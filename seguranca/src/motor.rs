@@ -222,6 +222,8 @@ pub struct Motor {
     /// A cabeça da auditoria, como o kernel a viu na volta.
     cabeca: u64,
     pub contadores: Contadores,
+    /// O tempo que a auditoria conta — ver [`crate::tempo`].
+    pub tempo: crate::tempo::Tempo,
 }
 
 impl Default for Motor {
@@ -254,6 +256,7 @@ impl Motor {
             recusas_seguidas: 0,
             cabeca: 0,
             contadores: Contadores::default(),
+            tempo: crate::tempo::Tempo::default(),
         }
     }
 
@@ -607,7 +610,18 @@ impl Motor {
         }
 
         let mut deteccoes = Vec::new();
-        if e.titular == Titular::Servico && e.tipo != Tipo::Leitura {
+        // O tempo: os registros de `time.sync` e `time.confirm`, de
+        // qualquer titular, contam o estado do relógio.
+        self.tempo.observar(&e);
+        if e.titular == Titular::Servico && e.principal != crate::evento::PRINCIPAL_DO_NSF {
+            // Outro serviço do sistema — o de hora: observado, e nunca alvo.
+            // Não é ação do NSF, e nenhuma regra nem perfil o conta: os
+            // destinos dele são os do registro, e a cadência é a do relógio.
+            // E nenhuma resposta do NSF chega a ele — nem às fontes dele:
+            // quem forja respostas ruins não faz o NSF cortar a fonte
+            // legítima.
+            self.contar_repeticao(&e);
+        } else if e.titular == Titular::Servico && e.tipo != Tipo::Leitura {
             // A resposta do próprio NSF: casa com o pedido, ou é uma ação
             // sem plano. Não é comportamento de ninguém — as regras não a
             // contam, e uma recusa dela não vira sondagem do NSF.

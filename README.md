@@ -473,6 +473,7 @@ tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um p
 ├── sessao.rs        a conexão: o aperto pela máquina de estados do rustls, os registros, o alerta que sai na recusa e a sessão que quebra
 ├── falha.rs         a taxonomia: a recusa do transporte passa com o código dela; as do TLS têm os seus
 ├── provedor.rs      as suítes, os grupos e as assinaturas que o cliente aceita — e nada mais
+├── tempo.rs         o tempo como a auditoria o conta: o estado do civil e os vereditos das fontes — só observa
 ├── cifra.rs         AES-GCM e ChaCha20-Poly1305 sobre um registro
 ├── troca.rs         X25519 e P-256, que recusam o ponto que não contribui
 ├── assinatura.rs    ECDSA P-256 e Ed25519 estrito, para o CertificateVerify e a cadeia

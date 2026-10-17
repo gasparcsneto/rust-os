@@ -266,6 +266,9 @@ pub struct Evento {
     pub severidade: Severidade,
 }
 
+/// O principal do próprio NSF, como [`principal`] o escreve.
+pub const PRINCIPAL_DO_NSF: &str = "service:nsf";
+
 /// A identidade estável de quem responde por um registro: a mesma para o
 /// mesmo agente em qualquer porta e boot (a chave), para a mesma pessoa em
 /// qualquer console (o identificador), e para o que alguém alegou ser

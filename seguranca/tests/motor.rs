@@ -1341,3 +1341,214 @@ fn a_recusa_do_nsf_nao_e_comportamento_dele() {
         m.deteccoes().collect::<Vec<_>>()
     );
 }
+
+/// O que o serviço de hora faria: a auditoria grava a decisão — ou a
+/// execução — do pedido dele.
+fn hora_pediu(
+    a: &mut Auditoria,
+    metodo: &str,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) -> u64 {
+    a.gravar(R {
+        titular: Titular::Servico,
+        agente: "hora",
+        chave: None,
+        papel: "tempo",
+        metodo,
+        recurso,
+        codigo,
+        detalhe,
+    })
+}
+
+const FONTE: &str = "udp:10.0.2.2:5319";
+
+/// Os pedidos do serviço de hora não são ações do NSF: nenhum vira "ação
+/// sem plano", e nenhum abre incidente.
+#[test]
+fn o_servico_de_hora_nao_e_acao_do_nsf() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    for _ in 0..3 {
+        hora_pediu(
+            &mut a,
+            "time.request",
+            "bancada-a",
+            Codigo::Allow,
+            "pelo processo 9 (kernel)",
+        );
+        hora_pediu(
+            &mut a,
+            "net.connect",
+            FONTE,
+            Codigo::Allow,
+            "pelo processo 9 (kernel)",
+        );
+        hora_pediu(
+            &mut a,
+            "net.block",
+            FONTE,
+            Codigo::Allow,
+            "pelo processo 9 (kernel)",
+        );
+        hora_pediu(
+            &mut a,
+            "time.sync",
+            "7",
+            Codigo::Allow,
+            "pelo processo 9 (kernel)",
+        );
+    }
+    ler(&mut m, &a);
+    assert_eq!(
+        m.deteccoes().count(),
+        0,
+        "{:?}",
+        m.deteccoes().collect::<Vec<_>>()
+    );
+    assert_eq!(m.incidentes.todos().count(), 0);
+    assert!(
+        m.pedidos().is_empty(),
+        "o NSF nao pede nada pelo servico de hora"
+    );
+}
+
+/// As recusas do serviço de hora — a política tirou `time.sync` do papel
+/// dele — não são sondagem, e a saída dele para a fonte depois delas não
+/// é a escada de ninguém: o NSF não pede contenção, nem bloqueio da fonte.
+#[test]
+fn as_recusas_do_servico_de_hora_nao_sao_sondagem() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    for metodo in ["time.request", "time.sync", "fs.read", "policy.show"] {
+        hora_pediu(
+            &mut a,
+            metodo,
+            "",
+            Codigo::DenyPermission,
+            "pelo processo 9 (kernel)",
+        );
+    }
+    hora_pediu(
+        &mut a,
+        "net.connect",
+        FONTE,
+        Codigo::Allow,
+        "pelo processo 9 (kernel)",
+    );
+    ler(&mut m, &a);
+    assert_eq!(m.incidentes.todos().count(), 0);
+    assert!(m.pedidos().is_empty());
+    assert!(
+        m.contadores.recusas >= 4,
+        "as recusas ainda contam: {}",
+        m.contadores.recusas
+    );
+}
+
+/// O tempo que a auditoria conta: os vereditos de cada entrega pela
+/// classe, e o estado e as marcas da última rodada que fechou — de
+/// qualquer titular.
+#[test]
+fn o_tempo_pela_auditoria() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let processo = "pelo processo 9 (kernel)";
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "bancada-a 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        Codigo::Allow,
+        &format!("{processo}: aceita midp 1791158400 radi 5 rtt 12; decisao 3"),
+    );
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "bancada-b 00",
+        Codigo::DenyCredential,
+        &format!("{processo}: recusada assinatura_da_resposta 1/4; decisao 5"),
+    );
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "bancada-b 01",
+        Codigo::DenyReplay,
+        &format!("{processo}: recusada nonce 2/4; decisao 6"),
+    );
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "bancada-c",
+        Codigo::Error,
+        &format!("{processo}: sem_resposta; decisao 8"),
+    );
+    // Uma entrega para um id que não existe não é resposta de fonte.
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "id 99",
+        Codigo::InvalidArgument,
+        &format!("{processo}: nenhum pedido de hora aberto com este id; decisao 9"),
+    );
+    let fechou = hora_pediu(
+        &mut a,
+        "time.sync",
+        "civil 1791158400000>1791158400000 logico 1791158400>1791158400 rtc>sincronizado divergente",
+        Codigo::Allow,
+        &format!("{processo}: r1 acordo 2/2 d+1 u5012 nada; decisao 8"),
+    );
+    // A decisão do gate, sem execução, não conta.
+    hora_pediu(
+        &mut a,
+        "time.sync",
+        "civil 1>2 logico 3>4 rtc>vencido",
+        Codigo::Allow,
+        processo,
+    );
+    ler(&mut m, &a);
+    let t = &m.tempo;
+    assert_eq!(t.estado.as_deref(), Some("sincronizado"));
+    assert!(t.divergente && !t.pendente && !t.adiantado);
+    assert_eq!(t.rodadas, 1);
+    assert_eq!(t.ultima_rodada, Some(fechou));
+    assert_eq!(
+        (
+            t.aceitas,
+            t.assinatura_invalida,
+            t.repetidas,
+            t.malformadas,
+            t.sem_resposta
+        ),
+        (1, 1, 1, 0, 1)
+    );
+    // Um administrador confirma um salto: conta, e o NSF não faz nada com
+    // isso.
+    a.gravar(R {
+        titular: Titular::Administrador,
+        agente: "raiz",
+        chave: None,
+        papel: "administrador",
+        metodo: "time.confirm",
+        recurso: "salto +15000 r1 civil 1>2 logico 3>4",
+        codigo: Codigo::Allow,
+        detalhe: "prova conferida; executada; permissao time.confirm; desafio 4",
+    });
+    ler(&mut m, &a);
+    assert_eq!(m.tempo.saltos_confirmados, 1);
+    assert!(m.pedidos().is_empty());
+    let mut s = String::new();
+    seguranca::relatorio::status(&m, &mut JsonWriter::new(&mut s)).unwrap();
+    let tempo = Json(s.as_bytes())
+        .member("time")
+        .expect("status com o tempo");
+    assert_eq!(
+        tempo.member("state").and_then(|v| v.as_str()),
+        Some("sincronizado")
+    );
+    assert_eq!(
+        tempo.member("confirmed_jumps").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+}

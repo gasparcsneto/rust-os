@@ -54,6 +54,7 @@ pub mod regras;
 pub mod relatorio;
 pub mod resposta;
 pub mod risco;
+pub mod tempo;
 pub mod ueba;
 pub mod util;
 

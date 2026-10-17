@@ -195,7 +195,46 @@ pub fn status(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("incidents", m.incidentes.todos().count() as u64)?;
     w.field_u64("evidence", m.cofre.guardados() as u64)?;
     w.field_u64("dns_malformed", m.dns.malformados)?;
+    tempo(&m.tempo, w)?;
     saude(m, w)?;
+    w.end_object()
+}
+
+/// O tempo, como a auditoria o conta, como membro `time`: o estado do
+/// relógio na última rodada que fechou, as marcas, e as respostas das
+/// fontes pela classe do veredito. Só observação — ver [`crate::tempo`].
+fn tempo(t: &crate::tempo::Tempo, w: &mut JsonWriter) -> fmt::Result {
+    w.key("time")?;
+    w.begin_object()?;
+    w.key("state")?;
+    match &t.estado {
+        Some(e) => w.str_value(e)?,
+        None => w.null_value()?,
+    }
+    w.key("marks")?;
+    w.begin_array()?;
+    for (nome, tem) in [
+        ("pendente", t.pendente),
+        ("divergente", t.divergente),
+        ("adiantado", t.adiantado),
+    ] {
+        if tem {
+            w.str_value(nome)?;
+        }
+    }
+    w.end_array()?;
+    w.field_u64("rounds", t.rodadas)?;
+    w.key("last_round_record")?;
+    match t.ultima_rodada {
+        Some(s) => w.u64_value(s)?,
+        None => w.null_value()?,
+    }
+    w.field_u64("accepted", t.aceitas)?;
+    w.field_u64("bad_signature", t.assinatura_invalida)?;
+    w.field_u64("replayed", t.repetidas)?;
+    w.field_u64("malformed", t.malformadas)?;
+    w.field_u64("no_response", t.sem_resposta)?;
+    w.field_u64("confirmed_jumps", t.saltos_confirmados)?;
     w.end_object()
 }
 
