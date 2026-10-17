@@ -13336,8 +13336,9 @@ fn sem_friccao(
 /// e o NSF pede `net.block` ao gate — só para o fluxo do agente, só para o
 /// eco. A conexão seguinte do agente o gate deixa e o firewall barra; a da
 /// serial passa. O incidente diz a decisão do gate e quem a autorizou: o
-/// próprio NSF. E, parado o movimento, a auditoria fica quieta: o NSF não
-/// lê a própria leitura.
+/// próprio NSF. E, parado o movimento — entre duas rodadas do serviço de
+/// hora, que tem as dele —, a auditoria fica quieta: o NSF não lê a própria
+/// leitura.
 fn sob_o_tecido(
     arch: Arquitetura,
     escrita: &mut UnixStream,
@@ -13515,6 +13516,27 @@ fn sob_o_tecido(
             .ok_or_else(|| format!("tecido: security.status sem audit_read_until\n  {status}"))?;
         Ok((lido, status))
     };
+    // E o serviço de hora roda as rodadas dele desde o boot — com as fontes
+    // caladas, uma a cada 64 s, umas trinta decisões cada —: uma janela em
+    // cima de uma delas mediria o serviço, e não o NSF. Espera a próxima
+    // rodada fechar; a janela inteira cabe no intervalo depois dela.
+    let fechadas =
+        |pedir: &mut dyn FnMut(&str, &str) -> Result<String, String>| -> Result<u64, String> {
+            let info = pedir("system.info", "{}")?;
+            apos(&info, r#""time":{"#)
+                .and_then(|t| apos(t, r#""rounds":{"#))
+                .and_then(|r| campo_simples(r, "closed"))
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| format!("tecido: o system.info nao conta as rodadas\n  {info}"))
+        };
+    let antes_da_rodada = fechadas(&mut pedir)?;
+    let prazo = Instant::now() + Duration::from_secs(100);
+    while fechadas(&mut pedir)? == antes_da_rodada {
+        if Instant::now() > prazo {
+            return Err("tecido: o servico de hora nao fechou rodada nenhuma em 100 s".into());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
     let inicio = Instant::now();
     loop {
         let alvo = cabeca(&mut pedir)?;

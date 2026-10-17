@@ -724,7 +724,7 @@ contido pelo despertador.
   leitura pelo gate, a sondagem que abre o incidente sem ação, a saída
   contida pelo gate em poucos segundos, o firewall barrando só o operador,
   o incidente dizendo a decisão e quem autorizou, e a auditoria quieta
-  depois.
+  depois — entre duas rodadas do serviço de hora, que escreve as dele.
 
 ## Incrementos e estado
 
