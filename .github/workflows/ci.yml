@@ -308,3 +308,51 @@ jobs:
 
       - name: Fumaça (virtio-gpu)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --video virtio
+
+  # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
+  # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
+  # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback
+  # do runner, e o servidor do `xtask` — três fontes, com as raízes de
+  # `target/chaves/` e um escritor de mensagens que não é o do kernel —
+  # responde. A suíte confere as respostas ruins com servidores de dentro da
+  # máquina e não move a hora; aqui a hora se move: o RTC adiantado e
+  # atrasado, as fontes que pulam, calam, atrasam e divergem, o firewall, a
+  # política tirando `time.sync` no meio de uma rodada, o teto da incerteza,
+  # o holdover. Um job à parte porque a bancada leva mais de uma hora — o
+  # holdover sozinho espera a janela de 34 minutos — e corre ao lado do de
+  # testes, sem esticá-lo.
+  tempo:
+    name: Bancada de tempo (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: tempo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: tempo-${{ matrix.arch }}-
+
+      # As mesmas da máquina do job de testes: a bancada sobe o kernel de
+      # produção com o disco, o TPM e a rede da fumaça.
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Bancada de tempo
+        run: cargo xtask tempo --arch ${{ matrix.arch }} --release
