@@ -301,6 +301,9 @@ struct Hora {
     ultima: Option<Ultima>,
     primeira_ms: Option<u64>,
     deriva_ppm: u64,
+    /// A taxa do relógio do kernel contra a régua, em ppm: negativa quando
+    /// ele perde tiques.
+    mono_ppm: Option<i64>,
     /// Quantas conferências, a média e a maior, em ns.
     conferencia: (u64, u64, u64),
     /// As rodadas pelo relógio do kernel: quantas, a média e a maior, em
@@ -323,6 +326,18 @@ struct Ultima {
 }
 
 impl Hora {
+    /// Quanto tempo passou de `antes` a esta leitura, na hora do hospedeiro.
+    /// É a régua das janelas e da deriva: o contador do civil anda com ela,
+    /// e o relógio do kernel (`uptime_ms`) conta tiques, que o emulador pode
+    /// perder — ver `mono_ppm`.
+    fn desde(&self, antes: &Hora) -> Duration {
+        Duration::from_millis(
+            self.hospedeiro_ms
+                .saturating_sub(antes.hospedeiro_ms)
+                .max(0) as u64,
+        )
+    }
+
     /// Quanto o civil está à frente da hora do hospedeiro.
     fn desvio_ms(&self) -> i64 {
         self.civil_ms as i64 - self.hospedeiro_ms
@@ -462,6 +477,7 @@ fn ler_a_hora(r: &str, hospedeiro_ms: i64) -> Option<Hora> {
             .member("counter")
             .and_then(|c| numero(c, "drift_ppm"))
             .unwrap_or(0),
+        mono_ppm: com_sinal(t, "mono_ppm"),
         conferencia: (
             numero(conferencia, "count")?,
             numero(conferencia, "mean")?,
@@ -2045,7 +2061,7 @@ fn a_perda_e_a_recuperacao(b: &mut Bancada) -> Result<String, String> {
     }
     // A incerteza cresce com a deriva, entre duas leituras sem acordo.
     let (i1, i2) = (h2.incerteza_ms.unwrap_or(0), h3.incerteza_ms.unwrap_or(0));
-    let passou = (h3.uptime_ms - h2.uptime_ms) as f64 / 1000.0;
+    let passou = h3.desde(&h2).as_secs_f64();
     let ppm = (i2 as f64 - i1 as f64) / passou * 1000.0;
     if i2 <= i1 || (ppm - h3.deriva_ppm as f64).abs() > h3.deriva_ppm as f64 * 0.25 + 20.0 {
         return Err(format!(
@@ -2451,7 +2467,7 @@ fn a_hora_vence(b: &mut Bancada) -> Result<String, String> {
     m.cortar_a_energia()?;
     Ok(format!(
         "o salto trouxe u {u} ms; caladas as fontes, a hora venceu {} s depois com u {} ms (deriva {deriva} ppm); o logico seguiu o civil; o NSF viu {:?}",
-        (vencido.uptime_ms - h.uptime_ms) / 1000,
+        vencido.desde(&h).as_secs(),
         vencido.incerteza_ms.unwrap_or(0),
         n.estado
     ))
@@ -2500,7 +2516,7 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
     if let Some(p) = problema {
         return Err(p);
     }
-    let passou = Duration::from_millis(holdover.uptime_ms - h.uptime_ms);
+    let passou = holdover.desde(&h);
     if passou + Duration::from_secs(20) < janela {
         return Err(format!(
             "a hora foi a holdover {} s depois do ultimo acordo; a janela e {} s",
@@ -2552,9 +2568,11 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
     b.medir(&mut m, true)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "sincronizado com u {} ms; calaram as fontes: sincronizado ate a janela, holdover {} s depois do ultimo acordo, com u {} ms (o teto e 60 s), {perdidas} rodadas perdidas, no maximo {} s entre duas, o NSF viu {:?}; voltaram +3 s: r{} gradual, sincronizado, o NSF viu {:?} ({} sem resposta)",
+        "sincronizado com u {} ms; calaram as fontes: sincronizado ate a janela, holdover {} s depois do ultimo acordo (no relogio do kernel, {} s: ele anda a {:+} ppm do contador), com u {} ms (o teto e 60 s), {perdidas} rodadas perdidas, no maximo {} s entre duas, o NSF viu {:?}; voltaram +3 s: r{} gradual, sincronizado, o NSF viu {:?} ({} sem resposta)",
         h.incerteza_ms.unwrap_or(0),
         passou.as_secs(),
+        holdover.uptime_ms.saturating_sub(h.uptime_ms) / 1000,
+        holdover.mono_ppm.unwrap_or(0),
         holdover.incerteza_ms.unwrap_or(0),
         maior_vao.as_secs(),
         n.estado,
