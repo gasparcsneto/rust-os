@@ -696,6 +696,15 @@ contido pelo despertador.
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
+- **O lógico parado junta as janelas.** Depois de um salto do civil para
+  trás, o lógico fica no piso, e os carimbos param com ele. As janelas das
+  regras contam carimbos, e juntam o que no relógio de verdade está
+  separado. Na bancada de tempo, um operador recusado em três métodos, um a
+  cada 35 s, com o lógico parado: os três registros saem com o mesmo
+  carimbo, cabem na janela de 30 s da sondagem, e dão uma detecção e um
+  incidente — sem contenção. O desenho do tempo suspende a contenção
+  automática por taxa enquanto o lógico está parado, com as detecções
+  registradas; a suspensão vem com as regras de tempo do NSF.
 
 ## Como se confere
 
@@ -739,3 +748,4 @@ contido pelo despertador.
 | 9.5 | o TLS como programa: o pacote `tls`, `random.read` e o `net.send` que espera espaço pelo gate, a bancada com o OpenSSL; a sessão interrompida pela política, pelo firewall e pela contenção |
 | 9.6 | o canal do agente por TCP: as vagas, a escuta do firewall, a chave confirmada, a contrapressão; a revogação, a contenção, a regra e o administrador pela rede; o NSF lendo os apertos recusados |
 | T7.3 | o relógio civil e o serviço de hora: o NSF lê o tempo nos registros de `time.sync` e `time.confirm` (`seguranca::tempo`, o `time` do `security.status`), sem regra nem resposta de tempo |
+| T7.4 | a bancada de tempo: o Roughtime pela rede de verdade, e o NSF lendo dela as rodadas, as marcas e o estado — o divergente, o adiantado, o holdover, o vencido —, sem regra nem resposta de tempo; a sondagem lenta com o lógico parado, que vira detecção |
