@@ -129,12 +129,32 @@ extern "C" fn laco(_argumento: u64) -> ! {
 /// ver o topo do módulo.
 pub fn proximo_intervalo(anterior: u64, d: &Desfecho) -> u64 {
     let ja_sincronizou = super::civil::ler().is_some_and(|l| l.incerteza_ms.is_some());
+    let separacao = super::civil::parametros().map_or(4_000, |p| p.separacao_minima_ms);
+    intervalo_depois(anterior, d, ja_sincronizou, separacao)
+}
+
+/// A conta de [`proximo_intervalo`], sem ler o civil: o intervalo anterior,
+/// o desfecho, se o civil já sincronizou alguma vez, e a separação mínima
+/// das duas rodadas de um salto.
+///
+/// Só um acordo que deixou o civil sincronizado é sucesso, e só ele dobra o
+/// intervalo. Uma rodada sem acordo é falha mesmo com o civil ainda
+/// sincronizado — dentro da janela, o estado continua o de antes —, e volta
+/// a 64 s (desenho §7.6): dobrar nela levava as fontes caladas a 1024 s em
+/// cinco rodadas, e a volta delas só era vista até 17 min depois.
+pub fn intervalo_depois(
+    anterior: u64,
+    d: &Desfecho,
+    ja_sincronizou: bool,
+    separacao_minima_ms: u64,
+) -> u64 {
     match d {
-        Desfecho::Fechada { efeito, .. } if efeito == "candidato" => super::civil::parametros()
-            .map_or(4_000, |p| p.separacao_minima_ms)
-            .max(ANTES_DE_SINCRONIZAR_MS),
+        Desfecho::Fechada { efeito, .. } if efeito == "candidato" => {
+            separacao_minima_ms.max(ANTES_DE_SINCRONIZAR_MS)
+        }
         Desfecho::Fechada { estado, efeito }
-            if estado == "sincronizado" && efeito != "pendente" =>
+            if estado == "sincronizado"
+                && !matches!(efeito.as_str(), "pendente" | "sem_acordo") =>
         {
             if anterior < SINCRONIZADO_MS {
                 SINCRONIZADO_MS

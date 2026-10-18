@@ -31534,6 +31534,10 @@ static CASOS: &[Caso] = &[
         f: hora_k_dois_sempre,
     },
     Caso {
+        nome: "hora: o intervalo entre rodadas",
+        f: hora_o_intervalo_entre_rodadas,
+    },
+    Caso {
         nome: "hora: fontes divergentes",
         f: hora_fontes_divergentes,
     },
@@ -47158,6 +47162,148 @@ fn hora_os_nonces_encadeados_e_a_ordem() -> Resultado {
         }
         Ok(())
     })
+}
+
+/// O intervalo entre rodadas, o do desenho (§7.6): 2 s até sincronizar,
+/// dobrando até 64 s com as fontes caladas; sincronizado, 64 s dobrando até
+/// 1024 s; uma falha volta a 64 s — também a rodada sem acordo com o civil
+/// ainda sincronizado, dentro da janela, que a bancada de tempo achou
+/// dobrando até 1024 s —; o candidato a salto pede a seguinte na separação
+/// mínima.
+fn hora_o_intervalo_entre_rodadas() -> Resultado {
+    use crate::hora::servico::{Desfecho, intervalo_depois};
+    let fechada = |efeito: &str, estado: &str| Desfecho::Fechada {
+        efeito: alloc::string::String::from(efeito),
+        estado: alloc::string::String::from(estado),
+    };
+    let casos = [
+        (
+            2_000,
+            fechada("sem_acordo", "rtc"),
+            false,
+            4_000,
+            "antes de sincronizar, as caladas nao dobraram",
+        ),
+        (
+            32_000,
+            fechada("sem_acordo", "rtc"),
+            false,
+            64_000,
+            "antes de sincronizar, as caladas passaram de 64 s",
+        ),
+        (
+            64_000,
+            fechada("sem_acordo", "rtc"),
+            false,
+            64_000,
+            "antes de sincronizar, as caladas passaram de 64 s",
+        ),
+        (
+            2_000,
+            fechada("nada", "sincronizado"),
+            true,
+            64_000,
+            "a primeira sincronizacao nao foi a 64 s",
+        ),
+        (
+            64_000,
+            fechada("nada", "sincronizado"),
+            true,
+            128_000,
+            "sincronizado, o intervalo nao dobrou",
+        ),
+        (
+            512_000,
+            fechada("gradual", "sincronizado"),
+            true,
+            1_024_000,
+            "sincronizado, o intervalo nao dobrou",
+        ),
+        (
+            1_024_000,
+            fechada("salto_alem", "sincronizado"),
+            true,
+            1_024_000,
+            "o intervalo passou de 1024 s",
+        ),
+        (
+            512_000,
+            fechada("sem_acordo", "sincronizado"),
+            true,
+            64_000,
+            "a falha com o civil ainda sincronizado nao voltou a 64 s",
+        ),
+        (
+            1_024_000,
+            fechada("sem_acordo", "holdover"),
+            true,
+            64_000,
+            "a falha em holdover nao voltou a 64 s",
+        ),
+        (
+            1_024_000,
+            fechada("sem_acordo", "vencido"),
+            true,
+            64_000,
+            "a falha vencida nao voltou a 64 s",
+        ),
+        (
+            512_000,
+            fechada("pendente", "sincronizado"),
+            true,
+            64_000,
+            "o pendente nao voltou a 64 s",
+        ),
+        (
+            512_000,
+            Desfecho::Encerrada("o gate recusou"),
+            true,
+            64_000,
+            "a rodada encerrada nao voltou a 64 s",
+        ),
+        (
+            16_000,
+            Desfecho::Encerrada("o gate recusou"),
+            false,
+            32_000,
+            "a rodada encerrada antes de sincronizar nao dobrou",
+        ),
+        (
+            64_000,
+            fechada("candidato", "sincronizado"),
+            true,
+            4_000,
+            "o candidato nao pediu a seguinte na separacao",
+        ),
+        (
+            2_000,
+            fechada("candidato", "rtc"),
+            false,
+            4_000,
+            "o candidato nao pediu a seguinte na separacao",
+        ),
+    ];
+    for (anterior, desfecho, ja_sincronizou, esperado, o_que) in casos {
+        let deu = intervalo_depois(anterior, &desfecho, ja_sincronizou, 4_000);
+        if deu != esperado {
+            crate::log_error!(
+                "teste",
+                "{:?} depois de {} ms: {} ms, e nao {} ms",
+                desfecho,
+                anterior,
+                deu,
+                esperado
+            );
+            return Err(o_que);
+        }
+    }
+    // A separação do registro manda, com 2 s de piso.
+    if intervalo_depois(64_000, &fechada("candidato", "sincronizado"), true, 9_000) != 9_000
+        || intervalo_depois(64_000, &fechada("candidato", "sincronizado"), true, 500) != 2_000
+    {
+        return Err("o candidato nao seguiu a separacao minima, com o piso de 2 s");
+    }
+    Ok(())
 }
 
 /// k ≥ 2 sempre: uma fonte só não move o relógio; k − 1 fontes também não;
