@@ -142,8 +142,9 @@ struct Bancada<'a> {
 #[derive(Default)]
 struct Medidas {
     /// Do endereço do DHCP à primeira sincronização, em ms do relógio do
-    /// kernel, do boot até ela, e a rodada em que ela veio.
-    primeira: Vec<(u64, u64, u64)>,
+    /// kernel, do boot até ela, e a rodada em que ela veio — se a auditoria
+    /// ainda tem o começo.
+    primeira: Vec<(u64, u64, Option<u64>)>,
     /// A conferência de cada máquina: quantas, a média e a maior, em ns.
     conferencia: Vec<(u64, u64, u64)>,
     /// O RTT das respostas aceitas, pela auditoria.
@@ -242,11 +243,15 @@ impl Bancada<'_> {
         let h = hora(m)?;
         let (registros, _) = auditoria(m, 0)?;
         // A rodada do primeiro acordo: com as fontes honestas desde o boot
-        // e o RTC na hora, é a da primeira sincronização.
+        // e o RTC na hora, é a da primeira sincronização — se a auditoria
+        // ainda tem o registro 1. O anel guarda os últimos, e numa máquina
+        // de muitas rodadas o primeiro acordo que sobrou é de outra.
+        let desde_o_comeco = registros.first().is_some_and(|r| campo(r, "seq") == "1");
         let rodada = fechamentos(&registros)
             .iter()
             .find(|f| f.do_servico && f.desfecho == "acordo")
-            .map_or(0, |f| f.rodada);
+            .filter(|_| desde_o_comeco)
+            .map(|f| f.rodada);
         if honestas_desde_o_boot
             && let (Some(primeira), Some(rede)) = (h.primeira_ms, uptime_do_dhcp(m)?)
         {
@@ -814,13 +819,19 @@ impl Medidas {
             let rede: Vec<u64> = self.primeira.iter().map(|p| p.0).collect();
             let boot: Vec<u64> = self.primeira.iter().map(|p| p.1).collect();
             let mut rodadas: BTreeMap<u64, usize> = BTreeMap::new();
-            for p in &self.primeira {
-                *rodadas.entry(p.2).or_default() += 1;
+            for r in self.primeira.iter().filter_map(|p| p.2) {
+                *rodadas.entry(r).or_default() += 1;
             }
-            let rodadas: Vec<String> = rodadas
+            let mut rodadas: Vec<String> = rodadas
                 .iter()
                 .map(|(r, n)| format!("{n} na r{r}"))
                 .collect();
+            let sem_o_comeco = self.primeira.iter().filter(|p| p.2.is_none()).count();
+            if sem_o_comeco > 0 {
+                rodadas.push(format!(
+                    "{sem_o_comeco} sem a rodada, que o anel da auditoria ja perdeu"
+                ));
+            }
             println!(
                 "  [tempo] medido  primeira sincronizacao depois do endereco do DHCP: media {} ms, maior {} ms, menor {} ms; {} ms do boot em media; {} maquinas: {}",
                 media(&rede),
