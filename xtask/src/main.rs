@@ -17,6 +17,8 @@
 mod canal_tcp;
 mod codigo;
 mod persistencia;
+mod servidor_de_hora;
+mod tempo;
 mod tls;
 
 use std::collections::BTreeMap;
@@ -257,6 +259,7 @@ fn main() -> ExitCode {
         "invariantes" => conferir_invariantes(),
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
+        "tempo" => tempo::tempo(arch, release),
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -345,6 +348,9 @@ COMANDOS:
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     persistencia              a mesma máquina em vários boots: corte de energia,
                               disco restaurado, relógio para trás
+    tempo                     o Roughtime de ponta a ponta, contra as fontes de
+                              hora do hospedeiro: atraso, perda, divergência,
+                              quórum, saltos e recuperação, uma máquina por cenário
     help                      mostra esta mensagem
 
 EXEMPLOS:
@@ -3245,6 +3251,41 @@ fn conferir_servidor_de_hora_so_na_suite(raiz: &Path) -> Result<Vec<String>, Str
     Ok(fora)
 }
 
+/// O servidor de Roughtime da bancada de tempo (`xtask/src/servidor_de_hora.rs`)
+/// é uma implementação à parte do formato: fora dos casos dele, nenhuma
+/// linha usa o pacote `hora` — nem o escritor, nem a árvore, nem os
+/// contextos. Os casos usam, de propósito: conferem as respostas daqui com o
+/// leitor do kernel. Se o servidor usasse o código do kernel, um erro de
+/// formato dos dois lados passaria pela bancada inteira. Devolve as linhas
+/// que o usam.
+fn conferir_servidor_da_bancada_a_parte(raiz: &Path) -> Result<Vec<String>, String> {
+    const ARQUIVO: &str = "xtask/src/servidor_de_hora.rs";
+    let texto = std::fs::read_to_string(raiz.join(ARQUIVO))
+        .map_err(|e| format!("não foi possível ler {ARQUIVO}: {e}"))?;
+    let Some(casos) = texto.find("#[cfg(test)]\nmod testes") else {
+        return Ok(vec![format!(
+            "{ARQUIVO}: os casos do servidor sumiram — a conferência com o leitor do kernel não roda"
+        )]);
+    };
+    let mut fora = Vec::new();
+    for (n, linha) in texto[..casos].lines().enumerate() {
+        let codigo = linha.split("//").next().unwrap_or("");
+        if codigo.contains("hora::") || codigo.contains("use hora") {
+            fora.push(format!(
+                "{ARQUIVO}:{}: o servidor da bancada usa o pacote hora: {}",
+                n + 1,
+                linha.trim()
+            ));
+        }
+    }
+    if !texto[casos..].contains("hora::resposta::conferir") {
+        fora.push(format!(
+            "{ARQUIVO}: os casos não conferem as respostas com o leitor do kernel"
+        ));
+    }
+    Ok(fora)
+}
+
 /// Nenhuma decisão de autorização lê o relógio civil nem o lógico (o
 /// desenho do tempo): o gate decide pelo relógio do kernel, que nenhuma
 /// fonte de hora ajusta, e o estado do relógio não concede nem tira nada.
@@ -3648,6 +3689,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // o relógio civil nem o lógico.
     fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
     fora.extend(conferir_decisao_sem_relogio_civil(&raiz)?);
+    // E o servidor de hora da bancada de tempo é outra implementação: o que
+    // ele responde não sai do código que o kernel usa para conferir.
+    fora.extend(conferir_servidor_da_bancada_a_parte(&raiz)?);
     // A chamada legítima tem de existir: uma busca que não acha nem ela
     // está procurando a coisa errada, e passaria por qualquer atalho.
     for ((chamada, donos), quantas) in CHAMADAS_PROTEGIDAS.iter().zip(&achadas) {
@@ -3671,7 +3715,7 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              sai da taxa, e só espera pela auditoria, pelo gate; o \
              código só vira processo pela conferência única, que o kernel faz e não sela; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
-             o servidor de teste só na suíte"
+             o servidor de teste só na suíte e o da bancada de tempo escrito à parte"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -5780,6 +5824,9 @@ struct Ambiente {
     /// No x86, o TPM pela interface CRB — a dos TPMs de firmware — em vez
     /// do TIS. O mesmo `swtpm` atrás das duas.
     crb: bool,
+    /// O disco da máquina, no lugar do de testes: a bancada de tempo sobe
+    /// uma imagem com outro registro de fontes — ver [`tempo`].
+    disco: Option<PathBuf>,
 }
 
 impl Ambiente {
@@ -5823,6 +5870,7 @@ impl Ambiente {
             tpm: Some((tpm, socket_do_tpm.clone())),
             relogio: relogio.map(String::from),
             crb: false,
+            disco: None,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -5851,7 +5899,14 @@ impl Ambiente {
             tpm: None,
             relogio: relogio.map(String::from),
             crb: false,
+            disco: None,
         }
+    }
+
+    /// O mesmo ambiente, com este disco no lugar do de testes.
+    fn com_disco(mut self, disco: PathBuf) -> Ambiente {
+        self.disco = Some(disco);
+        self
     }
 }
 
@@ -6017,7 +6072,10 @@ fn comando_qemu(
     // Que seja o mesmo disco não é economia: é o que faz o kernel ler a raiz
     // em Btrfs do disco de onde a máquina ligou, como numa máquina de
     // verdade.
-    let disco = disco_de_testes()?;
+    let disco = match &ambiente.disco {
+        Some(d) => d.clone(),
+        None => disco_de_testes()?,
+    };
     let compartilhado = if arch == Arquitetura::X86_64 {
         ",file.locking=off"
     } else {

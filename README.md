@@ -109,6 +109,7 @@ cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
+cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -618,6 +619,8 @@ xtask/src/
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
+├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
 ```
 

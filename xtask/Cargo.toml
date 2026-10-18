@@ -8,8 +8,10 @@ description = "Build system do projeto: compila o kernel, gera as imagens de dis
 [dependencies]
 # Só o contrato deste projeto: a base do kernel no espaço virtual, que o
 # `xtask` precisa para traduzir o `pc` de uma falha em arquivo e linha. É a
-# mesma constante que o kernel e o iniciador leem, e não uma cópia.
-protocolo = { path = "../protocolo" }
+# mesma constante que o kernel e o iniciador leem, e não uma cópia. E o
+# leitor de JSON, com os arrays: a bancada de tempo lê o `system.info time`,
+# o `log.tail` e o `security.status` por ele.
+protocolo = { path = "../protocolo", features = ["arrays"] }
 
 # O canal seguro, do lado do cliente: o mesmo Noise que o kernel faz do lado
 # dele, e o formato dos arquivos de chaves que o `xtask` grava na imagem.
@@ -31,6 +33,11 @@ hora = { path = "../hora" }
 # As raízes das fontes de hora da bancada: a pública de cada uma sai da
 # privada, que fica em `target/chaves/`. A mesma versão do `sigilo`.
 ed25519-dalek = { version = "3.0.0", default-features = false }
+
+# O resumo das fontes de hora da bancada: a árvore de Merkle e o `SRV` do
+# servidor do `xtask` (`src/servidor_de_hora.rs`), escritos à parte do
+# pacote `hora`. A mesma versão do `hora`: nada novo entra no `Cargo.lock`.
+sha2 = { version = "0.11.0", default-features = false }
 
 # Os certificados da bancada TLS: a raiz, as folhas, a vencida e a de outra
 # raiz — gerados em `target/`, nunca no repositório. Ver `src/tls.rs`.

@@ -1522,6 +1522,7 @@ dependencies = [
  "politica",
  "protocolo",
  "rcgen",
+ "sha2 0.11.0",
  "sigilo",
 ]
 
