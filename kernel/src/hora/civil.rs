@@ -14,9 +14,12 @@
 //!   ([`confirmar`]) — o de `time.confirm`. Nada mais escreve aqui: o
 //!   `xtask` confere quem chama os dois.
 //!
-//! O civil volta em dois casos só: na primeira sincronização do boot, e
-//! num salto para trás que as regras da disciplina deixam — ver
-//! `hora::disciplina`. O ajuste gradual nunca volta.
+//! O civil volta em três casos, e só neles — ver `hora::disciplina`: na
+//! primeira sincronização do boot; depois dela, num salto para trás dentro
+//! do envelope, com o acordo cabendo na incerteza do civil; e na
+//! confirmação de um salto para trás pendente, o de fora do envelope. O
+//! ajuste gradual nunca volta. O lógico não volta em caso nenhum: fica no
+//! piso, adiantado, até o civil passar.
 //!
 //! # A trava
 //!

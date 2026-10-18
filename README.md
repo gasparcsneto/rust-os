@@ -4684,6 +4684,19 @@ pelo menos 4 s uma da outra. Mas o salto para a frente além do teto
 o salto para trás depois da primeira sincronização que a régua não explica
 — fora do envelope — ficam **pendentes**: só `time.confirm` os aplica.
 
+**Quando o civil volta.** Em três casos, e só neles, sempre pelo acordo de
+pelo menos duas chaves de fontes do registro: na primeira sincronização do
+boot, quando a hora autenticada troca a do RTC — um salto, em duas rodadas
+seguidas —; depois dela, num salto para trás **dentro do envelope** — o
+acordo toca o intervalo do civil com a incerteza dele, e o civil é
+corrigido para dentro da própria incerteza —, também em duas rodadas
+seguidas, sem confirmação, como qualquer salto que a régua explica; e na
+confirmação de um salto para trás pendente, o de fora do envelope. O ajuste
+gradual nunca volta. Nenhum outro salto para trás acontece: o de fora do
+envelope fica pendente até alguém o confirmar. É a disciplina fechada no
+T7.1, e o desenho diz o mesmo. **O lógico não volta em caso nenhum** — nem
+nesses três.
+
 **O lógico** (`persistencia::agora`): `max(piso, civil em segundos)`, com o
 piso no journal. Antes da primeira sincronização é exatamente o de antes,
 porque o civil é o RTC; depois, segue a hora autenticada. Nunca volta:
@@ -5085,13 +5098,6 @@ nenhum entre as rodadas.
   Ligar a confirmação à rodada seria um parâmetro novo numa operação que o
   passo anterior fechou sem nenhum: é decisão de desenho, e está no
   relatório.
-- **O salto para trás dentro do envelope.** O desenho diz, ao descrever o
-  civil e a monotonicidade, que ele volta em dois casos só — a primeira
-  sincronização e um salto confirmado —; a tabela dos grandes saltos e a
-  disciplina do pacote, fechada no T7.1, aplicam também, depois de duas
-  rodadas, o salto para trás que a régua explica, com o civil dentro do
-  envelope. Este passo segue o código fechado; a divergência é do texto do
-  desenho, e também está no relatório. O lógico não volta em caso nenhum.
 - **A folga da pilha.** No perfil de depuração, a rodada inteira usa
   68% (x86) a 70% (ARM) da pilha de um fio; no de produção, bem menos. O
   caso da suíte exige folga de um quarto. O que a pilha de um fio tem de

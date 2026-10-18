@@ -34,10 +34,19 @@
 //!
 //! # O civil volta?
 //!
-//! Só em dois casos: num salto para trás — a primeira sincronização trocando
-//! o RTC por uma hora autenticada, ou um salto confirmado — e numa
-//! confirmação de salto pendente. O ajuste gradual nunca volta: a taxa
-//! máxima é menor que um.
+//! Em três casos, e só neles, sempre pelo acordo de pelo menos duas chaves:
+//!
+//! - na primeira sincronização, quando a hora autenticada troca a do RTC —
+//!   um salto, em duas rodadas seguidas;
+//! - depois dela, num salto para trás **dentro do envelope**: o acordo toca
+//!   o intervalo do civil com a incerteza dele, e o civil volta para dentro
+//!   da própria incerteza — também em duas rodadas seguidas;
+//! - na confirmação de um salto para trás pendente, o de fora do envelope,
+//!   que o contador não explica.
+//!
+//! Nenhum outro salto para trás acontece, e o ajuste gradual nunca volta: a
+//! taxa máxima é menor que um. O lógico de quem usa este relógio — o civil
+//! com um piso, no kernel — não volta em caso nenhum.
 //!
 //! # O que não está aqui
 //!
