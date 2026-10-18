@@ -986,6 +986,45 @@ fn sincronizar(m: &mut Ligada, nada_volta: &mut NadaVolta) -> Result<Hora, Strin
         &mut |h| nada_volta.ver(h),
         &|h| h.estado == "sincronizado",
     )
+    .map_err(|motivo| com_os_vereditos(m, motivo))
+}
+
+/// O motivo de uma falha, com o que a auditoria tem das entregas. O
+/// veredito final de uma fonte é `sem_resposta` também quando as respostas
+/// dela foram recusadas — uma recusa não consome o pedido, e quem está no
+/// caminho não queima o pedido mandando lixo antes da resposta verdadeira —;
+/// o nome da recusa só está no registro de cada entrega.
+fn com_os_vereditos(m: &mut Ligada, motivo: String) -> String {
+    match auditoria(m, 0) {
+        Ok((registros, _)) => format!(
+            "{motivo}; as entregas na auditoria: {}",
+            resumo_dos_vereditos(&registros)
+        ),
+        Err(e) => format!("{motivo}; (a auditoria nao se leu: {e})"),
+    }
+}
+
+/// Quantas entregas do serviço deram cada veredito — `aceita`,
+/// `recusada <motivo>`, `sem_resposta`, `vencida` —, pela auditoria.
+fn resumo_dos_vereditos(registros: &[ObjetoPlano]) -> String {
+    let mut contas: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, d) in vereditos(registros) {
+        let nome: Vec<&str> = d.split(' ').take(2).collect();
+        let nome = if nome.first() == Some(&"recusada") {
+            nome.join(" ")
+        } else {
+            nome[0].to_string()
+        };
+        *contas.entry(nome).or_default() += 1;
+    }
+    if contas.is_empty() {
+        return "nenhuma".into();
+    }
+    contas
+        .iter()
+        .map(|(v, n)| format!("{v}: {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Espera o último registro da auditoria que não é leitura chegar ao
@@ -1111,13 +1150,7 @@ fn imagem_com(b: &Bancada, linha: &str) -> Result<(std::path::PathBuf, Artefato)
 fn as_fontes_honestas(b: &mut Bancada) -> Result<String, String> {
     let mut m = b.subir(None)?;
     let mut nada_volta = NadaVolta::novo();
-    let h = esperar(
-        &mut m,
-        ATE_SINCRONIZAR,
-        "a sincronizacao",
-        &mut |h| nada_volta.ver(h),
-        &|h| h.estado == "sincronizado",
-    )?;
+    let h = sincronizar(&mut m, &mut nada_volta)?;
     let u = h.ultima.clone().unwrap_or_default();
     if !h.hora_dentro_da_incerteza()
         || h.logico_desvio_s().abs() > 2
@@ -2476,18 +2509,24 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     let n = nsf_em(&mut m, "holdover", SINCRONIZADO + Duration::from_secs(40))?;
+    // A volta, três segundos à frente. O NSF sabe do holdover pelo registro
+    // da rodada que fecha depois dele — calada —, e a espera acima a viu
+    // fechar; uma rodada já no ar quando as fontes voltam pode ter pedido a
+    // uma delas ainda calada. Vale a primeira que sincronizar, em até duas
+    // rodadas.
     b.servidor.todas(Modo {
         deslocamento_ms: 3_000,
         ..Modo::HONESTA
     });
-    let volta = proxima(
+    let volta = esperar(
         &mut m,
-        &mut nada_volta,
-        holdover.fechadas,
-        SINCRONIZADO + Duration::from_secs(40),
+        2 * SINCRONIZADO + Duration::from_secs(40),
+        "a volta das fontes",
+        &mut |h| nada_volta.ver(h),
+        &|h| h.estado == "sincronizado",
     )?;
     let u = volta.ultima.clone().unwrap_or_default();
-    if volta.estado != "sincronizado" || u.efeito != "gradual" {
+    if u.efeito != "gradual" {
         return Err(format!(
             "as fontes voltaram e o civil nao sincronizou aos poucos: {volta}"
         ));
