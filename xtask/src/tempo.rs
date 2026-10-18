@@ -1492,26 +1492,43 @@ fn o_atraso(b: &mut Bancada) -> Result<String, String> {
             "o atraso nao deu o RTT e a perda esperados: a {a:?} ms, b {bb:?} ms, c sem resposta {sem_resposta_c}; {depois}; {deles:?}"
         ));
     }
-    // A resposta da terceira saiu, depois do prazo: o kernel não a
-    // entregou a nada, e nenhum registro a mais apareceu por ela.
-    let eventos = b.servidor.eventos();
-    let saiu_tarde = eventos.iter().any(|e| {
-        e.fonte == 2
-            && matches!(e.desfecho, Desfecho::Respondido { .. })
-            && e.saida
-                .zip(Some(e.chegada))
-                .is_some_and(|(s, c)| s - c >= Duration::from_millis(2_500))
-    });
-    if !saiu_tarde {
+    // A resposta da terceira sai 2,5 s depois do pedido: depois do prazo, e
+    // depois de a rodada fechar. O diário só a tem quando ela sai.
+    let fim = Instant::now() + Duration::from_secs(10);
+    loop {
+        let eventos = b.servidor.eventos();
+        if eventos.iter().any(|e| {
+            e.fonte == 2
+                && matches!(e.desfecho, Desfecho::Respondido { atraso_ms, .. } if atraso_ms >= 2_500)
+        }) {
+            break;
+        }
+        if Instant::now() > fim {
+            return Err(format!(
+                "a resposta atrasada da terceira fonte nao saiu: {}",
+                resumo_do_diario(&eventos)
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Ela chega a um pedido fechado, numa associação fechada: o kernel não
+    // a entrega a nada, e nenhum veredito a mais aparece por ela.
+    std::thread::sleep(Duration::from_secs(2));
+    let (depois, _) = auditoria(&mut m, cabeca)?;
+    let de_c: Vec<String> = vereditos(&depois)
+        .into_iter()
+        .filter(|(f, _)| f == "bancada-c")
+        .map(|(_, d)| d)
+        .collect();
+    if de_c != ["sem_resposta"] {
         return Err(format!(
-            "a resposta atrasada da terceira fonte nao saiu: {}",
-            resumo_do_diario(&eventos)
+            "a resposta atrasada da terceira fonte mudou os vereditos dela: {de_c:?}"
         ));
     }
     b.medir(&mut m, true)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "r{} acordo 2/2 com RTT {} e {} ms, u {} ms (antes, u {} ms); a terceira respondeu em 2,5 s, e o kernel ja tinha fechado o pedido: sem_resposta",
+        "r{} acordo 2/2 com RTT {} e {} ms, u {} ms (antes, u {} ms); a terceira respondeu em 2,5 s, e o kernel ja tinha fechado o pedido: sem_resposta, e nenhum veredito a mais quando ela chegou",
         u.numero,
         a.unwrap_or(0),
         bb.unwrap_or(0),
