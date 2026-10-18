@@ -226,6 +226,13 @@ fn com_resumo<R>(f: impl FnOnce(&mut Resumo) -> R) -> R {
 /// ciclos.
 pub static CONFERENCIA: crate::metricas::Medida = crate::metricas::Medida::nova();
 
+/// Uma rodada inteira, do primeiro `time.request` ao desfecho, em ciclos — e
+/// a parte dela em que o fio esperou as fontes no `net.recv`. A diferença é
+/// o custo da rodada no kernel: as decisões do gate, a auditoria, a
+/// conferência, o quórum e a disciplina.
+pub static RODADA: crate::metricas::Medida = crate::metricas::Medida::nova();
+pub static ESPERA_DA_RODADA: crate::metricas::Medida = crate::metricas::Medida::nova();
+
 /// Os parâmetros da disciplina para o registro de agora: os tetos do
 /// registro, ou os do desenho sem ele, e a deriva da régua.
 fn parametros_da_regua(registro: Option<&Registro>) -> Parametros {
@@ -851,13 +858,19 @@ pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
         Some(p) => w.i64_value(p)?,
         None => w.null_value()?,
     }
-    let (n, media, maior) = CONFERENCIA.ler();
-    w.key("verify_ns")?;
-    w.begin_object()?;
-    w.field_u64("count", n)?;
-    w.field_u64("mean", crate::metricas::nanos(media))?;
-    w.field_u64("max", crate::metricas::nanos(maior))?;
-    w.end_object()?;
+    for (nome, medida) in [
+        ("verify_ns", &CONFERENCIA),
+        ("round_ns", &RODADA),
+        ("round_wait_ns", &ESPERA_DA_RODADA),
+    ] {
+        let (n, media, maior) = medida.ler();
+        w.key(nome)?;
+        w.begin_object()?;
+        w.field_u64("count", n)?;
+        w.field_u64("mean", crate::metricas::nanos(media))?;
+        w.field_u64("max", crate::metricas::nanos(maior))?;
+        w.end_object()?;
+    }
     w.end_object()
 }
 

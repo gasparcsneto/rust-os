@@ -286,12 +286,22 @@ pub fn rodada_de_teste(quem: Chamador) -> Desfecho {
 }
 
 fn rodada_como(quem: Chamador) -> Desfecho {
+    let inicio = crate::arch::ciclos();
+    let mut espera = 0;
+    let d = rodada_medida(quem, &mut espera);
+    super::RODADA.somar(crate::metricas::desde(inicio));
+    super::ESPERA_DA_RODADA.somar(espera);
+    d
+}
+
+/// A rodada, somando em `espera` os ciclos em que o fio esperou as fontes.
+fn rodada_medida(quem: Chamador, espera: &mut u64) -> Desfecho {
     let Some(registro) = crate::identidade::fontes_de_hora() else {
         return Desfecho::Encerrada("sem registro de fontes");
     };
     let n = registro.fontes().len();
     for (i, fonte) in registro.fontes().iter().enumerate() {
-        match consultar(quem, fonte) {
+        match consultar(quem, fonte, espera) {
             Ok(Some(fechada)) => return fechada,
             Ok(None) if i + 1 < n => {}
             Ok(None) => return Desfecho::Encerrada("a ultima fonte nao fechou a rodada"),
@@ -312,12 +322,13 @@ fn rodada_como(quem: Chamador) -> Desfecho {
 fn consultar(
     quem: Chamador,
     fonte: &hora::registro::Fonte,
+    espera: &mut u64,
 ) -> Result<Option<Desfecho>, &'static str> {
     let (id, bytes) = pedir_a_fonte(quem, fonte)?;
     let prazo = crate::tempo::uptime_ms() + super::PRAZO_MS.saturating_sub(MARGEM_MS);
     let fechou = match conectar(quem, fonte) {
         Some(c) => {
-            let fechou = ida_e_volta(quem, c, id, &bytes, prazo);
+            let fechou = ida_e_volta(quem, c, id, &bytes, prazo, espera);
             fechar(quem, c);
             fechou?
         }
@@ -380,6 +391,7 @@ fn ida_e_volta(
     id: u64,
     bytes: &[u8],
     prazo: u64,
+    espera: &mut u64,
 ) -> Result<Option<Vec<u8>>, &'static str> {
     if !mandar(quem, c, bytes) {
         return Ok(None);
@@ -389,7 +401,10 @@ fn ida_e_volta(
         if falta == 0 {
             break;
         }
-        let Some(chegou) = receber(quem, c, falta) else {
+        let antes = crate::arch::ciclos();
+        let chegou = receber(quem, c, falta);
+        *espera = espera.saturating_add(crate::metricas::desde(antes));
+        let Some(chegou) = chegou else {
             break;
         };
         let entrega = sincronizar(quem, id, Some(&chegou))?;
