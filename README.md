@@ -4636,12 +4636,15 @@ Ele chegou em passos. As contas — a moldura, a conferência da resposta, o
 quórum e a disciplina — estão no pacote `hora`, puro e testado no
 hospedeiro. A superfície na política e no gate — as duas permissões, o
 serviço e o papel, o registro das fontes — veio em seguida. Por cima dela,
-sem tirar nem pôr, o kernel tem agora o relógio civil, o lógico por ele, e
-o **serviço de hora**: um fio que consulta as fontes do registro pelo gate
-e entrega ao kernel o que elas responderam. **A bancada ainda não tem
-servidor de hora** — os da suíte moram no kernel de teste —: a imagem de
-produção faz as rodadas, não recebe resposta, e o civil fica no RTC, como
-antes. O servidor da bancada é o passo seguinte.
+sem tirar nem pôr, o kernel tem o relógio civil, o lógico por ele, e o
+**serviço de hora**: um fio que consulta as fontes do registro pelo gate e
+entrega ao kernel o que elas responderam. E a **bancada de tempo**
+(`cargo xtask tempo`) põe tudo isso à prova pela rede de verdade: três
+servidores de Roughtime no hospedeiro, escritos à parte do pacote `hora`, e
+a imagem de produção sincronizando por eles — com o RTC atrasado e
+adiantado, e com as fontes pulando, atrasando, calando, divergindo e
+voltando. A fumaça e a bancada de persistência continuam sem servidor: a
+imagem faz as rodadas, não recebe resposta, e o civil fica no RTC.
 
 ### Os relógios no kernel
 
@@ -5068,6 +5071,87 @@ lógico através de reboots: com o RTC voltado para trás do piso, o civil é
 o RTC e o lógico fica no piso, `adiantado`; com o RTC adiante, o lógico
 anda com ele.
 
+### A bancada de tempo
+
+`cargo xtask tempo` põe o caminho inteiro do Roughtime à prova pela rede de
+verdade. Para cada cenário, sobe três servidores no hospedeiro — as três
+fontes do registro da imagem, uma porta UDP do loopback para cada uma,
+`5319` a `5321` — e uma máquina da imagem de produção, com o estado zerado
+e o RTC onde o cenário pede (`-rtc base=`). O registro diz
+`udp:10.0.2.2:5319` a `5321`, e a rede do emulador leva esse endereço ao
+loopback do hospedeiro: a premissa do desenho, conferida antes de existir
+servidor, com um ouvinte que só anotava — a cada rodada, os três pedidos de
+1024 bytes, um por fonte, na ordem do registro. O pedido do serviço de hora
+sai pelo gate, pela placa e pela rede do emulador; a resposta volta pelo
+mesmo caminho, passa pelo firewall de entrada e chega ao tratador de
+`time.sync`, que a confere, junta as fontes no quórum e move o civil pela
+disciplina.
+
+**O servidor** (`xtask/src/servidor_de_hora.rs`) é escrito à parte do
+pacote `hora`: a moldura, as etiquetas na ordem, a árvore de Merkle, o
+`SRV` e as duas assinaturas, sobre o `sha2` e o `ed25519-dalek` direto. A
+raiz de cada fonte é a privada de `target/chaves/`, a mesma cuja pública a
+imagem fixa; a delegada é sorteada a cada subida e nunca gravada, e a raiz
+assina a delegação uma vez. Só os testes dele usam o pacote `hora`, e para
+conferir: a resposta passa pelo leitor do kernel, a de um lote fecha a
+árvore, e o desenho dela — as etiquetas, a ordem e os tamanhos, em cada
+nível — é o da resposta do vetor da RFC 10049. O `cargo xtask invariantes`
+confere que o resto do servidor não nomeia o pacote. O pedido que não é o
+de um cliente da versão 1 — menor que 1 KiB, sem a moldura, de outro tipo,
+sem a versão 1, com o `SRV` de outra raiz, sem o nonce — fica sem
+resposta. Cada datagrama vira uma linha do diário do servidor — quando
+chegou, de que fonte, o tamanho e o que se fez com ele —: o lado de fora da
+rodada, que a bancada confronta com o que o kernel diz ter aceitado.
+
+**Os modos.** Cada fonte responde num modo que o cenário troca com a
+máquina ligada: a hora deslocada, o raio, o atraso da resposta, calada, e o
+lote — a resposta numa árvore de 2, 8 ou 64 folhas, com o pedido na
+última, e o caminho de 1, 3 ou 6 resumos até a raiz assinada.
+
+**Nenhuma autoridade nova.** A bancada fala com a máquina pela serial, como
+a fumaça. O que ela muda lá dentro passa pelo gate: `net.block` e
+`net.unblock` com o papel da serial; `policy.write` e `time.confirm` em
+`admin.execute`, com a prova do administrador da imagem. O servidor não
+fala com o kernel: responde a quem pergunta.
+
+| Cenário | Montagem | O que se confere |
+|---|---|---|
+| As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o NSF lê as seis respostas aceitas, sem incidente |
+| O lote | árvores de 2, 8 e 64 folhas | as três respostas aceitas pelo caminho de Merkle, com o `INDX` 1, 7 e 63 |
+| Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; a marca sai quando ela volta |
+| O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, e o acordo é das outras duas |
+| O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado` |
+| O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador não vira contenção; uns dois minutos depois o lógico volta a andar com o civil, e nenhum carimbo da auditoria desce |
+| Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` |
+| O piso de outro boot | um boot com o RTC uma hora à frente; o seguinte na hora | o civil do segundo boot sincroniza, e o lógico fica no piso do primeiro, parado |
+| Dez minutos | as três pulam dez minutos à frente | o candidato e o salto em rodadas seguidas, além do envelope; o lógico salta junto |
+| Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, e a com a rodada dele aplica o salto |
+| A perda e a volta | a terceira calada desde o boot; depois a segunda; depois a primeira; e as três de volta, cinco segundos à frente | acordo 2/2; sem quórum; a rodada perdida; depois de uma falha, a rodada seguinte em 64 s; a incerteza cresce pela deriva; o NSF conta as respostas que não vieram; a volta é gradual, sem salto, dentro do teto de 5% |
+| O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
+| A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
+| A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido` |
+| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, e o NSF vê a volta |
+
+Cada cenário também confere, a cada leitura, que o lógico nunca volta. No
+fim, a bancada imprime o que mediu: a primeira sincronização depois do
+endereço do DHCP, a conferência das respostas, o RTT de cada uma, o tempo
+do servidor, e a rodada pelo relógio do kernel e pelo do hospedeiro. O
+trabalho `tempo` da CI roda os quinze cenários nas duas arquiteturas, em
+release.
+
+**O que ela achou: o intervalo depois de uma falha.** Dentro da janela, a
+hora continua `sincronizado` sem acordo nenhum, e o serviço tomava a
+rodada sem acordo — com uma fonte só, ou com nenhuma — por uma que deu
+certo: dobrava o intervalo. Com as fontes caladas, eram 1024 s em cinco
+rodadas, e a volta delas só era vista até 17 minutos depois. A bancada
+pegou isso no cenário da perda: depois da rodada sem quórum, a seguinte
+não veio em 104 s. O desenho diz que uma falha volta a 64 s. A regra agora
+é uma função pura do desfecho, de já ter sincronizado e do intervalo
+anterior, e um caso da suíte confere a tabela dela; a mutação que devolve
+a regra antiga reprova o caso. E o kernel passou a medir a rodada:
+`round_ns`, do primeiro pedido ao desfecho, e `round_wait_ns`, o que dela
+foi espera pelas fontes, no `system.info time`.
+
 ### O custo
 
 Medido no hospedeiro, na mesma máquina, antes e depois deste passo —
@@ -5106,18 +5190,29 @@ nenhum entre as rodadas.
 
 ### O que fica de fora
 
-- **O servidor da bancada.** Os servidores de Roughtime da suíte moram no
-  kernel de teste (`rede::bancada_hora`): o quadro que a pilha manda a uma
-  das fontes é desviado depois do firewall, e a resposta entra pela fila
-  da placa, passando pelo firewall de entrada. Só a placa e o emulador
-  ficam de fora do caminho. O recurso que os liga só existe no kernel da
-  suíte — o `xtask` confere que nenhum outro manifesto o pede. A fumaça e a
-  bancada de persistência rodam a imagem de produção, sem servidor: o
-  serviço faz as rodadas, nenhuma resposta chega, e o civil fica no RTC. O
-  tempo até a primeira sincronização, a rodada pela rede de verdade e a
-  fumaça de um acordo esperam o servidor do `xtask` — o passo seguinte, que
-  confirma também a premissa dos destinos: que o emulador leve o UDP do
-  hóspede para `10.0.2.2` ao loopback do hospedeiro.
+- **Um servidor só, do mesmo autor.** O servidor da bancada é escrito à
+  parte do pacote `hora`, mas da mesma leitura da RFC: ele confirma o
+  caminho — a placa, o emulador, o firewall, o gate, a conferência, o
+  quórum e a disciplina —, e não a leitura do formato. Um erro de leitura
+  que estivesse dos dois lados passaria pelos dois; contra isso, só o
+  vetor da RFC 10049, que os testes do servidor e os do `hora` conferem.
+  Nenhum servidor de outro autor respondeu à máquina: os públicos a bancada
+  não alcança, e nenhum de terceiros roda aqui.
+- **A fumaça continua sem servidor.** A fumaça e a bancada de persistência
+  rodam a imagem de produção sem fontes: o serviço faz as rodadas, nenhuma
+  resposta chega, e o civil fica no RTC. Os servidores da suíte moram no
+  kernel de teste (`rede::bancada_hora`), depois do firewall e antes da
+  placa; o recurso que os liga só existe no kernel da suíte, e o `xtask`
+  confere que nenhum outro manifesto o pede. A fumaça com um acordo, e o
+  TLS pela hora do civil, ficam para os passos seguintes.
+- **O NSF com o lógico parado.** Parado o lógico, param os carimbos da
+  auditoria, e as janelas do NSF, que contam carimbos, juntam o que no
+  relógio de verdade está separado. Na bancada, um operador recusado em
+  três métodos, um a cada 35 s, com o lógico parado: os três registros
+  saem com o mesmo carimbo, cabem numa janela de 30 s, e dão uma detecção
+  e um incidente — sem contenção. O desenho suspende a contenção automática
+  por taxa enquanto o lógico está parado, com as detecções registradas; a
+  suspensão vem com as regras de tempo do NSF.
 - **Os consumidores.** Nada mudou no TLS, nos cookies nem nas mensagens:
   eles leem o tempo lógico, como antes — e o lógico agora segue o civil.
   Depois de sincronizado, a validade de um certificado e a de um cookie
