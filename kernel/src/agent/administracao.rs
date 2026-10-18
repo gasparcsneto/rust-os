@@ -329,8 +329,9 @@ static OPERACOES: &[Operacao] = &[
         nome: "time.confirm",
         resumo: "Aplica o salto de hora pendente - o que o acordo de pelo menos duas chaves \
                  de fontes do registro indicou e que, acima do teto ou fora do envelope, \
-                 espera uma pessoa: {}. Nao recebe hora nenhuma; sem salto pendente, nao \
-                 ha o que confirmar (CONFLICT), e nada muda.",
+                 espera uma pessoa: {\"round\": N}, a rodada que o pediu, a do pending_round \
+                 do system.info time. A rodada so identifica a evidencia: nao recebe hora \
+                 nenhuma. Outra rodada, ou nenhum salto pendente: CONFLICT, e nada muda.",
         permissao: Permissao::TimeConfirm,
         efeito: Efeito::Nenhum,
         executar: confirmar_salto_de_hora,
@@ -1488,36 +1489,66 @@ fn revogar_sessao(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 /// arrendamento que saiu vai para a auditoria em nome de quem o tinha, e a
 /// operação em nome do administrador. O `sistema` não tem um atalho para
 /// isto.
-/// `time.confirm`: o salto de hora pendente, aplicado.
+/// `time.confirm { round }`: o salto de hora pendente da rodada `round`,
+/// aplicado.
 ///
-/// Não recebe hora nenhuma — os parâmetros são um objeto vazio, e um campo
-/// qualquer recusa o pedido, em vez de ser ignorado: a hora não se digita.
-/// O salto que se confirma é o que o acordo de pelo menos duas chaves
-/// indicou e a disciplina guardou como pendente — ver
-/// [`crate::hora::confirmar`]: levado até agora pela régua, com a
-/// incerteza do acordo e a deriva desde ele. Sem salto pendente,
-/// `CONFLICT`, e nada muda. A decisão já foi gravada: a prova, o papel com
-/// `time.confirm`, e o desafio; o registro da execução leva o salto, a
-/// rodada que o pediu, o civil e o lógico antes e depois.
+/// A rodada é a evidência que o administrador conferiu — a que o
+/// `system.info time` mostra em `pending_round` —, e só isso: não é hora,
+/// nem ajuste, nem escolha do relógio. Os parâmetros são `{"round": N}` e
+/// nada mais, e um campo a mais recusa o pedido, em vez de ser ignorado: a
+/// hora não se digita. O salto que se confirma é o que o acordo de pelo
+/// menos duas chaves daquela rodada indicou e a disciplina guardou como
+/// pendente — ver [`crate::hora::confirmar`]: levado até agora pela régua,
+/// com a incerteza do acordo e a deriva desde ele. Sem salto pendente, ou
+/// com o de outra rodada, `CONFLICT`, e nada muda. A decisão já foi
+/// gravada: a prova, o papel com `time.confirm`, e o desafio; o registro
+/// da execução leva o salto, a rodada, o civil e o lógico antes e depois —
+/// ou, no conflito, a rodada pedida e a do pendente.
 fn confirmar_salto_de_hora(
     _pedinte: &Pedinte,
     params: Json,
     w: &mut JsonWriter,
 ) -> Result<String, Falha> {
-    let vazio = params.raw_str().is_some_and(|t| {
-        t.bytes()
-            .filter(|b| !b.is_ascii_whitespace())
-            .eq(b"{}".iter().copied())
-    });
-    if !vazio {
-        return Err(falha(
-            Codigo::InvalidArgument,
-            "time.confirm nao recebe parametros: a hora nao se digita, so se confirma o salto que o quorum indicou",
-        ));
-    }
-    let aplicado = crate::hora::confirmar().map_err(|(codigo, motivo)| falha(codigo, motivo))?;
+    let rodada = rodada_a_confirmar(params)?;
+    let aplicado =
+        crate::hora::confirmar(rodada).map_err(|(codigo, motivo)| falha(codigo, motivo))?;
     let _ = w.field_str("applied", &aplicado);
     Ok(aplicado)
+}
+
+/// A rodada de um `time.confirm`: `{"round": N}`, com N inteiro e sem
+/// sinal, e nenhum outro campo — nem a mesma chave duas vezes, que diria
+/// duas rodadas.
+fn rodada_a_confirmar(params: Json) -> Result<u64, Falha> {
+    let (mut chaves, mut outra) = (0usize, false);
+    params.para_cada_chave(|chave| {
+        chaves += 1;
+        outra |= chave != "round";
+    });
+    if outra || chaves > 1 {
+        return Err(falha(
+            Codigo::InvalidArgument,
+            "time.confirm so recebe a rodada, {\"round\": N}: a hora nao se digita",
+        ));
+    }
+    let Some(valor) = params.member("round") else {
+        return Err(falha(
+            Codigo::InvalidArgument,
+            "time.confirm pede a rodada do salto pendente: {\"round\": N}",
+        ));
+    };
+    if !valor.e_numero() {
+        return Err(falha(
+            Codigo::InvalidArgument,
+            "a rodada de time.confirm e um numero inteiro sem sinal",
+        ));
+    }
+    valor.as_u64().ok_or_else(|| {
+        falha(
+            Codigo::InvalidArgument,
+            "a rodada de time.confirm e um numero inteiro sem sinal",
+        )
+    })
 }
 
 fn revogar_arrendamento(

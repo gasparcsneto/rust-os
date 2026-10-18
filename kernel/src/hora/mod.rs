@@ -35,8 +35,9 @@
 //!
 //! - o tratador de `time.sync`, na entrega da última fonte de uma rodada:
 //!   o desfecho do quórum vai à disciplina ([`civil::rodada`]);
-//! - o tratador de `time.confirm`, uma operação administrativa com prova:
-//!   o salto pendente que um acordo já pediu ([`civil::confirmar`]) — nunca
+//! - o tratador de `time.confirm { round }`, uma operação administrativa
+//!   com prova: o salto pendente que o acordo da rodada `round` já pediu
+//!   ([`civil::confirmar`]) — a rodada só identifica a evidência, e nunca
 //!   uma hora digitada.
 //!
 //! O `xtask` confere que ninguém mais chama os dois.
@@ -663,16 +664,28 @@ fn auditar_o_fechamento(f: &rodada::Fechamento, m: Option<&civil::Mudanca>, logi
     crate::autorizacao::auditar_execucao(&recurso, codigo, &detalhe);
 }
 
-/// `time.confirm`: aplica o salto pendente — o que o acordo pediu, levado
-/// até agora pela régua. Chamado só de dentro de `admin.execute`, com a
-/// prova e o papel conferidos e a decisão gravada. `Ok` com o recurso do
-/// registro da execução: o salto, a rodada que o pediu, o civil e o
-/// lógico antes e depois; `Err` sem salto pendente.
-pub fn confirmar() -> Result<String, (Codigo, &'static str)> {
+/// `time.confirm { round }`: aplica o salto pendente da rodada `rodada` —
+/// o que o acordo dela pediu, levado até agora pela régua. Chamado só de
+/// dentro de `admin.execute`, com a prova e o papel conferidos e a decisão
+/// gravada. `Ok` com o recurso do registro da execução: o salto, a rodada,
+/// o civil e o lógico antes e depois. `CONFLICT` sem salto pendente, ou
+/// com o de outra rodada — a que uma rodada nova pôs no lugar do que quem
+/// confirma conferiu —, e então nada se move, nem o civil nem o lógico; o
+/// motivo diz a rodada pedida e a do pendente, para o registro.
+pub fn confirmar(rodada: u64) -> Result<String, (Codigo, String)> {
     let logico_antes = crate::persistencia::agora();
-    let Some((m, rodada)) = civil::confirmar() else {
-        return Err((Codigo::Conflict, "nenhum salto de hora pendente"));
-    };
+    let (m, aplicada) = civil::confirmar(rodada).map_err(|recusa| {
+        let motivo = match recusa {
+            civil::Recusa::SemPendente => String::from("nenhum salto de hora pendente"),
+            civil::Recusa::OutraRodada(Some(pendente)) => {
+                alloc::format!("r{rodada} nao e a rodada do salto pendente, r{pendente}")
+            }
+            civil::Recusa::OutraRodada(None) => {
+                alloc::format!("r{rodada} nao e a rodada do salto pendente")
+            }
+        };
+        (Codigo::Conflict, motivo)
+    })?;
     let logico_depois = crate::persistencia::agora();
     let desvio = match m.efeito {
         Efeito::Salto { desvio_ms, .. } => desvio_ms,
@@ -685,7 +698,7 @@ pub fn confirmar() -> Result<String, (Codigo, &'static str)> {
     Ok(alloc::format!(
         "salto {:+} r{} civil {}>{} logico {}>{}",
         desvio,
-        rodada.unwrap_or(0),
+        aplicada,
         m.antes.meio_ms,
         m.depois.meio_ms,
         logico_antes,

@@ -31542,6 +31542,14 @@ static CASOS: &[Caso] = &[
         f: hora_a_disciplina_no_civil,
     },
     Caso {
+        nome: "hora: a confirmacao nomeia a rodada",
+        f: hora_a_confirmacao_nomeia_a_rodada,
+    },
+    Caso {
+        nome: "hora: a confirmacao pela cadeia inteira",
+        f: hora_a_confirmacao_pela_cadeia_inteira,
+    },
+    Caso {
         nome: "hora: os estados e a recuperacao",
         f: hora_os_estados_e_a_recuperacao,
     },
@@ -31564,6 +31572,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "hora: rodadas, leitores e o NSF ao mesmo tempo",
         f: hora_rodadas_leitores_e_nsf_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "hora: confirmacao e rodada nova ao mesmo tempo",
+        f: hora_confirmacao_e_rodada_nova_ao_mesmo_tempo,
     },
     Caso {
         nome: "hora: nenhum caminho fora do gate",
@@ -46027,13 +46039,17 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
     resultado
 }
 
-/// `time.confirm` é administrativa: não é comando, só se exerce por
-/// `admin.execute`, com a prova de um administrador cujo papel a tem. A
-/// chave fora do registro, a prova de outros parâmetros, a de outra
-/// operação, o pedido sem prova e o administrador sem a permissão são
-/// recusados e gravados. O administrador com prova é autorizado — e, sem
-/// salto pendente, não há o que confirmar: `CONFLICT`. Uma hora digitada é
-/// recusada, e não ignorada. Nada disso muda a política.
+/// `time.confirm { round }` é administrativa: não é comando, só se exerce
+/// por `admin.execute`, com a prova de um administrador cujo papel a tem. A
+/// chave fora do registro, a prova de outra rodada, a de outra operação, o
+/// pedido sem prova e o administrador sem a permissão são recusados e
+/// gravados. O administrador com prova é autorizado — e, sem salto
+/// pendente, não há o que confirmar: `CONFLICT`, com qualquer rodada, a que
+/// nunca existiu também. Os parâmetros são a rodada e só ela: sem a rodada,
+/// com uma rodada que não é um número inteiro sem sinal, com a mesma chave
+/// duas vezes, com uma hora — sozinha ou ao lado da rodada —,
+/// `INVALID_ARGUMENT`, e a recusa gravada; a hora é recusada, e não
+/// ignorada. Nada disso muda a política nem o civil.
 fn tempo_confirmar_so_com_prova() -> Resultado {
     use politica::Codigo;
     use politica::auditoria::Titular;
@@ -46041,11 +46057,13 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
         crate::autorizacao::versao_da_politica(),
         crate::autorizacao::com_politica(|p| p.texto()),
     );
+    let civil_antes = (civil_agora()?, crate::hora::contador::agora_ms());
+    let uma = r#"{"round":1}"#;
     let resultado = (|| -> Resultado {
         if registry::encontrar("time.confirm").is_some() {
             return Err("time.confirm esta na tabela de comandos comuns");
         }
-        let r = fs_pedir(sistema_aqui(), "time.confirm", "{}");
+        let r = fs_pedir(sistema_aqui(), "time.confirm", uma);
         if r.contains(r#""result""#) {
             crate::log_error!("teste", "{}", r);
             return Err("time.confirm respondeu como comando");
@@ -46054,16 +46072,18 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
             sigilo::publica_de(&ADMIN_DE_TESTE),
             "administrador",
         );
-        let r = executar_admin_com(0, &[0x42; 32], "time.confirm", "{}", "{}")?;
+        let r = executar_admin_com(0, &[0x42; 32], "time.confirm", uma, uma)?;
         if !r.contains("chave fora do registro de administradores") {
             crate::log_error!("teste", "{}", r);
             return Err("uma chave que nao e de administrador confirmou a hora");
         }
+        // A rodada está debaixo da prova: a de outra rodada não confirma
+        // esta.
         let d = com_sessao_de_teste(0, desafio)?;
-        let r = executar_admin_de(0, d, &ADMIN_DE_TESTE, "time.confirm", r#"{"x":1}"#, "{}")?;
+        let r = executar_admin_de(0, d, &ADMIN_DE_TESTE, "time.confirm", r#"{"round":2}"#, uma)?;
         if !r.contains("a prova nao confere") {
             crate::log_error!("teste", "{}", r);
-            return Err("a prova de outros parametros confirmou a hora");
+            return Err("a prova de outra rodada confirmou a hora");
         }
         let d = com_sessao_de_teste(0, desafio)?;
         let r = executar_admin_provado(
@@ -46072,8 +46092,8 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
             &ADMIN_DE_TESTE,
             "lease.revoke",
             "time.confirm",
-            "{}",
-            "{}",
+            uma,
+            uma,
         )?;
         if !r.contains("a prova nao confere") {
             crate::log_error!("teste", "{}", r);
@@ -46081,7 +46101,7 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
         }
         let (id, _, _) = com_sessao_de_teste(0, desafio)?;
         let sem_prova = alloc::format!(
-            r#"{{"challenge":{id},"command":"time.confirm","params":"{{}}","admin":"{}"}}"#,
+            r#"{{"challenge":{id},"command":"time.confirm","params":"{{\"round\":1}}","admin":"{}"}}"#,
             sigilo::hex(&sigilo::publica_de(&ADMIN_DE_TESTE))
         );
         let r = com_sessao_de_teste(0, || chamar("admin.execute", &sem_prova))?;
@@ -46091,12 +46111,12 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
         }
         let fraco = [0x43; 32];
         crate::identidade::registrar_administrador_de_teste(sigilo::publica_de(&fraco), "operador");
-        let r = executar_admin_com(0, &fraco, "time.confirm", "{}", "{}")?;
+        let r = executar_admin_com(0, &fraco, "time.confirm", uma, uma)?;
         if !r.contains(r#""code":"DENY_PERMISSION""#) {
             crate::log_error!("teste", "{}", r);
             return Err("um administrador sem time.confirm confirmou a hora");
         }
-        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", "{}", "{}")?;
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", uma, uma)?;
         if !r.contains(r#""executed":false"#)
             || !r.contains(r#""code":"CONFLICT""#)
             || !r.contains("nenhum salto de hora pendente")
@@ -46121,11 +46141,44 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
         if conflito <= autorizada {
             return Err("o desfecho do time.confirm veio antes da decisao");
         }
-        let hora = r#"{"unix_s":1760000000}"#;
-        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", hora, hora)?;
-        if !r.contains(r#""code":"INVALID_ARGUMENT""#) || !r.contains("a hora nao se digita") {
+        // Uma rodada que nunca existiu: sem pendente, o mesmo conflito.
+        let nunca = alloc::format!(r#"{{"round":{}}}"#, u64::MAX);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", &nunca, &nunca)?;
+        if !r.contains(r#""code":"CONFLICT""#) || !r.contains("nenhum salto de hora pendente") {
             crate::log_error!("teste", "{}", r);
-            return Err("uma hora digitada nao foi recusada");
+            return Err("uma rodada que nunca existiu nao deu conflito");
+        }
+        // O que não é a rodada, e só ela: recusado, e gravado.
+        for (params, motivo) in [
+            ("{}", "pede a rodada do salto pendente"),
+            ("[1]", "pede a rodada do salto pendente"),
+            (r#"{"unix_s":1760000000}"#, "a hora nao se digita"),
+            (r#"{"round":1,"unix_s":1760000000}"#, "a hora nao se digita"),
+            (r#"{"round":1,"round":2}"#, "so recebe a rodada"),
+            (r#"{"round":"1"}"#, "numero inteiro sem sinal"),
+            (r#"{"round":-1}"#, "numero inteiro sem sinal"),
+            (r#"{"round":1.5}"#, "numero inteiro sem sinal"),
+            (r#"{"round":1e3}"#, "numero inteiro sem sinal"),
+            (r#"{"round":01}"#, "numero inteiro sem sinal"),
+            (r#"{"round":null}"#, "numero inteiro sem sinal"),
+            (
+                r#"{"round":18446744073709551616}"#,
+                "numero inteiro sem sinal",
+            ),
+        ] {
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", params, params)?;
+            if !r.contains(r#""executed":false"#)
+                || !r.contains(r#""code":"INVALID_ARGUMENT""#)
+                || !r.contains(motivo)
+            {
+                crate::log_error!("teste", "{} {}", params, r);
+                return Err("um time.confirm sem a rodada, e so ela, nao foi recusado");
+            }
+            let e = ultimo_com_metodo("time.confirm").ok_or("a recusa nao foi gravada")?;
+            if e.codigo != Codigo::InvalidArgument || e.titular != Titular::Administrador {
+                crate::log_error!("teste", "{} {:?}", params, e);
+                return Err("a recusa de um time.confirm malformado nao foi gravada");
+            }
         }
         Ok(())
     })();
@@ -46137,6 +46190,14 @@ fn tempo_confirmar_so_com_prova() -> Resultado {
     ) != antes
     {
         return Err("time.confirm mudou a politica");
+    }
+    // E o civil andou só o que a régua andou: nenhuma dessas confirmações o
+    // moveu.
+    let (civil, regua) = (civil_agora()?, crate::hora::contador::agora_ms());
+    if civil.pendente_ms.is_some()
+        || civil.meio_ms > civil_antes.0.meio_ms + (regua - civil_antes.1) + 2_000
+    {
+        return Err("um time.confirm recusado moveu o civil");
     }
     Ok(())
 }
@@ -46419,6 +46480,112 @@ fn tempo_no_system_info() -> Result<alloc::string::String, &'static str> {
         .and_then(|v| v.member("time"))
         .ok_or("system.info sem o objeto time")?;
     Ok(alloc::string::String::from_utf8_lossy(t.0).into_owned())
+}
+
+/// A rodada do salto pendente, como o `system.info time` a diz.
+fn rodada_pendente() -> Result<u64, &'static str> {
+    let t = tempo_no_system_info()?;
+    Json(t.as_bytes())
+        .member("pending_round")
+        .and_then(|v| v.as_u64())
+        .ok_or("o system.info nao diz a rodada de um salto pendente")
+}
+
+/// Os parâmetros de um `time.confirm` da rodada `n`.
+fn rodada_em(n: u64) -> alloc::string::String {
+    alloc::format!(r#"{{"round":{n}}}"#)
+}
+
+/// O número da rodada mais nova que fechou, do registro do desfecho dela:
+/// o `r<n>` do detalhe — que pode vir com quem pediu na frente, `pelo
+/// processo 1 (kernel): r<n> ...`.
+fn rodada_do_ultimo_desfecho() -> Result<u64, &'static str> {
+    let (_, e) = ultimo_desfecho().ok_or("nenhuma rodada fechou")?;
+    e.detalhe
+        .split(' ')
+        .find_map(|p| p.strip_prefix('r').and_then(|n| n.parse().ok()))
+        .ok_or("o desfecho sem o numero da rodada")
+}
+
+/// O civil, a régua em que foi lido, o lógico e o salto pendente, com a
+/// rodada dele: o que um `time.confirm` recusado não pode mover.
+#[derive(Clone, Copy, Debug)]
+struct Relogios {
+    civil_ms: u64,
+    regua_ms: u64,
+    logico_s: u64,
+    pendente_ms: Option<i64>,
+    rodada: Option<u64>,
+}
+
+/// Os relógios agora — ver [`Relogios`].
+fn relogios_agora() -> Result<Relogios, &'static str> {
+    let logico_s = crate::persistencia::agora();
+    let (l, rodada) = crate::hora::civil::ler_com_o_pendente().ok_or("sem relogio civil")?;
+    Ok(Relogios {
+        civil_ms: l.meio_ms,
+        regua_ms: crate::hora::contador::agora_ms(),
+        logico_s,
+        pendente_ms: l.pendente_ms,
+        rodada,
+    })
+}
+
+/// De `antes` a `agora`, o civil e o lógico andaram o que a régua andou —
+/// com um ajuste gradual em curso, até 5% a mais —: nenhum salto, e
+/// nenhum dos dois voltou.
+fn sem_salto(antes: &Relogios, agora: &Relogios) -> Resultado {
+    let andou = agora.regua_ms.saturating_sub(antes.regua_ms);
+    let teto_ms = andou + andou / 20 + 2_000;
+    if agora.civil_ms < antes.civil_ms || agora.civil_ms - antes.civil_ms > teto_ms {
+        crate::log_error!("teste", "antes {:?}, agora {:?}", antes, agora);
+        return Err("o civil se moveu");
+    }
+    if agora.logico_s < antes.logico_s || (agora.logico_s - antes.logico_s) * 1000 > teto_ms + 1_000
+    {
+        crate::log_error!("teste", "antes {:?}, agora {:?}", antes, agora);
+        return Err("o logico se moveu");
+    }
+    Ok(())
+}
+
+/// Nada se moveu desde `antes`: nenhum salto — ver [`sem_salto`] —, e o
+/// salto pendente é o mesmo, da mesma rodada.
+fn nada_se_moveu(antes: &Relogios) -> Resultado {
+    let agora = relogios_agora()?;
+    sem_salto(antes, &agora)?;
+    if agora.pendente_ms != antes.pendente_ms || agora.rodada != antes.rodada {
+        crate::log_error!("teste", "antes {:?}, agora {:?}", antes, agora);
+        return Err("o salto pendente mudou");
+    }
+    Ok(())
+}
+
+/// Depois do registro `desde`, a tentativa de um `time.confirm` gravada: a
+/// decisão — a prova e a permissão — e, depois dela, o conflito com este
+/// motivo; os dois em nome do administrador.
+fn conflito_de_confirmacao_gravado(desde: u64, motivo: &str) -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    let decisao = registro_que(|e| {
+        e.metodo == "time.confirm"
+            && e.codigo == Codigo::Allow
+            && e.titular == Titular::Administrador
+            && e.detalhe
+                .contains("prova conferida; autorizada; permissao time.confirm")
+    });
+    let conflito = registro_que(|e| e.metodo == "time.confirm" && e.codigo == Codigo::Conflict);
+    match (decisao, conflito) {
+        (Some((d, _)), Some((c, e)))
+            if d > desde && c > d && e.detalhe == motivo && e.titular == Titular::Administrador =>
+        {
+            Ok(())
+        }
+        outro => {
+            crate::log_error!("teste", "desde {}: {:?}", desde, outro);
+            Err("a tentativa de confirmar nao foi gravada: a decisao, e o conflito depois dela")
+        }
+    }
 }
 
 /// Espera cedendo a CPU por `ms` no relógio do kernel.
@@ -47088,8 +47255,9 @@ fn hora_a_disciplina_no_civil() -> Resultado {
             bancada::deslocamento_de_teste(i, s);
         }
     };
-    let confirmar = || -> Result<alloc::string::String, &'static str> {
-        executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", "{}", "{}")
+    let confirmar = |rodada: u64| -> Result<alloc::string::String, &'static str> {
+        let params = alloc::format!(r#"{{"round":{rodada}}}"#);
+        executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", &params, &params)
     };
     crate::identidade::registrar_administrador_de_teste(
         sigilo::publica_de(&ADMIN_DE_TESTE),
@@ -47214,9 +47382,9 @@ fn hora_a_disciplina_no_civil() -> Resultado {
             crate::log_error!("teste", "rodada {} e {}", numero, t);
             return Err("o system.info nao diz a rodada do salto pendente");
         }
-        // Só o administrador, com prova, confirma — e confirma o que o
-        // acordo pediu, levado até agora.
-        let r = confirmar()?;
+        // Só o administrador, com prova, confirma — a rodada que conferiu —,
+        // e confirma o que o acordo pediu, levado até agora.
+        let r = confirmar(numero)?;
         if !r.contains(r#""executed":true"#) || !r.contains(r#""applied":"salto +"#) {
             crate::log_error!("teste", "{}", r);
             return Err("o administrador nao confirmou o salto pendente");
@@ -47243,7 +47411,7 @@ fn hora_a_disciplina_no_civil() -> Resultado {
             crate::log_error!("teste", "{}", t);
             return Err("confirmado, o system.info ainda diz um salto pendente");
         }
-        let r = confirmar()?;
+        let r = confirmar(numero)?;
         if !r.contains(r#""code":"CONFLICT""#) {
             return Err("um segundo time.confirm achou outro salto");
         }
@@ -47259,7 +47427,7 @@ fn hora_a_disciplina_no_civil() -> Resultado {
             return Err("o salto para tras sem confirmacao voltou o civil");
         }
         let piso = crate::persistencia::agora();
-        if !confirmar()?.contains(r#""executed":true"#) {
+        if !confirmar(rodada_pendente()?)?.contains(r#""executed":true"#) {
             return Err("o administrador nao confirmou o salto para tras");
         }
         let l = civil_agora()?;
@@ -47287,6 +47455,376 @@ fn hora_a_disciplina_no_civil() -> Resultado {
     });
     crate::identidade::esquecer_registrados();
     r
+}
+
+/// `time.confirm { round }` confirma a evidência que o administrador
+/// conferiu, e só ela: a corrida do pendente trocado. A rodada A deixa um
+/// salto pendente, e o `system.info time` diz A; a rodada B troca o
+/// pendente pelo dela antes de a confirmação chegar. A confirmação de A é
+/// `CONFLICT`, e nenhum relógio se move — nem o civil, nem o lógico, nem o
+/// pendente, que continua o de B —; a auditoria grava a tentativa: a
+/// decisão, e o conflito com a rodada pedida e a do pendente. A rodada que
+/// fechou sem pendente, a zero, uma que ainda não houve e a maior que há:
+/// o mesmo conflito, e nada se move. O que não é só uma rodada — a de B
+/// como texto, com sinal, com fração, com uma hora ao lado, duas vezes,
+/// com outro nome — é recusado antes de chegar ao civil. A confirmação de
+/// B, então, aplica o salto que o acordo de B pediu — o de B, e não o de
+/// A —, e o registro nomeia B. Confirmado, nem B nem A acham o que
+/// confirmar.
+fn hora_a_confirmacao_nomeia_a_rodada() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    let todas = |s: i64| {
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, s);
+        }
+    };
+    let confirmar = |params: &str| -> Result<alloc::string::String, &'static str> {
+        executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", params, params)
+    };
+    let conflito = |r: &str, motivo: &str| {
+        r.contains(r#""executed":false"#)
+            && r.contains(r#""code":"CONFLICT""#)
+            && r.contains(motivo)
+    };
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let sem_pendente = rodada_do_ultimo_desfecho()?;
+
+        // A rodada A: 14 s adiante, acima do teto de 10 s — pendente. O
+        // administrador lê o system.info time e vê A.
+        todas(14);
+        fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+        let a = rodada_pendente()?;
+        let de_a = relogios_agora()?;
+        if a == sem_pendente
+            || a != rodada_do_ultimo_desfecho()?
+            || de_a.rodada != Some(a)
+            || de_a
+                .pendente_ms
+                .is_none_or(|p| !(12_000..17_000).contains(&p))
+        {
+            crate::log_error!("teste", "A {} depois de r{}: {:?}", a, sem_pendente, de_a);
+            return Err("o system.info nao diz a rodada A do salto pendente");
+        }
+
+        // A rodada B troca o pendente pelo dela: outro acordo, 20 s
+        // adiante.
+        todas(20);
+        fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+        let b = rodada_pendente()?;
+        let antes = relogios_agora()?;
+        if b == a
+            || b != rodada_do_ultimo_desfecho()?
+            || antes.rodada != Some(b)
+            || antes.pendente_ms.is_none_or(|p| p < 18_000)
+        {
+            crate::log_error!("teste", "B {} depois de A {}: {:?}", b, a, antes);
+            return Err("a rodada B nao trocou o pendente pelo dela");
+        }
+
+        // A confirmação de A chega depois de B: conflito, e nada se move.
+        let desde = crate::autorizacao::ultimo_registro();
+        let r = confirmar(&rodada_em(a))?;
+        let motivo = alloc::format!("r{a} nao e a rodada do salto pendente, r{b}");
+        if !conflito(&r, &motivo) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a confirmacao de A, com o pendente de B, nao foi um conflito");
+        }
+        nada_se_moveu(&antes)?;
+        conflito_de_confirmacao_gravado(desde, &motivo)?;
+
+        // Nem a rodada que fechou sem pendente, nem uma que não houve.
+        for x in [sem_pendente, 0, b + 1_000, u64::MAX] {
+            let desde = crate::autorizacao::ultimo_registro();
+            let r = confirmar(&rodada_em(x))?;
+            let motivo = alloc::format!("r{x} nao e a rodada do salto pendente, r{b}");
+            if !conflito(&r, &motivo) {
+                crate::log_error!("teste", "r{}: {}", x, r);
+                return Err("a confirmacao de outra rodada nao foi um conflito");
+            }
+            nada_se_moveu(&antes)?;
+            conflito_de_confirmacao_gravado(desde, &motivo)?;
+        }
+
+        // Nem o que não é só a rodada — a de B inclusive.
+        for (params, motivo) in [
+            (
+                alloc::format!(r#"{{"round":"{b}"}}"#),
+                "numero inteiro sem sinal",
+            ),
+            (
+                alloc::format!(r#"{{"round":-{b}}}"#),
+                "numero inteiro sem sinal",
+            ),
+            (
+                alloc::format!(r#"{{"round":{b}.0}}"#),
+                "numero inteiro sem sinal",
+            ),
+            (
+                alloc::format!(r#"{{"round":{b},"unix_s":1760000000}}"#),
+                "a hora nao se digita",
+            ),
+            (
+                alloc::format!(r#"{{"round":{a},"round":{b}}}"#),
+                "so recebe a rodada",
+            ),
+            (
+                alloc::format!(r#"{{"round":{b},"round":{b}}}"#),
+                "so recebe a rodada",
+            ),
+            (alloc::format!(r#"{{"rodada":{b}}}"#), "so recebe a rodada"),
+            (alloc::string::String::from("{}"), "pede a rodada"),
+        ] {
+            let r = confirmar(&params)?;
+            if !r.contains(r#""executed":false"#)
+                || !r.contains(r#""code":"INVALID_ARGUMENT""#)
+                || !r.contains(motivo)
+            {
+                crate::log_error!("teste", "{}: {}", params, r);
+                return Err("um time.confirm que nao e so a rodada passou, com um salto pendente");
+            }
+            nada_se_moveu(&antes)?;
+        }
+
+        // A confirmação de B aplica o salto que o acordo de B pediu — os
+        // 20 s de B, e não os 14 de A —, e o registro nomeia B.
+        let r = confirmar(&rodada_em(b))?;
+        if !r.contains(r#""executed":true"#) || !r.contains(&alloc::format!(" r{b} ")) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a confirmacao de B nao aplicou o salto de B");
+        }
+        let depois = relogios_agora()?;
+        let andou = depois.regua_ms.saturating_sub(antes.regua_ms);
+        if depois.pendente_ms.is_some()
+            || depois.rodada.is_some()
+            || depois.civil_ms < antes.civil_ms + andou + 18_000
+            || depois.logico_s < antes.logico_s + 18
+        {
+            crate::log_error!("teste", "antes {:?}, depois {:?}", antes, depois);
+            return Err("confirmado B, o civil e o logico nao saltaram o que B pediu");
+        }
+        let (_, e) = registro_que(|e| {
+            e.metodo == "time.confirm"
+                && e.codigo == Codigo::Allow
+                && e.recurso.starts_with("salto +")
+        })
+        .ok_or("a confirmacao de B nao foi gravada")?;
+        if !e.recurso.contains(&alloc::format!(" r{b} ")) || e.titular != Titular::Administrador {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o registro da confirmacao nao nomeia B");
+        }
+
+        // Confirmado, nem B nem A acham o que confirmar.
+        for x in [b, a] {
+            let antes = relogios_agora()?;
+            let r = confirmar(&rodada_em(x))?;
+            if !conflito(&r, "nenhum salto de hora pendente") {
+                crate::log_error!("teste", "r{}: {}", x, r);
+                return Err("confirmado B, um time.confirm achou outro salto");
+            }
+            nada_se_moveu(&antes)?;
+        }
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    r
+}
+
+/// A cadeia inteira vale para a confirmação da rodada certa, com o salto
+/// pendente esperando: a rodada é só a evidência, e não passa por cima de
+/// nada. Recusados, gravados, e sem mover relógio nenhum: o pedido sem
+/// prova; a prova de outra rodada; o administrador cujo papel não tem
+/// `time.confirm`; a credencial revogada antes do pedido, e a revogada no
+/// meio dele — depois da decisão, com a ordem das gravações na mão —; e a
+/// política sem `time.confirm`, antes da decisão e no meio. Essa política
+/// não vem de um `policy.write`: o papel de um administrador é protegido,
+/// e a escrita é recusada. Um `policy.write` que muda outra coisa — tira o
+/// `time.sync` do serviço — muda a versão e para as rodadas seguintes no
+/// gate, mas não troca a evidência: o pendente continua o da rodada, e a
+/// confirmação, decidida pela política de agora, aplica o salto dele.
+fn hora_a_confirmacao_pela_cadeia_inteira() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    fn revogar_no_meio() {
+        let _ = crate::identidade::revogar_administrador(&publica_do_grupo(1), 1);
+    }
+    fn sem_time_confirm() {
+        politica_sem("time.confirm");
+    }
+    let politica = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = com_grupo(["administrador"; 3], || {
+        com_a_bancada_de_hora(2, 86_400, 60, || {
+            crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+            for i in 0..3 {
+                bancada::raio_de_teste(i, 1);
+            }
+            fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+            for i in 0..3 {
+                bancada::deslocamento_de_teste(i, 14);
+            }
+            fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+            let b = rodada_pendente()?;
+            let rodada = rodada_em(b);
+            let antes = relogios_agora()?;
+            let (um, dois, tres) = (
+                &GRUPO_DE_TESTE[0].0,
+                &GRUPO_DE_TESTE[1].0,
+                &GRUPO_DE_TESTE[2].0,
+            );
+            let confirmar =
+                |chave: &[u8; 32]| executar_admin_com(0, chave, "time.confirm", &rodada, &rodada);
+            let recusada = |r: &str, codigo: &str, motivo: &str| -> Resultado {
+                if !r.contains(r#""executed":false"#)
+                    || !r.contains(&alloc::format!(r#""code":"{codigo}""#))
+                    || !r.contains(motivo)
+                {
+                    crate::log_error!("teste", "{} ({}): {}", codigo, motivo, r);
+                    return Err("um time.confirm que a cadeia recusa nao foi recusado");
+                }
+                let e = ultimo_com_metodo("time.confirm").ok_or("a recusa nao foi gravada")?;
+                if e.codigo.nome() != codigo {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("a recusa do time.confirm nao foi gravada com o codigo");
+                }
+                nada_se_moveu(&antes)
+            };
+
+            // Sem prova.
+            let (id, _, _) = com_sessao_de_teste(0, desafio)?;
+            let sem_prova = alloc::format!(
+                r#"{{"challenge":{id},"command":"time.confirm","params":"{{\"round\":{b}}}","admin":"{}"}}"#,
+                sigilo::hex(&publica_do_grupo(0))
+            );
+            let r = com_sessao_de_teste(0, || chamar("admin.execute", &sem_prova))?;
+            recusada(&r, "INVALID_ARGUMENT", "prova ausente ou invalida")?;
+            // A prova de outra rodada não confirma esta.
+            let d = com_sessao_de_teste(0, desafio)?;
+            let r = executar_admin_de(0, d, um, "time.confirm", &rodada_em(b + 1), &rodada)?;
+            recusada(&r, "DENY_NOT_AUTHENTICATED", "a prova nao confere")?;
+            // O administrador cujo papel não tem time.confirm.
+            let operador = [0x44; 32];
+            crate::identidade::registrar_administrador_de_teste(
+                sigilo::publica_de(&operador),
+                "operador",
+            );
+            recusada(
+                &confirmar(&operador)?,
+                "DENY_PERMISSION",
+                "o papel do administrador nao tem a permissao",
+            )?;
+            // A credencial revogada antes do pedido.
+            crate::identidade::revogar_administrador(&publica_do_grupo(2), 1)
+                .map_err(|_| "a revogacao do caso nao aconteceu")?;
+            recusada(
+                &confirmar(tres)?,
+                "DENY_NOT_AUTHENTICATED",
+                "credencial de administrador revogada",
+            )?;
+            // E a revogada no meio: decidida, e revogada antes de confirmar.
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(revogar_no_meio));
+            let r = confirmar(dois);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            recusada(
+                &r?,
+                "DENY_NOT_AUTHENTICATED",
+                "credencial de administrador revogada no meio da operacao",
+            )?;
+            if !crate::identidade::administrador_revogado(&publica_do_grupo(1)) {
+                return Err("a revogacao do meio nao aconteceu");
+            }
+
+            // A política sem time.confirm não vem de um policy.write: o papel
+            // do administrador é protegido.
+            let versao = crate::autorizacao::versao_da_politica();
+            let linha = r#"{"line":"papel administrador message.read"}"#;
+            let r = executar_admin_com(0, um, "policy.write", linha, linha)?;
+            if !r.contains(r#""code":"DENY_POLICY""#)
+                || !r.contains("protegido")
+                || crate::autorizacao::versao_da_politica() != versao
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("policy.write tirou time.confirm do papel de um administrador");
+            }
+            nada_se_moveu(&antes)?;
+            // Com ela assim mesmo — a da imagem, digamos —, antes da decisão.
+            politica_sem("time.confirm");
+            let r = confirmar(um);
+            crate::autorizacao::restaurar_politica(politica.clone());
+            recusada(
+                &r?,
+                "DENY_PERMISSION",
+                "o papel do administrador nao tem a permissao",
+            )?;
+            // E no meio, depois da decisão.
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_time_confirm));
+            let r = confirmar(um);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::autorizacao::restaurar_politica(politica.clone());
+            recusada(
+                &r?,
+                "DENY_PERMISSION",
+                "a politica de agora nao da a permissao",
+            )?;
+
+            // Um policy.write que muda outra coisa: tira o time.sync do
+            // serviço. A rodada seguinte para no gate, e o pendente continua
+            // o de B.
+            let escrever = |linha: &str| -> Resultado {
+                let p = alloc::format!(r#"{{"line":"{linha}"}}"#);
+                let r = executar_admin_com(0, um, "policy.write", &p, &p)?;
+                if !r.contains(r#""executed":true"#) {
+                    crate::log_error!("teste", "{}: {}", linha, r);
+                    return Err("uma linha de politica do caso nao foi escrita");
+                }
+                Ok(())
+            };
+            let versao = crate::autorizacao::versao_da_politica();
+            escrever("papel tempo net.connect")?;
+            let parada = rodada_do_servico();
+            let r = (|| -> Resultado {
+                if crate::autorizacao::versao_da_politica() == versao {
+                    return Err("o policy.write do caso nao mudou a versao da politica");
+                }
+                if !matches!(parada, crate::hora::servico::Desfecho::Encerrada(_)) {
+                    crate::log_error!("teste", "{:?}", parada);
+                    return Err("sem time.sync, uma rodada do servico fechou");
+                }
+                nada_se_moveu(&antes)?;
+                // A confirmação é decidida pela política de agora — o papel do
+                // administrador ainda tem time.confirm —, e aplica o salto de B.
+                let r = confirmar(um)?;
+                if !r.contains(r#""executed":true"#) || !r.contains(&alloc::format!(" r{b} ")) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err(
+                        "depois do policy.write, a confirmacao de B nao aplicou o salto de B",
+                    );
+                }
+                let depois = relogios_agora()?;
+                let andou = depois.regua_ms.saturating_sub(antes.regua_ms);
+                if depois.rodada.is_some() || depois.civil_ms < antes.civil_ms + andou + 12_000 {
+                    crate::log_error!("teste", "antes {:?}, depois {:?}", antes, depois);
+                    return Err("confirmado B, o civil nao saltou o que B pediu");
+                }
+                Ok(())
+            })();
+            // A linha volta pelo mesmo caminho: o journal fica com a política
+            // de antes.
+            escrever("papel tempo net.connect time.sync")?;
+            r
+        })
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::autorizacao::carregar();
+    resultado
 }
 
 /// Os estados: `rtc` antes de tudo; `sincronizado` com o acordo;
@@ -47838,6 +48376,197 @@ fn hora_rodadas_leitores_e_nsf_ao_mesmo_tempo() -> Resultado {
     })
 }
 
+/// Concorrência: a confirmação e uma rodada nova ao mesmo tempo. Um fio
+/// faz rodadas sem parar, cada uma com o acordo 14 s adiante do civil —
+/// acima do teto —, que troca o pendente pelo dela. O caso pede o desafio,
+/// lê o `pending_round` e confirma: numa volta, logo, na corrida com a
+/// rodada seguinte; na outra, depois de mais duas rodadas fecharem, quando
+/// a lida já não é a do pendente. A rodada é conferida e o salto aplicado
+/// com a trava do civil — a mesma com que a rodada troca o pendente —, e
+/// então cada confirmação ou aplica o salto da rodada que nomeou, e a
+/// resposta e o registro a nomeiam, ou é um conflito, gravado, e o civil e
+/// o lógico não saltam. As voltas atrasadas são sempre um conflito de
+/// outra rodada. O lógico nunca volta, toda rodada fecha, e nada fica
+/// aberto.
+fn hora_confirmacao_e_rodada_nova_ao_mesmo_tempo() -> Resultado {
+    use crate::hora::servico::Desfecho;
+    use crate::rede::bancada_hora as bancada;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    use politica::Codigo;
+    static PENDENTES: AtomicU64 = AtomicU64::new(0);
+    static SEM_SALTO: AtomicU64 = AtomicU64::new(0);
+    static ERRADAS: AtomicU64 = AtomicU64::new(0);
+    static PARAR: AtomicBool = AtomicBool::new(false);
+    static PRONTO: AtomicBool = AtomicBool::new(false);
+
+    fn fechadas() -> u64 {
+        PENDENTES.load(SeqCst) + SEM_SALTO.load(SeqCst) + ERRADAS.load(SeqCst)
+    }
+    extern "C" fn rodadas(_: u64) -> ! {
+        while !PARAR.load(SeqCst) {
+            match rodada_do_servico() {
+                Desfecho::Fechada { efeito, estado } if estado == "sincronizado" => {
+                    match efeito.as_str() {
+                        "pendente" => PENDENTES.fetch_add(1, SeqCst),
+                        // A rodada no ar quando um salto se confirmou: o
+                        // acordo dela já é o civil.
+                        "nada" | "gradual" => SEM_SALTO.fetch_add(1, SeqCst),
+                        _ => {
+                            crate::log_error!("teste", "rodada concorrente: {}", efeito);
+                            ERRADAS.fetch_add(1, SeqCst)
+                        }
+                    };
+                }
+                outro => {
+                    crate::log_error!("teste", "rodada concorrente: {:?}", outro);
+                    ERRADAS.fetch_add(1, SeqCst);
+                }
+            }
+            // Devagar: cada rodada são uns quinze registros na auditoria, e
+            // o anel tem de guardar os de cada volta do caso.
+            esperar_ms(200);
+        }
+        PRONTO.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        for c in [&PENDENTES, &SEM_SALTO, &ERRADAS] {
+            c.store(0, SeqCst);
+        }
+        PARAR.store(false, SeqCst);
+        PRONTO.store(false, SeqCst);
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, 14);
+        }
+        crate::fios::criar("teste-hora-rodadas", rodadas, 0)?;
+        let voltas = (|| -> Result<(u32, u32, u32), &'static str> {
+            let (mut aplicadas, mut de_outra, mut sem_pendente) = (0u32, 0u32, 0u32);
+            let mut logico = crate::persistencia::agora();
+            let fim = crate::tempo::uptime_ms() + 120_000;
+            let mut volta = 0u32;
+            while aplicadas < 3 || de_outra < 3 {
+                if crate::tempo::uptime_ms() > fim {
+                    crate::log_error!(
+                        "teste",
+                        "{} aplicadas, {} de outra rodada, {} sem pendente",
+                        aplicadas,
+                        de_outra,
+                        sem_pendente
+                    );
+                    return Err("a confirmacao concorrente nao terminou em dois minutos");
+                }
+                volta += 1;
+                let atrasada = volta.is_multiple_of(2);
+                let d = com_sessao_de_teste(0, desafio)?;
+                // Um salto pendente — esperado sem a auditoria —, e a rodada
+                // dele, como o system.info a diz.
+                esperar_cedendo(
+                    || crate::hora::civil::ler_com_o_pendente().is_some_and(|(_, r)| r.is_some()),
+                    3_000,
+                )?;
+                // Cada volta logo cai num ponto diferente do ciclo das
+                // rodadas: a espera acima volta quando uma acaba de fechar.
+                if !atrasada {
+                    esperar_ms(u64::from(volta) * 37 % 300);
+                }
+                let Ok(p) = rodada_pendente() else {
+                    continue;
+                };
+                if atrasada {
+                    let n = fechadas();
+                    esperar_cedendo(|| fechadas() >= n + 2, 3_000)?;
+                }
+                let antes = relogios_agora()?;
+                let desde = crate::autorizacao::ultimo_registro();
+                let params = rodada_em(p);
+                let r = executar_admin_de(0, d, &ADMIN_DE_TESTE, "time.confirm", &params, &params)?;
+                let depois = relogios_agora()?;
+                if antes.logico_s < logico || depois.logico_s < antes.logico_s {
+                    return Err("o logico voltou");
+                }
+                logico = depois.logico_s;
+                let de_outra_rodada = alloc::format!("r{p} nao e a rodada do salto pendente, r");
+                if r.contains(r#""executed":true"#) {
+                    if atrasada {
+                        crate::log_error!("teste", "r{}: {}", p, r);
+                        return Err("uma rodada que ja nao era a do pendente foi confirmada");
+                    }
+                    let (seq, e) = registro_que(|e| {
+                        e.metodo == "time.confirm"
+                            && e.codigo == Codigo::Allow
+                            && e.recurso.starts_with("salto +")
+                    })
+                    .ok_or("a confirmacao nao foi gravada")?;
+                    let nomeada = alloc::format!(" r{p} ");
+                    if seq <= desde || !e.recurso.contains(&nomeada) || !r.contains(&nomeada) {
+                        crate::log_error!("teste", "r{}: {} {:?}", p, r, e);
+                        return Err("a confirmacao aplicou o salto de outra rodada");
+                    }
+                    if depois.civil_ms < antes.civil_ms + 10_000 {
+                        crate::log_error!("teste", "antes {:?}, depois {:?}", antes, depois);
+                        return Err("a confirmacao executada nao saltou o civil");
+                    }
+                    aplicadas += 1;
+                } else if r.contains(r#""code":"CONFLICT""#) && r.contains(&de_outra_rodada) {
+                    sem_salto(&antes, &depois)?;
+                    let (seq, e) = registro_que(|e| {
+                        e.metodo == "time.confirm" && e.codigo == Codigo::Conflict
+                    })
+                    .ok_or("o conflito nao foi gravado")?;
+                    if seq <= desde || !e.detalhe.starts_with(&de_outra_rodada) {
+                        crate::log_error!("teste", "r{}: {:?}", p, e);
+                        return Err("o conflito de outra rodada nao foi gravado com as rodadas");
+                    }
+                    de_outra += 1;
+                } else if !atrasada
+                    && r.contains(r#""code":"CONFLICT""#)
+                    && r.contains("nenhum salto de hora pendente")
+                {
+                    sem_salto(&antes, &depois)?;
+                    sem_pendente += 1;
+                } else {
+                    crate::log_error!("teste", "r{} (atrasada {}): {}", p, atrasada, r);
+                    return Err("uma confirmacao concorrente nao foi nem aplicada nem um conflito");
+                }
+            }
+            Ok((aplicadas, de_outra, sem_pendente))
+        })();
+        PARAR.store(true, SeqCst);
+        let parou = esperar_cedendo(|| PRONTO.load(SeqCst), 3_000);
+        let (aplicadas, de_outra, sem_pendente) = voltas?;
+        parou?;
+        if ERRADAS.load(SeqCst) != 0 {
+            return Err("uma rodada concorrente nao fechou sincronizada");
+        }
+        if crate::hora::abertos_de_teste() != (0, 0, 0) {
+            crate::log_error!("teste", "abertos {:?}", crate::hora::abertos_de_teste());
+            return Err("a confirmacao concorrente deixou pedidos ou rodadas abertos");
+        }
+        crate::log_info!(
+            "teste",
+            "confirmacao e rodada nova: {} aplicadas, {} de outra rodada, {} sem pendente; {} rodadas pendentes e {} sem salto",
+            aplicadas,
+            de_outra,
+            sem_pendente,
+            PENDENTES.load(SeqCst),
+            SEM_SALTO.load(SeqCst)
+        );
+        Ok(())
+    });
+    crate::identidade::esquecer_registrados();
+    r
+}
+
 /// Nenhum caminho fora do gate move o civil, e nenhum pedido de hora
 /// cria autoridade: os tratadores fora de um comando autorizado não acham
 /// principal; o `system.info` não recebe parâmetros nem diz nonce, id ou
@@ -47850,7 +48579,7 @@ fn hora_nenhum_caminho_fora_do_gate() -> Resultado {
     {
         return Err("um tratador de hora agiu fora de um comando autorizado");
     }
-    if crate::hora::confirmar().is_ok() {
+    if crate::hora::confirmar(0).is_ok() || crate::hora::confirmar(u64::MAX).is_ok() {
         return Err("sem salto pendente, a confirmacao fez alguma coisa");
     }
     let depois = civil_agora()?;

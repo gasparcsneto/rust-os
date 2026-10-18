@@ -52,8 +52,8 @@ struct Civil {
     tem_hora: bool,
     /// Antes de quando o RTC não é relido, na régua.
     releitura_ms: u64,
-    /// A rodada que pediu o salto pendente: o registro do `time.confirm`
-    /// diz qual evidência ele aplicou.
+    /// A rodada que pediu o salto pendente: a evidência que o
+    /// `time.confirm` tem de nomear para aplicá-lo.
     pendente_da_rodada: Option<u64>,
 }
 
@@ -178,28 +178,50 @@ pub(super) fn rodada(
     })
 }
 
-/// O salto pendente, aplicado: o que o acordo pediu, levado até agora pela
-/// régua — nunca uma hora de quem confirma. Só o tratador de
-/// `time.confirm` chega aqui. `None` sem salto pendente; com ele, a
-/// mudança e a rodada que o pediu.
-pub(super) fn confirmar() -> Option<(Mudanca, Option<u64>)> {
+/// Por que uma confirmação não aplicou nada.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Recusa {
+    /// Não há salto pendente.
+    SemPendente,
+    /// Há, mas outra rodada o pediu — a de agora, se se sabe qual.
+    OutraRodada(Option<u64>),
+}
+
+/// O salto pendente da rodada `rodada`, aplicado: o que o acordo pediu,
+/// levado até agora pela régua — nunca uma hora de quem confirma. Só o
+/// tratador de `time.confirm` chega aqui.
+///
+/// A rodada é a evidência que quem confirma conferiu, e é conferida com a
+/// trava na mão — a mesma com que uma rodada nova troca o pendente: ou a
+/// confirmação vê o pendente que pediu, ou vê o de outra rodada e não
+/// aplica nada. Um pendente sem rodada conhecida nunca se confirma.
+///
+/// Devolve a mudança e a rodada do pendente aplicado — a evidência que o
+/// registro da execução nomeia.
+pub(super) fn confirmar(rodada: u64) -> Result<(Mudanca, u64), Recusa> {
     com(|c| {
         let local = super::contador::agora_ms();
         let antes = c.relogio.ler(local);
-        let efeito = c.relogio.confirmar(local)?;
+        if antes.pendente_ms.is_none() {
+            return Err(Recusa::SemPendente);
+        }
+        let Some(pendente) = c.pendente_da_rodada.filter(|p| *p == rodada) else {
+            return Err(Recusa::OutraRodada(c.pendente_da_rodada));
+        };
+        let efeito = c.relogio.confirmar(local).ok_or(Recusa::SemPendente)?;
         let depois = c.relogio.ler(local);
         c.tem_hora = true;
-        let rodada = c.pendente_da_rodada.take();
-        Some((
+        c.pendente_da_rodada = None;
+        Ok((
             Mudanca {
                 efeito,
                 antes,
                 depois,
             },
-            rodada,
+            pendente,
         ))
     })
-    .flatten()
+    .unwrap_or(Err(Recusa::SemPendente))
 }
 
 /// O civil agora, com a rodada que pediu o salto pendente, se há um — do

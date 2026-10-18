@@ -4716,10 +4716,14 @@ escolher a hora: pedir ao kernel o pedido do Roughtime para uma fonte do
 registro, e entregar a resposta que chegou — o kernel a confere contra o
 que ele mesmo emitiu. É sensível — nenhum papel a recebe pela inclusão de
 outro — e não é administrativa: o serviço de hora a exerce pelo gate, sem
-prova. `time.confirm` aplica um salto que o quórum já indicou e que ficou
-pendente — acima do teto, ou para trás fora do envelope —; é
+prova. `time.confirm { round }` aplica um salto que o quórum já indicou e
+que ficou pendente — acima do teto, ou para trás fora do envelope —; é
 administrativa: só por `admin.execute`, com a prova de um administrador
-cujo papel a tem. Não recebe hora nenhuma.
+cujo papel a tem. `round` é a rodada que pediu o salto — a que o
+`system.info time` mostra em `pending_round` — e só identifica a evidência
+que o administrador conferiu: não é hora, nem ajuste, nem autoridade, nem
+escolha do relógio. Outra rodada, ou nenhum salto pendente: `CONFLICT`, e
+nada se move. Não recebe hora nenhuma.
 
 | | `time.sync` | `time.confirm` |
 |---|---|---|
@@ -4731,7 +4735,8 @@ cujo papel a tem. Não recebe hora nenhuma.
 
 **Três operações.** `time.request {source}` e `time.sync {id, anexo}` são
 comandos, decididos pelo gate com `time.sync` e gravados como qualquer
-outro; `time.confirm` é operação administrativa, dentro de `admin.execute`.
+outro; `time.confirm {round}` é operação administrativa, dentro de
+`admin.execute`.
 O que cada uma faz depois do gate está
 [mais abaixo](#o-que-cada-operação-faz-depois-do-gate).
 
@@ -4797,8 +4802,10 @@ fora do registro e o registro ausente; o transporte só até as fontes; o
 serviço não sendo o sistema — sem a linha, `DENY_ROLE`; incluindo o
 `sistema`, sem as sensíveis —; pessoa e agente do mesmo papel decidindo o
 mesmo, com e sem `time.sync` delegado, e os não autenticados recusados;
-`time.confirm` sem prova, com a prova de outra coisa, por quem não é
-administrador e por um administrador sem a permissão; a revogação e a
+`time.confirm` sem prova, com a prova de outra coisa ou de outra rodada,
+por quem não é administrador e por um administrador sem a permissão; sem
+a rodada, com uma rodada que não é inteiro sem sinal, com a mesma chave
+duas vezes e com uma hora, sozinha ou ao lado da rodada; a revogação e a
 devolução por `policy.write`; o balde de cada serviço; e nenhum caminho de
 `time.sync` mudando política, registro ou credencial. O que o relógio e o
 serviço acrescentam está
@@ -4924,12 +4931,20 @@ viu, e largaria as rodadas abertas sob a nova.
   marca de divergência, o salto pendente. Um id que não está aberto para
   quem entrega — a resposta sem pedido, o pedido de outro principal, a
   mesma resposta duas vezes — é `INVALID_REQUEST`.
-- **`time.confirm`**, dentro de `admin.execute`, com a prova de um
-  administrador cujo papel a tem: aplica o salto pendente — o meio do
-  acordo que o pediu, levado até agora pela régua — e grava a rodada que o
-  pediu, o civil e o lógico antes e depois. Sem salto pendente, `CONFLICT`;
-  com qualquer campo nos parâmetros, uma hora digitada, `INVALID_ARGUMENT`.
-  Nunca uma hora de quem confirma.
+- **`time.confirm {round}`**, dentro de `admin.execute`, com a prova de um
+  administrador cujo papel a tem: confere que o salto pendente é o da
+  rodada `round`, e só então o aplica — o meio do acordo daquela rodada,
+  levado até agora pela régua — e grava a rodada, o civil e o lógico antes
+  e depois. A conferência e a aplicação são uma coisa só, com a trava do
+  civil — a mesma com que uma rodada nova troca o pendente —: ou a
+  confirmação vê o pendente que nomeou, ou vê o de outra rodada e não
+  aplica nada. Sem salto pendente, ou com o de outra rodada — a que trocou
+  o que o administrador leu —, `CONFLICT`, e nada se move, nem o civil nem
+  o lógico; a decisão e o conflito ficam gravados, com a rodada pedida e a
+  do pendente. Os parâmetros são `{"round": N}` e nada mais: sem a rodada,
+  com uma que não é inteiro sem sinal, com a mesma chave duas vezes ou com
+  qualquer outro campo — uma hora digitada —, `INVALID_ARGUMENT`. Nunca
+  uma hora de quem confirma.
 
 **`system.info`** tem o objeto `time`: o estado, o civil em ms, a
 incerteza, o salto pendente e a rodada que o pediu — a evidência que quem
@@ -4953,7 +4968,8 @@ o serviço como `service`/`hora`/`tempo` —, e o que ela fez depois:
 | `time.sync`, o desfecho da rodada | `civil <antes>><depois> logico <antes>><depois> <estado>><estado>` e as marcas | `r<n> <desfecho>` — a cobertura, as aceitas, o desvio e a incerteza, ou a maior cobertura —, e o efeito | `ALLOW`; `CONFLICT` (pendente, divergente); `ERROR` (sem acordo) |
 | `time.sync`, a rodada descartada | `civil` | `r<n> descartada: <motivo>` | `DENY_POLICY` |
 | `time.sync` sem pedido aberto para quem entrega | `id <n>` | o motivo | `INVALID_ARGUMENT` |
-| a confirmação, `time.confirm` em `admin.execute`, executada | `salto <desvio> r<n> civil <antes>><depois> logico <antes>><depois>` | | `ALLOW`; `CONFLICT` sem pendente |
+| a confirmação, `time.confirm` em `admin.execute`, executada | `salto <desvio> r<n> civil <antes>><depois> logico <antes>><depois>` | | `ALLOW` |
+| a confirmação recusada depois da decisão | | `nenhum salto de hora pendente`, ou `r<pedida> nao e a rodada do salto pendente, r<pendente>` | `CONFLICT` |
 
 Dois registros na última fonte, e não um: o detalhe tem teto de 96 bytes no
 codec, que não muda. Nunca um corpo — o pedido, a resposta e o nonce não
@@ -4986,7 +5002,7 @@ e exige folga de um quarto: no perfil de depuração, 42 048 bytes dos
 ### O que a suíte, a fumaça e a bancada conferem
 
 A suíte tem três servidores de Roughtime dentro do kernel de teste, com
-chaves sorteadas a cada caso, e quinze casos `hora:` além dos oito `tempo:`
+chaves sorteadas a cada caso, e dezoito casos `hora:` além dos oito `tempo:`
 do passo anterior: a régua e os três relógios; uma rodada honesta ponta a
 ponta pelo gate — a primeira sincronização, cada passo gravado como do
 serviço, o `system.info` sem nonce nem resposta —; cada resposta ruim como
@@ -5000,7 +5016,16 @@ ordem da rodada; k ≥ 2 — uma fonte e k − 1 fontes não movem, duas
 coerentes movem —; as fontes divergentes e a interseção vazia; a
 disciplina — o ajuste gradual no teto de 5% e nunca para trás, o salto em
 duas rodadas, o salto acima do teto pendente até a confirmação, o salto
-para trás fora do envelope com o lógico parado no piso —; os estados e a
+para trás fora do envelope com o lógico parado no piso —; a confirmação que
+nomeia a rodada — a corrida do pendente trocado: a rodada A lida no
+`system.info`, a B no lugar dela, a confirmação de A em conflito, gravada
+e sem mover relógio nenhum, como a de uma rodada sem pendente e a de uma
+que não houve; a malformada, recusada antes do civil; e a de B aplicando o
+salto de B, e não o de A —; a confirmação pela cadeia inteira, com o salto
+pendente esperando — sem prova, a prova de outra rodada, o administrador
+sem `time.confirm`, a credencial revogada antes e no meio, a política sem
+`time.confirm` antes e no meio, nada se movendo, e o `policy.write` que
+muda outra coisa sem trocar a evidência —; os estados e a
 recuperação; a resposta atrasada na rede — com o fio da rodada fora do
 rodízio enquanto espera —; a revogação e a política no meio da rodada; o
 ponto de commit; a rodada na pilha de um fio; a concorrência; e nenhum
@@ -5017,15 +5042,23 @@ fazem rodadas ao mesmo tempo sobre as mesmas fontes, cada um com os
 pedidos dele, enquanto outros fios leem o civil e o `system.info time` e o
 NSF lê a auditoria — todas fecham com o acordo das três fontes, o civil
 lido nunca volta, os carimbos da auditoria nunca descem, e no fim não
-sobra pedido nem rodada aberta.
+sobra pedido nem rodada aberta. E a confirmação contra uma rodada nova: um
+fio faz rodadas sem parar, cada uma trocando o pendente pelo dela, enquanto
+o caso lê o `pending_round` e confirma — logo, na corrida, ou depois de
+mais duas rodadas fecharem —; cada confirmação aplica o salto da rodada que
+nomeou, e a resposta e o registro a nomeiam, ou é um conflito gravado, e o
+civil e o lógico não saltam; as atrasadas são sempre conflito de outra
+rodada, e o lógico nunca volta.
 
 A fumaça roda a imagem de produção, sem servidor: a serial faz uma rodada
 inteira pelo canal de verdade — o pedido de 1024 bytes de cada fonte, na
 ordem, a fonte de fora, fora da ordem e com a anterior aberta recusadas, a
 entrega sem resposta — e a rodada fecha sem acordo, com o civil no RTC; o
 operador de uma porta é recusado; o `system.info time` diz o estado, as
-fontes, as rodadas perdidas e a régua, sem pedido nenhum; `time.confirm`
-com a prova do administrador acha `CONFLICT` e recusa a hora digitada; e a
+fontes, as rodadas perdidas e a régua, sem pedido nenhum, e nenhuma rodada
+pendente; `time.confirm {round}` com a prova do administrador e a rodada da
+serial acha `CONFLICT` — nenhum salto pendente — e recusa o pedido sem a
+rodada, a hora digitada e a hora ao lado da rodada; e a
 auditoria tem cada decisão, o desfecho da rodada da serial e o serviço de
 hora pedindo pelo gate como ele mesmo. A bancada de persistência confere o
 lógico através de reboots: com o RTC voltado para trás do piso, o civil é
@@ -5090,14 +5123,12 @@ nenhum entre as rodadas.
   vez os prazos das mensagens; depois de um para trás, eles param no piso
   até o civil passar. Regras sobre o estado do relógio são dos incrementos
   dos consumidores.
-- **O que a confirmação confirma.** `time.confirm` aplica o salto pendente
-  de agora, e não recebe parâmetro nenhum — nem o número da rodada. Se uma
-  rodada nova trocar o pendente entre a leitura do `system.info` e a
-  confirmação, o administrador confirma uma evidência que não leu; o
-  registro do `time.confirm` diz qual rodada foi aplicada, mas depois.
-  Ligar a confirmação à rodada seria um parâmetro novo numa operação que o
-  passo anterior fechou sem nenhum: é decisão de desenho, e está no
-  relatório.
+- **O número da rodada vale no boot.** As rodadas são numeradas a partir
+  de 1 a cada boot, e o salto pendente não sobrevive a um reboot. Um
+  número lido antes de um reboot pode coincidir com o de um pendente novo
+  depois dele: confirmar com ele é confirmar o pendente de agora, que o
+  administrador não leu. Quem confirma lê o `pending_round` no boot em que
+  confirma — o desafio de `admin.execute` também é do boot e da sessão.
 - **A folga da pilha.** No perfil de depuração, a rodada inteira usa
   68% (x86) a 70% (ARM) da pilha de um fio; no de produção, bem menos. O
   caso da suíte exige folga de um quarto. O que a pilha de um fio tem de
@@ -5255,6 +5286,26 @@ reprova na primeira volta, nas duas arquiteturas.
 | a mesma, sem nomear a função | a fumaça do ARM: a sonda da tela — cada `video.sample` de novo duas vezes mais lento |
 | a espera da rede descansa | as invariantes |
 | a mesma, sem nomear a função | `hora: a resposta atrasada na rede` — a rodada esperou sem sair do rodízio |
+
+A finalização — `time.confirm { round }` — teve dez mutações próprias, cada
+uma contra os casos `tempo:` e `hora:` da suíte, no x86: as cinco do pedido
+— tirar a comparação da rodada, aceitar qualquer rodada, ignorar a rodada,
+confirmar o pendente mais recente qualquer que seja a rodada e confirmar
+sem pendente — e cinco no contrato e na evidência. **Todas reprovadas**, e
+as do pedido por mais de um caso.
+
+| Mutação | Reprovada por |
+|---|---|
+| sem a comparação da rodada | `hora: a confirmacao nomeia a rodada` — a confirmação de A, com o pendente de B, não foi um conflito; `hora: confirmacao e rodada nova ao mesmo tempo` — uma rodada que já não era a do pendente foi confirmada |
+| qualquer rodada aceita: a de outra, trocada pela do pendente | os mesmos dois |
+| a rodada ignorada: a do pendente no lugar da pedida | os mesmos dois |
+| o pendente mais recente, qualquer que seja a rodada (`>=`) | os mesmos dois |
+| a confirmação sem pendente | `tempo: confirmar so com prova`, `hora: a disciplina no civil`, `hora: a confirmacao nomeia a rodada` e `hora: nenhum caminho fora do gate` |
+| outros campos ao lado da rodada | `tempo: confirmar so com prova`; `hora: a confirmacao nomeia a rodada` — com o pendente esperando, o pedido que não é só a rodada passou |
+| sem a rodada, a do pendente | os mesmos dois |
+| a rodada como texto | os mesmos dois |
+| o conflito do `time.confirm` sem registro | `tempo: confirmar so com prova`, `hora: a confirmacao nomeia a rodada` — a decisão sem o conflito depois dela —, `hora: confirmacao e rodada nova ao mesmo tempo` |
+| a rodada nova troca o salto e deixa o número da anterior | `hora: a confirmacao nomeia a rodada` — B não trocou o pendente pelo dela; `hora: confirmacao e rodada nova ao mesmo tempo` |
 
 ## O código de fora da imagem
 

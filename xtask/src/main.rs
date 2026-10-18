@@ -9917,9 +9917,10 @@ fn esperar_vagas_tcp_livres(
 /// - o `system.info time` diz o estado, o civil e o lógico, as fontes e as
 ///   rodadas — a da serial e as do serviço de hora, que fala só pelo gate —,
 ///   e nenhum pedido;
-/// - `time.confirm` não é comando; com a prova do administrador é
-///   decidido e não acha salto pendente — `CONFLICT` —, e uma hora digitada
-///   é recusada, e não ignorada;
+/// - `time.confirm { round }` não é comando; com a prova do administrador
+///   e a rodada da serial é decidido e não acha salto pendente —
+///   `CONFLICT` —, e o que não é só a rodada — nada, uma hora, a hora ao
+///   lado da rodada — é recusado, e não ignorado;
 /// - cada decisão vai à auditoria com o titular e o papel — as do serviço
 ///   de hora também, como `service` no papel `tempo` —, com o desfecho da
 ///   rodada; e a política é a mesma no fim.
@@ -10058,27 +10059,48 @@ fn sob_o_tempo(
         "  [tempo] ok  system.info time: rtc, 3 fontes com quorum 2, rodadas perdidas contadas, regua {regua}; nenhum pedido"
     );
 
-    let r = pedir("time.confirm", "{}")?;
+    // `time.confirm { round }`: a rodada é a evidência que se confirma, a
+    // do `pending_round` — e aqui não há salto pendente nenhum.
+    if !tempo.contains(r#""pending_round":null"#) {
+        return Err(format!(
+            "tempo: sem salto pendente, o system.info diz uma rodada pendente\n  {tempo}"
+        ));
+    }
+    let da_rodada = format!(r#"{{"round":{rodada}}}"#);
+    let r = pedir("time.confirm", &da_rodada)?;
     if r.contains(r#""result""#) {
         return Err(format!("tempo: time.confirm respondeu como comando\n  {r}"));
     }
     let desafio = pedir("admin.challenge", "{}")?;
-    let pedido = pedido_administrativo(&chaves, 0, &desafio, "time.confirm", "{}", "{}")?;
+    let pedido =
+        pedido_administrativo(&chaves, 0, &desafio, "time.confirm", &da_rodada, &da_rodada)?;
     let r = pedir("admin.execute", &pedido)?;
-    if !r.contains(r#""executed":false"#) || !r.contains(r#""code":"CONFLICT""#) {
+    if !r.contains(r#""executed":false"#)
+        || !r.contains(r#""code":"CONFLICT""#)
+        || !r.contains("nenhum salto de hora pendente")
+    {
         return Err(format!(
             "tempo: sem salto pendente, time.confirm fez alguma coisa\n  {r}"
         ));
     }
-    let hora = r#"{"unix_s":1760000000}"#;
-    let desafio = pedir("admin.challenge", "{}")?;
-    let pedido = pedido_administrativo(&chaves, 0, &desafio, "time.confirm", hora, hora)?;
-    let r = pedir("admin.execute", &pedido)?;
-    if !r.contains(r#""code":"INVALID_ARGUMENT""#) {
-        return Err(format!("tempo: uma hora digitada nao foi recusada\n  {r}"));
+    // O que não é só a rodada — nada, uma hora, a hora ao lado da rodada —
+    // é recusado, e não ignorado.
+    for params in [
+        "{}".to_string(),
+        r#"{"unix_s":1760000000}"#.to_string(),
+        format!(r#"{{"round":{rodada},"unix_s":1760000000}}"#),
+    ] {
+        let desafio = pedir("admin.challenge", "{}")?;
+        let pedido = pedido_administrativo(&chaves, 0, &desafio, "time.confirm", &params, &params)?;
+        let r = pedir("admin.execute", &pedido)?;
+        if !r.contains(r#""executed":false"#) || !r.contains(r#""code":"INVALID_ARGUMENT""#) {
+            return Err(format!(
+                "tempo: um time.confirm que nao e so a rodada nao foi recusado: {params}\n  {r}"
+            ));
+        }
     }
     println!(
-        "  [tempo] ok  time.confirm nao e comando; com a prova do administrador, CONFLICT: nenhum salto pendente; uma hora digitada, INVALID_ARGUMENT"
+        "  [tempo] ok  time.confirm {{ round }} nao e comando; com a prova do administrador e a rodada r{rodada}, CONFLICT: nenhum salto pendente; sem a rodada, uma hora, a hora ao lado da rodada: INVALID_ARGUMENT"
     );
 
     // Cada decisão, gravada como foi — as desta sonda e as do serviço de
