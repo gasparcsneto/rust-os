@@ -5119,7 +5119,7 @@ fala com o kernel: responde a quem pergunta.
 | As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o NSF lê as seis respostas aceitas, sem incidente |
 | O lote | árvores de 2, 8 e 64 folhas | as três respostas aceitas pelo caminho de Merkle, com o `INDX` 1, 7 e 63 |
 | Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; a marca sai quando ela volta |
-| O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, e o acordo é das outras duas |
+| O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, nenhum veredito a mais quando ela chega, e o acordo é das outras duas |
 | O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado` |
 | O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador não vira contenção; uns dois minutos depois o lógico volta a andar com o civil, e nenhum carimbo da auditoria desce |
 | Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` |
@@ -5130,7 +5130,7 @@ fala com o kernel: responde a quem pergunta.
 | O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
 | A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
 | A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido` |
-| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, e o NSF vê a volta |
+| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, e o NSF vê a volta |
 
 Cada cenário também confere, a cada leitura, que o lógico nunca volta. No
 fim, a bancada imprime o que mediu: a primeira sincronização depois do
@@ -5188,6 +5188,24 @@ fio, 18–19 KiB da pilha em release e 41–42 KiB na depuração, dos 60 KiB.
 E o fio do serviço não custa nada parado: bloqueado, não ocupa núcleo
 nenhum entre as rodadas.
 
+E pela rede de verdade, na bancada de tempo — release, emulado; as
+bancadas inteiras deste passo, uma arquitetura de cada vez, numa máquina
+de quatro núcleos, e as da CI. A primeira sincronização chega de 80 a
+300 ms depois do endereço do DHCP, na primeira rodada do serviço; a
+exceção está logo abaixo. Uma rodada das fontes honestas leva de 60 a
+100 ms no relógio do kernel, mais da metade esperando as fontes; o kernel
+gasta nela de 20 a 42 ms, em média — as dezoito operações pelo gate, seis
+por fonte, com a auditoria delas, que vai ao journal, e as três
+conferências —, e a primeira do boot é a mais cara. A rodada com as três
+caladas, sem conferência nenhuma, gasta de 6 a 11 ms. A conferência de uma
+resposta leva de 3,2 a 4,1 ms em média, e a maior, até 11 ms; no
+hospedeiro, nativo, de 107 a 123 µs, e de 9 a 10 µs quando a delegação é
+recusada antes das contas da curva: as duas Ed25519 são quase tudo, e o
+emulador as faz umas trinta vezes mais devagar. O RTT de uma resposta
+aceita é de 18 a 20 ms na mediana — dos quais de 9 a 11 ms são do
+servidor, que assina num `xtask` de depuração. Uma rodada grava 25
+registros do serviço na auditoria.
+
 ### O que fica de fora
 
 - **Um servidor só, do mesmo autor.** O servidor da bancada é escrito à
@@ -5198,6 +5216,13 @@ nenhum entre as rodadas.
   vetor da RFC 10049, que os testes do servidor e os do `hora` conferem.
   Nenhum servidor de outro autor respondeu à máquina: os públicos a bancada
   não alcança, e nenhum de terceiros roda aqui.
+- **A primeira rodada pode sair antes do endereço.** O serviço começa
+  logo depois da pilha de rede, e nada espera o DHCP. Em duas execuções da
+  CI do ARM, uma e três máquinas de seis sincronizaram na segunda rodada,
+  até 4 s depois do endereço, e não na primeira, uns 0,1 s depois. Nada
+  errado é aplicado — a rodada sem acordo fica registrada, e a seguinte
+  vem 2 s depois, como o desenho manda até sincronizar —; esperar o
+  endereço antes da primeira rodada fica como proposta.
 - **A fumaça continua sem servidor.** A fumaça e a bancada de persistência
   rodam a imagem de produção sem fontes: o serviço faz as rodadas, nenhuma
   resposta chega, e o civil fica no RTC. Os servidores da suíte moram no
