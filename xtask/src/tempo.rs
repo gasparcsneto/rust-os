@@ -78,6 +78,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: uma_fonte_divergente,
     },
     Cenario {
+        nome: "uma fonte forjada fica de fora do acordo; o NSF registra a assinatura, e nao corta a fonte",
+        rodar: uma_fonte_forjada,
+    },
+    Cenario {
         nome: "o atraso alarga a incerteza, e a resposta depois do prazo e perdida",
         rodar: o_atraso,
     },
@@ -1527,6 +1531,44 @@ fn esperar_o_incidente(m: &mut Ligada, regra: &str, prazo: Duration) -> Result<S
     }
 }
 
+/// Espera o NSF abrir o incidente do relógio com a regra de tempo `regra`,
+/// e confere que ele não planejou nada por ela: as regras de tempo só
+/// registram — a do salto pendente recomenda a uma pessoa, e se confere à
+/// parte (ver [`os_saltos_pendentes`]). O principal é o relógio, e não o
+/// serviço de hora que o move.
+fn so_registrado(m: &mut Ligada, regra: &str) -> Result<String, String> {
+    let incidente = esperar_o_incidente(m, regra, Duration::from_secs(20))?;
+    if !incidente.contains(r#""principal":"clock""#) || !incidente.contains(r#""actions":[]"#) {
+        return Err(format!(
+            "o incidente de {regra} nao e so o registro do relogio: {incidente}"
+        ));
+    }
+    Ok(incidente)
+}
+
+/// Espera o NSF observar a regra `regra` — uma detecção de confiança baixa,
+/// que não abre incidente: o nível 0 — e devolve a observação.
+fn esperar_a_observacao(m: &mut Ligada, regra: &str, prazo: Duration) -> Result<String, String> {
+    let limite = Instant::now() + prazo;
+    let marca = format!(r#""{regra}""#);
+    loop {
+        let lista = m.pedir("security.incidents", "{}")?;
+        let observada = apos(&lista, r#""observations":["#).and_then(|o| {
+            o.split(r#"{"rule":"#)
+                .skip(1)
+                .find(|d| d.starts_with(&marca))
+                .map(String::from)
+        });
+        if let Some(d) = observada {
+            return Ok(d);
+        }
+        if Instant::now() > limite {
+            return Err(format!("o NSF nao observou `{regra}`\n  {lista}"));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// Espera a rodada seguinte à `depois_de`-ésima fechar.
 fn proxima(
     m: &mut Ligada,
@@ -1915,10 +1957,28 @@ fn o_relogio_atrasado(b: &mut Bancada) -> Result<String, String> {
             "o salto nao levou o estado de rtc a sincronizado: {s:?}"
         ));
     }
+    // O NSF observa o salto, com a gravidade pelo tamanho — de uma hora em
+    // diante, alta —; a confiança é baixa, porque é o relógio sendo
+    // corrigido: não abre incidente, e não pede nada.
+    let gravidade = if s.desvio_ms.unwrap_or(0).unsigned_abs() >= 3_600_000 {
+        "high"
+    } else {
+        "medium"
+    };
+    let salto_visto = esperar_a_observacao(&mut m, "clock-jump", Duration::from_secs(20))?;
+    if !salto_visto.contains(&format!(r#""severity":"{gravidade}""#))
+        || !salto_visto.contains(r#""principal":"clock""#)
+        || !salto_visto.contains("corrigiu o RTC")
+        || pedidos_do_nsf(&mut m)? != 0
+    {
+        return Err(format!(
+            "o NSF nao observou so o salto de uma hora do relogio, {gravidade}: {salto_visto}"
+        ));
+    }
     b.medir(&mut m, false)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "antes, o civil a {:+} s (rtc); r{} candidato d{:+} ms, r{} salto d{:+} ms; depois, o civil a {:+} ms e o logico a {:+} s do hospedeiro",
+        "antes, o civil a {:+} s (rtc); r{} candidato d{:+} ms, r{} salto d{:+} ms; depois, o civil a {:+} ms e o logico a {:+} s do hospedeiro; o NSF observou o clock-jump, {gravidade}, sem incidente nem pedido",
         antes.desvio_ms() / 1000,
         rodadas[candidato].rodada,
         rodadas[candidato].desvio_ms.unwrap_or(0),
@@ -2060,6 +2120,82 @@ fn uma_fonte_divergente(b: &mut Bancada) -> Result<String, String> {
         h.desvio_ms(),
         nsf_antes.marcas,
         v.hora,
+        u2.numero
+    ))
+}
+
+/// Uma fonte forjada: a segunda responde com a assinatura de uma chave que
+/// a delegação dela não nomeia — o que mandaria quem se passa por ela. O
+/// kernel recusa a resposta pela assinatura, a fonte fica sem resposta na
+/// rodada, e o civil segue o acordo das outras duas. O NSF registra a
+/// assinatura recusada e não faz nada com a fonte: quem forja respostas não
+/// escolhe o que ele corta. Quando ela volta a assinar com a delegada, entra
+/// no acordo de novo.
+fn uma_fonte_forjada(b: &mut Bancada) -> Result<String, String> {
+    let fonte = chaves::FONTES_DE_HORA[1].0;
+    b.servidor.modo(
+        1,
+        Modo {
+            forjada: true,
+            ..Modo::HONESTA
+        },
+    );
+    let mut m = b.subir(None)?;
+    let mut nada_volta = NadaVolta::novo();
+    let h = sincronizar(&mut m, &mut nada_volta)?;
+    let u = h.ultima.clone().unwrap_or_default();
+    if !h.hora_dentro_da_incerteza()
+        || u.cobertura != Some(2)
+        || u.aceitas != 2
+        || u.vereditos.iter().any(|(f, v)| f == fonte && v == "aceita")
+    {
+        return Err(format!(
+            "com a fonte forjada, o civil nao seguiu so as outras duas: {h}"
+        ));
+    }
+    // A recusa, na auditoria: a entrega da forjada, pela assinatura da
+    // resposta, com o código da credencial que não fecha.
+    let (registros, _) = auditoria(&mut m, 0)?;
+    let recusada = registros.iter().find(|r| {
+        do_servico(r)
+            && campo(r, "method") == "time.sync"
+            && campo(r, "resource").starts_with(&format!("{fonte} "))
+            && detalhe(r).starts_with("recusada assinatura_da_resposta")
+    });
+    if !recusada.is_some_and(|r| campo(r, "code") == "DENY_CREDENTIAL") {
+        return Err(format!(
+            "a auditoria nao tem a resposta forjada recusada pela assinatura: {recusada:?}; {}",
+            amostra_de_time_sync(&registros)
+        ));
+    }
+    // O NSF registra a assinatura recusada, com a fonte, e não faz nada com
+    // ela: nenhuma ação, nenhum pedido ao gate.
+    let incidente = so_registrado(&mut m, "time-source-bad-signature")?;
+    let pedidos = pedidos_do_nsf(&mut m)?;
+    if !incidente.contains(fonte) || pedidos != 0 {
+        return Err(format!(
+            "o NSF nao registrou so a assinatura de {fonte}: {pedidos} pedido(s); o incidente: {incidente}"
+        ));
+    }
+    b.servidor.modo(1, Modo::HONESTA);
+    let depois = proxima(
+        &mut m,
+        &mut nada_volta,
+        h.fechadas,
+        SINCRONIZADO + Duration::from_secs(30),
+    )?;
+    let u2 = depois.ultima.clone().unwrap_or_default();
+    if u2.cobertura != Some(3) || u2.aceitas != 3 || depois.desvio_ms().abs() > 2_000 {
+        return Err(format!(
+            "a fonte voltou a assinar com a delegada e nao entrou no acordo: {depois}"
+        ));
+    }
+    b.medir(&mut m, true)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "r{} acordo 2/2, a resposta de {fonte} recusada pela assinatura (DENY_CREDENTIAL), o civil a {:+} ms; o NSF abriu o incidente time-source-bad-signature, sem acao nem pedido; r{} acordo 3/3 com ela de volta",
+        u.numero,
+        h.desvio_ms(),
         u2.numero
     ))
 }
@@ -2509,6 +2645,9 @@ fn o_relogio_adiantado_um_dia(b: &mut Bancada) -> Result<String, String> {
             "o NSF viu o logico parado e nao suspendeu a contencao por taxa: {t}"
         ));
     }
+    // A parada é uma regra de tempo: o incidente do relógio, que só
+    // registra — o que o NSF contém, parado, vem de outra regra, abaixo.
+    so_registrado(&mut m, "logical-clock-stopped")?;
     // A hora é autenticada, e o lógico está parado um dia à frente dela: a
     // validade é a do civil, que anda — o `Max-Age` vence nele; pelo lógico
     // parado, não venceria.
@@ -2540,7 +2679,7 @@ fn o_relogio_adiantado_um_dia(b: &mut Bancada) -> Result<String, String> {
     b.medir(&mut m, false)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "o civil voltou um dia em duas rodadas, sincronizado a {:+} ms; o logico ficou {} s a frente, parado; o NSF viu {:?}, a contencao por taxa suspensa; a validade `{}`, pelo civil; parado, {contida}",
+        "o civil voltou um dia em duas rodadas, sincronizado a {:+} ms; o logico ficou {} s a frente, parado; o NSF viu {:?}, abriu o incidente logical-clock-stopped, sem acao, e suspendeu a contencao por taxa; a validade `{}`, pelo civil; parado, {contida}",
         h.desvio_ms(),
         h.logico_desvio_s(),
         n.marcas,
@@ -2998,10 +3137,17 @@ fn as_fontes_pulam_dez_minutos(b: &mut Bancada) -> Result<String, String> {
             "a auditoria nao tem o candidato e o salto alem do envelope que o confirma: {rodadas:?}"
         ));
     };
+    so_registrado(&mut m, "clock-jump-beyond-envelope")?;
+    let pedidos = pedidos_do_nsf(&mut m)?;
+    if pedidos != 0 {
+        return Err(format!(
+            "o NSF pediu {pedidos} acao(oes) pelo salto alem do envelope"
+        ));
+    }
     b.medir(&mut m, true)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "r{} candidato d{:+} ms, r{} salto_alem; o civil a {:+} ms e o logico a {:+} s do hospedeiro",
+        "r{} candidato d{:+} ms, r{} salto_alem; o civil a {:+} ms e o logico a {:+} s do hospedeiro; o NSF abriu o incidente clock-jump-beyond-envelope, sem acao nem pedido",
         rodadas[c].rodada,
         rodadas[c].desvio_ms.unwrap_or(0),
         rodadas[s].rodada,
@@ -3669,6 +3815,11 @@ fn a_hora_vence(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     let n = nsf_em(&mut m, "vencido", SINCRONIZADO + Duration::from_secs(40))?;
+    so_registrado(&mut m, "time-unauthenticated")?;
+    let pedidos = pedidos_do_nsf(&mut m)?;
+    if pedidos != 0 {
+        return Err(format!("o NSF pediu {pedidos} acao(oes) pela hora vencida"));
+    }
     // A volta: as fontes respondem de novo, com raio de 1 s. O acordo traz a
     // incerteza abaixo do teto — `sincronizado` —, e a validade volta a ser
     // a do civil, autenticado.
@@ -3701,7 +3852,7 @@ fn a_hora_vence(b: &mut Bancada) -> Result<String, String> {
     b.medir(&mut m, false)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "o salto trouxe u {u} ms; caladas as fontes, a hora venceu {} s depois com u {} ms (deriva {deriva} ppm); o logico seguiu o civil; a validade `{}`, pelo logico; o NSF viu {:?}; as fontes voltaram: sincronizado com u {} ms, a validade `{}`, pelo civil, e o NSF viu {:?}",
+        "o salto trouxe u {u} ms; caladas as fontes, a hora venceu {} s depois com u {} ms (deriva {deriva} ppm); o logico seguiu o civil; a validade `{}`, pelo logico; o NSF viu {:?} e abriu o incidente time-unauthenticated, sem acao nem pedido; as fontes voltaram: sincronizado com u {} ms, a validade `{}`, pelo civil, e o NSF viu {:?}",
         vencido.desde(&h).as_secs(),
         vencido.incerteza_ms.unwrap_or(0),
         v.hora,

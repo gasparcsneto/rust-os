@@ -34,7 +34,8 @@
 //!
 //! Cada fonte responde segundo um [`Modo`], que o cenário troca com a
 //! máquina rodando: o carimbo deslocado da hora do hospedeiro, o raio, o
-//! atraso da resposta, pedidos descartados, e a árvore de um lote.
+//! atraso da resposta, pedidos descartados, a árvore de um lote, e a
+//! assinatura de uma chave que a delegação não nomeia.
 //!
 //! # O diário
 //!
@@ -119,6 +120,10 @@ pub(crate) struct Modo {
     /// As folhas da árvore da resposta — o pedido e outras sorteadas —, numa
     /// potência de dois: 1 é o pedido sozinho, sem caminho.
     pub lote: u32,
+    /// A resposta assinada por uma chave que a delegação não nomeia: o que
+    /// mandaria quem se passa pela fonte, ou uma fonte com a chave trocada.
+    /// O resto é o de uma resposta honesta.
+    pub forjada: bool,
 }
 
 impl Modo {
@@ -130,6 +135,7 @@ impl Modo {
         atraso_ms: 0,
         descartar_um_a_cada: 0,
         lote: 1,
+        forjada: false,
     };
 
     /// A fonte calada: recebe e não responde.
@@ -444,7 +450,16 @@ impl Fonte {
             (etiqueta::VERS, VERSAO.to_le_bytes().to_vec()),
             (etiqueta::ROOT, raiz_da_arvore.to_vec()),
         ]);
-        let assinatura = self.delegada.sign(&[CONTEXTO_DA_RESPOSTA, &srep].concat());
+        // A forjada assina com uma chave sorteada agora: a delegação do `CERT`
+        // nomeia outra.
+        let forjadora;
+        let assinante = if modo.forjada {
+            forjadora = SigningKey::from_bytes(&sorteados().unwrap_or([0x5b; 32]));
+            &forjadora
+        } else {
+            &self.delegada
+        };
+        let assinatura = assinante.sign(&[CONTEXTO_DA_RESPOSTA, &srep].concat());
         let topo = mensagem(vec![
             (etiqueta::SIG, assinatura.to_bytes().to_vec()),
             (etiqueta::NONC, nonce.to_vec()),
@@ -635,6 +650,32 @@ mod testes {
         .expect("a resposta daqui fecha no leitor do kernel");
         assert_eq!((prova.midp, prova.radi), (1_791_158_400, 7));
         assert_eq!(prova.delegada, f.delegada.verifying_key().to_bytes());
+    }
+
+    /// A forjada é a resposta honesta assinada por outra chave: o leitor do
+    /// kernel a recusa pela assinatura da resposta, e não por outra coisa.
+    #[test]
+    fn a_forjada_e_recusada_pela_assinatura_da_resposta() {
+        let f = fonte();
+        let nonce = [0x44; 32];
+        let p = pedido_para(&f.raiz, &nonce);
+        let modo = Modo {
+            forjada: true,
+            ..Modo::HONESTA
+        };
+        let (r, _) = f.responder(p.bytes(), &nonce, 1_791_158_400, &modo);
+        let esperado = hora::resposta::Esperado {
+            nonce: &nonce,
+            folha: p.folha(),
+            chave_longa: &f.raiz.verifying_key().to_bytes(),
+            teto_do_raio: 10,
+        };
+        assert_eq!(
+            hora::resposta::conferir(&r, &esperado),
+            Err(hora::resposta::Recusa::AssinaturaDaResposta)
+        );
+        let (honesta, _) = f.responder(p.bytes(), &nonce, 1_791_158_400, &Modo::HONESTA);
+        assert!(hora::resposta::conferir(&honesta, &esperado).is_ok());
     }
 
     /// Num lote, o pedido vai na última folha: o `INDX` com todos os bits do
