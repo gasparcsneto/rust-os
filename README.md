@@ -608,6 +608,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── compressao.rs o HTTP comprimido da bancada, claro e cifrado: decodificado no processo, negociado, o estragado e a bomba com o código deles
         ├── cookies.rs    a sessão da bancada no pote do processo, clara e cifrada: o isolamento, os atributos, a validade, os tetos, e a recusa que é do gate
         ├── correntes.rs  o HTTP/2 da bancada, h2c e pelo ALPN: correntes ao mesmo tempo numa conexão, o erro da corrente e o da conexão, e a recusa que é do gate
+        ├── validade.rs   diz com que hora o sistema confere validades, e o que ela deu: um certificado válido e um vencido, e os cookies com `Expires` e `Max-Age`
         ├── carga.rs      quatro conexões com o eco ao mesmo tempo, 256 KiB de ida e volta em cada, cada uma com os bytes dela
         ├── insistente.rs passa dados pela conexão aberta, e insiste, no passo que a suíte dita: a revogação, a contenção e o firewall no meio
         ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate
@@ -2438,10 +2439,14 @@ usa, cada coisa pelo gate:
   kernel — a única fonte de acaso de um programa, e uma permissão do papel
   (o operador, o administrador e o sistema a têm; o observador e o tecido
   de segurança, não). Sem ela, nenhum byte do TLS sai;
-- o **relógio**: o tempo lógico do `system.info`, o relógio civil com o
-  piso do journal, que nunca volta — um RTC atrasado de propósito não
-  ressuscita um certificado vencido (ver [O tempo](#o-tempo)). Sem
-  relógio, a conexão é recusada, e não aceita sem conferir a validade;
+- a **hora** da validade: a do objeto `time` do `system.info`, por uma
+  regra só, a de `protocolo::usuario::hora` — o civil quando a hora é
+  autenticada (`sincronizado`, `holdover`), o tempo lógico quando não é
+  (`rtc`, `vencido`) —, e nunca o RTC cru: um RTC atrasado de propósito
+  não ressuscita um certificado vencido, e o lógico parado à frente da
+  hora autenticada não vence um que vale (ver [Os consumidores da
+  hora](#os-consumidores-da-hora)). Sem hora, a conexão é recusada, e
+  não aceita sem conferir a validade;
 - as **âncoras**: um arquivo PEM lido por `fs.read`;
 - o **transporte**: a conexão do `net.connect`, com cada `net.send` e cada
   `net.recv` decididos de novo e esperando o evento da pilha, sem girar.
@@ -3402,12 +3407,15 @@ passa tira primeiro os vencidos, depois o usado há mais tempo do domínio
 que passou, depois o usado há mais tempo de todos. O cabeçalho vai do
 caminho mais longo ao mais curto, e entre os iguais, do mais antigo.
 
-**O relógio.** A validade se confere no relógio do sistema, o mesmo do
-TLS: o `system.info`, pelo gate, lido uma vez por troca e só quando um
-cookie com validade está em jogo — algum que iria no pedido, ou algum
-`Set-Cookie` da resposta. Sem relógio — sem RTC, num programa cujo
-manifesto não declara `system.read`, ou com a leitura recusada pelo gate
-—, o que já tem validade no pote não vai, porque não há como saber se
+**O relógio.** A validade se confere na hora do TLS, pela mesma regra —
+o civil autenticado, ou o tempo lógico sem ele, e nunca o RTC cru (ver
+[Os consumidores da hora](#os-consumidores-da-hora)) —: o `system.info`,
+pelo gate, lido uma vez por troca e só quando um cookie com validade está
+em jogo — algum que iria no pedido, ou algum `Set-Cookie` da resposta. A
+hora confere a validade e mais nada: o cookie não é identidade,
+credencial, autoridade nem permissão. Sem relógio — sem RTC, num programa
+cujo manifesto não declara `system.read`, ou com a leitura recusada pelo
+gate —, o que já tem validade no pote não vai, porque não há como saber se
 venceu, e a resposta diz quantos ficaram (`retidos`); o que chega com
 validade fica de sessão — dura o pote, isto é, no máximo o processo —, e
 o `Max-Age=0` apaga do mesmo jeito.
@@ -5008,7 +5016,7 @@ e exige folga de um quarto: no perfil de depuração, 42 048 bytes dos
 ### O que a suíte, a fumaça e a bancada conferem
 
 A suíte tem três servidores de Roughtime dentro do kernel de teste, com
-chaves sorteadas a cada caso, e dezoito casos `hora:` além dos oito `tempo:`
+chaves sorteadas a cada caso, e vinte casos `hora:` além dos oito `tempo:`
 do passo anterior: a régua e os três relógios; uma rodada honesta ponta a
 ponta pelo gate — a primeira sincronização, cada passo gravado como do
 serviço, o `system.info` sem nonce nem resposta —; cada resposta ruim como
@@ -5054,7 +5062,10 @@ o caso lê o `pending_round` e confirma — logo, na corrida, ou depois de
 mais duas rodadas fecharem —; cada confirmação aplica o salto da rodada que
 nomeou, e a resposta e o registro a nomeiam, ou é um conflito gravado, e o
 civil e o lógico não saltam; as atrasadas são sempre conflito de outra
-rodada, e o lógico nunca volta.
+rodada, e o lógico nunca volta. E os consumidores (ver [Os consumidores
+da hora](#os-consumidores-da-hora)): o `system.info time` lido pela regra
+dos programas em cada estado, e três programas `validade` conferindo pelo
+civil enquanto rodadas e o NSF correm ao lado.
 
 A fumaça roda a imagem de produção, sem servidor: a serial faz uma rodada
 inteira pelo canal de verdade — o pedido de 1024 bytes de cada fonte, na
@@ -5066,8 +5077,9 @@ pendente; `time.confirm {round}` com a prova do administrador e a rodada da
 serial acha `CONFLICT` — nenhum salto pendente — e recusa o pedido sem a
 rodada, a hora digitada e a hora ao lado da rodada; e a
 auditoria tem cada decisão, o desfecho da rodada da serial e o serviço de
-hora pedindo pelo gate como ele mesmo. A bancada de persistência confere o
-lógico através de reboots: com o RTC voltado para trás do piso, o civil é
+hora pedindo pelo gate como ele mesmo. O `cifrado` diz que conferiu o TLS
+pela hora `rtc`, não autenticada — a do tempo lógico. A bancada de
+persistência confere o lógico através de reboots: com o RTC voltado para trás do piso, o civil é
 o RTC e o lógico fica no piso, `adiantado`; com o RTC adiante, o lógico
 anda com ele.
 
@@ -5118,26 +5130,30 @@ fala com o kernel: responde a quem pergunta.
 |---|---|---|
 | As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o NSF lê as seis respostas aceitas, sem incidente |
 | O lote | árvores de 2, 8 e 64 folhas | as três respostas aceitas pelo caminho de Merkle, com o `INDX` 1, 7 e 63 |
-| Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; a marca sai quando ela volta |
+| Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; o programa `validade` confere pelo civil, autenticado, e diz a marca; a marca sai quando ela volta |
 | O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, nenhum veredito a mais quando ela chega, e o acordo é das outras duas |
 | O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado` |
-| O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador não vira contenção; uns dois minutos depois o lógico volta a andar com o civil, e nenhum carimbo da auditoria desce |
+| O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador vira detecção e incidente, sem contenção; a saída do operador depois dela fica na recomendação, com o motivo — o lógico parado —, e o NSF não pede nada; uns dois minutos depois o lógico volta a andar com o civil, o NSF diz a contenção por taxa ativa de novo, e a saída para outro destino continua recomendação, porque a janela que a sustenta foi contada parada; nenhum carimbo da auditoria desce |
 | Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` |
-| O piso de outro boot | um boot com o RTC uma hora à frente; o seguinte na hora | o civil do segundo boot sincroniza, e o lógico fica no piso do primeiro, parado |
+| O piso de outro boot | um boot com o RTC uma hora à frente; o seguinte na hora | o civil do segundo boot sincroniza, e o lógico fica no piso do primeiro, parado; a validade é a do civil, autenticado, e não a do piso: o `Max-Age` vence com o civil andando |
+| O RTC além dos certificados | o RTC em 2041, depois de `bancada.duke` vencer; as fontes caladas, depois honestas | sem hora autenticada, a validade é a do lógico, em 2041: os dois certificados `TLS_EXPIRED`, o `Expires` de 2023 vencido, o `Max-Age` vencendo; sincronizado, o civil volta quinze anos e o lógico fica parado em 2041, `adiantado`: a validade é a do civil — `bancada.duke` aceito, `vencido.duke` ainda vencido —, e o NSF diz a contenção por taxa suspensa |
+| O RTC atrás do piso | um boot na hora, sem fontes, deixa o piso; o seguinte sobe com o RTC em 2020, dentro da validade de `vencido.duke`, e sem fontes | o civil é o RTC, não autenticado, e a validade é a do piso: `bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, o `Expires` de 2023 vencido — pelo RTC cru, os dois voltariam a valer —; parado, o lógico não vence o `Max-Age`; o NSF vê o lógico parado nas rodadas perdidas |
 | Dez minutos | as três pulam dez minutos à frente | o candidato e o salto em rodadas seguidas, além do envelope; o lógico salta junto |
-| Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, e a com a rodada dele aplica o salto |
+| Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente — a validade segue o civil de agora, autenticado, e não o salto; o NSF recomenda o `time.confirm` da rodada dele —; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, e a com a rodada dele aplica o salto |
 | A perda e a volta | a terceira calada desde o boot; depois a segunda; depois a primeira; e as três de volta, cinco segundos à frente | acordo 2/2; sem quórum; a rodada perdida; depois de uma falha, a rodada seguinte em 64 s; a incerteza cresce pela deriva; o NSF conta as respostas que não vieram; a volta é gradual, sem salto, dentro do teto de 5% |
 | O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
 | A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
-| A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido` |
-| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, e o NSF vê a volta |
+| A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido`; a validade é a do lógico, não autenticada; as fontes voltam, com raio de 1 s: `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
+| O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto: a validade ainda é a do civil, autenticado; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
 
 Cada cenário também confere, a cada leitura, que o lógico nunca volta. No
 fim, a bancada imprime o que mediu: a primeira sincronização depois do
 endereço do DHCP, a conferência das respostas, o RTT de cada uma, o tempo
 do servidor, e a rodada pelo relógio do kernel e pelo do hospedeiro. O
-trabalho `tempo` da CI roda os quinze cenários nas duas arquiteturas, em
-release.
+trabalho `tempo` da CI roda os dezessete cenários nas duas arquiteturas,
+em release. Os cenários que conferem a validade rodam o programa
+`validade` pela serial, como a fumaça roda o `cifrado`, e leem do log o
+que ele disse.
 
 **O que ela achou: o intervalo depois de uma falha.** Dentro da janela, a
 hora continua `sincronizado` sem acordo nenhum, e o serviço tomava a
@@ -5206,6 +5222,102 @@ aceita é de 18 a 20 ms na mediana — dos quais de 9 a 11 ms são do
 servidor, que assina num `xtask` de depuração. Uma rodada grava 25
 registros do serviço na auditoria.
 
+### Os consumidores da hora
+
+Quem confere uma validade lê a hora do objeto `time` do `system.info`,
+pelo gate, como qualquer pedido do programa: o TLS, a dos certificados; o
+pote de cookies, o `Expires` e o `Max-Age`. Os dois leem pela mesma regra,
+num lugar só — `protocolo::usuario::hora` —, e nenhum tem regra própria (o
+desenho, §10 e a decisão D3):
+
+| O estado | A hora da validade | Por quê |
+|---|---|---|
+| `sincronizado`, `holdover` | o **civil** | a hora autenticada: as fontes concordaram, e a incerteza cabe no teto. O lógico parado à frente dela (`adiantado`) é que mentiria: um certificado que vale não vence por ele |
+| `rtc`, `vencido` | o **tempo lógico**: o civil com o piso do journal | sem hora autenticada, o civil é o RTC, ou uma hora que a incerteza já não sustenta; o piso, que nunca volta, não deixa um RTC atrasado de propósito ressuscitar o certificado nem o cookie que venceram |
+| `desligado` | o tempo lógico | sem civil; e sem lógico — sem RTC e sem piso — falta relógio: a conexão é recusada (`CLOCK_UNAVAILABLE`), e o cookie com validade não vai |
+
+O RTC cru nunca vale como prova. As marcas não mudam a regra, e vão na
+saída: com um salto `pendente`, o civil não se moveu, e a validade segue o
+civil de agora — nunca o salto que ninguém confirmou —; com uma fonte
+`divergente`, o civil é o das que concordaram; com o lógico `adiantado`,
+vale o civil se a hora é autenticada, e o lógico — o piso — se não é, e
+nunca o RTC atrás dele. Sem hora autenticada, o TLS conecta como antes,
+pelo lógico, e diz o estado (D3): recusar (`CLOCK_UNTRUSTED`) é de uma
+política temporal, quando ela existir.
+
+**O programa diz com que hora conferiu.** O `cifrado` diz, antes do
+aperto, `a validade pela hora sincronizado, autenticada, +-986 ms`, ou
+`rtc, nao autenticada: a do tempo logico`, com as marcas — `salto
+pendente`, `uma fonte divergente`, `o logico adiantado`. O programa
+`validade` diz a hora, os segundos com que conferiu, os do civil e os do
+lógico, e o que ela deu no eco TLS — `bancada.duke`, válido de 2025 a
+2040, e `vencido.duke`, de 2020 a 2021 — e nos cookies — um `Expires` de
+2023, um de 2100 e um `Max-Age=3`: os que o pote levou logo depois de
+guardar, e os que levou 3,1 s depois. O programa não julga: a bancada sabe
+o que cada estado deve dar.
+
+**A hora confere a validade, e mais nada.** O cookie não é identidade,
+credencial, autoridade nem permissão; o certificado prova o nome ao
+programa, e não autoriza nada no gate; e o estado do relógio não concede
+nem nega nada — o gate decide pelo relógio do kernel, e nenhuma decisão de
+autorização lê o civil nem o lógico. Os arrendamentos, as sessões, as
+taxas e as esperas continuam no monotônico; os prazos das mensagens e os
+carimbos da auditoria, no lógico. A leitura é a mesma de antes — um
+`system.info` por conexão TLS, e um por troca HTTP com um cookie com
+validade em jogo —, agora do objeto `time` em vez do relógio da
+persistência.
+
+**O NSF e o tempo.** As regras de tempo do desenho (§9.3) leem os
+registros de `time.sync` e `time.confirm`, nunca um relógio, e cada uma
+dispara uma vez por acontecimento — o salto da rodada, a entrada no
+estado, a primeira recusa de uma fonte —, e não a cada rodada que o
+repete:
+
+| Regra | Dispara com | Gravidade, confiança |
+|---|---|---|
+| `clock-jump` | o salto que o envelope explica, ou o da primeira sincronização | pelo tamanho — baixa abaixo de 1 min, média até 1 h, alta acima —; confiança baixa: é o relógio sendo corrigido |
+| `clock-jump-beyond-envelope` | o salto que a incerteza não explica: o contador derivou, ou as fontes se moveram juntas | alta, média |
+| `clock-jump-pending` | o salto que só uma pessoa confirma: recomenda `time.confirm {round}`, com a rodada dele, a quem tem a prova | alta, média |
+| `time-source-divergent` | uma fonte fora do acordo, com os vereditos da rodada como evidência | média, média |
+| `time-source-bad-signature` | uma resposta que a chave fixada não fecha — forjada, ou a chave foi trocada —, uma vez por fonte até ela ser aceita de novo | alta, média |
+| `time-unauthenticated` | a hora vencida; ou três rodadas de um boot sem hora autenticada — esta, uma observação | média, média; média, baixa |
+| `logical-clock-stopped` | o lógico parado à frente do civil, uma vez por parada | média, média |
+
+O principal delas é o relógio (`clock`), e não o serviço de hora, que
+continua observado e nunca alvo. Elas registram e recomendam: nenhuma
+bloqueia uma fonte — quem forja respostas ruins não escolhe o que o NSF
+corta —, nenhuma confirma um salto, e nenhuma é da categoria que sustenta
+contenção.
+
+**Com o lógico parado, a contenção por taxa fica suspensa.** Parado o
+lógico, param os carimbos, e as janelas de 30 s das regras juntam o que no
+relógio de verdade está separado. O NSF sabe da parada pelos registros — a
+marca `adiantado` no fechamento de uma rodada, ou um `time.confirm` que
+deixa o lógico à frente do civil —, e da volta pelo primeiro carimbo
+maior. Enquanto parado, as detecções das regras de janela continuam
+registradas, marcadas (`com o tempo logico parado: a janela pode juntar o
+que no relogio esta separado`), e abrem o incidente como antes; a
+contenção que só uma janela sustenta — o `net.block` da saída depois da
+sondagem — vira recomendação, com o motivo, e o NSF não pede nada. A
+janela contada parada continua sem sustentar contenção depois que o
+lógico volta a andar; uma janela contada andando volta a conter. O que não
+é janela — o teto do administrador exercido, o código adulterado — contém
+parado ou não. O `security.status` diz `logical_stopped`,
+`stopped_at_ms` e `rate_containment` (`suspended` ou `active`).
+
+**Onde se confere.** No hospedeiro, a regra da hora em cada estado e cada
+marca (`protocolo`), e as regras de tempo, a suspensão, a volta e o
+contorno que contém parado (`seguranca`). Na suíte, dois casos: `hora: a
+validade dos programas pela regra deles, em cada estado` — o
+`system.info time` lido pela regra em `rtc`, `sincronizado`, `holdover`,
+`vencido` e de volta —, e `tls: a validade pela hora autenticada, com
+rodadas e o NSF ao mesmo tempo` — três programas `validade` de uma pessoa,
+com rodadas e o NSF lendo ao mesmo tempo, cada um conferindo pelo civil. E
+na bancada de tempo, cada estado com o programa
+de verdade, pela rede de verdade (ver os cenários acima): a hora vencida,
+o holdover e a volta, o pendente, a fonte divergente, o piso de outro
+boot, o RTC além dos certificados e o RTC atrás do piso.
+
 ### O que fica de fora
 
 - **Um servidor só, do mesmo autor.** O servidor da bancada é escrito à
@@ -5228,24 +5340,28 @@ registros do serviço na auditoria.
   resposta chega, e o civil fica no RTC. Os servidores da suíte moram no
   kernel de teste (`rede::bancada_hora`), depois do firewall e antes da
   placa; o recurso que os liga só existe no kernel da suíte, e o `xtask`
-  confere que nenhum outro manifesto o pede. A fumaça com um acordo, e o
-  TLS pela hora do civil, ficam para os passos seguintes.
-- **O NSF com o lógico parado.** Parado o lógico, param os carimbos da
-  auditoria, e as janelas do NSF, que contam carimbos, juntam o que no
-  relógio de verdade está separado. Na bancada, um operador recusado em
-  três métodos, um a cada 35 s, com o lógico parado: os três registros
-  saem com o mesmo carimbo, cabem numa janela de 30 s, e dão uma detecção
-  e um incidente — sem contenção. O desenho suspende a contenção automática
-  por taxa enquanto o lógico está parado, com as detecções registradas; a
-  suspensão vem com as regras de tempo do NSF.
-- **Os consumidores.** Nada mudou no TLS, nos cookies nem nas mensagens:
-  eles leem o tempo lógico, como antes — e o lógico agora segue o civil.
-  Depois de sincronizado, a validade de um certificado e a de um cookie
-  andam na hora autenticada; o estado e a incerteza do civil não entram em
-  decisão nenhuma deles. Um salto confirmado para a frente envelhece de uma
-  vez os prazos das mensagens; depois de um para trás, eles param no piso
-  até o civil passar. Regras sobre o estado do relógio são dos incrementos
-  dos consumidores.
+  confere que nenhum outro manifesto o pede. Na fumaça, o TLS confere pelo
+  tempo lógico, e o `cifrado` diz `rtc, nao autenticada`; a hora do civil
+  autenticado o TLS e os cookies só a veem na bancada de tempo e na suíte.
+  A fumaça com um acordo fica para o passo seguinte.
+- **O NSF só sabe do lógico parado por uma rodada.** A parada se lê da
+  marca `adiantado` no fechamento de uma rodada, ou de uma confirmação que
+  deixa o lógico à frente do civil. Sem fontes no registro, ou antes da
+  primeira rodada de um boot que sobe com o RTC atrás do piso, nenhum
+  registro diz que o lógico está parado: as janelas juntam o que no
+  relógio está separado, e a contenção por taxa não fica suspensa. A
+  primeira rodada sai logo depois da pilha de rede.
+- **Parado, o lógico não vence nada.** Sem hora autenticada, a validade é
+  a do lógico; com ele parado no piso — o RTC atrás dele —, um `Max-Age`
+  não vence, como não vence um prazo de mensagem, até o civil passar o
+  piso ou a hora ser autenticada. O certificado vencido continua vencido:
+  parado, o lógico não volta. Um salto confirmado para a frente envelhece
+  de uma vez os prazos das mensagens.
+- **A recomendação do `time.confirm` nomeia a rodada dela.** O NSF
+  recomenda confirmar o salto pendente pela rodada que o pediu; se outra
+  rodada troca o pendente antes da confirmação, a recomendada é um
+  `CONFLICT`, gravado, e nada se move — quem confirma lê o
+  `pending_round` de novo. O NSF não confirma: não tem prova.
 - **O número da rodada vale no boot.** As rodadas são numeradas a partir
   de 1 a cada boot, e o salto pendente não sobrevive a um reboot. Um
   número lido antes de um reboot pode coincidir com o de um pendente novo

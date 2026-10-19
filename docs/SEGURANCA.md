@@ -209,6 +209,17 @@ dispararam:
 | `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador |
 | `egress-after-probing` | quem tem um incidente alto aberto usa a rede |
 | `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada |
+| `clock-jump` | o relógio civil saltou dentro do envelope da incerteza, ou na primeira sincronização — a gravidade pelo tamanho, a confiança baixa: é o relógio sendo corrigido |
+| `clock-jump-beyond-envelope` | o salto que a incerteza não explica: o contador derivou, ou as fontes se moveram juntas |
+| `clock-jump-pending` | o salto acima do teto, ou para trás fora do envelope, que só uma pessoa confirma: recomenda `time.confirm {round}` com a rodada dele |
+| `time-source-divergent` | uma fonte fora do acordo da rodada, com os vereditos dela como evidência |
+| `time-source-bad-signature` | uma resposta que a chave fixada da fonte não fecha — forjada, ou a chave trocada —, uma vez por fonte até ela ser aceita de novo |
+| `time-unauthenticated` | a hora autenticada venceu; ou três rodadas de um boot sem hora autenticada, como observação |
+| `logical-clock-stopped` | o tempo lógico parado à frente do civil, uma vez por parada |
+
+As de tempo leem os registros de `time.sync` e `time.confirm` (ver [O
+tempo](#o-tempo-t73-a-t75)); o principal delas é o relógio, `clock`, e não o
+serviço de hora.
 
 E o **monitor de invariantes** — a segunda camada, sobre o que as regras
 não olham: o elo de cada registro lido refaz a conta da cadeia; a
@@ -378,8 +389,9 @@ Um certificado não autoriza nada, e o nome do servidor não é recurso:
   quatro.
 - **Provar o nome é do programa, pelas âncoras dele.** A âncora é um
   arquivo que o programa lê por `fs.read`, pelo gate; a semente de cada
-  conexão vem do `random.read`, e o relógio do tempo lógico
-  (`system.info`), os dois pelo gate. A verificação não tem atalho: o
+  conexão vem do `random.read`, e a hora da validade, do objeto `time` do
+  `system.info` — o civil autenticado, ou o tempo lógico sem ele, e nunca o
+  RTC cru —, os dois pelo gate. A verificação não tem atalho: o
   `xtask` confere que nenhum código chama a API `dangerous()` do `rustls`
   nem escreve um verificador próprio.
 - **A sessão não autoriza o que vem depois do aperto.** Cada `net.send` e
@@ -555,7 +567,7 @@ Nada do protocolo: não há regra do NSF sobre HTTP, nem leitura do que vai
 dentro — e, no `https`, nem os bytes. O uso normal não abre incidente: a
 suíte confere que a cadeia inteira não leva o NSF a pedir nada.
 
-## O tempo (T7.3)
+## O tempo (T7.3 a T7.5)
 
 O relógio civil autenticado não dá ao NSF autoridade nenhuma sobre ele. O
 serviço de hora é um principal como o NSF —
@@ -571,14 +583,32 @@ que o NSF faz com o tempo é ler:
   o lógico antes e depois, o estado, as marcas `pendente`, `divergente`,
   `adiantado`) e os `time.confirm` executados. O `security.status` diz o
   estado da última rodada, as marcas e as contagens.
-- **Nenhuma regra de tempo, nenhuma ação.** O NSF não ajusta o relógio,
-  não confirma salto, não bloqueia fonte e não cria autorização
-  emergencial — e as invariantes conferem quem chama o que move o civil.
+- **As regras de tempo registram e recomendam** (T7.5): o salto, o salto
+  além do envelope, o pendente, a fonte divergente, a assinatura que a
+  chave fixada não fecha, a hora vencida ou nunca autenticada, o lógico
+  parado — cada uma uma vez por acontecimento, com o relógio (`clock`) como
+  principal. O NSF não ajusta o relógio, não confirma salto — recomenda o
+  `time.confirm` da rodada a quem tem a prova —, não bloqueia fonte e não
+  cria autorização emergencial; nenhuma regra de tempo é da categoria que
+  sustenta contenção, e as invariantes conferem quem chama o que move o
+  civil.
+- **Com o lógico parado, a contenção por taxa fica suspensa.** O NSF sabe
+  da parada pela marca `adiantado` no fechamento de uma rodada, ou pela
+  confirmação que deixa o lógico à frente do civil, e da volta pelo
+  primeiro carimbo maior. As detecções das regras de janela continuam
+  registradas, marcadas, e abrem o incidente; a contenção que só uma janela
+  sustenta vira recomendação, com o motivo, e a janela contada parada não a
+  sustenta nem depois que o lógico volta a andar. O que não é janela
+  contém parado ou não. O `security.status` diz `logical_stopped`,
+  `stopped_at_ms` e `rate_containment`.
 - **O serviço de hora é observado e nunca alvo.** Nenhuma regra nem perfil
   o conta, e nenhuma resposta do NSF chega a ele nem às fontes dele: quem
   injeta respostas ruins no caminho não faz o NSF cortar a fonte legítima.
 - **Nenhuma decisão lê o tempo.** O gate decide pelo relógio do kernel; o
-  estado do civil não concede nem nega nada.
+  estado do civil não concede nem nega nada. A validade dos certificados e
+  a dos cookies é dos programas, pela hora do `system.info` (ver o README,
+  *Os consumidores da hora*), e o cookie não é identidade, credencial,
+  autoridade nem permissão.
 
 ## As consultas
 
@@ -636,7 +666,8 @@ mesma regra:
   executa.
 - o tempo: o serviço de hora é outro serviço, com o balde dele, e o NSF só
   lê o que a auditoria conta dele — não move, não confirma, não corta
-  fonte.
+  fonte; as regras de tempo registram e recomendam, e o lógico parado
+  suspende a contenção por taxa, sem suspender a detecção.
 
 Um ponto pediu cuidado e ficou dentro da regra: **observar é acessar**. Um
 gancho no funil da auditoria daria ao NSF a cadeia inteira sem permissão
@@ -696,15 +727,17 @@ contido pelo despertador.
 - **O relógio dos registros é de um segundo.** As janelas e as taxas das
   regras e do perfil contam com essa resolução; a ordem entre a captura e
   a auditoria é a dos números dos registros, que é exata.
-- **O lógico parado junta as janelas.** Depois de um salto do civil para
-  trás, o lógico fica no piso, e os carimbos param com ele. As janelas das
-  regras contam carimbos, e juntam o que no relógio de verdade está
+- **O lógico parado junta as janelas, e só uma rodada o diz.** Depois de
+  um salto do civil para trás, o lógico fica no piso, e os carimbos param
+  com ele: as janelas das regras juntam o que no relógio de verdade está
   separado. Na bancada de tempo, um operador recusado em três métodos, um a
   cada 35 s, com o lógico parado: os três registros saem com o mesmo
-  carimbo, cabem na janela de 30 s da sondagem, e dão uma detecção e um
-  incidente — sem contenção. O desenho do tempo suspende a contenção
-  automática por taxa enquanto o lógico está parado, com as detecções
-  registradas; a suspensão vem com as regras de tempo do NSF.
+  carimbo, e dão uma detecção e um incidente; a saída dele depois disso fica
+  na recomendação, e o NSF não pede nada. A suspensão depende de um
+  registro que mostre a parada — o fechamento de uma rodada, ou uma
+  confirmação —: sem fontes no registro, ou antes da primeira rodada de um
+  boot que sobe com o RTC atrás do piso, o NSF não sabe que o lógico está
+  parado, e a janela conta como sempre.
 
 ## Como se confere
 
@@ -714,7 +747,11 @@ contido pelo despertador.
   com os elos de verdade — da sondagem à contenção, a recusa que encerra o
   objetivo, a história que não pede, a ação sem plano, a adulteração e a
   lacuna, a proveniência, o DNS nas duas ordens, pessoa e agente pela
-  mesma conta, e só o incidente alto levando à contenção.
+  mesma conta, e só o incidente alto levando à contenção; e as regras de
+  tempo sobre uma rodada escrita como o kernel a escreve, a confirmação que
+  para o lógico, a contenção por taxa suspensa com ele parado e com a
+  janela contada parada, o contorno que contém parado, e a janela que volta
+  a conter com ele andando.
 - **Na suíte**, com o motor de verdade e sem o fio — cada volta é o caso
   que dá, e cada caso começa com o NSF sem história, sem espera e com o
   balde da taxa do papel cheio, porque as voltas vêm uma atrás da outra,
@@ -734,6 +771,12 @@ contido pelo despertador.
   contida pelo gate em poucos segundos, o firewall barrando só o operador,
   o incidente dizendo a decisão e quem autorizou, e a auditoria quieta
   depois — entre duas rodadas do serviço de hora, que escreve as dele.
+- **Na bancada de tempo**, a imagem de produção com o fio do NSF, pela rede
+  de verdade: a fonte divergente, o `adiantado` e o `vencido` no
+  `security.status`; a sondagem lenta com o lógico parado, que vira
+  detecção e incidente, e a saída depois dela, que fica na recomendação —
+  parado, e depois andando, pela janela contada parada —; o lógico parado
+  num boot com o RTC atrás do piso, e no RTC além dos certificados.
 
 ## Incrementos e estado
 
@@ -749,3 +792,4 @@ contido pelo despertador.
 | 9.6 | o canal do agente por TCP: as vagas, a escuta do firewall, a chave confirmada, a contrapressão; a revogação, a contenção, a regra e o administrador pela rede; o NSF lendo os apertos recusados |
 | T7.3 | o relógio civil e o serviço de hora: o NSF lê o tempo nos registros de `time.sync` e `time.confirm` (`seguranca::tempo`, o `time` do `security.status`), sem regra nem resposta de tempo |
 | T7.4 | a bancada de tempo: o Roughtime pela rede de verdade, e o NSF lendo dela as rodadas, as marcas e o estado — o divergente, o adiantado, o holdover, o vencido —, sem regra nem resposta de tempo; a sondagem lenta com o lógico parado, que vira detecção |
+| T7.5 | os consumidores da hora: o TLS e os cookies pela hora do `system.info`, por uma regra só — o civil autenticado, o lógico sem ele, nunca o RTC cru —; as sete regras de tempo, que registram e recomendam; e a contenção por taxa suspensa com o lógico parado, com as detecções registradas |
