@@ -5152,9 +5152,10 @@ chegou, de que fonte, o tamanho e o que se fez com ele —: o lado de fora da
 rodada, que a bancada confronta com o que o kernel diz ter aceitado.
 
 **Os modos.** Cada fonte responde num modo que o cenário troca com a
-máquina ligada: a hora deslocada, o raio, o atraso da resposta, calada, e o
+máquina ligada: a hora deslocada, o raio, o atraso da resposta, calada, o
 lote — a resposta numa árvore de 2, 8 ou 64 folhas, com o pedido na
-última, e o caminho de 1, 3 ou 6 resumos até a raiz assinada.
+última, e o caminho de 1, 3 ou 6 resumos até a raiz assinada —, e forjada
+— a resposta honesta assinada por uma chave que a delegação não nomeia.
 
 **Nenhuma autoridade nova.** A bancada fala com a máquina pela serial, como
 a fumaça. O que ela muda lá dentro passa pelo gate: `net.block` e
@@ -5167,26 +5168,27 @@ fala com o kernel: responde a quem pergunta.
 | As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o programa `validade` confere pelo civil, autenticado — `bancada.duke` aceito, `vencido.duke` e `futuro.duke` recusados, o `Max-Age` vencendo —; o NSF lê as seis respostas aceitas, sem incidente, sem marca, o lógico andando, a contenção por taxa ativa e nenhum pedido |
 | O lote | árvores de 2, 8 e 64 folhas | as três respostas aceitas pelo caminho de Merkle, com o `INDX` 1, 7 e 63 |
 | Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; o NSF abre o incidente `time-source-divergent` e não faz nada com a fonte — nenhuma ação no incidente, nenhum pedido ao gate —; o programa `validade` confere pelo civil, autenticado, e diz a marca; a marca sai quando ela volta |
+| Uma fonte forjada | a segunda assina com uma chave que a delegação dela não nomeia | o kernel recusa a resposta pela assinatura — a entrega na auditoria, `DENY_CREDENTIAL`, `recusada assinatura_da_resposta` —, e o acordo é das outras duas, 2/2; o NSF abre o incidente `time-source-bad-signature`, com a fonte, e não faz nada com ela — nenhuma ação, nenhum pedido —; quando ela volta a assinar com a delegada, 3/3 |
 | O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, nenhum veredito a mais quando ela chega, e o acordo é das outras duas |
-| O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado` |
+| O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado`; o NSF observa o `clock-jump` do relógio, com a gravidade pelo tamanho, sem incidente — a confiança é baixa: é o relógio sendo corrigido — e sem pedido |
 | O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador vira detecção e incidente, sem contenção; a saída do operador depois dela fica na recomendação, com o motivo — o lógico parado —, e o NSF não pede nada; uns dois minutos depois o lógico volta a andar com o civil, o NSF diz a contenção por taxa ativa de novo, e a saída para outro destino continua recomendação, porque a janela que a sustenta foi contada parada; e a contenção por taxa volta: a sondagem nova de outro operador, contada andando, sustenta a da saída seguinte dele — o NSF pede o `net.block` pelo gate, o gate permite, e a conexão seguinte é barrada —; nenhum carimbo da auditoria desce |
-| Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` e diz a contenção por taxa suspensa; a validade é a do civil, autenticado, e não a do lógico um dia à frente: o `Max-Age` vence; e, parado, a contenção que não depende de janela vale: o operador da porta 1 roda um código adulterado (`CODE_TAMPERED`) e depois usa a rede, e o NSF pede o `net.block` do destino pelo gate, que permite — a conexão seguinte do operador é barrada, e o lógico continua parado |
+| Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado`, abre o incidente `logical-clock-stopped` do relógio, sem ação, e diz a contenção por taxa suspensa; a validade é a do civil, autenticado, e não a do lógico um dia à frente: o `Max-Age` vence; e, parado, a contenção que não depende de janela vale: o operador da porta 1 roda um código adulterado (`CODE_TAMPERED`) e depois usa a rede, e o NSF pede o `net.block` do destino pelo gate, que permite — a conexão seguinte do operador é barrada, e o lógico continua parado |
 | O piso de outro boot | um boot com o RTC uma hora à frente; o seguinte na hora | o civil do segundo boot sincroniza, e o lógico fica no piso do primeiro, parado; a validade é a do civil, autenticado, e não a do piso: o `Max-Age` vence com o civil andando |
 | O RTC além dos certificados | o RTC em 2041, depois de `bancada.duke` vencer; as fontes caladas, depois honestas | sem hora autenticada, a validade é a do lógico, em 2041: os dois certificados `TLS_EXPIRED`, o `Expires` de 2023 vencido, o `Max-Age` vencendo; sincronizado, o civil volta quinze anos e o lógico fica parado em 2041, `adiantado`: a validade é a do civil — `bancada.duke` aceito, `vencido.duke` ainda vencido —, e o NSF diz a contenção por taxa suspensa |
 | O RTC atrás do piso | um boot na hora, sem fontes, deixa o piso; o seguinte sobe com o RTC em 2020, dentro da validade de `vencido.duke`, e sem fontes; depois, as fontes | o civil é o RTC, não autenticado, e a validade é a do piso: `bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, o `Expires` de 2023 vencido — pelo RTC cru, os dois voltariam a valer —; parado, o lógico não vence o `Max-Age`; o NSF vê o lógico parado nas rodadas perdidas, e a contenção por taxa suspensa; com as fontes, o civil sincroniza seis anos à frente, passa do piso, e o lógico anda com ele: a validade é a do civil, e o NSF vê o lógico andando, a contenção por taxa ativa |
-| Dez minutos | as três pulam dez minutos à frente | o candidato e o salto em rodadas seguidas, além do envelope; o lógico salta junto |
+| Dez minutos | as três pulam dez minutos à frente | o candidato e o salto em rodadas seguidas, além do envelope; o lógico salta junto; o NSF abre o incidente `clock-jump-beyond-envelope` do relógio, sem ação nem pedido |
 | Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente — a validade segue o civil de agora, autenticado, e não o salto; o NSF recomenda a uma pessoa o `time.confirm` da rodada dele, e não pede nada —; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, gravado com a rodada pedida e a do pendente, e a com a rodada dele aplica o salto; nenhum serviço confirma salto |
 | A perda e a volta | a terceira calada desde o boot; depois a segunda; depois a primeira; e as três de volta, cinco segundos à frente | acordo 2/2; sem quórum; a rodada perdida; depois de uma falha, a rodada seguinte em 64 s; a incerteza cresce pela deriva; o NSF conta as respostas que não vieram; a volta é gradual, sem salto, dentro do teto de 5% |
 | O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
 | A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
-| A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido`; a validade é a do lógico, não autenticada; as fontes voltam, com raio de 1 s: `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
+| A hora vence | uma imagem com o teto da incerteza baixado a 10 s; o RTC uma hora atrás; raios de 9 e 10 s | o salto traz a incerteza de 9 s; as fontes calam, a incerteza cresce pela deriva, passa do teto, e a hora vence; o lógico segue o civil; o NSF vê `vencido` e abre o incidente `time-unauthenticated` do relógio, sem ação nem pedido; a validade é a do lógico, não autenticada; as fontes voltam, com raio de 1 s: `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
 | O holdover | sincronizar e calar as três | `sincronizado` pela janela de 2048 s — contada na hora do hospedeiro, que o contador do civil acompanha; o relógio do kernel, no emulador, perde tiques —, uma rodada perdida a cada 64 s, e `holdover` depois dela, abaixo do teto: a validade ainda é a do civil, autenticado; as fontes voltam três segundos à frente: o ajuste gradual, `sincronizado` de novo, a validade pelo civil, e o NSF vê a volta |
 
 Cada cenário também confere, a cada leitura, que o lógico nunca volta. No
 fim, a bancada imprime o que mediu: a primeira sincronização depois do
 endereço do DHCP, a conferência das respostas, o RTT de cada uma, o tempo
 do servidor, e a rodada pelo relógio do kernel e pelo do hospedeiro. O
-trabalho `tempo` da CI roda os dezessete cenários nas duas arquiteturas,
+trabalho `tempo` da CI roda os dezoito cenários nas duas arquiteturas,
 em release. Os cenários que conferem a validade rodam o programa
 `validade` pela serial, como a fumaça roda o `cifrado`, e leem do log o
 que ele disse.
@@ -5353,7 +5355,13 @@ com rodadas e o NSF lendo ao mesmo tempo, cada um conferindo pelo civil. E
 na bancada de tempo, cada estado com o programa
 de verdade, pela rede de verdade (ver os cenários acima): a hora vencida,
 o holdover e a volta, o pendente, a fonte divergente, o piso de outro
-boot, o RTC além dos certificados e o RTC atrás do piso.
+boot, o RTC além dos certificados e o RTC atrás do piso. As sete regras de
+tempo, cada uma pelo nome, na imagem de produção: `clock-jump` no relógio
+atrasado — uma observação —, `clock-jump-beyond-envelope` nos dez minutos,
+`clock-jump-pending` nos pendentes, `time-source-divergent` na fonte
+divergente, `time-source-bad-signature` na forjada, `time-unauthenticated`
+na hora que vence e `logical-clock-stopped` no dia adiantado — e nenhuma
+com ação, a não ser a recomendação do pendente a uma pessoa.
 
 ### O que fica de fora
 
