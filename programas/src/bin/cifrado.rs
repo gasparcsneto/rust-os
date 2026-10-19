@@ -6,8 +6,10 @@
 //!   a recusa é `DENY_RESOURCE` — o código do gate, e não um do TLS; o
 //!   `ClientHello` nem é montado;
 //! - a âncora é um arquivo da imagem, [`ANCORAS`], lido por `fs.read`, pelo
-//!   gate; a semente de cada conexão vem do `random.read`, e o relógio, do
-//!   tempo lógico — os dois pelo gate também;
+//!   gate; a semente de cada conexão vem do `random.read`, e a hora da
+//!   validade, do `system.info` — o civil quando a hora é autenticada, o
+//!   tempo lógico quando não é —, as duas pelo gate também. O programa diz
+//!   com que hora conferiu: o estado, e se ela era autenticada;
 //! - `bancada.duke` no eco TLS, `tcp:10.0.2.100:443`: o aperto fecha, e o
 //!   segredo vai e volta cifrado — o kernel só vê bytes cifrados indo para
 //!   um destino que a política enumera. Depois, três registros inteiros de
@@ -147,6 +149,16 @@ fn principal() -> i64 {
             return SEM_ANCORAS;
         }
     };
+    // A hora com que os certificados se conferem, dita. Sem ela, o aperto
+    // abaixo falha, e diz por quê.
+    match tls::hora() {
+        Ok(h) => {
+            escreverln!("cifrado: a validade pela hora {}", h);
+        }
+        Err(f) => {
+            escreverln!("cifrado: sem hora: {}", f.codigo());
+        }
+    }
 
     // O destino fora do alcance: a recusa é do gate, antes do TLS.
     match tls::conectar(FORA, NOME, &ancoras) {

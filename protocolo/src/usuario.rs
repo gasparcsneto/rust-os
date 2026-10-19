@@ -1362,3 +1362,348 @@ pub mod manifesto {
         }
     }
 }
+
+/// A hora com que um programa confere validades — a dos certificados do
+/// TLS e a dos cookies —, lida do objeto `time` do `system.info`, pelo
+/// gate, como qualquer pedido do programa.
+///
+/// # Uma regra, num lugar só
+///
+/// O desenho do tempo (§10, decisão D3): com a hora autenticada — o civil
+/// `sincronizado` ou em `holdover`, as fontes de acordo e a incerteza
+/// abaixo do teto —, o **civil**; sem ela — `rtc`, `vencido`, ou sem civil
+/// nenhum —, o **tempo lógico**, como antes: o civil com o piso do journal,
+/// que nunca volta. Os dois consumidores leem por aqui, e nenhum tem regra
+/// própria.
+///
+/// O RTC cru nunca vale como prova. Antes da primeira sincronização o civil
+/// *é* o RTC, e um RTC atrasado de propósito ressuscitaria o certificado ou
+/// o cookie que já venceu; o lógico o segura no piso. Com a hora
+/// autenticada, o lógico pode estar parado à frente dela (`adiantado`), e
+/// aí é ele que mentiria: o civil é a hora certa.
+///
+/// O estado vai junto, para o programa dizer com que hora conferiu — e se
+/// ela era autenticada. Nada aqui decide autorização: a validade é do TLS e
+/// do pote de cookies, e o estado do relógio não concede nada.
+///
+/// Atrás da feature `arrays`, como o leitor das marcas: quem lê o objeto
+/// são os programas e a suíte do kernel — o kernel só o escreve.
+#[cfg(feature = "arrays")]
+pub mod hora {
+    use core::fmt;
+
+    use crate::json::Json;
+
+    /// O membro do `system.info` com o relógio.
+    pub const MEMBRO: &str = "time";
+
+    /// O estado do relógio civil, como o `system.info` o escreve.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Estado {
+        /// Nenhuma amostra autenticada: o civil é o RTC.
+        Rtc,
+        /// As fontes concordaram, e a incerteza cabe no teto.
+        Sincronizado,
+        /// Sem acordo por mais que a janela: a incerteza crescendo, ainda
+        /// abaixo do teto.
+        Holdover,
+        /// A incerteza passou do teto: a hora já não vale.
+        Vencido,
+        /// Sem relógio civil.
+        Desligado,
+    }
+
+    impl Estado {
+        /// O estado de um nome do `system.info`.
+        pub fn de(nome: &str) -> Option<Estado> {
+            Some(match nome {
+                "rtc" => Estado::Rtc,
+                "sincronizado" => Estado::Sincronizado,
+                "holdover" => Estado::Holdover,
+                "vencido" => Estado::Vencido,
+                "desligado" => Estado::Desligado,
+                _ => return None,
+            })
+        }
+
+        /// O nome, como o `system.info` o escreve.
+        pub const fn nome(self) -> &'static str {
+            match self {
+                Estado::Rtc => "rtc",
+                Estado::Sincronizado => "sincronizado",
+                Estado::Holdover => "holdover",
+                Estado::Vencido => "vencido",
+                Estado::Desligado => "desligado",
+            }
+        }
+
+        /// Se a hora do civil neste estado é autenticada.
+        pub const fn autenticado(self) -> bool {
+            matches!(self, Estado::Sincronizado | Estado::Holdover)
+        }
+    }
+
+    /// O objeto `time` do `system.info`, no que um programa usa.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Hora {
+        pub estado: Estado,
+        /// O meio do civil, em ms desde 1970; zero sem civil.
+        pub civil_ms: u64,
+        /// A incerteza do civil; `None` sem amostra autenticada.
+        pub incerteza_ms: Option<u64>,
+        /// O tempo lógico, em segundos desde 1970.
+        pub logico_s: u64,
+        /// Um salto que as fontes pediram e que espera uma pessoa.
+        pub pendente: bool,
+        /// Uma fonte fora do acordo na última rodada.
+        pub divergente: bool,
+        /// O lógico parado à frente do civil.
+        pub adiantado: bool,
+    }
+
+    impl Hora {
+        /// Lê o objeto `time`. `None` se não é um que se entenda: o estado
+        /// desconhecido, o lógico ausente, um estado com civil sem o meio,
+        /// ou um estado autenticado sem a incerteza.
+        pub fn ler(time: Json<'_>) -> Option<Hora> {
+            let estado = Estado::de(time.member("state")?.as_str()?)?;
+            let logico_s = time.member("logical")?.as_u64()?;
+            if estado == Estado::Desligado {
+                return Some(Hora {
+                    estado,
+                    civil_ms: 0,
+                    incerteza_ms: None,
+                    logico_s,
+                    pendente: false,
+                    divergente: false,
+                    adiantado: false,
+                });
+            }
+            let civil_ms = time.member("civil_ms")?.as_u64()?;
+            let incerteza = time.member("uncertainty_ms")?;
+            let incerteza_ms = if incerteza.is_null() {
+                None
+            } else {
+                Some(incerteza.as_u64()?)
+            };
+            // Autenticada sem incerteza não é um estado que o kernel escreva.
+            if estado.autenticado() && incerteza_ms.is_none() {
+                return None;
+            }
+            let marcas = time.member("marks")?;
+            let (mut pendente, mut divergente, mut adiantado) = (false, false, false);
+            let mut i = 0;
+            while let Some(m) = marcas.item(i) {
+                match m.as_str()? {
+                    "pendente" => pendente = true,
+                    "divergente" => divergente = true,
+                    "adiantado" => adiantado = true,
+                    _ => {}
+                }
+                i += 1;
+            }
+            Some(Hora {
+                estado,
+                civil_ms,
+                incerteza_ms,
+                logico_s,
+                pendente,
+                divergente,
+                adiantado,
+            })
+        }
+
+        /// Se a hora é autenticada — ver [`Estado::autenticado`].
+        pub const fn autenticada(&self) -> bool {
+            self.estado.autenticado()
+        }
+
+        /// A hora de conferir validades, em segundos desde 1970: o civil,
+        /// se autenticado; senão, o lógico. Zero é falta de relógio — sem
+        /// RTC e sem piso.
+        pub const fn validade_s(&self) -> u64 {
+            if self.autenticada() {
+                self.civil_ms / 1000
+            } else {
+                self.logico_s
+            }
+        }
+    }
+
+    /// Como um programa diz a hora com que conferiu: o estado, se era
+    /// autenticada — com a incerteza —, ou que foi a do tempo lógico, e as
+    /// marcas.
+    impl fmt::Display for Hora {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.estado.nome())?;
+            match self.incerteza_ms {
+                Some(u) if self.autenticada() => write!(f, ", autenticada, +-{u} ms")?,
+                _ => f.write_str(", nao autenticada: a do tempo logico")?,
+            }
+            for (tem, marca) in [
+                (self.pendente, "; salto pendente"),
+                (self.divergente, "; uma fonte divergente"),
+                (self.adiantado, "; o logico adiantado"),
+            ] {
+                if tem {
+                    f.write_str(marca)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod testes {
+        use super::*;
+        use std::string::ToString;
+
+        fn ler(texto: &str) -> Option<Hora> {
+            Hora::ler(Json(texto.as_bytes()))
+        }
+
+        /// 2026-10-19T00:00:00Z, em segundos.
+        const AGORA_S: u64 = 1_792_368_000;
+
+        #[test]
+        fn a_hora_autenticada_e_a_do_civil() {
+            for estado in ["sincronizado", "holdover"] {
+                let h = ler(&std::format!(
+                    r#"{{"state":"{estado}","civil_ms":{},"uncertainty_ms":980,"pending_ms":null,"pending_round":null,"marks":["adiantado"],"beyond_envelope":false,"logical":{},"ahead_ms":5}}"#,
+                    AGORA_S * 1000 + 999,
+                    AGORA_S + 3600
+                ))
+                .unwrap();
+                assert!(h.autenticada());
+                // O lógico parado uma hora à frente não conta: o civil é a
+                // hora certa.
+                assert_eq!(h.validade_s(), AGORA_S);
+                assert!(h.adiantado && !h.pendente && !h.divergente);
+                assert_eq!(h.incerteza_ms, Some(980));
+            }
+        }
+
+        #[test]
+        fn sem_hora_autenticada_e_a_do_logico() {
+            // O RTC atrás do piso: o lógico o segura, e o RTC cru não vale.
+            let rtc = ler(&std::format!(
+                r#"{{"state":"rtc","civil_ms":{},"uncertainty_ms":null,"marks":["adiantado"],"logical":{AGORA_S}}}"#,
+                (AGORA_S - 6 * 365 * 86_400) * 1000
+            ))
+            .unwrap();
+            assert!(!rtc.autenticada());
+            assert_eq!(rtc.validade_s(), AGORA_S);
+            assert_eq!(rtc.incerteza_ms, None);
+            // Vencida: a incerteza passou do teto, e a hora já não prova
+            // nada, mesmo com a incerteza ainda escrita.
+            let vencido = ler(&std::format!(
+                r#"{{"state":"vencido","civil_ms":{},"uncertainty_ms":10001,"marks":[],"logical":{}}}"#,
+                (AGORA_S + 30) * 1000,
+                AGORA_S + 7
+            ))
+            .unwrap();
+            assert!(!vencido.autenticada());
+            assert_eq!(vencido.validade_s(), AGORA_S + 7);
+            // Sem civil: só o lógico.
+            let desligado = ler(&std::format!(
+                r#"{{"state":"desligado","logical":{AGORA_S}}}"#
+            ))
+            .unwrap();
+            assert_eq!(desligado.validade_s(), AGORA_S);
+            // Sem RTC e sem piso: zero, a falta de relógio.
+            let zero =
+                ler(r#"{"state":"rtc","civil_ms":0,"uncertainty_ms":null,"marks":[],"logical":0}"#)
+                    .unwrap();
+            assert_eq!(zero.validade_s(), 0);
+        }
+
+        #[test]
+        fn as_marcas() {
+            let h = ler(&std::format!(
+                r#"{{"state":"sincronizado","civil_ms":{},"uncertainty_ms":1200,"marks":["pendente","divergente","outra"],"logical":{AGORA_S}}}"#,
+                AGORA_S * 1000
+            ))
+            .unwrap();
+            assert!(h.pendente && h.divergente && !h.adiantado);
+        }
+
+        #[test]
+        fn o_que_nao_se_entende_e_recusado() {
+            for texto in [
+                // Estado desconhecido.
+                r#"{"state":"quase","civil_ms":1,"uncertainty_ms":1,"marks":[],"logical":1}"#,
+                // Sem o lógico.
+                r#"{"state":"rtc","civil_ms":1,"uncertainty_ms":null,"marks":[]}"#,
+                // Com civil e sem o meio.
+                r#"{"state":"rtc","uncertainty_ms":null,"marks":[],"logical":1}"#,
+                // Autenticada sem incerteza.
+                r#"{"state":"sincronizado","civil_ms":1000,"uncertainty_ms":null,"marks":[],"logical":1}"#,
+                // Sem as marcas.
+                r#"{"state":"sincronizado","civil_ms":1000,"uncertainty_ms":5,"logical":1}"#,
+                // Uma marca que não é texto.
+                r#"{"state":"sincronizado","civil_ms":1000,"uncertainty_ms":5,"marks":[1],"logical":1}"#,
+                // O lógico negativo.
+                r#"{"state":"rtc","civil_ms":1,"uncertainty_ms":null,"marks":[],"logical":-1}"#,
+                "[]",
+                "",
+            ] {
+                assert_eq!(ler(texto), None, "{texto}");
+            }
+        }
+
+        #[test]
+        fn o_que_o_programa_diz() {
+            let mut h = Hora {
+                estado: Estado::Sincronizado,
+                civil_ms: AGORA_S * 1000,
+                incerteza_ms: Some(979),
+                logico_s: AGORA_S,
+                pendente: false,
+                divergente: false,
+                adiantado: false,
+            };
+            assert_eq!(h.to_string(), "sincronizado, autenticada, +-979 ms");
+            h.adiantado = true;
+            h.divergente = true;
+            assert_eq!(
+                h.to_string(),
+                "sincronizado, autenticada, +-979 ms; uma fonte divergente; o logico adiantado"
+            );
+            let rtc = Hora {
+                estado: Estado::Rtc,
+                incerteza_ms: None,
+                adiantado: false,
+                divergente: false,
+                ..h
+            };
+            assert_eq!(rtc.to_string(), "rtc, nao autenticada: a do tempo logico");
+            // Vencida, mesmo com a incerteza: não autenticada.
+            let vencido = Hora {
+                estado: Estado::Vencido,
+                incerteza_ms: Some(10_001),
+                pendente: true,
+                ..rtc
+            };
+            assert_eq!(
+                vencido.to_string(),
+                "vencido, nao autenticada: a do tempo logico; salto pendente"
+            );
+        }
+
+        #[test]
+        fn os_nomes_vao_e_voltam() {
+            for e in [
+                Estado::Rtc,
+                Estado::Sincronizado,
+                Estado::Holdover,
+                Estado::Vencido,
+                Estado::Desligado,
+            ] {
+                assert_eq!(Estado::de(e.nome()), Some(e));
+            }
+            assert!(Estado::Sincronizado.autenticado() && Estado::Holdover.autenticado());
+            assert!(!Estado::Rtc.autenticado() && !Estado::Vencido.autenticado());
+            assert!(!Estado::Desligado.autenticado());
+        }
+    }
+}

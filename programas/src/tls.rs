@@ -4,11 +4,14 @@
 //! gate, como qualquer pedido do programa:
 //!
 //! - a **semente** de cada conexão: 32 bytes do `random.read`;
-//! - o **relógio**: o tempo lógico do `system.info` — o relógio civil com
-//!   o piso do journal, que nunca volta: um RTC atrasado de propósito não
-//!   ressuscita um certificado vencido. O civil é o RTC até o primeiro
-//!   acordo das fontes de hora, e a hora autenticada depois; o estado e a
-//!   incerteza dele não entram aqui;
+//! - a **hora** da validade dos certificados: a do objeto `time` do
+//!   `system.info`, pela regra de [`protocolo::usuario::hora`] — o civil
+//!   quando a hora é autenticada (`sincronizado`, `holdover`), e o tempo
+//!   lógico quando não é (`rtc`, `vencido`): o civil com o piso do journal,
+//!   que nunca volta, e por isso um RTC atrasado de propósito não ressuscita
+//!   um certificado vencido. O RTC cru nunca vale como prova. A mesma hora
+//!   confere os cookies (ver [`crate::http::relogio_dos_cookies`]), e o
+//!   estado dela vai junto, para o programa dizer com que hora conferiu;
 //! - as **âncoras**: um arquivo PEM lido por `fs.read`;
 //! - o **transporte**: a conexão do `net.connect` — o destino inteiro, que
 //!   a política enumera —, com cada `net.send` e cada `net.recv` decididos
@@ -17,13 +20,14 @@
 //!   quem falhou — a recusa do gate, o firewall, a conexão recusada ou
 //!   derrubada, o prazo —, e não viram um código do TLS.
 //!
-//! A ordem de [`conectar`] é a de quem falha fechado: a semente e o relógio
-//! antes de qualquer conexão — sem eles, nada sai —, e o destino decidido
+//! A ordem de [`conectar`] é a de quem falha fechado: a semente e a hora
+//! antes de qualquer conexão — sem elas, nada sai —, e o destino decidido
 //! pelo gate antes do primeiro byte do TLS. Um destino fora do alcance é a
 //! recusa do gate, com o código dele, e o `ClientHello` nem é montado.
 
 use alloc::vec::Vec;
 
+pub use protocolo::usuario::hora::{Estado, Hora};
 pub use tls::{Ancoras, CLARO_POR_REGISTRO, Codigo, Falha, Sessao};
 
 use crate::conexao;
@@ -88,14 +92,15 @@ pub fn semente() -> Result<[u8; 32], Falha> {
     Ok(semente)
 }
 
-/// O relógio: o tempo lógico, em segundos desde 1970, do `system.info`.
-/// Zero — sem RTC e sem piso — é falta de relógio.
-pub fn relogio() -> Result<u64, Falha> {
+/// A hora de conferir validades, do objeto `time` do `system.info`, pelo
+/// gate — ver [`Hora::validade_s`]. Sem o objeto, com um que não se
+/// entende, ou com a hora zero — sem RTC e sem piso —, é falta de relógio.
+pub fn hora() -> Result<Hora, Falha> {
     let r = do_pedido(nativo::pedir("system.info", |_| Ok(())))?;
     r.resultado()
         .ok()
-        .and_then(|i| i.member("persistence")?.member("clock")?.as_u64())
-        .filter(|&s| s > 0)
+        .and_then(|i| Hora::ler(i.member(protocolo::usuario::hora::MEMBRO)?))
+        .filter(|h| h.validade_s() > 0)
         .ok_or(Falha::SemRelogio)
 }
 
@@ -134,9 +139,9 @@ pub fn ancoras(caminho: &str) -> Result<Ancoras, Falha> {
 /// Conecta ao `destino` — `tcp:<ipv4>:<porta>`, decidido pelo gate —, e
 /// conversa TLS com quem prova ser `nome`, pelas `ancoras`.
 pub fn conectar(destino: &str, nome: &str, ancoras: &Ancoras) -> Result<Sessao<Conexao>, Falha> {
-    // Antes de qualquer conexão: sem semente ou sem relógio, nada sai.
+    // Antes de qualquer conexão: sem semente ou sem hora, nada sai.
     let semente = semente()?;
-    let agora = relogio()?;
+    let agora = hora()?.validade_s();
     // O destino, pelo gate: a recusa vem com o código dele, e o TLS nem
     // começa.
     let conexao = conexao::abrir(destino, Prazo::PADRAO).map_err(conexao::Falha::para_o_tls)?;

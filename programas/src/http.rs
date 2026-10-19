@@ -252,7 +252,7 @@ pub fn conectar(url: &Url, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
         Esquema::Https => {
             let ancoras = opcoes.ancoras.ok_or(Falha::SemAncoras)?;
             let semente = tls::semente().map_err(Falha::Tls)?;
-            let agora = tls::relogio().map_err(Falha::Tls)?;
+            let agora = tls::hora().map_err(Falha::Tls)?.validade_s();
             Some((ancoras, semente, agora))
         }
     };
@@ -519,12 +519,15 @@ pub fn obter_com_pote(
     buscar_com_pote(Pedido::novo(Metodo::Get, url), opcoes, limites, pote)
 }
 
-/// O relógio da validade dos cookies: o tempo lógico do `system.info`,
-/// pelo gate, o mesmo do TLS. `None` sem relógio — sem RTC, sem a permissão
-/// de lê-lo, ou com a leitura recusada —: aí a validade não se confere, e
-/// os cookies que a têm não vão (ver `http::cookies`).
+/// O relógio da validade dos cookies — o `Expires` e o `Max-Age`: a hora
+/// do TLS ([`tls::hora`]), pela mesma regra — o civil autenticado, ou o
+/// tempo lógico sem ele —, e nunca o RTC cru. `None` sem relógio — sem RTC,
+/// sem a permissão de lê-lo, ou com a leitura recusada —: aí a validade não
+/// se confere, e os cookies que a têm não vão (ver `http::cookies`). A hora
+/// confere a validade e mais nada: o cookie não é identidade, credencial,
+/// autoridade nem permissão.
 pub fn relogio_dos_cookies() -> Option<u64> {
-    tls::relogio().ok()
+    tls::hora().ok().map(|h| h.validade_s())
 }
 
 /// O corpo de `r` como texto, para dizer — o que não é texto vira `?`.
