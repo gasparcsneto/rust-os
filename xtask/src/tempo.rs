@@ -86,7 +86,7 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_relogio_atrasado,
     },
     Cenario {
-        nome: "o relogio adiantado dois minutos volta no civil; o logico espera sem voltar, e o NSF nao contem por taxa",
+        nome: "o relogio adiantado dois minutos volta no civil; o logico espera sem voltar, o NSF nao contem por taxa parado, e volta a conter andando",
         rodar: o_relogio_adiantado_dois_minutos,
     },
     Cenario {
@@ -899,6 +899,35 @@ fn fechamentos(registros: &[ObjetoPlano]) -> Vec<Fechamento> {
             })
         })
         .collect()
+}
+
+/// Onde estão, em `rodadas`, o candidato e o salto que o confirmou: o
+/// primeiro candidato e o primeiro salto (`efeito`) com o desvio que `perto`
+/// aceita, o candidato antes, e só candidatos com esse desvio entre os
+/// dois. O salto pede duas rodadas seguidas e separadas (desenho §7.4): o
+/// candidato, e uma rodada que concorde com ele a pelo menos
+/// `separacao_minima` dele, contada pelo contador do civil. O serviço marca
+/// a rodada seguinte a um candidato para essa separação no relógio do
+/// kernel, e no emulador os dois andam a taxas diferentes: a rodada pode
+/// chegar antes da separação, pelo contador, e então é candidato de novo,
+/// com o candidato da primeira guardado, e o salto vem na seguinte. Nunca
+/// numa rodada só.
+fn salto_confirmado(
+    rodadas: &[Fechamento],
+    perto: &dyn Fn(&Fechamento) -> bool,
+    efeito: &str,
+) -> Option<(usize, usize)> {
+    let c = rodadas
+        .iter()
+        .position(|f| f.efeito == "candidato" && perto(f))?;
+    let s = rodadas
+        .iter()
+        .position(|f| f.efeito == efeito && perto(f))?;
+    (c < s
+        && rodadas[c..s]
+            .iter()
+            .all(|f| f.efeito == "candidato" && perto(f)))
+    .then_some((c, s))
 }
 
 /// Os vereditos de cada fonte, pela auditoria: o nome da fonte e o detalhe.
@@ -1835,23 +1864,17 @@ fn o_relogio_atrasado(b: &mut Bancada) -> Result<String, String> {
         .into_iter()
         .filter(|f| f.do_servico && f.desfecho == "acordo")
         .collect();
-    let candidato = rodadas.iter().position(|f| f.efeito == "candidato");
-    let salto = rodadas.iter().position(|f| f.efeito == "salto");
     let perto_de_uma_hora = |f: &Fechamento| {
         f.desvio_ms
             .is_some_and(|d| (3_590_000..=3_610_000).contains(&d))
     };
-    match (candidato, salto) {
-        (Some(c), Some(s))
-            if s == c + 1 && perto_de_uma_hora(&rodadas[c]) && perto_de_uma_hora(&rodadas[s]) => {}
-        _ => {
-            return Err(format!(
-                "a auditoria nao tem o candidato e o salto de +1 h em rodadas seguidas: {rodadas:?}; {}",
-                amostra_de_time_sync(&registros)
-            ));
-        }
-    }
-    let s = &rodadas[salto.unwrap_or(0)];
+    let Some((candidato, salto)) = salto_confirmado(&rodadas, &perto_de_uma_hora, "salto") else {
+        return Err(format!(
+            "a auditoria nao tem o candidato e o salto de +1 h que o confirma: {rodadas:?}; {}",
+            amostra_de_time_sync(&registros)
+        ));
+    };
+    let s = &rodadas[salto];
     if !s.recurso.contains(" rtc>sincronizado") || s.codigo != "ALLOW" {
         return Err(format!(
             "o salto nao levou o estado de rtc a sincronizado: {s:?}"
@@ -1862,8 +1885,8 @@ fn o_relogio_atrasado(b: &mut Bancada) -> Result<String, String> {
     Ok(format!(
         "antes, o civil a {:+} s (rtc); r{} candidato d{:+} ms, r{} salto d{:+} ms; depois, o civil a {:+} ms e o logico a {:+} s do hospedeiro",
         antes.desvio_ms() / 1000,
-        rodadas[candidato.unwrap_or(0)].rodada,
-        rodadas[candidato.unwrap_or(0)].desvio_ms.unwrap_or(0),
+        rodadas[candidato].rodada,
+        rodadas[candidato].desvio_ms.unwrap_or(0),
         s.rodada,
         s.desvio_ms.unwrap_or(0),
         depois.desvio_ms(),
@@ -2203,7 +2226,8 @@ fn sair_para(b: &Bancada, m: &mut Ligada, destino: &str) -> Result<(String, Stri
 /// volta. Parado, ele congela os carimbos da auditoria, que é o que as
 /// janelas do NSF contam: uma sondagem lenta, que no relógio de verdade não
 /// cabe numa janela, não pode virar contenção. Uns dois minutos depois o
-/// civil alcança o lógico, e os dois andam juntos de novo.
+/// civil alcança o lógico, e os dois andam juntos de novo — e a contenção
+/// por taxa volta: uma sondagem nova, contada andando, a sustenta.
 fn o_relogio_adiantado_dois_minutos(b: &mut Bancada) -> Result<String, String> {
     b.servidor.todas(Modo::CALADA);
     let mut m = b.subir(Some(120))?;
@@ -2244,17 +2268,13 @@ fn o_relogio_adiantado_dois_minutos(b: &mut Bancada) -> Result<String, String> {
         f.desvio_ms
             .is_some_and(|d| (-130_000..=-110_000).contains(&d))
     };
-    let c = rodadas
-        .iter()
-        .position(|f| f.efeito == "candidato" && perto(f));
-    let s = rodadas.iter().position(|f| f.efeito == "salto" && perto(f));
-    if !matches!((c, s), (Some(c), Some(s)) if s == c + 1)
-        || !rodadas[s.unwrap_or(0)].recurso.contains(" adiantado")
-    {
+    let confirmado = salto_confirmado(&rodadas, &perto, "salto");
+    let Some((c, s)) = confirmado.filter(|(_, s)| rodadas[*s].recurso.contains(" adiantado"))
+    else {
         return Err(format!(
             "a auditoria nao tem a volta de -2 min em duas rodadas, com o logico adiantado: {rodadas:?}"
         ));
-    }
+    };
     // Parado: dez segundos depois, o mesmo lógico, e o civil andou.
     let parado = hora(&mut m)?;
     std::thread::sleep(Duration::from_secs(10));
@@ -2346,6 +2366,40 @@ fn o_relogio_adiantado_dois_minutos(b: &mut Bancada) -> Result<String, String> {
             pedidos_depois - pedidos
         ));
     }
+    // E a contenção por taxa volta, como o desenho manda: uma sondagem
+    // nova, de outro operador — o da porta 3 —, contada com o lógico
+    // andando, sustenta a contenção da saída seguinte dele. O NSF pede o
+    // `net.block` pelo gate, o gate permite, e a conexão seguinte é
+    // barrada.
+    let abertos = nsf(&mut m)?.incidentes_abertos;
+    let mut terceiro = super::AgenteNaPorta::conectar(b.arch, 3)?;
+    for metodo in ["audit.tail", "policy.show", "security.status"] {
+        let r = terceiro.pedir(metodo, "{}")?;
+        if !super::recusado_com(&r, "DENY_PERMISSION") {
+            return Err(format!(
+                "o operador da porta 3 nao foi recusado em {metodo}\n  {r}"
+            ));
+        }
+    }
+    nsf_ate(
+        &mut m,
+        Duration::from_secs(20),
+        "o incidente da sondagem nova",
+        &|n| n.incidentes_abertos > abertos,
+    )?;
+    saida_contida(
+        &mut m,
+        &mut terceiro,
+        "tcp:10.0.2.100:443",
+        "privilege-probing",
+    )?;
+    drop(terceiro);
+    let contidas = pedidos_do_nsf(&mut m)?.saturating_sub(pedidos_depois);
+    if contidas == 0 {
+        return Err(
+            "andando, a saida depois da sondagem nova foi contida sem pedido do NSF".into(),
+        );
+    }
     // Os carimbos da auditoria nunca desceram.
     let (todos, _) = auditoria(&mut m, 0)?;
     let carimbos: Vec<u64> = todos
@@ -2361,10 +2415,10 @@ fn o_relogio_adiantado_dois_minutos(b: &mut Bancada) -> Result<String, String> {
     b.medir(&mut m, false)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "antes, o civil a {:+} s (rtc); r{} candidato e r{} salto de -2 min; o logico parou {} s a frente; a sondagem lenta com ele parado (tres recusas a 35 s) deu {deteccoes} deteccao(oes) e {incidentes} incidente(s); a saida depois dela, parado e depois andando, so recomendacao, e o NSF nao pediu nada; voltou a andar com o civil; {} carimbos da auditoria, nenhum desceu",
+        "antes, o civil a {:+} s (rtc); r{} candidato e r{} salto de -2 min; o logico parou {} s a frente; a sondagem lenta com ele parado (tres recusas a 35 s) deu {deteccoes} deteccao(oes) e {incidentes} incidente(s); a saida depois dela, parado e depois andando, so recomendacao, e o NSF nao pediu nada; voltou a andar com o civil; andando, a sondagem nova do operador da porta 3 sustentou a contencao da saida dele: o NSF pediu o net.block ({contidas} pedido(s)), o gate permitiu, e a conexao seguinte foi barrada; {} carimbos da auditoria, nenhum desceu",
         antes.desvio_ms() / 1000,
-        rodadas[c.unwrap_or(0)].rodada,
-        rodadas[s.unwrap_or(0)].rodada,
+        rodadas[c].rodada,
+        rodadas[s].rodada,
         h.adiantado_ms / 1000,
         carimbos.len()
     ))
@@ -2502,56 +2556,8 @@ fn conter_sem_janela(b: &Bancada, m: &mut Ligada) -> Result<String, String> {
         ));
     }
     esperar_o_incidente(m, "code-tampered", Duration::from_secs(20))?;
-    let aberta = agente.pedir("net.connect", &format!(r#"{{"to":"{DESTINO}"}}"#))?;
-    if !aberta.contains(r#""connection":"#) {
-        return Err(format!(
-            "o gate nao deixou o operador conectar a {DESTINO}\n  {aberta}"
-        ));
-    }
-    // A regra que o NSF pôs, pelo gate, para o fluxo do operador.
-    let limite = Instant::now() + Duration::from_secs(20);
-    let regra = loop {
-        let regras = m.pedir("net.rules", "{}")?;
-        if let Some(r) = regras.split(r#"{"id":"#).find(|r| {
-            r.contains(r#""by":"service nsf""#) && r.contains(&format!(r#""to":"{DESTINO}""#))
-        }) {
-            break r.to_string();
-        }
-        if Instant::now() > limite {
-            let incidentes = m.pedir("security.incidents", "{}")?;
-            return Err(format!(
-                "com o logico parado, a saida depois do codigo adulterado nao foi contida: {regras}\n  {incidentes}"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    };
-    if !campo_simples(&regra, "owner").is_some_and(|d| d.starts_with("agent:")) {
-        return Err(format!("a regra nao e so do fluxo do operador: {regra}"));
-    }
-    let barrada = agente.pedir("net.connect", &format!(r#"{{"to":"{DESTINO}"}}"#))?;
+    saida_contida(m, &mut agente, DESTINO, "code-tampered")?;
     drop(agente);
-    if !barrada.contains("barrado pelo firewall") {
-        return Err(format!(
-            "o firewall nao barrou a conexao seguinte do operador\n  {barrada}"
-        ));
-    }
-    // O incidente diz quem autorizou: o NSF pediu, o gate permitiu.
-    let incidente = acoes_do_incidente(m, "egress-after-probing")?;
-    let acao = incidente
-        .split(r#"{"id":"#)
-        .find(|a| a.contains(&format!(r#""resource":"{DESTINO}""#)))
-        .unwrap_or_default()
-        .to_string();
-    if !acao.contains(r#""method":"net.block""#)
-        || !acao.contains(r#""state":"allowed""#)
-        || !acao.contains(r#""authorized_by":"service:nsf""#)
-        || !acao.contains(r#""level":"reversible-containment""#)
-        || !incidente.contains(r#""code-tampered""#)
-    {
-        return Err(format!(
-            "o incidente nao tem a contencao do NSF permitida pelo gate, apoiada no codigo adulterado: {incidente}"
-        ));
-    }
     let pedidos_depois = pedidos_do_nsf(m)?;
     if pedidos_depois <= pedidos {
         return Err(format!(
@@ -2566,6 +2572,69 @@ fn conter_sem_janela(b: &Bancada, m: &mut Ligada) -> Result<String, String> {
         "o codigo adulterado (CODE_TAMPERED) e a saida para {DESTINO}: o NSF pediu o net.block, o gate permitiu, e a conexao seguinte foi barrada ({} pedido(s) do NSF)",
         pedidos_depois - pedidos
     ))
+}
+
+/// O operador `agente`, com um incidente alto aberto que se apoia em
+/// `apoio`, usa a rede para `destino`, e o gate deixa. A saída é contida:
+/// o NSF pede o `net.block` do destino, só para o fluxo do operador, pelo
+/// gate, como qualquer um; o gate permite, o incidente diz quem pediu e
+/// quem autorizou, e a conexão seguinte do operador é barrada.
+fn saida_contida(
+    m: &mut Ligada,
+    agente: &mut super::AgenteNaPorta,
+    destino: &str,
+    apoio: &str,
+) -> Result<(), String> {
+    let aberta = agente.pedir("net.connect", &format!(r#"{{"to":"{destino}"}}"#))?;
+    if !aberta.contains(r#""connection":"#) {
+        return Err(format!(
+            "o gate nao deixou o operador conectar a {destino}\n  {aberta}"
+        ));
+    }
+    // A regra que o NSF pôs, pelo gate, para o fluxo do operador.
+    let limite = Instant::now() + Duration::from_secs(20);
+    let regra = loop {
+        let regras = m.pedir("net.rules", "{}")?;
+        if let Some(r) = regras.split(r#"{"id":"#).find(|r| {
+            r.contains(r#""by":"service nsf""#) && r.contains(&format!(r#""to":"{destino}""#))
+        }) {
+            break r.to_string();
+        }
+        if Instant::now() > limite {
+            let incidentes = m.pedir("security.incidents", "{}")?;
+            return Err(format!(
+                "a saida para {destino}, com o incidente apoiado em {apoio}, nao foi contida: {regras}\n  {incidentes}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    if !campo_simples(&regra, "owner").is_some_and(|d| d.starts_with("agent:")) {
+        return Err(format!("a regra nao e so do fluxo do operador: {regra}"));
+    }
+    let barrada = agente.pedir("net.connect", &format!(r#"{{"to":"{destino}"}}"#))?;
+    if !barrada.contains("barrado pelo firewall") {
+        return Err(format!(
+            "o firewall nao barrou a conexao seguinte do operador para {destino}\n  {barrada}"
+        ));
+    }
+    // O incidente diz quem autorizou: o NSF pediu, o gate permitiu.
+    let incidente = acoes_do_incidente(m, "egress-after-probing")?;
+    let acao = incidente
+        .split(r#"{"id":"#)
+        .find(|a| a.contains(&format!(r#""resource":"{destino}""#)))
+        .unwrap_or_default()
+        .to_string();
+    if !acao.contains(r#""method":"net.block""#)
+        || !acao.contains(r#""state":"allowed""#)
+        || !acao.contains(r#""authorized_by":"service:nsf""#)
+        || !acao.contains(r#""level":"reversible-containment""#)
+        || !incidente.contains(&format!("\"{apoio}\""))
+    {
+        return Err(format!(
+            "o incidente nao tem a contencao do NSF para {destino} permitida pelo gate, apoiada em {apoio}: {incidente}"
+        ));
+    }
+    Ok(())
 }
 
 /// Um boot com o RTC uma hora à frente, sem fontes: o lógico anda uma hora
@@ -2889,24 +2958,18 @@ fn as_fontes_pulam_dez_minutos(b: &mut Bancada) -> Result<String, String> {
         f.desvio_ms
             .is_some_and(|d| (598_000..=602_000).contains(&d))
     };
-    let c = rodadas
-        .iter()
-        .position(|f| f.efeito == "candidato" && perto(f));
-    let s = rodadas
-        .iter()
-        .position(|f| f.efeito == "salto_alem" && perto(f));
-    if !matches!((c, s), (Some(c), Some(s)) if s == c + 1) {
+    let Some((c, s)) = salto_confirmado(&rodadas, &perto, "salto_alem") else {
         return Err(format!(
-            "a auditoria nao tem o candidato e o salto alem do envelope em rodadas seguidas: {rodadas:?}"
+            "a auditoria nao tem o candidato e o salto alem do envelope que o confirma: {rodadas:?}"
         ));
-    }
+    };
     b.medir(&mut m, true)?;
     m.cortar_a_energia()?;
     Ok(format!(
         "r{} candidato d{:+} ms, r{} salto_alem; o civil a {:+} ms e o logico a {:+} s do hospedeiro",
-        rodadas[c.unwrap_or(0)].rodada,
-        rodadas[c.unwrap_or(0)].desvio_ms.unwrap_or(0),
-        rodadas[s.unwrap_or(0)].rodada,
+        rodadas[c].rodada,
+        rodadas[c].desvio_ms.unwrap_or(0),
+        rodadas[s].rodada,
         h.desvio_ms(),
         h.logico_desvio_s()
     ))
@@ -3794,5 +3857,69 @@ mod testes {
             (13, "sem_quorum", "sem_acordo")
         );
         assert!(f[1].desvio_ms.is_none());
+    }
+
+    #[test]
+    fn o_salto_vem_depois_dos_candidatos_e_nunca_sozinho() {
+        let rodada = |n: u64, desvio_ms: i64, efeito: &str| Fechamento {
+            rodada: n,
+            desfecho: "acordo".into(),
+            contagem: "3/3".into(),
+            desvio_ms: Some(desvio_ms),
+            incerteza_ms: Some(1_000),
+            efeito: efeito.into(),
+            recurso: String::new(),
+            codigo: "ALLOW".into(),
+            do_servico: true,
+        };
+        let perto = |f: &Fechamento| {
+            f.desvio_ms
+                .is_some_and(|d| (-130_000..=-110_000).contains(&d))
+        };
+        // O candidato e a rodada seguinte que o confirma.
+        let um = [
+            rodada(1, -120_000, "candidato"),
+            rodada(2, -119_900, "salto"),
+        ];
+        assert_eq!(salto_confirmado(&um, &perto, "salto"), Some((0, 1)));
+        // A rodada seguinte cedo demais, pelo contador: candidato de novo, e
+        // o salto na outra.
+        let dois = [
+            rodada(1, -120_000, "candidato"),
+            rodada(2, -119_900, "candidato"),
+            rodada(3, -119_800, "salto"),
+        ];
+        assert_eq!(salto_confirmado(&dois, &perto, "salto"), Some((0, 2)));
+        // Antes do candidato, o que não é dele não conta.
+        let antes = [
+            rodada(1, 0, "nada"),
+            rodada(2, -120_000, "candidato"),
+            rodada(3, -119_900, "salto"),
+        ];
+        assert_eq!(salto_confirmado(&antes, &perto, "salto"), Some((1, 2)));
+        // O salto numa rodada só, sem candidato, ou antes dele: não.
+        assert_eq!(
+            salto_confirmado(&[rodada(1, -120_000, "salto")], &perto, "salto"),
+            None
+        );
+        let invertido = [
+            rodada(1, -120_000, "salto"),
+            rodada(2, -119_900, "candidato"),
+        ];
+        assert_eq!(salto_confirmado(&invertido, &perto, "salto"), None);
+        // Entre os dois, algo que não é o candidato: não.
+        let no_meio = [
+            rodada(1, -120_000, "candidato"),
+            rodada(2, -3_000, "gradual"),
+            rodada(3, -119_800, "salto"),
+        ];
+        assert_eq!(salto_confirmado(&no_meio, &perto, "salto"), None);
+        // O candidato de outro desvio, ou o salto de outro efeito: não.
+        let outro = [
+            rodada(1, -60_000, "candidato"),
+            rodada(2, -119_900, "salto"),
+        ];
+        assert_eq!(salto_confirmado(&outro, &perto, "salto"), None);
+        assert_eq!(salto_confirmado(&um, &perto, "salto_alem"), None);
     }
 }
