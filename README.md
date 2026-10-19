@@ -2288,10 +2288,14 @@ conta no teto **dele**: sem isso, um titular cujo outro lado não fecha
 enchia a tabela da máquina com fechos que não eram de ninguém — a suíte o
 mostrou, com um `sleep` da bancada em `10.0.2.100:9` que não fecha por
 trinta segundos. E o fecho
-termina ao chegar ao `TIME_WAIT`, e não dez segundos depois, como o
-`smoltcp` o guardaria: cada conexão nova pega a porta local seguinte numa
+termina quando o outro lado também fechou — no `TIME_WAIT`, ou no
+`CLOSING`, quando os dois FIN se cruzam —, e não dez segundos depois, como
+o `smoltcp` o guardaria: cada conexão nova pega a porta local seguinte numa
 faixa de milhares, e guardar os fechos já terminados fazia titulares novos
-ouvirem "tabela cheia" sem conexão viva de ninguém.
+ouvirem "tabela cheia" sem conexão viva de ninguém. A conexão derrubada —
+pelo firewall, ou porque o dono acabou — termina quando o RST dela sai, e
+não antes: se o vizinho pede um ARP, o RST espera a resposta, até dois
+segundos.
 
 **A associação UDP.** Um destino `udp:` abre uma associação: a mesma
 capacidade, com o mesmo número, o mesmo dono, a mesma decisão a cada uso,
@@ -5679,9 +5683,11 @@ frouxa), e a mutação, de novo, foi reprovada pelo que importa.
 
 ### O que a validação do fechamento achou
 
-A validação completa — aqui e no CI — achou três problemas fora do que o
+A validação completa — aqui e no CI — achou cinco problemas fora do que o
 fechamento mexia, e uma lacuna na própria bancada. Cada um foi reproduzido,
-com a causa, o conserto, o caso que o fixa e a mutação reprovada.
+com a causa, o conserto, o caso que o fixa e a mutação reprovada. Dois deles
+eram anteriores e conhecidos, com a proposta de conserto à espera: a CI
+deste passo os reprovou, e o fechamento pede a CI verde.
 
 - **O fio perdido no meio da conferência** (o kernel). No CI do ARM em
   release, a suíte perdeu o fio da bancada de hora no meio de `hora: cada
@@ -5725,6 +5731,36 @@ com a causa, o conserto, o caso que o fixa e a mutação reprovada.
   a dispara (ver "Onde se confere", acima), e a da assinatura num cenário
   novo, com a fonte forjada: o servidor assina a resposta com uma chave que
   a delegação não nomeia.
+- **O RST que esperava o vizinho** (a pilha de rede). No CI do x86, em
+  depuração, `firewall: descarta o quadro sem fluxo` não viu o firewall
+  barrar o aviso da conexão que a regra derrubou: o contador não se mexeu.
+  Já tinha acontecido uma vez, no ARM com virtio-gpu, e o gatilho de lá não
+  se achou. Agora se achou: a captura do fio mostra que o emulador responde
+  o ARP do `10.0.2.100` com um endereço Ethernet e manda os quadros IP de
+  lá com outro, o do roteador. O `smoltcp` só renova a entrada de um
+  vizinho com o tráfego que vem do mesmo endereço, e por isso ela vence
+  sessenta segundos depois de cada ARP, com tráfego ou sem. Se vencia entre
+  o SYN e a derrubada, o RST esperava um ARP, e a limpeza dos fechos tirava
+  o socket — fechado — na mesma volta: o RST nunca saía. Nada vazava, mas o
+  par de uma conexão derrubada não era avisado. O socket fechado com o RST
+  por sair fica agora nos fechos até ele sair, ou dois segundos; o caso
+  `firewall: o RST da derrubada espera o vizinho` esvazia a tabela de
+  vizinhos antes de derrubar, e confere que o RST sai depois do ARP, barrado
+  pela regra, e que o socket solta a vaga do dono com ele.
+- **O `RESOURCE_LIMIT` dos fechos cruzados** (a pilha de rede). No CI do ARM
+  em release, o programa `compressao` ouviu `RESOURCE_LIMIT` ao abrir uma
+  conexão, sem conexão viva nenhuma. A causa foi medida no T7.3, nos casos
+  dos cookies, e ficou como proposta: quando os dois FIN se cruzam, o
+  emulador reconhece o nosso num segmento que repete o FIN dele com o número
+  antigo; fora da janela, o `smoltcp` descarta o segmento inteiro, como a
+  RFC 9293 manda, e o ACK com ele, e o nosso FIN só é reconhecido no
+  reenvio, um segundo depois. No `CLOSING` daquele segundo, o fecho contava
+  no teto do dono, e quatro fechos cruzados num segundo esgotavam as quatro
+  vagas de um programa que abre uma conexão por pedido. O fecho agora
+  termina também no `CLOSING`: o outro lado já fechou. O caso
+  `rede: o fecho acaba quando o outro lado fechou` fixa a regra, estado a
+  estado; o cruzamento em si depende do tempo da bancada, e não há caso que
+  o provoque sempre.
 
 | Problema | Mutação | Reprovada por |
 |---|---|---|
@@ -5737,6 +5773,8 @@ com a causa, o conserto, o caso que o fixa e a mutação reprovada.
 | o descarte de um quadro só | o datagrama UDP sem associação passa pelo firewall | `firewall: descarta o quadro sem fluxo` — o datagrama sem associação entrou |
 | as sete regras de tempo, pelo nome | as cinco regras sem detecção — a assinatura, o salto, o salto além do envelope, a hora vencida e o lógico parado —, juntas | a bancada de tempo do x86, em release, cada cenário pela sua: a forjada sem `time-source-bad-signature`, a uma hora sem a observação `clock-jump`, os dez minutos sem `clock-jump-beyond-envelope`, a hora que vence sem `time-unauthenticated`, e o dia adiantado sem `logical-clock-stopped` |
 | | o kernel aceita a resposta que a delegada não assinou | a bancada de tempo do x86: com a forjada aceita, o acordo é 3/3, e não 2/2; e `a_forjada_e_recusada_pela_assinatura_da_resposta`, no hospedeiro |
+| o RST que esperava o vizinho | o socket fechado sai dos fechos na hora, com o RST por sair — o código de antes | `firewall: o RST da derrubada espera o vizinho` — o RST não saiu depois do ARP — e `rede: o fecho acaba quando o outro lado fechou`, no x86 |
+| o `RESOURCE_LIMIT` dos fechos cruzados | o `CLOSING` não termina o fecho — o código de antes | `rede: o fecho acaba quando o outro lado fechou`, no x86 |
 
 ## O código de fora da imagem
 
