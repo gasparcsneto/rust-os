@@ -6937,7 +6937,13 @@ o pedido; o boot o reaplica por cima da imagem, antes de abrir as portas.
 `system.info` diz o estado (`persistence`), a geração administrativa, a
 âncora, a região, quanto dela está usado, quantas compactações houve, a
 interface do TPM (`tpm_interface`: TIS ou CRB) e o começo da EK
-(`tpm_ek`). A bancada `cargo xtask persistencia` sobe a mesma máquina várias
+(`tpm_ek`). Os números do journal saem de uma leitura só, com a trava
+tomada uma vez: lidos em pedaços, um registro só de auditoria que o coletor
+gravasse entre dois deles entraria em `audit_records` e não em `records`,
+e a diferença diria um registro de estado a menos do que o journal tem —
+a bancada viu isso na CI.
+
+A bancada `cargo xtask persistencia` sobe a mesma máquina várias
 vezes, corta a energia, devolve fotografias antigas do disco, estraga o
 journal, limpa o TPM, devolve o TPM a um estado anterior, tira o TPM da
 máquina, avança o contador por fora, troca a interface do TPM e volta o

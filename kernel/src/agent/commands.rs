@@ -2332,31 +2332,30 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // que nunca volta.
     w.key("persistence")?;
     w.begin_object()?;
-    let (estado, geracao, ancora, registros, boots) = crate::persistencia::relatorio();
-    w.field_str("state", estado.como_str())?;
-    w.field_str("reason", estado.motivo())?;
-    w.field_u64("generation", geracao)?;
+    // Os números, de uma vez: em pedaços, um registro que o coletor grave
+    // no meio entraria num e não no outro — ver
+    // [`crate::persistencia::relatorio`].
+    let r = crate::persistencia::relatorio();
+    w.field_str("state", r.estado.como_str())?;
+    w.field_str("reason", r.estado.motivo())?;
+    w.field_u64("generation", r.geracao)?;
     w.key("anchor")?;
-    match ancora {
+    match r.ancora {
         Some(a) => w.u64_value(a)?,
         None => w.null_value()?,
     }
-    w.field_u64("records", registros)?;
-    w.field_u64(
-        "audit_records",
-        crate::persistencia::registros_de_auditoria(),
-    )?;
+    w.field_u64("records", r.registros)?;
+    w.field_u64("audit_records", r.de_auditoria)?;
     w.field_u64(
         "audit_durable_seq",
         crate::persistencia::auditoria_gravada(),
     )?;
     // A região do journal e quanto dela está ocupado: a compactação
     // acontece com três quartos.
-    let (regiao, compactacoes, usados, setores) = crate::persistencia::regiao();
-    w.field_u64("region", regiao as u64)?;
-    w.field_u64("region_used", usados)?;
-    w.field_u64("region_sectors", setores)?;
-    w.field_u64("compactions", compactacoes)?;
+    w.field_u64("region", r.regiao as u64)?;
+    w.field_u64("region_used", r.usados)?;
+    w.field_u64("region_sectors", r.setores)?;
+    w.field_u64("compactions", r.compactacoes)?;
     // O TPM: por qual interface, e a impressão da EK com que o journal
     // fala — os oito primeiros bytes do ponto, para distinguir um TPM de
     // outro sem expor nada que importe.
@@ -2372,7 +2371,7 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         })
         .unwrap_or("");
     w.field_str("tpm_ek", ek)?;
-    w.field_u64("boots", boots)?;
+    w.field_u64("boots", r.boots)?;
     w.field_u64("clock", crate::persistencia::agora())?;
     // O que o disco confirmou: escritas e descargas. É de fora que se vê
     // uma operação de autoridade terminar numa descarga.

@@ -265,32 +265,67 @@ pub fn geracao() -> u64 {
     com(|p| p.geracao)
 }
 
-/// O relatório para o `system.info`: estado, motivo, geração, âncora,
-/// registros e boots.
-pub fn relatorio() -> (Estado, u64, Option<u64>, u64, u64) {
+/// O relatório para o `system.info`: o que ele diz da persistência, lido
+/// de uma vez só — ver [`relatorio`].
+#[derive(Clone, Copy)]
+pub struct Relatorio {
+    pub estado: Estado,
+    pub geracao: u64,
+    /// O valor do contador que o journal confirmou por último.
+    pub ancora: Option<u64>,
+    /// Quantos registros o journal tem.
+    pub registros: u64,
+    /// Quantos deles são só de auditoria.
+    pub de_auditoria: u64,
+    pub boots: u64,
+    /// A região em que o journal mora, e quantas compactações ele já teve.
+    pub regiao: usize,
+    pub compactacoes: u64,
+    /// Quantos setores da região estão ocupados, de quantos.
+    pub usados: u64,
+    pub setores: u64,
+}
+
+/// O relatório, com a trava tomada uma vez só.
+///
+/// # Por que de uma vez
+///
+/// Porque o coletor grava a auditoria de outro núcleo a qualquer hora. Lido
+/// em pedaços — os registros numa tomada da trava, os só de auditoria em
+/// outra —, um registro só de auditoria gravado entre as duas entra num
+/// número e não no outro, e a diferença entre eles, que é quantos registros
+/// de estado o journal tem, sai menor do que ele tem. Foi o que a bancada
+/// de persistência viu na CI, com o journal inteiro no disco.
+pub fn relatorio() -> Relatorio {
     com(|p| {
-        (
-            p.estado,
-            p.geracao,
-            p.aberta.as_ref().map(|a| a.escritor.ancora()),
-            p.registros,
-            p.boots,
-        )
+        let (usados, setores) = p.aberta.as_ref().map_or((0, 0), |a| a.escritor.ocupacao());
+        Relatorio {
+            estado: p.estado,
+            geracao: p.geracao,
+            ancora: p.aberta.as_ref().map(|a| a.escritor.ancora()),
+            registros: p.registros,
+            de_auditoria: p.registros_de_auditoria,
+            boots: p.boots,
+            regiao: p.regiao,
+            compactacoes: p.compactacoes,
+            usados,
+            setores,
+        }
     })
 }
 
-/// A região do journal, quantas compactações ele já teve, e quantos
-/// setores da região estão ocupados, de quantos.
+/// Só para a suíte: a região do journal, quantas compactações ele já teve,
+/// e quantos setores da região estão ocupados, de quantos.
+#[cfg(feature = "modo-teste")]
 pub fn regiao() -> (usize, u64, u64, u64) {
-    com(|p| {
-        let (usados, total) = p.aberta.as_ref().map_or((0, 0), |a| a.escritor.ocupacao());
-        (p.regiao, p.compactacoes, usados, total)
-    })
+    let r = relatorio();
+    (r.regiao, r.compactacoes, r.usados, r.setores)
 }
 
-/// Quantos registros do journal são só de auditoria.
+/// Só para a suíte: quantos registros do journal são só de auditoria.
+#[cfg(feature = "modo-teste")]
 pub fn registros_de_auditoria() -> u64 {
-    com(|p| p.registros_de_auditoria)
+    relatorio().de_auditoria
 }
 
 /// A última sequência da auditoria que está no journal: escrita,
@@ -748,7 +783,13 @@ fn abrir_em_ordem() {
     // journal na próxima gravação: o coletor não espera para isso.
     match estado {
         Estado::Disponivel => {
-            let (_, g, a, r, b) = relatorio();
+            let Relatorio {
+                geracao: g,
+                ancora: a,
+                registros: r,
+                boots: b,
+                ..
+            } = relatorio();
             crate::log_info!(
                 "persistencia",
                 "journal aberto: {} registros, geracao {}, ancora {}, boot {}",

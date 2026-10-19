@@ -15959,8 +15959,8 @@ fn persistencia_aberta_e_ancorada() -> Resultado {
         crate::log_error!("teste", "disco {:?}, tpm {}", ultima, tpm);
         return Err("o journal nao confere com a ancora do TPM");
     }
-    let (_, _, ancora, n, _) = crate::persistencia::relatorio();
-    if ancora != Some(tpm) || n != registros.len() as u64 {
+    let r = crate::persistencia::relatorio();
+    if r.ancora != Some(tpm) || r.registros != registros.len() as u64 {
         return Err("o relatorio nao diz a ancora ou os registros do journal");
     }
     // A abertura e cada boot fixam a EK com que falaram: a do TPM.
