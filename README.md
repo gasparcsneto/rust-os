@@ -5546,6 +5546,50 @@ as do pedido por mais de um caso.
 | o conflito do `time.confirm` sem registro | `tempo: confirmar so com prova`, `hora: a confirmacao nomeia a rodada` — a decisão sem o conflito depois dela —, `hora: confirmacao e rodada nova ao mesmo tempo` |
 | a rodada nova troca o salto e deixa o número da anterior | `hora: a confirmacao nomeia a rodada` — B não trocou o pendente pelo dela; `hora: confirmacao e rodada nova ao mesmo tempo` |
 
+### As mutações dos consumidores
+
+Dezoito mutações contra o que os consumidores e o NSF prometem — que a
+validade não seja a do lógico com a hora autenticada, nem a do RTC cru sem
+ela; que o TLS e os cookies não deixem de conferir a validade; que o NSF
+dê as regras de tempo, suspenda a contenção por taxa com o lógico parado,
+e só ela, e não corte fonte nenhuma —, em três camadas: os testes do
+hospedeiro e as invariantes; os casos da suíte, no x86; e a bancada de
+tempo, no x86, em release, com o programa `validade` de verdade pela rede
+de verdade. **Todas reprovadas**, e as que tiram a verificação temporal ou
+usam o RTC cru, pela bancada. Quatro delas — as que mexem no TLS e nos
+cookies dos programas, que não têm testes no hospedeiro — só a bancada
+pode reprovar, e reprova. Na primeira passada, quatro sobreviveram ao caso
+da validade da suíte, que tirava o esperado de cada estado da própria
+regra conferida — o RTC tratado como autenticado, a hora vencida tratada
+como autenticada, a regra só pelo lógico e só pelo civil —, e com o civil
+igual ao lógico, as duas horas não se separavam: o caso agora escreve o
+esperado de cada estado, e confere também com o lógico parado 25 s à
+frente do civil, autenticada e vencida. E a mutação do RTC autenticado
+caía antes da hora, no leitor do `system.info` — que recusa um estado
+autenticado sem incerteza, e o programa ficava sem relógio —: uma variante
+sem essa conferência mostra que a bancada a reprova pelo que importa, o
+certificado vencido aceito.
+
+| Mutação | Hospedeiro e invariantes | Suíte | Bancada de tempo |
+|---|---|---|---|
+| o TLS confere pelo lógico, com a hora autenticada | — | — | o RTC além dos certificados: sincronizado, `bancada.duke` dá `TLS_EXPIRED` pelo lógico parado em 2041 |
+| o TLS confere pelo RTC cru | — | — (na suíte o civil e o RTC andam juntos) | o RTC atrás do piso: `vencido.duke` aceito e `bancada.duke` `TLS_NOT_YET_VALID`, pelo RTC de 2020 |
+| a regra trata o `rtc` como autenticado | `os_nomes_vao_e_voltam`, `sem_hora_autenticada_e_a_do_logico` | `hora: a validade dos programas…` — o leitor recusa | o RTC atrás do piso: o programa fica sem relógio (`CLOCK_UNAVAILABLE`) |
+| a mesma, sem a conferência da incerteza | e `o_que_nao_se_entende_e_recusado` | `hora: a validade dos programas…` | o RTC atrás do piso: `vencido.duke` aceito, e o cookie vencido em 2023 volta |
+| a regra trata o `vencido` como autenticado | `o_que_o_programa_diz` e mais dois | `hora: a validade dos programas…` | a hora vence: o programa diz `vencido, autenticada` |
+| a regra sempre pelo lógico | `a_hora_autenticada_e_a_do_civil` | `hora: a validade dos programas…` | o RTC além dos certificados: `TLS_EXPIRED`, e o `Max-Age` não vence |
+| a regra sempre pelo civil | `sem_hora_autenticada_e_a_do_logico` | `hora: a validade dos programas…` | o RTC atrás do piso: `vencido.duke` aceito, e o cookie de 2023 volta |
+| os cookies pelo lógico | — | — | o piso de outro boot e o RTC além dos certificados: o `Max-Age` não vence com a hora autenticada |
+| os cookies pelo RTC cru | — | — | o RTC atrás do piso: o cookie de 2023 vai no pedido |
+| os cookies sem a validade | `a_validade` e mais quatro | `cookies: o programa inteiro pelo gate`, `tls: a validade pela hora autenticada…` | o RTC atrás do piso: o cookie de 2023 vai, e o `Max-Age` nunca vence |
+| o TLS sem a validade — um verificador que aceita o vencido e o que ainda não vale | `o_vencido_e_o_que_ainda_nao_vale_sao_recusados` e mais um; as invariantes: um atalho na verificação do TLS | `tls: o programa cifrado conversa pelo gate`, `tls: a validade pela hora autenticada…` | o RTC atrás do piso: `vencido.duke` aceito |
+| o NSF sem a suspensão | `com_o_logico_parado_a_contencao_por_taxa_fica_suspensa` | — | o relógio adiantado: com o lógico parado, o NSF pede o `net.block` da saída do operador, e o gate o deixa |
+| a janela contada parada esquecida quando o lógico anda | o mesmo | — | o relógio adiantado: andando, a saída para outro destino vira `net.block` |
+| o lógico nunca volta a andar, para o NSF | `de_volta_a_andar_a_janela_contem` e mais dois | — | — |
+| sem a regra do lógico parado | `as_regras_de_tempo` e mais dois | — | — |
+| sem a regra do salto pendente; sem a da assinatura | `as_regras_de_tempo` | — | — |
+| uma regra de tempo bloqueia a fonte | `revogar_e_recomendacao` | — | — |
+
 ## O código de fora da imagem
 
 O código da imagem roda porque é da imagem: veio com o kernel, com a
