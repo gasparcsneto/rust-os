@@ -31523,6 +31523,14 @@ static CASOS: &[Caso] = &[
         f: firewall_descarta_o_quadro_sem_fluxo,
     },
     Caso {
+        nome: "firewall: o RST da derrubada espera o vizinho",
+        f: firewall_o_rst_da_derrubada_espera_o_vizinho,
+    },
+    Caso {
+        nome: "rede: o fecho acaba quando o outro lado fechou",
+        f: rede_o_fecho_acaba_quando_o_outro_lado_fechou,
+    },
+    Caso {
         nome: "dns: o resolvedor pela bancada",
         f: dns_o_resolvedor_pela_bancada,
     },
@@ -41377,9 +41385,11 @@ fn firewall_descarta_o_quadro_sem_fluxo() -> Resultado {
             crate::log_error!("teste", "{}", r);
             return Err("a regra nao derrubou a conexao viva da pessoa");
         }
-        let depois = pilha::descartes();
-        if depois.saida_barrada <= antes.saida_barrada {
-            crate::log_error!("teste", "{:?} -> {:?}", antes, depois);
+        // O aviso sai na volta da derrubada, ou na do ARP, se o vizinho o
+        // pede — ver `pilha::fecho_acabou` —, e a regra o barra.
+        let barrado = || pilha::descartes().saida_barrada > antes.saida_barrada;
+        if esperar_cedendo(barrado, PRAZO_DO_RST_EM_TIQUES).is_err() {
+            crate::log_error!("teste", "{:?} -> {:?}", antes, pilha::descartes());
             return Err("o aviso da conexao derrubada saiu pelo fluxo barrado");
         }
         let _ = conexao;
@@ -41388,6 +41398,94 @@ fn firewall_descarta_o_quadro_sem_fluxo() -> Resultado {
     crate::rede::pilha::esquecer_regras_de_teste();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+/// Quanto um caso espera o RST de uma conexão derrubada: o prazo da pilha
+/// para ele, e a folga das voltas.
+const PRAZO_DO_RST_EM_TIQUES: u64 = crate::rede::pilha::PRAZO_DO_RST_MS / 10 + 100;
+
+/// O RST de uma conexão derrubada espera o vizinho. A tabela de vizinhos
+/// esvaziada — como quando a entrada do `10.0.2.100` vence, sessenta
+/// segundos depois do ARP, por mais tráfego que haja: o emulador responde
+/// o ARP com um endereço Ethernet e manda os quadros IP de lá com outro —,
+/// a regra derruba a conexão viva com o RST ainda por sair. Ele espera o
+/// ARP, sai numa volta seguinte da pilha, e a regra o barra; e o socket só
+/// sai dos fechos com ele, e não prende a vaga do dono depois.
+fn firewall_o_rst_da_derrubada_espera_o_vizinho() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::rede::pilha;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(161),
+            "fw-vizinho",
+            "operador",
+        );
+        let conexao = eco_estabelecido(Chamador::Pessoa(sessao))?;
+        let (_, fechos, _) = pilha::ocupadas_de_teste();
+        pilha::esquecer_vizinhos_de_teste();
+        let antes = pilha::descartes();
+        let r = fs_pedir(
+            sistema_aqui(),
+            "net.block",
+            &alloc::format!(r#"{{"to":"{ECO}","owner":"person:{}"}}"#, sessao.texto()),
+        );
+        if fs_numero(&r, "dropped") != Some(1) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a regra nao derrubou a conexao viva da pessoa");
+        }
+        let barrado = || pilha::descartes().saida_barrada > antes.saida_barrada;
+        if esperar_cedendo(barrado, PRAZO_DO_RST_EM_TIQUES).is_err() {
+            crate::log_error!("teste", "{:?} -> {:?}", antes, pilha::descartes());
+            return Err("o RST da conexao derrubada nao saiu depois do ARP");
+        }
+        let soltou = || pilha::ocupadas_de_teste().1 <= fechos;
+        if esperar_cedendo(soltou, PRAZO_DO_RST_EM_TIQUES).is_err() {
+            crate::log_error!("teste", "{:?}", pilha::ocupadas_de_teste());
+            return Err("o socket derrubado ficou nos fechos depois do RST");
+        }
+        let _ = conexao;
+        Ok(())
+    })();
+    crate::rede::pilha::esquecer_regras_de_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Quando um fecho acaba e solta a vaga do dono — ver
+/// `pilha::fecho_acabou`: no `TIME_WAIT`, e no `CLOSING` — os dois FIN se
+/// cruzaram, e o outro lado já fechou —; fechado, só com o RST que ele deve
+/// já fora, ou vencido o prazo dele; e em nenhum outro estado.
+fn rede_o_fecho_acaba_quando_o_outro_lado_fechou() -> Resultado {
+    use crate::rede::pilha::{PRAZO_DO_RST_MS, fecho_acabou};
+    use smoltcp::socket::tcp::State;
+    let casos = [
+        (State::TimeWait, None, true),
+        (State::Closing, None, true),
+        (State::Closed, None, true),
+        (State::Closed, Some(0), false),
+        (State::Closed, Some(PRAZO_DO_RST_MS - 1), false),
+        (State::Closed, Some(PRAZO_DO_RST_MS), true),
+        (State::FinWait1, None, false),
+        (State::FinWait2, None, false),
+        (State::LastAck, None, false),
+        (State::CloseWait, None, false),
+        (State::Established, None, false),
+        (State::SynSent, None, false),
+        (State::SynReceived, None, false),
+    ];
+    for (estado, rst_pendente_ha, acaba) in casos {
+        if fecho_acabou(estado, rst_pendente_ha) != acaba {
+            crate::log_error!(
+                "teste",
+                "{:?} com o RST pendente ha {:?}",
+                estado,
+                rst_pendente_ha
+            );
+            return Err("o fecho acabou, ou nao, fora da regra");
+        }
+    }
+    Ok(())
 }
 
 /// O servidor de DNS da bancada.

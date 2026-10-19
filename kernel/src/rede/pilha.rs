@@ -151,6 +151,11 @@ pub const MAIOR_DATAGRAMA: usize = MAIOR_QUADRO - 14 - 20 - 8;
 /// espaço de [`BUFFER_DA_ASSOCIACAO`].
 const DATAGRAMAS_DA_ASSOCIACAO: usize = 8;
 
+/// Quanto o RST de um socket derrubado espera para sair — a resposta de um
+/// ARP —, no máximo, antes de o socket sair do conjunto mesmo sem ele. Ver
+/// [`fecho_acabou`].
+pub const PRAZO_DO_RST_MS: u64 = 2_000;
+
 /// O estado de uma conexão, como o agente e o programa o leem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Estado {
@@ -270,13 +275,13 @@ struct Pilha {
     /// no teto dele, e não enche a tabela dos outros com fechos que não
     /// seriam de ninguém.
     ///
-    /// Acabam ao chegar ao `TIME_WAIT`, e não dez segundos depois, como o
-    /// `smoltcp` os guardaria: o `TIME_WAIT` existe para um segmento
-    /// atrasado não cair numa conexão nova com os mesmos quatro números, e
-    /// aqui cada conexão nova pega a porta local seguinte numa faixa de
-    /// milhares. Guardá-los enchia a tabela da máquina com fechos já
-    /// terminados — medido na suíte: titulares novos ouviam "tabela cheia"
-    /// com nenhuma conexão viva de ninguém.
+    /// Acabam quando o outro lado também fechou, e não dez segundos depois,
+    /// como o `smoltcp` os guardaria — ver [`fecho_acabou`]: o `TIME_WAIT`
+    /// existe para um segmento atrasado não cair numa conexão nova com os
+    /// mesmos quatro números, e aqui cada conexão nova pega a porta local
+    /// seguinte numa faixa de milhares. Guardá-los enchia a tabela da
+    /// máquina com fechos já terminados — medido na suíte: titulares novos
+    /// ouviam "tabela cheia" com nenhuma conexão viva de ninguém.
     fechando: Vec<EmFecho>,
     /// As conexões que uma regra do firewall cortou — ver [`Cortada`].
     /// Contam no teto do dono, como uma conexão fechada pelo outro lado
@@ -309,6 +314,42 @@ struct EmFecho {
     destino: Destino,
     porta: u16,
     fluxo: DonoDoFluxo,
+    /// Desde quando o socket está fechado com o RST ainda por sair — o
+    /// vizinho pedia um ARP na volta em que ele caiu. Ver [`fecho_acabou`].
+    rst_desde: Option<u64>,
+}
+
+/// Se o fecho de um socket acabou, e ele sai do conjunto — e do teto do
+/// dono. `rst_pendente_ha` é há quanto tempo, em ms, ele está fechado com o
+/// RST ainda por sair, se está.
+///
+/// - No `TIME_WAIT`, os dois lados fecharam: ver [`Pilha::fechando`].
+/// - No `CLOSING` também: os dois FIN se cruzaram, o outro lado já fechou,
+///   e só falta o reconhecimento do nosso. O emulador da bancada (o TCP de
+///   BSD do slirp) o manda num segmento que repete o FIN dele com o número
+///   antigo; fora da janela, o `smoltcp` descarta o segmento inteiro, como
+///   a RFC 9293 manda, e o ACK com ele. O nosso FIN só é reconhecido quando
+///   o `smoltcp` o reenvia, um segundo depois (`RTTE_MIN_RTO`). Esse
+///   segundo contava no teto do dono, e quatro fechos cruzados num segundo
+///   — um programa que abre uma conexão por pedido — faziam a conexão
+///   seguinte ouvir `RESOURCE_LIMIT` sem conexão viva nenhuma.
+/// - Fechado — derrubado, recusado, ou o reconhecimento que chegou —, só
+///   quando o RST que ele deve já saiu. Derrubado, ele manda um RST; se o
+///   vizinho precisa de um ARP naquela volta, o RST espera a resposta, e o
+///   socket fica fechado com o par ainda nele. Tirá-lo na mesma volta
+///   perdia o RST: o par de uma conexão derrubada não era avisado, e a
+///   regra que a derrubou não chegava a barrar nada. O emulador responde o
+///   ARP do `10.0.2.100` com um endereço Ethernet e manda os quadros IP de
+///   lá com outro, o do roteador; a entrada do vizinho não se renova com o
+///   tráfego, e vence sessenta segundos depois de cada ARP. Até
+///   [`PRAZO_DO_RST_MS`], e não mais: um vizinho que não responde não
+///   prende a vaga do dono.
+pub fn fecho_acabou(estado: tcp::State, rst_pendente_ha: Option<u64>) -> bool {
+    match estado {
+        tcp::State::TimeWait | tcp::State::Closing => true,
+        tcp::State::Closed => rst_pendente_ha.is_none_or(|ms| ms >= PRAZO_DO_RST_MS),
+        _ => false,
+    }
 }
 
 /// Uma conexão que uma regra do firewall cortou — ver [`bloquear`]. O
@@ -749,12 +790,17 @@ impl Pilha {
             }
         }
         // Os que o dono fechou e já terminaram saem do conjunto — ver
-        // `fechando` sobre o `TIME_WAIT`.
+        // [`fecho_acabou`]. Fechado com o par ainda nele, o socket deve o
+        // RST: o `smoltcp` esquece o par quando o manda.
         let sockets = &mut self.sockets;
-        self.fechando.retain(|f| {
-            let acabou = matches!(
-                sockets.get::<tcp::Socket>(f.socket).state(),
-                tcp::State::Closed | tcp::State::TimeWait
+        self.fechando.retain_mut(|f| {
+            let socket = sockets.get::<tcp::Socket>(f.socket);
+            let estado = socket.state();
+            let rst_pendente = estado == tcp::State::Closed && socket.remote_endpoint().is_some();
+            f.rst_desde = rst_pendente.then(|| f.rst_desde.unwrap_or(agora_ms));
+            let acabou = fecho_acabou(
+                estado,
+                f.rst_desde.map(|desde| agora_ms.saturating_sub(desde)),
             );
             if acabou {
                 sockets.remove(f.socket);
@@ -990,6 +1036,7 @@ impl Pilha {
                         destino: c.destino,
                         porta: c.porta,
                         fluxo: c.fluxo,
+                        rst_desde: None,
                     });
                 }
                 Protocolo::Udp => {
@@ -1534,6 +1581,15 @@ pub fn proxima_porta_de_teste(porta: u16) {
     let _ = com_pilha(|p| p.proxima_porta = porta);
 }
 
+/// Só para a suíte: a tabela de vizinhos esvaziada, como quando a entrada
+/// de um vence — o próximo quadro para ele pede um ARP antes de sair. O
+/// `smoltcp` a esvazia quando os endereços da placa mudam; trocá-los pelos
+/// mesmos não muda mais nada.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_vizinhos_de_teste() {
+    let _ = com_pilha(|p| p.iface.update_ip_addrs(|_| {}));
+}
+
 /// Só para a suíte: a conexão `id`, de quem for, tem uma espera armada —
 /// de leitura ou de escrita?
 #[cfg(feature = "modo-teste")]
@@ -1609,6 +1665,7 @@ pub fn fechar(id: u64, dono: &Dono) -> Result<(), &'static str> {
                     destino: c.destino,
                     porta: c.porta,
                     fluxo: c.fluxo,
+                    rst_desde: None,
                 });
             }
             // Sem fecho com o outro lado: a porta se solta na hora.
