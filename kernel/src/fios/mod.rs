@@ -706,17 +706,26 @@ pub fn descansar_ate_a_interrupcao() {
 /// escalonador na mão, se a marca não estiver lá — e então o [`acordar`],
 /// que toma a mesma trava, o acha esperando.
 ///
-/// # Quem sai, sai rodando
+/// # Quem volta da cessão, volta rodando
 ///
 /// O primeiro núcleo não tem ocioso — o fio do boot faz as vezes dele —, e
-/// quem espera ali sem mais ninguém pronto não sai do núcleo: a escolha o
+/// quem estaciona ali sem mais ninguém pronto não sai do núcleo: a escolha o
 /// deixa correr, ainda esperando, e o laço confere o futuro de novo. Ele
 /// pode ficar pronto nessa conferência sem que o waker tenha passado: o
 /// prazo que o tique de outro núcleo venceu antes de o tique deste acordar
-/// os dormentes. O fio saía daqui marcado esperando, e a troca seguinte o
-/// tirava de circulação sem waker nenhum para devolvê-lo — a suíte parou
-/// assim no CI do ARM, no fio dela, que é o do boot, na rodada de hora com
-/// as três fontes mudas. Quem sai, sai rodando.
+/// os dormentes — e o `Dormir` pronto já devolveu a vaga dele na tabela;
+/// ninguém mais o acorda. Marcado esperando, ele saía de circulação para
+/// sempre na primeira troca: a de saída, que o primeiro conserto fechou (a
+/// suíte parou assim no CI do ARM, no fio dela, que é o do boot, na rodada
+/// de hora com as três fontes mudas), e a do quantum que vencia entre a
+/// conferência e a volta a `Rodando`, com outro fio pronto no núcleo (o fio
+/// da bancada de hora sumiu assim no CI do ARM, em release).
+///
+/// Então o fio só fica marcado esperando entre estacionar — com a trava na
+/// mão, e o waker do `Pending` registrado — e a troca: quem volta da cessão,
+/// trocado ou não, volta rodando antes de conferir o futuro de novo. Uma
+/// troca no meio do caminho o tira esperando com o waker no lugar, e o waker
+/// o devolve.
 ///
 /// Não se chama com trava na mão nem com as interrupções mascaradas: o fio
 /// sai do núcleo. Antes de o escalonador ligar, o futuro é conferido a cada
@@ -732,16 +741,6 @@ pub fn bloquear_em<F: core::future::Future>(futuro: F) -> F::Output {
     let mut futuro = core::pin::pin!(futuro);
     loop {
         if let Poll::Ready(valor) = futuro.as_mut().poll(&mut contexto) {
-            // Ver "Quem sai, sai rodando": esperando, ou pronto se o waker
-            // passou com ele ainda no núcleo.
-            com_escalonador(|e| {
-                if let Some(f) = e
-                    .fio_atual_mut()
-                    .filter(|f| matches!(f.estado, Estado::Esperando | Estado::Pronto))
-                {
-                    f.estado = Estado::Rodando;
-                }
-            });
             return valor;
         }
         let estacionou = com_escalonador(|e| {
@@ -754,6 +753,16 @@ pub fn bloquear_em<F: core::future::Future>(futuro: F) -> F::Output {
         });
         if estacionou {
             ceder();
+            // Ver "Quem volta da cessão, volta rodando": esperando, se não
+            // saiu do núcleo; pronto, se o waker passou com ele ainda nele.
+            com_escalonador(|e| {
+                if let Some(f) = e
+                    .fio_atual_mut()
+                    .filter(|f| matches!(f.estado, Estado::Esperando | Estado::Pronto))
+                {
+                    f.estado = Estado::Rodando;
+                }
+            });
         } else if !LIGADO.load(Ordering::Acquire) {
             descansar_ate_a_interrupcao();
         }
@@ -2237,6 +2246,14 @@ pub fn esperando_de_teste(id: u64) -> bool {
             .flatten()
             .any(|f| f.id.numero() == id && f.estado == Estado::Esperando)
     })
+}
+
+/// Só para a suíte: quantas vezes o fio que executa já foi escolhido para
+/// rodar — sem o retrato da tabela inteira de [`com_inscricoes`], que não
+/// cabe na pilha de um fio no perfil de depuração.
+#[cfg(feature = "modo-teste")]
+pub fn escalonamentos_de_teste() -> u64 {
+    com_escalonador(|e| e.fio_atual().map_or(0, |f| f.escalonamentos))
 }
 
 /// Só para a suíte: prende o fio `id` ao núcleo `cpu`, ou o solta com

@@ -22045,6 +22045,143 @@ fn fios_quem_volta_do_bloqueio_volta_rodando() -> Resultado {
     Ok(())
 }
 
+/// Quem é preemptado no meio da conferência do futuro, depois de ter
+/// estacionado e não ter saído do núcleo, volta.
+///
+/// # O que estava em jogo
+///
+/// O caso de cima pôs o fio de volta em `Rodando` na saída de
+/// `bloquear_em`. Faltava o caminho até ela: no núcleo sem ocioso, o fio que
+/// estaciona sem mais ninguém pronto continua no núcleo, ainda esperando, e
+/// confere o futuro de novo assim. O `Dormir` pronto já devolveu a vaga dele
+/// na tabela dos dormentes — ninguém mais o acorda —, e um quantum que
+/// vencia entre a conferência e a volta a `Rodando`, com outro fio pronto no
+/// núcleo, o tirava dali esperando: para sempre. Foi assim que o fio da
+/// bancada de hora sumiu no meio de "hora: cada resposta ruim e um
+/// veredito", no CI do ARM em release, e as rodadas seguintes da suíte
+/// fecharam sem resposta de fonte nenhuma.
+///
+/// Aqui um fio preso ao núcleo da suíte bloqueia num futuro que, na segunda
+/// conferência, acorda a suíte e gira até ela rodar — o que só acontece se
+/// o quantum o tirar do núcleo ali dentro. Os outros fios ficam presos a
+/// outro núcleo, e o fio do caso confere que não saiu do núcleo entre as
+/// duas conferências: é o caminho do defeito. Um prazo longe guarda o waker
+/// da primeira, para a volta em que ele sai de verdade. O fio tem de voltar
+/// da conferência e de `bloquear_em`.
+fn fios_a_preempcao_na_conferencia_nao_perde_o_fio() -> Resultado {
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    use core::task::{Context, Poll, Waker};
+    static SUITE: AtomicU64 = AtomicU64::new(0);
+    static ACORDAR_A_SUITE: AtomicBool = AtomicBool::new(false);
+    static A_SUITE_RODOU: AtomicBool = AtomicBool::new(false);
+    static SAIU_DO_NUCLEO: AtomicBool = AtomicBool::new(false);
+    // 1: voltou de `bloquear_em` depois de a suíte rodar; 2: sem ela.
+    static VOLTOU: AtomicU64 = AtomicU64::new(0);
+    static WAKER_DA_SUITE: crate::trava::Mutex<Option<Waker>> = crate::trava::Mutex::new(None);
+
+    /// A espera da suíte: pronta quando o fio do caso a acorda.
+    struct AteAcordarem;
+    impl Future for AteAcordarem {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            if ACORDAR_A_SUITE.load(SeqCst) {
+                return Poll::Ready(());
+            }
+            let w = cx.waker().clone();
+            let antigo = crate::arch::sem_interrupcoes(|| WAKER_DA_SUITE.lock().replace(w));
+            drop(antigo);
+            if ACORDAR_A_SUITE.load(SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    /// A conferência do fio do caso: pendente na primeira, com a suíte já
+    /// estacionada; pronta na segunda, depois de acordar a suíte e girar até
+    /// ela rodar.
+    struct PreemptadaNaSegunda {
+        conferido: Option<u64>,
+        prazo: crate::tarefas::relogio::Dormir,
+    }
+    impl Future for PreemptadaNaSegunda {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+            let este = self.get_mut();
+            let Some(antes) = este.conferido else {
+                // A suíte ainda não estacionou: confere de novo, sem
+                // estacionar.
+                if !crate::fios::esperando_de_teste(SUITE.load(SeqCst)) {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                este.conferido = Some(crate::fios::escalonamentos_de_teste());
+                let _ = Pin::new(&mut este.prazo).poll(cx);
+                return Poll::Pending;
+            };
+            SAIU_DO_NUCLEO.store(crate::fios::escalonamentos_de_teste() != antes, SeqCst);
+            ACORDAR_A_SUITE.store(true, SeqCst);
+            if let Some(w) = crate::arch::sem_interrupcoes(|| WAKER_DA_SUITE.lock().take()) {
+                w.wake();
+            }
+            let limite = crate::tempo::uptime_ms() + 3_000;
+            while !A_SUITE_RODOU.load(SeqCst) && crate::tempo::uptime_ms() < limite {
+                core::hint::spin_loop();
+            }
+            Poll::Ready(())
+        }
+    }
+
+    extern "C" fn fio(_: u64) -> ! {
+        crate::fios::bloquear_em(PreemptadaNaSegunda {
+            conferido: None,
+            prazo: crate::tarefas::relogio::por_ticks(1_000),
+        });
+        VOLTOU.store(if A_SUITE_RODOU.load(SeqCst) { 1 } else { 2 }, SeqCst);
+        crate::fios::terminar()
+    }
+
+    let Some(nucleo) = outro_nucleo() else {
+        return Err("o caso pede um segundo nucleo para prender os outros fios");
+    };
+    let eu = crate::fios::id_atual();
+    SUITE.store(eu, SeqCst);
+    ACORDAR_A_SUITE.store(false, SeqCst);
+    A_SUITE_RODOU.store(false, SeqCst);
+    SAIU_DO_NUCLEO.store(false, SeqCst);
+    VOLTOU.store(0, SeqCst);
+    let mut presos = alloc::vec::Vec::new();
+    crate::fios::com_inscricoes(|i| {
+        if i.id != eu && i.fixo.is_none() && !matches!(i.estado, "done" | "zombie") {
+            presos.push(i.id);
+        }
+    });
+    presos.retain(|&id| crate::fios::fixar(id, Some(nucleo)));
+    let resultado = (|| -> Resultado {
+        crate::fios::criar_no_nucleo("teste-preempcao", fio, 0, crate::nucleos::atual())?;
+        crate::fios::bloquear_em(AteAcordarem);
+        A_SUITE_RODOU.store(true, SeqCst);
+        esperar_cedendo(|| VOLTOU.load(SeqCst) != 0, 300)
+            .map_err(|_| "o fio preemptado no meio da conferencia nao voltou")?;
+        if SAIU_DO_NUCLEO.load(SeqCst) {
+            return Err(
+                "o fio do caso saiu do nucleo entre as conferencias: o caso nao passou pelo que confere",
+            );
+        }
+        if VOLTOU.load(SeqCst) != 1 {
+            return Err("o fio do caso voltou da conferencia sem a suite ter rodado");
+        }
+        Ok(())
+    })();
+    for &id in &presos {
+        crate::fios::fixar(id, None);
+    }
+    resultado
+}
+
 /// O quantum anda com a trava do escalonador ocupada.
 ///
 /// O tique tomava a trava do escalonador por `try_lock` para contar o
@@ -30266,6 +30403,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: quem volta do bloqueio volta rodando",
         f: fios_quem_volta_do_bloqueio_volta_rodando,
+    },
+    Caso {
+        nome: "fios: a preempcao na conferencia nao perde o fio",
+        f: fios_a_preempcao_na_conferencia_nao_perde_o_fio,
     },
     Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",

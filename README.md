@@ -4867,16 +4867,26 @@ do canal passou de 210 ms a 500 ms — a sonda da tela não conseguia
 fotografar a barra no mesmo segundo. Bloqueado, voltou a 216–272 ms. O
 `cargo xtask invariantes` confere quem ainda descansa.
 
-E quem sai de `bloquear_em` sai **rodando**. O primeiro núcleo não tem
-ocioso — o fio do boot faz as vezes dele —, e quem espera ali sem mais
-ninguém pronto não sai do núcleo: a escolha o deixa correr, ainda
-esperando, e o futuro conferido de novo pode ficar pronto sem o waker — o
-prazo que o tique de outro núcleo venceu antes de o tique deste acordar os
-dormentes. O fio saía marcado esperando, e a troca seguinte o tirava de
-circulação sem waker nenhum para devolvê-lo. Foi o CI que achou: a suíte do
-ARM carregada pelo firmware UEFI parou dez minutos em `hora: os estados e a
-recuperacao`, na rodada com as três fontes mudas — o fio da suíte é o do
-boot, fixo no primeiro núcleo.
+E quem volta da cessão em `bloquear_em` volta **rodando**, antes de
+conferir o futuro de novo. O primeiro núcleo não tem ocioso — o fio do boot
+faz as vezes dele —, e quem estaciona ali sem mais ninguém pronto não sai
+do núcleo: a escolha o deixa correr, ainda esperando, e o futuro conferido
+de novo pode ficar pronto sem o waker — o prazo que o tique de outro núcleo
+venceu antes de o tique deste acordar os dormentes; o `Dormir` pronto já
+devolveu a vaga dele, e ninguém mais o acorda. Marcado esperando, o fio
+saía de circulação para sempre na primeira troca. Foi o CI que achou, duas
+vezes. A primeira, a troca de saída: a suíte do ARM carregada pelo
+firmware UEFI parou dez minutos em `hora: os estados e a recuperacao`, na
+rodada com as três fontes mudas — o fio da suíte é o do boot, fixo no
+primeiro núcleo —, e o conserto pôs o fio de volta a `Rodando` ao sair. A
+segunda, no fechamento do tempo autenticado (T7.6), o quantum que vencia
+entre a conferência e essa volta, com outro fio pronto no núcleo: a suíte
+do ARM em release perdeu o fio da bancada de hora no meio de `hora: cada
+resposta ruim e um veredito`, e dali em diante toda rodada pela rede
+fechou sem resposta de fonte nenhuma — treze casos reprovados. Agora o fio
+só fica marcado esperando entre estacionar — com a trava do escalonador na
+mão e o waker do `Pending` registrado — e a troca: uma troca no meio do
+caminho o tira esperando com o waker no lugar, e o waker o devolve.
 
 ### A rodada
 
@@ -5053,7 +5063,12 @@ E outro, `fios: quem volta do bloqueio volta rodando`: o fio da suíte, no
 núcleo sem ocioso, bloqueia duzentas vezes num futuro que fica pronto sem
 acordar ninguém, e volta de cada uma rodando — com os outros fios presos a
 outro núcleo, ele não tem por quem ser trocado, e o caso exige ter passado
-pela volta sem sair do núcleo.
+pela volta sem sair do núcleo. E `fios: a preempcao na conferencia nao
+perde o fio`: um fio preso ao núcleo da suíte estaciona sem sair dele e,
+na segunda conferência do futuro, acorda a suíte e gira até ela rodar — o
+que só acontece se o quantum o tirar do núcleo ali dentro —; ele tem de
+voltar da conferência e de `bloquear_em`, e confere que não saiu do núcleo
+entre as duas conferências, o caminho do defeito.
 **A concorrência**: o serviço e o sistema
 fazem rodadas ao mesmo tempo sobre as mesmas fontes, cada um com os
 pedidos dele, enquanto outros fios leem o civil e o `system.info time` e o
