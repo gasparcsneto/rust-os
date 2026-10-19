@@ -5669,6 +5669,57 @@ frouxa), e a mutação, de novo, foi reprovada pelo que importa.
 | sem quórum | uma fonte basta | `uma_fonte_so_nao_move_nada` e mais cinco | — | o firewall: com duas barradas, o acordo de uma |
 | a fonte divergente aceita | ela conta na cobertura, e não fica marcada | `a_divergente_fica_de_fora_e_marcada` e mais dois | — | a fonte divergente: acordo 3/3, sem marca |
 
+### O que a validação do fechamento achou
+
+A validação completa — aqui e no CI — achou três problemas fora do que o
+fechamento mexia. Cada um foi reproduzido, com a causa, o conserto, o caso
+que o fixa e a mutação reprovada.
+
+- **O fio perdido no meio da conferência** (o kernel). No CI do ARM em
+  release, a suíte perdeu o fio da bancada de hora no meio de `hora: cada
+  resposta ruim e um veredito`, e toda rodada pela rede dali em diante
+  fechou sem resposta de fonte nenhuma: treze casos. A conta do tempo põe
+  o silêncio entre a resposta à primeira fonte e o pedido à terceira, na
+  rodada da resposta repetida. A causa estava em `fios::bloquear_em` — ver
+  "quem volta da cessão em `bloquear_em` volta rodando", acima: o fio que
+  estacionava no primeiro núcleo e não saía dele conferia o futuro ainda
+  marcado esperando; o `Dormir` pronto já tinha devolvido a vaga, e o
+  quantum que vencia antes da volta a `Rodando`, com outro fio pronto no
+  núcleo, o tirava dali esperando, sem waker. Dez execuções aqui não o
+  reproduziram — seis filtradas, três inteiras e uma com estresse da
+  bancada —; o caso `fios: a preempcao na conferencia nao perde o fio` abre
+  a janela de propósito, e reprova o código de antes na primeira execução,
+  no x86 e no ARM.
+- **A incerteza que cai sem acordo** (a bancada). No CI do x86, o holdover
+  falhou com `a incerteza diminuiu sem acordo`: a primeira rodada foi um
+  acordo gradual, e com as fontes caladas a incerteza caiu 743 ms em 15 s,
+  com o civil −753 ms. É o desenho: o que falta absorver do ajuste conta na
+  incerteza (`hora::disciplina`) e sai dela à taxa do ajuste, 5%. A
+  conferência, desde o T7.4, pedia mais que o desenho, e só passava quando
+  a primeira rodada não deixava ajuste. `incerteza_sem_acordo` confere a
+  propriedade do desenho — a incerteza só cai absorvendo um ajuste gradual,
+  e nunca mais rápido que ele —, e um teste no hospedeiro a fixa, com os
+  números do CI.
+- **O descarte de um quadro só** (a suíte). Numa execução inteira do ARM em
+  release, `firewall: descarta o quadro sem fluxo` contou dois descartes na
+  injeção de um quadro. O retrato dos descartes de antes do caso mostrou de
+  onde vem o outro: o fim de conexões que o kernel já tirou do conjunto — o
+  RST do eco da bancada, o FIN e os dados atrasados do HTTP —, que o
+  firewall descarta como sem fluxo, com razão; o caso de antes fecha duas
+  conexões com o eco logo antes. O caso agora mede o descarte de um quadro
+  só: nenhum descarte a mais é o datagrama entrando; mais de um é outro
+  descarte na mesma volta da pilha, e a injeção se repete.
+
+| Problema | Mutação | Reprovada por |
+|---|---|---|
+| o fio perdido no meio da conferência | `bloquear_em` volta a rodar só na saída — o código de antes | `fios: a preempcao na conferencia nao perde o fio` — o fio preemptado não voltou, no x86 e no ARM |
+| | `bloquear_em` sem volta nenhuma a rodar | `fios: quem volta do bloqueio volta rodando` e `fios: a preempcao na conferencia nao perde o fio`, no x86 e no ARM |
+| a incerteza que cai sem acordo | a conferência estrita de antes | `sem_acordo_a_incerteza_so_cai_absorvendo_o_ajuste_gradual` |
+| | a frouxa: qualquer queda passa | o mesmo |
+| | sem o teto da taxa do ajuste | o mesmo |
+| | o ajuste que não acaba de ser absorvido | o mesmo |
+| o descarte de um quadro só | o datagrama UDP sem associação passa pelo firewall | `firewall: descarta o quadro sem fluxo` — o datagrama sem associação entrou |
+
 ## O código de fora da imagem
 
 O código da imagem roda porque é da imagem: veio com o kernel, com a
