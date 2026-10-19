@@ -5680,8 +5680,8 @@ frouxa), e a mutação, de novo, foi reprovada pelo que importa.
 ### O que a validação do fechamento achou
 
 A validação completa — aqui e no CI — achou três problemas fora do que o
-fechamento mexia. Cada um foi reproduzido, com a causa, o conserto, o caso
-que o fixa e a mutação reprovada.
+fechamento mexia, e uma lacuna na própria bancada. Cada um foi reproduzido,
+com a causa, o conserto, o caso que o fixa e a mutação reprovada.
 
 - **O fio perdido no meio da conferência** (o kernel). No CI do ARM em
   release, a suíte perdeu o fio da bancada de hora no meio de `hora: cada
@@ -5717,6 +5717,14 @@ que o fixa e a mutação reprovada.
   conexões com o eco logo antes. O caso agora mede o descarte de um quadro
   só: nenhum descarte a mais é o datagrama entrando; mais de um é outro
   descarte na mesma volta da pilha, e a injeção se repete.
+- **As sete regras de tempo, pelo nome** (a bancada). Das sete regras de
+  tempo do NSF, a bancada conferia na imagem de produção duas pelo nome —
+  a fonte divergente e o salto pendente — e o lógico parado pelo estado do
+  `security.status`; as outras só se conferiam no hospedeiro, com
+  registros iguais aos do kernel. Agora cada uma se confere no cenário que
+  a dispara (ver "Onde se confere", acima), e a da assinatura num cenário
+  novo, com a fonte forjada: o servidor assina a resposta com uma chave que
+  a delegação não nomeia.
 
 | Problema | Mutação | Reprovada por |
 |---|---|---|
@@ -5727,6 +5735,8 @@ que o fixa e a mutação reprovada.
 | | sem o teto da taxa do ajuste | o mesmo |
 | | o ajuste que não acaba de ser absorvido | o mesmo |
 | o descarte de um quadro só | o datagrama UDP sem associação passa pelo firewall | `firewall: descarta o quadro sem fluxo` — o datagrama sem associação entrou |
+| as sete regras de tempo, pelo nome | as cinco regras sem detecção — a assinatura, o salto, o salto além do envelope, a hora vencida e o lógico parado —, juntas | a bancada de tempo do x86, em release, cada cenário pela sua: a forjada sem `time-source-bad-signature`, a uma hora sem a observação `clock-jump`, os dez minutos sem `clock-jump-beyond-envelope`, a hora que vence sem `time-unauthenticated`, e o dia adiantado sem `logical-clock-stopped` |
+| | o kernel aceita a resposta que a delegada não assinou | a bancada de tempo do x86: com a forjada aceita, o acordo é 3/3, e não 2/2; e `a_forjada_e_recusada_pela_assinatura_da_resposta`, no hospedeiro |
 
 ## O código de fora da imagem
 
