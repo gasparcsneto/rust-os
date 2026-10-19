@@ -6668,6 +6668,18 @@ fn fumaca(
     let _ = filho.wait();
     let _ = std::fs::remove_file(&socket);
 
+    // A hora autenticada, num boot só dela: o mesmo kernel com o servidor
+    // Roughtime da bancada respondendo, e a cadeia inteira até os
+    // consumidores — ver [`tempo::na_fumaca`]. A máquina dela é a de
+    // fábrica; as fumaças com teclado USB e com virtio-gpu não a repetem.
+    let resultado = resultado.and_then(|()| {
+        if teclado == Teclado::Nativo && video == Video::Linear {
+            tempo::na_fumaca(arch, &artefato)
+        } else {
+            Ok(())
+        }
+    });
+
     // O estouro de propósito precisa de um boot só dele: depois de uma
     // falha, o kernel só responde o relatório.
     let resultado = resultado.and_then(|()| {
