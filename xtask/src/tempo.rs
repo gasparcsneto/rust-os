@@ -930,6 +930,41 @@ fn salto_confirmado(
     .then_some((c, s))
 }
 
+/// A incerteza entre duas leituras sem acordo, de `antes_ms` a `depois_ms`
+/// em `passou`: ela só cresce, pela deriva — salvo enquanto o civil absorve
+/// o ajuste gradual do último acordo. O que falta do ajuste conta na
+/// incerteza (`hora::disciplina`, a leitura), e sai dela à taxa do ajuste:
+/// no máximo 5% do tempo que passou. Acabado o ajuste, a incerteza não
+/// diminui mais sem um acordo. `absorvendo` diz se ainda pode haver ajuste
+/// por absorver — o último acordo foi gradual, e a incerteza ainda não
+/// voltou a crescer —; devolve o mesmo, depois desta leitura.
+fn incerteza_sem_acordo(
+    antes_ms: u64,
+    depois_ms: u64,
+    passou: Duration,
+    absorvendo: bool,
+) -> Result<bool, String> {
+    if depois_ms >= antes_ms {
+        return Ok(absorvendo && depois_ms == antes_ms);
+    }
+    if !absorvendo {
+        return Err(format!(
+            "a incerteza diminuiu sem acordo, de {antes_ms} a {depois_ms} ms"
+        ));
+    }
+    // A folga é a da leitura: o kernel lê o civil no meio do pedido, e o
+    // hospedeiro mede `passou` pela ida e volta da serial.
+    let taxa = hora::disciplina::Parametros::PADRAO.taxa_gradual_por_mil;
+    let teto = u64::try_from(passou.as_millis()).unwrap_or(u64::MAX) * taxa / 1000 + 50;
+    if antes_ms - depois_ms > teto {
+        return Err(format!(
+            "a incerteza caiu de {antes_ms} a {depois_ms} ms em {} ms, mais que o ajuste gradual absorve",
+            passou.as_millis()
+        ));
+    }
+    Ok(true)
+}
+
 /// Os vereditos de cada fonte, pela auditoria: o nome da fonte e o detalhe.
 /// São os registros de execução de `time.sync` do serviço que dizem o que a
 /// entrega deu — e não a decisão do gate, cujo recurso é o id do pedido.
@@ -3692,6 +3727,9 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
     let janela = Duration::from_millis(hora::disciplina::Parametros::PADRAO.janela_sincronizado_ms);
     let mut anterior: Option<Hora> = None;
     let mut problema: Option<String> = None;
+    // Um acordo gradual deixa o ajuste por absorver, e ele sai da incerteza
+    // à taxa do ajuste — ver `incerteza_sem_acordo`.
+    let mut absorvendo = h.ultima.as_ref().is_some_and(|u| u.efeito == "gradual");
     let holdover = esperar_a_cada(
         &mut m,
         Duration::from_secs(15),
@@ -3702,8 +3740,14 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
             if let Some(a) = &anterior
                 && problema.is_none()
             {
-                if l.incerteza_ms < a.incerteza_ms {
-                    problema = Some(format!("a incerteza diminuiu sem acordo: {a} e depois {l}"));
+                match incerteza_sem_acordo(
+                    a.incerteza_ms.unwrap_or(0),
+                    l.incerteza_ms.unwrap_or(0),
+                    l.desde(a),
+                    absorvendo,
+                ) {
+                    Ok(ainda) => absorvendo = ainda,
+                    Err(e) => problema = Some(format!("{e}: {a} e depois {l}")),
                 }
                 if l.estado == "vencido" {
                     problema = Some(format!("a hora venceu antes do holdover: {l}"));
@@ -3921,5 +3965,24 @@ mod testes {
         ];
         assert_eq!(salto_confirmado(&outro, &perto, "salto"), None);
         assert_eq!(salto_confirmado(&um, &perto, "salto_alem"), None);
+    }
+
+    #[test]
+    fn sem_acordo_a_incerteza_so_cai_absorvendo_o_ajuste_gradual() {
+        let s = Duration::from_secs;
+        // Sem ajuste por absorver, ela só cresce, pela deriva; cair, por
+        // pouco que seja, é um erro.
+        assert_eq!(incerteza_sem_acordo(1_000, 1_008, s(15), false), Ok(false));
+        assert!(incerteza_sem_acordo(1_008, 1_007, s(15), false).is_err());
+        // Absorvendo o ajuste, cai à taxa dele: a do CI 281, 743 ms em 15 s.
+        assert_eq!(incerteza_sem_acordo(2_071, 1_328, s(15), true), Ok(true));
+        // Mais rápido que o ajuste: não.
+        assert!(incerteza_sem_acordo(2_071, 1_000, s(15), true).is_err());
+        // Voltou a crescer: o ajuste acabou, e cair depois é um erro.
+        assert_eq!(incerteza_sem_acordo(1_328, 1_336, s(15), true), Ok(false));
+        assert!(incerteza_sem_acordo(1_336, 1_300, s(15), false).is_err());
+        // Igual: absorvendo, ainda pode haver ajuste; sem ajuste, não.
+        assert_eq!(incerteza_sem_acordo(1_000, 1_000, s(15), true), Ok(true));
+        assert_eq!(incerteza_sem_acordo(1_000, 1_000, s(15), false), Ok(false));
     }
 }
