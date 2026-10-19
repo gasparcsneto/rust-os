@@ -5614,6 +5614,46 @@ certificado vencido aceito.
 | sem a regra do salto pendente; sem a da assinatura | `as_regras_de_tempo` | — | — |
 | uma regra de tempo bloqueia a fonte | `revogar_e_recomendacao` | — | — |
 
+### As mutações do fechamento
+
+Doze mutações contra as propriedades críticas do fechamento do tempo
+autenticado — onze propriedades, e o RTC cru de dois jeitos: no kernel, o
+lógico sem o piso; nos consumidores, o `rtc` tratado como hora
+autenticada —, em três camadas: os testes do hospedeiro e as invariantes;
+os casos da suíte, no x86; e a bancada de tempo, no x86, em release, na
+imagem de produção, com o programa `validade` de verdade, o servidor
+Roughtime da bancada e o NSF lendo a auditoria. **Todas reprovadas, e
+todas pela bancada.** As três que mexem no kernel não têm testes no
+hospedeiro; a suíte e a bancada as reprovam.
+
+Numa passada, a do NSF sem a suspensão falhou antes do que ela mexe: o
+cenário dos dois minutos pedia o salto na rodada logo depois do primeiro
+candidato, e veio um candidato a mais. Depois de um candidato, o serviço
+marca a rodada seguinte para a separação mínima (4 s) no relógio do
+kernel, e a disciplina mede a separação no contador do civil; no emulador
+os dois andam a taxas diferentes, e a rodada chegou 3,8 s depois, pelo
+contador — cedo demais: candidato de novo, com o primeiro guardado, e o
+salto na seguinte. É o desenho — duas rodadas seguidas e separadas, nunca
+uma só —, e a bancada pedia mais que ele nos três cenários com o candidato
+e o salto. `salto_confirmado` confere a propriedade do desenho, um teste
+no hospedeiro a fixa (e reprova tanto a versão estrita de antes quanto uma
+frouxa), e a mutação, de novo, foi reprovada pelo que importa.
+
+| Propriedade | Mutação | Hospedeiro e invariantes | Suíte | Bancada de tempo |
+|---|---|---|---|---|
+| o RTC cru no lugar do piso | o lógico do kernel é o civil de agora, sem o piso | — | `hora: a disciplina no civil` — o lógico voltou com o civil | o RTC atrás do piso: o segundo boot sobe com o lógico no RTC de 2020, abaixo do piso do primeiro |
+| o RTC cru nos consumidores | o `rtc` tratado como hora autenticada, sem a conferência da incerteza | `os_nomes_vao_e_voltam`, `o_que_nao_se_entende_e_recusado` e `sem_hora_autenticada_e_a_do_logico` | — | o RTC atrás do piso: a validade pelo RTC de 2020, e não pelo piso |
+| o lógico com a hora autenticada | a regra sempre pelo lógico | `a_hora_autenticada_e_a_do_civil` | — | um dia adiantado: a validade pelo lógico, um dia à frente do civil autenticado |
+| o civil sem hora autenticada | a regra sempre pelo civil | `sem_hora_autenticada_e_a_do_logico` | — | o RTC atrás do piso: a validade pelo RTC de 2020 |
+| o certificado vencido aceito | o verificador aceita o vencido e o que ainda não vale | `o_vencido_e_o_que_ainda_nao_vale_sao_recusados` e mais um; as invariantes: um atalho na verificação do TLS | — | as fontes honestas: `vencido.duke` e `futuro.duke` aceitos |
+| o cookie que não vence | sem o `Expires` e sem o `Max-Age` | `a_validade` e mais quatro | — | as fontes honestas: o cookie de 2023 vai |
+| o salto pendente aplicado | o que passaria do teto, ou voltaria fora do envelope, segue pelo candidato | `alem_do_teto_fica_pendente` e mais seis | — | os pendentes: os −10 min aplicados sem ninguém confirmar |
+| a confirmação de outra rodada | a rodada pedida não é comparada com a do pendente | — | `hora: a confirmacao nomeia a rodada` — a confirmação de A, com o pendente de B, não foi um conflito; `hora: confirmacao e rodada nova ao mesmo tempo` | os pendentes: a prova da outra rodada aplica o salto, em vez do `CONFLICT` |
+| a contenção com o lógico parado | o NSF sem a suspensão | `com_o_logico_parado_a_contencao_por_taxa_fica_suspensa` | — | dois minutos adiantado: parado, o NSF pede o `net.block` da saída do operador |
+| a revogação no meio da rodada | a decisão de `time.sync` não consulta a política de agora | — | `hora: revogacao e politica no meio da rodada` — revogado `time.sync`, a entrega passou pelo gate | a revogação: nenhuma recusa de hora do serviço, e a rodada segue |
+| sem quórum | uma fonte basta | `uma_fonte_so_nao_move_nada` e mais cinco | — | o firewall: com duas barradas, o acordo de uma |
+| a fonte divergente aceita | ela conta na cobertura, e não fica marcada | `a_divergente_fica_de_fora_e_marcada` e mais dois | — | a fonte divergente: acordo 3/3, sem marca |
+
 ## O código de fora da imagem
 
 O código da imagem roda porque é da imagem: veio com o kernel, com a
