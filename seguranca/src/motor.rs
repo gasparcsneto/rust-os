@@ -609,10 +609,11 @@ impl Motor {
             }
         }
 
-        let mut deteccoes = Vec::new();
         // O tempo: os registros de `time.sync` e `time.confirm`, de
-        // qualquer titular, contam o estado do relógio.
-        self.tempo.observar(&e);
+        // qualquer titular, contam o estado do relógio — e as regras de
+        // tempo, que só registram e recomendam: nenhuma contém nada, nem
+        // fonte nenhuma.
+        let mut deteccoes = self.tempo.observar(&e);
         if e.titular == Titular::Servico && e.principal != crate::evento::PRINCIPAL_DO_NSF {
             // Outro serviço do sistema — o de hora: observado, e nunca alvo.
             // Não é ação do NSF, e nenhuma regra nem perfil o conta: os
@@ -637,7 +638,20 @@ impl Motor {
                 grafo: &self.grafo,
                 anomalia: anomalia.as_ref(),
             };
-            deteccoes = self.detector.observar(&e, &ctx);
+            let mut das_regras = self.detector.observar(&e, &ctx);
+            // Com o tempo lógico parado, a janela de uma regra junta o que
+            // no relógio está separado: a detecção fica registrada, diz
+            // isso, e não corrobora contenção — nem depois de ele voltar a
+            // andar.
+            if self.tempo.parado() {
+                for d in das_regras.iter_mut().filter(|d| d.regra.por_janela()) {
+                    d.logico_parado = true;
+                    d.explicacao.push_str(
+                        " (com o tempo logico parado: a janela pode juntar o que no relogio esta separado)",
+                    );
+                }
+            }
+            deteccoes.extend(das_regras);
             if let Some(confianca) = self
                 .incidentes
                 .vivo_de(e.epoca, &e.principal)
@@ -749,6 +763,8 @@ impl Motor {
             alvo: None,
             ts_ms: e.ts_ms,
             epoca: e.epoca,
+            logico_parado: false,
+            rodada: None,
         })
     }
 
@@ -875,6 +891,8 @@ impl Motor {
             alvo: None,
             ts_ms: r.ts_ms,
             epoca: self.epoca,
+            logico_parado: false,
+            rodada: None,
         };
         self.registrar(d, r.seq <= self.ao_vivo, 0);
     }
@@ -921,12 +939,24 @@ impl Motor {
             },
         ));
         let saudavel = self.saude().saudavel();
+        let parado = self.tempo.parado();
         let situacao = self.incidentes.get(id).map(|i| Situacao {
             historico: historico || i.historico,
             contencao_negada: i.contencao_negada,
             recuperada: i.recuperada.clone(),
             saudavel,
             dono_contido: d.alvo.as_ref().is_some_and(|a| i.contido(&a.dono)),
+            // A saída depois da sondagem tem a confiança que o incidente
+            // corrobora; se só uma janela a leva até ali, e o lógico está
+            // parado — ou estava quando ela contou —, a contenção por taxa
+            // fica suspensa: a detecção fica, e a ação vira recomendação.
+            taxa_suspensa: (d.regra == Regra::SaidaDepoisDeSondagem
+                && i.corroboracao_para_conter(parado) < d.confianca)
+                .then_some(if parado {
+                    resposta::PARADO
+                } else {
+                    resposta::CONTADA_PARADA
+                }),
         });
         if let Some(inc) = self.incidentes.get_mut(id) {
             inc.evidencias.extend(ids);

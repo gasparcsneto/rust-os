@@ -201,8 +201,9 @@ pub fn status(m: &Motor, w: &mut JsonWriter) -> fmt::Result {
 }
 
 /// O tempo, como a auditoria o conta, como membro `time`: o estado do
-/// relógio na última rodada que fechou, as marcas, e as respostas das
-/// fontes pela classe do veredito. Só observação — ver [`crate::tempo`].
+/// relógio na última rodada que fechou, as marcas, as respostas das fontes
+/// pela classe do veredito, e se o lógico está parado — com ele parado, a
+/// contenção por taxa fica suspensa. Só observação — ver [`crate::tempo`].
 fn tempo(t: &crate::tempo::Tempo, w: &mut JsonWriter) -> fmt::Result {
     w.key("time")?;
     w.begin_object()?;
@@ -235,6 +236,16 @@ fn tempo(t: &crate::tempo::Tempo, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("malformed", t.malformadas)?;
     w.field_u64("no_response", t.sem_resposta)?;
     w.field_u64("confirmed_jumps", t.saltos_confirmados)?;
+    w.field_bool("logical_stopped", t.parado())?;
+    w.key("stopped_at_ms")?;
+    match t.parado_em_ms {
+        Some(ms) => w.u64_value(ms)?,
+        None => w.null_value()?,
+    }
+    w.field_str(
+        "rate_containment",
+        if t.parado() { "suspended" } else { "active" },
+    )?;
     w.end_object()
 }
 

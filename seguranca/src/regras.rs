@@ -85,6 +85,15 @@ pub enum Regra {
     LacunaNaLeitura,
     TempoQueVolta,
     AcaoSemPlano,
+    // As regras de tempo — ver [`crate::tempo`]: o relógio, lido dos
+    // registros do `time.sync` e do `time.confirm`.
+    SaltoDoRelogio,
+    SaltoAlemDoEnvelope,
+    SaltoPendente,
+    FonteDivergente,
+    AssinaturaDaFonte,
+    HoraNaoAutenticada,
+    LogicoParado,
 }
 
 impl Regra {
@@ -107,6 +116,13 @@ impl Regra {
             Regra::LacunaNaLeitura => "audit-gap",
             Regra::TempoQueVolta => "time-goes-back",
             Regra::AcaoSemPlano => "unplanned-nsf-action",
+            Regra::SaltoDoRelogio => "clock-jump",
+            Regra::SaltoAlemDoEnvelope => "clock-jump-beyond-envelope",
+            Regra::SaltoPendente => "clock-jump-pending",
+            Regra::FonteDivergente => "time-source-divergent",
+            Regra::AssinaturaDaFonte => "time-source-bad-signature",
+            Regra::HoraNaoAutenticada => "time-unauthenticated",
+            Regra::LogicoParado => "logical-clock-stopped",
         }
     }
 
@@ -118,7 +134,14 @@ impl Regra {
             | Regra::MudancaDePolitica
             | Regra::DnsContraAPolitica
             | Regra::LacunaNaLeitura
-            | Regra::TempoQueVolta => Categoria::Risco,
+            | Regra::TempoQueVolta
+            | Regra::SaltoDoRelogio
+            | Regra::SaltoAlemDoEnvelope
+            | Regra::SaltoPendente
+            | Regra::FonteDivergente
+            | Regra::AssinaturaDaFonte
+            | Regra::HoraNaoAutenticada
+            | Regra::LogicoParado => Categoria::Risco,
             Regra::SondagemDePrivilegio
             | Regra::ForaDoManifesto
             | Regra::ForaDoAlcance
@@ -131,8 +154,26 @@ impl Regra {
         }
     }
 
+    /// Se a regra conta uma janela no tempo dos registros — a de
+    /// [`JANELA_MS`], ou a taxa do perfil. Com o tempo lógico parado, os
+    /// carimbos não andam, e a janela junta o que no relógio está
+    /// separado: o que ela conta então não corrobora contenção — ver
+    /// [`crate::incidente::Incidente::corroboracao_para_conter`].
+    pub const fn por_janela(self) -> bool {
+        matches!(
+            self,
+            Regra::SondagemDePrivilegio
+                | Regra::AbusoDeCredencial
+                | Regra::ForaDoAlcance
+                | Regra::MudancaDePolitica
+                | Regra::ComportamentoAnomalo
+                | Regra::ContornoDoFirewall
+                | Regra::CadeiaDeProcessos
+        )
+    }
+
     /// Todas, para quem lista.
-    pub const TODAS: [Regra; 16] = [
+    pub const TODAS: [Regra; 23] = [
         Regra::SondagemDePrivilegio,
         Regra::ForaDoManifesto,
         Regra::AbusoDeCredencial,
@@ -149,6 +190,13 @@ impl Regra {
         Regra::LacunaNaLeitura,
         Regra::TempoQueVolta,
         Regra::AcaoSemPlano,
+        Regra::SaltoDoRelogio,
+        Regra::SaltoAlemDoEnvelope,
+        Regra::SaltoPendente,
+        Regra::FonteDivergente,
+        Regra::AssinaturaDaFonte,
+        Regra::HoraNaoAutenticada,
+        Regra::LogicoParado,
     ];
 }
 
@@ -240,6 +288,13 @@ pub struct Deteccao {
     pub alvo: Option<Alvo>,
     pub ts_ms: u64,
     pub epoca: u32,
+    /// A detecção contou a janela com o tempo lógico parado — ver
+    /// [`Regra::por_janela`]: a janela pode juntar o que no relógio está
+    /// separado, e ela não corrobora contenção.
+    pub logico_parado: bool,
+    /// A rodada do relógio de que uma regra de tempo fala: a evidência que
+    /// um `time.confirm` nomeia.
+    pub rodada: Option<u64>,
 }
 
 /// O que o detector guarda de cada evento da janela.
@@ -359,6 +414,8 @@ impl Detector {
                 alvo: None,
                 ts_ms: e.ts_ms,
                 epoca: e.epoca,
+                logico_parado: false,
+                rodada: None,
             };
         let decisoes = |c: Codigo| -> Vec<&Visto> {
             j.iter()
@@ -709,6 +766,8 @@ impl Detector {
             alvo: None,
             ts_ms: e.ts_ms,
             epoca: e.epoca,
+            logico_parado: false,
+            rodada: None,
         })
     }
 
@@ -752,6 +811,8 @@ impl Detector {
             }),
             ts_ms: e.ts_ms,
             epoca: e.epoca,
+            logico_parado: false,
+            rodada: None,
         })
     }
 }

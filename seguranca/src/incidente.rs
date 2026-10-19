@@ -107,6 +107,21 @@ impl Incidente {
     /// independentes apontando para o mesmo lado. O que é só risco — falhas
     /// de autenticação, DNS — não corrobora: fica média.
     pub fn corroboracao(&self) -> Confianca {
+        self.corroboracao_por(|_| true)
+    }
+
+    /// A corroboração em que uma contenção se apoia: a de
+    /// [`Self::corroboracao`], sem o que uma janela contou com o tempo
+    /// lógico parado — e, com ele parado agora (`parado`), sem janela
+    /// nenhuma. Parado, os carimbos não andam, e a janela junta o que no
+    /// relógio está separado: a contenção por taxa fica suspensa até ele
+    /// voltar a andar, e o que se contou enquanto ele estava parado não
+    /// a sustenta nem depois (desenho do tempo, §9.3).
+    pub fn corroboracao_para_conter(&self, parado: bool) -> Confianca {
+        self.corroboracao_por(|d| !(d.regra.por_janela() && (parado || d.logico_parado)))
+    }
+
+    fn corroboracao_por(&self, conta: impl Fn(&Deteccao) -> bool) -> Confianca {
         self.deteccoes
             .iter()
             .filter(|d| {
@@ -116,6 +131,7 @@ impl Incidente {
                         d.regra.categoria(),
                         Categoria::Violacao | Categoria::Contorno
                     )
+                    && conta(d)
             })
             .map(|d| d.confianca.acima())
             .max()
@@ -325,6 +341,8 @@ mod testes {
             alvo: None,
             ts_ms: ts,
             epoca: 0,
+            logico_parado: false,
+            rodada: None,
         }
     }
 

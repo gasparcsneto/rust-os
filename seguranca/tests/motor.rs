@@ -22,6 +22,9 @@ struct Auditoria {
     seq: u64,
     elo: [u8; 32],
     ts: u64,
+    /// Quanto o carimbo anda a cada registro: zero é o tempo lógico
+    /// parado.
+    passo: u64,
     registros: Vec<String>,
 }
 
@@ -56,13 +59,14 @@ impl Auditoria {
             seq: 0,
             elo: [0; 32],
             ts: 10_000,
+            passo: 100,
             registros: Vec::new(),
         }
     }
 
     fn gravar(&mut self, r: R) -> u64 {
         self.seq += 1;
-        self.ts += 100;
+        self.ts += self.passo;
         let e = DaCadeia {
             ts_ms: self.ts,
             titular: r.titular,
@@ -1550,5 +1554,387 @@ fn o_tempo_pela_auditoria() {
     assert_eq!(
         tempo.member("confirmed_jumps").and_then(|v| v.as_u64()),
         Some(1)
+    );
+}
+
+/// O fechamento de uma rodada do serviço de hora, como o kernel o grava:
+/// o civil, o lógico, os estados e as marcas no recurso; a rodada, o
+/// desfecho e o efeito no detalhe.
+fn fechar(a: &mut Auditoria, recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
+    hora_pediu(
+        a,
+        "time.sync",
+        &format!("civil {recurso}"),
+        codigo,
+        &format!("{detalhe}; decisao 2"),
+    )
+}
+
+/// O veredito da resposta de uma fonte.
+fn veredito(a: &mut Auditoria, fonte: &str, codigo: Codigo, detalhe: &str) -> u64 {
+    hora_pediu(
+        a,
+        "time.sync",
+        &format!("{fonte} 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+        codigo,
+        &format!("{detalhe}; decisao 2"),
+    )
+}
+
+/// As detecções de tempo, pela regra, na ordem em que vieram.
+fn do_relogio(m: &Motor) -> Vec<(Regra, Severidade, Confianca)> {
+    let mut v: Vec<(u64, Regra, Severidade, Confianca)> = m
+        .deteccoes()
+        .filter(|d| d.principal == seguranca::tempo::PRINCIPAL)
+        .map(|d| {
+            (
+                d.registros[d.registros.len() - 1],
+                d.regra,
+                d.severidade,
+                d.confianca,
+            )
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|(_, r, s, c)| (r, s, c)).collect()
+}
+
+/// O `time` do `security.status`.
+fn tempo_do_status(m: &Motor) -> String {
+    let mut s = String::new();
+    seguranca::relatorio::status(m, &mut JsonWriter::new(&mut s)).unwrap();
+    String::from_utf8_lossy(Json(s.as_bytes()).member("time").unwrap().0).into_owned()
+}
+
+/// As regras de tempo do desenho (§9.3), cada uma uma vez por acontecimento,
+/// do relógio — e não do serviço de hora —, e nenhuma pede nada: só
+/// registram e recomendam. O salto pendente recomenda o `time.confirm` da
+/// rodada a um administrador, e nunca o pede.
+#[test]
+fn as_regras_de_tempo() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    // Três rodadas sem fonte nenhuma: a hora nunca foi autenticada.
+    for r in 1..=3 {
+        fechar(
+            &mut a,
+            "1000>1100 logico 10>10 rtc>rtc",
+            Codigo::Error,
+            &format!("r{r} sem_quorum 0/3 sem_acordo"),
+        );
+    }
+    // A assinatura de uma fonte não fecha: uma vez, até ela ser aceita de
+    // novo.
+    for _ in 0..2 {
+        veredito(
+            &mut a,
+            "bancada-b",
+            Codigo::DenyCredential,
+            "recusada assinatura_da_resposta 1/4",
+        );
+    }
+    veredito(
+        &mut a,
+        "bancada-b",
+        Codigo::Allow,
+        "aceita midp 1 radi 5 rtt 12",
+    );
+    veredito(
+        &mut a,
+        "bancada-b",
+        Codigo::DenyCredential,
+        "recusada assinatura_da_delegacao 1/4",
+    );
+    // A primeira sincronização corrige o RTC uma hora: o salto que o
+    // envelope explica — gravidade alta, confiança baixa.
+    fechar(
+        &mut a,
+        "1000>3601000 logico 10>3601 rtc>sincronizado",
+        Codigo::Allow,
+        "r4 acordo 3/3 d+3600000 u980 salto",
+    );
+    // Um salto além do envelope.
+    fechar(
+        &mut a,
+        "3700000>4300000 logico 3700>4300 sincronizado>sincronizado",
+        Codigo::Allow,
+        "r5 acordo 3/3 d+600000 u980 salto_alem",
+    );
+    // O pendente: duas rodadas, uma detecção, com a rodada.
+    let pendente = fechar(
+        &mut a,
+        "4400000>4400000 logico 4400>4400 sincronizado>sincronizado pendente",
+        Codigo::Conflict,
+        "r6 acordo 3/3 d+172800000 u980 pendente",
+    );
+    fechar(
+        &mut a,
+        "4500000>4500000 logico 4500>4500 sincronizado>sincronizado pendente",
+        Codigo::Conflict,
+        "r7 acordo 3/3 d+172800000 u980 pendente",
+    );
+    // A fonte divergente: a evidência são os vereditos da rodada.
+    let mut da_rodada = Vec::new();
+    for f in ["bancada-a", "bancada-b", "bancada-c"] {
+        da_rodada.push(veredito(
+            &mut a,
+            f,
+            Codigo::Allow,
+            "aceita midp 1 radi 5 rtt 12",
+        ));
+    }
+    let divergente = fechar(
+        &mut a,
+        "4600000>4600005 logico 4600>4600 sincronizado>sincronizado divergente",
+        Codigo::Allow,
+        "r8 acordo 2/3 d+5 u980 nada",
+    );
+    fechar(
+        &mut a,
+        "4700000>4700000 logico 4700>4700 sincronizado>sincronizado divergente",
+        Codigo::Allow,
+        "r9 acordo 2/3 d+0 u980 nada",
+    );
+    // Vencida: a entrada no estado, uma vez.
+    for (r, estados) in [(10, "holdover>vencido"), (11, "vencido>vencido")] {
+        fechar(
+            &mut a,
+            &format!("4800000>4800000 logico 4800>4800 {estados}"),
+            Codigo::Error,
+            &format!("r{r} sem_quorum 0/3 sem_acordo"),
+        );
+    }
+    // O lógico parado à frente do civil.
+    a.passo = 0;
+    fechar(
+        &mut a,
+        "4900000>4780000 logico 4900>4900 vencido>sincronizado adiantado",
+        Codigo::Allow,
+        "r12 acordo 3/3 d-120000 u980 salto",
+    );
+    ler(&mut m, &a);
+
+    use Confianca as C;
+    use Severidade as S;
+    assert_eq!(
+        do_relogio(&m),
+        [
+            (Regra::HoraNaoAutenticada, S::Media, C::Baixa),
+            (Regra::AssinaturaDaFonte, S::Alta, C::Media),
+            (Regra::AssinaturaDaFonte, S::Alta, C::Media),
+            (Regra::SaltoDoRelogio, S::Alta, C::Baixa),
+            (Regra::SaltoAlemDoEnvelope, S::Alta, C::Media),
+            (Regra::SaltoPendente, S::Alta, C::Media),
+            (Regra::FonteDivergente, S::Media, C::Media),
+            (Regra::HoraNaoAutenticada, S::Media, C::Media),
+            (Regra::SaltoDoRelogio, S::Media, C::Baixa),
+            (Regra::LogicoParado, S::Media, C::Media),
+        ]
+    );
+    let divergencia = m
+        .deteccoes()
+        .find(|d| d.regra == Regra::FonteDivergente)
+        .unwrap();
+    da_rodada.push(divergente);
+    assert_eq!(divergencia.registros, da_rodada);
+    // Nada pedido; o incidente é do relógio, e não do serviço de hora.
+    assert!(m.pedidos().is_empty());
+    assert!(m.incidentes.todos().all(|i| i.principal == "clock"));
+    let inc = m.incidentes.todos().next().unwrap();
+    // A recomendação do pendente: o `time.confirm` da rodada, por um
+    // administrador com prova.
+    let confirmar: Vec<_> = inc
+        .acoes
+        .iter()
+        .filter(|x| x.params.contains("time.confirm"))
+        .collect();
+    assert_eq!(confirmar.len(), 1, "{:?}", inc.acoes);
+    assert_eq!(confirmar[0].estado, EstadoDaAcao::Recomendada);
+    assert_eq!(confirmar[0].nivel, Nivel::Forte);
+    assert_eq!(confirmar[0].metodo, "admin.execute");
+    assert_eq!(
+        confirmar[0].params,
+        r#"{"command":"time.confirm","round":6}"#
+    );
+    assert_eq!(confirmar[0].origem, pendente);
+    assert!(
+        inc.acoes
+            .iter()
+            .all(|x| x.estado == EstadoDaAcao::Recomendada)
+    );
+    let t = tempo_do_status(&m);
+    assert!(t.contains(r#""logical_stopped":true"#), "{t}");
+    assert!(t.contains(r#""rate_containment":"suspended""#), "{t}");
+}
+
+/// Uma confirmação que leva o civil para trás do lógico para o lógico — e
+/// ele volta a andar no primeiro carimbo depois daquele em que parou.
+#[test]
+fn a_confirmacao_que_para_o_logico() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    // 2026-10-19, em ms: o lógico de uma máquina de verdade.
+    a.ts = 1_792_368_000_000;
+    a.passo = 0;
+    let parado = a.ts / 1000;
+    a.gravar(R {
+        titular: Titular::Administrador,
+        agente: "raiz",
+        chave: None,
+        papel: "administrador",
+        metodo: "time.confirm",
+        recurso: &format!(
+            "salto -600000 r3 civil {}>{} logico {parado}>{parado}",
+            parado * 1000,
+            (parado - 600) * 1000
+        ),
+        codigo: Codigo::Allow,
+        detalhe: "prova conferida; executada; permissao time.confirm; desafio 4",
+    });
+    ler(&mut m, &a);
+    assert_eq!(
+        do_relogio(&m),
+        [(Regra::LogicoParado, Severidade::Media, Confianca::Media)]
+    );
+    assert!(m.tempo.parado());
+    // O mesmo carimbo: parado ainda.
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(m.tempo.parado());
+    // Um carimbo depois: andando.
+    a.passo = 1000;
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(!m.tempo.parado());
+    assert!(tempo_do_status(&m).contains(r#""rate_containment":"active""#));
+}
+
+const OUTRO: &str = "tcp:10.0.2.100:8";
+
+/// Para o lógico: o fechamento com a marca, e os carimbos parados.
+fn parar_o_logico(a: &mut Auditoria) {
+    a.passo = 0;
+    let s = a.ts / 1000;
+    fechar(
+        a,
+        &format!(
+            "{}>{} logico {s}>{s} rtc>sincronizado adiantado",
+            s * 1000 + 120_000,
+            s * 1000
+        ),
+        Codigo::Allow,
+        "r2 acordo 3/3 d-120000 u980 salto",
+    );
+}
+
+/// O desenho do tempo (§9.3): com o lógico parado, as detecções continuam
+/// registradas, e a contenção automática por taxa fica suspensa. A sondagem
+/// lenta cabe na janela só porque os carimbos não andam: ela é registrada,
+/// diz isso, e a saída depois dela vira recomendação, com o motivo. E o que
+/// a janela contou parada não sustenta contenção nem depois de o lógico
+/// voltar a andar.
+#[test]
+fn com_o_logico_parado_a_contencao_por_taxa_fica_suspensa() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    parar_o_logico(&mut a);
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(m.tempo.parado());
+    let sondagem = m
+        .deteccoes()
+        .find(|d| d.regra == Regra::SondagemDePrivilegio)
+        .expect("a sondagem continua registrada");
+    assert!(sondagem.logico_parado);
+    assert!(sondagem.explicacao.contains("tempo logico parado"));
+    assert!(
+        m.deteccoes()
+            .any(|d| d.regra == Regra::SaidaDepoisDeSondagem && d.confianca == Confianca::Alta),
+        "a saida depois da sondagem continua registrada"
+    );
+    assert!(
+        m.pedidos().is_empty(),
+        "parado, a contencao por taxa nao sai"
+    );
+    let dono = format!("agent:{}", hex(&CHAVE));
+    let inc = m.incidentes.vivo_de(0, &dono).unwrap();
+    let bloqueio = inc.acoes.iter().find(|x| x.metodo == "net.block").unwrap();
+    assert_eq!(bloqueio.estado, EstadoDaAcao::Recomendada);
+    assert!(
+        bloqueio.justificativa.contains(seguranca::resposta::PARADO),
+        "{}",
+        bloqueio.justificativa
+    );
+
+    // De volta a andar: a janela contada parada ainda não sustenta a
+    // contenção.
+    a.passo = 100;
+    a.ts += 5_000;
+    a.gravar(do_agente("net.connect", OUTRO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(!m.tempo.parado());
+    assert!(
+        m.pedidos().is_empty(),
+        "a janela contada parada nao contem depois"
+    );
+    let inc = m.incidentes.vivo_de(0, &dono).unwrap();
+    let outro = inc
+        .acoes
+        .iter()
+        .find(|x| x.recurso == OUTRO)
+        .expect("a saida para o outro destino tem a recomendacao");
+    assert_eq!(outro.estado, EstadoDaAcao::Recomendada);
+    assert!(
+        outro
+            .justificativa
+            .contains(seguranca::resposta::CONTADA_PARADA),
+        "{}",
+        outro.justificativa
+    );
+}
+
+/// O que não é janela não se suspende: com o lógico parado, o teto de um
+/// administrador exercido — um contorno, uma vez basta — ainda leva a saída
+/// depois dele à contenção.
+#[test]
+fn parado_o_contorno_ainda_contem() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    parar_o_logico(&mut a);
+    a.gravar(do_agente(
+        "policy.write",
+        "",
+        Codigo::DenyRole,
+        "acima do teto do administrador",
+    ));
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(m.tempo.parado());
+    let pedidos = m.pedidos();
+    assert_eq!(pedidos.len(), 1, "o contorno contem, parado ou nao");
+    assert_eq!(pedidos[0].metodo, "net.block");
+}
+
+/// De volta a andar, a janela conta de novo: a sondagem rápida, com os
+/// carimbos andando, leva a saída depois dela à contenção.
+#[test]
+fn de_volta_a_andar_a_janela_contem() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    parar_o_logico(&mut a);
+    a.passo = 100;
+    a.ts += 1_000;
+    sondar(&mut a);
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, ""));
+    ler(&mut m, &a);
+    assert!(!m.tempo.parado());
+    let pedidos = m.pedidos();
+    assert_eq!(pedidos.len(), 1);
+    assert_eq!(pedidos[0].metodo, "net.block");
+    assert!(
+        m.deteccoes()
+            .filter(|d| d.regra == Regra::SondagemDePrivilegio)
+            .all(|d| !d.logico_parado)
     );
 }

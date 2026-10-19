@@ -194,7 +194,18 @@ pub struct Situacao {
     /// O dono do alvo já está contido neste incidente: a ameaça continuou
     /// depois da contenção.
     pub dono_contido: bool,
+    /// Por que a contenção por taxa está suspensa para esta detecção: o
+    /// que a corrobora é uma janela, e o tempo lógico está parado — ou
+    /// estava quando ela contou. `None` quando não está — ver
+    /// [`crate::incidente::Incidente::corroboracao_para_conter`].
+    pub taxa_suspensa: Option<&'static str>,
 }
+
+/// A contenção por taxa com o tempo lógico parado agora.
+pub const PARADO: &str = "o tempo logico esta parado: as janelas de 30 s juntam o que no relogio esta separado, e a contencao por taxa fica suspensa ate ele voltar a andar";
+
+/// A contenção por taxa sobre uma janela contada com o tempo lógico parado.
+pub const CONTADA_PARADA: &str = "a janela que a corrobora foi contada com o tempo logico parado, e pode juntar o que no relogio esta separado: a contencao por taxa nao se apoia nela";
 
 impl Situacao {
     /// Por que o NSF não pede sozinho uma ação de nível `nivel` por `d`;
@@ -210,6 +221,11 @@ impl Situacao {
             return Some(alloc::format!(
                 "{quem} desfez uma contencao deste incidente"
             ));
+        }
+        if nivel >= Nivel::Reversivel
+            && let Some(motivo) = self.taxa_suspensa
+        {
+            return Some(motivo.to_string());
         }
         let permitido = nivel_permitido(d.confianca, d.regra.categoria(), self.saudavel);
         if nivel > permitido {
@@ -320,6 +336,31 @@ pub fn planejar(d: &Deteccao, s: &Situacao) -> Vec<Acao> {
                 justificativa,
             });
         }
+        // O salto pendente espera uma pessoa: conferir a rodada na auditoria
+        // e confirmar com prova. O NSF não tem autoridade sobre o relógio, e
+        // um salto confirmado não se desfaz — o lógico não volta: é do
+        // administrador, nunca pedido.
+        Regra::SaltoPendente => {
+            if let Some(rodada) = d.rodada {
+                v.push(Acao {
+                    id: 0,
+                    nivel: Nivel::Forte,
+                    metodo: "admin.execute".to_string(),
+                    params: alloc::format!(
+                        r#"{{"command":"time.confirm","round":{rodada}}}"#
+                    ),
+                    recurso: String::new(),
+                    dono: String::new(),
+                    estado: Estado::Recomendada,
+                    decisao: None,
+                    origem: d.registros.last().copied().unwrap_or(0),
+                    autorizado_por: "um administrador, com prova".to_string(),
+                    justificativa: alloc::format!(
+                        "o salto pendente da rodada r{rodada} espera uma pessoa: conferir a rodada na auditoria e confirmar com prova, ou esperar as fontes; se outra rodada o pediu de novo, vale a de pending_round"
+                    ),
+                });
+            }
+        }
         // Revogar é definitivo: nunca do NSF, sempre do administrador.
         Regra::AbusoDeCredencial
             if d.titular == Titular::Agente && d.severidade >= Severidade::Alta =>
@@ -364,6 +405,8 @@ mod testes {
             alvo,
             ts_ms: 1,
             epoca: 0,
+            logico_parado: false,
+            rodada: None,
         }
     }
 
