@@ -6,8 +6,9 @@
 //!   regra de `protocolo::usuario::hora` — o civil quando a hora é
 //!   autenticada, o tempo lógico quando não é. O programa diz o estado, se
 //!   a hora era autenticada, e os segundos de cada relógio;
-//! - **o TLS**: `bancada.duke` (válido de 2025 a 2040) e `vencido.duke` (de
-//!   2020 a 2021), no eco TLS da bancada: aceito, ou o código da recusa;
+//! - **o TLS**: `bancada.duke` (válido de 2025 a 2040), `vencido.duke` (de
+//!   2020 a 2021) e `futuro.duke` (de 2042 a 2044, ainda não válido), no
+//!   eco TLS da bancada: aceito, ou o código da recusa;
 //! - **os cookies**: um `Expires` de 2023, um de 2100 e um `Max-Age=3`, pelo
 //!   servidor HTTP da bancada: os que o pote levou logo depois de guardar, e
 //!   os que ele leva 3,1 s depois — a bancada espera do lado dela.
@@ -123,7 +124,7 @@ fn eco(pote: &mut Pote, opcoes: &Opcoes<'_>) -> Result<String, i64> {
 
 /// O TLS: o que cada nome deu, pela hora do sistema.
 fn tls_de(ancoras: &tls::Ancoras) {
-    for nome in ["bancada.duke", "vencido.duke"] {
+    for nome in ["bancada.duke", "vencido.duke", "futuro.duke"] {
         match tls::conectar(ECO_TLS, nome, ancoras) {
             Ok(sessao) => {
                 let _ = sessao.fechar();

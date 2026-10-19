@@ -42,6 +42,7 @@ def main():
     outros = {
         "estranho.duke": contexto(diretorio, "estranho"),
         "vencido.duke": contexto(diretorio, "vencido"),
+        "futuro.duke": contexto(diretorio, "futuro"),
     }
 
     def pelo_nome(conexao, nome, _contexto):
