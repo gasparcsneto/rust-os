@@ -31585,6 +31585,14 @@ static CASOS: &[Caso] = &[
         nome: "hora: nenhum caminho fora do gate",
         f: hora_nenhum_caminho_fora_do_gate,
     },
+    Caso {
+        nome: "hora: a validade dos programas pela regra deles, em cada estado",
+        f: hora_a_validade_dos_programas_em_cada_estado,
+    },
+    Caso {
+        nome: "tls: a validade pela hora autenticada, com rodadas e o NSF ao mesmo tempo",
+        f: tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo,
+    },
     // Perto do fim: a reposição cobre o que a suíte inteira gravou.
     Caso {
         nome: "reconstrucao: imagem limpa e journal inteiro",
@@ -35753,11 +35761,12 @@ fn tls_o_programa_conversa_pelo_gate() -> Resultado {
             v.iter()
                 .all(|(_, c, t)| *c == codigo && *t == Titular::Pessoa)
         };
-        // Uma semente e uma leitura do relógio por conexão: a de fora e as
-        // cinco de dentro.
-        for metodo in ["random.read", "system.info"] {
+        // Uma semente e uma leitura da hora por conexão — a de fora e as
+        // cinco de dentro —, e uma leitura da hora a mais: a que o programa
+        // diz antes do aperto, com o estado dela.
+        for (metodo, vezes) in [("random.read", 6), ("system.info", 7)] {
             let v = decisoes(metodo, "");
-            if v.len() != 6 || !todos_da_pessoa(&v, Codigo::Allow) {
+            if v.len() != vezes || !todos_da_pessoa(&v, Codigo::Allow) {
                 crate::log_error!("teste", "{}: {:?}", metodo, v);
                 return Err("cada conexao nao pediu a semente e o relogio ao gate");
             }
@@ -48738,4 +48747,190 @@ fn hora_nenhum_caminho_fora_do_gate() -> Resultado {
         return Err("system.info aceitou parametros");
     }
     Ok(())
+}
+
+/// A hora dos programas — `protocolo::usuario::hora`, a regra do TLS e dos
+/// cookies — lida do `system.info time` em cada estado do civil: `rtc` e
+/// `vencido` não são autenticados, e a validade é a do lógico;
+/// `sincronizado` e `holdover` são, e a validade é a do civil. É a leitura
+/// que os programas fazem, pelo mesmo comando: uma regra num lugar só, e o
+/// RTC cru em nenhuma delas.
+fn hora_a_validade_dos_programas_em_cada_estado() -> Resultado {
+    use crate::rede::bancada_hora as bancada;
+    use hora::disciplina::Estado;
+    use protocolo::usuario::hora::{Estado as Lido, Hora};
+    com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(hora::disciplina::Parametros {
+            janela_sincronizado_ms: 1_500,
+            deriva_ppm: 300_000,
+            teto_da_incerteza_ms: 4_000,
+            ..parametros_curtos()
+        });
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        let confere = |esperado: Lido| -> Resultado {
+            let t = tempo_no_system_info()?;
+            let h = Hora::ler(Json(t.as_bytes()))
+                .ok_or("a regra dos programas nao le o objeto time")?;
+            // O que o kernel tem logo depois: o civil e o lógico.
+            let civil_s = civil_agora()?.meio_ms / 1000;
+            let logico = crate::persistencia::agora();
+            let certo = if esperado.autenticado() {
+                civil_s
+            } else {
+                logico
+            };
+            if h.estado != esperado
+                || h.autenticada() != esperado.autenticado()
+                || h.validade_s().abs_diff(certo) > 1
+                || h.logico_s.abs_diff(logico) > 1
+            {
+                crate::log_error!(
+                    "teste",
+                    "{:?}: {} (civil {} s, logico {} s)",
+                    esperado,
+                    t,
+                    civil_s,
+                    logico
+                );
+                return Err("a regra dos programas nao deu a hora do estado");
+            }
+            Ok(())
+        };
+        let estado = || civil_agora().map(|l| l.estado);
+        confere(Lido::Rtc)?;
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        confere(Lido::Sincronizado)?;
+        esperar_cedendo(|| estado() == Ok(Estado::Holdover), 500)
+            .map_err(|_| "passada a janela, o civil nao foi a holdover")?;
+        confere(Lido::Holdover)?;
+        esperar_cedendo(|| estado() == Ok(Estado::Vencido), 2_000)
+            .map_err(|_| "com a incerteza acima do teto, o civil nao venceu")?;
+        confere(Lido::Vencido)?;
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        confere(Lido::Sincronizado)
+    })
+}
+
+/// Concorrência: três processos `validade` — o TLS e os cookies pela hora
+/// do `system.info` — de uma pessoa operadora, enquanto o serviço faz
+/// rodadas e o NSF lê a auditoria. Cada processo lê a hora pelo gate, e
+/// confere com o que leu: os três dizem tudo, com a hora autenticada e
+/// pelo civil — `bancada.duke` aceito, `vencido.duke` vencido, o `Max-Age`
+/// vencido 3,1 s depois —; as rodadas fecham sincronizadas, e nada fica
+/// aberto.
+fn tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static FECHADAS: AtomicU64 = AtomicU64::new(0);
+    static ERRADAS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static PARAR: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn rodadas(_: u64) -> ! {
+        while !PARAR.load(SeqCst) {
+            match rodada_do_servico() {
+                crate::hora::servico::Desfecho::Fechada { estado, .. }
+                    if estado == "sincronizado" =>
+                {
+                    FECHADAS.fetch_add(1, SeqCst);
+                }
+                outro => {
+                    crate::log_error!("teste", "rodada concorrente: {:?}", outro);
+                    ERRADAS.fetch_add(1, SeqCst);
+                }
+            }
+            esperar_ms(200);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn nsf(_: u64) -> ! {
+        while !PARAR.load(SeqCst) {
+            crate::seguranca::passo();
+            esperar_ms(300);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_a_bancada_de_hora(2, 86_400, 60, || {
+        com_o_nsf(|| {
+            for c in [&FECHADAS, &ERRADAS, &PRONTOS] {
+                c.store(0, SeqCst);
+            }
+            PARAR.store(false, SeqCst);
+            fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(95), "validade-op", "operador");
+            let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+            let programa = alloc::format!("{dir}/validade");
+            let desde = crate::log::total_emitidos();
+            crate::fios::criar("teste-validade-rodadas", rodadas, 0)?;
+            crate::fios::criar("teste-validade-nsf", nsf, 0)?;
+            for _ in 0..3 {
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            }
+            // O que os três dizem, colhido enquanto dizem: o anel do log é
+            // curto, e as rodadas também escrevem nele.
+            let mut ditas: alloc::vec::Vec<(u64, alloc::string::String)> = alloc::vec::Vec::new();
+            let mut colher = || {
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && !ditas.iter().any(|(s, _)| *s == r.seq)
+                    {
+                        ditas.push((r.seq, alloc::string::String::from(r.mensagem())));
+                    }
+                });
+                ditas
+                    .iter()
+                    .filter(|(_, m)| m.starts_with("processo encerrou com codigo "))
+                    .count()
+                    >= 3
+            };
+            let saiu = esperar_ate(&mut colher, 12_000);
+            PARAR.store(true, SeqCst);
+            esperar_cedendo(|| PRONTOS.load(SeqCst) == 2, 3_000)?;
+            let iguais = |linha: &str| ditas.iter().filter(|(_, m)| m == linha).count();
+            let comecam =
+                |trecho: &str| ditas.iter().filter(|(_, m)| m.starts_with(trecho)).count();
+            if saiu.is_err()
+                || iguais("processo encerrou com codigo 77") != 3
+                || comecam("validade: a hora sincronizado, autenticada") != 3
+                || iguais("validade: tls bancada.duke -> aceito") != 3
+                || iguais("validade: tls vencido.duke -> TLS_EXPIRED") != 3
+                || iguais("validade: cookies antes futuro,vence") != 3
+                || iguais("validade: cookies depois futuro") != 3
+            {
+                for (_, m) in &ditas {
+                    crate::log_error!("teste", "{}", m);
+                }
+                return Err("os tres processos nao conferiram pela hora autenticada");
+            }
+            // Cada um conferiu pelo civil que leu.
+            for (_, m) in &ditas {
+                if let Some(resto) = m.strip_prefix("validade: segundos ") {
+                    let n: alloc::vec::Vec<&str> = resto.split(' ').collect();
+                    if n.len() != 5 || n[1] != "civil" || n[0] != n[2] {
+                        crate::log_error!("teste", "{}", m);
+                        return Err("um processo nao conferiu pelo civil que leu");
+                    }
+                }
+            }
+            if ERRADAS.load(SeqCst) != 0 || FECHADAS.load(SeqCst) == 0 {
+                return Err("as rodadas concorrentes nao fecharam sincronizadas");
+            }
+            if crate::hora::abertos_de_teste() != (0, 0, 0) {
+                crate::log_error!("teste", "abertos {:?}", crate::hora::abertos_de_teste());
+                return Err("as rodadas concorrentes deixaram pedidos ou rodadas abertos");
+            }
+            Ok(())
+        })
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
 }
