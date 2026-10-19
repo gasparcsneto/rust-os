@@ -11289,6 +11289,10 @@ fn sob_a_rede(
     };
     let aperto = dita("provou ser bancada.duke")?;
     let eco = dita("foram e voltaram cifrados")?;
+    // A hora da validade, dita pelo programa: a imagem de produção, sem
+    // fontes, nunca autentica a hora, e o TLS confere pelo tempo lógico —
+    // o desenho do tempo, D3 —, e não pelo RTC cru.
+    let hora = dita("a validade pela hora rtc, nao autenticada: a do tempo logico")?;
     for recusa in [
         "DENY_RESOURCE: o gate recusou antes do TLS",
         "outro.duke -> TLS_NAME_MISMATCH",
@@ -11299,8 +11303,9 @@ fn sob_a_rede(
         dita(recusa)?;
     }
     println!(
-        "  [tls] ok  o cifrado saiu com 86 em {} ms; recusou outro.duke, estranho.duke, vencido.duke e o eco sem TLS; a porta ao lado, DENY_RESOURCE do gate",
-        comeco.elapsed().as_millis()
+        "  [tls] ok  o cifrado saiu com 86 em {} ms; recusou outro.duke, estranho.duke, vencido.duke e o eco sem TLS; a porta ao lado, DENY_RESOURCE do gate; {}",
+        comeco.elapsed().as_millis(),
+        hora.trim_start_matches("cifrado: ")
     );
     println!("  [tls] medido  {aperto}");
     println!("  [tls] medido  {eco}");

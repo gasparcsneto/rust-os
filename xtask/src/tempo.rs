@@ -126,7 +126,7 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_revogacao_no_meio_da_rodada,
     },
     Cenario {
-        nome: "com o teto do registro baixado, a hora vence sem as fontes",
+        nome: "com o teto do registro baixado, a hora vence sem as fontes, e volta com elas",
         rodar: a_hora_vence,
     },
     // Por último: meia hora de máquina.
@@ -1015,6 +1015,9 @@ struct Validade {
     /// depois.
     antes: String,
     depois: String,
+    /// A hora do hospedeiro, em segundos, antes de lançar o programa e
+    /// depois de ele sair: a que ele leu está entre as duas.
+    hospedeiro_s: (u64, u64),
 }
 
 impl Validade {
@@ -1035,17 +1038,27 @@ impl Validade {
     fn pelo_logico(&self) -> bool {
         self.segundos == self.logico_s
     }
+
+    /// Conferiu na hora do hospedeiro, com `folga_s` de cada lado: entre a
+    /// de antes de lançá-lo e a de depois de ele sair — o programa lê a hora
+    /// no começo, e leva segundos para dizer tudo.
+    fn na_hora_do_hospedeiro(&self, folga_s: u64) -> bool {
+        let (antes, depois) = self.hospedeiro_s;
+        (antes.saturating_sub(folga_s)..=depois + folga_s).contains(&self.segundos)
+    }
 }
 
 impl std::fmt::Display for Validade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "a hora `{}`, {} s (civil {} s, logico {} s); bancada.duke {}, vencido.duke {}; cookies {} e, 3,1 s depois, {}",
+            "a hora `{}`, {} s (civil {} s, logico {} s; o hospedeiro de {} a {} s); bancada.duke {}, vencido.duke {}; cookies {} e, 3,1 s depois, {}",
             self.hora,
             self.segundos,
             self.civil_s,
             self.logico_s,
+            self.hospedeiro_s.0,
+            self.hospedeiro_s.1,
             self.bancada,
             self.vencido,
             self.antes,
@@ -1076,6 +1089,8 @@ fn ultimo_do_log(m: &mut Ligada) -> Result<u64, String> {
 /// e lê do log o que ele disse — só o que veio depois de lançá-lo.
 fn validade(m: &mut Ligada, arch: Arquitetura) -> Result<Validade, String> {
     let desde = ultimo_do_log(m)?;
+    let hospedeiro = || servidor_de_hora::agora_ms().div_euclid(1000) as u64;
+    let lancado_em = hospedeiro();
     let lancado = m.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/validade"}}"#, arch.nome()),
@@ -1121,7 +1136,10 @@ fn validade(m: &mut Ligada, arch: Arquitetura) -> Result<Validade, String> {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    let mut v = Validade::default();
+    let mut v = Validade {
+        hospedeiro_s: (lancado_em, hospedeiro()),
+        ..Validade::default()
+    };
     for d in &ditas {
         if let Some(h) = d.strip_prefix("a hora ") {
             v.hora = h.to_string();
@@ -1948,9 +1966,7 @@ fn o_relogio_adiantado_dois_minutos(b: &mut Bancada) -> Result<String, String> {
     // Com o lógico parado, a sondagem lenta: três recusas a 35 s uma da
     // outra, todas com o mesmo carimbo. O desenho (§9.3): enquanto o lógico
     // está parado, as detecções continuam registradas, e a contenção
-    // automática por taxa não acontece. A suspensão dela é do NSF com as
-    // regras de tempo; o que se confere aqui é o que vale hoje: o operador
-    // continua atendido.
+    // automática por taxa não acontece — o operador continua atendido.
     let (_, antes_da_sondagem) = auditoria(&mut m, 0)?;
     let (deteccoes, incidentes, atendido) = sondar_devagar(b, &mut m, Duration::from_secs(35))?;
     let parado_ainda = hora(&mut m)?;
@@ -2223,12 +2239,11 @@ fn o_rtc_alem_dos_certificados(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     let depois = validade(&mut m, b.arch)?;
-    let agora_s = servidor_de_hora::agora_ms().div_euclid(1000) as u64;
     if depois.estado() != "sincronizado"
         || !depois.autenticada()
         || !depois.hora.contains("o logico adiantado")
         || !depois.pelo_civil()
-        || depois.segundos.abs_diff(agora_s) > 5
+        || !depois.na_hora_do_hospedeiro(3)
         || !em_2041(depois.logico_s)
         || depois.bancada != "aceito"
         || depois.vencido != "TLS_EXPIRED"
@@ -2455,11 +2470,10 @@ fn os_saltos_pendentes(b: &mut Bancada) -> Result<String, String> {
     // Com o salto pendente, a hora continua autenticada e o civil não se
     // moveu: a validade é a dele, e não a de dois dias à frente.
     let v = validade(&mut m, b.arch)?;
-    let agora_s = servidor_de_hora::agora_ms().div_euclid(1000) as u64;
     if !v.autenticada()
         || !v.hora.contains("salto pendente")
         || !v.pelo_civil()
-        || v.segundos.abs_diff(agora_s) > 5
+        || !v.na_hora_do_hospedeiro(3)
         || v.bancada != "aceito"
         || v.vencido != "TLS_EXPIRED"
         || v.depois != COOKIES_DEPOIS
@@ -2908,7 +2922,10 @@ fn a_revogacao_no_meio_da_rodada(b: &mut Bancada) -> Result<String, String> {
 /// terceira calada. O salto de uma hora traz a incerteza do acordo — a da
 /// primeira, que a segunda contém —, pouco abaixo do teto. Então as três
 /// calam: sem acordo, a incerteza cresce pela deriva do contador, passa do
-/// teto, e a hora fica `vencido`. O lógico continua andando com o civil.
+/// teto, e a hora fica `vencido`. O lógico continua andando com o civil, e a
+/// validade é a dele. As fontes voltam: o acordo traz a incerteza de volta
+/// abaixo do teto, a hora fica `sincronizado`, e a validade volta a ser a
+/// do civil.
 fn a_hora_vence(b: &mut Bancada) -> Result<String, String> {
     let (disco, artefato) = imagem_com(b, "incerteza 10\n")?;
     b.servidor.modo(
@@ -2992,14 +3009,46 @@ fn a_hora_vence(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     let n = nsf_em(&mut m, "vencido", SINCRONIZADO + Duration::from_secs(40))?;
+    // A volta: as fontes respondem de novo, com raio de 1 s. O acordo traz a
+    // incerteza abaixo do teto — `sincronizado` —, e a validade volta a ser
+    // a do civil, autenticado.
+    b.servidor.todas(Modo::HONESTA);
+    let volta = esperar(
+        &mut m,
+        2 * SINCRONIZADO + Duration::from_secs(40),
+        "a volta das fontes",
+        &mut |h| nada_volta.ver(h),
+        &|h| h.estado == "sincronizado",
+    )?;
+    if volta.desvio_ms().abs() > 3_000 || volta.incerteza_ms.is_none_or(|i| i >= 10_000) {
+        return Err(format!(
+            "as fontes voltaram e a hora nao voltou abaixo do teto: {volta}"
+        ));
+    }
+    let de_volta = validade(&mut m, b.arch)?;
+    if de_volta.estado() != "sincronizado"
+        || !de_volta.autenticada()
+        || !de_volta.pelo_civil()
+        || de_volta.bancada != "aceito"
+        || de_volta.vencido != "TLS_EXPIRED"
+        || de_volta.depois != COOKIES_DEPOIS
+    {
+        return Err(format!(
+            "de volta a sincronizado, a validade nao foi a do civil: {de_volta}"
+        ));
+    }
+    let n2 = nsf_em(&mut m, "sincronizado", Duration::from_secs(20))?;
     b.medir(&mut m, false)?;
     m.cortar_a_energia()?;
     Ok(format!(
-        "o salto trouxe u {u} ms; caladas as fontes, a hora venceu {} s depois com u {} ms (deriva {deriva} ppm); o logico seguiu o civil; a validade `{}`, pelo logico; o NSF viu {:?}",
+        "o salto trouxe u {u} ms; caladas as fontes, a hora venceu {} s depois com u {} ms (deriva {deriva} ppm); o logico seguiu o civil; a validade `{}`, pelo logico; o NSF viu {:?}; as fontes voltaram: sincronizado com u {} ms, a validade `{}`, pelo civil, e o NSF viu {:?}",
         vencido.desde(&h).as_secs(),
         vencido.incerteza_ms.unwrap_or(0),
         v.hora,
-        n.estado
+        n.estado,
+        volta.incerteza_ms.unwrap_or(0),
+        de_volta.hora,
+        n2.estado
     ))
 }
 
