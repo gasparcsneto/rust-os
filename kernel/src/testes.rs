@@ -41328,13 +41328,29 @@ fn firewall_descarta_o_quadro_sem_fluxo() -> Resultado {
     use crate::rede::pilha;
     crate::pessoas::esquecer_registradas();
     let resultado = (|| -> Resultado {
-        let antes = pilha::descartes();
-        pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, 40_999, b"ninguem pediu"));
-        let depois = pilha::descartes();
-        if depois.entrada_sem_fluxo != antes.entrada_sem_fluxo + 1 {
-            crate::log_error!("teste", "{:?} -> {:?}", antes, depois);
-            return Err("o datagrama sem associacao entrou");
+        // A medida é a de um quadro só, e a rede de outro caso pode estar
+        // acabando na mesma volta da pilha: o fim de uma conexão que já saiu
+        // do conjunto — o FIN repetido, o ACK atrasado — também é descartado
+        // como sem fluxo, com razão. Zero descartes a mais é o datagrama
+        // entrando; mais de um não diz nada, e a injeção se repete.
+        let mut depois = None;
+        for _ in 0..5 {
+            let antes = pilha::descartes();
+            pilha::injetar_de_teste(&quadro_udp(IP_DO_ROTEADOR, 69, 40_999, b"ninguem pediu"));
+            let agora = pilha::descartes();
+            match agora.entrada_sem_fluxo - antes.entrada_sem_fluxo {
+                0 => {
+                    crate::log_error!("teste", "{:?} -> {:?}", antes, agora);
+                    return Err("o datagrama sem associacao entrou");
+                }
+                1 => {
+                    depois = Some(agora);
+                    break;
+                }
+                _ => esperar_ms(200),
+            }
         }
+        let depois = depois.ok_or("outros descartes cairam junto com cada injecao")?;
         pilha::injetar_de_teste(&quadro_icmp_eco(IP_DO_ROTEADOR));
         let icmp = pilha::descartes();
         if icmp.entrada_protocolo <= depois.entrada_protocolo
