@@ -48755,11 +48755,21 @@ fn hora_nenhum_caminho_fora_do_gate() -> Resultado {
 /// `sincronizado` e `holdover` são, e a validade é a do civil. É a leitura
 /// que os programas fazem, pelo mesmo comando: uma regra num lugar só, e o
 /// RTC cru em nenhuma delas.
+///
+/// O que cada estado deve dar vem do desenho, escrito aqui, e não da regra
+/// que se confere. E as duas horas se separam: depois de um salto para trás
+/// confirmado, o lógico fica no piso, 25 s à frente do civil — autenticada,
+/// a validade é a do civil, e não a do lógico parado; vencida, a do lógico,
+/// e não a do civil.
 fn hora_a_validade_dos_programas_em_cada_estado() -> Resultado {
     use crate::rede::bancada_hora as bancada;
     use hora::disciplina::Estado;
     use protocolo::usuario::hora::{Estado as Lido, Hora};
-    com_a_bancada_de_hora(2, 86_400, 60, || {
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
         crate::hora::civil::reiniciar_de_teste(hora::disciplina::Parametros {
             janela_sincronizado_ms: 1_500,
             deriva_ppm: 300_000,
@@ -48769,27 +48779,30 @@ fn hora_a_validade_dos_programas_em_cada_estado() -> Resultado {
         for i in 0..3 {
             bancada::raio_de_teste(i, 1);
         }
-        let confere = |esperado: Lido| -> Resultado {
+        // `adiantado`: se o lógico tem de estar parado longe à frente do
+        // civil — o bastante para as duas horas não se confundirem —, ou
+        // não; `None` quando o caso não o controla.
+        let confere = |esperado: Lido, autenticada: bool, adiantado: Option<bool>| -> Resultado {
             let t = tempo_no_system_info()?;
             let h = Hora::ler(Json(t.as_bytes()))
                 .ok_or("a regra dos programas nao le o objeto time")?;
             // O que o kernel tem logo depois: o civil e o lógico.
             let civil_s = civil_agora()?.meio_ms / 1000;
             let logico = crate::persistencia::agora();
-            let certo = if esperado.autenticado() {
-                civil_s
-            } else {
-                logico
-            };
+            let certo = if autenticada { civil_s } else { logico };
+            let longe = logico >= civil_s + 5;
             if h.estado != esperado
-                || h.autenticada() != esperado.autenticado()
+                || h.autenticada() != autenticada
+                || adiantado.is_some_and(|a| h.adiantado != a || longe != a)
                 || h.validade_s().abs_diff(certo) > 1
                 || h.logico_s.abs_diff(logico) > 1
             {
                 crate::log_error!(
                     "teste",
-                    "{:?}: {} (civil {} s, logico {} s)",
+                    "{:?} (autenticada {}, adiantado {:?}): {} (civil {} s, logico {} s)",
                     esperado,
+                    autenticada,
+                    adiantado,
                     t,
                     civil_s,
                     logico
@@ -48799,18 +48812,55 @@ fn hora_a_validade_dos_programas_em_cada_estado() -> Resultado {
             Ok(())
         };
         let estado = || civil_agora().map(|l| l.estado);
-        confere(Lido::Rtc)?;
+        confere(Lido::Rtc, false, None)?;
         fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
-        confere(Lido::Sincronizado)?;
+        confere(Lido::Sincronizado, true, None)?;
         esperar_cedendo(|| estado() == Ok(Estado::Holdover), 500)
             .map_err(|_| "passada a janela, o civil nao foi a holdover")?;
-        confere(Lido::Holdover)?;
+        confere(Lido::Holdover, true, None)?;
         esperar_cedendo(|| estado() == Ok(Estado::Vencido), 2_000)
             .map_err(|_| "com a incerteza acima do teto, o civil nao venceu")?;
-        confere(Lido::Vencido)?;
+        confere(Lido::Vencido, false, None)?;
         fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
-        confere(Lido::Sincronizado)
-    })
+        confere(Lido::Sincronizado, true, None)?;
+
+        // O lógico à frente: as fontes voltam 25 s, o salto para trás fora
+        // do envelope fica pendente, e o administrador o confirma — o civil
+        // volta, e o lógico fica no piso.
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, -25);
+        }
+        fechou_com(&rodada_do_servico(), &["pendente"], "sincronizado")?;
+        let params = rodada_em(rodada_pendente()?);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "time.confirm", &params, &params)?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao confirmou o salto para tras");
+        }
+        // As fontes da bancada carimbam com o civil: confirmado o salto,
+        // elas voltam a concordar com ele.
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, 0);
+        }
+        confere(Lido::Sincronizado, true, Some(true))?;
+        esperar_cedendo(|| estado() == Ok(Estado::Holdover), 500)
+            .map_err(|_| "passada a janela, o civil nao foi a holdover")?;
+        confere(Lido::Holdover, true, Some(true))?;
+        esperar_cedendo(|| estado() == Ok(Estado::Vencido), 2_000)
+            .map_err(|_| "com a incerteza acima do teto, o civil nao venceu")?;
+        confere(Lido::Vencido, false, Some(true))?;
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        confere(Lido::Sincronizado, true, None)?;
+        // O piso fica: o caso só acaba com o civil de novo à frente dele,
+        // para o lógico andar nos casos seguintes.
+        esperar_cedendo(
+            || crate::hora::civil_s().unwrap_or(0) > crate::persistencia::piso(),
+            4_000,
+        )
+        .map_err(|_| "o civil nao alcancou o piso")
+    });
+    crate::identidade::esquecer_registrados();
+    r
 }
 
 /// Concorrência: três processos `validade` — o TLS e os cookies pela hora
