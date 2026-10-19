@@ -608,7 +608,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── compressao.rs o HTTP comprimido da bancada, claro e cifrado: decodificado no processo, negociado, o estragado e a bomba com o código deles
         ├── cookies.rs    a sessão da bancada no pote do processo, clara e cifrada: o isolamento, os atributos, a validade, os tetos, e a recusa que é do gate
         ├── correntes.rs  o HTTP/2 da bancada, h2c e pelo ALPN: correntes ao mesmo tempo numa conexão, o erro da corrente e o da conexão, e a recusa que é do gate
-        ├── validade.rs   diz com que hora o sistema confere validades, e o que ela deu: um certificado válido e um vencido, e os cookies com `Expires` e `Max-Age`
+        ├── validade.rs   diz com que hora o sistema confere validades, e o que ela deu: um certificado válido, um vencido e um ainda não válido, e os cookies com `Expires` e `Max-Age`
         ├── carga.rs      quatro conexões com o eco ao mesmo tempo, 256 KiB de ida e volta em cada, cada uma com os bytes dela
         ├── insistente.rs passa dados pela conexão aberta, e insiste, no passo que a suíte dita: a revogação, a contenção e o firewall no meio
         ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate
@@ -2492,7 +2492,10 @@ Python do hospedeiro — outra implementação inteira do protocolo —, que o
 emulador roda a cada conexão a `10.0.2.100:443`, como roda o `cat` do eco
 TCP. Ele escolhe o certificado pelo nome pedido: `bancada.duke` (e
 qualquer outro nome, que leva o mesmo certificado), `estranho.duke`, de
-outra raiz, e `vencido.duke`, vencido em 2021. A PKI é gerada a cada
+outra raiz, `vencido.duke`, vencido em 2021, e `futuro.duke`, que só vale
+de 2042 a 2044 — ainda não válido em nenhuma hora que a bancada de tempo
+põe, nem no RTC de 2041: é o que mostra que a validade confere o começo
+do certificado, e não só o fim. A PKI é gerada a cada
 máquina em `target/bancada-tls`, fora do repositório; a chave da raiz nem
 chega ao disco, e o que vai para a imagem é só o certificado dela, em
 `/dados/tls/bancada.pem`. No hospedeiro, o pacote `tls` conversa nos
@@ -5078,7 +5081,25 @@ serial acha `CONFLICT` — nenhum salto pendente — e recusa o pedido sem a
 rodada, a hora digitada e a hora ao lado da rodada; e a
 auditoria tem cada decisão, o desfecho da rodada da serial e o serviço de
 hora pedindo pelo gate como ele mesmo. O `cifrado` diz que conferiu o TLS
-pela hora `rtc`, não autenticada — a do tempo lógico. A bancada de
+pela hora `rtc`, não autenticada — a do tempo lógico.
+
+E a fumaça sobe a mesma imagem de produção mais uma vez, num boot só dela,
+agora com o servidor Roughtime da bancada de tempo respondendo nas três
+fontes do registro (`tempo::na_fumaca`), e confere a cadeia inteira de
+fora, na ordem em que ela acontece: o boot, a rede e o endereço do DHCP,
+pelo log; a primeira rodada do serviço depois do endereço; as três
+respostas aceitas, cada uma pela chave fixada no registro, e o acordo 3/3
+acima do quórum; o civil `sincronizado`, com a hora do hospedeiro dentro
+da incerteza; o lógico com o civil, e o mesmo no `persistence.clock`, que
+o journal grava como piso; o programa `validade`, de verdade, pelo civil —
+`bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, `futuro.duke`
+`TLS_NOT_YET_VALID`, o `Max-Age` vencendo 3,1 s depois —; o NSF vendo
+`sincronizado`, sem incidente, sem marca, o lógico andando, a contenção
+por taxa ativa e nenhum pedido; e a auditoria com cada passo do serviço
+`ALLOW`, o fechamento 3/3 da rodada, e o `validade` lendo a hora pelo
+gate (`system.info`) e conectando, sem um pedido `time.*`. Do lado do
+servidor, só pedidos de 1024 bytes, todos respondidos. A fumaça com
+teclado USB e a com virtio-gpu não repetem esse boot. A bancada de
 persistência confere o lógico através de reboots: com o RTC voltado para trás do piso, o civil é
 o RTC e o lógico fica no piso, `adiantado`; com o RTC adiante, o lógico
 anda com ele.
@@ -5128,18 +5149,18 @@ fala com o kernel: responde a quem pergunta.
 
 | Cenário | Montagem | O que se confere |
 |---|---|---|
-| As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o NSF lê as seis respostas aceitas, sem incidente |
+| As fontes honestas | o RTC na hora | a primeira rodada sincroniza — acordo 3/3, a hora do hospedeiro dentro da incerteza —, e a seguinte não move nada; cada passo do serviço na auditoria, `ALLOW`; o programa `validade` confere pelo civil, autenticado — `bancada.duke` aceito, `vencido.duke` e `futuro.duke` recusados, o `Max-Age` vencendo —; o NSF lê as seis respostas aceitas, sem incidente, sem marca, o lógico andando, a contenção por taxa ativa e nenhum pedido |
 | O lote | árvores de 2, 8 e 64 folhas | as três respostas aceitas pelo caminho de Merkle, com o `INDX` 1, 7 e 63 |
-| Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; o programa `validade` confere pelo civil, autenticado, e diz a marca; a marca sai quando ela volta |
+| Uma fonte divergente | a segunda dez minutos à frente | acordo 2/3, `divergente` na rodada e no NSF, o civil nas outras duas; o NSF abre o incidente `time-source-divergent` e não faz nada com a fonte — nenhuma ação no incidente, nenhum pedido ao gate —; o programa `validade` confere pelo civil, autenticado, e diz a marca; a marca sai quando ela volta |
 | O atraso | depois de sincronizar, respostas em 0,8 s, 1,5 s e 2,5 s | o RTT de cada uma na auditoria, e a incerteza alargada por ele; a de 2,5 s chega depois do prazo de 2 s, a um pedido fechado: `sem_resposta`, nenhum veredito a mais quando ela chega, e o acordo é das outras duas |
 | O relógio atrasado | o RTC uma hora atrás | antes das fontes, o civil é o RTC e o lógico anda com ele; o candidato e o salto de +1 h em rodadas seguidas, de `rtc` a `sincronizado` |
 | O relógio adiantado | o RTC dois minutos à frente | o civil volta em duas rodadas e o lógico para, `adiantado`; parado, ele congela os carimbos, e a sondagem lenta de um operador vira detecção e incidente, sem contenção; a saída do operador depois dela fica na recomendação, com o motivo — o lógico parado —, e o NSF não pede nada; uns dois minutos depois o lógico volta a andar com o civil, o NSF diz a contenção por taxa ativa de novo, e a saída para outro destino continua recomendação, porque a janela que a sustenta foi contada parada; nenhum carimbo da auditoria desce |
-| Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` |
+| Um dia adiantado | o RTC um dia à frente | o civil volta um dia; o lógico fica no piso, parado; o NSF vê `adiantado` e diz a contenção por taxa suspensa; a validade é a do civil, autenticado, e não a do lógico um dia à frente: o `Max-Age` vence; e, parado, a contenção que não depende de janela vale: o operador da porta 1 roda um código adulterado (`CODE_TAMPERED`) e depois usa a rede, e o NSF pede o `net.block` do destino pelo gate, que permite — a conexão seguinte do operador é barrada, e o lógico continua parado |
 | O piso de outro boot | um boot com o RTC uma hora à frente; o seguinte na hora | o civil do segundo boot sincroniza, e o lógico fica no piso do primeiro, parado; a validade é a do civil, autenticado, e não a do piso: o `Max-Age` vence com o civil andando |
 | O RTC além dos certificados | o RTC em 2041, depois de `bancada.duke` vencer; as fontes caladas, depois honestas | sem hora autenticada, a validade é a do lógico, em 2041: os dois certificados `TLS_EXPIRED`, o `Expires` de 2023 vencido, o `Max-Age` vencendo; sincronizado, o civil volta quinze anos e o lógico fica parado em 2041, `adiantado`: a validade é a do civil — `bancada.duke` aceito, `vencido.duke` ainda vencido —, e o NSF diz a contenção por taxa suspensa |
-| O RTC atrás do piso | um boot na hora, sem fontes, deixa o piso; o seguinte sobe com o RTC em 2020, dentro da validade de `vencido.duke`, e sem fontes | o civil é o RTC, não autenticado, e a validade é a do piso: `bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, o `Expires` de 2023 vencido — pelo RTC cru, os dois voltariam a valer —; parado, o lógico não vence o `Max-Age`; o NSF vê o lógico parado nas rodadas perdidas |
+| O RTC atrás do piso | um boot na hora, sem fontes, deixa o piso; o seguinte sobe com o RTC em 2020, dentro da validade de `vencido.duke`, e sem fontes; depois, as fontes | o civil é o RTC, não autenticado, e a validade é a do piso: `bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, o `Expires` de 2023 vencido — pelo RTC cru, os dois voltariam a valer —; parado, o lógico não vence o `Max-Age`; o NSF vê o lógico parado nas rodadas perdidas, e a contenção por taxa suspensa; com as fontes, o civil sincroniza seis anos à frente, passa do piso, e o lógico anda com ele: a validade é a do civil, e o NSF vê o lógico andando, a contenção por taxa ativa |
 | Dez minutos | as três pulam dez minutos à frente | o candidato e o salto em rodadas seguidas, além do envelope; o lógico salta junto |
-| Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente — a validade segue o civil de agora, autenticado, e não o salto; o NSF recomenda o `time.confirm` da rodada dele —; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, e a com a rodada dele aplica o salto |
+| Os pendentes | as três voltam dez minutos; depois pulam dois dias | o salto para trás fora do envelope fica pendente, sem mover o civil, e sai quando elas voltam; o de dois dias fica pendente — a validade segue o civil de agora, autenticado, e não o salto; o NSF recomenda a uma pessoa o `time.confirm` da rodada dele, e não pede nada —; `time.confirm` como comando não existe, a prova com a rodada de outro pendente é `CONFLICT`, gravado com a rodada pedida e a do pendente, e a com a rodada dele aplica o salto; nenhum serviço confirma salto |
 | A perda e a volta | a terceira calada desde o boot; depois a segunda; depois a primeira; e as três de volta, cinco segundos à frente | acordo 2/2; sem quórum; a rodada perdida; depois de uma falha, a rodada seguinte em 64 s; a incerteza cresce pela deriva; o NSF conta as respostas que não vieram; a volta é gradual, sem salto, dentro do teto de 5% |
 | O firewall | `net.block` numa fonte, depois noutra | o gate permite o `net.connect` do serviço, e o firewall o barra na execução (`DENY_POLICY`, com a regra); nenhum pedido chega às barradas; acordo 2/2, depois sem quórum; tiradas as regras, 3/3 |
 | A revogação | `policy.write` tirando `time.sync` do papel `tempo` no meio de uma rodada lenta | o passo de hora seguinte do serviço ouve `DENY_PERMISSION`; a rodada acaba ali, sem fechamento e sem mover nada, e a fonte seguinte não é pedida; com a linha de volta, 3/3 |
@@ -5251,7 +5272,8 @@ aperto, `a validade pela hora sincronizado, autenticada, +-986 ms`, ou
 pendente`, `uma fonte divergente`, `o logico adiantado`. O programa
 `validade` diz a hora, os segundos com que conferiu, os do civil e os do
 lógico, e o que ela deu no eco TLS — `bancada.duke`, válido de 2025 a
-2040, e `vencido.duke`, de 2020 a 2021 — e nos cookies — um `Expires` de
+2040, `vencido.duke`, de 2020 a 2021, e `futuro.duke`, de 2042 a 2044,
+que nenhum estado aceita (`TLS_NOT_YET_VALID`) — e nos cookies — um `Expires` de
 2023, um de 2100 e um `Max-Age=3`: os que o pote levou logo depois de
 guardar, e os que levou 3,1 s depois. O programa não julga: a bancada sabe
 o que cada estado deve dar.
@@ -5335,15 +5357,17 @@ boot, o RTC além dos certificados e o RTC atrás do piso.
   errado é aplicado — a rodada sem acordo fica registrada, e a seguinte
   vem 2 s depois, como o desenho manda até sincronizar —; esperar o
   endereço antes da primeira rodada fica como proposta.
-- **A fumaça continua sem servidor.** A fumaça e a bancada de persistência
-  rodam a imagem de produção sem fontes: o serviço faz as rodadas, nenhuma
-  resposta chega, e o civil fica no RTC. Os servidores da suíte moram no
-  kernel de teste (`rede::bancada_hora`), depois do firewall e antes da
-  placa; o recurso que os liga só existe no kernel da suíte, e o `xtask`
-  confere que nenhum outro manifesto o pede. Na fumaça, o TLS confere pelo
-  tempo lógico, e o `cifrado` diz `rtc, nao autenticada`; a hora do civil
-  autenticado o TLS e os cookies só a veem na bancada de tempo e na suíte.
-  A fumaça com um acordo fica para o passo seguinte.
+- **A fumaça principal roda sem servidor.** A fumaça e a bancada de
+  persistência rodam a imagem de produção sem fontes: o serviço faz as
+  rodadas, nenhuma resposta chega, e o civil fica no RTC. Os servidores da
+  suíte moram no kernel de teste (`rede::bancada_hora`), depois do firewall
+  e antes da placa; o recurso que os liga só existe no kernel da suíte, e o
+  `xtask` confere que nenhum outro manifesto o pede. Na fumaça principal, o
+  TLS confere pelo tempo lógico, e o `cifrado` diz `rtc, nao autenticada`.
+  O acordo de verdade, na imagem de produção, é o do boot da hora
+  autenticada da fumaça — com o servidor da bancada de tempo no
+  hospedeiro —, e o da bancada de tempo; a fumaça com teclado USB e a com
+  virtio-gpu não repetem esse boot.
 - **O NSF só sabe do lógico parado por uma rodada.** A parada se lê da
   marca `adiantado` no fechamento de uma rodada, ou de uma confirmação que
   deixa o lógico à frente do civil. Sem fontes no registro, ou antes da
