@@ -1259,6 +1259,56 @@ exatamente quando o registro de estado está no disco; e o do volume
 devolvido a uma fotografia anterior confere que ele é recusado sem
 derrubar o estado de autoridade.
 
+## As chaves de assinatura (ICP-3)
+
+As chaves de assinatura das identidades (ver [ICP.md](ICP.md), *A chamada
+assinada*) moram no journal de estado, sem um armazenamento à parte —
+o mesmo registro cifrado, a mesma âncora do TPM, a mesma compactação —,
+em duas entradas:
+
+```text
+CHAVE_CRIADA (33) [dono, nome, domínio, criada em ms, semente (32)]
+CHAVE_MORTA  (34) [dono, nome, estado (1 destruída, 2 anulada), domínio, criada em ms, pública (32)]
+```
+
+- **A criação grava antes de responder.** `key.create` vai num registro
+  de operação, com a decisão do gate no mesmo registro, e a semente
+  cifrada com ele — só ali: o conteúdo é montado num vetor do tamanho
+  exato, e zerado depois. Sem persistência, nenhuma chave nasce: um boot
+  não a traria de volta. A gravação que falha desfaz a criação inteira,
+  sem lápide — o nome não foi de chave nenhuma.
+- **A lápide é permanente.** `key.destroy`, `key.revoke` e a revogação do
+  dono (`person.revoke`, `agent.revoke`) gravam `CHAVE_MORTA`, sem a
+  semente; nenhum registro a desfaz, e o nome não volta, nem para o dono
+  registrado de novo. Na operação administrativa, a lápide de cada chave
+  do dono vai **antes** da revogação, no mesmo registro: reposta, a
+  revogação não acha chave viva, e não anula de novo.
+- **A reposição é estrita.** No boot, cada chave viva volta com a mesma
+  privada, e cada lápide volta. A criação sobre uma lápide, ou com outra
+  pública, é um erro do journal.
+- **A compactação larga a semente da morta.** A base leva a viva com a
+  semente e a morta só como lápide: a semente de uma chave destruída não
+  chega à região nova. Fica na região velha até ela ser reescrita — não
+  há apagamento criptográfico por chave; a região velha continua cifrada
+  com a chave do journal.
+- **O disco velho não ressuscita nada.** Cada registro de chave avança o
+  contador do TPM: uma fotografia de antes da destruição, devolvida ao
+  disco, é recusada pela âncora, e com o journal recusado nenhuma
+  credencial entra — a chave destruída não assina por ela.
+- **A destruição que não ficou gravada** fica — a privada já foi apagada
+  da memória — até o boot, como toda revogação que não ficou gravada, e
+  a resposta diz isso; a persistência indisponível não deixa nada assinar
+  até lá. Depois do boot, a chave volta viva: a destruição não foi
+  respondida como feita.
+
+Na bancada de persistência, as chaves sobrevivem ao corte de energia — a
+viva assina igual, com a mesma privada; a destruída volta destruída e não
+assina —, a fotografia de antes da destruição é recusada, e o disco de
+agora, de volta, abre com ela destruída. A queda em cada fronteira da
+gravação da criação e da lápide vale exatamente quando o registro está no
+disco: a criação que não valeu deixa o nome livre, e a destruição que não
+valeu deixa a chave viva, assinando igual.
+
 ## Fases e estado
 
 | Fase | O quê | Estado |
@@ -1271,3 +1321,4 @@ derrubar o estado de autoridade.
 | 7.5 | Auditoria persistente | feita |
 | 7.6 | Compactação e disco cheio | feita |
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | feita |
+| ICP-3 | As chaves de assinatura no journal: a semente, a lápide, a compactação | feita |

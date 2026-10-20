@@ -216,6 +216,8 @@ dispararam:
 | `time-source-bad-signature` | uma resposta que a chave fixada da fonte não fecha — forjada, ou a chave trocada —, uma vez por fonte até ela ser aceita de novo |
 | `time-unauthenticated` | a hora autenticada venceu; ou três rodadas de um boot sem hora autenticada, como observação |
 | `logical-clock-stopped` | o tempo lógico parado à frente do civil, uma vez por parada |
+| `declared-verification-failed` | um programa declarou que uma verificação dele falhou — `unverified`, `unverified_<motivo>` —: uma alegação, observada com confiança baixa, que não abre incidente (ver [A declaração](#a-declaração-icp-1-e-icp-3)) |
+| `dead-key-used` | uma assinatura pedida com uma chave destruída ou anulada, que o gate deixou e o kernel recusou: baixa na primeira — a corrida de quem assinava quando a chave morreu —, média na terceira da janela; só observa |
 
 As de tempo leem os registros de `time.sync` e `time.confirm` (ver [O
 tempo](#o-tempo-t73-a-t75)); o principal delas é o relógio, `clock`, e não o
@@ -610,7 +612,7 @@ que o NSF faz com o tempo é ler:
   *Os consumidores da hora*), e o cookie não é identidade, credencial,
   autoridade nem permissão.
 
-## A declaração (ICP-1)
+## A declaração (ICP-1 e ICP-3)
 
 Um programa que quer deixar um fato dele na auditoria o declara com
 `audit.declare` — ver o README, *A política*. O NSF lê a declaração como o
@@ -619,18 +621,23 @@ que ela é: uma **alegação** de quem pediu, ao lado dos fatos do kernel.
 - **As duas partes não se misturam.** A alegação — o evento, o assunto e o
   desfecho — está no recurso do registro, como o programa a escreveu, e o
   kernel só confere a forma dela. O detalhe é do kernel: o processo e o
-  programa, a conexão em que a declaração se ancorou e o destino real
-  dela, pela tabela da pilha, e a decisão. O NSF lê a alegação do recurso
-  e a âncora do detalhe; o que um programa escreve não faz nascimento,
-  queda de conexão nem corte do firewall, nem com as palavras deles.
+  programa, a âncora — a conexão em que a declaração se ancorou e o
+  destino real dela, pela tabela da pilha; ou, desde o ICP-3, uma decisão
+  `ALLOW` do mesmo processo e o método dela (`ancorada em <n> <método>`) —
+  e a decisão. O NSF lê a alegação do recurso e a âncora do detalhe, na
+  forma estrita que o kernel escreve; o que um programa escreve não faz
+  nascimento, queda de conexão nem corte do firewall, nem com as palavras
+  deles.
 - **O tipo e a correlação.** Um registro de execução de `audit.declare`
   que passou é do tipo `declaration` no `security.events`, com as duas
   partes separadas — `claimed` e `anchor` —; o grafo liga quem declarou à
-  declaração, e a declaração ao destino da âncora, e o
-  `security.provenance` de um processo lista as declarações dele. A
-  correlação sai daí: identidade → processo → o que ele alega → o destino
-  que o kernel diz → o desfecho que ele alega. A alegação não vira nó de
-  destino nem de recurso: só a âncora, que é do kernel.
+  declaração, e a declaração ao destino da âncora — ou à decisão dela —,
+  e o `security.provenance` de um processo lista as declarações dele, com
+  a âncora: `{"connection":N,"to":"<destino>"}` ou
+  `{"decision":N,"method":"<método>"}`. A correlação sai daí: identidade →
+  processo → a decisão que ele exerceu → o que ele alega → o desfecho que
+  ele alega. A alegação não vira nó de destino nem de recurso: só a
+  âncora, que é do kernel.
 - **A verificação que falhou é observada.** Um desfecho `unverified`, ou
   `unverified_<motivo>` — uma convenção do NSF, e de nenhum protocolo:
   qualquer programa que confere o que recebeu a usa —, dispara
@@ -639,7 +646,15 @@ que ela é: uma **alegação** de quem pediu, ao lado dos fatos do kernel.
   `risky`, que não sustenta contenção; não abre incidente sozinha, e o
   motor não planeja nem recomenda nada por ela — nem com a confiança que
   fosse. O NSF não corta o destino, não isola o programa e não suspende
-  quem o lançou por uma alegação.
+  quem o lançou por uma alegação. A explicação diz a âncora — `pela
+  conexao N a <destino>`, `pela decisao N (key.sign)`.
+- **A chave morta usada (ICP-3).** A execução de um `key.sign` que o gate
+  deixou e o kernel recusou porque a chave foi destruída ou anulada — o
+  motivo que o kernel escreve, e não uma alegação — dispara
+  `dead-key-used`: baixa na primeira, que é a corrida de quem assinava
+  quando a chave morreu; média na terceira da janela, que é quem continua
+  tentando com uma chave que lhe tiraram. Da categoria `risky`, só
+  observa: a chave já não assina nada, e a recusa foi do kernel.
 - **Nenhuma decisão lê uma declaração.** Nem o gate, nem o firewall, nem
   as cotas, nem a contenção: a declaração não autoriza, não nega e não
   muda nada além do registro.
@@ -827,3 +842,5 @@ contido pelo despertador.
 | T7.3 | o relógio civil e o serviço de hora: o NSF lê o tempo nos registros de `time.sync` e `time.confirm` (`seguranca::tempo`, o `time` do `security.status`), sem regra nem resposta de tempo |
 | T7.4 | a bancada de tempo: o Roughtime pela rede de verdade, e o NSF lendo dela as rodadas, as marcas e o estado — o divergente, o adiantado, o holdover, o vencido —, sem regra nem resposta de tempo; a sondagem lenta com o lógico parado, que vira detecção |
 | T7.5 | os consumidores da hora: o TLS e os cookies pela hora do `system.info`, por uma regra só — o civil autenticado, o lógico sem ele, nunca o RTC cru —; as sete regras de tempo, que registram e recomendam; e a contenção por taxa suspensa com o lógico parado, com as detecções registradas |
+| ICP-1 | a declaração (`audit.declare`) lida como alegação, ao lado da âncora do kernel na conexão; `declared-verification-failed`, que só observa |
+| ICP-3 | a âncora da declaração numa decisão de quem declarou — a assinatura de um `key.sign` —, no grafo e na proveniência; `dead-key-used`, a assinatura pedida com uma chave morta, que só observa |

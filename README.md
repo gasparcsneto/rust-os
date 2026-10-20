@@ -166,10 +166,10 @@ $ cargo xtask agent --canal 2 agent.session
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
 | `audit.declare` | Declara um fato de quem pede para a auditoria — uma alegação, e não um fato do kernel: o evento, o assunto e o desfecho vão, como vieram, no recurso de um registro da cadeia; quem, o papel, a sessão, o processo, o programa e a decisão, no detalhe, pelo kernel. Ancorada numa conexão de quem declara, o detalhe leva o destino real dela, pela tabela da pilha; a de outro titular, ou uma que não existe, é `INVALID_ARGUMENT`, sem dizer de quem é. Ancorada numa decisão, o detalhe leva o número e o método dela, que tem de ser um `ALLOW` de quem declara e do mesmo processo — a assinatura de um `key.sign` —; uma de outro, ou outra declaração, é `INVALID_ARGUMENT`. Uma âncora só. Nenhuma decisão lê uma declaração. Exige `audit.declare`, e gasta a taxa do papel (`event`, `subject`, `outcome`, `connection`, `decision`) |
-| `key.create` | Cria uma chave de assinatura Ed25519 da identidade de quem pede — a pessoa, o agente —, num domínio do registro de domínios que o papel usa. A privada nasce do gerador do kernel e nunca sai dele; o nome, `chave:<nome>`, é do espaço da identidade de quem pede, e um nome já usado — por uma chave viva ou destruída — não volta. Devolve a chave pública (`key`, `domain`) |
+| `key.create` | Cria uma chave de assinatura Ed25519 da identidade de quem pede — a pessoa, o agente —, num domínio do registro de domínios que o papel usa. A privada nasce do gerador do kernel e nunca sai dele; o nome, `chave:<nome>`, é do espaço da identidade de quem pede, e um nome já usado — por uma chave viva ou destruída — não volta. A chave vai para o journal cifrado antes da resposta, com a decisão no mesmo registro, e volta a cada boot; sem persistência, nenhuma nasce. Devolve a chave pública (`key`, `domain`) |
 | `key.read` | O que é público de uma chave de quem pede: a pública, a impressão, o algoritmo, o domínio, a custódia e o estado. Nunca a privada; um nome sem chave para quem pede responde o mesmo que um nome de outro (`key`) |
 | `key.sign` | Assina, com uma chave viva de quem pede, um resumo de exatamente 32 bytes no domínio dela — o prefixo registrado do domínio seguido do resumo. Uma decisão por assinatura; no commit, tudo de novo — autoridade, contenção, domínio, chave —, e o registro vai para a auditoria e para o journal antes de a assinatura sair: sem persistência, nada se assina (`key`, `domain`, `digest`) |
-| `key.destroy` | Destrói uma chave de quem pede: a privada é apagada, e o nome fica marcado para sempre (`key`) |
+| `key.destroy` | Destrói uma chave de quem pede: a privada é apagada, e o nome fica marcado para sempre. A lápide vai para o journal: o boot não traz a chave de volta, e uma fotografia velha do disco é recusada (`key`) |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
 | `security.status` | O tecido de segurança: o papel com que o gate decide as leituras dele, até onde leu, o que perdeu, o que pediu e os incidentes |
 | `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
@@ -275,7 +275,7 @@ kernel/src/
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta
-├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide, e a assinatura gravada antes de sair
+├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
@@ -517,7 +517,7 @@ http/src/            o cliente HTTP/1.1 e HTTP/2 dos programas: nada do HTTP é 
 ├── testes_dos_quadros.rs  cada quadro lido e escrito, e cada recusa com o alcance certo
 └── testes_do_h2.rs  a conexão contra um servidor de mentira que respeita as janelas, e contra roteiros hostis: o erro e o alcance de cada um
 
-web3/src/            os protocolos Web3 de um programa: o Internet Computer, a consulta anônima verificada — o que se prova não autoriza nada
+web3/src/            os protocolos Web3 de um programa: o Internet Computer, a consulta e a chamada verificadas — o que se prova não autoriza nada
 ├── lib.rs           o que o pacote é, e o que nada nele faz: rede, relógio, aleatório ou decisão
 ├── icp.rs           o Internet Computer de quem consulta: os módulos, e de onde vem cada regra — a especificação, a referência oficial
 └── icp/
@@ -530,7 +530,7 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── resumo.rs     o hash independente de representação: o id de um pedido e o que um nó assina
     ├── resumo/
     │   └── testes.rs  os exemplos da especificação, e o `ic-transport-types` como oráculo
-    ├── pedido.rs     os envelopes da consulta e da leitura de estado, anônimos, e o id do pedido
+    ├── pedido.rs     os envelopes da consulta, da chamada e da leitura de estado — do anônimo, ou com a pública e a assinatura de quem chama —, e o id do pedido
     ├── pedido/
     │   └── testes.rs  o mesmo id, e o envelope que o `ic-transport-types` lê
     ├── arvore.rs     a árvore de hash de um certificado: a leitura, a raiz e a procura
@@ -551,6 +551,12 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── agente.rs     a consulta ponta a ponta sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
     │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro
+    ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura assinada de novo — nada se entrega antes da verificação
+    ├── atualizacao/
+    │   └── testes.rs  contra um IC de mentira: o envelope e o id pelo `ic-transport-types`, a assinatura pelo `ic-ed25519`, e as recusas
+    ├── situacao.rs   o `request_status` de um certificado: recebida, processando, respondida, recusada, acabada
+    ├── situacao/
+    │   └── testes.rs  contra árvores do `ic-certification`
     ├── registro.rs   `/dados/icp/redes`: as redes em que se confia, a chave da raiz de cada uma — um erro recusa o arquivo inteiro
     ├── registro/
     │   └── testes.rs  o arquivo de redes, linha a linha
@@ -620,7 +626,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── conexao.rs   a conexão TCP de um programa, pelo gate: a recusa, o firewall, o outro lado e o prazo, sem se misturarem
     ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
     ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
-    ├── icp.rs       o Internet Computer de um programa: a consulta verificada do `web3` sobre o HTTPS dele, e a declaração do desfecho pelo `audit.declare`
+    ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, a chamada assinada pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
@@ -6228,10 +6234,12 @@ escondia — corrigido, as cinco foram reprovadas pelo que mexiam.
 
 ## O Internet Computer
 
-O Duke consulta o Internet Computer (IC) de dentro de um programa: a
-consulta anônima (*query*) a um canister, com a resposta **verificada**
-contra a raiz da rede antes de ser entregue. É o primeiro incremento do
-IC, o ICP-1; o desenho inteiro, as tabelas e o que fica de fora estão em
+O Duke fala com o Internet Computer (IC) de dentro de um programa: a
+consulta anônima (*query*) a um canister — o ICP-1 —, e a chamada de
+atualização (*update*), do anônimo ou assinada pela chave de uma
+identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada)
+—, com a resposta **verificada** contra a raiz da rede antes de ser
+entregue. O desenho inteiro, as tabelas e o que fica de fora estão em
 [`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
@@ -6461,6 +6469,47 @@ a forma canônica ainda recusa, mas com outro nome. E a mutação das faixas
 mostrou a defesa em camadas, do jeito que se quer: sem a conferência das
 faixas, o certificado da outra sub-rede passa, e a resposta cai na
 seguinte — os nós que assinaram não são da sub-rede do certificado.
+
+### A chamada assinada
+
+O ICP-3 dá a uma identidade do Duke — uma pessoa, um agente — uma chave
+Ed25519 que o kernel guarda, e ao programa a chamada de atualização
+assinada por ela, sem uma segunda autoridade em lugar nenhum:
+
+```
+pessoa / agente ─► identidade ─► sessão ─► processo ─► manifesto + papel ─► gate
+  ─► chave:<nome> ─► reconfirmação ─► auditoria (e journal) ─► assinatura
+  ─► programa icp ─► Principal do IC ─► chamada ─► certificado verificado
+  ─► audit.declare ─► NSF
+```
+
+- **A chave é da identidade durável**, nunca da sessão, do processo ou da
+  credencial; o nome `chave:<nome>` se resolve no espaço de quem pede, e
+  não há parâmetro de dono. Pessoa e agente seguem o mesmo caminho. A
+  privada não sai do kernel: nenhum comando a devolve nem a recebe, e ela
+  não aparece em resposta, erro, auditoria ou log.
+- **Cinco permissões genéricas**, no fim da tabela: `key.create`,
+  `key.read`, `key.sign`, `key.destroy` e `key.revoke` — esta só em
+  `admin.execute`, com prova: anula, e não dá o uso a ninguém. O sistema
+  e a política de emergência não têm nenhuma.
+- **Uma decisão por assinatura**, e no commit tudo de novo; o registro da
+  assinatura vai para a auditoria e para o journal **antes** de ela sair.
+  O kernel assina um resumo de 32 bytes num domínio do registro da imagem
+  — só `ic-request` —, e não sabe o que ele resume.
+- **O programa faz o resto**: a pública vira o Principal, o resumo é o id
+  do pedido, a chamada vai por `/api/v4`, a pendente é acompanhada por
+  `request_status`, cada leitura assinada de novo, e cada certificado é
+  verificado pela mesma verificação do ICP-1. A declaração do desfecho
+  vai ancorada na decisão da assinatura, e o NSF a lê como alegação.
+- **A lápide é para sempre.** A destruição, a anulação e a revogação do
+  dono gravam a lápide no journal; o nome não volta, nem para o dono
+  registrado de novo, e uma fotografia velha do disco é recusada. A
+  assinatura pedida com uma chave morta é recusada pelo kernel, e o NSF a
+  observa (`dead-key-used`), sem agir.
+
+Ver [`docs/ICP.md`](docs/ICP.md), *A chamada assinada*, para o caminho
+inteiro, os desfechos, os casos e o que ainda não existe — delegações,
+custódia no TPM, compartilhamento, exportação e a rede principal.
 
 ## Vários agentes
 
@@ -8906,9 +8955,12 @@ padronizado.
       conferido contra as bibliotecas oficiais da DFINITY, a declaração
       genérica `audit.declare`, que nenhuma decisão lê, o NSF lendo a
       declaração como alegação, e a bancada da PocketIC com o proxy que
-      mente (ver [O Internet Computer](#o-internet-computer)). A chamada de
-      atualização, a identidade do IC com chave, os *cycles* e o resto
-      ficam para os incrementos seguintes — cada um, uma decisão nova.
+      mente (ver [O Internet Computer](#o-internet-computer)); e o ICP-3 —
+      as chaves de assinatura das identidades pelo gate, no journal com
+      lápide, e a chamada de atualização assinada e verificada, do
+      anônimo também (ver [A chamada assinada](#a-chamada-assinada)). As
+      delegações, a custódia no TPM, os *cycles* e o resto ficam para os
+      incrementos seguintes — cada um, uma decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
