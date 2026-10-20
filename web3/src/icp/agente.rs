@@ -136,7 +136,7 @@ pub fn caminho(canister: &Principal, endpoint: &str) -> String {
 
 /// O começo de um corpo de erro, em ASCII imprimível: o que o servidor
 /// disse, sem controle nem terminal.
-fn trecho(corpo: &[u8]) -> String {
+pub(super) fn trecho(corpo: &[u8]) -> String {
     corpo
         .iter()
         .take(120)

@@ -140,23 +140,200 @@ fn so_o_anonimo_e_nonce_curto() {
     };
     assert_eq!(longo.id(), Err(Erro::NonceLongo));
     assert_eq!(longo.envelope(), Err(Erro::NonceLongo));
-    // Um remetente com chave não sai daqui sem assinatura: o ICP-1 só
-    // monta o anônimo, e não finge outro.
+    // A consulta é só do anônimo: um remetente com chave não sai daqui, e
+    // não se finge outro.
     let outro = Consulta {
         remetente: Principal::auto_autenticado(b"chave"),
         ..comum
     };
     assert_eq!(outro.id(), Err(Erro::RemetenteNaoAnonimo));
     assert_eq!(outro.envelope(), Err(Erro::RemetenteNaoAnonimo));
+    // A leitura de estado de outro remetente tem id — é o que se assina —,
+    // e sem assinatura não sai.
     let caminhos: [&[&[u8]]; 0] = [];
     let leitura = LeituraDeEstado {
         caminhos: &caminhos,
         remetente: Principal::GERENCIAMENTO,
         vencimento_ns: 1,
     };
-    assert_eq!(leitura.id(), Err(Erro::RemetenteNaoAnonimo));
+    assert!(leitura.id().is_ok());
+    assert_eq!(leitura.envelope(), Err(Erro::RemetenteNaoAnonimo));
     assert!(Erro::NonceLongo.to_string().is_ascii());
     assert!(Erro::RemetenteNaoAnonimo.to_string().is_ascii());
+    assert!(Erro::RemetenteNaoEDaChave.to_string().is_ascii());
+}
+
+/// Uma chave Ed25519 de teste e a pública dela em DER.
+fn chave(semente: u8) -> (ed25519_dalek::SigningKey, [u8; 44]) {
+    let privada = ed25519_dalek::SigningKey::from_bytes(&[semente; 32]);
+    let der = der_ed25519(privada.verifying_key().as_bytes());
+    (privada, der)
+}
+
+/// O DER da pública e o que se assina são os do `ic-ed25519` e do
+/// `ic-transport-types`; e o Principal da chave é o do `ic_principal`.
+#[test]
+fn a_chave_e_o_que_se_assina() {
+    let mut s = Sorteio::novo(23);
+    for _ in 0..50 {
+        let (privada, der) = chave(s.proximo() as u8);
+        let publica = privada.verifying_key().to_bytes();
+        let oficial = ic_ed25519::PublicKey::deserialize_raw(&publica).unwrap();
+        assert_eq!(der.to_vec(), oficial.serialize_rfc8410_der());
+        assert_eq!(
+            Principal::auto_autenticado(&der).bytes(),
+            candid::Principal::self_authenticating(der).as_slice()
+        );
+        let id: [u8; 32] = s.bytes(32).try_into().unwrap();
+        assert_eq!(
+            assinavel(&id).to_vec(),
+            ic_transport_types::RequestId::new(&id).signable()
+        );
+    }
+}
+
+/// A chamada: o id do oráculo — do anônimo e de quem tem chave —, e o
+/// envelope assinado que ele lê, com a chave e a assinatura no lugar, e a
+/// assinatura conferida pelo `ic-ed25519` sobre o id dele.
+#[test]
+fn a_chamada_tem_o_id_e_o_envelope_do_oraculo() {
+    let mut s = Sorteio::novo(24);
+    for i in 0..300 {
+        let canister = Principal::de_bytes(&s.bytes_ate(29)).unwrap();
+        let metodo: String = (0..s.ate(20))
+            .map(|_| char::from(b'a' + s.ate(26) as u8))
+            .collect();
+        let arg = s.bytes_ate(200);
+        let nonce = if i % 3 == 0 {
+            None
+        } else {
+            Some(s.bytes_ate(32))
+        };
+        let vencimento_ns = s.proximo();
+        let (privada, der) = chave(i as u8);
+        let assinada = i % 2 == 0;
+        let remetente = if assinada {
+            Principal::auto_autenticado(&der)
+        } else {
+            Principal::ANONIMO
+        };
+        let nossa = Chamada {
+            canister,
+            metodo: &metodo,
+            arg: &arg,
+            remetente,
+            vencimento_ns,
+            nonce: nonce.as_deref(),
+        };
+        let oficial = EnvelopeContent::Call {
+            nonce: nonce.clone(),
+            ingress_expiry: vencimento_ns,
+            sender: candid::Principal::from_slice(remetente.bytes()),
+            canister_id: principal_oficial(&canister),
+            method_name: metodo.clone(),
+            arg: arg.clone(),
+            sender_info: None,
+        };
+        let id = nossa.id().unwrap();
+        assert_eq!(&id[..], oficial.to_request_id().as_slice());
+        let assinatura = ed25519_dalek::Signer::sign(&privada, &assinavel(&id)).to_bytes();
+        let autenticacao = Autenticacao {
+            chave_der: &der,
+            assinatura: &assinatura,
+        };
+        let envelope = nossa.envelope(assinada.then_some(&autenticacao)).unwrap();
+        let lido: Envelope<'_> = serde_cbor::from_slice(&envelope).unwrap();
+        assert_eq!(lido.content.to_request_id(), oficial.to_request_id());
+        assert!(lido.sender_delegation.is_none());
+        if assinada {
+            assert_eq!(lido.sender_pubkey.as_deref(), Some(&der[..]));
+            assert_eq!(lido.sender_sig.as_deref(), Some(&assinatura[..]));
+            let publica = ic_ed25519::PublicKey::deserialize_rfc8410_der(&der).unwrap();
+            assert!(
+                publica
+                    .verify_signature(&lido.content.to_request_id().signable(), &assinatura)
+                    .is_ok()
+            );
+        } else {
+            assert!(lido.sender_pubkey.is_none() && lido.sender_sig.is_none());
+        }
+        assert!(cbor::ler(&envelope).is_ok());
+    }
+}
+
+/// O remetente é o da chave, ou o anônimo sem ela — na chamada e na
+/// leitura de estado; e a leitura assinada é a que o oráculo lê.
+#[test]
+fn o_remetente_e_o_da_chave() {
+    let (privada, der) = chave(1);
+    let (_, outra) = chave(2);
+    let assinatura = [0u8; 64];
+    let a = Autenticacao {
+        chave_der: &der,
+        assinatura: &assinatura,
+    };
+    let base = Chamada {
+        canister: Principal::GERENCIAMENTO,
+        metodo: "contar",
+        arg: b"DIDL\x00\x00",
+        remetente: Principal::auto_autenticado(&der),
+        vencimento_ns: 1,
+        nonce: Some(&[1; 8]),
+    };
+    assert!(base.envelope(Some(&a)).is_ok());
+    assert_eq!(base.envelope(None), Err(Erro::RemetenteNaoAnonimo));
+    let de_outra = Chamada {
+        remetente: Principal::auto_autenticado(&outra),
+        ..base
+    };
+    assert_eq!(de_outra.envelope(Some(&a)), Err(Erro::RemetenteNaoEDaChave));
+    let anonima = Chamada {
+        remetente: Principal::ANONIMO,
+        ..base
+    };
+    assert_eq!(anonima.envelope(Some(&a)), Err(Erro::RemetenteNaoEDaChave));
+    assert!(anonima.envelope(None).is_ok());
+    let longa = Chamada {
+        nonce: Some(&[0; 33]),
+        ..base
+    };
+    assert_eq!(longa.id(), Err(Erro::NonceLongo));
+    assert_eq!(longa.envelope(Some(&a)), Err(Erro::NonceLongo));
+
+    // A leitura da situação de uma chamada: `["request_status", id]`,
+    // assinada pela mesma chave.
+    let id = base.id().unwrap();
+    let caminhos: [&[&[u8]]; 1] = [&[b"request_status", &id]];
+    let leitura = LeituraDeEstado {
+        caminhos: &caminhos,
+        remetente: Principal::auto_autenticado(&der),
+        vencimento_ns: 9,
+    };
+    let oficial = EnvelopeContent::ReadState {
+        ingress_expiry: 9,
+        sender: candid::Principal::self_authenticating(der),
+        paths: vec![vec!["request_status".into(), id.to_vec().into()]],
+    };
+    let id_da_leitura = leitura.id().unwrap();
+    assert_eq!(&id_da_leitura[..], oficial.to_request_id().as_slice());
+    let assinatura = ed25519_dalek::Signer::sign(&privada, &assinavel(&id_da_leitura)).to_bytes();
+    let a = Autenticacao {
+        chave_der: &der,
+        assinatura: &assinatura,
+    };
+    let lido: Envelope<'_> =
+        serde_cbor::from_slice(&leitura.envelope_assinado(Some(&a)).unwrap()).unwrap();
+    assert_eq!(lido.content.to_request_id(), oficial.to_request_id());
+    assert_eq!(lido.sender_sig.as_deref(), Some(&assinatura[..]));
+    assert_eq!(leitura.envelope(), Err(Erro::RemetenteNaoAnonimo));
+    let b = Autenticacao {
+        chave_der: &outra,
+        assinatura: &assinatura,
+    };
+    assert_eq!(
+        leitura.envelope_assinado(Some(&b)),
+        Err(Erro::RemetenteNaoEDaChave)
+    );
 }
 
 #[test]

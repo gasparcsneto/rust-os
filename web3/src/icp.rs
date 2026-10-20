@@ -1,18 +1,23 @@
-//! O Internet Computer, do lado de quem consulta: as contas da consulta
-//! anônima verificada.
+//! O Internet Computer, do lado de quem consulta e chama: as contas da
+//! consulta anônima verificada e da chamada de atualização verificada.
 //!
 //! - [`principal`]: o Principal — bytes, texto, classes;
 //! - [`cbor`]: o subconjunto estrito do CBOR que o IC usa;
 //! - [`resumo`]: o hash independente de representação (`hash_of_map`);
-//! - [`pedido`]: os envelopes da consulta e da leitura de estado, e o id
-//!   do pedido;
+//! - [`pedido`]: os envelopes da consulta, da chamada e da leitura de
+//!   estado — do anônimo, ou assinados —, e o id do pedido;
 //! - [`arvore`]: a árvore de hash — reconstrução e procura;
 //! - [`certificado`]: o certificado — BLS, delegação, faixas e tempo;
 //! - [`assinatura`]: a assinatura Ed25519 de um nó (ZIP215);
 //! - [`consulta`]: a resposta da consulta e as assinaturas dos nós;
 //! - [`candid`]: o Candid — a tabela de tipos inteira, os valores de um
 //!   subconjunto;
-//! - [`agente`]: o agente síncrono, sobre um transporte de quem chama;
+//! - [`situacao`]: a situação de uma chamada — o corpo da chamada
+//!   síncrona e o `request_status` de um certificado;
+//! - [`agente`]: o agente síncrono da consulta, sobre um transporte de
+//!   quem chama;
+//! - [`atualizacao`]: a chamada de atualização verificada — do anônimo,
+//!   ou assinada por quem tem chave —, e o acompanhamento dela;
 //! - [`registro`]: as redes em que se confia — `/dados/icp/redes`.
 //!
 //! # De onde vem o que se sabe do protocolo
@@ -48,6 +53,7 @@
 pub mod agente;
 pub mod arvore;
 pub mod assinatura;
+pub mod atualizacao;
 pub mod candid;
 pub mod cbor;
 pub mod certificado;
@@ -56,6 +62,7 @@ pub mod pedido;
 pub mod principal;
 pub mod registro;
 pub mod resumo;
+pub mod situacao;
 
 #[cfg(test)]
 mod bancada;

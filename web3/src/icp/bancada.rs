@@ -285,6 +285,59 @@ impl Ic {
         )
     }
 
+    /// Um canister nas faixas da sub-rede raiz — as de
+    /// [`Ic::folhas_da_sub_rede`].
+    pub fn canister_da_raiz(&self) -> Principal {
+        Principal::de_bytes(&[0, 0, 0, 0, 0, 0, 0, 0, 1, 1]).unwrap()
+    }
+
+    /// O certificado de um `read_state` de `["subnet"]` de um canister da
+    /// sub-rede raiz: as mesmas folhas, assinadas pela raiz, sem
+    /// delegação.
+    pub fn certificado_da_raiz(&self, tempo_ns: u64) -> Vec<u8> {
+        certificado_assinado(arvore(&self.folhas_da_sub_rede(tempo_ns)), &self.raiz, None)
+    }
+
+    /// As folhas de `request_status/<id>/<campo>` e o tempo.
+    pub fn folhas_da_situacao(
+        &self,
+        id: &[u8; 32],
+        campos: &[(&[u8], Vec<u8>)],
+        tempo_ns: u64,
+    ) -> Vec<Folha> {
+        let mut folhas: Vec<Folha> = campos
+            .iter()
+            .map(|(nome, valor)| (caminho(&[b"request_status", id, nome]), valor.clone()))
+            .collect();
+        folhas.push((caminho(&[b"time"]), nat(tempo_ns)));
+        folhas
+    }
+
+    /// O certificado do `request_status` de `id` — o do corpo de uma
+    /// chamada, ou o de uma leitura da situação —, assinado pela sub-rede
+    /// de aplicação com a delegação; ou, `na_raiz`, pela raiz, sem ela.
+    pub fn certificado_da_situacao(
+        &self,
+        id: &[u8; 32],
+        campos: &[(&[u8], Vec<u8>)],
+        tempo_ns: u64,
+        na_raiz: bool,
+    ) -> Vec<u8> {
+        let a = arvore(&self.folhas_da_situacao(id, campos, tempo_ns));
+        if na_raiz {
+            certificado_assinado(a, &self.raiz, None)
+        } else {
+            certificado_assinado(
+                a,
+                &self.sub_rede,
+                Some((
+                    self.id_da_sub_rede.bytes().to_vec(),
+                    self.delegacao(tempo_ns),
+                )),
+            )
+        }
+    }
+
     /// O corpo da resposta de um `read_state`.
     pub fn resposta_de_leitura(&self, certificado: Vec<u8>) -> Vec<u8> {
         #[derive(Serialize)]

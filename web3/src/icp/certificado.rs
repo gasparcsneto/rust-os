@@ -114,6 +114,9 @@ pub enum Erro {
     ForaDasFaixas,
     /// A chave de um nó fora da forma DER de 44 bytes.
     ChaveDoNo,
+    /// O certificado de uma chamada é de outra sub-rede que a da leitura
+    /// separada das faixas — ver [`verificar_na_sub_rede`].
+    OutraSubRede,
 }
 
 impl From<cbor::Erro> for Erro {
@@ -157,6 +160,9 @@ impl fmt::Display for Erro {
             Erro::FaixasForaDaForma => f.write_str("faixas de canister fora da forma"),
             Erro::ForaDasFaixas => f.write_str("o canister nao esta nas faixas da sub-rede"),
             Erro::ChaveDoNo => f.write_str("chave de no fora da forma DER"),
+            Erro::OutraSubRede => {
+                f.write_str("o certificado e de outra sub-rede que a da leitura das faixas")
+            }
         }
     }
 }
@@ -315,48 +321,55 @@ pub struct Autoridade {
     pub tempo_ns: u64,
 }
 
-/// Confere um certificado de uma leitura de estado no escopo de um
-/// canister (`/api/v3/canister/<canister>/read_state`): a cadeia até a
-/// raiz, as faixas e o tempo.
-pub fn verificar(
+/// A sub-rede que assina o certificado e a chave dela: a raiz, sem
+/// delegação; com ela, a sub-rede delegada, depois de conferir a
+/// delegação — de um nível só, assinada pela raiz, com a chave da
+/// sub-rede e as faixas dela contendo o canister.
+fn quem_assina(
     cert: &Certificado<'_>,
     raiz: &Raiz,
     canister: &Principal,
-    agora_ns: u64,
-) -> Result<Autoridade, Erro> {
-    let (sub_rede, chave) = match &cert.delegacao {
-        None => (raiz.sub_rede(), raiz.chave()),
-        Some(d) => {
-            let dc = Certificado::ler(d.certificado)?;
-            if dc.delegacao.is_some() {
-                return Err(Erro::DelegacaoAninhada);
-            }
-            if !dc.assinado_por(&raiz.chave()) {
-                return Err(Erro::AssinaturaDaDelegacao);
-            }
-            let der = match dc
-                .arvore
-                .procurar(&[b"subnet", d.sub_rede.bytes(), b"public_key"])
-            {
-                Procura::Achou(der) => der,
-                _ => return Err(Erro::ChaveDaSubRedeAusente),
-            };
-            let chave = extrair_der(der)?;
-            match dc
-                .arvore
-                .subarvore(&[b"canister_ranges", d.sub_rede.bytes()])
-            {
-                Sub::Achou(fragmentos) => {
-                    if !fragmentos_contem(fragmentos, canister)? {
-                        return Err(Erro::ForaDasFaixas);
-                    }
-                }
-                Sub::Ausente | Sub::Desconhecida => return Err(Erro::FaixasAusentes),
-            }
-            (d.sub_rede, chave)
-        }
+) -> Result<(Principal, [u8; CHAVE_BLS]), Erro> {
+    let Some(d) = &cert.delegacao else {
+        return Ok((raiz.sub_rede(), raiz.chave()));
     };
-    if !cert.assinado_por(&chave) {
+    let dc = Certificado::ler(d.certificado)?;
+    if dc.delegacao.is_some() {
+        return Err(Erro::DelegacaoAninhada);
+    }
+    if !dc.assinado_por(&raiz.chave()) {
+        return Err(Erro::AssinaturaDaDelegacao);
+    }
+    let der = match dc
+        .arvore
+        .procurar(&[b"subnet", d.sub_rede.bytes(), b"public_key"])
+    {
+        Procura::Achou(der) => der,
+        _ => return Err(Erro::ChaveDaSubRedeAusente),
+    };
+    let chave = extrair_der(der)?;
+    match dc
+        .arvore
+        .subarvore(&[b"canister_ranges", d.sub_rede.bytes()])
+    {
+        Sub::Achou(fragmentos) => {
+            if !fragmentos_contem(fragmentos, canister)? {
+                return Err(Erro::ForaDasFaixas);
+            }
+        }
+        Sub::Ausente | Sub::Desconhecida => return Err(Erro::FaixasAusentes),
+    }
+    Ok((d.sub_rede, chave))
+}
+
+/// A assinatura do certificado com a chave de quem assina, e o tempo dele
+/// na janela de [`TOLERANCIA_NS`] em volta de `agora_ns`. Devolve o tempo.
+fn assinado_e_no_tempo(
+    cert: &Certificado<'_>,
+    chave: &[u8; CHAVE_BLS],
+    agora_ns: u64,
+) -> Result<u64, Erro> {
+    if !cert.assinado_por(chave) {
         return Err(Erro::Assinatura);
     }
     let tempo_ns = cert.tempo_ns()?;
@@ -366,6 +379,20 @@ pub fn verificar(
     if tempo_ns > agora_ns.saturating_add(TOLERANCIA_NS) {
         return Err(Erro::Futuro { tempo_ns, agora_ns });
     }
+    Ok(tempo_ns)
+}
+
+/// Confere um certificado de uma leitura de estado no escopo de um
+/// canister (`/api/v3/canister/<canister>/read_state`): a cadeia até a
+/// raiz, as faixas e o tempo.
+pub fn verificar(
+    cert: &Certificado<'_>,
+    raiz: &Raiz,
+    canister: &Principal,
+    agora_ns: u64,
+) -> Result<Autoridade, Erro> {
+    let (sub_rede, chave) = quem_assina(cert, raiz, canister)?;
+    let tempo_ns = assinado_e_no_tempo(cert, &chave, agora_ns)?;
     if cert.delegacao.is_none() {
         match cert
             .arvore
@@ -378,6 +405,50 @@ pub fn verificar(
             }
             _ => return Err(Erro::FaixasAusentes),
         }
+    }
+    Ok(Autoridade {
+        sub_rede,
+        delegada: cert.delegacao.is_some(),
+        tempo_ns,
+    })
+}
+
+/// Confere o certificado de uma chamada — o do corpo da chamada
+/// síncrona, ou o de uma leitura do `request_status` dela: a cadeia até a
+/// raiz e o tempo, como [`verificar`], **na sub-rede que a leitura
+/// separada das faixas já provou ser a do canister** — `faixas`, a
+/// [`Autoridade`] de um `read_state` de `["subnet"]` conferido por
+/// [`verificar`].
+///
+/// Com delegação, o certificado traz as faixas da sub-rede, conferidas
+/// como em [`verificar`], e a sub-rede tem de ser a da leitura separada.
+/// Sem delegação, quem assina é a raiz: o canister é da sub-rede raiz, e o
+/// certificado de uma chamada não traz as faixas dela — elas vêm da
+/// leitura separada, que tem de ter sido da raiz também. Se o certificado
+/// traz as faixas, elas são conferidas do mesmo jeito.
+///
+/// **Referência**: sem delegação, o `ic-agent` aceita o certificado da
+/// raiz para qualquer canister. Este lado recusa sem a prova das faixas —
+/// o lado que recusa.
+pub fn verificar_na_sub_rede(
+    cert: &Certificado<'_>,
+    raiz: &Raiz,
+    canister: &Principal,
+    agora_ns: u64,
+    faixas: &Autoridade,
+) -> Result<Autoridade, Erro> {
+    let (sub_rede, chave) = quem_assina(cert, raiz, canister)?;
+    if sub_rede != faixas.sub_rede || cert.delegacao.is_some() != faixas.delegada {
+        return Err(Erro::OutraSubRede);
+    }
+    let tempo_ns = assinado_e_no_tempo(cert, &chave, agora_ns)?;
+    if cert.delegacao.is_none()
+        && let Procura::Achou(faixas) =
+            cert.arvore
+                .procurar(&[b"subnet", sub_rede.bytes(), b"canister_ranges"])
+        && !faixas_contem(faixas, canister)?
+    {
+        return Err(Erro::ForaDasFaixas);
     }
     Ok(Autoridade {
         sub_rede,
