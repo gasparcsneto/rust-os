@@ -40,8 +40,22 @@ target = "x86_64-unknown-none"
 # No ARM o alvo `-softfloat` já não deixa o NEON existir; as opções são as
 # mesmas lá para a escolha estar escrita, e não depender de um detalhe do
 # alvo.
+#
+# # Os laços alinhados a 128 bytes
+#
+# Porque o emulador traduz o código em blocos que não atravessam uma página,
+# e não encadeia um salto para outra página: um laço apertado que caia em
+# cima da fronteira paga duas buscas por volta, e roda duas a três vezes
+# mais devagar — na bancada, e não no hardware. A suíte mede o desenho
+# contra um laço reto (`tela: desenhar nao regrediu em ordem de grandeza`),
+# e um código novo em qualquer lugar do kernel, ou um nightly novo, empurrava
+# o laço de `Tela::retangulo` para cima de uma fronteira: o preenchimento a
+# 216% e 251% do laço reto, contra um teto de 200%, sem nada no desenho ter
+# mudado. Alinhado a 128 bytes, um laço de até 128 não atravessa página, e a
+# medida volta a ser do código, e não de onde o ligador o pôs.
 [target.x86_64-unknown-none]
 rustflags = [
+    "-C", "llvm-args=-align-loops=128",
     "--cfg", 'chacha20_backend="soft"',
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
@@ -64,6 +78,7 @@ rustflags = [
 # exceção — um bug sutil e difícil de rastrear.
 rustflags = [
     "-C", "link-arg=-Tsrc/arch/aarch64/linker.ld",
+    "-C", "llvm-args=-align-loops=128",
     "--cfg", 'chacha20_backend="soft"',
     "--cfg", 'poly1305_backend="soft"',
     "--cfg", 'curve25519_dalek_backend="serial"',
