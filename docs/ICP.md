@@ -6,10 +6,11 @@ contra a raiz da rede antes de ser entregue. É o primeiro incremento do
 IC, e o único por enquanto — ver *O que não existe ainda*.
 
 Nada disso é do kernel. O kernel não sabe o que é um canister, um
-Principal, um método ou o Candid; a política não tem uma linha sobre o IC;
-o gate decide o que sempre decidiu — se esta identidade, por este
-processo, fala com este destino, agora. O IC é um protocolo de programa,
-como o TLS e o HTTP.
+Principal, um método ou o Candid, e a política não tem uma palavra do IC:
+o gateway da bancada é um destino do alcance, como os outros. O gate
+decide o que sempre decidiu — se esta identidade, por este processo, fala
+com este destino, agora. O IC é um protocolo de programa, como o TLS e o
+HTTP.
 
 ## O caminho de uma consulta
 
@@ -143,7 +144,8 @@ observa o desfecho `unverified*` com a regra `declared-verification-failed`
 
 ## A bancada
 
-`cargo xtask test` e `cargo xtask fumaca` sobem a bancada do IC
+`cargo xtask test`, `cargo xtask fumaca` e, no ARM, `cargo xtask iniciador`
+— que roda a suíte inteira pela UEFI — sobem a bancada do IC
 ([`xtask/src/icp.rs`](../xtask/src/icp.rs)) antes da máquina:
 
 - **a PocketIC 16.1.0**, o binário da release oficial da DFINITY, baixado

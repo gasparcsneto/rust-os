@@ -6230,7 +6230,8 @@ IC, o ICP-1; o desenho inteiro, as tabelas e o que fica de fora estão em
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
-método, e a política não tem uma linha sobre o IC. O gate decide o que
+método, e a política não tem uma palavra do IC — o gateway da bancada é um
+destino do alcance, como os outros. O gate decide o que
 sempre decidiu — se esta identidade, por este processo, fala com este
 destino, agora —, e o programa prova para si o que os nós responderam. O
 `xtask invariantes` confere o primeiro lado: o kernel e a política não
@@ -6320,7 +6321,8 @@ sem incidente, sem contenção e sem regra no firewall
 
 ### A bancada
 
-`cargo xtask test` e `cargo xtask fumaca` sobem a bancada do IC
+`cargo xtask test`, `cargo xtask fumaca` e, no ARM, `cargo xtask
+iniciador` — que roda a suíte inteira pela UEFI — sobem a bancada do IC
 ([`xtask/src/icp.rs`](xtask/src/icp.rs)) antes da máquina:
 
 - a **PocketIC 16.1.0**, o binário da release oficial da DFINITY, baixado
@@ -6342,8 +6344,9 @@ sem incidente, sem contenção e sem regra no firewall
   assinatura do nó, o nonce trocado no caminho, a delegação aninhada, o
   certificado da outra sub-rede e o certificado de quinze minutos atrás.
 
-`/dados/icp/redes` tem uma rede por modo, doze, todas para o mesmo destino
-— o gate decide `tcp:10.0.2.100:4943`, e os nomes são do TLS e do
+`/dados/icp/redes` tem doze redes — a honesta pelo DNS, a lenta, as nove
+mentiras e a `direta`, honesta pelo endereço fixo —, todas para o mesmo
+destino: o gate decide `tcp:10.0.2.100:4943`, e os nomes são do TLS e do
 programa.
 
 ### O que a suíte e a fumaça conferem
