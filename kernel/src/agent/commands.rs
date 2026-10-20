@@ -16,7 +16,7 @@
 use core::fmt;
 
 use super::json::{Json, JsonWriter};
-use super::registry::{Acesso, Command, Mais, ParamSpec, Plano, TipoParam};
+use super::registry::{Acesso, Command, Formato, Mais, ParamSpec, Plano, TipoParam};
 use politica::Permissao;
 
 /// A tabela de comandos do kernel.
@@ -1555,6 +1555,52 @@ pub static COMANDOS: &[Command] = &[
         handler: audit_verify,
     },
     Command {
+        nome: "audit.declare",
+        resumo: "Declara um fato de quem pede para a auditoria: uma alegacao, e nao um fato do \
+                 kernel. O evento, o assunto e o desfecho vao, como vieram, no recurso de um \
+                 registro da cadeia; o que so o kernel sabe - quem, o papel, a sessao, o \
+                 processo e o programa, e o numero da decisao - vai no detalhe. Com \
+                 `connection`, a declaracao se ancora numa conexao de quem declara, e o \
+                 kernel escreve no detalhe o destino real dela, pela tabela da pilha; uma \
+                 conexao de outro titular, ou que nao existe, e INVALID_ARGUMENT, sem dizer \
+                 de quem e. Nenhuma decisao le uma declaracao: ela nao autoriza, nao nega e \
+                 nao muda nada alem do registro. Gasta a taxa do papel, como todo exercicio \
+                 de autoridade.",
+        params: &[
+            ParamSpec {
+                nome: "event",
+                tipo: TipoParam::Formatado(Formato::Evento),
+                obrigatorio: true,
+                descricao: "O evento, `<espaco>.<nome>`: minusculas, digitos e `_`, cada parte comecando por letra, ate 32 bytes. O espaco nao e o de um comando do registro.",
+            },
+            ParamSpec {
+                nome: "subject",
+                tipo: TipoParam::Formatado(Formato::Simbolo),
+                obrigatorio: true,
+                descricao: "O assunto: ASCII imprimivel sem espaco, aspas, barra invertida nem `;`, de 1 a 64 bytes.",
+            },
+            ParamSpec {
+                nome: "outcome",
+                tipo: TipoParam::Formatado(Formato::Palavra),
+                obrigatorio: true,
+                descricao: "O desfecho: minusculas, digitos e `_`, comecando por letra, ate 24 bytes.",
+            },
+            ParamSpec {
+                nome: "connection",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O numero de uma conexao de quem declara: o destino real dela vai no registro.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::AuditDeclare),
+        // Sem recurso para o gate: a permissão não tem alcance, e nenhum
+        // campo da declaração chega à decisão.
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: audit_declare,
+    },
+    Command {
         nome: "policy.show",
         resumo: "A politica em vigor: cada papel com as permissoes, os recursos e a taxa; o \
                  papel da serial e o da autoridade local (o console e os processos do \
@@ -1858,6 +1904,69 @@ fn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_u64("durable_seq", crate::persistencia::auditoria_gravada())?;
         }
         None => w.field_str("error", "a auditoria nao foi iniciada")?,
+    }
+    w.end_object()
+}
+
+/// `audit.declare`: grava a declaração de quem pede, como execução da
+/// decisão do gate — ver o cabeçalho de `politica::permissao`.
+///
+/// O que se alega vai no **recurso**, como veio: o evento, o assunto e o
+/// desfecho, separados por espaço — nenhum tem espaço, e o registro do
+/// comando confere a forma de cada um antes do gate. O que só o kernel sabe
+/// vai no **detalhe**: o processo e o programa (pela auditoria), a conexão
+/// e o destino real dela (pela tabela da pilha, para o dono deste pedido),
+/// e a decisão. Nada do que quem declara escreveu entra no detalhe: é nele
+/// que se lê quem nasceu, que conexão caiu, o que o firewall cortou.
+///
+/// Não decide nada — a decisão foi a do gate, sobre a permissão —, e o que
+/// grava só vai para a cadeia, que nenhuma decisão lê.
+fn audit_declare(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::rede::conexoes::{self, Dono};
+    use politica::Codigo;
+    w.begin_object()?;
+    fn texto<'a>(v: Option<Json<'a>>) -> &'a str {
+        v.and_then(|v| v.as_str()).unwrap_or("")
+    }
+    let alegacao = alloc::format!(
+        "{} {} {}",
+        texto(params.member("event")),
+        texto(params.member("subject")),
+        texto(params.member("outcome"))
+    );
+    let numero = params.member("connection").and_then(|v| v.as_u64());
+    let ancora = match numero {
+        None => alloc::string::String::from("sem conexao"),
+        Some(n) => match Dono::do_comando().map(|dono| conexoes::destino_para(Some(n), &dono)) {
+            Some(Ok(destino)) => alloc::format!("conexao {n} {}", destino.texto()),
+            // A de outro titular e a que não existe respondem o mesmo: quem
+            // declara não descobre o que é dos outros. O detalhe é curto: com
+            // o processo e a decisão, cabe no teto do detalhe da auditoria.
+            Some(Err(_)) | None => {
+                let motivo = "a conexao nao e de quem declara, ou nao existe";
+                crate::autorizacao::auditar_execucao(
+                    &alegacao,
+                    Codigo::InvalidArgument,
+                    &alloc::format!("conexao {n} nao e de quem declara"),
+                );
+                w.field_bool("declared", false)?;
+                w.field_str("code", Codigo::InvalidArgument.nome())?;
+                w.field_str("error", motivo)?;
+                explicar_falha(w, Codigo::InvalidArgument, motivo)?;
+                return w.end_object();
+            }
+        },
+    };
+    let registro = crate::autorizacao::auditar_execucao(&alegacao, Codigo::Allow, &ancora);
+    if registro == 0 {
+        w.field_bool("declared", false)?;
+        w.field_str("error", "fora de um comando autorizado")?;
+        return w.end_object();
+    }
+    w.field_bool("declared", true)?;
+    w.field_u64("record", registro)?;
+    if let Some(d) = crate::autorizacao::decisao_atual() {
+        w.field_u64("decision", d)?;
     }
     w.end_object()
 }

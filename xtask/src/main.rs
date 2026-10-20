@@ -2873,6 +2873,10 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "Permissao::TimeConfirm",
         &["kernel/src/agent/administracao.rs"],
     ),
+    // A declaração (ver `politica::permissao`): só o comando dela a exige, e
+    // nenhum outro lugar do kernel a nomeia — o gate não a trata à parte, e
+    // nenhuma decisão lê o que ela grava.
+    ("Permissao::AuditDeclare", &["kernel/src/agent/commands.rs"]),
     // Os tratadores de hora só pelos handlers, depois do gate: o pedido e a
     // entrega pelos de `time.request` e `time.sync`, a confirmação pela
     // operação administrativa, com prova. E o civil só se move por eles: o
@@ -3518,6 +3522,77 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// O Internet Computer é do programa, como o HTTP: devolve o que o
+/// contraria.
+///
+/// - o kernel e a política não dependem do pacote `web3`: o Principal, o
+///   canister, o Candid e o método não chegam ao gate — o que ele decide é
+///   o destino, e quem pede é o processo, com a autoridade do titular dele;
+/// - o kernel e a política não falam dele (`icp`, `canister`, `candid`,
+///   `dfinity`, `web3`, `pocketic`, como palavras): nenhum comando, nenhuma
+///   permissão, nenhuma política, nenhuma auditoria e nenhuma exceção de
+///   rede do IC. Um Principal não é identidade do Duke, um certificado do IC
+///   não é autorização, e a verificação de uma resposta não concede nada. O
+///   que o programa quer deixar na auditoria ele declara pelo
+///   `audit.declare`, que é genérico — e que nenhuma decisão lê.
+fn conferir_icp_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
+    const PALAVRAS: [&str; 7] = [
+        "icp",
+        "canister",
+        "canisters",
+        "candid",
+        "dfinity",
+        "web3",
+        "pocketic",
+    ];
+    let mut fora = Vec::new();
+    for manifesto in ["kernel/Cargo.toml", "politica/Cargo.toml"] {
+        let texto = std::fs::read_to_string(raiz.join(manifesto))
+            .map_err(|e| format!("não foi possível ler {manifesto}: {e}"))?;
+        for (n, linha) in texto.lines().enumerate() {
+            let linha = linha.trim_start();
+            if linha.starts_with("web3 ")
+                || linha.starts_with("web3=")
+                || linha.starts_with("web3.")
+            {
+                fora.push(format!(
+                    "{manifesto}:{}: depende do pacote `web3` — o Internet Computer é do programa",
+                    n + 1
+                ));
+            }
+        }
+    }
+    for dir in ["kernel/src", "politica/src"] {
+        percorrer_fontes(&raiz.join(dir), &mut |caminho| {
+            let relativo = caminho
+                .strip_prefix(raiz)
+                .map_err(|_| format!("{} fora do projeto", caminho.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relativo == "kernel/src/testes.rs" {
+                return Ok(());
+            }
+            let texto = std::fs::read_to_string(caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            for (n, linha) in texto.lines().enumerate() {
+                let minusculas = linha.to_ascii_lowercase();
+                if let Some(palavra) = minusculas
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .find(|p| PALAVRAS.contains(p))
+                {
+                    fora.push(format!(
+                        "{relativo}:{}: `{palavra}` no kernel ou na política — o Internet Computer é do programa, e o gate decide o destino: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(fora)
+}
+
 /// Confere que o código de fora da imagem só roda conferido:
 ///
 /// - o executável de um processo não se lê pelo VFS em `usuario/` fora da
@@ -3681,6 +3756,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // E o HTTP também é do programa: o kernel não o tem, ele não alcança o
     // gate, e não há comando nem permissão dele.
     fora.extend(conferir_http_do_programa(&raiz)?);
+    // E o Internet Computer também: o kernel e a política não falam dele, e
+    // a declaração que o programa deixa na auditoria é genérica.
+    fora.extend(conferir_icp_do_programa(&raiz)?);
     // O código de fora da imagem só roda conferido: o executável não se lê
     // por fora da conferência, o programa do fio só nasce no carregador, e
     // o kernel não sela nada.
@@ -3711,7 +3789,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              o tecido de segurança só fala como ele mesmo, pelo gate, sem que o gate o leia; \
              o TLS, que é do programa, só verifica pelas âncoras, sem atalho que o desligue; \
              o HTTP, que é do programa, não tem comando, permissão nem caminho até o gate, \
-             e a compressão, os cookies e o HTTP/2 dele não chegam ao kernel nem à política; o plano de dados só \
+             e a compressão, os cookies e o HTTP/2 dele não chegam ao kernel nem à política; o \
+             Internet Computer, que é do programa, também não, e a declaração dele é genérica \
+             e não é lida por decisão nenhuma; o plano de dados só \
              sai da taxa, e só espera pela auditoria, pelo gate; o \
              código só vira processo pela conferência única, que o kernel faz e não sela; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
@@ -14842,7 +14922,7 @@ mod testes {
             assert!(politica::PADRAO.contains(de), "{de}");
             politica::Politica::ler(&politica::PADRAO.replace(de, para)).unwrap()
         };
-        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n";
+        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare\n";
         const TEMPO: &str = "papel tempo net.connect time.sync\n";
         const ALCANCE: &str =
             "recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";

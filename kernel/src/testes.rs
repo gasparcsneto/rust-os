@@ -31175,6 +31175,22 @@ static CASOS: &[Caso] = &[
         f: aleatorio_sem_entropia_nenhum_byte_sai,
     },
     Caso {
+        nome: "declaracao: a alegacao vai no recurso e o kernel diz quem",
+        f: declaracao_a_alegacao_e_os_fatos_do_kernel,
+    },
+    Caso {
+        nome: "declaracao: fora da forma nada chega ao gate",
+        f: declaracao_fora_da_forma_nada_chega_ao_gate,
+    },
+    Caso {
+        nome: "declaracao: ancorada so na conexao de quem declara",
+        f: declaracao_ancorada_na_conexao_de_quem_declara,
+    },
+    Caso {
+        nome: "declaracao: gasta a taxa de quem lanca",
+        f: declaracao_gasta_a_taxa_de_quem_lanca,
+    },
+    Caso {
         nome: "rede: o envio que nao cabe espera espaco",
         f: rede_o_envio_que_nao_cabe_espera_espaco,
     },
@@ -35255,6 +35271,505 @@ fn aleatorio_sem_entropia_nenhum_byte_sai() -> Resultado {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// A declaração: um fato de quem pede, na auditoria, que nenhuma decisão lê —
+// ver `politica::permissao` ("A declaração")
+// ---------------------------------------------------------------------------
+
+/// Uma declaração bem formada, sem âncora.
+const DECLARACAO: &str =
+    r#"{"event":"teste.consulta","subject":"alvo/metodo","outcome":"verificada"}"#;
+
+/// A declaração de `quem`, pelo mesmo caminho de todo pedido.
+fn declarar(quem: crate::autorizacao::Chamador, params: &str) -> alloc::string::String {
+    fs_pedir(quem, "audit.declare", params)
+}
+
+/// Quantas declarações a auditoria gravou depois do registro `desde`: os
+/// registros de execução do `audit.declare` que passaram, com a alegação no
+/// recurso.
+fn declaracoes_desde(desde: u64) -> usize {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| {
+                r.seq > desde
+                    && r.evento.metodo == "audit.declare"
+                    && r.evento.codigo == politica::Codigo::Allow
+                    && !r.evento.recurso.is_empty()
+            })
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// O registro da declaração e o da decisão dela, pelos números que a
+/// resposta deu.
+fn declaracao_gravada(
+    r: &str,
+) -> Result<
+    (
+        politica::auditoria::Evento,
+        u64,
+        politica::auditoria::Evento,
+    ),
+    &'static str,
+> {
+    let (Some(n), Some(d)) = (fs_numero(r, "record"), fs_numero(r, "decision")) else {
+        crate::log_error!("teste", "{}", r);
+        return Err("a declaracao nao foi feita");
+    };
+    if n <= d {
+        return Err("a declaracao veio antes da decisao dela");
+    }
+    let declarada = registro_numero(n).ok_or("a declaracao nao esta no anel")?;
+    let decisao = registro_numero(d).ok_or("a decisao da declaracao nao esta no anel")?;
+    Ok((declarada, d, decisao))
+}
+
+/// A declaração vai para a auditoria como execução da decisão do gate: a
+/// alegação no recurso, como veio — o evento, o assunto e o desfecho —, e
+/// no detalhe só o que o kernel sabe: o processo e o programa, a âncora e a
+/// decisão. A decisão é a de qualquer comando: a permissão do papel de quem
+/// pede, atenuada pelo manifesto do programa, sem recurso — nenhum campo
+/// da declaração chega a ela. Quem não tem `audit.declare` ouve
+/// `DENY_PERMISSION`, gravado, e nada é declarado; e o que se declara não
+/// muda decisão nenhuma depois.
+fn declaracao_a_alegacao_e_os_fatos_do_kernel() -> Resultado {
+    use crate::agent::registry::{Acesso, Mais, Plano};
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    const FIO: u64 = 7_000_041;
+    // O comando, como o registro o tem: só ele exige a permissão, e nada do
+    // pedido é recurso da decisão.
+    let c = registry::encontrar("audit.declare").ok_or("o audit.declare nao esta no registro")?;
+    if c.acesso != Acesso::Exige(politica::Permissao::AuditDeclare)
+        || c.recurso.is_some()
+        || c.mais != Mais::Nada
+        || c.plano != Plano::Controle
+    {
+        return Err("o audit.declare da recurso ao gate, ou sai da taxa do papel");
+    }
+    if registry::todos()
+        .iter()
+        .any(|o| o.nome != c.nome && o.acesso == c.acesso)
+    {
+        return Err("outro comando exige audit.declare");
+    }
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(180), "declara-op", "operador");
+        let op = Chamador::Pessoa(sessao);
+        let (declarada, d, decisao) = declaracao_gravada(&declarar(op, DECLARACAO))?;
+        if decisao.metodo != "audit.declare"
+            || decisao.codigo != Codigo::Allow
+            || !decisao.recurso.is_empty()
+            || !decisao.detalhe.is_empty()
+            || decisao.titular != Titular::Pessoa
+            || decisao.papel != "operador"
+        {
+            crate::log_error!("teste", "{:?}", decisao);
+            return Err("a decisao da declaracao nao foi a do gate, sem recurso");
+        }
+        if declarada.metodo != "audit.declare"
+            || declarada.codigo != Codigo::Allow
+            || declarada.recurso != "teste.consulta alvo/metodo verificada"
+            || declarada.detalhe != alloc::format!("sem conexao; decisao {d}")
+            || declarada.titular != decisao.titular
+            || declarada.sessao_de_pessoa != decisao.sessao_de_pessoa
+            || declarada.papel != decisao.papel
+        {
+            crate::log_error!("teste", "{:?}", declarada);
+            return Err("a declaracao nao foi gravada como alegacao, com os fatos do kernel");
+        }
+
+        // Pelo processo da pessoa: o programa vai no detalhe, pelo kernel.
+        let imagem = |permite: &str| Programa::Imagem {
+            manifesto: Some(manifesto_de_teste("caso", permite)),
+            resumo: [0xab; 32],
+            editor: None,
+        };
+        let processo = |programa| Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa,
+        };
+        let pelo = alloc::format!("pelo processo {FIO} (caso abababab)");
+        let (declarada, d, decisao) =
+            declaracao_gravada(&declarar(processo(imagem("audit.declare")), DECLARACAO))?;
+        if decisao.detalhe != pelo
+            || declarada.detalhe != alloc::format!("{pelo}: sem conexao; decisao {d}")
+            || declarada.recurso != "teste.consulta alvo/metodo verificada"
+            || declarada.titular != Titular::Pessoa
+        {
+            crate::log_error!("teste", "{:?} / {:?}", decisao, declarada);
+            return Err("a declaracao do processo nao disse o programa pelo kernel");
+        }
+        // O manifesto que não a declara: recusado, gravado, e nada declarado.
+        let antes = crate::autorizacao::ultimo_registro();
+        let r = declarar(processo(imagem("system.read")), DECLARACAO);
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" || declaracoes_desde(antes) != 0 {
+            crate::log_error!("teste", "{}", r);
+            return Err("o programa declarou sem audit.declare no manifesto");
+        }
+        let e = ultimo_que(|e| e.metodo == "audit.declare").ok_or("a recusa nao foi gravada")?;
+        if e.detalhe != alloc::format!("{pelo}: o manifesto nao declara audit.declare") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa do manifesto nao foi gravada como do programa");
+        }
+
+        // Quem não tem a permissão: o observador e o tecido de segurança.
+        let ob = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(181),
+            "declara-ob",
+            "observador",
+        ));
+        crate::autorizacao::encher_a_taxa_do_servico_de_teste();
+        for (quem, nome) in [(ob, "observador"), (como_o_nsf(), "nsf")] {
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = declarar(quem, DECLARACAO);
+            let gravada = ultimo_que(|e| e.metodo == "audit.declare")
+                .is_some_and(|e| e.codigo == Codigo::DenyPermission);
+            if decisao_do_envelope(&r) != "DENY_PERMISSION"
+                || declaracoes_desde(antes) != 0
+                || !gravada
+            {
+                crate::log_error!("teste", "{}: {}", nome, r);
+                return Err("quem nao tem audit.declare declarou, ou a recusa nao foi gravada");
+            }
+        }
+
+        // O que se declara não muda decisão nenhuma: as mesmas respostas,
+        // antes e depois de declarar o contrário de cada uma.
+        let pedidos = [
+            (op, "fs.list", r#"{"path":"/bin"}"#),
+            (op, "policy.show", "{}"),
+            (op, "net.connect", r#"{"to":"tcp:10.0.2.100:9"}"#),
+            (ob, "fs.list", r#"{"path":"/bin"}"#),
+            (ob, "audit.declare", DECLARACAO),
+        ];
+        let decisoes = || {
+            pedidos
+                .iter()
+                .map(|(quem, metodo, params)| decisao_do_envelope(&fs_pedir(*quem, metodo, params)))
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let antes = decisoes();
+        for (evento, assunto, desfecho) in [
+            ("teste.permite", "policy.show", "allow"),
+            ("teste.nega", "fs.list:/bin", "deny_permission"),
+            ("teste.papel", "papel:sistema", "concedido"),
+            ("teste.destino", "tcp:10.0.2.100:9", "allow"),
+            ("teste.conter", "papel:observador", "solto"),
+        ] {
+            let r = declarar(
+                op,
+                &alloc::format!(
+                    r#"{{"event":"{evento}","subject":"{assunto}","outcome":"{desfecho}"}}"#
+                ),
+            );
+            declaracao_gravada(&r)?;
+        }
+        if decisoes() != antes {
+            crate::log_error!("teste", "{:?} / {:?}", antes, decisoes());
+            return Err("uma declaracao mudou uma decisao");
+        }
+        if !antes.iter().any(|c| c == "ALLOW") || !antes.iter().any(|c| c != "ALLOW") {
+            crate::log_error!("teste", "{:?}", antes);
+            return Err("os pedidos do caso nao tem permissao e recusa");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Fora da forma, nada chega ao gate: o evento sem espaço, com maiúscula,
+/// com um caractere de fora, longo demais ou no espaço de um comando do
+/// registro; o assunto vazio, com espaço, `;`, aspas, barra invertida — um
+/// escape —, fora do ASCII ou longo demais; o desfecho que não é uma
+/// palavra; o campo que falta, o do tipo errado, e todo campo que o comando
+/// não declara — o processo, o papel, o destino, a decisão, uma nota: o
+/// que só o kernel diz não se manda. Cada um é `INVALID_ARGUMENT`, gravado
+/// com o nome do campo, e nada é declarado. A borda de cada teto passa, e
+/// a pontuação imprimível no assunto também: o kernel não a interpreta.
+fn declaracao_fora_da_forma_nada_chega_ao_gate() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let op = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(182),
+            "declara-forma",
+            "operador",
+        ));
+        let com = |evento: &str, assunto: &str, desfecho: &str| {
+            alloc::format!(r#"{{"event":"{evento}","subject":"{assunto}","outcome":"{desfecho}"}}"#)
+        };
+        let a = |n: usize| "a".repeat(n);
+        let evento_longo = alloc::format!("teste.{}", a(registry::MAIOR_EVENTO - 5));
+        let casos: alloc::vec::Vec<(alloc::string::String, &str)> = alloc::vec![
+            (com("consulta", "x", "ok"), "event"),
+            (com("Teste.x", "x", "ok"), "event"),
+            (com("teste.X", "x", "ok"), "event"),
+            (com("1teste.x", "x", "ok"), "event"),
+            (com("teste.1x", "x", "ok"), "event"),
+            (com("teste..x", "x", "ok"), "event"),
+            (com("teste.x.", "x", "ok"), "event"),
+            (com(".teste", "x", "ok"), "event"),
+            (com("teste-a.x", "x", "ok"), "event"),
+            (com("teste.x y", "x", "ok"), "event"),
+            (com("net.connect", "x", "ok"), "event"),
+            (com("audit.declare", "x", "ok"), "event"),
+            (com("fs.qualquer", "x", "ok"), "event"),
+            (com("time.fonte", "x", "ok"), "event"),
+            (com(&evento_longo, "x", "ok"), "event"),
+            (com("teste.x", "", "ok"), "subject"),
+            (com("teste.x", "a b", "ok"), "subject"),
+            (com("teste.x", "a;b", "ok"), "subject"),
+            (com("teste.x", r#"a\"b"#, "ok"), "subject"),
+            (com("teste.x", r#"a\\b"#, "ok"), "subject"),
+            (com("teste.x", concat!("a", "\\", "u0041"), "ok"), "subject"),
+            (com("teste.x", "ação", "ok"), "subject"),
+            (com("teste.x", &a(registry::MAIOR_SIMBOLO + 1), "ok"), "subject"),
+            (com("teste.x", "x", ""), "outcome"),
+            (com("teste.x", "x", "Ok"), "outcome"),
+            (com("teste.x", "x", "o.k"), "outcome"),
+            (com("teste.x", "x", "o-k"), "outcome"),
+            (com("teste.x", "x", "1ok"), "outcome"),
+            (com("teste.x", "x", &a(registry::MAIOR_PALAVRA + 1)), "outcome"),
+            (r#"{"event":"teste.x","subject":"x"}"#.into(), "outcome"),
+            (r#"{"subject":"x","outcome":"ok"}"#.into(), "event"),
+            (r#"{"event":"teste.x","outcome":"ok"}"#.into(), "subject"),
+            (r#"{"event":7,"subject":"x","outcome":"ok"}"#.into(), "event"),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","connection":"3"}"#.into(),
+                "connection",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","connection":-1}"#.into(),
+                "connection",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","process":7}"#.into(),
+                "process",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","role":"sistema"}"#.into(),
+                "role",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","destination":"tcp:10.0.2.100:7"}"#
+                    .into(),
+                "destination",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","decision":1}"#.into(),
+                "decision",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","note":"x"}"#.into(),
+                "note",
+            ),
+        ];
+        for (params, campo) in &casos {
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = declarar(op, params);
+            if !r.contains(r#""code":-32602"#) || decisao_do_envelope(&r) != *campo {
+                crate::log_error!("teste", "{} -> {}", params, r);
+                return Err("uma declaracao fora da forma nao foi recusada pelo campo");
+            }
+            let gravada = registro_que(|e| e.metodo == "audit.declare").is_some_and(|(seq, e)| {
+                seq > antes && e.codigo == Codigo::InvalidArgument && e.detalhe == *campo
+            });
+            if !gravada || declaracoes_desde(antes) != 0 {
+                crate::log_error!("teste", "{}", params);
+                return Err("a declaracao fora da forma nao foi gravada como INVALID_ARGUMENT");
+            }
+        }
+        // A borda de cada teto passa, e a pontuação no assunto também.
+        let no_teto = alloc::format!("teste.{}", a(registry::MAIOR_EVENTO - 6));
+        for (evento, assunto, desfecho) in [
+            (
+                no_teto.as_str(),
+                a(registry::MAIOR_SIMBOLO).as_str(),
+                a(registry::MAIOR_PALAVRA).as_str(),
+            ),
+            (
+                "teste.x",
+                "a/b:c-d_e.f@g+h=i,j!k?l#m$n%o&p*q(r)s[t]u{v}w|x~y",
+                "ok",
+            ),
+            ("a.b.c.d", "!", "z9_"),
+        ] {
+            let (declarada, _, _) =
+                declaracao_gravada(&declarar(op, &com(evento, assunto, desfecho)))?;
+            if declarada.recurso != alloc::format!("{evento} {assunto} {desfecho}") {
+                crate::log_error!("teste", "{:?}", declarada);
+                return Err("a declaracao na borda nao foi gravada como veio");
+            }
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A âncora é uma conexão de quem declara, e o destino dela é o da tabela
+/// da pilha: o kernel o escreve, e quem declara não o diz. A conexão de
+/// outro titular, a que não existe e a que já fechou respondem o mesmo
+/// `INVALID_ARGUMENT`, sem dizer de quem é: a pessoa não ancora na conexão
+/// de outra, nem o processo na da pessoa que o lançou — o dono de uma
+/// conexão é o caminho por onde ela foi aberta. A recusa vai para a
+/// auditoria com a alegação e o número pedido, e nada é declarado.
+fn declaracao_ancorada_na_conexao_de_quem_declara() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let sa = crate::pessoas::sessao_de_teste(Console::Terminal(183), "ancora-a", "operador");
+        let sb = crate::pessoas::sessao_de_teste(Console::Terminal(184), "ancora-b", "operador");
+        let (a, b) = (Chamador::Pessoa(sa), Chamador::Pessoa(sb));
+        let processo = Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Pessoa { sessao: sa },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", "net.connect audit.declare")),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        let abrir = |quem| {
+            conexao_aberta(&fs_pedir(
+                quem,
+                "net.connect",
+                &alloc::format!(r#"{{"to":"{ECO}"}}"#),
+            ))
+        };
+        let ancorada = |n: u64| {
+            alloc::format!(
+                r#"{{"event":"teste.eco","subject":"x","outcome":"ok","connection":{n}}}"#
+            )
+        };
+        let n = abrir(a)?;
+        let (declarada, d, _) = declaracao_gravada(&declarar(a, &ancorada(n)))?;
+        if declarada.recurso != "teste.eco x ok"
+            || declarada.detalhe != alloc::format!("conexao {n} {ECO}; decisao {d}")
+        {
+            crate::log_error!("teste", "{:?}", declarada);
+            return Err("a ancora nao levou o destino real da conexao, pelo kernel");
+        }
+        // A de outro titular, a que não existe, a da pessoa pelo processo
+        // dela: a mesma resposta, e nada declarado.
+        let recusada = |quem, numero: u64| -> Result<alloc::string::String, &'static str> {
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = declarar(quem, &ancorada(numero));
+            if decisao_do_envelope(&r) != "ALLOW"
+                || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT")
+                || r.contains(r#""declared":true"#)
+                || fs_numero(&r, "record").is_some()
+                || declaracoes_desde(antes) != 0
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("uma ancora que nao e de quem declara foi aceita");
+            }
+            let (seq, e) = registro_que(|e| {
+                e.metodo == "audit.declare" && e.codigo == Codigo::InvalidArgument
+            })
+            .ok_or("a ancora recusada nao foi gravada")?;
+            let esperado = alloc::format!("conexao {numero} nao e de quem declara; decisao ");
+            if seq <= antes
+                || e.recurso != "teste.eco x ok"
+                || !e.detalhe.contains(&esperado)
+                || decisao_executada(&e.detalhe).is_none()
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a ancora recusada nao foi gravada com a alegacao e o numero");
+            }
+            fs_texto(&r, "error").ok_or("a ancora recusada nao disse por que")
+        };
+        let de_outro = recusada(b, n)?;
+        let inexistente = recusada(a, 999_999_999)?;
+        let pelo_processo = recusada(processo, n)?;
+        if de_outro != inexistente || de_outro != pelo_processo {
+            return Err("a conexao de outro e a que nao existe nao responderam o mesmo");
+        }
+        // A do processo, aberta por ele: o programa e o destino, pelo kernel.
+        let m = abrir(processo)?;
+        let (declarada, d, _) = declaracao_gravada(&declarar(processo, &ancorada(m)))?;
+        let pelo = alloc::format!("pelo processo {} (caso abababab)", crate::fios::id_atual());
+        if declarada.detalhe != alloc::format!("{pelo}: conexao {m} {ECO}; decisao {d}") {
+            crate::log_error!("teste", "{:?}", declarada);
+            return Err("a ancora do processo nao levou o programa e o destino pelo kernel");
+        }
+        // Fechada, não ancora mais.
+        for (quem, numero) in [(a, n), (processo, m)] {
+            let r = fs_pedir(
+                quem,
+                "net.close",
+                &alloc::format!(r#"{{"connection":{numero}}}"#),
+            );
+            if decisao_do_envelope(&r) != "ALLOW" {
+                crate::log_error!("teste", "{}", r);
+                return Err("a conexao do caso nao fechou");
+            }
+        }
+        let fechada = recusada(a, n)?;
+        if fechada != de_outro {
+            return Err("a conexao fechada nao respondeu como a que nao existe");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A declaração gasta a taxa de quem lançou o programa, como todo exercício
+/// de autoridade: o programa de uma pessoa tira do balde dela, e o pedido
+/// que passa da rajada é `RATE_LIMIT`, sem declaração. A pessoa não tem
+/// taxa no que pede por si (`nativo_a_taxa_e_de_quem_pede`): com o balde
+/// do programa vazio, a declaração dela ainda passa.
+fn declaracao_gasta_a_taxa_de_quem_lanca() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_000_042;
+    let apertada = politica_trocada(&[("taxa operador 50 100", "taxa operador 1 3")])?;
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_a_politica(apertada, || {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(185), "declara-taxa", "operador");
+        let pessoa = Chamador::Pessoa(sessao);
+        let processo = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", "audit.declare")),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        // A rajada é de três, toda do programa.
+        for _ in 0..3 {
+            declaracao_gravada(&declarar(processo, DECLARACAO))?;
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        let r = declarar(processo, DECLARACAO);
+        if decisao_do_envelope(&r) != "RATE_LIMIT" || declaracoes_desde(antes) != 0 {
+            crate::log_error!("teste", "{}", r);
+            return Err("a declaracao nao gastou o balde de quem lancou o programa");
+        }
+        declaracao_gravada(&declarar(pessoa, DECLARACAO))
+            .map_err(|_| "a pessoa ganhou uma taxa no que declara por si")?;
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// Lê do eco da conexão de `quem` até juntar `n` bytes — texto, que é o
 /// que os casos mandam.
 fn ler_do_eco(
@@ -35972,8 +36487,8 @@ fn tls_sem_random_read_nada_sai() -> Resultado {
     use politica::Codigo;
     crate::pessoas::esquecer_registradas();
     let sem = politica_trocada(&[(
-        "message.send message.read random.read\nrecurso operador",
-        "message.send message.read\nrecurso operador",
+        "message.send message.read random.read audit.declare\nrecurso operador",
+        "message.send message.read audit.declare\nrecurso operador",
     )])?;
     let resultado = com_a_politica(sem, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
@@ -46257,8 +46772,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -48537,8 +49052,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(

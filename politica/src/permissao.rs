@@ -26,6 +26,19 @@
 //! uma hora digitada. As duas são sensíveis — nenhuma vem pela inclusão de
 //! outro papel —, e nenhuma tem alcance próprio: as fontes são destinos de
 //! `net.connect`, e o alcance delas é o dessa permissão.
+//!
+//! # A declaração
+//!
+//! `audit.declare` autoriza um programa a **declarar** um fato dele para a
+//! auditoria — um evento, o assunto e o desfecho, ancorados, se ele quiser,
+//! numa conexão dele —, e nada mais. A declaração é uma alegação: o kernel
+//! a grava na mesma cadeia com o que só ele sabe — quem, o papel, a sessão,
+//! o processo, a proveniência e o destino real da conexão —, e nenhuma
+//! decisão a lê: nem o gate, nem o firewall, nem as cotas, nem a contenção.
+//! Não autoriza, não nega e não muda nada além do registro. Sem alcance: o
+//! que se declara não é recurso de política. Sensível — o papel que a tem a
+//! escreve —, e não administrativa: um programa a exerce pelo gate, com o
+//! manifesto dele.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -161,11 +174,15 @@ pub enum Permissao {
     /// `admin.execute`, com prova. Não aceita uma hora digitada; sem salto
     /// pendente, não há o que confirmar.
     TimeConfirm,
+    /// Declarar um fato do programa para a auditoria — `audit.declare`: uma
+    /// alegação, gravada com os fatos do kernel, que nenhuma decisão lê. Ver
+    /// o cabeçalho do módulo.
+    AuditDeclare,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 40] = [
+pub const TODAS: [Permissao; 41] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -206,6 +223,7 @@ pub const TODAS: [Permissao; 40] = [
     Permissao::RandomRead,
     Permissao::TimeSync,
     Permissao::TimeConfirm,
+    Permissao::AuditDeclare,
 ];
 
 impl Permissao {
@@ -252,6 +270,7 @@ impl Permissao {
             Permissao::RandomRead => "random.read",
             Permissao::TimeSync => "time.sync",
             Permissao::TimeConfirm => "time.confirm",
+            Permissao::AuditDeclare => "audit.declare",
         }
     }
 
@@ -295,6 +314,7 @@ impl Permissao {
                 | Permissao::CredentialSuspend
                 | Permissao::TimeSync
                 | Permissao::TimeConfirm
+                | Permissao::AuditDeclare
         )
     }
 
@@ -391,6 +411,10 @@ impl Permissao {
     /// `time.sync` muda: a evidência entregue pode mover o relógio civil, e
     /// o pedido emitido ocupa a tabela do kernel. `time.confirm` aplica um
     /// salto.
+    ///
+    /// `audit.declare` não muda: a declaração só acrescenta à auditoria o
+    /// registro dela — como toda decisão acrescenta o seu —, e nada que
+    /// alguém veja na máquina muda por ela.
     pub const fn muda_estado(self) -> bool {
         match self {
             Permissao::AgentRead
@@ -405,7 +429,8 @@ impl Permissao {
             | Permissao::MessageRead
             | Permissao::SecurityRead
             | Permissao::NetObserve
-            | Permissao::RandomRead => false,
+            | Permissao::RandomRead
+            | Permissao::AuditDeclare => false,
             Permissao::UiAct
             | Permissao::FsWrite
             | Permissao::FsRawWrite
@@ -466,6 +491,8 @@ mod testes {
             "net.observe",
             // O gerador anda, mas nada que alguém veja muda.
             "random.read",
+            // Só o registro da declaração, como o de toda decisão.
+            "audit.declare",
         ];
         for p in TODAS {
             assert_eq!(
@@ -654,5 +681,28 @@ mod testes {
         assert_eq!(TODAS[37], Permissao::RandomRead);
         assert_eq!(Permissao::de_nome("time.*"), None);
         assert_eq!(Permissao::de_nome("time"), None);
+    }
+
+    /// Declarar é sensível — o papel que declara a escreve —, não é
+    /// administrativa — um programa a exerce pelo gate, com o manifesto —,
+    /// não muda o estado e não tem alcance: o que se declara não é recurso
+    /// de política. E entra no fim: as de antes não mudam de bit.
+    #[test]
+    fn declarar() {
+        let p = Permissao::de_nome("audit.declare").unwrap();
+        assert_eq!(p, Permissao::AuditDeclare);
+        assert!(p.sensivel() && !p.administrativa() && !p.muda_estado());
+        assert!(!p.tem_alcance() && !p.contencao());
+        assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_papel());
+        assert!(!p.recurso_e_destino());
+        assert_eq!(TODAS[40], Permissao::AuditDeclare);
+        assert_eq!(TODAS[39], Permissao::TimeConfirm);
+        assert_eq!(Permissao::AuditDeclare as usize, 40);
+        // A posição na lista é o número da variante: o bit do manifesto.
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        assert_eq!(Permissao::de_nome("audit.*"), None);
+        assert_eq!(Permissao::de_nome("audit"), None);
     }
 }

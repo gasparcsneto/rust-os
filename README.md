@@ -165,6 +165,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal; com `after`, os seguintes a um número, do mais velho ao mais novo — a leitura de quem acompanha a cadeia (`count`, `after`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
+| `audit.declare` | Declara um fato de quem pede para a auditoria — uma alegação, e não um fato do kernel: o evento, o assunto e o desfecho vão, como vieram, no recurso de um registro da cadeia; quem, o papel, a sessão, o processo, o programa e a decisão, no detalhe, pelo kernel. Ancorada numa conexão de quem declara, o detalhe leva o destino real dela, pela tabela da pilha; a de outro titular, ou uma que não existe, é `INVALID_ARGUMENT`, sem dizer de quem é. Nenhuma decisão lê uma declaração. Exige `audit.declare`, e gasta a taxa do papel (`event`, `subject`, `outcome`, `connection`) |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
 | `security.status` | O tecido de segurança: o papel com que o gate decide as leituras dele, até onde leu, o que perdeu, o que pediu e os incidentes |
 | `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
@@ -6467,8 +6468,8 @@ do tecido de segurança, e `tempo`, do serviço de hora — ver
 [O tecido de segurança](#o-tecido-de-segurança) e [O tempo](#o-tempo). Um
 papel pode incluir outro (`@observador`), mas as
 permissões **sensíveis** — `fs.read`, `fs.raw_read`, `keyboard.read`,
-`debug.trigger`, `terminal.attach`, `time.sync`, as administrativas — não
-atravessam a inclusão: cada papel que as tem as escreve. Não há curinga: `*` é um erro de
+`debug.trigger`, `terminal.attach`, `time.sync`, `audit.declare`, as
+administrativas — não atravessam a inclusão: cada papel que as tem as escreve. Não há curinga: `*` é um erro de
 leitura. Quatro agentes ou quatrocentos, a política continua do tamanho dos
 papéis.
 
@@ -6528,6 +6529,25 @@ journal, e atravessa o boot com os mesmos números e elos. `audit.head` dá
 a cabeça para ancorar fora da máquina, e a fumaça refaz a cauda no
 hospedeiro com o mesmo pacote. Uma enxurrada recusada por taxa grava o
 primeiro e soma os seguintes, para não empurrar para fora o que importa.
+
+**A declaração.** Quem quer deixar um fato seu na auditoria — um programa,
+um agente, uma pessoa — o declara com `audit.declare`: o evento
+(`<espaço>.<nome>`, fora dos espaços dos comandos), o assunto e o desfecho,
+cada um numa forma fechada que o registro do comando confere antes do gate
+— fora dela, `INVALID_ARGUMENT`, e nada chega à decisão. O kernel grava a
+declaração na mesma cadeia, como execução da decisão do gate: a alegação no
+recurso, como veio, e no detalhe só o que ele sabe — o processo e o
+programa, o número da decisão e, se a declaração se ancora numa conexão de
+quem declara, o destino real dela, pela tabela da pilha. A conexão de outro
+titular, a que não existe e a que já fechou respondem o mesmo
+`INVALID_ARGUMENT`, sem dizer de quem é; o processo não ancora na conexão
+de quem o lançou. É uma alegação, e não um fato do kernel: nenhuma decisão
+a lê — nem o gate, nem o firewall, nem as cotas, nem a contenção —, e ela
+não autoriza, não nega e não muda nada além do registro. A permissão é
+sensível e sem alcance: o operador, o sistema e o administrador a têm; o
+observador e o tecido de segurança, não. Gasta a ficha do papel de quem
+pede — a do processo é a de quem o lançou —, e o manifesto de um programa
+a declara como qualquer outra.
 
 **Os códigos.** `ALLOW`, `DENY_NOT_AUTHENTICATED`, `DENY_ROLE`,
 `DENY_PERMISSION`, `DENY_RESOURCE`, `DENY_POLICY`, `RATE_LIMIT`,

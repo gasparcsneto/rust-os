@@ -30,6 +30,9 @@ pub enum TipoParam {
     Booleano,
     /// Uma lista JSON — as operações de um lote.
     Lista,
+    /// Um texto numa forma fechada — ver [`Formato`]. Para o protocolo, um
+    /// `string`; a forma vai na descrição do parâmetro.
+    Formatado(Formato),
 }
 
 impl TipoParam {
@@ -37,9 +40,75 @@ impl TipoParam {
     pub const fn nome(self) -> &'static str {
         match self {
             TipoParam::Inteiro => "integer",
-            TipoParam::Texto => "string",
+            TipoParam::Texto | TipoParam::Formatado(_) => "string",
             TipoParam::Booleano => "boolean",
             TipoParam::Lista => "array",
+        }
+    }
+}
+
+/// A forma fechada de um texto que vai, como veio, para a auditoria — o que
+/// um programa declara (`audit.declare`). Conferida aqui, antes do gate,
+/// como o tipo: fora da forma, o pedido é `INVALID_ARGUMENT`, e nada chega
+/// à decisão.
+///
+/// Toda forma é ASCII imprimível, sem espaço, sem aspas, sem barra
+/// invertida e sem `;`: o texto do pedido é o texto gravado — não há
+/// escape a resolver, porque `Json::as_str` devolve os bytes crus —, as
+/// partes se separam por espaço sem ambiguidade, e nenhuma se confunde com
+/// o separador dos recursos de um registro (` ; `).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Formato {
+    /// Um nome de evento, `<espaco>.<nome>[.<nome>…]`: partes de
+    /// minúsculas, dígitos e `_`, cada uma começando por letra, até
+    /// [`MAIOR_EVENTO`] bytes. O espaço não é o de um comando do registro:
+    /// uma declaração não se passa por um comando.
+    Evento,
+    /// Uma palavra: minúsculas, dígitos e `_`, começando por letra, até
+    /// [`MAIOR_PALAVRA`] bytes.
+    Palavra,
+    /// Um símbolo: ASCII imprimível sem espaço, aspas, barra invertida nem
+    /// `;`, de 1 a [`MAIOR_SIMBOLO`] bytes.
+    Simbolo,
+}
+
+/// O maior nome de evento.
+pub const MAIOR_EVENTO: usize = 32;
+/// A maior palavra.
+pub const MAIOR_PALAVRA: usize = 24;
+/// O maior símbolo.
+pub const MAIOR_SIMBOLO: usize = 64;
+
+/// Minúsculas, dígitos e `_`, começando por letra.
+fn palavra(texto: &str) -> bool {
+    let b = texto.as_bytes();
+    b.first().is_some_and(u8::is_ascii_lowercase)
+        && b.iter()
+            .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+}
+
+impl Formato {
+    /// Se `texto` está na forma.
+    pub fn confere(self, texto: &str) -> bool {
+        match self {
+            Formato::Evento => {
+                let mut partes = texto.split('.');
+                let espaco = partes.next().unwrap_or("");
+                texto.len() <= MAIOR_EVENTO
+                    && texto.contains('.')
+                    && palavra(espaco)
+                    && partes.all(palavra)
+                    && !todos()
+                        .iter()
+                        .any(|c| c.nome.split('.').next() == Some(espaco))
+            }
+            Formato::Palavra => texto.len() <= MAIOR_PALAVRA && palavra(texto),
+            Formato::Simbolo => {
+                (1..=MAIOR_SIMBOLO).contains(&texto.len())
+                    && texto
+                        .bytes()
+                        .all(|c| c.is_ascii_graphic() && !matches!(c, b'"' | b'\\' | b';'))
+            }
         }
     }
 }
@@ -224,6 +293,7 @@ pub fn validar<'a>(cmd: &Command, params: Json<'a>) -> Result<(), &'a str> {
                 let tipo_confere = match spec.tipo {
                     TipoParam::Inteiro => valor.as_u64().is_some(),
                     TipoParam::Texto => valor.as_str().is_some(),
+                    TipoParam::Formatado(f) => valor.as_str().is_some_and(|t| f.confere(t)),
                     TipoParam::Booleano => valor.as_bool().is_some(),
                     TipoParam::Lista => valor.0.first() == Some(&b'['),
                 };
