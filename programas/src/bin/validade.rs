@@ -9,9 +9,13 @@
 //! - **o TLS**: `bancada.duke` (válido de 2025 a 2040), `vencido.duke` (de
 //!   2020 a 2021) e `futuro.duke` (de 2042 a 2044, ainda não válido), no
 //!   eco TLS da bancada: aceito, ou o código da recusa;
-//! - **os cookies**: um `Expires` de 2023, um de 2100 e um `Max-Age=3`, pelo
-//!   servidor HTTP da bancada: os que o pote levou logo depois de guardar, e
-//!   os que ele leva 3,1 s depois — a bancada espera do lado dela.
+//! - **os cookies**: um `Expires` de 2023, um de 2100 e um `Max-Age=10`,
+//!   pelo servidor HTTP da bancada: os que o pote levou logo depois de
+//!   guardar, e os que ele leva 10,1 s depois — a bancada espera do lado
+//!   dela. Dez segundos, e não três: o relógio dos cookies é em segundos, e
+//!   a janela antes do primeiro pedido é a do `Max-Age` menos a fração do
+//!   segundo em que se guardou e o trabalho de uma conexão nova — com três
+//!   processos, rodadas e o NSF ao mesmo tempo, mais de dois segundos.
 //!
 //! O programa não julga: diz o que viu, e a bancada sabe o que cada estado
 //! deve dar. Sai com [`CODIGO`] quando disse tudo, e com um código menor
@@ -63,11 +67,11 @@ const CLARA: &str = "http://bancada.duke";
 
 /// Os cookies com validade: um que venceu antes do piso de qualquer boot
 /// desta bancada e depois do RTC atrasado dela, um que não vence, e um que
-/// vence em 3 s.
+/// vence em 10 s.
 const COOKIES: [&str; 3] = [
     "antigo=1; Expires=Sun, 01 Jan 2023 00:00:00 GMT",
     "futuro=1; Expires=Fri, 31 Dec 2100 23:59:59 GMT",
-    "vence=1; Max-Age=3",
+    "vence=1; Max-Age=10",
 ];
 
 /// Um `GET` de `url` com `pote`, numa conexão só.
@@ -137,7 +141,7 @@ fn tls_de(ancoras: &tls::Ancoras) {
     }
 }
 
-/// Os cookies: os que o pote levou logo depois de guardar, e 3,1 s depois.
+/// Os cookies: os que o pote levou logo depois de guardar, e 10,1 s depois.
 fn cookies(ancoras: &tls::Ancoras) -> Result<(), i64> {
     let opcoes = Opcoes {
         resolucao: Resolucao::Fixa(BANCADA),
@@ -168,7 +172,7 @@ fn cookies(ancoras: &tls::Ancoras) -> Result<(), i64> {
     let antes = eco(&mut pote, &opcoes)?;
     escreverln!("validade: cookies antes {}", antes);
     // A bancada espera do lado dela: o programa não tem como dormir.
-    match pedir(&mut pote, &format!("{CLARA}/lento/3100"), &opcoes) {
+    match pedir(&mut pote, &format!("{CLARA}/lento/10100"), &opcoes) {
         Ok(r) if r.status == 200 => {}
         _ => {
             escreverln!("validade: a espera da bancada falhou");

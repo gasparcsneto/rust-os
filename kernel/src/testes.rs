@@ -49770,7 +49770,7 @@ fn hora_a_validade_dos_programas_em_cada_estado() -> Resultado {
 /// rodadas e o NSF lê a auditoria. Cada processo lê a hora pelo gate, e
 /// confere com o que leu: os três dizem tudo, com a hora autenticada e
 /// pelo civil — `bancada.duke` aceito, `vencido.duke` vencido, o `Max-Age`
-/// vencido 3,1 s depois —; as rodadas fecham sincronizadas, e nada fica
+/// vencido 10,1 s depois —; as rodadas fecham sincronizadas, e nada fica
 /// aberto.
 fn tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo() -> Resultado {
     use crate::autorizacao::Autoridade;
