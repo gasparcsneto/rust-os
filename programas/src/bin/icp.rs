@@ -23,7 +23,25 @@
 //!   lê e tem o tamanho certo, mas a soma não confere: nada sai, e nada se
 //!   declara;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
-//!   conexões de quem acabou.
+//!   conexões de quem acabou;
+//! - [`QUEM`], [`CONTAR`] e [`LENTO`]: as chamadas de atualização `quem`
+//!   (o canister responde o Principal de quem chamou), `contar` (o
+//!   contador, mais um) e `lento` (o que demora), do anônimo — com `c`
+//!   zero — ou assinadas pela chave `c` de [`CHAVES`], que o kernel guarda
+//!   para quem lançou o processo; com `c` de [`NA_RAIZ`] em diante, no
+//!   canister [`DA_RAIZ`], o da sub-rede raiz, e a chave `c - NA_RAIZ`;
+//! - [`RECUSA_NA_CHAMADA`]: o método `recusa` chamado como atualização —
+//!   o canister recusa, e o certificado prova a recusa —, como as chamadas
+//!   acima; e [`SEM_CANISTER`]: o `quem` de um canister que não existe na
+//!   faixa provada — a recusa antes do consenso, sem prova nenhuma, que o
+//!   programa diz à parte (`uncertified_reject`). A chamada pendente é
+//!   acompanhada até [`icp::MAIS_LEITURAS`] vezes, cada leitura assinada de
+//!   novo, com uma espera decidida pelo gate entre elas; antes de cada uma,
+//!   o programa diz `icp: <passo> pendente <situação>`. Antes do desfecho
+//!   de uma chamada que chegou ao fim, diz quem chamou — `icp: <passo>
+//!   remetente <principal>` — e o que voltou — `icp: <passo> resposta
+//!   <resposta>` —, cada um na sua linha: o Principal duas vezes não cabe
+//!   numa.
 //!
 //! Antes de cada pedido, diz `icp: <passo> pede <etapa>` — `read_state` ou
 //! `query`: a suíte sabe assim que o programa espera a resposta daquele
@@ -42,9 +60,11 @@
 //!
 //! O canister, o método, o Principal e o certificado não dão nada a este
 //! processo: o que ele pode é o que o gate decide para os pedidos dele —
-//! `fs.read`, `random.read`, `system.info`, `net.connect` e
-//! `audit.declare`, com a autoridade de quem o lançou. Uma resposta
-//! verificada prova o que os nós responderam, e não é `ALLOW` de nada.
+//! `fs.read`, `random.read`, `system.info`, `net.connect`,
+//! `audit.declare`, `key.read` e `key.sign`, com a autoridade de quem o
+//! lançou. Uma resposta verificada prova o que os nós responderam, e não
+//! é `ALLOW` de nada; e a chave com que assina é de quem o lançou, no
+//! espaço dele — o programa só sabe o nome.
 
 #![no_std]
 #![no_main]
@@ -57,14 +77,19 @@ programas::manifesto!(
     "random.read",
     "system.read",
     "fs.read",
-    "audit.declare"
+    "audit.declare",
+    "key.read",
+    "key.sign"
 );
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use programas::escreverln;
-use programas::icp::{self, Desfecho, Falha, Principal, Rede, Valor, Verificada};
+use programas::icp::{
+    self, Ancora, Andamento, ChaveDoKernel, Desfecho, Falha, Final, Principal, Rede, Valor,
+    Verificada,
+};
 use programas::sistema;
 use programas::tls::{self, Ancoras};
 use protocolo::usuario::evento::{Evento, tipo};
@@ -88,13 +113,22 @@ const RECUSA: i64 = 3;
 const CANDID: i64 = 4;
 const PRINCIPAL_INVALIDO: i64 = 5;
 const SAIR_SEM_FECHAR: i64 = 6;
+const QUEM: i64 = 7;
+const CONTAR: i64 = 8;
+const LENTO: i64 = 9;
+const RECUSA_NA_CHAMADA: i64 = 10;
+const SEM_CANISTER: i64 = 11;
+
+/// As chaves de uma chamada assinada, pelo `c` de um evento — `c` zero é o
+/// anônimo. Os nomes que a política padrão dá ao operador.
+const CHAVES: [&str; 2] = ["chave:bancada", "chave:bancada-2"];
 
 /// As redes, pelo índice que o `b` de um evento diz — os nomes de
 /// `/dados/icp/redes` da bancada. Cada uma é o mesmo canister por um
 /// endpoint que o proxy da bancada trata de um jeito: o honesto, o lento,
 /// e os que adulteram a resposta, cada um de uma maneira; a de chave
 /// errada, honesta e com outra raiz; e a honesta sem DNS.
-const REDES: [&str; 12] = [
+const REDES: [&str; 13] = [
     "bancada",
     "lenta",
     "raiz-errada",
@@ -107,6 +141,7 @@ const REDES: [&str; 12] = [
     "faixa-errada",
     "velho",
     "direta",
+    "assincrona",
 ];
 
 /// Os métodos que respondem Candid fora da forma, pelo `c` de um evento
@@ -117,11 +152,25 @@ const FORA_DA_FORMA: [&str; 3] = ["candid_truncado", "candid_sobra", "candid_mag
 /// PocketIC — a bancada confere que é este (`xtask/src/icp.rs`).
 const BANCADA: &str = "pi33i-pt777-77776-aaaaa-cai";
 
+/// O mesmo módulo num canister da NNS, a sub-rede raiz: a prova da chamada
+/// vem sem delegação, e as faixas, da leitura à parte de `["subnet"]` — a
+/// bancada confere que é este (`xtask/src/icp.rs`).
+const DA_RAIZ: &str = "xp3jw-ot777-77777-aaaaa-cai";
+
+/// O `c` de uma chamada a partir do qual ela vai ao canister [`DA_RAIZ`]:
+/// `c - NA_RAIZ` escolhe a chave como abaixo dele.
+const NA_RAIZ: i64 = 10;
+
 /// Os canisters que não são Principal, do passo [`PRINCIPAL_INVALIDO`]: um
 /// fora da base32, e o da bancada com o vigésimo caractere trocado — um bit
 /// dos bytes, e não do CRC nem da sobra da base32: a soma não confere, e é
 /// só ela que o recusa.
 const NAO_PRINCIPAIS: [&str; 2] = ["aaaaa-aa-nao-e-principal", "pi33i-pt777-77776-aaaab-cai"];
+
+/// O canister seguinte ao da bancada, na faixa da mesma sub-rede, e que a
+/// bancada não cria: a sub-rede é provada, e a chamada é recusada antes do
+/// consenso — a recusa sem prova do passo [`SEM_CANISTER`].
+const NAO_EXISTE: &str = "pp254-cl777-77776-aaaaq-cai";
 
 /// O DNS da bancada da suíte.
 const DNS: &str = "udp:10.0.2.53:53";
@@ -229,6 +278,148 @@ fn consultar(
     }
 }
 
+/// O que uma resposta de chamada diz, curto: o Principal, o número ou o
+/// texto do Candid — ou por que não se lê.
+fn resposta_da_chamada(bytes: &[u8]) -> String {
+    match icp::candid::decodificar(bytes) {
+        Ok(valores) => match valores.as_slice() {
+            [Valor::Principal(p)] => format!("principal {}", p.texto()),
+            [Valor::Nat64(n)] => format!("nat64 {n}"),
+            [Valor::Texto(t)] => format!("texto {t}"),
+            outros => format!("{} valores", outros.len()),
+        },
+        Err(e) => format!("recusado: {e}"),
+    }
+}
+
+/// O que o canister respondeu a uma chamada, curto: a resposta, a recusa
+/// provada pelo certificado, a recusa sem prova, ou a situação em que a
+/// chamada ficou.
+fn resposta_do_andamento(andamento: &Andamento) -> String {
+    match andamento {
+        Andamento::Certificado { desfecho, .. } => match desfecho {
+            Final::Respondida(bytes) => resposta_da_chamada(bytes),
+            Final::Recusada { codigo, erro, .. } => {
+                format!("recusa {codigo} {}", erro.as_deref().unwrap_or("-"))
+            }
+            Final::Concluida => String::from("concluida"),
+        },
+        Andamento::RecusaNaoReplicada { codigo, erro, .. } => {
+            format!(
+                "recusa sem prova {codigo} {}",
+                erro.as_deref().unwrap_or("-")
+            )
+        }
+        Andamento::Pendente(s) => format!("pendente {s}"),
+    }
+}
+
+/// O que uma chamada provou, curto — `prova <sub-rede> <delegada|da raiz>
+/// leituras <n>`. Quem chamou e o que voltou vão antes, cada um na sua
+/// linha: o Principal de quem chamou e a resposta do `quem` — o mesmo
+/// Principal — não cabem juntos numa linha.
+fn provado_da_chamada(a: &icp::Atualizacao, leituras: u32) -> String {
+    let texto = a.faixas.sub_rede.texto();
+    format!(
+        "prova {} {} leituras {}",
+        texto.split('-').next().unwrap_or(""),
+        if a.faixas.delegada {
+            "delegada"
+        } else {
+            "da raiz"
+        },
+        leituras
+    )
+}
+
+/// Uma chamada de atualização pelo caminho inteiro — a chave lida, a
+/// conexão, a chamada assinada, as leituras da situação enquanto
+/// pendente —, declarada antes do fecho, ancorada na decisão da assinatura
+/// da chamada; do anônimo, na conexão.
+fn chamar(
+    passo: &str,
+    rede: &Rede,
+    ancoras: &Ancoras,
+    canister: &Principal,
+    metodo: &str,
+    chave: Option<&str>,
+) {
+    let assunto = icp::assunto(canister, metodo);
+    let arg = sem_argumentos();
+    let mut kernel = None;
+    let mut gateway = None;
+    let mut hora_dita = None;
+    let mut leituras = 0u32;
+    let r: Result<(icp::Atualizacao, Andamento), Falha> = (|| {
+        if let Some(nome) = chave {
+            kernel = Some(ChaveDoKernel::ler(nome)?);
+        }
+        let hora = icp::hora()?;
+        hora_dita = Some(hora.estado.nome());
+        let nonce = icp::nonce()?;
+        let gateway = gateway.insert(icp::conectar(rede, ancoras, DNS)?);
+        let mut narrado = Narrado { gateway, passo };
+        let a = icp::chamar(
+            &mut narrado,
+            rede,
+            kernel.as_mut(),
+            canister,
+            metodo,
+            &arg,
+            &hora,
+            &nonce,
+        )?;
+        let mut andamento = a.andamento.clone();
+        while let Andamento::Pendente(situacao) = andamento
+            && leituras < icp::MAIS_LEITURAS
+        {
+            escreverln!("icp: {} pendente {}", passo, situacao);
+            narrado.gateway.esperar(icp::ESPERA_ENTRE_LEITURAS_MS)?;
+            let hora = icp::hora()?;
+            leituras += 1;
+            andamento = icp::acompanhar(&mut narrado, rede, kernel.as_mut(), &a, &hora)?;
+        }
+        Ok((a, andamento))
+    })();
+    let desfecho = icp::desfecho_da_chamada(r.as_ref().map(|(_, andamento)| andamento));
+    let decisao = kernel.as_ref().and_then(|k| k.decisoes().first().copied());
+    let ancora = match (decisao, gateway.as_ref()) {
+        (Some(d), _) => Ancora::Decisao(d),
+        (None, Some(g)) => Ancora::Conexao(g.conexao()),
+        (None, None) => Ancora::Nenhuma,
+    };
+    let declarada = icp::declarar_chamada(&assunto, desfecho, ancora);
+    let detalhe = match &r {
+        Ok((a, andamento)) => {
+            escreverln!("icp: {} remetente {}", passo, a.remetente.texto());
+            escreverln!(
+                "icp: {} resposta {}",
+                passo,
+                resposta_do_andamento(andamento)
+            );
+            provado_da_chamada(a, leituras)
+        }
+        Err(f) => format!("{f}"),
+    };
+    let declarada = match declarada {
+        Ok(n) => format!("{n}"),
+        Err(codigo) => format!("recusada {codigo}"),
+    };
+    let assinaturas = kernel.as_ref().map_or(0, |k| k.decisoes().len());
+    escreverln!(
+        "icp: {}: {}; declarada {}; hora {}; assinaturas {}; {}",
+        passo,
+        desfecho,
+        declarada,
+        hora_dita.unwrap_or("nenhuma"),
+        assinaturas,
+        detalhe
+    );
+    if let Some(g) = gateway {
+        g.fechar();
+    }
+}
+
 /// Diz o desfecho de um passo.
 fn dizer(
     passo: &str,
@@ -280,7 +471,11 @@ fn principal() -> i64 {
             return 3;
         }
     };
-    let Ok(bancada) = Principal::de_texto(BANCADA) else {
+    let (Ok(bancada), Ok(da_raiz), Ok(nao_existe)) = (
+        Principal::de_texto(BANCADA),
+        Principal::de_texto(DA_RAIZ),
+        Principal::de_texto(NAO_EXISTE),
+    ) else {
         escreverln!("icp: o canister da bancada nao se le");
         return 4;
     };
@@ -331,6 +526,28 @@ fn principal() -> i64 {
                 }
                 (_, None) => {
                     escreverln!("icp: rede {} nao esta no arquivo", nome);
+                }
+                (QUEM | CONTAR | LENTO | RECUSA_NA_CHAMADA | SEM_CANISTER, Some(rede)) => {
+                    let metodo = match e.a {
+                        QUEM | SEM_CANISTER => "quem",
+                        CONTAR => "contar",
+                        LENTO => "lento",
+                        _ => "recusa",
+                    };
+                    let (canister, c, onde) = if e.a == SEM_CANISTER {
+                        (&nao_existe, e.c, " sem canister")
+                    } else if e.c >= NA_RAIZ {
+                        (&da_raiz, e.c - NA_RAIZ, " raiz")
+                    } else {
+                        (&bancada, e.c, "")
+                    };
+                    let chave = usize::try_from(c)
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| CHAVES.get(i))
+                        .copied();
+                    let passo = format!("{metodo} {nome}{onde} {}", chave.unwrap_or("anonimo"));
+                    chamar(&passo, rede, &ancoras, canister, metodo, chave);
                 }
                 (OLA, Some(rede)) => {
                     let passo = format!("ola {nome}");

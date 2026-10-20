@@ -62,6 +62,11 @@ pub(crate) const RAIZ: &str = "308182301d060d2b0601040182dc7c0503010201060c2b060
 /// O programa `icp` tem o mesmo.
 pub(crate) const CANISTER: &str = "pi33i-pt777-77776-aaaaa-cai";
 
+/// O canister da bancada na NNS, a sub-rede raiz: o mesmo módulo, e a
+/// prova sem delegação — a raiz assina, e as faixas vêm da leitura à parte
+/// de `["subnet"]`. O programa `icp` tem o mesmo.
+pub(crate) const CANISTER_DA_RAIZ: &str = "xp3jw-ot777-77777-aaaaa-cai";
+
 /// A sub-rede do canister: a suíte confere que a prova veio dela.
 const SUB_REDE: &str = "753q6-ah42a-rm7md-yb6nn-3egqb-e2tyy-zdjgf-ind25-haovq-fe74w-pqe";
 
@@ -73,7 +78,7 @@ const RAIZ_DE_OUTRA_REDE: &str = "308182301d060d2b0601040182dc7c0503010201060c2b
 /// vai pelo DNS — senão, o endereço fixo da bancada. A `bancada` passa
 /// pelo DNS da suíte; as outras, direto — e a `direta` é a honesta sem
 /// DNS, a da fumaça: a imagem de produção não tem o DNS da suíte.
-pub(crate) const REDES: [(&str, bool); 12] = [
+pub(crate) const REDES: [(&str, bool); 13] = [
     ("bancada", true),
     ("lenta", false),
     ("raiz-errada", false),
@@ -86,6 +91,7 @@ pub(crate) const REDES: [(&str, bool); 12] = [
     ("faixa-errada", false),
     ("velho", false),
     ("direta", false),
+    ("assincrona", false),
 ];
 
 /// O conteúdo de `/dados/icp/redes`.
@@ -288,9 +294,14 @@ impl Bancada {
         let raiz = campo(&estado, "raiz").unwrap_or_default();
         let canister = campo(&estado, "canister").unwrap_or_default();
         let sub_rede = campo(&estado, "sub_rede").unwrap_or_default();
-        if raiz != RAIZ || canister != CANISTER || sub_rede != SUB_REDE {
+        let da_raiz = campo(&estado, "canister_da_raiz").unwrap_or_default();
+        if raiz != RAIZ
+            || canister != CANISTER
+            || sub_rede != SUB_REDE
+            || da_raiz != CANISTER_DA_RAIZ
+        {
             return Err(format!(
-                "a PocketIC {VERSAO} não é a fixada: raiz {raiz}, canister {canister}, sub-rede {sub_rede}"
+                "a PocketIC {VERSAO} não é a fixada: raiz {raiz}, canister {canister}, sub-rede {sub_rede}, canister da raiz {da_raiz}"
             ));
         }
         println!("[xtask] bancada do IC: PocketIC {VERSAO}, canister {canister}");
@@ -326,7 +337,10 @@ mod testes {
         assert_ne!(raiz("raiz-errada"), raiz("bancada"));
         assert_eq!(raiz("velho"), raiz("bancada"));
         assert_eq!(raiz("direta"), raiz("bancada"));
-        // O programa lê o arquivo num pedaço do `fs.read`.
-        assert!(texto.len() <= 4096, "{} bytes", texto.len());
+        assert_eq!(raiz("assincrona"), raiz("bancada"));
+        // O programa lê o arquivo em pedaços de 4 KiB do `fs.read`, uma
+        // decisão do gate cada: dois, com as treze redes — a suíte conta
+        // pelo tamanho.
+        assert!(texto.len() <= 2 * 4096, "{} bytes", texto.len());
     }
 }

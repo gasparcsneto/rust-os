@@ -1,5 +1,7 @@
-//! O Internet Computer de um programa: a consulta anônima verificada do
-//! pacote `web3` ([`web3::icp`]) sobre o HTTPS do Duke ([`crate::http`]).
+//! O Internet Computer de um programa: a consulta anônima verificada e a
+//! chamada de atualização verificada do pacote `web3` ([`web3::icp`]),
+//! sobre o HTTPS do Duke ([`crate::http`]) — a chamada assinada pela chave
+//! que o kernel guarda para quem lançou o processo ([`ChaveDoKernel`]).
 //!
 //! # O caminho de uma consulta
 //!
@@ -33,15 +35,32 @@
 //! o pedido. A convenção `unverified` é a que o NSF observa (ver
 //! `seguranca::regras`); o kernel não lê nenhuma delas.
 //!
+//! # A chamada de atualização
+//!
+//! Do anônimo, ou assinada pela chave `chave:<nome>` de quem lançou o
+//! processo — a pessoa, o agente: a identidade durável do Duke, nunca o
+//! processo nem a sessão. O programa lê a pública por `key.read` e pede
+//! cada assinatura por `key.sign`, no domínio `ic-request`, com o id do
+//! pedido como resumo: uma decisão do gate por assinatura — a da chamada
+//! e a de cada leitura da situação dela —, e a privada nunca chega aqui
+//! ([`ChaveDoKernel`]). O Principal do IC é o da pública; o kernel não o
+//! conhece. A chamada que fica pendente (a resposta 202, ou um
+//! certificado com `received` ou `processing`) é acompanhada por leituras
+//! assinadas de novo, com uma espera decidida pelo gate entre elas
+//! ([`Gateway::esperar`]). A declaração da chamada vai ancorada na
+//! decisão da assinatura dela ([`declarar_chamada`]): o kernel confere
+//! que a decisão é deste processo, e grava o método dela.
+//!
 //! # O que não há aqui
 //!
 //! Nenhuma decisão do Duke. O canister, o método, o Principal, o
 //! certificado e o resultado não viram permissão, recurso nem regra: o
 //! TLS prova o nome do endpoint, a verificação prova o que os nós
 //! responderam a este pedido, e o gate decide se esta identidade fala com
-//! este destino — nenhuma das três é as outras. A consulta é anônima: o
-//! Principal anônimo não é identidade de ninguém no Duke, e quem pede ao
-//! gate é o processo, com a autoridade de quem o lançou.
+//! este destino e assina com esta chave — nenhuma das três é as outras. A
+//! consulta é anônima: o Principal anônimo não é identidade de ninguém no
+//! Duke, e quem pede ao gate é o processo, com a autoridade de quem o
+//! lançou.
 
 use alloc::format;
 use alloc::string::String;
@@ -49,11 +68,13 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub use web3::icp::agente::{self, Desfecho, Etapa, Verificada};
+pub use web3::icp::atualizacao::{self, Andamento, Atualizacao, Final};
 pub use web3::icp::candid::{self, Valor};
+pub use web3::icp::pedido::DOMINIO_DO_PEDIDO;
 pub use web3::icp::principal::Principal;
 pub use web3::icp::registro::{self, Rede};
 
-use crate::conexao::Prazo;
+use crate::conexao::{self, Prazo};
 use crate::http::{self, Aceitas, ConexaoHttp, Limites, Metodo, Opcoes, Pedido, Protocolo, Url};
 use crate::nativo::{self, conteudo};
 use crate::tls::{self, Ancoras, Hora};
@@ -69,6 +90,15 @@ pub const MAIOR_CORPO: usize = 512 * 1024;
 /// O evento de uma consulta, como o programa a declara. O espaço `icp`
 /// não é de nenhum comando do Duke — o kernel recusaria.
 pub const EVENTO: &str = "icp.query";
+
+/// O evento de uma chamada de atualização.
+pub const EVENTO_DA_CHAMADA: &str = "icp.update";
+
+/// Quantas leituras da situação de uma chamada pendente, no máximo.
+pub const MAIS_LEITURAS: u32 = 20;
+
+/// Quanto se espera entre duas leituras da situação, em ms.
+pub const ESPERA_ENTRE_LEITURAS_MS: u64 = 500;
 
 /// O maior assunto que o kernel aceita numa declaração.
 const MAIOR_ASSUNTO: usize = 64;
@@ -94,6 +124,23 @@ pub enum Falha {
     Conexao(http::Falha),
     /// A consulta: o transporte, o HTTP, a verificação.
     Consulta(agente::Erro<Transporte>),
+    /// A chave do kernel não se leu: o código de quem recusou — o gate,
+    /// ou o kernel depois dele —, ou a chave fora do domínio do pedido.
+    Chave(String),
+    /// A chamada: o transporte, o HTTP, a assinatura, a verificação.
+    Chamada(atualizacao::Erro<Transporte, Recusada>),
+}
+
+/// Por que a chave do kernel não assinou: o código de quem recusou — o
+/// gate, ou o kernel depois dele —, ou `BAD_SIGNATURE` se o que voltou
+/// não confere com a pública lida.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recusada(pub String);
+
+impl fmt::Display for Recusada {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// A falha do transporte de uma consulta: a da conexão HTTPS, como veio —
@@ -120,6 +167,8 @@ impl fmt::Display for Falha {
             Falha::Acaso(e) => write!(f, "nonce: {}", e.codigo()),
             Falha::Conexao(e) => write!(f, "{} {}", e.categoria().nome(), e.codigo()),
             Falha::Consulta(e) => write!(f, "{e}"),
+            Falha::Chave(codigo) => write!(f, "chave: {codigo}"),
+            Falha::Chamada(e) => write!(f, "{e}"),
         }
     }
 }
@@ -143,6 +192,175 @@ pub fn desfecho(r: &Result<Verificada, Falha>) -> &'static str {
         Err(Falha::Hora(_)) => "failed_clock",
         Err(Falha::Acaso(_)) => "failed_entropy",
         Err(_) => "failed_setup",
+    }
+}
+
+/// O desfecho de uma chamada de atualização, numa palavra: `verified`,
+/// `verified_reject` e `verified_done` — o certificado provou a resposta,
+/// a recusa, ou que acabou e a resposta saiu do estado —;
+/// `uncertified_reject`, a recusa que não passou pelo consenso, sem prova
+/// nenhuma — dita à parte, e não como verificação que falhou —;
+/// `pending`, sem desfecho depois das leituras; `unverified_<etapa>`
+/// quando a prova não fechou; e `failed_<etapa>` quando não houve o que
+/// verificar — `failed_signature` se a chave não assinou.
+pub fn desfecho_da_chamada(r: Result<&Andamento, &Falha>) -> &'static str {
+    use atualizacao::Erro;
+    match r {
+        Ok(Andamento::Certificado { desfecho, .. }) => match desfecho {
+            Final::Respondida(_) => "verified",
+            Final::Recusada { .. } => "verified_reject",
+            Final::Concluida => "verified_done",
+        },
+        Ok(Andamento::RecusaNaoReplicada { .. }) => "uncertified_reject",
+        Ok(Andamento::Pendente(_)) => "pending",
+        Err(Falha::Chamada(e)) => match e {
+            Erro::Certificado(..) => "unverified_certificate",
+            Erro::Situacao(..) => "unverified_request_status",
+            Erro::LeituraDeEstado(_) => "unverified_read_state",
+            Erro::Corpo(_) => "unverified_response",
+            Erro::Http(..) => "failed_http",
+            Erro::Transporte(..) => "failed_transport",
+            Erro::Pedido(_) => "failed_request",
+            Erro::Assinatura(..) => "failed_signature",
+        },
+        Err(Falha::Chave(_)) => "failed_key",
+        Err(Falha::Conexao(_)) => "failed_connect",
+        Err(Falha::Hora(_)) => "failed_clock",
+        Err(Falha::Acaso(_)) => "failed_entropy",
+        Err(_) => "failed_setup",
+    }
+}
+
+/// Bytes em hexadecimal minúsculo.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITOS: &[u8; 16] = b"0123456789abcdef";
+    let mut t = String::with_capacity(2 * bytes.len());
+    for b in bytes {
+        t.push(char::from(DIGITOS[usize::from(b >> 4)]));
+        t.push(char::from(DIGITOS[usize::from(b & 0xf)]));
+    }
+    t
+}
+
+/// `N` bytes de exatamente `2N` dígitos hexadecimais minúsculos.
+fn de_hex<const N: usize>(texto: &str) -> Option<[u8; N]> {
+    let t = texto.as_bytes();
+    if t.len() != 2 * N {
+        return None;
+    }
+    let digito = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut saida = [0u8; N];
+    for (i, b) in saida.iter_mut().enumerate() {
+        *b = (digito(t[2 * i])? << 4) | digito(t[2 * i + 1])?;
+    }
+    Some(saida)
+}
+
+/// O código de quem recusou um pedido: o do gate, ou o do kernel depois
+/// dele — `code` no resultado.
+fn recusa_de(r: &nativo::Resposta) -> Option<String> {
+    match r.resultado() {
+        Err(recusa) => Some(String::from(recusa.motivo.unwrap_or("TECHNICAL_ERROR"))),
+        Ok(resultado) => resultado
+            .member("code")
+            .and_then(|c| c.as_str())
+            .map(String::from),
+    }
+}
+
+/// A chave de assinatura `chave:<nome>` de quem lançou o processo — a
+/// pessoa, o agente —, que o kernel guarda. O programa tem a pública, lida
+/// por `key.read`, e pede cada assinatura por `key.sign`, pelo gate: uma
+/// decisão por assinatura. A privada nunca chega aqui.
+pub struct ChaveDoKernel {
+    nome: String,
+    publica: [u8; 32],
+    der: [u8; 44],
+    decisoes: Vec<u64>,
+}
+
+impl ChaveDoKernel {
+    /// Lê a chave `chave` — `chave:<nome>`, no espaço de quem lançou o
+    /// processo —, por `key.read`: viva, Ed25519, no domínio do pedido do
+    /// IC. O nome de outro dono responde como o que ninguém tem.
+    pub fn ler(chave: &str) -> Result<ChaveDoKernel, Falha> {
+        let r = nativo::pedir("key.read", |w| w.field_str("key", chave))
+            .map_err(|e| Falha::Chave(format!("ERRO {e}")))?;
+        if let Some(codigo) = recusa_de(&r) {
+            return Err(Falha::Chave(codigo));
+        }
+        let resultado = r
+            .resultado()
+            .map_err(|_| Falha::Chave(String::from("TECHNICAL_ERROR")))?;
+        let campo = |nome: &str| resultado.member(nome).and_then(|v| v.as_str());
+        if campo("state") != Some("active") {
+            return Err(Falha::Chave(String::from(campo("state").unwrap_or("?"))));
+        }
+        if campo("algorithm") != Some("ed25519") || campo("domain") != Some(DOMINIO_DO_PEDIDO) {
+            return Err(Falha::Chave(String::from("WRONG_DOMAIN")));
+        }
+        let publica = campo("public")
+            .and_then(de_hex::<32>)
+            .ok_or_else(|| Falha::Chave(String::from("TECHNICAL_ERROR")))?;
+        Ok(ChaveDoKernel {
+            nome: String::from(chave),
+            publica,
+            der: web3::icp::pedido::der_ed25519(&publica),
+            decisoes: Vec::new(),
+        })
+    }
+
+    /// O Principal do IC desta chave: o auto-autenticado da pública.
+    pub fn principal(&self) -> Principal {
+        Principal::auto_autenticado(&self.der)
+    }
+
+    /// As decisões do gate de cada assinatura feita, na ordem.
+    pub fn decisoes(&self) -> &[u64] {
+        &self.decisoes
+    }
+}
+
+impl atualizacao::Assinador for ChaveDoKernel {
+    type Erro = Recusada;
+
+    fn chave_der(&self) -> &[u8] {
+        &self.der
+    }
+
+    fn assinar(&mut self, id: &[u8; 32]) -> Result<Vec<u8>, Recusada> {
+        let resumo = hex(id);
+        let r = nativo::pedir("key.sign", |w| {
+            w.field_str("key", &self.nome)?;
+            w.field_str("domain", DOMINIO_DO_PEDIDO)?;
+            w.field_str("digest", &resumo)
+        })
+        .map_err(|e| Recusada(format!("ERRO {e}")))?;
+        if let Some(codigo) = recusa_de(&r) {
+            return Err(Recusada(codigo));
+        }
+        let resultado = r
+            .resultado()
+            .map_err(|_| Recusada(String::from("TECHNICAL_ERROR")))?;
+        let assinatura = resultado
+            .member("signature")
+            .and_then(|s| s.as_str())
+            .and_then(de_hex::<64>)
+            .ok_or_else(|| Recusada(String::from("TECHNICAL_ERROR")))?;
+        // O que voltou tem de ser a assinatura deste id pela pública lida:
+        // nada que não confira sai daqui.
+        let mensagem = web3::icp::pedido::assinavel(id);
+        if !web3::icp::assinatura::verificar(&self.publica, &mensagem, &assinatura) {
+            return Err(Recusada(String::from("BAD_SIGNATURE")));
+        }
+        if let Some(d) = resultado.member("decision").and_then(|v| v.as_u64()) {
+            self.decisoes.push(d);
+        }
+        Ok(assinatura.to_vec())
     }
 }
 
@@ -243,6 +461,33 @@ impl Gateway {
     pub fn fechar(self) {
         self.conexao.fechar();
     }
+
+    /// Espera até `ms` milissegundos pela própria conexão — um `net.recv`
+    /// que não lê nada (`max` zero), decidido pelo gate como qualquer
+    /// outro: entre duas leituras da situação de uma chamada, nada chega,
+    /// e a espera vence o prazo. Volta antes se a conexão mudou.
+    ///
+    /// A espera é parte da leitura da situação: a recusa dela — a do gate,
+    /// a contenção, o firewall, a conexão que caiu — é a falha do
+    /// transporte da leitura, com o código de quem recusou.
+    pub fn esperar(&self, ms: u64) -> Result<(), Falha> {
+        let r = conexao::do_pedido(nativo::pedir("net.recv", |w| {
+            w.field_u64("connection", self.conexao.numero())?;
+            w.field_u64("max", 0)?;
+            w.field_u64("wait", ms)
+        }));
+        let falha = match r {
+            Err(f) => f,
+            Ok(r) => match conexao::depois_do_gate(&r) {
+                Some(f) => f,
+                None => return Ok(()),
+            },
+        };
+        Err(Falha::Chamada(atualizacao::Erro::Transporte(
+            atualizacao::Etapa::Situacao,
+            Transporte(http::Falha::Conexao(falha)),
+        )))
+    }
 }
 
 impl agente::Transporte for Gateway {
@@ -313,6 +558,44 @@ pub fn consultar<T: agente::Transporte<Erro = Transporte>>(
     .map_err(Falha::Consulta)
 }
 
+/// Chama `metodo` de `canister` com `arg` (Candid) pelo `transporte`,
+/// assinado pela `chave` do kernel — ou do anônimo, sem ela —, e confere
+/// tudo contra a raiz de `rede` com a hora `agora` — ver
+/// [`atualizacao::chamar`]. A chamada que fica pendente segue por
+/// [`acompanhar`].
+#[allow(clippy::too_many_arguments)]
+pub fn chamar<T: agente::Transporte<Erro = Transporte>>(
+    transporte: &mut T,
+    rede: &Rede,
+    chave: Option<&mut ChaveDoKernel>,
+    canister: &Principal,
+    metodo: &str,
+    arg: &[u8],
+    agora: &Hora,
+    nonce: &[u8; 32],
+) -> Result<Atualizacao, Falha> {
+    let agora_ns = agora.validade_s().saturating_mul(1_000_000_000);
+    atualizacao::chamar(
+        transporte, chave, &rede.raiz, canister, metodo, arg, agora_ns, nonce,
+    )
+    .map_err(Falha::Chamada)
+}
+
+/// Lê a situação de uma chamada pendente, uma vez: assinada de novo pela
+/// mesma `chave` — ou do anônimo —, com a hora `agora` — ver
+/// [`atualizacao::acompanhar`].
+pub fn acompanhar<T: agente::Transporte<Erro = Transporte>>(
+    transporte: &mut T,
+    rede: &Rede,
+    chave: Option<&mut ChaveDoKernel>,
+    chamada: &Atualizacao,
+    agora: &Hora,
+) -> Result<Andamento, Falha> {
+    let agora_ns = agora.validade_s().saturating_mul(1_000_000_000);
+    atualizacao::acompanhar(transporte, chave, &rede.raiz, chamada, agora_ns)
+        .map_err(Falha::Chamada)
+}
+
 /// O assunto de uma consulta, como o kernel o aceita numa declaração: o
 /// canister e o método — ou só o canister, se o método não cabe na forma
 /// (ASCII visível sem aspas, barra invertida nem `;`, até 64 com o resto).
@@ -334,14 +617,27 @@ pub fn assunto(canister: &Principal, metodo: &str) -> String {
 /// recusou — o gate, ou o kernel depois dele.
 pub type Declarada = Result<u64, String>;
 
-fn declarar_uma(assunto: &str, desfecho: &str, conexao: Option<u64>) -> Declarada {
+/// A que fato do kernel uma declaração se ancora — uma âncora só.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ancora {
+    /// Nenhum.
+    Nenhuma,
+    /// A conexão em que se falou com o IC.
+    Conexao(u64),
+    /// A decisão do gate que o processo exerceu — a da assinatura de uma
+    /// chamada.
+    Decisao(u64),
+}
+
+fn declarar_uma(evento: &str, assunto: &str, desfecho: &str, ancora: Ancora) -> Declarada {
     let r = nativo::pedir("audit.declare", |w| {
-        w.field_str("event", EVENTO)?;
+        w.field_str("event", evento)?;
         w.field_str("subject", assunto)?;
         w.field_str("outcome", desfecho)?;
-        match conexao {
-            Some(n) => w.field_u64("connection", n),
-            None => Ok(()),
+        match ancora {
+            Ancora::Conexao(n) => w.field_u64("connection", n),
+            Ancora::Decisao(d) => w.field_u64("decision", d),
+            Ancora::Nenhuma => Ok(()),
         }
     })
     .map_err(|e| format!("ERRO {e}"))?;
@@ -365,9 +661,25 @@ fn declarar_uma(assunto: &str, desfecho: &str, conexao: Option<u64>) -> Declarad
 /// processo — o firewall a cortou, o par a fechou —, a declaração vai sem
 /// âncora: a alegação fica, e o kernel diz que não havia conexão.
 pub fn declarar(assunto: &str, desfecho: &str, conexao: Option<u64>) -> Declarada {
-    match declarar_uma(assunto, desfecho, conexao) {
+    let ancora = conexao.map_or(Ancora::Nenhuma, Ancora::Conexao);
+    match declarar_uma(EVENTO, assunto, desfecho, ancora) {
         Err(codigo) if conexao.is_some() && codigo == "INVALID_ARGUMENT" => {
-            declarar_uma(assunto, desfecho, None)
+            declarar_uma(EVENTO, assunto, desfecho, Ancora::Nenhuma)
+        }
+        outro => outro,
+    }
+}
+
+/// Declara a chamada à auditoria, por `audit.declare`: o evento
+/// [`EVENTO_DA_CHAMADA`], o `assunto` e o `desfecho`, ancorada no fato do
+/// kernel que a prende — a decisão da assinatura da chamada, quando ela
+/// foi assinada; a conexão, quando foi do anônimo. Uma âncora que o kernel
+/// recusa — a conexão que já não é deste processo — cai para nenhuma: a
+/// alegação fica, sem o fato.
+pub fn declarar_chamada(assunto: &str, desfecho: &str, ancora: Ancora) -> Declarada {
+    match declarar_uma(EVENTO_DA_CHAMADA, assunto, desfecho, ancora) {
+        Err(codigo) if ancora != Ancora::Nenhuma && codigo == "INVALID_ARGUMENT" => {
+            declarar_uma(EVENTO_DA_CHAMADA, assunto, desfecho, Ancora::Nenhuma)
         }
         outro => outro,
     }

@@ -8,10 +8,12 @@ Tres papeis, pelo primeiro argumento:
         Com a PocketIC escutando em <url>: cria a instancia - a NNS e duas
         sub-redes de aplicacao, com o tempo quinze minutos atras -, instala
         o canister da bancada (o modulo de `modulo`) na primeira de
-        aplicacao, guarda uma resposta de `read_state` desse tempo velho
+        aplicacao, e o mesmo modulo num canister da NNS, a sub-rede raiz;
+        guarda uma resposta de `read_state` desse tempo velho
         (`velho.cbor`), poe a instancia no tempo de verdade, andando
         sozinha, e escreve <dir>/estado.json: a porta do gateway HTTP, a
-        chave da raiz, o canister e um canister da faixa da outra sub-rede.
+        chave da raiz, os dois canisters e um canister da faixa da outra
+        sub-rede.
 
     proxy <dir> <dir-tls>
         O que o emulador roda a cada conexao para 10.0.2.100:4943 (um
@@ -31,7 +33,7 @@ Nenhuma porta da bancada fica aberta para fora do hospedeiro: a PocketIC e
 o gateway escutam em 127.0.0.1, e o emulador fala com o proxy pelo
 `guestfwd`.
 
-O que o canister responde, cada metodo uma consulta (`canister_query`):
+O que o canister responde, nas consultas (`canister_query`):
 
     ola                 ("ola"), em Candid
     eco                 os bytes do argumento, como vieram
@@ -40,15 +42,26 @@ O que o canister responde, cada metodo uma consulta (`canister_query`):
     candid_sobra        ("ola") e dois bytes depois
     candid_magica       ("ola") com DIDX no lugar de DIDL
 
+e nas chamadas de atualizacao (`canister_update`):
+
+    quem                (principal), o de quem chamou - o anonimo, ou o
+                        auto-autenticado da chave que assinou
+    contar              (nat64), o contador do canister, mais um a cada
+                        chamada - o estado muda
+    lento               ("lento"), depois de LENTO_VOLTAS voltas de um laco:
+                        a chamada que demora
+
 Os modos, pelo nome do TLS:
 
     icp.duke                    honesto
     lenta.icp.duke              o `read_state` volta depois de LENTIDAO_MS
     raiz-errada.icp.duke        honesto: a chave errada e a do arquivo de redes
     bls-invalida.icp.duke       um byte trocado na assinatura do certificado
-    sem-assinatura.icp.duke     a resposta da consulta sem as assinaturas dos nos
+    sem-assinatura.icp.duke     a resposta da consulta sem as assinaturas dos nos,
+                                e a da chamada sem o certificado
     no-de-fora.icp.duke         as assinaturas atribuidas a um no de fora da sub-rede
-    assinatura-errada.icp.duke  um byte trocado na assinatura de cada no
+    assinatura-errada.icp.duke  um byte trocado na assinatura de cada no, e na
+                                do certificado da resposta da chamada
     pedido-trocado.icp.duke     o nonce da consulta trocado no caminho: os nos
                                 assinam outro pedido
     aninhada.icp.duke           uma delegacao dentro da delegacao
@@ -57,6 +70,12 @@ Os modos, pelo nome do TLS:
     velho.icp.duke              o `read_state` do tempo velho, guardado
     direta.icp.duke             honesto, pelo endereco fixo: a rede da fumaca,
                                 sem o DNS da suite
+    assincrona.icp.duke         a chamada (`/api/v4/.../call`) responde 202
+                                na hora, e vai a PocketIC pela via
+                                assincrona (`/api/v2`) so depois de
+                                ATRASO_DA_CHAMADA_MS: o cliente acompanha
+                                a situacao por `read_state` - desconhecida,
+                                e depois a resposta
 
 So a biblioteca padrao do Python: o CBOR, o Candid e o WebAssembly que a
 bancada precisa estao aqui, no tamanho do que ela usa.
@@ -70,6 +89,7 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import time
 import zlib
 
@@ -312,12 +332,33 @@ def principal_bytes(texto):
 # ---------------------------------------------------------------------------
 
 I32 = 0x7F
+I64 = 0x7E
 OLA = b"DIDL\x00\x01\x71\x03ola"
 NAO = b"nao"
 TRUNCADO = b"DIDL\x00\x01\x71\x05ab"
 SOBRA = b"DIDL\x00\x01\x71\x03olaXY"
 MAGICA = b"DIDX\x00\x01\x71\x03ola"
-DADOS = {0: OLA, 16: NAO, 32: TRUNCADO, 48: SOBRA, 64: MAGICA}
+# (principal): o cabecalho, e depois o tamanho e os bytes de quem chamou.
+QUEM = b"DIDL\x00\x01\x68\x01"
+QUEM_EM = 128
+# (nat64): o cabecalho, e depois os oito bytes do contador.
+CONTAR = b"DIDL\x00\x01\x78"
+CONTAR_EM = 192
+LENTO = b"DIDL\x00\x01\x71\x05lento"
+LENTO_EM = 224
+# Perto de dois bilhoes de instrucoes: cabe numa fatia de execucao, e leva
+# um segundo ou mais na PocketIC.
+LENTO_VOLTAS = 300_000_000
+DADOS = {
+    0: OLA,
+    16: NAO,
+    32: TRUNCADO,
+    48: SOBRA,
+    64: MAGICA,
+    QUEM_EM: QUEM,
+    CONTAR_EM: CONTAR + bytes(8),
+    LENTO_EM: LENTO,
+}
 ECO_EM = 1024
 MAIOR_ECO = 60000
 
@@ -341,24 +382,80 @@ def modulo():
     def chama(f):
         return b"\x10" + leb(f)
 
+    def const64(n):
+        return b"\x42" + sleb(n)
+
+    def local_get(i):
+        return b"\x20" + leb(i)
+
+    def local_set(i):
+        return b"\x21" + leb(i)
+
     # Os tipos: 0 () -> (); 1 (i32 i32) -> (); 2 () -> i32;
     # 3 (i32 i32 i32) -> ().
     tipos = vec([tipo([], []), tipo([I32, I32], []), tipo([], [I32]), tipo([I32] * 3, [])])
-    # As importacoes, que sao as funcoes 0 a 4.
+    # As importacoes, que sao as funcoes 0 a 6.
     importacoes = [
         ("msg_reply_data_append", 1),
         ("msg_reply", 0),
         ("msg_reject", 1),
         ("msg_arg_data_size", 2),
         ("msg_arg_data_copy", 3),
+        ("msg_caller_size", 2),
+        ("msg_caller_copy", 3),
     ]
-    append, reply, reject, tamanho, copia = range(5)
+    append, reply, reject, tamanho, copia, quem_tamanho, quem_copia = range(7)
     importa = vec([nome("ic0") + nome(n) + b"\x00" + leb(t) for n, t in importacoes])
 
     def responde(desloc, dados):
         return const(desloc) + const(len(dados)) + chama(append) + chama(reply)
 
-    corpos = [
+    # quem: o tamanho de quem chamou num byte depois do cabecalho, os bytes
+    # dele depois, e a resposta inteira.
+    quem = (
+        chama(quem_tamanho)
+        + local_set(0)
+        + const(QUEM_EM + len(QUEM))
+        + local_get(0)
+        + b"\x3a\x00\x00"  # i32.store8
+        + const(QUEM_EM + len(QUEM) + 1)
+        + const(0)
+        + local_get(0)
+        + chama(quem_copia)
+        + const(QUEM_EM)
+        + local_get(0)
+        + const(len(QUEM) + 1)
+        + b"\x6a"  # i32.add
+        + chama(append)
+        + chama(reply)
+    )
+    # contar: o contador, na memoria do canister - que fica entre uma
+    # chamada e outra -, mais um, e a resposta com ele.
+    contador = CONTAR_EM + len(CONTAR)
+    contar = (
+        const(contador)
+        + const(contador)
+        + b"\x29\x00\x00"  # i64.load
+        + const64(1)
+        + b"\x7c"  # i64.add
+        + b"\x37\x00\x00"  # i64.store
+        + responde(CONTAR_EM, CONTAR + bytes(8))
+    )
+    # lento: o laco, e a resposta.
+    lento = (
+        b"\x03\x40"  # loop
+        + local_get(0)
+        + const64(1)
+        + b"\x7c"  # i64.add
+        + b"\x22\x00"  # local.tee 0
+        + const64(LENTO_VOLTAS)
+        + b"\x54"  # i64.lt_u
+        + b"\x0d\x00"  # br_if 0
+        + b"\x0b"  # end
+        + responde(LENTO_EM, LENTO)
+    )
+
+    consultas = [
         ("ola", b"\x00", responde(0, OLA)),
         (
             "eco",
@@ -388,11 +485,22 @@ def modulo():
         ("candid_sobra", b"\x00", responde(48, SOBRA)),
         ("candid_magica", b"\x00", responde(64, MAGICA)),
     ]
+    atualizacoes = [
+        ("quem", b"\x01\x01" + bytes([I32]), quem),
+        ("contar", b"\x00", contar),
+        ("lento", b"\x01\x01" + bytes([I64]), lento),
+    ]
+    corpos = consultas + atualizacoes
     primeira = len(importacoes)
     funcoes = vec([leb(0) for _ in corpos])
     memoria = vec([b"\x00\x01"])
     exporta = vec(
-        [nome("canister_query " + n) + b"\x00" + leb(primeira + i) for i, (n, _, _) in enumerate(corpos)]
+        [
+            nome(("canister_query " if i < len(consultas) else "canister_update ") + n)
+            + b"\x00"
+            + leb(primeira + i)
+            for i, (n, _, _) in enumerate(corpos)
+        ]
     )
     codigo = vec(
         [leb(len(locais + corpo + b"\x0b")) + locais + corpo + b"\x0b" for _, locais, corpo in corpos]
@@ -554,6 +662,23 @@ def preparar(url, diretorio):
         candid_instalar(canister, modulo()),
         {"CanisterId": b64(canister)},
     )
+    # E o mesmo modulo na NNS: o canister da sub-rede raiz, que responde sem
+    # delegacao - as faixas dele vem de uma leitura a parte.
+    criacao = chamar_gerenciamento(
+        pic,
+        instancia,
+        "provisional_create_canister_with_cycles",
+        candid_criar(),
+        {"SubnetId": b64(principal_bytes(nns[0]))},
+    )
+    canister_da_raiz = principal_da_criacao(criacao)
+    chamar_gerenciamento(
+        pic,
+        instancia,
+        "install_code",
+        candid_instalar(canister_da_raiz, modulo()),
+        {"CanisterId": b64(canister_da_raiz)},
+    )
 
     # O certificado velho: um `read_state` do caminho `subnet`, como o
     # agente pede, ainda no tempo de quinze minutos atras.
@@ -595,6 +720,7 @@ def preparar(url, diretorio):
         "gateway": porta,
         "raiz": raiz.hex(),
         "canister": principal_texto(canister),
+        "canister_da_raiz": principal_texto(canister_da_raiz),
         "nns": nns[0],
         "sub_rede": aplicacao[0],
         "outra_sub_rede": aplicacao[1],
@@ -615,6 +741,9 @@ def preparar(url, diretorio):
 # que espera a resposta lenta acorda vazia, e e decidida de novo pelo gate
 # antes de a resposta chegar.
 LENTIDAO_MS = 8000
+# Quanto a chamada da rede assincrona espera antes de ir a PocketIC: as
+# primeiras leituras da situacao a acham desconhecida.
+ATRASO_DA_CHAMADA_MS = 1500
 MAIOR_CABECA = 16 * 1024
 MAIOR_CORPO = 1024 * 1024
 
@@ -631,6 +760,7 @@ MODOS = {
     "faixa-errada.icp.duke": "faixa-errada",
     "velho.icp.duke": "velho",
     "direta.icp.duke": "honesto",
+    "assincrona.icp.duke": "assincrona",
 }
 
 # Um no que nenhuma sub-rede tem: um principal auto-autenticado inventado.
@@ -699,10 +829,32 @@ def aninhar(cert):
     delegacao["certificate"] = cbor(com_etiqueta(interno, tinha))
 
 
-def repassar(estado, diretorio, modo, metodo, alvo, corpo):
+def chamar_depois(estado, metodo, alvo, corpo, log):
+    """A chamada pela via assincrona do gateway (`/api/v2`), depois de
+    ATRASO_DA_CHAMADA_MS. O fio nao e `daemon`: o processo do proxy so sai
+    depois de entregar a chamada."""
+
+    def entregar():
+        time.sleep(ATRASO_DA_CHAMADA_MS / 1000)
+        v2 = alvo.replace("/api/v4/", "/api/v2/", 1)
+        try:
+            status, _, _, _ = gateway(estado["gateway"], metodo, v2, corpo)
+            print("icp.py: assincrona %s %s -> %d" % (metodo, v2, status), file=log, flush=True)
+        except OSError as erro:
+            print("icp.py: assincrona %s: %s" % (v2, erro), file=log, flush=True)
+
+    threading.Thread(target=entregar).start()
+
+
+def repassar(estado, diretorio, modo, metodo, alvo, corpo, log=None):
     """O pedido ao gateway, e a resposta mexida conforme o modo."""
     leitura = alvo.endswith("/read_state")
     consulta = alvo.endswith("/query")
+    chamada = alvo.endswith("/call")
+    if modo == "assincrona" and chamada:
+        # O 202 na hora: a chamada foi aceita, e nada mais se sabe dela.
+        chamar_depois(estado, metodo, alvo, corpo, log or sys.stderr)
+        return 202, "Accepted", "application/cbor", b""
     if modo == "velho" and leitura:
         with open(os.path.join(diretorio, "velho.cbor"), "rb") as f:
             return 200, "OK", "application/cbor", f.read()
@@ -728,6 +880,8 @@ def repassar(estado, diretorio, modo, metodo, alvo, corpo):
         resposta = mexer_no_certificado(resposta, aninhar)
     elif modo == "sem-assinatura" and consulta:
         resposta = mexer_na_consulta(resposta, lambda r: r.pop("signatures", None))
+    elif modo == "sem-assinatura" and chamada:
+        resposta = mexer_na_consulta(resposta, lambda r: r.pop("certificate", None))
     elif modo == "no-de-fora" and consulta:
 
         def de_fora(r):
@@ -742,6 +896,12 @@ def repassar(estado, diretorio, modo, metodo, alvo, corpo):
                 a["signature"] = trocar_byte(a["signature"])
 
         resposta = mexer_na_consulta(resposta, errada)
+    elif modo == "assinatura-errada" and chamada:
+        # A recusa antes do consenso nao tem certificado: passa como veio.
+        if "certificate" in sem_etiqueta(de_cbor(resposta))[0]:
+            resposta = mexer_no_certificado(
+                resposta, lambda c: c.__setitem__("signature", trocar_byte(c["signature"]))
+            )
     return status, motivo, tipo, resposta
 
 
@@ -795,7 +955,9 @@ def atender(conexao, modo_de, estado, diretorio, log):
             return
         modo = modo_de(cabecalhos)
         try:
-            status, motivo, tipo, resposta = repassar(estado, diretorio, modo, metodo, alvo, corpo)
+            status, motivo, tipo, resposta = repassar(
+                estado, diretorio, modo, metodo, alvo, corpo, log
+            )
         except (OSError, ValueError, KeyError) as erro:
             print("icp.py: %s %s: %s" % (modo, alvo, erro), file=log, flush=True)
             status, motivo, tipo, resposta = 502, "Bad Gateway", "text/plain", b"bancada\n"
