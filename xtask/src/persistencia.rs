@@ -212,6 +212,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: as_mensagens_sobrevivem,
     },
     Cenario {
+        nome: "as chaves de assinatura sobrevivem ao corte, e a destruida nao volta nem por uma fotografia antiga",
+        rodar: as_chaves_sobrevivem,
+    },
+    Cenario {
         nome: "o disco tem a particao do armazem, no tipo e no lugar declarados, depois da de estado",
         rodar: a_particao_do_armazem,
     },
@@ -278,6 +282,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "a queda em cada fronteira de uma mensagem: ela existe se o registro esta no disco",
         rodar: as_quedas_numa_mensagem,
+    },
+    Cenario {
+        nome: "a queda em cada fronteira da criacao e da destruicao de uma chave: vale se o registro esta no disco",
+        rodar: as_quedas_numa_chave,
     },
     Cenario {
         nome: "a queda em cada fronteira de um registro so de auditoria: ele vale se esta no disco, e a cadeia continua",
@@ -1823,6 +1831,135 @@ fn as_mensagens_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     ))
 }
 
+/// Um campo de texto do resultado de uma resposta do agente.
+fn texto_do_resultado(r: &str, campo: &str) -> Option<String> {
+    let resultado = r.split(r#""result":"#).nth(1)?;
+    super::campo_simples(resultado, campo)
+}
+
+/// As chaves de assinatura sobrevivem ao corte de energia: a viva volta
+/// com a mesma pública e assina o mesmo resumo com a mesma assinatura — a
+/// mesma privada —; a destruída volta destruída — não assina —, e o nome
+/// dela não se cria de novo. A fotografia de antes da destruição, devolvida ao disco, é
+/// recusada — e, com o journal recusado, credencial nenhuma entra: nada se
+/// assina por ela —; o disco de agora, de volta, abre com a chave
+/// destruída.
+fn as_chaves_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let disco = disco_de_testes()?;
+    let resumo = "5a".repeat(32);
+    let criar = |a: &mut super::AgenteNaPorta, chave: &str| {
+        a.pedir(
+            "key.create",
+            &format!(r#"{{"key":"{chave}","domain":"ic-request"}}"#),
+        )
+    };
+    let assinar = |a: &mut super::AgenteNaPorta, chave: &str| {
+        a.pedir(
+            "key.sign",
+            &format!(r#"{{"key":"{chave}","domain":"ic-request","digest":"{resumo}"}}"#),
+        )
+    };
+    let ler = |a: &mut super::AgenteNaPorta, chave: &str| {
+        a.pedir("key.read", &format!(r#"{{"key":"{chave}"}}"#))
+    };
+
+    let m = Ligada::subir(arch, artefato, None)?;
+    let mut um = super::AgenteNaPorta::conectar(arch, 1)?;
+    let viva = criar(&mut um, "chave:bancada")?;
+    let morta = criar(&mut um, "chave:bancada-2")?;
+    let publica = texto_do_resultado(&viva, "public")
+        .ok_or_else(|| format!("a chave nao nasceu\n  {viva}"))?;
+    if texto_do_resultado(&morta, "public").is_none() {
+        return Err(format!("a segunda chave nao nasceu\n  {morta}"));
+    }
+    let r = assinar(&mut um, "chave:bancada")?;
+    let assinatura = texto_do_resultado(&r, "signature")
+        .ok_or_else(|| format!("a chave viva nao assinou\n  {r}"))?;
+    let foto = ler_o_estado(&disco)?;
+    let r = um.pedir("key.destroy", r#"{"key":"chave:bancada-2"}"#)?;
+    if !r.contains(r#""destroyed":true"#) {
+        return Err(format!("a chave nao foi destruida\n  {r}"));
+    }
+    drop(um);
+    m.cortar_a_energia()?;
+
+    // De volta: a viva assina igual, a destruída fica destruída.
+    let m = Ligada::subir(arch, artefato, None)?;
+    let mut um = super::AgenteNaPorta::conectar(arch, 1)?;
+    let lida = ler(&mut um, "chave:bancada")?;
+    let de_novo = assinar(&mut um, "chave:bancada")?;
+    let lapide = ler(&mut um, "chave:bancada-2")?;
+    let pela_lapide = assinar(&mut um, "chave:bancada-2")?;
+    let outra = criar(&mut um, "chave:bancada-2")?;
+    drop(um);
+    m.cortar_a_energia()?;
+    if texto_do_resultado(&lida, "public").as_deref() != Some(publica.as_str())
+        || texto_do_resultado(&lida, "state").as_deref() != Some("active")
+    {
+        return Err(format!("a chave viva nao voltou igual\n  {lida}"));
+    }
+    if texto_do_resultado(&de_novo, "signature").as_deref() != Some(assinatura.as_str()) {
+        return Err(format!(
+            "a chave viva voltou com outra privada: outra assinatura\n  {de_novo}"
+        ));
+    }
+    if texto_do_resultado(&lapide, "state").as_deref() != Some("destroyed") {
+        return Err(format!(
+            "a chave destruida nao voltou destruida\n  {lapide}"
+        ));
+    }
+    if !pela_lapide.contains(r#""signed":false"#)
+        || texto_do_resultado(&pela_lapide, "error").as_deref() != Some("a chave foi destruida")
+    {
+        return Err(format!(
+            "a chave destruida assinou depois do corte\n  {pela_lapide}"
+        ));
+    }
+    if !outra.contains(r#""created":false"#) {
+        return Err(format!("o nome da chave destruida voltou\n  {outra}"));
+    }
+    let atual = ler_o_estado(&disco)?;
+
+    // A fotografia de antes da destruição: recusada, e a chave destruída
+    // não assina por ela.
+    escrever_no_estado(&disco, &foto)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let assinou = super::AgenteNaPorta::conectar(arch, 1)
+        .and_then(|mut a| assinar(&mut a, "chave:bancada-2"))
+        .is_ok_and(|r| r.contains(r#""signed":true"#));
+    m.cortar_a_energia()?;
+    if p.estado != "refused" {
+        return Err(format!(
+            "a fotografia de antes da destruicao nao foi recusada: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if assinou {
+        return Err("a chave destruida assinou pela fotografia antiga".into());
+    }
+
+    // O disco de agora, de volta: abre, e ela continua destruída.
+    escrever_no_estado(&disco, &atual)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let lapide =
+        super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| ler(&mut a, "chave:bancada-2"));
+    m.cortar_a_energia()?;
+    let lapide = lapide?;
+    if p.estado != "available"
+        || texto_do_resultado(&lapide, "state").as_deref() != Some("destroyed")
+    {
+        return Err(format!(
+            "o disco de agora nao abriu com a chave destruida: {}\n  {lapide}",
+            p.estado
+        ));
+    }
+    Ok(String::from(
+        "a viva assina igual depois do corte, a destruida volta destruida, e a fotografia de antes e recusada",
+    ))
+}
+
 /// A versão de um caminho do armazém, pelo `fs.stat` — 0 sem arquivo.
 fn versao_no_armazem(m: &mut Ligada, caminho: &str) -> Result<u64, String> {
     let r = m.pedir("fs.stat", &format!(r#"{{"path":"{caminho}"}}"#))?;
@@ -2611,6 +2748,140 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     }
     Ok(format!(
         "{} quedas: a mensagem existe exatamente quando o registro esta no disco",
+        QUEDAS_NA_GRAVACAO.len()
+    ))
+}
+
+/// Pede `metodo` na porta 1 até a energia cair no meio dele: o pedido não
+/// volta — a máquina congela —, e o aviso da queda vem pela serial.
+fn pedir_na_porta_ate_cair(
+    arch: Arquitetura,
+    m: Ligada,
+    metodo: &'static str,
+    params: &'static str,
+) -> Result<u8, String> {
+    let fio = std::thread::spawn(move || {
+        super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| a.pedir(metodo, params))
+    });
+    let caiu = m.esperar_a_queda();
+    let _ = fio.join();
+    caiu
+}
+
+/// A queda em cada fronteira da gravação de uma chave de assinatura: na
+/// criação — a semente no journal, a primeira operação do boot — e na
+/// destruição — a lápide, a primeira operação do boot seguinte ao da
+/// criação. A chave existe depois exatamente quando o registro da criação
+/// está no disco, e o nome de uma criação que não ficou volta livre: não
+/// houve chave, e não há lápide. A destruída fica destruída exatamente
+/// quando o registro da lápide está no disco, e não assina; quando não
+/// está, a destruição não foi respondida, e a chave volta viva, com a
+/// mesma privada.
+fn as_quedas_numa_chave(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const CRIAR: &str = r#"{"key":"chave:bancada","domain":"ic-request"}"#;
+    const CHAVE: &str = r#"{"key":"chave:bancada"}"#;
+    let disco = disco_de_testes()?;
+    let assinar = format!(
+        r#"{{"key":"chave:bancada","domain":"ic-request","digest":"{}"}}"#,
+        "5a".repeat(32)
+    );
+    for (ponto, perder, vale, caso) in QUEDAS_NA_GRAVACAO {
+        // A criação.
+        zerar_o_estado(arch)?;
+        plano_de_queda(&disco, ponto, tipo::OPERACAO, 1)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let caiu = pedir_na_porta_ate_cair(arch, m, "key.create", CRIAR)?;
+        if caiu != ponto {
+            return Err(format!(
+                "{caso}, na criacao: caiu no ponto {caiu}, e nao no {ponto}"
+            ));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        let depois = super::AgenteNaPorta::conectar(arch, 1)
+            .and_then(|mut a| Ok((a.pedir("key.read", CHAVE)?, a.pedir("key.create", CRIAR)?)));
+        m.cortar_a_energia()?;
+        // Abertura, a criação do volume, o boot que caiu, a criação se
+        // valeu, e o boot de agora; a criação sobe a geração.
+        conferir_depois_da_queda(
+            &p,
+            &format!("{caso}, na criacao"),
+            CRIACAO_DO_VOLUME + if vale { 4 } else { 3 },
+            u64::from(vale),
+        )?;
+        let (lida, de_novo) = depois?;
+        let viva = texto_do_resultado(&lida, "state").as_deref() == Some("active");
+        let nome_livre = de_novo.contains(r#""created":true"#);
+        if viva != vale || nome_livre == vale {
+            return Err(format!(
+                "{caso}, na criacao: a chave {} depois da queda, e o nome {}\n  {lida}\n  {de_novo}",
+                if viva { "existe" } else { "nao existe" },
+                if nome_livre {
+                    "voltou livre"
+                } else {
+                    "ficou preso"
+                }
+            ));
+        }
+
+        // A destruição: a chave criada, e a assinatura dela, num boot; a
+        // lápide no seguinte.
+        zerar_o_estado(arch)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let assinada = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+            a.pedir("key.create", CRIAR)?;
+            a.pedir("key.sign", &assinar)
+        });
+        m.cortar_a_energia()?;
+        let assinada = assinada?;
+        let assinatura = texto_do_resultado(&assinada, "signature")
+            .ok_or_else(|| format!("{caso}: a chave da destruicao nao assinou\n  {assinada}"))?;
+        plano_de_queda(&disco, ponto, tipo::OPERACAO, 1)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let antes = persistencia_de(&mut m)?;
+        let caiu = pedir_na_porta_ate_cair(arch, m, "key.destroy", CHAVE)?;
+        if caiu != ponto {
+            return Err(format!(
+                "{caso}, na destruicao: caiu no ponto {caiu}, e nao no {ponto}"
+            ));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        let depois = super::AgenteNaPorta::conectar(arch, 1)
+            .and_then(|mut a| Ok((a.pedir("key.read", CHAVE)?, a.pedir("key.sign", &assinar)?)));
+        m.cortar_a_energia()?;
+        if p.estado != "available" || p.geracao != antes.geracao + u64::from(vale) {
+            return Err(format!(
+                "{caso}, na destruicao: a persistencia {} ({}), geracao {} depois de {}",
+                p.estado, p.motivo, p.geracao, antes.geracao
+            ));
+        }
+        let (lida, de_novo) = depois?;
+        let destruida = texto_do_resultado(&lida, "state").as_deref() == Some("destroyed");
+        let assinou_igual =
+            texto_do_resultado(&de_novo, "signature").as_deref() == Some(assinatura.as_str());
+        if destruida != vale || assinou_igual == vale {
+            return Err(format!(
+                "{caso}, na destruicao: a chave {} depois da queda, e {}\n  {lida}\n  {de_novo}",
+                if destruida { "destruida" } else { "viva" },
+                if assinou_igual {
+                    "assinou com a mesma privada"
+                } else {
+                    "nao assinou"
+                }
+            ));
+        }
+    }
+    Ok(format!(
+        "{} quedas em cada uma: a chave existe exatamente quando a criacao esta no disco, e morre exatamente quando a lapide esta",
         QUEDAS_NA_GRAVACAO.len()
     ))
 }

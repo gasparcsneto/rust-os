@@ -164,6 +164,19 @@ pub mod tipo {
     /// anteriores (`ARQUIVO_GRAVADO`, `ARQUIVO_APAGADO`, `ARMAZEM_PROXIMO`)
     /// são do formato em que o conteúdo morava aqui, e não se escrevem mais.
     pub const ARMAZEM_CONFIRMADO: u16 = 32;
+    /// Uma chave de assinatura nasceu: `[dono, nome, domínio, criada em ms
+    /// (8), semente (32)]`. O dono é a identidade durável — `pessoa:<id>`,
+    /// `agente:<hex>`, `servico:<nome>` —; a pública sai da semente. A
+    /// semente vai cifrada com o registro, como o corpo de uma mensagem, e
+    /// só aqui: a base de uma compactação a escreve de novo só para a chave
+    /// que ainda vive — a de uma chave morta fica na região velha, e não
+    /// passa para a nova.
+    pub const CHAVE_CRIADA: u16 = 33;
+    /// A lápide de uma chave de assinatura: `[dono, nome, estado (1: 1
+    /// destruída, 2 anulada), domínio, criada em ms (8), pública (32)]` — o
+    /// que é público, e nada da privada. Permanente: nenhum registro a
+    /// desfaz, e o nome não volta. Sozinha, na base, ela é a chave inteira.
+    pub const CHAVE_MORTA: u16 = 34;
 
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.
@@ -189,8 +202,8 @@ pub mod tipo {
     /// auditoria: só os eventos da cadeia e a lacuna dela. Um registro só
     /// de auditoria não avança o contador, e pode sumir num rollback para a
     /// última âncora: nada de estado protegido — agente, papel, política,
-    /// pessoa, lápide, mensagem, arquivo, chave do TPM — pode morar nele, nem como
-    /// cópia. Ver [`super::so_de_auditoria`].
+    /// pessoa, lápide, mensagem, arquivo, chave do TPM, chave de assinatura —
+    /// pode morar nele, nem como cópia. Ver [`super::so_de_auditoria`].
     pub const fn cabe_num_registro_de_auditoria(entrada: u16) -> bool {
         matches!(entrada, AUDITORIA_EVENTO | AUDITORIA_LACUNA)
     }
@@ -216,9 +229,12 @@ pub fn so_de_auditoria(conteudo: &[u8]) -> bool {
     })
 }
 
-/// Monta o conteúdo de um registro a partir dos campos.
+/// Monta o conteúdo de um registro a partir dos campos — num vetor do
+/// tamanho exato: um campo pode ser sigiloso (a semente de uma chave, o
+/// corpo de uma mensagem), e um vetor que cresce deixa cópias parciais nos
+/// pedaços que larga, que ninguém zera.
 pub fn campos(lista: &[&[u8]]) -> Result<Vec<u8>, &'static str> {
-    let mut v = Vec::new();
+    let mut v = Vec::with_capacity(lista.iter().map(|c| 2 + c.len()).sum());
     for c in lista {
         let n = u16::try_from(c.len()).map_err(|_| "campo maior que 64 KiB")?;
         v.extend_from_slice(&n.to_le_bytes());

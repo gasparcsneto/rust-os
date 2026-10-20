@@ -46,10 +46,18 @@
 //! destruição ou uma política nova gravam com a mesma ordem: ou a
 //! assinatura as vê e é recusada, ou elas vêm depois dela inteira.
 //!
-//! # Etapa A: em memória
+//! # O journal
 //!
-//! As chaves desta etapa vivem só na memória do kernel e não sobrevivem ao
-//! boot: um boot novo começa sem chave nenhuma, e sem lápide nenhuma.
+//! A chave vai para o journal de estado cifrado, num registro de operação
+//! com a decisão que a autorizou, antes de a criação responder: a semente,
+//! cifrada com o registro, e a lápide, quando ela morre — que um disco
+//! antigo não desfaz: o contador do TPM avança a cada uma, e o journal que
+//! volta para antes dele é recusado. Sem a gravação, a criação se desfaz
+//! inteira, e a destruição fica até o boot, como toda revogação que não
+//! ficou gravada. No boot, a reposição devolve cada chave viva com a mesma
+//! privada, e cada lápide; a base de uma compactação leva as chaves da
+//! memória — a viva com a semente, a morta só com o que é público —, e a
+//! semente de uma chave morta fica para trás, na região velha.
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -96,6 +104,24 @@ impl Estado {
             Estado::Ativa => "active",
             Estado::Destruida => "destroyed",
             Estado::Anulada => "annulled",
+        }
+    }
+
+    /// O byte do journal.
+    pub const fn codigo(self) -> u8 {
+        match self {
+            Estado::Ativa => 0,
+            Estado::Destruida => 1,
+            Estado::Anulada => 2,
+        }
+    }
+
+    /// O estado de uma lápide, pelo byte do journal.
+    pub const fn de_codigo(c: u8) -> Option<Estado> {
+        match c {
+            1 => Some(Estado::Destruida),
+            2 => Some(Estado::Anulada),
+            _ => None,
         }
     }
 }
@@ -154,7 +180,32 @@ impl Vista {
     }
 }
 
+/// O que o journal guarda de uma chave: o que é público, o estado e, da
+/// viva, a privada — que só a persistência usa, para a semente ir cifrada
+/// com o registro (ver `persistencia::entrada_da_chave_viva`).
+pub struct Gravavel {
+    pub dono: String,
+    pub nome: String,
+    pub dominio: String,
+    pub criada_ms: u64,
+    pub publica: [u8; TAM_PUBLICA],
+    pub estado: Estado,
+    pub privada: Option<Arc<Privada>>,
+}
+
 impl Chave {
+    fn gravavel(&self) -> Gravavel {
+        Gravavel {
+            dono: self.dono.clone(),
+            nome: self.nome.clone(),
+            dominio: self.dominio.clone(),
+            criada_ms: self.criada_ms,
+            publica: self.publica,
+            estado: self.estado,
+            privada: self.privada.clone(),
+        }
+    }
+
     fn vista(&self) -> Vista {
         Vista {
             nome: self.nome.clone(),
@@ -396,6 +447,134 @@ pub fn para_assinar(
     })
 }
 
+/// A chave `nome` de `dono`, como o journal a grava.
+pub fn gravavel(dono: &str, nome: &str) -> Option<Gravavel> {
+    com(|c| {
+        c.tabela
+            .iter()
+            .find(|k| k.dono == dono && k.nome == nome)
+            .map(Chave::gravavel)
+    })
+}
+
+/// Todas as chaves, como o journal as grava — para a base de uma
+/// compactação, na ordem da tabela.
+pub fn gravaveis() -> Vec<Gravavel> {
+    com(|c| c.tabela.iter().map(Chave::gravavel).collect())
+}
+
+/// O dono, o nome e o estado de cada chave: o que a foto de uma operação
+/// administrativa guarda, para gravar as que ela matou.
+pub fn estados() -> Vec<(String, String, Estado)> {
+    com(|c| {
+        c.tabela
+            .iter()
+            .map(|k| (k.dono.clone(), k.nome.clone(), k.estado))
+            .collect()
+    })
+}
+
+/// Desfaz a criação da chave viva `nome` de `dono`, que não chegou ao
+/// journal: ela sai da tabela inteira — sem lápide: o nome não foi de
+/// chave nenhuma —, e a privada é apagada quando a última referência sai.
+pub fn desfazer_criacao(dono: &str, nome: &str) {
+    let tirada = com(|c| {
+        c.tabela
+            .iter()
+            .position(|k| k.dono == dono && k.nome == nome && k.estado == Estado::Ativa)
+            .map(|i| c.tabela.remove(i))
+    });
+    drop(tirada);
+}
+
+/// Repõe uma chave viva do journal, no boot. O par dono e nome não pode
+/// estar na tabela — uma lápide não volta a viver, e duas criações do mesmo
+/// nome são um journal que o kernel não escreveu —, a não ser que seja a
+/// mesma chave, viva, com a mesma pública. A semente que veio é apagada
+/// aqui.
+pub fn restaurar_viva(
+    dono: &str,
+    nome: &str,
+    dominio: &str,
+    criada_ms: u64,
+    semente: [u8; 32],
+) -> Result<(), &'static str> {
+    let privada = Arc::new(Privada::de_semente(semente));
+    let publica = privada.publica();
+    com(|c| {
+        if let Some(k) = c.tabela.iter().find(|k| k.dono == dono && k.nome == nome) {
+            return if k.estado == Estado::Ativa && k.publica == publica {
+                Ok(())
+            } else {
+                Err("uma chave criada de novo sobre um nome que ja tem chave")
+            };
+        }
+        if c.tabela.len() >= MAIS_CHAVES {
+            return Err("mais chaves no journal que a tabela comporta");
+        }
+        c.tabela.push(Chave {
+            dono: String::from(dono),
+            nome: String::from(nome),
+            dominio: String::from(dominio),
+            custodia: Custodia::Kernel,
+            publica,
+            privada: Some(privada),
+            estado: Estado::Ativa,
+            criada_ms,
+        });
+        Ok(())
+    })
+}
+
+/// Repõe uma lápide do journal, no boot: a chave viva com a mesma pública
+/// morre; a já morta fica como está; a que não está entra como lápide. Uma
+/// pública diferente é outra chave com o mesmo nome — um journal que o
+/// kernel não escreveu.
+pub fn restaurar_morta(
+    dono: &str,
+    nome: &str,
+    estado: Estado,
+    dominio: &str,
+    criada_ms: u64,
+    publica: [u8; TAM_PUBLICA],
+) -> Result<(), &'static str> {
+    if estado == Estado::Ativa {
+        return Err("lapide de chave com o estado de viva");
+    }
+    let privada = com(|c| {
+        if let Some(k) = c
+            .tabela
+            .iter_mut()
+            .find(|k| k.dono == dono && k.nome == nome)
+        {
+            if k.publica != publica {
+                return Err("a lapide de uma chave com outra publica");
+            }
+            if k.estado == Estado::Ativa {
+                k.estado = estado;
+                return Ok(k.privada.take());
+            }
+            return Ok(None);
+        }
+        if c.tabela.len() >= MAIS_CHAVES {
+            return Err("mais chaves no journal que a tabela comporta");
+        }
+        c.tabela.push(Chave {
+            dono: String::from(dono),
+            nome: String::from(nome),
+            dominio: String::from(dominio),
+            custodia: Custodia::Kernel,
+            publica,
+            privada: None,
+            estado,
+            criada_ms,
+        });
+        Ok(None)
+    })?;
+    drop(privada);
+    Ok(())
+}
+
 /// Mata a chave `nome` de `dono`: o estado passa a `como`, e a privada sai
 /// da tabela — e é apagada aqui, fora da trava, quando a última referência
 /// a ela sai.
@@ -468,10 +647,24 @@ pub fn contagem_de_teste() -> (usize, usize) {
     })
 }
 
-/// Só para a suíte: a tabela vazia, como num boot novo — o registro de
-/// domínios fica.
+/// Só para a suíte: a tabela vazia, e o journal esquecido junto — por uma
+/// compactação, cuja base sai da memória: a região nova não tem as chaves
+/// esquecidas, e a velha não se repõe mais. Sem isso, a memória e o journal
+/// divergiriam, e um caso que cria de novo um nome esquecido gravaria uma
+/// história que o kernel nunca escreve — que a reposição recusa. O registro
+/// de domínios fica.
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_de_teste() {
+    limpar_a_memoria_de_teste();
+    if let Err(m) = crate::persistencia::compactar_de_teste() {
+        crate::log_error!("chaves", "o journal nao esqueceu as chaves: {}", m);
+    }
+}
+
+/// Só para a suíte: a tabela vazia, como num boot novo, antes de a suíte
+/// repor o journal por cima — ver `testes::de_volta_a_imagem`.
+#[cfg(feature = "modo-teste")]
+pub fn limpar_a_memoria_de_teste() {
     let tabela = com(|c| core::mem::take(&mut c.tabela));
     drop(tabela);
 }

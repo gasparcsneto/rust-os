@@ -1617,7 +1617,9 @@ pub static COMANDOS: &[Command] = &[
                  usa (linha `dominios`). A privada nasce do gerador do kernel e nunca sai \
                  dele: nenhum comando a devolve, nem a recebe. O nome, `chave:<nome>`, e do \
                  espaco da identidade de quem pede; um nome ja usado - por uma chave viva ou \
-                 por uma destruida - nao se cria de novo. Devolve a chave publica.",
+                 por uma destruida - nao se cria de novo. A chave vai para o journal cifrado \
+                 antes da resposta, com a decisao no mesmo registro, e volta a cada boot; sem \
+                 persistencia, nenhuma nasce. Devolve a chave publica.",
         params: &[
             ParamSpec {
                 nome: "key",
@@ -1697,7 +1699,8 @@ pub static COMANDOS: &[Command] = &[
         nome: "key.destroy",
         resumo: "Destroi uma chave da identidade de quem pede: a privada e apagada, e o nome \
                  fica marcado para sempre - nao se cria outra chave com ele. A publica fica, \
-                 para a historia.",
+                 para a historia. A lapide vai para o journal: o boot nao traz a chave de \
+                 volta, e uma fotografia velha do disco e recusada.",
         params: &[ParamSpec {
             nome: "key",
             tipo: TipoParam::Texto,
@@ -2188,6 +2191,14 @@ fn key_create(params: Json, w: &mut JsonWriter) -> fmt::Result {
         #[cfg(feature = "modo-teste")]
         crate::autorizacao::gancho_da_reconfirmacao();
         crate::autorizacao::reconfirmar()?;
+        // Sem persistência, nenhuma chave nasce: um boot não a traria de
+        // volta, e a assinatura também não sairia.
+        crate::persistencia::exigir().map_err(|_| {
+            (
+                Codigo::Error,
+                "sem persistencia, nenhuma chave nasce: um boot nao a traria de volta",
+            )
+        })?;
         if chaves::dominio(dominio).is_none() {
             return Err(como_recusa(Falha::DominioDesconhecido));
         }
@@ -2195,6 +2206,27 @@ fn key_create(params: Json, w: &mut JsonWriter) -> fmt::Result {
             return Err(como_recusa(Falha::DominioNaoUsado));
         }
         let v = chaves::criar(&dono, nome, dominio).map_err(como_recusa)?;
+        // No journal antes de responder, com a decisão no mesmo registro: a
+        // semente, cifrada com ele. Sem a gravação, a chave sai da tabela
+        // inteira — sem lápide: o nome não foi de chave nenhuma.
+        let gravada = chaves::gravavel(&dono, nome)
+            .ok_or("a chave criada nao esta na tabela")
+            .and_then(|g| crate::persistencia::entrada_da_chave_viva(&g))
+            .and_then(|e| {
+                crate::persistencia::gravar_operacao(
+                    "key.create",
+                    recurso,
+                    &mut [e],
+                    crate::autorizacao::decisao_atual().unwrap_or(0),
+                )
+            });
+        if gravada.is_err() {
+            chaves::desfazer_criacao(&dono, nome);
+            return Err((
+                Codigo::Error,
+                "a chave nao ficou gravada no journal: nenhuma nasceu",
+            ));
+        }
         let registro = crate::autorizacao::auditar_execucao(
             &alloc::format!("{recurso} {dominio}"),
             Codigo::Allow,
@@ -2338,6 +2370,27 @@ fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
         crate::autorizacao::gancho_da_reconfirmacao();
         crate::autorizacao::reconfirmar()?;
         let v = crate::chaves::destruir(&dono, nome).map_err(como_recusa)?;
+        // A lápide no journal, com a decisão. Sem a gravação, a destruição
+        // fica — a privada já foi apagada — até o boot, como toda revogação
+        // que não ficou gravada; e a persistência, indisponível, não deixa
+        // nada assinar até lá.
+        let gravada = crate::chaves::gravavel(&dono, nome)
+            .ok_or("a chave destruida nao esta na tabela")
+            .and_then(|g| crate::persistencia::entrada_da_chave_morta(&g))
+            .and_then(|e| {
+                crate::persistencia::gravar_operacao(
+                    "key.destroy",
+                    recurso,
+                    &mut [e],
+                    crate::autorizacao::decisao_atual().unwrap_or(0),
+                )
+            });
+        if gravada.is_err() {
+            return Err((
+                Codigo::Error,
+                "a destruicao nao ficou gravada no journal: a chave fica destruida ate o boot",
+            ));
+        }
         let registro = crate::autorizacao::auditar_execucao(
             recurso,
             Codigo::Allow,

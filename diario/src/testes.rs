@@ -1105,6 +1105,18 @@ fn o_registro_de_auditoria_nao_carrega_estado() {
     let agente = estado::campos(&[&AGENTE_REGISTRADO.to_le_bytes(), b"linha"]).unwrap();
     let mensagem = estado::campos(&[&MENSAGEM_ESTADO.to_le_bytes(), b"m"]).unwrap();
     let arquivo = estado::campos(&[&ARQUIVO_GRAVADO.to_le_bytes(), b"a", b"v", b"c"]).unwrap();
+    let chave =
+        estado::campos(&[&CHAVE_CRIADA.to_le_bytes(), b"d", b"n", b"x", b"t", b"s"]).unwrap();
+    let lapide = estado::campos(&[
+        &CHAVE_MORTA.to_le_bytes(),
+        b"d",
+        b"n",
+        b"e",
+        b"x",
+        b"t",
+        b"p",
+    ])
+    .unwrap();
     assert!(estado::so_de_auditoria(
         &estado::campos(&[&evento, &lacuna]).unwrap()
     ));
@@ -1113,6 +1125,8 @@ fn o_registro_de_auditoria_nao_carrega_estado() {
         estado::campos(&[&evento, &agente]).unwrap(),
         estado::campos(&[&mensagem, &evento]).unwrap(),
         estado::campos(&[&evento, &arquivo]).unwrap(),
+        estado::campos(&[&evento, &chave]).unwrap(),
+        estado::campos(&[&lapide]).unwrap(),
         alloc::vec![0xFF, 0xFF, 1],
         // Uma entrada sem campo nenhum: sem tipo, não é de auditoria.
         estado::campos(&[&estado::campos(&[]).unwrap()]).unwrap(),

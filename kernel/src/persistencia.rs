@@ -1644,7 +1644,9 @@ fn tipo_da_entrada(e: &[u8]) -> Option<u16> {
 }
 
 /// As entradas que mudam o estado de autoridade, e o marcador da operação:
-/// o que a base carrega da região velha, na ordem em que aconteceu.
+/// o que a base carrega da região velha, na ordem em que aconteceu. As
+/// chaves de assinatura não: a base as tira da memória — ver
+/// [`compactar_sozinho`].
 fn e_de_autoridade(t: u16) -> bool {
     matches!(
         t,
@@ -1909,6 +1911,19 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     // journal não cresce com eles.
     if let Some(c) = crate::volume::confirmado() {
         grupos.push(alloc::vec![entrada_do_armazem(&c)?]);
+    }
+    // As chaves de assinatura, da memória: a viva com a semente, a morta só
+    // com o que é público. Depois do histórico: uma revogação reposta dele
+    // não acha a chave ainda, e não anula a de quem foi registrado de novo
+    // depois dela. Nunca do histórico: a criação de uma chave que morreu
+    // tem a semente, e fica na região velha.
+    for g in crate::chaves::gravaveis() {
+        let e = if g.estado == crate::chaves::Estado::Ativa {
+            entrada_da_chave_viva(&g)?
+        } else {
+            entrada_da_chave_morta(&g)?
+        };
+        grupos.push(alloc::vec![e]);
     }
     let mut escritas = Ok(());
     for g in &grupos {
@@ -2202,6 +2217,10 @@ pub struct Foto {
     revogados: Vec<[u8; 32]>,
     politica: String,
     pessoas: Vec<sigilo::pessoas::Pessoa>,
+    /// O dono, o nome e o estado de cada chave de assinatura: a operação
+    /// pode anular as de uma identidade — `key.revoke`, a revogação do
+    /// dono.
+    chaves: Vec<(String, String, crate::chaves::Estado)>,
 }
 
 impl Foto {
@@ -2211,6 +2230,7 @@ impl Foto {
             revogados: crate::identidade::administradores_revogados(),
             politica: crate::autorizacao::com_politica(|p| p.texto()),
             pessoas: crate::pessoas::todas(),
+            chaves: crate::chaves::estados(),
         }
     }
 
@@ -2262,6 +2282,68 @@ pub fn concluir(
     }
 }
 
+/// A entrada de uma chave viva: `[dono, nome, domínio, criada em ms,
+/// semente]` — a semente emprestada pela privada só para a entrada, que
+/// quem grava zera depois.
+pub fn entrada_da_chave_viva(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'static str> {
+    let privada = g.privada.as_ref().ok_or("chave viva sem a privada")?;
+    privada.com_a_semente(|semente| {
+        entrada(
+            tipo::CHAVE_CRIADA,
+            &[
+                g.dono.as_bytes(),
+                g.nome.as_bytes(),
+                g.dominio.as_bytes(),
+                &g.criada_ms.to_le_bytes(),
+                semente,
+            ],
+        )
+    })
+}
+
+/// A lápide de uma chave: `[dono, nome, estado, domínio, criada em ms,
+/// pública]` — tudo o que é público, e nada da privada.
+pub fn entrada_da_chave_morta(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'static str> {
+    entrada(
+        tipo::CHAVE_MORTA,
+        &[
+            g.dono.as_bytes(),
+            g.nome.as_bytes(),
+            &[g.estado.codigo()],
+            g.dominio.as_bytes(),
+            &g.criada_ms.to_le_bytes(),
+            &g.publica,
+        ],
+    )
+}
+
+/// Grava uma operação que não passa pela foto — a de uma chave, pelo dono
+/// dela —: o marcador `[operação, recurso]`, as `entradas`, e a decisão
+/// `decisao` no mesmo registro, como [`concluir`]. As entradas, e o
+/// conteúdo montado com elas, são zerados depois: a de uma chave viva tem a
+/// semente.
+pub fn gravar_operacao(
+    nome: &str,
+    recurso: &str,
+    entradas: &mut [Vec<u8>],
+    decisao: u64,
+) -> Result<(), &'static str> {
+    let marcador = entrada(tipo::OPERACAO, &[nome.as_bytes(), recurso.as_bytes()])?;
+    let mut todas: Vec<&[u8]> = Vec::with_capacity(entradas.len() + 1);
+    todas.push(&marcador);
+    todas.extend(entradas.iter().map(Vec::as_slice));
+    let conteudo = estado::campos(&todas);
+    let resultado = conteudo.and_then(|mut c| {
+        let r = gravar_com_a_decisao(tipo::OPERACAO, &c, decisao);
+        politica::sigiloso::zerar_bloco(&mut c);
+        r
+    });
+    for e in entradas.iter_mut() {
+        politica::sigiloso::zerar_bloco(e);
+    }
+    resultado
+}
+
 /// Uma entrada do registro de uma operação: o tipo e os campos.
 fn entrada(t: u16, campos: &[&[u8]]) -> Result<Vec<u8>, &'static str> {
     let mut todos: Vec<&[u8]> = Vec::with_capacity(campos.len() + 1);
@@ -2278,6 +2360,21 @@ fn diferenca(foto: &Foto, nome: &str, recurso: &str) -> Result<Vec<Vec<u8>>, &'s
         tipo::OPERACAO,
         &[nome.as_bytes(), recurso.as_bytes()],
     )?);
+
+    // As chaves que a operação matou, logo depois do marcador — antes da
+    // revogação que as matou: reposta, a lápide vem primeiro, e a revogação
+    // reposta não acha chave viva para anular de novo, nem grava a
+    // anulação de novo a cada boot.
+    use crate::chaves::Estado;
+    for g in crate::chaves::gravaveis() {
+        let viva_antes = foto
+            .chaves
+            .iter()
+            .any(|(d, n, e)| *d == g.dono && *n == g.nome && *e == Estado::Ativa);
+        if viva_antes && g.estado != Estado::Ativa {
+            v.push(entrada_da_chave_morta(&g)?);
+        }
+    }
 
     let agora = crate::identidade::agentes();
     for a in &agora {
@@ -2507,6 +2604,35 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
             })
         }
         (tipo::MENSAGENS_PROXIMO, [n]) => crate::mensagens::fixar_proximo(u64_de(n)?),
+        (tipo::CHAVE_CRIADA, [dono, nome, dominio, criada, semente]) => {
+            let mut s: [u8; 32] = (*semente)
+                .try_into()
+                .map_err(|_| "semente de chave que nao tem 32 bytes")?;
+            let r = crate::chaves::restaurar_viva(
+                texto(dono)?,
+                texto(nome)?,
+                texto(dominio)?,
+                u64_de(criada)?,
+                s,
+            );
+            sigilo::zeroize::Zeroize::zeroize(&mut s);
+            r
+        }
+        (tipo::CHAVE_MORTA, [dono, nome, estado, dominio, criada, publica]) => {
+            let estado = match estado {
+                [c] => crate::chaves::Estado::de_codigo(*c),
+                _ => None,
+            }
+            .ok_or("estado de chave invalido")?;
+            crate::chaves::restaurar_morta(
+                texto(dono)?,
+                texto(nome)?,
+                estado,
+                texto(dominio)?,
+                u64_de(criada)?,
+                chave(publica)?,
+            )
+        }
         (tipo::ARMAZEM_CONFIRMADO, [id, setores, do_diario, ancora, elo]) => {
             let c = crate::volume::Confirmado {
                 geometria: ::armazem::registro::Volume {

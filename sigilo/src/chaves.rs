@@ -245,6 +245,16 @@ impl Privada {
         self.0.verifying_key().to_bytes()
     }
 
+    /// A semente, emprestada a `f` — para o journal cifrado do kernel, e só
+    /// para ele: é o que uma chave guardada precisa para voltar no boot. A
+    /// cópia é apagada quando `f` volta; nada dela sai daqui de outro jeito.
+    pub fn com_a_semente<R>(&self, f: impl FnOnce(&[u8; 32]) -> R) -> R {
+        let mut semente = self.0.to_bytes();
+        let r = f(&semente);
+        zeroize::Zeroize::zeroize(&mut semente);
+        r
+    }
+
     /// Assina `resumo` no domínio `dominio`: a assinatura Ed25519 de
     /// `prefixo ‖ resumo`.
     pub fn assinar(&self, dominio: &Dominio, resumo: &[u8; TAM_RESUMO]) -> [u8; TAM_ASSINATURA] {
@@ -296,6 +306,25 @@ pub fn impressao(publica: &[u8; TAM_PUBLICA]) -> [u8; TAM_IMPRESSAO] {
 mod testes {
     use super::*;
     use alloc::format;
+
+    /// A semente emprestada é a da chave: a privada refeita dela tem a
+    /// mesma pública e assina igual.
+    #[test]
+    fn a_semente_refaz_a_mesma_chave() {
+        let original = Privada::de_semente([0x42; 32]);
+        let refeita = original.com_a_semente(|s| Privada::de_semente(*s));
+        assert_eq!(refeita.publica(), original.publica());
+        let d = Dominios::ler(&linha_de_dominio("ic-request", b"\x0Aic-request"))
+            .unwrap()
+            .dominio("ic-request")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            refeita.assinar(&d, &[7; 32]),
+            original.assinar(&d, &[7; 32])
+        );
+        assert!(original.com_a_semente(|s| *s == [0x42; 32]));
+    }
 
     /// Um domínio com o prefixo dado, pelo caminho de verdade: o registro.
     fn dominio(nome: &str, prefixo: &[u8]) -> Dominio {
