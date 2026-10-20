@@ -487,6 +487,14 @@ impl Cadeia {
         self.registros.len()
     }
 
+    /// O registro de número `seq`, se ele ainda está na janela: os números
+    /// são seguidos, e o lugar dele é a distância até o primeiro guardado.
+    pub fn registro(&self, seq: u64) -> Option<&Registro> {
+        let primeiro = self.registros.front()?.seq;
+        let i = usize::try_from(seq.checked_sub(primeiro)?).ok()?;
+        self.registros.get(i).filter(|r| r.seq == seq)
+    }
+
     /// Refaz a cadeia guardada a partir da âncora. Devolve a cabeça, ou o
     /// número do primeiro registro que não confere.
     pub fn verificar(&self) -> Result<[u8; 32], u64> {
@@ -539,6 +547,26 @@ mod testes {
             codigo: Codigo::Allow,
             parametros: resumo_dos_parametros(b"{}"),
             detalhe: String::new(),
+        }
+    }
+
+    /// Um registro se acha pelo número enquanto está na janela; o que
+    /// saiu dela, e o que ainda não existe, não.
+    #[test]
+    fn o_registro_pelo_numero() {
+        let mut c = Cadeia::nova(4);
+        assert!(c.registro(1).is_none());
+        for i in 1..=6 {
+            assert_eq!(c.anexar(evento(i)), i);
+        }
+        // Na janela: 3, 4, 5 e 6.
+        for seq in 3..=6 {
+            let r = c.registro(seq).unwrap();
+            assert_eq!(r.seq, seq);
+            assert_eq!(r.evento.ts_ms, seq * 10);
+        }
+        for fora in [0, 1, 2, 7, u64::MAX] {
+            assert!(c.registro(fora).is_none(), "{fora}");
         }
     }
 

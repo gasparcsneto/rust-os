@@ -447,10 +447,13 @@ impl Recusa {
     }
 }
 
+/// O maior nome — de papel, de editor, de chave, de domínio —, em bytes.
+pub const MAIOR_NOME: usize = 32;
+
 /// Um nome de papel aceitável: o mesmo alfabeto dos nomes de agente.
 pub fn nome_valido(nome: &str) -> bool {
     !nome.is_empty()
-        && nome.len() <= 32
+        && nome.len() <= MAIOR_NOME
         && nome
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))

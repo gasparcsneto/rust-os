@@ -189,6 +189,18 @@ fn com_contidos<R>(f: impl FnOnce(&mut Contidos) -> R) -> R {
 /// prova é a autoridade, e a sessão por onde ela veio é só o transporte:
 /// o administrador recupera o sistema mesmo pela porta de quem foi contido.
 pub fn recusa(chamador: Chamador, autoridade: Autoridade) -> Option<(Codigo, &'static str)> {
+    let processo = match chamador {
+        Chamador::Processo { fio, .. } => Some(fio),
+        _ => None,
+    };
+    recusa_de(processo, autoridade)
+}
+
+/// [`recusa`], dito pelo fio do processo que pede — `None` se quem pede não
+/// é um processo — e pela autoridade: a mesma pergunta, que a reconfirmação
+/// faz de novo no ponto de commit, com o que o comando em execução guardou
+/// de quem o pediu.
+pub fn recusa_de(processo: Option<u64>, autoridade: Autoridade) -> Option<(Codigo, &'static str)> {
     // A pessoa da sessão, procurada fora da trava: a do registro de
     // pessoas não entra debaixo desta.
     let pessoa = match autoridade {
@@ -198,7 +210,7 @@ pub fn recusa(chamador: Chamador, autoridade: Autoridade) -> Option<(Codigo, &'s
         _ => None,
     };
     com_contidos(|c| {
-        if let Chamador::Processo { fio, .. } = chamador
+        if let Some(fio) = processo
             && c.isolados.contains(&fio)
         {
             return Some((Codigo::DenyContained, "processo isolado"));

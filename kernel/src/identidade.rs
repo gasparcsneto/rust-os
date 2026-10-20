@@ -772,6 +772,9 @@ pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
         politica::mensagens::Dono::Agente(*chave),
         "com a chave revogada",
     );
+    // E as chaves de assinatura dele: anuladas, com a lápide. A mesma chave
+    // registrada de novo não as recupera.
+    crate::chaves::identidade_revogada(&alloc::format!("agente:{}", sigilo::hex(chave)));
     // A chave revogada não conta mais como agente conectado, mesmo antes de
     // a porta cair: a barra diz isso na hora.
     crate::barra::atualizar_indicador();

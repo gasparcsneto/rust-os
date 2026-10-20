@@ -161,11 +161,15 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
-| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`, `time.confirm` — o salto de hora pendente, sem hora digitada —; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
+| `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`, `time.confirm` — o salto de hora pendente, sem hora digitada —, `key.revoke` — anula a chave de assinatura de outra identidade, sem dar o uso dela a ninguém —; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal; com `after`, os seguintes a um número, do mais velho ao mais novo — a leitura de quem acompanha a cadeia (`count`, `after`) |
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
-| `audit.declare` | Declara um fato de quem pede para a auditoria — uma alegação, e não um fato do kernel: o evento, o assunto e o desfecho vão, como vieram, no recurso de um registro da cadeia; quem, o papel, a sessão, o processo, o programa e a decisão, no detalhe, pelo kernel. Ancorada numa conexão de quem declara, o detalhe leva o destino real dela, pela tabela da pilha; a de outro titular, ou uma que não existe, é `INVALID_ARGUMENT`, sem dizer de quem é. Nenhuma decisão lê uma declaração. Exige `audit.declare`, e gasta a taxa do papel (`event`, `subject`, `outcome`, `connection`) |
+| `audit.declare` | Declara um fato de quem pede para a auditoria — uma alegação, e não um fato do kernel: o evento, o assunto e o desfecho vão, como vieram, no recurso de um registro da cadeia; quem, o papel, a sessão, o processo, o programa e a decisão, no detalhe, pelo kernel. Ancorada numa conexão de quem declara, o detalhe leva o destino real dela, pela tabela da pilha; a de outro titular, ou uma que não existe, é `INVALID_ARGUMENT`, sem dizer de quem é. Ancorada numa decisão, o detalhe leva o número e o método dela, que tem de ser um `ALLOW` de quem declara e do mesmo processo — a assinatura de um `key.sign` —; uma de outro, ou outra declaração, é `INVALID_ARGUMENT`. Uma âncora só. Nenhuma decisão lê uma declaração. Exige `audit.declare`, e gasta a taxa do papel (`event`, `subject`, `outcome`, `connection`, `decision`) |
+| `key.create` | Cria uma chave de assinatura Ed25519 da identidade de quem pede — a pessoa, o agente —, num domínio do registro de domínios que o papel usa. A privada nasce do gerador do kernel e nunca sai dele; o nome, `chave:<nome>`, é do espaço da identidade de quem pede, e um nome já usado — por uma chave viva ou destruída — não volta. Devolve a chave pública (`key`, `domain`) |
+| `key.read` | O que é público de uma chave de quem pede: a pública, a impressão, o algoritmo, o domínio, a custódia e o estado. Nunca a privada; um nome sem chave para quem pede responde o mesmo que um nome de outro (`key`) |
+| `key.sign` | Assina, com uma chave viva de quem pede, um resumo de exatamente 32 bytes no domínio dela — o prefixo registrado do domínio seguido do resumo. Uma decisão por assinatura; no commit, tudo de novo — autoridade, contenção, domínio, chave —, e o registro vai para a auditoria e para o journal antes de a assinatura sair: sem persistência, nada se assina (`key`, `domain`, `digest`) |
+| `key.destroy` | Destrói uma chave de quem pede: a privada é apagada, e o nome fica marcado para sempre (`key`) |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
 | `security.status` | O tecido de segurança: o papel com que o gate decide as leituras dele, até onde leu, o que perdeu, o que pediu e os incidentes |
 | `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
@@ -271,6 +275,7 @@ kernel/src/
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta
+├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
@@ -438,6 +443,7 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── administracao.rs a prova de uma operação administrativa, presa ao contexto
 ├── quorum.rs        M de N credenciais provando o mesmo conteúdo canônico
 ├── codigo.rs        o selo de um editor sobre um executável: Ed25519 estrita sobre o resumo, no fim do arquivo
+├── chaves.rs        as chaves de assinatura das identidades e o registro de domínios: o prefixo do domínio seguido de um resumo de 32 bytes, e nada mais
 ├── gerador.rs       ChaCha20 com apagamento rápido da chave
 ├── credencial.rs    o verificador Argon2id de uma senha, conferido em tempo constante
 ├── pessoas.rs       o identificador de uma pessoa e o formato do registro delas

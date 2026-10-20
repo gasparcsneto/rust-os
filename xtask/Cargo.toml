@@ -30,6 +30,13 @@ diario = { path = "../diario" }
 # de a imagem existir.
 hora = { path = "../hora" }
 
+# O Internet Computer do programa, do lado da bancada: o domínio do pedido
+# assinado que vai para o registro de domínios da imagem — o mesmo nome e
+# os mesmos bytes que o programa usa —, e o leitor de `/dados/icp/redes`,
+# para conferir que o arquivo que a bancada do IC põe na imagem vale (ver
+# `src/icp.rs`). O kernel e a política não dependem dele: o `xtask` confere.
+web3 = { path = "../web3" }
+
 # As raízes das fontes de hora da bancada: a pública de cada uma sai da
 # privada, que fica em `target/chaves/`. A mesma versão do `sigilo`.
 ed25519-dalek = { version = "3.0.0", default-features = false }
@@ -51,6 +58,3 @@ rcgen = "0.14.10"
 # Ele saiu quando o `iniciador/` passou a pôr o kernel de pé sozinho.
 
 [dev-dependencies]
-# Só nos testes: o leitor de `/dados/icp/redes` do programa, para conferir
-# que o arquivo que a bancada do IC põe na imagem vale — ver `src/icp.rs`.
-web3 = { path = "../web3" }

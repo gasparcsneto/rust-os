@@ -1563,9 +1563,13 @@ pub static COMANDOS: &[Command] = &[
                  `connection`, a declaracao se ancora numa conexao de quem declara, e o \
                  kernel escreve no detalhe o destino real dela, pela tabela da pilha; uma \
                  conexao de outro titular, ou que nao existe, e INVALID_ARGUMENT, sem dizer \
-                 de quem e. Nenhuma decisao le uma declaracao: ela nao autoriza, nao nega e \
-                 nao muda nada alem do registro. Gasta a taxa do papel, como todo exercicio \
-                 de autoridade.",
+                 de quem e. Com `decision`, ela se ancora num ALLOW da propria auditoria - de \
+                 quem declara, e do mesmo processo -, e o kernel escreve no detalhe o numero e \
+                 o metodo dele; uma decisao de outro, de outro processo, que nao e ALLOW, que \
+                 e outra declaracao, ou que saiu da janela da auditoria, e INVALID_ARGUMENT. \
+                 Uma ancora so: `connection` ou `decision`. Nenhuma decisao le uma \
+                 declaracao: ela nao autoriza, nao nega e nao muda nada alem do registro. \
+                 Gasta a taxa do papel, como todo exercicio de autoridade.",
         params: &[
             ParamSpec {
                 nome: "event",
@@ -1591,6 +1595,12 @@ pub static COMANDOS: &[Command] = &[
                 obrigatorio: false,
                 descricao: "O numero de uma conexao de quem declara: o destino real dela vai no registro.",
             },
+            ParamSpec {
+                nome: "decision",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O numero de um registro ALLOW da auditoria de quem declara, do mesmo processo - a assinatura de um key.sign, por exemplo: o numero e o metodo dele vao no registro.",
+            },
         ],
         acesso: Acesso::Exige(Permissao::AuditDeclare),
         // Sem recurso para o gate: a permissão não tem alcance, e nenhum
@@ -1599,6 +1609,106 @@ pub static COMANDOS: &[Command] = &[
         mais: Mais::Nada,
         plano: Plano::Controle,
         handler: audit_declare,
+    },
+    Command {
+        nome: "key.create",
+        resumo: "Cria uma chave de assinatura Ed25519 da identidade de quem pede - a pessoa, o \
+                 agente -, num dominio do registro de dominios (/etc/duke/dominios) que o papel \
+                 usa (linha `dominios`). A privada nasce do gerador do kernel e nunca sai \
+                 dele: nenhum comando a devolve, nem a recebe. O nome, `chave:<nome>`, e do \
+                 espaco da identidade de quem pede; um nome ja usado - por uma chave viva ou \
+                 por uma destruida - nao se cria de novo. Devolve a chave publica.",
+        params: &[
+            ParamSpec {
+                nome: "key",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "A chave, `chave:<nome>`: o nome no espaco da identidade de quem pede. E o recurso que o gate decide.",
+            },
+            ParamSpec {
+                nome: "domain",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O dominio de assinatura: um nome do registro de dominios.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::KeyCreate),
+        recurso: Some("key"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: key_create,
+    },
+    Command {
+        nome: "key.read",
+        resumo: "O que e publico de uma chave da identidade de quem pede: a chave publica, a \
+                 impressao, o algoritmo, o dominio, a custodia e o estado - viva, destruida \
+                 ou anulada. Nunca a privada. Um nome sem chave para quem pede e \
+                 INVALID_ARGUMENT, com a mesma resposta se outra identidade tem uma chave com \
+                 esse nome.",
+        params: &[ParamSpec {
+            nome: "key",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "A chave, `chave:<nome>`, no espaco da identidade de quem pede.",
+        }],
+        acesso: Acesso::Exige(Permissao::KeyRead),
+        recurso: Some("key"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: key_read,
+    },
+    Command {
+        nome: "key.sign",
+        resumo: "Assina, com uma chave viva da identidade de quem pede, um resumo de exatamente \
+                 32 bytes no dominio da chave: a assinatura Ed25519 do prefixo registrado do \
+                 dominio seguido do resumo. O kernel nao sabe o que o resumo resume. Uma \
+                 decisao por assinatura; no ponto de commit, a autoridade, a contencao, o \
+                 papel e o dominio, e a chave, sao conferidos de novo, e o registro da \
+                 execucao vai para a auditoria e para o journal antes de a assinatura sair - \
+                 sem persistencia, nada se assina. Devolve a assinatura, a chave publica e o \
+                 numero do registro (`record`), a ancora de uma declaracao.",
+        params: &[
+            ParamSpec {
+                nome: "key",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "A chave, `chave:<nome>`, no espaco da identidade de quem pede.",
+            },
+            ParamSpec {
+                nome: "domain",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O dominio da chave, pelo nome do registro de dominios.",
+            },
+            ParamSpec {
+                nome: "digest",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O resumo a assinar: exatamente 32 bytes, em 64 digitos hexadecimais minusculos.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::KeySign),
+        recurso: Some("key"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: key_sign,
+    },
+    Command {
+        nome: "key.destroy",
+        resumo: "Destroi uma chave da identidade de quem pede: a privada e apagada, e o nome \
+                 fica marcado para sempre - nao se cria outra chave com ele. A publica fica, \
+                 para a historia.",
+        params: &[ParamSpec {
+            nome: "key",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "A chave, `chave:<nome>`, no espaco da identidade de quem pede.",
+        }],
+        acesso: Acesso::Exige(Permissao::KeyDestroy),
+        recurso: Some("key"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: key_destroy,
     },
     Command {
         nome: "policy.show",
@@ -1935,9 +2045,44 @@ fn audit_declare(params: Json, w: &mut JsonWriter) -> fmt::Result {
         texto(params.member("outcome"))
     );
     let numero = params.member("connection").and_then(|v| v.as_u64());
-    let ancora = match numero {
-        None => alloc::string::String::from("sem conexao"),
-        Some(n) => match Dono::do_comando().map(|dono| conexoes::destino_para(Some(n), &dono)) {
+    let decisao = params.member("decision").and_then(|v| v.as_u64());
+    // Uma âncora só: o detalhe tem teto, e uma declaração diz a que fato do
+    // kernel ela se refere — a conexão, ou a decisão.
+    let recusar = |w: &mut JsonWriter, detalhe: &str, motivo: &str| -> fmt::Result {
+        crate::autorizacao::auditar_execucao(&alegacao, Codigo::InvalidArgument, detalhe);
+        w.field_bool("declared", false)?;
+        w.field_str("code", Codigo::InvalidArgument.nome())?;
+        w.field_str("error", motivo)?;
+        explicar_falha(w, Codigo::InvalidArgument, motivo)?;
+        w.end_object()
+    };
+    if numero.is_some() && decisao.is_some() {
+        let motivo = "uma ancora so: connection ou decision";
+        return recusar(w, motivo, motivo);
+    }
+    let ancora = match (numero, decisao) {
+        (None, Some(d)) => match crate::autorizacao::decisao_de_quem_pede(d) {
+            Ok(metodo) if metodo != "audit.declare" => alloc::format!("ancorada em {d} {metodo}"),
+            // Uma declaração não se ancora em outra: a âncora é um fato do
+            // kernel, e outra declaração é outra alegação.
+            Ok(_) => {
+                return recusar(
+                    w,
+                    &alloc::format!("decisao {d} e outra declaracao"),
+                    "uma declaracao nao se ancora em outra",
+                );
+            }
+            Err(motivo) => {
+                return recusar(
+                    w,
+                    &alloc::format!("decisao {d} nao e de quem declara"),
+                    motivo,
+                );
+            }
+        },
+        (None, None) => alloc::string::String::from("sem conexao"),
+        (Some(n), _) => match Dono::do_comando().map(|dono| conexoes::destino_para(Some(n), &dono))
+        {
             Some(Ok(destino)) => alloc::format!("conexao {n} {}", destino.texto()),
             // A de outro titular e a que não existe respondem o mesmo: quem
             // declara não descobre o que é dos outros. O detalhe é curto: com
@@ -1969,6 +2114,246 @@ fn audit_declare(params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.field_u64("decision", d)?;
     }
     w.end_object()
+}
+
+/// O texto de um parâmetro, cru; vazio sem ele.
+fn texto_de(v: Option<Json<'_>>) -> &str {
+    v.and_then(|v| v.as_str()).unwrap_or("")
+}
+
+/// Uma operação de chave que não aconteceu depois do gate: o registro da
+/// execução, com o código e o motivo, e a resposta — `campo` falso, o
+/// código, o erro e a explicação.
+fn falha_de_chave(
+    w: &mut JsonWriter,
+    campo: &str,
+    recurso: &str,
+    codigo: politica::Codigo,
+    motivo: &str,
+) -> fmt::Result {
+    crate::autorizacao::auditar_execucao(recurso, codigo, motivo);
+    w.field_bool(campo, false)?;
+    w.field_str("code", codigo.nome())?;
+    w.field_str("error", motivo)?;
+    explicar_falha(w, codigo, motivo)?;
+    w.end_object()
+}
+
+/// O que é público de uma chave, nos campos da resposta.
+fn escrever_chave(w: &mut JsonWriter, v: &crate::chaves::Vista) -> fmt::Result {
+    w.field_str(
+        "key",
+        &alloc::format!("{}{}", politica::arquivo::PREFIXO_DE_CHAVE, v.nome),
+    )?;
+    w.field_str("algorithm", crate::chaves::ALGORITMO)?;
+    w.field_str("domain", &v.dominio)?;
+    w.field_str("custody", v.custodia.como_str())?;
+    w.field_str("state", v.estado.como_str())?;
+    w.field_str("public", &sigilo::hex(&v.publica))?;
+    w.field_str("fingerprint", &v.impressao())?;
+    w.field_u64("created_ms", v.criada_ms)
+}
+
+/// A chave do pedido e o dono dela: o nome de `chave:<nome>`, e a
+/// identidade durável de quem pede — o espaço em que o nome se resolve.
+/// Nunca um dono vindo do pedido.
+fn chave_de_quem_pede(
+    recurso: &str,
+) -> Result<(&str, alloc::string::String), crate::chaves::Falha> {
+    let nome =
+        politica::arquivo::nome_de_chave(recurso).ok_or(crate::chaves::Falha::Inexistente)?;
+    let dono = crate::autorizacao::dono_duravel().ok_or(crate::chaves::Falha::SemDono)?;
+    Ok((nome, dono))
+}
+
+/// A falha de chave como o par da recusa: o código e o motivo.
+fn como_recusa(f: crate::chaves::Falha) -> (politica::Codigo, &'static str) {
+    (f.codigo(), f.motivo())
+}
+
+fn key_create(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::chaves::{self, Falha};
+    use politica::Codigo;
+    w.begin_object()?;
+    let recurso = texto_de(params.member("key"));
+    let dominio = texto_de(params.member("domain"));
+    let (nome, dono) = match chave_de_quem_pede(recurso) {
+        Ok(c) => c,
+        Err(f) => return falha_de_chave(w, "created", recurso, f.codigo(), f.motivo()),
+    };
+    // Com a ordem das gravações: a criação de outra chave com o mesmo nome,
+    // a revogação do dono e uma política nova vêm antes desta inteira, ou
+    // depois.
+    let feito = crate::persistencia::em_ordem(|| {
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        crate::autorizacao::reconfirmar()?;
+        if chaves::dominio(dominio).is_none() {
+            return Err(como_recusa(Falha::DominioDesconhecido));
+        }
+        if !crate::autorizacao::usa_o_dominio(dominio) {
+            return Err(como_recusa(Falha::DominioNaoUsado));
+        }
+        let v = chaves::criar(&dono, nome, dominio).map_err(como_recusa)?;
+        let registro = crate::autorizacao::auditar_execucao(
+            &alloc::format!("{recurso} {dominio}"),
+            Codigo::Allow,
+            &alloc::format!("criada {} {}", chaves::ALGORITMO, v.impressao()),
+        );
+        Ok((v, registro))
+    });
+    match feito {
+        Ok((v, registro)) => {
+            w.field_bool("created", true)?;
+            escrever_chave(w, &v)?;
+            w.field_u64("record", registro)?;
+            if let Some(d) = crate::autorizacao::decisao_atual() {
+                w.field_u64("decision", d)?;
+            }
+            w.end_object()
+        }
+        Err((codigo, motivo)) => falha_de_chave(w, "created", recurso, codigo, motivo),
+    }
+}
+
+fn key_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let recurso = texto_de(params.member("key"));
+    let lida = chave_de_quem_pede(recurso).and_then(|(nome, dono)| crate::chaves::ler(&dono, nome));
+    match lida {
+        Ok(v) => {
+            w.field_bool("found", true)?;
+            escrever_chave(w, &v)?;
+            w.end_object()
+        }
+        Err(f) => falha_de_chave(w, "found", recurso, f.codigo(), f.motivo()),
+    }
+}
+
+// O registro de uma assinatura leva o resumo inteiro: a chave de nome mais
+// longo, no domínio de nome mais longo, cabe no teto do recurso da
+// auditoria, e nada do resumo se corta.
+const _: () = assert!(
+    politica::arquivo::PREFIXO_DE_CHAVE.len()
+        + politica::arquivo::MAIOR_NOME
+        + 1
+        + sigilo::chaves::MAIOR_NOME_DE_DOMINIO
+        + 1
+        + 2 * sigilo::chaves::TAM_RESUMO
+        <= crate::autorizacao::MAIOR_RECURSO
+);
+
+fn key_sign(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use crate::chaves::{self, Falha};
+    use politica::Codigo;
+    w.begin_object()?;
+    let recurso = texto_de(params.member("key"));
+    let dominio = texto_de(params.member("domain"));
+    let (nome, dono) = match chave_de_quem_pede(recurso) {
+        Ok(c) => c,
+        Err(f) => return falha_de_chave(w, "signed", recurso, f.codigo(), f.motivo()),
+    };
+    // O resumo tem exatamente 32 bytes: com um de tamanho livre, o prefixo
+    // de um domínio seguido dele poderia ser o de outro. E uma grafia só,
+    // hexadecimal minúsculo: o que se assina tem uma forma, e não várias.
+    let digitos = texto_de(params.member("digest"));
+    let minusculo = digitos
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let Some(resumo) = sigilo::de_hex_fixo::<32>(digitos).filter(|_| minusculo) else {
+        return falha_de_chave(
+            w,
+            "signed",
+            recurso,
+            Codigo::InvalidArgument,
+            "o resumo nao tem exatamente 32 bytes em 64 digitos hexadecimais minusculos",
+        );
+    };
+    // Tudo de novo no ponto de commit, com a ordem das gravações na mão — a
+    // revogação, a destruição, a anulação e a política nova gravam com ela:
+    // ou esta assinatura as vê e é recusada, ou elas vêm depois dela
+    // inteira.
+    let feito = crate::persistencia::em_ordem(|| {
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        crate::autorizacao::reconfirmar()?;
+        // Sem persistência, nada se assina: o registro não chegaria ao
+        // journal antes da assinatura.
+        crate::persistencia::exigir().map_err(|_| {
+            (
+                Codigo::Error,
+                "sem persistencia, nada se assina: a auditoria nao chegaria ao journal antes",
+            )
+        })?;
+        if !crate::autorizacao::usa_o_dominio(dominio) {
+            return Err(como_recusa(Falha::DominioNaoUsado));
+        }
+        let (privada, v, d) = chaves::para_assinar(&dono, nome, dominio).map_err(como_recusa)?;
+        // O registro primeiro — o que assina, com que chave, em que domínio
+        // e sobre que resumo; nunca a privada, nem a assinatura —, e no
+        // journal; só então a assinatura.
+        let registro = crate::autorizacao::auditar_execucao(
+            &alloc::format!("{recurso} {dominio} {}", sigilo::hex(&resumo)),
+            Codigo::Allow,
+            &alloc::format!("assinatura {} {}", chaves::ALGORITMO, v.impressao()),
+        );
+        if registro == 0 {
+            return Err((Codigo::Error, "fora de um comando autorizado"));
+        }
+        crate::persistencia::gravar_auditoria_ate(registro).map_err(|_| {
+            (
+                Codigo::Error,
+                "a auditoria da assinatura nao chegou ao journal: nada foi assinado",
+            )
+        })?;
+        let assinatura = privada.assinar(&d, &resumo);
+        drop(privada);
+        Ok((v, registro, assinatura))
+    });
+    match feito {
+        Ok((v, registro, assinatura)) => {
+            w.field_bool("signed", true)?;
+            escrever_chave(w, &v)?;
+            w.field_str("signature", &sigilo::hex_de(&assinatura))?;
+            w.field_u64("record", registro)?;
+            if let Some(d) = crate::autorizacao::decisao_atual() {
+                w.field_u64("decision", d)?;
+            }
+            w.end_object()
+        }
+        Err((codigo, motivo)) => falha_de_chave(w, "signed", recurso, codigo, motivo),
+    }
+}
+
+fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use politica::Codigo;
+    w.begin_object()?;
+    let recurso = texto_de(params.member("key"));
+    let (nome, dono) = match chave_de_quem_pede(recurso) {
+        Ok(c) => c,
+        Err(f) => return falha_de_chave(w, "destroyed", recurso, f.codigo(), f.motivo()),
+    };
+    let feito = crate::persistencia::em_ordem(|| {
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        crate::autorizacao::reconfirmar()?;
+        let v = crate::chaves::destruir(&dono, nome).map_err(como_recusa)?;
+        let registro = crate::autorizacao::auditar_execucao(
+            recurso,
+            Codigo::Allow,
+            &alloc::format!("destruida {} {}", crate::chaves::ALGORITMO, v.impressao()),
+        );
+        Ok((v, registro))
+    });
+    match feito {
+        Ok((v, registro)) => {
+            w.field_bool("destroyed", true)?;
+            escrever_chave(w, &v)?;
+            w.field_u64("record", registro)?;
+            w.end_object()
+        }
+        Err((codigo, motivo)) => falha_de_chave(w, "destroyed", recurso, codigo, motivo),
+    }
 }
 
 fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {

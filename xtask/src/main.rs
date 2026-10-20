@@ -2885,6 +2885,38 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // nenhum outro lugar do kernel a nomeia — o gate não a trata à parte, e
     // nenhuma decisão lê o que ela grava.
     ("Permissao::AuditDeclare", &["kernel/src/agent/commands.rs"]),
+    // As chaves de assinatura (ver `kernel/src/chaves.rs`): cada permissão
+    // é exigida só pelo comando dela — e a anulação, só pela operação
+    // administrativa, com prova; a tabela muda só pelos handlers, depois do
+    // gate, pela operação administrativa e pela revogação do dono; a
+    // privada nasce só no módulo dela; e a assinatura só sai do handler que
+    // grava a auditoria no journal antes. A âncora de uma declaração só é
+    // lida pelo handler da declaração.
+    ("Permissao::KeyCreate", &["kernel/src/agent/commands.rs"]),
+    ("Permissao::KeyRead", &["kernel/src/agent/commands.rs"]),
+    ("Permissao::KeySign", &["kernel/src/agent/commands.rs"]),
+    ("Permissao::KeyDestroy", &["kernel/src/agent/commands.rs"]),
+    (
+        "Permissao::KeyRevoke",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    ("chaves::criar(", &["kernel/src/agent/commands.rs"]),
+    ("chaves::destruir(", &["kernel/src/agent/commands.rs"]),
+    ("chaves::para_assinar(", &["kernel/src/agent/commands.rs"]),
+    ("chaves::anular(", &["kernel/src/agent/administracao.rs"]),
+    (
+        "chaves::identidade_revogada(",
+        &["kernel/src/identidade.rs", "kernel/src/pessoas.rs"],
+    ),
+    ("Privada::de_semente(", &["kernel/src/chaves.rs"]),
+    (
+        "persistencia::gravar_auditoria_ate(",
+        &["kernel/src/agent/commands.rs"],
+    ),
+    (
+        "autorizacao::decisao_de_quem_pede(",
+        &["kernel/src/agent/commands.rs"],
+    ),
     // Os tratadores de hora só pelos handlers, depois do gate: o pedido e a
     // entrega pelos de `time.request` e `time.sync`, a confirmação pela
     // operação administrativa, com prova. E o civil só se move por eles: o
@@ -3803,7 +3835,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              sai da taxa, e só espera pela auditoria, pelo gate; o \
              código só vira processo pela conferência única, que o kernel faz e não sela; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
-             o servidor de teste só na suíte e o da bancada de tempo escrito à parte"
+             o servidor de teste só na suíte e o da bancada de tempo escrito à parte; e as \
+             chaves de assinatura só mudam pelos handlers delas, pela prova e pela revogação \
+             do dono, e a assinatura só sai depois da auditoria no journal"
         );
         Ok(ExitCode::SUCCESS)
     } else {
@@ -4900,6 +4934,40 @@ mod chaves {
         Ok(chave)
     }
 
+    /// O registro de domínios de assinatura da imagem, `/etc/duke/dominios`:
+    /// só o do pedido assinado da rede externa — o nome e o separador do
+    /// `web3`, as mesmas constantes que o programa usa. O kernel lê dele só
+    /// o nome e os bytes, pelo mesmo leitor que este confere; e a política
+    /// da imagem só usa domínios que ele tem — um domínio que a política
+    /// nomeasse e o registro não tivesse seria uma assinatura que nunca sai,
+    /// e o erro aparece aqui.
+    pub fn registro_de_dominios(politica: &politica::Politica) -> Result<String, String> {
+        let mut texto = String::from(
+            "# Os dominios de assinatura: o nome e o prefixo que a assinatura leva antes\n\
+             # do resumo de 32 bytes. Qual papel usa qual dominio e da politica (a linha\n\
+             # `dominios`).\n",
+        );
+        texto.push_str(&sigilo::chaves::linha_de_dominio(
+            web3::icp::pedido::DOMINIO_DO_PEDIDO,
+            web3::icp::pedido::SEPARADOR_DO_PEDIDO,
+        ));
+        let registro = sigilo::chaves::Dominios::ler(&texto)
+            .map_err(|e| format!("o registro de dominios da imagem nao se le: {e}"))?;
+        for papel in politica.papeis() {
+            if let Some(d) = papel
+                .dominios
+                .iter()
+                .find(|d| registro.dominio(d).is_none())
+            {
+                return Err(format!(
+                    "a politica da imagem faz `{}` usar o dominio `{d}`, que o registro de dominios nao tem",
+                    papel.nome
+                ));
+            }
+        }
+        Ok(texto)
+    }
+
     impl Chaves {
         /// As chaves, criando as que faltarem.
         pub fn garantir() -> Result<Chaves, String> {
@@ -5132,6 +5200,7 @@ mod chaves {
             // quórum de pelo menos duas chaves, os tetos nos limites — e se
             // a política da imagem diz o mesmo que ele.
             let fontes_de_hora = self.registro_de_fontes_de_hora(&politica)?;
+            let dominios = registro_de_dominios(&politica)?;
             Ok(vec![
                 (
                     "etc/duke/privado/chave".to_string(),
@@ -5139,6 +5208,7 @@ mod chaves {
                 ),
                 ("etc/duke/editores".to_string(), editores.into_bytes()),
                 ("etc/duke/tempo".to_string(), fontes_de_hora.into_bytes()),
+                ("etc/duke/dominios".to_string(), dominios.into_bytes()),
                 // O registro de pessoas, no diretório reservado: o
                 // verificador não é a senha, mas quem o tem testa palpites
                 // fora da máquina.

@@ -15,6 +15,9 @@
 //!   registro de editores de código;
 //! - [`codigo`]: o selo de um editor sobre um executável, e a conferência
 //!   dele;
+//! - [`chaves`]: as chaves de assinatura das identidades — a privada que só
+//!   o kernel tem, a assinatura de um resumo num domínio registrado — e o
+//!   registro de domínios;
 //! - [`resumo`] e [`cifra`]: as peças do Noise — o BLAKE2s, o HMAC, o HKDF
 //!   e o ChaCha20-Poly1305 com o contador.
 //!
@@ -40,6 +43,7 @@ extern crate alloc;
 
 pub mod administracao;
 pub mod aperto;
+pub mod chaves;
 pub mod cifra;
 pub mod codigo;
 pub mod credencial;

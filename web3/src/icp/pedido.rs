@@ -31,6 +31,17 @@ use super::resumo::{self, Hash};
 /// O maior nonce — **especificação**: "at most 32 bytes".
 pub const MAIOR_NONCE: usize = 32;
 
+/// O nome do domínio em que um pedido assinado vai: a assinatura é a de
+/// `domain_sep("ic-request") · id` — **especificação** (*Authentication*).
+/// É também o nome do domínio no registro de domínios do Duke: o programa
+/// pede ao kernel a assinatura neste domínio, e o kernel só conhece o nome
+/// e os bytes do registro.
+pub const DOMINIO_DO_PEDIDO: &str = "ic-request";
+
+/// O separador de domínio do pedido: o tamanho do nome, num byte, e o nome
+/// — **especificação**: `domain_sep(s) = byte(|s|) · s`.
+pub const SEPARADOR_DO_PEDIDO: &[u8; 11] = b"\x0Aic-request";
+
 /// O conteúdo de uma consulta.
 #[derive(Clone, Copy, Debug)]
 pub struct Consulta<'a> {
@@ -201,6 +212,18 @@ impl LeituraDeEstado<'_> {
         e.texto("ingress_expiry");
         e.nat(self.vencimento_ns);
         Ok(e.terminar())
+    }
+}
+
+#[cfg(test)]
+mod separador {
+    use super::*;
+
+    /// O separador é o tamanho do nome e o nome.
+    #[test]
+    fn o_separador_e_o_do_nome() {
+        assert_eq!(usize::from(SEPARADOR_DO_PEDIDO[0]), DOMINIO_DO_PEDIDO.len());
+        assert_eq!(&SEPARADOR_DO_PEDIDO[1..], DOMINIO_DO_PEDIDO.as_bytes());
     }
 }
 

@@ -336,6 +336,16 @@ static OPERACOES: &[Operacao] = &[
         efeito: Efeito::Nenhum,
         executar: confirmar_salto_de_hora,
     },
+    Operacao {
+        nome: "key.revoke",
+        resumo: "Anula a chave de assinatura de uma identidade: {\"owner\": \"pessoa:<16 hex>\" \
+                 ou \"agente:<64 hex>\", \"key\": \"chave:<nome>\"}. A privada e apagada e o \
+                 nome fica marcado para sempre; ninguem passa a usa-la - nem quem anula. O \
+                 papel do dono cabe no do administrador.",
+        permissao: Permissao::KeyRevoke,
+        efeito: Efeito::Tira,
+        executar: anular_chave,
+    },
 ];
 
 /// Os nomes das operações, para o `agent.describe` e para o resumo.
@@ -1427,6 +1437,57 @@ fn registrar_pessoa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Resu
     let _ = w.field_str("name", nome);
     let _ = w.field_str("role", papel);
     Ok(id.texto())
+}
+
+/// O papel de agora de uma identidade durável — `agente:<64 hex>`,
+/// `pessoa:<16 hex>`, `servico:<nome>`, `sistema`, `serial` —, para
+/// conferir que ela cabe no administrador. `Ok(None)` para quem existe e
+/// não tem papel: não pode nada, e mexer no que é dela não alcança mais.
+fn papel_da_identidade(dono: &str) -> Result<Option<String>, Falha> {
+    let desconhecido = || falha(Codigo::InvalidArgument, "dono desconhecido");
+    if let Some(hex) = dono.strip_prefix("agente:") {
+        let chave = sigilo::de_hex(hex).ok_or_else(desconhecido)?;
+        crate::identidade::agente(&chave).ok_or_else(desconhecido)?;
+        return Ok(crate::identidade::papel_do_agente(&chave));
+    }
+    if dono.starts_with("pessoa:") {
+        let id = sigilo::pessoas::IdPessoa::ler(dono).ok_or_else(desconhecido)?;
+        let pessoa = crate::pessoas::pessoa(id).ok_or_else(desconhecido)?;
+        return Ok(Some(pessoa.papel));
+    }
+    let papel = autorizacao::com_politica(|p| match dono.strip_prefix("servico:") {
+        Some(servico) => p.servico(servico).map(String::from),
+        None if dono == "sistema" => Some(p.local().to_string()),
+        None if dono == "serial" => Some(p.serial().to_string()),
+        None => None,
+    });
+    papel.map(Some).ok_or_else(desconhecido)
+}
+
+/// Anula a chave de assinatura de outra identidade. Não dá o uso dela a
+/// ninguém: a privada é apagada, como na destruição, e o nome não volta.
+fn anular_chave(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let dono = texto(params, "owner")?;
+    let recurso = texto(params, "key")?;
+    let nome = politica::arquivo::nome_de_chave(recurso)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "`key` nao e chave:<nome>"))?;
+    if let Some(papel) = papel_da_identidade(dono)? {
+        cabe(pedinte, &papel)?;
+    }
+    let v = crate::chaves::anular(dono, nome).map_err(|f| falha(f.codigo(), f.motivo()))?;
+    crate::log_info!(
+        "admin",
+        "chave {} de {} anulada ({} {})",
+        recurso,
+        dono,
+        crate::chaves::ALGORITMO,
+        v.impressao()
+    );
+    let _ = w.field_str("owner", dono);
+    let _ = w.field_str("key", recurso);
+    let _ = w.field_str("state", v.estado.como_str());
+    let _ = w.field_str("fingerprint", &v.impressao());
+    Ok(format!("{dono} {recurso}"))
 }
 
 fn revogar_pessoa(pedinte: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {

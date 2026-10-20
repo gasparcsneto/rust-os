@@ -913,7 +913,7 @@ const TETO_NAO_SE_EXERCE: (Codigo, &str) = (
 /// O maior recurso que a auditoria grava, em bytes. O recurso vem do pedido
 /// — um caminho, um número —, e um pedido hostil poderia mandar um caminho
 /// de quinhentos bytes para encher o anel com menos registros.
-const MAIOR_RECURSO: usize = 128;
+pub(crate) const MAIOR_RECURSO: usize = 128;
 
 /// Corta um texto em `teto` bytes, numa fronteira de caractere.
 fn cortado(texto: &str, teto: usize) -> &str {
@@ -1698,13 +1698,23 @@ pub fn alvo_decidido(texto: &str) -> bool {
 /// `logout`) acaba no instante em que sai do registro: a operação a vê se
 /// chegar aqui depois disso.
 ///
+/// A contenção também: quem foi contido entre a decisão e o commit — o
+/// processo isolado, o agente suspenso, a credencial suspensa — não
+/// conclui. É a mesma pergunta do gate, sobre quem pediu.
+///
 /// Não grava nada: a recusa é o resultado da execução do comando que o
 /// gate autorizou, e quem chama a grava assim.
 pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
-    let Some((autoridade, permissao, recursos, programa)) = do_comando_deste_fio(|c| {
-        c.decidido
-            .as_ref()
-            .map(|d| (c.autoridade, d.permissao, d.recursos.clone(), d.programa))
+    let Some((autoridade, pedinte, permissao, recursos, programa)) = do_comando_deste_fio(|c| {
+        c.decidido.as_ref().map(|d| {
+            (
+                c.autoridade,
+                c.pedinte,
+                d.permissao,
+                d.recursos.clone(),
+                d.programa,
+            )
+        })
     })
     .flatten() else {
         return Err((Codigo::Error, "fora de um comando autorizado"));
@@ -1734,6 +1744,13 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
             Codigo::DenyPermission,
             "o manifesto nao declara a permissao",
         ));
+    }
+    let processo = match pedinte {
+        Pedinte::Processo(fio) => Some(fio),
+        _ => None,
+    };
+    if let Some(recusa) = crate::contencao::recusa_de(processo, autoridade) {
+        return Err(recusa);
     }
     if papel_de_teto(&quem) {
         return Err(TETO_NAO_SE_EXERCE);
@@ -1802,6 +1819,83 @@ pub fn dono_no_armazem() -> Option<String> {
         }
         Autoridade::Servico(s) => Some(alloc::format!("servico:{}", s.nome())),
     }
+}
+
+/// A identidade durável de quem o comando em execução neste fio age por,
+/// na forma canônica: `agente:<hex>`, `pessoa:<16 hex>`, `servico:<nome>`,
+/// `sistema` ou `serial` — a identidade, e não a sessão, o processo ou a
+/// credencial. É o dono de uma chave de assinatura — ver
+/// [`crate::chaves`]. `None` para quem não é ninguém.
+///
+/// Difere de [`dono_no_armazem`] numa coisa: para uma pessoa, aquela
+/// escreve o prefixo duas vezes (`pessoa:pessoa:<16 hex>`), e os volumes
+/// do armazém já gravados têm essa forma — mudá-la é migrar o volume.
+pub fn dono_duravel() -> Option<String> {
+    match autoridade_atual() {
+        Autoridade::Pessoa { sessao } => {
+            crate::pessoas::dona_da_sessao(sessao).map(|id| id.texto())
+        }
+        _ => dono_no_armazem(),
+    }
+}
+
+/// Se o papel de quem o comando em execução neste fio age por — o de
+/// agora, na política de agora — usa o domínio de assinatura `dominio`: a
+/// linha `dominios` dele. Sem papel, ou um teto, que não se exerce: não.
+/// O handler de uma chave pergunta ao criar e a cada assinatura, no ponto
+/// de commit — ver [`crate::chaves`].
+pub fn usa_o_dominio(dominio: &str) -> bool {
+    let quem = quem_do_processo(autoridade_atual());
+    if papel_de_teto(&quem) {
+        return false;
+    }
+    com_politica(|p| p.permite_dominio(quem.papel.as_deref(), dominio))
+}
+
+/// O registro `seq` da auditoria é um `ALLOW` de quem pede o comando em
+/// execução neste fio — o mesmo titular, a mesma identidade e, se quem
+/// pede é um processo, o **mesmo processo**: devolve o método dele. É a
+/// âncora de uma declaração (`audit.declare` com `decision`): quem declara
+/// só se ancora no que ele mesmo fez.
+///
+/// # Não é uma decisão
+///
+/// Nada se autoriza por isto: a declaração já passou pelo gate, e a âncora
+/// só diz a que fato do kernel a alegação se refere — uma âncora que não é
+/// de quem declara é `INVALID_ARGUMENT`, e a alegação não se grava. A
+/// janela é a da memória, deste boot: um processo não sobrevive ao boot, e
+/// o registro dele também não precisa — o rollback do rabo da auditoria
+/// não muda o que se decide (ver `persistencia`).
+pub fn decisao_de_quem_pede(seq: u64) -> Result<String, &'static str> {
+    let Some(quem) =
+        do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.quem.clone())).flatten()
+    else {
+        return Err("fora de um comando autorizado");
+    };
+    let registro = com_auditoria(|c| c.registro(seq).map(|r| r.evento.clone())).flatten();
+    let Some(e) = registro else {
+        return Err("a decisao nao esta na janela da auditoria");
+    };
+    let mesmo_principal = e.titular == quem.titular
+        && e.agente == quem.agente
+        && e.chave == quem.chave
+        && e.sessao == quem.sessao
+        && e.sessao_de_pessoa == quem.sessao_de_pessoa;
+    // O processo vai no começo do detalhe, como a auditoria o grava: o fio
+    // nunca se repete, e o mesmo começo é o mesmo processo.
+    let mesmo_processo = match &quem.processo {
+        Some(pelo) => {
+            e.detalhe == *pelo
+                || e.detalhe
+                    .strip_prefix(pelo.as_str())
+                    .is_some_and(|resto| resto.starts_with(": "))
+        }
+        None => !e.detalhe.starts_with("pelo processo "),
+    };
+    if !mesmo_principal || !mesmo_processo || e.codigo != Codigo::Allow {
+        return Err("a decisao nao e um ALLOW de quem declara");
+    }
+    Ok(e.metodo)
 }
 
 /// A cota de armazém de quem o comando em execução neste fio age por: a

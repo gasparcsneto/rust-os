@@ -343,6 +343,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::virtio::entropia::destravar();
         crate::aleatorio::destravar();
         crate::identidade::destravar();
+        crate::chaves::destravar();
         crate::autorizacao::destravar();
         crate::pessoas::destravar();
         crate::coordenacao::destravar();

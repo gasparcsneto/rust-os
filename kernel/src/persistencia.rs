@@ -1360,6 +1360,28 @@ pub fn gravar_auditoria() -> Result<(), &'static str> {
     })
 }
 
+/// Grava no journal a auditoria até o registro `seq`, inclusive, e só
+/// devolve `Ok` com ele lá — o que a assinatura de uma chave exige antes de
+/// sair (ver [`crate::chaves`]): nenhuma assinatura sem o registro dela no
+/// disco. Sem a persistência disponível, recusa, em vez de deixar o
+/// registro só na memória, que uma queda levaria.
+///
+/// Um registro só de auditoria, como os do coletor: não avança o contador
+/// do TPM. É durável a uma queda; contra um rollback do disco, é o rabo da
+/// auditoria de sempre — e nenhuma decisão depende dele.
+pub fn gravar_auditoria_ate(seq: u64) -> Result<(), &'static str> {
+    em_ordem(|| {
+        exigir()?;
+        if auditoria_gravada() < seq {
+            gravar_com_a_decisao(tipo::AUDITORIA, &[], seq)?;
+        }
+        if auditoria_gravada() < seq {
+            return Err("o registro da auditoria nao chegou ao journal");
+        }
+        Ok(())
+    })
+}
+
 /// De quanto em quanto tempo o coletor grava a auditoria pendente, em ms
 /// desde o boot. É a janela do que uma queda de energia pode levar: as
 /// leituras e as recusas dos últimos segundos. Uma mudança de estado leva

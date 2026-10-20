@@ -68,6 +68,7 @@ mod armazem;
 mod atividade;
 mod autorizacao;
 mod barra;
+mod chaves;
 mod contencao;
 mod coordenacao;
 mod eventos;
@@ -479,6 +480,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
     // que acabou de montar.
     identidade::carregar();
+    // E o registro de domínios de assinatura, do mesmo disco — ver
+    // [`chaves`].
+    chaves::carregar();
     // O relógio civil, com os tetos do registro de fontes de hora que veio
     // junto: a régua (o contador do hardware, medido no x86 contra o PIT) e
     // o RTC. Antes da política e do journal — o tempo lógico de todo

@@ -676,6 +676,8 @@ pub fn revogar_pessoa(id: IdPessoa) -> Result<Vec<IdSessao>, Recusa> {
         politica::mensagens::Dono::Pessoa(id.0),
         "com a pessoa revogada",
     );
+    // E as chaves de assinatura dela: anuladas, com a lápide.
+    crate::chaves::identidade_revogada(&id.texto());
     // A revogação é o definitivo: a suspensão de antes some.
     crate::contencao::esquecer_pessoa(id);
     Ok(encerradas)

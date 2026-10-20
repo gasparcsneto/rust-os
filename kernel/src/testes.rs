@@ -31288,6 +31288,34 @@ static CASOS: &[Caso] = &[
         f: declaracao_o_nsf_le_como_alegacao,
     },
     Caso {
+        nome: "chaves: criar, ler, assinar e destruir, pelo gate e pela auditoria",
+        f: chaves_o_caminho_inteiro,
+    },
+    Caso {
+        nome: "chaves: o nome e do dono, pessoa ou agente",
+        f: chaves_o_nome_e_do_dono,
+    },
+    Caso {
+        nome: "chaves: o alcance, o dominio, o resumo e o limite",
+        f: chaves_o_alcance_e_o_dominio,
+    },
+    Caso {
+        nome: "chaves: a revogacao do dono as anula para sempre",
+        f: chaves_a_revogacao_do_dono_as_anula,
+    },
+    Caso {
+        nome: "chaves: key.revoke anula com prova, sem dar o uso",
+        f: chaves_a_anulacao_administrativa,
+    },
+    Caso {
+        nome: "chaves: o que muda antes do commit recusa a assinatura",
+        f: chaves_a_decisao_em_curso,
+    },
+    Caso {
+        nome: "chaves: a declaracao se ancora so na decisao de quem declara",
+        f: chaves_a_declaracao_ancorada_na_assinatura,
+    },
+    Caso {
         nome: "rede: o envio que nao cabe espera espaco",
         f: rede_o_envio_que_nao_cabe_espera_espaco,
     },
@@ -35615,9 +35643,10 @@ fn declaracao_a_alegacao_e_os_fatos_do_kernel() -> Resultado {
 /// com um caractere de fora, longo demais ou no espaço de um comando do
 /// registro; o assunto vazio, com espaço, `;`, aspas, barra invertida — um
 /// escape —, fora do ASCII ou longo demais; o desfecho que não é uma
-/// palavra; o campo que falta, o do tipo errado, e todo campo que o comando
-/// não declara — o processo, o papel, o destino, a decisão, uma nota: o
-/// que só o kernel diz não se manda. Cada um é `INVALID_ARGUMENT`, gravado
+/// palavra; o campo que falta, o do tipo errado — a conexão e a decisão
+/// que não são um número natural —, e todo campo que o comando não declara
+/// — o processo, o papel, o destino, uma nota: o que só o kernel diz não
+/// se manda. Cada um é `INVALID_ARGUMENT`, gravado
 /// com o nome do campo, e nada é declarado. A borda de cada teto passa, e
 /// a pontuação imprimível no assunto também: o kernel não a interpreta.
 fn declaracao_fora_da_forma_nada_chega_ao_gate() -> Resultado {
@@ -35692,7 +35721,11 @@ fn declaracao_fora_da_forma_nada_chega_ao_gate() -> Resultado {
                 "destination",
             ),
             (
-                r#"{"event":"teste.x","subject":"x","outcome":"ok","decision":1}"#.into(),
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","decision":"1"}"#.into(),
+                "decision",
+            ),
+            (
+                r#"{"event":"teste.x","subject":"x","outcome":"ok","decision":-1}"#.into(),
                 "decision",
             ),
             (
@@ -36021,6 +36054,1087 @@ fn declaracao_o_nsf_le_como_alegacao() -> Resultado {
     });
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// As chaves de assinatura das identidades — ver `crate::chaves`
+// ---------------------------------------------------------------------------
+
+/// O domínio de assinatura da imagem que os casos usam.
+const DOMINIO_DE_TESTE: &str = "ic-request";
+
+/// Um resumo de 32 bytes `b`, em hexadecimal.
+fn resumo_de_teste(b: u8) -> alloc::string::String {
+    sigilo::hex(&[b; 32])
+}
+
+/// `key.create` de `chave` no domínio `dominio`, como `quem`.
+fn criar_chave_em(
+    quem: crate::autorizacao::Chamador,
+    chave: &str,
+    dominio: &str,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "key.create",
+        &alloc::format!(r#"{{"key":"{chave}","domain":"{dominio}"}}"#),
+    )
+}
+
+/// `key.create` de `chave` no domínio de teste, como `quem`.
+fn criar_chave(quem: crate::autorizacao::Chamador, chave: &str) -> alloc::string::String {
+    criar_chave_em(quem, chave, DOMINIO_DE_TESTE)
+}
+
+/// `key.sign` do resumo `resumo` (hexadecimal) com `chave` no domínio
+/// `dominio`, como `quem`.
+fn assinar_com(
+    quem: crate::autorizacao::Chamador,
+    chave: &str,
+    dominio: &str,
+    resumo: &str,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "key.sign",
+        &alloc::format!(r#"{{"key":"{chave}","domain":"{dominio}","digest":"{resumo}"}}"#),
+    )
+}
+
+/// `key.read` ou `key.destroy` de `chave`, como `quem`.
+fn chave_so(
+    quem: crate::autorizacao::Chamador,
+    metodo: &str,
+    chave: &str,
+) -> alloc::string::String {
+    fs_pedir(quem, metodo, &alloc::format!(r#"{{"key":"{chave}"}}"#))
+}
+
+/// Um campo booleano do resultado de um envelope.
+fn fs_verdade(envelope: &str, campo: &str) -> bool {
+    Json(envelope.as_bytes())
+        .member("result")
+        .and_then(|r| r.member(campo))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+/// A operação de chave passou pelo gate e não aconteceu, com `codigo` e
+/// `erro`: `campo` falso no resultado.
+fn chave_recusada(r: &str, campo: &str, codigo: &str, erro: &str) -> bool {
+    decisao_do_envelope(r) == "ALLOW"
+        && r.contains(&alloc::format!(r#""{campo}":false"#))
+        && fs_texto(r, "code").as_deref() == Some(codigo)
+        && fs_texto(r, "error").as_deref() == Some(erro)
+}
+
+/// A pública e a assinatura de uma resposta, em bytes.
+fn publica_de(r: &str) -> Option<[u8; 32]> {
+    sigilo::de_hex_fixo::<32>(&fs_texto(r, "public")?)
+}
+
+/// Roda `f` com a tabela de chaves vazia, sem ninguém contido, e põe tudo
+/// de volta depois — também quando `f` falha: a tabela vazia, o registro
+/// de domínios e a política de antes, as pessoas e os agentes da imagem,
+/// sem gancho na reconfirmação.
+fn com_chaves(f: impl FnOnce() -> Resultado) -> Resultado {
+    crate::chaves::esquecer_de_teste();
+    crate::contencao::esquecer_de_teste();
+    crate::pessoas::esquecer_registradas();
+    let dominios = crate::chaves::trocar_dominios_de_teste(None);
+    crate::chaves::trocar_dominios_de_teste(dominios.clone());
+    let politica = crate::autorizacao::com_politica(|p| p.clone());
+    let r = f();
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::autorizacao::restaurar_politica(politica);
+    crate::chaves::trocar_dominios_de_teste(dominios);
+    crate::chaves::esquecer_de_teste();
+    crate::contencao::esquecer_de_teste();
+    crate::identidade::esquecer_registrados();
+    crate::pessoas::esquecer_registradas();
+    r
+}
+
+/// O registro de domínios com `ic-request` — o da imagem — e `outro`.
+fn dominios_com_outro() -> Result<sigilo::chaves::Dominios, &'static str> {
+    let texto = alloc::format!(
+        "{}{}",
+        sigilo::chaves::linha_de_dominio(DOMINIO_DE_TESTE, b"\x0aic-request"),
+        sigilo::chaves::linha_de_dominio("outro", b"\x05outro")
+    );
+    sigilo::chaves::Dominios::ler(&texto).map_err(|_| "o registro do caso nao se le")
+}
+
+/// O caminho inteiro de uma chave, por uma pessoa: criar, ler, assinar e
+/// destruir, cada um uma decisão do gate sobre `chave:<nome>`. A pública
+/// sai na criação e na leitura, e a assinatura confere com ela no domínio
+/// — e só nele. A privada não sai em resposta nenhuma. A assinatura vai
+/// para a auditoria — a chave, o domínio, o resumo inteiro e a impressão,
+/// sem a assinatura — e para o journal antes de sair. Destruída, a chave
+/// fica como lápide: a leitura a mostra destruída com a mesma pública, a
+/// assinatura é recusada, e o nome não volta.
+///
+/// # O que este caso protege
+///
+/// A cadeia que a ICP-3 pede, na ordem: gate → `chave:<nome>` →
+/// reconfirmação → auditoria → journal → assinatura. Uma assinatura que
+/// saísse antes do registro no journal seria um uso da chave que uma
+/// queda apagaria da história.
+fn chaves_o_caminho_inteiro() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(190), "chave-caminho", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        // O registro de domínios da imagem: `ic-request`, com o separador
+        // do pedido.
+        let d = crate::chaves::dominio(DOMINIO_DE_TESTE)
+            .ok_or("o registro de dominios da imagem nao tem o dominio de teste")?;
+        if d.prefixo() != b"\x0aic-request" {
+            return Err("o prefixo do dominio de teste nao e o da imagem");
+        }
+
+        // Criar: a decisão, a execução, a resposta.
+        let r = criar_chave(quem, "chave:bancada");
+        let publica = publica_de(&r).ok_or("a criacao nao deu a publica")?;
+        let impressao = sigilo::hex_de(&sigilo::chaves::impressao(&publica));
+        if !fs_verdade(&r, "created")
+            || fs_texto(&r, "key").as_deref() != Some("chave:bancada")
+            || fs_texto(&r, "algorithm").as_deref() != Some("ed25519")
+            || fs_texto(&r, "domain").as_deref() != Some(DOMINIO_DE_TESTE)
+            || fs_texto(&r, "custody").as_deref() != Some("kernel")
+            || fs_texto(&r, "state").as_deref() != Some("active")
+            || fs_texto(&r, "fingerprint").as_deref() != Some(impressao.as_str())
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a criacao nao respondeu a chave como ela e");
+        }
+        let (Some(registro), Some(decisao)) = (fs_numero(&r, "record"), fs_numero(&r, "decision"))
+        else {
+            return Err("a criacao nao disse os registros");
+        };
+        let feito = registro_numero(registro).ok_or("a criacao nao esta no anel")?;
+        let decidido = registro_numero(decisao).ok_or("a decisao da criacao nao esta no anel")?;
+        if feito.metodo != "key.create"
+            || feito.codigo != Codigo::Allow
+            || feito.recurso != alloc::format!("chave:bancada {DOMINIO_DE_TESTE}")
+            || feito.detalhe != alloc::format!("criada ed25519 {impressao}; decisao {decisao}")
+            || decidido.metodo != "key.create"
+            || decidido.recurso != "chave:bancada"
+            || decidido.codigo != Codigo::Allow
+        {
+            crate::log_error!("teste", "{:?} / {:?}", feito, decidido);
+            return Err("a criacao nao foi gravada com a chave, o dominio e a impressao");
+        }
+
+        // Ler: a mesma chave, sem a privada.
+        let lida = chave_so(quem, "key.read", "chave:bancada");
+        if !fs_verdade(&lida, "found") || publica_de(&lida) != Some(publica) {
+            crate::log_error!("teste", "{}", lida);
+            return Err("a leitura nao deu a chave criada");
+        }
+
+        // Assinar: confere com a pública, no domínio — e só nele.
+        let resumo = [0x5a; 32];
+        let r = assinar_com(
+            quem,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &sigilo::hex(&resumo),
+        );
+        let assinatura = fs_texto(&r, "signature")
+            .and_then(|s| sigilo::de_hex_fixo::<64>(&s))
+            .ok_or("a assinatura nao veio")?;
+        if !fs_verdade(&r, "signed") || publica_de(&r) != Some(publica) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a assinatura nao respondeu a chave que assinou");
+        }
+        if !sigilo::chaves::conferir(&publica, &d, &resumo, &assinatura) {
+            return Err("a assinatura nao confere com a publica no dominio");
+        }
+        let outro = dominios_com_outro()?;
+        let outro = outro
+            .dominio("outro")
+            .ok_or("o registro do caso nao tem outro")?;
+        let mut trocado = resumo;
+        trocado[0] ^= 1;
+        if sigilo::chaves::conferir(&publica, outro, &resumo, &assinatura)
+            || sigilo::chaves::conferir(&publica, &d, &trocado, &assinatura)
+        {
+            return Err("a assinatura conferiu fora do dominio ou com outro resumo");
+        }
+        let (Some(registro), Some(decisao)) = (fs_numero(&r, "record"), fs_numero(&r, "decision"))
+        else {
+            return Err("a assinatura nao disse os registros");
+        };
+        let feito = registro_numero(registro).ok_or("a assinatura nao esta no anel")?;
+        let decidido =
+            registro_numero(decisao).ok_or("a decisao da assinatura nao esta no anel")?;
+        if feito.metodo != "key.sign"
+            || feito.codigo != Codigo::Allow
+            || feito.recurso
+                != alloc::format!("chave:bancada {DOMINIO_DE_TESTE} {}", sigilo::hex(&resumo))
+            || feito.detalhe != alloc::format!("assinatura ed25519 {impressao}; decisao {decisao}")
+            || feito.papel != "operador"
+            || feito.sessao_de_pessoa != Some(sessao.0)
+            || decidido.metodo != "key.sign"
+            || decidido.recurso != "chave:bancada"
+        {
+            crate::log_error!("teste", "{:?} / {:?}", feito, decidido);
+            return Err(
+                "a assinatura nao foi gravada com a chave, o dominio, o resumo e a impressao",
+            );
+        }
+        // No journal antes de sair.
+        if crate::persistencia::auditoria_gravada() < registro {
+            return Err("a assinatura saiu sem o registro dela no journal");
+        }
+        // Nada da assinatura — nem da privada — na auditoria.
+        let hex_da_assinatura = sigilo::hex_de(&assinatura);
+        let vazou = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|e| {
+                    e.evento.recurso.contains(&hex_da_assinatura[..32])
+                        || e.evento.detalhe.contains(&hex_da_assinatura[..32])
+                })
+        })
+        .unwrap_or(true);
+        if vazou {
+            return Err("a assinatura foi para a auditoria");
+        }
+        for campo in ["private", "seed", "secret", "privada", "semente"] {
+            if r.contains(campo) || lida.contains(campo) {
+                crate::log_error!("teste", "{}", campo);
+                return Err("uma resposta fala da privada");
+            }
+        }
+        // Determinística: o mesmo resumo, a mesma assinatura.
+        let de_novo = assinar_com(
+            quem,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &sigilo::hex(&resumo),
+        );
+        if fs_texto(&de_novo, "signature").as_deref() != Some(hex_da_assinatura.as_str()) {
+            return Err("a mesma chave deu outra assinatura ao mesmo resumo");
+        }
+        if crate::chaves::contagem_de_teste() != (1, 1) {
+            return Err("a tabela nao tem so a chave do caso");
+        }
+        let _ = dono;
+
+        // Destruir: lápide.
+        let r = chave_so(quem, "key.destroy", "chave:bancada");
+        if !fs_verdade(&r, "destroyed") || fs_texto(&r, "state").as_deref() != Some("destroyed") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a destruicao nao respondeu");
+        }
+        let feito = registro_numero(fs_numero(&r, "record").ok_or("a destruicao sem registro")?)
+            .ok_or("a destruicao nao esta no anel")?;
+        if feito.metodo != "key.destroy"
+            || feito.recurso != "chave:bancada"
+            || !feito
+                .detalhe
+                .starts_with(&alloc::format!("destruida ed25519 {impressao}; decisao "))
+        {
+            crate::log_error!("teste", "{:?}", feito);
+            return Err("a destruicao nao foi gravada");
+        }
+        let lida = chave_so(quem, "key.read", "chave:bancada");
+        if fs_texto(&lida, "state").as_deref() != Some("destroyed")
+            || publica_de(&lida) != Some(publica)
+        {
+            crate::log_error!("teste", "{}", lida);
+            return Err("a lapide nao ficou com a publica");
+        }
+        let r = assinar_com(quem, "chave:bancada", DOMINIO_DE_TESTE, &resumo_de_teste(1));
+        if !chave_recusada(&r, "signed", "INVALID_ARGUMENT", "a chave foi destruida")
+            || fs_texto(&r, "signature").is_some()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave destruida assinou");
+        }
+        let r = criar_chave(quem, "chave:bancada");
+        if !chave_recusada(
+            &r,
+            "created",
+            "INVALID_ARGUMENT",
+            "o nome foi de uma chave destruida ou anulada, e nao volta",
+        ) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o nome da lapide voltou");
+        }
+        let r = chave_so(quem, "key.destroy", "chave:bancada");
+        if !chave_recusada(&r, "destroyed", "INVALID_ARGUMENT", "a chave foi destruida") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a lapide foi destruida de novo");
+        }
+        if crate::chaves::contagem_de_teste() != (0, 1) {
+            return Err("a lapide saiu da tabela");
+        }
+        Ok(())
+    })
+}
+
+/// O nome é do dono: duas pessoas criam `chave:bancada`, e cada uma tem a
+/// sua — outra pública, outra assinatura —; destruir a de uma não toca a
+/// da outra. A pessoa que não tem o nome ouve, de um nome que é de outra,
+/// exatamente o que ouve de um nome que ninguém tem. E o agente segue o
+/// mesmo caminho, com a mesma política: o dono dele é a chave dele.
+///
+/// # O que este caso protege
+///
+/// Que não há parâmetro de dono, nem atalho: o nome se resolve no espaço
+/// de quem pede, sempre, e pessoa e agente são a mesma coisa para as
+/// chaves.
+fn chaves_o_nome_e_do_dono() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        let a = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(191),
+            "chave-dona-a",
+            "operador",
+        ));
+        let b = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(192),
+            "chave-dona-b",
+            "operador",
+        ));
+        let c = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(193),
+            "chave-dona-c",
+            "operador",
+        ));
+        let (_, agente) = processo_de_agente_operador(41);
+        let ra = criar_chave(a, "chave:bancada");
+        let rb = criar_chave(b, "chave:bancada");
+        let rg = criar_chave(agente, "chave:bancada");
+        let (Some(pa), Some(pb), Some(pg)) = (publica_de(&ra), publica_de(&rb), publica_de(&rg))
+        else {
+            crate::log_error!("teste", "{} / {} / {}", ra, rb, rg);
+            return Err("o mesmo nome nao foi criado por cada dono");
+        };
+        if pa == pb || pa == pg || pb == pg {
+            return Err("dois donos ficaram com a mesma chave");
+        }
+        let d = crate::chaves::dominio(DOMINIO_DE_TESTE).ok_or("sem o dominio de teste")?;
+        let resumo = [0x33; 32];
+        for (quem, publica) in [(a, pa), (b, pb), (agente, pg)] {
+            let r = assinar_com(
+                quem,
+                "chave:bancada",
+                DOMINIO_DE_TESTE,
+                &sigilo::hex(&resumo),
+            );
+            let s = fs_texto(&r, "signature")
+                .and_then(|s| sigilo::de_hex_fixo::<64>(&s))
+                .ok_or("um dono nao assinou com a propria chave")?;
+            if !sigilo::chaves::conferir(&publica, &d, &resumo, &s) {
+                return Err("a assinatura de um dono nao conferiu com a publica dele");
+            }
+        }
+        // A de A some; as de B e do agente ficam.
+        if !fs_verdade(&chave_so(a, "key.destroy", "chave:bancada"), "destroyed") {
+            return Err("a dona nao destruiu a propria chave");
+        }
+        for quem in [b, agente] {
+            let r = chave_so(quem, "key.read", "chave:bancada");
+            if fs_texto(&r, "state").as_deref() != Some("active") {
+                crate::log_error!("teste", "{}", r);
+                return Err("destruir a chave de um dono tocou a de outro");
+            }
+        }
+        // C não tem `chave:bancada`: o nome dos outros e o que ninguém tem
+        // respondem o mesmo.
+        let inexistente = "nao ha chave com esse nome para quem pede";
+        for (metodo, campo) in [("key.read", "found"), ("key.destroy", "destroyed")] {
+            for nome in ["chave:bancada", "chave:bancada-2"] {
+                let r = chave_so(c, metodo, nome);
+                if !chave_recusada(&r, campo, "INVALID_ARGUMENT", inexistente) {
+                    crate::log_error!("teste", "{} {}: {}", metodo, nome, r);
+                    return Err("o nome de outro dono respondeu diferente do que ninguem tem");
+                }
+            }
+        }
+        for nome in ["chave:bancada", "chave:bancada-2"] {
+            let r = assinar_com(c, nome, DOMINIO_DE_TESTE, &resumo_de_teste(2));
+            if !chave_recusada(&r, "signed", "INVALID_ARGUMENT", inexistente) {
+                crate::log_error!("teste", "{}: {}", nome, r);
+                return Err("a assinatura com o nome de outro dono nao foi recusada igual");
+            }
+        }
+        // O dono de cada uma, na tabela: a identidade, não a sessão.
+        if crate::chaves::contagem_de_teste() != (2, 3) {
+            return Err("a tabela nao tem uma chave por dono");
+        }
+        Ok(())
+    })
+}
+
+/// O alcance e o domínio: `chave:*`, um nome que a política não enumera, o
+/// nome sem o prefixo, e o papel sem a permissão são recusados no gate —
+/// nada chega ao handler. Depois do gate: o domínio fora do registro é
+/// `INVALID_ARGUMENT`; o do registro que o papel não usa, `DENY_POLICY`; a
+/// chave de um domínio assinando em outro, `INVALID_ARGUMENT`; e o resumo
+/// que não tem exatamente 32 bytes em hexadecimal minúsculo,
+/// `INVALID_ARGUMENT` — e nada se assina. O sistema não tem chave nenhuma;
+/// o manifesto tira do programa o que não declara; e o dono não passa de
+/// oito chaves vivas.
+fn chaves_o_alcance_e_o_dominio() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(194), "chave-alcance", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let observadora = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(195),
+            "chave-observa",
+            "observador",
+        ));
+        // No gate.
+        for chave in [
+            "chave:*",
+            "chave:outra",
+            "bancada",
+            "chave:",
+            "chave:Bancada",
+        ] {
+            for r in [
+                criar_chave(quem, chave),
+                chave_so(quem, "key.read", chave),
+                assinar_com(quem, chave, DOMINIO_DE_TESTE, &resumo_de_teste(3)),
+                chave_so(quem, "key.destroy", chave),
+            ] {
+                if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+                    crate::log_error!("teste", "{}: {}", chave, r);
+                    return Err("uma chave fora do alcance enumerado passou do gate");
+                }
+            }
+        }
+        for r in [
+            criar_chave(observadora, "chave:bancada"),
+            chave_so(observadora, "key.read", "chave:bancada"),
+            assinar_com(
+                observadora,
+                "chave:bancada",
+                DOMINIO_DE_TESTE,
+                &resumo_de_teste(3),
+            ),
+        ] {
+            if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}", r);
+                return Err("o papel sem a permissao de chave passou do gate");
+            }
+        }
+        let sistema = Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Sistema,
+            programa: Programa::Kernel,
+        };
+        if decisao_do_envelope(&criar_chave(sistema, "chave:bancada")) != "DENY_PERMISSION" {
+            return Err("o sistema criou uma chave");
+        }
+        // O manifesto: o programa que não declara `key.sign` não assina,
+        // mesmo com o papel que tem.
+        let programa = |permite: &str, fio: u64| Chamador::Processo {
+            fio,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", permite)),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        let so_cria = programa("key.create key.read", 7_000_301);
+        if publica_de(&criar_chave(so_cria, "chave:bancada")).is_none() {
+            return Err("o programa que declara key.create nao criou");
+        }
+        let r = assinar_com(
+            so_cria,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(4),
+        );
+        if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o programa assinou sem declarar key.sign");
+        }
+
+        // Depois do gate: o domínio.
+        let r = criar_chave_em(quem, "chave:bancada-2", "nenhum");
+        if !chave_recusada(
+            &r,
+            "created",
+            "INVALID_ARGUMENT",
+            "dominio fora do registro de dominios",
+        ) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o dominio fora do registro criou uma chave");
+        }
+        crate::chaves::trocar_dominios_de_teste(Some(dominios_com_outro()?));
+        let r = criar_chave_em(quem, "chave:bancada-2", "outro");
+        if !chave_recusada(&r, "created", "DENY_POLICY", "o papel nao usa o dominio") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o dominio que o papel nao usa criou uma chave");
+        }
+        let r = assinar_com(quem, "chave:bancada", "outro", &resumo_de_teste(5));
+        if !chave_recusada(&r, "signed", "DENY_POLICY", "o papel nao usa o dominio") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a assinatura num dominio que o papel nao usa passou");
+        }
+        // Com o papel usando os dois, a chave de um não assina no outro.
+        let dois = politica_trocada(&[(
+            "dominios operador ic-request",
+            "dominios operador ic-request outro",
+        )])?;
+        com_a_politica(dois, || {
+            let r = assinar_com(quem, "chave:bancada", "outro", &resumo_de_teste(5));
+            if !chave_recusada(
+                &r,
+                "signed",
+                "INVALID_ARGUMENT",
+                "a chave e de outro dominio",
+            ) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a chave de um dominio assinou em outro");
+            }
+            Ok(())
+        })?;
+
+        // O resumo: exatamente 32 bytes, em hexadecimal minúsculo.
+        let curto = sigilo::hex_de(&[1u8; 31]);
+        let longo = sigilo::hex_de(&[1u8; 33]);
+        let maiusculo = resumo_de_teste(0xab).to_ascii_uppercase();
+        let impar = alloc::format!("{}0", sigilo::hex_de(&[1u8; 31]));
+        let nao_hex = "zz".repeat(32);
+        let com_sinal = "+a".repeat(32);
+        for resumo in [
+            "",
+            curto.as_str(),
+            longo.as_str(),
+            maiusculo.as_str(),
+            impar.as_str(),
+            nao_hex.as_str(),
+            com_sinal.as_str(),
+        ] {
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = assinar_com(quem, "chave:bancada", DOMINIO_DE_TESTE, resumo);
+            if !chave_recusada(
+                &r,
+                "signed",
+                "INVALID_ARGUMENT",
+                "o resumo nao tem exatamente 32 bytes em 64 digitos hexadecimais minusculos",
+            ) {
+                crate::log_error!("teste", "{}: {}", resumo, r);
+                return Err("um resumo fora da forma nao foi recusado");
+            }
+            let assinou =
+                registro_que(|e| e.metodo == "key.sign" && e.detalhe.starts_with("assinatura "))
+                    .is_some_and(|(seq, _)| seq > antes);
+            if assinou {
+                return Err("um resumo fora da forma foi assinado");
+            }
+        }
+
+        // Oito chaves vivas por dono, e não nove.
+        let nomes: alloc::vec::Vec<alloc::string::String> =
+            (0..9).map(|i| alloc::format!("chave:k{i}")).collect();
+        let lista = nomes.join(" ");
+        let muitas = politica_trocada(&[(
+            "recurso operador key.create chave:bancada chave:bancada-2",
+            &alloc::format!("recurso operador key.create chave:bancada chave:bancada-2 {lista}"),
+        )])?;
+        com_a_politica(muitas, || {
+            crate::chaves::esquecer_de_teste();
+            for nome in &nomes[..crate::chaves::MAIS_VIVAS_POR_DONO] {
+                if publica_de(&criar_chave(quem, nome)).is_none() {
+                    return Err("o dono nao criou ate o limite");
+                }
+            }
+            let r = criar_chave(quem, &nomes[crate::chaves::MAIS_VIVAS_POR_DONO]);
+            if !chave_recusada(
+                &r,
+                "created",
+                "DENY_QUOTA",
+                "o limite de chaves foi atingido",
+            ) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o dono passou do limite de chaves vivas");
+            }
+            Ok(())
+        })
+    })
+}
+
+/// A revogação do dono anula as chaves dele, com a lápide, e grava cada
+/// anulação em nome do kernel. A pessoa revogada não volta; o agente
+/// registrado de novo com a mesma chave volta — e não recupera nada: a
+/// leitura mostra a chave anulada, a assinatura é recusada, e o nome não
+/// volta. As chaves dos outros não mudam.
+fn chaves_a_revogacao_do_dono_as_anula() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(196), "chave-revogada", "operador");
+        let pessoa = Chamador::Pessoa(sessao);
+        let id = crate::pessoas::dona_da_sessao(sessao).ok_or("a sessao de teste nao tem dona")?;
+        let outra = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(197),
+            "chave-fica",
+            "operador",
+        ));
+        let (chave_do_agente, agente) = processo_de_agente_operador(42);
+        for quem in [pessoa, outra, agente] {
+            for nome in ["chave:bancada", "chave:bancada-2"] {
+                if publica_de(&criar_chave(quem, nome)).is_none() {
+                    return Err("um dono nao criou as chaves do caso");
+                }
+            }
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        crate::pessoas::revogar_pessoa(id).map_err(|_| "a pessoa nao foi revogada")?;
+        let anuladas: alloc::vec::Vec<alloc::string::String> =
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| r.seq > antes && r.evento.metodo == "key.annul")
+                    .map(|r| r.evento.recurso.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let esperadas = [
+            alloc::format!("{} chave:bancada", id.texto()),
+            alloc::format!("{} chave:bancada-2", id.texto()),
+        ];
+        if anuladas != esperadas {
+            crate::log_error!("teste", "{:?}", anuladas);
+            return Err("a revogacao da pessoa nao gravou a anulacao de cada chave dela");
+        }
+        let e = ultimo_com_metodo("key.annul").ok_or("a anulacao nao foi gravada")?;
+        if e.titular != politica::auditoria::Titular::Kernel || e.codigo != Codigo::Allow {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a anulacao nao foi gravada em nome do kernel");
+        }
+        if crate::chaves::contagem_de_teste() != (4, 6) {
+            return Err("a revogacao da pessoa nao anulou so as chaves dela");
+        }
+        // O agente: revogado, e registrado de novo com a mesma chave.
+        crate::identidade::revogar(&chave_do_agente).map_err(|_| "o agente nao foi revogado")?;
+        if crate::chaves::contagem_de_teste() != (2, 6) {
+            return Err("a revogacao do agente nao anulou as chaves dele");
+        }
+        let (_, de_novo) = processo_de_agente_operador(42);
+        let r = chave_so(de_novo, "key.read", "chave:bancada");
+        if fs_texto(&r, "state").as_deref() != Some("annulled") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente registrado de novo nao ve a chave anulada");
+        }
+        let r = assinar_com(
+            de_novo,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(6),
+        );
+        if !chave_recusada(&r, "signed", "INVALID_ARGUMENT", "a chave foi anulada") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente registrado de novo assinou com a chave anulada");
+        }
+        let r = criar_chave(de_novo, "chave:bancada-2");
+        if !chave_recusada(
+            &r,
+            "created",
+            "INVALID_ARGUMENT",
+            "o nome foi de uma chave destruida ou anulada, e nao volta",
+        ) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o agente registrado de novo recuperou o nome de uma chave anulada");
+        }
+        // A outra pessoa continua assinando.
+        let r = assinar_com(
+            outra,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(6),
+        );
+        if !fs_verdade(&r, "signed") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a revogacao de um dono tocou as chaves de outro");
+        }
+        Ok(())
+    })
+}
+
+/// `key.revoke`, a operação administrativa: com prova, o administrador
+/// anula a chave de outra identidade — a privada é apagada, e o nome não
+/// volta —, e a operação vai para a auditoria com o dono e a chave. Não há
+/// como usá-la: nenhum comando de chave tem dono no pedido, e o papel do
+/// administrador é um teto, que não se exerce. A chave anulada não anula
+/// de novo, e a que não existe é `INVALID_ARGUMENT`.
+fn chaves_a_anulacao_administrativa() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(198), "chave-anulada", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        if publica_de(&criar_chave(quem, "chave:bancada")).is_none() {
+            return Err("a pessoa nao criou a chave do caso");
+        }
+        let params = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
+        admin_espera(0, &ADMIN_DE_TESTE, "key.revoke", &params, None)?;
+        let r = chave_so(quem, "key.read", "chave:bancada");
+        if fs_texto(&r, "state").as_deref() != Some("annulled") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a anulacao administrativa nao anulou");
+        }
+        let r = assinar_com(quem, "chave:bancada", DOMINIO_DE_TESTE, &resumo_de_teste(7));
+        if !chave_recusada(&r, "signed", "INVALID_ARGUMENT", "a chave foi anulada") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave anulada pelo administrador assinou");
+        }
+        // De novo, e a que não existe: recusadas, sem mudar nada.
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "key.revoke",
+            &params,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        let inexistente = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada-2"}}"#);
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "key.revoke",
+            &inexistente,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        let desconhecido = r#"{"owner":"pessoa:0000000000000000","key":"chave:bancada"}"#;
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "key.revoke",
+            desconhecido,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        let fora = alloc::format!(r#"{{"owner":"{dono}","key":"chave:*"}}"#);
+        admin_espera(
+            0,
+            &ADMIN_DE_TESTE,
+            "key.revoke",
+            &fora,
+            Some("INVALID_ARGUMENT"),
+        )?;
+        if crate::chaves::contagem_de_teste() != (0, 1) {
+            return Err("a anulacao administrativa mudou outra coisa na tabela");
+        }
+        Ok(())
+    })
+}
+
+/// O fio do processo que os ganchos do meio isolam.
+static FIO_DO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A pessoa que os ganchos do meio revogam ou cujas chaves destroem.
+static PESSOA_DO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A decisão em curso, nas chaves: o gate decide a assinatura, e entre a
+/// decisão e o commit — com a ordem das gravações na mão — a dona é
+/// revogada, a chave é destruída, o processo é isolado, a política tira
+/// `key.sign`, ou tira o domínio do papel. Cada vez, nada se assina, a
+/// recusa vai para a auditoria como o resultado do comando que o gate
+/// autorizou, e nenhum registro de assinatura aparece. Sem nada no meio,
+/// o mesmo pedido assina.
+fn chaves_a_decisao_em_curso() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use core::sync::atomic::Ordering;
+    const FIO: u64 = 7_000_311;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(199), "chave-meio", "operador");
+        let id = crate::pessoas::dona_da_sessao(sessao).ok_or("a sessao de teste nao tem dona")?;
+        PESSOA_DO_MEIO.store(u64::from_le_bytes(id.0), Ordering::Release);
+        FIO_DO_MEIO.store(FIO, Ordering::Release);
+        let processo = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste(
+                    "caso",
+                    "key.create key.sign key.destroy",
+                )),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        for nome in ["chave:bancada", "chave:bancada-2"] {
+            if publica_de(&criar_chave(processo, nome)).is_none() {
+                return Err("o processo nao criou as chaves do caso");
+            }
+        }
+        let assinar =
+            |nome: &str| assinar_com(processo, nome, DOMINIO_DE_TESTE, &resumo_de_teste(8));
+        let nada_assinado = |antes: u64| {
+            registro_que(|e| e.metodo == "key.sign" && e.detalhe.contains("assinatura "))
+                .is_none_or(|(seq, _)| seq <= antes)
+        };
+        let no_meio = |gancho: fn(), nome: &str, codigo: &str| -> Resultado {
+            let antes = crate::autorizacao::ultimo_registro();
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(gancho));
+            let r = assinar(nome);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            if decisao_do_envelope(&r) != "ALLOW"
+                || !r.contains(r#""signed":false"#)
+                || fs_texto(&r, "code").as_deref() != Some(codigo)
+                || fs_texto(&r, "signature").is_some()
+            {
+                crate::log_error!("teste", "{}: {}", codigo, r);
+                return Err("o que mudou entre a decisao e o commit nao recusou a assinatura");
+            }
+            if !nada_assinado(antes) {
+                return Err("uma assinatura recusada no commit foi gravada como feita");
+            }
+            let e = ultimo_com_metodo("key.sign").ok_or("a recusa nao foi gravada")?;
+            if e.codigo == politica::Codigo::Allow || e.codigo.nome() != codigo {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a recusa no commit nao foi gravada como o resultado do comando");
+            }
+            Ok(())
+        };
+        // Sem nada no meio, assina.
+        if !fs_verdade(&assinar("chave:bancada"), "signed") {
+            return Err("sem nada no meio, a assinatura nao saiu");
+        }
+        // A política tira `key.sign`.
+        fn sem_sign() {
+            politica_sem("key.sign");
+        }
+        let de_antes = crate::autorizacao::com_politica(|p| p.clone());
+        no_meio(sem_sign, "chave:bancada", "DENY_PERMISSION")?;
+        crate::autorizacao::restaurar_politica(de_antes.clone());
+        // A política tira o domínio do papel.
+        fn sem_dominio() {
+            if let Ok(p) = politica_trocada(&[("dominios operador ic-request\n", "")]) {
+                crate::autorizacao::restaurar_politica(p);
+            }
+        }
+        no_meio(sem_dominio, "chave:bancada", "DENY_POLICY")?;
+        crate::autorizacao::restaurar_politica(de_antes);
+        // O processo é isolado.
+        fn isolar() {
+            let fio = FIO_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let _ = crate::contencao::conter(&crate::contencao::Alvo::Processo(fio));
+        }
+        no_meio(isolar, "chave:bancada", "DENY_CONTAINED")?;
+        crate::contencao::esquecer_de_teste();
+        // A chave é destruída.
+        fn destruir() {
+            let id = PESSOA_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let dono = sigilo::pessoas::IdPessoa(id.to_le_bytes()).texto();
+            let _ = crate::chaves::destruir(&dono, "bancada-2");
+        }
+        no_meio(destruir, "chave:bancada-2", "INVALID_ARGUMENT")?;
+        // Sem nada no meio, a outra ainda assina.
+        if !fs_verdade(&assinar("chave:bancada"), "signed") {
+            return Err("sem nada no meio, a assinatura nao saiu de novo");
+        }
+        // A dona é revogada: a sessão acaba, e as chaves com ela.
+        fn revogar() {
+            let id = PESSOA_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let _ = crate::pessoas::revogar_pessoa(sigilo::pessoas::IdPessoa(id.to_le_bytes()));
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(revogar));
+        let r = assinar("chave:bancada");
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        if decisao_do_envelope(&r) != "ALLOW"
+            || !r.contains(r#""signed":false"#)
+            || fs_texto(&r, "signature").is_some()
+            || !nada_assinado(antes)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a dona revogada no meio assinou");
+        }
+        if crate::chaves::contagem_de_teste() != (0, 2) {
+            return Err("a revogacao no meio nao anulou as chaves");
+        }
+        Ok(())
+    })
+}
+
+/// A âncora de uma declaração na decisão de quem declara: o processo que
+/// assinou declara o que fez, ancorado na decisão da assinatura — e o
+/// kernel grava a âncora com o método dela. Outro processo da mesma pessoa,
+/// a própria pessoa fora do processo, uma decisão recusada, a decisão de
+/// outra declaração, uma decisão que não está no anel, e as duas âncoras
+/// juntas são `INVALID_ARGUMENT`, e nada é declarado. A declaração continua
+/// alegação: nenhuma decisão a lê.
+fn chaves_a_declaracao_ancorada_na_assinatura() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_000_321;
+    const OUTRO: u64 = 7_000_322;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(200), "chave-declara", "operador");
+        let programa = || Programa::Imagem {
+            manifesto: Some(manifesto_de_teste(
+                "caso",
+                "key.create key.sign audit.declare",
+            )),
+            resumo: [0xab; 32],
+            editor: None,
+        };
+        let processo = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: programa(),
+        };
+        let outro = Chamador::Processo {
+            fio: OUTRO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: programa(),
+        };
+        let pessoa = Chamador::Pessoa(sessao);
+        if publica_de(&criar_chave(processo, "chave:bancada")).is_none() {
+            return Err("o processo nao criou a chave do caso");
+        }
+        let r = assinar_com(
+            processo,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(9),
+        );
+        let decisao = fs_numero(&r, "decision").ok_or("a assinatura nao disse a decisao")?;
+        let ancorada = |d: u64| {
+            alloc::format!(
+                r#"{{"event":"teste.assinado","subject":"pedido","outcome":"enviado","decision":{d}}}"#
+            )
+        };
+        // O processo que assinou: ancorada, com o método.
+        let (declarada, _, _) = declaracao_gravada(&declarar(processo, &ancorada(decisao)))?;
+        if declarada.recurso != "teste.assinado pedido enviado"
+            || !declarada
+                .detalhe
+                .starts_with(&alloc::format!("pelo processo {FIO} ("))
+            || !declarada.detalhe.contains(&alloc::format!(
+                "): ancorada em {decisao} key.sign; decisao "
+            ))
+        {
+            crate::log_error!("teste", "{:?}", declarada);
+            return Err("a declaracao nao foi gravada com a ancora na assinatura");
+        }
+        // A decisão de outra declaração não é âncora.
+        let r = declarar(processo, DECLARACAO);
+        let da_declaracao = fs_numero(&r, "decision").ok_or("a declaracao sem decisao")?;
+        // Uma decisão recusada do mesmo processo também não.
+        let r = assinar_com(
+            processo,
+            "chave:outra",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(9),
+        );
+        if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a assinatura fora do alcance passou do gate");
+        }
+        let recusada =
+            registro_que(|e| e.metodo == "key.sign" && e.codigo == politica::Codigo::DenyResource)
+                .map(|(seq, _)| seq)
+                .ok_or("a recusa do gate nao foi gravada")?;
+        let ambas = alloc::format!(
+            r#"{{"event":"teste.assinado","subject":"pedido","outcome":"enviado","connection":1,"decision":{decisao}}}"#
+        );
+        for (quem, params, detalhe) in [
+            (
+                outro,
+                ancorada(decisao),
+                alloc::format!("decisao {decisao} nao e de quem declara"),
+            ),
+            (
+                pessoa,
+                ancorada(decisao),
+                alloc::format!("decisao {decisao} nao e de quem declara"),
+            ),
+            (
+                processo,
+                ancorada(recusada),
+                alloc::format!("decisao {recusada} nao e de quem declara"),
+            ),
+            (
+                processo,
+                ancorada(da_declaracao),
+                alloc::format!("decisao {da_declaracao} e outra declaracao"),
+            ),
+            (
+                processo,
+                ancorada(u64::MAX / 2),
+                alloc::format!("decisao {} nao e de quem declara", u64::MAX / 2),
+            ),
+            (
+                processo,
+                ambas,
+                alloc::string::String::from("uma ancora so: connection ou decision"),
+            ),
+        ] {
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = declarar(quem, &params);
+            if decisao_do_envelope(&r) != "ALLOW"
+                || !r.contains(r#""declared":false"#)
+                || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT")
+            {
+                crate::log_error!("teste", "{}: {}", params, r);
+                return Err("uma ancora que nao e de quem declara foi aceita");
+            }
+            if declaracoes_desde(antes) != 0 {
+                return Err("uma ancora recusada declarou");
+            }
+            let gravada = registro_que(|e| e.metodo == "audit.declare").is_some_and(|(seq, e)| {
+                seq > antes
+                    && e.codigo == politica::Codigo::InvalidArgument
+                    && e.detalhe.contains(detalhe.as_str())
+            });
+            if !gravada {
+                crate::log_error!("teste", "{}", detalhe);
+                return Err("a ancora recusada nao foi gravada com o numero pedido");
+            }
+        }
+        // A pessoa se ancora no que ela mesma fez, fora de processo.
+        if publica_de(&criar_chave(pessoa, "chave:bancada-2")).is_none() {
+            return Err("a pessoa nao criou a chave dela");
+        }
+        let r = assinar_com(
+            pessoa,
+            "chave:bancada-2",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(9),
+        );
+        let dela = fs_numero(&r, "decision").ok_or("a assinatura da pessoa sem decisao")?;
+        let (declarada, _, _) = declaracao_gravada(&declarar(pessoa, &ancorada(dela)))?;
+        if !declarada
+            .detalhe
+            .starts_with(&alloc::format!("ancorada em {dela} key.sign; decisao "))
+        {
+            crate::log_error!("teste", "{:?}", declarada);
+            return Err("a pessoa nao se ancorou na propria assinatura");
+        }
+        Ok(())
+    })
 }
 
 /// Lê do eco da conexão de `quem` até juntar `n` bytes — texto, que é o
