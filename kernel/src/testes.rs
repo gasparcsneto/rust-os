@@ -9845,6 +9845,85 @@ fn heap_falha_devolve_nulo() -> Resultado {
     }
 }
 
+/// Um programa que cabe no teto de leitura e não cabe em pedaço livre
+/// nenhum do heap é recusado na leitura — `SemMemoria`, e o `executar`
+/// devolveria `SEM_MEMORIA` —, sem derrubar o kernel; devolvidos os pedaços,
+/// a mesma leitura dá certo.
+///
+/// Era pânico: a leitura pedia o arquivo inteiro com `vec![0; n]`, que não
+/// tem como dizer que faltou, e a CI viu o terceiro de três lançamentos
+/// seguidos de um programa de 750 KiB derrubar o kernel, com memória livre
+/// de sobra em pedaços menores que ele.
+///
+/// O caso estilhaça o heap de propósito, falando com o alocador direto —
+/// ver [`heap_falha_devolve_nulo`]: toma pedaços de meio programa até
+/// nenhum pedaço livre caber o programa inteiro. O que sobra é menor que
+/// ele, e os outros fios seguem alocando ali.
+fn heap_o_programa_que_nao_cabe_e_recusado() -> Resultado {
+    use crate::usuario::codigo::Recusa;
+    use core::alloc::Layout;
+
+    let caminho = alloc::format!("{}/icp", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let tamanho = crate::vfs::resolver(&caminho)
+        .map_err(|_| "o icp nao esta no disco")?
+        .no
+        .tamanho as usize;
+    let pedaco = Layout::from_size_align(tamanho / 2, 16).map_err(|_| "layout invalido")?;
+
+    // Num arranjo fixo: um `Vec` cresceria no heap que o caso esvazia.
+    let mut tomados = [core::ptr::null_mut::<u8>(); 32];
+    let mut quantos = 0;
+    let mut veredito = Ok(());
+    while crate::heap::estatisticas().maior_bloco >= tamanho {
+        let ponteiro = match tomados.get(quantos) {
+            Some(_) => crate::heap::tentar_alocar(pedaco),
+            None => core::ptr::null_mut(),
+        };
+        if ponteiro.is_null() {
+            veredito = Err("o heap nao se estilhacou abaixo do programa");
+            break;
+        }
+        tomados[quantos] = ponteiro;
+        quantos += 1;
+    }
+
+    if veredito.is_ok() {
+        veredito = if !matches!(
+            crate::vfs::ler_tudo(&caminho),
+            Err(crate::vfs::Erro::SemMemoria)
+        ) {
+            Err("o programa que nao cabe no heap nao foi recusado na leitura")
+        } else {
+            match crate::usuario::codigo::obter(&caminho, crate::autorizacao::Autoridade::Sistema) {
+                Err(recusa @ Recusa::Leitura(crate::vfs::Erro::SemMemoria)) => {
+                    if recusa.erro() == crate::usuario::erro::SEM_MEMORIA {
+                        Ok(())
+                    } else {
+                        Err("o executar devolveria outro erro que nao SEM_MEMORIA")
+                    }
+                }
+                Err(outra) => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    Err("o codigo foi recusado por outro motivo")
+                }
+                Ok(_) => Err("o codigo que nao cabe no heap foi lido"),
+            }
+        };
+    }
+
+    for &ponteiro in &tomados[..quantos] {
+        // SAFETY: veio de `tentar_alocar` com este mesmo layout.
+        unsafe { crate::heap::devolver(ponteiro, pedaco) };
+    }
+    veredito?;
+
+    // A falta era de agora: devolvidos os pedaços, o mesmo programa se lê.
+    match crate::vfs::ler_tudo(&caminho) {
+        Ok(bytes) if bytes.len() == tamanho => Ok(()),
+        _ => Err("devolvidos os pedacos, o programa nao se leu"),
+    }
+}
+
 fn heap_estatisticas_coerentes() -> Resultado {
     let e = crate::heap::estatisticas();
     if e.total == 0 {
@@ -30273,6 +30352,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: falha devolve nulo",
         f: heap_falha_devolve_nulo,
+    },
+    Caso {
+        nome: "heap: o programa que nao cabe e recusado, sem panico",
+        f: heap_o_programa_que_nao_cabe_e_recusado,
     },
     Caso {
         nome: "heap: estatisticas coerentes",

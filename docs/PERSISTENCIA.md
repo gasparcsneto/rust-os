@@ -511,9 +511,11 @@ veio do disco.
   inteiro para a memória — e o heap do kernel era de 1 MiB, para uma
   partição de 16 MiB. Com a auditoria indo ao disco, o journal cresce
   depressa, e a suíte esgotou o heap.
-- **O heap do kernel tem 4 MiB.** O anel da auditoria cheio é perto de
+- **O heap do kernel tem 8 MiB.** O anel da auditoria cheio é perto de
   meio MiB, e um registro de 64 KiB passa pelo heap algumas vezes; uma
-  falha de alocação no kernel é pânico.
+  falha de alocação no kernel é pânico. Foram 4 MiB até os programas do IC,
+  de uns 970 KiB, passarem inteiros por ele a cada lançamento — ver
+  `kernel/src/heap.rs`.
 - **Cada registro leva no máximo 16 KiB de auditoria.** O resto vai em
   registros só de auditoria antes dele, na ordem.
 - **O plano de queda da bancada diz o tipo do registro**: a n-ésima

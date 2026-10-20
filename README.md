@@ -2993,7 +2993,7 @@ O eco TLS manda três registros cheios, e o registro cresceu de 4 KiB para
 leituras em vez de 177; a fumaça inteira, 1575 decisões em vez de 2271.
 
 **A memória.** Os dois buffers de uma conexão nascem com ela e saem com ela:
-32 KiB por conexão, 128 KiB por titular, 512 KiB do heap de 4 MiB com a
+32 KiB por conexão, 128 KiB por titular, 512 KiB do heap de 8 MiB com a
 tabela cheia — eram 128 KiB. A suíte confere a conta: doze conexões tomam
 os dois buffers de cada uma e pouco mais, e fechadas o heap volta. A
 associação UDP continua com 4 KiB em cada sentido — um datagrama tem no
@@ -6907,7 +6907,7 @@ se confundem nem em texto nem na cadeia.
 `argon2id:m=4096,t=3,p=1:<sal>:<verificador>`. O custo vai escrito em cada
 uma, entre um mínimo (1 MiB, 2 passadas) e um máximo que o kernel aceita
 calcular (16 MiB, 10 passadas). A memória de trabalho sai do alocador de
-frames — o heap tem 4 MiB — e é zerada antes de voltar. A comparação é em
+frames — o heap tem 8 MiB — e é zerada antes de voltar. A comparação é em
 tempo constante, e um nome desconhecido paga o mesmo Argon2id, contra uma
 credencial que não confere com nada: o tempo da recusa não diz se o nome
 existe. A forma começa pelo tipo: uma credencial de dispositivo ou de chave

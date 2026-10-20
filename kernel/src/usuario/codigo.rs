@@ -81,6 +81,8 @@ impl Recusa {
     pub fn erro(&self) -> i64 {
         use super::erro;
         match self {
+            // O programa existe e cabe no teto: faltou o heap, agora.
+            Recusa::Leitura(crate::vfs::Erro::SemMemoria) => erro::SEM_MEMORIA,
             Recusa::Leitura(_) => erro::PROGRAMA_DESCONHECIDO,
             Recusa::Procedencia(Falta::SemSelo, _) => erro::SEM_SELO,
             Recusa::Procedencia(Falta::NaoConfere, _) => erro::SELO_NAO_CONFERE,

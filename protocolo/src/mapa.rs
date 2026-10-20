@@ -46,7 +46,7 @@ pub const BASE_DAS_PILHAS: u64 = 0xFFFF_9800_0000_0000;
 /// Onde moram as superfícies gráficas. Só o kernel mapeia aqui.
 ///
 /// Uma superfície é um buffer de pixels que o kernel compõe antes de mandar
-/// para a tela. Ela não cabe no heap, que tem 4 MiB: uma tela de 1280x800 a
+/// para a tela. Ela não cabe no heap, que tem 8 MiB: uma tela de 1280x800 a
 /// quatro bytes por pixel tem 4 MiB, e há outras. O Redox, de onde vem o desenho desta
 /// pilha, resolve isso com `mmap` em espaço de usuário; aqui a superfície sai
 /// direto do alocador de frames, nesta faixa.

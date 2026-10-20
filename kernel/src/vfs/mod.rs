@@ -78,6 +78,9 @@ pub enum Erro {
     JaMontado,
     /// O arquivo não cabe no teto de leitura.
     GrandeDemais,
+    /// O arquivo cabe no teto, mas não no heap agora: nenhum pedaço livre
+    /// tem o tamanho dele inteiro. Ler de novo depois pode dar certo.
+    SemMemoria,
     /// O dispositivo por baixo recusou, ou o que veio dele não faz sentido.
     DoDispositivo,
     /// O caminho é de um segredo do kernel — ver [`DIRETORIO_RESERVADO`].
@@ -99,6 +102,7 @@ impl Erro {
             Erro::NaoEhArquivo => "nao e arquivo",
             Erro::JaMontado => "ja ha algo montado neste ponto",
             Erro::GrandeDemais => "o arquivo nao cabe no teto de leitura",
+            Erro::SemMemoria => "o heap nao tem agora um pedaco do tamanho do arquivo",
             Erro::DoDispositivo => "o dispositivo recusou ou devolveu algo sem sentido",
             Erro::Reservado => "reservado ao kernel",
             Erro::Mudou => "o arquivo mudou depois de aberto",
@@ -215,9 +219,9 @@ pub const DIRETORIO_DOS_PROGRAMAS: &str = "/bin";
 
 /// Quanto um [`ler_tudo`] pode trazer.
 ///
-/// Um mebibyte. O maior cliente hoje é `executar`, e o maior programa
-/// embutido tem algumas centenas de bytes; o teto existe para que um arquivo
-/// absurdo vire erro em vez de consumir o heap inteiro.
+/// Um mebibyte. O maior cliente é o lançamento de um programa, e os maiores
+/// da imagem têm uns 970 KiB; o teto existe para que um arquivo absurdo vire
+/// erro em vez de consumir o heap inteiro.
 const TETO_DE_LEITURA: u64 = 1024 * 1024;
 
 /// Pendura um sistema de arquivos num ponto da árvore.
@@ -431,7 +435,18 @@ fn ler_vnode(vnode: Vnode) -> Result<Vec<u8>, Erro> {
         return Err(Erro::GrandeDemais);
     }
 
-    let mut conteudo = alloc::vec![0u8; vnode.no.tamanho as usize];
+    // O tamanho vem do arquivo, e um programa grande chega perto do teto:
+    // pedi-lo ao heap pode falhar com memória livre de sobra, em pedaços
+    // menores que ele — ver `crate::heap`. `vec![0; n]` não tinha como dizer
+    // que faltou, e falha de alocação no kernel é pânico: foi o que a CI
+    // pegou, no terceiro de três lançamentos seguidos de um programa de
+    // 750 KiB. Reservado antes, faltar é um erro de quem lê.
+    let tamanho = vnode.no.tamanho as usize;
+    let mut conteudo = Vec::new();
+    conteudo
+        .try_reserve_exact(tamanho)
+        .map_err(|_| Erro::SemMemoria)?;
+    conteudo.resize(tamanho, 0);
     let mut lidos = 0usize;
 
     // O laço abaixo era, até o Btrfs entrar, uma promessa não falsificável:

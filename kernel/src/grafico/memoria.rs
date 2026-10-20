@@ -2,7 +2,7 @@
 //!
 //! # Por que não o heap
 //!
-//! Porque ele tem 1 MiB e uma tela inteira tem 4. O Redox não tem esse
+//! Porque ele tem 8 MiB e uma tela inteira tem 4. O Redox não tem esse
 //! problema — os drivers dele vivem em espaço de usuário e pedem memória com
 //! `mmap` —, e este é o ponto em que o porte não pode ser literal: aqui a
 //! superfície sai direto do alocador de frames, mapeada numa faixa virtual
@@ -39,7 +39,7 @@
 //!
 //! # Por que uma tabela fixa de trechos
 //!
-//! Porque ela não pode depender do heap, que tem 4 MiB e que uma falha de
+//! Porque ela não pode depender do heap, que tem 8 MiB e que uma falha de
 //! alocação no meio de um `Drop` não teria como devolver. E porque o tamanho
 //! dela tem um teto que se calcula: cada trecho livre abaixo do topo tem uma
 //! superfície viva logo acima, então há no máximo tantos trechos quantas
