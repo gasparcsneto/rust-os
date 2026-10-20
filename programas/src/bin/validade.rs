@@ -11,11 +11,16 @@
 //!   eco TLS da bancada: aceito, ou o código da recusa;
 //! - **os cookies**: um `Expires` de 2023, um de 2100 e um `Max-Age=10`,
 //!   pelo servidor HTTP da bancada: os que o pote levou logo depois de
-//!   guardar, e os que ele leva 10,1 s depois — a bancada espera do lado
+//!   guardar, e os que ele leva 12 s depois — a bancada espera do lado
 //!   dela. Dez segundos, e não três: o relógio dos cookies é em segundos, e
 //!   a janela antes do primeiro pedido é a do `Max-Age` menos a fração do
 //!   segundo em que se guardou e o trabalho de uma conexão nova — com três
-//!   processos, rodadas e o NSF ao mesmo tempo, mais de dois segundos.
+//!   processos, rodadas e o NSF ao mesmo tempo, mais de dois segundos. E
+//!   doze, e não 10,1: o relógio dos cookies é o civil, e num ajuste
+//!   gradual ele anda até 5% mais devagar que o contador (ver
+//!   `hora::disciplina`) — dez segundos dele podem ser 10,5 do hospedeiro,
+//!   fora a deriva do contador. Com 10,1, a bancada de tempo do ARM viu o
+//!   `vence` ir depois, logo que as fontes voltaram.
 //!
 //! O programa não julga: diz o que viu, e a bancada sabe o que cada estado
 //! deve dar. Sai com [`CODIGO`] quando disse tudo, e com um código menor
@@ -141,7 +146,7 @@ fn tls_de(ancoras: &tls::Ancoras) {
     }
 }
 
-/// Os cookies: os que o pote levou logo depois de guardar, e 10,1 s depois.
+/// Os cookies: os que o pote levou logo depois de guardar, e 12 s depois.
 fn cookies(ancoras: &tls::Ancoras) -> Result<(), i64> {
     let opcoes = Opcoes {
         resolucao: Resolucao::Fixa(BANCADA),
@@ -172,7 +177,7 @@ fn cookies(ancoras: &tls::Ancoras) -> Result<(), i64> {
     let antes = eco(&mut pote, &opcoes)?;
     escreverln!("validade: cookies antes {}", antes);
     // A bancada espera do lado dela: o programa não tem como dormir.
-    match pedir(&mut pote, &format!("{CLARA}/lento/10100"), &opcoes) {
+    match pedir(&mut pote, &format!("{CLARA}/lento/12000"), &opcoes) {
         Ok(r) if r.status == 200 => {}
         _ => {
             escreverln!("validade: a espera da bancada falhou");

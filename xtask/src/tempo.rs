@@ -1298,7 +1298,7 @@ struct Validade {
     bancada: String,
     vencido: String,
     futuro: String,
-    /// Os cookies que o servidor recebeu logo depois de guardar, e 10,1 s
+    /// Os cookies que o servidor recebeu logo depois de guardar, e 12 s
     /// depois.
     antes: String,
     depois: String,
@@ -1339,7 +1339,7 @@ impl std::fmt::Display for Validade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "a hora `{}`, {} s (civil {} s, logico {} s; o hospedeiro de {} a {} s); bancada.duke {}, vencido.duke {}, futuro.duke {}; cookies {} e, 10,1 s depois, {}",
+            "a hora `{}`, {} s (civil {} s, logico {} s; o hospedeiro de {} a {} s); bancada.duke {}, vencido.duke {}, futuro.duke {}; cookies {} e, 12 s depois, {}",
             self.hora,
             self.segundos,
             self.civil_s,
@@ -1367,7 +1367,8 @@ const FUTURO: &str = "TLS_NOT_YET_VALID";
 /// `Max-Age=10`, sim.
 const COOKIES_LOGO: &str = "futuro,vence";
 
-/// E 10,1 s depois, com a hora andando: o `Max-Age` venceu.
+/// E 12 s depois, com a hora andando: o `Max-Age` venceu — também com o
+/// civil num ajuste gradual, até 5% mais devagar (ver o `validade`).
 const COOKIES_DEPOIS: &str = "futuro";
 
 /// O número do registro mais novo do log do kernel.

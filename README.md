@@ -5156,7 +5156,7 @@ acima do quórum; o civil `sincronizado`, com a hora do hospedeiro dentro
 da incerteza; o lógico com o civil, e o mesmo no `persistence.clock`, que
 o journal grava como piso; o programa `validade`, de verdade, pelo civil —
 `bancada.duke` aceito, `vencido.duke` `TLS_EXPIRED`, `futuro.duke`
-`TLS_NOT_YET_VALID`, o `Max-Age` vencendo 10,1 s depois —; o NSF vendo
+`TLS_NOT_YET_VALID`, o `Max-Age` vencendo 12 s depois —; o NSF vendo
 `sincronizado`, sem incidente, sem marca, o lógico andando, a contenção
 por taxa ativa e nenhum pedido; e a auditoria com cada passo do serviço
 `ALLOW`, o fechamento 3/3 da rodada, e o `validade` lendo a hora pelo
@@ -5340,7 +5340,7 @@ lógico, e o que ela deu no eco TLS — `bancada.duke`, válido de 2025 a
 2040, `vencido.duke`, de 2020 a 2021, e `futuro.duke`, de 2042 a 2044,
 que nenhum estado aceita (`TLS_NOT_YET_VALID`) — e nos cookies — um `Expires` de
 2023, um de 2100 e um `Max-Age=10`: os que o pote levou logo depois de
-guardar, e os que levou 10,1 s depois. O programa não julga: a bancada sabe
+guardar, e os que levou 12 s depois. O programa não julga: a bancada sabe
 o que cada estado deve dar.
 
 **A hora confere a validade, e mais nada.** O cookie não é identidade,
