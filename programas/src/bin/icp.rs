@@ -18,8 +18,10 @@
 //!   assinada pelos nós também é uma resposta verificada;
 //! - [`CANDID`]: o método `candid_<c>` — `truncado`, `sobra`, `magica` —,
 //!   que responde Candid fora da forma: verificado, e recusado na leitura;
-//! - [`PRINCIPAL_INVALIDO`]: um canister que não é Principal — nada sai, e
-//!   nada se declara;
+//! - [`PRINCIPAL_INVALIDO`]: dois canisters que não são Principal — um
+//!   texto fora da base32, e o da bancada com um caractere trocado, que se
+//!   lê e tem o tamanho certo, mas a soma não confere: nada sai, e nada se
+//!   declara;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
 //!   conexões de quem acabou.
 //!
@@ -114,6 +116,12 @@ const FORA_DA_FORMA: [&str; 3] = ["candid_truncado", "candid_sobra", "candid_mag
 /// O canister da bancada: o primeiro da primeira sub-rede de aplicação da
 /// PocketIC — a bancada confere que é este (`xtask/src/icp.rs`).
 const BANCADA: &str = "pi33i-pt777-77776-aaaaa-cai";
+
+/// Os canisters que não são Principal, do passo [`PRINCIPAL_INVALIDO`]: um
+/// fora da base32, e o da bancada com o vigésimo caractere trocado — um bit
+/// dos bytes, e não do CRC nem da sobra da base32: a soma não confere, e é
+/// só ela que o recusa.
+const NAO_PRINCIPAIS: [&str; 2] = ["aaaaa-aa-nao-e-principal", "pi33i-pt777-77776-aaaab-cai"];
 
 /// O DNS da bancada da suíte.
 const DNS: &str = "udp:10.0.2.53:53";
@@ -312,10 +320,14 @@ fn principal() -> i64 {
                 }
                 (PRINCIPAL_INVALIDO, _) => {
                     // Nada sai, e nada se declara: o Principal não se lê.
-                    match Principal::de_texto("aaaaa-aa-nao-e-principal") {
-                        Ok(_) => escreverln!("icp: principal invalido: aceito"),
-                        Err(e) => escreverln!("icp: principal invalido: recusado: {e}"),
-                    };
+                    let ditos: Vec<String> = NAO_PRINCIPAIS
+                        .iter()
+                        .map(|texto| match Principal::de_texto(texto) {
+                            Ok(_) => String::from("aceito"),
+                            Err(e) => format!("recusado: {e}"),
+                        })
+                        .collect();
+                    escreverln!("icp: principal invalido: {}", ditos.join("; "));
                 }
                 (_, None) => {
                     escreverln!("icp: rede {} nao esta no arquivo", nome);

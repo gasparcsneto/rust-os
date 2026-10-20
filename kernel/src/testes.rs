@@ -46962,8 +46962,12 @@ fn icp_a_consulta_verificada_pelo_gate() -> Resultado {
             }
 
             // O Principal que não se lê: nenhuma consulta começa, e nada se
-            // declara. O que vem do processo depois é o fecho da conexão do
-            // passo anterior, que ele larga depois de dizer o desfecho.
+            // declara — nem o texto fora da base32, nem o canister da bancada
+            // com um caractere trocado, que só a soma recusa. O motivo de
+            // cada um é conferido: o que a soma não pega, a forma canônica
+            // pegaria com outro nome. O que vem do processo depois é o fecho
+            // da conexão do passo anterior, que ele larga depois de dizer o
+            // desfecho.
             let desde = crate::log::total_emitidos();
             let ultimo = crate::autorizacao::ultimo_registro();
             icp.pedir(ICP_PRINCIPAL_INVALIDO, 0, 0)?;
@@ -46977,7 +46981,9 @@ fn icp_a_consulta_verificada_pelo_gate() -> Resultado {
                     !(matches!(m.as_str(), "net.send" | "net.close") && d == GATEWAY_ICP)
                 })
                 .collect();
-            if !dito.starts_with("icp: principal invalido: recusado: ") || !depois.is_empty() {
+            let esperado = "icp: principal invalido: recusado: texto de principal fora da base32; \
+                            recusado: o CRC do principal nao confere";
+            if dito != esperado || !depois.is_empty() {
                 crate::log_error!("teste", "{} / {:?}", dito, depois);
                 return Err("o principal invalido foi aceito, ou saiu do processo");
             }
