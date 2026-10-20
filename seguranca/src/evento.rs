@@ -16,8 +16,8 @@
 //! pediu — ver [`Declaracao`]: o evento, o assunto e o desfecho estão no
 //! recurso, como o programa os escreveu, e o kernel não os confere. O que o
 //! kernel sabe está no detalhe, como em qualquer execução: o processo, a
-//! conexão em que a declaração se ancorou e o destino real dela, e a
-//! decisão. O NSF lê as duas partes e não as mistura: correlaciona a
+//! âncora — a conexão em que a declaração se ancorou e o destino real
+//! dela, ou a decisão de quem declarou e o método dela —, e a decisão. O NSF lê as duas partes e não as mistura: correlaciona a
 //! alegação com os fatos, e nunca toma uma pela outra. Por isso a alegação
 //! sai do recurso do evento — que o perfil, as regras e o incidente leem
 //! como o que se tocou — e fica em [`Evento::alegacao`].
@@ -383,6 +383,24 @@ impl Evento {
         self.codigo == Codigo::DenyPermission && self.detalhe.contains("o manifesto nao declara")
     }
 
+    /// O estado da chave morta — `anulada`, `destruida` — com que este
+    /// evento tentou assinar: a execução de um `key.sign` que o gate deixou
+    /// e o kernel recusou, pelo motivo que ele escreve. `None` em todo
+    /// outro evento.
+    pub fn chave_morta(&self) -> Option<&'static str> {
+        if self.metodo != "key.sign"
+            || self.tipo != Tipo::Execucao
+            || self.codigo != Codigo::InvalidArgument
+        {
+            return None;
+        }
+        match ler_detalhe(&self.detalhe).resto.as_str() {
+            "a chave foi anulada" => Some("anulada"),
+            "a chave foi destruida" => Some("destruida"),
+            _ => None,
+        }
+    }
+
     /// O que falta ao código de fora da imagem que este registro recusou —
     /// ver `politica::procedencia` —, se é uma recusa assim.
     pub fn falta_de_procedencia(&self) -> Option<politica::procedencia::Falta> {
@@ -431,16 +449,39 @@ pub struct Declaracao {
     pub assunto: String,
     /// O desfecho, como foi declarado.
     pub desfecho: String,
-    /// A conexão em que a declaração se ancorou, e o destino real dela,
-    /// pela tabela da pilha — o que o kernel escreveu.
-    pub ancora: Option<(u64, String)>,
+    /// O fato do kernel em que a declaração se ancorou — o que o kernel
+    /// escreveu.
+    pub ancora: Option<Ancora>,
+}
+
+/// O fato do kernel a que uma declaração se refere — uma âncora só.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ancora {
+    /// Uma conexão de quem declarou, e o destino real dela, pela tabela da
+    /// pilha.
+    Conexao(u64, String),
+    /// Uma decisão de quem declarou — um `ALLOW` do mesmo processo —, e o
+    /// método dela: a assinatura de um `key.sign`, por exemplo. O kernel
+    /// confere que a decisão é de quem declara antes de gravar.
+    Decisao(u64, String),
+}
+
+impl Ancora {
+    /// Como uma explicação a escreve.
+    pub fn texto(&self) -> String {
+        match self {
+            Ancora::Conexao(n, destino) => alloc::format!("pela conexao {n} a {destino}"),
+            Ancora::Decisao(n, metodo) => alloc::format!("pela decisao {n} ({metodo})"),
+        }
+    }
 }
 
 impl Evento {
     /// A declaração deste evento, se ele é uma — ver [`Tipo::Declaracao`].
     /// A alegação são as três palavras de [`Self::alegacao`]; a âncora, a
-    /// conexão e o destino do detalhe. Um registro que não tem essa forma
-    /// não é lido como declaração.
+    /// do detalhe — `conexao <n> <destino>`, `ancorada em <decisão>
+    /// <método>`, ou `sem conexao`. Um registro que não tem essa forma não é
+    /// lido como declaração.
     pub fn declaracao(&self) -> Option<Declaracao> {
         let Tipo::Declaracao { conexao } = self.tipo else {
             return None;
@@ -451,14 +492,21 @@ impl Evento {
         else {
             return None;
         };
+        let resto = ler_detalhe(&self.detalhe).resto;
         let ancora = match conexao {
-            None => None,
             Some(n) => {
-                let resto = ler_detalhe(&self.detalhe).resto;
                 let destino = resto
                     .strip_prefix(&alloc::format!("conexao {n} "))
                     .and_then(politica::endereco::ler)?;
-                Some((n, destino.texto()))
+                Some(Ancora::Conexao(n, destino.texto()))
+            }
+            None if resto == "sem conexao" => None,
+            None => {
+                let (n, metodo) = resto.strip_prefix("ancorada em ")?.split_once(' ')?;
+                if metodo.is_empty() || metodo.contains(' ') {
+                    return None;
+                }
+                Some(Ancora::Decisao(n.parse().ok()?, metodo.to_string()))
             }
         };
         Some(Declaracao {
@@ -745,12 +793,27 @@ pub(crate) mod testes {
                 evento: "icp.query".to_string(),
                 assunto: "alvo/ola".to_string(),
                 desfecho: "verified".to_string(),
-                ancora: Some((3, "tcp:10.0.2.100:4943".to_string())),
+                ancora: Some(Ancora::Conexao(3, "tcp:10.0.2.100:4943".to_string())),
             })
         );
         let e = declarado("teste.x y ok", "sem conexao; decisao 5");
         assert_eq!(e.tipo, Tipo::Declaracao { conexao: None });
         assert_eq!(e.declaracao().unwrap().ancora, None);
+        // Ancorada numa decisão de quem declarou: o número e o método, como
+        // o kernel os escreveu.
+        let e = declarado(
+            "icp.update alvo/quem verified",
+            "pelo processo 12 (icp ab12cd34): ancorada em 70 key.sign; decisao 77",
+        );
+        assert_eq!(e.tipo, Tipo::Declaracao { conexao: None });
+        assert_eq!(
+            e.declaracao().unwrap().ancora,
+            Some(Ancora::Decisao(70, "key.sign".to_string()))
+        );
+        assert_eq!(
+            Ancora::Decisao(70, "key.sign".to_string()).texto(),
+            "pela decisao 70 (key.sign)"
+        );
         // As palavras de um nascimento, de uma queda, de um corte, no
         // recurso: continuam uma declaração.
         for recurso in [
@@ -801,6 +864,18 @@ pub(crate) mod testes {
             declarado("teste.x y ok", "conexao 3 lixo; decisao 5").declaracao(),
             None
         );
+        for detalhe in [
+            "ancorada em x key.sign; decisao 5",
+            "ancorada em 4; decisao 5",
+            "ancorada em 4 key.sign lixo; decisao 5",
+            "outra coisa; decisao 5",
+        ] {
+            assert_eq!(
+                declarado("teste.x y ok", detalhe).declaracao(),
+                None,
+                "{detalhe}"
+            );
+        }
         // O detalhe cortado no teto da auditoria: sem a decisão, não é
         // execução, e não se lê como declaração.
         assert_eq!(

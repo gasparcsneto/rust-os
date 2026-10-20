@@ -17350,8 +17350,9 @@ fn auditoria_a_lacuna() -> Resultado {
 
 /// O estado que o journal descreve, como a suíte o compara: os agentes, as
 /// credenciais administrativas revogadas, a política, as pessoas, as
-/// mensagens — vivas, lápides e o próximo id — e o armazém: cada arquivo
-/// com a versão e o conteúdo, e a próxima versão.
+/// mensagens — vivas, lápides e o próximo id —, o armazém — cada arquivo
+/// com a versão e o conteúdo, e a próxima versão — e as chaves de
+/// assinatura, vivas e lápides.
 #[derive(Debug, PartialEq, Eq)]
 struct EstadoDoJournal {
     agentes: alloc::vec::Vec<(
@@ -17367,6 +17368,38 @@ struct EstadoDoJournal {
     lapides: alloc::vec::Vec<politica::mensagens::Lapide>,
     proximo: u64,
     armazem: RetratoDoArmazem,
+    chaves: RetratoDasChaves,
+}
+
+/// As chaves como o journal as descreve: o dono, o nome, o domínio, o
+/// estado, a pública e a criação, em ordem — o que a reposição tem de pôr
+/// de volta igual. A privada não: a viva assina igual — ver
+/// [`chaves_o_journal_as_traz_de_volta`].
+type RetratoDasChaves = alloc::vec::Vec<(
+    alloc::string::String,
+    alloc::string::String,
+    alloc::string::String,
+    &'static str,
+    [u8; 32],
+    u64,
+)>;
+
+fn retrato_das_chaves() -> RetratoDasChaves {
+    let mut v: RetratoDasChaves = crate::chaves::gravaveis()
+        .into_iter()
+        .map(|g| {
+            (
+                g.dono,
+                g.nome,
+                g.dominio,
+                g.estado.como_str(),
+                g.publica,
+                g.criada_ms,
+            )
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 /// O armazém como a suíte o compara: cada nó — caminho, versão, dono e,
@@ -17412,14 +17445,15 @@ fn retrato_do_armazem() -> RetratoDoArmazem {
     (nos, proxima)
 }
 
-/// O registro, a política, as pessoas, as mensagens e o armazém voltam ao
-/// que a imagem diz — sem nada do journal.
+/// O registro, a política, as pessoas, as mensagens, o armazém e as
+/// chaves voltam ao que a imagem diz — sem nada do journal.
 fn de_volta_a_imagem() {
     crate::identidade::esquecer_registrados();
     crate::identidade::esquecer_lapides_de_teste();
     crate::pessoas::esquecer_registradas();
     crate::mensagens::como_na_imagem_de_teste();
     crate::armazem::trocar_de_teste(::armazem::Armazem::novo());
+    crate::chaves::limpar_a_memoria_de_teste();
     crate::autorizacao::carregar();
 }
 
@@ -17484,6 +17518,7 @@ fn estado_em_memoria() -> EstadoDoJournal {
         lapides,
         proximo,
         armazem: retrato_do_armazem(),
+        chaves: retrato_das_chaves(),
     }
 }
 
@@ -31316,6 +31351,26 @@ static CASOS: &[Caso] = &[
         f: chaves_a_declaracao_ancorada_na_assinatura,
     },
     Caso {
+        nome: "chaves: o journal as traz de volta, e a compactacao larga a destruida",
+        f: chaves_o_journal_as_traz_de_volta,
+    },
+    Caso {
+        nome: "chaves: a revogacao reposta nao anula de novo",
+        f: chaves_a_revogacao_reposta_nao_anula_de_novo,
+    },
+    Caso {
+        nome: "chaves: sem o journal nenhuma nasce",
+        f: chaves_sem_o_journal_nada_nasce,
+    },
+    Caso {
+        nome: "chaves: a sessao, a credencial, o agente e o papel no meio da assinatura",
+        f: chaves_quem_pede_muda_no_meio,
+    },
+    Caso {
+        nome: "chaves: dois processos assinando e duas criacoes do mesmo nome",
+        f: chaves_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "rede: o envio que nao cabe espera espaco",
         f: rede_o_envio_que_nao_cabe_espera_espaco,
     },
@@ -31590,6 +31645,42 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "icp: duas consultas ao mesmo tempo",
         f: icp_duas_consultas_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "icp: a chamada assinada e verificada",
+        f: icp_a_chamada_assinada_e_verificada,
+    },
+    Caso {
+        nome: "icp: cada chave e um principal",
+        f: icp_cada_chave_e_um_principal,
+    },
+    Caso {
+        nome: "icp: a chamada pendente e acompanhada",
+        f: icp_a_chamada_pendente_e_acompanhada,
+    },
+    Caso {
+        nome: "icp: o canister da sub-rede raiz",
+        f: icp_o_canister_da_sub_rede_raiz,
+    },
+    Caso {
+        nome: "icp: as recusas da chamada",
+        f: icp_as_recusas_da_chamada,
+    },
+    Caso {
+        nome: "icp: a chave anulada no meio da chamada",
+        f: icp_a_chave_anulada_no_meio_do_acompanhamento,
+    },
+    Caso {
+        nome: "icp: sem chave nada se assina",
+        f: icp_sem_chave_nada_se_assina,
+    },
+    Caso {
+        nome: "icp: a chamada adulterada e recusada",
+        f: icp_a_chamada_adulterada_e_recusada,
+    },
+    Caso {
+        nome: "icp: a contencao e o firewall no meio da chamada",
+        f: icp_a_contencao_e_o_firewall_no_meio_da_chamada,
     },
     Caso {
         nome: "canal tcp: o aperto pela rede",
@@ -35986,7 +36077,11 @@ fn declaracao_o_nsf_le_como_alegacao() -> Resultado {
                         && e.recurso.is_empty()
                         && (d.evento.as_str(), d.assunto.as_str(), d.desfecho.as_str())
                             == ("teste.consulta", "alvo/metodo", "verificada")
-                        && d.ancora == Some((n, alloc::string::String::from(ECO)))
+                        && d.ancora
+                            == Some(seguranca::evento::Ancora::Conexao(
+                                n,
+                                alloc::string::String::from(ECO),
+                            ))
                         && e.processo.as_ref().is_some_and(|(f, _)| *f == fio),
                 )
             })
@@ -36326,7 +36421,15 @@ fn chaves_o_caminho_inteiro() -> Resultado {
         if crate::chaves::contagem_de_teste() != (1, 1) {
             return Err("a tabela nao tem so a chave do caso");
         }
-        let _ = dono;
+        // A privada não aparece em lugar nenhum que se lê: nem na
+        // auditoria, nem no log, nem numa resposta — a da criação, a da
+        // leitura, a da assinatura, a de um erro.
+        let semente = crate::chaves::semente_de_teste(&dono, "bancada")
+            .ok_or("a chave viva do caso sem semente")?;
+        let erro = assinar_com(quem, "chave:bancada", "outro", &sigilo::hex(&resumo));
+        if a_semente_aparece(&semente, &[&r, &lida, &de_novo, &erro]) {
+            return Err("a privada apareceu na auditoria, no log ou numa resposta");
+        }
 
         // Destruir: lápide.
         let r = chave_so(quem, "key.destroy", "chave:bancada");
@@ -36425,6 +36528,7 @@ fn chaves_o_nome_e_do_dono() -> Resultado {
         }
         let d = crate::chaves::dominio(DOMINIO_DE_TESTE).ok_or("sem o dominio de teste")?;
         let resumo = [0x33; 32];
+        let mut assinaturas = alloc::vec::Vec::new();
         for (quem, publica) in [(a, pa), (b, pb), (agente, pg)] {
             let r = assinar_com(
                 quem,
@@ -36437,6 +36541,16 @@ fn chaves_o_nome_e_do_dono() -> Resultado {
                 .ok_or("um dono nao assinou com a propria chave")?;
             if !sigilo::chaves::conferir(&publica, &d, &resumo, &s) {
                 return Err("a assinatura de um dono nao conferiu com a publica dele");
+            }
+            assinaturas.push((publica, s));
+        }
+        // A chave errada: a assinatura de um dono não confere com a pública
+        // de outro.
+        for (i, (_, s)) in assinaturas.iter().enumerate() {
+            for (j, (outra, _)) in assinaturas.iter().enumerate() {
+                if i != j && sigilo::chaves::conferir(outra, &d, &resumo, s) {
+                    return Err("a assinatura de um dono conferiu com a publica de outro");
+                }
             }
         }
         // A de A some; as de B e do agente ficam.
@@ -36527,19 +36641,12 @@ fn chaves_o_alcance_e_o_dominio() -> Resultado {
                 DOMINIO_DE_TESTE,
                 &resumo_de_teste(3),
             ),
+            chave_so(observadora, "key.destroy", "chave:bancada"),
         ] {
             if decisao_do_envelope(&r) != "DENY_PERMISSION" {
                 crate::log_error!("teste", "{}", r);
                 return Err("o papel sem a permissao de chave passou do gate");
             }
-        }
-        let sistema = Chamador::Processo {
-            fio: crate::fios::id_atual(),
-            autoridade: Autoridade::Sistema,
-            programa: Programa::Kernel,
-        };
-        if decisao_do_envelope(&criar_chave(sistema, "chave:bancada")) != "DENY_PERMISSION" {
-            return Err("o sistema criou uma chave");
         }
         // O manifesto: o programa que não declara `key.sign` não assina,
         // mesmo com o papel que tem.
@@ -36565,6 +36672,35 @@ fn chaves_o_alcance_e_o_dominio() -> Resultado {
         if decisao_do_envelope(&r) != "DENY_PERMISSION" {
             crate::log_error!("teste", "{}", r);
             return Err("o programa assinou sem declarar key.sign");
+        }
+        // O sistema não alcança a chave da pessoa — nem a cria, nem a lê,
+        // nem assina com ela, nem a destrói —: não tem permissão de chave
+        // nenhuma, e a chave continua viva.
+        let sistema = Chamador::Processo {
+            fio: crate::fios::id_atual(),
+            autoridade: Autoridade::Sistema,
+            programa: Programa::Kernel,
+        };
+        for r in [
+            criar_chave(sistema, "chave:bancada"),
+            chave_so(sistema, "key.read", "chave:bancada"),
+            assinar_com(
+                sistema,
+                "chave:bancada",
+                DOMINIO_DE_TESTE,
+                &resumo_de_teste(4),
+            ),
+            chave_so(sistema, "key.destroy", "chave:bancada"),
+        ] {
+            if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema alcancou a chave de uma pessoa");
+            }
+        }
+        if fs_texto(&chave_so(quem, "key.read", "chave:bancada"), "state").as_deref()
+            != Some("active")
+        {
+            return Err("a chave da pessoa nao ficou viva depois do sistema");
         }
 
         // Depois do gate: o domínio.
@@ -36795,6 +36931,34 @@ fn chaves_a_anulacao_administrativa() -> Resultado {
         if publica_de(&criar_chave(quem, "chave:bancada")).is_none() {
             return Err("a pessoa nao criou a chave do caso");
         }
+        // Ninguém usa a chave de outra identidade dizendo de quem ela é: o
+        // pedido não tem dono — o nome se resolve no espaço de quem pede —,
+        // nem para o operador, nem para o administrador, que nem assina: o
+        // papel dele é um teto.
+        let outra = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(199),
+            "chave-outra",
+            "operador",
+        ));
+        let administradora = Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            Console::Terminal(200),
+            "chave-administra",
+            "administrador",
+        ));
+        for de in [outra, administradora] {
+            for extra in ["", ",\"owner\":\"OWNER\""] {
+                let p = alloc::format!(
+                    r#"{{"key":"chave:bancada","domain":"{DOMINIO_DE_TESTE}","digest":"{}"{}}}"#,
+                    resumo_de_teste(6),
+                    extra.replace("OWNER", &dono)
+                );
+                let r = fs_pedir(de, "key.sign", &p);
+                if fs_verdade(&r, "signed") || fs_texto(&r, "signature").is_some() {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a chave de outra identidade assinou para quem pediu");
+                }
+            }
+        }
         let params = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
         admin_espera(0, &ADMIN_DE_TESTE, "key.revoke", &params, None)?;
         let r = chave_so(quem, "key.read", "chave:bancada");
@@ -36846,11 +37010,75 @@ fn chaves_a_anulacao_administrativa() -> Resultado {
     })
 }
 
+/// Se o começo da `semente` de uma chave — 16 dígitos hexadecimais, que um
+/// corte no teto do detalhe não come — aparece num registro da auditoria,
+/// numa linha do log ou numa das `respostas`.
+fn a_semente_aparece(semente: &[u8; 32], respostas: &[&str]) -> bool {
+    let hex = sigilo::hex(semente);
+    let trecho = &hex[..16];
+    let na_auditoria = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .any(|e| e.evento.recurso.contains(trecho) || e.evento.detalhe.contains(trecho))
+    })
+    .unwrap_or(true);
+    let mut no_log = false;
+    crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+        no_log |= r.mensagem().contains(trecho);
+    });
+    na_auditoria || no_log || respostas.iter().any(|r| r.contains(trecho))
+}
+
 /// O fio do processo que os ganchos do meio isolam.
 static FIO_DO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// A pessoa que os ganchos do meio revogam ou cujas chaves destroem.
 static PESSOA_DO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A sessão que os ganchos do meio revogam.
+static SESSAO_DO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// O agente de teste — o número dele — que os ganchos do meio suspendem ou
+/// rebaixam.
+static AGENTE_DO_MEIO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Nenhum registro de assinatura feita depois do registro `antes`.
+fn nenhuma_assinatura_desde(antes: u64) -> bool {
+    registro_que(|e| e.metodo == "key.sign" && e.detalhe.contains("assinatura "))
+        .is_none_or(|(seq, _)| seq <= antes)
+}
+
+/// A assinatura de `chave` pedida por `quem`, com `gancho` rodando entre a
+/// decisão e o commit: o gate deixou, e o commit recusou com `codigo` — sem
+/// assinatura na resposta nem registro de assinatura feita, e com a recusa
+/// gravada como o resultado do comando que o gate autorizou.
+fn assinatura_recusada_no_commit(
+    quem: crate::autorizacao::Chamador,
+    gancho: fn(),
+    chave: &str,
+    codigo: &str,
+) -> Resultado {
+    let antes = crate::autorizacao::ultimo_registro();
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(gancho));
+    let r = assinar_com(quem, chave, DOMINIO_DE_TESTE, &resumo_de_teste(8));
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    if decisao_do_envelope(&r) != "ALLOW"
+        || !r.contains(r#""signed":false"#)
+        || fs_texto(&r, "code").as_deref() != Some(codigo)
+        || fs_texto(&r, "signature").is_some()
+    {
+        crate::log_error!("teste", "{}: {}", codigo, r);
+        return Err("o que mudou entre a decisao e o commit nao recusou a assinatura");
+    }
+    if !nenhuma_assinatura_desde(antes) {
+        return Err("uma assinatura recusada no commit foi gravada como feita");
+    }
+    let e = ultimo_com_metodo("key.sign").ok_or("a recusa nao foi gravada")?;
+    if e.codigo == politica::Codigo::Allow || e.codigo.nome() != codigo {
+        crate::log_error!("teste", "{:?}", e);
+        return Err("a recusa no commit nao foi gravada como o resultado do comando");
+    }
+    Ok(())
+}
 
 /// A decisão em curso, nas chaves: o gate decide a assinatura, e entre a
 /// decisão e o commit — com a ordem das gravações na mão — a dona é
@@ -36889,32 +37117,9 @@ fn chaves_a_decisao_em_curso() -> Resultado {
         }
         let assinar =
             |nome: &str| assinar_com(processo, nome, DOMINIO_DE_TESTE, &resumo_de_teste(8));
-        let nada_assinado = |antes: u64| {
-            registro_que(|e| e.metodo == "key.sign" && e.detalhe.contains("assinatura "))
-                .is_none_or(|(seq, _)| seq <= antes)
-        };
-        let no_meio = |gancho: fn(), nome: &str, codigo: &str| -> Resultado {
-            let antes = crate::autorizacao::ultimo_registro();
-            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(gancho));
-            let r = assinar(nome);
-            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
-            if decisao_do_envelope(&r) != "ALLOW"
-                || !r.contains(r#""signed":false"#)
-                || fs_texto(&r, "code").as_deref() != Some(codigo)
-                || fs_texto(&r, "signature").is_some()
-            {
-                crate::log_error!("teste", "{}: {}", codigo, r);
-                return Err("o que mudou entre a decisao e o commit nao recusou a assinatura");
-            }
-            if !nada_assinado(antes) {
-                return Err("uma assinatura recusada no commit foi gravada como feita");
-            }
-            let e = ultimo_com_metodo("key.sign").ok_or("a recusa nao foi gravada")?;
-            if e.codigo == politica::Codigo::Allow || e.codigo.nome() != codigo {
-                crate::log_error!("teste", "{:?}", e);
-                return Err("a recusa no commit nao foi gravada como o resultado do comando");
-            }
-            Ok(())
+        let nada_assinado = nenhuma_assinatura_desde;
+        let no_meio = |gancho: fn(), nome: &str, codigo: &str| {
+            assinatura_recusada_no_commit(processo, gancho, nome, codigo)
         };
         // Sem nada no meio, assina.
         if !fs_verdade(&assinar("chave:bancada"), "signed") {
@@ -37132,6 +37337,624 @@ fn chaves_a_declaracao_ancorada_na_assinatura() -> Resultado {
         {
             crate::log_error!("teste", "{:?}", declarada);
             return Err("a pessoa nao se ancorou na propria assinatura");
+        }
+        Ok(())
+    })
+}
+
+/// Se algum registro da região atual do journal, decifrado, tem os 32
+/// bytes de `semente` — a região inteira, e não só o fim que
+/// `persistencia::ler_de_teste` devolve com o conteúdo.
+fn a_semente_esta_no_journal(semente: &[u8; 32]) -> Result<bool, &'static str> {
+    crate::persistencia::algum_registro_de_teste(|r| r.conteudo.windows(32).any(|w| w == semente))
+}
+
+/// As chaves vão para o journal e voltam dele: a viva com a mesma privada
+/// — a assinatura do mesmo resumo é a mesma —, a destruída e a anulada como
+/// lápides, com os nomes presos. A compactação leva a viva e as lápides, e
+/// a semente da destruída fica para trás: na região nova, nenhum registro
+/// a tem.
+fn chaves_o_journal_as_traz_de_volta() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(206), "chave-journal", "operador");
+        let pessoa = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        let outra_sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(207), "chave-journal-b", "operador");
+        let outra = Chamador::Pessoa(outra_sessao);
+        let outro_dono = crate::pessoas::dona_da_sessao(outra_sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        for (quem, chave) in [
+            (pessoa, "chave:bancada"),
+            (pessoa, "chave:bancada-2"),
+            (outra, "chave:bancada"),
+        ] {
+            if !fs_verdade(&criar_chave(quem, chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let resumo = [0x5au8; 32];
+        let r = assinar_com(
+            pessoa,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &sigilo::hex(&resumo),
+        );
+        let assinatura = fs_texto(&r, "signature").ok_or("a chave viva nao assinou")?;
+        let semente_da_destruida = crate::chaves::semente_de_teste(&dono, "bancada-2")
+            .ok_or("a chave a destruir nao tem semente")?;
+        let semente_da_viva =
+            crate::chaves::semente_de_teste(&dono, "bancada").ok_or("a chave viva sem semente")?;
+        if !fs_verdade(
+            &chave_so(pessoa, "key.destroy", "chave:bancada-2"),
+            "destroyed",
+        ) {
+            return Err("a chave nao foi destruida");
+        }
+        let p = alloc::format!(r#"{{"owner":"{outro_dono}","key":"chave:bancada"}}"#);
+        admin_espera(0, &ADMIN_DE_TESTE, "key.revoke", &p, None)?;
+        // A semente da destruída ainda está na região: a criação dela.
+        if !a_semente_esta_no_journal(&semente_da_destruida)? {
+            return Err("a semente da chave criada nao chegou ao journal");
+        }
+        let antes = retrato_das_chaves();
+        let estados: alloc::vec::Vec<&str> = antes.iter().map(|c| c.3).collect();
+        if estados != ["active", "destroyed", "annulled"]
+            && estados != ["annulled", "active", "destroyed"]
+        {
+            crate::log_error!("teste", "{:?}", antes);
+            return Err("a tabela nao tem as tres chaves do caso");
+        }
+
+        // A reposição sobre a imagem, como no boot: as mesmas chaves, a
+        // viva assina igual, e as lápides não assinam.
+        let conferir = |etapa: &str| -> Resultado {
+            if retrato_das_chaves() != antes {
+                crate::log_error!(
+                    "teste",
+                    "{}: {:?} / {:?}",
+                    etapa,
+                    retrato_das_chaves(),
+                    antes
+                );
+                return Err("as chaves repostas nao sao as de antes");
+            }
+            let (privada, _, d) = crate::chaves::para_assinar(&dono, "bancada", DOMINIO_DE_TESTE)
+                .map_err(|_| "a chave viva reposta nao assina")?;
+            if sigilo::hex_de(&privada.assinar(&d, &resumo)) != assinatura {
+                return Err("a chave viva reposta assina outra coisa: outra privada");
+            }
+            for (de, nome) in [
+                (dono.as_str(), "bancada-2"),
+                (outro_dono.as_str(), "bancada"),
+            ] {
+                if crate::chaves::para_assinar(de, nome, DOMINIO_DE_TESTE).is_ok() {
+                    return Err("uma lapide reposta assinou");
+                }
+            }
+            Ok(())
+        };
+        estado_do_journal()?;
+        conferir("reposicao")?;
+        // A compactação: a região nova tem a viva e as lápides, e não a
+        // semente da destruída.
+        crate::persistencia::compactar_de_teste()?;
+        if a_semente_esta_no_journal(&semente_da_destruida)? {
+            return Err("a compactacao levou a semente da chave destruida");
+        }
+        if !a_semente_esta_no_journal(&semente_da_viva)? {
+            return Err("a compactacao nao levou a chave viva");
+        }
+        estado_do_journal()?;
+        conferir("compactacao")
+    })
+}
+
+/// A revogação do dono, pela operação administrativa, grava a lápide de
+/// cada chave dele **antes** da revogação, no mesmo registro: reposta, a
+/// revogação não acha chave viva, e não anula de novo — nenhum `key.annul`
+/// a mais a cada boot.
+fn chaves_a_revogacao_reposta_nao_anula_de_novo() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use diario::estado::tipo;
+    com_chaves(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(208), "chave-revogada-j", "operador");
+        let pessoa = Chamador::Pessoa(sessao);
+        let id = crate::pessoas::dona_da_sessao(sessao).ok_or("a sessao de teste nao tem dona")?;
+        for chave in ["chave:bancada", "chave:bancada-2"] {
+            if !fs_verdade(&criar_chave(pessoa, chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let anuladas = || {
+            crate::autorizacao::com_auditoria(|c| {
+                c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                    .filter(|r| r.evento.metodo == "key.annul")
+                    .count()
+            })
+            .unwrap_or(0)
+        };
+        let antes_da_revogacao = anuladas();
+        let p = alloc::format!(r#"{{"person":"{}"}}"#, id.texto());
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "person.revoke", &p, &p)?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a pessoa nao foi revogada");
+        }
+        let anuladas_na_revogacao = anuladas();
+        if anuladas_na_revogacao != antes_da_revogacao + 2 {
+            return Err("a revogacao nao anulou as duas chaves na auditoria");
+        }
+        // O registro da revogação: as lápides antes da revogação.
+        let ultimo = crate::persistencia::ler_de_teste()?
+            .into_iter()
+            .rev()
+            .find(|r| r.tipo == tipo::OPERACAO)
+            .ok_or("a revogacao nao foi gravada")?;
+        let tipos: alloc::vec::Vec<u16> = crate::persistencia::entradas_de_teste(&ultimo)?
+            .iter()
+            .filter_map(|e| {
+                let campos = diario::estado::ler_campos(e).ok()?;
+                Some(u16::from_le_bytes((*campos.first()?).try_into().ok()?))
+            })
+            .collect();
+        let lapides = tipos.iter().filter(|t| **t == tipo::CHAVE_MORTA).count();
+        let lapides_antes = tipos
+            .iter()
+            .position(|t| *t == tipo::PESSOA_REVOGADA)
+            .map(|i| {
+                tipos[..i]
+                    .iter()
+                    .filter(|t| **t == tipo::CHAVE_MORTA)
+                    .count()
+            });
+        if lapides != 2 || lapides_antes != Some(2) {
+            crate::log_error!("teste", "{:?}", tipos);
+            return Err("as lapides nao vao antes da revogacao no registro dela");
+        }
+        estado_do_journal()?;
+        if anuladas() != anuladas_na_revogacao {
+            return Err("a revogacao reposta anulou de novo");
+        }
+        let dono = id.texto();
+        for nome in ["bancada", "bancada-2"] {
+            if crate::chaves::ler(&dono, nome).map(|v| v.estado)
+                != Ok(crate::chaves::Estado::Anulada)
+            {
+                return Err("a chave do dono revogado nao voltou anulada");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Sem persistência, nenhuma chave nasce: um boot não a traria de volta.
+/// A gravação que falha desfaz a criação — sem lápide: o nome não foi de
+/// chave nenhuma —; a assinatura cujo registro não chegou ao journal não
+/// sai; e a destruição que não ficou gravada fica, até o boot.
+fn chaves_sem_o_journal_nada_nasce() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::persistencia::Estado;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(209),
+            "chave-sem-journal",
+            "operador",
+        );
+        let pessoa = Chamador::Pessoa(sessao);
+        let anterior =
+            crate::persistencia::forcar_estado_de_teste(Estado::Indisponivel("caso da suite"));
+        let r = criar_chave(pessoa, "chave:bancada");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if !chave_recusada(
+            &r,
+            "created",
+            "ERROR",
+            "sem persistencia, nenhuma chave nasce: um boot nao a traria de volta",
+        ) || crate::chaves::contagem_de_teste() != (0, 0)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("uma chave nasceu sem persistencia");
+        }
+        // A gravação que falha.
+        let anterior = crate::persistencia::forcar_estado_de_teste(Estado::Disponivel);
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = criar_chave(pessoa, "chave:bancada");
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if !chave_recusada(
+            &r,
+            "created",
+            "ERROR",
+            "a chave nao ficou gravada no journal: nenhuma nasceu",
+        ) || crate::chaves::contagem_de_teste() != (0, 0)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a criacao que nao ficou gravada nao se desfez");
+        }
+        if !fs_verdade(&criar_chave(pessoa, "chave:bancada"), "created") {
+            return Err("o nome da criacao desfeita ficou preso");
+        }
+        // A assinatura cujo registro não chega ao journal não sai: a
+        // auditoria vai antes da assinatura, e sem ela nada se assina.
+        let anterior = crate::persistencia::forcar_estado_de_teste(Estado::Disponivel);
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = assinar_com(
+            pessoa,
+            "chave:bancada",
+            DOMINIO_DE_TESTE,
+            &resumo_de_teste(9),
+        );
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if !chave_recusada(
+            &r,
+            "signed",
+            "ERROR",
+            "a auditoria da assinatura nao chegou ao journal: nada foi assinado",
+        ) || fs_texto(&r, "signature").is_some()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a assinatura saiu sem o registro dela no journal");
+        }
+        let anterior = crate::persistencia::forcar_estado_de_teste(Estado::Disponivel);
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = chave_so(pessoa, "key.destroy", "chave:bancada");
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if !chave_recusada(
+            &r,
+            "destroyed",
+            "ERROR",
+            "a destruicao nao ficou gravada no journal: a chave fica destruida ate o boot",
+        ) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a destruicao que nao ficou gravada nao se disse");
+        }
+        let r = chave_so(pessoa, "key.read", "chave:bancada");
+        if fs_texto(&r, "state").as_deref() != Some("destroyed")
+            || crate::chaves::para_assinar(
+                &crate::pessoas::dona_da_sessao(sessao)
+                    .ok_or("a sessao de teste nao tem dona")?
+                    .texto(),
+                "bancada",
+                DOMINIO_DE_TESTE,
+            )
+            .is_ok()
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a destruicao que nao ficou gravada nao ficou na memoria");
+        }
+        Ok(())
+    })
+}
+
+/// Quem pede muda entre a decisão e o commit de uma assinatura: a sessão
+/// da pessoa é revogada, a credencial dela é suspensa; o agente é
+/// suspenso, a credencial dele é suspensa, o papel dele vira `observador`.
+/// Cada vez nada se assina, e a recusa é a da reconfirmação — de quem pede
+/// agora, e não de quem pediu ao gate. E a chave não é da sessão: revogada
+/// a sessão, a chave da pessoa fica viva, e ela, numa sessão nova, assina
+/// com a mesma chave — a mesma pública, a mesma assinatura do mesmo
+/// resumo. Soltas as suspensões e de volta o papel, o mesmo pedido assina,
+/// e nenhuma chave foi anulada: a contenção e o papel são de quem pede, e a
+/// chave é da identidade.
+fn chaves_quem_pede_muda_no_meio() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::contencao::Alvo;
+    use crate::pessoas::Console;
+    use core::sync::atomic::Ordering;
+    const FIO: u64 = 7_000_321;
+    const AGENTE: u8 = 44;
+    com_chaves(|| {
+        let nome = "chave-quem-muda";
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(217), nome, "operador");
+        let id = crate::pessoas::dona_da_sessao(sessao).ok_or("a sessao de teste nao tem dona")?;
+        PESSOA_DO_MEIO.store(u64::from_le_bytes(id.0), Ordering::Release);
+        SESSAO_DO_MEIO.store(u64::from_le_bytes(sessao.0), Ordering::Release);
+        let processo = |sessao| Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", "key.create key.read key.sign")),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        let resumo = resumo_de_teste(10);
+        let assinar = |quem| assinar_com(quem, "chave:bancada", DOMINIO_DE_TESTE, &resumo);
+        let publica = publica_de(&criar_chave(processo(sessao), "chave:bancada"))
+            .ok_or("a pessoa nao criou a chave do caso")?;
+        let assinatura = fs_texto(&assinar(processo(sessao)), "signature")
+            .ok_or("sem nada no meio, a pessoa nao assinou")?;
+
+        // A sessão revogada no meio.
+        fn revogar_a_sessao() {
+            let s = SESSAO_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let _ = crate::pessoas::revogar_sessao(crate::pessoas::IdSessao(s.to_le_bytes()));
+        }
+        assinatura_recusada_no_commit(
+            processo(sessao),
+            revogar_a_sessao,
+            "chave:bancada",
+            "DENY_NOT_AUTHENTICATED",
+        )?;
+        // A chave era da pessoa, e não da sessão: na sessão nova, a mesma.
+        let nova = crate::pessoas::sessao_de_teste(Console::Terminal(218), nome, "operador");
+        if crate::pessoas::dona_da_sessao(nova) != Some(id) {
+            return Err("a sessao nova nao e da mesma pessoa");
+        }
+        let lida = chave_so(processo(nova), "key.read", "chave:bancada");
+        let de_novo = assinar(processo(nova));
+        if fs_texto(&lida, "state").as_deref() != Some("active")
+            || publica_de(&lida) != Some(publica)
+            || fs_texto(&de_novo, "signature").as_deref() != Some(assinatura.as_str())
+        {
+            crate::log_error!("teste", "{} / {}", lida, de_novo);
+            return Err("revogada a sessao, a chave nao ficou com a pessoa");
+        }
+
+        // A credencial da pessoa suspensa no meio; solta, assina.
+        fn suspender_a_pessoa() {
+            let id = PESSOA_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let _ = crate::contencao::conter(&crate::contencao::Alvo::Pessoa(
+                sigilo::pessoas::IdPessoa(id.to_le_bytes()),
+            ));
+        }
+        assinatura_recusada_no_commit(
+            processo(nova),
+            suspender_a_pessoa,
+            "chave:bancada",
+            "DENY_CREDENTIAL",
+        )?;
+        crate::contencao::soltar(&Alvo::Pessoa(id));
+        if !fs_verdade(&assinar(processo(nova)), "signed") {
+            return Err("solta a credencial, a pessoa nao assinou");
+        }
+
+        // O agente, pelo mesmo caminho: suspenso, a credencial dele
+        // suspensa, o papel dele trocado.
+        AGENTE_DO_MEIO.store(AGENTE, Ordering::Release);
+        let (chave_do_agente, agente) = processo_de_agente_operador(AGENTE);
+        if publica_de(&criar_chave(agente, "chave:bancada")).is_none() {
+            return Err("o agente nao criou a chave do caso");
+        }
+        fn suspender_o_agente() {
+            let n = AGENTE_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let k = sigilo::publica_de(&chave_de_teste(n));
+            let _ = crate::contencao::conter(&crate::contencao::Alvo::Agente(k));
+        }
+        fn suspender_a_credencial_do_agente() {
+            let n = AGENTE_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let k = sigilo::publica_de(&chave_de_teste(n));
+            let _ = crate::contencao::conter(&crate::contencao::Alvo::ChaveDeAgente(k));
+        }
+        fn rebaixar_o_agente() {
+            let n = AGENTE_DO_MEIO.load(core::sync::atomic::Ordering::Acquire);
+            let _ = crate::identidade::atribuir(&nome_de_teste(n), "observador");
+        }
+        assinatura_recusada_no_commit(
+            agente,
+            suspender_o_agente,
+            "chave:bancada",
+            "DENY_CONTAINED",
+        )?;
+        crate::contencao::soltar(&Alvo::Agente(chave_do_agente));
+        if !fs_verdade(&assinar(agente), "signed") {
+            return Err("solto, o agente nao assinou");
+        }
+        assinatura_recusada_no_commit(
+            agente,
+            suspender_a_credencial_do_agente,
+            "chave:bancada",
+            "DENY_CREDENTIAL",
+        )?;
+        crate::contencao::soltar(&Alvo::ChaveDeAgente(chave_do_agente));
+        if !fs_verdade(&assinar(agente), "signed") {
+            return Err("solta a credencial, o agente nao assinou");
+        }
+        assinatura_recusada_no_commit(
+            agente,
+            rebaixar_o_agente,
+            "chave:bancada",
+            "DENY_PERMISSION",
+        )?;
+        crate::identidade::atribuir(&nome_de_teste(AGENTE), "operador")
+            .map_err(|_| "o papel do agente nao voltou")?;
+        if !fs_verdade(&assinar(agente), "signed") {
+            return Err("de volta ao papel, o agente nao assinou");
+        }
+        if crate::chaves::contagem_de_teste() != (2, 2) {
+            return Err("uma suspensao ou um papel trocado mexeu nas chaves");
+        }
+        Ok(())
+    })
+}
+
+/// Duas coisas ao mesmo tempo, em dois fios do kernel, cada um um processo
+/// da mesma pessoa:
+///
+/// - os dois assinando com a mesma chave, cada um oito resumos seus: cada
+///   assinatura confere com a pública, e é uma decisão do gate e um
+///   registro — o do processo que pediu, com o resumo que ele pediu, e a
+///   decisão dele;
+/// - os dois criando o mesmo nome: a criação inteira vai com a ordem das
+///   gravações, e uma nasce; a outra ouve que a chave já existe
+///   (`CONFLICT`), e a tabela fica com uma.
+fn chaves_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIO: u64 = 7_000_331;
+    const VEZES: u8 = 8;
+    static SESSAO: AtomicU64 = AtomicU64::new(0);
+    static CONFEREM: AtomicU64 = AtomicU64::new(0);
+    static NAO_CONFEREM: AtomicU64 = AtomicU64::new(0);
+    static CRIADAS: AtomicU64 = AtomicU64::new(0);
+    static CONFLITOS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    fn processo(i: u64) -> Chamador {
+        Chamador::Processo {
+            fio: FIO + i,
+            autoridade: Autoridade::Pessoa {
+                sessao: crate::pessoas::IdSessao(SESSAO.load(SeqCst).to_le_bytes()),
+            },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", "key.create key.read key.sign")),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        }
+    }
+    // O resumo da vez `v` do processo `i`: nenhum se repete.
+    fn resumo(i: u64, v: u8) -> [u8; 32] {
+        [0x40 + 0x10 * i as u8 + v; 32]
+    }
+    extern "C" fn assinante(i: u64) -> ! {
+        let quem = processo(i);
+        let d = crate::chaves::dominio(DOMINIO_DE_TESTE);
+        let publica = publica_de(&chave_so(quem, "key.read", "chave:bancada"));
+        for v in 0..VEZES {
+            let r = resumo(i, v);
+            let s = fs_texto(
+                &assinar_com(quem, "chave:bancada", DOMINIO_DE_TESTE, &sigilo::hex(&r)),
+                "signature",
+            )
+            .and_then(|s| sigilo::de_hex_fixo::<64>(&s));
+            let confere = match (&d, publica, s) {
+                (Some(d), Some(p), Some(s)) => sigilo::chaves::conferir(&p, d, &r, &s),
+                _ => false,
+            };
+            if confere {
+                CONFEREM.fetch_add(1, SeqCst);
+            } else {
+                NAO_CONFEREM.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn criador(i: u64) -> ! {
+        let r = criar_chave(processo(i), "chave:bancada-2");
+        if fs_verdade(&r, "created") {
+            CRIADAS.fetch_add(1, SeqCst);
+        } else if chave_recusada(&r, "created", "CONFLICT", "a chave ja existe") {
+            CONFLITOS.fetch_add(1, SeqCst);
+        } else {
+            crate::log_error!("teste", "{}", r);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    com_chaves(|| {
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(219),
+            "chave-ao-mesmo-tempo",
+            "operador",
+        );
+        SESSAO.store(u64::from_le_bytes(sessao.0), SeqCst);
+        for a in [&CONFEREM, &NAO_CONFEREM, &CRIADAS, &CONFLITOS, &PRONTOS] {
+            a.store(0, SeqCst);
+        }
+        if publica_de(&criar_chave(processo(0), "chave:bancada")).is_none() {
+            return Err("a pessoa nao criou a chave do caso");
+        }
+
+        // Os dois assinando.
+        let antes = crate::autorizacao::ultimo_registro();
+        crate::fios::criar("teste-assina-a", assinante, 0)?;
+        crate::fios::criar("teste-assina-b", assinante, 1)?;
+        esperar_ate(|| PRONTOS.load(SeqCst) == 2, 3000)
+            .map_err(|_| "os dois processos nao acabaram de assinar")?;
+        if CONFEREM.load(SeqCst) != 2 * u64::from(VEZES) || NAO_CONFEREM.load(SeqCst) != 0 {
+            crate::log_error!(
+                "teste",
+                "{} conferem, {} nao",
+                CONFEREM.load(SeqCst),
+                NAO_CONFEREM.load(SeqCst)
+            );
+            return Err("uma assinatura dos dois processos ao mesmo tempo nao conferiu");
+        }
+        // Um registro por assinatura, do processo que a pediu, com o resumo
+        // dele e uma decisão só dele.
+        let mut decisoes = alloc::vec::Vec::new();
+        for i in 0..2u64 {
+            for v in 0..VEZES {
+                let recurso = alloc::format!(
+                    "chave:bancada {DOMINIO_DE_TESTE} {}",
+                    sigilo::hex(&resumo(i, v))
+                );
+                let deste = alloc::format!("pelo processo {} (", FIO + i);
+                let feitos: alloc::vec::Vec<_> = crate::autorizacao::com_auditoria(|c| {
+                    c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                        .filter(|r| r.seq > antes && r.evento.recurso == recurso)
+                        .map(|r| r.evento.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+                let [feito] = feitos.as_slice() else {
+                    crate::log_error!("teste", "{}: {:?}", recurso, feitos);
+                    return Err("uma assinatura nao teve exatamente um registro");
+                };
+                let decisao = decisao_executada(&feito.detalhe)
+                    .ok_or("o registro de uma assinatura sem a decisao")?;
+                let decidido = registro_numero(decisao).ok_or("a decisao nao esta no anel")?;
+                if feito.metodo != "key.sign"
+                    || feito.codigo != politica::Codigo::Allow
+                    || !feito.detalhe.starts_with(&deste)
+                    || decidido.metodo != "key.sign"
+                    || decidido.codigo != politica::Codigo::Allow
+                    || !decidido.detalhe.starts_with(&deste)
+                {
+                    crate::log_error!("teste", "{:?} / {:?}", feito, decidido);
+                    return Err("o registro de uma assinatura nao e do processo que a pediu");
+                }
+                decisoes.push(decisao);
+            }
+        }
+        decisoes.sort_unstable();
+        decisoes.dedup();
+        if decisoes.len() != 2 * usize::from(VEZES) {
+            return Err("duas assinaturas dividiram uma decisao");
+        }
+
+        // Os dois criando o mesmo nome.
+        PRONTOS.store(0, SeqCst);
+        crate::fios::criar("teste-cria-a", criador, 0)?;
+        crate::fios::criar("teste-cria-b", criador, 1)?;
+        esperar_ate(|| PRONTOS.load(SeqCst) == 2, 3000)
+            .map_err(|_| "as duas criacoes nao acabaram")?;
+        if CRIADAS.load(SeqCst) != 1 || CONFLITOS.load(SeqCst) != 1 {
+            crate::log_error!(
+                "teste",
+                "{} criadas, {} conflitos",
+                CRIADAS.load(SeqCst),
+                CONFLITOS.load(SeqCst)
+            );
+            return Err("duas criacoes do mesmo nome nao deram uma chave e um conflito");
+        }
+        if crate::chaves::contagem_de_teste() != (2, 2) {
+            return Err("as duas criacoes do mesmo nome deixaram mais de uma chave");
         }
         Ok(())
     })
@@ -43964,6 +44787,16 @@ fn linhas_do_programa(desde: u64, procurada: &str) -> usize {
     n
 }
 
+/// Quantas linhas de programa desde `desde` começam com `prefixo`.
+fn linhas_que_comecam(desde: u64, prefixo: &str) -> usize {
+    let mut n = 0;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        n += (r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(prefixo))
+            as usize;
+    });
+    n
+}
+
 /// Toda recusa diz por quê e o que fazer — estruturada para o agente, numa
 /// frase para a pessoa — sem ser uma segunda decisão: o número do `explain`
 /// é o registro da auditoria que a gravou, e o `security.explain` dele a
@@ -47805,10 +48638,34 @@ const ICP_RECUSA: i64 = 3;
 const ICP_CANDID: i64 = 4;
 const ICP_PRINCIPAL_INVALIDO: i64 = 5;
 const ICP_SAIR_SEM_FECHAR: i64 = 6;
+const ICP_QUEM: i64 = 7;
+const ICP_CONTAR: i64 = 8;
+const ICP_LENTO: i64 = 9;
+const ICP_RECUSA_NA_CHAMADA: i64 = 10;
+const ICP_SEM_CANISTER: i64 = 11;
+
+/// O `c` de uma chamada do `icp`: zero é o anônimo; 1 e 2, as chaves
+/// `chave:bancada` e `chave:bancada-2` de quem o lançou; somado
+/// [`ICP_NA_RAIZ`], o mesmo no canister da sub-rede raiz.
+const ICP_ANONIMO: i64 = 0;
+const ICP_CHAVE: i64 = 1;
+const ICP_CHAVE_2: i64 = 2;
+const ICP_NA_RAIZ: i64 = 10;
+
+/// O Principal anônimo, em texto.
+const PRINCIPAL_ANONIMO: &str = "2vxsx-fae";
+
+/// O canister da bancada na sub-rede raiz, e o primeiro grupo do texto
+/// dela — a NNS da PocketIC fixada.
+const CANISTER_DA_RAIZ_ICP: &str = "xp3jw-ot777-77777-aaaaa-cai";
+const SUB_REDE_DA_RAIZ: &str = "hzklm";
+
+/// O canister seguinte ao da bancada, que não existe.
+const CANISTER_QUE_NAO_EXISTE: &str = "pp254-cl777-77776-aaaaq-cai";
 
 /// As redes de `/dados/icp/redes`, na ordem do programa: o índice é o `b`
 /// de um passo.
-const REDES_DO_ICP: [&str; 12] = [
+const REDES_DO_ICP: [&str; 13] = [
     "bancada",
     "lenta",
     "raiz-errada",
@@ -47821,11 +48678,14 @@ const REDES_DO_ICP: [&str; 12] = [
     "faixa-errada",
     "velho",
     "direta",
+    "assincrona",
 ];
 
-/// A rede honesta, pelo DNS da bancada, e a lenta.
+/// A rede honesta, pelo DNS da bancada, a lenta e a que responde a
+/// chamada com 202.
 const REDE_BANCADA: i64 = 0;
 const REDE_LENTA: i64 = 1;
+const REDE_ASSINCRONA: i64 = 12;
 
 /// Roda `f` com o DNS da bancada respondendo `icp.duke` com o gateway do
 /// IC — ver [`com_os_nomes_da_bancada`].
@@ -47876,6 +48736,11 @@ struct PassoDoIcp {
     hora: alloc::string::String,
     /// O que a verificação provou, ou por que não houve prova.
     detalhe: alloc::string::String,
+    /// Numa chamada que chegou ao fim, quem chamou: o Principal, da linha
+    /// `icp: <passo> remetente <principal>`, dita antes do desfecho.
+    remetente: Option<alloc::string::String>,
+    /// E o que voltou, da linha `icp: <passo> resposta <resposta>`.
+    resposta: Option<alloc::string::String>,
 }
 
 impl PassoDoIcp {
@@ -47891,6 +48756,8 @@ impl PassoDoIcp {
             declarada,
             hora,
             detalhe,
+            remetente: None,
+            resposta: None,
         })
     }
 
@@ -47904,7 +48771,7 @@ impl Icp {
     /// Lança o `icp` com `autoridade` e espera ele ler as âncoras do TLS e
     /// as redes, pelo gate.
     fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Icp, &'static str> {
-        Icp::lancar_em(autoridade, "teste-icp", "icp: pronto (12 redes)")
+        Icp::lancar_em(autoridade, "teste-icp", "icp: pronto (13 redes)")
     }
 
     /// Lança um segundo `icp`, com o primeiro vivo: ele escuta o outro
@@ -47913,7 +48780,7 @@ impl Icp {
         Icp::lancar_em(
             autoridade,
             "teste-icp-2",
-            "icp: pronto pelo segundo canal (12 redes)",
+            "icp: pronto pelo segundo canal (13 redes)",
         )
     }
 
@@ -47959,7 +48826,18 @@ impl Icp {
             TETO_DO_ICP,
         );
         match (r, dito) {
-            (Ok(()), Some(dito)) => Ok(dito),
+            (Ok(()), Some(mut dito)) => {
+                // Numa chamada, quem chamou e o que voltou: cada um na sua
+                // linha, antes do desfecho.
+                let linha = |qual: &str| {
+                    let prefixo = alloc::format!("icp: {passo} {qual} ");
+                    linha_que_comeca(desde, &prefixo)
+                        .and_then(|l| l.strip_prefix(prefixo.as_str()).map(Into::into))
+                };
+                dito.remetente = linha("remetente");
+                dito.resposta = linha("resposta");
+                Ok(dito)
+            }
             _ => {
                 crate::log_error!("teste", "o icp nao disse `{}`", prefixo);
                 Err("o icp nao disse o desfecho do passo")
@@ -48060,7 +48938,18 @@ fn declaracao_do_icp(fio: u64, passo: &PassoDoIcp, metodo: &str, ancorada: bool)
 /// nome do gateway — as decisões do gate são sobre destinos, arquivos, a
 /// semente e o relógio, e o kernel não leu o que se declarou.
 fn o_ic_so_na_alegacao(fio: u64) -> Resultado {
-    const DO_IC: [&str; 5] = ["pi33i", "icp.query", "icp.duke", "read_state", "/ola"];
+    const DO_IC: [&str; 10] = [
+        "pi33i",
+        "xp3jw",
+        "pp254",
+        "icp.query",
+        "icp.update",
+        "icp.duke",
+        "read_state",
+        "request_status",
+        "/call",
+        "/ola",
+    ];
     let do_processo = alloc::format!("pelo processo {fio} (");
     let fora = crate::autorizacao::com_auditoria(|c| {
         c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
@@ -48204,8 +49093,13 @@ fn icp_a_consulta_verificada_pelo_gate() -> Resultado {
             if outros_destinos != 0 {
                 return Err("o icp conectou a um destino que nao e o gateway nem o DNS");
             }
+            // O arquivo das redes vai em pedaços de 4 KiB, uma decisão cada.
+            let redes = crate::vfs::ler_tudo("/dados/icp/redes")
+                .map_err(|_| "a imagem nao tem o arquivo das redes")?
+                .len()
+                .div_ceil(4096);
             for (metodo, recurso, vezes) in [
-                ("fs.read", "/dados/icp/redes", 1),
+                ("fs.read", "/dados/icp/redes", redes),
                 ("fs.read", "/dados/tls/bancada.pem", 1),
                 ("random.read", "", 2 * passos.len()),
                 ("system.info", "", 2 * passos.len()),
@@ -48767,6 +49661,1037 @@ fn icp_duas_consultas_ao_mesmo_tempo() -> Resultado {
         let fim_a = a.encerrar();
         let fim_b = b.encerrar();
         r.and(fim_a).and(fim_b)
+    })
+}
+
+/// O Principal do IC que o `icp` diz ter chamado, as leituras da situação e
+/// o que o canister respondeu: o remetente e a resposta das linhas deles, e
+/// as leituras do fim do detalhe — `prova <sub-rede> <delegada|da raiz>
+/// leituras <n>`.
+fn remetente_e_resposta(p: &PassoDoIcp) -> Option<(&str, u64, &str)> {
+    let (_, leituras) = p.detalhe.rsplit_once(" leituras ")?;
+    Some((
+        p.remetente.as_deref()?,
+        leituras.parse().ok()?,
+        p.resposta.as_deref()?,
+    ))
+}
+
+/// As assinaturas que o `icp` diz ter pedido numa chamada, e o resto do
+/// detalhe.
+fn assinaturas_do_passo(p: &PassoDoIcp) -> Option<(u64, &str)> {
+    let resto = p.detalhe.strip_prefix("assinaturas ")?;
+    let (n, resto) = resto.split_once("; ")?;
+    Some((n.parse().ok()?, resto))
+}
+
+/// As execuções de `key.sign` que assinaram, do processo `fio`, depois do
+/// registro `desde`: o número e o evento — a chave, o domínio, o resumo e
+/// a impressão.
+fn assinaturas_do_processo(
+    fio: u64,
+    desde: u64,
+) -> alloc::vec::Vec<(u64, politica::auditoria::Evento)> {
+    let prefixo = do_processo(fio);
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| {
+                r.seq > desde
+                    && r.evento.metodo == "key.sign"
+                    && r.evento.codigo == politica::Codigo::Allow
+                    && r.evento.detalhe.starts_with(&prefixo)
+                    && r.evento.detalhe.contains("): assinatura ed25519 ")
+            })
+            .map(|r| (r.seq, r.evento.clone()))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A declaração de uma chamada do `icp`: a alegação no recurso —
+/// `icp.update <canister>/<metodo> <desfecho>` — e, no detalhe, a âncora
+/// que o kernel escreveu: a decisão da assinatura da chamada, com o método
+/// dela; ou a conexão, do anônimo.
+fn declaracao_da_chamada(
+    fio: u64,
+    p: &PassoDoIcp,
+    canister: &str,
+    metodo: &str,
+    ancora: Option<u64>,
+) -> Resultado {
+    let n = p.registro().ok_or("o icp nao declarou a chamada")?;
+    let e = registro_numero(n).ok_or("a declaracao da chamada nao esta no anel")?;
+    let alegacao = alloc::format!("icp.update {canister}/{metodo} {}", p.desfecho);
+    let pelo = alloc::format!("pelo processo {fio} (icp ");
+    let ancorada = match ancora {
+        Some(d) => e
+            .detalhe
+            .contains(&alloc::format!("): ancorada em {d} key.sign; decisao ")),
+        None => e.detalhe.contains("): conexao ") && e.detalhe.contains(GATEWAY_ICP),
+    };
+    if e.metodo != "audit.declare"
+        || e.codigo != politica::Codigo::Allow
+        || e.recurso != alegacao
+        || !e.detalhe.starts_with(&pelo)
+        || !ancorada
+    {
+        crate::log_error!("teste", "{:?} / {:?}", p, e);
+        return Err("a declaracao da chamada nao e a alegacao com a ancora do kernel");
+    }
+    Ok(())
+}
+
+/// A primeira assinatura de uma chamada, conferida: uma execução de
+/// `key.sign` de `chave` no domínio do pedido, com um resumo de 32 bytes e a
+/// impressão da chave, cuja decisão foi um `ALLOW` do gate sobre a chave,
+/// em nome de `titular`. Devolve a decisão.
+fn assinatura_da_chamada(
+    assinada: &politica::auditoria::Evento,
+    chave: &str,
+    impressao: &str,
+    titular: politica::auditoria::Titular,
+) -> Result<u64, &'static str> {
+    let decisao = decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+    let decidida = registro_numero(decisao).ok_or("a decisao da assinatura saiu do anel")?;
+    let resumo = assinada
+        .recurso
+        .strip_prefix(&alloc::format!("{chave} {DOMINIO_DE_TESTE} "))
+        .filter(|r| r.len() == 64 && r.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("a assinatura nao gravou a chave, o dominio e o resumo")?;
+    if !assinada.detalhe.contains(&alloc::format!(
+        "): assinatura ed25519 {impressao}; decisao "
+    )) || decidida.metodo != "key.sign"
+        || decidida.recurso != chave
+        || decidida.codigo != politica::Codigo::Allow
+        || decidida.titular != titular
+        || resumo.is_empty()
+    {
+        crate::log_error!("teste", "{:?} / {:?}", assinada, decidida);
+        return Err("a assinatura nao foi a decisao do gate sobre a chave de quem lancou");
+    }
+    Ok(decisao)
+}
+
+/// A chamada de atualização assinada, de ponta a ponta, por uma pessoa
+/// operadora: a chave `chave:bancada` dela, criada por ela pelo gate, e o
+/// `icp` lançado por ela. O canister responde a quem chamou — o Principal
+/// auto-autenticado da pública da chave —, e o `icp` confere o certificado
+/// da resposta até a raiz. Aqui se confere o outro lado:
+///
+/// - cada chamada assinada foi uma decisão do gate sobre `chave:bancada`,
+///   em nome da pessoa, pelo processo, e a execução na auditoria leva a
+///   chave, o domínio, o resumo — o id do pedido — e a impressão, e nada
+///   do IC: o kernel não sabe de canister, método nem Principal;
+/// - a declaração vai ancorada na decisão da assinatura da chamada;
+/// - o contador do canister anda: a chamada muda estado;
+/// - o mesmo `quem`, do anônimo, responde o Principal anônimo, sem
+///   assinatura nenhuma, e a declaração vai ancorada na conexão.
+fn icp_a_chamada_assinada_e_verificada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(205), "icp-chave", "operador");
+        let r = criar_chave(Chamador::Pessoa(sessao), "chave:bancada");
+        let impressao = fs_texto(&r, "fingerprint").ok_or("a pessoa nao criou a chave")?;
+        let antes = crate::autorizacao::ultimo_registro();
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let p = icp.passo(
+                ICP_QUEM,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "quem bancada chave:bancada",
+            )?;
+            let (assinaturas, prova) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let (remetente, leituras, resposta) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            if p.desfecho != "verified"
+                || assinaturas != 1
+                || leituras != 0
+                || resposta != alloc::format!("principal {remetente}")
+                || remetente == PRINCIPAL_ANONIMO
+                || !prova.starts_with(&alloc::format!("prova {SUB_REDE_DA_BANCADA} delegada "))
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada assinada nao respondeu o principal da chave");
+            }
+            let feitas = assinaturas_do_processo(fio, antes);
+            let [(_, assinada)] = feitas.as_slice() else {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("a chamada nao foi uma assinatura do kernel");
+            };
+            let decisao = assinatura_da_chamada(
+                assinada,
+                "chave:bancada",
+                &impressao,
+                politica::auditoria::Titular::Pessoa,
+            )?;
+            declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisao))?;
+
+            // O contador anda, pela mesma chave.
+            let um = icp.passo(
+                ICP_CONTAR,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "contar bancada chave:bancada",
+            )?;
+            let dois = icp.passo(
+                ICP_CONTAR,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "contar bancada chave:bancada",
+            )?;
+            let contado = |p: &PassoDoIcp| {
+                remetente_e_resposta(p)
+                    .and_then(|(_, _, r)| r.strip_prefix("nat64 ")?.parse::<u64>().ok())
+            };
+            match (contado(&um), contado(&dois)) {
+                (Some(a), Some(b)) if b == a + 1 && um.desfecho == "verified" => {}
+                _ => {
+                    crate::log_error!("teste", "{:?} / {:?}", um, dois);
+                    return Err("o contador do canister nao andou com as chamadas");
+                }
+            }
+
+            // O método que demora: a resposta síncrona, mais tarde.
+            let p = icp.passo(
+                ICP_LENTO,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "lento bancada chave:bancada",
+            )?;
+            let resposta = remetente_e_resposta(&p).map(|(_, _, r)| r);
+            if p.desfecho != "verified" || resposta != Some("texto lento") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada que demora nao verificou");
+            }
+
+            // Do anônimo: o Principal anônimo, sem assinatura, ancorada na
+            // conexão.
+            let p = icp.passo(ICP_QUEM, REDE_BANCADA, ICP_ANONIMO, "quem bancada anonimo")?;
+            let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let (remetente, _, resposta) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            if p.desfecho != "verified"
+                || assinaturas != 0
+                || remetente != PRINCIPAL_ANONIMO
+                || resposta != alloc::format!("principal {PRINCIPAL_ANONIMO}")
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada anonima nao respondeu o anonimo");
+            }
+            declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", None)?;
+            if assinaturas_do_processo(fio, antes).len() != 4 {
+                return Err("a chamada anonima pediu uma assinatura");
+            }
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// O Principal é da chave, e só dela: duas chaves da mesma pessoa, a chave
+/// de outra pessoa e a de um agente dão quatro Principais diferentes, e a
+/// mesma chave, o mesmo de novo. Pessoa e agente seguem o mesmo caminho —
+/// a chave da identidade durável de quem lançou o processo, pelo gate —, e
+/// o Principal não é identidade do Duke: nenhum registro do kernel o tem.
+fn icp_cada_chave_e_um_principal() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let a = crate::pessoas::sessao_de_teste(Console::Terminal(206), "icp-dono-a", "operador");
+        let b = crate::pessoas::sessao_de_teste(Console::Terminal(207), "icp-dono-b", "operador");
+        let (chave_do_agente, agente) = processo_de_agente_operador(43);
+        for (quem, chave) in [
+            (Chamador::Pessoa(a), "chave:bancada"),
+            (Chamador::Pessoa(a), "chave:bancada-2"),
+            (Chamador::Pessoa(b), "chave:bancada"),
+            (agente, "chave:bancada"),
+        ] {
+            if !fs_verdade(&criar_chave(quem, chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let quem_responde = |autoridade: Autoridade, c: i64, passo: &str| {
+            let icp = Icp::lancar(autoridade)?;
+            let p = icp.passo(ICP_QUEM, REDE_BANCADA, c, passo);
+            let fio = icp.fio;
+            let fim = icp.encerrar();
+            let p = p?;
+            fim?;
+            assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let (remetente, _, resposta) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            if p.desfecho != "verified" || resposta != alloc::format!("principal {remetente}") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada de um dono nao verificou");
+            }
+            o_ic_so_na_alegacao(fio)?;
+            Ok(alloc::string::String::from(remetente))
+        };
+        let agente = Autoridade::Sessao {
+            sessao: 1,
+            chave: Some(chave_do_agente),
+        };
+        let a1 = quem_responde(
+            Autoridade::Pessoa { sessao: a },
+            ICP_CHAVE,
+            "quem bancada chave:bancada",
+        )?;
+        let a2 = quem_responde(
+            Autoridade::Pessoa { sessao: a },
+            ICP_CHAVE_2,
+            "quem bancada chave:bancada-2",
+        )?;
+        let b1 = quem_responde(
+            Autoridade::Pessoa { sessao: b },
+            ICP_CHAVE,
+            "quem bancada chave:bancada",
+        )?;
+        let g1 = quem_responde(agente, ICP_CHAVE, "quem bancada chave:bancada")?;
+        let de_novo = quem_responde(
+            Autoridade::Pessoa { sessao: a },
+            ICP_CHAVE,
+            "quem bancada chave:bancada",
+        )?;
+        let todos = [&a1, &a2, &b1, &g1];
+        let distintos = todos
+            .iter()
+            .enumerate()
+            .all(|(i, x)| todos.iter().skip(i + 1).all(|y| x != y));
+        if !distintos || de_novo != a1 || todos.iter().any(|p| p.as_str() == PRINCIPAL_ANONIMO) {
+            crate::log_error!("teste", "{:?} / {}", todos, de_novo);
+            return Err("cada chave nao deu o seu principal, ou a mesma chave deu outro");
+        }
+        // O kernel não tem o Principal em registro nenhum.
+        let algum = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
+                .any(|r| {
+                    let e = alloc::format!("{:?}", r.evento);
+                    todos.iter().any(|p| e.contains(p.as_str()))
+                })
+        })
+        .unwrap_or(true);
+        crate::chaves::esquecer_de_teste();
+        if algum {
+            return Err("um principal do IC apareceu num registro do kernel");
+        }
+        Ok(())
+    })
+}
+
+/// A chamada que fica pendente: a rede `assincrona` responde 202 na hora e
+/// só entrega a chamada à PocketIC depois. O `icp` acompanha a situação por
+/// `read_state` de `request_status`, cada leitura **assinada de novo** — uma
+/// decisão do gate por assinatura —, com uma espera decidida pelo gate
+/// entre elas, até o certificado provar a resposta. Do anônimo, as mesmas
+/// leituras, sem assinatura nenhuma.
+fn icp_a_chamada_pendente_e_acompanhada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(208), "icp-pendente", "operador");
+        let r = criar_chave(Chamador::Pessoa(sessao), "chave:bancada");
+        let impressao = fs_texto(&r, "fingerprint").ok_or("a pessoa nao criou a chave")?;
+        let antes = crate::autorizacao::ultimo_registro();
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            let passo = "quem assincrona chave:bancada";
+            let p = icp.passo(ICP_QUEM, REDE_ASSINCRONA, ICP_CHAVE, passo)?;
+            let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let (remetente, leituras, resposta) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            let pendentes = linhas_que_comecam(desde, &alloc::format!("icp: {passo} pendente "));
+            if p.desfecho != "verified"
+                || leituras == 0
+                || assinaturas != 1 + leituras
+                || pendentes as u64 != leituras
+                || resposta != alloc::format!("principal {remetente}")
+            {
+                crate::log_error!("teste", "{:?} / {} pendentes", p, pendentes);
+                return Err("a chamada pendente nao foi acompanhada ate a resposta");
+            }
+            // Cada assinatura foi uma decisão do gate sobre a chave: a da
+            // chamada, e uma por leitura.
+            let feitas = assinaturas_do_processo(fio, antes);
+            if feitas.len() as u64 != assinaturas {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("cada leitura da situacao nao foi uma assinatura do kernel");
+            }
+            let mut decisoes = alloc::vec::Vec::new();
+            for (_, assinada) in &feitas {
+                decisoes.push(assinatura_da_chamada(
+                    assinada,
+                    "chave:bancada",
+                    &impressao,
+                    politica::auditoria::Titular::Pessoa,
+                )?);
+            }
+            let resumos: alloc::collections::BTreeSet<&str> =
+                feitas.iter().map(|(_, e)| e.recurso.as_str()).collect();
+            if resumos.len() != feitas.len() {
+                return Err("duas assinaturas do acompanhamento assinaram o mesmo pedido");
+            }
+            declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisoes[0]))?;
+            // A espera entre as leituras é do gate, como qualquer leitura.
+            let esperas = registros_do_processo(fio, antes)
+                .into_iter()
+                .filter(|(m, d, _, _)| m == "net.recv" && d == GATEWAY_ICP)
+                .count();
+            if (esperas as u64) < leituras {
+                return Err("a espera entre as leituras nao passou pelo gate");
+            }
+
+            // Do anônimo: as mesmas leituras, sem assinatura.
+            let desde = crate::log::total_emitidos();
+            let passo = "quem assincrona anonimo";
+            let p = icp.passo(ICP_QUEM, REDE_ASSINCRONA, ICP_ANONIMO, passo)?;
+            let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let (remetente, leituras, _) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            if p.desfecho != "verified"
+                || assinaturas != 0
+                || leituras == 0
+                || remetente != PRINCIPAL_ANONIMO
+                || linhas_que_comecam(desde, &alloc::format!("icp: {passo} pendente ")) as u64
+                    != leituras
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada anonima pendente nao foi acompanhada");
+            }
+            declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", None)?;
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// O canister da sub-rede raiz: a prova da chamada vem sem delegação — a
+/// raiz assina —, e o certificado não traz as faixas dela; o `icp` as tem
+/// da leitura à parte de `["subnet"]`, que prova que o canister é da raiz,
+/// e confere o certificado da chamada nessa sub-rede. Assinada e do
+/// anônimo.
+fn icp_o_canister_da_sub_rede_raiz() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(209), "icp-raiz", "operador");
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a pessoa nao criou a chave");
+        }
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            for (c, passo, assinaturas_esperadas) in [
+                (
+                    ICP_NA_RAIZ + ICP_CHAVE,
+                    "quem bancada raiz chave:bancada",
+                    1,
+                ),
+                (ICP_NA_RAIZ + ICP_ANONIMO, "quem bancada raiz anonimo", 0),
+            ] {
+                let p = icp.passo(ICP_QUEM, REDE_BANCADA, c, passo)?;
+                let (assinaturas, prova) =
+                    assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                let (remetente, _, resposta) =
+                    remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+                if p.desfecho != "verified"
+                    || assinaturas != assinaturas_esperadas
+                    || resposta != alloc::format!("principal {remetente}")
+                    || !prova.starts_with(&alloc::format!("prova {SUB_REDE_DA_RAIZ} da raiz "))
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("a chamada ao canister da raiz nao verificou pela raiz");
+                }
+                let n = p.registro().ok_or("o icp nao declarou a chamada")?;
+                let e = registro_numero(n).ok_or("a declaracao nao esta no anel")?;
+                if !e
+                    .recurso
+                    .starts_with(&alloc::format!("icp.update {CANISTER_DA_RAIZ_ICP}/quem "))
+                {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("a declaracao nao foi a do canister da raiz");
+                }
+            }
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// As recusas da chamada, cada uma pelo que é: o canister que recusa — a
+/// prova da recusa está no certificado, `verified_reject` —, e a chamada a
+/// um canister que não existe na faixa provada, recusada antes do consenso:
+/// sem certificado, sem prova nenhuma, e dita à parte —
+/// `uncertified_reject` —, e não como verificação que falhou: o NSF não a
+/// conta como tal.
+fn icp_as_recusas_da_chamada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(210), "icp-recusas", "operador");
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a pessoa nao criou a chave");
+        }
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let p = icp.passo(
+                ICP_RECUSA_NA_CHAMADA,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "recusa bancada chave:bancada",
+            )?;
+            let resposta = remetente_e_resposta(&p).map(|(_, _, r)| r);
+            if p.desfecho != "verified_reject" || resposta != Some("recusa 4 IC0406") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a recusa do canister nao foi provada pelo certificado");
+            }
+            let p = icp.passo(
+                ICP_SEM_CANISTER,
+                REDE_BANCADA,
+                ICP_ANONIMO,
+                "quem bancada sem canister anonimo",
+            )?;
+            let resposta = remetente_e_resposta(&p).map(|(_, _, r)| r);
+            if p.desfecho != "uncertified_reject" || resposta != Some("recusa sem prova 3 IC0301") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a recusa antes do consenso nao foi dita a parte");
+            }
+            let n = p
+                .registro()
+                .ok_or("o icp nao declarou a recusa sem prova")?;
+            let e = registro_numero(n).ok_or("a declaracao nao esta no anel")?;
+            if e.recurso
+                != alloc::format!("icp.update {CANISTER_QUE_NAO_EXISTE}/quem uncertified_reject")
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a recusa sem prova nao foi declarada como tal");
+            }
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// Espera o `icp` dizer que o passo `passo` está pendente, desde `desde`,
+/// e dormir na espera decidida pelo gate antes da próxima leitura.
+fn icp_pendente_e_esperando(icp: &Icp, desde: u64, passo: &str) -> Resultado {
+    let pendente = alloc::format!("icp: {passo} pendente ");
+    esperar_ate(|| linhas_que_comecam(desde, &pendente) >= 1, TETO_DO_ICP)
+        .map_err(|_| "o icp nao ficou pendente")?;
+    let dono = crate::rede::conexoes::Dono::Processo(icp.fio);
+    let conexao = crate::rede::pilha::donos()
+        .into_iter()
+        .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+        .map(|(id, _, _)| id)
+        .max()
+        .ok_or("o icp nao tinha a conexao da chamada")?;
+    esperar_ate(
+        || crate::rede::pilha::espera_armada_de_teste(conexao),
+        TETO_DO_ICP,
+    )
+    .map_err(|_| "o icp nao chegou a esperar entre as leituras")
+}
+
+/// A chave anulada no meio do acompanhamento: a chamada assinada fica
+/// pendente, e o administrador anula a chave entre duas leituras. A leitura
+/// seguinte pede a assinatura, e o kernel recusa — a chave anulada não
+/// assina mais nada —: nenhuma leitura sai sem assinatura, o desfecho é
+/// `failed_signature`, e a declaração continua ancorada na decisão da
+/// assinatura da chamada, que foi um fato. E a pessoa revogada no meio do
+/// acompanhamento de outra chamada: as chaves dela anuladas, e nada mais
+/// assinado depois.
+fn icp_a_chave_anulada_no_meio_do_acompanhamento() -> Resultado {
+    com_a_bancada_icp(|| {
+        com_a_politica(
+            politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
+            icp_a_chave_anulada_no_meio_do_acompanhamento_com_a_politica,
+        )
+    })
+}
+
+/// O DNS da bancada também no alcance do administrador: o papel do dono de
+/// uma chave — o operador, com o DNS da bancada — cabe no de quem a anula,
+/// como a operação administrativa exige.
+const DNS_DA_BANCADA_PARA_O_ADMINISTRADOR: (&str, &str) = (
+    "recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+    "recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+);
+
+fn icp_a_chave_anulada_no_meio_do_acompanhamento_com_a_politica() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    {
+        crate::chaves::esquecer_de_teste();
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(211), "icp-anulada", "operador");
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a pessoa nao criou a chave");
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            let passo = "quem assincrona chave:bancada";
+            icp.pedir(ICP_QUEM, REDE_ASSINCRONA, ICP_CHAVE)?;
+            icp_pendente_e_esperando(&icp, desde, passo)?;
+            let p = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "key.revoke", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o administrador nao anulou a chave");
+            }
+            let anulada = crate::autorizacao::ultimo_registro();
+            let p = icp.dito(desde, passo)?;
+            if p.desfecho != "failed_signature"
+                || p.detalhe != "assinaturas 1; request_status: assinatura: INVALID_ARGUMENT"
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a leitura depois da anulacao nao foi recusada na assinatura");
+            }
+            if !assinaturas_do_processo(fio, anulada).is_empty() {
+                return Err("a chave anulada assinou");
+            }
+            let feitas = assinaturas_do_processo(fio, antes);
+            let [(_, assinada)] = feitas.as_slice() else {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("a chamada nao teve so a assinatura de antes da anulacao");
+            };
+            let decisao = decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+            declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisao))?;
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        let r = r.and(fim);
+
+        // A pessoa revogada no meio do acompanhamento.
+        let r = r.and_then(|()| {
+            let sessao =
+                crate::pessoas::sessao_de_teste(Console::Terminal(212), "icp-revogada", "operador");
+            let id =
+                crate::pessoas::dona_da_sessao(sessao).ok_or("a sessao de teste nao tem dona")?;
+            if !fs_verdade(
+                &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+                "created",
+            ) {
+                return Err("a pessoa nao criou a chave");
+            }
+            let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = icp.fio;
+            let desde = crate::log::total_emitidos();
+            let passo = "quem assincrona chave:bancada";
+            icp.pedir(ICP_QUEM, REDE_ASSINCRONA, ICP_CHAVE)?;
+            icp_pendente_e_esperando(&icp, desde, passo)?;
+            let p = alloc::format!(r#"{{"person":"{}"}}"#, id.texto());
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "person.revoke", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a pessoa nao foi revogada");
+            }
+            let revogada = crate::autorizacao::ultimo_registro();
+            let p = icp.dito(desde, passo)?;
+            let fim = icp.encerrar();
+            if p.desfecho == "verified" || !assinaturas_do_processo(fio, revogada).is_empty() {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada de quem foi revogada continuou assinando");
+            }
+            if crate::chaves::ler(&id.texto(), "bancada").map(|v| v.estado)
+                != Ok(crate::chaves::Estado::Anulada)
+            {
+                return Err("a chave da pessoa revogada nao foi anulada");
+            }
+            // O processo de quem foi revogado pode já não sair pelo canal.
+            let _ = fim;
+            Ok(())
+        });
+        crate::chaves::esquecer_de_teste();
+        r
+    }
+}
+
+/// Sem chave, ou sem a permissão, nada se assina: a pessoa operadora que
+/// não criou a chave ouve do kernel que não há chave — `failed_key`, e a
+/// chamada nem sai —; e a que criou a dela, com a política em que o
+/// operador não tem mais `key.read` nem `key.sign`, é recusada pelo gate: a
+/// chave existe, e usá-la não é do papel. Em nenhum dos dois o `key.sign`
+/// chega a acontecer.
+fn icp_sem_chave_nada_se_assina() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let antes = crate::autorizacao::ultimo_registro();
+        let sem_usar = politica_da_bancada_icp(&[
+            (
+                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.destroy\nrecurso operador",
+            ),
+            (
+                "recurso operador key.read chave:bancada chave:bancada-2\n",
+                "",
+            ),
+            (
+                "recurso operador key.sign chave:bancada chave:bancada-2\n",
+                "",
+            ),
+        ])?;
+        let r = (|| -> Resultado {
+            for (console, nome, sem_permissao, codigo) in [
+                (213, "icp-sem-chave", false, "INVALID_ARGUMENT"),
+                (214, "icp-sem-permissao", true, "DENY_PERMISSION"),
+            ] {
+                let sessao =
+                    crate::pessoas::sessao_de_teste(Console::Terminal(console), nome, "operador");
+                if sem_permissao
+                    && !fs_verdade(
+                        &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+                        "created",
+                    )
+                {
+                    return Err("a pessoa nao criou a chave");
+                }
+                let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+                let fio = icp.fio;
+                let passo = || {
+                    icp.passo(
+                        ICP_QUEM,
+                        REDE_BANCADA,
+                        ICP_CHAVE,
+                        "quem bancada chave:bancada",
+                    )
+                };
+                let p = if sem_permissao {
+                    com_a_politica(sem_usar.clone(), passo)
+                } else {
+                    passo()
+                };
+                let fim = icp.encerrar();
+                let p = p?;
+                fim?;
+                if p.desfecho != "failed_key"
+                    || p.detalhe != alloc::format!("assinaturas 0; chave: {codigo}")
+                {
+                    crate::log_error!("teste", "{} {:?}", nome, p);
+                    return Err("sem a chave, ou sem a permissao, a chamada nao parou na chave");
+                }
+                if !assinaturas_do_processo(fio, antes).is_empty()
+                    || !decisoes_do_processo(fio, "key.sign", "chave:bancada").is_empty()
+                {
+                    return Err("sem a chave, ou sem a permissao, um key.sign chegou ao gate");
+                }
+                o_ic_so_na_alegacao(fio)?;
+            }
+            Ok(())
+        })();
+        crate::chaves::esquecer_de_teste();
+        r
+    })
+}
+
+/// O índice da rede `nome` da bancada do IC, como o `b` de um evento a diz.
+fn rede_do_icp(nome: &str) -> Result<i64, &'static str> {
+    REDES_DO_ICP
+        .iter()
+        .position(|r| *r == nome)
+        .map(|b| b as i64)
+        .ok_or("a rede do caso nao esta na lista")
+}
+
+/// A prova adulterada de uma chamada, em cada lugar em que ela vem:
+///
+/// - `bls-invalida`: o certificado da leitura das faixas — a primeira
+///   etapa — com a assinatura BLS trocada: a chamada nem sai, e nada se
+///   assina;
+/// - `assinatura-errada`: o certificado da resposta da chamada com a
+///   assinatura trocada: assinada uma vez, e não verificada;
+/// - `sem-assinatura`: o corpo da resposta da chamada sem o certificado:
+///   a resposta fora da forma;
+///
+/// cada uma declarada como o que é — `unverified_*` —, ancorada na decisão
+/// da assinatura da chamada quando houve uma, e na conexão quando não; e
+/// observada pelo NSF como a verificação declarada que falhou, com a
+/// âncora que o kernel escreveu — a decisão e o método. Nem a alegação
+/// abre incidente.
+fn icp_a_chamada_adulterada_e_recusada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    use seguranca::regras::{Confianca, Regra};
+    com_a_bancada_icp(|| {
+        com_o_nsf(|| {
+            crate::chaves::esquecer_de_teste();
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(215),
+                "icp-chamada-adulterada",
+                "operador",
+            );
+            if !fs_verdade(
+                &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+                "created",
+            ) {
+                return Err("a pessoa nao criou a chave");
+            }
+            let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = icp.fio;
+            let r = (|| -> Resultado {
+                // O começo do motivo: a linha do passo, mais longa que a da
+                // consulta, passa do tamanho de um registro do log, e o
+                // corte come o fim.
+                let mentiras = [
+                    (
+                        "bls-invalida",
+                        "unverified_certificate",
+                        0,
+                        "subnet: verificacao: a assinatura BLS",
+                    ),
+                    (
+                        "assinatura-errada",
+                        "unverified_certificate",
+                        1,
+                        "call: verificacao: a assinatura BLS",
+                    ),
+                    (
+                        "sem-assinatura",
+                        "unverified_response",
+                        1,
+                        "call: corpo da chamada fora da forma",
+                    ),
+                ];
+                let mut ancoradas = alloc::vec::Vec::new();
+                for (rede, desfecho, esperadas, motivo) in mentiras {
+                    let antes = crate::autorizacao::ultimo_registro();
+                    let passo = alloc::format!("quem {rede} chave:bancada");
+                    let p = icp.passo(ICP_QUEM, rede_do_icp(rede)?, ICP_CHAVE, &passo)?;
+                    let (assinaturas, detalhe) =
+                        assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                    let feitas = assinaturas_do_processo(fio, antes);
+                    if p.desfecho != desfecho
+                        || assinaturas != esperadas
+                        || feitas.len() as u64 != esperadas
+                        || !detalhe.starts_with(motivo)
+                    {
+                        crate::log_error!("teste", "{}: {:?} / {:?}", rede, p, feitas);
+                        return Err("a chamada adulterada nao foi recusada, ou nao disse por que");
+                    }
+                    let ancora = match feitas.first() {
+                        Some((_, e)) => {
+                            Some(decisao_executada(&e.detalhe).ok_or("a assinatura sem decisao")?)
+                        }
+                        None => None,
+                    };
+                    declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", ancora)?;
+                    if let Some(d) = ancora {
+                        ancoradas.push((p.registro().unwrap_or(0), d));
+                    }
+                }
+
+                // O NSF: cada falha declarada observada, e só; a explicação
+                // traz a decisão da assinatura em que o kernel a ancorou.
+                let v = crate::seguranca::passo();
+                let w = crate::seguranca::passo();
+                let (explicacoes, baixa, incidentes) = crate::seguranca::com_motor_de_teste(|m| {
+                    let delas: alloc::vec::Vec<_> = m
+                        .observacoes()
+                        .filter(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+                        .collect();
+                    (
+                        delas
+                            .iter()
+                            .map(|d| (d.registros.clone(), d.explicacao.clone()))
+                            .collect::<alloc::vec::Vec<_>>(),
+                        delas.iter().all(|d| d.confianca == Confianca::Baixa),
+                        m.incidentes.todos().count(),
+                    )
+                })
+                .ok_or("o NSF nao estava ligado")?;
+                // A regra dispara uma vez por degrau: a detecção que fecha
+                // numa declaração assinada traz a decisão da assinatura.
+                let observada = ancoradas.iter().any(|(registro, decisao)| {
+                    let a_decisao = alloc::format!("pela decisao {decisao} (key.sign)");
+                    explicacoes
+                        .iter()
+                        .any(|(rs, e)| rs.last() == Some(registro) && e.contains(&a_decisao))
+                });
+                if explicacoes.is_empty() || !baixa || !observada {
+                    crate::log_error!("teste", "{:?} / {:?}", explicacoes, ancoradas);
+                    return Err("o NSF nao observou a falha declarada com a ancora da assinatura");
+                }
+                if incidentes != 0 || v.pedidos + w.pedidos != 0 {
+                    return Err("a alegacao abriu incidente ou pediu acao");
+                }
+                let r = consulta_de_seguranca(
+                    "security.provenance",
+                    &alloc::format!(r#"{{"process":{fio}}}"#),
+                );
+                if !ancoradas.iter().all(|(_, decisao)| {
+                    r.contains(&alloc::format!(
+                        r#""anchor":{{"decision":{decisao},"method":"key.sign"}}"#
+                    ))
+                }) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a proveniencia nao trouxe a declaracao ancorada na assinatura");
+                }
+                o_ic_so_na_alegacao(fio)
+            })();
+            let fim = icp.encerrar();
+            crate::chaves::esquecer_de_teste();
+            r.and(fim)
+        })
+    })
+}
+
+/// A contenção e o firewall no meio do acompanhamento de uma chamada
+/// assinada, enquanto o `icp` dorme na espera entre duas leituras da
+/// situação — a espera é uma leitura decidida pelo gate:
+///
+/// - o processo isolado: a espera acorda recusada, `DENY_CONTAINED`, e o
+///   desfecho é do transporte da leitura; nada se assina depois, e a
+///   declaração também é recusada — a alegação não é exceção; solto, a
+///   chamada nova verifica;
+/// - a regra do firewall sobre o gateway derruba a conexão: a espera acorda
+///   barrada, `FIREWALL_BLOCKED`, nada se assina depois, e a declaração
+///   passa, ancorada na decisão da assinatura da chamada, que foi um fato;
+///   tirada a regra, a chamada nova verifica.
+fn icp_a_contencao_e_o_firewall_no_meio_da_chamada() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(216),
+            "icp-chamada-contida",
+            "operador",
+        );
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a pessoa nao criou a chave");
+        }
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let para = alloc::format!(r#"{{"to":"{GATEWAY_ICP}"}}"#);
+        let passo = "quem assincrona chave:bancada";
+        let verifica = || -> Resultado {
+            let p = icp.passo(
+                ICP_QUEM,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "quem bancada chave:bancada",
+            )?;
+            if p.desfecho != "verified" {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada nova nao verificou");
+            }
+            Ok(())
+        };
+        let r = (|| -> Resultado {
+            // A contenção.
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_QUEM, REDE_ASSINCRONA, ICP_CHAVE)?;
+            icp_pendente_e_esperando(&icp, desde, passo)?;
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o icp");
+            }
+            let isolado = crate::autorizacao::ultimo_registro();
+            let p = icp.dito(desde, passo)?;
+            if p.desfecho != "failed_transport"
+                || p.detalhe != "assinaturas 1; request_status: contained DENY_CONTAINED"
+                || p.declarada != "recusada DENY_CONTAINED"
+                || !assinaturas_do_processo(fio, isolado).is_empty()
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("contido no meio da chamada, o icp assinou, leu ou declarou");
+            }
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o icp");
+            }
+            verifica()?;
+
+            // O firewall.
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_QUEM, REDE_ASSINCRONA, ICP_CHAVE)?;
+            icp_pendente_e_esperando(&icp, desde, passo)?;
+            let r = fs_pedir(sistema, "net.block", &para);
+            let regra = fs_numero(&r, "rule").ok_or("o sistema nao barrou o gateway do IC")?;
+            let barrada = (|| -> Resultado {
+                let cortada = crate::autorizacao::ultimo_registro();
+                let p = icp.dito(desde, passo)?;
+                if p.desfecho != "failed_transport"
+                    || p.detalhe != "assinaturas 1; request_status: firewall FIREWALL_BLOCKED"
+                    || !assinaturas_do_processo(fio, cortada).is_empty()
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("o corte do firewall no meio da chamada nao chegou ao icp");
+                }
+                let feitas = assinaturas_do_processo(fio, antes);
+                let [(_, assinada)] = feitas.as_slice() else {
+                    crate::log_error!("teste", "{:?}", feitas);
+                    return Err("a chamada cortada nao teve so a assinatura de antes do corte");
+                };
+                let decisao =
+                    decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisao))
+            })();
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            barrada?;
+            if fs_numero(&solta, "rule") != Some(regra) {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do gateway do IC");
+            }
+            verifica()?;
+            o_ic_so_na_alegacao(fio)
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let _ = fs_pedir(sistema, "net.unblock", &para);
+        let fim = icp.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
     })
 }
 

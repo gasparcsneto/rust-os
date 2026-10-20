@@ -15,7 +15,7 @@ use core::fmt;
 use politica::Codigo;
 use protocolo::json::JsonWriter;
 
-use crate::evento::{Declaracao, Evento, Tipo};
+use crate::evento::{Ancora, Declaracao, Evento, Tipo};
 use crate::grafo::No;
 use crate::incidente::Incidente;
 use crate::motor::Motor;
@@ -78,10 +78,16 @@ fn declaracao(w: &mut JsonWriter, d: &Declaracao) -> fmt::Result {
     w.end_object()?;
     w.key("anchor")?;
     match &d.ancora {
-        Some((conexao, destino)) => {
+        Some(Ancora::Conexao(conexao, destino)) => {
             w.begin_object()?;
             w.field_u64("connection", *conexao)?;
             w.field_str("to", destino)?;
+            w.end_object()?;
+        }
+        Some(Ancora::Decisao(decisao, metodo)) => {
+            w.begin_object()?;
+            w.field_u64("decision", *decisao)?;
+            w.field_str("method", metodo)?;
             w.end_object()?;
         }
         None => w.null_value()?,

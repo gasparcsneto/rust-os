@@ -3020,6 +3020,24 @@ pub fn ler_de_teste() -> Result<Vec<diario::Registro>, &'static str> {
 #[cfg(feature = "modo-teste")]
 pub const CONTEUDOS_DE_TESTE: usize = 12;
 
+/// Só para a suíte: se algum registro da região atual, decifrado, cumpre
+/// `f` — a região inteira, um registro de cada vez, sem guardar os
+/// conteúdos: o que [`ler_de_teste`] não devolve inteiro.
+#[cfg(feature = "modo-teste")]
+pub fn algum_registro_de_teste(
+    mut f: impl FnMut(&diario::Registro) -> bool,
+) -> Result<bool, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    let mut achou = false;
+    diario::percorrer(&mut meio, &chave, |r| {
+        achou |= f(&r);
+        Ok::<(), ()>(())
+    })
+    .map_err(|_| "o journal nao se le")?;
+    Ok(achou)
+}
+
 /// Destrava as trancas da persistência à força, para uso exclusivo do
 /// caminho de falha fatal.
 ///

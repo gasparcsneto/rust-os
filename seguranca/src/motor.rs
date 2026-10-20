@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use protocolo::json::Json;
 
 use crate::dns::{Dns, Observado};
-use crate::evento::{self, Evento, Registro, Severidade, Tipo, Titular};
+use crate::evento::{self, Ancora, Evento, Registro, Severidade, Tipo, Titular};
 use crate::evidencia::{Cofre, Prova};
 use crate::grafo::{Aresta, Criador, Grafo, No, Processo};
 use crate::incidente::Incidentes;
@@ -569,15 +569,23 @@ impl Motor {
             },
             None => No::Principal(e.principal.clone()),
         };
-        // A declaração: quem declarou, e o destino em que o kernel a
-        // ancorou. A alegação não vira nó de recurso nem de destino: o que
-        // ela diz fica no evento, e só o que o kernel escreveu liga o grafo.
+        // A declaração: quem declarou, e o fato em que o kernel a ancorou —
+        // o destino da conexão, ou a decisão de quem declarou. A alegação
+        // não vira nó de recurso nem de destino: o que ela diz fica no
+        // evento, e só o que o kernel escreveu liga o grafo.
         if let Some(d) = e.declaracao() {
             self.grafo
                 .ligar(quem.clone(), Aresta::Declarou, No::Declaracao(e.seq));
-            if let Some((_, destino)) = d.ancora {
-                self.grafo
-                    .ligar(No::Declaracao(e.seq), Aresta::Sobre, No::Destino(destino));
+            match d.ancora {
+                Some(Ancora::Conexao(_, destino)) => {
+                    self.grafo
+                        .ligar(No::Declaracao(e.seq), Aresta::Sobre, No::Destino(destino));
+                }
+                Some(Ancora::Decisao(n, _)) => {
+                    self.grafo
+                        .ligar(No::Declaracao(e.seq), Aresta::Sobre, No::Decisao(n));
+                }
+                None => {}
             }
         }
         if e.tipo == Tipo::Decisao {

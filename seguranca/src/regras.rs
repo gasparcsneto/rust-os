@@ -66,6 +66,10 @@ const MAIS_IDENTIDADES: usize = 64;
 /// primeiro e o segundo degrau.
 pub const VERIFICACAO_DECLARADA: [usize; 2] = [1, 3];
 
+/// As assinaturas pedidas com uma chave morta, na janela, que fazem o
+/// primeiro e o segundo degrau.
+pub const CHAVE_MORTA: [usize; 2] = [1, 3];
+
 /// As mudanças de política.
 const METODOS_DE_POLITICA: &[&str] = &["policy.write", "policy.assign"];
 
@@ -110,6 +114,9 @@ pub enum Regra {
     // A declaração — ver [`crate::evento::Declaracao`]: o que um programa
     // diz que não conseguiu verificar.
     VerificacaoDeclaradaFalhou,
+    // As chaves de assinatura: a assinatura pedida com uma chave que foi
+    // destruída ou anulada — ver [`Evento::chave_morta`].
+    ChaveMortaUsada,
 }
 
 impl Regra {
@@ -140,6 +147,7 @@ impl Regra {
             Regra::HoraNaoAutenticada => "time-unauthenticated",
             Regra::LogicoParado => "logical-clock-stopped",
             Regra::VerificacaoDeclaradaFalhou => "declared-verification-failed",
+            Regra::ChaveMortaUsada => "dead-key-used",
         }
     }
 
@@ -159,7 +167,8 @@ impl Regra {
             | Regra::AssinaturaDaFonte
             | Regra::HoraNaoAutenticada
             | Regra::LogicoParado
-            | Regra::VerificacaoDeclaradaFalhou => Categoria::Risco,
+            | Regra::VerificacaoDeclaradaFalhou
+            | Regra::ChaveMortaUsada => Categoria::Risco,
             Regra::SondagemDePrivilegio
             | Regra::ForaDoManifesto
             | Regra::ForaDoAlcance
@@ -188,11 +197,12 @@ impl Regra {
                 | Regra::ContornoDoFirewall
                 | Regra::CadeiaDeProcessos
                 | Regra::VerificacaoDeclaradaFalhou
+                | Regra::ChaveMortaUsada
         )
     }
 
     /// Todas, para quem lista.
-    pub const TODAS: [Regra; 24] = [
+    pub const TODAS: [Regra; 25] = [
         Regra::SondagemDePrivilegio,
         Regra::ForaDoManifesto,
         Regra::AbusoDeCredencial,
@@ -217,6 +227,7 @@ impl Regra {
         Regra::HoraNaoAutenticada,
         Regra::LogicoParado,
         Regra::VerificacaoDeclaradaFalhou,
+        Regra::ChaveMortaUsada,
     ];
 }
 
@@ -332,6 +343,9 @@ struct Visto {
     /// Uma declaração de verificação que falhou — ver
     /// [`verificacao_falhou`].
     falha_declarada: bool,
+    /// Uma assinatura pedida com uma chave morta — ver
+    /// [`Evento::chave_morta`].
+    chave_morta: bool,
 }
 
 /// Uma conexão que o gate recusou por estar fora do alcance: o dono do
@@ -412,6 +426,7 @@ impl Detector {
             falha_declarada: e
                 .declaracao()
                 .is_some_and(|d| verificacao_falhou(&d.desfecho)),
+            chave_morta: e.chave_morta().is_some(),
         });
         while j.len() > MAIS_NA_JANELA || j.front().is_some_and(|v| v.ts + JANELA_MS < e.ts_ms) {
             j.pop_front();
@@ -637,10 +652,10 @@ impl Detector {
                 let programa = e.processo.as_ref().map_or_else(String::new, |(fio, p)| {
                     alloc::format!(" {p} (processo {fio})")
                 });
-                let ancora = d.ancora.as_ref().map_or_else(
-                    || String::from("sem conexao"),
-                    |(n, destino)| alloc::format!("pela conexao {n} a {destino}"),
-                );
+                let ancora = d
+                    .ancora
+                    .as_ref()
+                    .map_or_else(|| String::from("sem conexao"), |a| a.texto());
                 saida.push(det(
                     Regra::VerificacaoDeclaradaFalhou,
                     Severidade::Media,
@@ -651,6 +666,41 @@ impl Detector {
                         d.evento,
                         d.assunto,
                         d.desfecho,
+                        vs.len(),
+                        JANELA_MS / 1000
+                    ),
+                ));
+            }
+        }
+
+        // A assinatura pedida com uma chave morta: o gate deixou — a
+        // permissão e o alcance são do papel —, e o kernel recusou, porque
+        // a chave foi destruída ou anulada. Uma, logo depois da anulação, é
+        // a corrida de quem assinava quando o administrador anulou: baixa,
+        // uma observação. Mais, na janela, é quem continua tentando com uma
+        // chave que lhe tiraram: média. O NSF só observa — a chave já não
+        // assina nada, e a recusa é do kernel.
+        if let Some(estado) = e.chave_morta() {
+            let vs: Vec<&Visto> = j.iter().filter(|v| v.chave_morta).collect();
+            let nivel = if vs.len() >= CHAVE_MORTA[1] { 2 } else { 1 };
+            if vs.len() >= CHAVE_MORTA[0]
+                && self.pode(Regra::ChaveMortaUsada, &e.principal, nivel, e.ts_ms)
+            {
+                let programa = e.processo.as_ref().map_or_else(String::new, |(fio, p)| {
+                    alloc::format!(" pelo programa {p} (processo {fio})")
+                });
+                saida.push(det(
+                    Regra::ChaveMortaUsada,
+                    Severidade::Media,
+                    if nivel == 2 {
+                        Confianca::Media
+                    } else {
+                        Confianca::Baixa
+                    },
+                    vs.iter().map(|v| v.seq).collect(),
+                    alloc::format!(
+                        "pediu uma assinatura com `{}`{programa}, e a chave foi {estado}: o kernel recusou ({} na janela de {} s)",
+                        e.recurso,
                         vs.len(),
                         JANELA_MS / 1000
                     ),
@@ -1428,5 +1478,81 @@ pub(crate) mod testes {
             Regra::VerificacaoDeclaradaFalhou.categoria(),
             Categoria::Risco
         );
+        // Ancorada na decisão de uma assinatura: a explicação diz a
+        // decisão e o método, que o kernel escreveu.
+        let mut assinada = declarada(14, "unverified_certificate", None);
+        assinada.detalhe =
+            "pelo processo 12 (icp ab12cd34): ancorada em 11 key.sign; decisao 13".to_string();
+        let ds = rodar(&[assinada]);
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        assert!(
+            ds[0].explicacao.contains("pela decisao 11 (key.sign)"),
+            "{}",
+            ds[0].explicacao
+        );
+    }
+
+    /// A assinatura pedida com uma chave morta — a execução de `key.sign`
+    /// que o kernel recusou porque a chave foi anulada ou destruída —, pelo
+    /// processo 12: baixa na primeira — a corrida de quem assinava quando a
+    /// chave morreu —, média na terceira da janela; o NSF só observa. A
+    /// recusa por outro motivo, a recusa do gate e a assinatura que saiu
+    /// não contam.
+    #[test]
+    fn a_chave_morta_usada() {
+        let assinatura = |seq: u64, codigo: Codigo, motivo: &str| {
+            let mut e = ev(seq, "person:01", Titular::Pessoa, "key.sign", codigo);
+            e.recurso = "chave:bancada".to_string();
+            e.detalhe = alloc::format!(
+                "pelo processo 12 (icp ab12cd34): {motivo}; decisao {}",
+                seq - 1
+            );
+            e.processo = Some((12, "icp ab12cd34".to_string()));
+            e.decisao = Some(seq - 1);
+            e.tipo = Tipo::Execucao;
+            e
+        };
+        let mut recusada_pelo_gate = ev(
+            2,
+            "person:01",
+            Titular::Pessoa,
+            "key.sign",
+            Codigo::DenyPermission,
+        );
+        recusada_pelo_gate.recurso = "chave:bancada".to_string();
+        let evs = [
+            recusada_pelo_gate,
+            assinatura(4, Codigo::Allow, "assinatura ed25519 ab12"),
+            assinatura(6, Codigo::InvalidArgument, "a chave e de outro dominio"),
+            assinatura(8, Codigo::InvalidArgument, "a chave foi anulada"),
+            assinatura(10, Codigo::InvalidArgument, "a chave foi destruida"),
+            assinatura(12, Codigo::InvalidArgument, "a chave foi anulada"),
+        ];
+        assert_eq!(evs[3].chave_morta(), Some("anulada"));
+        assert_eq!(evs[4].chave_morta(), Some("destruida"));
+        assert!(evs[..3].iter().all(|e| e.chave_morta().is_none()));
+        let ds = rodar(&evs);
+        assert_eq!(ds.len(), 2, "{ds:?}");
+        assert!(ds.iter().all(|d| d.regra == Regra::ChaveMortaUsada
+            && d.severidade == Severidade::Media
+            && d.alvo.is_none()));
+        assert_eq!(
+            (ds[0].confianca, ds[0].registros.as_slice()),
+            (Confianca::Baixa, [8].as_slice())
+        );
+        assert_eq!(
+            (ds[1].confianca, ds[1].registros.as_slice()),
+            (Confianca::Media, [8, 10, 12].as_slice())
+        );
+        for trecho in [
+            "`chave:bancada`",
+            "icp ab12cd34 (processo 12)",
+            "anulada",
+            "o kernel recusou",
+        ] {
+            assert!(ds[0].explicacao.contains(trecho), "{}", ds[0].explicacao);
+        }
+        assert_eq!(Regra::ChaveMortaUsada.categoria(), Categoria::Risco);
+        assert_eq!(Regra::ChaveMortaUsada.nome(), "dead-key-used");
     }
 }

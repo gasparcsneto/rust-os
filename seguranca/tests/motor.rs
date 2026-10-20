@@ -6,7 +6,7 @@ use politica::Codigo;
 use politica::auditoria::{Evento as DaCadeia, Titular, elo};
 use protocolo::json::{Json, JsonWriter};
 use seguranca::Motor;
-use seguranca::evento::{Severidade, Tipo};
+use seguranca::evento::{Ancora, Severidade, Tipo};
 use seguranca::grafo::{Aresta, No};
 use seguranca::incidente::Estado as EstadoDoIncidente;
 use seguranca::regras::{Confianca, Regra};
@@ -1992,7 +1992,7 @@ fn a_declaracao_e_alegacao_observada() {
         (d.evento.as_str(), d.assunto.as_str(), d.desfecho.as_str()),
         ("icp.query", "alvo/ola", "verified")
     );
-    assert_eq!(d.ancora, Some((3, GATEWAY.to_string())));
+    assert_eq!(d.ancora, Some(Ancora::Conexao(3, GATEWAY.to_string())));
     // O grafo: o processo declarou; a declaração, sobre o destino do kernel.
     let vizinhos = m.grafo.vizinhos(&No::Declaracao(verificada));
     assert!(
@@ -2057,6 +2057,75 @@ fn a_declaracao_e_alegacao_observada() {
         s.contains(&format!(r#""anchor":{{"connection":3,"to":"{GATEWAY}"}}"#)),
         "{s}"
     );
+}
+
+/// A declaração ancorada na decisão de uma assinatura do mesmo processo:
+/// o grafo liga a declaração à decisão — o fato do kernel —, e a
+/// proveniência diz a decisão e o método dela. A assinatura pedida depois
+/// com a chave anulada, que o kernel recusou, é só observada: sem
+/// incidente, sem pedido.
+#[test]
+fn a_declaracao_ancorada_na_assinatura() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("user.run", "/programas/x/icp", Codigo::Allow, ""));
+    a.gravar(do_agente(
+        "user.run",
+        "/programas/x/icp",
+        Codigo::Allow,
+        "processo 21 lancado; decisao 1",
+    ));
+    const PELO: &str = "pelo processo 21 (icp 0a0b0c0d)";
+    let assinou = a.gravar(do_agente("key.sign", "chave:bancada", Codigo::Allow, PELO));
+    a.gravar(do_agente(
+        "key.sign",
+        &format!("chave:bancada ic-request {}", "5a".repeat(32)),
+        Codigo::Allow,
+        &format!("{PELO}: assinatura ed25519 ab12cd34; decisao {assinou}"),
+    ));
+    let pedida = a.gravar(do_agente("audit.declare", "", Codigo::Allow, PELO));
+    let declarada = a.gravar(do_agente(
+        "audit.declare",
+        "icp.update alvo/quem verified",
+        Codigo::Allow,
+        &format!("{PELO}: ancorada em {assinou} key.sign; decisao {pedida}"),
+    ));
+    let pediu = a.gravar(do_agente("key.sign", "chave:bancada", Codigo::Allow, PELO));
+    let recusada = a.gravar(do_agente(
+        "key.sign",
+        "chave:bancada",
+        Codigo::InvalidArgument,
+        &format!("{PELO}: a chave foi anulada; decisao {pediu}"),
+    ));
+    ler(&mut m, &a);
+
+    let e = m.evento(declarada).expect("a declaracao nao foi lida");
+    assert_eq!(e.tipo, Tipo::Declaracao { conexao: None });
+    assert_eq!(
+        e.declaracao().unwrap().ancora,
+        Some(Ancora::Decisao(assinou, "key.sign".to_string()))
+    );
+    let vizinhos = m.grafo.vizinhos(&No::Declaracao(declarada));
+    assert!(
+        vizinhos.contains(&(Aresta::Sobre, No::Decisao(assinou), true)),
+        "{vizinhos:?}"
+    );
+    let mut s = String::new();
+    seguranca::relatorio::proveniencia(&m, 0, 21, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(
+        s.contains(&format!(
+            r#""anchor":{{"decision":{assinou},"method":"key.sign"}}"#
+        )),
+        "{s}"
+    );
+    let observadas: Vec<_> = m
+        .observacoes()
+        .filter(|d| d.regra == Regra::ChaveMortaUsada)
+        .collect();
+    assert_eq!(observadas.len(), 1, "{observadas:?}");
+    assert_eq!(observadas[0].registros, [recusada]);
+    assert_eq!(m.incidentes.todos().count(), 0);
+    assert!(m.pedidos().is_empty());
 }
 
 /// Com um incidente vivo do mesmo principal, a verificação que o programa

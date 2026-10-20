@@ -669,6 +669,13 @@ pub fn limpar_a_memoria_de_teste() {
     drop(tabela);
 }
 
+/// Só para a suíte: a semente da chave `nome` de `dono`, viva — para o
+/// caso conferir que a compactação não a leva depois de ela morrer.
+#[cfg(feature = "modo-teste")]
+pub fn semente_de_teste(dono: &str, nome: &str) -> Option<[u8; 32]> {
+    gravavel(dono, nome)?.privada?.com_a_semente(|s| Some(*s))
+}
+
 /// Só para a suíte: troca o registro de domínios, e devolve o de antes.
 #[cfg(feature = "modo-teste")]
 pub fn trocar_dominios_de_teste(dominios: Option<Dominios>) -> Option<Dominios> {
