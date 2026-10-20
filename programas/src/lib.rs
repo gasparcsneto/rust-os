@@ -20,7 +20,10 @@
 //!   a moldura que o servidor de janelas e o Terminal compartilham;
 //! - **a rede de cima** — [`dns`], o resolvedor, e [`tls`], o cliente TLS
 //!   1.3: protocolos que rodam no processo, sobre a conexão que o gate
-//!   decidiu, e que não concedem nada.
+//!   decidiu, e que não concedem nada;
+//! - **o Internet Computer** — [`icp`], a consulta anônima verificada sobre
+//!   o HTTPS daqui: a prova do que os nós responderam, que também não
+//!   concede nada.
 //!
 //! # Como um programa se escreve
 //!
@@ -53,6 +56,7 @@ pub mod conexao;
 pub mod desenho;
 pub mod dns;
 pub mod http;
+pub mod icp;
 pub mod janela;
 pub mod manifesto;
 pub mod monte;
