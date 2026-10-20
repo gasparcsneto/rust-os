@@ -27,6 +27,7 @@
 //! | `vencido.duke` | o de `vencido.duke`, da raiz da bancada, vencido em 2021 |
 //! | `futuro.duke` | o de `futuro.duke`, da raiz da bancada, que só vale de 2042 a 2044 |
 //! | `antigo.duke` | o de `antigo.duke`, da raiz da bancada |
+//! | `icp.duke` e `*.icp.duke` | o do proxy da bancada do IC, da raiz da bancada — ver [`super::icp`] |
 //!
 //! O gate decide um destino só, `tcp:10.0.2.100:443`; os nomes são do TLS.
 //! É a bancada que mostra que o nome não autoriza nada: o mesmo destino,
@@ -65,7 +66,7 @@ pub(crate) const ANCORA_NA_IMAGEM: &str = "dados/tls/bancada.pem";
 
 /// A versão do formato do diretório: um diretório de outra versão é
 /// refeito inteiro.
-const VERSAO: &str = "bancada-tls v3\n";
+const VERSAO: &str = "bancada-tls v4\n";
 
 /// O diretório da bancada, com os certificados e as chaves das folhas.
 pub(crate) fn diretorio() -> PathBuf {
@@ -73,7 +74,7 @@ pub(crate) fn diretorio() -> PathBuf {
 }
 
 /// Os arquivos que o servidor e a imagem leem.
-const ARQUIVOS: [&str; 11] = [
+const ARQUIVOS: [&str; 13] = [
     "raiz.pem",
     "bancada.pem",
     "bancada.chave",
@@ -85,6 +86,8 @@ const ARQUIVOS: [&str; 11] = [
     "futuro.chave",
     "antigo.pem",
     "antigo.chave",
+    "icp.pem",
+    "icp.chave",
 ];
 
 /// Prepara a bancada, se ainda não está pronta, e devolve o diretório.
@@ -117,16 +120,18 @@ fn raiz(nome: &str) -> Result<CertifiedIssuer<'static, KeyPair>, String> {
     CertifiedIssuer::self_signed(p, chave).map_err(|e| e.to_string())
 }
 
-/// Uma folha para `nome`, assinada por `raiz`, valendo de `de` a `ate`
-/// (1º de janeiro de cada ano): o certificado e a chave, em PEM.
+/// Uma folha para `nomes` — o primeiro é o nome comum —, assinada por
+/// `raiz`, valendo de `de` a `ate` (1º de janeiro de cada ano): o
+/// certificado e a chave, em PEM.
 fn folha(
     raiz: &CertifiedIssuer<'static, KeyPair>,
-    nome: &str,
+    nomes: &[&str],
     de: i32,
     ate: i32,
 ) -> Result<(String, String), String> {
-    let mut p = CertificateParams::new(vec![nome.to_string()]).map_err(|e| e.to_string())?;
-    p.distinguished_name.push(DnType::CommonName, nome);
+    let mut p = CertificateParams::new(nomes.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+        .map_err(|e| e.to_string())?;
+    p.distinguished_name.push(DnType::CommonName, nomes[0]);
     p.not_before = rcgen::date_time_ymd(de, 1, 1);
     p.not_after = rcgen::date_time_ymd(ate, 1, 1);
     p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -148,11 +153,13 @@ fn gerar(dir: &Path) -> Result<(), String> {
 
     let da_bancada = raiz("Raiz da bancada do Duke")?;
     let estranha = raiz("Raiz estranha")?;
-    let (bancada, bancada_chave) = folha(&da_bancada, "bancada.duke", 2025, 2040)?;
-    let (estranho, estranho_chave) = folha(&estranha, "estranho.duke", 2025, 2040)?;
-    let (vencido, vencido_chave) = folha(&da_bancada, "vencido.duke", 2020, 2021)?;
-    let (futuro, futuro_chave) = folha(&da_bancada, "futuro.duke", 2042, 2044)?;
-    let (antigo, antigo_chave) = folha(&da_bancada, "antigo.duke", 2025, 2040)?;
+    let (bancada, bancada_chave) = folha(&da_bancada, &["bancada.duke"], 2025, 2040)?;
+    let (estranho, estranho_chave) = folha(&estranha, &["estranho.duke"], 2025, 2040)?;
+    let (vencido, vencido_chave) = folha(&da_bancada, &["vencido.duke"], 2020, 2021)?;
+    let (futuro, futuro_chave) = folha(&da_bancada, &["futuro.duke"], 2042, 2044)?;
+    let (antigo, antigo_chave) = folha(&da_bancada, &["antigo.duke"], 2025, 2040)?;
+    // O proxy da bancada do IC: um nome por modo, todos sob `icp.duke`.
+    let (icp, icp_chave) = folha(&da_bancada, &["icp.duke", "*.icp.duke"], 2025, 2040)?;
 
     let escrever = |nome: &str, conteudo: &str, privado: bool| -> Result<(), String> {
         let caminho = novo.join(nome);
@@ -176,6 +183,8 @@ fn gerar(dir: &Path) -> Result<(), String> {
     escrever("futuro.chave", &futuro_chave, true)?;
     escrever("antigo.pem", &antigo, false)?;
     escrever("antigo.chave", &antigo_chave, true)?;
+    escrever("icp.pem", &icp, false)?;
+    escrever("icp.chave", &icp_chave, true)?;
     escrever("versao", VERSAO, false)?;
 
     let _ = std::fs::remove_dir_all(dir);

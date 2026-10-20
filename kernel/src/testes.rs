@@ -7401,8 +7401,8 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
 /// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
 ///
-/// A folha usada é a da árvore de pedaços, cujos sete itens — o
-/// dispositivo e seis pedaços — têm chave e tamanho conhecidos do lado de
+/// A folha usada é a da árvore de pedaços, cujos oito itens — o
+/// dispositivo e sete pedaços — têm chave e tamanho conhecidos do lado de
 /// fora: o `dump-tree` imprime `itemoff` e `itemsize` de cada um. Eram
 /// quatro itens e três pedaços até os programas do TLS levarem os dados da
 /// imagem além dos oito megabytes do primeiro pedaço de dados: o `mkfs` pôs
@@ -7410,7 +7410,10 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// pedaços até os programas do HTTP — três, de uns 680 KB cada, nas duas
 /// arquiteturas — passarem do segundo: o `mkfs` pôs um terceiro. E seis
 /// itens e cinco pedaços até o programa dos cookies — uns 740 KB em cada
-/// arquitetura — passar do terceiro: o `mkfs` pôs um quarto.
+/// arquitetura — passar do terceiro: o `mkfs` pôs um quarto. E sete itens
+/// e seis pedaços até os programas do IC — o `icp` e o `verificado`, uns
+/// 970 KB cada nas duas arquiteturas, com o BLS12-381 dentro — passarem do
+/// quarto: o `mkfs` pôs um quinto.
 fn btrfs_percorre_itens_da_folha() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let particao = tabela
@@ -7448,12 +7451,12 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         }
     }
 
-    if quantos != 7 {
+    if quantos != 8 {
         crate::log_error!("teste", "a folha deu {} itens", quantos);
-        return Err("a folha de pedacos nao tem os sete itens que o disco traz");
+        return Err("a folha de pedacos nao tem os oito itens que o disco traz");
     }
-    if pedacos != 6 {
-        return Err("a folha de pedacos nao trouxe os seis pedacos");
+    if pedacos != 7 {
+        return Err("a folha de pedacos nao trouxe os sete pedacos");
     }
 
     // E um nó interno não é folha. Forjar o nível no bloco já lido é o
@@ -7937,15 +7940,15 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
         .ok_or("nao ha particao de dados")?;
     let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
 
-    // Sistema, metadados e quatro de dados — ver
+    // Sistema, metadados e cinco de dados — ver
     // `btrfs_percorre_itens_da_folha`.
-    if volume.mapa.quantos() != 6 {
+    if volume.mapa.quantos() != 7 {
         crate::log_error!(
             "teste",
             "o mapa ficou com {} pedacos",
             volume.mapa.quantos()
         );
-        return Err("o mapa completo nao tem os seis pedacos do disco");
+        return Err("o mapa completo nao tem os sete pedacos do disco");
     }
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
@@ -8079,10 +8082,12 @@ fn btrfs_raiz_montada() -> Resultado {
         return Err("a raiz montada nao lista exatamente o que o xtask pos nela");
     }
 
-    // E o subdiretório tem o que é dele, e só: a nota, e o diretório da
-    // âncora TLS da bancada, com ela dentro.
+    // E o subdiretório tem o que é dele, e só: a nota, o diretório da
+    // âncora TLS da bancada, com ela dentro, e o das redes do IC, com o
+    // arquivo delas.
     let dados = conteudo("/dados")?;
     let esperado_em_dados = [
+        (alloc::string::String::from("icp"), Tipo::Diretorio),
         (alloc::string::String::from("nota.txt"), Tipo::Arquivo),
         (alloc::string::String::from("tls"), Tipo::Diretorio),
     ];
@@ -8094,6 +8099,11 @@ fn btrfs_raiz_montada() -> Resultado {
     if tls.len() != 1 || tls[0].0 != "bancada.pem" || tls[0].1 != Tipo::Arquivo {
         crate::log_error!("teste", "/dados/tls listou {:?}", tls);
         return Err("o diretorio da ancora nao tem so a ancora");
+    }
+    let icp = conteudo("/dados/icp")?;
+    if icp.len() != 1 || icp[0].0 != "redes" || icp[0].1 != Tipo::Arquivo {
+        crate::log_error!("teste", "/dados/icp listou {:?}", icp);
+        return Err("o diretorio das redes do IC nao tem so as redes");
     }
 
     // E `/programas` tem uma arquitetura por diretório, as duas, e nada mais:
@@ -31443,6 +31453,34 @@ static CASOS: &[Caso] = &[
         f: codigo_o_conferido_e_o_que_roda,
     },
     Caso {
+        nome: "icp: a consulta verificada pelo gate",
+        f: icp_a_consulta_verificada_pelo_gate,
+    },
+    Caso {
+        nome: "icp: cada prova adulterada e recusada",
+        f: icp_cada_prova_adulterada_e_recusada,
+    },
+    Caso {
+        nome: "icp: a revogacao no meio da consulta",
+        f: icp_a_revogacao_no_meio_da_consulta,
+    },
+    Caso {
+        nome: "icp: a contencao no meio da consulta",
+        f: icp_a_contencao_no_meio_da_consulta,
+    },
+    Caso {
+        nome: "icp: o firewall no meio da consulta",
+        f: icp_o_firewall_no_meio_da_consulta,
+    },
+    Caso {
+        nome: "icp: o alcance e a permissao sao do gate",
+        f: icp_o_alcance_e_a_permissao_sao_do_gate,
+    },
+    Caso {
+        nome: "icp: duas consultas ao mesmo tempo",
+        f: icp_duas_consultas_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "canal tcp: o aperto pela rede",
         f: canal_tcp_o_aperto_pela_rede,
     },
@@ -37044,13 +37082,22 @@ fn decisoes_do_processo(
 }
 
 /// Roda `f` com o DNS da bancada respondendo `bancada.duke` com o servidor
-/// HTTP, e com a política que põe o servidor de DNS no alcance do operador
-/// e do NSF. Depois, devolve o DNS, as regras do firewall e as pessoas
-/// como estavam — também quando `f` falha.
+/// HTTP — ver [`com_os_nomes_da_bancada`].
 fn com_a_bancada_http(f: impl FnOnce() -> Resultado) -> Resultado {
+    com_os_nomes_da_bancada(&[("bancada.duke", &[[10, 0, 2, 100]])], f)
+}
+
+/// Roda `f` com o DNS da bancada respondendo os `nomes`, e com a política
+/// que põe o servidor de DNS no alcance do operador e do NSF. Depois,
+/// devolve o DNS, as regras do firewall e as pessoas como estavam — também
+/// quando `f` falha.
+fn com_os_nomes_da_bancada(
+    nomes: &[(&str, &[[u8; 4]])],
+    f: impl FnOnce() -> Resultado,
+) -> Resultado {
     use crate::rede::bancada_dns::{self, Modo};
     crate::pessoas::esquecer_registradas();
-    bancada_dns::por_de_teste(&[("bancada.duke", &[[10, 0, 2, 100]])], Modo::Normal);
+    bancada_dns::por_de_teste(nomes, Modo::Normal);
     let resultado = politica_com_a_bancada_de_dns().and_then(|p| com_a_politica(p, f));
     bancada_dns::por_de_teste(&[], Modo::Normal);
     crate::rede::pilha::esquecer_regras_de_teste();
@@ -46524,6 +46571,999 @@ fn codigo_o_conferido_e_o_que_roda() -> Resultado {
             return Err("a troca e os lancamentos nao aconteceram juntos");
         }
         Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// O IC — docs/ICP.md: a consulta anônima verificada, de dentro de um
+// programa, pelo caminho de todo programa
+// ---------------------------------------------------------------------------
+
+/// O gateway do IC da bancada: o proxy em `10.0.2.100:4943`, um destino só
+/// para todas as redes de `/dados/icp/redes` — ver `xtask/src/icp.rs`.
+const GATEWAY_ICP: &str = "tcp:10.0.2.100:4943";
+
+/// O canister da bancada: o que o `icp` consulta, e o assunto do que ele
+/// declara.
+const CANISTER_DA_BANCADA: &str = "pi33i-pt777-77776-aaaaa-cai";
+
+/// O primeiro grupo do texto da sub-rede do canister da bancada: a
+/// primeira de aplicação da PocketIC fixada, que a bancada confere.
+const SUB_REDE_DA_BANCADA: &str = "753q6";
+
+/// Quanto o `icp` tem para dizer um passo: o aperto do TLS e a verificação
+/// — emparelhamentos BLS emulados —, ou a resposta da rede lenta, que a
+/// bancada segura oito segundos.
+const TETO_DO_ICP: u64 = 2 * TETO_DO_TLS;
+
+/// Os códigos com que o `icp` sai: no fim pedido, e sem fechar nada — o
+/// programa tem os mesmos.
+const ICP_ENCERRADO: i64 = 93;
+const ICP_SEM_FECHAR: i64 = 94;
+
+/// Os passos do `icp` — o programa tem as mesmas constantes.
+const ICP_OLA: i64 = 1;
+const ICP_ECO: i64 = 2;
+const ICP_RECUSA: i64 = 3;
+const ICP_CANDID: i64 = 4;
+const ICP_PRINCIPAL_INVALIDO: i64 = 5;
+const ICP_SAIR_SEM_FECHAR: i64 = 6;
+
+/// As redes de `/dados/icp/redes`, na ordem do programa: o índice é o `b`
+/// de um passo.
+const REDES_DO_ICP: [&str; 12] = [
+    "bancada",
+    "lenta",
+    "raiz-errada",
+    "bls-invalida",
+    "sem-assinatura",
+    "no-de-fora",
+    "assinatura-errada",
+    "pedido-trocado",
+    "aninhada",
+    "faixa-errada",
+    "velho",
+    "direta",
+];
+
+/// A rede honesta, pelo DNS da bancada, e a lenta.
+const REDE_BANCADA: i64 = 0;
+const REDE_LENTA: i64 = 1;
+
+/// Roda `f` com o DNS da bancada respondendo `icp.duke` com o gateway do
+/// IC — ver [`com_os_nomes_da_bancada`].
+fn com_a_bancada_icp(f: impl FnOnce() -> Resultado) -> Resultado {
+    com_os_nomes_da_bancada(&[("icp.duke", &[[10, 0, 2, 100]])], f)
+}
+
+/// A política da bancada do IC — a do DNS da bancada, ver
+/// [`politica_com_a_bancada_de_dns`] — com as `trocas` a mais, feitas
+/// depois das do DNS.
+fn politica_da_bancada_icp(trocas: &[(&str, &str)]) -> Result<politica::Politica, &'static str> {
+    let mut todas = alloc::vec![
+        (
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+        (
+            "recurso seguranca net.observe udp:10.0.2.3:53",
+            "recurso seguranca net.observe udp:10.0.2.3:53 udp:10.0.2.53:53",
+        ),
+    ];
+    todas.extend_from_slice(trocas);
+    politica_trocada(&todas)
+}
+
+/// A troca que tira o gateway do IC do alcance do operador — e só dele.
+const SEM_O_GATEWAY_ICP: (&str, &str) = (
+    "udp:10.0.2.53:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943",
+    "udp:10.0.2.53:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443",
+);
+
+/// O `icp` em execução: o fio dele, e o canal por onde a suíte dita os
+/// passos.
+struct Icp {
+    fio: u64,
+    canal: &'static str,
+}
+
+/// O que o `icp` disse de um passo — ver o cabeçalho de
+/// `programas/src/bin/icp.rs`.
+#[derive(Debug)]
+struct PassoDoIcp {
+    /// O desfecho, numa palavra.
+    desfecho: alloc::string::String,
+    /// O número do registro da declaração, ou `recusada <código>`.
+    declarada: alloc::string::String,
+    /// O estado do relógio com que conferiu, ou `nenhuma`.
+    hora: alloc::string::String,
+    /// O que a verificação provou, ou por que não houve prova.
+    detalhe: alloc::string::String,
+}
+
+impl PassoDoIcp {
+    /// Lê a linha do desfecho, sem o `prefixo` — `icp: <passo>: `.
+    fn ler(linha: &str, prefixo: &str) -> Option<PassoDoIcp> {
+        let mut partes = linha.strip_prefix(prefixo)?.splitn(4, "; ");
+        let desfecho = partes.next()?.into();
+        let declarada = partes.next()?.strip_prefix("declarada ")?.into();
+        let hora = partes.next()?.strip_prefix("hora ")?.into();
+        let detalhe = partes.next().unwrap_or("").into();
+        Some(PassoDoIcp {
+            desfecho,
+            declarada,
+            hora,
+            detalhe,
+        })
+    }
+
+    /// O registro da declaração, se o kernel a gravou.
+    fn registro(&self) -> Option<u64> {
+        self.declarada.parse().ok()
+    }
+}
+
+impl Icp {
+    /// Lança o `icp` com `autoridade` e espera ele ler as âncoras do TLS e
+    /// as redes, pelo gate.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Icp, &'static str> {
+        Icp::lancar_em(autoridade, "teste-icp", "icp: pronto (12 redes)")
+    }
+
+    /// Lança um segundo `icp`, com o primeiro vivo: ele escuta o outro
+    /// canal.
+    fn lancar_segundo(autoridade: crate::autorizacao::Autoridade) -> Result<Icp, &'static str> {
+        Icp::lancar_em(
+            autoridade,
+            "teste-icp-2",
+            "icp: pronto pelo segundo canal (12 redes)",
+        )
+    }
+
+    fn lancar_em(
+        autoridade: crate::autorizacao::Autoridade,
+        canal: &'static str,
+        pronto: &str,
+    ) -> Result<Icp, &'static str> {
+        let programa = alloc::format!("{}/icp", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(|| linhas_do_programa(desde, pronto) == 1, TETO_DO_ICP)
+            .map_err(|_| "o icp nao leu as ancoras e as redes")?;
+        Ok(Icp { fio, canal })
+    }
+
+    /// Pede o passo `a`, na rede `b`, com `c`, sem esperar o que ele diz.
+    fn pedir(&self, a: i64, b: i64, c: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b,
+                c,
+            },
+        )
+        .map_err(|_| "o canal do icp nao recebeu o passo")
+    }
+
+    /// Espera o `icp` dizer o desfecho do passo `passo`, desde o registro
+    /// `desde` do log.
+    fn dito(&self, desde: u64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let prefixo = alloc::format!("icp: {passo}: ");
+        let mut dito = None;
+        let r = esperar_ate(
+            || {
+                dito =
+                    linha_que_comeca(desde, &prefixo).and_then(|l| PassoDoIcp::ler(&l, &prefixo));
+                dito.is_some()
+            },
+            TETO_DO_ICP,
+        );
+        match (r, dito) {
+            (Ok(()), Some(dito)) => Ok(dito),
+            _ => {
+                crate::log_error!("teste", "o icp nao disse `{}`", prefixo);
+                Err("o icp nao disse o desfecho do passo")
+            }
+        }
+    }
+
+    /// O passo inteiro: pede, e espera o desfecho.
+    fn passo(&self, a: i64, b: i64, c: i64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let desde = crate::log::total_emitidos();
+        self.pedir(a, b, c)?;
+        self.dito(desde, passo)
+    }
+
+    /// Espera o `icp` pedir `etapa` no passo `passo`, desde `desde`, e
+    /// dormir esperando a resposta: a leitura dele armada na conexão com o
+    /// gateway. Devolve o número da conexão.
+    fn esperando(&self, desde: u64, passo: &str, etapa: &str) -> Result<u64, &'static str> {
+        let pede = alloc::format!("icp: {passo} pede {etapa}");
+        esperar_ate(|| linhas_do_programa(desde, &pede) == 1, TETO_DO_ICP)
+            .map_err(|_| "o icp nao chegou ao pedido")?;
+        let dono = crate::rede::conexoes::Dono::Processo(self.fio);
+        let conexao = crate::rede::pilha::donos()
+            .into_iter()
+            .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+            .map(|(id, _, _)| id)
+            .max()
+            .ok_or("o icp nao tinha a conexao do pedido")?;
+        esperar_ate(
+            || crate::rede::pilha::espera_armada_de_teste(conexao),
+            TETO_DO_ICP,
+        )
+        .map_err(|_| "o icp nao chegou a esperar a resposta")?;
+        Ok(conexao)
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let saiu = alloc::format!("processo encerrou com codigo {ICP_ENCERRADO}");
+        esperar_ate(|| linhas_do_programa(desde, &saiu) == 1, TETO_DO_ICP)
+            .map_err(|_| "o icp nao saiu quando pedido")
+    }
+}
+
+/// A declaração de um passo do `icp`, como o kernel a gravou: o registro
+/// que o programa disse, com a alegação dele no recurso — o canister, o
+/// método e o desfecho que ele concluiu — e, no detalhe, só o que o kernel
+/// sabe: o processo e o programa, a conexão e o destino real dela — ou que
+/// não havia conexão —, e a decisão do gate, que não teve recurso.
+fn declaracao_do_icp(fio: u64, passo: &PassoDoIcp, metodo: &str, ancorada: bool) -> Resultado {
+    use politica::Codigo;
+    let n = passo.registro().ok_or("o icp nao declarou o passo")?;
+    let e = registro_numero(n).ok_or("a declaracao do icp nao esta no anel")?;
+    let d = decisao_executada(&e.detalhe).ok_or("a declaracao do icp nao aponta a decisao")?;
+    let decisao = registro_numero(d).ok_or("a decisao da declaracao nao esta no anel")?;
+    let pelo = alloc::format!("pelo processo {fio} (icp ");
+    let alegacao = alloc::format!(
+        "icp.query {CANISTER_DA_BANCADA}/{metodo} {}",
+        passo.desfecho
+    );
+    let ancora = if ancorada {
+        e.detalhe.contains("): conexao ")
+            && e.detalhe
+                .ends_with(&alloc::format!(" {GATEWAY_ICP}; decisao {d}"))
+    } else {
+        e.detalhe
+            .ends_with(&alloc::format!("): sem conexao; decisao {d}"))
+    };
+    if e.metodo != "audit.declare"
+        || e.codigo != Codigo::Allow
+        || e.recurso != alegacao
+        || !e.detalhe.starts_with(&pelo)
+        || !ancora
+        || d >= n
+        || decisao.metodo != "audit.declare"
+        || decisao.codigo != Codigo::Allow
+        || !decisao.recurso.is_empty()
+        || !decisao.detalhe.starts_with(&pelo)
+        || decisao.titular != e.titular
+    {
+        crate::log_error!("teste", "{:?} / {:?} / {:?}", passo, e, decisao);
+        return Err("a declaracao do icp nao e a alegacao dele com os fatos do kernel");
+    }
+    Ok(())
+}
+
+/// O IC só na alegação: fora das execuções do `audit.declare` do processo
+/// `fio`, nenhum registro dele diz o canister, o método, o evento ou o
+/// nome do gateway — as decisões do gate são sobre destinos, arquivos, a
+/// semente e o relógio, e o kernel não leu o que se declarou.
+fn o_ic_so_na_alegacao(fio: u64) -> Resultado {
+    const DO_IC: [&str; 5] = ["pi33i", "icp.query", "icp.duke", "read_state", "/ola"];
+    let do_processo = alloc::format!("pelo processo {fio} (");
+    let fora = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
+            .filter(|r| {
+                let e = alloc::format!("{:?}", r.evento);
+                DO_IC.iter().any(|t| e.contains(t))
+            })
+            .map(|r| r.seq)
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .unwrap_or_default();
+    if !fora.is_empty() {
+        crate::log_error!("teste", "registros com o IC fora da alegacao: {:?}", fora);
+        return Err("o IC apareceu num registro do processo fora da alegacao");
+    }
+    Ok(())
+}
+
+/// A consulta anônima verificada, de ponta a ponta, de dentro do processo
+/// de uma pessoa operadora: o `icp` consulta o canister da bancada — uma
+/// PocketIC de verdade, atrás do proxy TLS — e confere de dentro a prova:
+/// o certificado da sub-rede, delegado pela raiz do arquivo de redes, e a
+/// assinatura do nó sobre a resposta deste pedido. Aqui se confere o outro
+/// lado:
+///
+/// - as respostas verificadas: o texto, o eco, a recusa assinada pelos
+///   nós, e o Candid fora da forma — verificado, e recusado na leitura;
+/// - cada passo foi uma conexão nova, decidida pelo gate em nome da
+///   pessoa, pelo processo, para o gateway — o mesmo destino para todos os
+///   métodos: o canister e o método não são recurso —, com uma semente e
+///   uma hora para o TLS e outras para a consulta, e as âncoras e as redes
+///   lidas uma vez;
+/// - cada passo declarado como alegação, ancorado na conexão em que foi:
+///   o kernel escreveu o destino real dela, e a decisão do gate não teve
+///   recurso;
+/// - o Principal que não se lê não sai do processo: nenhum pedido ao gate,
+///   nada declarado;
+/// - nada do IC em registro nenhum fora da alegação.
+fn icp_a_consulta_verificada_pelo_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    com_a_bancada_icp(|| {
+        let antes = crate::autorizacao::ultimo_registro();
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(190), "icp-op", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let passos = [
+                (ICP_OLA, 0, "ola bancada", "ola", "verified", "texto ola"),
+                (ICP_ECO, 0, "eco bancada", "eco", "verified", "texto duke"),
+                (
+                    ICP_RECUSA,
+                    0,
+                    "recusa bancada",
+                    "recusa",
+                    "verified_reject",
+                    "recusa 4 IC0406",
+                ),
+                (
+                    ICP_CANDID,
+                    0,
+                    "candid_truncado bancada",
+                    "candid_truncado",
+                    "verified_malformed",
+                    "recusado: candid truncado",
+                ),
+                (
+                    ICP_CANDID,
+                    1,
+                    "candid_sobra bancada",
+                    "candid_sobra",
+                    "verified_malformed",
+                    "recusado: bytes depois dos valores candid",
+                ),
+                (
+                    ICP_CANDID,
+                    2,
+                    "candid_magica bancada",
+                    "candid_magica",
+                    "verified_malformed",
+                    "recusado: candid sem DIDL",
+                ),
+            ];
+            for (a, c, passo, metodo, desfecho, resposta) in passos {
+                let p = icp.passo(a, REDE_BANCADA, c, passo)?;
+                let prova = alloc::format!("prova {SUB_REDE_DA_BANCADA} delegada 1/13: {resposta}");
+                if p.desfecho != desfecho || p.detalhe != prova || p.hora == "nenhuma" {
+                    crate::log_error!("teste", "{}: {:?}", passo, p);
+                    return Err("a consulta da bancada nao verificou o que o canister respondeu");
+                }
+                declaracao_do_icp(fio, &p, metodo, true)?;
+            }
+
+            // O Principal que não se lê: nenhuma consulta começa, e nada se
+            // declara. O que vem do processo depois é o fecho da conexão do
+            // passo anterior, que ele larga depois de dizer o desfecho.
+            let desde = crate::log::total_emitidos();
+            let ultimo = crate::autorizacao::ultimo_registro();
+            icp.pedir(ICP_PRINCIPAL_INVALIDO, 0, 0)?;
+            let prefixo = "icp: principal invalido: ";
+            esperar_ate(|| linha_que_comeca(desde, prefixo).is_some(), TETO_DO_ICP)
+                .map_err(|_| "o icp nao disse o principal invalido")?;
+            let dito = linha_que_comeca(desde, prefixo).unwrap_or_default();
+            let depois: alloc::vec::Vec<_> = registros_do_processo(fio, ultimo)
+                .into_iter()
+                .filter(|(m, d, _, _)| {
+                    !(matches!(m.as_str(), "net.send" | "net.close") && d == GATEWAY_ICP)
+                })
+                .collect();
+            if !dito.starts_with("icp: principal invalido: recusado: ") || !depois.is_empty() {
+                crate::log_error!("teste", "{} / {:?}", dito, depois);
+                return Err("o principal invalido foi aceito, ou saiu do processo");
+            }
+
+            // Do lado do kernel: destinos, arquivos, a semente e o relógio.
+            let da_pessoa = |v: &[(u64, Codigo, Titular)]| {
+                v.iter()
+                    .all(|(_, c, t)| *c == Codigo::Allow && *t == Titular::Pessoa)
+            };
+            let conexoes = decisoes_do_processo(fio, "net.connect", GATEWAY_ICP);
+            if conexoes.len() != passos.len() || !da_pessoa(&conexoes) {
+                crate::log_error!("teste", "{:?}", conexoes);
+                return Err(
+                    "cada consulta nao foi uma conexao decidida pelo gate em nome da pessoa",
+                );
+            }
+            let outros_destinos = registros_do_processo(fio, antes)
+                .into_iter()
+                .filter(|(m, d, _, _)| m == "net.connect" && d != GATEWAY_ICP && d != SERVIDOR_DNS)
+                .count();
+            if outros_destinos != 0 {
+                return Err("o icp conectou a um destino que nao e o gateway nem o DNS");
+            }
+            for (metodo, recurso, vezes) in [
+                ("fs.read", "/dados/icp/redes", 1),
+                ("fs.read", "/dados/tls/bancada.pem", 1),
+                ("random.read", "", 2 * passos.len()),
+                ("system.info", "", 2 * passos.len()),
+            ] {
+                let v = decisoes_do_processo(fio, metodo, recurso);
+                if v.len() != vezes || !da_pessoa(&v) {
+                    crate::log_error!("teste", "{} {}: {:?}", metodo, recurso, v);
+                    return Err("o icp nao leu pelo gate so o que a consulta pede");
+                }
+            }
+            o_ic_so_na_alegacao(fio)
+        })();
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Cada prova adulterada é recusada pelo programa, e só por ele: a bancada
+/// mente de um jeito em cada rede — a raiz de outra rede, a assinatura BLS
+/// do certificado, a resposta sem a assinatura do nó, o nó de fora da
+/// sub-rede, a assinatura do nó, o pedido trocado no caminho, a delegação
+/// aninhada, o certificado de outra sub-rede, o certificado velho — e o
+/// `icp` não entrega nada: diz por que a prova não fechou, e declara o
+/// desfecho. Do lado do kernel:
+///
+/// - o gate decidiu cada conexão como as honestas — `ALLOW`, o mesmo
+///   destino: a verificação é do programa, e não muda decisão nenhuma;
+/// - cada declaração é a alegação do programa, ancorada na conexão dela;
+/// - o NSF observa as verificações declaradas que falharam, com confiança
+///   baixa, e só observa: nenhum incidente, nenhum pedido de contenção,
+///   nenhuma regra no firewall; a proveniência do processo mostra as
+///   declarações, com a alegação e a âncora separadas.
+fn icp_cada_prova_adulterada_e_recusada() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    use seguranca::regras::{Confianca, Regra};
+    com_a_bancada_icp(|| {
+        com_o_nsf(|| {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(191),
+                "icp-adulterada",
+                "operador",
+            );
+            let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = icp.fio;
+            let r = (|| -> Resultado {
+                let mentiras = [
+                    (
+                        "raiz-errada",
+                        "unverified_certificate",
+                        "verificacao: a delegacao nao confere com a chave da raiz",
+                    ),
+                    (
+                        "bls-invalida",
+                        "unverified_certificate",
+                        "verificacao: a assinatura BLS do certificado nao confere",
+                    ),
+                    (
+                        "sem-assinatura",
+                        "unverified_response",
+                        "verificacao: resposta sem assinatura de no",
+                    ),
+                    ("no-de-fora", "unverified_response", "verificacao: o no "),
+                    (
+                        "assinatura-errada",
+                        "unverified_response",
+                        "verificacao: a assinatura do no ",
+                    ),
+                    (
+                        "pedido-trocado",
+                        "unverified_response",
+                        "verificacao: a assinatura do no ",
+                    ),
+                    (
+                        "aninhada",
+                        "unverified_certificate",
+                        "verificacao: delegacao aninhada",
+                    ),
+                    (
+                        "faixa-errada",
+                        "unverified_certificate",
+                        "verificacao: o canister nao esta nas faixas da sub-rede",
+                    ),
+                    (
+                        "velho",
+                        "unverified_certificate",
+                        "verificacao: certificado velho: ",
+                    ),
+                ];
+                let mut falhas = alloc::vec::Vec::new();
+                for (rede, desfecho, motivo) in mentiras {
+                    let b = REDES_DO_ICP
+                        .iter()
+                        .position(|r| *r == rede)
+                        .ok_or("a rede do caso nao esta na lista")?;
+                    let p = icp.passo(ICP_OLA, b as i64, 0, &alloc::format!("ola {rede}"))?;
+                    if p.desfecho != desfecho || !p.detalhe.starts_with(motivo) {
+                        crate::log_error!("teste", "{}: {:?}", rede, p);
+                        return Err("o icp nao recusou a prova adulterada, ou nao disse por que");
+                    }
+                    declaracao_do_icp(fio, &p, "ola", true)?;
+                    falhas.push(p.registro().unwrap_or(0));
+                }
+                let conexoes = decisoes_do_processo(fio, "net.connect", GATEWAY_ICP);
+                if conexoes.len() != mentiras.len()
+                    || !conexoes
+                        .iter()
+                        .all(|(_, c, t)| *c == Codigo::Allow && *t == Titular::Pessoa)
+                {
+                    crate::log_error!("teste", "{:?}", conexoes);
+                    return Err("o gate nao decidiu as conexoes adulteradas como as honestas");
+                }
+
+                // O NSF: a alegação observada, e só.
+                let v = crate::seguranca::passo();
+                let w = crate::seguranca::passo();
+                let (registros, baixa, incidentes) = crate::seguranca::com_motor_de_teste(|m| {
+                    let delas: alloc::vec::Vec<_> = m
+                        .observacoes()
+                        .filter(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+                        .collect();
+                    (
+                        delas
+                            .iter()
+                            .map(|d| d.registros.clone())
+                            .collect::<alloc::vec::Vec<_>>(),
+                        delas.iter().all(|d| d.confianca == Confianca::Baixa),
+                        m.incidentes.todos().count(),
+                    )
+                })
+                .ok_or("o NSF nao estava ligado")?;
+                let primeira = registros.first().cloned().unwrap_or_default();
+                if registros.is_empty()
+                    || registros.len() > 2
+                    || primeira != [falhas[0]]
+                    || !registros.iter().flatten().all(|n| falhas.contains(n))
+                    || !baixa
+                {
+                    crate::log_error!("teste", "{:?} / {:?}", registros, falhas);
+                    return Err("as verificacoes declaradas que falharam nao foram observadas");
+                }
+                if incidentes != 0
+                    || v.pedidos + w.pedidos != 0
+                    || !crate::rede::pilha::regras().is_empty()
+                {
+                    return Err("a alegacao abriu incidente, pediu contencao ou pos regra");
+                }
+                let r = consulta_de_seguranca(
+                    "security.provenance",
+                    &alloc::format!(r#"{{"process":{fio}}}"#),
+                );
+                let alegada = alloc::format!(
+                    r#""claimed":{{"event":"icp.query","subject":"{CANISTER_DA_BANCADA}/ola","outcome":"unverified_certificate"}}"#
+                );
+                let ancora = alloc::format!(r#""to":"{GATEWAY_ICP}"}}"#);
+                if !r.contains(&alloc::format!(
+                    r#""declarations":[{{"record":{},"decision":"#,
+                    falhas[0]
+                )) || !r.contains(&alegada)
+                    || !r.contains(&ancora)
+                {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a proveniencia do icp nao trouxe as declaracoes");
+                }
+                o_ic_so_na_alegacao(fio)
+            })();
+            let fim = icp.encerrar();
+            r.and(fim)
+        })
+    })
+}
+
+/// A revogação no meio de uma consulta: o `icp` dorme esperando a
+/// resposta do `read_state`, que a rede `lenta` da bancada segura oito
+/// segundos — mais que uma espera do prazo do programa.
+///
+/// - a política tira o gateway do alcance do operador: a leitura que acorda
+///   é decidida de novo e recusada pelo gate, `DENY_RESOURCE`, e nada é
+///   entregue nem verificado — o desfecho é do transporte; a declaração
+///   passa, ancorada — ela não é rede, e a âncora é um fato do kernel —, e
+///   o fecho, um pedido sobre o destino fora do alcance, é recusado: a
+///   conexão fica com o processo;
+/// - com a política de volta, a consulta lenta verifica: a leitura decidida
+///   de novo a cada espera, e a recuperação é a decisão de agora;
+/// - o processo que sai sem fechar deixa a conexão que o gate não deixou
+///   fechar, e o kernel a recolhe;
+/// - a sessão da pessoa acaba no meio da consulta de outro `icp`: a
+///   leitura é `DENY_NOT_AUTHENTICATED`, e a declaração também — a
+///   alegação não é exceção.
+fn icp_a_revogacao_no_meio_da_consulta() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_icp(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(192), "icp-rev", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let dono = crate::rede::conexoes::Dono::Processo(fio);
+        let do_processo = || {
+            crate::rede::pilha::donos()
+                .iter()
+                .filter(|(_, d, _)| *d == dono)
+                .count()
+        };
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_OLA, REDE_LENTA, 0)?;
+            icp.esperando(desde, "ola lenta", "read_state")?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let fechos = || {
+                registros_do_processo(fio, antes)
+                    .into_iter()
+                    .filter(|(m, d, _, _)| m == "net.close" && d == GATEWAY_ICP)
+                    .map(|(_, _, c, _)| c)
+                    .collect::<alloc::vec::Vec<_>>()
+            };
+            let revogada = com_a_politica(politica_da_bancada_icp(&[SEM_O_GATEWAY_ICP])?, || {
+                let p = icp.dito(desde, "ola lenta")?;
+                // O fecho vem depois do desfecho, ainda sem o gateway.
+                esperar_ate(|| !fechos().is_empty(), TETO_DO_ICP)
+                    .map_err(|_| "o icp nao pediu o fecho da conexao")?;
+                Ok(p)
+            })?;
+            if revogada.desfecho != "failed_transport"
+                || revogada.detalhe != "read_state: denied DENY_RESOURCE"
+            {
+                crate::log_error!("teste", "{:?}", revogada);
+                return Err("a leitura depois da revogacao nao foi recusada pelo gate");
+            }
+            let leituras = registros_do_processo(fio, antes)
+                .into_iter()
+                .filter(|(m, d, _, _)| m == "net.recv" && d == GATEWAY_ICP)
+                .map(|(_, _, c, _)| c)
+                .collect::<alloc::vec::Vec<_>>();
+            if leituras.last() != Some(&Codigo::DenyResource) {
+                crate::log_error!("teste", "{:?}", leituras);
+                return Err("a leitura acordada nao foi decidida de novo pelo gate");
+            }
+            declaracao_do_icp(fio, &revogada, "ola", true)?;
+            if fechos() != [Codigo::DenyResource] || do_processo() != 1 {
+                crate::log_error!("teste", "{:?} / {}", fechos(), do_processo());
+                return Err("o fecho fora do alcance nao foi recusado, ou a conexao sumiu");
+            }
+
+            // A política de volta: a mesma consulta lenta verifica — a
+            // recusa foi da política, e não da lentidão.
+            let lenta = icp.passo(ICP_OLA, REDE_LENTA, 0, "ola lenta")?;
+            if lenta.desfecho != "verified" {
+                crate::log_error!("teste", "{:?}", lenta);
+                return Err("com a politica de volta, a consulta lenta nao verificou");
+            }
+            declaracao_do_icp(fio, &lenta, "ola", true)?;
+
+            // Sai sem fechar: a conexão que o gate não deixou fechar é
+            // recolhida pelo kernel.
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_SAIR_SEM_FECHAR, 0, 0)?;
+            let saiu = alloc::format!("processo encerrou com codigo {ICP_SEM_FECHAR}");
+            esperar_ate(|| linhas_do_programa(desde, &saiu) == 1, TETO_DO_ICP)
+                .map_err(|_| "o icp nao saiu sem fechar")?;
+            esperar_cedendo(|| do_processo() == 0, TETO_DO_ICP)
+                .map_err(|_| "a conexao de quem saiu nao foi recolhida")
+        })();
+        if r.is_err() {
+            let _ = icp.encerrar();
+            return r;
+        }
+
+        // A sessão da pessoa acaba no meio da consulta.
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(193), "icp-fim", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_OLA, REDE_LENTA, 0)?;
+            icp.esperando(desde, "ola lenta", "read_state")?;
+            if !crate::pessoas::sair(sessao) {
+                return Err("a sessao da pessoa nao estava aberta");
+            }
+            let p = icp.dito(desde, "ola lenta")?;
+            if p.desfecho != "failed_transport"
+                || p.detalhe != "read_state: denied DENY_NOT_AUTHENTICATED"
+                || p.declarada != "recusada DENY_NOT_AUTHENTICATED"
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("o fim da sessao nao recusou a leitura e a declaracao");
+            }
+            Ok(())
+        })();
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// A contenção no meio de uma consulta: o processo é isolado enquanto
+/// espera a resposta lenta. A conexão cai na hora, a espera acorda — muito
+/// antes de a resposta vir —, e a leitura executada de novo é
+/// `DENY_CONTAINED`, o código da contenção. A declaração também: contido,
+/// o processo não declara, e nem lê a hora de uma consulta nova. Solto pelo
+/// sistema, pelo gate, a consulta nova verifica.
+fn icp_a_contencao_no_meio_da_consulta() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(194), "icp-iso", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let sistema = sistema_aqui();
+        let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_OLA, REDE_LENTA, 0)?;
+            icp.esperando(desde, "ola lenta", "read_state")?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated")
+                || fs_numero(&r, "dropped") != Some(1)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o icp com a conexao dele");
+            }
+            let p = icp.dito(desde, "ola lenta")?;
+            if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                return Err("a espera nao acordou com a contencao: esperou a resposta");
+            }
+            if p.desfecho != "failed_transport"
+                || p.detalhe != "read_state: contained DENY_CONTAINED"
+                || p.declarada != "recusada DENY_CONTAINED"
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("contido, o icp leu ou declarou");
+            }
+            // Contido, nem a hora de uma consulta nova.
+            let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+            if p.desfecho != "failed_clock"
+                || !p.detalhe.contains("DENY_CONTAINED")
+                || p.declarada != "recusada DENY_CONTAINED"
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("contido, o icp comecou uma consulta nova");
+            }
+            let r = fs_pedir(sistema, "process.release", &processo);
+            if !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao soltou o icp");
+            }
+            let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+            if p.desfecho != "verified" {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("solto, a consulta nova nao verificou");
+            }
+            declaracao_do_icp(fio, &p, "ola", true)
+        })();
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O firewall no meio de uma consulta, com o código dele:
+///
+/// - a regra que entra enquanto o `icp` espera a resposta lenta derruba a
+///   conexão; a espera acorda na hora, e a leitura executada de novo é
+///   decidida pelo gate, que deixa — o processo ainda tem a autoridade e o
+///   número —, e barrada pelo firewall: `FIREWALL_BLOCKED`, gravado como
+///   execução daquela decisão `ALLOW`;
+/// - a declaração passa, ancorada no número cortado, que ainda é do
+///   processo: o kernel escreve o destino dele;
+/// - a conexão nova é decidida `ALLOW` e barrada também: nada a declarar
+///   como ancorado — a declaração diz que não havia conexão;
+/// - tirada a regra, a consulta nova verifica.
+fn icp_o_firewall_no_meio_da_consulta() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_icp(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(195), "icp-fw", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let sistema = sistema_aqui();
+        let para = alloc::format!(r#"{{"to":"{GATEWAY_ICP}"}}"#);
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            icp.pedir(ICP_OLA, REDE_LENTA, 0)?;
+            icp.esperando(desde, "ola lenta", "read_state")?;
+            let antes = crate::tempo::uptime_ms();
+            let r = fs_pedir(sistema, "net.block", &para);
+            let regra = fs_numero(&r, "rule").ok_or("o sistema nao barrou o gateway do IC")?;
+            let barrada = (|| -> Resultado {
+                if fs_numero(&r, "dropped") != Some(1) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("a regra nao derrubou a conexao viva do icp");
+                }
+                let p = icp.dito(desde, "ola lenta")?;
+                if crate::tempo::uptime_ms().saturating_sub(antes) >= 6_000 {
+                    return Err("a espera nao acordou com o corte: esperou a resposta");
+                }
+                if p.desfecho != "failed_transport"
+                    || p.detalhe != "read_state: firewall FIREWALL_BLOCKED"
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("o corte do firewall nao chegou ao icp com o codigo dele");
+                }
+                declaracao_do_icp(fio, &p, "ola", true)?;
+                let prefixo = alloc::format!("bloqueado pelo firewall, regra {regra}; decisao ");
+                let (_, corte) = registro_que(|e| {
+                    e.codigo == Codigo::DenyPolicy && e.detalhe.contains(&prefixo)
+                })
+                .ok_or("o corte do firewall nao foi gravado")?;
+                let decidida = decisao_executada(&corte.detalhe)
+                    .and_then(registro_numero)
+                    .ok_or("o corte do firewall nao aponta a decisao")?;
+                if decidida.metodo != "net.recv"
+                    || decidida.codigo != Codigo::Allow
+                    || !decidida
+                        .detalhe
+                        .starts_with(&alloc::format!("pelo processo {fio} ("))
+                {
+                    crate::log_error!("teste", "{:?}", decidida);
+                    return Err("o corte nao executa a decisao ALLOW da leitura do icp");
+                }
+                // A conexão nova: decidida, e barrada.
+                let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+                if p.desfecho != "failed_connect" || p.detalhe != "firewall FIREWALL_BLOCKED" {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("a conexao nova nao foi barrada pelo firewall");
+                }
+                declaracao_do_icp(fio, &p, "ola", false)
+            })();
+            let solta = fs_pedir(sistema, "net.unblock", &para);
+            barrada?;
+            if fs_numero(&solta, "rule") != Some(regra) {
+                crate::log_error!("teste", "{}", solta);
+                return Err("o sistema nao tirou a regra do gateway do IC");
+            }
+            let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+            if p.desfecho != "verified" {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("sem a regra, a consulta nova nao verificou");
+            }
+            Ok(())
+        })();
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// O alcance e a permissão são do gate, e de mais ninguém:
+///
+/// - sem o gateway no alcance do papel, a conexão é `DENY_RESOURCE` — o
+///   canister, o método e a rede do arquivo não abrem destino nenhum —, e
+///   o programa declara a falha sem âncora;
+/// - sem `audit.declare` no papel, a consulta verifica do mesmo jeito — a
+///   declaração não é parte dela —, e a declaração é `DENY_PERMISSION`,
+///   gravada, e nada é declarado.
+fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    com_a_bancada_icp(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(196), "icp-gate", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            com_a_politica(politica_da_bancada_icp(&[SEM_O_GATEWAY_ICP])?, || {
+                let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+                if p.desfecho != "failed_connect" || p.detalhe != "denied DENY_RESOURCE" {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("sem o gateway no alcance, o icp conectou");
+                }
+                declaracao_do_icp(fio, &p, "ola", false)
+            })?;
+            let negada = decisoes_do_processo(fio, "net.connect", GATEWAY_ICP);
+            if negada
+                .iter()
+                .map(|(_, c, _)| *c)
+                .collect::<alloc::vec::Vec<_>>()
+                != [Codigo::DenyResource]
+                || !decisoes_do_processo(fio, "net.send", GATEWAY_ICP).is_empty()
+            {
+                crate::log_error!("teste", "{:?}", negada);
+                return Err("a conexao fora do alcance nao foi recusada pelo gate");
+            }
+            let sem_declarar = politica_da_bancada_icp(&[(
+                "message.send message.read random.read audit.declare\nrecurso operador",
+                "message.send message.read random.read\nrecurso operador",
+            )])?;
+            com_a_politica(sem_declarar, || {
+                let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+                if p.desfecho != "verified" || p.declarada != "recusada DENY_PERMISSION" {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("sem audit.declare, a consulta mudou ou a declaracao passou");
+                }
+                let e = ultimo_que(|e| {
+                    e.metodo == "audit.declare"
+                        && e.detalhe
+                            .starts_with(&alloc::format!("pelo processo {fio} ("))
+                })
+                .ok_or("a declaracao recusada nao foi gravada")?;
+                if e.codigo != Codigo::DenyPermission || !e.recurso.is_empty() {
+                    crate::log_error!("teste", "{:?}", e);
+                    return Err("a declaracao sem a permissao nao foi recusada pelo gate");
+                }
+                Ok(())
+            })
+        })();
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// Duas consultas ao mesmo tempo, de duas pessoas: enquanto um `icp` dorme
+/// esperando a resposta lenta, o outro consulta e verifica — a espera de
+/// um não segura o outro —, e depois o primeiro verifica também. Cada um
+/// pela sua conexão, cada declaração ancorada na conexão do seu processo.
+fn icp_duas_consultas_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        let sa = crate::pessoas::sessao_de_teste(Console::Terminal(197), "icp-a", "operador");
+        let sb = crate::pessoas::sessao_de_teste(Console::Terminal(198), "icp-b", "operador");
+        let a = Icp::lancar(Autoridade::Pessoa { sessao: sa })?;
+        let b = match Icp::lancar_segundo(Autoridade::Pessoa { sessao: sb }) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = a.encerrar();
+                return Err(e);
+            }
+        };
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            a.pedir(ICP_OLA, REDE_LENTA, 0)?;
+            a.esperando(desde, "ola lenta", "read_state")?;
+            let ola = b.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
+            if linha_que_comeca(desde, "icp: ola lenta: ").is_some() {
+                return Err("a consulta do segundo esperou a do primeiro");
+            }
+            let lenta = a.dito(desde, "ola lenta")?;
+            if ola.desfecho != "verified" || lenta.desfecho != "verified" {
+                crate::log_error!("teste", "{:?} / {:?}", ola, lenta);
+                return Err("as duas consultas ao mesmo tempo nao verificaram");
+            }
+            declaracao_do_icp(a.fio, &lenta, "ola", true)?;
+            declaracao_do_icp(b.fio, &ola, "ola", true)?;
+            let ancora = |p: &PassoDoIcp| {
+                p.registro().and_then(registro_numero).and_then(|e| {
+                    e.detalhe
+                        .split_once("): conexao ")
+                        .and_then(|(_, r)| r.split(' ').next().map(alloc::string::String::from))
+                })
+            };
+            if ancora(&lenta).is_none() || ancora(&lenta) == ancora(&ola) {
+                return Err("as duas declaracoes nao foram ancoradas cada uma na sua conexao");
+            }
+            Ok(())
+        })();
+        let fim_a = a.encerrar();
+        let fim_b = b.encerrar();
+        r.and(fim_a).and(fim_b)
     })
 }
 

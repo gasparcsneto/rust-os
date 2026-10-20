@@ -16,6 +16,7 @@
 
 mod canal_tcp;
 mod codigo;
+mod icp;
 mod persistencia;
 mod servidor_de_hora;
 mod tempo;
@@ -3952,6 +3953,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "hora/src",
         "tls/src",
         "http/src",
+        "web3/src",
         "programas/src",
         "xtask/src",
     ] {
@@ -5747,6 +5749,9 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // `cifrado` confia — ver [`tls`]. Gerada também, com a chave da raiz
     // longe da imagem e do repositório.
     programas.push((tls::ANCORA_NA_IMAGEM.to_string(), tls::ancora()?));
+    // E as redes do IC em que o programa `icp` confia: as da bancada, com a
+    // raiz fixada da PocketIC — ver [`icp`].
+    programas.push((icp::REDES_NA_IMAGEM.to_string(), icp::redes().into_bytes()));
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {
@@ -6310,10 +6315,14 @@ fn comando_qemu(
     // disco, que os compila.
     codigo::publicar(arch)?;
     let canal_tcp = canal_tcp::preparar(arch.nome())?;
+    // O proxy da bancada do IC: `10.0.2.100:4943`, um processo do script a
+    // cada conexão, com os certificados do eco TLS — ver [`icp`]. Sem a
+    // PocketIC ligada, cada conexão cai.
+    let icp = icp::guestfwd()?;
     qemu.args([
         "-netdev",
         &format!(
-            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp}"
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp},{icp}"
         ),
     ]);
     qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
@@ -6718,6 +6727,8 @@ fn fumaca(
 
     zerar_o_estado(arch)?;
     let ambiente = Ambiente::ligar(arch, None)?;
+    // A PocketIC da bancada do IC, para a sonda do IC — ver [`sob_o_ic`].
+    let _icp = icp::Bancada::ligar()?;
     let mut filho = comando_qemu(arch, &artefato, Some(&socket), teclado, video, &ambiente)?
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
@@ -7111,6 +7122,7 @@ fn conversar(
     sob_os_cookies(arch, &mut escrita, &mut leitor)?;
     sob_o_http2(arch, &mut escrita, &mut leitor)?;
     sob_o_codigo(arch, &mut escrita, &mut leitor)?;
+    sob_o_ic(arch, &mut escrita, &mut leitor)?;
     sob_agentes(arch)?;
     sob_sigilo(arch)?;
     sob_administracao(arch, &mut escrita, &mut leitor)?;
@@ -12307,6 +12319,241 @@ const DO_H2: [&str; 9] = [
     "/lento/",
 ];
 
+/// O que seria o IC fora da alegação num registro da auditoria: o
+/// canister, o evento, o nome do gateway, um caminho do IC. Em qualquer
+/// registro, de qualquer um, fora das declarações.
+const DO_IC: [&str; 5] = ["pi33i", "icp.query", "icp.duke", "read_state", "/api/v3/"];
+
+/// O IC no kernel de produção, com a política padrão — ver `docs/ICP.md`.
+/// O agente da porta 2, do papel `operador`, lança o `verificado`, que
+/// consulta o canister da bancada pela rede `direta` — o texto e o eco,
+/// verificados —, recusa a prova adulterada da `bls-invalida` e mede cinco
+/// consultas, cada uma declarada. Daqui, o que o kernel viu, registro a
+/// registro desde antes do lançamento:
+///
+/// - as oito declarações, cada uma a alegação do programa no recurso e, no
+///   detalhe, só o que o kernel sabe: o processo, a conexão e o destino
+///   real dela — o gateway da bancada —, e a decisão;
+/// - as decisões do processo, todas deixadas, e só do que a consulta pede:
+///   a semente, a hora, o relógio da medida, as âncoras, as redes, o
+///   gateway e a declaração;
+/// - nada do IC em registro nenhum fora das declarações;
+/// - nenhuma recusa por taxa e nenhum registro perdido.
+fn sob_o_ic(
+    arch: Arquitetura,
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    println!("[xtask] fumaça: o IC, pelo operador");
+    // Fora da faixa dos `id` do aperto, que começam com 9, e longe das do
+    // HTTP.
+    let mut id = 3500;
+    let mut pedir = |metodo: &str, params: &str| -> Result<String, String> {
+        id += 1;
+        escrita
+            .write_all(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{metodo}","params":{params}}}"#)
+                    .as_bytes(),
+            )
+            .and_then(|()| escrita.write_all(b"\n"))
+            .and_then(|()| escrita.flush())
+            .map_err(|e| format!("ic: falha ao pedir `{metodo}`: {e}"))?;
+        let resposta = ler_resposta(leitor).map_err(|e| format!("ic: {e}"))?;
+        if !e_a_resposta(&resposta, id) {
+            return Err(format!("ic: veio a resposta de outro pedido\n  {resposta}"));
+        }
+        Ok(resposta)
+    };
+    let antes = contas_do_orcamento(&pedir("security.metrics", "{}")?)?;
+    let inicio = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("ic: o audit.head nao disse o numero")?;
+    let comeco = std::time::Instant::now();
+    let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    let lancado = operador.pedir(
+        "user.run",
+        &format!(r#"{{"path":"/programas/{}/verificado"}}"#, arch.nome()),
+    )?;
+    let processo = numero_no_caminho(&lancado, &["thread_id"])
+        .filter(|_| lancado.contains(r#""launched":true"#))
+        .ok_or_else(|| format!("ic: o operador nao lancou o programa\n  {lancado}"))?;
+    let limite = comeco + Duration::from_secs(300);
+    let mut ditas: Vec<String> = Vec::new();
+    loop {
+        let log = pedir("log.tail", r#"{"count":32}"#)?;
+        for pedaco in log.split("verificado: ").skip(1) {
+            let linha = format!("verificado: {}", pedaco.split('"').next().unwrap_or(""));
+            if !ditas.contains(&linha) {
+                ditas.push(linha);
+            }
+        }
+        if log.contains("processo encerrou com codigo 97") {
+            break;
+        }
+        // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
+        // diz o quê, sem esperar o teto.
+        let falhou = log
+            .split("processo encerrou com codigo ")
+            .skip(1)
+            .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
+            .find(|c| (40..=49).contains(c));
+        if let Some(codigo) = falhou {
+            return Err(format!(
+                "ic: o programa saiu com {codigo}\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        if std::time::Instant::now() > limite {
+            return Err(format!(
+                "ic: o programa nao terminou em 300 s\n  {}",
+                ditas.join("\n  ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let duracao = comeco.elapsed();
+    drop(operador);
+    let fim = numero_no_caminho(&pedir("audit.head", "{}")?, &["seq"])
+        .ok_or("ic: o audit.head nao disse o numero")?;
+    let dita = |trecho: &str| {
+        ditas
+            .iter()
+            .find(|l| l.contains(trecho))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "ic: o programa nao disse `{trecho}`\n  {}",
+                    ditas.join("\n  ")
+                )
+            })
+    };
+    for conferida in [
+        "verificado: ola: verified; declarada ",
+        "verificado: eco: verified; declarada ",
+        "verificado: adulterada: unverified_certificate; declarada ",
+        "verificacao: a assinatura BLS do certificado nao confere",
+        "verificado: tudo conferiu",
+    ] {
+        dita(conferida)?;
+    }
+    // O que o kernel gravou desde antes do lançamento, de 128 em 128.
+    let do_processo = format!("pelo processo {processo} (verificado ");
+    let mut depois_de = inicio;
+    let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    let mut declaradas: Vec<String> = Vec::new();
+    let mut vistos = 0u64;
+    while depois_de < fim {
+        let cauda = pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois_de},"count":128}}"#),
+        )?;
+        let registros =
+            objetos_planos(apos(&cauda, r#""records":["#).ok_or("ic: audit.tail sem registros")?)?;
+        if registros.is_empty() {
+            break;
+        }
+        for campos in &registros {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(n, _)| n == nome)
+                    .and_then(|(_, v)| v.clone())
+                    .unwrap_or_default()
+            };
+            depois_de = campo("seq").parse().unwrap_or(depois_de + 1);
+            if depois_de > fim {
+                break;
+            }
+            vistos += 1;
+            let (metodo, recurso, detalhe) = (campo("method"), campo("resource"), campo("detail"));
+            let declaracao = metodo == "audit.declare" && !recurso.is_empty();
+            if declaracao && detalhe.starts_with(&do_processo) {
+                // A alegação no recurso; no detalhe, a âncora do kernel e a
+                // decisão — e nada que o programa escreveu.
+                let ancora = detalhe.split_once("): conexao ").map(|(_, r)| r);
+                let destino = ancora.and_then(|r| r.split(' ').nth(1));
+                if campo("code") != "ALLOW"
+                    || destino != Some("tcp:10.0.2.100:4943;")
+                    || !detalhe.contains("; decisao ")
+                {
+                    return Err(format!(
+                        "ic: a declaracao nao tem a ancora do kernel\n  {recurso} / {detalhe}"
+                    ));
+                }
+                declaradas.push(recurso.clone());
+            } else if let Some(t) = DO_IC
+                .iter()
+                .find(|t| format!("{metodo} {recurso} {detalhe} {}", campo("agent")).contains(*t))
+            {
+                return Err(format!(
+                    "ic: um registro fora das declaracoes tem `{t}`\n  {metodo} {recurso} {detalhe}"
+                ));
+            }
+            if detalhe.starts_with(&do_processo) {
+                *decisoes.entry((metodo, campo("code"))).or_default() += 1;
+            }
+        }
+    }
+    let alegacao = |metodo: &str, desfecho: &str| {
+        format!("icp.query pi33i-pt777-77776-aaaaa-cai/{metodo} {desfecho}")
+    };
+    let mut esperadas = vec![
+        alegacao("ola", "verified"),
+        alegacao("eco", "verified"),
+        alegacao("ola", "unverified_certificate"),
+    ];
+    esperadas.extend((0..5).map(|_| alegacao("ola", "verified")));
+    if declaradas != esperadas {
+        return Err(format!(
+            "ic: as declaracoes nao foram as das consultas\n  {declaradas:?}"
+        ));
+    }
+    const PEDIDOS: [&str; 9] = [
+        "net.connect",
+        "net.send",
+        "net.recv",
+        "net.close",
+        "random.read",
+        "system.info",
+        "system.uptime",
+        "fs.read",
+        "audit.declare",
+    ];
+    if let Some(((metodo, codigo), _)) = decisoes
+        .iter()
+        .find(|((m, c), _)| !PEDIDOS.contains(&m.as_str()) || c != "ALLOW")
+    {
+        return Err(format!(
+            "ic: o programa ouviu {codigo} em `{metodo}`, ou pediu o que a consulta nao pede: {decisoes:?}"
+        ));
+    }
+    let conexoes = decisoes
+        .get(&("net.connect".to_string(), "ALLOW".to_string()))
+        .copied()
+        .unwrap_or(0);
+    if conexoes != 8 {
+        return Err(format!(
+            "ic: {conexoes} conexoes para 8 consultas: {decisoes:?}"
+        ));
+    }
+    let metricas = pedir("security.metrics", "{}")?;
+    let depois = contas_do_orcamento(&metricas)?;
+    let taxa = depois[3].saturating_sub(antes[3]);
+    if taxa != 0 || depois[5] != 0 {
+        return Err(format!(
+            "ic: {taxa} recusas por taxa, {} registros perdidos",
+            depois[5]
+        ));
+    }
+    println!(
+        "  [ic] ok  o verificado do operador saiu com 97 em {} ms: o texto e o eco verificados pela rede direta, a prova adulterada recusada, cinco consultas medidas; {vistos} registros da auditoria lidos: oito declaracoes, cada uma ancorada pelo kernel no gateway, e nada do IC fora delas; as decisoes do processo todas deixadas",
+        duracao.as_millis()
+    );
+    if let Ok(medida) = dita("verificado: medida ") {
+        println!("  [ic] medido  {medida}");
+    }
+    Ok(())
+}
+
 /// O HTTP/2 no kernel de produção, com a política padrão — ver "O HTTP/2"
 /// no README. O agente da porta 2, do papel `operador`, lança o
 /// `correntes`, que confere de dentro o h2c com conhecimento prévio, as
@@ -14334,6 +14581,9 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
 
     zerar_o_estado(arch)?;
     let ambiente = Ambiente::ligar(arch, None)?;
+    // A PocketIC da bancada do IC, para os casos `icp:` — e fora quando a
+    // suíte acaba, ao sair daqui.
+    let _icp = icp::Bancada::ligar()?;
     let mut filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
         .stdout(Stdio::piped())
         .spawn()

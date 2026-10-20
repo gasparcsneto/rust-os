@@ -2427,6 +2427,7 @@ dependencies = [
  "rcgen",
  "sha2 0.11.0",
  "sigilo",
+ "web3",
 ]
 
 [[package]]

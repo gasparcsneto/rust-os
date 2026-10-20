@@ -511,6 +511,45 @@ http/src/            o cliente HTTP/1.1 e HTTP/2 dos programas: nada do HTTP é 
 ├── testes_dos_quadros.rs  cada quadro lido e escrito, e cada recusa com o alcance certo
 └── testes_do_h2.rs  a conexão contra um servidor de mentira que respeita as janelas, e contra roteiros hostis: o erro e o alcance de cada um
 
+web3/src/            os protocolos Web3 de um programa: o Internet Computer, a consulta anônima verificada — o que se prova não autoriza nada
+├── lib.rs           o que o pacote é, e o que nada nele faz: rede, relógio, aleatório ou decisão
+├── icp.rs           o Internet Computer de quem consulta: os módulos, e de onde vem cada regra — a especificação, a referência oficial
+└── icp/
+    ├── principal.rs  o Principal: os bytes, o texto com o CRC32, e a forma canônica que se recusa a variar
+    ├── principal/
+    │   └── testes.rs  contra a especificação e contra o `ic_principal`
+    ├── cbor.rs       o subconjunto estrito do CBOR que o IC usa, lido e escrito
+    ├── cbor/
+    │   └── testes.rs  os casos de borda, e o `serde_cbor` como oráculo
+    ├── resumo.rs     o hash independente de representação: o id de um pedido e o que um nó assina
+    ├── resumo/
+    │   └── testes.rs  os exemplos da especificação, e o `ic-transport-types` como oráculo
+    ├── pedido.rs     os envelopes da consulta e da leitura de estado, anônimos, e o id do pedido
+    ├── pedido/
+    │   └── testes.rs  o mesmo id, e o envelope que o `ic-transport-types` lê
+    ├── arvore.rs     a árvore de hash de um certificado: a leitura, a raiz e a procura
+    ├── arvore/
+    │   └── testes.rs  contra o exemplo da especificação e contra o `ic-certification`
+    ├── certificado.rs  o certificado: a assinatura BLS, a delegação de um nível, as faixas da sub-rede e o tempo
+    ├── certificado/
+    │   └── testes.rs  contra a bancada e contra o `ic-certificate-verification`
+    ├── assinatura.rs  a assinatura Ed25519 de um nó, pela ZIP215
+    ├── assinatura/
+    │   └── testes.rs  a ZIP215 daqui contra o `ic-ed25519`
+    ├── consulta.rs   a resposta da consulta e as assinaturas dos nós da sub-rede, presas a este pedido
+    ├── consulta/
+    │   └── testes.rs  contra a bancada e o `ic-transport-types`
+    ├── candid.rs     o Candid: a tabela de tipos inteira, os valores de um subconjunto, e o que sobra recusado
+    ├── candid/
+    │   └── testes.rs  contra a especificação e contra o crate `candid`
+    ├── agente.rs     a consulta ponta a ponta sobre um transporte de quem chama: nada se entrega antes da verificação
+    ├── agente/
+    │   └── testes.rs  contra um IC de mentira, e os modos adversários de quem está no caminho
+    ├── registro.rs   `/dados/icp/redes`: as redes em que se confia, a chave da raiz de cada uma — um erro recusa o arquivo inteiro
+    ├── registro/
+    │   └── testes.rs  o arquivo de redes, linha a linha
+    └── bancada.rs    só nos testes: chaves, certificados e respostas de um IC de mentira, montados com as bibliotecas oficiais
+
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
 ├── lib.rs           a árvore de arquivos e diretórios, a versão do armazém inteiro, o lote inteiro ou nada
 ├── bloco.rs         o bloco de 4 KiB do volume: XChaCha20-Poly1305 com o id do conteúdo e o índice no nonce
@@ -615,12 +654,15 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── insistente.rs passa dados pela conexão aberta, e insiste, no passo que a suíte dita: a revogação, a contenção e o firewall no meio
         ├── vindo.rs      o programa que chega pela rede: fora da imagem, selado pela bancada, e pede pelo gate
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
+        ├── icp.rs        consulta o canister da bancada pelo DNS, TCP, TLS e HTTP, confere a prova de dentro e declara o desfecho: a prova não dá acesso a nada
+        ├── verificado.rs o IC na imagem de produção: o texto e o eco verificados pela rede sem DNS, a prova adulterada recusada, cada consulta medida e declarada
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
+├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário

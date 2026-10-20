@@ -49,3 +49,8 @@ rcgen = "0.14.10"
 #
 # Aqui morava o crate `bootloader`, que gerava as imagens de BIOS e de UEFI.
 # Ele saiu quando o `iniciador/` passou a pôr o kernel de pé sozinho.
+
+[dev-dependencies]
+# Só nos testes: o leitor de `/dados/icp/redes` do programa, para conferir
+# que o arquivo que a bancada do IC põe na imagem vale — ver `src/icp.rs`.
+web3 = { path = "../web3" }
