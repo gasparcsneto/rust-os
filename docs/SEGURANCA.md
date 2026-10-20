@@ -610,6 +610,40 @@ que o NSF faz com o tempo é ler:
   *Os consumidores da hora*), e o cookie não é identidade, credencial,
   autoridade nem permissão.
 
+## A declaração (ICP-1)
+
+Um programa que quer deixar um fato dele na auditoria o declara com
+`audit.declare` — ver o README, *A política*. O NSF lê a declaração como o
+que ela é: uma **alegação** de quem pediu, ao lado dos fatos do kernel.
+
+- **As duas partes não se misturam.** A alegação — o evento, o assunto e o
+  desfecho — está no recurso do registro, como o programa a escreveu, e o
+  kernel só confere a forma dela. O detalhe é do kernel: o processo e o
+  programa, a conexão em que a declaração se ancorou e o destino real
+  dela, pela tabela da pilha, e a decisão. O NSF lê a alegação do recurso
+  e a âncora do detalhe; o que um programa escreve não faz nascimento,
+  queda de conexão nem corte do firewall, nem com as palavras deles.
+- **O tipo e a correlação.** Um registro de execução de `audit.declare`
+  que passou é do tipo `declaration` no `security.events`, com as duas
+  partes separadas — `claimed` e `anchor` —; o grafo liga quem declarou à
+  declaração, e a declaração ao destino da âncora, e o
+  `security.provenance` de um processo lista as declarações dele. A
+  correlação sai daí: identidade → processo → o que ele alega → o destino
+  que o kernel diz → o desfecho que ele alega. A alegação não vira nó de
+  destino nem de recurso: só a âncora, que é do kernel.
+- **A verificação que falhou é observada.** Um desfecho `unverified`, ou
+  `unverified_<motivo>` — uma convenção do NSF, e de nenhum protocolo:
+  qualquer programa que confere o que recebeu a usa —, dispara
+  `declared-verification-failed`: média, confiança baixa, no primeiro
+  degrau na primeira e no segundo na terceira da janela. É da categoria
+  `risky`, que não sustenta contenção; não abre incidente sozinha, e o
+  motor não planeja nem recomenda nada por ela — nem com a confiança que
+  fosse. O NSF não corta o destino, não isola o programa e não suspende
+  quem o lançou por uma alegação.
+- **Nenhuma decisão lê uma declaração.** Nem o gate, nem o firewall, nem
+  as cotas, nem a contenção: a declaração não autoriza, não nega e não
+  muda nada além do registro.
+
 ## As consultas
 
 Todas pelo gate, com a permissão `security.read` (sensível: diz o que os
@@ -621,7 +655,7 @@ outros fizeram):
 | `security.incidents` | os incidentes; com `id`, um inteiro |
 | `security.events` | a linha do tempo: de um ator, de um incidente, ou toda |
 | `security.explain` | a interpretação de uma decisão gravada — nunca uma segunda decisão |
-| `security.provenance` | a cadeia de um processo até a raiz, com a rede dele |
+| `security.provenance` | a cadeia de um processo até a raiz, com a rede dele e o que ele declarou |
 | `security.risk` | o risco e o perfil de um principal, com os motivos, e o raio de alcance do que ele já tocou |
 | `security.verify` | refaz o cofre de evidências |
 | `net.rules` | as regras do firewall e os descartes |

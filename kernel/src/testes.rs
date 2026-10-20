@@ -31191,6 +31191,10 @@ static CASOS: &[Caso] = &[
         f: declaracao_gasta_a_taxa_de_quem_lanca,
     },
     Caso {
+        nome: "declaracao: o NSF le como alegacao e so observa",
+        f: declaracao_o_nsf_le_como_alegacao,
+    },
+    Caso {
         nome: "rede: o envio que nao cabe espera espaco",
         f: rede_o_envio_que_nao_cabe_espera_espaco,
     },
@@ -35765,6 +35769,134 @@ fn declaracao_gasta_a_taxa_de_quem_lanca() -> Resultado {
         declaracao_gravada(&declarar(pessoa, DECLARACAO))
             .map_err(|_| "a pessoa ganhou uma taxa no que declara por si")?;
         Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O NSF lê a declaração como alegação, pela auditoria e pelo gate: o tipo
+/// dela, a alegação fora do recurso — que o perfil e as regras leem como o
+/// que se tocou —, a âncora — a conexão e o destino que o kernel escreveu
+/// —, e a proveniência do processo com as duas partes separadas. A
+/// verificação que o programa diz que falhou é só observada: confiança
+/// baixa, nenhum incidente, nenhum pedido ao gate, nenhuma regra no
+/// firewall — e o processo continua declarando e abrindo conexões: o gate
+/// não leu nada do que se declarou.
+fn declaracao_o_nsf_le_como_alegacao() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use seguranca::evento::Tipo;
+    use seguranca::regras::{Confianca, Regra};
+    crate::pessoas::esquecer_registradas();
+    let resultado = com_o_nsf(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(186), "declara-nsf", "operador");
+        let fio = crate::fios::id_atual();
+        let processo = Chamador::Processo {
+            fio,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste("caso", "net.connect audit.declare")),
+                resumo: [0xab; 32],
+                editor: None,
+            },
+        };
+        let conectar = alloc::format!(r#"{{"to":"{ECO}"}}"#);
+        let n = conexao_aberta(&fs_pedir(processo, "net.connect", &conectar))?;
+        let r = (|| -> Resultado {
+            let declarar_com = |desfecho: &str| -> Result<u64, &'static str> {
+                let r = declarar(
+                    processo,
+                    &alloc::format!(
+                        r#"{{"event":"teste.consulta","subject":"alvo/metodo","outcome":"{desfecho}","connection":{n}}}"#
+                    ),
+                );
+                declaracao_gravada(&r)?;
+                fs_numero(&r, "record").ok_or("a declaracao nao disse o registro")
+            };
+            let verificada = declarar_com("verificada")?;
+            let falhas = [
+                declarar_com("unverified_assinatura")?,
+                declarar_com("unverified_assinatura")?,
+                declarar_com("unverified")?,
+            ];
+            let v = crate::seguranca::passo();
+            let w = crate::seguranca::passo();
+
+            // A alegação, com a âncora do kernel — e fora do recurso.
+            let lida = crate::seguranca::com_motor_de_teste(|m| {
+                let e = m.evento(verificada)?;
+                let d = e.declaracao()?;
+                Some(
+                    e.tipo == Tipo::Declaracao { conexao: Some(n) }
+                        && e.recurso.is_empty()
+                        && (d.evento.as_str(), d.assunto.as_str(), d.desfecho.as_str())
+                            == ("teste.consulta", "alvo/metodo", "verificada")
+                        && d.ancora == Some((n, alloc::string::String::from(ECO)))
+                        && e.processo.as_ref().is_some_and(|(f, _)| *f == fio),
+                )
+            })
+            .flatten();
+            if lida != Some(true) {
+                return Err("o NSF nao leu a declaracao como alegacao com a ancora do kernel");
+            }
+
+            // A verificação que falhou: observada, e só.
+            let (registros, baixa, no_incidente) = crate::seguranca::com_motor_de_teste(|m| {
+                let delas: alloc::vec::Vec<_> = m
+                    .observacoes()
+                    .filter(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+                    .collect();
+                (
+                    delas
+                        .iter()
+                        .map(|d| d.registros.clone())
+                        .collect::<alloc::vec::Vec<_>>(),
+                    delas.iter().all(|d| d.confianca == Confianca::Baixa),
+                    m.incidentes.todos().any(|i| {
+                        i.deteccoes
+                            .iter()
+                            .any(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+                    }),
+                )
+            })
+            .ok_or("o NSF nao estava ligado")?;
+            if registros != [alloc::vec![falhas[0]], falhas.to_vec()] || !baixa {
+                crate::log_error!("teste", "{:?} {:?}", registros, falhas);
+                return Err("a verificacao declarada que falhou nao foi observada como alegacao");
+            }
+            if no_incidente
+                || v.pedidos + w.pedidos != 0
+                || !crate::rede::pilha::regras().is_empty()
+            {
+                return Err("a alegacao abriu incidente, pediu contencao ou pos regra no firewall");
+            }
+
+            // A proveniência do processo: as declarações, com as duas partes.
+            let r = consulta_de_seguranca(
+                "security.provenance",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            let alegada = r#""claimed":{"event":"teste.consulta","subject":"alvo/metodo","outcome":"verificada"}"#;
+            if !r.contains(&alloc::format!(
+                r#""declarations":[{{"record":{verificada},"decision":"#
+            )) || !r.contains(alegada)
+                || !r.contains(&alloc::format!(
+                    r#""anchor":{{"connection":{n},"to":"{ECO}"}}"#
+                ))
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("a proveniencia nao trouxe as declaracoes com as duas partes");
+            }
+
+            // E o processo continua: o gate não leu o que se declarou.
+            declaracao_gravada(&declarar(processo, DECLARACAO))?;
+            let outra = conexao_aberta(&fs_pedir(processo, "net.connect", &conectar))?;
+            fechar_conexao(processo, outra);
+            Ok(())
+        })();
+        fechar_conexao(processo, n);
+        r
     });
     crate::pessoas::esquecer_registradas();
     resultado

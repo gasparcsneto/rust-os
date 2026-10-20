@@ -210,6 +210,7 @@ mod testes {
             recurso: String::new(),
             codigo,
             detalhe: String::new(),
+            alegacao: None,
             processo: None,
             decisao: None,
             tipo,

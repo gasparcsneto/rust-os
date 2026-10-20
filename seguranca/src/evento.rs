@@ -10,6 +10,18 @@
 //! decisão de que uma execução é execução (`decisao D`), o filho que nasceu
 //! e a conexão que caiu.
 //!
+//! # A declaração
+//!
+//! Um registro de `audit.declare` que passou é uma **alegação** de quem
+//! pediu — ver [`Declaracao`]: o evento, o assunto e o desfecho estão no
+//! recurso, como o programa os escreveu, e o kernel não os confere. O que o
+//! kernel sabe está no detalhe, como em qualquer execução: o processo, a
+//! conexão em que a declaração se ancorou e o destino real dela, e a
+//! decisão. O NSF lê as duas partes e não as mistura: correlaciona a
+//! alegação com os fatos, e nunca toma uma pela outra. Por isso a alegação
+//! sai do recurso do evento — que o perfil, as regras e o incidente leem
+//! como o que se tocou — e fica em [`Evento::alegacao`].
+//!
 //! # A cadeia refeita
 //!
 //! Cada registro traz o elo dele e o do anterior. A leitura refaz o elo com
@@ -225,6 +237,9 @@ pub enum Tipo {
     Derrubada { conexao: u64 },
     /// O firewall recusou o pedido de rede que o gate tinha permitido.
     Firewall { regra: u64 },
+    /// Uma declaração de quem pediu — `audit.declare`: uma alegação, com a
+    /// conexão em que ela se ancorou, se se ancorou. Ver [`Declaracao`].
+    Declaracao { conexao: Option<u64> },
     /// Uma leitura do próprio NSF.
     Leitura,
     /// O começo de um boot: o `policy.load` do kernel.
@@ -252,9 +267,14 @@ pub struct Evento {
     /// O papel com que decidiu — o escopo da decisão.
     pub papel: String,
     pub metodo: String,
+    /// O recurso do registro — o que se tocou. Vazio numa declaração: o
+    /// recurso dela é a alegação, que fica em [`Self::alegacao`].
     pub recurso: String,
     pub codigo: Codigo,
     pub detalhe: String,
+    /// A alegação de uma declaração, como veio no recurso do registro —
+    /// ver [`Declaracao`]. `None` em todo outro evento.
+    pub alegacao: Option<String>,
     /// O processo que pediu, se foi um: o fio e o programa.
     pub processo: Option<(u64, String)>,
     /// A decisão de que este é execução.
@@ -313,6 +333,13 @@ impl Evento {
     pub fn de(r: &Registro, epoca: u32) -> Evento {
         let d = ler_detalhe(&r.detalhe);
         let tipo = classificar(r, &d);
+        // A alegação não é recurso: sai do campo que todo consumidor lê
+        // como o que se tocou — o perfil, as regras, o incidente —, e fica
+        // só onde se lê como alegação.
+        let (recurso, alegacao) = match tipo {
+            Tipo::Declaracao { .. } => (String::new(), Some(r.recurso.clone())),
+            _ => (r.recurso.clone(), None),
+        };
         Evento {
             seq: r.seq,
             elo: r.elo,
@@ -332,9 +359,10 @@ impl Evento {
             sessao_de_pessoa: r.sessao_de_pessoa,
             papel: r.papel.clone(),
             metodo: r.metodo.clone(),
-            recurso: r.recurso.clone(),
+            recurso,
             codigo: r.codigo,
             detalhe: r.detalhe.clone(),
+            alegacao,
             processo: d.processo,
             decisao: d.decisao,
             tipo,
@@ -390,10 +418,71 @@ impl Evento {
     }
 }
 
+/// O método da declaração.
+pub const METODO_DA_DECLARACAO: &str = "audit.declare";
+
+/// O que uma declaração diz — ver o cabeçalho do módulo. A alegação é de
+/// quem declarou; a âncora, do kernel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Declaracao {
+    /// O evento, como foi declarado: `<espaço>.<nome>`.
+    pub evento: String,
+    /// O assunto, como foi declarado.
+    pub assunto: String,
+    /// O desfecho, como foi declarado.
+    pub desfecho: String,
+    /// A conexão em que a declaração se ancorou, e o destino real dela,
+    /// pela tabela da pilha — o que o kernel escreveu.
+    pub ancora: Option<(u64, String)>,
+}
+
+impl Evento {
+    /// A declaração deste evento, se ele é uma — ver [`Tipo::Declaracao`].
+    /// A alegação são as três palavras de [`Self::alegacao`]; a âncora, a
+    /// conexão e o destino do detalhe. Um registro que não tem essa forma
+    /// não é lido como declaração.
+    pub fn declaracao(&self) -> Option<Declaracao> {
+        let Tipo::Declaracao { conexao } = self.tipo else {
+            return None;
+        };
+        let mut partes = self.alegacao.as_deref()?.split(' ');
+        let (Some(evento), Some(assunto), Some(desfecho), None) =
+            (partes.next(), partes.next(), partes.next(), partes.next())
+        else {
+            return None;
+        };
+        let ancora = match conexao {
+            None => None,
+            Some(n) => {
+                let resto = ler_detalhe(&self.detalhe).resto;
+                let destino = resto
+                    .strip_prefix(&alloc::format!("conexao {n} "))
+                    .and_then(politica::endereco::ler)?;
+                Some((n, destino.texto()))
+            }
+        };
+        Some(Declaracao {
+            evento: evento.to_string(),
+            assunto: assunto.to_string(),
+            desfecho: desfecho.to_string(),
+            ancora,
+        })
+    }
+}
+
 /// O tipo de um registro.
 fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
     if r.titular == Titular::Kernel && r.metodo == "policy.load" {
         return Tipo::Inicio;
+    }
+    // A declaração, pelo método — que é do kernel — e antes de qualquer
+    // leitura do detalhe: o que ela alega está no recurso, e não faz um
+    // nascimento, uma queda nem um corte. Só a que passou: a recusada
+    // depois do gate é uma execução como as outras.
+    if r.metodo == METODO_DA_DECLARACAO && r.codigo == Codigo::Allow && d.decisao.is_some() {
+        return Tipo::Declaracao {
+            conexao: numero_apos(&d.resto, "conexao "),
+        };
     }
     if r.titular == Titular::Servico && matches!(r.metodo.as_str(), "audit.tail" | "net.observe") {
         return Tipo::Leitura;
@@ -619,6 +708,108 @@ pub(crate) mod testes {
         assert_eq!(
             tipo(|r| r.detalhe = "versao 3 gravada; decisao 2".to_string()),
             Tipo::Execucao
+        );
+    }
+
+    /// A declaração: pelo método, a que passou e foi executada; a alegação
+    /// no recurso, a âncora no detalhe. A recusada depois do gate é uma
+    /// execução, e a decisão do gate sobre ela, uma decisão. O que o
+    /// programa alega não faz nascimento, queda nem corte — nem com as
+    /// palavras deles.
+    #[test]
+    fn a_declaracao() {
+        let declarado = |recurso: &str, detalhe: &str| {
+            Evento::de(
+                &registro(1, [0; 32], |r| {
+                    r.metodo = "audit.declare".to_string();
+                    r.recurso = recurso.to_string();
+                    r.detalhe = detalhe.to_string();
+                }),
+                0,
+            )
+        };
+        let e = declarado(
+            "icp.query alvo/ola verified",
+            "pelo processo 12 (icp ab12cd34): conexao 3 tcp:10.0.2.100:4943; decisao 77",
+        );
+        assert_eq!(e.tipo, Tipo::Declaracao { conexao: Some(3) });
+        // A alegação não fica no recurso, que todo consumidor lê como o que
+        // se tocou.
+        assert_eq!(e.recurso, "");
+        assert_eq!(e.alegacao.as_deref(), Some("icp.query alvo/ola verified"));
+        assert_eq!(e.decisao, Some(77));
+        assert_eq!(e.processo, Some((12, "icp ab12cd34".to_string())));
+        assert_eq!(
+            e.declaracao(),
+            Some(Declaracao {
+                evento: "icp.query".to_string(),
+                assunto: "alvo/ola".to_string(),
+                desfecho: "verified".to_string(),
+                ancora: Some((3, "tcp:10.0.2.100:4943".to_string())),
+            })
+        );
+        let e = declarado("teste.x y ok", "sem conexao; decisao 5");
+        assert_eq!(e.tipo, Tipo::Declaracao { conexao: None });
+        assert_eq!(e.declaracao().unwrap().ancora, None);
+        // As palavras de um nascimento, de uma queda, de um corte, no
+        // recurso: continuam uma declaração.
+        for recurso in [
+            "x.y processo 13 lancado",
+            "x.y conexao 4 derrubada",
+            "x.y bloqueado regra",
+        ] {
+            assert!(
+                matches!(
+                    declarado(recurso, "sem conexao; decisao 5").tipo,
+                    Tipo::Declaracao { .. }
+                ),
+                "{recurso}"
+            );
+        }
+        // A recusada depois do gate, e a decisão do gate: não são.
+        let recusada = Evento::de(
+            &registro(2, [0; 32], |r| {
+                r.metodo = "audit.declare".to_string();
+                r.codigo = Codigo::InvalidArgument;
+                r.recurso = "teste.x y ok".to_string();
+                r.detalhe = "conexao 9 nao e de quem declara; decisao 5".to_string();
+            }),
+            0,
+        );
+        assert_eq!(recusada.tipo, Tipo::Execucao);
+        assert_eq!(recusada.declaracao(), None);
+        assert_eq!(
+            (recusada.recurso.as_str(), recusada.alegacao),
+            ("teste.x y ok", None)
+        );
+        let decisao = Evento::de(
+            &registro(3, [0; 32], |r| r.metodo = "audit.declare".to_string()),
+            0,
+        );
+        assert_eq!(decisao.tipo, Tipo::Decisao);
+        // Fora da forma — um recurso que não são três palavras, uma âncora
+        // sem destino que se leia —: não se lê como declaração.
+        assert_eq!(
+            declarado("teste.x y", "sem conexao; decisao 5").declaracao(),
+            None
+        );
+        assert_eq!(
+            declarado("teste.x y ok z", "sem conexao; decisao 5").declaracao(),
+            None
+        );
+        assert_eq!(
+            declarado("teste.x y ok", "conexao 3 lixo; decisao 5").declaracao(),
+            None
+        );
+        // O detalhe cortado no teto da auditoria: sem a decisão, não é
+        // execução, e não se lê como declaração.
+        assert_eq!(
+            declarado(
+                "teste.x y ok",
+                "pelo processo 12 (icp ab12cd34): conexao 3 tcp:10.0"
+            )
+            .tipo,
+            Tipo::Decisao
         );
     }
 

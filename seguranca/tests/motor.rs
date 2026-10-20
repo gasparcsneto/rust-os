@@ -6,7 +6,8 @@ use politica::Codigo;
 use politica::auditoria::{Evento as DaCadeia, Titular, elo};
 use protocolo::json::{Json, JsonWriter};
 use seguranca::Motor;
-use seguranca::evento::Severidade;
+use seguranca::evento::{Severidade, Tipo};
+use seguranca::grafo::{Aresta, No};
 use seguranca::incidente::Estado as EstadoDoIncidente;
 use seguranca::regras::{Confianca, Regra};
 use seguranca::resposta::{Estado as EstadoDaAcao, Nivel};
@@ -1937,4 +1938,176 @@ fn de_volta_a_andar_a_janela_contem() {
             .filter(|d| d.regra == Regra::SondagemDePrivilegio)
             .all(|d| !d.logico_parado)
     );
+}
+
+/// A declaração de um programa, pela auditoria: a alegação no recurso, e a
+/// conexão e o destino que o kernel escreveu no detalhe. O motor a lê como
+/// alegação — o tipo dela, a âncora no grafo, a proveniência do processo —,
+/// e a verificação que o programa diz que falhou é só observada: sem
+/// incidente, sem pedido, sem recomendação. O que se alega não vira
+/// destino, processo nem recurso no grafo: só a âncora, que é do kernel.
+#[test]
+fn a_declaracao_e_alegacao_observada() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("user.run", "/programas/x/icp", Codigo::Allow, ""));
+    a.gravar(do_agente(
+        "user.run",
+        "/programas/x/icp",
+        Codigo::Allow,
+        "processo 21 lancado; decisao 1",
+    ));
+    const PELO: &str = "pelo processo 21 (icp 0a0b0c0d)";
+    const GATEWAY: &str = "tcp:10.0.2.100:4943";
+    a.gravar(do_agente("net.connect", GATEWAY, Codigo::Allow, PELO));
+    let declarar = |a: &mut Auditoria, recurso: &str, ancora: &str| {
+        let d = a.gravar(do_agente("audit.declare", "", Codigo::Allow, PELO));
+        a.gravar(do_agente(
+            "audit.declare",
+            recurso,
+            Codigo::Allow,
+            &format!("{PELO}: {ancora}; decisao {d}"),
+        ))
+    };
+    let ancorada = format!("conexao 3 {GATEWAY}");
+    let verificada = declarar(&mut a, "icp.query alvo/ola verified", &ancorada);
+    let falhas: Vec<u64> = (0..3)
+        .map(|_| declarar(&mut a, "icp.query alvo/ola unverified_signature", &ancorada))
+        .collect();
+    // Uma que alega o que o kernel não confere — um destino, um processo
+    // que nasceu —: continua alegação.
+    let enganosa = declarar(
+        &mut a,
+        "x.y tcp:10.0.2.100:7 processo_9_lancado",
+        "sem conexao",
+    );
+    ler(&mut m, &a);
+
+    let e = m.evento(verificada).expect("a declaracao nao foi lida");
+    assert_eq!(e.tipo, Tipo::Declaracao { conexao: Some(3) });
+    assert_eq!(e.recurso, "", "a alegacao ficou no recurso do evento");
+    assert_eq!(e.alegacao.as_deref(), Some("icp.query alvo/ola verified"));
+    let d = e.declaracao().unwrap();
+    assert_eq!(
+        (d.evento.as_str(), d.assunto.as_str(), d.desfecho.as_str()),
+        ("icp.query", "alvo/ola", "verified")
+    );
+    assert_eq!(d.ancora, Some((3, GATEWAY.to_string())));
+    // O grafo: o processo declarou; a declaração, sobre o destino do kernel.
+    let vizinhos = m.grafo.vizinhos(&No::Declaracao(verificada));
+    assert!(
+        vizinhos.contains(&(Aresta::Declarou, No::Processo { epoca: 0, fio: 21 }, false)),
+        "{vizinhos:?}"
+    );
+    assert!(
+        vizinhos.contains(&(Aresta::Sobre, No::Destino(GATEWAY.to_string()), true)),
+        "{vizinhos:?}"
+    );
+    // A enganosa: nem destino, nem nascimento, nem recurso.
+    assert!(
+        m.grafo
+            .vizinhos(&No::Declaracao(enganosa))
+            .iter()
+            .all(|(a, _, _)| *a == Aresta::Declarou)
+    );
+    assert!(
+        m.grafo
+            .vizinhos(&No::Destino("tcp:10.0.2.100:7".into()))
+            .is_empty()
+    );
+    assert!(m.grafo.processo(0, 9).is_none());
+    // O perfil de quem declarou não conta a alegação como o que ele tocou.
+    let perfil = m
+        .ueba
+        .perfil(&format!("agent:{}", hex(&CHAVE)))
+        .expect("o perfil do agente");
+    assert!(perfil.recursos.contains(GATEWAY));
+    assert!(
+        perfil
+            .recursos
+            .iter()
+            .all(|r| !r.contains("icp.query") && !r.contains("x.y")),
+        "{:?}",
+        perfil.recursos
+    );
+    // A regra: observada, sem incidente nem pedido.
+    let observadas: Vec<_> = m
+        .observacoes()
+        .filter(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+        .collect();
+    assert_eq!(observadas.len(), 2, "{observadas:?}");
+    assert!(
+        observadas
+            .iter()
+            .all(|d| d.confianca == Confianca::Baixa && d.severidade == Severidade::Media)
+    );
+    assert_eq!(observadas[0].registros, [falhas[0]]);
+    assert_eq!(observadas[1].registros, falhas);
+    assert_eq!(m.incidentes.todos().count(), 0);
+    assert!(m.pedidos().is_empty());
+    // A proveniência do processo diz as declarações, com as duas partes.
+    let mut s = String::new();
+    seguranca::relatorio::proveniencia(&m, 0, 21, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(s.contains(r#""declarations":[{"record":"#), "{s}");
+    assert!(
+        s.contains(r#""claimed":{"event":"icp.query","subject":"alvo/ola","outcome":"verified"}"#),
+        "{s}"
+    );
+    assert!(
+        s.contains(&format!(r#""anchor":{{"connection":3,"to":"{GATEWAY}"}}"#)),
+        "{s}"
+    );
+}
+
+/// Com um incidente vivo do mesmo principal, a verificação que o programa
+/// diz que falhou entra nele como detecção — a evidência de uma alegação —,
+/// e só: a alegação não vira recurso afetado, a severidade e a confiança do
+/// incidente não sobem por ela, e nenhuma ação nova é planejada — nem para
+/// o destino em que ela se ancorou.
+#[test]
+fn a_declaracao_no_incidente_vivo() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    sondar(&mut a);
+    ler(&mut m, &a);
+    assert!(m.pedidos().is_empty(), "sondar nao leva a pedido nenhum");
+    let antes = m
+        .incidentes
+        .todos()
+        .next()
+        .cloned()
+        .expect("a sondagem abre um incidente");
+    let ancorada = format!("conexao 3 {ECO}");
+    let falhas: Vec<u64> = (0..3)
+        .map(|_| {
+            let d = a.gravar(do_agente("audit.declare", "", Codigo::Allow, ""));
+            a.gravar(do_agente(
+                "audit.declare",
+                "icp.query alvo/ola unverified_signature",
+                Codigo::Allow,
+                &format!("{ancorada}; decisao {d}"),
+            ))
+        })
+        .collect();
+    ler(&mut m, &a);
+    let inc = m.incidentes.get(antes.id).expect("o incidente vivo");
+    let delas: Vec<_> = inc
+        .deteccoes
+        .iter()
+        .filter(|d| d.regra == Regra::VerificacaoDeclaradaFalhou)
+        .collect();
+    assert_eq!(delas.len(), 2, "{delas:?}");
+    assert_eq!(delas[1].registros, falhas);
+    assert!(falhas.iter().all(|f| inc.registros.contains(f)));
+    assert_eq!(
+        inc.recursos, antes.recursos,
+        "a alegacao virou recurso afetado"
+    );
+    assert_eq!(
+        (inc.severidade, inc.confianca),
+        (antes.severidade, antes.confianca)
+    );
+    assert_eq!(inc.acoes.len(), antes.acoes.len());
+    assert!(m.pedidos().is_empty(), "a alegacao levou a um pedido");
+    assert_eq!(m.incidentes.todos().count(), 1);
 }

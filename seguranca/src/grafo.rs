@@ -1,5 +1,7 @@
 //! O grafo causal: quem lançou quem, quem pediu o quê, que nome levou a que
-//! endereço, que regra barrou que destino, que incidente envolve o quê.
+//! endereço, que regra barrou que destino, que incidente envolve o quê — e
+//! quem declarou o quê, sobre que conexão: a declaração é uma alegação, e o
+//! destino dela, um fato do kernel.
 //!
 //! # A proveniência
 //!
@@ -52,6 +54,9 @@ pub enum No {
     Endereco([u8; 4]),
     /// Uma decisão do gate, pelo número na auditoria.
     Decisao(u64),
+    /// Uma declaração de quem pediu, pelo número na auditoria: uma
+    /// alegação — ver [`crate::evento::Declaracao`].
+    Declaracao(u64),
     /// Uma regra do firewall.
     Regra(u64),
     /// Um incidente.
@@ -70,6 +75,7 @@ impl No {
             No::Nome(n) => alloc::format!("name {n}"),
             No::Endereco([a, b, c, d]) => alloc::format!("address {a}.{b}.{c}.{d}"),
             No::Decisao(s) => alloc::format!("decision {s}"),
+            No::Declaracao(s) => alloc::format!("declaration {s}"),
             No::Regra(r) => alloc::format!("rule {r}"),
             No::Incidente(i) => alloc::format!("incident {i}"),
         }
@@ -97,6 +103,9 @@ pub enum Aresta {
     Barra,
     /// Um incidente envolve um nó.
     Envolve,
+    /// Uma identidade ou um processo declarou — ver
+    /// [`No::Declaracao`].
+    Declarou,
 }
 
 impl Aresta {
@@ -112,6 +121,7 @@ impl Aresta {
             Aresta::ResolveuPara => "resolved_to",
             Aresta::Barra => "blocks",
             Aresta::Envolve => "involves",
+            Aresta::Declarou => "declared",
         }
     }
 }

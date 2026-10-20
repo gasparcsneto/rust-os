@@ -383,6 +383,10 @@ pub fn planejar(d: &Deteccao, s: &Situacao) -> Vec<Acao> {
                     .to_string(),
             });
         }
+        // A verificação que um programa declarou que falhou é uma alegação
+        // dele: o NSF observa, e não pede nem recomenda nada — nem com a
+        // confiança que fosse.
+        Regra::VerificacaoDeclaradaFalhou => {}
         _ => {}
     }
     v
@@ -638,6 +642,21 @@ mod testes {
             ) {
                 assert!(a.nivel < Nivel::Forte);
             }
+        }
+    }
+
+    /// A verificação que um programa declarou que falhou não planeja nada —
+    /// nem com a confiança mais alta e um alvo: é uma alegação dele.
+    #[test]
+    fn a_declaracao_nao_planeja_nada() {
+        for titular in [Titular::Agente, Titular::Pessoa] {
+            assert!(
+                planejar(
+                    &det(Regra::VerificacaoDeclaradaFalhou, alvo(), titular),
+                    &saudavel()
+                )
+                .is_empty()
+            );
         }
     }
 }

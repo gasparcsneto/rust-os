@@ -62,8 +62,21 @@ const MAIS_NA_JANELA: usize = 64;
 /// Quantas identidades o detector acompanha.
 const MAIS_IDENTIDADES: usize = 64;
 
+/// As verificações declaradas que falharam, na janela, que fazem o
+/// primeiro e o segundo degrau.
+pub const VERIFICACAO_DECLARADA: [usize; 2] = [1, 3];
+
 /// As mudanças de política.
 const METODOS_DE_POLITICA: &[&str] = &["policy.write", "policy.assign"];
+
+/// O desfecho declarado de uma verificação que falhou: `unverified`, ou
+/// `unverified_<motivo>`. Uma convenção do NSF, e não do kernel — que não
+/// lê o que se declara —, e de nenhum protocolo: qualquer programa que
+/// confere o que recebeu — uma assinatura, um certificado, uma prova — a
+/// usa para dizer que não conseguiu.
+pub fn verificacao_falhou(desfecho: &str) -> bool {
+    desfecho == "unverified" || desfecho.starts_with("unverified_")
+}
 
 /// Uma regra.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +107,9 @@ pub enum Regra {
     AssinaturaDaFonte,
     HoraNaoAutenticada,
     LogicoParado,
+    // A declaração — ver [`crate::evento::Declaracao`]: o que um programa
+    // diz que não conseguiu verificar.
+    VerificacaoDeclaradaFalhou,
 }
 
 impl Regra {
@@ -123,6 +139,7 @@ impl Regra {
             Regra::AssinaturaDaFonte => "time-source-bad-signature",
             Regra::HoraNaoAutenticada => "time-unauthenticated",
             Regra::LogicoParado => "logical-clock-stopped",
+            Regra::VerificacaoDeclaradaFalhou => "declared-verification-failed",
         }
     }
 
@@ -141,7 +158,8 @@ impl Regra {
             | Regra::FonteDivergente
             | Regra::AssinaturaDaFonte
             | Regra::HoraNaoAutenticada
-            | Regra::LogicoParado => Categoria::Risco,
+            | Regra::LogicoParado
+            | Regra::VerificacaoDeclaradaFalhou => Categoria::Risco,
             Regra::SondagemDePrivilegio
             | Regra::ForaDoManifesto
             | Regra::ForaDoAlcance
@@ -169,11 +187,12 @@ impl Regra {
                 | Regra::ComportamentoAnomalo
                 | Regra::ContornoDoFirewall
                 | Regra::CadeiaDeProcessos
+                | Regra::VerificacaoDeclaradaFalhou
         )
     }
 
     /// Todas, para quem lista.
-    pub const TODAS: [Regra; 23] = [
+    pub const TODAS: [Regra; 24] = [
         Regra::SondagemDePrivilegio,
         Regra::ForaDoManifesto,
         Regra::AbusoDeCredencial,
@@ -197,6 +216,7 @@ impl Regra {
         Regra::AssinaturaDaFonte,
         Regra::HoraNaoAutenticada,
         Regra::LogicoParado,
+        Regra::VerificacaoDeclaradaFalhou,
     ];
 }
 
@@ -309,6 +329,9 @@ struct Visto {
     /// Uma recusa do manifesto do programa — ver
     /// [`Evento::fora_do_manifesto`].
     manifesto: bool,
+    /// Uma declaração de verificação que falhou — ver
+    /// [`verificacao_falhou`].
+    falha_declarada: bool,
 }
 
 /// Uma conexão que o gate recusou por estar fora do alcance: o dono do
@@ -386,6 +409,9 @@ impl Detector {
             codigo: e.codigo,
             tipo: e.tipo,
             manifesto: e.fora_do_manifesto(),
+            falha_declarada: e
+                .declaracao()
+                .is_some_and(|d| verificacao_falhou(&d.desfecho)),
         });
         while j.len() > MAIS_NA_JANELA || j.front().is_some_and(|v| v.ts + JANELA_MS < e.ts_ms) {
             j.pop_front();
@@ -582,6 +608,54 @@ impl Detector {
                     e.recurso
                 ),
             ));
+        }
+
+        // A verificação que quem declarou diz que falhou: uma alegação. A
+        // confiança é baixa sempre — o kernel não confere o que se declara
+        // —, a severidade não passa de média, e o NSF só observa: a regra
+        // não abre incidente, não corrobora contenção e não planeja nada
+        // (ver `resposta::planejar`). O que o kernel sabe — o programa, a
+        // conexão e o destino dela — vai na explicação, ao lado do que se
+        // alega, sem se misturar.
+        if let Some(d) = e.declaracao()
+            && verificacao_falhou(&d.desfecho)
+        {
+            let vs: Vec<&Visto> = j.iter().filter(|v| v.falha_declarada).collect();
+            let nivel = if vs.len() >= VERIFICACAO_DECLARADA[1] {
+                2
+            } else {
+                1
+            };
+            if vs.len() >= VERIFICACAO_DECLARADA[0]
+                && self.pode(
+                    Regra::VerificacaoDeclaradaFalhou,
+                    &e.principal,
+                    nivel,
+                    e.ts_ms,
+                )
+            {
+                let programa = e.processo.as_ref().map_or_else(String::new, |(fio, p)| {
+                    alloc::format!(" {p} (processo {fio})")
+                });
+                let ancora = d.ancora.as_ref().map_or_else(
+                    || String::from("sem conexao"),
+                    |(n, destino)| alloc::format!("pela conexao {n} a {destino}"),
+                );
+                saida.push(det(
+                    Regra::VerificacaoDeclaradaFalhou,
+                    Severidade::Media,
+                    Confianca::Baixa,
+                    vs.iter().map(|v| v.seq).collect(),
+                    alloc::format!(
+                        "o programa{programa} declarou que nao verificou `{} {}`: {} ({} na janela de {} s), {ancora} — uma alegacao do programa, observada",
+                        d.evento,
+                        d.assunto,
+                        d.desfecho,
+                        vs.len(),
+                        JANELA_MS / 1000
+                    ),
+                ));
+            }
         }
 
         if e.codigo == Codigo::DenyRole
@@ -857,6 +931,7 @@ pub(crate) mod testes {
             recurso: String::new(),
             codigo,
             detalhe: String::new(),
+            alegacao: None,
             processo: None,
             decisao: None,
             tipo: Tipo::Decisao,
@@ -1273,5 +1348,85 @@ pub(crate) mod testes {
         e.codigo = Codigo::DenyResource;
         e.recurso = "tcp:10.0.2.101:7".to_string();
         assert!(d.saida_depois_de_sondagem(&e, Confianca::Alta).is_none());
+    }
+
+    /// Uma declaração, como o motor a vê depois do `audit.tail`: pelo
+    /// processo 12, ancorada na conexão `conexao` — ou sem âncora.
+    fn declarada(seq: u64, desfecho: &str, conexao: Option<u64>) -> Evento {
+        let mut e = ev(
+            seq,
+            "person:01",
+            Titular::Pessoa,
+            "audit.declare",
+            Codigo::Allow,
+        );
+        e.alegacao = Some(alloc::format!("icp.query alvo/ola {desfecho}"));
+        let ancora = match conexao {
+            Some(n) => alloc::format!("conexao {n} tcp:10.0.2.100:4943"),
+            None => String::from("sem conexao"),
+        };
+        e.detalhe = alloc::format!(
+            "pelo processo 12 (icp ab12cd34): {ancora}; decisao {}",
+            seq - 1
+        );
+        e.processo = Some((12, "icp ab12cd34".to_string()));
+        e.decisao = Some(seq - 1);
+        e.tipo = Tipo::Declaracao { conexao };
+        e
+    }
+
+    /// A verificação que um programa declara que falhou é observada: média,
+    /// confiança baixa — uma alegação —, no primeiro degrau na primeira, no
+    /// segundo na terceira da janela; a explicação diz o que o programa
+    /// alega e, à parte, o que o kernel sabe. A que passou, a declaração de
+    /// outra coisa e a recusada depois do gate não disparam.
+    #[test]
+    fn a_verificacao_declarada_que_falhou() {
+        assert!(verificacao_falhou("unverified"));
+        assert!(verificacao_falhou("unverified_signature"));
+        assert!(!verificacao_falhou("verified"));
+        assert!(!verificacao_falhou("unverifiedx"));
+        assert!(!verificacao_falhou("rejected"));
+        let evs = [
+            declarada(2, "verified", Some(3)),
+            declarada(4, "unverified_signature", Some(3)),
+            declarada(6, "rejected", None),
+            declarada(8, "unverified_stale", Some(5)),
+            declarada(10, "unverified", None),
+        ];
+        let ds = rodar(&evs);
+        assert_eq!(ds.len(), 2, "{ds:?}");
+        for d in &ds {
+            assert_eq!(d.regra, Regra::VerificacaoDeclaradaFalhou);
+            assert_eq!(
+                (d.severidade, d.confianca),
+                (Severidade::Media, Confianca::Baixa)
+            );
+            assert!(d.alvo.is_none());
+        }
+        assert_eq!(ds[0].registros, [4]);
+        for trecho in [
+            "icp ab12cd34 (processo 12)",
+            "`icp.query alvo/ola`: unverified_signature",
+            "pela conexao 3 a tcp:10.0.2.100:4943",
+            "alegacao",
+        ] {
+            assert!(ds[0].explicacao.contains(trecho), "{}", ds[0].explicacao);
+        }
+        assert_eq!(ds[1].registros, [4, 8, 10]);
+        assert!(
+            ds[1].explicacao.contains("sem conexao"),
+            "{}",
+            ds[1].explicacao
+        );
+        // A recusada depois do gate não é declaração, e não conta.
+        let mut recusada = declarada(12, "unverified", Some(9));
+        recusada.codigo = Codigo::InvalidArgument;
+        recusada.tipo = Tipo::Execucao;
+        assert!(rodar(&[recusada]).is_empty());
+        assert_eq!(
+            Regra::VerificacaoDeclaradaFalhou.categoria(),
+            Categoria::Risco
+        );
     }
 }

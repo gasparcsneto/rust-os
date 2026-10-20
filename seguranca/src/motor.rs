@@ -569,6 +569,17 @@ impl Motor {
             },
             None => No::Principal(e.principal.clone()),
         };
+        // A declaração: quem declarou, e o destino em que o kernel a
+        // ancorou. A alegação não vira nó de recurso nem de destino: o que
+        // ela diz fica no evento, e só o que o kernel escreveu liga o grafo.
+        if let Some(d) = e.declaracao() {
+            self.grafo
+                .ligar(quem.clone(), Aresta::Declarou, No::Declaracao(e.seq));
+            if let Some((_, destino)) = d.ancora {
+                self.grafo
+                    .ligar(No::Declaracao(e.seq), Aresta::Sobre, No::Destino(destino));
+            }
+        }
         if e.tipo == Tipo::Decisao {
             self.grafo.ligar(quem, Aresta::Pediu, No::Decisao(e.seq));
             if let Some(d) = politica::endereco::ler(&e.recurso) {

@@ -15,7 +15,7 @@ use core::fmt;
 use politica::Codigo;
 use protocolo::json::JsonWriter;
 
-use crate::evento::{Evento, Tipo};
+use crate::evento::{Declaracao, Evento, Tipo};
 use crate::grafo::No;
 use crate::incidente::Incidente;
 use crate::motor::Motor;
@@ -59,6 +59,37 @@ fn evento(w: &mut JsonWriter, e: &Evento) -> fmt::Result {
     w.field_str("correlation", &alloc::format!("{:016x}", e.correlacao))?;
     w.field_str("severity", e.severidade.nome())?;
     w.field_str("detail", &e.detalhe)?;
+    if let Some(d) = e.declaracao() {
+        w.key("declaration")?;
+        declaracao(w, &d)?;
+    }
+    w.end_object()
+}
+
+/// Uma declaração, com as duas partes separadas: o que quem declarou
+/// alega, e o que o kernel sabe.
+fn declaracao(w: &mut JsonWriter, d: &Declaracao) -> fmt::Result {
+    w.begin_object()?;
+    w.key("claimed")?;
+    w.begin_object()?;
+    w.field_str("event", &d.evento)?;
+    w.field_str("subject", &d.assunto)?;
+    w.field_str("outcome", &d.desfecho)?;
+    w.end_object()?;
+    w.key("anchor")?;
+    match &d.ancora {
+        Some((conexao, destino)) => {
+            w.begin_object()?;
+            w.field_u64("connection", *conexao)?;
+            w.field_str("to", destino)?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
+    w.field_str(
+        "note",
+        "alegacao de quem declarou: o kernel confere a ancora, nao o que se alega",
+    )?;
     w.end_object()
 }
 
@@ -69,6 +100,7 @@ fn tipo(t: Tipo) -> &'static str {
         Tipo::Nascimento { .. } => "birth",
         Tipo::Derrubada { .. } => "teardown",
         Tipo::Firewall { .. } => "firewall",
+        Tipo::Declaracao { .. } => "declaration",
         Tipo::Leitura => "nsf-read",
         Tipo::Inicio => "boot",
     }
@@ -731,6 +763,29 @@ pub fn proveniencia(m: &Motor, epoca: u32, fio: u64, w: &mut JsonWriter) -> fmt:
                 None => w.null_value()?,
             }
         }
+        w.end_object()?;
+    }
+    w.end_array()?;
+    // O que o processo declarou: a alegação dele, com a conexão e o destino
+    // que o kernel escreveu — ver [`crate::evento::Declaracao`].
+    w.key("declarations")?;
+    w.begin_array()?;
+    for e in m
+        .eventos()
+        .filter(|e| e.epoca == epoca && e.processo.as_ref().is_some_and(|(f, _)| *f == fio))
+    {
+        let Some(d) = e.declaracao() else {
+            continue;
+        };
+        w.begin_object()?;
+        w.field_u64("record", e.seq)?;
+        w.key("decision")?;
+        match e.decisao {
+            Some(n) => w.u64_value(n)?,
+            None => w.null_value()?,
+        }
+        w.key("declaration")?;
+        declaracao(w, &d)?;
         w.end_object()?;
     }
     w.end_array()?;
