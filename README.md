@@ -544,7 +544,7 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     │   └── testes.rs  contra a especificação e contra o crate `candid`
     ├── agente.rs     a consulta ponta a ponta sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
-    │   └── testes.rs  contra um IC de mentira, e os modos adversários de quem está no caminho
+    │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro
     ├── registro.rs   `/dados/icp/redes`: as redes em que se confia, a chave da raiz de cada uma — um erro recusa o arquivo inteiro
     ├── registro/
     │   └── testes.rs  o arquivo de redes, linha a linha
@@ -6220,6 +6220,239 @@ do caso do instalador, rodadas sozinhas, falhavam no download, antes do
 que elas mexiam: era o `fs.mkdir` de um nível só, que o caso de antes
 escondia — corrigido, as cinco foram reprovadas pelo que mexiam.
 
+## O Internet Computer
+
+O Duke consulta o Internet Computer (IC) de dentro de um programa: a
+consulta anônima (*query*) a um canister, com a resposta **verificada**
+contra a raiz da rede antes de ser entregue. É o primeiro incremento do
+IC, o ICP-1; o desenho inteiro, as tabelas e o que fica de fora estão em
+[`docs/ICP.md`](docs/ICP.md).
+
+Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
+HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
+método, e a política não tem uma linha sobre o IC. O gate decide o que
+sempre decidiu — se esta identidade, por este processo, fala com este
+destino, agora —, e o programa prova para si o que os nós responderam. O
+`xtask invariantes` confere o primeiro lado: o kernel e a política não
+dependem do pacote `web3` e não dizem `icp`, `canister`, `candid`,
+`dfinity`, `web3` nem `pocketic` — nenhum comando, permissão, política,
+auditoria ou exceção de rede do IC.
+
+### O caminho de uma consulta
+
+```
+/dados/icp/redes ──► DNS ──► net.connect ──► TLS 1.3 ──► HTTP/1.1 ──► IC
+   (fs.read)        (udp)    (o gate)       (âncoras)    (POST cbor)
+```
+
+As redes em que o programa confia vêm de `/dados/icp/redes`, pelo
+`fs.read` — o endpoint e a **chave da raiz** de cada uma: a chave nunca se
+aprende da rede, e um endpoint que mente não troca a raiz. A conexão é a
+de [`programas::http`](programas/src/http.rs): o nome pelo DNS do
+programa, o destino pelo gate, o TLS com as âncoras da imagem. Por ela, dois
+`POST application/cbor` — o `read_state`, que traz o certificado da
+sub-rede do canister, e a `query` —, e cada `net.send` e cada `net.recv`
+decididos de novo: a revogação, a contenção e o firewall valem no meio de
+uma consulta.
+
+A verificação é do processo, no pacote [`web3`](web3/src/icp.rs), `no_std`
+como o `tls` e o `http`, e nada é entregue antes dela:
+
+- o certificado: a delegação da raiz, de um nível só — uma aninhada é
+  recusada —, a assinatura BLS de cada nível, o canister nas faixas da
+  sub-rede e o tempo do certificado a no máximo cinco minutos da hora de
+  quem confere. O BLS12-381 é o da DFINITY, `ic-verify-bls-signature`,
+  reutilizado direto: `no_std`, conferido nos dois alvos dos programas;
+- a resposta: a assinatura Ed25519 (ZIP215) de um nó **da sub-rede do
+  certificado** sobre a resposta **deste pedido** — o nonce do
+  `random.read` entra no id do pedido, e o id no que o nó assina;
+- o Candid da resposta, com tetos: o truncado, o que sobra e o que não é
+  Candid são recusados.
+
+A hora de conferir é a dos consumidores ([Os consumidores da
+hora](#os-consumidores-da-hora)): o civil quando autenticado, o lógico
+quando não. As outras bibliotecas oficiais — `ic-transport-types`,
+`ic-certification`, `ic-certificate-verification`, `ic_principal`,
+`candid`, `ic-ed25519` — são **oráculos** dos testes do hospedeiro: cada
+peça do `web3` é conferida contra a oficial, e nenhuma vai para um
+programa. O `ic-agent` foi lido e não portado: traria o `tokio`, o
+`reqwest`, sockets e DNS próprios e um repositório de raízes paralelo —
+tudo o que o caminho do Duke já é, pelo gate.
+
+### O que se prova não autoriza nada
+
+| | prova | não é |
+|---|---|---|
+| o TLS | que o endpoint tem o nome pedido | a resposta do IC, nem autorização |
+| a verificação do IC | que os nós da sub-rede do canister responderam isto a este pedido | `ALLOW` do Duke |
+| o gate | que esta identidade pode falar com este destino, agora | nada sobre o canister |
+
+Um Principal do IC nunca é identidade do Duke — a consulta é anônima, e
+quem pede ao gate é o processo, com a autoridade de quem o lançou. Um
+certificado, do TLS ou do IC, nunca é autorização, e uma verificação nunca
+concede permissão: a suíte confere com a política que tira o gateway do
+alcance — `DENY_RESOURCE`, nada enviado — e com a que tira
+`audit.declare` do papel — a consulta verifica do mesmo jeito, e a
+declaração é recusada.
+
+### A declaração
+
+O programa deixa o desfecho de cada consulta na auditoria pelo
+`audit.declare` — *A declaração*, em [A política](#a-política) —,
+genérico: uma **alegação** de quem pediu, ao lado dos fatos que
+só o kernel sabe. O registro de uma consulta da fumaça:
+
+```text
+recurso  icp.query pi33i-pt777-77776-aaaaa-cai/ola verified
+detalhe  pelo processo 41 (verificado 3f2a…): conexao 7 tcp:10.0.2.100:4943; decisao 1234
+```
+
+No recurso, o que o programa disse; no detalhe, o processo, o programa, a
+conexão e o **destino real** dela pela tabela da pilha — ou `sem conexao`
+— e a decisão do gate, que é a da permissão `audit.declare` do papel, sem
+recurso. Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
+as cotas, nem a contenção. Ela gasta a taxa de quem lançou o programa, e
+é recusada a um processo contido e a uma sessão que acabou. O desfecho é
+uma palavra — `verified`, `verified_reject`, `unverified_<etapa>`,
+`failed_<etapa>` —, e o NSF observa os `unverified*` com confiança baixa,
+sem incidente, sem contenção e sem regra no firewall
+([`docs/SEGURANCA.md`](docs/SEGURANCA.md)).
+
+### A bancada
+
+`cargo xtask test` e `cargo xtask fumaca` sobem a bancada do IC
+([`xtask/src/icp.rs`](xtask/src/icp.rs)) antes da máquina:
+
+- a **PocketIC 16.1.0**, o binário da release oficial da DFINITY, baixado
+  uma vez e **conferido pelo SHA-256** antes de rodar, escutando só em
+  `127.0.0.1`;
+- a instância: a NNS e duas sub-redes de aplicação, e o canister da
+  bancada na primeira — um módulo WebAssembly que o próprio script monta
+  byte a byte ([`xtask/bancada/icp.py`](xtask/bancada/icp.py)), sem
+  toolchain: `ola`, `eco`, `recusa` e três respostas de Candid fora da
+  forma. A raiz, o canister e a sub-rede são os mesmos a cada instância
+  desta versão, e a bancada confere os três: uma PocketIC que mudou é um
+  erro da bancada, e não um caso falhando sem dizer por quê;
+- o proxy, sem porta no hospedeiro: um `guestfwd` do emulador roda o
+  script a cada conexão para `10.0.2.100:4943`, com o TLS 1.3 de
+  `icp.duke` e `*.icp.duke`, e o nome que o cliente pede escolhe o que ele
+  faz com a resposta — nada, segurar o `read_state` oito segundos, ou uma
+  das nove mentiras: a raiz de outra rede, um bit da assinatura BLS, a
+  resposta sem as assinaturas dos nós, o nó de fora da sub-rede, um bit da
+  assinatura do nó, o nonce trocado no caminho, a delegação aninhada, o
+  certificado da outra sub-rede e o certificado de quinze minutos atrás.
+
+`/dados/icp/redes` tem uma rede por modo, doze, todas para o mesmo destino
+— o gate decide `tcp:10.0.2.100:4943`, e os nomes são do TLS e do
+programa.
+
+### O que a suíte e a fumaça conferem
+
+Na suíte (`icp:`), o programa [`icp`](programas/src/bin/icp.rs), lançado
+por uma pessoa operadora e ditado por um canal de eventos, uma conexão
+nova por consulta:
+
+- **a consulta verificada pelo gate** — o texto, o eco, a recusa assinada
+  e o Candid fora da forma recusado na leitura; uma conexão decidida em
+  nome da pessoa por consulta; cada passo declarado, com a âncora do
+  kernel; os dois canisters que não são Principal — o texto fora da
+  base32 e o da bancada com um caractere trocado, que só a soma recusa —
+  não saem do processo, cada um com o seu motivo; e nada do IC em
+  registro nenhum fora das alegações;
+- **cada prova adulterada recusada** — as nove mentiras, cada uma com o
+  motivo dela, e o NSF observando a alegação, sem incidente nem pedido;
+- **a revogação, a contenção e o firewall no meio da consulta**, com o
+  programa dormindo na resposta lenta: a política sem o gateway
+  (`DENY_RESOURCE` na leitura acordada, o fecho recusado), a sessão que
+  acaba (`DENY_NOT_AUTHENTICATED` na leitura **e** na declaração), a
+  contenção (`DENY_CONTAINED`) e a regra do firewall (`FIREWALL_BLOCKED`,
+  e a declaração ancorada no número cortado); e a recuperação, a decisão
+  de agora;
+- **o alcance e a permissão são do gate** — sem o gateway, nada sai; sem
+  `audit.declare`, a consulta verifica e a declaração é recusada;
+- **duas consultas ao mesmo tempo**, de duas pessoas, cada declaração na
+  conexão do seu processo.
+
+Na fumaça, com o kernel de produção e a política padrão, o agente do
+papel `operador` lança o [`verificado`](programas/src/bin/verificado.rs):
+o `ola` e o `eco` verificados pela rede `direta` — o endereço fixo, porque
+a imagem de produção não tem o DNS da suíte —, a prova da `bls-invalida`
+recusada e cinco consultas medidas. Do lado de fora, a fumaça lê a
+auditoria desde antes do lançamento: as oito declarações, cada uma com a
+âncora do kernel no gateway; as decisões do processo, todas deixadas e só
+do que a consulta pede; nada do IC em registro nenhum fora delas; nenhuma
+recusa por taxa e nenhum registro perdido.
+
+### As medidas do IC
+
+A fumaça mede cinco consultas `ola` seguidas na imagem de produção, cada
+uma numa conexão nova, por parte: a conexão (o TCP e o aperto do TLS — o
+endereço é fixo, sem DNS), os dois pedidos, e o resto, que é a
+verificação, com a hora e o nonce pelo gate. A mediana, em ms, no
+emulador sem aceleração, quatro núcleos:
+
+| kernel de produção | x86 | ARM |
+|---|---|---|
+| depuração | conexão 120, pedidos 100, verificação 130 — **430** (340 a 610) | conexão 210, pedidos 100, verificação 110 — **380** (340 a 620) |
+| release | conexão 90, pedidos 70, verificação 80 — **260** (220 a 440) | conexão 80, pedidos 70, verificação 90 — **230** (220 a 240) |
+
+O programa é sempre o mesmo, compilado com otimização; o que muda entre
+as linhas é o kernel — o gate, a pilha TCP e a auditoria de cada pedido.
+Rodadas diferentes da mesma bancada variam: a mediana do x86 em depuração
+deu 360, 420 e 430 ms em três fumaças.
+
+No hospedeiro, nativo, a mesma leitura e verificação — o certificado com a
+delegação (duas assinaturas BLS), duas assinaturas de nó e o Candid,
+sobre as respostas gravadas de uma consulta ao IC de mentira — leva
+**5,5 ms** de mediana (5,0 a 9,2 ms em 50;
+`cargo test -p web3 --release -- --ignored --nocapture medida`). Os 80 a
+130 ms da verificação no emulador são a emulação: o mesmo código, sem
+tradução de instruções, é vinte vezes mais rápido.
+
+Na suíte (o kernel de teste, o x86 em depuração), do pedido do
+`read_state` à linha do desfecho — sem a conexão, com a declaração —, uma
+consulta verificada leva de 660 a 810 ms (mediana 730); a prova recusada
+no certificado, de 290 a 490 ms, porque a consulta nem sai.
+
+### As mutações do IC
+
+Uma de cada vez, sobre a árvore do ICP-1, com o que a pega: os testes do
+hospedeiro (`cargo test -p web3`), quando a mutação é do `web3`, e a suíte
+do x86 só com os casos `icp:`, sempre. As dezessete morrem nas duas — as
+duas do Principal, só depois de a campanha achar o furo do passo da
+suíte (abaixo):
+
+| mutação | no hospedeiro | na suíte |
+|---|---|---|
+| a assinatura BLS do certificado não é conferida | `a_assinatura_errada_e_recusada` | a `bls-invalida` verificou |
+| a delegação não é conferida contra a raiz do arquivo | `outra_raiz_e_recusada`, `os_modos_adversarios` | a `raiz-errada` verificou |
+| a delegação aninhada é aceita | `a_delegacao_aninhada_e_recusada`, `os_modos_adversarios` | a `aninhada` verificou |
+| as faixas da sub-rede delegada não são conferidas | `as_faixas_da_delegacao`, `a_delegacao_sem_faixas_ou_so_na_forma_antiga` | a `faixa-errada` caiu na conferência seguinte — os nós não são da sub-rede do certificado —, com o motivo errado |
+| o certificado velho é aceito | `o_tempo`, `a_hora_errada_de_quem_verifica`, `os_modos_adversarios` | a `velho` verificou |
+| a assinatura do nó não é conferida — o id do pedido não prende a resposta | `a_assinatura_presa_ao_pedido_e_a_resposta`, `o_reply_inteiro_entra_no_que_se_assina` e mais dois | a `assinatura-errada` verificou |
+| o nó de fora da sub-rede é pulado, e não recusado | `a_assinatura_de_um_no_de_fora` | a `no-de-fora` verificou |
+| a resposta sem assinatura é aceita | `sem_assinatura_ou_com_assinaturas_demais`, `os_modos_adversarios` | a `sem-assinatura` verificou |
+| o Candid com bytes depois dos valores é aceito | `mensagens_simples`, `mensagens_geradas_e_estragadas_contra_o_oraculo` | o `candid_sobra` foi lido |
+| o Candid sem a mágica é aceito | `mensagens_simples` | o `candid_magica` foi lido |
+| o Candid truncado é lido até onde der | `valores_fora_da_forma`, `todo_prefixo_concorda_com_o_oraculo` e mais um | o `candid_truncado` entregou `ab` |
+| o programa lê a falha do certificado como verificada | — | a `raiz-errada` foi declarada `verified` |
+| o programa declara sem a âncora | — | seis casos: a declaração sem o destino que o kernel conhece |
+| a contenção não alcança a declaração (kernel) | — | contido, o `icp` declarou |
+| o programa não pede o nonce ao gate | — | um `random.read` a menos por consulta |
+| o Principal com o CRC32 errado passa da soma | `o_texto_malformado` | o segundo recusado pela forma, e não pela soma |
+| o Principal fora da soma e da forma é aceito | `o_crc_corrompido_e_recusado`, `o_texto_malformado` e mais um | o segundo aceito |
+
+**O que a campanha achou.** O passo do Principal inválido da suíte usava um
+texto fora da base32, recusado antes da soma e da forma canônica: as duas
+últimas mutações passavam pela suíte, e só o hospedeiro as pegava. O
+passo ganhou o canister da bancada com o vigésimo caractere trocado — um
+bit dos bytes, e não do CRC nem da sobra da base32 —, que só a soma
+recusa, e a suíte passou a conferir o motivo de cada recusa: sem a soma,
+a forma canônica ainda recusa, mas com outro nome. E a mutação das faixas
+mostrou a defesa em camadas, do jeito que se quer: sem a conferência das
+faixas, o certificado da outra sub-rede passa, e a resposta cai na
+seguinte — os nós que assinaram não são da sub-rede do certificado.
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
@@ -8652,7 +8885,21 @@ padronizado.
       o HPACK, pelo ALPN no TLS ou no claro com conhecimento prévio: várias
       correntes numa conexão que o gate decidiu pelo destino, sem que ele
       saiba delas, e o erro de uma corrente separado do da conexão (ver [O
-      HTTP/2](#o-http2)).
+      HTTP/2](#o-http2)). E o tempo, no lugar do NTP — a hora autenticada
+      pelo Roughtime, de várias fontes com quórum, pelo serviço de hora e
+      pelo gate, e o TLS e os cookies dos programas validando por ela (ver
+      [O tempo](#o-tempo)).
+- [ ] **Fase 12 — Web3: o Internet Computer.** Um protocolo de programa,
+      como o TLS e o HTTP, sem nada no kernel nem na política: o Duke
+      consulta o IC de dentro de um processo, pela conexão que o gate
+      decide, e confere a prova antes de entregar a resposta. Feito: o
+      ICP-1 — a consulta anônima verificada ponta a ponta, o pacote `web3`
+      conferido contra as bibliotecas oficiais da DFINITY, a declaração
+      genérica `audit.declare`, que nenhuma decisão lê, o NSF lendo a
+      declaração como alegação, e a bancada da PocketIC com o proxy que
+      mente (ver [O Internet Computer](#o-internet-computer)). A chamada de
+      atualização, a identidade do IC com chave, os *cycles* e o resto
+      ficam para os incrementos seguintes — cada um, uma decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

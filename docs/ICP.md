@@ -190,8 +190,10 @@ Na suíte do kernel (`icp:`), com o programa
   na leitura); uma conexão por consulta, decidida em nome da pessoa, pelo
   processo, para o gateway; a semente e a hora de cada consulta e do TLS,
   as âncoras e as redes lidas uma vez; cada passo declarado com a âncora
-  do kernel; o Principal que não se lê não sai do processo; e nada do IC
-  em registro nenhum fora da alegação;
+  do kernel; os dois canisters que não são Principal — o texto fora da
+  base32 e o da bancada com um caractere trocado, que só a soma recusa —
+  não saem do processo, cada um com o seu motivo; e nada do IC em
+  registro nenhum fora da alegação;
 - **cada prova adulterada é recusada** — as nove mentiras da tabela, cada
   uma com o motivo dela; o gate decidiu cada conexão como as honestas; o
   NSF observa as verificações declaradas que falharam, com confiança
@@ -217,6 +219,92 @@ Na suíte do kernel (`icp:`), com o programa
 
 No hospedeiro, `cargo test -p web3` confere cada peça contra os oráculos
 — e o agente contra um IC de mentira, com os mesmos modos adversários.
+
+## A fumaça
+
+Na imagem de produção, com a política padrão (`cargo xtask fumaca`, a sonda
+*o IC, pelo operador*), o agente da porta 2, do papel `operador`, lança o
+[`verificado`](../programas/src/bin/verificado.rs):
+
+- o `ola` e o `eco` (`duke`) verificados pela rede `direta` — o endereço
+  fixo, porque a imagem de produção não tem o DNS da suíte;
+- o `ola` pela `bls-invalida`: `unverified_certificate`, nada entregue;
+- cinco consultas `ola` seguidas, cada uma numa conexão nova, medidas por
+  parte — a conexão (o TCP e o aperto do TLS), os dois pedidos, e o resto,
+  que é a verificação, com a hora e o nonce pelo gate.
+
+Cada consulta é declarada, ancorada na conexão dela, antes do fecho. Do
+lado de fora, a fumaça lê a auditoria desde antes do lançamento, de 128 em
+128 registros:
+
+- as oito declarações — `icp.query pi33i-pt777-77776-aaaaa-cai/<método>
+  <desfecho>`, na ordem das consultas —, cada uma com a âncora do kernel:
+  `conexao N tcp:10.0.2.100:4943` e a decisão;
+- as decisões do processo, todas `ALLOW` e só do que a consulta pede —
+  `net.connect`, `net.send`, `net.recv`, `net.close`, `random.read`,
+  `system.info`, `system.uptime`, `fs.read` e `audit.declare` —, com oito
+  conexões para oito consultas;
+- nada do IC — `pi33i`, `icp.query`, `icp.duke`, `read_state`, `/api/v3/`
+  — em registro nenhum fora das declarações, de ninguém;
+- nenhuma recusa por taxa e nenhum registro perdido.
+
+## As medidas
+
+Na imagem de produção, a mediana das cinco consultas do `verificado`, em ms
+(o emulador sem aceleração, quatro núcleos):
+
+| kernel de produção | x86 | ARM |
+|---|---|---|
+| depuração | conexão 120, pedidos 100, verificação 130 — **430** (340 a 610) | conexão 210, pedidos 100, verificação 110 — **380** (340 a 620) |
+| release | conexão 90, pedidos 70, verificação 80 — **260** (220 a 440) | conexão 80, pedidos 70, verificação 90 — **230** (220 a 240) |
+
+O programa é sempre o mesmo, compilado com otimização; o que muda entre as
+linhas é o kernel. Rodadas diferentes variam: a mediana do x86 em depuração
+deu 360, 420 e 430 ms em três fumaças.
+
+No hospedeiro, nativo (`cargo test -p web3 --release -- --ignored
+--nocapture medida`): a mesma leitura e verificação, sobre as respostas
+gravadas de uma consulta ao IC de mentira — o certificado com a delegação
+(duas assinaturas BLS), duas assinaturas de nó e o Candid —, em **5,5 ms**
+de mediana (5,0 a 9,2 ms em 50). A verificação no emulador, de 80 a 130 ms,
+é o mesmo código traduzido instrução a instrução.
+
+Na suíte (o kernel de teste, o x86 em depuração), do pedido do `read_state`
+à linha do desfecho — sem a conexão, com a declaração —, uma consulta
+verificada leva de 660 a 810 ms (mediana 730); a prova recusada no
+certificado, de 290 a 490 ms, porque a consulta nem sai.
+
+## As mutações
+
+Uma de cada vez, com o que a pega: os testes do hospedeiro (`cargo test -p
+web3`), quando a mutação é do `web3`, e a suíte do x86 só com os casos
+`icp:`, sempre. As dezessete morrem nas duas:
+
+| mutação | onde | o que a suíte viu |
+|---|---|---|
+| a assinatura BLS do certificado não é conferida | `certificado.rs` | a `bls-invalida` verificou |
+| a delegação não é conferida contra a raiz do arquivo | `certificado.rs` | a `raiz-errada` verificou |
+| a delegação aninhada é aceita | `certificado.rs` | a `aninhada` verificou |
+| as faixas da sub-rede delegada não são conferidas | `certificado.rs` | a `faixa-errada` caiu na conferência seguinte, com o motivo errado |
+| o certificado velho é aceito | `certificado.rs` | a `velho` verificou |
+| a assinatura do nó não é conferida | `consulta.rs` | a `assinatura-errada` verificou |
+| o nó de fora da sub-rede é pulado, e não recusado | `consulta.rs` | a `no-de-fora` verificou |
+| a resposta sem assinatura é aceita | `consulta.rs` | a `sem-assinatura` verificou |
+| o Candid com bytes depois dos valores é aceito | `candid.rs` | o `candid_sobra` foi lido |
+| o Candid sem a mágica é aceito | `candid.rs` | o `candid_magica` foi lido |
+| o Candid truncado é lido até onde der | `candid.rs` | o `candid_truncado` entregou `ab` |
+| o programa lê a falha do certificado como verificada | `programas::icp` | a `raiz-errada` declarada `verified` |
+| o programa declara sem a âncora | `programas::icp` | seis casos: a declaração sem o destino do kernel |
+| a contenção não alcança a declaração | kernel | contido, o `icp` declarou |
+| o programa não pede o nonce ao gate | `programas::icp` | um `random.read` a menos por consulta |
+| o Principal com o CRC32 errado passa da soma | `principal.rs` | o segundo canister recusado pela forma, e não pela soma |
+| o Principal fora da soma e da forma é aceito | `principal.rs` | o segundo canister aceito |
+
+As duas últimas passavam pela suíte na primeira rodada: o texto do passo do
+Principal inválido era recusado pela base32, antes da soma e da forma. O
+passo ganhou o canister da bancada com o vigésimo caractere trocado — um bit
+dos bytes, e não do CRC nem da sobra da base32 —, que só a soma recusa, e a
+suíte passou a conferir o motivo de cada recusa.
 
 ## O que não existe ainda
 

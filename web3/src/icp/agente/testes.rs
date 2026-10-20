@@ -339,3 +339,91 @@ fn o_caminho() {
     assert_eq!(Etapa::Consulta.to_string(), "query");
     assert_eq!(Etapa::LeituraDeEstado.to_string(), "read_state");
 }
+
+/// O transporte que grava o que o IC de mentira respondeu.
+struct Gravador<'a> {
+    ic: &'a IcDeMentira,
+    respostas: Vec<(u16, Vec<u8>)>,
+}
+
+impl Transporte for Gravador<'_> {
+    type Erro = Corte;
+
+    fn post(&mut self, caminho: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), Corte> {
+        let mut ic = self.ic;
+        let r = ic.post(caminho, corpo)?;
+        self.respostas.push(r.clone());
+        Ok(r)
+    }
+}
+
+/// O transporte que devolve, na ordem, o que foi gravado.
+struct Gravadas(Vec<(u16, Vec<u8>)>);
+
+impl Transporte for Gravadas {
+    type Erro = Corte;
+
+    fn post(&mut self, _caminho: &str, _corpo: &[u8]) -> Result<(u16, Vec<u8>), Corte> {
+        if self.0.is_empty() {
+            return Err(Corte);
+        }
+        Ok(self.0.remove(0))
+    }
+}
+
+/// A medida da consulta no hospedeiro, nativa: o mesmo código que o
+/// programa roda no emulador, sobre as duas respostas de uma consulta ao IC
+/// de mentira, gravadas uma vez — o que se mede é ler e verificar, e não a
+/// bancada assinando. O pedido é o mesmo a cada volta (a hora e o nonce
+/// fixos), e as assinaturas dos nós continuam presas a ele.
+///
+/// Só sob demanda, de preferência sem depuração:
+/// `cargo test -p web3 --release -- --ignored --nocapture medida`.
+#[test]
+#[ignore = "medida: --ignored --nocapture, em --release"]
+fn medida_da_consulta_no_hospedeiro() {
+    const VOLTAS: usize = 50;
+    let ic = mentira(Modo::Honesto);
+    let raiz = ic.ic.raiz_de_confianca();
+    let mut gravador = Gravador {
+        ic: &ic,
+        respostas: Vec::new(),
+    };
+    consultar(
+        &mut gravador,
+        &raiz,
+        &ic.ic.canister,
+        "ola",
+        b"DIDL\x00\x00",
+        AGORA_NS,
+        &[0x5a; 16],
+    )
+    .unwrap();
+    let respostas = gravador.respostas;
+    let mut tempos: Vec<std::time::Duration> = (0..VOLTAS)
+        .map(|_| {
+            let mut gravadas = Gravadas(respostas.clone());
+            let inicio = std::time::Instant::now();
+            let v = consultar(
+                &mut gravadas,
+                &raiz,
+                &ic.ic.canister,
+                "ola",
+                b"DIDL\x00\x00",
+                AGORA_NS,
+                &[0x5a; 16],
+            );
+            let tempo = inicio.elapsed();
+            assert!(v.is_ok_and(|v| v.assinaturas == 2), "a volta nao verificou");
+            tempo
+        })
+        .collect();
+    tempos.sort_unstable();
+    std::println!(
+        "medida: {VOLTAS} consultas verificadas no hospedeiro ({} nos, 2 assinaturas): mediana {:?}, de {:?} a {:?}",
+        ic.ic.nos.len(),
+        tempos[VOLTAS / 2],
+        tempos[0],
+        tempos[VOLTAS - 1]
+    );
+}
