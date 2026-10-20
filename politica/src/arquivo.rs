@@ -27,7 +27,10 @@
 //!   `net.connect` — os destinos de rede, cada um inteiro e na forma
 //!   normal, `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`
 //!   ([`crate::endereco`]). Nos dois, uma lista enumerada: o que não está
-//!   escrito não é alcançado.
+//!   escrito não é alcançado. E o de `key.create`, `key.read`, `key.sign`
+//!   e `key.destroy`: os nomes das chaves, `chave:<nome>`, enumerados — o
+//!   nome se resolve no espaço da identidade de quem pede, e não diz nada
+//!   das chaves de outra.
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
@@ -58,6 +61,15 @@
 //!   só o código da imagem. Pede `process.run` no papel — sem ele, não há o
 //!   que rodar. Um `policy.write` que acrescente um editor cabe no teto de
 //!   quem delega; tirar é sempre possível, e é a revogação da confiança.
+//! - `dominios <papel> <dominio>...`: os domínios de assinatura em que o
+//!   papel cria chaves e assina — os nomes do registro de domínios da
+//!   imagem (ver `sigilo::chaves`). O kernel assina só o prefixo de um
+//!   domínio registrado seguido de um resumo de 32 bytes, e o papel só usa
+//!   os domínios que a linha dele enumera. Sem a linha, ou com a lista
+//!   vazia, nenhum: o papel não cria chave nem assina. Pede `key.create` ou
+//!   `key.sign` no papel — sem uma delas, não há o que fazer com um
+//!   domínio. Um `policy.write` que acrescente um domínio cabe no teto de
+//!   quem delega; tirar é sempre possível.
 //! - `apertos <quantos> <janela em ms>`: apertos de mão por sessão
 //!   cifrada — uma porta, ou uma vaga do canal TCP.
 //! - `serial <papel>`: o papel da sessão 0. Obrigatória.
@@ -236,6 +248,9 @@ pub struct Papel {
     /// Os editores de código em que o papel confia, pelo nome, em ordem e
     /// sem repetição. Vazio: só o código da imagem.
     pub editores: Vec<String>,
+    /// Os domínios de assinatura que o papel usa, pelo nome, em ordem e sem
+    /// repetição. Vazio: nenhum — o papel não cria chave nem assina.
+    pub dominios: Vec<String>,
     /// As diretas mais as não sensíveis dos incluídos. Calculadas pela
     /// validação.
     permissoes: BTreeSet<Permissao>,
@@ -253,6 +268,7 @@ impl Papel {
             mensagens: crate::mensagens::COTAS_PADRAO,
             armazem: CotaDoArmazem::NENHUMA,
             editores: Vec::new(),
+            dominios: Vec::new(),
             permissoes: BTreeSet::new(),
         }
     }
@@ -311,6 +327,8 @@ pub enum ErroTipo {
     /// Um destino de rede que não é `tcp:<ipv4>:<porta>` nem
     /// `udp:<ipv4>:<porta>` na forma normal — ver [`crate::endereco`].
     EnderecoInvalido(String),
+    /// Uma chave que não é `chave:<nome>`, com o nome na regra.
+    ChaveInvalida(String),
     /// Falta a linha `serial`.
     SemSerial,
     /// Falta a linha `local`.
@@ -330,6 +348,9 @@ pub enum ErroTipo {
     ServicoComPapelDoSistema(String, String),
     /// Uma linha `editores` não vazia para um papel sem `process.run`.
     EditoresSemExecucao(String),
+    /// Uma linha `dominios` não vazia para um papel sem `key.create` e sem
+    /// `key.sign`.
+    DominiosSemChave(String),
 }
 
 /// Um erro, com a linha onde está. Linha zero: a política como um todo.
@@ -355,9 +376,9 @@ impl Erro {
             ErroTipo::RecursoSemPermissao(p) => {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
-            ErroTipo::RecursoNaoECaminho(p) => {
-                format!("`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede")
-            }
+            ErroTipo::RecursoNaoECaminho(p) => format!(
+                "`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede, nem chave"
+            ),
             ErroTipo::RecursoFaltando(papel, p) => {
                 format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
             }
@@ -368,6 +389,9 @@ impl Erro {
             ErroTipo::EnderecoInvalido(d) => format!(
                 "destino de rede invalido `{d}`: so `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, na forma normal, sem curinga"
             ),
+            ErroTipo::ChaveInvalida(c) => {
+                format!("chave invalida `{c}`: so `chave:<nome>`, sem curinga")
+            }
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
             ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
@@ -382,6 +406,9 @@ impl Erro {
             ),
             ErroTipo::EditoresSemExecucao(papel) => format!(
                 "`{papel}` confia em editores de codigo e nao tem process.run: nao ha o que rodar"
+            ),
+            ErroTipo::DominiosSemChave(papel) => format!(
+                "`{papel}` usa dominios de assinatura e nao tem key.create nem key.sign: nao ha o que assinar"
             ),
         };
         if self.linha == 0 {
@@ -556,6 +583,16 @@ impl Politica {
             .is_some_and(|p| p.editores.iter().any(|e| e == editor))
     }
 
+    /// Se o papel `papel` usa o domínio de assinatura `dominio` — o nome do
+    /// registro de domínios. Sem papel, ou com um que a política não tem:
+    /// não. É a pergunta que o kernel faz ao criar uma chave e a cada
+    /// assinatura, e de novo no ponto de commit.
+    pub fn permite_dominio(&self, papel: Option<&str>, dominio: &str) -> bool {
+        papel
+            .and_then(|n| self.papel(n))
+            .is_some_and(|p| p.dominios.iter().any(|d| d == dominio))
+    }
+
     /// O papel do serviço `nome`, se a política lhe dá um. Sem a linha, o
     /// serviço não tem papel — e a decisão sem papel é `DENY_ROLE`.
     pub fn servico(&self, nome: &str) -> Option<&str> {
@@ -637,6 +674,16 @@ impl Politica {
                             .ok_or(erro(ErroTipo::EnderecoInvalido(c.to_string())))?;
                         if !prefixos.contains(&normal) {
                             prefixos.push(normal);
+                        }
+                    } else if p.recurso_e_chave() {
+                        // Um nome de chave, e só: nada de curinga. De quem
+                        // é a chave não se escreve — é sempre da
+                        // identidade de quem pede.
+                        let nome =
+                            nome_de_chave(c).ok_or(erro(ErroTipo::ChaveInvalida(c.to_string())))?;
+                        let chave = alloc::format!("{PREFIXO_DE_CHAVE}{nome}");
+                        if !prefixos.contains(&chave) {
+                            prefixos.push(chave);
                         }
                     } else {
                         let normal = caminho::normalizar(c)
@@ -740,6 +787,26 @@ impl Politica {
                     .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
                 papel.editores = editores;
             }
+            "dominios" => {
+                let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                let mut dominios: Vec<String> = Vec::new();
+                for d in partes {
+                    if d.contains('*') {
+                        return Err(erro(ErroTipo::Curinga));
+                    }
+                    if !nome_valido(d) {
+                        return Err(erro(ErroTipo::NomeInvalido(d.to_string())));
+                    }
+                    if !dominios.iter().any(|ja| ja == d) {
+                        dominios.push(d.to_string());
+                    }
+                }
+                dominios.sort();
+                let papel = self
+                    .papel_mut(nome)
+                    .ok_or(erro(ErroTipo::PapelDesconhecido(nome.to_string())))?;
+                papel.dominios = dominios;
+            }
             "quorum" => {
                 let operacao = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 let m = numero(partes.next(), n)?;
@@ -842,6 +909,14 @@ impl Politica {
             // nada é erro de quem a escreveu.
             if !papel.editores.is_empty() && !papel.tem(Permissao::ProcessRun) {
                 return Err(geral(ErroTipo::EditoresSemExecucao(papel.nome.clone())));
+            }
+            // Um domínio de assinatura é sobre criar chaves e assinar: sem
+            // uma das duas, a linha não diria nada.
+            if !papel.dominios.is_empty()
+                && !papel.tem(Permissao::KeyCreate)
+                && !papel.tem(Permissao::KeySign)
+            {
+                return Err(geral(ErroTipo::DominiosSemChave(papel.nome.clone())));
             }
             // E o contrário: cada permissão de caminho tem o alcance
             // escrito. Também a que veio por inclusão — o alcance é de cada
@@ -975,6 +1050,20 @@ impl Politica {
                 return Codigo::DenyResource;
             }
         }
+        if p.recurso_e_chave() {
+            // O nome da chave, igual a um dos enumerados. Sem nome, ou um
+            // que não é `chave:<nome>`: fechado. De quem é a chave a
+            // decisão não diz — é sempre de quem pede.
+            let Some(alcance) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
+            let Some(alvo) = recurso.filter(|r| nome_de_chave(r).is_some()) else {
+                return Codigo::DenyResource;
+            };
+            if !alcance.iter().any(|a| a == alvo) {
+                return Codigo::DenyResource;
+            }
+        }
         Codigo::Allow
     }
 
@@ -1060,6 +1149,11 @@ impl Politica {
                 "`{papel}` confia no editor `{e}`, em que o administrador nao confia"
             )));
         }
+        if let Some(d) = a.dominios.iter().find(|d| !t.dominios.contains(d)) {
+            return Err(Recusa::Proibida(format!(
+                "`{papel}` usa o dominio `{d}`, que o administrador nao usa"
+            )));
+        }
         for p in a.permissoes() {
             if !t.tem(p) {
                 return Err(Recusa::Proibida(format!(
@@ -1100,12 +1194,19 @@ impl Politica {
         let palavra = linha.split_ascii_whitespace().next().unwrap_or("");
         if !matches!(
             palavra,
-            "papel" | "recurso" | "taxa" | "processos" | "mensagens" | "armazem" | "editores"
+            "papel"
+                | "recurso"
+                | "taxa"
+                | "processos"
+                | "mensagens"
+                | "armazem"
+                | "editores"
+                | "dominios"
         ) {
             return Err(Recusa::Proibida(
-                "policy.write muda papel, recurso, taxa, processos, mensagens, armazem ou \
-                 editores; a serial muda por policy.assign, e o papel local, o dos servicos e os \
-                 apertos so pela imagem"
+                "policy.write muda papel, recurso, taxa, processos, mensagens, armazem, \
+                 editores ou dominios; a serial muda por policy.assign, e o papel local, o dos \
+                 servicos e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -1152,6 +1253,19 @@ impl Politica {
             {
                 return Err(Recusa::Proibida(format!(
                     "a mudanca daria a `{}` a confianca no editor `{e}`, em que o administrador nao confia",
+                    depois.nome
+                )));
+            }
+            // O domínio de assinatura que o papel passa a usar é um que o
+            // teto usa: ninguém concede o domínio que não tem. Tirar não
+            // pede nada.
+            if let Some(d) = depois
+                .dominios
+                .iter()
+                .find(|d| antes.is_none_or(|a| !a.dominios.contains(d)) && !t.dominios.contains(d))
+            {
+                return Err(Recusa::Proibida(format!(
+                    "a mudanca daria a `{}` o dominio `{d}`, que o administrador nao usa",
                     depois.nome
                 )));
             }
@@ -1266,6 +1380,9 @@ impl Politica {
             if !papel.editores.is_empty() {
                 let _ = writeln!(t, "editores {} {}", papel.nome, papel.editores.join(" "));
             }
+            if !papel.dominios.is_empty() {
+                let _ = writeln!(t, "dominios {} {}", papel.nome, papel.dominios.join(" "));
+            }
         }
         let _ = writeln!(t, "serial {}", self.serial);
         let _ = writeln!(t, "local {}", self.local);
@@ -1305,13 +1422,16 @@ impl Politica {
 /// contido em qualquer um, e não contém nada além de outro `None`.
 ///
 /// Um caminho está contido no prefixo que o contém; um destinatário, só no
-/// mesmo destinatário — papéis não têm hierarquia de nome —; e um destino
-/// de rede, só no mesmo destino: não há faixa que contenha outra.
+/// mesmo destinatário — papéis não têm hierarquia de nome —; um destino
+/// de rede, só no mesmo destino: não há faixa que contenha outra; e uma
+/// chave, só na mesma chave.
 fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>>) -> bool {
     match (a, b) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(a), Some(b)) if p.recurso_e_papel() || p.recurso_e_endereco() => {
+        (Some(a), Some(b))
+            if p.recurso_e_papel() || p.recurso_e_endereco() || p.recurso_e_chave() =>
+        {
             a.iter().all(|pa| b.contains(pa))
         }
         (Some(a), Some(b)) => a
@@ -1323,6 +1443,18 @@ fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>
 /// Como um destino se escreve no alcance de `message.send`, e como a
 /// decisão o recebe: o papel do destinatário.
 pub const PREFIXO_DE_DESTINO: &str = "papel:";
+
+/// Como uma chave se escreve no alcance das permissões de chave, e como a
+/// decisão a recebe: `chave:<nome>`.
+pub const PREFIXO_DE_CHAVE: &str = "chave:";
+
+/// O nome de `chave:<nome>`, se o texto é isso e o nome está na regra dos
+/// nomes. `chave:*`, `chave:` e um nome com maiúscula não são chave.
+pub fn nome_de_chave(texto: &str) -> Option<&str> {
+    texto
+        .strip_prefix(PREFIXO_DE_CHAVE)
+        .filter(|n| nome_valido(n))
+}
 
 /// Um número de 64 bits, para as cotas de armazém.
 fn numero_grande(texto: Option<&str>, n: usize) -> Result<u64, Erro> {
@@ -1360,6 +1492,8 @@ mod testes {
             "taxa observador 7 21",
             "processos observador 3",
             "mensagens observador 3 9",
+            "dominios operador",
+            "recurso operador key.sign chave:bancada",
         ] {
             politicas.push(padrao.com_linha(linha, "administrador", &[]).unwrap());
         }
@@ -2117,6 +2251,293 @@ mod testes {
         );
     }
 
+    /// A linha de alcance das chaves: só `chave:<nome>`, com o nome na
+    /// regra; obrigatória para quem tem uma de chave; e as de chave são
+    /// sensíveis — não vêm por inclusão. Anular não tem alcance: é
+    /// administrativa, e o alvo é a identidade dona.
+    #[test]
+    fn a_linha_de_chave() {
+        use Codigo::*;
+        use Permissao::{KeyCreate, KeyRead, KeySign};
+        for ruim in [
+            "recurso operador key.sign chave:*",
+            "recurso operador key.sign *",
+            "recurso operador key.sign chave:",
+            "recurso operador key.sign chave:Bancada",
+            "recurso operador key.sign bancada",
+            "recurso operador key.sign papel:operador",
+            "recurso operador key.sign /dados",
+            "recurso operador key.sign tcp:10.0.2.100:7",
+            "recurso operador key.sign chave:a*",
+            "recurso operador key.sign",
+            "recurso operador key.revoke chave:bancada",
+        ] {
+            let texto = alloc::format!("{}{ruim}\n", crate::PADRAO);
+            let erro = Politica::ler(&texto).unwrap_err();
+            assert!(
+                matches!(
+                    erro.tipo,
+                    ErroTipo::ChaveInvalida(_)
+                        | ErroTipo::Sintaxe
+                        | ErroTipo::RecursoNaoECaminho(_)
+                        | ErroTipo::RecursoSemPermissao(_)
+                ),
+                "{ruim}: {erro:?}"
+            );
+        }
+        assert_eq!(
+            Politica::ler(&alloc::format!(
+                "{}recurso operador key.sign chave:*\n",
+                crate::PADRAO
+            ))
+            .unwrap_err()
+            .tipo,
+            ErroTipo::ChaveInvalida("chave:*".into())
+        );
+        // Sem a linha: recusada, e não "qualquer chave".
+        let sem = crate::PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador key.sign"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            Politica::ler(&sem).unwrap_err().tipo,
+            ErroTipo::RecursoFaltando(papel, p) if papel == "operador" && p == "key.sign"
+        ));
+        // Repetida na linha: lida uma vez.
+        let p = Politica::ler(&alloc::format!(
+            "{}recurso operador key.read chave:bancada chave:bancada\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        assert_eq!(
+            p.papel("operador").unwrap().recursos.get(&KeyRead).unwrap(),
+            &["chave:bancada"]
+        );
+        // A decisão: só o nome escrito, inteiro.
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for perm in [KeyCreate, KeyRead, KeySign, Permissao::KeyDestroy] {
+            for dentro in ["chave:bancada", "chave:bancada-2"] {
+                assert_eq!(p.decidir(Some("operador"), perm, Some(dentro)), Allow);
+            }
+            for fora in [
+                "chave:outra",
+                "chave:*",
+                "chave:",
+                "chave:Bancada",
+                "chave:bancada-3",
+                "chave:bancad",
+                "bancada",
+                "papel:operador",
+                "",
+            ] {
+                assert_eq!(
+                    p.decidir(Some("operador"), perm, Some(fora)),
+                    DenyResource,
+                    "{} {fora}",
+                    perm.nome()
+                );
+            }
+            assert_eq!(p.decidir(Some("operador"), perm, None), DenyResource);
+        }
+        // Sensível: por inclusão não vem.
+        let incluida = alloc::format!(
+            "{}papel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(Some("herdeiro"), KeySign, Some("chave:bancada")),
+            DenyPermission
+        );
+        assert!(!h.papel("herdeiro").unwrap().tem(KeyCreate));
+        assert!(h.papel("herdeiro").unwrap().dominios.is_empty());
+    }
+
+    /// Os domínios de assinatura: lidos, escritos de volta iguais, só num
+    /// papel que cria chave ou assina. O uso é do papel — sem papel,
+    /// nenhum —, e a ordem e a repetição na linha não mudam o que ela diz.
+    #[test]
+    fn os_dominios_de_assinatura() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for papel in ["operador", "administrador"] {
+            assert!(p.permite_dominio(Some(papel), "ic-request"), "{papel}");
+            assert!(!p.permite_dominio(Some(papel), "outro"), "{papel}");
+            assert!(!p.permite_dominio(Some(papel), "ic-request2"), "{papel}");
+            assert!(!p.permite_dominio(Some(papel), ""), "{papel}");
+        }
+        // O sistema não assina nada: não tem chave.
+        for papel in [
+            Some("sistema"),
+            Some("observador"),
+            Some("seguranca"),
+            Some("tempo"),
+            Some("fantasma"),
+            None,
+        ] {
+            assert!(!p.permite_dominio(papel, "ic-request"), "{papel:?}");
+        }
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+        // Na emergência, ninguém.
+        let e = Politica::emergencia();
+        for papel in ["sistema", "administrador", "seguranca"] {
+            assert!(!e.permite_dominio(Some(papel), "ic-request"), "{papel}");
+            let papel = e.papel(papel).unwrap();
+            assert!(papel.dominios.is_empty());
+            assert!(papel.permissoes().all(|q| !q.nome().starts_with("key.")));
+        }
+
+        let base = "papel a key.sign\nrecurso a key.sign chave:x\nserial a\nlocal a\n";
+        let com = |linha: &str| Politica::ler(&format!("{base}{linha}\n"));
+        let um = com("dominios a z y z").unwrap();
+        assert_eq!(um, com("dominios a y z").unwrap());
+        assert_eq!(um.papel("a").unwrap().dominios, ["y", "z"]);
+        assert_eq!(Politica::ler(&um.texto()).unwrap(), um);
+        assert!(um.permite_dominio(Some("a"), "y"));
+        // Vazia é nenhum, e o texto não a escreve.
+        let vazia = com("dominios a").unwrap();
+        assert!(!vazia.permite_dominio(Some("a"), "y"));
+        assert!(!vazia.texto().contains("dominios"));
+        assert_eq!(vazia, Politica::ler(base).unwrap());
+        let erro = |linha: &str| com(linha).unwrap_err().tipo;
+        assert_eq!(erro("dominios a *"), ErroTipo::Curinga);
+        assert_eq!(erro("dominios a ic-*"), ErroTipo::Curinga);
+        assert_eq!(
+            erro("dominios a Ic-Request"),
+            ErroTipo::NomeInvalido("Ic-Request".into())
+        );
+        assert_eq!(
+            erro("dominios b y"),
+            ErroTipo::PapelDesconhecido("b".into())
+        );
+        assert_eq!(erro("dominios"), ErroTipo::Sintaxe);
+        // Um domínio sem criar nem assinar é uma linha que não diz nada —
+        // ler ou destruir não pedem domínio.
+        assert_eq!(
+            Politica::ler(
+                "papel a key.read key.destroy\nrecurso a key.read chave:x\nrecurso a key.destroy chave:x\nserial a\nlocal a\ndominios a y\n"
+            )
+            .unwrap_err()
+            .tipo,
+            ErroTipo::DominiosSemChave("a".into())
+        );
+        // Só criar, ou só assinar, basta.
+        assert!(
+            Politica::ler(
+                "papel a key.create\nrecurso a key.create chave:x\nserial a\nlocal a\ndominios a y\n"
+            )
+            .is_ok()
+        );
+        assert!(Politica::ler("papel a system.read\nserial a\nlocal a\ndominios a\n").is_ok());
+    }
+
+    /// Os domínios mudam por `policy.write`: tirar, sempre; acrescentar, só
+    /// o que o teto usa. As chaves também: alargar o alcance além do teto é
+    /// recusado, e uma permissão de chave que o papel não tinha pede a
+    /// linha do alcance. E a atribuição de um papel cabe no teto também
+    /// pelos domínios.
+    #[test]
+    fn as_chaves_mudam_dentro_do_teto() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert!(p.cabe_em("operador", "administrador").is_ok());
+        let sem = p
+            .com_linha("dominios operador", "administrador", &[])
+            .unwrap();
+        assert!(!sem.permite_dominio(Some("operador"), "ic-request"));
+        assert!(sem.permite_dominio(Some("administrador"), "ic-request"));
+        assert_eq!(
+            sem.com_linha("dominios operador ic-request", "administrador", &[])
+                .unwrap(),
+            p
+        );
+        for proibida in [
+            "dominios operador ic-request outro",
+            "dominios operador outro",
+            "dominios administrador",
+            "recurso operador key.sign chave:bancada chave:outra",
+            "recurso operador key.create chave:outra",
+        ] {
+            assert!(
+                matches!(
+                    p.com_linha(proibida, "administrador", &[]),
+                    Err(Recusa::Proibida(_))
+                ),
+                "{proibida}"
+            );
+        }
+        // Encolher cabe, e a decisão encolhe junto.
+        let menor = p
+            .com_linha(
+                "recurso operador key.sign chave:bancada",
+                "administrador",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            menor.decidir(
+                Some("operador"),
+                Permissao::KeySign,
+                Some("chave:bancada-2")
+            ),
+            Codigo::DenyResource
+        );
+        // O papel protegido não muda.
+        assert!(matches!(
+            p.com_linha("dominios operador", "administrador", &["operador"]),
+            Err(Recusa::Proibida(_))
+        ));
+        // Um papel sem criar nem assinar não passa a usar domínio.
+        assert!(matches!(
+            p.com_linha("dominios observador ic-request", "administrador", &[]),
+            Err(Recusa::Invalida(Erro {
+                tipo: ErroTipo::DominiosSemChave(_),
+                ..
+            }))
+        ));
+        // A permissão de chave sem a linha do alcance: a política que
+        // resultaria não vale.
+        assert!(matches!(
+            p.com_linha(
+                "papel observador agent.read system.read log.read ui.read message.read key.read",
+                "administrador",
+                &[]
+            ),
+            Err(Recusa::Invalida(Erro {
+                tipo: ErroTipo::RecursoFaltando(_, _),
+                ..
+            }))
+        ));
+        // Um domínio que o teto não usa, numa política em que o operador já
+        // o usa: a atribuição do operador não cabe no teto.
+        let alem = Politica::ler(&crate::PADRAO.replace(
+            "dominios operador ic-request",
+            "dominios operador ic-request outro",
+        ))
+        .unwrap();
+        let r = alem.cabe_em("operador", "administrador");
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("outro")),
+            "{r:?}"
+        );
+        // Tirar o que já era usado continua possível.
+        assert!(
+            alem.com_linha("dominios operador ic-request", "administrador", &[])
+                .is_ok()
+        );
+        // E na emergência o teto não tem chave: um papel com chave não cabe
+        // nele, e nenhum se delega.
+        let e = Politica::ler(&format!(
+            "{}papel operador ui.read key.read\nrecurso operador key.read chave:bancada\n",
+            crate::EMERGENCIA
+        ))
+        .unwrap();
+        let r = e.cabe_em("operador", "administrador");
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.read")),
+            "{r:?}"
+        );
+    }
+
     /// A decisão fecha sozinha: um papel com permissão de caminho e sem
     /// alcance — que a validação não deixa existir — não alcança nada. É a
     /// segunda linha de defesa, e não pode virar "tudo" se a primeira um
@@ -2129,6 +2550,14 @@ mod testes {
         assert!(p.papel("sistema").unwrap().tem(Permissao::FsRead));
         assert_eq!(
             p.decidir(Some("sistema"), Permissao::FsRead, Some("/dados/x")),
+            Codigo::DenyResource
+        );
+        // A chave também: sem alcance, nenhuma.
+        let operador = p.papel_mut("operador").unwrap();
+        operador.recursos.remove(&Permissao::KeySign);
+        assert!(p.papel("operador").unwrap().tem(Permissao::KeySign));
+        assert_eq!(
+            p.decidir(Some("operador"), Permissao::KeySign, Some("chave:bancada")),
             Codigo::DenyResource
         );
     }

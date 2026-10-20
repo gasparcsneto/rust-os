@@ -135,9 +135,20 @@ pub use permissao::Permissao;
 ///   deles, com o alcance enumerado: o `sistema` porque é o máximo
 ///   enumerado, e o `administrador` para que as três do papel `seguranca`
 ///   caibam no teto de quem as delega.
+/// - As de chave (`key.*`) **não** estão no `sistema`, em nenhuma das duas:
+///   uma chave de assinatura é da identidade durável de quem a cria — a
+///   pessoa, o agente —, e o sistema é o máximo sobre a máquina, não o
+///   dono das chaves de alguém; nem há chave global do sistema. O teto do
+///   `administrador` as tem só na padrão — os dois parâmetros da macro:
+///   as permissões e o alcance —, para que o operador seja delegável, e
+///   `key.revoke`, para anular com prova a chave de outra identidade; o
+///   teto não se exerce, e anular não dá o uso de nada. Na de emergência,
+///   nenhuma: sem política no disco, ninguém cria, usa nem delega chave —
+///   a revogação de uma pessoa ou de um agente ainda anula as dele.
 macro_rules! papeis_de_sistema {
-    () => {
-        "\
+    ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
+        concat!(
+            "\
 papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
@@ -154,7 +165,9 @@ recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare",
+            $chaves_do_administrador,
+            "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
 recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
@@ -169,7 +182,9 @@ recurso administrador agent.suspend papel:observador papel:operador papel:sistem
 recurso administrador credential.suspend papel:observador papel:operador papel:sistema
 taxa administrador 10 20
 processos administrador 8
-
+",
+            $alcance_das_chaves_do_administrador,
+            "
 quorum admin.revoke 2 3
 
 papel seguranca audit.read net.observe net.block process.isolate
@@ -179,6 +194,7 @@ recurso seguranca process.isolate papel:observador papel:operador
 taxa seguranca 10 20
 servico nsf seguranca
 "
+        )
     };
 }
 
@@ -190,9 +206,11 @@ servico nsf seguranca
 /// - `observador` observa o estado do sistema e a tela; não lê arquivos;
 /// - `operador` observa e age: a tela, programas de `/bin` e
 ///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`; lê e
-///   escreve no armazém compartilhado, `/armazem/compartilhado`; e roda o
+///   escreve no armazém compartilhado, `/armazem/compartilhado`; roda o
 ///   código instalado em `/armazem/compartilhado/codigo` — só o selado
-///   pelo editor `bancada`, em que ele confia;
+///   pelo editor `bancada`, em que ele confia —; e cria, lê, assina e
+///   destrói as chaves `chave:bancada` e `chave:bancada-2` da própria
+///   identidade, só no domínio `ic-request` do registro de domínios;
 /// - `tempo` é o papel do serviço de hora — a linha `servico hora tempo`:
 ///   apresenta evidência de hora (`time.sync`) e conecta às três fontes do
 ///   registro de fontes, `/etc/duke/tempo`, cada uma escrita por inteiro,
@@ -209,14 +227,14 @@ pub const PADRAO: &str = concat!(
 # Uma permissao sensivel (fs.*, net.connect, keyboard.read, debug.trigger,
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
 # credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
-# process.isolate, agent.suspend e credential.suspend, time.* e
-# audit.declare) nao atravessa a inclusao de outro papel: cada papel que a
-# tem a escreve. Toda permissao
-# de caminho, o message.send e o net.connect tem o alcance escrito numa
-# linha `recurso` — o de message.send e o papel do destinatario,
-# `papel:<nome>`, e o de net.connect cada destino inteiro,
-# `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, os dois enumerados. Nao ha
-# curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
+# process.isolate, agent.suspend e credential.suspend, time.*,
+# audit.declare e key.*) nao atravessa a inclusao de outro papel: cada
+# papel que a tem a escreve. Toda permissao
+# de caminho, o message.send, o net.connect e as de chave tem o alcance
+# escrito numa linha `recurso` — o de message.send e o papel do
+# destinatario, `papel:<nome>`, o de net.connect cada destino inteiro,
+# `tcp:<ipv4>:<porta>` ou `udp:<ipv4>:<porta>`, e o de key.* cada nome de
+# chave, `chave:<nome>`, todos enumerados. Nao ha curinga. Os unicos destinos desta imagem sao os da bancada: o eco TCP em
 # 10.0.2.100:7, o eco TLS em 10.0.2.100:443, o TFTP do emulador, UDP, em
 # 10.0.2.2:69, o DNS do emulador, UDP, em 10.0.2.3:53, o HTTP da bancada
 # em 10.0.2.100:80 e, atras do TLS, em 10.0.2.100:8443, e o gateway HTTPS da
@@ -239,12 +257,20 @@ pub const PADRAO: &str = concat!(
 # cada fonte do registro tem o destino dela aqui, e o xtask confere. A hora
 # nao se escolhe: so o acordo de pelo menos duas chaves a move, e o salto
 # que fica pendente so o administrador confirma, com prova (time.confirm).
+# As chaves de assinatura (key.*) sao da identidade duravel de quem as cria
+# — a pessoa, o agente —, nunca do sistema, e a privada nunca sai do
+# kernel: o operador cria, le, assina e destroi as chaves chave:bancada e
+# chave:bancada-2 da propria identidade — o nome se resolve no espaco de
+# quem pede —, e assina so no dominio ic-request do registro de dominios
+# (/etc/duke/dominios), a linha `dominios`. O sistema nao tem nenhuma de
+# chave. O administrador anula a chave de outra identidade com prova
+# (key.revoke), sem poder usa-la.
 
 papel observador agent.read system.read log.read ui.read message.read
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943
@@ -252,6 +278,11 @@ armazem operador 16777216 4096
 recurso operador process.run /bin /programas /armazem/compartilhado/codigo
 editores operador bancada
 recurso operador message.send papel:operador papel:sistema
+recurso operador key.create chave:bancada chave:bancada-2
+recurso operador key.read chave:bancada chave:bancada-2
+recurso operador key.sign chave:bancada chave:bancada-2
+recurso operador key.destroy chave:bancada chave:bancada-2
+dominios operador ic-request
 taxa operador 50 100
 processos operador 8
 
@@ -261,7 +292,15 @@ taxa tempo 10 20
 servico hora tempo
 
 ",
-    papeis_de_sistema!(),
+    papeis_de_sistema!(
+        " key.create key.read key.sign key.destroy key.revoke",
+        "recurso administrador key.create chave:bancada chave:bancada-2
+recurso administrador key.read chave:bancada chave:bancada-2
+recurso administrador key.sign chave:bancada chave:bancada-2
+recurso administrador key.destroy chave:bancada chave:bancada-2
+dominios administrador ic-request
+"
+    ),
     "
 apertos 10 10000
 serial sistema
@@ -275,16 +314,18 @@ local sistema
 /// O `sistema` é o mesmo da padrão — o mesmo texto —, e continua sendo o da
 /// serial e o da autoridade local: sem política no disco, a autoridade
 /// máxima não encolhe, e não vira curinga. O `administrador` também é o
-/// mesmo, para quem tem a prova recuperar a política em memória com
-/// `policy.write`. Os outros papéis não estão aqui: um agente de papel
-/// `operador` ou `observador` é recusado; um de papel `sistema` continua o
-/// que era — ninguém ganha nem perde papel na emergência.
+/// mesmo, menos as de chave, para quem tem a prova recuperar a política em
+/// memória com `policy.write`. Os outros papéis não estão aqui: um agente
+/// de papel `operador` ou `observador` é recusado; um de papel `sistema`
+/// continua o que era — ninguém ganha nem perde papel na emergência. E
+/// nenhum papel tem permissão de chave: sem política no disco, nenhuma
+/// chave se cria nem assina.
 pub const EMERGENCIA: &str = concat!(
     "\
 # A politica de emergencia, embutida no kernel.
 
 ",
-    papeis_de_sistema!(),
+    papeis_de_sistema!("", ""),
     "
 apertos 10 10000
 serial sistema
@@ -493,6 +534,39 @@ mod testes {
                 Codigo::DenyPermission
             );
         }
+        // As chaves: o operador cria, lê, assina e destrói as dele, pelo
+        // nome enumerado; o observador, o tecido de segurança, o serviço de
+        // hora e o sistema, nenhuma — não há chave do sistema. O teto do
+        // administrador as tem para delegar (o gate não deixa o teto se
+        // exercer); anular é administrativa, só dele.
+        for perm in [KeyCreate, KeyRead, KeySign, KeyDestroy] {
+            for (papel, esperado) in [
+                ("operador", Codigo::Allow),
+                ("administrador", Codigo::Allow),
+                ("observador", Codigo::DenyPermission),
+                ("seguranca", Codigo::DenyPermission),
+                ("tempo", Codigo::DenyPermission),
+                ("sistema", Codigo::DenyPermission),
+            ] {
+                assert_eq!(
+                    d(papel, perm, Some("chave:bancada")),
+                    esperado,
+                    "{papel} {}",
+                    perm.nome()
+                );
+            }
+            assert_eq!(
+                d("operador", perm, Some("chave:outra")),
+                Codigo::DenyResource
+            );
+        }
+        for (papel, esperado) in [
+            ("administrador", Codigo::Allow),
+            ("operador", Codigo::DenyPermission),
+            ("sistema", Codigo::DenyPermission),
+        ] {
+            assert_eq!(d(papel, KeyRevoke, None), esperado, "{papel}");
+        }
         assert_eq!(p.decidir(None, AgentRead, None), Codigo::DenyRole);
         assert_eq!(
             p.decidir(Some("fantasma"), AgentRead, None),
@@ -502,17 +576,56 @@ mod testes {
         assert_eq!(p.local(), "sistema");
     }
 
+    /// A emergência não tem chave nenhuma: nenhum papel cria, lê, assina,
+    /// destrói nem anula — nem o teto do administrador —, e nenhum usa
+    /// domínio.
+    #[test]
+    fn a_emergencia_nao_tem_chave() {
+        let e = Politica::emergencia();
+        for papel in e.papeis() {
+            for perm in permissao::TODAS
+                .into_iter()
+                .filter(|q| q.nome().starts_with("key."))
+            {
+                assert!(!papel.tem(perm), "{} {}", papel.nome, perm.nome());
+                assert_eq!(
+                    e.decidir(Some(&papel.nome), perm, Some("chave:bancada")),
+                    Codigo::DenyPermission
+                );
+            }
+            assert!(papel.dominios.is_empty(), "{}", papel.nome);
+        }
+        assert!(!EMERGENCIA.contains("key."));
+        assert!(!EMERGENCIA.contains("dominios"));
+        // E fora as de chave, o administrador da emergência é o da padrão.
+        let p = padrao();
+        let (a, b) = (
+            p.papel("administrador").unwrap(),
+            e.papel("administrador").unwrap(),
+        );
+        let fora_as_de_chave = |x: &Papel| {
+            x.permissoes()
+                .filter(|q| !q.nome().starts_with("key."))
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        assert_eq!(fora_as_de_chave(a), fora_as_de_chave(b));
+        assert_eq!(p.papel("sistema"), e.papel("sistema"));
+    }
+
     /// O sistema é a autoridade máxima, e enumerada: tem cada permissão que
-    /// não é administrativa nem a escrita bruta — sem incluir papel nenhum,
-    /// sem curinga —, e cada uma de caminho com o alcance escrito: `/` para
-    /// ler e executar, e só o armazém para escrever.
+    /// não é administrativa, nem a escrita bruta, nem de chave — sem incluir
+    /// papel nenhum, sem curinga —, e cada uma de caminho com o alcance
+    /// escrito: `/` para ler e executar, e só o armazém para escrever. As
+    /// de chave não: a chave é da identidade de quem a cria, e não há chave
+    /// do sistema.
     #[test]
     fn o_sistema_e_maximo_e_enumerado() {
         let p = padrao();
         let sistema = p.papel("sistema").unwrap();
         assert!(sistema.inclui.is_empty(), "o sistema inclui outro papel");
         for perm in permissao::TODAS {
-            let esperado = !perm.administrativa() && perm != Permissao::FsRawWrite;
+            let de_chave = perm.recurso_e_chave() || perm == Permissao::KeyRevoke;
+            let esperado = !perm.administrativa() && perm != Permissao::FsRawWrite && !de_chave;
             assert_eq!(sistema.tem(perm), esperado, "{}", perm.nome());
             assert_eq!(
                 sistema.diretas.contains(&perm),
@@ -555,10 +668,33 @@ mod testes {
                 assert_eq!(sistema.recursos.get(&perm).unwrap(), &[alcance.to_string()]);
             }
         }
-        // Nenhum outro papel da padrão alcança mais que ele.
-        for papel in ["observador", "operador", "tempo"] {
+        // Nenhum outro papel da padrão alcança mais que ele — fora as chaves
+        // do operador, que são da identidade dele, e que o sistema não tem
+        // de propósito.
+        for papel in ["observador", "tempo"] {
             assert!(p.cabe_em(papel, "sistema").is_ok(), "{papel}");
         }
+        let r = p.cabe_em("operador", "sistema");
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.") || m.contains("dominio")),
+            "{r:?}"
+        );
+        // Sem as de chave, o operador cabe no sistema.
+        let sem_chaves: alloc::string::String = PADRAO
+            .lines()
+            .filter(|l| {
+                !l.starts_with("recurso operador key.") && !l.starts_with("dominios operador")
+            })
+            .map(|l| {
+                let l = l
+                    .strip_suffix(" key.create key.read key.sign key.destroy")
+                    .unwrap_or(l);
+                alloc::format!("{l}\n")
+            })
+            .collect();
+        let q = Politica::ler(&sem_chaves).unwrap();
+        assert!(!q.papel("operador").unwrap().tem(Permissao::KeySign));
+        assert!(q.cabe_em("operador", "sistema").is_ok());
     }
 
     /// Uma permissão de caminho sem o alcance escrito não é "tudo": a
@@ -684,13 +820,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read key.create key.read key.sign key.destroy audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read key.create key.read key.sign key.destroy keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));
@@ -698,7 +834,7 @@ mod testes {
         // que resultaria não vale — um alcance para o que o papel não tem.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read"
+                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read key.create key.read key.sign key.destroy"
             ),
             Err(Recusa::Invalida(_))
         ));
@@ -763,7 +899,27 @@ mod testes {
         assert_eq!(e.serial(), "sistema");
         assert_eq!(e.local(), "sistema");
         assert_eq!(e.papel("sistema"), p.papel("sistema"));
-        assert_eq!(e.papel("administrador"), p.papel("administrador"));
+        // O administrador é o mesmo, menos as de chave — ver
+        // `a_emergencia_nao_tem_chave`.
+        let mut sem_chaves = p.papel("administrador").unwrap().clone();
+        sem_chaves.diretas.retain(|q| !q.nome().starts_with("key."));
+        sem_chaves
+            .recursos
+            .retain(|q, _| !q.nome().starts_with("key."));
+        sem_chaves.dominios.clear();
+        let adm = e.papel("administrador").unwrap();
+        assert_eq!(adm.diretas, sem_chaves.diretas);
+        assert_eq!(adm.recursos, sem_chaves.recursos);
+        assert_eq!(adm.dominios, sem_chaves.dominios);
+        assert_eq!(
+            (adm.taxa, adm.processos, adm.armazem, &adm.editores),
+            (
+                sem_chaves.taxa,
+                sem_chaves.processos,
+                sem_chaves.armazem,
+                &sem_chaves.editores
+            )
+        );
         for papel in ["observador", "operador"] {
             assert!(e.papel(papel).is_none(), "{papel}");
             assert_eq!(
@@ -1346,7 +1502,7 @@ mod testes {
         // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
         // tem a prova, e a auditoria a grava.
         let delegado = mudar(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read time.sync",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read key.create key.read key.sign key.destroy time.sync",
         )
         .unwrap();
         assert_eq!(

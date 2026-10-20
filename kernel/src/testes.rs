@@ -36740,8 +36740,8 @@ fn tls_sem_random_read_nada_sai() -> Resultado {
     use politica::Codigo;
     crate::pessoas::esquecer_registradas();
     let sem = politica_trocada(&[(
-        "message.send message.read random.read audit.declare\nrecurso operador",
-        "message.send message.read audit.declare\nrecurso operador",
+        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+        "message.send message.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
     )])?;
     let resultado = com_a_politica(sem, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
@@ -47578,8 +47578,8 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 return Err("a conexao fora do alcance nao foi recusada pelo gate");
             }
             let sem_declarar = politica_da_bancada_icp(&[(
-                "message.send message.read random.read audit.declare\nrecurso operador",
-                "message.send message.read random.read\nrecurso operador",
+                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "message.send message.read random.read key.create key.read key.sign key.destroy\nrecurso operador",
             )])?;
             com_a_politica(sem_declarar, || {
                 let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
@@ -48033,8 +48033,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -50313,8 +50313,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(

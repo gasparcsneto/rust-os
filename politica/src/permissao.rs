@@ -39,6 +39,22 @@
 //! que se declara não é recurso de política. Sensível — o papel que a tem a
 //! escreve —, e não administrativa: um programa a exerce pelo gate, com o
 //! manifesto dele.
+//!
+//! # As chaves
+//!
+//! Uma chave de assinatura é da **identidade durável** de quem a cria — a
+//! pessoa, o agente, o serviço, o sistema —, e não da sessão, do processo
+//! ou da credencial; a chave privada nunca sai do kernel. `key.create`,
+//! `key.read`, `key.sign` e `key.destroy` têm alcance: o recurso é
+//! `chave:<nome>`, e cada papel enumera os nomes — sem curinga. O nome se
+//! resolve no espaço de quem pede: `chave:x` de uma identidade não é
+//! `chave:x` de outra, e saber o nome da chave de outro não dá nada. Assinar
+//! é sempre num **domínio** registrado na imagem, que a linha `dominios` do
+//! papel enumera (ver [`crate::arquivo`]); o kernel assina o prefixo do
+//! domínio seguido de um resumo de 32 bytes, e nada mais. `key.revoke` é
+//! administrativa: anula a chave de outra identidade, por `admin.execute`,
+//! com prova — e não dá a ninguém o uso dela. Todas sensíveis: nenhuma vem
+//! pela inclusão de outro papel.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -178,11 +194,30 @@ pub enum Permissao {
     /// alegação, gravada com os fatos do kernel, que nenhuma decisão lê. Ver
     /// o cabeçalho do módulo.
     AuditDeclare,
+    /// Criar uma chave de assinatura da própria identidade, para um domínio
+    /// que o papel enumera. O recurso é `chave:<nome>`, no espaço de quem
+    /// pede; um nome que já foi usado — por uma chave viva ou destruída —
+    /// não se cria de novo.
+    KeyCreate,
+    /// Ler o que é público de uma chave da própria identidade: a chave
+    /// pública, o algoritmo, o domínio e o estado. Nunca a privada.
+    KeyRead,
+    /// Assinar, com uma chave da própria identidade, um resumo de 32 bytes
+    /// no domínio da chave. Uma decisão por assinatura, reconfirmada no
+    /// ponto de commit, e gravada na auditoria antes de a assinatura sair.
+    KeySign,
+    /// Destruir uma chave da própria identidade: a privada é apagada, e o
+    /// nome fica marcado para sempre — não se cria outra com ele.
+    KeyDestroy,
+    /// Anular a chave de outra identidade — só pela operação
+    /// administrativa, com prova. Não dá o uso da chave a quem anula: ela
+    /// deixa de assinar para todos.
+    KeyRevoke,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 41] = [
+pub const TODAS: [Permissao; 46] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -224,6 +259,11 @@ pub const TODAS: [Permissao; 41] = [
     Permissao::TimeSync,
     Permissao::TimeConfirm,
     Permissao::AuditDeclare,
+    Permissao::KeyCreate,
+    Permissao::KeyRead,
+    Permissao::KeySign,
+    Permissao::KeyDestroy,
+    Permissao::KeyRevoke,
 ];
 
 impl Permissao {
@@ -271,6 +311,11 @@ impl Permissao {
             Permissao::TimeSync => "time.sync",
             Permissao::TimeConfirm => "time.confirm",
             Permissao::AuditDeclare => "audit.declare",
+            Permissao::KeyCreate => "key.create",
+            Permissao::KeyRead => "key.read",
+            Permissao::KeySign => "key.sign",
+            Permissao::KeyDestroy => "key.destroy",
+            Permissao::KeyRevoke => "key.revoke",
         }
     }
 
@@ -315,6 +360,11 @@ impl Permissao {
                 | Permissao::TimeSync
                 | Permissao::TimeConfirm
                 | Permissao::AuditDeclare
+                | Permissao::KeyCreate
+                | Permissao::KeyRead
+                | Permissao::KeySign
+                | Permissao::KeyDestroy
+                | Permissao::KeyRevoke
         )
     }
 
@@ -335,6 +385,19 @@ impl Permissao {
                 | Permissao::MessagePurgeMailbox
                 | Permissao::AdminRevoke
                 | Permissao::TimeConfirm
+                | Permissao::KeyRevoke
+        )
+    }
+
+    /// O recurso desta permissão é uma chave da identidade de quem pede —
+    /// `chave:<nome>` —, e um papel o limita a uma lista enumerada de
+    /// nomes. Sem curinga: um nome que não está na lista não é alcançado. O
+    /// nome se resolve no espaço da identidade de quem pede, e não diz nada
+    /// das chaves de outra.
+    pub const fn recurso_e_chave(self) -> bool {
+        matches!(
+            self,
+            Permissao::KeyCreate | Permissao::KeyRead | Permissao::KeySign | Permissao::KeyDestroy
         )
     }
 
@@ -415,6 +478,11 @@ impl Permissao {
     /// `audit.declare` não muda: a declaração só acrescenta à auditoria o
     /// registro dela — como toda decisão acrescenta o seu —, e nada que
     /// alguém veja na máquina muda por ela.
+    ///
+    /// `key.read` é leitura — o que é público da chave. As outras de chave
+    /// mudam: criar e destruir mexem na tabela de chaves, anular também, e
+    /// assinar é um ato da identidade que sai da máquina com efeito — quem
+    /// assinou por último é quem agiu.
     pub const fn muda_estado(self) -> bool {
         match self {
             Permissao::AgentRead
@@ -430,7 +498,8 @@ impl Permissao {
             | Permissao::SecurityRead
             | Permissao::NetObserve
             | Permissao::RandomRead
-            | Permissao::AuditDeclare => false,
+            | Permissao::AuditDeclare
+            | Permissao::KeyRead => false,
             Permissao::UiAct
             | Permissao::FsWrite
             | Permissao::FsRawWrite
@@ -457,15 +526,22 @@ impl Permissao {
             | Permissao::AgentSuspend
             | Permissao::CredentialSuspend
             | Permissao::TimeSync
-            | Permissao::TimeConfirm => true,
+            | Permissao::TimeConfirm
+            | Permissao::KeyCreate
+            | Permissao::KeySign
+            | Permissao::KeyDestroy
+            | Permissao::KeyRevoke => true,
         }
     }
 
     /// O papel limita o recurso desta permissão por uma linha `recurso`: de
-    /// caminho, de destinatário ou de destino de rede. A linha é obrigatória
-    /// para quem a tem.
+    /// caminho, de destinatário, de destino de rede ou de chave. A linha é
+    /// obrigatória para quem a tem.
     pub const fn tem_alcance(self) -> bool {
-        self.recurso_e_caminho() || self.recurso_e_papel() || self.recurso_e_endereco()
+        self.recurso_e_caminho()
+            || self.recurso_e_papel()
+            || self.recurso_e_endereco()
+            || self.recurso_e_chave()
     }
 }
 
@@ -493,6 +569,8 @@ mod testes {
             "random.read",
             // Só o registro da declaração, como o de toda decisão.
             "audit.declare",
+            // O que é público da chave.
+            "key.read",
         ];
         for p in TODAS {
             assert_eq!(
@@ -704,5 +782,61 @@ mod testes {
         }
         assert_eq!(Permissao::de_nome("audit.*"), None);
         assert_eq!(Permissao::de_nome("audit"), None);
+    }
+
+    /// As de chave: todas sensíveis — nenhuma vem pela inclusão de outro
+    /// papel —; só anular é administrativa; criar, ler, assinar e destruir
+    /// têm a chave como recurso, com alcance obrigatório; só ler não muda
+    /// o estado. E entram no fim, nas posições 41 a 45: as de antes não
+    /// mudam de bit.
+    #[test]
+    fn as_de_chave() {
+        let nomes: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.nome().starts_with("key."))
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(
+            nomes,
+            [
+                "key.create",
+                "key.read",
+                "key.sign",
+                "key.destroy",
+                "key.revoke"
+            ]
+        );
+        for p in TODAS.into_iter().filter(|p| p.nome().starts_with("key.")) {
+            assert!(p.sensivel(), "{}", p.nome());
+            assert_eq!(
+                p.administrativa(),
+                p == Permissao::KeyRevoke,
+                "{}",
+                p.nome()
+            );
+            assert_eq!(
+                p.recurso_e_chave(),
+                p != Permissao::KeyRevoke,
+                "{}",
+                p.nome()
+            );
+            assert_eq!(p.tem_alcance(), p.recurso_e_chave(), "{}", p.nome());
+            assert_eq!(p.muda_estado(), p != Permissao::KeyRead, "{}", p.nome());
+            assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_papel());
+            assert!(!p.recurso_e_destino() && !p.contencao());
+        }
+        // Só as quatro têm a chave como recurso.
+        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_chave()).count(), 4);
+        assert_eq!(TODAS[40], Permissao::AuditDeclare);
+        assert_eq!(TODAS[41], Permissao::KeyCreate);
+        assert_eq!(TODAS[45], Permissao::KeyRevoke);
+        assert_eq!(Permissao::KeyRevoke as usize, 45);
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        assert_eq!(Permissao::de_nome("key.*"), None);
+        assert_eq!(Permissao::de_nome("key"), None);
+        assert_eq!(Permissao::de_nome("key.export"), None);
+        assert_eq!(Permissao::de_nome("key.import"), None);
     }
 }
