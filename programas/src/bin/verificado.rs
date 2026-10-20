@@ -10,10 +10,17 @@
 //! - `ola` pela `bls-invalida`: `unverified_certificate`, e nada entregue;
 //! - a medida: [`MEDIDAS`] consultas `ola` seguidas, cada uma uma conexão
 //!   nova, com o tempo de cada parte — a conexão (o aperto do TLS), os dois
-//!   pedidos e o resto, que é a verificação.
+//!   pedidos e o resto, que é a verificação;
+//! - a chamada de atualização `quem`, assinada pela chave [`CHAVE`] de
+//!   quem lançou o programa — o canister responde o Principal da chave —,
+//!   e do anônimo — o Principal anônimo;
+//! - a medida da chamada: [`MEDIDAS`] chamadas `contar` assinadas e
+//!   [`MEDIDAS`] do anônimo, cada uma uma conexão nova, e [`MEDIDAS`]
+//!   assinaturas sozinhas, pelo `key.sign`.
 //!
 //! Cada consulta é declarada por `audit.declare`, ancorada na conexão
-//! dela, antes do fecho. Sai com [`CODIGO`] quando tudo confere, e com um
+//! dela, antes do fecho; cada chamada, na decisão da assinatura dela — ou
+//! na conexão, do anônimo. Sai com [`CODIGO`] quando tudo confere, e com um
 //! código menor que diz o quê, quando não.
 
 #![no_std]
@@ -27,13 +34,17 @@ programas::manifesto!(
     "random.read",
     "system.read",
     "fs.read",
-    "audit.declare"
+    "audit.declare",
+    "key.read",
+    "key.sign"
 );
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use programas::escreverln;
-use programas::icp::{self, Desfecho, Falha, Principal, Rede, Valor, Verificada};
+use programas::icp::{
+    self, Andamento, ChaveDoKernel, Desfecho, Falha, Final, Principal, Rede, Valor, Verificada,
+};
 use programas::nativo;
 use programas::tls::{self, Ancoras};
 
@@ -49,9 +60,17 @@ const OLA: i64 = 44;
 const ECO: i64 = 45;
 const ADULTERADA: i64 = 46;
 const MEDIDA: i64 = 47;
+const SEM_CHAVE: i64 = 48;
+const QUEM_ASSINADA: i64 = 49;
+const QUEM_ANONIMA: i64 = 50;
+const MEDIDA_DA_CHAMADA: i64 = 51;
+const MEDIDA_DA_ASSINATURA: i64 = 52;
 
 /// Quantas consultas a medida faz.
 const MEDIDAS: usize = 5;
+
+/// A chave de quem lançou o programa, que a fumaça cria antes.
+const CHAVE: &str = "chave:bancada";
 
 /// O canister da bancada — ver `xtask/src/icp.rs`.
 const BANCADA: &str = "pi33i-pt777-77776-aaaaa-cai";
@@ -197,6 +216,154 @@ fn mediana(mut v: Vec<u64>) -> u64 {
     v[v.len() / 2]
 }
 
+/// Uma chamada de atualização, como saiu: o desfecho, a declaração, as
+/// assinaturas que o kernel fez para ela e o tempo.
+struct Chamada {
+    r: Result<(icp::Atualizacao, Andamento), Falha>,
+    declarada: icp::Declarada,
+    assinaturas: usize,
+    total_ms: u64,
+}
+
+impl Chamada {
+    /// O desfecho, numa palavra.
+    fn desfecho(&self) -> &'static str {
+        icp::desfecho_da_chamada(self.r.as_ref().map(|(_, andamento)| andamento))
+    }
+
+    /// O Principal que o canister respondeu, se a chamada foi verificada e
+    /// a resposta é um Principal só.
+    fn principal(&self) -> Option<Principal> {
+        let (
+            _,
+            Andamento::Certificado {
+                desfecho: Final::Respondida(bytes),
+                ..
+            },
+        ) = self.r.as_ref().ok()?
+        else {
+            return None;
+        };
+        match icp::candid::decodificar(bytes).ok()?.as_slice() {
+            [Valor::Principal(p)] => Some(*p),
+            _ => None,
+        }
+    }
+}
+
+/// Uma chamada de atualização sem argumentos pelo caminho inteiro —
+/// assinada pela chave `chave` de quem lançou o programa, ou do anônimo —,
+/// acompanhada enquanto pendente, e declarada antes do fecho: ancorada na
+/// decisão da assinatura da chamada, ou, do anônimo, na conexão.
+fn chamar(
+    rede: &Rede,
+    ancoras: &Ancoras,
+    canister: &Principal,
+    metodo: &str,
+    chave: Option<&str>,
+) -> Chamada {
+    let inicio = agora_ms();
+    let mut kernel = None;
+    let mut gateway = None;
+    let r = (|| {
+        if let Some(nome) = chave {
+            kernel = Some(ChaveDoKernel::ler(nome)?);
+        }
+        let hora = icp::hora()?;
+        let nonce = icp::nonce()?;
+        let gateway = gateway.insert(icp::conectar(rede, ancoras, DNS)?);
+        let a = icp::chamar(
+            gateway,
+            rede,
+            kernel.as_mut(),
+            canister,
+            metodo,
+            b"DIDL\x00\x00",
+            &hora,
+            &nonce,
+        )?;
+        let mut andamento = a.andamento.clone();
+        let mut leituras = 0;
+        while let Andamento::Pendente(_) = andamento
+            && leituras < icp::MAIS_LEITURAS
+        {
+            gateway.esperar(icp::ESPERA_ENTRE_LEITURAS_MS)?;
+            let hora = icp::hora()?;
+            leituras += 1;
+            andamento = icp::acompanhar(gateway, rede, kernel.as_mut(), &a, &hora)?;
+        }
+        Ok((a, andamento))
+    })();
+    let total_ms = agora_ms().saturating_sub(inicio);
+    let desfecho = icp::desfecho_da_chamada(r.as_ref().map(|(_, andamento)| andamento));
+    let ancora = match (
+        kernel
+            .as_ref()
+            .and_then(|k: &ChaveDoKernel| k.decisoes().first().copied()),
+        gateway.as_ref(),
+    ) {
+        (Some(d), _) => icp::Ancora::Decisao(d),
+        (None, Some(g)) => icp::Ancora::Conexao(g.conexao()),
+        (None, None) => icp::Ancora::Nenhuma,
+    };
+    let declarada = icp::declarar_chamada(&icp::assunto(canister, metodo), desfecho, ancora);
+    let assinaturas = kernel.as_ref().map_or(0, |k| k.decisoes().len());
+    if let Some(g) = gateway {
+        g.fechar();
+    }
+    Chamada {
+        r,
+        declarada,
+        assinaturas,
+        total_ms,
+    }
+}
+
+/// Diz uma chamada: o desfecho, a declaração, as assinaturas, o tempo, e
+/// quem o canister disse que chamou — ou a falha.
+fn dizer_chamada(passo: &str, c: &Chamada) {
+    let declarada = match &c.declarada {
+        Ok(n) => alloc::format!("{n}"),
+        Err(codigo) => alloc::format!("recusada {codigo}"),
+    };
+    let detalhe = match (&c.r, c.principal()) {
+        (Ok(_), Some(p)) => alloc::format!("principal {}", p.texto()),
+        (Ok(_), None) => String::from("sem principal"),
+        (Err(f), _) => alloc::format!("{f}"),
+    };
+    escreverln!(
+        "verificado: {}: {}; declarada {}; assinaturas {}; em {} ms; {}",
+        passo,
+        c.desfecho(),
+        declarada,
+        c.assinaturas,
+        c.total_ms,
+        detalhe
+    );
+}
+
+/// Uma assinatura sozinha, pelo `key.sign`, do resumo `resumo` com a
+/// [`CHAVE`] no domínio do pedido do IC: o tempo, se assinou.
+fn assinar_so(resumo: &[u8; 32]) -> Option<u64> {
+    let mut digitos = String::with_capacity(64);
+    for b in resumo {
+        digitos.push_str(&alloc::format!("{b:02x}"));
+    }
+    let inicio = agora_ms();
+    let r = nativo::pedir("key.sign", |w| {
+        w.field_str("key", CHAVE)?;
+        w.field_str("domain", icp::DOMINIO_DO_PEDIDO)?;
+        w.field_str("digest", &digitos)
+    })
+    .ok()?;
+    let ms = agora_ms().saturating_sub(inicio);
+    r.resultado()
+        .ok()?
+        .member("signed")?
+        .as_bool()?
+        .then_some(ms)
+}
+
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
     let ancoras = match tls::ancoras(ANCORAS) {
@@ -261,6 +428,68 @@ fn principal() -> i64 {
         parte(|c| c.total_ms),
         totais.iter().min().copied().unwrap_or(0),
         totais.iter().max().copied().unwrap_or(0)
+    );
+
+    // A chamada de atualização: o `quem` assinado pela chave de quem lançou
+    // o programa responde o Principal dela; o do anônimo, o anônimo.
+    let chave = match ChaveDoKernel::ler(CHAVE) {
+        Ok(k) => k,
+        Err(f) => {
+            escreverln!("verificado: a chave nao se leu: {}", f);
+            return SEM_CHAVE;
+        }
+    };
+    let assinada = chamar(direta, &ancoras, &canister, "quem", Some(CHAVE));
+    dizer_chamada("quem assinada", &assinada);
+    if assinada.desfecho() != "verified"
+        || assinada.principal() != Some(chave.principal())
+        || assinada.assinaturas != 1
+        || assinada.declarada.is_err()
+    {
+        return QUEM_ASSINADA;
+    }
+    let anonima = chamar(direta, &ancoras, &canister, "quem", None);
+    dizer_chamada("quem anonima", &anonima);
+    if anonima.desfecho() != "verified"
+        || anonima.principal() != Some(Principal::ANONIMO)
+        || anonima.assinaturas != 0
+        || anonima.declarada.is_err()
+    {
+        return QUEM_ANONIMA;
+    }
+
+    // A medida da chamada: o `contar` assinado e do anônimo, e a
+    // assinatura sozinha.
+    let mut assinadas = Vec::new();
+    let mut anonimas = Vec::new();
+    for _ in 0..MEDIDAS {
+        for (chave, medidas) in [(Some(CHAVE), &mut assinadas), (None, &mut anonimas)] {
+            let c = chamar(direta, &ancoras, &canister, "contar", chave);
+            if c.desfecho() != "verified" || c.declarada.is_err() {
+                dizer_chamada("medida da chamada", &c);
+                return MEDIDA_DA_CHAMADA;
+            }
+            medidas.push(c.total_ms);
+        }
+    }
+    let mut so_assinatura = Vec::new();
+    for i in 0..MEDIDAS {
+        match assinar_so(&[0xd0 + i as u8; 32]) {
+            Some(ms) => so_assinatura.push(ms),
+            None => {
+                escreverln!("verificado: a assinatura sozinha nao saiu");
+                return MEDIDA_DA_ASSINATURA;
+            }
+        }
+    }
+    escreverln!(
+        "verificado: medida da chamada {} contar, medianas em ms: assinada {}, anonima {}; key.sign sozinho {} (de {} a {})",
+        MEDIDAS,
+        mediana(assinadas),
+        mediana(anonimas),
+        mediana(so_assinatura.clone()),
+        so_assinatura.iter().min().copied().unwrap_or(0),
+        so_assinatura.iter().max().copied().unwrap_or(0)
     );
     escreverln!("verificado: tudo conferiu");
     CODIGO

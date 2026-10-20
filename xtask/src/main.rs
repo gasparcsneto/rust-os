@@ -12397,23 +12397,42 @@ const DO_H2: [&str; 9] = [
 ];
 
 /// O que seria o IC fora da alegação num registro da auditoria: o
-/// canister, o evento, o nome do gateway, um caminho do IC. Em qualquer
+/// canister, os eventos, o nome do gateway, um caminho do IC. Em qualquer
 /// registro, de qualquer um, fora das declarações.
-const DO_IC: [&str; 5] = ["pi33i", "icp.query", "icp.duke", "read_state", "/api/v3/"];
+const DO_IC: [&str; 8] = [
+    "pi33i",
+    "icp.query",
+    "icp.update",
+    "icp.duke",
+    "read_state",
+    "request_status",
+    "/api/v3/",
+    "/api/v4/",
+];
+
+/// Quantas consultas e quantas chamadas `contar` de cada espécie o
+/// `verificado` mede — o `MEDIDAS` dele —, e quantas assinaturas sozinhas.
+const MEDIDAS_DO_VERIFICADO: usize = 5;
 
 /// O IC no kernel de produção, com a política padrão — ver `docs/ICP.md`.
-/// O agente da porta 2, do papel `operador`, lança o `verificado`, que
-/// consulta o canister da bancada pela rede `direta` — o texto e o eco,
-/// verificados —, recusa a prova adulterada da `bls-invalida` e mede cinco
-/// consultas, cada uma declarada. Daqui, o que o kernel viu, registro a
-/// registro desde antes do lançamento:
+/// O agente da porta 2, do papel `operador`, cria a chave `chave:bancada`
+/// dele, e lança o `verificado`, que consulta o canister da bancada pela
+/// rede `direta` — o texto e o eco, verificados —, recusa a prova
+/// adulterada da `bls-invalida` e mede cinco consultas; chama o `quem`
+/// assinado pela chave do operador — o Principal dela — e do anônimo, e
+/// mede cinco `contar` de cada um e cinco assinaturas sozinhas; cada
+/// consulta e cada chamada, declarada. Daqui, o que o kernel viu, registro
+/// a registro desde antes do lançamento:
 ///
-/// - as oito declarações, cada uma a alegação do programa no recurso e, no
-///   detalhe, só o que o kernel sabe: o processo, a conexão e o destino
-///   real dela — o gateway da bancada —, e a decisão;
-/// - as decisões do processo, todas deixadas, e só do que a consulta pede:
-///   a semente, a hora, o relógio da medida, as âncoras, as redes, o
-///   gateway e a declaração;
+/// - as declarações, cada uma a alegação do programa no recurso e, no
+///   detalhe, só o que o kernel sabe: o processo, a âncora — a conexão e o
+///   destino real dela, o gateway da bancada; ou, da chamada assinada, a
+///   decisão da assinatura dela, um `key.sign` deste processo — e a
+///   decisão;
+/// - as decisões do processo, todas deixadas, e só do que a consulta e a
+///   chamada pedem: a semente, a hora, o relógio da medida, as âncoras, as
+///   redes, o gateway, a chave e a declaração; e cada assinatura feita, com
+///   a chave e o domínio;
 /// - nada do IC em registro nenhum fora das declarações;
 /// - nenhuma recusa por taxa e nenhum registro perdido.
 fn sob_o_ic(
@@ -12446,6 +12465,15 @@ fn sob_o_ic(
         .ok_or("ic: o audit.head nao disse o numero")?;
     let comeco = std::time::Instant::now();
     let mut operador = AgenteNaPorta::conectar(arch, 2)?;
+    // A chave é do operador — da identidade dele —, e o programa que ele
+    // lança assina com ela, pelo gate.
+    let criada = operador.pedir(
+        "key.create",
+        r#"{"key":"chave:bancada","domain":"ic-request"}"#,
+    )?;
+    if !criada.contains(r#""created":true"#) {
+        return Err(format!("ic: o operador nao criou a chave\n  {criada}"));
+    }
     let lancado = operador.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/verificado"}}"#, arch.nome()),
@@ -12466,13 +12494,13 @@ fn sob_o_ic(
         if log.contains("processo encerrou com codigo 97") {
             break;
         }
-        // Saiu com um dos códigos de falha dele (40 a 49): o que ele disse
+        // Saiu com um dos códigos de falha dele (40 a 59): o que ele disse
         // diz o quê, sem esperar o teto.
         let falhou = log
             .split("processo encerrou com codigo ")
             .skip(1)
             .filter_map(|r| r.split('"').next()?.parse::<u32>().ok())
-            .find(|c| (40..=49).contains(c));
+            .find(|c| (40..=59).contains(c));
         if let Some(codigo) = falhou {
             return Err(format!(
                 "ic: o programa saiu com {codigo}\n  {}",
@@ -12508,6 +12536,8 @@ fn sob_o_ic(
         "verificado: eco: verified; declarada ",
         "verificado: adulterada: unverified_certificate; declarada ",
         "verificacao: a assinatura BLS do certificado nao confere",
+        "verificado: quem assinada: verified; declarada ",
+        "verificado: quem anonima: verified; declarada ",
         "verificado: tudo conferiu",
     ] {
         dita(conferida)?;
@@ -12517,6 +12547,11 @@ fn sob_o_ic(
     let mut depois_de = inicio;
     let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
     let mut declaradas: Vec<String> = Vec::new();
+    // As decisões de `key.sign` deste processo, e as assinaturas feitas,
+    // cada uma pela decisão dela.
+    let mut assinaturas_decididas = std::collections::BTreeSet::new();
+    let mut assinaturas_feitas = 0usize;
+    let mut ancoradas_na_assinatura = 0usize;
     let mut vistos = 0u64;
     while depois_de < fim {
         let cauda = pedir(
@@ -12543,19 +12578,50 @@ fn sob_o_ic(
             vistos += 1;
             let (metodo, recurso, detalhe) = (campo("method"), campo("resource"), campo("detail"));
             let declaracao = metodo == "audit.declare" && !recurso.is_empty();
+            if metodo == "key.sign" && detalhe.starts_with(&do_processo) {
+                // A decisão de cada assinatura, sobre a chave; e a execução,
+                // com a chave, o domínio e o resumo, pela decisão dela —
+                // gravada antes.
+                let seq: u64 = campo("seq").parse().unwrap_or(0);
+                if recurso == "chave:bancada" && campo("code") == "ALLOW" {
+                    assinaturas_decididas.insert(seq);
+                } else if recurso.starts_with("chave:bancada ic-request ")
+                    && detalhe.contains("): assinatura ed25519 ")
+                {
+                    let decisao = detalhe
+                        .rsplit_once("; decisao ")
+                        .and_then(|(_, d)| d.parse::<u64>().ok());
+                    if !decisao.is_some_and(|d| assinaturas_decididas.contains(&d)) {
+                        return Err(format!(
+                            "ic: uma assinatura sem a decisao dela antes\n  {recurso} / {detalhe}"
+                        ));
+                    }
+                    assinaturas_feitas += 1;
+                }
+            }
             if declaracao && detalhe.starts_with(&do_processo) {
                 // A alegação no recurso; no detalhe, a âncora do kernel e a
-                // decisão — e nada que o programa escreveu.
-                let ancora = detalhe.split_once("): conexao ").map(|(_, r)| r);
-                let destino = ancora.and_then(|r| r.split(' ').nth(1));
+                // decisão — e nada que o programa escreveu. A âncora é a
+                // conexão, com o destino real dela; ou, de uma chamada
+                // assinada, a decisão da assinatura, deste processo.
+                let na_conexao = detalhe
+                    .split_once("): conexao ")
+                    .and_then(|(_, r)| r.split(' ').nth(1))
+                    == Some("tcp:10.0.2.100:4943;");
+                let na_assinatura = detalhe
+                    .split_once("): ancorada em ")
+                    .and_then(|(_, r)| r.split_once(" key.sign; decisao "))
+                    .and_then(|(d, _)| d.parse::<u64>().ok())
+                    .is_some_and(|d| assinaturas_decididas.contains(&d));
                 if campo("code") != "ALLOW"
-                    || destino != Some("tcp:10.0.2.100:4943;")
+                    || !(na_conexao || (na_assinatura && recurso.starts_with("icp.update ")))
                     || !detalhe.contains("; decisao ")
                 {
                     return Err(format!(
                         "ic: a declaracao nao tem a ancora do kernel\n  {recurso} / {detalhe}"
                     ));
                 }
+                ancoradas_na_assinatura += usize::from(na_assinatura);
                 declaradas.push(recurso.clone());
             } else if let Some(t) = DO_IC
                 .iter()
@@ -12570,21 +12636,38 @@ fn sob_o_ic(
             }
         }
     }
-    let alegacao = |metodo: &str, desfecho: &str| {
-        format!("icp.query pi33i-pt777-77776-aaaaa-cai/{metodo} {desfecho}")
+    let alegacao = |evento: &str, metodo: &str, desfecho: &str| {
+        format!("{evento} pi33i-pt777-77776-aaaaa-cai/{metodo} {desfecho}")
     };
     let mut esperadas = vec![
-        alegacao("ola", "verified"),
-        alegacao("eco", "verified"),
-        alegacao("ola", "unverified_certificate"),
+        alegacao("icp.query", "ola", "verified"),
+        alegacao("icp.query", "eco", "verified"),
+        alegacao("icp.query", "ola", "unverified_certificate"),
     ];
-    esperadas.extend((0..5).map(|_| alegacao("ola", "verified")));
+    esperadas.extend((0..MEDIDAS_DO_VERIFICADO).map(|_| alegacao("icp.query", "ola", "verified")));
+    esperadas.extend((0..2).map(|_| alegacao("icp.update", "quem", "verified")));
+    esperadas.extend(
+        (0..2 * MEDIDAS_DO_VERIFICADO).map(|_| alegacao("icp.update", "contar", "verified")),
+    );
     if declaradas != esperadas {
         return Err(format!(
-            "ic: as declaracoes nao foram as das consultas\n  {declaradas:?}"
+            "ic: as declaracoes nao foram as das consultas e chamadas\n  {declaradas:?}"
         ));
     }
-    const PEDIDOS: [&str; 9] = [
+    // Uma assinatura por chamada assinada — o `quem` e os `contar` —, e as
+    // sozinhas; cada chamada assinada declarada na decisão da assinatura
+    // dela.
+    let chamadas_assinadas = 1 + MEDIDAS_DO_VERIFICADO;
+    if assinaturas_feitas != chamadas_assinadas + MEDIDAS_DO_VERIFICADO
+        || assinaturas_decididas.len() != assinaturas_feitas
+        || ancoradas_na_assinatura != chamadas_assinadas
+    {
+        return Err(format!(
+            "ic: {assinaturas_feitas} assinaturas feitas, {} decididas e {ancoradas_na_assinatura} declaracoes ancoradas nelas, para {chamadas_assinadas} chamadas assinadas e {MEDIDAS_DO_VERIFICADO} sozinhas",
+            assinaturas_decididas.len()
+        ));
+    }
+    const PEDIDOS: [&str; 11] = [
         "net.connect",
         "net.send",
         "net.recv",
@@ -12594,22 +12677,25 @@ fn sob_o_ic(
         "system.uptime",
         "fs.read",
         "audit.declare",
+        "key.read",
+        "key.sign",
     ];
     if let Some(((metodo, codigo), _)) = decisoes
         .iter()
         .find(|((m, c), _)| !PEDIDOS.contains(&m.as_str()) || c != "ALLOW")
     {
         return Err(format!(
-            "ic: o programa ouviu {codigo} em `{metodo}`, ou pediu o que a consulta nao pede: {decisoes:?}"
+            "ic: o programa ouviu {codigo} em `{metodo}`, ou pediu o que a consulta e a chamada nao pedem: {decisoes:?}"
         ));
     }
     let conexoes = decisoes
         .get(&("net.connect".to_string(), "ALLOW".to_string()))
         .copied()
         .unwrap_or(0);
-    if conexoes != 8 {
+    let esperadas_as_conexoes = 3 + MEDIDAS_DO_VERIFICADO + 2 + 2 * MEDIDAS_DO_VERIFICADO;
+    if conexoes != esperadas_as_conexoes as u64 {
         return Err(format!(
-            "ic: {conexoes} conexoes para 8 consultas: {decisoes:?}"
+            "ic: {conexoes} conexoes para {esperadas_as_conexoes} consultas e chamadas: {decisoes:?}"
         ));
     }
     let metricas = pedir("security.metrics", "{}")?;
@@ -12622,10 +12708,14 @@ fn sob_o_ic(
         ));
     }
     println!(
-        "  [ic] ok  o verificado do operador saiu com 97 em {} ms: o texto e o eco verificados pela rede direta, a prova adulterada recusada, cinco consultas medidas; {vistos} registros da auditoria lidos: oito declaracoes, cada uma ancorada pelo kernel no gateway, e nada do IC fora delas; as decisoes do processo todas deixadas",
-        duracao.as_millis()
+        "  [ic] ok  o verificado do operador saiu com 97 em {} ms: o texto e o eco verificados pela rede direta, a prova adulterada recusada, cinco consultas medidas; o quem assinado pela chave do operador e do anonimo, cada um com o seu Principal, e as chamadas medidas; {vistos} registros da auditoria lidos: {} declaracoes, cada uma ancorada pelo kernel — no gateway, ou na decisao da assinatura —, {assinaturas_feitas} assinaturas, cada uma pela decisao dela, e nada do IC fora das declaracoes; as decisoes do processo todas deixadas",
+        duracao.as_millis(),
+        declaradas.len()
     );
     if let Ok(medida) = dita("verificado: medida ") {
+        println!("  [ic] medido  {medida}");
+    }
+    if let Ok(medida) = dita("verificado: medida da chamada ") {
         println!("  [ic] medido  {medida}");
     }
     Ok(())
