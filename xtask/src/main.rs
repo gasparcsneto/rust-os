@@ -1099,6 +1099,13 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let disco = disco_de_testes()?;
     zerar_o_estado(arch)?;
     let mut falhou = false;
+    // No ARM a suíte inteira roda por aqui, com os casos `icp:`: a PocketIC
+    // da bancada do IC, como em [`test`], até a sonda acabar — sem ela, o
+    // proxy do `guestfwd` não tem a quem repassar, e cada consulta cai.
+    let _icp = match arch {
+        Arquitetura::Aarch64 => Some(icp::Bancada::ligar()?),
+        Arquitetura::X86_64 => None,
+    };
 
     // A rodada que importa: o kernel de verdade, e o relatório inteiro.
     instalar_iniciador(arch, &disco, &efi, &kernel)?;
