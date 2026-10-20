@@ -171,3 +171,49 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
+
+## DFINITY — o Internet Computer
+
+O pacote `web3` (módulo `icp`) é um subconjunto `no_std` do cliente do
+Internet Computer, escrito aqui e conferido nos testes contra as
+bibliotecas oficiais da DFINITY, que só entram como dependências de teste
+(ver `web3/Cargo.toml`). Uma função é porte de código delas:
+
+| Arquivo do Duke | Origem |
+|---|---|
+| `web3/src/icp/assinatura.rs` — `verificar`, a regra ZIP215 da assinatura de um nó | `ic-ed25519` 0.6.0 (`dfinity/ic`, `packages/ic-ed25519`, commit `52d3ede621e1bbc4d51df92ad39eeec850d3d744`) — `PublicKey::verify_signature`, `Signature::from_slice` e `compute_challenge` |
+
+O porte troca o `curve25519-dalek` 4 pelo 5 que o projeto já usa, devolve
+um `bool` e não traz a verificação em lote; a conta é a mesma, e os testes
+a conferem contra o `ic-ed25519` em todos os pontos de ordem pequena e
+codificações não canônicas que separam as regras.
+
+Os testes do pacote usam também os exemplos da *Internet Computer
+Interface Specification* (`dfinity/portal`, commit
+`ed742236de3b54ed56161f188913536259941a12`): a árvore de hash de exemplo e
+a podada, com a raiz e as procuras; o id de pedido de exemplo, campo a
+campo; e os Principals `em77e-bvlzu-aq`, `2vxsx-fae` e `aaaaa-aa`.
+
+Ficam no binário dos programas, sem modificação, como dependências
+normais: `ic-verify-bls-signature` 0.6.0 (Apache-2.0), para a assinatura
+BLS dos certificados, e `ic_bls12_381` 0.10.1 (MIT OU Apache-2.0), por
+baixo dela.
+
+O texto da Licença Apache 2.0 está em [`licencas/Apache-2.0`](licencas/Apache-2.0).
+
+```text
+Copyright © 2021 DFINITY Foundation   (ic-ed25519)
+Copyright 2022 DFINITY Foundation     (dfinity/portal)
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```

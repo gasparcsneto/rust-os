@@ -1,0 +1,44 @@
+[package]
+# Os protocolos Web3 de um programa do Duke — o Internet Computer (ICP),
+# por enquanto o único. Ver `src/lib.rs`.
+#
+# `no_std` com `alloc`, como o `tls` e o `http`: compila para os programas,
+# e os testes rodam no hospedeiro. Nenhuma rede, nenhum relógio, nenhuma
+# trava: quem chama dá os bytes que chegaram, a hora e o transporte.
+name = "web3"
+version = "0.1.0"
+edition = "2024"
+description = "Os protocolos Web3 dos programas do Duke: o Internet Computer, verificado"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# A verificação da assinatura BLS12-381 de um certificado do IC: a da
+# DFINITY, sem reescrever o pareamento. Sem as features padrão é `no_std`
+# e sem `alloc` — compila para os dois alvos dos programas (conferido na
+# inspeção do ICP-0) e não traz o `lazy_static`.
+ic-verify-bls-signature = { version = "0.6.0", default-features = false }
+# O sha2 0.10 que a verificação BLS traz para o hash-to-curve: em
+# software. O kernel não salva os registradores de SIMD de um processo
+# (ver `programas/.cargo/config.toml`), e o `cpufeatures` dele escolheria o
+# caminho com SHA-NI ou NEON sozinho.
+sha2-010 = { package = "sha2", version = "0.10.9", default-features = false, features = ["force-soft"] }
+# O resto, nas versões que o projeto já usa: o SHA-256 da árvore e do
+# hash independente de representação, o SHA-224 do Principal
+# auto-autenticado, e o SHA-512 e a curva da assinatura dos nós (ZIP215).
+sha2 = { version = "0.11.0", default-features = false }
+curve25519-dalek = { version = "5.0.0", default-features = false, features = ["digest"] }
+
+[dev-dependencies]
+# Os oráculos: as bibliotecas oficiais da DFINITY, só nos testes do
+# hospedeiro — elas dependem de `std`, e nada delas vai para um programa.
+# Cada peça daqui é conferida contra a oficial, nos dois sentidos.
+candid = { version = "0.10.38", features = ["value"] }
+ic_principal = "0.1.5"
+ic-transport-types = "0.49.2"
+ic-certification = "4.0.0"
+ic-certificate-verification = "4.0.0"
+ic-ed25519 = "0.6.0"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_cbor = "0.11.2"
+ed25519-dalek = { version = "3.0.0", default-features = false }
