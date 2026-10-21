@@ -50048,10 +50048,21 @@ fn icp_a_chamada_pendente_e_acompanhada() -> Resultado {
                     politica::auditoria::Titular::Pessoa,
                 )?);
             }
-            let resumos: alloc::collections::BTreeSet<&str> =
-                feitas.iter().map(|(_, e)| e.recurso.as_str()).collect();
-            if resumos.len() != feitas.len() {
-                return Err("duas assinaturas do acompanhamento assinaram o mesmo pedido");
+            // Uma decisão por assinatura, e a da chamada é de outro pedido
+            // que o de qualquer leitura. Duas leituras no mesmo segundo são
+            // o mesmo pedido — a validade conta em segundos e a leitura não
+            // tem nonce, como no `ic-agent`, que a arredonda ao minuto —, e
+            // cada uma é assinada de novo: o resumo se repete; a decisão e
+            // a assinatura, não (CI 297, no x86 em release).
+            let distintas: alloc::collections::BTreeSet<u64> = decisoes.iter().copied().collect();
+            if distintas.len() != decisoes.len() {
+                return Err("duas assinaturas do acompanhamento sairam da mesma decisao");
+            }
+            if feitas[1..]
+                .iter()
+                .any(|(_, e)| e.recurso == feitas[0].1.recurso)
+            {
+                return Err("uma leitura da situacao assinou o pedido da chamada");
             }
             declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisoes[0]))?;
             // A espera entre as leituras é do gate, como qualquer leitura.
