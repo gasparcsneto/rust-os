@@ -233,6 +233,22 @@ fn classe_em(
     Some(c)
 }
 
+/// A trava cuja classe está em `guardada` está na mão deste núcleo? Uma
+/// trava nunca pedida ainda não tem classe, e ninguém a tem.
+pub fn na_mao_deste_nucleo(guardada: &AtomicU16) -> bool {
+    let c = guardada.load(Ordering::Relaxed);
+    if c == NENHUMA {
+        return false;
+    }
+    mascarado(|| {
+        let n = crate::nucleos::atual();
+        let altura = ALTURA[n].load(Ordering::Relaxed).min(PROFUNDIDADE);
+        NA_MAO[n][..altura]
+            .iter()
+            .any(|v| v.load(Ordering::Relaxed) == c)
+    })
+}
+
 /// A classe da ordem das gravações, guardada como a das travas.
 static CLASSE_DA_ORDEM: AtomicU16 = AtomicU16::new(NENHUMA);
 

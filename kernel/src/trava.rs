@@ -137,6 +137,14 @@ impl<T: ?Sized> Mutex<T> {
         guarda
     }
 
+    /// Só para a suíte: este núcleo tem a vez? Pela conferência da ordem,
+    /// que sabe o que cada núcleo tem na mão — e não por uma tentativa, que
+    /// falha também quando outro núcleo tem a vez ou espera na fila.
+    #[cfg(feature = "modo-teste")]
+    pub fn na_mao_deste_nucleo(&self) -> bool {
+        crate::ordem_das_travas::na_mao_deste_nucleo(&self.classe)
+    }
+
     /// Alguém tem a vez, ou está na fila?
     #[allow(dead_code)]
     pub fn is_locked(&self) -> bool {

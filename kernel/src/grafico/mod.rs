@@ -278,11 +278,13 @@ pub fn com_o_compositor_preso_de_teste<R>(f: impl FnOnce() -> R) -> R {
     })
 }
 
-/// Só para a suíte: a trava do compositor está livre para quem a pedir
-/// agora? Tenta algumas vezes — outro núcleo pode estar compondo.
+/// Só para a suíte: este núcleo tem a trava do compositor na mão? Pela
+/// conferência da ordem das travas. Tentar tomá-la não diria: a trava é
+/// justa, e outro núcleo compondo — ou só na fila dela — faz a tentativa
+/// falhar tanto quanto quem a tem aqui.
 #[cfg(feature = "modo-teste")]
-pub fn compositor_alcancavel_de_teste() -> bool {
-    (0..10_000).any(|_| crate::arch::sem_interrupcoes(|| ATIVO.try_lock().is_some()))
+pub fn compositor_na_mao_de_teste() -> bool {
+    ATIVO.na_mao_deste_nucleo()
 }
 
 /// A camada de cima em `(x, y)`, sem o cursor nem as invisíveis — ver

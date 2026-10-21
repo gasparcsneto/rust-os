@@ -22746,13 +22746,23 @@ fn smp_o_relogio_de_parede_lido_em_todos_os_nucleos() -> Resultado {
 /// núcleos, o executor pedindo a árvore e um processo redesenhando a janela
 /// ficavam presos um ao outro, com as interrupções do primeiro núcleo
 /// mascaradas — e o canal do agente morria. Visto na fumaça do x86 em
-/// release. Aqui, de dentro do percurso, a trava tem de estar alcançável.
+/// release. Aqui, de dentro do percurso, este núcleo não tem a trava.
+///
+/// # A conferência
+///
+/// O caso tentava tomar a trava dez mil vezes, de dentro do percurso, e a
+/// dava por presa se nenhuma conseguisse. No ARM em depuração (CI 294),
+/// outro núcleo compondo um quadro a segurou mais do que as dez mil
+/// tentativas, e o caso acusou o percurso, que estava certo. A trava é
+/// justa: a tentativa falha também quando outro núcleo só espera na fila.
+/// A pergunta é se *este* núcleo a tem, e quem sabe isso é a conferência
+/// da ordem das travas, que guarda o que cada núcleo tem na mão.
 fn grafico_o_percurso_das_camadas_solta_o_compositor() -> Resultado {
     let mut chamadas = 0;
     let mut presa = false;
     crate::grafico::camadas(|_| {
         chamadas += 1;
-        presa |= !crate::grafico::compositor_alcancavel_de_teste();
+        presa |= crate::grafico::compositor_na_mao_de_teste();
     });
     if chamadas == 0 {
         crate::log_info!("teste", "sem compositor: nada a percorrer");
