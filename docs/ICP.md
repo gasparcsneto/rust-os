@@ -587,6 +587,61 @@ Do lado de fora, além do que a sonda já conferia:
 - nada do IC — além do que já se procurava, `icp.update`,
   `request_status` e `/api/v4/` — fora das declarações.
 
+### As medidas
+
+Na imagem de produção, a mediana dos cinco `contar` do `verificado`, em
+ms: a chamada inteira — a hora e o nonce pelo gate, a conexão, a leitura
+das faixas, a chamada pela `/api/v4` e a verificação do certificado da
+resposta; a assinada, mais o `key.read` e o `key.sign` do id do pedido. E
+o `key.sign` sozinho, cinco vezes, do pedido à resposta — a decisão, a
+reconfirmação, o registro no journal e a assinatura:
+
+| kernel de produção | x86 | ARM |
+|---|---|---|
+| depuração | assinada **700**, do anônimo 630; `key.sign` 20 (20 a 70) | assinada **630**, do anônimo 570; `key.sign` 30 (20 a 70) |
+| release | assinada **530**, do anônimo 460; `key.sign` 10 (0 a 10) | assinada **430**, do anônimo 420; `key.sign` 10 (0 a 20) |
+
+O relógio do programa é o `system.uptime`, que anda de 10 em 10 ms: o
+`key.sign` sozinho é do tamanho da régua. A assinatura custa à chamada de
+10 a 70 ms; o resto é o que a chamada do anônimo também faz. Na mesma
+fumaça, as consultas do ICP-1 deram 470, 340, 230 e 240 ms, na ordem da
+tabela.
+
+### As mutações
+
+Uma de cada vez, com o que a pega: a suíte do x86 só com os casos
+`chaves:` — ou os `icp:` da chamada, quando a mutação é dela —, e os testes
+do hospedeiro do pacote, quando ela é do `web3` ou da `politica`. As
+dezessete pedidas morrem, e mais duas — a reconfirmação sem a contenção e
+a compactação sem as lápides:
+
+| mutação | onde | o que a pegou |
+|---|---|---|
+| sem o gate de `key.sign`: a permissão de ler basta | kernel | o programa assinou sem declarar `key.sign` |
+| sem a conferência do dono: a chave de mesmo nome de qualquer dono assina | `chaves.rs` | a chave de outra identidade assinou; a revogação de um dono tocou as de outro; uma lápide reposta assinou |
+| domínio arbitrário: o papel não precisa usar o domínio | kernel | a assinatura num domínio que o papel não usa passou |
+| sem a reconfirmação no commit | kernel | o que mudou entre a decisão e o commit não recusou a assinatura |
+| a reconfirmação sem a contenção | `autorizacao.rs` | idem: o processo isolado, o agente e a credencial suspensos assinaram |
+| assinar antes da auditoria | kernel | a assinatura saiu sem o registro dela no journal |
+| a privada na auditoria da assinatura | kernel | a assinatura não foi gravada com a chave, o domínio, o resumo e a impressão |
+| sem lápide: a destruída sai da tabela | `chaves.rs` | seis casos: a destruição, a anulação e a revogação não deixaram nada |
+| sem lápide no journal: a compactação esquece as mortas | `persistencia.rs` | as chaves repostas não são as de antes |
+| o resumo de mais de 32 bytes aceito | kernel | um resumo fora da forma não foi recusado |
+| a sessão como dono | `autorizacao.rs` | sete casos — entre eles, revogada a sessão, a chave não ficou com a pessoa |
+| o administrador com a chave alheia: `owner` no pedido | kernel | a chave de outra identidade assinou para quem pediu |
+| o sistema com `key.*` | `politica` | o sistema alcançou a chave de uma pessoa; e quatro testes da política (a emergência sem chave, o sistema enumerado) |
+| exportar: `key.read` devolve a semente | kernel | a privada apareceu numa resposta |
+| a declaração ancorada na decisão de outro | `autorizacao.rs` | uma âncora que não é de quem declara foi aceita |
+| o 202 como resposta final | `web3` | `a_202_acompanhada_ate_a_resposta`; a chamada pendente não foi acompanhada |
+| sem `request_status`: qualquer certificado é a resposta | `web3` | idem |
+| sem a verificação do certificado da chamada | `web3` | `o_certificado_de_outra_sub_rede`; a chamada adulterada não foi recusada |
+| o certificado adulterado aceito: a BLS não é conferida | `web3` | `a_assinatura_errada_e_recusada`; idem |
+
+A da sessão como dono parecia morta na primeira rodada, em dois segundos:
+era a mutação que não compilava, e a campanha contava a falha da
+compilação como morte. A campanha passou a separar as duas, e a mutação,
+escrita de novo, morreu em sete casos.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,

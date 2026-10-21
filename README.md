@@ -6507,9 +6507,20 @@ pessoa / agente ─► identidade ─► sessão ─► processo ─► manifest
   assinatura pedida com uma chave morta é recusada pelo kernel, e o NSF a
   observa (`dead-key-used`), sem agir.
 
+Na fumaça, o operador cria a chave dele e o `verificado` chama o `quem`
+assinado por ela — o canister responde o Principal da pública que o
+`key.read` deu — e do anônimo; do lado de fora, cada assinatura cita a
+decisão dela, gravada antes, e cada chamada assinada é declarada na
+decisão da sua assinatura. A chamada `contar` inteira, assinada, leva de
+430 a 700 ms de mediana no emulador — de 10 a 70 ms a mais que a do
+anônimo —, e o `key.sign` sozinho, de 10 a 30 ms. As dezessete mutações
+pedidas — do gate de `key.sign` ao certificado adulterado — morrem, e mais
+duas: a reconfirmação sem a contenção e a compactação sem as lápides.
+
 Ver [`docs/ICP.md`](docs/ICP.md), *A chamada assinada*, para o caminho
-inteiro, os desfechos, os casos e o que ainda não existe — delegações,
-custódia no TPM, compartilhamento, exportação e a rede principal.
+inteiro, os desfechos, os casos, as medidas, as mutações e o que ainda
+não existe — delegações, custódia no TPM, compartilhamento, exportação e a
+rede principal.
 
 ## Vários agentes
 
