@@ -1,11 +1,13 @@
-# O Internet Computer (ICP-1 e ICP-3)
+# O Internet Computer (ICP-1, ICP-3 e ICP-4a)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
 atualização (*update*), do anônimo ou assinada pela chave de uma
 identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada-icp-3).
 Nos dois, a resposta é **verificada** contra a raiz da rede antes de ser
-entregue. O que ainda não existe está em *O que não existe ainda*.
+entregue. O ICP-4a dá ao TLS do programa as cadeias das autoridades
+públicas, que a rede principal usa — em [O TLS público](#o-tls-público-icp-4a).
+O que ainda não existe está em *O que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
 Principal, um método, o Candid ou o id de um pedido, e a política não tem
@@ -646,12 +648,156 @@ era a mutação que não compilava, e a campanha contava a falha da
 compilação como morte. A campanha passou a separar as duas, e a mutação,
 escrita de novo, morreu em sete casos.
 
+## O TLS público (ICP-4a)
+
+A rede principal do IC fala por `icp-api.io`, atrás do certificado de uma
+autoridade pública — e o perfil do TLS do Duke recusava toda cadeia
+pública: só conferia ECDSA P-256 e Ed25519, e as raízes e os
+intermediários das autoridades que importam são P-384 ou RSA — na Let's
+Encrypt, as raízes X1 (RSA de 4096 bits) e X2 (P-384), os intermediários
+ECDSA P-384 e os RSA de 2048 bits; na Google Trust Services, as raízes
+R1 (RSA) e R4 (P-384). O ICP-4a dá ao programa a verificação dessas
+cadeias, e só isso: a rede principal continua desligada, e nada mais do
+Duke muda.
+
+### O que mudou
+
+Só o perfil de assinaturas do pacote [`tls`](../tls/src/assinatura.rs), que
+é do programa:
+
+| Algoritmo | Na cadeia | No `CertificateVerify` |
+|---|---|---|
+| ECDSA P-256 com SHA-256 | sim (já era) | `ecdsa_secp256r1_sha256` (já era) |
+| ECDSA P-384 com SHA-384 | **sim** | **`ecdsa_secp384r1_sha384`** |
+| Ed25519 | sim (já era) | `ed25519` (já era) |
+| RSA PKCS#1 v1.5 com SHA-256, SHA-384 ou SHA-512 | **sim** | não: o TLS 1.3 não o aceita no aperto |
+| RSA-PSS com SHA-256, SHA-384 ou SHA-512, chave `rsaEncryption` | não | **`rsa_pss_rsae_sha256`, `_sha384`, `_sha512`** |
+
+As contas são do RustCrypto, como as de antes: o `p384` 0.14 e o `rsa`
+0.10 (a candidata 19, fixa: a linha estável, a 0.9, está nas versões
+antigas do `digest` e do `signature`), só na **verificação** — não há
+chave privada RSA no Duke, nem cifra RSA, nem geração de chave fora dos
+testes e da bancada. O `rsa` vem sem o `encoding`: a chave pública do
+certificado é lida aqui, pelo `der` que o `ecdsa` já trazia.
+
+A chave também tem perfil, e uma fora dele não confere assinatura nenhuma:
+
+- **RSA:** o `RSAPublicKey` em DER estrito — nada depois da sequência,
+  cada inteiro na forma mínima e positivo —; o módulo de 2048 a 4096 bits
+  e múltiplo de 8 (a regra da CA/Browser Forum; 4096 é o das raízes
+  públicas); o expoente ímpar, de 2^16 + 1 a 2^33 − 1. A assinatura tem o
+  tamanho exato do módulo: o `rsa` aceitaria uma com o zero da frente
+  cortado, e o RFC 8017 não. O PSS tem o sal do tamanho do hash (RFC 8446,
+  4.2.3);
+- **ECDSA:** só o ponto sem compressão — como o *ring* e o `webpki`
+  exigem —, também na P-256, que antes aceitava o comprimido.
+
+Fora do perfil, de propósito: SHA-1, P-521, a curva com o hash da outra
+(P-256 com SHA-384, P-384 com SHA-256 — a regra da CA/Browser Forum, que
+o *ring* não segue), o certificado assinado com RSA-PSS (que a CA/Browser
+Forum permite e nenhuma das cadeias públicas encontradas usa), e o RSA
+acima de 4096 bits. Um servidor com um deles é recusado no aperto com
+`TLS_UNTRUSTED`, e não aceito com menos verificação.
+
+**O que não mudou.** O kernel, a política, o gate, as permissões, as
+identidades, o NSF e o `net.connect` — nenhuma linha deles: os casos da
+suíte que mudaram só contam as conexões novas do programa. O TLS continua
+no programa, e o resto da verificação é o de antes, do `webpki`: a cadeia
+até uma âncora dada, a validade de cada certificado — da folha e de cada
+intermediário — pela hora de quem conecta, o nome, o uso `serverAuth`, o
+teto de seis intermediários. A âncora continua sendo a configuração da
+imagem: o programa não aprende raiz pela rede, nem a que o servidor manda
+junto. Os códigos `TLS_*` continuam do programa, e nenhum vira decisão do
+gate.
+
+### A bancada
+
+O eco TLS da bancada ([`xtask/src/tls.rs`](../xtask/src/tls.rs)) ganhou as
+cadeias com a forma das públicas — um intermediário entre a folha e a
+raiz —, servidas pelo OpenSSL do hospedeiro, outra implementação inteira:
+
+| nome | cadeia | o que o programa tem de dizer |
+|---|---|---|
+| `p384.duke` | raiz P-384 → intermediário P-384 → folha P-384 | aceita: a P-384 na cadeia e no aperto |
+| `rsa.duke` | raiz RSA de 4096 → intermediário RSA de 2048 → folha RSA de 2048 | aceita: o PKCS#1 v1.5 na cadeia, o PSS no aperto |
+| `misto.duke` | raiz RSA → intermediário P-384 → folha P-256 | aceita: a forma da cadeia ECDSA da Let's Encrypt pela X1 |
+| `intruso.duke` | uma raiz RSA que o programa não tem, mandada junto | `TLS_UNTRUSTED` |
+| `falso-p384.duke` | a de `misto.duke`, com um bit da assinatura da folha trocado | `TLS_UNTRUSTED` |
+| `falso-rsa.duke` | a de `rsa.duke` até o intermediário, folha P-256 com um bit da assinatura trocado | `TLS_UNTRUSTED` |
+
+As chaves RSA vêm do `rsa`, de um ChaCha20 semeado pelo sistema — o *ring*,
+que o `rcgen` usa, não gera chave RSA —, em `target/bancada-tls`, fora do
+repositório. A imagem tem as três raízes da bancada em
+`/dados/tls/bancada.pem`: a P-256 de antes, a RSA e a P-384.
+
+### Os casos
+
+No hospedeiro (`cargo test -p tls`), o cliente conversa com o servidor do
+`rustls` sobre o *ring*, e o que o perfil recusa é conferido contra o
+cliente do `rustls` sobre o *ring*, que aceita a mesma cadeia — a recusa é
+pelo algoritmo ou pela chave, e não por outro defeito dela. Na suíte, o
+programa [`cifrado`](../programas/src/bin/cifrado.rs) fecha as três cadeias
+e recusa as três falsas; o [`pausado`](../programas/src/bin/pausado.rs), que
+os casos da política, do firewall e da contenção interrompem no meio,
+conversa agora pela cadeia mista.
+
+| | o que se confere | onde |
+|---|---|---|
+| 1 | P-256 continua | `o_aperto_fecha_e_o_eco_volta` e os de antes; `bancada.duke` na suíte |
+| 2 | Ed25519 continua | `a_cadeia_ed25519_vale`, `ed25519_recusa_a_chave_de_ordem_pequena` |
+| 3 | P-384 | `a_cadeia_p384_vale`, `p384_confere_e_recusa_a_outra_mensagem_e_o_outro_hash`; `p384.duke` |
+| 4 | RSA | `cada_rsa_do_perfil_vale` (cada SHA-2, no PKCS#1 v1.5 e no PSS), `rsa_confere_cada_hash_e_cada_preenchimento`; `rsa.duke` |
+| 5 | cadeia com intermediário | `a_cadeia_mista_das_autoridades_publicas_vale` — e sem o intermediário ela não fecha; `misto.duke` |
+| 6 | cadeia inválida | `a_cadeia_quebrada_e_recusada`: o intermediário de outra raiz, uma folha no lugar de um intermediário |
+| 7 | assinatura inválida | `a_assinatura_que_nao_confere_nas_cadeias_novas_e_recusada`, `rsa_recusa_a_assinatura_de_outro_tamanho_ou_trocada`, `pss_recusa_o_sal_de_outro_tamanho`; `falso-p384.duke` e `falso-rsa.duke` |
+| 8 | vencido | `a_validade_nas_cadeias_novas` — a folha e o intermediário —; `vencido.duke` |
+| 9 | ainda não válido | `a_validade_nas_cadeias_novas`; `futuro.duke`, no `validade` |
+| 10 | nome errado | `o_nome_errado_nas_cadeias_novas_e_recusado`; `outro.duke` |
+| 11 | autoridade não confiável | `a_raiz_que_o_servidor_manda_nao_vira_ancora`; `estranho.duke` e `intruso.duke` |
+| 12 | algoritmo fora do perfil | `a_curva_com_o_hash_da_outra_e_recusada` (o *ring* aceita), `a_lista_do_perfil_e_exatamente_esta` |
+| 13 | chave pública inválida | `a_chave_publica_fora_do_perfil_e_recusada` (o RSA de 1024 bits, o expoente 3 — que o *ring* aceita —, o módulo fora da forma mínima, o ponto comprimido), `a_chave_rsa_so_se_le_no_perfil`, `rsa_recusa_a_chave_curta_e_o_expoente_pequeno` |
+| 14 | certificado malformado ou cortado | `o_certificado_torto_e_recusado` |
+| 15 | cadeia longa demais | `a_cadeia_longa_demais_e_recusada`: seis intermediários fecham, sete não |
+| 16 | a política, o firewall e a contenção no meio da sessão | `tls: a politica que tira o destino derruba a sessao`, `tls: o firewall barra a conexao nova com o codigo dele`, `tls: o processo isolado perde a sessao` — pela cadeia mista —; `a_recusa_do_transporte_vale_igual_nas_cadeias_novas` |
+| 17 | o `net.connect` como era | `tls: o programa cifrado conversa pelo gate`: dez nomes, dez decisões `ALLOW` iguais do mesmo destino; a porta ao lado, `DENY_RESOURCE` antes do TLS |
+| 18 | nenhum desvio pelo TLS | o mesmo caso, `tls: sem random.read nada sai`, `os_codigos_do_tls_nao_sao_do_gate`, e o `xtask invariantes` — nenhum verificador próprio, nenhum `dangerous()` |
+
+### O tamanho
+
+O P-384 e o RSA puseram uns 100 KB em cada programa com TLS — a maior
+parte, a aritmética do RSA —, e o `icp` e o `verificado` passaram do teto
+de leitura do kernel, 1 MiB (1 107 432 e 1 108 944 bytes no x86): o
+código não se lia, e os casos do IC caíam com "o arquivo nao cabe no teto
+de leitura". O teto ficou como está — ele protege o heap, por onde cada
+lançamento passa inteiro. Os programas perderam a tabela de símbolos
+(`strip = "symbols"` no perfil de release de `programas/`), que nada lia:
+o kernel carrega pelos cabeçalhos e pelo manifesto, `.note.duke`, que
+fica, e o `xtask simbolo` é do kernel. Ela era um sexto de cada programa:
+
+| programa | antes do ICP-4a | com o P-384 e o RSA | sem a tabela de símbolos |
+|---|---|---|---|
+| `icp`, x86 | 1 011 032 | 1 107 432 | 924 520 |
+| `icp`, ARM | 997 056 | 1 095 104 | 819 728 |
+| `cifrado`, x86 | 642 336 | 738 696 | 592 552 |
+| todos, x86 | 11,6 MB | 12,9 MB | 10,6 MB |
+| todos, ARM | 12,1 MB | 13,4 MB | 9,6 MB |
+
+O crescimento também achou um defeito da bancada: com os dados maiores, o
+`mkfs.btrfs --rootdir` aumentou o arquivo da raiz para 133 MiB, calado, e
+o `xtask` o copiou por cima do começo da partição seguinte — o caso do
+superbloco pegou, longe da causa. O `xtask` agora recusa a partição maior
+que o lugar dela. Com os programas menores, a raiz voltou a quatro
+pedaços de dados.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
 com elas, chaves de sessão e o domínio de delegação —; a custódia no TPM;
 o compartilhamento de chaves; exportar ou importar uma privada; a rede
 principal do IC; *cycles*; implantar canisters; o `icp-cli` dentro do
-Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no TCP, no TLS ou no
-HTTP: o ICP-1 e o ICP-3 rodam sobre a infraestrutura que já existia, e o
-gate decide as chaves como decide tudo.
+Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no TCP ou no HTTP: o
+ICP-1 e o ICP-3 rodam sobre a infraestrutura que já existia, e o gate
+decide as chaves como decide tudo. O TLS mudou uma vez, no ICP-4a — o
+perfil de assinaturas do programa, para as cadeias públicas —, e a rede
+principal continua desligada: as âncoras dela, os endereços dos *API
+boundary nodes* e a raiz do IC na imagem são o passo seguinte.

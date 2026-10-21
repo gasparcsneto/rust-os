@@ -491,7 +491,7 @@ tls/src/             o cliente TLS 1.3 dos programas: o rustls sem std, com um p
 ├── provedor.rs      as suítes, os grupos e as assinaturas que o cliente aceita — e nada mais
 ├── cifra.rs         AES-GCM e ChaCha20-Poly1305 sobre um registro
 ├── troca.rs         X25519 e P-256, que recusam o ponto que não contribui
-├── assinatura.rs    ECDSA P-256 e Ed25519 estrito, para o CertificateVerify e a cadeia
+├── assinatura.rs    ECDSA P-256 e P-384, Ed25519 estrito e RSA — o PKCS#1 v1.5 na cadeia, o PSS no CertificateVerify —, com o perfil da chave
 ├── resumo.rs        SHA-256, SHA-384 e o HMAC deles
 └── acaso.rs         o gerador da conexão, semeado por quem conecta, que falha fechado sem semente
 
@@ -651,8 +651,8 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
         ├── resolvedor.rs resolve nomes pelo DNS da bancada, e confere que a resposta não dá acesso: o gate decide o endereço
-        ├── cifrado.rs    conversa TLS com o eco da bancada: o nome provado, o segredo cifrado, e as recusas — do gate antes, do programa depois
-        ├── pausado.rs    uma sessão TLS que a suíte interrompe no meio: a política, o firewall e a contenção chegam com o código deles
+        ├── cifrado.rs    conversa TLS com o eco da bancada: o nome provado, o segredo cifrado, as cadeias P-384, RSA e mista, e as recusas — do gate antes, do programa depois
+        ├── pausado.rs    uma sessão TLS, pela cadeia mista, que a suíte interrompe no meio: a política, o firewall e a contenção chegam com o código deles
         ├── pagina.rs     busca páginas na bancada, claro e cifrado: cada página, cada falha com o código e a família dela, e as medidas
         ├── buscador.rs   uma conversa HTTP que a suíte interrompe no meio: a revogação, a contenção, o firewall e o fim chegam com o código deles
         ├── consulta.rs   uma visita curta à bancada, para várias correrem ao mesmo tempo com a autoridade de cada um
@@ -678,7 +678,7 @@ xtask/src/
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
-└── tls.rs           a bancada TLS: a PKI gerada a cada máquina, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
+└── tls.rs           a bancada TLS: a PKI gerada a cada máquina — as raízes P-256, RSA e P-384 e as cadeias com a forma das públicas —, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
 ```
 
 **Como as duas arquiteturas convivem.** Cada backend em `arch/` traduz o que
@@ -2491,7 +2491,8 @@ um anexo que não confere.
 O TLS 1.3 é do **programa**, como o DNS: o pacote [`tls`](tls/src/lib.rs)
 é o [`rustls`](https://github.com/rustls/rustls) sem `std`, com um provedor
 de cifra próprio sobre as implementações do RustCrypto e do dalek — AES-GCM
-e ChaCha20-Poly1305, X25519 e P-256, ECDSA P-256 e Ed25519 —, e
+e ChaCha20-Poly1305, X25519 e P-256, ECDSA P-256 e P-384, Ed25519 e a
+verificação RSA —, e
 [`programas::tls`](programas/src/tls.rs) dá a ele o que ele pede a quem o
 usa, cada coisa pelo gate:
 
@@ -2513,11 +2514,17 @@ usa, cada coisa pelo gate:
 
 ```
 cifrado: tcp:10.0.2.100:444 -> DENY_RESOURCE: o gate recusou antes do TLS
-cifrado: tcp:10.0.2.100:443 provou ser bancada.duke (TLS13_AES_256_GCM_SHA384, X25519) em 130 ms
-cifrado: o segredo e 12222 bytes foram e voltaram cifrados em 150 ms
+cifrado: tcp:10.0.2.100:443 provou ser bancada.duke (TLS13_AES_256_GCM_SHA384, X25519) em 150 ms
+cifrado: o segredo e 49086 bytes foram e voltaram cifrados em 260 ms
+cifrado: tcp:10.0.2.100:443 provou ser p384.duke (TLS13_AES_256_GCM_SHA384, X25519) em 170 ms
+cifrado: tcp:10.0.2.100:443 provou ser rsa.duke (TLS13_AES_256_GCM_SHA384, X25519) em 110 ms
+cifrado: tcp:10.0.2.100:443 provou ser misto.duke (TLS13_AES_256_GCM_SHA384, X25519) em 100 ms
 cifrado: outro.duke -> TLS_NAME_MISMATCH: o programa recusou
 cifrado: estranho.duke -> TLS_UNTRUSTED: o programa recusou
 cifrado: vencido.duke -> TLS_EXPIRED: o programa recusou
+cifrado: intruso.duke -> TLS_UNTRUSTED: o programa recusou
+cifrado: falso-p384.duke -> TLS_UNTRUSTED: o programa recusou
+cifrado: falso-rsa.duke -> TLS_UNTRUSTED: o programa recusou
 cifrado: tcp:10.0.2.100:7 nao fala TLS: TLS_HANDSHAKE_FAILED
 ```
 
@@ -2525,7 +2532,8 @@ cifrado: tcp:10.0.2.100:7 nao fala TLS: TLS_HANDSHAKE_FAILED
 do primeiro byte do TLS — fora do alcance, a recusa é do gate, e o
 `ClientHello` nem é montado —, e o nome que o programa quer provar não é
 recurso da política: o mesmo `tcp:10.0.2.100:443`, decidido `ALLOW` pela
-política, serve um nome que o programa aceita e três que ele recusa. A
+política, serve quatro nomes que o programa aceita — de cadeias P-256,
+P-384, RSA e mista — e seis que ele recusa. A
 sessão cifrada não autoriza o que vem depois do aperto: a política que
 tira o destino, o processo isolado e a regra do firewall valem no envio
 seguinte, no meio dela.
@@ -2542,8 +2550,13 @@ quebrou: o registro que não saiu já gastou o número dele, e o seguinte
 sairia com o número errado.
 
 **O perfil é estreito, de propósito.** Só TLS 1.3; três suítes; dois
-grupos; duas assinaturas; sem retomada de sessão, sem 0-RTT, sem
-certificado de cliente; e nenhum atalho na verificação: o `xtask` confere
+grupos; as assinaturas que as cadeias das autoridades públicas usam —
+ECDSA P-256 e P-384, cada uma só com o hash dela, Ed25519, e RSA de 2048 a
+4096 bits, o PKCS#1 v1.5 na cadeia e o PSS no aperto —, e nenhuma outra:
+nem SHA-1, nem P-521, nem a curva com o hash da outra, nem o certificado
+assinado com PSS (ver [O TLS público](docs/ICP.md#o-tls-público-icp-4a));
+sem retomada de sessão, sem 0-RTT, sem certificado de cliente; e nenhum
+atalho na verificação: o `xtask` confere
 que nenhum código chama a API `dangerous()` do `rustls` nem escreve um
 verificador próprio, e que o kernel não depende do pacote `tls`.
 
@@ -2555,13 +2568,21 @@ qualquer outro nome, que leva o mesmo certificado), `estranho.duke`, de
 outra raiz, `vencido.duke`, vencido em 2021, e `futuro.duke`, que só vale
 de 2042 a 2044 — ainda não válido em nenhuma hora que a bancada de tempo
 põe, nem no RTC de 2041: é o que mostra que a validade confere o começo
-do certificado, e não só o fim. A PKI é gerada a cada
-máquina em `target/bancada-tls`, fora do repositório; a chave da raiz nem
-chega ao disco, e o que vai para a imagem é só o certificado dela, em
-`/dados/tls/bancada.pem`. No hospedeiro, o pacote `tls` conversa nos
-testes com o servidor do próprio `rustls` sobre o *ring* — outro provedor
-de cifra —, com raízes forjadas com o mesmo nome, assinaturas trocadas,
-registros adulterados e transportes que recusam no meio.
+do certificado, e não só o fim. E as cadeias com a forma das públicas,
+com um intermediário entre a folha e a raiz: `p384.duke`, `rsa.duke` e
+`misto.duke` — a raiz RSA, o intermediário P-384 e a folha P-256, a forma
+da cadeia ECDSA da Let's Encrypt pela raiz X1 —, `intruso.duke`, que
+manda junto a raiz que o programa não tem, e `falso-p384.duke` e
+`falso-rsa.duke`, com a assinatura da folha estragada. A PKI é gerada a
+cada máquina em `target/bancada-tls`, fora do repositório; as chaves das
+raízes e dos intermediários nem chegam ao disco, e o que vai para a imagem
+são só os certificados das três raízes da bancada — a P-256, a RSA de 4096
+bits e a P-384 —, em `/dados/tls/bancada.pem`. No hospedeiro, o pacote
+`tls` conversa nos testes com o servidor do próprio `rustls` sobre o *ring*
+— outro provedor de cifra —, com raízes forjadas com o mesmo nome,
+assinaturas trocadas, registros adulterados e transportes que recusam no
+meio; e confere contra o cliente do `rustls` sobre o *ring* que uma cadeia
+recusada aqui pelo perfil é recusada só pelo algoritmo ou pela chave.
 
 #### O que o exercício encontrou
 

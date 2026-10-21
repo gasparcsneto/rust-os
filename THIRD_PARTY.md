@@ -87,7 +87,8 @@ só TLS 1.3, a cifra é uma implementação genérica para as três suítes, o
 acaso é o gerador semeado por quem conecta — que falha fechado sem semente
 —, a troca X25519 recusa o ponto que não contribui (o exemplo aceita) e há
 também P-256, e a verificação de assinatura é própria: ECDSA P-256 e
-Ed25519 estrito, e nada além.
+P-384, Ed25519 estrito e RSA — o perfil das cadeias das autoridades
+públicas, com a chave conferida —, e nada além.
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
