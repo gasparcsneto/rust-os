@@ -359,7 +359,7 @@ fn chamar(
         let nonce = icp::nonce()?;
         let gateway = gateway.insert(icp::conectar(rede, ancoras, DNS)?);
         let mut narrado = Narrado { gateway, passo };
-        let a = icp::chamar(
+        let mut a = icp::chamar(
             &mut narrado,
             rede,
             kernel.as_mut(),
@@ -377,7 +377,7 @@ fn chamar(
             narrado.gateway.esperar(icp::ESPERA_ENTRE_LEITURAS_MS)?;
             let hora = icp::hora()?;
             leituras += 1;
-            andamento = icp::acompanhar(&mut narrado, rede, kernel.as_mut(), &a, &hora)?;
+            andamento = icp::acompanhar(&mut narrado, rede, kernel.as_mut(), &mut a, &hora)?;
         }
         Ok((a, andamento))
     })();

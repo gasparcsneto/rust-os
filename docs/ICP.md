@@ -434,14 +434,15 @@ e [`programas::icp`](../programas/src/icp.rs) —, a lógica do *update* do
    certificado do desfecho, ou a recusa que não passou pelo consenso;
    HTTP 202, nada ainda;
 3. **a situação**, enquanto pendente: o `read_state` de
-   `["request_status", <id>]`, **assinado de novo a cada leitura** — outra
-   decisão do gate —, até vinte vezes, com uma espera de 500 ms entre
-   elas que também é do gate: um `net.recv` da própria conexão que não lê
-   nada. `received` e `processing` continuam esperando; `replied`,
-   `rejected` e `done` acabam. A leitura não tem nonce — como a do
-   `ic-agent`, que nem tem o campo — e a validade dela conta em
-   segundos: duas leituras no mesmo segundo são o mesmo pedido, e cada
-   uma é assinada de novo, pela decisão dela.
+   `["request_status", <id>]`, **cada leitura outro pedido, assinado de
+   novo** — outra decisão do gate —, até vinte vezes, com uma espera de
+   500 ms entre elas que também é do gate: um `net.recv` da própria
+   conexão que não lê nada. `received` e `processing` continuam
+   esperando; `replied`, `rejected` e `done` acabam. A leitura vai sem
+   nonce — como a do `ic-agent`, que nem tem o campo —, e a hora do
+   programa conta em segundos; por isso a validade de cada leitura vai
+   além da da anterior, um nanossegundo se a hora não andou, e duas
+   leituras no mesmo segundo são dois pedidos, e duas assinaturas.
 
 Cada certificado — o do corpo da chamada e o de cada leitura — é
 conferido na sub-rede que o primeiro passo provou, e só então a situação

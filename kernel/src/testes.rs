@@ -49999,10 +49999,10 @@ fn icp_cada_chave_e_um_principal() -> Resultado {
 
 /// A chamada que fica pendente: a rede `assincrona` responde 202 na hora e
 /// só entrega a chamada à PocketIC depois. O `icp` acompanha a situação por
-/// `read_state` de `request_status`, cada leitura **assinada de novo** — uma
-/// decisão do gate por assinatura —, com uma espera decidida pelo gate
-/// entre elas, até o certificado provar a resposta. Do anônimo, as mesmas
-/// leituras, sem assinatura nenhuma.
+/// `read_state` de `request_status`, cada leitura outro pedido, **assinado
+/// de novo** — uma decisão do gate por assinatura —, com uma espera
+/// decidida pelo gate entre elas, até o certificado provar a resposta. Do
+/// anônimo, as mesmas leituras, sem assinatura nenhuma.
 fn icp_a_chamada_pendente_e_acompanhada() -> Resultado {
     use crate::autorizacao::{Autoridade, Chamador};
     use crate::pessoas::Console;
@@ -50048,21 +50048,20 @@ fn icp_a_chamada_pendente_e_acompanhada() -> Resultado {
                     politica::auditoria::Titular::Pessoa,
                 )?);
             }
-            // Uma decisão por assinatura, e a da chamada é de outro pedido
-            // que o de qualquer leitura. Duas leituras no mesmo segundo são
-            // o mesmo pedido — a validade conta em segundos e a leitura não
-            // tem nonce, como no `ic-agent`, que a arredonda ao minuto —, e
-            // cada uma é assinada de novo: o resumo se repete; a decisão e
-            // a assinatura, não (CI 297, no x86 em release).
+            // Uma decisão por assinatura, e cada assinatura de outro pedido:
+            // a chamada, e cada leitura. A leitura vai sem nonce, e a
+            // validade conta em segundos; a de cada leitura vai além da da
+            // anterior, e duas leituras no mesmo segundo são dois pedidos
+            // (CI 297, no x86 em release: eram o mesmo).
             let distintas: alloc::collections::BTreeSet<u64> = decisoes.iter().copied().collect();
             if distintas.len() != decisoes.len() {
                 return Err("duas assinaturas do acompanhamento sairam da mesma decisao");
             }
-            if feitas[1..]
-                .iter()
-                .any(|(_, e)| e.recurso == feitas[0].1.recurso)
-            {
-                return Err("uma leitura da situacao assinou o pedido da chamada");
+            let resumos: alloc::collections::BTreeSet<&str> =
+                feitas.iter().map(|(_, e)| e.recurso.as_str()).collect();
+            if resumos.len() != feitas.len() {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("duas assinaturas do acompanhamento assinaram o mesmo pedido");
             }
             declaracao_da_chamada(fio, &p, CANISTER_DA_BANCADA, "quem", Some(decisoes[0]))?;
             // A espera entre as leituras é do gate, como qualquer leitura.

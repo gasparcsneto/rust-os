@@ -551,7 +551,7 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── agente.rs     a consulta ponta a ponta sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
     │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro
-    ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura assinada de novo — nada se entrega antes da verificação
+    ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura outro pedido, assinado de novo — nada se entrega antes da verificação
     ├── atualizacao/
     │   └── testes.rs  contra um IC de mentira: o envelope e o id pelo `ic-transport-types`, a assinatura pelo `ic-ed25519`, e as recusas
     ├── situacao.rs   o `request_status` de um certificado: recebida, processando, respondida, recusada, acabada
@@ -6498,9 +6498,10 @@ pessoa / agente ─► identidade ─► sessão ─► processo ─► manifest
   — só `ic-request` —, e não sabe o que ele resume.
 - **O programa faz o resto**: a pública vira o Principal, o resumo é o id
   do pedido, a chamada vai por `/api/v4`, a pendente é acompanhada por
-  `request_status`, cada leitura assinada de novo, e cada certificado é
-  verificado pela mesma verificação do ICP-1. A declaração do desfecho
-  vai ancorada na decisão da assinatura, e o NSF a lê como alegação.
+  `request_status`, cada leitura outro pedido, assinado de novo, e cada
+  certificado é verificado pela mesma verificação do ICP-1. A declaração
+  do desfecho vai ancorada na decisão da assinatura, e o NSF a lê como
+  alegação.
 - **A lápide é para sempre.** A destruição, a anulação e a revogação do
   dono gravam a lápide no journal; o nome não volta, nem para o dono
   registrado de novo, e uma fotografia velha do disco é recusada. A

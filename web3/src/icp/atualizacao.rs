@@ -186,6 +186,9 @@ pub struct Atualizacao {
     pub faixas: Autoridade,
     /// Até onde ela chegou.
     pub andamento: Andamento,
+    /// A validade da última leitura da situação: a seguinte vai além dela
+    /// — ver [`acompanhar`].
+    validade_da_ultima_leitura_ns: u64,
 }
 
 /// O certificado de uma resposta de `read_state`.
@@ -335,6 +338,7 @@ pub fn chamar<T: Transporte, A: Assinador>(
         remetente,
         faixas,
         andamento,
+        validade_da_ultima_leitura_ns: 0,
     })
 }
 
@@ -353,23 +357,34 @@ fn caminho_v4(canister: &Principal) -> String {
 /// situação —, ou do anônimo, e o certificado conferido na sub-rede das
 /// faixas da chamada. Quem chama decide quantas vezes, e quanto espera
 /// entre elas.
+///
+/// Cada leitura é outro pedido, assinado de novo: a leitura vai sem nonce,
+/// como a do `ic-agent` — o `ic-transport-types` nem tem o campo —, e a
+/// validade dela vai além da da leitura anterior, um nanossegundo se a hora
+/// não andou. Sem isso, duas leituras na mesma hora de quem chama — que o
+/// Duke dá em segundos — seriam o mesmo pedido, e a mesma assinatura.
 pub fn acompanhar<T: Transporte, A: Assinador>(
     t: &mut T,
     assinador: Option<&mut A>,
     raiz: &Raiz,
-    chamada: &Atualizacao,
+    chamada: &mut Atualizacao,
     agora_ns: u64,
 ) -> Result<Andamento, Erro<T::Erro, A::Erro>> {
+    let remetente = remetente(&assinador);
+    if remetente != chamada.remetente {
+        return Err(Erro::Pedido(pedido::Erro::RemetenteNaoEDaChave));
+    }
+    let vencimento_ns = agora_ns
+        .saturating_add(VALIDADE_DO_PEDIDO_NS)
+        .max(chamada.validade_da_ultima_leitura_ns.saturating_add(1));
+    chamada.validade_da_ultima_leitura_ns = vencimento_ns;
     let id = &chamada.id_do_pedido;
     let caminhos: [&[&[u8]]; 1] = [&[b"request_status", id]];
     let leitura = LeituraDeEstado {
         caminhos: &caminhos,
-        remetente: remetente(&assinador),
-        vencimento_ns: agora_ns.saturating_add(VALIDADE_DO_PEDIDO_NS),
+        remetente,
+        vencimento_ns,
     };
-    if leitura.remetente != chamada.remetente {
-        return Err(Erro::Pedido(pedido::Erro::RemetenteNaoEDaChave));
-    }
     let id_da_leitura = leitura.id().map_err(Erro::Pedido)?;
     let assinado =
         autenticar(assinador, &id_da_leitura).map_err(|e| Erro::Assinatura(Etapa::Situacao, e))?;

@@ -581,14 +581,14 @@ pub fn chamar<T: agente::Transporte<Erro = Transporte>>(
     .map_err(Falha::Chamada)
 }
 
-/// Lê a situação de uma chamada pendente, uma vez: assinada de novo pela
-/// mesma `chave` — ou do anônimo —, com a hora `agora` — ver
+/// Lê a situação de uma chamada pendente, uma vez: outro pedido, assinado
+/// de novo pela mesma `chave` — ou do anônimo —, com a hora `agora` — ver
 /// [`atualizacao::acompanhar`].
 pub fn acompanhar<T: agente::Transporte<Erro = Transporte>>(
     transporte: &mut T,
     rede: &Rede,
     chave: Option<&mut ChaveDoKernel>,
-    chamada: &Atualizacao,
+    chamada: &mut Atualizacao,
     agora: &Hora,
 ) -> Result<Andamento, Falha> {
     let agora_ns = agora.validade_s().saturating_mul(1_000_000_000);

@@ -304,14 +304,14 @@ fn a_202_acompanhada_ate_a_resposta() {
         respondida(b"DIDL\x00\x01\x71\x02ok"),
     ]);
     let mut chave = ChaveDeTeste::nova(6);
-    let a = chamar_com(&mut ic, Some(&mut chave)).unwrap();
+    let mut a = chamar_com(&mut ic, Some(&mut chave)).unwrap();
     assert_eq!(a.andamento, Andamento::Pendente("accepted"));
     let raiz = ic.ic.raiz_de_confianca();
     let mut vistos = Vec::new();
     let mut agora = AGORA_NS;
     let fim = loop {
         agora += 500_000_000;
-        match acompanhar(&mut ic, Some(&mut chave), &raiz, &a, agora).unwrap() {
+        match acompanhar(&mut ic, Some(&mut chave), &raiz, &mut a, agora).unwrap() {
             Andamento::Pendente(s) => vistos.push(s),
             outro => break outro,
         }
@@ -326,6 +326,34 @@ fn a_202_acompanhada_ate_a_resposta() {
     assert_eq!(chave.assinou, 5);
     let leituras: Vec<[u8; 32]> = ic.pedidos[2..].iter().map(|p| p.2).collect();
     assert_eq!(leituras.len(), 4);
+    for (i, a) in leituras.iter().enumerate() {
+        assert!(leituras[i + 1..].iter().all(|b| b != a));
+    }
+}
+
+/// Duas leituras na mesma hora de quem chama — o Duke a dá em segundos, e
+/// a espera entre elas é de meio — são dois pedidos: a validade da segunda
+/// vai além da da primeira, e o id muda com ela. Cada uma assinada de novo.
+#[test]
+fn leituras_na_mesma_hora_sao_pedidos_diferentes() {
+    let mut ic = IcDeChamadas::novo(Responde::Aceita);
+    ic.situacoes.extend([
+        status("received"),
+        status("processing"),
+        status("processing"),
+    ]);
+    let mut chave = ChaveDeTeste::nova(6);
+    let mut a = chamar_com(&mut ic, Some(&mut chave)).unwrap();
+    let raiz = ic.ic.raiz_de_confianca();
+    for _ in 0..3 {
+        assert!(matches!(
+            acompanhar(&mut ic, Some(&mut chave), &raiz, &mut a, AGORA_NS).unwrap(),
+            Andamento::Pendente(_)
+        ));
+    }
+    assert_eq!(chave.assinou, 4);
+    let leituras: Vec<[u8; 32]> = ic.pedidos[2..].iter().map(|p| p.2).collect();
+    assert_eq!(leituras.len(), 3);
     for (i, a) in leituras.iter().enumerate() {
         assert!(leituras[i + 1..].iter().all(|b| b != a));
     }
@@ -391,10 +419,10 @@ fn o_canister_da_raiz_pela_leitura_das_faixas() {
     // E a leitura da situação, também da raiz.
     let mut ic = IcDeChamadas::novo(Responde::Aceita).na_raiz();
     ic.situacoes.push_back(respondida(b"DIDL\x00\x00"));
-    let a = chamar_com(&mut ic, Some(&mut chave)).unwrap();
+    let mut a = chamar_com(&mut ic, Some(&mut chave)).unwrap();
     let raiz = ic.ic.raiz_de_confianca();
     assert!(matches!(
-        acompanhar(&mut ic, Some(&mut chave), &raiz, &a, AGORA_NS).unwrap(),
+        acompanhar(&mut ic, Some(&mut chave), &raiz, &mut a, AGORA_NS).unwrap(),
         Andamento::Certificado { .. }
     ));
 }
@@ -448,20 +476,20 @@ fn http_e_outro_remetente() {
     );
     assert!(e.to_string().is_ascii());
     let mut ic = IcDeChamadas::novo(Responde::Aceita);
-    let a = chamar_com(&mut ic, Some(&mut ChaveDeTeste::nova(12))).unwrap();
+    let mut a = chamar_com(&mut ic, Some(&mut ChaveDeTeste::nova(12))).unwrap();
     let raiz = ic.ic.raiz_de_confianca();
     assert_eq!(
         acompanhar(
             &mut ic,
             Some(&mut ChaveDeTeste::nova(13)),
             &raiz,
-            &a,
+            &mut a,
             AGORA_NS
         ),
         Err(Erro::Pedido(pedido::Erro::RemetenteNaoEDaChave))
     );
     assert_eq!(
-        acompanhar(&mut ic, None::<&mut ChaveDeTeste>, &raiz, &a, AGORA_NS),
+        acompanhar(&mut ic, None::<&mut ChaveDeTeste>, &raiz, &mut a, AGORA_NS),
         Err(Erro::Pedido(pedido::Erro::RemetenteNaoEDaChave))
     );
 }
