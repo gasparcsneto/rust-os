@@ -438,7 +438,10 @@ e [`programas::icp`](../programas/src/icp.rs) —, a lógica do *update* do
    decisão do gate —, até vinte vezes, com uma espera de 500 ms entre
    elas que também é do gate: um `net.recv` da própria conexão que não lê
    nada. `received` e `processing` continuam esperando; `replied`,
-   `rejected` e `done` acabam.
+   `rejected` e `done` acabam. A leitura não tem nonce — como a do
+   `ic-agent`, que nem tem o campo — e a validade dela conta em
+   segundos: duas leituras no mesmo segundo são o mesmo pedido, e cada
+   uma é assinada de novo, pela decisão dela.
 
 Cada certificado — o do corpo da chamada e o de cada leitura — é
 conferido na sub-rede que o primeiro passo provou, e só então a situação
