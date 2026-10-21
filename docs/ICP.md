@@ -699,9 +699,10 @@ Forum permite e nenhuma das cadeias públicas encontradas usa), e o RSA
 acima de 4096 bits. Um servidor com um deles é recusado no aperto com
 `TLS_UNTRUSTED`, e não aceito com menos verificação.
 
-**O que não mudou.** O kernel, a política, o gate, as permissões, as
-identidades, o NSF e o `net.connect` — nenhuma linha deles: os casos da
-suíte que mudaram só contam as conexões novas do programa. O TLS continua
+**O que não mudou.** O código do kernel, a política, o gate, as
+permissões, as identidades, o NSF e o `net.connect` — nenhuma linha
+deles: os casos da suíte que mudaram contam as conexões novas do
+programa e os pedaços do disco, que ficou menor (ver *O tamanho*). O TLS continua
 no programa, e o resto da verificação é o de antes, do `webpki`: a cadeia
 até uma âncora dada, a validade de cada certificado — da folha e de cada
 intermediário — pela hora de quem conecta, o nome, o uso `serverAuth`, o
@@ -788,6 +789,72 @@ o `xtask` o copiou por cima do começo da partição seguinte — o caso do
 superbloco pegou, longe da causa. O `xtask` agora recusa a partição maior
 que o lugar dela. Com os programas menores, a raiz voltou a quatro
 pedaços de dados.
+
+### As medidas
+
+O aperto de cada cadeia, como o `cifrado` o diz — do `net.connect` ao
+servidor provado, com a régua de 10 ms do `system.uptime` —, numa
+rodada de cada:
+
+| cadeia | x86, suíte | x86, fumaça | ARM, fumaça |
+|---|---|---|---|
+| `bancada.duke` — P-256 | 150 ms | 170 ms | 120 ms |
+| `p384.duke` — P-384 na cadeia e no aperto | 170 ms | 130 ms | 120 ms |
+| `rsa.duke` — RSA de 4096 e de 2048, o PSS no aperto | 110 ms | 130 ms | 100 ms |
+| `misto.duke` — RSA, P-384 e P-256 | 100 ms | 120 ms | 100 ms |
+| o `cifrado` inteiro — doze conexões, quatro conversas | 3,6 s | 5,9 s | 4,7 s |
+
+As cadeias novas custam o que a P-256 custa: o RSA verifica com o
+expoente 65537 — dezessete multiplicações —, e a P-384 é uma conta por
+elo. O que domina o aperto é o resto dele, igual nas quatro. Os três
+`cifrado` ao mesmo tempo da suíte levam uns 12 s no x86, de um teto de
+60.
+
+### As mutações
+
+Uma de cada vez, com o que a pega: os testes do pacote `tls` no
+hospedeiro (`cargo test -p tls`), e a suíte do x86 só com os casos `tls:`
+quando a mutação chega ao programa ou ao kernel. As sete pedidas — em
+onze formas, as onze primeiras da tabela — e dez do perfil novo: vinte e
+uma, todas reprovadas.
+
+| mutação | onde | no hospedeiro | na suíte |
+|---|---|---|---|
+| **o nome não é conferido** | `sessao.rs`: um verificador que engole `NotValidForName` | `o_nome_errado_e_recusado`, `o_nome_errado_nas_cadeias_novas_e_recusado` | `outro.duke` aceito |
+| **a autoridade desconhecida é aceita** | `sessao.rs`: engole `UnknownIssuer` | `a_raiz_desconhecida_e_recusada`, `a_raiz_que_o_servidor_manda_nao_vira_ancora`, `a_cadeia_quebrada_e_recusada`, `a_cadeia_mista_das_autoridades_publicas_vale` (sem o intermediário) | `estranho.duke` aceito |
+| **o vencido é aceito** | `sessao.rs`: engole `Expired` | `a_validade_nas_cadeias_novas`, `o_vencido_e_o_que_ainda_nao_vale_sao_recusados`, `o_relogio_de_quem_conecta_decide_a_validade` | `vencido.duke` aceito, e o caso da validade pela hora autenticada |
+| **a assinatura P-384 não é conferida** | `assinatura.rs` | `p384_confere_e_recusa_a_outra_mensagem_e_o_outro_hash`, `a_assinatura_que_nao_confere_nas_cadeias_novas_e_recusada` | `falso-p384.duke` aceito |
+| **a assinatura RSA PKCS#1 v1.5 não é conferida** | `assinatura.rs` | `rsa_confere_cada_hash_e_cada_preenchimento`, `rsa_recusa_a_assinatura_de_outro_tamanho_ou_trocada`, `a_assinatura_que_nao_confere_nas_cadeias_novas_e_recusada` | `falso-rsa.duke` aceito |
+| **a assinatura RSA-PSS não é conferida** | `assinatura.rs` | `pss_recusa_o_sal_de_outro_tamanho`, `rsa_confere_cada_hash_e_cada_preenchimento`, `a_assinatura_que_nao_confere_nas_cadeias_novas_e_recusada` | — |
+| **a curva com o hash da outra é aceita** — a P-384 com o SHA-256 na cadeia | `assinatura.rs`: mais um algoritmo na lista | `a_curva_com_o_hash_da_outra_e_recusada`, `a_lista_do_perfil_e_exatamente_esta` | — |
+| **o gate deixa o `net.connect` fora do alcance** | kernel, `autorizacao.rs` | — | a porta ao lado, que nenhum papel alcança, foi conectada — `NETWORK_TIMEOUT`, e não `DENY_RESOURCE` —; e, tirado o destino da política no meio da sessão, o `pausado` mandou |
+| **a recusa do gate no meio da sessão é engolida pelo TLS** | `sessao.rs` | `a_recusa_do_transporte_passa_adiante_sem_traducao`, `a_recusa_do_transporte_vale_igual_nas_cadeias_novas`, `a_sessao_que_falhou_nao_volta` | — |
+| **a recusa do TLS vira sessão aceita** | `sessao.rs` | vinte casos: toda recusa da conversa | `outro.duke` aceito, e o caso da validade |
+| **`TLS_UNTRUSTED` vira `ALLOW`** | `falha.rs` | `os_codigos_do_tls_nao_sao_do_gate` | na fumaça: "o cifrado nao disse `estranho.duke -> TLS_UNTRUSTED`" |
+| o PSS também na cadeia | `assinatura.rs` | `a_lista_do_perfil_e_exatamente_esta` | — |
+| o módulo RSA de 1024 bits | `assinatura.rs` | `a_chave_rsa_so_se_le_no_perfil`, `rsa_recusa_a_chave_curta_e_o_expoente_pequeno`, `a_chave_publica_fora_do_perfil_e_recusada` | — |
+| o módulo RSA de 8192 bits | `assinatura.rs` | `a_chave_rsa_so_se_le_no_perfil` | — |
+| o módulo fora do múltiplo de 8 | `assinatura.rs` | `a_chave_rsa_so_se_le_no_perfil` | — |
+| o expoente 3 | `assinatura.rs` | `a_chave_rsa_so_se_le_no_perfil`, `rsa_recusa_a_chave_curta_e_o_expoente_pequeno`, `a_chave_publica_fora_do_perfil_e_recusada` | — |
+| a assinatura RSA de outro tamanho | `assinatura.rs` | `rsa_recusa_a_assinatura_de_outro_tamanho_ou_trocada` | — |
+| o PSS com qualquer sal | `assinatura.rs` | `pss_recusa_o_sal_de_outro_tamanho` | — |
+| o ponto ECDSA comprimido | `assinatura.rs` | `ecdsa_recusa_o_ponto_comprimido_e_o_fora_da_curva`, `a_chave_publica_fora_do_perfil_e_recusada` | — |
+| o DER da chave RSA com sobra | `assinatura.rs` | `a_chave_rsa_so_se_le_no_perfil` | — |
+| o SHA-384 do PKCS#1 conferido como SHA-256 | `assinatura.rs` | `rsa_confere_cada_hash_e_cada_preenchimento`, `cada_rsa_do_perfil_vale` | — |
+
+As três primeiras são o atalho que o `xtask invariantes` procura — um
+verificador próprio, pela API `dangerous()` do `rustls` —, e ele as recusa
+antes de qualquer teste, nas três linhas: "um atalho na verificação do
+TLS". Os testes as pegam também: sem a conferência estática, o nome, a
+autoridade e a validade continuam conferidos por casos que reprovam.
+
+As que não chegam à suíte não chegam de propósito. O OpenSSL da bancada
+não assina o aperto com uma chave que não é a do certificado — ele confere
+o par ao carregar —, e a bancada só serve cadeias do perfil e as recusadas
+pela confiança, pelo nome, pela validade e pela assinatura da cadeia; a do
+TLS que engole a recusa do gate no meio da sessão é vista pelo `pausado`
+na leitura seguinte, que o gate também recusa. Todas morrem no
+hospedeiro, onde o servidor e as cadeias são feitos sob medida.
 
 ## O que não existe ainda
 

@@ -6260,8 +6260,10 @@ consulta anônima (*query*) a um canister — o ICP-1 —, e a chamada de
 atualização (*update*), do anônimo ou assinada pela chave de uma
 identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada)
 —, com a resposta **verificada** contra a raiz da rede antes de ser
-entregue. O desenho inteiro, as tabelas e o que fica de fora estão em
-[`docs/ICP.md`](docs/ICP.md).
+entregue. O ICP-4a deu ao TLS do programa as cadeias das autoridades
+públicas — a P-384 e o RSA, só na verificação —, que a rede principal usa,
+e mais nada: ela continua desligada. O desenho inteiro, as tabelas e o que
+fica de fora estão em [`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
@@ -8991,7 +8993,10 @@ padronizado.
       mente (ver [O Internet Computer](#o-internet-computer)); e o ICP-3 —
       as chaves de assinatura das identidades pelo gate, no journal com
       lápide, e a chamada de atualização assinada e verificada, do
-      anônimo também (ver [A chamada assinada](#a-chamada-assinada)). As
+      anônimo também (ver [A chamada assinada](#a-chamada-assinada)); e o
+      ICP-4a — o TLS do programa confere as cadeias das autoridades
+      públicas, P-384 e RSA, com a cadeia, o nome e a validade tão estritos
+      quanto antes (ver [`docs/ICP.md`](docs/ICP.md)). A rede principal, as
       delegações, a custódia no TPM, os *cycles* e o resto ficam para os
       incrementos seguintes — cada um, uma decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
