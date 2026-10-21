@@ -16,3 +16,16 @@ members = ["ancora", "aparencia", "armazem", "diario", "hora", "http", "politica
 # por caminho. Ser membro é o que põe o `cargo fmt`, o `cargo clippy` e os
 # testes da raiz em cima delas.
 exclude = ["kernel", "iniciador"]
+
+# A aritmética do RSA otimizada mesmo no build de depuração: os testes do
+# `tls` e a bancada TLS do `xtask` geram chaves RSA, e gerar uma de 4096
+# bits sem otimização leva minutos. Só no hospedeiro — os programas do Duke
+# são do workspace deles, e compilam sempre em release.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.crypto-primes]
+opt-level = 3

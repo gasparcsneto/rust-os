@@ -42,8 +42,11 @@
 //!
 //! TLS 1.3, e só. Suítes: AES-128-GCM, AES-256-GCM e ChaCha20-Poly1305.
 //! Troca de chaves: X25519 e P-256. Assinaturas — do servidor e da cadeia
-//! —: ECDSA P-256 com SHA-256, e Ed25519. Sem RSA, sem P-384, sem
-//! retomada de sessão, sem dados antecipados, sem certificado de cliente.
+//! —: ECDSA P-256 com SHA-256, ECDSA P-384 com SHA-384, Ed25519, e RSA de
+//! 2048 a 4096 bits — o PKCS#1 v1.5 na cadeia, o PSS no aperto, com
+//! SHA-256, SHA-384 ou SHA-512: o que as cadeias das autoridades públicas
+//! usam, e nada além (ver `src/assinatura.rs`). Sem retomada de sessão,
+//! sem dados antecipados, sem certificado de cliente.
 //! Um servidor fora do perfil é recusado no aperto, com o motivo — nunca
 //! aceito com menos verificação. E não há, neste pacote, caminho que pule a
 //! verificação: a configuração é montada aqui, com o verificador do

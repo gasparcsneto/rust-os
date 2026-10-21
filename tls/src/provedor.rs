@@ -5,7 +5,8 @@
 //! |---|---|
 //! | suítes | `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`, `TLS13_CHACHA20_POLY1305_SHA256` |
 //! | troca de chaves | X25519, `secp256r1` |
-//! | assinaturas | `ecdsa_secp256r1_sha256`, `ed25519` |
+//! | assinaturas no aperto | `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384`, `ed25519`, `rsa_pss_rsae_sha256`, `rsa_pss_rsae_sha384`, `rsa_pss_rsae_sha512` |
+//! | assinaturas na cadeia | ECDSA P-256 com SHA-256, ECDSA P-384 com SHA-384, Ed25519, RSA PKCS#1 v1.5 com SHA-256, SHA-384 ou SHA-512 |
 //! | aleatório | o gerador semeado por quem conecta |
 //! | chaves privadas | nenhuma: o cliente não se autentica por certificado |
 //!

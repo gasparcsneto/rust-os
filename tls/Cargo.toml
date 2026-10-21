@@ -23,17 +23,30 @@ license = "MIT OR Apache-2.0"
 rustls = { version = "0.23.45", default-features = false }
 # O gerador: o mesmo ChaCha20 com apagamento rápido da chave do kernel.
 sigilo = { path = "../sigilo" }
-# As primitivas, as mesmas versões do resto do projeto.
-sha2 = { version = "0.11.0", default-features = false }
+# As primitivas, as mesmas versões do resto do projeto. O `oid` dá a cada
+# SHA-2 o identificador que o PKCS#1 v1.5 põe dentro da assinatura RSA.
+sha2 = { version = "0.11.0", default-features = false, features = ["oid"] }
 hmac = { version = "0.13.0", default-features = false }
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 ed25519-dalek = { version = "3.0.0", default-features = false }
 p256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdh", "ecdsa"] }
+# A P-384 só verifica: é a curva das raízes e dos intermediários ECDSA das
+# autoridades públicas.
+p384 = { version = "0.14.0", default-features = false, features = ["ecdsa"] }
 # Só para ligar a leitura da assinatura ECDSA em DER, que é como ela vem no
 # certificado e no `CertificateVerify`.
 ecdsa = { version = "0.17.0", default-features = false, features = ["der"] }
+# O RSA também só verifica: o das cadeias das autoridades públicas e o do
+# `CertificateVerify` de uma folha RSA. Sem chave privada, sem cifra, sem
+# geração de chave. A versão é candidata, e fixa: a linha estável (0.9)
+# está nas versões antigas do `digest` e do `signature`, e a candidata está
+# nas mesmas do resto do projeto.
+rsa = { version = "=0.10.0-rc.19", default-features = false }
+# A leitura, em DER estrito, da chave pública RSA do certificado. A mesma
+# versão que o `ecdsa` já traz.
+der = { version = "0.8.2", default-features = false }
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
@@ -43,3 +56,8 @@ zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
 # Os certificados dos testes: raízes, folhas vencidas, nomes errados.
 rcgen = "0.14.10"
+# As chaves RSA dos testes: o mesmo `rsa`, aqui também gerando, assinando
+# e escrevendo a chave no PKCS#8 que o *ring* e o `rcgen` leem. O acaso, de
+# um ChaCha20 de semente fixa: as mesmas chaves a cada rodada.
+rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["encoding"] }
+chacha20 = { version = "0.10.2", default-features = false, features = ["rng"] }
