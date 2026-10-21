@@ -50,6 +50,17 @@ sha2 = { version = "0.11.0", default-features = false }
 # raiz — gerados em `target/`, nunca no repositório. Ver `src/tls.rs`.
 rcgen = "0.14.10"
 
+# As chaves RSA da bancada TLS — o *ring*, que o `rcgen` usa, não gera
+# chave RSA —, escritas no PKCS#8 que o `rcgen` e o OpenSSL leem, e o
+# ChaCha20 que as gera, semeado pelo sistema. As mesmas versões do `tls`.
+rsa = { version = "=0.10.0-rc.19", default-features = false, features = ["encoding"] }
+chacha20 = { version = "0.10.2", default-features = false, features = ["rng"] }
+
+# O PEM do certificado da bancada com a assinatura estragada de propósito —
+# o `rcgen` só escreve certificado que ele mesmo assinou. A mesma versão
+# que o `rcgen` traz.
+pem = "4.0.0"
+
 # De fora, nenhuma. O `xtask` monta o disco com as ferramentas do hospedeiro —
 # `sgdisk`, `mkfs.vfat`, `mcopy`, `mkfs.btrfs` — e o que boota é o iniciador
 # deste projeto, compilado como mais um alvo.

@@ -5782,9 +5782,22 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
     // As duas partições no lugar, e o padrão por setor na faixa reservada.
     let mut conteudo =
         std::fs::read(caminho).map_err(|e| format!("não foi possível reler a imagem: {e}"))?;
-    for (origem, em) in [(&esp, disco::ESP_EM), (&raiz, disco::RAIZ_EM)] {
+    for (origem, em, setores) in [
+        (&esp, disco::ESP_EM, disco::ESP_SETORES),
+        (&raiz, disco::RAIZ_EM, disco::RAIZ_SETORES),
+    ] {
         let bytes =
             std::fs::read(origem).map_err(|e| format!("não foi possível ler {origem}: {e}"))?;
+        // O `mkfs.btrfs --rootdir` aumenta o arquivo, calado, quando o que
+        // ele estima para o conteúdo não cabe: a raiz maior que a partição
+        // cobriria o começo da seguinte, e a suíte falharia longe daqui.
+        if bytes.len() as u64 > setores * 512 {
+            return Err(format!(
+                "{origem} tem {} bytes, e a partição, {}: o conteúdo não cabe nela",
+                bytes.len(),
+                setores * 512
+            ));
+        }
         let inicio = (em * 512) as usize;
         conteudo[inicio..inicio + bytes.len()].copy_from_slice(&bytes);
     }
@@ -11424,9 +11437,10 @@ fn sob_a_rede(
 
     // O TLS de um programa: o `cifrado` conversa com o eco TLS da bancada —
     // o OpenSSL do hospedeiro, outra implementação inteira —, prova o nome,
+    // fecha as cadeias com a forma das públicas — P-384, RSA e a mista —,
     // recusa os que o servidor não prova, e cada pedido dele passa pelo
     // gate, que recusa a porta ao lado antes do primeiro byte. Daqui, a
-    // medida do aperto e do eco, que o programa diz no log.
+    // medida de cada aperto e do eco, que o programa diz no log.
     let lancado = serial.pedir(
         "user.run",
         &format!(r#"{{"path":"/programas/{}/cifrado"}}"#, arch.nome()),
@@ -11469,6 +11483,10 @@ fn sob_a_rede(
             })
     };
     let aperto = dita("provou ser bancada.duke")?;
+    let publicas = ["p384.duke", "rsa.duke", "misto.duke"]
+        .iter()
+        .map(|nome| dita(&format!("provou ser {nome}")))
+        .collect::<Result<Vec<_>, _>>()?;
     let eco = dita("foram e voltaram cifrados")?;
     // A hora da validade, dita pelo programa: a imagem de produção, sem
     // fontes, nunca autentica a hora, e o TLS confere pelo tempo lógico —
@@ -11479,16 +11497,22 @@ fn sob_a_rede(
         "outro.duke -> TLS_NAME_MISMATCH",
         "estranho.duke -> TLS_UNTRUSTED",
         "vencido.duke -> TLS_EXPIRED",
+        "intruso.duke -> TLS_UNTRUSTED",
+        "falso-p384.duke -> TLS_UNTRUSTED",
+        "falso-rsa.duke -> TLS_UNTRUSTED",
         "nao fala TLS: TLS_HANDSHAKE_FAILED",
     ] {
         dita(recusa)?;
     }
     println!(
-        "  [tls] ok  o cifrado saiu com 86 em {} ms; recusou outro.duke, estranho.duke, vencido.duke e o eco sem TLS; a porta ao lado, DENY_RESOURCE do gate; {}",
+        "  [tls] ok  o cifrado saiu com 86 em {} ms; fechou as cadeias P-384, RSA e mista; recusou outro.duke, estranho.duke, vencido.duke, intruso.duke, falso-p384.duke, falso-rsa.duke e o eco sem TLS; a porta ao lado, DENY_RESOURCE do gate; {}",
         comeco.elapsed().as_millis(),
         hora.trim_start_matches("cifrado: ")
     );
     println!("  [tls] medido  {aperto}");
+    for publica in &publicas {
+        println!("  [tls] medido  {publica}");
+    }
     println!("  [tls] medido  {eco}");
 
     // O HTTP de um programa: a `pagina` conversa com o servidor HTTP da

@@ -28,6 +28,12 @@
 //! | `futuro.duke` | o de `futuro.duke`, da raiz da bancada, que só vale de 2042 a 2044 |
 //! | `antigo.duke` | o de `antigo.duke`, da raiz da bancada |
 //! | `icp.duke` e `*.icp.duke` | o do proxy da bancada do IC, da raiz da bancada — ver [`super::icp`] |
+//! | `p384.duke` | P-384, por um intermediário P-384 da raiz P-384 |
+//! | `rsa.duke` | RSA de 2048 bits, por um intermediário RSA de 2048 da raiz RSA de 4096 |
+//! | `misto.duke` | P-256, por um intermediário P-384 que a raiz RSA assina — a forma da cadeia ECDSA da Let's Encrypt pela raiz X1 |
+//! | `intruso.duke` | o de `intruso.duke`, de uma raiz RSA que o programa **não** tem — e que o servidor manda junto |
+//! | `falso-p384.duke` | P-256, pelo intermediário P-384 de `misto.duke`, com um bit da assinatura trocado |
+//! | `falso-rsa.duke` | P-256, pelo intermediário RSA de `rsa.duke`, com um bit da assinatura trocado |
 //!
 //! O gate decide um destino só, `tcp:10.0.2.100:443`; os nomes são do TLS.
 //! É a bancada que mostra que o nome não autoriza nada: o mesmo destino,
@@ -38,18 +44,35 @@
 //! HTTP: por ele, o ALPN só oferece o HTTP/1.1, como um servidor que não
 //! fala HTTP/2.
 //!
+//! # As cadeias das autoridades públicas
+//!
+//! As cadeias de `p384.duke`, `rsa.duke` e `misto.duke` têm a forma das
+//! públicas: um intermediário entre a folha e a raiz, a P-384 e o RSA nos
+//! elos — as raízes e os intermediários da Let's Encrypt e da Google Trust
+//! Services são P-384 ou RSA —, o PKCS#1 v1.5 nas assinaturas da cadeia e,
+//! na folha RSA, o PSS no aperto. O servidor manda a folha e o
+//! intermediário; a raiz, o programa tem. O `intruso.duke` é o contrário:
+//! a raiz vem do servidor, e o programa não a aprende — `TLS_UNTRUSTED`. E
+//! os dois `falso-*.duke` têm a cadeia certa e a assinatura da folha
+//! estragada — a do intermediário P-384 e a do RSA, uma de cada conta —:
+//! `TLS_UNTRUSTED` também, e só a verificação da assinatura os recusa.
+//!
 //! # As chaves
 //!
 //! Geradas aqui, em `target/bancada-tls`, na primeira vez — nunca no
-//! repositório. A chave da raiz nem chega ao disco: assina as folhas e
-//! some. O que vai para a imagem é só o certificado da raiz, em
-//! `/dados/tls/bancada.pem`: a âncora em que o programa confia.
+//! repositório. As chaves das raízes e dos intermediários nem chegam ao
+//! disco: assinam e somem. As RSA vêm do pacote `rsa`, de um ChaCha20
+//! semeado pelo sistema — o *ring*, que o `rcgen` usa, não gera chave RSA.
+//! O que vai para a imagem são só os certificados das três raízes da
+//! bancada — a P-256, a RSA e a P-384 —, em `/dados/tls/bancada.pem`: as
+//! âncoras em que o programa confia.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose,
+    Issuer, KeyPair, KeyUsagePurpose, SignatureAlgorithm,
 };
 
 /// O script do servidor, no repositório.
@@ -66,7 +89,7 @@ pub(crate) const ANCORA_NA_IMAGEM: &str = "dados/tls/bancada.pem";
 
 /// A versão do formato do diretório: um diretório de outra versão é
 /// refeito inteiro.
-const VERSAO: &str = "bancada-tls v4\n";
+const VERSAO: &str = "bancada-tls v5\n";
 
 /// O diretório da bancada, com os certificados e as chaves das folhas.
 pub(crate) fn diretorio() -> PathBuf {
@@ -74,8 +97,8 @@ pub(crate) fn diretorio() -> PathBuf {
 }
 
 /// Os arquivos que o servidor e a imagem leem.
-const ARQUIVOS: [&str; 13] = [
-    "raiz.pem",
+const ARQUIVOS: [&str; 25] = [
+    "ancoras.pem",
     "bancada.pem",
     "bancada.chave",
     "estranho.pem",
@@ -88,6 +111,18 @@ const ARQUIVOS: [&str; 13] = [
     "antigo.chave",
     "icp.pem",
     "icp.chave",
+    "p384.pem",
+    "p384.chave",
+    "rsa.pem",
+    "rsa.chave",
+    "misto.pem",
+    "misto.chave",
+    "intruso.pem",
+    "intruso.chave",
+    "falso-p384.pem",
+    "falso-p384.chave",
+    "falso-rsa.pem",
+    "falso-rsa.chave",
 ];
 
 /// Prepara a bancada, se ainda não está pronta, e devolve o diretório.
@@ -102,29 +137,62 @@ pub(crate) fn preparar() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// O certificado da raiz da bancada, em PEM: a âncora da imagem.
+/// Os certificados das raízes da bancada, em PEM: as âncoras da imagem.
 pub(crate) fn ancora() -> Result<Vec<u8>, String> {
-    let caminho = preparar()?.join("raiz.pem");
+    let caminho = preparar()?.join("ancoras.pem");
     std::fs::read(&caminho).map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))
 }
 
-/// Uma raiz: o certificado autoassinado e quem assina com ela.
-fn raiz(nome: &str) -> Result<CertifiedIssuer<'static, KeyPair>, String> {
+/// Uma chave nova de `alg`. A RSA, de `bits` bits, vem do `rsa`, de um
+/// ChaCha20 semeado pelo sistema; as outras, do *ring*.
+fn chave(alg: &'static SignatureAlgorithm, bits: usize) -> Result<KeyPair, String> {
+    if alg != &rcgen::PKCS_RSA_SHA256 {
+        return KeyPair::generate_for(alg).map_err(|e| e.to_string());
+    }
+    use chacha20::rand_core::SeedableRng;
+    use rsa::pkcs8::EncodePrivateKey;
+    let mut semente = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut semente))
+        .map_err(|e| format!("sem o aleatório do sistema para a chave RSA: {e}"))?;
+    let rsa = rsa::RsaPrivateKey::new(&mut chacha20::ChaCha20Rng::from_seed(semente), bits)
+        .map_err(|e| e.to_string())?;
+    let der = rsa.to_pkcs8_der().map_err(|e| e.to_string())?;
+    KeyPair::try_from(der.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// O que uma autoridade tem no certificado.
+fn autoridade(nome: &str) -> Result<CertificateParams, String> {
     let mut p = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
     p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     p.distinguished_name.push(DnType::CommonName, nome);
     p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     p.not_before = rcgen::date_time_ymd(2024, 1, 1);
     p.not_after = rcgen::date_time_ymd(2045, 1, 1);
-    let chave = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
-    CertifiedIssuer::self_signed(p, chave).map_err(|e| e.to_string())
+    Ok(p)
 }
 
-/// Uma folha para `nomes` — o primeiro é o nome comum —, assinada por
-/// `raiz`, valendo de `de` a `ate` (1º de janeiro de cada ano): o
-/// certificado e a chave, em PEM.
-fn folha(
-    raiz: &CertifiedIssuer<'static, KeyPair>,
+/// Uma raiz: o certificado autoassinado e quem assina com ela.
+fn raiz(nome: &str, chave: KeyPair) -> Result<CertifiedIssuer<'static, KeyPair>, String> {
+    CertifiedIssuer::self_signed(autoridade(nome)?, chave).map_err(|e| e.to_string())
+}
+
+/// Um intermediário assinado por `acima`: o certificado e quem assina com
+/// ele.
+fn intermediario(
+    acima: &Issuer<'static, KeyPair>,
+    nome: &str,
+    chave: KeyPair,
+) -> Result<CertifiedIssuer<'static, KeyPair>, String> {
+    CertifiedIssuer::signed_by(autoridade(nome)?, chave, acima).map_err(|e| e.to_string())
+}
+
+/// Uma folha para `nomes` — o primeiro é o nome comum —, com a chave
+/// `chave`, assinada por `emissor`, valendo de `de` a `ate` (1º de janeiro
+/// de cada ano): o certificado e a chave, em PEM.
+fn folha_com(
+    emissor: &Issuer<'static, KeyPair>,
+    chave: KeyPair,
     nomes: &[&str],
     de: i32,
     ate: i32,
@@ -136,9 +204,33 @@ fn folha(
     p.not_after = rcgen::date_time_ymd(ate, 1, 1);
     p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let chave = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| e.to_string())?;
-    let certificado = p.signed_by(&chave, raiz).map_err(|e| e.to_string())?;
+    let certificado = p.signed_by(&chave, emissor).map_err(|e| e.to_string())?;
     Ok((certificado.pem(), chave.serialize_pem()))
+}
+
+/// O certificado em PEM com o último bit trocado: o fim de um certificado
+/// é o fim da assinatura dele, que deixa de conferir — e o resto, a forma
+/// e a chave, fica igual.
+fn com_a_assinatura_trocada(certificado: &str) -> Result<String, String> {
+    let lido = pem::parse(certificado).map_err(|e| e.to_string())?;
+    let mut der = lido.contents().to_vec();
+    let ultimo = der.last_mut().ok_or("certificado vazio")?;
+    *ultimo ^= 0x01;
+    Ok(pem::encode_config(
+        &pem::Pem::new("CERTIFICATE", der),
+        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+    ))
+}
+
+/// Uma folha P-256 — ver [`folha_com`].
+fn folha(
+    emissor: &Issuer<'static, KeyPair>,
+    nomes: &[&str],
+    de: i32,
+    ate: i32,
+) -> Result<(String, String), String> {
+    let p256 = chave(&rcgen::PKCS_ECDSA_P256_SHA256, 0)?;
+    folha_com(emissor, p256, nomes, de, ate)
 }
 
 /// Gera a bancada inteira num diretório novo e o põe no lugar do antigo.
@@ -151,8 +243,11 @@ fn gerar(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&novo)
         .map_err(|e| format!("não foi possível criar {}: {e}", novo.display()))?;
 
-    let da_bancada = raiz("Raiz da bancada do Duke")?;
-    let estranha = raiz("Raiz estranha")?;
+    let p256 = || chave(&rcgen::PKCS_ECDSA_P256_SHA256, 0);
+    let p384 = || chave(&rcgen::PKCS_ECDSA_P384_SHA384, 0);
+    let rsa = |bits| chave(&rcgen::PKCS_RSA_SHA256, bits);
+    let da_bancada = raiz("Raiz da bancada do Duke", p256()?)?;
+    let estranha = raiz("Raiz estranha", p256()?)?;
     let (bancada, bancada_chave) = folha(&da_bancada, &["bancada.duke"], 2025, 2040)?;
     let (estranho, estranho_chave) = folha(&estranha, &["estranho.duke"], 2025, 2040)?;
     let (vencido, vencido_chave) = folha(&da_bancada, &["vencido.duke"], 2020, 2021)?;
@@ -160,6 +255,39 @@ fn gerar(dir: &Path) -> Result<(), String> {
     let (antigo, antigo_chave) = folha(&da_bancada, &["antigo.duke"], 2025, 2040)?;
     // O proxy da bancada do IC: um nome por modo, todos sob `icp.duke`.
     let (icp, icp_chave) = folha(&da_bancada, &["icp.duke", "*.icp.duke"], 2025, 2040)?;
+    // As cadeias das autoridades públicas: a folha e o intermediário, num
+    // arquivo só — é o que o servidor manda.
+    let raiz_rsa = raiz("Raiz RSA da bancada do Duke", rsa(4096)?)?;
+    let raiz_p384 = raiz("Raiz P-384 da bancada do Duke", p384()?)?;
+    let meio_p384 = intermediario(&raiz_p384, "Intermediario P-384 da bancada", p384()?)?;
+    let meio_rsa = intermediario(&raiz_rsa, "Intermediario RSA da bancada", rsa(2048)?)?;
+    let meio_misto = intermediario(&raiz_rsa, "Intermediario misto da bancada", p384()?)?;
+    let intrusa = raiz("Raiz intrusa", rsa(2048)?)?;
+    let com = |(folha, chave): (String, String), acima: String| (folha + &acima, chave);
+    let (p384_pem, p384_chave) = com(
+        folha_com(&meio_p384, p384()?, &["p384.duke"], 2025, 2040)?,
+        meio_p384.pem(),
+    );
+    let (rsa_pem, rsa_chave) = com(
+        folha_com(&meio_rsa, rsa(2048)?, &["rsa.duke"], 2025, 2040)?,
+        meio_rsa.pem(),
+    );
+    let (misto, misto_chave) = com(
+        folha(&meio_misto, &["misto.duke"], 2025, 2040)?,
+        meio_misto.pem(),
+    );
+    let (intruso, intruso_chave) = com(
+        folha(&intrusa, &["intruso.duke"], 2025, 2040)?,
+        intrusa.pem(),
+    );
+    let falsa = |emissor: &Issuer<'static, KeyPair>, nome: &str| {
+        folha(emissor, &[nome], 2025, 2040)
+            .and_then(|(f, chave)| Ok((com_a_assinatura_trocada(&f)?, chave)))
+    };
+    let (falso_p384, falso_p384_chave) =
+        com(falsa(&meio_misto, "falso-p384.duke")?, meio_misto.pem());
+    let (falso_rsa, falso_rsa_chave) = com(falsa(&meio_rsa, "falso-rsa.duke")?, meio_rsa.pem());
+    let ancoras = da_bancada.pem() + &raiz_rsa.pem() + &raiz_p384.pem();
 
     let escrever = |nome: &str, conteudo: &str, privado: bool| -> Result<(), String> {
         let caminho = novo.join(nome);
@@ -172,7 +300,7 @@ fn gerar(dir: &Path) -> Result<(), String> {
         }
         Ok(())
     };
-    escrever("raiz.pem", &da_bancada.pem(), false)?;
+    escrever("ancoras.pem", &ancoras, false)?;
     escrever("bancada.pem", &bancada, false)?;
     escrever("bancada.chave", &bancada_chave, true)?;
     escrever("estranho.pem", &estranho, false)?;
@@ -185,6 +313,18 @@ fn gerar(dir: &Path) -> Result<(), String> {
     escrever("antigo.chave", &antigo_chave, true)?;
     escrever("icp.pem", &icp, false)?;
     escrever("icp.chave", &icp_chave, true)?;
+    escrever("p384.pem", &p384_pem, false)?;
+    escrever("p384.chave", &p384_chave, true)?;
+    escrever("rsa.pem", &rsa_pem, false)?;
+    escrever("rsa.chave", &rsa_chave, true)?;
+    escrever("misto.pem", &misto, false)?;
+    escrever("misto.chave", &misto_chave, true)?;
+    escrever("intruso.pem", &intruso, false)?;
+    escrever("intruso.chave", &intruso_chave, true)?;
+    escrever("falso-p384.pem", &falso_p384, false)?;
+    escrever("falso-p384.chave", &falso_p384_chave, true)?;
+    escrever("falso-rsa.pem", &falso_rsa, false)?;
+    escrever("falso-rsa.chave", &falso_rsa_chave, true)?;
     escrever("versao", VERSAO, false)?;
 
     let _ = std::fs::remove_dir_all(dir);

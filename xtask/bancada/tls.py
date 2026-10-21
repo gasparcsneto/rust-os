@@ -39,10 +39,23 @@ def main():
     sys.stderr = log
 
     padrao = contexto(diretorio, "bancada")
+    # As cadeias das autoridades publicas: cada arquivo traz a folha e o
+    # intermediario - o `intruso`, a raiz dele -, e o OpenSSL manda os dois.
+    # Os `falso-*` tem a assinatura da folha estragada, e o OpenSSL os serve
+    # assim mesmo: quem confere a assinatura e o cliente.
     outros = {
-        "estranho.duke": contexto(diretorio, "estranho"),
-        "vencido.duke": contexto(diretorio, "vencido"),
-        "futuro.duke": contexto(diretorio, "futuro"),
+        nome + ".duke": contexto(diretorio, nome)
+        for nome in (
+            "estranho",
+            "vencido",
+            "futuro",
+            "p384",
+            "rsa",
+            "misto",
+            "intruso",
+            "falso-p384",
+            "falso-rsa",
+        )
     }
 
     def pelo_nome(conexao, nome, _contexto):
