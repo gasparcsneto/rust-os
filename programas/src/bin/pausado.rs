@@ -3,9 +3,10 @@
 //! barra a conexao nova com o codigo dele` e `tls: o processo isolado perde
 //! a sessao`.
 //!
-//! O programa conecta ao eco TLS da bancada como `bancada.duke`, manda e lê
-//! de volta uma linha, diz `pausado: no meio` e espera um evento no canal
-//! [`CANAL`]. A cada evento [`tipo::ACAO`]:
+//! O programa conecta ao eco TLS da bancada como [`NOME`] — a cadeia com a
+//! forma das públicas: a raiz RSA, um intermediário P-384, a folha P-256 —,
+//! manda e lê de volta uma linha, diz `pausado: no meio` e espera um evento
+//! no canal [`CANAL`]. A cada evento [`tipo::ACAO`]:
 //!
 //! - com `a` igual a [`RECONECTAR`], larga a sessão de antes e conecta de
 //!   novo, do zero — a semente, o relógio e o destino pelo gate —, manda e
@@ -13,7 +14,8 @@
 //! - com qualquer outro, manda pela sessão que tem e diz `pausado: depois:
 //!   ALLOW` se o eco voltou, ou `pausado: depois: <código>`.
 //!
-//! A sessão cifrada não muda nada no que o gate decide: a recusa dele —
+//! A sessão cifrada não muda nada no que o gate decide — nem o algoritmo da
+//! cadeia que a autenticou: a recusa dele —
 //! `DENY_RESOURCE` depois de a política tirar o destino, `DENY_CONTAINED`
 //! com o processo isolado — e a do firewall depois dele —
 //! `FIREWALL_BLOCKED` — passam pelo TLS com o código de quem recusou, e não
@@ -50,8 +52,11 @@ const CANAL: &str = "teste-pausado";
 /// há. A suíte tem a mesma constante.
 const RECONECTAR: i64 = 2;
 
-/// A raiz da bancada, na imagem.
+/// As raízes da bancada, na imagem.
 const ANCORAS: &str = "/dados/tls/bancada.pem";
+
+/// O nome que o eco TLS prova pela cadeia mista.
+const NOME: &str = "misto.duke";
 
 /// O eco TLS da bancada.
 const ECO_TLS: &str = "tcp:10.0.2.100:443";
@@ -76,7 +81,7 @@ fn eco(sessao: &mut tls::Sessao<tls::Conexao>, texto: &[u8]) -> Result<(), Falha
 
 /// Uma sessão nova com o eco TLS, que já mandou e leu `texto`.
 fn conectar(ancoras: &Ancoras, texto: &[u8]) -> Result<tls::Sessao<tls::Conexao>, Falha> {
-    let mut sessao = tls::conectar(ECO_TLS, "bancada.duke", ancoras)?;
+    let mut sessao = tls::conectar(ECO_TLS, NOME, ancoras)?;
     eco(&mut sessao, texto)?;
     Ok(sessao)
 }

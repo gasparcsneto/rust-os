@@ -68,5 +68,11 @@ panic = "abort"
 opt-level = "s"
 codegen-units = 1
 lto = true
+# Sem a tabela de símbolos no executável — o que vai para o disco. Nada a
+# lê: o kernel carrega pelos cabeçalhos e pelo manifesto (`.note.duke`, que
+# fica), e o `xtask simbolo` é do kernel. Ela era um sexto de cada programa
+# e de cada lançamento, que passa inteiro pelo heap; e, com o P-384 e o RSA
+# no TLS, os programas do IC passavam do teto de leitura do kernel, 1 MiB.
+strip = "symbols"
 
 [workspace]

@@ -15,13 +15,22 @@
 //!   um destino que a política enumera. Depois, três registros inteiros de
 //!   uma vez: mais que o buffer de saída da conexão, e o `net.send` espera
 //!   espaço em vez de girar;
+//! - no **mesmo** destino, as cadeias com a forma das públicas — um
+//!   intermediário entre a folha e a raiz, a P-384 e o RSA nos elos —:
+//!   `p384.duke` (a P-384 na cadeia e no aperto), `rsa.duke` (a raiz RSA de
+//!   4096 bits e o intermediário de 2048, em PKCS#1 v1.5, e o PSS no aperto)
+//!   e `misto.duke` (a raiz RSA, o intermediário P-384 e a folha P-256). O
+//!   aperto fecha e o segredo vai e volta, em cada uma;
 //! - no **mesmo** destino, os nomes que o servidor não prova: `outro.duke`
 //!   (ele apresenta o certificado de `bancada.duke`: `TLS_NAME_MISMATCH`),
 //!   `estranho.duke` (de uma raiz em que o programa não confia:
-//!   `TLS_UNTRUSTED`) e `vencido.duke` (`TLS_EXPIRED`). O gate deixou cada
-//!   uma dessas conexões — o destino está no alcance —, e é o programa que
-//!   as recusa: o nome não é recurso da política, e o certificado não
-//!   autoriza nada;
+//!   `TLS_UNTRUSTED`), `vencido.duke` (`TLS_EXPIRED`), `intruso.duke` (de
+//!   uma raiz RSA que o servidor manda junto, e que o programa não aprende:
+//!   `TLS_UNTRUSTED`), e `falso-p384.duke` e `falso-rsa.duke` (a cadeia
+//!   certa com a assinatura da folha estragada — a de um intermediário
+//!   P-384 e a de um RSA —: `TLS_UNTRUSTED`). O gate deixou cada uma dessas
+//!   conexões — o destino está no alcance —, e é o programa que as recusa:
+//!   o nome não é recurso da política, e o certificado não autoriza nada;
 //! - o eco TCP, `tcp:10.0.2.100:7`, não fala TLS: devolve o `ClientHello`,
 //!   e o aperto falha com `TLS_HANDSHAKE_FAILED`.
 //!
@@ -66,8 +75,10 @@ const NOME_ACEITO: i64 = 65;
 const SEM_TLS: i64 = 66;
 /// O fecho não saiu.
 const FECHO: i64 = 67;
+/// Uma cadeia com a forma das públicas não fechou.
+const CADEIA: i64 = 68;
 
-/// A raiz da bancada, na imagem.
+/// As raízes da bancada, na imagem: a P-256, a RSA e a P-384.
 const ANCORAS: &str = "/dados/tls/bancada.pem";
 
 /// O eco TLS da bancada.
@@ -114,6 +125,33 @@ fn eco(sessao: &mut tls::Sessao<tls::Conexao>, texto: &[u8]) -> Result<(), Falha
         return Err(Falha::Interna);
     }
     Ok(())
+}
+
+/// Uma cadeia com a forma das públicas: o aperto fecha, o segredo vai e
+/// volta, e o fecho sai.
+fn publica(ancoras: &Ancoras, nome: &str) -> Result<(), i64> {
+    let comeco = agora_ms();
+    let mut sessao = tls::conectar(ECO_TLS, nome, ancoras).map_err(|f| {
+        escreverln!("cifrado: o aperto com {} falhou: {}", nome, f.codigo());
+        CADEIA
+    })?;
+    let aperto = agora_ms().saturating_sub(comeco);
+    eco(&mut sessao, SEGREDO).map_err(|f| {
+        escreverln!("cifrado: o eco com {} falhou: {}", nome, f.codigo());
+        ECO
+    })?;
+    escreverln!(
+        "cifrado: {} provou ser {} ({}, {}) em {} ms",
+        ECO_TLS,
+        nome,
+        sessao.suite().unwrap_or("?"),
+        sessao.grupo().unwrap_or("?"),
+        aperto
+    );
+    sessao.fechar().map(|_| ()).map_err(|f| {
+        escreverln!("cifrado: o fecho com {} falhou: {}", nome, f.codigo());
+        FECHO
+    })
 }
 
 /// Um nome que o servidor não prova: o gate deixa a conexão, e o TLS a
@@ -218,11 +256,21 @@ fn principal() -> i64 {
         return FECHO;
     }
 
+    // No mesmo destino, as cadeias com a forma das públicas.
+    for nome in ["p384.duke", "rsa.duke", "misto.duke"] {
+        if let Err(codigo) = publica(&ancoras, nome) {
+            return codigo;
+        }
+    }
+
     // No mesmo destino, os nomes que o servidor não prova.
     for (nome, esperado) in [
         ("outro.duke", Falha::NomeErrado),
         ("estranho.duke", Falha::NaoConfiavel),
         ("vencido.duke", Falha::Vencido),
+        ("intruso.duke", Falha::NaoConfiavel),
+        ("falso-p384.duke", Falha::NaoConfiavel),
+        ("falso-rsa.duke", Falha::NaoConfiavel),
     ] {
         if let Err(codigo) = recusado(&ancoras, nome, esperado) {
             return codigo;

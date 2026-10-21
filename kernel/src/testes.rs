@@ -7401,8 +7401,8 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
 /// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
 ///
-/// A folha usada é a da árvore de pedaços, cujos oito itens — o
-/// dispositivo e sete pedaços — têm chave e tamanho conhecidos do lado de
+/// A folha usada é a da árvore de pedaços, cujos sete itens — o
+/// dispositivo e seis pedaços — têm chave e tamanho conhecidos do lado de
 /// fora: o `dump-tree` imprime `itemoff` e `itemsize` de cada um. Eram
 /// quatro itens e três pedaços até os programas do TLS levarem os dados da
 /// imagem além dos oito megabytes do primeiro pedaço de dados: o `mkfs` pôs
@@ -7413,7 +7413,10 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// arquitetura — passar do terceiro: o `mkfs` pôs um quarto. E sete itens
 /// e seis pedaços até os programas do IC — o `icp` e o `verificado`, uns
 /// 970 KB cada nas duas arquiteturas, com o BLS12-381 dentro — passarem do
-/// quarto: o `mkfs` pôs um quinto.
+/// quarto: o `mkfs` pôs um quinto. E de volta a sete itens e seis pedaços
+/// quando os programas perderam a tabela de símbolos, que nada lia — um
+/// sexto de cada um, no ICP-4a, que pôs o P-384 e o RSA no TLS —: os dados
+/// couberam em quatro pedaços de novo.
 fn btrfs_percorre_itens_da_folha() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let particao = tabela
@@ -7451,12 +7454,12 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         }
     }
 
-    if quantos != 8 {
+    if quantos != 7 {
         crate::log_error!("teste", "a folha deu {} itens", quantos);
-        return Err("a folha de pedacos nao tem os oito itens que o disco traz");
+        return Err("a folha de pedacos nao tem os sete itens que o disco traz");
     }
-    if pedacos != 7 {
-        return Err("a folha de pedacos nao trouxe os sete pedacos");
+    if pedacos != 6 {
+        return Err("a folha de pedacos nao trouxe os seis pedacos");
     }
 
     // E um nó interno não é folha. Forjar o nível no bloco já lido é o
@@ -7940,15 +7943,15 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
         .ok_or("nao ha particao de dados")?;
     let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
 
-    // Sistema, metadados e cinco de dados — ver
+    // Sistema, metadados e quatro de dados — ver
     // `btrfs_percorre_itens_da_folha`.
-    if volume.mapa.quantos() != 7 {
+    if volume.mapa.quantos() != 6 {
         crate::log_error!(
             "teste",
             "o mapa ficou com {} pedacos",
             volume.mapa.quantos()
         );
-        return Err("o mapa completo nao tem os sete pedacos do disco");
+        return Err("o mapa completo nao tem os seis pedacos do disco");
     }
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
@@ -38579,16 +38582,19 @@ const ECO_TLS: &str = "tcp:10.0.2.100:443";
 const TETO_DO_TLS: u64 = 3_000;
 
 /// O TLS de verdade, de dentro de um processo de uma pessoa operadora: o
-/// programa `cifrado` confere de dentro o aperto, o eco cifrado, e os nomes
-/// que o servidor não prova — e aqui se confere o outro lado:
+/// programa `cifrado` confere de dentro o aperto, o eco cifrado, as cadeias
+/// com a forma das públicas — P-384 e RSA —, e os nomes que o servidor não
+/// prova — e aqui se confere o outro lado:
 ///
 /// - cada pedido do TLS foi uma decisão do gate, em nome da pessoa e pelo
-///   processo — o `random.read` e o relógio de cada conexão, a âncora por
+///   processo — o `random.read` e o relógio de cada conexão, as âncoras por
 ///   `fs.read`, o destino por `net.connect` —, e o destino fora do alcance
 ///   foi `DENY_RESOURCE` sem nenhum envio depois dele;
 /// - o mesmo destino, `tcp:10.0.2.100:443`, foi decidido `ALLOW` para cada
-///   um dos quatro nomes — o que o programa aceitou e os três que ele
-///   recusou: o nome não passou pelo gate, e não muda o que o gate decide;
+///   um dos dez nomes — os quatro que o programa aceitou, de cadeias P-256,
+///   P-384, RSA e mista, e os seis que ele recusou: nem o nome nem o
+///   algoritmo da cadeia passam pelo gate, e nenhum dos dois muda o que o
+///   gate decide;
 /// - o segredo que foi e voltou cifrado não está em registro nenhum da
 ///   auditoria, nem no log: o kernel só viu bytes cifrados.
 fn tls_o_programa_conversa_pelo_gate() -> Resultado {
@@ -38626,9 +38632,9 @@ fn tls_o_programa_conversa_pelo_gate() -> Resultado {
                 .all(|(_, c, t)| *c == codigo && *t == Titular::Pessoa)
         };
         // Uma semente e uma leitura da hora por conexão — a de fora e as
-        // cinco de dentro —, e uma leitura da hora a mais: a que o programa
+        // onze de dentro —, e uma leitura da hora a mais: a que o programa
         // diz antes do aperto, com o estado dela.
-        for (metodo, vezes) in [("random.read", 6), ("system.info", 7)] {
+        for (metodo, vezes) in [("random.read", 12), ("system.info", 13)] {
             let v = decisoes(metodo, "");
             if v.len() != vezes || !todos_da_pessoa(&v, Codigo::Allow) {
                 crate::log_error!("teste", "{}: {:?}", metodo, v);
@@ -38648,9 +38654,9 @@ fn tls_o_programa_conversa_pelo_gate() -> Resultado {
         if !decisoes("net.send", "tcp:10.0.2.100:444").is_empty() {
             return Err("algo foi mandado para o destino recusado");
         }
-        // Quatro nomes no mesmo destino: quatro decisões iguais.
+        // Dez nomes no mesmo destino: dez decisões iguais.
         let dentro = decisoes("net.connect", ECO_TLS);
-        if dentro.len() != 4 || !todos_da_pessoa(&dentro, Codigo::Allow) {
+        if dentro.len() != 10 || !todos_da_pessoa(&dentro, Codigo::Allow) {
             crate::log_error!("teste", "{:?}", dentro);
             return Err("o eco TLS nao foi decidido igual para cada nome");
         }
