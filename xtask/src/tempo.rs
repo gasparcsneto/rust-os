@@ -2831,8 +2831,19 @@ fn o_piso_de_outro_boot(b: &mut Bancada) -> Result<String, String> {
     let mut m = b.subir(None)?;
     let mut nada_volta = NadaVolta::novo();
     let h = sincronizar(&mut m, &mut nada_volta)?;
-    if h.desvio_ms().abs() > 2_000
-        || !h.marcado("adiantado")
+    // Na hora, como nas fontes honestas: a do hospedeiro dentro da
+    // incerteza que o civil diz. O RTC conta segundos inteiros — o do
+    // emulador começa no segundo do hospedeiro, e o kernel o lê no segundo
+    // dele —, e o civil sobe até dois segundos atrás, mais o erro da medida.
+    // Abaixo do limiar, o acordo é gradual, e a leitura logo depois dele
+    // ainda tem quase todo o desvio, que a incerteza cobre: no CI 303,
+    // -2404 ms com 2796 ms.
+    if !h.hora_dentro_da_incerteza() {
+        return Err(format!(
+            "o civil do segundo boot nao sincronizou na hora do hospedeiro: {h}"
+        ));
+    }
+    if !h.marcado("adiantado")
         || !(3_400..=3_610).contains(&h.logico_desvio_s())
         || h.logico < antes.logico
     {
