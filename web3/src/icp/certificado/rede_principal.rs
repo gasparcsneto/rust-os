@@ -342,3 +342,38 @@ fn a_delegacao_aninhada_na_rede_principal_e_recusada() {
         TEMPO_DO_IVG37
     ));
 }
+
+/// Quanto custa, no hospedeiro, verificar um certificado de verdade da rede
+/// principal: o da leitura da sub-rede do `224od`, delegado — duas
+/// assinaturas BLS, a da raiz sobre a delegação e a da sub-rede sobre a
+/// árvore —, com as chaves das 47 sub-redes e os 13 nós dela; e o do
+/// `ivg37`, menor. Só sob demanda, sem depuração:
+/// `cargo test -p web3 --release -- --ignored --nocapture medida`.
+#[test]
+#[ignore = "medida: --ignored --nocapture, em --release"]
+fn medida_da_rede_principal_no_hospedeiro() {
+    const VOLTAS: usize = 50;
+    for (nome, corpo, canister, tempo) in [
+        ("224od", SUB_REDE_224OD, CANISTER_224OD, TEMPO_DO_224OD),
+        ("ivg37", IVG37, CANISTER_IVG37, TEMPO_DO_IVG37),
+    ] {
+        let d = doc(corpo);
+        let mut tempos: Vec<std::time::Duration> = (0..VOLTAS)
+            .map(|_| {
+                let inicio = std::time::Instant::now();
+                let r = conferir(&d, canister, tempo);
+                let gasto = inicio.elapsed();
+                assert!(r.is_ok(), "a volta nao verificou");
+                gasto
+            })
+            .collect();
+        tempos.sort_unstable();
+        std::println!(
+            "medida: {VOLTAS} certificados do {nome} ({} bytes) verificados no hospedeiro: mediana {:?}, de {:?} a {:?}",
+            d.len(),
+            tempos[VOLTAS / 2],
+            tempos[0],
+            tempos[VOLTAS - 1]
+        );
+    }
+}
