@@ -7401,8 +7401,8 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// item que existe, do tamanho certo, com bytes de outro. Nada falha, e o que
 /// se lê depois é um pedaço, uma raiz ou um nome montado a partir de lixo.
 ///
-/// A folha usada é a da árvore de pedaços, cujos sete itens — o
-/// dispositivo e seis pedaços — têm chave e tamanho conhecidos do lado de
+/// A folha usada é a da árvore de pedaços, cujos oito itens — o
+/// dispositivo e sete pedaços — têm chave e tamanho conhecidos do lado de
 /// fora: o `dump-tree` imprime `itemoff` e `itemsize` de cada um. Eram
 /// quatro itens e três pedaços até os programas do TLS levarem os dados da
 /// imagem além dos oito megabytes do primeiro pedaço de dados: o `mkfs` pôs
@@ -7416,7 +7416,10 @@ fn btrfs_le_a_raiz_dos_pedacos() -> Resultado {
 /// quarto: o `mkfs` pôs um quinto. E de volta a sete itens e seis pedaços
 /// quando os programas perderam a tabela de símbolos, que nada lia — um
 /// sexto de cada um, no ICP-4a, que pôs o P-384 e o RSA no TLS —: os dados
-/// couberam em quatro pedaços de novo.
+/// couberam em quatro pedaços de novo. E oito itens e sete pedaços outra
+/// vez no ICP-4b, quando a imagem ganhou o `livro` — uns 900 KB no x86 e
+/// 800 KB no ARM, com o TLS e o IC dentro — e as âncoras públicas: os dados
+/// passaram do quarto pedaço, e o `mkfs` pôs o quinto.
 fn btrfs_percorre_itens_da_folha() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let particao = tabela
@@ -7454,12 +7457,12 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
         }
     }
 
-    if quantos != 7 {
+    if quantos != 8 {
         crate::log_error!("teste", "a folha deu {} itens", quantos);
-        return Err("a folha de pedacos nao tem os sete itens que o disco traz");
+        return Err("a folha de pedacos nao tem os oito itens que o disco traz");
     }
-    if pedacos != 6 {
-        return Err("a folha de pedacos nao trouxe os seis pedacos");
+    if pedacos != 7 {
+        return Err("a folha de pedacos nao trouxe os sete pedacos");
     }
 
     // E um nó interno não é folha. Forjar o nível no bloco já lido é o
@@ -7943,15 +7946,15 @@ fn btrfs_mapa_completo_alcanca_metadados() -> Resultado {
         .ok_or("nao ha particao de dados")?;
     let volume = crate::vfs::btrfs::Volume::abrir(particao.primeiro)?;
 
-    // Sistema, metadados e quatro de dados — ver
+    // Sistema, metadados e cinco de dados — ver
     // `btrfs_percorre_itens_da_folha`.
-    if volume.mapa.quantos() != 6 {
+    if volume.mapa.quantos() != 7 {
         crate::log_error!(
             "teste",
             "o mapa ficou com {} pedacos",
             volume.mapa.quantos()
         );
-        return Err("o mapa completo nao tem os seis pedacos do disco");
+        return Err("o mapa completo nao tem os sete pedacos do disco");
     }
 
     let mut bloco = alloc::vec![0u8; volume.superbloco.tamanho_de_no as usize];
@@ -8085,9 +8088,9 @@ fn btrfs_raiz_montada() -> Resultado {
         return Err("a raiz montada nao lista exatamente o que o xtask pos nela");
     }
 
-    // E o subdiretório tem o que é dele, e só: a nota, o diretório da
-    // âncora TLS da bancada, com ela dentro, e o das redes do IC, com o
-    // arquivo delas.
+    // E o subdiretório tem o que é dele, e só: a nota, o diretório das
+    // âncoras do TLS, com a da bancada e as públicas dentro, e o das redes
+    // do IC, com o arquivo delas.
     let dados = conteudo("/dados")?;
     let esperado_em_dados = [
         (alloc::string::String::from("icp"), Tipo::Diretorio),
@@ -8099,9 +8102,13 @@ fn btrfs_raiz_montada() -> Resultado {
         return Err("o subdiretorio nao lista exatamente o que esta dentro dele");
     }
     let tls = conteudo("/dados/tls")?;
-    if tls.len() != 1 || tls[0].0 != "bancada.pem" || tls[0].1 != Tipo::Arquivo {
+    let esperado_em_tls = [
+        (alloc::string::String::from("bancada.pem"), Tipo::Arquivo),
+        (alloc::string::String::from("publicas.pem"), Tipo::Arquivo),
+    ];
+    if tls != esperado_em_tls {
         crate::log_error!("teste", "/dados/tls listou {:?}", tls);
-        return Err("o diretorio da ancora nao tem so a ancora");
+        return Err("o diretorio das ancoras nao tem so as ancoras");
     }
     let icp = conteudo("/dados/icp")?;
     if icp.len() != 1 || icp[0].0 != "redes" || icp[0].1 != Tipo::Arquivo {
