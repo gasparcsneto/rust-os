@@ -110,6 +110,7 @@ cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
+cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -6264,9 +6265,10 @@ atualização (*update*), do anônimo ou assinada pela chave de uma
 identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada)
 —, com a resposta **verificada** contra a raiz da rede antes de ser
 entregue. O ICP-4a deu ao TLS do programa as cadeias das autoridades
-públicas — a P-384 e o RSA, só na verificação —, que a rede principal usa,
-e mais nada: ela continua desligada. O desenho inteiro, as tabelas e o que
-fica de fora estão em [`docs/ICP.md`](docs/ICP.md).
+públicas — a P-384 e o RSA, só na verificação —, que a rede principal usa.
+O ICP-4b liga a rede principal, só para ler — em [A rede
+principal](#a-rede-principal). O desenho inteiro, as tabelas e o que fica
+de fora estão em [`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
@@ -6384,10 +6386,12 @@ iniciador` — que roda a suíte inteira pela UEFI — sobem a bancada do IC
   assinatura do nó, o nonce trocado no caminho, a delegação aninhada, o
   certificado da outra sub-rede e o certificado de quinze minutos atrás.
 
-`/dados/icp/redes` tem doze redes — a honesta pelo DNS, a lenta, as nove
-mentiras e a `direta`, honesta pelo endereço fixo —, todas para o mesmo
-destino: o gate decide `tcp:10.0.2.100:4943`, e os nomes são do TLS e do
-programa.
+`/dados/icp/redes` tem catorze redes. Treze são da bancada — a honesta
+pelo DNS, a lenta, as nove mentiras, a `direta`, honesta pelo endereço
+fixo, e a `assincrona`, que responde a chamada com 202 —, todas para o
+mesmo destino: o gate decide `tcp:10.0.2.100:4943`, e os nomes são do TLS
+e do programa. A última é a `mainnet`, a rede principal, pelo DNS e com a
+raiz dela, sem destino nenhum na política padrão.
 
 ### O que a suíte e a fumaça conferem
 
@@ -6495,6 +6499,37 @@ a forma canônica ainda recusa, mas com outro nome. E a mutação das faixas
 mostrou a defesa em camadas, do jeito que se quer: sem a conferência das
 faixas, o certificado da outra sub-rede passa, e a resposta cai na
 seguinte — os nós que assinaram não são da sub-rede do certificado.
+
+### A rede principal
+
+O ICP-4b é a primeira leitura da rede principal do IC: o programa
+[`livro`](programas/src/bin/livro.rs) pergunta `icrc1_symbol` ao
+livro-razão do ICP (`ryjl3-tyaaa-aaaaa-aaaba-cai`, na sub-rede raiz) pelo
+caminho de sempre — o DNS, o `net.connect` pelo gate, o TLS 1.3 pelas
+âncoras públicas, o HTTP/1.1 —, verifica a resposta pela raiz da rede
+principal e só então diz o símbolo. O kernel, a política, o gate e o
+`key.sign` não mudaram:
+
+- a imagem tem a linha `mainnet` em `/dados/icp/redes` — `icp-api.io` pelo
+  DNS e a chave da raiz da rede principal, que nunca se aprende da rede — e
+  as âncoras públicas em `/dados/tls/publicas.pem`, as raízes ISRG X1 e X2,
+  conferidas pela impressão ao montar o disco;
+- nenhum destino da rede principal na política padrão. Um destino é um
+  IPv4 concreto, dado a um papel pelo `policy.write` com prova, e o DNS só
+  resolve: um que mente leva, no máximo, a um `DENY_RESOURCE`, a um
+  `TLS_UNTRUSTED` ou a uma prova recusada;
+- na suíte, `icp: a rede principal: o dns nao abre nada` confere cada
+  mentira do DNS; no hospedeiro, quatro respostas que a rede principal deu
+  de verdade são conferidas pela raiz dela;
+- `cargo xtask mainnet` é a fumaça real, à mão e fora da CI: o pré-voo do
+  TLS contra o perfil do programa, os destinos pelo `policy.write`, a
+  consulta, a auditoria e a revogação, e o relatório em `target/mainnet/`.
+  O fluxo `rede-principal.yml` a roda num runner do GitHub quando alguém o
+  pede.
+
+O resto — a configuração, o DNS, os casos, a fumaça real, as medidas, as
+mutações e o que fica de fora — está em [A rede
+principal](docs/ICP.md#a-rede-principal-icp-4b).
 
 ### A chamada assinada
 

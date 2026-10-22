@@ -1,4 +1,4 @@
-# O Internet Computer (ICP-1, ICP-3 e ICP-4a)
+# O Internet Computer (ICP-1, ICP-3, ICP-4a e ICP-4b)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
@@ -7,7 +7,9 @@ identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada-icp-
 Nos dois, a resposta é **verificada** contra a raiz da rede antes de ser
 entregue. O ICP-4a dá ao TLS do programa as cadeias das autoridades
 públicas, que a rede principal usa — em [O TLS público](#o-tls-público-icp-4a).
-O que ainda não existe está em *O que não existe ainda*.
+O ICP-4b liga a rede principal, só para ler — em [A rede
+principal](#a-rede-principal-icp-4b). O que ainda não existe está em *O
+que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
 Principal, um método, o Candid ou o id de um pedido, e a política não tem
@@ -856,15 +858,337 @@ TLS que engole a recusa do gate no meio da sessão é vista pelo `pausado`
 na leitura seguinte, que o gate também recusa. Todas morrem no
 hospedeiro, onde o servidor e as cadeias são feitos sob medida.
 
+## A rede principal (ICP-4b)
+
+O ICP-4b é a primeira leitura da rede principal do IC: uma consulta
+anônima, só de leitura, ao livro-razão do ICP — o canister
+`ryjl3-tyaaa-aaaaa-aaaba-cai`, na sub-rede raiz, o método `icrc1_symbol`
+—, pelo caminho que já existia: DNS → `net.connect` → TLS 1.3 → HTTP/1.1
+→ IC, e a resposta verificada pelo programa antes de chegar a ele. O
+código de produção do kernel, a política padrão, o gate, o `key.sign`, as
+identidades e as permissões não mudaram uma linha. O que mudou é
+configuração da imagem, um programa, a medida do caminho, casos da suíte
+e a fumaça real, que é à mão e fora da CI.
+
+### A configuração da imagem
+
+- **A rede.** `/dados/icp/redes` ganhou a linha
+
+  ```
+  rede mainnet https://icp-api.io dns bls:308182301d…0baaae
+  ```
+
+  O endpoint é o dos *API boundary nodes*, na porta do HTTPS, pelo DNS.
+  A chave é a da raiz da rede principal, em DER: a `IC_ROOT_KEY` do
+  `ic-agent`, num arquivo só,
+  [`web3/dados/rede_principal/raiz.hex`](../web3/dados/rede_principal/raiz.hex),
+  o mesmo com que os testes do hospedeiro conferem as respostas gravadas.
+  O Principal dela é o da sub-rede raiz,
+  `tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe`. A raiz
+  **nunca se aprende da rede**: o programa não pede `/api/v2/status`, e a
+  raiz que um endpoint anuncia não muda nada. A mutação M02, abaixo, é
+  exatamente esse pedido, e a suíte a pega.
+- **As âncoras públicas.** `/dados/tls/publicas.pem` tem as raízes ISRG
+  Root X1 (RSA de 4096 bits) e X2 (P-384) da Let's Encrypt, de
+  [`xtask/ancoras/`](../xtask/ancoras), conferidas pela impressão SHA-256
+  ao montar o disco (`PUBLICAS`, em [`xtask/src/tls.rs`](../xtask/src/tls.rs)):
+  um PEM trocado no repositório não entra na imagem. São as âncoras do
+  `livro` e do passo da rede principal do `icp`. As da bancada continuam
+  em `/dados/tls/bancada.pem`, e nenhuma conexão mistura as duas. Nada que
+  o servidor mande vira âncora.
+- **A política.** Nenhum destino da rede principal na política padrão. Um
+  destino é um IPv4 concreto, `tcp:<ipv4>:443`, enumerado como todos: sem
+  nome, sem faixa, sem uma política com o nome da rede. O teto do
+  administrador não muda em execução, então a imagem que vai falar com a
+  rede principal traz os endereços no teto — o `net.connect` e o
+  `net.block` do `sistema` e do `administrador`, e o `net.block` do
+  `seguranca`. Quem os dá a um papel de trabalho é o administrador, pelo
+  `policy.write` com prova, gravado na auditoria: o mecanismo de sempre. A
+  fumaça real faz exatamente isso (ver *A fumaça real*).
+
+### O DNS só resolve
+
+O nome `icp-api.io` vira endereço pelo DNS do programa — uma associação
+`udp:<servidor>:53` que o gate decide como qualquer outra —, e o endereço é
+um destino como os outros: fora da política, `DENY_RESOURCE` antes de
+qualquer byte. Nenhuma resposta do DNS autoriza nada, e o kernel nem sabe
+que houve um nome. Um DNS que mente leva, no máximo, a uma conexão que o
+gate, o TLS ou a verificação recusam — negação de serviço, nunca uma
+resposta aceita:
+
+| o DNS diz | o que acontece | o desfecho |
+|---|---|---|
+| um endereço fora da política | o gate recusa o `net.connect`, e nada é enviado | `denied DENY_RESOURCE` |
+| um endereço da política, de outro servidor | o gate deixa; a cadeia não sobe às âncoras públicas | `tls TLS_UNTRUSTED` |
+| o endereço de antes, com a política sem ele | o gate recusa | `denied DENY_RESOURCE` |
+| que o nome não existe | nenhuma conexão TCP | `dns DNS_NAME_NOT_FOUND` |
+| nada (mudo), ou lixo | nenhuma conexão TCP | `dns DNS_UNAVAILABLE` |
+
+O outro lado é o mesmo: um endpoint com HTTPS válido e resposta do IC
+inválida é recusado pela verificação. As nove mentiras da bancada são
+isso, todas por um TLS que fecha.
+
+### O programa `livro` e a consulta medida
+
+O [`livro`](../programas/src/bin/livro.rs) pergunta `icrc1_symbol` ao
+livro-razão pela rede `mainnet`, com as âncoras públicas e o DNS do
+emulador (`udp:10.0.2.3:53`, que repassa ao resolvedor do hospedeiro), e
+sai com 85 quando o símbolo verificado é `ICP`. O manifesto tem
+`net.connect`, `random.read`, `system.read`, `fs.read` e `audit.declare`,
+nada além do que uma consulta pede. Ele diz cada parte numa linha:
+
+```text
+livro: rede mainnet https://icp-api.io:443 dns; raiz da sub-rede tdb26-…; 2 ancoras
+livro: destino tcp:<ipv4>:443
+livro: tls <a suíte>
+livro: medida preparo … dns … tcp … tls … http … verificacao … total …
+livro: prova sub-rede tdb26-… da raiz; certificado <s> s; assinaturas <a>/<n>; pedido <id>
+livro: icrc1_symbol: verified; declarada <n>; hora <estado>; texto ICP
+livro: o simbolo verificado e ICP
+```
+
+A medida é a de
+[`programas::icp::consultar_medindo`](../programas/src/icp.rs) e
+[`programas::http::conectar_medindo`](../programas/src/http.rs): o mesmo
+caminho de `consultar` e `conectar`, com um `system.uptime` em cada
+fronteira. As partes são o preparo (a hora e o nonce, a semente e o
+relógio do TLS), o DNS, o TCP com a decisão do `net.connect`, o aperto, os
+dois `POST` e a verificação, que é o resto. Cada `system.uptime` é uma
+decisão do gate, como qualquer pedido, e só quem mede o pede: os outros
+caminhos não mudaram, e as contas da suíte também não. A régua anda de 10
+em 10 ms. A declaração vai antes do fecho, ancorada na conexão, com o
+desfecho numa palavra, como sempre.
+
+O `icp` da suíte ganhou o mesmo passo, `SIMBOLO`, pela rede `mainnet` da
+imagem e com o DNS da bancada, que nunca chega à rede principal.
+
+### Os casos
+
+No hospedeiro (`cargo test -p web3`),
+[`certificado/rede_principal.rs`](../web3/src/icp/certificado/rede_principal.rs)
+confere quatro corpos de `read_state` que a **rede principal de verdade**
+respondeu. Foram gravados pelo `ic-agent` 0.49.2 nos testes dele e estão em
+[`web3/dados/rede_principal/`](../web3/dados/rede_principal), com a
+procedência em `THIRD_PARTY.md`. Cada um é conferido pela raiz da rede
+principal, na hora em que foi assinado, e contra o oráculo do
+`ic-certificate-verification`. Nenhum byte deles veio pela rede desta
+máquina: a prova de que são da rede principal é a verificação — a
+assinatura BLS da raiz sobre a delegação, e a da sub-rede sobre a árvore.
+
+Na suíte (`icp: a rede principal: o dns nao abre nada`), o `icp` pede o
+símbolo pela rede `mainnet` com o DNS da bancada dizendo cada mentira da
+tabela de cima. O caso confere:
+
+- a família e o código de cada falha;
+- a decisão do gate de cada `net.connect`, e que nada foi mandado ao
+  destino recusado;
+- nenhuma conexão TCP sem endereço;
+- as âncoras públicas lidas uma vez pelo gate;
+- a declaração ancorada de cada passo, e nenhuma palavra do IC fora das
+  alegações.
+
+Três casos de fora do IC mudaram com o disco, porque a imagem ficou
+maior: o `livro` — uns 900 KB no x86 e 800 KB no ARM — e as âncoras
+públicas levaram os dados além do quarto pedaço de 8 MiB, e o `mkfs` pôs
+o quinto. Os dois casos do btrfs que contam os pedaços passaram a contar
+oito itens e sete pedaços, e a listagem de `/dados/tls` tem agora as duas
+âncoras.
+
+O que foi pedido, e onde está:
+
+| pedido | onde |
+|---|---|
+| **DNS**: resolução válida | `dns: o resolvedor pela bancada`, `http: o nome pelo dns e o destino pelo gate`; o endereço da política no caso da rede principal |
+| DNS errado | o caso da rede principal: o endereço fora da política, e o de outro servidor |
+| DNS indisponível | o caso da rede principal: o mudo e o que responde lixo (`DNS_UNAVAILABLE`), e o nome que não existe (`DNS_NAME_NOT_FOUND`) |
+| endereço resolvido fora da política | o caso da rede principal (`DENY_RESOURCE`, nada enviado); `dns: a resposta nao da acesso` |
+| **Gate**: destino permitido | o caso da rede principal: o `ALLOW` do destino da política |
+| destino não permitido | o caso da rede principal; `icp: o alcance e a permissao sao do gate` |
+| revogação antes da conexão | o caso da rede principal: a política sem o destino, o mesmo nome, `DENY_RESOURCE` — e, de volta, `ALLOW` |
+| política removida durante a sessão | `icp: a revogacao no meio da consulta`, `tls: a politica que tira o destino derruba a sessao` |
+| **TLS**: cadeia válida | as cadeias com a forma das públicas (ICP-4a): `misto.duke`, `p384.duke`, `rsa.duke`. A cadeia real é a da fumaça real |
+| hostname correto | `o_nome_errado_nas_cadeias_novas_e_recusado`; `outro.duke` |
+| expirado | `a_validade_nas_cadeias_novas`; `vencido.duke` |
+| CA desconhecida | o caso da rede principal: o servidor da bancada pelas âncoras públicas (`TLS_UNTRUSTED`); `estranho.duke`, `intruso.duke` |
+| assinatura inválida | `falso-p384.duke`, `falso-rsa.duke`; os testes do `tls` |
+| cadeia inválida | `a_cadeia_quebrada_e_recusada`, `a_raiz_que_o_servidor_manda_nao_vira_ancora` |
+| **ICP**: certificado válido | `a_rede_principal_verifica_pela_raiz_dela`, `a_leitura_da_sub_rede_traz_os_nos_dela` — a rede principal de verdade —; `icp: a consulta verificada pelo gate` |
+| certificado inválido | `a_raiz_de_outra_rede_recusa_a_rede_principal`, `a_rede_principal_fora_da_hora_e_recusada`, `a_delegacao_aninhada_na_rede_principal_e_recusada`; a `raiz-errada`, a `velho` e a `aninhada` |
+| assinatura inválida | `um_bit_trocado_na_rede_principal_e_recusado` (a assinatura da sub-rede e a da raiz sobre a delegação); a `bls-invalida` e a `assinatura-errada` |
+| hash tree alterada | `um_bit_trocado_na_rede_principal_e_recusado` (o tempo e a chave de um nó, folhas da árvore), `as_faixas_podadas_e_a_forma_antiga_sao_recusadas`, `o_canister_de_outra_sub_rede_e_recusado` (o livro-razão contra as faixas de outra sub-rede) |
+| resposta alterada | a `pedido-trocado` (o nonce trocado no caminho), a `assinatura-errada`, a `no-de-fora` |
+| resposta incompleta ou malformada | a `sem-assinatura`; o Candid truncado, com sobra e sem a mágica; os testes de `consulta` e de `candid` |
+| DNS falso → no máximo DoS | o caso da rede principal, inteiro |
+| HTTPS válido + resposta ICP inválida → recusada | `icp: cada prova adulterada e recusada`: as nove mentiras, todas por um TLS que fecha |
+
+### A fumaça real
+
+`cargo xtask mainnet [--arch A] [--release]`
+([`xtask/src/rede_principal.rs`](../xtask/src/rede_principal.rs)) roda à
+mão, fora da CI. Precisa de uma máquina com a rede de verdade: DNS por
+UDP e TCP na porta 443, sem proxy que reabra o TLS. O TLS do programa
+recusaria a cadeia de um proxy, como deve.
+
+1. **O pré-voo, no hospedeiro.** Os IPv4 de `icp-api.io` vêm do resolvedor
+   dele, ou de `--enderecos a,b`. O `openssl s_client` fecha o aperto com
+   o primeiro **no perfil do programa**: só o TLS 1.3, as três suítes, o
+   X25519 e o P-256, e as assinaturas do aperto. A cadeia é lida como
+   dado: cada certificado com a chave e o algoritmo da assinatura, contra
+   o perfil e as âncoras da imagem. Fora do perfil, a fumaça para com
+   `TLS_PROFILE_GAP` e diz o que o servidor fecha sem ele; com uma raiz
+   que não é âncora, para com `TLS_ANCHOR_GAP`. Nenhum dos dois amplia
+   nada: são o relatório de uma decisão que falta. O pré-voo não
+   verifica; quem verifica é o programa.
+2. **A máquina.** A imagem de produção com os IPv4 no teto, sobre o estado
+   zerado e sem servidor de hora. A hora do programa é a do tempo lógico,
+   que vem do RTC do emulador — o relógio do hospedeiro —, e o programa
+   diz `hora rtc`.
+3. **O gate antes do transporte.** O agente da porta 2, do papel
+   `operador`, lança o `livro`: o nome resolve, e o `net.connect` é
+   `DENY_RESOURCE`. Nenhum byte vai à rede principal.
+4. **A política.** O `policy.write` da linha do operador com os IPv4, com
+   a prova do administrador da imagem.
+5. **A consulta.** O `livro` de novo: o caminho inteiro, e o símbolo
+   `ICP`, verificado.
+6. **A auditoria**, lida de fora:
+   - as decisões do processo, todas `ALLOW`, só do DNS e dos IPv4;
+   - a declaração `icp.query ryjl3-tyaaa-aaaaa-aaaba-cai/icrc1_symbol
+     verified`, ancorada na conexão, com o destino real que o kernel viu;
+   - nada do IC fora dela.
+7. **A revogação.** A linha do operador volta ao que era, e o `livro` roda
+   de novo: `DENY_RESOURCE`.
+8. **O relatório**, em `target/mainnet/relatorio-<data>.md`: o endpoint, a
+   data, os IPv4, o aperto e a cadeia, o destino, a suíte, a medida de
+   cada parte, a prova, a resposta, a auditoria e o que o programa
+   confere.
+
+`--ensaio` pula o pré-voo e não espera a rede principal. Confere a
+máquina, a política, o programa e a auditoria onde a rede não chega, e o
+título do relatório diz que não é a fumaça real. O fluxo
+[`rede-principal.yml`](../.github/workflows/rede-principal.yml) roda o
+comando num runner do GitHub quando alguém o pede (`workflow_dispatch`),
+com o relatório como artefato. O GitHub só oferece o botão para um fluxo
+que já está no ramo padrão. A CI não o roda, e não depende da rede
+principal.
+
+### As medidas
+
+Na suíte (o kernel de teste, o x86 em depuração, a bancada), o passo da
+rede principal mede as partes da conexão que chegam a acontecer:
+
+| o DNS disse | DNS | TCP | TLS | o desfecho |
+|---|---|---|---|---|
+| um endereço fora da política | 50 ms | 10 ms, a recusa do gate | — | `denied DENY_RESOURCE` |
+| um endereço da política, de outro servidor | 30 a 40 ms | 20 a 40 ms | 90 a 110 ms, até a recusa | `tls TLS_UNTRUSTED` |
+| que o nome não existe | 30 ms | — | — | `dns DNS_NAME_NOT_FOUND` |
+| nada | 3030 ms, o prazo do DNS | — | — | `dns DNS_UNAVAILABLE` |
+| lixo | 30 ms | — | — | `dns DNS_UNAVAILABLE` |
+
+O caminho verificado inteiro, com os dois `POST` e a verificação, é o das
+medidas do ICP-1 (README, *As medidas do IC*): na bancada, uma consulta
+leva uns 260 ms com o kernel de release e 430 ms com o de depuração, no
+x86. Na rede principal, as partes de cada consulta são as do relatório da
+fumaça real, medidas pelo próprio `livro`. Sem a rede de verdade, não há
+número delas aqui.
+
+O que dá para medir sem a rede é a verificação dos certificados de
+verdade, no hospedeiro, nativa (`cargo test -p web3 --release -- --ignored
+--nocapture medida`, 50 voltas):
+
+| certificado | bytes | mediana | de / a |
+|---|---|---|---|
+| a leitura da sub-rede do `224od` — delegado: duas assinaturas BLS, 47 chaves de sub-rede e 13 nós | 13 055 | 5,8 ms | 5,6 a 9,7 ms |
+| o `/time` do `ivg37` — delegado: duas assinaturas BLS | 1 181 | 5,2 ms | 5,2 a 10,4 ms |
+
+Quase tudo é o emparelhamento das duas assinaturas BLS; o tamanho da
+árvore quase não pesa. O certificado do livro-razão é assinado direto pela
+raiz, com uma assinatura BLS só. No emulador, o mesmo código anda umas
+vinte vezes mais devagar (ICP-1).
+
+### As mutações
+
+Uma de cada vez, com o que a pega:
+
+- os testes do hospedeiro do pacote mutado (`cargo test -p web3` ou `-p
+  tls`);
+- a suíte do x86 só com os casos `icp:`, `dns:`, `tls:` e `http:` — 37
+  casos, que passam todos sem mutação (o controle).
+
+As dezessete pedidas, em dezenove formas: todas reprovadas, nenhuma equivalente.
+
+| | mutação | onde | no hospedeiro | na suíte |
+|---|---|---|---|---|
+| M01 | **qualquer root key**: a delegação não é conferida contra a raiz do arquivo | `web3`, `certificado.rs` | `a_raiz_de_outra_rede_recusa_a_rede_principal` e `um_bit_trocado_na_rede_principal_e_recusado` — a rede principal de verdade —, `outra_raiz_e_recusada`, `os_modos_adversarios` | a `raiz-errada` verificou |
+| M02 | **a root key da própria rede**: o programa pede `/api/v2/status` e usa a raiz que a rede anuncia | `programas/src/icp.rs` e o `icp` | — o `web3` não pede nada à rede: a raiz é sempre um parâmetro | a `raiz-errada` verificou: a PocketIC anuncia a raiz dela, e o programa acreditou |
+| M03 | **ignorar o hostname**: o TLS engole `NotValidForName` | `tls`, `sessao.rs` | `o_nome_errado_e_recusado`, `o_nome_errado_nas_cadeias_novas_e_recusado` | `outro.duke` aceito; a página de `outro.duke` deu 200 |
+| M04 | **ignorar a validade**: o TLS engole `Expired` | `tls`, `sessao.rs` | `a_validade_nas_cadeias_novas`, `o_vencido_e_o_que_ainda_nao_vale_sao_recusados`, `o_relogio_de_quem_conecta_decide_a_validade` | `vencido.duke` aceito, e a validade pela hora autenticada |
+| M05 | **ignorar a assinatura do TLS**: P-256, P-384 e RSA (PKCS#1 v1.5 e PSS) sempre conferem | `tls`, `assinatura.rs` | oito, entre eles `o_certificate_verify_de_outra_chave_e_recusado` e `a_assinatura_que_nao_confere_nas_cadeias_novas_e_recusada` | `falso-p384.duke` aceito |
+| M06 | **ignorar o certificado do IC**: a consulta não confere o `read_state` | `web3`, `agente.rs` | `os_modos_adversarios`, `a_hora_errada_de_quem_verifica` | a `raiz-errada` verificou |
+| M07 | **ignorar a assinatura do IC**: a resposta não é conferida pela chave do nó | `web3`, `consulta.rs` | `a_assinatura_presa_ao_pedido_e_a_resposta`, `o_reply_inteiro_entra_no_que_se_assina`, `a_assinatura_de_um_no_de_fora`, `os_modos_adversarios` | a `assinatura-errada` verificou |
+| M08 | **aceitar a hash tree alterada**: o valor de uma folha fica fora da raiz da árvore | `web3`, `arvore.rs` | 42, entre eles `o_exemplo_da_especificacao` e `a_rede_principal_verifica_pela_raiz_dela`: nenhum certificado de verdade fecha | quinze casos `icp:`: nenhuma consulta verifica |
+| M09 | **aceitar a resposta não certificada**: sem assinatura de nó, aceita | `web3`, `consulta.rs` | `sem_assinatura_ou_com_assinaturas_demais`, `os_modos_adversarios` | a `sem-assinatura` verificou, com 0 de 13 assinaturas |
+| M10 | **o erro do IC vira sucesso**: o desfecho diz `verified` | `programas/src/icp.rs` | — | a `raiz-errada` declarada `verified`, com a delegação que não confere no detalhe |
+| M11 | **contornar o `net.connect`**: a conexão abre sem decisão do gate e sem registro | o kernel, `autorizacao.rs` | — | catorze casos: o endereço fora da política conectou, e as conexões não foram gravadas — entre eles o da rede principal |
+| M12 | **contornar o gate**: a decisão da política é sempre `ALLOW` | o kernel, `autorizacao.rs` | — | quinze casos: sem o gateway no alcance o `icp` conectou, o `random.read` sem permissão saiu, e o nome da rede principal abriu mais do que devia |
+| M13 | **entregar antes da verificação**: a resposta sai mesmo com a prova recusada | `web3`, `agente.rs` | `os_modos_adversarios`, `a_hora_errada_de_quem_verifica` | a `raiz-errada` entregou o texto `ola`, com uma prova vazia (`0/0`) |
+| M14 | **aceitar destino fora da política**: o gate deixa o `net.connect` fora do alcance (gravado como `ALLOW`) | o kernel, `autorizacao.rs` | — | onze casos, entre eles o da rede principal: o endereço que o DNS forjou conectou |
+| M15 | **DNS como autorização**: o endereço que uma resposta do DNS trouxe vira destino deixado | o kernel: `commands.rs` guarda os endereços das respostas de `:53`, e `autorizacao.rs` os deixa | — | sete casos: no da rede principal, o endereço forjado conectou e esperou 15 s até `NETWORK_TIMEOUT`, em vez de `DENY_RESOURCE` antes de qualquer byte; e em `dns: a resposta nao da acesso`, o nome religado abriu um destino fora do alcance |
+| M16 | **remover a auditoria obrigatória**, em duas formas: (a) o programa não declara a consulta; (b) o gate deixa as decisões de rede sem gravá-las | (a) `programas/src/icp.rs`; (b) o kernel, `autorizacao.rs` | — | (a) oito casos `icp:`: a declaração não está no anel, inclusive no da rede principal; (b) dezoito casos: as conexões, o DNS e o corte do firewall sem a decisão na auditoria |
+| M17 | **aceitar a resposta de outro endpoint**, em duas formas: (a) a de outra sub-rede — as faixas do canister não são conferidas; (b) a de um nó de fora da sub-rede, cuja assinatura é pulada | `web3`: (a) `certificado.rs`; (b) `consulta.rs` | (a) `o_canister_de_outra_sub_rede_e_recusado` — a rede principal de verdade —, `as_faixas_da_delegacao`, `a_delegacao_sem_faixas_ou_so_na_forma_antiga`, `o_certificado_da_raiz_vale_com_as_faixas_da_raiz`; (b) `a_assinatura_de_um_no_de_fora` | (a) a `faixa-errada` passou das faixas e só caiu na conferência seguinte — os nós não são da sub-rede do certificado —, com o motivo errado; (b) a `no-de-fora` verificou |
+
+**A M08 não tem forma silenciosa.** Para aceitar uma árvore alterada, a
+raiz que o programa calcula teria de deixar de depender de uma parte da
+árvore, e a assinatura da sub-rede é sobre a raiz que o IC calculou com
+tudo. Uma árvore que esquece um valor perde a assinatura de todos os
+certificados de verdade, e não só a dos alterados. É por isso que ela cai
+pelos testes que verificam, e não pelos que adulteram: o
+`um_bit_trocado_na_rede_principal_e_recusado` recusa o tempo e a chave do
+nó alterados com ela também, porque já recusava o certificado inteiro.
+
+### O que fica de fora
+
+- **A fumaça real ainda não rodou.** O ICP-4b foi escrito num ambiente cuja
+  saída passa por um proxy que recusa `icp-api.io` (403), sem DNS, e que
+  reabre o TLS. O ensaio rodou lá inteiro: as três rodadas pararam no DNS
+  (`DNS_NAME_NOT_FOUND`). Até a fumaça real rodar numa máquina com a rede
+  de verdade, a cadeia real de `icp-api.io` e a resposta real do
+  livro-razão não foram conferidas pelo programa.
+- **As âncoras são duas.** Só as raízes da Let's Encrypt. Se `icp-api.io`
+  mudar de autoridade, o TLS recusa (`TLS_UNTRUSTED`) e o pré-voo diz
+  `TLS_ANCHOR_GAP`: falha fechada. Outra âncora é outra configuração da
+  imagem, decidida à parte.
+- **Os endereços são os da hora da imagem.** Os IPv4 que a fumaça põe na
+  política são os que o resolvedor do hospedeiro deu antes de montar a
+  imagem. Se o DNS da máquina responder outro — os *API boundary nodes*
+  mudam —, o gate recusa (`DENY_RESOURCE`) até o administrador escrever o
+  novo: falha fechada. Descobrir os nós pela árvore de estado
+  (`api_boundary_nodes`) seria uma decisão nova.
+- **Só IPv4 e HTTP/1.1.** O Duke conecta IPv4; o HTTP/3 está fora, de
+  propósito.
+- **A hora sem fontes públicas.** O registro de hora da imagem só tem as
+  fontes da bancada. Sem elas, o programa confere a validade do TLS e o
+  tempo do certificado do IC (a janela de cinco minutos) pelo tempo
+  lógico, que vem do RTC, e diz `hora rtc`.
+- **Uma consulta anônima.** Nada de chamada de atualização, consulta
+  autenticada, *replicated query*, *Management Canister*, ledger ou
+  *cycles* na rede principal.
+- **O tamanho.** O `icp` (940 920 bytes no x86) e o `livro` (899 512)
+  ficam a uns 10% do teto de leitura do kernel, 1 MiB. Mais código de TLS
+  ou do IC num deles pede outra rodada de redução, como a do ICP-4a.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
 com elas, chaves de sessão e o domínio de delegação —; a custódia no TPM;
-o compartilhamento de chaves; exportar ou importar uma privada; a rede
-principal do IC; *cycles*; implantar canisters; o `icp-cli` dentro do
-Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no TCP ou no HTTP: o
-ICP-1 e o ICP-3 rodam sobre a infraestrutura que já existia, e o gate
-decide as chaves como decide tudo. O TLS mudou uma vez, no ICP-4a — o
-perfil de assinaturas do programa, para as cadeias públicas —, e a rede
-principal continua desligada: as âncoras dela, os endereços dos *API
-boundary nodes* e a raiz do IC na imagem são o passo seguinte.
+o compartilhamento de chaves; exportar ou importar uma privada; na rede
+principal, qualquer coisa além da consulta anônima — a chamada de
+atualização, a consulta autenticada, o *Management Canister*, o ledger e
+os *cycles*; descobrir os *API boundary nodes* pela árvore de estado;
+implantar canisters; o `icp-cli` dentro do Duke; o CDK; a EVM; o HTTP/3.
+Nem mudança no DNS, no TCP ou no HTTP: o ICP-1, o ICP-3 e o ICP-4b rodam
+sobre a infraestrutura que já existia, e o gate decide as chaves e os
+destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de
+assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
+principal pela configuração da imagem — a raiz, as âncoras públicas, a
+rede `mainnet` —, sem destino dela na política padrão; o que falta para
+fechá-lo é a fumaça real, numa máquina com a rede de verdade.
