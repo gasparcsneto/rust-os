@@ -805,7 +805,7 @@ fn uptime_do_dhcp(m: &mut Ligada) -> Result<Option<u64>, String> {
 }
 
 /// O valor de um campo de um registro, ou vazio.
-fn campo(r: &ObjetoPlano, nome: &str) -> String {
+pub(crate) fn campo(r: &ObjetoPlano, nome: &str) -> String {
     r.iter()
         .find(|(n, _)| n == nome)
         .and_then(|(_, v)| v.clone())
@@ -820,7 +820,7 @@ fn do_servico(r: &ObjetoPlano) -> bool {
 /// Os registros da auditoria depois de `depois`, até a cabeça de agora, e a
 /// cabeça. Em páginas: cada `audit.tail` também é gravado, e quem lesse até
 /// a página vazia nunca chegaria lá.
-fn auditoria(m: &mut Ligada, depois: u64) -> Result<(Vec<ObjetoPlano>, u64), String> {
+pub(crate) fn auditoria(m: &mut Ligada, depois: u64) -> Result<(Vec<ObjetoPlano>, u64), String> {
     let fim: u64 = campo_simples(&m.pedir("audit.head", "{}")?, "seq")
         .and_then(|v| v.parse().ok())
         .ok_or("audit.head sem seq")?;
@@ -1019,7 +1019,7 @@ fn amostra_de_time_sync(registros: &[ObjetoPlano]) -> String {
 
 /// Uma data `AAAA-MM-DDTHH:MM:SS` do RTC, de um instante em segundos desde a
 /// época Unix.
-fn data_de(unix_s: i64) -> String {
+pub(crate) fn data_de(unix_s: i64) -> String {
     let dias = unix_s.div_euclid(86_400);
     let s = unix_s.rem_euclid(86_400);
     // O calendário civil a partir dos dias (o algoritmo de Howard Hinnant).
@@ -1204,7 +1204,7 @@ fn media(v: &[u64]) -> u64 {
 /// Uma operação administrativa pela serial, com a prova do administrador da
 /// imagem — o mesmo caminho da fumaça: o desafio, a prova sobre o comando e
 /// os parâmetros, e a execução pelo gate.
-fn administrar(m: &mut Ligada, comando: &str, params: &str) -> Result<String, String> {
+pub(crate) fn administrar(m: &mut Ligada, comando: &str, params: &str) -> Result<String, String> {
     let chaves = chaves::Chaves::garantir()?;
     let desafio = m.pedir("admin.challenge", "{}")?;
     let pedido = super::pedido_administrativo(&chaves, 0, &desafio, comando, params, params)?;
@@ -1372,7 +1372,7 @@ const COOKIES_LOGO: &str = "futuro,vence";
 const COOKIES_DEPOIS: &str = "futuro";
 
 /// O número do registro mais novo do log do kernel.
-fn ultimo_do_log(m: &mut Ligada) -> Result<u64, String> {
+pub(crate) fn ultimo_do_log(m: &mut Ligada) -> Result<u64, String> {
     let r = m.pedir("log.tail", r#"{"count":1}"#)?;
     let registros = objetos_planos(apos(&r, r#""records":["#).ok_or("log.tail sem registros")?)?;
     Ok(registros

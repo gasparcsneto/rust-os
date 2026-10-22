@@ -18,6 +18,7 @@ mod canal_tcp;
 mod codigo;
 mod icp;
 mod persistencia;
+mod rede_principal;
 mod servidor_de_hora;
 mod tempo;
 mod tls;
@@ -217,7 +218,7 @@ fn main() -> ExitCode {
             pular = false;
             continue;
         }
-        if a == "--arch" || a == "--teclado" || a == "--canal" {
+        if a == "--arch" || a == "--teclado" || a == "--canal" || a == "--enderecos" {
             pular = true;
         } else if !a.starts_with("--") {
             posicionais.push(a);
@@ -261,6 +262,12 @@ fn main() -> ExitCode {
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
         "tempo" => tempo::tempo(arch, release),
+        "mainnet" => rede_principal::mainnet(
+            arch,
+            release,
+            extrair_valor(&args, "--enderecos"),
+            args.iter().any(|a| a == "--ensaio"),
+        ),
         "help" | "-h" => {
             ajuda();
             Ok(ExitCode::SUCCESS)
@@ -352,6 +359,12 @@ COMANDOS:
     tempo                     o Roughtime de ponta a ponta, contra as fontes de
                               hora do hospedeiro: atraso, perda, divergência,
                               quórum, saltos e recuperação, uma máquina por cenário
+    mainnet                   a rede principal do IC, de verdade: uma consulta
+                              verificada ao livro-razão do ICP, à mão e fora da
+                              CI — precisa de DNS e da porta 443 sem proxy;
+                              --enderecos a,b dá os IPv4 de icp-api.io, e
+                              --ensaio confere a máquina sem a rede (não é a
+                              fumaça real)
     help                      mostra esta mensagem
 
 EXEMPLOS:

@@ -538,7 +538,8 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     │   └── testes.rs  contra o exemplo da especificação e contra o `ic-certification`
     ├── certificado.rs  o certificado: a assinatura BLS, a delegação de um nível, as faixas da sub-rede e o tempo
     ├── certificado/
-    │   └── testes.rs  contra a bancada e contra o `ic-certificate-verification`
+    │   ├── testes.rs  contra a bancada e contra o `ic-certificate-verification`
+    │   └── rede_principal.rs  respostas gravadas da rede principal, conferidas pela raiz dela — `web3/dados/rede_principal/`
     ├── assinatura.rs  a assinatura Ed25519 de um nó, pela ZIP215
     ├── assinatura/
     │   └── testes.rs  a ZIP215 daqui contra o `ic-ed25519`
@@ -668,6 +669,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── legado.rs     pede, não busca a resposta e troca de imagem: a nova não a encontra
         ├── icp.rs        consulta o canister da bancada pelo DNS, TCP, TLS e HTTP, confere a prova de dentro e declara o desfecho: a prova não dá acesso a nada
         ├── verificado.rs o IC na imagem de produção: o texto e o eco verificados pela rede sem DNS, a prova adulterada recusada, cada consulta medida e declarada
+        ├── livro.rs      a rede principal do IC, de verdade: o símbolo do livro-razão do ICP pelo DNS, o gate, o TLS público e a verificação pela raiz da imagem, cada parte medida
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
@@ -676,6 +678,7 @@ xtask/src/
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, a auditoria e a revogação
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina — as raízes P-256, RSA e P-384 e as cadeias com a forma das públicas —, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão

@@ -1,0 +1,72 @@
+# A fumaça real da rede principal do IC: `cargo xtask mainnet` — ver
+# `docs/ICP.md`, "A rede principal (ICP-4b)".
+#
+# Fora da CI, de propósito: a CI não depende da rede principal — a suíte
+# confere o caminho inteiro com a bancada, sem ela —, e este fluxo só roda
+# quando alguém o pede, pelo botão "Run workflow" da aba Actions. O GitHub
+# só oferece o botão para um fluxo que está no ramo padrão; o ramo que
+# roda é o que se escolhe nele. Só leitura: uma consulta anônima ao
+# livro-razão do ICP, e nada que mude estado na rede principal.
+#
+# O runner tem o que a fumaça precisa e uma máquina atrás de um proxy não
+# tem: DNS de verdade e a porta 443 sem ninguém reabrindo o TLS. O
+# relatório sai no log e como artefato.
+name: Rede principal (fumaça real)
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: A arquitetura da máquina
+        type: choice
+        options: [x86_64, aarch64]
+        default: x86_64
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  mainnet:
+    name: A rede principal do IC (${{ inputs.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: mainnet-${{ inputs.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: mainnet-${{ inputs.arch }}-
+
+      # As mesmas da fumaça: o kernel de produção com o disco, o TPM e a
+      # rede do emulador. O `openssl` é do pré-voo, que lê a cadeia real.
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3 openssl
+
+      - name: A fumaça real
+        run: cargo xtask mainnet --arch ${{ inputs.arch }} --release
+
+      - name: O relatório
+        if: always()
+        run: cat target/mainnet/relatorio-*.md || true
+
+      - name: O relatório, como artefato
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-mainnet-${{ inputs.arch }}
+          path: target/mainnet/relatorio-*.md
+          if-no-files-found: ignore
