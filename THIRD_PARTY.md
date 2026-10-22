@@ -195,6 +195,25 @@ Interface Specification* (`dfinity/portal`, commit
 a podada, com a raiz e as procuras; o id de pedido de exemplo, campo a
 campo; e os Principals `em77e-bvlzu-aq`, `2vxsx-fae` e `aaaaa-aa`.
 
+E as respostas reais da rede principal do IC: quatro corpos de
+`read_state` que ela respondeu, gravados pelo `ic-agent` nos testes dele,
+em `web3/dados/rede_principal/` — dados, sem uma linha de código:
+
+| Arquivo do Duke | Origem no `ic-agent` |
+|---|---|
+| `web3/dados/rede_principal/ivg37_time.bin` | `src/agent/agent_test/ivg37_time.bin` |
+| `web3/dados/rede_principal/ivg37_time_pruned_ranges.bin` | `src/agent/agent_test/ivg37_time_pruned_ranges.bin` |
+| `web3/dados/rede_principal/ivg37_delegated_v2.bin` | `src/agent/agent_test/ivg37_delegated_v2.bin` |
+| `web3/dados/rede_principal/224od_subnet.bin` | `src/agent/agent_test/224od_subnet.bin` |
+
+Obtidos do pacote `ic-agent` 0.49.2, no crates.io — o SHA-256 do `.crate`
+é o `cksum` do índice, `1f9086b59107b6d6485a915762a2a3986ef208e80bb40eff22d099bbcd71deea`
+—, publicado do commit `5053d3585eb829eb8e75ad1099ad8a4a19721099` de
+<https://github.com/dfinity/agent-rs>, em `ic-agent`; Apache-2.0. A chave da
+raiz da rede principal, em `web3/dados/rede_principal/raiz.hex`, é a
+`IC_ROOT_KEY` do mesmo pacote. Os testes de
+`web3/src/icp/certificado/rede_principal.rs` conferem as respostas com ela.
+
 Ficam no binário dos programas, sem modificação, como dependências
 normais: `ic-verify-bls-signature` 0.6.0 (Apache-2.0), para a assinatura
 BLS dos certificados, e `ic_bls12_381` 0.10.1 (MIT OU Apache-2.0), por
@@ -205,6 +224,7 @@ O texto da Licença Apache 2.0 está em [`licencas/Apache-2.0`](licencas/Apache-
 ```text
 Copyright © 2021 DFINITY Foundation   (ic-ed25519)
 Copyright 2022 DFINITY Foundation     (dfinity/portal)
+Copyright DFINITY Foundation          (dfinity/agent-rs: os corpos gravados da rede principal)
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

@@ -581,3 +581,6 @@ pub fn ler_leb128(bytes: &[u8]) -> Option<u64> {
 
 #[cfg(test)]
 mod testes;
+
+#[cfg(test)]
+mod rede_principal;
