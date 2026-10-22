@@ -31656,6 +31656,10 @@ static CASOS: &[Caso] = &[
         f: icp_o_alcance_e_a_permissao_sao_do_gate,
     },
     Caso {
+        nome: "icp: a rede principal: o dns nao abre nada",
+        f: icp_a_rede_principal_o_dns_nao_abre_nada,
+    },
+    Caso {
         nome: "icp: duas consultas ao mesmo tempo",
         f: icp_duas_consultas_ao_mesmo_tempo,
     },
@@ -48659,6 +48663,7 @@ const ICP_CONTAR: i64 = 8;
 const ICP_LENTO: i64 = 9;
 const ICP_RECUSA_NA_CHAMADA: i64 = 10;
 const ICP_SEM_CANISTER: i64 = 11;
+const ICP_SIMBOLO: i64 = 12;
 
 /// O `c` de uma chamada do `icp`: zero é o anônimo; 1 e 2, as chaves
 /// `chave:bancada` e `chave:bancada-2` de quem o lançou; somado
@@ -48681,7 +48686,7 @@ const CANISTER_QUE_NAO_EXISTE: &str = "pp254-cl777-77776-aaaaq-cai";
 
 /// As redes de `/dados/icp/redes`, na ordem do programa: o índice é o `b`
 /// de um passo.
-const REDES_DO_ICP: [&str; 13] = [
+const REDES_DO_ICP: [&str; 14] = [
     "bancada",
     "lenta",
     "raiz-errada",
@@ -48695,13 +48700,15 @@ const REDES_DO_ICP: [&str; 13] = [
     "velho",
     "direta",
     "assincrona",
+    "mainnet",
 ];
 
 /// A rede honesta, pelo DNS da bancada, a lenta e a que responde a
-/// chamada com 202.
+/// chamada com 202 — e a rede principal, que a suíte nunca alcança.
 const REDE_BANCADA: i64 = 0;
 const REDE_LENTA: i64 = 1;
 const REDE_ASSINCRONA: i64 = 12;
+const REDE_PRINCIPAL: i64 = 13;
 
 /// Roda `f` com o DNS da bancada respondendo `icp.duke` com o gateway do
 /// IC — ver [`com_os_nomes_da_bancada`].
@@ -48787,7 +48794,7 @@ impl Icp {
     /// Lança o `icp` com `autoridade` e espera ele ler as âncoras do TLS e
     /// as redes, pelo gate.
     fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Icp, &'static str> {
-        Icp::lancar_em(autoridade, "teste-icp", "icp: pronto (13 redes)")
+        Icp::lancar_em(autoridade, "teste-icp", "icp: pronto (14 redes)")
     }
 
     /// Lança um segundo `icp`, com o primeiro vivo: ele escuta o outro
@@ -48796,7 +48803,7 @@ impl Icp {
         Icp::lancar_em(
             autoridade,
             "teste-icp-2",
-            "icp: pronto pelo segundo canal (13 redes)",
+            "icp: pronto pelo segundo canal (14 redes)",
         )
     }
 
@@ -48913,16 +48920,24 @@ impl Icp {
 /// sabe: o processo e o programa, a conexão e o destino real dela — ou que
 /// não havia conexão —, e a decisão do gate, que não teve recurso.
 fn declaracao_do_icp(fio: u64, passo: &PassoDoIcp, metodo: &str, ancorada: bool) -> Resultado {
+    declaracao_de_consulta(fio, passo, CANISTER_DA_BANCADA, metodo, ancorada)
+}
+
+/// [`declaracao_do_icp`], de uma consulta a `canister`.
+fn declaracao_de_consulta(
+    fio: u64,
+    passo: &PassoDoIcp,
+    canister: &str,
+    metodo: &str,
+    ancorada: bool,
+) -> Resultado {
     use politica::Codigo;
     let n = passo.registro().ok_or("o icp nao declarou o passo")?;
     let e = registro_numero(n).ok_or("a declaracao do icp nao esta no anel")?;
     let d = decisao_executada(&e.detalhe).ok_or("a declaracao do icp nao aponta a decisao")?;
     let decisao = registro_numero(d).ok_or("a decisao da declaracao nao esta no anel")?;
     let pelo = alloc::format!("pelo processo {fio} (icp ");
-    let alegacao = alloc::format!(
-        "icp.query {CANISTER_DA_BANCADA}/{metodo} {}",
-        passo.desfecho
-    );
+    let alegacao = alloc::format!("icp.query {canister}/{metodo} {}", passo.desfecho);
     let ancora = if ancorada {
         e.detalhe.contains("): conexao ")
             && e.detalhe
@@ -48954,10 +48969,13 @@ fn declaracao_do_icp(fio: u64, passo: &PassoDoIcp, metodo: &str, ancorada: bool)
 /// nome do gateway — as decisões do gate são sobre destinos, arquivos, a
 /// semente e o relógio, e o kernel não leu o que se declarou.
 fn o_ic_so_na_alegacao(fio: u64) -> Resultado {
-    const DO_IC: [&str; 10] = [
+    const DO_IC: [&str; 13] = [
         "pi33i",
         "xp3jw",
         "pp254",
+        "ryjl3",
+        "icrc1_symbol",
+        "icp-api.io",
         "icp.query",
         "icp.update",
         "icp.duke",
@@ -49623,6 +49641,132 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 }
                 Ok(())
             })
+        })();
+        let fim = icp.encerrar();
+        r.and(fim)
+    })
+}
+
+/// A rede principal da imagem, na suíte — que nunca a alcança. O `icp`
+/// pergunta ao livro-razão do ICP o símbolo dele pela rede `mainnet` de
+/// `/dados/icp/redes` — a raiz da rede principal, e as âncoras públicas
+/// da imagem —, pelo caminho medido da fumaça real
+/// (`programas::icp::consultar_medindo`), e o DNS da bancada responde
+/// `icp-api.io` como quem mente. O nome não abre nada, e um DNS falso dá
+/// no máximo negação de serviço:
+///
+/// - o nome num endereço fora da política: `DENY_RESOURCE` no
+///   `net.connect`, antes de qualquer byte — nenhum `net.send` para ele;
+/// - o nome no eco TLS da bancada, um destino que a política dá ao
+///   operador, servindo a raiz da bancada: o gate deixa, e o TLS recusa
+///   (`TLS_UNTRUSTED`) — as âncoras públicas não confiam na bancada, e
+///   nada que o servidor mandou virou âncora;
+/// - o mesmo destino tirado do alcance do operador — a revogação antes da
+///   conexão —: `DENY_RESOURCE`; devolvido, o TLS recusa de novo;
+/// - o nome que não existe, o DNS mudo e o que responde lixo: nenhum
+///   endereço, e nenhum `net.connect` de TCP;
+/// - cada passo `failed_connect` — nunca `verified` —, declarado sem
+///   âncora, porque não houve conexão com o endpoint, e com o destino que
+///   o nome deu e a medida da conexão na linha do programa;
+/// - as âncoras públicas lidas uma vez, pelo gate; e nada da rede
+///   principal em registro nenhum fora da alegação.
+fn icp_a_rede_principal_o_dns_nao_abre_nada() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use crate::rede::bancada_dns::{self, Modo};
+    use politica::Codigo;
+    const ENDPOINT: &str = "icp-api.io";
+    const LIVRO_RAZAO: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+    const FORA: [u8; 4] = [10, 0, 2, 99];
+    const ECO_TLS: [u8; 4] = [10, 0, 2, 100];
+    const DESTINO_FORA: &str = "tcp:10.0.2.99:443";
+    const DESTINO_ECO: &str = "tcp:10.0.2.100:443";
+    const SEM_O_ECO_TLS: (&str, &str) = (
+        "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69",
+        "recurso operador net.connect tcp:10.0.2.100:7 udp:10.0.2.2:69",
+    );
+    com_os_nomes_da_bancada(&[(ENDPOINT, &[FORA])], || {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(214), "icp-principal", "operador");
+        let icp = Icp::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = icp.fio;
+        let r = (|| -> Resultado {
+            let passo = "simbolo mainnet";
+            // O passo, e o que a linha dele tem de dizer: o destino, a
+            // medida da conexão — que não se confere, é do relógio —, e a
+            // falha, com a família e o código.
+            let pedir = |destino: &str, falha: &str| -> Result<PassoDoIcp, &'static str> {
+                let p = icp.passo(ICP_SIMBOLO, REDE_PRINCIPAL, 0, passo)?;
+                let inicio = alloc::format!("destino {destino}; dns ");
+                if p.desfecho != "failed_connect"
+                    || p.hora == "nenhuma"
+                    || !p.detalhe.starts_with(&inicio)
+                    || !p.detalhe.ends_with(&alloc::format!("; {falha}"))
+                {
+                    crate::log_error!("teste", "{} {}: {:?}", destino, falha, p);
+                    return Err("o nome da rede principal abriu mais do que devia");
+                }
+                declaracao_de_consulta(fio, &p, LIVRO_RAZAO, "icrc1_symbol", false)?;
+                Ok(p)
+            };
+            let codigos = |destino: &str| {
+                decisoes_do_processo(fio, "net.connect", destino)
+                    .iter()
+                    .map(|(_, c, _)| *c)
+                    .collect::<alloc::vec::Vec<_>>()
+            };
+
+            // Fora da política: o gate recusa, e nada sai para lá.
+            pedir(DESTINO_FORA, "denied DENY_RESOURCE")?;
+            if codigos(DESTINO_FORA) != [Codigo::DenyResource]
+                || !decisoes_do_processo(fio, "net.send", DESTINO_FORA).is_empty()
+            {
+                return Err("o endereco fora da politica nao foi recusado pelo gate");
+            }
+
+            // Dentro da política, no servidor errado: o gate deixa, e o TLS
+            // recusa.
+            bancada_dns::por_de_teste(&[(ENDPOINT, &[ECO_TLS])], Modo::Normal);
+            pedir(DESTINO_ECO, "tls TLS_UNTRUSTED")?;
+            if codigos(DESTINO_ECO) != [Codigo::Allow] {
+                return Err("o destino da politica nao foi deixado pelo gate");
+            }
+
+            // A revogação antes da conexão: o mesmo nome, o destino fora do
+            // alcance.
+            com_a_politica(politica_da_bancada_icp(&[SEM_O_ECO_TLS])?, || {
+                pedir(DESTINO_ECO, "denied DENY_RESOURCE").map(|_| ())
+            })?;
+            pedir(DESTINO_ECO, "tls TLS_UNTRUSTED")?;
+            if codigos(DESTINO_ECO) != [Codigo::Allow, Codigo::DenyResource, Codigo::Allow] {
+                crate::log_error!("teste", "{:?}", codigos(DESTINO_ECO));
+                return Err("a revogacao antes da conexao nao foi decidida pelo gate");
+            }
+
+            // Nenhum endereço: o nome que não existe, o DNS mudo e o que
+            // responde lixo.
+            let antes = crate::autorizacao::ultimo_registro();
+            bancada_dns::por_de_teste(&[], Modo::Normal);
+            pedir("nenhum", "dns DNS_NAME_NOT_FOUND")?;
+            for modo in [Modo::Muda, Modo::Malformada] {
+                bancada_dns::por_de_teste(&[(ENDPOINT, &[ECO_TLS])], modo);
+                pedir("nenhum", "dns DNS_UNAVAILABLE")?;
+            }
+            bancada_dns::por_de_teste(&[], Modo::Normal);
+            let tcp = registros_do_processo(fio, antes)
+                .iter()
+                .filter(|(m, r, _, _)| m == "net.connect" && r.starts_with("tcp:"))
+                .count();
+            if tcp != 0 {
+                return Err("sem endereco do DNS, o icp conectou a algum lugar");
+            }
+
+            // As âncoras públicas, uma vez; e a rede principal só na
+            // alegação.
+            if decisoes_do_processo(fio, "fs.read", "/dados/tls/publicas.pem").len() != 1 {
+                return Err("as ancoras publicas nao foram lidas uma vez pelo gate");
+            }
+            o_ic_so_na_alegacao(fio)
         })();
         let fim = icp.encerrar();
         r.and(fim)

@@ -245,20 +245,94 @@ fn id_da_pergunta() -> u16 {
 
 /// Conecta à origem de `url` — ver o cabeçalho do módulo para a ordem.
 pub fn conectar(url: &Url, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
+    conectar_com(url, opcoes, &mut Cronometro(None))
+}
+
+/// O tempo de cada parte de uma conexão, em ms do `system.uptime`, e o
+/// destino que o nome deu — ver [`conectar_medindo`]. Uma parte que não
+/// aconteceu fica em zero.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Medida {
+    /// A semente e o relógio do TLS, pelo gate — zero no `http`.
+    pub preparo_ms: u64,
+    /// O nome virando endereço, pelo DNS do programa — zero com o
+    /// endereço fixo.
+    pub dns_ms: u64,
+    /// O `net.connect`, decidido pelo gate, e o TCP.
+    pub tcp_ms: u64,
+    /// O aperto do TLS — zero no `http`.
+    pub tls_ms: u64,
+    /// O destino pedido ao gate, `tcp:<ipv4>:<porta>`, se o nome virou
+    /// endereço.
+    pub destino: Option<String>,
+}
+
+/// [`conectar`], com o tempo de cada parte: o preparo do TLS, o DNS, o TCP
+/// e o aperto — mesmo quando uma delas falha, a dela vem medida. O caminho
+/// é o mesmo; a medida custa um `system.uptime` por parte, decidido pelo
+/// gate como os outros pedidos, e só a quem mede.
+pub fn conectar_medindo(url: &Url, opcoes: &Opcoes<'_>) -> (Result<ConexaoHttp, Falha>, Medida) {
+    let mut medida = Medida::default();
+    let mut cronometro = Cronometro(Some((&mut medida, crate::nativo::uptime_ms())));
+    let r = conectar_com(url, opcoes, &mut cronometro);
+    (r, medida)
+}
+
+/// Quem mede uma conexão: a medida e a última marca. Sem medida, não pede
+/// relógio nenhum.
+struct Cronometro<'m>(Option<(&'m mut Medida, u64)>);
+
+impl Cronometro<'_> {
+    /// Fecha a parte `parte`: o tempo desde a última marca.
+    fn marcar(&mut self, parte: fn(&mut Medida) -> &mut u64) {
+        if let Some((medida, desde)) = &mut self.0 {
+            let agora = crate::nativo::uptime_ms();
+            *parte(medida) = agora.saturating_sub(*desde);
+            *desde = agora;
+        }
+    }
+
+    fn destino(&mut self, destino: &str) {
+        if let Some((medida, _)) = &mut self.0 {
+            medida.destino = Some(String::from(destino));
+        }
+    }
+}
+
+fn conectar_com(
+    url: &Url,
+    opcoes: &Opcoes<'_>,
+    cronometro: &mut Cronometro<'_>,
+) -> Result<ConexaoHttp, Falha> {
     // Com `https`, antes de qualquer pergunta e de qualquer conexão: as
     // âncoras, a semente e o relógio. Sem eles, nada sai.
     let cifra = match url.esquema {
         Esquema::Http => None,
         Esquema::Https => {
             let ancoras = opcoes.ancoras.ok_or(Falha::SemAncoras)?;
-            let semente = tls::semente().map_err(Falha::Tls)?;
-            let agora = tls::hora().map_err(Falha::Tls)?.validade_s();
+            let semente = tls::semente().map_err(Falha::Tls);
+            let agora =
+                semente.and_then(|s| Ok((s, tls::hora().map_err(Falha::Tls)?.validade_s())));
+            cronometro.marcar(|m| &mut m.preparo_ms);
+            let (semente, agora) = agora?;
             Some((ancoras, semente, agora))
         }
     };
-    let [a, b, c, d] = endereco(url, opcoes.resolucao, id_da_pergunta())?;
+    let endereco = endereco(url, opcoes.resolucao, id_da_pergunta());
+    // Sem pergunta — o endereço na URL, ou o fixo —, o DNS não tomou tempo
+    // nenhum, e não há o que marcar.
+    if matches!(
+        (&url.host, opcoes.resolucao),
+        (Host::Nome(_), Resolucao::Dns(_))
+    ) {
+        cronometro.marcar(|m| &mut m.dns_ms);
+    }
+    let [a, b, c, d] = endereco?;
     let destino = format!("tcp:{a}.{b}.{c}.{d}:{}", url.porta);
-    let conexao = conexao::abrir(&destino, opcoes.prazo).map_err(Falha::Conexao)?;
+    cronometro.destino(&destino);
+    let conexao = conexao::abrir(&destino, opcoes.prazo).map_err(Falha::Conexao);
+    cronometro.marcar(|m| &mut m.tcp_ms);
+    let conexao = conexao?;
     let numero = conexao.numero();
     let (via, suite) = match cifra {
         None if opcoes.protocolo == Protocolo::Http2 => {
@@ -281,7 +355,9 @@ pub fn conectar(url: &Url, opcoes: &Opcoes<'_>) -> Result<ConexaoHttp, Falha> {
                 semente,
                 protocolos,
             )
-            .map_err(Falha::Tls)?;
+            .map_err(Falha::Tls);
+            cronometro.marcar(|m| &mut m.tls_ms);
+            let sessao = sessao?;
             let suite = sessao.suite();
             let h2 = sessao.protocolo() == Some(H2);
             if opcoes.protocolo == Protocolo::Http2 && !h2 {

@@ -70,9 +70,19 @@ pub(crate) const CANISTER_DA_RAIZ: &str = "xp3jw-ot777-77777-aaaaa-cai";
 /// A sub-rede do canister: a suíte confere que a prova veio dela.
 const SUB_REDE: &str = "753q6-ah42a-rm7md-yb6nn-3egqb-e2tyy-zdjgf-ind25-haovq-fe74w-pqe";
 
-/// A chave da raiz da rede principal do IC — pública, e de outra rede: a
-/// da `raiz-errada`.
-const RAIZ_DE_OUTRA_REDE: &str = "308182301d060d2b0601040182dc7c0503010201060c2b0601040182dc7c05030201036100814c0e6ec71fab583b08bd81373c255c3c371b2e84863c98a4f1e08b74235d14fb5d9c0cd546d9685f913a0c0b2cc5341583bf4b4392e467db96d65b9bb4cb717112f8472e0d5a4d14505ffd7484b01291091c5f87b98883463f98091a0baaae";
+/// A chave da raiz da rede principal do IC, em DER: a `IC_ROOT_KEY` do
+/// `ic-agent`, num arquivo só — o mesmo com que os testes do `web3` conferem
+/// respostas gravadas da rede principal (ver
+/// `web3/src/icp/certificado/rede_principal.rs`). É a da rede `mainnet`, e
+/// a da `raiz-errada`: na bancada, a de outra rede.
+pub(crate) fn raiz_da_rede_principal() -> &'static str {
+    include_str!("../../web3/dados/rede_principal/raiz.hex").trim()
+}
+
+/// A rede principal do IC: o nome em `/dados/icp/redes`, e o endpoint dos
+/// *API boundary nodes* — o que o TLS prova e o que vai no `Host`. O host
+/// vai pelo DNS do programa; o destino, pelo gate.
+pub(crate) const REDE_PRINCIPAL: (&str, &str) = ("mainnet", "icp-api.io");
 
 /// As redes da imagem, na ordem do programa `icp`: o nome, e se o host
 /// vai pelo DNS — senão, o endereço fixo da bancada. A `bancada` passa
@@ -94,9 +104,10 @@ pub(crate) const REDES: [(&str, bool); 13] = [
     ("assincrona", false),
 ];
 
-/// O conteúdo de `/dados/icp/redes`.
+/// O conteúdo de `/dados/icp/redes`: as redes da bancada e a rede
+/// principal.
 pub(crate) fn redes() -> String {
-    // Curto: o arquivo inteiro cabe num pedaço do `fs.read`.
+    // Pequeno: dois pedaços do `fs.read`, de 4 KiB.
     let mut texto =
         String::from("# A PocketIC da bancada, um modo do proxy por rede (xtask/src/icp.rs).\n");
     for (nome, dns) in REDES {
@@ -107,7 +118,7 @@ pub(crate) fn redes() -> String {
         };
         let endereco = if dns { "dns" } else { "10.0.2.100" };
         let raiz = if nome == "raiz-errada" {
-            RAIZ_DE_OUTRA_REDE
+            raiz_da_rede_principal()
         } else {
             RAIZ
         };
@@ -115,6 +126,14 @@ pub(crate) fn redes() -> String {
             "rede {nome} https://{host}:4943 {endereco} bls:{raiz}\n"
         ));
     }
+    // A rede principal: o endereço pelo DNS, e a raiz da imagem — nunca a
+    // que a rede anuncia. Conectar a ela é do gate: nenhum destino dela
+    // está na política padrão.
+    let (nome, host) = REDE_PRINCIPAL;
+    texto.push_str(&format!(
+        "# A rede principal do IC: os API boundary nodes, pelo DNS.\nrede {nome} https://{host} dns bls:{}\n",
+        raiz_da_rede_principal()
+    ));
     texto
 }
 
@@ -326,7 +345,7 @@ mod testes {
     fn as_redes_da_imagem() {
         let texto = redes();
         let lidas = web3::icp::registro::ler(&texto).expect("o arquivo da imagem não vale");
-        assert_eq!(lidas.len(), REDES.len());
+        assert_eq!(lidas.len(), REDES.len() + 1);
         for ((nome, dns), rede) in REDES.iter().zip(&lidas) {
             assert_eq!(rede.nome, *nome);
             assert_eq!(rede.porta, 4943);
@@ -338,9 +357,34 @@ mod testes {
         assert_eq!(raiz("velho"), raiz("bancada"));
         assert_eq!(raiz("direta"), raiz("bancada"));
         assert_eq!(raiz("assincrona"), raiz("bancada"));
+        // A rede principal: o endpoint dos API boundary nodes, na porta do
+        // HTTPS, pelo DNS, com a raiz da rede principal — a mesma da
+        // `raiz-errada`, que na bancada é de outra rede.
+        let principal = lidas.last().unwrap();
+        assert_eq!(principal.nome, "mainnet");
+        assert_eq!(principal.host, "icp-api.io");
+        assert_eq!(principal.porta, 443);
+        assert_eq!(principal.endereco, None);
+        assert_eq!(principal.raiz, raiz("raiz-errada"));
+        let der: Vec<u8> = (0..raiz_da_rede_principal().len() / 2)
+            .map(|i| u8::from_str_radix(&raiz_da_rede_principal()[2 * i..2 * i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(principal.raiz.der().as_slice(), der.as_slice());
         // O programa lê o arquivo em pedaços de 4 KiB do `fs.read`, uma
-        // decisão do gate cada: dois, com as treze redes — a suíte conta
+        // decisão do gate cada: dois, com as catorze redes — a suíte conta
         // pelo tamanho.
         assert!(texto.len() <= 2 * 4096, "{} bytes", texto.len());
+    }
+
+    /// As âncoras públicas da imagem: as duas raízes fixadas, nada mais, e o
+    /// arquivo se lê como as âncoras do programa.
+    #[test]
+    fn as_ancoras_publicas_da_imagem() {
+        let pem = super::super::tls::publicas().expect("as ancoras publicas");
+        let blocos = pem::parse_many(&pem).unwrap();
+        assert_eq!(blocos.len(), 2);
+        assert!(blocos.iter().all(|b| b.tag() == "CERTIFICATE"));
+        // Cabe no teto do programa, que lê 16 KiB.
+        assert!(pem.len() <= 16 * 1024);
     }
 }

@@ -233,6 +233,16 @@ pub fn pedir_com_anexo(
     receber(tamanho)
 }
 
+/// O tempo desde o boot, em milissegundos, pelo `system.uptime` — uma
+/// decisão do gate, como qualquer pedido. Zero, se o relógio não
+/// respondeu. É a régua de quem mede: anda de 10 em 10 ms.
+pub fn uptime_ms() -> u64 {
+    pedir("system.uptime", |_| Ok(()))
+        .ok()
+        .and_then(|r| r.resultado().ok()?.member("uptime_ms")?.as_u64())
+        .unwrap_or(0)
+}
+
 /// Pede com a linha já montada — para quem quer mandar o JSON como está,
 /// inclusive quebrado. A resposta, ou o erro da chamada de sistema.
 pub fn pedir_cru(linha: &[u8]) -> Result<Resposta, i64> {

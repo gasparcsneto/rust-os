@@ -5839,9 +5839,14 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // `cifrado` confia — ver [`tls`]. Gerada também, com a chave da raiz
     // longe da imagem e do repositório.
     programas.push((tls::ANCORA_NA_IMAGEM.to_string(), tls::ancora()?));
-    // E as redes do IC em que o programa `icp` confia: as da bancada, com a
-    // raiz fixada da PocketIC — ver [`icp`].
+    // E as redes do IC em que os programas confiam: as da bancada, com a
+    // raiz fixada da PocketIC, e a rede principal, com a dela — ver
+    // [`icp`].
     programas.push((icp::REDES_NA_IMAGEM.to_string(), icp::redes().into_bytes()));
+    // E as âncoras públicas: as raízes da autoridade do endpoint da rede
+    // principal, do repositório, conferidas pela impressão — ver
+    // [`tls::publicas`].
+    programas.push((tls::PUBLICAS_NA_IMAGEM.to_string(), tls::publicas()?));
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {

@@ -87,6 +87,60 @@ pub(crate) const SERVIDOR_HTTP: &str = "xtask/bancada/http.py";
 /// `cifrado` lê.
 pub(crate) const ANCORA_NA_IMAGEM: &str = "dados/tls/bancada.pem";
 
+/// Onde as âncoras públicas moram na imagem: as raízes da autoridade que
+/// emite o certificado do endpoint da rede principal do IC — as que o
+/// programa da rede principal lê. Ver [`publicas`].
+pub(crate) const PUBLICAS_NA_IMAGEM: &str = "dados/tls/publicas.pem";
+
+/// As raízes públicas, no repositório, e o SHA-256 do DER de cada uma: as
+/// duas da Let's Encrypt, a X1 (RSA de 4096 bits) e a X2 (P-384), copiadas
+/// do pacote `ca-certificates` da distribuição — a lista da Mozilla — e
+/// conferidas contra as impressões que a ISRG publica.
+const PUBLICAS: [(&str, &str); 2] = [
+    (
+        "xtask/ancoras/isrg-root-x1.pem",
+        "96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
+    ),
+    (
+        "xtask/ancoras/isrg-root-x2.pem",
+        "69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470",
+    ),
+];
+
+/// O conteúdo de `/dados/tls/publicas.pem`: as raízes de [`PUBLICAS`],
+/// cada uma conferida pela impressão antes de entrar. Um arquivo trocado,
+/// ou com outro certificado junto, não vira âncora: a imagem nem é gerada.
+///
+/// São as raízes de **uma** autoridade, a que emite o certificado de
+/// `icp-api.io` — e nada que o servidor mande vira âncora. Trocar de
+/// autoridade é trocar este arquivo, e a imagem.
+pub(crate) fn publicas() -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+    let mut saida = Vec::new();
+    for (caminho, impressao) in PUBLICAS {
+        let texto = std::fs::read(super::raiz_do_projeto().join(caminho))
+            .map_err(|e| format!("a ancora publica {caminho} nao se le: {e}"))?;
+        let blocos = pem::parse_many(&texto).map_err(|e| format!("{caminho} nao e PEM: {e}"))?;
+        let [bloco] = &blocos[..] else {
+            return Err(format!(
+                "{caminho} tem {} blocos; uma raiz por arquivo",
+                blocos.len()
+            ));
+        };
+        if bloco.tag() != "CERTIFICATE" {
+            return Err(format!("{caminho} nao e um certificado"));
+        }
+        let tem = sigilo::hex(&Sha256::digest(bloco.contents()).into());
+        if tem != impressao {
+            return Err(format!(
+                "{caminho} tem a impressao {tem}, e a raiz fixada e {impressao}"
+            ));
+        }
+        saida.extend_from_slice(pem::encode(bloco).as_bytes());
+    }
+    Ok(saida)
+}
+
 /// A versão do formato do diretório: um diretório de outra versão é
 /// refeito inteiro.
 const VERSAO: &str = "bancada-tls v5\n";

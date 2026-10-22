@@ -514,6 +514,35 @@ impl agente::Transporte for Gateway {
 /// Conecta ao endpoint de `rede`: o host pelo DNS `dns` — ou pelo endereço
 /// fixo do arquivo —, o destino pelo gate, e o TLS pelas `ancoras`.
 pub fn conectar(rede: &Rede, ancoras: &Ancoras, dns: &str) -> Result<Gateway, Falha> {
+    let (origem, url, opcoes) = endpoint(rede, ancoras, dns)?;
+    let conexao = http::conectar(&url, &opcoes).map_err(Falha::Conexao)?;
+    Ok(Gateway::de(conexao, origem))
+}
+
+/// [`conectar`], com o tempo de cada parte da conexão — ver
+/// [`http::conectar_medindo`].
+pub fn conectar_medindo(
+    rede: &Rede,
+    ancoras: &Ancoras,
+    dns: &str,
+) -> (Result<Gateway, Falha>, http::Medida) {
+    let (origem, url, opcoes) = match endpoint(rede, ancoras, dns) {
+        Ok(e) => e,
+        Err(f) => return (Err(f), http::Medida::default()),
+    };
+    let (r, medida) = http::conectar_medindo(&url, &opcoes);
+    (
+        r.map(|c| Gateway::de(c, origem)).map_err(Falha::Conexao),
+        medida,
+    )
+}
+
+/// A origem, a URL e as opções da conexão com o endpoint de `rede`.
+fn endpoint<'a>(
+    rede: &Rede,
+    ancoras: &'a Ancoras,
+    dns: &'a str,
+) -> Result<(String, Url, Opcoes<'a>), Falha> {
     let origem = format!("https://{}:{}", rede.host, rede.porta);
     let url = Url::ler(&origem).map_err(|_| Falha::Url)?;
     let opcoes = Opcoes {
@@ -525,17 +554,137 @@ pub fn conectar(rede: &Rede, ancoras: &Ancoras, dns: &str) -> Result<Gateway, Fa
         prazo: Prazo::PADRAO,
         protocolo: Protocolo::Http1,
     };
-    let conexao = http::conectar(&url, &opcoes).map_err(Falha::Conexao)?;
-    let limites = Limites {
-        corpo: MAIOR_CORPO,
-        descomprimido: MAIOR_CORPO,
-        ..Limites::default()
-    };
-    Ok(Gateway {
-        conexao,
-        origem,
-        limites,
-    })
+    Ok((origem, url, opcoes))
+}
+
+impl Gateway {
+    fn de(conexao: ConexaoHttp, origem: String) -> Gateway {
+        let limites = Limites {
+            corpo: MAIOR_CORPO,
+            descomprimido: MAIOR_CORPO,
+            ..Limites::default()
+        };
+        Gateway {
+            conexao,
+            origem,
+            limites,
+        }
+    }
+
+    /// A suíte do TLS da conexão.
+    pub fn suite(&self) -> Option<&'static str> {
+        self.conexao.suite()
+    }
+}
+
+/// O tempo de cada parte de uma consulta, em ms do `system.uptime` — a
+/// régua de 10 ms. Ver [`consultar_medindo`].
+#[derive(Clone, Debug, Default)]
+pub struct Medida {
+    /// A hora de conferir e o nonce da consulta, pelo gate.
+    pub preparo_ms: u64,
+    /// A conexão: o preparo do TLS, o DNS, o TCP e o aperto, e o destino.
+    pub conexao: http::Medida,
+    /// Os pedidos HTTP — o `read_state` e o `query` —, de ida e volta.
+    pub http_ms: u64,
+    /// A verificação, com os pedidos montados e as respostas lidas: o
+    /// certificado até a raiz, a resposta contra os nós, o Candid. Tudo o
+    /// que a consulta fez fora do HTTP.
+    pub verificacao_ms: u64,
+    /// Do começo da consulta ao fim da verificação, antes da declaração.
+    pub total_ms: u64,
+}
+
+/// Uma consulta pelo caminho inteiro, como saiu — ver
+/// [`consultar_medindo`].
+pub struct ConsultaMedida {
+    /// O que a consulta deu.
+    pub r: Result<Verificada, Falha>,
+    /// A hora com que conferiu, se o gate a deu.
+    pub hora: Option<Hora>,
+    /// A suíte do TLS, se o aperto fechou.
+    pub suite: Option<&'static str>,
+    /// A declaração à auditoria.
+    pub declarada: Declarada,
+    /// O tempo de cada parte.
+    pub medida: Medida,
+}
+
+/// O [`Gateway`] de uma consulta medida, que soma o tempo dos pedidos.
+struct Cronometrado<'g> {
+    gateway: &'g mut Gateway,
+    ms: u64,
+}
+
+impl agente::Transporte for Cronometrado<'_> {
+    type Erro = Transporte;
+
+    fn post(&mut self, caminho: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), Transporte> {
+        let inicio = nativo::uptime_ms();
+        let r = self.gateway.post(caminho, corpo);
+        self.ms += nativo::uptime_ms().saturating_sub(inicio);
+        r
+    }
+}
+
+/// Consulta `metodo` de `canister` com `arg` pela rede `rede`, pelo
+/// caminho inteiro — a hora e o nonce, o DNS `dns`, o destino pelo gate, o
+/// TLS pelas `ancoras`, os dois `POST` e a verificação —, medindo cada
+/// parte. Declara o desfecho antes do fecho, ancorado na conexão — ou sem
+/// âncora, se não houve conexão. Nada é entregue antes da verificação.
+pub fn consultar_medindo(
+    rede: &Rede,
+    ancoras: &Ancoras,
+    dns: &str,
+    canister: &Principal,
+    metodo: &str,
+    arg: &[u8],
+) -> ConsultaMedida {
+    let mut medida = Medida::default();
+    let inicio = nativo::uptime_ms();
+    let preparo = hora().and_then(|h| Ok((h, nonce()?)));
+    medida.preparo_ms = nativo::uptime_ms().saturating_sub(inicio);
+    let hora = preparo.as_ref().ok().map(|(h, _)| *h);
+    let mut gateway = None;
+    let mut suite = None;
+    let r = preparo.and_then(|(hora, nonce)| {
+        let (g, conexao) = conectar_medindo(rede, ancoras, dns);
+        medida.conexao = conexao;
+        let g = gateway.insert(g?);
+        suite = g.suite();
+        let mut cronometrado = Cronometrado { gateway: g, ms: 0 };
+        let antes = nativo::uptime_ms();
+        let r = consultar(
+            &mut cronometrado,
+            rede,
+            canister,
+            metodo,
+            arg,
+            &hora,
+            &nonce,
+        );
+        medida.http_ms = cronometrado.ms;
+        medida.verificacao_ms = nativo::uptime_ms()
+            .saturating_sub(antes)
+            .saturating_sub(cronometrado.ms);
+        r
+    });
+    medida.total_ms = nativo::uptime_ms().saturating_sub(inicio);
+    let declarada = declarar(
+        &assunto(canister, metodo),
+        desfecho(&r),
+        gateway.as_ref().map(Gateway::conexao),
+    );
+    if let Some(g) = gateway {
+        g.fechar();
+    }
+    ConsultaMedida {
+        r,
+        hora,
+        suite,
+        declarada,
+        medida,
+    }
 }
 
 /// Consulta `metodo` de `canister` com `arg` (Candid), como o anônimo,

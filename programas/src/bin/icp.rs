@@ -24,6 +24,14 @@
 //!   declara;
 //! - [`SAIR_SEM_FECHAR`]: sai sem fechar nada — o kernel recolhe as
 //!   conexões de quem acabou;
+//! - [`SIMBOLO`]: o símbolo do livro-razão do ICP ([`LIVRO_RAZAO`],
+//!   `icrc1_symbol`) pela rede `mainnet` da imagem — a rede principal, com
+//!   a raiz dela —, pelo caminho medido da fumaça real
+//!   (`programas::icp::consultar_medindo`), com as âncoras públicas
+//!   ([`PUBLICAS`], lidas no primeiro passo destes) e o DNS da suíte. Na
+//!   suíte o nome nunca chega à rede principal: o DNS que mente, o mudo, o
+//!   endereço fora da política — e o desfecho diz até onde foi. A linha diz
+//!   também o destino que o nome deu e a medida da conexão;
 //! - [`QUEM`], [`CONTAR`] e [`LENTO`]: as chamadas de atualização `quem`
 //!   (o canister responde o Principal de quem chamou), `contar` (o
 //!   contador, mais um) e `lento` (o que demora), do anônimo — com `c`
@@ -118,17 +126,19 @@ const CONTAR: i64 = 8;
 const LENTO: i64 = 9;
 const RECUSA_NA_CHAMADA: i64 = 10;
 const SEM_CANISTER: i64 = 11;
+const SIMBOLO: i64 = 12;
 
 /// As chaves de uma chamada assinada, pelo `c` de um evento — `c` zero é o
 /// anônimo. Os nomes que a política padrão dá ao operador.
 const CHAVES: [&str; 2] = ["chave:bancada", "chave:bancada-2"];
 
 /// As redes, pelo índice que o `b` de um evento diz — os nomes de
-/// `/dados/icp/redes` da bancada. Cada uma é o mesmo canister por um
-/// endpoint que o proxy da bancada trata de um jeito: o honesto, o lento,
-/// e os que adulteram a resposta, cada um de uma maneira; a de chave
-/// errada, honesta e com outra raiz; e a honesta sem DNS.
-const REDES: [&str; 13] = [
+/// `/dados/icp/redes`. As da bancada são o mesmo canister por um endpoint
+/// que o proxy da bancada trata de um jeito: o honesto, o lento, e os que
+/// adulteram a resposta, cada um de uma maneira; a de chave errada,
+/// honesta e com outra raiz; e a honesta sem DNS. A última é a rede
+/// principal.
+const REDES: [&str; 14] = [
     "bancada",
     "lenta",
     "raiz-errada",
@@ -142,6 +152,7 @@ const REDES: [&str; 13] = [
     "velho",
     "direta",
     "assincrona",
+    "mainnet",
 ];
 
 /// Os métodos que respondem Candid fora da forma, pelo `c` de um evento
@@ -177,6 +188,13 @@ const DNS: &str = "udp:10.0.2.53:53";
 
 /// A raiz do TLS da bancada, na imagem.
 const ANCORAS: &str = "/dados/tls/bancada.pem";
+
+/// As raízes públicas, na imagem: as da autoridade do endpoint da rede
+/// principal.
+const PUBLICAS: &str = "/dados/tls/publicas.pem";
+
+/// O livro-razão do ICP, na sub-rede do NNS da rede principal.
+const LIVRO_RAZAO: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 
 /// Os argumentos de `ola`: nenhum.
 fn sem_argumentos() -> Vec<u8> {
@@ -276,6 +294,35 @@ fn consultar(
     if let Some(g) = gateway {
         g.fechar();
     }
+}
+
+/// O símbolo do livro-razão pela rede `rede`, pelo caminho medido —
+/// [`icp::consultar_medindo`] —, declarado antes do fecho: diz o desfecho
+/// como os outros passos, e no detalhe o destino que o nome deu e a medida
+/// da conexão, antes da prova ou da falha.
+fn simbolo(passo: &str, rede: &Rede, ancoras: &Ancoras, livro: &Principal) {
+    let c = icp::consultar_medindo(rede, ancoras, DNS, livro, "icrc1_symbol", &sem_argumentos());
+    let m = &c.medida.conexao;
+    let detalhe = match &c.r {
+        Ok(v) => provado(v),
+        Err(f) => format!("{f}"),
+    };
+    let declarada = match &c.declarada {
+        Ok(n) => format!("{n}"),
+        Err(codigo) => format!("recusada {codigo}"),
+    };
+    escreverln!(
+        "icp: {}: {}; declarada {}; hora {}; destino {}; dns {} tcp {} tls {}; {}",
+        passo,
+        desfecho(&c.r),
+        declarada,
+        c.hora.map_or("nenhuma", |h| h.estado.nome()),
+        m.destino.as_deref().unwrap_or("nenhum"),
+        m.dns_ms,
+        m.tcp_ms,
+        m.tls_ms,
+        detalhe
+    );
 }
 
 /// O que uma resposta de chamada diz, curto: o Principal, o número ou o
@@ -471,10 +518,11 @@ fn principal() -> i64 {
             return 3;
         }
     };
-    let (Ok(bancada), Ok(da_raiz), Ok(nao_existe)) = (
+    let (Ok(bancada), Ok(da_raiz), Ok(nao_existe), Ok(livro)) = (
         Principal::de_texto(BANCADA),
         Principal::de_texto(DA_RAIZ),
         Principal::de_texto(NAO_EXISTE),
+        Principal::de_texto(LIVRO_RAZAO),
     ) else {
         escreverln!("icp: o canister da bancada nao se le");
         return 4;
@@ -485,6 +533,9 @@ fn principal() -> i64 {
         escreverln!("icp: pronto ({} redes)", redes.len());
     }
 
+    // As públicas só no primeiro passo da rede principal: os outros não as
+    // leem.
+    let mut publicas: Option<Ancoras> = None;
     let mut eventos = [Evento::default(); 8];
     loop {
         let n = match sistema::ler_eventos(canal as u64, &mut eventos) {
@@ -548,6 +599,22 @@ fn principal() -> i64 {
                         .copied();
                     let passo = format!("{metodo} {nome}{onde} {}", chave.unwrap_or("anonimo"));
                     chamar(&passo, rede, &ancoras, canister, metodo, chave);
+                }
+                (SIMBOLO, Some(rede)) => {
+                    let passo = format!("simbolo {nome}");
+                    let lidas = match publicas.take() {
+                        Some(a) => Ok(a),
+                        None => tls::ancoras(PUBLICAS),
+                    };
+                    match lidas {
+                        Ok(a) => {
+                            simbolo(&passo, rede, &a, &livro);
+                            publicas = Some(a);
+                        }
+                        Err(f) => {
+                            escreverln!("icp: as ancoras publicas nao se leram: {}", f.codigo());
+                        }
+                    }
                 }
                 (OLA, Some(rede)) => {
                     let passo = format!("ola {nome}");
