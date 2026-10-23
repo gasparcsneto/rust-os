@@ -13,9 +13,10 @@
 //!
 //! # Os passos
 //!
-//! 1. **O pré-voo, no hospedeiro**: os IPv4 de `icp-api.io` pelo
-//!    resolvedor do hospedeiro — ou os de `--enderecos` —, e a cadeia TLS
-//!    que o primeiro apresenta, pelo `openssl s_client`, lida como dado:
+//! 1. **O pré-voo, no hospedeiro**: os IPv4 de `icp-api.io` pelos dois
+//!    caminhos do hospedeiro — o resolvedor do sistema e a pergunta da
+//!    máquina, ver *A janela do DNS* — ou os de `--enderecos`, e a cadeia
+//!    TLS que cada um apresenta, pelo `openssl s_client`, lida como dado:
 //!    cada certificado com a chave e o algoritmo da assinatura, contra o
 //!    perfil do TLS do programa e as âncoras da imagem. Um algoritmo fora do
 //!    perfil para a fumaça com `TLS_PROFILE_GAP`, e uma raiz fora das
@@ -45,13 +46,23 @@
 //!
 //! # A janela do DNS
 //!
-//! A máquina pergunta o nome ao resolvedor do hospedeiro, pelo emulador, e
-//! conecta ao primeiro endereço da resposta; a política só tem os que o
-//! pré-voo leu. Por isso a máquina é compilada antes do pré-voo: compilada
-//! depois, a frio — num runner, são minutos —, a resposta que o pré-voo leu
-//! já teria saído do cache do resolvedor quando a máquina perguntasse, e a
-//! dela podia trazer outros nós. Assim, as duas perguntas cabem na mesma
-//! janela. Um endereço que o pré-voo não leu continua recusado pelo gate
+//! A máquina pergunta o nome ao DNS do emulador (`10.0.2.3`), que repassa
+//! a pergunta ao primeiro `nameserver` IPv4 do `/etc/resolv.conf` do
+//! hospedeiro, e conecta ao primeiro endereço da resposta; a política só
+//! tem os que o pré-voo leu. Duas coisas cuidam de que sejam os mesmos:
+//!
+//! - **a mesma pergunta**: o pré-voo faz, do hospedeiro, a pergunta que a
+//!   máquina vai fazer — os mesmos bytes, de `protocolo::dns`, ao mesmo
+//!   servidor —, além da do resolvedor do sistema, e a política leva as
+//!   duas respostas. Elas não são iguais: na primeira fumaça num runner do
+//!   GitHub, o resolvedor do sistema deu um nó, e a máquina, nas três
+//!   rodadas e nos dois runners, sempre outro;
+//! - **a mesma hora**: a máquina é compilada antes do pré-voo. Compilada
+//!   depois, a frio — num runner, são minutos —, a resposta que o pré-voo
+//!   leu já teria saído do cache do resolvedor quando a máquina
+//!   perguntasse.
+//!
+//! Um endereço que o pré-voo não leu continua recusado pelo gate
 //! (`DENY_RESOURCE`): a falha é fechada, e a auditoria do relatório diz o
 //! destino recusado.
 //!
@@ -68,7 +79,7 @@
 //! runner do GitHub, quando alguém o pede: a CI não o roda.
 
 use std::fmt::Write as _;
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
@@ -122,21 +133,44 @@ pub(crate) fn mainnet(
     let preparo = preparar(arch, release)?;
 
     // 1. O pré-voo.
-    let ips = match enderecos {
-        Some(lista) => ler_enderecos(lista)?,
+    let (ips, origem) = match enderecos {
+        Some(lista) => (ler_enderecos(lista)?, String::from("os de --enderecos")),
         None => resolver_no_hospedeiro()?,
     };
     relatorio.ips = ips.clone();
-    println!("[xtask] mainnet: {ENDPOINT} -> {}", texto_dos(&ips));
+    relatorio.origem = origem;
+    println!(
+        "[xtask] mainnet: {ENDPOINT} -> {} ({})",
+        texto_dos(&ips),
+        relatorio.origem
+    );
     if !ensaio {
-        let lacuna = match aperto_real(&ips[0]) {
-            Ok(aperto) => {
-                relatorio.cadeia = aperto.cadeia.iter().map(Elo::resumo).collect();
-                relatorio.negociado = aperto.negociado;
-                conferir_a_cadeia(&aperto.cadeia).err()
+        let mut lacuna = None;
+        for ip in &ips {
+            let com = texto_dos(&[*ip]);
+            match aperto_real(ip) {
+                Ok(aperto) => {
+                    println!(
+                        "[xtask] mainnet: o aperto real com {com}: {}",
+                        aperto.negociado
+                    );
+                    let conferida = conferir_a_cadeia(&aperto.cadeia);
+                    relatorio.apertos.push((
+                        *ip,
+                        aperto.negociado,
+                        aperto.cadeia.iter().map(Elo::resumo).collect(),
+                    ));
+                    if let Err(e) = conferida {
+                        lacuna = Some(format!("{e} (com {com})"));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    lacuna = Some(format!("{e} (com {com})"));
+                    break;
+                }
             }
-            Err(e) => Some(e),
-        };
+        }
         if let Some(lacuna) = lacuna {
             relatorio.veredito = format!("o pre-voo parou: {lacuna}");
             let caminho = relatorio.gravar()?;
@@ -145,8 +179,7 @@ pub(crate) fn mainnet(
             return Ok(ExitCode::FAILURE);
         }
         println!(
-            "[xtask] mainnet: o aperto real fecha no perfil do programa ({}), e a cadeia sobe a uma ancora da imagem",
-            relatorio.negociado
+            "[xtask] mainnet: o aperto real de cada IPv4 fecha no perfil do programa, e cada cadeia sobe a uma ancora da imagem"
         );
     }
 
@@ -263,28 +296,101 @@ fn ler_enderecos(lista: &str) -> Result<Vec<[u8; 4]>, String> {
     Ok(ips)
 }
 
-/// Os IPv4 de [`ENDPOINT`] pelo resolvedor do hospedeiro.
-fn resolver_no_hospedeiro() -> Result<Vec<[u8; 4]>, String> {
-    let mut ips: Vec<[u8; 4]> = (ENDPOINT, 443)
+/// Os IPv4 de [`ENDPOINT`] pelos dois caminhos do hospedeiro — o
+/// resolvedor do sistema e [`perguntar_como_a_maquina`] —, juntos, e de
+/// onde cada um veio, para o relatório. Ver o cabeçalho, *A janela do DNS*.
+fn resolver_no_hospedeiro() -> Result<(Vec<[u8; 4]>, String), String> {
+    let do_sistema: Result<Vec<[u8; 4]>, String> = (ENDPOINT, 443)
         .to_socket_addrs()
-        .map_err(|e| {
-            format!(
-                "mainnet: o hospedeiro nao resolve {ENDPOINT}: {e} — a fumaca real precisa de DNS e da rede de verdade"
-            )
-        })?
-        .filter_map(|a| match a.ip() {
-            std::net::IpAddr::V4(v4) => Some(v4.octets()),
-            std::net::IpAddr::V6(_) => None,
+        .map(|enderecos| {
+            enderecos
+                .filter_map(|a| match a.ip() {
+                    IpAddr::V4(v4) => Some(v4.octets()),
+                    IpAddr::V6(_) => None,
+                })
+                .collect()
         })
+        .map_err(|e| e.to_string());
+    let servidor = std::fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|texto| servidor_do_emulador(&texto));
+    let da_maquina = match servidor {
+        Some(s) => perguntar_como_a_maquina(SocketAddrV4::new(s, 53)),
+        None => Err("sem nameserver IPv4 no /etc/resolv.conf".into()),
+    };
+    let dito = |r: &Result<Vec<[u8; 4]>, String>| match r {
+        Ok(ips) if ips.is_empty() => String::from("nenhum IPv4"),
+        Ok(ips) => texto_dos(ips),
+        Err(e) => e.clone(),
+    };
+    let origem = format!(
+        "o resolvedor do sistema deu {}; a pergunta da maquina, a {}, deu {}",
+        dito(&do_sistema),
+        servidor.map_or_else(|| String::from("nenhum servidor"), |s| s.to_string()),
+        dito(&da_maquina)
+    );
+    let mut ips: Vec<[u8; 4]> = do_sistema
+        .iter()
+        .chain(da_maquina.iter())
+        .flatten()
+        .copied()
         .collect();
     ips.sort_unstable();
     ips.dedup();
     if ips.is_empty() {
         return Err(format!(
-            "mainnet: {ENDPOINT} nao tem IPv4 pelo resolvedor do hospedeiro, e o Duke so conecta IPv4"
+            "mainnet: o hospedeiro nao resolve {ENDPOINT} em IPv4, e o Duke so conecta IPv4 ({origem}) — a fumaca real precisa de DNS e da rede de verdade"
         ));
     }
-    Ok(ips)
+    Ok((ips, origem))
+}
+
+/// O servidor a que o DNS do emulador (`10.0.2.3`) repassa a pergunta da
+/// máquina: o primeiro `nameserver` IPv4 do `/etc/resolv.conf` do
+/// hospedeiro, lido como a `libslirp` do QEMU o lê no Linux — a palavra no
+/// começo da linha, um espaço ou tab, e o primeiro endereço que é IPv4.
+fn servidor_do_emulador(resolv_conf: &str) -> Option<Ipv4Addr> {
+    resolv_conf.lines().find_map(|linha| {
+        let resto = linha.strip_prefix("nameserver")?;
+        if !resto.starts_with([' ', '\t']) {
+            return None;
+        }
+        resto.split_whitespace().next()?.parse().ok()
+    })
+}
+
+/// A pergunta que o `livro` faz pelo nome — os mesmos bytes, de
+/// `protocolo::dns`: o tipo `A`, a recursão pedida, sem EDNS —, feita do
+/// hospedeiro ao `servidor` do emulador. A resposta é lida como o programa
+/// a lê: só os endereços do nome perguntado e dos apelidos dele.
+fn perguntar_como_a_maquina(servidor: SocketAddrV4) -> Result<Vec<[u8; 4]>, String> {
+    use protocolo::dns;
+    let nome = dns::Nome::de_texto(ENDPOINT).map_err(|e| e.motivo().to_string())?;
+    let id = (super::servidor_de_hora::agora_ms() & 0xffff) as u16;
+    let mut b = [0u8; dns::MAIOR_MENSAGEM];
+    let n = dns::pergunta(id, &nome, &mut b).map_err(|e| e.motivo().to_string())?;
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|e| e.to_string())?;
+    socket
+        .send_to(&b[..n], servidor)
+        .map_err(|e| e.to_string())?;
+    let mut r = [0u8; dns::MAIOR_MENSAGEM];
+    let (tamanho, de) = socket
+        .recv_from(&mut r)
+        .map_err(|e| format!("sem resposta ({e})"))?;
+    if de != SocketAddr::V4(servidor) {
+        return Err(format!("a resposta veio de {de}"));
+    }
+    let m = dns::ler(&r[..tamanho]).map_err(|e| e.motivo().to_string())?;
+    if m.id != id || !m.resposta || m.nome() != Some(&nome) {
+        return Err("a resposta nao e desta pergunta".into());
+    }
+    if m.codigo != dns::SEM_ERRO {
+        return Err(format!("o codigo {}", m.codigo));
+    }
+    Ok(m.enderecos().to_vec())
 }
 
 fn texto_dos(ips: &[[u8; 4]]) -> String {
@@ -896,8 +1002,12 @@ struct Relatorio {
     release: bool,
     ensaio: bool,
     ips: Vec<[u8; 4]>,
-    cadeia: Vec<String>,
-    negociado: String,
+    /// De onde vieram os IPv4: cada caminho do DNS do hospedeiro e o que
+    /// ele deu, ou `--enderecos`.
+    origem: String,
+    /// O aperto real de cada IPv4, lido no hospedeiro: o endereço, o que se
+    /// negociou e a cadeia, da folha para cima.
+    apertos: Vec<([u8; 4], String, Vec<String>)>,
     rodadas: Vec<(&'static str, Rodada)>,
     auditoria: Auditoria,
     veredito: String,
@@ -911,8 +1021,8 @@ impl Relatorio {
             release,
             ensaio,
             ips: Vec::new(),
-            cadeia: Vec::new(),
-            negociado: String::new(),
+            origem: String::new(),
+            apertos: Vec::new(),
             rodadas: Vec::new(),
             auditoria: Auditoria::default(),
             veredito: String::new(),
@@ -943,18 +1053,23 @@ impl Relatorio {
             "- endpoint: https://{ENDPOINT} (a rede `mainnet` de `/dados/icp/redes`)"
         );
         let _ = writeln!(t, "- IPv4 no teto da política: {}", texto_dos(&self.ips));
+        if !self.origem.is_empty() {
+            let _ = writeln!(t, "- de onde vieram: {}", self.origem);
+        }
         let _ = writeln!(t, "- veredito: {}\n", self.veredito);
-        if !self.cadeia.is_empty() {
+        if !self.apertos.is_empty() {
             let _ = writeln!(t, "## O aperto real, lido no hospedeiro\n");
-            let _ = writeln!(
-                t,
-                "No perfil do programa: {}. A cadeia, da folha para cima:\n",
-                self.negociado
-            );
-            for e in &self.cadeia {
-                let _ = writeln!(t, "- {e}");
+            for (ip, negociado, cadeia) in &self.apertos {
+                let _ = writeln!(
+                    t,
+                    "Com {}, no perfil do programa: {negociado}. A cadeia, da folha para cima:\n",
+                    texto_dos(&[*ip])
+                );
+                for e in cadeia {
+                    let _ = writeln!(t, "- {e}");
+                }
+                let _ = writeln!(t);
             }
-            let _ = writeln!(t);
         }
         for (quando, r) in &self.rodadas {
             let _ = writeln!(
@@ -1034,6 +1149,60 @@ mod testes {
         );
         assert!(ler_enderecos("icp-api.io").is_err());
         assert!(ler_enderecos("2001:db8::1").is_err());
+    }
+
+    /// O servidor do emulador é o primeiro `nameserver` IPv4, como a
+    /// `libslirp` o lê: o IPv6 e o que não começa a linha ficam de fora.
+    #[test]
+    fn o_servidor_do_emulador() {
+        let resolv = "# gerado\nsearch exemplo.internal\nnameserver ::1\n nameserver 192.0.2.1\nnameserver\t127.0.0.53\nnameserver 8.8.8.8\n";
+        assert_eq!(
+            servidor_do_emulador(resolv),
+            Some(Ipv4Addr::new(127, 0, 0, 53))
+        );
+        assert_eq!(servidor_do_emulador("nameserver fe80::1%eth0\n"), None);
+        assert_eq!(
+            servidor_do_emulador("#nameserver 192.0.2.1\nnameservers 192.0.2.2\n"),
+            None
+        );
+    }
+
+    /// A pergunta da máquina contra um servidor de mentira no hospedeiro:
+    /// os bytes que chegam são os da pergunta do `livro`, e a resposta é
+    /// lida como ele a lê — o registro de outro nome fica de fora.
+    #[test]
+    fn a_pergunta_da_maquina() {
+        use protocolo::dns;
+        let servidor = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let SocketAddr::V4(endereco) = servidor.local_addr().unwrap() else {
+            unreachable!()
+        };
+        let atendente = std::thread::spawn(move || {
+            let mut b = [0u8; dns::MAIOR_MENSAGEM];
+            let (n, de) = servidor.recv_from(&mut b).unwrap();
+            let pergunta = dns::ler(&b[..n]).unwrap();
+            let nome = *pergunta.nome().unwrap();
+            assert_eq!(nome, dns::Nome::de_texto(ENDPOINT).unwrap());
+            let mut do_livro = [0u8; dns::MAIOR_MENSAGEM];
+            let m = dns::pergunta(pergunta.id, &nome, &mut do_livro).unwrap();
+            assert_eq!(&b[..n], &do_livro[..m]);
+            let mut r = [0u8; dns::MAIOR_MENSAGEM];
+            let k = dns::resposta(
+                pergunta.id,
+                &nome,
+                &[[203, 0, 113, 7], [198, 51, 100, 9]],
+                60,
+                dns::SEM_ERRO,
+                &mut r,
+            )
+            .unwrap();
+            servidor.send_to(&r[..k], de).unwrap();
+        });
+        assert_eq!(
+            perguntar_como_a_maquina(endereco).unwrap(),
+            [[203, 0, 113, 7], [198, 51, 100, 9]]
+        );
+        atendente.join().unwrap();
     }
 
     /// O perfil da cadeia: a forma da Let's Encrypt pela X1 e pela X2

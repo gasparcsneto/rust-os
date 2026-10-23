@@ -1029,18 +1029,29 @@ mão, fora da CI. Precisa de uma máquina com a rede de verdade: DNS por
 UDP e TCP na porta 443, sem proxy que reabra o TLS. O TLS do programa
 recusaria a cadeia de um proxy, como deve.
 
-A máquina é compilada antes de tudo. O `livro` pergunta o nome ao
-resolvedor do hospedeiro, pelo emulador, e conecta ao primeiro endereço da
-resposta; a política só tem os que o pré-voo leu. Compilada depois do
-pré-voo, a frio — num runner, são minutos —, a resposta que ele leu já
-teria saído do cache do resolvedor, e a da máquina podia trazer outros
-nós. Assim, as duas perguntas cabem na mesma janela. Um endereço que o
-pré-voo não leu continua recusado pelo gate (`DENY_RESOURCE`): falha
-fechada, com o destino recusado na auditoria do relatório.
+O `livro` pergunta o nome ao DNS do emulador (`10.0.2.3`), que repassa a
+pergunta ao primeiro `nameserver` IPv4 do `/etc/resolv.conf` do
+hospedeiro, e conecta ao primeiro endereço da resposta; a política só tem
+os que o pré-voo leu. Duas coisas cuidam de que sejam os mesmos:
 
-1. **O pré-voo, no hospedeiro.** Os IPv4 de `icp-api.io` vêm do resolvedor
-   dele, ou de `--enderecos a,b`. O `openssl s_client` fecha o aperto com
-   o primeiro **no perfil do programa**: só o TLS 1.3, as três suítes, o
+- **A mesma pergunta.** O pré-voo faz, do hospedeiro, a pergunta que a
+  máquina vai fazer — os mesmos bytes, de `protocolo::dns`, ao mesmo
+  servidor —, além da do resolvedor do sistema, e a política leva as duas
+  respostas. Elas não são iguais: na primeira fumaça num runner do GitHub,
+  o resolvedor do sistema deu um nó, e a máquina, nas três rodadas e nos
+  dois runners, sempre outro (ver *O resultado*).
+- **A mesma hora.** A máquina é compilada antes do pré-voo. Compilada
+  depois, a frio — num runner, são minutos —, a resposta que o pré-voo leu
+  já teria saído do cache do resolvedor quando a máquina perguntasse.
+
+Um endereço que o pré-voo não leu continua recusado pelo gate
+(`DENY_RESOURCE`): falha fechada, com o destino recusado na auditoria do
+relatório.
+
+1. **O pré-voo, no hospedeiro.** Os IPv4 de `icp-api.io` vêm dos dois
+   caminhos, ou de `--enderecos a,b`, e o relatório diz de onde veio cada
+   um. O `openssl s_client` fecha o aperto com cada um **no perfil do
+   programa**: só o TLS 1.3, as três suítes, o
    X25519 e o P-256, e as assinaturas do aperto. A cadeia é lida como
    dado: cada certificado com a chave e o algoritmo da assinatura, contra
    o perfil e as âncoras da imagem. Fora do perfil, a fumaça para com
@@ -1079,6 +1090,24 @@ comando num runner do GitHub quando alguém o pede (`workflow_dispatch`),
 com o relatório como artefato. O GitHub só oferece o botão para um fluxo
 que já está no ramo padrão. A CI não o roda, e não depende da rede
 principal.
+
+#### O resultado
+
+A primeira fumaça real rodou em 23 de outubro de 2026, num runner do
+GitHub para cada arquitetura, com o kernel de produção em release:
+
+- **o pré-voo fechou.** O aperto real é TLS 1.3 com
+  `TLS_AES_128_GCM_SHA256` e a assinatura `ecdsa_secp384r1_sha384`, dentro
+  do perfil. A cadeia — a folha (`CN = ic0.app`, P-384), a intermediária
+  YE2 da Let's Encrypt, a raiz ISRG Root YE com a assinatura cruzada da X2,
+  e a X2 com a da X1 — sobe à X2, uma âncora da imagem. Nenhum
+  `TLS_PROFILE_GAP`, nenhum `TLS_ANCHOR_GAP`;
+- **a consulta não saiu da máquina.** O resolvedor do sistema deu
+  `23.142.184.129`, que foi para a política, e o DNS da máquina deu
+  `63.251.162.11`, nas três rodadas e nos dois runners. O gate recusou as
+  três (`DENY_RESOURCE`) sem um byte para fora: a falha fechada que o
+  desenho promete, e a razão de o pré-voo fazer, desde então, a pergunta
+  da máquina.
 
 ### As medidas
 
