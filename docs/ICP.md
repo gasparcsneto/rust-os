@@ -1,4 +1,4 @@
-# O Internet Computer (ICP-1, ICP-3, ICP-4a e ICP-4b)
+# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b e ICP-4c)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
@@ -8,8 +8,11 @@ Nos dois, a resposta é **verificada** contra a raiz da rede antes de ser
 entregue. O ICP-4a dá ao TLS do programa as cadeias das autoridades
 públicas, que a rede principal usa — em [O TLS público](#o-tls-público-icp-4a).
 O ICP-4b liga a rede principal, só para ler — em [A rede
-principal](#a-rede-principal-icp-4b). O que ainda não existe está em *O
-que não existe ainda*.
+principal](#a-rede-principal-icp-4b). O ICP-4c dá à consulta a chave do
+ICP-3 — a consulta assinada — e o caminho do consenso — a replicada —, em
+[A consulta assinada e a
+replicada](#a-consulta-assinada-e-a-replicada-icp-4c). O que ainda não
+existe está em *O que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
 Principal, um método, o Candid ou o id de um pedido, e a política não tem
@@ -73,8 +76,10 @@ programa icp ──► /dados/icp/redes ──► DNS ──► net.connect ─�
 
 E, pelas regras do ICP-1:
 
-- **um Principal do IC nunca é identidade do Duke.** A consulta é anônima;
-  quem pede ao gate é o processo, com a autoridade de quem o lançou;
+- **um Principal do IC nunca é identidade do Duke.** A consulta do ICP-1 é
+  anônima, e a assinada do ICP-4c vai com o Principal da chave, que
+  também não é identidade de ninguém aqui; quem pede ao gate é o
+  processo, com a autoridade de quem o lançou;
 - **um certificado TLS nunca é autorização**, e **um certificado do IC
   também não**: o que se prova não abre destino, papel nem recurso;
 - **uma verificação nunca concede permissão.** Uma resposta verificada não
@@ -1258,6 +1263,137 @@ nó alterados com ela também, porque já recusava o certificado inteiro.
   ficam a uns 10% do teto de leitura do kernel, 1 MiB. Mais código de TLS
   ou do IC num deles pede outra rodada de redução, como a do ICP-4a.
 
+## A consulta assinada e a replicada (ICP-4c)
+
+O ICP-4c dá à consulta o que o ICP-3 deu à chamada: uma identidade do
+Duke — uma pessoa, um agente — consulta um canister **com a própria
+chave**, e consulta com a resposta **provada pelo consenso**. Nos dois
+casos, a resposta é verificada antes de chegar ao programa. É tudo
+programa e bancada: o kernel, a política, o gate, o `key.sign`, as
+identidades, as permissões e o TLS não mudaram uma linha, e nenhuma
+decisão de arquitetura é nova — a consulta assinada usa a chave, o
+domínio e a decisão por assinatura do ICP-3, e a verificação do ICP-1.
+
+```
+pessoa / agente ─► identidade do Duke ─► sessão ─► processo ─► manifesto + papel
+  ─► gate ─► chave:<nome> ─► reconfirmação ─► auditoria (e journal) ─► assinatura
+  ─► programa icp ─► Principal do IC ─► consulta assinada ─► assinaturas dos nós
+  ─► audit.declare (ancorada na decisão) ─► NSF
+```
+
+### A consulta assinada
+
+O pedido é o da consulta do ICP-1 com o remetente da chave, e vai como a
+chamada do ICP-3 vai:
+
+1. **as faixas**, pelo anônimo: o `read_state` de `["subnet"]`, o
+   certificado conferido até a raiz do arquivo. O caminho é público, e a
+   chave assina uma vez só por consulta;
+2. **a consulta**, assinada: o remetente é o Principal auto-autenticado
+   da pública que o `key.read` deu; o id do pedido — que leva o remetente
+   e o nonce do `random.read` — vai ao `key.sign`, no domínio
+   `ic-request`, por uma decisão do gate; o envelope leva a pública em DER
+   e a assinatura;
+3. **a resposta**, conferida como a do anônimo: as assinaturas dos nós da
+   sub-rede, pelas chaves deles no certificado, sobre a resposta **deste
+   pedido**. O id leva o remetente: a resposta de outra consulta — do
+   anônimo, ou de outra chave, na mesma hora e com o mesmo nonce — não
+   confere.
+
+No `web3`, é `agente::consultar_assinada`, ao lado da `consultar`, que
+não mudou; o pedido dela é `Consulta::id_assinada` e
+`Consulta::envelope_assinado`, com a regra da chamada: um remetente que
+não é o Principal da chave não tem id assinado nem envelope, e nada se
+assina por ele. No programa, `programas::icp::consultar_assinada`, com a
+`ChaveDoKernel` do ICP-3.
+
+**Sem a chave, nada vai do anônimo no lugar.** A chave que não se lê
+para tudo antes da conexão (`failed_key`); a assinatura recusada — pelo
+gate, ou pelo kernel depois dele — para a consulta antes de ela sair
+(`failed_signature`): as faixas, do anônimo, já foram, e a consulta não
+vai, nem sem assinatura.
+
+### A consulta replicada
+
+É o método de consulta pelo caminho da chamada: `POST
+/api/v4/canister/<id>/call`. O IC a executa no consenso, e a resposta vem
+no certificado, como a de uma chamada — `atualizacao::chamar`, do ICP-3,
+sem mudança. Do anônimo ou assinada, ela é, para o protocolo, uma
+chamada, e é declarada como uma: `icp.update`. Custa *cycles* ao canister
+na rede de verdade; na bancada, não.
+
+### O desfecho e a declaração
+
+A consulta assinada tem os desfechos da consulta ([O desfecho, numa
+palavra](#o-desfecho-numa-palavra)), e mais dois:
+`programas::icp::desfecho_da_consulta_assinada`.
+
+| desfecho | o que quer dizer |
+|---|---|
+| `failed_key` | a chave não se leu — não há, ou o gate recusou o `key.read`; nada conectou |
+| `failed_signature` | a chave não assinou — o gate recusou o `key.sign`, ou o kernel, depois dele; a consulta não saiu |
+
+A declaração é a da consulta — `icp.query <canister>/<método>
+<desfecho>` —, ancorada na **decisão da assinatura** dela, como a da
+chamada (`programas::icp::declarar_consulta`); a que não chegou a ser
+assinada vai ancorada na conexão, e a que nem conectou, sem âncora. O NSF
+lê a âncora da decisão como lê a da chamada: a explicação de uma
+verificação declarada que falhou diz a decisão e o método.
+
+### A bancada
+
+O canister ganhou a consulta `quem_consulta`: o corpo do `quem`,
+exportado como consulta — responde o Principal de quem consultou.
+Chamada pelo `/call`, é a replicada. O programa `icp` ganhou dois passos:
+`quem_consulta` (13), do anônimo ou assinada pela chave do `c`, e
+`replicada` (14), a mesma pelo caminho da chamada; os dois também no
+canister da sub-rede raiz, com `c` de 10 em diante.
+
+### Os casos
+
+No hospedeiro (`cargo test -p web3`):
+
+- o id e o envelope da consulta assinada pelo `ic-transport-types`, e a
+  assinatura pelo `ic-ed25519`, em trezentos pedidos sorteados;
+- o remetente é o da chave: outra chave, ou o anônimo, não tem id
+  assinado; sem assinatura, a consulta continua só do anônimo; três
+  remetentes, três pedidos;
+- o IC de mentira do agente confere a assinatura como o IC — a de outro id
+  ouve 403 — e diz quem pediu; os modos adversários da consulta anônima
+  valem os mesmos na assinada, e a chave só assina depois do certificado
+  conferido; a resposta gravada de outro remetente não confere; a
+  assinatura recusada não manda nada; o nonce longo não se assina.
+
+Na suíte (`icp:`), o programa lançado por uma pessoa operadora:
+
+- **a consulta assinada e verificada**: o Principal da chave, dois
+  pedidos — as faixas e a consulta —, uma assinatura do kernel, e a
+  declaração ancorada nela; a do anônimo responde o anônimo, sem
+  assinatura, ancorada na conexão; e no canister da sub-rede raiz, pela
+  raiz, sem delegação;
+- **a consulta replicada e certificada**: pelo `/call`, sem `query`,
+  certificada, do anônimo e assinada, na sub-rede de aplicação e na raiz,
+  declarada como chamada; a prova adulterada dela — o certificado com a
+  assinatura trocada, a resposta sem o certificado — recusada como a da
+  chamada; e o mesmo Principal pela consulta assinada, pela replicada e
+  pela chamada `quem`, e outro pela outra chave;
+- **sem `key.sign` a consulta não se assina**: sem a chave e sem
+  `key.read`, nada conecta; com `key.read` e sem `key.sign`, e com
+  `key.sign` só sobre a outra chave, o gate recusa a assinatura e a
+  consulta não sai — nenhum `query`, de ninguém —; a outra chave assina;
+- **a consulta assinada adulterada e recusada**, em cada modo da bancada —
+  o certificado das faixas (nada se assina), a resposta (assinada uma
+  vez, e recusada), e o pedido trocado no caminho, que desfaz a assinatura
+  de quem pede: o IC responde `400`, e nada é entregue —; cada uma
+  declarada com a âncora certa, e observada pelo NSF com a decisão;
+- **duas consultas assinadas ao mesmo tempo**, com a mesma chave, por dois
+  processos: nenhuma espera a outra, o mesmo Principal, e duas assinaturas
+  de dois pedidos, cada declaração na sua decisão;
+- **a chave anulada no meio da consulta**: a assinatura pedida depois da
+  anulação é recusada pelo kernel, e a consulta não sai; e a pessoa
+  revogada no meio de outra: nada se assina depois, e as chaves dela
+  ficam anuladas.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
@@ -1267,10 +1403,12 @@ principal, qualquer coisa além da consulta anônima — a chamada de
 atualização, a consulta autenticada, o *Management Canister*, o ledger e
 os *cycles*; descobrir os *API boundary nodes* pela árvore de estado;
 implantar canisters; o `icp-cli` dentro do Duke; o CDK; a EVM; o HTTP/3.
-Nem mudança no DNS, no TCP ou no HTTP: o ICP-1, o ICP-3 e o ICP-4b rodam
-sobre a infraestrutura que já existia, e o gate decide as chaves e os
+Nem mudança no DNS, no TCP ou no HTTP: o ICP-1, o ICP-3, o ICP-4b e o
+ICP-4c rodam sobre a infraestrutura que já existia, e o gate decide as chaves e os
 destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de
 assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
 principal pela configuração da imagem — a raiz, as âncoras públicas, a
 rede `mainnet` —, sem destino dela na política padrão, e fechou com a
-fumaça real de 23 de outubro de 2026 (ver *O resultado*).
+fumaça real de 23 de outubro de 2026 (ver *O resultado*). O ICP-4c fez a
+consulta assinada e a replicada na bancada; na rede principal, ficam para
+quando houver lá um canister do projeto.

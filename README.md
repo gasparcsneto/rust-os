@@ -550,7 +550,7 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── candid.rs     o Candid: a tabela de tipos inteira, os valores de um subconjunto, e o que sobra recusado
     ├── candid/
     │   └── testes.rs  contra a especificação e contra o crate `candid`
-    ├── agente.rs     a consulta ponta a ponta sobre um transporte de quem chama: nada se entrega antes da verificação
+    ├── agente.rs     a consulta ponta a ponta — do anônimo, ou assinada por quem tem chave — sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
     │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro
     ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura outro pedido, assinado de novo — nada se entrega antes da verificação
@@ -628,7 +628,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── conexao.rs   a conexão TCP de um programa, pelo gate: a recusa, o firewall, o outro lado e o prazo, sem se misturarem
     ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
     ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
-    ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, a chamada assinada pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
+    ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, assinadas pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
     └── bin/
@@ -6267,8 +6267,9 @@ identidade do Duke — o ICP-3, em [A chamada assinada](#a-chamada-assinada)
 entregue. O ICP-4a deu ao TLS do programa as cadeias das autoridades
 públicas — a P-384 e o RSA, só na verificação —, que a rede principal usa.
 O ICP-4b liga a rede principal, só para ler — em [A rede
-principal](#a-rede-principal). O desenho inteiro, as tabelas e o que fica
-de fora estão em [`docs/ICP.md`](docs/ICP.md).
+principal](#a-rede-principal). O ICP-4c dá à consulta a chave do ICP-3 — em
+[A consulta assinada](#a-consulta-assinada). O desenho inteiro, as tabelas
+e o que fica de fora estão em [`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
@@ -6583,6 +6584,32 @@ Ver [`docs/ICP.md`](docs/ICP.md), *A chamada assinada*, para o caminho
 inteiro, os desfechos, os casos, as medidas, as mutações e o que ainda
 não existe — delegações, custódia no TPM, compartilhamento, exportação e a
 rede principal.
+
+### A consulta assinada
+
+O ICP-4c dá à consulta a chave do ICP-3: uma identidade do Duke consulta
+um canister com a própria chave — a **consulta assinada** — e com a
+resposta provada pelo consenso — a **consulta replicada**, o método de
+consulta pelo caminho da chamada. O kernel, a política, o gate, o
+`key.sign` e o TLS não mudaram, e nenhuma decisão de arquitetura é nova:
+
+- **a consulta assinada** vai como a chamada vai: as faixas pelo anônimo,
+  a consulta assinada pelo `key.sign` — uma decisão do gate, uma só —, e
+  a resposta conferida como a do anônimo, pelas assinaturas dos nós sobre
+  este pedido, que leva o remetente. A declaração é `icp.query`, ancorada
+  na decisão da assinatura;
+- **sem a chave, nada vai do anônimo no lugar**: a chave que não se lê
+  para antes da conexão (`failed_key`), e a assinatura recusada para a
+  consulta antes de ela sair (`failed_signature`);
+- **a replicada** é a chamada do ICP-3 num método de consulta: certificada,
+  e declarada como chamada, `icp.update`.
+
+Na suíte, a consulta assinada e a replicada, do anônimo e assinadas, na
+sub-rede de aplicação e na raiz; o mesmo Principal pela consulta, pela
+replicada e pela chamada; sem `key.sign`; a prova adulterada em cada modo
+da bancada; duas consultas assinadas ao mesmo tempo com a mesma chave; e
+a chave anulada no meio. Ver [A consulta assinada e a
+replicada](docs/ICP.md#a-consulta-assinada-e-a-replicada-icp-4c).
 
 ## Vários agentes
 
@@ -9034,8 +9061,12 @@ padronizado.
       anônimo também (ver [A chamada assinada](#a-chamada-assinada)); e o
       ICP-4a — o TLS do programa confere as cadeias das autoridades
       públicas, P-384 e RSA, com a cadeia, o nome e a validade tão estritos
-      quanto antes (ver [`docs/ICP.md`](docs/ICP.md)). A rede principal, as
-      delegações, a custódia no TPM, os *cycles* e o resto ficam para os
+      quanto antes (ver [`docs/ICP.md`](docs/ICP.md)); e o ICP-4b — a rede
+      principal, só para ler, com a fumaça real (ver [A rede
+      principal](#a-rede-principal)); e o ICP-4c — a consulta assinada pela
+      chave da identidade, e a replicada (ver [A consulta
+      assinada](#a-consulta-assinada)). As delegações, a custódia no TPM, os
+      *cycles*, a rede principal com chave e o resto ficam para os
       incrementos seguintes — cada um, uma decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
