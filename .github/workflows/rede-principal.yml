@@ -21,12 +21,12 @@ on:
         type: choice
         options: [x86_64, aarch64]
         default: x86_64
-  # Temporário: o primeiro disparo, nas duas arquiteturas, vem do empurrão
-  # deste arquivo neste ramo — o fluxo ainda não está no ramo padrão, onde
-  # o botão aparece. O commit seguinte tira o gatilho.
+  # Temporário: enquanto o fluxo não está no ramo padrão, onde o botão
+  # aparece, os disparos vêm do empurrão deste arquivo ou do comando que ele
+  # roda, neste ramo, nas duas arquiteturas. Sai quando a fumaça fechar.
   push:
     branches: [claude/modest-pascal-vy8p8k]
-    paths: [.github/workflows/rede-principal.yml]
+    paths: [.github/workflows/rede-principal.yml, xtask/src/rede_principal.rs]
 
 env:
   CARGO_TERM_COLOR: always
