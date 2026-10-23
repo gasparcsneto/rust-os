@@ -56,6 +56,12 @@ jobs:
             gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
             swtpm python3 openssl
 
+      # O cache traz o `target/` de uma execução anterior, e com ele o
+      # `target/mainnet/` dela: o disco e o relatório. Só esse diretório
+      # sai, antes da fumaça; o relatório do artefato é só o desta execução.
+      - name: Esvaziar o target/mainnet
+        run: rm -rf target/mainnet
+
       - name: A fumaça real
         run: cargo xtask mainnet --arch ${{ inputs.arch }} --release
 

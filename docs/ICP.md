@@ -1088,10 +1088,13 @@ máquina, a política, o programa e a auditoria onde a rede não chega, e o
 título do relatório diz que não é a fumaça real. O fluxo
 [`rede-principal.yml`](../.github/workflows/rede-principal.yml) roda o
 comando num runner do GitHub quando alguém o pede (`workflow_dispatch`),
-com o relatório como artefato. O GitHub só oferece o botão para um fluxo
-que já está no ramo padrão; enquanto ele não está, as execuções de 23 de
-outubro de 2026 vieram de um gatilho `push` temporário, só no ramo do
-ICP-4b, tirado depois. A CI não o roda, e não depende da rede principal.
+com o relatório como artefato. Antes da fumaça, ele esvazia
+`target/mainnet/`: o cache traz o `target/` de execuções anteriores, e o
+artefato leva só o relatório da execução. O GitHub só oferece o botão
+para um fluxo que já está no ramo padrão; enquanto ele não está, as
+execuções de 23 de outubro de 2026 vieram de um gatilho `push`
+temporário, só no ramo do ICP-4b, tirado depois. A CI não o roda, e não
+depende da rede principal.
 
 #### O resultado
 
@@ -1242,11 +1245,6 @@ nó alterados com ela também, porque já recusava o certificado inteiro.
   mudar de autoridade, o TLS recusa (`TLS_UNTRUSTED`) e o pré-voo diz
   `TLS_ANCHOR_GAP`: falha fechada. Outra âncora é outra configuração da
   imagem, decidida à parte.
-- **O cache do fluxo guarda relatórios.** O fluxo do GitHub guarda o
-  `target/` no cache, e com ele os relatórios de execuções anteriores: o
-  artefato de uma pode trazer o de outra, que se distingue pela data no
-  nome. A execução que fecha esvaziou `target/mainnet/` antes de rodar; o
-  fluxo do ramo não esvazia.
 - **Só IPv4 e HTTP/1.1.** O Duke conecta IPv4; o HTTP/3 está fora, de
   propósito.
 - **A hora sem fontes públicas.** O registro de hora da imagem só tem as
