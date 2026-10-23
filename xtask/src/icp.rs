@@ -10,11 +10,12 @@
 //! escolhe, e nada de fora a alcança.
 //!
 //! [`Bancada::ligar`] sobe o servidor e roda `bancada/icp.py preparar`: a
-//! instância (a NNS e duas sub-redes de aplicação), o canister da bancada e
-//! o gateway HTTP dela — ver o cabeçalho do script. A PocketIC deriva as
-//! chaves das sub-redes de sementes fixas: a raiz e o canister são os
-//! mesmos a cada instância desta versão, e a bancada confere que são
-//! [`RAIZ`] e [`CANISTER`]. Uma PocketIC que mudou é um erro aqui, e não um
+//! instância (a NNS, a II e duas sub-redes de aplicação), o canister da
+//! bancada, os ledgers e o gateway HTTP dela — ver o cabeçalho do script. A
+//! PocketIC deriva as chaves das sub-redes de sementes fixas: a raiz e o
+//! canister são os mesmos a cada instância desta versão, e a bancada
+//! confere que são [`RAIZ`] e [`CANISTER`], e que os ledgers respondem nos
+//! ids da rede principal. Uma PocketIC que mudou é um erro aqui, e não um
 //! caso da suíte falhando sem dizer por quê.
 //!
 //! # O proxy, sem porta aberta no hospedeiro
@@ -69,6 +70,14 @@ pub(crate) const CANISTER_DA_RAIZ: &str = "xp3jw-ot777-77777-aaaaa-cai";
 
 /// A sub-rede do canister: a suíte confere que a prova veio dela.
 const SUB_REDE: &str = "753q6-ah42a-rm7md-yb6nn-3egqb-e2tyy-zdjgf-ind25-haovq-fe74w-pqe";
+
+/// Os ledgers da bancada (ICP-4d), nos ids da rede principal: o ledger de
+/// ICP, o CMC e o ledger de cycles, que a PocketIC sobe (`IcpFeatures`).
+const LEDGERS: [(&str, &str); 3] = [
+    ("ledger", "ryjl3-tyaaa-aaaaa-aaaba-cai"),
+    ("cmc", "rkp4c-7iaaa-aaaaa-aaaca-cai"),
+    ("ledger_de_ciclos", "um5iw-rqaaa-aaaaq-qaaba-cai"),
+];
 
 /// A chave da raiz da rede principal do IC, em DER: a `IC_ROOT_KEY` do
 /// `ic-agent`, num arquivo só — o mesmo com que os testes do `web3` conferem
@@ -322,6 +331,14 @@ impl Bancada {
             return Err(format!(
                 "a PocketIC {VERSAO} não é a fixada: raiz {raiz}, canister {canister}, sub-rede {sub_rede}, canister da raiz {da_raiz}"
             ));
+        }
+        for (nome, fixado) in LEDGERS {
+            let dela = campo(&estado, nome).unwrap_or_default();
+            if dela != fixado {
+                return Err(format!(
+                    "a PocketIC {VERSAO} não subiu o {nome} em {fixado}: {dela}"
+                ));
+            }
         }
         println!("[xtask] bancada do IC: PocketIC {VERSAO}, canister {canister}");
         Ok(())

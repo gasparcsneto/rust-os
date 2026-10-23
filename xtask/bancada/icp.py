@@ -5,15 +5,15 @@ proxy TLS que a suite usa para mentir - ver xtask/src/icp.rs.
 Tres papeis, pelo primeiro argumento:
 
     preparar <url> <dir>
-        Com a PocketIC escutando em <url>: cria a instancia - a NNS e duas
-        sub-redes de aplicacao, com o tempo quinze minutos atras -, instala
-        o canister da bancada (o modulo de `modulo`) na primeira de
-        aplicacao, e o mesmo modulo num canister da NNS, a sub-rede raiz;
-        guarda uma resposta de `read_state` desse tempo velho
-        (`velho.cbor`), poe a instancia no tempo de verdade, andando
-        sozinha, e escreve <dir>/estado.json: a porta do gateway HTTP, a
-        chave da raiz, os dois canisters e um canister da faixa da outra
-        sub-rede.
+        Com a PocketIC escutando em <url>: cria a instancia - a NNS, a II e
+        duas sub-redes de aplicacao, com o tempo quinze minutos atras, e os
+        ledgers (ver LEDGERS) -, instala o canister da bancada (o modulo de
+        `modulo`) na primeira de aplicacao, e o mesmo modulo num canister
+        da NNS, a sub-rede raiz; confere que os ledgers respondem; guarda
+        uma resposta de `read_state` desse tempo velho (`velho.cbor`), poe
+        a instancia no tempo de verdade, andando sozinha, e escreve
+        <dir>/estado.json: a porta do gateway HTTP, a chave da raiz, os dois
+        canisters, um canister da faixa da outra sub-rede e os ledgers.
 
     proxy <dir> <dir-tls>
         O que o emulador roda a cada conexao para 10.0.2.100:4943 (um
@@ -55,6 +55,16 @@ e nas chamadas de atualizacao (`canister_update`):
                         chamada - o estado muda
     lento               ("lento"), depois de LENTO_VOLTAS voltas de um laco:
                         a chamada que demora
+
+Os ledgers (ICP-4d), os `IcpFeatures` da PocketIC, nos ids da rede
+principal - os canisters de sistema que ela sobe e mantem:
+
+    ryjl3-tyaaa-aaaaa-aaaba-cai   o ledger de ICP (`icp_token`), na NNS; o
+                                  anonimo comeca com 1 bilhao de ICP
+    rkp4c-7iaaa-aaaaa-aaaca-cai   o CMC (`cycles_minting`), na NNS: converte
+                                  ICP em cycles
+    um5iw-rqaaa-aaaaq-qaaba-cai   o ledger de cycles (`cycles_token`), na
+                                  II; o anonimo comeca com 2^127 cycles
 
 Os modos, pelo nome do TLS:
 
@@ -589,6 +599,48 @@ def sub_rede():
     return {"state_config": "New", "instruction_config": "Production"}
 
 
+# Os ledgers, e o simbolo de cada um - ver o cabecalho. O CMC nao tem
+# simbolo: responde a taxa de conversao.
+LEDGERS = {
+    "ledger": ("ryjl3-tyaaa-aaaaa-aaaba-cai", "ICP"),
+    "cmc": ("rkp4c-7iaaa-aaaaa-aaaca-cai", None),
+    "ledger_de_ciclos": ("um5iw-rqaaa-aaaaq-qaaba-cai", "TCYCLES"),
+}
+
+
+def consultar(pic, instancia, canister, metodo, payload):
+    """Uma consulta pela API da PocketIC, do anonimo: os bytes da resposta."""
+    resultado = pic.chamar(
+        "POST",
+        "/instances/%d/read/query" % instancia,
+        {
+            "sender": b64(b"\x04"),
+            "canister_id": b64(principal_bytes(canister)),
+            "effective_principal": "None",
+            "method": metodo,
+            "payload": b64(payload),
+        },
+    )
+    if "Ok" not in resultado:
+        raise ErroDaPocketIc("%s de %s falhou: %s" % (metodo, canister, resultado))
+    return base64.b64decode(resultado["Ok"])
+
+
+def conferir_os_ledgers(pic, instancia):
+    """Cada ledger responde o simbolo dele, e o CMC a taxa: a PocketIC subiu
+    os tres nos ids da rede principal."""
+    vazio = b"DIDL" + leb(0) + leb(0)
+    for canister, simbolo in LEDGERS.values():
+        if simbolo is None:
+            consultar(pic, instancia, canister, "get_icp_xdr_conversion_rate", vazio)
+            continue
+        texto = simbolo.encode()
+        esperado = b"DIDL" + leb(0) + leb(1) + sleb(-15) + leb(len(texto)) + texto
+        resposta = consultar(pic, instancia, canister, "icrc1_symbol", vazio)
+        if resposta != esperado:
+            raise ErroDaPocketIc("o simbolo de %s nao e %s: %r" % (canister, simbolo, resposta))
+
+
 ANanos = 1_000_000_000
 ATRAS_NS = 15 * 60 * ANanos
 
@@ -627,12 +679,19 @@ def preparar(url, diretorio):
     config = {
         "subnet_config_set": {
             "nns": sub_rede(),
+            # A do ledger de cycles.
+            "ii": sub_rede(),
             "system": [],
             "application": [sub_rede(), sub_rede()],
             "verified_application": [],
         },
         "http_gateway_config": {"ip_addr": "127.0.0.1"},
         "initial_time": {"Timestamp": {"nanos_since_epoch": agora - ATRAS_NS}},
+        "icp_features": {
+            "icp_token": "DefaultConfig",
+            "cycles_minting": "DefaultConfig",
+            "cycles_token": "DefaultConfig",
+        },
     }
     criada = pic.chamar("POST", "/instances", config)
     if "Created" not in criada:
@@ -686,6 +745,7 @@ def preparar(url, diretorio):
         candid_instalar(canister_da_raiz, modulo()),
         {"CanisterId": b64(canister_da_raiz)},
     )
+    conferir_os_ledgers(pic, instancia)
 
     # O certificado velho: um `read_state` do caminho `subnet`, como o
     # agente pede, ainda no tempo de quinze minutos atras.
@@ -733,6 +793,8 @@ def preparar(url, diretorio):
         "outra_sub_rede": aplicacao[1],
         "canister_da_outra": principal_texto(base64.b64decode(outra)),
     }
+    for nome, (canister, _) in LEDGERS.items():
+        estado[nome] = canister
     caminho = os.path.join(diretorio, "estado.json")
     with open(caminho + ".novo", "w") as f:
         json.dump(estado, f, indent=1)
