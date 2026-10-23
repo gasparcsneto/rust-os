@@ -12,7 +12,10 @@
 //! - [`assinatura`]: a assinatura Ed25519 de um nó (ZIP215);
 //! - [`consulta`]: a resposta da consulta e as assinaturas dos nós;
 //! - [`candid`]: o Candid — a tabela de tipos inteira, os valores de um
-//!   subconjunto;
+//!   subconjunto, e a escrita com o tipo dado;
+//! - [`icrc1`]: o ICRC-1 de um ledger — a conta, a transferência, o
+//!   resultado dela e o saldo;
+//! - [`cmc`]: o CMC — a cunhagem de cycles com ICP;
 //! - [`situacao`]: a situação de uma chamada — o corpo da chamada
 //!   síncrona e o `request_status` de um certificado;
 //! - [`agente`]: o agente síncrono da consulta — do anônimo, ou assinada
@@ -34,7 +37,7 @@
 //!   `ic-transport-types` 0.49.2, `ic-certification` e
 //!   `ic-certificate-verification` 4.0.0, `ic_principal` 0.1.5, `candid`
 //!   0.10.38, `ic-ed25519` 0.6.0 —, onde a especificação deixa a escolha ao
-//!   cliente;
+//!   cliente; e, do ICRC-1, o `icrc-ledger-types` 0.2.0;
 //! - **oráculo**: os testes do hospedeiro conferem cada peça contra a
 //!   oficial, nos dois sentidos, e os vetores de exemplo da especificação
 //!   (a árvore de hash e o id do pedido) estão nos casos.
@@ -58,7 +61,9 @@ pub mod atualizacao;
 pub mod candid;
 pub mod cbor;
 pub mod certificado;
+pub mod cmc;
 pub mod consulta;
+pub mod icrc1;
 pub mod pedido;
 pub mod principal;
 pub mod registro;

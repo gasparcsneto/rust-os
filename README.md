@@ -547,9 +547,15 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── consulta.rs   a resposta da consulta e as assinaturas dos nós da sub-rede, presas a este pedido
     ├── consulta/
     │   └── testes.rs  contra a bancada e o `ic-transport-types`
-    ├── candid.rs     o Candid: a tabela de tipos inteira, os valores de um subconjunto, e o que sobra recusado
+    ├── candid.rs     o Candid: a tabela de tipos inteira, os valores de um subconjunto, e o que sobra recusado; e a escrita com o tipo dado — `opt`, `vec`, `record`, `variant`
     ├── candid/
-    │   └── testes.rs  contra a especificação e contra o crate `candid`
+    │   └── testes.rs  contra a especificação e contra o crate `candid`, nos dois sentidos, com tipos e valores sorteados
+    ├── icrc1.rs      o ICRC-1 de um ledger: a conta, a transferência, o saldo, e o bloco ou a recusa pelo nome do padrão — o que não tem a forma dele não vira bloco
+    ├── icrc1/
+    │   └── testes.rs  contra o `icrc-ledger-types`, nos dois sentidos
+    ├── cmc.rs        o CMC: a conta de depósito de quem cunha, o memo `MINT` e o `notify_mint_cycles`
+    ├── cmc/
+    │   └── testes.rs  contra a interface do CMC, declarada com o `candid`
     ├── agente.rs     a consulta ponta a ponta — do anônimo, ou assinada por quem tem chave — sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
     │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro

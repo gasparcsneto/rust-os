@@ -30,6 +30,13 @@
 //! A codificação é a de um subconjunto menor: os valores que se escrevem
 //! sem tipo de fora — os primitivos, `principal` e `blob`. É o que um
 //! argumento do ICP-1 precisa.
+//!
+//! Com o tipo dado ([`codificar_com_tipos`]), escreve também `opt`, `vec`,
+//! `record` e `variant` — um `opt` vazio, um `vec` vazio e o caso de um
+//! `variant` só se escrevem com o tipo —: é o que o argumento de um ledger
+//! precisa (ICP-4d). Os campos vão pelo id do nome ([`id_do_campo`]), em
+//! ordem crescente, e cada composto entra uma vez na tabela. O que a
+//! leitura daqui recusaria ([`TETOS`]) também não se escreve.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -776,6 +783,329 @@ pub fn codificar(valores: &[Valor]) -> Result<Vec<u8>, Erro> {
         }
     }
     Ok(saida)
+}
+
+/// O id de um campo de `record` ou `variant` pelo nome — **especificação**,
+/// `idl_hash`: `h · 223 + b`, byte a byte do UTF-8, módulo 2^32.
+pub fn id_do_campo(nome: &str) -> u32 {
+    nome.bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(223).wrapping_add(u32::from(b)))
+}
+
+/// Um tipo, para escrever o que não se escreve sozinho — ver
+/// [`codificar_com_tipos`]. Os campos de `record` e `variant` vão pelo id,
+/// em qualquer ordem: a escrita os ordena.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tipo {
+    /// Um primitivo.
+    Primitivo(Primitivo),
+    /// `opt t`.
+    Opt(Box<Tipo>),
+    /// `vec t`; `vec nat8` é o `blob`.
+    Vec(Box<Tipo>),
+    /// `record { id: t; … }`.
+    Record(Vec<(u32, Tipo)>),
+    /// `variant { id: t; … }`.
+    Variant(Vec<(u32, Tipo)>),
+}
+
+impl From<Primitivo> for Tipo {
+    fn from(p: Primitivo) -> Tipo {
+        Tipo::Primitivo(p)
+    }
+}
+
+impl Tipo {
+    /// `opt t`.
+    pub fn opt(t: impl Into<Tipo>) -> Tipo {
+        Tipo::Opt(Box::new(t.into()))
+    }
+
+    /// `vec t`.
+    pub fn vec(t: impl Into<Tipo>) -> Tipo {
+        Tipo::Vec(Box::new(t.into()))
+    }
+
+    /// `blob`: `vec nat8`.
+    pub fn blob() -> Tipo {
+        Tipo::vec(Primitivo::Nat8)
+    }
+
+    /// `record`, com os campos pelo nome.
+    pub fn record<'a>(campos: impl IntoIterator<Item = (&'a str, Tipo)>) -> Tipo {
+        Tipo::Record(
+            campos
+                .into_iter()
+                .map(|(nome, t)| (id_do_campo(nome), t))
+                .collect(),
+        )
+    }
+
+    /// `variant`, com os casos pelo nome.
+    pub fn variant<'a>(casos: impl IntoIterator<Item = (&'a str, Tipo)>) -> Tipo {
+        Tipo::Variant(
+            casos
+                .into_iter()
+                .map(|(nome, t)| (id_do_campo(nome), t))
+                .collect(),
+        )
+    }
+}
+
+impl Valor {
+    /// O campo `nome` de um `record`, pelo id dele ([`id_do_campo`]).
+    pub fn campo(&self, nome: &str) -> Option<&Valor> {
+        let Valor::Record(campos) = self else {
+            return None;
+        };
+        let id = id_do_campo(nome);
+        campos.iter().find(|(i, _)| *i == id).map(|(_, v)| v)
+    }
+
+    /// O valor do caso `nome`, se este `variant` é ele.
+    pub fn caso(&self, nome: &str) -> Option<&Valor> {
+        match self {
+            Valor::Variant(id, v) if *id == id_do_campo(nome) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Por que um valor não se escreve no tipo dado — ver
+/// [`codificar_com_tipos`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErroDaEscrita {
+    /// O valor não é do tipo: outro primitivo, outro composto, um campo que
+    /// falta ou que sobra, um caso que o `variant` não tem, um tipo sem
+    /// valor (`empty`, os de ponto flutuante), ou tipos e valores em
+    /// números diferentes.
+    ForaDoTipo,
+    /// Um id de campo repetido num `record` ou `variant` do tipo.
+    CampoRepetido,
+    /// Compostos, um dentro do outro, além do teto da leitura.
+    Profundo,
+    /// Argumentos ou entradas da tabela além do teto da leitura.
+    Grande,
+}
+
+impl fmt::Display for ErroDaEscrita {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ErroDaEscrita::ForaDoTipo => "valor candid fora do tipo",
+            ErroDaEscrita::CampoRepetido => "campo candid repetido no tipo",
+            ErroDaEscrita::Profundo => "tipo candid mais fundo que o teto",
+            ErroDaEscrita::Grande => "candid maior que o teto",
+        })
+    }
+}
+
+/// Escreve `valores`, cada um no tipo de `tipos` na mesma posição: a tabela
+/// com os compostos — cada um uma vez, os campos pelo id em ordem
+/// crescente —, os tipos dos argumentos e os valores. Nada se escreve se um
+/// valor não é do tipo.
+pub fn codificar_com_tipos(tipos: &[Tipo], valores: &[Valor]) -> Result<Vec<u8>, ErroDaEscrita> {
+    if tipos.len() != valores.len() {
+        return Err(ErroDaEscrita::ForaDoTipo);
+    }
+    if tipos.len() > TETOS.argumentos {
+        return Err(ErroDaEscrita::Grande);
+    }
+    let mut tabela = Tabela {
+        entradas: Vec::new(),
+    };
+    let mut referencias = Vec::with_capacity(tipos.len());
+    for t in tipos {
+        // A leitura conta os compostos de cada argumento a partir dele.
+        if profundidade(t) > TETOS.profundidade {
+            return Err(ErroDaEscrita::Profundo);
+        }
+        referencias.push(tabela.referencia(t)?);
+    }
+    if tabela.entradas.len() > TETOS.tabela {
+        return Err(ErroDaEscrita::Grande);
+    }
+    let mut saida = Vec::from(*MAGICA);
+    escrever_nat(&mut saida, tabela.entradas.len() as u128);
+    for (_, entrada) in &tabela.entradas {
+        saida.extend_from_slice(entrada);
+    }
+    escrever_nat(&mut saida, referencias.len() as u128);
+    for r in referencias {
+        escrever_int(&mut saida, r.into());
+    }
+    let mut escrita = Escrita { saida, valores: 0 };
+    for (t, v) in tipos.iter().zip(valores) {
+        escrita.valor(t, v)?;
+    }
+    Ok(escrita.saida)
+}
+
+/// A tabela de tipos que se escreve: cada composto, com a entrada dele.
+struct Tabela<'t> {
+    entradas: Vec<(&'t Tipo, Vec<u8>)>,
+}
+
+impl<'t> Tabela<'t> {
+    /// `I(t)`: o opcode de um primitivo, ou o índice do composto na tabela
+    /// — posto nela, depois dos que ele usa, se ainda não estava.
+    fn referencia(&mut self, t: &'t Tipo) -> Result<i64, ErroDaEscrita> {
+        if let Tipo::Primitivo(p) = t {
+            return Ok(p.opcode());
+        }
+        if let Some(i) = self.entradas.iter().position(|(x, _)| *x == t) {
+            return Ok(i as i64);
+        }
+        let mut entrada = Vec::new();
+        match t {
+            Tipo::Opt(d) | Tipo::Vec(d) => {
+                let r = self.referencia(d)?;
+                escrever_int(
+                    &mut entrada,
+                    if matches!(t, Tipo::Opt(_)) { -18 } else { -19 },
+                );
+                escrever_int(&mut entrada, r.into());
+            }
+            Tipo::Record(campos) | Tipo::Variant(campos) => {
+                if campos.len() > TETOS.campos {
+                    return Err(ErroDaEscrita::Grande);
+                }
+                let campos = em_ordem(campos)?;
+                escrever_int(
+                    &mut entrada,
+                    if matches!(t, Tipo::Record(_)) {
+                        -20
+                    } else {
+                        -21
+                    },
+                );
+                escrever_nat(&mut entrada, campos.len() as u128);
+                for (id, tipo) in campos {
+                    let r = self.referencia(tipo)?;
+                    escrever_nat(&mut entrada, u128::from(*id));
+                    escrever_int(&mut entrada, r.into());
+                }
+            }
+            Tipo::Primitivo(_) => unreachable!("o primitivo voltou antes"),
+        }
+        self.entradas.push((t, entrada));
+        Ok((self.entradas.len() - 1) as i64)
+    }
+}
+
+/// Quantos compostos há, um dentro do outro, no caminho mais fundo de `t`.
+fn profundidade(t: &Tipo) -> usize {
+    match t {
+        Tipo::Primitivo(_) => 0,
+        Tipo::Opt(d) | Tipo::Vec(d) => 1 + profundidade(d),
+        Tipo::Record(campos) | Tipo::Variant(campos) => {
+            1 + campos
+                .iter()
+                .map(|(_, t)| profundidade(t))
+                .max()
+                .unwrap_or(0)
+        }
+    }
+}
+
+/// Os campos de um `record` ou `variant` pelo id, em ordem crescente; um
+/// id repetido é recusado.
+fn em_ordem(campos: &[(u32, Tipo)]) -> Result<Vec<&(u32, Tipo)>, ErroDaEscrita> {
+    let mut ordem: Vec<&(u32, Tipo)> = campos.iter().collect();
+    ordem.sort_by_key(|(id, _)| *id);
+    if ordem.windows(2).any(|par| par[0].0 == par[1].0) {
+        return Err(ErroDaEscrita::CampoRepetido);
+    }
+    Ok(ordem)
+}
+
+/// Os valores que se escrevem, contados como a leitura os conta: cada
+/// valor um, cada item de um `vec` também, e o `blob` inteiro um.
+struct Escrita {
+    saida: Vec<u8>,
+    valores: usize,
+}
+
+impl Escrita {
+    /// `M(v : t)`: o valor no tipo, ou um erro se não é dele.
+    fn valor(&mut self, t: &Tipo, v: &Valor) -> Result<(), ErroDaEscrita> {
+        self.valores += 1;
+        if self.valores > TETOS.valores {
+            return Err(ErroDaEscrita::Grande);
+        }
+        let saida = &mut self.saida;
+        match (t, v) {
+            (Tipo::Primitivo(p), v) => escrever_primitivo(saida, *p, v),
+            (Tipo::Opt(_), Valor::Opt(None)) => {
+                saida.push(0);
+                Ok(())
+            }
+            (Tipo::Opt(d), Valor::Opt(Some(x))) => {
+                saida.push(1);
+                self.valor(d, x)
+            }
+            (Tipo::Vec(d), Valor::Blob(b)) if **d == Tipo::Primitivo(Primitivo::Nat8) => {
+                escrever_nat(saida, b.len() as u128);
+                saida.extend_from_slice(b);
+                Ok(())
+            }
+            (Tipo::Vec(d), Valor::Vec(itens)) => {
+                escrever_nat(saida, itens.len() as u128);
+                itens.iter().try_for_each(|x| self.valor(d, x))
+            }
+            (Tipo::Record(campos), Valor::Record(valores)) => {
+                if valores.len() != campos.len() {
+                    return Err(ErroDaEscrita::ForaDoTipo);
+                }
+                for (id, tipo) in em_ordem(campos)? {
+                    let (_, x) = valores
+                        .iter()
+                        .find(|(i, _)| i == id)
+                        .ok_or(ErroDaEscrita::ForaDoTipo)?;
+                    self.valor(tipo, x)?;
+                }
+                Ok(())
+            }
+            (Tipo::Variant(casos), Valor::Variant(id, x)) => {
+                let casos = em_ordem(casos)?;
+                let indice = casos
+                    .iter()
+                    .position(|(c, _)| c == id)
+                    .ok_or(ErroDaEscrita::ForaDoTipo)?;
+                escrever_nat(saida, indice as u128);
+                self.valor(&casos[indice].1, x)
+            }
+            _ => Err(ErroDaEscrita::ForaDoTipo),
+        }
+    }
+}
+
+/// O valor de um primitivo, se é dele.
+fn escrever_primitivo(saida: &mut Vec<u8>, p: Primitivo, v: &Valor) -> Result<(), ErroDaEscrita> {
+    match (p, v) {
+        (Primitivo::Null, Valor::Null) | (Primitivo::Reserved, Valor::Reservado) => {}
+        (Primitivo::Bool, Valor::Bool(b)) => saida.push(u8::from(*b)),
+        (Primitivo::Nat, Valor::Nat(n)) => escrever_nat(saida, *n),
+        (Primitivo::Int, Valor::Int(n)) => escrever_int(saida, *n),
+        (Primitivo::Nat8, Valor::Nat8(n)) => saida.push(*n),
+        (Primitivo::Nat16, Valor::Nat16(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Nat32, Valor::Nat32(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Nat64, Valor::Nat64(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Int8, Valor::Int8(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Int16, Valor::Int16(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Int32, Valor::Int32(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Int64, Valor::Int64(n)) => saida.extend_from_slice(&n.to_le_bytes()),
+        (Primitivo::Text, Valor::Texto(t)) => {
+            escrever_nat(saida, t.len() as u128);
+            saida.extend_from_slice(t.as_bytes());
+        }
+        (Primitivo::Principal, Valor::Principal(p)) => {
+            saida.push(1);
+            escrever_nat(saida, p.bytes().len() as u128);
+            saida.extend_from_slice(p.bytes());
+        }
+        _ => return Err(ErroDaEscrita::ForaDoTipo),
+    }
+    Ok(())
 }
 
 /// Um texto entre aspas, só em ASCII: o que não é ASCII imprimível sai
