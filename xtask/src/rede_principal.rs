@@ -43,6 +43,18 @@
 //!    cadeia, o destino, a suíte do TLS, a medida de cada parte, a prova e a
 //!    resposta.
 //!
+//! # A janela do DNS
+//!
+//! A máquina pergunta o nome ao resolvedor do hospedeiro, pelo emulador, e
+//! conecta ao primeiro endereço da resposta; a política só tem os que o
+//! pré-voo leu. Por isso a máquina é compilada antes do pré-voo: compilada
+//! depois, a frio — num runner, são minutos —, a resposta que o pré-voo leu
+//! já teria saído do cache do resolvedor quando a máquina perguntasse, e a
+//! dela podia trazer outros nós. Assim, as duas perguntas cabem na mesma
+//! janela. Um endereço que o pré-voo não leu continua recusado pelo gate
+//! (`DENY_RESOURCE`): a falha é fechada, e a auditoria do relatório diz o
+//! destino recusado.
+//!
 //! A máquina sobe sobre o estado zerado — o do disco e o do TPM, como em
 //! toda bancada — e sem servidor de hora, como a fumaça principal: a hora
 //! do programa é a do tempo lógico, que vem do RTC do emulador — o relógio
@@ -105,6 +117,10 @@ pub(crate) fn mainnet(
     );
     let mut relatorio = Relatorio::novo(&quando, arch, release, ensaio);
 
+    // A máquina compilada antes do pré-voo — ver o cabeçalho, *A janela do
+    // DNS*.
+    let preparo = preparar(arch, release)?;
+
     // 1. O pré-voo.
     let ips = match enderecos {
         Some(lista) => ler_enderecos(lista)?,
@@ -135,8 +151,7 @@ pub(crate) fn mainnet(
     }
 
     // 2. A imagem, e a máquina.
-    let base = super::build(arch, release, false)?;
-    let (disco, artefato) = imagem_com_os_destinos(arch, release, &base, &ips)?;
+    let (disco, artefato) = imagem_com_os_destinos(arch, preparo, &ips)?;
     // Um disco novo sobre o TPM de outro comando seria um journal que a
     // âncora não conhece, e nenhuma credencial valeria.
     zerar_o_estado(arch)?;
@@ -616,32 +631,21 @@ fn linha_em_json(linha: &str) -> String {
     format!(r#"{{"line":"{linha}"}}"#)
 }
 
-/// A imagem de produção com a política de [`politica_com_os_destinos`] —
-/// o resto é o da imagem de sempre: os programas, as chaves, as redes do
-/// IC, as âncoras. Mora em `target/mainnet/`.
-fn imagem_com_os_destinos(
-    arch: Arquitetura,
-    release: bool,
-    base: &Artefato,
-    ips: &[[u8; 4]],
-) -> Result<(std::path::PathBuf, Artefato), String> {
-    let dir = super::raiz_do_projeto().join("target").join("mainnet");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let caminho = dir.join("disco.img");
-    let politica = politica_com_os_destinos(ips)?;
+/// A máquina antes dos endereços: o kernel, os programas e o iniciador
+/// compilados, e os arquivos da imagem de sempre — os programas, as chaves,
+/// as redes do IC, as âncoras. Só a política espera o pré-voo.
+struct Preparo {
+    base: Artefato,
+    arquivos: Vec<(String, Vec<u8>)>,
+    /// O iniciador UEFI e o kernel para a ESP, quando a máquina sobe pelo
+    /// disco.
+    esp: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+fn preparar(arch: Arquitetura, release: bool) -> Result<Preparo, String> {
+    let base = super::build(arch, release, false)?;
     let mut arquivos = super::programas_do_disco()?;
-    let mut da_imagem = super::chaves::Chaves::garantir()?.arquivos()?;
-    let mut trocada = false;
-    for (nome, conteudo) in da_imagem.iter_mut() {
-        if nome == "etc/duke/politica" {
-            *conteudo = politica.clone().into_bytes();
-            trocada = true;
-        }
-    }
-    if !trocada {
-        return Err("a imagem nao tem etc/duke/politica".into());
-    }
-    arquivos.extend(da_imagem);
+    arquivos.extend(super::chaves::Chaves::garantir()?.arquivos()?);
     arquivos.push((
         super::tls::ANCORA_NA_IMAGEM.to_string(),
         super::tls::ancora()?,
@@ -654,9 +658,8 @@ fn imagem_com_os_destinos(
         super::tls::PUBLICAS_NA_IMAGEM.to_string(),
         super::tls::publicas()?,
     ));
-    super::montar_disco(&caminho, &arquivos)?;
-    let artefato = match base {
-        Artefato::Binario(img) => Artefato::Binario(img.clone()),
+    let esp = match &base {
+        Artefato::Binario(_) => None,
         Artefato::Disco(_) => {
             let perfil = if release { "release" } else { "debug" };
             let elf = super::raiz_do_projeto()
@@ -666,7 +669,39 @@ fn imagem_com_os_destinos(
                 .join(perfil)
                 .join(super::NOME_DO_BINARIO);
             let efi = super::build_do_iniciador(arch, release)?;
-            super::instalar_iniciador(arch, &caminho, &efi, &super::kernel_para_a_esp(&elf)?)?;
+            Some((efi, super::kernel_para_a_esp(&elf)?))
+        }
+    };
+    Ok(Preparo {
+        base,
+        arquivos,
+        esp,
+    })
+}
+
+/// A imagem de produção com a política de [`politica_com_os_destinos`] no
+/// lugar da padrão — o resto é o do [`Preparo`]. Mora em `target/mainnet/`.
+fn imagem_com_os_destinos(
+    arch: Arquitetura,
+    preparo: Preparo,
+    ips: &[[u8; 4]],
+) -> Result<(std::path::PathBuf, Artefato), String> {
+    let dir = super::raiz_do_projeto().join("target").join("mainnet");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let caminho = dir.join("disco.img");
+    let mut arquivos = preparo.arquivos;
+    let Some((_, padrao)) = arquivos
+        .iter_mut()
+        .find(|(nome, _)| nome == "etc/duke/politica")
+    else {
+        return Err("a imagem nao tem etc/duke/politica".into());
+    };
+    *padrao = politica_com_os_destinos(ips)?.into_bytes();
+    super::montar_disco(&caminho, &arquivos)?;
+    let artefato = match preparo.esp {
+        None => preparo.base,
+        Some((efi, kernel)) => {
+            super::instalar_iniciador(arch, &caminho, &efi, &kernel)?;
             Artefato::Disco(caminho.clone())
         }
     };

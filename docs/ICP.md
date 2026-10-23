@@ -1029,6 +1029,15 @@ mão, fora da CI. Precisa de uma máquina com a rede de verdade: DNS por
 UDP e TCP na porta 443, sem proxy que reabra o TLS. O TLS do programa
 recusaria a cadeia de um proxy, como deve.
 
+A máquina é compilada antes de tudo. O `livro` pergunta o nome ao
+resolvedor do hospedeiro, pelo emulador, e conecta ao primeiro endereço da
+resposta; a política só tem os que o pré-voo leu. Compilada depois do
+pré-voo, a frio — num runner, são minutos —, a resposta que ele leu já
+teria saído do cache do resolvedor, e a da máquina podia trazer outros
+nós. Assim, as duas perguntas cabem na mesma janela. Um endereço que o
+pré-voo não leu continua recusado pelo gate (`DENY_RESOURCE`): falha
+fechada, com o destino recusado na auditoria do relatório.
+
 1. **O pré-voo, no hospedeiro.** Os IPv4 de `icp-api.io` vêm do resolvedor
    dele, ou de `--enderecos a,b`. O `openssl s_client` fecha o aperto com
    o primeiro **no perfil do programa**: só o TLS 1.3, as três suítes, o
