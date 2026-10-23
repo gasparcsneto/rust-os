@@ -31731,6 +31731,38 @@ static CASOS: &[Caso] = &[
         f: icp_a_chave_anulada_no_meio_da_consulta,
     },
     Caso {
+        nome: "icp: o saldo e a transferencia assinada",
+        f: icp_o_saldo_e_a_transferencia_assinada,
+    },
+    Caso {
+        nome: "icp: a repeticao nao executa duas vezes",
+        f: icp_a_repeticao_nao_executa_duas_vezes,
+    },
+    Caso {
+        nome: "icp: a prova adulterada nao vira transferencia",
+        f: icp_a_prova_adulterada_nao_vira_transferencia,
+    },
+    Caso {
+        nome: "icp: sem key.sign nada se transfere",
+        f: icp_sem_key_sign_nada_se_transfere,
+    },
+    Caso {
+        nome: "icp: as recusas do ledger",
+        f: icp_as_recusas_do_ledger,
+    },
+    Caso {
+        nome: "icp: icp em cycles pelo cmc",
+        f: icp_icp_em_cycles_pelo_cmc,
+    },
+    Caso {
+        nome: "icp: a mesma transferencia por dois processos",
+        f: icp_a_mesma_transferencia_por_dois_processos,
+    },
+    Caso {
+        nome: "icp: a chave anulada no meio da transferencia",
+        f: icp_a_chave_anulada_no_meio_da_transferencia,
+    },
+    Caso {
         nome: "canal tcp: o aperto pela rede",
         f: canal_tcp_o_aperto_pela_rede,
     },
@@ -51888,6 +51920,1272 @@ fn icp_a_chave_anulada_no_meio_da_consulta_com_a_politica() -> Resultado {
         }
         Ok(())
     });
+    crate::chaves::esquecer_de_teste();
+    r
+}
+
+// ---------------------------------------------------------------------------
+// A carteira — docs/ICP.md, ICP-4d: o valor na bancada do IC, pela chave de
+// quem lança o programa
+// ---------------------------------------------------------------------------
+
+/// O código com que a `carteira` sai no fim pedido — o programa tem o
+/// mesmo.
+const CARTEIRA_ENCERRADA: i64 = 81;
+
+/// Os passos da `carteira` — o programa tem as mesmas constantes.
+const CARTEIRA_SALDO: i64 = 1;
+const CARTEIRA_SALDO_DE_CICLOS: i64 = 2;
+const CARTEIRA_FUNDOS: i64 = 3;
+const CARTEIRA_TRANSFERIR: i64 = 4;
+const CARTEIRA_REPETIR: i64 = 5;
+const CARTEIRA_TRANSFERIR_EM: i64 = 6;
+const CARTEIRA_CICLOS: i64 = 7;
+const CARTEIRA_NOTIFICAR: i64 = 8;
+const CARTEIRA_FIXAR_HORA: i64 = 9;
+
+/// O ledger de ICP, o CMC e o ledger de cycles da bancada, nos ids da rede
+/// principal — ver `xtask/src/icp.rs`.
+const LEDGER_DA_BANCADA: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+const CMC_DA_BANCADA: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
+
+/// A taxa de uma transferência no ledger de ICP, em e8s, e a de um depósito
+/// no ledger de cycles.
+const TAXA_DO_LEDGER: u128 = 10_000;
+const TAXA_DE_CICLOS: u128 = 100_000_000;
+
+/// O que a `carteira` transfere e cunha — 1 ICP — e o que o anônimo põe
+/// numa chave — 10 ICP —, em e8s: o programa tem os mesmos.
+const QUANTIA_DA_CARTEIRA: u128 = 100_000_000;
+const FUNDOS_DA_CARTEIRA: u128 = 1_000_000_000;
+
+/// A `carteira` em execução: o fio dela, e o canal por onde a suíte dita
+/// os passos.
+struct Carteira {
+    fio: u64,
+    canal: &'static str,
+}
+
+impl Carteira {
+    /// Lança a `carteira` com `autoridade`, e espera ela ler as âncoras do
+    /// TLS e as redes, pelo gate.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Carteira, &'static str> {
+        Carteira::lancar_em(autoridade, "teste-carteira", "carteira: pronto (14 redes)")
+    }
+
+    /// Lança uma segunda `carteira`, com a primeira viva: ela escuta o
+    /// outro canal.
+    fn lancar_segunda(
+        autoridade: crate::autorizacao::Autoridade,
+    ) -> Result<Carteira, &'static str> {
+        Carteira::lancar_em(
+            autoridade,
+            "teste-carteira-2",
+            "carteira: pronto pelo segundo canal (14 redes)",
+        )
+    }
+
+    fn lancar_em(
+        autoridade: crate::autorizacao::Autoridade,
+        canal: &'static str,
+        pronto: &str,
+    ) -> Result<Carteira, &'static str> {
+        let programa = alloc::format!("{}/carteira", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(|| linhas_do_programa(desde, pronto) == 1, TETO_DO_ICP)
+            .map_err(|_| "a carteira nao leu as ancoras e as redes")?;
+        Ok(Carteira { fio, canal })
+    }
+
+    /// Pede o passo `a`, com `b` e `c`, sem esperar o que ela diz.
+    fn pedir(&self, a: i64, b: i64, c: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b,
+                c,
+            },
+        )
+        .map_err(|_| "o canal da carteira nao recebeu o passo")
+    }
+
+    /// Espera a `carteira` dizer o desfecho do passo `passo`, desde o
+    /// registro `desde` do log; numa chamada que chegou ao fim, com quem
+    /// chamou e o que voltou, cada um da sua linha.
+    fn dito(&self, desde: u64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let prefixo = alloc::format!("carteira: {passo}: ");
+        let mut dito = None;
+        let r = esperar_ate(
+            || {
+                dito =
+                    linha_que_comeca(desde, &prefixo).and_then(|l| PassoDoIcp::ler(&l, &prefixo));
+                dito.is_some()
+            },
+            TETO_DO_ICP,
+        );
+        match (r, dito) {
+            (Ok(()), Some(mut dito)) => {
+                let linha = |qual: &str| {
+                    let prefixo = alloc::format!("carteira: {passo} {qual} ");
+                    linha_que_comeca(desde, &prefixo)
+                        .and_then(|l| l.strip_prefix(prefixo.as_str()).map(Into::into))
+                };
+                dito.remetente = linha("remetente");
+                dito.resposta = linha("resposta");
+                Ok(dito)
+            }
+            _ => {
+                crate::log_error!("teste", "a carteira nao disse `{}`", prefixo);
+                Err("a carteira nao disse o desfecho do passo")
+            }
+        }
+    }
+
+    /// O passo inteiro: pede, e espera o desfecho.
+    fn passo(&self, a: i64, b: i64, c: i64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let desde = crate::log::total_emitidos();
+        self.pedir(a, b, c)?;
+        self.dito(desde, passo)
+    }
+
+    /// Espera a `carteira` pedir `etapa` no passo `passo`, desde `desde`, e
+    /// dormir esperando a resposta, com a leitura armada na conexão com o
+    /// gateway.
+    fn esperando(&self, desde: u64, passo: &str, etapa: &str) -> Resultado {
+        let pede = alloc::format!("carteira: {passo} pede {etapa}");
+        esperar_ate(|| linhas_do_programa(desde, &pede) == 1, TETO_DO_ICP)
+            .map_err(|_| "a carteira nao chegou ao pedido")?;
+        let dono = crate::rede::conexoes::Dono::Processo(self.fio);
+        let conexao = crate::rede::pilha::donos()
+            .into_iter()
+            .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+            .map(|(id, _, _)| id)
+            .max()
+            .ok_or("a carteira nao tinha a conexao do pedido")?;
+        esperar_ate(
+            || crate::rede::pilha::espera_armada_de_teste(conexao),
+            TETO_DO_ICP,
+        )
+        .map_err(|_| "a carteira nao chegou a esperar a resposta")
+    }
+
+    /// Fixa a hora das transferências com hora, em segundos.
+    fn fixar_hora(&self, segundos: u64) -> Resultado {
+        let desde = crate::log::total_emitidos();
+        self.pedir(CARTEIRA_FIXAR_HORA, segundos as i64, 0)?;
+        let dita = alloc::format!("carteira: hora fixada {segundos}");
+        esperar_ate(|| linhas_do_programa(desde, &dita) == 1, TETO_DO_ICP)
+            .map_err(|_| "a carteira nao fixou a hora")
+    }
+
+    /// O saldo da conta `c` — o anônimo, ou uma das chaves —, no ledger de
+    /// ICP ou no de cycles, verificado, pela rede honesta.
+    fn saldo(&self, de_ciclos: bool, c: i64) -> Result<u128, &'static str> {
+        let (a, nome) = if de_ciclos {
+            (CARTEIRA_SALDO_DE_CICLOS, "saldo_de_ciclos")
+        } else {
+            (CARTEIRA_SALDO, "saldo")
+        };
+        let passo = alloc::format!("{nome} bancada {}", conta_da_carteira(c));
+        let p = self.passo(a, REDE_BANCADA, c, &passo)?;
+        saldo_dito(&p).ok_or_else(|| {
+            crate::log_error!("teste", "{:?}", p);
+            "a carteira nao disse o saldo verificado"
+        })
+    }
+
+    /// Os fundos do anônimo na chave `c`, pela rede honesta: o bloco.
+    fn fundos(&self, c: i64) -> Result<u128, &'static str> {
+        let passo = alloc::format!("fundos bancada {}", conta_da_carteira(c));
+        let p = self.passo(CARTEIRA_FUNDOS, REDE_BANCADA, c, &passo)?;
+        bloco_dito(&p)
+            .filter(|_| p.desfecho == "verified")
+            .ok_or_else(|| {
+                crate::log_error!("teste", "{:?}", p);
+                "o anonimo nao pos os fundos"
+            })
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let saiu = alloc::format!("processo encerrou com codigo {CARTEIRA_ENCERRADA}");
+        esperar_ate(|| linhas_do_programa(desde, &saiu) == 1, TETO_DO_ICP)
+            .map_err(|_| "a carteira nao saiu quando pedida")
+    }
+}
+
+/// O nome da conta `c` de um passo da `carteira`.
+fn conta_da_carteira(c: i64) -> &'static str {
+    match c {
+        1 => "chave:bancada",
+        2 => "chave:bancada-2",
+        _ => "anonimo",
+    }
+}
+
+/// O saldo verificado que a `carteira` disse: `saldo <n>; prova ...`.
+fn saldo_dito(p: &PassoDoIcp) -> Option<u128> {
+    if p.desfecho != "verified" {
+        return None;
+    }
+    p.detalhe
+        .strip_prefix("saldo ")?
+        .split_once("; ")?
+        .0
+        .parse()
+        .ok()
+}
+
+/// O bloco que uma transferência executou: `bloco <n>`, na resposta.
+fn bloco_dito(p: &PassoDoIcp) -> Option<u128> {
+    p.resposta.as_deref()?.strip_prefix("bloco ")?.parse().ok()
+}
+
+/// O erro do ledger, ou do CMC, que a resposta disse: `erro <nome>`.
+fn erro_dito(p: &PassoDoIcp) -> Option<&str> {
+    p.resposta.as_deref()?.strip_prefix("erro ")
+}
+
+/// Os cycles cunhados, o saldo no ledger de cycles e o bloco do depósito
+/// que a resposta de uma cunhagem disse: `cunhados <n> saldo <n> bloco
+/// <n>`.
+fn cunhagem_dita(p: &PassoDoIcp) -> Option<(u128, u128, u128)> {
+    let resto = p.resposta.as_deref()?.strip_prefix("cunhados ")?;
+    let (cunhados, resto) = resto.split_once(" saldo ")?;
+    let (saldo, bloco) = resto.split_once(" bloco ")?;
+    Some((
+        cunhados.parse().ok()?,
+        saldo.parse().ok()?,
+        bloco.parse().ok()?,
+    ))
+}
+
+/// Os pedidos que a `carteira` disse no passo `passo`, desde `desde`:
+/// quantos `read_state`, quantos `query` e quantos `call`.
+fn pedidos_da_carteira(desde: u64, passo: &str) -> (usize, usize, usize) {
+    let pede =
+        |etapa: &str| linhas_do_programa(desde, &alloc::format!("carteira: {passo} pede {etapa}"));
+    (pede("read_state"), pede("query"), pede("call"))
+}
+
+/// As chaves `chave:bancada` e `chave:bancada-2` da pessoa da `sessao`,
+/// criadas por ela pelo gate: a impressão da primeira.
+fn chaves_da_carteira(
+    sessao: crate::pessoas::IdSessao,
+) -> Result<alloc::string::String, &'static str> {
+    use crate::autorizacao::Chamador;
+    let r = criar_chave(Chamador::Pessoa(sessao), "chave:bancada");
+    let impressao = fs_texto(&r, "fingerprint").ok_or("a pessoa nao criou a chave")?;
+    if !fs_verdade(
+        &criar_chave(Chamador::Pessoa(sessao), "chave:bancada-2"),
+        "created",
+    ) {
+        return Err("a pessoa nao criou a segunda chave");
+    }
+    Ok(impressao)
+}
+
+/// A declaração de um passo da `carteira`: a alegação no recurso —
+/// `<evento> <canister>/<metodo> <desfecho>` — e, no detalhe, a âncora que
+/// o kernel escreveu.
+fn declaracao_da_carteira(
+    fio: u64,
+    p: &PassoDoIcp,
+    evento: &str,
+    canister: &str,
+    metodo: &str,
+    ancora: AncoraDaConsulta,
+) -> Resultado {
+    let n = p.registro().ok_or("a carteira nao declarou o passo")?;
+    let e = registro_numero(n).ok_or("a declaracao da carteira nao esta no anel")?;
+    let alegacao = alloc::format!("{evento} {canister}/{metodo} {}", p.desfecho);
+    let pelo = alloc::format!("pelo processo {fio} (carteira ");
+    let ancorada = match ancora {
+        AncoraDaConsulta::Decisao(d) => e
+            .detalhe
+            .contains(&alloc::format!("): ancorada em {d} key.sign; decisao ")),
+        AncoraDaConsulta::Conexao => {
+            e.detalhe.contains("): conexao ") && e.detalhe.contains(GATEWAY_ICP)
+        }
+        AncoraDaConsulta::Nenhuma => e.detalhe.contains("): sem conexao; decisao "),
+    };
+    if e.metodo != "audit.declare"
+        || e.codigo != politica::Codigo::Allow
+        || e.recurso != alegacao
+        || !e.detalhe.starts_with(&pelo)
+        || !ancorada
+    {
+        crate::log_error!("teste", "{:?} / {:?} / {:?}", ancora, p, e);
+        return Err("a declaracao da carteira nao e a alegacao com a ancora do kernel");
+    }
+    Ok(())
+}
+
+/// O valor só na alegação: o IC fora das declarações, como no `icp` — ver
+/// [`o_ic_so_na_alegacao`] —, e também o CMC, o ledger de cycles e os
+/// métodos do valor: o kernel não leu o que se declarou, e nenhuma decisão
+/// dele é sobre um ledger.
+fn o_valor_so_na_alegacao(fio: u64) -> Resultado {
+    o_ic_so_na_alegacao(fio)?;
+    const DO_VALOR: [&str; 5] = [
+        "rkp4c",
+        "um5iw",
+        "icrc1_transfer",
+        "icrc1_balance_of",
+        "notify_mint_cycles",
+    ];
+    let do_processo = alloc::format!("pelo processo {fio} (");
+    let fora = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
+            .filter(|r| {
+                let e = alloc::format!("{:?}", r.evento);
+                DO_VALOR.iter().any(|t| e.contains(t))
+            })
+            .map(|r| r.seq)
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .unwrap_or_default();
+    if !fora.is_empty() {
+        crate::log_error!(
+            "teste",
+            "registros com o valor fora da alegacao: {:?}",
+            fora
+        );
+        return Err("o valor apareceu num registro do processo fora da alegacao");
+    }
+    Ok(())
+}
+
+/// O valor na bancada, de ponta a ponta, por uma pessoa operadora com as
+/// chaves dela — `chave:bancada` e `chave:bancada-2`, criadas por ela pelo
+/// gate — e a `carteira` lançada por ela:
+///
+/// - as duas chaves começam sem saldo, verificado pelas assinaturas dos
+///   nós, e a consulta do saldo é declarada `icp.query`, ancorada na
+///   conexão;
+/// - o anônimo põe fundos na primeira — sem assinatura, ancorado na
+///   conexão —, e o saldo dela é o que ele pôs;
+/// - a primeira transfere para a segunda, assinado: **uma** execução de
+///   `key.sign`, a decisão do gate sobre `chave:bancada` em nome da
+///   pessoa, a declaração `icp.update` ancorada nela, o remetente que não é
+///   o anônimo, o bloco depois do dos fundos e a prova da NNS, pela raiz;
+///   a primeira perde a quantia e a taxa, e a segunda ganha a quantia;
+/// - nada do IC nem do valor em registro nenhum fora da alegação.
+fn icp_o_saldo_e_a_transferencia_assinada() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(238),
+            "carteira-transferencia",
+            "operador",
+        );
+        let impressao = chaves_da_carteira(sessao)?;
+        let antes = crate::autorizacao::ultimo_registro();
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            let p = carteira.passo(
+                CARTEIRA_SALDO,
+                REDE_BANCADA,
+                1,
+                "saldo bancada chave:bancada",
+            )?;
+            if saldo_dito(&p) != Some(0) || !p.detalhe.contains("; prova hzklm da raiz 1/") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chave nova nao comecou sem saldo, verificado");
+            }
+            declaracao_da_carteira(
+                fio,
+                &p,
+                "icp.query",
+                LEDGER_DA_BANCADA,
+                "icrc1_balance_of",
+                AncoraDaConsulta::Conexao,
+            )?;
+            if carteira.saldo(false, 2)? != 0 {
+                return Err("a segunda chave nao comecou sem saldo");
+            }
+
+            // Os fundos, do anônimo.
+            let p = carteira.passo(
+                CARTEIRA_FUNDOS,
+                REDE_BANCADA,
+                1,
+                "fundos bancada chave:bancada",
+            )?;
+            let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let fundos = bloco_dito(&p);
+            if p.desfecho != "verified"
+                || assinaturas != 0
+                || fundos.is_none()
+                || p.remetente.as_deref() != Some(PRINCIPAL_ANONIMO)
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("o anonimo nao pos os fundos, sem assinatura");
+            }
+            declaracao_da_carteira(
+                fio,
+                &p,
+                "icp.update",
+                LEDGER_DA_BANCADA,
+                "icrc1_transfer",
+                AncoraDaConsulta::Conexao,
+            )?;
+            if carteira.saldo(false, 1)? != FUNDOS_DA_CARTEIRA {
+                return Err("os fundos nao chegaram a chave");
+            }
+
+            // A transferência, assinada pela chave.
+            let p = carteira.passo(
+                CARTEIRA_TRANSFERIR,
+                REDE_BANCADA,
+                1,
+                "transferir bancada chave:bancada",
+            )?;
+            let (assinaturas, prova) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            if p.desfecho != "verified"
+                || assinaturas != 1
+                || bloco_dito(&p) <= fundos
+                || p.remetente
+                    .as_deref()
+                    .is_none_or(|r| r == PRINCIPAL_ANONIMO)
+                || prova != "prova hzklm da raiz leituras 0"
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a transferencia assinada nao verificou com o bloco");
+            }
+            let feitas = assinaturas_do_processo(fio, antes);
+            let [(_, assinada)] = feitas.as_slice() else {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("a transferencia nao foi uma assinatura do kernel");
+            };
+            let decisao = assinatura_da_chamada(
+                assinada,
+                "chave:bancada",
+                &impressao,
+                politica::auditoria::Titular::Pessoa,
+            )?;
+            declaracao_da_carteira(
+                fio,
+                &p,
+                "icp.update",
+                LEDGER_DA_BANCADA,
+                "icrc1_transfer",
+                AncoraDaConsulta::Decisao(decisao),
+            )?;
+            let (um, dois) = (carteira.saldo(false, 1)?, carteira.saldo(false, 2)?);
+            if um != FUNDOS_DA_CARTEIRA - QUANTIA_DA_CARTEIRA - TAXA_DO_LEDGER
+                || dois != QUANTIA_DA_CARTEIRA
+            {
+                crate::log_error!("teste", "{} {}", um, dois);
+                return Err("os saldos nao mostram a transferencia");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// A repetição não executa duas vezes: a mesma transferência — os mesmos
+/// argumentos, o mesmo `created_at_time` e o mesmo `memo` —, assinada de
+/// novo, volta `Duplicate` com o bloco da primeira, pela rede honesta e
+/// pela que responde 202 — esta acompanhada, cada leitura da situação
+/// assinada de novo. Cada assinatura é uma decisão do gate, cada repetição
+/// declarada ancorada na primeira dela, e os saldos mostram uma
+/// transferência só.
+fn icp_a_repeticao_nao_executa_duas_vezes() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(239),
+            "carteira-repeticao",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            carteira.fundos(1)?;
+            let p = carteira.passo(
+                CARTEIRA_TRANSFERIR,
+                REDE_BANCADA,
+                1,
+                "transferir bancada chave:bancada",
+            )?;
+            let bloco = bloco_dito(&p)
+                .filter(|_| p.desfecho == "verified")
+                .ok_or("a transferencia nao executou")?;
+            let duplicada = alloc::format!("Duplicate duplicate_of {bloco}");
+            for (rede, nome) in [(REDE_BANCADA, "bancada"), (REDE_ASSINCRONA, "assincrona")] {
+                let antes = crate::autorizacao::ultimo_registro();
+                let passo = alloc::format!("repetir {nome} chave:bancada");
+                let p = carteira.passo(CARTEIRA_REPETIR, rede, 0, &passo)?;
+                let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                let (_, leituras, _) =
+                    remetente_e_resposta(&p).ok_or("a repeticao sem resposta")?;
+                let feitas = assinaturas_do_processo(fio, antes);
+                if p.desfecho != "verified"
+                    || erro_dito(&p) != Some(duplicada.as_str())
+                    || assinaturas != 1 + leituras
+                    || feitas.len() as u64 != assinaturas
+                    || (rede == REDE_ASSINCRONA) != (leituras > 0)
+                {
+                    crate::log_error!("teste", "{}: {:?} / {:?}", nome, p, feitas);
+                    return Err("a repeticao nao voltou Duplicate com o bloco da primeira");
+                }
+                let d =
+                    decisao_executada(&feitas[0].1.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_carteira(
+                    fio,
+                    &p,
+                    "icp.update",
+                    LEDGER_DA_BANCADA,
+                    "icrc1_transfer",
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+            }
+            let (um, dois) = (carteira.saldo(false, 1)?, carteira.saldo(false, 2)?);
+            if um != FUNDOS_DA_CARTEIRA - QUANTIA_DA_CARTEIRA - TAXA_DO_LEDGER
+                || dois != QUANTIA_DA_CARTEIRA
+            {
+                crate::log_error!("teste", "{} {}", um, dois);
+                return Err("a repeticao executou de novo");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// A prova adulterada não vira transferência:
+///
+/// - `bls-invalida`: o certificado das faixas é recusado — nada se assina,
+///   nenhuma chamada sai —; a repetição pela rede honesta executa agora,
+///   pela primeira vez;
+/// - `assinatura-errada` e `sem-assinatura`: a chamada sai, assinada, e o
+///   ledger executa — mas a prova da resposta não fecha, e a `carteira` não
+///   diz bloco nenhum; a repetição pela rede honesta volta `Duplicate`,
+///   com o bloco que a verificação não deixou dizer;
+/// - o saldo, pelas redes que mentem para a consulta, não é dito;
+///
+/// cada passo declarado como o que é, ancorado na decisão da assinatura
+/// quando houve uma, e os saldos mostram três transferências, uma de cada.
+fn icp_a_prova_adulterada_nao_vira_transferencia() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(240),
+            "carteira-adulterada",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            carteira.fundos(1)?;
+            let mut blocos = alloc::vec::Vec::new();
+            for (rede, desfecho, esperadas, motivo, executou) in [
+                (
+                    "bls-invalida",
+                    "unverified_certificate",
+                    0u64,
+                    "subnet: verificacao",
+                    false,
+                ),
+                (
+                    "assinatura-errada",
+                    "unverified_certificate",
+                    1,
+                    "call: verificacao",
+                    true,
+                ),
+                (
+                    "sem-assinatura",
+                    "unverified_response",
+                    1,
+                    "call: corpo",
+                    true,
+                ),
+            ] {
+                let antes = crate::autorizacao::ultimo_registro();
+                let desde = crate::log::total_emitidos();
+                let passo = alloc::format!("transferir {rede} chave:bancada");
+                let p = carteira.passo(CARTEIRA_TRANSFERIR, rede_do_icp(rede)?, 1, &passo)?;
+                let (assinaturas, detalhe) =
+                    assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                let feitas = assinaturas_do_processo(fio, antes);
+                let chamadas = pedidos_da_carteira(desde, &passo).2 as u64;
+                if p.desfecho != desfecho
+                    || assinaturas != esperadas
+                    || feitas.len() as u64 != esperadas
+                    || chamadas != esperadas
+                    || !detalhe.starts_with(motivo)
+                    || p.resposta.is_some()
+                {
+                    crate::log_error!("teste", "{}: {:?} / {:?}", rede, p, feitas);
+                    return Err("a transferencia adulterada disse um bloco, ou nao disse por que");
+                }
+                let ancora = match feitas.first() {
+                    Some((_, e)) => AncoraDaConsulta::Decisao(
+                        decisao_executada(&e.detalhe).ok_or("a assinatura sem decisao")?,
+                    ),
+                    None => AncoraDaConsulta::Conexao,
+                };
+                declaracao_da_carteira(
+                    fio,
+                    &p,
+                    "icp.update",
+                    LEDGER_DA_BANCADA,
+                    "icrc1_transfer",
+                    ancora,
+                )?;
+                // A repetição pela rede honesta diz o que houve.
+                let p = carteira.passo(
+                    CARTEIRA_REPETIR,
+                    REDE_BANCADA,
+                    0,
+                    "repetir bancada chave:bancada",
+                )?;
+                let duplicada = erro_dito(&p)
+                    .and_then(|e| e.strip_prefix("Duplicate duplicate_of "))
+                    .and_then(|b| b.parse::<u128>().ok());
+                let bloco = match (executou, bloco_dito(&p), duplicada) {
+                    (false, Some(b), None) | (true, None, Some(b)) => b,
+                    _ => {
+                        crate::log_error!("teste", "{}: {:?}", rede, p);
+                        return Err(
+                            "a repeticao nao mostrou se a transferencia adulterada executou",
+                        );
+                    }
+                };
+                if p.desfecho != "verified" || blocos.contains(&bloco) {
+                    crate::log_error!("teste", "{}: {:?} / {:?}", rede, p, blocos);
+                    return Err("a repeticao nao foi verificada, ou repetiu um bloco");
+                }
+                blocos.push(bloco);
+            }
+            // O saldo, pelas redes que mentem para a consulta.
+            for (rede, desfecho) in [
+                ("bls-invalida", "unverified_certificate"),
+                ("assinatura-errada", "unverified_response"),
+                ("sem-assinatura", "unverified_response"),
+                ("no-de-fora", "unverified_response"),
+                ("pedido-trocado", "unverified_response"),
+            ] {
+                let passo = alloc::format!("saldo {rede} chave:bancada");
+                let p = carteira.passo(CARTEIRA_SALDO, rede_do_icp(rede)?, 1, &passo)?;
+                if p.desfecho != desfecho || p.detalhe.starts_with("saldo ") {
+                    crate::log_error!("teste", "{}: {:?}", rede, p);
+                    return Err("o saldo pela prova adulterada foi dito");
+                }
+                declaracao_da_carteira(
+                    fio,
+                    &p,
+                    "icp.query",
+                    LEDGER_DA_BANCADA,
+                    "icrc1_balance_of",
+                    AncoraDaConsulta::Conexao,
+                )?;
+            }
+            let (um, dois) = (carteira.saldo(false, 1)?, carteira.saldo(false, 2)?);
+            if um != FUNDOS_DA_CARTEIRA - 3 * (QUANTIA_DA_CARTEIRA + TAXA_DO_LEDGER)
+                || dois != 3 * QUANTIA_DA_CARTEIRA
+            {
+                crate::log_error!("teste", "{} {}", um, dois);
+                return Err("os saldos nao mostram uma transferencia de cada");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// Sem `key.sign`, nada se transfere — e nada vai do anônimo no lugar, que
+/// na bancada tem fundos:
+///
+/// - sem a chave: `failed_key`, e nada conecta;
+/// - sem `key.read`: `failed_key`, `DENY_PERMISSION`, e nada conecta;
+/// - com o `key.read` só sobre a outra chave: `failed_key`,
+///   `DENY_RESOURCE` — o destino se lê, e a origem não —, e nada conecta;
+/// - com `key.read` e sem `key.sign`: `failed_signature`,
+///   `DENY_PERMISSION` — as faixas, e nenhuma chamada;
+/// - com `key.sign` só sobre a outra chave: `failed_signature`,
+///   `DENY_RESOURCE`, também sem chamada;
+///
+/// o kernel não executa um `key.sign` desta chave, as duas assinaturas
+/// pedidas são recusadas pelo gate, e os saldos — o da outra chave e o do
+/// anônimo — não mudam. A outra chave, no alcance, assina, e o ledger a
+/// recusa por falta de fundos: a recusa é verificada.
+fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sem_ler_nem_assinar = politica_da_bancada_icp(&[
+            (
+                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.destroy\nrecurso operador",
+            ),
+            (
+                "recurso operador key.read chave:bancada chave:bancada-2\n",
+                "",
+            ),
+            (
+                "recurso operador key.sign chave:bancada chave:bancada-2\n",
+                "",
+            ),
+        ])?;
+        let sem_assinar = politica_da_bancada_icp(&[
+            (
+                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy\nrecurso operador",
+            ),
+            (
+                "recurso operador key.sign chave:bancada chave:bancada-2\n",
+                "",
+            ),
+        ])?;
+        let so_a_outra = politica_da_bancada_icp(&[(
+            "recurso operador key.sign chave:bancada chave:bancada-2\n",
+            "recurso operador key.sign chave:bancada-2\n",
+        )])?;
+        let so_le_a_outra = politica_da_bancada_icp(&[(
+            "recurso operador key.read chave:bancada chave:bancada-2\n",
+            "recurso operador key.read chave:bancada-2\n",
+        )])?;
+        let passo = "transferir bancada chave:bancada";
+        let r = (|| -> Resultado {
+            // Sem a chave.
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(241),
+                "carteira-sem-chave",
+                "operador",
+            );
+            let antes = crate::autorizacao::ultimo_registro();
+            let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = carteira.fio;
+            let desde = crate::log::total_emitidos();
+            let p = carteira.passo(CARTEIRA_TRANSFERIR, REDE_BANCADA, 1, passo);
+            let pedidos = pedidos_da_carteira(desde, passo);
+            let fim = carteira.encerrar();
+            let p = p?;
+            fim?;
+            if p.desfecho != "failed_key"
+                || p.detalhe != "assinaturas 0; chave: INVALID_ARGUMENT"
+                || pedidos != (0, 0, 0)
+            {
+                crate::log_error!("teste", "{:?} {:?}", p, pedidos);
+                return Err("sem a chave, a transferencia nao parou na chave");
+            }
+            declaracao_da_carteira(
+                fio,
+                &p,
+                "icp.update",
+                LEDGER_DA_BANCADA,
+                "icrc1_transfer",
+                AncoraDaConsulta::Nenhuma,
+            )?;
+            if !assinaturas_do_processo(fio, antes).is_empty()
+                || !decisoes_do_processo(fio, "key.sign", "chave:bancada").is_empty()
+            {
+                return Err("sem a chave, um key.sign chegou ao gate");
+            }
+            o_valor_so_na_alegacao(fio)?;
+
+            // Com as chaves, e sem a permissão: na leitura, na assinatura,
+            // e fora do alcance.
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(242),
+                "carteira-sem-permissao",
+                "operador",
+            );
+            chaves_da_carteira(sessao)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = carteira.fio;
+            let r = (|| -> Resultado {
+                carteira.fundos(1)?;
+                let anonimo = carteira.saldo(false, 0)?;
+                for (politica, desfecho, detalhe, pedidos, ancora) in [
+                    (
+                        &sem_ler_nem_assinar,
+                        "failed_key",
+                        "assinaturas 0; chave: DENY_PERMISSION",
+                        (0, 0, 0),
+                        AncoraDaConsulta::Nenhuma,
+                    ),
+                    (
+                        &so_le_a_outra,
+                        "failed_key",
+                        "assinaturas 0; chave: DENY_RESOURCE",
+                        (0, 0, 0),
+                        AncoraDaConsulta::Nenhuma,
+                    ),
+                    (
+                        &sem_assinar,
+                        "failed_signature",
+                        "assinaturas 0; call: assinatura: DENY_PERMISSION",
+                        (1, 0, 0),
+                        AncoraDaConsulta::Conexao,
+                    ),
+                    (
+                        &so_a_outra,
+                        "failed_signature",
+                        "assinaturas 0; call: assinatura: DENY_RESOURCE",
+                        (1, 0, 0),
+                        AncoraDaConsulta::Conexao,
+                    ),
+                ] {
+                    let desde = crate::log::total_emitidos();
+                    let p = com_a_politica(politica.clone(), || {
+                        carteira.passo(CARTEIRA_TRANSFERIR, REDE_BANCADA, 1, passo)
+                    })?;
+                    if p.desfecho != desfecho
+                        || p.detalhe != detalhe
+                        || pedidos_da_carteira(desde, passo) != pedidos
+                    {
+                        crate::log_error!(
+                            "teste",
+                            "{:?} {:?}",
+                            p,
+                            pedidos_da_carteira(desde, passo)
+                        );
+                        return Err(
+                            "sem a permissao, a transferencia nao parou na chave, ou saiu sem assinar",
+                        );
+                    }
+                    declaracao_da_carteira(
+                        fio,
+                        &p,
+                        "icp.update",
+                        LEDGER_DA_BANCADA,
+                        "icrc1_transfer",
+                        ancora,
+                    )?;
+                }
+                if !assinaturas_do_processo(fio, antes).is_empty() {
+                    return Err("sem a permissao, o kernel executou um key.sign");
+                }
+                // O gate recusou cada assinatura pedida.
+                let assinaturas = decisoes_do_processo(fio, "key.sign", "chave:bancada");
+                if assinaturas.len() != 2
+                    || assinaturas
+                        .iter()
+                        .any(|(_, c, _)| *c == politica::Codigo::Allow)
+                {
+                    crate::log_error!("teste", "{:?}", assinaturas);
+                    return Err("as assinaturas sem permissao nao foram recusadas pelo gate");
+                }
+                // Nada saiu: nem da chave, nem do anônimo no lugar.
+                if carteira.saldo(false, 1)? != FUNDOS_DA_CARTEIRA
+                    || carteira.saldo(false, 2)? != 0
+                    || carteira.saldo(false, 0)? != anonimo
+                {
+                    return Err("sem a permissao, um saldo mudou");
+                }
+                // A outra chave, no alcance, assina; o ledger a recusa.
+                let p = com_a_politica(so_a_outra.clone(), || {
+                    carteira.passo(
+                        CARTEIRA_TRANSFERIR,
+                        REDE_BANCADA,
+                        2,
+                        "transferir bancada chave:bancada-2",
+                    )
+                })?;
+                let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                if p.desfecho != "verified"
+                    || assinaturas != 1
+                    || erro_dito(&p) != Some("InsufficientFunds balance 0")
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("a chave no alcance nao assinou, ou o ledger nao a recusou");
+                }
+                o_valor_so_na_alegacao(fio)
+            })();
+            let fim = carteira.encerrar();
+            r.and(fim)
+        })();
+        crate::chaves::esquecer_de_teste();
+        r
+    })
+}
+
+/// As recusas do ledger são respostas verificadas, ditas pelo nome do
+/// padrão, sem bloco e sem mudar saldo:
+///
+/// - sem fundos: `InsufficientFunds`, com o saldo;
+/// - o `created_at_time` de 25 horas atrás: `TooOld`;
+/// - o de 10 minutos à frente: `CreatedInFuture`, com a hora do ledger;
+///
+/// cada uma assinada — uma decisão do gate — e declarada `verified`,
+/// ancorada na decisão: a recusa do ledger é o que o certificado provou.
+fn icp_as_recusas_do_ledger() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(243), "carteira-recusas", "operador");
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            carteira.fundos(1)?;
+            let agora = crate::hora::civil_s().ok_or("a suite sem a hora civil")?;
+            for (c, hora, passo, erro) in [
+                (
+                    2,
+                    None,
+                    "transferir bancada chave:bancada-2",
+                    "InsufficientFunds balance 0",
+                ),
+                (
+                    1,
+                    Some(agora - 25 * 3600),
+                    "transferir_em bancada chave:bancada",
+                    "TooOld",
+                ),
+                (
+                    1,
+                    Some(agora + 600),
+                    "transferir_em bancada chave:bancada",
+                    "CreatedInFuture ledger_time ",
+                ),
+            ] {
+                let a = match hora {
+                    Some(s) => {
+                        carteira.fixar_hora(s)?;
+                        CARTEIRA_TRANSFERIR_EM
+                    }
+                    None => CARTEIRA_TRANSFERIR,
+                };
+                let antes = crate::autorizacao::ultimo_registro();
+                let p = carteira.passo(a, REDE_BANCADA, c, passo)?;
+                let feitas = assinaturas_do_processo(fio, antes);
+                if p.desfecho != "verified"
+                    || !erro_dito(&p).is_some_and(|e| e.starts_with(erro))
+                    || bloco_dito(&p).is_some()
+                    || feitas.len() != 1
+                {
+                    crate::log_error!("teste", "{:?} / {:?}", p, feitas);
+                    return Err("a recusa do ledger nao foi verificada e dita pelo nome");
+                }
+                let d =
+                    decisao_executada(&feitas[0].1.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_carteira(
+                    fio,
+                    &p,
+                    "icp.update",
+                    LEDGER_DA_BANCADA,
+                    "icrc1_transfer",
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+            }
+            if carteira.saldo(false, 1)? != FUNDOS_DA_CARTEIRA || carteira.saldo(false, 2)? != 0 {
+                return Err("uma recusa do ledger mudou um saldo");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// ICP em cycles, pelo CMC: a chave transfere para a conta de depósito dela
+/// no CMC, com o memo `MINT`, e notifica — duas chamadas, duas
+/// assinaturas, duas declarações, cada uma ancorada na sua decisão. O CMC
+/// cunha, e deposita os cycles, menos a taxa, na conta dela no ledger de
+/// cycles, que o saldo verificado mostra. A mesma notificação de novo, pela
+/// mesma chave, devolve o mesmo resultado; pela outra, é recusada, e não
+/// cunha nada. O saldo de cycles do anônimo, acima de 64 bits, se lê
+/// inteiro.
+fn icp_icp_em_cycles_pelo_cmc() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(244), "carteira-ciclos", "operador");
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            carteira.fundos(1)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            carteira.pedir(CARTEIRA_CICLOS, REDE_BANCADA, 1)?;
+            let t = carteira.dito(desde, "ciclos bancada chave:bancada transferencia")?;
+            let n = carteira.dito(desde, "ciclos bancada chave:bancada notificacao")?;
+            let cunhagem = cunhagem_dita(&n);
+            if t.desfecho != "verified"
+                || bloco_dito(&t).is_none()
+                || n.desfecho != "verified"
+                || cunhagem.is_none_or(|(c, s, _)| c == 0 || s != c - TAXA_DE_CICLOS)
+                || !n.detalhe.ends_with("prova hzklm da raiz leituras 0")
+            {
+                crate::log_error!("teste", "{:?} / {:?}", t, n);
+                return Err("o cmc nao cunhou os cycles da transferencia");
+            }
+            let feitas = assinaturas_do_processo(fio, antes);
+            let [(_, da_transferencia), (_, da_notificacao)] = feitas.as_slice() else {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("a cunhagem nao foram duas assinaturas");
+            };
+            for (p, canister, metodo, e) in [
+                (&t, LEDGER_DA_BANCADA, "icrc1_transfer", da_transferencia),
+                (&n, CMC_DA_BANCADA, "notify_mint_cycles", da_notificacao),
+            ] {
+                let d = decisao_executada(&e.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_carteira(
+                    fio,
+                    p,
+                    "icp.update",
+                    canister,
+                    metodo,
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+            }
+            let (_, saldo, _) = cunhagem.unwrap_or_default();
+            if carteira.saldo(true, 1)? != saldo {
+                return Err("o saldo de cycles nao e o que o cmc depositou");
+            }
+            // A mesma notificação, de novo: o mesmo resultado.
+            let p = carteira.passo(
+                CARTEIRA_NOTIFICAR,
+                REDE_BANCADA,
+                1,
+                "notificar bancada chave:bancada",
+            )?;
+            if p.desfecho != "verified" || p.resposta != n.resposta {
+                crate::log_error!("teste", "{:?} / {:?}", p, n);
+                return Err("a mesma notificacao nao devolveu o mesmo resultado");
+            }
+            // Pela outra chave: recusada.
+            let p = carteira.passo(
+                CARTEIRA_NOTIFICAR,
+                REDE_BANCADA,
+                2,
+                "notificar bancada chave:bancada-2",
+            )?;
+            if p.desfecho != "verified"
+                || !erro_dito(&p).is_some_and(|e| e.starts_with("InvalidTransaction "))
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a notificacao de outra chave nao foi recusada pelo cmc");
+            }
+            if carteira.saldo(true, 1)? != saldo
+                || carteira.saldo(true, 2)? != 0
+                || carteira.saldo(false, 1)?
+                    != FUNDOS_DA_CARTEIRA - QUANTIA_DA_CARTEIRA - TAXA_DO_LEDGER
+            {
+                return Err("a cunhagem repetida mudou um saldo");
+            }
+            if carteira.saldo(true, 0)? <= u128::from(u64::MAX) {
+                return Err("o saldo de cycles do anonimo nao passou de 64 bits");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// A mesma transferência por duas carteiras ao mesmo tempo, da mesma
+/// pessoa e com a mesma chave — a mesma hora fixada, o mesmo `memo`, o
+/// mesmo destino e a mesma quantia, cada uma pela sua rede honesta —:
+/// uma executa, e a outra volta `Duplicate` com o bloco dela. Duas
+/// assinaturas, cada uma do seu processo, de dois pedidos — as decisões e
+/// os resumos diferem —, cada declaração ancorada na sua; e os saldos
+/// mostram uma transferência só.
+fn icp_a_mesma_transferencia_por_dois_processos() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(245),
+            "carteira-concorrente",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let a = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let b = match Carteira::lancar_segunda(Autoridade::Pessoa { sessao }) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = a.encerrar();
+                crate::chaves::esquecer_de_teste();
+                return Err(e);
+            }
+        };
+        let r = (|| -> Resultado {
+            a.fundos(1)?;
+            let agora = crate::hora::civil_s().ok_or("a suite sem a hora civil")?;
+            a.fixar_hora(agora - 5)?;
+            b.fixar_hora(agora - 5)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            a.pedir(CARTEIRA_TRANSFERIR_EM, REDE_BANCADA, 1)?;
+            b.pedir(CARTEIRA_TRANSFERIR_EM, rede_do_icp("direta")?, 1)?;
+            let pa = a.dito(desde, "transferir_em bancada chave:bancada")?;
+            let pb = b.dito(desde, "transferir_em direta chave:bancada")?;
+            let uma_so = match (
+                bloco_dito(&pa),
+                erro_dito(&pa),
+                bloco_dito(&pb),
+                erro_dito(&pb),
+            ) {
+                (Some(x), None, None, Some(e)) | (None, Some(e), Some(x), None) => {
+                    e == alloc::format!("Duplicate duplicate_of {x}")
+                }
+                _ => false,
+            };
+            if !uma_so || pa.desfecho != "verified" || pb.desfecho != "verified" {
+                crate::log_error!("teste", "{:?} / {:?}", pa, pb);
+                return Err("a mesma transferencia por dois processos nao executou uma vez so");
+            }
+            let mut decisoes = alloc::vec::Vec::new();
+            let mut resumos = alloc::vec::Vec::new();
+            for (carteira, p) in [(&a, &pa), (&b, &pb)] {
+                let feitas = assinaturas_do_processo(carteira.fio, antes);
+                let [(_, assinada)] = feitas.as_slice() else {
+                    crate::log_error!("teste", "{:?}", feitas);
+                    return Err("cada transferencia nao foi uma assinatura do processo dela");
+                };
+                let d = decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_carteira(
+                    carteira.fio,
+                    p,
+                    "icp.update",
+                    LEDGER_DA_BANCADA,
+                    "icrc1_transfer",
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+                decisoes.push(d);
+                resumos.push(assinada.recurso.clone());
+            }
+            if decisoes[0] == decisoes[1] || resumos[0] == resumos[1] {
+                crate::log_error!("teste", "{:?} / {:?}", decisoes, resumos);
+                return Err("as duas transferencias nao foram duas assinaturas de dois pedidos");
+            }
+            let (um, dois) = (a.saldo(false, 1)?, a.saldo(false, 2)?);
+            if um != FUNDOS_DA_CARTEIRA - QUANTIA_DA_CARTEIRA - TAXA_DO_LEDGER
+                || dois != QUANTIA_DA_CARTEIRA
+            {
+                crate::log_error!("teste", "{} {}", um, dois);
+                return Err("a mesma transferencia executou duas vezes");
+            }
+            o_valor_so_na_alegacao(a.fio)?;
+            o_valor_so_na_alegacao(b.fio)
+        })();
+        let fim_a = a.encerrar();
+        let fim_b = b.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim_a).and(fim_b)
+    })
+}
+
+/// A chave anulada no meio da transferência: a `carteira` dorme esperando
+/// as faixas, que a rede `lenta` segura, e o administrador anula a chave.
+/// As faixas chegam, a transferência pede a assinatura, e o kernel recusa —
+/// a chave anulada não assina mais nada —: nenhuma chamada sai, nem do
+/// anônimo no lugar, o desfecho é `failed_signature`, a declaração vai
+/// ancorada na conexão, e nenhum saldo muda.
+fn icp_a_chave_anulada_no_meio_da_transferencia() -> Resultado {
+    com_a_bancada_icp(|| {
+        com_a_politica(
+            politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
+            icp_a_chave_anulada_no_meio_da_transferencia_com_a_politica,
+        )
+    })
+}
+
+fn icp_a_chave_anulada_no_meio_da_transferencia_com_a_politica() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    crate::chaves::esquecer_de_teste();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let passo = "transferir lenta chave:bancada";
+    let r = (|| -> Resultado {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(246), "carteira-anulada", "operador");
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let fio = carteira.fio;
+        let r = (|| -> Resultado {
+            carteira.fundos(1)?;
+            let anonimo = carteira.saldo(false, 0)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            carteira.pedir(CARTEIRA_TRANSFERIR, REDE_LENTA, 1)?;
+            carteira.esperando(desde, passo, "read_state")?;
+            let p = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "key.revoke", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o administrador nao anulou a chave");
+            }
+            let p = carteira.dito(desde, passo)?;
+            if p.desfecho != "failed_signature"
+                || p.detalhe != "assinaturas 0; call: assinatura: INVALID_ARGUMENT"
+                || pedidos_da_carteira(desde, passo) != (1, 0, 0)
+            {
+                crate::log_error!("teste", "{:?} {:?}", p, pedidos_da_carteira(desde, passo));
+                return Err("a transferencia depois da anulacao nao foi recusada na assinatura");
+            }
+            if !assinaturas_do_processo(fio, antes).is_empty() {
+                return Err("a chave anulada assinou");
+            }
+            declaracao_da_carteira(
+                fio,
+                &p,
+                "icp.update",
+                LEDGER_DA_BANCADA,
+                "icrc1_transfer",
+                AncoraDaConsulta::Conexao,
+            )?;
+            if carteira.saldo(false, 2)? != 0 || carteira.saldo(false, 0)? != anonimo {
+                return Err("um saldo mudou depois da anulacao");
+            }
+            o_valor_so_na_alegacao(fio)
+        })();
+        let fim = carteira.encerrar();
+        r.and(fim)
+    })();
     crate::chaves::esquecer_de_teste();
     r
 }
