@@ -1394,6 +1394,60 @@ Na suíte (`icp:`), o programa lançado por uma pessoa operadora:
   revogada no meio de outra: nada se assina depois, e as chaves dela
   ficam anuladas.
 
+### O tamanho e as medidas
+
+O `icp` cresceu 4 136 bytes no x86 e 8 192 no ARM: de 940 920 para
+945 056 — 90,1% do teto de leitura do kernel, 1 MiB — e de 832 016 para
+840 208. O `livro` do ICP-4b ficou com o mesmo tamanho nos dois — 899 512
+e 799 248 —, mas não com os mesmos bytes: o `Display` do `Falha`, que ele
+usa para dizer uma falha, ganhou o caso da assinatura, e o código depois
+dele mudou de lugar. O fonte do caminho dele não mudou, e o build é
+reprodutível — o mesmo commit dá o mesmo binário.
+
+Na suíte (o kernel de teste em depuração, o x86, a bancada), do pedido das
+faixas ao desfecho dito — sem a leitura da chave, a hora, o nonce e a
+conexão, que vêm antes —, em três rodadas:
+
+| passo | amostras | de / a | mediana |
+|---|---|---|---|
+| a consulta do anônimo (`ola`, `quem_consulta`) | 12 | 590 a 940 ms | 655 ms |
+| a consulta assinada | 12 | 610 a 990 ms | 750 ms |
+| a assinatura recusada, sem a consulta | 4 | 340 a 500 ms | 385 ms |
+| a replicada do anônimo | 3 | 830 a 1000 ms | 910 ms |
+| a replicada assinada | 3 | 1020 a 1090 ms | 1060 ms |
+| a chamada `quem` assinada (ICP-3) | 17 | 830 a 1190 ms | 1030 ms |
+
+A assinatura soma à consulta o `key.sign` — de 10 a 30 ms na imagem de
+produção (ICP-3) — e o resto é da régua de 10 ms e da rodada. A replicada
+custa o que custa a chamada: passa pelo consenso.
+
+### As mutações
+
+Uma de cada vez, numa *worktree* à parte, com o que a pega: os testes do
+hospedeiro (`cargo test -p web3`), quando a mutação é do `web3`, e a suíte
+do x86 só com os casos `icp:` — 23 casos, que passam todos sem mutação
+(o controle). As oito pedidas na inspeção, em doze formas: todas
+reprovadas.
+
+| | mutação | onde | no hospedeiro | na suíte |
+|---|---|---|---|---|
+| M01 | **o envelope sem conferir o remetente**: qualquer Principal assina pela chave | `pedido.rs` | `o_remetente_da_consulta_assinada_e_o_da_chave` | — o agente sempre usa o Principal da chave |
+| M02 | **o id sem o remetente**: o que se assina é o id da consulta do anônimo | `pedido.rs` | sete, entre eles `a_consulta_assinada_tem_o_id_e_o_envelope_do_oraculo` e `a_consulta_assinada_verificada_ponta_a_ponta` — o IC de mentira ouve a assinatura de outro id, e responde 403 | cinco casos: a PocketIC recusa a assinatura (`400`) |
+| M03 | **a resposta assinada sem conferir os nós** | `agente.rs` | `os_modos_adversarios_na_assinada`, `a_resposta_de_outro_remetente_nao_confere` | a consulta assinada adulterada verificou |
+| M04 | **a resposta entregue apesar da verificação**: a falha dela não para nada | `agente.rs` | os mesmos | idem |
+| M05 | **a chave recusada caindo para o anônimo**, em duas formas: (a) a assinatura recusada manda a consulta do anônimo; (b) a chave que não se lê também | (a) `agente.rs`; (b) o `icp` | (a) `a_assinatura_recusada_nao_manda_a_consulta`; (b) — | (a) sem `key.sign` e com a chave anulada, a consulta saiu e verificou; (b) sem a chave, a consulta saiu |
+| M06 | **a declaração sem a âncora da decisão**: sempre a conexão | o `icp` | — | três casos: a declaração da consulta assinada sem a decisão da assinatura |
+| M07 | **a replicada sem o certificado**, em duas formas: (a) o passo vai pela consulta; (b) o certificado da chamada não é conferido | (a) o `icp`; (b) `atualizacao.rs` | (a) —; (b) `o_certificado_de_outra_sub_rede` | (a) a replicada sem `call` e sem leituras; (b) a replicada adulterada verificou, e a chamada adulterada do ICP-3 também |
+| M08 | **o `key.sign` sem o gate dele**: a permissão de ler basta | o kernel, `commands.rs` | — | sem `key.sign`, e com ela fora do alcance, a consulta foi assinada. Só o caso novo a pega entre os `icp:`: o do ICP-3 tira `key.read` e `key.sign` juntos |
+| M09 | **as faixas assinadas**: duas assinaturas por consulta | `agente.rs` | oito: o IC de mentira não aceita as faixas assinadas | cinco casos: duas assinaturas por consulta, e uma antes das faixas |
+| M10 | **a consulta assinada sem nonce** | `agente.rs` | seis: o IC de mentira exige o nonce em toda consulta | — passa: a PocketIC aceita a consulta sem nonce, como a rede de verdade, e nenhum caso lê o pedido por dentro |
+
+A M10 é a única que a suíte não vê. O nonce prende a assinatura dos nós a
+um pedido só — sem ele, duas consultas iguais no mesmo segundo seriam o
+mesmo id —, e quem o confere são os testes do hospedeiro: o IC de mentira
+recusa a consulta sem ele, e o id é conferido contra o do
+`ic-transport-types` com o nonce.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
