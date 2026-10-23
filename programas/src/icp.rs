@@ -1,6 +1,6 @@
-//! O Internet Computer de um programa: a consulta anônima verificada e a
-//! chamada de atualização verificada do pacote `web3` ([`web3::icp`]),
-//! sobre o HTTPS do Duke ([`crate::http`]) — a chamada assinada pela chave
+//! O Internet Computer de um programa: a consulta verificada e a chamada
+//! de atualização verificada do pacote `web3` ([`web3::icp`]), sobre o
+//! HTTPS do Duke ([`crate::http`]) — do anônimo, ou assinadas pela chave
 //! que o kernel guarda para quem lançou o processo ([`ChaveDoKernel`]).
 //!
 //! # O caminho de uma consulta
@@ -51,16 +51,33 @@
 //! decisão da assinatura dela ([`declarar_chamada`]): o kernel confere
 //! que a decisão é deste processo, e grava o método dela.
 //!
+//! # A consulta assinada
+//!
+//! A consulta também vai assinada pela mesma chave ([`consultar_assinada`]),
+//! e pelo mesmo caminho: a pública por `key.read`, a assinatura por
+//! `key.sign` — uma decisão do gate, uma só, a da consulta: as faixas vão
+//! do anônimo. O remetente é o Principal da chave, e as assinaturas dos
+//! nós prendem a resposta ao id do pedido, que o leva. A chave que não se
+//! lê não conecta (`failed_key`); a assinatura recusada não manda a
+//! consulta, nem do anônimo no lugar (`failed_signature`) — ver
+//! [`desfecho_da_consulta_assinada`]. A declaração é a da consulta,
+//! [`EVENTO`], ancorada na decisão da assinatura dela
+//! ([`declarar_consulta`]).
+//!
+//! A **consulta replicada** é o método de consulta pelo caminho da chamada
+//! ([`chamar`]): a resposta passa pelo consenso e vem certificada, como a
+//! de uma chamada — e é declarada como uma, [`EVENTO_DA_CHAMADA`].
+//!
 //! # O que não há aqui
 //!
 //! Nenhuma decisão do Duke. O canister, o método, o Principal, o
 //! certificado e o resultado não viram permissão, recurso nem regra: o
 //! TLS prova o nome do endpoint, a verificação prova o que os nós
 //! responderam a este pedido, e o gate decide se esta identidade fala com
-//! este destino e assina com esta chave — nenhuma das três é as outras. A
-//! consulta é anônima: o Principal anônimo não é identidade de ninguém no
-//! Duke, e quem pede ao gate é o processo, com a autoridade de quem o
-//! lançou.
+//! este destino e assina com esta chave — nenhuma das três é as outras.
+//! Nenhum Principal do IC — o anônimo, ou o de uma chave — é identidade de
+//! ninguém no Duke: quem pede ao gate é o processo, com a autoridade de
+//! quem o lançou.
 
 use alloc::format;
 use alloc::string::String;
@@ -129,6 +146,9 @@ pub enum Falha {
     Chave(String),
     /// A chamada: o transporte, o HTTP, a assinatura, a verificação.
     Chamada(atualizacao::Erro<Transporte, Recusada>),
+    /// A consulta assinada que a chave do kernel não assinou: ela não
+    /// saiu.
+    Assinatura(Recusada),
 }
 
 /// Por que a chave do kernel não assinou: o código de quem recusou — o
@@ -169,6 +189,7 @@ impl fmt::Display for Falha {
             Falha::Consulta(e) => write!(f, "{e}"),
             Falha::Chave(codigo) => write!(f, "chave: {codigo}"),
             Falha::Chamada(e) => write!(f, "{e}"),
+            Falha::Assinatura(r) => write!(f, "{}: assinatura: {r}", Etapa::Consulta),
         }
     }
 }
@@ -192,6 +213,17 @@ pub fn desfecho(r: &Result<Verificada, Falha>) -> &'static str {
         Err(Falha::Hora(_)) => "failed_clock",
         Err(Falha::Acaso(_)) => "failed_entropy",
         Err(_) => "failed_setup",
+    }
+}
+
+/// O desfecho de uma consulta assinada, numa palavra: o da consulta
+/// ([`desfecho`]), e `failed_key` — a chave não se leu — e
+/// `failed_signature` — ela não assinou, e a consulta não saiu.
+pub fn desfecho_da_consulta_assinada(r: &Result<Verificada, Falha>) -> &'static str {
+    match r {
+        Err(Falha::Chave(_)) => "failed_key",
+        Err(Falha::Assinatura(_)) => "failed_signature",
+        outro => desfecho(outro),
     }
 }
 
@@ -707,6 +739,32 @@ pub fn consultar<T: agente::Transporte<Erro = Transporte>>(
     .map_err(Falha::Consulta)
 }
 
+/// Consulta `metodo` de `canister` com `arg` (Candid) pelo `transporte`,
+/// assinada pela `chave` do kernel — o remetente é o Principal dela —, e
+/// confere tudo contra a raiz de `rede` com a hora `agora` — ver
+/// [`agente::consultar_assinada`]. Uma assinatura, uma decisão do gate;
+/// recusada, a consulta não sai. Nada é entregue antes da verificação.
+#[allow(clippy::too_many_arguments)]
+pub fn consultar_assinada<T: agente::Transporte<Erro = Transporte>>(
+    transporte: &mut T,
+    rede: &Rede,
+    chave: &mut ChaveDoKernel,
+    canister: &Principal,
+    metodo: &str,
+    arg: &[u8],
+    agora: &Hora,
+    nonce: &[u8; 32],
+) -> Result<Verificada, Falha> {
+    let agora_ns = agora.validade_s().saturating_mul(1_000_000_000);
+    agente::consultar_assinada(
+        transporte, chave, &rede.raiz, canister, metodo, arg, agora_ns, nonce,
+    )
+    .map_err(|e| match e {
+        agente::ErroDaAssinada::Consulta(e) => Falha::Consulta(e),
+        agente::ErroDaAssinada::Assinatura(r) => Falha::Assinatura(r),
+    })
+}
+
 /// Chama `metodo` de `canister` com `arg` (Candid) pelo `transporte`,
 /// assinado pela `chave` do kernel — ou do anônimo, sem ela —, e confere
 /// tudo contra a raiz de `rede` com a hora `agora` — ver
@@ -774,7 +832,7 @@ pub enum Ancora {
     /// A conexão em que se falou com o IC.
     Conexao(u64),
     /// A decisão do gate que o processo exerceu — a da assinatura de uma
-    /// chamada.
+    /// chamada, ou de uma consulta assinada.
     Decisao(u64),
 }
 
@@ -813,6 +871,20 @@ pub fn declarar(assunto: &str, desfecho: &str, conexao: Option<u64>) -> Declarad
     let ancora = conexao.map_or(Ancora::Nenhuma, Ancora::Conexao);
     match declarar_uma(EVENTO, assunto, desfecho, ancora) {
         Err(codigo) if conexao.is_some() && codigo == "INVALID_ARGUMENT" => {
+            declarar_uma(EVENTO, assunto, desfecho, Ancora::Nenhuma)
+        }
+        outro => outro,
+    }
+}
+
+/// Declara a consulta à auditoria, como [`declarar`], com a `ancora` que
+/// a prende — a decisão da assinatura dela, quando foi assinada
+/// ([`consultar_assinada`]); a conexão, quando não chegou a ser assinada,
+/// ou é do anônimo. Uma âncora que o kernel recusa cai para nenhuma: a
+/// alegação fica, sem o fato.
+pub fn declarar_consulta(assunto: &str, desfecho: &str, ancora: Ancora) -> Declarada {
+    match declarar_uma(EVENTO, assunto, desfecho, ancora) {
+        Err(codigo) if ancora != Ancora::Nenhuma && codigo == "INVALID_ARGUMENT" => {
             declarar_uma(EVENTO, assunto, desfecho, Ancora::Nenhuma)
         }
         outro => outro,

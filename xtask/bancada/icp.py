@@ -41,6 +41,11 @@ O que o canister responde, nas consultas (`canister_query`):
     candid_truncado     um texto de 5 bytes com 2
     candid_sobra        ("ola") e dois bytes depois
     candid_magica       ("ola") com DIDX no lugar de DIDL
+    quem_consulta       (principal), o de quem consultou - o anonimo, ou o
+                        auto-autenticado da chave que assinou a consulta.
+                        Pelo caminho da chamada (`/api/v4/.../call`), e a
+                        consulta replicada: a resposta passa pelo consenso
+                        e vem certificada
 
 e nas chamadas de atualizacao (`canister_update`):
 
@@ -484,6 +489,8 @@ def modulo():
         ("candid_truncado", b"\x00", responde(32, TRUNCADO)),
         ("candid_sobra", b"\x00", responde(48, SOBRA)),
         ("candid_magica", b"\x00", responde(64, MAGICA)),
+        # O corpo do `quem`, como consulta: quem consultou.
+        ("quem_consulta", b"\x01\x01" + bytes([I32]), quem),
     ]
     atualizacoes = [
         ("quem", b"\x01\x01" + bytes([I32]), quem),

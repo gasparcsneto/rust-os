@@ -49,7 +49,19 @@
 //!   de uma chamada que chegou ao fim, diz quem chamou — `icp: <passo>
 //!   remetente <principal>` — e o que voltou — `icp: <passo> resposta
 //!   <resposta>` —, cada um na sua linha: o Principal duas vezes não cabe
-//!   numa.
+//!   numa;
+//! - [`QUEM_CONSULTA`]: a consulta `quem_consulta` (o canister responde o
+//!   Principal de quem consultou), do anônimo — com `c` zero — ou
+//!   **assinada** pela chave `c` de [`CHAVES`] — uma assinatura, a da
+//!   consulta —; com `c` de [`NA_RAIZ`] em diante, no canister
+//!   [`DA_RAIZ`]. Diz quem consultou e o que voltou como a chamada, e a
+//!   linha do desfecho também diz as assinaturas pedidas; a declaração é a
+//!   da consulta, ancorada na decisão da assinatura — ou na conexão, do
+//!   anônimo;
+//! - [`QUEM_REPLICADA`]: a mesma `quem_consulta` pelo caminho da chamada —
+//!   a **consulta replicada**: a resposta passa pelo consenso e vem
+//!   certificada —, do anônimo ou assinada, como as chamadas acima, e
+//!   declarada como uma.
 //!
 //! Antes de cada pedido, diz `icp: <passo> pede <etapa>` — `read_state` ou
 //! `query`: a suíte sabe assim que o programa espera a resposta daquele
@@ -127,6 +139,8 @@ const LENTO: i64 = 9;
 const RECUSA_NA_CHAMADA: i64 = 10;
 const SEM_CANISTER: i64 = 11;
 const SIMBOLO: i64 = 12;
+const QUEM_CONSULTA: i64 = 13;
+const QUEM_REPLICADA: i64 = 14;
 
 /// As chaves de uma chamada assinada, pelo `c` de um evento — `c` zero é o
 /// anônimo. Os nomes que a política padrão dá ao operador.
@@ -467,6 +481,109 @@ fn chamar(
     }
 }
 
+/// O que uma consulta de quem consultou provou, curto — `prova
+/// <sub-rede> <delegada|da raiz> <assinaturas>/<nós>`. Quem consultou e o
+/// que voltou vão antes, cada um na sua linha, como na chamada.
+fn provado_da_consulta(v: &Verificada) -> String {
+    let texto = v.sub_rede.texto();
+    format!(
+        "prova {} {} {}/{}",
+        texto.split('-').next().unwrap_or(""),
+        if v.delegada { "delegada" } else { "da raiz" },
+        v.assinaturas,
+        v.nos
+    )
+}
+
+/// A consulta `quem_consulta` pelo caminho inteiro — do anônimo, ou
+/// assinada pela `chave` do kernel: a pública lida por `key.read`, a
+/// assinatura da consulta por `key.sign` —, declarada antes do fecho:
+/// ancorada na decisão da assinatura; do anônimo, na conexão. Antes do
+/// desfecho, diz quem consultou e o que voltou, cada um na sua linha, como
+/// a chamada.
+fn consultar_quem(
+    passo: &str,
+    rede: &Rede,
+    ancoras: &Ancoras,
+    canister: &Principal,
+    chave: Option<&str>,
+) {
+    const METODO: &str = "quem_consulta";
+    let assunto = icp::assunto(canister, METODO);
+    let arg = sem_argumentos();
+    let mut kernel = None;
+    let mut gateway = None;
+    let mut hora_dita = None;
+    let r: Result<Verificada, Falha> = (|| {
+        if let Some(nome) = chave {
+            kernel = Some(ChaveDoKernel::ler(nome)?);
+        }
+        let hora = icp::hora()?;
+        hora_dita = Some(hora.estado.nome());
+        let nonce = icp::nonce()?;
+        let gateway = gateway.insert(icp::conectar(rede, ancoras, DNS)?);
+        let mut narrado = Narrado { gateway, passo };
+        match kernel.as_mut() {
+            Some(k) => icp::consultar_assinada(
+                &mut narrado,
+                rede,
+                k,
+                canister,
+                METODO,
+                &arg,
+                &hora,
+                &nonce,
+            ),
+            None => icp::consultar(&mut narrado, rede, canister, METODO, &arg, &hora, &nonce),
+        }
+    })();
+    let desfecho = match &r {
+        Err(Falha::Chave(_) | Falha::Assinatura(_)) => icp::desfecho_da_consulta_assinada(&r),
+        _ => desfecho(&r),
+    };
+    let decisao = kernel.as_ref().and_then(|k| k.decisoes().first().copied());
+    let ancora = match (decisao, gateway.as_ref()) {
+        (Some(d), _) => Ancora::Decisao(d),
+        (None, Some(g)) => Ancora::Conexao(g.conexao()),
+        (None, None) => Ancora::Nenhuma,
+    };
+    let declarada = icp::declarar_consulta(&assunto, desfecho, ancora);
+    let detalhe = match &r {
+        Ok(v) => {
+            let remetente = kernel
+                .as_ref()
+                .map_or(Principal::ANONIMO, ChaveDoKernel::principal);
+            escreverln!("icp: {} remetente {}", passo, remetente.texto());
+            let resposta = match &v.desfecho {
+                Desfecho::Respondida(bytes) => resposta_da_chamada(bytes),
+                Desfecho::Recusada { codigo, erro, .. } => {
+                    format!("recusa {codigo} {}", erro.as_deref().unwrap_or("-"))
+                }
+            };
+            escreverln!("icp: {} resposta {}", passo, resposta);
+            provado_da_consulta(v)
+        }
+        Err(f) => format!("{f}"),
+    };
+    let declarada = match declarada {
+        Ok(n) => format!("{n}"),
+        Err(codigo) => format!("recusada {codigo}"),
+    };
+    let assinaturas = kernel.as_ref().map_or(0, |k| k.decisoes().len());
+    escreverln!(
+        "icp: {}: {}; declarada {}; hora {}; assinaturas {}; {}",
+        passo,
+        desfecho,
+        declarada,
+        hora_dita.unwrap_or("nenhuma"),
+        assinaturas,
+        detalhe
+    );
+    if let Some(g) = gateway {
+        g.fechar();
+    }
+}
+
 /// Diz o desfecho de um passo.
 fn dizer(
     passo: &str,
@@ -599,6 +716,26 @@ fn principal() -> i64 {
                         .copied();
                     let passo = format!("{metodo} {nome}{onde} {}", chave.unwrap_or("anonimo"));
                     chamar(&passo, rede, &ancoras, canister, metodo, chave);
+                }
+                (QUEM_CONSULTA | QUEM_REPLICADA, Some(rede)) => {
+                    let (canister, c, onde) = if e.c >= NA_RAIZ {
+                        (&da_raiz, e.c - NA_RAIZ, " raiz")
+                    } else {
+                        (&bancada, e.c, "")
+                    };
+                    let chave = usize::try_from(c)
+                        .ok()
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| CHAVES.get(i))
+                        .copied();
+                    let quem = chave.unwrap_or("anonimo");
+                    if e.a == QUEM_CONSULTA {
+                        let passo = format!("quem_consulta {nome}{onde} {quem}");
+                        consultar_quem(&passo, rede, &ancoras, canister, chave);
+                    } else {
+                        let passo = format!("replicada {nome}{onde} {quem}");
+                        chamar(&passo, rede, &ancoras, canister, "quem_consulta", chave);
+                    }
                 }
                 (SIMBOLO, Some(rede)) => {
                     let passo = format!("simbolo {nome}");
