@@ -21,12 +21,12 @@ on:
         type: choice
         options: [x86_64, aarch64]
         default: x86_64
-  # Temporário: enquanto o fluxo não está no ramo padrão, onde o botão
-  # aparece, os disparos vêm do empurrão deste arquivo ou do comando que ele
-  # roda, neste ramo, nas duas arquiteturas. Sai quando a fumaça fechar.
+  # Temporário: a fumaça real do ICP-4b roda pelo empurrão deste arquivo, e
+  # só dele, neste ramo — o fluxo não está no ramo padrão, onde o botão
+  # aparece. O commit seguinte tira o gatilho.
   push:
     branches: [claude/modest-pascal-vy8p8k]
-    paths: [.github/workflows/rede-principal.yml, xtask/src/rede_principal.rs]
+    paths: [.github/workflows/rede-principal.yml]
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,14 +34,9 @@ env:
 
 jobs:
   mainnet:
-    name: A rede principal do IC (${{ matrix.arch }})
+    name: A rede principal do IC (${{ inputs.arch || 'x86_64' }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        # Pelo botão, a arquitetura escolhida; pelo empurrão, as duas.
-        arch: ${{ fromJSON(inputs.arch && format('["{0}"]', inputs.arch) || '["x86_64", "aarch64"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,8 +49,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: mainnet-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: mainnet-${{ matrix.arch }}-
+          key: mainnet-${{ inputs.arch || 'x86_64' }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: mainnet-${{ inputs.arch || 'x86_64' }}-
 
       # As mesmas da fumaça: o kernel de produção com o disco, o TPM e a
       # rede do emulador. O `openssl` é do pré-voo, que lê a cadeia real.
@@ -67,12 +62,13 @@ jobs:
             gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
             swtpm python3 openssl
 
-      # Temporário, como o gatilho: os dois nós que o DNS deu a `icp-api.io`
-      # nas duas primeiras rodadas — o resolvedor do runner deu um, e a
-      # máquina, quase sempre o outro. O administrador escreve os dois; o
-      # gate, o TLS e a verificação fazem o resto.
+      # Temporário, com o gatilho: pelo empurrão, o comando do ICP-4b como
+      # está, no x86_64. O `target/mainnet/` começa vazio: o cache traz o
+      # `target/` de uma rodada anterior, com o relatório dela.
       - name: A fumaça real
-        run: cargo xtask mainnet --arch ${{ matrix.arch }} --release --enderecos 23.142.184.129,63.251.162.11
+        run: |
+          rm -rf target/mainnet
+          cargo xtask mainnet --release
 
       - name: O relatório
         if: always()
@@ -82,6 +78,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: relatorio-mainnet-${{ matrix.arch }}
+          name: relatorio-mainnet-${{ inputs.arch || 'x86_64' }}
           path: target/mainnet/relatorio-*.md
           if-no-files-found: ignore
