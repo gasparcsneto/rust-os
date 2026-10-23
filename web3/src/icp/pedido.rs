@@ -22,8 +22,12 @@
 //! assinatura feita — no Duke, pelo kernel, que guarda a privada. Sem
 //! delegação: a cadeia de delegações do IC não existe aqui.
 //!
-//! A consulta continua só do anônimo: a identidade com chave assina a
-//! chamada e a leitura do estado dela.
+//! A consulta também vai dos dois jeitos: a do anônimo pelo
+//! [`Consulta::id`] e pelo [`Consulta::envelope`], que não aceitam outro
+//! remetente; a de quem tem chave pelo [`Consulta::id_assinada`] e pelo
+//! [`Consulta::envelope_assinado`], com a regra da chamada — o remetente é
+//! o Principal da chave, ou nada se monta. O id leva o remetente: a mesma
+//! consulta, do anônimo e assinada, são dois pedidos.
 //!
 //! # O nonce da consulta
 //!
@@ -64,7 +68,7 @@ pub struct Consulta<'a> {
     pub metodo: &'a str,
     /// O argumento, em Candid.
     pub arg: &'a [u8],
-    /// Quem pede: no ICP-1, sempre o anônimo.
+    /// Quem pede: o anônimo, ou o Principal da chave que assina.
     pub remetente: Principal,
     /// Até quando o pedido vale, em nanossegundos desde 1970.
     pub vencimento_ns: u64,
@@ -141,8 +145,7 @@ pub fn assinavel(id: &Hash) -> [u8; 43] {
 pub enum Erro {
     /// O nonce passa de [`MAIOR_NONCE`] bytes.
     NonceLongo,
-    /// Um remetente que não é o anônimo num pedido sem assinatura — ou
-    /// numa consulta, que só o anônimo faz.
+    /// Um remetente que não é o anônimo num pedido sem assinatura.
     RemetenteNaoAnonimo,
     /// Um pedido assinado cujo remetente não é o Principal da chave.
     RemetenteNaoEDaChave,
@@ -292,6 +295,39 @@ impl Consulta<'_> {
     pub fn envelope(&self) -> Result<Vec<u8>, Erro> {
         let c = self.conteudo()?;
         Ok(envelope_com(None, |e| c.escrever(e)))
+    }
+
+    /// O conteúdo da consulta assinada pela chave `chave_der`: o
+    /// remetente tem de ser o Principal dela.
+    fn conteudo_assinado(&self, chave_der: &[u8]) -> Result<AoCanister<'_>, Erro> {
+        let c = AoCanister {
+            tipo: "query",
+            canister: &self.canister,
+            metodo: self.metodo,
+            arg: self.arg,
+            remetente: &self.remetente,
+            vencimento_ns: self.vencimento_ns,
+            nonce: self.nonce,
+        };
+        c.conferir()?;
+        if self.remetente != Principal::auto_autenticado(chave_der) {
+            return Err(Erro::RemetenteNaoEDaChave);
+        }
+        Ok(c)
+    }
+
+    /// O id da consulta assinada pela chave `chave_der` — a pública, em
+    /// DER: o hash do conteúdo, o que se assina. Um remetente que não é o
+    /// Principal da chave não tem id, e nada se assina por ele.
+    pub fn id_assinada(&self, chave_der: &[u8]) -> Result<Hash, Erro> {
+        Ok(self.conteudo_assinado(chave_der)?.id())
+    }
+
+    /// O corpo HTTP da consulta assinada: o envelope, em CBOR, com a
+    /// pública e a assinatura do [`Consulta::id_assinada`].
+    pub fn envelope_assinado(&self, autenticacao: &Autenticacao<'_>) -> Result<Vec<u8>, Erro> {
+        let c = self.conteudo_assinado(autenticacao.chave_der)?;
+        Ok(envelope_com(Some(autenticacao), |e| c.escrever(e)))
     }
 }
 

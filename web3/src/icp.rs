@@ -1,5 +1,6 @@
 //! O Internet Computer, do lado de quem consulta e chama: as contas da
-//! consulta anônima verificada e da chamada de atualização verificada.
+//! consulta verificada e da chamada de atualização verificada — do
+//! anônimo, ou assinadas por quem tem chave.
 //!
 //! - [`principal`]: o Principal — bytes, texto, classes;
 //! - [`cbor`]: o subconjunto estrito do CBOR que o IC usa;
@@ -14,8 +15,8 @@
 //!   subconjunto;
 //! - [`situacao`]: a situação de uma chamada — o corpo da chamada
 //!   síncrona e o `request_status` de um certificado;
-//! - [`agente`]: o agente síncrono da consulta, sobre um transporte de
-//!   quem chama;
+//! - [`agente`]: o agente síncrono da consulta — do anônimo, ou assinada
+//!   por quem tem chave —, sobre um transporte de quem chama;
 //! - [`atualizacao`]: a chamada de atualização verificada — do anônimo,
 //!   ou assinada por quem tem chave —, e o acompanhamento dela;
 //! - [`registro`]: as redes em que se confia — `/dados/icp/redes`.

@@ -1,5 +1,6 @@
-//! O agente: a consulta anônima verificada, ponta a ponta, sobre um
-//! transporte de quem chama.
+//! O agente: a consulta verificada, ponta a ponta, sobre um transporte de
+//! quem chama — do anônimo ([`consultar`]), ou assinada por quem tem chave
+//! ([`consultar_assinada`]).
 //!
 //! É a lógica do `ic-agent` para uma *query* com as assinaturas conferidas
 //! (`query_inner` e `fetch_subnet_by_canister`, **referência**), síncrona
@@ -17,16 +18,30 @@
 //! Duke, o HTTP do programa sobre a conexão que o gate decidiu
 //! (`programas::icp`). O agente não sabe de nome, endereço, TLS ou gate, e
 //! não decide nada além do que a resposta prova.
+//!
+//! # A consulta assinada
+//!
+//! A [`consultar_assinada`] faz os mesmos três passos, com uma diferença
+//! só: a consulta do passo 2 vai assinada pelo [`Assinador`] — a pública
+//! dele em DER e a assinatura do id —, e o remetente é o Principal da
+//! chave dele. O passo 1 continua do anônimo, porque o caminho `subnet` é
+//! público, como na chamada ([`super::atualizacao`]): uma assinatura por
+//! consulta. O passo 3 é o mesmo: as assinaturas dos nós prendem a
+//! resposta ao id, e o id leva o remetente — a resposta de outra consulta,
+//! do anônimo ou de outra chave, não confere.
+//!
+//! Quem assina não assinou: nada sai, e nada vai do anônimo no lugar.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
 use super::VALIDADE_DO_PEDIDO_NS;
+use super::atualizacao::Assinador;
 use super::cbor::{self, Valor};
 use super::certificado::{self, Certificado, Raiz};
 use super::consulta::{self, Resposta, Resultado};
-use super::pedido::{self, Consulta, LeituraDeEstado};
+use super::pedido::{self, Autenticacao, Consulta, LeituraDeEstado};
 use super::principal::Principal;
 use super::resumo::Hash;
 
@@ -86,6 +101,31 @@ impl<E: fmt::Display> fmt::Display for Erro<E> {
             Erro::LeituraDeEstado => f.write_str("read_state: resposta fora da forma"),
             Erro::Certificado(e) => write!(f, "verificacao: {e}"),
             Erro::Consulta(e) => write!(f, "verificacao: {e}"),
+        }
+    }
+}
+
+/// Por que uma consulta assinada não foi entregue: o que a consulta do
+/// anônimo também tem, ou a assinatura que não saiu.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ErroDaAssinada<E, A> {
+    /// O que a consulta do anônimo também tem.
+    Consulta(Erro<E>),
+    /// Quem assina não assinou: a consulta não saiu.
+    Assinatura(A),
+}
+
+impl<E, A> From<Erro<E>> for ErroDaAssinada<E, A> {
+    fn from(e: Erro<E>) -> Self {
+        ErroDaAssinada::Consulta(e)
+    }
+}
+
+impl<E: fmt::Display, A: fmt::Display> fmt::Display for ErroDaAssinada<E, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErroDaAssinada::Consulta(e) => write!(f, "{e}"),
+            ErroDaAssinada::Assinatura(e) => write!(f, "{}: assinatura: {e}", Etapa::Consulta),
         }
     }
 }
@@ -215,6 +255,99 @@ pub fn consultar<T: Transporte>(
     let corpo = post(t, Etapa::Consulta, &caminho(canister, "query"), &envelope)?;
 
     // 3. A resposta, contra os nós do certificado.
+    let resposta = Resposta::ler(&corpo).map_err(Erro::Consulta)?;
+    let conferida = consulta::verificar(&resposta, &id_do_pedido, &cert, &autoridade, agora_ns)
+        .map_err(Erro::Consulta)?;
+    let desfecho = match resposta.resultado {
+        Resultado::Respondida { arg } => Desfecho::Respondida(Vec::from(arg)),
+        Resultado::Recusada {
+            codigo,
+            mensagem,
+            erro,
+        } => Desfecho::Recusada {
+            codigo,
+            mensagem: String::from(mensagem),
+            erro: erro.map(String::from),
+        },
+    };
+    Ok(Verificada {
+        desfecho,
+        id_do_pedido,
+        sub_rede: autoridade.sub_rede,
+        delegada: autoridade.delegada,
+        tempo_do_certificado_ns: autoridade.tempo_ns,
+        assinaturas: conferida.assinaturas,
+        nos: conferida.nos,
+    })
+}
+
+/// Consulta `metodo` de `canister` com `arg` (Candid), assinada por
+/// `assinador` — o remetente é o Principal da chave dele —, e confere tudo
+/// antes de devolver. O resto é o da [`consultar`]: as faixas pelo
+/// anônimo, a hora `agora_ns` de quem verifica e o `nonce` de quem chama.
+/// Uma assinatura só, a da consulta; se ela não sai, a consulta também não.
+#[allow(clippy::too_many_arguments)]
+pub fn consultar_assinada<T: Transporte, A: Assinador>(
+    t: &mut T,
+    assinador: &mut A,
+    raiz: &Raiz,
+    canister: &Principal,
+    metodo: &str,
+    arg: &[u8],
+    agora_ns: u64,
+    nonce: &[u8],
+) -> Result<Verificada, ErroDaAssinada<T::Erro, A::Erro>> {
+    let vencimento_ns = agora_ns.saturating_add(VALIDADE_DO_PEDIDO_NS);
+
+    // 1. O certificado da sub-rede do canister, pelo anônimo.
+    let caminhos: [&[&[u8]]; 1] = [&[b"subnet"]];
+    let leitura = LeituraDeEstado {
+        caminhos: &caminhos,
+        remetente: Principal::ANONIMO,
+        vencimento_ns,
+    };
+    let envelope = leitura.envelope().map_err(Erro::Pedido)?;
+    let corpo = post(
+        t,
+        Etapa::LeituraDeEstado,
+        &caminho(canister, "read_state"),
+        &envelope,
+    )?;
+    let bytes = cbor::ler(&corpo)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.campo("certificate"))
+        .and_then(Valor::bytes)
+        .ok_or(Erro::LeituraDeEstado)?;
+    let cert = Certificado::ler(bytes).map_err(Erro::Certificado)?;
+    let autoridade =
+        certificado::verificar(&cert, raiz, canister, agora_ns).map_err(Erro::Certificado)?;
+
+    // 2. A consulta, assinada: o remetente é o Principal da chave.
+    let chave_der = Vec::from(assinador.chave_der());
+    let consulta = Consulta {
+        canister: *canister,
+        metodo,
+        arg,
+        remetente: Principal::auto_autenticado(&chave_der),
+        vencimento_ns,
+        nonce: Some(nonce),
+    };
+    let id_do_pedido = consulta.id_assinada(&chave_der).map_err(Erro::Pedido)?;
+    let assinatura = assinador
+        .assinar(&id_do_pedido)
+        .map_err(ErroDaAssinada::Assinatura)?;
+    let autenticacao = Autenticacao {
+        chave_der: &chave_der,
+        assinatura: &assinatura,
+    };
+    let envelope = consulta
+        .envelope_assinado(&autenticacao)
+        .map_err(Erro::Pedido)?;
+    let corpo = post(t, Etapa::Consulta, &caminho(canister, "query"), &envelope)?;
+
+    // 3. A resposta, contra os nós do certificado: presa a este id, que
+    //    leva o remetente.
     let resposta = Resposta::ler(&corpo).map_err(Erro::Consulta)?;
     let conferida = consulta::verificar(&resposta, &id_do_pedido, &cert, &autoridade, agora_ns)
         .map_err(Erro::Consulta)?;

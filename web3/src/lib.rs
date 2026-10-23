@@ -1,9 +1,10 @@
 //! Os protocolos Web3 de um programa do Duke.
 //!
 //! O primeiro, e por enquanto o único, é o Internet Computer ([`icp`]): a
-//! consulta (*query*) anônima a um canister, verificada como o agente
-//! oficial da DFINITY verifica. Outros protocolos entram como módulos
-//! irmãos, quando entrarem — nada aqui os antecipa.
+//! consulta (*query*) e a chamada (*update*) a um canister — do anônimo,
+//! ou assinadas por quem tem chave —, verificadas como o agente oficial da
+//! DFINITY verifica. Outros protocolos entram como módulos irmãos, quando
+//! entrarem — nada aqui os antecipa.
 //!
 //! # O que nada aqui faz
 //!

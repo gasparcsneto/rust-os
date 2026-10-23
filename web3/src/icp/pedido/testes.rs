@@ -140,8 +140,8 @@ fn so_o_anonimo_e_nonce_curto() {
     };
     assert_eq!(longo.id(), Err(Erro::NonceLongo));
     assert_eq!(longo.envelope(), Err(Erro::NonceLongo));
-    // A consulta é só do anônimo: um remetente com chave não sai daqui, e
-    // não se finge outro.
+    // A consulta sem assinatura é só do anônimo: um remetente com chave
+    // não sai daqui, e não se finge outro.
     let outro = Consulta {
         remetente: Principal::auto_autenticado(b"chave"),
         ..comum
@@ -379,4 +379,141 @@ fn o_nonce_muda_o_id() {
         .unwrap()
         .as_slice()
     );
+}
+
+/// A consulta assinada: o id do oráculo, com o remetente da chave, e o
+/// envelope assinado que ele lê, com a chave e a assinatura no lugar, e a
+/// assinatura conferida pelo `ic-ed25519` sobre o id dele.
+#[test]
+fn a_consulta_assinada_tem_o_id_e_o_envelope_do_oraculo() {
+    let mut s = Sorteio::novo(25);
+    for i in 0..300 {
+        let canister = Principal::de_bytes(&s.bytes_ate(29)).unwrap();
+        let metodo: String = (0..s.ate(20))
+            .map(|_| char::from(b'a' + s.ate(26) as u8))
+            .collect();
+        let arg = s.bytes_ate(200);
+        let nonce = if i % 3 == 0 {
+            None
+        } else {
+            Some(s.bytes_ate(32))
+        };
+        let vencimento_ns = s.proximo();
+        let (privada, der) = chave(i as u8);
+        let nossa = Consulta {
+            canister,
+            metodo: &metodo,
+            arg: &arg,
+            remetente: Principal::auto_autenticado(&der),
+            vencimento_ns,
+            nonce: nonce.as_deref(),
+        };
+        let oficial = EnvelopeContent::Query {
+            ingress_expiry: vencimento_ns,
+            sender: candid::Principal::self_authenticating(der),
+            canister_id: principal_oficial(&canister),
+            method_name: metodo.clone(),
+            arg: arg.clone(),
+            nonce: nonce.clone(),
+            sender_info: None,
+        };
+        let id = nossa.id_assinada(&der).unwrap();
+        assert_eq!(&id[..], oficial.to_request_id().as_slice());
+        let assinatura = ed25519_dalek::Signer::sign(&privada, &assinavel(&id)).to_bytes();
+        let autenticacao = Autenticacao {
+            chave_der: &der,
+            assinatura: &assinatura,
+        };
+        let envelope = nossa.envelope_assinado(&autenticacao).unwrap();
+        assert!(envelope.starts_with(&[0xd9, 0xd9, 0xf7]));
+        let lido: Envelope<'_> = serde_cbor::from_slice(&envelope).unwrap();
+        assert_eq!(lido.content.to_request_id(), oficial.to_request_id());
+        assert!(lido.sender_delegation.is_none());
+        assert_eq!(lido.sender_pubkey.as_deref(), Some(&der[..]));
+        assert_eq!(lido.sender_sig.as_deref(), Some(&assinatura[..]));
+        let publica = ic_ed25519::PublicKey::deserialize_rfc8410_der(&der).unwrap();
+        assert!(
+            publica
+                .verify_signature(&lido.content.to_request_id().signable(), &assinatura)
+                .is_ok()
+        );
+        assert!(cbor::ler(&envelope).is_ok());
+    }
+}
+
+/// O remetente da consulta assinada é o da chave: outro Principal, ou o
+/// anônimo, não tem id assinado nem envelope; a consulta sem assinatura
+/// continua só do anônimo; e o id leva o remetente — a mesma consulta, do
+/// anônimo e de cada chave, são pedidos diferentes.
+#[test]
+fn o_remetente_da_consulta_assinada_e_o_da_chave() {
+    let (_, der) = chave(1);
+    let (_, outra) = chave(2);
+    let assinatura = [0u8; 64];
+    let a = Autenticacao {
+        chave_der: &der,
+        assinatura: &assinatura,
+    };
+    let b = Autenticacao {
+        chave_der: &outra,
+        assinatura: &assinatura,
+    };
+    let base = Consulta {
+        canister: Principal::GERENCIAMENTO,
+        metodo: "quem_consulta",
+        arg: b"DIDL\x00\x00",
+        remetente: Principal::auto_autenticado(&der),
+        vencimento_ns: 1,
+        nonce: Some(&[1; 8]),
+    };
+    assert!(base.id_assinada(&der).is_ok());
+    assert!(base.envelope_assinado(&a).is_ok());
+    // A chave de outro não assina por este remetente.
+    assert_eq!(base.id_assinada(&outra), Err(Erro::RemetenteNaoEDaChave));
+    assert_eq!(base.envelope_assinado(&b), Err(Erro::RemetenteNaoEDaChave));
+    // Sem assinatura, um remetente com chave não sai.
+    assert_eq!(base.id(), Err(Erro::RemetenteNaoAnonimo));
+    assert_eq!(base.envelope(), Err(Erro::RemetenteNaoAnonimo));
+    // O anônimo não vai assinado por chave nenhuma.
+    let anonima = Consulta {
+        remetente: Principal::ANONIMO,
+        ..base
+    };
+    assert_eq!(anonima.id_assinada(&der), Err(Erro::RemetenteNaoEDaChave));
+    assert_eq!(
+        anonima.envelope_assinado(&a),
+        Err(Erro::RemetenteNaoEDaChave)
+    );
+    assert!(anonima.envelope().is_ok());
+    // O nonce longo também não.
+    let longa = Consulta {
+        nonce: Some(&[0; 33]),
+        ..base
+    };
+    assert_eq!(longa.id_assinada(&der), Err(Erro::NonceLongo));
+    assert_eq!(longa.envelope_assinado(&a), Err(Erro::NonceLongo));
+    // Três remetentes, três pedidos.
+    let de_outra = Consulta {
+        remetente: Principal::auto_autenticado(&outra),
+        ..base
+    };
+    let ids = [
+        anonima.id().unwrap(),
+        base.id_assinada(&der).unwrap(),
+        de_outra.id_assinada(&outra).unwrap(),
+    ];
+    assert_ne!(ids[0], ids[1]);
+    assert_ne!(ids[0], ids[2]);
+    assert_ne!(ids[1], ids[2]);
+    // E o envelope assinado leva o conteúdo da consulta, não o de uma
+    // chamada: o mesmo id que a chamada teria é outro.
+    let chamada = Chamada {
+        canister: base.canister,
+        metodo: base.metodo,
+        arg: base.arg,
+        remetente: base.remetente,
+        vencimento_ns: base.vencimento_ns,
+        nonce: base.nonce,
+    };
+    assert_ne!(chamada.id().unwrap(), ids[1]);
 }
