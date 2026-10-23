@@ -72,7 +72,8 @@ pub(crate) const CANISTER_DA_RAIZ: &str = "xp3jw-ot777-77777-aaaaa-cai";
 const SUB_REDE: &str = "753q6-ah42a-rm7md-yb6nn-3egqb-e2tyy-zdjgf-ind25-haovq-fe74w-pqe";
 
 /// Os ledgers da bancada (ICP-4d), nos ids da rede principal: o ledger de
-/// ICP, o CMC e o ledger de cycles, que a PocketIC sobe (`IcpFeatures`).
+/// ICP, o CMC e o ledger de cycles, que a PocketIC sobe (`IcpFeatures`). O
+/// programa `carteira` tem os mesmos.
 const LEDGERS: [(&str, &str); 3] = [
     ("ledger", "ryjl3-tyaaa-aaaaa-aaaba-cai"),
     ("cmc", "rkp4c-7iaaa-aaaaa-aaaca-cai"),

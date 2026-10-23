@@ -677,6 +677,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── icp.rs        consulta o canister da bancada pelo DNS, TCP, TLS e HTTP, confere a prova de dentro e declara o desfecho: a prova não dá acesso a nada
         ├── verificado.rs o IC na imagem de produção: o texto e o eco verificados pela rede sem DNS, a prova adulterada recusada, cada consulta medida e declarada
         ├── livro.rs      a rede principal do IC, de verdade: o símbolo do livro-razão do ICP pelo DNS, o gate, o TLS público e a verificação pela raiz da imagem, cada parte medida
+        ├── carteira.rs   o valor na bancada do IC, pela chave de quem a lançou: o saldo, a transferência do ICRC-1, a repetição que o ledger deduplica e ICP em cycles pelo CMC — cada resposta verificada, cada assinatura uma decisão do gate
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
