@@ -1032,7 +1032,8 @@ recusaria a cadeia de um proxy, como deve.
 O `livro` pergunta o nome ao DNS do emulador (`10.0.2.3`), que repassa a
 pergunta ao primeiro `nameserver` IPv4 do `/etc/resolv.conf` do
 hospedeiro, e conecta ao primeiro endereço da resposta; a política só tem
-os que o pré-voo leu. Duas coisas cuidam de que sejam os mesmos:
+os que o pré-voo leu. Duas coisas aproximam as duas respostas, sem
+garantir que sejam as mesmas (ver *O que fica de fora*):
 
 - **A mesma pergunta.** O pré-voo faz, do hospedeiro, a pergunta que a
   máquina vai fazer — os mesmos bytes, de `protocolo::dns`, ao mesmo
@@ -1088,26 +1089,56 @@ título do relatório diz que não é a fumaça real. O fluxo
 [`rede-principal.yml`](../.github/workflows/rede-principal.yml) roda o
 comando num runner do GitHub quando alguém o pede (`workflow_dispatch`),
 com o relatório como artefato. O GitHub só oferece o botão para um fluxo
-que já está no ramo padrão. A CI não o roda, e não depende da rede
-principal.
+que já está no ramo padrão; enquanto ele não está, as execuções de 23 de
+outubro de 2026 vieram de um gatilho `push` temporário, só no ramo do
+ICP-4b, tirado depois. A CI não o roda, e não depende da rede principal.
 
 #### O resultado
 
-A primeira fumaça real rodou em 23 de outubro de 2026, num runner do
-GitHub para cada arquitetura, com o kernel de produção em release:
+**A execução que fecha o ICP-4b.** O fluxo `rede-principal.yml` rodou
+`cargo xtask mainnet --release` num runner do GitHub, em 23 de outubro de
+2026, às 03:03:56 UTC: o x86_64, o kernel de produção em release, o mesmo
+QEMU e as mesmas ferramentas da CI (execução 39892893235 do Actions,
+commit `aa71843`). Os destinos da política foram só os que o DNS do
+hospedeiro deu ao pré-voo, nenhum acrescentado à mão. O relatório,
+`target/mainnet/relatorio-2026-10-23T030356.md`, ficou como o artefato
+`relatorio-mainnet-x86_64` da execução.
 
-- **o pré-voo fechou.** O aperto real é TLS 1.3 com
-  `TLS_AES_128_GCM_SHA256` e a assinatura `ecdsa_secp384r1_sha384`, dentro
-  do perfil. A cadeia — a folha (`CN = ic0.app`, P-384), a intermediária
-  YE2 da Let's Encrypt, a raiz ISRG Root YE com a assinatura cruzada da X2,
-  e a X2 com a da X1 — sobe à X2, uma âncora da imagem. Nenhum
-  `TLS_PROFILE_GAP`, nenhum `TLS_ANCHOR_GAP`;
-- **a consulta não saiu da máquina.** O resolvedor do sistema deu
-  `23.142.184.129`, que foi para a política, e o DNS da máquina deu
-  `63.251.162.11`, nas três rodadas e nos dois runners. O gate recusou as
-  três (`DENY_RESOURCE`) sem um byte para fora: a falha fechada que o
-  desenho promete, e a razão de o pré-voo fazer, desde então, a pergunta
-  da máquina.
+| o quê | o que se viu |
+|---|---|
+| endpoint | `https://icp-api.io:443`, a rede `mainnet` de `/dados/icp/redes`, pelo DNS |
+| destinos na política | `38.96.31.203` e `209.34.235.18`: os mesmos pelos dois caminhos do hospedeiro |
+| destino usado | `tcp:209.34.235.18:443`, a conexão 5, a decisão 120 do gate |
+| a cadeia TLS | a folha `CN = ic0.app` (P-384, de 28/08 a 26/11/2026) ← a YE2 da Let's Encrypt (P-384) ← a ISRG Root YE, com a assinatura cruzada da X2 ← a X2, com a da X1. Conferida pelo programa contra as âncoras da imagem — fecha na X2 —, com o nome e a validade pela hora dele: o aperto fechou, `TLS13_AES_128_GCM_SHA256`. Nenhum `TLS_UNTRUSTED`, `TLS_PROFILE_GAP` ou `TLS_ANCHOR_GAP` |
+| o certificado do IC | o `read_state` de `["subnet"]`, **da raiz**, sem delegação: a assinatura BLS pela chave da raiz de `/dados/icp/redes`; o tempo, 1 792 724 786 s, dentro dos cinco minutos da hora do programa; o livro-razão nas faixas da sub-rede raiz, `tdb26-…` |
+| o hash tree | a assinatura BLS é conferida sobre a raiz recalculada da árvore do certificado (`ic-state-root` e o hash dela); o tempo, as faixas e as chaves dos nós saem dessa árvore |
+| a assinatura do nó | uma, de 40 nós da sub-rede: Ed25519, pela chave do nó no certificado, sobre a resposta deste pedido (`466f873312c…`, com o nonce do `random.read`) |
+| o Candid | a resposta, com tetos: um valor só, um texto, `ICP` |
+| o resultado | `icrc1_symbol: verified; … texto ICP` e "o simbolo verificado e ICP"; o `livro` saiu com 85 |
+| o gate | antes da política, `DENY_RESOURCE` (`209.34.235.18`); depois da revogação, `DENY_RESOURCE` (`38.96.31.203`); nenhum byte para fora nas duas |
+| a auditoria | 52 registros do processo, nenhuma recusa; só o DNS (`udp:10.0.2.3:53`) e o destino da política; a declaração `icp.query ryjl3-tyaaa-aaaaa-aaaba-cai/icrc1_symbol verified`, ancorada na conexão 5, `tcp:209.34.235.18:443`, decisão 120; nada do IC fora dela |
+
+Cada verificação é uma etapa de `web3::icp::agente::consultar` — o
+certificado (`certificado::verificar`), a árvore
+(`Certificado::assinado_por`), os nós (`consulta::verificar`) — ou do
+`livro` (`candid::decodificar`): o `verified` só sai se todas passarem, e o
+símbolo só é dito depois.
+
+**As execuções antes dela**, que não fecham o ICP-4b. Os relatórios estão
+nos artefatos de cada uma:
+
+| execução | máquina | a política | o DNS da máquina | o desfecho |
+|---|---|---|---|---|
+| 39886513968 | x86 e ARM | `23.142.184.129`, do resolvedor do sistema | `63.251.162.11` | `DENY_RESOURCE`, nas duas |
+| 39889242601 | x86 | `23.142.184.129`, pelos dois caminhos | `63.251.162.11` | `DENY_RESOURCE` |
+| 39889242601 | ARM | `23.142.184.129`, pelos dois caminhos | `23.142.184.129` | verificado, `ICP` |
+| 39891593000 | ARM | `23.142.184.129` e `63.251.162.11`, por `--enderecos` | `209.34.235.18` | `DENY_RESOURCE` |
+| 39891593000 | x86 | os mesmos, por `--enderecos` | `63.251.162.11` | verificado, `ICP` — fora do critério: a política teve nós acrescentados à mão |
+
+Em todas, o pré-voo fechou, com a mesma cadeia, dentro do perfil. Depois
+da primeira, o `xtask` passou a compilar a máquina antes do pré-voo e a
+fazer, no pré-voo, a pergunta da máquina; na execução que fecha, os dois
+caminhos deram os mesmos dois nós, e o resultado não depende disso.
 
 ### As medidas
 
@@ -1125,9 +1156,19 @@ rede principal mede as partes da conexão que chegam a acontecer:
 O caminho verificado inteiro, com os dois `POST` e a verificação, é o das
 medidas do ICP-1 (README, *As medidas do IC*): na bancada, uma consulta
 leva uns 260 ms com o kernel de release e 430 ms com o de depuração, no
-x86. Na rede principal, as partes de cada consulta são as do relatório da
-fumaça real, medidas pelo próprio `livro`. Sem a rede de verdade, não há
-número delas aqui.
+x86. Na rede principal, as partes da consulta verificada, medidas pelo
+próprio `livro` no emulador sem aceleração do runner, foram:
+
+| execução | máquina | preparo | DNS | TCP | TLS | HTTP | verificação | total | do lançamento à saída |
+|---|---|---|---|---|---|---|---|---|---|
+| a que fecha | x86 | 0 ms | 0 ms | 70 ms | 160 ms | 510 ms | 80 ms | 840 ms | 1 468 ms |
+| 39889242601 | ARM | 10 ms | 0 ms | 50 ms | 120 ms | 630 ms | 60 ms | 870 ms | 1 182 ms |
+| 39891593000, fora do critério | x86 | 0 ms | 10 ms | 50 ms | 100 ms | 640 ms | 60 ms | 860 ms | 1 294 ms |
+
+O HTTP — os dois `POST`, o `read_state` e o `query`, até a rede principal
+e de volta — é a maior parte. O DNS da consulta veio do cache do
+resolvedor: na rodada antes da política, a mesma pergunta levou de 40 a
+60 ms.
 
 O que dá para medir sem a rede é a verificação dos certificados de
 verdade, no hospedeiro, nativa (`cargo test -p web3 --release -- --ignored
@@ -1185,22 +1226,27 @@ nó alterados com ela também, porque já recusava o certificado inteiro.
 
 ### O que fica de fora
 
-- **A fumaça real ainda não rodou.** O ICP-4b foi escrito num ambiente cuja
-  saída passa por um proxy que recusa `icp-api.io` (403), sem DNS, e que
-  reabre o TLS. O ensaio rodou lá inteiro: as três rodadas pararam no DNS
-  (`DNS_NAME_NOT_FOUND`). Até a fumaça real rodar numa máquina com a rede
-  de verdade, a cadeia real de `icp-api.io` e a resposta real do
-  livro-razão não foram conferidas pelo programa.
-- **As âncoras são duas.** Só as raízes da Let's Encrypt. Se `icp-api.io`
+- **Os nós giram.** `icp-api.io` é servido por *API boundary nodes*, e o
+  DNS deu quatro diferentes em pouco mais de uma hora: `23.142.184.129`,
+  `63.251.162.11`, `209.34.235.18` e `38.96.31.203`. Os IPv4 que a fumaça
+  põe na política são os que o DNS do hospedeiro dá ao pré-voo; quando a
+  máquina recebe outro, o gate recusa (`DENY_RESOURCE`), e aconteceu em
+  quatro das sete máquinas das execuções de 23 de outubro. A fumaça real,
+  então, nem sempre fecha; quando não fecha, falha fechada, sem um byte
+  para fora, e a auditoria do relatório diz o destino recusado. Escrever o
+  nó novo é do administrador, pelo `policy.write`, dentro do teto da
+  imagem; descobrir os nós pela árvore de estado (`api_boundary_nodes`)
+  seria uma decisão nova.
+- **As âncoras são duas.** Só as raízes da Let's Encrypt; a cadeia real de
+  `icp-api.io` sobe à X2 (YE2 ← Root YE, cruzada pela X2). Se `icp-api.io`
   mudar de autoridade, o TLS recusa (`TLS_UNTRUSTED`) e o pré-voo diz
   `TLS_ANCHOR_GAP`: falha fechada. Outra âncora é outra configuração da
   imagem, decidida à parte.
-- **Os endereços são os da hora da imagem.** Os IPv4 que a fumaça põe na
-  política são os que o resolvedor do hospedeiro deu antes de montar a
-  imagem. Se o DNS da máquina responder outro — os *API boundary nodes*
-  mudam —, o gate recusa (`DENY_RESOURCE`) até o administrador escrever o
-  novo: falha fechada. Descobrir os nós pela árvore de estado
-  (`api_boundary_nodes`) seria uma decisão nova.
+- **O cache do fluxo guarda relatórios.** O fluxo do GitHub guarda o
+  `target/` no cache, e com ele os relatórios de execuções anteriores: o
+  artefato de uma pode trazer o de outra, que se distingue pela data no
+  nome. A execução que fecha esvaziou `target/mainnet/` antes de rodar; o
+  fluxo do ramo não esvazia.
 - **Só IPv4 e HTTP/1.1.** O Duke conecta IPv4; o HTTP/3 está fora, de
   propósito.
 - **A hora sem fontes públicas.** O registro de hora da imagem só tem as
@@ -1228,5 +1274,5 @@ sobre a infraestrutura que já existia, e o gate decide as chaves e os
 destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de
 assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
 principal pela configuração da imagem — a raiz, as âncoras públicas, a
-rede `mainnet` —, sem destino dela na política padrão; o que falta para
-fechá-lo é a fumaça real, numa máquina com a rede de verdade.
+rede `mainnet` —, sem destino dela na política padrão, e fechou com a
+fumaça real de 23 de outubro de 2026 (ver *O resultado*).
