@@ -21,6 +21,12 @@ on:
         type: choice
         options: [x86_64, aarch64]
         default: x86_64
+  # Temporário: o primeiro disparo, nas duas arquiteturas, vem do empurrão
+  # deste arquivo neste ramo — o fluxo ainda não está no ramo padrão, onde
+  # o botão aparece. O commit seguinte tira o gatilho.
+  push:
+    branches: [claude/modest-pascal-vy8p8k]
+    paths: [.github/workflows/rede-principal.yml]
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,9 +34,14 @@ env:
 
 jobs:
   mainnet:
-    name: A rede principal do IC (${{ inputs.arch }})
+    name: A rede principal do IC (${{ matrix.arch }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pelo botão, a arquitetura escolhida; pelo empurrão, as duas.
+        arch: ${{ fromJSON(inputs.arch && format('["{0}"]', inputs.arch) || '["x86_64", "aarch64"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -43,8 +54,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: mainnet-${{ inputs.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: mainnet-${{ inputs.arch }}-
+          key: mainnet-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: mainnet-${{ matrix.arch }}-
 
       # As mesmas da fumaça: o kernel de produção com o disco, o TPM e a
       # rede do emulador. O `openssl` é do pré-voo, que lê a cadeia real.
@@ -57,7 +68,7 @@ jobs:
             swtpm python3 openssl
 
       - name: A fumaça real
-        run: cargo xtask mainnet --arch ${{ inputs.arch }} --release
+        run: cargo xtask mainnet --arch ${{ matrix.arch }} --release
 
       - name: O relatório
         if: always()
@@ -67,6 +78,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: relatorio-mainnet-${{ inputs.arch }}
+          name: relatorio-mainnet-${{ matrix.arch }}
           path: target/mainnet/relatorio-*.md
           if-no-files-found: ignore
