@@ -67,8 +67,12 @@ jobs:
             gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
             swtpm python3 openssl
 
+      # Temporário, como o gatilho: os dois nós que o DNS deu a `icp-api.io`
+      # nas duas primeiras rodadas — o resolvedor do runner deu um, e a
+      # máquina, quase sempre o outro. O administrador escreve os dois; o
+      # gate, o TLS e a verificação fazem o resto.
       - name: A fumaça real
-        run: cargo xtask mainnet --arch ${{ matrix.arch }} --release
+        run: cargo xtask mainnet --arch ${{ matrix.arch }} --release --enderecos 23.142.184.129,63.251.162.11
 
       - name: O relatório
         if: always()
