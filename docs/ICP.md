@@ -1,4 +1,4 @@
-# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b, ICP-4c e ICP-4d)
+# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b, ICP-4c, ICP-4d e ICP-4e)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
@@ -14,8 +14,11 @@ ICP-3 — a consulta assinada — e o caminho do consenso — a replicada —, e
 replicada](#a-consulta-assinada-e-a-replicada-icp-4c). O ICP-4d move valor
 com a chave, na bancada — o saldo, a transferência do ICRC-1 e ICP em
 cycles pelo CMC —, em [O valor na
-bancada](#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d). O que ainda não
-existe está em *O que não existe ainda*.
+bancada](#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d). O ICP-4e implanta e
+gerencia um canister com a chave, na bancada — a criação, a instalação, o
+estado, o upgrade em pedaços e a carga de cycles —, em [A gestão de
+canister](#a-gestão-de-canister-na-bancada-icp-4e). O que ainda não existe
+está em *O que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
 Principal, um método, o Candid ou o id de um pedido, e a política não tem
@@ -1723,25 +1726,357 @@ a notificação foi recusada: na rede de verdade, o ICP ficaria numa
 subconta do CMC que ninguém notifica. Quem a pega antes de qualquer
 transferência é o teste do hospedeiro, contra a interface.
 
+## A gestão de canister, na bancada (ICP-4e)
+
+O ICP-4e implanta e gerencia um canister no IC com a chave de uma
+identidade do Duke, na bancada: cria o canister pelo ledger de cycles,
+pagando com os cycles dela; instala nele um módulo do armazém; lê o estado
+dele; troca o módulo em pedaços, guardando o estado do canister; e carrega
+cycles nele. Cada resposta é verificada antes de chegar ao programa. É
+tudo `web3`, programa e bancada: o kernel, a política, o gate, o
+`key.sign`, o domínio `ic-request`, as identidades, as permissões, o TLS
+e o DNS não mudaram uma linha, e nenhuma decisão de arquitetura é nova —
+a gestão é uma chamada do ICP-3 ao canister de gerenciamento, e o kernel
+não sabe o que assina.
+
+```
+pessoa / agente ─► identidade do Duke ─► sessão ─► processo ─► manifesto + papel
+  ─► gate ─► chave:<nome> ─► reconfirmação ─► auditoria (e journal) ─► assinatura
+  ─► programa implantacao ─► Principal do IC ─► aaaaa-aa, pelo canister efetivo
+  ─► certificado verificado ─► o canister, o módulo, o estado ─► audit.declare ─► NSF
+```
+
+### O canister não é recurso do Duke
+
+Quem controla um canister é um fato do IC — os controladores dele —, e
+quem assina com uma chave é uma decisão do gate. São duas decisões em duas
+camadas, e nenhuma lê a outra: o kernel não sabe que um pedido instala um
+módulo, e o IC não sabe que a chave é de uma pessoa do Duke. O ICP-4e não
+amplia a autoridade de ninguém: a permissão `key.sign` sobre
+`chave:<nome>` já cobria, desde o ICP-3, qualquer pedido que um programa
+monte. O controle é o do roteiro — as chaves por finalidade, os programas
+pelo manifesto, os papéis —, e o programa não tem os passos que mais
+custam: nenhum `reinstall`, que apaga o estado do canister, e nenhuma troca
+de controladores, que pode trancar o dono fora.
+
+O código implantado no IC não passa pelo selo de código do Duke: o selo é
+da execução local, e fazê-lo valer para a implantação exigiria o kernel
+interpretar o pedido.
+
+### A chamada ao canister de gerenciamento
+
+O canister de gerenciamento (`aaaaa-aa`) não mora numa sub-rede: o método
+roda na sub-rede do canister que ele gerencia, o **canister efetivo** — o
+`canister_id` do argumento. `atualizacao::chamar_ao_gerenciamento`, ao lado
+da `chamar`, que não mudou, separa os dois: o pedido vai com `canister_id =
+aaaaa-aa` — é o id dele que se assina —, e o caminho
+(`/api/v4/canister/<efetivo>/call`), as faixas, a conferência do
+certificado e a leitura da situação vão pelo efetivo. A `Atualizacao` volta
+com o efetivo, e a `acompanhar` de hoje lê a situação no lugar certo.
+
+### O gerenciamento e o ledger de cycles
+
+`web3::icp::gerenciamento` escreve o argumento de `install_code` (o modo
+`install`, `reinstall` ou `upgrade`, o canister, o módulo e o argumento
+dele), de `upload_chunk` (um pedaço de até 1 MiB), de
+`install_chunked_code` (os hashes dos pedaços, em ordem, e o do módulo
+inteiro) e de `canister_status`; e lê o hash que o `upload_chunk` devolve e
+o estado, pelo nome: a situação, o hash do módulo instalado, os
+controladores, os cycles e a memória. O que não tem a forma da interface é
+recusado.
+
+`web3::icp::ciclos` faz a criação (`create_canister`: a quantia, o
+`created_at_time` e os controladores do canister novo) e a carga
+(`withdraw`: o canister que recebe, a quantia e o `created_at_time`), e lê
+o canister e o bloco, o bloco, ou a recusa pelo nome da interface —
+`Duplicate` (na criação, com o canister da primeira, se já se sabe),
+`InsufficientFunds`, `TooOld`, `CreatedInFuture`, `FailedToCreate`,
+`InvalidReceiver`, `GenericError`…
+
+### A repetição
+
+O ledger de cycles deduplica a criação e a carga pelo `created_at_time`,
+como o ICRC-1 do ICP-4d: a mesma, dentro da janela dele, volta `Duplicate`
+com o bloco da primeira, e não executa. Na criação, o ledger debita antes
+de pedir o canister ao CMC: a repetição que chega com a primeira ainda em
+andamento volta `Duplicate` **sem** o canister, e a de depois, com ele. A
+`implantacao` fica com o canister que a criação deu, ou que a repetição
+disse; uma resposta perdida — uma prova adulterada, uma conexão cortada —
+pode esconder uma criação que aconteceu, e a repetição a esclarece.
+
+### Os módulos e o upgrade
+
+Dois módulos de 324 bytes, escritos à mão pelo `xtask`
+(`xtask/src/icp.rs`) e postos no disco de testes, em
+`/dados/icp/modulos/`: o A e o B. Cada um responde a versão dele (`versao`,
+uma consulta) e conta numa memória estável (`contar`, uma chamada). O
+upgrade guarda a memória estável, e o reinstall a apaga: depois de um
+upgrade, o contador continua de onde estava — é o que mostra, na suíte,
+que o modo foi o certo e que o estado do canister ficou.
+
+O programa lê o módulo pelo `fs.read`, em pedaços de 4 KiB — cada um uma
+decisão do gate e uma ficha do papel —, até 256 KiB, e diz o SHA-256 dos
+bytes que leu antes de mandá-los: é o hash que o `canister_status` diz do
+módulo instalado. No upgrade, os hashes dos pedaços e o do módulo inteiro
+são os dos bytes daqui, e um pedaço que voltou com o hash de outros bytes
+para tudo antes da instalação.
+
+### O programa `implantacao`
+
+Como a `carteira`: lê as âncoras do TLS da bancada e as redes, espera os
+passos no canal `teste-implantacao` — ou, com outra viva, no
+`teste-implantacao-2` —, cada pedido por uma conexão nova, pelo caminho
+inteiro, e cada passo declarado antes do fecho. O `c` de um passo é a
+chave: `chave:bancada` ou `chave:bancada-2`, de quem lançou o processo. O
+canister da execução fica na memória do programa, e nada se guarda.
+
+| passo | o que faz |
+|---|---|
+| `criar` (1) | a chave cria um canister pelo ledger de cycles, com 1 T dos cycles dela e o `created_at_time` da hora do Duke |
+| `repetir_criacao` (2) | a última criação de novo, com os mesmos argumentos, assinada de novo |
+| `fixar_hora` (9), `criar_em` (3) | a hora dada fica; a criação sai com ela: duas implantações com a mesma hora fazem a mesma criação |
+| `instalar` (4) | o módulo A, do armazém, pelo `install_code` em modo `install` |
+| `fixar_pedaco` (12), `atualizar` (5) | o tamanho dos pedaços fica; o módulo B, um `upload_chunk` por pedaço e o `install_chunked_code` em modo `upgrade` |
+| `estado` (6) | o `canister_status`: a situação, o hash do módulo, os controladores, os cycles e a memória |
+| `carregar` (7) | 0,5 T da conta da chave no canister, pelo `withdraw` |
+| `repetir_carga` (8) | a última carga de novo |
+| `versao` (10) | a versão do módulo, pela consulta do anônimo |
+| `contar` (11) | o contador do módulo, pela chave ou pelo anônimo |
+
+A declaração é a da chamada do ICP-3, `icp.update`, ancorada na decisão
+da assinatura; a do gerenciamento diz o canister alvo —
+`icp.update aaaaa-aa/install_code@<canister> verified` —: com
+`aaaaa-aa/<método>` só, a auditoria não diria qual canister foi mexido. O
+upgrade em N pedaços são N + 1 chamadas: N + 1 assinaturas, N + 1 decisões
+do gate e N + 1 declarações. A `implantacao` só anda nas redes da bancada:
+a rede principal não está na lista dela, e a política da imagem não
+alcança destino nenhum da rede principal.
+
+### A bancada
+
+A mesma PocketIC, sem mudança: o CMC cria o canister numa das duas
+sub-redes de aplicação — ele escolhe, e a suíte viu as duas —, e a
+bancada já conhece as duas. Na bancada, a criação custa 500 B cycles, e o
+ledger cobra 100 M de taxa por criação e por carga. O primeiro canister
+novo da primeira sub-rede leva o id que um caso do ICP-3 usa como o
+canister que não existe: os casos do 4e rodam depois dele, e a bancada é
+nova a cada suíte.
+
+O disco de testes ganhou os dois módulos, e a raiz dele cresceu de 128
+para 160 MiB (o disco, de 272 para 304): o `mkfs.btrfs --rootdir` não
+formata pelo que o conteúdo ocupa — uns 26 MB —, ele estima, com folga
+para os metadados em dobro e em degraus de 8 MiB de dados, e aumenta o
+arquivo, calado, quando a estimativa não cabe. Passados 24 MiB de
+conteúdo, a estimativa da versão 6.6.3 é de 133 MiB, e o `implantacao` já
+não cabia. O kernel acha as partições pela GPT, e não mudou; a suíte, que
+confere o lugar e o tamanho de cada partição, ganhou os números novos.
+
+### Os casos
+
+No hospedeiro (`cargo test -p web3`), contra os oráculos:
+
+- **a chamada ao gerenciamento**, contra um IC de mentira: o id do pedido
+  com `canister_id = aaaaa-aa`, contra o `ic-transport-types` — e outro
+  que o do mesmo pedido mandado ao canister alvo —; o caminho da chamada,
+  o das faixas e o da situação pelo canister efetivo, e nunca por
+  `aaaaa-aa`; o efetivo na sub-rede raiz; o certificado de outra sub-rede,
+  recusado; a situação pela `acompanhar`; a recusa não replicada de quem
+  não controla, dita como tal; e a assinatura recusada, que não manda
+  nada;
+- **o gerenciamento contra o `ic-management-canister-types` 0.11.0**, nos
+  dois sentidos: os argumentos de `install_code` nos três modos, de
+  `upload_chunk` — e o pedaço de mais de 1 MiB, que não se escreve —, de
+  `install_chunked_code` e de `canister_status`, escritos aqui e lidos
+  pelo oficial, campo a campo; o estado e o hash de um pedaço escritos pelo
+  oficial e lidos aqui; os campos de uma versão mais nova da interface,
+  que não atrapalham, e o que falta ou não tem a forma dela, recusado; e
+  os pedaços de um módulo, do tamanho pedido e na ordem dele;
+- **o ledger de cycles contra a interface dele**, declarada no teste com o
+  `candid`: a criação e a carga, o argumento, o resultado e cada recusa
+  pelo nome — o `Duplicate` com e sem o canister —; mais de dez
+  controladores, que não se escrevem; e o que não tem a forma da
+  interface, que nunca vira canister nem bloco.
+
+E no `xtask`: os dois módulos são os bytes que a PocketIC da bancada rodou
+na inspeção, pelo SHA-256, e diferem só na versão.
+
+Na suíte (`icp:`), a `implantacao` e a `carteira` lançadas por uma pessoa
+operadora com as duas chaves dela — a `carteira` põe cycles na conta da
+chave, 1 ICP pelo CMC:
+
+- **o canister criado, instalado e conferido**: a criação assinada pela
+  chave — uma execução de `key.sign`, a decisão do gate sobre
+  `chave:bancada` em nome da pessoa, a declaração ancorada nela —, o
+  canister e o bloco, e a conta da chave sem a quantia e a taxa; o estado:
+  `running`, sem módulo, a chave como controladora, os cycles que sobraram
+  da criação, e a prova da sub-rede do canister, delegada pela raiz; a
+  instalação do A, com o SHA-256 dos bytes lidos igual ao hash que o
+  estado diz do módulo; a versão `A`, e o contador de um em um;
+- **o upgrade em pedaços guarda o estado**: o canister contou até três, e
+  o B sobe em três pedaços — quatro assinaturas, cada uma a decisão de uma
+  chamada, quatro declarações, cada uma ancorada na sua e dizendo o
+  canister alvo —; o estado diz o hash do B, a versão é `B`, e o contador
+  continua: quatro;
+- **quem não controla não gerencia**: a outra chave, que o gate deixa
+  assinar, lê o estado, instala e manda um pedaço; o IC recusa as três na
+  entrada, sem certificado — `IC0542` no estado, `IC0512` na instalação —,
+  cada uma assinada e declarada `uncertified_reject`; o upgrade para no
+  primeiro pedaço, e o canister não muda;
+- **a prova adulterada não vira instalação**: com o certificado das faixas
+  adulterado, nada se assina e nada sai, e o canister continua vazio; com
+  o da resposta adulterado, a instalação sai, assinada, e o IC instala —
+  a `implantacao` não diz `instalado`, o estado e a versão, pela rede
+  honesta, mostram o que houve, e a mesma instalação de novo é a recusa
+  verificada do canister cheio (`IC0514`) —; o primeiro pedaço sem prova
+  para o upgrade; e a versão, pelas redes que mentem para a consulta, não é
+  dita;
+- **sem `key.sign` nada se implanta**: sem a chave, sem `key.read`, com o
+  `key.read` só sobre a outra chave, sem `key.sign`, e com o `key.sign` só
+  sobre a outra chave — nenhuma chamada sai, de ninguém, nenhum canister
+  nasce, e os cycles, os do anônimo inclusive, não mudam; a outra chave,
+  no alcance, assina, e o ledger a recusa por falta de cycles;
+- **a criação e a carga repetidas não executam duas vezes**: a mesma
+  criação volta `Duplicate` com o bloco e o canister da primeira, pela
+  rede honesta e pela que responde 202; a carga põe os cycles no canister,
+  e a mesma de novo volta `Duplicate`, sem pôr mais nada; os cycles da
+  chave mostram uma criação e uma carga, cada uma com a taxa;
+- **a mesma criação por dois processos** — a mesma hora fixada, cada um
+  pela sua rede honesta —: uma cria, e a outra volta `Duplicate` com o
+  bloco dela; a que chegou com a primeira em andamento não sabe o
+  canister, e a repetição dela, depois, diz; duas assinaturas de dois
+  pedidos, e os cycles da chave mostram uma criação só;
+- **a chave anulada no meio do upgrade**: os dois pedaços sobem, pela rede
+  lenta; a `implantacao` dorme esperando as faixas da instalação, e o
+  administrador anula a chave: a assinatura é recusada, nenhuma chamada
+  sai, nem do anônimo no lugar, e o canister continua no A — a versão,
+  pela consulta do anônimo, e o contador, do anônimo.
+
+Em todos, nada do IC nem da gestão — o ledger de cycles, o canister de
+gerenciamento, os métodos, o canister mexido, o hash dos módulos —
+aparece em registro nenhum do kernel fora da alegação. O arquivo do
+módulo está nas decisões do `fs.read`: um arquivo é do gate. Os 31 casos
+`icp:` de antes passam sem mudança, nas duas máquinas.
+
+### O tamanho e as medidas
+
+O `implantacao` tem 974 104 bytes no x86 — 92,9% do teto de leitura do
+kernel, 1 MiB — e 864 784 no ARM: o maior programa da imagem, 16 416
+bytes acima da `carteira` no x86. O `icp`, o `livro` e a `carteira`
+ficaram com o tamanho de antes no x86 — 945 056, 899 512 e 957 688 —, mas
+não com os mesmos bytes, e o fonte deles não mudou: a leitura pública de
+um arquivo, no fim do `programas::icp`, chama a privada que a leitura das
+redes já chamava, e o `web3` ganhou outras chamadas às peças da chamada;
+com elas, o compilador arranja o código de outro jeito. Sem a leitura
+pública, o `icp` difere do de antes em 3 KB, e não em 790. No ARM, o `icp`
+e o `livro` também ficaram com o tamanho — 840 208 e 799 248 —, e a
+`carteira` passou uma página, de 848 400 para 852 496, pelo mesmo motivo.
+O ensaio da rede principal, com o `livro` novo, fechou como os de antes.
+
+Na suíte (o kernel de teste em depuração, o x86, a bancada), do pedido das
+faixas ao desfecho dito — sem a leitura da chave, a hora, o nonce e a
+conexão, que vêm antes —, em três rodadas:
+
+| passo | amostras | de / a | mediana |
+|---|---|---|---|
+| a versão — a consulta do anônimo | 18 | 400 a 480 ms | 425 ms |
+| o estado (`canister_status`) | 33 | 600 a 850 ms | 720 ms |
+| **a criação, com o canister e o bloco** | 18 | 1040 a 1310 ms | **1180 ms** |
+| **a repetição da criação: `Duplicate`** | 6 | 590 a 650 ms | **600 ms** |
+| a criação recusada pelo ledger (`InsufficientFunds`) | 3 | 770 a 780 ms | 770 ms |
+| a repetição da criação pela rede que responde 202, acompanhada | 3 | 2310 a 2390 ms | 2340 ms |
+| **a instalação do A** (`install_code`) | 12 | 540 a 810 ms | **670 ms** |
+| a instalação num canister cheio: a recusa verificada (`IC0514`) | 3 | 620 a 710 ms | 620 ms |
+| um pedaço do upgrade (`upload_chunk`) | 9 | 670 a 780 ms | 740 ms |
+| **a instalação em pedaços** (`install_chunked_code`) | 3 | 740 a 760 ms | **760 ms** |
+| a carga (`withdraw`) | 3 | 710 a 720 ms | 720 ms |
+| a repetição da carga: `Duplicate` | 3 | 650 a 700 ms | 680 ms |
+| o contador — a chamada `contar` | 27 | 550 a 820 ms | 730 ms |
+| a recusa de quem não controla, sem prova (`IC0542`, `IC0512`) | 9 | 470 a 550 ms | 500 ms |
+| a assinatura recusada, sem a chamada | 6 | 250 a 350 ms | 295 ms |
+| a mesma criação por dois processos ao mesmo tempo | 6 | 860 a 1480 ms | 1150 ms |
+
+A criação é a mais lenta: o ledger de cycles debita e pede o canister ao
+CMC, noutra sub-rede, e o CMC o cria numa sub-rede de aplicação — são
+mensagens entre sub-redes, cada uma com o seu consenso, antes da resposta.
+A repetição volta na metade do tempo: o ledger responde da memória dele,
+sem o CMC. A instalação e cada pedaço custam o de uma chamada do ICP-3 — o
+módulo de 324 bytes não pesa —, e o upgrade em três pedaços são quatro
+dessas chamadas. A recusa de quem não controla volta antes: o IC recusa na
+entrada, sem consenso e sem certificado, e sobram as faixas e o pedido; a
+assinatura recusada custa só as faixas. A rede que responde 202 soma a
+espera da situação, cada leitura assinada. Os dois processos dividem a
+bancada: em cada rodada, um criou e o outro voltou `Duplicate` sem o
+canister — a primeira ainda em andamento —, e a repetição dele, depois,
+disse o canister; duas vezes criou o da rede honesta, uma o da `direta`.
+No ARM, numa rodada, os mesmos passos deram menos — o estado com mediana
+de 610 ms, a instalação de 600, a criação de 1085 —, e a criação foi a do
+processo da `direta`.
+
+### As mutações
+
+Uma de cada vez, numa *worktree* à parte, com o que a pega: os testes do
+hospedeiro (`cargo test -p web3`), quando a mutação é do `web3`, e a suíte
+do x86 com os oito casos da gestão. O controle — a suíte com os 39 casos
+`icp:`, sem mutação — passou inteiro. As catorze da inspeção, em dezesseis
+formas — a M08 e a M12 em duas —: todas reprovadas, cada uma pela suíte.
+
+| | mutação | onde | no hospedeiro | na suíte |
+|---|---|---|---|---|
+| M01 | **a chamada pelo caminho do canister de gerenciamento**, e não do efetivo | `atualizacao.rs` | cinco, entre eles `a_chamada_ao_gerenciamento_vai_pelo_efetivo` | seis casos: o gateway responde HTTP 400 (`canister_not_found`) |
+| M02 | **o pedido com o canister alvo** no lugar de `aaaaa-aa` | `atualizacao.rs` | os mesmos cinco | seis casos: o IC recusa sem prova (`IC0537`) |
+| M03 | **as faixas e a conferência pelo canister de gerenciamento** | `atualizacao.rs` | seis, entre eles `a_assinatura_recusada_nao_manda_nada_ao_gerenciamento` | seis casos: as faixas voltam HTTP 400, e nada se assina |
+| M04 | **o upgrade em modo `reinstall`** | a `implantacao` | — | o upgrade: o contador voltou a 1 — a memória estável foi apagada |
+| M05 | **o upgrade em modo `install`** | a `implantacao` | — | o upgrade: a recusa verificada do canister cheio (`IC0514`) |
+| M06 | **os hashes dos pedaços fora de ordem** | `gerenciamento.rs` | `a_instalacao_em_pedacos_e_a_do_oficial` | o upgrade: o IC recusa a instalação (`IC0504`) |
+| M07 | **o hash do módulo inteiro errado** | a `implantacao` | — | o upgrade: a mesma recusa (`IC0504`) |
+| M08 | **sem `created_at_time`**, em duas formas: (a) na criação; (b) na carga | a `implantacao` | — | (a) a repetição criou outro canister, e os dois processos criaram dois; (b) a carga repetida carregou de novo |
+| M09 | **o certificado da chamada ao gerenciamento sem conferir** | `atualizacao.rs` | `o_gerenciamento_conferido_na_sub_rede_do_efetivo` | a prova adulterada: a instalação com a resposta adulterada disse `instalado` |
+| M10 | **os cycles do estado lidos do campo da memória** | `gerenciamento.rs` | `o_estado_escrito_pelo_oficial`, `o_estado_de_outra_versao_da_interface` | a carga: o canister não recebeu os cycles — o estado disse a memória, 12 510, antes e depois |
+| M11 | **o módulo errado**: o passo do A lê o B | a `implantacao` | — | cinco casos: o hash dos bytes lidos, que a `implantacao` diz antes de instalar, foi o do B |
+| M12 | **a chave recusada caindo para o anônimo**, em duas formas: (a) a chave que não se lê; (b) a assinatura recusada | a `implantacao` | — | sem `key.sign`: (a) já no primeiro cenário, sem a chave, o anônimo criou um canister, com os cycles dele; (b) sem a permissão de assinar, a criação saiu do anônimo |
+| M13 | **o `key.sign` sem o gate dele**: a permissão de ler basta | o kernel, `commands.rs` | — | sem `key.sign`, a criação foi assinada, e o canister nasceu |
+| M14 | **a declaração sem a âncora da decisão**: sempre a conexão | a `implantacao` | — | seis casos: a declaração da chamada assinada sem a decisão da assinatura |
+
+**A M10, só a carga a pega na suíte.** O caso da criação confere que o
+canister tem menos cycles que a quantia dada — e os 12 510 bytes da
+memória passam por isso —; é a carga, que espera a quantia a mais no
+estado, que a vê. O hospedeiro a pega antes, contra o oficial.
+
+**A M11 aparece antes da versão.** A `implantacao` diz o SHA-256 dos bytes
+que leu antes de instalá-los, e a suíte o confere com o do A: reprova sem
+precisar da versão, que a inspeção esperava que a pegasse.
+
+**A M12a, aqui, o primeiro cenário pega.** A `carteira` do 4d lia a conta
+do destino antes de chegar à chamada, e só com o `key.read` sobre a outra
+chave a chave que não se lê chegava lá; a `implantacao` não lê outra conta
+antes da criação, e, sem a chave, a criação mutada saiu do anônimo,
+pagando com os cycles dele.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
-com elas, chaves de sessão e o domínio de delegação —; a custódia no TPM;
-o compartilhamento de chaves; exportar ou importar uma privada; na rede
-principal, qualquer coisa além da consulta anônima — a chamada de
+com elas, chaves de sessão e o domínio de delegação —; a custódia no
+TPM; o compartilhamento de chaves; exportar ou importar uma privada; na
+rede principal, qualquer coisa além da consulta anônima — a chamada de
 atualização, a consulta autenticada, o *Management Canister*, o ledger e
 os *cycles*, com valor de verdade —; o ICRC-2 e o ICRC-3; descobrir os
-*API boundary nodes* pela árvore de estado; implantar canisters; o
-`icp-cli` dentro do Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no
-TCP ou no HTTP: o ICP-1, o ICP-3, o ICP-4b, o ICP-4c e o ICP-4d rodam
+*API boundary nodes* pela árvore de estado; guardar os canisters
+criados, para gerenciá-los noutra execução; o selo de código do Duke
+valendo para o módulo implantado no IC; os outros métodos do canister de
+gerenciamento — trocar os controladores, parar, apagar —; o `icp-cli`
+dentro do Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no TCP ou no
+HTTP: o ICP-1, o ICP-3, o ICP-4b, o ICP-4c, o ICP-4d e o ICP-4e rodam
 sobre a infraestrutura que já existia, e o gate decide as chaves e os
 destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de
 assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
 principal pela configuração da imagem — a raiz, as âncoras públicas, a
 rede `mainnet` —, sem destino dela na política padrão, e fechou com a
 fumaça real de 23 de outubro de 2026 (ver *O resultado*). O ICP-4c fez a
-consulta assinada e a replicada na bancada; na rede principal, ficam para
-quando houver lá um canister do projeto. O ICP-4d moveu valor na bancada —
-o ICRC-1, a repetição que o ledger deduplica e o CMC —; na rede
-principal, nenhum valor se move: a política padrão não alcança destino
-nenhum dela, e a `carteira` só anda nas redes da bancada.
+consulta assinada e a replicada na bancada; na rede principal, ficam
+para quando houver lá um canister do projeto. O ICP-4d moveu valor na
+bancada — o ICRC-1, a repetição que o ledger deduplica e o CMC —, e o
+ICP-4e implantou e gerenciou um canister na bancada — a criação pelo
+ledger de cycles, a instalação, o estado, o upgrade em pedaços e a carga
+—; na rede principal, nenhum valor se move e nenhum canister nasce: a
+política padrão não alcança destino nenhum dela, e a `carteira` e a
+`implantacao` só andam nas redes da bancada.

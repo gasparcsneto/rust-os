@@ -53290,6 +53290,12 @@ const QUANTIA_DA_CARGA: u128 = 500_000_000_000;
 /// mensagens que ele recebe —, muito abaixo de uma carga.
 const GASTO_ENTRE_ESTADOS: u128 = 1_000_000_000;
 
+// Os canisters que a `implantacao` cria tomam os ids seguintes das duas
+// sub-redes de aplicação — o CMC escolhe a sub-rede. O primeiro da
+// primeira depois do da bancada é o [`CANISTER_QUE_NAO_EXISTE`], que o caso
+// das recusas da chamada (ICP-3) confere antes: os casos daqui vêm depois
+// dele na lista, e a bancada é nova a cada suíte.
+
 /// A `implantacao` em execução: o fio dela, e o canal por onde a suíte dita
 /// os passos.
 struct Implantacao {

@@ -6283,9 +6283,10 @@ públicas — a P-384 e o RSA, só na verificação —, que a rede principal us
 O ICP-4b liga a rede principal, só para ler — em [A rede
 principal](#a-rede-principal). O ICP-4c dá à consulta a chave do ICP-3 — em
 [A consulta assinada](#a-consulta-assinada). O ICP-4d move valor com a
-chave, na bancada — em [O valor na bancada](#o-valor-na-bancada). O desenho
-inteiro, as tabelas e o que fica de fora estão em
-[`docs/ICP.md`](docs/ICP.md).
+chave, na bancada — em [O valor na bancada](#o-valor-na-bancada). O ICP-4e
+implanta e gerencia um canister com a chave, na bancada — em [A gestão de
+canister](#a-gestão-de-canister). O desenho inteiro, as tabelas e o que
+fica de fora estão em [`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
@@ -6656,6 +6657,37 @@ recusas do ledger; ICP em cycles pelo CMC, e a notificação repetida; a
 mesma transferência por dois processos, que executa uma vez; e a chave
 anulada no meio. Ver [O valor na
 bancada](docs/ICP.md#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d).
+
+### A gestão de canister
+
+O ICP-4e implanta e gerencia um canister no IC com a chave de uma
+identidade do Duke, na bancada: a criação pelo ledger de cycles, pagando
+com os cycles dela; a instalação de um módulo do armazém; o estado; o
+upgrade em pedaços, que guarda o estado do canister; e a carga de cycles.
+Cada resposta é verificada antes de chegar ao programa. O kernel, a
+política, o gate, o `key.sign`, o domínio e o TLS não mudaram, e nenhuma
+decisão de arquitetura é nova:
+
+- **o canister não é recurso do Duke**: quem o controla é um fato do IC, e
+  quem assina com a chave é uma decisão do gate — duas camadas, e nenhuma
+  lê a outra. O programa não tem `reinstall`, que apaga o estado, nem troca
+  de controladores, que pode trancar o dono fora;
+- **a gestão é uma chamada do ICP-3** ao canister de gerenciamento
+  (`aaaaa-aa`), com o canister que ela gerencia como efetivo: o pedido vai
+  com `aaaaa-aa`, e o caminho, as faixas, o certificado e a situação, pela
+  sub-rede do canister. A declaração diz o canister alvo;
+- **nenhuma repetição cria dois canisters nem carrega duas vezes**: o
+  ledger de cycles deduplica pelo `created_at_time`, e a repetição de uma
+  criação que ainda estava em andamento volta `Duplicate` sem o canister —
+  a de depois, com ele.
+
+Na suíte, o canister criado, instalado e conferido — o SHA-256 dos bytes
+lidos é o hash que o estado diz do módulo —; o upgrade em pedaços, que
+guarda o contador da memória estável; quem não controla, recusado pelo
+IC; a prova adulterada em cada lugar; sem `key.sign`, nada se implanta,
+nem do anônimo no lugar; a criação e a carga repetidas; a mesma criação
+por dois processos; e a chave anulada no meio do upgrade. Ver [A gestão
+de canister](docs/ICP.md#a-gestão-de-canister-na-bancada-icp-4e).
 
 ## Vários agentes
 
@@ -9114,10 +9146,13 @@ padronizado.
       assinada](#a-consulta-assinada)); e o ICP-4d — o valor na bancada: o
       saldo, a transferência do ICRC-1 que a repetição não executa duas
       vezes, e ICP em cycles pelo CMC (ver [O valor na
-      bancada](#o-valor-na-bancada)). A gestão de canister, as delegações, a
-      custódia no TPM, a rede principal com chave e com valor e o resto
-      ficam para os incrementos seguintes — os que pedem, cada um, uma
-      decisão nova.
+      bancada](#o-valor-na-bancada)); e o ICP-4e — a gestão de canister na
+      bancada: a criação pelo ledger de cycles, a instalação, o estado, o
+      upgrade em pedaços que guarda o estado e a carga de cycles (ver [A
+      gestão de canister](#a-gestão-de-canister)). As delegações, a
+      custódia no TPM, a rede principal com chave, com valor e com canister
+      e o resto ficam para os incrementos seguintes — os que pedem, cada
+      um, uma decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a
