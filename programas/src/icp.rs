@@ -905,3 +905,35 @@ pub fn declarar_chamada(assunto: &str, desfecho: &str, ancora: Ancora) -> Declar
         outro => outro,
     }
 }
+
+/// Chama `metodo` do canister de gerenciamento (`aaaaa-aa`) com `arg`
+/// (Candid) pelo `transporte`, assinado pela `chave` do kernel — ou do
+/// anônimo, sem ela —, pelo canister `efetivo` — o que o método gerencia —,
+/// e confere tudo contra a raiz de `rede` com a hora `agora` — ver
+/// [`atualizacao::chamar_ao_gerenciamento`]. A chamada que fica pendente
+/// segue por [`acompanhar`], que lê a situação pelo efetivo.
+#[allow(clippy::too_many_arguments)]
+pub fn chamar_ao_gerenciamento<T: agente::Transporte<Erro = Transporte>>(
+    transporte: &mut T,
+    rede: &Rede,
+    chave: Option<&mut ChaveDoKernel>,
+    efetivo: &Principal,
+    metodo: &str,
+    arg: &[u8],
+    agora: &Hora,
+    nonce: &[u8; 32],
+) -> Result<Atualizacao, Falha> {
+    let agora_ns = agora.validade_s().saturating_mul(1_000_000_000);
+    atualizacao::chamar_ao_gerenciamento(
+        transporte, chave, &rede.raiz, efetivo, metodo, arg, agora_ns, nonce,
+    )
+    .map_err(Falha::Chamada)
+}
+
+/// O conteúdo do arquivo `caminho`, lido por `fs.read`, pelo gate — em
+/// pedaços de 4 KiB, uma decisão cada —, até `teto` bytes: o arquivo maior
+/// não se lê. A recusa é a [`Falha::Arquivo`], com o código de quem
+/// recusou.
+pub fn ler(caminho: &str, teto: usize) -> Result<Vec<u8>, Falha> {
+    ler_arquivo(caminho, teto)
+}
