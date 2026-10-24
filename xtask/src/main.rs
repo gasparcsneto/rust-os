@@ -5247,7 +5247,7 @@ mod chaves {
 
 mod disco {
     /// O disco inteiro: as quatro partições e a cópia da GPT no fim.
-    pub const SETORES: u64 = 272 * 1024 * 1024 / 512;
+    pub const SETORES: u64 = 304 * 1024 * 1024 / 512;
 
     /// Onde a ESP começa e quanto ocupa.
     ///
@@ -5258,8 +5258,18 @@ mod disco {
     pub const ESP_SETORES: u64 = 48 * 1024 * 1024 / 512;
 
     /// E a raiz, logo depois.
+    ///
+    /// # Por que cento e sessenta mebibytes
+    ///
+    /// O conteúdo é bem menor — uns 26 MB, quase tudo programas das duas
+    /// arquiteturas —, mas o `mkfs.btrfs --rootdir` não formata pelo que o
+    /// conteúdo ocupa: ele estima, com folga para os metadados em dobro e
+    /// em degraus de 8 MiB de dados, e aumenta o arquivo, calado, quando a
+    /// estimativa não cabe. Passados 24 MiB de conteúdo, a da versão 6.6.3
+    /// é de 133 MiB: com 128, o programa `implantacao` (ICP-4e) já não
+    /// cabia. Com 160, o conteúdo pode quase dobrar.
     pub const RAIZ_EM: u64 = ESP_EM + ESP_SETORES;
-    pub const RAIZ_SETORES: u64 = 128 * 1024 * 1024 / 512;
+    pub const RAIZ_SETORES: u64 = 160 * 1024 * 1024 / 512;
 
     /// E a partição de estado, depois da raiz: a única área em que o kernel
     /// escreve, onde mora o journal da persistência.
@@ -5856,6 +5866,10 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // raiz fixada da PocketIC, e a rede principal, com a dela — ver
     // [`icp`].
     programas.push((icp::REDES_NA_IMAGEM.to_string(), icp::redes().into_bytes()));
+    // E os módulos da gestão de canister: o que o programa `implantacao`
+    // instala num canister da bancada, e o que põe no lugar dele — ver
+    // [`icp::modulos`].
+    programas.extend(icp::modulos());
     // E as âncoras públicas: as raízes da autoridade do endpoint da rede
     // principal, do repositório, conferidas pela impressão — ver
     // [`tls::publicas`].

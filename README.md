@@ -690,7 +690,7 @@ xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
-├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão
+├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` instala
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, a auditoria e a revogação
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte

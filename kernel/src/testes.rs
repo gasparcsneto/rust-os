@@ -6818,9 +6818,9 @@ fn particoes_tabela_do_disco() -> Resultado {
         vistas += 1;
         let esperado = match particao.tipo {
             crate::particoes::Tipo::Esp => (2048u64, 98304u64),
-            crate::particoes::Tipo::Dados => (100352, 262144),
-            crate::particoes::Tipo::Estado => (362496, 32768),
-            crate::particoes::Tipo::Armazem => (395264, 131072),
+            crate::particoes::Tipo::Dados => (100352, 327680),
+            crate::particoes::Tipo::Estado => (428032, 32768),
+            crate::particoes::Tipo::Armazem => (460800, 131072),
             crate::particoes::Tipo::Outro => {
                 return Err("apareceu uma particao de tipo inesperado");
             }
@@ -7119,7 +7119,7 @@ fn btrfs_superbloco_confere() -> Resultado {
     if sb.tamanho_de_setor != 4096 {
         return Err("o tamanho de setor do sistema de arquivos mudou");
     }
-    if sb.total != 128 * 1024 * 1024 {
+    if sb.total != 160 * 1024 * 1024 {
         return Err("o sistema de arquivos nao tem o tamanho da particao");
     }
     // Os dois endereços de raiz são lógicos, e o que se pode afirmar sem
@@ -8089,8 +8089,9 @@ fn btrfs_raiz_montada() -> Resultado {
     }
 
     // E o subdiretório tem o que é dele, e só: a nota, o diretório das
-    // âncoras do TLS, com a da bancada e as públicas dentro, e o das redes
-    // do IC, com o arquivo delas.
+    // âncoras do TLS, com a da bancada e as públicas dentro, e o do IC, com
+    // o arquivo das redes e o diretório dos módulos que a `implantacao`
+    // instala.
     let dados = conteudo("/dados")?;
     let esperado_em_dados = [
         (alloc::string::String::from("icp"), Tipo::Diretorio),
@@ -8111,9 +8112,28 @@ fn btrfs_raiz_montada() -> Resultado {
         return Err("o diretorio das ancoras nao tem so as ancoras");
     }
     let icp = conteudo("/dados/icp")?;
-    if icp.len() != 1 || icp[0].0 != "redes" || icp[0].1 != Tipo::Arquivo {
+    let esperado_em_icp = [
+        (alloc::string::String::from("modulos"), Tipo::Diretorio),
+        (alloc::string::String::from("redes"), Tipo::Arquivo),
+    ];
+    if icp != esperado_em_icp {
         crate::log_error!("teste", "/dados/icp listou {:?}", icp);
-        return Err("o diretorio das redes do IC nao tem so as redes");
+        return Err("o diretorio do IC nao tem so as redes e os modulos");
+    }
+    let modulos = conteudo("/dados/icp/modulos")?;
+    let esperado_em_modulos = [
+        (
+            alloc::string::String::from("implantavel-a.wasm"),
+            Tipo::Arquivo,
+        ),
+        (
+            alloc::string::String::from("implantavel-b.wasm"),
+            Tipo::Arquivo,
+        ),
+    ];
+    if modulos != esperado_em_modulos {
+        crate::log_error!("teste", "/dados/icp/modulos listou {:?}", modulos);
+        return Err("o diretorio dos modulos nao tem so os dois modulos");
     }
 
     // E `/programas` tem uma arquitetura por diretório, as duas, e nada mais:

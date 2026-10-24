@@ -32,6 +32,13 @@
 //! raiz da PocketIC — menos a `raiz-errada`, com a da rede principal do IC,
 //! que é de outra rede. O gate decide um destino só, `tcp:10.0.2.100:4943`,
 //! para todas: os nomes são do TLS e do programa, e não autorizam nada.
+//!
+//! # Os módulos da gestão de canister
+//!
+//! `/dados/icp/modulos/` ([`modulos`]): dois módulos escritos à mão, o A e o
+//! B, que o programa `implantacao` instala num canister que ele mesmo cria
+//! na bancada (ICP-4e). Cada um responde a versão dele e conta numa memória
+//! estável, que o upgrade guarda e o reinstall apaga.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -353,6 +360,222 @@ impl Drop for Bancada {
     }
 }
 
+/// Os módulos da gestão de canister (ICP-4e), onde moram na imagem, e a
+/// versão de cada um: o que o programa `implantacao` instala num canister
+/// novo, o A, e o que põe no lugar dele em pedaços, o B. O programa tem os
+/// mesmos caminhos.
+pub(crate) const MODULOS: [(&str, &str); 2] = [
+    ("dados/icp/modulos/implantavel-a.wasm", "A"),
+    ("dados/icp/modulos/implantavel-b.wasm", "B"),
+];
+
+/// Os módulos da gestão de canister, com o caminho de cada um na imagem —
+/// ver [`modulo_estavel`].
+pub(crate) fn modulos() -> Vec<(String, Vec<u8>)> {
+    MODULOS
+        .iter()
+        .map(|(caminho, versao)| (caminho.to_string(), modulo_estavel(versao)))
+        .collect()
+}
+
+/// O LEB128 sem sinal de `n`.
+fn leb(n: usize) -> Vec<u8> {
+    let (bytes, tamanho) = web3::icp::resumo::leb128(n as u64);
+    bytes[..tamanho].to_vec()
+}
+
+/// O LEB128 com sinal de `n`.
+fn sleb(mut n: i64) -> Vec<u8> {
+    let mut saida = Vec::new();
+    loop {
+        let byte = (n & 0x7f) as u8;
+        n >>= 7;
+        let fim = (n == 0 && byte & 0x40 == 0) || (n == -1 && byte & 0x40 != 0);
+        saida.push(if fim { byte } else { byte | 0x80 });
+        if fim {
+            return saida;
+        }
+    }
+}
+
+/// Um módulo da gestão de canister, escrito à mão como o do canister da
+/// bancada (`bancada/icp.py`, `modulo`), com duas funções e nada importado
+/// além do `ic0`:
+///
+/// - `versao`, uma consulta: responde `(text)` com a `versao` do módulo;
+/// - `contar`, uma chamada: soma um ao contador de 64 bits no começo da
+///   memória estável — que ganha a primeira página na primeira vez — e
+///   responde `(nat64)` com ele.
+///
+/// O upgrade guarda a memória estável, e o reinstall a apaga. Depois de um
+/// upgrade, o `contar` continua de onde estava; depois de um reinstall,
+/// recomeça do 1. A versão diz que módulo o canister roda.
+fn modulo_estavel(versao: &str) -> Vec<u8> {
+    fn vetor(itens: &[Vec<u8>]) -> Vec<u8> {
+        let mut v = leb(itens.len());
+        for item in itens {
+            v.extend_from_slice(item);
+        }
+        v
+    }
+    fn nome(s: &str) -> Vec<u8> {
+        [leb(s.len()), s.as_bytes().to_vec()].concat()
+    }
+    fn secao(numero: u8, conteudo: &[u8]) -> Vec<u8> {
+        [vec![numero], leb(conteudo.len()), conteudo.to_vec()].concat()
+    }
+    fn tipo(params: &[u8], resultados: &[u8]) -> Vec<u8> {
+        [
+            vec![0x60],
+            leb(params.len()),
+            params.to_vec(),
+            leb(resultados.len()),
+            resultados.to_vec(),
+        ]
+        .concat()
+    }
+    fn i32_const(n: usize) -> Vec<u8> {
+        [vec![0x41], sleb(n as i64)].concat()
+    }
+    fn i64_const(n: usize) -> Vec<u8> {
+        [vec![0x42], sleb(n as i64)].concat()
+    }
+    fn chama(f: usize) -> Vec<u8> {
+        [vec![0x10], leb(f)].concat()
+    }
+
+    const I32: u8 = 0x7f;
+    const I64: u8 = 0x7e;
+    // Os tipos: 0 () -> (); 1 (i32 i32) -> (); 2 () -> i64; 3 (i64) -> i64;
+    // 4 (i64 i64 i64) -> ().
+    let tipos = vetor(&[
+        tipo(&[], &[]),
+        tipo(&[I32, I32], &[]),
+        tipo(&[], &[I64]),
+        tipo(&[I64], &[I64]),
+        tipo(&[I64; 3], &[]),
+    ]);
+    // As importações, que são as funções 0 a 5.
+    let importacoes = [
+        ("msg_reply_data_append", 1),
+        ("msg_reply", 0),
+        ("stable64_size", 2),
+        ("stable64_grow", 3),
+        ("stable64_read", 4),
+        ("stable64_write", 4),
+    ];
+    let (anexar, responder, tamanho, crescer, ler, gravar) = (0, 1, 2, 3, 4, 5);
+    let importa = vetor(
+        &importacoes
+            .iter()
+            .map(|(n, t)| [nome("ic0"), nome(n), vec![0x00], leb(*t)].concat())
+            .collect::<Vec<_>>(),
+    );
+    // Os dados: a resposta da versão em 0, e o começo da do contador em 64,
+    // com os 8 bytes do contador logo depois.
+    let texto = [
+        b"DIDL\x00\x01\x71".to_vec(),
+        leb(versao.len()),
+        versao.as_bytes().to_vec(),
+    ]
+    .concat();
+    let contador = b"DIDL\x00\x01\x78".to_vec();
+    let (em_texto, em_contador) = (0, 64);
+    let numero = em_contador + contador.len();
+    let corpo_da_versao = [
+        i32_const(em_texto),
+        i32_const(texto.len()),
+        chama(anexar),
+        chama(responder),
+    ]
+    .concat();
+    let corpo_do_contar = [
+        // A primeira página da memória estável, se ela não tem nenhuma.
+        chama(tamanho),
+        vec![0x50],       // i64.eqz
+        vec![0x04, 0x40], // if
+        i64_const(1),
+        chama(crescer),
+        vec![0x1a], // drop
+        vec![0x0b], // end
+        // O contador, da memória estável para a comum.
+        i64_const(numero),
+        i64_const(0),
+        i64_const(8),
+        chama(ler),
+        // Mais um.
+        i32_const(numero),
+        i32_const(numero),
+        vec![0x29, 0x00, 0x00], // i64.load
+        i64_const(1),
+        vec![0x7c],             // i64.add
+        vec![0x37, 0x00, 0x00], // i64.store
+        // De volta à memória estável.
+        i64_const(0),
+        i64_const(numero),
+        i64_const(8),
+        chama(gravar),
+        // E a resposta, com ele.
+        i32_const(em_contador),
+        i32_const(contador.len() + 8),
+        chama(anexar),
+        chama(responder),
+    ]
+    .concat();
+    let corpos = [corpo_da_versao, corpo_do_contar];
+    let funcoes = vetor(&corpos.iter().map(|_| leb(0)).collect::<Vec<_>>());
+    let memoria = vetor(&[vec![0x00, 0x01]]);
+    let primeira = importacoes.len();
+    let exporta = vetor(&[
+        [nome("canister_query versao"), vec![0x00], leb(primeira)].concat(),
+        [
+            nome("canister_update contar"),
+            vec![0x00],
+            leb(primeira + 1),
+        ]
+        .concat(),
+    ]);
+    // Cada corpo sem locais: o zero, as instruções e o fim.
+    let codigo = vetor(
+        &corpos
+            .iter()
+            .map(|c| {
+                let corpo = [vec![0x00], c.clone(), vec![0x0b]].concat();
+                [leb(corpo.len()), corpo].concat()
+            })
+            .collect::<Vec<_>>(),
+    );
+    let dados = vetor(&[
+        [
+            vec![0x00],
+            i32_const(em_texto),
+            vec![0x0b],
+            leb(texto.len()),
+            texto,
+        ]
+        .concat(),
+        [
+            vec![0x00],
+            i32_const(em_contador),
+            vec![0x0b],
+            leb(contador.len()),
+            contador,
+        ]
+        .concat(),
+    ]);
+    [
+        b"\x00asm\x01\x00\x00\x00".to_vec(),
+        secao(1, &tipos),
+        secao(2, &importa),
+        secao(3, &funcoes),
+        secao(5, &memoria),
+        secao(7, &exporta),
+        secao(10, &codigo),
+        secao(11, &dados),
+    ]
+    .concat()
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -404,5 +627,48 @@ mod testes {
         assert!(blocos.iter().all(|b| b.tag() == "CERTIFICATE"));
         // Cabe no teto do programa, que lê 16 KiB.
         assert!(pem.len() <= 16 * 1024);
+    }
+
+    /// Os módulos da gestão de canister são os bytes que a PocketIC da
+    /// [`VERSAO`] rodou na inspeção do ICP-4e: instalou o A, contou na
+    /// memória estável, trocou pelo B em três pedaços e continuou contando.
+    /// O SHA-256 de cada um é o hash que o `canister_status` diz do módulo
+    /// instalado, e a suíte do kernel tem os mesmos.
+    #[test]
+    fn os_modulos_da_gestao() {
+        let modulos = modulos();
+        assert_eq!(modulos.len(), 2);
+        let resumos = [
+            "9b6cc41ff390673f7c41030d1764a945419bff2dd7260bf37e8cb6a4e82d6590",
+            "4b80bb110309a6ba48366c96d3350bcf40688754e6a8bfc02f28ee9dc887d317",
+        ];
+        for ((caminho, bytes), esperado) in modulos.iter().zip(resumos) {
+            assert!(caminho.starts_with("dados/icp/modulos/"), "{caminho}");
+            assert!(bytes.starts_with(b"\x00asm\x01\x00\x00\x00"));
+            assert_eq!(resumo(bytes), esperado, "{caminho}");
+            // Num `fs.read` só, de 4 KiB, e em três pedaços de 128 bytes.
+            assert!(bytes.len() <= 4096 && bytes.len().div_ceil(128) == 3);
+        }
+        // Os dois diferem só na versão, um byte da resposta dela.
+        let (a, b) = (&modulos[0].1, &modulos[1].1);
+        assert_eq!(a.len(), b.len());
+        let diferentes: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        assert_eq!(diferentes.len(), 1);
+        assert_eq!((a[diferentes[0]], b[diferentes[0]]), (b'A', b'B'));
+    }
+
+    /// O LEB128 com sinal, nas bordas de um byte — as constantes do
+    /// módulo.
+    #[test]
+    fn o_leb128_com_sinal() {
+        assert_eq!(sleb(0), [0x00]);
+        assert_eq!(sleb(63), [0x3f]);
+        assert_eq!(sleb(64), [0xc0, 0x00]);
+        assert_eq!(sleb(71), [0xc7, 0x00]);
+        assert_eq!(sleb(-1), [0x7f]);
+        assert_eq!(sleb(-64), [0x40]);
+        assert_eq!(sleb(-65), [0xbf, 0x7f]);
+        assert_eq!(leb(127), [0x7f]);
+        assert_eq!(leb(128), [0x80, 0x01]);
     }
 }
