@@ -35,8 +35,8 @@
 //!
 //! # O que não há aqui
 //!
-//! O canister de gerenciamento (`aaaaa-aa`), que pede outro canister
-//! efetivo no caminho; delegações; outra chave que não Ed25519 em DER.
+//! Delegações; outra chave que não Ed25519 em DER. O canister de
+//! gerenciamento vai pela [`chamar_ao_gerenciamento`], com o efetivo.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -412,6 +412,106 @@ pub fn acompanhar<T: Transporte, A: Assinador>(
     )
     .map_err(|e| Erro::Certificado(Etapa::Situacao, e))?;
     andamento(&cert, id, a.tempo_ns).map_err(|e| Erro::Situacao(Etapa::Situacao, e))
+}
+
+/// Chama `metodo` do canister de gerenciamento (`aaaaa-aa`) com `arg`
+/// (Candid) — assinado por `assinador`, ou do anônimo sem ele — pelo
+/// canister `efetivo`: o que o método gerencia, o `canister_id` do
+/// argumento (**especificação**, *effective canister id*).
+///
+/// O pedido vai com o canister de gerenciamento; o caminho, as faixas e a
+/// conferência do certificado, pelo efetivo — é a sub-rede dele que
+/// executa o método e certifica o desfecho. A [`Atualizacao`] volta com o
+/// canister efetivo: é por ele que [`acompanhar`] lê a situação.
+///
+/// São os passos de [`chamar`], com o canister separado em dois; a
+/// [`chamar`] fica como está.
+#[allow(clippy::too_many_arguments)]
+pub fn chamar_ao_gerenciamento<T: Transporte, A: Assinador>(
+    t: &mut T,
+    assinador: Option<&mut A>,
+    raiz: &Raiz,
+    efetivo: &Principal,
+    metodo: &str,
+    arg: &[u8],
+    agora_ns: u64,
+    nonce: &[u8],
+) -> Result<Atualizacao, Erro<T::Erro, A::Erro>> {
+    let vencimento_ns = agora_ns.saturating_add(VALIDADE_DO_PEDIDO_NS);
+
+    // 1. As faixas: de que sub-rede o canister efetivo é.
+    let caminhos: [&[&[u8]]; 1] = [&[b"subnet"]];
+    let leitura = LeituraDeEstado {
+        caminhos: &caminhos,
+        remetente: Principal::ANONIMO,
+        vencimento_ns,
+    };
+    let envelope = leitura.envelope().map_err(Erro::Pedido)?;
+    let (status, corpo) = t
+        .post(&caminho(efetivo, "read_state"), &envelope)
+        .map_err(|e| Erro::Transporte(Etapa::Faixas, e))?;
+    if status != 200 {
+        return Err(Erro::Http(Etapa::Faixas, status, trecho(&corpo)));
+    }
+    let bytes = certificado_da_leitura(&corpo).ok_or(Erro::LeituraDeEstado(Etapa::Faixas))?;
+    let cert = Certificado::ler(bytes).map_err(|e| Erro::Certificado(Etapa::Faixas, e))?;
+    let faixas = certificado::verificar(&cert, raiz, efetivo, agora_ns)
+        .map_err(|e| Erro::Certificado(Etapa::Faixas, e))?;
+
+    // 2. A chamada ao canister de gerenciamento, pelo caminho do efetivo.
+    let remetente = remetente(&assinador);
+    let chamada = Chamada {
+        canister: Principal::GERENCIAMENTO,
+        metodo,
+        arg,
+        remetente,
+        vencimento_ns,
+        nonce: Some(nonce),
+    };
+    let id_do_pedido = chamada.id().map_err(Erro::Pedido)?;
+    let assinado =
+        autenticar(assinador, &id_do_pedido).map_err(|e| Erro::Assinatura(Etapa::Chamada, e))?;
+    let autenticacao = assinado.as_ref().map(|(chave, assinatura)| Autenticacao {
+        chave_der: chave,
+        assinatura,
+    });
+    let envelope = chamada
+        .envelope(autenticacao.as_ref())
+        .map_err(Erro::Pedido)?;
+    let (status, corpo) = t
+        .post(&caminho_v4(efetivo), &envelope)
+        .map_err(|e| Erro::Transporte(Etapa::Chamada, e))?;
+    let andamento = match status {
+        202 => Andamento::Pendente("accepted"),
+        200 => match situacao::ler_corpo(&corpo).map_err(Erro::Corpo)? {
+            Corpo::RecusaNaoReplicada {
+                codigo,
+                mensagem,
+                erro,
+            } => Andamento::RecusaNaoReplicada {
+                codigo,
+                mensagem,
+                erro,
+            },
+            Corpo::Certificada(bytes) => {
+                let cert =
+                    Certificado::ler(bytes).map_err(|e| Erro::Certificado(Etapa::Chamada, e))?;
+                let a = certificado::verificar_na_sub_rede(&cert, raiz, efetivo, agora_ns, &faixas)
+                    .map_err(|e| Erro::Certificado(Etapa::Chamada, e))?;
+                andamento(&cert, &id_do_pedido, a.tempo_ns)
+                    .map_err(|e| Erro::Situacao(Etapa::Chamada, e))?
+            }
+        },
+        outro => return Err(Erro::Http(Etapa::Chamada, outro, trecho(&corpo))),
+    };
+    Ok(Atualizacao {
+        canister: *efetivo,
+        id_do_pedido,
+        remetente,
+        faixas,
+        andamento,
+        validade_da_ultima_leitura_ns: 0,
+    })
 }
 
 #[cfg(test)]

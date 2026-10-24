@@ -16,12 +16,17 @@
 //! - [`icrc1`]: o ICRC-1 de um ledger — a conta, a transferência, o
 //!   resultado dela e o saldo;
 //! - [`cmc`]: o CMC — a cunhagem de cycles com ICP;
+//! - [`ciclos`]: o ledger de cycles — a criação de um canister pago com
+//!   cycles, e a carga de cycles num canister;
+//! - [`gerenciamento`]: o canister de gerenciamento — instalar um módulo,
+//!   inteiro ou em pedaços, e ler o estado de um canister;
 //! - [`situacao`]: a situação de uma chamada — o corpo da chamada
 //!   síncrona e o `request_status` de um certificado;
 //! - [`agente`]: o agente síncrono da consulta — do anônimo, ou assinada
 //!   por quem tem chave —, sobre um transporte de quem chama;
 //! - [`atualizacao`]: a chamada de atualização verificada — do anônimo,
-//!   ou assinada por quem tem chave —, e o acompanhamento dela;
+//!   ou assinada por quem tem chave —, e o acompanhamento dela; e a
+//!   chamada ao canister de gerenciamento, pelo canister efetivo;
 //! - [`registro`]: as redes em que se confia — `/dados/icp/redes`.
 //!
 //! # De onde vem o que se sabe do protocolo
@@ -37,7 +42,8 @@
 //!   `ic-transport-types` 0.49.2, `ic-certification` e
 //!   `ic-certificate-verification` 4.0.0, `ic_principal` 0.1.5, `candid`
 //!   0.10.38, `ic-ed25519` 0.6.0 —, onde a especificação deixa a escolha ao
-//!   cliente; e, do ICRC-1, o `icrc-ledger-types` 0.2.0;
+//!   cliente; do ICRC-1, o `icrc-ledger-types` 0.2.0; e, do canister de
+//!   gerenciamento, o `ic-management-canister-types` 0.11.0;
 //! - **oráculo**: os testes do hospedeiro conferem cada peça contra a
 //!   oficial, nos dois sentidos, e os vetores de exemplo da especificação
 //!   (a árvore de hash e o id do pedido) estão nos casos.
@@ -61,8 +67,10 @@ pub mod atualizacao;
 pub mod candid;
 pub mod cbor;
 pub mod certificado;
+pub mod ciclos;
 pub mod cmc;
 pub mod consulta;
+pub mod gerenciamento;
 pub mod icrc1;
 pub mod pedido;
 pub mod principal;

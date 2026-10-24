@@ -528,3 +528,181 @@ fn o_ic_de_mentira_confere_a_assinatura() {
     .unwrap_err();
     assert!(matches!(e, Erro::Http(Etapa::Chamada, 403, _)));
 }
+
+/// O IC de mentira para o canister de gerenciamento: confere que cada
+/// chamada vai com `canister_id = aaaaa-aa` e o método pedido, e que nenhum
+/// caminho é o do canister de gerenciamento; e repassa ao de chamadas, que
+/// confere o caminho pelo canister dele — o efetivo — e a assinatura do id
+/// que o `ic-transport-types` calcula do envelope.
+struct AoGerenciamento {
+    ic: IcDeChamadas,
+    metodo: &'static str,
+}
+
+impl Transporte for AoGerenciamento {
+    type Erro = &'static str;
+
+    fn post(&mut self, rota: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), &'static str> {
+        let envelope: Envelope<'_> = serde_cbor::from_slice(corpo).map_err(|_| "cbor")?;
+        if let EnvelopeContent::Call {
+            canister_id,
+            method_name,
+            ..
+        } = &*envelope.content
+        {
+            if *canister_id != candid::Principal::management_canister() {
+                return Err("o pedido nao vai ao canister de gerenciamento");
+            }
+            if method_name != self.metodo {
+                return Err("outro metodo");
+            }
+        }
+        if rota.contains("/aaaaa-aa/") {
+            return Err("o caminho pelo canister de gerenciamento");
+        }
+        self.ic.post(rota, corpo)
+    }
+}
+
+fn gerenciar_com(
+    ic: &mut AoGerenciamento,
+    chave: Option<&mut ChaveDeTeste>,
+) -> Result<Atualizacao, Erro<&'static str, &'static str>> {
+    let raiz = ic.ic.ic.raiz_de_confianca();
+    let efetivo = ic.ic.canister;
+    let metodo = ic.metodo;
+    chamar_ao_gerenciamento(
+        ic,
+        chave,
+        &raiz,
+        &efetivo,
+        metodo,
+        b"DIDL\x00\x00",
+        AGORA_NS,
+        &[7; 16],
+    )
+}
+
+fn ao_gerenciamento(chamada: Responde) -> AoGerenciamento {
+    AoGerenciamento {
+        ic: IcDeChamadas::novo(chamada),
+        metodo: "install_code",
+    }
+}
+
+/// A chamada ao canister de gerenciamento vai pelo efetivo: as faixas e a
+/// chamada pelo caminho dele, o pedido com `aaaaa-aa`, o id assinado como o
+/// do `ic-transport-types`, e o certificado conferido na sub-rede dele. A
+/// `Atualizacao` volta com o efetivo.
+#[test]
+fn a_chamada_ao_gerenciamento_vai_pelo_efetivo() {
+    let mut ic = ao_gerenciamento(Responde::Certificado(respondida(b"DIDL\x00\x00")));
+    let mut chave = ChaveDeTeste::nova(21);
+    let a = gerenciar_com(&mut ic, Some(&mut chave)).unwrap();
+    let efetivo = ic.ic.canister;
+    assert_eq!(a.canister, efetivo);
+    assert_eq!(
+        a.andamento,
+        Andamento::Certificado {
+            desfecho: Final::Respondida(b"DIDL\x00\x00".to_vec()),
+            tempo_ns: AGORA_NS,
+        }
+    );
+    assert_eq!(a.remetente, chave.principal());
+    assert_eq!(chave.assinou, 1);
+    assert!(a.faixas.delegada);
+    assert_eq!(ic.ic.pedidos.len(), 2);
+    assert_eq!(ic.ic.pedidos[0].0, caminho(&efetivo, "read_state"));
+    assert_eq!(
+        ic.ic.pedidos[1].0,
+        std::format!("/api/v4/canister/{}/call", efetivo.texto())
+    );
+    assert_eq!(ic.ic.pedidos[1].2, a.id_do_pedido);
+    // O id do mesmo pedido mandado ao canister alvo seria outro.
+    let ao_alvo = EnvelopeContent::Call {
+        nonce: Some(std::vec![7; 16]),
+        ingress_expiry: AGORA_NS + crate::icp::VALIDADE_DO_PEDIDO_NS,
+        sender: candid::Principal::from_slice(a.remetente.bytes()),
+        canister_id: candid::Principal::from_slice(efetivo.bytes()),
+        method_name: String::from("install_code"),
+        arg: b"DIDL\x00\x00".to_vec(),
+        sender_info: None,
+    };
+    assert_ne!(*ao_alvo.to_request_id(), a.id_do_pedido);
+}
+
+/// O efetivo na sub-rede raiz: as faixas pela leitura à parte, e o
+/// certificado da raiz, sem delegação.
+#[test]
+fn o_efetivo_na_sub_rede_raiz() {
+    let mut ic = AoGerenciamento {
+        ic: IcDeChamadas::novo(Responde::Certificado(respondida(b"DIDL\x00\x00"))).na_raiz(),
+        metodo: "canister_status",
+    };
+    let a = gerenciar_com(&mut ic, Some(&mut ChaveDeTeste::nova(22))).unwrap();
+    assert!(!a.faixas.delegada);
+    assert_eq!(a.canister, ic.ic.ic.canister_da_raiz());
+    assert!(matches!(a.andamento, Andamento::Certificado { .. }));
+}
+
+/// A 202: a situação lida pela `acompanhar` de sempre, pelo efetivo, cada
+/// leitura assinada de novo.
+#[test]
+fn a_situacao_do_gerenciamento_pelo_efetivo() {
+    let mut ic = ao_gerenciamento(Responde::Aceita);
+    ic.ic
+        .situacoes
+        .extend([status("processing"), respondida(b"DIDL\x00\x00")]);
+    let mut chave = ChaveDeTeste::nova(23);
+    let mut a = gerenciar_com(&mut ic, Some(&mut chave)).unwrap();
+    assert_eq!(a.andamento, Andamento::Pendente("accepted"));
+    let raiz = ic.ic.ic.raiz_de_confianca();
+    assert_eq!(
+        acompanhar(&mut ic, Some(&mut chave), &raiz, &mut a, AGORA_NS).unwrap(),
+        Andamento::Pendente("processing")
+    );
+    assert!(matches!(
+        acompanhar(&mut ic, Some(&mut chave), &raiz, &mut a, AGORA_NS).unwrap(),
+        Andamento::Certificado { .. }
+    ));
+    let efetivo = ic.ic.canister;
+    assert!(
+        ic.ic.pedidos[2..]
+            .iter()
+            .all(|(rota, _, _)| *rota == caminho(&efetivo, "read_state"))
+    );
+    assert_eq!(chave.assinou, 3);
+}
+
+/// O certificado de outra sub-rede que a do efetivo é recusado.
+#[test]
+fn o_gerenciamento_conferido_na_sub_rede_do_efetivo() {
+    let mut ic = ao_gerenciamento(Responde::DaRaiz);
+    assert_eq!(
+        gerenciar_com(&mut ic, Some(&mut ChaveDeTeste::nova(24))).unwrap_err(),
+        Erro::Certificado(Etapa::Chamada, certificado::Erro::OutraSubRede)
+    );
+}
+
+/// Quem não controla o canister ouve a recusa da entrada, sem
+/// certificado: dita como recusa não replicada, e não como desfecho.
+#[test]
+fn a_recusa_nao_replicada_do_gerenciamento() {
+    let mut ic = ao_gerenciamento(Responde::NaoReplicada);
+    let a = gerenciar_com(&mut ic, Some(&mut ChaveDeTeste::nova(25))).unwrap();
+    assert!(matches!(a.andamento, Andamento::RecusaNaoReplicada { .. }));
+}
+
+/// A assinatura recusada não manda nada ao canister de gerenciamento: só
+/// as faixas, do anônimo, saíram.
+#[test]
+fn a_assinatura_recusada_nao_manda_nada_ao_gerenciamento() {
+    let mut ic = ao_gerenciamento(Responde::Certificado(respondida(b"DIDL\x00\x00")));
+    let mut chave = ChaveDeTeste::nova(26);
+    chave.recusar = true;
+    assert_eq!(
+        gerenciar_com(&mut ic, Some(&mut chave)).unwrap_err(),
+        Erro::Assinatura(Etapa::Chamada, "DENY_RESOURCE")
+    );
+    assert_eq!(ic.ic.pedidos.len(), 1);
+}

@@ -1174,6 +1174,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ic-management-canister-types"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3e3162bdfbdbc6ca3b4bfa8145f9ba19cddaf3eb8d1af8dc7be6a39557b76c2"
+dependencies = [
+ "candid",
+ "serde",
+ "serde_bytes",
+]
+
+[[package]]
 name = "ic-transport-types"
 version = "0.49.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,6 +2494,7 @@ dependencies = [
  "ic-certificate-verification",
  "ic-certification 4.0.0",
  "ic-ed25519",
+ "ic-management-canister-types",
  "ic-transport-types",
  "ic-verify-bls-signature",
  "ic_principal",

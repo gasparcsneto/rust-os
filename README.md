@@ -556,10 +556,16 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── cmc.rs        o CMC: a conta de depósito de quem cunha, o memo `MINT` e o `notify_mint_cycles`
     ├── cmc/
     │   └── testes.rs  contra a interface do CMC, declarada com o `candid`
+    ├── ciclos.rs     o ledger de cycles: a criação de um canister pago com cycles e a carga de cycles num canister, e o canister, o bloco ou a recusa pelo nome da interface
+    ├── ciclos/
+    │   └── testes.rs  contra a interface do ledger de cycles, declarada com o `candid`
+    ├── gerenciamento.rs  o canister de gerenciamento: instalar um módulo, inteiro ou em pedaços, e ler o estado de um canister — o que não tem a forma da interface é recusado
+    ├── gerenciamento/
+    │   └── testes.rs  contra o `ic-management-canister-types`, nos dois sentidos
     ├── agente.rs     a consulta ponta a ponta — do anônimo, ou assinada por quem tem chave — sobre um transporte de quem chama: nada se entrega antes da verificação
     ├── agente/
     │   └── testes.rs  contra um IC de mentira, os modos adversários de quem está no caminho, e a medida da consulta no hospedeiro
-    ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura outro pedido, assinado de novo — nada se entrega antes da verificação
+    ├── atualizacao.rs  a chamada de atualização: as faixas, a chamada pela `/api/v4` e a situação enquanto pendente, cada leitura outro pedido, assinado de novo — e a do canister de gerenciamento, pelo canister efetivo; nada se entrega antes da verificação
     ├── atualizacao/
     │   └── testes.rs  contra um IC de mentira: o envelope e o id pelo `ic-transport-types`, a assinatura pelo `ic-ed25519`, e as recusas
     ├── situacao.rs   o `request_status` de um certificado: recebida, processando, respondida, recusada, acabada
