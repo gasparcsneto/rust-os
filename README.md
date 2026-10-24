@@ -6275,8 +6275,10 @@ entregue. O ICP-4a deu ao TLS do programa as cadeias das autoridades
 públicas — a P-384 e o RSA, só na verificação —, que a rede principal usa.
 O ICP-4b liga a rede principal, só para ler — em [A rede
 principal](#a-rede-principal). O ICP-4c dá à consulta a chave do ICP-3 — em
-[A consulta assinada](#a-consulta-assinada). O desenho inteiro, as tabelas
-e o que fica de fora estão em [`docs/ICP.md`](docs/ICP.md).
+[A consulta assinada](#a-consulta-assinada). O ICP-4d move valor com a
+chave, na bancada — em [O valor na bancada](#o-valor-na-bancada). O desenho
+inteiro, as tabelas e o que fica de fora estão em
+[`docs/ICP.md`](docs/ICP.md).
 
 Nada disso é do kernel. O IC é um protocolo de programa, como o TLS e o
 HTTP: o kernel não sabe o que é um canister, um Principal, o Candid ou um
@@ -6617,6 +6619,36 @@ replicada e pela chamada; sem `key.sign`; a prova adulterada em cada modo
 da bancada; duas consultas assinadas ao mesmo tempo com a mesma chave; e
 a chave anulada no meio. Ver [A consulta assinada e a
 replicada](docs/ICP.md#a-consulta-assinada-e-a-replicada-icp-4c).
+
+### O valor na bancada
+
+O ICP-4d move valor no IC com a chave de uma identidade do Duke, na
+bancada: o saldo, a transferência de ICP pelo ICRC-1 e ICP convertido em
+cycles pelo CMC, cada resposta verificada antes de chegar ao programa. O
+kernel, a política, o gate, o `key.sign`, o domínio e o TLS não mudaram, e
+nenhuma decisão de arquitetura é nova:
+
+- **o valor não é recurso do Duke**: o kernel não sabe o que assina, e a
+  permissão `key.sign` sobre `chave:<nome>` já cobria qualquer pedido do
+  IC. O controle é por separação — que chaves cada papel usa, que ações
+  cada programa declara —, e não por um limite, que obrigaria o kernel a
+  interpretar o IC;
+- **a transferência é uma chamada do ICP-3**, e o saldo, uma consulta do
+  ICP-1: o `web3` escreve agora o Candid composto, com o tipo dado, e lê o
+  ICRC-1 e o CMC pelos nomes — o que não tem a forma deles não vira bloco
+  nem saldo;
+- **a repetição não executa duas vezes**: a `carteira` sempre põe o
+  `created_at_time`, e repete com os mesmos argumentos, assinados de novo —
+  o ledger responde `Duplicate` com o bloco da primeira. Uma prova
+  adulterada não vira bloco: a repetição mostra o que houve.
+
+Na suíte, o saldo e a transferência assinada entre duas chaves do Duke; a
+repetição pela rede honesta e pela que responde 202; a prova adulterada em
+cada lugar; sem `key.sign`, nada se transfere, nem do anônimo no lugar; as
+recusas do ledger; ICP em cycles pelo CMC, e a notificação repetida; a
+mesma transferência por dois processos, que executa uma vez; e a chave
+anulada no meio. Ver [O valor na
+bancada](docs/ICP.md#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d).
 
 ## Vários agentes
 
@@ -9072,9 +9104,13 @@ padronizado.
       principal, só para ler, com a fumaça real (ver [A rede
       principal](#a-rede-principal)); e o ICP-4c — a consulta assinada pela
       chave da identidade, e a replicada (ver [A consulta
-      assinada](#a-consulta-assinada)). As delegações, a custódia no TPM, os
-      *cycles*, a rede principal com chave e o resto ficam para os
-      incrementos seguintes — cada um, uma decisão nova.
+      assinada](#a-consulta-assinada)); e o ICP-4d — o valor na bancada: o
+      saldo, a transferência do ICRC-1 que a repetição não executa duas
+      vezes, e ICP em cycles pelo CMC (ver [O valor na
+      bancada](#o-valor-na-bancada)). A gestão de canister, as delegações, a
+      custódia no TPM, a rede principal com chave e com valor e o resto
+      ficam para os incrementos seguintes — os que pedem, cada um, uma
+      decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

@@ -112,8 +112,8 @@ fn o_saldo_e_o_do_oficial() {
         assert_eq!(dele.subaccount, c.subconta);
         assert_eq!(lidos(&Encode!(&dele).unwrap()), lidos(&bytes));
     }
-    // A resposta, um `nat` de até 128 bits: o anônimo da bancada tem 2^127
-    // cycles.
+    // A resposta, um `nat` de até 128 bits: o anônimo da bancada tem
+    // 2^127 - 1 cycles.
     for n in [0u128, 1, 10_000, u64::MAX.into(), 1 << 127, u128::MAX] {
         assert_eq!(ler_saldo(&Encode!(&Nat::from(n)).unwrap()), Ok(n));
     }

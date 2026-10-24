@@ -1,4 +1,4 @@
-# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b e ICP-4c)
+# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b, ICP-4c e ICP-4d)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
@@ -11,7 +11,10 @@ O ICP-4b liga a rede principal, só para ler — em [A rede
 principal](#a-rede-principal-icp-4b). O ICP-4c dá à consulta a chave do
 ICP-3 — a consulta assinada — e o caminho do consenso — a replicada —, em
 [A consulta assinada e a
-replicada](#a-consulta-assinada-e-a-replicada-icp-4c). O que ainda não
+replicada](#a-consulta-assinada-e-a-replicada-icp-4c). O ICP-4d move valor
+com a chave, na bancada — o saldo, a transferência do ICRC-1 e ICP em
+cycles pelo CMC —, em [O valor na
+bancada](#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d). O que ainda não
 existe está em *O que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
@@ -1448,6 +1451,278 @@ mesmo id —, e quem o confere são os testes do hospedeiro: o IC de mentira
 recusa a consulta sem ele, e o id é conferido contra o do
 `ic-transport-types` com o nonce.
 
+## O valor na bancada: o ICRC-1 e o CMC (ICP-4d)
+
+O ICP-4d move valor no IC com a chave de uma identidade do Duke — uma
+pessoa, um agente —, na bancada: o saldo de uma conta, a transferência de
+ICP pelo ICRC-1, a repetição que não executa duas vezes, e ICP convertido
+em cycles pelo CMC. Cada resposta é verificada antes de chegar ao
+programa. É tudo `web3`, programa e bancada: o kernel, a política, o gate,
+o `key.sign`, o domínio `ic-request`, as identidades, as permissões, o TLS
+e o DNS não mudaram uma linha, e nenhuma decisão de arquitetura é nova —
+a transferência é uma chamada do ICP-3, o saldo é uma consulta do ICP-1,
+e o kernel não sabe o que assina.
+
+```
+pessoa / agente ─► identidade do Duke ─► sessão ─► processo ─► manifesto + papel
+  ─► gate ─► chave:<nome> ─► reconfirmação ─► auditoria (e journal) ─► assinatura
+  ─► programa carteira ─► Principal do IC ─► icrc1_transfer ─► certificado verificado
+  ─► o bloco, ou a recusa do ledger ─► audit.declare (ancorada na decisão) ─► NSF
+```
+
+### O valor não é recurso do Duke
+
+O kernel não distingue uma transferência de uma consulta, e não deve: a
+permissão `key.sign` sobre `chave:<nome>` já cobria, desde o ICP-3,
+qualquer pedido do IC que um programa monte — uma transferência inclusive.
+O ICP-4d não amplia a autoridade de ninguém. O controle do valor é por
+separação, como o roteiro decidiu:
+
+- **as chaves**: a política diz que chaves cada papel usa
+  (`recurso <papel> key.sign chave:<nome>`); uma chave com fundos é uma
+  chave com finalidade;
+- **os programas**: o manifesto diz que ações cada programa exerce; o
+  código de fora da imagem só roda com o selo de um editor confiado;
+- **os papéis**: quem tem a chave.
+
+Um limite de valor ou de destino no Duke obrigaria o kernel a interpretar o
+IC, e não existe. A auditoria guarda a decisão de cada assinatura — a
+chave, o domínio e o resumo, que é o id do pedido — e a alegação do
+programa; o valor e o destino estão no pedido assinado e no bloco do
+ledger.
+
+### O Candid composto
+
+O argumento de um ledger é um `record` com `opt`, `vec` e outros
+`record`: o `web3` já lia tudo isso (ICP-1), e agora escreve, com o tipo
+dado — `candid::codificar_com_tipos`, ao lado da `codificar`, que não
+mudou. Um `Tipo` em árvore diz o que não se escreve sozinho — um `opt`
+vazio, um `vec` vazio, o caso de um `variant` —; os campos vão pelo id do
+nome (`id_do_campo`, o `idl_hash` da especificação), em ordem crescente;
+cada composto entra uma vez na tabela; e o que a leitura daqui recusaria —
+a profundidade, os argumentos, a tabela, os campos e os valores além dos
+tetos dela — também não se escreve. Na leitura, `Valor::campo` e
+`Valor::caso` acham um campo ou um caso pelo nome.
+
+### O ICRC-1 e o CMC
+
+`web3::icp::icrc1` escreve o argumento de `icrc1_transfer` (`TransferArg`)
+e de `icrc1_balance_of` (`Account`), e lê a resposta pelo nome dos campos:
+o bloco, ou a recusa do ledger pelo nome do padrão — `Duplicate`,
+`InsufficientFunds`, `TooOld`, `CreatedInFuture`, `BadFee`, `BadBurn`,
+`TemporarilyUnavailable`, `GenericError`. O que não tem a forma do ICRC-1
+— outro tipo, um caso que o padrão não tem — é recusado, e nunca vira
+bloco nem saldo. O `memo` de mais de 32 bytes não se escreve.
+
+`web3::icp::cmc` faz a cunhagem: a conta de depósito de quem cunha no CMC
+— o dono é o CMC, e a subconta é a do Principal de quem cunha: o tamanho,
+os bytes e zeros —, o memo `MINT`, e o `notify_mint_cycles`, o argumento e
+o resultado — os cycles cunhados, o saldo e o bloco no ledger de cycles,
+ou a recusa pelo nome da interface.
+
+### A repetição
+
+O ledger deduplica a transferência pelo `created_at_time`: a mesma — a
+mesma origem, o mesmo destino, a mesma quantia, a mesma taxa, o mesmo
+`memo` e o mesmo `created_at_time` —, dentro da janela dele (24 horas),
+volta `Duplicate` com o bloco da primeira, e não executa; **sem**
+`created_at_time`, executa de novo. Por isso a `carteira` sempre o põe — a
+hora do Duke, a mesma que confere os certificados —, com um `memo` de
+bytes do gerador que faz de cada transferência uma só; e repete com os
+mesmos argumentos, assinados de novo: cada repetição é um pedido novo, com
+uma decisão do gate nova, como toda assinatura. O CMC lembra cada bloco: a
+mesma notificação devolve o mesmo resultado.
+
+Não se guarda nem se reenvia o envelope: o IC só deduplicaria o mesmo
+envelope durante a validade dele, uns minutos, e o ledger deduplica por
+24 horas. Uma resposta perdida — uma prova adulterada, uma conexão
+cortada — pode esconder uma transferência que executou: a `carteira` não
+diz bloco nenhum sem verificar, e a repetição mostra o bloco.
+
+### O programa `carteira`
+
+Como o `icp`: lê as âncoras do TLS da bancada e as redes, espera os passos
+no canal `teste-carteira` — ou, com outra viva, no `teste-carteira-2` —,
+cada pedido por uma conexão nova, pelo caminho inteiro, e cada passo
+declarado antes do fecho. O `c` de um passo é a conta: o anônimo, ou as
+chaves `chave:bancada` e `chave:bancada-2`, de quem lançou o processo.
+
+| passo | o que faz |
+|---|---|
+| `saldo` (1), `saldo_de_ciclos` (2) | o saldo da conta no ledger de ICP, ou no de cycles: a consulta do anônimo, verificada pelas assinaturas dos nós — o saldo é público |
+| `fundos` (3) | o anônimo transfere 10 ICP para a chave: só na bancada, onde o anônimo começa com um bilhão de ICP |
+| `transferir` (4) | a chave transfere 1 ICP para a outra, assinado, com o `created_at_time` e um `memo` do gerador, e a guarda |
+| `repetir` (5) | a última transferência de novo, com os mesmos argumentos, assinada de novo |
+| `fixar_hora` (9), `transferir_em` (6) | a hora dada fica; a transferência sai com ela e um `memo` fixo: duas carteiras com a mesma hora fazem a mesma transferência |
+| `ciclos` (7) | 1 ICP para a conta de depósito da chave no CMC, com o memo `MINT`, e o `notify_mint_cycles` — as duas chamadas assinadas |
+| `notificar` (8) | a última notificação de novo, assinada pela chave do `c` |
+
+O desfecho e a declaração são os da chamada e os da consulta: `icp.update
+<canister>/<método> <desfecho>`, ancorada na decisão da assinatura — ou na
+conexão, do anônimo —; e `icp.query`, para o saldo. O desfecho é o do
+protocolo: `verified` quando o certificado provou a resposta, seja o bloco
+ou a recusa do ledger, que a linha da resposta diz pelo nome
+(`erro Duplicate duplicate_of 4`); e `verified_malformed` quando a prova
+fechou e a resposta não tem a forma do ICRC-1 ou do CMC. A `carteira` só
+anda nas redes da bancada: a rede principal não está na lista dela, e a
+política da imagem não alcança destino nenhum da rede principal.
+
+### A bancada
+
+A instância da PocketIC ganhou a sub-rede II e três `IcpFeatures` —
+`icp_token`, `cycles_minting` e `cycles_token` —: o ledger de ICP
+(`ryjl3-tyaaa-aaaaa-aaaba-cai`) e o CMC (`rkp4c-7iaaa-aaaaa-aaaca-cai`) na
+NNS, e o ledger de cycles (`um5iw-rqaaa-aaaaq-qaaba-cai`) na II, nos ids
+da rede principal. O `preparar` confere que os três respondem — o símbolo
+de cada ledger, a taxa de conversão do CMC —, e o xtask, que estão nos ids
+fixados. A raiz, a NNS, a primeira sub-rede de aplicação e os canisters da
+bancada continuam os mesmos; só a segunda de aplicação muda, e a bancada a
+lê da topologia. Criar a instância leva uns cinco segundos.
+
+### Os casos
+
+No hospedeiro (`cargo test -p web3`), contra os oráculos, nos dois
+sentidos:
+
+- **o Candid composto contra o `candid`**: o id do campo é o `idl_hash`
+  dele; estruturas com `record`, `variant`, `opt`, `vec` e `blob`
+  aninhados, escritas aqui e lidas pelo oficial como o valor dele, e
+  escritas pelo oficial e lidas aqui; três mil tipos e valores sorteados,
+  nos dois sentidos — o oficial escreve nos tipos sorteados, e este lado
+  lê —; cada composto uma vez na tabela; o que não é do tipo, recusado sem
+  escrever nada; e os tetos da leitura, que a escrita não passa;
+- **o ICRC-1 contra o `icrc-ledger-types`**: quinhentas transferências e
+  duzentas contas sorteadas, escritas aqui e lidas pelo oficial, campo a
+  campo; o resultado e cada recusa escritos pelo oficial e lidos aqui pelo
+  nome; o saldo de até 128 bits, e o que passa disso recusado; o que não
+  tem a forma do padrão, recusado — nunca bloco —; e o `memo` além de 32
+  bytes, que não se escreve;
+- **o CMC contra a interface dele**, declarada no teste com o `candid`: a
+  subconta de um Principal de cada tamanho, o memo `MINT`, a notificação e
+  cada resultado e recusa.
+
+Na suíte (`icp:`), a `carteira` lançada por uma pessoa operadora com as
+duas chaves dela:
+
+- **o saldo e a transferência assinada**: as duas chaves começam sem
+  saldo, verificado pela NNS; o anônimo põe fundos na primeira, sem
+  assinatura, ancorado na conexão; a primeira transfere para a segunda —
+  uma execução de `key.sign`, a decisão do gate sobre `chave:bancada` em
+  nome da pessoa, a declaração ancorada nela, o bloco —, e os saldos
+  mostram a quantia e a taxa;
+- **a repetição não executa duas vezes**: a mesma transferência, assinada
+  de novo, volta `Duplicate` com o bloco da primeira, pela rede honesta e
+  pela que responde 202 — acompanhada, cada leitura assinada de novo —, e
+  os saldos mostram uma transferência só;
+- **a prova adulterada não vira transferência**: com o certificado das
+  faixas adulterado, nada se assina e nada sai, e a repetição executa
+  agora; com o da resposta adulterado, ou sem ele, a chamada sai e o
+  ledger executa, mas a `carteira` não diz bloco nenhum — a repetição volta
+  `Duplicate` com o bloco que a verificação não deixou dizer —; e o saldo,
+  pelas redes que mentem para a consulta, não é dito;
+- **sem `key.sign` nada se transfere**: sem a chave, sem `key.read`, com o
+  `key.read` só sobre a outra chave (o destino se lê e a origem não), sem
+  `key.sign`, e com o `key.sign` só sobre a outra chave — nenhuma chamada
+  sai, de ninguém, e os saldos, o do anônimo inclusive, não mudam; a outra
+  chave, no alcance, assina, e o ledger a recusa por falta de fundos;
+- **as recusas do ledger**: sem fundos, o `created_at_time` de 25 horas
+  atrás e o de 10 minutos à frente — respostas verificadas, ditas pelo
+  nome, ancoradas na decisão da assinatura, sem bloco e sem mudar saldo;
+- **ICP em cycles pelo CMC**: a transferência ao CMC e a notificação, duas
+  assinaturas e duas declarações; os cycles cunhados, menos a taxa, no
+  saldo do ledger de cycles; a mesma notificação de novo, o mesmo
+  resultado; pela outra chave, recusada; e o saldo de cycles do anônimo,
+  acima de 64 bits, lido inteiro;
+- **a mesma transferência por dois processos** — a mesma hora fixada, o
+  mesmo `memo`, cada um pela sua rede honesta —: uma executa, e a outra
+  volta `Duplicate` com o bloco dela; duas assinaturas de dois pedidos,
+  cada declaração na sua decisão;
+- **a chave anulada no meio da transferência**: a assinatura pedida depois
+  da anulação é recusada pelo kernel, nenhuma chamada sai, nem do anônimo,
+  e nenhum saldo muda.
+
+Em todos, nada do IC nem do valor — o ledger, o CMC, o ledger de cycles,
+os métodos — aparece em registro nenhum do kernel fora da alegação.
+
+### O tamanho e as medidas
+
+O `carteira` tem 957 688 bytes no x86 — 91,3% do teto de leitura do
+kernel, 1 MiB — e 848 400 no ARM: o maior programa da imagem, 12 632
+bytes acima do `icp` no x86. O `icp` e o `livro` ficaram com o tamanho do
+ICP-4c nos dois — 945 056 e 840 208, 899 512 e 799 248 —, mas não com os
+mesmos bytes: o fonte deles não mudou, e o `web3` ganhou linhas antes das
+que eles usam — o parágrafo novo no começo do `candid.rs` —; o lugar de
+cada pânico, que vai no binário, é o arquivo e a linha. Pelo mesmo motivo,
+o binário depende do caminho do checkout: o caminho de cada crate vai no
+lugar do pânico, e o mesmo commit noutro diretório dá outros bytes — no
+ARM, o `carteira` de uma *worktree* com o nome quatro letras mais longo
+passou uma página, para 852 496. No mesmo caminho, o build é reprodutível:
+os seis — o `carteira`, o `icp` e o `livro`, nas duas máquinas —,
+recompilados do zero, deram os mesmos bytes.
+
+Na suíte (o kernel de teste em depuração, o x86, a bancada), do pedido das
+faixas ao desfecho dito — sem a leitura da chave, a hora, o nonce e a
+conexão, que vêm antes —, em três rodadas:
+
+| passo | amostras | de / a | mediana |
+|---|---|---|---|
+| o saldo no ledger de ICP — a consulta do anônimo | 63 | 430 a 650 ms | 500 ms |
+| o saldo no ledger de cycles, pela delegação da II | 12 | 480 a 700 ms | 535 ms |
+| os fundos — a chamada do anônimo | 24 | 550 a 820 ms | 645 ms |
+| **a transferência assinada, com o bloco** | 9 | 630 a 860 ms | **720 ms** |
+| **a repetição: `Duplicate`** | 9 | 600 a 760 ms | **680 ms** |
+| a recusa do ledger (`InsufficientFunds`, `TooOld`, `CreatedInFuture`) | 12 | 640 a 900 ms | 795 ms |
+| a repetição pela rede que responde 202, acompanhada | 3 | 2430 a 2610 ms | 2570 ms |
+| a transferência ao CMC, e a notificação | 3 e 3 | 660 a 700 ms, e 740 a 810 | 690 ms, e 780 |
+| a notificação de novo — o mesmo resultado, ou a recusa pela outra chave | 6 | 640 a 830 ms | 705 ms |
+| a assinatura recusada, sem a chamada | 6 | 240 a 350 ms | 270 ms |
+| a mesma transferência por dois processos ao mesmo tempo | 6 | 830 a 1520 ms | 1420 ms |
+
+A transferência é uma chamada do ICP-3 — a assinatura, o consenso, a
+leitura do certificado —, e a repetição também: o `Duplicate` volta pelo
+mesmo caminho, e custa quase o mesmo. A rede que responde 202 soma a
+espera da situação, cada leitura assinada. Os dois processos dividem a
+bancada, e em cada rodada um executou e o outro voltou `Duplicate` — duas
+vezes o da rede honesta, uma o da `direta`. No ARM, numa rodada, os mesmos
+passos deram menos — o saldo com mediana de 360 ms, a transferência com o
+bloco de 530, a repetição de 560.
+
+### As mutações
+
+Uma de cada vez, numa *worktree* à parte, com o que a pega: os testes do
+hospedeiro (`cargo test -p web3`), quando a mutação é do `web3`, e a suíte
+do x86 só com os casos `icp:` — 31 casos, que passam todos sem mutação (o
+controle). As catorze da inspeção, em quinze formas — a M12 em duas —:
+todas reprovadas.
+
+| | mutação | onde | no hospedeiro | na suíte |
+|---|---|---|---|---|
+| M01 | **os campos de um `record` fora da ordem do hash** | `candid.rs` | cinco: o oficial não lê o `record` fora de ordem — entre eles `a_escrita_com_tipos_e_a_leitura_do_oraculo` e `a_transferencia_e_a_do_oficial` | os oito casos novos: o ledger recusa o argumento — o canister para na leitura (`IC0503`) — já nos fundos |
+| M02 | **o hash do nome do campo errado** | `candid.rs` | nove, entre eles `o_id_do_campo_e_o_do_oraculo` | os oito: até a consulta do saldo volta recusada (`IC0503`) |
+| M03 | **o `opt` vazio escrito como presente** | `candid.rs` | sete, entre eles `cada_composto_uma_vez_na_tabela` | os oito: a conta sem subconta não se lê, e o saldo volta recusado |
+| M04 | **o `nat` do saldo cortado em 64 bits** | `icrc1.rs` | `o_saldo_e_o_do_oficial`, `o_resultado_escrito_pelo_oficial` | ICP em cycles: o saldo de cycles do anônimo, 2^127 − 1, lido como 2^64 − 1 |
+| M05 | **a recusa `Duplicate` lida como bloco** | `icrc1.rs` | `o_resultado_escrito_pelo_oficial`, `os_campos_a_mais_de_um_ledger_novo_nao_atrapalham` | três casos — a repetição, a prova adulterada e os dois processos —: a repetição disse um bloco |
+| M06 | **a transferência sem `created_at_time`** | a `carteira` | — | a repetição e a prova adulterada: a repetição executou de novo |
+| M07 | **a repetição com um `created_at_time` novo** | a `carteira` | — | os mesmos dois |
+| M08 | **o certificado da chamada sem conferir** | `atualizacao.rs` | `o_certificado_de_outra_sub_rede` | três casos: a transferência adulterada disse um bloco, e a chamada adulterada do ICP-3 e a replicada adulterada do 4c verificaram |
+| M09 | **o saldo sem conferir os nós** | `agente.rs` | `os_modos_adversarios`, `a_resposta_de_outro_remetente_nao_confere` | o saldo pela prova adulterada foi dito, e a consulta adulterada do ICP-1 verificou |
+| M10 | **a subconta do CMC sem o byte do tamanho** | `cmc.rs` | `a_subconta_de_um_principal` | ICP em cycles: a transferência executou, para uma subconta do CMC que não é a de quem cunha, e o CMC recusou a notificação (`InvalidTransaction`, a conta de destino) |
+| M11 | **o memo de top-up no lugar do `MINT`** | `cmc.rs` | `o_memo_da_cunhagem` | ICP em cycles: o CMC recusou a notificação (`InvalidTransaction`, o memo) |
+| M12 | **a chave recusada caindo para o anônimo**, em duas formas: (a) a chave que não se lê; (b) a assinatura recusada | a `carteira` | — | (a) sem `key.sign`: com o `key.read` só sobre a outra chave, a transferência saiu do anônimo; (b) sem `key.sign` e com a chave anulada no meio, a transferência saiu do anônimo |
+| M13 | **o `key.sign` sem o gate dele**: a permissão de ler basta | o kernel, `commands.rs` | — | sem `key.sign`, a transferência foi assinada — e a consulta do 4c também |
+| M14 | **a declaração sem a âncora da decisão**: sempre a conexão | a `carteira` | — | seis casos: a declaração da chamada assinada sem a decisão da assinatura |
+
+**A M12a, só um cenário a pega.** Sem a chave e sem `key.read`, a
+`carteira` para antes, na conta do destino, que também não se lê; só com
+o `key.read` sobre a outra chave — o destino se lê, e a origem não — a
+chave que não se lê chega à chamada, e a mutação aparece. O cenário entrou
+no caso por isso.
+
+**A M10 mostra o custo de uma conta errada.** A transferência executou, e
+a notificação foi recusada: na rede de verdade, o ICP ficaria numa
+subconta do CMC que ninguém notifica. Quem a pega antes de qualquer
+transferência é o teste do hospedeiro, contra a interface.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
@@ -1455,14 +1730,18 @@ com elas, chaves de sessão e o domínio de delegação —; a custódia no TPM;
 o compartilhamento de chaves; exportar ou importar uma privada; na rede
 principal, qualquer coisa além da consulta anônima — a chamada de
 atualização, a consulta autenticada, o *Management Canister*, o ledger e
-os *cycles*; descobrir os *API boundary nodes* pela árvore de estado;
-implantar canisters; o `icp-cli` dentro do Duke; o CDK; a EVM; o HTTP/3.
-Nem mudança no DNS, no TCP ou no HTTP: o ICP-1, o ICP-3, o ICP-4b e o
-ICP-4c rodam sobre a infraestrutura que já existia, e o gate decide as chaves e os
+os *cycles*, com valor de verdade —; o ICRC-2 e o ICRC-3; descobrir os
+*API boundary nodes* pela árvore de estado; implantar canisters; o
+`icp-cli` dentro do Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no
+TCP ou no HTTP: o ICP-1, o ICP-3, o ICP-4b, o ICP-4c e o ICP-4d rodam
+sobre a infraestrutura que já existia, e o gate decide as chaves e os
 destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de
 assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
 principal pela configuração da imagem — a raiz, as âncoras públicas, a
 rede `mainnet` —, sem destino dela na política padrão, e fechou com a
 fumaça real de 23 de outubro de 2026 (ver *O resultado*). O ICP-4c fez a
 consulta assinada e a replicada na bancada; na rede principal, ficam para
-quando houver lá um canister do projeto.
+quando houver lá um canister do projeto. O ICP-4d moveu valor na bancada —
+o ICRC-1, a repetição que o ledger deduplica e o CMC —; na rede
+principal, nenhum valor se move: a política padrão não alcança destino
+nenhum dela, e a `carteira` só anda nas redes da bancada.

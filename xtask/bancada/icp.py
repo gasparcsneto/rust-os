@@ -64,7 +64,7 @@ principal - os canisters de sistema que ela sobe e mantem:
     rkp4c-7iaaa-aaaaa-aaaca-cai   o CMC (`cycles_minting`), na NNS: converte
                                   ICP em cycles
     um5iw-rqaaa-aaaaq-qaaba-cai   o ledger de cycles (`cycles_token`), na
-                                  II; o anonimo comeca com 2^127 cycles
+                                  II; o anonimo comeca com 2^127 - 1 cycles
 
 Os modos, pelo nome do TLS:
 
