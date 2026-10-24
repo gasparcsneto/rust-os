@@ -31783,6 +31783,38 @@ static CASOS: &[Caso] = &[
         f: icp_a_chave_anulada_no_meio_da_transferencia,
     },
     Caso {
+        nome: "icp: o canister criado, instalado e conferido",
+        f: icp_o_canister_criado_instalado_e_conferido,
+    },
+    Caso {
+        nome: "icp: o upgrade em pedacos guarda o estado",
+        f: icp_o_upgrade_em_pedacos_guarda_o_estado,
+    },
+    Caso {
+        nome: "icp: quem nao controla nao gerencia",
+        f: icp_quem_nao_controla_nao_gerencia,
+    },
+    Caso {
+        nome: "icp: a prova adulterada nao vira instalacao",
+        f: icp_a_prova_adulterada_nao_vira_instalacao,
+    },
+    Caso {
+        nome: "icp: sem key.sign nada se implanta",
+        f: icp_sem_key_sign_nada_se_implanta,
+    },
+    Caso {
+        nome: "icp: a criacao e a carga nao executam duas vezes",
+        f: icp_a_criacao_e_a_carga_nao_executam_duas_vezes,
+    },
+    Caso {
+        nome: "icp: a mesma criacao por dois processos",
+        f: icp_a_mesma_criacao_por_dois_processos,
+    },
+    Caso {
+        nome: "icp: a chave anulada no meio do upgrade",
+        f: icp_a_chave_anulada_no_meio_do_upgrade,
+    },
+    Caso {
         nome: "canal tcp: o aperto pela rede",
         f: canal_tcp_o_aperto_pela_rede,
     },
@@ -53205,6 +53237,1629 @@ fn icp_a_chave_anulada_no_meio_da_transferencia_com_a_politica() -> Resultado {
         })();
         let fim = carteira.encerrar();
         r.and(fim)
+    })();
+    crate::chaves::esquecer_de_teste();
+    r
+}
+
+// ---------------------------------------------------------------------------
+// A implantação — docs/ICP.md, ICP-4e: um canister na bancada do IC, pela
+// chave de quem lança o programa
+// ---------------------------------------------------------------------------
+
+/// O código com que a `implantacao` sai no fim pedido — o programa tem o
+/// mesmo.
+const IMPLANTACAO_ENCERRADA: i64 = 82;
+
+/// Os passos da `implantacao` — o programa tem as mesmas constantes.
+const IMPLANTACAO_CRIAR: i64 = 1;
+const IMPLANTACAO_REPETIR_CRIACAO: i64 = 2;
+const IMPLANTACAO_CRIAR_EM: i64 = 3;
+const IMPLANTACAO_INSTALAR: i64 = 4;
+const IMPLANTACAO_ATUALIZAR: i64 = 5;
+const IMPLANTACAO_ESTADO: i64 = 6;
+const IMPLANTACAO_CARREGAR: i64 = 7;
+const IMPLANTACAO_REPETIR_CARGA: i64 = 8;
+const IMPLANTACAO_FIXAR_HORA: i64 = 9;
+const IMPLANTACAO_VERSAO: i64 = 10;
+const IMPLANTACAO_CONTAR: i64 = 11;
+const IMPLANTACAO_FIXAR_PEDACO: i64 = 12;
+
+/// O ledger de cycles da bancada, no id da rede principal, e o canister de
+/// gerenciamento — ver `xtask/src/icp.rs`.
+const LEDGER_DE_CICLOS_DA_BANCADA: &str = "um5iw-rqaaa-aaaaq-qaaba-cai";
+const CANISTER_DE_GERENCIAMENTO: &str = "aaaaa-aa";
+
+/// O SHA-256 dos módulos que a `implantacao` lê do armazém: o hash que o
+/// `canister_status` diz do módulo instalado. O `xtask` confere os mesmos
+/// (`xtask/src/icp.rs`).
+const MODULO_IMPLANTAVEL_A: &str =
+    "9b6cc41ff390673f7c41030d1764a945419bff2dd7260bf37e8cb6a4e82d6590";
+const MODULO_IMPLANTAVEL_B: &str =
+    "4b80bb110309a6ba48366c96d3350bcf40688754e6a8bfc02f28ee9dc887d317";
+
+/// O tamanho dos dois módulos, e o dos pedaços do upgrade na suíte: três.
+const TAMANHO_DO_IMPLANTAVEL: usize = 324;
+const PEDACO_DA_SUITE: i64 = 128;
+
+/// Os cycles de uma criação e de uma carga — o programa tem os mesmos.
+const QUANTIA_DA_CRIACAO: u128 = 1_000_000_000_000;
+const QUANTIA_DA_CARGA: u128 = 500_000_000_000;
+
+/// O que um canister pode gastar entre duas leituras do estado — as
+/// mensagens que ele recebe —, muito abaixo de uma carga.
+const GASTO_ENTRE_ESTADOS: u128 = 1_000_000_000;
+
+/// A `implantacao` em execução: o fio dela, e o canal por onde a suíte dita
+/// os passos.
+struct Implantacao {
+    fio: u64,
+    canal: &'static str,
+}
+
+impl Implantacao {
+    /// Lança a `implantacao` com `autoridade`, e espera ela ler as âncoras
+    /// do TLS e as redes, pelo gate.
+    fn lancar(autoridade: crate::autorizacao::Autoridade) -> Result<Implantacao, &'static str> {
+        Implantacao::lancar_em(
+            autoridade,
+            "teste-implantacao",
+            "implantacao: pronto (14 redes)",
+        )
+    }
+
+    /// Lança uma segunda `implantacao`, com a primeira viva: ela escuta o
+    /// outro canal.
+    fn lancar_segunda(
+        autoridade: crate::autorizacao::Autoridade,
+    ) -> Result<Implantacao, &'static str> {
+        Implantacao::lancar_em(
+            autoridade,
+            "teste-implantacao-2",
+            "implantacao: pronto pelo segundo canal (14 redes)",
+        )
+    }
+
+    fn lancar_em(
+        autoridade: crate::autorizacao::Autoridade,
+        canal: &'static str,
+        pronto: &str,
+    ) -> Result<Implantacao, &'static str> {
+        let programa = alloc::format!("{}/implantacao", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
+        esperar_ate(|| linhas_do_programa(desde, pronto) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao leu as ancoras e as redes")?;
+        Ok(Implantacao { fio, canal })
+    }
+
+    /// Pede o passo `a`, com `b` e `c`, sem esperar o que ela diz.
+    fn pedir(&self, a: i64, b: i64, c: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ACAO,
+                a,
+                b,
+                c,
+            },
+        )
+        .map_err(|_| "o canal da implantacao nao recebeu o passo")
+    }
+
+    /// Espera a `implantacao` dizer o desfecho do passo `passo`, desde o
+    /// registro `desde` do log; numa chamada que chegou ao fim, com quem
+    /// chamou e o que voltou, cada um da sua linha.
+    fn dito(&self, desde: u64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let prefixo = alloc::format!("implantacao: {passo}: ");
+        let mut dito = None;
+        let r = esperar_ate(
+            || {
+                dito =
+                    linha_que_comeca(desde, &prefixo).and_then(|l| PassoDoIcp::ler(&l, &prefixo));
+                dito.is_some()
+            },
+            TETO_DO_ICP,
+        );
+        match (r, dito) {
+            (Ok(()), Some(mut dito)) => {
+                let linha = |qual: &str| {
+                    let prefixo = alloc::format!("implantacao: {passo} {qual} ");
+                    linha_que_comeca(desde, &prefixo)
+                        .and_then(|l| l.strip_prefix(prefixo.as_str()).map(Into::into))
+                };
+                dito.remetente = linha("remetente");
+                dito.resposta = linha("resposta");
+                Ok(dito)
+            }
+            _ => {
+                crate::log_error!("teste", "a implantacao nao disse `{}`", prefixo);
+                Err("a implantacao nao disse o desfecho do passo")
+            }
+        }
+    }
+
+    /// O passo inteiro: pede, e espera o desfecho.
+    fn passo(&self, a: i64, b: i64, c: i64, passo: &str) -> Result<PassoDoIcp, &'static str> {
+        let desde = crate::log::total_emitidos();
+        self.pedir(a, b, c)?;
+        self.dito(desde, passo)
+    }
+
+    /// Espera a `implantacao` pedir `etapa` no passo `passo`, desde `desde`,
+    /// e dormir esperando a resposta, com a leitura armada na conexão com o
+    /// gateway.
+    fn esperando(&self, desde: u64, passo: &str, etapa: &str) -> Resultado {
+        let pede = alloc::format!("implantacao: {passo} pede {etapa}");
+        esperar_ate(|| linhas_do_programa(desde, &pede) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao chegou ao pedido")?;
+        let dono = crate::rede::conexoes::Dono::Processo(self.fio);
+        let conexao = crate::rede::pilha::donos()
+            .into_iter()
+            .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+            .map(|(id, _, _)| id)
+            .max()
+            .ok_or("a implantacao nao tinha a conexao do pedido")?;
+        esperar_ate(
+            || crate::rede::pilha::espera_armada_de_teste(conexao),
+            TETO_DO_ICP,
+        )
+        .map_err(|_| "a implantacao nao chegou a esperar a resposta")
+    }
+
+    /// Fixa a hora das criações com hora, em segundos.
+    fn fixar_hora(&self, segundos: u64) -> Resultado {
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_FIXAR_HORA, segundos as i64, 0)?;
+        let dita = alloc::format!("implantacao: hora fixada {segundos}");
+        esperar_ate(|| linhas_do_programa(desde, &dita) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao fixou a hora")
+    }
+
+    /// Fixa o tamanho dos pedaços do upgrade, em bytes.
+    fn fixar_pedaco(&self, tamanho: i64) -> Resultado {
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_FIXAR_PEDACO, tamanho, 0)?;
+        let dita = alloc::format!("implantacao: pedaco fixado {tamanho}");
+        esperar_ate(|| linhas_do_programa(desde, &dita) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao fixou o pedaco")
+    }
+
+    /// A criação de um canister pela chave `c`, pela rede honesta: o passo,
+    /// o canister e o bloco.
+    fn criar(&self, c: i64) -> Result<(PassoDoIcp, alloc::string::String, u128), &'static str> {
+        let passo = alloc::format!("criar bancada {}", conta_da_carteira(c));
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_CRIAR, REDE_BANCADA, c)?;
+        let p = self.dito(desde, &passo)?;
+        match canister_dito(&p) {
+            Some((canister, bloco)) if p.desfecho == "verified" => {
+                let alvo = alloc::format!("implantacao: alvo {canister}");
+                esperar_ate(|| linhas_do_programa(desde, &alvo) == 1, TETO_DO_ICP)
+                    .map_err(|_| "a implantacao nao guardou o canister criado")?;
+                Ok((p, canister, bloco))
+            }
+            _ => {
+                crate::log_error!("teste", "{:?}", p);
+                Err("a chave nao criou o canister")
+            }
+        }
+    }
+
+    /// A instalação do módulo A pela chave `c`, pela rede `rede`: o passo,
+    /// depois de a `implantacao` dizer o SHA-256 dos bytes que leu.
+    fn instalar(&self, c: i64, rede: &str) -> Result<PassoDoIcp, &'static str> {
+        let passo = alloc::format!("instalar {rede} {}", conta_da_carteira(c));
+        let lido = alloc::format!(
+            "implantacao: {passo} modulo {MODULO_IMPLANTAVEL_A} {TAMANHO_DO_IMPLANTAVEL} bytes"
+        );
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_INSTALAR, rede_do_icp(rede)?, c)?;
+        esperar_ate(|| linhas_do_programa(desde, &lido) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao disse o modulo A que leu")?;
+        self.dito(desde, &passo)
+    }
+
+    /// O upgrade para o módulo B pela chave `c`, pela rede `rede`: depois de
+    /// a `implantacao` dizer o SHA-256 dos bytes que leu e em quantos
+    /// pedaços os manda, o passo de cada pedaço, até o primeiro que não
+    /// subiu verificado, e o da instalação, se chegou a ela.
+    fn atualizar(
+        &self,
+        c: i64,
+        rede: &str,
+        pedacos: usize,
+    ) -> Result<(alloc::vec::Vec<PassoDoIcp>, Option<PassoDoIcp>), &'static str> {
+        let base = alloc::format!("atualizar {rede} {}", conta_da_carteira(c));
+        let lido = alloc::format!(
+            "implantacao: {base} modulo {MODULO_IMPLANTAVEL_B} {TAMANHO_DO_IMPLANTAVEL} bytes"
+        );
+        let em = alloc::format!("implantacao: {base} em {pedacos} pedacos");
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_ATUALIZAR, rede_do_icp(rede)?, c)?;
+        esperar_ate(
+            || linhas_do_programa(desde, &lido) == 1 && linhas_do_programa(desde, &em) == 1,
+            TETO_DO_ICP,
+        )
+        .map_err(|_| "a implantacao nao disse o modulo B que leu, e em quantos pedacos")?;
+        let mut feitos = alloc::vec::Vec::new();
+        for i in 1..=pedacos {
+            let p = self.dito(desde, &alloc::format!("{base} pedaco {i}"))?;
+            let subiu = p.desfecho == "verified";
+            feitos.push(p);
+            if !subiu {
+                return Ok((feitos, None));
+            }
+        }
+        let p = self.dito(desde, &alloc::format!("{base} instalacao"))?;
+        Ok((feitos, Some(p)))
+    }
+
+    /// O estado do canister, lido pela chave `c` pela rede `rede`: o passo,
+    /// e o estado que ele disse, se disse.
+    fn estado_em(
+        &self,
+        c: i64,
+        rede: &str,
+    ) -> Result<(PassoDoIcp, Option<EstadoDito>), &'static str> {
+        let passo = alloc::format!("estado {rede} {}", conta_da_carteira(c));
+        let desde = crate::log::total_emitidos();
+        self.pedir(IMPLANTACAO_ESTADO, rede_do_icp(rede)?, c)?;
+        let p = self.dito(desde, &passo)?;
+        let estado = estado_dito(desde, &passo, &p);
+        Ok((p, estado))
+    }
+
+    /// O estado do canister, lido pela chave `c` pela rede honesta.
+    fn estado(&self, c: i64) -> Result<EstadoDito, &'static str> {
+        let (p, estado) = self.estado_em(c, "bancada")?;
+        estado.filter(|_| p.desfecho == "verified").ok_or_else(|| {
+            crate::log_error!("teste", "{:?}", p);
+            "a implantacao nao disse o estado verificado"
+        })
+    }
+
+    /// A versão do módulo que o canister roda, pela consulta do anônimo
+    /// pela rede honesta: o texto, entre aspas.
+    fn versao(&self) -> Result<alloc::string::String, &'static str> {
+        let p = self.passo(IMPLANTACAO_VERSAO, REDE_BANCADA, 0, "versao bancada")?;
+        versao_dita(&p)
+            .filter(|_| p.desfecho == "verified")
+            .map(Into::into)
+            .ok_or_else(|| {
+                crate::log_error!("teste", "{:?}", p);
+                "a implantacao nao disse a versao verificada"
+            })
+    }
+
+    /// O contador do módulo, pela chave `c` — ou do anônimo —, pela rede
+    /// honesta.
+    fn contar(&self, c: i64) -> Result<u64, &'static str> {
+        let passo = alloc::format!("contar bancada {}", conta_da_carteira(c));
+        let p = self.passo(IMPLANTACAO_CONTAR, REDE_BANCADA, c, &passo)?;
+        contador_dito(&p)
+            .filter(|_| p.desfecho == "verified")
+            .ok_or_else(|| {
+                crate::log_error!("teste", "{:?}", p);
+                "a implantacao nao disse o contador verificado"
+            })
+    }
+
+    /// Pede o fim, e espera o programa sair com o código dele.
+    fn encerrar(self) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let desde = crate::log::total_emitidos();
+        let _ = crate::eventos::publicar(
+            self.canal,
+            Evento {
+                tipo: tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        let saiu = alloc::format!("processo encerrou com codigo {IMPLANTACAO_ENCERRADA}");
+        esperar_ate(|| linhas_do_programa(desde, &saiu) == 1, TETO_DO_ICP)
+            .map_err(|_| "a implantacao nao saiu quando pedida")
+    }
+}
+
+/// A `carteira` e a `implantacao`, lançadas pela pessoa da `sessao`.
+fn carteira_e_implantacao(
+    sessao: crate::pessoas::IdSessao,
+) -> Result<(Carteira, Implantacao), &'static str> {
+    use crate::autorizacao::Autoridade;
+    let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+    match Implantacao::lancar(Autoridade::Pessoa { sessao }) {
+        Ok(implantacao) => Ok((carteira, implantacao)),
+        Err(e) => {
+            let _ = carteira.encerrar();
+            Err(e)
+        }
+    }
+}
+
+/// Cycles na conta da chave `c`, pela `carteira`: os fundos do anônimo, e
+/// 1 ICP em cycles pelo CMC. Devolve o saldo de cycles da chave,
+/// verificado.
+fn ciclos_para_a_chave(carteira: &Carteira, c: i64) -> Result<u128, &'static str> {
+    carteira.fundos(c)?;
+    let quem = conta_da_carteira(c);
+    let desde = crate::log::total_emitidos();
+    carteira.pedir(CARTEIRA_CICLOS, REDE_BANCADA, c)?;
+    carteira.dito(
+        desde,
+        &alloc::format!("ciclos bancada {quem} transferencia"),
+    )?;
+    let n = carteira.dito(desde, &alloc::format!("ciclos bancada {quem} notificacao"))?;
+    let (_, saldo, _) = cunhagem_dita(&n)
+        .filter(|_| n.desfecho == "verified")
+        .ok_or_else(|| {
+            crate::log_error!("teste", "{:?}", n);
+            "a chave nao ganhou cycles pelo cmc"
+        })?;
+    if carteira.saldo(true, c)? != saldo {
+        return Err("o saldo de cycles da chave nao e o que o cmc depositou");
+    }
+    Ok(saldo)
+}
+
+/// O canister e o bloco de uma criação: `canister <id> bloco <n>`.
+fn canister_dito(p: &PassoDoIcp) -> Option<(alloc::string::String, u128)> {
+    let resto = p.resposta.as_deref()?.strip_prefix("canister ")?;
+    let (canister, bloco) = resto.split_once(" bloco ")?;
+    Some((canister.into(), bloco.parse().ok()?))
+}
+
+/// O estado de um canister, como a `implantacao` o disse: a situação, os
+/// cycles e a memória na resposta — `<situação> cycles <n> memoria <n>` —,
+/// e o módulo e cada controlador numa linha à parte.
+#[derive(Debug)]
+struct EstadoDito {
+    situacao: alloc::string::String,
+    modulo: alloc::string::String,
+    controladores: alloc::vec::Vec<alloc::string::String>,
+    cycles: u128,
+}
+
+/// O estado que a `implantacao` disse no passo `passo` — `p` —, desde o
+/// registro `desde` do log.
+fn estado_dito(desde: u64, passo: &str, p: &PassoDoIcp) -> Option<EstadoDito> {
+    let resto = p.resposta.as_deref()?;
+    let (situacao, resto) = resto.split_once(" cycles ")?;
+    let (cycles, memoria) = resto.split_once(" memoria ")?;
+    memoria.parse::<u128>().ok()?;
+    let prefixo = alloc::format!("implantacao: {passo} modulo ");
+    let modulo = linha_que_comeca(desde, &prefixo)?
+        .strip_prefix(prefixo.as_str())?
+        .into();
+    let controladores = linhas_desde(desde, &alloc::format!("implantacao: {passo} controlador "));
+    Some(EstadoDito {
+        situacao: situacao.into(),
+        modulo,
+        controladores,
+        cycles: cycles.parse().ok()?,
+    })
+}
+
+/// Cada linha de programa desde `desde` que começa com `prefixo`, sem ele,
+/// na ordem.
+fn linhas_desde(desde: u64, prefixo: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut linhas = alloc::vec::Vec::new();
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.seq >= desde
+            && r.subsistema == "usuario"
+            && let Some(resto) = r.mensagem().strip_prefix(prefixo)
+        {
+            linhas.push(resto.into());
+        }
+    });
+    linhas
+}
+
+/// O contador que a resposta disse: `contador <n>`.
+fn contador_dito(p: &PassoDoIcp) -> Option<u64> {
+    p.resposta
+        .as_deref()?
+        .strip_prefix("contador ")?
+        .parse()
+        .ok()
+}
+
+/// A versão que a consulta disse: `versao "<texto>"; prova ...`.
+fn versao_dita(p: &PassoDoIcp) -> Option<&str> {
+    Some(p.detalhe.strip_prefix("versao ")?.split_once("; prova ")?.0)
+}
+
+/// O hash de um pedaço que a resposta disse: `hash <64 dígitos>`.
+fn hash_dito(p: &PassoDoIcp) -> Option<&str> {
+    p.resposta
+        .as_deref()?
+        .strip_prefix("hash ")
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A sub-rede que a prova de uma chamada diz — `prova <grupo> <delegada|da
+/// raiz> leituras <n>` —, pelo grupo.
+fn sub_rede_da_prova(prova: &str) -> Option<&str> {
+    prova.strip_prefix("prova ")?.split(' ').next()
+}
+
+/// Os pedidos que a `implantacao` disse no passo `passo`, desde `desde`:
+/// quantos `read_state`, quantos `query` e quantos `call`.
+fn pedidos_da_implantacao(desde: u64, passo: &str) -> (usize, usize, usize) {
+    let pede = |etapa: &str| {
+        linhas_do_programa(desde, &alloc::format!("implantacao: {passo} pede {etapa}"))
+    };
+    (pede("read_state"), pede("query"), pede("call"))
+}
+
+/// O assunto de uma chamada ao canister de gerenciamento: o método e o
+/// canister alvo.
+fn assunto_da_gestao(metodo: &str, canister: &str) -> alloc::string::String {
+    alloc::format!("{CANISTER_DE_GERENCIAMENTO}/{metodo}@{canister}")
+}
+
+/// O assunto de uma chamada ao ledger de cycles.
+fn assunto_do_ledger_de_ciclos(metodo: &str) -> alloc::string::String {
+    alloc::format!("{LEDGER_DE_CICLOS_DA_BANCADA}/{metodo}")
+}
+
+/// A declaração de um passo da `implantacao`: a alegação no recurso —
+/// `<evento> <assunto> <desfecho>` — e, no detalhe, a âncora que o kernel
+/// escreveu.
+fn declaracao_da_implantacao(
+    fio: u64,
+    p: &PassoDoIcp,
+    evento: &str,
+    assunto: &str,
+    ancora: AncoraDaConsulta,
+) -> Resultado {
+    let n = p.registro().ok_or("a implantacao nao declarou o passo")?;
+    let e = registro_numero(n).ok_or("a declaracao da implantacao nao esta no anel")?;
+    let alegacao = alloc::format!("{evento} {assunto} {}", p.desfecho);
+    let pelo = alloc::format!("pelo processo {fio} (implantacao ");
+    let ancorada = match ancora {
+        AncoraDaConsulta::Decisao(d) => e
+            .detalhe
+            .contains(&alloc::format!("): ancorada em {d} key.sign; decisao ")),
+        AncoraDaConsulta::Conexao => {
+            e.detalhe.contains("): conexao ") && e.detalhe.contains(GATEWAY_ICP)
+        }
+        AncoraDaConsulta::Nenhuma => e.detalhe.contains("): sem conexao; decisao "),
+    };
+    if e.metodo != "audit.declare"
+        || e.codigo != politica::Codigo::Allow
+        || e.recurso != alegacao
+        || !e.detalhe.starts_with(&pelo)
+        || !ancorada
+    {
+        crate::log_error!("teste", "{:?} / {:?} / {:?}", ancora, p, e);
+        return Err("a declaracao da implantacao nao e a alegacao com a ancora do kernel");
+    }
+    Ok(())
+}
+
+/// A única assinatura de um passo da chave `chave:bancada`, do processo
+/// `fio` depois do registro `antes`, conferida — a decisão do gate sobre a
+/// chave, em nome da pessoa —: a decisão.
+fn assinatura_do_passo(fio: u64, antes: u64, impressao: &str) -> Result<u64, &'static str> {
+    let feitas = assinaturas_do_processo(fio, antes);
+    let [(_, assinada)] = feitas.as_slice() else {
+        crate::log_error!("teste", "{:?}", feitas);
+        return Err("o passo nao foi uma assinatura do kernel");
+    };
+    assinatura_da_chamada(
+        assinada,
+        "chave:bancada",
+        impressao,
+        politica::auditoria::Titular::Pessoa,
+    )
+}
+
+/// A gestão só na alegação: o IC fora das declarações, como no `icp` — ver
+/// [`o_ic_so_na_alegacao`] —, e também o ledger de cycles, o canister de
+/// gerenciamento, os métodos da gestão, o hash dos módulos e os
+/// `canisters` mexidos: o kernel não leu o que se declarou, e nenhuma
+/// decisão dele é sobre um canister. O arquivo do módulo está nas decisões
+/// do `fs.read`: um arquivo é do gate.
+fn a_gestao_so_na_alegacao(fio: u64, canisters: &[&str]) -> Resultado {
+    o_ic_so_na_alegacao(fio)?;
+    let mut da_gestao = alloc::vec![
+        "um5iw",
+        CANISTER_DE_GERENCIAMENTO,
+        "create_canister",
+        "withdraw",
+        "install_code",
+        "upload_chunk",
+        "install_chunked_code",
+        "canister_status",
+        MODULO_IMPLANTAVEL_A,
+        MODULO_IMPLANTAVEL_B,
+    ];
+    da_gestao.extend_from_slice(canisters);
+    let do_processo = alloc::format!("pelo processo {fio} (");
+    let fora = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
+            .filter(|r| {
+                let e = alloc::format!("{:?}", r.evento);
+                da_gestao.iter().any(|t| e.contains(t))
+            })
+            .map(|r| r.seq)
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .unwrap_or_default();
+    if !fora.is_empty() {
+        crate::log_error!(
+            "teste",
+            "registros com a gestao fora da alegacao: {:?}",
+            fora
+        );
+        return Err("a gestao apareceu num registro do processo fora da alegacao");
+    }
+    Ok(())
+}
+
+/// O canister criado, instalado e conferido, de ponta a ponta, por uma
+/// pessoa operadora com as chaves dela — `chave:bancada` e
+/// `chave:bancada-2`, criadas por ela pelo gate — e os dois programas
+/// lançados por ela: a `carteira`, que põe cycles na conta da chave, e a
+/// `implantacao`:
+///
+/// - a criação pelo ledger de cycles, assinada pela chave: **uma**
+///   execução de `key.sign`, a decisão do gate sobre `chave:bancada` em
+///   nome da pessoa, a declaração `icp.update` ancorada nela, o canister e
+///   o bloco; a conta da chave perde a quantia e a taxa;
+/// - o estado, pelo canister de gerenciamento com o canister novo como
+///   efetivo: `running`, sem módulo, a chave como controladora, os cycles
+///   que sobraram da criação — a prova da sub-rede do canister, delegada
+///   pela raiz, e a declaração que diz o canister alvo;
+/// - a instalação do módulo A, lido do armazém: o SHA-256 dos bytes lidos
+///   é o hash que o estado diz do módulo instalado;
+/// - a versão `A`, pela consulta do anônimo, e o contador, de um em um;
+/// - nada do IC nem da gestão em registro nenhum fora da alegação.
+fn icp_o_canister_criado_instalado_e_conferido() -> Resultado {
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(247),
+            "implantacao-criada",
+            "operador",
+        );
+        let impressao = chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+
+            // A criação, assinada pela chave.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (p, canister, _) = implantacao.criar(1)?;
+            let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let dono = p
+                .remetente
+                .clone()
+                .filter(|r| r != PRINCIPAL_ANONIMO)
+                .ok_or("a criacao nao foi da chave")?;
+            if assinaturas != 1 {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a criacao nao foi uma assinatura");
+            }
+            let decisao = assinatura_do_passo(fio, antes, &impressao)?;
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &assunto_do_ledger_de_ciclos("create_canister"),
+                AncoraDaConsulta::Decisao(decisao),
+            )?;
+            if carteira.saldo(true, 1)? != ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS {
+                return Err("a criacao nao custou a quantia e a taxa");
+            }
+
+            // O estado: rodando, sem módulo, e a chave como controladora. O
+            // CMC escolhe a sub-rede de aplicação do canister novo; a prova
+            // vem dela, delegada pela raiz.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (p, e) = implantacao.estado_em(1, "bancada")?;
+            let e = e.ok_or_else(|| {
+                crate::log_error!("teste", "{:?}", p);
+                "o estado nao se le"
+            })?;
+            let (assinaturas, prova) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let sub_rede = sub_rede_da_prova(prova).unwrap_or_default();
+            if p.desfecho != "verified"
+                || assinaturas != 1
+                || e.situacao != "running"
+                || e.modulo != "nenhum"
+                || e.controladores != [dono.as_str()]
+                || e.cycles == 0
+                || e.cycles >= QUANTIA_DA_CRIACAO
+                || !prova.ends_with(" delegada leituras 0")
+                || sub_rede.is_empty()
+                || sub_rede == SUB_REDE_DA_RAIZ
+            {
+                crate::log_error!("teste", "{:?} / {:?}", p, e);
+                return Err("o canister novo nao rodava vazio, com a chave como controladora");
+            }
+            let decisao = assinatura_do_passo(fio, antes, &impressao)?;
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &assunto_da_gestao("canister_status", &canister),
+                AncoraDaConsulta::Decisao(decisao),
+            )?;
+
+            // A instalação do módulo A.
+            let antes = crate::autorizacao::ultimo_registro();
+            let p = implantacao.instalar(1, "bancada")?;
+            let (assinaturas, prova) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            if p.desfecho != "verified"
+                || assinaturas != 1
+                || p.resposta.as_deref() != Some("instalado")
+                || p.remetente.as_deref() != Some(dono.as_str())
+                || sub_rede_da_prova(prova) != Some(sub_rede)
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("o modulo A nao foi instalado, verificado");
+            }
+            let decisao = assinatura_do_passo(fio, antes, &impressao)?;
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &assunto_da_gestao("install_code", &canister),
+                AncoraDaConsulta::Decisao(decisao),
+            )?;
+            let e = implantacao.estado(1)?;
+            if e.modulo != MODULO_IMPLANTAVEL_A || e.controladores != [dono.as_str()] {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o estado nao diz o modulo A que se leu");
+            }
+
+            // A versão, pela consulta do anônimo, e o contador.
+            let p = implantacao.passo(IMPLANTACAO_VERSAO, REDE_BANCADA, 0, "versao bancada")?;
+            if p.desfecho != "verified" || versao_dita(&p) != Some("\"A\"") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a versao do canister nao e a do modulo A");
+            }
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.query",
+                &alloc::format!("{canister}/versao"),
+                AncoraDaConsulta::Conexao,
+            )?;
+            for n in 1..=2u64 {
+                let antes = crate::autorizacao::ultimo_registro();
+                let p = implantacao.passo(
+                    IMPLANTACAO_CONTAR,
+                    REDE_BANCADA,
+                    1,
+                    "contar bancada chave:bancada",
+                )?;
+                if p.desfecho != "verified" || contador_dito(&p) != Some(n) {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("o contador nao contou de um em um");
+                }
+                let decisao = assinatura_do_passo(fio, antes, &impressao)?;
+                declaracao_da_implantacao(
+                    fio,
+                    &p,
+                    "icp.update",
+                    &alloc::format!("{canister}/contar"),
+                    AncoraDaConsulta::Decisao(decisao),
+                )?;
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])?;
+            o_valor_so_na_alegacao(carteira.fio)
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim).and(fim_da_carteira)
+    })
+}
+
+/// O upgrade em pedaços guarda o estado: o canister roda o A e contou até
+/// três; a `implantacao` manda o B em três pedaços — um `upload_chunk`
+/// assinado cada, verificado, com o hash do pedaço guardado — e o
+/// `install_chunked_code` em modo `upgrade`. São quatro assinaturas, cada
+/// uma a decisão de uma chamada, e quatro declarações, cada uma ancorada
+/// na sua e dizendo o canister alvo. Depois, o estado diz o hash do B, a
+/// versão é `B`, e o contador continua de onde estava: quatro.
+fn icp_o_upgrade_em_pedacos_guarda_o_estado() -> Resultado {
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(248),
+            "implantacao-upgrade",
+            "operador",
+        );
+        let impressao = chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            ciclos_para_a_chave(&carteira, 1)?;
+            let (_, canister, _) = implantacao.criar(1)?;
+            let p = implantacao.instalar(1, "bancada")?;
+            if p.desfecho != "verified" || p.resposta.as_deref() != Some("instalado") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("o modulo A nao foi instalado");
+            }
+            for n in 1..=3 {
+                if implantacao.contar(1)? != n {
+                    return Err("o contador nao contou de um em um");
+                }
+            }
+            implantacao.fixar_pedaco(PEDACO_DA_SUITE)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let (pedacos, instalacao) = implantacao.atualizar(1, "bancada", 3)?;
+            let mut hashes = alloc::vec::Vec::new();
+            for p in &pedacos {
+                let (assinaturas, _) = assinaturas_do_passo(p).ok_or("o passo sem assinaturas")?;
+                let hash = hash_dito(p);
+                if p.desfecho != "verified"
+                    || assinaturas != 1
+                    || hash.is_none()
+                    || hashes.contains(&hash)
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("um pedaco nao subiu verificado, com o hash dele");
+                }
+                hashes.push(hash);
+            }
+            let instalacao = instalacao.ok_or("o upgrade nao chegou a instalacao")?;
+            let (assinaturas, _) =
+                assinaturas_do_passo(&instalacao).ok_or("o passo sem assinaturas")?;
+            if instalacao.desfecho != "verified"
+                || assinaturas != 1
+                || instalacao.resposta.as_deref() != Some("instalado")
+            {
+                crate::log_error!("teste", "{:?}", instalacao);
+                return Err("o upgrade em pedacos nao instalou, verificado");
+            }
+            let feitas = assinaturas_do_processo(fio, antes);
+            if feitas.len() != 4 {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("o upgrade em tres pedacos nao foram quatro assinaturas");
+            }
+            let chamadas = pedacos
+                .iter()
+                .map(|p| (p, "upload_chunk"))
+                .chain(core::iter::once((&instalacao, "install_chunked_code")));
+            for ((_, assinada), (p, metodo)) in feitas.iter().zip(chamadas) {
+                let decisao = assinatura_da_chamada(
+                    assinada,
+                    "chave:bancada",
+                    &impressao,
+                    politica::auditoria::Titular::Pessoa,
+                )?;
+                declaracao_da_implantacao(
+                    fio,
+                    p,
+                    "icp.update",
+                    &assunto_da_gestao(metodo, &canister),
+                    AncoraDaConsulta::Decisao(decisao),
+                )?;
+            }
+            // O canister roda o B, e a memória estável ficou.
+            let e = implantacao.estado(1)?;
+            if e.modulo != MODULO_IMPLANTAVEL_B {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o estado nao diz o modulo B");
+            }
+            if implantacao.versao()? != "\"B\"" {
+                return Err("a versao depois do upgrade nao e a do modulo B");
+            }
+            if implantacao.contar(1)? != 4 {
+                return Err("o upgrade nao guardou a memoria estavel do canister");
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim).and(fim_da_carteira)
+    })
+}
+
+/// Quem não controla não gerencia: o canister é da primeira chave, e a
+/// segunda — da mesma pessoa, no alcance dela, que o gate deixa assinar —
+/// lê o estado, instala e manda o primeiro pedaço de um upgrade. O IC
+/// recusa as três na entrada, sem certificado: cada uma assinada — uma
+/// decisão do gate sobre `chave:bancada-2` —, dita como recusa sem prova e
+/// declarada `uncertified_reject`, ancorada na decisão; o upgrade para no
+/// primeiro pedaço. O canister não mudou: o módulo A, a primeira chave como
+/// controladora, a versão `A`, e o contador onde estava. São duas decisões
+/// em duas camadas, e nenhuma lê a outra.
+fn icp_quem_nao_controla_nao_gerencia() -> Resultado {
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(249),
+            "implantacao-controle",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            ciclos_para_a_chave(&carteira, 1)?;
+            let (_, canister, _) = implantacao.criar(1)?;
+            let p = implantacao.instalar(1, "bancada")?;
+            if p.desfecho != "verified" {
+                return Err("o modulo A nao foi instalado");
+            }
+            if implantacao.contar(1)? != 1 {
+                return Err("o contador nao comecou do um");
+            }
+            let antes_do_estado = implantacao.estado(1)?;
+            implantacao.fixar_pedaco(PEDACO_DA_SUITE)?;
+
+            // A outra chave: o estado, a instalação e um pedaço.
+            let antes = crate::autorizacao::ultimo_registro();
+            let estado = implantacao.passo(
+                IMPLANTACAO_ESTADO,
+                REDE_BANCADA,
+                2,
+                "estado bancada chave:bancada-2",
+            )?;
+            let instalacao = implantacao.instalar(2, "bancada")?;
+            let (pedacos, instalada) = implantacao.atualizar(2, "bancada", 3)?;
+            if pedacos.len() != 1 || instalada.is_some() {
+                return Err("o upgrade de quem nao controla passou do primeiro pedaco");
+            }
+            let tentadas = [
+                (&estado, "canister_status"),
+                (&instalacao, "install_code"),
+                (&pedacos[0], "upload_chunk"),
+            ];
+            let feitas = assinaturas_do_processo(fio, antes);
+            if feitas.len() != tentadas.len() {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("cada pedido de quem nao controla nao foi uma assinatura");
+            }
+            for ((_, assinada), (p, metodo)) in feitas.iter().zip(tentadas) {
+                let (assinaturas, _) = assinaturas_do_passo(p).ok_or("o passo sem assinaturas")?;
+                if p.desfecho != "uncertified_reject"
+                    || assinaturas != 1
+                    || !p
+                        .resposta
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with("recusa sem prova "))
+                    || !assinada.recurso.starts_with("chave:bancada-2 ")
+                {
+                    crate::log_error!("teste", "{}: {:?} / {:?}", metodo, p, assinada);
+                    return Err("quem nao controla nao foi recusado sem prova, assinado");
+                }
+                let decisao =
+                    decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_implantacao(
+                    fio,
+                    p,
+                    "icp.update",
+                    &assunto_da_gestao(metodo, &canister),
+                    AncoraDaConsulta::Decisao(decisao),
+                )?;
+            }
+
+            // O canister não mudou.
+            let depois = implantacao.estado(1)?;
+            if depois.modulo != MODULO_IMPLANTAVEL_A
+                || depois.controladores != antes_do_estado.controladores
+            {
+                crate::log_error!("teste", "{:?} / {:?}", antes_do_estado, depois);
+                return Err("quem nao controla mudou o canister");
+            }
+            if implantacao.versao()? != "\"A\"" || implantacao.contar(1)? != 2 {
+                return Err("quem nao controla mudou o modulo ou o estado do canister");
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim).and(fim_da_carteira)
+    })
+}
+
+/// A prova adulterada não vira instalação:
+///
+/// - `bls-invalida`: o certificado das faixas é recusado — nada se assina,
+///   nenhuma chamada sai —, e o canister continua vazio;
+/// - `assinatura-errada`: a instalação sai, assinada, e o IC instala — mas
+///   a prova da resposta não fecha, e a `implantacao` não diz `instalado`;
+///   o estado e a versão, pela rede honesta, mostram o que houve, e a
+///   mesma instalação de novo é a recusa verificada do canister cheio;
+/// - `sem-assinatura`: o primeiro pedaço de um upgrade sobe sem prova, e o
+///   upgrade para nele — o canister continua no A;
+/// - a versão, pelas redes que mentem para a consulta, não é dita;
+///
+/// cada passo declarado como o que é, ancorado na decisão da assinatura
+/// quando houve uma.
+fn icp_a_prova_adulterada_nao_vira_instalacao() -> Resultado {
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(250),
+            "implantacao-adulterada",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            ciclos_para_a_chave(&carteira, 1)?;
+            let (_, canister, _) = implantacao.criar(1)?;
+            let instalar = assunto_da_gestao("install_code", &canister);
+
+            // As faixas recusadas: nada se assina, nenhuma chamada sai.
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            let p = implantacao.instalar(1, "bls-invalida")?;
+            let (assinaturas, detalhe) =
+                assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            if p.desfecho != "unverified_certificate"
+                || assinaturas != 0
+                || !detalhe.starts_with("subnet: verificacao")
+                || p.resposta.is_some()
+                || pedidos_da_implantacao(desde, "instalar bls-invalida chave:bancada").2 != 0
+                || !assinaturas_do_processo(fio, antes).is_empty()
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a instalacao com as faixas adulteradas saiu, ou disse instalado");
+            }
+            declaracao_da_implantacao(fio, &p, "icp.update", &instalar, AncoraDaConsulta::Conexao)?;
+            if implantacao.estado(1)?.modulo != "nenhum" {
+                return Err("a instalacao recusada nas faixas instalou");
+            }
+
+            // A resposta adulterada: o IC instalou, e não se diz.
+            let antes = crate::autorizacao::ultimo_registro();
+            let p = implantacao.instalar(1, "assinatura-errada")?;
+            let (assinaturas, detalhe) =
+                assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+            let feitas = assinaturas_do_processo(fio, antes);
+            if p.desfecho != "unverified_certificate"
+                || assinaturas != 1
+                || feitas.len() != 1
+                || !detalhe.starts_with("call: verificacao")
+                || p.resposta.is_some()
+            {
+                crate::log_error!("teste", "{:?} / {:?}", p, feitas);
+                return Err("a instalacao com a resposta adulterada disse instalado");
+            }
+            let decisao =
+                decisao_executada(&feitas[0].1.detalhe).ok_or("a assinatura sem decisao")?;
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &instalar,
+                AncoraDaConsulta::Decisao(decisao),
+            )?;
+            // A rede honesta diz o que houve.
+            if implantacao.estado(1)?.modulo != MODULO_IMPLANTAVEL_A
+                || implantacao.versao()? != "\"A\""
+            {
+                return Err("o estado nao mostrou a instalacao que a prova escondeu");
+            }
+            let p = implantacao.instalar(1, "bancada")?;
+            if p.desfecho != "verified_reject"
+                || !p
+                    .resposta
+                    .as_deref()
+                    .is_some_and(|r| r.starts_with("recusa "))
+            {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a instalacao num canister cheio nao foi a recusa verificada");
+            }
+
+            // Um pedaço sem prova para o upgrade.
+            implantacao.fixar_pedaco(PEDACO_DA_SUITE)?;
+            let (pedacos, instalada) = implantacao.atualizar(1, "sem-assinatura", 3)?;
+            if pedacos.len() != 1
+                || instalada.is_some()
+                || pedacos[0].desfecho != "unverified_response"
+                || pedacos[0].resposta.is_some()
+            {
+                crate::log_error!("teste", "{:?}", pedacos);
+                return Err("o upgrade seguiu depois de um pedaco sem prova");
+            }
+            if implantacao.estado(1)?.modulo != MODULO_IMPLANTAVEL_A
+                || implantacao.versao()? != "\"A\""
+            {
+                return Err("o upgrade parado no primeiro pedaco trocou o modulo");
+            }
+
+            // A versão, pelas redes que mentem para a consulta.
+            for (rede, desfecho) in [
+                ("bls-invalida", "unverified_certificate"),
+                ("assinatura-errada", "unverified_response"),
+                ("sem-assinatura", "unverified_response"),
+            ] {
+                let passo = alloc::format!("versao {rede}");
+                let p = implantacao.passo(IMPLANTACAO_VERSAO, rede_do_icp(rede)?, 0, &passo)?;
+                if p.desfecho != desfecho || versao_dita(&p).is_some() {
+                    crate::log_error!("teste", "{}: {:?}", rede, p);
+                    return Err("a versao pela prova adulterada foi dita");
+                }
+                declaracao_da_implantacao(
+                    fio,
+                    &p,
+                    "icp.query",
+                    &alloc::format!("{canister}/versao"),
+                    AncoraDaConsulta::Conexao,
+                )?;
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim).and(fim_da_carteira)
+    })
+}
+
+/// Sem `key.sign`, nada se implanta — e nada vai do anônimo no lugar, que
+/// na bancada tem cycles:
+///
+/// - sem a chave: `failed_key`, e nada conecta;
+/// - sem `key.read`: `failed_key`, `DENY_PERMISSION`, e nada conecta;
+/// - com o `key.read` só sobre a outra chave: `failed_key`,
+///   `DENY_RESOURCE`, e nada conecta;
+/// - com `key.read` e sem `key.sign`: `failed_signature`,
+///   `DENY_PERMISSION` — as faixas, e nenhuma chamada;
+/// - com `key.sign` só sobre a outra chave: `failed_signature`,
+///   `DENY_RESOURCE`, também sem chamada;
+///
+/// o kernel não executa um `key.sign` desta chave, as duas assinaturas
+/// pedidas são recusadas pelo gate, nenhum canister nasce, e os cycles —
+/// os da chave, os da outra e os do anônimo — não mudam. A outra chave, no
+/// alcance, assina, e o ledger a recusa por falta de cycles: a recusa é
+/// verificada.
+fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sem_ler_nem_assinar = politica_da_bancada_icp(&[
+            (
+                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.destroy\nrecurso operador",
+            ),
+            (
+                "recurso operador key.read chave:bancada chave:bancada-2\n",
+                "",
+            ),
+            (
+                "recurso operador key.sign chave:bancada chave:bancada-2\n",
+                "",
+            ),
+        ])?;
+        let sem_assinar = politica_da_bancada_icp(&[
+            (
+                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy\nrecurso operador",
+            ),
+            (
+                "recurso operador key.sign chave:bancada chave:bancada-2\n",
+                "",
+            ),
+        ])?;
+        let so_a_outra = politica_da_bancada_icp(&[(
+            "recurso operador key.sign chave:bancada chave:bancada-2\n",
+            "recurso operador key.sign chave:bancada-2\n",
+        )])?;
+        let so_le_a_outra = politica_da_bancada_icp(&[(
+            "recurso operador key.read chave:bancada chave:bancada-2\n",
+            "recurso operador key.read chave:bancada-2\n",
+        )])?;
+        let passo = "criar bancada chave:bancada";
+        let criar = assunto_do_ledger_de_ciclos("create_canister");
+        let r = (|| -> Resultado {
+            // Sem a chave.
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(251),
+                "implantacao-sem-chave",
+                "operador",
+            );
+            let antes = crate::autorizacao::ultimo_registro();
+            let implantacao = Implantacao::lancar(Autoridade::Pessoa { sessao })?;
+            let fio = implantacao.fio;
+            let desde = crate::log::total_emitidos();
+            let p = implantacao.passo(IMPLANTACAO_CRIAR, REDE_BANCADA, 1, passo);
+            let pedidos = pedidos_da_implantacao(desde, passo);
+            let fim = implantacao.encerrar();
+            let p = p?;
+            fim?;
+            if p.desfecho != "failed_key"
+                || p.detalhe != "assinaturas 0; chave: INVALID_ARGUMENT"
+                || pedidos != (0, 0, 0)
+            {
+                crate::log_error!("teste", "{:?} {:?}", p, pedidos);
+                return Err("sem a chave, a criacao nao parou na chave");
+            }
+            declaracao_da_implantacao(fio, &p, "icp.update", &criar, AncoraDaConsulta::Nenhuma)?;
+            if !assinaturas_do_processo(fio, antes).is_empty()
+                || !decisoes_do_processo(fio, "key.sign", "chave:bancada").is_empty()
+            {
+                return Err("sem a chave, um key.sign chegou ao gate");
+            }
+            a_gestao_so_na_alegacao(fio, &[])?;
+
+            // Com as chaves e os cycles, e sem a permissão: na leitura, na
+            // assinatura, e fora do alcance.
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(252),
+                "implantacao-sem-permissao",
+                "operador",
+            );
+            chaves_da_carteira(sessao)?;
+            let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+            let fio = implantacao.fio;
+            let r = (|| -> Resultado {
+                let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+                let anonimo = carteira.saldo(true, 0)?;
+                let antes = crate::autorizacao::ultimo_registro();
+                for (politica, desfecho, detalhe, pedidos, ancora) in [
+                    (
+                        &sem_ler_nem_assinar,
+                        "failed_key",
+                        "assinaturas 0; chave: DENY_PERMISSION",
+                        (0, 0, 0),
+                        AncoraDaConsulta::Nenhuma,
+                    ),
+                    (
+                        &so_le_a_outra,
+                        "failed_key",
+                        "assinaturas 0; chave: DENY_RESOURCE",
+                        (0, 0, 0),
+                        AncoraDaConsulta::Nenhuma,
+                    ),
+                    (
+                        &sem_assinar,
+                        "failed_signature",
+                        "assinaturas 0; call: assinatura: DENY_PERMISSION",
+                        (1, 0, 0),
+                        AncoraDaConsulta::Conexao,
+                    ),
+                    (
+                        &so_a_outra,
+                        "failed_signature",
+                        "assinaturas 0; call: assinatura: DENY_RESOURCE",
+                        (1, 0, 0),
+                        AncoraDaConsulta::Conexao,
+                    ),
+                ] {
+                    let desde = crate::log::total_emitidos();
+                    let p = com_a_politica(politica.clone(), || {
+                        implantacao.passo(IMPLANTACAO_CRIAR, REDE_BANCADA, 1, passo)
+                    })?;
+                    if p.desfecho != desfecho
+                        || p.detalhe != detalhe
+                        || pedidos_da_implantacao(desde, passo) != pedidos
+                    {
+                        crate::log_error!(
+                            "teste",
+                            "{:?} {:?}",
+                            p,
+                            pedidos_da_implantacao(desde, passo)
+                        );
+                        return Err(
+                            "sem a permissao, a criacao nao parou na chave, ou saiu sem assinar",
+                        );
+                    }
+                    declaracao_da_implantacao(fio, &p, "icp.update", &criar, ancora)?;
+                }
+                if !assinaturas_do_processo(fio, antes).is_empty() {
+                    return Err("sem a permissao, o kernel executou um key.sign");
+                }
+                // O gate recusou cada assinatura pedida.
+                let assinaturas = decisoes_do_processo(fio, "key.sign", "chave:bancada");
+                if assinaturas.len() != 2
+                    || assinaturas
+                        .iter()
+                        .any(|(_, c, _)| *c == politica::Codigo::Allow)
+                {
+                    crate::log_error!("teste", "{:?}", assinaturas);
+                    return Err("as assinaturas sem permissao nao foram recusadas pelo gate");
+                }
+                // Nada saiu — nem da chave, nem do anônimo no lugar —, e
+                // nenhum canister nasceu.
+                if carteira.saldo(true, 1)? != ciclos
+                    || carteira.saldo(true, 2)? != 0
+                    || carteira.saldo(true, 0)? != anonimo
+                {
+                    return Err("sem a permissao, um saldo de cycles mudou");
+                }
+                let desde = crate::log::total_emitidos();
+                implantacao.pedir(IMPLANTACAO_ESTADO, REDE_BANCADA, 1)?;
+                esperar_ate(
+                    || linhas_do_programa(desde, "implantacao: nenhum canister") == 1,
+                    TETO_DO_ICP,
+                )
+                .map_err(|_| "sem a permissao, a implantacao guardou um canister")?;
+                // A outra chave, no alcance, assina; o ledger a recusa.
+                let p = com_a_politica(so_a_outra.clone(), || {
+                    implantacao.passo(
+                        IMPLANTACAO_CRIAR,
+                        REDE_BANCADA,
+                        2,
+                        "criar bancada chave:bancada-2",
+                    )
+                })?;
+                let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                if p.desfecho != "verified"
+                    || assinaturas != 1
+                    || erro_dito(&p) != Some("InsufficientFunds balance 0")
+                {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("a chave no alcance nao assinou, ou o ledger nao a recusou");
+                }
+                a_gestao_so_na_alegacao(fio, &[])
+            })();
+            let fim = implantacao.encerrar();
+            let fim_da_carteira = carteira.encerrar();
+            r.and(fim).and(fim_da_carteira)
+        })();
+        crate::chaves::esquecer_de_teste();
+        r
+    })
+}
+
+/// A criação e a carga repetidas não executam duas vezes: a mesma criação
+/// — o mesmo `created_at_time`, a mesma quantia —, assinada de novo, volta
+/// `Duplicate` com o bloco e o canister da primeira, pela rede honesta e
+/// pela que responde 202 — esta acompanhada, cada leitura da situação
+/// assinada de novo —, e a `implantacao` fica com o mesmo canister. A
+/// carga põe os cycles no canister; a mesma carga de novo volta
+/// `Duplicate` com o bloco da primeira, e o canister não ganha mais nada.
+/// Os cycles da chave mostram uma criação e uma carga, cada uma com a taxa.
+fn icp_a_criacao_e_a_carga_nao_executam_duas_vezes() -> Resultado {
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(253),
+            "implantacao-repeticao",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+            let (_, canister, bloco) = implantacao.criar(1)?;
+            let criar = assunto_do_ledger_de_ciclos("create_canister");
+            let duplicada = alloc::format!("Duplicate duplicate_of {bloco} canister_id {canister}");
+            for (rede, nome) in [(REDE_BANCADA, "bancada"), (REDE_ASSINCRONA, "assincrona")] {
+                let antes = crate::autorizacao::ultimo_registro();
+                let desde = crate::log::total_emitidos();
+                let passo = alloc::format!("repetir_criacao {nome} chave:bancada");
+                implantacao.pedir(IMPLANTACAO_REPETIR_CRIACAO, rede, 0)?;
+                let p = implantacao.dito(desde, &passo)?;
+                let (assinaturas, _) = assinaturas_do_passo(&p).ok_or("o passo sem assinaturas")?;
+                let (_, leituras, _) =
+                    remetente_e_resposta(&p).ok_or("a repeticao sem resposta")?;
+                let feitas = assinaturas_do_processo(fio, antes);
+                if p.desfecho != "verified"
+                    || erro_dito(&p) != Some(duplicada.as_str())
+                    || assinaturas != 1 + leituras
+                    || feitas.len() as u64 != assinaturas
+                    || (rede == REDE_ASSINCRONA) != (leituras > 0)
+                {
+                    crate::log_error!("teste", "{}: {:?} / {:?}", nome, p, feitas);
+                    return Err(
+                        "a criacao repetida nao voltou Duplicate com o canister da primeira",
+                    );
+                }
+                let alvo = alloc::format!("implantacao: alvo {canister}");
+                esperar_ate(|| linhas_do_programa(desde, &alvo) == 1, TETO_DO_ICP)
+                    .map_err(|_| "a repeticao nao deixou a implantacao com o mesmo canister")?;
+                let d =
+                    decisao_executada(&feitas[0].1.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_implantacao(
+                    fio,
+                    &p,
+                    "icp.update",
+                    &criar,
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+            }
+            let depois_da_criacao = ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS;
+            if carteira.saldo(true, 1)? != depois_da_criacao {
+                return Err("a criacao repetida cobrou de novo");
+            }
+
+            // A carga, e a mesma de novo.
+            let carregar = assunto_do_ledger_de_ciclos("withdraw");
+            let antes_da_carga = implantacao.estado(1)?.cycles;
+            let antes = crate::autorizacao::ultimo_registro();
+            let p = implantacao.passo(
+                IMPLANTACAO_CARREGAR,
+                REDE_BANCADA,
+                1,
+                "carregar bancada chave:bancada",
+            )?;
+            let bloco_da_carga = bloco_dito(&p)
+                .filter(|_| p.desfecho == "verified")
+                .ok_or_else(|| {
+                    crate::log_error!("teste", "{:?}", p);
+                    "a carga nao executou"
+                })?;
+            let feitas = assinaturas_do_processo(fio, antes);
+            let [(_, assinada)] = feitas.as_slice() else {
+                return Err("a carga nao foi uma assinatura");
+            };
+            let d = decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &carregar,
+                AncoraDaConsulta::Decisao(d),
+            )?;
+            let depois_da_carga = implantacao.estado(1)?.cycles;
+            if depois_da_carga > antes_da_carga + QUANTIA_DA_CARGA
+                || depois_da_carga + GASTO_ENTRE_ESTADOS < antes_da_carga + QUANTIA_DA_CARGA
+            {
+                crate::log_error!("teste", "{} {}", antes_da_carga, depois_da_carga);
+                return Err("o canister nao recebeu a carga");
+            }
+            let p = implantacao.passo(
+                IMPLANTACAO_REPETIR_CARGA,
+                REDE_BANCADA,
+                0,
+                "repetir_carga bancada chave:bancada",
+            )?;
+            let duplicada = alloc::format!("Duplicate duplicate_of {bloco_da_carga}");
+            if p.desfecho != "verified" || erro_dito(&p) != Some(duplicada.as_str()) {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a carga repetida nao voltou Duplicate com o bloco da primeira");
+            }
+            if implantacao.estado(1)?.cycles > depois_da_carga {
+                return Err("a carga repetida carregou de novo");
+            }
+            if carteira.saldo(true, 1)? != depois_da_criacao - QUANTIA_DA_CARGA - TAXA_DE_CICLOS {
+                return Err("os cycles da chave nao mostram uma criacao e uma carga");
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim).and(fim_da_carteira)
+    })
+}
+
+/// A mesma criação por duas implantações ao mesmo tempo, da mesma pessoa e
+/// com a mesma chave — a mesma hora fixada, a mesma quantia, cada uma pela
+/// sua rede honesta —: uma cria, e a outra volta `Duplicate` com o bloco
+/// dela. O ledger debita antes de pedir o canister ao CMC: a que chegou com
+/// a primeira em andamento não sabe o canister, e a repetição dela, depois,
+/// diz; as duas ficam com o mesmo canister. Duas assinaturas, cada uma do
+/// seu processo, de dois pedidos — as decisões e os resumos diferem —, cada
+/// declaração ancorada na sua; e os cycles da chave mostram uma criação só.
+fn icp_a_mesma_criacao_por_dois_processos() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(254),
+            "implantacao-concorrente",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let (carteira, a) = carteira_e_implantacao(sessao)?;
+        let b = match Implantacao::lancar_segunda(Autoridade::Pessoa { sessao }) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = a.encerrar();
+                let _ = carteira.encerrar();
+                crate::chaves::esquecer_de_teste();
+                return Err(e);
+            }
+        };
+        let r = (|| -> Resultado {
+            let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+            let agora = crate::hora::civil_s().ok_or("a suite sem a hora civil")?;
+            a.fixar_hora(agora - 5)?;
+            b.fixar_hora(agora - 5)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            a.pedir(IMPLANTACAO_CRIAR_EM, REDE_BANCADA, 1)?;
+            b.pedir(IMPLANTACAO_CRIAR_EM, rede_do_icp("direta")?, 1)?;
+            let pa = a.dito(desde, "criar_em bancada chave:bancada")?;
+            let pb = b.dito(desde, "criar_em direta chave:bancada")?;
+            // Uma criou; a outra voltou `Duplicate` com o bloco da primeira
+            // — e com o canister, se a primeira já tinha acabado quando ela
+            // chegou: o ledger debita antes de pedir o canister ao CMC.
+            let (canister, bloco, duplicada, repetidora, rede_da_repetidora) =
+                match (canister_dito(&pa), canister_dito(&pb)) {
+                    (Some((c, x)), None) => (c, x, &pb, &b, "direta"),
+                    (None, Some((c, x))) => (c, x, &pa, &a, "bancada"),
+                    _ => {
+                        crate::log_error!("teste", "{:?} / {:?}", pa, pb);
+                        return Err("a mesma criacao por dois processos nao criou uma vez so");
+                    }
+                };
+            let sem_o_canister = alloc::format!("Duplicate duplicate_of {bloco}");
+            let com_o_canister = alloc::format!("{sem_o_canister} canister_id {canister}");
+            let disse_o_canister = match erro_dito(duplicada) {
+                Some(e) if e == com_o_canister => true,
+                Some(e) if e == sem_o_canister => false,
+                _ => {
+                    crate::log_error!("teste", "{:?} / {:?}", pa, pb);
+                    return Err("a outra criacao nao voltou Duplicate com o bloco da primeira");
+                }
+            };
+            if pa.desfecho != "verified" || pb.desfecho != "verified" {
+                crate::log_error!("teste", "{:?} / {:?}", pa, pb);
+                return Err("as duas criacoes nao foram verificadas");
+            }
+            let alvo = alloc::format!("implantacao: alvo {canister}");
+            let ditos = if disse_o_canister { 2 } else { 1 };
+            esperar_ate(|| linhas_do_programa(desde, &alvo) == ditos, TETO_DO_ICP)
+                .map_err(|_| "a implantacao nao ficou com o canister que a criacao disse")?;
+            let criar = assunto_do_ledger_de_ciclos("create_canister");
+            let mut decisoes = alloc::vec::Vec::new();
+            let mut resumos = alloc::vec::Vec::new();
+            for (implantacao, p) in [(&a, &pa), (&b, &pb)] {
+                let feitas = assinaturas_do_processo(implantacao.fio, antes);
+                let [(_, assinada)] = feitas.as_slice() else {
+                    crate::log_error!("teste", "{:?}", feitas);
+                    return Err("cada criacao nao foi uma assinatura do processo dela");
+                };
+                let d = decisao_executada(&assinada.detalhe).ok_or("a assinatura sem decisao")?;
+                declaracao_da_implantacao(
+                    implantacao.fio,
+                    p,
+                    "icp.update",
+                    &criar,
+                    AncoraDaConsulta::Decisao(d),
+                )?;
+                decisoes.push(d);
+                resumos.push(assinada.recurso.clone());
+            }
+            if decisoes[0] == decisoes[1] || resumos[0] == resumos[1] {
+                crate::log_error!("teste", "{:?} / {:?}", decisoes, resumos);
+                return Err("as duas criacoes nao foram duas assinaturas de dois pedidos");
+            }
+            // A que chegou com a primeira em andamento não soube o canister:
+            // a repetição, depois, diz.
+            if !disse_o_canister {
+                let desde = crate::log::total_emitidos();
+                let passo = alloc::format!("repetir_criacao {rede_da_repetidora} chave:bancada");
+                repetidora.pedir(
+                    IMPLANTACAO_REPETIR_CRIACAO,
+                    rede_do_icp(rede_da_repetidora)?,
+                    0,
+                )?;
+                let p = repetidora.dito(desde, &passo)?;
+                if p.desfecho != "verified" || erro_dito(&p) != Some(com_o_canister.as_str()) {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("a repeticao nao disse o canister da primeira criacao");
+                }
+                esperar_ate(|| linhas_do_programa(desde, &alvo) == 1, TETO_DO_ICP)
+                    .map_err(|_| "a repeticao nao deixou a implantacao com o canister")?;
+            }
+            if carteira.saldo(true, 1)? != ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS {
+                return Err("a mesma criacao cobrou duas vezes");
+            }
+            a_gestao_so_na_alegacao(a.fio, &[&canister])?;
+            a_gestao_so_na_alegacao(b.fio, &[&canister])
+        })();
+        let fim_a = a.encerrar();
+        let fim_b = b.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim_a).and(fim_b).and(fim_da_carteira)
+    })
+}
+
+/// A chave anulada no meio do upgrade: os dois pedaços do B sobem, cada um
+/// assinado, pela rede `lenta`; a `implantacao` dorme esperando as faixas
+/// do `install_chunked_code`, que a rede segura, e o administrador anula a
+/// chave. As faixas chegam, a instalação pede a assinatura, e o kernel
+/// recusa — a chave anulada não assina mais nada —: nenhuma chamada sai,
+/// nem do anônimo no lugar, o desfecho é `failed_signature`, a declaração
+/// vai ancorada na conexão, e o canister continua rodando o A — a versão,
+/// pela consulta do anônimo, e o contador, do anônimo.
+fn icp_a_chave_anulada_no_meio_do_upgrade() -> Resultado {
+    com_a_bancada_icp(|| {
+        com_a_politica(
+            politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
+            icp_a_chave_anulada_no_meio_do_upgrade_com_a_politica,
+        )
+    })
+}
+
+fn icp_a_chave_anulada_no_meio_do_upgrade_com_a_politica() -> Resultado {
+    use crate::pessoas::Console;
+    crate::chaves::esquecer_de_teste();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let base = "atualizar lenta chave:bancada";
+    let instalacao = alloc::format!("{base} instalacao");
+    let r = (|| -> Resultado {
+        let sessao = crate::pessoas::sessao_de_teste(
+            Console::Terminal(255),
+            "implantacao-anulada",
+            "operador",
+        );
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        chaves_da_carteira(sessao)?;
+        let (carteira, implantacao) = carteira_e_implantacao(sessao)?;
+        let fio = implantacao.fio;
+        let r = (|| -> Resultado {
+            ciclos_para_a_chave(&carteira, 1)?;
+            let (_, canister, _) = implantacao.criar(1)?;
+            if implantacao.instalar(1, "bancada")?.desfecho != "verified" {
+                return Err("o modulo A nao foi instalado");
+            }
+            implantacao.fixar_pedaco(256)?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let desde = crate::log::total_emitidos();
+            implantacao.pedir(IMPLANTACAO_ATUALIZAR, REDE_LENTA, 1)?;
+            for i in 1..=2 {
+                let p = implantacao.dito(desde, &alloc::format!("{base} pedaco {i}"))?;
+                if p.desfecho != "verified" || hash_dito(&p).is_none() {
+                    crate::log_error!("teste", "{:?}", p);
+                    return Err("um pedaco nao subiu pela rede lenta");
+                }
+            }
+            implantacao.esperando(desde, &instalacao, "read_state")?;
+            let p = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
+            let r = executar_admin_com(0, &ADMIN_DE_TESTE, "key.revoke", &p, &p)?;
+            if !r.contains(r#""executed":true"#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o administrador nao anulou a chave");
+            }
+            let p = implantacao.dito(desde, &instalacao)?;
+            if p.desfecho != "failed_signature"
+                || p.detalhe != "assinaturas 0; call: assinatura: INVALID_ARGUMENT"
+                || pedidos_da_implantacao(desde, &instalacao) != (1, 0, 0)
+            {
+                crate::log_error!(
+                    "teste",
+                    "{:?} {:?}",
+                    p,
+                    pedidos_da_implantacao(desde, &instalacao)
+                );
+                return Err("a instalacao depois da anulacao nao foi recusada na assinatura");
+            }
+            if assinaturas_do_processo(fio, antes).len() != 2 {
+                return Err("a chave anulada assinou, ou um pedaco nao foi assinado");
+            }
+            declaracao_da_implantacao(
+                fio,
+                &p,
+                "icp.update",
+                &assunto_da_gestao("install_chunked_code", &canister),
+                AncoraDaConsulta::Conexao,
+            )?;
+            // O canister continua no A.
+            if implantacao.versao()? != "\"A\"" || implantacao.contar(0)? != 1 {
+                return Err("o canister trocou de modulo depois da anulacao");
+            }
+            a_gestao_so_na_alegacao(fio, &[&canister])
+        })();
+        let fim = implantacao.encerrar();
+        let fim_da_carteira = carteira.encerrar();
+        r.and(fim).and(fim_da_carteira)
     })();
     crate::chaves::esquecer_de_teste();
     r
