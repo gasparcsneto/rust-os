@@ -232,6 +232,34 @@ pub struct Disco {
     /// descarga aconteceu.
     escritas: u64,
     descargas: u64,
+    /// Só na suíte: as últimas escritas confirmadas — ver [`Rastro`].
+    #[cfg(feature = "modo-teste")]
+    rastro: Rastro,
+}
+
+/// Só na suíte: as últimas [`RASTRO`] escritas que o dispositivo confirmou,
+/// cada uma com o número dela, o setor, quantos setores e um resumo do que
+/// foi escrito — nada do conteúdo. É para o diagnóstico de um bloco do
+/// armazém que não abre: quem mais escreveu nos setores dele, e se o que
+/// se lê é o que se escreveu por último.
+#[cfg(feature = "modo-teste")]
+struct Rastro {
+    escritas: alloc::vec::Vec<(u64, u64, u32, u64)>,
+    proxima: u64,
+}
+
+/// Quantas escritas o rastro guarda: 192 KiB de heap, e mais que as de um
+/// caso inteiro do gestor — o módulo de 8 MiB são 2 049 blocos.
+#[cfg(feature = "modo-teste")]
+const RASTRO: usize = 8192;
+
+/// Um resumo de 64 bits do que se leu ou escreveu: FNV-1a, só para comparar
+/// — não é proteção de nada.
+#[cfg(feature = "modo-teste")]
+pub fn resumo(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 // SAFETY: o ponteiro é para um frame de propriedade exclusiva deste disco,
@@ -379,6 +407,11 @@ impl Disco {
             janelas: [None, None],
             escritas: 0,
             descargas: 0,
+            #[cfg(feature = "modo-teste")]
+            rastro: Rastro {
+                escritas: alloc::vec::Vec::with_capacity(RASTRO),
+                proxima: 0,
+            },
         })
     }
 
@@ -397,6 +430,26 @@ impl Disco {
     /// Quantas escritas e quantas descargas o dispositivo confirmou.
     pub fn contadores(&self) -> (u64, u64) {
         (self.escritas, self.descargas)
+    }
+
+    /// Só na suíte: as escritas do rastro que tocaram `[setor, setor +
+    /// setores)`, da mais velha para a mais nova — o número, o setor,
+    /// quantos e o resumo —, e quantas escritas o disco confirmou ao todo.
+    #[cfg(feature = "modo-teste")]
+    pub fn escritas_em(
+        &self,
+        setor: u64,
+        setores: u64,
+    ) -> (alloc::vec::Vec<(u64, u64, u32, u64)>, u64) {
+        let mut tocaram: alloc::vec::Vec<(u64, u64, u32, u64)> = self
+            .rastro
+            .escritas
+            .iter()
+            .copied()
+            .filter(|&(_, s, n, _)| s < setor + setores && setor < s + u64::from(n))
+            .collect();
+        tocaram.sort_unstable_by_key(|e| e.0);
+        (tocaram, self.rastro.proxima)
     }
 
     /// Quantos setores o disco tem.
@@ -480,6 +533,17 @@ impl Disco {
         self.copiar_para_os_dados(origem);
         self.pedir(ESCREVER, setor, origem.len())?;
         self.escritas += 1;
+        #[cfg(feature = "modo-teste")]
+        {
+            let e = (self.rastro.proxima, setor, quantos as u32, resumo(origem));
+            let i = (self.rastro.proxima % RASTRO as u64) as usize;
+            if self.rastro.escritas.len() < RASTRO {
+                self.rastro.escritas.push(e);
+            } else {
+                self.rastro.escritas[i] = e;
+            }
+            self.rastro.proxima += 1;
+        }
         Ok(())
     }
 

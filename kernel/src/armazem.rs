@@ -479,7 +479,11 @@ fn mudar_em_ordem(
     // Os rascunhos gravados deixam de existir: os blocos são de arquivos.
     tirar_rascunhos(&rascunhos);
     match aplicado {
-        Ok(soltar) => crate::volume::soltar(&soltar),
+        Ok(soltar) => {
+            crate::volume::soltar(&soltar);
+            #[cfg(feature = "modo-teste")]
+            conferir_o_mapa("um lote");
+        }
         Err(r) => {
             crate::log_error!(
                 "armazem",
@@ -530,12 +534,105 @@ fn conferir_arrendamentos(
     Ok(())
 }
 
+/// Só na suíte: quantas vezes um bloco de uma versão viva não abriu, um
+/// bloco que vale apareceu livre no mapa, ou uma reserva deu um bloco que
+/// vale. O último caso da suíte confere que foram zero: cada uma é um
+/// conteúdo que se perde, e nenhuma pode passar só para o log.
+#[cfg(feature = "modo-teste")]
+static DIVERGENCIAS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "modo-teste")]
+fn divergiu() {
+    DIVERGENCIAS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Só na suíte: as divergências até agora — ver `DIVERGENCIAS`.
+#[cfg(feature = "modo-teste")]
+pub fn divergencias_de_teste() -> u64 {
+    DIVERGENCIAS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Só na suíte: os blocos que valem — os dos nós e os dos rascunhos —,
+/// cada faixa com quem a tem.
+#[cfg(feature = "modo-teste")]
+fn blocos_que_valem() -> Vec<((u64, u64), String)> {
+    let mut v: Vec<((u64, u64), String)> = com_o_armazem(|a| {
+        a.todos()
+            .filter_map(|(c, n)| n.conteudo().map(|ct| (c, n.versao(), ct)))
+            .flat_map(|(c, versao, ct)| ct.faixas().map(move |f| (f, format!("{c}@{versao}"))))
+            .collect()
+    });
+    v.extend(com_rascunhos(|rs| {
+        rs.iter()
+            .flat_map(|r| {
+                r.faixas
+                    .iter()
+                    .map(move |&f| (f, format!("rascunho {}", r.numero)))
+            })
+            .collect::<Vec<_>>()
+    }));
+    v
+}
+
+/// Só na suíte: confere, depois de `quando`, que nenhum bloco que vale está
+/// livre no mapa — um bloco assim é o que a próxima reserva dá a outro
+/// conteúdo, por cima deste. É o diagnóstico de um bloco de uma versão viva
+/// que não abre: diz qual operação o soltou, e de quem ele era.
+#[cfg(feature = "modo-teste")]
+fn conferir_o_mapa(quando: &str) {
+    let valem = blocos_que_valem();
+    let faixas: Vec<(u64, u64)> = valem.iter().map(|(f, _)| *f).collect();
+    let soltos: Vec<String> = crate::volume::livres_em(&faixas)
+        .into_iter()
+        .zip(&valem)
+        .filter_map(|(livre, (f, quem))| livre.map(|b| format!("{quem} {f:?}: o bloco {b}")))
+        .collect();
+    if !soltos.is_empty() {
+        divergiu();
+        crate::log_error!(
+            "armazem",
+            "depois de {}: blocos que valem estao livres no mapa: {:?}",
+            quando,
+            soltos
+        );
+    }
+}
+
+/// Só na suíte: confere que a reserva de `quem` não deu bloco que vale.
+#[cfg(feature = "modo-teste")]
+fn conferir_a_reserva(quem: &str, faixas: &Faixas) {
+    let cruzam: Vec<String> = blocos_que_valem()
+        .into_iter()
+        .filter(|&((de, ate), _)| faixas.iter().any(|&(d2, a2)| de < a2 && d2 < ate))
+        .map(|(f, dono)| format!("{dono} {f:?}"))
+        .collect();
+    if !cruzam.is_empty() {
+        divergiu();
+        crate::log_error!(
+            "armazem",
+            "{}: a reserva {:?} deu blocos que valem: {:?}",
+            quem,
+            faixas,
+            cruzam
+        );
+    }
+}
+
+/// Reserva `n` blocos no volume — na suíte, conferindo que nenhum vale.
+fn reservar(n: u64, quem: &str) -> Result<Faixas, Falha> {
+    let faixas = crate::volume::reservar(n).map_err(Falha::Persistencia)?;
+    #[cfg(feature = "modo-teste")]
+    conferir_a_reserva(quem, &faixas);
+    let _ = quem;
+    Ok(faixas)
+}
+
 /// Escreve `dados` em blocos novos, e devolve o conteúdo que os aponta. As
 /// faixas reservadas vão para `reservadas`.
 fn escrever_novo(dados: &[u8], reservadas: &mut Faixas) -> Result<Conteudo, Falha> {
     let blocos = (dados.len() as u64).div_ceil(CARGA as u64);
     let id = crate::volume::novo_id().map_err(Falha::Persistencia)?;
-    let faixas = crate::volume::reservar(blocos).map_err(Falha::Persistencia)?;
+    let faixas = reservar(blocos, "a escrita nova")?;
     reservadas.extend(faixas.iter().copied());
     crate::volume::escrever_blocos(&faixas, &id, 0, dados).map_err(Falha::Persistencia)?;
     Ok(conteudo_de(&faixas, id, 0, dados.len() as u64))
@@ -607,7 +704,7 @@ fn acrescentar(
     cauda.extend_from_slice(mais);
     let blocos = (cauda.len() as u64).div_ceil(carga);
     let id = crate::volume::novo_id().map_err(Falha::Persistencia)?;
-    let faixas = crate::volume::reservar(blocos).map_err(Falha::Persistencia)?;
+    let faixas = reservar(blocos, "o acrescimo")?;
     reservadas.extend(faixas.iter().copied());
     let escrito = crate::volume::escrever_blocos(&faixas, &id, cheios, &cauda);
     politica::sigiloso::zerar_bloco(&mut cauda);
@@ -707,6 +804,8 @@ fn sumir_rascunhos_vencidos_em(agora: u64) {
     });
     for r in vencidos {
         crate::volume::soltar(&::armazem::normalizar(r.faixas.clone()));
+        #[cfg(feature = "modo-teste")]
+        conferir_o_mapa("um rascunho vencido");
     }
 }
 
@@ -735,7 +834,7 @@ fn fechar_rascunho(
     reservadas.extend(faixas.iter().copied());
     let mut conteudo = conteudo_de(&faixas, id, 0, blocos * CARGA as u64);
     if !cauda.is_empty() {
-        let ultima = crate::volume::reservar(1).map_err(Falha::Persistencia)?;
+        let ultima = reservar(1, "a cauda do rascunho")?;
         reservadas.extend(ultima.iter().copied());
         crate::volume::escrever_blocos(&ultima, &id, blocos, &cauda)
             .map_err(Falha::Persistencia)?;
@@ -833,7 +932,7 @@ fn rascunho_em_ordem(
     let cheios = juntos.len() / CARGA;
     let resto = juntos.split_off(cheios * CARGA);
     let escritos = (|| {
-        let faixas = crate::volume::reservar(cheios as u64).map_err(Falha::Persistencia)?;
+        let faixas = reservar(cheios as u64, "o rascunho")?;
         if let Err(m) = crate::volume::escrever_blocos(&faixas, &id, blocos, &juntos) {
             crate::volume::soltar(&faixas);
             return Err(Falha::Persistencia(m));
@@ -873,6 +972,8 @@ fn descartar_numero(numero: u64) {
     });
     for r in fora {
         crate::volume::soltar(&::armazem::normalizar(r.faixas.clone()));
+        #[cfg(feature = "modo-teste")]
+        conferir_o_mapa("um rascunho descartado");
     }
 }
 
@@ -1121,6 +1222,10 @@ impl SistemaDeArquivos for NoVfs {
                 // Um bloco que não abre: o conteúdo mudou e o bloco foi
                 // reaproveitado — ou o disco estragou.
                 let mudou = com_o_armazem(|a| a.por_versao(no.id).is_none());
+                #[cfg(feature = "modo-teste")]
+                if !mudou {
+                    divergiu();
+                }
                 if !mudou {
                     // A versão ainda vale: o que ela diz não está no disco.
                     // Diz qual bloco, por quê, se o que veio é zero — uma
@@ -1128,6 +1233,34 @@ impl SistemaDeArquivos for NoVfs {
                     // mesmo bloco abre — uma leitura que trouxe outro setor.
                     // Nada do conteúdo.
                     let zerado = buf.iter().all(|&x| x == 0);
+                    // Na suíte, o resumo do que veio — e o do que veio na
+                    // segunda leitura, antes de ela abrir no lugar —, e as
+                    // escritas que o disco confirmou nos setores do bloco.
+                    #[cfg(feature = "modo-teste")]
+                    let primeira = crate::virtio::blk::resumo(&buf[..]);
+                    #[cfg(feature = "modo-teste")]
+                    let segunda_crua = crate::volume::setor_do_bloco(b).and_then(|s| {
+                        let mut cru: Box<[u8; TAM_BLOCO]> = Box::new([0; TAM_BLOCO]);
+                        crate::virtio::blk::com_o_disco(|d| d.ler(s, &mut cru[..]))?
+                            .ok()
+                            .map(|()| crate::virtio::blk::resumo(&cru[..]))
+                    });
+                    #[cfg(feature = "modo-teste")]
+                    let escritas = crate::volume::setor_do_bloco(b).and_then(|s| {
+                        crate::virtio::blk::com_o_disco(|d| {
+                            d.escritas_em(s, ::armazem::bloco::SETORES_POR_BLOCO)
+                        })
+                    });
+                    #[cfg(feature = "modo-teste")]
+                    crate::log_error!(
+                        "armazem",
+                        "versao {}: o bloco {} veio com o resumo {:016x}; relido cru, {:016x?}; as escritas do disco nos setores dele (numero, setor, setores, resumo) e o total: {:x?}",
+                        no.id,
+                        b,
+                        primeira,
+                        segunda_crua,
+                        escritas
+                    );
                     let segunda = crate::volume::ler_bloco(b, &id, k, &mut buf).is_ok();
                     // O mapa, e os outros nós que apontam para o mesmo
                     // bloco: um bloco livre no mapa foi solto vivo; outro

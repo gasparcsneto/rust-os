@@ -14875,6 +14875,22 @@ fn anotar_o_fundo_das_excecoes(caso: &'static str) {
     }
 }
 
+/// Nenhum bloco que vale se perdeu na suíte inteira: nenhum bloco de uma
+/// versão viva deixou de abrir, nenhum bloco de um nó ou de um rascunho
+/// apareceu livre no mapa depois de uma operação, e nenhuma reserva deu um
+/// bloco que vale. O armazém confere cada operação na suíte, e diz no log
+/// qual soltou o bloco e de quem ele era; este caso é o que não deixa uma
+/// leitura que não abriu passar só para o log — um auxiliar que lê o
+/// arquivo e segue, como o que grava o pedido do gestor, não a veria.
+fn armazem_nenhum_bloco_que_vale_se_perdeu() -> Resultado {
+    let n = crate::armazem::divergencias_de_teste();
+    if n != 0 {
+        crate::log_error!("teste", "{} divergencias do armazem na suite", n);
+        return Err("um bloco que vale se perdeu na suite: ver o log do armazem");
+    }
+    Ok(())
+}
+
 /// A pilha de exceção de cada núcleo tem folga depois da suíte inteira.
 ///
 /// No ARM toda exceção roda nela — a interrupção, a falha e a chamada de
@@ -32310,6 +32326,11 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "pilhas: a de excecao de cada nucleo tem folga",
         f: pilhas_a_de_excecao_tem_folga,
+    },
+    // Depois de todos os outros: as divergências são as da suíte inteira.
+    Caso {
+        nome: "armazem: nenhum bloco que vale se perdeu na suite",
+        f: armazem_nenhum_bloco_que_vale_se_perdeu,
     },
     // Sempre o último: confere a ordem das travas de todos os anteriores.
     Caso {
@@ -56459,6 +56480,42 @@ fn rodar_o_gestor(autoridade: crate::autorizacao::Autoridade) -> Result<Gerido, 
     })
 }
 
+/// Quantas vezes a suíte repete a criação retomada que o ledger diz
+/// duplicada sem o canister dela.
+const REPETICOES_DA_DUPLICADA: usize = 10;
+
+/// A criação retomada até se saber. O ledger diz a criação duplicada antes
+/// de o canister dela existir — a primeira ainda anda no CMC —, e o gestor
+/// sai com `pending_duplicate` e o pedido `v` em andamento no registro em
+/// `caminho`, para quem repita: a suíte repete como a pessoa repetiria,
+/// poucas vezes e com uma pausa, conferindo a cada vez que o pedido ficou
+/// em andamento. Quantas vezes depende da velocidade da máquina — a CI do
+/// ARM em release retomou antes de o CMC acabar —, e não muda o que se
+/// confere depois: a criação é a mesma, paga uma vez.
+fn retomada_ate_se_saber(
+    primeira: Gerido,
+    sessao: crate::pessoas::IdSessao,
+    caminho: &str,
+    v: u64,
+    fios: &mut alloc::vec::Vec<u64>,
+) -> Result<Gerido, &'static str> {
+    let mut g = primeira;
+    for _ in 0..REPETICOES_DA_DUPLICADA {
+        if g.codigo != Some(GESTOR_FALHOU) || g.desfecho() != Some("pending_duplicate") {
+            return Ok(g);
+        }
+        let (_, _, registro) = registro_em(caminho);
+        if ultimo_no_registro(&registro) != Some((v, "criar", "andamento")) {
+            crate::log_error!("teste", "{:?} / {}", g, registro);
+            return Err("a criacao duplicada sem o canister nao ficou em andamento");
+        }
+        esperar_ms(500);
+        g = rodar_o_gestor(crate::autorizacao::Autoridade::Pessoa { sessao })?;
+        fios.push(g.fio);
+    }
+    Err("a criacao retomada nao disse o canister")
+}
+
 /// Espera o processo `fio` dizer `linha` desde `desde` — ou sair antes.
 /// Sair antes é o erro, com a resposta do gestor no log da suíte: um caso
 /// que esperasse a linha até o teto diria só que ela não veio.
@@ -56607,7 +56664,21 @@ fn conferir_chamadas(
 fn registro_do_gestor(
     principal: &str,
 ) -> (u64, Option<alloc::string::String>, alloc::string::String) {
-    registro_em(&alloc::format!("{REGISTROS_DO_GESTOR}/bancada/{principal}"))
+    registro_do_gestor_na("bancada", principal)
+}
+
+/// O mesmo, na rede `rede` — o registro é de uma chave numa rede, e o
+/// pedido pela rede lenta vai para o dela.
+fn registro_do_gestor_na(
+    rede: &str,
+    principal: &str,
+) -> (u64, Option<alloc::string::String>, alloc::string::String) {
+    registro_em(&alloc::format!("{REGISTROS_DO_GESTOR}/{rede}/{principal}"))
+}
+
+/// O registro tem um pedido em andamento.
+fn em_andamento_no_registro(registro: &str) -> bool {
+    ultimo_no_registro(registro).is_some_and(|(_, _, estado)| estado == "andamento")
 }
 
 /// O registro do gestor em `caminho`: a versão, o dono e o texto.
@@ -57524,6 +57595,7 @@ fn icp_o_gestor_retoma_o_que_ficou_em_andamento() -> Resultado {
             // O texto pendente, regravado: retoma com a mesma hora.
             let (g, v3) = gerir(sessao, &pendente)?;
             fios.push(g.fio);
+            let g = retomada_ate_se_saber(g, sessao, &caminho, v3, &mut fios)?;
             g.conferir(GESTOR_FEITO, "verified", Some(v3))?;
             conferir_chamadas(
                 &g,
@@ -57608,6 +57680,7 @@ fn icp_o_gestor_retoma_o_que_ficou_em_andamento() -> Resultado {
             }
             let g = rodar_o_gestor(Autoridade::Pessoa { sessao })?;
             fios.push(g.fio);
+            let g = retomada_ate_se_saber(g, sessao, &caminho, v4, &mut fios)?;
             g.conferir(GESTOR_FEITO, "verified", Some(v4))?;
             let outro_canister: alloc::string::String = g
                 .linha("canister ")
@@ -58140,10 +58213,15 @@ fn icp_o_gestor_para_quando_outro_grava_a_resposta() -> Resultado {
             if !arrendado {
                 return Err("o gestor soltou o arrendamento que era do outro tambem");
             }
-            // Nada que muda o canister foi assinado: o registro de antes.
+            // Nada que muda o canister foi assinado: o registro de antes —
+            // o da bancada, e o da rede lenta, por onde o pedido foi, sem
+            // ele em andamento.
             let (_, _, registro) = registro_do_gestor(&c.principal);
-            if ultimo_no_registro(&registro).map(|u| u.0) != Some(antes_do_pedido) {
-                crate::log_error!("teste", "{}", registro);
+            let (_, _, lenta) = registro_do_gestor_na("lenta", &c.principal);
+            if ultimo_no_registro(&registro).map(|u| u.0) != Some(antes_do_pedido)
+                || em_andamento_no_registro(&lenta)
+            {
+                crate::log_error!("teste", "{} / {}", registro, lenta);
                 return Err("o pedido parado ficou em andamento");
             }
 
@@ -58281,19 +58359,27 @@ fn icp_a_chave_anulada_no_meio_do_gestor_com_a_politica() -> Resultado {
         let resposta = resposta
             .and_then(|b| alloc::string::String::from_utf8(b).ok())
             .unwrap_or_default();
+        // O pedido foi pela rede lenta, e o registro dela não o tem em
+        // andamento: o pedaço que subiu só encheu o depósito.
         let (_, _, registro) = registro_do_gestor(&c.principal);
+        let (_, _, lenta) = registro_do_gestor_na("lenta", &c.principal);
         if assinaturas_do_processo(fio, antes).len() != 1
             || !assinaturas_do_processo(fio, anulada).is_empty()
             || !(resposta.contains("desfecho failed_key\n")
                 || resposta.contains("desfecho failed_signature\n"))
             || ultimo_no_registro(&registro).map(|u| u.0) != Some(feito)
+            || em_andamento_no_registro(&lenta)
+            || !resposta.contains(
+                "nada que muda o canister foi assinado: o pedido nao ficou em andamento\n",
+            )
         {
             crate::log_error!(
                 "teste",
-                "{:?} / {} / {}",
+                "{:?} / {} / {} / {}",
                 assinaturas_do_processo(fio, antes).len(),
                 resposta,
-                registro
+                registro,
+                lenta
             );
             return Err("a chave anulada assinou, ou o pedido ficou em andamento");
         }

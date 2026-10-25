@@ -252,6 +252,20 @@ antes de uma mudança não lê o conteúdo novo pelo nó velho, nem metade de
 cada um: recebe `Erro::Mudou` (no processo, `MUDOU`), e abrir de novo dá o
 de agora.
 
+Um bloco de uma versão que ainda vale e não abre é um conteúdo que se
+perdeu — outro conteúdo no lugar, ou o disco estragado —, e a leitura
+devolve `DoDispositivo` (no processo, `ler -2`), nunca os bytes de outro
+arquivo. O log diz a versão, o bloco, o bloco lógico, o motivo, se o que
+veio é zero, se uma segunda leitura abre, o que o mapa diz do bloco e os
+outros nós que apontam para ele — nada do conteúdo. Na suíte, o armazém
+confere ainda, depois de cada operação, que nenhum bloco de um nó ou de um
+rascunho está livre no mapa, e, a cada reserva, que ela não deu um bloco
+que vale; o disco guarda o rastro das últimas escritas confirmadas, com um
+resumo de cada uma, e o bloco que não abre diz quem escreveu nos setores
+dele. O penúltimo caso da suíte, `armazem: nenhum bloco que vale se perdeu
+na suite`, reprova se qualquer um desses aconteceu — um auxiliar que lê um
+arquivo e segue não deixa a perda passar só para o log.
+
 ## A política padrão
 
 A capacidade é concedida **explicitamente**, por linhas da política — nunca

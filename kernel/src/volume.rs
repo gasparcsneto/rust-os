@@ -537,6 +537,30 @@ pub fn bloco_em_uso(b: u64) -> Option<bool> {
     com(|v| v.mapa.as_ref().and_then(|m| m.em_uso(b)))
 }
 
+/// Só na suíte: para cada faixa, o primeiro bloco dela que o mapa tem como
+/// livre — `None` se estão todos em uso. Numa tomada só da trava.
+#[cfg(feature = "modo-teste")]
+pub fn livres_em(faixas: &[(u64, u64)]) -> Vec<Option<u64>> {
+    com(|v| {
+        faixas
+            .iter()
+            .map(|&(de, ate)| {
+                let m = v.mapa.as_ref()?;
+                (de..ate).find(|&b| m.em_uso(b) == Some(false))
+            })
+            .collect()
+    })
+}
+
+/// Só na suíte: o primeiro setor (absoluto) do bloco `b` da área de dados
+/// — para o rastro das escritas do disco.
+#[cfg(feature = "modo-teste")]
+pub fn setor_do_bloco(b: u64) -> Option<u64> {
+    let (g, _) = para_blocos().ok()?;
+    let (inicio, blocos) = area_de_dados(&g).ok()?;
+    (b < blocos).then(|| inicio + b * SETORES_POR_BLOCO)
+}
+
 /// A geometria e as chaves para ler ou escrever blocos.
 fn para_blocos() -> Result<(Geometria, [u8; 32]), &'static str> {
     let g =
