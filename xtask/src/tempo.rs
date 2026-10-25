@@ -1763,8 +1763,16 @@ fn as_fontes_honestas(b: &mut Bancada) -> Result<String, String> {
     let mut nada_volta = NadaVolta::novo();
     let h = sincronizar(&mut m, &mut nada_volta)?;
     let u = h.ultima.clone().unwrap_or_default();
+    // O lógico anda com o civil, em segundos inteiros, e o civil, logo
+    // depois da primeira rodada, está dentro da incerteza que ele diz — o
+    // acordo gradual ainda tem quase todo o desvio do RTC. O teto do lógico
+    // é essa incerteza, arredondada para cima, e nunca menos que 2 s: no CI
+    // 324, o civil a -2504 ms com 2789 ms, e o lógico a -3 s.
+    let teto_do_logico = h
+        .incerteza_ms
+        .map_or(2, |i| (i + 100).div_ceil(1000).max(2));
     if !h.hora_dentro_da_incerteza()
-        || h.logico_desvio_s().abs() > 2
+        || h.logico_desvio_s().unsigned_abs() > teto_do_logico
         || !h.marcas.is_empty()
         || u.desfecho != "acordo"
         || u.cobertura != Some(3)
