@@ -56766,6 +56766,18 @@ fn icp_o_gestor_do_saldo_ao_apagado() -> Resultado {
                     "verified",
                 )],
             )?;
+            // Nenhuma recusa numa execução que anda: os diretórios do
+            // registro já existem, e o gestor não os pede de novo — cada
+            // recusa vai para a auditoria, que o tecido lê (a fumaça da rede
+            // principal contou duas por execução).
+            let recusas: alloc::vec::Vec<Decisao> = registros_do_processo(g.fio, g.antes)
+                .into_iter()
+                .filter(|(_, _, c, _)| *c != politica::Codigo::Allow)
+                .collect();
+            if !recusas.is_empty() {
+                crate::log_error!("teste", "{:?}", recusas);
+                return Err("o gestor deixou recusas numa execucao que andou");
+            }
             let canister: alloc::string::String = g
                 .linha("canister ")
                 .and_then(|l| l.split(' ').next())
