@@ -1093,8 +1093,12 @@ fn preparar_o_gestor(operador: &mut AgenteNaPorta) -> Result<String, String> {
         return Err(format!("mainnet: o operador nao criou a chave\n  {r}"));
     }
     let impressao = super::campo_simples(&r, "fingerprint").unwrap_or_default();
-    // Já existir não é erro: a gravação do pedido diz se falta.
-    let _ = operador.pedir("fs.mkdir", r#"{"path":"/armazem/compartilhado/gestor"}"#)?;
+    // A máquina sobe zerada, e o armazém não cria pai de passagem: o
+    // compartilhado, e o diretório do gestor nele. Já existir não é erro: a
+    // gravação do pedido diz se falta.
+    for dir in ["/armazem/compartilhado", "/armazem/compartilhado/gestor"] {
+        let _ = operador.pedir("fs.mkdir", &format!(r#"{{"path":"{dir}"}}"#))?;
+    }
     Ok(impressao)
 }
 

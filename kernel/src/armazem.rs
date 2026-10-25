@@ -1107,11 +1107,39 @@ impl SistemaDeArquivos for NoVfs {
             }
             let k = pos / carga;
             let dentro = (pos % carga) as usize;
-            let (b, id) = conteudo.onde(k).ok_or(vfs::Erro::DoDispositivo)?;
-            if crate::volume::ler_bloco(b, &id, k, &mut buf).is_err() {
+            let Some((b, id)) = conteudo.onde(k) else {
+                crate::log_error!(
+                    "armazem",
+                    "versao {}: o bloco logico {} fora das extensoes ({} bytes)",
+                    no.id,
+                    k,
+                    conteudo.tamanho
+                );
+                return Err(vfs::Erro::DoDispositivo);
+            };
+            if let Err(m) = crate::volume::ler_bloco(b, &id, k, &mut buf) {
                 // Um bloco que não abre: o conteúdo mudou e o bloco foi
                 // reaproveitado — ou o disco estragou.
                 let mudou = com_o_armazem(|a| a.por_versao(no.id).is_none());
+                if !mudou {
+                    // A versão ainda vale: o que ela diz não está no disco.
+                    // Diz qual bloco, por quê, se o que veio é zero — uma
+                    // escrita que não chegou — e se uma segunda leitura do
+                    // mesmo bloco abre — uma leitura que trouxe outro setor.
+                    // Nada do conteúdo.
+                    let zerado = buf.iter().all(|&x| x == 0);
+                    let segunda = crate::volume::ler_bloco(b, &id, k, &mut buf).is_ok();
+                    crate::log_error!(
+                        "armazem",
+                        "versao {}: o bloco {} (logico {}) nao abre: {}; zerado {}; a segunda leitura abre {}",
+                        no.id,
+                        b,
+                        k,
+                        m,
+                        zerado,
+                        segunda
+                    );
+                }
                 politica::sigiloso::zerar(&mut buf[..]);
                 return Err(if mudou {
                     vfs::Erro::Mudou
