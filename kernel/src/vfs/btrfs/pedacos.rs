@@ -28,10 +28,15 @@
 
 /// Quantos pedaços este mapa guarda.
 ///
-/// Oito. O vetor do superbloco tem um nesta imagem, e a árvore de pedaços
-/// deste sistema de arquivos tem três. O número existe para que um mapa
+/// Dezesseis. O vetor do superbloco tem um nesta imagem — o de sistema —, e
+/// a árvore de pedaços tem o de sistema, o de metadados e os de dados, que
+/// o `mkfs.btrfs` põe em degraus de 8 MiB conforme o conteúdo cresce: nove
+/// com os 38 MB de hoje. Na partição de 160 MiB cabem no máximo doze —
+/// dez de dados, com o de sistema e o de metadados em dobro. Eram oito, e
+/// a imagem do gestor de canisters, com os módulos dele nas bordas do
+/// tamanho, passou: o volume não abria. O número existe para que um mapa
 /// absurdo vire um teto em vez de crescer com o que o disco disser.
-pub const MAX: usize = 8;
+pub const MAX: usize = 16;
 
 /// Os bits de perfil que este leitor **não** sabe montar.
 ///

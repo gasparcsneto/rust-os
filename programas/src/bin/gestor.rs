@@ -1569,7 +1569,7 @@ fn trabalhar(resposta: &mut Resposta) -> (Option<u64>, Option<Acao>, Fim) {
         } else if contexto.saidas.get() == 0 {
             registro.ultimo = anterior;
             fim.linhas.push(String::from(
-                "nada foi assinado: o pedido nao ficou em andamento",
+                "nada que muda o canister foi assinado: o pedido nao ficou em andamento",
             ));
         }
     }
