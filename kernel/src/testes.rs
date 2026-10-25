@@ -38905,10 +38905,12 @@ fn persistencia_a_antiga_cujo_selado_nao_abre_fica_fechada() -> Resultado {
 }
 
 /// O teto de vivas da tabela — 64, de oito donos — e a morte de uma: as 63
-/// outras seladas de novo para a geração seguinte num registro só, o índice
-/// avançado uma vez, e a reposição abre as 63 do cofre. Os tempos vão para
-/// o log: o custo de selar todas numa morte, de abrir todas num boot e de
-/// compactar com elas — e o de cada operação do cofre, sozinha.
+/// outras seladas de novo para a geração seguinte num registro só, e o
+/// índice avançado uma vez; depois a revogação de um dono, que mata as oito
+/// dele e sela as 55 que ficam, de novo numa geração só; e a reposição abre
+/// as 55 do cofre. Os tempos vão para o log: o custo de selar todas numa
+/// morte e numa revogação, de abrir todas num boot e de compactar com elas
+/// — e o de cada operação do cofre, sozinha.
 fn chaves_sessenta_e_quatro_vivas_e_a_morte_de_uma() -> Resultado {
     use crate::autorizacao::Chamador;
     use crate::pessoas::Console;
@@ -38955,13 +38957,27 @@ fn chaves_sessenta_e_quatro_vivas_e_a_morte_de_uma() -> Resultado {
             {
                 return Err("a morte de uma das 64 nao avancou a geracao uma vez");
             }
+            // A revogação de um dono: as oito chaves dele morrem no mesmo
+            // registro, e as 55 que ficam são seladas de novo — uma geração.
+            let inicio = crate::tempo::uptime_ms();
+            crate::persistencia::em_ordem(|| {
+                let foto = crate::persistencia::Foto::tirar();
+                crate::chaves::identidade_revogada(&quem[1].1);
+                crate::persistencia::concluir(&foto, "person.revoke", &quem[1].1, false, 0)
+            })?;
+            let revogar_ms = crate::tempo::uptime_ms() - inicio;
+            if crate::persistencia::geracao_da_selagem_de_teste()? != g + 2
+                || crate::persistencia::geracao_no_tpm_de_teste()? != g + 2
+            {
+                return Err("a revogacao de um dono das 64 nao avancou a geracao uma vez");
+            }
             let mut publicas = alloc::vec::Vec::new();
             for (i, (_, dono)) in quem.iter().enumerate() {
                 for (k, nome) in NOMES.iter().enumerate() {
                     let nome = &nome["chave:".len()..];
                     let selado = crate::chaves::selado_de_teste(dono, nome);
-                    let viva = i != 0 || k != 0;
-                    if selado.is_some() != viva || selado.is_some_and(|s| s.geracao() != g + 1) {
+                    let viva = (i != 0 || k != 0) && i != 1;
+                    if selado.is_some() != viva || selado.is_some_and(|s| s.geracao() != g + 2) {
                         return Err("uma viva nao foi selada para a geracao seguinte");
                     }
                     if viva {
@@ -38976,17 +38992,27 @@ fn chaves_sessenta_e_quatro_vivas_e_a_morte_de_uma() -> Resultado {
             for (dono, nome, publica) in &publicas {
                 assina_com_a_publica(dono, nome, [0x34; 32], publica)?;
             }
-            if crate::chaves::para_assinar(&quem[0].1, "v0", DOMINIO_DE_TESTE).is_ok() {
-                return Err("a destruida das 64 voltou a assinar");
+            if crate::chaves::para_assinar(&quem[0].1, "v0", DOMINIO_DE_TESTE).is_ok()
+                || NOMES.iter().any(|nome| {
+                    crate::chaves::para_assinar(
+                        &quem[1].1,
+                        &nome["chave:".len()..],
+                        DOMINIO_DE_TESTE,
+                    )
+                    .is_ok()
+                })
+            {
+                return Err("uma morta das 64 voltou a assinar");
             }
             let inicio = crate::tempo::uptime_ms();
             crate::persistencia::compactar_de_teste()?;
             let compactar_ms = crate::tempo::uptime_ms() - inicio;
             crate::log_info!(
                 "teste",
-                "64 vivas: criadas em {} ms; a morte de uma selou 63 em {} ms; a reposicao abriu 63 em {} ms; a compactacao com 63 levou {} ms",
+                "64 vivas: criadas em {} ms; a morte de uma selou 63 em {} ms; a revogacao de um dono matou 8 e selou 55 em {} ms; a reposicao abriu 55 em {} ms; a compactacao com 55 levou {} ms",
                 criar_ms,
                 morte_ms,
+                revogar_ms,
                 abrir_ms,
                 compactar_ms
             );

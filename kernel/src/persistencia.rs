@@ -2609,6 +2609,7 @@ fn abrir_as_seladas(valor: u64) -> Result<usize, &'static str> {
 /// falha é um journal que não se confirma: o estado em que a persistência
 /// fica volta como erro.
 fn abrir_a_selagem(lida: SelagemLida) -> Result<(), Estado> {
+    let inicio = crate::tempo::uptime_ms();
     let recusa = |e: ancora::Erro| Estado::Recusada(e.motivo());
     let senha = senha_da_geracao().ok_or(Estado::Indisponivel("sem a chave do Duke"))?;
     // O primário deste boot: o nome dele é o que toda operação do cofre
@@ -2685,9 +2686,10 @@ fn abrir_a_selagem(lida: SelagemLida) -> Result<(), Estado> {
     let abertas = abrir_as_seladas(valor).map_err(Estado::Recusada)?;
     crate::log_info!(
         "persistencia",
-        "cofre aberto: geracao {}, {} chaves seladas abertas",
+        "cofre aberto: geracao {}, {} chaves seladas abertas em {} ms",
         valor,
-        abertas
+        abertas,
+        crate::tempo::uptime_ms().saturating_sub(inicio)
     );
     Ok(())
 }
