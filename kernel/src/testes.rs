@@ -38570,34 +38570,45 @@ fn chaves_o_selado_que_nao_abre_falha_fechado() -> Resultado {
             return Err("a chave fechada nao diz o que e");
         }
 
-        // Mexido: um byte do bloco privado do objeto de agora.
-        let mut privado = novo.privado().to_vec();
-        privado[7] ^= 0x01;
-        gravar_selado(&novo, &privado)?;
-        let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
-        if reposto != Err("o objeto selado nao e deste TPM, ou foi mexido") {
-            crate::log_error!("teste", "{:?}", reposto);
-            return Err("o selado mexido nao parou a reposicao com o motivo dele");
-        }
-        fechada("mexido")?;
+        let feito = (|| -> Resultado {
+            // Mexido: um byte do bloco privado do objeto de agora.
+            let mut privado = novo.privado().to_vec();
+            privado[7] ^= 0x01;
+            gravar_selado(&novo, &privado)?;
+            let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+            if reposto != Err("o objeto selado nao e deste TPM, ou foi mexido") {
+                crate::log_error!("teste", "{:?}", reposto);
+                return Err("o selado mexido nao parou a reposicao com o motivo dele");
+            }
+            fechada("mexido")?;
 
-        // De outra geração: o de antes da morte da outra, como uma cópia
-        // antiga o teria.
-        gravar_selado(&velho, velho.privado())?;
-        let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
-        if reposto != Err("uma chave selada para outra geracao que a do TPM") {
-            crate::log_error!("teste", "{:?}", reposto);
-            return Err("o selado de outra geracao nao parou a reposicao com o motivo dele");
-        }
-        fechada("outra geracao")?;
+            // De outra geração: o de antes da morte da outra, como uma cópia
+            // antiga o teria.
+            gravar_selado(&velho, velho.privado())?;
+            let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+            if reposto != Err("uma chave selada para outra geracao que a do TPM") {
+                crate::log_error!("teste", "{:?}", reposto);
+                return Err("o selado de outra geracao nao parou a reposicao com o motivo dele");
+            }
+            fechada("outra geracao")?;
 
-        // De volta: o objeto de agora por cima, e ela abre e assina igual.
-        gravar_selado(&novo, novo.privado())?;
-        estado_do_journal()?;
-        if assina_com_a_publica(&dono, "bancada", [0x41; 32], &vista.publica)? != antes {
-            return Err("de volta, a chave assina com outra privada");
+            // De volta: o objeto de agora por cima, e ela abre e assina igual.
+            gravar_selado(&novo, novo.privado())?;
+            estado_do_journal()?;
+            if assina_com_a_publica(&dono, "bancada", [0x41; 32], &vista.publica)? != antes {
+                return Err("de volta, a chave assina com outra privada");
+            }
+            Ok(())
+        })();
+        if feito.is_err() {
+            // Uma reposição que parou deixa o armazém como a imagem o tem, e
+            // o volume por abrir: a compactação larga as entradas do caso, e
+            // o estado volta do journal, com o volume — os casos seguintes
+            // não herdam a falha deste.
+            crate::chaves::esquecer_de_teste();
+            let _ = estado_do_journal();
         }
-        Ok(())
+        feito
     })
 }
 
@@ -38850,31 +38861,45 @@ fn persistencia_a_antiga_cujo_selado_nao_abre_fica_fechada() -> Resultado {
         };
         let mut mexido = outro.privado().to_vec();
         mexido[9] ^= 0x01;
-        for (como, privado, motivo) in [
-            (
-                "de outra chave",
-                outro.privado().to_vec(),
-                "a semente aberta pelo cofre nao e a da chave",
-            ),
-            (
-                "mexido",
-                mexido,
-                "o objeto selado nao e deste TPM, ou foi mexido",
-            ),
-        ] {
-            migracao(&privado)?;
-            let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
-            if reposto != Err(motivo) {
-                crate::log_error!("teste", "{}: {:?}", como, reposto);
-                return Err("o selado da antiga que nao abre nao parou a reposicao com o motivo");
+        let feito = (|| -> Resultado {
+            for (como, privado, motivo) in [
+                (
+                    "de outra chave",
+                    outro.privado().to_vec(),
+                    "a semente aberta pelo cofre nao e a da chave",
+                ),
+                (
+                    "mexido",
+                    mexido,
+                    "o objeto selado nao e deste TPM, ou foi mexido",
+                ),
+            ] {
+                migracao(&privado)?;
+                let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+                if reposto != Err(motivo) {
+                    crate::log_error!("teste", "{}: {:?}", como, reposto);
+                    return Err(
+                        "o selado da antiga que nao abre nao parou a reposicao com o motivo",
+                    );
+                }
+                if crate::chaves::para_assinar(&dono, "antiga", DOMINIO_DE_TESTE).err()
+                    != Some(crate::chaves::Falha::Fechada)
+                {
+                    crate::log_error!("teste", "{}", como);
+                    return Err("a antiga cujo selado nao abre assinou com a semente de antes");
+                }
             }
-            if crate::chaves::para_assinar(&dono, "antiga", DOMINIO_DE_TESTE).err()
-                != Some(crate::chaves::Falha::Fechada)
-            {
-                crate::log_error!("teste", "{}", como);
-                return Err("a antiga cujo selado nao abre assinou com a semente de antes");
-            }
-        }
+            Ok(())
+        })();
+        // Sempre: a reposição que parou deixou o armazém como a imagem o
+        // tem, e o volume por abrir. A compactação larga as entradas do caso
+        // — a tabela fica vazia —, e o estado inteiro volta do journal, com o
+        // volume; sem isso, o próximo a gravar no armazém gravaria por cima
+        // de um armazém vazio.
+        crate::chaves::esquecer_de_teste();
+        let de_volta = estado_do_journal();
+        feito?;
+        de_volta?;
         Ok(())
     })
 }
