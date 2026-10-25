@@ -1220,7 +1220,11 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     }
     // O cofre, com o journal confirmado: as chaves seladas abertas, e as do
     // formato de antes dele migradas — ver o cabeçalho do módulo. Um journal
-    // que não é novo e nunca falou de geração é de antes do cofre.
+    // com um boot completo e que nunca falou de geração é de antes do
+    // cofre. Um sem boot completo nenhum é uma criação interrompida — por
+    // este kernel ou pelo de antes —, e não tem chave nenhuma: uma chave só
+    // nasce depois do registro de boot, que o boot grava com a ordem das
+    // gravações na mão.
     let lida = crate::arch::sem_interrupcoes(|| core::mem::take(&mut *SELAGEM_LIDA.lock()));
     #[cfg(feature = "quedas")]
     let sem_cofre = crate::quedas::chaves_antigas();
@@ -1230,7 +1234,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         if let Err(e) = abrir_a_selagem(lida) {
             return Ok(e);
         }
-        if let Err(e) = migrar(lida, !novo && lida.confirmada.is_none()) {
+        if let Err(e) = migrar(lida, boots > 0 && lida.confirmada.is_none()) {
             return Ok(e);
         }
     }
