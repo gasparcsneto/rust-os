@@ -88,20 +88,28 @@
 //! números, e a segunda — uma queda na primeira instalação — viraria uma
 //! recusa para sempre.
 
+//! # O cofre
+//!
+//! O mesmo TPM, pela mesma sessão salgada, guarda as sementes das chaves de
+//! assinatura do kernel: seladas, e presas a um terceiro índice — o de
+//! geração —, que mata de uma vez todo objeto selado antes dele. Ver
+//! [`cofre`].
+
 #![no_std]
 
 use zeroize::Zeroize;
 
+pub mod cofre;
 mod cripto;
 
 use cripto::{ChaveDeHmac, TAM};
 
 /// O maior comando ou resposta que este pacote troca com o TPM.
 ///
-/// Os comandos daqui são pequenos; a maior resposta é a da criação da
-/// chave de endosso, com umas três centenas de bytes. Um teto fixo, e não
-/// `alloc`, porque o pacote roda no kernel antes de qualquer coisa que
-/// dependa do journal.
+/// Os comandos daqui são pequenos; a maior resposta é a da criação de um
+/// objeto selado — ver [`cofre`] —, com umas quatro centenas de bytes. Um
+/// teto fixo, e não `alloc`, porque o pacote roda no kernel antes de
+/// qualquer coisa que dependa do journal.
 pub const MAIOR_QUADRO: usize = 1024;
 
 /// O transporte até o TPM: manda um comando, devolve a resposta.
@@ -138,6 +146,10 @@ pub enum Erro {
     ChaveDoTpmTrocada,
     /// O gerador não deu os bytes.
     SemEntropia,
+    /// O objeto selado não é o que [`cofre`] cria: outro tipo, outros
+    /// atributos, outra política — ou o que voltou aberto não é a semente
+    /// que ele guardava.
+    SeladoEstranho,
 }
 
 impl Erro {
@@ -147,11 +159,16 @@ impl Erro {
             Erro::Transporte(m) | Erro::RespostaMalformada(m) => m,
             Erro::Codigo(codigo::SENHA_ERRADA) => "o TPM recusou a senha da ancora",
             Erro::Codigo(codigo::NV_JA_DEFINIDO) => "o indice da ancora ja existe",
+            Erro::Codigo(codigo::POLITICA_RECUSADA) => {
+                "o objeto selado e de outra geracao que a do indice do TPM"
+            }
+            Erro::Codigo(codigo::INTEGRIDADE) => "o objeto selado nao e deste TPM, ou foi mexido",
             Erro::Codigo(_) => "o TPM recusou o comando",
             Erro::IndiceEstranho => "o indice da ancora nao e o contador que o Duke cria",
             Erro::RespostaNaoAutenticada => "a resposta do TPM nao confere com a sessao",
             Erro::ChaveDoTpmTrocada => "a chave de endosso do TPM nao e a que o journal conhece",
             Erro::SemEntropia => "sem entropia para a sessao com o TPM",
+            Erro::SeladoEstranho => "o objeto selado nao e o que o Duke cria",
         }
     }
 }
@@ -181,6 +198,13 @@ pub mod codigo {
     /// com [`super::atributo::SEM_BLOQUEIO`], a especificação manda `BAD_AUTH`, e
     /// reserva `AUTH_FAIL` para os que contam para o bloqueio.
     pub const SENHA_ERRADA: u32 = 0x9A2;
+    /// `TPM_RC_POLICY`: o `TPM2_PolicyNV` com um valor que o índice não tem
+    /// — um objeto selado de outra geração.
+    pub const POLITICA_RECUSADA: u32 = 0x126;
+    /// `TPM_RC_INTEGRITY` no primeiro parâmetro do `TPM2_Load`: o bloco
+    /// privado não confere com o primário e com o nome — um objeto selado
+    /// de outro TPM, de outro primário, ou mexido.
+    pub const INTEGRIDADE: u32 = 0x1DF;
 }
 
 /// Os comandos, pelo código que a especificação lhes dá.
@@ -195,6 +219,11 @@ mod comando {
     pub const CREATE_PRIMARY: u32 = 0x0000_0131;
     pub const START_AUTH_SESSION: u32 = 0x0000_0176;
     pub const FLUSH_CONTEXT: u32 = 0x0000_0165;
+    pub const CREATE: u32 = 0x0000_0153;
+    pub const LOAD: u32 = 0x0000_0157;
+    pub const UNSEAL: u32 = 0x0000_015E;
+    pub const POLICY_NV: u32 = 0x0000_0149;
+    pub const POLICY_RESTART: u32 = 0x0000_0180;
 }
 
 /// Um comando sem área de autorização.
@@ -218,6 +247,9 @@ const ENDOSSO: u32 = 0x4000_000B;
 const NULO: u32 = 0x4000_0007;
 /// `TPM_SE_HMAC`.
 const SESSAO_HMAC: u8 = 0x00;
+/// `TPM_SE_POLICY`: a sessão que autoriza pelo que se provou nela — ver
+/// [`cofre`].
+const SESSAO_POLITICA: u8 = 0x01;
 /// A cifra simétrica da sessão e da EK: AES-128 em CFB.
 const AES: u16 = 0x0006;
 const CFB: u16 = 0x0043;
@@ -227,6 +259,8 @@ const P256: u16 = 0x0003;
 /// O atributo de sessão que diz que o primeiro parâmetro do comando vai
 /// cifrado.
 const DECIFRAR: u8 = 0x20;
+/// O atributo de sessão que pede o primeiro parâmetro da resposta cifrado.
+const CIFRAR: u8 = 0x40;
 
 /// A EK de ECC P-256 pelo modelo L-1 do *TCG EK Credential Profile 2.0*: a
 /// mesma chave em todo boot, e a que o certificado do fabricante descreve.
@@ -280,6 +314,15 @@ struct Quadro {
 }
 
 impl Quadro {
+    /// Um quadro vazio, sem cabeçalho: para montar uma parte de um comando
+    /// — os parâmetros, uma parte pública — antes de pô-la no comando.
+    fn vazio() -> Quadro {
+        Quadro {
+            bytes: [0; MAIOR_QUADRO],
+            tam: 0,
+        }
+    }
+
     /// Abre um comando com a etiqueta e o código. O tamanho é escrito no
     /// fim, por [`Quadro::fechar`].
     fn novo(etiqueta: u16, codigo: u32) -> Quadro {
@@ -690,6 +733,18 @@ pub fn abrir_sessao<T: Tpm>(
     chave: &ChaveDoTpm,
     sorteio: &mut dyn Sorteio,
 ) -> Result<Sessao, Erro> {
+    abrir_sessao_do_tipo(tpm, chave, SESSAO_HMAC, sorteio)
+}
+
+/// [`abrir_sessao`] de um tipo: a HMAC, ou a de política — que o
+/// [`cofre`] usa para abrir um objeto selado. Salgadas do mesmo jeito: a
+/// chave de uma e de outra só o TPM da EK conhece.
+fn abrir_sessao_do_tipo<T: Tpm>(
+    tpm: &mut T,
+    chave: &ChaveDoTpm,
+    tipo: u8,
+    sorteio: &mut dyn Sorteio,
+) -> Result<Sessao, Erro> {
     let mut nonce_caller = [0u8; TAM];
     sorteio.sortear(&mut nonce_caller)?;
     let sal = cripto::salgar(&chave.x, &chave.y, sorteio)?;
@@ -701,7 +756,7 @@ pub fn abrir_sessao<T: Tpm>(
     q.u16(2 * (2 + TAM as u16));
     q.tpm2b(&sal.x);
     q.tpm2b(&sal.y);
-    q.u8(SESSAO_HMAC);
+    q.u8(tipo);
     q.u16(AES);
     q.u16(128);
     q.u16(CFB);
@@ -740,6 +795,12 @@ struct Pedido<'a> {
     senha: &'a [u8],
     parametros: &'a mut [u8],
     cifrar_o_primeiro: bool,
+    /// Onde pôr o handle que a resposta traz antes dos parâmetros — o do
+    /// objeto que o comando criou ou carregou —, se ela traz um.
+    alca_da_resposta: Option<&'a mut u32>,
+    /// Se o primeiro parâmetro da resposta volta cifrado, para ser
+    /// decifrado aqui depois de o HMAC dela conferir.
+    decifrar_a_resposta: bool,
 }
 
 /// Um comando pela sessão: autoriza `entidades[0]` com `senha`, manda,
@@ -756,6 +817,16 @@ struct Pedido<'a> {
 /// - Com `cifrar_o_primeiro`, o primeiro parâmetro (um `TPM2B`) vai em
 ///   AES-128-CFB com a chave do `KDFa(…, "CFB", nonceCaller, nonceTPM)` —
 ///   cifrado antes do `cpHash`, e por isso coberto pelo HMAC do comando.
+/// - Com `decifrar_a_resposta`, o primeiro parâmetro da resposta volta
+///   cifrado do mesmo jeito, com os nonces na outra ordem — o do TPM é o
+///   mais novo. O TPM cifra antes do `rpHash`: o HMAC da resposta cobre o
+///   texto cifrado, e só depois de ele conferir o texto é decifrado.
+///
+/// Uma alça na resposta — a do objeto que o comando criou ou carregou —
+/// vai para `alca_da_resposta` assim que lida, antes de qualquer
+/// conferência: quem chama a tira do TPM se o resto falhar. Ela não entra
+/// no `rpHash` (parte 1, 18.8); quem a usa depois a usa pelo nome, que
+/// entra.
 ///
 /// Qualquer erro — do TPM ou da conferência — fecha a sessão: um erro não
 /// gira os nonces, e não há como saber em que pé ela ficou.
@@ -772,11 +843,16 @@ fn pela_sessao<T: Tpm>(
         senha,
         parametros,
         cifrar_o_primeiro,
+        alca_da_resposta,
+        decifrar_a_resposta,
     } = pedido;
     let mut nonce_caller = [0u8; TAM];
     sorteio.sortear(&mut nonce_caller)?;
     let chave = ChaveDeHmac::nova(&sessao.chave, senha);
     let mut atributos = CONTINUAR_SESSAO;
+    if decifrar_a_resposta {
+        atributos |= CIFRAR;
+    }
     // A cifra vem antes do cpHash, e não depois: o HMAC abaixo cobre o
     // texto cifrado inteiro e o atributo que o anuncia. O CFB não anda sem
     // autenticação — ver o cabeçalho do pacote.
@@ -791,7 +867,9 @@ fn pela_sessao<T: Tpm>(
             false,
         );
     }
-    let mut nomes = [0u8; 2 * (2 + TAM)];
+    // Até três nomes: o `TPM2_PolicyNV` tem o índice duas vezes e a sessão
+    // de política.
+    let mut nomes = [0u8; 3 * (2 + TAM)];
     let mut tam_nomes = 0;
     for e in entidades {
         nomes[tam_nomes..tam_nomes + e.nome.len()].copy_from_slice(e.nome);
@@ -822,6 +900,9 @@ fn pela_sessao<T: Tpm>(
     if codigo != codigo::SUCESSO {
         return Err(Erro::Codigo(codigo));
     }
+    if let Some(alca) = alca_da_resposta {
+        *alca = leitor.u32()?;
+    }
     let n = leitor.u32()? as usize;
     let rp = leitor.bytes(n)?;
     let nonce_novo: [u8; TAM] = leitor
@@ -849,6 +930,28 @@ fn pela_sessao<T: Tpm>(
     }
     sessao.nonce_tpm = nonce_novo;
     saida[..n].copy_from_slice(rp);
+    if decifrar_a_resposta {
+        // O atributo está no HMAC: uma resposta autêntica que diz não ter
+        // cifrado é o TPM que não cifrou — e o que viria em claro não se
+        // decifra.
+        if atributos_da_resposta & CIFRAR == 0 {
+            return Err(Erro::RespostaMalformada(
+                "o TPM nao cifrou a resposta que devia vir cifrada",
+            ));
+        }
+        let m = match saida[..n] {
+            [a, b, ..] => u16::from_be_bytes([a, b]) as usize,
+            _ => return Err(Erro::RespostaMalformada("resposta cifrada sem parametro")),
+        };
+        let dados =
+            saida
+                .get_mut(2..2 + m)
+                .filter(|_| 2 + m <= n)
+                .ok_or(Erro::RespostaMalformada(
+                    "parametro cifrado maior que a resposta",
+                ))?;
+        cripto::cfb(&chave, &nonce_novo, &nonce_caller, dados, true);
+    }
     Ok(n)
 }
 
@@ -924,7 +1027,17 @@ impl Ancora {
         sorteio: &mut dyn Sorteio,
     ) -> Result<(), Erro> {
         let indice = self.indice;
-        self.definir_indice(tpm, indice, senha_do_dono, atributo::DA_ANCORA, sorteio)?;
+        let mut senha = self.senha;
+        let r = self.definir_indice(
+            tpm,
+            indice,
+            &senha,
+            senha_do_dono,
+            atributo::DA_ANCORA,
+            sorteio,
+        );
+        senha.zeroize();
+        r?;
         self.escrito = Some(false);
         Ok(())
     }
@@ -942,7 +1055,10 @@ impl Ancora {
     /// O valor atual, lido pela sessão: a resposta é do TPM, ou é erro.
     pub fn ler<T: Tpm>(&mut self, tpm: &mut T, sorteio: &mut dyn Sorteio) -> Result<u64, Erro> {
         let (indice, atributos) = (self.indice, self.atributos(tpm)?);
-        self.ler_indice(tpm, indice, atributos, sorteio)
+        let mut senha = self.senha;
+        let r = self.ler_indice(tpm, indice, atributos, &senha, sorteio);
+        senha.zeroize();
+        r
     }
 
     /// Avança um. Não diz o valor novo: quem quer saber lê — ver
@@ -953,31 +1069,12 @@ impl Ancora {
         sorteio: &mut dyn Sorteio,
     ) -> Result<(), Erro> {
         let atributos = self.atributos(tpm)?;
-        let nome = nome_do_indice(self.indice, atributos);
-        let entidades = [
-            Entidade {
-                handle: self.indice,
-                nome: &nome,
-            },
-            Entidade {
-                handle: self.indice,
-                nome: &nome,
-            },
-        ];
-        let mut saida = [0; MAIOR_QUADRO];
         // Daqui até a resposta conferida, não se sabe se o contador andou.
         self.escrito = None;
-        let n = self.comando(
-            tpm,
-            sorteio,
-            comando::NV_INCREMENT,
-            &entidades,
-            &mut [],
-            &mut saida,
-        )?;
-        if n != 0 {
-            return Err(Erro::RespostaMalformada("o comando nao devolve parametros"));
-        }
+        let mut senha = self.senha;
+        let r = self.incrementar_indice(tpm, self.indice, atributos, &senha, sorteio);
+        senha.zeroize();
+        r?;
         self.escrito = Some(true);
         Ok(())
     }
@@ -1009,8 +1106,10 @@ impl Ancora {
         if publico.atributos & atributo::ESCRITO == 0 {
             return Ok(None);
         }
-        self.ler_indice(tpm, indice, publico.atributos, sorteio)
-            .map(Some)
+        let mut senha = self.senha;
+        let r = self.ler_indice(tpm, indice, publico.atributos, &senha, sorteio);
+        senha.zeroize();
+        r.map(Some)
     }
 
     /// Guarda no índice `indice` o valor do contador **agora**, como o do
@@ -1034,7 +1133,17 @@ impl Ancora {
                 p.atributos
             }
             None => {
-                self.definir_indice(tpm, indice, senha_do_dono, atributo::DO_NASCIMENTO, sorteio)?;
+                let mut senha = self.senha;
+                let r = self.definir_indice(
+                    tpm,
+                    indice,
+                    &senha,
+                    senha_do_dono,
+                    atributo::DO_NASCIMENTO,
+                    sorteio,
+                );
+                senha.zeroize();
+                r?;
                 atributo::DO_NASCIMENTO
             }
         };
@@ -1054,15 +1163,18 @@ impl Ancora {
         parametros[..2].copy_from_slice(&8u16.to_be_bytes());
         parametros[2..10].copy_from_slice(&valor.to_be_bytes());
         let mut saida = [0; MAIOR_QUADRO];
+        let mut senha = self.senha;
         let n = self.comando(
             tpm,
             sorteio,
             comando::NV_WRITE,
             &entidades,
+            &senha,
             &mut parametros,
             &mut saida,
-        )?;
-        if n != 0 {
+        );
+        senha.zeroize();
+        if n? != 0 {
             return Err(Erro::RespostaMalformada("o comando nao devolve parametros"));
         }
         Ok(valor)
@@ -1091,12 +1203,51 @@ impl Ancora {
         Ok(atributo::DA_ANCORA | if escrito { atributo::ESCRITO } else { 0 })
     }
 
-    /// `TPM2_NV_Read` dos oito bytes de `indice`, com estes `atributos`.
+    /// `TPM2_NV_Increment` do contador `indice`, com estes `atributos`,
+    /// autorizado por `senha`.
+    fn incrementar_indice<T: Tpm>(
+        &mut self,
+        tpm: &mut T,
+        indice: u32,
+        atributos: u32,
+        senha: &[u8],
+        sorteio: &mut dyn Sorteio,
+    ) -> Result<(), Erro> {
+        let nome = nome_do_indice(indice, atributos);
+        let entidades = [
+            Entidade {
+                handle: indice,
+                nome: &nome,
+            },
+            Entidade {
+                handle: indice,
+                nome: &nome,
+            },
+        ];
+        let mut saida = [0; MAIOR_QUADRO];
+        let n = self.comando(
+            tpm,
+            sorteio,
+            comando::NV_INCREMENT,
+            &entidades,
+            senha,
+            &mut [],
+            &mut saida,
+        )?;
+        if n != 0 {
+            return Err(Erro::RespostaMalformada("o comando nao devolve parametros"));
+        }
+        Ok(())
+    }
+
+    /// `TPM2_NV_Read` dos oito bytes de `indice`, com estes `atributos`,
+    /// autorizado por `senha`.
     fn ler_indice<T: Tpm>(
         &mut self,
         tpm: &mut T,
         indice: u32,
         atributos: u32,
+        senha: &[u8],
         sorteio: &mut dyn Sorteio,
     ) -> Result<u64, Erro> {
         let nome = nome_do_indice(indice, atributos);
@@ -1118,6 +1269,7 @@ impl Ancora {
             sorteio,
             comando::NV_READ,
             &entidades,
+            senha,
             &mut parametros,
             &mut saida,
         )?;
@@ -1134,11 +1286,12 @@ impl Ancora {
     }
 
     /// `TPM2_NV_DefineSpace` de um índice de oito bytes, pela hierarquia
-    /// do dono, com a senha desta âncora cifrada no parâmetro.
+    /// do dono, com a senha `senha` cifrada no parâmetro.
     fn definir_indice<T: Tpm>(
         &mut self,
         tpm: &mut T,
         indice: u32,
+        senha: &[u8; 32],
         senha_do_dono: &[u8],
         atributos: u32,
         sorteio: &mut dyn Sorteio,
@@ -1147,7 +1300,7 @@ impl Ancora {
             bytes: [0; MAIOR_QUADRO],
             tam: 0,
         };
-        p.tpm2b(&self.senha);
+        p.tpm2b(senha);
         // TPM2B_NV_PUBLIC: índice, algoritmo do nome, atributos, política
         // vazia, tamanho.
         p.u16(4 + 2 + 4 + 2 + 2);
@@ -1172,6 +1325,8 @@ impl Ancora {
                 senha: senha_do_dono,
                 parametros: &mut p.bytes[..tam],
                 cifrar_o_primeiro: true,
+                alca_da_resposta: None,
+                decifrar_a_resposta: false,
             },
             &mut saida,
         );
@@ -1183,31 +1338,33 @@ impl Ancora {
         Ok(())
     }
 
-    /// Um comando autorizado pela senha desta âncora.
+    /// Um comando sobre um índice, autorizado pela senha `senha` dele — a
+    /// desta âncora, a do nascimento, ou a do índice de geração.
+    #[allow(clippy::too_many_arguments)]
     fn comando<T: Tpm>(
         &mut self,
         tpm: &mut T,
         sorteio: &mut dyn Sorteio,
         codigo: u32,
         entidades: &[Entidade],
+        senha: &[u8],
         parametros: &mut [u8],
         saida: &mut [u8; MAIOR_QUADRO],
     ) -> Result<usize, Erro> {
-        let mut senha = self.senha;
-        let r = self.pela_sessao(
+        self.pela_sessao(
             tpm,
             sorteio,
             Pedido {
                 codigo,
                 entidades,
-                senha: &senha,
+                senha,
                 parametros,
                 cifrar_o_primeiro: false,
+                alca_da_resposta: None,
+                decifrar_a_resposta: false,
             },
             saida,
-        );
-        senha.zeroize();
-        r
+        )
     }
 
     /// Um pedido pela sessão — aberta agora, se não houver uma. Um erro
