@@ -207,6 +207,7 @@ fn codigo_de(r: &nativo::Resposta) -> Option<String> {
 /// a identidade de quem o gravou por último.
 struct Estatistica {
     arquivo: bool,
+    diretorio: bool,
     versao: u64,
     dono: Option<String>,
 }
@@ -218,8 +219,10 @@ fn estatistica(caminho: &str) -> Result<Estatistica, String> {
         return Err(codigo);
     }
     let resultado = r.resultado().map_err(|_| String::from("TECHNICAL_ERROR"))?;
+    let tipo = resultado.member("type").and_then(|t| t.as_str());
     Ok(Estatistica {
-        arquivo: resultado.member("type").and_then(|t| t.as_str()) == Some("file"),
+        arquivo: tipo == Some("file"),
+        diretorio: tipo == Some("dir"),
         versao: resultado
             .member("version")
             .and_then(|v| v.as_u64())
@@ -276,9 +279,14 @@ fn gravar(caminho: &str, texto: &str, esperada: u64) -> Result<u64, String> {
         .ok_or_else(|| String::from("TECHNICAL_ERROR"))
 }
 
-/// Cria o diretório, se não existe. O que falhar aparece na gravação
-/// seguinte, que é quem precisa dele.
+/// Cria o diretório, se não existe. O que existe não se pede de novo: o
+/// `fs.mkdir` dele é uma recusa, e a auditoria — que o tecido lê — ganharia
+/// duas a cada execução (a fumaça da rede principal as contou). O que
+/// falhar aparece na gravação seguinte, que é quem precisa dele.
 fn diretorio(caminho: &str) {
+    if estatistica(caminho).is_ok_and(|e| e.diretorio) {
+        return;
+    }
     let _ = nativo::pedir("fs.mkdir", |w| w.field_str("path", caminho));
 }
 

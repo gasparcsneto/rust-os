@@ -531,6 +531,12 @@ pub fn soltar(faixas: &Faixas) {
     }
 }
 
+/// Se o mapa tem o bloco `b` da área de dados em uso — `None` sem volume
+/// aberto, ou fora dele. Só para o diagnóstico de um bloco que não abre.
+pub fn bloco_em_uso(b: u64) -> Option<bool> {
+    com(|v| v.mapa.as_ref().and_then(|m| m.em_uso(b)))
+}
+
 /// A geometria e as chaves para ler ou escrever blocos.
 fn para_blocos() -> Result<(Geometria, [u8; 32]), &'static str> {
     let g =

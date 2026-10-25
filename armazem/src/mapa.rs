@@ -168,6 +168,12 @@ impl Mapa {
         None
     }
 
+    /// Se o bloco `b` está em uso — `None` fora do mapa. Só para dizer o
+    /// que se viu quando um bloco não confere.
+    pub fn em_uso(&self, b: u64) -> Option<bool> {
+        (b < self.total).then(|| self.usado(b))
+    }
+
     /// Os blocos em uso, contados de novo — para conferir a conta.
     pub fn contar_usados(&self) -> u64 {
         self.palavras

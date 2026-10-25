@@ -1129,15 +1129,32 @@ impl SistemaDeArquivos for NoVfs {
                     // Nada do conteúdo.
                     let zerado = buf.iter().all(|&x| x == 0);
                     let segunda = crate::volume::ler_bloco(b, &id, k, &mut buf).is_ok();
+                    // O mapa, e os outros nós que apontam para o mesmo
+                    // bloco: um bloco livre no mapa foi solto vivo; outro
+                    // dono é posse dupla; nenhum dos dois é uma escrita ou
+                    // uma leitura no lugar errado.
+                    let no_mapa = crate::volume::bloco_em_uso(b);
+                    let outros: Vec<String> = com_o_armazem(|a| {
+                        a.todos()
+                            .filter(|(_, n)| n.versao() != no.id)
+                            .filter(|(_, n)| {
+                                n.conteudo()
+                                    .is_some_and(|c| c.faixas().any(|(de, ate)| de <= b && b < ate))
+                            })
+                            .map(|(c, n)| format!("{c}@{}", n.versao()))
+                            .collect()
+                    });
                     crate::log_error!(
                         "armazem",
-                        "versao {}: o bloco {} (logico {}) nao abre: {}; zerado {}; a segunda leitura abre {}",
+                        "versao {}: o bloco {} (logico {}) nao abre: {}; zerado {}; a segunda leitura abre {}; em uso no mapa {:?}; outros donos {:?}",
                         no.id,
                         b,
                         k,
                         m,
                         zerado,
-                        segunda
+                        segunda,
+                        no_mapa,
+                        outros
                     );
                 }
                 politica::sigiloso::zerar(&mut buf[..]);
