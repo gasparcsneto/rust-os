@@ -15,6 +15,13 @@
 //!
 //! O CMC lembra cada bloco: a mesma notificação de novo devolve o mesmo
 //! resultado, e não cunha duas vezes.
+//!
+//! A recarga de um canister (`notify_top_up`) é a mesma forma, com outra
+//! conta e outro memo: o ICP vai para a conta de recarga **do canister** no
+//! CMC ([`conta_de_recarga`]) com o memo [`MEMO_DE_RECARGA`], e o
+//! `notify_top_up` com o bloco dela converte e deposita os cycles no
+//! canister. Qualquer um pode notificar uma recarga — os cycles vão para o
+//! canister da subconta, e não para quem notifica.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,6 +34,10 @@ use super::principal::Principal;
 /// O `memo` da cunhagem: `MINT`, o número `0x544e494d` em 8 bytes little
 /// endian — o `memo` de 8 bytes que o CMC lê como número.
 pub const MEMO_DE_CUNHAGEM: [u8; 8] = 0x544e_494d_u64.to_le_bytes();
+
+/// O `memo` da recarga: `TPUP`, o número `0x50555054` em 8 bytes little
+/// endian.
+pub const MEMO_DE_RECARGA: [u8; 8] = 0x5055_5054_u64.to_le_bytes();
 
 /// A subconta de um Principal no CMC: o tamanho dele, os bytes, e zeros
 /// até [`SUBCONTA`].
@@ -45,6 +56,15 @@ pub fn conta_de_deposito(cmc: &Principal, quem: &Principal) -> Conta {
     Conta {
         dono: *cmc,
         subconta: Some(subconta_de(quem)),
+    }
+}
+
+/// A conta de recarga do `canister` no CMC `cmc`: o ICP que vai para ela,
+/// com o [`MEMO_DE_RECARGA`], vira cycles do `canister`.
+pub fn conta_de_recarga(cmc: &Principal, canister: &Principal) -> Conta {
+    Conta {
+        dono: *cmc,
+        subconta: Some(subconta_de(canister)),
     }
 }
 
@@ -201,15 +221,38 @@ fn texto(v: Option<&Valor>) -> Result<String, Erro> {
     }
 }
 
-/// Lê a resposta de `notify_mint_cycles`: `(variant { Ok :
-/// NotifyMintCyclesSuccess; Err : NotifyError })` — os cycles cunhados, ou
-/// a recusa do CMC.
-pub fn ler_cunhagem(resposta: &[u8]) -> Result<Result<Cunhagem, Recusa>, Erro> {
+/// Escreve o argumento de `notify_top_up`: `(record { block_index : nat64;
+/// canister_id : principal })` — o bloco da transferência para a conta de
+/// recarga do canister.
+pub fn argumento_da_recarga(bloco: u64, canister: &Principal) -> Vec<u8> {
+    let tipo = Tipo::record([
+        ("block_index", Primitivo::Nat64.into()),
+        ("canister_id", Primitivo::Principal.into()),
+    ]);
+    let valor = Valor::Record(alloc::vec![
+        (candid::id_do_campo("block_index"), Valor::Nat64(bloco)),
+        (
+            candid::id_do_campo("canister_id"),
+            Valor::Principal(*canister)
+        ),
+    ]);
+    candid::codificar_com_tipos(&[tipo], &[valor]).expect("o valor e do tipo daqui")
+}
+
+/// O único valor de uma resposta.
+fn unico(resposta: &[u8]) -> Result<Valor, Erro> {
     let mut valores = candid::decodificar(resposta).map_err(Erro::Candid)?;
     if valores.len() != 1 {
         return Err(Erro::Forma);
     }
-    let v = valores.remove(0);
+    Ok(valores.remove(0))
+}
+
+/// Lê a resposta de `notify_mint_cycles`: `(variant { Ok :
+/// NotifyMintCyclesSuccess; Err : NotifyError })` — os cycles cunhados, ou
+/// a recusa do CMC.
+pub fn ler_cunhagem(resposta: &[u8]) -> Result<Result<Cunhagem, Recusa>, Erro> {
+    let v = unico(resposta)?;
     if let Some(ok) = v.caso("Ok") {
         return Ok(Ok(Cunhagem {
             cunhados: nat(ok.campo("minted"))?,
@@ -217,7 +260,22 @@ pub fn ler_cunhagem(resposta: &[u8]) -> Result<Result<Cunhagem, Recusa>, Erro> {
             bloco: nat(ok.campo("block_index"))?,
         }));
     }
-    let erro = v.caso("Err").ok_or(Erro::Forma)?;
+    Ok(Err(ler_recusa(v.caso("Err").ok_or(Erro::Forma)?)?))
+}
+
+/// Lê a resposta de `notify_top_up`: `(variant { Ok : nat; Err :
+/// NotifyError })` — os cycles depositados no canister, ou a recusa do
+/// CMC.
+pub fn ler_recarga(resposta: &[u8]) -> Result<Result<u128, Recusa>, Erro> {
+    let v = unico(resposta)?;
+    if let Some(ok) = v.caso("Ok") {
+        return Ok(Ok(nat(Some(ok))?));
+    }
+    Ok(Err(ler_recusa(v.caso("Err").ok_or(Erro::Forma)?)?))
+}
+
+/// `NotifyError`, pelo nome do caso.
+fn ler_recusa(erro: &Valor) -> Result<Recusa, Erro> {
     let recusa = if let Some(r) = erro.caso("Refunded") {
         Recusa::Devolvida {
             motivo: texto(r.campo("reason"))?,
@@ -245,7 +303,7 @@ pub fn ler_cunhagem(resposta: &[u8]) -> Result<Result<Cunhagem, Recusa>, Erro> {
     } else {
         return Err(Erro::Forma);
     };
-    Ok(Err(recusa))
+    Ok(recusa)
 }
 
 #[cfg(test)]

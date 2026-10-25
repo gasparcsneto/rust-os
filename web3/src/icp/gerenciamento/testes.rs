@@ -8,8 +8,9 @@ use std::vec::Vec;
 
 use ::candid::{CandidType, Decode, Deserialize, Encode, Nat};
 use ic_management_canister_types::{
-    CanisterIdRecord, CanisterInstallMode, CanisterStatusResult, CanisterStatusType, ChunkHash,
-    DefiniteCanisterSettings, InstallChunkedCodeArgs, InstallCodeArgs, MemoryMetrics, QueryStats,
+    CanisterIdRecord, CanisterInstallMode, CanisterSettings, CanisterStatusResult,
+    CanisterStatusType, ChunkHash, DefiniteCanisterSettings, InstallChunkedCodeArgs,
+    InstallCodeArgs, MemoryMetrics, QueryStats, UninstallCodeArgs, UpdateSettingsArgs,
     UploadChunkArgs,
 };
 
@@ -210,13 +211,15 @@ fn o_estado_escrito_pelo_oficial() {
             (0..s.ate(11)).map(|_| principal_sorteado(&mut s)).collect();
         let cycles = u128::MAX >> s.ate(128);
         let memoria = u128::from(s.proximo());
-        let dele = estado_oficial(
+        let congelamento = u128::from(s.proximo()) >> s.ate(64);
+        let mut dele = estado_oficial(
             oficial_status,
             modulo.map(|h| h.to_vec()),
             controladores.iter().map(oficial).collect(),
             cycles,
             memoria,
         );
+        dele.settings.freezing_threshold = Nat::from(congelamento);
         let estado = ler_estado(&Encode!(&dele).unwrap()).unwrap();
         assert_eq!(
             estado,
@@ -224,6 +227,7 @@ fn o_estado_escrito_pelo_oficial() {
                 situacao,
                 modulo,
                 controladores,
+                congelamento: Some(congelamento),
                 cycles,
                 memoria,
             }
@@ -277,6 +281,8 @@ fn o_estado_de_outra_versao_da_interface() {
     );
     assert_eq!(estado.cycles, 2_499_998_434_000);
     assert_eq!(estado.memoria, 12_510);
+    // A interface que não diz o limiar de congelamento: nenhum.
+    assert_eq!(estado.congelamento, None);
 
     // Sem o hash do módulo: fora da forma.
     #[derive(CandidType, Deserialize)]
@@ -385,4 +391,91 @@ fn as_mensagens_sao_ascii() {
     for s in [Situacao::Rodando, Situacao::Parando, Situacao::Parado] {
         assert!(s.nome().is_ascii());
     }
+}
+
+/// Os métodos que só levam o canister — `canister_status`,
+/// `start_canister`, `stop_canister`, `delete_canister` e
+/// `clear_chunk_store` —, contra o `CanisterIdRecord` do oficial, nos dois
+/// sentidos; e a resposta vazia deles, escrita pelo oficial.
+#[test]
+fn o_canister_so_e_o_do_oficial() {
+    let mut s = Sorteio::novo(46);
+    for _ in 0..200 {
+        let canister = principal_sorteado(&mut s);
+        let bytes = argumento_do_canister(&canister);
+        let dele = Decode!(&bytes, CanisterIdRecord).unwrap();
+        assert_eq!(dele.canister_id, oficial(&canister));
+        assert_eq!(lidos(&Encode!(&dele).unwrap()), lidos(&bytes));
+        assert_eq!(argumento_do_estado(&canister), bytes);
+    }
+    assert_eq!(ler_vazio(&Encode!().unwrap()), Ok(()));
+    // Um valor onde não devia haver nenhum: fora da forma.
+    assert_eq!(ler_vazio(&Encode!(&1u8).unwrap()), Err(Erro::Forma));
+}
+
+#[test]
+fn a_desinstalacao_e_a_do_oficial() {
+    let mut s = Sorteio::novo(47);
+    for _ in 0..200 {
+        let canister = principal_sorteado(&mut s);
+        let bytes = argumento_da_desinstalacao(&canister);
+        let dele = Decode!(&bytes, UninstallCodeArgs).unwrap();
+        assert_eq!(dele.canister_id, oficial(&canister));
+        assert_eq!(dele.sender_canister_version, None);
+        assert_eq!(lidos(&Encode!(&dele).unwrap()), lidos(&bytes));
+    }
+}
+
+/// O `update_settings`: o oficial lê o argumento como o dele, com os
+/// ajustes dados e cada um dos outros ausente — "não muda". O argumento
+/// leva só os ajustes dados; o oficial escreve todos, como `null`, e os
+/// dois se leem igual na interface.
+#[test]
+fn os_ajustes_sao_os_do_oficial() {
+    let mut s = Sorteio::novo(48);
+    for _ in 0..300 {
+        let canister = principal_sorteado(&mut s);
+        let controladores = (s.ate(2) == 1).then(|| {
+            (0..s.ate(MAIS_CONTROLADORES as u64 + 1))
+                .map(|_| principal_sorteado(&mut s))
+                .collect::<Vec<_>>()
+        });
+        let congelamento = (s.ate(2) == 1).then(|| s.proximo() >> s.ate(64));
+        let ajustes = Ajustes {
+            controladores: controladores.clone(),
+            congelamento,
+        };
+        let bytes = argumento_dos_ajustes(&canister, &ajustes).unwrap();
+        let dele = Decode!(&bytes, UpdateSettingsArgs).unwrap();
+        assert_eq!(dele.canister_id, oficial(&canister));
+        assert_eq!(dele.sender_canister_version, None);
+        let esperados = CanisterSettings {
+            controllers: controladores.map(|cs| cs.iter().map(oficial).collect()),
+            freezing_threshold: congelamento.map(Nat::from),
+            ..CanisterSettings::default()
+        };
+        assert_eq!(dele.settings, esperados);
+    }
+    // A lista vazia se escreve — tirar todos os controladores é do IC
+    // aceitar ou não —, e onze não.
+    let canister = Principal::de_texto("qpsvj-4l777-77775-qaaaa-cai").unwrap();
+    let vazia = Ajustes {
+        controladores: Some(vec![]),
+        congelamento: None,
+    };
+    let dele = Decode!(
+        &argumento_dos_ajustes(&canister, &vazia).unwrap(),
+        UpdateSettingsArgs
+    )
+    .unwrap();
+    assert_eq!(dele.settings.controllers, Some(vec![]));
+    let onze = Ajustes {
+        controladores: Some(vec![canister; MAIS_CONTROLADORES + 1]),
+        congelamento: None,
+    };
+    assert_eq!(
+        argumento_dos_ajustes(&canister, &onze),
+        Err(Erro::MuitosControladores)
+    );
+    assert!(Erro::MuitosControladores.to_string().is_ascii());
 }

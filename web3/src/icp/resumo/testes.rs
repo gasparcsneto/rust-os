@@ -181,3 +181,22 @@ fn estruturas_geradas_contra_o_oraculo() {
         assert_eq!(&nosso[..], oficial.as_slice(), "{doc:02x?}");
     }
 }
+
+/// O SHA-256 em pedaços é o de uma vez, em qualquer corte — e o vazio é
+/// o do vazio.
+#[test]
+fn o_sha256_em_pedacos_e_o_de_uma_vez() {
+    let mut s = crate::icp::bancada::Sorteio::novo(61);
+    for _ in 0..200 {
+        let bytes = s.bytes_ate(9000);
+        let mut h = Sha256EmPedacos::novo();
+        let mut resto = &bytes[..];
+        while !resto.is_empty() {
+            let n = (s.ate(1500) as usize + 1).min(resto.len());
+            h.juntar(&resto[..n]);
+            resto = &resto[n..];
+        }
+        assert_eq!(h.fim(), sha256(&bytes));
+    }
+    assert_eq!(Sha256EmPedacos::novo().fim(), sha256(&[]));
+}

@@ -11,9 +11,18 @@
 //! - [`argumento_da_instalacao_em_pedacos`], o de `install_chunked_code`:
 //!   os hashes dos pedaços, em ordem, e o do módulo inteiro;
 //! - [`argumento_do_estado`] e [`ler_estado`], o de `canister_status` e o
-//!   estado: a situação, o hash do módulo, os controladores, os cycles e a
-//!   memória — os campos pelo nome; os que esta leitura não usa, e os que
-//!   a interface ganhar, não atrapalham.
+//!   estado: a situação, o hash do módulo, os controladores, o limiar de
+//!   congelamento, os cycles e a memória — os campos pelo nome; os que esta
+//!   leitura não usa, e os que a interface ganhar, não atrapalham;
+//! - [`argumento_do_canister`], o dos métodos que só levam o canister:
+//!   `start_canister`, `stop_canister`, `delete_canister` e
+//!   `clear_chunk_store` — e o próprio `canister_status`;
+//! - [`argumento_da_desinstalacao`], o de `uninstall_code`;
+//! - [`argumento_dos_ajustes`], o de `update_settings`, com os
+//!   [`Ajustes`] que se mudam: os controladores, até
+//!   [`MAIS_CONTROLADORES`], e o limiar de congelamento. O que não se
+//!   muda não vai: na interface, cada ajuste é opcional, e o ausente fica
+//!   como estava.
 //!
 //! O que não tem a forma da interface é recusado. A chamada vai pela
 //! [`super::atualizacao::chamar_ao_gerenciamento`], com o canister efetivo
@@ -37,6 +46,10 @@ use super::resumo::Hash;
 
 /// O maior pedaço que o IC guarda: 1 MiB.
 pub const MAIOR_PEDACO: usize = 1024 * 1024;
+
+/// Quantos controladores um canister tem, no máximo — **especificação**:
+/// "a list of at most 10 principals".
+pub const MAIS_CONTROLADORES: usize = 10;
 
 /// O modo de uma instalação — `canister_install_mode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +95,9 @@ pub struct Estado {
     pub modulo: Option<Hash>,
     /// Os controladores.
     pub controladores: Vec<Principal>,
+    /// O limiar de congelamento, em segundos; nenhum, numa interface que
+    /// não o diz.
+    pub congelamento: Option<u128>,
     /// Os cycles do canister.
     pub cycles: u128,
     /// A memória que o canister ocupa, em bytes.
@@ -93,6 +109,8 @@ pub struct Estado {
 pub enum Erro {
     /// Um pedaço de mais de [`MAIOR_PEDACO`] bytes: o IC o recusaria.
     PedacoGrande,
+    /// Mais de [`MAIS_CONTROLADORES`] controladores: o IC os recusaria.
+    MuitosControladores,
     /// O argumento passa dos tetos da escrita.
     Escrita(ErroDaEscrita),
     /// A resposta não é Candid.
@@ -105,6 +123,7 @@ impl fmt::Display for Erro {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Erro::PedacoGrande => f.write_str("pedaco maior que 1 MiB"),
+            Erro::MuitosControladores => f.write_str("mais de 10 controladores"),
             Erro::Escrita(e) => write!(f, "{e}"),
             Erro::Candid(e) => write!(f, "{e}"),
             Erro::Forma => f.write_str("resposta fora da forma do gerenciamento"),
@@ -234,14 +253,93 @@ pub fn argumento_da_instalacao_em_pedacos(
 }
 
 /// Escreve o argumento de `canister_status`: `(record { canister_id :
-/// principal })`.
+/// principal })` — o de [`argumento_do_canister`].
 pub fn argumento_do_estado(canister: &Principal) -> Vec<u8> {
+    argumento_do_canister(canister)
+}
+
+/// Escreve o argumento dos métodos que só levam o canister —
+/// `canister_status`, `start_canister`, `stop_canister`, `delete_canister`
+/// e `clear_chunk_store`: `(record { canister_id : principal })`.
+pub fn argumento_do_canister(canister: &Principal) -> Vec<u8> {
     let tipo = Tipo::record([("canister_id", Primitivo::Principal.into())]);
     let valor = Valor::Record(alloc::vec![campo(
         "canister_id",
         Valor::Principal(*canister)
     )]);
     escrever(tipo, valor).expect("o valor e do tipo daqui")
+}
+
+/// Escreve o argumento de `uninstall_code`: `(record { canister_id :
+/// principal; sender_canister_version : opt nat64 })`. O canister fica
+/// sem módulo e sem estado — a memória estável inclusive.
+pub fn argumento_da_desinstalacao(canister: &Principal) -> Vec<u8> {
+    let tipo = Tipo::record([
+        ("canister_id", Primitivo::Principal.into()),
+        ("sender_canister_version", Tipo::opt(Primitivo::Nat64)),
+    ]);
+    let valor = Valor::Record(alloc::vec![
+        campo("canister_id", Valor::Principal(*canister)),
+        campo("sender_canister_version", Valor::Opt(None)),
+    ]);
+    escrever(tipo, valor).expect("o valor e do tipo daqui")
+}
+
+/// Os ajustes que um `update_settings` muda — a parte de
+/// `canister_settings` que se usa aqui. `None` é "não muda".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ajustes {
+    /// Os controladores, que **substituem** os de agora: até
+    /// [`MAIS_CONTROLADORES`]. Quem não estiver na lista deixa de
+    /// controlar o canister.
+    pub controladores: Option<Vec<Principal>>,
+    /// O limiar de congelamento, em segundos: o canister que não teria
+    /// cycles para tanto tempo para de executar, em vez de se esgotar.
+    pub congelamento: Option<u64>,
+}
+
+/// Escreve o argumento de `update_settings`: `(record { canister_id :
+/// principal; settings : canister_settings; sender_canister_version : opt
+/// nat64 })`, com só os ajustes dados em `canister_settings`. Na
+/// interface, cada ajuste é `opt`, e o campo que falta se lê como `null`
+/// — "não muda".
+pub fn argumento_dos_ajustes(canister: &Principal, ajustes: &Ajustes) -> Result<Vec<u8>, Erro> {
+    if ajustes
+        .controladores
+        .as_ref()
+        .is_some_and(|c| c.len() > MAIS_CONTROLADORES)
+    {
+        return Err(Erro::MuitosControladores);
+    }
+    let mut tipos = Vec::new();
+    let mut valores = Vec::new();
+    if let Some(cs) = &ajustes.controladores {
+        tipos.push(("controllers", Tipo::opt(Tipo::vec(Primitivo::Principal))));
+        valores.push(campo(
+            "controllers",
+            Valor::Opt(Some(Box::new(Valor::Vec(
+                cs.iter().map(|c| Valor::Principal(*c)).collect(),
+            )))),
+        ));
+    }
+    if let Some(segundos) = ajustes.congelamento {
+        tipos.push(("freezing_threshold", Tipo::opt(Primitivo::Nat)));
+        valores.push(campo(
+            "freezing_threshold",
+            Valor::Opt(Some(Box::new(Valor::Nat(u128::from(segundos))))),
+        ));
+    }
+    let tipo = Tipo::record([
+        ("canister_id", Primitivo::Principal.into()),
+        ("settings", Tipo::record(tipos)),
+        ("sender_canister_version", Tipo::opt(Primitivo::Nat64)),
+    ]);
+    let valor = Valor::Record(alloc::vec![
+        campo("canister_id", Valor::Principal(*canister)),
+        campo("settings", Valor::Record(valores)),
+        campo("sender_canister_version", Valor::Opt(None)),
+    ]);
+    escrever(tipo, valor)
 }
 
 /// Os pedaços de um módulo, de até `tamanho` bytes cada — de 1 até
@@ -275,7 +373,10 @@ fn nat(v: Option<&Valor>) -> Result<u128, Erro> {
     }
 }
 
-/// Lê a resposta de `install_code` e de `install_chunked_code`: `()`.
+/// Lê a resposta de `install_code`, de `install_chunked_code` e dos
+/// métodos que não devolvem nada — `start_canister`, `stop_canister`,
+/// `delete_canister`, `uninstall_code`, `update_settings` e
+/// `clear_chunk_store`: `()`.
 pub fn ler_vazio(resposta: &[u8]) -> Result<(), Erro> {
     let valores = candid::decodificar(resposta).map_err(Erro::Candid)?;
     if valores.is_empty() {
@@ -319,10 +420,19 @@ pub fn ler_estado(resposta: &[u8]) -> Result<Estado, Erro> {
             .collect::<Result<Vec<_>, _>>()?,
         _ => return Err(Erro::Forma),
     };
+    let congelamento = match v
+        .campo("settings")
+        .and_then(|s| s.campo("freezing_threshold"))
+    {
+        None => None,
+        Some(Valor::Nat(n)) => Some(*n),
+        Some(_) => return Err(Erro::Forma),
+    };
     Ok(Estado {
         situacao,
         modulo,
         controladores,
+        congelamento,
         cycles: nat(v.campo("cycles"))?,
         memoria: nat(v.campo("memory_size"))?,
     })

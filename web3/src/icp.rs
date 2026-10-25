@@ -27,7 +27,9 @@
 //! - [`atualizacao`]: a chamada de atualização verificada — do anônimo,
 //!   ou assinada por quem tem chave —, e o acompanhamento dela; e a
 //!   chamada ao canister de gerenciamento, pelo canister efetivo;
-//! - [`registro`]: as redes em que se confia — `/dados/icp/redes`.
+//! - [`registro`]: as redes em que se confia — `/dados/icp/redes`;
+//! - [`gestor`]: o pedido de quem opera canisters e o registro deles — as
+//!   contas do programa `gestor`, sem arquivo nem rede.
 //!
 //! # De onde vem o que se sabe do protocolo
 //!
@@ -71,6 +73,7 @@ pub mod ciclos;
 pub mod cmc;
 pub mod consulta;
 pub mod gerenciamento;
+pub mod gestor;
 pub mod icrc1;
 pub mod pedido;
 pub mod principal;

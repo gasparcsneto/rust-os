@@ -242,3 +242,82 @@ fn as_mensagens_sao_ascii() {
     };
     assert!(r.to_string().is_ascii(), "{r}");
 }
+
+#[derive(CandidType, Deserialize, Debug)]
+struct NotifyTopUpArg {
+    block_index: u64,
+    canister_id: ::candid::Principal,
+}
+
+#[test]
+fn o_memo_e_a_conta_da_recarga() {
+    assert_eq!(&MEMO_DE_RECARGA, b"TPUP\0\0\0\0");
+    assert_eq!(u64::from_le_bytes(MEMO_DE_RECARGA), 0x5055_5054);
+    // A conta é a do CMC, com a subconta **do canister** — a mesma forma
+    // da de depósito, de outro Principal.
+    let cmc = Principal::de_texto("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let canister = Principal::de_texto("qpsvj-4l777-77775-qaaaa-cai").unwrap();
+    assert_eq!(
+        conta_de_recarga(&cmc, &canister),
+        Conta {
+            dono: cmc,
+            subconta: Some(subconta_de(&canister)),
+        }
+    );
+    assert_eq!(
+        conta_de_recarga(&cmc, &canister),
+        conta_de_deposito(&cmc, &canister)
+    );
+}
+
+#[test]
+fn a_recarga_e_a_da_interface() {
+    let mut s = Sorteio::novo(6);
+    for _ in 0..300 {
+        let bloco = s.proximo();
+        let bytes = s.bytes_ate(29);
+        let canister = Principal::de_bytes(&bytes).unwrap();
+        let dele = Decode!(&argumento_da_recarga(bloco, &canister), NotifyTopUpArg).unwrap();
+        assert_eq!(dele.block_index, bloco);
+        assert_eq!(dele.canister_id.as_slice(), canister.bytes());
+    }
+}
+
+#[test]
+fn o_resultado_da_recarga_escrito_pela_interface() {
+    type DaRecarga = Result<Nat, NotifyError>;
+    let ok: DaRecarga = Ok(Nat::from(3_520_000_000_000u64));
+    assert_eq!(
+        ler_recarga(&Encode!(&ok).unwrap()),
+        Ok(Ok(3_520_000_000_000))
+    );
+    // As recusas são as da cunhagem, pelo mesmo leitor.
+    let r: DaRecarga = Err(NotifyError::Processing);
+    assert_eq!(
+        ler_recarga(&Encode!(&r).unwrap()),
+        Ok(Err(Recusa::Processando))
+    );
+    let r: DaRecarga = Err(NotifyError::Refunded {
+        reason: "x".into(),
+        block_index: Some(4),
+    });
+    assert_eq!(
+        ler_recarga(&Encode!(&r).unwrap()),
+        Ok(Err(Recusa::Devolvida {
+            motivo: "x".into(),
+            bloco: Some(4),
+        }))
+    );
+    // Os cycles que não são `nat`, e a resposta de dois valores: fora da
+    // forma.
+    let torto: Result<u64, NotifyError> = Ok(5);
+    assert_eq!(ler_recarga(&Encode!(&torto).unwrap()), Err(Erro::Forma));
+    assert_eq!(ler_recarga(&Encode!(&ok, &ok).unwrap()), Err(Erro::Forma));
+    // A resposta de uma cunhagem não é a de uma recarga.
+    let cunhagem: Resultado = Ok(NotifyMintCyclesSuccess {
+        block_index: Nat::from(1u8),
+        minted: Nat::from(2u8),
+        balance: Nat::from(3u8),
+    });
+    assert_eq!(ler_recarga(&Encode!(&cunhagem).unwrap()), Err(Erro::Forma));
+}

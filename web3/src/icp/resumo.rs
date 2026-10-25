@@ -22,6 +22,28 @@ pub fn sha256(bytes: &[u8]) -> Hash {
     Sha256::digest(bytes).into()
 }
 
+/// O SHA-256 em pedaços: o de [`sha256`] dos bytes juntados, na ordem —
+/// para o módulo que se lê aos poucos, sem caber inteiro na memória.
+#[derive(Clone, Default)]
+pub struct Sha256EmPedacos(Sha256);
+
+impl Sha256EmPedacos {
+    /// Sem nada ainda.
+    pub fn novo() -> Sha256EmPedacos {
+        Sha256EmPedacos::default()
+    }
+
+    /// Junta `bytes` ao que já veio.
+    pub fn juntar(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// O hash de tudo o que veio.
+    pub fn fim(self) -> Hash {
+        self.0.finalize().into()
+    }
+}
+
 /// O LEB128 sem sinal, na forma mais curta: no máximo dez bytes para um
 /// `u64`. Devolve o buffer e quantos bytes valem.
 pub fn leb128(mut n: u64) -> ([u8; 10], usize) {
