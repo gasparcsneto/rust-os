@@ -1,4 +1,4 @@
-# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b, ICP-4c, ICP-4d e ICP-4e)
+# O Internet Computer (ICP-1, ICP-3, ICP-4a, ICP-4b, ICP-4c, ICP-4d, ICP-4e e ICP-5)
 
 O Duke fala com o Internet Computer (IC) de dentro de um programa: a
 consulta (*query*) anônima a um canister — o ICP-1 —, e a chamada de
@@ -17,8 +17,11 @@ cycles pelo CMC —, em [O valor na
 bancada](#o-valor-na-bancada-o-icrc-1-e-o-cmc-icp-4d). O ICP-4e implanta e
 gerencia um canister com a chave, na bancada — a criação, a instalação, o
 estado, o upgrade em pedaços e a carga de cycles —, em [A gestão de
-canister](#a-gestão-de-canister-na-bancada-icp-4e). O que ainda não existe
-está em *O que não existe ainda*.
+canister](#a-gestão-de-canister-na-bancada-icp-4e). O ICP-5 sela no TPM
+da máquina a semente das chaves — a custódia continua do kernel —, com a
+destruição presa a um índice de geração, em [A semente selada no
+TPM](#a-semente-selada-no-tpm-icp-5). O que ainda não existe está em *O
+que não existe ainda*.
 
 Nada do IC é do kernel. O kernel não sabe o que é um canister, um
 Principal, um método, o Candid ou o id de um pedido, e a política não tem
@@ -352,8 +355,10 @@ verificação do ICP-1, sem mudar a arquitetura dela.
 ### A chave é da identidade
 
 - **Ed25519 em software**, custódia `kernel`: a privada nasce do gerador
-  do kernel e não sai dele. O campo `custody` existe para a custódia
-  `tpm` que vier; não há código de TPM para chaves.
+  do kernel, mora na memória dele e não sai dele. Em repouso, desde o
+  ICP-5, a semente está selada no TPM da máquina — `"seal":"tpm"` —, e o
+  TPM não assina nem guarda a chave de assinatura: ver [A semente selada
+  no TPM](#a-semente-selada-no-tpm-icp-5).
 - **O dono é a identidade durável** — `pessoa:<id>`, `agente:<hex>`,
   `servico:<nome>` —, nunca a sessão, o processo ou a credencial: a pessoa
   que troca a senha, ou abre outra sessão, continua com as chaves dela.
@@ -523,7 +528,10 @@ TPM, a mesma compactação, sem um segundo armazenamento:
   recusado nenhuma credencial entra: a chave destruída não assina por
   ela.
 
-Ver [PERSISTENCIA.md](PERSISTENCIA.md), *As chaves de assinatura*.
+Ver [PERSISTENCIA.md](PERSISTENCIA.md), *As chaves de assinatura*. Desde
+o ICP-5, a entrada da criação leva o objeto selado no TPM, e não a
+semente; a compactação também — ver [A semente selada no
+TPM](#a-semente-selada-no-tpm-icp-5).
 
 ### A bancada, de novo
 
@@ -2055,8 +2063,10 @@ pagando com os cycles dele.
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
-com elas, chaves de sessão e o domínio de delegação —; a custódia no
-TPM; o compartilhamento de chaves; exportar ou importar uma privada; na
+com elas, chaves de sessão e o domínio de delegação —; a chave de
+assinatura dentro do TPM, assinando lá — o ICP-5 só sela a semente em
+repouso, e a custódia continua do kernel —; o boot medido, com os PCRs na
+política do selado; o compartilhamento de chaves; exportar ou importar uma privada; na
 rede principal, qualquer coisa além da consulta anônima — a chamada de
 atualização, a consulta autenticada, o *Management Canister*, o ledger e
 os *cycles*, com valor de verdade —; o ICRC-2 e o ICRC-3; descobrir os

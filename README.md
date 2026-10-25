@@ -167,10 +167,10 @@ $ cargo xtask agent --canal 2 agent.session
 | `audit.head` | A cabeça da auditoria — o elo do último registro, para ancorar fora da máquina —, a âncora e quantos há |
 | `audit.verify` | Refaz a cadeia guardada a partir da âncora e diz se cada elo confere |
 | `audit.declare` | Declara um fato de quem pede para a auditoria — uma alegação, e não um fato do kernel: o evento, o assunto e o desfecho vão, como vieram, no recurso de um registro da cadeia; quem, o papel, a sessão, o processo, o programa e a decisão, no detalhe, pelo kernel. Ancorada numa conexão de quem declara, o detalhe leva o destino real dela, pela tabela da pilha; a de outro titular, ou uma que não existe, é `INVALID_ARGUMENT`, sem dizer de quem é. Ancorada numa decisão, o detalhe leva o número e o método dela, que tem de ser um `ALLOW` de quem declara e do mesmo processo — a assinatura de um `key.sign` —; uma de outro, ou outra declaração, é `INVALID_ARGUMENT`. Uma âncora só. Nenhuma decisão lê uma declaração. Exige `audit.declare`, e gasta a taxa do papel (`event`, `subject`, `outcome`, `connection`, `decision`) |
-| `key.create` | Cria uma chave de assinatura Ed25519 da identidade de quem pede — a pessoa, o agente —, num domínio do registro de domínios que o papel usa. A privada nasce do gerador do kernel e nunca sai dele; o nome, `chave:<nome>`, é do espaço da identidade de quem pede, e um nome já usado — por uma chave viva ou destruída — não volta. A chave vai para o journal cifrado antes da resposta, com a decisão no mesmo registro, e volta a cada boot; sem persistência, nenhuma nasce. Devolve a chave pública (`key`, `domain`) |
-| `key.read` | O que é público de uma chave de quem pede: a pública, a impressão, o algoritmo, o domínio, a custódia e o estado. Nunca a privada; um nome sem chave para quem pede responde o mesmo que um nome de outro (`key`) |
+| `key.create` | Cria uma chave de assinatura Ed25519 da identidade de quem pede — a pessoa, o agente —, num domínio do registro de domínios que o papel usa. A privada nasce do gerador do kernel e nunca sai dele; o nome, `chave:<nome>`, é do espaço da identidade de quem pede, e um nome já usado — por uma chave viva ou destruída — não volta. A semente é selada no TPM da máquina, e o objeto selado vai para o journal cifrado antes da resposta, com a decisão no mesmo registro; a cada boot o cofre a abre. Sem persistência, nenhuma nasce. Devolve a chave pública (`key`, `domain`) |
+| `key.read` | O que é público de uma chave de quem pede: a pública, a impressão, o algoritmo, o domínio, a custódia, a selagem — `tpm`, a semente selada no TPM — e o estado. Nunca a privada, nem o objeto selado; um nome sem chave para quem pede responde o mesmo que um nome de outro (`key`) |
 | `key.sign` | Assina, com uma chave viva de quem pede, um resumo de exatamente 32 bytes no domínio dela — o prefixo registrado do domínio seguido do resumo. Uma decisão por assinatura; no commit, tudo de novo — autoridade, contenção, domínio, chave —, e o registro vai para a auditoria e para o journal antes de a assinatura sair: sem persistência, nada se assina (`key`, `domain`, `digest`) |
-| `key.destroy` | Destrói uma chave de quem pede: a privada é apagada, e o nome fica marcado para sempre. A lápide vai para o journal: o boot não traz a chave de volta, e uma fotografia velha do disco é recusada (`key`) |
+| `key.destroy` | Destrói uma chave de quem pede: a privada é apagada, e o nome fica marcado para sempre. A lápide vai para o journal com as outras vivas seladas de novo, e o índice de geração do TPM avança: o boot não traz a chave de volta, e nenhuma cópia velha do disco abre o selado dela (`key`) |
 | `policy.show` | A política em vigor: papéis, permissões, recursos, taxas, o papel da serial e se veio do disco |
 | `security.status` | O tecido de segurança: o papel com que o gate decide as leituras dele, até onde leu, o que perdeu, o que pediu e os incidentes |
 | `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
@@ -588,8 +588,9 @@ diario/src/          o journal da persistência: registros cifrados, encadeados 
 ├── estado.rs        o que os registros do estado administrativo dizem: resultados, e não pedidos
 └── testes.rs        o journal cortado em cada setor, cada bit trocado, registros de outro journal e fora de ordem
 
-ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0
+ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0 — e o cofre das sementes
 ├── lib.rs           os comandos do TPM byte a byte, a sessão HMAC salgada pela EK, e o que um contador ausente ou estranho quer dizer
+├── cofre.rs         as sementes seladas no TPM: o primário que todo boot recria, o selado preso ao índice de geração pelo TPM2_PolicyNV, e o Unseal com a resposta cifrada
 ├── cripto.rs        o KDFa, o KDFe, o sal por ECDH em P-256 e a cifra de parâmetro, como a especificação do TPM os compõe
 └── testes.rs        os bytes que a especificação fixa; `tests/swtpm.rs`, a sessão contra o swtpm, com um interposto no barramento
 
@@ -6599,8 +6600,9 @@ duas: a reconfirmação sem a contenção e a compactação sem as lápides.
 
 Ver [`docs/ICP.md`](docs/ICP.md), *A chamada assinada*, para o caminho
 inteiro, os desfechos, os casos, as medidas, as mutações e o que ainda
-não existe — delegações, custódia no TPM, compartilhamento, exportação e a
-rede principal.
+não existe — delegações, a chave dentro do TPM, compartilhamento,
+exportação e a rede principal. Desde o ICP-5, a semente fica selada no TPM
+em repouso — ver [A semente selada no TPM](#a-semente-selada-no-tpm).
 
 ### A consulta assinada
 
@@ -6688,6 +6690,39 @@ IC; a prova adulterada em cada lugar; sem `key.sign`, nada se implanta,
 nem do anônimo no lugar; a criação e a carga repetidas; a mesma criação
 por dois processos; e a chave anulada no meio do upgrade. Ver [A gestão
 de canister](docs/ICP.md#a-gestão-de-canister-na-bancada-icp-4e).
+
+### A semente selada no TPM
+
+O ICP-5 tira do disco a semente das chaves de assinatura: o journal
+guarda um objeto **selado no TPM da máquina**, que só esse TPM abre, e
+só enquanto a chave vive. A custódia continua do kernel — a semente nasce
+do gerador dele, a privada mora na memória dele, e quem assina é ele,
+depois do gate —; o TPM protege a semente em repouso e não decide nada.
+O Ed25519, o Principal, o `key.sign`, a política, o gate, o domínio
+`ic-request`, a auditoria e os programas não mudaram:
+
+- **o selado** é um *keyedhash* filho de um primário que todo boot
+  recria igual — `fixedTPM`, `fixedParent`, `noDA`, sem senha —, preso
+  por um `TPM2_PolicyNV` a um valor do **índice de geração**; a semente
+  vai e volta cifrada pela sessão salgada com a EK fixada;
+- **toda morte de chave avança a geração**, em três passos: o registro
+  com a lápide e as vivas seladas de novo para a geração seguinte; o
+  índice do TPM avançado; e a confirmação. O índice nunca anda antes dos
+  selados novos, e o boot completa ou confirma um avanço interrompido.
+  Depois dele, nenhuma cópia velha do disco abre a morta;
+- **o boot abre cada viva** — e a primeira que não abre recusa o journal,
+  com o motivo dela, e fica fechada: nenhuma semente de outro lugar entra
+  no lugar;
+- **as chaves de antes** são seladas no primeiro boot, e a partição fora
+  do journal é zerada: nenhuma semente antiga fica no disco.
+
+`key.read` diz `"custody":"kernel"` e `"seal":"tpm"`. Na suíte, a semente
+não chega ao disco nem ao barramento; a morta não volta de uma cópia
+antiga; o selado mexido, o de outra geração e o de outro primário são
+recusados; 64 vivas; tudo ao mesmo tempo; a migração; e o Principal
+igual depois do cofre. Na bancada, a queda em cada passo da morte, da
+migração e da compactação, e outro TPM recusado. Ver [O cofre das chaves
+no TPM](docs/PERSISTENCIA.md#o-cofre-das-chaves-no-tpm-icp-5).
 
 ## Vários agentes
 
@@ -9149,10 +9184,13 @@ padronizado.
       bancada](#o-valor-na-bancada)); e o ICP-4e — a gestão de canister na
       bancada: a criação pelo ledger de cycles, a instalação, o estado, o
       upgrade em pedaços que guarda o estado e a carga de cycles (ver [A
-      gestão de canister](#a-gestão-de-canister)). As delegações, a
-      custódia no TPM, a rede principal com chave, com valor e com canister
-      e o resto ficam para os incrementos seguintes — os que pedem, cada
-      um, uma decisão nova.
+      gestão de canister](#a-gestão-de-canister)); e o ICP-5 — a semente
+      das chaves selada no TPM da máquina, com a destruição presa ao índice
+      de geração e a custódia do kernel (ver [A semente selada no
+      TPM](#a-semente-selada-no-tpm)). As delegações, a chave dentro do
+      TPM, a rede principal com chave, com valor e com canister e o resto
+      ficam para os incrementos seguintes — os que pedem, cada um, uma
+      decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo
       que uma pessoa faz, o modelo de permissão precisa ser **mais** forte que
       o de um desktop comum, e não mais fraco. Três coisas: quem pediu — a

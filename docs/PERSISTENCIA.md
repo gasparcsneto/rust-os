@@ -1263,8 +1263,11 @@ derrubar o estado de autoridade.
 
 As chaves de assinatura das identidades (ver [ICP.md](ICP.md), *A chamada
 assinada*) moram no journal de estado, sem um armazenamento à parte —
-o mesmo registro cifrado, a mesma âncora do TPM, a mesma compactação —,
-em duas entradas:
+o mesmo registro cifrado, a mesma âncora do TPM, a mesma compactação.
+No ICP-3, em duas entradas — desde o ICP-5, a semente não vai mais ao
+disco, e a entrada da criação é o objeto selado no TPM: ver [O cofre das
+chaves no TPM](#o-cofre-das-chaves-no-tpm-icp-5); o que segue sobre a
+lápide, a reposição estrita e o disco velho continua valendo:
 
 ```text
 CHAVE_CRIADA (33) [dono, nome, domínio, criada em ms, semente (32)]
@@ -1309,6 +1312,152 @@ gravação da criação e da lápide vale exatamente quando o registro está no
 disco: a criação que não valeu deixa o nome livre, e a destruição que não
 valeu deixa a chave viva, assinando igual.
 
+## O cofre das chaves no TPM (ICP-5)
+
+O ICP-5 tira a semente das chaves de assinatura do disco. A custódia
+continua do kernel — a semente nasce do gerador dele, a privada mora na
+memória dele e a assinatura sai dele, pelo gate, como no ICP-3 —; o que
+muda é o repouso: o journal guarda um **objeto selado no TPM** da
+máquina, que só esse TPM abre, e só enquanto a chave estiver viva.
+
+### O objeto selado
+
+- **O primário** é um primário de armazenamento na hierarquia do dono —
+  ECC P-256 com o modelo de SRK do TCG: `fixedTPM`, `fixedParent`,
+  `sensitiveDataOrigin`, `userWithAuth`, `noDA`, `restricted`, `decrypt`,
+  AES-128-CFB, `unique` zerado —, recriado por `TPM2_CreatePrimary` a
+  cada operação do cofre e tirado do TPM no fim dela: um TPM tem três
+  vagas de objeto, e o `TPM2_Create` e o `TPM2_Load` precisam de uma além
+  da EK e do primário. O mesmo TPM dá sempre o mesmo primário; o nome
+  dele é anotado no boot, e cada operação confere que é o mesmo — outro é
+  o TPM limpo, ou trocado, e nada se sela nem se abre nele.
+- **O selado** é um *keyedhash* filho do primário, criado por
+  `TPM2_Create` com a semente como dados: `fixedTPM`, `fixedParent`,
+  `adminWithPolicy` e `noDA`, sem `userWithAuth` — nenhuma senha o abre
+  — e com a política da geração como `authPolicy`. O journal guarda o
+  bloco privado — cifrado e autenticado pelo TPM, sob a semente do
+  primário —, o `unique` e a geração; o resto da parte pública é refeito
+  pelo kernel.
+- **A política da geração** é um `TPM2_PolicyNV` sobre o índice de
+  geração (`0x0180_D0E2`): o valor do contador igual à geração em que o
+  objeto foi selado. O `TPM2_Unseal` só passa numa sessão de política em
+  que o `TPM2_PolicyNV` passou — e ele só passa com o índice nesse valor.
+- **No barramento**, a semente nunca anda em claro: no `TPM2_Create` ela
+  é o primeiro parâmetro, cifrado pela sessão salgada com a EK fixada; no
+  `TPM2_Unseal` ela volta cifrada pela sessão de política, salgada
+  também, e a resposta é autenticada antes de decifrada. O
+  `TPM2_PolicyNV` se autoriza com a senha do índice — derivada da chave
+  do Duke, como a do contador da âncora —, pela sessão HMAC da âncora.
+- **`noDA` no primário e no selado:** nenhuma autorização errada neles
+  conta para o bloqueio do TPM. O selado não tem senha — só a política —,
+  e o primário não tem senha do dono; um TPM bloqueado por outro uso não
+  trava o cofre.
+
+### A morte de uma chave e o índice de geração
+
+Toda morte de chave — `key.destroy`, `key.revoke`, a revogação do dono —
+avança a geração em três passos, com a ordem das gravações na mão:
+
+1. o registro da operação: a lápide, as vivas **seladas de novo para a
+   geração seguinte** e `SELAGEM_PENDENTE(g+1)` — tudo num registro só,
+   que a âncora confirma;
+2. o índice de geração incrementado no TPM, e lido de volta;
+3. o registro `SELAGEM_CONFIRMADA(g+1)`.
+
+O índice nunca anda antes de os selados novos estarem confirmados no
+journal. Depois do passo 2, todo objeto selado na geração `g` — o da
+morta e os das vivas de antes — deixa de abrir, inclusive numa cópia
+velha do disco: a cópia tem os selados de `g`, e o TPM está em `g+1`. Um
+passo 2 ou 3 que falha deixa a persistência indisponível: o registro da
+operação está no journal, e o boot seguinte completa o avanço, ou o
+confirma.
+
+### O boot
+
+Com o journal confirmado pela âncora, o boot abre o cofre: recria o
+primário, define o índice de geração se ele não existe — num journal que
+nunca falou de geração —, e concilia a geração que o journal diz com a
+do TPM:
+
+| journal | TPM | o boot |
+|---|---|---|
+| sem geração | — | segue com a do TPM |
+| confirmada `C` | `C` | segue |
+| confirmada `C`, pendente `C+1` | `C+1` | confirma o avanço |
+| confirmada `C`, pendente `C+1` | `C` | completa o avanço |
+| qualquer outra coisa | — | recusado |
+
+Um índice que sumiu do TPM com o journal falando de geração é recusado:
+um índice novo nasceria em outro valor. Depois, cada chave viva é
+aberta — `TPM2_Load`, `TPM2_PolicyNV`, `TPM2_Unseal` —, e a pública que
+sai da semente tem de ser a da chave. A primeira que não abre recusa o
+journal, com o motivo dela; a chave fica fechada — `key.sign` responde
+*a chave está selada no TPM e não foi aberta neste boot* —, e **nenhuma
+semente de outro lugar** entra no lugar: nem a de uma entrada antiga,
+nem a da memória, nem a de cópia nenhuma.
+
+### O formato
+
+```text
+SELAGEM            (9)   o registro da selagem
+CHAVE_SELADA       (35)  [dono, nome, domínio, criada em ms, pública (32),
+                          geração (8), unique (32), bloco privado]
+SELAGEM_PENDENTE   (36)  [geração]
+SELAGEM_CONFIRMADA (37)  [geração]
+LIMPEZA_PENDENTE   (38)  []
+LIMPEZA_FEITA      (39)  []
+```
+
+`CHAVE_CRIADA` (33), a entrada com a semente, é o formato de antes: o
+kernel ainda a lê, para migrar, e não a escreve mais. A compactação leva
+`SELAGEM_CONFIRMADA`, a limpeza se ela ainda falta, cada viva como
+`CHAVE_SELADA` e cada morta como lápide; o registro do boot leva
+`SELAGEM_CONFIRMADA` também.
+
+### A migração das chaves antigas
+
+O primeiro boot sobre um journal de antes do cofre:
+
+1. repõe as chaves antigas com a semente da entrada antiga, e abre o
+   cofre;
+2. sela cada uma na geração atual, e grava um registro `SELAGEM` com
+   `SELAGEM_CONFIRMADA`, as `CHAVE_SELADA` e `LIMPEZA_PENDENTE`;
+3. compacta: a região nova tem só os objetos selados;
+4. zera a partição de estado fora do journal de agora — a região velha,
+   com as entradas antigas, e o que sobrou desta —, menos a reserva do
+   fim, que é da bancada;
+5. grava `LIMPEZA_FEITA`.
+
+Uma queda em qualquer passo é retomada no boot seguinte. A entrada
+antiga e o selado da mesma chave, juntos no journal, repõem a chave
+**fechada** — o objeto selado é a única origem da privada —, e o cofre a
+abre; a limpeza pendente é refeita até o registro do fim. Uma
+compactação que não cabe deixa a limpeza pendente no journal, para o
+boot seguinte.
+
+### O que o cofre não é
+
+O TPM é mecanismo de custódia em repouso, não autoridade: não decide
+quem assina — a política decide quem pode `key.sign`, e o gate decide
+cada assinatura, como no ICP-3 —, não guarda chave de assinatura nem
+assina, e não aparece na política. `key.read` diz `"custody":"kernel"` e
+`"seal":"tpm"` — e nada do objeto selado, da sessão ou do TPM.
+
+### Os riscos que ficam
+
+- **O mesmo TPM com o disco.** Quem tem o disco — a chave do Duke está
+  nele — e o mesmo TPM satisfaz a política: o índice está na geração das
+  vivas, e a senha dele deriva da chave do Duke. As vivas de agora abrem;
+  as mortas, não. O cofre não mede o boot: nenhum PCR entra na política.
+- **A janela do passo 2.** Se o avanço do índice falha depois do registro
+  da operação, uma cópia de antes da morte ainda abriria a morta, no
+  mesmo TPM, até o boot seguinte completar o avanço.
+- **O custo.** Cada morte de chave sela de novo todas as vivas e gasta
+  três escritas de NV — o contador da âncora duas vezes, e o índice de
+  geração uma.
+- **A limpeza da migração** depende de a compactação caber; enquanto não
+  cabe, as entradas antigas ficam na região velha, pendentes.
+
 ## Fases e estado
 
 | Fase | O quê | Estado |
@@ -1322,3 +1471,4 @@ valeu deixa a chave viva, assinando igual.
 | 7.6 | Compactação e disco cheio | feita |
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | feita |
 | ICP-3 | As chaves de assinatura no journal: a semente, a lápide, a compactação | feita |
+| ICP-5 | A semente selada no TPM, presa ao índice de geração: a morte em três passos, a migração das antigas | feita |
