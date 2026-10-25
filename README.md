@@ -8919,9 +8919,9 @@ O CI roda formatação, lints, as conferências de fonte de `cargo xtask
 invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
 as sondas de fumaça contra o kernel de produção, e a suíte nas duas
 arquiteturas em debug e release — e, nas duas, a suíte e a fumaça também na
-máquina que só tem `virtio-gpu`. As duas bancadas longas — a de
-persistência, com os cortes de energia, e a de tempo — rodam cada uma num
-job à parte, ao lado do de testes, nas duas arquiteturas.
+máquina que só tem `virtio-gpu`. Essa máquina e as duas bancadas longas —
+a de persistência, com os cortes de energia, e a de tempo — rodam cada uma
+num job à parte, ao lado do de testes, nas duas arquiteturas.
 
 **Por que o QEMU.** É a bancada do Duke, e continua sendo — decisão tomada
 depois de comparar as alternativas. É a mesma do Redox, cujo caminho de todo

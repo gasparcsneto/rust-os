@@ -169,7 +169,9 @@ jobs:
     # cookies, a uns 141, e foi cortado de novo no último passo. Foi a 290,
     # e com o cofre do ICP-5 o x86 levou 253 minutos em dois runners
     # lentos, 123 deles na bancada de persistência: ela foi para um job à
-    # parte, `persistencia`, ao lado deste, e este voltou a uns 130.
+    # parte, `persistencia`, ao lado deste, e este voltou a uns 100. Os
+    # casos do gestor de canisters o levaram a 144 no x86 (CI 335), 39
+    # deles na suíte em virtio-gpu, que foi para o job `video`.
     timeout-minutes: 290
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
@@ -285,18 +287,58 @@ jobs:
       - name: Fumaça (teclado USB)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --teclado usb
 
-      # E a máquina que só tem `virtio-gpu`: sem VGA, sem `bochs`, sem tela
-      # linear deixada pelo firmware. É outro caminho de tela no kernel — ele
-      # escreve numa memória que o dispositivo só lê quando mandado —, e cada
-      # uma das duas conferências vê o que a outra não vê.
-      #
-      # A suíte confere o que o kernel mandou: que só o dano atravessou, que
-      # uma recusa do dispositivo virou erro. A fumaça fotografa o monitor
-      # pelo `screendump` do emulador e compara com o que o kernel diz ter
-      # desenhado. Medido com mutações: transferir a tela inteira a cada
-      # escrita só a suíte reprova, porque a tela sai certa; errar o
-      # deslocamento ou o formato do pixel só a fumaça reprova, porque o
-      # kernel acredita ter mandado certo.
+  # A máquina que só tem `virtio-gpu`: sem VGA, sem `bochs`, sem tela
+  # linear deixada pelo firmware. É outro caminho de tela no kernel — ele
+  # escreve numa memória que o dispositivo só lê quando mandado —, e cada
+  # uma das duas conferências vê o que a outra não vê.
+  #
+  # A suíte confere o que o kernel mandou: que só o dano atravessou, que
+  # uma recusa do dispositivo virou erro. A fumaça fotografa o monitor
+  # pelo `screendump` do emulador e compara com o que o kernel diz ter
+  # desenhado. Medido com mutações: transferir a tela inteira a cada
+  # escrita só a suíte reprova, porque a tela sai certa; errar o
+  # deslocamento ou o formato do pixel só a fumaça reprova, porque o
+  # kernel acredita ter mandado certo.
+  #
+  # Um job à parte, como as bancadas: a suíte inteira de novo, com outra
+  # placa, levava de 26 a 39 minutos dentro do job de testes (CI 330 e
+  # 335). A cobertura é a mesma, ao lado dele. O teto é o dobro do pior
+  # medido com a compilação.
+  video:
+    name: Tela virtio-gpu (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: video-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # Sem um cache seu ainda, o do job de testes: a mesma compilação.
+          restore-keys: |
+            video-${{ matrix.arch }}-
+            testes-${{ matrix.arch }}-
+
+      # As mesmas da máquina do job de testes: o disco, o TPM e a rede.
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
       - name: Suíte de testes (virtio-gpu)
         run: cargo xtask test --arch ${{ matrix.arch }} --video virtio
 
