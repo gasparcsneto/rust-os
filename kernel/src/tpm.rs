@@ -579,8 +579,11 @@ pub mod falhas {
             // NV_DefineSpace e NV_UndefineSpace: a hierarquia (e o índice).
             0x12A => 1,
             0x122 => 2,
-            // CreatePrimary: a hierarquia.
-            0x131 => 1,
+            // CreatePrimary: a hierarquia. Create e Load: o primário.
+            // Unseal: o objeto selado.
+            0x131 | 0x153 | 0x157 | 0x15E => 1,
+            // PolicyNV: o índice duas vezes e a sessão de política.
+            0x149 => 3,
             // NV_Read, NV_Write, NV_Increment: o índice duas vezes.
             _ => 2,
         }

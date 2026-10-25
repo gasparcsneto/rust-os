@@ -53,6 +53,24 @@
 //! recusa o journal: o que ele diz é mais recente que a imagem, e uma
 //! lápide lida é uma credencial a menos. Recusado, o journal deixa a
 //! administração bloqueada até alguém resolver por fora.
+//!
+//! # As chaves seladas
+//!
+//! As sementes das chaves de assinatura não vêm para o disco: o journal
+//! guarda o objeto selado no TPM — ver `ancora::cofre` —, preso a uma
+//! geração do índice de geração. Com o journal confirmado pela âncora, o
+//! boot abre o cofre: o primário, recriado; o índice, conferido com a
+//! geração que o journal diz — e um avanço interrompido, completado —; e
+//! cada chave viva, aberta. Uma falha aqui é um journal que não se
+//! confirma: recusado, e nenhuma semente de outro lugar no lugar dela.
+//!
+//! Toda morte de chave — a destruição, a anulação, a revogação do dono —
+//! avança a geração em três passos, com a ordem das gravações na mão: o
+//! registro da operação com a lápide, as vivas seladas para a geração
+//! seguinte e a geração pendente; o índice do TPM avançado; e o registro
+//! que confirma o avanço. O índice nunca anda antes de os selados novos
+//! estarem confirmados no journal, e o boot conclui a qualquer altura uma
+//! sequência interrompida.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -72,6 +90,10 @@ pub const INDICE_DA_ANCORA: u32 = 0x0180_D0E0;
 /// nasceu — ver o módulo `ancora`. É o que separa uma criação interrompida
 /// de um disco apagado.
 pub const INDICE_DO_NASCIMENTO: u32 = 0x0180_D0E1;
+
+/// O índice de geração da selagem: o contador cujo valor prende os objetos
+/// selados das chaves vivas — ver `ancora::cofre`.
+pub const INDICE_DA_GERACAO: u32 = 0x0180_D0E2;
 
 /// O que a persistência é agora.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +136,17 @@ struct Aberta {
     escritor: Escritor,
     ancora: ancora::Ancora,
     chave: [u8; 32],
+    /// O cofre, aberto no boot depois de a âncora confirmar o journal.
+    selagem: Option<Selagem>,
+}
+
+/// O cofre, como o boot o encontrou: o índice de geração, a geração em que
+/// as chaves vivas estão seladas, e o nome do primário. O primário não fica
+/// no TPM entre uma operação e outra — ver [`abrir_o_cofre`].
+struct Selagem {
+    geracao: ancora::cofre::Geracao,
+    valor: u64,
+    primario: [u8; 34],
 }
 
 struct Persistencia {
@@ -171,6 +204,32 @@ fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
 /// A cadeia que o journal refaz no boot, enquanto ele é lido. Ela só vira
 /// a auditoria com o journal confirmado pela âncora — ver [`abrir`].
 static REPOSTA: Mutex<Option<Cadeia>> = Mutex::new(None);
+
+/// O que o journal disse da selagem, juntado enquanto ele é lido no boot.
+#[derive(Clone, Copy, Debug, Default)]
+struct SelagemLida {
+    /// A última geração confirmada.
+    confirmada: Option<u64>,
+    /// A geração que ia subir, depois da última confirmada.
+    pendente: Option<u64>,
+    /// A limpeza da partição está por fazer.
+    limpeza: bool,
+    /// Quantas entradas de chave do formato antigo — com a semente — a
+    /// região tem.
+    antigas: u64,
+}
+
+static SELAGEM_LIDA: Mutex<SelagemLida> = Mutex::new(SelagemLida {
+    confirmada: None,
+    pendente: None,
+    limpeza: false,
+    antigas: 0,
+});
+
+/// A limpeza da partição está por fazer: a base de uma compactação a leva,
+/// até o registro que diz que ela acabou.
+static LIMPEZA_POR_FAZER: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Quem tem a ordem das gravações: o fio, como `id + 1`, ou zero.
 ///
@@ -701,6 +760,15 @@ fn segredos() -> Option<([u8; 32], [u8; 32])> {
     })
 }
 
+/// A senha do índice de geração: uma terceira derivação da chave do Duke,
+/// com outro rótulo — nem a chave do journal nem a senha da âncora dão
+/// esta.
+fn senha_da_geracao() -> Option<[u8; 32]> {
+    crate::identidade::com_chave_do_duke(|k| {
+        sigilo::resumo::hkdf_rfc5869(b"Duke persistencia v1", k, &[b"cofre: senha da geracao"])
+    })
+}
+
 /// A âncora recém-conectada no boot. Se o boot não chega a ficar com ela —
 /// uma recusa, um erro —, ela sai do TPM com a EK e a sessão: nenhuma
 /// saída deixa vaga ocupada no TPM.
@@ -883,6 +951,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     let mut de_auditoria = 0u64;
     crate::arch::sem_interrupcoes(|| *FIXADA.lock() = None);
     crate::arch::sem_interrupcoes(|| *ARMAZEM_LIDO.lock() = None);
+    crate::arch::sem_interrupcoes(|| *SELAGEM_LIDA.lock() = SelagemLida::default());
     let lido = match escolhida {
         None => Ok(vazio()),
         Some(i) => diario::percorrer(&mut regioes[i], &chave, |r| {
@@ -1127,6 +1196,7 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
             escritor,
             ancora,
             chave,
+            selagem: None,
         });
         p.estado = Estado::Disponivel;
     });
@@ -1148,6 +1218,22 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         gravar(tipo::ABERTURA, &dados)?;
         com(|p| p.instalacao = Some(instalacao));
     }
+    // O cofre, com o journal confirmado: as chaves seladas abertas, e as do
+    // formato de antes dele migradas — ver o cabeçalho do módulo. Um journal
+    // que não é novo e nunca falou de geração é de antes do cofre.
+    let lida = crate::arch::sem_interrupcoes(|| core::mem::take(&mut *SELAGEM_LIDA.lock()));
+    #[cfg(feature = "quedas")]
+    let sem_cofre = crate::quedas::chaves_antigas();
+    #[cfg(not(feature = "quedas"))]
+    let sem_cofre = false;
+    if !sem_cofre {
+        if let Err(e) = abrir_a_selagem(lida) {
+            return Ok(e);
+        }
+        if let Err(e) = migrar(lida, !novo && lida.confirmada.is_none()) {
+            return Ok(e);
+        }
+    }
     // O boot é um ponto seguro: o que está em memória é o que o journal
     // disse, e nada mais mudou. Uma região que passou do ponto — ou que
     // encheu e deixou o boot anterior sem gravar — compacta aqui, antes do
@@ -1161,9 +1247,17 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
         let _ = compactar();
     }
     // O registro de boot diz a EK com que este boot falou: a do journal, ou
-    // — num journal de antes do 7.7 — a primeira, fixada agora.
+    // — num journal de antes do 7.7 — a primeira, fixada agora. E a geração
+    // em que as chaves vivas estão: a do journal, ou a que este boot
+    // completou.
     let mut dados = estado::campos(&[&(boots + 1).to_le_bytes()])?;
     dados.extend_from_slice(&entrada_da_chave(&ponto_atual()?)?);
+    if let Ok(valor) = geracao_da_selagem() {
+        dados.extend_from_slice(&estado::campos(&[&entrada(
+            tipo::SELAGEM_CONFIRMADA,
+            &[&valor.to_le_bytes()],
+        )?])?);
+    }
     gravar(tipo::BOOT, &dados)?;
     com(|p| p.boots = boots + 1);
     Ok(Estado::Disponivel)
@@ -1817,6 +1911,7 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
         return Err(Adiada(estado.motivo()));
     }
     let instalacao = instalacao.ok_or(Falhou("o journal nao tem a instalacao"))?;
+    let valor_da_selagem = geracao_da_selagem().map_err(Adiada)?;
     let (chave, _) = segredos().ok_or(Falhou("sem a chave do Duke"))?;
     duravel()?;
     let [a, b] = regioes()?;
@@ -1912,14 +2007,27 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     if let Some(c) = crate::volume::confirmado() {
         grupos.push(alloc::vec![entrada_do_armazem(&c)?]);
     }
-    // As chaves de assinatura, da memória: a viva com a semente, a morta só
-    // com o que é público. Depois do histórico: uma revogação reposta dele
-    // não acha a chave ainda, e não anula a de quem foi registrado de novo
-    // depois dela. Nunca do histórico: a criação de uma chave que morreu
-    // tem a semente, e fica na região velha.
+    // A selagem: a geração em que as chaves vivas estão, e a limpeza, se
+    // ainda falta.
+    grupos.push(alloc::vec![entrada(
+        tipo::SELAGEM_CONFIRMADA,
+        &[&valor_da_selagem.to_le_bytes()]
+    )?]);
+    if LIMPEZA_POR_FAZER.load(Ordering::Acquire) {
+        grupos.push(alloc::vec![entrada(tipo::LIMPEZA_PENDENTE, &[])?]);
+    }
+    // As chaves de assinatura, da memória: a viva com o objeto selado, a
+    // morta só com o que é público. Depois do histórico: uma revogação
+    // reposta dele não acha a chave ainda, e não anula a de quem foi
+    // registrado de novo depois dela. Nunca do histórico: a base leva só o
+    // objeto que vale de cada chave viva.
     for g in crate::chaves::gravaveis() {
         let e = if g.estado == crate::chaves::Estado::Ativa {
-            entrada_da_chave_viva(&g)?
+            let s = g
+                .selado
+                .as_ref()
+                .ok_or("uma chave viva sem o objeto selado")?;
+            entrada_da_chave_selada(&g, s)?
         } else {
             entrada_da_chave_morta(&g)?
         };
@@ -2179,6 +2287,530 @@ fn gravar_um(tipo_do_registro: u16, dados: &[u8]) -> Result<(), &'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// A selagem das chaves
+// ---------------------------------------------------------------------------
+
+/// Chama `f` com a âncora, o índice de geração e o TPM.
+fn com_a_geracao<R>(
+    f: impl FnOnce(
+        &mut ancora::Ancora,
+        &mut ancora::cofre::Geracao,
+        &mut crate::tpm::Interface,
+    ) -> Result<R, ancora::Erro>,
+) -> Result<R, ancora::Erro> {
+    crate::tpm::com_o_tpm(|t| {
+        com(|p| {
+            p.aberta.as_mut().map(|a| match a.selagem.as_mut() {
+                Some(s) => f(&mut a.ancora, &mut s.geracao, t),
+                None => Err(ancora::Erro::Transporte("o cofre nao esta aberto")),
+            })
+        })
+        .ok_or(ancora::Erro::Transporte("a persistencia nao esta aberta"))?
+    })
+    .ok_or(ancora::Erro::Transporte("sem TPM"))?
+}
+
+/// O primário de armazenamento no TPM enquanto dura uma operação do cofre:
+/// recriado no começo dela e tirado do TPM no fim, por qualquer saída. Fora
+/// das operações o TPM fica só com a EK, como antes do cofre: um TPM tem
+/// três vagas de objeto, e o `TPM2_Create` e o `TPM2_Load` precisam de uma
+/// além do primário.
+struct CofreAberto(Option<ancora::cofre::Cofre>);
+
+impl Drop for CofreAberto {
+    fn drop(&mut self) {
+        if let Some(c) = self.0.take() {
+            crate::tpm::com_o_tpm(|t| c.fechar(t));
+        }
+    }
+}
+
+/// Recria o primário para uma operação do cofre. Ele é determinístico — o
+/// mesmo pedido, a mesma chave —, e tem de ser o do boot: outro é o TPM
+/// limpo, ou outro TPM, e nada se sela nele.
+fn abrir_o_cofre() -> Result<CofreAberto, ancora::Erro> {
+    let cofre = CofreAberto(Some(com_a_ancora(|a, t| {
+        a.abrir_cofre(t, &[], &mut Sorteio)
+    })?));
+    let do_boot = com(|p| {
+        p.aberta
+            .as_ref()
+            .and_then(|a| a.selagem.as_ref())
+            .map(|s| s.primario)
+    })
+    .ok_or(ancora::Erro::Transporte("o cofre nao esta aberto"))?;
+    match cofre.0.as_ref() {
+        Some(c) if *c.nome() == do_boot => Ok(cofre),
+        _ => Err(ancora::Erro::SeladoEstranho),
+    }
+}
+
+/// Chama `f` com a âncora, o primário recriado, o índice de geração e o
+/// TPM.
+fn com_o_cofre<R>(
+    cofre: &mut CofreAberto,
+    f: impl FnOnce(
+        &mut ancora::Ancora,
+        &mut ancora::cofre::Cofre,
+        &mut ancora::cofre::Geracao,
+        &mut crate::tpm::Interface,
+    ) -> Result<R, ancora::Erro>,
+) -> Result<R, ancora::Erro> {
+    let c = cofre
+        .0
+        .as_mut()
+        .ok_or(ancora::Erro::Transporte("o cofre nao esta aberto"))?;
+    com_a_geracao(|a, g, t| f(a, c, g, t))
+}
+
+/// A geração em que as chaves vivas estão seladas.
+fn geracao_da_selagem() -> Result<u64, &'static str> {
+    com(|p| {
+        p.aberta
+            .as_ref()
+            .and_then(|a| a.selagem.as_ref())
+            .map(|s| s.valor)
+    })
+    .ok_or("o cofre nao esta aberto")
+}
+
+/// Sela a semente da chave viva `g` para a geração `valor`, sob o primário
+/// do `cofre`: a semente vai cifrada ao TPM, e volta o objeto selado.
+fn selar(
+    cofre: &mut CofreAberto,
+    g: &crate::chaves::Gravavel,
+    valor: u64,
+) -> Result<ancora::cofre::Selado, &'static str> {
+    let privada = g.privada.as_ref().ok_or("chave viva sem a privada")?;
+    privada
+        .com_a_semente(|s| {
+            com_o_cofre(cofre, |a, c, geracao, t| {
+                a.selar(t, c, geracao, valor, s, &mut Sorteio)
+            })
+        })
+        .map_err(|e| e.motivo())
+}
+
+/// A entrada de uma chave viva selada: `[dono, nome, domínio, criada em
+/// ms, pública, geração, unique, bloco privado]` — o objeto selado, e nada
+/// da semente.
+fn entrada_da_chave_selada(
+    g: &crate::chaves::Gravavel,
+    s: &ancora::cofre::Selado,
+) -> Result<Vec<u8>, &'static str> {
+    entrada(
+        tipo::CHAVE_SELADA,
+        &[
+            g.dono.as_bytes(),
+            g.nome.as_bytes(),
+            g.dominio.as_bytes(),
+            &g.criada_ms.to_le_bytes(),
+            &g.publica,
+            &s.geracao().to_le_bytes(),
+            s.unico(),
+            s.privado(),
+        ],
+    )
+}
+
+/// A entrada da criação de uma chave: ela selada no TPM na geração atual,
+/// com o objeto selado guardado na tabela. A semente não vai ao journal.
+pub fn entrada_da_criacao(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'static str> {
+    // Na bancada da migração: o kernel de antes do cofre, que gravava a
+    // semente.
+    #[cfg(feature = "quedas")]
+    if crate::quedas::chaves_antigas() {
+        return entrada_antiga(g);
+    }
+    let valor = geracao_da_selagem()?;
+    let mut cofre = abrir_o_cofre().map_err(|e| e.motivo())?;
+    let s = selar(&mut cofre, g, valor)?;
+    let e = entrada_da_chave_selada(g, &s)?;
+    crate::chaves::guardar_selado(&g.dono, &g.nome, s)?;
+    Ok(e)
+}
+
+/// A entrada de uma chave do formato de antes do cofre — `[dono, nome,
+/// domínio, criada em ms, semente]` —, que o kernel não escreve mais: só a
+/// bancada a escreve, no kernel de antes que ela imita, para conferir a
+/// migração. A semente é emprestada pela privada só para a entrada, que
+/// quem grava zera depois.
+#[cfg(feature = "quedas")]
+fn entrada_antiga(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'static str> {
+    let privada = g.privada.as_ref().ok_or("chave viva sem a privada")?;
+    privada.com_a_semente(|semente| {
+        entrada(
+            tipo::CHAVE_CRIADA,
+            &[
+                g.dono.as_bytes(),
+                g.nome.as_bytes(),
+                g.dominio.as_bytes(),
+                &g.criada_ms.to_le_bytes(),
+                semente,
+            ],
+        )
+    })
+}
+
+/// Uma morte de chave em andamento: a geração seguinte, e os objetos das
+/// vivas selados para ela.
+struct Proxima {
+    valor: u64,
+    selados: Vec<(String, String, ancora::cofre::Selado)>,
+}
+
+/// O primeiro passo de uma morte de chave. Se `entradas` têm a lápide de
+/// alguma chave, todas as vivas são seladas de novo para a geração seguinte,
+/// e as entradas delas e a geração pendente vão no mesmo registro que a
+/// lápide: tudo, ou nada. Sem lápide, nada muda.
+fn selar_para_a_proxima(entradas: &mut Vec<Vec<u8>>) -> Result<Option<Proxima>, &'static str> {
+    if !entradas
+        .iter()
+        .any(|e| tipo_da_entrada(e) == Some(tipo::CHAVE_MORTA))
+    {
+        return Ok(None);
+    }
+    #[cfg(feature = "quedas")]
+    if crate::quedas::chaves_antigas() {
+        return Ok(None);
+    }
+    let valor = geracao_da_selagem()?
+        .checked_add(1)
+        .ok_or("a geracao da selagem esgotou")?;
+    let mut cofre = abrir_o_cofre().map_err(|e| e.motivo())?;
+    let mut selados = Vec::new();
+    for g in crate::chaves::gravaveis() {
+        if g.estado != crate::chaves::Estado::Ativa {
+            continue;
+        }
+        let s = selar(&mut cofre, &g, valor)?;
+        entradas.push(entrada_da_chave_selada(&g, &s)?);
+        selados.push((g.dono, g.nome, s));
+    }
+    entradas.push(entrada(tipo::SELAGEM_PENDENTE, &[&valor.to_le_bytes()])?);
+    Ok(Some(Proxima { valor, selados }))
+}
+
+/// O segundo e o terceiro passos de uma morte de chave, com o registro do
+/// primeiro confirmado pela âncora: os selados novos na tabela, o índice de
+/// geração avançado e lido de volta, e o registro que confirma o avanço.
+/// Uma falha aqui deixa a persistência indisponível — o registro da
+/// operação está no journal, e o próximo boot completa o avanço, ou o
+/// confirma.
+fn concluir_a_proxima(p: Proxima) {
+    for (dono, nome, s) in p.selados {
+        // Viva há pouco, com a ordem das gravações na mão: o erro não
+        // acontece, e não mudaria nada no journal.
+        let _ = crate::chaves::guardar_selado(&dono, &nome, s);
+    }
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::GeracaoPendente);
+    if let Err(m) = avancar_a_geracao(p.valor) {
+        com(|q| {
+            q.estado =
+                Estado::Indisponivel("a geracao da selagem nao avancou: o proximo boot completa")
+        });
+        crate::log_error!(
+            "persistencia",
+            "a geracao da selagem nao chegou a {}: {}",
+            p.valor,
+            m
+        );
+        return;
+    }
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::GeracaoAvancada);
+    let gravado = entrada(tipo::SELAGEM_CONFIRMADA, &[&p.valor.to_le_bytes()])
+        .and_then(|e| estado::campos(&[&e]))
+        .and_then(|dados| gravar(tipo::SELAGEM, &dados));
+    if let Err(m) = gravado {
+        crate::log_error!(
+            "persistencia",
+            "a geracao {} avancou, e a confirmacao nao foi gravada: {}",
+            p.valor,
+            m
+        );
+    }
+}
+
+/// Avança o índice de geração, que tem de chegar a `esperado`: o incremento
+/// e a leitura de volta, pela sessão. Uma falha no meio não diz se ele
+/// andou; uma leitura autenticada, por uma sessão nova, diz — como no
+/// avanço da âncora.
+fn avancar_a_geracao(esperado: u64) -> Result<(), &'static str> {
+    let avanco = com_a_geracao(|a, g, t| {
+        a.incrementar_geracao(t, g, &mut Sorteio)?;
+        a.ler_geracao(t, g, &mut Sorteio)
+    });
+    let lido = match avanco {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log_warn!(
+                "persistencia",
+                "o avanco da geracao falhou ({}): conferindo pela leitura",
+                e.motivo()
+            );
+            com_a_geracao(|a, g, t| a.ler_geracao(t, g, &mut Sorteio)).map_err(|e| e.motivo())?
+        }
+    };
+    if lido != esperado {
+        return Err("o indice de geracao nao esta onde o journal espera");
+    }
+    com(|p| {
+        if let Some(s) = p.aberta.as_mut().and_then(|a| a.selagem.as_mut()) {
+            s.valor = esperado;
+        }
+    });
+    Ok(())
+}
+
+/// Abre cada chave viva selada, na geração `valor`: o cofre devolve a
+/// semente, e a chave só a aceita se a pública que sai dela é a sua. A
+/// primeira que não abre para tudo — com o motivo dela, e nenhuma semente
+/// de outro lugar no lugar.
+fn abrir_as_seladas(valor: u64) -> Result<usize, &'static str> {
+    let seladas = crate::chaves::seladas();
+    if seladas.is_empty() {
+        return Ok(0);
+    }
+    let mut cofre = abrir_o_cofre().map_err(|e| e.motivo())?;
+    let mut aberto = Ok(());
+    for (dono, nome, selado) in &seladas {
+        // Uma chave por vez com o TPM na mão — as interrupções esperam por
+        // ele —, e o primário recriado uma vez só, para todas.
+        aberto = if selado.geracao() != valor {
+            Err("uma chave selada para outra geracao que a do TPM")
+        } else {
+            com_o_cofre(&mut cofre, |a, c, g, t| {
+                a.abrir(t, c, g, selado, &mut Sorteio)
+            })
+            .map_err(|e| e.motivo())
+            .and_then(|semente| crate::chaves::abrir_selada(dono, nome, semente.como_bytes()))
+        };
+        if let Err(m) = aberto {
+            crate::log_error!(
+                "persistencia",
+                "a chave {} de {} nao abriu: {}",
+                nome,
+                dono,
+                m
+            );
+            break;
+        }
+    }
+    // O primário e a sessão de política saem do TPM com o cofre.
+    drop(cofre);
+    aberto.map(|()| seladas.len())
+}
+
+/// O cofre no boot, com o journal confirmado pela âncora: o primário
+/// recriado; o índice de geração conferido com o que o journal diz — e um
+/// avanço interrompido, completado —; e cada chave selada, aberta. Qualquer
+/// falha é um journal que não se confirma: o estado em que a persistência
+/// fica volta como erro.
+fn abrir_a_selagem(lida: SelagemLida) -> Result<(), Estado> {
+    let recusa = |e: ancora::Erro| Estado::Recusada(e.motivo());
+    let senha = senha_da_geracao().ok_or(Estado::Indisponivel("sem a chave do Duke"))?;
+    // O primário deste boot: o nome dele é o que toda operação do cofre
+    // confere ao recriá-lo.
+    let cofre = CofreAberto(Some(
+        com_a_ancora(|a, t| a.abrir_cofre(t, &[], &mut Sorteio)).map_err(recusa)?,
+    ));
+    let primario = *cofre.0.as_ref().map(|c| c.nome()).expect("posto acima");
+    drop(cofre);
+    com(|p| {
+        if let Some(a) = p.aberta.as_mut() {
+            a.selagem = Some(Selagem {
+                geracao: ancora::cofre::Geracao::nova(INDICE_DA_GERACAO, senha),
+                valor: 0,
+                primario,
+            });
+        }
+    });
+    let existe = com_a_geracao(|a, g, t| a.geracao_existe(t, g)).map_err(recusa)?;
+    if !existe {
+        // Um journal que já falou de geração foi selado contra este índice:
+        // sem ele nenhum selado abre, e um índice novo nasceria em outro
+        // valor.
+        if lida.confirmada.is_some() || lida.pendente.is_some() {
+            return Err(Estado::Recusada(
+                "o indice de geracao sumiu do TPM: as chaves seladas nao abrem",
+            ));
+        }
+        com_a_geracao(|a, g, t| a.definir_geracao(t, g, &[], &mut Sorteio)).map_err(recusa)?;
+    }
+    let no_tpm = com_a_geracao(|a, g, t| a.valor_da_geracao(t, g, &mut Sorteio)).map_err(recusa)?;
+    let seguinte = |c: u64| c.checked_add(1);
+    let valor = match (lida.confirmada, lida.pendente) {
+        // O primeiro boot do cofre: um journal novo, ou de antes dele.
+        (None, None) => no_tpm,
+        (Some(c), None) if no_tpm == c => c,
+        // O índice andou e a confirmação não chegou ao journal: o registro
+        // de boot a leva.
+        (Some(c), Some(p)) if seguinte(c) == Some(p) && no_tpm == p => p,
+        // Os selados novos estão no journal e o índice não andou: a morte
+        // que o registro diz aconteceu, e o avanço se completa agora.
+        (Some(c), Some(p)) if seguinte(c) == Some(p) && no_tpm == c => {
+            let novo =
+                com_a_geracao(|a, g, t| a.avancar_geracao(t, g, &mut Sorteio)).map_err(recusa)?;
+            if novo != p {
+                return Err(Estado::Recusada(
+                    "a geracao nao chegou a pendente ao completar o avanco",
+                ));
+            }
+            crate::log_warn!(
+                "persistencia",
+                "a morte de uma chave parou antes do avanco da geracao: completado em {}",
+                p
+            );
+            p
+        }
+        _ => {
+            crate::log_error!(
+                "persistencia",
+                "a geracao no TPM e {}, e o journal diz {:?}",
+                no_tpm,
+                lida
+            );
+            return Err(Estado::Recusada(
+                "a geracao do TPM nao e a que o journal diz",
+            ));
+        }
+    };
+    com(|p| {
+        if let Some(s) = p.aberta.as_mut().and_then(|a| a.selagem.as_mut()) {
+            s.valor = valor;
+        }
+    });
+    let abertas = abrir_as_seladas(valor).map_err(Estado::Recusada)?;
+    crate::log_info!(
+        "persistencia",
+        "cofre aberto: geracao {}, {} chaves seladas abertas",
+        valor,
+        abertas
+    );
+    Ok(())
+}
+
+/// A migração das chaves do formato de antes do cofre: seladas na geração
+/// atual e gravadas, e a representação antiga eliminada pela limpeza. Num
+/// journal de antes do cofre a limpeza acontece mesmo sem chave viva: uma
+/// chave destruída deixou a semente na região, ou na outra.
+fn migrar(lida: SelagemLida, de_antes_do_cofre: bool) -> Result<(), Estado> {
+    let antigas = crate::chaves::antigas();
+    let limpar = lida.limpeza || lida.antigas > 0 || de_antes_do_cofre;
+    if antigas.is_empty() && !limpar {
+        return Ok(());
+    }
+    let valor = geracao_da_selagem().map_err(Estado::Indisponivel)?;
+    let mut entradas = alloc::vec![
+        entrada(tipo::SELAGEM_CONFIRMADA, &[&valor.to_le_bytes()]).map_err(Estado::Indisponivel)?
+    ];
+    // Uma falha do TPM aqui é como na abertura: recusado.
+    let mut cofre = if antigas.is_empty() {
+        CofreAberto(None)
+    } else {
+        abrir_o_cofre().map_err(|e| Estado::Recusada(e.motivo()))?
+    };
+    for g in &antigas {
+        let s = selar(&mut cofre, g, valor).map_err(Estado::Recusada)?;
+        entradas.push(entrada_da_chave_selada(g, &s).map_err(Estado::Indisponivel)?);
+        crate::chaves::guardar_selado(&g.dono, &g.nome, s).map_err(Estado::Indisponivel)?;
+    }
+    drop(cofre);
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::AntigasSeladas);
+    if limpar {
+        entradas.push(entrada(tipo::LIMPEZA_PENDENTE, &[]).map_err(Estado::Indisponivel)?);
+        LIMPEZA_POR_FAZER.store(true, Ordering::Release);
+    }
+    let dados = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        .map_err(Estado::Indisponivel)?;
+    gravar(tipo::SELAGEM, &dados).map_err(Estado::Indisponivel)?;
+    crate::log_info!(
+        "persistencia",
+        "{} chaves do formato de antes do cofre seladas na geracao {}",
+        antigas.len(),
+        valor
+    );
+    if limpar {
+        limpar_a_particao()?;
+    }
+    Ok(())
+}
+
+/// A limpeza: uma compactação — a região nova tem só os objetos selados —,
+/// os setores de fora do journal zerados, e o registro que diz que acabou.
+/// Uma base que não cabe na outra região deixa a limpeza para o próximo
+/// boot, pendente no journal; uma falha do disco ou do TPM deixa a
+/// persistência indisponível.
+fn limpar_a_particao() -> Result<(), Estado> {
+    if compactar().is_err() {
+        let e = estado();
+        if e != Estado::Disponivel {
+            return Err(e);
+        }
+        crate::log_error!(
+            "persistencia",
+            "a compactacao da limpeza nao aconteceu: a limpeza fica para o proximo boot"
+        );
+        return Ok(());
+    }
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::LimpezaComecou);
+    if let Err(m) = zerar_fora_do_journal() {
+        com(|p| p.estado = Estado::Indisponivel("a limpeza da particao falhou"));
+        crate::log_error!("persistencia", "a limpeza da particao falhou: {}", m);
+        return Err(Estado::Indisponivel("a limpeza da particao falhou"));
+    }
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::LimpezaTerminada);
+    entrada(tipo::LIMPEZA_FEITA, &[])
+        .and_then(|e| estado::campos(&[&e]))
+        .and_then(|dados| gravar(tipo::SELAGEM, &dados))
+        .map_err(Estado::Indisponivel)?;
+    LIMPEZA_POR_FAZER.store(false, Ordering::Release);
+    crate::log_info!(
+        "persistencia",
+        "limpeza feita: fora do journal, a particao de estado e so zeros"
+    );
+    Ok(())
+}
+
+/// Zera os setores da partição de estado que não são o journal de agora — a
+/// região dele até onde está escrita — nem a reserva do fim: tudo o que
+/// sobrou de antes, inclusive o que a chave do journal ainda decifraria,
+/// sai do disco.
+fn zerar_fora_do_journal() -> Result<(), &'static str> {
+    const DE_UMA_VEZ: u64 = 32;
+    duravel()?;
+    let mut janela = janela()?;
+    let [a, b] = regioes()?;
+    let (regiao, usados) = com(|p| (p.regiao, p.aberta.as_ref().map(|a| a.escritor.ocupacao().0)));
+    let usados = usados.ok_or("a persistencia nao esta aberta")?;
+    let atual = if regiao == 0 { a } else { b };
+    let inicio = atual.primeiro - janela.primeiro;
+    let fim = inicio + usados;
+    let total = janela.setores.saturating_sub(diario::RESERVA_NO_FIM);
+    let zeros = alloc::vec![0u8; DE_UMA_VEZ as usize * diario::TAM_SETOR];
+    let mut s = 0;
+    while s < total {
+        if (inicio..fim).contains(&s) {
+            s = fim;
+            continue;
+        }
+        let ate = if s < inicio { inicio.min(total) } else { total };
+        let n = (ate - s).min(DE_UMA_VEZ);
+        janela.escrever(s, &zeros[..n as usize * diario::TAM_SETOR])?;
+        // Na bancada: a energia cai com o primeiro pedaço zerado.
+        #[cfg(feature = "quedas")]
+        crate::quedas::aqui(crate::quedas::Ponto::LimpezaNoMeio);
+        s += n;
+    }
+    janela.descarregar()
+}
+
+// ---------------------------------------------------------------------------
 // As operações de autoridade
 // ---------------------------------------------------------------------------
 
@@ -2266,39 +2898,58 @@ pub fn concluir(
     desfazer: bool,
     decisao: u64,
 ) -> Result<(), &'static str> {
-    let mut entradas = diferenca(foto, nome, recurso)?;
-    // O que a operação fez às mensagens — a revogação de um titular anula
-    // as dele — vai no mesmo registro: uma operação, um registro.
-    entradas.extend(tirar_pendentes());
-    let conteudo = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-    match gravar_com_a_decisao(tipo::OPERACAO, &conteudo, decisao) {
-        Ok(()) => Ok(()),
-        Err(motivo) => {
-            if desfazer {
-                foto.restaurar_concessoes();
-            }
-            Err(motivo)
+    em_ordem(|| {
+        let mut entradas = diferenca(foto, nome, recurso)?;
+        // O que a operação fez às mensagens — a revogação de um titular
+        // anula as dele — vai no mesmo registro: uma operação, um registro.
+        entradas.extend(tirar_pendentes());
+        let gravado = gravar_com_as_mortes(&mut entradas, decisao);
+        if gravado.is_err() && desfazer {
+            foto.restaurar_concessoes();
         }
-    }
+        gravado
+    })
 }
 
-/// A entrada de uma chave viva: `[dono, nome, domínio, criada em ms,
-/// semente]` — a semente emprestada pela privada só para a entrada, que
-/// quem grava zera depois.
-pub fn entrada_da_chave_viva(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'static str> {
-    let privada = g.privada.as_ref().ok_or("chave viva sem a privada")?;
-    privada.com_a_semente(|semente| {
-        entrada(
-            tipo::CHAVE_CRIADA,
-            &[
-                g.dono.as_bytes(),
-                g.nome.as_bytes(),
-                g.dominio.as_bytes(),
-                &g.criada_ms.to_le_bytes(),
-                semente,
-            ],
-        )
-    })
+/// Grava as entradas de uma operação num registro, com a decisão — e, se
+/// elas matam alguma chave, os três passos da geração: os selados das vivas
+/// para a geração seguinte no mesmo registro, o avanço do índice, e a
+/// confirmação. As entradas são zeradas depois.
+///
+/// Uma selagem que falha antes do registro é uma gravação que falhou: a
+/// persistência fica indisponível, e a morte fica até o boot, como toda
+/// revogação que não ficou gravada.
+fn gravar_com_as_mortes(entradas: &mut Vec<Vec<u8>>, decisao: u64) -> Result<(), &'static str> {
+    let proxima = match selar_para_a_proxima(entradas) {
+        Ok(p) => p,
+        Err(m) => {
+            com(|p| {
+                p.estado = Estado::Indisponivel(
+                    "a selagem das chaves vivas para a geracao seguinte falhou",
+                )
+            });
+            crate::log_error!(
+                "persistencia",
+                "a selagem para a geracao seguinte falhou: {}",
+                m
+            );
+            return Err(m);
+        }
+    };
+    let conteudo = estado::campos(&entradas.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let resultado = conteudo.and_then(|mut c| {
+        let r = gravar_com_a_decisao(tipo::OPERACAO, &c, decisao);
+        politica::sigiloso::zerar_bloco(&mut c);
+        r
+    });
+    for e in entradas.iter_mut() {
+        politica::sigiloso::zerar_bloco(e);
+    }
+    resultado?;
+    if let Some(p) = proxima {
+        concluir_a_proxima(p);
+    }
+    Ok(())
 }
 
 /// A lápide de uma chave: `[dono, nome, estado, domínio, criada em ms,
@@ -2319,29 +2970,22 @@ pub fn entrada_da_chave_morta(g: &crate::chaves::Gravavel) -> Result<Vec<u8>, &'
 
 /// Grava uma operação que não passa pela foto — a de uma chave, pelo dono
 /// dela —: o marcador `[operação, recurso]`, as `entradas`, e a decisão
-/// `decisao` no mesmo registro, como [`concluir`]. As entradas, e o
-/// conteúdo montado com elas, são zerados depois: a de uma chave viva tem a
-/// semente.
+/// `decisao` no mesmo registro, como [`concluir`] — com os três passos da
+/// geração, se uma delas é uma lápide. As entradas são tiradas de quem
+/// chama, e zeradas depois.
 pub fn gravar_operacao(
     nome: &str,
     recurso: &str,
     entradas: &mut [Vec<u8>],
     decisao: u64,
 ) -> Result<(), &'static str> {
-    let marcador = entrada(tipo::OPERACAO, &[nome.as_bytes(), recurso.as_bytes()])?;
-    let mut todas: Vec<&[u8]> = Vec::with_capacity(entradas.len() + 1);
-    todas.push(&marcador);
-    todas.extend(entradas.iter().map(Vec::as_slice));
-    let conteudo = estado::campos(&todas);
-    let resultado = conteudo.and_then(|mut c| {
-        let r = gravar_com_a_decisao(tipo::OPERACAO, &c, decisao);
-        politica::sigiloso::zerar_bloco(&mut c);
-        r
-    });
-    for e in entradas.iter_mut() {
-        politica::sigiloso::zerar_bloco(e);
-    }
-    resultado
+    em_ordem(|| {
+        let marcador = entrada(tipo::OPERACAO, &[nome.as_bytes(), recurso.as_bytes()])?;
+        let mut todas = Vec::with_capacity(entradas.len() + 1);
+        todas.push(marcador);
+        todas.extend(entradas.iter_mut().map(core::mem::take));
+        gravar_com_as_mortes(&mut todas, decisao)
+    })
 }
 
 /// Uma entrada do registro de uma operação: o tipo e os campos.
@@ -2463,9 +3107,12 @@ fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
             Some((_, resto)) => Ok(resto.to_vec()),
             None => Err("registro sem o campo do tipo"),
         },
-        tipo::OPERACAO | tipo::MENSAGENS | tipo::ARMAZEM | tipo::AUDITORIA | tipo::BASE => {
-            Ok(campos)
-        }
+        tipo::OPERACAO
+        | tipo::MENSAGENS
+        | tipo::ARMAZEM
+        | tipo::AUDITORIA
+        | tipo::BASE
+        | tipo::SELAGEM => Ok(campos),
         // O fecho tem só os campos dele — ver [`fecho`].
         tipo::BASE_FIM => fecho(&r.conteudo).map(|_| Vec::new()),
         _ => Err("tipo de registro desconhecido"),
@@ -2616,7 +3263,56 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
                 s,
             );
             sigilo::zeroize::Zeroize::zeroize(&mut s);
+            crate::arch::sem_interrupcoes(|| SELAGEM_LIDA.lock().antigas += 1);
             r
+        }
+        (
+            tipo::CHAVE_SELADA,
+            [
+                dono,
+                nome,
+                dominio,
+                criada,
+                publica,
+                geracao,
+                unico,
+                privado,
+            ],
+        ) => {
+            let selado = ancora::cofre::Selado::de_partes(u64_de(geracao)?, unico, privado)
+                .map_err(|e| e.motivo())?;
+            crate::chaves::restaurar_selada(
+                texto(dono)?,
+                texto(nome)?,
+                texto(dominio)?,
+                u64_de(criada)?,
+                chave(publica)?,
+                selado,
+            )
+        }
+        (tipo::SELAGEM_PENDENTE, [g]) => {
+            let g = u64_de(g)?;
+            crate::arch::sem_interrupcoes(|| SELAGEM_LIDA.lock().pendente = Some(g));
+            Ok(())
+        }
+        (tipo::SELAGEM_CONFIRMADA, [g]) => {
+            let g = u64_de(g)?;
+            crate::arch::sem_interrupcoes(|| {
+                let mut lida = SELAGEM_LIDA.lock();
+                lida.confirmada = Some(g);
+                if lida.pendente.is_some_and(|p| p <= g) {
+                    lida.pendente = None;
+                }
+            });
+            Ok(())
+        }
+        (tipo::LIMPEZA_PENDENTE, []) => {
+            crate::arch::sem_interrupcoes(|| SELAGEM_LIDA.lock().limpeza = true);
+            Ok(())
+        }
+        (tipo::LIMPEZA_FEITA, []) => {
+            crate::arch::sem_interrupcoes(|| SELAGEM_LIDA.lock().limpeza = false);
+            Ok(())
         }
         (tipo::CHAVE_MORTA, [dono, nome, estado, dominio, criada, publica]) => {
             let estado = match estado {
@@ -2856,7 +3552,8 @@ pub fn fixar_limite_de_teste(setores: Option<u64>) {
     LIMITE_DE_TESTE.store(setores.unwrap_or(0), Ordering::Release);
 }
 
-/// Só para a suíte: reaplica a região atual inteira, como o boot.
+/// Só para a suíte: reaplica a região atual inteira, como o boot — e, como
+/// o boot, abre no cofre cada chave selada reposta, na geração de agora.
 #[cfg(feature = "modo-teste")]
 pub fn reaplicar_regiao_de_teste() -> Result<u64, &'static str> {
     let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
@@ -2867,7 +3564,138 @@ pub fn reaplicar_regiao_de_teste() -> Result<u64, &'static str> {
     for mut e in tirar_pendentes() {
         politica::sigiloso::zerar_bloco(&mut e);
     }
+    abrir_as_seladas(geracao_da_selagem()?)?;
     Ok(p.quantos)
+}
+
+/// Só para a suíte: as chaves vivas fechadas e abertas de novo pelo cofre,
+/// na geração de agora, como o boot as abre. Devolve quantas abriu.
+#[cfg(feature = "modo-teste")]
+pub fn reabrir_as_chaves_de_teste() -> Result<usize, &'static str> {
+    em_ordem(|| {
+        crate::chaves::fechar_as_vivas_de_teste();
+        abrir_as_seladas(geracao_da_selagem()?)
+    })
+}
+
+/// Só para a suíte: troca o nome do primário do boot — o que cada operação
+/// do cofre confere ao recriá-lo —, e devolve o de antes: um outro faz o
+/// TPM de agora parecer limpo, ou trocado, no meio do caminho.
+#[cfg(feature = "modo-teste")]
+pub fn trocar_o_primario_de_teste(nome: [u8; 34]) -> Result<[u8; 34], &'static str> {
+    com(|p| {
+        p.aberta
+            .as_mut()
+            .and_then(|a| a.selagem.as_mut())
+            .map(|s| core::mem::replace(&mut s.primario, nome))
+    })
+    .ok_or("o cofre nao esta aberto")
+}
+
+/// Só para a suíte: quanto custa cada operação do cofre, somada em
+/// `vezes`: recriar o primário, selar uma semente e abrir o selado — o
+/// `TPM2_Load`, o `TPM2_PolicyNV` e o `TPM2_Unseal`. Os milissegundos de
+/// cada uma, nessa ordem.
+#[cfg(feature = "modo-teste")]
+pub fn medir_o_cofre_de_teste(vezes: u32) -> Result<[u64; 3], &'static str> {
+    let semente = [0x5E; 32];
+    let valor = geracao_da_selagem()?;
+    let t0 = crate::tempo::uptime_ms();
+    for _ in 0..vezes {
+        drop(abrir_o_cofre().map_err(|e| e.motivo())?);
+    }
+    let t1 = crate::tempo::uptime_ms();
+    let mut cofre = abrir_o_cofre().map_err(|e| e.motivo())?;
+    let mut selado = None;
+    for _ in 0..vezes {
+        let s = com_o_cofre(&mut cofre, |a, c, g, t| {
+            a.selar(t, c, g, valor, &semente, &mut Sorteio)
+        })
+        .map_err(|e| e.motivo())?;
+        selado = Some(s);
+    }
+    let t2 = crate::tempo::uptime_ms();
+    let selado = selado.ok_or("nenhuma selagem medida")?;
+    for _ in 0..vezes {
+        let aberta = com_o_cofre(&mut cofre, |a, c, g, t| {
+            a.abrir(t, c, g, &selado, &mut Sorteio)
+        })
+        .map_err(|e| e.motivo())?;
+        if aberta.como_bytes() != &semente {
+            return Err("a semente medida nao voltou igual");
+        }
+    }
+    let t3 = crate::tempo::uptime_ms();
+    drop(cofre);
+    Ok([t1 - t0, t2 - t1, t3 - t2])
+}
+
+/// Só para a suíte: a geração em que as chaves vivas estão seladas.
+#[cfg(feature = "modo-teste")]
+pub fn geracao_da_selagem_de_teste() -> Result<u64, &'static str> {
+    geracao_da_selagem()
+}
+
+/// Só para a suíte: o valor do índice de geração, lido do TPM agora.
+#[cfg(feature = "modo-teste")]
+pub fn geracao_no_tpm_de_teste() -> Result<u64, &'static str> {
+    com_a_geracao(|a, g, t| a.ler_geracao(t, g, &mut Sorteio)).map_err(|e| e.motivo())
+}
+
+/// Só para a suíte: abre no cofre um objeto selado avulso — o de uma cópia
+/// antiga do disco, digamos —, como o boot o abriria agora.
+#[cfg(feature = "modo-teste")]
+pub fn abrir_selado_de_teste(
+    selado: &ancora::cofre::Selado,
+) -> Result<ancora::cofre::Semente, ancora::Erro> {
+    let mut cofre = abrir_o_cofre()?;
+    com_o_cofre(&mut cofre, |a, c, g, t| {
+        a.abrir(t, c, g, selado, &mut Sorteio)
+    })
+}
+
+/// Só para a suíte: a migração das chaves do formato de antes do cofre
+/// repostas na tabela, como o boot a faz — a selagem, o registro, a
+/// compactação e a limpeza.
+#[cfg(feature = "modo-teste")]
+pub fn migrar_de_teste() -> Result<(), &'static str> {
+    em_ordem(|| {
+        migrar(
+            SelagemLida {
+                antigas: 1,
+                ..SelagemLida::default()
+            },
+            false,
+        )
+        .map_err(|e| e.motivo())
+    })
+}
+
+/// Só para a suíte: a região atual e onde a escrita dela está — o começo,
+/// na partição, e quantos setores estão escritos.
+#[cfg(feature = "modo-teste")]
+pub fn extensao_do_journal_de_teste() -> Result<(u64, u64), &'static str> {
+    let janela = janela()?;
+    let atual = regiao_atual()?;
+    let usados = com(|p| p.aberta.as_ref().map(|a| a.escritor.ocupacao().0))
+        .ok_or("a persistencia nao esta aberta")?;
+    Ok((atual.primeiro - janela.primeiro, usados))
+}
+
+/// Só para a suíte: os setores `[inicio, inicio + n)` da partição de
+/// estado, crus, como estão no disco.
+#[cfg(feature = "modo-teste")]
+pub fn setores_crus_de_teste(inicio: u64, n: u64) -> Result<Vec<u8>, &'static str> {
+    let mut janela = janela()?;
+    let mut v = alloc::vec![0u8; n as usize * diario::TAM_SETOR];
+    janela.ler(inicio, &mut v)?;
+    Ok(v)
+}
+
+/// Só para a suíte: quantos setores a partição de estado tem.
+#[cfg(feature = "modo-teste")]
+pub fn setores_do_estado_de_teste() -> Result<u64, &'static str> {
+    Ok(janela()?.setores)
 }
 
 /// Só para a suíte: reaplica só os primeiros `k` registros da região atual
@@ -3038,6 +3866,24 @@ pub fn algum_registro_de_teste(
     Ok(achou)
 }
 
+/// Só para a suíte: [`algum_registro_de_teste`] na região `i` — a atual ou
+/// a outra, inteira até onde ela se lê.
+#[cfg(feature = "modo-teste")]
+pub fn algum_registro_na_regiao_de_teste(
+    i: usize,
+    mut f: impl FnMut(&diario::Registro) -> bool,
+) -> Result<bool, &'static str> {
+    let (chave, _) = segredos().ok_or("sem a chave do Duke")?;
+    let [a, b] = regioes()?;
+    let mut meio = if i == 0 { a } else { b };
+    let mut achou = false;
+    let _ = diario::percorrer(&mut meio, &chave, |r| {
+        achou |= f(&r);
+        Ok::<(), ()>(())
+    });
+    Ok(achou)
+}
+
 /// Destrava as trancas da persistência à força, para uso exclusivo do
 /// caminho de falha fatal.
 ///
@@ -3052,6 +3898,7 @@ pub unsafe fn destravar() {
         REPOSTA.force_unlock();
         ELO_GRAVADO.force_unlock();
         ARMAZEM_LIDO.force_unlock();
+        SELAGEM_LIDA.force_unlock();
     }
     DONO_DA_ORDEM.store(0, Ordering::Release);
 }

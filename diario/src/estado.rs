@@ -70,6 +70,13 @@ pub mod tipo {
     /// decisão do gate que a autorizou vai no mesmo registro, como em todo
     /// registro.
     pub const ARMAZEM: u16 = 8;
+    /// O que a selagem das chaves mudou fora de uma operação: a geração
+    /// confirmada no terceiro passo de uma morte de chave, a migração das
+    /// chaves antigas, a limpeza — entradas [`SELAGEM_CONFIRMADA`],
+    /// [`CHAVE_SELADA`], [`LIMPEZA_PENDENTE`] e [`LIMPEZA_FEITA`]. Não sobe a
+    /// geração administrativa: a selagem é custódia, e não autoridade. Avança
+    /// o contador do TPM, como todo registro de estado protegido.
+    pub const SELAGEM: u16 = 9;
 
     /// Um agente entrou no registro: `[a linha do arquivo de agentes]`.
     pub const AGENTE_REGISTRADO: u16 = 10;
@@ -164,19 +171,39 @@ pub mod tipo {
     /// anteriores (`ARQUIVO_GRAVADO`, `ARQUIVO_APAGADO`, `ARMAZEM_PROXIMO`)
     /// são do formato em que o conteúdo morava aqui, e não se escrevem mais.
     pub const ARMAZEM_CONFIRMADO: u16 = 32;
-    /// Uma chave de assinatura nasceu: `[dono, nome, domínio, criada em ms
-    /// (8), semente (32)]`. O dono é a identidade durável — `pessoa:<id>`,
-    /// `agente:<hex>`, `servico:<nome>` —; a pública sai da semente. A
-    /// semente vai cifrada com o registro, como o corpo de uma mensagem, e
-    /// só aqui: a base de uma compactação a escreve de novo só para a chave
-    /// que ainda vive — a de uma chave morta fica na região velha, e não
-    /// passa para a nova.
+    /// Do formato de antes do cofre do TPM — ver [`CHAVE_SELADA`]: uma
+    /// chave de assinatura nasceu, `[dono, nome, domínio, criada em ms (8),
+    /// semente (32)]`, com a semente cifrada só com o registro. Não se
+    /// escreve mais: o primeiro boot que a lê sela a chave, e a limpeza
+    /// tira do disco o registro que a tinha — ver [`LIMPEZA_PENDENTE`].
     pub const CHAVE_CRIADA: u16 = 33;
     /// A lápide de uma chave de assinatura: `[dono, nome, estado (1: 1
     /// destruída, 2 anulada), domínio, criada em ms (8), pública (32)]` — o
     /// que é público, e nada da privada. Permanente: nenhum registro a
     /// desfaz, e o nome não volta. Sozinha, na base, ela é a chave inteira.
     pub const CHAVE_MORTA: u16 = 34;
+    /// Uma chave de assinatura viva, com a semente selada no TPM: `[dono,
+    /// nome, domínio, criada em ms (8), pública (32), geração (8), unique
+    /// (32), bloco privado]` — o objeto selado e a geração do índice a que
+    /// ele está preso, e nada da semente. Na criação, no primeiro passo de
+    /// toda morte de chave (a viva selada de novo para a geração seguinte),
+    /// na migração e na base: a última de uma chave é o selado que vale.
+    pub const CHAVE_SELADA: u16 = 35;
+    /// A geração da selagem vai subir para `[geração (8)]`: os selados das
+    /// vivas para ela já estão neste registro, e o índice do TPM ainda não
+    /// andou. Um boot que a encontra sem a confirmação completa o avanço.
+    pub const SELAGEM_PENDENTE: u16 = 36;
+    /// A geração da selagem em que as chaves vivas estão: `[geração (8)]`.
+    /// Vai no registro de boot, no terceiro passo de toda morte de chave e
+    /// na base.
+    pub const SELAGEM_CONFIRMADA: u16 = 37;
+    /// A limpeza da partição está por fazer: `[]`. A migração das chaves do
+    /// formato antigo a pede, e a base a leva até ela acabar — ver
+    /// [`CHAVE_CRIADA`].
+    pub const LIMPEZA_PENDENTE: u16 = 38;
+    /// A limpeza acabou: `[]`. Fora do journal, a partição de estado é só
+    /// zeros.
+    pub const LIMPEZA_FEITA: u16 = 39;
 
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.

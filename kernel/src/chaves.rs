@@ -46,23 +46,31 @@
 //! destruição ou uma política nova gravam com a mesma ordem: ou a
 //! assinatura as vê e é recusada, ou elas vêm depois dela inteira.
 //!
-//! # O journal
+//! # O journal, e o cofre do TPM
 //!
-//! A chave vai para o journal de estado cifrado, num registro de operação
-//! com a decisão que a autorizou, antes de a criação responder: a semente,
-//! cifrada com o registro, e a lápide, quando ela morre — que um disco
-//! antigo não desfaz: o contador do TPM avança a cada uma, e o journal que
-//! volta para antes dele é recusado. Sem a gravação, a criação se desfaz
+//! A semente não vai para o disco. Na criação ela é selada no TPM — ver
+//! `ancora::cofre` —, e o journal de estado guarda o objeto selado, num
+//! registro de operação com a decisão que a autorizou, antes de a criação
+//! responder; quando a chave morre, a lápide. O objeto selado só abre neste
+//! TPM, e só enquanto o índice de geração do TPM tiver o valor a que ele
+//! está preso: toda morte de chave sela as vivas de novo para a geração
+//! seguinte e só então avança o índice — e o objeto da morta, em qualquer
+//! cópia do disco, não abre mais. Sem a gravação, a criação se desfaz
 //! inteira, e a destruição fica até o boot, como toda revogação que não
-//! ficou gravada. No boot, a reposição devolve cada chave viva com a mesma
-//! privada, e cada lápide; a base de uma compactação leva as chaves da
-//! memória — a viva com a semente, a morta só com o que é público —, e a
-//! semente de uma chave morta fica para trás, na região velha.
+//! ficou gravada. No boot, a reposição devolve cada chave viva selada, e o
+//! cofre a abre — com a mesma privada, conferida pela pública —; a base de
+//! uma compactação leva as chaves da memória, a viva com o objeto selado e
+//! a morta só com o que é público.
+//!
+//! A custódia continua do kernel: o TPM guarda a semente em repouso e a
+//! devolve ao kernel no boot; quem assina é o kernel, e quem decide se uma
+//! assinatura acontece é o gate. O TPM não autoriza nada.
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use ancora::cofre::Selado;
 use politica::Codigo;
 use sigilo::chaves::{Dominio, Dominios, Privada, TAM_PUBLICA};
 
@@ -158,6 +166,10 @@ struct Chave {
     /// que a destruição e a anulação também tomam: ninguém a apaga no meio
     /// de uma assinatura, e ela é apagada quando a última referência sai.
     privada: Option<Arc<Privada>>,
+    /// O objeto selado no TPM com a semente, enquanto a chave vive: o que o
+    /// journal guarda dela. Sem ele, uma chave viva é do formato de antes do
+    /// cofre, reposta de uma entrada antiga, e o boot a sela.
+    selado: Option<Selado>,
     estado: Estado,
     criada_ms: u64,
 }
@@ -171,6 +183,8 @@ pub struct Vista {
     pub estado: Estado,
     pub publica: [u8; TAM_PUBLICA],
     pub criada_ms: u64,
+    /// Se a semente está selada no TPM.
+    pub selada: bool,
 }
 
 impl Vista {
@@ -181,8 +195,9 @@ impl Vista {
 }
 
 /// O que o journal guarda de uma chave: o que é público, o estado e, da
-/// viva, a privada — que só a persistência usa, para a semente ir cifrada
-/// com o registro (ver `persistencia::entrada_da_chave_viva`).
+/// viva, o objeto selado. A privada só a persistência usa, e só para a
+/// semente ir ao TPM — selada de novo quando outra chave morre (ver
+/// `persistencia::selar_para_a_proxima`).
 pub struct Gravavel {
     pub dono: String,
     pub nome: String,
@@ -191,6 +206,7 @@ pub struct Gravavel {
     pub publica: [u8; TAM_PUBLICA],
     pub estado: Estado,
     pub privada: Option<Arc<Privada>>,
+    pub selado: Option<Selado>,
 }
 
 impl Chave {
@@ -203,6 +219,7 @@ impl Chave {
             publica: self.publica,
             estado: self.estado,
             privada: self.privada.clone(),
+            selado: self.selado.clone(),
         }
     }
 
@@ -214,6 +231,7 @@ impl Chave {
             estado: self.estado,
             publica: self.publica,
             criada_ms: self.criada_ms,
+            selada: self.selado.is_some(),
         }
     }
 }
@@ -242,6 +260,9 @@ pub enum Falha {
     SemEntropia,
     /// Quem pede não é uma identidade.
     SemDono,
+    /// A chave está viva no journal e selada no TPM, e o cofre não a abriu
+    /// neste boot: nada assina com ela.
+    Fechada,
 }
 
 impl Falha {
@@ -251,7 +272,7 @@ impl Falha {
             Falha::DominioNaoUsado => Codigo::DenyPolicy,
             Falha::JaExiste => Codigo::Conflict,
             Falha::Limite => Codigo::DenyQuota,
-            Falha::SemEntropia | Falha::SemDono => Codigo::Error,
+            Falha::SemEntropia | Falha::SemDono | Falha::Fechada => Codigo::Error,
             Falha::DominioDesconhecido
             | Falha::OutroDominio
             | Falha::NomeDeLapide
@@ -275,6 +296,7 @@ impl Falha {
             Falha::Limite => "o limite de chaves foi atingido",
             Falha::SemEntropia => "sem fonte de entropia: nenhuma chave nasce",
             Falha::SemDono => "quem pede nao e uma identidade",
+            Falha::Fechada => "a chave esta selada no TPM e nao foi aberta neste boot",
         }
     }
 }
@@ -393,6 +415,7 @@ pub fn criar(dono: &str, nome: &str, dominio: &str) -> Result<Vista, Falha> {
             custodia: Custodia::Kernel,
             publica,
             privada: Some(privada),
+            selado: None,
             estado: Estado::Ativa,
             criada_ms,
         };
@@ -442,7 +465,7 @@ pub fn para_assinar(
             .and_then(|d| d.dominio(dominio))
             .cloned()
             .ok_or(Falha::DominioDesconhecido)?;
-        let privada = k.privada.clone().ok_or(Falha::Morta(k.estado))?;
+        let privada = k.privada.clone().ok_or(Falha::Fechada)?;
         Ok((privada, k.vista(), d))
     })
 }
@@ -487,11 +510,11 @@ pub fn desfazer_criacao(dono: &str, nome: &str) {
     drop(tirada);
 }
 
-/// Repõe uma chave viva do journal, no boot. O par dono e nome não pode
-/// estar na tabela — uma lápide não volta a viver, e duas criações do mesmo
-/// nome são um journal que o kernel não escreveu —, a não ser que seja a
-/// mesma chave, viva, com a mesma pública. A semente que veio é apagada
-/// aqui.
+/// Repõe uma chave viva do formato de antes do cofre, no boot — a semente
+/// veio do journal, e o boot a sela. O par dono e nome não pode estar na
+/// tabela — uma lápide não volta a viver, e duas criações do mesmo nome são
+/// um journal que o kernel não escreveu —, a não ser que seja a mesma
+/// chave, viva, com a mesma pública. A semente que veio é apagada aqui.
 pub fn restaurar_viva(
     dono: &str,
     nome: &str,
@@ -519,10 +542,119 @@ pub fn restaurar_viva(
             custodia: Custodia::Kernel,
             publica,
             privada: Some(privada),
+            selado: None,
             estado: Estado::Ativa,
             criada_ms,
         });
         Ok(())
+    })
+}
+
+/// Repõe uma chave viva selada, no boot: a entrada mais nova de uma chave
+/// traz o objeto que vale — a da criação, a de uma morte de outra chave, a
+/// da migração, a da base. Uma chave que não está entra viva e fechada, sem
+/// privada, até o cofre a abrir; a viva com a mesma pública troca de objeto
+/// selado, e fecha também: o objeto selado é a única origem da privada, e a
+/// que uma entrada do formato de antes trouxe sai — o cofre a abre de novo,
+/// ou a chave fica fechada. Uma lápide não volta a viver, e uma pública
+/// diferente é outra chave com o mesmo nome: um journal que o kernel não
+/// escreveu.
+pub fn restaurar_selada(
+    dono: &str,
+    nome: &str,
+    dominio: &str,
+    criada_ms: u64,
+    publica: [u8; TAM_PUBLICA],
+    selado: Selado,
+) -> Result<(), &'static str> {
+    let antes = com(|c| {
+        if let Some(k) = c
+            .tabela
+            .iter_mut()
+            .find(|k| k.dono == dono && k.nome == nome)
+        {
+            if k.estado != Estado::Ativa || k.publica != publica {
+                return Err("um selado de uma chave que nao e esta, viva");
+            }
+            k.selado = Some(selado);
+            return Ok(k.privada.take());
+        }
+        if c.tabela.len() >= MAIS_CHAVES {
+            return Err("mais chaves no journal que a tabela comporta");
+        }
+        c.tabela.push(Chave {
+            dono: String::from(dono),
+            nome: String::from(nome),
+            dominio: String::from(dominio),
+            custodia: Custodia::Kernel,
+            publica,
+            privada: None,
+            selado: Some(selado),
+            estado: Estado::Ativa,
+            criada_ms,
+        });
+        Ok(None)
+    })?;
+    drop(antes);
+    Ok(())
+}
+
+/// As chaves vivas seladas, para o cofre abrir no boot: o dono, o nome e o
+/// objeto selado de cada uma.
+pub fn seladas() -> Vec<(String, String, Selado)> {
+    com(|c| {
+        c.tabela
+            .iter()
+            .filter(|k| k.estado == Estado::Ativa)
+            .filter_map(|k| Some((k.dono.clone(), k.nome.clone(), k.selado.clone()?)))
+            .collect()
+    })
+}
+
+/// A semente que o cofre abriu para a chave `nome` de `dono`: vira a
+/// privada dela — se a pública que sai dela é a da chave. Outra pública é
+/// um objeto que não é desta chave, e nada é posto no lugar.
+pub fn abrir_selada(dono: &str, nome: &str, semente: &[u8; 32]) -> Result<(), &'static str> {
+    let privada = Arc::new(Privada::de_semente(*semente));
+    let publica = privada.publica();
+    let antes = com(|c| {
+        let k = c
+            .tabela
+            .iter_mut()
+            .find(|k| k.dono == dono && k.nome == nome && k.estado == Estado::Ativa)
+            .ok_or("a chave aberta nao esta viva na tabela")?;
+        if k.publica != publica {
+            return Err("a semente aberta pelo cofre nao e a da chave");
+        }
+        Ok(k.privada.replace(privada))
+    })?;
+    drop(antes);
+    Ok(())
+}
+
+/// Guarda o objeto selado da chave viva `nome` de `dono`: o da criação, o
+/// da geração seguinte quando outra chave morre, o da migração.
+pub fn guardar_selado(dono: &str, nome: &str, selado: Selado) -> Result<(), &'static str> {
+    com(|c| {
+        let k = c
+            .tabela
+            .iter_mut()
+            .find(|k| k.dono == dono && k.nome == nome && k.estado == Estado::Ativa)
+            .ok_or("o selado de uma chave que nao esta viva")?;
+        k.selado = Some(selado);
+        Ok(())
+    })
+}
+
+/// As chaves vivas do formato de antes do cofre — com a privada e sem
+/// objeto selado —, como o journal as grava: o boot as sela.
+pub fn antigas() -> Vec<Gravavel> {
+    com(|c| {
+        c.tabela
+            .iter()
+            .filter(|k| k.estado == Estado::Ativa && k.selado.is_none() && k.privada.is_some())
+            .map(Chave::gravavel)
+            .collect()
     })
 }
 
@@ -552,6 +684,7 @@ pub fn restaurar_morta(
             }
             if k.estado == Estado::Ativa {
                 k.estado = estado;
+                k.selado = None;
                 return Ok(k.privada.take());
             }
             return Ok(None);
@@ -566,6 +699,7 @@ pub fn restaurar_morta(
             custodia: Custodia::Kernel,
             publica,
             privada: None,
+            selado: None,
             estado,
             criada_ms,
         });
@@ -589,6 +723,7 @@ fn matar(dono: &str, nome: &str, como: Estado) -> Result<Vista, Falha> {
             return Err(Falha::Morta(k.estado));
         }
         k.estado = como;
+        k.selado = None;
         Ok((k.privada.take(), k.vista()))
     })?;
     drop(privada);
@@ -617,6 +752,7 @@ pub fn identidade_revogada(dono: &str) {
                 .filter(|k| k.dono == dono && k.estado == Estado::Ativa)
                 .map(|k| {
                     k.estado = Estado::Anulada;
+                    k.selado = None;
                     (k.privada.take(), k.vista())
                 })
                 .unzip()
@@ -674,6 +810,27 @@ pub fn limpar_a_memoria_de_teste() {
 #[cfg(feature = "modo-teste")]
 pub fn semente_de_teste(dono: &str, nome: &str) -> Option<[u8; 32]> {
     gravavel(dono, nome)?.privada?.com_a_semente(|s| Some(*s))
+}
+
+/// Só para a suíte: o objeto selado da chave `nome` de `dono`, viva — o
+/// que uma cópia do disco de agora teria dela.
+#[cfg(feature = "modo-teste")]
+pub fn selado_de_teste(dono: &str, nome: &str) -> Option<Selado> {
+    gravavel(dono, nome)?.selado
+}
+
+/// Só para a suíte: as chaves vivas seladas fechadas — sem a privada, como
+/// o boot as repõe antes de o cofre as abrir. Devolve quantas fechou.
+#[cfg(feature = "modo-teste")]
+pub fn fechar_as_vivas_de_teste() -> usize {
+    let privadas: Vec<_> = com(|c| {
+        c.tabela
+            .iter_mut()
+            .filter(|k| k.estado == Estado::Ativa && k.selado.is_some())
+            .filter_map(|k| k.privada.take())
+            .collect()
+    });
+    privadas.len()
 }
 
 /// Só para a suíte: troca o registro de domínios, e devolve o de antes.

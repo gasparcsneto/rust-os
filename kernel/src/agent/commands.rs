@@ -2151,6 +2151,8 @@ fn escrever_chave(w: &mut JsonWriter, v: &crate::chaves::Vista) -> fmt::Result {
     w.field_str("algorithm", crate::chaves::ALGORITMO)?;
     w.field_str("domain", &v.dominio)?;
     w.field_str("custody", v.custodia.como_str())?;
+    // A custódia é do kernel; a semente, em repouso, selada no TPM.
+    w.field_str("seal", if v.selada { "tpm" } else { "none" })?;
     w.field_str("state", v.estado.como_str())?;
     w.field_str("public", &sigilo::hex(&v.publica))?;
     w.field_str("fingerprint", &v.impressao())?;
@@ -2207,11 +2209,12 @@ fn key_create(params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
         let v = chaves::criar(&dono, nome, dominio).map_err(como_recusa)?;
         // No journal antes de responder, com a decisão no mesmo registro: a
-        // semente, cifrada com ele. Sem a gravação, a chave sai da tabela
-        // inteira — sem lápide: o nome não foi de chave nenhuma.
+        // semente selada no TPM, e o objeto selado no registro. Sem a
+        // selagem ou sem a gravação, a chave sai da tabela inteira — sem
+        // lápide: o nome não foi de chave nenhuma.
         let gravada = chaves::gravavel(&dono, nome)
             .ok_or("a chave criada nao esta na tabela")
-            .and_then(|g| crate::persistencia::entrada_da_chave_viva(&g))
+            .and_then(|g| crate::persistencia::entrada_da_criacao(&g))
             .and_then(|e| {
                 crate::persistencia::gravar_operacao(
                     "key.create",
@@ -2220,13 +2223,21 @@ fn key_create(params: Json, w: &mut JsonWriter) -> fmt::Result {
                     crate::autorizacao::decisao_atual().unwrap_or(0),
                 )
             });
-        if gravada.is_err() {
+        if let Err(m) = gravada {
+            crate::log_error!(
+                "chaves",
+                "a criacao de {} nao ficou gravada: {}",
+                recurso,
+                m
+            );
             chaves::desfazer_criacao(&dono, nome);
             return Err((
                 Codigo::Error,
                 "a chave nao ficou gravada no journal: nenhuma nasceu",
             ));
         }
+        // A vista de agora, com a semente já selada.
+        let v = chaves::ler(&dono, nome).unwrap_or(v);
         let registro = crate::autorizacao::auditar_execucao(
             &alloc::format!("{recurso} {dominio}"),
             Codigo::Allow,

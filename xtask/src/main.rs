@@ -2922,6 +2922,19 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         &["kernel/src/identidade.rs", "kernel/src/pessoas.rs"],
     ),
     ("Privada::de_semente(", &["kernel/src/chaves.rs"]),
+    // A selagem das chaves (ver `ancora::cofre` e `kernel/src/persistencia.rs`):
+    // o objeto selado só entra na tabela pela persistência — na criação, na
+    // morte de outra chave, na migração e na reposição —, a semente aberta
+    // pelo cofre só vira privada no módulo das chaves, conferida pela
+    // pública, e só a persistência fala com o cofre. A entrada do formato de
+    // antes do cofre, com a semente, só a persistência monta — e só na
+    // compilação da bancada da migração.
+    ("chaves::guardar_selado(", &["kernel/src/persistencia.rs"]),
+    ("chaves::abrir_selada(", &["kernel/src/persistencia.rs"]),
+    ("chaves::restaurar_selada(", &["kernel/src/persistencia.rs"]),
+    ("tipo::CHAVE_CRIADA,", &["kernel/src/persistencia.rs"]),
+    (".abrir_cofre(", &["kernel/src/persistencia.rs"]),
+    ("cofre::Geracao::nova(", &["kernel/src/persistencia.rs"]),
     (
         "persistencia::gravar_auditoria_ate(",
         &["kernel/src/agent/commands.rs"],

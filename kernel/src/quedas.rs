@@ -33,7 +33,9 @@
 //!                        não compacta; bit 2: a criação do journal
 //!                        espera, cedendo, antes de gravar a abertura;
 //!                        bit 3: o contador anda uma vez "de fora" no
-//!                        boot, antes de ser lido
+//!                        boot, antes de ser lido; bit 4: as chaves no
+//!                        formato de antes do cofre — ver
+//!                        [`chaves_antigas`]
 //! ```
 //!
 //! O limite e as bandeiras servem à compactação: a bancada enche uma
@@ -81,6 +83,24 @@ pub enum Ponto {
     /// journal de estado. Conta como da gravação de estado que viria a
     /// seguir: a n-ésima do tipo do plano.
     LoteNoVolume = 17,
+    /// Uma morte de chave: o registro da operação — a lápide, os selados
+    /// das vivas para a geração seguinte, a geração pendente — confirmado
+    /// pela âncora, e o índice de geração ainda não avançado. Conta como da
+    /// gravação da operação.
+    GeracaoPendente = 18,
+    /// O índice de geração avançado, e a confirmação ainda não gravada.
+    /// Conta como da gravação da operação.
+    GeracaoAvancada = 19,
+    /// No boot: as chaves do formato de antes do cofre seladas no TPM, e o
+    /// registro da migração ainda não gravado.
+    AntigasSeladas = 20,
+    /// No boot: a compactação da limpeza feita, e nada zerado ainda.
+    LimpezaComecou = 21,
+    /// No boot: o primeiro pedaço de fora do journal zerado, e o resto não.
+    LimpezaNoMeio = 22,
+    /// No boot: a partição zerada fora do journal, e o registro do fim da
+    /// limpeza ainda não gravado.
+    LimpezaTerminada = 23,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -142,6 +162,14 @@ pub fn contador_de_fora() -> bool {
     BANDEIRAS.load(Ordering::Relaxed) & 8 != 0
 }
 
+/// Se o plano põe o kernel no formato de antes do cofre: a criação grava a
+/// semente no journal, o boot não abre o cofre e não migra, e uma morte de
+/// chave não avança a geração. É o kernel de antes, para a bancada da
+/// migração ter um journal antigo de verdade — e só aqui.
+pub fn chaves_antigas() -> bool {
+    BANDEIRAS.load(Ordering::Relaxed) & 16 != 0
+}
+
 /// Se o plano faz a criação do journal esperar antes da abertura, com a
 /// persistência já disponível: tempo para o coletor passar — e ele não
 /// pode gravar nada antes da abertura.
@@ -180,6 +208,10 @@ pub fn aqui(p: Ponto) {
             | Ponto::AncoraAvancada
             | Ponto::NascimentoGuardado
             | Ponto::DepoisDaChave
+            | Ponto::AntigasSeladas
+            | Ponto::LimpezaComecou
+            | Ponto::LimpezaNoMeio
+            | Ponto::LimpezaTerminada
     );
     if p == Ponto::LoteNoVolume {
         // A gravação de estado que confirmaria o lote ainda não começou: a
