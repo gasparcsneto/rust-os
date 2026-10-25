@@ -132,11 +132,11 @@ fn lancar(
         Video::Linear,
         ambiente,
     )?;
-    // A saída humana do x86 (COM1) não interessa aqui, e um terminal cheio
-    // de log do firmware a cada boot esconderia o resultado. Para depurar
-    // um cenário, `DUKE_BANCADA_LOG` diz um arquivo onde acumulá-la.
-    let saida = std::env::var("DUKE_BANCADA_LOG")
-        .ok()
+    // A saída humana do x86 (COM1) não vai para o terminal: um terminal
+    // cheio de log do firmware a cada boot esconderia o resultado. Na
+    // bancada de persistência ela vai para a serial do cenário, que só
+    // aparece quando ele reprova — ver [`serial_do_cenario`].
+    let saida = serial_do_cenario()
         .and_then(|caminho| {
             std::fs::OpenOptions::new()
                 .create(true)
@@ -359,6 +359,8 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
 /// produção mais os pontos de queda —, que substitui a primeira no disco.
 pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     let artefato = build(arch, release, false)?;
+    let _ = SERIAL_DA_BANCADA
+        .set(super::raiz_do_estado().join(format!("persistencia-{}.serial", arch.nome())));
     println!(
         "[xtask] persistencia: {} cenarios, cada um sobre um estado zerado ({})",
         CENARIOS.len() + CENARIOS_DE_QUEDA.len(),
@@ -377,11 +379,17 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     let mut rodar = |cenarios: &[Cenario], artefato: &Artefato| -> Result<(), String> {
         for cenario in cenarios.iter().filter(|c| escolhido(c)) {
             zerar_o_estado(arch)?;
+            if let (None, Some(serial)) =
+                (std::env::var_os("DUKE_BANCADA_LOG"), serial_do_cenario())
+            {
+                let _ = std::fs::write(serial, b"");
+            }
             match (cenario.rodar)(arch, artefato) {
                 Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
                 Err(motivo) => {
                     falhas += 1;
                     println!("  [persistencia] FALHOU  {}: {motivo}", cenario.nome);
+                    mostrar_o_fim_da_serial();
                 }
             }
         }
@@ -400,6 +408,49 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     }
     println!("\n[xtask] persistencia: todos os cenarios passaram");
     Ok(ExitCode::SUCCESS)
+}
+
+/// A serial da bancada de persistência, posta pelo [`persistencia`]: a
+/// fumaça e a bancada de tempo, que sobem a máquina por aqui também, jogam
+/// a saída humana fora, como sempre.
+static SERIAL_DA_BANCADA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Onde vai a saída humana das máquinas do cenário que roda (a COM1 do
+/// x86): cada boot acrescenta a sua, e o começo de cada cenário a esvazia.
+/// Com `DUKE_BANCADA_LOG`, vai para esse arquivo, que acumula todos.
+///
+/// Ela existe para o cenário que reprova: na CI 335, o primeiro boot de um
+/// cenário não respondeu em 90 s, e nada dizia onde a máquina parou — o
+/// firmware, o iniciador, ou que passo do kernel.
+fn serial_do_cenario() -> Option<std::path::PathBuf> {
+    std::env::var_os("DUKE_BANCADA_LOG")
+        .map(std::path::PathBuf::from)
+        .or_else(|| SERIAL_DA_BANCADA.get().cloned())
+}
+
+/// O fim da serial do cenário que reprovou, na saída: as últimas linhas,
+/// sem os controles de terminal do firmware.
+fn mostrar_o_fim_da_serial() {
+    const LINHAS: usize = 40;
+    let Some(caminho) = serial_do_cenario() else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&caminho) else {
+        return;
+    };
+    let texto: String = String::from_utf8_lossy(&bytes)
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect();
+    let linhas: Vec<&str> = texto.lines().collect();
+    println!(
+        "  [persistencia]   as ultimas {} linhas da serial ({}):",
+        LINHAS.min(linhas.len()),
+        caminho.display()
+    );
+    for linha in &linhas[linhas.len().saturating_sub(LINHAS)..] {
+        println!("  [serial] {}", linha.trim_end());
+    }
 }
 
 /// A GPT diz o que o kernel vai procurar: a terceira partição, do tipo do

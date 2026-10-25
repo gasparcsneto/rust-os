@@ -76,9 +76,10 @@
 //! destino recusado.
 //!
 //! A máquina sobe sobre o estado zerado — o do disco e o do TPM, como em
-//! toda bancada — e sem servidor de hora, como a fumaça principal: a hora
-//! do programa é a do tempo lógico, que vem do RTC do emulador — o relógio
-//! do hospedeiro —, e o programa diz isso (`hora rtc`).
+//! toda bancada, mas os dela, em `target/mainnet/`, longe dos da suíte — e
+//! sem servidor de hora, como a fumaça principal: a hora do programa é a do
+//! tempo lógico, que vem do RTC do emulador — o relógio do hospedeiro —, e
+//! o programa diz isso (`hora rtc`).
 //!
 //! `--ensaio` pula o pré-voo e não espera a rede principal: confere a
 //! máquina, a política, o programa e a auditoria onde a rede não chega, e
@@ -94,7 +95,9 @@ use std::time::{Duration, Instant};
 
 use super::persistencia::Ligada;
 use super::tempo::{administrar, auditoria, campo, data_de, ultimo_do_log};
-use super::{AgenteNaPorta, Ambiente, Arquitetura, Artefato, ObjetoPlano, zerar_o_estado};
+use super::{
+    AgenteNaPorta, Ambiente, Arquitetura, Artefato, ObjetoPlano, usar_estado_proprio, zerar_o_tpm,
+};
 
 /// O programa que consulta, e o código com que ele sai quando o símbolo
 /// verificado é `ICP` — ver `programas/src/bin/livro.rs`.
@@ -154,6 +157,13 @@ pub(crate) fn mainnet(
     );
     let mut relatorio = Relatorio::novo(&quando, arch, release, ensaio);
 
+    // O estado da fumaça é dela: o TPM, o signatário, as variáveis da UEFI
+    // e os sockets da máquina moram em `target/mainnet/`, com o disco e a
+    // imagem — nada do que a suíte usa é tocado. A fumaça já zerou o disco
+    // de testes, no começo e no fim, e uma suíte rodando ao lado perdia o
+    // armazém no meio.
+    usar_estado_proprio(&diretorio_da_fumaca()?)?;
+
     // A máquina compilada antes do pré-voo — ver o cabeçalho, *A janela do
     // DNS*.
     let preparo = preparar(arch, release)?;
@@ -211,9 +221,10 @@ pub(crate) fn mainnet(
 
     // 2. A imagem, e a máquina.
     let (disco, artefato) = imagem_com_os_destinos(arch, preparo, &ips)?;
-    // Um disco novo sobre o TPM de outro comando seria um journal que a
-    // âncora não conhece, e nenhuma credencial valeria.
-    zerar_o_estado(arch)?;
+    // Um disco novo sobre o TPM de outra fumaça seria um journal que a
+    // âncora não conhece, e nenhuma credencial valeria: o TPM e o
+    // signatário zeram com o disco novo.
+    zerar_o_tpm(arch)?;
     let ambiente = Ambiente::ligar(arch, None)?.com_disco(disco);
     let mut m = Ligada::subir_com(arch, &artefato, ambiente)?;
     let r = (|| -> Result<ExitCode, String> {
@@ -333,8 +344,9 @@ pub(crate) fn mainnet(
     let caminho = relatorio.gravar()?;
     println!("[xtask] mainnet: {}", relatorio.veredito);
     println!("[xtask] mainnet: relatorio em {}", caminho.display());
-    // O estado fica zerado para quem vier depois, como todo comando o deixa.
-    zerar_o_estado(arch)?;
+    // O estado da fumaça fica zerado para a próxima, como todo comando o
+    // deixa — o dela, e não o de quem roda ao lado.
+    zerar_o_tpm(arch)?;
     r
 }
 
@@ -804,16 +816,45 @@ fn linha_em_json(linha: &str) -> String {
 /// A máquina antes dos endereços: o kernel, os programas e o iniciador
 /// compilados, e os arquivos da imagem de sempre — os programas, as chaves,
 /// as redes do IC, as âncoras. Só a política espera o pré-voo.
+///
+/// Nada disto vai para onde a suíte procura: nem para a ESP do disco de
+/// testes, nem para a imagem do ARM em `target/imagens/`, nem para o ELF de
+/// `kernel/target` — o kernel da fumaça se compila em `kernel/target/fumaca`.
 struct Preparo {
-    base: Artefato,
+    kernel: Kernel,
     arquivos: Vec<(String, Vec<u8>)>,
-    /// O iniciador UEFI e o kernel para a ESP, quando a máquina sobe pelo
-    /// disco.
-    esp: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+/// O kernel da fumaça, como a máquina o carrega.
+enum Kernel {
+    /// ARM: a imagem crua, em [`diretorio_da_fumaca`].
+    Imagem(std::path::PathBuf),
+    /// x86: o iniciador UEFI e o kernel, para a ESP do disco da fumaça.
+    Esp {
+        efi: std::path::PathBuf,
+        kernel: std::path::PathBuf,
+    },
 }
 
 fn preparar(arch: Arquitetura, release: bool) -> Result<Preparo, String> {
-    let base = super::build(arch, release, false)?;
+    // Num diretório do cargo só dela: no `kernel/target` da suíte, o ELF
+    // de uma troca pelo da outra entre o build e a cópia.
+    let saida = super::raiz_do_projeto()
+        .join("kernel")
+        .join("target")
+        .join("fumaca");
+    let elf = super::compilar_o_kernel(arch, release, &[], Some(&saida))?;
+    let kernel = match arch {
+        Arquitetura::Aarch64 => {
+            let img = diretorio_da_fumaca()?.join("kernel-arm64.img");
+            super::imagem_do_arm64(&elf, &img)?;
+            Kernel::Imagem(img)
+        }
+        Arquitetura::X86_64 => {
+            let (efi, kernel) = super::para_a_esp(arch, release, &elf)?;
+            Kernel::Esp { efi, kernel }
+        }
+    };
     let mut arquivos = super::programas_do_disco()?;
     arquivos.extend(super::chaves::Chaves::garantir()?.arquivos()?);
     arquivos.push((
@@ -828,25 +869,16 @@ fn preparar(arch: Arquitetura, release: bool) -> Result<Preparo, String> {
         super::tls::PUBLICAS_NA_IMAGEM.to_string(),
         super::tls::publicas()?,
     ));
-    let esp = match &base {
-        Artefato::Binario(_) => None,
-        Artefato::Disco(_) => {
-            let perfil = if release { "release" } else { "debug" };
-            let elf = super::raiz_do_projeto()
-                .join("kernel")
-                .join("target")
-                .join(arch.alvo())
-                .join(perfil)
-                .join(super::NOME_DO_BINARIO);
-            let efi = super::build_do_iniciador(arch, release)?;
-            Some((efi, super::kernel_para_a_esp(&elf)?))
-        }
-    };
-    Ok(Preparo {
-        base,
-        arquivos,
-        esp,
-    })
+    Ok(Preparo { kernel, arquivos })
+}
+
+/// O diretório da fumaça, `target/mainnet/`: o relatório, o disco, a imagem
+/// do ARM, e o estado da máquina — o TPM, o signatário, as variáveis da
+/// UEFI e os sockets (ver `usar_estado_proprio`). Nada que a suíte use.
+fn diretorio_da_fumaca() -> Result<std::path::PathBuf, String> {
+    let dir = super::raiz_do_projeto().join("target").join("mainnet");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 /// A imagem de produção com a política de [`politica_com_os_destinos`] no
@@ -856,9 +888,7 @@ fn imagem_com_os_destinos(
     preparo: Preparo,
     ips: &[[u8; 4]],
 ) -> Result<(std::path::PathBuf, Artefato), String> {
-    let dir = super::raiz_do_projeto().join("target").join("mainnet");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let caminho = dir.join("disco.img");
+    let caminho = diretorio_da_fumaca()?.join("disco.img");
     let mut arquivos = preparo.arquivos;
     let Some((_, padrao)) = arquivos
         .iter_mut()
@@ -868,9 +898,9 @@ fn imagem_com_os_destinos(
     };
     *padrao = politica_com_os_destinos(ips)?.into_bytes();
     super::montar_disco(&caminho, &arquivos)?;
-    let artefato = match preparo.esp {
-        None => preparo.base,
-        Some((efi, kernel)) => {
+    let artefato = match preparo.kernel {
+        Kernel::Imagem(img) => Artefato::Binario(img),
+        Kernel::Esp { efi, kernel } => {
             super::instalar_iniciador(arch, &caminho, &efi, &kernel)?;
             Artefato::Disco(caminho.clone())
         }
@@ -1363,9 +1393,7 @@ impl Relatorio {
         for l in O_QUE_SE_CONFERE {
             let _ = writeln!(t, "- {l}");
         }
-        let dir = super::raiz_do_projeto().join("target").join("mainnet");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let caminho = dir.join(format!(
+        let caminho = diretorio_da_fumaca()?.join(format!(
             "relatorio-{}{}.md",
             self.quando.replace(':', ""),
             if self.ensaio { "-ensaio" } else { "" }

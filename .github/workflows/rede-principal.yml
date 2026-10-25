@@ -59,8 +59,9 @@ jobs:
             swtpm python3 openssl
 
       # O cache traz o `target/` de uma execução anterior, e com ele o
-      # `target/mainnet/` dela: o disco e o relatório. Só esse diretório
-      # sai, antes da fumaça; o relatório do artefato é só o desta execução.
+      # `target/mainnet/` dela: o disco, o estado da máquina e o relatório.
+      # Só esse diretório sai, antes da fumaça; o relatório do artefato é só
+      # o desta execução.
       - name: Esvaziar o target/mainnet
         run: rm -rf target/mainnet
 

@@ -1126,6 +1126,27 @@ execuções de 23 de outubro de 2026 vieram de um gatilho `push`
 temporário, só no ramo do ICP-4b, tirado depois. A CI não o roda, e não
 depende da rede principal.
 
+O estado da fumaça é dela, em `target/mainnet/`: o disco, montado de novo
+a cada fumaça; a imagem do kernel do ARM; o TPM e o signatário, zerados no
+começo e no fim; as variáveis da UEFI e os sockets da máquina. O kernel
+dela se compila num diretório do cargo só dela, `kernel/target/fumaca`, e
+nada vai para onde a suíte procura — nem a ESP do disco de testes, nem
+`target/imagens/`, nem o ELF de `kernel/target`. Assim ela roda ao lado de
+uma suíte da mesma árvore, das duas arquiteturas.
+
+Até o ciclo de uso real não era assim. A fumaça zerava o disco de testes —
+no começo e no fim, sem usá-lo —, e uma suíte do ARM rodando ao lado viu
+blocos de arquivos pequenos do armazém voltarem zerados com a versão ainda
+valendo. O rastro das escritas da suíte provou: cada um tinha uma escrita
+só, do kernel, e veio de volta com o resumo de 4 KiB de zeros. Corrigido
+isso, a primeira tentativa de rodar as duas juntas achou outra corrida: as
+duas compilavam o kernel no mesmo `kernel/target`, com features diferentes,
+e o cargo troca o ELF final na hora — a suíte pôs na ESP o kernel de
+produção da fumaça. Daí o diretório próprio. Os comandos da bancada, por
+sua vez, são um de cada vez: cada um trava `target/bancada.trava` antes de
+compilar, e o segundo recusa dizendo o processo do primeiro; e nenhum
+escreve no disco de testes com o emulador de outra execução sobre ele.
+
 #### O resultado
 
 **A execução que fecha o ICP-4b.** O fluxo `rede-principal.yml` rodou

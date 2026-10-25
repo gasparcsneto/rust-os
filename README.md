@@ -1311,7 +1311,16 @@ O `xtask` compila os dois alvos em release e põe os executáveis no disco, em
 `/programas/x86_64` e `/programas/aarch64` — o disco de testes é um só para as
 duas máquinas, e cada kernel procura no diretório da sua. A receita do disco
 os resume pelo conteúdo inteiro, e não pelo tamanho: um executável
-recompilado muda bytes sem mudar de tamanho.
+recompilado muda bytes sem mudar de tamanho. Por ser um só — como o
+kernel compilado em `kernel/target` e o estado de `target/` —, os comandos
+que o usam são um de cada vez: cada um trava `target/bancada.trava` antes
+de compilar, e o segundo recusa dizendo o processo do primeiro. E ninguém
+escreve no disco — nem o remonta, nem põe o kernel na ESP, nem o zera —
+com o emulador de outra execução sobre ele: o `xtask` procura no `/proc`
+um `qemu-system` com `file=` e o caminho inteiro do disco, e recusa.
+Zerá-lo por baixo de uma suíte apagava, no meio dela, o journal e os
+blocos do armazém. A fumaça da rede principal tem o próprio estado, em
+`target/mainnet/`, e roda ao lado (ver `docs/ICP.md`).
 
 Três coisas o carregador exige, e um compilador não entrega sem pedir: um
 executável de **endereço fixo** (o carregador não faz relocação), que more
@@ -7767,6 +7776,13 @@ mensagem e num registro só de auditoria —, entre a chave do TPM e o
 contador no boot, no meio da criação da âncora, e em cada fronteira de uma
 compactação; e enche a região até a operação que não cabe. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
+
+A saída humana das máquinas de cada cenário (a COM1 do x86) vai para
+`target/persistencia-<arch>.serial`, esvaziado no começo do cenário, e o
+cenário que reprova mostra as últimas quarenta linhas dela: é o que diz
+onde parou uma máquina que não respondeu — o firmware, o iniciador ou um
+passo do kernel. `DUKE_CENARIOS` escolhe os cenários por pedaços do nome,
+e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
 ## Barramento PCI
 

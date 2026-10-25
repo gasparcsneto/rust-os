@@ -30,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, ExitCode, Stdio},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -397,9 +397,7 @@ fn raiz_do_projeto() -> PathBuf {
 /// Um socket por arquitetura, para que dá para ter um kernel x86 e um ARM
 /// rodando lado a lado sem que um sobrescreva o canal do outro.
 fn caminho_socket(arch: Arquitetura) -> PathBuf {
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("agent-{}.sock", arch.nome()))
+    raiz_do_estado().join(format!("agent-{}.sock", arch.nome()))
 }
 
 /// Quantas portas de agente a máquina tem, no console virtio — as sessões 1
@@ -412,9 +410,7 @@ fn caminho_canal(arch: Arquitetura, porta: u8) -> PathBuf {
     if porta == 0 {
         return caminho_socket(arch);
     }
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("agente-{porta}-{}.sock", arch.nome()))
+    raiz_do_estado().join(format!("agente-{porta}-{}.sock", arch.nome()))
 }
 
 /// Qual teclado a máquina vai ter.
@@ -465,9 +461,7 @@ enum Video {
 /// É a mesma ideia do `llvm-readobj` conferindo os ELFs de usuário: quem
 /// produz o estímulo não é quem o interpreta.
 fn caminho_monitor(arch: Arquitetura) -> PathBuf {
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("monitor-{}.sock", arch.nome()))
+    raiz_do_estado().join(format!("monitor-{}.sock", arch.nome()))
 }
 
 /// Onde fica o QMP do emulador desta arquitetura.
@@ -481,9 +475,7 @@ fn caminho_monitor(arch: Arquitetura) -> PathBuf {
 /// verdade, porque o emulador entrega o evento ao dispositivo, e o
 /// dispositivo ao kernel.
 fn caminho_qmp(arch: Arquitetura) -> PathBuf {
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("qmp-{}.sock", arch.nome()))
+    raiz_do_estado().join(format!("qmp-{}.sock", arch.nome()))
 }
 
 /// O que o build produziu e o QEMU precisa carregar.
@@ -536,8 +528,52 @@ pub(crate) fn build_com(
     release: bool,
     features: &[&str],
 ) -> Result<Artefato, String> {
-    let raiz = raiz_do_projeto();
-    let dir_kernel = raiz.join("kernel");
+    reservar_a_bancada()?;
+    let elf = compilar_o_kernel(arch, release, features, None)?;
+    match arch {
+        Arquitetura::Aarch64 => {
+            let saida = raiz_do_projeto().join("target").join("imagens");
+            std::fs::create_dir_all(&saida)
+                .map_err(|e| format!("não foi possível criar {}: {e}", saida.display()))?;
+            let img = saida.join("kernel-arm64.img");
+            imagem_do_arm64(&elf, &img)?;
+            Ok(Artefato::Binario(img))
+        }
+
+        Arquitetura::X86_64 => {
+            // O x86 boota pela UEFI, com o iniciador deste projeto. Os dois
+            // vão para a ESP do disco de testes: o `.efi` no caminho que todo
+            // firmware procura, e o ELF do kernel ao lado.
+            //
+            // É sempre este kernel, e não o da execução anterior: a cópia é
+            // incondicional porque `test`, `fumaca` e `run` compilam binários
+            // diferentes, e bootar o errado dá um resultado que não é sobre o
+            // que se pediu.
+            let (efi, kernel) = para_a_esp(arch, release, &elf)?;
+            let disco = disco_de_testes()?;
+            instalar_iniciador(arch, &disco, &efi, &kernel)?;
+            Ok(Artefato::Disco(disco))
+        }
+    }
+}
+
+/// Compila o kernel com estas features, e devolve o caminho do ELF.
+///
+/// O ELF fica onde o cargo o põe: em `kernel/target`, ou no diretório
+/// `saida` de quem compila à parte. Num mesmo diretório, o build seguinte
+/// com outras features troca o ELF na hora — o cargo só reaponta o arquivo
+/// final para o que já tinha compilado —, e quem estava entre o build e a
+/// cópia levava o kernel do outro. Foi o que se viu com a fumaça da rede
+/// principal compilando ao lado da suíte: a suíte pôs na ESP o kernel de
+/// produção da fumaça. Por isso a fumaça compila em `saida` própria, e os
+/// comandos da bancada, um de cada vez (ver [`reservar_a_bancada`]).
+pub(crate) fn compilar_o_kernel(
+    arch: Arquitetura,
+    release: bool,
+    features: &[&str],
+    saida: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let dir_kernel = raiz_do_projeto().join("kernel");
 
     let perfil = if release { "release" } else { "debug" };
     println!("[xtask] compilando o kernel ({}, {perfil})...", arch.nome());
@@ -546,6 +582,9 @@ pub(crate) fn build_com(
     cargo
         .current_dir(&dir_kernel)
         .args(["build", "--target", arch.alvo()]);
+    if let Some(dir) = saida {
+        cargo.arg("--target-dir").arg(dir);
+    }
     if release {
         cargo.arg("--release");
     }
@@ -567,8 +606,8 @@ pub(crate) fn build_com(
         return Err("a compilação do kernel falhou".into());
     }
 
-    let elf = dir_kernel
-        .join("target")
+    let elf = saida
+        .map_or_else(|| dir_kernel.join("target"), Path::to_path_buf)
         .join(arch.alvo())
         .join(perfil)
         .join(NOME_DO_BINARIO);
@@ -578,50 +617,42 @@ pub(crate) fn build_com(
             elf.display()
         ));
     }
+    Ok(elf)
+}
 
-    let saida = raiz.join("target").join("imagens");
-    std::fs::create_dir_all(&saida)
-        .map_err(|e| format!("não foi possível criar {}: {e}", saida.display()))?;
+/// A imagem crua do arm64, em `img`, tirada do ELF.
+///
+/// O ELF carrega metadados que o protocolo de boot do arm64 não entende.
+/// `objcopy -O binary` extrai apenas os bytes que vão para a memória, na
+/// ordem em que vão — que é exatamente o que um carregador de imagem crua
+/// espera.
+pub(crate) fn imagem_do_arm64(elf: &Path, img: &Path) -> Result<(), String> {
+    println!("[xtask] gerando imagem arm64 -> {}", img.display());
 
-    match arch {
-        Arquitetura::Aarch64 => {
-            // O ELF carrega metadados que o protocolo de boot do arm64 não
-            // entende. `objcopy -O binary` extrai apenas os bytes que vão para
-            // a memória, na ordem em que vão — que é exatamente o que um
-            // carregador de imagem crua espera.
-            let img = saida.join("kernel-arm64.img");
-            println!("[xtask] gerando imagem arm64 -> {}", img.display());
-
-            let objcopy = localizar_objcopy()?;
-            let status = Command::new(&objcopy)
-                .args(["-O", "binary"])
-                .arg(&elf)
-                .arg(&img)
-                .status()
-                .map_err(|e| format!("não foi possível executar {}: {e}", objcopy.display()))?;
-            if !status.success() {
-                return Err("objcopy falhou ao gerar a imagem arm64".into());
-            }
-
-            Ok(Artefato::Binario(img))
-        }
-
-        Arquitetura::X86_64 => {
-            // O x86 boota pela UEFI, com o iniciador deste projeto. Os dois
-            // vão para a ESP do disco de testes: o `.efi` no caminho que todo
-            // firmware procura, e o ELF do kernel ao lado.
-            //
-            // É sempre este kernel, e não o da execução anterior: a cópia é
-            // incondicional porque `test`, `fumaca` e `run` compilam binários
-            // diferentes, e bootar o errado dá um resultado que não é sobre o
-            // que se pediu.
-            conferir_sem_simd(&elf).map_err(|e| format!("o kernel {e}"))?;
-            let efi = build_do_iniciador(arch, release)?;
-            let disco = disco_de_testes()?;
-            instalar_iniciador(arch, &disco, &efi, &kernel_para_a_esp(&elf)?)?;
-            Ok(Artefato::Disco(disco))
-        }
+    let objcopy = localizar_objcopy()?;
+    let status = Command::new(&objcopy)
+        .args(["-O", "binary"])
+        .arg(elf)
+        .arg(img)
+        .status()
+        .map_err(|e| format!("não foi possível executar {}: {e}", objcopy.display()))?;
+    if !status.success() {
+        return Err("objcopy falhou ao gerar a imagem arm64".into());
     }
+    Ok(())
+}
+
+/// O iniciador UEFI e o kernel que vão para a ESP de um disco do x86 — o
+/// kernel conferido sem SIMD antes ([`conferir_sem_simd`]). Quem os põe
+/// num disco é [`instalar_iniciador`].
+pub(crate) fn para_a_esp(
+    arch: Arquitetura,
+    release: bool,
+    elf: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    conferir_sem_simd(elf).map_err(|e| format!("o kernel {e}"))?;
+    let efi = build_do_iniciador(arch, release)?;
+    Ok((efi, kernel_para_a_esp(elf)?))
 }
 
 /// Confere que o kernel do x86 não usa registrador de SIMD nenhum.
@@ -975,9 +1006,7 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
             )
         })?;
 
-    let nossas = raiz_do_projeto()
-        .join("target")
-        .join(format!("uefi-vars-{}.fd", arch.nome()));
+    let nossas = raiz_do_estado().join(format!("uefi-vars-{}.fd", arch.nome()));
     std::fs::copy(&variaveis, &nossas).map_err(|e| {
         format!(
             "não foi possível copiar {} para {}: {e}",
@@ -5861,9 +5890,28 @@ fn which(nome: &str) -> Option<PathBuf> {
 }
 
 /// Cria o disco de testes, ou o recria se a receita mudou.
+///
+/// # Nunca por baixo de uma máquina viva de outra execução
+///
+/// O disco é um só para as duas arquiteturas, e quem o pede escreve nele
+/// no lugar: monta de novo (o arquivo inteiro), põe o iniciador e o kernel
+/// na ESP, zera o estado e o armazém. Com o emulador de outra execução
+/// sobre ele, a máquina viva perde, no meio, o que gravou — foi o que se
+/// viu na suíte do ARM com a fumaça da rede principal rodando ao lado, que
+/// zerava este disco sem usá-lo. Aqui se recusa antes de qualquer escrita.
+/// Os emuladores desta mesma execução não contam: são filhos dela.
 fn disco_de_testes() -> Result<PathBuf, String> {
+    reservar_a_bancada()?;
     let caminho = raiz_do_projeto().join("target").join("disco.img");
     let receita = raiz_do_projeto().join("target").join("disco.receita");
+    let vivas = maquinas_de_outra_execucao_sobre(&caminho);
+    if !vivas.is_empty() {
+        return Err(format!(
+            "o disco de testes {} esta aberto pelo emulador de outra execucao (processo {:?}): escrever nele agora apagaria o que ela grava; espere ela acabar",
+            caminho.display(),
+            vivas
+        ));
+    }
     // Os programas compilados e as chaves vão pela mesma lista: os dois são
     // gerados, e os dois entram na receita pelo resumo do conteúdo inteiro.
     // Uma chave nova muda bytes sem mudar o tamanho, e o byte do meio que
@@ -5938,11 +5986,34 @@ fn diretorio_do_tftp() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Onde moram o estado do TPM e a memória do signatário de cada
+/// arquitetura, e o que a máquina abre enquanto vive — as variáveis da UEFI
+/// e os sockets da serial, do agente, do monitor e do QMP: `target/`, que a
+/// suíte, a fumaça e as bancadas dividem — uma máquina de cada arquitetura
+/// por vez —, ou o diretório próprio de um comando que roda ao lado deles
+/// sem tocar no que eles usam: a fumaça da rede principal (ver
+/// [`usar_estado_proprio`]).
+static RAIZ_DO_ESTADO: OnceLock<PathBuf> = OnceLock::new();
+
+fn raiz_do_estado() -> PathBuf {
+    RAIZ_DO_ESTADO
+        .get()
+        .cloned()
+        .unwrap_or_else(|| raiz_do_projeto().join("target"))
+}
+
+/// Este comando guarda o TPM e o signatário em `dir`, e não em `target/`.
+/// Uma vez por execução do `xtask`, antes de qualquer máquina.
+pub(crate) fn usar_estado_proprio(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    RAIZ_DO_ESTADO
+        .set(dir.to_path_buf())
+        .map_err(|_| String::from("o estado deste comando ja tinha outro lugar"))
+}
+
 /// Onde mora o estado do TPM de uma arquitetura: o diretório do `swtpm`.
 fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("tpm-{}", arch.nome()))
+    raiz_do_estado().join(format!("tpm-{}", arch.nome()))
 }
 
 /// Zera o estado persistente da máquina: a partição de estado do disco e o
@@ -5959,15 +6030,132 @@ fn diretorio_do_tpm(arch: Arquitetura) -> PathBuf {
 ///
 /// Dentro de um comando o estado persiste: a bancada de persistência sobe a
 /// mesma máquina várias vezes sobre ele, e é isso que ela testa.
+///
+/// Com o emulador de outra execução sobre o disco, recusa — ver
+/// [`disco_de_testes`].
 fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
     let disco = disco_de_testes()?;
     escrever_no_estado(&disco, &vec![0u8; (disco::ESTADO_SETORES * 512) as usize])?;
     zerar_o_armazem(&disco)?;
+    zerar_o_tpm(arch)
+}
+
+/// O TPM e o signatário de `arch`, de volta ao começo — o par do journal
+/// zerado, ou de um disco novo.
+pub(crate) fn zerar_o_tpm(arch: Arquitetura) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(diretorio_do_signatario(arch));
     let tpm = diretorio_do_tpm(arch);
     let _ = std::fs::remove_dir_all(&tpm);
     std::fs::create_dir_all(tpm.join("estado"))
         .map_err(|e| format!("não foi possível criar {}: {e}", tpm.display()))
+}
+
+/// A trava da bancada desta árvore, enquanto o comando vive.
+static TRAVA_DA_BANCADA: OnceLock<std::fs::File> = OnceLock::new();
+
+/// Reserva a bancada desta árvore para este comando, até ele sair: o disco
+/// de testes, o kernel compilado em `kernel/target`, a imagem do ARM em
+/// `target/imagens/`, o TPM, o signatário e os sockets de `target/`. Duas
+/// execuções ao mesmo tempo se pisam em qualquer um deles — a segunda
+/// troca o ELF que a primeira ia copiar, zera o disco em que ela grava,
+/// ou toma o socket dela —, e a segunda recusa aqui, antes de compilar.
+///
+/// É uma trava de arquivo (`flock`) em `target/bancada.trava`, com o número
+/// do processo dentro: o sistema a solta quando o processo sai, de
+/// qualquer jeito. A fumaça da rede principal não a pede: o estado dela é
+/// outro (ver [`usar_estado_proprio`]), e o kernel dela, compilado à parte.
+fn reservar_a_bancada() -> Result<(), String> {
+    if TRAVA_DA_BANCADA.get().is_some() {
+        return Ok(());
+    }
+    let arquivo = travar(&raiz_do_projeto().join("target").join("bancada.trava"))?;
+    let _ = TRAVA_DA_BANCADA.set(arquivo);
+    Ok(())
+}
+
+/// A trava exclusiva de `caminho`, com o número deste processo dentro — ou a
+/// recusa, com o número de quem a tem.
+fn travar(caminho: &Path) -> Result<std::fs::File, String> {
+    use std::io::Write as _;
+    if let Some(dir) = caminho.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let mut arquivo = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(caminho)
+        .map_err(|e| format!("{}: {e}", caminho.display()))?;
+    match arquivo.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let dono = std::fs::read_to_string(caminho).unwrap_or_default();
+            return Err(format!(
+                "outra execucao do xtask usa a bancada desta arvore (processo {}): o disco de testes, o kernel compilado e o estado de target/ sao de uma execucao por vez; espere ela acabar",
+                dono.trim()
+            ));
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(format!(
+                "nao foi possivel travar {}: {e}",
+                caminho.display()
+            ));
+        }
+    }
+    // O número do processo, para a mensagem de quem vier depois.
+    let _ = arquivo.set_len(0);
+    let _ = write!(arquivo, "{}", std::process::id());
+    Ok(arquivo)
+}
+
+/// Os emuladores vivos de outra execução — que não são filhos desta — com
+/// `disco` na linha de comando, pelo `/proc`: os números dos processos.
+/// Fora do Linux, nenhum.
+fn maquinas_de_outra_execucao_sobre(disco: &Path) -> Vec<u32> {
+    let alvo = disco.to_string_lossy().into_owned();
+    let eu = std::process::id();
+    let Ok(processos) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    processos
+        .flatten()
+        .filter_map(|p| p.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| pid != eu && pai_de(pid) != Some(eu))
+        .filter(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|linha| emulador_sobre(&linha, &alvo))
+        })
+        .collect()
+}
+
+/// Se a linha de comando `linha` — a do `/proc/<pid>/cmdline`, argumentos
+/// separados por NUL — é a de um emulador que abre `alvo`: o programa é um
+/// `qemu-system`, e uma das opções de um argumento é `file=<alvo>`, com o
+/// caminho inteiro. O disco de outra árvore, o da fumaça, ou um shell que
+/// só cita o caminho não contam.
+fn emulador_sobre(linha: &[u8], alvo: &str) -> bool {
+    let mut argumentos = linha.split(|&b| b == 0).map(String::from_utf8_lossy);
+    let Some(programa) = argumentos.next() else {
+        return false;
+    };
+    programa.contains("qemu-system")
+        && argumentos.any(|a| {
+            a.split(',')
+                .any(|opcao| opcao.strip_prefix("file=") == Some(alvo))
+        })
+}
+
+/// O processo pai de `pid`, pelo `/proc/<pid>/stat` — o quarto campo, depois
+/// do nome entre parênteses, que pode ter espaços.
+fn pai_de(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Zera o volume do armazém: um volume que sobra de um estado apagado não
@@ -9580,9 +9768,7 @@ fn credencial_administrativa(chaves: &chaves::Chaves, i: usize) -> ([u8; 32], [u
 /// assinou. Zerado com o estado da máquina: é a memória de quem administra
 /// **esta** instalação.
 fn diretorio_do_signatario(arch: Arquitetura) -> PathBuf {
-    raiz_do_projeto()
-        .join("target")
-        .join(format!("signatario-{}", arch.nome()))
+    raiz_do_estado().join(format!("signatario-{}", arch.nome()))
 }
 
 /// O signatário confere a geração que vai assinar contra a maior que já
@@ -15141,6 +15327,76 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    /// A trava da bancada é de um de cada vez: a segunda recusa, dizendo o
+    /// processo que a tem, e a trava solta vale de novo.
+    #[test]
+    fn a_trava_da_bancada_e_de_um_de_cada_vez() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("xtask-trava-{}", std::process::id()));
+        let caminho = dir.join("bancada.trava");
+        let primeira = travar(&caminho).unwrap();
+        let recusa = travar(&caminho).unwrap_err();
+        assert!(
+            recusa.contains(&format!("processo {}", std::process::id())),
+            "{recusa}"
+        );
+        drop(primeira);
+        let de_novo = travar(&caminho).unwrap();
+        drop(de_novo);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A guarda do disco de testes reconhece o emulador que o abre pelo
+    /// caminho inteiro: nem o disco da fumaça, nem o de outra árvore, nem um
+    /// shell que só cita o caminho a fazem recusar.
+    #[test]
+    fn o_emulador_sobre_o_disco_e_o_do_caminho_inteiro() {
+        use super::*;
+        let alvo = "/r/target/disco.img";
+        let linha = |args: &[&str]| {
+            let mut l = args.join("\0").into_bytes();
+            l.push(0);
+            l
+        };
+        // As duas formas do `-drive` que o xtask escreve.
+        assert!(emulador_sobre(
+            &linha(&[
+                "qemu-system-aarch64",
+                "-drive",
+                "format=raw,file=/r/target/disco.img,if=none,id=disco0"
+            ]),
+            alvo
+        ));
+        assert!(emulador_sobre(
+            &linha(&[
+                "/usr/bin/qemu-system-x86_64",
+                "-drive",
+                "format=raw,file=/r/target/disco.img"
+            ]),
+            alvo
+        ));
+        for outro in [
+            "format=raw,file=/r/target/mainnet/disco.img",
+            "format=raw,file=/r-mut/target/disco.img",
+            "format=raw,file=/r/target/disco.img.bak",
+            "if=pflash,format=raw,file=/r/target/uefi-vars-x86_64.fd",
+        ] {
+            assert!(
+                !emulador_sobre(&linha(&["qemu-system-x86_64", "-drive", outro]), alvo),
+                "{outro}"
+            );
+        }
+        assert!(!emulador_sobre(
+            &linha(&[
+                "bash",
+                "-c",
+                "qemu-system-x86_64 -drive file=/r/target/disco.img"
+            ]),
+            alvo
+        ));
+        assert!(!emulador_sobre(b"", alvo));
+    }
+
     /// O andamento conta o que a suíte escreve ao fim de cada caso, e não
     /// o log que um caso escreve no meio — nem o de um laço que só escreve.
     #[test]
