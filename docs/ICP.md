@@ -1085,7 +1085,10 @@ relatório.
    diz `hora rtc`.
 3. **O gate antes do transporte.** O agente da porta 2, do papel
    `operador`, lança o `livro`: o nome resolve, e o `net.connect` é
-   `DENY_RESOURCE`. Nenhum byte vai à rede principal.
+   `DENY_RESOURCE`. Nenhum byte vai à rede principal. Depois o operador
+   cria pelo gate a chave `chave:bancada`, grava no armazém o pedido
+   `acao saldo` da rede `mainnet` e lança o `gestor`: recusado do mesmo
+   jeito, com 95 e sem assinatura nenhuma.
 4. **A política.** O `policy.write` da linha do operador com os IPv4, com
    a prova do administrador da imagem.
 5. **A consulta.** O `livro` de novo: o caminho inteiro, e o símbolo
@@ -1095,9 +1098,17 @@ relatório.
    - a declaração `icp.query ryjl3-tyaaa-aaaaa-aaaba-cai/icrc1_symbol
      verified`, ancorada na conexão, com o destino real que o kernel viu;
    - nada do IC fora dela.
-7. **A revogação.** A linha do operador volta ao que era, e o `livro` roda
-   de novo: `DENY_RESOURCE`.
-8. **O relatório**, em `target/mainnet/relatorio-<data>.md`: o endpoint, a
+7. **O saldo do gestor.** O `gestor` de novo, com o mesmo pedido: as
+   duas consultas assinadas — o `icrc1_balance_of` da chave nova no
+   ledger de ICP e no de cycles —, cada uma com a leitura das faixas,
+   verificadas pela raiz da rede principal. Na auditoria do processo,
+   lida de fora: as duas assinaturas (`key.sign`), uma declaração
+   ancorada em cada, nenhuma recusa, só o DNS e os IPv4, e nada do IC
+   fora das alegações. Só leitura: a chave nasceu na máquina zerada e
+   não tem fundos.
+8. **A revogação.** A linha do operador volta ao que era, e o `livro` roda
+   de novo: `DENY_RESOURCE`. O `gestor` também: 95, sem assinatura.
+9. **O relatório**, em `target/mainnet/relatorio-<data>.md`: o endpoint, a
    data, os IPv4, o aperto e a cadeia, o destino, a suíte, a medida de
    cada parte, a prova, a resposta, a auditoria e o que o programa
    confere.
@@ -1162,6 +1173,34 @@ da primeira, o `xtask` passou a compilar a máquina antes do pré-voo e a
 fazer, no pré-voo, a pergunta da máquina; na execução que fecha, os dois
 caminhos deram os mesmos dois nós, e o resultado não depende disso.
 
+**O gestor na rede principal.** O passo do gestor (itens 3, 7 e 8) entrou
+na fumaça com o ciclo de uso real e rodou pelo fluxo em 25 de outubro de
+2026, no x86, com o kernel de produção em release:
+
+| execução | commit | o desfecho |
+|---|---|---|
+| 40212402682 | `c6491a2` | não fechou. O `livro` e os dois saldos verificaram, e o gate recusou os dois programas antes da política e depois da revogação; a auditoria do saldo contou duas recusas — os `fs.mkdir` dos diretórios do registro, que já existiam: o gestor os pedia a cada execução, e cada um virava uma recusa na auditoria, que o tecido lê. O gestor passou a consultar antes de criar, e o caso do ciclo de vida da suíte, a conferir que uma execução que anda não deixa recusa |
+| 40213186798 | `ee7ec6e` | **fechou** |
+
+A que fecha, com o relatório `relatorio-2026-10-25T165018.md` no artefato
+`relatorio-mainnet-x86_64`:
+
+| o quê | o que se viu |
+|---|---|
+| destinos na política | `38.96.31.203` e `209.34.235.18`, os mesmos pelos dois caminhos do hospedeiro |
+| o `livro` | `tcp:38.96.31.203:443`; o aperto fechou em `TLS13_CHACHA20_POLY1305_SHA256` — a preferência dos programas desde o ciclo de uso real —; o `read_state` da raiz, com a assinatura de um nó de 40; `ICP`, verificado; saiu com 85 em 1 464 ms |
+| a chave | `chave:bancada`, criada pelo operador pelo gate na máquina zerada, impressão `4a644d7dc65d4971` |
+| o `gestor`, antes da política | 95 em 734 ms: `saldo icp: failed_connect denied DENY_RESOURCE`, `desfecho failed_query`; nenhuma assinatura |
+| o `gestor`, com os destinos | 90 em 3 084 ms: o `icrc1_balance_of` no ledger de ICP (`ryjl3-…`) e no de cycles (`um5iw-…`), cada um com a leitura das faixas e a consulta, assinadas pela chave nova e verificadas pela raiz; `saldo icp 0`, `saldo ciclos 0`, `desfecho verified`; a resposta e o registro no armazém |
+| o `gestor`, revogados os destinos | 95 em 750 ms; nenhuma assinatura |
+| a auditoria do saldo | 88 registros do processo, nenhuma recusa; só o DNS e os dois IPv4; duas assinaturas, e uma declaração `icp.query …/icrc1_balance_of verified` ancorada em cada (`key.sign` 258 → decisão 268; 297 → 306); nada do IC fora delas |
+| a auditoria do `livro` | 45 registros, nenhuma recusa; a declaração ancorada no destino real; nada do IC fora dela |
+
+Na rede principal, nada além disso: nenhuma chamada de atualização,
+nenhum canister, nenhum valor. Criar e instalar lá pede uma chave com
+cycles — um pagamento de verdade, que não volta atrás —, e fica fora da
+CI e deste ciclo (ver *O que não existe ainda*).
+
 ### As medidas
 
 Na suíte (o kernel de teste, o x86 em depuração, a bancada), o passo da
@@ -1186,11 +1225,14 @@ próprio `livro` no emulador sem aceleração do runner, foram:
 | a que fecha | x86 | 0 ms | 0 ms | 70 ms | 160 ms | 510 ms | 80 ms | 840 ms | 1 468 ms |
 | 39889242601 | ARM | 10 ms | 0 ms | 50 ms | 120 ms | 630 ms | 60 ms | 870 ms | 1 182 ms |
 | 39891593000, fora do critério | x86 | 0 ms | 10 ms | 50 ms | 100 ms | 640 ms | 60 ms | 860 ms | 1 294 ms |
+| 40213186798, com o ChaCha20 | x86 | 10 ms | 0 ms | 20 ms | 120 ms | 370 ms | 80 ms | 600 ms | 1 464 ms |
 
 O HTTP — os dois `POST`, o `read_state` e o `query`, até a rede principal
 e de volta — é a maior parte. O DNS da consulta veio do cache do
 resolvedor: na rodada antes da política, a mesma pergunta levou de 40 a
-60 ms.
+60 ms. O saldo do `gestor`, na execução 40213186798 — as duas consultas
+assinadas, cada uma com a leitura das faixas, e o pedido, a resposta e o
+registro no armazém —, levou 3 084 ms do lançamento à saída.
 
 O que dá para medir sem a rede é a verificação dos certificados de
 verdade, no hospedeiro, nativa (`cargo test -p web3 --release -- --ignored
@@ -2258,6 +2300,17 @@ da bancada:
   nas duas arquiteturas;
 - **o programa**: o `gestor` tem 1 023 784 bytes no x86, em release.
 
+### Na rede principal
+
+Só o saldo, que só lê: a fumaça real roda o `gestor` com uma chave nova,
+sem fundos, e confere as duas consultas assinadas pela raiz da rede
+principal, a recusa do gate antes da política e depois da revogação, e a
+auditoria do processo — duas assinaturas, duas declarações ancoradas,
+nenhuma recusa (ver *O gestor na rede principal*, em *A rede principal*).
+Criar, instalar e carregar lá move valor e não volta atrás: fica para
+quando houver uma chave com cycles e a decisão de gastá-los — e nunca na
+CI.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
@@ -2265,9 +2318,9 @@ com elas, chaves de sessão e o domínio de delegação —; a chave de
 assinatura dentro do TPM, assinando lá — o ICP-5 só sela a semente em
 repouso, e a custódia continua do kernel —; o boot medido, com os PCRs na
 política do selado; o compartilhamento de chaves; exportar ou importar uma privada; na
-rede principal, qualquer coisa além da consulta anônima — a chamada de
-atualização, a consulta autenticada, o *Management Canister*, o ledger e
-os *cycles*, com valor de verdade —; o ICRC-2 e o ICRC-3; descobrir os
+rede principal, qualquer coisa além das consultas — a anônima do `livro`
+e as assinadas do saldo do `gestor` —: a chamada de atualização, o
+*Management Canister*, o ledger e os *cycles* com valor de verdade; o ICRC-2 e o ICRC-3; descobrir os
 *API boundary nodes* pela árvore de estado; o selo de código do Duke
 valendo para o módulo implantado no IC; o `icp-cli` dentro do Duke; o
 CDK; a EVM; o HTTP/3. Guardar os canisters criados, para gerenciá-los
@@ -2281,8 +2334,10 @@ assinaturas do programa, para as cadeias públicas. O ICP-4b ligou a rede
 principal pela configuração da imagem — a raiz, as âncoras públicas, a
 rede `mainnet` —, sem destino dela na política padrão, e fechou com a
 fumaça real de 23 de outubro de 2026 (ver *O resultado*). O ICP-4c fez a
-consulta assinada e a replicada na bancada; na rede principal, ficam
-para quando houver lá um canister do projeto. O ICP-4d moveu valor na
+consulta assinada e a replicada na bancada; na rede principal, a
+assinada rodou com o saldo do `gestor` (ver *O gestor na rede
+principal*), e a replicada fica para quando houver lá um canister do
+projeto. O ICP-4d moveu valor na
 bancada — o ICRC-1, a repetição que o ledger deduplica e o CMC —, e o
 ICP-4e implantou e gerenciou um canister na bancada — a criação pelo
 ledger de cycles, a instalação, o estado, o upgrade em pedaços e a carga

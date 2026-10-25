@@ -698,7 +698,7 @@ xtask/src/
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
-├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, a auditoria e a revogação
+├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina — as raízes P-256, RSA e P-384 e as cadeias com a forma das públicas —, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
@@ -2534,6 +2534,14 @@ usa, cada coisa pelo gate:
 - as **âncoras**: um arquivo PEM lido por `fs.read`;
 - o **transporte**: a conexão do `net.connect`, com cada `net.send` e cada
   `net.recv` decididos de novo e esperando o evento da pilha, sem girar.
+
+As três suítes do TLS 1.3 vão na ordem de preferência do cliente, e o
+ChaCha20-Poly1305 primeiro: os programas não usam SIMD nem AES-NI — o
+kernel não salva esses registradores entre processos —, e em software ele
+cifrou 317 MiB/s no hospedeiro, contra 104 do AES-128-GCM e 80 do
+AES-256-GCM, em registros de 16 KiB. A ordem não muda a segurança, só o
+custo; um servidor sem ele escolhe o AES-128-GCM. O `icp-api.io` da rede
+principal aceita o ChaCha20.
 
 ```
 cifrado: tcp:10.0.2.100:444 -> DENY_RESOURCE: o gate recusou antes do TLS
@@ -6546,9 +6554,15 @@ principal e só então diz o símbolo. O kernel, a política, o gate e o
   de verdade são conferidas pela raiz dela;
 - `cargo xtask mainnet` é a fumaça real, à mão e fora da CI: o pré-voo do
   TLS contra o perfil do programa, os destinos pelo `policy.write`, a
-  consulta, a auditoria e a revogação, e o relatório em `target/mainnet/`.
-  O fluxo `rede-principal.yml` a roda num runner do GitHub quando alguém o
-  pede.
+  consulta, o saldo de uma chave nova pelas duas consultas assinadas do
+  [`gestor`](#o-gestor-de-canisters), a auditoria e a revogação, e o
+  relatório em `target/mainnet/`. O fluxo `rede-principal.yml` a roda num
+  runner do GitHub quando alguém o pede. A de 25 de outubro de 2026
+  (execução 40213186798) fechou: o símbolo `ICP` verificado, com o TLS em
+  `TLS13_CHACHA20_POLY1305_SHA256`; os dois saldos da chave nova
+  verificados, com uma declaração ancorada em cada assinatura e nenhuma
+  recusa na auditoria; e o gate recusando os dois programas antes da
+  política e depois da revogação.
 
 O resto — a configuração, o DNS, os casos, a fumaça real, as medidas, as
 mutações e o que fica de fora — está em [A rede
@@ -6764,7 +6778,10 @@ mesma; o pedido e o registro de outra pessoa; dois gestores ao mesmo
 tempo, da mesma pessoa e de outra; o que perde a resposta para outro no
 meio da instalação; a chave anulada no meio dela; e a carga e a recarga. Os
 módulos grandes acharam dois limites do leitor Btrfs da imagem — o mapa
-de pedaços e a leitura de uma extensão só —, corrigidos. Ver [O gestor de
+de pedaços e a leitura de uma extensão só —, corrigidos. Na rede
+principal, só o saldo, que só lê: a fumaça real o confere com uma chave
+nova, pelas duas consultas assinadas (ver [A rede
+principal](#a-rede-principal)). Ver [O gestor de
 canisters](docs/ICP.md#o-gestor-de-canisters-uso-real).
 
 ## Vários agentes
