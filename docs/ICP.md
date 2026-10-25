@@ -2282,6 +2282,61 @@ Na suíte, nove casos, nas duas arquiteturas:
 | o gestor carrega e recarrega | a carga pelo ledger de cycles e a recarga pelo CMC, cada uma uma vez |
 | btrfs: lê arquivo de várias extensões | os módulos do gestor lidos inteiros, com bytes conferidos em cada borda de extensão |
 
+### As mutações
+
+Uma de cada vez, na worktree, com o controle verde antes de cada lote:
+
+- as `H` e a `T`: os testes do hospedeiro do pacote;
+- as `S` e as `K`: a suíte do x86 só com os casos que deviam pegá-las.
+
+Vinte e seis mutações, em vinte e oito rodadas. Na primeira campanha,
+vinte e uma de vinte e três morreram; as duas que ficaram, a S6 e a K2,
+rodaram de novo depois, como S6b e K2b, e morreram, como a S13, a K4 e a
+K5.
+
+| | a mutação | onde | o que a pegou |
+|---|---|---|---|
+| H1 | o texto pendente sem conferir o SHA-256 | `web3::icp::gestor` | `o_registro_que_nao_se_entende_e_recusado` |
+| H2 | o plano executa por cima do pendente | idem | `o_plano_de_cada_pedido` |
+| H3 | a retomada com a hora nova | idem | `o_plano_de_cada_pedido` |
+| H4 | a instalação sem `sha256` | idem | `o_que_falta_recusa` |
+| H5 | os controladores sem a própria chave | idem | `os_controladores_novos_incluem_a_chave` |
+| H6 | o que não volta atrás sem `confirmar` | idem | `a_confirmacao_e_o_que_a_acao_mexe` |
+| H7 | a confirmação de outra coisa | idem | idem |
+| T1 | o AES-128-GCM de volta na frente | `tls::provedor` | `a_preferencia_do_cliente_e_o_chacha20` |
+| S1 | o pedido gravado por outra pessoa vale | o programa | o gestor só faz o pedido de quem o lançou |
+| S2 | o registro gravado por outra pessoa vale | o programa | idem |
+| S3 | a primeira leitura sem conferir o SHA-256 | o programa | as bordas do tamanho |
+| S4 | a primeira leitura sem o teto | o programa | idem |
+| S5 | o que nada assinou fica em andamento | o programa | idem |
+| S6 | os pedaços contam como mudança | o programa | **sobreviveu** (ver abaixo); a S6b, depois da correção, morreu nos dois casos da rede lenta |
+| S7 | o arrendamento renovado vale como novo | o programa | dois gestores ao mesmo tempo |
+| S8 | o pedido sai com a resposta de outro | o programa | o gestor para quando outro grava a resposta |
+| S9 | solta o arrendamento com a resposta de outro | o programa | idem |
+| S10 | a retomada com a hora nova | `web3::icp::gestor` | o gestor retoma o que ficou em andamento |
+| S11 | o Btrfs lê só a primeira extensão | o kernel | `btrfs: le arquivo de varias extensoes`; as bordas |
+| S12 | o mapa de pedaços volta a oito | o kernel | dezesseis casos `btrfs:` |
+| S13 | o gestor pede de novo o diretório que existe | o programa | o do saldo ao apagado: as recusas na auditoria |
+| K1 | a gravação ignora o arrendamento de outro titular | o kernel | dois gestores ao mesmo tempo |
+| K2 | a chave anulada continua assinando | o kernel | não pelo gestor (ver abaixo); a K2b, os dois casos `chaves:` que assinam pelo `key.sign` direto |
+| K3 | o dono que o `fs.stat` diz é o de quem pergunta | o kernel | o gestor só faz o pedido de quem o lançou |
+| K4 | o lote solta os blocos do conteúdo novo | o kernel | a conferência do mapa no primeiro lote, e vinte e um casos `armazem:`, o último deles o das perdas |
+| K5 | o `key.sign` sem a decisão de novo no ponto de commit | o kernel | os dois casos `chaves:` que mudam a autoridade antes do commit — a sessão, a credencial, o agente, o papel, a política; o caso do gestor anula a chave, e a anulação não depende da reconfirmação |
+
+**A S6** pegou um defeito do caso, e não do programa. Os dois casos que
+mandam o pedido pela rede lenta conferiam o registro da bancada: o
+pedido parado nunca esteve nele, e "o registro volta ao de antes" era
+verdade por vacuidade. Agora eles conferem o registro da rede lenta, sem
+o pedido em andamento, e a resposta da chave anulada diz "nada que muda o
+canister foi assinado".
+
+**A K2** tirou do kernel as duas barreiras da chave anulada: o estado,
+na hora de assinar, e a privada, apagada na anulação. O gestor não chega a
+pedir a assinatura: ele lê o estado da chave antes de cada uma e para
+(`chave: annulled`). É a defesa em profundidade fazendo o papel dela. O
+que confere o kernel sozinho é o `key.sign` direto, e a K2b, a mesma
+mutação contra os casos `chaves:`, morreu nos dois.
+
 ### As medidas
 
 Na suíte em depuração, no emulador sem aceleração (x86), com a PocketIC

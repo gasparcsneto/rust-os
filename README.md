@@ -9228,7 +9228,13 @@ padronizado.
       HTTP/2](#o-http2)). E o tempo, no lugar do NTP — a hora autenticada
       pelo Roughtime, de várias fontes com quórum, pelo serviço de hora e
       pelo gate, e o TLS e os cookies dos programas validando por ela (ver
-      [O tempo](#o-tempo)).
+      [O tempo](#o-tempo)). E as otimizações de cifra, medidas: sem SIMD
+      nem AES-NI nos processos, o ChaCha20-Poly1305 vai primeiro — 317
+      MiB/s em software, contra 104 do AES-128-GCM —, e a rede principal o
+      negocia (ver [O TLS de um programa](#o-tls-de-um-programa)). O SIMD
+      nos processos, o mTLS e o *proxy* pedem, cada um, uma decisão — o
+      contrato dos registradores, um domínio de assinatura novo e um
+      destino que o gate não vê —, e o HTTP/3 espera a avaliação do QUIC.
 - [ ] **Fase 12 — Web3: o Internet Computer.** Um protocolo de programa,
       como o TLS e o HTTP, sem nada no kernel nem na política: o Duke
       consulta o IC de dentro de um processo, pela conexão que o gate
