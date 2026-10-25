@@ -1416,6 +1416,7 @@ fn as_chaves_seladas_diante_de_outro_tpm(
     if pelo_outro.is_ok_and(|r| r.contains(r#""signed":true"#)) {
         return Err("a chave selada assinou diante de outro TPM".into());
     }
+    let recusa = p.motivo;
     // De volta ao TPM dela.
     copiar_diretorio(&deste, &estado)?;
     let mut m = Ligada::subir(arch, artefato, None)?;
@@ -1432,7 +1433,9 @@ fn as_chaves_seladas_diante_de_outro_tpm(
             p.estado, p.motivo
         ));
     }
-    Ok(format!("recusado diante de outro TPM: {}", p.motivo))
+    Ok(format!(
+        "recusado diante de outro TPM ({recusa}), e de volta ao dele a chave assina igual"
+    ))
 }
 
 /// Uma máquina sem TPM: sem âncora, a persistência é indisponível, e as
