@@ -551,12 +551,20 @@ fn registro_sorteado(s: &mut Sorteio) -> Registro {
             .map(|(a, _)| *a)
             .filter(|a| !a.so_le())
             .collect();
+        let acao = acoes[s.ate(acoes.len() as u64) as usize];
+        // Em andamento, o texto vai junto, e o resumo é o dele.
+        let texto = format!("acao {}\nrede bancada\n# {}\n", acao.nome(), s.proximo());
+        let (fase, resumo) = if s.ate(2) == 1 {
+            (Fase::Feito, sha256(&s.bytes(8)))
+        } else {
+            (Fase::Andamento(texto.clone()), sha256(texto.as_bytes()))
+        };
         r.ultimo = Some(Ultimo {
             pedido: s.proximo(),
-            acao: acoes[s.ate(acoes.len() as u64) as usize],
-            feito: s.ate(2) == 1,
+            acao,
+            fase,
             criado_em_ns: s.proximo(),
-            resumo: sha256(&s.bytes(8)),
+            resumo,
         });
     }
     r
@@ -576,8 +584,17 @@ fn o_registro_vai_e_volta() {
 
 #[test]
 fn o_registro_que_nao_se_entende_e_recusado() {
+    let hex = |b: &[u8]| -> String { b.iter().map(|b| format!("{b:02x}")).collect() };
     let h = sha256(b"x");
-    let hh: String = h.iter().map(|b| format!("{b:02x}")).collect();
+    let hh = hex(&h);
+    // O texto do pedido em andamento: o do resumo, e o que não é.
+    let texto = "acao criar\n";
+    let ht = hex(&sha256(texto.as_bytes()));
+    let texto_hex = hex(texto.as_bytes());
+    let invalido = [0xffu8, 0xfe];
+    let hi = hex(&sha256(&invalido));
+    let longo = "#".repeat(MAIOR_PEDIDO + 1);
+    let hl = hex(&sha256(longo.as_bytes()));
     let bom_canister = format!("canister {CANISTER} ativo nenhum 5");
     let casos: Vec<(String, usize, &str)> = vec![
         (String::new(), 1, "registro sem o cabecalho"),
@@ -642,6 +659,55 @@ fn o_registro_que_nao_se_entende_e_recusado() {
             format!("{CABECALHO}\nultimo 1 criar feito 2 abc"),
             2,
             "resumo do pedido fora da forma",
+        ),
+        // Em andamento sem o texto, e feito com um.
+        (
+            format!("{CABECALHO}\nultimo 1 criar andamento 2 {ht}"),
+            2,
+            "linha fora da forma",
+        ),
+        (
+            format!("{CABECALHO}\nultimo 1 criar feito 2 {ht} {texto_hex}"),
+            2,
+            "linha fora da forma",
+        ),
+        (
+            format!("{CABECALHO}\nultimo 1 criar andamento 2 {ht} {texto_hex} {texto_hex}"),
+            2,
+            "linha fora da forma",
+        ),
+        // O texto que não é o do resumo, o vazio, o grande, o que não é
+        // UTF-8 e o que não é hexadecimal.
+        (
+            format!("{CABECALHO}\nultimo 1 criar andamento 2 {hh} {texto_hex}"),
+            2,
+            "o texto do pedido nao e o do resumo",
+        ),
+        (
+            format!("{CABECALHO}\nultimo 1 criar andamento 2 {ht} "),
+            2,
+            "texto do pedido fora da forma",
+        ),
+        (
+            format!(
+                "{CABECALHO}\nultimo 1 criar andamento 2 {hl} {}",
+                hex(longo.as_bytes())
+            ),
+            2,
+            "texto do pedido fora da forma",
+        ),
+        (
+            format!(
+                "{CABECALHO}\nultimo 1 criar andamento 2 {hi} {}",
+                hex(&invalido)
+            ),
+            2,
+            "texto do pedido fora da forma",
+        ),
+        (
+            format!("{CABECALHO}\nultimo 1 criar andamento 2 {ht} xyz"),
+            2,
+            "texto do pedido fora da forma",
         ),
     ];
     for (texto, linha, motivo) in casos {
@@ -710,12 +776,16 @@ fn o_plano_de_cada_pedido() {
     };
     // Sem último: executa com a hora de agora.
     assert_eq!(planejar(7, Acao::Criar, &resumo, &vazio, agora), executar);
-    let com_ultimo = |feito, pedido, resumo| Registro {
+    let com_ultimo = |feito: bool, pedido, resumo| Registro {
         canisters: vec![],
         ultimo: Some(Ultimo {
             pedido,
             acao: Acao::Criar,
-            feito,
+            fase: if feito {
+                Fase::Feito
+            } else {
+                Fase::Andamento(String::from("acao criar"))
+            },
             criado_em_ns: antes,
             resumo,
         }),

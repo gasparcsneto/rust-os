@@ -56,7 +56,9 @@
 //!
 //! O registro de uma chave numa rede guarda os canisters que ela criou ou
 //! mexeu, e o último pedido: a versão dele no armazém, a ação, se acabou, a
-//! hora com que foi assinado e o SHA-256 do texto dele. Antes de mandar o
+//! hora com que foi assinado e o SHA-256 do texto dele — e, enquanto em
+//! andamento, o próprio texto, conferido contra o SHA-256 a cada leitura:
+//! quem precisar repeti-lo não depende de tê-lo guardado. Antes de mandar o
 //! que muda alguma coisa, o programa grava o pedido como em andamento — com
 //! a versão do registro que leu, e por isso dois programas não executam o
 //! mesmo pedido. O plano ([`planejar`]):
@@ -69,7 +71,8 @@
 //!   vez de executar duas vezes;
 //! - com outro pedido em andamento, nada executa: um pedido novo por cima
 //!   de uma criação que ninguém sabe se aconteceu perderia o canister dela.
-//!   Repetir o pedido de antes resolve, e depois o novo anda;
+//!   Repetir o pedido de antes — o texto está no registro — resolve, e
+//!   depois o novo anda;
 //! - o pedido novo executa com a hora de agora.
 //!
 //! O registro não é autoridade: quem controla um canister é um fato do IC,
@@ -563,20 +566,46 @@ pub struct Canister {
     pub ns: u64,
 }
 
+/// Se o último pedido acabou — e, enquanto não, o texto dele.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Fase {
+    /// Acabou: o desfecho foi provado.
+    Feito,
+    /// Em andamento — o programa caiu, a rede caiu, ou o desfecho não se
+    /// provou —, com o texto do pedido: quem for repeti-lo o tem aqui, e
+    /// o SHA-256 dele é o [`Ultimo::resumo`].
+    Andamento(String),
+}
+
 /// O último pedido de quem muda alguma coisa.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ultimo {
     /// A versão do pedido no armazém.
     pub pedido: u64,
     /// A ação.
     pub acao: Acao,
     /// Se acabou.
-    pub feito: bool,
+    pub fase: Fase,
     /// A hora com que se assina — o `created_at_time` da criação, da
     /// carga e da transferência da recarga.
     pub criado_em_ns: u64,
     /// O SHA-256 do texto do pedido: o mesmo texto retoma.
     pub resumo: Hash,
+}
+
+impl Ultimo {
+    /// Acabou.
+    pub fn feito(&self) -> bool {
+        self.fase == Fase::Feito
+    }
+
+    /// O texto do pedido, enquanto em andamento.
+    pub fn pendente(&self) -> Option<&str> {
+        match &self.fase {
+            Fase::Feito => None,
+            Fase::Andamento(t) => Some(t),
+        }
+    }
 }
 
 /// O registro dos canisters de uma chave numa rede.
@@ -634,13 +663,18 @@ impl Registro {
         }
         if let Some(u) = &self.ultimo {
             s.push_str(&alloc::format!(
-                "ultimo {} {} {} {} {}\n",
+                "ultimo {} {} {} {} {}",
                 u.pedido,
                 u.acao.nome(),
-                if u.feito { "feito" } else { "andamento" },
+                if u.feito() { "feito" } else { "andamento" },
                 u.criado_em_ns,
                 hex(&u.resumo)
             ));
+            if let Fase::Andamento(texto) = &u.fase {
+                s.push(' ');
+                s.push_str(&hex(texto.as_bytes()));
+            }
+            s.push('\n');
         }
         s
     }
@@ -691,7 +725,7 @@ pub fn ler_registro(texto: &str) -> Result<Registro, Erro> {
                     ns,
                 });
             }
-            ["ultimo", pedido, acao, estado, criado, resumo] => {
+            ["ultimo", pedido, acao, estado, criado, resumo, resto @ ..] => {
                 if r.ultimo.is_some() {
                     return Err(erro(n, "ultimo repetido"));
                 }
@@ -699,26 +733,44 @@ pub fn ler_registro(texto: &str) -> Result<Registro, Erro> {
                 if acao.so_le() {
                     return Err(erro(n, "ultimo de uma acao que so le"));
                 }
+                let pedido = pedido
+                    .parse()
+                    .map_err(|_| erro(n, "versao fora da forma"))?;
+                let criado_em_ns = criado.parse().map_err(|_| erro(n, "hora fora da forma"))?;
+                let resumo = de_hex(resumo)
+                    .and_then(|b| <Hash>::try_from(b.as_slice()).ok())
+                    .ok_or(erro(n, "resumo do pedido fora da forma"))?;
+                let fase = match (*estado, resto) {
+                    ("feito", []) => Fase::Feito,
+                    ("andamento", [texto]) => Fase::Andamento(texto_pendente(texto, &resumo, n)?),
+                    ("feito" | "andamento", _) => return Err(erro(n, "linha fora da forma")),
+                    _ => return Err(erro(n, "estado do ultimo desconhecido")),
+                };
                 r.ultimo = Some(Ultimo {
-                    pedido: pedido
-                        .parse()
-                        .map_err(|_| erro(n, "versao fora da forma"))?,
+                    pedido,
                     acao,
-                    feito: match *estado {
-                        "feito" => true,
-                        "andamento" => false,
-                        _ => return Err(erro(n, "estado do ultimo desconhecido")),
-                    },
-                    criado_em_ns: criado.parse().map_err(|_| erro(n, "hora fora da forma"))?,
-                    resumo: de_hex(resumo)
-                        .and_then(|b| <Hash>::try_from(b.as_slice()).ok())
-                        .ok_or(erro(n, "resumo do pedido fora da forma"))?,
+                    fase,
+                    criado_em_ns,
+                    resumo,
                 });
             }
             _ => return Err(erro(n, "linha fora da forma")),
         }
     }
     Ok(r)
+}
+
+/// O texto do pedido em andamento, em hexadecimal no registro: um pedido
+/// em UTF-8, do tamanho de um, cujo SHA-256 é o `resumo` da linha.
+fn texto_pendente(hex: &str, resumo: &Hash, n: usize) -> Result<String, Erro> {
+    let bytes = de_hex(hex).ok_or(erro(n, "texto do pedido fora da forma"))?;
+    if bytes.is_empty() || bytes.len() > MAIOR_PEDIDO {
+        return Err(erro(n, "texto do pedido fora da forma"));
+    }
+    if super::resumo::sha256(&bytes) != *resumo {
+        return Err(erro(n, "o texto do pedido nao e o do resumo"));
+    }
+    String::from_utf8(bytes).map_err(|_| erro(n, "texto do pedido fora da forma"))
 }
 
 /// O que fazer com o pedido de versão `versao`, pelo registro.
@@ -762,11 +814,11 @@ pub fn planejar(
     if acao.so_le() {
         return agora;
     }
-    match registro.ultimo {
-        Some(u) if !u.feito && u.resumo == *resumo => Plano::Retomar {
+    match &registro.ultimo {
+        Some(u) if !u.feito() && u.resumo == *resumo => Plano::Retomar {
             criado_em_ns: u.criado_em_ns,
         },
-        Some(u) if !u.feito => Plano::Bloqueado {
+        Some(u) if !u.feito() => Plano::Bloqueado {
             pendente: u.acao,
             versao: u.pedido,
         },

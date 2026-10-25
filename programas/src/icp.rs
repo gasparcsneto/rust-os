@@ -313,6 +313,7 @@ pub struct ChaveDoKernel {
     publica: [u8; 32],
     der: [u8; 44],
     decisoes: Vec<u64>,
+    assinaturas: u32,
 }
 
 impl ChaveDoKernel {
@@ -343,6 +344,7 @@ impl ChaveDoKernel {
             publica,
             der: web3::icp::pedido::der_ed25519(&publica),
             decisoes: Vec::new(),
+            assinaturas: 0,
         })
     }
 
@@ -354,6 +356,12 @@ impl ChaveDoKernel {
     /// As decisões do gate de cada assinatura feita, na ordem.
     pub fn decisoes(&self) -> &[u64] {
         &self.decisoes
+    }
+
+    /// Quantas assinaturas conferidas saíram daqui: sem nenhuma, nenhum
+    /// pedido assinado por esta chave pode ter saído do processo.
+    pub fn assinaturas(&self) -> u32 {
+        self.assinaturas
     }
 }
 
@@ -389,6 +397,7 @@ impl atualizacao::Assinador for ChaveDoKernel {
         if !web3::icp::assinatura::verificar(&self.publica, &mensagem, &assinatura) {
             return Err(Recusada(String::from("BAD_SIGNATURE")));
         }
+        self.assinaturas += 1;
         if let Some(d) = resultado.member("decision").and_then(|v| v.as_u64()) {
             self.decisoes.push(d);
         }
