@@ -1916,6 +1916,16 @@ fn texto_do_resultado(r: &str, campo: &str) -> Option<String> {
     super::campo_simples(resultado, campo)
 }
 
+/// A linha do log em que o boot diz o cofre aberto — a geração, quantas
+/// chaves seladas abriu e em quanto tempo —, ou que ela não está lá.
+fn linha_do_cofre(log: &str) -> String {
+    log.split("cofre aberto: ")
+        .nth(1)
+        .and_then(|resto| resto.split('"').next())
+        .map(|l| format!("cofre aberto: {l}"))
+        .unwrap_or_else(|| "sem a linha do cofre no log".into())
+}
+
 /// As chaves de assinatura sobrevivem ao corte de energia: a viva volta
 /// com a mesma pública e assina o mesmo resumo com a mesma assinatura — a
 /// mesma privada —; a destruída volta destruída — não assina —, e o nome
@@ -1962,8 +1972,9 @@ fn as_chaves_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<String
     drop(um);
     m.cortar_a_energia()?;
 
-    // De volta: a viva assina igual, a destruída fica destruída.
-    let m = Ligada::subir(arch, artefato, None)?;
+    // De volta: a viva assina igual, a destruída fica destruída. O log do
+    // boot diz quanto o cofre levou para abrir a viva.
+    let mut m = Ligada::subir(arch, artefato, None)?;
     let mut um = super::AgenteNaPorta::conectar(arch, 1)?;
     let lida = ler(&mut um, "chave:bancada")?;
     let de_novo = assinar(&mut um, "chave:bancada")?;
@@ -1971,6 +1982,10 @@ fn as_chaves_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<String
     let pela_lapide = assinar(&mut um, "chave:bancada-2")?;
     let outra = criar(&mut um, "chave:bancada-2")?;
     drop(um);
+    let cofre = m
+        .pedir("log.tail", r#"{"count":256,"min_level":"info"}"#)
+        .map(|log| linha_do_cofre(&log))
+        .unwrap_or_else(|e| format!("sem o log: {e}"));
     m.cortar_a_energia()?;
     if texto_do_resultado(&lida, "public").as_deref() != Some(publica.as_str())
         || texto_do_resultado(&lida, "state").as_deref() != Some("active")
@@ -2034,8 +2049,8 @@ fn as_chaves_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<String
             p.estado
         ));
     }
-    Ok(String::from(
-        "a viva assina igual depois do corte, a destruida volta destruida, e a fotografia de antes e recusada",
+    Ok(format!(
+        "a viva assina igual depois do corte, a destruida volta destruida, e a fotografia de antes e recusada; no boot, {cofre}"
     ))
 }
 
