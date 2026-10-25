@@ -166,7 +166,10 @@ jobs:
     # último passo. O teto ficou em 140 enquanto o job crescia — a rede, o
     # TLS, o HTTP, a suíte em virtio-gpu, e a bancada de persistência, que
     # sozinha leva 74 minutos no x86 —, e o x86 chegou a 137; com os
-    # cookies, a uns 141, e foi cortado de novo no último passo.
+    # cookies, a uns 141, e foi cortado de novo no último passo. Foi a 290,
+    # e com o cofre do ICP-5 o x86 levou 253 minutos em dois runners
+    # lentos, 123 deles na bancada de persistência: ela foi para um job à
+    # parte, `persistencia`, ao lado deste, e este voltou a uns 130.
     timeout-minutes: 290
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
@@ -271,15 +274,6 @@ jobs:
       - name: Iniciador UEFI
         run: cargo xtask iniciador --arch ${{ matrix.arch }}
 
-      # A persistência só aparece entre boots: a mesma máquina, ligada de
-      # novo sobre o mesmo disco e o mesmo TPM, depois de um corte de
-      # energia — `SIGKILL` no emulador e no TPM, sem aviso. A bancada também
-      # fotografa a partição de estado e a devolve ao disco, que é como se
-      # simula um disco restaurado de uma cópia antiga. Ver
-      # `docs/PERSISTENCIA.md`.
-      - name: Persistência
-        run: cargo xtask persistencia --arch ${{ matrix.arch }}
-
       # E uma terceira, com teclado USB no lugar do nativo.
       #
       # Não é redundância: o emulador entrega cada tecla a **um** dispositivo,
@@ -308,6 +302,53 @@ jobs:
 
       - name: Fumaça (virtio-gpu)
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --video virtio
+
+  # A persistência só aparece entre boots: a mesma máquina, ligada de novo
+  # sobre o mesmo disco e o mesmo TPM, depois de um corte de energia —
+  # `SIGKILL` no emulador e no TPM, sem aviso. A bancada também fotografa a
+  # partição de estado e a devolve ao disco, que é como se simula um disco
+  # restaurado de uma cópia antiga. Ver `docs/PERSISTENCIA.md`.
+  #
+  # Um job à parte, como a bancada de tempo, e pelo mesmo motivo: ela leva
+  # de 96 a 123 minutos no x86, e dentro do job de testes empurrava o x86
+  # para 253 dos 290 minutos do teto, com o runner variando uns vinte por
+  # cento. A cobertura é a mesma — os mesmos cenários, a mesma máquina —, e
+  # corre ao lado dos testes, sem esticá-los. O teto é o dobro do pior
+  # medido com a compilação.
+  persistencia:
+    name: Persistência (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: persistencia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: persistencia-${{ matrix.arch }}-
+
+      # As mesmas da máquina do job de testes: o disco, o TPM e a rede.
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Persistência
+        run: cargo xtask persistencia --arch ${{ matrix.arch }}
 
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
