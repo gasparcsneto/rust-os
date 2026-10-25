@@ -16,7 +16,14 @@
 //! # O caminho
 //!
 //! - **o arrendamento**: o programa arrenda o pedido (`fs.claim`) enquanto
-//!   trabalha — ninguém mais o muda até ele acabar —, e o solta no fim;
+//!   trabalha — ninguém mais o muda até ele acabar —, renova antes de cada
+//!   chamada, e o solta no fim. O arrendamento é da titular, e não do
+//!   processo: o que já existia é de outro gestor dela, ou de um que caiu
+//!   há menos que o prazo, e o programa sai sem tocá-lo. Dois que o
+//!   pedissem no mesmo instante o veriam novo: o que os separa é a
+//!   resposta, que cada um grava ao começar — antes de cada pedido que
+//!   sai, o gestor confere que ela ainda é a dele, e com a de outro para,
+//!   sem gravar a resposta e sem soltar o arrendamento;
 //! - **quem pediu**: o pedido tem de ter sido gravado pela identidade que
 //!   lançou o programa — o dono que o armazém diz dele é o da resposta que
 //!   o programa grava ao começar. O armazém compartilhado deixa outra
@@ -50,7 +57,9 @@
 //! # Os módulos
 //!
 //! Do disco da imagem ou do armazém, pelo `abrir`: uma decisão do gate, e o
-//! `ler` do descritor sem outra. Até [`gestor::MAIOR_MODULO`]: o que cabe
+//! `ler` do descritor sem outra, de 4 KiB em 4 KiB. Duas leituras: a
+//! primeira mede e soma o SHA-256, sem mandar nada; a segunda manda. Até
+//! [`gestor::MAIOR_MODULO`]: o que cabe
 //! num pedaço vai inteiro (`install_code`); o maior vai em pedaços de
 //! 1 MiB, lidos um de cada vez — `upload_chunk` por pedaço, com o hash que
 //! volta conferido contra o dos bytes lidos, e `install_chunked_code` com
@@ -58,9 +67,10 @@
 //! pedaços do canister é esvaziado no fim. O módulo que muda no meio da
 //! leitura para tudo antes da instalação.
 //!
-//! Só se instalam os bytes que têm o `sha256` do pedido: o inteiro confere
-//! antes do `install_code`, e o em pedaços, antes do
-//! `install_chunked_code` — o que não confere esvazia o depósito e não
+//! Só se instalam os bytes que têm o `sha256` do pedido: a primeira
+//! leitura confere antes de qualquer pedaço subir, e a segunda de novo —
+//! o inteiro antes do `install_code`, o em pedaços antes do
+//! `install_chunked_code`, e o que mudou no meio esvazia o depósito e não
 //! instala nada. O arquivo pode estar onde outra pessoa grava; o que a
 //! chave instala é o que o pedido diz.
 //!
@@ -96,6 +106,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use programas::escreverln;
+use programas::http;
 use programas::icp::{
     self, Ancora, Andamento, ChaveDoKernel, Desfecho, Falha, Final, Principal, Rede,
 };
@@ -271,8 +282,8 @@ fn diretorio(caminho: &str) {
     let _ = nativo::pedir("fs.mkdir", |w| w.field_str("path", caminho));
 }
 
-/// Arrenda o pedido para a sessão de quem lançou o programa.
-fn arrendar() -> Result<(), String> {
+/// O `fs.claim` do pedido, pelo prazo do gestor.
+fn pedir_o_arrendamento() -> Result<nativo::Resposta, String> {
     let r = nativo::pedir("fs.claim", |w| {
         w.field_str("path", PEDIDO)?;
         w.field_u64("ttl_ms", PRAZO_DO_ARRENDAMENTO_MS)
@@ -280,18 +291,60 @@ fn arrendar() -> Result<(), String> {
     .map_err(|e| format!("ERRO {e}"))?;
     match codigo_de(&r) {
         Some(codigo) => Err(codigo),
-        None => Ok(()),
+        None => Ok(r),
     }
+}
+
+/// Arrenda o pedido para a titular de quem lançou o programa — e só se
+/// ninguém o tinha. O arrendamento é da titular, e não do processo: o de
+/// outro gestor dela, ainda trabalhando, se renovaria em vez de recusar, e
+/// os dois executariam o mesmo pedido. O novo começa agora — o começo
+/// mais o prazo é o vencimento —, e o renovado começou antes: ele é de
+/// outro gestor, ou de um que caiu há menos que o prazo. Nesse caso,
+/// `ARRENDADO`, e o arrendamento fica como estava.
+fn arrendar() -> Result<(), String> {
+    let r = pedir_o_arrendamento()?;
+    let arrendamento = r.resultado().ok().and_then(|v| v.member("lease"));
+    let campo = |nome: &str| {
+        arrendamento
+            .and_then(|a| a.member(nome))
+            .and_then(|v| v.as_u64())
+    };
+    match (campo("since_ms"), campo("expires_ms")) {
+        (Some(desde), Some(vence)) if desde.saturating_add(PRAZO_DO_ARRENDAMENTO_MS) == vence => {
+            Ok(())
+        }
+        _ => Err(String::from("ARRENDADO")),
+    }
+}
+
+/// Renova o arrendamento antes de cada chamada: uma instalação longa
+/// passaria do prazo, e outro gestor andaria junto.
+fn renovar() -> Result<(), String> {
+    pedir_o_arrendamento().map(|_| ())
 }
 
 fn soltar() {
     let _ = nativo::pedir("fs.release", |w| w.field_str("path", PEDIDO));
 }
 
-/// O [`icp::Gateway`] de um passo, que diz cada pedido antes de mandá-lo.
+/// O [`icp::Gateway`] de um passo, que diz cada pedido antes de mandá-lo —
+/// e não manda nenhum com a resposta de outro gestor.
+///
+/// O arrendamento do pedido é da titular, e não do processo: outro gestor
+/// dela que o pedisse no mesmo instante que este o veria novo, como este.
+/// O que os separa é a resposta, que cada um grava ao começar, pela
+/// versão: a de cima é a do que segue. O outro confere a versão antes de
+/// cada pedido que sai — a leitura das faixas, a chamada, as leituras da
+/// situação, a consulta —, e com a de outro não manda nada: a assinatura
+/// que o pedido carregaria fica neste processo.
 struct Narrado<'a> {
     gateway: &'a mut icp::Gateway,
     passo: &'a str,
+    /// A versão da resposta deste gestor.
+    resposta: u64,
+    /// Um pedido não saiu porque a resposta era de outro.
+    parado: &'a core::cell::Cell<bool>,
 }
 
 impl icp::agente::Transporte for Narrado<'_> {
@@ -299,6 +352,17 @@ impl icp::agente::Transporte for Narrado<'_> {
 
     fn post(&mut self, caminho: &str, corpo: &[u8]) -> Result<(u16, Vec<u8>), icp::Transporte> {
         let etapa = caminho.rsplit('/').next().unwrap_or(caminho);
+        // A resposta que não se lê — o processo contido, a pessoa revogada —
+        // não é de outro: o pedido segue, e o gate diz por que não sai.
+        if estatistica(RESPOSTA).is_ok_and(|e| e.versao != self.resposta) {
+            self.parado.set(true);
+            escreverln!(
+                "gestor: {} nao pede {}: a resposta e de outro gestor",
+                self.passo,
+                etapa
+            );
+            return Err(icp::Transporte(http::Falha::Pedido(None)));
+        }
         escreverln!("gestor: {} pede {}", self.passo, etapa);
         self.gateway.post(caminho, corpo)
     }
@@ -313,6 +377,9 @@ struct Contexto {
     /// Quantas chamadas que mudam alguma coisa foram assinadas: sem
     /// nenhuma, nada que mude alguma coisa saiu daqui.
     saidas: core::cell::Cell<u32>,
+    /// A versão da resposta que este gestor gravou ao começar: outra é a
+    /// de outro gestor — ver [`Narrado`].
+    resposta: u64,
 }
 
 /// Para onde vai uma chamada.
@@ -361,10 +428,24 @@ impl Chamada {
 /// lida, a hora, a conexão, a chamada assinada e as leituras da situação
 /// enquanto pendente —, declarada ancorada na decisão da assinatura dela.
 fn chamar(contexto: &Contexto, passo: &str, destino: Destino, metodo: &str, arg: &[u8]) -> Chamada {
+    // Sem o arrendamento, nada se assina.
+    if let Err(c) = renovar() {
+        escreverln!(
+            "gestor: {}: o arrendamento do pedido se perdeu: {}",
+            passo,
+            c
+        );
+        return Chamada {
+            desfecho: "failed_lease",
+            resposta: None,
+            detalhe: format!("o arrendamento do pedido: {c}"),
+        };
+    }
     let assunto = destino.assunto(metodo);
     let mut kernel = None;
     let mut gateway = None;
     let mut leituras = 0u32;
+    let parado = core::cell::Cell::new(false);
     let r: Result<(icp::Atualizacao, Andamento), Falha> = (|| {
         let kernel = kernel.insert(ChaveDoKernel::ler(&contexto.chave)?);
         let hora = icp::hora()?;
@@ -374,7 +455,12 @@ fn chamar(contexto: &Contexto, passo: &str, destino: Destino, metodo: &str, arg:
             &contexto.ancoras,
             &contexto.dns,
         )?);
-        let mut narrado = Narrado { gateway, passo };
+        let mut narrado = Narrado {
+            gateway,
+            passo,
+            resposta: contexto.resposta,
+            parado: &parado,
+        };
         let mut a = match destino {
             Destino::Canister(canister) => icp::chamar(
                 &mut narrado,
@@ -414,7 +500,11 @@ fn chamar(contexto: &Contexto, passo: &str, destino: Destino, metodo: &str, arg:
         }
         Ok((a, andamento))
     })();
-    let desfecho = icp::desfecho_da_chamada(r.as_ref().map(|(_, andamento)| andamento));
+    let desfecho = if parado.get() {
+        "failed_lease"
+    } else {
+        icp::desfecho_da_chamada(r.as_ref().map(|(_, andamento)| andamento))
+    };
     // A chamada assinada pode ter saído — e, se muda alguma coisa, o pedido
     // não volta atrás sozinho. O estado só lê, e os pedaços só enchem o
     // depósito do canister, sem mexer no módulo nem nos dados dele.
@@ -451,6 +541,7 @@ fn chamar(contexto: &Contexto, passo: &str, destino: Destino, metodo: &str, arg:
             ),
         ),
         Ok((_, Andamento::Pendente(s))) => (None, format!("pendente {s}")),
+        Err(_) if parado.get() => (None, String::from("a resposta e de outro gestor")),
         Err(f) => (None, format!("{f}")),
     };
     escreverln!(
@@ -482,8 +573,10 @@ fn consultar(
     metodo: &str,
     arg: &[u8],
 ) -> Result<Vec<u8>, String> {
+    renovar().map_err(|c| format!("failed_lease o arrendamento do pedido: {c}"))?;
     let mut kernel = None;
     let mut gateway = None;
+    let parado = core::cell::Cell::new(false);
     let r = (|| {
         let kernel = kernel.insert(ChaveDoKernel::ler(&contexto.chave)?);
         let hora = icp::hora()?;
@@ -496,6 +589,8 @@ fn consultar(
         let mut narrado = Narrado {
             gateway,
             passo: metodo,
+            resposta: contexto.resposta,
+            parado: &parado,
         };
         icp::consultar_assinada(
             &mut narrado,
@@ -508,7 +603,11 @@ fn consultar(
             &nonce,
         )
     })();
-    let desfecho = icp::desfecho_da_consulta_assinada(&r);
+    let desfecho = if parado.get() {
+        "failed_lease"
+    } else {
+        icp::desfecho_da_consulta_assinada(&r)
+    };
     let decisao = kernel
         .as_ref()
         .and_then(|k: &ChaveDoKernel| k.decisoes().first().copied());
@@ -610,21 +709,48 @@ fn saldo(contexto: &Contexto, principal: &Principal) -> Feito {
     }
 }
 
-/// O tamanho de um arquivo da árvore — do disco da imagem ou do armazém —,
-/// pelo `fs.read` de um byte: o `size` que ele diz. A recusa é o código.
-fn tamanho_de(caminho: &str) -> Result<u64, String> {
-    let r = nativo::pedir("fs.read", |w| {
-        w.field_str("path", caminho)?;
-        w.field_u64("max", 1)
-    })
-    .map_err(|e| format!("ERRO {e}"))?;
-    if let Some(codigo) = codigo_de(&r) {
-        return Err(codigo);
+/// A primeira leitura do módulo, por um `abrir` e os `ler` de 4 KiB: o
+/// tamanho e o SHA-256, sem mandar nada. Para no primeiro byte acima do
+/// teto. O `fs.read` não serve: ele traz o arquivo inteiro para o kernel,
+/// e recusa o que passa de 1 MiB.
+fn medir(caminho: &str) -> Result<Hash, Feito> {
+    let fd = sistema::abrir(caminho);
+    if fd < 0 {
+        return Err(falhou(
+            "failed_module",
+            format!("modulo {caminho}: abrir {fd}"),
+        ));
     }
-    r.resultado()
-        .ok()
-        .and_then(|v| v.member("size").and_then(|s| s.as_u64()))
-        .ok_or_else(|| String::from("nao se le"))
+    let fd = fd as u64;
+    let mut soma = Sha256EmPedacos::novo();
+    let mut total = 0u64;
+    let mut buffer = [0u8; MAIOR_LEITURA];
+    let r = loop {
+        let n = sistema::ler(fd, &mut buffer);
+        if n < 0 {
+            break Err(ler_falhou(n));
+        }
+        if n == 0 {
+            break Ok(());
+        }
+        total += n as u64;
+        if total > gestor::MAIOR_MODULO {
+            break Err(falhou(
+                "failed_module",
+                format!(
+                    "modulo {caminho}: acima do teto de {} bytes",
+                    gestor::MAIOR_MODULO
+                ),
+            ));
+        }
+        soma.juntar(&buffer[..n as usize]);
+    };
+    sistema::fechar(fd);
+    r?;
+    if total == 0 {
+        return Err(falhou("failed_module", String::from("modulo vazio")));
+    }
+    Ok(soma.fim())
 }
 
 /// Instala o módulo do pedido no canister — inteiro, ou em pedaços.
@@ -633,17 +759,13 @@ fn instalar(contexto: &Contexto, pedido: &Pedido, registro: &mut Registro, ns: u
     let caminho = pedido.modulo.as_deref().expect("a instalacao tem modulo");
     let modo = pedido.modo.expect("a instalacao tem modo");
     let sha256 = pedido.sha256.expect("a instalacao tem sha256");
-    // O tamanho antes de qualquer pedaço subir: o módulo acima do teto não
-    // manda nada.
-    let tamanho = match tamanho_de(caminho) {
-        Ok(t) => t,
-        Err(c) => return falhou("failed_module", format!("modulo {caminho}: {c}")),
-    };
-    if tamanho > gestor::MAIOR_MODULO {
-        return falhou(
-            "failed_module",
-            format!("modulo {caminho}: {tamanho} bytes, acima do teto"),
-        );
+    // A primeira leitura, antes de qualquer pedaço subir: o módulo acima do
+    // teto, ou que não tem o SHA-256 do pedido, não manda nada. A segunda
+    // manda, e confere de novo — o que mudou entre as duas não se instala.
+    match medir(caminho) {
+        Ok(hash) if hash == sha256 => {}
+        Ok(hash) => return outro_modulo(&hash),
+        Err(f) => return f,
     }
     let fd = sistema::abrir(caminho);
     if fd < 0 {
@@ -963,6 +1085,18 @@ fn executar(
                         format!("canister {} bloco {} duplicada", c2.texto(), bloco),
                     )
                 }
+                // A mesma criação, ainda sem o canister: ela anda no ledger,
+                // e o pedido continua em andamento — repetido, o ledger diz
+                // o canister.
+                Ok(Err(ciclos::RecusaDaCriacao::Duplicada {
+                    bloco,
+                    canister: None,
+                })) => falhou(
+                    "pending_duplicate",
+                    format!(
+                        "bloco {bloco} duplicada; o canister ainda nao se sabe: repita o pedido"
+                    ),
+                ),
                 Ok(Err(recusa)) => Feito {
                     fim: Fim::novo(FALHOU, "verified_ledger_error", format!("erro {recusa}")),
                     provado: true,
@@ -1256,10 +1390,11 @@ impl Resposta {
 
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
-    // Sem o arrendamento, nada — nem a resposta, que é de quem o tem.
+    // Sem o arrendamento, nada — nem a resposta, que é de quem o tem; e o
+    // de outro gestor fica como está.
     if let Err(codigo) = arrendar() {
         escreverln!("gestor: o pedido nao se arrendou: {}", codigo);
-        return if codigo == "CONFLICT" {
+        return if codigo == "CONFLICT" || codigo == "ARRENDADO" {
             EM_USO
         } else {
             RECUSADO
@@ -1268,7 +1403,18 @@ fn principal() -> i64 {
     let mut resposta = Resposta::nova();
     let (versao, acao, fim) = trabalhar(&mut resposta);
     resposta.fim(versao, acao, &fim);
-    soltar();
+    // A resposta de outro gestor é de quem tem o mesmo arrendamento — ele
+    // é da titular, e não do processo —, e ele fica para quem o usa. A que
+    // não se lê não deixa saber de quem é: ele fica até o prazo.
+    match estatistica(RESPOSTA) {
+        Ok(e) if e.versao == resposta.versao => soltar(),
+        Ok(_) => {
+            escreverln!("gestor: a resposta e de outro gestor: o arrendamento fica com ele");
+        }
+        Err(c) => {
+            escreverln!("gestor: a resposta nao se le ({}): o arrendamento fica", c);
+        }
+    }
     fim.codigo
 }
 
@@ -1323,6 +1469,15 @@ fn trabalhar(resposta: &mut Resposta) -> (Option<u64>, Option<Acao>, Fim) {
     // não escolhe o que a chave de quem lançou assina.
     let eu = match resposta.trabalhando(est.versao) {
         Ok(d) => d,
+        // Outro gravou a resposta entre a leitura e a gravação desta: outro
+        // gestor da mesma titular, com o mesmo arrendamento.
+        Err(c) if c == "CONFLICT" => {
+            return (
+                versao,
+                None,
+                Fim::novo(EM_USO, "failed_response", format!("resposta: {c}")),
+            );
+        }
         Err(c) => {
             return (
                 versao,
@@ -1445,6 +1600,7 @@ fn trabalhar(resposta: &mut Resposta) -> (Option<u64>, Option<Acao>, Fim) {
             .unwrap_or_else(|| String::from(DNS_PADRAO)),
         chave: pedido.chave.clone(),
         saidas: core::cell::Cell::new(0),
+        resposta: resposta.versao,
     };
 
     // O registro da chave na rede: inteiro, ou nada.
@@ -1490,11 +1646,9 @@ fn trabalhar(resposta: &mut Resposta) -> (Option<u64>, Option<Acao>, Fim) {
     );
     let criado_em_ns = match plano {
         Plano::JaFeito => {
-            return (
-                versao,
-                acao,
-                Fim::novo(REPETIDO, "repeated", "o pedido ja foi feito"),
-            );
+            let mut fim = Fim::novo(REPETIDO, "repeated", "o pedido ja foi feito");
+            fim.linhas.push(format!("registro {caminho}"));
+            return (versao, acao, fim);
         }
         Plano::Bloqueado {
             pendente,
@@ -1514,6 +1668,7 @@ fn trabalhar(resposta: &mut Resposta) -> (Option<u64>, Option<Acao>, Fim) {
                 fim.linhas
                     .extend(t.lines().map(|l| format!("pendente {l}")));
             }
+            fim.linhas.push(format!("registro {caminho}"));
             return (versao, acao, fim);
         }
         Plano::Retomar { criado_em_ns } => {

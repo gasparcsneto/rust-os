@@ -578,6 +578,35 @@ impl Volume {
         })?;
         Ok(achado)
     }
+
+    /// A extensão do arquivo `objeto` que cobre o byte `deslocamento`: a de
+    /// maior começo que não passa dele — o começo é o `offset` da chave do
+    /// `EXTENT_DATA` —, copiada, com o começo dela.
+    ///
+    /// Um arquivo gravado em pedaços tem um item por pedaço, em ordem de
+    /// deslocamento; o `mkfs.btrfs --rootdir` grava os maiores de 1 MiB em
+    /// extensões de 1 MiB. O percurso para no primeiro item que começa
+    /// depois do byte pedido.
+    pub fn achar_extensao(
+        &self,
+        raiz: u64,
+        objeto: u64,
+        deslocamento: u64,
+    ) -> Result<Option<(u64, alloc::vec::Vec<u8>)>, &'static str> {
+        let tipo = arvore::tipo::EXTENSAO;
+        let mut achada = None;
+        self.percorrer(raiz, folha::Chave::primeira_de(objeto, tipo), |item| {
+            if item.chave.objeto != objeto
+                || item.chave.tipo != tipo
+                || item.chave.offset > deslocamento
+            {
+                return Passo::Para;
+            }
+            achada = Some((item.chave.offset, item.dados.to_vec()));
+            Passo::Segue
+        })?;
+        Ok(achada)
+    }
 }
 
 /// O endereço lógico da raiz que um item de raiz descreve.
@@ -720,18 +749,20 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
         deslocamento: u64,
         destino: &mut [u8],
     ) -> Result<usize, crate::vfs::Erro> {
-        let dados = self
-            .volume
-            .achar(self.raiz, no.id, arvore::tipo::EXTENSAO)
-            .map_err(|_| crate::vfs::Erro::DoDispositivo)?
-            .ok_or(crate::vfs::Erro::NaoEncontrado)?;
-        let conteudo = arvore::ler_extensao(&dados).map_err(|_| crate::vfs::Erro::DoDispositivo)?;
-
         // O que ainda falta ler do arquivo, que é o teto de qualquer extensão.
         let restante = no.tamanho.saturating_sub(deslocamento) as usize;
         if restante == 0 {
             return Ok(0);
         }
+        // A extensão que cobre o byte pedido, e onde ele cai dentro dela: o
+        // resto do método conta a partir do começo da extensão.
+        let (comeco, dados) = self
+            .volume
+            .achar_extensao(self.raiz, no.id, deslocamento)
+            .map_err(|_| crate::vfs::Erro::DoDispositivo)?
+            .ok_or(crate::vfs::Erro::NaoEncontrado)?;
+        let deslocamento = deslocamento - comeco;
+        let conteudo = arvore::ler_extensao(&dados).map_err(|_| crate::vfs::Erro::DoDispositivo)?;
         let quanto = destino.len().min(restante);
 
         match conteudo {

@@ -528,7 +528,7 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── cbor.rs       o subconjunto estrito do CBOR que o IC usa, lido e escrito
     ├── cbor/
     │   └── testes.rs  os casos de borda, e o `serde_cbor` como oráculo
-    ├── resumo.rs     o hash independente de representação: o id de um pedido e o que um nó assina
+    ├── resumo.rs     o hash independente de representação: o id de um pedido e o que um nó assina; e o SHA-256 em pedaços, do módulo que se lê aos poucos
     ├── resumo/
     │   └── testes.rs  os exemplos da especificação, e o `ic-transport-types` como oráculo
     ├── pedido.rs     os envelopes da consulta, da chamada e da leitura de estado — do anônimo, ou com a pública e a assinatura de quem chama —, e o id do pedido
@@ -553,13 +553,13 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── icrc1.rs      o ICRC-1 de um ledger: a conta, a transferência, o saldo, e o bloco ou a recusa pelo nome do padrão — o que não tem a forma dele não vira bloco
     ├── icrc1/
     │   └── testes.rs  contra o `icrc-ledger-types`, nos dois sentidos
-    ├── cmc.rs        o CMC: a conta de depósito de quem cunha, o memo `MINT` e o `notify_mint_cycles`
+    ├── cmc.rs        o CMC: a conta de depósito de quem cunha, o memo `MINT` e o `notify_mint_cycles`; e a recarga de um canister, o memo `TPUP` e o `notify_top_up`
     ├── cmc/
     │   └── testes.rs  contra a interface do CMC, declarada com o `candid`
     ├── ciclos.rs     o ledger de cycles: a criação de um canister pago com cycles e a carga de cycles num canister, e o canister, o bloco ou a recusa pelo nome da interface
     ├── ciclos/
     │   └── testes.rs  contra a interface do ledger de cycles, declarada com o `candid`
-    ├── gerenciamento.rs  o canister de gerenciamento: instalar um módulo, inteiro ou em pedaços, e ler o estado de um canister — o que não tem a forma da interface é recusado
+    ├── gerenciamento.rs  o canister de gerenciamento: instalar um módulo, inteiro ou em pedaços, ler o estado de um canister, parar, iniciar, desinstalar, apagar, esvaziar o depósito de pedaços e mudar os controladores e o congelamento — o que não tem a forma da interface é recusado
     ├── gerenciamento/
     │   └── testes.rs  contra o `ic-management-canister-types`, nos dois sentidos
     ├── agente.rs     a consulta ponta a ponta — do anônimo, ou assinada por quem tem chave — sobre um transporte de quem chama: nada se entrega antes da verificação
@@ -574,6 +574,9 @@ web3/src/            os protocolos Web3 de um programa: o Internet Computer, a c
     ├── registro.rs   `/dados/icp/redes`: as redes em que se confia, a chave da raiz de cada uma — um erro recusa o arquivo inteiro
     ├── registro/
     │   └── testes.rs  o arquivo de redes, linha a linha
+    ├── gestor.rs     o pedido de quem opera canisters, em texto — as ações, os campos, a confirmação por extenso do que não volta atrás —, o registro dos canisters de uma chave numa rede e o plano que não executa duas vezes; nada dele assina, conecta ou lê arquivo
+    ├── gestor/
+    │   └── testes.rs  o pedido e o registro linha a linha, o texto em andamento conferido pelo SHA-256, e o plano: feito, retomado, bloqueado
     └── bancada.rs    só nos testes: chaves, certificados e respostas de um IC de mentira, montados com as bibliotecas oficiais
 
 armazem/src/         o armazém como conta pura: caminhos, diretórios, versões, donos e cotas; preparar e aplicar um lote
@@ -686,13 +689,14 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── livro.rs      a rede principal do IC, de verdade: o símbolo do livro-razão do ICP pelo DNS, o gate, o TLS público e a verificação pela raiz da imagem, cada parte medida
         ├── carteira.rs   o valor na bancada do IC, pela chave de quem a lançou: o saldo, a transferência do ICRC-1, a repetição que o ledger deduplica e ICP em cycles pelo CMC — cada resposta verificada, cada assinatura uma decisão do gate
         ├── implantacao.rs um canister na bancada do IC, pela chave de quem a lançou: a criação pelo ledger de cycles, a instalação de um módulo do armazém, o estado, o upgrade em pedaços que guarda o estado e a carga de cycles — cada resposta verificada, cada assinatura uma decisão do gate
+        ├── gestor.rs     os canisters de uma chave, por um pedido que quem o lançou grava no armazém: o saldo, criar, instalar até 8 MiB, o estado, parar, iniciar, os ajustes, desinstalar, apagar e as cargas — com o arrendamento do pedido, o registro que não executa duas vezes e o pedido em andamento que se retoma
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
-├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` instala
+├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, a auditoria e a revogação
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
@@ -6727,6 +6731,42 @@ antes dos selados novos —, e o kernel de produção cresceu 1,7% de código
 no x86 e 2,1% no ARM. Ver [O cofre das chaves
 no TPM](docs/PERSISTENCIA.md#o-cofre-das-chaves-no-tpm-icp-5).
 
+### O gestor de canisters
+
+O ciclo de uso real depois do ICP-5 juntou as peças num programa que se
+usa: o `gestor` opera os canisters de uma chave de uma identidade do Duke
+— cria, instala módulos de até 8 MiB (inteiros até 1 MiB, e em pedaços de
+1 MiB acima), lê o estado, para, inicia, troca os controladores e o
+limiar de congelamento, desinstala, apaga, carrega cycles e recarrega ICP
+em cycles pelo CMC — por um pedido no armazém, e guarda os canisters da
+chave e o último pedido num registro, também no armazém. É o `key.sign`
+do ICP-3 e os caminhos do ICP-4c a 4e, sem decisão de arquitetura nova; o
+kernel não sabe o que assina:
+
+- **o pedido é de quem lança**: o armazém compartilhado deixa outra pessoa
+  gravar ali, e ela não escolhe o que a chave de quem lança assina — o
+  gestor confere o dono do pedido e o do registro;
+- **o módulo é o do pedido**: o SHA-256 dele vem no pedido, e o gestor o
+  confere numa primeira leitura, antes de qualquer pedaço subir;
+- **o que não volta atrás pede `confirmar`**, por extenso; os controladores
+  novos incluem a própria chave; e só o canister parado se apaga;
+- **nada executa duas vezes**: o pedido feito não repete; o que ficou em
+  andamento retoma com a mesma hora, e o ledger deduplica; outro pedido
+  por cima dele não anda, e a resposta diz o texto do pendente; e um
+  gestor por vez, pelo arrendamento do pedido — que é da titular, e não
+  do processo — e pela resposta que cada um grava ao começar, conferida
+  antes de cada pedido que sai: com a de outro, nada mais sai.
+
+Na suíte, do saldo ao canister apagado; os módulos nas bordas do tamanho
+— exatamente 1 MiB, 1 MiB + 1 e o teto de 8 MiB —, o acima do teto e o de
+outro SHA-256; a criação contida e a barrada no meio, retomadas como a
+mesma; o pedido e o registro de outra pessoa; dois gestores ao mesmo
+tempo, da mesma pessoa e de outra; o que perde a resposta para outro no
+meio da instalação; a chave anulada no meio dela; e a carga e a recarga. Os
+módulos grandes acharam dois limites do leitor Btrfs da imagem — o mapa
+de pedaços e a leitura de uma extensão só —, corrigidos. Ver [O gestor de
+canisters](docs/ICP.md#o-gestor-de-canisters-uso-real).
+
 ## Vários agentes
 
 O Duke atende vários agentes ao mesmo tempo, cada um numa **sessão**: um
@@ -8307,11 +8347,18 @@ era a do código. Agora a receita é montada a partir das mesmas funções que
 montam o disco, e um caso de `cargo test -p xtask` afirma que todo argumento
 do `mkfs` e todo arquivo da raiz aparecem nela.
 
-**O que este leitor não lê, declarado:** mais de uma extensão por arquivo (um
-arquivo escrito em pedaços sai truncado no primeiro), extensões comprimidas,
-extensões pré-alocadas, subvolumes e os perfis RAID0/10/5/6. Cada uma delas é
-uma recusa escrita no código, ou um limite anotado onde ele mora — não um
-caminho que dá errado calado.
+**O que este leitor não lê, declarado:** extensões comprimidas, extensões
+pré-alocadas, subvolumes e os perfis RAID0/10/5/6. Cada uma delas é uma
+recusa escrita no código, ou um limite anotado onde ele mora — não um
+caminho que dá errado calado. Mais de uma extensão por arquivo ficou na
+lista até a imagem ter um arquivo que precisasse: os módulos do gestor de
+canisters nas bordas do tamanho. O `mkfs.btrfs --rootdir` grava em
+extensões de 1 MiB, e o módulo de 1 MiB + 1 saía truncado no primeiro MiB
+— o SHA-256 do pedido do gestor recusou o truncado antes de qualquer
+pedaço subir. A leitura de um byte agora escolhe a extensão de maior
+começo que não passa dele. Os mesmos módulos levaram a imagem a nove
+pedaços, e o mapa do leitor, que comportava oito, passou a comportar
+dezesseis; na partição de 160 MiB cabem no máximo doze.
 
 **Ele existiu antes de haver disco, e é isso que o tornou útil.** Quando o
 Btrfs entrou, ele entrou por baixo desta mesma interface, sem que `executar`
@@ -9192,8 +9239,11 @@ padronizado.
       gestão de canister](#a-gestão-de-canister)); e o ICP-5 — a semente
       das chaves selada no TPM da máquina, com a destruição presa ao índice
       de geração e a custódia do kernel (ver [A semente selada no
-      TPM](#a-semente-selada-no-tpm)). As delegações, a chave dentro do
-      TPM, a rede principal com chave, com valor e com canister e o resto
+      TPM](#a-semente-selada-no-tpm)); e o gestor de canisters — os
+      canisters de uma chave por um pedido no armazém, com o registro, os
+      módulos de até 8 MiB e as proteções do que não volta atrás (ver [O
+      gestor de canisters](#o-gestor-de-canisters)). As delegações, a chave
+      dentro do TPM, a rede principal com valor e com canister e o resto
       ficam para os incrementos seguintes — os que pedem, cada um, uma
       decisão nova.
 - [ ] **Fase 13 — Consentimento e auditoria.** Se um agente pode fazer tudo

@@ -2095,6 +2095,169 @@ chaves antigas, os testes, as vinte mutações e as medidas. Do lado do
 IC, o caso novo da suíte é "o principal da chave selada é o mesmo depois
 do cofre", ao lado dos 39 `icp:` de antes, que passam sem mudança.
 
+## O gestor de canisters (uso real)
+
+Depois do ICP-5, o ciclo de uso real juntou o que os incrementos
+anteriores provaram em peças separadas num programa que se usa: o
+`gestor` opera os canisters de uma chave de uma identidade do Duke — cria,
+instala módulos de até 8 MiB, lê o estado, para, inicia, troca os
+controladores e o limiar de congelamento, desinstala, apaga, carrega
+cycles e recarrega ICP em cycles pelo CMC — por um **pedido** no armazém,
+e guarda num **registro**, também no armazém, os canisters da chave e o
+último pedido. Nenhuma decisão de arquitetura é nova: é o `key.sign` do
+ICP-3, o caminho da chamada do ICP-4c, o valor do ICP-4d, o gerenciamento
+do ICP-4e e o armazém de antes; o kernel não sabe o que assina, e nem o
+canister, nem o registro, nem o pedido são recurso do Duke.
+
+```
+pessoa / agente ─► fs.write do pedido (o dono é a identidade dela)
+  ─► user.run do gestor ─► fs.claim do pedido ─► o dono do pedido é o de quem lançou?
+  ─► o pedido lido, conferido, pela versão ─► o registro da chave na rede, do mesmo dono
+  ─► o plano: feito, retoma, bloqueado ou executa ─► o pedido em andamento, no registro
+  ─► cada chamada: DNS, gate, TLS, key.sign (uma decisão por assinatura), verificação,
+     audit.declare ancorado na decisão ─► o registro e a resposta no armazém
+```
+
+### O pedido e a resposta
+
+`user.run` não passa argumentos: o pedido é um arquivo,
+`/armazem/compartilhado/gestor/pedido`, uma linha por campo — a ação, a
+rede, a chave e o que a ação pede (ver `web3::icp::gestor`) —, e a
+resposta outro, `.../resposta`: o pedido, a ação, o desfecho e as linhas
+do que se fez, com o caminho do registro. O que falta, sobra, se repete
+ou está fora da forma recusa o pedido inteiro, com a linha.
+
+### As proteções
+
+- **o pedido é de quem lança**: o armazém compartilhado deixa outra
+  pessoa gravar o pedido — e ela não escolhe o que a chave de quem lança
+  assina. O gestor grava a resposta ao começar e confere que o dono que o
+  armazém deu a ela é o dono do pedido; o registro de outro dono também
+  para tudo, sem sobrescrever;
+- **o módulo é o do pedido**: a instalação diz o SHA-256 do módulo, e o
+  gestor mede o arquivo e soma o resumo numa primeira leitura, antes de
+  qualquer pedaço subir; a segunda, que manda, confere de novo. O arquivo
+  pode estar onde outra pessoa grava;
+- **o que não volta atrás pede `confirmar`** com o que vai ser mexido —
+  o canister do `reinstall`, da troca de controladores, do `desinstalar`
+  e do `apagar`, e a quantia da criação, da carga e da recarga —; os
+  controladores novos têm de incluir a própria chave; e o canister só se
+  apaga parado, o que o gestor confere pelo estado antes;
+- **um gestor por vez**: o arrendamento do pedido é da titular, e não do
+  processo; o gestor só anda com um arrendamento novo — o que já existia
+  é de outro gestor dela, ou de um que caiu há menos que o prazo —, e
+  renova antes de cada chamada. Dois que o pedissem no mesmo tique do
+  relógio o veriam novo, os dois: a resposta, que cada um grava ao começar
+  pela versão, é o que os separa — antes de cada pedido que sai, o gestor
+  confere que ela ainda é a dele, e com a de outro não manda nada, não
+  grava a resposta e não solta o arrendamento (ver *A corrida do
+  arrendamento*, abaixo);
+- **o que não executa duas vezes**: o pedido feito não repete; o que ficou
+  em andamento — uma chamada que muda alguma coisa foi assinada, e o
+  desfecho não se provou — retoma só com o mesmo texto, e com a mesma
+  hora: o ledger responde `Duplicate` à criação, à carga e à transferência
+  da recarga; outro pedido por cima dele não anda, e a resposta diz o
+  texto do pendente — que o registro guarda, conferido pelo SHA-256 —
+  para quem for repeti-lo. O que nada assinou que muda o canister — o
+  estado só lê, e os pedaços só enchem o depósito — não fica em
+  andamento. A criação repetida que o ledger diz duplicada **sem** o
+  canister — a primeira ainda no CMC — continua em andamento;
+- **o registro não é autoridade**: quem controla um canister é um fato do
+  IC, e o gestor age pelo canister do pedido, nunca pelo do registro. O
+  registro é lido inteiro, ou nada.
+
+### Os módulos grandes
+
+Até 8 MiB: o que cabe em 1 MiB vai inteiro (`install_code`), e o maior em
+pedaços de 1 MiB — `upload_chunk` por pedaço, com o hash que volta
+conferido, `install_chunked_code` e o `clear_chunk_store` no fim. O
+`fs.read` não serve para módulos: ele traz o arquivo inteiro para o kernel
+e recusa o que passa de 1 MiB; o gestor lê pelo `abrir` e de 4 KiB em
+4 KiB — o teto de um `ler` —, uma decisão do gate por abertura.
+
+Os módulos de teste nas bordas do tamanho — exatamente 1 MiB, 1 MiB + 1 e
+8 MiB — vão para a imagem montados pelo `xtask`; os três instalaram na
+PocketIC 16.1.0 antes da suíte. Eles acharam dois limites do disco da
+imagem: o mapa de pedaços do leitor Btrfs comportava oito, e a imagem
+passou a precisar de nove (o teto foi a dezesseis); e o leitor lia só a
+primeira extensão de um arquivo — o `mkfs.btrfs --rootdir` grava em
+extensões de 1 MiB, e o módulo de 1 MiB + 1 saía truncado no primeiro MiB.
+O SHA-256 do pedido recusou o módulo truncado antes de qualquer pedaço
+subir; o leitor agora escolhe a extensão pelo deslocamento.
+
+### A corrida do arrendamento
+
+O `fs.claim` diz o começo e o vencimento do arrendamento, e não se ele é
+novo: um pedido da mesma titular sobre o arrendamento que ela já tem o
+renova. O gestor só anda com um novo — o começo mais o prazo é o
+vencimento —, e o renovado sai com `ARRENDADO`, código 94, sem tocar em
+nada; a suíte confere isso com o segundo gestor da mesma pessoa lançado
+enquanto o primeiro espera a leitura da rede lenta. O relógio do kernel
+conta em tiques de 10 ms, e dois gestores da mesma titular que pedissem
+o arrendamento no mesmo tique o veriam novo, os dois. O kernel não
+distingue os dois processos — o arrendamento é da titular —, e mudar
+isso seria mudar o armazém; o gestor fecha a corrida do lado dele:
+
+- cada um grava a resposta ao começar, pela versão que leu: o que perde
+  a gravação sai com 94;
+- o que ganhou, mas viu outro gravar depois, para: o `Narrado`, o
+  transporte do gestor, confere a versão da resposta antes de cada pedido
+  que sai — a leitura das faixas, a chamada, as leituras da situação, a
+  consulta —, e com a de outro não manda nada. A assinatura que já se
+  fez fica no processo, e a declaração diz `failed_lease`;
+- o que parou não grava a resposta por cima da do outro, e não solta o
+  arrendamento — ele é do outro também. A resposta que não se lê (o
+  processo contido, a pessoa revogada) não é de outro: o pedido segue, e
+  o gate diz por que não sai.
+
+O registro, gravado também pela versão, decide o resto: o que o outro lê
+— o pedido em andamento deste, com o mesmo texto — o faz retomar com a
+mesma hora, e o ledger deduplica. O que sobra da corrida é um pedido que
+já tinha saído quando o outro gravou a resposta: ele chega ao IC, e o
+outro o retoma como o mesmo.
+
+### Os testes
+
+No hospedeiro, os doze de `web3::icp::gestor`: cada ação com o que ela
+pede; o que falta, sobra, se repete ou está fora da forma, recusado com
+a linha; onze controladores; a confirmação que tem de ser o que a ação
+mexe; os controladores novos com a própria chave; o registro sorteado
+que vai e volta, e o que não se entende recusado — o texto pendente
+conferido pelo SHA-256 —; o teto dos canisters; e o plano de cada pedido:
+feito, retomado com a hora de antes, bloqueado, executado.
+
+Na suíte, nove casos, nas duas arquiteturas:
+
+| caso | o que confere |
+|---|---|
+| o gestor do saldo ao apagado | o saldo pelas duas consultas assinadas; criar, instalar, o estado, o congelamento, os controladores, apagar rodando recusado, parar, iniciar, desinstalar, apagar; o mesmo pedido de novo sem assinatura; cada declaração ancorada na assinatura dela |
+| o gestor nas bordas do tamanho | 1 MiB inteiro; 1 MiB + 1 em dois pedaços; 8 MiB em oito, em `reinstall`; 8 MiB + 1 no armazém recusado antes de qualquer assinatura, e a cota de volta ao apagá-lo; o SHA-256 de outro módulo, inteiro e em pedaços, recusado na primeira leitura |
+| o gestor retoma o que ficou em andamento | a criação contida no meio do acompanhamento fica em andamento; outro pedido por cima bloqueado, com o texto do pendente; o pendente regravado retoma com a mesma hora e o ledger diz a criação de antes; o firewall no meio de outra; o pedido que nada assinou não fica em andamento |
+| o gestor só faz o pedido de quem o lançou | o pedido e o registro gravados por outra pessoa recusados sem assinatura e sem sobrescrever; o pedido arrendado por outra pessoa; o pedido fora da forma, a chave que não existe e os controladores sem a própria chave; e o pedido da dona, que anda |
+| dois gestores ao mesmo tempo | a mesma pessoa, dois gestores, o mesmo pedido: 90 e 94, uma criação paga uma vez; a outra pessoa com o pedido arrendado; o segundo gestor da mesma pessoa com o primeiro no meio |
+| o gestor para quando outro grava a resposta | a resposta regravada com o primeiro pedaço esperando a leitura: o pedido assinado não sai, nada mais se assina, o arrendamento fica, o registro volta ao de antes; solto o arrendamento, o mesmo pedido instala |
+| a chave anulada no meio do gestor | o pedaço que já ia assinado chega; o segundo não se assina; nada se instala; o canister continua no módulo de antes pela segunda chave |
+| o gestor carrega e recarrega | a carga pelo ledger de cycles e a recarga pelo CMC, cada uma uma vez |
+| btrfs: lê arquivo de várias extensões | os módulos do gestor lidos inteiros, com bytes conferidos em cada borda de extensão |
+
+### As medidas
+
+Na suíte em depuração, no emulador sem aceleração (x86), com a PocketIC
+da bancada:
+
+- **o teto**: o módulo de 8 MiB em oito pedaços, em `reinstall`, de 44 a
+  51 s do pedido à resposta — cada pedaço uns 3,9 s, a leitura das faixas,
+  a chamada assinada e a verificação —; a memória do canister depois dele,
+  16 855 870 bytes;
+- **a primeira leitura**: medir e somar o SHA-256 de 8 MiB leva uns 12 s
+  do disco da imagem e uns 36 s do armazém — no armazém, cada `ler` de
+  4 KiB abre dois blocos cifrados (XChaCha20-Poly1305); a segunda leitura
+  custa o mesmo, e a instalação de um módulo do armazém paga as duas;
+- **os casos do gestor**: os nove somam uns 8 minutos de tempo do kernel
+  por suíte; a CI roda a suíte em depuração, em release e em virtio-gpu,
+  nas duas arquiteturas;
+- **o programa**: o `gestor` tem 1 023 784 bytes no x86, em release.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,
@@ -2105,11 +2268,12 @@ política do selado; o compartilhamento de chaves; exportar ou importar uma priv
 rede principal, qualquer coisa além da consulta anônima — a chamada de
 atualização, a consulta autenticada, o *Management Canister*, o ledger e
 os *cycles*, com valor de verdade —; o ICRC-2 e o ICRC-3; descobrir os
-*API boundary nodes* pela árvore de estado; guardar os canisters
-criados, para gerenciá-los noutra execução; o selo de código do Duke
-valendo para o módulo implantado no IC; os outros métodos do canister de
-gerenciamento — trocar os controladores, parar, apagar —; o `icp-cli`
-dentro do Duke; o CDK; a EVM; o HTTP/3. Nem mudança no DNS, no TCP ou no
+*API boundary nodes* pela árvore de estado; o selo de código do Duke
+valendo para o módulo implantado no IC; o `icp-cli` dentro do Duke; o
+CDK; a EVM; o HTTP/3. Guardar os canisters criados, para gerenciá-los
+noutra execução, e os outros métodos do canister de gerenciamento —
+trocar os controladores, parar, iniciar, desinstalar, apagar — vieram com
+o gestor de canisters (ver acima). Nem mudança no DNS, no TCP ou no
 HTTP: o ICP-1, o ICP-3, o ICP-4b, o ICP-4c, o ICP-4d e o ICP-4e rodam
 sobre a infraestrutura que já existia, e o gate decide as chaves e os
 destinos como decide tudo. O TLS mudou uma vez, no ICP-4a — o perfil de

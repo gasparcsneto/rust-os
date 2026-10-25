@@ -21,20 +21,20 @@
 //! primeiro nó e nada dos outros — um sistema de arquivos que parece
 //! funcionar e esconde a maior parte do conteúdo.
 //!
-//! # O limite que fica
+//! # As extensões de um arquivo
 //!
-//! Ele lê **uma extensão por arquivo**: o `achar` devolve o primeiro
-//! `EXTENT_DATA` do inode, que é o que começa no byte zero. Um arquivo
-//! escrito em pedaços tem um item por pedaço, com o deslocamento na chave, e
-//! deste leitor sairia só o primeiro — truncado, não corrompido, porque o
-//! tamanho da extensão limita a leitura e o laço do `ler_tudo` para quando
-//! ela acaba. Um arquivo de até 128 MiB gravado de uma vez, como os que o
-//! `mkfs.btrfs` põe na imagem, tem uma extensão só.
-//!
-//! Agora que a descida existe, escolher a extensão pelo deslocamento é uma
-//! mudança pequena — trocar a chave procurada por `(inode, EXTENSAO, off)`.
-//! Ela entra quando houver na imagem um arquivo que precise dela, porque um
-//! caminho que nenhum arquivo percorre é um caminho que nenhum caso prova.
+//! Um arquivo escrito em pedaços tem um `EXTENT_DATA` por pedaço, com o
+//! deslocamento do pedaço na chave, e a leitura de um byte escolhe o de
+//! maior começo que não passa dele ([`super::Volume::achar_extensao`]). Por
+//! muito tempo este leitor leu só o primeiro, o do byte zero: um arquivo de
+//! várias extensões saía **truncado** — não corrompido: o tamanho da
+//! extensão limitava a leitura, e quem lia até o fim achava o fim antes da
+//! hora. Estava escrito que a escolha pelo deslocamento entraria quando
+//! houvesse na imagem um arquivo que precisasse dela; os módulos de teste
+//! de 1 MiB a 8 MiB foram esse arquivo — o `mkfs.btrfs --rootdir` grava em
+//! extensões de 1 MiB, e o de 1 MiB + 1 lia só o primeiro MiB. O SHA-256
+//! que o programa que o lia conferia recusou o arquivo truncado antes de
+//! usá-lo.
 
 use super::folha;
 use super::{Passo, Volume};

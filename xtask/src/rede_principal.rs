@@ -1,7 +1,9 @@
 //! A fumaça real da rede principal do IC — `cargo xtask mainnet`: à mão, e
 //! fora da CI, que não depende da rede principal (ver `docs/ICP.md`, *A
 //! rede principal*). Só leitura: uma consulta anônima ao livro-razão do
-//! ICP, e nada que mude estado na rede principal.
+//! ICP, e as duas consultas assinadas do [`GESTOR`] — o saldo de uma chave
+//! nova, sem fundos, no ledger de ICP e no de cycles —, e nada que mude
+//! estado, nem que mova valor, na rede principal.
 //!
 //! # O que precisa
 //!
@@ -30,19 +32,26 @@
 //!    `policy.write`, com prova;
 //! 3. **o gate antes do transporte**: o agente da porta 2, do papel
 //!    `operador`, lança o [`PROGRAMA`]; o nome resolve, e o `net.connect`
-//!    é `DENY_RESOURCE` — nenhum byte vai à rede principal;
+//!    é `DENY_RESOURCE` — nenhum byte vai à rede principal. E cria a chave
+//!    `chave:bancada`, pelo gate, no domínio do pedido do IC, grava o pedido
+//!    do saldo no armazém e lança o [`GESTOR`]: recusado do mesmo jeito,
+//!    sem assinatura nenhuma;
 //! 4. **a política**: o `policy.write` da linha do operador com os IPv4,
 //!    com a prova do administrador da imagem;
 //! 5. **a consulta**: de novo o programa — o DNS, o destino pelo gate, o TLS
 //!    real, o `read_state` e o `query`, a verificação pela raiz da rede
-//!    principal —, e o símbolo, `ICP`;
-//! 6. **a auditoria**: cada decisão do processo, e a declaração ancorada na
-//!    conexão, com o destino real que o kernel viu;
-//! 7. **a revogação**: a linha do operador de volta, e o programa de novo —
-//!    `DENY_RESOURCE`;
+//!    principal —, e o símbolo, `ICP`; e de novo o gestor: as duas
+//!    consultas assinadas pela chave nova — `key.sign`, uma decisão do gate
+//!    cada —, verificadas pela mesma raiz, e os dois saldos;
+//! 6. **a auditoria**: cada decisão de cada processo; a declaração da
+//!    consulta anônima ancorada na conexão, com o destino real que o kernel
+//!    viu, e as duas do gestor, cada uma na decisão da sua assinatura;
+//! 7. **a revogação**: a linha do operador de volta, e o programa e o
+//!    gestor de novo — `DENY_RESOURCE`, sem assinatura;
 //! 8. **o relatório**, em `target/mainnet/`: o endpoint, a hora, os IPv4, a
 //!    cadeia, o destino, a suíte do TLS, a medida de cada parte, a prova e a
-//!    resposta.
+//!    resposta; e, do gestor, a impressão da chave, a resposta no armazém —
+//!    o Principal dela, no caminho do registro — e a auditoria.
 //!
 //! # A janela do DNS
 //!
@@ -112,6 +121,23 @@ const LINHA_DO_OPERADOR: &str = "recurso operador net.connect ";
 /// Quanto o programa tem para uma rodada: o DNS, o TLS e a verificação no
 /// emulador sem aceleração, com folga para a rede.
 const TETO_DA_RODADA: Duration = Duration::from_secs(180);
+
+/// O gestor de canisters — `programas/src/bin/gestor.rs` —, com a chave do
+/// operador, criada por ele pelo gate na máquina zerada: o pedido do saldo
+/// no armazém, e o código com que ele sai quando o pedido foi feito. Só
+/// leitura: duas consultas assinadas, ao ledger de ICP e ao de cycles, de
+/// uma chave nova, sem fundos — nada que mude estado, nem que mova valor.
+pub(crate) const GESTOR: &str = "gestor";
+const GESTOR_FEITO: u32 = 90;
+const CHAVE_DO_GESTOR: &str = "chave:bancada";
+const PEDIDO_DO_GESTOR: &str = "/armazem/compartilhado/gestor/pedido";
+const RESPOSTA_DO_GESTOR: &str = "/armazem/compartilhado/gestor/resposta";
+/// O pedido, como valor de uma cadeia JSON: as quebras de linha escapadas.
+const PEDIDO_DO_SALDO: &str = "acao saldo\\nrede mainnet\\nchave chave:bancada\\n";
+const ASSUNTOS_DO_SALDO: [&str; 2] = [
+    "ryjl3-tyaaa-aaaaa-aaaba-cai/icrc1_balance_of",
+    "um5iw-rqaaa-aaaaq-qaaba-cai/icrc1_balance_of",
+];
 
 /// `cargo xtask mainnet` — ver o cabeçalho do módulo.
 pub(crate) fn mainnet(
@@ -193,7 +219,8 @@ pub(crate) fn mainnet(
     let r = (|| -> Result<ExitCode, String> {
         let mut operador = AgenteNaPorta::conectar(arch, 2)?;
 
-        // 3. O gate antes do transporte.
+        // 3. O gate antes do transporte — da consulta anônima, e da
+        // assinada do gestor, com a chave que o operador cria agora.
         let antes = rodar(&mut m, &mut operador, arch)?;
         relatorio
             .rodadas
@@ -205,6 +232,15 @@ pub(crate) fn mainnet(
                 antes.linhas.join("\n  ")
             ));
         }
+        relatorio.impressao = preparar_o_gestor(&mut operador)?;
+        let inicio = auditoria(&mut m, 0)?.1;
+        let gestor_antes = rodar_o_gestor(&mut m, &mut operador, arch)?;
+        let (registros, _) = auditoria(&mut m, inicio)?;
+        let assinou_antes = assinaturas_do_processo(&registros, gestor_antes.rodada.processo);
+        relatorio
+            .gestor
+            .push(("sem os destinos na linha do operador", gestor_antes.clone()));
+        let gestor_negado = gestor_antes.rodada.codigo != GESTOR_FEITO && assinou_antes == 0;
 
         // 4. A política: o administrador dá os destinos ao operador.
         let original = linha_do_operador()?;
@@ -223,6 +259,15 @@ pub(crate) fn mainnet(
         let (registros, _) = auditoria(&mut m, inicio)?;
         relatorio.auditoria = auditoria_da_consulta(&registros, &consulta, &ips);
 
+        // 5b. O saldo do gestor, pelas consultas assinadas.
+        let inicio = auditoria(&mut m, 0)?.1;
+        let saldo = rodar_o_gestor(&mut m, &mut operador, arch)?;
+        let (registros, _) = auditoria(&mut m, inicio)?;
+        relatorio.auditoria_do_gestor = auditoria_do_gestor(&registros, &saldo, &ips);
+        relatorio
+            .gestor
+            .push(("com os destinos, pelo policy.write", saldo.clone()));
+
         // 7. A revogação.
         let r = administrar(&mut m, "policy.write", &linha_em_json(&original))?;
         if !r.contains(r#""executed":true"#) {
@@ -234,28 +279,47 @@ pub(crate) fn mainnet(
         relatorio
             .rodadas
             .push(("revogados os destinos", depois.clone()));
+        let inicio = auditoria(&mut m, 0)?.1;
+        let gestor_depois = rodar_o_gestor(&mut m, &mut operador, arch)?;
+        let (registros, _) = auditoria(&mut m, inicio)?;
+        let assinou_depois = assinaturas_do_processo(&registros, gestor_depois.rodada.processo);
+        relatorio
+            .gestor
+            .push(("revogados os destinos", gestor_depois.clone()));
+        let gestor_revogado = gestor_depois.rodada.codigo != GESTOR_FEITO && assinou_depois == 0;
 
         // O veredito.
         let verificou = consulta.codigo == CODIGO;
         let revogou = depois.desfecho().ends_with("denied DENY_RESOURCE");
-        relatorio.veredito = match (ensaio, verificou && negada && revogou) {
+        let o_gestor = saldo.rodada.codigo == GESTOR_FEITO
+            && saldo.resposta.contains("\ndesfecho verified\n")
+            && relatorio.auditoria_do_gestor.ok
+            && gestor_negado
+            && gestor_revogado;
+        relatorio.veredito = match (ensaio, verificou && negada && revogou && o_gestor) {
             (false, true) => String::from(
-                "a fumaca real fechou: o simbolo verificado e ICP, o gate recusou antes da politica e depois da revogacao",
+                "a fumaca real fechou: o simbolo verificado e ICP; os dois saldos da chave nova, pelas consultas assinadas do gestor, verificados; o gate recusou os dois antes da politica e depois da revogacao",
             ),
             (false, false) => format!(
-                "a fumaca real NAO fechou: antes {}, a consulta {}, depois {}",
+                "a fumaca real NAO fechou: antes {}, a consulta {}, depois {}; o gestor saiu com {} ({}) — antes {}, depois {}",
                 antes.desfecho(),
                 consulta.desfecho(),
-                depois.desfecho()
+                depois.desfecho(),
+                saldo.rodada.codigo,
+                saldo.desfecho(),
+                gestor_antes.rodada.codigo,
+                gestor_depois.rodada.codigo
             ),
             (true, _) => format!(
-                "ENSAIO, nao e a fumaca real: a maquina, a politica e o programa responderam; antes {}, a consulta {}, depois {}",
+                "ENSAIO, nao e a fumaca real: a maquina, a politica e os programas responderam; antes {}, a consulta {}, depois {}; o gestor saiu com {} ({})",
                 antes.desfecho(),
                 consulta.desfecho(),
-                depois.desfecho()
+                depois.desfecho(),
+                saldo.rodada.codigo,
+                saldo.desfecho()
             ),
         };
-        let ok = ensaio || (verificou && negada && revogou && relatorio.auditoria.ok);
+        let ok = ensaio || (verificou && negada && revogou && relatorio.auditoria.ok && o_gestor);
         Ok(if ok {
             ExitCode::SUCCESS
         } else {
@@ -822,6 +886,7 @@ fn imagem_com_os_destinos(
 /// número do processo.
 #[derive(Clone, Debug, Default)]
 struct Rodada {
+    programa: &'static str,
     processo: u64,
     codigo: u32,
     linhas: Vec<String>,
@@ -829,11 +894,11 @@ struct Rodada {
 }
 
 impl Rodada {
-    /// A linha que começa com `livro: <trecho>`, sem o começo.
+    /// A linha que começa com `<programa>: <trecho>`, sem o começo.
     fn linha(&self, trecho: &str) -> Option<&str> {
         self.linhas
             .iter()
-            .find_map(|l| l.strip_prefix(&format!("{PROGRAMA}: {trecho}")))
+            .find_map(|l| l.strip_prefix(&format!("{}: {trecho}", self.programa)))
     }
 
     /// O desfecho da consulta, como o programa o disse.
@@ -851,16 +916,27 @@ fn rodar(
     operador: &mut AgenteNaPorta,
     arch: Arquitetura,
 ) -> Result<Rodada, String> {
+    rodar_programa(m, operador, arch, PROGRAMA)
+}
+
+/// [`rodar`], com o `programa` dado.
+fn rodar_programa(
+    m: &mut Ligada,
+    operador: &mut AgenteNaPorta,
+    arch: Arquitetura,
+    programa: &'static str,
+) -> Result<Rodada, String> {
     let desde = ultimo_do_log(m)?;
     let comeco = Instant::now();
     let lancado = operador.pedir(
         "user.run",
-        &format!(r#"{{"path":"/programas/{}/{PROGRAMA}"}}"#, arch.nome()),
+        &format!(r#"{{"path":"/programas/{}/{programa}"}}"#, arch.nome()),
     )?;
     let processo = super::numero_no_caminho(&lancado, &["thread_id"])
         .filter(|_| lancado.contains(r#""launched":true"#))
-        .ok_or_else(|| format!("mainnet: o operador nao lancou o programa\n  {lancado}"))?;
+        .ok_or_else(|| format!("mainnet: o operador nao lancou o {programa}\n  {lancado}"))?;
     let mut rodada = Rodada {
+        programa,
         processo,
         ..Rodada::default()
     };
@@ -877,7 +953,7 @@ fn rodar(
             }
             visto = seq;
             let mensagem = campo(registro, "message");
-            if mensagem.starts_with(&format!("{PROGRAMA}: ")) {
+            if mensagem.starts_with(&format!("{programa}: ")) {
                 rodada.linhas.push(mensagem);
             } else if let Some(c) = mensagem.strip_prefix("processo encerrou com codigo ") {
                 rodada.codigo = c.trim().parse().unwrap_or(0);
@@ -983,6 +1059,159 @@ fn auditoria_da_consulta(
 }
 
 // ---------------------------------------------------------------------------
+// O gestor
+// ---------------------------------------------------------------------------
+
+/// O que o gestor fez numa rodada: o que ele disse e o código, e a resposta
+/// que gravou no armazém.
+#[derive(Clone, Debug, Default)]
+struct DoGestor {
+    rodada: Rodada,
+    resposta: String,
+}
+
+impl DoGestor {
+    /// O desfecho da resposta.
+    fn desfecho(&self) -> String {
+        self.resposta
+            .lines()
+            .find_map(|l| l.strip_prefix("desfecho "))
+            .map(String::from)
+            .unwrap_or_else(|| format!("sem resposta (codigo {})", self.rodada.codigo))
+    }
+}
+
+/// A chave do gestor, criada pelo operador pelo gate — no domínio do pedido
+/// do IC —, e o diretório do pedido no armazém. Devolve a impressão da
+/// chave.
+fn preparar_o_gestor(operador: &mut AgenteNaPorta) -> Result<String, String> {
+    let r = operador.pedir(
+        "key.create",
+        &format!(r#"{{"key":"{CHAVE_DO_GESTOR}","domain":"ic-request"}}"#),
+    )?;
+    if !r.contains(r#""created":true"#) {
+        return Err(format!("mainnet: o operador nao criou a chave\n  {r}"));
+    }
+    let impressao = super::campo_simples(&r, "fingerprint").unwrap_or_default();
+    // Já existir não é erro: a gravação do pedido diz se falta.
+    let _ = operador.pedir("fs.mkdir", r#"{"path":"/armazem/compartilhado/gestor"}"#)?;
+    Ok(impressao)
+}
+
+/// Grava o pedido do saldo pelo operador — o dono do pedido é o que lança o
+/// gestor — e lança o gestor por ele; lê do log o que ele disse e o código,
+/// e do armazém a resposta.
+fn rodar_o_gestor(
+    m: &mut Ligada,
+    operador: &mut AgenteNaPorta,
+    arch: Arquitetura,
+) -> Result<DoGestor, String> {
+    let estado = operador.pedir("fs.stat", &format!(r#"{{"path":"{PEDIDO_DO_GESTOR}"}}"#))?;
+    let versao = super::numero_no_caminho(&estado, &["version"]).unwrap_or(0);
+    let r = operador.pedir(
+        "fs.write",
+        &format!(
+            r#"{{"path":"{PEDIDO_DO_GESTOR}","content":"{PEDIDO_DO_SALDO}","expect_version":{versao}}}"#
+        ),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!(
+            "mainnet: o pedido do gestor nao foi gravado\n  {r}"
+        ));
+    }
+    let rodada = rodar_programa(m, operador, arch, GESTOR)?;
+    let lida = operador.pedir(
+        "fs.read",
+        &format!(r#"{{"path":"{RESPOSTA_DO_GESTOR}","max":4096}}"#),
+    )?;
+    let resposta = super::apos(&lida, r#""content":""#)
+        .and_then(|c| c.split('"').next())
+        .map(|c| c.replace("\\n", "\n"))
+        .unwrap_or_default();
+    Ok(DoGestor { rodada, resposta })
+}
+
+/// Quantas assinaturas do processo `processo` a auditoria tem: as execuções
+/// do `key.sign`.
+fn assinaturas_do_processo(registros: &[ObjetoPlano], processo: u64) -> usize {
+    let do_processo = format!("pelo processo {processo} (");
+    registros
+        .iter()
+        .filter(|r| {
+            campo(r, "method") == "key.sign"
+                && campo(r, "code") == "ALLOW"
+                && campo(r, "detail").starts_with(&do_processo)
+                && campo(r, "detail").contains("): assinatura ed25519 ")
+        })
+        .count()
+}
+
+/// As decisões do processo do saldo: todas `ALLOW`; as conexões só com o DNS
+/// e os IPv4; duas assinaturas, a decisão do gate sobre a chave do
+/// operador; e as duas declarações `icp.query`, uma por ledger, cada uma
+/// ancorada na decisão de uma assinatura. Nada do IC fora delas.
+fn auditoria_do_gestor(registros: &[ObjetoPlano], saldo: &DoGestor, ips: &[[u8; 4]]) -> Auditoria {
+    let do_processo = format!("pelo processo {} (", saldo.rodada.processo);
+    let deles: Vec<&ObjetoPlano> = registros
+        .iter()
+        .filter(|r| campo(r, "detail").starts_with(&do_processo))
+        .collect();
+    let mut a = Auditoria::default();
+    let recusadas = deles.iter().filter(|r| campo(r, "code") != "ALLOW").count();
+    let dos_ips: Vec<String> = ips
+        .iter()
+        .map(|[a, b, c, d]| format!("tcp:{a}.{b}.{c}.{d}:443"))
+        .collect();
+    let so_o_que_pede = deles
+        .iter()
+        .filter(|r| campo(r, "method") == "net.connect")
+        .all(|r| {
+            let d = campo(r, "resource");
+            d == "udp:10.0.2.3:53" || dos_ips.contains(&d)
+        });
+    let assinaturas = assinaturas_do_processo(registros, saldo.rodada.processo);
+    let decisoes: Vec<String> = deles
+        .iter()
+        .filter(|r| campo(r, "method") == "key.sign" && campo(r, "code") == "ALLOW")
+        .filter_map(|r| {
+            campo(r, "detail")
+                .rsplit_once("; decisao ")
+                .map(|(_, d)| d.to_string())
+        })
+        .collect();
+    let mut declaradas = 0;
+    for assunto in ASSUNTOS_DO_SALDO {
+        let declaracao = deles.iter().find(|r| {
+            campo(r, "method") == "audit.declare"
+                && campo(r, "resource") == format!("icp.query {assunto} verified")
+        });
+        if let Some(r) = declaracao {
+            let d = campo(r, "detail");
+            let ancorada = decisoes
+                .iter()
+                .any(|n| d.contains(&format!("): ancorada em {n} key.sign; decisao ")));
+            if ancorada {
+                declaradas += 1;
+            }
+            a.linhas
+                .push(format!("a declaracao: {} | {}", campo(r, "resource"), d));
+        }
+    }
+    let do_ic = ["ryjl3", "um5iw", "icrc1", "icp-api.io"];
+    let fora = deles
+        .iter()
+        .filter(|r| !(campo(r, "method") == "audit.declare" && !campo(r, "resource").is_empty()))
+        .filter(|r| do_ic.iter().any(|t| format!("{r:?}").contains(t)))
+        .count();
+    a.linhas.push(format!(
+        "{} registros do processo; recusadas {recusadas}; so o DNS e os IPv4 {so_o_que_pede}; assinaturas {assinaturas}; declaracoes ancoradas numa assinatura {declaradas}; registros com o IC fora da alegacao {fora}",
+        deles.len()
+    ));
+    a.ok = recusadas == 0 && so_o_que_pede && assinaturas == 2 && declaradas == 2 && fora == 0;
+    a
+}
+
+// ---------------------------------------------------------------------------
 // O relatório
 // ---------------------------------------------------------------------------
 
@@ -1010,6 +1239,10 @@ struct Relatorio {
     apertos: Vec<([u8; 4], String, Vec<String>)>,
     rodadas: Vec<(&'static str, Rodada)>,
     auditoria: Auditoria,
+    /// A impressão da chave do gestor, e cada rodada dele.
+    impressao: String,
+    gestor: Vec<(&'static str, DoGestor)>,
+    auditoria_do_gestor: Auditoria,
     veredito: String,
 }
 
@@ -1025,6 +1258,9 @@ impl Relatorio {
             apertos: Vec::new(),
             rodadas: Vec::new(),
             auditoria: Auditoria::default(),
+            impressao: String::new(),
+            gestor: Vec::new(),
+            auditoria_do_gestor: Auditoria::default(),
             veredito: String::new(),
         }
     }
@@ -1088,6 +1324,36 @@ impl Relatorio {
                 let _ = writeln!(t, "- {l}");
             }
             let _ = writeln!(t);
+        }
+        if !self.gestor.is_empty() {
+            let _ = writeln!(
+                t,
+                "## O gestor: os saldos de uma chave nova, por consultas assinadas\n\nA chave `{CHAVE_DO_GESTOR}` do operador, criada por ele pelo gate na máquina zerada — impressão `{}` —, e o pedido `acao saldo` na rede `mainnet`, gravado por ele no armazém.\n",
+                self.impressao
+            );
+            for (quando, g) in &self.gestor {
+                let r = &g.rodada;
+                let _ = writeln!(
+                    t,
+                    "### {quando}\n\nprocesso {}, saiu com {} em {} ms\n\n```text",
+                    r.processo, r.codigo, r.duracao_ms
+                );
+                for l in &r.linhas {
+                    let _ = writeln!(t, "{l}");
+                }
+                let _ = writeln!(
+                    t,
+                    "```\n\nA resposta no armazém:\n\n```text\n{}```\n",
+                    g.resposta
+                );
+            }
+            if !self.auditoria_do_gestor.linhas.is_empty() {
+                let _ = writeln!(t, "### A auditoria do saldo\n");
+                for l in &self.auditoria_do_gestor.linhas {
+                    let _ = writeln!(t, "- {l}");
+                }
+                let _ = writeln!(t);
+            }
         }
         let _ = writeln!(t, "## O que o programa confere antes de entregar\n");
         for l in O_QUE_SE_CONFERE {

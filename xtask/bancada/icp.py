@@ -814,7 +814,10 @@ LENTIDAO_MS = 8000
 # primeiras leituras da situacao a acham desconhecida.
 ATRASO_DA_CHAMADA_MS = 1500
 MAIOR_CABECA = 16 * 1024
-MAIOR_CORPO = 1024 * 1024
+# O proxy nao corta antes do IC: o maior ingresso de uma sub-rede de
+# aplicacao e de 2 MiB, e o envelope do pedido vem por cima - o modulo de
+# 1 MiB que o gestor manda inteiro passava de um teto de 1 MiB.
+MAIOR_CORPO = 4 * 1024 * 1024
 
 MODOS = {
     "icp.duke": "honesto",

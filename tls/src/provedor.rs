@@ -3,7 +3,7 @@
 //!
 //! | Peça | Daqui |
 //! |---|---|
-//! | suítes | `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`, `TLS13_CHACHA20_POLY1305_SHA256` |
+//! | suítes | `TLS13_CHACHA20_POLY1305_SHA256`, `TLS13_AES_128_GCM_SHA256`, `TLS13_AES_256_GCM_SHA384`, nesta ordem de preferência |
 //! | troca de chaves | X25519, `secp256r1` |
 //! | assinaturas no aperto | `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384`, `ed25519`, `rsa_pss_rsae_sha256`, `rsa_pss_rsae_sha384`, `rsa_pss_rsae_sha512` |
 //! | assinaturas na cadeia | ECDSA P-256 com SHA-256, ECDSA P-384 com SHA-384, Ed25519, RSA PKCS#1 v1.5 com SHA-256, SHA-384 ou SHA-512 |
@@ -69,12 +69,22 @@ pub static TLS13_CHACHA20_POLY1305_SHA256: SupportedCipherSuite =
     });
 
 /// O provedor do perfil. As suítes na ordem de preferência do cliente — o
-/// servidor do TLS 1.3 costuma escolher pela dele.
+/// servidor do TLS 1.3 escolhe: pela ordem do cliente, ou pela dele.
+///
+/// O ChaCha20-Poly1305 vai primeiro porque, em software, é o mais rápido:
+/// os programas não usam SIMD nem AES-NI — o kernel não salva esses
+/// registradores entre processos (ver `programas/.cargo/config.toml`) —, e
+/// nas mesmas condições, no hospedeiro, ele cifrou 317 MiB/s, contra 104 do
+/// AES-128-GCM e 80 do AES-256-GCM, em registros de 16 KiB. As três são
+/// AEAD do TLS 1.3 com 128 bits ou mais, e a cifra em software do AES do
+/// RustCrypto não depende do dado: a ordem não muda a segurança, só o
+/// custo. Um servidor sem ChaCha20 escolhe o AES-128-GCM, que todo TLS 1.3
+/// tem.
 pub fn provedor() -> CryptoProvider {
     CryptoProvider {
         cipher_suites: vec![
-            TLS13_AES_128_GCM_SHA256,
             TLS13_CHACHA20_POLY1305_SHA256,
+            TLS13_AES_128_GCM_SHA256,
             TLS13_AES_256_GCM_SHA384,
         ],
         kx_groups: vec![&troca::X25519, &troca::P256],

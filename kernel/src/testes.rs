@@ -7492,6 +7492,88 @@ fn btrfs_percorre_itens_da_folha() -> Resultado {
     Ok(())
 }
 
+/// Um arquivo de várias extensões se lê inteiro. O `mkfs.btrfs --rootdir`
+/// grava em extensões de 1 MiB, e os módulos do gestor de canisters nas
+/// bordas do tamanho têm duas e oito: lidos de 4 KiB em 4 KiB pelo vnode,
+/// como um processo lê pelo descritor, cada um tem o tamanho todo — o
+/// leitor que só conhecia a primeira extensão achava o fim no primeiro MiB
+/// —, e os bytes em pontos escolhidos são os que o `xtask` montou: o
+/// começo, a fronteira entre duas extensões lida de uma vez, o meio de uma
+/// extensão do meio e o fim.
+fn btrfs_le_arquivo_de_varias_extensoes() -> Resultado {
+    let ler_tudo_contando = |caminho: &str| -> Result<u64, &'static str> {
+        let vnode = crate::vfs::resolver(caminho).map_err(|_| "o modulo nao resolve")?;
+        let mut buffer = [0u8; 4096];
+        let mut lidos = 0u64;
+        loop {
+            let n = crate::vfs::ler_em(&vnode, lidos, &mut buffer)
+                .map_err(|_| "a leitura do modulo falhou")?;
+            if n == 0 {
+                break;
+            }
+            lidos += n as u64;
+        }
+        Ok(lidos)
+    };
+    // Os bytes de `caminho` a partir de `em`, até encher `quantos` — cada
+    // leitura para no fim da extensão, e a seguinte continua na outra.
+    let ler_em =
+        |caminho: &str, em: u64, quantos: usize| -> Result<alloc::vec::Vec<u8>, &'static str> {
+            let vnode = crate::vfs::resolver(caminho).map_err(|_| "o modulo nao resolve")?;
+            let mut v = alloc::vec![0u8; quantos];
+            let mut cheio = 0;
+            while cheio < quantos {
+                let n = crate::vfs::ler_em(&vnode, em + cheio as u64, &mut v[cheio..])
+                    .map_err(|_| "a leitura do modulo falhou")?;
+                if n == 0 {
+                    break;
+                }
+                cheio += n;
+            }
+            v.truncate(cheio);
+            Ok(v)
+        };
+    let teto = "/dados/icp/modulos/gestor-teto.wasm";
+    let dois = "/dados/icp/modulos/gestor-dois.wasm";
+    for (caminho, tamanho) in [
+        ("/dados/icp/modulos/gestor-inteiro.wasm", 1u64 << 20),
+        (dois, (1 << 20) + 1),
+        (teto, 8 << 20),
+    ] {
+        let lidos = ler_tudo_contando(caminho)?;
+        if lidos != tamanho {
+            crate::log_error!("teste", "{}: {} de {} bytes", caminho, lidos, tamanho);
+            return Err("um arquivo de varias extensoes nao se leu inteiro");
+        }
+    }
+    for (caminho, em, esperado) in [
+        (teto, 0u64, &b"\x00\x61\x73\x6d\x01\x00\x00\x00"[..]),
+        (
+            teto,
+            (1 << 20) - 4,
+            &b"\x1f\x29\x79\xc2\x6e\x5d\x89\x5e"[..],
+        ),
+        (
+            teto,
+            (5 << 20) + 12345,
+            &b"\x2a\x84\x3e\xcf\x79\x53\x17\x98"[..],
+        ),
+        (
+            teto,
+            (8 << 20) - 8,
+            &b"\x3c\x5b\x37\xb9\x2f\xf9\x65\xae"[..],
+        ),
+        (dois, (1 << 20) - 4, &b"\xec\xc8\x36\x4f\x9b"[..]),
+    ] {
+        let lidos = ler_em(caminho, em, 8)?;
+        if lidos != esperado {
+            crate::log_error!("teste", "{} em {}: {:x?}", caminho, em, lidos);
+            return Err("os bytes de uma extensao nao sao os do arquivo");
+        }
+    }
+    Ok(())
+}
+
 /// A árvore de arquivos tem mais de um nível, e a descida chega a todas as
 /// folhas.
 ///
@@ -26512,6 +26594,13 @@ fn fs_no_armazem(caminho: &str) -> (u64, Option<alloc::vec::Vec<u8>>) {
     )
 }
 
+/// Só a versão de `caminho` no armazém — sem trazer o conteúdo, que num
+/// arquivo grande não cabe no heap do kernel.
+fn versao_no_armazem(caminho: &str) -> u64 {
+    let (_, relativo) = crate::armazem::relativo(caminho).unwrap_or_default();
+    crate::armazem::com_o_armazem(|a| a.versao(&relativo))
+}
+
 /// O sistema, como um processo do kernel.
 fn sistema_no_armazem(fio: u64) -> crate::autorizacao::Chamador {
     use crate::autorizacao::{Autoridade, Chamador, Programa};
@@ -31153,6 +31242,10 @@ static CASOS: &[Caso] = &[
         f: btrfs_raiz_montada,
     },
     Caso {
+        nome: "btrfs: le arquivo de varias extensoes",
+        f: btrfs_le_arquivo_de_varias_extensoes,
+    },
+    Caso {
         nome: "btrfs: le arquivo embutido e arquivo com extensao",
         f: btrfs_le_os_dois_tipos_de_arquivo,
     },
@@ -31859,6 +31952,34 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "icp: o gestor do saldo ao apagado",
         f: icp_o_gestor_do_saldo_ao_apagado,
+    },
+    Caso {
+        nome: "icp: o gestor nas bordas do tamanho",
+        f: icp_o_gestor_nas_bordas_do_tamanho,
+    },
+    Caso {
+        nome: "icp: o gestor retoma o que ficou em andamento",
+        f: icp_o_gestor_retoma_o_que_ficou_em_andamento,
+    },
+    Caso {
+        nome: "icp: o gestor so faz o pedido de quem o lancou",
+        f: icp_o_gestor_so_faz_o_pedido_de_quem_o_lancou,
+    },
+    Caso {
+        nome: "icp: dois gestores ao mesmo tempo",
+        f: icp_dois_gestores_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "icp: o gestor para quando outro grava a resposta",
+        f: icp_o_gestor_para_quando_outro_grava_a_resposta,
+    },
+    Caso {
+        nome: "icp: a chave anulada no meio do gestor",
+        f: icp_a_chave_anulada_no_meio_do_gestor,
+    },
+    Caso {
+        nome: "icp: o gestor carrega e recarrega",
+        f: icp_o_gestor_carrega_e_recarrega,
     },
     Caso {
         nome: "canal tcp: o aperto pela rede",
@@ -56175,7 +56296,10 @@ const REGISTROS_DO_GESTOR: &str = "/armazem/compartilhado/gestor/registro";
 const GESTOR_FEITO: i64 = 90;
 const GESTOR_REPETIDO: i64 = 91;
 const GESTOR_RECUSADO: i64 = 92;
+const GESTOR_BLOQUEADO: i64 = 93;
+const GESTOR_EM_USO: i64 = 94;
 const GESTOR_FALHOU: i64 = 95;
+const GESTOR_SEM_REGISTRO: i64 = 96;
 
 /// O SHA-256 dos módulos do gestor na imagem — o `xtask` monta os mesmos
 /// (`xtask/src/icp.rs`): exatamente 1 MiB, 1 MiB + 1 e 8 MiB.
@@ -56277,6 +56401,11 @@ impl Gerido {
         self.linha("registro ")?.rsplit('/').next()
     }
 
+    /// O caminho do registro, como a resposta o diz.
+    fn caminho_do_registro(&self) -> Option<&str> {
+        self.linha("registro ")
+    }
+
     /// O código, o desfecho e o pedido são os esperados.
     fn conferir(&self, codigo: i64, desfecho: &str, pedido: Option<u64>) -> Resultado {
         let pedido_dito = self.linha("pedido ").and_then(|v| v.parse::<u64>().ok());
@@ -56330,6 +56459,32 @@ fn rodar_o_gestor(autoridade: crate::autorizacao::Autoridade) -> Result<Gerido, 
     })
 }
 
+/// Espera o processo `fio` dizer `linha` desde `desde` — ou sair antes.
+/// Sair antes é o erro, com a resposta do gestor no log da suíte: um caso
+/// que esperasse a linha até o teto diria só que ela não veio.
+fn esperar_a_linha_do_gestor(fio: u64, desde: u64, linha: &str) -> Resultado {
+    let mut veio = false;
+    esperar_ate(
+        || {
+            veio = linhas_do_programa(desde, linha) >= 1;
+            veio || !crate::fios::vivo(fio)
+        },
+        TETO_DO_GESTOR,
+    )
+    .map_err(|_| "o gestor nao disse a linha esperada no prazo")?;
+    if !veio && linhas_do_programa(desde, linha) == 0 {
+        let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+        crate::log_error!(
+            "teste",
+            "o gestor saiu antes de `{}`: {}",
+            linha,
+            alloc::string::String::from_utf8_lossy(&resposta.unwrap_or_default())
+        );
+        return Err("o gestor saiu antes da linha esperada");
+    }
+    Ok(())
+}
+
 /// Grava o pedido pela pessoa da `sessao`, lança o gestor com a autoridade
 /// dela e espera ele sair. Devolve a execução e a versão do pedido.
 fn gerir(sessao: crate::pessoas::IdSessao, texto: &str) -> Result<(Gerido, u64), &'static str> {
@@ -56341,8 +56496,11 @@ fn gerir(sessao: crate::pessoas::IdSessao, texto: &str) -> Result<(Gerido, u64),
 /// As chamadas que o processo `fio` declarou depois do registro `antes`,
 /// na ordem — o evento, o assunto e o desfecho de cada uma —, conferidas:
 /// cada declaração ancorada na decisão de uma assinatura do processo pela
-/// chave `chave`, em nome da pessoa, uma assinatura por declaração, e
-/// nenhuma assinatura sem declaração. A que não se assinou vai ancorada na
+/// chave `chave`, em nome da pessoa, uma âncora por declaração, e nenhuma
+/// assinatura sem declaração. A chamada que fica pendente é acompanhada
+/// por leituras da situação, cada uma outro pedido assinado de novo: as
+/// assinaturas entre a da chamada e a declaração dela são essas leituras,
+/// e só elas ficam sem âncora. A que não se assinou vai ancorada na
 /// conexão, ou em nada.
 fn chamadas_declaradas(
     fio: u64,
@@ -56376,13 +56534,15 @@ fn chamadas_declaradas(
                     && !r.evento.recurso.is_empty()
                     && r.evento.detalhe.starts_with(&prefixo)
             })
-            .map(|r| r.evento.clone())
+            .map(|r| (r.seq, r.evento.clone()))
             .collect::<alloc::vec::Vec<_>>()
     })
     .unwrap_or_default();
     let mut usadas = alloc::vec::Vec::new();
+    // As janelas de cada chamada assinada: da assinatura dela à declaração.
+    let mut janelas = alloc::vec::Vec::new();
     let mut chamadas = alloc::vec::Vec::new();
-    for e in &declaradas {
+    for (seq, e) in &declaradas {
         let mut partes = e.recurso.splitn(3, ' ');
         let (Some(evento), Some(assunto), Some(desfecho)) =
             (partes.next(), partes.next(), partes.next())
@@ -56396,7 +56556,10 @@ fn chamadas_declaradas(
             .and_then(|(_, resto)| resto.split_once(" key.sign"))
             .and_then(|(n, _)| n.parse::<u64>().ok());
         match ancora {
-            Some(d) if decisoes.contains(&d) && !usadas.contains(&d) => usadas.push(d),
+            Some(d) if decisoes.contains(&d) && !usadas.contains(&d) => {
+                usadas.push(d);
+                janelas.push((d, *seq));
+            }
             Some(_) => {
                 crate::log_error!("teste", "{:?} / {:?}", e, decisoes);
                 return Err("uma declaracao do gestor nao se ancora numa assinatura dele");
@@ -56405,8 +56568,15 @@ fn chamadas_declaradas(
         }
         chamadas.push((evento.into(), assunto.into(), desfecho.into()));
     }
-    if usadas.len() != decisoes.len() {
-        crate::log_error!("teste", "{:?} / {:?}", decisoes, chamadas);
+    // A assinatura que não é âncora é uma leitura da situação da chamada
+    // que a contém — entre a assinatura dela e a declaração —, ou não tem
+    // declaração.
+    let sem_janela = decisoes
+        .iter()
+        .filter(|d| !usadas.contains(d))
+        .any(|d| !janelas.iter().any(|(de, ate)| de < d && d < ate));
+    if sem_janela {
+        crate::log_error!("teste", "{:?} / {:?} / {:?}", decisoes, janelas, chamadas);
         return Err("uma assinatura do gestor nao tem a declaracao dela");
     }
     Ok(chamadas)
@@ -56437,9 +56607,13 @@ fn conferir_chamadas(
 fn registro_do_gestor(
     principal: &str,
 ) -> (u64, Option<alloc::string::String>, alloc::string::String) {
-    let caminho = alloc::format!("{REGISTROS_DO_GESTOR}/bancada/{principal}");
-    let (v, texto) = fs_no_armazem(&caminho);
-    let dono = crate::armazem::situacao(&caminho).and_then(|(_, s)| s.dono);
+    registro_em(&alloc::format!("{REGISTROS_DO_GESTOR}/bancada/{principal}"))
+}
+
+/// O registro do gestor em `caminho`: a versão, o dono e o texto.
+fn registro_em(caminho: &str) -> (u64, Option<alloc::string::String>, alloc::string::String) {
+    let (v, texto) = fs_no_armazem(caminho);
+    let dono = crate::armazem::situacao(caminho).and_then(|(_, s)| s.dono);
     (
         v,
         dono,
@@ -56841,6 +57015,1436 @@ fn icp_o_gestor_do_saldo_ao_apagado() -> Resultado {
             Ok(())
         })();
         let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// Uma pessoa operadora com as chaves dela, a `carteira` com cycles na
+/// conta da primeira, e um canister criado pelo gestor: a sessão, a
+/// impressão da chave, a carteira, o saldo de cycles depois da criação, o
+/// Principal da chave e o canister.
+struct ComCanister {
+    sessao: crate::pessoas::IdSessao,
+    impressao: alloc::string::String,
+    carteira: Carteira,
+    ciclos: u128,
+    principal: alloc::string::String,
+    canister: alloc::string::String,
+}
+
+/// Prepara um [`ComCanister`] no console `console`, com o nome `nome`.
+fn com_canister_do_gestor(console: u16, nome: &str) -> Result<ComCanister, &'static str> {
+    use crate::autorizacao::Autoridade;
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(console),
+        nome,
+        "operador",
+    );
+    let impressao = chaves_da_carteira(sessao)?;
+    let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+    let r = (|| {
+        let antes = ciclos_para_a_chave(&carteira, 1)?;
+        let (g, v) = gerir(
+            sessao,
+            &pedido_ao_gestor(
+                "criar",
+                "chave:bancada",
+                &[
+                    &alloc::format!("ciclos {QUANTIA_DA_CRIACAO}"),
+                    &alloc::format!("confirmar {QUANTIA_DA_CRIACAO}"),
+                ],
+            ),
+        )?;
+        g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+        let canister = g
+            .linha("canister ")
+            .and_then(|l| l.split(' ').next())
+            .ok_or("a criacao nao disse o canister")?;
+        let principal = g.principal().ok_or("sem o registro")?;
+        Ok((
+            antes - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS,
+            alloc::string::String::from(principal),
+            alloc::string::String::from(canister),
+        ))
+    })();
+    match r {
+        Ok((ciclos, principal, canister)) => Ok(ComCanister {
+            sessao,
+            impressao,
+            carteira,
+            ciclos,
+            principal,
+            canister,
+        }),
+        Err(e) => {
+            let _ = carteira.encerrar();
+            Err(e)
+        }
+    }
+}
+
+/// Grava `total` bytes em `caminho`, pelo sistema, em rascunho de
+/// [`crate::autorizacao::MAIOR_ANEXO`] em [`crate::autorizacao::MAIOR_ANEXO`]
+/// — nunca o arquivo inteiro na memória —, com o byte `i` dado por
+/// `byte(i)`. Devolve a versão.
+fn gravar_grande_pelo_sistema(
+    caminho: &str,
+    total: usize,
+    byte: impl Fn(usize) -> u8,
+) -> Result<u64, &'static str> {
+    let sistema = sistema_aqui();
+    diretorios_acima(caminho)?;
+    let mut numero: Option<u64> = None;
+    let mut pedaco = alloc::vec::Vec::with_capacity(crate::autorizacao::MAIOR_ANEXO);
+    let mut feito = 0;
+    while feito < total {
+        let n = (total - feito).min(crate::autorizacao::MAIOR_ANEXO);
+        pedaco.clear();
+        pedaco.extend((feito..feito + n).map(&byte));
+        let params = match numero {
+            Some(d) => alloc::format!(r#"{{"path":"{caminho}","draft":{d}}}"#),
+            None => alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        };
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            sistema,
+            &pedido_rpc("fs.draft", &params),
+            &pedaco,
+        );
+        numero = fs_numero(&r, "draft").filter(|_| fs_ok(&r));
+        if numero.is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pedaco do arquivo grande foi recusado");
+        }
+        feito += n;
+    }
+    let v = versao_no_armazem(caminho);
+    let r = fs_pedir(
+        sistema,
+        "fs.write",
+        &alloc::format!(
+            r#"{{"path":"{caminho}","draft":{},"expect_version":{v}}}"#,
+            numero.ok_or("sem rascunho")?
+        ),
+    );
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o arquivo grande nao foi gravado");
+    }
+    fs_numero(&r, "version").ok_or("a gravacao nao disse a versao")
+}
+
+/// Os módulos nas bordas do tamanho, pelo gestor, num canister criado por
+/// ele, cada um conferido pelo SHA-256 do pedido:
+///
+/// - exatamente 1 MiB vai inteiro: um `install_code`, e o estado diz o
+///   hash dele;
+/// - 1 MiB + 1 vai em dois pedaços, o segundo de um byte: dois
+///   `upload_chunk`, o `install_chunked_code` em `upgrade` e o
+///   `clear_chunk_store` — quatro assinaturas, quatro declarações;
+/// - o teto, 8 MiB, em oito pedaços, em `reinstall`: dez assinaturas, e o
+///   estado diz o hash e a memória que ele ocupa;
+/// - um byte acima do teto, gravado no armazém: recusado pelo tamanho antes
+///   de qualquer assinatura, e o pedido não fica em andamento; apagado, a
+///   cota volta;
+/// - o SHA-256 que não é o do módulo, inteiro ou em pedaços: a primeira
+///   leitura confere antes de qualquer pedaço subir — nenhuma assinatura,
+///   nada em andamento, e o módulo do canister é o de antes.
+fn icp_o_gestor_nas_bordas_do_tamanho() -> Resultado {
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let c = com_canister_do_gestor(257, "gestor-bordas")?;
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            let (sessao, canister) = (c.sessao, c.canister.as_str());
+            let com_canister = alloc::format!("canister {canister}");
+            let instalar = |modulo: &str, sha: &str, modo: &str| {
+                let mut linhas = alloc::vec![
+                    com_canister.clone(),
+                    alloc::format!("modulo {modulo}"),
+                    alloc::format!("sha256 {sha}"),
+                    alloc::format!("modo {modo}"),
+                ];
+                if modo == "reinstall" {
+                    linhas.push(alloc::format!("confirmar {canister}"));
+                }
+                let emprestadas: alloc::vec::Vec<&str> =
+                    linhas.iter().map(|l| l.as_str()).collect();
+                pedido_ao_gestor("instalar", "chave:bancada", &emprestadas)
+            };
+            let gestao = |metodo: &str| assunto_da_gestao(metodo, canister);
+            let modulo_no_estado = |fios: &mut alloc::vec::Vec<u64>| -> Result<
+                (alloc::string::String, u128),
+                &'static str,
+            > {
+                let (g, _) = gerir(
+                    sessao,
+                    &pedido_ao_gestor("estado", "chave:bancada", &[&com_canister]),
+                )?;
+                fios.push(g.fio);
+                g.conferir(GESTOR_FEITO, "verified", None)?;
+                Ok((
+                    g.linha("modulo ").unwrap_or_default().into(),
+                    g.linha("memoria ")
+                        .and_then(|m| m.parse().ok())
+                        .unwrap_or_default(),
+                ))
+            };
+
+            // Exatamente 1 MiB: inteiro.
+            let (g, v) = gerir(
+                sessao,
+                &instalar(
+                    "/dados/icp/modulos/gestor-inteiro.wasm",
+                    MODULO_DO_GESTOR_INTEIRO,
+                    "install",
+                ),
+            )?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            conferir_chamadas(
+                &g,
+                &c.impressao,
+                &[("icp.update", gestao("install_code"), "verified")],
+            )?;
+            if !g.tem(&alloc::format!(
+                "modulo {MODULO_DO_GESTOR_INTEIRO} 1048576 bytes 1 pedacos; respondida"
+            )) || modulo_no_estado(&mut fios)?.0 != MODULO_DO_GESTOR_INTEIRO
+            {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o modulo de 1 MiB nao foi inteiro");
+            }
+
+            // 1 MiB + 1: dois pedaços, o segundo de um byte.
+            let (g, v) = gerir(
+                sessao,
+                &instalar(
+                    "/dados/icp/modulos/gestor-dois.wasm",
+                    MODULO_DO_GESTOR_DOIS,
+                    "upgrade",
+                ),
+            )?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            conferir_chamadas(
+                &g,
+                &c.impressao,
+                &[
+                    ("icp.update", gestao("upload_chunk"), "verified"),
+                    ("icp.update", gestao("upload_chunk"), "verified"),
+                    ("icp.update", gestao("install_chunked_code"), "verified"),
+                    ("icp.update", gestao("clear_chunk_store"), "verified"),
+                ],
+            )?;
+            if !g.tem(&alloc::format!(
+                "modulo {MODULO_DO_GESTOR_DOIS} 1048577 bytes 2 pedacos; respondida"
+            )) || !g.tem("deposito de pedacos: verified")
+                || modulo_no_estado(&mut fios)?.0 != MODULO_DO_GESTOR_DOIS
+            {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o modulo de 1 MiB + 1 nao foi em dois pedacos");
+            }
+
+            // O teto: oito pedaços, em reinstall.
+            let inicio = crate::tempo::uptime_ms();
+            let (g, v) = gerir(
+                sessao,
+                &instalar(
+                    "/dados/icp/modulos/gestor-teto.wasm",
+                    MODULO_DO_GESTOR_TETO,
+                    "reinstall",
+                ),
+            )?;
+            let ms = crate::tempo::uptime_ms() - inicio;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            let mut esperadas = alloc::vec::Vec::new();
+            for _ in 0..8 {
+                esperadas.push(("icp.update", gestao("upload_chunk"), "verified"));
+            }
+            esperadas.push(("icp.update", gestao("install_chunked_code"), "verified"));
+            esperadas.push(("icp.update", gestao("clear_chunk_store"), "verified"));
+            conferir_chamadas(&g, &c.impressao, &esperadas)?;
+            let (modulo, memoria) = modulo_no_estado(&mut fios)?;
+            if !g.tem(&alloc::format!(
+                "modulo {MODULO_DO_GESTOR_TETO} 8388608 bytes 8 pedacos; respondida"
+            )) || modulo != MODULO_DO_GESTOR_TETO
+                || memoria < 8 << 20
+            {
+                crate::log_error!("teste", "{:?} / {} {}", g, modulo, memoria);
+                return Err("o modulo do teto nao foi em oito pedacos");
+            }
+            crate::log_info!(
+                "teste",
+                "o teto do gestor: 8 MiB em {} ms; memoria do canister {} bytes",
+                ms,
+                memoria
+            );
+            let (_, _, registro) = registro_do_gestor(&c.principal);
+            let (feito, _, _) = ultimo_no_registro(&registro).ok_or("o registro sem ultimo")?;
+
+            // Um byte acima do teto, no armazém: nada se assina.
+            let acima = "/armazem/compartilhado/gestor-modulos/acima.wasm";
+            let total = (8 << 20) + 1;
+            gravar_grande_pelo_sistema(acima, total, |i| (i * 31 % 251) as u8)?;
+            let (g, _) = gerir(sessao, &instalar(acima, MODULO_DO_GESTOR_TETO, "upgrade"))?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FALHOU, "failed_module", None)?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            let (_, _, registro) = registro_do_gestor(&c.principal);
+            if !g.tem(&alloc::format!(
+                "modulo {acima}: acima do teto de 8388608 bytes"
+            )) || ultimo_no_registro(&registro).map(|u| u.0) != Some(feito)
+            {
+                crate::log_error!("teste", "{:?} / {}", g, registro);
+                return Err("o modulo acima do teto nao foi recusado antes de tudo");
+            }
+            let antes = fs_pedir(
+                sistema_aqui(),
+                "fs.stat",
+                &alloc::format!(r#"{{"path":"{acima}"}}"#),
+            );
+            let usado = |r: &str| {
+                Json(r.as_bytes())
+                    .member("result")
+                    .and_then(|v| v.member("quota"))
+                    .and_then(|q| q.member("used_bytes"))
+                    .and_then(|u| u.as_u64())
+            };
+            let versao = versao_no_armazem(acima);
+            let r = fs_pedir(
+                sistema_aqui(),
+                "fs.delete",
+                &alloc::format!(r#"{{"path":"{acima}","expect_version":{versao}}}"#),
+            );
+            let depois = fs_pedir(
+                sistema_aqui(),
+                "fs.stat",
+                &alloc::format!(r#"{{"path":"{acima}"}}"#),
+            );
+            match (usado(&antes), usado(&depois)) {
+                (Some(a), Some(d)) if fs_ok(&r) && a >= d + total as u64 => {}
+                outro => {
+                    crate::log_error!("teste", "{:?} {}", outro, r);
+                    return Err("apagado o modulo grande, a cota nao voltou");
+                }
+            }
+
+            // O SHA-256 que não é o do módulo: inteiro, nada se assina.
+            let (g, _) = gerir(
+                sessao,
+                &instalar(
+                    "/dados/icp/modulos/gestor-inteiro.wasm",
+                    MODULO_DO_GESTOR_DOIS,
+                    "upgrade",
+                ),
+            )?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FALHOU, "failed_module", None)?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            if !g.tem(&alloc::format!(
+                "o modulo lido tem sha256 {MODULO_DO_GESTOR_INTEIRO}, e nao o do pedido"
+            )) {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o modulo inteiro de outro sha256 nao foi recusado");
+            }
+            // Em pedaços: a primeira leitura confere, antes de qualquer
+            // pedaço subir.
+            let (g, _) = gerir(
+                sessao,
+                &instalar(
+                    "/dados/icp/modulos/gestor-dois.wasm",
+                    MODULO_DO_GESTOR_INTEIRO,
+                    "upgrade",
+                ),
+            )?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FALHOU, "failed_module", None)?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            let (_, _, registro) = registro_do_gestor(&c.principal);
+            if !g.tem(&alloc::format!(
+                "o modulo lido tem sha256 {MODULO_DO_GESTOR_DOIS}, e nao o do pedido"
+            )) || ultimo_no_registro(&registro).map(|u| u.0) != Some(feito)
+                || modulo_no_estado(&mut fios)?.0 != MODULO_DO_GESTOR_TETO
+            {
+                crate::log_error!("teste", "{:?} / {}", g, registro);
+                return Err("o modulo em pedacos de outro sha256 nao foi recusado");
+            }
+
+            for fio in &fios {
+                o_gestor_so_na_alegacao(*fio, &[canister])?;
+            }
+            Ok(())
+        })();
+        let fim = c.carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// O que ficou em andamento, e a repetição que não executa duas vezes:
+///
+/// - a criação pela rede assíncrona, contida no meio do acompanhamento: a
+///   chamada assinada chegou ao IC e o processo não soube o desfecho — o
+///   pedido fica em andamento no registro, com o texto dele, e nada mais
+///   se grava depois da contenção;
+/// - outro pedido por cima dele não executa: a resposta diz o pendente, e
+///   o texto dele, linha a linha;
+/// - o texto pendente, regravado, retoma com a mesma hora: o ledger diz
+///   que a criação é a mesma, e o canister dela entra no registro — uma
+///   criação só, paga uma vez;
+/// - o firewall no meio de outra criação: o processo não está contido, e
+///   grava ele mesmo o pedido como em andamento — a chamada que muda
+///   alguma coisa foi assinada —; tirada a regra, o mesmo pedido retoma, e
+///   é a mesma criação;
+/// - o pedido que nada assinou — a rede principal, que o DNS da bancada
+///   não conhece — não fica em andamento: repetido, executa de novo, sem
+///   bloqueio.
+fn icp_o_gestor_retoma_o_que_ficou_em_andamento() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(258),
+            "gestor-retoma",
+            "operador",
+        );
+        let impressao = chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+            let sistema = sistema_aqui();
+
+            // A criação pela rede assíncrona, contida no meio.
+            let criar = alloc::format!(
+                "acao criar\nrede assincrona\nchave chave:bancada\nancoras /dados/tls/bancada.pem\nciclos {QUANTIA_DA_CRIACAO}\nconfirmar {QUANTIA_DA_CRIACAO}\n"
+            );
+            let v = gravar_pedido_do_gestor(crate::autorizacao::Chamador::Pessoa(sessao), &criar)?;
+            let programa = alloc::format!("{}/gestor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+            let desde = crate::log::total_emitidos();
+            let antes = crate::autorizacao::ultimo_registro();
+            let fio = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            fios.push(fio);
+            // A chamada saiu: a espera armada depois dela é a da resposta, ou
+            // a de antes da primeira leitura da situação — e não a da leitura
+            // das faixas, que vem antes da chamada (run7: a contenção pegou o
+            // gestor ali, e nada se assinou).
+            esperar_a_linha_do_gestor(fio, desde, "gestor: criar pede call")?;
+            let dono = crate::rede::conexoes::Dono::Processo(fio);
+            let conexao = crate::rede::pilha::donos()
+                .into_iter()
+                .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+                .map(|(id, _, _)| id)
+                .max()
+                .ok_or("o gestor nao tinha a conexao da criacao")?;
+            esperar_ate(
+                || crate::rede::pilha::espera_armada_de_teste(conexao),
+                TETO_DO_GESTOR,
+            )
+            .map_err(|_| "o gestor nao chegou a esperar a criacao")?;
+            let processo = alloc::format!(r#"{{"process":{fio}}}"#);
+            let r = fs_pedir(sistema, "process.isolate", &processo);
+            if fs_texto(&r, "state").as_deref() != Some("isolated") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao isolou o gestor");
+            }
+            let isolado = crate::autorizacao::ultimo_registro();
+            esperar_ate(|| !crate::fios::vivo(fio), TETO_DO_GESTOR)
+                .map_err(|_| "o gestor contido nao saiu")?;
+            let _ = fs_pedir(sistema, "process.release", &processo);
+            // O arrendamento do contido ficou — ele não soltou —, e um gestor
+            // novo sairia por ele até o prazo: a pessoa o solta.
+            let _ = fs_pedir(
+                crate::autorizacao::Chamador::Pessoa(sessao),
+                "fs.release",
+                &alloc::format!(r#"{{"path":"{PEDIDO_DO_GESTOR}"}}"#),
+            );
+            if assinaturas_do_processo(fio, antes).len() != 1
+                || !assinaturas_do_processo(fio, isolado).is_empty()
+            {
+                return Err("a criacao contida nao foi uma assinatura so");
+            }
+            // O registro: o pedido em andamento, com o texto; a resposta,
+            // a de quando começou — a contenção recusou a de depois.
+            let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let resposta = resposta
+                .and_then(|b| alloc::string::String::from_utf8(b).ok())
+                .unwrap_or_default();
+            if resposta != alloc::format!("pedido {v}\ndesfecho working\n") {
+                crate::log_error!("teste", "{}", resposta);
+                return Err("a resposta do gestor contido nao e a do comeco");
+            }
+
+            // Outro pedido por cima, na mesma rede — o registro é de uma
+            // chave numa rede —: bloqueado, com o texto do pendente.
+            let outro = alloc::format!(
+                "acao criar\nrede assincrona\nchave chave:bancada\nancoras /dados/tls/bancada.pem\nciclos {}\nconfirmar {}\n",
+                2 * QUANTIA_DA_CRIACAO,
+                2 * QUANTIA_DA_CRIACAO
+            );
+            let (g, v2) = gerir(sessao, &outro)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_BLOQUEADO, "blocked", Some(v2))?;
+            conferir_chamadas(&g, &impressao, &[])?;
+            let caminho =
+                alloc::string::String::from(g.caminho_do_registro().ok_or("sem o registro")?);
+            let (_, _, registro) = registro_em(&caminho);
+            if ultimo_no_registro(&registro) != Some((v, "criar", "andamento"))
+                || !g.tem(&alloc::format!(
+                    "o pedido {v} (criar) ficou em andamento: repita-o"
+                ))
+            {
+                crate::log_error!("teste", "{:?} / {}", g, registro);
+                return Err("o pedido novo nao foi bloqueado pelo pendente");
+            }
+            let pendente: alloc::string::String = g
+                .resposta
+                .lines()
+                .filter_map(|l| l.strip_prefix("pendente "))
+                .map(|l| alloc::format!("{l}\n"))
+                .collect();
+            if pendente != criar {
+                crate::log_error!("teste", "{:?}", pendente);
+                return Err("a resposta nao disse o texto do pendente");
+            }
+
+            // O texto pendente, regravado: retoma com a mesma hora.
+            let (g, v3) = gerir(sessao, &pendente)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v3))?;
+            conferir_chamadas(
+                &g,
+                &impressao,
+                &[(
+                    "icp.update",
+                    assunto_do_ledger_de_ciclos("create_canister"),
+                    "verified",
+                )],
+            )?;
+            let canister: alloc::string::String = g
+                .linha("canister ")
+                .filter(|l| l.ends_with(" duplicada"))
+                .and_then(|l| l.split(' ').next())
+                .ok_or("a retomada nao disse a criacao de antes")?
+                .into();
+            let (_, _, registro) = registro_em(&caminho);
+            if canister_no_registro(&registro, &canister) != Some(("ativo", "nenhum"))
+                || ultimo_no_registro(&registro) != Some((v3, "criar", "feito"))
+            {
+                crate::log_error!("teste", "{:?} / {}", g, registro);
+                return Err("a retomada nao pos o canister no registro");
+            }
+            if carteira.saldo(true, 1)? != ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS {
+                return Err("a criacao foi paga mais de uma vez");
+            }
+
+            // O firewall no meio de outra criação: a conexão cai, o processo
+            // não está contido, e grava ele mesmo o pedido como em andamento —
+            // a chamada que muda alguma coisa foi assinada, e pode ter
+            // chegado. Tirada a regra, o mesmo pedido retoma, e o ledger diz
+            // que a criação é a mesma.
+            let segunda = alloc::format!(
+                "acao criar\nrede assincrona\nchave chave:bancada\nancoras /dados/tls/bancada.pem\nciclos {}\nconfirmar {}\n",
+                QUANTIA_DA_CRIACAO + 1,
+                QUANTIA_DA_CRIACAO + 1
+            );
+            let v4 =
+                gravar_pedido_do_gestor(crate::autorizacao::Chamador::Pessoa(sessao), &segunda)?;
+            let desde = crate::log::total_emitidos();
+            let antes = crate::autorizacao::ultimo_registro();
+            let fio = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            fios.push(fio);
+            // A chamada saiu: a espera armada depois dela é a da resposta, ou
+            // a de antes da primeira leitura da situação — e não a da leitura
+            // das faixas, que vem antes da chamada (run7: a contenção pegou o
+            // gestor ali, e nada se assinou).
+            esperar_a_linha_do_gestor(fio, desde, "gestor: criar pede call")?;
+            let dono = crate::rede::conexoes::Dono::Processo(fio);
+            let conexao = crate::rede::pilha::donos()
+                .into_iter()
+                .filter(|(_, d, x)| *d == dono && x.texto() == GATEWAY_ICP)
+                .map(|(id, _, _)| id)
+                .max()
+                .ok_or("o gestor nao tinha a conexao da segunda criacao")?;
+            esperar_ate(
+                || crate::rede::pilha::espera_armada_de_teste(conexao),
+                TETO_DO_GESTOR,
+            )
+            .map_err(|_| "o gestor nao chegou a esperar a segunda criacao")?;
+            let para = alloc::format!(r#"{{"to":"{GATEWAY_ICP}"}}"#);
+            let r = fs_pedir(sistema, "net.block", &para);
+            if !fs_ok(&r) && !r.contains(r#""result""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao barrou o gateway");
+            }
+            let saiu = esperar_ate(|| !crate::fios::vivo(fio), TETO_DO_GESTOR);
+            let _ = fs_pedir(sistema, "net.unblock", &para);
+            saiu.map_err(|_| "o gestor barrado nao saiu")?;
+            let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let resposta = resposta
+                .and_then(|b| alloc::string::String::from_utf8(b).ok())
+                .unwrap_or_default();
+            let (_, _, registro) = registro_em(&caminho);
+            if assinaturas_do_processo(fio, antes).len() != 1
+                || !resposta
+                    .starts_with(&alloc::format!("pedido {v4}\nacao criar\ndesfecho failed_"))
+                || ultimo_no_registro(&registro) != Some((v4, "criar", "andamento"))
+            {
+                crate::log_error!("teste", "{} / {}", resposta, registro);
+                return Err("barrada no meio, a criacao nao ficou em andamento");
+            }
+            let g = rodar_o_gestor(Autoridade::Pessoa { sessao })?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v4))?;
+            let outro_canister: alloc::string::String = g
+                .linha("canister ")
+                .filter(|l| l.ends_with(" duplicada"))
+                .and_then(|l| l.split(' ').next())
+                .ok_or("a retomada barrada nao disse a criacao de antes")?
+                .into();
+            let (_, _, registro) = registro_em(&caminho);
+            if canister_no_registro(&registro, &outro_canister) != Some(("ativo", "nenhum"))
+                || ultimo_no_registro(&registro) != Some((v4, "criar", "feito"))
+                || carteira.saldo(true, 1)?
+                    != ciclos - 2 * QUANTIA_DA_CRIACAO - 1 - 2 * TAXA_DE_CICLOS
+            {
+                crate::log_error!("teste", "{:?} / {}", g, registro);
+                return Err("a retomada depois do firewall nao foi a mesma criacao");
+            }
+
+            // O que nada assinou — a rede principal, que o DNS da bancada não
+            // conhece — não fica em andamento: de novo, ele executa de novo,
+            // e não se bloqueia.
+            let principal_rede = pedido_ao_gestor(
+                "criar",
+                "chave:bancada",
+                &[
+                    &alloc::format!("ciclos {QUANTIA_DA_CRIACAO}"),
+                    &alloc::format!("confirmar {QUANTIA_DA_CRIACAO}"),
+                ],
+            )
+            .replace("rede bancada", "rede mainnet");
+            for _ in 0..2 {
+                let (g, _) = gerir(sessao, &principal_rede)?;
+                fios.push(g.fio);
+                if g.codigo != Some(GESTOR_FALHOU)
+                    || !g.tem(
+                        "nada que muda o canister foi assinado: o pedido nao ficou em andamento",
+                    )
+                {
+                    crate::log_error!("teste", "{:?}", g);
+                    return Err("o pedido que nada assinou ficou em andamento");
+                }
+                // A chamada que não saiu é declarada — o desfecho dela, sem
+                // âncora: nem assinatura, nem conexão.
+                conferir_chamadas(
+                    &g,
+                    &impressao,
+                    &[(
+                        "icp.update",
+                        assunto_do_ledger_de_ciclos("create_canister"),
+                        "failed_connect",
+                    )],
+                )?;
+                if !assinaturas_do_processo(g.fio, g.antes).is_empty() {
+                    return Err("o pedido da rede principal assinou");
+                }
+                let (_, _, registro) =
+                    registro_em(g.caminho_do_registro().ok_or("sem o registro")?);
+                if ultimo_no_registro(&registro).is_some() {
+                    crate::log_error!("teste", "{}", registro);
+                    return Err("o pedido que nada assinou ficou no registro");
+                }
+            }
+
+            for fio in &fios {
+                o_gestor_so_na_alegacao(*fio, &[&canister])?;
+            }
+            Ok(())
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// O gestor só faz o pedido de quem o lançou, com a chave dela, e só lê o
+/// registro que ela gravou — o armazém compartilhado deixa outra pessoa
+/// gravar ali, e ela não escolhe nada:
+///
+/// - o pedido gravado por outra pessoa, lançado pela dona da chave: nada
+///   se assina, e a resposta diz quem o gravou;
+/// - o registro da chave gravado por outra pessoa: o gestor para, sem
+///   sobrescrever, e nada se assina;
+/// - o pedido arrendado por outra pessoa: o gestor nem começa, e a
+///   resposta não muda;
+/// - o pedido fora da forma, a chave que não existe e os controladores sem
+///   a própria chave: nada se assina, e o registro não muda;
+/// - e, depois de tudo, o pedido da dona anda.
+fn icp_o_gestor_so_faz_o_pedido_de_quem_o_lancou() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let c = com_canister_do_gestor(259, "gestor-dona")?;
+        let outra = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(260),
+            "gestor-outra",
+            "operador",
+        );
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            let (sessao, canister) = (c.sessao, c.canister.as_str());
+            let com_canister = alloc::format!("canister {canister}");
+            let pessoa_outra = crate::pessoas::dona_da_sessao(outra)
+                .ok_or("a outra sem pessoa")?
+                .texto();
+            let (v_registro, _, registro_antes) = registro_do_gestor(&c.principal);
+            let parar = pedido_ao_gestor("parar", "chave:bancada", &[&com_canister]);
+
+            // O pedido de outra pessoa, lançado pela dona da chave.
+            let v = gravar_pedido_do_gestor(Chamador::Pessoa(outra), &parar)?;
+            let g = rodar_o_gestor(Autoridade::Pessoa { sessao })?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_RECUSADO, "refused_owner", Some(v))?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            if !g.tem(&alloc::format!(
+                "o pedido foi gravado por pessoa:{pessoa_outra}, e nao por quem lancou o gestor"
+            )) {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o pedido de outra pessoa nao foi recusado pelo dono");
+            }
+            if !assinaturas_do_processo(g.fio, g.antes).is_empty() {
+                return Err("o pedido de outra pessoa assinou");
+            }
+
+            // O registro da chave gravado por outra pessoa.
+            let caminho = alloc::format!("{REGISTROS_DO_GESTOR}/bancada/{}", c.principal);
+            let forjado = alloc::format!(
+                "# registro do gestor de canisters\ncanister {canister} ativo nenhum 1\n"
+            );
+            let r = fs_gravar(
+                Chamador::Pessoa(outra),
+                &caminho,
+                v_registro,
+                &como_cadeia_json(&forjado),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a outra pessoa nao gravou no registro");
+            }
+            let (g, _) = gerir(sessao, &parar)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_SEM_REGISTRO, "failed_registry", None)?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            let (_, dono, texto) = registro_do_gestor(&c.principal);
+            if texto != forjado
+                || dono.as_deref() != Some(alloc::format!("pessoa:{pessoa_outra}").as_str())
+                || !g
+                    .resposta
+                    .contains(&alloc::format!("gravado por pessoa:{pessoa_outra}"))
+            {
+                crate::log_error!("teste", "{:?} / {:?} {}", g, dono, texto);
+                return Err("o registro de outra pessoa foi lido ou sobrescrito");
+            }
+            // A dona devolve o registro que era dela.
+            let (v_forjado, _, _) = registro_do_gestor(&c.principal);
+            let r = fs_gravar(
+                Chamador::Pessoa(sessao),
+                &caminho,
+                v_forjado,
+                &como_cadeia_json(&registro_antes),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a dona nao regravou o registro dela");
+            }
+
+            // O pedido arrendado por outra pessoa: o gestor nem começa.
+            gravar_pedido_do_gestor(Chamador::Pessoa(sessao), &parar)?;
+            let arrendado = fs_pedir(
+                Chamador::Pessoa(outra),
+                "fs.claim",
+                &alloc::format!(r#"{{"path":"{PEDIDO_DO_GESTOR}","ttl_ms":60000}}"#),
+            );
+            if !fs_ok(&arrendado) {
+                crate::log_error!("teste", "{}", arrendado);
+                return Err("a outra pessoa nao arrendou o pedido");
+            }
+            let (v_resposta, _) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let g = rodar_o_gestor(Autoridade::Pessoa { sessao })?;
+            fios.push(g.fio);
+            let (v_resposta_depois, _) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let _ = fs_pedir(
+                Chamador::Pessoa(outra),
+                "fs.release",
+                &alloc::format!(r#"{{"path":"{PEDIDO_DO_GESTOR}"}}"#),
+            );
+            if g.codigo != Some(GESTOR_EM_USO)
+                || v_resposta_depois != v_resposta
+                || !assinaturas_do_processo(g.fio, g.antes).is_empty()
+            {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o gestor andou com o pedido arrendado por outra pessoa");
+            }
+
+            // O pedido fora da forma, a chave que não existe e os
+            // controladores sem a própria chave.
+            let (v_registro, _, registro) = registro_do_gestor(&c.principal);
+            for (pedido, codigo, desfecho, linha) in [
+                (
+                    pedido_ao_gestor("parar", "chave:bancada", &[&com_canister, "dono pessoa:1"]),
+                    GESTOR_RECUSADO,
+                    "failed_request",
+                    "pedido: linha 7: campo desconhecido",
+                ),
+                (
+                    pedido_ao_gestor("parar", "chave:inexistente", &[&com_canister]),
+                    GESTOR_FALHOU,
+                    "failed_key",
+                    "",
+                ),
+                (
+                    pedido_ao_gestor(
+                        "controladores",
+                        "chave:bancada",
+                        &[
+                            &com_canister,
+                            &alloc::format!("controlador {PRINCIPAL_ANONIMO}"),
+                            &alloc::format!("confirmar {canister}"),
+                        ],
+                    ),
+                    GESTOR_RECUSADO,
+                    "failed_request",
+                    "os controladores novos nao incluem a propria chave",
+                ),
+            ] {
+                let (g, _) = gerir(sessao, &pedido)?;
+                fios.push(g.fio);
+                g.conferir(codigo, desfecho, None)?;
+                conferir_chamadas(&g, &c.impressao, &[])?;
+                if !assinaturas_do_processo(g.fio, g.antes).is_empty()
+                    || (!linha.is_empty() && !g.tem(linha))
+                {
+                    crate::log_error!("teste", "{:?}", g);
+                    return Err("um pedido recusado assinou, ou nao disse por que");
+                }
+            }
+            let (v_registro_depois, _, registro_depois) = registro_do_gestor(&c.principal);
+            if v_registro_depois != v_registro || registro_depois != registro {
+                crate::log_error!("teste", "{} / {}", registro, registro_depois);
+                return Err("um pedido recusado mudou o registro");
+            }
+
+            // E o pedido da dona anda.
+            let (g, v) = gerir(sessao, &parar)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            conferir_chamadas(
+                &g,
+                &c.impressao,
+                &[(
+                    "icp.update",
+                    assunto_da_gestao("stop_canister", canister),
+                    "verified",
+                )],
+            )?;
+            for fio in &fios {
+                o_gestor_so_na_alegacao(*fio, &[canister])?;
+            }
+            Ok(())
+        })();
+        let fim = c.carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// Dois gestores ao mesmo tempo:
+///
+/// - lançados pela mesma pessoa, sobre o mesmo pedido de criação: o
+///   segundo acha o pedido arrendado pela mesma titular e sai sem tocá-lo —
+///   o arrendamento é da titular, e o novo começa quando é tomado —; a
+///   criação acontece uma vez, paga uma vez, e o registro tem um canister;
+/// - o de outra pessoa enquanto um trabalha, pela rede lenta: o pedido está
+///   arrendado, a gravação dela nele é recusada, e o gestor dela nem
+///   começa; e outro da mesma pessoa, com o primeiro esperando a leitura:
+///   o arrendamento é da titular, e o pedido dele renovaria o do primeiro
+///   — mas o que se renova não é novo, e ele sai sem tocar em nada. O
+///   primeiro acaba, e a resposta é a dele.
+fn icp_dois_gestores_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(261),
+            "gestor-dois",
+            "operador",
+        );
+        let outra = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(262),
+            "gestor-dois-outra",
+            "operador",
+        );
+        chaves_da_carteira(sessao)?;
+        let carteira = Carteira::lancar(Autoridade::Pessoa { sessao })?;
+        let r = (|| -> Resultado {
+            let ciclos = ciclos_para_a_chave(&carteira, 1)?;
+            let programa = alloc::format!("{}/gestor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+            let criar = |rede: &str, quantia: u128| {
+                pedido_ao_gestor(
+                    "criar",
+                    "chave:bancada",
+                    &[
+                        &alloc::format!("ciclos {quantia}"),
+                        &alloc::format!("confirmar {quantia}"),
+                    ],
+                )
+                .replace("rede bancada", &alloc::format!("rede {rede}"))
+            };
+            let codigos_desde = |desde: u64| {
+                let mut codigos = alloc::vec::Vec::new();
+                crate::log::ultimos(128, crate::log::Level::Trace, |r| {
+                    if r.seq >= desde
+                        && r.subsistema == "usuario"
+                        && let Some(c) = r.mensagem().strip_prefix("processo encerrou com codigo ")
+                    {
+                        codigos.push(c.parse::<i64>().unwrap_or(-1));
+                    }
+                });
+                codigos.sort();
+                codigos
+            };
+
+            // A mesma pessoa, dois gestores, o mesmo pedido.
+            gravar_pedido_do_gestor(
+                Chamador::Pessoa(sessao),
+                &criar("bancada", QUANTIA_DA_CRIACAO),
+            )?;
+            let desde = crate::log::total_emitidos();
+            let a = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            let b = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            esperar_ate(
+                || !crate::fios::vivo(a) && !crate::fios::vivo(b),
+                TETO_DO_GESTOR,
+            )
+            .map_err(|_| "os dois gestores nao sairam")?;
+            let codigos = codigos_desde(desde);
+            let feitos = codigos.iter().filter(|c| **c == GESTOR_FEITO).count();
+            // O segundo acha o pedido arrendado pela mesma titular, e sai sem
+            // tocá-lo.
+            if codigos.len() != 2 || feitos != 1 || !codigos.contains(&GESTOR_EM_USO) {
+                crate::log_error!("teste", "{:?}", codigos);
+                return Err("os dois gestores nao sairam como se espera");
+            }
+            crate::log_info!("teste", "dois gestores, o mesmo pedido: {:?}", codigos);
+            if carteira.saldo(true, 1)? != ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS {
+                return Err("a mesma criacao por dois gestores foi paga duas vezes");
+            }
+            let ciclos = ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS;
+            let (g, _) = gerir(sessao, &pedido_ao_gestor("saldo", "chave:bancada", &[]))?;
+            let principal = alloc::string::String::from(g.principal().ok_or("sem o registro")?);
+            let (_, _, registro) = registro_do_gestor(&principal);
+            if registro
+                .lines()
+                .filter(|l| l.starts_with("canister "))
+                .count()
+                != 1
+            {
+                crate::log_error!("teste", "{}", registro);
+                return Err("o registro nao tem um canister so");
+            }
+
+            // A outra pessoa, com um gestor trabalhando pela rede lenta.
+            let v = gravar_pedido_do_gestor(
+                Chamador::Pessoa(sessao),
+                &criar("lenta", QUANTIA_DA_CRIACAO),
+            )?;
+            let desde = crate::log::total_emitidos();
+            let a = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            esperar_a_linha_do_gestor(a, desde, "gestor: criar pede read_state")?;
+            let r = fs_gravar(Chamador::Pessoa(outra), PEDIDO_DO_GESTOR, v, "acao saldo");
+            let desde_da_outra = crate::log::total_emitidos();
+            let terceiro =
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao: outra })?;
+            esperar_ate(|| !crate::fios::vivo(terceiro), TETO_DO_GESTOR)
+                .map_err(|_| "o gestor da outra pessoa nao saiu")?;
+            let ainda = crate::fios::vivo(a);
+            let codigos_da_outra = codigos_desde(desde_da_outra);
+            if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("CONFLICT") {
+                crate::log_error!("teste", "{}", r);
+                return Err("a outra pessoa gravou no pedido arrendado");
+            }
+            if !ainda || codigos_da_outra != [GESTOR_EM_USO] {
+                crate::log_error!("teste", "{} {:?}", ainda, codigos_da_outra);
+                return Err("o gestor da outra pessoa andou com o pedido arrendado");
+            }
+            // Outro da mesma pessoa, com o primeiro esperando a leitura.
+            let desde_do_quarto = crate::log::total_emitidos();
+            let quarto =
+                crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            esperar_ate(|| !crate::fios::vivo(quarto), TETO_DO_GESTOR)
+                .map_err(|_| "o segundo gestor da mesma pessoa nao saiu")?;
+            let ainda = crate::fios::vivo(a);
+            let codigos_do_quarto = codigos_desde(desde_do_quarto);
+            if !ainda
+                || codigos_do_quarto != [GESTOR_EM_USO]
+                || linhas_do_programa(
+                    desde_do_quarto,
+                    "gestor: o pedido nao se arrendou: ARRENDADO",
+                ) != 1
+            {
+                crate::log_error!("teste", "{} {:?}", ainda, codigos_do_quarto);
+                return Err("o segundo gestor da mesma pessoa andou com o pedido arrendado");
+            }
+            esperar_ate(|| !crate::fios::vivo(a), TETO_DO_GESTOR)
+                .map_err(|_| "o gestor da rede lenta nao saiu")?;
+            let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let resposta = resposta
+                .and_then(|b| alloc::string::String::from_utf8(b).ok())
+                .unwrap_or_default();
+            if !resposta.starts_with(&alloc::format!(
+                "pedido {v}\nacao criar\ndesfecho verified\n"
+            )) || carteira.saldo(true, 1)? != ciclos - QUANTIA_DA_CRIACAO - TAXA_DE_CICLOS
+            {
+                crate::log_error!("teste", "{}", resposta);
+                return Err("o gestor da rede lenta nao acabou a criacao");
+            }
+            Ok(())
+        })();
+        let fim = carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// O gestor que perde a resposta para outro: o arrendamento é da titular,
+/// e não do processo — outro gestor dela que o pedisse no mesmo instante o
+/// veria novo —, e é a resposta, gravada por cada um ao começar, que os
+/// separa. A instalação em pedaços pela rede lenta; com o primeiro pedaço
+/// esperando o `read_state`, a pessoa grava a resposta por cima, como o
+/// outro gestor gravaria:
+///
+/// - o primeiro pedaço se assina depois da leitura, mas o pedido assinado
+///   não sai — o gestor confere a resposta antes de cada pedido —, e nada
+///   mais se assina: uma assinatura, e a declaração dela, `failed_lease`;
+/// - o gestor não grava a resposta por cima da do outro, e não solta o
+///   arrendamento: ele é do outro também;
+/// - nada que muda o canister foi assinado, e o registro volta ao de antes;
+/// - solto o arrendamento, o mesmo pedido instala, pela rede da bancada.
+fn icp_o_gestor_para_quando_outro_grava_a_resposta() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let c = com_canister_do_gestor(265, "gestor-resposta")?;
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            let (sessao, canister) = (c.sessao, c.canister.as_str());
+            let com_canister = alloc::format!("canister {canister}");
+            let pedido = pedido_ao_gestor(
+                "instalar",
+                "chave:bancada",
+                &[
+                    &com_canister,
+                    "modulo /dados/icp/modulos/gestor-dois.wasm",
+                    &alloc::format!("sha256 {MODULO_DO_GESTOR_DOIS}"),
+                    "modo install",
+                ],
+            );
+            let (_, _, registro) = registro_do_gestor(&c.principal);
+            let antes_do_pedido = ultimo_no_registro(&registro)
+                .map(|u| u.0)
+                .ok_or("o registro sem ultimo")?;
+
+            // A rede lenta, e a resposta de outro com o primeiro pedaço no ar.
+            gravar_pedido_do_gestor(
+                Chamador::Pessoa(sessao),
+                &pedido.replace("rede bancada", "rede lenta"),
+            )?;
+            let programa = alloc::format!("{}/gestor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+            let desde = crate::log::total_emitidos();
+            let antes = crate::autorizacao::ultimo_registro();
+            let fio = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+            fios.push(fio);
+            esperar_a_linha_do_gestor(fio, desde, "gestor: pedaco 1 pede read_state")?;
+            let por_cima = "pedido 0\\ndesfecho working\\n";
+            let r = fs_gravar(
+                Chamador::Pessoa(sessao),
+                RESPOSTA_DO_GESTOR,
+                versao_no_armazem(RESPOSTA_DO_GESTOR),
+                por_cima,
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a pessoa nao gravou a resposta por cima");
+            }
+            let v_por_cima = versao_no_armazem(RESPOSTA_DO_GESTOR);
+            esperar_ate(|| !crate::fios::vivo(fio), TETO_DO_GESTOR)
+                .map_err(|_| "o gestor nao saiu depois da resposta de outro")?;
+
+            // Uma assinatura, que não saiu, e nada depois.
+            let feitas = chamadas_declaradas(fio, antes, "chave:bancada", &c.impressao)?;
+            let esperadas = [(
+                "icp.update",
+                assunto_da_gestao("upload_chunk", canister),
+                "failed_lease",
+            )];
+            let iguais = feitas.len() == esperadas.len()
+                && feitas
+                    .iter()
+                    .zip(&esperadas)
+                    .all(|((e, a, d), (e2, a2, d2))| e == e2 && a == a2 && d == d2);
+            if !iguais || assinaturas_do_processo(fio, antes).len() != 1 {
+                crate::log_error!("teste", "{:?}", feitas);
+                return Err("o gestor assinou depois da resposta de outro");
+            }
+            if linhas_do_programa(desde, "gestor: pedaco 1 pede call") != 0
+                || linhas_do_programa(
+                    desde,
+                    "gestor: pedaco 1 nao pede call: a resposta e de outro gestor",
+                ) != 1
+                || linhas_do_programa(desde, "gestor: pedaco 2 pede read_state") != 0
+                || linhas_do_programa(
+                    desde,
+                    "gestor: a resposta e de outro gestor: o arrendamento fica com ele",
+                ) != 1
+            {
+                return Err("o gestor nao parou na resposta de outro");
+            }
+            // A resposta é a do outro, e o arrendamento continua.
+            let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+            let resposta = resposta
+                .and_then(|b| alloc::string::String::from_utf8(b).ok())
+                .unwrap_or_default();
+            if versao_no_armazem(RESPOSTA_DO_GESTOR) != v_por_cima
+                || resposta != "pedido 0\ndesfecho working\n"
+            {
+                crate::log_error!("teste", "{}", resposta);
+                return Err("o gestor gravou por cima da resposta de outro");
+            }
+            let arrendado = crate::armazem::situacao(PEDIDO_DO_GESTOR)
+                .and_then(|(_, s)| s.arrendamento)
+                .is_some();
+            if !arrendado {
+                return Err("o gestor soltou o arrendamento que era do outro tambem");
+            }
+            // Nada que muda o canister foi assinado: o registro de antes.
+            let (_, _, registro) = registro_do_gestor(&c.principal);
+            if ultimo_no_registro(&registro).map(|u| u.0) != Some(antes_do_pedido) {
+                crate::log_error!("teste", "{}", registro);
+                return Err("o pedido parado ficou em andamento");
+            }
+
+            // Solto o arrendamento, o mesmo pedido instala.
+            let r = fs_pedir(
+                Chamador::Pessoa(sessao),
+                "fs.release",
+                &alloc::format!(r#"{{"path":"{PEDIDO_DO_GESTOR}"}}"#),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a pessoa nao soltou o arrendamento");
+            }
+            let (g, v) = gerir(sessao, &pedido)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            if !g.tem(&alloc::format!(
+                "modulo {MODULO_DO_GESTOR_DOIS} 1048577 bytes 2 pedacos; respondida"
+            )) {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("o mesmo pedido nao instalou depois");
+            }
+            for fio in &fios {
+                o_gestor_so_na_alegacao(*fio, &[canister])?;
+            }
+            Ok(())
+        })();
+        // O arrendamento que um caso deixou não passa para o seguinte.
+        let _ = fs_pedir(
+            Chamador::Pessoa(c.sessao),
+            "fs.release",
+            &alloc::format!(r#"{{"path":"{PEDIDO_DO_GESTOR}"}}"#),
+        );
+        let fim = c.carteira.encerrar();
+        crate::chaves::esquecer_de_teste();
+        r.and(fim)
+    })
+}
+
+/// A chave anulada no meio da instalação em pedaços, pela rede lenta: o
+/// canister tem as duas chaves da pessoa como controladoras e roda o A; o
+/// gestor manda o módulo de 1 MiB + 1, e o administrador anula a primeira
+/// chave com o primeiro pedaço no ar. O pedaço que já ia assinado chega; o
+/// segundo não se assina — o kernel recusa a chave anulada —, nada se
+/// instala, e o pedido não fica em andamento: só os pedaços subiram. O
+/// canister continua no A, pela segunda chave; e a primeira não serve mais
+/// a pedido nenhum.
+fn icp_a_chave_anulada_no_meio_do_gestor() -> Resultado {
+    com_a_bancada_icp(|| {
+        com_a_politica(
+            politica_da_bancada_icp(&[DNS_DA_BANCADA_PARA_O_ADMINISTRADOR])?,
+            icp_a_chave_anulada_no_meio_do_gestor_com_a_politica,
+        )
+    })
+}
+
+fn icp_a_chave_anulada_no_meio_do_gestor_com_a_politica() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    crate::chaves::esquecer_de_teste();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    let c = com_canister_do_gestor(263, "gestor-anulada")?;
+    let mut fios = alloc::vec::Vec::new();
+    let r = (|| -> Resultado {
+        let (sessao, canister) = (c.sessao, c.canister.as_str());
+        let com_canister = alloc::format!("canister {canister}");
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        // As duas chaves como controladoras, e o A.
+        let (g, _) = gerir(sessao, &pedido_ao_gestor("saldo", "chave:bancada-2", &[]))?;
+        let segunda = alloc::string::String::from(g.principal().ok_or("sem o registro")?);
+        let (g, _) = gerir(
+            sessao,
+            &pedido_ao_gestor(
+                "controladores",
+                "chave:bancada",
+                &[
+                    &com_canister,
+                    &alloc::format!("controlador {}", c.principal),
+                    &alloc::format!("controlador {segunda}"),
+                    &alloc::format!("confirmar {canister}"),
+                ],
+            ),
+        )?;
+        g.conferir(GESTOR_FEITO, "verified", None)?;
+        let (g, _) = gerir(
+            sessao,
+            &pedido_ao_gestor(
+                "instalar",
+                "chave:bancada",
+                &[
+                    &com_canister,
+                    "modulo /dados/icp/modulos/implantavel-a.wasm",
+                    &alloc::format!("sha256 {MODULO_IMPLANTAVEL_A}"),
+                    "modo install",
+                ],
+            ),
+        )?;
+        g.conferir(GESTOR_FEITO, "verified", None)?;
+        let (_, _, registro) = registro_do_gestor(&c.principal);
+        let (feito, _, _) = ultimo_no_registro(&registro).ok_or("o registro sem ultimo")?;
+
+        // O módulo de 1 MiB + 1 pela rede lenta, e a anulação no meio.
+        let pedido = pedido_ao_gestor(
+            "instalar",
+            "chave:bancada",
+            &[
+                &com_canister,
+                "modulo /dados/icp/modulos/gestor-dois.wasm",
+                &alloc::format!("sha256 {MODULO_DO_GESTOR_DOIS}"),
+                "modo upgrade",
+            ],
+        )
+        .replace("rede bancada", "rede lenta");
+        gravar_pedido_do_gestor(Chamador::Pessoa(sessao), &pedido)?;
+        let programa = alloc::format!("{}/gestor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let antes = crate::autorizacao::ultimo_registro();
+        let fio = crate::usuario::lancar_como(Some(&programa), Autoridade::Pessoa { sessao })?;
+        fios.push(fio);
+        esperar_a_linha_do_gestor(fio, desde, "gestor: pedaco 1 pede call")?;
+        let p = alloc::format!(r#"{{"owner":"{dono}","key":"chave:bancada"}}"#);
+        let r = executar_admin_com(0, &ADMIN_DE_TESTE, "key.revoke", &p, &p)?;
+        if !r.contains(r#""executed":true"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao anulou a chave");
+        }
+        let anulada = crate::autorizacao::ultimo_registro();
+        esperar_ate(|| !crate::fios::vivo(fio), TETO_DO_GESTOR)
+            .map_err(|_| "o gestor nao saiu depois da anulacao")?;
+        let (_, resposta) = fs_no_armazem(RESPOSTA_DO_GESTOR);
+        let resposta = resposta
+            .and_then(|b| alloc::string::String::from_utf8(b).ok())
+            .unwrap_or_default();
+        let (_, _, registro) = registro_do_gestor(&c.principal);
+        if assinaturas_do_processo(fio, antes).len() != 1
+            || !assinaturas_do_processo(fio, anulada).is_empty()
+            || !(resposta.contains("desfecho failed_key\n")
+                || resposta.contains("desfecho failed_signature\n"))
+            || ultimo_no_registro(&registro).map(|u| u.0) != Some(feito)
+        {
+            crate::log_error!(
+                "teste",
+                "{:?} / {} / {}",
+                assinaturas_do_processo(fio, antes).len(),
+                resposta,
+                registro
+            );
+            return Err("a chave anulada assinou, ou o pedido ficou em andamento");
+        }
+
+        // O canister continua no A, pela segunda chave.
+        let (g, _) = gerir(
+            sessao,
+            &pedido_ao_gestor("estado", "chave:bancada-2", &[&com_canister]),
+        )?;
+        fios.push(g.fio);
+        g.conferir(GESTOR_FEITO, "verified", None)?;
+        if !g.tem(&alloc::format!("modulo {MODULO_IMPLANTAVEL_A}")) {
+            crate::log_error!("teste", "{:?}", g);
+            return Err("o canister trocou de modulo depois da anulacao");
+        }
+        // A primeira não serve mais.
+        let (g, _) = gerir(
+            sessao,
+            &pedido_ao_gestor("estado", "chave:bancada", &[&com_canister]),
+        )?;
+        fios.push(g.fio);
+        g.conferir(GESTOR_FALHOU, "failed_key", None)?;
+        if !assinaturas_do_processo(g.fio, g.antes).is_empty() {
+            return Err("a chave anulada assinou um pedido novo");
+        }
+        for fio in &fios {
+            o_gestor_so_na_alegacao(*fio, &[canister])?;
+        }
+        Ok(())
+    })();
+    let fim = c.carteira.encerrar();
+    crate::chaves::esquecer_de_teste();
+    r.and(fim)
+}
+
+/// Cycles e ICP no canister, pelo gestor:
+///
+/// - a carga pelo ledger de cycles: uma assinatura, o bloco, a conta da
+///   chave menos a quantia e a taxa, e os cycles do canister mais a
+///   quantia; o mesmo pedido de novo não executa;
+/// - a recarga pelo CMC: a transferência de 1 ICP para a conta de recarga
+///   do canister, com o memo dela, e a notificação com o bloco — duas
+///   assinaturas —; a conta de ICP da chave menos o ICP e a taxa, e os
+///   cycles do canister mais os que o CMC disse;
+/// - nada do valor nem da gestão fora das alegações.
+fn icp_o_gestor_carrega_e_recarrega() -> Resultado {
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let c = com_canister_do_gestor(264, "gestor-carga")?;
+        let mut fios = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            let (sessao, canister) = (c.sessao, c.canister.as_str());
+            let com_canister = alloc::format!("canister {canister}");
+            let cycles_do_canister =
+                |fios: &mut alloc::vec::Vec<u64>| -> Result<u128, &'static str> {
+                    let (g, _) = gerir(
+                        sessao,
+                        &pedido_ao_gestor("estado", "chave:bancada", &[&com_canister]),
+                    )?;
+                    fios.push(g.fio);
+                    g.conferir(GESTOR_FEITO, "verified", None)?;
+                    g.linha("cycles ")
+                        .and_then(|n| n.parse().ok())
+                        .ok_or("o estado nao disse os cycles")
+                };
+
+            // A carga.
+            let antes = cycles_do_canister(&mut fios)?;
+            let carga = pedido_ao_gestor(
+                "carregar",
+                "chave:bancada",
+                &[
+                    &com_canister,
+                    &alloc::format!("ciclos {QUANTIA_DA_CARGA}"),
+                    &alloc::format!("confirmar {QUANTIA_DA_CARGA}"),
+                ],
+            );
+            let (g, v) = gerir(sessao, &carga)?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            conferir_chamadas(
+                &g,
+                &c.impressao,
+                &[(
+                    "icp.update",
+                    assunto_do_ledger_de_ciclos("withdraw"),
+                    "verified",
+                )],
+            )?;
+            if !g
+                .linha("carregado bloco ")
+                .is_some_and(|b| b.parse::<u128>().is_ok())
+            {
+                crate::log_error!("teste", "{:?}", g);
+                return Err("a carga nao disse o bloco");
+            }
+            // O mesmo pedido de novo — antes de outro no lugar dele — não
+            // executa.
+            let g = rodar_o_gestor(crate::autorizacao::Autoridade::Pessoa { sessao })?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_REPETIDO, "repeated", Some(v))?;
+            conferir_chamadas(&g, &c.impressao, &[])?;
+            if c.carteira.saldo(true, 1)? != c.ciclos - QUANTIA_DA_CARGA - TAXA_DE_CICLOS {
+                return Err("a carga nao custou a quantia e a taxa, uma vez");
+            }
+            let depois = cycles_do_canister(&mut fios)?;
+            if depois + GASTO_ENTRE_ESTADOS < antes + QUANTIA_DA_CARGA {
+                crate::log_error!("teste", "{} -> {}", antes, depois);
+                return Err("os cycles da carga nao chegaram ao canister");
+            }
+
+            // A recarga, 1 ICP.
+            let icp_antes = c.carteira.saldo(false, 1)?;
+            let (g, v) = gerir(
+                sessao,
+                &pedido_ao_gestor(
+                    "recarregar",
+                    "chave:bancada",
+                    &[
+                        &com_canister,
+                        &alloc::format!("icp {QUANTIA_DA_CARTEIRA}"),
+                        &alloc::format!("confirmar {QUANTIA_DA_CARTEIRA}"),
+                    ],
+                ),
+            )?;
+            fios.push(g.fio);
+            g.conferir(GESTOR_FEITO, "verified", Some(v))?;
+            conferir_chamadas(
+                &g,
+                &c.impressao,
+                &[
+                    (
+                        "icp.update",
+                        alloc::format!("{LEDGER_DE_ICP_DA_BANCADA}/icrc1_transfer"),
+                        "verified",
+                    ),
+                    (
+                        "icp.update",
+                        alloc::format!("{CMC_DA_BANCADA}/notify_top_up"),
+                        "verified",
+                    ),
+                ],
+            )?;
+            let cunhados: u128 = g
+                .linha("recarregado bloco ")
+                .and_then(|l| l.split_once(" cycles "))
+                .and_then(|(_, n)| n.parse().ok())
+                .ok_or("a recarga nao disse os cycles")?;
+            if c.carteira.saldo(false, 1)? != icp_antes - QUANTIA_DA_CARTEIRA - TAXA_DO_LEDGER {
+                return Err("a recarga nao custou o ICP e a taxa");
+            }
+            let recarregado = cycles_do_canister(&mut fios)?;
+            if cunhados == 0 || recarregado + GASTO_ENTRE_ESTADOS < depois + cunhados {
+                crate::log_error!("teste", "{} + {} -> {}", depois, cunhados, recarregado);
+                return Err("os cycles da recarga nao chegaram ao canister");
+            }
+            for fio in &fios {
+                o_gestor_so_na_alegacao(*fio, &[canister])?;
+                o_valor_so_na_alegacao(*fio)?;
+            }
+            Ok(())
+        })();
+        let fim = c.carteira.encerrar();
         crate::chaves::esquecer_de_teste();
         r.and(fim)
     })

@@ -6,7 +6,9 @@
 # quando alguém o pede, pelo botão "Run workflow" da aba Actions. O GitHub
 # só oferece o botão para um fluxo que está no ramo padrão; o ramo que
 # roda é o que se escolhe nele. Só leitura: uma consulta anônima ao
-# livro-razão do ICP, e nada que mude estado na rede principal.
+# livro-razão do ICP, e as duas consultas assinadas do gestor — o saldo de
+# uma chave nova, sem fundos, no ledger de ICP e no de cycles —; nada que
+# mude estado, nem que mova valor, na rede principal.
 #
 # O runner tem o que a fumaça precisa e uma máquina atrás de um proxy não
 # tem: DNS de verdade e a porta 443 sem ninguém reabrindo o TLS. O

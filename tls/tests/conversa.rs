@@ -617,6 +617,30 @@ fn cada_suite_conversa_com_o_ring() {
     }
 }
 
+/// A preferência do cliente: o servidor que segue a ordem dele — o do
+/// `rustls`, por padrão — escolhe o ChaCha20-Poly1305, o mais rápido em
+/// software; o que segue a própria escolhe pela dele, e o cliente aceita
+/// qualquer uma do perfil.
+#[test]
+fn a_preferencia_do_cliente_e_o_chacha20() {
+    let raiz = raiz();
+    let mut s = conectar(Bancada::nova(config(folha(&raiz))), &ancoras(&raiz)).unwrap();
+    assert_eq!(s.suite(), Some("TLS13_CHACHA20_POLY1305_SHA256"));
+    eco(&mut s, b"pela ordem do cliente");
+    let provedor = CryptoProvider {
+        cipher_suites: vec![
+            anel::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            anel::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+        ],
+        ..anel::default_provider()
+    };
+    let mut c = config_com(provedor, folha(&raiz));
+    c.ignore_client_order = true;
+    let mut s = conectar(Bancada::nova(c), &ancoras(&raiz)).unwrap();
+    assert_eq!(s.suite(), Some("TLS13_AES_256_GCM_SHA384"));
+    eco(&mut s, b"pela ordem do servidor");
+}
+
 /// Cada grupo de troca de chaves. O cliente manda a parte do X25519 no
 /// `ClientHello`; com o servidor só em P-256, o servidor pede outra
 /// (`HelloRetryRequest`), e o cliente a gera — o caminho do segundo aperto.

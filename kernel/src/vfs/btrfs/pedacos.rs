@@ -33,8 +33,8 @@
 /// o `mkfs.btrfs` põe em degraus de 8 MiB conforme o conteúdo cresce: nove
 /// com os 38 MB de hoje. Na partição de 160 MiB cabem no máximo doze —
 /// dez de dados, com o de sistema e o de metadados em dobro. Eram oito, e
-/// a imagem do gestor de canisters, com os módulos dele nas bordas do
-/// tamanho, passou: o volume não abria. O número existe para que um mapa
+/// a imagem com os módulos de teste de até 8 MiB passou: o volume não
+/// abria. O número existe para que um mapa
 /// absurdo vire um teto em vez de crescer com o que o disco disser.
 pub const MAX: usize = 16;
 
