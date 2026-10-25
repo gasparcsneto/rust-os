@@ -1196,12 +1196,15 @@ caminhos deram os mesmos dois nós, e o resultado não depende disso.
 
 **O gestor na rede principal.** O passo do gestor (itens 3, 7 e 8) entrou
 na fumaça com o ciclo de uso real e rodou pelo fluxo em 25 de outubro de
-2026, no x86, com o kernel de produção em release:
+2026, com o kernel de produção em release — no x86 e, depois que a fumaça
+passou a ter estado e kernel próprios, também no ARM:
 
 | execução | commit | o desfecho |
 |---|---|---|
 | 40212402682 | `c6491a2` | não fechou. O `livro` e os dois saldos verificaram, e o gate recusou os dois programas antes da política e depois da revogação; a auditoria do saldo contou duas recusas — os `fs.mkdir` dos diretórios do registro, que já existiam: o gestor os pedia a cada execução, e cada um virava uma recusa na auditoria, que o tecido lê. O gestor passou a consultar antes de criar, e o caso do ciclo de vida da suíte, a conferir que uma execução que anda não deixa recusa |
 | 40213186798 | `ee7ec6e` | **fechou** |
+| 40222917485 | `cc2f3a7` | **fechou**, no x86, com o estado em `target/mainnet/` e o kernel compilado em `kernel/target/fumaca`: o `livro` por `23.142.184.129`, saiu com 85 em 1 665 ms; o saldo, 90 em 2 689 ms, com 95 registros do processo e nenhuma recusa |
+| 40222919118 | `cc2f3a7` | **fechou**, no ARM — o primeiro gestor do ARM na rede principal: o `livro` por `38.96.31.203`, saiu com 85 em 965 ms; o saldo, 90 em 1 885 ms, com 88 registros do processo e nenhuma recusa |
 
 A que fecha, com o relatório `relatorio-2026-10-25T165018.md` no artefato
 `relatorio-mainnet-x86_64`:
@@ -1247,13 +1250,16 @@ próprio `livro` no emulador sem aceleração do runner, foram:
 | 39889242601 | ARM | 10 ms | 0 ms | 50 ms | 120 ms | 630 ms | 60 ms | 870 ms | 1 182 ms |
 | 39891593000, fora do critério | x86 | 0 ms | 10 ms | 50 ms | 100 ms | 640 ms | 60 ms | 860 ms | 1 294 ms |
 | 40213186798, com o ChaCha20 | x86 | 10 ms | 0 ms | 20 ms | 120 ms | 370 ms | 80 ms | 600 ms | 1 464 ms |
+| 40222917485, com o ChaCha20 | x86 | 0 ms | 0 ms | 60 ms | 130 ms | 710 ms | 80 ms | 990 ms | 1 665 ms |
+| 40222919118, com o ChaCha20 | ARM | 10 ms | 0 ms | 20 ms | 90 ms | 330 ms | 70 ms | 520 ms | 965 ms |
 
 O HTTP — os dois `POST`, o `read_state` e o `query`, até a rede principal
 e de volta — é a maior parte. O DNS da consulta veio do cache do
 resolvedor: na rodada antes da política, a mesma pergunta levou de 40 a
 60 ms. O saldo do `gestor`, na execução 40213186798 — as duas consultas
 assinadas, cada uma com a leitura das faixas, e o pedido, a resposta e o
-registro no armazém —, levou 3 084 ms do lançamento à saída.
+registro no armazém —, levou 3 084 ms do lançamento à saída; nas de
+`cc2f3a7`, 2 689 ms no x86 e 1 885 ms no ARM.
 
 O que dá para medir sem a rede é a verificação dos certificados de
 verdade, no hospedeiro, nativa (`cargo test -p web3 --release -- --ignored

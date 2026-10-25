@@ -6571,7 +6571,9 @@ principal e só então diz o símbolo. O kernel, a política, o gate e o
   `TLS13_CHACHA20_POLY1305_SHA256`; os dois saldos da chave nova
   verificados, com uma declaração ancorada em cada assinatura e nenhuma
   recusa na auditoria; e o gate recusando os dois programas antes da
-  política e depois da revogação.
+  política e depois da revogação. Com a fumaça em estado e kernel
+  próprios, fechou de novo no x86 e, pela primeira vez com o gestor, no
+  ARM (execuções 40222917485 e 40222919118).
 
 O resto — a configuração, o DNS, os casos, a fumaça real, as medidas, as
 mutações e o que fica de fora — está em [A rede
