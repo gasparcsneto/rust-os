@@ -8090,8 +8090,8 @@ fn btrfs_raiz_montada() -> Resultado {
 
     // E o subdiretório tem o que é dele, e só: a nota, o diretório das
     // âncoras do TLS, com a da bancada e as públicas dentro, e o do IC, com
-    // o arquivo das redes e o diretório dos módulos que a `implantacao`
-    // instala.
+    // o arquivo das redes e o diretório dos módulos que a `implantacao` e o
+    // `gestor` instalam.
     let dados = conteudo("/dados")?;
     let esperado_em_dados = [
         (alloc::string::String::from("icp"), Tipo::Diretorio),
@@ -8122,18 +8122,16 @@ fn btrfs_raiz_montada() -> Resultado {
     }
     let modulos = conteudo("/dados/icp/modulos")?;
     let esperado_em_modulos = [
-        (
-            alloc::string::String::from("implantavel-a.wasm"),
-            Tipo::Arquivo,
-        ),
-        (
-            alloc::string::String::from("implantavel-b.wasm"),
-            Tipo::Arquivo,
-        ),
-    ];
+        "gestor-dois.wasm",
+        "gestor-inteiro.wasm",
+        "gestor-teto.wasm",
+        "implantavel-a.wasm",
+        "implantavel-b.wasm",
+    ]
+    .map(|n| (alloc::string::String::from(n), Tipo::Arquivo));
     if modulos != esperado_em_modulos {
         crate::log_error!("teste", "/dados/icp/modulos listou {:?}", modulos);
-        return Err("o diretorio dos modulos nao tem so os dois modulos");
+        return Err("o diretorio dos modulos nao tem so os cinco modulos");
     }
 
     // E `/programas` tem uma arquitetura por diretório, as duas, e nada mais:

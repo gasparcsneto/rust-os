@@ -13,6 +13,7 @@
 //! chave chave:bancada
 //! canister lxzze-o7777-77777-aaaaa-cai
 //! modulo /armazem/compartilhado/modulos/meu.wasm
+//! sha256 9b6cc41ff390673f7c41030d1764a945419bff2dd7260bf37e8cb6a4e82d6590
 //! modo reinstall
 //! confirmar lxzze-o7777-77777-aaaaa-cai
 //! ```
@@ -26,7 +27,7 @@
 //! |---|---|---|
 //! | `saldo` | o saldo da chave no ledger de ICP e no de cycles, por consulta assinada | — |
 //! | `criar` | um canister novo, pago com cycles da chave | `ciclos`, `confirmar` = `ciclos` |
-//! | `instalar` | o módulo no canister: `install`, `upgrade` ou `reinstall` | `canister`, `modulo`, `modo`, `argumento`?; no `reinstall`, `confirmar` = `canister` |
+//! | `instalar` | o módulo no canister: `install`, `upgrade` ou `reinstall` | `canister`, `modulo`, `sha256`, `modo`, `argumento`?; no `reinstall`, `confirmar` = `canister` |
 //! | `estado` | a situação, o módulo, os controladores, os cycles | `canister` |
 //! | `parar`, `iniciar` | para e volta a executar | `canister` |
 //! | `controladores` | troca os controladores | `canister`, `controlador`+, `confirmar` = `canister` |
@@ -46,6 +47,11 @@
 //! controla, e a quantia de uma que move valor. É contra o engano, e não
 //! autoridade: quem decide se a chave assina continua sendo o gate, a cada
 //! assinatura.
+//!
+//! A instalação diz o SHA-256 do módulo, e o programa só instala os bytes
+//! que têm esse resumo: o arquivo do módulo pode estar onde outra pessoa
+//! grava — o armazém compartilhado —, e o que a chave instala é o que o
+//! pedido de quem a tem diz, e não o que estiver no caminho.
 //!
 //! E duas regras que o IC não tem: os controladores novos têm de incluir o
 //! Principal da própria chave ([`conferir_controladores`]) — sem ele, a
@@ -190,6 +196,8 @@ pub struct Pedido {
     pub canister: Option<Principal>,
     /// O módulo, na instalação.
     pub modulo: Option<String>,
+    /// O SHA-256 do módulo, na instalação.
+    pub sha256: Option<Hash>,
     /// O modo, na instalação.
     pub modo: Option<Modo>,
     /// O argumento da instalação, em Candid; `()` sem ele.
@@ -293,6 +301,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
     let mut chave = None;
     let mut canister = None;
     let mut modulo = None;
+    let mut sha256 = None;
     let mut modo = None;
     let mut argumento = None;
     let mut ciclos = None;
@@ -349,6 +358,12 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
                     return Err(erro(n, "modulo sem caminho absoluto"));
                 }
                 uma(&mut modulo, n, String::from(valor))?;
+            }
+            "sha256" => {
+                let h = de_hex(valor)
+                    .and_then(|b| <Hash>::try_from(b.as_slice()).ok())
+                    .ok_or(erro(n, "sha256 fora da forma"))?;
+                uma(&mut sha256, n, h)?;
             }
             "modo" => {
                 let m = match valor {
@@ -414,7 +429,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
     let usa = |campo: &str| -> bool {
         match campo {
             "canister" => acao.tem_canister(),
-            "modulo" | "modo" | "argumento" => acao == Acao::Instalar,
+            "modulo" | "sha256" | "modo" | "argumento" => acao == Acao::Instalar,
             "ciclos" => matches!(acao, Acao::Criar | Acao::Carregar),
             "icp" => acao == Acao::Recarregar,
             "controlador" => acao == Acao::Controladores,
@@ -430,6 +445,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
     };
     sobra("canister", canister.as_ref().map(|(n, _)| *n))?;
     sobra("modulo", modulo.as_ref().map(|(n, _)| *n))?;
+    sobra("sha256", sha256.as_ref().map(|(n, _)| *n))?;
     sobra("modo", modo.as_ref().map(|(n, _)| *n))?;
     sobra("argumento", argumento.as_ref().map(|(n, _)| *n))?;
     sobra("ciclos", ciclos.as_ref().map(|(n, _)| *n))?;
@@ -444,6 +460,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
                 motivo: match campo {
                     "canister" => "pedido sem canister",
                     "modulo" => "pedido sem modulo",
+                    "sha256" => "pedido sem sha256",
                     "modo" => "pedido sem modo",
                     "ciclos" => "pedido sem ciclos",
                     "icp" => "pedido sem icp",
@@ -456,6 +473,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
     };
     falta("canister", canister.is_some())?;
     falta("modulo", modulo.is_some())?;
+    falta("sha256", sha256.is_some())?;
     falta("modo", modo.is_some())?;
     falta("ciclos", ciclos.is_some())?;
     falta("icp", icp.is_some())?;
@@ -498,6 +516,7 @@ pub fn ler_pedido(texto: &str) -> Result<Pedido, Erro> {
         chave,
         canister,
         modulo: modulo.map(|(_, m)| m),
+        sha256: sha256.map(|(_, h)| h),
         modo,
         argumento: argumento.map_or_else(|| Vec::from(VAZIO), |(_, a)| a),
         ciclos,

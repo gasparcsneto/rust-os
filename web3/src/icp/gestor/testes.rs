@@ -13,6 +13,8 @@ const CANISTER: &str = "lxzze-o7777-77777-aaaaa-cai";
 const OUTRO: &str = "qpsvj-4l777-77775-qaaaa-cai";
 /// O Principal auto-autenticado de uma chave Ed25519 qualquer.
 const DA_CHAVE: &str = "hpikg-6exdt-jn33w-ndty3-fc7jc-tl2lr-buih3-cs3y7-tftkp-sfp62-gqe";
+/// O SHA-256 de um módulo, como o pedido o diz.
+const SHA: &str = "sha256 9b6cc41ff390673f7c41030d1764a945419bff2dd7260bf37e8cb6a4e82d6590";
 
 fn p(texto: &str) -> Principal {
     Principal::de_texto(texto).unwrap()
@@ -56,6 +58,7 @@ fn cada_acao_com_o_que_ela_pede() {
         &[
             &format!("canister {CANISTER}"),
             "modulo /dados/icp/modulos/a.wasm",
+            SHA,
             "modo upgrade",
         ],
     )
@@ -64,6 +67,10 @@ fn cada_acao_com_o_que_ela_pede() {
     assert_eq!(
         instalar.modulo.as_deref(),
         Some("/dados/icp/modulos/a.wasm")
+    );
+    assert_eq!(
+        instalar.sha256.map(|h| h[..2].to_vec()),
+        Some(vec![0x9b, 0x6c])
     );
     assert_eq!(instalar.modo, Some(Modo::Atualizar));
     // Sem argumento, o vazio do Candid.
@@ -74,6 +81,7 @@ fn cada_acao_com_o_que_ela_pede() {
         &[
             &format!("canister {CANISTER}"),
             "modulo /armazem/compartilhado/m.wasm",
+            SHA,
             "modo install",
             "argumento 4449444c00017107616263646566",
         ],
@@ -87,6 +95,7 @@ fn cada_acao_com_o_que_ela_pede() {
         &[
             &format!("canister {CANISTER}"),
             "modulo /m.wasm",
+            SHA,
             "modo reinstall",
             &format!("confirmar {CANISTER}"),
         ],
@@ -197,7 +206,15 @@ fn o_que_falta_recusa() {
         "pedido sem modulo"
     );
     assert_eq!(
-        com("instalar", &[&c, "modulo /m.wasm"]).unwrap_err().motivo,
+        com("instalar", &[&c, "modulo /m.wasm", "modo upgrade"])
+            .unwrap_err()
+            .motivo,
+        "pedido sem sha256"
+    );
+    assert_eq!(
+        com("instalar", &[&c, "modulo /m.wasm", SHA])
+            .unwrap_err()
+            .motivo,
         "pedido sem modo"
     );
     assert_eq!(
@@ -282,7 +299,25 @@ fn os_valores_fora_da_forma() {
     assert_eq!(fora(&["chave bancada"]), "chave sem o prefixo chave:");
     assert_eq!(fora(&["chave chave:"]), "nome de chave fora da forma");
     let c = format!("canister {CANISTER}");
-    let em = |mais: &str| com("instalar", &[&c, "modo upgrade", "modulo /m", mais]);
+    let em = |mais: &str| com("instalar", &[&c, "modo upgrade", "modulo /m", SHA, mais]);
+    for sha in [
+        "sha256 9b6c",
+        "sha256 XX",
+        &format!("sha256 {}", "0".repeat(66)),
+    ] {
+        assert_eq!(
+            com("instalar", &[&c, "modo upgrade", "modulo /m", sha])
+                .unwrap_err()
+                .motivo,
+            "sha256 fora da forma",
+            "{sha}"
+        );
+    }
+    // O sha256 é só da instalação.
+    assert_eq!(
+        com("estado", &[&c, SHA]).unwrap_err().motivo,
+        "campo que a acao nao usa"
+    );
     assert_eq!(
         com("estado", &["canister nao-e-principal"])
             .unwrap_err()
@@ -441,7 +476,7 @@ fn a_confirmacao_e_o_que_a_acao_mexe() {
         "pedido sem confirmar"
     );
     assert_eq!(
-        com("instalar", &[&c, "modulo /m", "modo reinstall"])
+        com("instalar", &[&c, "modulo /m", SHA, "modo reinstall"])
             .unwrap_err()
             .motivo,
         "pedido sem confirmar"
@@ -491,6 +526,7 @@ fn a_confirmacao_e_o_que_a_acao_mexe() {
             &[
                 &c,
                 "modulo /m",
+                SHA,
                 "modo upgrade",
                 &format!("confirmar {CANISTER}")
             ]

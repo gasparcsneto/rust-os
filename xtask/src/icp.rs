@@ -369,13 +369,53 @@ pub(crate) const MODULOS: [(&str, &str); 2] = [
     ("dados/icp/modulos/implantavel-b.wasm", "B"),
 ];
 
-/// Os módulos da gestão de canister, com o caminho de cada um na imagem —
-/// ver [`modulo_estavel`].
+/// Os módulos do gestor de canisters nas bordas do tamanho, o caminho de
+/// cada um na imagem, a versão e o tamanho exato: o que cabe num pedaço de
+/// 1 MiB e vai inteiro, o de um byte a mais, que vai em dois pedaços — o
+/// segundo de um byte —, e o do teto do gestor, 8 MiB, em oito. O acima do
+/// teto a suíte grava no armazém.
+pub(crate) const MODULOS_DO_GESTOR: [(&str, &str, usize); 3] = [
+    ("dados/icp/modulos/gestor-inteiro.wasm", "I", 1 << 20),
+    ("dados/icp/modulos/gestor-dois.wasm", "D", (1 << 20) + 1),
+    ("dados/icp/modulos/gestor-teto.wasm", "T", 8 << 20),
+];
+
+/// Os módulos da gestão de canister e os do gestor, com o caminho de cada
+/// um na imagem — ver [`modulo_estavel`] e [`modulo_com_tamanho`].
 pub(crate) fn modulos() -> Vec<(String, Vec<u8>)> {
     MODULOS
         .iter()
         .map(|(caminho, versao)| (caminho.to_string(), modulo_estavel(versao)))
+        .chain(MODULOS_DO_GESTOR.iter().map(|(caminho, versao, total)| {
+            (caminho.to_string(), modulo_com_tamanho(versao, *total))
+        }))
         .collect()
+}
+
+/// O [`modulo_estavel`] da `versao` com exatamente `total` bytes: o que
+/// falta vai num segmento de dados a mais, na segunda página da memória em
+/// diante, de bytes pseudoaleatórios da versão — cada pedaço de 1 MiB com
+/// um hash dele, como um módulo de verdade. O segmento não muda o que o
+/// módulo faz.
+fn modulo_com_tamanho(versao: &str, total: usize) -> Vec<u8> {
+    let base = modulo(versao, 0).len();
+    assert!(total > base + 64, "o tamanho pedido nao cabe o modulo");
+    // O enchimento de `n` bytes soma `n` mais os campos que crescem com
+    // ele — o tamanho do segmento, o da seção, as páginas da memória —; de
+    // perto, um byte a mais no enchimento é um a mais no módulo.
+    let mut n = total - base - 16;
+    loop {
+        let m = modulo(versao, n);
+        match m.len().cmp(&total) {
+            std::cmp::Ordering::Equal => return m,
+            std::cmp::Ordering::Less => n += total - m.len(),
+            std::cmp::Ordering::Greater => {
+                n = n
+                    .checked_sub(m.len() - total)
+                    .expect("o enchimento nao chega ao tamanho");
+            }
+        }
+    }
 }
 
 /// O LEB128 sem sinal de `n`.
@@ -411,6 +451,13 @@ fn sleb(mut n: i64) -> Vec<u8> {
 /// upgrade, o `contar` continua de onde estava; depois de um reinstall,
 /// recomeça do 1. A versão diz que módulo o canister roda.
 fn modulo_estavel(versao: &str) -> Vec<u8> {
+    modulo(versao, 0)
+}
+
+/// O [`modulo_estavel`], com `enchimento` bytes num segmento de dados a
+/// mais, a partir da segunda página — zero, sem o segmento: os bytes do
+/// estável.
+fn modulo(versao: &str, enchimento: usize) -> Vec<u8> {
     fn vetor(itens: &[Vec<u8>]) -> Vec<u8> {
         let mut v = leb(itens.len());
         for item in itens {
@@ -524,7 +571,10 @@ fn modulo_estavel(versao: &str) -> Vec<u8> {
     .concat();
     let corpos = [corpo_da_versao, corpo_do_contar];
     let funcoes = vetor(&corpos.iter().map(|_| leb(0)).collect::<Vec<_>>());
-    let memoria = vetor(&[vec![0x00, 0x01]]);
+    // A primeira página, com as respostas; e as do enchimento, se há.
+    const PAGINA: usize = 64 * 1024;
+    let paginas = 1 + enchimento.div_ceil(PAGINA);
+    let memoria = vetor(&[[vec![0x00], leb(paginas)].concat()]);
     let primeira = importacoes.len();
     let exporta = vetor(&[
         [nome("canister_query versao"), vec![0x00], leb(primeira)].concat(),
@@ -545,7 +595,7 @@ fn modulo_estavel(versao: &str) -> Vec<u8> {
             })
             .collect::<Vec<_>>(),
     );
-    let dados = vetor(&[
+    let mut segmentos = vec![
         [
             vec![0x00],
             i32_const(em_texto),
@@ -562,7 +612,32 @@ fn modulo_estavel(versao: &str) -> Vec<u8> {
             contador,
         ]
         .concat(),
-    ]);
+    ];
+    if enchimento > 0 {
+        // Um xorshift de 64 bits semeado pela versão.
+        let mut x = versao.bytes().fold(0x9e37_79b9_7f4a_7c15_u64, |a, b| {
+            (a ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+        });
+        let bytes: Vec<u8> = (0..enchimento)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        segmentos.push(
+            [
+                vec![0x00],
+                i32_const(PAGINA),
+                vec![0x0b],
+                leb(enchimento),
+                bytes,
+            ]
+            .concat(),
+        );
+    }
+    let dados = vetor(&segmentos);
     [
         b"\x00asm\x01\x00\x00\x00".to_vec(),
         secao(1, &tipos),
@@ -637,7 +712,7 @@ mod testes {
     #[test]
     fn os_modulos_da_gestao() {
         let modulos = modulos();
-        assert_eq!(modulos.len(), 2);
+        assert_eq!(modulos.len(), 2 + MODULOS_DO_GESTOR.len());
         let resumos = [
             "9b6cc41ff390673f7c41030d1764a945419bff2dd7260bf37e8cb6a4e82d6590",
             "4b80bb110309a6ba48366c96d3350bcf40688754e6a8bfc02f28ee9dc887d317",
@@ -651,10 +726,102 @@ mod testes {
         }
         // Os dois diferem só na versão, um byte da resposta dela.
         let (a, b) = (&modulos[0].1, &modulos[1].1);
+        assert_eq!(modulo_estavel("A"), *a);
         assert_eq!(a.len(), b.len());
         let diferentes: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
         assert_eq!(diferentes.len(), 1);
         assert_eq!((a[diferentes[0]], b[diferentes[0]]), (b'A', b'B'));
+    }
+
+    /// Um LEB128 sem sinal de `b` a partir de `i`: o valor e onde acaba.
+    fn ler_leb(b: &[u8], mut i: usize) -> (usize, usize) {
+        let (mut v, mut deslocamento) = (0usize, 0);
+        loop {
+            let byte = b[i];
+            i += 1;
+            v |= usize::from(byte & 0x7f) << deslocamento;
+            if byte & 0x80 == 0 {
+                return (v, i);
+            }
+            deslocamento += 7;
+        }
+    }
+
+    /// Os módulos do gestor têm o tamanho exato de cada borda, a forma do
+    /// Wasm — as seções em ordem, cada uma do tamanho que diz —, o
+    /// enchimento dentro das páginas da memória, e cada pedaço de 1 MiB
+    /// com um hash próprio. O código e as respostas são os do estável: só
+    /// o enchimento muda.
+    #[test]
+    fn os_modulos_do_gestor_nas_bordas() {
+        const PEDACO: usize = 1 << 20;
+        let todos = modulos();
+        let mut hashes = std::collections::BTreeSet::new();
+        for (caminho, versao, total) in MODULOS_DO_GESTOR {
+            let m = &todos.iter().find(|(c, _)| c == caminho).unwrap().1;
+            assert_eq!(m.len(), total, "{caminho}");
+            assert!(m.starts_with(b"\x00asm\x01\x00\x00\x00"));
+            // As seções, em ordem, até o fim exato.
+            let (mut i, mut anterior, mut paginas, mut dados) = (8, 0u8, 0, None);
+            while i < m.len() {
+                let id = m[i];
+                assert!(id > anterior, "{caminho}: secao {id} fora de ordem");
+                anterior = id;
+                let (n, inicio) = ler_leb(m, i + 1);
+                match id {
+                    5 => paginas = ler_leb(m, inicio + 2).0,
+                    11 => dados = Some(inicio),
+                    _ => {}
+                }
+                i = inicio + n;
+            }
+            assert_eq!(i, m.len(), "{caminho}");
+            // O terceiro segmento: ativo, na segunda página, dentro da memória.
+            let mut j = dados.unwrap();
+            let (segmentos, k) = ler_leb(m, j);
+            assert_eq!(segmentos, 3);
+            j = k;
+            for s in 0..3 {
+                // Ativo, com o deslocamento num `i32.const` e o `end`.
+                assert_eq!(m[j..j + 2], [0x00, 0x41], "segmento ativo");
+                let (deslocamento, fim_do_i32) = ler_leb(m, j + 2);
+                assert_eq!(m[fim_do_i32], 0x0b);
+                let (n, inicio) = ler_leb(m, fim_do_i32 + 1);
+                if s == 2 {
+                    // O LEB com sinal de 65 536 lido sem sinal é o mesmo:
+                    // o último byte não tem o bit do sinal.
+                    assert_eq!(deslocamento, 64 * 1024);
+                    assert!(deslocamento + n <= paginas * 64 * 1024, "{caminho}");
+                    assert!(n > total - 1024);
+                }
+                j = inicio + n;
+            }
+            assert_eq!(j, m.len());
+            // Os pedaços de 1 MiB: quantos o gestor manda, cada um outro.
+            let pedacos: Vec<&[u8]> = m.chunks(PEDACO).collect();
+            assert_eq!(pedacos.len(), total.div_ceil(PEDACO));
+            for p in pedacos {
+                assert!(hashes.insert(resumo(p)), "{caminho}: pedaco repetido");
+            }
+            // O começo — tipos, importações, funções, exportações, código e
+            // as respostas — é o do estável da mesma versão.
+            let estavel = modulo_estavel(versao);
+            let codigo = |b: &[u8]| -> Vec<u8> {
+                let (mut i, mut v) = (8, Vec::new());
+                while i < b.len() {
+                    let (n, inicio) = ler_leb(b, i + 1);
+                    if ![5, 11].contains(&b[i]) {
+                        v.extend_from_slice(&b[i..inicio + n]);
+                    }
+                    i = inicio + n;
+                }
+                v
+            };
+            assert_eq!(codigo(m), codigo(&estavel), "{caminho}");
+        }
+        // As versões que se dizem são as das bordas, e os da gestão não
+        // mudaram.
+        assert_eq!(todos.len(), 5);
     }
 
     /// O LEB128 com sinal, nas bordas de um byte — as constantes do

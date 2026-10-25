@@ -5274,13 +5274,14 @@ mod disco {
     ///
     /// # Por que cento e sessenta mebibytes
     ///
-    /// O conteúdo é bem menor — uns 26 MB, quase tudo programas das duas
-    /// arquiteturas —, mas o `mkfs.btrfs --rootdir` não formata pelo que o
-    /// conteúdo ocupa: ele estima, com folga para os metadados em dobro e
-    /// em degraus de 8 MiB de dados, e aumenta o arquivo, calado, quando a
-    /// estimativa não cabe. Passados 24 MiB de conteúdo, a da versão 6.6.3
-    /// é de 133 MiB: com 128, o programa `implantacao` (ICP-4e) já não
-    /// cabia. Com 160, o conteúdo pode quase dobrar.
+    /// O conteúdo é bem menor — uns 38 MB: os programas das duas
+    /// arquiteturas, e 10 MiB dos módulos do gestor nas bordas do tamanho
+    /// —, mas o `mkfs.btrfs --rootdir` não formata pelo que o conteúdo
+    /// ocupa: ele estima, com folga para os metadados em dobro e em degraus
+    /// de 8 MiB de dados, e aumenta o arquivo, calado, quando a estimativa
+    /// não cabe. Passados 24 MiB de conteúdo, a da versão 6.6.3 é de
+    /// 133 MiB: com 128, o programa `implantacao` (ICP-4e) já não cabia.
+    /// Com 160, os 38 MB cabem — e a montagem confere, depois do `mkfs`.
     pub const RAIZ_EM: u64 = ESP_EM + ESP_SETORES;
     pub const RAIZ_SETORES: u64 = 160 * 1024 * 1024 / 512;
 
@@ -5880,8 +5881,8 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // [`icp`].
     programas.push((icp::REDES_NA_IMAGEM.to_string(), icp::redes().into_bytes()));
     // E os módulos da gestão de canister: o que o programa `implantacao`
-    // instala num canister da bancada, e o que põe no lugar dele — ver
-    // [`icp::modulos`].
+    // instala num canister da bancada, o que põe no lugar dele, e os do
+    // `gestor` nas bordas do tamanho — ver [`icp::modulos`].
     programas.extend(icp::modulos());
     // E as âncoras públicas: as raízes da autoridade do endpoint da rede
     // principal, do repositório, conferidas pela impressão — ver

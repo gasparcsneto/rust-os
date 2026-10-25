@@ -17,23 +17,35 @@
 //!
 //! - **o arrendamento**: o programa arrenda o pedido (`fs.claim`) enquanto
 //!   trabalha — ninguém mais o muda até ele acabar —, e o solta no fim;
+//! - **quem pediu**: o pedido tem de ter sido gravado pela identidade que
+//!   lançou o programa — o dono que o armazém diz dele é o da resposta que
+//!   o programa grava ao começar. O armazém compartilhado deixa outra
+//!   pessoa gravar ali, e ela não escolhe o que a chave de quem lançou
+//!   assina;
 //! - **o pedido**: a versão dele pelo `fs.stat`, o texto por um `abrir` só,
-//!   o SHA-256 do texto, e as regras: o que falta, sobra ou não confirma
-//!   recusa o pedido antes de qualquer outra coisa;
+//!   conferido pela versão depois de lido, o SHA-256 do texto, e as regras:
+//!   o que falta, sobra ou não confirma recusa o pedido antes de qualquer
+//!   outra coisa;
 //! - **a chave**: `key.read` — o Principal dela confere a regra dos
 //!   controladores, e nomeia o registro;
-//! - **o registro**: lido inteiro, ou nada — o que não se entende para o
-//!   programa, sem sobrescrever; e o plano: o pedido que acabou não repete,
-//!   o mesmo texto em andamento retoma com a mesma hora, e outro em
-//!   andamento bloqueia. Antes de mandar o que muda alguma coisa, o pedido
-//!   vai para o registro como em andamento, pela versão que se leu: dois
-//!   programas não executam o mesmo pedido;
+//! - **o registro**: lido inteiro, ou nada — o que não se entende, o de
+//!   outro dono e o que muda durante a leitura param o programa, sem
+//!   sobrescrever; e o plano: o pedido que acabou não repete, o mesmo texto
+//!   em andamento retoma com a mesma hora, e outro em andamento bloqueia —
+//!   a resposta diz o texto dele, para quem for repeti-lo. Antes de mandar
+//!   o que muda alguma coisa, o pedido vai para o registro como em
+//!   andamento, com o texto, pela versão que se leu: dois programas não
+//!   executam o mesmo pedido;
 //! - **as chamadas**: cada uma pelo caminho inteiro — o DNS, o destino no
 //!   gate, o TLS, os `POST`, a assinatura (`key.sign`, uma decisão por
 //!   assinatura) e a verificação —, declarada ancorada na decisão da
 //!   assinatura dela (`icp.update`; a consulta assinada, `icp.query`);
-//! - **o fim**: o registro com o pedido feito — ou ainda em andamento, se
-//!   o desfecho não foi provado — e os canisters, e a resposta.
+//! - **o fim**: o registro com o pedido feito, se o desfecho foi provado;
+//!   em andamento, se não foi e alguma chamada que muda alguma coisa foi
+//!   assinada — ela pode ter chegado ao IC —; e de volta ao que era, se
+//!   nenhuma foi: nada saiu, e o pedido se repete como novo. O estado só
+//!   lê, e os pedaços só enchem o depósito do canister: não contam. Depois,
+//!   os canisters, e a resposta.
 //!
 //! # Os módulos
 //!
@@ -45,6 +57,12 @@
 //! os hashes e o do módulo inteiro, somado aos poucos —, e o depósito de
 //! pedaços do canister é esvaziado no fim. O módulo que muda no meio da
 //! leitura para tudo antes da instalação.
+//!
+//! Só se instalam os bytes que têm o `sha256` do pedido: o inteiro confere
+//! antes do `install_code`, e o em pedaços, antes do
+//! `install_chunked_code` — o que não confere esvazia o depósito e não
+//! instala nada. O arquivo pode estar onde outra pessoa grava; o que a
+//! chave instala é o que o pedido diz.
 //!
 //! # O que o programa não é
 //!
@@ -107,6 +125,10 @@ const DNS_PADRAO: &str = "udp:10.0.2.3:53";
 const LEDGER_DE_ICP: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 const LEDGER_DE_CICLOS: &str = "um5iw-rqaaa-aaaaq-qaaba-cai";
 const CMC: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
+
+/// O maior `ler` que o kernel aceita de uma vez: o resto é
+/// `TAMANHO_INVALIDO`.
+const MAIOR_LEITURA: usize = 4096;
 
 /// Quanto o arrendamento do pedido dura: o teto, renovado pela atividade.
 const PRAZO_DO_ARRENDAMENTO_MS: u64 = 300_000;
@@ -207,7 +229,7 @@ fn ler_arquivo(caminho: &str, teto: usize) -> Result<Vec<u8>, String> {
     }
     let fd = fd as u64;
     let mut bytes = Vec::new();
-    let mut buffer = alloc::vec![0u8; 16 * 1024];
+    let mut buffer = alloc::vec![0u8; MAIOR_LEITURA];
     let r = loop {
         let n = sistema::ler(fd, &mut buffer);
         if n < 0 {
@@ -394,8 +416,13 @@ fn chamar(contexto: &Contexto, passo: &str, destino: Destino, metodo: &str, arg:
     })();
     let desfecho = icp::desfecho_da_chamada(r.as_ref().map(|(_, andamento)| andamento));
     // A chamada assinada pode ter saído — e, se muda alguma coisa, o pedido
-    // não volta atrás sozinho.
-    if metodo != "canister_status" && kernel.as_ref().is_some_and(|k| k.assinaturas() > 0) {
+    // não volta atrás sozinho. O estado só lê, e os pedaços só enchem o
+    // depósito do canister, sem mexer no módulo nem nos dados dele.
+    if !matches!(
+        metodo,
+        "canister_status" | "upload_chunk" | "clear_chunk_store"
+    ) && kernel.as_ref().is_some_and(|k| k.assinaturas() > 0)
+    {
         contexto.saidas.set(contexto.saidas.get() + 1);
     }
     let decisao = kernel
@@ -605,6 +632,7 @@ fn instalar(contexto: &Contexto, pedido: &Pedido, registro: &mut Registro, ns: u
     let canister = pedido.canister.expect("a instalacao tem canister");
     let caminho = pedido.modulo.as_deref().expect("a instalacao tem modulo");
     let modo = pedido.modo.expect("a instalacao tem modo");
+    let sha256 = pedido.sha256.expect("a instalacao tem sha256");
     // O tamanho antes de qualquer pedaço subir: o módulo acima do teto não
     // manda nada.
     let tamanho = match tamanho_de(caminho) {
@@ -622,7 +650,7 @@ fn instalar(contexto: &Contexto, pedido: &Pedido, registro: &mut Registro, ns: u
         return falhou("failed_module", format!("modulo {caminho}: abrir {fd}"));
     }
     let fd = fd as u64;
-    let r = instalar_do_descritor(contexto, &canister, modo, &pedido.argumento, fd);
+    let r = instalar_do_descritor(contexto, &canister, modo, &pedido.argumento, &sha256, fd);
     sistema::fechar(fd);
     match r {
         Ok((chamada, hash, n, pedacos)) => {
@@ -659,12 +687,22 @@ fn instalar(contexto: &Contexto, pedido: &Pedido, registro: &mut Registro, ns: u
     }
 }
 
-/// O resto da instalação, com o módulo aberto em `fd`.
+/// O módulo que não é o do pedido: nada se instala.
+fn outro_modulo(hash: &Hash) -> Feito {
+    falhou(
+        "failed_module",
+        format!("o modulo lido tem sha256 {}, e nao o do pedido", dito(hash)),
+    )
+}
+
+/// O resto da instalação, com o módulo aberto em `fd`: só os bytes que
+/// têm o `sha256` do pedido se instalam.
 fn instalar_do_descritor(
     contexto: &Contexto,
     canister: &Principal,
     modo: Modo,
     argumento: &[u8],
+    sha256: &Hash,
     fd: u64,
 ) -> Result<(Chamada, Hash, u64, usize), Feito> {
     let mut pedaco = alloc::vec![0u8; MAIOR_PEDACO];
@@ -698,6 +736,9 @@ fn instalar_do_descritor(
             // Cabe num pedaço: vai inteiro.
             let hash = soma.fim();
             escreverln!("gestor: modulo {} {} bytes inteiro", dito(&hash), total);
+            if hash != *sha256 {
+                return Err(outro_modulo(&hash));
+            }
             let arg = gerenciamento::argumento_da_instalacao(modo, canister, atual, argumento)
                 .map_err(|e| falhou("failed_module", format!("{e}")))?;
             let c = chamar(
@@ -747,6 +788,21 @@ fn instalar_do_descritor(
         total,
         hashes.len()
     );
+    if hash != *sha256 {
+        // Os pedaços que subiram não instalam nada: o depósito se esvazia.
+        let limpeza = chamar(
+            contexto,
+            "limpeza",
+            Destino::Gerenciamento(*canister),
+            "clear_chunk_store",
+            &gerenciamento::argumento_do_canister(canister),
+        );
+        let mut f = outro_modulo(&hash);
+        f.fim
+            .linhas
+            .push(format!("deposito de pedacos: {}", limpeza.desfecho));
+        return Err(f);
+    }
     let arg = gerenciamento::argumento_da_instalacao_em_pedacos(
         modo, canister, &hashes, &hash, argumento,
     )
@@ -773,12 +829,13 @@ fn ler_falhou(n: i64) -> Feito {
     }
 }
 
-/// Enche `destino` do descritor, até o fim dele ou do arquivo. Devolve
-/// quantos bytes vieram.
+/// Enche `destino` do descritor, até o fim dele ou do arquivo, de
+/// [`MAIOR_LEITURA`] em [`MAIOR_LEITURA`]. Devolve quantos bytes vieram.
 fn encher(fd: u64, destino: &mut [u8]) -> Result<usize, Feito> {
     let mut cheio = 0;
     while cheio < destino.len() {
-        let n = sistema::ler(fd, &mut destino[cheio..]);
+        let ate = destino.len().min(cheio + MAIOR_LEITURA);
+        let n = sistema::ler(fd, &mut destino[cheio..ate]);
         if n < 0 {
             return Err(ler_falhou(n));
         }
