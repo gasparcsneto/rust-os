@@ -260,6 +260,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_tpm_limpo_e_recusado,
     },
     Cenario {
+        nome: "as chaves seladas diante de outro TPM: a EK fixada recusa, e nada assina",
+        rodar: as_chaves_seladas_diante_de_outro_tpm,
+    },
+    Cenario {
         nome: "sem TPM, nada de autoridade muda, e o que nao e autoridade continua",
         rodar: sem_tpm_nada_de_autoridade,
     },
@@ -286,6 +290,14 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "a queda em cada fronteira da criacao e da destruicao de uma chave: vale se o registro esta no disco",
         rodar: as_quedas_numa_chave,
+    },
+    Cenario {
+        nome: "a queda entre os tres passos de uma morte de chave: o boot completa o avanco da geracao ou o confirma",
+        rodar: as_quedas_na_geracao,
+    },
+    Cenario {
+        nome: "a queda em cada passo da migracao das chaves antigas: seladas, e nenhuma semente fica no disco",
+        rodar: as_quedas_na_migracao,
     },
     Cenario {
         nome: "a queda em cada fronteira de um registro so de auditoria: ele vale se esta no disco, e a cadeia continua",
@@ -1359,6 +1371,70 @@ fn o_tpm_limpo_e_recusado(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     Ok(format!("{}: {}", p.estado, p.motivo))
 }
 
+/// As chaves seladas diante de outro TPM — o disco levado para outra
+/// máquina, ou o TPM trocado —: a EK não é a fixada, o journal é recusado
+/// antes de o cofre abrir, e nenhuma chave assina. De volta ao TPM dela, a
+/// mesma chave abre e assina igual.
+fn as_chaves_seladas_diante_de_outro_tpm(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    const CRIAR: &str = r#"{"key":"chave:bancada","domain":"ic-request"}"#;
+    let assinar = format!(
+        r#"{{"key":"chave:bancada","domain":"ic-request","digest":"{}"}}"#,
+        "5c".repeat(32)
+    );
+    let m = Ligada::subir(arch, artefato, None)?;
+    let feito = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+        let criada = a.pedir("key.create", CRIAR)?;
+        Ok((criada, a.pedir("key.sign", &assinar)?))
+    });
+    m.cortar_a_energia()?;
+    let (criada, assinada) = feito?;
+    if texto_do_resultado(&criada, "seal").as_deref() != Some("tpm") {
+        return Err(format!("a chave nao nasceu selada no TPM\n  {criada}"));
+    }
+    let assinatura = texto_do_resultado(&assinada, "signature")
+        .ok_or_else(|| format!("a chave nao assinou\n  {assinada}"))?;
+    let estado = diretorio_do_tpm(arch).join("estado");
+    let deste = diretorio_do_tpm(arch).join("deste");
+    copiar_diretorio(&estado, &deste)?;
+    // Outro TPM: um estado novo, com outra semente de endosso e outro dono.
+    let _ = std::fs::remove_dir_all(&estado);
+    std::fs::create_dir_all(&estado).map_err(|e| e.to_string())?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let pelo_outro =
+        super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| a.pedir("key.sign", &assinar));
+    m.cortar_a_energia()?;
+    if p.estado != "refused" || !p.motivo.contains("TPM") {
+        return Err(format!(
+            "o journal diante de outro TPM nao foi recusado: {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    if pelo_outro.is_ok_and(|r| r.contains(r#""signed":true"#)) {
+        return Err("a chave selada assinou diante de outro TPM".into());
+    }
+    // De volta ao TPM dela.
+    copiar_diretorio(&deste, &estado)?;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let p = persistencia_de(&mut m)?;
+    let de_volta =
+        super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| a.pedir("key.sign", &assinar));
+    m.cortar_a_energia()?;
+    let de_volta = de_volta?;
+    if p.estado != "available"
+        || texto_do_resultado(&de_volta, "signature").as_deref() != Some(assinatura.as_str())
+    {
+        return Err(format!(
+            "de volta ao TPM dela, a chave nao assinou igual: {} ({})\n  {de_volta}",
+            p.estado, p.motivo
+        ));
+    }
+    Ok(format!("recusado diante de outro TPM: {}", p.motivo))
+}
+
 /// Uma máquina sem TPM: sem âncora, a persistência é indisponível, e as
 /// credenciais administrativas são recusadas com o motivo — para mudar
 /// autoridade e para o resto. Os agentes continuam sendo atendidos.
@@ -2254,6 +2330,12 @@ mod ponto {
     pub const DEPOIS_DO_INCREMENTO: u8 = 15;
     pub const DEPOIS_DA_CHAVE: u8 = 16;
     pub const LOTE_NO_VOLUME: u8 = 17;
+    pub const GERACAO_PENDENTE: u8 = 18;
+    pub const GERACAO_AVANCADA: u8 = 19;
+    pub const ANTIGAS_SELADAS: u8 = 20;
+    pub const LIMPEZA_COMECOU: u8 = 21;
+    pub const LIMPEZA_NO_MEIO: u8 = 22;
+    pub const LIMPEZA_TERMINADA: u8 = 23;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
@@ -2277,7 +2359,9 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 /// Os tipos de registro do journal, para o plano de queda: a n-ésima
 /// gravação de um tipo. Ver `diario::estado::tipo`.
 mod tipo {
-    pub use diario::estado::tipo::{ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO};
+    pub use diario::estado::tipo::{
+        ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO, SELAGEM,
+    };
 }
 
 /// O plano: a energia cai no `ponto` da `gravacao`-ésima gravação de um
@@ -2315,6 +2399,9 @@ const BOOT_NAO_COMPACTA: u8 = 2;
 const ESPERAR_NA_ABERTURA: u8 = 4;
 /// O contador anda uma vez "de fora" no boot, antes de ser lido.
 const CONTADOR_DE_FORA: u8 = 8;
+/// O kernel no formato de antes do cofre: a criação grava a semente no
+/// journal, e o boot não abre o cofre nem migra — ver `kernel/src/quedas.rs`.
+const CHAVES_ANTIGAS: u8 = 16;
 
 fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     let mut setor = [0u8; 512];
@@ -2886,6 +2973,422 @@ fn as_quedas_numa_chave(arch: Arquitetura, artefato: &Artefato) -> Result<String
     ))
 }
 
+/// A morte de uma chave em três passos — o registro com a lápide, o selado
+/// da viva para a geração seguinte e a pendente; o índice de geração
+/// avançado; o registro que confirma —, e a energia caindo entre eles e
+/// dentro da confirmação. A morte vale em todos: o registro dela estava no
+/// disco antes de o índice andar. O boot seguinte completa o avanço, ou o
+/// confirma, e sobe com a persistência de pé; a viva, aberta do cofre na
+/// geração nova, assina igual; e mais um boot dá o mesmo.
+fn as_quedas_na_geracao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const VIVA: &str = r#"{"key":"chave:bancada","domain":"ic-request"}"#;
+    const MORTA: &str = r#"{"key":"chave:bancada-2","domain":"ic-request"}"#;
+    const A_VIVA: &str = r#"{"key":"chave:bancada"}"#;
+    const A_MORTA: &str = r#"{"key":"chave:bancada-2"}"#;
+    let disco = disco_de_testes()?;
+    let assinar = format!(
+        r#"{{"key":"chave:bancada","domain":"ic-request","digest":"{}"}}"#,
+        "5d".repeat(32)
+    );
+    let casos: [(u8, u16, bool, &str); 7] = [
+        (
+            ponto::GERACAO_PENDENTE,
+            tipo::OPERACAO,
+            false,
+            "com os selados no journal, antes do avanco do indice",
+        ),
+        (
+            ponto::GERACAO_AVANCADA,
+            tipo::OPERACAO,
+            false,
+            "com o indice avancado, antes da confirmacao",
+        ),
+        (
+            ponto::ANTES_DA_ESCRITA,
+            tipo::SELAGEM,
+            false,
+            "na confirmacao, antes da escrita",
+        ),
+        (
+            ponto::DEPOIS_DA_ESCRITA,
+            tipo::SELAGEM,
+            true,
+            "na confirmacao, com a escrita perdida sem a descarga",
+        ),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            tipo::SELAGEM,
+            false,
+            "na confirmacao, antes do contador",
+        ),
+        (
+            ponto::DEPOIS_DO_INCREMENTO,
+            tipo::SELAGEM,
+            false,
+            "na confirmacao, depois do incremento",
+        ),
+        (
+            ponto::DEPOIS_DO_CONTADOR,
+            tipo::SELAGEM,
+            false,
+            "na confirmacao, depois do contador",
+        ),
+    ];
+    for (ponto, tipo_do_plano, perder, caso) in casos {
+        zerar_o_estado(arch)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let feito = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+            a.pedir("key.create", VIVA)?;
+            a.pedir("key.create", MORTA)?;
+            a.pedir("key.sign", &assinar)
+        });
+        m.cortar_a_energia()?;
+        let feito = feito?;
+        let assinatura = texto_do_resultado(&feito, "signature")
+            .ok_or_else(|| format!("{caso}: a viva nao assinou\n  {feito}"))?;
+        plano_de_queda(&disco, ponto, tipo_do_plano, 1)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let caiu = pedir_na_porta_ate_cair(arch, m, "key.destroy", A_MORTA)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+        for boot in ["no boot seguinte", "em mais um boot"] {
+            let mut m = Ligada::subir(arch, artefato, None)?;
+            let p = persistencia_de(&mut m)?;
+            let depois = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+                Ok((
+                    a.pedir("key.read", A_MORTA)?,
+                    a.pedir("key.read", A_VIVA)?,
+                    a.pedir("key.sign", &assinar)?,
+                ))
+            });
+            m.cortar_a_energia()?;
+            if p.estado != "available" {
+                return Err(format!(
+                    "{caso}, {boot}: a persistencia {} ({})",
+                    p.estado, p.motivo
+                ));
+            }
+            let (morta, viva, de_novo) = depois?;
+            if texto_do_resultado(&morta, "state").as_deref() != Some("destroyed") {
+                return Err(format!("{caso}, {boot}: a morte nao valeu\n  {morta}"));
+            }
+            if texto_do_resultado(&viva, "seal").as_deref() != Some("tpm")
+                || texto_do_resultado(&de_novo, "signature").as_deref() != Some(assinatura.as_str())
+            {
+                return Err(format!(
+                    "{caso}, {boot}: a viva nao voltou selada com a mesma privada\n  {viva}\n  {de_novo}"
+                ));
+            }
+        }
+    }
+    Ok(format!(
+        "{} quedas: a morte vale em todas, o boot completa o avanco ou o confirma, e a viva assina igual",
+        casos.len()
+    ))
+}
+
+/// Uma região do journal lida de uma fotografia da partição de estado,
+/// para o hospedeiro percorrer com o `diario`.
+struct RegiaoNaMemoria<'a> {
+    bytes: &'a [u8],
+}
+
+impl diario::Meio for RegiaoNaMemoria<'_> {
+    fn setores(&self) -> u64 {
+        (self.bytes.len() / 512) as u64
+    }
+
+    fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
+        let i = setor as usize * 512;
+        let origem = self
+            .bytes
+            .get(i..i + destino.len())
+            .ok_or("leitura fora da regiao")?;
+        destino.copy_from_slice(origem);
+        Ok(())
+    }
+
+    fn escrever(&mut self, _: u64, _: &[u8]) -> Result<(), &'static str> {
+        Err("so leitura")
+    }
+
+    fn descarregar(&mut self) -> Result<(), &'static str> {
+        Err("so leitura")
+    }
+}
+
+/// A chave do journal, derivada da chave do Duke como o kernel a deriva:
+/// quem tem o disco também a tem — a chave do Duke mora nele.
+fn chave_do_journal(duke: &[u8; 32]) -> [u8; 32] {
+    sigilo::resumo::hkdf_rfc5869(b"Duke persistencia v1", duke, &[b"journal: cifra"])
+}
+
+/// As duas regiões de uma fotografia da partição de estado, percorridas com
+/// a chave do journal: cada registro que abre vai a `f`. Devolve o
+/// percurso de cada uma.
+fn percorrer_as_regioes(
+    estado: &[u8],
+    chave: &[u8; 32],
+    mut f: impl FnMut(&diario::Registro),
+) -> [diario::Percorrido; 2] {
+    diario::regioes(disco::ESTADO_SETORES, None).map(|(inicio, tamanho)| {
+        let fim = ((inicio + tamanho) as usize * 512).min(estado.len());
+        let mut meio = RegiaoNaMemoria {
+            bytes: &estado[inicio as usize * 512..fim],
+        };
+        diario::percorrer(&mut meio, chave, |r| {
+            f(&r);
+            Ok::<(), ()>(())
+        })
+        .unwrap_or_else(|_| diario::Percorrido::vazio())
+    })
+}
+
+/// As entradas de um registro aberto, como campos: a lista de campos de
+/// cada uma, das que se leem.
+fn entradas_abertas(r: &diario::Registro) -> Vec<Vec<&[u8]>> {
+    diario::estado::ler_campos(&r.conteudo)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| diario::estado::ler_campos(e).ok())
+        .collect()
+}
+
+/// As sementes do formato de antes do cofre numa fotografia da partição: as
+/// das entradas de criação que a chave do journal abre — o que quem tem o
+/// disco lê dele.
+fn sementes_antigas(estado: &[u8], duke: &[u8; 32]) -> Vec<[u8; 32]> {
+    let criada = diario::estado::tipo::CHAVE_CRIADA.to_le_bytes();
+    let mut v = Vec::new();
+    percorrer_as_regioes(estado, &chave_do_journal(duke), |r| {
+        for c in entradas_abertas(r) {
+            if c.len() == 6
+                && c[0] == &criada[..]
+                && let Ok(s) = <[u8; 32]>::try_from(c[5])
+                && !v.contains(&s)
+            {
+                v.push(s);
+            }
+        }
+    });
+    v
+}
+
+/// O disco depois da migração: nenhuma das `sementes` em claro em setor
+/// nenhum, nem em registro nenhum que a chave do journal abra, em nenhuma
+/// das regiões; nenhuma entrada do formato de antes; e, fora do journal —
+/// tirada a reserva do fim —, só zeros.
+fn o_disco_sem_as_sementes(
+    disco: &Path,
+    duke: &[u8; 32],
+    sementes: &[[u8; 32]],
+) -> Result<(), String> {
+    let estado = ler_o_estado(disco)?;
+    if sementes.iter().any(|s| estado.windows(32).any(|w| w == s)) {
+        return Err("uma semente antiga em claro no disco".into());
+    }
+    let criada = diario::estado::tipo::CHAVE_CRIADA.to_le_bytes();
+    let (mut com_semente, mut antigas) = (false, 0);
+    let percorridas = percorrer_as_regioes(&estado, &chave_do_journal(duke), |r| {
+        com_semente |= sementes
+            .iter()
+            .any(|s| r.conteudo.windows(32).any(|w| w == s));
+        antigas += entradas_abertas(r)
+            .iter()
+            .filter(|c| c.first().copied() == Some(&criada[..]))
+            .count();
+    });
+    if com_semente || antigas > 0 {
+        return Err(format!(
+            "o journal ainda abre o formato de antes: semente {com_semente}, {antigas} entradas"
+        ));
+    }
+    let i = diario::escolher(&percorridas).ok_or("nenhuma regiao do journal esta inteira")?;
+    let (inicio, _) = diario::regioes(disco::ESTADO_SETORES, None)[i];
+    let fim = inicio + percorridas[i].proximo_setor;
+    let reserva = disco::ESTADO_SETORES - diario::RESERVA_NO_FIM;
+    for (s, setor) in estado.chunks(512).enumerate() {
+        let s = s as u64;
+        if (inicio..fim).contains(&s) || s >= reserva {
+            continue;
+        }
+        if setor.iter().any(|&b| b != 0) {
+            return Err(format!("o setor {s}, fora do journal, nao foi zerado"));
+        }
+    }
+    Ok(())
+}
+
+/// A migração das chaves do formato de antes do cofre, com a energia
+/// caindo em cada passo dela: as antigas seladas no TPM; o registro da
+/// migração; a compactação; a limpeza, no começo, no meio e no fim; e o
+/// registro do fim dela. O journal antigo é de verdade: o kernel da
+/// bancada, no formato de antes, cria duas chaves — a semente no journal —
+/// e destrói uma. Em cada queda, o boot seguinte termina a migração: sobe
+/// de pé, a viva volta selada e assina igual, a morta continua morta, e o
+/// disco fica sem nenhuma das sementes antigas — nem em claro, nem num
+/// registro que a chave do journal abra — e só com zeros fora do journal.
+fn as_quedas_na_migracao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const VIVA: &str = r#"{"key":"chave:bancada","domain":"ic-request"}"#;
+    const MORTA: &str = r#"{"key":"chave:bancada-2","domain":"ic-request"}"#;
+    const A_VIVA: &str = r#"{"key":"chave:bancada"}"#;
+    const A_MORTA: &str = r#"{"key":"chave:bancada-2"}"#;
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    let assinar = format!(
+        r#"{{"key":"chave:bancada","domain":"ic-request","digest":"{}"}}"#,
+        "5e".repeat(32)
+    );
+    // O journal de antes do cofre.
+    zerar_o_estado(arch)?;
+    plano(
+        &disco,
+        Plano {
+            bandeiras: CHAVES_ANTIGAS | COLETOR_NAO_COMPACTA | BOOT_NAO_COMPACTA,
+            ..Plano::default()
+        },
+    )?;
+    let m = Ligada::subir_com(arch, artefato, Ambiente::ligar(arch, None)?)?;
+    let feito = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+        let criada = a.pedir("key.create", VIVA)?;
+        a.pedir("key.create", MORTA)?;
+        a.pedir("key.destroy", A_MORTA)?;
+        Ok((criada, a.pedir("key.sign", &assinar)?))
+    });
+    m.cortar_a_energia()?;
+    let (criada, assinada) = feito?;
+    if texto_do_resultado(&criada, "seal").as_deref() != Some("none") {
+        return Err(format!(
+            "o kernel de antes do cofre selou a chave\n  {criada}"
+        ));
+    }
+    let assinatura = texto_do_resultado(&assinada, "signature")
+        .ok_or_else(|| format!("a chave antiga nao assinou\n  {assinada}"))?;
+    sem_plano(&disco)?;
+    let antes = ler_o_estado(&disco)?;
+    let sementes = sementes_antigas(&antes, &chaves.duke);
+    if sementes.len() != 2 {
+        return Err(format!(
+            "o journal antigo devia abrir as duas sementes, e abre {}",
+            sementes.len()
+        ));
+    }
+    let tpm = diretorio_do_tpm(arch).join("estado");
+    let tpm_antes = diretorio_do_tpm(arch).join("antes-do-cofre");
+    copiar_diretorio(&tpm, &tpm_antes)?;
+
+    let casos: [(u8, u16, u32, &str); 10] = [
+        (
+            ponto::ANTIGAS_SELADAS,
+            0,
+            0,
+            "com as antigas seladas no TPM, antes do registro",
+        ),
+        (
+            ponto::ANTES_DA_ESCRITA,
+            tipo::SELAGEM,
+            1,
+            "no registro da migracao, antes da escrita",
+        ),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            tipo::SELAGEM,
+            1,
+            "no registro da migracao, antes do contador",
+        ),
+        (
+            ponto::DEPOIS_DO_CONTADOR,
+            tipo::SELAGEM,
+            1,
+            "no registro da migracao, depois do contador",
+        ),
+        (
+            ponto::DEPOIS_DA_PRIMEIRA_PARTE,
+            tipo::BASE_FIM,
+            1,
+            "na compactacao, com a primeira parte escrita",
+        ),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            tipo::BASE_FIM,
+            1,
+            "na compactacao, antes do contador",
+        ),
+        (ponto::LIMPEZA_COMECOU, 0, 0, "compactado, antes de zerar"),
+        (ponto::LIMPEZA_NO_MEIO, 0, 0, "no meio da limpeza"),
+        (
+            ponto::LIMPEZA_TERMINADA,
+            0,
+            0,
+            "zerado, antes do registro do fim",
+        ),
+        (
+            ponto::DEPOIS_DA_DESCARGA,
+            tipo::SELAGEM,
+            2,
+            "no registro do fim da limpeza, antes do contador",
+        ),
+    ];
+    for (ponto, tipo_do_plano, gravacao, caso) in casos {
+        escrever_no_estado(&disco, &antes)?;
+        copiar_diretorio(&tpm_antes, &tpm)?;
+        plano(
+            &disco,
+            Plano {
+                ponto,
+                tipo: tipo_do_plano,
+                gravacao,
+                ..Plano::default()
+            },
+        )?;
+        let caiu = subir_ate_cair(arch, artefato)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        for boot in ["no boot seguinte", "em mais um boot"] {
+            let mut m = Ligada::subir(arch, artefato, None)?;
+            let p = persistencia_de(&mut m)?;
+            let depois = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+                Ok((
+                    a.pedir("key.read", A_VIVA)?,
+                    a.pedir("key.read", A_MORTA)?,
+                    a.pedir("key.sign", &assinar)?,
+                ))
+            });
+            m.cortar_a_energia()?;
+            if p.estado != "available" {
+                return Err(format!(
+                    "{caso}, {boot}: a persistencia {} ({})",
+                    p.estado, p.motivo
+                ));
+            }
+            let (viva, morta, de_novo) = depois?;
+            if texto_do_resultado(&viva, "seal").as_deref() != Some("tpm")
+                || texto_do_resultado(&de_novo, "signature").as_deref() != Some(assinatura.as_str())
+            {
+                return Err(format!(
+                    "{caso}, {boot}: a antiga nao voltou selada com a mesma privada\n  {viva}\n  {de_novo}"
+                ));
+            }
+            if texto_do_resultado(&morta, "state").as_deref() != Some("destroyed") {
+                return Err(format!("{caso}, {boot}: a morta voltou\n  {morta}"));
+            }
+            o_disco_sem_as_sementes(&disco, &chaves.duke, &sementes)
+                .map_err(|e| format!("{caso}, {boot}: {e}"))?;
+        }
+    }
+    Ok(format!(
+        "{} quedas: a migracao termina em todas, a antiga assina igual selada, e nenhuma semente fica no disco",
+        casos.len()
+    ))
+}
+
 /// A queda em cada fronteira de um registro só de auditoria: o primeiro
 /// que o coletor grava depois do boot, que leva o `persistence.open` do
 /// boot. O boot seguinte sobe com a persistência de pé; o registro vale
@@ -3311,13 +3814,15 @@ fn a_compactacao_sobrevive(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 }
 
 /// Enche a região sem compactar, com um agente que fica e um que sai, e
-/// devolve a geração.
+/// devolve a geração. Com o pedido `assinar`, a `chave:bancada` nasce
+/// antes — selada, no journal —, e a assinatura dela volta também.
 fn preparar_a_compactacao(
     arch: Arquitetura,
     artefato: &Artefato,
     chaves: &super::chaves::Chaves,
     disco: &Path,
-) -> Result<u64, String> {
+    assinar: Option<&str>,
+) -> Result<(u64, Option<String>), String> {
     plano(
         disco,
         Plano {
@@ -3328,14 +3833,30 @@ fn preparar_a_compactacao(
     )?;
     let mut m = Ligada::subir(arch, artefato, None)?;
     let r = (|| {
+        let assinatura = match assinar {
+            Some(pedido) => {
+                let r = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+                    a.pedir(
+                        "key.create",
+                        r#"{"key":"chave:bancada","domain":"ic-request"}"#,
+                    )?;
+                    a.pedir("key.sign", pedido)
+                })?;
+                Some(
+                    texto_do_resultado(&r, "signature")
+                        .ok_or_else(|| format!("a chave da compactacao nao assinou\n  {r}"))?,
+                )
+            }
+            None => None,
+        };
         registrar(&mut m, chaves, &[0xD4; 32], "queda-fica")?;
         registrar(&mut m, chaves, &[0xD5; 32], "queda-sai")?;
         revogar_agente(&mut m, chaves, &[0xD5; 32])?;
         encher(&mut m, chaves, None)?;
-        persistencia_de(&mut m)
+        Ok((persistencia_de(&mut m)?.geracao, assinatura))
     })();
     m.cortar_a_energia()?;
-    Ok(r?.geracao)
+    r
 }
 
 /// A energia cai em cada fronteira da compactação, feita no boot: antes de
@@ -3344,11 +3865,16 @@ fn preparar_a_compactacao(
 /// e antes do contador, depois do incremento e antes da leitura de volta,
 /// depois do contador. O boot seguinte sobe com a
 /// persistência de pé; a compactação vale exatamente quando o fecho está
-/// no disco; o estado é o mesmo — o agente que fica entra, o revogado não —
-/// e a geração também; e a próxima operação grava.
+/// no disco; o estado é o mesmo — o agente que fica entra, o revogado não,
+/// e a chave selada antes de encher volta selada e assina igual, levada ou
+/// não pela base — e a geração também; e a próxima operação grava.
 fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
+    let assinar = format!(
+        r#"{{"key":"chave:bancada","domain":"ic-request","digest":"{}"}}"#,
+        "5c".repeat(32)
+    );
     let casos: [Caso; 7] = [
         (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
         (
@@ -3390,7 +3916,8 @@ fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<St
     ];
     for (i, (ponto, perder, vale, caso)) in casos.into_iter().enumerate() {
         zerar_o_estado(arch)?;
-        let geracao = preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+        let (geracao, assinatura) =
+            preparar_a_compactacao(arch, artefato, &chaves, &disco, Some(&assinar))?;
         plano(
             &disco,
             Plano {
@@ -3421,11 +3948,25 @@ fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<St
         let verifica = auditoria_verifica(&mut m);
         let fica = agente_entra(arch, &[0xD4; 32], "queda-fica")?;
         let sai = agente_entra(arch, &[0xD5; 32], "queda-sai")?;
+        let chave = super::AgenteNaPorta::conectar(arch, 1).and_then(|mut a| {
+            Ok((
+                a.pedir("key.read", r#"{"key":"chave:bancada"}"#)?,
+                a.pedir("key.sign", &assinar)?,
+            ))
+        });
         m.cortar_a_energia()?;
         if p.estado != "available" {
             return Err(format!(
                 "{caso}: a persistencia ficou {} ({})",
                 p.estado, p.motivo
+            ));
+        }
+        let (lida, assinada) = chave.map_err(|e| format!("{caso}: {e}"))?;
+        if texto_do_resultado(&lida, "seal").as_deref() != Some("tpm")
+            || texto_do_resultado(&assinada, "signature") != assinatura
+        {
+            return Err(format!(
+                "{caso}: a chave selada nao voltou igual da compactacao\n  {lida}\n  {assinada}"
             ));
         }
         if (p.compactacoes == 1) != vale || p.compactacoes > 1 {
@@ -3460,7 +4001,7 @@ fn as_quedas_na_compactacao(arch: Arquitetura, artefato: &Artefato) -> Result<St
         r.map_err(|e| format!("{caso}: {e}"))?;
     }
     Ok(format!(
-        "{} quedas: a compactacao vale exatamente quando o fecho esta no disco, e nada volta atras",
+        "{} quedas: a compactacao vale exatamente quando o fecho esta no disco, nada volta atras, e a chave selada assina igual",
         casos.len()
     ))
 }
@@ -3474,7 +4015,7 @@ fn a_fotografia_de_antes_da_compactacao(
 ) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
-    preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+    preparar_a_compactacao(arch, artefato, &chaves, &disco, None)?;
     // O agente que fica é o que vai ser revogado depois da compactação.
     let foto = ler_o_estado(&disco)?;
     plano(
@@ -3523,7 +4064,7 @@ fn a_fotografia_de_antes_da_compactacao(
 fn a_base_sem_fecho_sozinha(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
-    preparar_a_compactacao(arch, artefato, &chaves, &disco)?;
+    preparar_a_compactacao(arch, artefato, &chaves, &disco, None)?;
     plano(
         &disco,
         Plano {

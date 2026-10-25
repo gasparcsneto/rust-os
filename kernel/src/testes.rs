@@ -31411,6 +31411,42 @@ static CASOS: &[Caso] = &[
         f: chaves_ao_mesmo_tempo,
     },
     Caso {
+        nome: "chaves: a semente selada no TPM nao chega ao disco nem ao barramento",
+        f: chaves_a_semente_selada_nao_chega_ao_disco,
+    },
+    Caso {
+        nome: "chaves: a morta nao volta de uma copia antiga do disco: a geracao andou",
+        f: chaves_a_morta_nao_volta_de_uma_copia_antiga,
+    },
+    Caso {
+        nome: "chaves: o selado que nao abre falha fechado, sem semente de outro lugar",
+        f: chaves_o_selado_que_nao_abre_falha_fechado,
+    },
+    Caso {
+        nome: "chaves: o primario que nao e o do boot nao sela nem abre",
+        f: chaves_o_primario_que_nao_e_o_do_boot_nao_sela_nem_abre,
+    },
+    Caso {
+        nome: "chaves: sessenta e quatro vivas, e a morte de uma sela as outras",
+        f: chaves_sessenta_e_quatro_vivas_e_a_morte_de_uma,
+    },
+    Caso {
+        nome: "chaves: o cofre com assinaturas, mortes e compactacoes ao mesmo tempo",
+        f: chaves_o_cofre_com_tudo_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "chaves: a revogacao do dono enquanto o boot abre as chaves",
+        f: chaves_a_revogacao_enquanto_o_boot_abre,
+    },
+    Caso {
+        nome: "persistencia: as chaves do formato antigo sao seladas, e a limpeza tira a semente do disco",
+        f: persistencia_a_migracao_das_chaves_antigas,
+    },
+    Caso {
+        nome: "persistencia: a antiga cujo selado nao abre fica fechada, sem a semente de antes",
+        f: persistencia_a_antiga_cujo_selado_nao_abre_fica_fechada,
+    },
+    Caso {
         nome: "rede: o envio que nao cabe espera espaco",
         f: rede_o_envio_que_nao_cabe_espera_espaco,
     },
@@ -31697,6 +31733,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "icp: cada chave e um principal",
         f: icp_cada_chave_e_um_principal,
+    },
+    Caso {
+        nome: "icp: o principal da chave selada e o mesmo depois do cofre",
+        f: icp_o_principal_da_chave_selada_e_o_mesmo_depois_do_cofre,
     },
     Caso {
         nome: "icp: a chamada pendente e acompanhada",
@@ -37481,11 +37521,62 @@ fn a_semente_esta_no_journal(semente: &[u8; 32]) -> Result<bool, &'static str> {
     crate::persistencia::algum_registro_de_teste(|r| r.conteudo.windows(32).any(|w| w == semente))
 }
 
+/// Se algum registro decifrado de qualquer das duas regiões tem os 32 bytes
+/// de `bytes`.
+fn em_alguma_regiao(bytes: &[u8; 32]) -> Result<bool, &'static str> {
+    for i in 0..2 {
+        if crate::persistencia::algum_registro_na_regiao_de_teste(i, |r| {
+            r.conteudo.windows(32).any(|w| w == bytes)
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Se algum setor da partição de estado, cru, tem os 32 bytes de `bytes`.
+fn na_particao_crua(bytes: &[u8; 32]) -> Result<bool, &'static str> {
+    const DE_UMA_VEZ: u64 = 256;
+    let total = crate::persistencia::setores_do_estado_de_teste()?;
+    let mut s = 0;
+    let mut cauda: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    while s < total {
+        let n = (total - s).min(DE_UMA_VEZ);
+        let mut pedaco = core::mem::take(&mut cauda);
+        pedaco.extend_from_slice(&crate::persistencia::setores_crus_de_teste(s, n)?);
+        if pedaco.windows(32).any(|w| w == bytes) {
+            return Ok(true);
+        }
+        // Os 31 bytes do fim continuam no pedaço seguinte: o que cai entre
+        // dois não escapa.
+        cauda = pedaco[pedaco.len() - 31..].to_vec();
+        s += n;
+    }
+    Ok(false)
+}
+
+/// Se a região atual tem a entrada selada de uma chave de pública
+/// `publica`.
+fn a_selada_esta_no_journal(publica: &[u8; 32]) -> Result<bool, &'static str> {
+    use diario::estado::tipo;
+    crate::persistencia::algum_registro_de_teste(|r| {
+        crate::persistencia::entradas_de_teste(r)
+            .unwrap_or_default()
+            .iter()
+            .any(|e| {
+                diario::estado::ler_campos(e).is_ok_and(|c| {
+                    c.first().copied() == Some(&tipo::CHAVE_SELADA.to_le_bytes()[..])
+                        && c.get(5).copied() == Some(&publica[..])
+                })
+            })
+    })
+}
+
 /// As chaves vão para o journal e voltam dele: a viva com a mesma privada
-/// — a assinatura do mesmo resumo é a mesma —, a destruída e a anulada como
-/// lápides, com os nomes presos. A compactação leva a viva e as lápides, e
-/// a semente da destruída fica para trás: na região nova, nenhum registro
-/// a tem.
+/// — a assinatura do mesmo resumo é a mesma, aberta do cofre do TPM —, a
+/// destruída e a anulada como lápides, com os nomes presos. A semente de
+/// nenhuma vai ao journal: vai o objeto selado da viva. A compactação leva
+/// o objeto selado da viva e as lápides.
 fn chaves_o_journal_as_traz_de_volta() -> Resultado {
     use crate::autorizacao::Chamador;
     use crate::pessoas::Console;
@@ -37535,9 +37626,17 @@ fn chaves_o_journal_as_traz_de_volta() -> Resultado {
         }
         let p = alloc::format!(r#"{{"owner":"{outro_dono}","key":"chave:bancada"}}"#);
         admin_espera(0, &ADMIN_DE_TESTE, "key.revoke", &p, None)?;
-        // A semente da destruída ainda está na região: a criação dela.
-        if !a_semente_esta_no_journal(&semente_da_destruida)? {
-            return Err("a semente da chave criada nao chegou ao journal");
+        // A semente de nenhuma está na região — nem a da criação da que
+        // morreu —, e o objeto selado da viva está.
+        if a_semente_esta_no_journal(&semente_da_destruida)?
+            || a_semente_esta_no_journal(&semente_da_viva)?
+        {
+            return Err("uma semente chegou ao journal");
+        }
+        let publica_da_viva = publica_de(&chave_so(pessoa, "key.read", "chave:bancada"))
+            .ok_or("a viva sem a publica")?;
+        if !a_selada_esta_no_journal(&publica_da_viva)? {
+            return Err("o objeto selado da chave viva nao chegou ao journal");
         }
         let antes = retrato_das_chaves();
         let estados: alloc::vec::Vec<&str> = antes.iter().map(|c| c.3).collect();
@@ -37578,14 +37677,16 @@ fn chaves_o_journal_as_traz_de_volta() -> Resultado {
         };
         estado_do_journal()?;
         conferir("reposicao")?;
-        // A compactação: a região nova tem a viva e as lápides, e não a
-        // semente da destruída.
+        // A compactação: a região nova tem a viva selada e as lápides, e
+        // semente nenhuma.
         crate::persistencia::compactar_de_teste()?;
-        if a_semente_esta_no_journal(&semente_da_destruida)? {
-            return Err("a compactacao levou a semente da chave destruida");
+        if a_semente_esta_no_journal(&semente_da_destruida)?
+            || a_semente_esta_no_journal(&semente_da_viva)?
+        {
+            return Err("a compactacao levou uma semente");
         }
-        if !a_semente_esta_no_journal(&semente_da_viva)? {
-            return Err("a compactacao nao levou a chave viva");
+        if !a_selada_esta_no_journal(&publica_da_viva)? {
+            return Err("a compactacao nao levou a chave viva selada");
         }
         estado_do_journal()?;
         conferir("compactacao")
@@ -38089,6 +38190,1061 @@ fn chaves_ao_mesmo_tempo() -> Resultado {
             return Err("as duas criacoes do mesmo nome deixaram mais de uma chave");
         }
         Ok(())
+    })
+}
+
+/// Assina `resumo` com a chave `nome` de `dono` direto da tabela — sem
+/// sessão: depois de uma reposição sobre a imagem, a pessoa do caso não
+/// está mais lá, e a chave está — e confere com `publica`.
+fn assina_com_a_publica(
+    dono: &str,
+    nome: &str,
+    resumo: [u8; 32],
+    publica: &[u8; 32],
+) -> Result<[u8; 64], &'static str> {
+    let (privada, _, d) = crate::chaves::para_assinar(dono, nome, DOMINIO_DE_TESTE)
+        .map_err(|_| "a chave reposta nao assina")?;
+    let assinatura = privada.assinar(&d, &resumo);
+    if !sigilo::chaves::conferir(publica, &d, &resumo, &assinatura) {
+        return Err("a chave reposta assina com outra privada");
+    }
+    Ok(assinatura)
+}
+
+/// A política da imagem com o alcance das chaves do operador estendido a
+/// `nomes`, em todas as operações de chave, enquanto `f` roda.
+fn com_mais_nomes_de_chave(nomes: &[&str], f: impl FnOnce() -> Resultado) -> Resultado {
+    let lista = nomes.join(" ");
+    let pares: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
+        ["key.create", "key.read", "key.sign", "key.destroy"]
+            .iter()
+            .map(|op| {
+                (
+                    alloc::format!("recurso operador {op} chave:bancada chave:bancada-2\n"),
+                    alloc::format!("recurso operador {op} chave:bancada chave:bancada-2 {lista}\n"),
+                )
+            })
+            .collect();
+    let trocas: alloc::vec::Vec<(&str, &str)> = pares
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    com_a_politica(politica_trocada(&trocas)?, f)
+}
+
+/// A semente de uma chave vai ao TPM e só volta dele. Nenhum registro do
+/// journal a tem — nem a criação, nem a selagem dela para a geração
+/// seguinte quando outra chave morre, nem a base de uma compactação, em
+/// nenhuma das duas regiões —, nenhum setor da partição de estado a tem em
+/// claro, e ela não passa pelo barramento do TPM: nem selada de novo, nem
+/// aberta pela reposição. O `key.read` diz a custódia — do kernel — e a
+/// selagem — no TPM —, e nada do objeto selado nem da semente.
+fn chaves_a_semente_selada_nao_chega_ao_disco() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(220), "chave-selada", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        let criada = criar_chave(quem, "chave:bancada");
+        if !fs_verdade(&criada, "created")
+            || fs_texto(&criada, "custody").as_deref() != Some("kernel")
+            || fs_texto(&criada, "seal").as_deref() != Some("tpm")
+        {
+            crate::log_error!("teste", "{}", criada);
+            return Err("a criacao nao diz a custodia do kernel com a semente selada no TPM");
+        }
+        let publica = publica_de(&criada).ok_or("a criacao sem a publica")?;
+        let semente =
+            crate::chaves::semente_de_teste(&dono, "bancada").ok_or("a chave viva sem semente")?;
+        let selado = crate::chaves::selado_de_teste(&dono, "bancada")
+            .ok_or("a chave viva sem o objeto selado")?;
+        let lida = chave_so(quem, "key.read", "chave:bancada");
+        if fs_texto(&lida, "custody").as_deref() != Some("kernel")
+            || fs_texto(&lida, "seal").as_deref() != Some("tpm")
+            || lida.contains(&sigilo::hex(&semente))
+            || lida.contains(&sigilo::hex_de(selado.privado()))
+            || lida.contains(&sigilo::hex(selado.unico()))
+        {
+            crate::log_error!("teste", "{}", lida);
+            return Err("o key.read nao diz so a custodia e a selagem");
+        }
+        // A escuta no barramento, daqui em diante: a morte de outra chave
+        // sela esta de novo, e a reposição a abre.
+        crate::tpm::falhas::escutar(Some(semente));
+        let feito = (|| -> Resultado {
+            if !fs_verdade(&criar_chave(quem, "chave:bancada-2"), "created") {
+                return Err("a segunda chave do caso nao nasceu");
+            }
+            if !fs_verdade(
+                &chave_so(quem, "key.destroy", "chave:bancada-2"),
+                "destroyed",
+            ) {
+                return Err("a segunda chave do caso nao foi destruida");
+            }
+            estado_do_journal()?;
+            crate::persistencia::compactar_de_teste()?;
+            estado_do_journal()?;
+            Ok(())
+        })();
+        let ouvida = crate::tpm::falhas::visto();
+        crate::tpm::falhas::escutar(None);
+        feito?;
+        if ouvida {
+            return Err("a semente passou em claro pelo barramento do TPM");
+        }
+        if crate::chaves::selado_de_teste(&dono, "bancada").is_none_or(|s| s == selado) {
+            return Err("a morte da outra chave nao selou esta de novo");
+        }
+        if em_alguma_regiao(&semente)? {
+            return Err("a semente esta num registro do journal");
+        }
+        if na_particao_crua(&semente)? {
+            return Err("a semente esta em claro na particao de estado");
+        }
+        if !a_selada_esta_no_journal(&publica)? {
+            return Err("o objeto selado da chave nao esta no journal");
+        }
+        // E a chave, aberta do cofre, assina com a mesma pública.
+        let vista = crate::chaves::ler(&dono, "bancada").map_err(|_| "a chave sumiu")?;
+        if !vista.selada || vista.custodia.como_str() != "kernel" {
+            return Err("a chave reposta nao esta selada com a custodia do kernel");
+        }
+        assina_com_a_publica(&dono, "bancada", [0x31; 32], &publica)?;
+        Ok(())
+    })
+}
+
+/// O registro da região atual de sequência maior que `depois` em que
+/// `achar` acha a entrada que procura: a sequência dele.
+fn registro_com_entrada(
+    depois: u64,
+    achar: impl Fn(&[&[u8]]) -> bool,
+) -> Result<Option<u64>, &'static str> {
+    let mut achado = None;
+    crate::persistencia::algum_registro_de_teste(|r| {
+        let tem = r.sequencia > depois
+            && crate::persistencia::entradas_de_teste(r)
+                .unwrap_or_default()
+                .iter()
+                .any(|e| diario::estado::ler_campos(e).is_ok_and(|c| achar(&c)));
+        if tem && achado.is_none() {
+            achado = Some(r.sequencia);
+        }
+        tem
+    })?;
+    Ok(achado)
+}
+
+/// Uma cópia antiga do disco guarda o objeto selado de uma chave que depois
+/// morreu — destruída pelo dono, anulada por `key.revoke`, ou de um dono
+/// revogado. Cada morte avança o índice de geração uma vez, em três passos
+/// no journal — o registro da operação com a lápide, o selado da viva para
+/// a geração seguinte e a geração pendente; o índice; o registro que
+/// confirma —, e o objeto da cópia antiga não abre mais: nem o da morta,
+/// nem o antigo da viva, selada de novo para a geração nova. O da viva de
+/// agora abre, e é a mesma chave.
+fn chaves_a_morta_nao_volta_de_uma_copia_antiga() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use diario::estado::tipo;
+    com_chaves(|| {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let sessao = |t: u16, nome: &str| {
+            crate::pessoas::sessao_de_teste(Console::Terminal(t), nome, "operador")
+        };
+        let (s1, s2, s3) = (
+            sessao(221, "copia-antiga-a"),
+            sessao(222, "copia-antiga-b"),
+            sessao(223, "copia-antiga-c"),
+        );
+        let dono = |s| {
+            crate::pessoas::dona_da_sessao(s)
+                .map(|d| d.texto())
+                .ok_or("a sessao de teste nao tem dona")
+        };
+        let (d1, d2, d3) = (dono(s1)?, dono(s2)?, dono(s3)?);
+        // A viva é a `chave:bancada` da primeira pessoa; as outras três
+        // morrem, cada uma de um jeito.
+        for (s, chave) in [
+            (s1, "chave:bancada"),
+            (s1, "chave:bancada-2"),
+            (s2, "chave:bancada"),
+            (s3, "chave:bancada"),
+        ] {
+            if !fs_verdade(&criar_chave(Chamador::Pessoa(s), chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let publica_da_viva = crate::chaves::ler(&d1, "bancada")
+            .map_err(|_| "a viva sumiu")?
+            .publica;
+        let semente_da_viva =
+            crate::chaves::semente_de_teste(&d1, "bancada").ok_or("a viva sem semente")?;
+        let mortes = [
+            (d1.as_str(), "bancada-2", "destruida"),
+            (d2.as_str(), "bancada", "anulada"),
+            (d3.as_str(), "bancada", "do dono revogado"),
+        ];
+        for (de, nome, como) in mortes {
+            let g = crate::persistencia::geracao_da_selagem_de_teste()?;
+            if crate::persistencia::geracao_no_tpm_de_teste()? != g {
+                return Err("a geracao do TPM nao e a do journal antes da morte");
+            }
+            let velho_da_morta =
+                crate::chaves::selado_de_teste(de, nome).ok_or("a chave a matar sem selado")?;
+            let velho_da_viva =
+                crate::chaves::selado_de_teste(&d1, "bancada").ok_or("a viva sem selado")?;
+            let mut antes = 0;
+            crate::persistencia::algum_registro_de_teste(|r| {
+                antes = antes.max(r.sequencia);
+                false
+            })?;
+            match como {
+                "destruida" => {
+                    let r = chave_so(Chamador::Pessoa(s1), "key.destroy", "chave:bancada-2");
+                    if !fs_verdade(&r, "destroyed") {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("a chave nao foi destruida");
+                    }
+                }
+                "anulada" => {
+                    let p = alloc::format!(r#"{{"owner":"{d2}","key":"chave:bancada"}}"#);
+                    admin_espera(0, &ADMIN_DE_TESTE, "key.revoke", &p, None)?;
+                }
+                _ => {
+                    let p = alloc::format!(r#"{{"person":"{d3}"}}"#);
+                    let r = executar_admin_com(0, &ADMIN_DE_TESTE, "person.revoke", &p, &p)?;
+                    if !r.contains(r#""executed":true"#) {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("o dono nao foi revogado");
+                    }
+                }
+            }
+            // Um avanço por morte, no TPM e no journal.
+            if crate::persistencia::geracao_da_selagem_de_teste()? != g + 1
+                || crate::persistencia::geracao_no_tpm_de_teste()? != g + 1
+            {
+                crate::log_error!("teste", "{}", como);
+                return Err("a morte nao avancou a geracao exatamente uma vez");
+            }
+            // Os três passos: a operação leva a lápide, o selado da viva para
+            // a geração seguinte e a pendente; depois dela, a confirmação.
+            let seguinte = (g + 1).to_le_bytes();
+            let entrada_de = |t: u16, c: &[&[u8]]| c.first().copied() == Some(&t.to_le_bytes()[..]);
+            let operacao = registro_com_entrada(antes, |c| {
+                entrada_de(tipo::SELAGEM_PENDENTE, c) && c.get(1).copied() == Some(&seguinte[..])
+            })?
+            .ok_or("a geracao pendente nao esta no journal")?;
+            let com_a_lapide = registro_com_entrada(antes, |c| {
+                entrada_de(tipo::CHAVE_MORTA, c)
+                    && c.get(1).copied() == Some(de.as_bytes())
+                    && c.get(2).copied() == Some(nome.as_bytes())
+            })?;
+            let com_a_viva = registro_com_entrada(antes, |c| {
+                entrada_de(tipo::CHAVE_SELADA, c)
+                    && c.get(1).copied() == Some(d1.as_bytes())
+                    && c.get(2).copied() == Some(&b"bancada"[..])
+                    && c.get(6).copied() == Some(&seguinte[..])
+            })?;
+            let confirmada = registro_com_entrada(operacao, |c| {
+                entrada_de(tipo::SELAGEM_CONFIRMADA, c) && c.get(1).copied() == Some(&seguinte[..])
+            })?;
+            if com_a_lapide != Some(operacao)
+                || com_a_viva != Some(operacao)
+                || confirmada.is_none()
+            {
+                crate::log_error!(
+                    "teste",
+                    "{}: operacao {} lapide {:?} viva {:?} confirmada {:?}",
+                    como,
+                    operacao,
+                    com_a_lapide,
+                    com_a_viva,
+                    confirmada
+                );
+                return Err("os tres passos da morte nao estao no journal");
+            }
+            // A cópia antiga: os objetos de antes não abrem — a política do
+            // TPM os recusa —, nem o da morta, nem o antigo da viva.
+            for velho in [&velho_da_morta, &velho_da_viva] {
+                match crate::persistencia::abrir_selado_de_teste(velho) {
+                    Err(ancora::Erro::Codigo(ancora::codigo::POLITICA_RECUSADA)) => {}
+                    Err(e) => {
+                        crate::log_error!("teste", "{}: {}", como, e.motivo());
+                        return Err("um objeto selado antigo falhou por outro motivo");
+                    }
+                    Ok(_) => return Err("um objeto selado de uma copia antiga abriu"),
+                }
+            }
+            let agora =
+                crate::chaves::selado_de_teste(&d1, "bancada").ok_or("a viva sem selado")?;
+            let aberta =
+                crate::persistencia::abrir_selado_de_teste(&agora).map_err(|e| e.motivo())?;
+            if agora.geracao() != g + 1 || aberta.como_bytes() != &semente_da_viva {
+                return Err("o objeto selado de agora da viva nao abre a semente dela");
+            }
+        }
+        // A reposição: as mortas continuam mortas, e a viva abre e assina.
+        estado_do_journal()?;
+        for (de, nome, _) in mortes {
+            if crate::chaves::para_assinar(de, nome, DOMINIO_DE_TESTE).is_ok() {
+                return Err("uma chave morta voltou a assinar");
+            }
+        }
+        assina_com_a_publica(&d1, "bancada", [0x32; 32], &publica_da_viva)?;
+        Ok(())
+    })
+}
+
+/// Um objeto selado que não abre — mexido, ou de uma geração que o índice
+/// do TPM já passou, como o de uma cópia antiga — para a reposição com o
+/// motivo dele, e a chave fica viva no journal e fechada: nada assina com
+/// ela, e nenhuma semente de outro lugar — nem a que a memória tinha antes
+/// — entra no lugar. Com o objeto bom de volta no journal, a reposição a
+/// abre, e ela assina igual.
+fn chaves_o_selado_que_nao_abre_falha_fechado() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use diario::estado::tipo;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(224), "selado-fechado", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        for chave in ["chave:bancada", "chave:bancada-2"] {
+            if !fs_verdade(&criar_chave(quem, chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let vista = crate::chaves::ler(&dono, "bancada").map_err(|_| "a chave do caso sumiu")?;
+        let antes = assina_com_a_publica(&dono, "bancada", [0x41; 32], &vista.publica)?;
+        // O objeto selado antes e depois da morte da outra: a geração andou,
+        // e a viva foi selada de novo.
+        let velho = crate::chaves::selado_de_teste(&dono, "bancada").ok_or("a chave sem selado")?;
+        if !fs_verdade(
+            &chave_so(quem, "key.destroy", "chave:bancada-2"),
+            "destroyed",
+        ) {
+            return Err("a outra chave nao foi destruida");
+        }
+        let novo = crate::chaves::selado_de_teste(&dono, "bancada").ok_or("a chave sem selado")?;
+        let gravar_selado = |s: &ancora::cofre::Selado, privado: &[u8]| -> Resultado {
+            let e = crate::persistencia::entrada_de_teste(
+                tipo::CHAVE_SELADA,
+                &[
+                    dono.as_bytes(),
+                    b"bancada",
+                    DOMINIO_DE_TESTE.as_bytes(),
+                    &vista.criada_ms.to_le_bytes(),
+                    &vista.publica,
+                    &s.geracao().to_le_bytes(),
+                    s.unico(),
+                    privado,
+                ],
+            );
+            let dados = diario::estado::campos(&[&e]).map_err(|_| "a entrada nao se monta")?;
+            crate::persistencia::gravar_de_teste(tipo::SELAGEM, &dados, 0)
+        };
+        let fechada = |etapa: &str| -> Resultado {
+            if crate::chaves::para_assinar(&dono, "bancada", DOMINIO_DE_TESTE).err()
+                != Some(crate::chaves::Falha::Fechada)
+            {
+                crate::log_error!("teste", "{}", etapa);
+                return Err("a chave do selado que nao abre nao ficou fechada");
+            }
+            Ok(())
+        };
+        let f = crate::chaves::Falha::Fechada;
+        if f.codigo() != politica::Codigo::Error
+            || f.motivo() != "a chave esta selada no TPM e nao foi aberta neste boot"
+        {
+            return Err("a chave fechada nao diz o que e");
+        }
+
+        // Mexido: um byte do bloco privado do objeto de agora.
+        let mut privado = novo.privado().to_vec();
+        privado[7] ^= 0x01;
+        gravar_selado(&novo, &privado)?;
+        let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+        if reposto != Err("o objeto selado nao e deste TPM, ou foi mexido") {
+            crate::log_error!("teste", "{:?}", reposto);
+            return Err("o selado mexido nao parou a reposicao com o motivo dele");
+        }
+        fechada("mexido")?;
+
+        // De outra geração: o de antes da morte da outra, como uma cópia
+        // antiga o teria.
+        gravar_selado(&velho, velho.privado())?;
+        let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+        if reposto != Err("uma chave selada para outra geracao que a do TPM") {
+            crate::log_error!("teste", "{:?}", reposto);
+            return Err("o selado de outra geracao nao parou a reposicao com o motivo dele");
+        }
+        fechada("outra geracao")?;
+
+        // De volta: o objeto de agora por cima, e ela abre e assina igual.
+        gravar_selado(&novo, novo.privado())?;
+        estado_do_journal()?;
+        if assina_com_a_publica(&dono, "bancada", [0x41; 32], &vista.publica)? != antes {
+            return Err("de volta, a chave assina com outra privada");
+        }
+        Ok(())
+    })
+}
+
+/// O primário que não é o do boot — o TPM limpo no meio do caminho, ou
+/// trocado — não sela nem abre: a criação é recusada sem chave nenhuma, e a
+/// reabertura para com o motivo, a chave fechada. De volta o primário do
+/// boot, a chave abre e assina igual.
+fn chaves_o_primario_que_nao_e_o_do_boot_nao_sela_nem_abre() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(227), "outro-primario", "operador");
+        let quem = Chamador::Pessoa(sessao);
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        if !fs_verdade(&criar_chave(quem, "chave:bancada"), "created") {
+            return Err("a chave do caso nao nasceu");
+        }
+        let vista = crate::chaves::ler(&dono, "bancada").map_err(|_| "a chave do caso sumiu")?;
+        let antes = assina_com_a_publica(&dono, "bancada", [0x29; 32], &vista.publica)?;
+        let do_boot = crate::persistencia::trocar_o_primario_de_teste([0x5A; 34])?;
+        let criada = criar_chave(quem, "chave:bancada-2");
+        let reaberta = crate::persistencia::reabrir_as_chaves_de_teste();
+        let fechada = crate::chaves::para_assinar(&dono, "bancada", DOMINIO_DE_TESTE).err();
+        crate::persistencia::trocar_o_primario_de_teste(do_boot)?;
+        if fs_verdade(&criada, "created") || crate::chaves::ler(&dono, "bancada-2").is_ok() {
+            return Err("uma chave nasceu sob um primario que nao e o do boot");
+        }
+        if reaberta != Err("o objeto selado nao e o que o Duke cria")
+            || fechada != Some(crate::chaves::Falha::Fechada)
+        {
+            crate::log_error!("teste", "{:?} / {:?}", reaberta, fechada);
+            return Err("o primario que nao e o do boot abriu, ou a chave nao ficou fechada");
+        }
+        if crate::persistencia::reabrir_as_chaves_de_teste()? != 1
+            || assina_com_a_publica(&dono, "bancada", [0x29; 32], &vista.publica)? != antes
+        {
+            return Err("de volta o primario do boot, a chave nao abriu igual");
+        }
+        Ok(())
+    })
+}
+
+/// As chaves do formato de antes do cofre — a semente cifrada só com o
+/// registro do journal, que a chave do Duke no disco abre — são migradas:
+/// seladas no TPM na geração atual e gravadas, e a representação antiga
+/// eliminada. A compactação leva só os objetos selados; a limpeza zera a
+/// partição fora do journal — a outra região e o que sobrou desta —, e o
+/// registro do fim dela fica no journal. Depois, nenhuma semente — nem a de
+/// uma antiga que já tinha morrido — está em registro nenhum de nenhuma
+/// região, nem em claro em setor nenhum; a migrada assina com a mesma
+/// pública, e a reposição a traz selada.
+fn persistencia_a_migracao_das_chaves_antigas() -> Resultado {
+    use crate::pessoas::Console;
+    use diario::estado::tipo;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(225), "chave-antiga", "operador");
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        let viva: [u8; 32] = core::array::from_fn(|i| 0x51 + i as u8);
+        let morta: [u8; 32] = core::array::from_fn(|i| 0xA3 ^ (i as u8).wrapping_mul(5));
+        let publica_viva = sigilo::chaves::Privada::de_semente(viva).publica();
+        let publica_morta = sigilo::chaves::Privada::de_semente(morta).publica();
+        let criada = crate::persistencia::agora_ms().to_le_bytes();
+        let antiga = |nome: &str, s: &[u8; 32]| {
+            crate::persistencia::entrada_de_teste(
+                tipo::CHAVE_CRIADA,
+                &[
+                    dono.as_bytes(),
+                    nome.as_bytes(),
+                    DOMINIO_DE_TESTE.as_bytes(),
+                    &criada,
+                    s,
+                ],
+            )
+        };
+        let lapide = crate::persistencia::entrada_de_teste(
+            tipo::CHAVE_MORTA,
+            &[
+                dono.as_bytes(),
+                b"antiga-morta",
+                &[crate::chaves::Estado::Destruida.codigo()],
+                DOMINIO_DE_TESTE.as_bytes(),
+                &criada,
+                &publica_morta,
+            ],
+        );
+        // Gravadas como o kernel de antes do cofre as gravava: cada criação
+        // com a semente, e a lápide de uma que morreu.
+        for (operacao, recurso, e) in [
+            ("key.create", "chave:antiga", antiga("antiga", &viva)),
+            (
+                "key.create",
+                "chave:antiga-morta",
+                antiga("antiga-morta", &morta),
+            ),
+            ("key.destroy", "chave:antiga-morta", lapide),
+        ] {
+            let marcador = crate::persistencia::entrada_de_teste(
+                tipo::OPERACAO,
+                &[operacao.as_bytes(), recurso.as_bytes()],
+            );
+            let dados = diario::estado::campos(&[&marcador, &e])
+                .map_err(|_| "o registro antigo nao se monta")?;
+            crate::persistencia::gravar_de_teste(tipo::OPERACAO, &dados, 0)?;
+        }
+        // O boot: reposta, a antiga é viva, com a privada e sem objeto
+        // selado, e as duas sementes estão na região.
+        estado_do_journal()?;
+        let lida = crate::chaves::ler(&dono, "antiga").map_err(|_| "a antiga nao foi reposta")?;
+        if lida.selada || lida.publica != publica_viva {
+            return Err("a antiga reposta nao e a do formato de antes do cofre");
+        }
+        if !a_semente_esta_no_journal(&viva)? || !a_semente_esta_no_journal(&morta)? {
+            return Err("o caso nao gravou as sementes do formato de antes");
+        }
+
+        // A migração, como o boot a faz.
+        crate::persistencia::migrar_de_teste()?;
+        let lida = crate::chaves::ler(&dono, "antiga").map_err(|_| "a antiga sumiu")?;
+        if !lida.selada || lida.publica != publica_viva {
+            return Err("a antiga nao foi selada, ou mudou de publica");
+        }
+        // Fora do journal, a partição é só zeros — tirada a reserva do fim,
+        // que é da bancada. A auditoria do coletor espera: um registro dela
+        // agora cairia depois da extensão medida.
+        crate::persistencia::pausar_a_auditoria_de_teste(true);
+        let zerada = (|| -> Result<bool, &'static str> {
+            let (inicio, usados) = crate::persistencia::extensao_do_journal_de_teste()?;
+            let total = crate::persistencia::setores_do_estado_de_teste()? - diario::RESERVA_NO_FIM;
+            for (de, ate) in [(0, inicio), (inicio + usados, total)] {
+                let mut s = de;
+                while s < ate {
+                    let n = (ate - s).min(256);
+                    if crate::persistencia::setores_crus_de_teste(s, n)?
+                        .iter()
+                        .any(|&b| b != 0)
+                    {
+                        crate::log_error!("teste", "setores {}..{} nao zerados", s, s + n);
+                        return Ok(false);
+                    }
+                    s += n;
+                }
+            }
+            Ok(true)
+        })();
+        crate::persistencia::pausar_a_auditoria_de_teste(false);
+        if !zerada? {
+            return Err("fora do journal, a particao nao e so zeros");
+        }
+        for s in [&viva, &morta] {
+            if em_alguma_regiao(s)? {
+                return Err("uma semente antiga ficou num registro do journal");
+            }
+            if na_particao_crua(s)? {
+                return Err("uma semente antiga ficou em claro na particao");
+            }
+        }
+        let feita = registro_com_entrada(0, |c| {
+            c.first().copied() == Some(&tipo::LIMPEZA_FEITA.to_le_bytes()[..])
+        })?;
+        if feita.is_none() || !a_selada_esta_no_journal(&publica_viva)? {
+            return Err("o fim da limpeza ou o objeto selado da migrada nao esta no journal");
+        }
+
+        // A migrada assina com a mesma pública; reposta, volta selada, e o
+        // cofre a abre.
+        let primeira = assina_com_a_publica(&dono, "antiga", [0x33; 32], &publica_viva)?;
+        estado_do_journal()?;
+        let reposta = crate::chaves::ler(&dono, "antiga").map_err(|_| "a migrada sumiu")?;
+        if !reposta.selada
+            || assina_com_a_publica(&dono, "antiga", [0x33; 32], &publica_viva)? != primeira
+        {
+            return Err("a migrada reposta nao e a mesma chave selada");
+        }
+        if crate::chaves::para_assinar(&dono, "antiga-morta", DOMINIO_DE_TESTE).is_ok() {
+            return Err("a antiga morta voltou a assinar");
+        }
+        Ok(())
+    })
+}
+
+/// Uma chave do formato de antes do cofre com a migração interrompida — a
+/// entrada antiga, com a semente, e o registro da migração com o objeto
+/// selado dela — cujo objeto não abre: o de outra chave, que o cofre abre e
+/// dá outra semente, ou um mexido, que o TPM recusa. A reposição para com o
+/// motivo, e a chave fica fechada: a semente da entrada antiga não entra no
+/// lugar — o objeto selado é a única origem da privada.
+fn persistencia_a_antiga_cujo_selado_nao_abre_fica_fechada() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use diario::estado::tipo;
+    com_chaves(|| {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(226), "antiga-fechada", "operador");
+        let dono = crate::pessoas::dona_da_sessao(sessao)
+            .ok_or("a sessao de teste nao tem dona")?
+            .texto();
+        // Um objeto selado de verdade, deste TPM e desta geração: o de outra
+        // chave.
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(sessao), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a chave do caso nao nasceu");
+        }
+        let outro = crate::chaves::selado_de_teste(&dono, "bancada").ok_or("a chave sem selado")?;
+        let semente: [u8; 32] = core::array::from_fn(|i| 0x6B ^ (i as u8).wrapping_mul(3));
+        let publica = sigilo::chaves::Privada::de_semente(semente).publica();
+        let criada = crate::persistencia::agora_ms().to_le_bytes();
+        let marcador = crate::persistencia::entrada_de_teste(
+            tipo::OPERACAO,
+            &[b"key.create", b"chave:antiga"],
+        );
+        let antiga = crate::persistencia::entrada_de_teste(
+            tipo::CHAVE_CRIADA,
+            &[
+                dono.as_bytes(),
+                b"antiga",
+                DOMINIO_DE_TESTE.as_bytes(),
+                &criada,
+                &semente,
+            ],
+        );
+        let dados = diario::estado::campos(&[&marcador, &antiga])
+            .map_err(|_| "o registro antigo nao se monta")?;
+        crate::persistencia::gravar_de_teste(tipo::OPERACAO, &dados, 0)?;
+        let migracao = |privado: &[u8]| -> Resultado {
+            let e = crate::persistencia::entrada_de_teste(
+                tipo::CHAVE_SELADA,
+                &[
+                    dono.as_bytes(),
+                    b"antiga",
+                    DOMINIO_DE_TESTE.as_bytes(),
+                    &criada,
+                    &publica,
+                    &outro.geracao().to_le_bytes(),
+                    outro.unico(),
+                    privado,
+                ],
+            );
+            let pendente = crate::persistencia::entrada_de_teste(tipo::LIMPEZA_PENDENTE, &[]);
+            let dados = diario::estado::campos(&[&e, &pendente])
+                .map_err(|_| "o registro da migracao nao se monta")?;
+            crate::persistencia::gravar_de_teste(tipo::SELAGEM, &dados, 0)
+        };
+        let mut mexido = outro.privado().to_vec();
+        mexido[9] ^= 0x01;
+        for (como, privado, motivo) in [
+            (
+                "de outra chave",
+                outro.privado().to_vec(),
+                "a semente aberta pelo cofre nao e a da chave",
+            ),
+            (
+                "mexido",
+                mexido,
+                "o objeto selado nao e deste TPM, ou foi mexido",
+            ),
+        ] {
+            migracao(&privado)?;
+            let reposto = reposto_da_imagem(crate::persistencia::reaplicar_regiao_de_teste);
+            if reposto != Err(motivo) {
+                crate::log_error!("teste", "{}: {:?}", como, reposto);
+                return Err("o selado da antiga que nao abre nao parou a reposicao com o motivo");
+            }
+            if crate::chaves::para_assinar(&dono, "antiga", DOMINIO_DE_TESTE).err()
+                != Some(crate::chaves::Falha::Fechada)
+            {
+                crate::log_error!("teste", "{}", como);
+                return Err("a antiga cujo selado nao abre assinou com a semente de antes");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// O teto de vivas da tabela — 64, de oito donos — e a morte de uma: as 63
+/// outras seladas de novo para a geração seguinte num registro só, o índice
+/// avançado uma vez, e a reposição abre as 63 do cofre. Os tempos vão para
+/// o log: o custo de selar todas numa morte, de abrir todas num boot e de
+/// compactar com elas — e o de cada operação do cofre, sozinha.
+fn chaves_sessenta_e_quatro_vivas_e_a_morte_de_uma() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    const NOMES: [&str; 8] = [
+        "chave:v0", "chave:v1", "chave:v2", "chave:v3", "chave:v4", "chave:v5", "chave:v6",
+        "chave:v7",
+    ];
+    com_chaves(|| {
+        com_mais_nomes_de_chave(&NOMES, || {
+            let mut quem = alloc::vec::Vec::new();
+            for i in 0..8u16 {
+                let s = crate::pessoas::sessao_de_teste(
+                    Console::Terminal(230 + i),
+                    &alloc::format!("vivas-{i}"),
+                    "operador",
+                );
+                let dono = crate::pessoas::dona_da_sessao(s)
+                    .ok_or("a sessao de teste nao tem dona")?
+                    .texto();
+                quem.push((Chamador::Pessoa(s), dono));
+            }
+            let inicio = crate::tempo::uptime_ms();
+            for (q, _) in &quem {
+                for nome in NOMES {
+                    let r = criar_chave(*q, nome);
+                    if !fs_verdade(&r, "created") {
+                        crate::log_error!("teste", "{}", r);
+                        return Err("uma das 64 chaves nao nasceu");
+                    }
+                }
+            }
+            let criar_ms = crate::tempo::uptime_ms() - inicio;
+            if crate::chaves::contagem_de_teste().0 != 64 {
+                return Err("a tabela nao tem as 64 vivas");
+            }
+            let g = crate::persistencia::geracao_da_selagem_de_teste()?;
+            let inicio = crate::tempo::uptime_ms();
+            if !fs_verdade(&chave_so(quem[0].0, "key.destroy", "chave:v0"), "destroyed") {
+                return Err("uma das 64 nao foi destruida");
+            }
+            let morte_ms = crate::tempo::uptime_ms() - inicio;
+            if crate::persistencia::geracao_da_selagem_de_teste()? != g + 1
+                || crate::persistencia::geracao_no_tpm_de_teste()? != g + 1
+            {
+                return Err("a morte de uma das 64 nao avancou a geracao uma vez");
+            }
+            let mut publicas = alloc::vec::Vec::new();
+            for (i, (_, dono)) in quem.iter().enumerate() {
+                for (k, nome) in NOMES.iter().enumerate() {
+                    let nome = &nome["chave:".len()..];
+                    let selado = crate::chaves::selado_de_teste(dono, nome);
+                    let viva = i != 0 || k != 0;
+                    if selado.is_some() != viva || selado.is_some_and(|s| s.geracao() != g + 1) {
+                        return Err("uma viva nao foi selada para a geracao seguinte");
+                    }
+                    if viva {
+                        let v = crate::chaves::ler(dono, nome).map_err(|_| "uma viva sumiu")?;
+                        publicas.push((dono.clone(), nome, v.publica));
+                    }
+                }
+            }
+            let inicio = crate::tempo::uptime_ms();
+            estado_do_journal()?;
+            let abrir_ms = crate::tempo::uptime_ms() - inicio;
+            for (dono, nome, publica) in &publicas {
+                assina_com_a_publica(dono, nome, [0x34; 32], publica)?;
+            }
+            if crate::chaves::para_assinar(&quem[0].1, "v0", DOMINIO_DE_TESTE).is_ok() {
+                return Err("a destruida das 64 voltou a assinar");
+            }
+            let inicio = crate::tempo::uptime_ms();
+            crate::persistencia::compactar_de_teste()?;
+            let compactar_ms = crate::tempo::uptime_ms() - inicio;
+            crate::log_info!(
+                "teste",
+                "64 vivas: criadas em {} ms; a morte de uma selou 63 em {} ms; a reposicao abriu 63 em {} ms; a compactacao com 63 levou {} ms",
+                criar_ms,
+                morte_ms,
+                abrir_ms,
+                compactar_ms
+            );
+            // Cada operação do cofre, dezesseis vezes.
+            let [primario, selar, abrir] = crate::persistencia::medir_o_cofre_de_teste(16)?;
+            crate::log_info!(
+                "teste",
+                "o cofre, 16 vezes: o primario em {} ms; selar em {} ms; abrir em {} ms",
+                primario,
+                selar,
+                abrir
+            );
+            Ok(())
+        })
+    })
+}
+
+/// O cofre com tudo ao mesmo tempo, em fios do kernel, cada um um processo
+/// da mesma pessoa: dois assinando com duas chaves; um terceiro criando e
+/// destruindo outras — cada morte sela as vivas de novo e avança o índice
+/// —; e um quarto compactando no meio. Cada assinatura confere com a
+/// pública da chave dela, cada morte avança a geração uma vez, e a
+/// reposição, no fim, abre as vivas do cofre, que assinam igual.
+fn chaves_o_cofre_com_tudo_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIO: u64 = 7_000_341;
+    const VEZES: u8 = 8;
+    const CICLOS: [&str; 4] = ["chave:c0", "chave:c1", "chave:c2", "chave:c3"];
+    static SESSAO: AtomicU64 = AtomicU64::new(0);
+    static CONFEREM: AtomicU64 = AtomicU64::new(0);
+    static NAO_CONFEREM: AtomicU64 = AtomicU64::new(0);
+    static MORTES: AtomicU64 = AtomicU64::new(0);
+    static COMPACTACOES: AtomicU64 = AtomicU64::new(0);
+    static FALHAS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+
+    fn processo(i: u64) -> Chamador {
+        Chamador::Processo {
+            fio: FIO + i,
+            autoridade: Autoridade::Pessoa {
+                sessao: crate::pessoas::IdSessao(SESSAO.load(SeqCst).to_le_bytes()),
+            },
+            programa: Programa::Imagem {
+                manifesto: Some(manifesto_de_teste(
+                    "caso",
+                    "key.create key.read key.sign key.destroy",
+                )),
+                resumo: [0xac; 32],
+                editor: None,
+            },
+        }
+    }
+    extern "C" fn assinante(i: u64) -> ! {
+        let quem = processo(i);
+        let chave = if i == 0 {
+            "chave:bancada"
+        } else {
+            "chave:bancada-2"
+        };
+        let d = crate::chaves::dominio(DOMINIO_DE_TESTE);
+        let publica = publica_de(&chave_so(quem, "key.read", chave));
+        for v in 0..VEZES {
+            let r = [0x60 + 0x10 * i as u8 + v; 32];
+            let s = fs_texto(
+                &assinar_com(quem, chave, DOMINIO_DE_TESTE, &sigilo::hex(&r)),
+                "signature",
+            )
+            .and_then(|s| sigilo::de_hex_fixo::<64>(&s));
+            let confere = match (&d, publica, s) {
+                (Some(d), Some(p), Some(s)) => sigilo::chaves::conferir(&p, d, &r, &s),
+                _ => false,
+            };
+            if confere {
+                CONFEREM.fetch_add(1, SeqCst);
+            } else {
+                NAO_CONFEREM.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn ciclo(i: u64) -> ! {
+        let quem = processo(i);
+        for chave in CICLOS {
+            let criada = fs_verdade(&criar_chave(quem, chave), "created");
+            let destruida =
+                criada && fs_verdade(&chave_so(quem, "key.destroy", chave), "destroyed");
+            if destruida {
+                MORTES.fetch_add(1, SeqCst);
+            } else {
+                FALHAS.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn compactador(_: u64) -> ! {
+        for _ in 0..3 {
+            match crate::persistencia::compactar_de_teste() {
+                Ok(()) => COMPACTACOES.fetch_add(1, SeqCst),
+                Err(_) => FALHAS.fetch_add(1, SeqCst),
+            };
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    com_chaves(|| {
+        com_mais_nomes_de_chave(&CICLOS, || {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(239),
+                "cofre-ao-mesmo-tempo",
+                "operador",
+            );
+            let dono = crate::pessoas::dona_da_sessao(sessao)
+                .ok_or("a sessao de teste nao tem dona")?
+                .texto();
+            SESSAO.store(u64::from_le_bytes(sessao.0), SeqCst);
+            for a in [
+                &CONFEREM,
+                &NAO_CONFEREM,
+                &MORTES,
+                &COMPACTACOES,
+                &FALHAS,
+                &PRONTOS,
+            ] {
+                a.store(0, SeqCst);
+            }
+            let mut publicas = alloc::vec::Vec::new();
+            for chave in ["chave:bancada", "chave:bancada-2"] {
+                let p = publica_de(&criar_chave(processo(0), chave))
+                    .ok_or("uma chave do caso nao nasceu")?;
+                publicas.push((&chave["chave:".len()..], p));
+            }
+            let g = crate::persistencia::geracao_da_selagem_de_teste()?;
+            crate::fios::criar("teste-cofre-assina-a", assinante, 0)?;
+            crate::fios::criar("teste-cofre-assina-b", assinante, 1)?;
+            crate::fios::criar("teste-cofre-ciclo", ciclo, 2)?;
+            crate::fios::criar("teste-cofre-compacta", compactador, 3)?;
+            esperar_ate(|| PRONTOS.load(SeqCst) == 4, 60_000)
+                .map_err(|_| "os quatro fios do cofre nao acabaram")?;
+            let (conferem, nao, mortes, compactacoes, falhas) = (
+                CONFEREM.load(SeqCst),
+                NAO_CONFEREM.load(SeqCst),
+                MORTES.load(SeqCst),
+                COMPACTACOES.load(SeqCst),
+                FALHAS.load(SeqCst),
+            );
+            if conferem != 2 * u64::from(VEZES)
+                || nao != 0
+                || mortes != CICLOS.len() as u64
+                || compactacoes != 3
+                || falhas != 0
+            {
+                crate::log_error!(
+                    "teste",
+                    "{} conferem, {} nao, {} mortes, {} compactacoes, {} falhas",
+                    conferem,
+                    nao,
+                    mortes,
+                    compactacoes,
+                    falhas
+                );
+                return Err("o cofre com tudo ao mesmo tempo nao deu o que cada fio pediu");
+            }
+            let mortas = CICLOS.len() as u64;
+            if crate::persistencia::geracao_da_selagem_de_teste()? != g + mortas
+                || crate::persistencia::geracao_no_tpm_de_teste()? != g + mortas
+            {
+                return Err("as mortes ao mesmo tempo nao avancaram a geracao uma vez cada");
+            }
+            let mut antes = alloc::vec::Vec::new();
+            for (nome, publica) in &publicas {
+                antes.push(assina_com_a_publica(&dono, nome, [0x35; 32], publica)?);
+            }
+            estado_do_journal()?;
+            for ((nome, publica), assinatura) in publicas.iter().zip(&antes) {
+                if assina_com_a_publica(&dono, nome, [0x35; 32], publica)? != *assinatura {
+                    return Err("reabertas do cofre, as vivas assinam outra coisa");
+                }
+            }
+            for chave in CICLOS {
+                if crate::chaves::para_assinar(&dono, &chave["chave:".len()..], DOMINIO_DE_TESTE)
+                    .is_ok()
+                {
+                    return Err("uma das destruidas ao mesmo tempo voltou a assinar");
+                }
+            }
+            Ok(())
+        })
+    })
+}
+
+/// A revogação de um dono no meio da reposição que abre as chaves do cofre
+/// — pelo caminho da persistência de uma revogação: a foto, a anulação das
+/// chaves dele, e a conclusão que grava a diferença. As duas tomam a ordem
+/// das gravações, e uma vem inteira antes da outra. No fim as chaves do
+/// revogado estão anuladas e não assinam, a geração andou uma vez, e as do
+/// outro dono abriram e assinam — e uma reposição a mais dá o mesmo.
+fn chaves_a_revogacao_enquanto_o_boot_abre() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::pessoas::Console;
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    static DONO: crate::trava::Mutex<alloc::string::String> =
+        crate::trava::Mutex::new(alloc::string::String::new());
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static GRAVADA: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn revogador(_: u64) -> ! {
+        let dono = crate::arch::sem_interrupcoes(|| DONO.lock().clone());
+        let gravada = crate::persistencia::em_ordem(|| {
+            let foto = crate::persistencia::Foto::tirar();
+            crate::chaves::identidade_revogada(&dono);
+            crate::persistencia::concluir(&foto, "person.revoke", &dono, false, 0)
+        });
+        GRAVADA.store(u64::from(gravada.is_ok()), SeqCst);
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    com_chaves(|| {
+        let sa = crate::pessoas::sessao_de_teste(Console::Terminal(240), "boot-fica", "operador");
+        let sb = crate::pessoas::sessao_de_teste(Console::Terminal(241), "boot-sai", "operador");
+        let (da, db) = (
+            crate::pessoas::dona_da_sessao(sa)
+                .ok_or("a sessao de teste nao tem dona")?
+                .texto(),
+            crate::pessoas::dona_da_sessao(sb)
+                .ok_or("a sessao de teste nao tem dona")?
+                .texto(),
+        );
+        for (s, chave) in [
+            (sa, "chave:bancada"),
+            (sa, "chave:bancada-2"),
+            (sb, "chave:bancada"),
+            (sb, "chave:bancada-2"),
+        ] {
+            if !fs_verdade(&criar_chave(Chamador::Pessoa(s), chave), "created") {
+                return Err("uma chave do caso nao nasceu");
+            }
+        }
+        let publicas: alloc::vec::Vec<[u8; 32]> = ["bancada", "bancada-2"]
+            .iter()
+            .map(|n| crate::chaves::ler(&da, n).map(|v| v.publica))
+            .collect::<Result<_, _>>()
+            .map_err(|_| "uma chave do caso sumiu")?;
+        let g = crate::persistencia::geracao_da_selagem_de_teste()?;
+        crate::arch::sem_interrupcoes(|| *DONO.lock() = db.clone());
+        PRONTOS.store(0, SeqCst);
+        GRAVADA.store(0, SeqCst);
+        crate::fios::criar("teste-revoga-no-boot", revogador, 0)?;
+        // A reposição, agora: o revogador espera a ordem, ou ela espera ele.
+        estado_do_journal()?;
+        esperar_ate(|| PRONTOS.load(SeqCst) == 1, 30_000)
+            .map_err(|_| "a revogacao do dono nao acabou")?;
+        if GRAVADA.load(SeqCst) != 1 {
+            return Err("a revogacao do dono nao foi gravada");
+        }
+        let conferir = |etapa: &str| -> Resultado {
+            for (i, nome) in ["bancada", "bancada-2"].iter().enumerate() {
+                if crate::chaves::ler(&db, nome).map(|v| v.estado)
+                    != Ok(crate::chaves::Estado::Anulada)
+                    || crate::chaves::para_assinar(&db, nome, DOMINIO_DE_TESTE).is_ok()
+                {
+                    crate::log_error!("teste", "{}", etapa);
+                    return Err("uma chave do dono revogado nao ficou anulada");
+                }
+                assina_com_a_publica(&da, nome, [0x36; 32], &publicas[i])?;
+            }
+            if crate::persistencia::geracao_da_selagem_de_teste()? != g + 1
+                || crate::persistencia::geracao_no_tpm_de_teste()? != g + 1
+            {
+                crate::log_error!("teste", "{}", etapa);
+                return Err("a revogacao no meio do boot nao avancou a geracao uma vez");
+            }
+            Ok(())
+        };
+        conferir("depois das duas")?;
+        estado_do_journal()?;
+        conferir("de novo")
     })
 }
 
@@ -50260,6 +51416,82 @@ fn icp_cada_chave_e_um_principal() -> Resultado {
         crate::chaves::esquecer_de_teste();
         if algum {
             return Err("um principal do IC apareceu num registro do kernel");
+        }
+        Ok(())
+    })
+}
+
+/// O Principal de uma chave selada no TPM é o mesmo depois que o cofre a
+/// fecha e a abre de novo — como num boot —, e de novo depois que a morte
+/// de outra chave a sela na geração seguinte: a custódia muda de forma, a
+/// identidade não.
+fn icp_o_principal_da_chave_selada_e_o_mesmo_depois_do_cofre() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_bancada_icp(|| {
+        crate::chaves::esquecer_de_teste();
+        let a = crate::pessoas::sessao_de_teste(Console::Terminal(208), "icp-selada", "operador");
+        let dono = crate::pessoas::dona_da_sessao(a)
+            .map(|d| d.texto())
+            .ok_or("a sessao de teste nao tem dona")?;
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(a), "chave:bancada"),
+            "created",
+        ) {
+            return Err("a chave do caso nao nasceu");
+        }
+        let quem_responde = || {
+            let icp = Icp::lancar(Autoridade::Pessoa { sessao: a })?;
+            let p = icp.passo(
+                ICP_QUEM,
+                REDE_BANCADA,
+                ICP_CHAVE,
+                "quem bancada chave:bancada",
+            );
+            let fio = icp.fio;
+            let fim = icp.encerrar();
+            let p = p?;
+            fim?;
+            let (remetente, _, resposta) =
+                remetente_e_resposta(&p).ok_or("o passo sem remetente")?;
+            if p.desfecho != "verified" || resposta != alloc::format!("principal {remetente}") {
+                crate::log_error!("teste", "{:?}", p);
+                return Err("a chamada da chave selada nao verificou");
+            }
+            o_ic_so_na_alegacao(fio)?;
+            Ok(alloc::string::String::from(remetente))
+        };
+        let reabrir = || match crate::persistencia::reabrir_as_chaves_de_teste()? {
+            1 => Ok(()),
+            _ => Err("o cofre nao reabriu so a chave do caso"),
+        };
+        let antes = quem_responde()?;
+        let selado =
+            crate::chaves::selado_de_teste(&dono, "bancada").ok_or("a chave sem selado")?;
+        reabrir()?;
+        let reaberta = quem_responde()?;
+        // A morte de outra chave sela a do caso na geração seguinte.
+        let g = crate::persistencia::geracao_da_selagem_de_teste()?;
+        if !fs_verdade(
+            &criar_chave(Chamador::Pessoa(a), "chave:bancada-2"),
+            "created",
+        ) || !fs_verdade(
+            &chave_so(Chamador::Pessoa(a), "key.destroy", "chave:bancada-2"),
+            "destroyed",
+        ) {
+            return Err("a outra chave nao nasceu, ou nao morreu");
+        }
+        if crate::persistencia::geracao_da_selagem_de_teste()? != g + 1
+            || crate::chaves::selado_de_teste(&dono, "bancada").is_none_or(|s| s == selado)
+        {
+            return Err("a morte da outra chave nao selou a do caso na geracao seguinte");
+        }
+        reabrir()?;
+        let depois = quem_responde()?;
+        crate::chaves::esquecer_de_teste();
+        if antes != reaberta || antes != depois || antes == PRINCIPAL_ANONIMO {
+            crate::log_error!("teste", "{} / {} / {}", antes, reaberta, depois);
+            return Err("o principal da chave selada mudou depois do cofre");
         }
         Ok(())
     })
