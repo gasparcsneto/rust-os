@@ -2060,6 +2060,41 @@ chave a chave que não se lê chegava lá; a `implantacao` não lê outra conta
 antes da criação, e, sem a chave, a criação mutada saiu do anônimo,
 pagando com os cycles dele.
 
+## A semente selada no TPM (ICP-5)
+
+O ICP-5 tira do disco a semente das chaves de assinatura. Até ele, o
+journal levava a semente, cifrada com o registro pela chave do journal —
+que deriva da chave do Duke, no disco. Agora ele leva um objeto **selado
+no TPM da máquina**: só esse TPM o abre, e só enquanto a chave vive. A
+custódia continua do kernel, e o TPM é mecanismo de custódia em repouso,
+e não autoridade:
+
+| | antes (ICP-3) | agora (ICP-5) |
+|---|---|---|
+| onde a semente nasce | o gerador do kernel | o mesmo |
+| onde a privada mora | a memória do kernel | a mesma |
+| quem assina, e quem decide | o kernel, depois do gate e da política | os mesmos |
+| no disco | a semente, cifrada pela chave do journal | o objeto selado no TPM |
+| uma cópia velha do disco | recusada pela âncora | recusada pela âncora, e o selado da morta não abre mais |
+| `key.read` | `"custody":"kernel"` | `"custody":"kernel"`, `"seal":"tpm"` |
+
+O Ed25519, o mesmo Principal, o `key.sign`, o domínio `ic-request`, a
+política, o gate, a auditoria e a proveniência não mudaram, nem o `web3`
+e os programas: o `icp`, a `carteira` e a `implantacao` assinam pela
+mesma chave, e o Principal dela é o mesmo antes e depois de o cofre a
+fechar e abrir de novo — e depois de a morte de outra chave a selar na
+geração seguinte. Os programas têm exatamente o tamanho do ICP-4e, e
+nenhum fonte deles mudou.
+
+O desenho inteiro está em [PERSISTENCIA.md](PERSISTENCIA.md), *O cofre
+das chaves no TPM*: o primário que todo boot recria, o selado preso ao
+índice de geração pelo `TPM2_PolicyNV`, a semente que nunca anda em claro
+no barramento, a morte de uma chave em três passos — os selados novos no
+journal antes de o índice andar —, a conciliação no boot, a migração das
+chaves antigas, os testes, as vinte mutações e as medidas. Do lado do
+IC, o caso novo da suíte é "o principal da chave selada é o mesmo depois
+do cofre", ao lado dos 39 `icp:` de antes, que passam sem mudança.
+
 ## O que não existe ainda
 
 De propósito, e cada um é uma decisão nova quando vier: delegações — e,

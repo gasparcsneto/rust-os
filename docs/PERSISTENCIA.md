@@ -1416,7 +1416,11 @@ kernel ainda a lê, para migrar, e não a escreve mais. A compactação leva
 
 ### A migração das chaves antigas
 
-O primeiro boot sobre um journal de antes do cofre:
+Um journal de antes do cofre é um com um boot completo que nunca falou de
+geração. Um sem boot completo nenhum é uma criação interrompida — por
+este kernel ou pelo de antes —, e não tem chave nenhuma: uma chave só
+nasce depois do registro de boot. O primeiro boot sobre um journal de
+antes do cofre:
 
 1. repõe as chaves antigas com a semente da entrada antiga, e abre o
    cofre;
@@ -1442,6 +1446,113 @@ quem assina — a política decide quem pode `key.sign`, e o gate decide
 cada assinatura, como no ICP-3 —, não guarda chave de assinatura nem
 assina, e não aparece na política. `key.read` diz `"custody":"kernel"` e
 `"seal":"tpm"` — e nada do objeto selado, da sessão ou do TPM.
+
+### Os testes
+
+- **No hospedeiro**, contra o swtpm com o interposto no barramento
+  (`ancora/tests/swtpm.rs`, quinze novos): selar e abrir; o mesmo
+  primário em dois boots; o selado que não abre noutro TPM
+  (`TPM_RC_INTEGRITY`), nem no mesmo TPM depois de limpo; o mexido
+  recusado, também com a geração trocada; a semente que não passa pelo
+  barramento, nem no `TPM2_Create` nem no `TPM2_Unseal`; a resposta do
+  `TPM2_Unseal` mexida ou repetida, recusada; a geração que anda mata os
+  selados velhos (`TPM_RC_POLICY`), também depois de reiniciar; o índice
+  recriado não ressuscita nada; a geração definida e nunca avançada se
+  completa; a senha errada da geração não abre nem bloqueia; o bloqueio
+  do TPM não trava o cofre — e, de controle, um primário sem `noDA`
+  trava —; a política é a que o TPM calcula, por uma sessão de teste e o
+  `TPM2_PolicyGetDigest`; os atributos do primário e do selado são os
+  pedidos, bit a bit; as aberturas que falham não ocupam o TPM.
+- **Na suíte**, dez casos novos, e o do journal das chaves invertido —
+  nenhuma semente no journal, e o selado da viva lá, antes e depois da
+  compactação: a semente não chega ao disco — em registro decifrado
+  nenhum, de nenhuma região, nem em claro na partição — nem ao
+  barramento; a morta não volta de uma cópia antiga do disco — a
+  destruída, a anulada e a do dono revogado, cada morte avançando a
+  geração uma vez —; o selado que não abre falha fechado, com o motivo; o
+  primário que não é o do boot não sela nem abre; sessenta e quatro
+  vivas, com a morte de uma e a revogação de um dono; tudo ao mesmo
+  tempo — dois assinantes, criações e mortes, compactações —; a
+  revogação do dono enquanto o boot abre as chaves; a migração das
+  antigas; a antiga cujo selado não abre fica fechada, sem a semente de
+  antes; e o Principal da chave selada, o mesmo depois que o cofre a
+  reabre e depois que a morte de outra a sela na geração seguinte.
+- **Na bancada de persistência**: as chaves seladas diante de outro TPM —
+  a EK fixada recusa, e nada assina —; a queda entre os três passos de
+  uma morte, em sete pontos; a queda em cada passo da migração, em dez,
+  com o disco conferido depois — nenhuma semente em registro decifrado de
+  região nenhuma, nem em claro, nem entrada do formato de antes, e zeros
+  fora do journal —; e a queda em cada fronteira da compactação, agora
+  com uma chave selada que volta e assina igual. Os cenários de antes —
+  a queda na criação e na destruição de uma chave, as chaves que
+  sobrevivem ao corte — passam com o cofre. A queda na criação da âncora
+  achou a migração disparando numa criação interrompida (ver *A
+  migração*); a CI 324 a pegou no ARM e no x86.
+
+### As mutações
+
+Uma de cada vez, numa worktree à parte, com o que a pega: os testes do
+hospedeiro do `ancora`, a suíte do x86 só com os casos `chaves:`,
+`persistencia:` e `tpm:` — e os `icp:` da chave —, e os cenários da
+bancada de persistência do cofre. O controle, sem mutação, passa em
+tudo. As vinte reprovam:
+
+| forma | o que muda | quem a pega |
+|---|---|---|
+| a semente em claro | o `TPM2_Create` sem a cifra do parâmetro | o barramento, no hospedeiro e na suíte |
+| a semente cifrada só pela chave do Duke | a criação no formato de antes, com a semente no journal | treze casos da suíte |
+| sem `fixedTPM` | o selado sem o bit | o TPM recusa o `TPM2_Create` (`TPM_RC_ATTRIBUTES`): treze testes do hospedeiro; na suíte, nenhuma chave nasce |
+| sem `fixedParent` | o selado sem o bit | o mesmo |
+| o Unseal sem proteger a resposta | a semente volta em claro | o barramento, no hospedeiro e na suíte |
+| o primário de outro TPM aceito | o cofre não confere o nome do primário do boot | o caso do primário que não é o do boot |
+| sem `TPM2_PolicyNV` | o selado abre pela senha vazia, em qualquer geração | oito testes do hospedeiro; a morta que volta de uma cópia antiga |
+| a geração não avança | a morte sem o passo 2 | dois cenários da bancada e sete casos da suíte |
+| a geração avança antes dos selados novos | o passo 2 antes do registro | a queda antes da escrita de uma destruição: o boot recusado, todas as chaves perdidas |
+| a migração sem zerar | a limpeza sem os zeros | a bancada da migração e o caso dela |
+| a migração sem limpeza | nem compactação forçada, nem zeros | o mesmo |
+| a compactação leva a entrada antiga | a base com a semente junto do selado | a bancada da migração e três casos |
+| a semente antiga fica | a entrada do formato de antes e um selado que não abre: a privada antiga não sai | a antiga cujo selado não abre |
+| a falha do Unseal ignorada | a chave fica como estava, e o boot segue | o selado que não abre, e a antiga |
+| o primário sem `noDA` | o primário conta para o bloqueio | o TPM não começa os comandos (`TPM_RC_RETRY`): treze testes do hospedeiro |
+| o selado sem `noDA` | o selado conta para o bloqueio | os atributos pedidos — sem senha, o selado não erra autorização nenhuma |
+| `key.sign` sem o gate dele | a permissão de ler basta | quatro casos (ICP-3, ICP-4c) |
+| a revogação ignorada | a revogação do dono não anula as chaves | cinco casos |
+| a declaração sem âncora | a decisão de qualquer um ancora | a declaração ancorada |
+| a chave de outro dono | o nome resolve fora do dono | oito casos, e cada chave é um Principal |
+
+### As medidas
+
+Na suíte do x86 em depuração, com o swtpm — um TPM de software: um TPM
+de verdade é mais lento em cada comando —, o caso das sessenta e quatro
+vivas e as operações do cofre sozinhas, dezesseis vezes cada — o x86
+em duas rodadas, a suíte inteira e o caso sozinho; a compactação
+depende do resto do estado da região, e o ARM a mediu depois de outros
+quarenta casos:
+
+| | x86 | ARM |
+|---|---|---|
+| criar 64 chaves (cada uma selada, gravada e ancorada) | 1060 a 1490 ms | 1150 ms |
+| a morte de uma: 63 seladas de novo, um registro, o índice | 220 a 280 ms | 260 ms |
+| a revogação de um dono: 8 mortas e 55 seladas de novo | 270 ms | 240 ms |
+| a reposição inteira, com o cofre abrindo 55 | 2360 ms | 2560 ms |
+| a compactação com 55 | 1030 ms | 2390 ms |
+| o primário recriado (`TPM2_CreatePrimary`) | 2,5 ms | 2,5 ms |
+| selar (`TPM2_Create`) | 3,8 a 5,6 ms | 3,1 ms |
+| abrir (`TPM2_Load`, `TPM2_PolicyNV`, `TPM2_Unseal`) | 5,0 a 6,9 ms | 7,5 ms |
+
+No boot, o registro que diz o cofre aberto diz quanto ele levou; na
+bancada, com uma chave viva: 40 ms no x86 e 20 ms no ARM, o kernel de
+depuração; sem chave nenhuma, de 0 a 30 ms. A reposição da suíte, que
+refaz a região inteira, é quase toda a leitura do journal: as 55
+aberturas são de 280 a 410 ms dela. O `key.sign` não muda: a privada continua na
+memória do kernel, e a assinatura não fala com o TPM.
+
+O kernel de produção (release) cresceu 58 432 bytes de código no x86
+(+1,7%) e 59 300 no ARM (+2,1%); com os dados, 57 544 (+0,8%) e 63 484
+(+1,6%). A imagem do x86 que o iniciador carrega passou de 4440 para
+4504 KiB. Os programas não mudaram — nenhum fonte deles nem das
+bibliotecas deles —, e têm exatamente o tamanho do ICP-4e; a raiz
+continua com 160 MiB.
 
 ### Os riscos que ficam
 

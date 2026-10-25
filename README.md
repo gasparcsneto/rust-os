@@ -6721,7 +6721,10 @@ não chega ao disco nem ao barramento; a morta não volta de uma cópia
 antiga; o selado mexido, o de outra geração e o de outro primário são
 recusados; 64 vivas; tudo ao mesmo tempo; a migração; e o Principal
 igual depois do cofre. Na bancada, a queda em cada passo da morte, da
-migração e da compactação, e outro TPM recusado. Ver [O cofre das chaves
+migração e da compactação, e outro TPM recusado. As vinte mutações
+pedidas reprovam — da semente em claro no barramento ao índice que anda
+antes dos selados novos —, e o kernel de produção cresceu 1,7% de código
+no x86 e 2,1% no ARM. Ver [O cofre das chaves
 no TPM](docs/PERSISTENCIA.md#o-cofre-das-chaves-no-tpm-icp-5).
 
 ## Vários agentes
