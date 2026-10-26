@@ -110,6 +110,7 @@ mod relogio;
 mod seguranca;
 mod serial;
 mod sessoes;
+mod slots;
 mod superficies;
 mod tarefas;
 mod teclado;
@@ -481,7 +482,14 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
                     ),
                 }
             }
+            // As partições da atualização A/B, e a janela do controle de
+            // boot — ver [`slots`].
+            slots::anotar(&tabela);
             montar_a_raiz(&tabela);
+            // A imagem de onde o kernel veio, conferida com o registro de
+            // chaves da raiz que acabou de montar; e o pacote dela, por cima
+            // da raiz.
+            slots::conferir_e_montar();
         }
         Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
     }
@@ -516,6 +524,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // âncora do TPM. Antes das portas e do primeiro desafio: não há janela
     // em que uma credencial revogada da imagem esteja ativa.
     persistencia::abrir();
+    // A atualização A/B, com o journal aberto: a imagem que bootou contra o
+    // estado dele — o piso, a ativa, a candidata — e o controle de boot.
+    // Antes de qualquer serviço: um boot recusado não decide nada, e um que
+    // precisa voltar para o slot bom reinicia aqui.
+    slots::reconciliar();
     // O tecido de segurança, com a auditoria que o journal repôs como
     // história: ele lê pelo gate, com o papel do serviço `nsf` — ver
     // `docs/SEGURANCA.md`. Na suíte, cada caso faz as voltas dele.
@@ -539,6 +552,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         );
     }
     nucleos::ligar_os_demais();
+
+    // A versão nova que bootou numa tentativa se confirma aqui, com o boot
+    // inteiro de pé — o journal, os serviços, os núcleos —, e antes dos
+    // programas e dos canais: é o ponto sem volta da atualização. Um pânico
+    // antes daqui reinicia, e o iniciador conta a tentativa.
+    slots::confirmar_se_pendente();
 
     // O servidor de janelas e o Terminal, agora que o disco onde eles moram
     // está montado. Na suíte, é o caso de cada um que o lança.
@@ -698,6 +717,16 @@ fn panic(info: &PanicInfo) -> ! {
     // travado".
     #[cfg(feature = "modo-teste")]
     qemu::encerrar(qemu::Resultado::Falha);
+
+    // Numa tentativa da atualização A/B, a máquina reinicia em vez de
+    // parar: o iniciador já contou esta tentativa, e o boot seguinte tenta
+    // de novo ou volta para a versão velha. Parar deixaria a máquina sem
+    // ninguém até alguém desligá-la.
+    #[cfg(not(feature = "modo-teste"))]
+    if slots::em_tentativa() {
+        serial_println!("tentativa da versao nova: reiniciando");
+        arch::reiniciar_a_maquina()
+    }
 
     #[cfg(not(feature = "modo-teste"))]
     arch::halt_forever()

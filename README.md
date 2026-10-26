@@ -111,13 +111,17 @@ cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
+cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
-# Uma máquina de verdade — ver docs/OPERACAO.md
+# Uma máquina de verdade — ver docs/OPERACAO.md e docs/ATUALIZACAO.md
 cargo xtask chave agente <arquivo> <nome> <papel>   # a chave de quem a opera; a privada fica com ele
-cargo xtask provisionar <diretório> --release       # a imagem de produção, do material do operador
+cargo xtask chave atualizacao <arquivo> <nome>      # a chave de quem publica as versões
+cargo xtask publicar <chave> <versão> <geração>     # a imagem de slot de uma versão, assinada
+cargo xtask provisionar <diretório> --imagem <slot> # a imagem de produção, com a versão no slot A
 cargo xtask operar <host:porta> <método> --chave <arquivo> --duke <pública>
+cargo xtask operar <host:porta> update.stage --imagem <slot> --chave <arquivo> --duke <pública>
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -190,6 +194,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC, o tempo — `time`: o estado e as marcas do relógio civil, o civil, o lógico, a incerteza, o salto pendente, as fontes, as rodadas e a régua; ver [O tempo](#o-tempo) — e mecanismo de guarda da pilha |
 | `system.reboot` | Reinicia a máquina: o pedido vai à auditoria e ao journal antes (sem ele no disco, nada acontece); meio segundo depois da resposta as gravações param, o disco descarrega e o firmware reinicia (ACPI no x86, PSCI no ARM) |
 | `system.poweroff` | Desliga a máquina, pela mesma ordem do `system.reboot`: o pedido no journal antes, as gravações paradas, o disco descarregado, e o firmware corta a energia |
+| `update.status` | A atualização A/B: de que slot o kernel veio, em que modo e com que imagem conferida; a reconciliação do boot e a autoridade dele; o journal — o piso, a ativa, a candidata —; e o controle de boot que vale. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md) |
+| `update.stage` | Escreve um pedaço da versão nova — o anexo — no slot inativo, a partir de `offset` (múltiplo de setor), com a permissão `system.update`. Não instala nada: só o quórum `system.update` arma uma versão, conferindo o slot inteiro. Recusado com uma versão armada, com outro pedido no slot, ou sem a autoridade do boot (`offset`, `attachment`) |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
 | `time.request` | O pedido do Roughtime — versão 1, 1 KiB, em base64 em `request` — para uma fonte do registro de fontes de hora, `/etc/duke/tempo`, e o `id` dele. O kernel escolhe o nonce — o primeiro do gerador; os seguintes, encadeados à última resposta aceita da rodada — e liga o pedido ao principal que o gate decidiu, à fonte e à chave fixada dela; não escolhe a hora. A rodada começa pela primeira fonte do registro e segue a ordem dele, e pedir de novo a fonte em curso substitui o pedido. Exige `time.sync`; o transporte até a fonte é um `net.connect` UDP, decidido à parte. Uma fonte fora do registro, ou fora da ordem, é `INVALID_REQUEST`; a tabela cheia, `DENY_QUOTA`; sem entropia, `ENTROPY_UNAVAILABLE` (`source`) |
@@ -289,6 +295,7 @@ kernel/src/
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta, e o término de um processo, que isola antes
 ├── energia.rs       reiniciar e desligar: o pedido no journal antes, as gravações paradas, e a máquina entregue ao firmware (ACPI, PSCI)
+├── slots.rs         a atualização A/B do lado do kernel: a imagem do slot conferida, o pacote montado, a reconciliação do boot com o journal, a escrita no slot inativo e a instalação por quórum
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
@@ -440,6 +447,7 @@ iniciador/src/       a aplicação UEFI que o firmware carrega da ESP
 ├── salto.rs         a saída dos serviços de boot, e a entrega da máquina
 ├── crc32.rs         o CRC-32 que a UEFI usa nos cabeçalhos das tabelas
 ├── fdt.rs           o mínimo de device tree para conferir um endereço
+├── slots.rs         a atualização A/B: o controle de boot, a tentativa contada e gravada antes do boot, o slot conferido pelos resumos e pela forma do ELF, e a volta para o bom
 └── alvo/
     ├── mod.rs       o que muda de uma arquitetura para a outra
     ├── x86_64.rs    o que o Duke precisa saber sobre o x86_64
@@ -606,6 +614,15 @@ armazem/src/         o armazém como conta pura: caminhos, diretórios, versões
 ├── registro.rs      as entradas do journal dos metadados: nós, extensões, movimentos, a geometria do volume
 └── testes.rs        criar, substituir, renomear, os diretórios, as cotas, os lotes sorteados e a reposição
 
+atualizacao/src/     a atualização A/B como conta pura: os formatos que o iniciador e o kernel leem, e as regras que o journal guarda
+├── lib.rs           os slots, as arquiteturas, o resumo BLAKE2s e quem decide: o journal, e não o controle
+├── manifesto.rs     o manifesto canônico de uma imagem e a assinatura Ed25519 estrita sobre ele
+├── cabecalho.rs     os primeiros 4 KiB de um slot: o manifesto, a assinatura, a chave; onde o kernel e o pacote moram
+├── pacote.rs        os programas e os dados públicos da imagem, num índice só de leitura, sem nada em `etc/`
+├── controle.rs      o controle de boot em duas cópias, o plano do iniciador, a tentativa contada e o controle sintetizado
+├── disco.rs         as partições da atualização pelos tipos na GPT, e o leitor de GPT do iniciador
+└── estado.rs        a ativa e a candidata do journal, o piso, as transições e a reconciliação de cada boot; `tests/simulacao.rs`, a queda de energia em cada escrita
+
 diario/src/          o journal da persistência: registros cifrados, encadeados e ancorados
 ├── lib.rs           o formato, a leitura que confere cada registro, o escritor, o julgamento contra a âncora e o relógio que não volta
 ├── estado.rs        o que os registros do estado administrativo dizem: resultados, e não pedidos
@@ -715,6 +732,7 @@ programas/           os programas de usuário, compilados à parte do kernel
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
+├── atualizar.rs     a bancada da atualização A/B: a máquina de produção pelo firmware, a versão nova instalada, tentada, confirmada ou desfeita, as recusas, a concorrência e as quedas em cada fronteira
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, erros de mídia por faixa e respostas retidas
@@ -723,6 +741,7 @@ xtask/src/
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
+├── slots.rs         a atualização do lado do hospedeiro: a imagem de um slot montada e assinada, conferida como o kernel a confere, o slot A e o controle do disco de testes
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina — as raízes P-256, RSA e P-384 e as cadeias com a forma das públicas —, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
 ```
@@ -9486,11 +9505,15 @@ padronizado.
       o desligamento de verdade, pela ACPI (FADT e `\_S5`) no x86 e pela
       PSCI no ARM, com o pedido no journal antes; o término de processo, a
       rede sem DHCP, a verificação do armazém e o heap pela memória. Ver
-      [Operação](#operação) e [`docs/OPERACAO.md`](docs/OPERACAO.md). A
-      atualização A/B, as imagens assinadas e a identidade gerada na
-      máquina pedem uma raiz de confiança nova — decisões que o guia
-      descreve, sem implementar —; a placa de rede física e o watchdog
-      ficaram de fora.
+      [Operação](#operação) e [`docs/OPERACAO.md`](docs/OPERACAO.md).
+      Depois, a atualização A/B com rollback e as imagens assinadas: dois
+      slots com o kernel e o pacote, um manifesto assinado pela chave de
+      quem publica, a instalação pelo quórum `system.update`, a tentativa
+      contada pelo iniciador, a confirmação no journal ancorado no TPM — o
+      piso de geração que não volta — e a volta sozinha quando a versão nova
+      não presta. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md). A
+      identidade gerada na máquina, o Secure Boot e o watchdog ficaram de
+      fora.
 
 ## Licença
 

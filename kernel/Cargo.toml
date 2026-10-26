@@ -92,6 +92,9 @@ ancora = { path = "../ancora" }
 # registro e o julgamento contra a âncora — ver `diario/src/lib.rs`. O
 # disco é do kernel (`persistencia.rs`).
 diario = { path = "../diario" }
+# A atualização A/B: os formatos, a reconciliação do boot, e a conferência
+# da assinatura do manifesto.
+atualizacao = { path = "../atualizacao", features = ["alloc", "conferir"] }
 
 # O armazém, como conta pura: caminhos, versões, tetos, preparar e aplicar
 # — ver `armazem/src/lib.rs`. A autorização, o arrendamento, a persistência

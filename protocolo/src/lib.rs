@@ -121,6 +121,38 @@ pub struct Entrega {
     /// denuncia a diferença — ver [`VERSAO`] —, e o kernel recusa uma
     /// entrega menor do que a que ele lê.
     pub acpi: u64,
+    /// De que slot da atualização A/B o kernel veio, e como — ver
+    /// [`Arranque`].
+    ///
+    /// # O único campo que pode faltar
+    ///
+    /// O iniciador não se atualiza pela atualização A/B: ele mora na ESP, e
+    /// só uma reinstalação o troca. Um kernel novo vai bootar, por anos, com
+    /// o iniciador da instalação — e um iniciador de antes deste campo
+    /// monta uma entrega que acaba em [`Entrega::acpi`]. O kernel aceita
+    /// essa entrega, a [`TAMANHO_SEM_ARRANQUE`], e a lê como um kernel que
+    /// não veio de slot nenhum. Todo campo acrescentado depois deste também
+    /// terá de poder faltar, pela mesma razão.
+    pub arranque: Arranque,
+}
+
+/// O tamanho da entrega dos iniciadores de antes de [`Entrega::arranque`].
+pub const TAMANHO_SEM_ARRANQUE: usize = core::mem::offset_of!(Entrega, arranque);
+
+/// De onde o kernel veio, quando veio de um slot da atualização A/B. Os
+/// formatos e as regras são do crate `atualizacao`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arranque {
+    /// O slot: 1 é o A, 2 o B. Zero quando o kernel não veio de um slot —
+    /// o iniciador o leu da ESP, ou ele foi carregado direto, sem iniciador.
+    pub slot: u8,
+    /// Como o iniciador escolheu o slot: `atualizacao::controle::Modo`.
+    pub modo: u8,
+    pub reservado: [u8; 6],
+    /// O BLAKE2s-256 do manifesto que o iniciador leu do cabeçalho do slot,
+    /// e com que conferiu o kernel.
+    pub manifesto: [u8; 32],
 }
 
 /// Quantas regiões de memória uma entrega pode carregar, no máximo.
@@ -205,7 +237,9 @@ pub mod tipo {
 // impede a mudança — ela obriga quem a fizer a passar por aqui e subir a
 // versão se o significado mudou.
 const _: () = {
-    assert!(size_of::<Entrega>() == 96);
+    assert!(size_of::<Entrega>() == 136);
+    assert!(TAMANHO_SEM_ARRANQUE == 96);
+    assert!(size_of::<Arranque>() == 40);
     assert!(size_of::<Video>() == 40);
     assert!(size_of::<Regiao>() == 24);
 };

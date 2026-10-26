@@ -25,6 +25,17 @@
 //! recusa a imagem inteira; e a raiz leva os programas, as âncoras TLS
 //! públicas e a rede principal do IC — o que é público e é do produto.
 //!
+//! # O código num slot, o estado na raiz
+//!
+//! O disco tem a atualização A/B — ver `docs/ATUALIZACAO.md`. O código vem
+//! numa imagem de slot assinada pela chave de atualização de quem publica
+//! (`cargo xtask publicar`): o kernel e o pacote — os programas do produto,
+//! as âncoras TLS públicas e a rede principal do IC. A raiz leva só o que é
+//! da máquina: `/etc/duke` — a chave do Duke, os registros, a política, a
+//! rede, e o registro das chaves de atualização em que ela confia. Uma
+//! versão nova troca o slot inteiro e não toca a raiz, o journal nem o
+//! armazém.
+//!
 //! # O que não muda
 //!
 //! A identidade do Duke continua nascendo na imagem — é o grupo B de
@@ -48,6 +59,7 @@ const PESSOAS: &str = "pessoas";
 const TEMPO: &str = "tempo";
 const EDITORES: &str = "editores";
 const REDE: &str = "rede";
+const ATUALIZACAO: &str = "atualizacao";
 
 /// O menor tamanho de senha que o provisionamento aceita.
 const MENOR_SENHA: usize = 12;
@@ -73,6 +85,9 @@ pub(crate) struct Operador {
     pub tempo: Option<String>,
     pub editores: Option<String>,
     pub rede: Option<String>,
+    /// O registro das chaves de atualização: as que podem assinar uma
+    /// imagem dos slots desta máquina.
+    pub atualizacao: String,
     /// Os textos lidos, pelo nome do arquivo, para a busca das chaves da
     /// bancada.
     textos: Vec<(&'static str, String)>,
@@ -99,6 +114,7 @@ pub(crate) fn ler_o_operador(dir: &Path) -> Result<Operador, String> {
     let nome = obrigatorio(NOME)?.trim().to_string();
     let politica = obrigatorio(POLITICA)?;
     let administradores = obrigatorio(ADMINISTRADORES)?;
+    let atualizacao = obrigatorio(ATUALIZACAO)?;
     let agentes = ler(dir, AGENTES)?.unwrap_or_default();
     let tempo = ler(dir, TEMPO)?;
     let editores = ler(dir, EDITORES)?;
@@ -126,6 +142,7 @@ pub(crate) fn ler_o_operador(dir: &Path) -> Result<Operador, String> {
         (POLITICA, politica.clone()),
         (ADMINISTRADORES, administradores.clone()),
         (AGENTES, agentes.clone()),
+        (ATUALIZACAO, atualizacao.clone()),
     ];
     for (nome, texto) in [(TEMPO, &tempo), (EDITORES, &editores), (REDE, &rede)] {
         if let Some(t) = texto {
@@ -141,6 +158,7 @@ pub(crate) fn ler_o_operador(dir: &Path) -> Result<Operador, String> {
         tempo,
         editores,
         rede,
+        atualizacao,
         textos,
     })
 }
@@ -352,7 +370,65 @@ pub(crate) fn conferir(op: &Operador) -> Result<politica::Politica, String> {
         conferir_a_rede(texto)
             .map_err(|(linha, motivo)| format!("`{REDE}`, linha {linha}: {motivo}"))?;
     }
+
+    // A atualização: ao menos uma chave que assine as imagens dos slots, e
+    // o quórum que as instala, com a permissão no papel de quem assina. Uma
+    // máquina sem um dos dois boota da imagem do provisionamento e nunca
+    // mais troca de versão: a saída seria provisionar de novo, e a chave
+    // do Duke, que nasce na imagem, iria junto.
+    let chaves_de_atualizacao = registro_de_atualizacao(&op.atualizacao)?;
+    if chaves_de_atualizacao.is_empty() {
+        return Err(format!(
+            "`{ATUALIZACAO}` não tem chave: sem ela, nenhuma imagem dos slots tem autoridade, e nenhuma versão nova se instala"
+        ));
+    }
+    let Some(q) = politica.quorum("system.update") else {
+        return Err(
+            "a política não tem `quorum system.update`: a máquina não teria como instalar uma versão nova"
+                .into(),
+        );
+    };
+    let com_a_permissao = administradores
+        .iter()
+        .filter(|(_, _, papel)| {
+            politica
+                .papel(papel)
+                .is_some_and(|p| p.tem(politica::Permissao::SystemUpdate))
+        })
+        .count();
+    if com_a_permissao < usize::from(q.m) {
+        return Err(format!(
+            "o quórum de system.update pede {} credenciais, e só {com_a_permissao} administradores têm system.update no papel",
+            q.m
+        ));
+    }
     Ok(politica)
+}
+
+/// As chaves de um registro de atualização — o texto de
+/// `/etc/duke/atualizacao`, no formato do de editores —, lidas pelo leitor
+/// do kernel: a pública e o nome.
+pub(crate) fn registro_de_atualizacao(texto: &str) -> Result<Vec<([u8; 32], String)>, String> {
+    let mut chaves = Vec::new();
+    for (n, linha) in texto.lines().enumerate() {
+        match sigilo::registro::ler_linha_de_editor(linha) {
+            Ok(None) => {}
+            Ok(Some((chave, nome))) => {
+                if chaves
+                    .iter()
+                    .any(|(c, m): &([u8; 32], String)| *c == chave || m == nome)
+                {
+                    return Err(format!(
+                        "{ATUALIZACAO}, linha {}: a chave ou o nome `{nome}` repetidos",
+                        n + 1
+                    ));
+                }
+                chaves.push((chave, nome.to_string()));
+            }
+            Err(e) => return Err(format!("{ATUALIZACAO}, linha {}: {}", n + 1, e.motivo())),
+        }
+    }
+    Ok(chaves)
 }
 
 /// Um IPv4 escrito em quatro números de 0 a 255.
@@ -486,11 +562,11 @@ fn redes_de_producao() -> String {
     )
 }
 
-/// Os arquivos da raiz de uma imagem de produção para `arch`: os do
-/// operador, a chave do Duke `duke`, a marca com o id `id`, as âncoras
-/// públicas, a rede principal do IC e os programas da arquitetura.
-pub(crate) fn arquivos_da_imagem(
-    arch: Arquitetura,
+/// Os arquivos da raiz de uma imagem de produção: os do operador, a chave
+/// do Duke `duke` e a marca com o id `id` — só `/etc/duke`, o que é da
+/// máquina. O código e os dados públicos vêm no pacote do slot — ver
+/// [`arquivos_do_pacote`] —, e uma versão nova os troca sem tocar aqui.
+pub(crate) fn arquivos_da_raiz(
     op: &Operador,
     politica: &politica::Politica,
     duke: &[u8; 32],
@@ -534,10 +610,9 @@ pub(crate) fn arquivos_da_imagem(
             "etc/duke/dominios".to_string(),
             super::chaves::registro_de_dominios(politica)?.into_bytes(),
         ),
-        (tls::PUBLICAS_NA_IMAGEM.to_string(), tls::publicas()?),
         (
-            icp::REDES_NA_IMAGEM.to_string(),
-            redes_de_producao().into_bytes(),
+            "etc/duke/atualizacao".to_string(),
+            op.atualizacao.clone().into_bytes(),
         ),
     ];
     if let Some(t) = &op.tempo {
@@ -546,6 +621,20 @@ pub(crate) fn arquivos_da_imagem(
     if let Some(r) = &op.rede {
         arquivos.push(("etc/duke/rede".to_string(), r.clone().into_bytes()));
     }
+    Ok(arquivos)
+}
+
+/// O pacote de uma imagem de produção para `arch`: os programas do
+/// produto, as âncoras TLS públicas e a rede principal do IC — o que é
+/// público e é do produto, e que uma versão nova troca junto com o kernel.
+pub(crate) fn arquivos_do_pacote(arch: Arquitetura) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut arquivos = vec![
+        (tls::PUBLICAS_NA_IMAGEM.to_string(), tls::publicas()?),
+        (
+            icp::REDES_NA_IMAGEM.to_string(),
+            redes_de_producao().into_bytes(),
+        ),
+    ];
     let prefixo = format!("programas/{}/", arch.nome());
     arquivos.extend(
         super::programas_do_disco()?
@@ -567,22 +656,41 @@ pub(crate) fn arquivos_da_imagem(
     Ok(arquivos)
 }
 
+/// Os bytes do pacote de [`arquivos_do_pacote`].
+pub(crate) fn pacote_do_produto(arch: Arquitetura) -> Result<Vec<u8>, String> {
+    let arquivos = arquivos_do_pacote(arch)?;
+    let lista: Vec<(&str, &[u8])> = arquivos
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    atualizacao::pacote::montar(&lista).map_err(|m| format!("o pacote do produto: {m}"))
+}
+
 /// O resumo de um arquivo, para o registro do que entrou.
 fn resumo(bytes: &[u8]) -> String {
     use sha2::Digest;
     sigilo::hex_de(&sha2::Sha256::digest(bytes))
 }
 
-/// `cargo xtask provisionar <diretório>`: a imagem de produção de `arch`, do
-/// material do operador, em `saida` (ou `target/producao/<nome>-<arch>`).
+/// `cargo xtask provisionar <diretório> --imagem <arquivo>`: o disco de
+/// produção de `arch`, do material do operador, em `saida` (ou
+/// `target/producao/<nome>-<arch>`): a raiz com `/etc/duke`, o iniciador na
+/// ESP, e no slot A a imagem publicada por `cargo xtask publicar` —
+/// conferida aqui como o kernel a confere, com o registro de atualização
+/// do operador.
 pub(crate) fn provisionar(
     arch: Arquitetura,
     release: bool,
     dir: &Path,
     saida: Option<&Path>,
+    imagem_do_slot: &Path,
 ) -> Result<ExitCode, String> {
     let op = ler_o_operador(dir)?;
     let politica = conferir(&op)?;
+    let bytes_do_slot =
+        std::fs::read(imagem_do_slot).map_err(|e| format!("{}: {e}", imagem_do_slot.display()))?;
+    let slot = super::slots::conferir_imagem(&bytes_do_slot, &op.atualizacao, arch)
+        .map_err(|m| format!("a imagem {}: {m}", imagem_do_slot.display()))?;
     let saida = saida.map(Path::to_path_buf).unwrap_or_else(|| {
         super::raiz_do_projeto()
             .join("target")
@@ -602,39 +710,40 @@ pub(crate) fn provisionar(
     let duke = aleatorios()?;
     let mut id = [0u8; 16];
     id.copy_from_slice(&aleatorios()?[..16]);
-    let arquivos = arquivos_da_imagem(arch, &op, &politica, &duke, id)?;
+    let arquivos = arquivos_da_raiz(&op, &politica, &duke, id)?;
 
     // A montagem leva a privada do Duke em claro — na árvore da raiz e na
     // imagem —: só o dono a lê, e ela some também quando algo falha no meio.
     let montagem = saida.join("montagem");
     so_do_dono(&montagem, true)?;
-    let montada = (|| -> Result<(PathBuf, PathBuf), String> {
+    let montada = (|| -> Result<PathBuf, String> {
         let imagem = montagem.join("duke.img");
-        super::montar_disco(&imagem, &arquivos, super::Extras::Nenhum)?;
-        so_do_dono(&imagem, false)?;
-        let alvo_do_kernel = super::raiz_do_projeto()
-            .join("target")
-            .join("producao-kernel");
-        let elf = super::compilar_o_kernel(arch, release, &[], Some(&alvo_do_kernel))?;
-        let (efi, kernel) = super::para_a_esp(arch, release, &elf)?;
-        super::instalar_iniciador(arch, &imagem, &efi, &kernel)?;
+        let efi = montar_o_disco(arch, release, &imagem, &arquivos, &bytes_do_slot)?;
         std::fs::rename(&imagem, saida.join("duke.img"))
             .map_err(|e| format!("não foi possível mover a imagem: {e}"))?;
-        Ok((efi, kernel))
+        Ok(efi)
     })();
     let _ = std::fs::remove_dir_all(&montagem);
-    let (efi, kernel) = montada?;
+    let efi = montada?;
 
     let publica = sigilo::hex(&sigilo::publica_de(&duke));
     std::fs::write(saida.join("duke.publica"), format!("{publica}\n"))
         .map_err(|e| format!("não foi possível gravar a pública do Duke: {e}"))?;
     let mut registro = format!(
-        "# A imagem de producao `{}`, para {}: o que entrou nela.\nid {}\nduke {publica}\nkernel {}\niniciador {}\n",
+        "# A imagem de producao `{}`, para {}: o que entrou nela.\nid {}\nduke {publica}\niniciador {}\n\
+         slot-a {} {}\nmanifesto {}\nversao {}\ngeracao {}\nassinada-por {}\nkernel {} bytes\npacote {} bytes\n",
         op.nome,
         arch.nome(),
         sigilo::hex_de(&id),
-        resumo(&std::fs::read(&kernel).map_err(|e| e.to_string())?),
         resumo(&std::fs::read(&efi).map_err(|e| e.to_string())?),
+        imagem_do_slot.display(),
+        resumo(&bytes_do_slot),
+        sigilo::hex(&slot.resumo),
+        slot.versao,
+        slot.geracao,
+        slot.chave,
+        slot.kernel,
+        slot.pacote,
     );
     for (nome, bytes) in &arquivos {
         // A chave do Duke e o registro de pessoas não entram: o resumo de
@@ -649,15 +758,132 @@ pub(crate) fn provisionar(
         .map_err(|e| format!("não foi possível gravar o registro: {e}"))?;
     println!(
         "[xtask] imagem de produção `{}` ({}) em {}\n\
+         [xtask] no slot A: a versão {} (geração {}), assinada por `{}`\n\
          [xtask] a pública do Duke, que os agentes fixam: {publica}\n\
          [xtask] o que entrou: {}\n\
          [xtask] a privada do Duke só existe dentro da imagem: guarde a imagem como se guarda a chave",
         op.nome,
         arch.nome(),
         saida.join("duke.img").display(),
+        slot.versao,
+        slot.geracao,
+        slot.chave,
         saida.join("registro.txt").display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// O disco de produção em `imagem`: a raiz com `arquivos`, só do dono; o
+/// iniciador de `arch` na ESP; e `slot` — uma imagem de slot já conferida
+/// — no slot A, com o controle apontando para ela e o B vazio. Devolve o
+/// `.efi` do iniciador. É o que o `provisionar` grava e o que a bancada de
+/// persistência boota.
+pub(crate) fn montar_o_disco(
+    arch: Arquitetura,
+    release: bool,
+    imagem: &Path,
+    arquivos: &[(String, Vec<u8>)],
+    slot: &[u8],
+) -> Result<PathBuf, String> {
+    let c = atualizacao::cabecalho::ler(slot).map_err(|m| format!("a imagem do slot: {m}"))?;
+    super::montar_disco(imagem, arquivos, super::Extras::Nenhum)?;
+    so_do_dono(imagem, false)?;
+    let efi = super::build_do_iniciador(arch, release)?;
+    super::instalar_so_o_iniciador(arch, imagem, &efi)?;
+    super::slots::escrever_imagem_no_slot_a(
+        imagem,
+        slot,
+        atualizacao::manifesto::resumo_do_manifesto(c.manifesto),
+    )?;
+    Ok(efi)
+}
+
+/// `cargo xtask publicar <chave> <versão> <geração>`: a imagem de slot de
+/// uma versão do produto para `arch` — o kernel de produção, o pacote do
+/// produto e o manifesto, assinado pela chave de atualização em `chave` —,
+/// em `saida` (ou `target/atualizacao/<versão>-<arch>.slot`). É a mesma
+/// imagem que o `provisionar` põe no slot A de uma máquina nova e que o
+/// `operar --encenar` escreve no slot inativo de uma que já roda.
+///
+/// A imagem não tem segredo: o manifesto diz o que ela é, e a assinatura,
+/// quem a publicou. Quem a instala é o quórum da máquina.
+pub(crate) fn publicar(
+    arch: Arquitetura,
+    release: bool,
+    chave: &Path,
+    versao: &str,
+    geracao: &str,
+    saida: Option<&Path>,
+) -> Result<ExitCode, String> {
+    let privada = chave_de_atualizacao(chave)?;
+    if !atualizacao::manifesto::versao_valida(versao) {
+        return Err(format!(
+            "`{versao}` não é uma versão: de 1 a 32 caracteres de [A-Za-z0-9._+-]"
+        ));
+    }
+    let geracao: u64 = geracao
+        .parse()
+        .ok()
+        .filter(|g| *g >= 1)
+        .ok_or_else(|| format!("`{geracao}` não é uma geração: um inteiro de 1 em diante"))?;
+    let alvo_do_kernel = super::raiz_do_projeto()
+        .join("target")
+        .join("producao-kernel");
+    let elf = super::compilar_o_kernel(arch, release, &[], Some(&alvo_do_kernel))?;
+    let kernel = std::fs::read(super::kernel_para_a_esp(&elf)?)
+        .map_err(|e| format!("não foi possível ler o kernel: {e}"))?;
+    let pacote = pacote_do_produto(arch)?;
+    let imagem = super::slots::imagem(
+        &super::slots::Pedido {
+            arch,
+            kernel: &kernel,
+            pacote: &pacote,
+            versao,
+            geracao,
+            estado: (
+                super::slots::FORMATO_DO_ESTADO,
+                super::slots::FORMATO_DO_ESTADO,
+            ),
+        },
+        &privada,
+    )?;
+    let saida = saida.map(Path::to_path_buf).unwrap_or_else(|| {
+        super::raiz_do_projeto()
+            .join("target")
+            .join("atualizacao")
+            .join(format!("{versao}-{}.slot", arch.nome()))
+    });
+    if let Some(pai) = saida.parent() {
+        std::fs::create_dir_all(pai)
+            .map_err(|e| format!("não foi possível criar {}: {e}", pai.display()))?;
+    }
+    std::fs::write(&saida, &imagem.bytes)
+        .map_err(|e| format!("não foi possível gravar {}: {e}", saida.display()))?;
+    println!(
+        "[xtask] a versão {versao} (geração {geracao}) para {} em {}: {} KiB — kernel de {} KiB, pacote de {} KiB\n\
+         [xtask] o manifesto, que o quórum assina para instalar: {}\n{}",
+        arch.nome(),
+        saida.display(),
+        imagem.bytes.len() / 1024,
+        kernel.len() / 1024,
+        pacote.len() / 1024,
+        sigilo::hex(&imagem.resumo),
+        String::from_utf8_lossy(&imagem.manifesto).trim_end()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A privada de uma chave de atualização: o arquivo de
+/// `cargo xtask chave atualizacao`, com a semente Ed25519 em hexadecimal.
+pub(crate) fn chave_de_atualizacao(arquivo: &Path) -> Result<[u8; 32], String> {
+    let texto =
+        std::fs::read_to_string(arquivo).map_err(|e| format!("{}: {e}", arquivo.display()))?;
+    chave_de_atualizacao_de_texto(&texto).map_err(|e| format!("{}: {e}", arquivo.display()))
+}
+
+/// [`chave_de_atualizacao`], do conteúdo do arquivo.
+pub(crate) fn chave_de_atualizacao_de_texto(texto: &str) -> Result<[u8; 32], String> {
+    sigilo::de_hex(texto.trim()).ok_or_else(|| "não é uma chave de atualização".to_string())
 }
 
 /// Deixa `caminho` só para o dono — 0700 num diretório, que é criado se
@@ -715,7 +941,8 @@ pub(crate) fn chave_de_administrador_de_texto(texto: &str) -> Result<([u8; 32], 
     }
 }
 
-/// Uma chave nova de `tipo` — `agente`, `administrador` ou `editor` —:
+/// Uma chave nova de `tipo` — `agente`, `administrador`, `editor` ou
+/// `atualizacao` —:
 /// o conteúdo do arquivo da privada, e a linha do registro que a imagem
 /// leva, com o nome do registro.
 pub(crate) fn chave_nova(
@@ -767,9 +994,24 @@ pub(crate) fn chave_nova(
                 EDITORES,
             )
         }
+        // A de atualização: assina o manifesto das imagens dos slots, no
+        // formato do registro de editores. Não é uma credencial: não entra
+        // em porta nenhuma, e não instala nada sozinha — quem instala é o
+        // quórum `system.update`.
+        ("atualizacao", None) => {
+            let privada = aleatorios()?;
+            (
+                format!("{}\n", sigilo::hex(&privada)),
+                sigilo::registro::linha_de_editor(
+                    &atualizacao::manifesto::publica_de(&privada),
+                    nome,
+                ),
+                ATUALIZACAO,
+            )
+        }
         _ => {
             return Err(
-                "uso: cargo xtask chave agente|administrador <arquivo> <nome> <papel>, ou chave editor <arquivo> <nome>"
+                "uso: cargo xtask chave agente|administrador <arquivo> <nome> <papel>, ou chave editor|atualizacao <arquivo> <nome>"
                     .into(),
             );
         }
@@ -807,6 +1049,37 @@ pub(crate) fn gravar_privada(arquivo: &Path, conteudo: &str) -> Result<(), Strin
         .map_err(|e| format!("não foi possível escrever {}: {e}", arquivo.display()))
 }
 
+/// Quantos bytes cada `update.stage` leva: o maior anexo de um pedido,
+/// que é múltiplo do setor.
+pub(crate) const PEDACO_DA_ENCENACAO: usize = protocolo::usuario::nativo::MAIOR_ANEXO;
+const _: () = assert!(PEDACO_DA_ENCENACAO.is_multiple_of(512));
+
+/// Escreve a imagem de slot `bytes` no slot inativo, um `update.stage` por
+/// pedaço, do começo ao fim, e devolve o `update.status` de depois. Nada
+/// se instala aqui: a máquina guarda os bytes, e só o quórum
+/// `system.update`, com o resumo do manifesto que a resposta diz, arma a
+/// versão — conferindo o slot inteiro de novo.
+pub(crate) fn encenar(agente: &mut super::AgenteNaPorta, bytes: &[u8]) -> Result<String, String> {
+    let c = atualizacao::cabecalho::ler(bytes).map_err(|m| format!("a imagem: {m}"))?;
+    let resumo = atualizacao::manifesto::resumo_do_manifesto(c.manifesto);
+    for (i, pedaco) in bytes.chunks(PEDACO_DA_ENCENACAO).enumerate() {
+        let de = i * PEDACO_DA_ENCENACAO;
+        let r = agente.pedir_com_anexo("update.stage", &format!(r#"{{"offset":{de}}}"#), pedaco)?;
+        if !r.contains(r#""written":"#) {
+            return Err(format!(
+                "o update.stage parou no byte {de} de {}\n  {r}",
+                bytes.len()
+            ));
+        }
+    }
+    let status = agente.pedir("update.status", "{}")?;
+    Ok(format!(
+        "{status}\n# {} bytes no slot inativo; o manifesto, que o quorum system.update assina: {}",
+        bytes.len(),
+        sigilo::hex(&resumo)
+    ))
+}
+
 /// A pública do Duke de `texto`: o conteúdo de `duke.publica`, ou o
 /// caminho dele.
 fn publica_do_duke(texto: &str) -> Result<[u8; 32], String> {
@@ -823,7 +1096,10 @@ fn publica_do_duke(texto: &str) -> Result<[u8; 32], String> {
 /// máquina de verdade, pelo canal TCP, como o agente da chave `chave`, com
 /// a pública do Duke fixada em `duke`. Com `admin`, o pedido vai como
 /// operação administrativa: o desafio, a prova da credencial, e o
-/// `admin.execute`. Com `assinaturas`, um `admin.revoke` pelo quórum.
+/// `admin.execute`. Com `assinaturas`, uma operação de quórum —
+/// `admin.revoke` ou `system.update`. Com `imagem`, o `update.stage` da
+/// imagem inteira, em pedaços — ver [`encenar`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn operar(
     endereco: &str,
     metodo: &str,
@@ -832,12 +1108,19 @@ pub(crate) fn operar(
     duke: &str,
     admin: Option<&Path>,
     assinaturas: &[PathBuf],
+    imagem: Option<&Path>,
 ) -> Result<ExitCode, String> {
     let chave = chave_de_agente(chave)?;
     let duke = publica_do_duke(duke)?;
     let mut agente = super::AgenteNaPorta::conectar_endereco(endereco, &chave, &duke)?;
-    let resposta = if !assinaturas.is_empty() {
-        super::revogar_pelo_operador(&mut agente, params, assinaturas)?
+    let resposta = if let Some(imagem) = imagem {
+        if metodo != "update.stage" {
+            return Err("--imagem é do update.stage: a imagem vai para o slot inativo".into());
+        }
+        let bytes = std::fs::read(imagem).map_err(|e| format!("{}: {e}", imagem.display()))?;
+        encenar(&mut agente, &bytes)?
+    } else if !assinaturas.is_empty() {
+        super::quorum_pelo_operador(&mut agente, metodo, params, assinaturas)?
     } else if let Some(admin) = admin {
         let (credencial, _) = chave_de_administrador(admin)?;
         let sessao = agente.pedir("agent.session", "{}")?;
@@ -939,6 +1222,11 @@ mod testes {
         .unwrap();
         std::fs::write(dir.join("senha-ana"), "uma senha comprida\n").unwrap();
         std::fs::write(dir.join(PESSOAS), "ana operador senha-ana\n").unwrap();
+        std::fs::write(
+            dir.join(ATUALIZACAO),
+            chave_nova("atualizacao", "publicador-1", None).unwrap().1,
+        )
+        .unwrap();
         mudar(&dir);
         let resultado = ler_o_operador(&dir).and_then(|op| conferir(&op));
         let _ = std::fs::remove_dir_all(&dir);
@@ -996,6 +1284,125 @@ mod testes {
             r.as_ref().is_err_and(|e| e.contains("menos de 12")),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn sem_chave_de_atualizacao_e_recusado() {
+        let r = operador_de_teste("sem-atualizacao", |dir| {
+            std::fs::write(dir.join(ATUALIZACAO), "# ninguem\n").unwrap();
+        });
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("não tem chave")),
+            "{r:?}"
+        );
+        let r = operador_de_teste("sem-arquivo-de-atualizacao", |dir| {
+            std::fs::remove_file(dir.join(ATUALIZACAO)).unwrap();
+        });
+        assert!(r.as_ref().is_err_and(|e| e.contains(ATUALIZACAO)), "{r:?}");
+    }
+
+    #[test]
+    fn a_chave_de_atualizacao_da_bancada_e_recusada() {
+        let bancada = super::super::chaves::Chaves::garantir().unwrap();
+        let linha = sigilo::registro::linha_de_editor(
+            &atualizacao::manifesto::publica_de(&bancada.atualizacao),
+            "parece-do-operador",
+        );
+        let r = operador_de_teste("atualizacao-da-bancada", |dir| {
+            std::fs::write(dir.join(ATUALIZACAO), &linha).unwrap();
+        });
+        assert!(r.as_ref().is_err_and(|e| e.contains("da bancada")), "{r:?}");
+    }
+
+    #[test]
+    fn sem_o_quorum_da_atualizacao_e_recusado() {
+        let r = operador_de_teste("sem-quorum-de-atualizacao", |dir| {
+            let politica = std::fs::read_to_string(dir.join(POLITICA)).unwrap();
+            let sem: String = politica
+                .lines()
+                .filter(|l| !l.starts_with("quorum system.update"))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            std::fs::write(dir.join(POLITICA), sem).unwrap();
+        });
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("quorum system.update")),
+            "{r:?}"
+        );
+        // E sem a permissão no papel de quem assina.
+        let r = operador_de_teste("sem-permissao-de-atualizacao", |dir| {
+            let politica = std::fs::read_to_string(dir.join(POLITICA)).unwrap();
+            let sem: String = politica
+                .lines()
+                .map(|l| {
+                    if l.starts_with("papel administrador ") {
+                        format!("{}\n", l.replace(" system.update", ""))
+                    } else {
+                        format!("{l}\n")
+                    }
+                })
+                .collect();
+            std::fs::write(dir.join(POLITICA), sem).unwrap();
+        });
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("system.update no papel")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_chave_de_atualizacao_nova_assina_o_que_o_registro_confere() {
+        let (privada, linha, registro) = chave_nova("atualizacao", "publicador-1", None).unwrap();
+        assert_eq!(registro, ATUALIZACAO);
+        let privada = chave_de_atualizacao_de_texto(&privada).unwrap();
+        let chaves = registro_de_atualizacao(&linha).unwrap();
+        assert_eq!(
+            chaves,
+            vec![(
+                atualizacao::manifesto::publica_de(&privada),
+                "publicador-1".to_string()
+            )]
+        );
+        let kernel = b"\x7fELF um kernel de mentira".repeat(64);
+        let pacote = atualizacao::pacote::montar(&[("programas/x86_64/livro", b"livro")]).unwrap();
+        let i = super::super::slots::imagem(
+            &super::super::slots::Pedido {
+                arch: Arquitetura::X86_64,
+                kernel: &kernel,
+                pacote: &pacote,
+                versao: "1.0",
+                geracao: 1,
+                estado: (1, 1),
+            },
+            &privada,
+        )
+        .unwrap();
+        let c =
+            super::super::slots::conferir_imagem(&i.bytes, &linha, Arquitetura::X86_64).unwrap();
+        assert_eq!(
+            (c.versao.as_str(), c.geracao, c.chave.as_str()),
+            ("1.0", 1, "publicador-1")
+        );
+        // Outra arquitetura, outro registro, um byte trocado: recusadas.
+        assert!(
+            super::super::slots::conferir_imagem(&i.bytes, &linha, Arquitetura::Aarch64).is_err()
+        );
+        let (_, outra, _) = chave_nova("atualizacao", "outro", None).unwrap();
+        assert!(
+            super::super::slots::conferir_imagem(&i.bytes, &outra, Arquitetura::X86_64)
+                .is_err_and(|e| e.contains("nao esta no registro"))
+        );
+        let mut estragada = i.bytes.clone();
+        let k = atualizacao::cabecalho::KERNEL_EM as usize;
+        estragada[k + 10] ^= 1;
+        assert!(
+            super::super::slots::conferir_imagem(&estragada, &linha, Arquitetura::X86_64)
+                .is_err_and(|e| e.contains("kernel"))
+        );
+        // E a chave repetida no registro.
+        assert!(registro_de_atualizacao(&format!("{linha}{linha}")).is_err());
     }
 
     #[test]

@@ -122,6 +122,11 @@ pub enum Tipo {
     Estado,
     /// O volume do armazém: o conteúdo dos arquivos e o journal deles.
     Armazem,
+    /// O controle de boot da atualização A/B — ver `atualizacao::disco`.
+    Controle,
+    /// Os dois slots da atualização A/B.
+    SlotA,
+    SlotB,
     /// Qualquer outro GUID.
     Outro,
 }
@@ -133,6 +138,9 @@ impl Tipo {
             Tipo::Dados => "dados",
             Tipo::Estado => "estado",
             Tipo::Armazem => "armazem",
+            Tipo::Controle => "controle",
+            Tipo::SlotA => "slot-a",
+            Tipo::SlotB => "slot-b",
             Tipo::Outro => "outro",
         }
     }
@@ -146,6 +154,12 @@ impl Tipo {
             Tipo::Estado
         } else if guid == GUID_ARMAZEM {
             Tipo::Armazem
+        } else if guid == atualizacao::disco::GUID_DO_CONTROLE {
+            Tipo::Controle
+        } else if guid == atualizacao::disco::GUID_DO_SLOT_A {
+            Tipo::SlotA
+        } else if guid == atualizacao::disco::GUID_DO_SLOT_B {
+            Tipo::SlotB
         } else {
             Tipo::Outro
         }

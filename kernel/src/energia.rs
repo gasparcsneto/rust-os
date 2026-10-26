@@ -160,6 +160,22 @@ pub fn detalhe_do_pedido(acao: Acao) -> alloc::string::String {
     )
 }
 
+/// O reinício que a reconciliação da atualização A/B decide no boot — ver
+/// [`crate::slots`]: o kernel devolve a máquina ao slot que o controle de
+/// boot, regravado pelo journal, diz. Sem pedido de ninguém e sem gate: é
+/// o boot recusado, antes de qualquer serviço, e não uma operação. A
+/// auditoria até `seq` — a recusa — vai ao journal, se ele está de pé; as
+/// gravações param, com a ordem da persistência e a tranca do disco na mão;
+/// e o firmware reinicia. Na suíte, só a auditoria: o caso confere o pedido
+/// por `slots::reinicio_pedido_de_teste`.
+pub fn reiniciar_pela_atualizacao(seq: u64) {
+    if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+        let _ = crate::persistencia::gravar_auditoria_ate(seq);
+    }
+    #[cfg(not(feature = "modo-teste"))]
+    crate::persistencia::parar_as_gravacoes(|| entregar(Acao::Reiniciar));
+}
+
 /// A ação a caminho, se há uma.
 pub fn pedida() -> Option<Acao> {
     Acao::de(u64::from(PEDIDA.load(Ordering::Acquire)))

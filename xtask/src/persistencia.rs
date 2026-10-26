@@ -58,8 +58,20 @@ impl Ligada {
         artefato: &Artefato,
         ambiente: Ambiente,
     ) -> Result<Ligada, String> {
+        Ligada::subir_esperando(arch, artefato, ambiente, ESPERA_PELO_BOOT)
+    }
+
+    /// [`Ligada::subir_com`], esperando o canal por `espera`: a máquina que
+    /// reinicia sozinha antes de atender — a versão nova que entra em
+    /// pânico, as tentativas que o iniciador conta — leva vários boots.
+    pub(crate) fn subir_esperando(
+        arch: Arquitetura,
+        artefato: &Artefato,
+        ambiente: Ambiente,
+        espera: Duration,
+    ) -> Result<Ligada, String> {
         let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
-        let fluxo = match canal_de_pe(&socket, filho.id(), ESPERA_PELO_BOOT) {
+        let fluxo = match canal_de_pe(&socket, filho.id(), espera) {
             Ok(f) => f,
             Err(e) => {
                 let _ = filho.kill();
@@ -132,6 +144,27 @@ impl Ligada {
             .get_ref()
             .set_read_timeout(Some(prazo))
             .map_err(|e| format!("não foi possível configurar o timeout: {e}"))
+    }
+
+    /// Uma operação de quórum pela serial — ver
+    /// [`super::quorum_pela_serial`] —: a resposta.
+    pub(crate) fn quorum(
+        &mut self,
+        arch: Arquitetura,
+        chaves: &super::chaves::Chaves,
+        comando: &str,
+        parametros: &str,
+        quem: &[usize],
+    ) -> Result<String, String> {
+        super::quorum_pela_serial(
+            arch,
+            (&mut self.escrita, &mut self.leitor, &mut self.id),
+            chaves,
+            comando,
+            parametros,
+            quem,
+        )
+        .map(|(r, _)| r)
     }
 
     /// Corta a energia: `SIGKILL` no QEMU e no TPM, sem aviso a nenhum dos
@@ -493,7 +526,8 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
 /// A serial da bancada de persistência, posta pelo [`persistencia`]: a
 /// fumaça e a bancada de tempo, que sobem a máquina por aqui também, jogam
 /// a saída humana fora, como sempre.
-static SERIAL_DA_BANCADA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+pub(crate) static SERIAL_DA_BANCADA: std::sync::OnceLock<std::path::PathBuf> =
+    std::sync::OnceLock::new();
 
 /// Onde vai a saída humana das máquinas do cenário que roda (a COM1 do
 /// x86): cada boot acrescenta a sua, e o começo de cada cenário a esvazia.
@@ -502,7 +536,7 @@ static SERIAL_DA_BANCADA: std::sync::OnceLock<std::path::PathBuf> = std::sync::O
 /// Ela existe para o cenário que reprova: na CI 335, o primeiro boot de um
 /// cenário não respondeu em 90 s, e nada dizia onde a máquina parou — o
 /// firmware, o iniciador, ou que passo do kernel.
-fn serial_do_cenario() -> Option<std::path::PathBuf> {
+pub(crate) fn serial_do_cenario() -> Option<std::path::PathBuf> {
     std::env::var_os("DUKE_BANCADA_LOG")
         .map(std::path::PathBuf::from)
         .or_else(|| SERIAL_DA_BANCADA.get().cloned())
@@ -510,7 +544,7 @@ fn serial_do_cenario() -> Option<std::path::PathBuf> {
 
 /// O fim da serial do cenário que reprovou, na saída: as últimas linhas,
 /// sem os controles de terminal do firmware.
-fn mostrar_o_fim_da_serial() {
+pub(crate) fn mostrar_o_fim_da_serial() {
     const LINHAS: usize = 40;
     let Some(caminho) = serial_do_cenario() else {
         return;
@@ -642,7 +676,10 @@ fn dois_boots_sobre_o_mesmo_tpm(arch: Arquitetura, artefato: &Artefato) -> Resul
 
 impl Ligada {
     /// Espera o QEMU sair sozinho — a máquina se desligou —, até `prazo`.
-    fn esperar_sair(&mut self, prazo: Duration) -> Result<std::process::ExitStatus, String> {
+    pub(crate) fn esperar_sair(
+        &mut self,
+        prazo: Duration,
+    ) -> Result<std::process::ExitStatus, String> {
         let limite = std::time::Instant::now() + prazo;
         loop {
             match self.filho.try_wait() {
@@ -660,8 +697,18 @@ impl Ligada {
     /// sozinha, e o canal da serial é o mesmo —, até [`ESPERA_PELO_BOOT`].
     /// Os pedidos feitos no meio do reinício se perdem, e são feitos de
     /// novo.
-    fn esperar_o_boot_seguinte(&mut self, boots: u64) -> Result<Persistencia, String> {
-        let limite = std::time::Instant::now() + ESPERA_PELO_BOOT;
+    pub(crate) fn esperar_o_boot_seguinte(&mut self, boots: u64) -> Result<Persistencia, String> {
+        self.esperar_o_boot_ate(boots, ESPERA_PELO_BOOT)
+    }
+
+    /// [`Ligada::esperar_o_boot_seguinte`], até `espera`: a atualização
+    /// atravessa vários boots antes de um atender.
+    pub(crate) fn esperar_o_boot_ate(
+        &mut self,
+        boots: u64,
+        espera: Duration,
+    ) -> Result<Persistencia, String> {
+        let limite = std::time::Instant::now() + espera;
         let mut ultimo = String::from("nenhuma resposta");
         while std::time::Instant::now() < limite {
             if let Ok(Some(status)) = self.filho.try_wait() {
@@ -957,15 +1004,47 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
     escrever("administradores", &administradores)?;
     escrever("senha-ana", "uma senha comprida de teste\n")?;
     escrever("pessoas", "ana operador senha-ana\n")?;
+    let (publicador, linha_do_publicador, _) =
+        producao::chave_nova("atualizacao", "publicador-1", None)?;
+    escrever("atualizacao", &linha_do_publicador)?;
 
     let op = producao::ler_o_operador(&dir)?;
     let politica = producao::conferir(&op)?;
     let duke = super::aleatorios()?;
     let mut id = [0u8; 16];
     id.copy_from_slice(&super::aleatorios()?[..16]);
-    let arquivos = producao::arquivos_da_imagem(arch, &op, &politica, &duke, id)?;
+    let arquivos = producao::arquivos_da_raiz(&op, &politica, &duke, id)?;
+    // A imagem do slot, como o `publicar` a monta: o kernel de produção
+    // desta bancada — o do slot A do disco de testes —, o pacote do
+    // produto, e o manifesto assinado pela chave de atualização do
+    // operador. Conferida pelo registro dele, como o `provisionar` faz.
+    let _ = artefato;
+    let kernel = super::slots::kernel_da_imagem(&super::slots::imagem_do_slot(
+        &disco_de_testes()?,
+        atualizacao::Slot::A,
+    )?)?;
+    let pacote = producao::pacote_do_produto(arch)?;
+    let slot = super::slots::imagem(
+        &super::slots::Pedido {
+            arch,
+            kernel: &kernel,
+            pacote: &pacote,
+            versao: "bancada-producao",
+            geracao: 1,
+            estado: (
+                super::slots::FORMATO_DO_ESTADO,
+                super::slots::FORMATO_DO_ESTADO,
+            ),
+        },
+        &producao::chave_de_atualizacao_de_texto(&publicador)?,
+    )?;
+    super::slots::conferir_imagem(&slot.bytes, &op.atualizacao, arch)?;
     let disco = super::raiz_do_estado().join(format!("producao-{}.img", arch.nome()));
-    let da_imagem = super::disco_com(artefato, &disco, &arquivos, super::Extras::Nenhum)?;
+    producao::montar_o_disco(arch, false, &disco, &arquivos, &slot.bytes)?;
+    // Pelo firmware, nas duas arquiteturas: o iniciador da ESP, o slot A,
+    // o pacote montado por cima da raiz — o caminho de uma máquina de
+    // verdade.
+    let da_imagem = Artefato::Disco(disco.clone());
     let mut m = Ligada::subir_com(
         arch,
         &da_imagem,
@@ -1172,7 +1251,7 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
 }
 
 /// O socket do disco hostil de `arch`, em `target/`.
-fn socket_do_disco_hostil(arch: Arquitetura) -> std::path::PathBuf {
+pub(crate) fn socket_do_disco_hostil(arch: Arquitetura) -> std::path::PathBuf {
     super::raiz_do_projeto()
         .join("target")
         .join(format!("disco-hostil-{}.sock", arch.nome()))
@@ -1673,34 +1752,34 @@ fn o_rtc_e_o_que_se_mandou(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 // ---------------------------------------------------------------------------
 
 /// O que o `system.info` diz da persistência.
-struct Persistencia {
-    estado: String,
-    motivo: String,
+pub(crate) struct Persistencia {
+    pub(crate) estado: String,
+    pub(crate) motivo: String,
     /// A interface do TPM, e a impressão da EK com que o journal fala.
-    interface: String,
-    ek: String,
-    geracao: u64,
+    pub(crate) interface: String,
+    pub(crate) ek: String,
+    pub(crate) geracao: u64,
     /// Os registros do journal que não são só de auditoria: os de estado,
     /// de boot e de abertura. Os de auditoria o coletor grava quando quer,
     /// e a conta deles não é a de um cenário.
-    registros: u64,
+    pub(crate) registros: u64,
     /// Os registros só de auditoria do journal.
-    de_auditoria: u64,
+    pub(crate) de_auditoria: u64,
     /// O valor do contador que o journal confirmou por último.
-    ancora: Option<u64>,
+    pub(crate) ancora: Option<u64>,
     /// A última sequência da auditoria no journal.
-    auditoria_gravada: u64,
+    pub(crate) auditoria_gravada: u64,
     /// Quantas compactações o journal já teve.
-    compactacoes: u64,
+    pub(crate) compactacoes: u64,
     /// Quantos setores da região estão ocupados, e quantos ela tem.
-    usados: u64,
-    setores: u64,
-    boots: u64,
-    relogio: u64,
-    descargas: u64,
+    pub(crate) usados: u64,
+    pub(crate) setores: u64,
+    pub(crate) boots: u64,
+    pub(crate) relogio: u64,
+    pub(crate) descargas: u64,
 }
 
-fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
+pub(crate) fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
     let r = maquina.pedir("system.info", "{}")?;
     let p = r
         .split(r#""persistence":{"#)
@@ -1735,18 +1814,18 @@ fn persistencia_de(maquina: &mut Ligada) -> Result<Persistencia, String> {
 /// Um registro da auditoria como o `audit.tail` o mostra — o que a
 /// bancada confere dele.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Rastro {
-    seq: u64,
-    elo: String,
-    titular: String,
-    metodo: String,
-    recurso: String,
-    codigo: String,
-    duravel: bool,
+pub(crate) struct Rastro {
+    pub(crate) seq: u64,
+    pub(crate) elo: String,
+    pub(crate) titular: String,
+    pub(crate) metodo: String,
+    pub(crate) recurso: String,
+    pub(crate) codigo: String,
+    pub(crate) duravel: bool,
 }
 
 /// A cauda da auditoria: os últimos 128 registros, pela serial.
-fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
+pub(crate) fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
     let r = maquina.pedir("audit.tail", r#"{"count":128}"#)?;
     let mut v = Vec::new();
     for pedaco in r.split(r#"{"seq":"#).skip(1) {
@@ -1771,7 +1850,7 @@ fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
 }
 
 /// A cadeia da auditoria se verifica, do começo da janela à cabeça.
-fn auditoria_verifica(maquina: &mut Ligada) -> Result<(), String> {
+pub(crate) fn auditoria_verifica(maquina: &mut Ligada) -> Result<(), String> {
     let r = maquina.pedir("audit.verify", "{}")?;
     if r.contains(r#""ok":true"#) {
         Ok(())
@@ -1823,7 +1902,7 @@ fn esperar_a_auditoria_gravada(maquina: &mut Ligada) -> Result<Vec<Rastro>, Stri
 
 /// Uma operação administrativa provada pela credencial `privada`, pela
 /// serial.
-fn administrar(
+pub(crate) fn administrar(
     maquina: &mut Ligada,
     privada: &[u8; 32],
     comando: &str,
@@ -1862,12 +1941,12 @@ fn privada_administrativa(chaves: &super::chaves::Chaves, i: usize) -> [u8; 32] 
     }
 }
 
-fn executou(r: &str) -> bool {
+pub(crate) fn executou(r: &str) -> bool {
     r.contains(r#""executed":true"#)
 }
 
 /// O pedido de registro de um agente com a chave privada `privada`.
-fn registro_de_agente(privada: &[u8; 32], nome: &str, papel: &str) -> String {
+pub(crate) fn registro_de_agente(privada: &[u8; 32], nome: &str, papel: &str) -> String {
     format!(
         r#"{{"key":"{}","name":"{nome}","role":"{papel}"}}"#,
         sigilo::hex(&sigilo::publica_de(privada))
@@ -2187,7 +2266,7 @@ fn a_queda_no_meio_da_gravacao(arch: Arquitetura, artefato: &Artefato) -> Result
 }
 
 /// Copia os arquivos de um diretório para outro, que é recriado vazio.
-fn copiar_diretorio(de: &Path, para: &Path) -> Result<(), String> {
+pub(crate) fn copiar_diretorio(de: &Path, para: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(para);
     std::fs::create_dir_all(para).map_err(|e| e.to_string())?;
     for e in std::fs::read_dir(de).map_err(|e| e.to_string())? {
@@ -3038,7 +3117,7 @@ fn as_mensagens_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 }
 
 /// Um campo de texto do resultado de uma resposta do agente.
-fn texto_do_resultado(r: &str, campo: &str) -> Option<String> {
+pub(crate) fn texto_do_resultado(r: &str, campo: &str) -> Option<String> {
     let resultado = r.split(r#""result":"#).nth(1)?;
     super::campo_simples(resultado, campo)
 }
@@ -3460,10 +3539,10 @@ fn o_prazo_e_do_tempo_logico(arch: Arquitetura, artefato: &Artefato) -> Result<S
 
 /// A feature do kernel com os pontos de queda — ver `kernel/src/quedas.rs`.
 /// Só esta bancada a pede.
-const FEATURE_DE_QUEDAS: &str = "quedas";
+pub(crate) const FEATURE_DE_QUEDAS: &str = "quedas";
 
 /// Os pontos de queda, com os números de `kernel/src/quedas.rs`.
-mod ponto {
+pub(crate) mod ponto {
     pub const ANCORA_DEFINIDA: u8 = 1;
     pub const ANCORA_AVANCADA: u8 = 2;
     pub const NASCIMENTO_GUARDADO: u8 = 3;
@@ -3484,7 +3563,7 @@ mod ponto {
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
-const ESPERA_PELA_QUEDA: Duration = Duration::from_secs(60);
+pub(crate) const ESPERA_PELA_QUEDA: Duration = Duration::from_secs(60);
 
 /// Escreve `bytes` (um setor) no setor `setor` da partição de estado.
 fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Result<(), String> {
@@ -3503,7 +3582,7 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 /// O plano da queda: no último setor da partição, como o kernel o lê.
 /// Os tipos de registro do journal, para o plano de queda: a n-ésima
 /// gravação de um tipo. Ver `diario::estado::tipo`.
-mod tipo {
+pub(crate) mod tipo {
     pub use diario::estado::tipo::{
         ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO, SELAGEM,
     };
@@ -3525,15 +3604,15 @@ fn plano_de_queda(disco: &Path, ponto: u8, tipo: u16, gravacao: u32) -> Result<(
 
 /// O plano inteiro da bancada — ver `kernel/src/quedas.rs`.
 #[derive(Clone, Copy, Default)]
-struct Plano {
+pub(crate) struct Plano {
     /// Onde a energia cai; zero, em lugar nenhum.
-    ponto: u8,
-    tipo: u16,
-    gravacao: u32,
+    pub(crate) ponto: u8,
+    pub(crate) tipo: u16,
+    pub(crate) gravacao: u32,
     /// O tamanho de cada região do journal, em setores.
-    limite: Option<u64>,
+    pub(crate) limite: Option<u64>,
     /// Bit 0: o coletor não compacta; bit 1: o boot não compacta.
-    bandeiras: u8,
+    pub(crate) bandeiras: u8,
 }
 
 /// O coletor não compacta.
@@ -3548,7 +3627,7 @@ const CONTADOR_DE_FORA: u8 = 8;
 /// journal, e o boot não abre o cofre nem migra — ver `kernel/src/quedas.rs`.
 const CHAVES_ANTIGAS: u8 = 16;
 
-fn plano(disco: &Path, p: Plano) -> Result<(), String> {
+pub(crate) fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     let mut setor = [0u8; 512];
     setor[..8].copy_from_slice(b"DUKEQUED");
     setor[8] = p.ponto;
@@ -3559,7 +3638,7 @@ fn plano(disco: &Path, p: Plano) -> Result<(), String> {
     escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &setor)
 }
 
-fn sem_plano(disco: &Path) -> Result<(), String> {
+pub(crate) fn sem_plano(disco: &Path) -> Result<(), String> {
     escrever_setor_do_estado(disco, disco::ESTADO_SETORES - 1, &[0; 512])
 }
 
@@ -3642,7 +3721,7 @@ fn estragar_o_registro(disco: &Path, inicio: u64) -> Result<(), String> {
 /// registro escrito — o de âncora maior, e entre esses o que está mais
 /// adiante, que numa base é o fecho — voltam a zero, como num disco que
 /// não chegou a gravá-los.
-fn perder_o_ultimo_registro(disco: &Path, limite: Option<u64>) -> Result<(), String> {
+pub(crate) fn perder_o_ultimo_registro(disco: &Path, limite: Option<u64>) -> Result<(), String> {
     let (inicio, n, _) = registros_no_disco(disco, limite)?
         .into_iter()
         .max_by_key(|&(s, _, a)| (a, s))
@@ -3686,7 +3765,7 @@ fn esperar_o_aviso(leitor: &mut BufReader<UnixStream>, espera: Duration) -> Resu
 impl Ligada {
     /// Manda um pedido que o plano faz cair: espera o aviso, e corta a
     /// energia. Devolve o ponto em que caiu.
-    fn pedir_ate_cair(mut self, metodo: &str, params: &str) -> Result<u8, String> {
+    pub(crate) fn pedir_ate_cair(mut self, metodo: &str, params: &str) -> Result<u8, String> {
         use std::io::Write;
         self.id += 1;
         let linha = format!(
@@ -3704,7 +3783,7 @@ impl Ligada {
 
     /// Espera o aviso de uma queda que vem de outro lugar — um pedido numa
     /// porta —, e corta a energia.
-    fn esperar_a_queda(mut self) -> Result<u8, String> {
+    pub(crate) fn esperar_a_queda(mut self) -> Result<u8, String> {
         let caiu = esperar_o_aviso(&mut self.leitor, ESPERA_PELA_QUEDA);
         self.cortar_a_energia()?;
         caiu
@@ -3713,10 +3792,20 @@ impl Ligada {
 
 /// Liga a máquina com um plano que a faz cair no boot, antes de o canal
 /// atender: lê a serial desde o começo até o aviso, e corta a energia.
-fn subir_ate_cair(arch: Arquitetura, artefato: &Artefato) -> Result<u8, String> {
+pub(crate) fn subir_ate_cair(arch: Arquitetura, artefato: &Artefato) -> Result<u8, String> {
+    subir_ate_cair_em(arch, artefato, ESPERA_PELO_BOOT)
+}
+
+/// [`subir_ate_cair`], esperando o aviso por `espera`: a queda num boot que
+/// vem depois de outros — uma tentativa da atualização — demora mais.
+pub(crate) fn subir_ate_cair_em(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    espera: Duration,
+) -> Result<u8, String> {
     let mut ambiente = Ambiente::ligar(arch, None)?;
     let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
-    let limite = std::time::Instant::now() + ESPERA_PELO_BOOT;
+    let limite = std::time::Instant::now() + espera;
     let conectado = loop {
         if let Ok(f) = UnixStream::connect(&socket) {
             break Ok(f);
@@ -3729,7 +3818,7 @@ fn subir_ate_cair(arch: Arquitetura, artefato: &Artefato) -> Result<u8, String> 
     let caiu = conectado.and_then(|f| {
         f.set_read_timeout(Some(Duration::from_secs(1)))
             .map_err(|e| e.to_string())?;
-        esperar_o_aviso(&mut BufReader::new(f), ESPERA_PELO_BOOT)
+        esperar_o_aviso(&mut BufReader::new(f), espera)
     });
     let _ = filho.kill();
     let _ = filho.wait();
@@ -3770,12 +3859,12 @@ const CRIACAO_DO_VOLUME: u64 = 1;
 
 /// O caso de uma queda dentro de uma gravação: o ponto, se a escrita sem
 /// descarga se perde, se a operação vale depois, e como se lê.
-type Caso = (u8, bool, bool, &'static str);
+pub(crate) type Caso = (u8, bool, bool, &'static str);
 
 /// As quedas dentro de uma gravação, em cada fronteira. Valer ou não valer
 /// é o que o ponto decide; o que nunca pode acontecer é o boot seguinte
 /// recusar, ou o próximo registro não gravar.
-const QUEDAS_NA_GRAVACAO: [Caso; 6] = [
+pub(crate) const QUEDAS_NA_GRAVACAO: [Caso; 6] = [
     (ponto::ANTES_DA_ESCRITA, false, false, "antes da escrita"),
     (
         ponto::DEPOIS_DA_ESCRITA,

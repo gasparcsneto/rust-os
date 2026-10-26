@@ -25,6 +25,12 @@ politica = { path = "../politica" }
 # estado e os registros nelas, pelo cabeçalho em claro — sem a chave.
 diario = { path = "../diario" }
 
+# A atualização A/B: o manifesto assinado, o cabeçalho e o pacote de um
+# slot, e o controle de boot — os mesmos formatos que o iniciador e o
+# kernel leem. Com `assinar`: quem publica uma imagem assina o manifesto
+# aqui, com a chave de atualização, que nunca vai para a imagem.
+atualizacao = { path = "../atualizacao", features = ["assinar"] }
+
 # O registro de fontes de hora que vai para a imagem: o mesmo leitor que o
 # kernel usa no boot, e a coerência dele com a política — conferidos antes
 # de a imagem existir.

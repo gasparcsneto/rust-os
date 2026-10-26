@@ -13,6 +13,10 @@
 # O que muda da politica da bancada:
 # - a serial e `observador`: o canal em claro so le o estado. Para agir,
 #   uma pessoa entra pelo console, ou um agente pela porta cifrada;
+# - a atualizacao A/B: o `sistema` escreve a versao nova no slot inativo
+#   (update.stage, pelo gate), e so o quorum system.update - dois dos tres
+#   administradores, cada um com system.update no papel - a instala. Ver
+#   docs/ATUALIZACAO.md;
 # - nenhum editor de codigo: so roda o codigo da imagem;
 # - nenhuma chave de assinatura: sem `dominios` nem key.*;
 # - sem o servico de hora: o relogio civil fica no RTC ate o operador
@@ -33,7 +37,7 @@ recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
 processos operador 8
 
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema net.connect udp:192.0.2.53:53
@@ -49,7 +53,7 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
 recurso administrador net.connect udp:192.0.2.53:53
@@ -68,6 +72,11 @@ processos administrador 8
 # A revogacao de um administrador: duas das tres credenciais do arquivo
 # dos administradores. O N e o numero de linhas dele.
 quorum admin.revoke 2 3
+
+# A instalacao de uma versao nova - ou a desistencia dela -: duas das tres,
+# como a revogacao. Sem esta linha a maquina nao troca de versao, e o
+# provisionamento a recusa.
+quorum system.update 2 3
 
 papel seguranca audit.read net.observe net.block process.isolate
 recurso seguranca net.observe udp:192.0.2.53:53

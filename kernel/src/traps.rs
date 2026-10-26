@@ -371,6 +371,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::ponteiro::destravar();
         crate::eventos::destravar();
         crate::pseudoterminal::destravar();
+        crate::slots::destravar();
     }
 
     // Para o escalonador antes de qualquer outra coisa. Com multitarefa
@@ -407,6 +408,16 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         "traps",
         "entrando em modo post-mortem; o canal do agente segue respondendo"
     );
+
+    // Numa tentativa da atualização A/B, a falha reinicia em vez de ficar
+    // em post-mortem: o iniciador já contou esta tentativa, e o boot
+    // seguinte tenta de novo ou volta para a versão velha. O post-mortem
+    // seguraria a máquina na versão que caiu.
+    #[cfg(not(feature = "modo-teste"))]
+    if crate::slots::em_tentativa() {
+        crate::log_error!("traps", "tentativa da versao nova: reiniciando");
+        crate::arch::reiniciar_a_maquina()
+    }
 
     // Daqui em diante, o post-mortem: quem faria trabalho que ele não admite
     // pergunta por isto.

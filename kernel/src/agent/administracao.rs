@@ -792,12 +792,26 @@ struct OperacaoDeQuorum {
     nome: &'static str,
     /// A permissão que o papel de **cada** credencial que assina precisa ter.
     permissao: Permissao,
+    /// O parâmetro que nomeia o alvo — vai no conteúdo assinado, e uma
+    /// assinatura feita para outro alvo não confere.
+    alvo: &'static str,
 }
 
-static OPERACOES_DE_QUORUM: &[OperacaoDeQuorum] = &[OperacaoDeQuorum {
-    nome: "admin.revoke",
-    permissao: Permissao::AdminRevoke,
-}];
+static OPERACOES_DE_QUORUM: &[OperacaoDeQuorum] = &[
+    OperacaoDeQuorum {
+        nome: "admin.revoke",
+        permissao: Permissao::AdminRevoke,
+        alvo: "key",
+    },
+    // A atualização A/B: instalar a versão nova escrita no slot inativo,
+    // ou desistir da armada. O alvo é o resumo do manifesto: as credenciais
+    // assinam **aquela** imagem — ver `crate::slots`.
+    OperacaoDeQuorum {
+        nome: "system.update",
+        permissao: Permissao::SystemUpdate,
+        alvo: "manifest",
+    },
+];
 
 /// Quantas assinaturas um pedido de quórum pode trazer: o maior grupo.
 const MAIS_ASSINATURAS: usize = politica::arquivo::MAIOR_GRUPO as usize;
@@ -956,7 +970,7 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
     // O alvo, dos parâmetros: entra no conteúdo, e uma assinatura feita
     // para outro alvo não confere.
     let alvo = Json(parametros.as_bytes())
-        .member("key")
+        .member(operacao.alvo)
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let efemera = sigilo::publica_de(&desafio.efemera);
@@ -1070,6 +1084,21 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
     }
     let papeis: Vec<&str> = assinantes.iter().filter_map(|a| a.2.as_deref()).collect();
     let papel = papeis.first().copied();
+    // A instalação de uma versão nova confere o slot inativo inteiro antes
+    // — dezenas de mebibytes, fora da ordem das gravações —, com a vez no
+    // slot presa até a operação acabar: nada o escreve no meio.
+    let acao = Json(parametros.as_bytes())
+        .member("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let preparada = match (operacao.nome, acao) {
+        ("system.update", "install") => match crate::slots::preparar_a_instalacao(alvo) {
+            Ok(p) => Some(p),
+            Err((codigo, motivo)) => return Err(recusar(&nomes, codigo, alvo, &motivo)),
+        },
+        _ => None,
+    };
+    let mut controle_gravado = false;
     // As restrições e a execução da operação, e a gravação, com a ordem
     // das gravações na mão — como as de uma credencial. O desfecho do
     // quórum é registrado na auditoria antes da gravação, e vai no mesmo
@@ -1078,6 +1107,7 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
         let foto = crate::persistencia::Foto::tirar();
         let feito = match operacao.nome {
             "admin.revoke" => revogar_administrador(&assinantes, alvo, quorum.m, parametros),
+            "system.update" => atualizar(acao, alvo, preparada.as_ref()),
             _ => Err(falha(Codigo::Error, "operacao de quorum sem execucao")),
         };
         let gravado = match &feito {
@@ -1098,8 +1128,14 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             }
             Err(_) => Ok(()),
         };
+        // A atualização: o estado novo vale só gravado, e o controle de
+        // boot passa a dizê-lo — ainda com a ordem na mão.
+        if operacao.nome == "system.update" {
+            controle_gravado = crate::slots::depois_da_gravacao(feito.is_ok() && gravado.is_ok());
+        }
         (feito, gravado)
     });
+    drop(preparada);
     match feito {
         Ok(Feito {
             recurso,
@@ -1111,7 +1147,17 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             // o que se tira não volta — e a resposta diz que não ficou
             // gravada; a persistência indisponível bloqueia o resto.
             if let Err(m) = gravado {
-                let motivo = format!("a revogacao vale, mas nao ficou gravada no journal: {m}");
+                // A atualização, ao contrário: nada vale em memória — o
+                // estado novo só vira o de agora gravado, e o controle não
+                // foi escrito. O journal decide no próximo boot, e o
+                // `update.status` de lá diz o que valeu.
+                let motivo = if operacao.nome == "system.update" {
+                    format!(
+                        "a atualizacao nao se sabe gravada no journal: {m}; nada mudou neste boot, e o proximo decide pelo journal"
+                    )
+                } else {
+                    format!("a revogacao vale, mas nao ficou gravada no journal: {m}")
+                };
                 gravar(&nomes, papel, Codigo::Error, &recurso, &motivo);
                 return Err((Codigo::Error, motivo));
             }
@@ -1127,6 +1173,11 @@ fn conferir_quorum_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) ->
             let _ = w.field_str("command", operacao.nome);
             let _ = w.field_str("target", &recurso);
             let _ = w.field_u64("challenges_discarded", descartados as u64);
+            if operacao.nome == "system.update" {
+                // O journal decidiu; o controle de boot, se não gravou
+                // agora, o próximo boot regrava.
+                let _ = w.field_bool("control_written", controle_gravado);
+            }
             let _ = w.key("signed_by");
             let _ = w.begin_array();
             for nome in &nomes {
@@ -1157,6 +1208,55 @@ struct Feito {
     detalhe: String,
     /// Quantos desafios pendentes a operação descartou.
     descartados: usize,
+}
+
+/// `system.update`: `{"action": "install" | "cancel", "manifest": o
+/// resumo do manifesto, em hex}` — ver [`crate::slots`].
+///
+/// - `install`: a versão nova escrita no slot inativo, já conferida por
+///   [`crate::slots::preparar_a_instalacao`] — o manifesto que as
+///   credenciais assinaram, a assinatura dele com uma chave do registro da
+///   máquina, o kernel, o pacote, a arquitetura, o formato do estado, e a
+///   geração acima do piso —, vira a candidata no journal: o próximo boot
+///   a tenta;
+/// - `cancel`: a candidata armada, que tem de ser `manifest`, sai antes de
+///   bootar.
+///
+/// O estado novo vai no registro da operação, pela anotação da
+/// persistência; o controle de boot é gravado depois do registro.
+fn atualizar(
+    acao: &str,
+    manifesto: &str,
+    preparada: Option<&crate::slots::Preparada>,
+) -> Result<Feito, Falha> {
+    match (acao, preparada) {
+        ("install", Some(p)) => {
+            let de = p.imagem().slot.outro();
+            crate::slots::armar(p)?;
+            Ok(Feito {
+                recurso: manifesto.to_string(),
+                detalhe: p.detalhe(de),
+                descartados: 0,
+            })
+        }
+        ("cancel", None) => {
+            let (_, c) = crate::slots::cancelar(manifesto)?;
+            Ok(Feito {
+                recurso: manifesto.to_string(),
+                detalhe: format!(
+                    "cancelar slot {} g{} {}",
+                    c.slot.nome(),
+                    c.geracao,
+                    c.versao()
+                ),
+                descartados: 0,
+            })
+        }
+        _ => Err(falha(
+            Codigo::InvalidArgument,
+            "action precisa ser `install` ou `cancel`",
+        )),
+    }
 }
 
 /// `admin.revoke`: `{"key": chave pública em hex, "reason": texto}`.

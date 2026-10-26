@@ -121,6 +121,7 @@ pub unsafe extern "sysv64" fn _start(entrega: *const protocolo::Entrega) -> ! {
 
     DESLOCAMENTO_FISICO.store(entrega.deslocamento_fisico, Ordering::Relaxed);
     acpi::registrar_rsdp(entrega.acpi);
+    crate::slots::registrar(entrega.arranque);
 
     for i in 0..entrega.quantas_regioes {
         // SAFETY: o ponteiro e a contagem vêm da entrega conferida, e as
@@ -177,8 +178,10 @@ unsafe fn conferir_a_entrega(entrega: *const protocolo::Entrega) -> protocolo::E
 
     // SAFETY: delegada a quem chama; o alinhamento acabou de ser conferido, e
     // um ponteiro que não aponte para memória mapeada faria uma falha de
-    // página — que é um desfecho melhor que ler campos deslocados.
-    let entrega = unsafe { core::ptr::read(entrega) };
+    // página — que é um desfecho melhor que ler campos deslocados. A
+    // entrega mora no começo de uma página do iniciador, e a struct inteira
+    // cabe nela mesmo quando o iniciador é de antes do último campo.
+    let mut entrega = unsafe { core::ptr::read(entrega) };
 
     if entrega.magica != protocolo::MAGICA {
         crate::log_error!(
@@ -201,7 +204,10 @@ unsafe fn conferir_a_entrega(entrega: *const protocolo::Entrega) -> protocolo::E
     // Menor que o esperado significa campos que este kernel leria e que não
     // foram escritos. Maior é um iniciador mais novo, e os campos que este
     // kernel conhece continuam onde estavam — por isso só o menor é recusado.
-    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+    // A exceção é o arranque, o único campo que pode faltar: um iniciador
+    // de antes dele é um kernel que não veio de slot nenhum — ver
+    // `protocolo::Entrega::arranque`.
+    if (entrega.tamanho as usize) < protocolo::TAMANHO_SEM_ARRANQUE {
         crate::log_error!(
             "boot",
             "a entrega tem {} bytes, e este kernel le {}",
@@ -209,6 +215,9 @@ unsafe fn conferir_a_entrega(entrega: *const protocolo::Entrega) -> protocolo::E
             size_of::<protocolo::Entrega>()
         );
         parar("a entrega e menor do que este kernel le");
+    }
+    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+        entrega.arranque = protocolo::Arranque::default();
     }
     if entrega.regioes == 0 || entrega.quantas_regioes == 0 {
         parar("a entrega nao traz mapa de memoria");

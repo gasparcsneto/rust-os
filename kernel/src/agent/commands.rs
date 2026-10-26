@@ -271,6 +271,39 @@ pub static COMANDOS: &[Command] = &[
         handler: system_poweroff,
     },
     Command {
+        nome: "update.status",
+        resumo: "A atualizacao A/B: de que slot e em que modo o kernel bootou, a imagem conferida (geracao, versao, quem assinou), o estado do journal (a ativa, o piso, a versao nova armada), o controle de boot (o slot bom, a tentativa, as que restam) e se o slot inativo pode ser escrito.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: update_status,
+    },
+    Command {
+        nome: "update.stage",
+        resumo: "Escreve um pedaco da versao nova no slot inativo da atualizacao A/B, a partir de `offset` (multiplo de 512; o ultimo pedaco pode ser curto, e e completado com zeros). O conteudo vem do anexo do pedido (binario, ate 60 KiB). Nada no journal: escrever nao instala — so a operacao de quorum system.update arma a versao, e ela confere o slot inteiro de novo. Recusado com uma versao nova armada, sem persistencia, ou com outro pedido no slot.",
+        params: &[
+            ParamSpec {
+                nome: "offset",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "Onde o pedaco comeca, em bytes desde o comeco do slot; multiplo de 512.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa sessao cifrada de agente: quantos bytes de anexo vieram nos quadros de anexo antes deste pedido.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::SystemUpdate),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: update_stage,
+    },
+    Command {
         nome: "system.uptime",
         resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
         params: &[],
@@ -2899,6 +2932,49 @@ fn system_reboot(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
 fn system_poweroff(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     parar_a_maquina(crate::energia::Acao::Desligar, w)
+}
+
+/// `update.status`: ver [`crate::slots::relatar`].
+fn update_status(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    crate::slots::relatar(w)?;
+    w.end_object()
+}
+
+/// `update.stage`: um pedaço da versão nova no slot inativo — ver
+/// [`crate::slots::encenar`].
+fn update_stage(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    use politica::Codigo;
+    w.begin_object()?;
+    let anexo = crate::autorizacao::tirar_anexo();
+    let deslocamento = params.member("offset").and_then(|v| v.as_u64());
+    let feito = match (
+        deslocamento,
+        anexo_declarado(params.member("attachment"), &anexo),
+    ) {
+        (_, Err(m)) => Err((Codigo::InvalidArgument, m.into())),
+        (None, Ok(())) => Err((Codigo::InvalidArgument, "falta offset".into())),
+        (Some(d), Ok(())) => crate::slots::encenar(d, &anexo).map(|r| (d, r)),
+    };
+    match feito {
+        Ok((de, (slot, ate))) => {
+            crate::autorizacao::auditar_execucao(
+                slot.nome(),
+                Codigo::Allow,
+                &alloc::format!("{} bytes no slot inativo, de {de} a {ate}", anexo.len()),
+            );
+            w.field_str("slot", slot.nome())?;
+            w.field_u64("offset", de)?;
+            w.field_u64("written", anexo.len() as u64)?;
+            w.field_u64("end", ate)?;
+        }
+        Err((codigo, motivo)) => {
+            crate::autorizacao::auditar_execucao("", codigo, &motivo);
+            w.field_str("error", &motivo)?;
+            explicar_falha(w, codigo, &motivo)?;
+        }
+    }
+    w.end_object()
 }
 
 fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {

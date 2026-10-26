@@ -147,9 +147,16 @@ de `cargo xtask provisionar`, montada do que o operador traz
 # linha impressa vai para o registro do diretório do operador.
 cargo xtask chave agente segredos/operador-1.chave operador-1 operador >> op/agentes
 cargo xtask chave administrador segredos/adm-a.chave adm-a administrador >> op/administradores
+# E a de quem publica as versões: assina o manifesto das imagens dos slots.
+cargo xtask chave atualizacao segredos/publicador-1.chave publicador-1 >> op/atualizacao
 
-# A imagem, para o x86 (ou --arch aarch64), em target/producao/<nome>-<arch>.
-cargo xtask provisionar op --release
+# A versão, assinada: o kernel de produção, o pacote do produto e o
+# manifesto, em target/atualizacao/<versão>-<arch>.slot.
+cargo xtask publicar segredos/publicador-1.chave 2026.11.0 1
+
+# O disco, para o x86 (ou --arch aarch64), em target/producao/<nome>-<arch>,
+# com a versão no slot A.
+cargo xtask provisionar op --imagem target/atualizacao/2026.11.0-x86_64.slot
 ```
 
 O diretório do operador — um exemplo para adaptar em
@@ -161,18 +168,23 @@ O diretório do operador — um exemplo para adaptar em
 | `politica` | a política, lida pelo mesmo leitor do kernel |
 | `agentes`, `administradores` | as linhas que `cargo xtask chave` imprime |
 | `pessoas` | `<nome> <papel> <arquivo da senha>`, uma por linha; a senha, de 12 caracteres ou mais, vira o verificador e não entra na imagem |
+| `atualizacao` | as linhas que `cargo xtask chave atualizacao` imprime: as chaves que podem assinar uma versão desta máquina — ver [`ATUALIZACAO.md`](ATUALIZACAO.md) |
 | `tempo`, `editores`, `rede` | opcionais: as fontes de hora, os editores de código, a rede sem DHCP |
 
 O provisionamento recusa a imagem inteira se uma chave da bancada aparece
 em qualquer arquivo, se a política é a da bancada ou não se lê, se o
-quórum não fecha com os administradores, se a rede não se lê, ou se a
-saída já tem uma imagem — a chave do Duke dela sumiria. A raiz leva o
-material do operador, uma chave do Duke sorteada ali, a marca
-`/etc/duke/imagem` (`tipo producao`, o nome, um id sorteado), as âncoras
-TLS públicas, a rede principal do IC e os programas do produto — o
-servidor de janelas, o terminal, o `gestor` e o `livro` —; nada da
-bancada: nem os arquivos da suíte, nem a âncora TLS dela, nem as redes da
-PocketIC, nem os programas que são o outro lado de um caso.
+quórum não fecha com os administradores, se não há chave de atualização,
+se a política não tem o quórum `system.update` com a permissão no papel de
+quem assina, se a rede não se lê, se a imagem do slot não confere com o
+registro de atualização do operador, ou se a saída já tem uma imagem — a
+chave do Duke dela sumiria. A raiz leva só o que é da máquina: o material
+do operador, uma chave do Duke sorteada ali e a marca `/etc/duke/imagem`
+(`tipo producao`, o nome, um id sorteado). O código vem no slot A — o
+kernel e o pacote, com as âncoras TLS públicas, a rede principal do IC e
+os programas do produto: o servidor de janelas, o terminal, o `gestor` e
+o `livro` —, e uma versão nova o troca sem tocar a raiz; nada da bancada:
+nem os arquivos da suíte, nem a âncora TLS dela, nem as redes da PocketIC,
+nem os programas que são o outro lado de um caso.
 
 A saída tem três arquivos: `duke.img`, a imagem; `duke.publica`, a
 pública do Duke, que cada agente fixa; e `registro.txt`, o resumo de cada
@@ -379,6 +391,13 @@ problema, por que importa, o impacto, as alternativas, a recomendação e os
 invariantes que ele toca.
 
 ### Atualizar o kernel e a imagem
+
+**Feito no B1** — ver [`ATUALIZACAO.md`](ATUALIZACAO.md): dois slots com o
+kernel e o pacote, o manifesto assinado pela chave de quem publica, a
+instalação pelo quórum `system.update`, a tentativa contada pelo
+iniciador, a confirmação e o piso de geração no journal ancorado no TPM, e
+a volta sozinha para a versão velha. O que segue é o registro da decisão
+como ela foi tomada.
 
 - **Problema.** Não há como trocar o kernel, os programas da imagem ou a
   política da imagem numa máquina em uso, a não ser regravando o disco.

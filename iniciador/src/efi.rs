@@ -193,7 +193,7 @@ pub struct ServicosDeBoot {
 
     // Memória.
     pub alocar_paginas: unsafe extern "efiapi" fn(u32, u32, usize, *mut u64) -> Status,
-    _liberar_paginas: *const c_void,
+    pub liberar_paginas: unsafe extern "efiapi" fn(u64, usize) -> Status,
     pub mapa_de_memoria:
         unsafe extern "efiapi" fn(*mut usize, *mut u8, *mut usize, *mut usize, *mut u32) -> Status,
     pub alocar_pool: unsafe extern "efiapi" fn(u32, usize, *mut *mut u8) -> Status,
@@ -216,7 +216,11 @@ pub struct ServicosDeBoot {
     _reservado: *const c_void,
     _registrar_notificacao: *const c_void,
     _localizar_handle: *const c_void,
-    _localizar_caminho: *const c_void,
+    /// `LocateDevicePath`: o dispositivo mais fundo de um caminho que tem o
+    /// protocolo pedido. É por ele que o iniciador sobe da partição de onde
+    /// veio até o disco inteiro.
+    pub localizar_caminho:
+        unsafe extern "efiapi" fn(*const Guid, *mut *const NoDoCaminho, *mut Handle) -> Status,
     _instalar_configuracao: *const c_void,
 
     // Imagens.
@@ -465,6 +469,76 @@ pub const MODO_LEITURA: u64 = 1;
 /// alternativa — `GetInfo` — exige um GUID a mais, uma struct a mais e a
 /// mesma dança de dois passos para descobrir o tamanho do buffer.
 pub const FIM_DO_ARQUIVO: u64 = u64::MAX;
+
+/// O protocolo do caminho de dispositivo: como o firmware nomeia de onde
+/// uma coisa veio — a placa, o disco, a partição —, um nó atrás do outro.
+pub const GUID_DO_CAMINHO: Guid = Guid {
+    a: 0x0957_6e91,
+    b: 0x6d3f,
+    c: 0x11d2,
+    d: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+/// O cabeçalho de um nó do caminho de dispositivo. O nó continua por
+/// `tamanho` bytes, contando o cabeçalho.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NoDoCaminho {
+    pub tipo: u8,
+    pub subtipo: u8,
+    /// Little-endian, e sem alinhamento: o nó pode começar em qualquer
+    /// byte.
+    pub tamanho: [u8; 2],
+}
+
+/// O tipo e o subtipo do nó de partição de disco rígido — `HD(...)` —, o
+/// que separa a partição do disco que a contém.
+pub const NO_DE_MIDIA: u8 = 4;
+pub const NO_DE_PARTICAO: u8 = 1;
+
+/// O nó que fecha um caminho inteiro.
+pub const NO_DO_FIM: NoDoCaminho = NoDoCaminho {
+    tipo: 0x7f,
+    subtipo: 0xff,
+    tamanho: [4, 0],
+};
+
+/// O protocolo de bloco: ler e escrever blocos de um disco, ou de uma
+/// partição, sem sistema de arquivos no meio.
+pub const GUID_DO_BLOCO: Guid = Guid {
+    a: 0x964e_5b21,
+    b: 0x6459,
+    c: 0x11d2,
+    d: [0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+};
+
+#[repr(C)]
+pub struct Bloco {
+    pub revisao: u64,
+    pub midia: *const Midia,
+    _reiniciar: *const c_void,
+    pub ler: unsafe extern "efiapi" fn(*mut Bloco, u32, u64, usize, *mut u8) -> Status,
+    pub escrever: unsafe extern "efiapi" fn(*mut Bloco, u32, u64, usize, *const u8) -> Status,
+    pub descarregar: unsafe extern "efiapi" fn(*mut Bloco) -> Status,
+}
+
+/// A mídia de um protocolo de bloco. Os campos da revisão 2 em diante não
+/// são lidos: o iniciador não precisa deles, e um firmware da revisão 1
+/// não os tem.
+#[repr(C)]
+pub struct Midia {
+    pub id: u32,
+    pub removivel: u8,
+    pub presente: u8,
+    pub particao: u8,
+    pub so_leitura: u8,
+    pub cache_de_escrita: u8,
+    pub tamanho_do_bloco: u32,
+    /// O alinhamento que o buffer de uma transferência precisa ter; zero ou
+    /// um, nenhum.
+    pub alinhamento: u32,
+    pub ultimo_bloco: u64,
+}
 
 /// `AllocateAnyPages`: o firmware escolhe onde.
 pub const ALOCAR_QUALQUER: u32 = 0;

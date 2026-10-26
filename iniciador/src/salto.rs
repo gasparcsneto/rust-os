@@ -81,6 +81,8 @@ pub struct Destino {
     pub dispositivos: u64,
     /// A RSDP da ACPI, em endereço físico, ou zero quando não há.
     pub acpi: u64,
+    /// O slot de onde o kernel veio, ou zero.
+    pub arranque: protocolo::Arranque,
 }
 
 /// Tudo que precisa estar pronto antes de o mapa de memória ser pedido.
@@ -130,6 +132,7 @@ pub unsafe fn saltar(
         video: destino.video,
         dispositivos: destino.dispositivos,
         acpi: destino.acpi,
+        arranque: destino.arranque,
     };
     // SAFETY: a página veio do firmware, está alinhada, e ninguém mais a tem.
     unsafe { reservado.entrega.write(entrega) };

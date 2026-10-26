@@ -63,6 +63,7 @@ mod fdt;
 #[cfg(target_arch = "x86_64")]
 mod paginas;
 mod salto;
+mod slots;
 
 use core::fmt::Write;
 use core::panic::PanicInfo;
@@ -493,7 +494,7 @@ const PEDACO_DA_LEITURA: usize = 64 * 1024;
 /// e sem elas ele tem poucos mebibytes. O teto existe porque o tamanho vem
 /// do disco: um número absurdo viraria um pedido de alocação absurdo, e o
 /// firmware o recusaria com uma mensagem que não diz o que aconteceu.
-const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
+pub(crate) const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 
 /// Segue a corrente até o arquivo do kernel, lê, e descreve o que leu.
 ///
@@ -507,6 +508,33 @@ const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 /// rodando; a imagem sabe de qual **dispositivo** veio; e o dispositivo
 /// oferece o **sistema de arquivos**. Os três elos são o que amarra o kernel
 /// ao iniciador que o carregou.
+/// Se `bytes` tem a forma de um kernel que este iniciador carrega: o
+/// cabeçalho ELF, a máquina desta arquitetura, e os segmentos legíveis —
+/// ao menos um, com a entrada dentro deles. A mesma conferência que a
+/// carga faz antes de copiar qualquer coisa, sem copiar nada: o slot de
+/// uma tentativa que não passa por ela volta para o bom — ver
+/// [`slots`].
+pub(crate) fn elf_carregavel(bytes: &[u8]) -> Result<(), &'static str> {
+    let imagem = elf::Imagem::abrir(bytes)?;
+    if imagem.maquina != alvo::MAQUINA {
+        return Err("o kernel nao e desta arquitetura");
+    }
+    let (mut menor, mut maior, mut quantos) = (u64::MAX, 0u64, 0usize);
+    for segmento in imagem.segmentos() {
+        let s = segmento?;
+        quantos += 1;
+        menor = menor.min(s.endereco);
+        maior = maior.max(s.endereco.saturating_add(s.tamanho_na_memoria));
+    }
+    if quantos == 0 {
+        return Err("o kernel nao tem segmento nenhum para carregar");
+    }
+    if imagem.entrada < menor || imagem.entrada >= maior {
+        return Err("a entrada do kernel nao cai em segmento nenhum");
+    }
+    Ok(())
+}
+
 fn carregar_o_kernel(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
@@ -515,7 +543,12 @@ fn carregar_o_kernel(
     fim_da_ram: u64,
     video: Option<efi::Tela>,
 ) -> Result<core::convert::Infallible, &'static str> {
-    let bytes = ler_o_kernel(handle, boot)?;
+    // O kernel vem de um slot da atualização A/B, se o disco os tem; senão,
+    // da ESP — ver `slots`.
+    let (bytes, arranque) = match slots::carregar(handle, boot)? {
+        Some(lido) => (lido.kernel, lido.arranque),
+        None => (ler_o_kernel(handle, boot)?, protocolo::Arranque::default()),
+    };
     let imagem = elf::Imagem::abrir(bytes)?;
 
     if imagem.maquina != alvo::MAQUINA {
@@ -598,7 +631,16 @@ fn carregar_o_kernel(
         na_memoria / 1024
     );
 
-    carregar_e_saltar(handle, boot, dispositivos, acpi, imagem, fim_da_ram, video)
+    carregar_e_saltar(
+        handle,
+        boot,
+        dispositivos,
+        acpi,
+        imagem,
+        fim_da_ram,
+        video,
+        arranque,
+    )
 }
 
 /// Confronta o endereço de serial escrito no código com o que a placa diz.
@@ -764,6 +806,7 @@ fn achar_a_acpi(sistema: &efi::Sistema) -> u64 {
 /// `cfg` pelo meio do relatório, porque tudo acima dela é **o mesmo
 /// programa** nas duas máquinas — e é isso que a divisão precisa mostrar.
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
 fn carregar_e_saltar(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
@@ -776,6 +819,7 @@ fn carregar_e_saltar(
     imagem: elf::Imagem,
     fim_da_ram: u64,
     video: Option<efi::Tela>,
+    arranque: protocolo::Arranque,
 ) -> Result<core::convert::Infallible, &'static str> {
     // O bit que torna o 63 das entradas significativo, antes de qualquer
     // tabela ser escrita com ele.
@@ -813,6 +857,7 @@ fn carregar_e_saltar(
         // vez de ausente. Ver `protocolo::Entrega::dispositivos`.
         dispositivos: 0,
         acpi,
+        arranque,
     };
 
     let raiz = carga.tabelas.raiz();
@@ -862,6 +907,7 @@ fn carregar_e_saltar(
 /// saída é tornar o kernel independente de posição, e a recusa aqui diz
 /// isso em vez de escolher sozinha.
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
 fn carregar_e_saltar(
     handle: efi::Handle,
     boot: &efi::ServicosDeBoot,
@@ -876,6 +922,7 @@ fn carregar_e_saltar(
     // resto.
     _fim_da_ram: u64,
     video: Option<efi::Tela>,
+    arranque: protocolo::Arranque,
 ) -> Result<core::convert::Infallible, &'static str> {
     // A tabela de relocações é lida e conferida mesmo sem nada a aplicar: é
     // o último pedaço do arquivo que ainda não tinha sido olhado, e ele é o
@@ -924,6 +971,7 @@ fn carregar_e_saltar(
         tela_bytes: video.map_or(0, |t| t.bytes),
         dispositivos,
         acpi,
+        arranque,
     };
 
     // SAFETY: a imagem foi copiada para o endereço em que ela é ligada e

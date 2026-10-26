@@ -73,6 +73,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "atualizacao"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "ed25519-dalek",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,6 +353,7 @@ dependencies = [
  "ancora",
  "aparencia",
  "armazem",
+ "atualizacao",
  "diario",
  "hora",
  "pci_types",

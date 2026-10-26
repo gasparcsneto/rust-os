@@ -122,6 +122,12 @@ pub use permissao::Permissao;
 ///   prova. Ninguém mais: nem o `operador`, nem o tecido de segurança.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
+/// - `system.update` — escrever a versão nova no slot inativo da
+///   atualização A/B —, no `sistema`, pelo gate, e no `administrador`, para
+///   o papel de cada credencial que assina a instalação; e `quorum
+///   system.update 2 3`: instalar uma versão nova, ou desistir dela, exige
+///   duas credenciais do grupo de três. Escrever não instala: só o quórum
+///   arma — ver `docs/ATUALIZACAO.md`.
 /// - `editores`: o `sistema` e o `administrador` confiam no editor
 ///   `bancada`, o da imagem de desenvolvimento — ver `sigilo::codigo` e o
 ///   registro de editores, `/etc/duke/editores`. O código de fora da
@@ -156,7 +162,7 @@ macro_rules! papeis_de_sistema {
     ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
         concat!(
             "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
@@ -173,7 +179,7 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -195,6 +201,7 @@ processos administrador 8
             $alcance_das_chaves_do_administrador,
             "
 quorum admin.revoke 2 3
+quorum system.update 2 3
 
 papel seguranca audit.read net.observe net.block process.isolate
 recurso seguranca net.observe udp:10.0.2.3:53
@@ -237,7 +244,7 @@ pub const PADRAO: &str = concat!(
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
 # credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
 # process.isolate, agent.suspend e credential.suspend, process.terminate,
-# system.power, time.*, audit.declare e key.*) nao atravessa a inclusao de
+# system.power, system.update, time.*, audit.declare e key.*) nao atravessa a inclusao de
 # outro papel: cada
 # papel que a tem a escreve. Toda permissao
 # de caminho, o message.send, o net.connect e as de chave tem o alcance

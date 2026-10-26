@@ -231,11 +231,21 @@ pub enum Permissao {
     /// `debug.trigger`, que derruba a máquina de outro jeito; o
     /// administrador, pela prova.
     SystemPower,
+    /// A atualização A/B: escrever a versão nova no slot inativo —
+    /// `update.stage`, pelo gate — e, no papel de **cada** credencial que
+    /// assina, instalá-la ou desistir dela — a operação de quórum
+    /// `system.update`, com a linha `quorum` da política. Escrever não
+    /// instala nada: só o quórum arma uma versão, e só a versão que bootou
+    /// e se conferiu vira a ativa. Sem recurso: o slot que se escreve é o
+    /// inativo, que o journal diz qual é. Sensível, e não administrativa,
+    /// como o `system.power`: o `sistema` a exerce pelo gate; a instalação
+    /// é do quórum.
+    SystemUpdate,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 48] = [
+pub const TODAS: [Permissao; 49] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -284,6 +294,7 @@ pub const TODAS: [Permissao; 48] = [
     Permissao::KeyRevoke,
     Permissao::ProcessTerminate,
     Permissao::SystemPower,
+    Permissao::SystemUpdate,
 ];
 
 impl Permissao {
@@ -338,6 +349,7 @@ impl Permissao {
             Permissao::KeyRevoke => "key.revoke",
             Permissao::ProcessTerminate => "process.terminate",
             Permissao::SystemPower => "system.power",
+            Permissao::SystemUpdate => "system.update",
         }
     }
 
@@ -389,6 +401,7 @@ impl Permissao {
                 | Permissao::KeyRevoke
                 | Permissao::ProcessTerminate
                 | Permissao::SystemPower
+                | Permissao::SystemUpdate
         )
     }
 
@@ -567,7 +580,8 @@ impl Permissao {
             | Permissao::KeyDestroy
             | Permissao::KeyRevoke
             | Permissao::ProcessTerminate
-            | Permissao::SystemPower => true,
+            | Permissao::SystemPower
+            | Permissao::SystemUpdate => true,
         }
     }
 
@@ -746,12 +760,24 @@ mod testes {
     }
 
     /// Reiniciar e desligar: sensível, não administrativa — o sistema a
-    /// exerce pelo gate —, muda o estado, e sem recurso nenhum. No fim da
-    /// lista, depois do término de um processo.
+    /// exerce pelo gate —, muda o estado, e sem recurso nenhum. Depois do
+    /// término de um processo.
     #[test]
     fn reiniciar_e_desligar() {
         let e = Permissao::de_nome("system.power").unwrap();
         assert_eq!(e, Permissao::SystemPower);
+        assert!(e.sensivel() && !e.administrativa() && e.muda_estado());
+        assert!(!e.tem_alcance() && !e.alvo_e_papel() && !e.contencao());
+        assert_eq!(TODAS[TODAS.len() - 2], e);
+    }
+
+    /// A atualização: como o `system.power` — sensível, não
+    /// administrativa, muda o estado, sem recurso —, e no fim da lista: a
+    /// posição é o bit do manifesto, e as que já existiam não se movem.
+    #[test]
+    fn atualizar() {
+        let e = Permissao::de_nome("system.update").unwrap();
+        assert_eq!(e, Permissao::SystemUpdate);
         assert!(e.sensivel() && !e.administrativa() && e.muda_estado());
         assert!(!e.tem_alcance() && !e.alvo_e_papel() && !e.contencao());
         assert_eq!(TODAS.last(), Some(&e));

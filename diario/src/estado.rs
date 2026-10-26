@@ -205,6 +205,23 @@ pub mod tipo {
     /// zeros.
     pub const LIMPEZA_FEITA: u16 = 39;
 
+    /// O que a atualização A/B mudou fora de uma operação: a linha de base
+    /// do primeiro boot de um slot, a confirmação da versão nova que bootou
+    /// numa tentativa, o desfazimento da que não se confirmou — uma entrada
+    /// [`ATUALIZACAO_ESTADO`]. Não sobe a geração administrativa: são
+    /// desfechos do boot, e não decisões de autoridade — a decisão é a
+    /// operação de quórum que armou a versão nova, num registro
+    /// [`OPERACAO`]. Avança o contador do TPM, como todo registro de
+    /// estado protegido: é a âncora que impede o disco de voltar a antes de
+    /// uma confirmação, e com ele o piso de geração.
+    pub const ATUALIZACAO: u16 = 40;
+    /// O estado da atualização A/B depois da mudança: `[a imagem ativa, a
+    /// candidata ou nada, o motivo]` — cada imagem como
+    /// `atualizacao::estado::Imagem::codificar` a escreve. O piso de
+    /// geração é a geração da ativa. A última entrada vale; a base leva a
+    /// de agora.
+    pub const ATUALIZACAO_ESTADO: u16 = 41;
+
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.
     ///

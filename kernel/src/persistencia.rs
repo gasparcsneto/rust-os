@@ -1510,12 +1510,18 @@ pub fn descarga_final_de_teste() -> (u64, u64) {
 /// disco. Sem a persistência disponível, recusa, em vez de deixar o
 /// registro só na memória, que uma queda levaria.
 ///
+/// Pede o journal de pé, e não a autoridade do boot: gravar a auditoria
+/// não decide nada, e um boot que a atualização A/B recusou grava o porquê
+/// antes de reiniciar (ver [`crate::energia::reiniciar_pela_atualizacao`]).
+/// Quem grava para decidir — a assinatura, o reinício pedido — confere a
+/// autoridade antes, com [`exigir`].
+///
 /// Um registro só de auditoria, como os do coletor: não avança o contador
 /// do TPM. É durável a uma queda; contra um rollback do disco, é o rabo da
 /// auditoria de sempre — e nenhuma decisão depende dele.
 pub fn gravar_auditoria_ate(seq: u64) -> Result<(), &'static str> {
     em_ordem(|| {
-        exigir()?;
+        exigir_o_journal()?;
         if auditoria_gravada() < seq {
             gravar_com_a_decisao(tipo::AUDITORIA, &[], seq)?;
         }
@@ -2056,6 +2062,14 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     // journal não cresce com eles.
     if let Some(c) = crate::volume::confirmado() {
         grupos.push(alloc::vec![entrada_do_armazem(&c)?]);
+    }
+    // A atualização A/B: o estado de agora — a ativa, e com ela o piso, e
+    // a candidata armada, se há.
+    if let Some(e) = crate::slots::estado_do_journal() {
+        let (ativo, candidato) = crate::slots::campos(&e);
+        grupos.push(alloc::vec![entrada_da_atualizacao(
+            &ativo, &candidato, "base"
+        )?]);
     }
     // A selagem: a geração em que as chaves vivas estão, e a limpeza, se
     // ainda falta.
@@ -2886,8 +2900,18 @@ pub fn revogacoes_desconhecidas() -> Option<&'static str> {
 }
 
 /// Uma operação de autoridade pode começar? Só com a persistência
-/// disponível. Não há exceção: nem para o `sistema`, nem para a serial.
+/// disponível — e com a autoridade do boot: um kernel que a atualização
+/// A/B recusou, ou uma versão nova que ainda não se confirmou, não decide
+/// nada, mesmo com o journal de pé (ver [`crate::slots::exigir`]). Não há
+/// exceção: nem para o `sistema`, nem para a serial.
 pub fn exigir() -> Result<(), &'static str> {
+    exigir_o_journal()?;
+    crate::slots::exigir()
+}
+
+/// Só a persistência disponível, sem a autoridade do boot: para o que não
+/// decide nada — a auditoria.
+fn exigir_o_journal() -> Result<(), &'static str> {
     match estado() {
         Estado::Disponivel => Ok(()),
         outro => Err(outro.motivo()),
@@ -3040,6 +3064,36 @@ pub fn gravar_operacao(
     })
 }
 
+/// A entrada do estado da atualização A/B: a ativa e a candidata, como
+/// [`crate::slots::campos`] as codifica, e o motivo da mudança.
+pub fn entrada_da_atualizacao(
+    ativo: &[u8],
+    candidato: &[u8],
+    motivo: &str,
+) -> Result<Vec<u8>, &'static str> {
+    entrada(
+        tipo::ATUALIZACAO_ESTADO,
+        &[ativo, candidato, motivo.as_bytes()],
+    )
+}
+
+/// Grava um desfecho da atualização A/B que não é uma operação — a linha de
+/// base, a confirmação, o desfazimento —, num registro próprio, que avança
+/// a âncora e não a geração administrativa, com a decisão `decisao` da
+/// auditoria no mesmo registro.
+pub fn gravar_atualizacao(
+    ativo: &[u8],
+    candidato: &[u8],
+    motivo: &str,
+    decisao: u64,
+) -> Result<(), &'static str> {
+    em_ordem(|| {
+        let e = entrada_da_atualizacao(ativo, candidato, motivo)?;
+        let dados = estado::campos(&[&e])?;
+        gravar_com_a_decisao(tipo::ATUALIZACAO, &dados, decisao)
+    })
+}
+
 /// Uma entrada do registro de uma operação: o tipo e os campos.
 fn entrada(t: u16, campos: &[&[u8]]) -> Result<Vec<u8>, &'static str> {
     let mut todos: Vec<&[u8]> = Vec::with_capacity(campos.len() + 1);
@@ -3164,7 +3218,8 @@ fn entradas(r: &diario::Registro) -> Result<Vec<&[u8]>, &'static str> {
         | tipo::ARMAZEM
         | tipo::AUDITORIA
         | tipo::BASE
-        | tipo::SELAGEM => Ok(campos),
+        | tipo::SELAGEM
+        | tipo::ATUALIZACAO => Ok(campos),
         // O fecho tem só os campos dele — ver [`fecho`].
         tipo::BASE_FIM => fecho(&r.conteudo).map(|_| Vec::new()),
         _ => Err("tipo de registro desconhecido"),
@@ -3400,6 +3455,9 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
         // se escreve mais, e um journal que o tenha é de antes do volume.
         (tipo::ARQUIVO_GRAVADO | tipo::ARQUIVO_APAGADO | tipo::ARMAZEM_PROXIMO, _) => {
             Err("entrada do armazem no formato de antes do volume")
+        }
+        (tipo::ATUALIZACAO_ESTADO, [ativo, candidato, _motivo]) => {
+            crate::slots::restaurar(ativo, candidato)
         }
         (tipo::AUDITORIA_LACUNA, [primeira, ultima, elo]) => {
             let l = politica::auditoria::Lacuna {

@@ -125,7 +125,7 @@ pub const MAIS_PROCESSOS: u32 = 64;
 
 /// As operações que exigem quórum — e que só existem com a linha `quorum`
 /// delas na política.
-pub const OPERACOES_DE_QUORUM: &[&str] = &["admin.revoke"];
+pub const OPERACOES_DE_QUORUM: &[&str] = &["admin.revoke", "system.update"];
 
 /// O maior grupo de credenciais de um quórum.
 pub const MAIOR_GRUPO: u8 = 16;
@@ -156,12 +156,22 @@ pub struct Piso {
 /// baixasse não vigora — no boot vale a de emergência, e o `xtask` nem gera
 /// a imagem —, e uma mudança que o baixasse é recusada, mesmo que um dia o
 /// `policy.write` passasse a aceitar a linha.
-pub const PISOS_DO_QUORUM: &[Piso] = &[Piso {
-    operacao: "admin.revoke",
-    m_minimo: 2,
-    num: 2,
-    den: 3,
-}];
+pub const PISOS_DO_QUORUM: &[Piso] = &[
+    Piso {
+        operacao: "admin.revoke",
+        m_minimo: 2,
+        num: 2,
+        den: 3,
+    },
+    // A troca do código que decide: o mesmo piso da revogação. Uma
+    // credencial só, ou uma minoria do grupo, não arma uma versão nova.
+    Piso {
+        operacao: "system.update",
+        m_minimo: 2,
+        num: 2,
+        den: 3,
+    },
+];
 
 impl Piso {
     /// Se o quórum `q` está no piso ou acima: M no mínimo, e M/N na fração

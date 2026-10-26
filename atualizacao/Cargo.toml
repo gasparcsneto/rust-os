@@ -1,0 +1,18 @@
+[package]
+name = "atualizacao"
+version = "0.1.0"
+edition = "2024"
+description = "A atualização A/B do Duke: o manifesto assinado, o slot, o controle de boot e o estado"
+license = "MIT OR Apache-2.0"
+
+# Sem `alloc` e sem Ed25519 por padrão: o iniciador UEFI usa só os formatos
+# e o BLAKE2s — ele confere resumos, e não assinaturas (ver `lib.rs`). O
+# kernel liga `alloc` e `conferir`; o `xtask`, `assinar`.
+[features]
+alloc = []
+conferir = ["dep:ed25519-dalek"]
+assinar = ["conferir", "alloc"]
+
+[dependencies]
+blake2 = { version = "0.11.0", default-features = false }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"], optional = true }

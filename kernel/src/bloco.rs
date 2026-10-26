@@ -4,8 +4,9 @@
 //! # Por que uma camada
 //!
 //! As regras que protegem o resto do disco moravam no driver do virtio-blk:
-//! as janelas de escrita — só a partição de estado e a do armazém recebem
-//! escrita —, a recusa de escrever num disco que não promete durabilidade,
+//! as janelas de escrita — só a partição de estado, a do armazém, o
+//! controle de boot e o slot inativo da atualização A/B recebem escrita —,
+//! a recusa de escrever num disco que não promete durabilidade,
 //! a conferência da faixa. Um segundo driver as repetiria, e a primeira que
 //! ele esquecesse deixaria a ESP e a raiz ao alcance de uma conta errada.
 //! Aqui elas valem para qualquer [`Dispositivo`]: o driver só sabe ler,
@@ -176,7 +177,7 @@ pub struct Disco {
     /// qual, e o setor é conferido contra **aquela** janela — o volume do
     /// armazém não alcança o estado por uma conta errada, e o journal não
     /// alcança o volume.
-    janelas: [Option<(u64, u64)>; 2],
+    janelas: [Option<(u64, u64)>; JANELAS],
     /// Quantas escritas e quantas descargas o dispositivo confirmou. Só
     /// para os casos e para o relatório: é o que mostra de dentro que a
     /// descarga aconteceu.
@@ -249,7 +250,7 @@ impl Disco {
     pub fn novo(dispositivo: Box<dyn Dispositivo>) -> Disco {
         Disco {
             dispositivo,
-            janelas: [None, None],
+            janelas: [None; JANELAS],
             escritas: 0,
             descargas: 0,
             leituras: 0,
@@ -489,7 +490,16 @@ pub enum Janela {
     Estado = 0,
     /// A partição do armazém: o volume dele.
     Armazem = 1,
+    /// O controle de boot da atualização A/B — ver [`crate::slots`].
+    Controle = 2,
+    /// O slot **inativo** da atualização A/B: o único que recebe uma
+    /// versão nova. O ativo — de onde o kernel que roda veio — nunca tem
+    /// janela.
+    Slot = 3,
 }
+
+/// Quantas janelas há.
+const JANELAS: usize = 4;
 
 impl Disco {
     /// Fixa uma janela de escrita deste disco — ver
@@ -527,8 +537,11 @@ impl Disco {
 /// Uma segunda chamada para a mesma janela é recusada, mesmo que com a
 /// mesma faixa: a janela não é algo que um caminho de execução possa
 /// redesenhar depois que o sistema subiu, e uma função que aceitasse ser
-/// chamada de novo seria exatamente isso. Uma janela que cruze a outra
-/// também: o estado e o armazém nunca dividem um setor.
+/// chamada de novo seria exatamente isso. Uma janela que cruze outra
+/// também: o estado, o armazém, o controle e o slot nunca dividem um setor.
+///
+/// A do slot é fixada mais tarde que as outras — depois de o journal dizer
+/// qual slot é o ativo, ver [`crate::slots`] —, e também uma vez só.
 pub fn fixar_janela_de_escrita(
     qual: Janela,
     primeiro: u64,

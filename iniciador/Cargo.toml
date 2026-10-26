@@ -17,9 +17,20 @@ license = "MIT OR Apache-2.0"
 # A ABI com o kernel: o que é entregue a ele e onde cada coisa mora no espaço
 # virtual. Ver `protocolo/src/lib.rs` sobre por que é um pacote.
 protocolo = { path = "../protocolo" }
+# Os formatos da atualização A/B — o controle de boot, o cabeçalho do slot,
+# o manifesto — e o BLAKE2s com que o kernel do slot é conferido. Sem
+# `alloc` e sem Ed25519: o iniciador confere resumos, e não assinaturas
+# (ver `atualizacao/src/lib.rs`).
+atualizacao = { path = "../atualizacao" }
 
 [profile.dev]
 panic = "abort"
+
+# O resumo do kernel de depuração — mais de vinte mebibytes — otimizado
+# mesmo no build de depuração, como no kernel: sem isto, só conferir o
+# kernel leva segundos no emulador.
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

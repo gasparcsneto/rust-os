@@ -35,7 +35,9 @@
 //!                        bit 3: o contador anda uma vez "de fora" no
 //!                        boot, antes de ser lido; bit 4: as chaves no
 //!                        formato de antes do cofre — ver
-//!                        [`chaves_antigas`]
+//!                        [`chaves_antigas`]; bit 5: no ponto
+//!                        [`Ponto::AntesDaConfirmacao`], o pânico em vez de
+//!                        congelar
 //! ```
 //!
 //! O limite e as bandeiras servem à compactação: a bancada enche uma
@@ -101,6 +103,18 @@ pub enum Ponto {
     /// No boot: a partição zerada fora do journal, e o registro do fim da
     /// limpeza ainda não gravado.
     LimpezaTerminada = 23,
+    /// A atualização A/B: o controle de boot gravado pela n-ésima vez desde
+    /// o boot — a gravação do plano —, uma cópia descarregada, e nada
+    /// depois.
+    ControleGravado = 24,
+    /// A atualização A/B: no boot de uma tentativa, a versão nova
+    /// conferida, e a confirmação ainda não gravada. Com a bandeira 5, em
+    /// vez de congelar a máquina entra em pânico — a versão nova que cai de
+    /// verdade, e reinicia sozinha.
+    AntesDaConfirmacao = 25,
+    /// A atualização A/B: o n-ésimo pedaço da versão nova escrito no slot
+    /// inativo e descarregado — a gravação do plano —, e nada depois.
+    NoMeioDaEncenacao = 26,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -109,6 +123,10 @@ static TIPO: AtomicU16 = AtomicU16::new(0);
 static LIMITE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static BANDEIRAS: AtomicU8 = AtomicU8::new(0);
 static GRAVACOES: AtomicU32 = AtomicU32::new(0);
+/// Quantas vezes o controle de boot foi gravado desde o boot.
+static CONTROLES: AtomicU32 = AtomicU32::new(0);
+/// Quantos pedaços da versão nova foram escritos desde o boot.
+static PEDACOS: AtomicU32 = AtomicU32::new(0);
 
 /// Lê o plano do último setor da partição de estado, se houver um.
 pub fn carregar<M: diario::Meio>(meio: &mut M) {
@@ -228,6 +246,46 @@ pub fn aqui(p: Ponto) {
     {
         return;
     }
+    cair(p)
+}
+
+/// A n-ésima gravação de uma conta própria — a do controle, a dos pedaços
+/// da versão nova —: cai no ponto `p` se o plano é ele e a conta chegou à
+/// gravação do plano.
+fn contar_e_cair(p: Ponto, conta: &AtomicU32) {
+    let n = conta.fetch_add(1, Ordering::Relaxed) + 1;
+    if PONTO.load(Ordering::Relaxed) == p as u8 && n == GRAVACAO.load(Ordering::Relaxed) {
+        cair(p)
+    }
+}
+
+/// O controle de boot acabou de ser gravado: o ponto
+/// [`Ponto::ControleGravado`].
+pub fn controle_gravado() {
+    contar_e_cair(Ponto::ControleGravado, &CONTROLES);
+}
+
+/// Um pedaço da versão nova acabou de ser escrito: o ponto
+/// [`Ponto::NoMeioDaEncenacao`].
+pub fn encenacao_gravada() {
+    contar_e_cair(Ponto::NoMeioDaEncenacao, &PEDACOS);
+}
+
+/// A versão nova vai se confirmar: o ponto [`Ponto::AntesDaConfirmacao`] —
+/// congelar, ou, com a bandeira 5, o pânico.
+pub fn antes_da_confirmacao() {
+    if PONTO.load(Ordering::Relaxed) != Ponto::AntesDaConfirmacao as u8 {
+        return;
+    }
+    if BANDEIRAS.load(Ordering::Relaxed) & 32 != 0 {
+        panic!("queda: a versao nova cai antes de se confirmar");
+    }
+    cair(Ponto::AntesDaConfirmacao)
+}
+
+/// A energia cai aqui: o aviso sai pelo canal do agente, e a máquina
+/// congela com as interrupções desligadas.
+fn cair(p: Ponto) -> ! {
     crate::arch::sem_interrupcoes(|| {
         // A trava da serial pode estar na mão deste mesmo processador — no
         // modo post-mortem a resposta se escreve enquanto o handler
@@ -252,5 +310,9 @@ pub fn aqui(p: Ponto) {
         loop {
             crate::arch::esperar_interrupcao();
         }
-    })
+    });
+    // O laço de cima não volta; este existe para o tipo.
+    loop {
+        crate::arch::esperar_interrupcao();
+    }
 }

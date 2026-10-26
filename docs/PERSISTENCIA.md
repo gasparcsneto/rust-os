@@ -1583,6 +1583,34 @@ continua com 160 MiB.
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | feita |
 | ICP-3 | As chaves de assinatura no journal: a semente, a lápide, a compactação | feita |
 | ICP-5 | A semente selada no TPM, presa ao índice de geração: a morte em três passos, a migração das antigas | feita |
+| B1 | O estado da atualização A/B: a ativa, a candidata e o piso de geração, no journal | feita |
+
+## A atualização A/B
+
+O estado da atualização — a imagem **ativa**, a **candidata** se há, e o
+**piso**, que é a geração da ativa — é estado protegido como os outros:
+mora no journal, e a âncora o protege. Ver
+[`ATUALIZACAO.md`](ATUALIZACAO.md).
+
+```text
+ATUALIZACAO        (40)  o registro de uma decisão do boot: a linha de base,
+                         a confirmação, o desfazimento. Avança o contador, e
+                         não a geração administrativa
+ATUALIZACAO_ESTADO (41)  [ativa: slot, geração, manifesto, versão,
+                          candidata: a mesma forma, ou vazia, motivo]
+```
+
+A instalação e a desistência pelo quórum `system.update` levam a entrada
+`ATUALIZACAO_ESTADO` no registro da operação (`OPERACAO`), que avança a
+geração administrativa como toda operação de autoridade. A última entrada
+vale; a base da compactação leva a de agora.
+
+O piso não tem índice de NV próprio. A confirmação — a candidata que vira a
+ativa, e o piso que sobe com ela — é **um** registro, que avança o contador
+**uma** vez: não há uma janela em que o TPM diga um piso e o journal outro.
+Um disco devolvido a um journal de antes da confirmação é um journal atrás
+da âncora, recusado como qualquer outro; e, sem o journal, a autoridade
+não existe, para a versão velha nem para a nova.
 
 ## O disco hostil
 

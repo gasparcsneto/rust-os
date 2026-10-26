@@ -6810,6 +6810,330 @@ fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
 /// Os números vêm do `xtask`, que é quem manda montar o disco — e é o mesmo
 /// contrato duplicado que o padrão por setor já tem, pela mesma razão: os
 /// dois lados rodam em máquinas diferentes.
+/// O `update.status` diz o boot, o journal e o controle. Na suíte do x86 —
+/// e na do ARM pelo firmware —, o kernel veio do slot A pelo iniciador: a
+/// imagem conferida, a linha de base no journal, o controle dizendo o A, e
+/// a autoridade com o boot. Na do ARM pelo `-kernel`, fora de um slot: a
+/// suíte segue sem reconciliar, e diz isso.
+fn atualizacao_o_estado_do_boot() -> Resultado {
+    let r = chamar("update.status", "{}")?;
+    let j = Json(r.as_bytes());
+    let texto = |c: &[&str]| {
+        let mut v = Some(j);
+        for n in c {
+            v = v.and_then(|x| x.member(n));
+        }
+        v.and_then(|x| x.as_str())
+    };
+    if j.member("slots").and_then(|v| v.as_bool()) != Some(true)
+        || j.member("partial").and_then(|v| v.as_bool()) != Some(false)
+    {
+        crate::log_error!("teste", "{}", r);
+        return Err("o disco da suite nao tem as particoes da atualizacao");
+    }
+    match crate::slots::arranque() {
+        Some(a) => {
+            let piso = j
+                .member("journal")
+                .and_then(|v| v.member("floor"))
+                .and_then(|v| v.as_u64());
+            if a.slot != atualizacao::Slot::A
+                || texto(&["booted", "slot"]) != Some("a")
+                || j.member("booted")
+                    .and_then(|v| v.member("verified"))
+                    .and_then(|v| v.as_bool())
+                    != Some(true)
+                || texto(&["authority"]) != Some("granted")
+                || !matches!(texto(&["reconciliation"]), Some("linha de base" | "seguir"))
+                || piso.is_none_or(|p| p < 1)
+                || texto(&["journal", "active", "slot"]) != Some("a")
+                || texto(&["control", "good"]) != Some("a")
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("o boot do slot A nao e o que o update.status diz");
+            }
+            if crate::slots::exigir().is_err() {
+                return Err("o boot do slot A ficou sem autoridade");
+            }
+            // Um boot normal: nem tentativa — o pânico pararia a máquina, como
+            // sempre —, nem um reinício que a reconciliação tenha pedido.
+            if crate::slots::em_tentativa() {
+                return Err("a suite bootou numa tentativa da atualizacao");
+            }
+            if crate::slots::reinicio_pedido_de_teste() {
+                return Err("a reconciliacao do boot da suite pediu um reinicio");
+            }
+        }
+        None => {
+            if !j.member("booted").is_some_and(|v| v.is_null())
+                || texto(&["reconciliation"]) != Some("fora de um slot, na suite")
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("fora de um slot, o update.status nao diz isso");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// O `update.stage` passa pelo gate como qualquer comando: o observador lê
+/// o `update.status`; o operador, sem `system.update`, é recusado pela
+/// permissão — e a auditoria grava a recusa com o papel e a sessão —; o
+/// `sistema` chega ao comando, que recusa o pedido vazio pelo que ele é.
+fn atualizacao_pelo_gate() -> Resultado {
+    com_agentes_de_teste(|| {
+        let (mut agente, mut sessao) = conectado(1)?;
+        let nome = nome_de_teste(1);
+        crate::identidade::atribuir(&nome, "observador").map_err(|_| "a atribuicao falhou")?;
+        let r = pela_porta(&mut agente, &mut sessao, "update.status", "{}")?;
+        if !r.contains(r#""slots":"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o observador nao leu o update.status");
+        }
+        for papel in ["observador", "operador"] {
+            crate::identidade::atribuir(&nome, papel).map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "update.stage", r#"{"offset":0}"#)?;
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}: {}", papel, r);
+                return Err("um papel sem system.update escreveu no slot inativo");
+            }
+            let reg = ultimo_registro().ok_or("a auditoria esta vazia")?;
+            if reg.evento.metodo != "update.stage"
+                || reg.evento.codigo.nome() != "DENY_PERMISSION"
+                || reg.evento.papel != papel
+                || reg.evento.agente != nome
+            {
+                crate::log_error!("teste", "{:?}", reg.evento);
+                return Err("a recusa do update.stage nao foi auditada como foi");
+            }
+        }
+        crate::identidade::atribuir(&nome, "sistema").map_err(|_| "a atribuicao falhou")?;
+        let r = pela_porta(&mut agente, &mut sessao, "update.stage", r#"{"offset":0}"#)?;
+        if recusado_com(&r, "DENY_PERMISSION") || !r.contains("nada a escrever") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao chegou ao update.stage, ou o vazio foi escrito");
+        }
+        Ok(())
+    })
+}
+
+/// As assinaturas dos membros `quem` sobre um pedido de quórum de
+/// `comando`, com o alvo `alvo` — o parâmetro que a operação nomeia.
+fn assinaturas_de_quorum(
+    d: &DesafioDeQuorum,
+    comando: &str,
+    alvo: &str,
+    quem: &[usize],
+    params: &str,
+) -> alloc::string::String {
+    let efemera = d.efemera;
+    let conteudo = sigilo::quorum::Conteudo {
+        operacao: d.id,
+        nonce: &d.nonce,
+        sessao: d.sessao,
+        efemera: &efemera,
+        versao_da_politica: d.versao,
+        geracao: d.geracao,
+        m: d.m,
+        n: d.n,
+        comando,
+        alvo,
+        parametros: params,
+    };
+    let todas: alloc::vec::Vec<alloc::string::String> = quem
+        .iter()
+        .map(|&i| {
+            alloc::format!(
+                "{}:{}",
+                sigilo::hex(&publica_do_grupo(i)),
+                sigilo::hex_de(&sigilo::quorum::assinar(&GRUPO_DE_TESTE[i].1, &conteudo))
+            )
+        })
+        .collect();
+    todas.join(",")
+}
+
+/// O quórum da atualização pela política, antes de qualquer slot: com o
+/// grupo de três — dois administradores e um observador —, duas
+/// assinaturas certas em que uma é de um papel sem `system.update` são
+/// recusadas pela permissão; uma só, pelo M da política. Nada se instala, e
+/// o journal não muda.
+fn atualizacao_o_quorum_pela_politica() -> Resultado {
+    com_grupo(["administrador", "administrador", "observador"], || {
+        let manifesto = "0".repeat(64);
+        let params = alloc::format!(r#"{{"action":"install","manifest":"{manifesto}"}}"#);
+        let antes = crate::slots::estado_do_journal();
+        for (quem, trecho) in [
+            (&[0usize, 2][..], "nao tem a permissao"),
+            (&[1usize][..], "quorum incompleto"),
+        ] {
+            let r = com_sessao_de_teste(0, || {
+                chamar("admin.challenge", r#"{"for":"system.update"}"#)
+            })?;
+            let d = ler_desafio_de_quorum(Json(r.as_bytes()), 0)?;
+            if (d.m, d.n) != (2, 3) {
+                return Err("o desafio de system.update nao diz o quorum da politica");
+            }
+            let assinaturas = assinaturas_de_quorum(&d, "system.update", &manifesto, quem, &params);
+            let pedido = alloc::format!(
+                r#"{{"challenge":{},"command":"system.update","params":"{}","signatures":"{assinaturas}"}}"#,
+                d.id,
+                como_string_json(&params)
+            );
+            let r = com_sessao_de_teste(0, || chamar("admin.execute", &pedido))?;
+            if !r.contains(r#""executed":false"#) || !r.contains(trecho) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o quorum de system.update passou por cima da politica");
+            }
+        }
+        if crate::slots::estado_do_journal() != antes {
+            return Err("um quorum recusado mudou o estado da atualizacao");
+        }
+        Ok(())
+    })
+}
+
+/// A compactação leva o estado da atualização: uma parte da base tem a
+/// entrada dele — a ativa e a candidata, como o journal as guarda —, igual
+/// à de agora, e reaplicada ela dá o mesmo estado. Sem estado — a suíte fora
+/// de um slot —, nenhuma entrada na base.
+fn atualizacao_a_compactacao_leva_o_estado() -> Resultado {
+    use diario::estado::tipo;
+    let antes = crate::slots::estado_do_journal();
+    crate::persistencia::compactar_de_teste()?;
+    let registros = todos_do_journal()?;
+    let mut achadas = alloc::vec::Vec::new();
+    for r in registros.iter().filter(|r| r.tipo == tipo::BASE) {
+        for e in crate::persistencia::entradas_de_teste(r)? {
+            let c = diario::estado::ler_campos(e)?;
+            if c.first() == Some(&&tipo::ATUALIZACAO_ESTADO.to_le_bytes()[..]) {
+                achadas.push((c.get(1).map(|v| v.to_vec()), c.get(2).map(|v| v.to_vec())));
+            }
+        }
+    }
+    match antes {
+        None => {
+            if !achadas.is_empty() {
+                return Err("sem estado de atualizacao, a base levou um");
+            }
+        }
+        Some(e) => {
+            let (ativo, candidato) = crate::slots::campos(&e);
+            if achadas.len() != 1 || achadas[0] != (Some(ativo.clone()), Some(candidato.clone())) {
+                crate::log_error!("teste", "{} entradas na base", achadas.len());
+                return Err("a base nao levou o estado da atualizacao de agora");
+            }
+            crate::slots::restaurar(&ativo, &candidato)?;
+            if crate::slots::estado_do_journal() != Some(e) {
+                return Err("a entrada da base nao repoe o mesmo estado");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A escrita no slot inativo confere o pedido antes do disco: o vazio, o
+/// deslocamento fora do setor e o que passa do fim do slot são recusados
+/// pelo que são. Com um reinício a caminho, nada da atualização começa —
+/// a escrita é recusada pelo conflito —, e o journal não muda. Fora de um
+/// slot, a recusa diz que o kernel não veio de um.
+fn atualizacao_a_escrita_e_o_reinicio() -> Resultado {
+    use politica::Codigo;
+    let setor = [0u8; 512];
+    if crate::slots::arranque().is_none() {
+        return match crate::slots::encenar(0, &setor) {
+            Err((_, m)) if m.contains("nao veio de um slot") => Ok(()),
+            _ => Err("fora de um slot, a escrita nao foi recusada pelo que o boot e"),
+        };
+    }
+    let antes =
+        crate::slots::estado_do_journal().ok_or("o journal nao tem o estado da atualizacao")?;
+    for (de, dados, codigo, trecho) in [
+        (0, &[][..], Codigo::InvalidArgument, "nada a escrever"),
+        (
+            100,
+            &setor[..],
+            Codigo::InvalidArgument,
+            "multiplo de setor",
+        ),
+        (
+            1u64 << 40,
+            &setor[..],
+            Codigo::InvalidArgument,
+            "passa do fim do slot",
+        ),
+    ] {
+        match crate::slots::encenar(de, dados) {
+            Err((c, m)) if c == codigo && m.contains(trecho) => {}
+            outro => {
+                crate::log_error!("teste", "{:?}", outro);
+                return Err("a escrita nao recusou o pedido torto pelo que ele e");
+            }
+        }
+    }
+    let _ = crate::energia::executada_de_teste();
+    let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
+    if fs_numero(&r, "record").is_none() {
+        crate::log_error!("teste", "{}", r);
+        return Err("o reinicio nao foi aceito");
+    }
+    let durante = crate::slots::encenar(0, &setor);
+    let entregue = energia_entregue();
+    match durante {
+        Err((Codigo::Conflict, m)) if m.contains("reiniciando") => {}
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            return Err("com um reinicio a caminho, a escrita no slot comecou");
+        }
+    }
+    if entregue != Some(crate::energia::Acao::Reiniciar) {
+        return Err("o fio da energia nao chegou ao fim");
+    }
+    if crate::slots::estado_do_journal() != Some(antes) {
+        return Err("as recusas mudaram o estado da atualizacao");
+    }
+    Ok(())
+}
+
+/// A recusa de um boot pela reconciliação: o registro dela chega ao journal
+/// antes do reinício — gravar a auditoria não pede a autoridade que o boot
+/// acabou de perder —, e nenhuma operação de autoridade passa depois dela.
+fn atualizacao_o_boot_recusado_grava_o_porque() -> Resultado {
+    const MOTIVO: &str = "recusa da suite: o porque vai ao journal";
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        return Err("a suite roda com a persistencia de pe");
+    }
+    let antes = crate::autorizacao::com_auditoria(|c| c.ultima_seq()).unwrap_or(0);
+    let _ = crate::slots::reinicio_pedido_de_teste();
+    let devolver = crate::slots::recusar_de_teste(MOTIVO);
+    let pedido = crate::slots::reinicio_pedido_de_teste();
+    let sem_autoridade = crate::persistencia::exigir();
+    let gravada = crate::persistencia::auditoria_gravada();
+    devolver();
+    let (seq, e) =
+        registro_que(|e| e.metodo == "system.update.refuse" && e.detalhe.contains(MOTIVO))
+            .filter(|(seq, _)| *seq > antes)
+            .ok_or("a recusa nao esta na auditoria")?;
+    if e.codigo != politica::Codigo::DenyPolicy {
+        return Err("a recusa nao e DENY_POLICY");
+    }
+    if !pedido {
+        return Err("a recusa nao pediu o reinicio");
+    }
+    if sem_autoridade != Err(MOTIVO) {
+        crate::log_error!("teste", "{:?}", sem_autoridade);
+        return Err("com o boot recusado, a persistencia ainda deixa decidir");
+    }
+    if gravada < seq {
+        crate::log_error!("teste", "gravada ate {}, a recusa e {}", gravada, seq);
+        return Err("a recusa do boot nao chegou ao journal antes do reinicio");
+    }
+    if crate::persistencia::exigir().is_err() {
+        return Err("a autoridade de antes nao voltou");
+    }
+    Ok(())
+}
+
 fn particoes_tabela_do_disco() -> Resultado {
     let tabela = crate::particoes::varrer()?;
     let mut vistas = 0;
@@ -6821,6 +7145,9 @@ fn particoes_tabela_do_disco() -> Resultado {
             crate::particoes::Tipo::Dados => (100352, 327680),
             crate::particoes::Tipo::Estado => (428032, 32768),
             crate::particoes::Tipo::Armazem => (460800, 131072),
+            crate::particoes::Tipo::Controle => (591872, 2048),
+            crate::particoes::Tipo::SlotA => (593920, 98304),
+            crate::particoes::Tipo::SlotB => (692224, 98304),
             crate::particoes::Tipo::Outro => {
                 return Err("apareceu uma particao de tipo inesperado");
             }
@@ -6837,9 +7164,9 @@ fn particoes_tabela_do_disco() -> Resultado {
         }
     }
 
-    if vistas != 4 {
+    if vistas != 7 {
         crate::log_error!("teste", "a tabela trouxe {} particoes", vistas);
-        return Err("o disco tem quatro particoes e a tabela disse outra coisa");
+        return Err("o disco tem sete particoes e a tabela disse outra coisa");
     }
 
     Ok(())
@@ -32175,6 +32502,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "particoes: a tabela do disco e a que o disco tem",
         f: particoes_tabela_do_disco,
+    },
+    Caso {
+        nome: "atualizacao: o update.status diz de onde o kernel veio, o journal e o controle",
+        f: atualizacao_o_estado_do_boot,
+    },
+    Caso {
+        nome: "atualizacao: o update.stage passa pelo gate, e so o papel com system.update escreve",
+        f: atualizacao_pelo_gate,
+    },
+    Caso {
+        nome: "atualizacao: o quorum de system.update pede o M da politica e a permissao no papel de cada assinante",
+        f: atualizacao_o_quorum_pela_politica,
+    },
+    Caso {
+        nome: "atualizacao: a compactacao leva o estado da atualizacao na base, igual ao de agora",
+        f: atualizacao_a_compactacao_leva_o_estado,
+    },
+    Caso {
+        nome: "atualizacao: a escrita confere o pedaco e o slot, e com um reinicio a caminho nada da atualizacao comeca",
+        f: atualizacao_a_escrita_e_o_reinicio,
+    },
+    Caso {
+        nome: "atualizacao: o boot recusado grava o porque no journal antes de reiniciar, e nao decide nada",
+        f: atualizacao_o_boot_recusado_grava_o_porque,
     },
     Caso {
         nome: "disco: a janela de escrita e a particao de estado",

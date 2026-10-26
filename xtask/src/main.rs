@@ -14,6 +14,7 @@
 //!
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
+mod atualizar;
 mod canal_tcp;
 mod codigo;
 mod disco_hostil;
@@ -22,6 +23,7 @@ mod persistencia;
 mod producao;
 mod rede_principal;
 mod servidor_de_hora;
+mod slots;
 mod tempo;
 mod tls;
 
@@ -230,6 +232,7 @@ fn main() -> ExitCode {
             "--duke",
             "--admin",
             "--assinatura",
+            "--imagem",
         ]
         .contains(&a.as_str())
         {
@@ -275,17 +278,35 @@ fn main() -> ExitCode {
         "invariantes" => conferir_invariantes(),
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
+        "atualizacao" => atualizar::atualizacao(arch, release),
         // A imagem de produção é sempre a de release: é a que vai para a
-        // máquina de verdade.
-        "provisionar" => match posicionais.get(1) {
-            Some(dir) => producao::provisionar(
+        // máquina de verdade. O iniciador dela compila aqui; o kernel vem
+        // na imagem do slot, publicada antes.
+        "provisionar" => match (posicionais.get(1), extrair_valor(&args, "--imagem")) {
+            (Some(dir), Some(imagem)) => producao::provisionar(
                 arch,
                 true,
                 Path::new(dir),
                 extrair_valor(&args, "--saida").map(Path::new),
+                Path::new(imagem),
             ),
-            None => Err(
-                "uso: cargo xtask provisionar <diretório do operador> [--arch A] [--saida D]"
+            _ => Err(
+                "uso: cargo xtask provisionar <diretório do operador> --imagem <imagem do slot> [--arch A] [--saida D]"
+                    .into(),
+            ),
+        },
+        // A imagem de uma versão, também sempre de release.
+        "publicar" => match (posicionais.get(1), posicionais.get(2), posicionais.get(3)) {
+            (Some(chave), Some(versao), Some(geracao)) => producao::publicar(
+                arch,
+                true,
+                Path::new(chave),
+                versao,
+                geracao,
+                extrair_valor(&args, "--saida").map(Path::new),
+            ),
+            _ => Err(
+                "uso: cargo xtask publicar <chave de atualização> <versão> <geração> [--arch A] [--saida F]"
                     .into(),
             ),
         },
@@ -294,7 +315,7 @@ fn main() -> ExitCode {
                 producao::gerar_chave(tipo, Path::new(arquivo), nome, posicionais.get(4).copied())
             }
             _ => Err(
-                "uso: cargo xtask chave agente|administrador <arquivo> <nome> <papel>, ou chave editor <arquivo> <nome>"
+                "uso: cargo xtask chave agente|administrador <arquivo> <nome> <papel>, ou chave editor|atualizacao <arquivo> <nome>"
                     .into(),
             ),
         },
@@ -318,10 +339,11 @@ fn main() -> ExitCode {
                     duke,
                     extrair_valor(&args, "--admin").map(Path::new),
                     &assinaturas,
+                    extrair_valor(&args, "--imagem").map(Path::new),
                 )
             }
             _ => Err(
-                "uso: cargo xtask operar <host:porta> <método> [parâmetros] --chave <arquivo> --duke <pública> [--admin <arquivo>] [--assinatura <arquivo>]..."
+                "uso: cargo xtask operar <host:porta> <método> [parâmetros] --chave <arquivo> --duke <pública> [--admin <arquivo>] [--assinatura <arquivo>]... [--imagem <imagem do slot>]"
                     .into(),
             ),
         },
@@ -423,18 +445,30 @@ COMANDOS:
     tempo                     o Roughtime de ponta a ponta, contra as fontes de
                               hora do hospedeiro: atraso, perda, divergência,
                               quórum, saltos e recuperação, uma máquina por cenário
-    provisionar <diretório>   a imagem de produção, do material do operador (a
+    atualizacao               a atualização A/B de ponta a ponta: a versão nova
+                              escrita, instalada por quórum, tentada, confirmada
+                              ou desfeita; recusas, quedas de energia em cada
+                              passo e concorrência
+    publicar <chave> <versão> <geração>
+                              a imagem de slot de uma versão: o kernel de
+                              produção, o pacote do produto e o manifesto
+                              assinado pela chave de atualização; --saida diz onde
+    provisionar <diretório> --imagem <imagem do slot>
+                              a imagem de produção, do material do operador (a
                               política, os registros, as pessoas, a rede, as
-                              fontes de hora): uma chave do Duke nova, nada da
-                              bancada; --saida diz onde
+                              fontes de hora, as chaves de atualização): uma
+                              chave do Duke nova, nada da bancada, e a imagem
+                              publicada no slot A; --saida diz onde
     chave <tipo> <arquivo> <nome> [papel]
-                              uma chave de agente, administrador ou editor, e a
-                              linha do registro que a imagem leva
+                              uma chave de agente, administrador, editor ou de
+                              atualização, e a linha do registro que a imagem leva
     operar <host:porta> <metodo> [params] --chave <arquivo> --duke <pública>
                               um pedido a uma máquina de verdade pelo canal TCP;
-                              --admin <arquivo> o faz administrativo, e
+                              --admin <arquivo> o faz administrativo,
                               --assinatura <arquivo> (uma por credencial) faz o
-                              admin.revoke pelo quórum
+                              admin.revoke ou o system.update pelo quórum, e
+                              update.stage --imagem <arquivo> escreve a imagem
+                              de uma versão no slot inativo
     mainnet                   a rede principal do IC, de verdade: uma consulta
                               verificada ao livro-razão do ICP, à mão e fora da
                               CI — precisa de DNS e da porta 443 sem proxy;
@@ -613,6 +647,15 @@ pub(crate) fn build_com(
                 .map_err(|e| format!("não foi possível criar {}: {e}", saida.display()))?;
             let img = saida.join("kernel-arm64.img");
             imagem_do_arm64(&elf, &img)?;
+            // O ARM sobe pelo `-kernel`, mas o mesmo kernel vai para o slot
+            // A do disco de testes, e o iniciador do ARM para a ESP dele: é
+            // por eles que a sonda do iniciador, a imagem de produção da
+            // bancada de persistência e a bancada da atualização sobem pelo
+            // firmware. O kernel que sobe pelo `-kernel` não veio de um slot
+            // — ver `atualizacao::estado::Decisao::SemSlot`.
+            let disco = disco_de_testes()?;
+            let efi = build_do_iniciador(arch, release)?;
+            instalar_iniciador(arch, &disco, &efi, &kernel_para_a_esp(&elf)?)?;
             Ok(Artefato::Binario(img))
         }
 
@@ -895,12 +938,13 @@ const fn caminho_na_esp(arch: Arquitetura) -> &'static str {
     }
 }
 
-/// Onde o kernel fica na mesma partição, para o iniciador achá-lo.
+/// Onde o kernel ficava na ESP, antes dos slots da atualização A/B — e onde
+/// o iniciador ainda o procura num disco sem eles.
 ///
 /// O outro lado deste contrato é o `CAMINHO_DO_KERNEL` do iniciador, escrito
-/// em UTF-16. Divergir os dois faz o boot parar com "o kernel nao esta na
-/// particao de sistema" — que é um erro claro, e é a razão de a mensagem
-/// dizer isso em vez de um código do firmware.
+/// em UTF-16. Os discos deste projeto têm os slots, e o kernel vai para o
+/// slot A — ver [`instalar_iniciador`]; o nome fica aqui para o arquivo
+/// velho ser apagado.
 const KERNEL_NA_ESP: &str = "::/duke.elf";
 
 /// Firmwares UEFI que este comando sabe procurar, em ordem de preferência.
@@ -987,7 +1031,9 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
     Ok(efi)
 }
 
-/// Copia o iniciador para a ESP do disco de testes.
+/// Copia o iniciador para a ESP do disco de testes, e o kernel para o slot
+/// A, num manifesto assinado pela chave de atualização da bancada — ver
+/// [`slots::instalar_no_slot_a`].
 ///
 /// # Por que o disco de testes, e não uma imagem só para isto
 ///
@@ -998,13 +1044,35 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
 ///
 /// A cópia acontece a cada execução, por cima do que estiver lá. O disco é
 /// cacheado por uma receita que não menciona o iniciador, de propósito:
-/// recompilá-lo não deve custar a remontagem de 192 MiB, e sobrescrever um
-/// arquivo de 35 KiB é barato o bastante para ser incondicional.
+/// recompilá-lo não deve custar a remontagem do disco inteiro, e
+/// sobrescrever um arquivo de algumas dezenas de KiB e um slot é barato o
+/// bastante para ser incondicional.
+///
+/// # Por que o kernel não vai mais para a ESP
+///
+/// Porque o disco tem os slots da atualização A/B, e o iniciador boota por
+/// eles: o kernel de um disco A/B vem sempre de um slot, conferido pelo
+/// manifesto — ver `iniciador/src/slots.rs`. Um `duke.elf` que tivesse
+/// ficado na ESP de uma execução de antes é apagado: o iniciador não o
+/// leria, e ele só confundiria quem olha o disco.
 fn instalar_iniciador(
     arch: Arquitetura,
     disco: &Path,
     efi: &Path,
     kernel: &Path,
+) -> Result<(), String> {
+    instalar_so_o_iniciador(arch, disco, efi)?;
+    slots::instalar_no_slot_a(arch, disco, kernel)?;
+    Ok(())
+}
+
+/// Copia só o iniciador para a ESP — e apaga um `duke.elf` velho dela. A
+/// imagem de produção põe o kernel no slot por conta própria, com a chave
+/// de atualização do operador.
+pub(crate) fn instalar_so_o_iniciador(
+    arch: Arquitetura,
+    disco: &Path,
+    efi: &Path,
 ) -> Result<(), String> {
     let imagem = format!("{}@@1M", disco.display());
 
@@ -1014,19 +1082,27 @@ fn instalar_iniciador(
     for dir in ["::/EFI", "::/EFI/BOOT"] {
         let _ = Command::new("mmd").args(["-i", &imagem, dir]).output();
     }
+    // O `mdel` reclama se o arquivo não existe, que é o caso comum.
+    let _ = Command::new("mdel")
+        .args(["-i", &imagem, KERNEL_NA_ESP])
+        .output();
 
-    for (origem, destino) in [(efi, caminho_na_esp(arch)), (kernel, KERNEL_NA_ESP)] {
-        ferramenta(
-            "mcopy",
-            &["-o", "-i", &imagem, &origem.display().to_string(), destino],
-        )?;
-        println!(
-            "[xtask] {} -> {} ({} KiB)",
-            origem.file_name().unwrap_or_default().display(),
-            destino.trim_start_matches("::"),
-            origem.metadata().map(|m| m.len()).unwrap_or(0) / 1024
-        );
-    }
+    ferramenta(
+        "mcopy",
+        &[
+            "-o",
+            "-i",
+            &imagem,
+            &efi.display().to_string(),
+            caminho_na_esp(arch),
+        ],
+    )?;
+    println!(
+        "[xtask] {} -> {} ({} KiB)",
+        efi.file_name().unwrap_or_default().display(),
+        caminho_na_esp(arch).trim_start_matches("::"),
+        efi.metadata().map(|m| m.len()).unwrap_or(0) / 1024
+    );
     Ok(())
 }
 
@@ -1138,7 +1214,7 @@ const ESPERADO_DO_INICIADOR: &[&str] = &[
     "vivo em x86_64, carregado pelo firmware",
     "tabela do sistema confere",
     "as tres tabelas conferem",
-    "esp: duke.elf aberto e lido",
+    "slot a: kernel lido",
     "relocacoes aplicadas",
     "mapa confere",
     "fim do relatorio",
@@ -1158,7 +1234,7 @@ const ESPERADO_DO_INICIADOR_ARM: &[&str] = &[
     "vivo em aarch64, carregado pelo firmware",
     "tabela do sistema confere",
     "as tres tabelas conferem",
-    "esp: duke.elf aberto e lido",
+    "slot a: kernel lido",
     // O kernel do ARM é ligado num endereço fixo, e não independente de
     // posição como o do x86. Exigir a linha registra o fato onde ele
     // importa: é a razão de o iniciador pedir ao firmware **aquele**
@@ -2057,11 +2133,12 @@ fn conferir_elf_contra_readelf(
     let esperado = crc32_do_arquivo(kernel)?;
     let esp = relatorio
         .iter()
-        .find(|l| l.starts_with("esp:"))
-        .ok_or("o iniciador não relatou a leitura da ESP")?;
+        .find(|l| l.starts_with("slot ") && l.contains("kernel lido"))
+        .ok_or("o iniciador não relatou a leitura do slot")?;
     let lido = esp
         .split("crc ")
         .nth(1)
+        .and_then(|h| h.split([',', ';', ' ']).next())
         .and_then(|h| u32::from_str_radix(h.trim().trim_start_matches("0x"), 16).ok())
         .ok_or_else(|| format!("não consegui ler o crc de `{esp}`"))?;
     if lido != esperado {
@@ -2804,21 +2881,32 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // portas, o lançamento e o `executar`, que a usam.
     ("codigo::obter(", &["kernel/src/usuario/mod.rs"]),
     ("programa::carregar(", &["kernel/src/usuario/mod.rs"]),
-    // Escrever no disco: só o journal de estado e o volume do armazém, cada
-    // um pela sua janela — o journal na de estado, o volume na dele. As
-    // janelas, só o boot (e a definição delas na camada de bloco, que vale
-    // para todo driver). A camada confere a janela em toda escrita, contra
-    // qualquer chamador — isto confere que não há outro chamador, e que
-    // nenhum dos dois escreve pela janela do outro. E o aviso de
-    // desligamento ao disco, só quem para as gravações. A suíte, que esta
-    // conferência não lê, exercita todos.
+    // Escrever no disco: só o journal de estado, o volume do armazém e a
+    // atualização A/B, cada um pela sua janela — o journal na de estado, o
+    // volume na dele, a atualização na do controle de boot e na do slot
+    // inativo. As janelas, só o boot (e a definição delas na camada de
+    // bloco, que vale para todo driver) — as da atualização, pela
+    // reconciliação, depois de o journal dizer qual slot é o ativo. A
+    // camada confere a janela em toda escrita, contra qualquer chamador —
+    // isto confere que não há outro chamador, e que nenhum deles escreve
+    // pela janela do outro. E o aviso de desligamento ao disco, só quem
+    // para as gravações. A suíte, que esta conferência não lê, exercita
+    // todos.
     (
         ".gravar_setores(",
-        &["kernel/src/persistencia.rs", "kernel/src/volume.rs"],
+        &[
+            "kernel/src/persistencia.rs",
+            "kernel/src/volume.rs",
+            "kernel/src/slots.rs",
+        ],
     ),
     (
         ".descarregar_disco(",
-        &["kernel/src/persistencia.rs", "kernel/src/volume.rs"],
+        &[
+            "kernel/src/persistencia.rs",
+            "kernel/src/volume.rs",
+            "kernel/src/slots.rs",
+        ],
     ),
     (
         "Janela::Estado",
@@ -2828,9 +2916,15 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "Janela::Armazem",
         &["kernel/src/volume.rs", "kernel/src/main.rs"],
     ),
+    ("Janela::Controle", &["kernel/src/slots.rs"]),
+    ("Janela::Slot", &["kernel/src/slots.rs"]),
     (
         "fixar_janela_de_escrita(",
-        &["kernel/src/bloco.rs", "kernel/src/main.rs"],
+        &[
+            "kernel/src/bloco.rs",
+            "kernel/src/main.rs",
+            "kernel/src/slots.rs",
+        ],
     ),
     (
         ".avisar_desligamento(",
@@ -3136,7 +3230,18 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "persistencia::parar_as_gravacoes(",
         &["kernel/src/energia.rs"],
     ),
-    ("arch::reiniciar_a_maquina(", &["kernel/src/energia.rs"]),
+    // E a falha numa tentativa da atualização A/B — o pânico, a falha
+    // fatal —, que reinicia sem a ordem das gravações: as travas podem
+    // estar presas por quem caiu, e o iniciador já contou a tentativa. Ver
+    // `kernel/src/slots.rs`.
+    (
+        "arch::reiniciar_a_maquina(",
+        &[
+            "kernel/src/energia.rs",
+            "kernel/src/main.rs",
+            "kernel/src/traps.rs",
+        ],
+    ),
     ("arch::desligar_a_maquina(", &["kernel/src/energia.rs"]),
     (
         "contencao::encerrar_processo(",
@@ -4206,6 +4311,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
     for sub in [
         "kernel/src",
         "iniciador/src",
+        "atualizacao/src",
         "protocolo/src",
         "tipografia/src",
         "aparencia/src",
@@ -4468,6 +4574,7 @@ fn conferir_blocos_unsafe() -> Result<ExitCode, String> {
     for sub in [
         "kernel/src",
         "iniciador/src",
+        "atualizacao/src",
         "protocolo/src",
         "tipografia/src",
         "aparencia/src",
@@ -5092,6 +5199,14 @@ mod chaves {
         /// na ordem de [`FONTES_DE_HORA`]. A imagem recebe só as públicas,
         /// no registro de fontes, `/etc/duke/tempo`.
         pub fontes_de_hora: [[u8; 32]; 3],
+        /// A chave **privada** Ed25519 de atualização da bancada: a que
+        /// assina o manifesto das imagens dos slots — ver [`super::slots`].
+        /// A imagem recebe só a pública, no registro de chaves de
+        /// atualização, `/etc/duke/atualizacao`.
+        pub atualizacao: [u8; 32],
+        /// Uma chave de atualização fora do registro: o manifesto que ela
+        /// assina não se instala.
+        pub atualizacao_estranha: [u8; 32],
     }
 
     /// As fontes de hora da bancada: o nome e o destino UDP de cada uma. Os
@@ -5231,7 +5346,29 @@ mod chaves {
                     chave("fonte-de-hora-b")?,
                     chave("fonte-de-hora-c")?,
                 ],
+                atualizacao: chave("atualizacao-bancada")?,
+                atualizacao_estranha: chave("atualizacao-estranha")?,
             })
+        }
+
+        /// O registro de chaves de atualização da imagem: a pública da
+        /// bancada, no formato do registro de editores — lido de volta pelo
+        /// mesmo leitor do kernel antes de ir para a imagem.
+        pub fn registro_de_atualizacao(&self) -> Result<String, String> {
+            let publica = atualizacao::manifesto::publica_de(&self.atualizacao);
+            let mut texto = String::from(
+                "# As chaves de atualizacao: a publica Ed25519 que pode assinar o manifesto\n\
+                 # de uma imagem dos slots, e o nome. Quem instala e o quorum system.update.\n",
+            );
+            texto.push_str(&sigilo::registro::linha_de_editor(
+                &publica,
+                super::slots::CHAVE_DA_BANCADA,
+            ));
+            for linha in texto.lines() {
+                sigilo::registro::ler_linha_de_editor(linha)
+                    .map_err(|e| format!("o registro de chaves de atualizacao nao se le: {e:?}"))?;
+            }
+            Ok(texto)
         }
 
         /// O registro de fontes de hora da imagem — as públicas das fontes
@@ -5457,6 +5594,10 @@ mod chaves {
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
                 ),
                 ("etc/duke/editores".to_string(), editores.into_bytes()),
+                (
+                    "etc/duke/atualizacao".to_string(),
+                    self.registro_de_atualizacao()?.into_bytes(),
+                ),
                 ("etc/duke/tempo".to_string(), fontes_de_hora.into_bytes()),
                 ("etc/duke/dominios".to_string(), dominios.into_bytes()),
                 // O registro de pessoas, no diretório reservado: o
@@ -5483,8 +5624,8 @@ mod chaves {
 }
 
 mod disco {
-    /// O disco inteiro: as quatro partições e a cópia da GPT no fim.
-    pub const SETORES: u64 = 304 * 1024 * 1024 / 512;
+    /// O disco inteiro: as sete partições e a cópia da GPT no fim.
+    pub const SETORES: u64 = 387 * 1024 * 1024 / 512;
 
     /// Onde a ESP começa e quanto ocupa.
     ///
@@ -5528,6 +5669,32 @@ mod disco {
     pub const ARMAZEM_EM: u64 = ESTADO_EM + ESTADO_SETORES;
     pub const ARMAZEM_SETORES: u64 = 64 * 1024 * 1024 / 512;
     pub const GUID_DO_ARMAZEM: &str = "4A1F7C3B-92D6-4E5A-8B07-C3E91D6F2A58";
+
+    /// E as três da atualização A/B, depois do armazém — as de antes não
+    /// mudam de lugar: o controle de boot, um mebibyte, e os dois slots.
+    /// Os tipos são os do crate `atualizacao` — ver `atualizacao::disco`.
+    pub const CONTROLE_EM: u64 = ARMAZEM_EM + ARMAZEM_SETORES;
+    pub const CONTROLE_SETORES: u64 = 1024 * 1024 / 512;
+
+    /// Cada slot leva uma imagem inteira: o cabeçalho, o kernel e o pacote.
+    /// Quarenta e oito mebibytes: o kernel de depuração da suíte, sem as
+    /// seções de depuração, tem uns vinte e três no x86; o de produção,
+    /// menos de cinco, e o pacote de produção — os programas e os dados
+    /// públicos —, uns poucos.
+    pub const SLOT_A_EM: u64 = CONTROLE_EM + CONTROLE_SETORES;
+    pub const SLOT_SETORES: u64 = 48 * 1024 * 1024 / 512;
+    pub const SLOT_B_EM: u64 = SLOT_A_EM + SLOT_SETORES;
+
+    /// O começo de um slot.
+    pub const fn slot_em(s: atualizacao::Slot) -> u64 {
+        match s {
+            atualizacao::Slot::A => SLOT_A_EM,
+            atualizacao::Slot::B => SLOT_B_EM,
+        }
+    }
+
+    // O fim do último slot, e a cópia da GPT depois dele, cabem no disco.
+    const _: () = assert!(SLOT_B_EM + SLOT_SETORES + 34 <= SETORES);
 
     /// A faixa que a GPT reserva e ninguém usa: do fim das entradas de
     /// partição até o começo da primeira.
@@ -5830,7 +5997,7 @@ fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
     // ficou no lugar, e os casos da descida reprovaram dizendo a verdade
     // sobre uma imagem que já não existia no código.
     let mut receita = format!(
-        "v8 setores={} esp={}+{} raiz={}+{} estado={}+{}:{} armazem={}+{}:{} padrao={}..{}\n",
+        "v9 setores={} esp={}+{} raiz={}+{} estado={}+{}:{} armazem={}+{}:{} controle={}+{}:{} slots={},{}+{}:{},{} padrao={}..{}\n",
         disco::SETORES,
         disco::ESP_EM,
         disco::ESP_SETORES,
@@ -5842,6 +6009,14 @@ fn receita_do_disco(programas: &[(String, Vec<u8>)]) -> String {
         disco::ARMAZEM_EM,
         disco::ARMAZEM_SETORES,
         disco::GUID_DO_ARMAZEM,
+        disco::CONTROLE_EM,
+        disco::CONTROLE_SETORES,
+        atualizacao::disco::TEXTO_DO_CONTROLE,
+        disco::SLOT_A_EM,
+        disco::SLOT_B_EM,
+        disco::SLOT_SETORES,
+        atualizacao::disco::TEXTO_DO_SLOT_A,
+        atualizacao::disco::TEXTO_DO_SLOT_B,
         disco::PADRAO_DE,
         disco::PADRAO_ATE,
     );
@@ -6034,6 +6209,45 @@ fn montar_disco(
             &imagem,
         ],
     )?;
+    // E as três da atualização A/B: o controle de boot e os dois slots —
+    // ver [`slots`]. Nascem zerados: quem põe o kernel no slot A e o
+    // controle apontando para ele é quem instala o kernel no disco.
+    for (n, em, setores, tipo, nome) in [
+        (
+            5,
+            disco::CONTROLE_EM,
+            disco::CONTROLE_SETORES,
+            atualizacao::disco::TEXTO_DO_CONTROLE,
+            "duke-controle",
+        ),
+        (
+            6,
+            disco::SLOT_A_EM,
+            disco::SLOT_SETORES,
+            atualizacao::disco::TEXTO_DO_SLOT_A,
+            "duke-slot-a",
+        ),
+        (
+            7,
+            disco::SLOT_B_EM,
+            disco::SLOT_SETORES,
+            atualizacao::disco::TEXTO_DO_SLOT_B,
+            "duke-slot-b",
+        ),
+    ] {
+        ferramenta(
+            "sgdisk",
+            &[
+                "-n",
+                &format!("{n}:{em}:+{}M", setores * 512 / 1024 / 1024),
+                "-t",
+                &format!("{n}:{tipo}"),
+                "-c",
+                &format!("{n}:{nome}"),
+                &imagem,
+            ],
+        )?;
+    }
 
     // A ESP, com os arquivos dentro. Ela é montada num arquivo próprio e
     // depositada na imagem depois: `mkfs.vfat` não sabe escrever a partir de
@@ -6162,9 +6376,10 @@ fn arquivos_do_disco_de_testes() -> Result<Vec<(String, Vec<u8>)>, String> {
 /// Um disco de testes em `destino` com `extras` na raiz — no lugar do
 /// arquivo de mesmo nome, se houver um —, para um cenário que sobe a
 /// máquina com uma imagem diferente: os mesmos arquivos do
-/// [`disco_de_testes`] e, no x86, a mesma ESP do disco de `artefato`, o
-/// iniciador e o kernel copiados byte a byte. Devolve o artefato que boota
-/// dele; a máquina usa o disco por `Ambiente::com_disco`.
+/// [`disco_de_testes`] e, no boot pelo firmware, a mesma ESP e o mesmo slot
+/// A do disco de `artefato` — o iniciador e o kernel copiados byte a byte.
+/// Devolve o artefato que boota dele; a máquina usa o disco por
+/// `Ambiente::com_disco`.
 pub(crate) fn disco_de_testes_com(
     artefato: &Artefato,
     destino: &Path,
@@ -6178,11 +6393,11 @@ pub(crate) fn disco_de_testes_com(
     disco_com(artefato, destino, &arquivos, Extras::DaSuite)
 }
 
-/// Um disco em `destino` com `arquivos` e `extras` na raiz e, no x86, a
-/// mesma ESP do disco de `artefato` — o iniciador e o kernel copiados byte
-/// a byte. Devolve o artefato que boota dele; a máquina usa o disco por
-/// `Ambiente::com_disco`. Com [`Extras::Nenhum`], é o da imagem de produção
-/// na bancada: os arquivos do provisionamento, o kernel da bancada.
+/// Um disco em `destino` com `arquivos` e `extras` na raiz e, no boot pelo
+/// firmware, a mesma ESP e o mesmo slot A do disco de `artefato` — o
+/// iniciador e o kernel copiados byte a byte, com o controle apontando para
+/// o slot A. Devolve o artefato que boota dele; a máquina usa o disco por
+/// `Ambiente::com_disco`.
 pub(crate) fn disco_com(
     artefato: &Artefato,
     destino: &Path,
@@ -6218,6 +6433,14 @@ pub(crate) fn disco_com(
                         destino.display()
                     )
                 })?;
+            let slot_a = slots::imagem_do_slot(original, atualizacao::Slot::A)?;
+            let c = atualizacao::cabecalho::ler(&slot_a)
+                .map_err(|m| format!("o slot A de {}: {m}", original.display()))?;
+            slots::escrever_imagem_no_slot_a(
+                destino,
+                &slot_a,
+                atualizacao::manifesto::resumo_do_manifesto(c.manifesto),
+            )?;
             Ok(Artefato::Disco(destino.to_path_buf()))
         }
     }
@@ -6472,6 +6695,11 @@ fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
     let disco = disco_de_testes()?;
     escrever_no_estado(&disco, &vec![0u8; (disco::ESTADO_SETORES * 512) as usize])?;
     zerar_o_armazem(&disco)?;
+    // Os slots e o controle voltam ao que a instalação deixou: o journal
+    // zerado não tem estado de atualização, e um controle que dissesse
+    // outra coisa — de um cenário da atualização — seria um disco de outra
+    // máquina.
+    slots::restaurar_o_slot_a(arch, &disco)?;
     zerar_o_tpm(arch)
 }
 
@@ -10347,49 +10575,131 @@ fn signatario_aceita_em(arquivo: &Path, geracao: u64) -> Result<(), String> {
 /// e o pedido, para quem quiser repeti-lo.
 pub(crate) fn revogacao_por_quorum(
     arch: Arquitetura,
-    (escrita, leitor, id): (&mut UnixStream, &mut BufReader<UnixStream>, &mut u32),
+    canal: (&mut UnixStream, &mut BufReader<UnixStream>, &mut u32),
     chaves: &chaves::Chaves,
     alvo: &[u8; 32],
     quem: &[usize],
     motivo: &str,
 ) -> Result<(String, String), String> {
-    let alvo = sigilo::hex(alvo);
-    let parametros = format!(r#"{{"key":"{alvo}","reason":"{motivo}"}}"#);
+    let parametros = format!(r#"{{"key":"{}","reason":"{motivo}"}}"#, sigilo::hex(alvo));
+    quorum_pela_serial(arch, canal, chaves, "admin.revoke", &parametros, quem)
+}
+
+/// O alvo de uma operação de quórum, dos parâmetros dela — o mesmo
+/// parâmetro que o kernel lê, e que entra no conteúdo assinado: a chave que
+/// sai, num `admin.revoke`; o resumo do manifesto, num `system.update`.
+pub(crate) fn alvo_do_quorum(comando: &str, parametros: &str) -> Result<String, String> {
+    let campo = match comando {
+        "admin.revoke" => "key",
+        "system.update" => "manifest",
+        outro => return Err(format!("`{outro}` nao e uma operacao de quorum")),
+    };
+    campo_simples(parametros, campo)
+        .ok_or_else(|| format!("{comando} pede `{campo}` nos parametros"))
+}
+
+/// O conteúdo que cada credencial de um quórum assina, do desafio que o
+/// `admin.challenge` devolveu para `comando`, na sessão `sessao`.
+fn conteudo_do_quorum<'a>(
+    desafio: &str,
+    sessao: u8,
+    comando: &'a str,
+    alvo: &'a str,
+    parametros: &'a str,
+    nonce: &'a mut [u8; 32],
+    efemera: &'a mut [u8; 32],
+) -> Result<sigilo::quorum::Conteudo<'a>, String> {
+    let numero = |nome: &str| -> Result<u64, String> {
+        campo_simples(desafio, nome)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    let hex = |nome: &str| -> Result<[u8; 32], String> {
+        campo_simples(desafio, nome)
+            .and_then(|v| sigilo::de_hex(&v))
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    *nonce = hex("nonce")?;
+    *efemera = hex("ephemeral")?;
+    Ok(sigilo::quorum::Conteudo {
+        operacao: numero("challenge")?,
+        nonce,
+        sessao,
+        efemera,
+        versao_da_politica: numero("policy_version")?,
+        geracao: numero("generation")?,
+        m: numero("m")? as u8,
+        n: numero("n")? as u8,
+        comando,
+        alvo,
+        parametros,
+    })
+}
+
+/// O `admin.execute` de uma operação de quórum, com as assinaturas.
+fn pedido_de_quorum(conteudo: &sigilo::quorum::Conteudo, assinaturas: &[String]) -> String {
+    format!(
+        r#"{{"challenge":{},"command":"{}","params":"{}","signatures":"{}"}}"#,
+        conteudo.operacao,
+        conteudo.comando,
+        conteudo.parametros.replace('"', "\\\""),
+        assinaturas.join(",")
+    )
+}
+
+/// Uma operação de quórum pela serial — `comando` com `parametros`, como
+/// estão —, assinada pelas credenciais `quem` da bancada — ver
+/// [`assinar_quorum_da_bancada`]. Devolve a resposta e o pedido, para quem
+/// quiser repeti-lo.
+pub(crate) fn quorum_pela_serial(
+    arch: Arquitetura,
+    (escrita, leitor, id): (&mut UnixStream, &mut BufReader<UnixStream>, &mut u32),
+    chaves: &chaves::Chaves,
+    comando: &str,
+    parametros: &str,
+    quem: &[usize],
+) -> Result<(String, String), String> {
     let desafio = pedir_pela_serial(
         escrita,
         leitor,
         id,
         "admin.challenge",
-        r#"{"for":"admin.revoke"}"#,
+        &format!(r#"{{"for":"{comando}"}}"#),
     )?;
-    let numero = |nome: &str| -> Result<u64, String> {
-        campo_simples(&desafio, nome)
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-    };
-    let hex = |nome: &str| -> Result<[u8; 32], String> {
-        campo_simples(&desafio, nome)
-            .and_then(|v| sigilo::de_hex(&v))
-            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-    };
-    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
-    let geracao = numero("generation")?;
-    let conteudo = sigilo::quorum::Conteudo {
-        operacao: numero("challenge")?,
-        nonce: &nonce,
-        sessao: 0,
-        efemera: &efemera,
-        versao_da_politica: numero("policy_version")?,
-        geracao,
-        m: numero("m")? as u8,
-        n: numero("n")? as u8,
-        comando: "admin.revoke",
-        alvo: &alvo,
-        parametros: &parametros,
-    };
+    let pedido = assinar_quorum_da_bancada(arch, chaves, &desafio, 0, comando, parametros, quem)?;
+    let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
+    Ok((resposta, pedido))
+}
+
+/// O pedido do `admin.execute` de uma operação de quórum da bancada:
+/// `comando` com `parametros`, para o `desafio` que o `admin.challenge`
+/// devolveu na sessão `sessao`, assinado pelas credenciais `quem` (índices
+/// de [`credencial_administrativa`]) — cada uma depois de o signatário dela
+/// conferir a geração, e conferida aqui, fora do Duke, só com a pública.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assinar_quorum_da_bancada(
+    arch: Arquitetura,
+    chaves: &chaves::Chaves,
+    desafio: &str,
+    sessao: u8,
+    comando: &str,
+    parametros: &str,
+    quem: &[usize],
+) -> Result<String, String> {
+    let alvo = alvo_do_quorum(comando, parametros)?;
+    let (mut nonce, mut efemera) = ([0u8; 32], [0u8; 32]);
+    let conteudo = conteudo_do_quorum(
+        desafio,
+        sessao,
+        comando,
+        &alvo,
+        parametros,
+        &mut nonce,
+        &mut efemera,
+    )?;
     let mut assinaturas = Vec::new();
     for &i in quem {
-        signatario_aceita(arch, NOMES_DOS_ADMINISTRADORES[i], geracao)?;
+        signatario_aceita(arch, NOMES_DOS_ADMINISTRADORES[i], conteudo.geracao)?;
         let (credencial, privada) = credencial_administrativa(chaves, i);
         let assinatura = sigilo::quorum::assinar(&privada, &conteudo);
         // Confere aqui, fora do Duke, só com a pública.
@@ -10403,63 +10713,42 @@ pub(crate) fn revogacao_por_quorum(
             sigilo::hex_de(&assinatura)
         ));
     }
-    let pedido = format!(
-        r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
-        conteudo.operacao,
-        parametros.replace('"', "\\\""),
-        assinaturas.join(",")
-    );
-    let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
-    Ok((resposta, pedido))
+    Ok(pedido_de_quorum(&conteudo, &assinaturas))
 }
 
-/// `admin.revoke` pelo quórum, de quem opera uma máquina de verdade: o
-/// desafio na sessão do agente, cada credencial de `assinaturas` assinando
-/// — depois de o signatário dela conferir a geração —, e o `admin.execute`.
-/// `params` é o da revogação, `{"key":…,"reason":…}`, assinado como está.
-pub(crate) fn revogar_pelo_operador(
+/// Uma operação de quórum de quem opera uma máquina de verdade —
+/// `admin.revoke` ou `system.update`, com `params` assinado como está —:
+/// o desafio na sessão do agente, cada credencial de `assinaturas`
+/// assinando — depois de o signatário dela conferir a geração —, e o
+/// `admin.execute`.
+pub(crate) fn quorum_pelo_operador(
     agente: &mut AgenteNaPorta,
+    comando: &str,
     params: &str,
     assinaturas: &[PathBuf],
 ) -> Result<String, String> {
-    let alvo = campo_simples(params, "key")
-        .ok_or("admin.revoke pede `key`: a credencial que sai, em hexadecimal")?;
+    let alvo = alvo_do_quorum(comando, params)?;
     let sessao = agente.pedir("agent.session", "{}")?;
     let sessao: u8 = campo_simples(&sessao, "session")
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| format!("quorum: a sessão não diz o número\n  {sessao}"))?;
-    let desafio = agente.pedir("admin.challenge", r#"{"for":"admin.revoke"}"#)?;
-    let numero = |nome: &str| -> Result<u64, String> {
-        campo_simples(&desafio, nome)
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-    };
-    let hex = |nome: &str| -> Result<[u8; 32], String> {
-        campo_simples(&desafio, nome)
-            .and_then(|v| sigilo::de_hex(&v))
-            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
-    };
-    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
-    let geracao = numero("generation")?;
-    let conteudo = sigilo::quorum::Conteudo {
-        operacao: numero("challenge")?,
-        nonce: &nonce,
+    let desafio = agente.pedir("admin.challenge", &format!(r#"{{"for":"{comando}"}}"#))?;
+    let (mut nonce, mut efemera) = ([0u8; 32], [0u8; 32]);
+    let conteudo = conteudo_do_quorum(
+        &desafio,
         sessao,
-        efemera: &efemera,
-        versao_da_politica: numero("policy_version")?,
-        geracao,
-        m: numero("m")? as u8,
-        n: numero("n")? as u8,
-        comando: "admin.revoke",
-        alvo: &alvo,
-        parametros: params,
-    };
+        comando,
+        &alvo,
+        params,
+        &mut nonce,
+        &mut efemera,
+    )?;
     let mut lista = Vec::new();
     for arquivo in assinaturas {
         let (credencial, privada) = producao::chave_de_administrador(arquivo)?;
         // O signatário desta credencial, ao lado da chave dela: a maior
         // geração que ela já assinou nesta máquina.
-        signatario_aceita_em(&arquivo.with_extension("geracao"), geracao)?;
+        signatario_aceita_em(&arquivo.with_extension("geracao"), conteudo.geracao)?;
         let assinatura = sigilo::quorum::assinar(&privada, &conteudo);
         lista.push(format!(
             "{}:{}",
@@ -10467,13 +10756,7 @@ pub(crate) fn revogar_pelo_operador(
             sigilo::hex_de(&assinatura)
         ));
     }
-    let pedido = format!(
-        r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
-        conteudo.operacao,
-        params.replace('"', "\\\""),
-        lista.join(",")
-    );
-    agente.pedir("admin.execute", &pedido)
+    agente.pedir("admin.execute", &pedido_de_quorum(&conteudo, &lista))
 }
 
 /// Pede pela serial, em claro, e devolve a resposta deste pedido.

@@ -250,6 +250,7 @@ extern "C" fn inicio_aarch64(x0: u64) -> ! {
             // ponteiro e a contagem são os que o iniciador escreveu. O mapa
             // é de identidade no ARM, então o endereço serve direto.
             unsafe { adotar_as_regioes(&entrega) };
+            crate::slots::registrar(entrega.arranque);
             crate::log_info!(
                 "boot",
                 "entrega do iniciador: {} regioes, device tree em {:#x}",
@@ -352,8 +353,10 @@ unsafe fn entrega_em(x0: u64) -> Option<protocolo::Entrega> {
         return None;
     }
 
-    // SAFETY: a magia confere, então a struct inteira está ali.
-    let entrega = unsafe { core::ptr::read(ponteiro) };
+    // SAFETY: a magia confere, então a entrega está ali — no começo de uma
+    // página do iniciador, onde a struct inteira cabe mesmo quando ele é de
+    // antes do último campo.
+    let mut entrega = unsafe { core::ptr::read(ponteiro) };
 
     if entrega.versao != protocolo::VERSAO {
         crate::log_error!(
@@ -364,7 +367,9 @@ unsafe fn entrega_em(x0: u64) -> Option<protocolo::Entrega> {
         );
         return None;
     }
-    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+    // O arranque é o único campo que pode faltar — ver
+    // `protocolo::Entrega::arranque`.
+    if (entrega.tamanho as usize) < protocolo::TAMANHO_SEM_ARRANQUE {
         crate::log_error!(
             "boot",
             "a entrega tem {} bytes e este kernel espera {}",
@@ -372,6 +377,9 @@ unsafe fn entrega_em(x0: u64) -> Option<protocolo::Entrega> {
             size_of::<protocolo::Entrega>()
         );
         return None;
+    }
+    if (entrega.tamanho as usize) < size_of::<protocolo::Entrega>() {
+        entrega.arranque = protocolo::Arranque::default();
     }
     Some(entrega)
 }
