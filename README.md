@@ -7851,8 +7851,10 @@ recuperação e o que o Duke ainda não faz — está em
   material do operador — as chaves de `cargo xtask chave`, a política, as
   pessoas, a rede —, com uma chave do Duke sorteada ali, a marca
   `/etc/duke/imagem` e só os programas do produto; recusa qualquer chave da
-  bancada. O `system.info` diz de onde veio a imagem, e `cargo xtask
-  operar` é o cliente de uma máquina de verdade, pelo TCP.
+  bancada. A imagem, que leva a privada do Duke, sai só para o dono, e a
+  montagem dela é apagada mesmo quando algo falha no meio. O `system.info`
+  diz de onde veio a imagem, e `cargo xtask operar` é o cliente de uma
+  máquina de verdade, pelo TCP.
 - **A máquina física.** Um PC com UEFI, NVMe, TPM 2.0 e uma Intel 82574L
   ([`kernel/src/e1000.rs`](kernel/src/e1000.rs)): a varredura do PCI segue
   as pontes que o firmware numerou, a placa diz o enlace e se recupera de
@@ -7911,6 +7913,46 @@ verificação — soma, pelos símbolos, 37 KiB no x86 e 26 KiB no ARM; o resto
 monomorfizações de `sem_interrupcoes` passaram a embutir os fechos). Os
 programas não mudaram; o `encerravel`, novo, só existe para os casos do
 término.
+
+### As mutações da prontidão
+
+Só as áreas da auditoria de prontidão — a 82574L, a varredura do PCI, a
+passagem do xHCI, a marca da imagem, o prazo e o identificador do NVMe, os
+erros que a camada de bloco conta, a descarga do journal diante do disco
+hostil, o `provisionar` e a guarda do teto —, uma proteção por mutação,
+tirada ou enfraquecida, uma de cada vez, contra o teste que a deve pegar: a
+suíte filtrada aos casos da área, a bancada de persistência com o kernel de
+produção, ou os testes do hospedeiro. **Vinte e seis no x86, vinte e três
+reprovadas; e cinco no ARM, as cinco reprovadas.** Duas sobreviveram à primeira
+rodada por teste fraco, e os casos mudaram por elas. A lista de
+capacidades do xHCI que sai da região levava a uma memória que, por acaso,
+não parecia capacidade nenhuma — seguir a lista não mudava nada que o caso
+visse; agora ela leva a uma capacidade de suporte legado de verdade, logo
+depois do fim declarado, que o driver tomaria se a seguisse. E o prazo do
+disco de volta às voltas, no ARM emulado, durou uns trinta e seis
+segundos — dentro da janela que o caso aceitava para os trinta; agora o
+caso confere o próprio prazo: um de 100 ms com o teto de uma volta só não
+vence antes dos 100 ms, o que só vale se ele for medido em tempo.
+
+| Mutação | Reprovada por |
+|---|---|
+| a 82574L: o tamanho do descritor sem o corte no buffer; o quadro com erro sobe; o partido sobe; o descritor colhido não volta para a placa | `e1000: o quadro com erro, o partido e o grande demais nao passam do buffer` |
+| a 82574L transmite sem conferir o enlace | `e1000: sem enlace o quadro nao chega a placa, e a recusa e contada` |
+| a transmissão perdida desliga sem reiniciar; o reinício que não volta deixa a placa ligada | `e1000: a transmissao sem confirmacao reinicia a placa, e a que nao volta e desligada` |
+| a varredura do PCI não segue as pontes | `e1000: a placa Intel, atras de uma ponte no x86, responde ao ARP` e mais dois |
+| as SMIs do xHCI ficam ligadas; o firmware que não solta continua dono; a lista seguida sem conferir a região (na segunda rodada) | `usb: o firmware que nao solta o xhci o perde, com as SMIs desligadas` |
+| o prazo do disco volta a ser em voltas | `nvme: o controlador que nao responde e desligado no prazo do disco` — no x86, esperou 130 s, e não 30; no ARM, na segunda rodada, pelo prazo de 100 ms que venceu na primeira volta |
+| o NVMe aceita a resposta de outro comando | `nvme: o controlador que responde outro comando e desligado, e o erro e contado` — a que sobrevivia nas mutações da operação |
+| o erro de escrita não é contado | `nvme: o erro de midia do dispositivo volta como erro, e a camada o conta pelo tipo` |
+| o contador do TPM avança sem a descarga do journal | a bancada, `o disco que perde o que nao foi descarregado`: depois do corte, a âncora fica à frente do journal, e a persistência é recusada |
+| a imagem de produção com todos os programas; com os arquivos da suíte; com a marca de desenvolvimento | a bancada, `a imagem de producao` |
+| o `provisionar` aceita uma chave da bancada; a política da bancada; o quórum que não fecha; a senha curta | os testes do hospedeiro de [`xtask/src/producao.rs`](xtask/src/producao.rs) |
+| o `xtask` põe no disco um programa maior que o teto | `o_programa_maior_que_o_teto_e_recusado` |
+| **a varredura segue a ponte cujo barramento volta** | **sobrevive — redundante**: quem impede o laço é a varredura, que entra em cada barramento uma vez só; a conferência do número é o diagnóstico no log |
+| **a marca da imagem vale sem ter vindo da imagem** | **sobrevive — sem efeito observável**: nenhuma montagem gravável alcança `/etc/duke`, e a marca sempre vem da imagem; a conferência é contra uma montagem futura |
+| **o driver não chama a passagem do xHCI** | **sobrevive — sem efeito observável no emulador**: o xHCI do QEMU não tem a capacidade de suporte legado; a passagem é exercitada direto, pelo caso `usb:`, numa memória comum |
+
+Nenhuma é uma vulnerabilidade.
 
 ## Barramento PCI
 

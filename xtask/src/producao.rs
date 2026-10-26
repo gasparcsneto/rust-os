@@ -604,18 +604,26 @@ pub(crate) fn provisionar(
     id.copy_from_slice(&aleatorios()?[..16]);
     let arquivos = arquivos_da_imagem(arch, &op, &politica, &duke, id)?;
 
+    // A montagem leva a privada do Duke em claro — na árvore da raiz e na
+    // imagem —: só o dono a lê, e ela some também quando algo falha no meio.
     let montagem = saida.join("montagem");
-    let imagem = montagem.join("duke.img");
-    super::montar_disco(&imagem, &arquivos, super::Extras::Nenhum)?;
-    let alvo_do_kernel = super::raiz_do_projeto()
-        .join("target")
-        .join("producao-kernel");
-    let elf = super::compilar_o_kernel(arch, release, &[], Some(&alvo_do_kernel))?;
-    let (efi, kernel) = super::para_a_esp(arch, release, &elf)?;
-    super::instalar_iniciador(arch, &imagem, &efi, &kernel)?;
-    std::fs::rename(&imagem, saida.join("duke.img"))
-        .map_err(|e| format!("não foi possível mover a imagem: {e}"))?;
+    so_do_dono(&montagem, true)?;
+    let montada = (|| -> Result<(PathBuf, PathBuf), String> {
+        let imagem = montagem.join("duke.img");
+        super::montar_disco(&imagem, &arquivos, super::Extras::Nenhum)?;
+        so_do_dono(&imagem, false)?;
+        let alvo_do_kernel = super::raiz_do_projeto()
+            .join("target")
+            .join("producao-kernel");
+        let elf = super::compilar_o_kernel(arch, release, &[], Some(&alvo_do_kernel))?;
+        let (efi, kernel) = super::para_a_esp(arch, release, &elf)?;
+        super::instalar_iniciador(arch, &imagem, &efi, &kernel)?;
+        std::fs::rename(&imagem, saida.join("duke.img"))
+            .map_err(|e| format!("não foi possível mover a imagem: {e}"))?;
+        Ok((efi, kernel))
+    })();
     let _ = std::fs::remove_dir_all(&montagem);
+    let (efi, kernel) = montada?;
 
     let publica = sigilo::hex(&sigilo::publica_de(&duke));
     std::fs::write(saida.join("duke.publica"), format!("{publica}\n"))
@@ -650,6 +658,20 @@ pub(crate) fn provisionar(
         saida.join("registro.txt").display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Deixa `caminho` só para o dono — 0700 num diretório, que é criado se
+/// não existe; 0600 num arquivo. É o que se faz com o que leva a privada do
+/// Duke.
+fn so_do_dono(caminho: &Path, diretorio: bool) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    if diretorio {
+        std::fs::create_dir_all(caminho)
+            .map_err(|e| format!("não foi possível criar {}: {e}", caminho.display()))?;
+    }
+    let modo = if diretorio { 0o700 } else { 0o600 };
+    std::fs::set_permissions(caminho, std::fs::Permissions::from_mode(modo))
+        .map_err(|e| format!("não foi possível proteger {}: {e}", caminho.display()))
 }
 
 /// Lê uma linha `prefixo <hex>` de um arquivo de chave de administrador.
@@ -974,6 +996,21 @@ mod testes {
             r.as_ref().is_err_and(|e| e.contains("menos de 12")),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn o_que_leva_a_privada_e_so_do_dono() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("xtask-dono-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let montagem = dir.join("montagem");
+        so_do_dono(&montagem, true).unwrap();
+        let imagem = montagem.join("duke.img");
+        std::fs::write(&imagem, b"x").unwrap();
+        so_do_dono(&imagem, false).unwrap();
+        let modo = |c: &Path| std::fs::metadata(c).unwrap().permissions().mode() & 0o777;
+        assert_eq!((modo(&montagem), modo(&imagem)), (0o700, 0o600));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

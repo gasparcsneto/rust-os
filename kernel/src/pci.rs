@@ -484,7 +484,9 @@ fn atribuir_bars(
 ///
 /// Um número que não passa de `barramento` não é seguido: numa árvore que o
 /// firmware numerou, o barramento de trás é sempre maior que o da frente, e
-/// seguir um que volta seria varrer em laço uma configuração que mente.
+/// um que volta é uma configuração que mente — dita no log. O laço, esse,
+/// quem impede é a varredura, que entra em cada barramento uma vez só: a
+/// conferência daqui é o diagnóstico, e não a única guarda.
 fn barramento_de_tras(
     acesso: &impl ConfigRegionAccess,
     endereco: PciAddress,

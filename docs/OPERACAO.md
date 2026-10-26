@@ -58,9 +58,9 @@ primeira máquina diz no log o que viu de cada uma.
 |---|---|---|
 | Firmware | UEFI, com o CSM desligado e o **Secure Boot desligado** — o iniciador não é assinado | OVMF |
 | Disco | **NVMe** no slot M.2, com o namespace 1 em blocos de 512 bytes; um formatado em 4 KiB é recusado no boot, e se reformata (`nvme format --lbaf=`) noutra máquina | `-device nvme` |
-| TPM 2.0 | o do firmware (Intel PTT, AMD fTPM), pela interface CRB, ou um discreto pela TIS, ligado no firmware | `tpm-crb`, `tpm-tis` e o `swtpm` |
+| TPM 2.0 | o do firmware da Intel (PTT), pela interface CRB, ou um discreto pela TIS — os dois no endereço fixo do PC, `0xFED4_0000`; o fTPM da AMD põe os buffers onde a tabela ACPI `TPM2` diz e pede o início pelo ACPI, e o Duke não lê essa tabela | `tpm-crb`, `tpm-tis` e o `swtpm` |
 | Rede | uma **Intel 82574L** numa porta PCIe — a placa avulsa de um gigabit (`kernel/src/e1000.rs`) —, com DHCP ou o `/etc/duke/rede` | `-device e1000e`, atrás de uma ponte PCI |
-| Teclado | USB, pelo xHCI — o firmware solta o controlador, e o Duke o toma se ele não soltar —, ou PS/2 | `qemu-xhci`, e a passagem numa memória comum na suíte |
+| Teclado | USB numa porta da raiz do xHCI — o driver não tem hub —, ou PS/2; o firmware solta o controlador, e o Duke o toma se ele não soltar | `qemu-xhci`, e a passagem numa memória comum na suíte |
 | Vídeo | o modo que o firmware deixa (o protocolo de vídeo da UEFI) | o da VGA do OVMF |
 | Energia | o registrador de reinício da FADT, 0xCF9 ou o 8042; o S5 pela FADT e pela DSDT | o mesmo ACPI |
 | Relógio | o CMOS, e o TSC medido contra o canal 2 do PIT | o mesmo |
@@ -73,8 +73,11 @@ quantos barramentos a varredura percorreu (`buses`).
 No firmware, antes do primeiro boot:
 
 - UEFI só, sem CSM; Secure Boot desligado;
-- o TPM ligado (PTT ou fTPM), e **limpo** numa reinstalação — ver
+- o TPM ligado (o PTT da Intel, ou um discreto), e **limpo** numa
+  reinstalação — ver
   [Recuperar a máquina](#recuperar-a-máquina);
+- o NVMe como NVMe: sem o VMD da Intel (o modo "RAID" ou "RST" do
+  armazenamento), que o esconde atrás de outro dispositivo;
 - o boot pelo NVMe;
 - onde existir a opção, o *8254 Clock Gating* desligado: o PIT parado
   deixa o TSC sem medida e o timer sem calibração;
@@ -175,7 +178,10 @@ A saída tem três arquivos: `duke.img`, a imagem; `duke.publica`, a
 pública do Duke, que cada agente fixa; e `registro.txt`, o resumo de cada
 arquivo que entrou — a chave e as pessoas só pelo nome. A privada do Duke
 só existe dentro da imagem: guarde a imagem como se guarda a chave — ver
-[o grupo B](#a-identidade-do-duke-nasce-na-imagem).
+[o grupo B](#a-identidade-do-duke-nasce-na-imagem). Por isso a imagem sai
+só para o dono (0600), e a montagem — a árvore da raiz, com a privada em
+claro — fica num diretório só do dono, apagado ao fim, e também quando o
+provisionamento falha no meio.
 
 O `system.info` diz de onde veio o disco (`image`: `kind`, `name`, `id`),
 e o boot de uma imagem de desenvolvimento avisa no log. A marca não dá nem

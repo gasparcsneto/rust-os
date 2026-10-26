@@ -7517,13 +7517,29 @@ fn nvme_o_controlador_que_responde_outro_comando() -> Resultado {
 /// não um número de voltas que dura um segundo num processador e dois
 /// minutos noutro —, desliga o controlador e devolve o erro; a camada o
 /// conta, e o disco deixa de se dizer durável. São os trinta segundos de
-/// [`crate::bloco::ESPERA_MS`], e o caso os mede.
+/// [`crate::bloco::ESPERA_MS`], e o caso os mede — e confere, antes, que o
+/// prazo vence pelo tempo, e não pelas voltas.
 fn nvme_o_controlador_que_nao_responde() -> Resultado {
     const B: usize = crate::bloco::TAMANHO_DO_SETOR;
     let (mut d, _respostas) =
         crate::nvme::de_mentira(64).ok_or("sem frames para o controlador de mentira")?;
     if crate::hora::contador::hz() == 0 {
         return Err("o contador de ciclos nao tem frequencia: o prazo seria em voltas");
+    }
+    // O prazo em si: um de 100 ms com o teto de uma volta só não vence antes
+    // dos 100 ms — um de folga, do arredondamento do relógio, que lê o
+    // mesmo contador. A janela da espera, abaixo, não separa as voltas de
+    // antes do prazo em toda máquina: no ARM emulado, os quatrocentos
+    // milhões delas duraram uns trinta e seis segundos.
+    let comeco = crate::hora::contador::agora_ms();
+    let prazo = crate::bloco::Prazo::em(100, 1);
+    let mut volta = 0;
+    while !prazo.vencido(volta) {
+        volta += 1;
+        core::hint::spin_loop();
+    }
+    if crate::hora::contador::agora_ms() - comeco < 99 {
+        return Err("o prazo do disco venceu pelas voltas, e nao pelo tempo");
     }
     let mut um = [0u8; B];
     let comeco = crate::hora::contador::agora_ms();
@@ -7843,7 +7859,9 @@ fn e1000_transmissao_sem_confirmacao() -> Resultado {
 /// passando por outra; o firmware dono, que não solta no prazo, perde o
 /// controlador; as SMIs são desligadas, os bits reservados ficam, e os
 /// eventos são limpos. O firmware que não é dono não é chamado a soltar. E
-/// uma lista que sai da região, ou que não existe, não é seguida.
+/// uma lista que sai da região, ou que não existe, não é seguida — mesmo
+/// quando logo depois do fim declarado há uma capacidade de suporte legado
+/// que o driver tomaria.
 fn usb_a_passagem_do_xhci() -> Resultado {
     use crate::usb::xhci::{Passagem, passar_do_firmware};
     const FIRMWARE: u32 = 1 << 16;
@@ -7851,7 +7869,9 @@ fn usb_a_passagem_do_xhci() -> Resultado {
     const SMIS: u32 = 1 | (1 << 4) | (1 << 13) | (1 << 14) | (1 << 15);
     const RESERVADO: u32 = 1 << 1;
     const EVENTOS: u32 = 0x7 << 29;
-    let regiao = alloc::vec![0u32; 64].leak();
+    // A memória tem o dobro do que se declara ao driver: a metade de cima
+    // é o que está além da região.
+    let regiao = alloc::vec![0u32; 128].leak();
     let base = regiao.as_mut_ptr() as u64;
     // A lista começa no dword 16: uma capacidade de protocolo, e quatro
     // dwords depois, a de suporte legado, com o firmware dono.
@@ -7881,10 +7901,16 @@ fn usb_a_passagem_do_xhci() -> Resultado {
     {
         return Err("o firmware que nao era dono foi chamado a soltar, ou as SMIs ficaram");
     }
-    regiao[16] = 2 | (0xFF << 8);
-    // SAFETY: como acima; o caso confere que nada além dela é lido.
+    // A próxima capacidade, sessenta dwords adiante: no dword 76, além dos
+    // 64 declarados — e é uma de suporte legado, com o firmware dono.
+    regiao[16] = 2 | (60 << 8);
+    regiao[76] = 1 | FIRMWARE;
+    regiao[77] = SMIS;
+    // SAFETY: como acima; a memória além da região é deste caso também.
     if unsafe { passar_do_firmware(base, 256, hcc1) } != Passagem::SemCapacidade
         || unsafe { passar_do_firmware(base, 256, 0) } != Passagem::SemCapacidade
+        || regiao[76] != (1 | FIRMWARE)
+        || regiao[77] != SMIS
     {
         return Err("uma lista que sai da regiao, ou que nao existe, foi seguida");
     }
