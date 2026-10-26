@@ -82,7 +82,9 @@ próprio canal, lendo `log.tail`.
 Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`),
 os pacotes do emulador para as arquiteturas desejadas e o `swtpm`, que é o TPM
 2.0 das máquinas de teste — a âncora da persistência, ver
-[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md). Para pôr uma máquina de pé e
+operá-la — o hardware de referência, a imagem, a rede, a recuperação —, ver
+[`docs/OPERACAO.md`](docs/OPERACAO.md).
 
 ```bash
 # x86_64 (padrão): compila e põe o iniciador e o kernel na ESP do disco
@@ -7796,6 +7798,46 @@ onde parou uma máquina que não respondeu — o firmware, o iniciador ou um
 passo do kernel. `DUKE_CENARIOS` escolhe os cenários por pedaços do nome,
 e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
+## Operação
+
+O que faltava para operar uma máquina com o Duke fora da suíte, sem mudar
+nenhum invariante — cada coisa pelo gate, com o recurso decidido pela
+política e o efeito no journal antes de valer. O guia de quem opera — a
+máquina de referência, a imagem, a rede, os comandos de todo dia, a
+recuperação e o que o Duke ainda não faz — está em
+[`docs/OPERACAO.md`](docs/OPERACAO.md).
+
+- **Processos.** `process.list` mostra cada processo — o programa, o pai,
+  o estado, por quem age e com que papel, se está isolado. O
+  `process.terminate` (a permissão nova `process.terminate`, com o alcance
+  `papel:<nome>` do isolamento: o sistema, e o administrador pela prova;
+  nunca um processo de administrador) isola o processo na hora e o mata
+  no próximo ponto seguro — a entrada ou a volta de uma chamada de
+  sistema, ou a interrupção que o pega no anel do usuário, nas duas
+  arquiteturas. O pai colhe um morto: a ABI não muda.
+- **Energia.** `system.reboot` e `system.poweroff` (a permissão nova
+  `system.power`): o pedido na auditoria e no journal antes da resposta —
+  sem ele no disco, a máquina segue —; meio segundo depois as gravações
+  param, o disco descarrega, o NVMe recebe o aviso de desligamento, e a
+  máquina vai ao firmware: a FADT, 0xCF9, o 8042 e o `\_S5` da DSDT no x86;
+  a PSCI no ARM.
+- **Disco.** A camada de bloco ([`kernel/src/bloco.rs`](kernel/src/bloco.rs))
+  guarda as janelas de escrita, a descarga e a faixa para qualquer
+  driver; o NVMe ([`kernel/src/nvme.rs`](kernel/src/nvme.rs)) é o disco de
+  uma máquina de verdade, nas duas arquiteturas. `fs.verify` confere o
+  armazém — cada bloco de cada versão viva abre, o mapa do volume confere
+  — sem mudar nada.
+- **Rede.** O `/etc/duke/rede` da imagem fixa o endereço, o roteador e os
+  DNS, sem DHCP; um arquivo que não se lê deixa a máquina sem endereço e
+  diz por quê. O `net.info` diz de onde veio o endereço e os DNS.
+- **Memória.** O heap do kernel é um dezesseis avos da memória
+  utilizável, entre 8 e 256 MiB.
+
+A suíte exercita cada um nas duas arquiteturas — incluindo um segundo
+disco, NVMe, na máquina dos testes —, e a bancada de persistência, com o
+kernel de produção, reinicia e desliga de verdade, sobe com o disco do
+sistema no NVMe (no x86 o firmware boota dele) e com a rede do arquivo.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
@@ -8927,6 +8969,12 @@ A mesma suíte roda nas duas máquinas de vídeo — `--video linear`, o padrão
 `--video virtio` —, porque são dois caminhos de tela no kernel, e cada caso
 que depende do adaptador confere o da máquina em que está.
 
+A máquina da suíte tem dois discos: o do sistema, no virtio-blk, e um
+segundo, num controlador NVMe — 16 MiB com um padrão por setor e por byte
+que o `xtask` grava a cada execução, para os casos `nvme:`. O NVMe como
+disco do sistema, com o firmware bootando dele, é da bancada de
+persistência.
+
 O CI roda formatação, lints, as conferências de fonte de `cargo xtask
 invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
 as sondas de fumaça contra o kernel de produção, e a suíte nas duas
@@ -9316,6 +9364,17 @@ padronizado.
       com rollback, imagens assinadas, ACPI de verdade, NVMe, placa de rede
       real, watchdog. É onde projetos assim costumam morrer, e é por isso que
       vem por último: até aqui o emulador é hardware suficiente.
+      Começou pela operação, sem mudar nenhum invariante: o NVMe, sobre uma
+      camada de bloco que guarda as janelas de escrita para qualquer
+      driver, como o disco do sistema — o firmware boota dele; o reinício e
+      o desligamento de verdade, pela ACPI (FADT e `\_S5`) no x86 e pela
+      PSCI no ARM, com o pedido no journal antes; o término de processo, a
+      rede sem DHCP, a verificação do armazém e o heap pela memória. Ver
+      [Operação](#operação) e [`docs/OPERACAO.md`](docs/OPERACAO.md). A
+      atualização A/B, as imagens assinadas e a identidade gerada na
+      máquina pedem uma raiz de confiança nova — decisões que o guia
+      descreve, sem implementar —; a placa de rede física e o watchdog
+      ficaram de fora.
 
 ## Licença
 

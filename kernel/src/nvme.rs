@@ -579,6 +579,10 @@ impl Nvme {
                 _ => "o dispositivo recusou a descarga",
             });
         }
+        #[cfg(feature = "modo-teste")]
+        if matches!(qual, Qual::EntradaESaida) && comando[0] & 0xFF == DESCARREGAR {
+            FLUSHES.fetch_add(1, Ordering::AcqRel);
+        }
         Ok(resultado)
     }
 
@@ -780,6 +784,17 @@ static DESLIGOU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool
 #[cfg(feature = "modo-teste")]
 pub fn desligou_de_teste() -> bool {
     DESLIGOU.load(Ordering::Acquire)
+}
+
+/// Só na suíte: quantos `Flush` um controlador concluiu — o comando que
+/// chegou a ele, e não a descarga que a camada contou.
+#[cfg(feature = "modo-teste")]
+static FLUSHES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Só na suíte: ver [`FLUSHES`].
+#[cfg(feature = "modo-teste")]
+pub fn flushes_de_teste() -> u64 {
+    FLUSHES.load(Ordering::Acquire)
 }
 
 /// Só na suíte: chama `f` com o segundo disco — o NVMe da máquina dos

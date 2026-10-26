@@ -553,6 +553,24 @@ pub fn livres_em(faixas: &[(u64, u64)]) -> Vec<Option<u64>> {
     })
 }
 
+/// Só na suíte: marca o bloco `b` como livre (ou de volta em uso) no mapa,
+/// sem tocar no disco — a conta errada que a verificação do armazém deve
+/// achar. Quem chama desfaz antes de qualquer lote.
+#[cfg(feature = "modo-teste")]
+pub fn marcar_livre_de_teste(b: u64, livre: bool) -> Result<(), &'static str> {
+    com(|v| {
+        let m = v
+            .mapa
+            .as_mut()
+            .ok_or("o volume do armazem nao esta aberto")?;
+        if livre {
+            m.soltar(b, b + 1)
+        } else {
+            m.marcar(b, b + 1)
+        }
+    })
+}
+
 /// Só na suíte: o primeiro setor (absoluto) do bloco `b` da área de dados
 /// — para o rastro das escritas do disco.
 #[cfg(feature = "modo-teste")]

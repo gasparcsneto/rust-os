@@ -135,7 +135,8 @@ pub struct Verificacao {
     /// caminho relativo.
     pub ilegiveis: Vec<String>,
     /// Os arquivos que mudaram no meio da verificação: a versão conferida
-    /// deixou de valer, e eles não contam nem como bons nem como ruins.
+    /// deixou de valer, e eles não contam nem como bons nem como ruins —
+    /// nem pelos blocos livres no mapa.
     pub mudaram: u64,
     /// Blocos de versões vivas que o mapa do volume diz livres — os que a
     /// próxima reserva daria a outro conteúdo, por cima deste.
@@ -169,8 +170,12 @@ pub fn verificar(relativo: &str) -> Result<Verificacao, &'static str> {
     let mut v = Verificacao::default();
     let mut bloco: Box<[u8; TAM_BLOCO]> = Box::new([0; TAM_BLOCO]);
     for (caminho, versao, conteudo) in alvos {
+        #[cfg(feature = "modo-teste")]
+        if let Some(f) = crate::arch::sem_interrupcoes(|| *NO_MEIO_DA_VERIFICACAO.lock()) {
+            f(&caminho);
+        }
         let faixas: Vec<(u64, u64)> = conteudo.faixas().collect();
-        v.soltos += crate::volume::livres_em(&faixas)
+        let soltos = crate::volume::livres_em(&faixas)
             .iter()
             .filter(|livre| livre.is_some())
             .count() as u64;
@@ -187,9 +192,16 @@ pub fn verificar(relativo: &str) -> Result<Verificacao, &'static str> {
             }
             abertos += 1;
         }
+        // A versão que ainda vale agora valeu desde a lista — uma versão
+        // que sai não volta —, e os blocos dela não foram soltos. A que
+        // saiu no meio teve os blocos soltos depois de sair: livres no
+        // mapa, ou já de outro conteúdo, eles não dizem nada do disco.
         if com_o_armazem(|a| a.por_versao(versao).is_none()) {
             v.mudaram += 1;
-        } else if abre {
+            continue;
+        }
+        v.soltos += soltos;
+        if abre {
             v.arquivos += 1;
             v.blocos += abertos;
             v.bytes += conteudo.tamanho;
@@ -1433,6 +1445,18 @@ pub fn antes_do_commit_de_teste(f: Option<fn()>) {
     crate::arch::sem_interrupcoes(|| *ANTES_DO_COMMIT.lock() = f);
 }
 
+/// Só para a suíte: o que a verificação chama antes de conferir cada
+/// arquivo, com o caminho relativo dele — sem trava nenhuma na mão, depois
+/// de a lista estar feita.
+#[cfg(feature = "modo-teste")]
+static NO_MEIO_DA_VERIFICACAO: Mutex<Option<fn(&str)>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) [`NO_MEIO_DA_VERIFICACAO`].
+#[cfg(feature = "modo-teste")]
+pub fn no_meio_da_verificacao_de_teste(f: Option<fn(&str)>) {
+    crate::arch::sem_interrupcoes(|| *NO_MEIO_DA_VERIFICACAO.lock() = f);
+}
+
 /// Só para a suíte: o conteúdo do arquivo `relativo`, lido do volume pelo
 /// mesmo caminho do VFS.
 #[cfg(feature = "modo-teste")]
@@ -1472,5 +1496,7 @@ pub unsafe fn destravar() {
         RASCUNHOS.force_unlock();
         #[cfg(feature = "modo-teste")]
         ANTES_DO_COMMIT.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        NO_MEIO_DA_VERIFICACAO.force_unlock();
     }
 }

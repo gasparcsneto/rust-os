@@ -1467,8 +1467,15 @@ pub fn parar_as_gravacoes(entregar: impl FnOnce()) {
     em_ordem(|| {
         let mut entregar = Some(entregar);
         crate::bloco::com_o_disco(|d| {
+            #[cfg(feature = "modo-teste")]
+            let antes = d.contadores().1;
             if let Err(motivo) = d.descarregar_disco() {
                 crate::log_warn!("energia", "a descarga final falhou: {}", motivo);
+            }
+            #[cfg(feature = "modo-teste")]
+            {
+                DESCARGA_FINAL[0].store(antes, Ordering::Release);
+                DESCARGA_FINAL[1].store(d.contadores().1, Ordering::Release);
             }
             #[cfg(not(feature = "modo-teste"))]
             d.avisar_desligamento();
@@ -1480,6 +1487,21 @@ pub fn parar_as_gravacoes(entregar: impl FnOnce()) {
             f();
         }
     });
+}
+
+/// Só na suíte: as descargas que o disco contava logo antes e logo depois
+/// da descarga final do último [`parar_as_gravacoes`] — já com as
+/// gravações paradas.
+#[cfg(feature = "modo-teste")]
+static DESCARGA_FINAL: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Só na suíte: ver [`DESCARGA_FINAL`].
+#[cfg(feature = "modo-teste")]
+pub fn descarga_final_de_teste() -> (u64, u64) {
+    (
+        DESCARGA_FINAL[0].load(Ordering::Acquire),
+        DESCARGA_FINAL[1].load(Ordering::Acquire),
+    )
 }
 
 /// Grava no journal a auditoria até o registro `seq`, inclusive, e só

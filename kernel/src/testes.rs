@@ -7064,6 +7064,24 @@ fn nvme_o_controlador_liga() -> Resultado {
     if crate::bloco::com_o_disco(|d| d.driver()) != Some("virtio-blk") {
         return Err("o disco do sistema deixou de ser o virtio-blk");
     }
+    // O driver espera por consulta: a função com a mestria de barramento
+    // ligada e o INTx desligado — um pino levantado que ninguém atende
+    // prenderia a linha de quem a divide.
+    let mut funcao = None;
+    crate::pci::com_dispositivos(|p| {
+        // A classe do NVMe: armazenamento, memória não volátil, NVMe.
+        if (p.classe, p.subclasse, p.interface) == (0x01, 0x08, 0x02) {
+            funcao = Some(*p);
+        }
+    });
+    let funcao = funcao.ok_or("o NVMe nao esta no inventario do PCI")?;
+    let comando = crate::pci::comando_de_teste(&funcao).ok_or("sem acesso ao PCI")?;
+    if !comando.contains(pci_types::CommandRegister::BUS_MASTER_ENABLE) {
+        return Err("o NVMe ficou sem a mestria de barramento");
+    }
+    if !comando.contains(pci_types::CommandRegister::INTERRUPT_DISABLE) {
+        return Err("o NVMe ficou com o INTx ligado");
+    }
     Ok(())
 }
 
@@ -7104,10 +7122,12 @@ fn nvme_cada_setor_devolve_o_seu_padrao() -> Resultado {
 
 /// No NVMe, a escrita é a da camada: sem janela nada se escreve; a janela
 /// se fixa uma vez e não cruza a outra; dentro dela, de um a trinta e dois
-/// setores por ida, o que se escreve e se descarrega volta igual, e os
-/// contadores contam; fora dela — antes, depois, começando dentro e
-/// terminando fora, o setor zero, um setor absurdo — nada chega ao
-/// controlador, e o vizinho continua o que o `xtask` gravou.
+/// setores por ida, o que se escreve e se descarrega volta igual, os
+/// contadores contam, e cada descarga chega ao controlador como um `Flush`
+/// — o NVMe da máquina dos testes diz que tem cache volátil; fora dela —
+/// antes, depois, começando dentro e terminando fora, o setor zero, um
+/// setor absurdo — nada chega ao controlador, e o vizinho continua o que o
+/// `xtask` gravou.
 fn nvme_escreve_so_dentro_da_janela() -> Resultado {
     use crate::bloco::Janela;
     const B: usize = crate::bloco::TAMANHO_DO_SETOR;
@@ -7148,10 +7168,14 @@ fn nvme_escreve_so_dentro_da_janela() -> Resultado {
                 .map(|i| (i as u8) ^ (setor as u8) ^ ((i >> 9) as u8).wrapping_mul(11) ^ 0xA5)
                 .collect();
             let (escritas, descargas) = d.contadores();
+            let flushes = crate::nvme::flushes_de_teste();
             d.gravar_setores(Janela::Armazem, setor, &dados)?;
             d.descarregar_disco()?;
             if d.contadores() != (escritas + 1, descargas + 1) {
                 return Err("a escrita ou a descarga no NVMe nao foi contada");
+            }
+            if crate::nvme::flushes_de_teste() != flushes + 1 {
+                return Err("a descarga no NVMe nao chegou ao controlador como um Flush");
             }
             let mut lido = alloc::vec![0u8; quantos * B];
             d.ler(setor, &mut lido)?;
@@ -7265,6 +7289,78 @@ fn nvme_dois_fios_ao_mesmo_tempo() -> Resultado {
         }
         Ok(())
     })
+}
+
+/// A medida de uma ida ao disco, no NVMe e no virtio-blk, pelo contador de
+/// ciclos: a média de sessenta e quatro leituras de dezesseis kibibytes em
+/// cada um; e, no NVMe, de sessenta e quatro escritas, com uma descarga a
+/// cada oito. É a medida do relatório e da documentação — o caso só confere
+/// que cada ida cabe em cem milissegundos, e a diz no log.
+fn nvme_a_medida_de_uma_ida() -> Resultado {
+    use crate::bloco::Janela;
+    const IDAS: u64 = 64;
+    const SETORES: u64 = (crate::bloco::MAIOR_LEITURA / crate::bloco::TAMANHO_DO_SETOR) as u64;
+    let hz = crate::hora::contador::hz();
+    if hz == 0 {
+        return Err("a maquina nao tem contador de ciclos com frequencia: nada a medir");
+    }
+    let us = |ciclos: u64| (u128::from(ciclos) * 1_000_000 / u128::from(hz)) as u64;
+    let mut buf = alloc::vec![0u8; crate::bloco::MAIOR_LEITURA];
+    let (mut leitura, mut escrita, mut descarga) = (0u64, 0u64, 0u64);
+    com_o_nvme(|d| {
+        let inicio = crate::arch::ciclos();
+        for i in 0..IDAS {
+            d.ler(1024 + i * SETORES, &mut buf)?;
+        }
+        leitura = crate::arch::ciclos() - inicio;
+        for i in 0..IDAS {
+            let antes = crate::arch::ciclos();
+            d.gravar_setores(Janela::Armazem, JANELA_DO_NVME.0 + 2048 + i * SETORES, &buf)?;
+            escrita += crate::arch::ciclos() - antes;
+            if i % 8 == 7 {
+                let antes = crate::arch::ciclos();
+                d.descarregar_disco()?;
+                descarga += crate::arch::ciclos() - antes;
+            }
+        }
+        Ok(())
+    })?;
+    // O virtio-blk, pela raiz — só leitura, onde ninguém escreve.
+    let raiz = crate::particoes::varrer()?
+        .primeira(crate::particoes::Tipo::Dados)
+        .ok_or("o disco nao tem a raiz")?
+        .primeiro;
+    let mut virtio = 0u64;
+    crate::bloco::com_o_disco(|d| -> Resultado {
+        let inicio = crate::arch::ciclos();
+        for i in 0..IDAS {
+            d.ler(raiz + i * SETORES, &mut buf)?;
+        }
+        virtio = crate::arch::ciclos() - inicio;
+        Ok(())
+    })
+    .ok_or("nao ha disco")??;
+    let (leitura, escrita, descarga, virtio) = (
+        us(leitura) / IDAS,
+        us(escrita) / IDAS,
+        us(descarga) / (IDAS / 8),
+        us(virtio) / IDAS,
+    );
+    crate::log_info!(
+        "teste",
+        "medida de uma ida de 16 KiB: nvme leitura {} us, escrita {} us, descarga {} us; virtio-blk leitura {} us",
+        leitura,
+        escrita,
+        descarga,
+        virtio
+    );
+    if [leitura, escrita, descarga, virtio]
+        .iter()
+        .any(|&t| t > 100_000)
+    {
+        return Err("uma ida ao disco passou de cem milissegundos");
+    }
+    Ok(())
 }
 
 /// O aviso de desligamento — o que a energia dá ao disco antes de cortar:
@@ -31527,6 +31623,10 @@ static CASOS: &[Caso] = &[
         f: nvme_dois_fios_ao_mesmo_tempo,
     },
     Caso {
+        nome: "nvme: a medida de uma ida, no NVMe e no virtio-blk",
+        f: nvme_a_medida_de_uma_ida,
+    },
+    Caso {
         nome: "nvme: o aviso de desligamento para o controlador, e nada mais passa",
         f: nvme_o_aviso_de_desligamento,
     },
@@ -32523,6 +32623,10 @@ static CASOS: &[Caso] = &[
         f: energia_sem_o_pedido_no_journal_a_maquina_segue,
     },
     Caso {
+        nome: "energia: sem o meio no firmware, a maquina segue",
+        f: energia_sem_o_meio_no_firmware_a_maquina_segue,
+    },
+    Caso {
         nome: "energia: a maquina diz como reinicia e desliga",
         f: energia_a_maquina_diz_como_reinicia_e_desliga,
     },
@@ -32533,6 +32637,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "armazem: a verificacao acha o bloco que nao abre, e so le",
         f: armazem_a_verificacao_acha_o_bloco_que_nao_abre,
+    },
+    Caso {
+        nome: "armazem: a verificacao com o arquivo mudando no meio, e o bloco vivo livre no mapa",
+        f: armazem_a_verificacao_com_o_arquivo_mudando_no_meio,
     },
     Caso {
         nome: "contencao: o agente suspenso e retomado pela prova",
@@ -48193,6 +48301,13 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
         if descargas <= descargas_antes {
             return Err("o disco nao descarregou antes de a maquina parar");
         }
+        // E a descarga é a final: com as gravações já paradas, uma a mais —
+        // a do pedido no journal, antes da resposta, não conta aqui.
+        let (antes, depois) = crate::persistencia::descarga_final_de_teste();
+        if depois != antes + 1 {
+            crate::log_error!("teste", "descargas na parada: {} -> {}", antes, depois);
+            return Err("as gravacoes pararam sem a descarga final do disco");
+        }
         let info = fs_pedir(sistema, "system.info", "{}");
         if !info.contains(r#""power":null"#) {
             crate::log_error!("teste", "{}", info);
@@ -48205,7 +48320,8 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
 /// Quem não pode reiniciar nem desligar ouve a recusa, e a máquina segue:
 /// o operador, o observador e o tecido de segurança, `DENY_PERMISSION`. O
 /// agente de papel `operador` também; trocado para `sistema`, o pedido
-/// seguinte passa. O administrador desliga pela prova.
+/// seguinte passa. O administrador desliga pela prova — e não desliga com
+/// um reinício a caminho.
 fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
     use crate::energia::Acao;
     let _ = crate::energia::executada_de_teste();
@@ -48269,6 +48385,29 @@ fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
         if energia_entregue() != Some(Acao::Desligar) {
             return Err("o desligamento do administrador nao chegou ao fim");
         }
+        // Com um reinício a caminho, pedido pelo gate, o desligamento pela
+        // prova — que não passa pelo handler do comando — é recusado pela
+        // própria energia: uma ação de cada vez, por qualquer caminho.
+        let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
+        if !r.contains(r#""state":"rebooting""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o reinicio do sistema nao foi aceito");
+        }
+        let r = executar_admin_de(
+            0,
+            desafio()?,
+            &ADMIN_DE_TESTE,
+            "system.poweroff",
+            "{}",
+            "{}",
+        )?;
+        if !r.contains("ja esta reiniciando ou desligando") {
+            crate::log_error!("teste", "{}", r);
+            return Err("com um reinicio a caminho, o administrador desligou pela prova");
+        }
+        if energia_entregue() != Some(Acao::Reiniciar) {
+            return Err("o reinicio a caminho nao chegou ao fim");
+        }
         Ok(())
     })();
     let _ = esperar_cedendo(|| crate::energia::pedida().is_none(), 600);
@@ -48309,6 +48448,36 @@ fn energia_sem_o_pedido_no_journal_a_maquina_segue() -> Resultado {
     crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
     crate::persistencia::forcar_estado_de_teste(anterior);
     resultado
+}
+
+/// Uma máquina cujo firmware não diz como desligar — nem o S5 da ACPI, nem
+/// a PSCI —, ou como reiniciar, recusa o pedido antes de parar qualquer
+/// coisa: aceito, as gravações parariam e a máquina ficaria parada sem
+/// desligar. O pedido e a recusa ficam na auditoria, e nenhum fio sobe.
+fn energia_sem_o_meio_no_firmware_a_maquina_segue() -> Resultado {
+    let _ = crate::energia::executada_de_teste();
+    let sistema = sistema_aqui();
+    crate::energia::sem_meio_de_teste(true);
+    let desligar = fs_pedir(sistema, "system.poweroff", "{}");
+    let reiniciar = fs_pedir(sistema, "system.reboot", "{}");
+    crate::energia::sem_meio_de_teste(false);
+    if !desligar.contains("nao diz como desligar") {
+        crate::log_error!("teste", "{}", desligar);
+        return Err("sem o meio no firmware, o desligamento nao foi recusado");
+    }
+    if !reiniciar.contains("nao diz como reiniciar") {
+        crate::log_error!("teste", "{}", reiniciar);
+        return Err("sem o meio no firmware, o reinicio nao foi recusado");
+    }
+    let recusa = ultimo_que(|e| e.metodo == "system.reboot").ok_or("a recusa nao foi gravada")?;
+    if recusa.codigo != politica::Codigo::Error {
+        return Err("a recusa do reinicio foi gravada com outro codigo");
+    }
+    let _ = esperar_cedendo(|| false, 80);
+    if crate::energia::pedida().is_some() || crate::energia::executada_de_teste().is_some() {
+        return Err("sem o meio no firmware, a maquina parou");
+    }
+    Ok(())
 }
 
 /// O que a máquina diz de como reinicia e desliga — e, no x86, o leitor do
@@ -48506,6 +48675,86 @@ fn armazem_a_verificacao_acha_o_bloco_que_nao_abre() -> Resultado {
         Ok(())
     })();
     crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// A verificação não segura trava entre um arquivo e outro: o arquivo
+/// gravado de novo no meio dela — depois da lista, antes de os blocos dele
+/// serem conferidos, com os da versão listada já soltos no mapa — conta
+/// como mudado e não acusa o disco: nem bloco livre de versão viva, nem
+/// bloco que não abre. E o contrário: um bloco da versão viva que o mapa
+/// diz livre — a conta errada que daria o bloco a outro conteúdo — aparece,
+/// e a verificação não passa.
+fn armazem_a_verificacao_com_o_arquivo_mudando_no_meio() -> Resultado {
+    const C: &str = "/armazem/compartilhado/verifica-meio.txt";
+    const RELATIVO: &str = "compartilhado/verifica-meio.txt";
+    static GRAVADA: AtomicU64 = AtomicU64::new(0);
+
+    // Na verificação, sem trava na mão: grava o arquivo de novo, uma vez.
+    fn no_meio(caminho: &str) {
+        if caminho != RELATIVO || GRAVADA.load(SeqCst) != 0 {
+            return;
+        }
+        let r = fs_gravar(sistema_aqui(), C, versao_no_armazem(C), &"m".repeat(6000));
+        match fs_numero(&r, "version") {
+            Some(v) => GRAVADA.store(v, SeqCst),
+            None => crate::log_error!("teste", "{}", r),
+        }
+    }
+
+    let sistema = sistema_aqui();
+    let verificar = || fs_pedir(sistema, "fs.verify", &alloc::format!(r#"{{"path":"{C}"}}"#));
+    let resultado = (|| -> Resultado {
+        diretorios_acima(C)?;
+        let r = fs_gravar(sistema, C, versao_no_armazem(C), &"v".repeat(6000));
+        let versao = fs_numero(&r, "version").ok_or_else(|| {
+            crate::log_error!("teste", "{}", r);
+            "o arquivo do caso nao foi gravado"
+        })?;
+        GRAVADA.store(0, SeqCst);
+        crate::armazem::no_meio_da_verificacao_de_teste(Some(no_meio));
+        let v = crate::armazem::verificar(RELATIVO);
+        crate::armazem::no_meio_da_verificacao_de_teste(None);
+        let v = v?;
+        if GRAVADA.load(SeqCst) <= versao {
+            return Err("o arquivo do caso nao foi gravado no meio da verificacao");
+        }
+        if v.mudaram != 1 || v.soltos != 0 || !v.ilegiveis.is_empty() || v.arquivos != 0 {
+            crate::log_error!("teste", "{:?}", v);
+            return Err("o arquivo que mudou no meio acusou o disco");
+        }
+        let r = verificar();
+        if !r.contains(r#""ok":true"#)
+            || fs_numero(&r, "files") != Some(1)
+            || fs_numero(&r, "changed") != Some(0)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a versao gravada no meio nao conferiu");
+        }
+        // A conta errada: o segundo bloco da versão viva, livre no mapa — e
+        // de volta em uso antes de qualquer lote.
+        let (bloco, _) = crate::armazem::com_o_armazem(|a| {
+            a.no(RELATIVO)
+                .and_then(|n| n.conteudo())
+                .and_then(|c| c.onde(1))
+        })
+        .ok_or("o arquivo do caso nao tem o segundo bloco")?;
+        crate::volume::marcar_livre_de_teste(bloco, true)?;
+        let r = verificar();
+        crate::volume::marcar_livre_de_teste(bloco, false)?;
+        if !r.contains(r#""ok":false"#)
+            || fs_numero(&r, "live_blocks_free_in_map") != Some(1)
+            || fs_numero(&r, "unreadable_count") != Some(0)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o bloco da versao viva livre no mapa nao apareceu");
+        }
+        if !verificar().contains(r#""ok":true"#) {
+            return Err("com o mapa de volta, o arquivo nao voltou a conferir");
+        }
+        Ok(())
+    })();
+    crate::armazem::no_meio_da_verificacao_de_teste(None);
     resultado
 }
 

@@ -86,17 +86,28 @@ static EXECUTADA: AtomicU8 = AtomicU8::new(0);
 /// autorização da operação administrativa — e lança o fio que para a
 /// máquina.
 ///
-/// `Err` sem efeito nenhum: outra ação a caminho, nenhum registro, a
-/// persistência indisponível, o registro que não chegou ao journal, o fio
-/// que não subiu. Só os handlers dos comandos — depois do gate — e as
-/// operações administrativas — depois da prova — chamam; o `xtask`
-/// confere.
+/// `Err` sem efeito nenhum: outra ação a caminho, nenhum registro, uma
+/// máquina cujo firmware não diz como fazer a ação, a persistência
+/// indisponível, o registro que não chegou ao journal, o fio que não
+/// subiu. Só os handlers dos comandos — depois do gate — e as operações
+/// administrativas — depois da prova — chamam; o `xtask` confere.
 pub fn preparar(acao: Acao, registro: u64) -> Result<(), &'static str> {
     if PEDIDA.load(Ordering::Acquire) != 0 {
         return Err("a maquina ja esta reiniciando ou desligando");
     }
     if registro == 0 {
         return Err("fora de um comando autorizado");
+    }
+    // Sem o meio no firmware, a ação seria aceita, as gravações parariam e
+    // a máquina ficaria parada sem desligar: recusada antes, com a máquina
+    // seguindo como estava.
+    if meio(acao) == "nenhum" {
+        return Err(match acao {
+            Acao::Reiniciar => "esta maquina nao diz como reiniciar: ela segue ligada",
+            Acao::Desligar => {
+                "esta maquina nao diz como desligar (nem o S5 da ACPI, nem a PSCI): ela segue ligada"
+            }
+        });
     }
     crate::persistencia::exigir()
         .map_err(|_| "sem persistencia, a maquina nao para: o pedido nao chegaria ao journal")?;
@@ -113,6 +124,31 @@ pub fn preparar(acao: Acao, registro: u64) -> Result<(), &'static str> {
         return Err(motivo);
     }
     Ok(())
+}
+
+/// Como a máquina faz `acao`, pelo firmware — o `reboot_via` e o
+/// `poweroff_via` do `system.info` —, ou `nenhum`.
+fn meio(acao: Acao) -> &'static str {
+    #[cfg(feature = "modo-teste")]
+    if SEM_MEIO.load(Ordering::Acquire) {
+        return "nenhum";
+    }
+    let (reinicio, desligamento) = crate::arch::meios_da_energia();
+    match acao {
+        Acao::Reiniciar => reinicio,
+        Acao::Desligar => desligamento,
+    }
+}
+
+/// Só na suíte: a máquina como se o firmware não dissesse como reiniciar
+/// nem desligar.
+#[cfg(feature = "modo-teste")]
+static SEM_MEIO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só na suíte: liga ou desliga [`SEM_MEIO`].
+#[cfg(feature = "modo-teste")]
+pub fn sem_meio_de_teste(sem: bool) {
+    SEM_MEIO.store(sem, Ordering::Release);
 }
 
 /// O detalhe do registro do pedido, como o comando o grava.

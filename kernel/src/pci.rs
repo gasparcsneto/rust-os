@@ -568,6 +568,16 @@ pub fn habilitar_mestre_por_consulta(d: &Dispositivo) {
     });
 }
 
+/// Só na suíte: o registrador de comando de `d`, como o dispositivo o tem
+/// agora — a mestria de barramento e o INTx que o driver ligou ou
+/// desligou.
+#[cfg(feature = "modo-teste")]
+pub fn comando_de_teste(d: &Dispositivo) -> Option<CommandRegister> {
+    let acesso = crate::arch::pci::acesso()?;
+    let endereco = PciAddress::new(0, d.barramento, d.dispositivo, d.funcao);
+    Some(PciHeader::new(endereco).command(acesso))
+}
+
 /// Quantos dispositivos a varredura encontrou.
 pub fn total() -> usize {
     ENCONTRADOS.load(Ordering::Acquire)
