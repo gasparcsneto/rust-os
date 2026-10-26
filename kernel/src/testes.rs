@@ -2665,7 +2665,7 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
 /// isso que só um caso os produz.
 fn gpt_cabecalho_absurdo_e_recusado() -> Resultado {
     use crate::particoes::planejar;
-    const SETOR: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    const SETOR: usize = crate::bloco::TAMANHO_DO_SETOR;
 
     // O que o disco desta máquina traz, e que tem de continuar passando: 128
     // entradas de 128 bytes, o vetor começando no setor 2.
@@ -6741,13 +6741,12 @@ fn vfs_montagem_mais_longa_ganha() -> Resultado {
 /// e meia, e é onde um laço que assume páginas cheias se perde.
 fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
     const PRIMEIRO: u64 = PADRAO_DE;
-    let maximo = crate::virtio::blk::MAIOR_LEITURA / crate::virtio::blk::TAMANHO_DO_SETOR;
+    let maximo = crate::bloco::MAIOR_LEITURA / crate::bloco::TAMANHO_DO_SETOR;
 
     for quantos in [1usize, 12, maximo] {
-        let mut juntos = [0u8; crate::virtio::blk::MAIOR_LEITURA];
-        let bytes = quantos * crate::virtio::blk::TAMANHO_DO_SETOR;
-        let Some(resultado) =
-            crate::virtio::blk::com_o_disco(|d| d.ler(PRIMEIRO, &mut juntos[..bytes]))
+        let mut juntos = [0u8; crate::bloco::MAIOR_LEITURA];
+        let bytes = quantos * crate::bloco::TAMANHO_DO_SETOR;
+        let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler(PRIMEIRO, &mut juntos[..bytes]))
         else {
             return Err("nao ha disco nesta maquina");
         };
@@ -6755,8 +6754,8 @@ fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
 
         for i in 0..quantos {
             let esperado = marca_do_setor(PRIMEIRO + i as u64);
-            let fatia = &juntos[i * crate::virtio::blk::TAMANHO_DO_SETOR..]
-                [..crate::virtio::blk::TAMANHO_DO_SETOR];
+            let fatia =
+                &juntos[i * crate::bloco::TAMANHO_DO_SETOR..][..crate::bloco::TAMANHO_DO_SETOR];
             if let Some(posicao) = fatia.iter().position(|&b| b != esperado) {
                 crate::log_error!(
                     "teste",
@@ -6775,14 +6774,14 @@ fn disco_leitura_multipla_atravessa_paginas() -> Resultado {
     // E os pedidos que o driver precisa recusar. Um destino que não é
     // múltiplo de setor faria o dispositivo escrever menos do que a cadeia
     // anuncia; um maior que a cadeia comporta não caberia nos descritores.
-    let mut qualquer = [0u8; crate::virtio::blk::MAIOR_LEITURA];
-    let recusas = crate::virtio::blk::com_o_disco(|d| {
+    let mut qualquer = [0u8; crate::bloco::MAIOR_LEITURA];
+    let recusas = crate::bloco::com_o_disco(|d| {
         [
             d.ler(PRIMEIRO, &mut []).is_err(),
             d.ler(PRIMEIRO, &mut qualquer[..100]).is_err(),
             d.ler(
                 PRIMEIRO,
-                &mut qualquer[..crate::virtio::blk::TAMANHO_DO_SETOR + 1],
+                &mut qualquer[..crate::bloco::TAMANHO_DO_SETOR + 1],
             )
             .is_err(),
         ]
@@ -6853,10 +6852,9 @@ fn disco_a_janela_e_a_particao_de_estado() -> Resultado {
     let estado = tabela
         .primeira(crate::particoes::Tipo::Estado)
         .ok_or("o disco nao tem particao de estado")?;
-    let (janela, duravel) = crate::virtio::blk::com_o_disco(|d| {
-        (d.janela(crate::virtio::blk::Janela::Estado), d.duravel())
-    })
-    .ok_or("nao ha disco")?;
+    let (janela, duravel) =
+        crate::bloco::com_o_disco(|d| (d.janela(crate::bloco::Janela::Estado), d.duravel()))
+            .ok_or("nao ha disco")?;
     if janela != Some((estado.primeiro, estado.setores)) {
         return Err("a janela de escrita nao e a particao de estado");
     }
@@ -6869,27 +6867,26 @@ fn disco_a_janela_e_a_particao_de_estado() -> Resultado {
 /// O último setor da janela de escrita: o lugar dos casos, longe do começo
 /// da partição, onde o journal mora.
 fn setor_de_teste() -> Result<u64, &'static str> {
-    let (primeiro, setores) =
-        crate::virtio::blk::com_o_disco(|d| d.janela(crate::virtio::blk::Janela::Estado))
-            .flatten()
-            .ok_or("nao ha janela de escrita")?;
+    let (primeiro, setores) = crate::bloco::com_o_disco(|d| d.janela(crate::bloco::Janela::Estado))
+        .flatten()
+        .ok_or("nao ha janela de escrita")?;
     Ok(primeiro + setores - 2)
 }
 
 /// Escreve dois setores, descarrega, lê de volta, e devolve o que estava
 /// lá. Os contadores do driver contam a escrita e a descarga.
 fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
-    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
     let setor = setor_de_teste()?;
     let mut antes = [0u8; 2 * B];
     let mut padrao = [0u8; 2 * B];
     for (i, b) in padrao.iter_mut().enumerate() {
         *b = (i as u8).wrapping_mul(13).wrapping_add(0x5A);
     }
-    let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
+    let resultado = crate::bloco::com_o_disco(|d| -> Resultado {
         d.ler(setor, &mut antes)?;
         let (escritas, descargas) = d.contadores();
-        d.gravar_setores(crate::virtio::blk::Janela::Estado, setor, &padrao)?;
+        d.gravar_setores(crate::bloco::Janela::Estado, setor, &padrao)?;
         d.descarregar_disco()?;
         if d.contadores() != (escritas + 1, descargas + 1) {
             return Err("a escrita ou a descarga nao foi contada");
@@ -6901,7 +6898,7 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
         }
         // Devolve o que havia, para não deixar lixo onde o journal pode
         // um dia chegar.
-        d.gravar_setores(crate::virtio::blk::Janela::Estado, setor, &antes)?;
+        d.gravar_setores(crate::bloco::Janela::Estado, setor, &antes)?;
         d.descarregar_disco()
     });
     resultado.ok_or("nao ha disco")?
@@ -6912,7 +6909,7 @@ fn disco_escreve_descarrega_e_le_de_volta() -> Resultado {
 /// termina fora, o MBR, a ESP e um setor absurdo. E o vizinho continua o
 /// que era.
 fn disco_recusa_escrita_fora_da_janela() -> Resultado {
-    use crate::virtio::blk::Janela;
+    use crate::bloco::Janela;
     for qual in [Janela::Estado, Janela::Armazem] {
         recusa_fora_da_janela(qual)?;
     }
@@ -6920,9 +6917,9 @@ fn disco_recusa_escrita_fora_da_janela() -> Resultado {
 }
 
 /// Fora de uma janela, pelo nome dela, nada se escreve.
-fn recusa_fora_da_janela(qual: crate::virtio::blk::Janela) -> Resultado {
-    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
-    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| d.janela(qual))
+fn recusa_fora_da_janela(qual: crate::bloco::Janela) -> Resultado {
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    let (primeiro, setores) = crate::bloco::com_o_disco(|d| d.janela(qual))
         .flatten()
         .ok_or("nao ha janela de escrita")?;
     let lixo = [0xEEu8; 2 * B];
@@ -6934,7 +6931,7 @@ fn recusa_fora_da_janela(qual: crate::virtio::blk::Janela) -> Resultado {
         (2048, 1),
         (u64::MAX - 1, 1),
     ];
-    let resultado = crate::virtio::blk::com_o_disco(|d| -> Resultado {
+    let resultado = crate::bloco::com_o_disco(|d| -> Resultado {
         let mut antes = [0u8; B];
         d.ler(primeiro - 1, &mut antes)?;
         let (escritas, _) = d.contadores();
@@ -6960,9 +6957,9 @@ fn recusa_fora_da_janela(qual: crate::virtio::blk::Janela) -> Resultado {
 /// A janela foi fixada no boot e não se fixa de novo — nem com a mesma
 /// faixa, nem com o disco inteiro.
 fn disco_a_janela_nao_se_redesenha() -> Resultado {
-    use crate::virtio::blk::{Janela, fixar_janela_de_escrita};
+    use crate::bloco::{Janela, fixar_janela_de_escrita};
     let janelas =
-        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+        crate::bloco::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
             .ok_or("nao ha disco")?;
     let (Some(estado), Some(armazem)) = janelas else {
         return Err("falta uma janela de escrita");
@@ -6976,12 +6973,333 @@ fn disco_a_janela_nao_se_redesenha() -> Resultado {
         }
     }
     let depois =
-        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+        crate::bloco::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
             .ok_or("nao ha disco")?;
     if depois != (Some(estado), Some(armazem)) {
         return Err("a janela mudou");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// nvme: o segundo disco da máquina dos testes
+// ---------------------------------------------------------------------------
+
+/// Quantos setores tem o disco NVMe dos casos — o `xtask` o monta.
+const SETORES_DO_NVME: u64 = 32 * 1024;
+
+/// A janela de escrita que os casos fixam no NVMe: a metade de cima.
+const JANELA_DO_NVME: (u64, u64) = (16 * 1024, 8 * 1024);
+
+/// O byte `i` do setor `setor` do disco NVMe dos casos: muda de setor para
+/// setor e dentro do setor. É metade de um contrato cuja outra metade é a
+/// `byte_do_nvme` do `xtask`; o que impede a divergência é o caso que lê.
+fn byte_do_nvme(setor: u64, i: usize) -> u8 {
+    (setor as u8).wrapping_mul(7) ^ ((setor >> 8) as u8) ^ (i as u8).wrapping_mul(3)
+}
+
+/// Se `bytes`, lidos a partir de `setor`, têm o padrão do `xtask`.
+fn conferir_o_padrao_do_nvme(setor: u64, bytes: &[u8]) -> Resultado {
+    for (n, s) in bytes.chunks(crate::bloco::TAMANHO_DO_SETOR).enumerate() {
+        for (i, &b) in s.iter().enumerate() {
+            let esperado = byte_do_nvme(setor + n as u64, i);
+            if b != esperado {
+                crate::log_error!(
+                    "teste",
+                    "nvme: setor {} byte {} e {:#04x}, esperava {:#04x}",
+                    setor + n as u64,
+                    i,
+                    b,
+                    esperado
+                );
+                return Err("um setor do NVMe veio com o conteudo de outro");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Chama `f` com o NVMe da suíte e a janela dos casos fixada.
+fn com_o_nvme(f: impl FnOnce(&mut crate::bloco::Disco) -> Resultado) -> Resultado {
+    crate::nvme::com_o_segundo_de_teste(|d| {
+        if d.janela(crate::bloco::Janela::Armazem).is_none() {
+            d.fixar_janela(
+                crate::bloco::Janela::Armazem,
+                JANELA_DO_NVME.0,
+                JANELA_DO_NVME.1,
+            )?;
+        }
+        f(d)
+    })
+    .ok_or("a maquina de testes nao tem o NVMe")?
+}
+
+/// O controlador do segundo disco liga: o driver é o NVMe, o disco tem o
+/// tamanho que o `xtask` montou, promete durabilidade, e nasce sem janela —
+/// e o disco do sistema continua o virtio-blk.
+fn nvme_o_controlador_liga() -> Resultado {
+    use crate::bloco::Janela;
+    let (driver, setores, duravel, janelas) = crate::nvme::com_o_segundo_de_teste(|d| {
+        (
+            d.driver(),
+            d.capacidade(),
+            d.duravel(),
+            (d.janela(Janela::Estado), d.janela(Janela::Armazem)),
+        )
+    })
+    .ok_or("a maquina de testes nao tem o NVMe")?;
+    if driver != "nvme" {
+        return Err("o segundo disco nao e o NVMe");
+    }
+    if setores != SETORES_DO_NVME {
+        crate::log_error!("teste", "o NVMe tem {} setores", setores);
+        return Err("o NVMe nao tem o tamanho que o xtask montou");
+    }
+    if !duravel {
+        return Err("o NVMe nao promete durabilidade");
+    }
+    if janelas != (None, None) {
+        return Err("o NVMe nasceu com uma janela de escrita");
+    }
+    if crate::bloco::com_o_disco(|d| d.driver()) != Some("virtio-blk") {
+        return Err("o disco do sistema deixou de ser o virtio-blk");
+    }
+    Ok(())
+}
+
+/// Cada setor do NVMe devolve o padrão dele, numa ida de um setor a
+/// trinta e dois — uma página (o PRP1), duas (o PRP2) e três e quatro (a
+/// lista de PRP), começando no começo e no meio de uma página. E a camada
+/// recusa, com o NVMe por baixo, o que recusa com o virtio: além do fim,
+/// o que não é múltiplo de setor, o maior que uma ida.
+fn nvme_cada_setor_devolve_o_seu_padrao() -> Resultado {
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    com_o_nvme(|d| {
+        let mut buf = alloc::vec![0u8; crate::bloco::MAIOR_LEITURA + B];
+        for setor in [0, 1, 7, 8, 12345, SETORES_DO_NVME - 1] {
+            d.ler(setor, &mut buf[..B])?;
+            conferir_o_padrao_do_nvme(setor, &buf[..B])?;
+        }
+        for (setor, quantos) in [(100u64, 2usize), (200, 9), (300, 17), (400, 32), (1003, 31)] {
+            buf[..quantos * B].fill(0);
+            d.ler(setor, &mut buf[..quantos * B])?;
+            conferir_o_padrao_do_nvme(setor, &buf[..quantos * B])?;
+        }
+        let recusas = [
+            d.ler(SETORES_DO_NVME, &mut buf[..B]).is_err(),
+            d.ler(SETORES_DO_NVME - 1, &mut buf[..2 * B]).is_err(),
+            d.ler(u64::MAX - 1, &mut buf[..B]).is_err(),
+            d.ler(0, &mut buf[..100]).is_err(),
+            d.ler(0, &mut []).is_err(),
+            d.ler(0, &mut buf[..crate::bloco::MAIOR_LEITURA + B])
+                .is_err(),
+        ];
+        if !recusas.iter().all(|r| *r) {
+            crate::log_error!("teste", "recusas: {:?}", recusas);
+            return Err("a camada aceitou, com o NVMe por baixo, um pedido que recusa");
+        }
+        Ok(())
+    })
+}
+
+/// No NVMe, a escrita é a da camada: sem janela nada se escreve; a janela
+/// se fixa uma vez e não cruza a outra; dentro dela, de um a trinta e dois
+/// setores por ida, o que se escreve e se descarrega volta igual, e os
+/// contadores contam; fora dela — antes, depois, começando dentro e
+/// terminando fora, o setor zero, um setor absurdo — nada chega ao
+/// controlador, e o vizinho continua o que o `xtask` gravou.
+fn nvme_escreve_so_dentro_da_janela() -> Resultado {
+    use crate::bloco::Janela;
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    let (primeiro, setores) = JANELA_DO_NVME;
+    crate::nvme::com_o_segundo_de_teste(|d| -> Resultado {
+        if d.janela(Janela::Armazem).is_none() {
+            if d.gravar_setores(Janela::Armazem, primeiro, &[0u8; B])
+                .is_ok()
+            {
+                return Err("sem janela, o NVMe aceitou uma escrita");
+            }
+            d.fixar_janela(Janela::Armazem, primeiro, setores)?;
+        }
+        if d.fixar_janela(Janela::Armazem, primeiro, setores).is_ok() {
+            return Err("a janela do NVMe foi fixada de novo");
+        }
+        if d.fixar_janela(Janela::Estado, primeiro + 10, 4).is_ok() {
+            return Err("uma janela que cruza a outra foi fixada no NVMe");
+        }
+        if d.fixar_janela(Janela::Estado, SETORES_DO_NVME - 4, 8)
+            .is_ok()
+        {
+            return Err("uma janela alem do fim foi fixada no NVMe");
+        }
+        Ok(())
+    })
+    .ok_or("a maquina de testes nao tem o NVMe")??;
+    com_o_nvme(|d| {
+        for (setor, quantos) in [
+            (primeiro, 1usize),
+            (primeiro + 1, 8),
+            (primeiro + 20, 9),
+            (primeiro + 40, 17),
+            (primeiro + 70, 32),
+            (primeiro + setores - 32, 32),
+        ] {
+            let dados: alloc::vec::Vec<u8> = (0..quantos * B)
+                .map(|i| (i as u8) ^ (setor as u8) ^ ((i >> 9) as u8).wrapping_mul(11) ^ 0xA5)
+                .collect();
+            let (escritas, descargas) = d.contadores();
+            d.gravar_setores(Janela::Armazem, setor, &dados)?;
+            d.descarregar_disco()?;
+            if d.contadores() != (escritas + 1, descargas + 1) {
+                return Err("a escrita ou a descarga no NVMe nao foi contada");
+            }
+            let mut lido = alloc::vec![0u8; quantos * B];
+            d.ler(setor, &mut lido)?;
+            if lido != dados {
+                crate::log_error!("teste", "nvme: {} setores em {}", quantos, setor);
+                return Err("o que se leu do NVMe nao e o que se escreveu");
+            }
+        }
+        let (escritas, _) = d.contadores();
+        let lixo = [0xEEu8; 2 * B];
+        for (setor, quantos) in [
+            (primeiro - 1, 1usize),
+            (primeiro + setores, 1),
+            (primeiro + setores - 1, 2),
+            (0, 1),
+            (u64::MAX - 1, 1),
+        ] {
+            if d.gravar_setores(Janela::Armazem, setor, &lixo[..quantos * B])
+                .is_ok()
+            {
+                crate::log_error!("teste", "nvme: a escrita no setor {} passou", setor);
+                return Err("uma escrita fora da janela do NVMe foi aceita");
+            }
+        }
+        if d.contadores().0 != escritas {
+            return Err("uma escrita recusada chegou ao NVMe");
+        }
+        let mut vizinho = [0u8; 2 * B];
+        d.ler(primeiro - 1, &mut vizinho[..B])?;
+        conferir_o_padrao_do_nvme(primeiro - 1, &vizinho[..B])?;
+        d.ler(0, &mut vizinho[..B])?;
+        conferir_o_padrao_do_nvme(0, &vizinho[..B])
+    })
+}
+
+/// Dois fios escrevendo no NVMe ao mesmo tempo, cada um na sua faixa, cada
+/// volta uma escrita de dezesseis kibibytes, a descarga e a releitura: a
+/// tranca da camada os põe em fila, nenhum lê o que o outro escreveu, e as
+/// duzentas e quarenta idas dão várias voltas inteiras na fila do
+/// controlador — a fase das conclusões vira a cada uma.
+fn nvme_dois_fios_ao_mesmo_tempo() -> Resultado {
+    const VOLTAS: u64 = 40;
+    const SETORES_POR_IDA: u64 = 32;
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    static FALHAS: AtomicU64 = AtomicU64::new(0);
+
+    fn faixa(qual: u64) -> u64 {
+        JANELA_DO_NVME.0 + 1024 + qual * 16 * SETORES_POR_IDA
+    }
+
+    fn dados(qual: u64, volta: u64) -> alloc::vec::Vec<u8> {
+        (0..SETORES_POR_IDA as usize * crate::bloco::TAMANHO_DO_SETOR)
+            .map(|i| (i as u8) ^ (volta as u8).wrapping_mul(13) ^ (qual as u8).wrapping_mul(0x5B))
+            .collect()
+    }
+
+    extern "C" fn escrever(qual: u64) -> ! {
+        for volta in 0..VOLTAS {
+            let setor = faixa(qual) + (volta % 16) * SETORES_POR_IDA;
+            let esperado = dados(qual, volta);
+            let r = com_o_nvme(|d| {
+                d.gravar_setores(crate::bloco::Janela::Armazem, setor, &esperado)?;
+                d.descarregar_disco()?;
+                let mut lido = alloc::vec![0u8; esperado.len()];
+                d.ler(setor, &mut lido)?;
+                if lido != esperado {
+                    return Err("um fio leu do NVMe o que nao escreveu");
+                }
+                Ok(())
+            });
+            if let Err(motivo) = r {
+                crate::log_error!("teste", "nvme: fio {} volta {}: {}", qual, volta, motivo);
+                FALHAS.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    PRONTOS.store(0, SeqCst);
+    FALHAS.store(0, SeqCst);
+    let (escritas, descargas) = crate::nvme::com_o_segundo_de_teste(|d| d.contadores())
+        .ok_or("a maquina de testes nao tem o NVMe")?;
+    crate::fios::criar("teste-nvme-a", escrever, 0)?;
+    crate::fios::criar("teste-nvme-b", escrever, 1)?;
+    esperar_cedendo(|| PRONTOS.load(SeqCst) == 2, 3000)
+        .map_err(|_| "os dois fios do NVMe nao terminaram")?;
+    if FALHAS.load(SeqCst) != 0 {
+        return Err("uma volta de um fio do NVMe falhou");
+    }
+    let depois = crate::nvme::com_o_segundo_de_teste(|d| d.contadores())
+        .ok_or("a maquina de testes nao tem o NVMe")?;
+    if depois != (escritas + 2 * VOLTAS, descargas + 2 * VOLTAS) {
+        crate::log_error!("teste", "nvme: {:?} -> {:?}", (escritas, descargas), depois);
+        return Err("o NVMe nao contou as escritas e descargas dos dois fios");
+    }
+    // A última volta de cada faixa ficou: as de um fio não pisaram as do
+    // outro.
+    com_o_nvme(|d| {
+        for qual in 0..2 {
+            for volta in VOLTAS - 16..VOLTAS {
+                let setor = faixa(qual) + (volta % 16) * SETORES_POR_IDA;
+                let mut lido =
+                    alloc::vec![0u8; SETORES_POR_IDA as usize * crate::bloco::TAMANHO_DO_SETOR];
+                d.ler(setor, &mut lido)?;
+                if lido != dados(qual, volta) {
+                    return Err("a faixa de um fio do NVMe nao tem a ultima volta dele");
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// O aviso de desligamento — o que a energia dá ao disco antes de cortar:
+/// o controlador diz que terminou, e depois disso a camada não deixa nada
+/// passar — nem leitura, nem escrita, nem descarga — e o disco deixa de se
+/// dizer durável. O último caso do NVMe: depois dele, não há mais NVMe.
+fn nvme_o_aviso_de_desligamento() -> Resultado {
+    use crate::bloco::Janela;
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    crate::nvme::com_o_segundo_de_teste(|d| -> Resultado {
+        if !d.duravel() {
+            return Err("o NVMe ja nao era duravel antes do aviso");
+        }
+        d.avisar_desligamento();
+        if !crate::nvme::desligou_de_teste() {
+            return Err("o controlador nao disse que terminou o desligamento");
+        }
+        if d.duravel() {
+            return Err("depois do aviso, o NVMe ainda se diz duravel");
+        }
+        let mut b = [0u8; B];
+        if d.ler(0, &mut b) != Err("o disco parou de responder e foi desligado") {
+            return Err("depois do aviso, uma leitura passou");
+        }
+        if d.gravar_setores(Janela::Armazem, JANELA_DO_NVME.0, &b)
+            .is_ok()
+        {
+            return Err("depois do aviso, uma escrita passou");
+        }
+        if d.descarregar_disco().is_ok() {
+            return Err("depois do aviso, uma descarga passou");
+        }
+        Ok(())
+    })
+    .ok_or("a maquina de testes nao tem o NVMe")?
 }
 
 /// O contador de NV do TPM, pelo transporte do kernel e por uma sessão
@@ -7080,7 +7398,7 @@ fn relogio_o_rtc_diz_uma_data_plausivel() -> Resultado {
 /// transforma "leu alguma coisa" em "leu o campo certo".
 ///
 /// O `nodesize` tem um papel a mais: ele é 16 KiB, que é exatamente o que
-/// [`crate::virtio::blk::MAIOR_LEITURA`] traz numa ida ao disco. Os dois
+/// [`crate::bloco::MAIOR_LEITURA`] traz numa ida ao disco. Os dois
 /// números coincidirem não é sorte — o driver foi dimensionado para isto — e
 /// o caso falha se alguém mudar um sem o outro.
 fn btrfs_superbloco_confere() -> Resultado {
@@ -7113,7 +7431,7 @@ fn btrfs_superbloco_confere() -> Resultado {
         );
         return Err("o tamanho de no nao e o que o xtask formatou");
     }
-    if sb.tamanho_de_no as usize > crate::virtio::blk::MAIOR_LEITURA {
+    if sb.tamanho_de_no as usize > crate::bloco::MAIOR_LEITURA {
         return Err("o no nao cabe numa ida ao disco");
     }
     if sb.tamanho_de_setor != 4096 {
@@ -16214,7 +16532,7 @@ fn persistencia_cada_operacao_um_registro() -> Resultado {
         );
         let antes = registros_do_journal()?.len();
         let geracao = crate::persistencia::geracao();
-        let disco = || crate::virtio::blk::com_o_disco(|d| d.contadores()).ok_or("sem disco");
+        let disco = || crate::bloco::com_o_disco(|d| d.contadores()).ok_or("sem disco");
         let (escritas, descargas) = disco()?;
         let r = executar_admin_com(
             0,
@@ -17829,7 +18147,7 @@ fn compactacao_preserva_o_estado() -> Resultado {
         let geracao = crate::persistencia::geracao();
         let tpm = crate::persistencia::ancora_no_tpm_de_teste()?;
         let velha = crate::persistencia::percorrida_de_teste(regiao)?;
-        let descargas = || crate::virtio::blk::com_o_disco(|d| d.contadores().1).unwrap_or(0);
+        let descargas = || crate::bloco::com_o_disco(|d| d.contadores().1).unwrap_or(0);
         let antes_das_descargas = descargas();
         crate::persistencia::compactar_de_teste()?;
         // Uma descarga, a da base inteira, antes do contador.
@@ -28126,7 +28444,7 @@ fn armazem_o_agente_manda_binario_no_anexo() -> Resultado {
 /// cruzam, e nenhuma escreve na outra pelo nome errado. O conteúdo de um
 /// arquivo não aparece em claro nem no volume nem na partição de estado.
 fn armazem_o_volume_e_da_particao_propria() -> Resultado {
-    use crate::virtio::blk::Janela;
+    use crate::bloco::Janela;
     const MARCA: &[u8] = b"marca-do-volume-que-nao-aparece-em-claro";
     let tabela = crate::particoes::varrer()?;
     let estado = tabela
@@ -28136,7 +28454,7 @@ fn armazem_o_volume_e_da_particao_propria() -> Resultado {
         .primeira(crate::particoes::Tipo::Armazem)
         .ok_or("sem particao do armazem")?;
     let (je, ja) =
-        crate::virtio::blk::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
+        crate::bloco::com_o_disco(|d| (d.janela(Janela::Estado), d.janela(Janela::Armazem)))
             .ok_or("nao ha disco")?;
     if je != Some((estado.primeiro, estado.setores))
         || ja != Some((volume.primeiro, volume.setores))
@@ -28149,9 +28467,9 @@ fn armazem_o_volume_e_da_particao_propria() -> Resultado {
         return Err("as particoes de estado e do armazem se cruzam");
     }
     // Pelo nome errado, nada se escreve — nem um setor.
-    const B: usize = crate::virtio::blk::TAMANHO_DO_SETOR;
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
     let lixo = [0xEEu8; B];
-    let recusas = crate::virtio::blk::com_o_disco(|d| {
+    let recusas = crate::bloco::com_o_disco(|d| {
         let (escritas, _) = d.contadores();
         let a = d
             .gravar_setores(Janela::Armazem, estado.primeiro + 1, &lixo)
@@ -28165,7 +28483,7 @@ fn armazem_o_volume_e_da_particao_propria() -> Resultado {
     if !recusas {
         return Err("uma janela escreveu na particao da outra");
     }
-    if crate::virtio::blk::fixar_janela_de_escrita(Janela::Armazem, estado.primeiro, estado.setores)
+    if crate::bloco::fixar_janela_de_escrita(Janela::Armazem, estado.primeiro, estado.setores)
         .is_ok()
     {
         return Err("a janela do armazem foi redesenhada sobre o estado");
@@ -28190,10 +28508,9 @@ fn armazem_o_volume_e_da_particao_propria() -> Resultado {
         let mut buf = alloc::vec![0u8; 64 * 1024];
         let mut s = 0u64;
         while s < setores {
-            let n = (setores - s).min((crate::virtio::blk::MAIOR_LEITURA / B) as u64);
+            let n = (setores - s).min((crate::bloco::MAIOR_LEITURA / B) as u64);
             let fatia = &mut buf[..n as usize * B];
-            crate::virtio::blk::com_o_disco(|d| d.ler(primeiro + s, fatia))
-                .ok_or("nao ha disco")??;
+            crate::bloco::com_o_disco(|d| d.ler(primeiro + s, fatia)).ok_or("nao ha disco")??;
             if fatia.windows(MARCA.len()).any(|w| w == MARCA) {
                 return Ok(true);
             }
@@ -31194,6 +31511,26 @@ static CASOS: &[Caso] = &[
         f: disco_a_janela_nao_se_redesenha,
     },
     Caso {
+        nome: "nvme: o controlador liga, e o disco e o que o xtask montou",
+        f: nvme_o_controlador_liga,
+    },
+    Caso {
+        nome: "nvme: cada setor devolve o seu padrao, de um a trinta e dois setores por ida",
+        f: nvme_cada_setor_devolve_o_seu_padrao,
+    },
+    Caso {
+        nome: "nvme: escreve, descarrega e le de volta, so dentro da janela",
+        f: nvme_escreve_so_dentro_da_janela,
+    },
+    Caso {
+        nome: "nvme: dois fios escrevendo ao mesmo tempo, e a fila da varias voltas",
+        f: nvme_dois_fios_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "nvme: o aviso de desligamento para o controlador, e nada mais passa",
+        f: nvme_o_aviso_de_desligamento,
+    },
+    Caso {
         nome: "tpm: o contador da ancora so cresce, e so com a senha",
         f: tpm_o_contador_so_cresce,
     },
@@ -32516,8 +32853,8 @@ fn pci_regioes_atribuidas_nao_se_sobrepoem() -> Resultado {
 /// caminho de DMA quebrado devolve um buffer intacto — e um buffer intacto é
 /// de zeros, que passariam por qualquer verificação frouxa.
 fn disco_le_as_assinaturas_de_particionamento() -> Resultado {
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(0, &mut setor)) else {
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler_setor(0, &mut setor)) else {
         return Err("nao ha disco nesta maquina");
     };
     resultado?;
@@ -32537,7 +32874,7 @@ fn disco_le_as_assinaturas_de_particionamento() -> Resultado {
     // últimos, então um driver que só trouxesse o fim do setor passaria. O
     // cabeçalho seguinte é a marca que mora no **começo** de um setor, e os
     // dois juntos cobrem as duas pontas.
-    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
+    let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
         return Err("nao ha disco nesta maquina");
     };
     resultado?;
@@ -32570,11 +32907,10 @@ fn disco_cada_setor_devolve_o_seu_padrao() -> Resultado {
     // limite aparece.
     const ALVOS: [u64; 6] = [PADRAO_DE, PADRAO_DE + 1, 100, 999, 1500, PADRAO_ATE];
 
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
 
     for numero in ALVOS {
-        let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(numero, &mut setor))
-        else {
+        let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler_setor(numero, &mut setor)) else {
             return Err("nao ha disco nesta maquina");
         };
         resultado?;
@@ -32602,7 +32938,7 @@ fn disco_cada_setor_devolve_o_seu_padrao() -> Resultado {
 /// dispositivo. Poderia não ser — o dispositivo também recusaria —, mas então
 /// o erro voltaria como "o dispositivo recusou", que não diz por quê.
 fn disco_recusa_setor_fora_da_capacidade() -> Resultado {
-    let Some(capacidade) = crate::virtio::blk::com_o_disco(|d| d.capacidade()) else {
+    let Some(capacidade) = crate::bloco::com_o_disco(|d| d.capacidade()) else {
         return Err("nao ha disco nesta maquina");
     };
     if capacidade == 0 {
@@ -32618,8 +32954,8 @@ fn disco_recusa_setor_fora_da_capacidade() -> Resultado {
     // detalhe interno: é o campo `error` que o agente lê em `disk.read`.
     const POR_CAPACIDADE: &str = "setor alem da capacidade do disco";
 
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let resultado = crate::virtio::blk::com_o_disco(|d| {
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
+    let resultado = crate::bloco::com_o_disco(|d| {
         let alem = [
             d.ler_setor(capacidade, &mut setor),
             d.ler_setor(capacidade + 1, &mut setor),
@@ -47803,8 +48139,7 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
         ("system.reboot", Acao::Reiniciar, "rebooting"),
         ("system.poweroff", Acao::Desligar, "powering_off"),
     ] {
-        let (_, descargas_antes) =
-            crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+        let (_, descargas_antes) = crate::bloco::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
         let pedido_em = crate::tempo::uptime_ms();
         let r = fs_pedir(sistema, metodo, "{}");
         let registro = fs_numero(&r, "record").ok_or_else(|| {
@@ -47854,7 +48189,7 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
             crate::log_error!("teste", "{} ms", passou);
             return Err("as gravacoes pararam antes da espera");
         }
-        let (_, descargas) = crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+        let (_, descargas) = crate::bloco::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
         if descargas <= descargas_antes {
             return Err("o disco nao descarregou antes de a maquina parar");
         }
@@ -48135,8 +48470,8 @@ fn armazem_a_verificacao_acha_o_bloco_que_nao_abre() -> Resultado {
         .ok_or("o arquivo do caso nao tem bloco")?;
         let setor = crate::volume::setor_do_bloco(bloco).ok_or("o bloco nao tem setor")?;
         let divergencias = crate::armazem::divergencias_de_teste();
-        crate::virtio::blk::com_o_disco(|d| {
-            d.gravar_setores(crate::virtio::blk::Janela::Armazem, setor, &[0xA5; 512])
+        crate::bloco::com_o_disco(|d| {
+            d.gravar_setores(crate::bloco::Janela::Armazem, setor, &[0xA5; 512])
         })
         .ok_or("sem disco")??;
         let r = verificar(sistema, "/armazem");
@@ -48878,8 +49213,8 @@ fn irq_o_virtio_interrompe_de_verdade() -> Resultado {
     let antes = crate::virtio::total_de_avisos();
 
     // Gerar trabalho: uma leitura de disco basta, e é a mais barata.
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler_setor(1, &mut setor)) else {
         return Err("nao ha disco nesta maquina");
     };
     resultado?;
@@ -48959,8 +49294,8 @@ fn uma_janela_da_linha_compartilhada() -> Result<bool, &'static str> {
         return Err("o disco nao registrou interrupcao");
     };
 
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let Some(resultado) = crate::virtio::blk::com_o_disco(|d| d.ler_setor(2, &mut setor)) else {
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
+    let Some(resultado) = crate::bloco::com_o_disco(|d| d.ler_setor(2, &mut setor)) else {
         return Err("nao ha disco nesta maquina");
     };
     resultado?;

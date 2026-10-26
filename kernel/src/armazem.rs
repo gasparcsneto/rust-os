@@ -1324,17 +1324,17 @@ impl SistemaDeArquivos for NoVfs {
                     // segunda leitura, antes de ela abrir no lugar —, e as
                     // escritas que o disco confirmou nos setores do bloco.
                     #[cfg(feature = "modo-teste")]
-                    let primeira = crate::virtio::blk::resumo(&buf[..]);
+                    let primeira = crate::bloco::resumo(&buf[..]);
                     #[cfg(feature = "modo-teste")]
                     let segunda_crua = crate::volume::setor_do_bloco(b).and_then(|s| {
                         let mut cru: Box<[u8; TAM_BLOCO]> = Box::new([0; TAM_BLOCO]);
-                        crate::virtio::blk::com_o_disco(|d| d.ler(s, &mut cru[..]))?
+                        crate::bloco::com_o_disco(|d| d.ler(s, &mut cru[..]))?
                             .ok()
-                            .map(|()| crate::virtio::blk::resumo(&cru[..]))
+                            .map(|()| crate::bloco::resumo(&cru[..]))
                     });
                     #[cfg(feature = "modo-teste")]
                     let escritas = crate::volume::setor_do_bloco(b).and_then(|s| {
-                        crate::virtio::blk::com_o_disco(|d| {
+                        crate::bloco::com_o_disco(|d| {
                             d.escritas_em(s, ::armazem::bloco::SETORES_POR_BLOCO)
                         })
                     });

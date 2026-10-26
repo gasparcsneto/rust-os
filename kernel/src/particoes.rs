@@ -267,14 +267,14 @@ pub(crate) fn planejar(
     // Uma entrada precisa caber num setor e ter os campos que lemos. Sem
     // isto, um tamanho absurdo faria a aritmética de deslocamento apontar
     // para qualquer lugar do buffer.
-    if !(entrada::ULTIMO + 8..=crate::virtio::blk::TAMANHO_DO_SETOR).contains(&tamanho) {
+    if !(entrada::ULTIMO + 8..=crate::bloco::TAMANHO_DO_SETOR).contains(&tamanho) {
         return Err("tamanho de entrada implausivel na GPT");
     }
     if quantas > MAX_ENTRADAS {
         return Err("entradas demais na GPT");
     }
 
-    let por_setor = crate::virtio::blk::TAMANHO_DO_SETOR / tamanho;
+    let por_setor = crate::bloco::TAMANHO_DO_SETOR / tamanho;
 
     // O setor da última entrada é a maior conta que a varredura vai fazer. Se
     // ele não cabe num `u64`, o vetor começa fora de qualquer disco possível —
@@ -293,9 +293,9 @@ pub(crate) fn planejar(
 
 /// Lê a tabela do disco da máquina.
 pub fn varrer() -> Result<Tabela, &'static str> {
-    let mut setor = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
+    let mut setor = [0u8; crate::bloco::TAMANHO_DO_SETOR];
 
-    let resultado = crate::virtio::blk::com_o_disco(|d| d.ler_setor(CABECALHO_EM, &mut setor));
+    let resultado = crate::bloco::com_o_disco(|d| d.ler_setor(CABECALHO_EM, &mut setor));
     let Some(resultado) = resultado else {
         return Err("nao ha disco nesta maquina");
     };
@@ -317,8 +317,7 @@ pub fn varrer() -> Result<Tabela, &'static str> {
 
     while indice < plano.quantas && achadas < MAX {
         let setor_da_entrada = plano.setor_da(indice);
-        let resultado =
-            crate::virtio::blk::com_o_disco(|d| d.ler_setor(setor_da_entrada, &mut setor));
+        let resultado = crate::bloco::com_o_disco(|d| d.ler_setor(setor_da_entrada, &mut setor));
         let Some(resultado) = resultado else {
             return Err("nao ha disco nesta maquina");
         };

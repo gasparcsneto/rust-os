@@ -182,9 +182,9 @@ pub fn do_disco(primeiro: u64, bloco: &mut [u8]) -> Result<Superbloco, &'static 
         return Err("o buffer nao cabe um superbloco");
     }
 
-    let setor = primeiro + SUPERBLOCO_EM / crate::virtio::blk::TAMANHO_DO_SETOR as u64;
+    let setor = primeiro + SUPERBLOCO_EM / crate::bloco::TAMANHO_DO_SETOR as u64;
     let resultado =
-        crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut bloco[..TAMANHO_DO_SUPERBLOCO]));
+        crate::bloco::com_o_disco(|d| d.ler(setor, &mut bloco[..TAMANHO_DO_SUPERBLOCO]));
     let Some(resultado) = resultado else {
         return Err("nao ha disco nesta maquina");
     };
@@ -336,7 +336,7 @@ impl Volume {
         if destino.len() < tamanho {
             return Err("o destino nao cabe um no");
         }
-        if !(no::TAMANHO..=crate::virtio::blk::MAIOR_LEITURA).contains(&tamanho) {
+        if !(no::TAMANHO..=crate::bloco::MAIOR_LEITURA).contains(&tamanho) {
             return Err("o tamanho de no nao e um que este leitor saiba ler");
         }
 
@@ -345,13 +345,13 @@ impl Volume {
             .traduzir(logico)
             .ok_or("o endereco logico nao cai em pedaco conhecido")?;
 
-        let setor_da_particao = crate::virtio::blk::TAMANHO_DO_SETOR as u64;
+        let setor_da_particao = crate::bloco::TAMANHO_DO_SETOR as u64;
         if !fisico.is_multiple_of(setor_da_particao) {
             return Err("o endereco traduzido nao cai em fronteira de setor");
         }
 
         let setor = self.primeiro + fisico / setor_da_particao;
-        let resultado = crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut destino[..tamanho]));
+        let resultado = crate::bloco::com_o_disco(|d| d.ler(setor, &mut destino[..tamanho]));
         let Some(resultado) = resultado else {
             return Err("nao ha disco nesta maquina");
         };
@@ -809,9 +809,9 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
                 }
 
                 // Uma ida ao disco por vez, do tamanho que o driver monta.
-                let por_vez = crate::virtio::blk::MAIOR_LEITURA;
+                let por_vez = crate::bloco::MAIOR_LEITURA;
                 let logico = endereco + deslocamento;
-                let setor_em_bytes = crate::virtio::blk::TAMANHO_DO_SETOR as u64;
+                let setor_em_bytes = crate::bloco::TAMANHO_DO_SETOR as u64;
 
                 // A leitura precisa começar numa fronteira de setor: o driver
                 // lê setores inteiros. O que sobra antes do ponto pedido é
@@ -827,10 +827,10 @@ impl crate::vfs::SistemaDeArquivos for Sistema {
                     .ok_or(crate::vfs::Erro::DoDispositivo)?;
 
                 let mut bruto = alloc::vec![0u8; bytes.div_ceil(
-                    crate::virtio::blk::TAMANHO_DO_SETOR
-                ) * crate::virtio::blk::TAMANHO_DO_SETOR];
+                    crate::bloco::TAMANHO_DO_SETOR
+                ) * crate::bloco::TAMANHO_DO_SETOR];
                 let setor = self.volume.primeiro + fisico / setor_em_bytes;
-                let resultado = crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut bruto));
+                let resultado = crate::bloco::com_o_disco(|d| d.ler(setor, &mut bruto));
                 resultado
                     .ok_or(crate::vfs::Erro::DoDispositivo)?
                     .map_err(|_| crate::vfs::Erro::DoDispositivo)?;

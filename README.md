@@ -202,7 +202,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint`, `fatal`, `stack_overflow`, `hang_core`; no ARM também `stack_overflow_edge`) |
 | `pci.list` | Dispositivos do barramento PCI, com fabricante, modelo e função |
-| `disk.info` | Capacidade e estado do disco virtio, se houver um |
+| `disk.info` | Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um |
 | `disk.read` | Lê um setor de 512 bytes e o devolve em hexadecimal (`sector`, `length`) |
 | `disk.partitions` | A tabela de partições do disco, lida da GPT |
 | `btrfs.info` | O superbloco do Btrfs da partição de dados |
@@ -308,6 +308,8 @@ kernel/src/
 ├── ui.rs            a árvore semântica: o que está na tela, e o que se faz com cada coisa
 ├── teclado.rs       o que uma pessoa digita chega ao kernel
 ├── pci.rs           enumeração do barramento PCI
+├── bloco.rs         o disco do sistema, de qualquer driver: as janelas de escrita, a descarga, a faixa e a tranca
+├── nvme.rs          o disco NVMe: o controlador, as filas de administração e de entrada e saída, o aviso de desligamento
 ├── particoes.rs     a tabela de partições GPT do disco: ESP, raiz e a de estado
 ├── rede/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
@@ -371,7 +373,7 @@ kernel/src/
 │   ├── mod.rs       dispositivos virtio
 │   ├── transporte.rs  achar os registradores de um dispositivo, e ligá-lo
 │   ├── fila.rs      a virtqueue split: o canal por onde os pedidos passam
-│   ├── blk.rs       o disco
+│   ├── blk.rs       o disco virtio: só o driver — as regras de todo disco estão em `bloco.rs`
 │   ├── net.rs       a placa de rede
 │   ├── gpu.rs       o vídeo que só mostra o que se manda (porte do virtio-gpud)
 │   ├── console.rs   o canal local dos agentes: uma porta do console virtio por agente

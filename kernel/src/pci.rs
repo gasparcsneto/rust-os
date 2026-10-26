@@ -551,6 +551,23 @@ pub fn habilitar_mestre(d: &Dispositivo) {
     ponta.update_command(acesso, |atual| atual | CommandRegister::BUS_MASTER_ENABLE);
 }
 
+/// Como [`habilitar_mestre`], e sem interrupção de pino: o bit que desliga
+/// o INTx da função. Para o driver que espera por consulta e nunca atende
+/// um aviso — o do NVMe —: um pino levantado que ninguém abaixa prenderia a
+/// linha, e com ela quem a divide.
+pub fn habilitar_mestre_por_consulta(d: &Dispositivo) {
+    let Some(acesso) = crate::arch::pci::acesso() else {
+        return;
+    };
+    let endereco = PciAddress::new(0, d.barramento, d.dispositivo, d.funcao);
+    let Some(mut ponta) = EndpointHeader::from_header(PciHeader::new(endereco), acesso) else {
+        return;
+    };
+    ponta.update_command(acesso, |atual| {
+        atual | CommandRegister::BUS_MASTER_ENABLE | CommandRegister::INTERRUPT_DISABLE
+    });
+}
+
 /// Quantos dispositivos a varredura encontrou.
 pub fn total() -> usize {
     ENCONTRADOS.load(Ordering::Acquire)

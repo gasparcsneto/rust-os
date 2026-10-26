@@ -68,8 +68,8 @@ use ::armazem::{Armazem, Faixas, Lote, Mudanca};
 use diario::Meio;
 use diario::estado::tipo;
 
+use crate::bloco::Janela;
 use crate::trava::Mutex;
-use crate::virtio::blk::Janela;
 
 /// O menor volume aceito: 8 MiB. Abaixo disso o journal dos metadados não
 /// teria lugar para um lote grande e uma compactação.
@@ -183,7 +183,7 @@ fn chaves() -> Option<([u8; 32], [u8; 32])> {
 
 /// A partição do armazém: a janela de escrita que o boot fixou para ela.
 fn particao() -> Result<(u64, u64), &'static str> {
-    crate::virtio::blk::com_o_disco(|d| d.janela(Janela::Armazem))
+    crate::bloco::com_o_disco(|d| d.janela(Janela::Armazem))
         .flatten()
         .ok_or("o disco nao tem a particao do armazem")
 }
@@ -203,9 +203,9 @@ impl Meio for NoVolume {
     fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
         let mut feito = 0;
         while feito < destino.len() {
-            let n = (destino.len() - feito).min(crate::virtio::blk::MAIOR_LEITURA);
+            let n = (destino.len() - feito).min(crate::bloco::MAIOR_LEITURA);
             let s = self.primeiro + setor + (feito / diario::TAM_SETOR) as u64;
-            crate::virtio::blk::com_o_disco(|d| d.ler(s, &mut destino[feito..feito + n]))
+            crate::bloco::com_o_disco(|d| d.ler(s, &mut destino[feito..feito + n]))
                 .ok_or("nao ha disco")??;
             feito += n;
         }
@@ -215,9 +215,9 @@ impl Meio for NoVolume {
     fn escrever(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
         let mut feito = 0;
         while feito < origem.len() {
-            let n = (origem.len() - feito).min(crate::virtio::blk::MAIOR_LEITURA);
+            let n = (origem.len() - feito).min(crate::bloco::MAIOR_LEITURA);
             let s = self.primeiro + setor + (feito / diario::TAM_SETOR) as u64;
-            crate::virtio::blk::com_o_disco(|d| {
+            crate::bloco::com_o_disco(|d| {
                 d.gravar_setores(Janela::Armazem, s, &origem[feito..feito + n])
             })
             .ok_or("nao ha disco")??;
@@ -227,7 +227,7 @@ impl Meio for NoVolume {
     }
 
     fn descarregar(&mut self) -> Result<(), &'static str> {
-        crate::virtio::blk::com_o_disco(|d| d.descarregar_disco()).ok_or("nao ha disco")?
+        crate::bloco::com_o_disco(|d| d.descarregar_disco()).ok_or("nao ha disco")?
     }
 }
 
@@ -592,10 +592,8 @@ pub fn escrever_blocos(
             let pedaco = pedacos.next().unwrap_or(&[]);
             bloco::selar(&chave, &g.id, id, k, pedaco, &mut buffer)?;
             let setor = inicio + b * SETORES_POR_BLOCO;
-            crate::virtio::blk::com_o_disco(|d| {
-                d.gravar_setores(Janela::Armazem, setor, &buffer[..])
-            })
-            .ok_or("nao ha disco")??;
+            crate::bloco::com_o_disco(|d| d.gravar_setores(Janela::Armazem, setor, &buffer[..]))
+                .ok_or("nao ha disco")??;
             k += 1;
         }
     }
@@ -621,7 +619,7 @@ pub fn ler_bloco(
         return Err("bloco fora da area de dados");
     }
     let setor = inicio + bloco_ * SETORES_POR_BLOCO;
-    crate::virtio::blk::com_o_disco(|d| d.ler(setor, &mut destino[..])).ok_or("nao ha disco")??;
+    crate::bloco::com_o_disco(|d| d.ler(setor, &mut destino[..])).ok_or("nao ha disco")??;
     bloco::abrir(&chave, &g.id, id, indice, destino)?;
     Ok(())
 }

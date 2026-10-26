@@ -418,7 +418,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "disk.info",
-        resumo: "Capacidade e estado do disco virtio, se houver um.",
+        resumo: "Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um.",
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
@@ -3053,8 +3053,7 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("clock", crate::persistencia::agora())?;
     // O que o disco confirmou: escritas e descargas. É de fora que se vê
     // uma operação de autoridade terminar numa descarga.
-    let (escritas, descargas) =
-        crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+    let (escritas, descargas) = crate::bloco::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
     w.field_u64("disk_writes", escritas)?;
     w.field_u64("disk_flushes", descargas)?;
     w.end_object()?;
@@ -5751,15 +5750,15 @@ const BYTES_MOSTRADOS_POR_PADRAO: u64 = 64;
 
 fn disk_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
-    match crate::virtio::blk::com_o_disco(|disco| disco.capacidade()) {
-        Some(setores) => {
+    match crate::bloco::com_o_disco(|disco| (disco.capacidade(), disco.driver(), disco.duravel())) {
+        Some((setores, driver, duravel)) => {
             w.field_bool("present", true)?;
+            // Qual driver dirige o disco do sistema: virtio-blk ou nvme.
+            w.field_str("driver", driver)?;
+            w.field_bool("durable", duravel)?;
             w.field_u64("sectors", setores)?;
-            w.field_u64("sector_size", crate::virtio::blk::TAMANHO_DO_SETOR as u64)?;
-            w.field_u64(
-                "bytes",
-                setores * crate::virtio::blk::TAMANHO_DO_SETOR as u64,
-            )?;
+            w.field_u64("sector_size", crate::bloco::TAMANHO_DO_SETOR as u64)?;
+            w.field_u64("bytes", setores * crate::bloco::TAMANHO_DO_SETOR as u64)?;
         }
         // Ausência não é erro. A máquina pode legitimamente não ter disco, e
         // dizer isso é mais útil ao agente que um código de falha que ele
@@ -5778,10 +5777,10 @@ fn disk_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .member("length")
         .and_then(|v| v.as_u64())
         .unwrap_or(BYTES_MOSTRADOS_POR_PADRAO)
-        .min(crate::virtio::blk::TAMANHO_DO_SETOR as u64) as usize;
+        .min(crate::bloco::TAMANHO_DO_SETOR as u64) as usize;
 
-    let mut buffer = [0u8; crate::virtio::blk::TAMANHO_DO_SETOR];
-    let resultado = crate::virtio::blk::com_o_disco(|disco| disco.ler_setor(setor, &mut buffer));
+    let mut buffer = [0u8; crate::bloco::TAMANHO_DO_SETOR];
+    let resultado = crate::bloco::com_o_disco(|disco| disco.ler_setor(setor, &mut buffer));
 
     w.begin_object()?;
     w.field_u64("sector", setor)?;
@@ -5789,7 +5788,7 @@ fn disk_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     match resultado {
         None => {
             w.field_bool("ok", false)?;
-            w.field_str("error", "nao ha disco virtio nesta maquina")?;
+            w.field_str("error", "nao ha disco nesta maquina")?;
         }
         Some(Err(motivo)) => {
             w.field_bool("ok", false)?;

@@ -68,6 +68,7 @@ mod armazem;
 mod atividade;
 mod autorizacao;
 mod barra;
+mod bloco;
 mod chaves;
 mod contencao;
 mod coordenacao;
@@ -88,6 +89,7 @@ mod metricas;
 mod mmio;
 mod nativo;
 mod nucleos;
+mod nvme;
 mod oleoduto;
 #[cfg(feature = "modo-teste")]
 mod ordem_das_travas;
@@ -381,6 +383,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     barra::iniciar();
 
     virtio::blk::init();
+    // O NVMe, depois: numa máquina com os dois, o disco do sistema é o
+    // virtio — ver [`bloco`].
+    nvme::init();
     // O TPM e o relógio de parede: a âncora e o tempo da persistência.
     tpm::init();
     relogio::init();
@@ -441,13 +446,13 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
             // As janelas de escrita, antes de qualquer outra coisa usar o
             // disco: a partição de estado, para o journal, e a do armazém,
             // para o volume dele — e só elas, cada uma pelo nome, e sem se
-            // cruzar. Ver [`virtio::blk::fixar_janela_de_escrita`]. Sem a de
+            // cruzar. Ver [`bloco::fixar_janela_de_escrita`]. Sem a de
             // estado, o disco fica só de leitura, e a persistência diz que
             // não há onde gravar; sem a do armazém, o armazém fica
             // indisponível, e o estado não muda por isso.
             for (tipo, janela) in [
-                (particoes::Tipo::Estado, virtio::blk::Janela::Estado),
-                (particoes::Tipo::Armazem, virtio::blk::Janela::Armazem),
+                (particoes::Tipo::Estado, bloco::Janela::Estado),
+                (particoes::Tipo::Armazem, bloco::Janela::Armazem),
             ] {
                 let Some(p) = tabela.primeira(tipo) else {
                     log_warn!(
@@ -457,7 +462,7 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
                     );
                     continue;
                 };
-                match virtio::blk::fixar_janela_de_escrita(janela, p.primeiro, p.setores) {
+                match bloco::fixar_janela_de_escrita(janela, p.primeiro, p.setores) {
                     Ok(()) => log_info!(
                         "disco",
                         "janela de escrita: setores {}..{} (particao {})",

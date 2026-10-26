@@ -288,6 +288,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_rede_fixa_da_imagem,
     },
     Cenario {
+        nome: "o disco do sistema no NVMe: o firmware boota dele, o armazem e a cadeia sobrevivem ao corte, e o desligamento avisa o controlador",
+        rodar: o_disco_nvme_do_sistema,
+    },
+    Cenario {
         nome: "o signatario recusa assinar sobre uma geracao menor que a que ja viu",
         rodar: o_signatario_recusa_geracao_menor,
     },
@@ -760,6 +764,91 @@ fn o_heap_segue_a_memoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
         "{} MiB na de 128 MiB, {} MiB na de 1 GiB",
         pequena / MIB,
         grande / MIB
+    ))
+}
+
+/// O disco do sistema num controlador NVMe, de ponta a ponta, num kernel
+/// de produção — o disco de uma máquina de verdade: no x86 o firmware boota
+/// dele (não há outro disco na máquina); o `disk.info` diz o driver; a
+/// persistência abre; o que se grava no armazém e se confirma sobrevive a
+/// um corte de energia, com a cadeia da auditoria inteira; e o
+/// desligamento pelo comando — a descarga e o aviso ao controlador — deixa
+/// o pedido no journal do boot seguinte, e o arquivo lá.
+fn o_disco_nvme_do_sistema(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/sistema/nvme.txt";
+    const CONTEUDO: &str = "gravado no NVMe";
+    let nvme = || Ambiente::ligar(arch, None).map(Ambiente::com_nvme);
+    let mut m = Ligada::subir_com(arch, artefato, nvme()?)?;
+    let r = m.pedir("disk.info", "{}")?;
+    if !r.contains(r#""driver":"nvme""#) || !r.contains(r#""durable":true"#) {
+        return Err(format!("o disk.info nao diz o NVMe duravel\n  {r}"));
+    }
+    let antes = persistencia_de(&mut m)?;
+    if antes.estado != "available" {
+        return Err(format!(
+            "a persistencia nao abriu no NVMe: {} ({})",
+            antes.estado, antes.motivo
+        ));
+    }
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/sistema"}"#)?;
+    no_armazem(
+        &mut m,
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"{CONTEUDO}","expect_version":0}}"#),
+    )?;
+    let versao = versao_no_armazem(&mut m, A)?;
+    let r = m.pedir("fs.verify", r#"{"path":"/armazem"}"#)?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!("o armazem no NVMe nao conferiu\n  {r}"));
+    }
+    m.cortar_a_energia()?;
+
+    let mut m = Ligada::subir_com(arch, artefato, nvme()?)?;
+    let depois = persistencia_de(&mut m)?;
+    if depois.estado != "available" || depois.boots <= antes.boots {
+        return Err(format!(
+            "depois do corte: {} ({}), boot {} depois de {}",
+            depois.estado, depois.motivo, depois.boots, antes.boots
+        ));
+    }
+    let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    if !lido.contains(CONTEUDO) || versao_no_armazem(&mut m, A)? != versao {
+        return Err(format!(
+            "o arquivo nao sobreviveu ao corte no NVMe\n  {lido}"
+        ));
+    }
+    auditoria_verifica(&mut m)?;
+    let r = m.pedir("system.poweroff", "{}")?;
+    let registro: u64 = texto_do_resultado(&r, "record")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("o desligamento nao foi aceito\n  {r}"))?;
+    let status = m.esperar_sair(Duration::from_secs(60))?;
+    if !status.success() {
+        return Err(format!("o QEMU saiu com {status}, e nao pelo desligamento"));
+    }
+    drop(m);
+
+    let mut m = Ligada::subir_com(arch, artefato, nvme()?)?;
+    let terceiro = persistencia_de(&mut m)?;
+    if terceiro.estado != "available" || terceiro.boots <= depois.boots {
+        return Err(format!(
+            "depois do desligamento: {} ({}), boot {} depois de {}",
+            terceiro.estado, terceiro.motivo, terceiro.boots, depois.boots
+        ));
+    }
+    let cauda = cauda_da_auditoria(&mut m)?;
+    pedido_de_energia_na_cauda(&cauda, registro, "system.poweroff", "poweroff")?;
+    auditoria_verifica(&mut m)?;
+    let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    m.cortar_a_energia()?;
+    if !lido.contains(CONTEUDO) {
+        return Err(format!(
+            "o arquivo nao estava la depois do desligamento\n  {lido}"
+        ));
+    }
+    Ok(format!(
+        "boots {} -> {} -> {}; o arquivo e a cadeia sobreviveram ao corte; o desligamento pelo comando deixou o pedido {registro} no journal",
+        antes.boots, depois.boots, terceiro.boots
     ))
 }
 

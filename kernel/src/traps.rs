@@ -323,7 +323,9 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::fios::destravar();
         crate::tarefas::relogio::destravar();
         crate::tarefas::executor::destravar();
-        crate::virtio::blk::destravar();
+        crate::bloco::destravar();
+        #[cfg(feature = "modo-teste")]
+        crate::nvme::destravar();
         crate::tpm::destravar();
         crate::persistencia::destravar();
         crate::virtio::net::destravar();

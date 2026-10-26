@@ -580,9 +580,9 @@ impl Meio for Particao {
     fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
         let mut feito = 0;
         while feito < destino.len() {
-            let n = (destino.len() - feito).min(crate::virtio::blk::MAIOR_LEITURA);
+            let n = (destino.len() - feito).min(crate::bloco::MAIOR_LEITURA);
             let s = self.primeiro + setor + (feito / diario::TAM_SETOR) as u64;
-            crate::virtio::blk::com_o_disco(|d| d.ler(s, &mut destino[feito..feito + n]))
+            crate::bloco::com_o_disco(|d| d.ler(s, &mut destino[feito..feito + n]))
                 .ok_or("nao ha disco")??;
             feito += n;
         }
@@ -592,14 +592,10 @@ impl Meio for Particao {
     fn escrever(&mut self, setor: u64, origem: &[u8]) -> Result<(), &'static str> {
         let mut feito = 0;
         while feito < origem.len() {
-            let n = (origem.len() - feito).min(crate::virtio::blk::MAIOR_LEITURA);
+            let n = (origem.len() - feito).min(crate::bloco::MAIOR_LEITURA);
             let s = self.primeiro + setor + (feito / diario::TAM_SETOR) as u64;
-            crate::virtio::blk::com_o_disco(|d| {
-                d.gravar_setores(
-                    crate::virtio::blk::Janela::Estado,
-                    s,
-                    &origem[feito..feito + n],
-                )
+            crate::bloco::com_o_disco(|d| {
+                d.gravar_setores(crate::bloco::Janela::Estado, s, &origem[feito..feito + n])
             })
             .ok_or("nao ha disco")??;
             feito += n;
@@ -608,18 +604,16 @@ impl Meio for Particao {
     }
 
     fn descarregar(&mut self) -> Result<(), &'static str> {
-        crate::virtio::blk::com_o_disco(|d| d.descarregar_disco()).ok_or("nao ha disco")?
+        crate::bloco::com_o_disco(|d| d.descarregar_disco()).ok_or("nao ha disco")?
     }
 }
 
 /// A partição de estado: a janela de escrita que o boot fixou. Para ler
 /// basta ela; para gravar, ver [`particao`].
 fn janela() -> Result<Particao, &'static str> {
-    let (primeiro, setores) = crate::virtio::blk::com_o_disco(|d| {
-        d.janela(crate::virtio::blk::Janela::Estado)
-            .unwrap_or((0, 0))
-    })
-    .ok_or("nao ha disco")?;
+    let (primeiro, setores) =
+        crate::bloco::com_o_disco(|d| d.janela(crate::bloco::Janela::Estado).unwrap_or((0, 0)))
+            .ok_or("nao ha disco")?;
     if setores == 0 {
         return Err("nao ha particao de estado");
     }
@@ -628,7 +622,7 @@ fn janela() -> Result<Particao, &'static str> {
 
 /// Se uma escrita no disco pode ser tornada durável.
 fn duravel() -> Result<(), &'static str> {
-    if crate::virtio::blk::com_o_disco(|d| d.duravel()).unwrap_or(false) {
+    if crate::bloco::com_o_disco(|d| d.duravel()).unwrap_or(false) {
         Ok(())
     } else {
         Err("o disco nao aceita descarga: nenhuma escrita seria duravel")
@@ -1461,19 +1455,23 @@ pub fn gravar_auditoria() -> Result<(), &'static str> {
 /// Para as gravações para a máquina parar — ver [`crate::energia`]: toma a
 /// ordem, que espera a operação de autoridade em curso acabar e não deixa
 /// outra começar, e a tranca do disco, que espera a escrita em curso;
-/// descarrega o disco; e, com as duas na mão, chama `entregar` — que, fora
-/// da suíte, entrega a máquina ao firmware e não volta. Sem disco, chama
-/// `entregar` com a ordem só.
+/// descarrega o disco; avisa o dispositivo de que a energia vai acabar (um
+/// NVMe põe no meio o que guarda — ver [`crate::bloco::Disco::avisar_desligamento`]);
+/// e, com as duas na mão, chama `entregar` — que, fora da suíte, entrega a
+/// máquina ao firmware e não volta. Sem disco, chama `entregar` com a
+/// ordem só. Na suíte não há aviso: a máquina segue, e o disco com ela.
 ///
 /// Aqui, e não na energia, porque escrever e descarregar o disco são do
 /// journal e do volume do armazém — o `xtask` confere.
 pub fn parar_as_gravacoes(entregar: impl FnOnce()) {
     em_ordem(|| {
         let mut entregar = Some(entregar);
-        crate::virtio::blk::com_o_disco(|d| {
+        crate::bloco::com_o_disco(|d| {
             if let Err(motivo) = d.descarregar_disco() {
                 crate::log_warn!("energia", "a descarga final falhou: {}", motivo);
             }
+            #[cfg(not(feature = "modo-teste"))]
+            d.avisar_desligamento();
             if let Some(f) = entregar.take() {
                 f();
             }

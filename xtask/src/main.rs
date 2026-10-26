@@ -2722,10 +2722,12 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("programa::carregar(", &["kernel/src/usuario/mod.rs"]),
     // Escrever no disco: só o journal de estado e o volume do armazém, cada
     // um pela sua janela — o journal na de estado, o volume na dele. As
-    // janelas, só o boot (e a definição delas no driver). O driver confere
-    // a janela em toda escrita, contra qualquer chamador — isto confere que
-    // não há outro chamador, e que nenhum dos dois escreve pela janela do
-    // outro. A suíte, que esta conferência não lê, exercita os três.
+    // janelas, só o boot (e a definição delas na camada de bloco, que vale
+    // para todo driver). A camada confere a janela em toda escrita, contra
+    // qualquer chamador — isto confere que não há outro chamador, e que
+    // nenhum dos dois escreve pela janela do outro. E o aviso de
+    // desligamento ao disco, só quem para as gravações. A suíte, que esta
+    // conferência não lê, exercita todos.
     (
         ".gravar_setores(",
         &["kernel/src/persistencia.rs", "kernel/src/volume.rs"],
@@ -2736,23 +2738,19 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ),
     (
         "Janela::Estado",
-        &[
-            "kernel/src/persistencia.rs",
-            "kernel/src/virtio/blk.rs",
-            "kernel/src/main.rs",
-        ],
+        &["kernel/src/persistencia.rs", "kernel/src/main.rs"],
     ),
     (
         "Janela::Armazem",
-        &[
-            "kernel/src/volume.rs",
-            "kernel/src/virtio/blk.rs",
-            "kernel/src/main.rs",
-        ],
+        &["kernel/src/volume.rs", "kernel/src/main.rs"],
     ),
     (
         "fixar_janela_de_escrita(",
-        &["kernel/src/virtio/blk.rs", "kernel/src/main.rs"],
+        &["kernel/src/bloco.rs", "kernel/src/main.rs"],
+    ),
+    (
+        ".avisar_desligamento(",
+        &["kernel/src/persistencia.rs", "kernel/src/bloco.rs"],
     ),
     // E o journal se abre uma vez, no boot.
     ("persistencia::abrir()", &["kernel/src/main.rs"]),
@@ -6050,6 +6048,33 @@ fn conteudo_do_tftp() -> String {
     (0..40).map(|i| format!("bancada udp {i:03}\n")).collect()
 }
 
+/// Quantos setores tem o disco NVMe dos casos `nvme:` — 16 MiB.
+const SETORES_DO_NVME: u64 = 32 * 1024;
+
+/// O byte `i` do setor `setor` do disco NVMe dos casos: muda de setor para
+/// setor e dentro de cada setor, para que um setor trocado, uma página da
+/// lista de PRP fora de ordem ou um deslocamento dentro do setor apareçam
+/// todos. É metade de um contrato cuja outra metade é a `byte_do_nvme` da
+/// suíte (`kernel/src/testes.rs`).
+fn byte_do_nvme(setor: u64, i: usize) -> u8 {
+    (setor as u8).wrapping_mul(7) ^ ((setor >> 8) as u8) ^ (i as u8).wrapping_mul(3)
+}
+
+/// O disco do NVMe da suíte, refeito a cada execução — os casos escrevem
+/// nele: `target/nvme-testes.img`, com o padrão de [`byte_do_nvme`].
+fn disco_nvme_de_testes() -> Result<PathBuf, String> {
+    let caminho = raiz_do_projeto().join("target").join("nvme-testes.img");
+    let mut conteudo = vec![0u8; (SETORES_DO_NVME * 512) as usize];
+    for (setor, bytes) in conteudo.chunks_mut(512).enumerate() {
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = byte_do_nvme(setor as u64, i);
+        }
+    }
+    std::fs::write(&caminho, &conteudo)
+        .map_err(|e| format!("não foi possível gravar {}: {e}", caminho.display()))?;
+    Ok(caminho)
+}
+
 /// O diretório que o TFTP do emulador serve, com [`ARQUIVO_DO_TFTP`].
 ///
 /// O destino UDP da bancada é o TFTP que o próprio emulador tem, em
@@ -6328,6 +6353,10 @@ struct Ambiente {
     /// cenário que confere o que muda numa máquina maior — o heap do
     /// kernel segue a memória (`kernel/src/heap.rs`).
     memoria_mib: u32,
+    /// O disco da máquina num controlador NVMe, e não no virtio-blk: no
+    /// x86, o firmware boota dele também — o disco de uma máquina de
+    /// verdade, de ponta a ponta (`kernel/src/nvme.rs`).
+    disco_nvme: bool,
 }
 
 impl Ambiente {
@@ -6373,6 +6402,7 @@ impl Ambiente {
             crb: false,
             disco: None,
             memoria_mib: MEMORIA_DA_BANCADA_MIB,
+            disco_nvme: false,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -6403,6 +6433,7 @@ impl Ambiente {
             crb: false,
             disco: None,
             memoria_mib: MEMORIA_DA_BANCADA_MIB,
+            disco_nvme: false,
         }
     }
 
@@ -6415,6 +6446,12 @@ impl Ambiente {
     /// O mesmo ambiente, com `mib` MiB de memória.
     pub(crate) fn com_memoria(mut self, mib: u32) -> Ambiente {
         self.memoria_mib = mib;
+        self
+    }
+
+    /// O mesmo ambiente, com o disco num controlador NVMe.
+    pub(crate) fn com_nvme(mut self) -> Ambiente {
+        self.disco_nvme = true;
         self
     }
 }
@@ -6505,8 +6542,12 @@ fn comando_qemu(
             ]);
             // E o disco de onde o firmware boota, que é o mesmo que o kernel
             // depois lê. O `-drive` sem `if=` o liga ao controlador padrão da
-            // máquina, que é de onde o firmware procura uma ESP.
-            qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
+            // máquina, que é de onde o firmware procura uma ESP. Com o disco
+            // no NVMe, não: o firmware boota do NVMe, como numa máquina de
+            // verdade — ver mais abaixo.
+            if !ambiente.disco_nvme {
+                qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
+            }
             // O dispositivo que permite ao kernel encerrar o QEMU.
             qemu.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
         }
@@ -6601,7 +6642,13 @@ fn comando_qemu(
             disco.display()
         ),
     ]);
-    qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
+    if ambiente.disco_nvme {
+        // O controlador NVMe do QEMU, com o namespace 1 sobre o disco. O
+        // número de série é obrigatório nele.
+        qemu.args(["-device", "nvme,serial=duke-sistema,drive=disco0"]);
+    } else {
+        qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
+    }
 
     // E uma placa de rede virtio, tambem nas duas.
     //
@@ -15111,7 +15158,16 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
     // A PocketIC da bancada do IC, para os casos `icp:` — e fora quando a
     // suíte acaba, ao sair daqui.
     let _icp = icp::Bancada::ligar()?;
+    // E um segundo disco, num controlador NVMe: o disco do sistema é o
+    // virtio-blk, e o NVMe é o dos casos `nvme:` — ver [`disco_nvme_de_testes`].
+    let nvme = disco_nvme_de_testes()?;
     let mut filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
+        .args([
+            "-drive",
+            &format!("format=raw,file={},if=none,id=nvme0", nvme.display()),
+            "-device",
+            "nvme,serial=duke-nvme-testes,drive=nvme0",
+        ])
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
