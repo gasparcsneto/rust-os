@@ -1452,6 +1452,13 @@ fn subir_no_firmware(
     // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
     // disco se ela existisse.
     qemu.args(["-net", "none"]);
+    // Quem espera o desligamento é a suíte inteira, no ARM: a máquina leva
+    // o segundo disco dela, o NVMe dos casos `nvme:`, como no `test`. Sem
+    // ele, os casos do NVMe reprovam aqui dizendo que a máquina não o tem
+    // — a mesma lição de cima, com um disco a mais.
+    if matches!(espera, Desenlace::Desligamento) {
+        com_o_nvme_de_testes(&mut qemu)?;
+    }
 
     let mut filho = qemu
         .spawn()
@@ -6058,6 +6065,21 @@ const SETORES_DO_NVME: u64 = 32 * 1024;
 /// suíte (`kernel/src/testes.rs`).
 fn byte_do_nvme(setor: u64, i: usize) -> u8 {
     (setor as u8).wrapping_mul(7) ^ ((setor >> 8) as u8) ^ (i as u8).wrapping_mul(3)
+}
+
+/// O segundo disco da máquina da suíte, num controlador NVMe: o disco do
+/// sistema é o virtio-blk, e o NVMe é o dos casos `nvme:` — com o disco de
+/// [`disco_nvme_de_testes`], refeito agora. Para quem roda a suíte: o
+/// [`test()`] e, no ARM, a sonda do iniciador ([`subir_no_firmware`]).
+fn com_o_nvme_de_testes(qemu: &mut Command) -> Result<(), String> {
+    let nvme = disco_nvme_de_testes()?;
+    qemu.args([
+        "-drive",
+        &format!("format=raw,file={},if=none,id=nvme0", nvme.display()),
+        "-device",
+        "nvme,serial=duke-nvme-testes,drive=nvme0",
+    ]);
+    Ok(())
 }
 
 /// O disco do NVMe da suíte, refeito a cada execução — os casos escrevem
@@ -15158,16 +15180,9 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
     // A PocketIC da bancada do IC, para os casos `icp:` — e fora quando a
     // suíte acaba, ao sair daqui.
     let _icp = icp::Bancada::ligar()?;
-    // E um segundo disco, num controlador NVMe: o disco do sistema é o
-    // virtio-blk, e o NVMe é o dos casos `nvme:` — ver [`disco_nvme_de_testes`].
-    let nvme = disco_nvme_de_testes()?;
-    let mut filho = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?
-        .args([
-            "-drive",
-            &format!("format=raw,file={},if=none,id=nvme0", nvme.display()),
-            "-device",
-            "nvme,serial=duke-nvme-testes,drive=nvme0",
-        ])
+    let mut qemu = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?;
+    com_o_nvme_de_testes(&mut qemu)?;
+    let mut filho = qemu
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
