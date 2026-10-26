@@ -251,6 +251,26 @@ pub static COMANDOS: &[Command] = &[
         handler: paging_translate,
     },
     Command {
+        nome: "system.reboot",
+        resumo: "Reinicia a maquina. O pedido vai a auditoria e ao journal antes; sem ele no disco, nada acontece. A resposta sai, e meio segundo depois as gravacoes param (a operacao em curso termina, nenhuma comeca), o disco descarrega e o firmware reinicia. Um segundo pedido, com o primeiro a caminho, e recusado.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SystemPower),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: system_reboot,
+    },
+    Command {
+        nome: "system.poweroff",
+        resumo: "Desliga a maquina, pela mesma ordem do system.reboot: o pedido no journal antes, as gravacoes paradas e o disco descarregado, e o firmware corta a energia.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SystemPower),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: system_poweroff,
+    },
+    Command {
         nome: "system.uptime",
         resumo: "Tempo desde o boot, em ticks do timer e em milissegundos.",
         params: &[],
@@ -642,6 +662,16 @@ pub static COMANDOS: &[Command] = &[
         handler: net_rules,
     },
     Command {
+        nome: "process.list",
+        resumo: "Os processos: o fio, o programa (o nome do manifesto, o comeco do resumo e, se veio de fora da imagem, o editor), o pai, o estado, por quem age (system, agent, person, service) e com que papel, se esta isolado, quantas vezes rodou, o nucleo e os descritores abertos. Os zumbis aparecem ate o pai colher.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::SystemRead),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: process_list,
+    },
+    Command {
         nome: "process.isolate",
         resumo: "Isola o processo `process`: ele continua existindo, mas todo pedido dele e recusado (DENY_CONTAINED) e as conexoes dele caem. Reversivel por process.release. O alcance e o papel de quem o lancou. Idempotente.",
         params: &[ParamSpec {
@@ -655,6 +685,21 @@ pub static COMANDOS: &[Command] = &[
         mais: Mais::Nada,
         plano: Plano::Controle,
         handler: process_isolate,
+    },
+    Command {
+        nome: "process.terminate",
+        resumo: "Encerra o processo `process`: ele e isolado na hora (todo pedido dele passa a ser DENY_CONTAINED, o que estava em curso e recusado no commit, e as conexoes caem) e morre no proximo ponto seguro, a entrada ou a volta de uma chamada de sistema, ou o proximo tique do nucleo em que ele gira. Sem volta. O pai colhe um morto, como o de uma falha. Os filhos seguem. O alcance e o papel de quem o lancou.",
+        params: &[ParamSpec {
+            nome: "process",
+            tipo: TipoParam::Inteiro,
+            obrigatorio: true,
+            descricao: "O fio do processo.",
+        }],
+        acesso: Acesso::Exige(Permissao::ProcessTerminate),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: process_terminate,
     },
     Command {
         nome: "process.release",
@@ -2793,6 +2838,54 @@ fn describe(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 // system.*
 // ---------------------------------------------------------------------------
 
+/// Reinicia ou desliga, pela ordem de [`crate::energia`]: a resposta diz o
+/// registro do pedido, já no journal, e em quanto tempo as gravações param.
+fn parar_a_maquina(acao: crate::energia::Acao, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    // Com outra a caminho, nem o registro do pedido: ele diria um pedido
+    // que nao vai acontecer.
+    let registro = if crate::energia::pedida().is_some() {
+        0
+    } else {
+        crate::autorizacao::auditar_execucao(
+            acao.nome(),
+            politica::Codigo::Allow,
+            &crate::energia::detalhe_do_pedido(acao),
+        )
+    };
+    let feito = match crate::energia::pedida() {
+        Some(_) => Err("a maquina ja esta reiniciando ou desligando"),
+        None => crate::energia::preparar(acao, registro),
+    };
+    if let Err(motivo) = feito
+        && registro != 0
+    {
+        // O pedido gravado, e a recusa logo depois: a cadeia diz as duas.
+        crate::autorizacao::auditar_execucao(acao.nome(), politica::Codigo::Error, motivo);
+    }
+    match feito.map(|()| registro) {
+        Ok(registro) => {
+            w.field_str("action", acao.nome())?;
+            w.field_str("state", acao.estado())?;
+            w.field_u64("record", registro)?;
+            w.field_u64("in_ms", crate::energia::ESPERA_MS)?;
+        }
+        Err(motivo) => {
+            w.field_str("error", motivo)?;
+            explicar_falha(w, politica::Codigo::Error, motivo)?;
+        }
+    }
+    w.end_object()
+}
+
+fn system_reboot(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    parar_a_maquina(crate::energia::Acao::Reiniciar, w)
+}
+
+fn system_poweroff(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    parar_a_maquina(crate::energia::Acao::Desligar, w)
+}
+
 fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_str("arch", crate::arch::nome())?;
@@ -2872,6 +2965,18 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
 
     w.field_u64("uptime_ms", crate::tempo::uptime_ms())?;
+    // Um reinicio ou desligamento ja pedido, a caminho: as gravacoes param
+    // em meio segundo, e nenhum outro e aceito.
+    w.key("power")?;
+    match crate::energia::pedida() {
+        Some(acao) => w.str_value(acao.estado())?,
+        None => w.null_value()?,
+    }
+    // E como a maquina reinicia e desliga: pelo que a ACPI ou o device
+    // tree descrevem. `nenhum` e uma maquina que o kernel nao desliga.
+    let (reinicio, desligamento) = crate::arch::meios_da_energia();
+    w.field_str("reboot_via", reinicio)?;
+    w.field_str("poweroff_via", desligamento)?;
     // O relógio de parede, cru: o que o RTC diz, em segundos desde 1970.
     // Cru de propósito — o tempo que vale para prazos é o lógico, que a
     // persistência mantém e nunca volta; este é o que o hardware diz.
@@ -3294,6 +3399,16 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                         Some([a, b, c, d]) => w.str_value(&alloc::format!("{a}.{b}.{c}.{d}"))?,
                         None => w.null_value()?,
                     }
+                    // Os servidores de DNS que a rede anunciou. Para quem
+                    // configura um resolvedor; nao para quem decide: falar
+                    // com um deles e um net.connect, e o destino precisa
+                    // estar no alcance do papel como qualquer outro.
+                    w.key("dns")?;
+                    w.begin_array()?;
+                    for [a, b, c, d] in r.dns.iter().flatten() {
+                        w.str_value(&alloc::format!("{a}.{b}.{c}.{d}"))?;
+                    }
+                    w.end_array()?;
                     w.field_u64("connections", r.conexoes as u64)?;
                     w.field_u64("connections_opened", r.abertas)?;
                     // Os datagramas que chegaram a uma associação UDP de
@@ -5962,6 +6077,12 @@ fn threads_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (colhidos, zumbis) = crate::fios::colheita();
     w.field_u64("harvested", colhidos)?;
     w.field_u64("zombies", zumbis as u64)?;
+    // Os termos de `process.terminate`: os pedidos que ainda esperam um
+    // ponto seguro, e os processos que ja morreram por um. Um pendente que
+    // nao baixa e um processo que nao volta de uma chamada.
+    let (pendentes, terminados) = crate::fios::terminos();
+    w.field_u64("terminate_pending", pendentes as u64)?;
+    w.field_u64("terminated", terminados)?;
     w.end_object()
 }
 
@@ -6889,6 +7010,62 @@ fn conter_ou_soltar(
     w.end_object()
 }
 
+/// Por quem um processo age, numa palavra: a autoridade local, uma sessão
+/// do canal, uma pessoa ou um serviço. Sem a chave nem a pessoa: quem é
+/// quem a auditoria diz, a quem a lê.
+fn especie_da_autoridade(a: crate::autorizacao::Autoridade) -> &'static str {
+    use crate::autorizacao::Autoridade;
+    match a {
+        Autoridade::Sistema => "system",
+        Autoridade::Sessao { .. } => "agent",
+        Autoridade::Pessoa { .. } => "person",
+        Autoridade::Servico(_) => "service",
+    }
+}
+
+fn process_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // O retrato primeiro, de uma vez; o papel e a contenção de cada um
+    // depois, fora da trava do escalonador.
+    let mut processos = alloc::vec::Vec::new();
+    crate::fios::com_processos(|p| processos.push(p));
+
+    w.begin_object()?;
+    w.key("processes")?;
+    w.begin_array()?;
+    for p in &processos {
+        w.begin_object()?;
+        w.field_u64("id", p.id)?;
+        w.field_str("program", &p.programa.descricao())?;
+        w.key("parent")?;
+        match p.pai {
+            Some(pai) => w.u64_value(pai)?,
+            None => w.null_value()?,
+        }
+        w.field_str("state", p.estado)?;
+        w.field_str("authority", especie_da_autoridade(p.autoridade))?;
+        w.key("role")?;
+        match crate::autorizacao::papel_da_autoridade(p.autoridade) {
+            Some(papel) => w.str_value(&papel)?,
+            None => w.null_value()?,
+        }
+        w.field_bool(
+            "isolated",
+            crate::contencao::contido(&crate::contencao::Alvo::Processo(p.id)),
+        )?;
+        w.field_u64("scheduled", p.escalonamentos)?;
+        w.key("core")?;
+        match p.nucleo {
+            Some(n) => w.u64_value(n as u64)?,
+            None => w.null_value()?,
+        }
+        w.field_u64("descriptors", p.descritores as u64)?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.field_u64("count", processos.len() as u64)?;
+    w.end_object()
+}
+
 fn process_isolate(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let alvo = params
         .member("process")
@@ -6903,6 +7080,50 @@ fn process_release(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .and_then(|v| v.as_u64())
         .map(crate::contencao::Alvo::Processo);
     conter_ou_soltar(alvo, false, w)
+}
+
+/// Encerra o processo, se é o que o gate decidiu: isola, pede o fim, e
+/// escreve o desfecho — ver [`crate::contencao::encerrar_processo`]. Cada
+/// conexão que caiu vai para a auditoria em nome da decisão, e o pedido de
+/// fim também.
+fn process_terminate(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let Some(fio) = params.member("process").and_then(|v| v.as_u64()) else {
+        w.field_str("error", "alvo invalido")?;
+        return w.end_object();
+    };
+    let alvo = crate::contencao::Alvo::Processo(fio);
+    let texto = alvo.texto();
+    if !crate::autorizacao::alvo_decidido(&texto) {
+        w.field_str("error", "o alvo nao e o que foi decidido")?;
+        return w.end_object();
+    }
+    match crate::contencao::encerrar_processo(fio) {
+        Ok(feito) => {
+            for (id, d) in &feito.isolamento.derrubadas {
+                crate::autorizacao::auditar_execucao(
+                    &d.texto(),
+                    politica::Codigo::Allow,
+                    &alloc::format!("conexao {id} derrubada pelo termino"),
+                );
+            }
+            crate::autorizacao::auditar_execucao(
+                &texto,
+                politica::Codigo::Allow,
+                &alloc::format!("termino pedido; estava {}", feito.estava),
+            );
+            w.field_str("target", &texto)?;
+            w.field_str("state", "terminating")?;
+            w.field_str("was", feito.estava)?;
+            w.field_bool("isolated", crate::contencao::contido(&alvo))?;
+            w.field_u64("dropped", feito.isolamento.derrubadas.len() as u64)?;
+        }
+        Err(motivo) => {
+            crate::autorizacao::auditar_execucao(&texto, politica::Codigo::Error, motivo);
+            w.field_str("error", motivo)?;
+        }
+    }
+    w.end_object()
 }
 
 fn agent_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {

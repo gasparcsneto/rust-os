@@ -54,7 +54,7 @@ use crate::arch::{Permissoes, TAMANHO_PAGINA};
 /// o mapa em `arch::x86_64` e `arch::aarch64`.
 pub const HEAP_INICIO: usize = crate::arch::BASE_DO_HEAP as usize;
 
-/// Tamanho do heap: 8 MiB, de 128 MiB da máquina.
+/// O menor heap: 8 MiB, de 128 MiB da máquina — o da bancada.
 ///
 /// Foi 1 MiB até a auditoria ir ao journal. O anel da auditoria, cheio, é
 /// perto de meio MiB; um registro do journal de 64 KiB passa pelo heap
@@ -68,7 +68,53 @@ pub const HEAP_INICIO: usize = crate::arch::BASE_DO_HEAP as usize;
 /// na suíte: perto do fim, com 2,9 MiB livres, o maior pedaço era de
 /// 2,2 MiB, e o terceiro `validade` coube com 18 KiB de sobra — na CI, não
 /// coube.
-pub const HEAP_TAMANHO: usize = 8 * 1024 * 1024;
+pub const HEAP_MINIMO: usize = 8 * 1024 * 1024;
+
+/// O maior heap: 256 MiB.
+///
+/// O heap é mapeado inteiro no boot, página a página e zerado, então o
+/// teto é também o custo do boot numa máquina grande; 256 MiB são uns
+/// cem milissegundos numa máquina de verdade. A faixa virtual dele é bem
+/// maior nas duas arquiteturas — oito TiB no x86, 64 GiB no ARM.
+pub const HEAP_MAXIMO: usize = 256 * 1024 * 1024;
+
+/// Que fração da memória utilizável o heap toma: um dezesseis avos.
+///
+/// # Por que proporcional, e não fixo
+///
+/// Porque falta de heap no kernel é pânico, e não erro: uma máquina de
+/// 4 GiB com o heap de uma de 128 MiB cai na primeira rajada de sessões,
+/// conexões e mensagens que a de 128 MiB nem conseguiria receber. Um
+/// dezesseis avos deixa a máquina da bancada — 128 MiB — exatamente no
+/// piso de antes, e dá 64 MiB a uma de 1 GiB e o teto a uma de 4 GiB: o
+/// resto continua dos frames, que é de onde os processos tiram memória.
+pub const FRACAO_DA_MEMORIA: usize = 16;
+
+/// O tamanho do heap desta máquina, fixado em [`init`] — ver
+/// [`tamanho_para`].
+static TAMANHO: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// O tamanho do heap desta máquina: a fração da memória utilizável, entre
+/// o piso e o teto, em páginas inteiras. Antes de [`init`], o piso.
+pub fn tamanho() -> usize {
+    match TAMANHO.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => HEAP_MINIMO,
+        n => n,
+    }
+}
+
+/// O heap de uma máquina com `utilizavel` bytes de memória utilizável.
+pub const fn tamanho_para(utilizavel: u64) -> usize {
+    let proporcional = (utilizavel / FRACAO_DA_MEMORIA as u64) as usize;
+    let limitado = if proporcional < HEAP_MINIMO {
+        HEAP_MINIMO
+    } else if proporcional > HEAP_MAXIMO {
+        HEAP_MAXIMO
+    } else {
+        proporcional
+    };
+    limitado & !(TAMANHO_PAGINA as usize - 1)
+}
 
 /// Um bloco livre.
 ///
@@ -370,7 +416,8 @@ pub unsafe fn devolver(ponteiro: *mut u8, layout: Layout) {
 ///
 /// Precisa rodar depois da paginação e antes de qualquer alocação.
 pub fn init() -> Result<(), &'static str> {
-    let paginas = HEAP_TAMANHO / TAMANHO_PAGINA as usize;
+    let tamanho = tamanho_para(crate::machine::estatisticas().utilizavel);
+    let paginas = tamanho / TAMANHO_PAGINA as usize;
 
     for indice in 0..paginas {
         let virtual_ = HEAP_INICIO + indice * TAMANHO_PAGINA as usize;
@@ -381,16 +428,17 @@ pub fn init() -> Result<(), &'static str> {
 
     crate::arch::sem_interrupcoes(|| {
         let mut estado = ALOCADOR.estado.lock();
-        estado.total = HEAP_TAMANHO;
+        estado.total = tamanho;
         // SAFETY: a faixa acabou de ser mapeada, pertence só a nós, e o início
         // do heap é alinhado em página — portanto também para um `No`.
-        unsafe { estado.inserir(HEAP_INICIO, HEAP_TAMANHO) };
+        unsafe { estado.inserir(HEAP_INICIO, tamanho) };
     });
+    TAMANHO.store(tamanho, core::sync::atomic::Ordering::Relaxed);
 
     crate::log_info!(
         "heap",
         "{} KiB em {:#x}, {} paginas mapeadas",
-        HEAP_TAMANHO / 1024,
+        tamanho / 1024,
         HEAP_INICIO,
         paginas
     );

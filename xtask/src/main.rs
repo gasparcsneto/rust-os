@@ -2964,9 +2964,13 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("tipo::CHAVE_CRIADA,", &["kernel/src/persistencia.rs"]),
     (".abrir_cofre(", &["kernel/src/persistencia.rs"]),
     ("cofre::Geracao::nova(", &["kernel/src/persistencia.rs"]),
+    // O registro antes do efeito: a assinatura (`key.sign`) e o pedido de
+    // reiniciar ou desligar, que a energia leva ao journal antes de lançar
+    // o fio que para a máquina — e a energia só é chamada pelos handlers e
+    // pelas operações administrativas (ver `energia::preparar`, abaixo).
     (
         "persistencia::gravar_auditoria_ate(",
-        &["kernel/src/agent/commands.rs"],
+        &["kernel/src/agent/commands.rs", "kernel/src/energia.rs"],
     ),
     (
         "autorizacao::decisao_de_quem_pede(",
@@ -3027,6 +3031,33 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ),
     (
         "contencao::soltar(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
+    // O término de um processo: só a contenção pede o fim de um fio — ela
+    // isola antes —, e só os handlers dos comandos — depois do gate — e
+    // as operações administrativas — depois da prova — a chamam.
+    ("fios::pedir_termino(", &["kernel/src/contencao.rs"]),
+    // Reiniciar e desligar: só a energia entrega a máquina ao firmware —
+    // depois de gravar o pedido no journal e de parar as gravações —, e só
+    // os handlers dos comandos e as operações administrativas a pedem.
+    (
+        "energia::preparar(",
+        &[
+            "kernel/src/agent/commands.rs",
+            "kernel/src/agent/administracao.rs",
+        ],
+    ),
+    (
+        "persistencia::parar_as_gravacoes(",
+        &["kernel/src/energia.rs"],
+    ),
+    ("arch::reiniciar_a_maquina(", &["kernel/src/energia.rs"]),
+    ("arch::desligar_a_maquina(", &["kernel/src/energia.rs"]),
+    (
+        "contencao::encerrar_processo(",
         &[
             "kernel/src/agent/commands.rs",
             "kernel/src/agent/administracao.rs",
@@ -6236,6 +6267,10 @@ struct Ambiente {
     /// O disco da máquina, no lugar do de testes: a bancada de tempo sobe
     /// uma imagem com outro registro de fontes — ver [`tempo`].
     disco: Option<PathBuf>,
+    /// A memória da máquina, em MiB: 128, a de toda a bancada, ou a de um
+    /// cenário que confere o que muda numa máquina maior — o heap do
+    /// kernel segue a memória (`kernel/src/heap.rs`).
+    memoria_mib: u32,
 }
 
 impl Ambiente {
@@ -6280,6 +6315,7 @@ impl Ambiente {
             relogio: relogio.map(String::from),
             crb: false,
             disco: None,
+            memoria_mib: MEMORIA_DA_BANCADA_MIB,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -6309,6 +6345,7 @@ impl Ambiente {
             relogio: relogio.map(String::from),
             crb: false,
             disco: None,
+            memoria_mib: MEMORIA_DA_BANCADA_MIB,
         }
     }
 
@@ -6317,7 +6354,17 @@ impl Ambiente {
         self.disco = Some(disco);
         self
     }
+
+    /// O mesmo ambiente, com `mib` MiB de memória.
+    pub(crate) fn com_memoria(mut self, mib: u32) -> Ambiente {
+        self.memoria_mib = mib;
+        self
+    }
 }
+
+/// A memória de toda máquina da bancada, em MiB, se o cenário não pede
+/// outra.
+const MEMORIA_DA_BANCADA_MIB: u32 = 128;
 
 impl Drop for Ambiente {
     /// O `swtpm` sai sozinho quando o QEMU sai com ordem; isto cobre o QEMU
@@ -6696,7 +6743,7 @@ fn comando_qemu(
         qemu.args(["-rtc", &format!("base={data},clock=vm")]);
     }
 
-    qemu.args(["-m", "128M"]);
+    qemu.args(["-m", &format!("{}M", ambiente.memoria_mib)]);
 
     // O monitor acompanha o canal do agente: os dois existem quando alguém vai
     // conversar com a máquina, e não quando ela sobe para rodar a suíte e

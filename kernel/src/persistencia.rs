@@ -1458,6 +1458,32 @@ pub fn gravar_auditoria() -> Result<(), &'static str> {
     })
 }
 
+/// Para as gravações para a máquina parar — ver [`crate::energia`]: toma a
+/// ordem, que espera a operação de autoridade em curso acabar e não deixa
+/// outra começar, e a tranca do disco, que espera a escrita em curso;
+/// descarrega o disco; e, com as duas na mão, chama `entregar` — que, fora
+/// da suíte, entrega a máquina ao firmware e não volta. Sem disco, chama
+/// `entregar` com a ordem só.
+///
+/// Aqui, e não na energia, porque escrever e descarregar o disco são do
+/// journal e do volume do armazém — o `xtask` confere.
+pub fn parar_as_gravacoes(entregar: impl FnOnce()) {
+    em_ordem(|| {
+        let mut entregar = Some(entregar);
+        crate::virtio::blk::com_o_disco(|d| {
+            if let Err(motivo) = d.descarregar_disco() {
+                crate::log_warn!("energia", "a descarga final falhou: {}", motivo);
+            }
+            if let Some(f) = entregar.take() {
+                f();
+            }
+        });
+        if let Some(f) = entregar.take() {
+            f();
+        }
+    });
+}
+
 /// Grava no journal a auditoria até o registro `seq`, inclusive, e só
 /// devolve `Ok` com ele lá — o que a assinatura de uma chave exige antes de
 /// sair (ver [`crate::chaves`]): nenhuma assinatura sem o registro dela no

@@ -342,6 +342,15 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
     // o `svc` se repita, o que dá no mesmo de fora e não tem como dar no
     // mesmo por dentro. Ver `arch::aarch64::usuario::atender_chamada`.
     loop {
+        // O término pedido por `process.terminate` — ver
+        // `crate::fios::terminar_se_pedido`. Aqui, antes de a chamada rodar:
+        // é por onde passa o processo que esperava e foi acordado pelo
+        // pedido, e ele não repete a chamada para morrer depois dela.
+        // Marcado, `estacionar` não volta.
+        if crate::fios::terminar_se_pedido() {
+            estacionar();
+        }
+
         // SAFETY: o quadro é o desta chamada; `bifurcar` e `executar` o leem e
         // o reescrevem, e é por isso que ele desce até o despacho.
         let resultado = unsafe {
@@ -357,6 +366,10 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
         crate::fios::pausa_de_teste::talvez_pausar();
         let reexecutar = crate::fios::tirar_reexecucao();
         let ceder = crate::fios::tirar_cessao();
+        // E na volta: um término pedido durante a chamada vale antes de o
+        // processo ver o resultado dela. Marcado, ele está parado, e cai no
+        // `estacionar` abaixo, que não volta.
+        crate::fios::terminar_se_pedido();
 
         // O fio continua de pé, e a chamada não pediu outra volta? Então ela
         // acabou e o valor é dela — depois de dar a vez, se ela pediu. Aqui

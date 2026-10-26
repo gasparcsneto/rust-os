@@ -1009,6 +1009,41 @@ pub fn identificar_cpu() -> super::IdCpu {
     super::IdCpu::de_bytes(fabricante)
 }
 
+/// Reinicia a máquina pela PSCI — ver [`crate::energia`]. Nunca volta: se
+/// o firmware recusar, ou não houver PSCI, o núcleo para aqui, e a máquina
+/// fica parada até alguém cortar a energia.
+/// Como esta máquina reinicia e desliga: pela PSCI, pelo conduto que o
+/// device tree declara (`psci-hvc`, `psci-smc`), ou por nenhum.
+pub fn meios_da_energia() -> (&'static str, &'static str) {
+    let meio = match smp::conduto_da_maquina() {
+        Some(fdt::Conduto::Hvc) => "psci-hvc",
+        Some(fdt::Conduto::Smc) => "psci-smc",
+        None => "nenhum",
+    };
+    (meio, meio)
+}
+
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn reiniciar_a_maquina() -> ! {
+    match smp::chamar_para_a_maquina(smp::SYSTEM_RESET) {
+        Some(erro) => crate::log_error!("energia", "a PSCI recusou o reinicio: {}", erro),
+        None => crate::log_error!("energia", "sem PSCI para reiniciar"),
+    }
+    halt_forever()
+}
+
+/// Desliga a máquina pela PSCI — ver [`crate::energia`]. Nunca volta.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn desligar_a_maquina() -> ! {
+    match smp::chamar_para_a_maquina(smp::SYSTEM_OFF) {
+        Some(erro) => crate::log_error!("energia", "a PSCI recusou o desligamento: {}", erro),
+        None => crate::log_error!("energia", "sem PSCI para desligar"),
+    }
+    halt_forever()
+}
+
 /// Encerra o QEMU por *semihosting*.
 ///
 /// O ARM não tem nada como o `isa-debug-exit` do x86. O que existe é o

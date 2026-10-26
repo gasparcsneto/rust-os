@@ -195,6 +195,35 @@ unsafe fn psci(conduto: Conduto, funcao: u64, a1: u64, a2: u64, a3: u64) -> i64 
 /// O conduto da PSCI, lido do device tree na descoberta.
 static CONDUTO: AtomicU8 = AtomicU8::new(0);
 
+/// `SYSTEM_OFF` e `SYSTEM_RESET` da PSCI 0.2 em diante: desligar e
+/// reiniciar a máquina inteira. Não voltam quando dão certo.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub const SYSTEM_OFF: u64 = 0x8400_0008;
+pub const SYSTEM_RESET: u64 = 0x8400_0009;
+
+/// Chama uma função da PSCI que vale para a máquina inteira —
+/// [`SYSTEM_OFF`], [`SYSTEM_RESET`] —, pelo conduto do device tree: o
+/// guardado na descoberta dos núcleos, ou, se ela não rodou, o lido agora.
+/// Devolve o código de erro, se a função voltou; sem PSCI, `None`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn chamar_para_a_maquina(funcao: u64) -> Option<i64> {
+    let conduto = conduto_da_maquina()?;
+    // SAFETY: as duas funções não levam argumento.
+    Some(unsafe { psci(conduto, funcao, 0, 0, 0) })
+}
+
+/// O conduto da PSCI: o guardado na descoberta dos núcleos, ou, se ela não
+/// rodou, o lido agora do device tree.
+pub fn conduto_da_maquina() -> Option<Conduto> {
+    match CONDUTO.load(Ordering::Acquire) {
+        1 => Some(Conduto::Hvc),
+        2 => Some(Conduto::Smc),
+        // SAFETY: o ponteiro veio do firmware e foi guardado no boot; o
+        // leitor confere a assinatura e trata o nulo.
+        _ => unsafe { super::fdt::encontrar_nucleos(super::dtb()) }.psci,
+    }
+}
+
 /// Chama `f` com o `MPIDR` de cada núcleo que o device tree descreve.
 pub fn descobrir(mut f: impl FnMut(u64)) {
     // SAFETY: o ponteiro veio do firmware e foi guardado no boot; o leitor

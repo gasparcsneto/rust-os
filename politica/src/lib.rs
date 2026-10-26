@@ -113,6 +113,13 @@ pub use permissao::Permissao;
 ///   no `administrador`, alcançam `observador`, `operador` e `sistema` —
 ///   nunca `administrador`: suspender um administrador seria tirar dele,
 ///   sem quórum, o que a revogação só tira com quórum.
+/// - `process.terminate` — encerrar um processo, sem volta —, no `sistema`
+///   e no `administrador`, com o mesmo alcance do isolamento: `observador`,
+///   `operador` e `sistema`, nunca `administrador`. O `seguranca` não a tem:
+///   o tecido só contém, de forma reversível, e não mata nada.
+/// - `system.power` — reiniciar e desligar a máquina —, no `sistema`, que a
+///   exerce pelo gate como o `debug.trigger`, e no `administrador`, pela
+///   prova. Ninguém mais: nem o `operador`, nem o tecido de segurança.
 /// - `quorum admin.revoke 2 3`: revogar a credencial de um administrador
 ///   exige a prova de duas outras, de um grupo de três — o da imagem.
 /// - `editores`: o `sistema` e o `administrador` confiam no editor
@@ -149,7 +156,7 @@ macro_rules! papeis_de_sistema {
     ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
         concat!(
             "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
@@ -162,10 +169,11 @@ recurso sistema message.send papel:observador papel:operador papel:sistema papel
 recurso sistema process.isolate papel:observador papel:operador papel:sistema
 recurso sistema agent.suspend papel:observador papel:operador papel:sistema
 recurso sistema credential.suspend papel:observador papel:operador papel:sistema
+recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -180,6 +188,7 @@ recurso administrador message.send papel:operador papel:sistema papel:administra
 recurso administrador process.isolate papel:observador papel:operador papel:sistema
 recurso administrador agent.suspend papel:observador papel:operador papel:sistema
 recurso administrador credential.suspend papel:observador papel:operador papel:sistema
+recurso administrador process.terminate papel:observador papel:operador papel:sistema
 taxa administrador 10 20
 processos administrador 8
 ",
@@ -227,8 +236,9 @@ pub const PADRAO: &str = concat!(
 # Uma permissao sensivel (fs.*, net.connect, keyboard.read, debug.trigger,
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
 # credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
-# process.isolate, agent.suspend e credential.suspend, time.*,
-# audit.declare e key.*) nao atravessa a inclusao de outro papel: cada
+# process.isolate, agent.suspend e credential.suspend, process.terminate,
+# system.power, time.*, audit.declare e key.*) nao atravessa a inclusao de
+# outro papel: cada
 # papel que a tem a escreve. Toda permissao
 # de caminho, o message.send, o net.connect e as de chave tem o alcance
 # escrito numa linha `recurso` — o de message.send e o papel do
@@ -1084,6 +1094,7 @@ mod testes {
                 TimeSync,
                 TimeConfirm,
                 AuditDeclare,
+                ProcessTerminate,
             ] {
                 assert_eq!(
                     d(perm, Some("tcp:10.0.2.100:7")),
@@ -1098,6 +1109,93 @@ mod testes {
             // O serviço não exerce teto.
             assert_eq!(p.conferir_tetos(&["administrador"]), Ok(()));
         }
+    }
+
+    /// Encerrar um processo: o `sistema` e o `administrador`, com o alcance
+    /// do isolamento — `observador`, `operador` e `sistema`, nunca o
+    /// `administrador` —, nas duas políticas embutidas; ninguém mais.
+    /// Nenhum papel a ganha pela inclusão de outro.
+    #[test]
+    fn quem_encerra_um_processo() {
+        use Permissao::ProcessTerminate;
+        for p in [padrao(), Politica::emergencia()] {
+            for papel in ["sistema", "administrador"] {
+                let d = |rec| p.decidir(Some(papel), ProcessTerminate, rec);
+                // Na de emergência não há observador nem operador: o papel do
+                // alvo precisa existir para ser alcançado.
+                for dentro in ["papel:observador", "papel:operador", "papel:sistema"] {
+                    let esperado = if p.papel(&dentro["papel:".len()..]).is_some() {
+                        Codigo::Allow
+                    } else {
+                        Codigo::DenyResource
+                    };
+                    assert_eq!(d(Some(dentro)), esperado, "{papel} {dentro}");
+                }
+                for fora in ["papel:administrador", "papel:seguranca", "papel:x", ""] {
+                    assert_eq!(d(Some(fora)), Codigo::DenyResource, "{papel} {fora}");
+                }
+                assert_eq!(d(None), Codigo::DenyResource, "{papel}");
+                assert!(
+                    p.papel(papel).unwrap().diretas.contains(&ProcessTerminate),
+                    "{papel}: escrita pelo nome"
+                );
+            }
+            for papel in ["observador", "operador", "tempo", "seguranca"] {
+                if p.papel(papel).is_some() {
+                    assert_eq!(
+                        p.decidir(Some(papel), ProcessTerminate, Some("papel:operador")),
+                        Codigo::DenyPermission,
+                        "{papel}"
+                    );
+                }
+            }
+        }
+        // Sensível: um papel que inclui quem a tem não a herda.
+        let p = com(
+            "papel a ui.read process.terminate\nrecurso a process.terminate papel:a\n\
+             papel b @a\nserial a",
+        )
+        .unwrap();
+        assert!(p.papel("a").unwrap().tem(ProcessTerminate));
+        assert!(p.papel("b").unwrap().tem(Permissao::UiRead));
+        assert!(!p.papel("b").unwrap().tem(ProcessTerminate));
+        assert_eq!(
+            p.decidir(Some("b"), ProcessTerminate, Some("papel:a")),
+            Codigo::DenyPermission
+        );
+        // E o alcance é obrigatório: sem a linha `recurso`, a política
+        // inteira é recusada.
+        assert!(com("papel a process.terminate\nserial a").is_err());
+    }
+
+    /// Reiniciar e desligar: o `sistema` e o `administrador`, nas duas
+    /// políticas embutidas, escrita pelo nome; nenhum outro papel.
+    #[test]
+    fn quem_reinicia_e_desliga() {
+        use Permissao::SystemPower;
+        for p in [padrao(), Politica::emergencia()] {
+            for papel in ["sistema", "administrador"] {
+                assert_eq!(
+                    p.decidir(Some(papel), SystemPower, None),
+                    Codigo::Allow,
+                    "{papel}"
+                );
+                assert!(p.papel(papel).unwrap().diretas.contains(&SystemPower));
+            }
+            for papel in ["observador", "operador", "tempo", "seguranca"] {
+                if p.papel(papel).is_some() {
+                    assert_eq!(
+                        p.decidir(Some(papel), SystemPower, None),
+                        Codigo::DenyPermission,
+                        "{papel}"
+                    );
+                }
+            }
+        }
+        // Sensível: incluir quem a tem não a traz.
+        let p = com("papel a ui.read system.power\npapel b @a\nserial a").unwrap();
+        assert!(p.papel("a").unwrap().tem(SystemPower));
+        assert!(!p.papel("b").unwrap().tem(SystemPower));
     }
 
     /// O serviço não herda o sistema: uma política que lhe dê o papel da

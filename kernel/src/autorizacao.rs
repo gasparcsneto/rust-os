@@ -1765,7 +1765,7 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         let (c, d) = if permissao.recurso_e_destino() {
             let (c, d, _) = decidir_destino(quem.papel.as_deref(), permissao, r);
             (c, d)
-        } else if permissao.contencao() {
+        } else if permissao.alvo_e_papel() {
             decidir_contencao(quem.papel.as_deref(), permissao, metodo, r)
         } else {
             decidir(quem.papel.as_deref(), permissao, r)
@@ -2289,8 +2289,9 @@ fn decidir_o_pedido(
     // dela, resolvido para quem pede: o número de outro titular, ou um que
     // não existe, não resolve. Ver `rede::conexoes`.
     let mut sem_conexao = None;
-    let recurso = if exigida.is_some_and(Permissao::contencao) {
-        // O alvo de uma contenção, no texto em que a auditoria o grava;
+    let recurso = if exigida.is_some_and(Permissao::alvo_e_papel) {
+        // O alvo de uma contenção — ou do término de um processo —, no
+        // texto em que a auditoria o grava;
         // vazio se o pedido não diz um alvo que se leia — a decisão diz por
         // quê.
         crate::contencao::Alvo::do_pedido(comando.nome, params)
@@ -2337,7 +2338,7 @@ fn decidir_o_pedido(
             destino = resolvido;
             (codigo, detalhe)
         }
-        Acesso::Exige(permissao) if permissao.contencao() => {
+        Acesso::Exige(permissao) if permissao.alvo_e_papel() => {
             decidir_contencao(quem.papel.as_deref(), permissao, comando.nome, &recurso)
         }
         Acesso::Exige(permissao) => todos_os_recursos(comando, &recurso, &mais)

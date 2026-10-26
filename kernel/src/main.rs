@@ -71,6 +71,7 @@ mod barra;
 mod chaves;
 mod contencao;
 mod coordenacao;
+mod energia;
 mod eventos;
 mod fios;
 mod frames;

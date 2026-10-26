@@ -72,7 +72,7 @@
 
 pub mod pilha;
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::trava::Mutex;
 
@@ -102,6 +102,12 @@ pub const MAX_NUCLEOS: usize = crate::nucleos::MAX_NUCLEOS;
 /// responsivo, longo o bastante para a troca de contexto não dominar o tempo
 /// de CPU.
 pub const QUANTUM_EM_TIQUES: u32 = 5;
+
+/// O nome dos fios que hospedam um programa — os que `usuario` lança e os
+/// que eles bifurcam. É por ele que o escalonador separa um processo de um
+/// fio do kernel: só um processo é alvo de `process.isolate`, conta na cota
+/// de processos de um papel e aparece em `process.list`.
+pub const NOME_DO_PROCESSO: &str = "usuario";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Estado {
@@ -288,6 +294,20 @@ struct Fio {
     /// Trocado junto com o espaço de endereços, em [`adotar_imagem`]: a
     /// imagem nova nunca roda com o manifesto da anterior.
     programa: crate::autorizacao::Programa,
+    /// `process.terminate` pediu o fim deste processo, e ele ainda não
+    /// chegou a um ponto seguro — ver [`pedir_termino`].
+    ///
+    /// # Por que um pedido, e não a morte na hora
+    ///
+    /// Porque quem pede está em outro fio, talvez em outro núcleo, e o
+    /// processo pode estar no meio de uma chamada de sistema — com a trava
+    /// do disco, da pilha ou do registro na mão. Marcá-lo como terminado
+    /// ali largaria a trava com um dono morto. Os pontos seguros são os de
+    /// [`terminar_se_pedido`]: a entrada e a volta de uma chamada de
+    /// sistema, e uma interrupção que o pega no anel do usuário — onde ele
+    /// não segura nada do kernel. Um processo que só gira, sem chamada
+    /// nenhuma, morre no tique seguinte do núcleo dele.
+    terminar: bool,
 }
 
 /// Onde está o pedido que um processo fez pela interface nativa.
@@ -545,6 +565,7 @@ pub fn init() {
             ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa: crate::autorizacao::Programa::Kernel,
+            terminar: false,
         });
         e.por_atual(cpu, 0);
         QUANTUM[cpu].store(QUANTUM_EM_TIQUES, Ordering::Relaxed);
@@ -898,6 +919,7 @@ pub fn recolher_terminados() -> usize {
                 ceder_ao_voltar: false,
                 pedido: EstadoDoPedido::Livre,
                 programa: crate::autorizacao::Programa::Kernel,
+                terminar: false,
             });
             let id = e.fios[vaga].as_ref().map(|f| f.id)?;
             Some((vaga, id, morto))
@@ -1231,6 +1253,7 @@ fn nascer(
             ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa,
+            terminar: false,
         });
         Ok::<_, &'static str>((vaga, anterior, herdada, pai, autoridade, fixo, programa))
     })?;
@@ -1315,6 +1338,7 @@ fn nascer(
             ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa,
+            terminar: false,
         });
         (marcador, e.nucleos_ociosos())
     });
@@ -1381,6 +1405,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa: crate::autorizacao::Programa::Kernel,
+            terminar: false,
         });
         Ok::<_, &'static str>((vaga, anterior))
     })?;
@@ -1452,7 +1477,9 @@ impl Escalonador {
             .iter()
             .flatten()
             .filter(|f| {
-                f.nome == "usuario" && f.estado != Estado::Terminado && f.autoridade == autoridade
+                f.nome == NOME_DO_PROCESSO
+                    && f.estado != Estado::Terminado
+                    && f.autoridade == autoridade
             })
             .count()
     }
@@ -2308,7 +2335,9 @@ pub fn autoridade_do_processo(id: u64) -> Option<crate::autorizacao::Autoridade>
         e.fios
             .iter()
             .flatten()
-            .find(|f| f.id.numero() == id && f.nome == "usuario" && f.estado != Estado::Terminado)
+            .find(|f| {
+                f.id.numero() == id && f.nome == NOME_DO_PROCESSO && f.estado != Estado::Terminado
+            })
             .map(|f| f.autoridade)
     })
 }
@@ -2352,6 +2381,13 @@ pub fn marcar_terminado(saida: Option<i64>) {
             Some(fio) => {
                 fio.estado = Estado::Terminado;
                 fio.saida = saida;
+                // Um pedido de término que não chegou a um ponto seguro —
+                // o processo saiu, ou morreu de falha, antes — acaba aqui:
+                // morto não espera mais nada, e o contador dos pendentes
+                // volta a dizer só o que falta.
+                if core::mem::take(&mut fio.terminar) {
+                    TERMINOS_PENDENTES.fetch_sub(1, Ordering::Relaxed);
+                }
                 fio.pai
             }
             None => return 0,
@@ -2381,6 +2417,89 @@ pub fn marcar_terminado(saida: Option<i64>) {
         0
     });
     crate::nucleos::cutucar(ociosos);
+}
+
+/// Quantos processos têm um término pedido e ainda não chegaram a um ponto
+/// seguro. É a pergunta barata de [`terminar_se_pedido`]: com zero — o caso
+/// de quase todo tique —, nem a trava do escalonador é tomada.
+static TERMINOS_PENDENTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Quantos processos morreram por um término pedido, desde o boot.
+static TERMINADOS: AtomicU64 = AtomicU64::new(0);
+
+/// Pede o fim do processo `id`: ele morre no próximo ponto seguro — ver
+/// [`Fio::terminar`] e [`terminar_se_pedido`]. Devolve o estado em que ele
+/// estava; `Err` se `id` não é um processo vivo.
+///
+/// Um processo que espera — um filho, um evento, a resposta de um pedido —
+/// volta a circular agora: é na volta da chamada que ele encontra o pedido.
+/// Pedir de novo não muda nada. Os filhos dele seguem: o término é de um
+/// processo, e não da árvore.
+///
+/// Só pela contenção, que isola antes — o `xtask` confere.
+pub fn pedir_termino(id: u64) -> Result<&'static str, &'static str> {
+    let (estado, ociosos) = com_escalonador(|e| -> Result<_, &'static str> {
+        let fio = e
+            .fios
+            .iter_mut()
+            .flatten()
+            .find(|f| {
+                f.id.numero() == id && f.nome == NOME_DO_PROCESSO && f.estado != Estado::Terminado
+            })
+            .ok_or("processo inexistente")?;
+        let estado = match fio.estado {
+            Estado::Reservado => "spawning",
+            Estado::Pronto => "ready",
+            Estado::Rodando => "running",
+            Estado::Esperando => "waiting",
+            Estado::Terminado => "zombie",
+        };
+        if !fio.terminar {
+            fio.terminar = true;
+            TERMINOS_PENDENTES.fetch_add(1, Ordering::Relaxed);
+        }
+        if fio.estado == Estado::Esperando {
+            fio.estado = Estado::Pronto;
+            return Ok((estado, e.nucleos_ociosos()));
+        }
+        Ok((estado, 0))
+    })?;
+    crate::nucleos::cutucar(ociosos);
+    Ok(estado)
+}
+
+/// Se o fio atual tem um término pedido, ele termina aqui: marcado como
+/// encerrado, sem código de saída — o pai colhe um morto, como o de uma
+/// falha —, e quem chama tira-o de circulação como tira um que saiu.
+/// Devolve se terminou.
+///
+/// Só nos pontos seguros: a entrada e a volta de uma chamada de sistema, e
+/// uma interrupção vinda do anel do usuário. Em qualquer um deles o fio não
+/// segura trava nenhuma do kernel.
+pub fn terminar_se_pedido() -> bool {
+    if TERMINOS_PENDENTES.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    let pedido = com_escalonador(|e| {
+        e.fio_atual()
+            .filter(|f| f.terminar && f.estado != Estado::Terminado)
+            .map(|f| f.id.numero())
+    });
+    let Some(id) = pedido else {
+        return false;
+    };
+    marcar_terminado(None);
+    TERMINADOS.fetch_add(1, Ordering::Relaxed);
+    crate::log_info!("usuario", "processo {} encerrado pelo termino pedido", id);
+    true
+}
+
+/// `(pedidos ainda pendentes, processos terminados por pedido)`.
+pub fn terminos() -> (usize, u64) {
+    (
+        TERMINOS_PENDENTES.load(Ordering::Relaxed),
+        TERMINADOS.load(Ordering::Relaxed),
+    )
 }
 
 /// Encerra o fio atual. Nunca retorna.
@@ -2506,6 +2625,73 @@ pub fn com_inscricoes<F: FnMut(Inscricao)>(mut f: F) {
 
     for inscricao in instantaneo.into_iter().flatten() {
         f(inscricao);
+    }
+}
+
+/// Uma linha de `process.list`: um fio que hospeda um programa.
+#[derive(Clone, Copy)]
+pub struct Processo {
+    pub id: u64,
+    /// Quem bifurcou para criá-lo, se alguém bifurcou.
+    pub pai: Option<u64>,
+    pub estado: &'static str,
+    /// Com que autoridade ele age: a de quem o lançou.
+    pub autoridade: crate::autorizacao::Autoridade,
+    /// O que ele executa — o manifesto, o resumo, o editor.
+    pub programa: crate::autorizacao::Programa,
+    pub escalonamentos: u64,
+    pub nucleo: Option<usize>,
+    /// Quantos descritores ele tem abertos.
+    pub descritores: usize,
+}
+
+/// Chama `f` com cada processo, vivo ou zumbi, de um retrato tirado de uma
+/// vez sob a trava do escalonador. O papel de cada um, e se está contido,
+/// quem chama pergunta depois, fora da trava: as duas perguntas tomam as
+/// travas do registro e da política.
+///
+/// # Por que um vetor reservado antes, e não um arranjo na pilha
+///
+/// Porque um [`Processo`] leva o programa inteiro — o manifesto, o resumo,
+/// o editor —, e um arranjo de [`MAX_FIOS`] deles passa de 20 KiB: mais que
+/// a pilha de um fio do kernel. Medido: a primeira versão deste retrato
+/// estourou a pilha do fio da suíte, com a trava do escalonador na mão, e
+/// a máquina caiu numa falha dupla. O vetor é reservado fora da trava, do
+/// tamanho da tabela, e sob ela só recebe — nada se aloca lá dentro.
+pub fn com_processos<F: FnMut(Processo)>(mut f: F) {
+    let mut instantaneo = alloc::vec::Vec::with_capacity(MAX_FIOS);
+    com_escalonador(|e| {
+        for i in 0..MAX_FIOS {
+            let zumbi = e.e_zumbi(i);
+            let Some(fio) = e.fios[i].as_ref() else {
+                continue;
+            };
+            // Só quem hospeda um programa, e só o que ainda conta: o
+            // terminado que ninguém espera some na próxima volta do coletor.
+            if fio.nome != NOME_DO_PROCESSO || (fio.estado == Estado::Terminado && !zumbi) {
+                continue;
+            }
+            instantaneo.push(Processo {
+                id: fio.id.numero(),
+                pai: fio.pai.map(IdFio::numero),
+                estado: match fio.estado {
+                    Estado::Reservado => "spawning",
+                    Estado::Pronto => "ready",
+                    Estado::Rodando => "running",
+                    Estado::Esperando => "waiting",
+                    Estado::Terminado => "zombie",
+                },
+                autoridade: fio.autoridade,
+                programa: fio.programa,
+                escalonamentos: fio.escalonamentos,
+                nucleo: fio.na_cpu,
+                descritores: fio.descritores.abertos(),
+            });
+        }
+    });
+
+    for processo in instantaneo {
+        f(processo);
     }
 }
 

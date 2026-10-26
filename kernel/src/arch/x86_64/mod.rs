@@ -910,6 +910,183 @@ pub fn encerrar_emulador(resultado: crate::qemu::Resultado) -> ! {
     halt_forever()
 }
 
+/// Como esta máquina reinicia e desliga, pelo que a ACPI descreve: o
+/// reinício pelo registrador da FADT (`acpi`) ou pela porta `0xCF9`
+/// (`cf9`, que todo PC tem); o desligamento pelo S5 (`acpi-s5`), pelo
+/// controle de sono do hardware reduzido (`acpi-reduzido`), ou nenhum.
+pub fn meios_da_energia() -> (&'static str, &'static str) {
+    let Ok(e) = acpi::energia() else {
+        return ("cf9", "nenhum");
+    };
+    let reinicio = if e.reinicio.is_some() { "acpi" } else { "cf9" };
+    let desligamento = match (e.pm1a, e.s5, e.controle_de_sono) {
+        (Some(_), Some(_), _) => "acpi-s5",
+        (_, Some(_), Some(_)) => "acpi-reduzido",
+        _ => "nenhum",
+    };
+    (reinicio, desligamento)
+}
+
+/// Escreve `valor` no registrador genérico da ACPI `r`: numa porta, ou na
+/// memória do dispositivo, mapeada para isso. `largura` é 8 ou 16.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+fn escrever_registrador(r: acpi::Registrador, valor: u16, largura: u8) {
+    match r.espaco {
+        acpi::ESPACO_PORTA => {
+            let porta = r.endereco as u16;
+            // SAFETY: a porta é a que a FADT descreve para este registrador,
+            // e o efeito — reiniciar, desligar — é o pedido.
+            unsafe {
+                if largura == 8 {
+                    x86_64::instructions::port::Port::<u8>::new(porta).write(valor as u8);
+                } else {
+                    x86_64::instructions::port::Port::<u16>::new(porta).write(valor);
+                }
+            }
+        }
+        acpi::ESPACO_MEMORIA => {
+            if let Ok(virtual_) = crate::mmio::mapear(r.endereco, 4096) {
+                // SAFETY: o endereço é o do registrador que a FADT descreve,
+                // acabado de mapear como memória de dispositivo.
+                unsafe {
+                    if largura == 8 {
+                        core::ptr::write_volatile(virtual_ as *mut u8, valor as u8);
+                    } else {
+                        core::ptr::write_volatile(virtual_ as *mut u16, valor);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Lê dezesseis bits do registrador genérico `r`, se ele é uma porta.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+fn ler_registrador(r: acpi::Registrador) -> Option<u16> {
+    // SAFETY: leitura da porta que a FADT descreve como o controle do PM1.
+    (r.espaco == acpi::ESPACO_PORTA)
+        .then(|| unsafe { x86_64::instructions::port::Port::<u16>::new(r.endereco as u16).read() })
+}
+
+/// Gira um pouco, para o chipset ter tempo de agir antes do próximo modo.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+fn esperar_o_chipset() {
+    for _ in 0..10_000_000u32 {
+        core::hint::spin_loop();
+    }
+}
+
+/// Reinicia a máquina — ver [`crate::energia`]. Nunca volta.
+///
+/// Quatro modos, do que a máquina descreve ao que ela não pode recusar, e
+/// cada um só se o anterior não reiniciou:
+///
+/// 1. o registrador de reinício da FADT, com o valor dela;
+/// 2. a porta `0xCF9`, o controle de reinício dos chipsets de PC: `0x02`
+///    prepara, `0x06` reinicia de verdade;
+/// 3. o controlador de teclado 8042: o comando `0xFE` pulsa a linha de
+///    reinício;
+/// 4. a falha tripla: uma tabela de interrupções vazia e uma interrupção —
+///    o processador não tem para onde ir, e reinicia.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn reiniciar_a_maquina() -> ! {
+    use x86_64::instructions::port::Port;
+    x86_64::instructions::interrupts::disable();
+    if let Ok(energia) = acpi::energia()
+        && let Some((registrador, valor)) = energia.reinicio
+    {
+        escrever_registrador(registrador, u16::from(valor), 8);
+        esperar_o_chipset();
+    }
+    // SAFETY: `0xCF9` e o 8042 são as portas de reinício do PC; escrever
+    // nelas é o efeito pedido. Numa máquina sem elas, a escrita se perde.
+    unsafe {
+        let mut cf9 = Port::<u8>::new(0xCF9);
+        cf9.write(0x02);
+        esperar_o_chipset();
+        cf9.write(0x06);
+        esperar_o_chipset();
+        let mut estado = Port::<u8>::new(0x64);
+        for _ in 0..100_000 {
+            if estado.read() & 0x02 == 0 {
+                break;
+            }
+        }
+        estado.write(0xFE);
+    }
+    esperar_o_chipset();
+    #[repr(C, packed)]
+    struct Vazia {
+        limite: u16,
+        base: u64,
+    }
+    let vazia = Vazia { limite: 0, base: 0 };
+    // SAFETY: carregar uma tabela de interrupções vazia e interromper é a
+    // falha tripla de propósito — o último modo de reiniciar, que não volta.
+    unsafe {
+        core::arch::asm!("lidt [{}]", "int3", in(reg) &vazia, options(noreturn));
+    }
+}
+
+/// Desliga a máquina pela ACPI — ver [`crate::energia`]. Nunca volta.
+///
+/// O estado S5: o `SLP_TYP` do `\_S5` da DSDT e o bit `SLP_EN` no
+/// controle do PM1a — e no do PM1b, quando há —, preservando os outros
+/// bits. Antes, se o firmware deixou a máquina fora do modo ACPI (`SCI_EN`
+/// desligado), o modo é ligado pela porta `SMI_CMD`. Numa máquina de
+/// hardware reduzido, o `SLEEP_CONTROL_REG`. Sem nada disso, o núcleo para
+/// aqui, de interrupções desligadas: a máquina fica parada, mas ligada.
+// Na suíte a energia só anota a ação — ver `crate::energia`.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn desligar_a_maquina() -> ! {
+    /// `SLP_EN`, no controle do PM1.
+    const DORMIR: u16 = 1 << 13;
+    /// `SCI_EN`: o modo ACPI está ligado.
+    const MODO_ACPI: u16 = 1;
+    x86_64::instructions::interrupts::disable();
+    match acpi::energia() {
+        Ok(e) => match (e.pm1a, e.s5, e.controle_de_sono) {
+            (Some(pm1a), Some((a, b)), _) => {
+                if ler_registrador(pm1a).is_some_and(|v| v & MODO_ACPI == 0)
+                    && e.smi_cmd != 0
+                    && e.acpi_enable != 0
+                {
+                    // SAFETY: a porta e o valor que a FADT dá para ligar o
+                    // modo ACPI.
+                    unsafe {
+                        x86_64::instructions::port::Port::<u8>::new(e.smi_cmd as u16)
+                            .write(e.acpi_enable)
+                    };
+                    for _ in 0..1_000_000 {
+                        if ler_registrador(pm1a).is_some_and(|v| v & MODO_ACPI != 0) {
+                            break;
+                        }
+                        core::hint::spin_loop();
+                    }
+                }
+                let atual = ler_registrador(pm1a).unwrap_or(0) & !(7 << 10);
+                escrever_registrador(pm1a, atual | u16::from(a) << 10 | DORMIR, 16);
+                if let Some(pm1b) = e.pm1b {
+                    let atual = ler_registrador(pm1b).unwrap_or(0) & !(7 << 10);
+                    escrever_registrador(pm1b, atual | u16::from(b) << 10 | DORMIR, 16);
+                }
+            }
+            (_, Some((a, _)), Some(controle)) => {
+                escrever_registrador(controle, u16::from(a & 7) << 2 | 1 << 5, 8);
+            }
+            _ => crate::log_error!("energia", "a ACPI nao descreve como desligar"),
+        },
+        Err(motivo) => crate::log_error!("energia", "sem FADT para desligar: {}", motivo),
+    }
+    esperar_o_chipset();
+    halt_forever()
+}
+
 /// O contador de tempo do processador, o TSC: anda numa frequência que o
 /// kernel não conhece de antemão, e é a régua das medidas de custo — ver
 /// [`crate::metricas`] —, que a convertem pelo próprio relógio do kernel.

@@ -181,6 +181,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.verify` | Refaz a cadeia do cofre de evidências |
 | `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa, a conferência do código de fora da imagem, e o orçamento: as decisões de controle, de dados e de fecho, as recusas por taxa, as esperas pelo caminho da auditoria e o atraso dela, a vazão do plano de dados e a justiça entre os principais |
 | `system.info` | Kernel, CPU, vídeo, uptime, o RTC, o tempo — `time`: o estado e as marcas do relógio civil, o civil, o lógico, a incerteza, o salto pendente, as fontes, as rodadas e a régua; ver [O tempo](#o-tempo) — e mecanismo de guarda da pilha |
+| `system.reboot` | Reinicia a máquina: o pedido vai à auditoria e ao journal antes (sem ele no disco, nada acontece); meio segundo depois da resposta as gravações param, o disco descarrega e o firmware reinicia (ACPI no x86, PSCI no ARM) |
+| `system.poweroff` | Desliga a máquina, pela mesma ordem do `system.reboot`: o pedido no journal antes, as gravações paradas, o disco descarregado, e o firmware corta a energia |
 | `system.uptime` | Ticks do timer e milissegundos desde o boot |
 | `random.read` | Bytes do gerador do kernel, em hexadecimal, para quem precisa de uma chave — a semente de cada conexão TLS de um programa. De 1 a 256 — fora disso é erro, e não um corte —; sem fonte de entropia, `ENTROPY_UNAVAILABLE` e nenhum byte. A auditoria grava a decisão, nunca os bytes (`bytes`) |
 | `time.request` | O pedido do Roughtime — versão 1, 1 KiB, em base64 em `request` — para uma fonte do registro de fontes de hora, `/etc/duke/tempo`, e o `id` dele. O kernel escolhe o nonce — o primeiro do gerador; os seguintes, encadeados à última resposta aceita da rodada — e liga o pedido ao principal que o gate decidiu, à fonte e à chave fixada dela; não escolhe a hora. A rodada começa pela primeira fonte do registro e segue a ordem dele, e pedir de novo a fonte em curso substitui o pedido. Exige `time.sync`; o transporte até a fonte é um `net.connect` UDP, decidido à parte. Uma fonte fora do registro, ou fora da ordem, é `INVALID_REQUEST`; a tabela cheia, `DENY_QUOTA`; sem entropia, `ENTROPY_UNAVAILABLE` (`source`) |
@@ -230,7 +232,9 @@ $ cargo xtask agent --canal 2 agent.session
 | `net.block` | Barra o tráfego para um destino, para todos ou para um dono — e derruba as conexões vivas que a regra alcança. Só restringe (`to`, `owner`) |
 | `net.unblock` | Tira a regra de um destino e um dono; o gate continua decidindo cada pedido (`to`, `owner`) |
 | `net.rules` | As regras do firewall — o destino, o dono, a decisão que pôs cada uma e quem pediu — e os quadros descartados, em cada sentido: sem fluxo, de fluxo barrado, de protocolo que não passa |
+| `process.list` | Os processos: fio, programa (nome do manifesto, começo do resumo, editor), pai, estado, por quem age e com que papel, se está isolado, quantas vezes rodou, núcleo e descritores; os zumbis até o pai colher |
 | `process.isolate` | Isola um processo: ele continua existindo, mas todo pedido dele é `DENY_CONTAINED` e as conexões dele caem. Reversível, idempotente; o alcance é o papel de quem o lançou (`process`) |
+| `process.terminate` | Encerra um processo: isolado na hora, morre no próximo ponto seguro (entrada ou volta de uma chamada de sistema, ou o tique seguinte do núcleo em que gira); o pai colhe um morto, os filhos seguem. Sem volta; o alcance é o papel de quem o lançou (`process`) |
 | `process.release` | Solta o processo isolado — pela mesma permissão (`process`) |
 | `agent.suspend` | Suspende um agente: registrado e conectado, mas todo pedido dele e dos processos dele é `DENY_CONTAINED`; as conexões caem e os arrendamentos são soltos. Não é revogação (`key`) |
 | `agent.resume` | Retoma o agente suspenso (`key`) |
@@ -275,7 +279,8 @@ kernel/src/
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
-├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta
+├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta, e o término de um processo, que isola antes
+├── energia.rs       reiniciar e desligar: o pedido no journal antes, as gravações paradas, e a máquina entregue ao firmware (ACPI, PSCI)
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
@@ -665,6 +670,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── nativo.rs     um programa nativo: confere de dentro o que a interface nativa promete
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
         ├── isolavel.rs   pede pelo gate a cada passo da suíte: isolado, ouve `DENY_CONTAINED` e não bifurca; solto, pede de novo
+        ├── encerravel.rs gira sem chamada de sistema, espera um evento, espera um filho ou escreve no armazém, no passo da suíte: o término o pega em cada um
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas

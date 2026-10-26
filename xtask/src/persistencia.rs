@@ -272,6 +272,18 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_relogio_logico_nao_volta,
     },
     Cenario {
+        nome: "o reinicio pelo comando: o pedido ja esta no journal, e a maquina volta sozinha",
+        rodar: o_reinicio_pelo_comando,
+    },
+    Cenario {
+        nome: "o desligamento pelo comando: a maquina para sozinha, e o pedido esta no journal no boot seguinte",
+        rodar: o_desligamento_pelo_comando,
+    },
+    Cenario {
+        nome: "o heap do kernel segue a memoria: 8 MiB na maquina de 128 MiB, 64 MiB na de 1 GiB",
+        rodar: o_heap_segue_a_memoria,
+    },
+    Cenario {
         nome: "o signatario recusa assinar sobre uma geracao menor que a que ja viu",
         rodar: o_signatario_recusa_geracao_menor,
     },
@@ -558,6 +570,193 @@ fn dois_boots_sobre_o_mesmo_tpm(arch: Arquitetura, artefato: &Artefato) -> Resul
     }
     maquina.cortar_a_energia()?;
     Ok("dois cortes de energia, o NV do TPM no disco do hospedeiro entre eles".into())
+}
+
+impl Ligada {
+    /// Espera o QEMU sair sozinho — a máquina se desligou —, até `prazo`.
+    fn esperar_sair(&mut self, prazo: Duration) -> Result<std::process::ExitStatus, String> {
+        let limite = std::time::Instant::now() + prazo;
+        loop {
+            match self.filho.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) if std::time::Instant::now() < limite => {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Ok(None) => return Err(format!("a maquina nao se desligou em {prazo:?}")),
+                Err(e) => return Err(format!("nao foi possivel esperar o QEMU: {e}")),
+            }
+        }
+    }
+
+    /// Espera o boot seguinte ao de `boots` responder — a máquina reiniciou
+    /// sozinha, e o canal da serial é o mesmo —, até [`ESPERA_PELO_BOOT`].
+    /// Os pedidos feitos no meio do reinício se perdem, e são feitos de
+    /// novo.
+    fn esperar_o_boot_seguinte(&mut self, boots: u64) -> Result<Persistencia, String> {
+        let limite = std::time::Instant::now() + ESPERA_PELO_BOOT;
+        let mut ultimo = String::from("nenhuma resposta");
+        while std::time::Instant::now() < limite {
+            if let Ok(Some(status)) = self.filho.try_wait() {
+                return Err(format!("a maquina saiu em vez de reiniciar: {status}"));
+            }
+            match persistencia_de(self) {
+                Ok(p) if p.boots > boots => return Ok(p),
+                Ok(p) => ultimo = format!("ainda o boot {}", p.boots),
+                Err(e) => ultimo = e,
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Err(format!("o boot seguinte nao respondeu: {ultimo}"))
+    }
+}
+
+/// O registro do pedido de energia `registro`, na cauda da auditoria: o
+/// método, o recurso — o nome da ação — e o desfecho.
+fn pedido_de_energia_na_cauda(
+    cauda: &[Rastro],
+    registro: u64,
+    metodo: &str,
+    acao: &str,
+) -> Result<(), String> {
+    match cauda.iter().find(|r| r.seq == registro) {
+        Some(r) if r.metodo == metodo && r.recurso == acao && r.codigo == "ALLOW" => Ok(()),
+        Some(r) => Err(format!("o registro {registro} nao e o pedido: {r:?}")),
+        None => Err(format!(
+            "o registro {registro} do pedido nao voltou do journal; a cauda vai de {:?} a {:?}",
+            cauda.first().map(|r| r.seq),
+            cauda.last().map(|r| r.seq)
+        )),
+    }
+}
+
+/// O reinício pedido pelo comando, numa máquina de produção: a resposta
+/// diz o registro do pedido, e ele já está no journal quando ela sai; a
+/// máquina reinicia sozinha — o QEMU não sai —, e no boot seguinte o
+/// registro está lá, a persistência disponível e a cadeia inteira.
+fn o_reinicio_pelo_comando(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let antes = persistencia_de(&mut m)?;
+    if antes.estado != "available" {
+        return Err(format!(
+            "a persistencia nao subiu: {} ({})",
+            antes.estado, antes.motivo
+        ));
+    }
+    let r = m.pedir("system.reboot", "{}")?;
+    let registro: u64 = texto_do_resultado(&r, "record")
+        .or_else(|| super::campo_simples(&r, "record"))
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "o reinicio nao foi aceito
+  {r}"
+            )
+        })?;
+    if !r.contains(r#""state":"rebooting""#) {
+        return Err(format!(
+            "a resposta nao diz que reinicia
+  {r}"
+        ));
+    }
+    let depois = m.esperar_o_boot_seguinte(antes.boots)?;
+    if depois.estado != "available" {
+        return Err(format!(
+            "o boot depois do reinicio nao abriu a persistencia: {} ({})",
+            depois.estado, depois.motivo
+        ));
+    }
+    if depois.auditoria_gravada < registro {
+        return Err(format!(
+            "o journal do boot seguinte vai ate {}, antes do pedido {registro}",
+            depois.auditoria_gravada
+        ));
+    }
+    let cauda = cauda_da_auditoria(&mut m)?;
+    pedido_de_energia_na_cauda(&cauda, registro, "system.reboot", "reboot")?;
+    auditoria_verifica(&mut m)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "boot {} -> {}; o pedido {registro} voltou do journal; a cadeia se verifica",
+        antes.boots, depois.boots
+    ))
+}
+
+/// O desligamento pedido pelo comando: a máquina para sozinha — o QEMU sai,
+/// com sucesso —, e no boot seguinte o registro do pedido está no journal,
+/// com a persistência disponível.
+fn o_desligamento_pelo_comando(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let antes = persistencia_de(&mut m)?;
+    let r = m.pedir("system.poweroff", "{}")?;
+    let registro: u64 = texto_do_resultado(&r, "record")
+        .or_else(|| super::campo_simples(&r, "record"))
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "o desligamento nao foi aceito
+  {r}"
+            )
+        })?;
+    let status = m.esperar_sair(Duration::from_secs(60))?;
+    if !status.success() {
+        return Err(format!("o QEMU saiu com {status}, e nao pelo desligamento"));
+    }
+    drop(m);
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let depois = persistencia_de(&mut m)?;
+    if depois.estado != "available" || depois.boots <= antes.boots {
+        return Err(format!(
+            "o boot seguinte: {} ({}), boot {} depois de {}",
+            depois.estado, depois.motivo, depois.boots, antes.boots
+        ));
+    }
+    let cauda = cauda_da_auditoria(&mut m)?;
+    pedido_de_energia_na_cauda(&cauda, registro, "system.poweroff", "poweroff")?;
+    auditoria_verifica(&mut m)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "o QEMU saiu sozinho ({status}); o pedido {registro} voltou do journal no boot {}",
+        depois.boots
+    ))
+}
+
+/// O total do heap do kernel, pelo `heap.stats`.
+fn heap_do_kernel(maquina: &mut Ligada) -> Result<u64, String> {
+    let r = maquina.pedir("heap.stats", "{}")?;
+    texto_do_resultado(&r, "total_bytes")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("o heap.stats nao diz o total\n  {r}"))
+}
+
+/// O heap do kernel segue a memória da máquina: a de 128 MiB — a de toda a
+/// bancada — fica no piso de 8 MiB, e a de 1 GiB tem 64 MiB, um dezesseis
+/// avos dela; e a máquina maior atende como a outra.
+fn o_heap_segue_a_memoria(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const MIB: u64 = 1024 * 1024;
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let pequena = heap_do_kernel(&mut m)?;
+    m.cortar_a_energia()?;
+    if pequena != 8 * MIB {
+        return Err(format!("a maquina de 128 MiB tem {pequena} bytes de heap"));
+    }
+    let ambiente = Ambiente::ligar(arch, None)?.com_memoria(1024);
+    let mut m = Ligada::subir_com(arch, artefato, ambiente)?;
+    let grande = heap_do_kernel(&mut m)?;
+    let r = m.pedir("agent.ping", "{}")?;
+    m.cortar_a_energia()?;
+    // Um dezesseis avos da memória utilizável: um pouco menos que 64 MiB,
+    // o que o firmware e o iniciador guardam para si.
+    if !(48 * MIB..=64 * MIB).contains(&grande) {
+        return Err(format!("a maquina de 1 GiB tem {grande} bytes de heap"));
+    }
+    if !r.contains(r#""result""#) {
+        return Err(format!("a maquina de 1 GiB nao respondeu\n  {r}"));
+    }
+    Ok(format!(
+        "{} MiB na de 128 MiB, {} MiB na de 1 GiB",
+        pequena / MIB,
+        grande / MIB
+    ))
 }
 
 /// O RTC lido pelo kernel, pelo `system.info`.

@@ -249,11 +249,20 @@ struct Conexao {
 }
 
 /// O que `net.info` diz da pilha.
+/// Quantos servidores de DNS de um DHCP o resumo guarda: os três que o
+/// `smoltcp` lê da oferta.
+pub const MAIS_DNS: usize = 3;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Resumo {
     /// O endereço e a máscara que o DHCP deu, se deu.
     pub endereco: Option<([u8; 4], u8)>,
     pub roteador: Option<[u8; 4]>,
+    /// Os servidores de DNS que o DHCP anunciou, na ordem dele — até
+    /// [`MAIS_DNS`]. Informação, e não alcance: falar com um deles é um
+    /// `net.connect` decidido pela política como qualquer outro, e o
+    /// anúncio não abre nada.
+    pub dns: [Option<[u8; 4]>; MAIS_DNS],
     pub conexoes: usize,
     /// Quantas conexões já foram abertas desde o boot.
     pub abertas: u64,
@@ -268,6 +277,8 @@ struct Pilha {
     dhcp: SocketHandle,
     endereco: Option<Ipv4Cidr>,
     roteador: Option<Ipv4Address>,
+    /// Os servidores de DNS do último DHCP — ver [`Resumo::dns`].
+    dns: [Option<[u8; 4]>; MAIS_DNS],
     conexoes: Vec<Conexao>,
     /// Os sockets de conexões que o dono fechou e que ainda terminam o
     /// fecho com o outro lado, com o dono de cada um. Até acabarem, contam
@@ -679,6 +690,7 @@ pub fn iniciar() {
             dhcp,
             endereco: None,
             roteador: None,
+            dns: [None; MAIS_DNS],
             conexoes: Vec::new(),
             fechando: Vec::new(),
             cortadas: Vec::new(),
@@ -832,6 +844,10 @@ impl Pilha {
                 }
                 self.endereco = Some(endereco);
                 self.roteador = roteador;
+                self.dns = [None; MAIS_DNS];
+                for (vaga, d) in self.dns.iter_mut().zip(c.dns_servers.iter()) {
+                    *vaga = Some(d.octets());
+                }
                 Some(Some((endereco.address().octets(), endereco.prefix_len())))
             }
             dhcpv4::Event::Deconfigured => {
@@ -839,6 +855,7 @@ impl Pilha {
                 self.iface.routes_mut().remove_default_ipv4_route();
                 self.endereco = None;
                 self.roteador = None;
+                self.dns = [None; MAIS_DNS];
                 Some(None)
             }
         }
@@ -1830,6 +1847,7 @@ pub fn resumo() -> Option<Resumo> {
     com_pilha(|p| Resumo {
         endereco: p.endereco.map(|c| (c.address().octets(), c.prefix_len())),
         roteador: p.roteador.map(|r| r.octets()),
+        dns: p.dns,
         conexoes: p.conexoes.len(),
         abertas: p.abertas,
         datagramas_alheios: p.datagramas_alheios,

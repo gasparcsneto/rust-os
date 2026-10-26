@@ -313,6 +313,15 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
     // apontando para depois dela.
     if ec == 0x15 {
         if super::usuario::veio_de_usuario(quadro) {
+            // O término pedido por `process.terminate`, antes de a chamada
+            // rodar — ver `crate::fios::terminar_se_pedido`. É por aqui que
+            // volta o processo que esperava e foi acordado pelo pedido: o
+            // `svc` dele se repete, e ele morre em vez de repeti-lo.
+            if crate::fios::terminar_se_pedido() {
+                parar_o_fio_atual(quadro);
+                return;
+            }
+
             // Chamada de sistema de um processo.
             super::usuario::atender_chamada(quadro);
 
@@ -326,6 +335,9 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
             // aqui, sobre o quadro de fora, o fio volta em EL0 pelo quadro
             // dele, em qualquer núcleo. Ver `fios::pedir_cessao`.
             let ceder = crate::fios::tirar_cessao();
+            // E na volta: o término pedido durante a chamada vale antes de
+            // o processo ver o resultado. Marcado, ele está parado.
+            crate::fios::terminar_se_pedido();
             if crate::fios::atual_parado() {
                 parar_o_fio_atual(quadro);
             } else if ceder {
@@ -547,6 +559,17 @@ fn parar_o_fio_atual(quadro: &mut Quadro) {
 #[unsafe(no_mangle)]
 extern "C" fn tratar_irq(quadro: &mut Quadro) {
     let preemptar = super::gic::tratar();
+
+    // O término pedido por `process.terminate`, quando a interrupção pegou
+    // o processo em EL0 — o ponto seguro de quem só gira, sem chamada de
+    // sistema: ali ele não segura nada do kernel. Vinda de EL1, ela pode
+    // ter cortado uma chamada no meio, e o processo morre na volta dela.
+    // Depois do fim da interrupção, que o GIC já recebeu, dentro de
+    // `tratar`.
+    if super::usuario::veio_de_usuario(quadro) && crate::fios::terminar_se_pedido() {
+        parar_o_fio_atual(quadro);
+        return;
+    }
 
     if preemptar {
         // A troca acontece **depois** de o GIC ter sido avisado do fim do

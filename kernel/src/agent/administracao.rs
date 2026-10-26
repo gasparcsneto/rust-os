@@ -113,7 +113,7 @@ fn reconfirmar(
         ));
     }
     let codigo = match alvo {
-        Some(alvo) if permissao.contencao() => {
+        Some(alvo) if permissao.alvo_e_papel() => {
             autorizacao::decidir_contencao(Some(papel), permissao, metodo, alvo).0
         }
         Some(alvo) => autorizacao::decidir_destino(Some(papel), permissao, alvo).0,
@@ -268,6 +268,29 @@ static OPERACOES: &[Operacao] = &[
         permissao: Permissao::ProcessIsolate,
         efeito: Efeito::Nenhum,
         executar: isolar_processo,
+    },
+    Operacao {
+        nome: "process.terminate",
+        resumo: "Encerra um processo: {\"process\": fio}. Isolado na hora, morre no proximo \
+                 ponto seguro. Sem volta.",
+        permissao: Permissao::ProcessTerminate,
+        efeito: Efeito::Nenhum,
+        executar: encerrar_processo,
+    },
+    Operacao {
+        nome: "system.reboot",
+        resumo: "Reinicia a maquina: {}. O pedido vai ao journal antes; as gravacoes param \
+                 meio segundo depois, e o firmware reinicia.",
+        permissao: Permissao::SystemPower,
+        efeito: Efeito::Nenhum,
+        executar: reiniciar,
+    },
+    Operacao {
+        nome: "system.poweroff",
+        resumo: "Desliga a maquina: {}. A mesma ordem do reinicio.",
+        permissao: Permissao::SystemPower,
+        efeito: Efeito::Nenhum,
+        executar: desligar,
     },
     Operacao {
         nome: "process.release",
@@ -593,7 +616,7 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // A prova disse quem; a política diz se o papel dele pode isto. A
     // permissão de destino tem o recurso nos parâmetros: o papel primeiro,
     // e o destinatário logo abaixo.
-    let decisao = if operacao.permissao.recurso_e_destino() || operacao.permissao.contencao() {
+    let decisao = if operacao.permissao.recurso_e_destino() || operacao.permissao.alvo_e_papel() {
         autorizacao::papel_tem(papel.as_deref(), operacao.permissao)
     } else {
         autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao)
@@ -630,9 +653,10 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
         }
         destino = resolvido;
     }
-    // O alvo de uma contenção, pelo mesmo `decidir_contencao` da sessão,
-    // com o papel do administrador: o papel do alvo, contra o alcance dele.
-    if operacao.permissao.contencao() {
+    // O alvo de uma contenção — ou do término de um processo —, pelo mesmo
+    // `decidir_contencao` da sessão, com o papel do administrador: o papel
+    // do alvo, contra o alcance dele.
+    if operacao.permissao.alvo_e_papel() {
         let alvo = crate::contencao::Alvo::do_pedido(operacao.nome, Json(parametros.as_bytes()))
             .map(|a| a.texto())
             .unwrap_or_default();
@@ -1696,6 +1720,55 @@ fn isolar_processo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<Stri
 
 fn soltar_processo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
     conter_pela_prova("process.release", params, false, w)
+}
+
+/// O término de um processo, pela prova: o mesmo efeito do comando — ver
+/// [`crate::contencao::encerrar_processo`]. Devolve o alvo, o recurso que a
+/// auditoria grava.
+fn encerrar_processo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    let alvo = crate::contencao::Alvo::do_pedido("process.terminate", params)
+        .map_err(|m| falha(Codigo::InvalidArgument, m))?;
+    let crate::contencao::Alvo::Processo(fio) = alvo else {
+        return Err(falha(Codigo::InvalidArgument, "falta o processo"));
+    };
+    let feito = crate::contencao::encerrar_processo(fio).map_err(|m| falha(Codigo::Error, m))?;
+    for (id, d) in &feito.isolamento.derrubadas {
+        autorizacao::auditar_execucao(
+            &d.texto(),
+            Codigo::Allow,
+            &format!("conexao {id} derrubada pelo termino"),
+        );
+    }
+    let texto = alvo.texto();
+    let _ = w.field_str("target", &texto);
+    let _ = w.field_str("state", "terminating");
+    let _ = w.field_str("was", feito.estava);
+    let _ = w.field_bool("isolated", crate::contencao::contido(&alvo));
+    let _ = w.field_u64("dropped", feito.isolamento.derrubadas.len() as u64);
+    Ok(texto)
+}
+
+/// Reiniciar ou desligar, pela prova: a mesma ordem do comando — ver
+/// [`crate::energia`]. Devolve o recurso da auditoria, o nome da ação.
+fn parar_a_maquina(acao: crate::energia::Acao, w: &mut JsonWriter) -> Result<String, Falha> {
+    // O registro do pedido é o da autorização, que a operação sem efeito
+    // grava antes de executar: o último da auditoria agora, ou um depois
+    // dele — e o journal grava em ordem.
+    let registro = autorizacao::ultimo_registro();
+    crate::energia::preparar(acao, registro).map_err(|m| falha(Codigo::Error, m))?;
+    let _ = w.field_str("action", acao.nome());
+    let _ = w.field_str("state", acao.estado());
+    let _ = w.field_u64("record", registro);
+    let _ = w.field_u64("in_ms", crate::energia::ESPERA_MS);
+    Ok(String::from(acao.nome()))
+}
+
+fn reiniciar(_: &Pedinte, _: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    parar_a_maquina(crate::energia::Acao::Reiniciar, w)
+}
+
+fn desligar(_: &Pedinte, _: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    parar_a_maquina(crate::energia::Acao::Desligar, w)
 }
 
 fn suspender_agente(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {

@@ -111,8 +111,10 @@ extern "x86-interrupt" fn nmi(_quadro: InterruptStackFrame) {
 macro_rules! tratadores {
     ($($nome:ident = $linha:expr),* $(,)?) => {
         $(
-            extern "x86-interrupt" fn $nome(_quadro: InterruptStackFrame) {
-                if atender($linha) {
+            extern "x86-interrupt" fn $nome(quadro: InterruptStackFrame) {
+                let preemptar = atender($linha);
+                terminar_se_veio_do_usuario(&quadro);
+                if preemptar {
                     // Trocar de fio aqui dentro é seguro porque no x86 o
                     // quadro de interrupção foi empilhado na pilha do fio
                     // interrompido: a troca leva o quadro junto, e o `iretq`
@@ -141,7 +143,7 @@ tratadores! {
 /// É a gêmea de `atender(0)`, e faz o mesmo trabalho: marcar o tempo e
 /// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
 /// o APIC, não o PIC.
-extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
+extern "x86-interrupt" fn timer_do_apic(quadro: InterruptStackFrame) {
     // Cada núcleo tem o seu timer, e cada um conta o próprio pulso e o
     // oferece ao relógio, que anda uma vez por período por qualquer núcleo
     // vivo — ver `tempo::tick`. Os dispositivos, só no núcleo deles.
@@ -156,8 +158,27 @@ extern "x86-interrupt" fn timer_do_apic(_quadro: InterruptStackFrame) {
     // escalonado de novo, e até lá o APIC não entregaria outra.
     super::apic::fim_de_interrupcao();
 
+    terminar_se_veio_do_usuario(&quadro);
     if preemptar {
         super::contexto::ceder_cpu();
+    }
+}
+
+/// O término pedido por `process.terminate`, quando a interrupção pegou o
+/// processo no anel do usuário — ver `crate::fios::terminar_se_pedido`. É
+/// o ponto seguro de quem só gira, sem chamada de sistema: ali ele não
+/// segura nada do kernel. Vinda do anel zero, a interrupção pode ter
+/// cortado uma chamada no meio, com uma trava na mão, e o processo morre
+/// na volta dela.
+///
+/// Depois do fim da interrupção, que já foi sinalizado: marcado, o fio sai
+/// de circulação como o morto de uma falha de página — `descansar` não
+/// volta, e o quadro desta interrupção fica para trás com a pilha dele.
+fn terminar_se_veio_do_usuario(quadro: &InterruptStackFrame) {
+    if quadro.code_segment.rpl() as u8 == x86_64::PrivilegeLevel::Ring3 as u8
+        && crate::fios::terminar_se_pedido()
+    {
+        crate::fios::descansar();
     }
 }
 

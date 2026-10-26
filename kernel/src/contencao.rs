@@ -93,7 +93,7 @@ impl Alvo {
     /// espécie, e os parâmetros, quem.
     pub fn do_pedido(metodo: &str, params: Json) -> Result<Alvo, &'static str> {
         match metodo {
-            "process.isolate" | "process.release" => params
+            "process.isolate" | "process.release" | "process.terminate" => params
                 .member("process")
                 .and_then(|v| v.as_u64())
                 .map(Alvo::Processo)
@@ -314,6 +314,43 @@ pub fn conter(alvo: &Alvo) -> Result<Feito, &'static str> {
         }
     }
     Ok(feito)
+}
+
+/// O que encerrar um processo fez.
+#[derive(Debug)]
+pub struct Encerrado {
+    /// O isolamento que veio antes: se mudou, e as conexões que caíram.
+    pub isolamento: Feito,
+    /// Em que estado ele estava quando o fim foi pedido.
+    pub estava: &'static str,
+}
+
+/// Encerra o processo `fio` — `process.terminate`: isola-o na hora e pede
+/// o fim dele, que acontece no próximo ponto seguro (ver
+/// [`crate::fios::terminar_se_pedido`]).
+///
+/// # Por que isolar antes
+///
+/// Porque o fim não é instantâneo — o processo pode estar no meio de uma
+/// chamada, ou de um pedido que o executor está atendendo —, e o que ele
+/// pediu antes de morrer não pode terminar de acontecer depois do
+/// término: isolado, um pedido em curso é recusado no ponto de commit
+/// (`DENY_CONTAINED`), um novo é recusado no gate, e as conexões dele já
+/// caíram. O isolamento de um morto sai sozinho, na próxima poda.
+///
+/// Com o teto de isolados cheio, o fim é pedido mesmo assim: as conexões
+/// caem quando o coletor recolhe o morto, e o pedido em curso não tem mais
+/// a quem responder.
+///
+/// Só os handlers dos comandos e as operações administrativas chamam.
+pub fn encerrar_processo(fio: u64) -> Result<Encerrado, &'static str> {
+    if crate::fios::autoridade_do_processo(fio).is_none() {
+        return Err("processo inexistente");
+    }
+    let alvo = Alvo::Processo(fio);
+    let isolamento = conter(&alvo).unwrap_or_default();
+    let estava = crate::fios::pedir_termino(fio)?;
+    Ok(Encerrado { isolamento, estava })
 }
 
 /// Desfaz a contenção de `alvo`. Nada mais muda: as conexões que caíram não

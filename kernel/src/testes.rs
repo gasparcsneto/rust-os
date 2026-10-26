@@ -9945,7 +9945,7 @@ fn heap_respeita_alinhamento() -> Resultado {
 /// assume que a alocação teve sucesso, o que fazia o teste passar em debug e
 /// falhar em release — medindo o otimizador, não o alocador.
 fn heap_falha_devolve_nulo() -> Resultado {
-    let layout = core::alloc::Layout::from_size_align(crate::heap::HEAP_TAMANHO * 2, 8)
+    let layout = core::alloc::Layout::from_size_align(crate::heap::tamanho() * 2, 8)
         .map_err(|_| "layout invalido")?;
 
     let ponteiro = crate::heap::tentar_alocar(layout);
@@ -32130,6 +32130,62 @@ static CASOS: &[Caso] = &[
         f: contencao_o_processo_isolado_e_solto,
     },
     Caso {
+        nome: "processos: a lista diz o programa, o papel e o estado",
+        f: processos_a_lista_diz_o_programa_o_papel_e_o_estado,
+    },
+    Caso {
+        nome: "processos: o encerrado que gira morre no tique",
+        f: processos_o_encerrado_que_gira_morre_no_tique,
+    },
+    Caso {
+        nome: "processos: o encerrado que espera acorda e morre",
+        f: processos_o_encerrado_que_espera_acorda_e_morre,
+    },
+    Caso {
+        nome: "processos: o pai colhe o filho encerrado, e o filho do encerrado segue",
+        f: processos_o_pai_colhe_o_filho_encerrado_e_o_filho_do_encerrado_segue,
+    },
+    Caso {
+        nome: "processos: o pedido em curso do encerrado nao chega ao commit",
+        f: processos_o_pedido_em_curso_do_encerrado_nao_chega_ao_commit,
+    },
+    Caso {
+        nome: "processos: quem nao pode encerrar ouve a recusa",
+        f: processos_quem_nao_pode_encerrar_ouve_a_recusa,
+    },
+    Caso {
+        nome: "processos: varios encerrados ao mesmo tempo",
+        f: processos_varios_encerrados_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "processos: o administrador encerra pela prova",
+        f: processos_o_administrador_encerra_pela_prova,
+    },
+    Caso {
+        nome: "rede: o net.info diz os DNS do DHCP",
+        f: rede_o_net_info_diz_os_dns_do_dhcp,
+    },
+    Caso {
+        nome: "energia: o pedido vai ao journal antes, e as gravacoes param depois",
+        f: energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois,
+    },
+    Caso {
+        nome: "energia: quem nao pode ouve a recusa",
+        f: energia_quem_nao_pode_ouve_a_recusa,
+    },
+    Caso {
+        nome: "energia: sem o pedido no journal, a maquina segue",
+        f: energia_sem_o_pedido_no_journal_a_maquina_segue,
+    },
+    Caso {
+        nome: "energia: a maquina diz como reinicia e desliga",
+        f: energia_a_maquina_diz_como_reinicia_e_desliga,
+    },
+    Caso {
+        nome: "heap: o tamanho segue a memoria",
+        f: heap_o_tamanho_segue_a_memoria,
+    },
+    Caso {
         nome: "contencao: o agente suspenso e retomado pela prova",
         f: contencao_o_agente_suspenso_e_retomado_pela_prova,
     },
@@ -46593,6 +46649,1016 @@ fn contencao_o_processo_isolado_e_solto() -> Resultado {
     );
     if ficou.is_err() {
         return Err("a contencao ficou para um processo que acabou");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// processos: a lista e o término — `process.list` e `process.terminate`
+// ---------------------------------------------------------------------------
+
+/// O `encerravel`, lançado por alguém — ver `programas/src/bin/encerravel.rs`.
+struct Encerravel {
+    fio: u64,
+    desde: u64,
+}
+
+/// Os passos do `encerravel`, no `a` de um evento.
+const ENCERRAVEL_GIRAR: i64 = 1;
+const ENCERRAVEL_FILHO: i64 = 2;
+const ENCERRAVEL_ESCREVER: i64 = 3;
+
+impl Encerravel {
+    /// Lança o programa como `quem`, e espera ele dizer que está pronto.
+    fn lancar(quem: crate::autorizacao::Chamador) -> Result<Self, &'static str> {
+        let desde = crate::log::total_emitidos();
+        let dir = crate::usuario::DIRETORIO_DOS_COMPILADOS;
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{dir}/encerravel"}}"#),
+        );
+        let fio = fs_numero(&r, "thread_id").ok_or_else(|| {
+            crate::log_error!("teste", "{}", r);
+            "o user.run nao lancou o encerravel"
+        })?;
+        let e = Encerravel { fio, desde };
+        e.esperar_linha("encerravel: pronto", 1)?;
+        Ok(e)
+    }
+
+    /// Espera `n` linhas `linha` do programa desde o lançamento.
+    fn esperar_linha(&self, linha: &str, n: usize) -> Resultado {
+        esperar_ate(|| linhas_do_programa(self.desde, linha) >= n, 600).map_err(|_| {
+            crate::log_error!("teste", "nao veio `{}` ({} vez(es))", linha, n);
+            "o encerravel nao disse o que devia"
+        })
+    }
+
+    /// Publica um passo para todos os `encerravel` que escutam — cada um
+    /// no seu canal. `Err` se nenhum canal tinha ouvinte.
+    fn passo(a: i64, b: i64) -> Resultado {
+        use protocolo::usuario::evento::{Evento, tipo};
+        let mut ouvido = false;
+        for canal in [
+            "teste-encerravel",
+            "teste-encerravel-1",
+            "teste-encerravel-2",
+            "teste-encerravel-3",
+        ] {
+            ouvido |= crate::eventos::publicar(
+                canal,
+                Evento {
+                    tipo: tipo::ACAO,
+                    a,
+                    b,
+                    ..Default::default()
+                },
+            )
+            .is_ok();
+        }
+        if ouvido {
+            Ok(())
+        } else {
+            Err("o canal do encerravel nao recebeu o passo")
+        }
+    }
+
+    /// Espera o processo `fio` ter morrido pelo término pedido: a linha do
+    /// kernel, uma vez, e o fio fora de circulação.
+    fn morreu(fio: u64, desde: u64) -> Resultado {
+        let linha = alloc::format!("processo {fio} encerrado pelo termino pedido");
+        esperar_ate(
+            || !crate::fios::vivo(fio) && linhas_do_programa(desde, &linha) >= 1,
+            600,
+        )
+        .map_err(|_| {
+            crate::log_error!("teste", "o processo {} nao morreu", fio);
+            "o processo encerrado nao morreu"
+        })?;
+        if linhas_do_programa(desde, &linha) != 1 {
+            return Err("o processo morreu mais de uma vez");
+        }
+        Ok(())
+    }
+}
+
+/// Encerra, sem passar pelo gate, todo `encerravel` que tenha sobrado de
+/// um caso que reprovou no meio — um que gira tomaria um núcleo pelo resto
+/// da suíte —, e espera eles saírem de circulação.
+fn encerrar_os_encerraveis() {
+    let mut vivos = alloc::vec::Vec::new();
+    crate::fios::com_processos(|p| {
+        if p.estado != "zombie" && p.programa.descricao().starts_with("encerravel ") {
+            vivos.push(p.id);
+        }
+    });
+    for fio in &vivos {
+        let _ = crate::contencao::encerrar_processo(*fio);
+    }
+    let _ = esperar_ate(|| vivos.iter().all(|f| !crate::fios::vivo(*f)), 600);
+}
+
+/// Uma linha de `process.list`, lida do envelope.
+struct NaLista {
+    estado: alloc::string::String,
+    programa: alloc::string::String,
+    autoridade: alloc::string::String,
+    papel: Option<alloc::string::String>,
+    pai: Option<u64>,
+    isolado: bool,
+    descritores: u64,
+}
+
+/// O processo `fio` em `process.list`, pedida por `quem`; `None` se a
+/// lista não o tem.
+fn na_lista(quem: crate::autorizacao::Chamador, fio: u64) -> Option<NaLista> {
+    let r = fs_pedir(quem, "process.list", "{}");
+    let lista = Json(r.as_bytes()).member("result")?.member("processes")?;
+    let mut i = 0;
+    while let Some(p) = lista.item(i) {
+        i += 1;
+        if p.member("id").and_then(|v| v.as_u64()) != Some(fio) {
+            continue;
+        }
+        let texto = |c: &str| {
+            p.member(c)
+                .and_then(|v| v.as_str())
+                .map(alloc::string::String::from)
+        };
+        return Some(NaLista {
+            estado: texto("state")?,
+            programa: texto("program")?,
+            autoridade: texto("authority")?,
+            papel: texto("role"),
+            pai: p.member("parent").and_then(|v| v.as_u64()),
+            isolado: p.member("isolated").and_then(|v| v.as_bool())?,
+            descritores: p.member("descriptors").and_then(|v| v.as_u64())?,
+        });
+    }
+    None
+}
+
+/// O número no fim da última linha do programa que começa com `prefixo`.
+fn numero_da_linha(desde: u64, prefixo: &str) -> Option<u64> {
+    let mut achado = None;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.seq >= desde
+            && r.subsistema == "usuario"
+            && let Some(resto) = r.mensagem().strip_prefix(prefixo)
+        {
+            achado = resto.trim().parse().ok().or(achado);
+        }
+    });
+    achado
+}
+
+/// Quantos registros da auditoria têm o recurso `recurso` e um detalhe com
+/// `trecho`.
+fn auditados(recurso: &str, trecho: &str) -> usize {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.recurso == recurso && r.evento.detalhe.contains(trecho))
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// Um operador num console de pessoa, para lançar os `encerravel`.
+fn operador_que_lanca(console: u16, nome: &str) -> crate::autorizacao::Chamador {
+    crate::autorizacao::Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(console),
+        nome,
+        "operador",
+    ))
+}
+
+/// `process.list`: o processo de uma pessoa operadora aparece com o
+/// programa que ele é — o nome do manifesto e o começo do resumo —, por
+/// quem age e com que papel, parado numa chamada (`waiting`), sem pai e
+/// sem isolamento; isolado, a lista diz. É leitura, pela `system.read`: o
+/// observador lê, e o papel sem ela ouve `DENY_PERMISSION`. O que acabou
+/// sai da lista.
+fn processos_a_lista_diz_o_programa_o_papel_e_o_estado() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operador = operador_que_lanca(140, "lista-operador");
+        let e = Encerravel::lancar(operador)?;
+        let sistema = sistema_aqui();
+        esperar_ate(
+            || na_lista(sistema, e.fio).is_some_and(|l| l.estado == "waiting"),
+            600,
+        )
+        .map_err(|_| "o processo parado numa chamada nao apareceu esperando")?;
+        let l = na_lista(sistema, e.fio).ok_or("o processo sumiu da lista")?;
+        if !l.programa.starts_with("encerravel ")
+            || l.autoridade != "person"
+            || l.papel.as_deref() != Some("operador")
+            || l.pai.is_some()
+            || l.isolado
+            || l.descritores < 3
+        {
+            crate::log_error!(
+                "teste",
+                "{} {} {:?} {:?} {} {}",
+                l.programa,
+                l.autoridade,
+                l.papel,
+                l.pai,
+                l.isolado,
+                l.descritores
+            );
+            return Err("a lista nao diz o programa, quem e o papel do processo");
+        }
+        // O observador lê; o papel sem `system.read` não.
+        let observador = crate::autorizacao::Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(141),
+            "lista-observador",
+            "observador",
+        ));
+        if na_lista(observador, e.fio).is_none() {
+            return Err("o observador nao leu a lista dos processos");
+        }
+        let r = fs_pedir(como_o_nsf(), "process.list", "{}");
+        if !recusado_com(&r, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", r);
+            return Err("um papel sem system.read leu a lista dos processos");
+        }
+        // Isolado, a lista diz.
+        let processo = alloc::format!(r#"{{"process":{}}}"#, e.fio);
+        let r = fs_pedir(sistema, "process.isolate", &processo);
+        if fs_texto(&r, "state").as_deref() != Some("isolated") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o sistema nao isolou o processo");
+        }
+        if !na_lista(sistema, e.fio).is_some_and(|l| l.isolado) {
+            return Err("a lista nao diz que o processo esta isolado");
+        }
+        let _ = fs_pedir(sistema, "process.release", &processo);
+        // O fim pedido: ele sai, e sai da lista.
+        let _ = crate::eventos::publicar(
+            "teste-encerravel",
+            protocolo::usuario::evento::Evento {
+                tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+                ..Default::default()
+            },
+        );
+        e.esperar_linha("processo encerrou com codigo 86", 1)?;
+        esperar_ate(|| na_lista(sistema, e.fio).is_none(), 600)
+            .map_err(|_| "o processo que saiu continuou na lista")?;
+        Ok(())
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O processo que só gira — sem chamada de sistema nenhuma — é encerrado
+/// pelo sistema: a resposta diz `terminating`, que ele estava rodando ou
+/// pronto, e que já está isolado; ele morre no tique seguinte do núcleo
+/// dele, uma vez, sem sair por `sair`; a auditoria grava o pedido; e o
+/// contador dos pendentes volta a zero.
+fn processos_o_encerrado_que_gira_morre_no_tique() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let e = Encerravel::lancar(operador_que_lanca(142, "gira-operador"))?;
+        Encerravel::passo(ENCERRAVEL_GIRAR, 0)?;
+        e.esperar_linha("encerravel: girando", 1)?;
+        let sistema = sistema_aqui();
+        // Girando, ele roda: a lista o vê pronto ou rodando, nunca
+        // esperando.
+        let _ = esperar_ate(|| false, 20);
+        let estado = na_lista(sistema, e.fio)
+            .map(|l| l.estado)
+            .unwrap_or_default();
+        if estado != "running" && estado != "ready" {
+            crate::log_error!("teste", "{}", estado);
+            return Err("o processo que gira nao estava rodando");
+        }
+        let (_, terminados_antes) = crate::fios::terminos();
+        let r = fs_pedir(
+            sistema,
+            "process.terminate",
+            &alloc::format!(r#"{{"process":{}}}"#, e.fio),
+        );
+        let estava = fs_texto(&r, "was").unwrap_or_default();
+        if fs_texto(&r, "state").as_deref() != Some("terminating")
+            || (estava != "running" && estava != "ready")
+            || !r.contains(r#""isolated":true"#)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o termino nao disse o que pediu");
+        }
+        Encerravel::morreu(e.fio, e.desde)?;
+        if linhas_do_programa(e.desde, "processo encerrou com codigo 86") != 0 {
+            return Err("o processo encerrado saiu por sair");
+        }
+        let alvo = alloc::format!("process:{}", e.fio);
+        if auditados(&alvo, "termino pedido; estava ") != 1 {
+            return Err("a auditoria nao gravou o pedido de termino uma vez");
+        }
+        let (pendentes, terminados) = crate::fios::terminos();
+        if pendentes != 0 || terminados != terminados_antes + 1 {
+            crate::log_error!(
+                "teste",
+                "pendentes {} terminados {} antes {}",
+                pendentes,
+                terminados,
+                terminados_antes
+            );
+            return Err("os contadores do termino nao fecham");
+        }
+        // O morto sai da lista, e o isolamento dele também.
+        esperar_ate(|| na_lista(sistema, e.fio).is_none(), 600)
+            .map_err(|_| "o processo encerrado continuou na lista")?;
+        esperar_ate(
+            || {
+                !crate::contencao::lista()
+                    .iter()
+                    .any(|(_, contido)| *contido == alvo)
+            },
+            300,
+        )
+        .map_err(|_| "o isolamento ficou para um processo encerrado")?;
+        // E encerrar de novo: o alvo não existe mais.
+        let r = fs_pedir(
+            sistema,
+            "process.terminate",
+            &alloc::format!(r#"{{"process":{}}}"#, e.fio),
+        );
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("encerrar um morto nao foi recusado");
+        }
+        Ok(())
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O processo parado numa chamada — a leitura de um canal vazio — volta a
+/// circular pelo pedido e morre na volta, sem ler nada.
+fn processos_o_encerrado_que_espera_acorda_e_morre() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let e = Encerravel::lancar(operador_que_lanca(143, "espera-operador"))?;
+        let sistema = sistema_aqui();
+        esperar_ate(
+            || na_lista(sistema, e.fio).is_some_and(|l| l.estado == "waiting"),
+            600,
+        )
+        .map_err(|_| "o processo nao parou na leitura do canal")?;
+        let r = fs_pedir(
+            sistema,
+            "process.terminate",
+            &alloc::format!(r#"{{"process":{}}}"#, e.fio),
+        );
+        if fs_texto(&r, "was").as_deref() != Some("waiting") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o termino nao viu o processo esperando");
+        }
+        Encerravel::morreu(e.fio, e.desde)?;
+        // O morto não escuta mais: o canal dele ficou sem ouvinte, e um
+        // passo publicado não chega a ninguém.
+        if Encerravel::passo(ENCERRAVEL_GIRAR, 0).is_ok() {
+            return Err("o canal do processo encerrado ainda tinha ouvinte");
+        }
+        let _ = esperar_ate(|| false, 30);
+        if linhas_do_programa(e.desde, "encerravel: girando") != 0 {
+            return Err("o processo encerrado ainda leu o canal");
+        }
+        Ok(())
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O parentesco: o filho encerrado é colhido pelo pai como morto — o
+/// desfecho de quem não saiu por `sair` —, e o pai encerrado enquanto
+/// espera o filho morre sem levar o filho: os filhos seguem, com o pai
+/// na lista, e o filho órfão encerrado depois não fica zumbi.
+fn processos_o_pai_colhe_o_filho_encerrado_e_o_filho_do_encerrado_segue() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let e = Encerravel::lancar(operador_que_lanca(144, "pai-operador"))?;
+        let sistema = sistema_aqui();
+        let encerrar = |fio: u64| {
+            let r = fs_pedir(
+                sistema,
+                "process.terminate",
+                &alloc::format!(r#"{{"process":{fio}}}"#),
+            );
+            if fs_texto(&r, "state").as_deref() == Some("terminating") {
+                Ok(())
+            } else {
+                crate::log_error!("teste", "{}", r);
+                Err("o sistema nao encerrou o processo")
+            }
+        };
+        // O primeiro filho, encerrado: o pai o colhe morto.
+        Encerravel::passo(ENCERRAVEL_FILHO, 0)?;
+        esperar_ate(
+            || numero_da_linha(e.desde, "encerravel: filho ").is_some(),
+            600,
+        )
+        .map_err(|_| "o filho nao nasceu")?;
+        let filho = numero_da_linha(e.desde, "encerravel: filho ").ok_or("sem filho")?;
+        let l = na_lista(sistema, filho).ok_or("o filho nao esta na lista")?;
+        if l.pai != Some(e.fio) || l.papel.as_deref() != Some("operador") {
+            return Err("a lista nao diz o pai e o papel herdado do filho");
+        }
+        encerrar(filho)?;
+        Encerravel::morreu(filho, e.desde)?;
+        e.esperar_linha(&alloc::format!("encerravel: colheu {filho} morto"), 1)?;
+        // O segundo filho, e o pai encerrado enquanto o espera.
+        let desde = crate::log::total_emitidos();
+        Encerravel::passo(ENCERRAVEL_FILHO, 0)?;
+        esperar_ate(
+            || numero_da_linha(desde, "encerravel: filho ").is_some(),
+            600,
+        )
+        .map_err(|_| "o segundo filho nao nasceu")?;
+        let neto = numero_da_linha(desde, "encerravel: filho ").ok_or("sem filho")?;
+        esperar_ate(
+            || na_lista(sistema, e.fio).is_some_and(|l| l.estado == "waiting"),
+            600,
+        )
+        .map_err(|_| "o pai nao parou esperando o filho")?;
+        encerrar(e.fio)?;
+        Encerravel::morreu(e.fio, e.desde)?;
+        // O filho segue, e gira.
+        let _ = esperar_ate(|| false, 20);
+        if !crate::fios::vivo(neto) {
+            return Err("o filho morreu junto com o pai encerrado");
+        }
+        if na_lista(sistema, neto).is_none_or(|l| l.pai != Some(e.fio)) {
+            return Err("a lista perdeu o filho do encerrado");
+        }
+        // Encerrado também, ele não fica zumbi: o pai não existe mais.
+        encerrar(neto)?;
+        Encerravel::morreu(neto, desde)?;
+        esperar_ate(|| na_lista(sistema, neto).is_none(), 600)
+            .map_err(|_| "o orfao encerrado ficou na lista")?;
+        Ok(())
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O fio do `encerravel` que o gancho do commit encerra.
+static ENCERRAR_NO_COMMIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Se o gancho rodou.
+static ENCERROU_NO_COMMIT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Encerra, no ponto de commit do armazém, o processo do caso.
+fn encerrar_no_commit() {
+    use core::sync::atomic::Ordering;
+    let fio = ENCERRAR_NO_COMMIT.swap(0, Ordering::SeqCst);
+    if fio != 0 && crate::contencao::encerrar_processo(fio).is_ok() {
+        ENCERROU_NO_COMMIT.store(true, Ordering::SeqCst);
+    }
+}
+
+/// O término no meio de um pedido: o processo pede uma escrita no
+/// armazém, e é encerrado entre a decisão do gate e o commit. A escrita
+/// não acontece — a reconfirmação no commit ouve o isolamento,
+/// `DENY_CONTAINED` —, o arquivo não existe, e o processo morre sem ver a
+/// resposta.
+fn processos_o_pedido_em_curso_do_encerrado_nao_chega_ao_commit() -> Resultado {
+    use core::sync::atomic::Ordering;
+    const ARQUIVO: &str = "/armazem/compartilhado/encerravel.txt";
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        diretorios_acima(ARQUIVO)?;
+        let e = Encerravel::lancar(operador_que_lanca(145, "commit-operador"))?;
+        ENCERROU_NO_COMMIT.store(false, Ordering::SeqCst);
+        ENCERRAR_NO_COMMIT.store(e.fio, Ordering::SeqCst);
+        crate::armazem::antes_do_commit_de_teste(Some(encerrar_no_commit));
+        let cabeca = crate::autorizacao::ultimo_registro();
+        Encerravel::passo(ENCERRAVEL_ESCREVER, 16)?;
+        let morto = Encerravel::morreu(e.fio, e.desde);
+        crate::armazem::antes_do_commit_de_teste(None);
+        morto?;
+        if !ENCERROU_NO_COMMIT.load(Ordering::SeqCst) {
+            return Err("o pedido nao chegou ao ponto de commit");
+        }
+        if linhas_que_comecam(e.desde, "encerravel: escreveu") != 0 {
+            return Err("o processo encerrado viu a resposta da escrita");
+        }
+        if fs_no_armazem(ARQUIVO).1.is_some() {
+            return Err("a escrita do processo encerrado chegou ao commit");
+        }
+        let recusada = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.seq > cabeca)
+                .any(|r| {
+                    r.evento.recurso == ARQUIVO
+                        && r.evento.codigo == politica::Codigo::DenyContained
+                })
+        })
+        .unwrap_or(false);
+        if !recusada {
+            return Err("a recusa da escrita no commit nao foi gravada");
+        }
+        Ok(())
+    })();
+    crate::armazem::antes_do_commit_de_teste(None);
+    ENCERRAR_NO_COMMIT.store(0, Ordering::SeqCst);
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Quem não pode encerrar ouve a recusa, e o processo segue:
+///
+/// - o operador, nem o próprio processo: `DENY_PERMISSION`;
+/// - o tecido de segurança, que só contém: `DENY_PERMISSION`;
+/// - um fio do kernel — o da própria suíte — não é processo, e um número
+///   que não existe também não: `DENY_RESOURCE`;
+/// - com a política que tira o operador do alcance do sistema:
+///   `DENY_RESOURCE`;
+/// - um agente de papel `sistema` encerra; trocado para `operador`, o
+///   pedido seguinte já é `DENY_PERMISSION`.
+fn processos_quem_nao_pode_encerrar_ouve_a_recusa() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operador = operador_que_lanca(146, "recusa-operador");
+        let e = Encerravel::lancar(operador)?;
+        let processo = alloc::format!(r#"{{"process":{}}}"#, e.fio);
+        let recusa = |quem, params: &str, codigo: &str| -> Resultado {
+            let r = fs_pedir(quem, "process.terminate", params);
+            if recusado_com(&r, codigo) {
+                Ok(())
+            } else {
+                crate::log_error!("teste", "{}", r);
+                Err("um termino que devia ser recusado nao foi")
+            }
+        };
+        recusa(operador, &processo, "DENY_PERMISSION")?;
+        recusa(como_o_nsf(), &processo, "DENY_PERMISSION")?;
+        let sistema = sistema_aqui();
+        recusa(
+            sistema,
+            &alloc::format!(r#"{{"process":{}}}"#, crate::fios::id_atual()),
+            "DENY_RESOURCE",
+        )?;
+        recusa(sistema, r#"{"process":999999999}"#, "DENY_RESOURCE")?;
+        let fora = politica_trocada(&[(
+            "recurso sistema process.terminate papel:observador papel:operador papel:sistema",
+            "recurso sistema process.terminate papel:observador papel:sistema",
+        )])?;
+        crate::autorizacao::trocar_politica(fora);
+        let fora_do_alcance = recusa(sistema, &processo, "DENY_RESOURCE");
+        crate::autorizacao::carregar();
+        fora_do_alcance?;
+        if !crate::fios::vivo(e.fio) || na_lista(sistema, e.fio).is_some_and(|l| l.isolado) {
+            return Err("uma recusa tocou no processo");
+        }
+        // O agente: com o papel do sistema encerra; trocado o papel, não.
+        com_agentes_de_teste(|| {
+            let (mut agente, mut sessao) = conectado(1)?;
+            crate::identidade::atribuir(&nome_de_teste(1), "operador")
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "process.terminate", &processo)?;
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o agente operador encerrou um processo");
+            }
+            crate::identidade::atribuir(&nome_de_teste(1), "sistema")
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "process.terminate", &processo)?;
+            if !r.contains(r#""state":"terminating""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o agente de papel sistema nao encerrou o processo");
+            }
+            Ok(())
+        })?;
+        Encerravel::morreu(e.fio, e.desde)
+    })();
+    crate::autorizacao::carregar();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Vários ao mesmo tempo: quatro `encerravel` girando — nos núcleos que a
+/// máquina tiver —, encerrados um atrás do outro, morrem todos, cada um
+/// uma vez; encerrar o mesmo duas vezes seguidas não o mata duas vezes; e
+/// a máquina segue respondendo.
+fn processos_varios_encerrados_ao_mesmo_tempo() -> Resultado {
+    const QUANTOS: usize = 4;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operador = operador_que_lanca(147, "varios-operador");
+        let mut todos = alloc::vec::Vec::new();
+        for _ in 0..QUANTOS {
+            todos.push(Encerravel::lancar(operador)?);
+        }
+        let desde = todos[0].desde;
+        Encerravel::passo(ENCERRAVEL_GIRAR, 0)?;
+        esperar_ate(
+            || linhas_do_programa(desde, "encerravel: girando") >= QUANTOS,
+            600,
+        )
+        .map_err(|_| "nem todos giraram")?;
+        let sistema = sistema_aqui();
+        for e in &todos {
+            let params = alloc::format!(r#"{{"process":{}}}"#, e.fio);
+            let r = fs_pedir(sistema, "process.terminate", &params);
+            if fs_texto(&r, "state").as_deref() != Some("terminating") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o sistema nao encerrou um dos que giravam");
+            }
+        }
+        // O primeiro, pedido de novo logo em seguida: ou ainda está
+        // morrendo, ou já não existe — e morre uma vez só.
+        let r = fs_pedir(
+            sistema,
+            "process.terminate",
+            &alloc::format!(r#"{{"process":{}}}"#, todos[0].fio),
+        );
+        if fs_texto(&r, "state").as_deref() != Some("terminating")
+            && !recusado_com(&r, "DENY_RESOURCE")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o segundo pedido de termino nao foi nem um nem outro");
+        }
+        for e in &todos {
+            Encerravel::morreu(e.fio, e.desde)?;
+        }
+        if crate::fios::terminos().0 != 0 {
+            return Err("sobrou pedido de termino pendente");
+        }
+        let r = fs_pedir(sistema, "system.info", "{}");
+        if !r.contains(r#""result":"#) {
+            return Err("a maquina nao respondeu depois dos terminos");
+        }
+        Ok(())
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O administrador encerra pela prova — o papel dele não se exerce pelo
+/// gate —, com o mesmo efeito do comando: isolado na hora, morto depois.
+fn processos_o_administrador_encerra_pela_prova() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let e = Encerravel::lancar(operador_que_lanca(148, "prova-operador"))?;
+        let params = alloc::format!(r#"{{"process":{}}}"#, e.fio);
+        let r = executar_admin_de(
+            0,
+            desafio()?,
+            &ADMIN_DE_TESTE,
+            "process.terminate",
+            &params,
+            &params,
+        )?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""state":"terminating""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao encerrou o processo pela prova");
+        }
+        Encerravel::morreu(e.fio, e.desde)
+    })();
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O `net.info` diz os servidores de DNS que o DHCP anunciou — o do
+/// emulador —, e o anúncio não abre nada: com a política que tira esse
+/// destino do alcance do operador, conectar a ele é `DENY_RESOURCE`, com
+/// o servidor na lista do mesmo jeito.
+fn rede_o_net_info_diz_os_dns_do_dhcp() -> Resultado {
+    const DNS: &str = "10.0.2.3";
+    let sistema = sistema_aqui();
+    esperar_ate(
+        || {
+            let r = fs_pedir(sistema, "net.info", "{}");
+            Json(r.as_bytes())
+                .member("result")
+                .and_then(|v| v.member("dns"))
+                .and_then(|v| v.item(0))
+                .and_then(|v| v.as_str())
+                == Some(DNS)
+        },
+        1000,
+    )
+    .map_err(|_| "o net.info nao disse o DNS que o DHCP anunciou")?;
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operador = operador_que_lanca(149, "dns-operador");
+        let fora = politica_trocada(&[(
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53",
+            "recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69",
+        )])?;
+        crate::autorizacao::trocar_politica(fora);
+        let r = fs_pedir(operador, "net.connect", r#"{"to":"udp:10.0.2.3:53"}"#);
+        if !recusado_com(&r, "DENY_RESOURCE") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o DNS anunciado abriu um destino fora do alcance");
+        }
+        let r = fs_pedir(operador, "net.info", "{}");
+        if !r.contains(r#""dns":["10.0.2.3"]"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o net.info do operador nao diz o DNS anunciado");
+        }
+        Ok(())
+    })();
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// energia: reiniciar e desligar — `system.reboot` e `system.poweroff`
+// ---------------------------------------------------------------------------
+
+/// Espera o fio `energia` chegar ao fim — com a ordem e a tranca do disco
+/// na mão — e devolve a ação que ele entregaria ao firmware.
+fn energia_entregue() -> Option<crate::energia::Acao> {
+    let mut entregue = None;
+    let _ = esperar_cedendo(
+        || {
+            entregue = entregue.or(crate::energia::executada_de_teste());
+            entregue.is_some() && crate::energia::pedida().is_none()
+        },
+        600,
+    );
+    entregue
+}
+
+/// A ordem do reinício: a resposta só sai com o registro do pedido já no
+/// journal; o `system.info` diz que a máquina vai; um segundo pedido é
+/// recusado; o fio espera o meio segundo antes de parar as gravações, e
+/// para com uma descarga do disco. Depois, o desligamento pela mesma
+/// ordem.
+fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Resultado {
+    use crate::energia::Acao;
+    let _ = crate::energia::executada_de_teste();
+    let sistema = sistema_aqui();
+    for (metodo, acao, estado) in [
+        ("system.reboot", Acao::Reiniciar, "rebooting"),
+        ("system.poweroff", Acao::Desligar, "powering_off"),
+    ] {
+        let (_, descargas_antes) =
+            crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+        let pedido_em = crate::tempo::uptime_ms();
+        let r = fs_pedir(sistema, metodo, "{}");
+        let registro = fs_numero(&r, "record").ok_or_else(|| {
+            crate::log_error!("teste", "{}", r);
+            "o pedido de energia nao foi aceito"
+        })?;
+        if fs_texto(&r, "state").as_deref() != Some(estado)
+            || fs_numero(&r, "in_ms") != Some(crate::energia::ESPERA_MS)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a resposta nao diz a acao e a espera");
+        }
+        // O registro já estava no journal quando a resposta saiu.
+        if crate::persistencia::auditoria_gravada() < registro {
+            return Err("a resposta saiu antes do registro do pedido estar no journal");
+        }
+        let gravado = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|e| {
+                    e.seq == registro
+                        && e.evento.metodo == metodo
+                        && e.evento.recurso == acao.nome()
+                        && e.evento.detalhe.contains("pedido; as gravacoes param")
+                })
+        })
+        .unwrap_or(false);
+        if !gravado {
+            return Err("a auditoria nao tem o registro do pedido");
+        }
+        let info = fs_pedir(sistema, "system.info", "{}");
+        if fs_texto(&info, "power").as_deref() != Some(estado) {
+            crate::log_error!("teste", "{}", info);
+            return Err("o system.info nao diz que a maquina vai parar");
+        }
+        let segundo = fs_pedir(sistema, "system.reboot", "{}");
+        if !segundo.contains("ja esta reiniciando ou desligando") {
+            crate::log_error!("teste", "{}", segundo);
+            return Err("um segundo pedido foi aceito com o primeiro a caminho");
+        }
+        let entregue = energia_entregue();
+        let passou = crate::tempo::uptime_ms() - pedido_em;
+        if entregue != Some(acao) {
+            crate::log_error!("teste", "{:?}", entregue);
+            return Err("o fio nao chegou a entregar a acao ao firmware");
+        }
+        if passou < crate::energia::ESPERA_MS {
+            crate::log_error!("teste", "{} ms", passou);
+            return Err("as gravacoes pararam antes da espera");
+        }
+        let (_, descargas) = crate::virtio::blk::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+        if descargas <= descargas_antes {
+            return Err("o disco nao descarregou antes de a maquina parar");
+        }
+        let info = fs_pedir(sistema, "system.info", "{}");
+        if !info.contains(r#""power":null"#) {
+            crate::log_error!("teste", "{}", info);
+            return Err("o pedido ficou a caminho depois do fio");
+        }
+    }
+    Ok(())
+}
+
+/// Quem não pode reiniciar nem desligar ouve a recusa, e a máquina segue:
+/// o operador, o observador e o tecido de segurança, `DENY_PERMISSION`. O
+/// agente de papel `operador` também; trocado para `sistema`, o pedido
+/// seguinte passa. O administrador desliga pela prova.
+fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
+    use crate::energia::Acao;
+    let _ = crate::energia::executada_de_teste();
+    crate::pessoas::esquecer_registradas();
+    let resultado = (|| -> Resultado {
+        let operador = operador_que_lanca(150, "energia-operador");
+        let observador = crate::autorizacao::Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(151),
+            "energia-observador",
+            "observador",
+        ));
+        for quem in [operador, observador, como_o_nsf()] {
+            for metodo in ["system.reboot", "system.poweroff"] {
+                let r = fs_pedir(quem, metodo, "{}");
+                if !recusado_com(&r, "DENY_PERMISSION") {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("quem nao tem system.power pediu a energia");
+                }
+            }
+        }
+        if crate::energia::pedida().is_some() {
+            return Err("uma recusa deixou a maquina a caminho de parar");
+        }
+        com_agentes_de_teste(|| {
+            let (mut agente, mut sessao) = conectado(1)?;
+            crate::identidade::atribuir(&nome_de_teste(1), "operador")
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "system.reboot", "{}")?;
+            if !recusado_com(&r, "DENY_PERMISSION") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o agente operador reiniciou a maquina");
+            }
+            crate::identidade::atribuir(&nome_de_teste(1), "sistema")
+                .map_err(|_| "a atribuicao falhou")?;
+            let r = pela_porta(&mut agente, &mut sessao, "system.reboot", "{}")?;
+            if !r.contains(r#""state":"rebooting""#) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o agente de papel sistema nao reiniciou");
+            }
+            if energia_entregue() != Some(Acao::Reiniciar) {
+                return Err("o reinicio do agente nao chegou ao fim");
+            }
+            Ok(())
+        })?;
+        crate::identidade::registrar_administrador_de_teste(
+            sigilo::publica_de(&ADMIN_DE_TESTE),
+            "administrador",
+        );
+        let r = executar_admin_de(
+            0,
+            desafio()?,
+            &ADMIN_DE_TESTE,
+            "system.poweroff",
+            "{}",
+            "{}",
+        )?;
+        if !r.contains(r#""executed":true"#) || !r.contains(r#""state":"powering_off""#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o administrador nao desligou pela prova");
+        }
+        if energia_entregue() != Some(Acao::Desligar) {
+            return Err("o desligamento do administrador nao chegou ao fim");
+        }
+        Ok(())
+    })();
+    let _ = esperar_cedendo(|| crate::energia::pedida().is_none(), 600);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Sem o pedido no journal, a máquina segue: com a persistência
+/// indisponível, e com a gravação do registro falhando no meio, o pedido é
+/// recusado com o motivo, nenhum fio sobe, e nada para.
+fn energia_sem_o_pedido_no_journal_a_maquina_segue() -> Resultado {
+    let _ = crate::energia::executada_de_teste();
+    let anterior = crate::persistencia::estado();
+    let sistema = sistema_aqui();
+    let resultado = (|| -> Resultado {
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Indisponivel(
+            "teste",
+        ));
+        let r = fs_pedir(sistema, "system.reboot", "{}");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if !r.contains("sem persistencia, a maquina nao para") {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem persistencia, o reinicio nao foi recusado");
+        }
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = fs_pedir(sistema, "system.poweroff", "{}");
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        if !r.contains("nao chegou ao journal: a maquina segue") {
+            crate::log_error!("teste", "{}", r);
+            return Err("com a gravacao falhando, o desligamento nao foi recusado");
+        }
+        let _ = esperar_cedendo(|| false, 80);
+        if crate::energia::pedida().is_some() || crate::energia::executada_de_teste().is_some() {
+            return Err("um pedido que nao chegou ao journal parou a maquina");
+        }
+        Ok(())
+    })();
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    resultado
+}
+
+/// O que a máquina diz de como reinicia e desliga — e, no x86, o leitor do
+/// `\_S5` contra as formas do AML: com e sem o prefixo da raiz, com os
+/// elementos por `BytePrefix`, `ZeroOp` e `OneOp`, com o comprimento do
+/// pacote em dois bytes; e nada fora de uma declaração de nome com pacote.
+fn energia_a_maquina_diz_como_reinicia_e_desliga() -> Resultado {
+    let r = fs_pedir(sistema_aqui(), "system.info", "{}");
+    let reinicio = fs_texto(&r, "reboot_via").unwrap_or_default();
+    let desligamento = fs_texto(&r, "poweroff_via").unwrap_or_default();
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::arch::atual::acpi::s5_do_aml;
+        if reinicio != "acpi" && reinicio != "cf9" || desligamento != "acpi-s5" {
+            crate::log_error!("teste", "{} {}", reinicio, desligamento);
+            return Err("a ACPI do emulador nao descreve o reinicio e o S5");
+        }
+        type Caso<'a> = (&'a [u8], Option<(u8, u8)>);
+        let casos: [Caso; 7] = [
+            (
+                b"\x08_S5_\x12\x08\x04\x0a\x05\x0a\x05\x00\x00",
+                Some((5, 5)),
+            ),
+            (b"\x10\x08\\_S5_\x12\x06\x04\x00\x00\x00\x00", Some((0, 0))),
+            (b"\x08_S5_\x12\x40\x01\x02\x0a\x07\x01", Some((7, 1))),
+            (b"\x08_S5_\x12\x05\x01\x0a\xff", Some((7, 0))),
+            (b"x_S5_\x12\x06\x04\x0a\x05\x0a\x05", None),
+            (b"\x08_S5_\x14\x06\x04\x0a\x05\x0a\x05", None),
+            (
+                b"\x08_S4_\x12\x06\x04\x0a\x05\x0a\x05\x08_S5_\x12\x05\x02\x01\x00",
+                Some((1, 0)),
+            ),
+        ];
+        for (aml, esperado) in casos {
+            if s5_do_aml(aml) != esperado {
+                crate::log_error!("teste", "{:x?}: {:?}", aml, s5_do_aml(aml));
+                return Err("o leitor do _S5 leu errado uma forma do AML");
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if reinicio != "psci-hvc" || desligamento != "psci-hvc" {
+        crate::log_error!("teste", "{} {}", reinicio, desligamento);
+        return Err("o device tree do emulador nao descreve a PSCI por hvc");
+    }
+    Ok(())
+}
+
+/// O heap segue a memória da máquina: um dezesseis avos da utilizável,
+/// entre o piso de 8 MiB e o teto de 256 MiB, em páginas inteiras; o desta
+/// máquina é o que a conta dá para a memória dela, e é o total que o
+/// alocador administra.
+fn heap_o_tamanho_segue_a_memoria() -> Resultado {
+    use crate::heap::{HEAP_MAXIMO, HEAP_MINIMO, tamanho, tamanho_para};
+    const MIB: u64 = 1024 * 1024;
+    for (memoria, esperado) in [
+        (0, HEAP_MINIMO),
+        (128 * MIB, HEAP_MINIMO),
+        (1024 * MIB, 64 * MIB as usize),
+        (1024 * MIB + 123, 64 * MIB as usize),
+        (4096 * MIB, HEAP_MAXIMO),
+        (64 * 1024 * MIB, HEAP_MAXIMO),
+    ] {
+        if tamanho_para(memoria) != esperado {
+            crate::log_error!("teste", "{} -> {}", memoria, tamanho_para(memoria));
+            return Err("o heap nao segue a memoria como a conta diz");
+        }
+    }
+    let utilizavel = crate::machine::estatisticas().utilizavel;
+    if tamanho() != tamanho_para(utilizavel) || crate::heap::estatisticas().total != tamanho() {
+        crate::log_error!(
+            "teste",
+            "utilizavel {} tamanho {} total {}",
+            utilizavel,
+            tamanho(),
+            crate::heap::estatisticas().total
+        );
+        return Err("o heap desta maquina nao e o da conta");
     }
     Ok(())
 }

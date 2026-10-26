@@ -91,6 +91,12 @@ pub use atual::{
     preparar_o_primeiro_nucleo, reavisos_remotos,
 };
 
+/// Reiniciar e desligar — ver [`crate::energia`]: a ACPI no x86, a PSCI
+/// no ARM. As duas não voltam; na suíte, ninguém as chama. E como a
+/// máquina diz que faz uma e outra, para o `system.info`.
+#[cfg_attr(feature = "modo-teste", allow(unused_imports))]
+pub use atual::{desligar_a_maquina, meios_da_energia, reiniciar_a_maquina};
+
 /// Só para a suíte: o par de conversões de permissão de cada backend.
 #[cfg(feature = "modo-teste")]
 pub use atual::permissoes_ida_e_volta;

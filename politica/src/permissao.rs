@@ -213,11 +213,29 @@ pub enum Permissao {
     /// administrativa, com prova. Não dá o uso da chave a quem anula: ela
     /// deixa de assinar para todos.
     KeyRevoke,
+    /// Encerrar um processo: ele é isolado na hora — os pedidos dele
+    /// passam a ser `DENY_CONTAINED`, as conexões caem — e morre no próximo
+    /// ponto seguro, sem sair por `sair`. Não tem inverso: não é uma
+    /// contenção, e quem a tem não ganha `process.isolate` por isso. O
+    /// recurso é o papel de quem responde pelo processo, `papel:<nome>`,
+    /// enumerado como o do `process.isolate`. Sensível, e não
+    /// administrativa: quem a tem a exerce pelo gate; o administrador, pela
+    /// prova.
+    ProcessTerminate,
+    /// Reiniciar ou desligar a máquina — `system.reboot` e
+    /// `system.poweroff`. O registro do pedido vai ao journal antes, e sem
+    /// ele a máquina não para; as gravações param com a ordem da
+    /// persistência e a tranca do disco na mão. Sem recurso: a máquina é
+    /// uma só. Sensível — o papel que a tem a escreve —, e não
+    /// administrativa: o `sistema` a exerce pelo gate, como o
+    /// `debug.trigger`, que derruba a máquina de outro jeito; o
+    /// administrador, pela prova.
+    SystemPower,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 46] = [
+pub const TODAS: [Permissao; 48] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -264,6 +282,8 @@ pub const TODAS: [Permissao; 46] = [
     Permissao::KeySign,
     Permissao::KeyDestroy,
     Permissao::KeyRevoke,
+    Permissao::ProcessTerminate,
+    Permissao::SystemPower,
 ];
 
 impl Permissao {
@@ -316,6 +336,8 @@ impl Permissao {
             Permissao::KeySign => "key.sign",
             Permissao::KeyDestroy => "key.destroy",
             Permissao::KeyRevoke => "key.revoke",
+            Permissao::ProcessTerminate => "process.terminate",
+            Permissao::SystemPower => "system.power",
         }
     }
 
@@ -365,6 +387,8 @@ impl Permissao {
                 | Permissao::KeySign
                 | Permissao::KeyDestroy
                 | Permissao::KeyRevoke
+                | Permissao::ProcessTerminate
+                | Permissao::SystemPower
         )
     }
 
@@ -428,7 +452,18 @@ impl Permissao {
                 | Permissao::ProcessIsolate
                 | Permissao::AgentSuspend
                 | Permissao::CredentialSuspend
+                | Permissao::ProcessTerminate
         )
+    }
+
+    /// O recurso desta permissão é o papel de quem um **alvo** do pedido
+    /// alcança — o processo, o agente, a credencial, nomeados pelos
+    /// parâmetros —, e não o de um destinatário de mensagem. O gate lê o
+    /// alvo do pedido, decide `papel:<papel do alvo>`, e o handler só age
+    /// sobre o alvo decidido. As três contenções e o término de um
+    /// processo.
+    pub const fn alvo_e_papel(self) -> bool {
+        self.recurso_e_papel() && !self.recurso_e_destino()
     }
 
     /// Uma contenção reversível: só restringe, e tem o seu inverso na mesma
@@ -530,7 +565,9 @@ impl Permissao {
             | Permissao::KeyCreate
             | Permissao::KeySign
             | Permissao::KeyDestroy
-            | Permissao::KeyRevoke => true,
+            | Permissao::KeyRevoke
+            | Permissao::ProcessTerminate
+            | Permissao::SystemPower => true,
         }
     }
 
@@ -670,8 +707,54 @@ mod testes {
             assert!(p.recurso_e_papel() && p.tem_alcance() && !p.recurso_e_destino());
             assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco());
         }
-        // O papel como recurso: o destinatário de uma mensagem, e as três.
-        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_papel()).count(), 4);
+        // O papel como recurso: o destinatário de uma mensagem, as três e
+        // o término de um processo.
+        assert_eq!(TODAS.iter().filter(|p| p.recurso_e_papel()).count(), 5);
+    }
+
+    /// Encerrar um processo: sensível, não administrativa — quem a tem a
+    /// exerce pelo gate —, muda o estado, e o recurso é o papel de quem
+    /// responde pelo processo, como o do isolamento. Mas não é uma
+    /// contenção: não tem inverso, e ter uma não dá a outra.
+    #[test]
+    fn encerrar_um_processo() {
+        let t = Permissao::de_nome("process.terminate").unwrap();
+        assert_eq!(t, Permissao::ProcessTerminate);
+        assert!(t.sensivel() && !t.administrativa() && t.muda_estado());
+        assert!(t.recurso_e_papel() && t.alvo_e_papel() && t.tem_alcance());
+        assert!(!t.contencao() && !t.recurso_e_destino());
+        assert!(!t.recurso_e_caminho() && !t.recurso_e_endereco() && !t.recurso_e_chave());
+        // No fim da lista: a posição é o bit do manifesto, e as de antes
+        // não mudam de lugar.
+        assert_eq!(TODAS[46], t);
+        // O alvo do pedido como recurso: as três contenções e esta — o
+        // destinatário de uma mensagem é outra coisa.
+        let alvos: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.alvo_e_papel())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(
+            alvos,
+            [
+                "process.isolate",
+                "agent.suspend",
+                "credential.suspend",
+                "process.terminate"
+            ]
+        );
+    }
+
+    /// Reiniciar e desligar: sensível, não administrativa — o sistema a
+    /// exerce pelo gate —, muda o estado, e sem recurso nenhum. No fim da
+    /// lista, depois do término de um processo.
+    #[test]
+    fn reiniciar_e_desligar() {
+        let e = Permissao::de_nome("system.power").unwrap();
+        assert_eq!(e, Permissao::SystemPower);
+        assert!(e.sensivel() && !e.administrativa() && e.muda_estado());
+        assert!(!e.tem_alcance() && !e.alvo_e_papel() && !e.contencao());
+        assert_eq!(TODAS.last(), Some(&e));
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

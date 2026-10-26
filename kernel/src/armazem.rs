@@ -82,8 +82,11 @@ use crate::vfs::{self, Entrada, No, SistemaDeArquivos};
 pub const RAIZ: &str = "/armazem";
 
 /// O que a memória do kernel dá aos metadados do armazém: um oitavo do
-/// heap. O conteúdo não conta — está no volume.
-pub const TETO_DE_METADADOS: usize = crate::heap::HEAP_TAMANHO / 8;
+/// heap — que segue a memória da máquina, ver [`crate::heap::tamanho`]. O
+/// conteúdo não conta — está no volume.
+pub fn teto_de_metadados() -> usize {
+    crate::heap::tamanho() / 8
+}
 
 /// Quantos rascunhos vivem ao mesmo tempo, no sistema e por dono.
 pub const MAIS_RASCUNHOS: usize = 16;
@@ -414,7 +417,7 @@ fn mudar_em_ordem(
             ops.push(op);
         }
         let reservado = reservado_em_rascunhos(dono, &rascunhos);
-        com_o_armazem(|a| a.preparar(&ops, dono, cota, reservado, TETO_DE_METADADOS))
+        com_o_armazem(|a| a.preparar(&ops, dono, cota, reservado, teto_de_metadados()))
             .map_err(|(i, r)| (i, Falha::from(r)))
     })();
     // As faixas dos rascunhos continuam deles até o lote valer.
