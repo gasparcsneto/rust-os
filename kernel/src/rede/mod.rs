@@ -2,9 +2,10 @@
 //!
 //! # Onde cada coisa mora
 //!
-//! [`crate::virtio::net`] transporta quadros: entrega um, recebe os que
-//! chegarem, sem saber o que há dentro deles. Aqui fica o que olha para
-//! dentro:
+//! A placa transporta quadros — a virtio ([`crate::virtio::net`]) ou a
+//! Intel ([`crate::e1000`]), pela mesma interface ([`placa`]) —: entrega
+//! um, recebe os que chegarem, sem saber o que há dentro deles. Aqui fica o
+//! que olha para dentro:
 //!
 //! - [`pilha`]: a pilha IP — Ethernet, ARP, IPv4, DHCP e TCP, pelo
 //!   `smoltcp` —, que é a **única** que colhe quadros da placa;
@@ -41,6 +42,7 @@ pub mod conexoes;
 pub mod configuracao;
 pub mod espera;
 pub mod pilha;
+pub mod placa;
 
 use crate::trava::Mutex;
 
@@ -130,7 +132,7 @@ pub unsafe fn destravar() {
 }
 
 /// Monta um pedido ARP perguntando quem atende por `procurado`.
-fn montar_pedido(
+pub(crate) fn montar_pedido(
     nosso_mac: &[u8; TAMANHO_DO_MAC],
     nosso_ip: &[u8; TAMANHO_DO_IP],
     procurado: &[u8; TAMANHO_DO_IP],
@@ -174,8 +176,8 @@ pub fn resolver(
     procurado: &[u8; TAMANHO_DO_IP],
     nosso_ip: &[u8; TAMANHO_DO_IP],
 ) -> Result<[u8; TAMANHO_DO_MAC], &'static str> {
-    let Some(nosso_mac) = crate::virtio::net::com_a_placa(|placa| placa.mac()) else {
-        return Err("nao ha placa de rede virtio nesta maquina");
+    let Some(nosso_mac) = placa::com_a_placa(|placa| placa.mac()) else {
+        return Err("nao ha placa de rede nesta maquina");
     };
     let Some(nosso_mac) = nosso_mac else {
         return Err("a placa nao publicou endereco");
@@ -185,10 +187,10 @@ pub fn resolver(
     // Só as respostas que chegarem daqui em diante: uma antiga, de outra
     // pergunta, não responde a esta.
     let desde = com_observadas(|o| o.proxima);
-    match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&pedido)) {
+    match placa::com_a_placa(|placa| placa.transmitir(&pedido)) {
         Some(Ok(())) => {}
         Some(Err(motivo)) => return Err(motivo),
-        None => return Err("nao ha placa de rede virtio nesta maquina"),
+        None => return Err("nao ha placa de rede nesta maquina"),
     }
 
     let limite = crate::tempo::ticks() + ESPERA_EM_TIQUES;
@@ -208,7 +210,7 @@ pub fn resolver(
         if crate::tempo::ticks() >= limite {
             break;
         }
-        if !crate::virtio::net::com_a_placa(|placa| placa.vivo()).unwrap_or(false) {
+        if !placa::com_a_placa(|placa| placa.vivo()).unwrap_or(false) {
             return Err("a placa parou de responder e foi desligada");
         }
         crate::fios::ceder();
@@ -218,7 +220,7 @@ pub fn resolver(
 }
 
 /// O resto da conferência de uma resposta ARP de quem perguntamos.
-fn conferir_resposta(
+pub(crate) fn conferir_resposta(
     quadro: &[u8; TAMANHO_DO_QUADRO],
     nosso_ip: &[u8; TAMANHO_DO_IP],
     nosso_mac: &[u8; TAMANHO_DO_MAC],

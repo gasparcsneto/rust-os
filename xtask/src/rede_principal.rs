@@ -897,7 +897,7 @@ fn imagem_com_os_destinos(
         return Err("a imagem nao tem etc/duke/politica".into());
     };
     *padrao = politica_com_os_destinos(ips)?.into_bytes();
-    super::montar_disco(&caminho, &arquivos)?;
+    super::montar_disco(&caminho, &arquivos, super::Extras::DaSuite)?;
     let artefato = match preparo.kernel {
         Kernel::Imagem(img) => Artefato::Binario(img),
         Kernel::Esp { efi, kernel } => {

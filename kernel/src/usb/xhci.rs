@@ -88,6 +88,114 @@ const PORTA_RW1C: u32 = 0x00FE_0002;
 /// teto só precisa distinguir "lento" de "morto".
 const VOLTAS: u32 = 1_000_000;
 
+/// A capacidade estendida de suporte legado: o semáforo com que o firmware
+/// e o sistema dizem quem é o dono do controlador.
+const CAPACIDADE_LEGADA: u32 = 1;
+/// No primeiro registrador dela: o firmware é o dono, e o sistema quer ser.
+const FIRMWARE_DONO: u32 = 1 << 16;
+const SISTEMA_DONO: u32 = 1 << 24;
+/// No segundo: os bits reservados, que se preservam — todo o resto que se
+/// lê e escreve são os que ligam uma SMI, e que se desligam —, e os
+/// eventos de SMI, que se limpam escrevendo 1. Os de quem já fez isto no
+/// Linux (`XHCI_LEGACY_DISABLE_SMI`, `XHCI_LEGACY_SMI_EVENTS`).
+const SMI_RESERVADOS: u32 = (0x7 << 1) | (0xFF << 5) | (0x7 << 17);
+const SMI_EVENTOS: u32 = 0x7 << 29;
+/// Quanto o firmware tem para soltar o controlador: um segundo, o da
+/// especificação e o do Linux.
+const ESPERA_DO_FIRMWARE_MS: u64 = 1_000;
+/// Quantas capacidades estendidas, no máximo, se percorrem: a lista anda
+/// sempre para a frente dentro do BAR, e o teto só limita o custo.
+const CAPACIDADES: usize = 64;
+
+/// O que a passagem do controlador do firmware para o sistema encontrou —
+/// ver [`passar_do_firmware`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Passagem {
+    /// O controlador não tem a capacidade de suporte legado: o firmware não
+    /// o reclama.
+    SemCapacidade,
+    /// O firmware não era o dono.
+    JaEraDoSistema,
+    /// O firmware soltou o controlador no prazo.
+    Solto,
+    /// O firmware não soltou no prazo, e o sistema o tomou.
+    Tomado,
+}
+
+/// Toma o controlador do firmware, se ele é o dono.
+///
+/// # Por que existe
+///
+/// O firmware de um PC usa o xHCI — o teclado do menu de boot —, e o de
+/// muitos o empresta à emulação do teclado PS/2 pelo modo de gerência do
+/// sistema (SMM): uma interrupção que o processador atende fora do kernel,
+/// mexendo nos registradores do controlador. Reiniciar o controlador com o
+/// firmware ainda dono é disputá-lo com essa interrupção — o teclado some,
+/// ou a máquina trava numa SMI que não acha mais o que esperava. A
+/// especificação do xHCI tem para isso um semáforo: o sistema pede, o
+/// firmware solta, e as SMIs são desligadas.
+///
+/// O emulador não tem a capacidade; uma máquina de verdade quase sempre tem.
+/// O caso da suíte que exercita isto monta a lista numa memória comum.
+///
+/// # Safety
+///
+/// `base` precisa ser o começo de uma região legível e gravável de
+/// `tamanho` bytes, e `hccparams1` o que se lê no deslocamento 0x10 dela.
+pub unsafe fn passar_do_firmware(base: u64, tamanho: u64, hccparams1: u32) -> Passagem {
+    let ler = |deslocamento: u64| {
+        // SAFETY: o chamador garante a região, e cada deslocamento abaixo é
+        // conferido contra `tamanho` antes.
+        u32::from_le(unsafe { core::ptr::read_volatile((base + deslocamento) as *const u32) })
+    };
+    let escrever = |deslocamento: u64, valor: u32| {
+        // SAFETY: como acima.
+        unsafe { core::ptr::write_volatile((base + deslocamento) as *mut u32, valor.to_le()) }
+    };
+    let mut deslocamento = u64::from(hccparams1 >> 16) * 4;
+    for _ in 0..CAPACIDADES {
+        if deslocamento == 0 || deslocamento + 8 > tamanho {
+            return Passagem::SemCapacidade;
+        }
+        let cabeca = ler(deslocamento);
+        if cabeca & 0xFF == CAPACIDADE_LEGADA {
+            let passagem = if cabeca & FIRMWARE_DONO == 0 {
+                Passagem::JaEraDoSistema
+            } else {
+                escrever(deslocamento, cabeca | SISTEMA_DONO);
+                let prazo = crate::bloco::Prazo::em(ESPERA_DO_FIRMWARE_MS, u64::from(VOLTAS));
+                let mut volta = 0;
+                loop {
+                    if ler(deslocamento) & FIRMWARE_DONO == 0 {
+                        break Passagem::Solto;
+                    }
+                    if prazo.vencido(volta) {
+                        // Um firmware que não solta é um firmware com defeito,
+                        // e o controlador é tomado assim mesmo: as SMIs vão
+                        // ser desligadas logo abaixo.
+                        escrever(
+                            deslocamento,
+                            (ler(deslocamento) & !FIRMWARE_DONO) | SISTEMA_DONO,
+                        );
+                        break Passagem::Tomado;
+                    }
+                    volta += 1;
+                    core::hint::spin_loop();
+                }
+            };
+            let controle = ler(deslocamento + 4);
+            escrever(deslocamento + 4, (controle & SMI_RESERVADOS) | SMI_EVENTOS);
+            return passagem;
+        }
+        let proxima = u64::from((cabeca >> 8) & 0xFF);
+        if proxima == 0 {
+            return Passagem::SemCapacidade;
+        }
+        deslocamento += proxima * 4;
+    }
+    Passagem::SemCapacidade
+}
+
 /// O acesso aos registradores do controlador.
 pub struct Controlador {
     /// Onde começam os registradores operacionais.
@@ -174,6 +282,19 @@ impl Controlador {
                 c.ler32(base + cap::RTSOFF),
             )
         };
+
+        // O controlador é do firmware até ele soltar: antes de qualquer
+        // escrita nos registradores operacionais.
+        // SAFETY: o BAR inteiro está mapeado, e `hcc1` veio dele.
+        match unsafe { passar_do_firmware(base, regiao.tamanho, hcc1) } {
+            Passagem::Solto => crate::log_info!("usb", "o firmware soltou o xhci"),
+            Passagem::Tomado => crate::log_warn!(
+                "usb",
+                "o firmware nao soltou o xhci em {} ms; tomado, com as SMIs desligadas",
+                ESPERA_DO_FIRMWARE_MS
+            ),
+            Passagem::SemCapacidade | Passagem::JaEraDoSistema => {}
+        }
 
         c.operacional = base + u64::from(comprimento);
         // Os dois deslocamentos têm os bits baixos reservados, e eles não são

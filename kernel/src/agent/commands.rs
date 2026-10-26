@@ -418,7 +418,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "disk.info",
-        resumo: "Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um.",
+        resumo: "Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um: se ainda responde, o que confirmou e os erros que o dispositivo devolveu.",
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
@@ -2916,6 +2916,27 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         protocolo::usuario::nativo::VERSAO as u64,
     )?;
 
+    // De onde veio o disco desta máquina: a imagem de produção, montada do
+    // que o operador trouxe, ou a da bancada — ver `crate::imagem`. Só
+    // informação: nenhuma decisão lê a marca.
+    w.key("image")?;
+    w.begin_object()?;
+    match crate::imagem::estado() {
+        crate::imagem::Estado::Marcada(m) => {
+            w.field_str("kind", m.tipo.em_ingles())?;
+            w.field_str("name", &m.nome)?;
+            w.field_str("id", &alloc::format!("{}", crate::imagem::Id(&m.id)))?;
+        }
+        crate::imagem::Estado::SemMarca => w.field_str("kind", "unmarked")?,
+        crate::imagem::Estado::NaoLida => w.field_str("kind", "unread")?,
+        crate::imagem::Estado::Ilegivel(linha, motivo) => {
+            w.field_str("kind", "invalid")?;
+            w.field_u64("line", linha as u64)?;
+            w.field_str("error", motivo)?;
+        }
+    }
+    w.end_object()?;
+
     let cpu = crate::arch::identificar_cpu();
     w.field_str("cpu_vendor", cpu.como_str())?;
 
@@ -3374,13 +3395,35 @@ fn paging_translate(params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
 
-    let dados = crate::virtio::net::com_a_placa(|placa| {
-        (placa.mac(), placa.contadores(), placa.maior_espera())
+    let dados = crate::rede::placa::com_a_placa(|placa| {
+        (
+            placa.mac(),
+            placa.contadores(),
+            placa.maior_espera(),
+            (placa.driver(), placa.vivo(), placa.enlace(), placa.perdas()),
+        )
     });
 
     match dados {
-        Some((mac, (transmitidos, recebidos), maior_espera)) => {
+        Some((mac, (transmitidos, recebidos), maior_espera, (driver, vivo, enlace, perdas))) => {
             w.field_bool("present", true)?;
+            // Qual placa a pilha usa, se ela ainda responde e, numa placa
+            // com cabo, se ha enlace — null na virtio, que nao tem.
+            w.field_str("driver", driver)?;
+            w.field_bool("alive", vivo)?;
+            w.key("link")?;
+            match enlace {
+                Some(e) => w.bool_value(e)?,
+                None => w.null_value()?,
+            }
+            // O que se perdeu, numa placa que conta: os quadros recebidos
+            // com erro, os que nao sairam sem enlace, e os reinicios por
+            // uma transmissao que nao se confirmou.
+            if let Some(p) = perdas {
+                w.field_u64("frames_dropped", p.descartados)?;
+                w.field_u64("frames_without_link", p.sem_enlace)?;
+                w.field_u64("resets", p.reinicios)?;
+            }
 
             // O endereco vai como texto no formato em que se le um MAC, e nao
             // como seis numeros. Um agente que precise compara-lo compara uma
@@ -3393,7 +3436,7 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 
             w.field_u64("frames_sent", transmitidos)?;
             w.field_u64("frames_received", recebidos)?;
-            w.field_u64("max_frame", crate::virtio::net::MAIOR_QUADRO as u64)?;
+            w.field_u64("max_frame", crate::rede::placa::MAIOR_QUADRO as u64)?;
             // A maior espera por uma confirmação de transmissão, em voltas:
             // quão perto do teto que desliga a placa o emulador já chegou.
             w.field_u64("tx_wait_max_spins", u64::from(maior_espera))?;
@@ -5693,6 +5736,9 @@ fn pci_list(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
     w.field_str("mechanism", crate::arch::pci::MECANISMO)?;
     w.field_u64("count", crate::pci::total() as u64)?;
+    // Os barramentos percorridos: o zero e o de trás de cada ponte que o
+    // firmware numerou.
+    w.field_u64("buses", crate::pci::barramentos() as u64)?;
 
     // O teto do inventário vai na resposta porque `count` pode ser maior que o
     // que a lista traz: um agente precisa distinguir "só há isto" de "isto é o
@@ -5750,15 +5796,47 @@ const BYTES_MOSTRADOS_POR_PADRAO: u64 = 64;
 
 fn disk_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.begin_object()?;
-    match crate::bloco::com_o_disco(|disco| (disco.capacidade(), disco.driver(), disco.duravel())) {
-        Some((setores, driver, duravel)) => {
+    let estado = crate::bloco::com_o_disco(|disco| {
+        (
+            disco.capacidade(),
+            disco.driver(),
+            disco.duravel(),
+            disco.vivo(),
+            disco.leituras(),
+            disco.contadores(),
+            disco.erros(),
+        )
+    });
+    match estado {
+        Some((setores, driver, duravel, vivo, leituras, (escritas, descargas), erros)) => {
             w.field_bool("present", true)?;
             // Qual driver dirige o disco do sistema: virtio-blk ou nvme.
             w.field_str("driver", driver)?;
             w.field_bool("durable", duravel)?;
+            // Um disco que não respondeu a tempo, ou respondeu outro pedido,
+            // foi desligado pelo driver: segue presente, e nada mais passa.
+            w.field_bool("alive", vivo)?;
             w.field_u64("sectors", setores)?;
             w.field_u64("sector_size", crate::bloco::TAMANHO_DO_SETOR as u64)?;
             w.field_u64("bytes", setores * crate::bloco::TAMANHO_DO_SETOR as u64)?;
+            // O que o dispositivo confirmou e o que ele devolveu com erro,
+            // desde o boot — ver `crate::bloco::Erros`.
+            w.field_u64("reads", leituras)?;
+            w.field_u64("writes", escritas)?;
+            w.field_u64("flushes", descargas)?;
+            w.key("errors")?;
+            w.begin_object()?;
+            w.field_u64("read", erros.leitura)?;
+            w.field_u64("write", erros.escrita)?;
+            w.field_u64("flush", erros.descarga)?;
+            match erros.ultimo {
+                Some(motivo) => w.field_str("last", motivo)?,
+                None => {
+                    w.key("last")?;
+                    w.null_value()?;
+                }
+            }
+            w.end_object()?;
         }
         // Ausência não é erro. A máquina pode legitimamente não ter disco, e
         // dizer isso é mais útil ao agente que um código de falha que ele

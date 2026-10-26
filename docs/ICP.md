@@ -2380,7 +2380,14 @@ da bancada:
 - **os casos do gestor**: os nove somam uns 8 minutos de tempo do kernel
   por suíte; a CI roda a suíte em depuração, em release e em virtio-gpu,
   nas duas arquiteturas;
-- **o programa**: o `gestor` tem 1 023 784 bytes no x86, em release.
+- **o programa**: o `gestor` tem 988 504 bytes no x86, em release — 94,3%
+  do maior executável que o kernel lança (`protocolo::usuario::MAIOR_EXECUTAVEL`,
+  1 MiB). Tinha 1 023 784 (97,6%) até os pacotes de protocolo — o rustls, a
+  PKI, o `web3` e o DER — irem para `opt-level = "z"`
+  (`programas/Cargo.toml`), sem mudar a vazão cifrada medida pelo caso
+  `dados:` (233 e 237 KiB/s, antes e depois). O `xtask` confere cada
+  programa contra o teto ao montar o disco: acima dele, recusa; acima de
+  90%, avisa com a folga.
 
 ### Na rede principal
 

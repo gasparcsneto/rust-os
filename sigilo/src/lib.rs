@@ -48,6 +48,7 @@ pub mod cifra;
 pub mod codigo;
 pub mod credencial;
 pub mod gerador;
+pub mod imagem;
 pub mod pessoas;
 pub mod quadro;
 pub mod quorum;

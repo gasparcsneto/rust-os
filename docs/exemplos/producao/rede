@@ -1,0 +1,7 @@
+# A rede da maquina, sem DHCP: um exemplo para adaptar. Sem este arquivo,
+# a maquina pede o endereco ao DHCP. Os enderecos daqui sao de
+# documentacao (192.0.2.0/24): troque pelos da sua rede. Ver "A rede" em
+# docs/OPERACAO.md.
+endereco 192.0.2.10/24
+roteador 192.0.2.1
+dns 192.0.2.53

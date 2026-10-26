@@ -219,10 +219,11 @@ pub const DIRETORIO_DOS_PROGRAMAS: &str = "/bin";
 
 /// Quanto um [`ler_tudo`] pode trazer.
 ///
-/// Um mebibyte. O maior cliente é o lançamento de um programa, e os maiores
-/// da imagem têm uns 970 KiB; o teto existe para que um arquivo absurdo vire
-/// erro em vez de consumir o heap inteiro.
-const TETO_DE_LEITURA: u64 = 1024 * 1024;
+/// Um mebibyte. O maior cliente é o lançamento de um programa, e o teto é o
+/// do maior executável — `protocolo::usuario::MAIOR_EXECUTAVEL`, que o
+/// `xtask` confere em cada programa ao montar o disco; existe para que um
+/// arquivo absurdo vire erro em vez de consumir o heap inteiro.
+const TETO_DE_LEITURA: u64 = protocolo::usuario::MAIOR_EXECUTAVEL;
 
 /// Pendura um sistema de arquivos num ponto da árvore.
 ///

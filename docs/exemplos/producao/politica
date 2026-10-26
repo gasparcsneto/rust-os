@@ -1,0 +1,81 @@
+# A politica de uma maquina de producao: um exemplo para adaptar.
+#
+# O formato e o de /etc/duke/politica: ver politica/src/arquivo.rs e
+# docs/SEGURANCA.md. cargo xtask provisionar le este arquivo pelo mesmo
+# leitor do kernel, e recusa a imagem se ele nao se le, se e a politica da
+# bancada, ou se o quorum nao fecha com o arquivo dos administradores.
+#
+# Os destinos de net.connect sao os da rede desta maquina: troque o DNS de
+# exemplo (192.0.2.53, um endereco de documentacao) pelo da sua rede, e
+# acrescente cada destino que um papel alcanca - inteiro, tcp:<ipv4>:<porta>
+# ou udp:<ipv4>:<porta>, sem curinga.
+#
+# O que muda da politica da bancada:
+# - a serial e `observador`: o canal em claro so le o estado. Para agir,
+#   uma pessoa entra pelo console, ou um agente pela porta cifrada;
+# - nenhum editor de codigo: so roda o codigo da imagem;
+# - nenhuma chave de assinatura: sem `dominios` nem key.*;
+# - sem o servico de hora: o relogio civil fica no RTC ate o operador
+#   registrar fontes de Roughtime - um /etc/duke/tempo, o papel `tempo` com
+#   net.connect e time.sync para cada fonte, e `servico hora tempo`.
+
+papel observador agent.read system.read log.read ui.read message.read
+taxa observador 20 40
+processos observador 2
+
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare
+recurso operador fs.read /dados /bin /programas /armazem/compartilhado
+recurso operador fs.write /armazem/compartilhado
+recurso operador net.connect udp:192.0.2.53:53
+armazem operador 16777216 4096
+recurso operador process.run /bin /programas
+recurso operador message.send papel:operador papel:sistema
+taxa operador 50 100
+processos operador 8
+
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power
+recurso sistema fs.read /
+recurso sistema fs.write /armazem
+recurso sistema net.connect udp:192.0.2.53:53
+recurso sistema net.observe udp:192.0.2.53:53
+recurso sistema net.block udp:192.0.2.53:53
+armazem sistema 268435456 65536
+recurso sistema process.run /
+recurso sistema message.send papel:observador papel:operador papel:sistema papel:administrador
+recurso sistema process.isolate papel:observador papel:operador papel:sistema
+recurso sistema agent.suspend papel:observador papel:operador papel:sistema
+recurso sistema credential.suspend papel:observador papel:operador papel:sistema
+recurso sistema process.terminate papel:observador papel:operador papel:sistema
+taxa sistema 400 800
+processos sistema 32
+
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power
+recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
+recurso administrador fs.write /armazem/compartilhado
+recurso administrador net.connect udp:192.0.2.53:53
+recurso administrador net.observe udp:192.0.2.53:53
+recurso administrador net.block udp:192.0.2.53:53
+armazem administrador 67108864 16384
+recurso administrador process.run /bin /programas
+recurso administrador message.send papel:operador papel:sistema papel:administrador
+recurso administrador process.isolate papel:observador papel:operador papel:sistema
+recurso administrador agent.suspend papel:observador papel:operador papel:sistema
+recurso administrador credential.suspend papel:observador papel:operador papel:sistema
+recurso administrador process.terminate papel:observador papel:operador papel:sistema
+taxa administrador 10 20
+processos administrador 8
+
+# A revogacao de um administrador: duas das tres credenciais do arquivo
+# dos administradores. O N e o numero de linhas dele.
+quorum admin.revoke 2 3
+
+papel seguranca audit.read net.observe net.block process.isolate
+recurso seguranca net.observe udp:192.0.2.53:53
+recurso seguranca net.block udp:192.0.2.53:53
+recurso seguranca process.isolate papel:observador papel:operador
+taxa seguranca 10 20
+servico nsf seguranca
+
+apertos 10 10000
+serial observador
+local sistema

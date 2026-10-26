@@ -112,11 +112,11 @@ const _: () = assert!(PAGINAS_DE_DADOS * PAGINA == crate::bloco::MAIOR_LEITURA);
 /// O tamanho do bloco lógico que este driver aceita: o setor da camada.
 const BLOCO_LOGICO: usize = crate::bloco::TAMANHO_DO_SETOR;
 
-/// Quantas voltas esperar por uma conclusão — a mesma conta do virtio-blk,
-/// pela mesma razão: a espera roda com as interrupções mascaradas, sem
-/// relógio, e uma descarga é um `fsync` no hospedeiro que às vezes demora
-/// dezenas de milissegundos. Um tempo esgotado desliga o disco de vez.
-const VOLTAS_DE_ESPERA: u32 = 400_000_000;
+/// Quantas voltas esperar por uma conclusão quando o contador de ciclos
+/// ainda não tem frequência — cedo no boot, quando o controlador liga. Com
+/// ela, o prazo é em tempo: ver [`crate::bloco::Prazo`]. Um tempo esgotado
+/// desliga o disco de vez.
+const VOLTAS_DE_ESPERA: u64 = 400_000_000;
 
 /// Quantas voltas valem meio segundo, a unidade do tempo de prontidão
 /// (`CAP.TO`) que o controlador declara. Cada volta lê um registrador, e
@@ -143,6 +143,23 @@ struct Fila {
     fase: bool,
 }
 
+impl Fila {
+    /// A fila `id` sobre os frames `submissao` e `conclusao`, zerados: a
+    /// cauda e a cabeça no começo, e a fase da primeira volta.
+    fn nova(id: u16, submissao: u64, conclusao: u64) -> Fila {
+        Fila {
+            id,
+            submissao,
+            base_da_submissao: crate::arch::acesso_fisico(submissao),
+            conclusao,
+            base_da_conclusao: crate::arch::acesso_fisico(conclusao),
+            cauda: 0,
+            cabeca: 0,
+            fase: true,
+        }
+    }
+}
+
 /// Qual das duas filas.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Qual {
@@ -156,7 +173,9 @@ struct Nvme {
     registradores: u64,
     /// A distância entre duas campainhas: `4 << CAP.DSTRD`.
     passo: usize,
-    /// O teto das esperas por um estado do controlador.
+    /// O teto das esperas por um estado do controlador: o tempo que ele
+    /// declara (`CAP.TO`), e as voltas sem a frequência do contador.
+    ms_de_estado: u64,
     voltas_de_estado: u64,
     entradas: u16,
     administracao: Fila,
@@ -230,7 +249,9 @@ impl Nvme {
     /// Espera o estado do controlador mostrar `valor` nos bits de
     /// `mascara`. Uma falha fatal encerra a espera na hora.
     fn esperar_estado(&self, mascara: u32, valor: u32) -> Result<(), &'static str> {
-        for _ in 0..self.voltas_de_estado {
+        let prazo = crate::bloco::Prazo::em(self.ms_de_estado, self.voltas_de_estado);
+        let mut volta = 0;
+        while !prazo.vencido(volta) {
             let csts = self.ler32(CSTS);
             if csts & CSTS_FALHA_FATAL != 0 && mascara != CSTS_FALHA_FATAL {
                 return Err("o controlador declarou falha fatal");
@@ -238,6 +259,7 @@ impl Nvme {
             if csts & mascara == valor {
                 return Ok(());
             }
+            volta += 1;
             core::hint::spin_loop();
         }
         Err("o controlador nao mudou de estado no tempo que ele mesmo declara")
@@ -277,16 +299,6 @@ impl Nvme {
             // não zera, e uma fila de conclusão com lixo teria fases velhas.
             unsafe { core::ptr::write_bytes(crate::arch::acesso_fisico(*frame), 0, PAGINA) };
         }
-        let fila = |id: u16, submissao: u64, conclusao: u64| Fila {
-            id,
-            submissao,
-            base_da_submissao: crate::arch::acesso_fisico(submissao),
-            conclusao,
-            base_da_conclusao: crate::arch::acesso_fisico(conclusao),
-            cauda: 0,
-            cabeca: 0,
-            fase: true,
-        };
         let mut dados = [0u64; PAGINAS_DE_DADOS];
         dados.copy_from_slice(&frames[5..]);
         let mut bases_de_dados = [core::ptr::null_mut(); PAGINAS_DE_DADOS];
@@ -296,10 +308,11 @@ impl Nvme {
         let mut nvme = Nvme {
             registradores,
             passo: 4,
+            ms_de_estado: 500,
             voltas_de_estado: VOLTAS_POR_MEIO_SEGUNDO,
             entradas: ENTRADAS,
-            administracao: fila(0, frames[0], frames[1]),
-            entrada_e_saida: fila(1, frames[2], frames[3]),
+            administracao: Fila::nova(0, frames[0], frames[1]),
+            entrada_e_saida: Fila::nova(1, frames[2], frames[3]),
             dados,
             bases_de_dados,
             lista: frames[4],
@@ -330,6 +343,7 @@ impl Nvme {
         if PORTAS + 3 * nvme.passo + 4 > regiao.tamanho as usize {
             return Err("as campainhas da fila de entrada e saida passam do BAR 0");
         }
+        nvme.ms_de_estado = (((cap >> 24) & 0xFF) + 1) * 500;
         nvme.voltas_de_estado = (((cap >> 24) & 0xFF) + 1) * VOLTAS_POR_MEIO_SEGUNDO;
 
         // Desligado antes de configurar: o firmware pode tê-lo deixado
@@ -519,8 +533,10 @@ impl Nvme {
 
         let conclusao =
             base_da_conclusao.wrapping_add(usize::from(cabeca) * BYTES_DA_CONCLUSAO) as *const u32;
+        let prazo = crate::bloco::Prazo::em(crate::bloco::ESPERA_MS, VOLTAS_DE_ESPERA);
         let mut respondida = None;
-        for _ in 0..VOLTAS_DE_ESPERA {
+        let mut volta = 0;
+        while !prazo.vencido(volta) {
             // SAFETY: a entrada está dentro da página de conclusão desta
             // fila, pela mesma conta da submissão.
             let palavra = unsafe { core::ptr::read_volatile(conclusao.add(3)) };
@@ -528,15 +544,16 @@ impl Nvme {
                 respondida = Some(palavra);
                 break;
             }
+            volta += 1;
             core::hint::spin_loop();
         }
         let Some(palavra) = respondida else {
             self.vivo = false;
             crate::log_error!(
                 "nvme",
-                "o controlador nao respondeu o comando {:#04x} em {} voltas (estado {:#x}); desligado",
+                "o controlador nao respondeu o comando {:#04x} em {} (estado {:#x}); desligado",
                 comando[0] & 0xFF,
-                VOLTAS_DE_ESPERA,
+                prazo,
                 self.ler32(CSTS)
             );
             return Err("o dispositivo nao respondeu");
@@ -814,4 +831,102 @@ pub fn com_o_segundo_de_teste<R>(f: impl FnOnce(&mut crate::bloco::Disco) -> R) 
 #[cfg(feature = "modo-teste")]
 pub unsafe fn destravar() {
     unsafe { SEGUNDO.force_unlock() };
+}
+
+/// Só na suíte: um controlador NVMe que não existe — os registradores, as
+/// filas e as páginas de dados em frames da memória, e nenhum dispositivo
+/// por trás. É o modelo do controlador hostil, que o emulador não sabe
+/// ser: o caso deposita na fila de conclusão a resposta que quiser — a de
+/// outro comando, ou nenhuma — e o driver a colhe pelo mesmo
+/// [`Nvme::submeter`] com que colheria a de um controlador de verdade.
+/// Nada do driver muda: só quem responde.
+///
+/// Nasce como [`Nvme::ligar`] deixaria um controlador — as filas criadas,
+/// o namespace com `setores` blocos de 512, cache volátil — e com o
+/// próximo comando de identificador zero. Os frames e a memória dos
+/// registradores não voltam: o driver não tem como ser desligado, e os
+/// casos criam poucos.
+#[cfg(feature = "modo-teste")]
+pub fn de_mentira(setores: u64) -> Option<(crate::bloco::Disco, Respostas)> {
+    let mut frames = [0u64; 5 + PAGINAS_DE_DADOS];
+    let mut quantos = 0;
+    while quantos < frames.len() {
+        let Some(frame) = crate::frames::alocar() else {
+            for frame in &frames[..quantos] {
+                crate::frames::liberar(*frame);
+            }
+            return None;
+        };
+        // SAFETY: o frame acabou de vir do alocador e é deste caso.
+        unsafe { core::ptr::write_bytes(crate::arch::acesso_fisico(frame), 0, PAGINA) };
+        frames[quantos] = frame;
+        quantos += 1;
+    }
+    let mut dados = [0u64; PAGINAS_DE_DADOS];
+    dados.copy_from_slice(&frames[5..]);
+    let mut bases_de_dados = [core::ptr::null_mut(); PAGINAS_DE_DADOS];
+    for (base, frame) in bases_de_dados.iter_mut().zip(&dados) {
+        *base = crate::arch::acesso_fisico(*frame);
+    }
+    // Os "registradores" são memória comum do heap, e não um frame: as
+    // campainhas começam em `PORTAS`, uma página adiante, e o driver só
+    // precisa de um endereço que se leia e se escreva — ninguém faz DMA
+    // aqui. A campainha que ele toca cai nela, e o estado que ele lê é o
+    // que estiver lá: zero.
+    let registradores = alloc::vec![0u32; (PORTAS + 4 * 8) / 4].leak();
+    let nvme = Nvme {
+        registradores: registradores.as_mut_ptr() as u64,
+        passo: 4,
+        ms_de_estado: 500,
+        voltas_de_estado: VOLTAS_POR_MEIO_SEGUNDO,
+        entradas: ENTRADAS,
+        administracao: Fila::nova(0, frames[0], frames[1]),
+        entrada_e_saida: Fila::nova(1, frames[2], frames[3]),
+        dados,
+        bases_de_dados,
+        lista: frames[4],
+        capacidade: setores,
+        maior_ida: crate::bloco::MAIOR_LEITURA,
+        cache_volatil: true,
+        somente_leitura: false,
+        vivo: true,
+        proximo: 0,
+    };
+    let respostas = Respostas {
+        conclusao: nvme.entrada_e_saida.base_da_conclusao,
+    };
+    Some((
+        crate::bloco::Disco::novo(alloc::boxed::Box::new(nvme)),
+        respostas,
+    ))
+}
+
+/// Só na suíte: a fila de conclusão de entrada e saída de um controlador
+/// de [`de_mentira`] — onde o caso deposita as respostas.
+#[cfg(feature = "modo-teste")]
+pub struct Respostas {
+    conclusao: *mut u8,
+}
+
+#[cfg(feature = "modo-teste")]
+impl Respostas {
+    /// Deposita na entrada `i` da fila a resposta ao comando `cid`, com a
+    /// fase `fase` e o estado `estado` — o tipo nos três bits de cima e o
+    /// código nos oito de baixo, como na palavra três de uma conclusão.
+    pub fn depositar(&self, i: u16, cid: u16, fase: bool, estado: u16) {
+        assert!(i < ENTRADAS, "a fila de mentira tem {ENTRADAS} entradas");
+        let entrada = self
+            .conclusao
+            .wrapping_add(usize::from(i) * BYTES_DA_CONCLUSAO) as *mut u32;
+        let palavra = u32::from(cid) | (u32::from(fase) << 16) | (u32::from(estado & 0x7FF) << 17);
+        // SAFETY: a entrada está na página de conclusão do controlador de
+        // mentira, que é do caso; o driver só a lê, e nenhum comando está
+        // em voo enquanto o caso escreve.
+        unsafe {
+            for k in 0..3 {
+                core::ptr::write_volatile(entrada.add(k), 0);
+            }
+            core::ptr::write_volatile(entrada.add(3), palavra.to_le());
+        }
+    }
 }

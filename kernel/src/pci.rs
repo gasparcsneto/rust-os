@@ -35,22 +35,24 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::trava::Mutex;
-use pci_types::{Bar, CommandRegister, ConfigRegionAccess, EndpointHeader, PciAddress, PciHeader};
+use pci_types::{
+    Bar, CommandRegister, ConfigRegionAccess, EndpointHeader, PciAddress, PciHeader,
+    PciPciBridgeHeader,
+};
 
 /// Quantos dispositivos cabem no inventário.
 ///
-/// A máquina `virt` do QEMU expõe menos de uma dezena; o teto existe para que
-/// a varredura tenha custo previsível e nunca dependa do heap — ela roda no
-/// boot, e um boot que falha por falta de memória é o pior lugar para falhar.
-pub const MAX_DISPOSITIVOS: usize = 32;
+/// A máquina `virt` do QEMU expõe menos de uma dezena, e um PC de verdade
+/// passa de quarenta funções só no chipset — as portas raiz, o controlador
+/// USB, o áudio, a ponte LPC, o SMBus. Eram 32, e o NVMe de um PC, atrás de
+/// uma porta raiz, é visto depois de todas elas: ficaria fora do inventário
+/// cheio. O teto existe para que a varredura tenha custo previsível e nunca
+/// dependa do heap — ela roda no boot, e um boot que falha por falta de
+/// memória é o pior lugar para falhar.
+pub const MAX_DISPOSITIVOS: usize = 128;
 
-/// Barramentos varridos.
-///
-/// Um só, por ora. A máquina `virt` e o QEMU no x86 põem tudo no barramento 0,
-/// e varrer os 256 possíveis custaria 32 mil leituras de configuração num boot
-/// para encontrar nada. Pontes PCI-PCI, que é o que torna os outros
-/// alcançáveis, são assunto de quando houver uma.
-const BARRAMENTOS: u8 = 1;
+/// Quantos barramentos um domínio PCI numera.
+const BARRAMENTOS: usize = 256;
 
 /// Uma faixa de endereços em que o kernel pode pôr os BARs dos dispositivos.
 ///
@@ -266,6 +268,10 @@ static INVENTARIO: Mutex<[Option<Dispositivo>; MAX_DISPOSITIVOS]> =
 /// Quantos dispositivos a varredura encontrou, incluindo os que não couberam.
 static ENCONTRADOS: AtomicUsize = AtomicUsize::new(0);
 
+/// Quantos barramentos a varredura percorreu: o zero e um atrás de cada
+/// ponte que o firmware numerou.
+static VARRIDOS: AtomicUsize = AtomicUsize::new(0);
+
 /// Lê a identidade de um dispositivo, ou `None` se não há ninguém ali.
 ///
 /// Só a identidade: onde as regiões dele estão é assunto de [`preparar`], que
@@ -459,7 +465,63 @@ fn atribuir_bars(
     }
 }
 
-/// Varre o barramento e guarda o que encontrar.
+/// O barramento atrás de `endereco`, se ele é uma ponte PCI-PCI que alguém
+/// numerou para depois de `barramento`.
+///
+/// # Só as pontes que o firmware numerou
+///
+/// Num PC o NVMe e uma placa PCIe ficam atrás de uma porta raiz — uma ponte
+/// —, num barramento que só existe porque o firmware lhe deu um número e
+/// abriu, na ponte, as janelas de memória dos dispositivos de trás. O kernel
+/// segue o que o firmware fez, e não refaz: numerar pontes e repartir janelas
+/// é distribuir o espaço da placa inteira, e quem já distribuiu foi ele.
+///
+/// Onde não houve firmware — o ARM que sobe pelo protocolo de imagem crua —
+/// a ponte fica com o barramento zero, e o que está atrás dela não é visto: é
+/// dito no log, e a máquina `virt` de referência não tem ponte nenhuma. No
+/// ARM, o ECAM que o boot mapeia é o do barramento zero, e um de trás além
+/// dele também é dito, e não seguido.
+///
+/// Um número que não passa de `barramento` não é seguido: numa árvore que o
+/// firmware numerou, o barramento de trás é sempre maior que o da frente, e
+/// seguir um que volta seria varrer em laço uma configuração que mente.
+fn barramento_de_tras(
+    acesso: &impl ConfigRegionAccess,
+    endereco: PciAddress,
+    barramento: u8,
+) -> Option<u8> {
+    let ponte = PciPciBridgeHeader::from_header(PciHeader::new(endereco), acesso)?;
+    let de_tras = ponte.secondary_bus_number(acesso);
+    let alcancaveis = crate::arch::pci::barramentos_alcancaveis();
+    if de_tras > barramento && usize::from(de_tras) < alcancaveis {
+        return Some(de_tras);
+    }
+    if de_tras > barramento {
+        crate::log_warn!(
+            "pci",
+            "a ponte em {:02x}:{:02x}.{} leva ao barramento {}, alem dos {} que a configuracao alcanca: o que esta atras dela nao foi visto",
+            endereco.bus(),
+            endereco.device(),
+            endereco.function(),
+            de_tras,
+            alcancaveis
+        );
+        return None;
+    }
+    crate::log_warn!(
+        "pci",
+        "a ponte em {:02x}:{:02x}.{} nao tem barramento numerado depois do {} ({}): o que esta atras dela nao foi visto",
+        endereco.bus(),
+        endereco.device(),
+        endereco.function(),
+        barramento,
+        de_tras
+    );
+    None
+}
+
+/// Varre os barramentos e guarda o que encontrar: o zero, e o de trás de
+/// cada ponte — ver [`barramento_de_tras`].
 pub fn init() {
     let Some(acesso) = crate::arch::pci::acesso() else {
         crate::log_warn!("pci", "sem acesso a configuracao: barramento nao enumerado");
@@ -474,10 +536,22 @@ pub fn init() {
     // exatamente o que impede dois dispositivos de receberem a mesma faixa.
     let mut distribuidor = crate::arch::pci::janela_mmio().map(Distribuidor::novo);
 
+    // Os barramentos a varrer, uma pilha: cada um entra uma vez só, e a
+    // pilha não passa de 256 — o que impede uma configuração que mente de
+    // fazer a varredura girar.
+    let mut a_varrer = [0u8; BARRAMENTOS];
+    let mut pendentes = 1usize;
+    let mut visto = [false; BARRAMENTOS];
+    visto[0] = true;
+    let mut varridos = 0usize;
+
     crate::arch::sem_interrupcoes(|| {
         let mut inventario = INVENTARIO.lock();
 
-        for barramento in 0..BARRAMENTOS {
+        while pendentes > 0 {
+            pendentes -= 1;
+            let barramento = a_varrer[pendentes];
+            varridos += 1;
             for dispositivo in 0..32u8 {
                 let zero = PciAddress::new(0, barramento, dispositivo, 0);
                 let Some(primeira) = ler(&acesso, zero) else {
@@ -498,6 +572,14 @@ pub fn init() {
                     };
 
                     let Some(mut achado) = achado else { continue };
+                    let endereco = PciAddress::new(0, barramento, dispositivo, funcao);
+                    if let Some(de_tras) = barramento_de_tras(&acesso, endereco, barramento)
+                        && !visto[usize::from(de_tras)]
+                    {
+                        visto[usize::from(de_tras)] = true;
+                        a_varrer[pendentes] = de_tras;
+                        pendentes += 1;
+                    }
                     preparar(&acesso, &mut achado, &mut distribuidor);
                     encontrados += 1;
                     if guardados < MAX_DISPOSITIVOS {
@@ -510,6 +592,7 @@ pub fn init() {
     });
 
     ENCONTRADOS.store(encontrados, Ordering::Release);
+    VARRIDOS.store(varridos, Ordering::Release);
 
     if encontrados > guardados {
         crate::log_warn!(
@@ -521,11 +604,17 @@ pub fn init() {
     } else {
         crate::log_info!(
             "pci",
-            "{} dispositivos no barramento ({})",
+            "{} dispositivos em {} barramentos ({})",
             encontrados,
+            varridos,
             crate::arch::pci::MECANISMO
         );
     }
+}
+
+/// Quantos barramentos a varredura percorreu.
+pub fn barramentos() -> usize {
+    VARRIDOS.load(Ordering::Acquire)
 }
 
 /// Autoriza um dispositivo a ler e escrever na memória por conta própria.

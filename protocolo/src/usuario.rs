@@ -1172,6 +1172,16 @@ pub const TETO: u64 = BASE + 0x1000_0000;
 /// seria a página de guarda.
 pub const PAGINAS_DA_PILHA: u64 = 16;
 
+/// O maior executável que o kernel lança: o lançamento lê o arquivo
+/// inteiro, e o VFS não lê de uma vez mais que isto — o teto que faz um
+/// arquivo absurdo virar erro em vez de consumir o heap. Um mebibyte.
+///
+/// Mora aqui, e não só no VFS, porque tem dois lados: o kernel recusa a
+/// leitura, e o `xtask` confere cada programa contra o mesmo número quando
+/// monta o disco — um programa maior compilaria, entraria na imagem e só
+/// falharia quando alguém o lançasse.
+pub const MAIOR_EXECUTAVEL: u64 = 1024 * 1024;
+
 /// O tamanho de página que esta ABI assume nas duas arquiteturas.
 pub const PAGINA: u64 = 4096;
 

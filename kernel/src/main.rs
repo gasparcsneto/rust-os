@@ -72,6 +72,7 @@ mod bloco;
 mod chaves;
 mod contencao;
 mod coordenacao;
+mod e1000;
 mod energia;
 mod eventos;
 mod fios;
@@ -80,6 +81,7 @@ mod grafico;
 mod heap;
 mod hora;
 mod identidade;
+mod imagem;
 mod interpretador;
 mod irq;
 mod log;
@@ -389,7 +391,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // O TPM e o relógio de parede: a âncora e o tempo da persistência.
     tpm::init();
     relogio::init();
-    virtio::net::init();
+    // As placas de rede — a virtio e a Intel — e a da pilha.
+    rede::placa::init();
     virtio::teclado::init();
     virtio::console::init();
     // A entropia, e o gerador que ela semeia. Antes das tarefas das portas,
@@ -491,6 +494,9 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
     // que acabou de montar.
     identidade::carregar();
+    // E de onde veio o disco: a imagem de produção ou a da bancada — só
+    // para dizer, no log e no `system.info`; ver [`imagem`].
+    imagem::carregar();
     // E o registro de domínios de assinatura, do mesmo disco — ver
     // [`chaves`].
     chaves::carregar();

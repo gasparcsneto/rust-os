@@ -33,6 +33,7 @@
 //! chegarem. É a camada sobre a qual uma pilha se constrói, e separá-la é o
 //! que permite testá-la sem ter uma.
 
+use crate::rede::placa::PlacaDeRede;
 use crate::trava::Mutex;
 
 use super::fila::Fila;
@@ -344,21 +345,6 @@ impl Placa {
         }
     }
 
-    /// O endereço desta placa.
-    pub fn mac(&self) -> Option<[u8; TAMANHO_DO_MAC]> {
-        self.mac
-    }
-
-    /// Quantos quadros saíram e quantos entraram.
-    pub fn contadores(&self) -> (u64, u64) {
-        (self.transmitidos, self.recebidos)
-    }
-
-    /// A maior espera por uma confirmação de transmissão, em voltas.
-    pub fn maior_espera(&self) -> u32 {
-        self.maior_espera
-    }
-
     /// Transmite um quadro Ethernet.
     ///
     /// `quadro` é o quadro inteiro, a partir do endereço de destino — o
@@ -546,13 +532,6 @@ impl Placa {
         self.recepcao.notificar(&self.transporte);
     }
 
-    /// A placa ainda está no ar? O ARP do diagnóstico pergunta para não
-    /// esperar dois segundos por uma resposta que uma placa desligada não
-    /// colhe.
-    pub fn vivo(&self) -> bool {
-        self.vivo
-    }
-
     /// Quantos descritores da fila de recepção estão com o dispositivo.
     ///
     /// O número que a suíte confere: com um buffer por cadeia, ele tem de
@@ -586,6 +565,48 @@ impl Placa {
             core::hint::spin_loop();
         }
         None
+    }
+}
+
+impl PlacaDeRede for Placa {
+    fn driver(&self) -> &'static str {
+        "virtio-net"
+    }
+
+    fn mac(&self) -> Option<[u8; TAMANHO_DO_MAC]> {
+        self.mac
+    }
+
+    fn contadores(&self) -> (u64, u64) {
+        (self.transmitidos, self.recebidos)
+    }
+
+    fn maior_espera(&self) -> u32 {
+        self.maior_espera
+    }
+
+    /// O emulador não tem cabo: a placa não diz enlace nenhum.
+    fn enlace(&self) -> Option<bool> {
+        None
+    }
+
+    fn perdas(&self) -> Option<crate::rede::placa::Perdas> {
+        None
+    }
+
+    fn transmitir(&mut self, quadro: &[u8]) -> Result<(), &'static str> {
+        Placa::transmitir(self, quadro)
+    }
+
+    fn receber(&mut self, destino: &mut [u8]) -> Option<usize> {
+        Placa::receber(self, destino)
+    }
+
+    /// A placa ainda está no ar? O ARP do diagnóstico pergunta para não
+    /// esperar dois segundos por uma resposta que uma placa desligada não
+    /// colhe.
+    fn vivo(&self) -> bool {
+        self.vivo
     }
 }
 

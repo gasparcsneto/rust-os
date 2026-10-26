@@ -113,6 +113,11 @@ cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do a
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
+
+# Uma máquina de verdade — ver docs/OPERACAO.md
+cargo xtask chave agente <arquivo> <nome> <papel>   # a chave de quem a opera; a privada fica com ele
+cargo xtask provisionar <diretório> --release       # a imagem de produção, do material do operador
+cargo xtask operar <host:porta> <método> --chave <arquivo> --duke <pública>
 ```
 
 Com o kernel rodando, converse com ele de outro terminal:
@@ -204,7 +209,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `traps.stats` | Contadores de exceções e detalhes da última falha |
 | `debug.trigger` | Dispara uma exceção de propósito (`kind`: `breakpoint`, `fatal`, `stack_overflow`, `hang_core`; no ARM também `stack_overflow_edge`) |
 | `pci.list` | Dispositivos do barramento PCI, com fabricante, modelo e função |
-| `disk.info` | Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um |
+| `disk.info` | Capacidade, driver (virtio-blk ou nvme) e estado do disco do sistema, se houver um: se ainda responde (`alive`), as leituras, escritas e descargas confirmadas, e os erros que o dispositivo devolveu, com o último |
 | `disk.read` | Lê um setor de 512 bytes e o devolve em hexadecimal (`sector`, `length`) |
 | `disk.partitions` | A tabela de partições do disco, lida da GPT |
 | `btrfs.info` | O superbloco do Btrfs da partição de dados |
@@ -312,10 +317,13 @@ kernel/src/
 ├── pci.rs           enumeração do barramento PCI
 ├── bloco.rs         o disco do sistema, de qualquer driver: as janelas de escrita, a descarga, a faixa e a tranca
 ├── nvme.rs          o disco NVMe: o controlador, as filas de administração e de entrada e saída, o aviso de desligamento
+├── e1000.rs         a placa de rede Intel 82574L, a da máquina física: os dois anéis por consulta, o enlace, e o reinício que devolve o buffer
+├── imagem.rs        a marca da imagem, `/etc/duke/imagem`: produção ou desenvolvimento, dita no log e no `system.info`, e lida por decisão nenhuma
 ├── particoes.rs     a tabela de partições GPT do disco: ESP, raiz e a de estado
 ├── rede/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
 │   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
+│   ├── placa.rs     a placa da pilha: o transporte de quadros que a virtio e a Intel cumprem, e qual das duas a pilha usa
 │   ├── configuracao.rs  a rede sem DHCP: o `/etc/duke/rede` da imagem — o endereço, o roteador e os DNS —, e a pilha sem endereço quando ele não se lê
 │   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
 │   ├── canal.rs     o canal do agente por TCP, só o transporte: as vagas, a geração, o prazo do aperto e a contrapressão
@@ -460,6 +468,7 @@ sigilo/src/          o canal seguro, dos dois lados da conversa
 ├── credencial.rs    o verificador Argon2id de uma senha, conferido em tempo constante
 ├── pessoas.rs       o identificador de uma pessoa e o formato do registro delas
 ├── quadro.rs        como as mensagens se delimitam no fluxo da porta
+├── imagem.rs        o formato da marca da imagem: o tipo, o nome da máquina e o id sorteado na montagem
 └── registro.rs      o formato dos arquivos de chaves autorizadas
 
 politica/src/        a política de autorização, a mesma no kernel e no hospedeiro
@@ -708,6 +717,8 @@ xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
+├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, erros de mídia por faixa e respostas retidas
+├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, com uma chave do Duke nova, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
@@ -7788,7 +7799,11 @@ fronteira entre o disco e o TPM: antes e depois da escrita, da descarga,
 do incremento do contador e da leitura de volta — numa operação, numa
 mensagem e num registro só de auditoria —, entre a chave do TPM e o
 contador no boot, no meio da criação da âncora, e em cada fronteira de uma
-compactação; e enche a região até a operação que não cabe. O desenho, os requisitos e o que
+compactação; e enche a região até a operação que não cabe. Com um disco
+hostil — um servidor NBD da própria bancada
+([`xtask/src/disco_hostil.rs`](xtask/src/disco_hostil.rs)) atrás do NVMe —,
+o disco perde no corte o que não foi descarregado, inteiro ou em parte,
+devolve erro de mídia no journal, e para de responder. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 A saída humana das máquinas de cada cenário (a COM1 do x86) vai para
@@ -7832,6 +7847,18 @@ recuperação e o que o Duke ainda não faz — está em
   diz por quê. O `net.info` diz de onde veio o endereço e os DNS.
 - **Memória.** O heap do kernel é um dezesseis avos da memória
   utilizável, entre 8 e 256 MiB.
+- **A imagem de produção.** `cargo xtask provisionar` monta a imagem do
+  material do operador — as chaves de `cargo xtask chave`, a política, as
+  pessoas, a rede —, com uma chave do Duke sorteada ali, a marca
+  `/etc/duke/imagem` e só os programas do produto; recusa qualquer chave da
+  bancada. O `system.info` diz de onde veio a imagem, e `cargo xtask
+  operar` é o cliente de uma máquina de verdade, pelo TCP.
+- **A máquina física.** Um PC com UEFI, NVMe, TPM 2.0 e uma Intel 82574L
+  ([`kernel/src/e1000.rs`](kernel/src/e1000.rs)): a varredura do PCI segue
+  as pontes que o firmware numerou, a placa diz o enlace e se recupera de
+  uma transmissão perdida, e o xHCI é tomado do firmware pelo semáforo da
+  especificação. O `disk.info` diz se o disco responde e conta os erros
+  dele.
 
 A suíte exercita cada um nas duas arquiteturas — incluindo um segundo
 disco, NVMe, na máquina dos testes —, e a bancada de persistência, com o

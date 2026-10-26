@@ -134,12 +134,10 @@ const _: () = assert!(MAIOR_PEDIDO == crate::bloco::MAIOR_LEITURA);
 
 const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize);
 
-/// Quantas voltas esperar por uma resposta antes de desistir.
-///
-/// Não é um tempo: é um número de tentativas, porque aqui ainda não há relógio
-/// confiável em todo caminho que chama o disco. A ordem de grandeza é
-/// deliberadamente folgada — um dispositivo emulado responde em algumas
-/// dezenas de voltas, e o teto só precisa distinguir "lento" de "morto".
+/// Quantas voltas esperar por uma resposta antes de desistir, quando o
+/// contador de ciclos ainda não tem frequência — cedo no boot, quando o disco
+/// liga. Com ela, o prazo é em tempo: [`crate::bloco::ESPERA_MS`], pelo
+/// [`crate::bloco::Prazo`].
 ///
 /// # O que esperar custa
 ///
@@ -154,18 +152,18 @@ const _: () = assert!(PAGINAS_DE_DADOS + 2 <= super::fila::DESCRITORES as usize)
 /// kernel. Sem aquele campo, cada leitura seguinte pagaria o mesmo preço,
 /// para sempre.
 ///
-/// # Por que quatrocentos milhões
+/// # Por que o prazo deixou de ser este número
 ///
-/// Foram cinco milhões até o journal passar a gravar e descarregar a cada
-/// decisão auditada. Uma descarga é um `fsync` no arquivo do disco, no
-/// hospedeiro, e numa máquina compartilhada ela às vezes demora dezenas de
-/// milissegundos. Medido na CI, no ARM emulado em release: cinco milhões de
-/// voltas são uns vinte milissegundos — e uma descarga lenta passou disso, e
-/// o disco foi desligado com ela no meio. Quatrocentos milhões ali são perto
-/// de dois segundos; numa máquina de verdade, poucos segundos. Um teto em
-/// tempo seria melhor que um em voltas, e espera um relógio que se leia com
-/// as interrupções desligadas, nas duas arquiteturas.
-const VOLTAS_DE_ESPERA: u32 = 400_000_000;
+/// Foram cinco milhões de voltas até o journal passar a gravar e descarregar
+/// a cada decisão auditada; uma descarga lenta da CI passou disso, e o disco
+/// foi desligado com ela no meio. Quatrocentos milhões eram perto de dois
+/// segundos no ARM emulado em release — e dois minutos e meio no x86 emulado,
+/// onde cada `pause` custa uma volta ao emulador. Uma volta não tem duração,
+/// e o teto dizia coisas diferentes em cada processador; o comentário que
+/// estava aqui já pedia um teto em tempo, à espera de um relógio que se
+/// lesse com as interrupções desligadas. O contador de ciclos é esse
+/// relógio, e a régua do civil sabe a frequência dele.
+const VOLTAS_DE_ESPERA: u64 = 400_000_000;
 
 /// Um disco virtio pronto para uso.
 struct Disco {
@@ -480,19 +478,18 @@ impl Disco {
     }
 
     fn esperar(&mut self) -> Result<(u16, u32), &'static str> {
-        for _ in 0..VOLTAS_DE_ESPERA {
+        let prazo = crate::bloco::Prazo::em(crate::bloco::ESPERA_MS, VOLTAS_DE_ESPERA);
+        let mut volta = 0;
+        while !prazo.vencido(volta) {
             if let Some(resposta) = self.fila.colher() {
                 return Ok(resposta);
             }
+            volta += 1;
             core::hint::spin_loop();
         }
 
         self.vivo = false;
-        crate::log_error!(
-            "virtio",
-            "o disco nao respondeu em {} voltas; desligado",
-            VOLTAS_DE_ESPERA
-        );
+        crate::log_error!("virtio", "o disco nao respondeu em {}; desligado", prazo);
         Err("o dispositivo nao respondeu")
     }
 }

@@ -21,6 +21,7 @@
 //! O TPM morre junto — ver [`Ligada::cortar_a_energia`] —, e o estado
 //! dele fica no diretório, como o NV de um chip sem energia.
 
+use super::disco_hostil::{Corte, DiscoHostil, Faixa, Gatilho, Sentido};
 use super::{
     Ambiente, Arquitetura, Artefato, BufReader, Child, Command, Duration, ExitCode, Path, Teclado,
     UnixStream, Video, build, caminho_socket, canal_de_pe, comando_qemu, diretorio_do_tpm, disco,
@@ -92,6 +93,45 @@ impl Ligada {
             metodo,
             params,
         )
+    }
+
+    /// Manda um pedido pela serial sem esperar a resposta: o número dele,
+    /// para quem lê depois com [`Ligada::proxima_resposta`]. Os pedidos da
+    /// serial são atendidos na ordem, um de cada vez.
+    pub(crate) fn mandar(&mut self, metodo: &str, params: &str) -> Result<u32, String> {
+        use std::io::Write;
+        self.id += 1;
+        let id = self.id;
+        self.escrita
+            .write_all(
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{metodo}\",\"params\":{params}}}\n"
+                )
+                .as_bytes(),
+            )
+            .and_then(|()| self.escrita.flush())
+            .map_err(|e| format!("falha ao mandar `{metodo}` pela serial: {e}"))?;
+        Ok(id)
+    }
+
+    /// A próxima resposta da serial, de qualquer pedido: o número dele e a
+    /// linha inteira.
+    pub(crate) fn proxima_resposta(&mut self) -> Result<(u32, String), String> {
+        loop {
+            let linha = super::ler_resposta(&mut self.leitor)?;
+            if let Some(id) = super::campo_simples(&linha, "id").and_then(|v| v.parse().ok()) {
+                return Ok((id, linha));
+            }
+        }
+    }
+
+    /// Quanto a leitura da serial espera por uma resposta: um pedido que
+    /// espera o prazo do disco leva mais que os 15 s de sempre.
+    pub(crate) fn esperar_respostas_por(&mut self, prazo: Duration) -> Result<(), String> {
+        self.leitor
+            .get_ref()
+            .set_read_timeout(Some(prazo))
+            .map_err(|e| format!("não foi possível configurar o timeout: {e}"))
     }
 
     /// Corta a energia: `SIGKILL` no QEMU e no TPM, sem aviso a nenhum dos
@@ -294,6 +334,26 @@ const CENARIOS: &[Cenario] = &[
     Cenario {
         nome: "o signatario recusa assinar sobre uma geracao menor que a que ja viu",
         rodar: o_signatario_recusa_geracao_menor,
+    },
+    Cenario {
+        nome: "a imagem de producao: so o material do operador, a marca dela, a chave do Duke dela, e nada da bancada",
+        rodar: a_imagem_de_producao,
+    },
+    Cenario {
+        nome: "o disco que perde o que nao foi descarregado: o confirmado volta depois do corte, e o resto nao conta",
+        rodar: o_disco_que_perde_o_cache,
+    },
+    Cenario {
+        nome: "o erro de midia no journal: a persistencia se declara indisponivel, o disk.info conta, e a maquina segue",
+        rodar: o_erro_de_midia_no_journal,
+    },
+    Cenario {
+        nome: "o disco que para de responder: o driver o desliga no prazo, a persistencia fica indisponivel, e o boot seguinte volta",
+        rodar: o_disco_que_para_de_responder,
+    },
+    Cenario {
+        nome: "a placa Intel como a unica da maquina: DHCP, o agente por TCP, e o cabo que sai e volta",
+        rodar: a_placa_intel,
     },
 ];
 
@@ -852,6 +912,577 @@ fn o_disco_nvme_do_sistema(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     ))
 }
 
+/// A imagem de produção, montada pelo provisionamento do material de um
+/// operador — a política de `docs/exemplos/producao`, a rede do emulador
+/// escrita, e chaves geradas aqui como `cargo xtask chave` as gera. No
+/// primeiro boot a persistência abre; o `system.info` diz produção, com o
+/// nome e o id da marca; só os agentes, os administradores e a pessoa do
+/// operador existem; o agente dele entra fixando a pública do Duke da
+/// imagem, e o da bancada é recusado; a prova de um administrador dele
+/// registra um agente, e a do administrador da bancada não; nada da
+/// bancada está na raiz — nem a âncora TLS dela, nem a PocketIC, nem os
+/// arquivos da suíte —; a rede é a do arquivo; e a serial é `observador`:
+/// lê o estado, e não a auditoria.
+fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    use super::producao;
+    let dir = super::raiz_do_estado().join(format!("operador-{}", arch.nome()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let escrever = |nome: &str, conteudo: &str| {
+        std::fs::write(dir.join(nome), conteudo).map_err(|e| format!("{nome}: {e}"))
+    };
+    let exemplo = super::raiz_do_projeto().join("docs/exemplos/producao/politica");
+    escrever(
+        "politica",
+        &std::fs::read_to_string(&exemplo).map_err(|e| format!("{}: {e}", exemplo.display()))?,
+    )?;
+    escrever("nome", "bancada-producao\n")?;
+    escrever(
+        "rede",
+        "endereco 10.0.2.15/24\nroteador 10.0.2.2\ndns 10.0.2.3\n",
+    )?;
+    let (operador, linha_do_operador, _) =
+        producao::chave_nova("agente", "operador-1", Some("operador"))?;
+    let (sistema, linha_do_sistema, _) =
+        producao::chave_nova("agente", "sistema-1", Some("sistema"))?;
+    escrever("agentes", &format!("{linha_do_operador}{linha_do_sistema}"))?;
+    let mut administradores = String::new();
+    let mut credenciais = Vec::new();
+    for nome in ["adm-a", "adm-b", "adm-c"] {
+        let (privada, linha, _) =
+            producao::chave_nova("administrador", nome, Some("administrador"))?;
+        administradores.push_str(&linha);
+        credenciais.push(privada);
+    }
+    escrever("administradores", &administradores)?;
+    escrever("senha-ana", "uma senha comprida de teste\n")?;
+    escrever("pessoas", "ana operador senha-ana\n")?;
+
+    let op = producao::ler_o_operador(&dir)?;
+    let politica = producao::conferir(&op)?;
+    let duke = super::aleatorios()?;
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&super::aleatorios()?[..16]);
+    let arquivos = producao::arquivos_da_imagem(arch, &op, &politica, &duke, id)?;
+    let disco = super::raiz_do_estado().join(format!("producao-{}.img", arch.nome()));
+    let da_imagem = super::disco_com(artefato, &disco, &arquivos, super::Extras::Nenhum)?;
+    let mut m = Ligada::subir_com(
+        arch,
+        &da_imagem,
+        Ambiente::ligar(arch, None)?.com_disco(disco.clone()),
+    )?;
+    let resultado = (|| -> Result<String, String> {
+        let r = m.pedir("system.info", "{}")?;
+        let id = sigilo::hex_de(&id);
+        if !r.contains(&format!(
+            r#""image":{{"kind":"production","name":"bancada-producao","id":"{id}"}}"#
+        )) {
+            return Err(format!("o system.info nao diz a imagem de producao\n  {r}"));
+        }
+        let p = persistencia_de(&mut m)?;
+        if p.estado != "available" {
+            return Err(format!(
+                "a persistencia nao abriu no primeiro boot da imagem de producao: {} ({})",
+                p.estado, p.motivo
+            ));
+        }
+        let registro = m.pedir("agent.registry", "{}")?;
+        if !registro.contains("operador-1")
+            || !registro.contains("sistema-1")
+            || registro.contains("agente-1")
+        {
+            return Err(format!(
+                "os agentes da imagem nao sao os do operador\n  {registro}"
+            ));
+        }
+        let pessoas = m.pedir("person.registry", "{}")?;
+        if !pessoas.contains(r#""name":"ana""#) || pessoas.contains(r#""name":"dev""#) {
+            return Err(format!(
+                "as pessoas da imagem nao sao as do operador\n  {pessoas}"
+            ));
+        }
+        let rede = m.pedir("net.info", "{}")?;
+        if texto_do_resultado(&rede, "mode").as_deref() != Some("static") {
+            return Err(format!("a rede nao e a do arquivo do operador\n  {rede}"));
+        }
+        // A serial do operador e `observador`: le o estado, e nao a
+        // auditoria.
+        let r = m.pedir("audit.tail", "{}")?;
+        if !r.contains("DENY") {
+            return Err(format!("a serial de observador leu a auditoria\n  {r}"));
+        }
+
+        // O agente do operador entra, fixando a pública do Duke da imagem;
+        // o da bancada, não.
+        let publica = sigilo::publica_de(&duke);
+        let chave_do_operador = producao::chave_de_agente_de_texto(&operador)?;
+        let mut agente =
+            super::AgenteNaPorta::conectar_com_publica(arch, 1, &chave_do_operador, &publica)?;
+        let s = agente.pedir("agent.session", "{}")?;
+        if !s.contains(r#""agent":"operador-1""#) {
+            return Err(format!("o agente do operador entrou com outro nome\n  {s}"));
+        }
+        let bancada = super::chaves::Chaves::garantir()?;
+        match super::AgenteNaPorta::conectar_com_publica(arch, 2, &bancada.do_agente(4), &publica) {
+            Err(e) if e.contains("recusado") => {}
+            Err(e) => return Err(format!("o agente da bancada nao foi recusado: {e}")),
+            Ok(_) => return Err("o agente da bancada entrou na imagem de producao".into()),
+        }
+
+        // Nada da bancada na raiz, lido pelo agente `sistema` do operador —
+        // a serial, `observador`, nem lê arquivo: uma recusa dela não
+        // provaria ausência nenhuma.
+        let chave_do_sistema = producao::chave_de_agente_de_texto(&sistema)?;
+        let mut sis =
+            super::AgenteNaPorta::conectar_com_publica(arch, 3, &chave_do_sistema, &publica)?;
+        let raiz = sis.pedir("fs.list", r#"{"path":"/"}"#)?;
+        if !raiz.contains("etc") || raiz.contains("saudacao.txt") || raiz.contains("enche-1.txt") {
+            return Err(format!(
+                "a raiz da imagem de producao tem os arquivos da suite\n  {raiz}"
+            ));
+        }
+        let programas = sis.pedir(
+            "fs.list",
+            &format!(r#"{{"path":"/programas/{}"}}"#, arch.nome()),
+        )?;
+        for programa in producao::PROGRAMAS_DO_PRODUTO {
+            if !programas.contains(&format!(r#""{programa}""#)) {
+                return Err(format!(
+                    "o programa `{programa}` nao esta na imagem de producao\n  {programas}"
+                ));
+            }
+        }
+        if programas.contains(r#""carga""#) || programas.contains(r#""cifrado""#) {
+            return Err(format!(
+                "a imagem de producao leva programas da suite\n  {programas}"
+            ));
+        }
+        // A pessoa do operador entra pelo Terminal, pelo teclado da
+        // máquina: a senha do arquivo dela, conferida pelo Argon2id do
+        // kernel contra o verificador que o provisionamento gravou. Antes,
+        // um comando sem login, para saber que o Terminal já lê o teclado.
+        let mut mon = UnixStream::connect(super::caminho_monitor(arch))
+            .map_err(|e| format!("login: o monitor nao aceitou conexao: {e}"))?;
+        super::digitar_pelo_monitor(&mut mon, "\nagent.ping\n", "login")?;
+        let limite = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let cauda = sis.pedir("audit.tail", r#"{"count":32}"#)?;
+            if cauda.contains(r#""method":"agent.ping""#)
+                && cauda.contains("DENY_NOT_AUTHENTICATED")
+                && cauda.contains(r#""resource":"terminal:"#)
+            {
+                break;
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!(
+                    "o Terminal da imagem de producao nao recusou o comando sem login\n  {cauda}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        super::digitar_pelo_monitor(
+            &mut mon,
+            "login\nana\numa senha comprida de teste\n",
+            "login",
+        )?;
+        let limite = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let registro = m.pedir("person.registry", "{}")?;
+            if super::consoles_da_pessoa(&registro, "ana")
+                .iter()
+                .any(|c| c.starts_with("terminal:"))
+            {
+                break;
+            }
+            if std::time::Instant::now() >= limite {
+                return Err(format!(
+                    "a pessoa do operador nao entrou no Terminal com a senha dela\n  {registro}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let ancora = sis.pedir("fs.read", r#"{"path":"/dados/tls/bancada.pem"}"#)?;
+        if !ancora.contains("nao encontrado") {
+            return Err(format!(
+                "a ancora TLS da bancada esta na imagem de producao\n  {ancora}"
+            ));
+        }
+        let publicas = sis.pedir("fs.read", r#"{"path":"/dados/tls/publicas.pem"}"#)?;
+        if !publicas.contains("BEGIN CERTIFICATE") {
+            return Err(format!(
+                "as ancoras publicas nao estao na imagem de producao\n  {publicas}"
+            ));
+        }
+        let redes = sis.pedir("fs.read", r#"{"path":"/dados/icp/redes"}"#)?;
+        if !redes.contains("rede mainnet") || redes.contains("icp.duke") {
+            return Err(format!(
+                "as redes do IC da imagem nao sao so a principal\n  {redes}"
+            ));
+        }
+        drop(sis);
+
+        // A prova de um administrador do operador registra um agente; a do
+        // administrador da bancada, não.
+        let sessao: u8 = super::campo_simples(&s, "session")
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("a sessao do agente nao diz o numero\n  {s}"))?;
+        let novo = super::aleatorios()?;
+        let params = registro_de_agente(&novo, "registrado-1", "observador");
+        let (credencial, _) = producao::chave_de_administrador_de_texto(&credenciais[0])?;
+        let desafio = agente.pedir("admin.challenge", "{}")?;
+        let pedido = super::pedido_administrativo_de(
+            &credencial,
+            sessao,
+            &desafio,
+            "agent.register",
+            &params,
+            &params,
+        )?;
+        let r = agente.pedir("admin.execute", &pedido)?;
+        if !executou(&r) {
+            return Err(format!(
+                "a prova do administrador do operador nao valeu\n  {r}"
+            ));
+        }
+        let desafio = agente.pedir("admin.challenge", "{}")?;
+        let params = registro_de_agente(&super::aleatorios()?, "intruso-1", "sistema");
+        let pedido = super::pedido_administrativo_de(
+            &bancada.administrador,
+            sessao,
+            &desafio,
+            "agent.register",
+            &params,
+            &params,
+        )?;
+        let r = agente.pedir("admin.execute", &pedido)?;
+        if executou(&r) {
+            return Err(format!(
+                "a prova do administrador da bancada valeu na imagem de producao\n  {r}"
+            ));
+        }
+        Ok(format!(
+            "imagem `bancada-producao` ({id}): persistencia {}, agentes e pessoa do operador, a pessoa entra no Terminal pelo teclado, o agente e o administrador da bancada recusados, a raiz sem nada da bancada, a rede do arquivo",
+            p.estado
+        ))
+    })();
+    m.cortar_a_energia()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&disco);
+    resultado
+}
+
+/// O socket do disco hostil de `arch`, em `target/`.
+fn socket_do_disco_hostil(arch: Arquitetura) -> std::path::PathBuf {
+    super::raiz_do_projeto()
+        .join("target")
+        .join(format!("disco-hostil-{}.sock", arch.nome()))
+}
+
+/// O disco de testes atrás do servidor do disco hostil, com o corte
+/// `corte` — ver [`super::disco_hostil`].
+fn disco_hostil(arch: Arquitetura, corte: Corte) -> Result<DiscoHostil, String> {
+    DiscoHostil::servir(&disco_de_testes()?, &socket_do_disco_hostil(arch), corte)
+}
+
+/// Se a resposta de um comando do armazém é a de uma gravação confirmada —
+/// a mesma regra do [`no_armazem`]: a recusa também vem em `result`.
+fn confirmada(r: &str) -> bool {
+    r.contains(r#""ok":true"#) && r.contains(r#""durable":true"#)
+}
+
+/// A faixa da partição de estado: o journal.
+fn faixa_do_journal() -> Faixa {
+    Faixa {
+        primeiro: disco::ESTADO_EM,
+        quantos: disco::ESTADO_SETORES,
+    }
+}
+
+/// O disco que perde o que não foi descarregado: o servidor guarda cada
+/// escrita num cache volátil até a descarga, e o corte o perde — todo, ou
+/// uma parte sorteada, como um SSD sem capacitor. Doze gravações no
+/// armazém pedidas de uma vez pela serial, e a energia acaba no meio
+/// delas, num ponto exato: na `n`-ésima escrita, com ela no cache, ou na
+/// `n`-ésima descarga, antes de gravar — o próprio servidor corta, ver
+/// [`Gatilho`]. No boot seguinte a persistência abre — nada que foi
+/// confirmado se perdeu, senão o journal ficaria atrás da âncora e seria
+/// recusado —, cada gravação confirmada está lá, cada uma sem confirmação
+/// está inteira ou não está, e a auditoria e o armazém conferem. Quatro
+/// rodadas: o corte que perde tudo, e três que guardam partes diferentes.
+///
+/// É o que o arquivo sozinho não pegava: o que o emulador escreveu está no
+/// cache do hospedeiro e sobrevive à morte dele — uma gravação confirmada
+/// antes da descarga passaria do mesmo jeito.
+fn o_disco_que_perde_o_cache(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const GRAVACOES: u32 = 12;
+    let mut relato = Vec::new();
+    for (corte, gatilho) in [
+        (Corte::PerdeTudo, Gatilho::Escrita(4)),
+        (Corte::GuardaParte(0x5eed_0001), Gatilho::Descarga(3)),
+        (Corte::GuardaParte(0x5eed_0002), Gatilho::Escrita(9)),
+        (Corte::GuardaParte(0x5eed_0003), Gatilho::Descarga(7)),
+    ] {
+        zerar_o_estado(arch)?;
+        let disco = disco_hostil(arch, corte)?;
+        let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
+        let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+        let antes = persistencia_de(&mut m)?;
+        if antes.estado != "available" {
+            return Err(format!(
+                "{corte:?}: a persistencia nao abriu no disco hostil: {} ({})",
+                antes.estado, antes.motivo
+            ));
+        }
+        no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/hostil"}"#)?;
+        disco.cortar_em(gatilho);
+        let mut pedidos = Vec::new();
+        for i in 0..GRAVACOES {
+            let id = m.mandar(
+                "fs.write",
+                &format!(
+                    r#"{{"path":"/armazem/hostil/{i}.txt","content":"confirmado {i}","expect_version":0}}"#
+                ),
+            )?;
+            pedidos.push((id, i));
+        }
+        // As respostas, até o corte e o silêncio depois dele: sem o disco,
+        // o que estava em curso falha ou fica sem resposta.
+        m.esperar_respostas_por(Duration::from_secs(2))?;
+        let limite = std::time::Instant::now() + Duration::from_secs(180);
+        let mut confirmadas = Vec::new();
+        loop {
+            match m.proxima_resposta() {
+                Ok((id, r)) => {
+                    if let Some(&(_, i)) = pedidos.iter().find(|(p, _)| *p == id)
+                        && confirmada(&r)
+                    {
+                        confirmadas.push(i);
+                    }
+                }
+                Err(_) if disco.contas().cortes > 0 => break,
+                Err(_) if std::time::Instant::now() > limite => {
+                    return Err(format!(
+                        "{corte:?}: o gatilho {gatilho:?} nao disparou: {:?}",
+                        disco.contas()
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
+        m.cortar_a_energia()?;
+        let no_corte = disco.esperar_o_fim_da_conexao(1)?;
+        if no_corte.cortes != 1 || no_corte.no_corte == 0 {
+            return Err(format!(
+                "{corte:?}: o corte em {gatilho:?} nao pegou nada no cache: {no_corte:?}"
+            ));
+        }
+
+        let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+        let depois = persistencia_de(&mut m)?;
+        if depois.estado != "available" || depois.boots <= antes.boots {
+            return Err(format!(
+                "{corte:?}, {gatilho:?}: depois do corte, a persistencia ficou {} ({}), boot {} depois de {}: algo confirmado nao estava descarregado",
+                depois.estado, depois.motivo, depois.boots, antes.boots
+            ));
+        }
+        let mut voltaram = 0;
+        for i in 0..GRAVACOES {
+            let lido = m.pedir(
+                "fs.read",
+                &format!(r#"{{"path":"/armazem/hostil/{i}.txt"}}"#),
+            )?;
+            let inteiro = lido.contains(&format!("confirmado {i}"));
+            if confirmadas.contains(&i) && !inteiro {
+                return Err(format!(
+                    "{corte:?}, {gatilho:?}: a gravacao {i}, confirmada antes do corte, nao voltou\n  {lido}"
+                ));
+            }
+            if !inteiro && !lido.contains(r#""error":"nao encontrado""#) {
+                return Err(format!(
+                    "{corte:?}, {gatilho:?}: a gravacao {i}, sem confirmacao, voltou diferente\n  {lido}"
+                ));
+            }
+            voltaram += u32::from(inteiro);
+        }
+        auditoria_verifica(&mut m)?;
+        let r = m.pedir("fs.verify", r#"{"path":"/armazem"}"#)?;
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!(
+                "{corte:?}, {gatilho:?}: o armazem nao conferiu depois do corte\n  {r}"
+            ));
+        }
+        m.cortar_a_energia()?;
+        relato.push(format!(
+            "{corte:?} em {gatilho:?}: {} confirmadas, {voltaram} de {GRAVACOES} de volta; {} setores no cache no corte, {} guardados",
+            confirmadas.len(),
+            no_corte.no_corte,
+            no_corte.guardados_no_corte
+        ));
+    }
+    Ok(relato.join("; "))
+}
+
+/// O erro de mídia na partição de estado: o servidor devolve `EIO` a toda
+/// escrita no journal, e o NVMe do emulador a conclui como falha de
+/// escrita. A gravação no armazém que precisava do registro não é
+/// confirmada; a persistência se declara indisponível, com o motivo; o
+/// `disk.info` diz o disco vivo e conta o erro, com o último; a máquina
+/// segue respondendo, e o pedido seguinte que mudaria o estado é recusado.
+/// Com o disco são de novo, o boot seguinte abre a persistência, e a
+/// gravação que falhou não existe.
+fn o_erro_de_midia_no_journal(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/midia/a.txt";
+    let disco = disco_hostil(arch, Corte::PerdeTudo)?;
+    let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
+    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let antes = persistencia_de(&mut m)?;
+    if antes.estado != "available" {
+        return Err(format!(
+            "a persistencia nao abriu no disco hostil: {} ({})",
+            antes.estado, antes.motivo
+        ));
+    }
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/midia"}"#)?;
+    disco.erro_em(Some((faixa_do_journal(), Sentido::Escrita)));
+    let r = m.pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"nunca confirmado","expect_version":0}}"#),
+    )?;
+    if confirmada(&r) {
+        return Err(format!(
+            "a gravacao foi confirmada com o journal recusando a escrita\n  {r}"
+        ));
+    }
+    let p = persistencia_de(&mut m)?;
+    if p.estado != "unavailable" || !p.motivo.contains("gravacao no journal falhou") {
+        return Err(format!(
+            "depois do erro de midia, a persistencia ficou {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    let d = m.pedir("disk.info", "{}")?;
+    if !d.contains(r#""alive":true"#)
+        || d.contains(r#""write":0"#)
+        || !d.contains(r#""last":"o dispositivo recusou a escrita""#)
+    {
+        return Err(format!(
+            "o disk.info nao contou o erro de midia com o disco vivo\n  {d}"
+        ));
+    }
+    m.pedir("system.info", "{}")?;
+    let r = m.pedir(
+        "fs.write",
+        r#"{"path":"/armazem/midia/b.txt","content":"depois","expect_version":0}"#,
+    )?;
+    if confirmada(&r) {
+        return Err(format!(
+            "com a persistencia indisponivel, uma gravacao foi confirmada\n  {r}"
+        ));
+    }
+    let erros = disco.contas().erros;
+    m.cortar_a_energia()?;
+    disco.esperar_o_fim_da_conexao(1)?;
+    disco.erro_em(None);
+
+    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let depois = persistencia_de(&mut m)?;
+    if depois.estado != "available" || depois.boots <= antes.boots {
+        return Err(format!(
+            "com o disco sao, o boot seguinte: {} ({}), boot {} depois de {}",
+            depois.estado, depois.motivo, depois.boots, antes.boots
+        ));
+    }
+    let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    if lido.contains("nunca confirmado") {
+        return Err(format!("a gravacao que falhou existe\n  {lido}"));
+    }
+    auditoria_verifica(&mut m)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "{erros} escrita(s) do journal com EIO; a persistencia ficou indisponivel e voltou no boot {}",
+        depois.boots
+    ))
+}
+
+/// O disco que para de responder: o servidor retém, sem resposta nunca,
+/// toda escrita no journal. O NVMe do emulador espera com ela; o driver do
+/// Duke, depois do prazo do disco — trinta segundos, e não um laço sem
+/// fim —, desliga o dispositivo. A gravação não é confirmada, a
+/// persistência fica indisponível, o `disk.info` diz o disco desligado e o
+/// tempo esgotado, e a máquina segue respondendo. Com o disco são de novo,
+/// o boot seguinte abre a persistência sem a gravação.
+fn o_disco_que_para_de_responder(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const A: &str = "/armazem/mudo/a.txt";
+    let disco = disco_hostil(arch, Corte::PerdeTudo)?;
+    let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
+    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let antes = persistencia_de(&mut m)?;
+    if antes.estado != "available" {
+        return Err(format!(
+            "a persistencia nao abriu no disco hostil: {} ({})",
+            antes.estado, antes.motivo
+        ));
+    }
+    no_armazem(&mut m, "fs.mkdir", r#"{"path":"/armazem/mudo"}"#)?;
+    disco.reter_em(Some((faixa_do_journal(), Sentido::Escrita)));
+    m.esperar_respostas_por(Duration::from_secs(120))?;
+    let comeco = std::time::Instant::now();
+    let r = m.pedir(
+        "fs.write",
+        &format!(r#"{{"path":"{A}","content":"nunca confirmado","expect_version":0}}"#),
+    )?;
+    let esperou = comeco.elapsed();
+    if confirmada(&r) {
+        return Err(format!(
+            "a gravacao foi confirmada com o journal sem resposta\n  {r}"
+        ));
+    }
+    if esperou < Duration::from_secs(25) {
+        return Err(format!(
+            "o driver desistiu do disco em {esperou:?}, antes do prazo"
+        ));
+    }
+    m.esperar_respostas_por(Duration::from_secs(15))?;
+    let p = persistencia_de(&mut m)?;
+    if p.estado != "unavailable" {
+        return Err(format!(
+            "com o disco sem resposta, a persistencia ficou {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    let d = m.pedir("disk.info", "{}")?;
+    if !d.contains(r#""alive":false"#) || !d.contains(r#""last":"o dispositivo nao respondeu""#) {
+        return Err(format!(
+            "o disk.info nao diz o disco desligado pelo tempo esgotado\n  {d}"
+        ));
+    }
+    m.pedir("system.info", "{}")?;
+    let retidos = disco.contas().retidos;
+    m.cortar_a_energia()?;
+    disco.esperar_o_fim_da_conexao(1)?;
+    disco.reter_em(None);
+
+    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let depois = persistencia_de(&mut m)?;
+    if depois.estado != "available" || depois.boots <= antes.boots {
+        return Err(format!(
+            "com o disco sao, o boot seguinte: {} ({}), boot {} depois de {}",
+            depois.estado, depois.motivo, depois.boots, antes.boots
+        ));
+    }
+    let lido = m.pedir("fs.read", &format!(r#"{{"path":"{A}"}}"#))?;
+    if lido.contains("nunca confirmado") {
+        return Err(format!("a gravacao sem resposta existe\n  {lido}"));
+    }
+    auditoria_verifica(&mut m)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "{retidos} pedido(s) retido(s); o driver desistiu em {:.1} s, e o boot {} abriu sem a gravacao",
+        esperou.as_secs_f64(),
+        depois.boots
+    ))
+}
+
 /// O `/etc/duke/rede` da imagem, num kernel de produção, em dois discos
 /// novos: com o arquivo, a máquina sobe com o endereço dele — um que o DHCP
 /// do emulador não dá — e sem DHCP; com um arquivo que não se lê, sobe sem
@@ -908,6 +1539,101 @@ fn a_rede_fixa_da_imagem(arch: Arquitetura, artefato: &Artefato) -> Result<Strin
     let _ = std::fs::remove_dir_all(&dir);
     resultado?;
     Ok(vistos.join("; "))
+}
+
+/// Espera o `net.info` da máquina dizer `valor` em `campo`, por até
+/// `segundos`, e devolve a última resposta.
+fn esperar_net_info(
+    m: &mut Ligada,
+    campo: &str,
+    valor: &str,
+    segundos: u64,
+) -> Result<String, String> {
+    let limite = std::time::Instant::now() + Duration::from_secs(segundos);
+    loop {
+        let r = m.pedir("net.info", "{}")?;
+        if texto_do_resultado(&r, campo).as_deref() == Some(valor) {
+            return Ok(r);
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "o net.info nao disse {campo} {valor} em {segundos} s\n  {r}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A máquina física de referência, na rede: a 82574L é a única placa — no
+/// x86, atrás de uma ponte PCI, como numa placa PCIe de um PC —, e a pilha
+/// sobe nela. O DHCP dá o endereço, e um agente de fora entra pelo canal
+/// TCP. O cabo sai (o `set_link` do emulador): o `net.info` diz o enlace
+/// caído, o ARP é recusado sem enlace, e a recusa é contada; nada desliga
+/// a placa. O cabo volta: o enlace volta, a sessão TCP aberta antes do
+/// corte continua respondendo, e uma nova entra.
+fn a_placa_intel(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    zerar_o_estado(arch)?;
+    let ambiente = Ambiente::ligar(arch, None)?.com_placa_intel();
+    let mut m = Ligada::subir_com(arch, artefato, ambiente)?;
+    let resultado = (|| -> Result<String, String> {
+        let r = m.pedir("net.info", "{}")?;
+        if texto_do_resultado(&r, "driver").as_deref() != Some("e1000e")
+            || texto_do_resultado(&r, "link").as_deref() != Some("true")
+        {
+            return Err(format!(
+                "a pilha nao subiu na placa Intel com enlace\n  {r}"
+            ));
+        }
+        let r = esperar_net_info(&mut m, "mode", "dhcp", 30)?;
+        let endereco = texto_do_resultado(&r, "address").unwrap_or_default();
+        if !endereco.starts_with("10.0.2.") {
+            return Err(format!("o DHCP nao deu endereco pela placa Intel\n  {r}"));
+        }
+        let mut antes = super::AgenteNaPorta::conectar_tcp(arch, 1)?;
+        let s = antes.pedir("system.info", "{}")?;
+        if !s.contains(r#""result""#) {
+            return Err(format!("o agente pelo TCP nao foi atendido\n  {s}"));
+        }
+
+        super::mudar_o_enlace(arch, "rede0", false)?;
+        esperar_net_info(&mut m, "link", "false", 10)?;
+        let arp = m.pedir("net.arp", "{}")?;
+        if !arp.contains("sem enlace") {
+            return Err(format!(
+                "o ARP sem enlace nao foi recusado pelo motivo\n  {arp}"
+            ));
+        }
+        let r = m.pedir("net.info", "{}")?;
+        let sem_enlace: u64 = super::campo_simples(&r, "frames_without_link")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if sem_enlace == 0 || texto_do_resultado(&r, "alive").as_deref() != Some("true") {
+            return Err(format!(
+                "sem enlace, a recusa nao foi contada ou a placa foi desligada\n  {r}"
+            ));
+        }
+
+        super::mudar_o_enlace(arch, "rede0", true)?;
+        esperar_net_info(&mut m, "link", "true", 10)?;
+        let s = antes.pedir("system.info", "{}")?;
+        if !s.contains(r#""result""#) {
+            return Err(format!(
+                "a sessao TCP de antes do corte nao respondeu depois dele\n  {s}"
+            ));
+        }
+        let mut depois = super::AgenteNaPorta::conectar_tcp(arch, 2)?;
+        let s = depois.pedir("system.info", "{}")?;
+        if !s.contains(r#""result""#) {
+            return Err(format!("um agente novo nao entrou depois do corte\n  {s}"));
+        }
+        let r = m.pedir("net.info", "{}")?;
+        let reinicios = super::campo_simples(&r, "resets").unwrap_or_default();
+        Ok(format!(
+            "{endereco} pelo DHCP na 82574L, o agente por TCP antes e depois do cabo, {sem_enlace} quadros recusados sem enlace, {reinicios} reinicios"
+        ))
+    })();
+    m.cortar_a_energia()?;
+    resultado
 }
 
 /// O RTC lido pelo kernel, pelo `system.info`.

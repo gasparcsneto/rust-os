@@ -1730,7 +1730,7 @@ fn imagem_com(b: &Bancada, linha: &str) -> Result<(std::path::PathBuf, Artefato)
         super::tls::ANCORA_NA_IMAGEM.to_string(),
         super::tls::ancora()?,
     ));
-    super::montar_disco(&caminho, &arquivos)?;
+    super::montar_disco(&caminho, &arquivos, super::Extras::DaSuite)?;
     let artefato = match b.artefato {
         Artefato::Binario(img) => Artefato::Binario(img.clone()),
         Artefato::Disco(_) => {

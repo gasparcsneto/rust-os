@@ -154,3 +154,9 @@ pub fn janela_alta() -> Option<crate::pci::JanelaMmio> {
 
 /// Como o barramento é alcançado, para o relatório do agente.
 pub const MECANISMO: &str = "port-io-cf8";
+
+/// Quantos barramentos a configuração alcança: o par de portas endereça os
+/// 256.
+pub fn barramentos_alcancaveis() -> usize {
+    256
+}

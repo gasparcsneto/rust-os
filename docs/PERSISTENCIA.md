@@ -1583,3 +1583,24 @@ continua com 160 MiB.
 | 7.7 | O que restar da âncora (TPM físico, sessão autenticada no barramento) | feita |
 | ICP-3 | As chaves de assinatura no journal: a semente, a lápide, a compactação | feita |
 | ICP-5 | A semente selada no TPM, presa ao índice de geração: a morte em três passos, a migração das antigas | feita |
+
+## O disco hostil
+
+O arquivo de um disco emulado não perde nada: o que o emulador escreveu
+está no cache do hospedeiro e sobrevive à morte dele. Uma gravação
+confirmada antes da descarga passaria do mesmo jeito que uma confirmada
+depois — e a descarga antes de avançar o contador e de confirmar é o que
+separa as duas. A bancada põe atrás do NVMe da máquina um disco que se
+comporta como um de verdade, e pior: um servidor NBD dela mesma
+([`xtask/src/disco_hostil.rs`](../xtask/src/disco_hostil.rs)), com um
+cache de escrita volátil, erros de mídia por faixa e respostas retidas.
+
+| Cenário | O disco | O que se confere |
+|---|---|---|
+| o disco que perde o que não foi descarregado | cada escrita fica no cache até a descarga; o corte — numa escrita ou numa descarga exata, pelo próprio servidor — perde tudo, ou uma parte sorteada com semente fixa, como um SSD sem capacitor | doze gravações pedidas de uma vez, e a energia corta no meio: no boot seguinte a persistência abre, cada gravação confirmada está lá, cada uma sem confirmação está inteira ou não está, e a auditoria e o armazém conferem. Quatro rodadas |
+| o erro de mídia no journal | toda escrita no journal volta com erro de mídia, que o NVMe conclui como falha | a gravação que precisava do registro não é confirmada, a persistência se declara indisponível com o motivo, o `disk.info` conta o erro com o último, e a máquina segue — recusando o que mudaria o estado; com o disco são, o boot seguinte abre, sem a gravação |
+| o disco que para de responder | toda escrita no journal fica sem resposta, para sempre | o driver espera o prazo do disco — trinta segundos, pelo contador de ciclos — e desliga o controlador; a gravação não é confirmada, o `disk.info` diz `alive` falso e o tempo esgotado; com o disco são, o boot seguinte abre, sem a gravação |
+
+Os cortes são determinísticos: o servidor corta na n-ésima escrita ou
+descarga, e a parte guardada sai de uma semente escrita no cenário — a
+mesma rodada perde os mesmos setores em toda execução.

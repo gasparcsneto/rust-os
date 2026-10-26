@@ -16,8 +16,10 @@
 
 mod canal_tcp;
 mod codigo;
+mod disco_hostil;
 mod icp;
 mod persistencia;
+mod producao;
 mod rede_principal;
 mod servidor_de_hora;
 mod tempo;
@@ -218,7 +220,19 @@ fn main() -> ExitCode {
             pular = false;
             continue;
         }
-        if a == "--arch" || a == "--teclado" || a == "--canal" || a == "--enderecos" {
+        if [
+            "--arch",
+            "--teclado",
+            "--canal",
+            "--enderecos",
+            "--saida",
+            "--chave",
+            "--duke",
+            "--admin",
+            "--assinatura",
+        ]
+        .contains(&a.as_str())
+        {
             pular = true;
         } else if !a.starts_with("--") {
             posicionais.push(a);
@@ -261,6 +275,56 @@ fn main() -> ExitCode {
         "invariantes" => conferir_invariantes(),
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
+        // A imagem de produção é sempre a de release: é a que vai para a
+        // máquina de verdade.
+        "provisionar" => match posicionais.get(1) {
+            Some(dir) => producao::provisionar(
+                arch,
+                true,
+                Path::new(dir),
+                extrair_valor(&args, "--saida").map(Path::new),
+            ),
+            None => Err(
+                "uso: cargo xtask provisionar <diretório do operador> [--arch A] [--saida D]"
+                    .into(),
+            ),
+        },
+        "chave" => match (posicionais.get(1), posicionais.get(2), posicionais.get(3)) {
+            (Some(tipo), Some(arquivo), Some(nome)) => {
+                producao::gerar_chave(tipo, Path::new(arquivo), nome, posicionais.get(4).copied())
+            }
+            _ => Err(
+                "uso: cargo xtask chave agente|administrador <arquivo> <nome> <papel>, ou chave editor <arquivo> <nome>"
+                    .into(),
+            ),
+        },
+        "operar" => match (
+            posicionais.get(1),
+            posicionais.get(2),
+            extrair_valor(&args, "--chave"),
+            extrair_valor(&args, "--duke"),
+        ) {
+            (Some(endereco), Some(metodo), Some(chave), Some(duke)) => {
+                let assinaturas: Vec<PathBuf> = args
+                    .windows(2)
+                    .filter(|w| w[0] == "--assinatura")
+                    .map(|w| PathBuf::from(&w[1]))
+                    .collect();
+                producao::operar(
+                    endereco,
+                    metodo,
+                    posicionais.get(3).copied().unwrap_or("{}"),
+                    Path::new(chave),
+                    duke,
+                    extrair_valor(&args, "--admin").map(Path::new),
+                    &assinaturas,
+                )
+            }
+            _ => Err(
+                "uso: cargo xtask operar <host:porta> <método> [parâmetros] --chave <arquivo> --duke <pública> [--admin <arquivo>] [--assinatura <arquivo>]..."
+                    .into(),
+            ),
+        },
         "tempo" => tempo::tempo(arch, release),
         "mainnet" => rede_principal::mainnet(
             arch,
@@ -359,6 +423,18 @@ COMANDOS:
     tempo                     o Roughtime de ponta a ponta, contra as fontes de
                               hora do hospedeiro: atraso, perda, divergência,
                               quórum, saltos e recuperação, uma máquina por cenário
+    provisionar <diretório>   a imagem de produção, do material do operador (a
+                              política, os registros, as pessoas, a rede, as
+                              fontes de hora): uma chave do Duke nova, nada da
+                              bancada; --saida diz onde
+    chave <tipo> <arquivo> <nome> [papel]
+                              uma chave de agente, administrador ou editor, e a
+                              linha do registro que a imagem leva
+    operar <host:porta> <metodo> [params] --chave <arquivo> --duke <pública>
+                              um pedido a uma máquina de verdade pelo canal TCP;
+                              --admin <arquivo> o faz administrativo, e
+                              --assinatura <arquivo> (uma por credencial) faz o
+                              admin.revoke pelo quórum
     mainnet                   a rede principal do IC, de verdade: uma consulta
                               verificada ao livro-razão do ICP, à mão e fora da
                               CI — precisa de DNS e da porta 443 sem proxy;
@@ -1458,6 +1534,7 @@ fn subir_no_firmware(
     // — a mesma lição de cima, com um disco a mais.
     if matches!(espera, Desenlace::Desligamento) {
         com_o_nvme_de_testes(&mut qemu)?;
+        com_a_placa_intel_de_testes(arch, &mut qemu);
     }
 
     let mut filho = qemu
@@ -3472,6 +3549,61 @@ fn conferir_decisao_sem_relogio_civil(raiz: &Path) -> Result<Vec<String>, String
     Ok(fora)
 }
 
+/// A marca da imagem só no `system.info`: devolve o que o contraria.
+///
+/// A marca (`kernel/src/imagem.rs`) diz de onde veio o disco — a imagem de
+/// produção ou a da bancada — e é só isso: informação para quem opera. Se
+/// uma decisão a lesse, um arquivo do disco passaria a dar ou tirar
+/// autoridade por fora da política. Fora do próprio módulo e da suíte, só o
+/// handler do `system.info` a lê.
+fn conferir_marca_so_no_system_info(raiz: &Path) -> Result<Vec<String>, String> {
+    let mut fora = Vec::new();
+    let mut lidas = 0usize;
+    percorrer_fontes(&raiz.join("kernel/src"), &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(raiz)
+            .unwrap_or(caminho)
+            .display()
+            .to_string();
+        if relativo == "kernel/src/imagem.rs" || relativo == "kernel/src/testes.rs" {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {relativo}: {e}"))?;
+        let mut dentro = "";
+        for (n, linha) in texto.lines().enumerate() {
+            if let Some(resto) = linha
+                .strip_prefix("fn ")
+                .or(linha.strip_prefix("pub fn "))
+                .or(linha.strip_prefix("pub(crate) fn "))
+            {
+                dentro = resto.split(['(', '<']).next().unwrap_or("");
+            }
+            let codigo = linha.split("//").next().unwrap_or("");
+            if !codigo.contains("imagem::estado(") {
+                continue;
+            }
+            if relativo == "kernel/src/agent/commands.rs" && dentro == "system_info" {
+                lidas += 1;
+            } else {
+                fora.push(format!(
+                    "{relativo}:{}: a marca da imagem lida fora do system.info, em `{dentro}`: {}",
+                    n + 1,
+                    linha.trim()
+                ));
+            }
+        }
+        Ok(())
+    })?;
+    if lidas == 0 {
+        fora.push(
+            "kernel/src/agent/commands.rs: o system.info não lê a marca da imagem: a conferência está cega"
+                .into(),
+        );
+    }
+    Ok(fora)
+}
+
 /// O TLS sem atalho: devolve o que o contraria.
 ///
 /// - nenhum código do Duke — o pacote `tls`, os programas, o kernel — chama
@@ -3898,6 +4030,8 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // o relógio civil nem o lógico.
     fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
     fora.extend(conferir_decisao_sem_relogio_civil(&raiz)?);
+    // A marca da imagem é informação para quem opera: nenhuma decisão a lê.
+    fora.extend(conferir_marca_so_no_system_info(&raiz)?);
     // E o servidor de hora da bancada de tempo é outra implementação: o que
     // ele responde não sai do código que o kernel usa para conferir.
     fora.extend(conferir_servidor_da_bancada_a_parte(&raiz)?);
@@ -4975,6 +5109,19 @@ mod chaves {
     /// O nome da pessoa de desenvolvimento.
     pub const NOME_DA_PESSOA_DEV: &str = "dev";
 
+    /// O nome da imagem de desenvolvimento, na marca dela.
+    pub const NOME_DA_IMAGEM: &str = "bancada";
+
+    /// O id da marca da imagem de desenvolvimento: dezesseis bytes do HKDF da
+    /// chave do Duke da bancada — fixo enquanto a chave for a mesma.
+    pub fn id_da_imagem(duke: &[u8; 32]) -> [u8; 16] {
+        let derivado =
+            sigilo::resumo::hkdf_rfc5869(b"duke: marca da imagem", duke, &[b"desenvolvimento"]);
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&derivado[..16]);
+        id
+    }
+
     /// O papel dela: um papel comum, como o de uma pessoa qualquer. Pessoa e
     /// agente estão no mesmo nível; o `sistema` não é papel de pessoa.
     pub const PAPEL_DA_PESSOA_DEV: &str = "operador";
@@ -5292,7 +5439,19 @@ mod chaves {
             // a política da imagem diz o mesmo que ele.
             let fontes_de_hora = self.registro_de_fontes_de_hora(&politica)?;
             let dominios = registro_de_dominios(&politica)?;
+            // A marca: uma imagem de desenvolvimento, com o id tirado da
+            // chave do Duke da bancada — o mesmo a cada montagem, para a
+            // receita do disco não mudar à toa.
+            let marca = sigilo::imagem::Marca {
+                tipo: sigilo::imagem::Tipo::Desenvolvimento,
+                nome: NOME_DA_IMAGEM.to_string(),
+                id: id_da_imagem(&self.duke),
+            };
             Ok(vec![
+                (
+                    "etc/duke/imagem".to_string(),
+                    sigilo::imagem::escrever(&marca).into_bytes(),
+                ),
                 (
                     "etc/duke/privado/chave".to_string(),
                     format!("{}\n", sigilo::hex(&self.duke)).into_bytes(),
@@ -5572,12 +5731,7 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
         if !status.success() {
             return Err(format!("os programas não compilaram para {}", arch.nome()));
         }
-        // Os publicados não vão para a imagem: chegam pela rede, selados —
-        // ver [`codigo`].
-        for nome in nomes
-            .iter()
-            .filter(|n| !codigo::PUBLICADOS.contains(&n.as_str()))
-        {
+        for nome in &nomes {
             let caminho = dir
                 .join("target")
                 .join(arch.alvo())
@@ -5585,10 +5739,42 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
                 .join(nome);
             let bytes = std::fs::read(&caminho)
                 .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
-            programas.push((format!("programas/{}/{nome}", arch.nome()), bytes));
+            // Todos contra o teto, os publicados também: chegam pela rede, e
+            // o kernel os lança pelo mesmo caminho.
+            if let Some(aviso) = conferir_o_tamanho(nome, arch, bytes.len() as u64)? {
+                println!("[xtask] {aviso}");
+            }
+            // Os publicados não vão para a imagem: chegam pela rede, selados —
+            // ver [`codigo`].
+            if !codigo::PUBLICADOS.contains(&nome.as_str()) {
+                programas.push((format!("programas/{}/{nome}", arch.nome()), bytes));
+            }
         }
     }
     Ok(programas)
+}
+
+/// Confere um programa de `bytes` bytes contra o maior executável que o
+/// kernel lança (`protocolo::usuario::MAIOR_EXECUTAVEL`): acima dele é erro
+/// — o programa entraria na imagem e só falharia no lançamento —, e acima de
+/// nove décimos é um aviso, com quanto falta.
+fn conferir_o_tamanho(nome: &str, arch: Arquitetura, bytes: u64) -> Result<Option<String>, String> {
+    let teto = protocolo::usuario::MAIOR_EXECUTAVEL;
+    if bytes > teto {
+        return Err(format!(
+            "o programa `{nome}` ({}) tem {bytes} bytes, e o kernel não lê um executável de mais de {teto}: ele entraria no disco e não seria lançado",
+            arch.nome()
+        ));
+    }
+    if bytes * 10 > teto * 9 {
+        return Ok(Some(format!(
+            "o programa `{nome}` ({}) tem {bytes} bytes, {}% do maior executável que o kernel lança: faltam {} KiB",
+            arch.nome(),
+            bytes * 100 / teto,
+            (teto - bytes) / 1024
+        )));
+    }
+    Ok(None)
 }
 
 /// Os nomes dos programas: um por arquivo em `programas/src/bin`, em ordem.
@@ -5725,8 +5911,24 @@ fn ferramenta(nome: &str, args: &[&str]) -> Result<(), String> {
     ))
 }
 
-/// Monta o disco de testes com as ferramentas do hospedeiro.
-fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), String> {
+/// O que um disco leva além dos arquivos que quem o monta deu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Extras {
+    /// Os da suíte: os arquivos que os casos leem na raiz, a nota na ESP e
+    /// o padrão por setor na faixa reservada.
+    DaSuite,
+    /// Nenhum: a imagem de produção não leva nada da bancada.
+    Nenhum,
+}
+
+/// Monta um disco com as ferramentas do hospedeiro: `programas` na raiz e,
+/// com [`Extras::DaSuite`], o que os casos da suíte leem.
+fn montar_disco(
+    caminho: &Path,
+    programas: &[(String, Vec<u8>)],
+    extras: Extras,
+) -> Result<(), String> {
+    let da_suite = extras == Extras::DaSuite;
     let faltando: Vec<&str> = FERRAMENTAS_DO_DISCO
         .iter()
         .filter(|(binario, _)| which(binario).is_none())
@@ -5839,7 +6041,7 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
     std::fs::write(&esp, vec![0u8; (disco::ESP_SETORES * 512) as usize])
         .map_err(|e| format!("não foi possível criar a imagem da ESP: {e}"))?;
     ferramenta("mkfs.vfat", &["-F", "32", "-n", "DUKE-ESP", &esp])?;
-    for (nome, conteudo) in disco::NA_ESP {
+    for (nome, conteudo) in disco::NA_ESP.iter().filter(|_| da_suite) {
         let temporario = alvo.join(nome);
         std::fs::write(&temporario, conteudo)
             .map_err(|e| format!("não foi possível escrever {nome}: {e}"))?;
@@ -5859,7 +6061,9 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
     // conteúdo de um diretório, sem montar nada e sem privilégio — que é o
     // que torna isto possível dentro de um contêiner.
     let _ = std::fs::remove_dir_all(&arvore);
-    for (nome, conteudo) in arquivos_da_raiz() {
+    std::fs::create_dir_all(&arvore)
+        .map_err(|e| format!("não foi possível criar {}: {e}", arvore.display()))?;
+    for (nome, conteudo) in arquivos_da_raiz().into_iter().filter(|_| da_suite) {
         escrever_na_arvore(&arvore, &nome, &conteudo)?;
     }
     for (nome, conteudo) in programas {
@@ -5903,7 +6107,7 @@ fn montar_disco(caminho: &Path, programas: &[(String, Vec<u8>)]) -> Result<(), S
         let inicio = (em * 512) as usize;
         conteudo[inicio..inicio + bytes.len()].copy_from_slice(&bytes);
     }
-    for numero in disco::PADRAO_DE..=disco::PADRAO_ATE {
+    for numero in (disco::PADRAO_DE..=disco::PADRAO_ATE).filter(|_| da_suite) {
         let inicio = (numero * 512) as usize;
         conteudo[inicio..inicio + 512].fill(disco::marca_do_setor(numero));
     }
@@ -5971,7 +6175,21 @@ pub(crate) fn disco_de_testes_com(
         arquivos.retain(|(n, _)| *n != nome);
         arquivos.push((nome, conteudo));
     }
-    montar_disco(destino, &arquivos)?;
+    disco_com(artefato, destino, &arquivos, Extras::DaSuite)
+}
+
+/// Um disco em `destino` com `arquivos` e `extras` na raiz e, no x86, a
+/// mesma ESP do disco de `artefato` — o iniciador e o kernel copiados byte
+/// a byte. Devolve o artefato que boota dele; a máquina usa o disco por
+/// `Ambiente::com_disco`. Com [`Extras::Nenhum`], é o da imagem de produção
+/// na bancada: os arquivos do provisionamento, o kernel da bancada.
+pub(crate) fn disco_com(
+    artefato: &Artefato,
+    destino: &Path,
+    arquivos: &[(String, Vec<u8>)],
+    extras: Extras,
+) -> Result<Artefato, String> {
+    montar_disco(destino, arquivos, extras)?;
     match artefato {
         Artefato::Binario(img) => Ok(Artefato::Binario(img.clone())),
         Artefato::Disco(original) => {
@@ -6036,7 +6254,7 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     }
 
     println!("[xtask] montando o disco de testes (GPT, ESP em FAT32, raiz em Btrfs)");
-    montar_disco(&caminho, &programas)?;
+    montar_disco(&caminho, &programas, Extras::DaSuite)?;
     std::fs::write(&receita, &esperada)
         .map_err(|e| format!("não foi possível gravar a receita do disco: {e}"))?;
     println!("[xtask] disco de testes em {}", caminho.display());
@@ -6058,6 +6276,16 @@ fn conteudo_do_tftp() -> String {
 /// Quantos setores tem o disco NVMe dos casos `nvme:` — 16 MiB.
 const SETORES_DO_NVME: u64 = 32 * 1024;
 
+/// Os setores do disco NVMe dos casos em que o emulador devolve erro de
+/// mídia: uma leitura que toque o primeiro volta com `EIO`, e uma escrita
+/// que toque o segundo também — ver [`com_o_nvme_de_testes`]. O segundo
+/// fica na janela de escrita dos casos, a metade de cima do disco. É metade
+/// de um contrato cuja outra metade são as constantes de mesmo nome da
+/// suíte (`kernel/src/testes.rs`); o que impede a divergência é o caso que
+/// lê o setor e espera o erro.
+const SETOR_COM_ERRO_DE_LEITURA: u64 = 9000;
+const SETOR_COM_ERRO_DE_ESCRITA: u64 = 23_384;
+
 /// O byte `i` do setor `setor` do disco NVMe dos casos: muda de setor para
 /// setor e dentro de cada setor, para que um setor trocado, uma página da
 /// lista de PRP fora de ordem ou um deslocamento dentro do setor apareçam
@@ -6071,14 +6299,86 @@ fn byte_do_nvme(setor: u64, i: usize) -> u8 {
 /// sistema é o virtio-blk, e o NVMe é o dos casos `nvme:` — com o disco de
 /// [`disco_nvme_de_testes`], refeito agora. Para quem roda a suíte: o
 /// [`test()`] e, no ARM, a sonda do iniciador ([`subir_no_firmware`]).
+///
+/// # O erro de mídia
+///
+/// Entre o controlador e o arquivo, o `blkdebug` do emulador: uma leitura
+/// que toque [`SETOR_COM_ERRO_DE_LEITURA`], ou uma escrita que toque
+/// [`SETOR_COM_ERRO_DE_ESCRITA`], volta do arquivo com `EIO`, e o NVMe do
+/// emulador a conclui como um disco de verdade concluiria um setor ruim —
+/// "leitura irrecuperável", "falha de escrita". É o dispositivo que falha,
+/// e não o kernel que finge: o driver colhe o estado da fila como colheria
+/// de qualquer controlador. O resto do disco é o arquivo, sem mudança.
 fn com_o_nvme_de_testes(qemu: &mut Command) -> Result<(), String> {
     let nvme = disco_nvme_de_testes()?;
+    let regras = nvme.with_extension("falhas");
+    std::fs::write(
+        &regras,
+        format!(
+            "[inject-error]\nevent = \"read_aio\"\nerrno = \"5\"\nsector = \"{SETOR_COM_ERRO_DE_LEITURA}\"\n\n\
+             [inject-error]\nevent = \"write_aio\"\nerrno = \"5\"\nsector = \"{SETOR_COM_ERRO_DE_ESCRITA}\"\n"
+        ),
+    )
+    .map_err(|e| format!("não foi possível gravar {}: {e}", regras.display()))?;
+    for caminho in [&nvme, &regras] {
+        if caminho.to_string_lossy().contains(',') {
+            return Err(format!(
+                "o caminho do disco NVMe dos casos não cabe na opção do emulador: {}",
+                caminho.display()
+            ));
+        }
+    }
     qemu.args([
-        "-drive",
-        &format!("format=raw,file={},if=none,id=nvme0", nvme.display()),
+        "-blockdev",
+        &format!(
+            "driver=file,node-name=nvme-arquivo,filename={}",
+            nvme.display()
+        ),
+        "-blockdev",
+        &format!(
+            "driver=blkdebug,node-name=nvme-falhas,config={},image=nvme-arquivo",
+            regras.display()
+        ),
+        "-blockdev",
+        "driver=raw,node-name=nvme0,file=nvme-falhas",
         "-device",
         "nvme,serial=duke-nvme-testes,drive=nvme0",
     ]);
+    Ok(())
+}
+
+/// A placa Intel da suíte: uma 82574L numa rede em modo usuário só dela, e
+/// fechada (`restrict=on`) — o roteador dela responde ao ARP, e nada sai
+/// para fora. No x86 ela fica atrás de uma ponte PCI, como uma placa PCIe
+/// atrás da porta raiz de um PC: o firmware numera a ponte, e a varredura do
+/// kernel a segue. No ARM, que sobe sem firmware, no barramento zero. Sem a
+/// ROM de boot pela rede: o firmware não tenta bootar dela. Os casos
+/// `e1000:` a usam; a pilha fica na virtio.
+fn com_a_placa_intel_de_testes(arch: Arquitetura, qemu: &mut Command) {
+    qemu.args(["-netdev", "user,id=intel0,restrict=on"]);
+    match arch {
+        Arquitetura::X86_64 => qemu.args([
+            "-device",
+            "pci-bridge,id=ponte0,chassis_nr=1",
+            "-device",
+            "e1000e,netdev=intel0,bus=ponte0,addr=0x1,romfile=",
+        ]),
+        Arquitetura::Aarch64 => qemu.args(["-device", "e1000e,netdev=intel0,romfile="]),
+    };
+}
+
+/// O enlace de uma placa da máquina de `arch`, pelo QMP: `rede0` é a rede
+/// dela. O cabo que sai e volta, sem tocar o hóspede.
+pub(crate) fn mudar_o_enlace(arch: Arquitetura, rede: &str, de_pe: bool) -> Result<(), String> {
+    let (mut escrita, mut leitor) = qmp_abrir(&caminho_qmp(arch))?;
+    let r = qmp_pedir(
+        &mut escrita,
+        &mut leitor,
+        &format!(r#"{{"execute":"set_link","arguments":{{"name":"{rede}","up":{de_pe}}}}}"#),
+    )?;
+    if r.contains("\"error\"") {
+        return Err(format!("o QMP recusou o set_link de {rede}: {r}"));
+    }
     Ok(())
 }
 
@@ -6379,6 +6679,13 @@ struct Ambiente {
     /// x86, o firmware boota dele também — o disco de uma máquina de
     /// verdade, de ponta a ponta (`kernel/src/nvme.rs`).
     disco_nvme: bool,
+    /// O disco por trás do NVMe é o servidor do disco hostil, neste socket,
+    /// e não o arquivo: ver [`disco_hostil`].
+    disco_hostil: Option<PathBuf>,
+    /// A rede da máquina numa 82574L, e não na virtio: a placa da máquina
+    /// física de referência — no x86, atrás de uma ponte PCI, como uma
+    /// placa PCIe atrás da porta raiz de um PC. Ver `kernel/src/e1000.rs`.
+    placa_intel: bool,
 }
 
 impl Ambiente {
@@ -6425,6 +6732,8 @@ impl Ambiente {
             disco: None,
             memoria_mib: MEMORIA_DA_BANCADA_MIB,
             disco_nvme: false,
+            disco_hostil: None,
+            placa_intel: false,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -6456,6 +6765,8 @@ impl Ambiente {
             disco: None,
             memoria_mib: MEMORIA_DA_BANCADA_MIB,
             disco_nvme: false,
+            disco_hostil: None,
+            placa_intel: false,
         }
     }
 
@@ -6474,6 +6785,21 @@ impl Ambiente {
     /// O mesmo ambiente, com o disco num controlador NVMe.
     pub(crate) fn com_nvme(mut self) -> Ambiente {
         self.disco_nvme = true;
+        self
+    }
+
+    /// O mesmo ambiente, com o disco num controlador NVMe e, por trás dele,
+    /// o servidor do disco hostil que escuta em `socket` — ver
+    /// [`disco_hostil`]. O firmware boota dele também.
+    pub(crate) fn com_disco_hostil(mut self, socket: &Path) -> Ambiente {
+        self.disco_nvme = true;
+        self.disco_hostil = Some(socket.to_path_buf());
+        self
+    }
+
+    /// O mesmo ambiente, com a rede na 82574L — ver `placa_intel`.
+    pub(crate) fn com_placa_intel(mut self) -> Ambiente {
+        self.placa_intel = true;
         self
     }
 }
@@ -6657,13 +6983,19 @@ fn comando_qemu(
     } else {
         ""
     };
-    qemu.args([
-        "-drive",
-        &format!(
+    let unidade = match &ambiente.disco_hostil {
+        // O mesmo disco, pelo servidor do disco hostil: o emulador é o
+        // cliente NBD dele, e o arquivo fica do lado do servidor.
+        Some(socket) => format!(
+            "driver=raw,if=none,id=disco0,file.driver=nbd,file.server.type=unix,file.server.path={}",
+            socket.display()
+        ),
+        None => format!(
             "format=raw,file={},if=none,id=disco0{compartilhado}",
             disco.display()
         ),
-    ]);
+    };
+    qemu.args(["-drive", &unidade]);
     if ambiente.disco_nvme {
         // O controlador NVMe do QEMU, com o namespace 1 sobre o disco. O
         // número de série é obrigatório nele.
@@ -6822,7 +7154,16 @@ fn comando_qemu(
             "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp},{icp}"
         ),
     ]);
-    qemu.args(["-device", "virtio-net-pci,netdev=rede0"]);
+    match (ambiente.placa_intel, arch) {
+        (false, _) => qemu.args(["-device", "virtio-net-pci,netdev=rede0"]),
+        (true, Arquitetura::X86_64) => qemu.args([
+            "-device",
+            "pci-bridge,id=ponte-da-rede,chassis_nr=2",
+            "-device",
+            "e1000e,netdev=rede0,bus=ponte-da-rede,addr=0x1",
+        ]),
+        (true, Arquitetura::Aarch64) => qemu.args(["-device", "e1000e,netdev=rede0"]),
+    };
 
     // A captura do fio, para quem mede a rede: `DUKE_CAPTURA=<arquivo>`
     // grava em pcap cada quadro que passa pela placa, nos dois sentidos —
@@ -9113,10 +9454,36 @@ impl AgenteNaPorta {
         chave: &[u8; 32],
         duke: &[u8; 32],
     ) -> Result<AgenteNaPorta, String> {
+        Self::conectar_com_publica(arch, porta, chave, &sigilo::publica_de(duke))
+    }
+
+    /// Como [`AgenteNaPorta::conectar_com`], só com a pública do Duke — a
+    /// que um agente de uma máquina de verdade recebe, e fixa.
+    pub(crate) fn conectar_com_publica(
+        arch: Arquitetura,
+        porta: u8,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+    ) -> Result<AgenteNaPorta, String> {
         Self::insistir(&format!("porta {porta}"), porta, chave, duke, || {
             UnixStream::connect(caminho_canal(arch, porta))
                 .map(FluxoDoAgente::Porta)
                 .map_err(|e| FalhaDoAperto::Outra(format!("a porta nao aceitou conexao: {e}")))
+        })
+    }
+
+    /// Conecta pelo canal TCP de uma máquina de verdade, em `endereco`
+    /// (`host:porta`), com a chave do agente e a pública do Duke que ele
+    /// fixa — a do `duke.publica` da imagem.
+    pub(crate) fn conectar_endereco(
+        endereco: &str,
+        chave: &[u8; 32],
+        duke: &[u8; 32],
+    ) -> Result<AgenteNaPorta, String> {
+        Self::insistir(endereco, 1, chave, duke, || {
+            std::net::TcpStream::connect(endereco)
+                .map(FluxoDoAgente::Tcp)
+                .map_err(|e| FalhaDoAperto::Outra(format!("{endereco} nao aceitou conexao: {e}")))
         })
     }
 
@@ -9136,7 +9503,7 @@ impl AgenteNaPorta {
         duke: &[u8; 32],
     ) -> Result<AgenteNaPorta, String> {
         let porta = canal_tcp::porta(arch.nome())?;
-        Self::insistir("tcp", numero, chave, duke, || {
+        Self::insistir("tcp", numero, chave, &sigilo::publica_de(duke), || {
             std::net::TcpStream::connect(("127.0.0.1", porta))
                 .map(FluxoDoAgente::Tcp)
                 .map_err(|e| FalhaDoAperto::Outra(format!("o canal TCP nao aceitou conexao: {e}")))
@@ -9144,7 +9511,8 @@ impl AgenteNaPorta {
     }
 
     /// O aperto por um fluxo que `abrir` dá, de novo enquanto o kernel não
-    /// responde. Uma recusa é a resposta, e não se insiste.
+    /// responde, com a pública do Duke `duke` fixada. Uma recusa é a
+    /// resposta, e não se insiste.
     fn insistir(
         onde: &str,
         porta: u8,
@@ -9193,10 +9561,9 @@ impl AgenteNaPorta {
 
         let efemera = aleatorios().map_err(FalhaDoAperto::Outra)?;
         let mut mensagem = vec![0u8; 1024];
-        let (n, aguardando) =
-            sigilo::Iniciador::novo(sigilo::PROLOGO, chave, &sigilo::publica_de(duke))
-                .escrever(efemera, b"", &mut mensagem)
-                .map_err(|e| FalhaDoAperto::Outra(e.motivo().to_string()))?;
+        let (n, aguardando) = sigilo::Iniciador::novo(sigilo::PROLOGO, chave, duke)
+            .escrever(efemera, b"", &mut mensagem)
+            .map_err(|e| FalhaDoAperto::Outra(e.motivo().to_string()))?;
         let quadro = montar(Tipo::Inicio, &mensagem[..n])
             .map_err(|e| FalhaDoAperto::Outra(e.motivo().to_string()))?;
         fluxo
@@ -9955,17 +10322,22 @@ fn signatario_aceita(arch: Arquitetura, nome: &str, geracao: u64) -> Result<(), 
     let dir = diretorio_do_signatario(arch);
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("não foi possível criar {}: {e}", dir.display()))?;
-    let arquivo = dir.join(format!("{nome}.geracao"));
-    let vista: u64 = std::fs::read_to_string(&arquivo)
+    signatario_aceita_em(&dir.join(format!("{nome}.geracao")), geracao)
+}
+
+/// [`signatario_aceita`], com a memória do signatário em `arquivo`.
+fn signatario_aceita_em(arquivo: &Path, geracao: u64) -> Result<(), String> {
+    let vista: u64 = std::fs::read_to_string(arquivo)
         .ok()
         .and_then(|t| t.trim().parse().ok())
         .unwrap_or(0);
     if geracao < vista {
         return Err(format!(
-            "o signatario de `{nome}` ja assinou na geracao {vista}, e recusa assinar sobre a {geracao}"
+            "o signatario de {} ja assinou na geracao {vista}, e recusa assinar sobre a {geracao}",
+            arquivo.display()
         ));
     }
-    std::fs::write(&arquivo, geracao.to_string())
+    std::fs::write(arquivo, geracao.to_string())
         .map_err(|e| format!("não foi possível gravar {}: {e}", arquivo.display()))
 }
 
@@ -10039,6 +10411,69 @@ pub(crate) fn revogacao_por_quorum(
     );
     let resposta = pedir_pela_serial(escrita, leitor, id, "admin.execute", &pedido)?;
     Ok((resposta, pedido))
+}
+
+/// `admin.revoke` pelo quórum, de quem opera uma máquina de verdade: o
+/// desafio na sessão do agente, cada credencial de `assinaturas` assinando
+/// — depois de o signatário dela conferir a geração —, e o `admin.execute`.
+/// `params` é o da revogação, `{"key":…,"reason":…}`, assinado como está.
+pub(crate) fn revogar_pelo_operador(
+    agente: &mut AgenteNaPorta,
+    params: &str,
+    assinaturas: &[PathBuf],
+) -> Result<String, String> {
+    let alvo = campo_simples(params, "key")
+        .ok_or("admin.revoke pede `key`: a credencial que sai, em hexadecimal")?;
+    let sessao = agente.pedir("agent.session", "{}")?;
+    let sessao: u8 = campo_simples(&sessao, "session")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("quorum: a sessão não diz o número\n  {sessao}"))?;
+    let desafio = agente.pedir("admin.challenge", r#"{"for":"admin.revoke"}"#)?;
+    let numero = |nome: &str| -> Result<u64, String> {
+        campo_simples(&desafio, nome)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    let hex = |nome: &str| -> Result<[u8; 32], String> {
+        campo_simples(&desafio, nome)
+            .and_then(|v| sigilo::de_hex(&v))
+            .ok_or_else(|| format!("quorum: o desafio nao diz `{nome}`\n  {desafio}"))
+    };
+    let (nonce, efemera) = (hex("nonce")?, hex("ephemeral")?);
+    let geracao = numero("generation")?;
+    let conteudo = sigilo::quorum::Conteudo {
+        operacao: numero("challenge")?,
+        nonce: &nonce,
+        sessao,
+        efemera: &efemera,
+        versao_da_politica: numero("policy_version")?,
+        geracao,
+        m: numero("m")? as u8,
+        n: numero("n")? as u8,
+        comando: "admin.revoke",
+        alvo: &alvo,
+        parametros: params,
+    };
+    let mut lista = Vec::new();
+    for arquivo in assinaturas {
+        let (credencial, privada) = producao::chave_de_administrador(arquivo)?;
+        // O signatário desta credencial, ao lado da chave dela: a maior
+        // geração que ela já assinou nesta máquina.
+        signatario_aceita_em(&arquivo.with_extension("geracao"), geracao)?;
+        let assinatura = sigilo::quorum::assinar(&privada, &conteudo);
+        lista.push(format!(
+            "{}:{}",
+            sigilo::hex(&sigilo::publica_de(&credencial)),
+            sigilo::hex_de(&assinatura)
+        ));
+    }
+    let pedido = format!(
+        r#"{{"challenge":{},"command":"admin.revoke","params":"{}","signatures":"{}"}}"#,
+        conteudo.operacao,
+        params.replace('"', "\\\""),
+        lista.join(",")
+    );
+    agente.pedir("admin.execute", &pedido)
 }
 
 /// Pede pela serial, em claro, e devolve a resposta deste pedido.
@@ -13855,7 +14290,13 @@ fn digitar_pelo_monitor(mon: &mut UnixStream, texto: &str, quem: &str) -> Result
 /// As sessões abertas da pessoa de desenvolvimento, pelos consoles delas,
 /// como `person.registry` as mostra.
 fn consoles_da_pessoa_dev(registro: &str) -> Vec<String> {
-    let marca = format!(r#""name":"{}""#, chaves::NOME_DA_PESSOA_DEV);
+    consoles_da_pessoa(registro, chaves::NOME_DA_PESSOA_DEV)
+}
+
+/// As sessões abertas da pessoa `nome`, pelos consoles delas, como
+/// `person.registry` as mostra.
+fn consoles_da_pessoa(registro: &str, nome: &str) -> Vec<String> {
+    let marca = format!(r#""name":"{nome}""#);
     let Some(resto) = registro.find(&marca).map(|i| &registro[i..]) else {
         return Vec::new();
     };
@@ -15182,6 +15623,7 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
     let _icp = icp::Bancada::ligar()?;
     let mut qemu = comando_qemu(arch, &artefato, None, Teclado::Nativo, video, &ambiente)?;
     com_o_nvme_de_testes(&mut qemu)?;
+    com_a_placa_intel_de_testes(arch, &mut qemu);
     let mut filho = qemu
         .stdout(Stdio::piped())
         .spawn()
@@ -15502,6 +15944,28 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    /// O teto do executável: o programa do tamanho dele passa, com o aviso
+    /// de quase cheio; um byte a mais é recusado; nove décimos, exatos,
+    /// passam calados.
+    #[test]
+    fn o_programa_maior_que_o_teto_e_recusado() {
+        use super::*;
+        let teto = protocolo::usuario::MAIOR_EXECUTAVEL;
+        let aviso = conferir_o_tamanho("gestor", Arquitetura::X86_64, teto).unwrap();
+        assert!(aviso.is_some_and(|a| a.contains("100%") && a.contains("faltam 0 KiB")));
+        let recusa = conferir_o_tamanho("gestor", Arquitetura::X86_64, teto + 1).unwrap_err();
+        assert!(recusa.contains("`gestor` (x86_64)"), "{recusa}");
+        assert_eq!(
+            conferir_o_tamanho("ola", Arquitetura::Aarch64, teto / 10 * 9),
+            Ok(None)
+        );
+        assert!(
+            conferir_o_tamanho("ola", Arquitetura::Aarch64, teto / 10 * 9 + 8)
+                .unwrap()
+                .is_some()
+        );
+    }
+
     /// A trava da bancada é de um de cada vez: a segunda recusa, dizendo o
     /// processo que a tem, e a trava solta vale de novo.
     #[test]

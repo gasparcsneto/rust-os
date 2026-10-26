@@ -37,6 +37,81 @@ pub const TAMANHO_DO_SETOR: usize = 512;
 /// saber quantas idas ao disco um bloco custa.
 pub const MAIOR_LEITURA: usize = 16 * 1024;
 
+/// Quanto um driver espera por um pedido antes de dar o dispositivo por
+/// morto: trinta segundos, o prazo de entrada e saída do Linux. Um disco de
+/// verdade ocupado — uma descarga de um SSD com o cache cheio — responde
+/// bem antes; um que não respondeu nisto não vai responder.
+pub const ESPERA_MS: u64 = 30_000;
+
+/// O prazo de uma espera por um dispositivo de disco.
+///
+/// # Por que em tempo, e não em voltas
+///
+/// O teto em voltas foi o que havia: a espera roda com as interrupções
+/// mascaradas, e o relógio do kernel conta interrupções. Mas uma volta não
+/// tem duração: é uma leitura e um `pause`, e o `pause` custa de poucos
+/// ciclos a perto de cento e cinquenta, conforme o processador. Os
+/// quatrocentos milhões de voltas dos drivers eram perto de um segundo num
+/// processador de `pause` curto, uns quinze noutro — e dois minutos e meio
+/// no emulador sem aceleração, medidos pelo caso `nvme: o controlador que
+/// nao responde` da suíte. Um segundo é menos que uma descarga lenta de um
+/// SSD de verdade: o driver desligaria um disco que só estava ocupado.
+///
+/// O contador de ciclos ([`crate::arch::ciclos`]) anda com as interrupções
+/// mascaradas, e a régua do civil já sabe a frequência dele
+/// ([`crate::hora::contador::hz`]). Antes dela — cedo no boot, quando o
+/// disco liga —, ou num x86 em que a medida contra o PIT não valeu, a
+/// espera volta ao teto em voltas, como antes.
+#[derive(Clone, Copy, Debug)]
+pub struct Prazo {
+    /// O contador de ciclos em que o prazo vence, com a frequência.
+    fim: Option<u64>,
+    ms: u64,
+    teto_de_voltas: u64,
+}
+
+/// De quantas em quantas voltas o contador é lido: ler o TSC custa dezenas
+/// de ciclos, e a espera é por uma palavra da memória.
+const VOLTAS_POR_LEITURA: u64 = 1024;
+
+impl Prazo {
+    /// Um prazo de `ms` milissegundos a partir de agora — ou de
+    /// `teto_de_voltas` voltas, sem a frequência do contador.
+    pub fn em(ms: u64, teto_de_voltas: u64) -> Prazo {
+        let hz = crate::hora::contador::hz();
+        let fim = (hz != 0).then(|| {
+            let ciclos = u128::from(hz) * u128::from(ms) / 1000;
+            crate::arch::ciclos().saturating_add(u64::try_from(ciclos).unwrap_or(u64::MAX))
+        });
+        Prazo {
+            fim,
+            ms,
+            teto_de_voltas,
+        }
+    }
+
+    /// Se o prazo venceu, na volta `volta` da espera — contada de zero.
+    pub fn vencido(&self, volta: u64) -> bool {
+        match self.fim {
+            Some(fim) => volta.is_multiple_of(VOLTAS_POR_LEITURA) && crate::arch::ciclos() >= fim,
+            None => volta >= self.teto_de_voltas,
+        }
+    }
+}
+
+impl core::fmt::Display for Prazo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.fim {
+            Some(_) => write!(f, "{} ms", self.ms),
+            None => write!(
+                f,
+                "{} voltas, sem a frequencia do contador",
+                self.teto_de_voltas
+            ),
+        }
+    }
+}
+
 /// O que um driver de disco sabe fazer — e só isso: nada de janelas, nada
 /// de faixas. Quando [`Disco`] chama `ler` ou `escrever`, o pedido já foi
 /// conferido: o dispositivo está vivo, o buffer é um múltiplo de setor e
@@ -107,9 +182,37 @@ pub struct Disco {
     /// descarga aconteceu.
     escritas: u64,
     descargas: u64,
+    /// Quantas leituras o dispositivo confirmou.
+    leituras: u64,
+    /// Os pedidos que o dispositivo devolveu com erro — ver [`Erros`].
+    erros: Erros,
     /// Só na suíte: as últimas escritas confirmadas — ver [`Rastro`].
     #[cfg(feature = "modo-teste")]
     rastro: Rastro,
+}
+
+/// Os pedidos que chegaram ao dispositivo e voltaram com erro: quantos de
+/// cada tipo, e o motivo do último.
+///
+/// # Por que a camada conta
+///
+/// Porque é o que diferencia, para quem opera, um disco que falha de um
+/// disco que não está lá. A persistência que se declara indisponível diz
+/// que "uma gravação no journal falhou" — e não se foi uma escrita
+/// recusada pelo controlador, um erro de mídia na leitura, ou um tempo
+/// esgotado que desligou o driver de vez. Contados aqui, os dois drivers
+/// contam igual, e o `disk.info` mostra.
+///
+/// Só os erros **do dispositivo**: um pedido que esta camada recusa antes
+/// — fora da janela, além da capacidade, num disco já desligado — não
+/// chegou a ele, e não é sinal de disco nenhum.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Erros {
+    pub leitura: u64,
+    pub escrita: u64,
+    pub descarga: u64,
+    /// O motivo do último, como o driver o disse.
+    pub ultimo: Option<&'static str>,
 }
 
 /// Só na suíte: as últimas [`RASTRO`] escritas que o dispositivo confirmou,
@@ -149,6 +252,8 @@ impl Disco {
             janelas: [None, None],
             escritas: 0,
             descargas: 0,
+            leituras: 0,
+            erros: Erros::default(),
             #[cfg(feature = "modo-teste")]
             rastro: Rastro {
                 escritas: alloc::vec::Vec::with_capacity(RASTRO),
@@ -179,6 +284,22 @@ impl Disco {
     /// Quantas escritas e quantas descargas o dispositivo confirmou.
     pub fn contadores(&self) -> (u64, u64) {
         (self.escritas, self.descargas)
+    }
+
+    /// Quantas leituras o dispositivo confirmou.
+    pub fn leituras(&self) -> u64 {
+        self.leituras
+    }
+
+    /// Os pedidos que o dispositivo devolveu com erro.
+    pub fn erros(&self) -> Erros {
+        self.erros
+    }
+
+    /// Se o dispositivo ainda responde: um tempo esgotado, ou uma resposta
+    /// que não descreve o pedido, o desliga de vez.
+    pub fn vivo(&self) -> bool {
+        self.dispositivo.vivo()
     }
 
     /// Só na suíte: as escritas do rastro que tocaram `[setor, setor +
@@ -227,7 +348,17 @@ impl Disco {
     /// [`MAIOR_LEITURA`].
     pub fn ler(&mut self, setor: u64, destino: &mut [u8]) -> Result<(), &'static str> {
         self.conferir_faixa(setor, destino.len())?;
-        self.dispositivo.ler(setor, destino)
+        match self.dispositivo.ler(setor, destino) {
+            Ok(()) => {
+                self.leituras += 1;
+                Ok(())
+            }
+            Err(motivo) => {
+                self.erros.leitura += 1;
+                self.erros.ultimo = Some(motivo);
+                Err(motivo)
+            }
+        }
     }
 
     /// Escreve setores consecutivos — e só dentro da janela de escrita.
@@ -264,7 +395,11 @@ impl Disco {
         if setor < primeiro || setor.saturating_add(quantos) > primeiro.saturating_add(setores) {
             return Err("escrita fora da janela de escrita");
         }
-        self.dispositivo.escrever(setor, origem)?;
+        if let Err(motivo) = self.dispositivo.escrever(setor, origem) {
+            self.erros.escrita += 1;
+            self.erros.ultimo = Some(motivo);
+            return Err(motivo);
+        }
         self.escritas += 1;
         #[cfg(feature = "modo-teste")]
         {
@@ -289,7 +424,11 @@ impl Disco {
         if !self.dispositivo.descarga() {
             return Err("o disco nao aceita descarga");
         }
-        self.dispositivo.descarregar()?;
+        if let Err(motivo) = self.dispositivo.descarregar() {
+            self.erros.descarga += 1;
+            self.erros.ultimo = Some(motivo);
+            return Err(motivo);
+        }
         self.descargas += 1;
         Ok(())
     }

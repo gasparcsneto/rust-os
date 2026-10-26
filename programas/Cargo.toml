@@ -75,4 +75,23 @@ lto = true
 # no TLS, os programas do IC passavam do teto de leitura do kernel, 1 MiB.
 strip = "symbols"
 
+# Os pacotes de protocolo em "z": o TLS e a PKI, o IC e o DER são
+# conferência e parsing — código que roda uma vez por aperto ou por
+# resposta, e não os laços dos dados, que estão nas cifras e ficam em "s".
+# São o que pesa nos programas do IC: o `gestor` estava a 24 KiB do maior
+# executável que o kernel lança (`protocolo::usuario::MAIOR_EXECUTAVEL`),
+# e o `xtask` recusa o programa que passa dele.
+[profile.release.package.rustls]
+opt-level = "z"
+[profile.release.package.rustls-webpki]
+opt-level = "z"
+[profile.release.package.rustls-pki-types]
+opt-level = "z"
+[profile.release.package.web3]
+opt-level = "z"
+[profile.release.package.der]
+opt-level = "z"
+[profile.release.package.const-oid]
+opt-level = "z"
+
 [workspace]

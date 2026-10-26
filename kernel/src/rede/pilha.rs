@@ -100,8 +100,8 @@ use smoltcp::wire::{
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::placa::MAIOR_QUADRO;
 use crate::trava::Mutex;
-use crate::virtio::net::MAIOR_QUADRO;
 use politica::endereco::{Destino, Protocolo};
 use seguranca::firewall::{self, DonoDoFluxo, Escopo, Fluxo, Motivo, Regra, Regras, Veredito};
 
@@ -560,8 +560,9 @@ impl TxToken for Envio<'_> {
         }
         #[cfg(feature = "modo-teste")]
         observar_janela(&quadro);
-        match crate::virtio::net::com_a_placa(|placa| placa.transmitir(&quadro)) {
+        match super::placa::com_a_placa(|placa| placa.transmitir(&quadro)) {
             Some(Ok(())) | None => {}
+            Some(Err(super::placa::SEM_ENLACE)) => {}
             Some(Err(motivo)) => crate::log_warn!("rede", "quadro nao saiu: {}", motivo),
         }
         r
@@ -585,7 +586,7 @@ impl Adaptador<'_> {
                 return Some(Recebido { quadro, tamanho });
             }
         }
-        let tamanho = crate::virtio::net::com_a_placa(|placa| placa.receber(&mut quadro))??;
+        let tamanho = super::placa::com_a_placa(|placa| placa.receber(&mut quadro))??;
         if tamanho == 0 {
             return None;
         }
@@ -644,7 +645,7 @@ impl Device for Adaptador<'_> {
         // ele. Com um quadro só, a janela era um segmento: o outro lado
         // mandava um e esperava a confirmação atrasada, e a conexão andava
         // um segmento a cada 20 ms, qualquer que fosse o buffer.
-        c.max_burst_size = Some(crate::virtio::net::BUFFERS_DE_RECEPCAO);
+        c.max_burst_size = Some(super::placa::BUFFERS_DE_RECEPCAO);
         c
     }
 }
@@ -654,7 +655,7 @@ impl Device for Adaptador<'_> {
 /// sem os cabeçalhos IPv4 e TCP, contados no maior — 20 e 60 bytes —, como o
 /// `smoltcp` conta.
 const _: () = assert!(
-    crate::virtio::net::BUFFERS_DE_RECEPCAO * (MAIOR_QUADRO - 20 - 60) >= BUFFER_DA_CONEXAO,
+    super::placa::BUFFERS_DE_RECEPCAO * (MAIOR_QUADRO - 20 - 60) >= BUFFER_DA_CONEXAO,
     "a rajada da placa nao cobre a janela de uma conexao"
 );
 
@@ -662,7 +663,7 @@ const _: () = assert!(
 /// para fazê-la andar. Depois da placa e do gerador de números: a semente
 /// do TCP vem dele.
 pub fn iniciar() {
-    let Some(Some(mac)) = crate::virtio::net::com_a_placa(|placa| placa.mac()) else {
+    let Some(Some(mac)) = super::placa::com_a_placa(|placa| placa.mac()) else {
         crate::log_info!("rede", "sem placa com endereco: a pilha IP fica desligada");
         return;
     };

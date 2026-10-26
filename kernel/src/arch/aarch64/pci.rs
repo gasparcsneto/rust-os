@@ -202,3 +202,11 @@ pub fn acesso() -> Option<Acesso> {
 
 /// Como o barramento é alcançado, para o relatório do agente.
 pub const MECANISMO: &str = "ecam";
+
+/// Quantos barramentos a configuração alcança: os do ECAM mapeado, um MiB
+/// por barramento. O boot mapeia só o primeiro — a máquina `virt` de
+/// referência põe tudo nele; ver `arch::aarch64` —, e um barramento além
+/// dele não se lê.
+pub fn barramentos_alcancaveis() -> usize {
+    (TAMANHO.load(Ordering::Acquire) / (1024 * 1024)) as usize
+}

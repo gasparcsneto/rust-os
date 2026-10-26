@@ -26,6 +26,7 @@ use crate::agent::json::{Json, JsonWriter};
 use crate::agent::protocol::Requisicao;
 use crate::agent::registry;
 use crate::log::Level;
+use crate::rede::placa::PlacaDeRede;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
 /// para montar uma dinâmica; detalhes vão para o log antes do retorno.
@@ -7396,6 +7397,565 @@ fn nvme_o_aviso_de_desligamento() -> Resultado {
         Ok(())
     })
     .ok_or("a maquina de testes nao tem o NVMe")?
+}
+
+/// Os setores do NVMe dos casos em que o emulador devolve erro de mídia —
+/// metade de um contrato cuja outra metade são as constantes de mesmo nome
+/// do `xtask`, que monta o disco atrás do `blkdebug`. O que impede a
+/// divergência é [`nvme_o_erro_de_midia_e_contado`], que lê os dois.
+const SETOR_COM_ERRO_DE_LEITURA: u64 = 9000;
+const SETOR_COM_ERRO_DE_ESCRITA: u64 = 23_384;
+
+/// O erro de mídia: o NVMe do emulador conclui com erro a leitura que toca
+/// um setor ruim, e a escrita que toca outro — o `xtask` os pôs atrás do
+/// `blkdebug`, entre o controlador e o arquivo. O driver devolve o erro do
+/// dispositivo, a camada o conta pelo tipo e guarda o motivo, e o disco
+/// segue vivo e durável: um setor ruim não é um controlador quebrado. O
+/// vizinho lê com o padrão, e a descarga passa.
+fn nvme_o_erro_de_midia_e_contado() -> Resultado {
+    use crate::bloco::Janela;
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    com_o_nvme(|d| {
+        let antes = d.erros();
+        let leituras = d.leituras();
+        let mut um = [0u8; B];
+        let r = d.ler(SETOR_COM_ERRO_DE_LEITURA, &mut um);
+        if r != Err("o dispositivo recusou a leitura") {
+            crate::log_error!("teste", "nvme: a leitura do setor ruim deu {:?}", r);
+            return Err("a leitura do setor com erro de midia nao voltou como erro do dispositivo");
+        }
+        // Uma ida de quatro setores que começa antes dele e o contém.
+        let mut quatro = [0u8; 4 * B];
+        if d.ler(SETOR_COM_ERRO_DE_LEITURA - 1, &mut quatro).is_ok() {
+            return Err("a ida que contem o setor ruim passou");
+        }
+        // O vizinho, longe dele, lê com o padrão.
+        d.ler(SETOR_COM_ERRO_DE_LEITURA + 8, &mut um)?;
+        conferir_o_padrao_do_nvme(SETOR_COM_ERRO_DE_LEITURA + 8, &um)?;
+        let r = d.gravar_setores(Janela::Armazem, SETOR_COM_ERRO_DE_ESCRITA, &um);
+        if r != Err("o dispositivo recusou a escrita") {
+            crate::log_error!("teste", "nvme: a escrita no setor ruim deu {:?}", r);
+            return Err("a escrita no setor com erro de midia nao voltou como erro do dispositivo");
+        }
+        let depois = d.erros();
+        if (depois.leitura, depois.escrita, depois.descarga)
+            != (antes.leitura + 2, antes.escrita + 1, antes.descarga)
+        {
+            crate::log_error!("teste", "nvme: erros {:?} -> {:?}", antes, depois);
+            return Err("a camada nao contou os erros do dispositivo pelo tipo");
+        }
+        if depois.ultimo != Some("o dispositivo recusou a escrita") {
+            return Err("a camada nao guardou o motivo do ultimo erro");
+        }
+        if d.leituras() != leituras + 1 {
+            return Err("a camada contou como lida uma leitura que falhou");
+        }
+        if !d.vivo() || !d.duravel() {
+            return Err("um setor ruim desligou o disco inteiro");
+        }
+        d.descarregar_disco()?;
+        Ok(())
+    })
+}
+
+/// O controlador hostil, que o emulador não sabe ser — o de mentira de
+/// `nvme::de_mentira`, em memória. A primeira resposta é a do comando que
+/// o driver mandou, e a leitura passa: o modelo funciona como controlador.
+/// A segunda é a de outro comando: o driver a recusa e desliga o
+/// controlador de vez — o anel deixou de descrever a realidade —, e a
+/// camada conta o erro com o motivo. Daí em diante nada chega a ele: a
+/// resposta certa que o caso deposita depois não é colhida, e a recusa da
+/// camada não conta como erro do dispositivo.
+fn nvme_o_controlador_que_responde_outro_comando() -> Resultado {
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    const RESPOSTA_DE_OUTRO: &str = "dispositivo respondeu um comando que nao pedimos";
+    let (mut d, respostas) =
+        crate::nvme::de_mentira(64).ok_or("sem frames para o controlador de mentira")?;
+    let mut um = [0xEEu8; B];
+    // O comando zero, na fase da primeira volta, sem erro: a leitura passa,
+    // com o que está nas páginas de dados — zeradas.
+    respostas.depositar(0, 0, true, 0);
+    d.ler(3, &mut um)?;
+    if um != [0u8; B] {
+        return Err("o controlador de mentira nao entregou a pagina de dados");
+    }
+    if d.leituras() != 1 || d.erros() != crate::bloco::Erros::default() {
+        return Err("a leitura do controlador de mentira nao foi contada como lida");
+    }
+    // O driver manda o comando um, e a resposta é a do sete.
+    respostas.depositar(1, 7, true, 0);
+    let r = d.ler(3, &mut um);
+    if r != Err(RESPOSTA_DE_OUTRO) {
+        crate::log_error!("teste", "nvme: a resposta de outro comando deu {:?}", r);
+        return Err("o driver aceitou a resposta de outro comando");
+    }
+    if d.vivo() || d.duravel() {
+        return Err("o controlador que respondeu outro comando continua ligado");
+    }
+    let erros = d.erros();
+    if (erros.leitura, erros.escrita, erros.descarga, erros.ultimo)
+        != (1, 0, 0, Some(RESPOSTA_DE_OUTRO))
+    {
+        crate::log_error!("teste", "nvme: erros {:?}", erros);
+        return Err("a camada nao contou o erro do controlador");
+    }
+    respostas.depositar(2, 2, true, 0);
+    if d.ler(3, &mut um) != Err("o disco parou de responder e foi desligado") {
+        return Err("depois de desligado, um pedido chegou ao controlador");
+    }
+    if d.descarregar_disco().is_ok() {
+        return Err("depois de desligado, uma descarga passou");
+    }
+    if d.erros() != erros || d.leituras() != 1 {
+        return Err("a recusa da camada contou como erro ou leitura do dispositivo");
+    }
+    Ok(())
+}
+
+/// O controlador que não responde: nenhuma resposta na fila do de mentira.
+/// O driver espera o prazo do disco — em tempo, pelo contador de ciclos, e
+/// não um número de voltas que dura um segundo num processador e dois
+/// minutos noutro —, desliga o controlador e devolve o erro; a camada o
+/// conta, e o disco deixa de se dizer durável. São os trinta segundos de
+/// [`crate::bloco::ESPERA_MS`], e o caso os mede.
+fn nvme_o_controlador_que_nao_responde() -> Resultado {
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    let (mut d, _respostas) =
+        crate::nvme::de_mentira(64).ok_or("sem frames para o controlador de mentira")?;
+    if crate::hora::contador::hz() == 0 {
+        return Err("o contador de ciclos nao tem frequencia: o prazo seria em voltas");
+    }
+    let mut um = [0u8; B];
+    let comeco = crate::hora::contador::agora_ms();
+    let r = d.ler(0, &mut um);
+    let esperou = crate::hora::contador::agora_ms() - comeco;
+    if r != Err("o dispositivo nao respondeu") {
+        crate::log_error!("teste", "nvme: o controlador mudo deu {:?}", r);
+        return Err("o driver nao desistiu do controlador que nao responde");
+    }
+    // O prazo, e não menos; e não as voltas de antes, que no x86 emulado
+    // passavam de dois minutos. O teto é folgado: o emulador ocupado atrasa
+    // a volta, e não o prazo.
+    if !(crate::bloco::ESPERA_MS..crate::bloco::ESPERA_MS * 3).contains(&esperou) {
+        crate::log_error!("teste", "nvme: o controlador mudo esperou {} ms", esperou);
+        return Err("a espera pelo controlador mudo nao foi o prazo do disco");
+    }
+    if d.vivo() || d.duravel() {
+        return Err("o controlador que nao respondeu continua ligado");
+    }
+    let erros = d.erros();
+    if (erros.leitura, erros.ultimo) != (1, Some("o dispositivo nao respondeu")) {
+        crate::log_error!("teste", "nvme: erros {:?}", erros);
+        return Err("a camada nao contou o tempo esgotado");
+    }
+    if d.descarregar_disco() != Err("o disco parou de responder e foi desligado") {
+        return Err("depois do tempo esgotado, uma descarga chegou ao controlador");
+    }
+    Ok(())
+}
+
+/// O ARP pela placa Intel da suíte, que não é a da pilha: o caso transmite
+/// o pedido e colhe a resposta direto do driver, sem a pilha no meio — a
+/// pilha colhe só a placa dela. Do outro lado, o roteador da rede em modo
+/// usuário da segunda placa, `10.0.2.2`. A conferência da resposta é a do
+/// `net.arp` ([`crate::rede::conferir_resposta`]).
+fn arp_pela_intel(nosso_ip: [u8; 4]) -> Result<[u8; 6], &'static str> {
+    let mac = crate::e1000::com_a_placa(|p| p.mac())
+        .ok_or("a maquina da suite nao tem a placa Intel ligada")?
+        .ok_or("a placa Intel nao tem endereco")?;
+    let pedido = crate::rede::montar_pedido(&mac, &nosso_ip, &IP_DO_ROTEADOR);
+    crate::e1000::com_a_placa(|p| p.transmitir(&pedido)).ok_or("a placa Intel sumiu")??;
+    // Três segundos: o ARP do `net.arp` espera dois.
+    let limite = crate::tempo::ticks() + 300;
+    let mut quadro = [0u8; crate::rede::placa::MAIOR_QUADRO];
+    loop {
+        while let Some(n) = crate::e1000::com_a_placa(|p| p.receber(&mut quadro)).flatten() {
+            let arp = n >= crate::rede::TAMANHO_DO_QUADRO
+                && quadro[12..14] == [0x08, 0x06]
+                && quadro[20..22] == [0, 2]
+                && quadro[28..32] == IP_DO_ROTEADOR;
+            if arp {
+                let mut resposta = [0u8; crate::rede::TAMANHO_DO_QUADRO];
+                resposta.copy_from_slice(&quadro[..crate::rede::TAMANHO_DO_QUADRO]);
+                return crate::rede::conferir_resposta(&resposta, &nosso_ip, &mac);
+            }
+        }
+        if crate::tempo::ticks() >= limite {
+            return Err("nenhuma resposta ARP chegou pela placa Intel");
+        }
+        crate::fios::ceder();
+    }
+}
+
+/// A 82574L da máquina da suíte: no x86 ela está atrás de uma ponte PCI —
+/// como numa placa PCIe de um PC, atrás da porta raiz —, e a varredura a
+/// acha lá, no barramento que o firmware numerou; no ARM, que sobe sem
+/// firmware, no barramento zero. O driver a liga com enlace, ela não é a da
+/// pilha — a virtio é —, e um ARP por ela vai e volta: os dois anéis de
+/// verdade, com os contadores andando.
+fn e1000_a_placa_intel_responde() -> Resultado {
+    let mut intel = None;
+    let mut pontes = 0;
+    crate::pci::com_dispositivos(|d| {
+        if d.fabricante == 0x8086 && d.modelo == 0x10D3 {
+            intel = Some(*d);
+        }
+        if (d.classe, d.subclasse) == (0x06, 0x04) {
+            pontes += 1;
+        }
+    });
+    let intel = intel.ok_or("a 82574L da suite nao esta no inventario do PCI")?;
+    if cfg!(target_arch = "x86_64")
+        && (intel.barramento == 0 || pontes == 0 || crate::pci::barramentos() < 2)
+    {
+        crate::log_error!(
+            "teste",
+            "e1000: a placa em {:02x}:{:02x}.{}, {} pontes, {} barramentos varridos",
+            intel.barramento,
+            intel.dispositivo,
+            intel.funcao,
+            pontes,
+            crate::pci::barramentos()
+        );
+        return Err(
+            "no x86 a 82574L da suite esta atras de uma ponte, e a varredura nao a achou la",
+        );
+    }
+    let (driver, vivo, enlace) = crate::e1000::com_a_placa(|p| (p.driver(), p.vivo(), p.enlace()))
+        .ok_or("a 82574L nao foi ligada")?;
+    if (driver, vivo, enlace) != ("e1000e", true, Some(true)) {
+        return Err("a 82574L nao esta ligada, viva e com enlace");
+    }
+    if crate::rede::placa::com_a_placa(|p| p.driver()) != Some("virtio-net") {
+        return Err("a pilha da suite nao e a da placa virtio");
+    }
+    let antes = crate::e1000::com_a_placa(|p| p.contadores()).unwrap_or_default();
+    let dono = arp_pela_intel(NOSSO_IP)?;
+    if dono == [0; 6] || dono[0] & 1 != 0 {
+        return Err("o ARP pela placa Intel trouxe um dono que nao e uma placa");
+    }
+    let depois = crate::e1000::com_a_placa(|p| p.contadores()).unwrap_or_default();
+    if depois.0 <= antes.0 || depois.1 <= antes.1 {
+        return Err("os contadores da placa Intel nao acompanharam o ARP");
+    }
+    Ok(())
+}
+
+/// O reinício da placa de verdade — o caminho de uma transmissão que não se
+/// confirmou: o DMA para, a placa recarrega o endereço da EEPROM e os anéis
+/// são reprogramados. Ela volta com o mesmo endereço e responde de novo.
+fn e1000_a_placa_reiniciada_volta() -> Resultado {
+    let antes = crate::e1000::com_a_placa(|p| p.mac())
+        .flatten()
+        .ok_or("a 82574L nao foi ligada")?;
+    crate::e1000::com_a_placa(|p| p.reiniciar_de_teste()).ok_or("a 82574L sumiu")??;
+    let depois = crate::e1000::com_a_placa(|p| (p.mac(), p.vivo()));
+    if depois != Some((Some(antes), true)) {
+        return Err("a 82574L reiniciada voltou com outro endereco, ou desligada");
+    }
+    arp_pela_intel([10, 0, 2, 16])?;
+    Ok(())
+}
+
+/// Vários fios, em núcleos diferentes, transmitem pela 82574L ao mesmo
+/// tempo: o buffer de transmissão é um só, e a trava da placa é o que impede
+/// um quadro de ser escrito por cima de outro. Cada fio pergunta pelo
+/// roteador em nome de um endereço seu, várias vezes; depois, cada pedido
+/// tem a sua resposta, endereçada a quem perguntou. Um quadro misturado com
+/// o de outro fio sairia com o endereço errado, ou não teria resposta. O
+/// resultado não depende da ordem em que os fios andam.
+fn e1000_varios_fios_transmitem() -> Resultado {
+    use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const FIOS: u64 = 4;
+    const PEDIDOS: u64 = 4;
+    static SAIRAM: AtomicU64 = AtomicU64::new(0);
+    static FALHAS: AtomicU64 = AtomicU64::new(0);
+    static PRONTOS: AtomicU64 = AtomicU64::new(0);
+    extern "C" fn transmitir(indice: u64) -> ! {
+        match crate::e1000::com_a_placa(|p| p.mac()).flatten() {
+            Some(mac) => {
+                let nosso = [10, 0, 2, 20 + indice as u8];
+                let pedido = crate::rede::montar_pedido(&mac, &nosso, &IP_DO_ROTEADOR);
+                for _ in 0..PEDIDOS {
+                    match crate::e1000::com_a_placa(|p| p.transmitir(&pedido)) {
+                        Some(Ok(())) => SAIRAM.fetch_add(1, SeqCst),
+                        _ => FALHAS.fetch_add(1, SeqCst),
+                    };
+                    crate::fios::ceder();
+                }
+            }
+            None => {
+                FALHAS.fetch_add(PEDIDOS, SeqCst);
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    // O que estiver no anel de antes não conta.
+    let mut quadro = [0u8; crate::rede::placa::MAIOR_QUADRO];
+    while crate::e1000::com_a_placa(|p| p.receber(&mut quadro))
+        .flatten()
+        .is_some()
+    {}
+    SAIRAM.store(0, SeqCst);
+    FALHAS.store(0, SeqCst);
+    PRONTOS.store(0, SeqCst);
+    let nucleos = crate::nucleos::ligados() as u64;
+    for i in 0..FIOS {
+        crate::fios::criar_no_nucleo("e1000-fio", transmitir, i, (i % nucleos) as usize)?;
+    }
+    esperar_cedendo(|| PRONTOS.load(SeqCst) == FIOS, 1000)
+        .map_err(|_| "os fios da placa Intel nao terminaram")?;
+    if FALHAS.load(SeqCst) != 0 || SAIRAM.load(SeqCst) != FIOS * PEDIDOS {
+        return Err("um pedido de um fio nao saiu pela placa Intel");
+    }
+    // As respostas: dezesseis cabem no anel de recepção, que tem trinta e
+    // um descritores com a placa.
+    let mut por_fio = [0u64; FIOS as usize];
+    let limite = crate::tempo::ticks() + 300;
+    while por_fio.iter().sum::<u64>() < FIOS * PEDIDOS && crate::tempo::ticks() < limite {
+        while let Some(n) = crate::e1000::com_a_placa(|p| p.receber(&mut quadro)).flatten() {
+            let resposta = n >= crate::rede::TAMANHO_DO_QUADRO
+                && quadro[12..14] == [0x08, 0x06]
+                && quadro[20..22] == [0, 2]
+                && quadro[28..32] == IP_DO_ROTEADOR
+                && quadro[38..41] == [10, 0, 2];
+            let fio = usize::from(quadro[41].wrapping_sub(20));
+            if resposta && fio < por_fio.len() {
+                por_fio[fio] += 1;
+            }
+        }
+        crate::fios::ceder();
+    }
+    if por_fio != [PEDIDOS; FIOS as usize] {
+        crate::log_error!("teste", "e1000: respostas por fio {:?}", por_fio);
+        return Err("um pedido ficou sem resposta, ou a resposta foi para outro endereco");
+    }
+    Ok(())
+}
+
+/// Sem enlace, o quadro não chega à placa — a cauda do anel não anda —, a
+/// recusa diz por quê e é contada, e a placa continua ligada: o cabo que
+/// volta traz a rede de volta. Numa placa de mentira, onde o caso escreve o
+/// registrador de estado.
+fn e1000_sem_enlace_nada_sai() -> Resultado {
+    use crate::e1000::registros_de_teste as r;
+    use crate::rede::placa::Perdas;
+    let mut p = crate::e1000::de_mentira().ok_or("sem frames para a placa de mentira")?;
+    p.tocar_registrador(r::STATUS, 0);
+    let cauda = p.registrador(r::TDT);
+    if p.transmitir(&[0xAA; 60]) != Err(crate::rede::placa::SEM_ENLACE) {
+        return Err("sem enlace, a transmissao nao foi recusada pelo motivo");
+    }
+    if p.registrador(r::TDT) != cauda {
+        return Err("sem enlace, o driver entregou o quadro a placa");
+    }
+    let esperado = Perdas {
+        sem_enlace: 1,
+        ..Perdas::default()
+    };
+    if p.perdas() != Some(esperado) || p.enlace() != Some(false) || !p.vivo() {
+        return Err("o quadro sem enlace nao foi contado, ou a placa foi desligada");
+    }
+    Ok(())
+}
+
+/// O que a placa escreve num descritor não leva o driver além do buffer
+/// dele: o quadro com erro de CRC e o partido — sem o fim do quadro — não
+/// sobem e são contados, e um tamanho de 65535 é cortado no maior quadro,
+/// sem um byte além no destino. Cada descritor colhido volta para a placa
+/// pela cauda. Numa placa de mentira, onde o caso escreve os descritores.
+fn e1000_quadros_hostis() -> Resultado {
+    use crate::e1000::registros_de_teste as r;
+    let mut p = crate::e1000::de_mentira().ok_or("sem frames para a placa de mentira")?;
+    let inteiro = r::DD | r::FIM_DO_QUADRO;
+    p.depositar(0, 0x11, 64, inteiro, 0x01);
+    p.depositar(1, 0x22, 64, r::DD, 0);
+    p.depositar(2, 0x33, u16::MAX, inteiro, 0);
+    let mut destino = [0u8; 1600];
+    let n = p.receber(&mut destino);
+    if n != Some(crate::rede::placa::MAIOR_QUADRO) {
+        crate::log_error!("teste", "e1000: o quadro hostil deu {:?}", n);
+        return Err("o tamanho que a placa disse nao foi cortado no maior quadro");
+    }
+    if destino[..crate::rede::placa::MAIOR_QUADRO]
+        .iter()
+        .any(|&b| b != 0x33)
+        || destino[crate::rede::placa::MAIOR_QUADRO..]
+            .iter()
+            .any(|&b| b != 0)
+    {
+        return Err("o driver copiou outro buffer, ou alem do quadro");
+    }
+    let perdas = p.perdas().unwrap_or_default();
+    if perdas.descartados != 2 || p.contadores() != (0, 1) {
+        crate::log_error!(
+            "teste",
+            "e1000: {:?}, contadores {:?}",
+            perdas,
+            p.contadores()
+        );
+        return Err("o quadro com erro e o partido nao foram contados como descartados");
+    }
+    if p.registrador(r::RDT) != 2 {
+        return Err("os descritores colhidos nao voltaram para a placa pela cauda");
+    }
+    if p.receber(&mut destino).is_some() {
+        return Err("o driver colheu um descritor que a placa nao marcou");
+    }
+    Ok(())
+}
+
+/// A transmissão que a placa não confirma: o driver espera o prazo dele —
+/// em tempo —, reinicia a placa para ter o buffer de volta, e a placa de
+/// mentira, que ninguém reinicia, não volta: é desligada, e nada mais
+/// chega a ela.
+fn e1000_transmissao_sem_confirmacao() -> Resultado {
+    if crate::hora::contador::hz() == 0 {
+        return Err("o contador de ciclos nao tem frequencia: o prazo seria em voltas");
+    }
+    let mut p = crate::e1000::de_mentira().ok_or("sem frames para a placa de mentira")?;
+    let comeco = crate::hora::contador::agora_ms();
+    let r = p.transmitir(&[0xAA; 60]);
+    let esperou = crate::hora::contador::agora_ms() - comeco;
+    if r != Err("a placa nao voltou do reinicio no prazo") {
+        crate::log_error!("teste", "e1000: a transmissao sem confirmacao deu {:?}", r);
+        return Err("a transmissao sem confirmacao nao levou ao reinicio que nao volta");
+    }
+    if !(2_000..6_000).contains(&esperou) {
+        crate::log_error!("teste", "e1000: esperou {} ms", esperou);
+        return Err("a espera pela transmissao nao foi o prazo do driver");
+    }
+    if p.vivo() || p.perdas().map(|x| x.reinicios) != Some(1) {
+        return Err(
+            "a placa que nao voltou do reinicio continua ligada, ou o reinicio nao foi contado",
+        );
+    }
+    if p.transmitir(&[0xAA; 60]) != Err("a placa parou de responder e foi desligada") {
+        return Err("depois de desligada, um quadro chegou a placa");
+    }
+    Ok(())
+}
+
+/// A passagem do xHCI do firmware para o sistema, sobre uma memória comum
+/// com a lista de capacidades estendidas de uma máquina de verdade — o
+/// emulador não tem a de suporte legado. A lista é percorrida até ela,
+/// passando por outra; o firmware dono, que não solta no prazo, perde o
+/// controlador; as SMIs são desligadas, os bits reservados ficam, e os
+/// eventos são limpos. O firmware que não é dono não é chamado a soltar. E
+/// uma lista que sai da região, ou que não existe, não é seguida.
+fn usb_a_passagem_do_xhci() -> Resultado {
+    use crate::usb::xhci::{Passagem, passar_do_firmware};
+    const FIRMWARE: u32 = 1 << 16;
+    const SISTEMA: u32 = 1 << 24;
+    const SMIS: u32 = 1 | (1 << 4) | (1 << 13) | (1 << 14) | (1 << 15);
+    const RESERVADO: u32 = 1 << 1;
+    const EVENTOS: u32 = 0x7 << 29;
+    let regiao = alloc::vec![0u32; 64].leak();
+    let base = regiao.as_mut_ptr() as u64;
+    // A lista começa no dword 16: uma capacidade de protocolo, e quatro
+    // dwords depois, a de suporte legado, com o firmware dono.
+    let hcc1 = 16u32 << 16;
+    regiao[16] = 2 | (4 << 8);
+    regiao[20] = 1 | FIRMWARE;
+    regiao[21] = SMIS | RESERVADO;
+    // SAFETY: a região é deste caso, com os 256 bytes ditos.
+    let r = unsafe { passar_do_firmware(base, 256, hcc1) };
+    if r != Passagem::Tomado {
+        crate::log_error!("teste", "usb: a passagem deu {:?}", r);
+        return Err("o firmware que nao soltou nao perdeu o controlador");
+    }
+    if regiao[20] & (FIRMWARE | SISTEMA) != SISTEMA {
+        return Err("o semaforo nao diz o sistema dono do controlador");
+    }
+    if regiao[21] & SMIS != 0 || regiao[21] & RESERVADO == 0 || regiao[21] & EVENTOS != EVENTOS {
+        crate::log_error!("teste", "usb: controle {:#x}", regiao[21]);
+        return Err("as SMIs nao foram desligadas, ou um bit reservado foi apagado");
+    }
+    regiao[20] = 1;
+    regiao[21] = SMIS;
+    // SAFETY: como acima.
+    if unsafe { passar_do_firmware(base, 256, hcc1) } != Passagem::JaEraDoSistema
+        || regiao[20] & SISTEMA != 0
+        || regiao[21] & SMIS != 0
+    {
+        return Err("o firmware que nao era dono foi chamado a soltar, ou as SMIs ficaram");
+    }
+    regiao[16] = 2 | (0xFF << 8);
+    // SAFETY: como acima; o caso confere que nada além dela é lido.
+    if unsafe { passar_do_firmware(base, 256, hcc1) } != Passagem::SemCapacidade
+        || unsafe { passar_do_firmware(base, 256, 0) } != Passagem::SemCapacidade
+    {
+        return Err("uma lista que sai da regiao, ou que nao existe, foi seguida");
+    }
+    Ok(())
+}
+
+/// O `disk.info` do disco do sistema: diz se ele responde, conta as
+/// leituras, escritas e descargas que o dispositivo confirmou e os erros
+/// que ele devolveu, com o último; e uma leitura de verdade aparece nele.
+fn disco_o_disk_info_diz_o_estado() -> Resultado {
+    const B: usize = crate::bloco::TAMANHO_DO_SETOR;
+    let lidas = |r: &str| Json(r.as_bytes()).member("reads").and_then(|v| v.as_u64());
+    let antes = chamar("disk.info", "{}")?;
+    let j = Json(antes.as_bytes());
+    if j.member("alive").and_then(|v| v.as_bool()) != Some(true) {
+        crate::log_error!("teste", "disk.info: {}", antes);
+        return Err("o disk.info nao diz que o disco do sistema responde");
+    }
+    for campo in ["writes", "flushes"] {
+        if j.member(campo).and_then(|v| v.as_u64()).is_none() {
+            return Err("o disk.info nao conta as escritas e as descargas");
+        }
+    }
+    let erros = j.member("errors").ok_or("o disk.info nao tem os erros")?;
+    for campo in ["read", "write", "flush"] {
+        if erros.member(campo).and_then(|v| v.as_u64()).is_none() {
+            return Err("um contador de erro do disk.info nao e um numero");
+        }
+    }
+    if erros.member("last").is_none() {
+        return Err("o disk.info nao diz o ultimo erro");
+    }
+    let antes = lidas(&antes).ok_or("o disk.info nao conta as leituras")?;
+    let mut setor = [0u8; B];
+    crate::bloco::com_o_disco(|d| d.ler_setor(0, &mut setor))
+        .ok_or("a maquina nao tem disco")??;
+    let depois = lidas(&chamar("disk.info", "{}")?).ok_or("o disk.info nao conta as leituras")?;
+    if depois <= antes {
+        crate::log_error!("teste", "disk.info: leituras {} -> {}", antes, depois);
+        return Err("uma leitura do disco do sistema nao apareceu no disk.info");
+    }
+    Ok(())
+}
+
+/// A marca da imagem da suíte: a de desenvolvimento, que o `xtask` escreve
+/// em `/etc/duke/imagem` com o nome da bancada — e o `system.info` a diz,
+/// para ninguém tomar esta máquina por uma de produção. A marca não decide
+/// nada: a conferência das invariantes exige que só o `system.info` a leia.
+fn imagem_a_marca_diz_desenvolvimento() -> Resultado {
+    match crate::imagem::estado() {
+        crate::imagem::Estado::Marcada(m)
+            if m.tipo == sigilo::imagem::Tipo::Desenvolvimento && m.nome == "bancada" => {}
+        outro => {
+            crate::log_error!("teste", "imagem: {:?}", outro);
+            return Err("a imagem da suite nao esta marcada como de desenvolvimento");
+        }
+    }
+    let r = chamar("system.info", "{}")?;
+    let imagem = Json(r.as_bytes())
+        .member("image")
+        .ok_or("o system.info nao diz de onde veio a imagem")?;
+    let campo = |nome: &str| imagem.member(nome).and_then(|v| v.as_str());
+    if campo("kind") != Some("development") || campo("name") != Some("bancada") {
+        crate::log_error!("teste", "system.info: {}", r);
+        return Err("o system.info nao diz a imagem de desenvolvimento");
+    }
+    let id = campo("id").ok_or("o system.info nao diz o id da imagem")?;
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("o id da imagem nao tem 32 digitos hexadecimais");
+    }
+    Ok(())
 }
 
 /// O contador de NV do TPM, pelo transporte do kernel e por uma sessão
@@ -31627,8 +32187,56 @@ static CASOS: &[Caso] = &[
         f: nvme_a_medida_de_uma_ida,
     },
     Caso {
+        nome: "nvme: o erro de midia do dispositivo volta como erro, e a camada o conta pelo tipo",
+        f: nvme_o_erro_de_midia_e_contado,
+    },
+    Caso {
         nome: "nvme: o aviso de desligamento para o controlador, e nada mais passa",
         f: nvme_o_aviso_de_desligamento,
+    },
+    Caso {
+        nome: "nvme: o controlador que responde outro comando e desligado, e o erro e contado",
+        f: nvme_o_controlador_que_responde_outro_comando,
+    },
+    Caso {
+        nome: "nvme: o controlador que nao responde e desligado no prazo do disco",
+        f: nvme_o_controlador_que_nao_responde,
+    },
+    Caso {
+        nome: "disco: o disk.info diz se o disco responde, o que ele confirmou e os erros",
+        f: disco_o_disk_info_diz_o_estado,
+    },
+    Caso {
+        nome: "imagem: a marca diz que a imagem da suite e de desenvolvimento",
+        f: imagem_a_marca_diz_desenvolvimento,
+    },
+    Caso {
+        nome: "e1000: a placa Intel, atras de uma ponte no x86, responde ao ARP",
+        f: e1000_a_placa_intel_responde,
+    },
+    Caso {
+        nome: "e1000: a placa reiniciada volta com o mesmo endereco e responde",
+        f: e1000_a_placa_reiniciada_volta,
+    },
+    Caso {
+        nome: "e1000: varios fios transmitem pela placa ao mesmo tempo, e cada pedido tem a sua resposta",
+        f: e1000_varios_fios_transmitem,
+    },
+    Caso {
+        nome: "e1000: sem enlace o quadro nao chega a placa, e a recusa e contada",
+        f: e1000_sem_enlace_nada_sai,
+    },
+    Caso {
+        nome: "e1000: o quadro com erro, o partido e o grande demais nao passam do buffer",
+        f: e1000_quadros_hostis,
+    },
+    Caso {
+        nome: "e1000: a transmissao sem confirmacao reinicia a placa, e a que nao volta e desligada",
+        f: e1000_transmissao_sem_confirmacao,
+    },
+    Caso {
+        nome: "usb: o firmware que nao solta o xhci o perde, com as SMIs desligadas",
+        f: usb_a_passagem_do_xhci,
     },
     Caso {
         nome: "tpm: o contador da ancora so cresce, e so com a senha",
@@ -32905,7 +33513,8 @@ fn marca_do_setor(numero: u64) -> u8 {
 /// exatamente o que o alinhamento ao tamanho do BAR existe para impedir.
 fn pci_regioes_atribuidas_nao_se_sobrepoem() -> Resultado {
     // Cada dispositivo pode ter até seis regiões, e o inventário tem teto.
-    let mut faixas = [(0u64, 0u64); crate::pci::MAX_DISPOSITIVOS * crate::pci::BARS];
+    // No monte: com o teto de um PC, a tabela passa de doze KiB.
+    let mut faixas = alloc::vec![(0u64, 0u64); crate::pci::MAX_DISPOSITIVOS * crate::pci::BARS];
     let mut quantas = 0usize;
     let mut falha: Option<&'static str> = None;
 
