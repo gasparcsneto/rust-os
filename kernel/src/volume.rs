@@ -537,9 +537,10 @@ pub fn bloco_em_uso(b: u64) -> Option<bool> {
     com(|v| v.mapa.as_ref().and_then(|m| m.em_uso(b)))
 }
 
-/// Só na suíte: para cada faixa, o primeiro bloco dela que o mapa tem como
-/// livre — `None` se estão todos em uso. Numa tomada só da trava.
-#[cfg(feature = "modo-teste")]
+/// Para cada faixa, o primeiro bloco dela que o mapa tem como livre —
+/// `None` se estão todos em uso. Numa tomada só da trava. É a pergunta da
+/// verificação do armazém (`fs.verify`), e a da suíte depois de cada
+/// operação.
 pub fn livres_em(faixas: &[(u64, u64)]) -> Vec<Option<u64>> {
     com(|v| {
         faixas

@@ -122,6 +122,90 @@ pub fn montar() -> Result<(), vfs::Erro> {
     vfs::montar("armazem", RAIZ, vfs::Origem::Gravada, Box::new(NoVfs))
 }
 
+/// O que [`verificar`] achou: o que conferiu, e o que não confere.
+#[derive(Debug, Default)]
+pub struct Verificacao {
+    /// Os arquivos cujos blocos abriram todos.
+    pub arquivos: u64,
+    /// Os blocos que abriram, e os bytes desses arquivos.
+    pub blocos: u64,
+    pub bytes: u64,
+    /// Os arquivos com um bloco que não abre — a cifra autenticada recusou
+    /// o que o disco devolveu, ou a extensão não diz onde ele está —, pelo
+    /// caminho relativo.
+    pub ilegiveis: Vec<String>,
+    /// Os arquivos que mudaram no meio da verificação: a versão conferida
+    /// deixou de valer, e eles não contam nem como bons nem como ruins.
+    pub mudaram: u64,
+    /// Blocos de versões vivas que o mapa do volume diz livres — os que a
+    /// próxima reserva daria a outro conteúdo, por cima deste.
+    pub soltos: u64,
+}
+
+/// Confere o armazém abaixo de `relativo` — o caminho sem a raiz; vazio é
+/// o armazém inteiro —: cada bloco da versão viva de cada arquivo abre, e
+/// nenhum está livre no mapa do volume. É o que o boot confere do mapa, e o
+/// que uma leitura confere de um bloco, para tudo de uma vez: a corrupção
+/// que ninguém leu ainda aparece agora, e não no dia em que alguém
+/// precisar do arquivo.
+///
+/// Só lê. Nada muda, nada do conteúdo sai — nem para o log: um bloco que
+/// não abre aqui diz só o caminho do arquivo. Um arquivo é conferido pela
+/// versão que valia quando a verificação começou, sem trava nenhuma na mão
+/// entre um bloco e outro: o que muda no meio é contado à parte.
+pub fn verificar(relativo: &str) -> Result<Verificacao, &'static str> {
+    crate::volume::exigir()?;
+    let alvos: Vec<(String, u64, Conteudo)> = com_o_armazem(|a| {
+        a.todos()
+            .filter(|(c, n)| {
+                n.tipo() == Tipo::Arquivo && (*c == relativo || ::armazem::abaixo_de(c, relativo))
+            })
+            .filter_map(|(c, n)| {
+                n.conteudo()
+                    .map(|ct| (String::from(c), n.versao(), ct.clone()))
+            })
+            .collect()
+    });
+    let mut v = Verificacao::default();
+    let mut bloco: Box<[u8; TAM_BLOCO]> = Box::new([0; TAM_BLOCO]);
+    for (caminho, versao, conteudo) in alvos {
+        let faixas: Vec<(u64, u64)> = conteudo.faixas().collect();
+        v.soltos += crate::volume::livres_em(&faixas)
+            .iter()
+            .filter(|livre| livre.is_some())
+            .count() as u64;
+        let mut abertos = 0;
+        let mut abre = true;
+        for k in 0..conteudo.blocos() {
+            let lido = conteudo
+                .onde(k)
+                .ok_or("fora das extensoes")
+                .and_then(|(b, id)| crate::volume::ler_bloco(b, &id, k, &mut bloco));
+            if lido.is_err() {
+                abre = false;
+                break;
+            }
+            abertos += 1;
+        }
+        if com_o_armazem(|a| a.por_versao(versao).is_none()) {
+            v.mudaram += 1;
+        } else if abre {
+            v.arquivos += 1;
+            v.blocos += abertos;
+            v.bytes += conteudo.tamanho;
+        } else {
+            crate::log_error!(
+                "armazem",
+                "verificacao: {} (versao {}) tem um bloco que nao abre",
+                caminho,
+                versao
+            );
+            v.ilegiveis.push(caminho);
+        }
+    }
+    Ok(v)
+}
+
 /// O caminho do armazém, relativo à raiz dele, de um caminho do pedido — na
 /// forma normal da política, a mesma que o gate conferiu. `None` para o que
 /// não está abaixo de [`RAIZ`].

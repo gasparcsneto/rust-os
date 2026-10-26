@@ -478,6 +478,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
         Err(motivo) => log_warn!("vfs", "a tabela de particoes nao foi lida: {}", motivo),
     }
 
+    // A rede sem DHCP, se a imagem a escreve: o `/etc/duke/rede`, do disco
+    // que acabou de montar — ver [`rede::configuracao`]. A pilha subiu
+    // pedindo ao DHCP; sem o arquivo, segue pedindo.
+    rede::configuracao::carregar();
+
     // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
     // que acabou de montar.
     identidade::carregar();

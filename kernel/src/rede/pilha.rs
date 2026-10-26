@@ -263,6 +263,11 @@ pub struct Resumo {
     /// `net.connect` decidido pela política como qualquer outro, e o
     /// anúncio não abre nada.
     pub dns: [Option<[u8; 4]>; MAIS_DNS],
+    /// De onde veio o endereço: `dhcp`, `static` — o `/etc/duke/rede` — ou
+    /// `static-invalid`, um arquivo que não se leu, e a pilha sem endereço.
+    pub modo: &'static str,
+    /// Por que o arquivo da rede não se leu, quando não se leu.
+    pub erro_de_configuracao: Option<&'static str>,
     pub conexoes: usize,
     /// Quantas conexões já foram abertas desde o boot.
     pub abertas: u64,
@@ -271,10 +276,23 @@ pub struct Resumo {
     pub datagramas_alheios: u64,
 }
 
+/// De onde vem o endereço da pilha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Modo {
+    /// Do DHCP, como sempre.
+    Dhcp,
+    /// Do `/etc/duke/rede` — ver [`super::configuracao`].
+    Estatica,
+    /// De um `/etc/duke/rede` que não se leu: sem endereço, e o motivo.
+    Invalida(&'static str),
+}
+
 struct Pilha {
     iface: Interface,
     sockets: SocketSet<'static>,
-    dhcp: SocketHandle,
+    /// O socket do DHCP, enquanto o endereço vem dele.
+    dhcp: Option<SocketHandle>,
+    modo: Modo,
     endereco: Option<Ipv4Cidr>,
     roteador: Option<Ipv4Address>,
     /// Os servidores de DNS do último DHCP — ver [`Resumo::dns`].
@@ -433,6 +451,11 @@ pub fn descartes() -> Descartes {
 /// handler o reconhece, procura a regra e grava a recusa.
 pub const BARRADO: &str = "barrado pelo firewall";
 
+/// A pilha sem endereço porque o `/etc/duke/rede` não se leu — e não
+/// porque o DHCP não respondeu: ele nem pergunta.
+const SEM_ENDERECO_PELO_ARQUIVO: &str =
+    "a rede nao tem endereco: o /etc/duke/rede nao se leu (o net.info diz por que)";
+
 /// O código de uma falha da rede **depois** do gate — a seção 24 do
 /// incremento de usabilidade: "o firewall barrou", "a rede não está" e "o
 /// pedido não cabe" nunca se confundem com "a política recusou", que é uma
@@ -451,6 +474,7 @@ pub fn codigo_da_falha(motivo: &str) -> &'static str {
         BARRADO => "FIREWALL_BLOCKED",
         "a pilha de rede nao esta no ar"
         | "a rede ainda nao tem endereco (o DHCP nao respondeu)"
+        | SEM_ENDERECO_PELO_ARQUIVO
         | "o destino nao se alcanca" => "NETWORK_UNAVAILABLE",
         "a tabela de conexoes esta cheia"
         | "este titular ja tem o maximo de conexoes abertas"
@@ -687,7 +711,8 @@ pub fn iniciar() {
         *PILHA.lock() = Some(Pilha {
             iface,
             sockets,
-            dhcp,
+            dhcp: Some(dhcp),
+            modo: Modo::Dhcp,
             endereco: None,
             roteador: None,
             dns: [None; MAIS_DNS],
@@ -825,37 +850,23 @@ impl Pilha {
         for i in 0..self.conexoes.len() {
             self.descartar_alheios(i);
         }
-        let evento = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll()?;
+        let dhcp = self.dhcp?;
+        let evento = self.sockets.get_mut::<dhcpv4::Socket>(dhcp).poll()?;
         match evento {
             dhcpv4::Event::Configured(c) => {
+                // Tudo copiado do evento antes de mexer na pilha: ele aponta
+                // para dentro do socket.
                 let endereco = c.address;
                 let roteador = c.router;
-                self.iface.update_ip_addrs(|a| {
-                    a.clear();
-                    let _ = a.push(IpCidr::Ipv4(endereco));
-                });
-                match roteador {
-                    Some(r) => {
-                        let _ = self.iface.routes_mut().add_default_ipv4_route(r);
-                    }
-                    None => {
-                        self.iface.routes_mut().remove_default_ipv4_route();
-                    }
-                }
-                self.endereco = Some(endereco);
-                self.roteador = roteador;
-                self.dns = [None; MAIS_DNS];
-                for (vaga, d) in self.dns.iter_mut().zip(c.dns_servers.iter()) {
+                let mut dns = [None; MAIS_DNS];
+                for (vaga, d) in dns.iter_mut().zip(c.dns_servers.iter()) {
                     *vaga = Some(d.octets());
                 }
+                self.configurar(Some(endereco), roteador, dns);
                 Some(Some((endereco.address().octets(), endereco.prefix_len())))
             }
             dhcpv4::Event::Deconfigured => {
-                self.iface.update_ip_addrs(|a| a.clear());
-                self.iface.routes_mut().remove_default_ipv4_route();
-                self.endereco = None;
-                self.roteador = None;
-                self.dns = [None; MAIS_DNS];
+                self.configurar(None, None, [None; MAIS_DNS]);
                 Some(None)
             }
         }
@@ -1123,7 +1134,10 @@ pub fn abrir(
 ) -> Result<(u64, Estado), &'static str> {
     let r = com_pilha(|p| {
         if p.endereco.is_none() {
-            return Err("a rede ainda nao tem endereco (o DHCP nao respondeu)");
+            return Err(match p.modo {
+                Modo::Invalida(_) => SEM_ENDERECO_PELO_ARQUIVO,
+                _ => "a rede ainda nao tem endereco (o DHCP nao respondeu)",
+            });
         }
         // Depois do gate, o firewall: um destino barrado para este dono não
         // abre — ver [`BARRADO`].
@@ -1630,7 +1644,7 @@ pub fn sockets_soltos_de_teste() -> usize {
         p.sockets
             .iter()
             .filter(|(h, _)| {
-                *h != p.dhcp
+                Some(*h) != p.dhcp
                     && !p.vagas.contains(h)
                     && !p.conexoes.iter().any(|c| c.socket == *h)
                     && !p.fechando.iter().any(|f| f.socket == *h)
@@ -1848,10 +1862,98 @@ pub fn resumo() -> Option<Resumo> {
         endereco: p.endereco.map(|c| (c.address().octets(), c.prefix_len())),
         roteador: p.roteador.map(|r| r.octets()),
         dns: p.dns,
+        modo: match p.modo {
+            Modo::Dhcp => "dhcp",
+            Modo::Estatica => "static",
+            Modo::Invalida(_) => "static-invalid",
+        },
+        erro_de_configuracao: match p.modo {
+            Modo::Invalida(motivo) => Some(motivo),
+            _ => None,
+        },
         conexoes: p.conexoes.len(),
         abertas: p.abertas,
         datagramas_alheios: p.datagramas_alheios,
     })
+}
+
+impl Pilha {
+    /// Larga o DHCP: o socket sai, e nenhuma descoberta parte mais.
+    fn largar_o_dhcp(&mut self) {
+        if let Some(h) = self.dhcp.take() {
+            self.sockets.remove(h);
+        }
+    }
+
+    /// Põe o endereço, a rota e os servidores de DNS.
+    fn configurar(
+        &mut self,
+        endereco: Option<Ipv4Cidr>,
+        roteador: Option<Ipv4Address>,
+        dns: [Option<[u8; 4]>; MAIS_DNS],
+    ) {
+        self.iface.update_ip_addrs(|a| {
+            a.clear();
+            if let Some(e) = endereco {
+                let _ = a.push(IpCidr::Ipv4(e));
+            }
+        });
+        match roteador {
+            Some(r) => {
+                let _ = self.iface.routes_mut().add_default_ipv4_route(r);
+            }
+            None => {
+                self.iface.routes_mut().remove_default_ipv4_route();
+            }
+        }
+        self.endereco = endereco;
+        self.roteador = roteador;
+        self.dns = dns;
+    }
+}
+
+/// A rede do `/etc/duke/rede`: sem DHCP, com o endereço, a rota e os
+/// servidores do arquivo — ver [`super::configuracao`].
+pub fn fixar_estatica(c: &super::configuracao::Estatica) {
+    let ([a, b, cc, d], prefixo) = c.endereco;
+    com_pilha(|p| {
+        p.largar_o_dhcp();
+        p.configurar(
+            Some(Ipv4Cidr::new(Ipv4Address::new(a, b, cc, d), prefixo)),
+            c.roteador
+                .map(|[a, b, cc, d]| Ipv4Address::new(a, b, cc, d)),
+            c.dns,
+        );
+        p.modo = Modo::Estatica;
+    });
+}
+
+/// Um `/etc/duke/rede` que não se leu: sem DHCP e sem endereço — quem
+/// escreveu um endereço quis aquele —, e o motivo no `net.info`.
+pub fn sem_configuracao(motivo: &'static str) {
+    com_pilha(|p| {
+        p.largar_o_dhcp();
+        p.configurar(None, None, [None; MAIS_DNS]);
+        p.modo = Modo::Invalida(motivo);
+    });
+}
+
+/// Só na suíte: se a pilha ainda tem o socket do DHCP.
+#[cfg(feature = "modo-teste")]
+pub fn com_dhcp_de_teste() -> bool {
+    com_pilha(|p| p.dhcp.is_some()).unwrap_or(false)
+}
+
+/// Só na suíte: de volta ao DHCP, depois de um caso que fixou a rede.
+#[cfg(feature = "modo-teste")]
+pub fn voltar_ao_dhcp_de_teste() {
+    com_pilha(|p| {
+        if p.dhcp.is_none() {
+            p.dhcp = Some(p.sockets.add(dhcpv4::Socket::new()));
+        }
+        p.configurar(None, None, [None; MAIS_DNS]);
+        p.modo = Modo::Dhcp;
+    });
 }
 
 /// Destrava a tranca da pilha à força, para uso exclusivo do caminho de

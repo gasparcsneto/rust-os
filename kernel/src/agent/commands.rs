@@ -1451,6 +1451,21 @@ pub static COMANDOS: &[Command] = &[
         handler: fs_release,
     },
     Command {
+        nome: "fs.verify",
+        resumo: "Confere o armazem abaixo de `path`: cada bloco de cada versao viva abre (a cifra autenticada confere o que o disco devolveu) e nenhum esta livre no mapa do volume. So le: nada muda, nada do conteudo sai. Diz quantos arquivos, blocos e bytes conferiu, quais nao abrem, quantos mudaram no meio e quantos blocos vivos o mapa diz livres. O alcance e o do fs.read.",
+        params: &[ParamSpec {
+            nome: "path",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "Onde comecar: /armazem para o armazem inteiro, ou um diretorio ou arquivo abaixo dele.",
+        }],
+        acesso: Acesso::Exige(Permissao::FsRead),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fs_verify,
+    },
+    Command {
         nome: "keyboard.read",
         resumo: "O que foi digitado no teclado da maquina, e os contadores dele. Tira da fila o que devolve.",
         params: &[ParamSpec {
@@ -3409,6 +3424,12 @@ fn net_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                         w.str_value(&alloc::format!("{a}.{b}.{c}.{d}"))?;
                     }
                     w.end_array()?;
+                    // De onde veio o endereco: o DHCP, ou o /etc/duke/rede
+                    // da imagem — e, se ele nao se leu, por que.
+                    w.field_str("mode", r.modo)?;
+                    if let Some(motivo) = r.erro_de_configuracao {
+                        w.field_str("config_error", motivo)?;
+                    }
                     w.field_u64("connections", r.conexoes as u64)?;
                     w.field_u64("connections_opened", r.abertas)?;
                     // Os datagramas que chegaram a uma associação UDP de
@@ -4914,6 +4935,45 @@ const TECLAS_MAX: u64 = 64;
 /// sem consumir faria a próxima leitura devolver as mesmas teclas. O preço é
 /// que a resposta é a única cópia; por isso os contadores vêm junto —
 /// `dropped` diz se houve perda, o que nenhuma releitura revelaria.
+/// Quantos caminhos ilegíveis a resposta de `fs.verify` lista: o resto é
+/// a contagem, e o log tem cada um.
+const MAIS_ILEGIVEIS_NA_RESPOSTA: usize = 32;
+
+fn fs_verify(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let relativo =
+        if politica::caminho::normalizar(caminho).as_deref() == Some(crate::armazem::RAIZ) {
+            Some(alloc::string::String::new())
+        } else {
+            crate::armazem::relativo(caminho).map(|(_, r)| r)
+        };
+    let Some(relativo) = relativo else {
+        w.field_str("error", "o caminho nao e do armazem")?;
+        return w.end_object();
+    };
+    match crate::armazem::verificar(&relativo) {
+        Ok(v) => {
+            w.field_str("path", caminho)?;
+            w.field_u64("files", v.arquivos)?;
+            w.field_u64("blocks", v.blocos)?;
+            w.field_u64("bytes", v.bytes)?;
+            w.key("unreadable")?;
+            w.begin_array()?;
+            for c in v.ilegiveis.iter().take(MAIS_ILEGIVEIS_NA_RESPOSTA) {
+                w.str_value(&alloc::format!("{}/{}", crate::armazem::RAIZ, c))?;
+            }
+            w.end_array()?;
+            w.field_u64("unreadable_count", v.ilegiveis.len() as u64)?;
+            w.field_u64("changed", v.mudaram)?;
+            w.field_u64("live_blocks_free_in_map", v.soltos)?;
+            w.field_bool("ok", v.ilegiveis.is_empty() && v.soltos == 0)?;
+        }
+        Err(motivo) => w.field_str("error", motivo)?,
+    }
+    w.end_object()
+}
+
 fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let max = params
         .member("max")

@@ -32166,6 +32166,14 @@ static CASOS: &[Caso] = &[
         f: rede_o_net_info_diz_os_dns_do_dhcp,
     },
     Caso {
+        nome: "rede: o arquivo da rede se le linha a linha, e o que nao e rede e recusado",
+        f: rede_o_arquivo_da_rede_se_le_linha_a_linha,
+    },
+    Caso {
+        nome: "rede: o endereco do arquivo, sem DHCP; o arquivo ilegivel deixa a rede sem endereco",
+        f: rede_o_endereco_do_arquivo_sem_dhcp,
+    },
+    Caso {
         nome: "energia: o pedido vai ao journal antes, e as gravacoes param depois",
         f: energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois,
     },
@@ -32184,6 +32192,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "heap: o tamanho segue a memoria",
         f: heap_o_tamanho_segue_a_memoria,
+    },
+    Caso {
+        nome: "armazem: a verificacao acha o bloco que nao abre, e so le",
+        f: armazem_a_verificacao_acha_o_bloco_que_nao_abre,
     },
     Caso {
         nome: "contencao: o agente suspenso e retomado pela prova",
@@ -47379,6 +47391,387 @@ fn rede_o_net_info_diz_os_dns_do_dhcp() -> Resultado {
     resultado
 }
 
+/// O leitor do `/etc/duke/rede`: o arquivo completo — comentários, linhas
+/// em branco, espaços, CRLF —, o mínimo, e cada forma recusada com a linha
+/// e o motivo. Um arquivo que não se lê não vira um endereço pela metade.
+fn rede_o_arquivo_da_rede_se_le_linha_a_linha() -> Resultado {
+    use crate::rede::configuracao::{Estatica, ler};
+    use crate::rede::pilha::MAIS_DNS;
+    let completo = "# a rede da bancada, escrita a mao\r\n\r\n  endereco   10.0.2.16/24  \r\nroteador 10.0.2.2\r\n# o do emulador e outro\r\ndns 10.0.2.3\r\ndns 9.9.9.9\r\n";
+    let esperado = Estatica {
+        endereco: ([10, 0, 2, 16], 24),
+        roteador: Some([10, 0, 2, 2]),
+        dns: [Some([10, 0, 2, 3]), Some([9, 9, 9, 9]), None],
+    };
+    if ler(completo) != Ok(esperado) {
+        crate::log_error!("teste", "{:?}", ler(completo));
+        return Err("o arquivo completo nao se leu");
+    }
+    let minimo = Estatica {
+        endereco: ([192, 168, 10, 5], 30),
+        roteador: None,
+        dns: [None; MAIS_DNS],
+    };
+    if ler("endereco 192.168.10.5/30") != Ok(minimo) {
+        return Err("o arquivo so com o endereco nao se leu");
+    }
+    const SUB_REDE: &str = "endereco que nao e de uma maquina nesta sub-rede";
+    const NAO_IPV4: &str = "endereco que nao e IPv4";
+    const PREFIXO: &str = "prefixo fora de 1 a 30";
+    const ROTEADOR: &str = "o roteador nao e outra maquina da sub-rede do endereco";
+    let recusados: &[(&str, usize, &str)] = &[
+        ("", 0, "falta o endereco"),
+        (
+            "# so um comentario\nroteador 10.0.2.2",
+            0,
+            "falta o endereco",
+        ),
+        (
+            "endereco 10.0.2.15/24\nendereco 10.0.2.16/24",
+            2,
+            "dois enderecos",
+        ),
+        ("endereco 10.0.2.15", 1, "falta o prefixo: a.b.c.d/p"),
+        ("endereco 10.0.2.15/0", 1, PREFIXO),
+        ("endereco 10.0.2.15/31", 1, PREFIXO),
+        ("endereco 10.0.2.15/32", 1, PREFIXO),
+        ("endereco 10.0.2.15/+24", 1, PREFIXO),
+        ("endereco 10.0.2.15/024", 1, PREFIXO),
+        ("endereco 10.0.2.15/", 1, PREFIXO),
+        ("endereco 10.0.2.0/24", 1, SUB_REDE),
+        ("endereco 10.0.2.255/24", 1, SUB_REDE),
+        ("endereco 0.0.2.15/8", 1, SUB_REDE),
+        ("endereco 127.0.0.2/8", 1, SUB_REDE),
+        ("endereco 224.0.0.5/24", 1, SUB_REDE),
+        ("endereco 250.1.1.1/8", 1, SUB_REDE),
+        ("endereco 10.0.2.256/24", 1, NAO_IPV4),
+        ("endereco 10.0.2/24", 1, NAO_IPV4),
+        ("endereco 10.0.2.15.1/24", 1, NAO_IPV4),
+        ("endereco 10.0.2.+5/24", 1, NAO_IPV4),
+        ("endereco 10.0.2.0015/24", 1, NAO_IPV4),
+        ("endereco 10.0..15/24", 1, NAO_IPV4),
+        (
+            "endereco 10.0.2.15/24 10.0.2.16/24",
+            1,
+            "um valor so por linha",
+        ),
+        ("endereco", 1, "falta o valor"),
+        (
+            "Endereco 10.0.2.15/24",
+            1,
+            "linha que nao e endereco, roteador nem dns",
+        ),
+        (
+            "endereco 10.0.2.15/24\nmascara 255.255.255.0",
+            2,
+            "linha que nao e endereco, roteador nem dns",
+        ),
+        ("endereco 10.0.2.15/24\nroteador 10.0.3.1", 2, ROTEADOR),
+        ("endereco 10.0.2.15/24\n\nroteador 10.0.2.15", 3, ROTEADOR),
+        ("endereco 10.0.2.15/24\nroteador 10.0.2.0", 2, ROTEADOR),
+        ("endereco 10.0.2.15/24\nroteador 10.0.2.255", 2, ROTEADOR),
+        ("roteador 10.0.3.1\nendereco 10.0.2.15/24", 1, ROTEADOR),
+        (
+            "endereco 10.0.2.15/24\nroteador 10.0.2.2\nroteador 10.0.2.3",
+            3,
+            "dois roteadores",
+        ),
+        (
+            "endereco 10.0.2.15/24\nroteador 255.255.255.255",
+            2,
+            "roteador que nao e IPv4 de maquina",
+        ),
+        (
+            "endereco 10.0.2.15/24\ndns 1.1.1.1\ndns 8.8.8.8\ndns 9.9.9.9\ndns 10.0.2.3",
+            5,
+            "servidores de DNS demais",
+        ),
+        (
+            "endereco 10.0.2.15/24\ndns 239.1.1.1",
+            2,
+            "dns que nao e IPv4 de maquina",
+        ),
+        (
+            "endereco 10.0.2.15/24\ndns 127.0.0.1",
+            2,
+            "dns que nao e IPv4 de maquina",
+        ),
+        (
+            "endereco 10.0.2.15/24\ndns 0.0.0.0",
+            2,
+            "dns que nao e IPv4 de maquina",
+        ),
+    ];
+    for &(texto, linha, motivo) in recusados {
+        if ler(texto) != Err((linha, motivo)) {
+            crate::log_error!("teste", "{:?}: {:?}", texto, ler(texto));
+            return Err("um arquivo da rede foi lido de outro jeito");
+        }
+    }
+    Ok(())
+}
+
+/// Um sistema de arquivos de um arquivo só, em memória: o arquivo da rede
+/// que a suíte escreve, para o carregador do boot o ler pelo VFS.
+struct UmArquivo {
+    nome: &'static str,
+    conteudo: alloc::vec::Vec<u8>,
+}
+
+impl crate::vfs::SistemaDeArquivos for UmArquivo {
+    fn raiz(&self) -> crate::vfs::No {
+        crate::vfs::No {
+            tipo: crate::vfs::Tipo::Diretorio,
+            id: 0,
+            tamanho: 0,
+        }
+    }
+
+    fn procurar(
+        &self,
+        _dir: &crate::vfs::No,
+        nome: &str,
+    ) -> Result<crate::vfs::No, crate::vfs::Erro> {
+        if nome != self.nome {
+            return Err(crate::vfs::Erro::NaoEncontrado);
+        }
+        Ok(crate::vfs::No {
+            tipo: crate::vfs::Tipo::Arquivo,
+            id: 1,
+            tamanho: self.conteudo.len() as u64,
+        })
+    }
+
+    fn ler(
+        &self,
+        _no: &crate::vfs::No,
+        deslocamento: u64,
+        destino: &mut [u8],
+    ) -> Result<usize, crate::vfs::Erro> {
+        let resto = usize::try_from(deslocamento)
+            .ok()
+            .and_then(|d| self.conteudo.get(d..))
+            .unwrap_or(&[]);
+        let n = resto.len().min(destino.len());
+        destino[..n].copy_from_slice(&resto[..n]);
+        Ok(n)
+    }
+
+    fn listar(
+        &self,
+        _dir: &crate::vfs::No,
+        indice: usize,
+    ) -> Result<Option<crate::vfs::Entrada>, crate::vfs::Erro> {
+        Ok((indice == 0).then(|| crate::vfs::Entrada {
+            nome: self.nome.into(),
+            tipo: crate::vfs::Tipo::Arquivo,
+        }))
+    }
+}
+
+/// Onde a suíte monta o arquivo da rede.
+const PONTO_DA_REDE: &str = "/teste-rede";
+
+/// O carregador do boot sobre `conteudo`, montado em [`PONTO_DA_REDE`] com
+/// a origem dada, e desmontado depois.
+fn rede_carregada(
+    conteudo: &[u8],
+    origem: crate::vfs::Origem,
+) -> Result<crate::rede::configuracao::Carga, &'static str> {
+    crate::vfs::montar(
+        "teste",
+        PONTO_DA_REDE,
+        origem,
+        alloc::boxed::Box::new(UmArquivo {
+            nome: "rede",
+            conteudo: conteudo.to_vec(),
+        }),
+    )
+    .map_err(|e| e.motivo())?;
+    let carga = crate::rede::configuracao::carregar_de("/teste-rede/rede");
+    let _ = crate::vfs::desmontar(PONTO_DA_REDE);
+    Ok(carga)
+}
+
+/// A rede de volta ao DHCP, esperada até o endereço e o DNS dele voltarem.
+fn rede_de_volta_ao_dhcp() -> Resultado {
+    crate::rede::pilha::voltar_ao_dhcp_de_teste();
+    esperar_cedendo(
+        || {
+            crate::rede::pilha::resumo().is_some_and(|r| {
+                r.modo == "dhcp"
+                    && r.endereco == Some((NOSSO_IP, 24))
+                    && r.dns[0] == Some([10, 0, 2, 3])
+            })
+        },
+        1500,
+    )
+    .map_err(|_| "o DHCP nao devolveu o endereco depois do caso")
+}
+
+/// O carregador do boot (`rede::configuracao::carregar_de`), pelo VFS: sem
+/// o arquivo, nada muda — a imagem da suíte não tem um, e o boot ficou no
+/// DHCP —; com ele, a pilha larga o DHCP e fica com o endereço, a rota e os
+/// DNS do arquivo — um endereço que o DHCP não dá, e o TFTP do emulador
+/// responde a ele —; ilegível (o roteador fora, bytes que não são texto, um
+/// diretório, uma origem que não é a imagem), a pilha fica sem endereço e
+/// diz por quê — nada disca —, e o arquivo bom volta a valer. No fim, o
+/// DHCP de volta, para os casos seguintes.
+fn rede_o_endereco_do_arquivo_sem_dhcp() -> Resultado {
+    use crate::rede::configuracao::{CAMINHO, Carga, carregar_de};
+    esperar_cedendo(
+        || {
+            crate::rede::pilha::resumo()
+                .is_some_and(|r| r.modo == "dhcp" && r.endereco == Some((NOSSO_IP, 24)))
+        },
+        1000,
+    )
+    .map_err(|_| "a rede nao estava no DHCP antes do caso")?;
+    crate::pessoas::esquecer_registradas();
+    let sistema = sistema_aqui();
+    let info = || fs_pedir(sistema, "net.info", "{}");
+    let resultado = (|| -> Resultado {
+        // A imagem da suíte não tem o arquivo, e um caminho que não existe
+        // não muda nada.
+        if carregar_de(CAMINHO) != Carga::SemArquivo
+            || carregar_de("/teste-rede-que-nao-existe/rede") != Carga::SemArquivo
+        {
+            return Err("sem o arquivo da rede, o carregador fez alguma coisa");
+        }
+        if !crate::rede::pilha::com_dhcp_de_teste()
+            || fs_texto(&info(), "mode").as_deref() != Some("dhcp")
+        {
+            return Err("sem o arquivo da rede, a pilha largou o DHCP");
+        }
+        let arquivo =
+            b"# a bancada, escrita a mao\nendereco 10.0.2.16/24\nroteador 10.0.2.2\ndns 10.0.2.3\ndns 9.9.9.9\n";
+        match rede_carregada(arquivo, crate::vfs::Origem::Imagem)? {
+            Carga::Estatica(c) if c.endereco == ([10, 0, 2, 16], 24) => {}
+            outra => {
+                crate::log_error!("teste", "{:?}", outra);
+                return Err("o arquivo da rede nao foi aplicado");
+            }
+        }
+        let r = info();
+        if fs_texto(&r, "mode").as_deref() != Some("static")
+            || fs_texto(&r, "address").as_deref() != Some("10.0.2.16/24")
+            || fs_texto(&r, "gateway").as_deref() != Some("10.0.2.2")
+            || !r.contains(r#""dns":["10.0.2.3","9.9.9.9"]"#)
+            || r.contains("config_error")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o net.info nao diz a rede do arquivo");
+        }
+        if crate::rede::pilha::com_dhcp_de_teste() {
+            return Err("com o arquivo da rede, a pilha continuou com o DHCP");
+        }
+        // O endereço é o do arquivo, e a rede responde a ele: o primeiro
+        // bloco do TFTP do emulador volta para 10.0.2.16.
+        let aberta = fs_pedir(
+            sistema,
+            "net.connect",
+            &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+        );
+        let conexao = conexao_aberta(&aberta)?;
+        let bloco = (|| {
+            let r = mandar_datagrama(sistema, conexao, &pedido_de_leitura("bancada.txt"));
+            if fs_numero(&r, "sent") != Some(20) {
+                crate::log_error!("teste", "net.send: {}", r);
+                return Err("o pedido de leitura nao saiu");
+            }
+            datagrama_de(sistema, conexao)
+        })();
+        let _ = mandar_datagrama(sistema, conexao, &confirmacao(1));
+        fechar_conexao(sistema, conexao);
+        let bloco = bloco?;
+        if bloco.len() != 516
+            || bloco[..4] != [0, 3, 0, 1]
+            || bloco[4..] != arquivo_do_tftp()[..512]
+        {
+            return Err("pelo endereco do arquivo, o TFTP nao respondeu o primeiro bloco");
+        }
+        // Ilegível: a pilha sem endereço, sem rota, sem DNS, e o motivo.
+        let ilegiveis: &[(&[u8], crate::vfs::Origem, &str)] = &[
+            (
+                b"endereco 10.0.2.16/24\nroteador 10.0.3.1\n",
+                crate::vfs::Origem::Imagem,
+                "o roteador nao e outra maquina da sub-rede do endereco",
+            ),
+            (
+                b"endereco 10.0.2.16/24\n\xff\n",
+                crate::vfs::Origem::Imagem,
+                "o arquivo da rede nao e texto",
+            ),
+            (
+                b"endereco 10.0.2.16/24\n",
+                crate::vfs::Origem::Gravada,
+                "o arquivo da rede nao veio da imagem",
+            ),
+        ];
+        for &(conteudo, origem, motivo) in ilegiveis {
+            match rede_carregada(conteudo, origem)? {
+                Carga::Invalida(_, m) if m == motivo => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("o arquivo ilegivel foi carregado de outro jeito");
+                }
+            }
+            let r = info();
+            if fs_texto(&r, "mode").as_deref() != Some("static-invalid")
+                || fs_texto(&r, "config_error").as_deref() != Some(motivo)
+                || !r.contains(r#""address":null"#)
+                || !r.contains(r#""gateway":null"#)
+                || !r.contains(r#""dns":[]"#)
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("com o arquivo ilegivel, o net.info nao diz a rede sem endereco");
+            }
+        }
+        // Sem endereço, nada disca — e o motivo é o arquivo, não o DHCP.
+        let r = fs_pedir(sistema, "net.connect", r#"{"to":"tcp:10.0.2.100:7"}"#);
+        if let Ok(conexao) = conexao_aberta(&r) {
+            fechar_conexao(sistema, conexao);
+            return Err("sem endereco, uma conexao foi discada");
+        }
+        if fs_texto(&r, "code").as_deref() != Some("NETWORK_UNAVAILABLE")
+            || !r.contains("o /etc/duke/rede nao se leu")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("sem endereco pelo arquivo, a recusa nao diz o arquivo");
+        }
+        // Um diretório no lugar do arquivo também não se lê.
+        crate::vfs::montar(
+            "teste",
+            PONTO_DA_REDE,
+            crate::vfs::Origem::Imagem,
+            alloc::boxed::Box::new(UmArquivo {
+                nome: "rede",
+                conteudo: alloc::vec::Vec::new(),
+            }),
+        )
+        .map_err(|e| e.motivo())?;
+        let diretorio = carregar_de(PONTO_DA_REDE);
+        let _ = crate::vfs::desmontar(PONTO_DA_REDE);
+        if diretorio != Carga::Invalida(0, "o arquivo da rede nao se le") {
+            crate::log_error!("teste", "{:?}", diretorio);
+            return Err("um diretorio no lugar do arquivo da rede foi carregado");
+        }
+        // E o arquivo bom volta a valer.
+        if !matches!(
+            rede_carregada(arquivo, crate::vfs::Origem::Imagem)?,
+            Carga::Estatica(_)
+        ) || fs_texto(&info(), "address").as_deref() != Some("10.0.2.16/24")
+        {
+            return Err("depois do ilegivel, o arquivo bom nao voltou a valer");
+        }
+        Ok(())
+    })();
+    let volta = rede_de_volta_ao_dhcp();
+    crate::pessoas::esquecer_registradas();
+    resultado?;
+    volta
+}
+
 // ---------------------------------------------------------------------------
 // energia: reiniciar e desligar — `system.reboot` e `system.poweroff`
 // ---------------------------------------------------------------------------
@@ -47661,6 +48054,124 @@ fn heap_o_tamanho_segue_a_memoria() -> Resultado {
         return Err("o heap desta maquina nao e o da conta");
     }
     Ok(())
+}
+
+/// `fs.verify`: o armazém inteiro confere — cada bloco de cada versão viva
+/// abre, nenhum está livre no mapa —, e um arquivo também; um bloco
+/// estragado no disco aparece pelo caminho do arquivo, e só ele; a
+/// verificação só lê — a versão não muda, e nenhuma leitura que não abre
+/// conta como divergência do armazém. O alcance é o do `fs.read`: o
+/// observador não tem a permissão, e o operador confere só o que lê.
+fn armazem_a_verificacao_acha_o_bloco_que_nao_abre() -> Resultado {
+    const C: &str = "/armazem/compartilhado/verifica.txt";
+    crate::pessoas::esquecer_registradas();
+    let sistema = sistema_aqui();
+    let resultado = (|| -> Resultado {
+        diretorios_acima(C)?;
+        let (v, _) = fs_no_armazem(C);
+        if v != 0 {
+            let r = fs_pedir(
+                sistema,
+                "fs.delete",
+                &alloc::format!(r#"{{"path":"{C}","expect_version":{v}}}"#),
+            );
+            if !fs_ok(&r) {
+                return Err("o caso nao apagou o arquivo de antes");
+            }
+        }
+        let r = fs_gravar(sistema, C, 0, &"v".repeat(3000));
+        let versao = fs_numero(&r, "version").ok_or_else(|| {
+            crate::log_error!("teste", "{}", r);
+            "o arquivo do caso nao foi gravado"
+        })?;
+        let verificar = |quem, caminho: &str| {
+            fs_pedir(
+                quem,
+                "fs.verify",
+                &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+            )
+        };
+        let r = verificar(sistema, "/armazem");
+        if !r.contains(r#""ok":true"#)
+            || fs_numero(&r, "files").is_none_or(|n| n == 0)
+            || fs_numero(&r, "unreadable_count") != Some(0)
+            || fs_numero(&r, "live_blocks_free_in_map") != Some(0)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("o armazem inteiro nao conferiu");
+        }
+        let r = verificar(sistema, C);
+        if fs_numero(&r, "files") != Some(1) || fs_numero(&r, "bytes") != Some(3000) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arquivo do caso nao conferiu sozinho");
+        }
+        // O alcance é o do fs.read.
+        let observador = crate::autorizacao::Chamador::Pessoa(crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(152),
+            "verifica-observador",
+            "observador",
+        ));
+        if !recusado_com(&verificar(observador, "/armazem"), "DENY_PERMISSION") {
+            return Err("o observador verificou o armazem");
+        }
+        let operador = operador_que_lanca(153, "verifica-operador");
+        if !recusado_com(&verificar(operador, "/armazem"), "DENY_RESOURCE") {
+            return Err("o operador verificou o armazem inteiro, fora do alcance dele");
+        }
+        if !verificar(operador, "/armazem/compartilhado").contains(r#""ok":true"#) {
+            return Err("o operador nao verificou o que le");
+        }
+        if !verificar(sistema, "/dados").contains("o caminho nao e do armazem") {
+            return Err("a verificacao aceitou um caminho fora do armazem");
+        }
+        // Um bloco estragado no disco: o primeiro setor do primeiro bloco do
+        // arquivo, por cima, pela janela do armazém.
+        let relativo = C.strip_prefix("/armazem/").ok_or("caminho do caso")?;
+        let (bloco, _) = crate::armazem::com_o_armazem(|a| {
+            a.no(relativo)
+                .and_then(|n| n.conteudo())
+                .and_then(|c| c.onde(0))
+        })
+        .ok_or("o arquivo do caso nao tem bloco")?;
+        let setor = crate::volume::setor_do_bloco(bloco).ok_or("o bloco nao tem setor")?;
+        let divergencias = crate::armazem::divergencias_de_teste();
+        crate::virtio::blk::com_o_disco(|d| {
+            d.gravar_setores(crate::virtio::blk::Janela::Armazem, setor, &[0xA5; 512])
+        })
+        .ok_or("sem disco")??;
+        let r = verificar(sistema, "/armazem");
+        if !r.contains(r#""ok":false"#)
+            || fs_numero(&r, "unreadable_count") != Some(1)
+            || !r.contains(&alloc::format!(r#""unreadable":["{C}"]"#))
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a verificacao nao achou o bloco estragado");
+        }
+        // Só a versão: ler o conteúdo, com o bloco estragado, seria uma
+        // divergência — a da leitura, não a da verificação.
+        if versao_no_armazem(C) != versao {
+            return Err("a verificacao mudou a versao do arquivo");
+        }
+        if crate::armazem::divergencias_de_teste() != divergencias {
+            return Err("a verificacao contou o bloco estragado como divergencia do armazem");
+        }
+        // E o arquivo sai, com o bloco estragado: ninguém mais o lê.
+        let r = fs_pedir(
+            sistema,
+            "fs.delete",
+            &alloc::format!(r#"{{"path":"{C}","expect_version":{versao}}}"#),
+        );
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arquivo estragado nao saiu");
+        }
+        if !verificar(sistema, "/armazem").contains(r#""ok":true"#) {
+            return Err("sem o arquivo estragado, o armazem nao voltou a conferir");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    resultado
 }
 
 /// O agente suspenso: continua registrado e conectado, mas cada pedido

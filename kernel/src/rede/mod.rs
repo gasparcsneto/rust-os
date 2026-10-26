@@ -38,6 +38,7 @@ pub mod bancada_hora;
 pub mod canal;
 pub mod captura;
 pub mod conexoes;
+pub mod configuracao;
 pub mod espera;
 pub mod pilha;
 

@@ -252,6 +252,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `message.ack` | Confirma uma mensagem lida: ela sai da caixa (`id`, `expect_version`) |
 | `message.cancel` | Cancela uma mensagem mandada, enquanto ninguém a leu (`id`, `expect_version`) |
 | `message.status` | O estado de uma mensagem mandada ou recebida (`id`) |
+| `fs.verify` | Confere o armazém abaixo de `path`: cada bloco de cada versão viva abre (a cifra autenticada confere o que o disco devolveu) e nenhum está livre no mapa do volume. Só lê; diz o que conferiu, os arquivos que não abrem, os que mudaram no meio. O alcance é o do `fs.read` |
 | `keyboard.read` | O que foi digitado no teclado da máquina desde a última leitura de quem pede, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -311,6 +312,7 @@ kernel/src/
 ├── rede/
 │   ├── mod.rs       o ARP do diagnóstico, e o observador que o deixa conviver com a pilha
 │   ├── pilha.rs     a pilha IP — o smoltcp sobre a placa —, o DHCP, a tabela de conexões e o fio que a faz andar
+│   ├── configuracao.rs  a rede sem DHCP: o `/etc/duke/rede` da imagem — o endereço, o roteador e os DNS —, e a pilha sem endereço quando ele não se lê
 │   ├── conexoes.rs  a conexão como capacidade do registro: de quem ela é, e como o gate a decide
 │   ├── canal.rs     o canal do agente por TCP, só o transporte: as vagas, a geração, o prazo do aperto e a contrapressão
 │   ├── captura.rs   os datagramas trocados com um destino observado, para quem tem `net.observe` sobre ele

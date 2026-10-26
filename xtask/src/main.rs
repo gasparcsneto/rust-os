@@ -5920,29 +5920,9 @@ fn which(nome: &str) -> Option<PathBuf> {
         .find(|caminho| caminho.is_file())
 }
 
-/// Cria o disco de testes, ou o recria se a receita mudou.
-///
-/// # Nunca por baixo de uma máquina viva de outra execução
-///
-/// O disco é um só para as duas arquiteturas, e quem o pede escreve nele
-/// no lugar: monta de novo (o arquivo inteiro), põe o iniciador e o kernel
-/// na ESP, zera o estado e o armazém. Com o emulador de outra execução
-/// sobre ele, a máquina viva perde, no meio, o que gravou — foi o que se
-/// viu na suíte do ARM com a fumaça da rede principal rodando ao lado, que
-/// zerava este disco sem usá-lo. Aqui se recusa antes de qualquer escrita.
-/// Os emuladores desta mesma execução não contam: são filhos dela.
-fn disco_de_testes() -> Result<PathBuf, String> {
-    reservar_a_bancada()?;
-    let caminho = raiz_do_projeto().join("target").join("disco.img");
-    let receita = raiz_do_projeto().join("target").join("disco.receita");
-    let vivas = maquinas_de_outra_execucao_sobre(&caminho);
-    if !vivas.is_empty() {
-        return Err(format!(
-            "o disco de testes {} esta aberto pelo emulador de outra execucao (processo {:?}): escrever nele agora apagaria o que ela grava; espere ela acabar",
-            caminho.display(),
-            vivas
-        ));
-    }
+/// Os arquivos da raiz do disco de testes: os programas, as chaves, as
+/// âncoras, as redes do IC e os módulos da gestão.
+fn arquivos_do_disco_de_testes() -> Result<Vec<(String, Vec<u8>)>, String> {
     // Os programas compilados e as chaves vão pela mesma lista: os dois são
     // gerados, e os dois entram na receita pelo resumo do conteúdo inteiro.
     // Uma chave nova muda bytes sem mudar o tamanho, e o byte do meio que
@@ -5967,6 +5947,83 @@ fn disco_de_testes() -> Result<PathBuf, String> {
     // principal, do repositório, conferidas pela impressão — ver
     // [`tls::publicas`].
     programas.push((tls::PUBLICAS_NA_IMAGEM.to_string(), tls::publicas()?));
+    Ok(programas)
+}
+
+/// Um disco de testes em `destino` com `extras` na raiz — no lugar do
+/// arquivo de mesmo nome, se houver um —, para um cenário que sobe a
+/// máquina com uma imagem diferente: os mesmos arquivos do
+/// [`disco_de_testes`] e, no x86, a mesma ESP do disco de `artefato`, o
+/// iniciador e o kernel copiados byte a byte. Devolve o artefato que boota
+/// dele; a máquina usa o disco por `Ambiente::com_disco`.
+pub(crate) fn disco_de_testes_com(
+    artefato: &Artefato,
+    destino: &Path,
+    extras: Vec<(String, Vec<u8>)>,
+) -> Result<Artefato, String> {
+    let mut arquivos = arquivos_do_disco_de_testes()?;
+    for (nome, conteudo) in extras {
+        arquivos.retain(|(n, _)| *n != nome);
+        arquivos.push((nome, conteudo));
+    }
+    montar_disco(destino, &arquivos)?;
+    match artefato {
+        Artefato::Binario(img) => Ok(Artefato::Binario(img.clone())),
+        Artefato::Disco(original) => {
+            use std::io::{Read, Seek, SeekFrom};
+            let tamanho = (disco::ESP_SETORES * 512) as usize;
+            let mut esp = vec![0u8; tamanho];
+            std::fs::File::open(original)
+                .and_then(|mut f| {
+                    f.seek(SeekFrom::Start(disco::ESP_EM * 512))?;
+                    f.read_exact(&mut esp)
+                })
+                .map_err(|e| {
+                    format!("não foi possível ler a ESP de {}: {e}", original.display())
+                })?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(destino)
+                .and_then(|mut f| {
+                    f.seek(SeekFrom::Start(disco::ESP_EM * 512))?;
+                    f.write_all(&esp)?;
+                    f.sync_all()
+                })
+                .map_err(|e| {
+                    format!(
+                        "não foi possível escrever a ESP em {}: {e}",
+                        destino.display()
+                    )
+                })?;
+            Ok(Artefato::Disco(destino.to_path_buf()))
+        }
+    }
+}
+
+/// Cria o disco de testes, ou o recria se a receita mudou.
+///
+/// # Nunca por baixo de uma máquina viva de outra execução
+///
+/// O disco é um só para as duas arquiteturas, e quem o pede escreve nele
+/// no lugar: monta de novo (o arquivo inteiro), põe o iniciador e o kernel
+/// na ESP, zera o estado e o armazém. Com o emulador de outra execução
+/// sobre ele, a máquina viva perde, no meio, o que gravou — foi o que se
+/// viu na suíte do ARM com a fumaça da rede principal rodando ao lado, que
+/// zerava este disco sem usá-lo. Aqui se recusa antes de qualquer escrita.
+/// Os emuladores desta mesma execução não contam: são filhos dela.
+fn disco_de_testes() -> Result<PathBuf, String> {
+    reservar_a_bancada()?;
+    let caminho = raiz_do_projeto().join("target").join("disco.img");
+    let receita = raiz_do_projeto().join("target").join("disco.receita");
+    let vivas = maquinas_de_outra_execucao_sobre(&caminho);
+    if !vivas.is_empty() {
+        return Err(format!(
+            "o disco de testes {} esta aberto pelo emulador de outra execucao (processo {:?}): escrever nele agora apagaria o que ela grava; espere ela acabar",
+            caminho.display(),
+            vivas
+        ));
+    }
+    let programas = arquivos_do_disco_de_testes()?;
     let esperada = receita_do_disco(&programas);
 
     if caminho.is_file() && std::fs::read_to_string(&receita).is_ok_and(|atual| atual == esperada) {

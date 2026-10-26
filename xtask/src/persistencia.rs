@@ -284,6 +284,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_heap_segue_a_memoria,
     },
     Cenario {
+        nome: "a rede fixa da imagem: o endereco do arquivo sem DHCP, e o arquivo ilegivel deixa a maquina sem endereco",
+        rodar: a_rede_fixa_da_imagem,
+    },
+    Cenario {
         nome: "o signatario recusa assinar sobre uma geracao menor que a que ja viu",
         rodar: o_signatario_recusa_geracao_menor,
     },
@@ -757,6 +761,64 @@ fn o_heap_segue_a_memoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
         pequena / MIB,
         grande / MIB
     ))
+}
+
+/// O `/etc/duke/rede` da imagem, num kernel de produção, em dois discos
+/// novos: com o arquivo, a máquina sobe com o endereço dele — um que o DHCP
+/// do emulador não dá — e sem DHCP; com um arquivo que não se lê, sobe sem
+/// endereço, e o `net.info` diz o motivo. Nos dois, o canal atende e a
+/// persistência abre: a rede não é autoridade.
+fn a_rede_fixa_da_imagem(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let dir = super::raiz_do_projeto().join("target").join("rede-fixa");
+    let disco = dir.join("disco.img");
+    let casos = [
+        (
+            "# a rede da bancada, escrita a mao\nendereco 10.0.2.16/24\nroteador 10.0.2.2\ndns 10.0.2.3\n",
+            "static",
+            "10.0.2.16/24",
+            None,
+        ),
+        (
+            "endereco 10.0.2.16/24\nroteador 10.0.3.1\n",
+            "static-invalid",
+            // O `campo_simples` lê o `null` do JSON como o texto dele.
+            "null",
+            Some("o roteador nao e outra maquina da sub-rede do endereco"),
+        ),
+    ];
+    let mut vistos = Vec::new();
+    let resultado = (|| -> Result<(), String> {
+        for (arquivo, modo, endereco, erro) in casos {
+            super::zerar_o_tpm(arch)?;
+            let variante = super::disco_de_testes_com(
+                artefato,
+                &disco,
+                vec![("etc/duke/rede".to_string(), arquivo.as_bytes().to_vec())],
+            )?;
+            let ambiente = Ambiente::ligar(arch, None)?.com_disco(disco.clone());
+            let mut m = Ligada::subir_com(arch, &variante, ambiente)?;
+            let r = m.pedir("net.info", "{}")?;
+            let p = persistencia_de(&mut m)?;
+            m.cortar_a_energia()?;
+            if texto_do_resultado(&r, "mode").as_deref() != Some(modo)
+                || texto_do_resultado(&r, "address").as_deref() != Some(endereco)
+                || texto_do_resultado(&r, "config_error").as_deref() != erro
+            {
+                return Err(format!("com o arquivo {arquivo:?}, o net.info:\n  {r}"));
+            }
+            if p.estado != "available" {
+                return Err(format!(
+                    "com o arquivo {arquivo:?}, a persistencia nao abriu: {} ({})",
+                    p.estado, p.motivo
+                ));
+            }
+            vistos.push(format!("{modo} {}", erro.unwrap_or(endereco)));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    resultado?;
+    Ok(vistos.join("; "))
 }
 
 /// O RTC lido pelo kernel, pelo `system.info`.
