@@ -7838,6 +7838,53 @@ disco, NVMe, na máquina dos testes —, e a bancada de persistência, com o
 kernel de produção, reinicia e desliga de verdade, sobe com o disco do
 sistema no NVMe (no x86 o firmware boota dele) e com a rede do arquivo.
 
+### As mutações da operação
+
+Cada proteção nova tirada ou enfraquecida, uma de cada vez, contra os
+casos da suíte que a devem pegar: **trinta no x86, vinte e sete
+reprovadas**; e doze no ARM — as do código do ARM e algumas de fora
+dele, para saber se a suíte do ARM também as pega —, dez reprovadas. Quatro
+sobreviveram à primeira rodada por testes fracos, e os testes mudaram por
+elas: a descarga final da energia (a do pedido no journal já contava), o
+segundo pedido pela prova com um reinício a caminho (o handler do comando
+já recusava o do gate), o `Flush` do NVMe (a camada contava a descarga, e o
+cache do hospedeiro sobrevive ao corte da bancada) e o INTx da função (os
+vetores mascarados já seguravam o pino).
+
+| Mutação | Reprovada por |
+|---|---|
+| `process.terminate` pela permissão de leitura | cinco casos `processos:` |
+| o gate decide o término como se o alvo fosse do sistema | `processos: quem nao pode encerrar ouve a recusa` |
+| o término sem o isolamento | `processos: o encerrado que gira morre no tique`, `processos: o pedido em curso do encerrado nao chega ao commit` |
+| o término não acorda quem espera (x86 e ARM) | `processos: o encerrado que espera acorda e morre` e mais quatro |
+| o tique não mata quem gira no anel 3; a IRQ vinda de EL0 não mata (ARM) | `processos: o encerrado que gira morre no tique` e mais três |
+| as duas conferências da chamada tiradas — a entrada e a volta do `syscall`; do `svc` no ARM | seis casos `processos:` no x86, quatro no ARM |
+| **só a entrada, ou só a volta, da chamada (x86 e ARM)** | **sobrevivem** — cada uma é redundante com a outra: no pior caso, um encerrado faz uma chamada a mais, já isolado e sem autoridade nenhuma |
+| a energia sem o pedido no journal | `energia: o pedido vai ao journal antes, e as gravacoes param depois`, `energia: sem o pedido no journal, a maquina segue` |
+| a energia sem a descarga final | `energia: o pedido vai ao journal antes, e as gravacoes param depois` |
+| um segundo pedido de energia aceito | `energia: quem nao pode ouve a recusa` |
+| `system.reboot` pela permissão de leitura | `energia: quem nao pode ouve a recusa` |
+| a energia sem conferir o meio no firmware (x86 e ARM) | `energia: sem o meio no firmware, a maquina segue` |
+| `fs.verify` sem o recurso do caminho; a verificação que não abre o bloco | `armazem: a verificacao acha o bloco que nao abre, e so le` |
+| a verificação conta os blocos livres do arquivo que mudou no meio (x86 e ARM); a verificação sem os blocos vivos livres no mapa | `armazem: a verificacao com o arquivo mudando no meio, e o bloco vivo livre no mapa` |
+| o arquivo ilegível deixa o DHCP e o endereço; o arquivo gravado vale como o da imagem; o endereço fixo com o DHCP ainda ligado | `rede: o endereco do arquivo, sem DHCP; o arquivo ilegivel deixa a rede sem endereco` |
+| o roteador fora da sub-rede aceito | o mesmo caso e `rede: o arquivo da rede se le linha a linha, e o que nao e rede e recusado` |
+| a escrita fora da janela (x86 e ARM) | `disco: recusa escrita fora da janela, e nao toca o vizinho`, `nvme: escreve, descarrega e le de volta, so dentro da janela` |
+| a janela se redesenha; a janela que cruza a outra; a leitura além da capacidade | `disco: a janela nao se redesenha depois do boot`; o caso `nvme:` da janela; `disco: recusa setor fora da capacidade` |
+| o NVMe sem o aviso de desligamento (x86 e ARM) | `nvme: o aviso de desligamento para o controlador, e nada mais passa` |
+| o NVMe sem o bit de fase (x86 e ARM) | todos os casos `nvme:` |
+| o NVMe sem o `Flush`; o NVMe com o INTx ligado (x86 e ARM) | `nvme: escreve, descarrega e le de volta, so dentro da janela`; `nvme: o controlador liga, e o disco e o que o xtask montou` |
+| **o NVMe sem conferir o identificador do comando** | **sobreviveu** — o QEMU responde um comando por vez, sempre com o identificador certo: a conferência é contra um controlador defeituoso, que o emulador não produz (a mesma do virtio-blk) |
+
+O kernel de produção cresceu 26 152 bytes no x86 (+0,66%) e 119 444 no
+ARM (+3,68%), pela soma dos segmentos carregáveis. O código novo — o
+NVMe, a camada de bloco, a energia, o término, o leitor da rede, a
+verificação — soma, pelos símbolos, 37 KiB no x86 e 26 KiB no ARM; o resto
+é o LLVM embutindo de outro jeito o mesmo código-fonte (no ARM, dezenas de
+monomorfizações de `sem_interrupcoes` passaram a embutir os fechos). Os
+programas não mudaram; o `encerravel`, novo, só existe para os casos do
+término.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
