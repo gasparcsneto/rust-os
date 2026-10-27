@@ -633,6 +633,15 @@ fn encenar(arch: Arquitetura, bytes: &[u8]) -> Result<(), String> {
 /// a instalação confere o slot inteiro, e o que não bate é recusado.
 fn encenar_sobre(arch: Arquitetura, antes: &[u8], depois: &[u8]) -> Result<(), String> {
     let mut agente = AgenteNaPorta::conectar(arch, PORTA_DO_SISTEMA)?;
+    encenar_sobre_por(&mut agente, antes, depois)
+}
+
+/// [`encenar_sobre`] por uma conexão que já está aberta.
+fn encenar_sobre_por(
+    agente: &mut AgenteNaPorta,
+    antes: &[u8],
+    depois: &[u8],
+) -> Result<(), String> {
     let pedaco = producao::PEDACO_DA_ENCENACAO;
     for (i, novo) in depois.chunks(pedaco).enumerate() {
         let de = i * pedaco;
@@ -669,6 +678,11 @@ fn encenar_no_caso(arch: Arquitetura, i: usize, imagem: &[u8]) -> Result<(), Str
 /// Um `update.stage` cru, de `bytes` a partir de `de`: a resposta.
 fn encenar_em(arch: Arquitetura, porta: u8, de: u64, bytes: &[u8]) -> Result<String, String> {
     let mut agente = AgenteNaPorta::conectar(arch, porta)?;
+    encenar_em_por(&mut agente, de, bytes)
+}
+
+/// [`encenar_em`] por uma conexão que já está aberta.
+fn encenar_em_por(agente: &mut AgenteNaPorta, de: u64, bytes: &[u8]) -> Result<String, String> {
     agente.pedir_com_anexo("update.stage", &format!(r#"{{"offset":{de}}}"#), bytes)
 }
 
@@ -1047,18 +1061,25 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         let arch = b.arch;
         let im = &b.imagens;
         let mut recusas = Vec::new();
+        // Uma conexão só pela porta do sistema, para todas as escritas: a
+        // política limita os apertos de mão a dez por porta a cada dez
+        // segundos (`apertos 10 10000`), e o cenário escreve no slot uma
+        // dúzia de vezes no mesmo boot. Com uma conexão por escrita, um
+        // emulador mais rápido punha onze apertos na mesma janela, e o
+        // décimo primeiro era recusado — como deve.
+        let mut sistema = AgenteNaPorta::conectar(arch, PORTA_DO_SISTEMA)?;
 
-        encenar(arch, &im.estranha.bytes)?;
+        producao::encenar(&mut sistema, &im.estranha.bytes)?;
         let r = quorum(&mut m, arch, "install", &im.estranha.resumo, &[0, 1])?;
         recusado("a chave de fora", &r, "nao esta no registro de atualizacao")?;
         recusas.push("chave de fora");
 
-        encenar_sobre(arch, &im.estranha.bytes, &im.velha.bytes)?;
+        encenar_sobre_por(&mut sistema, &im.estranha.bytes, &im.velha.bytes)?;
         let r = quorum(&mut m, arch, "install", &im.velha.resumo, &[0, 1])?;
         recusado("a geracao que nao sobe", &r, "nao e maior que a da ativa")?;
         recusas.push("geracao");
 
-        encenar_sobre(arch, &im.velha.bytes, &im.outro_formato.bytes)?;
+        encenar_sobre_por(&mut sistema, &im.velha.bytes, &im.outro_formato.bytes)?;
         let r = quorum(&mut m, arch, "install", &im.outro_formato.resumo, &[0, 1])?;
         recusado(
             "o formato de estado incompativel",
@@ -1067,7 +1088,11 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         )?;
         recusas.push("formato de estado");
 
-        encenar_sobre(arch, &im.outro_formato.bytes, &im.outra_arquitetura.bytes)?;
+        encenar_sobre_por(
+            &mut sistema,
+            &im.outro_formato.bytes,
+            &im.outra_arquitetura.bytes,
+        )?;
         let r = quorum(
             &mut m,
             arch,
@@ -1078,7 +1103,7 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         recusado("a outra arquitetura", &r, "a imagem e de outra arquitetura")?;
         recusas.push("outra arquitetura");
 
-        encenar_sobre(arch, &im.outra_arquitetura.bytes, &im.nova.bytes)?;
+        encenar_sobre_por(&mut sistema, &im.outra_arquitetura.bytes, &im.nova.bytes)?;
         let r = quorum(&mut m, arch, "install", &im.estranha.resumo, &[0, 1])?;
         recusado("o manifesto trocado", &r, "nao e o que se esperava")?;
         recusas.push("manifesto trocado");
@@ -1087,7 +1112,7 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         // certo: um byte dela trocado no cabeçalho.
         let mut adulterada = im.nova.bytes[..512].to_vec();
         adulterada[16] ^= 0x01;
-        let r = encenar_em(arch, PORTA_DO_SISTEMA, 0, &adulterada)?;
+        let r = encenar_em_por(&mut sistema, 0, &adulterada)?;
         if !r.contains(r#""written":"#) {
             return Err(format!("a assinatura adulterada nao foi escrita\n  {r}"));
         }
@@ -1098,11 +1123,11 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
             "a assinatura do manifesto nao confere",
         )?;
         recusas.push("assinatura adulterada");
-        encenar_em(arch, PORTA_DO_SISTEMA, 0, &im.nova.bytes[..512])?;
+        encenar_em_por(&mut sistema, 0, &im.nova.bytes[..512])?;
 
         // O kernel estragado no slot: um pedaço de zeros no meio dele.
         let zeros = vec![0u8; producao::PEDACO_DA_ENCENACAO];
-        let r = encenar_em(arch, PORTA_DO_SISTEMA, KERNEL_EM + (1 << 20), &zeros)?;
+        let r = encenar_em_por(&mut sistema, KERNEL_EM + (1 << 20), &zeros)?;
         if !r.contains(r#""written":"#) {
             return Err(format!(
                 "os zeros no meio do kernel nao foram escritos\n  {r}"
@@ -1121,10 +1146,10 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         estragado[k..fim].copy_from_slice(&zeros[..fim - k]);
 
         // O pacote estragado.
-        encenar_sobre(arch, &estragado, &im.nova.bytes)?;
+        encenar_sobre_por(&mut sistema, &estragado, &im.nova.bytes)?;
         let kernel = slots::kernel_da_imagem(&im.nova.bytes)?;
         let pacote_em = cabecalho::pacote_em(kernel.len() as u64);
-        let r = encenar_em(arch, PORTA_DO_SISTEMA, pacote_em, &zeros[..512])?;
+        let r = encenar_em_por(&mut sistema, pacote_em, &zeros[..512])?;
         if !r.contains(r#""written":"#) {
             return Err(format!("os zeros no pacote nao foram escritos\n  {r}"));
         }
@@ -1132,9 +1157,8 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         recusado("o pacote estragado", &r, "o pacote")?;
         recusas.push("pacote estragado");
 
-        let r = encenar_em(
-            arch,
-            PORTA_DO_SISTEMA,
+        let r = encenar_em_por(
+            &mut sistema,
             pacote_em,
             &im.nova.bytes[pacote_em as usize..pacote_em as usize + 512],
         )?;
@@ -1183,7 +1207,7 @@ fn as_recusas_da_instalacao(b: &Bancada) -> Result<String, String> {
         // A certa vale; com ela armada, a escrita e a desistência errada são
         // recusadas; a desistência certa vale.
         instalar(&mut m, arch, &im.nova.resumo)?;
-        let r = encenar_em(arch, PORTA_DO_SISTEMA, 0, &zeros[..512])?;
+        let r = encenar_em_por(&mut sistema, 0, &zeros[..512])?;
         recusado(
             "a escrita com a versao armada",
             &r,
