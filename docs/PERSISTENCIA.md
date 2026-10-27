@@ -1674,11 +1674,68 @@ do Duke" em [`OPERACAO.md`](OPERACAO.md).
 A abertura do selo custa, a cada boot, uma conexão a mais com o TPM — a
 EK, a sessão salgada, o primário — e o `TPM2_Load` com o `TPM2_Unseal`; o
 nascimento, uma vez na vida da máquina, o `TPM2_Create`, a abertura de
-volta e duas escritas descarregadas. O log do boot diz quanto levou.
+volta e duas escritas descarregadas. O log do boot diz quanto levou: no
+x86, com o kernel de depuração e o swtpm — um TPM de verdade é mais lento
+por comando —, o nascimento levou 70 ms, e a abertura, de 40 a 60 ms.
 
 O kernel de produção (release) cresceu 33 336 bytes nos segmentos
 carregáveis no x86 (+0,81%) e 26 088 no ARM (+0,75%), contra o B1
 (`d48d31b`). O iniciador e os programas não mudaram — nenhum fonte deles.
+
+### As mutações do B2
+
+Uma de cada vez, no repositório, com o que a pega: os testes do
+hospedeiro do `ancora` (e o do `provisionar`, no `xtask`), a suíte do x86
+só com os casos `identidade:`, e os cenários da bancada da identidade. O
+controle, sem mutação, passa em tudo. As trinta reprovam:
+
+| forma | o que muda | quem a pega |
+|---|---|---|
+| a cópia sem o resumo conferido | a leitura da área não confere o SHA-256 | o bit trocado e a escrita cortada, no hospedeiro |
+| os zeros depois do privado; o reservado; a versão | a leitura não confere cada um deles | o resumo refeito não salva o formato errado |
+| duas cópias inteiras e diferentes abrem a primeira | sem a recusa das divergentes | a tabela inteira, e o teste delas |
+| uma cópia inteira sem TPM tenta abrir | sem a recusa antes da abertura | a tabela; e a bancada, sem o TPM: o motivo que a máquina diz é outro |
+| a cópia que falta não é reparada | a decisão sem o reparo | a tabela, e o teste do reparo |
+| a cópia ilegível não impede o nascimento | sem a recusa do setor que o disco não lê | a tabela, e o teste dela |
+| nasce por cima do journal | a decisão sem o journal | a tabela, e o teste dele |
+| nasce no TPM de outra instalação | a decisão sem os índices do Duke | a tabela, e o teste deles |
+| a chave em claro no `TPM2_Create` | sem a cifra do parâmetro | o barramento, no hospedeiro e na suíte |
+| o `TPM2_Unseal` sem proteger a resposta | a chave volta em claro | o barramento, no hospedeiro e na suíte |
+| o selado sem `fixedTPM` | o objeto sem o bit | o TPM recusa o `TPM2_Create` (`TPM_RC_ATTRIBUTES`): doze testes do hospedeiro |
+| o selado sem `noDA` | o objeto sem o bit | os atributos pedidos, e mais nove testes do hospedeiro |
+| o selado administrado pela senha | sem `adminWithPolicy` | ninguém troca a senha da identidade; os atributos pedidos |
+| a chave aberta sem a pública conferida | o boot não confere a chave com a área | a pública trocada, na suíte |
+| a cópia estragada não é reparada no boot | sem a reescrita | a suíte, e a bancada (uma cópia estragada) |
+| o nascimento grava só a primeira cópia | sem a segunda escrita | a suíte (as duas cópias, a concorrência) e a bancada (o primeiro boot) |
+| o nascimento não vai à auditoria | sem o registro | a bancada, o primeiro boot |
+| a recusa não vai à auditoria | sem o registro | a bancada, sem o TPM e a reinstalação: a recusa lida pela serial |
+| o journal não conta na decisão | `ha_journal` sempre falso | a suíte, e a bancada (as duas cópias estragadas recusam por outro motivo) |
+| o TPM não conta na decisão | os índices do Duke sempre ausentes | a bancada, a reinstalação: o disco novo no TPM de antes nasceria |
+| o nascimento sem a abertura de volta | o selado não é aberto e conferido antes de gravar | a suíte: o nascimento cujo `TPM2_Unseal` de volta se perde |
+| a área gravada sem descarga | a escrita sem o `FLUSH` | a bancada, o cache do disco: o corte na primeira descarga — a do journal — leva as duas cópias com os índices já no TPM, e a máquina fica recusada como a de outra instalação. A suíte não a pega: o disco dela não perde o que foi escrito |
+| sem identidade e com journal, a persistência só indisponível | a recusa vira indisponibilidade | a suíte, e a bancada (sem o TPM) |
+| a EK da área não é conferida na abertura | a conexão aceita qualquer EK | a suíte (a EK de outro TPM, a área com outra EK) e a bancada (o disco clonado) |
+| as duas cópias no mesmo setor | o setor da segunda é o da primeira | a suíte (o reparo) |
+| a chave adotada por cima da que está em uso | sem a recusa da adoção | a suíte (nenhuma por cima; a concorrência) |
+| a persistência abre antes da identidade | a ordem do boot trocada | a bancada, os boots seguintes: a persistência indisponível no boot do nascimento. O primeiro boot sozinho não a pega — ele confere a identidade e a auditoria, e não a persistência |
+| a imagem de produção leva a chave do Duke | o `provisionar` põe a privada na raiz | o teste do hospedeiro do `provisionar` |
+
+Três delas não tinham testemunha no primeiro commit do B2 (`c9cbb55`), e
+o desenho da campanha as achou antes de ela rodar: a área gravada sem
+descarga — nenhum cenário perdia o cache do disco no nascimento —, a
+recusa sem auditoria — numa máquina sem identidade nenhum agente entra, e
+ninguém lia o registro — e o nascimento sem a abertura de volta. As três
+testemunhas entraram no `0e4e3ae`, e a campanha rodou sobre ele. A
+testemunha da recusa achou um defeito: o motivo de "journal sem selo"
+tinha 103 bytes, e o detalhe da auditoria guarda 96 — chegava cortado.
+
+No ARM, contra a bancada pelo AAVMF e a suíte do aarch64, de novo as
+cinco que dependem da arquitetura — o disco hostil atrás do NVMe, o
+barramento do TPM pelo `tpm-tis-device`, a auditoria lida pela serial, a
+reinstalação e a ordem do boot: a chave em claro no `TPM2_Create`, a
+recusa sem auditoria, o TPM fora da decisão, a área sem descarga e a
+persistência antes da identidade. O controle passou; as cinco reprovaram
+pelos mesmos casos e cenários do x86.
 
 ## O disco hostil
 

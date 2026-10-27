@@ -8047,6 +8047,16 @@ TPM limpo; cada recusa, lida também na auditoria pela serial. A da
 atualização confere a versão nova que se confirma e a que cai na
 tentativa, com a identidade nascida.
 
+**Trinta mutações, as trinta reprovadas** — pelos testes do hospedeiro do
+`ancora`, pelos casos `identidade:` da suíte ou pela bancada —, e cinco
+delas de novo no ARM, as cinco reprovadas; a tabela está em
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#as-mutações-do-b2). Três não
+tinham testemunha no primeiro commit — a área gravada sem descarga, a
+recusa sem auditoria, o nascimento sem a abertura de volta —, e a da
+recusa achou um motivo maior que o detalhe da auditoria. O kernel de
+produção cresceu 33 336 bytes no x86 (+0,81%) e 26 088 no ARM (+0,75%);
+o iniciador e os programas não mudaram.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
