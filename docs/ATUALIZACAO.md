@@ -345,9 +345,56 @@ não a autoridade que o boot recusado acabou de perder.
   carga); a concorrência; o caminho do operador numa imagem de produção; o
   kernel fora de um slot (ARM); e, com os pontos de queda, cada fronteira
   da instalação, da confirmação, da escrita e do desfazimento, e o pânico
-  em toda tentativa.
+  em toda tentativa. Na CI, um job por arquitetura: a bancada inteira levou
+  65 minutos no x86 e 53 no ARM.
 - `cargo test -p xtask`: a chave de atualização, o registro do operador, a
   imagem conferida pelo registro.
+
+### As mutações
+
+Cada proteção da atualização foi tirada ou enfraquecida, uma de cada vez, e
+o detector mais barato que a deve pegar rodou contra ela: os testes do
+hospedeiro do crate, os casos `atualizacao:` da suíte, ou cenários da
+bancada (x86). A rodada de controle, sem mutação, passou em todos — o
+hospedeiro, a suíte (678 de 678) e os quatro cenários dela. As dezoito
+foram reprovadas:
+
+| | a mutação | quem reprovou |
+|---|---|---|
+| M01 | o manifesto sem assinatura que confira é aceito | 2 testes do hospedeiro |
+| M02 | o kernel não confere a assinatura do manifesto | a bancada: as recusas da instalação |
+| M03 | a candidata não precisa de geração acima do piso | 3 testes do hospedeiro; as recusas |
+| M04 | a imagem abaixo do piso ganha autoridade | 6 testes do hospedeiro; a versão velha que não volta |
+| M05 | a confirmação grava o controle antes do journal | as quedas na confirmação |
+| M06 | a confirmação vale para a candidata com outra imagem no boot | 8 testes do hospedeiro |
+| M07 | o desfazimento é ignorado | 6 testes do hospedeiro; a carga recusada |
+| M08 | a tentativa sem o journal continua | 3 testes do hospedeiro; sem o TPM |
+| M09 | o `update.stage` pela permissão de leitura | a suíte: o `update.stage` pelo gate |
+| M10 | a escrita responde e não escreve | a atualização inteira |
+| M11 | a decisão do boot sem auditoria | o primeiro boot |
+| M12 | o quórum sem a permissão no papel de quem assina | a suíte: o quórum pela política |
+| M13 | o quórum com menos que o M da política | a suíte: o quórum; as recusas |
+| M14 | a escrita por cima da versão armada | as recusas |
+| M15 | o iniciador não confere o resumo do kernel | a carga recusada |
+| M16 | o iniciador não desce a conta antes da tentativa | 5 testes do hospedeiro; o pânico na tentativa |
+| M17 | a imagem de uma chave fora do registro boota e instala | as recusas |
+| M18 | a recusa do boot reinicia sem gravar o porquê | a suíte: o boot recusado; a versão cancelada |
+
+A M18 é o defeito que a bancada achou de verdade: o B1 tinha posto a
+autoridade do boot na `persistencia::exigir`, e a gravação da auditoria
+passava por ela — um boot recusado reiniciava sem o porquê no journal, a
+não ser que o coletor da auditoria chegasse antes. A gravação da auditoria
+agora pede só o journal de pé.
+
+### O tamanho
+
+O kernel de produção (release) cresceu 84 904 bytes no x86 (+2,11%) e
+88 832 no ARM (+2,61%), pela soma dos segmentos carregáveis — 95 784 e
+107 176 bytes no ELF sem as seções de depuração, que é o que vai no slot.
+O iniciador foi de 42 496 para 81 920 bytes no x86 e de 34 304 para 67 072
+no ARM: o controle, a GPT, o cabeçalho e o manifesto, o BLAKE2s e a forma
+do ELF — sem o Ed25519, que ele não usa. Os programas não mudaram, e o teto
+de 1 MiB do executável também não.
 
 ## O que fica de fora
 

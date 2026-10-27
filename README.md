@@ -7973,6 +7973,33 @@ vence antes dos 100 ms, o que só vale se ele for medido em tempo.
 
 Nenhuma é uma vulnerabilidade.
 
+### A atualização A/B
+
+A troca do código que decide — o kernel e os programas do produto — sem
+perder a máquina: dois slots, um manifesto assinado pela chave de quem
+publica, a instalação pelo quórum `system.update` (o mecanismo da
+revogação, com o M e o N da política), a tentativa contada pelo iniciador
+antes de bootar, a confirmação num registro do journal ancorado no TPM — o
+piso de geração que não volta — e a volta sozinha quando a versão nova não
+presta. Nenhuma identidade, autoridade, custódia ou índice de NV novos: a
+atualização passa pela mesma cadeia de toda operação de autoridade. O
+desenho, o fluxo, os estados de queda e o que o operador faz estão em
+[`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md).
+
+A bancada (`cargo xtask atualizacao`) liga a máquina pelo firmware nas duas
+arquiteturas — OVMF e AAVMF — e corta a energia em cada fronteira da
+instalação, da confirmação, da escrita e do desfazimento. **Dezoito
+mutações, as dezoito reprovadas** — pelos testes do hospedeiro, pelos
+casos `atualizacao:` da suíte ou pela bancada; a tabela está no
+documento. Uma delas é o defeito que a bancada achou: o boot recusado
+reiniciava sem gravar o porquê no journal.
+
+O kernel de produção cresceu 84 904 bytes no x86 (+2,11%) e 88 832 no ARM
+(+2,61%), pela soma dos segmentos carregáveis; o iniciador, que passou a
+ler o controle, a GPT e os slots e a conferir o BLAKE2s do kernel, foi de
+42 496 para 81 920 bytes no x86 e de 34 304 para 67 072 no ARM. Os
+programas não mudaram, e o teto de 1 MiB do executável também não.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
