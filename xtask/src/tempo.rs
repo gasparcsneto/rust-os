@@ -527,6 +527,8 @@ struct Hora {
     logico: u64,
     adiantado_ms: u64,
     fechadas: u64,
+    /// As rodadas abertas: pedidas às fontes, e ainda não fechadas.
+    abertas: u64,
     com_acordo: u64,
     sem_acordo: u64,
     perdidas: u64,
@@ -700,6 +702,7 @@ fn ler_a_hora(r: &str, hospedeiro_ms: i64) -> Option<Hora> {
         logico: numero(t, "logical")?,
         adiantado_ms: numero(t, "ahead_ms").unwrap_or(0),
         fechadas: numero(rodadas, "closed")?,
+        abertas: numero(rodadas, "open")?,
         com_acordo: numero(rodadas, "with_agreement")?,
         sem_acordo: numero(rodadas, "without_agreement")?,
         perdidas: numero(rodadas, "lost")?,
@@ -1586,6 +1589,22 @@ fn proxima(
     )
 }
 
+/// Espera a primeira rodada que pediu às fontes depois de agora — depois
+/// de uma troca no modo delas. A rodada que já fechou e a que está aberta
+/// pediram antes, com o modo de antes, e não contam: as conferências entre
+/// a última rodada e a troca podem levar o intervalo inteiro, e no ARM
+/// levam. Se uma rodada com acordo fechou no meio delas, a seguinte vem um
+/// intervalo dobrado depois dela — ver `kernel/src/hora/servico.rs` —, e o
+/// prazo de quem chama tem de cobri-lo.
+fn proxima_depois_de_agora(
+    m: &mut Ligada,
+    nada_volta: &mut NadaVolta,
+    prazo: Duration,
+) -> Result<Hora, String> {
+    let agora = hora(m)?;
+    proxima(m, nada_volta, agora.fechadas + agora.abertas, prazo)
+}
+
 /// Espera o primeiro acordo, com as fontes como estão.
 fn sincronizar(m: &mut Ligada, nada_volta: &mut NadaVolta) -> Result<Hora, String> {
     esperar(
@@ -2111,11 +2130,10 @@ fn uma_fonte_divergente(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     b.servidor.modo(1, Modo::HONESTA);
-    let depois = proxima(
+    let depois = proxima_depois_de_agora(
         &mut m,
         &mut nada_volta,
-        h.fechadas,
-        SINCRONIZADO + Duration::from_secs(30),
+        2 * SINCRONIZADO + Duration::from_secs(30),
     )?;
     let u2 = depois.ultima.clone().unwrap_or_default();
     if depois.marcado("divergente") || u2.cobertura != Some(3) || depois.desvio_ms().abs() > 2_000 {
@@ -2187,11 +2205,10 @@ fn uma_fonte_forjada(b: &mut Bancada) -> Result<String, String> {
         ));
     }
     b.servidor.modo(1, Modo::HONESTA);
-    let depois = proxima(
+    let depois = proxima_depois_de_agora(
         &mut m,
         &mut nada_volta,
-        h.fechadas,
-        SINCRONIZADO + Duration::from_secs(30),
+        2 * SINCRONIZADO + Duration::from_secs(30),
     )?;
     let u2 = depois.ultima.clone().unwrap_or_default();
     if u2.cobertura != Some(3) || u2.aceitas != 3 || depois.desvio_ms().abs() > 2_000 {

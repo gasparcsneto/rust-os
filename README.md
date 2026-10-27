@@ -5373,6 +5373,17 @@ a regra antiga reprova o caso. E o kernel passou a medir a rodada:
 `round_ns`, do primeiro pedido ao desfecho, e `round_wait_ns`, o que dela
 foi espera pelas fontes, no `system.info time`.
 
+**E a corrida da volta de uma fonte (CI 358).** Os cenários da fonte
+divergente e da forjada trocam a fonte de volta depois de um minuto de
+conferências — o NSF, o incidente, a validade —, e esperavam a primeira
+rodada contada da sincronização. No runner do ARM as conferências levaram
+o intervalo inteiro, 64 s: a rodada seguinte pediu à fonte antes de ela
+voltar, e foi tomada pela da volta — a marca `divergente` ainda estava lá.
+A espera agora conta da troca: as rodadas fechadas e as abertas naquele
+instante não contam, e o prazo cobre o intervalo dobrado que vem depois de
+uma rodada com acordo. Com 66 s de atraso antes da troca, a espera antiga
+reprova como na CI, e a nova toma a rodada seguinte, sem a marca.
+
 ### O custo
 
 Medido no hospedeiro, na mesma máquina, antes e depois deste passo —
