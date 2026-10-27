@@ -1674,7 +1674,11 @@ do Duke" em [`OPERACAO.md`](OPERACAO.md).
 A abertura do selo custa, a cada boot, uma conexão a mais com o TPM — a
 EK, a sessão salgada, o primário — e o `TPM2_Load` com o `TPM2_Unseal`; o
 nascimento, uma vez na vida da máquina, o `TPM2_Create`, a abertura de
-volta e duas escritas descarregadas.
+volta e duas escritas descarregadas. O log do boot diz quanto levou.
+
+O kernel de produção (release) cresceu 33 336 bytes nos segmentos
+carregáveis no x86 (+0,81%) e 26 088 no ARM (+0,75%), contra o B1
+(`d48d31b`). O iniciador e os programas não mudaram — nenhum fonte deles.
 
 ## O disco hostil
 
