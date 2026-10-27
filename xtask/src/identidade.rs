@@ -13,9 +13,13 @@
 //!
 //! O que a máquina mostra é lido como o operador o lê: o `system.info`,
 //! campo `identity`, pela serial — o console. O agente `sistema` do
-//! operador entra fixando a pública que ela mostrou, e lê a auditoria. A
-//! área do selo é lida e estragada no arquivo do disco, entre um boot e
-//! outro.
+//! operador entra fixando a pública que ela mostrou, e lê a auditoria. Numa
+//! máquina sem identidade nenhum agente entra, e a recusa na auditoria é
+//! lida pela serial: a política desta bancada é a do exemplo de produção
+//! com a serial `sistema`, e não `observador`. A área do selo é lida e
+//! estragada no arquivo do disco, entre um boot e outro; a energia que cai
+//! com o cache do disco por descarregar é a do disco hostil — ver
+//! `xtask/src/disco_hostil.rs`.
 //!
 //! A atualização A/B com a identidade nascida — a versão nova que se
 //! confirma, e a que cai na tentativa e volta — é da bancada da
@@ -29,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use ancora::identidade::{Area, Leitura, Recusa, TAM_AREA};
 
+use super::disco_hostil::{Corte, DiscoHostil, Gatilho};
 use super::persistencia::{self as p, Ligada, ponto};
 use super::{AgenteNaPorta, Ambiente, Arquitetura, Artefato, disco, producao};
 
@@ -65,11 +70,19 @@ impl Bancada {
             std::fs::write(dir.join(nome), conteudo).map_err(|e| format!("{nome}: {e}"))
         };
         let exemplo = super::raiz_do_projeto().join("docs/exemplos/producao/politica");
-        escrever(
-            "politica",
-            &std::fs::read_to_string(&exemplo)
-                .map_err(|e| format!("{}: {e}", exemplo.display()))?,
-        )?;
+        let do_exemplo =
+            std::fs::read_to_string(&exemplo).map_err(|e| format!("{}: {e}", exemplo.display()))?;
+        // A serial `sistema`, e não `observador`: numa máquina sem
+        // identidade nenhum agente entra, e é pela serial que a bancada lê a
+        // recusa na auditoria.
+        let politica = do_exemplo.replace("\nserial observador\n", "\nserial sistema\n");
+        if politica == do_exemplo {
+            return Err(format!(
+                "{}: o exemplo nao tem a linha `serial observador`",
+                exemplo.display()
+            ));
+        }
+        escrever("politica", &politica)?;
         escrever("nome", "bancada-identidade\n")?;
         let (sistema, linha, _) = producao::chave_nova("agente", "sistema-1", Some("sistema"))?;
         escrever("agentes", &linha)?;
@@ -234,9 +247,34 @@ fn da_identidade_na_auditoria(agente: &mut AgenteNaPorta) -> Result<Vec<p::Rastr
         .collect())
 }
 
+/// A recusa da identidade na auditoria — pelo kernel, sem recurso, com
+/// `motivo` —, e nenhum outro registro dela, lidos pela serial: numa
+/// máquina sem identidade nenhum agente entra.
+fn recusa_na_auditoria(m: &mut Ligada, motivo: &str) -> Result<(), String> {
+    let r = m.pedir("audit.tail", r#"{"count":128}"#)?;
+    let da_identidade: Vec<_> = p::rastros(&r)?
+        .into_iter()
+        .filter(|r| r.metodo == "system.identity")
+        .collect();
+    match da_identidade.as_slice() {
+        [r] if r.titular == "kernel" && r.codigo == "ERROR" && r.recurso.is_empty() => {}
+        outro => {
+            return Err(format!(
+                "a recusa da identidade nao foi para a auditoria, e so ela: {outro:?}"
+            ));
+        }
+    }
+    if !r.contains(&format!(r#""detail":"{motivo}""#)) {
+        return Err(format!(
+            "a auditoria nao diz por que a identidade foi recusada (`{motivo}`)\n  {r}"
+        ));
+    }
+    Ok(())
+}
+
 /// A máquina sem identidade: o `system.info` diz `none` com `motivo`, a
-/// persistência — com journal no disco — recusada, e o agente que fixa
-/// `publica` não entra.
+/// recusa na auditoria, a persistência — com journal no disco — recusada,
+/// e o agente que fixa `publica` não entra.
 fn sem_identidade(
     b: &Bancada,
     m: &mut Ligada,
@@ -250,6 +288,7 @@ fn sem_identidade(
             vista.origem, vista.erro
         ));
     }
+    recusa_na_auditoria(m, motivo)?;
     let estado = p::persistencia_de(m)?;
     if estado.estado != "refused" {
         return Err(format!(
@@ -312,6 +351,10 @@ const CENARIOS: &[Cenario] = &[
     Cenario {
         nome: "a energia caindo em cada passo do nascimento: antes das copias nasce de novo, com uma abre e repara, e a criacao da ancora interrompida retoma com a mesma",
         rodar: as_quedas_no_nascimento,
+    },
+    Cenario {
+        nome: "a energia caindo com o cache do disco por descarregar, na descarga de cada copia e na primeira do journal: o boot seguinte nasce de novo ou abre a copia descarregada, e nunca recusa",
+        rodar: o_cache_do_disco_no_nascimento,
     },
     Cenario {
         nome: "uma copia do selo estragada: a outra abre e a repara; as duas estragadas recusam, e com elas de volta a identidade volta",
@@ -515,6 +558,115 @@ fn as_quedas_no_nascimento(b: &Bancada) -> Result<String, String> {
     Ok(feitos.join("; "))
 }
 
+/// A energia caindo com o cache do disco por descarregar, pelo disco
+/// hostil — ver `xtask/src/disco_hostil.rs`: cada escrita fica num cache
+/// volátil até a descarga, e o corte o perde todo. O corte vem na descarga
+/// de cada cópia, antes de ela gravar, e na primeira descarga depois das
+/// duas, que é a do journal.
+///
+/// O que o nascimento promete é a ordem: a chave só entra em uso — a
+/// âncora e o nascimento definidos no TPM, o journal — depois de uma cópia
+/// descarregada. O arquivo do disco sozinho não pega uma descarga que
+/// falta: o que o emulador escreveu está no cache do hospedeiro e
+/// sobrevive à morte dele. Aqui, sem ela, o corte levaria as duas cópias
+/// com os índices do Duke já no TPM, e a máquina ficaria recusada como a
+/// de outra instalação, para sempre.
+fn o_cache_do_disco_no_nascimento(b: &Bancada) -> Result<String, String> {
+    let mut feitos = Vec::new();
+    // A descarga em que a energia acaba, as cópias que o arquivo guarda
+    // depois do corte, e o nome.
+    let cortes: [(u64, [bool; 2], &str); 3] = [
+        (1, [false, false], "na descarga da primeira copia"),
+        (2, [true, false], "na descarga da segunda copia"),
+        (3, [true, true], "na primeira descarga do journal"),
+    ];
+    for (i, (n, inteiras, nome)) in cortes.into_iter().enumerate() {
+        if i > 0 {
+            super::zerar_o_tpm(b.arch)?;
+            b.disco_novo()?;
+        }
+        let disco = DiscoHostil::servir(
+            &b.disco,
+            &p::socket_do_disco_hostil(b.arch),
+            Corte::PerdeTudo,
+        )?;
+        disco.cortar_em(Gatilho::Descarga(n));
+        // O boot segue depois do corte, sem disco: a máquina sobe, ou não,
+        // e a bancada a desliga quando o servidor diz que cortou.
+        let ligada = Ligada::subir_com(
+            b.arch,
+            &b.artefato(),
+            Ambiente::ligar(b.arch, None)?.com_disco_hostil(disco.socket()),
+        );
+        let limite = Instant::now() + ESPERA_PELA_QUEDA;
+        while disco.contas().cortes == 0 && Instant::now() < limite {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if let Ok(m) = ligada {
+            m.cortar_a_energia()?;
+        }
+        let contas = disco.esperar_o_fim_da_conexao(1)?;
+        drop(disco);
+        if contas.cortes != 1 || contas.no_corte == 0 {
+            return Err(format!(
+                "{nome}: o corte nao pegou nada no cache: {contas:?}"
+            ));
+        }
+        let [a, c] = b.area()?;
+        let lidas = [ancora::identidade::ler(&a), ancora::identidade::ler(&c)];
+        for (copia, (lida, inteira)) in lidas.iter().zip(inteiras).enumerate() {
+            let esperada = if inteira { "inteira" } else { "vazia" };
+            if descrever(lida) != esperada {
+                return Err(format!(
+                    "{nome}: a copia {copia} esta {}, e nao {esperada}",
+                    descrever(lida)
+                ));
+            }
+        }
+        let antes = match &lidas[0] {
+            Leitura::Valida(area) => Some(area.publica),
+            _ => None,
+        };
+        let mut m = b.ligar()?;
+        let r = (|| {
+            let vista = p::identidade_vista(&mut m)?;
+            let publica = vista.publica.ok_or_else(|| {
+                format!("{nome}: sem identidade depois do corte: {:?}", vista.erro)
+            })?;
+            match antes {
+                None if vista.origem == "born" => {}
+                Some(p) if vista.origem == "sealed" && p == publica => {}
+                _ => {
+                    return Err(format!(
+                        "{nome}: depois do corte, a identidade e {} ({}), e a area tinha {:?}",
+                        vista.origem,
+                        sigilo::hex(&publica),
+                        antes.map(|p| sigilo::hex(&p))
+                    ));
+                }
+            }
+            let estado = p::persistencia_de(&mut m)?;
+            if estado.estado != "available" {
+                return Err(format!(
+                    "{nome}: a persistencia nao abriu depois do corte: {} ({})",
+                    estado.estado, estado.motivo
+                ));
+            }
+            Ok(publica)
+        })();
+        m.cortar_a_energia()?;
+        let publica = r?;
+        if b.area_inteira()?.publica != publica {
+            return Err(format!("{nome}: a area nao ficou com a identidade aberta"));
+        }
+        feitos.push(format!(
+            "{nome}: {} setores no cache no corte",
+            contas.no_corte
+        ));
+    }
+    Ok(feitos.join("; "))
+}
+
 fn as_copias_estragadas(b: &Bancada) -> Result<String, String> {
     let (publica, area) = nascer(b)?;
     let inteira = area.em_bytes();
@@ -653,12 +805,12 @@ fn reinstalar(b: &Bancada) -> Result<String, String> {
         // estão lá, e nada nasce por cima deles.
         b.disco_novo()?;
         let mut m = b.ligar()?;
-        let vista = p::identidade_vista(&mut m);
+        let motivo = Recusa::TpmDeOutraInstalacao.motivo();
+        let vista = p::identidade_vista(&mut m)
+            .and_then(|v| recusa_na_auditoria(&mut m, motivo).map(|()| v));
         m.cortar_a_energia()?;
         let vista = vista?;
-        if vista.origem != "none"
-            || vista.erro.as_deref() != Some(Recusa::TpmDeOutraInstalacao.motivo())
-        {
+        if vista.origem != "none" || vista.erro.as_deref() != Some(motivo) {
             return Err(format!(
                 "o disco novo no TPM de antes nao recusou: {} ({:?})",
                 vista.origem, vista.erro

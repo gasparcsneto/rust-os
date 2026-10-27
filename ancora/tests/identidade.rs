@@ -348,6 +348,10 @@ fn a_tabela_inteira() {
                         }
                         Decisao::Recusar(r) => {
                             assert!(!r.motivo().is_empty() && r.motivo().is_ascii());
+                            // Inteiro no detalhe da auditoria, que o kernel
+                            // grava na recusa: o teto é o
+                            // `politica::auditoria::MAIOR_DETALHE`.
+                            assert!(r.motivo().len() <= 96, "{}", r.motivo());
                         }
                     }
                     vistas.insert(format!("{d:?}"));

@@ -1661,6 +1661,15 @@ do Duke" em [`OPERACAO.md`](OPERACAO.md).
   journal, e nenhum índice do Duke no TPM — a âncora, o nascimento, a
   geração. Uma identidade nova por cima de estado que dependa de outra
   seria uma máquina que não abre o próprio estado.
+- **A ordem das descargas.** A chave só entra em uso — a âncora e o
+  nascimento definidos no TPM, o primeiro registro do journal — depois de
+  a primeira cópia do selo estar descarregada no disco; a segunda é
+  descarregada antes de a persistência abrir. Um disco que perde o cache
+  no corte não deixa os índices do Duke no TPM sem um selo que os abra:
+  sem a descarga, a máquina ficaria recusada para sempre, como a de outra
+  instalação. A bancada da identidade corta a energia num disco assim — o
+  disco hostil, abaixo — na descarga de cada cópia e na primeira do
+  journal, e o boot seguinte nasce de novo ou abre a cópia descarregada.
 
 A abertura do selo custa, a cada boot, uma conexão a mais com o TPM — a
 EK, a sessão salgada, o primário — e o `TPM2_Load` com o `TPM2_Unseal`; o
@@ -1683,6 +1692,7 @@ cache de escrita volátil, erros de mídia por faixa e respostas retidas.
 | o disco que perde o que não foi descarregado | cada escrita fica no cache até a descarga; o corte — numa escrita ou numa descarga exata, pelo próprio servidor — perde tudo, ou uma parte sorteada com semente fixa, como um SSD sem capacitor | doze gravações pedidas de uma vez, e a energia corta no meio: no boot seguinte a persistência abre, cada gravação confirmada está lá, cada uma sem confirmação está inteira ou não está, e a auditoria e o armazém conferem. Quatro rodadas |
 | o erro de mídia no journal | toda escrita no journal volta com erro de mídia, que o NVMe conclui como falha | a gravação que precisava do registro não é confirmada, a persistência se declara indisponível com o motivo, o `disk.info` conta o erro com o último, e a máquina segue — recusando o que mudaria o estado; com o disco são, o boot seguinte abre, sem a gravação |
 | o disco que para de responder | toda escrita no journal fica sem resposta, para sempre | o driver espera o prazo do disco — trinta segundos, pelo contador de ciclos — e desliga o controlador; a gravação não é confirmada, o `disk.info` diz `alive` falso e o tempo esgotado; com o disco são, o boot seguinte abre, sem a gravação |
+| o cache do disco no nascimento da identidade (`cargo xtask identidade`, numa máquina de produção nova) | o corte na descarga da primeira cópia do selo, na da segunda — antes de gravar — e na primeira do journal, perdendo tudo | o arquivo fica sem cópia, com a primeira, ou com as duas; o boot seguinte nasce de novo — nada dependia da chave sorteada — ou abre a cópia descarregada e repara a outra, com a persistência de pé; nunca recusa |
 
 Os cortes são determinísticos: o servidor corta na n-ésima escrita ou
 descarga, e a parte guardada sai de uma semente escrita no cenário — a

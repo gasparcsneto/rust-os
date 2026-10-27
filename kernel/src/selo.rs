@@ -116,6 +116,7 @@ pub fn estabelecer() {
     }
     #[cfg(feature = "quedas")]
     persistencia::carregar_o_plano_de_quedas();
+    let inicio = crate::tempo::uptime_ms();
     let Estabelecida {
         mut chave,
         origem,
@@ -127,6 +128,7 @@ pub fn estabelecer() {
             return;
         }
     };
+    let ms = crate::tempo::uptime_ms().saturating_sub(inicio);
     let publica = sigilo::hex(&sigilo::publica_de(&chave));
     let adotada = identidade::adotar_a_chave(chave, origem);
     chave.zeroize();
@@ -138,8 +140,9 @@ pub fn estabelecer() {
         OrigemDaChave::Nascida => {
             crate::log_warn!(
                 "identidade",
-                "identidade do Duke {}: nascida neste boot e selada no TPM",
-                publica
+                "identidade do Duke {}: nascida neste boot e selada no TPM, em {} ms",
+                publica,
+                ms
             );
             crate::autorizacao::auditar_do_kernel(
                 METODO,
@@ -150,8 +153,9 @@ pub fn estabelecer() {
         }
         _ => crate::log_info!(
             "identidade",
-            "identidade do Duke {}: aberta do selo no TPM",
-            publica
+            "identidade do Duke {}: aberta do selo no TPM em {} ms",
+            publica,
+            ms
         ),
     }
     if let Some((copia, r)) = reparo {

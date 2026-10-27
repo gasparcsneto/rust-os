@@ -18404,7 +18404,8 @@ fn identidade_sem_ela_o_journal_recusa_a_persistencia() -> Resultado {
 
 /// O barramento que mente no `TPM2_Unseal` da identidade — a resposta
 /// adulterada, repetida, perdida, ou o comando adulterado — não vira chave,
-/// e nada fica ocupado no TPM: a abertura seguinte abre.
+/// e nada fica ocupado no TPM: a abertura seguinte abre. E o nascimento
+/// cujo `TPM2_Unseal` de volta se perde não grava a área do selo.
 fn identidade_o_unseal_que_mente_nao_vira_chave() -> Resultado {
     use crate::tpm::falhas::{Falha, armar, desarmar};
     const UNSEAL: u32 = 0x15E;
@@ -18444,7 +18445,22 @@ fn identidade_o_unseal_que_mente_nao_vira_chave() -> Resultado {
         if boa.como_bytes() != &chave {
             return Err("depois das falhas, a abertura nao abriu a chave");
         }
-        Ok(())
+        drop(boa);
+        // O nascimento cuja abertura de volta não se completa não grava
+        // nada: o selo que o disco guardaria não provou que abre.
+        com_a_area_do_selo_de_volta(|| {
+            let antes = area_do_selo_crua()?;
+            armar(UNSEAL, Falha::RespostaPerdida, 1);
+            let r = crate::selo::nascer_de_teste();
+            desarmar();
+            if r.is_ok() {
+                return Err("o nascimento cuja abertura de volta falhou foi aceito");
+            }
+            if area_do_selo_crua()? != antes {
+                return Err("o nascimento que falhou gravou a area do selo");
+            }
+            Ok(())
+        })
     })
 }
 
@@ -32039,7 +32055,7 @@ static CASOS: &[Caso] = &[
         f: identidade_sem_ela_o_journal_recusa_a_persistencia,
     },
     Caso {
-        nome: "identidade: o unseal que mente no barramento nao vira chave",
+        nome: "identidade: o unseal que mente no barramento nao vira chave, nem o nascimento que nao abriu de volta",
         f: identidade_o_unseal_que_mente_nao_vira_chave,
     },
     Caso {

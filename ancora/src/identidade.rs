@@ -199,13 +199,15 @@ pub enum Recusa {
 }
 
 impl Recusa {
-    /// Uma frase para o log, a auditoria e o `system.info`.
+    /// Uma frase para o log, a auditoria e o `system.info` — que cabe
+    /// inteira no detalhe de um registro da auditoria
+    /// (`politica::auditoria::MAIOR_DETALHE`, 96 bytes).
     pub fn motivo(self) -> &'static str {
         match self {
             Recusa::CopiasDivergem => "as duas copias do selo da identidade divergem",
             Recusa::AreaIlegivel => "o disco nao leu a area do selo da identidade",
             Recusa::SemSelo => {
-                "a particao de estado tem journal e nenhum selo da identidade: a identidade de que ele depende se perdeu"
+                "a particao de estado tem journal e nenhum selo: a identidade de que ele depende se perdeu"
             }
             Recusa::SemTpm => "sem TPM: a identidade selada nao abre, nem nasce",
             Recusa::TpmDeOutraInstalacao => {

@@ -112,7 +112,7 @@ cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
-cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, cópias, sem TPM, clone, reinstalar
+cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, o cache do disco, cópias, sem TPM, clone, reinstalar
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -740,7 +740,7 @@ xtask/src/
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, erros de mídia por faixa e respostas retidas
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
-├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, as cópias do selo, sem TPM, o clone, a reinstalação
+├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
@@ -8029,10 +8029,12 @@ Duke](docs/OPERACAO.md#a-identidade-do-duke); a área do selo, em
 A bancada `cargo xtask identidade` sobe a imagem do `provisionar` pelo
 firmware, nas duas arquiteturas, num disco e num TPM novos por cenário: o
 nascimento, os boots seguintes, a energia caindo em cada passo do
-nascimento, as cópias estragadas, a máquina sem TPM, o disco clonado
-noutra, e a reinstalação com e sem o TPM limpo. A da atualização confere a
-versão nova que se confirma e a que cai na tentativa, com a identidade
-nascida.
+nascimento — também num disco que perde o cache de escrita no corte, na
+descarga de cada cópia e na primeira do journal —, as cópias estragadas,
+a máquina sem TPM, o disco clonado noutra, e a reinstalação com e sem o
+TPM limpo; cada recusa, lida também na auditoria pela serial. A da
+atualização confere a versão nova que se confirma e a que cai na
+tentativa, com a identidade nascida.
 
 ## Barramento PCI
 

@@ -454,8 +454,9 @@ COMANDOS:
     identidade                a identidade do Duke numa máquina de produção:
                               nascida no primeiro boot e selada no TPM, os
                               boots seguintes, quedas de energia no
-                              nascimento, cópias do selo estragadas, sem TPM,
-                              o disco clonado, e a reinstalação
+                              nascimento — também com o cache do disco
+                              perdido no corte —, cópias do selo estragadas,
+                              sem TPM, o disco clonado, e a reinstalação
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto

@@ -242,7 +242,7 @@ no **primeiro boot**, e não na imagem
    começo da reserva do fim da partição de estado. A chave passa pelo
    barramento só cifrada pela sessão salgada com a EK.
 2. A pública aparece no console: no log do boot (`identidade do Duke
-   <pública>: nascida neste boot e selada no TPM`) e no `system.info`,
+   <pública>: nascida neste boot e selada no TPM, em <n> ms`) e no `system.info`,
    campo `identity` (`origin`: `born`, `key`: a pública). O operador
    entra no console com a pessoa dele e lê `system.info` — ou lê a linha
    do log —, e dá a pública aos agentes, que a fixam. O nascimento vai à
@@ -258,15 +258,19 @@ velha abrem a mesma identidade ([`ATUALIZACAO.md`](ATUALIZACAO.md)). Uma
 queda de energia em qualquer passo do nascimento é segura: antes da
 primeira cópia gravada, o boot seguinte nasce de novo, porque nada
 dependia da chave sorteada; depois dela, abre a cópia inteira e repara a
-outra. Uma cópia estragada é reparada pela outra, e o reparo vai à
-auditoria.
+outra. Vale também num disco que perde o cache de escrita no corte: a
+chave só entra em uso — os índices do TPM, o journal — depois de uma
+cópia descarregada. Uma cópia estragada é reparada pela outra, e o reparo
+vai à auditoria.
 
 O que **recusa** — a máquina sobe sem identidade, as portas dos agentes
 recusam o aperto, e a persistência não abre: com journal no disco ela é
 recusada — as revogações dele não se sabem —, e as credenciais das
 pessoas fecham como diante de qualquer journal recusado; a serial
 continua, com o papel dela. O motivo está no `system.info` (`origin`:
-`none`, `error`), que a serial lê, e no log do boot:
+`none`, `error`), que a serial lê, no log do boot, e na auditoria do boot
+(`system.identity`, pelo kernel) — que só a memória guarda, sem journal,
+e que a serial lê se o papel dela tem `audit.read`:
 
 | O que aconteceu | O motivo | O que fazer |
 |---|---|---|
