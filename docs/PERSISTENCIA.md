@@ -1758,3 +1758,28 @@ cache de escrita volátil, erros de mídia por faixa e respostas retidas.
 Os cortes são determinísticos: o servidor corta na n-ésima escrita ou
 descarga, e a parte guardada sai de uma semente escrita no cenário — a
 mesma rodada perde os mesmos setores em toda execução.
+
+E o corte é definitivo. Quando o servidor corta, a máquina ainda está
+viva — a bancada a mata depois —, e o cliente NBD do emulador, ao ver a
+conexão cair, abre outra sozinho no pedido seguinte. Até a investigação
+da CI 359, o servidor a aceitava: a máquina cortada seguia gravando com o
+disco de volta, e a rodada do corte na quarta escrita terminava com dez
+das doze gravações confirmadas — pelo menos nove delas depois do corte. Nenhuma
+promessa foi quebrada (toda confirmada voltou), mas o cenário conferia
+uma máquina que não tinha perdido a energia. Agora o servidor fecha sem
+negociar toda conexão que chega entre o corte e o `religar` da bancada,
+que vem depois de ela matar o emulador; a mesma rodada termina com uma
+gravação confirmada e três reconexões recusadas, e os dois cenários que
+cortam pelo gatilho — este e o do nascimento da identidade — conferem que
+a máquina cortada não teve o disco de volta.
+
+Um boot da bancada que não atende em noventa segundos diz, além do fim
+da serial, o que o emulador diz de si pelo QMP — se roda, onde está cada
+processador e se parado num `hlt`, e quanto o disco leu e escreveu, com
+há quanto tempo está ocioso — e, sobre o disco hostil, o que o servidor
+atendeu. Na CI 359, o primeiro boot de uma rodada parou no iniciador,
+lendo o kernel do slot, e a serial não dizia mais que isso: se o
+processador esperava o disco, se o disco tinha um pedido pendurado, ou se
+o emulador inteiro tinha parado. A falha não se reproduziu aqui (três
+execuções inteiras do cenário, 24 boots); a próxima ocorrência diz qual
+das três foi.

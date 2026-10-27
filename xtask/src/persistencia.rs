@@ -74,9 +74,10 @@ impl Ligada {
         let fluxo = match canal_de_pe(&socket, filho.id(), espera) {
             Ok(f) => f,
             Err(e) => {
+                let estado = estado_do_emulador(arch);
                 let _ = filho.kill();
                 let _ = filho.wait();
-                return Err(e);
+                return Err(format!("{e}\n  o emulador, pelo QMP: {estado}"));
             }
         };
         fluxo
@@ -187,6 +188,52 @@ impl Ligada {
             None => Ok(()),
         }
     }
+}
+
+/// O que o emulador diz de si pelo QMP, para o boot que não atendeu: se
+/// roda, onde está cada processador — e se parado num `hlt` —, e o que o
+/// disco da máquina já leu e escreveu, com há quanto tempo está ocioso.
+///
+/// Na CI 359, um primeiro boot parou no iniciador, lendo o kernel do slot,
+/// e a serial só dizia até onde o hóspede tinha escrito: não dizia se o
+/// processador girava à espera do disco, se o disco tinha um pedido
+/// pendurado, ou se o próprio emulador tinha parado. Um emulador que não
+/// responde ao QMP é essa terceira resposta.
+fn estado_do_emulador(arch: Arquitetura) -> String {
+    let perguntar = || -> Result<String, String> {
+        let (mut escrita, mut leitor) = super::qmp_abrir(&super::caminho_qmp(arch))?;
+        let mut pedir = |pedido: &str| super::qmp_pedir(&mut escrita, &mut leitor, pedido);
+        let status = pedir(r#"{"execute":"query-status"}"#)?;
+        let monitor = |comando: &str| {
+            format!(
+                r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{comando}"}}}}"#
+            )
+        };
+        let registros = pedir(&monitor("info registers -a"))?;
+        let disco = pedir(&monitor("info blockstats"))?;
+        let mut partes = vec![
+            status
+                .split("\"status\": \"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or(status.trim())
+                .to_string(),
+        ];
+        // A saída do monitor humano vem dentro de uma string JSON, com as
+        // quebras de linha escapadas.
+        for linha in registros.split("\\r\\n").chain(disco.split("\\r\\n")) {
+            let linha = linha.trim();
+            if linha.starts_with("CPU#")
+                || linha.starts_with("RIP=")
+                || linha.starts_with("PC=")
+                || linha.starts_with("disco0")
+            {
+                partes.push(linha.to_string());
+            }
+        }
+        Ok(partes.join("; "))
+    };
+    perguntar().unwrap_or_else(|e| format!("sem resposta ({e}): o emulador parou por dentro"))
 }
 
 /// Liga o QEMU, sem esperar nada dele. Devolve o processo e o socket da
@@ -1277,6 +1324,18 @@ fn disco_hostil(arch: Arquitetura, corte: Corte) -> Result<DiscoHostil, String> 
     DiscoHostil::servir(&disco_de_testes()?, &socket_do_disco_hostil(arch), corte)
 }
 
+/// Liga a máquina sobre o disco hostil. O boot que não atende diz também o
+/// que o servidor viu: as conexões, e as leituras e escritas atendidas.
+fn ligar_no_disco_hostil(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    disco: &DiscoHostil,
+) -> Result<Ligada, String> {
+    let ambiente = Ambiente::ligar(arch, None)?.com_disco_hostil(disco.socket());
+    Ligada::subir_com(arch, artefato, ambiente)
+        .map_err(|e| format!("{e}\n  o disco hostil: {:?}", disco.contas()))
+}
+
 /// Se a resposta de um comando do armazém é a de uma gravação confirmada —
 /// a mesma regra do [`no_armazem`]: a recusa também vem em `result`.
 fn confirmada(r: &str) -> bool {
@@ -1297,7 +1356,9 @@ fn faixa_do_journal() -> Faixa {
 /// armazém pedidas de uma vez pela serial, e a energia acaba no meio
 /// delas, num ponto exato: na `n`-ésima escrita, com ela no cache, ou na
 /// `n`-ésima descarga, antes de gravar — o próprio servidor corta, ver
-/// [`Gatilho`]. No boot seguinte a persistência abre — nada que foi
+/// [`Gatilho`] —, e a máquina cortada não tem o disco de volta: a conexão
+/// nova que o emulador abre sozinho é recusada até o cenário matá-lo e
+/// religar. No boot seguinte a persistência abre — nada que foi
 /// confirmado se perdeu, senão o journal ficaria atrás da âncora e seria
 /// recusado —, cada gravação confirmada está lá, cada uma sem confirmação
 /// está inteira ou não está, e a auditoria e o armazém conferem. Quatro
@@ -1317,8 +1378,7 @@ fn o_disco_que_perde_o_cache(arch: Arquitetura, artefato: &Artefato) -> Result<S
     ] {
         zerar_o_estado(arch)?;
         let disco = disco_hostil(arch, corte)?;
-        let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
-        let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+        let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
         let antes = persistencia_de(&mut m)?;
         if antes.estado != "available" {
             return Err(format!(
@@ -1369,8 +1429,14 @@ fn o_disco_que_perde_o_cache(arch: Arquitetura, artefato: &Artefato) -> Result<S
                 "{corte:?}: o corte em {gatilho:?} nao pegou nada no cache: {no_corte:?}"
             ));
         }
+        if no_corte.conexoes != 1 {
+            return Err(format!(
+                "{corte:?}: depois do corte em {gatilho:?}, a maquina cortada teve o disco de volta: {no_corte:?}"
+            ));
+        }
+        disco.religar();
 
-        let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+        let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
         let depois = persistencia_de(&mut m)?;
         if depois.estado != "available" || depois.boots <= antes.boots {
             return Err(format!(
@@ -1406,10 +1472,11 @@ fn o_disco_que_perde_o_cache(arch: Arquitetura, artefato: &Artefato) -> Result<S
         }
         m.cortar_a_energia()?;
         relato.push(format!(
-            "{corte:?} em {gatilho:?}: {} confirmadas, {voltaram} de {GRAVACOES} de volta; {} setores no cache no corte, {} guardados",
+            "{corte:?} em {gatilho:?}: {} confirmadas, {voltaram} de {GRAVACOES} de volta; {} setores no cache no corte, {} guardados; {} reconexoes da maquina cortada recusadas",
             confirmadas.len(),
             no_corte.no_corte,
-            no_corte.guardados_no_corte
+            no_corte.guardados_no_corte,
+            no_corte.recusadas
         ));
     }
     Ok(relato.join("; "))
@@ -1426,8 +1493,7 @@ fn o_disco_que_perde_o_cache(arch: Arquitetura, artefato: &Artefato) -> Result<S
 fn o_erro_de_midia_no_journal(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     const A: &str = "/armazem/midia/a.txt";
     let disco = disco_hostil(arch, Corte::PerdeTudo)?;
-    let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
-    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
     let antes = persistencia_de(&mut m)?;
     if antes.estado != "available" {
         return Err(format!(
@@ -1477,7 +1543,7 @@ fn o_erro_de_midia_no_journal(arch: Arquitetura, artefato: &Artefato) -> Result<
     disco.esperar_o_fim_da_conexao(1)?;
     disco.erro_em(None);
 
-    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
     let depois = persistencia_de(&mut m)?;
     if depois.estado != "available" || depois.boots <= antes.boots {
         return Err(format!(
@@ -1507,8 +1573,7 @@ fn o_erro_de_midia_no_journal(arch: Arquitetura, artefato: &Artefato) -> Result<
 fn o_disco_que_para_de_responder(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     const A: &str = "/armazem/mudo/a.txt";
     let disco = disco_hostil(arch, Corte::PerdeTudo)?;
-    let ambiente = || Ambiente::ligar(arch, None).map(|a| a.com_disco_hostil(disco.socket()));
-    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
     let antes = persistencia_de(&mut m)?;
     if antes.estado != "available" {
         return Err(format!(
@@ -1555,7 +1620,7 @@ fn o_disco_que_para_de_responder(arch: Arquitetura, artefato: &Artefato) -> Resu
     disco.esperar_o_fim_da_conexao(1)?;
     disco.reter_em(None);
 
-    let mut m = Ligada::subir_com(arch, artefato, ambiente()?)?;
+    let mut m = ligar_no_disco_hostil(arch, artefato, &disco)?;
     let depois = persistencia_de(&mut m)?;
     if depois.estado != "available" || depois.boots <= antes.boots {
         return Err(format!(

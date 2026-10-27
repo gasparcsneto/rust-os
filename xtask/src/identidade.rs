@@ -612,6 +612,11 @@ fn o_cache_do_disco_no_nascimento(b: &Bancada) -> Result<String, String> {
                 "{nome}: o corte nao pegou nada no cache: {contas:?}"
             ));
         }
+        if contas.conexoes != 1 {
+            return Err(format!(
+                "{nome}: a maquina cortada teve o disco de volta: {contas:?}"
+            ));
+        }
         let [a, c] = b.area()?;
         let lidas = [ancora::identidade::ler(&a), ancora::identidade::ler(&c)];
         for (copia, (lida, inteira)) in lidas.iter().zip(inteiras).enumerate() {
@@ -660,8 +665,8 @@ fn o_cache_do_disco_no_nascimento(b: &Bancada) -> Result<String, String> {
             return Err(format!("{nome}: a area nao ficou com a identidade aberta"));
         }
         feitos.push(format!(
-            "{nome}: {} setores no cache no corte",
-            contas.no_corte
+            "{nome}: {} setores no cache no corte, {} reconexoes recusadas",
+            contas.no_corte, contas.recusadas
         ));
     }
     Ok(feitos.join("; "))

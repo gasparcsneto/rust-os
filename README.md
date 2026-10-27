@@ -738,7 +738,7 @@ xtask/src/
 ├── atualizar.rs     a bancada da atualização A/B: a máquina de produção pelo firmware, a versão nova instalada, tentada, confirmada ou desfeita, as recusas, a concorrência e as quedas em cada fronteira
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
-├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, erros de mídia por faixa e respostas retidas
+├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
@@ -7836,15 +7836,19 @@ contador no boot, no meio da criação da âncora, e em cada fronteira de uma
 compactação; e enche a região até a operação que não cabe. Com um disco
 hostil — um servidor NBD da própria bancada
 ([`xtask/src/disco_hostil.rs`](xtask/src/disco_hostil.rs)) atrás do NVMe —,
-o disco perde no corte o que não foi descarregado, inteiro ou em parte,
-devolve erro de mídia no journal, e para de responder. O desenho, os requisitos e o que
+o disco perde no corte o que não foi descarregado, inteiro ou em parte —
+e a máquina cortada não tem o disco de volta: a conexão que o emulador
+reabre sozinho é recusada até a bancada religar —, devolve erro de mídia
+no journal, e para de responder. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 A saída humana das máquinas de cada cenário (a COM1 do x86) vai para
 `target/persistencia-<arch>.serial`, esvaziado no começo do cenário, e o
 cenário que reprova mostra as últimas quarenta linhas dela: é o que diz
 onde parou uma máquina que não respondeu — o firmware, o iniciador ou um
-passo do kernel. `DUKE_CENARIOS` escolhe os cenários por pedaços do nome,
+passo do kernel. O boot que não atende diz também o que o emulador diz
+de si pelo QMP: se roda, onde está cada processador, e há quanto tempo o
+disco está ocioso. `DUKE_CENARIOS` escolhe os cenários por pedaços do nome,
 e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
 ## Operação

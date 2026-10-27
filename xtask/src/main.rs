@@ -9107,16 +9107,16 @@ fn sob_arvore(escrita: &mut UnixStream, leitor: &mut BufReader<UnixStream>) -> R
 /// — um `{"event": ...}` pode chegar antes da resposta. Lê até a resposta.
 /// Abre o QMP do emulador e passa da saudação e da negociação.
 fn qmp_abrir(qmp: &Path) -> Result<(UnixStream, BufReader<UnixStream>), String> {
-    let fluxo = UnixStream::connect(qmp).map_err(|e| format!("mouse: o QMP nao aceitou: {e}"))?;
+    let fluxo = UnixStream::connect(qmp).map_err(|e| format!("o QMP nao aceitou: {e}"))?;
     fluxo
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("mouse: {e}"))?;
-    let mut escrita = fluxo.try_clone().map_err(|e| format!("mouse: {e}"))?;
+        .map_err(|e| format!("QMP: {e}"))?;
+    let mut escrita = fluxo.try_clone().map_err(|e| format!("QMP: {e}"))?;
     let mut leitor = BufReader::new(fluxo);
     let mut saudacao = String::new();
     leitor
         .read_line(&mut saudacao)
-        .map_err(|e| format!("mouse: o QMP nao saudou: {e}"))?;
+        .map_err(|e| format!("o QMP nao saudou: {e}"))?;
     qmp_pedir(
         &mut escrita,
         &mut leitor,
@@ -9160,14 +9160,14 @@ fn qmp_pedir(
         .write_all(pedido.as_bytes())
         .and_then(|()| escrita.write_all(b"\n"))
         .and_then(|()| escrita.flush())
-        .map_err(|e| format!("mouse: falha ao falar com o QMP: {e}"))?;
+        .map_err(|e| format!("falha ao falar com o QMP: {e}"))?;
     loop {
         let mut linha = String::new();
         leitor
             .read_line(&mut linha)
-            .map_err(|e| format!("mouse: o QMP nao respondeu: {e}"))?;
+            .map_err(|e| format!("o QMP nao respondeu: {e}"))?;
         if linha.is_empty() {
-            return Err("mouse: o QMP fechou a conexao".into());
+            return Err("o QMP fechou a conexao".into());
         }
         if linha.contains("\"return\"") || linha.contains("\"error\"") {
             return Ok(linha);

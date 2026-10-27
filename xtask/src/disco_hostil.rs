@@ -27,6 +27,16 @@
 //!   nunca. O controlador do emulador espera com ele, e o driver do Duke,
 //!   depois do prazo do disco, desliga o dispositivo.
 //!
+//! # O corte do gatilho é definitivo
+//!
+//! Quando o gatilho corta, a máquina ainda está viva — é a bancada que a
+//! mata depois —, e o cliente NBD do emulador, quando a conexão cai, abre
+//! outra sozinho no pedido seguinte. Medido: com o corte na quarta escrita,
+//! a máquina seguia gravando pela conexão nova, e dez das doze gravações
+//! voltavam confirmadas. Até [`DiscoHostil::religar`], que a bancada chama
+//! depois de matar o emulador, o servidor fecha toda conexão nova sem
+//! negociar: sem energia, o disco não volta para a máquina cortada.
+//!
 //! # O protocolo
 //!
 //! O NBD *newstyle* fixo, só o que o QEMU usa: a negociação por
@@ -130,6 +140,7 @@ pub(crate) struct Contas {
     /// Quantas conexões houve — um boot cada —, e quantas já acabaram.
     pub conexoes: u64,
     pub encerradas: u64,
+    pub leituras: u64,
     pub escritas: u64,
     pub descargas: u64,
     /// Setores que estavam no cache volátil no corte, e quantos deles
@@ -141,6 +152,9 @@ pub(crate) struct Contas {
     pub retidos: u64,
     /// Quantas vezes o gatilho cortou a energia.
     pub cortes: u64,
+    /// Conexões fechadas sem negociar enquanto faltava energia: o emulador
+    /// da máquina cortada pedindo o disco de volta.
+    pub recusadas: u64,
 }
 
 /// O estado do disco, dividido entre o servidor e o cenário.
@@ -153,6 +167,9 @@ struct Estado {
     erro: Option<(Faixa, Sentido)>,
     reter: Option<(Faixa, Sentido)>,
     gatilho: Option<Gatilho>,
+    /// O gatilho cortou, e a bancada ainda não religou: uma conexão nova é
+    /// da máquina cortada, e não leva o disco.
+    sem_energia: bool,
     contas: Contas,
 }
 
@@ -222,6 +239,7 @@ impl Estado {
         self.gatilho = None;
         self.cortar();
         self.contas.cortes += 1;
+        self.sem_energia = true;
         true
     }
 
@@ -277,6 +295,7 @@ impl DiscoHostil {
             erro: None,
             reter: None,
             gatilho: None,
+            sem_energia: false,
             contas: Contas::default(),
         }));
         let do_servidor = Arc::clone(&estado);
@@ -290,7 +309,17 @@ impl DiscoHostil {
                 let Ok(conexao) = conexao else {
                     continue;
                 };
-                do_servidor.lock().expect("estado do disco").contas.conexoes += 1;
+                {
+                    let mut e = do_servidor.lock().expect("estado do disco");
+                    if e.sem_energia {
+                        // A máquina cortada pedindo o disco de volta: a
+                        // conexão fecha sem negociar, e o emulador vê o
+                        // disco sumido.
+                        e.contas.recusadas += 1;
+                        continue;
+                    }
+                    e.contas.conexoes += 1;
+                }
                 // Uma conexão é um boot: quando ela acaba sem `DISC`, a
                 // energia acabou — o emulador morreu.
                 let limpo = atender(conexao, &do_servidor).unwrap_or(false);
@@ -346,9 +375,16 @@ impl DiscoHostil {
 
     /// Arma o corte de energia: no ponto que `gatilho` diz, o servidor perde
     /// o cache e fecha a conexão — o emulador fica sem disco, e o cenário o
-    /// mata depois, quando [`Contas::cortes`] subir.
+    /// mata depois, quando [`Contas::cortes`] subir. Até
+    /// [`DiscoHostil::religar`], nenhuma conexão nova leva o disco.
     pub(crate) fn cortar_em(&self, gatilho: Gatilho) {
         self.estado.lock().expect("estado do disco").gatilho = Some(gatilho);
+    }
+
+    /// A energia de volta, depois de o cenário matar o emulador da máquina
+    /// cortada: a próxima conexão é um boot novo.
+    pub(crate) fn religar(&self) {
+        self.estado.lock().expect("estado do disco").sem_energia = false;
     }
 
     /// O que o servidor viu até agora.
@@ -440,6 +476,7 @@ fn atender(mut c: UnixStream, estado: &Mutex<Estado>) -> std::io::Result<bool> {
             .is_none_or(|fim| fim > e.tamanho);
         match tipo {
             CMD_READ => {
+                e.contas.leituras += 1;
                 let mut dados = vec![0u8; bytes as usize];
                 let erro = if bytes > MAIOR_PEDIDO || fora {
                     EINVAL
