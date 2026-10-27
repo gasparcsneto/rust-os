@@ -6970,7 +6970,7 @@ fn atualizacao_o_quorum_pela_politica() -> Resultado {
             let r = com_sessao_de_teste(0, || {
                 chamar("admin.challenge", r#"{"for":"system.update"}"#)
             })?;
-            let d = ler_desafio_de_quorum(Json(r.as_bytes()), 0)?;
+            let d = ler_desafio_da_operacao(Json(r.as_bytes()), 0, "system.update")?;
             if (d.m, d.n) != (2, 3) {
                 return Err("o desafio de system.update nao diz o quorum da politica");
             }
@@ -17328,6 +17328,15 @@ struct DesafioDeQuorum {
 }
 
 fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'static str> {
+    ler_desafio_da_operacao(j, sessao, "admin.revoke")
+}
+
+/// O desafio de quórum de `operacao`, da resposta do `admin.challenge`.
+fn ler_desafio_da_operacao(
+    j: Json,
+    sessao: u8,
+    operacao: &str,
+) -> Result<DesafioDeQuorum, &'static str> {
     let numero = |nome| {
         j.member(nome)
             .and_then(|v| v.as_u64())
@@ -17339,7 +17348,7 @@ fn ler_desafio_de_quorum(j: Json, sessao: u8) -> Result<DesafioDeQuorum, &'stati
             .and_then(sigilo::de_hex)
             .ok_or("desafio de quorum incompleto")
     };
-    if j.member("operation").and_then(|v| v.as_str()) != Some("admin.revoke") {
+    if j.member("operation").and_then(|v| v.as_str()) != Some(operacao) {
         return Err("o desafio nao diz a operacao de quorum");
     }
     Ok(DesafioDeQuorum {
