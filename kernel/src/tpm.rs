@@ -475,9 +475,12 @@ pub mod falhas {
 
     /// A falha armada: o código do comando, o que fazer, e quantas vezes.
     static PLANO: Mutex<Option<(u32, Falha, u32)>> = Mutex::new(None);
-    /// A última resposta de cada código de comando, para repetir.
-    static ANTERIORES: Mutex<[(u32, [u8; MAIOR_QUADRO], usize); 4]> =
-        Mutex::new([(0, [0; MAIOR_QUADRO], 0); 4]);
+    /// A última resposta de cada código de comando, para repetir: uma vaga
+    /// para cada código que o kernel manda — a conexão da identidade, do
+    /// `TPM2_Startup` ao `TPM2_Unseal`, passa por sete deles, e com quatro
+    /// vagas a resposta do `TPM2_Unseal` saía antes de ser repetida.
+    static ANTERIORES: Mutex<[(u32, [u8; MAIOR_QUADRO], usize); 16]> =
+        Mutex::new([(0, [0; MAIOR_QUADRO], 0); 16]);
 
     /// Arma a falha para os próximos `vezes` comandos de código `codigo`.
     pub fn armar(codigo: u32, falha: Falha, vezes: u32) {

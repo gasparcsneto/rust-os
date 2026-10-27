@@ -19,11 +19,13 @@
 //!   de teste do IC e os arquivos que a suíte lê.
 //!
 //! A imagem daqui é montada do que o operador traz, e de nada disso: a
-//! chave do Duke é sorteada aqui e só existe dentro dela; os registros, a
-//! política, a rede e as fontes de hora são os do operador, conferidos pelos
-//! mesmos leitores do kernel; uma chave da bancada em qualquer arquivo
-//! recusa a imagem inteira; e a raiz leva os programas, as âncoras TLS
-//! públicas e a rede principal do IC — o que é público e é do produto.
+//! imagem não leva chave do Duke nenhuma — a identidade nasce no primeiro
+//! boot da máquina, selada no TPM dela (ver `kernel/src/selo.rs`); os
+//! registros, a política, a rede e as fontes de hora são os do operador,
+//! conferidos pelos mesmos leitores do kernel; uma chave da bancada em
+//! qualquer arquivo recusa a imagem inteira; e a raiz leva os programas, as
+//! âncoras TLS públicas e a rede principal do IC — o que é público e é do
+//! produto.
 //!
 //! # O código num slot, o estado na raiz
 //!
@@ -31,17 +33,20 @@
 //! numa imagem de slot assinada pela chave de atualização de quem publica
 //! (`cargo xtask publicar`): o kernel e o pacote — os programas do produto,
 //! as âncoras TLS públicas e a rede principal do IC. A raiz leva só o que é
-//! da máquina: `/etc/duke` — a chave do Duke, os registros, a política, a
-//! rede, e o registro das chaves de atualização em que ela confia. Uma
-//! versão nova troca o slot inteiro e não toca a raiz, o journal nem o
-//! armazém.
+//! da máquina: `/etc/duke` — os registros, a política, a rede, e o registro
+//! das chaves de atualização em que ela confia. Uma versão nova troca o
+//! slot inteiro e não toca a raiz, o journal, o armazém nem o selo da
+//! identidade.
 //!
-//! # O que não muda
+//! # A identidade do Duke
 //!
-//! A identidade do Duke continua nascendo na imagem — é o grupo B de
-//! `docs/OPERACAO.md`, e esta ferramenta não o decide: ela só faz com que
-//! cada imagem tenha uma chave própria, e que ninguém mais a tenha. O
-//! formato de cada arquivo, a política, o gate, a persistência: os mesmos.
+//! Não sai daqui. A máquina a sorteia no primeiro boot, sela no TPM dela e
+//! mostra a pública no console — no log do boot e no `system.info`, campo
+//! `identity.key` —; o operador a lê ali e a dá aos agentes dele, que a
+//! fixam (`cargo xtask operar --duke`). Uma cópia da imagem, ou do disco
+//! depois do primeiro boot, não leva identidade que abra noutra máquina —
+//! ver "A identidade do Duke" em `docs/OPERACAO.md`. O formato de cada
+//! arquivo, a política, o gate, a persistência: os mesmos.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -562,14 +567,14 @@ fn redes_de_producao() -> String {
     )
 }
 
-/// Os arquivos da raiz de uma imagem de produção: os do operador, a chave
-/// do Duke `duke` e a marca com o id `id` — só `/etc/duke`, o que é da
-/// máquina. O código e os dados públicos vêm no pacote do slot — ver
-/// [`arquivos_do_pacote`] —, e uma versão nova os troca sem tocar aqui.
+/// Os arquivos da raiz de uma imagem de produção: os do operador e a marca
+/// com o id `id` — só `/etc/duke`, o que é da máquina, e nenhuma chave do
+/// Duke: ela nasce no primeiro boot. O código e os dados públicos vêm no
+/// pacote do slot — ver [`arquivos_do_pacote`] —, e uma versão nova os
+/// troca sem tocar aqui.
 pub(crate) fn arquivos_da_raiz(
     op: &Operador,
     politica: &politica::Politica,
-    duke: &[u8; 32],
     id: [u8; 16],
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     let marca = sigilo::imagem::Marca {
@@ -581,10 +586,6 @@ pub(crate) fn arquivos_da_raiz(
         (
             "etc/duke/imagem".to_string(),
             sigilo::imagem::escrever(&marca).into_bytes(),
-        ),
-        (
-            "etc/duke/privado/chave".to_string(),
-            format!("{}\n", sigilo::hex(duke)).into_bytes(),
         ),
         (
             "etc/duke/politica".to_string(),
@@ -697,23 +698,23 @@ pub(crate) fn provisionar(
             .join("producao")
             .join(format!("{}-{}", op.nome, arch.nome()))
     });
-    // Uma imagem nunca por cima de outra: a chave do Duke da anterior
-    // sumiria, e com ela a máquina que já a usa.
+    // Uma imagem nunca por cima de outra: o registro dela, e o id da marca
+    // com que a máquina dela se apresenta, sumiriam.
     if saida.join("duke.img").exists() {
         return Err(format!(
-            "{} já tem uma imagem: escolha outra saída, ou apague a anterior sabendo que a chave do Duke dela some junto",
+            "{} já tem uma imagem: escolha outra saída, ou apague a anterior sabendo que o registro dela some junto",
             saida.display()
         ));
     }
     std::fs::create_dir_all(&saida)
         .map_err(|e| format!("não foi possível criar {}: {e}", saida.display()))?;
-    let duke = aleatorios()?;
     let mut id = [0u8; 16];
     id.copy_from_slice(&aleatorios()?[..16]);
-    let arquivos = arquivos_da_raiz(&op, &politica, &duke, id)?;
+    let arquivos = arquivos_da_raiz(&op, &politica, id)?;
 
-    // A montagem leva a privada do Duke em claro — na árvore da raiz e na
-    // imagem —: só o dono a lê, e ela some também quando algo falha no meio.
+    // A montagem leva os verificadores das senhas das pessoas — na árvore
+    // da raiz e na imagem —: só o dono os lê, e eles somem também quando
+    // algo falha no meio.
     let montagem = saida.join("montagem");
     so_do_dono(&montagem, true)?;
     let montada = (|| -> Result<PathBuf, String> {
@@ -726,11 +727,10 @@ pub(crate) fn provisionar(
     let _ = std::fs::remove_dir_all(&montagem);
     let efi = montada?;
 
-    let publica = sigilo::hex(&sigilo::publica_de(&duke));
-    std::fs::write(saida.join("duke.publica"), format!("{publica}\n"))
-        .map_err(|e| format!("não foi possível gravar a pública do Duke: {e}"))?;
     let mut registro = format!(
-        "# A imagem de producao `{}`, para {}: o que entrou nela.\nid {}\nduke {publica}\niniciador {}\n\
+        "# A imagem de producao `{}`, para {}: o que entrou nela.\n\
+         # A identidade do Duke nao entra: nasce no primeiro boot, selada no TPM, e a publica aparece no console (system.info, identity.key).\n\
+         id {}\niniciador {}\n\
          slot-a {} {}\nmanifesto {}\nversao {}\ngeracao {}\nassinada-por {}\nkernel {} bytes\npacote {} bytes\n",
         op.nome,
         arch.nome(),
@@ -746,8 +746,8 @@ pub(crate) fn provisionar(
         slot.pacote,
     );
     for (nome, bytes) in &arquivos {
-        // A chave do Duke e o registro de pessoas não entram: o resumo de
-        // um segredo de 32 bytes não o protege de quem testa palpites.
+        // O registro de pessoas não entra: o resumo dos verificadores não
+        // os protege de quem testa palpites.
         if nome.starts_with("etc/duke/privado/") {
             registro.push_str(&format!("{nome} (privado)\n"));
         } else {
@@ -759,9 +759,9 @@ pub(crate) fn provisionar(
     println!(
         "[xtask] imagem de produção `{}` ({}) em {}\n\
          [xtask] no slot A: a versão {} (geração {}), assinada por `{}`\n\
-         [xtask] a pública do Duke, que os agentes fixam: {publica}\n\
          [xtask] o que entrou: {}\n\
-         [xtask] a privada do Duke só existe dentro da imagem: guarde a imagem como se guarda a chave",
+         [xtask] a identidade do Duke nasce no primeiro boot, selada no TPM da máquina: leia a pública no console (system.info, identity.key) e a dê aos agentes, que a fixam\n\
+         [xtask] a imagem leva os verificadores das senhas das pessoas: guarde-a só com o dono",
         op.nome,
         arch.nome(),
         saida.join("duke.img").display(),
@@ -1080,8 +1080,9 @@ pub(crate) fn encenar(agente: &mut super::AgenteNaPorta, bytes: &[u8]) -> Result
     ))
 }
 
-/// A pública do Duke de `texto`: o conteúdo de `duke.publica`, ou o
-/// caminho dele.
+/// A pública do Duke de `texto`: o hexadecimal que a máquina mostra no
+/// console no primeiro boot (`system.info`, `identity.key`), ou o caminho
+/// de um arquivo com ele.
 fn publica_do_duke(texto: &str) -> Result<[u8; 32], String> {
     sigilo::de_hex(texto.trim())
         .or_else(|| {
@@ -1196,6 +1197,14 @@ mod testes {
         caso: &str,
         mudar: impl FnOnce(&Path),
     ) -> Result<politica::Politica, String> {
+        operador_lido(caso, mudar).map(|(_, politica)| politica)
+    }
+
+    /// [`operador_de_teste`], com o material lido.
+    fn operador_lido(
+        caso: &str,
+        mudar: impl FnOnce(&Path),
+    ) -> Result<(Operador, politica::Politica), String> {
         let dir =
             std::env::temp_dir().join(format!("xtask-operador-{caso}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1228,9 +1237,33 @@ mod testes {
         )
         .unwrap();
         mudar(&dir);
-        let resultado = ler_o_operador(&dir).and_then(|op| conferir(&op));
+        let resultado =
+            ler_o_operador(&dir).and_then(|op| conferir(&op).map(|politica| (op, politica)));
         let _ = std::fs::remove_dir_all(&dir);
         resultado
+    }
+
+    /// A raiz de produção não leva chave do Duke nenhuma — ela nasce no
+    /// primeiro boot, selada no TPM —, e o resto do `/etc/duke` continua.
+    #[test]
+    fn a_raiz_de_producao_nao_leva_a_chave_do_duke() {
+        let (op, politica) = operador_lido("raiz", |_| {}).unwrap();
+        let arquivos = arquivos_da_raiz(&op, &politica, [7; 16]).unwrap();
+        let nomes: Vec<&str> = arquivos.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !nomes.iter().any(|n| n.contains("privado/chave")),
+            "{nomes:?}"
+        );
+        for esperado in [
+            "etc/duke/imagem",
+            "etc/duke/politica",
+            "etc/duke/agentes",
+            "etc/duke/administradores",
+            "etc/duke/privado/pessoas",
+            "etc/duke/atualizacao",
+        ] {
+            assert!(nomes.contains(&esperado), "falta {esperado}: {nomes:?}");
+        }
     }
 
     #[test]

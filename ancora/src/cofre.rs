@@ -51,6 +51,32 @@
 //! abriria do mesmo jeito sem o bit; ele está lá para o objeto não depender
 //! disso.
 //!
+//! # A identidade do Duke
+//!
+//! Sob o mesmo primário mora um outro selado: a chave privada da
+//! identidade do Duke, nascida no primeiro boot — ver [`crate::identidade`].
+//! Ele não pode usar a política de geração: a senha do índice de geração
+//! deriva da própria chave da identidade, e o selado que a guarda teria de
+//! ser aberto com ela. É um *keyedhash* com `fixedTPM` e `fixedParent`, sem
+//! política e com a senha vazia (`userWithAuth`) — só a senha autoriza o
+//! uso, e ninguém a troca: `adminWithPolicy` com a política vazia fecha o
+//! `TPM2_ObjectChangeAuth`. O que o prende é o primário: só este TPM, e só
+//! até ele ser limpo, carrega o bloco privado.
+//!
+//! O barramento é o mesmo do cofre. A chave vai ao `TPM2_Create` cifrada
+//! pela sessão salgada da âncora, e volta do `TPM2_Unseal` cifrada por ela,
+//! com a resposta autenticada pelo HMAC da sessão — o mesmo caminho da
+//! senha de um índice novo, e o da semente de uma chave de assinatura.
+//!
+//! A senha vazia tem um preço, e ele é dito: quem tem o disco **e** a
+//! máquina — outro sistema bootado nela, ou alguém no barramento mandando
+//! os próprios comandos — abre o selado. O que a política de geração
+//! acrescenta ao cofre exige um segredo que exista antes da identidade, e
+//! não há nenhum: nem no disco, que é o que se protege, nem na imagem, que
+//! não leva segredo. Prender o selado à medição do boot é o boot seguro,
+//! fora deste pacote — e quebraria a atualização A/B, que boota outro
+//! kernel com a mesma identidade.
+//!
 //! # O que este módulo não decide
 //!
 //! Quem pode assinar, quando selar, quando avançar a geração, o que fazer
@@ -106,6 +132,10 @@ pub mod objeto {
     /// O objeto selado.
     pub const DO_SELADO: u32 =
         FIXO_NO_TPM | FIXO_NO_PAI | ADMINISTRACAO_PELA_POLITICA | SEM_BLOQUEIO;
+    /// O selado da identidade: o uso pela senha, vazia; a administração
+    /// pela política, vazia — ninguém a satisfaz.
+    pub const DA_IDENTIDADE: u32 =
+        FIXO_NO_TPM | FIXO_NO_PAI | USO_COM_SENHA | ADMINISTRACAO_PELA_POLITICA | SEM_BLOQUEIO;
 }
 
 /// O maior bloco privado de um objeto selado que o cofre aceita. O tamanho
@@ -239,6 +269,40 @@ impl Drop for Semente {
     }
 }
 
+/// O selado da identidade como o disco o guarda: o `unique` da parte
+/// pública — o resto dela é o modelo, fixo — e o bloco privado, cifrado e
+/// autenticado pelo TPM. Sem geração: a identidade vive enquanto a
+/// instalação vive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeladoDaIdentidade {
+    unico: [u8; TAM],
+    privado: [u8; MAIOR_PRIVADO],
+    tam: usize,
+}
+
+impl SeladoDaIdentidade {
+    /// O selado a partir do que o disco guarda. Só os tamanhos se conferem
+    /// aqui: o resto, quem confere é o TPM, no `TPM2_Load`.
+    pub fn de_partes(unico: &[u8], privado: &[u8]) -> Result<SeladoDaIdentidade, Erro> {
+        let s = Selado::de_partes(0, unico, privado)?;
+        Ok(SeladoDaIdentidade {
+            unico: s.unico,
+            privado: s.privado,
+            tam: s.tam,
+        })
+    }
+
+    /// O `unique` da parte pública.
+    pub fn unico(&self) -> &[u8; TAM] {
+        &self.unico
+    }
+
+    /// O bloco privado, cifrado pelo TPM.
+    pub fn privado(&self) -> &[u8] {
+        &self.privado[..self.tam]
+    }
+}
+
 /// A política de um objeto selado na geração `geracao` do índice `indice`
 /// (parte 3, 23.9): o `TPM2_PolicyNV` com o valor do contador igual a
 /// `geracao`, a partir da sessão zerada —
@@ -295,6 +359,17 @@ fn publico_do_selado(q: &mut Quadro, politica: &[u8; TAM], unico: &[u8]) {
     q.u16(SHA256);
     q.u32(objeto::DO_SELADO);
     q.tpm2b(politica);
+    q.u16(ALG_NULO); // esquema
+    q.tpm2b(unico);
+}
+
+/// A parte pública do selado da identidade: *keyedhash* sem esquema e sem
+/// política, com o `unique` que o TPM deu (vazio no pedido).
+fn publico_da_identidade(q: &mut Quadro, unico: &[u8]) {
+    q.u16(KEYEDHASH);
+    q.u16(SHA256);
+    q.u32(objeto::DA_IDENTIDADE);
+    q.tpm2b(&[]);
     q.u16(ALG_NULO); // esquema
     q.tpm2b(unico);
 }
@@ -519,45 +594,16 @@ impl Ancora {
         let mut publico = Quadro::vazio();
         publico_do_selado(&mut publico, &politica, &selado.unico);
         let nome = nome_do_publico(&publico.bytes[..publico.tam]);
-        let mut p = Quadro::vazio();
-        p.tpm2b(selado.privado());
-        p.tpm2b(&publico.bytes[..publico.tam]);
-        let entidades = [Entidade {
-            handle: cofre.handle,
-            nome: &cofre.nome,
-        }];
         let mut alca = 0u32;
-        let mut saida = [0; MAIOR_QUADRO];
-        let tam = p.tam;
-        let carregado = self.pela_sessao(
+        let carregado = self.carregar(
             tpm,
+            cofre,
+            selado.privado(),
+            &publico.bytes[..publico.tam],
+            &nome,
+            &mut alca,
             sorteio,
-            Pedido {
-                codigo: comando::LOAD,
-                entidades: &entidades,
-                senha: &[],
-                parametros: &mut p.bytes[..tam],
-                cifrar_o_primeiro: false,
-                alca_da_resposta: Some(&mut alca),
-                decifrar_a_resposta: false,
-            },
-            &mut saida,
         );
-        // O nome que o TPM deu ao objeto, autenticado com a resposta: o da
-        // parte pública que foi.
-        let carregado = carregado.and_then(|n| {
-            let mut l = Leitor {
-                bytes: &saida[..n],
-                pos: 0,
-            };
-            let lido = l.tpm2b()?;
-            l.fim()?;
-            if lido == nome {
-                Ok(())
-            } else {
-                Err(Erro::SeladoEstranho)
-            }
-        });
         let aberto = match carregado {
             Ok(()) => {
                 self.abrir_carregado(tpm, cofre, geracao, alca, &nome, selado.geracao, sorteio)
@@ -568,6 +614,58 @@ impl Ancora {
             let _ = esquecer(tpm, alca);
         }
         aberto
+    }
+
+    /// `TPM2_Load` de um selado sob o primário do `cofre`, pela sessão
+    /// salgada. A alça vai para `alca` assim que lida — quem chama a tira
+    /// do TPM, carregado ou não —, e o nome que o TPM deu ao objeto,
+    /// autenticado com a resposta, tem de ser `nome`: o da parte pública
+    /// que foi.
+    #[allow(clippy::too_many_arguments)]
+    fn carregar<T: Tpm>(
+        &mut self,
+        tpm: &mut T,
+        cofre: &Cofre,
+        privado: &[u8],
+        publico: &[u8],
+        nome: &[u8; 2 + TAM],
+        alca: &mut u32,
+        sorteio: &mut dyn Sorteio,
+    ) -> Result<(), Erro> {
+        let mut p = Quadro::vazio();
+        p.tpm2b(privado);
+        p.tpm2b(publico);
+        let entidades = [Entidade {
+            handle: cofre.handle,
+            nome: &cofre.nome,
+        }];
+        let mut saida = [0; MAIOR_QUADRO];
+        let tam = p.tam;
+        let n = self.pela_sessao(
+            tpm,
+            sorteio,
+            Pedido {
+                codigo: comando::LOAD,
+                entidades: &entidades,
+                senha: &[],
+                parametros: &mut p.bytes[..tam],
+                cifrar_o_primeiro: false,
+                alca_da_resposta: Some(alca),
+                decifrar_a_resposta: false,
+            },
+            &mut saida,
+        )?;
+        let mut l = Leitor {
+            bytes: &saida[..n],
+            pos: 0,
+        };
+        let lido = l.tpm2b()?;
+        l.fim()?;
+        if lido == nome {
+            Ok(())
+        } else {
+            Err(Erro::SeladoEstranho)
+        }
     }
 
     /// O objeto `alca`, carregado, de nome `nome`: a política, numa sessão
@@ -796,5 +894,145 @@ impl Ancora {
             }
         };
         Ok(atributo::DA_ANCORA | if escrito { atributo::ESCRITO } else { 0 })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A identidade
+// ---------------------------------------------------------------------------
+
+impl Ancora {
+    /// `TPM2_Create` do selado da identidade com a chave privada `chave`,
+    /// filho do primário do `cofre`. A chave vai cifrada pela sessão
+    /// salgada, e a resposta volta autenticada por ela. Devolve o que o
+    /// disco guarda — ver [`crate::identidade`].
+    pub fn selar_identidade<T: Tpm>(
+        &mut self,
+        tpm: &mut T,
+        cofre: &Cofre,
+        chave: &[u8; TAM],
+        sorteio: &mut dyn Sorteio,
+    ) -> Result<SeladoDaIdentidade, Erro> {
+        let mut modelo = Quadro::vazio();
+        publico_da_identidade(&mut modelo, &[]);
+        let mut p = Quadro::vazio();
+        // TPM2B_SENSITIVE_CREATE — o primeiro parâmetro, que vai cifrado:
+        // sem senha, e a chave como os dados.
+        p.u16(2 + 2 + TAM as u16);
+        p.tpm2b(&[]);
+        p.tpm2b(chave);
+        p.tpm2b(&modelo.bytes[..modelo.tam]);
+        p.tpm2b(&[]); // outsideInfo
+        p.u32(0); // nenhuma seleção de PCR
+        let entidades = [Entidade {
+            handle: cofre.handle,
+            nome: &cofre.nome,
+        }];
+        let mut saida = [0; MAIOR_QUADRO];
+        let tam = p.tam;
+        let r = self.pela_sessao(
+            tpm,
+            sorteio,
+            Pedido {
+                codigo: comando::CREATE,
+                entidades: &entidades,
+                senha: &[],
+                parametros: &mut p.bytes[..tam],
+                cifrar_o_primeiro: true,
+                alca_da_resposta: None,
+                decifrar_a_resposta: false,
+            },
+            &mut saida,
+        );
+        // A chave esteve aqui em claro antes de cifrada.
+        p.bytes.zeroize();
+        // A parte pública que voltou é a do modelo — os atributos e a
+        // política vazia, conferidos byte a byte — com um `unique` dela.
+        let s = selado_da_resposta(&modelo, 0, &saida[..r?])?;
+        Ok(SeladoDaIdentidade {
+            unico: s.unico,
+            privado: s.privado,
+            tam: s.tam,
+        })
+    }
+
+    /// Abre o selado da identidade: `TPM2_Load` sob o primário e
+    /// `TPM2_Unseal` pela sessão salgada, com a chave voltando cifrada por
+    /// ela e a resposta autenticada. O objeto sai do TPM no fim, aberto ou
+    /// não.
+    ///
+    /// Um selado de outro TPM, de um TPM limpo depois do nascimento, ou
+    /// mexido, não passa do `TPM2_Load`: o erro volta como veio. Quem chama
+    /// confere a chave aberta com a pública que a área diz.
+    pub fn abrir_identidade<T: Tpm>(
+        &mut self,
+        tpm: &mut T,
+        cofre: &Cofre,
+        selado: &SeladoDaIdentidade,
+        sorteio: &mut dyn Sorteio,
+    ) -> Result<Semente, Erro> {
+        let mut publico = Quadro::vazio();
+        publico_da_identidade(&mut publico, &selado.unico);
+        let nome = nome_do_publico(&publico.bytes[..publico.tam]);
+        let mut alca = 0u32;
+        let carregado = self.carregar(
+            tpm,
+            cofre,
+            selado.privado(),
+            &publico.bytes[..publico.tam],
+            &nome,
+            &mut alca,
+            sorteio,
+        );
+        let aberto = match carregado {
+            Ok(()) => self.abrir_a_identidade_carregada(tpm, alca, &nome, sorteio),
+            Err(e) => Err(e),
+        };
+        if alca != 0 {
+            let _ = esquecer(tpm, alca);
+        }
+        aberto
+    }
+
+    /// O `TPM2_Unseal` do selado da identidade carregado em `alca`, de nome
+    /// `nome`: autorizado pela senha vazia, pela sessão salgada, e com a
+    /// resposta cifrada por ela. O comando leva o nome no `cpHash`: outro
+    /// objeto posto no mesmo handle é recusado pelo TPM.
+    fn abrir_a_identidade_carregada<T: Tpm>(
+        &mut self,
+        tpm: &mut T,
+        alca: u32,
+        nome: &[u8; 2 + TAM],
+        sorteio: &mut dyn Sorteio,
+    ) -> Result<Semente, Erro> {
+        let entidades = [Entidade { handle: alca, nome }];
+        let mut saida = [0; MAIOR_QUADRO];
+        let r = self
+            .pela_sessao(
+                tpm,
+                sorteio,
+                Pedido {
+                    codigo: comando::UNSEAL,
+                    entidades: &entidades,
+                    senha: &[],
+                    parametros: &mut [],
+                    cifrar_o_primeiro: false,
+                    alca_da_resposta: None,
+                    decifrar_a_resposta: true,
+                },
+                &mut saida,
+            )
+            .and_then(|n| {
+                let mut l = Leitor {
+                    bytes: &saida[..n],
+                    pos: 0,
+                };
+                let dados: [u8; TAM] = l.tpm2b()?.try_into().map_err(|_| Erro::SeladoEstranho)?;
+                l.fim()?;
+                Ok(Semente(dados))
+            });
+        // A chave esteve aqui, decifrada.
+        saida.zeroize();
+        r
     }
 }

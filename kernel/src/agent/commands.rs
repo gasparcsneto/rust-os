@@ -174,7 +174,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "system.info",
-        resumo: "Identificacao do kernel, arquitetura, CPU e video.",
+        resumo: "Identificacao do kernel, arquitetura, CPU e video, e a identidade do Duke: a chave publica, de onde veio (image, sealed, born) ou por que nao ha uma.",
         params: &[],
         acesso: Acesso::Exige(Permissao::SystemRead),
         recurso: None,
@@ -3008,6 +3008,28 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         crate::imagem::Estado::Ilegivel(linha, motivo) => {
             w.field_str("kind", "invalid")?;
             w.field_u64("line", linha as u64)?;
+            w.field_str("error", motivo)?;
+        }
+    }
+    w.end_object()?;
+
+    // A identidade do Duke: a chave pública que os agentes fixam, de onde
+    // ela veio — a imagem, o selo no TPM, ou nascida neste boot —, ou por
+    // que não há uma. Ver `crate::selo`.
+    w.key("identity")?;
+    w.begin_object()?;
+    match crate::identidade::situacao_da_chave() {
+        crate::identidade::SituacaoDaChave::Em(origem) => {
+            w.field_str("origin", origem.como_str())?;
+            w.key("key")?;
+            match crate::identidade::publica_do_duke() {
+                Some(k) => w.str_value(&sigilo::hex(&k))?,
+                None => w.null_value()?,
+            }
+        }
+        crate::identidade::SituacaoDaChave::Pendente => w.field_str("origin", "pending")?,
+        crate::identidade::SituacaoDaChave::Sem(motivo) => {
+            w.field_str("origin", "none")?;
             w.field_str("error", motivo)?;
         }
     }

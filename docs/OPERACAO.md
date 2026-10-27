@@ -126,7 +126,7 @@ O que a raiz leva em `/etc/duke`, e quem o lê:
 | `agentes` | as chaves públicas dos agentes que podem abrir uma porta, e o papel de cada um |
 | `administradores` | as credenciais de quem prova uma operação administrativa, e o quórum |
 | `privado/pessoas` | o registro das pessoas: o verificador da senha, nunca a senha |
-| `privado/chave` | a chave do Duke — ver [o grupo B](#a-identidade-do-duke-nasce-na-imagem) |
+| `privado/chave` | a chave do Duke — só na imagem da bancada e nas máquinas provisionadas antes do selo; a imagem de produção não a leva — ver [A identidade do Duke](#a-identidade-do-duke) |
 | `editores` | as chaves dos editores de código, para o código de fora da imagem |
 | `tempo`, `dominios` | as fontes de hora e os domínios de assinatura |
 | `rede` | opcional: a rede sem DHCP — ver [A rede](#a-rede) |
@@ -176,33 +176,37 @@ em qualquer arquivo, se a política é a da bancada ou não se lê, se o
 quórum não fecha com os administradores, se não há chave de atualização,
 se a política não tem o quórum `system.update` com a permissão no papel de
 quem assina, se a rede não se lê, se a imagem do slot não confere com o
-registro de atualização do operador, ou se a saída já tem uma imagem — a
-chave do Duke dela sumiria. A raiz leva só o que é da máquina: o material
-do operador, uma chave do Duke sorteada ali e a marca `/etc/duke/imagem`
-(`tipo producao`, o nome, um id sorteado). O código vem no slot A — o
+registro de atualização do operador, ou se a saída já tem uma imagem — o
+registro dela sumiria. A raiz leva só o que é da máquina: o material do
+operador e a marca `/etc/duke/imagem` (`tipo producao`, o nome, um id
+sorteado) — e nenhuma chave do Duke: a identidade nasce no primeiro boot,
+selada no TPM da máquina ([A identidade do Duke](#a-identidade-do-duke)).
+O código vem no slot A — o
 kernel e o pacote, com as âncoras TLS públicas, a rede principal do IC e
 os programas do produto: o servidor de janelas, o terminal, o `gestor` e
 o `livro` —, e uma versão nova o troca sem tocar a raiz; nada da bancada:
 nem os arquivos da suíte, nem a âncora TLS dela, nem as redes da PocketIC,
 nem os programas que são o outro lado de um caso.
 
-A saída tem três arquivos: `duke.img`, a imagem; `duke.publica`, a
-pública do Duke, que cada agente fixa; e `registro.txt`, o resumo de cada
-arquivo que entrou — a chave e as pessoas só pelo nome. A privada do Duke
-só existe dentro da imagem: guarde a imagem como se guarda a chave — ver
-[o grupo B](#a-identidade-do-duke-nasce-na-imagem). Por isso a imagem sai
-só para o dono (0600), e a montagem — a árvore da raiz, com a privada em
-claro — fica num diretório só do dono, apagado ao fim, e também quando o
-provisionamento falha no meio.
+A saída tem dois arquivos: `duke.img`, a imagem, e `registro.txt`, o
+resumo de cada arquivo que entrou — as pessoas só pelo nome. A imagem não
+leva identidade nenhuma: uma cópia dela não é uma cópia de máquina
+nenhuma. Ela leva os verificadores das senhas das pessoas: por isso sai só
+para o dono (0600), e a montagem — a árvore da raiz — fica num diretório
+só do dono, apagado ao fim, e também quando o provisionamento falha no
+meio.
 
 O `system.info` diz de onde veio o disco (`image`: `kind`, `name`, `id`),
 e o boot de uma imagem de desenvolvimento avisa no log. A marca não dá nem
 tira autoridade: quem pode o quê continua sendo a política.
 
 De fora, um agente fala com a máquina pelo canal TCP, com a chave dele e
-a pública do Duke:
+a pública do Duke — a que a máquina mostrou no console no primeiro boot,
+copiada dali pelo operador:
 
 ```bash
+# A pública do console (system.info, identity.key), num arquivo do operador.
+echo 3a77b33617d1cb01e31c15e96805222d8cb35d9e9d10544274ac11911cbc2338 > duke.publica
 cargo xtask operar 192.168.10.5:7070 system.info --chave segredos/operador-1.chave --duke $(cat duke.publica)
 # uma operação administrativa: a prova do administrador sobre o desafio da sessão
 cargo xtask operar 192.168.10.5:7070 agent.register '{...}' --chave segredos/operador-1.chave \
@@ -213,12 +217,87 @@ cargo xtask operar 192.168.10.5:7070 agent.register '{...}' --chave segredos/ope
 
 A imagem é escrita no disco da máquina — o arquivo vira o disco da VM, ou
 um `dd` para o NVMe (`dd if=duke.img of=/dev/nvme0n1 bs=4M conv=fsync`,
-de outro sistema, conferindo duas vezes o dispositivo). No primeiro boot o kernel cria a âncora no TPM, o
-journal na partição de estado e o volume do armazém na dele, e sela no TPM
-a semente das chaves de assinatura. Daí em diante cada boot confere o
+de outro sistema, conferindo duas vezes o dispositivo). No primeiro boot o
+kernel sorteia a identidade do Duke, sela-a no TPM e a mostra no console —
+ver abaixo —; depois cria a âncora no TPM, o journal na partição de estado
+e o volume do armazém na dele, e sela no TPM a semente das chaves de
+assinatura. Daí em diante cada boot abre a identidade do selo e confere o
 journal contra a âncora: um disco devolvido a uma fotografia anterior, um
 TPM trocado ou limpo, são recusados, e a máquina sobe sem autoridade nova —
 ver *R6* em [`PERSISTENCIA.md`](PERSISTENCIA.md).
+
+### A identidade do Duke
+
+A identidade da máquina é a chave estática X25519 do canal dos agentes: a
+que eles fixam no aperto de mão, e de que o kernel deriva os segredos da
+persistência — a cifra do journal, a senha da âncora e a do índice de
+geração do TPM, as chaves do armazém. Numa máquina de produção ela nasce
+no **primeiro boot**, e não na imagem
+([`kernel/src/selo.rs`](../kernel/src/selo.rs),
+[`ancora/src/identidade.rs`](../ancora/src/identidade.rs)):
+
+1. O kernel sorteia a chave, sela-a no TPM — um objeto que só este TPM
+   carrega, e só até ele ser limpo —, abre o selo de volta e confere, e
+   grava o selo em duas cópias, cada uma descarregada antes da outra, no
+   começo da reserva do fim da partição de estado. A chave passa pelo
+   barramento só cifrada pela sessão salgada com a EK.
+2. A pública aparece no console: no log do boot (`identidade do Duke
+   <pública>: nascida neste boot e selada no TPM`) e no `system.info`,
+   campo `identity` (`origin`: `born`, `key`: a pública). O operador
+   entra no console com a pessoa dele e lê `system.info` — ou lê a linha
+   do log —, e dá a pública aos agentes, que a fixam. O nascimento vai à
+   auditoria (`system.identity`).
+3. Em cada boot seguinte a identidade é aberta do selo (`origin`:
+   `sealed`), antes da persistência. A EK guardada no selo é conferida
+   antes de qualquer sessão com o TPM, e a chave aberta, contra a pública
+   guardada.
+
+Nada da atualização A/B toca nela: o selo não mora em slot nenhum, e não
+depende da medição do boot — a versão nova, a confirmação e a volta para a
+velha abrem a mesma identidade ([`ATUALIZACAO.md`](ATUALIZACAO.md)). Uma
+queda de energia em qualquer passo do nascimento é segura: antes da
+primeira cópia gravada, o boot seguinte nasce de novo, porque nada
+dependia da chave sorteada; depois dela, abre a cópia inteira e repara a
+outra. Uma cópia estragada é reparada pela outra, e o reparo vai à
+auditoria.
+
+O que **recusa** — a máquina sobe sem identidade, as portas dos agentes
+recusam o aperto, e a persistência não abre: com journal no disco ela é
+recusada — as revogações dele não se sabem —, e as credenciais das
+pessoas fecham como diante de qualquer journal recusado; a serial
+continua, com o papel dela. O motivo está no `system.info` (`origin`:
+`none`, `error`), que a serial lê, e no log do boot:
+
+| O que aconteceu | O motivo | O que fazer |
+|---|---|---|
+| As duas cópias do selo estragadas, com journal | a identidade de que o journal depende se perdeu | reinstalar |
+| As duas cópias inteiras e diferentes | as duas cópias divergem | reinstalar — nenhuma sequência de escritas do kernel faz isso |
+| A máquina sem TPM | sem TPM, a identidade não abre nem nasce | o TPM de volta: nada foi perdido |
+| Outro TPM — o disco levado, ou clonado, para outra máquina | o TPM não é o do nascimento | o disco de volta à máquina dele; o clone não abre nunca |
+| O TPM limpo depois do nascimento | o selo não abre neste TPM | reinstalar |
+| Um disco novo num TPM com o estado de outra instalação | o TPM guarda o estado de outra instalação | limpar o TPM no firmware e reinstalar |
+
+Nunca nasce uma identidade por cima de estado que dependa de outra: nascer
+exige nenhum selo, nenhum journal na partição de estado e nenhum índice do
+Duke no TPM.
+
+**Reinstalar** é uma imagem nova num disco novo, com o TPM **limpo** no
+firmware antes: a máquina nasce com outra identidade, que os agentes
+precisam fixar de novo. Não há cópia da identidade em lugar nenhum além do
+selo — nem exportação, nem backup —: perder o selo, ou o TPM, é perder a
+identidade e o que dependia dela.
+
+**O que o selo protege, e o que não.** O disco sozinho — roubado,
+clonado, restaurado noutra máquina — não leva a identidade: o selo só abre
+no TPM em que nasceu, e uma cópia da imagem de produção não tem
+identidade nenhuma. Quem tem o disco **e** a máquina — outro sistema
+bootado nela, ou alguém no barramento do TPM mandando os próprios
+comandos — abre o selo: ele não tem senha nem política, porque nenhum
+segredo existe antes da identidade, e prendê-lo à medição do boot é o boot
+seguro, que fica fora daqui (e quebraria a atualização A/B). A imagem da
+bancada, e as máquinas de produção provisionadas antes do selo, continuam
+com a chave no arquivo da imagem: o arquivo presente decide, e a marca da
+imagem não decide nada.
 
 ### Provisionar as identidades
 
@@ -376,12 +455,13 @@ O que se recupera sem cópia nenhuma:
   ele.
 
 O que não se recupera é reinstalar: uma imagem nova num disco novo, com o
-TPM da máquina **limpo** no firmware antes. Sem limpar, a âncora do TPM
-lembra o journal antigo e recusa o vazio — é o rollback que ela existe
-para recusar —, e a máquina sobe sem persistência. Reinstalar é perder
-tudo o que a máquina guardava: o armazém, as revogações, a auditoria, as
-chaves de assinatura seladas, e a identidade — a imagem nova tem outra
-chave do Duke, que os agentes precisam fixar.
+TPM da máquina **limpo** no firmware antes. Sem limpar, os índices do TPM
+lembram a instalação antiga: a identidade não nasce por cima deles, e a
+máquina sobe sem identidade e sem persistência. Reinstalar é perder tudo
+o que a máquina guardava: o armazém, as revogações, a auditoria, as chaves
+de assinatura seladas, e a identidade — a máquina reinstalada nasce com
+outra, que os agentes precisam fixar ([A identidade do
+Duke](#a-identidade-do-duke)).
 
 ## O que o Duke ainda não faz (grupo B)
 
@@ -422,6 +502,15 @@ como ela foi tomada.
   decide). É exatamente o que o pedido manda não decidir sozinho.
 
 ### A identidade do Duke nasce na imagem
+
+**Feito no B2** — ver [A identidade do Duke](#a-identidade-do-duke): a
+chave nasce no primeiro boot, selada no TPM sob o mesmo primário do cofre,
+sem política e só deste TPM; o selo em duas cópias na reserva da partição
+de estado; a pública no console e no `system.info`; o `provisionar` sem
+chave nenhuma; e a recusa, sem nascer por cima, de tudo o que dependa de
+uma identidade anterior. A pública vai aos agentes pelo operador, lida no
+console — não por um registro levado pela rede. O que segue é o registro
+da decisão como ela foi tomada.
 
 - **Problema.** A chave do Duke (`/etc/duke/privado/chave`) vem na imagem:
   quem tem a imagem tem a chave, e duas máquinas da mesma imagem são o

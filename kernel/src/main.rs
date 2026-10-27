@@ -108,6 +108,7 @@ mod quedas;
 mod rede;
 mod relogio;
 mod seguranca;
+mod selo;
 mod serial;
 mod sessoes;
 mod slots;
@@ -499,8 +500,8 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // pedindo ao DHCP; sem o arquivo, segue pedindo.
     rede::configuracao::carregar();
 
-    // Quem pode falar pelas portas: a chave do Duke e os registros, do disco
-    // que acabou de montar.
+    // Quem pode falar pelas portas: os registros, do disco que acabou de
+    // montar, e a chave do Duke, se a imagem a traz.
     identidade::carregar();
     // E de onde veio o disco: a imagem de produção ou a da bancada — só
     // para dizer, no log e no `system.info`; ver [`imagem`].
@@ -519,6 +520,11 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     autorizacao::carregar();
     // E as pessoas que podem entrar pelo console — ver [`pessoas`].
     pessoas::carregar();
+    // A identidade do Duke: a chave da imagem, ou a do selo no TPM, ou uma
+    // nascida agora, numa instalação nova — ver [`selo`]. Antes do journal,
+    // que deriva dela os segredos dele; depois do `policy.load`, que
+    // continua o primeiro registro da auditoria de um boot.
+    selo::estabelecer();
     // E o journal por cima dos três: o que mudou depois da imagem — as
     // lápides, os registros, a política em vigor —, conferido contra a
     // âncora do TPM. Antes das portas e do primeiro desafio: não há janela

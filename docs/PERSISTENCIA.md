@@ -560,7 +560,9 @@ sequência repetida — e ganhou o caso que faltava.
 ### As duas regiões
 
 A partição de estado tem duas regiões do mesmo tamanho e, no fim, 64
-setores de reserva (o plano de queda da bancada mora ali). O journal vive
+setores de reserva (o plano de queda da bancada mora no último; os dois
+primeiros são, desde o B2, o selo da identidade do Duke — ver [A
+identidade do Duke](#a-identidade-do-duke-b2)). O journal vive
 numa delas. A outra é o journal de antes da última compactação, uma
 compactação que não terminou, ou nada.
 
@@ -1557,9 +1559,10 @@ continua com 160 MiB.
 ### Os riscos que ficam
 
 - **O mesmo TPM com o disco.** Quem tem o disco — a chave do Duke está
-  nele — e o mesmo TPM satisfaz a política: o índice está na geração das
-  vivas, e a senha dele deriva da chave do Duke. As vivas de agora abrem;
-  as mortas, não. O cofre não mede o boot: nenhum PCR entra na política.
+  nele, ou, desde o B2, o selo dela, que este TPM abre — e o mesmo TPM
+  satisfaz a política: o índice está na geração das vivas, e a senha dele
+  deriva da chave do Duke. As vivas de agora abrem; as mortas, não. O
+  cofre não mede o boot: nenhum PCR entra na política.
 - **A janela do passo 2.** Se o avanço do índice falha depois do registro
   da operação, uma cópia de antes da morte ainda abriria a morta, no
   mesmo TPM, até o boot seguinte completar o avanço.
@@ -1584,6 +1587,7 @@ continua com 160 MiB.
 | ICP-3 | As chaves de assinatura no journal: a semente, a lápide, a compactação | feita |
 | ICP-5 | A semente selada no TPM, presa ao índice de geração: a morte em três passos, a migração das antigas | feita |
 | B1 | O estado da atualização A/B: a ativa, a candidata e o piso de geração, no journal | feita |
+| B2 | A identidade do Duke nascida no primeiro boot, selada no TPM, antes do journal | feita |
 
 ## A atualização A/B
 
@@ -1622,6 +1626,46 @@ quem chega antes depende do tempo. Por isso o cenário da queda num
 registro só de auditoria sobe um boot comum antes do que cai: depois da
 abertura, nele, só o coletor grava. No ARM a bancada boota pelo
 `-kernel`, de fora de um slot, e não há linha de base.
+
+## A identidade do Duke (B2)
+
+Tudo o que a persistência guarda é cifrado ou autorizado por derivações da
+chave do Duke — a cifra do journal, a senha da âncora, a do índice de
+geração, as do armazém. Numa máquina de produção a chave nasce no
+primeiro boot, selada no TPM, e não mora no journal: o journal só abre com
+ela. Ver [`kernel/src/selo.rs`](../kernel/src/selo.rs),
+[`ancora/src/identidade.rs`](../ancora/src/identidade.rs) e "A identidade
+do Duke" em [`OPERACAO.md`](OPERACAO.md).
+
+- **Onde mora.** Nos dois primeiros setores da reserva do fim da partição
+  de estado, uma cópia em cada: o ponto da EK em que nasceu, a pública, e
+  o objeto selado — o `unique` e o bloco privado que o TPM cifrou —, com
+  um SHA-256 contra o setor estragado. Fora das regiões do journal, e fora
+  da limpeza do cofre, que zera só até a reserva. Só a persistência
+  escreve ali, pela janela de estado, como no journal; o selo pede.
+- **O objeto selado.** Sob o mesmo primário do cofre, `fixedTPM` e
+  `fixedParent`, sem política e com a senha vazia: a política de geração
+  não serve, porque a senha do índice deriva da própria chave. Nenhum
+  índice de NV novo.
+- **A ordem no boot.** A identidade é estabelecida antes de `persistencia::abrir`,
+  com uma conexão própria com o TPM, que sai inteira dele antes de a
+  persistência conectar a dela; o `policy.load` continua o primeiro
+  registro da auditoria de um boot, e o `system.identity` — o nascimento,
+  o reparo de uma cópia, a recusa — vem depois dele.
+- **Sem identidade.** A persistência não abre. Com journal na partição —
+  alguma região começando por um registro, pela magia, sem a chave — ela
+  é **recusada**, e não só indisponível: o que o journal guarda pode ser
+  uma revogação que agora não se lê, e as credenciais fecham como diante
+  de qualquer journal que não se confirma. Sem journal, é indisponível.
+- **Nascer.** Só numa instalação nova: nenhum selo inteiro, nenhum
+  journal, e nenhum índice do Duke no TPM — a âncora, o nascimento, a
+  geração. Uma identidade nova por cima de estado que dependa de outra
+  seria uma máquina que não abre o próprio estado.
+
+A abertura do selo custa, a cada boot, uma conexão a mais com o TPM — a
+EK, a sessão salgada, o primário — e o `TPM2_Load` com o `TPM2_Unseal`; o
+nascimento, uma vez na vida da máquina, o `TPM2_Create`, a abertura de
+volta e duas escritas descarregadas.
 
 ## O disco hostil
 

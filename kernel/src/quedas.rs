@@ -115,6 +115,15 @@ pub enum Ponto {
     /// A atualização A/B: o n-ésimo pedaço da versão nova escrito no slot
     /// inativo e descarregado — a gravação do plano —, e nada depois.
     NoMeioDaEncenacao = 26,
+    /// O nascimento da identidade: a chave selada no TPM e conferida, e
+    /// nenhuma cópia da área escrita.
+    IdentidadeSelada = 27,
+    /// O nascimento da identidade: a primeira cópia da área escrita e
+    /// descarregada, e a segunda não.
+    PrimeiraCopia = 28,
+    /// O nascimento da identidade: as duas cópias escritas, e a chave
+    /// ainda não em uso — a persistência nem começou.
+    IdentidadeGravada = 29,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -230,6 +239,9 @@ pub fn aqui(p: Ponto) {
             | Ponto::LimpezaComecou
             | Ponto::LimpezaNoMeio
             | Ponto::LimpezaTerminada
+            | Ponto::IdentidadeSelada
+            | Ponto::PrimeiraCopia
+            | Ponto::IdentidadeGravada
     );
     if p == Ponto::LoteNoVolume {
         // A gravação de estado que confirmaria o lote ainda não começou: a

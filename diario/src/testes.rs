@@ -1375,3 +1375,26 @@ fn o_percurso_para_na_ancora_confirmada() {
     assert_eq!(nada.quantos, 0);
     assert_eq!(nada.parada, Parada::Alem { setor: 0 });
 }
+
+/// O boot pergunta se há journal antes de a identidade do Duke existir, sem
+/// a chave: o primeiro setor de um journal começa por um registro; o setor
+/// zerado, um setor de lixo e o de um registro do meio cortado na magia,
+/// não.
+#[test]
+fn o_comeco_de_um_registro_se_ve_sem_a_chave() {
+    let (mut m, _, _) = journal(3);
+    let mut setor = [0u8; TAM_SETOR];
+    m.ler(0, &mut setor).unwrap();
+    assert!(comeca_um_registro(&setor));
+    assert!(comeca_um_registro(&setor[..8]));
+    assert!(!comeca_um_registro(&setor[..7]));
+    let mut mexido = setor;
+    mexido[7] ^= 1;
+    assert!(!comeca_um_registro(&mexido));
+    assert!(!comeca_um_registro(&[0u8; TAM_SETOR]));
+    assert!(!comeca_um_registro(&[0xA5u8; TAM_SETOR]));
+    // A região que nunca foi escrita: o setor do começo dela, zerado.
+    let [_, (b, _)] = regioes(m.setores(), None);
+    m.ler(b, &mut setor).unwrap();
+    assert!(!comeca_um_registro(&setor));
+}

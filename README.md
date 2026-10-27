@@ -112,6 +112,7 @@ cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
+cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, cópias, sem TPM, clone, reinstalar
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -191,7 +192,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
 | `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa, a conferência do código de fora da imagem, e o orçamento: as decisões de controle, de dados e de fecho, as recusas por taxa, as esperas pelo caminho da auditoria e o atraso dela, a vazão do plano de dados e a justiça entre os principais |
-| `system.info` | Kernel, CPU, vídeo, uptime, o RTC, o tempo — `time`: o estado e as marcas do relógio civil, o civil, o lógico, a incerteza, o salto pendente, as fontes, as rodadas e a régua; ver [O tempo](#o-tempo) — e mecanismo de guarda da pilha |
+| `system.info` | Kernel, CPU, vídeo, uptime, o RTC, o tempo — `time`: o estado e as marcas do relógio civil, o civil, o lógico, a incerteza, o salto pendente, as fontes, as rodadas e a régua; ver [O tempo](#o-tempo) —, a identidade do Duke — `identity`: a pública e de onde veio (`image`, `sealed`, `born`), ou por que não há uma — e mecanismo de guarda da pilha |
 | `system.reboot` | Reinicia a máquina: o pedido vai à auditoria e ao journal antes (sem ele no disco, nada acontece); meio segundo depois da resposta as gravações param, o disco descarrega e o firmware reinicia (ACPI no x86, PSCI no ARM) |
 | `system.poweroff` | Desliga a máquina, pela mesma ordem do `system.reboot`: o pedido no journal antes, as gravações paradas, o disco descarregado, e o firmware corta a energia |
 | `update.status` | A atualização A/B: de que slot o kernel veio, em que modo e com que imagem conferida; a reconciliação do boot e a autoridade dele; o journal — o piso, a ativa, a candidata —; e o controle de boot que vale. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md) |
@@ -290,6 +291,7 @@ kernel/src/
 ├── heap.rs          alocador do kernel: lista livre ordenada com fusão
 ├── interpretador.rs operar o Duke digitando
 ├── identidade.rs    quem é quem: a chave do Duke, os agentes, os administradores e os desafios
+├── selo.rs          a identidade do Duke deste boot, antes da persistência: a chave da imagem, a do selo no TPM, ou uma nascida numa instalação nova
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
@@ -628,11 +630,12 @@ diario/src/          o journal da persistência: registros cifrados, encadeados 
 ├── estado.rs        o que os registros do estado administrativo dizem: resultados, e não pedidos
 └── testes.rs        o journal cortado em cada setor, cada bit trocado, registros de outro journal e fora de ordem
 
-ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0 — e o cofre das sementes
+ancora/src/          a âncora da persistência: um contador monotônico num TPM 2.0 — o cofre das sementes e o selo da identidade do Duke
 ├── lib.rs           os comandos do TPM byte a byte, a sessão HMAC salgada pela EK, e o que um contador ausente ou estranho quer dizer
-├── cofre.rs         as sementes seladas no TPM: o primário que todo boot recria, o selado preso ao índice de geração pelo TPM2_PolicyNV, e o Unseal com a resposta cifrada
+├── cofre.rs         as sementes seladas no TPM: o primário que todo boot recria, o selado preso ao índice de geração pelo TPM2_PolicyNV, e o Unseal com a resposta cifrada; e o selado da identidade, só deste TPM, sem política
+├── identidade.rs    a área do selo da identidade no disco — duas cópias, um setor cada — e a decisão do boot: abrir, reparar, nascer ou recusar
 ├── cripto.rs        o KDFa, o KDFe, o sal por ECDH em P-256 e a cifra de parâmetro, como a especificação do TPM os compõe
-└── testes.rs        os bytes que a especificação fixa; `tests/swtpm.rs`, a sessão contra o swtpm, com um interposto no barramento
+└── testes.rs        os bytes que a especificação fixa; `tests/swtpm.rs`, a sessão contra o swtpm, com um interposto no barramento; `tests/identidade.rs`, a área e a tabela da decisão
 
 hora/src/            a hora como conta pura: o Roughtime da RFC 10049, versão 1, conferido, e o relógio civil disciplinado — uma resposta não escolhe a hora
 ├── lib.rs           o que mora aqui, de onde vem o que se sabe do protocolo — reproduzido, da referência, pendente — e o que não se declara
@@ -736,7 +739,8 @@ xtask/src/
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, erros de mídia por faixa e respostas retidas
-├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, com uma chave do Duke nova, as chaves de quem a opera, e o cliente com que se fala com ela
+├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
+├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, as cópias do selo, sem TPM, o clone, a reinstalação
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
@@ -7868,11 +7872,12 @@ recuperação e o que o Duke ainda não faz — está em
   utilizável, entre 8 e 256 MiB.
 - **A imagem de produção.** `cargo xtask provisionar` monta a imagem do
   material do operador — as chaves de `cargo xtask chave`, a política, as
-  pessoas, a rede —, com uma chave do Duke sorteada ali, a marca
-  `/etc/duke/imagem` e só os programas do produto; recusa qualquer chave da
-  bancada. A imagem, que leva a privada do Duke, sai só para o dono, e a
-  montagem dela é apagada mesmo quando algo falha no meio. O `system.info`
-  diz de onde veio a imagem, e `cargo xtask operar` é o cliente de uma
+  pessoas, a rede —, com a marca `/etc/duke/imagem` e só os programas do
+  produto, e sem chave do Duke nenhuma: desde o B2 ela nasce no primeiro
+  boot, selada no TPM; recusa qualquer chave da bancada. A imagem, que
+  leva os verificadores das senhas, sai só para o dono, e a montagem dela é
+  apagada mesmo quando algo falha no meio. O `system.info` diz de onde
+  veio a imagem e a identidade, e `cargo xtask operar` é o cliente de uma
   máquina de verdade, pelo TCP.
 - **A máquina física.** Um PC com UEFI, NVMe, TPM 2.0 e uma Intel 82574L
   ([`kernel/src/e1000.rs`](kernel/src/e1000.rs)): a varredura do PCI segue
@@ -8000,6 +8005,34 @@ O kernel de produção cresceu 84 904 bytes no x86 (+2,11%) e 88 832 no ARM
 ler o controle, a GPT e os slots e a conferir o BLAKE2s do kernel, foi de
 42 496 para 81 920 bytes no x86 e de 34 304 para 67 072 no ARM. Os
 programas não mudaram, e o teto de 1 MiB do executável também não.
+
+### A identidade do Duke nasce no primeiro boot
+
+Numa máquina de produção, a chave do Duke — a estática X25519 que os
+agentes fixam, e de que a persistência deriva a cifra do journal, as
+senhas do TPM e as chaves do armazém — não vem mais na imagem: o kernel a
+sorteia no primeiro boot, sela no TPM sob o primário do cofre (só este
+TPM, sem política: a senha do índice de geração deriva dela), abre de
+volta e confere, e grava o selo em duas cópias na reserva da partição de
+estado, antes da persistência. A pública aparece no console — o log do
+boot e o `system.info`, campo `identity` —, e o operador a dá aos agentes.
+Os boots seguintes abrem o selo; a atualização A/B, a confirmação e a
+volta abrem a mesma. Nada nasce por cima de estado que dependa de outra
+identidade: sem selo e com journal, com índices do Duke no TPM, noutro
+TPM, sem TPM, com as cópias divergentes, a máquina sobe sem identidade, a
+persistência recusa e a serial continua, dizendo por quê. A imagem da bancada, e as
+máquinas provisionadas antes, seguem com a chave no arquivo. O desenho e o
+que o operador faz estão em [A identidade do
+Duke](docs/OPERACAO.md#a-identidade-do-duke); a área do selo, em
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#a-identidade-do-duke-b2).
+
+A bancada `cargo xtask identidade` sobe a imagem do `provisionar` pelo
+firmware, nas duas arquiteturas, num disco e num TPM novos por cenário: o
+nascimento, os boots seguintes, a energia caindo em cada passo do
+nascimento, as cópias estragadas, a máquina sem TPM, o disco clonado
+noutra, e a reinstalação com e sem o TPM limpo. A da atualização confere a
+versão nova que se confirma e a que cai na tentativa, com a identidade
+nascida.
 
 ## Barramento PCI
 

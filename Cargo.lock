@@ -2647,6 +2647,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "ancora",
  "atualizacao",
  "chacha20 0.10.2",
  "diario",

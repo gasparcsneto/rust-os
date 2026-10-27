@@ -95,12 +95,21 @@
 //! geração —, que mata de uma vez todo objeto selado antes dele. Ver
 //! [`cofre`].
 
+//! # A identidade
+//!
+//! E guarda a chave da identidade do Duke, nascida no primeiro boot: selada
+//! sob o mesmo primário, sem índice e sem política — ela é a raiz das
+//! senhas dos índices. O selado mora numa área própria do disco, e o boot
+//! decide o que fazer com ela antes de qualquer outra coisa. Ver
+//! [`identidade`].
+
 #![no_std]
 
 use zeroize::Zeroize;
 
 pub mod cofre;
 mod cripto;
+pub mod identidade;
 
 use cripto::{ChaveDeHmac, TAM};
 

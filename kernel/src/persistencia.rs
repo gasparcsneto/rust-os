@@ -887,8 +887,22 @@ fn abrir_em_ordem() {
     }
 }
 
+/// Sem a identidade do Duke, o journal não se lê. Se há um no disco, o
+/// que se perdeu dele pode ser uma revogação: recusado, como qualquer
+/// journal que não se confirma — e as credenciais fecham. Sem journal, só
+/// não há onde gravar.
+fn sem_identidade() -> Result<Estado, &'static str> {
+    let motivo = crate::identidade::sem_chave_porque().unwrap_or("sem a chave do Duke");
+    match ha_journal() {
+        Ok(false) => Err(motivo),
+        _ => Ok(Estado::Recusada(motivo)),
+    }
+}
+
 fn abrir_de_fato() -> Result<Estado, &'static str> {
-    let (chave, senha) = segredos().ok_or("sem a chave do Duke")?;
+    let Some((chave, senha)) = segredos() else {
+        return sem_identidade();
+    };
     #[cfg(feature = "quedas")]
     crate::quedas::carregar(&mut janela()?);
 
@@ -2877,6 +2891,144 @@ fn zerar_fora_do_journal() -> Result<(), &'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// A área do selo da identidade
+// ---------------------------------------------------------------------------
+
+/// O setor da cópia `copia` da área do selo da identidade: o começo da
+/// reserva do fim da partição — fora das regiões do journal e fora da
+/// limpeza. Ver `ancora::identidade` e [`crate::selo`].
+fn setor_da_area(setores: u64, copia: usize) -> Result<u64, &'static str> {
+    setores
+        .checked_sub(diario::RESERVA_NO_FIM)
+        .filter(|&base| base > 0)
+        .map(|base| base + copia as u64)
+        .ok_or("a particao de estado nao tem a reserva do fim")
+}
+
+/// As duas cópias da área do selo da identidade, como estão no disco. Um
+/// setor que o disco não lê é [`ancora::identidade::Leitura::Ilegivel`].
+pub(crate) fn ler_a_area_da_identidade() -> Result<[ancora::identidade::Leitura; 2], &'static str> {
+    let mut j = janela()?;
+    let mut ler = |copia| -> Result<ancora::identidade::Leitura, &'static str> {
+        let setor = setor_da_area(j.setores, copia)?;
+        let mut b = [0u8; ancora::identidade::TAM_AREA];
+        Ok(match j.ler(setor, &mut b) {
+            Ok(()) => ancora::identidade::ler(&b),
+            Err(_) => ancora::identidade::Leitura::Ilegivel,
+        })
+    };
+    Ok([ler(0)?, ler(1)?])
+}
+
+/// Grava a cópia `copia` da área do selo da identidade e descarrega o
+/// disco: quando volta, a cópia é durável.
+pub(crate) fn gravar_a_area_da_identidade(
+    copia: usize,
+    bytes: &[u8; ancora::identidade::TAM_AREA],
+) -> Result<(), &'static str> {
+    duravel()?;
+    let mut j = janela()?;
+    let setor = setor_da_area(j.setores, copia)?;
+    j.escrever(setor, bytes)?;
+    j.descarregar()
+}
+
+/// Se a partição de estado tem journal: alguma região começa por um
+/// registro. Sem a chave não se sabe se ele é autêntico — só que existe, e
+/// que o que ele guarda depende da identidade de quando foi escrito. Um
+/// começo de região que o disco não lê conta como journal: não saber não
+/// autoriza uma identidade nova. Sem partição de estado, não há journal.
+pub(crate) fn ha_journal() -> Result<bool, &'static str> {
+    let Ok(mut j) = janela() else {
+        return Ok(false);
+    };
+    for (inicio, _) in diario::regioes(j.setores, None) {
+        let mut b = [0u8; diario::TAM_SETOR];
+        match j.ler(inicio, &mut b) {
+            Ok(()) if !diario::comeca_um_registro(&b) => {}
+            _ => return Ok(true),
+        }
+    }
+    Ok(false)
+}
+
+/// Um passo com o TPM, que sai com erro se não há TPM.
+fn no_tpm<R>(
+    f: impl FnOnce(&mut crate::tpm::Interface) -> Result<R, ancora::Erro>,
+) -> Result<R, ancora::Erro> {
+    crate::tpm::com_o_tpm(f).ok_or(ancora::Erro::Transporte("sem TPM"))?
+}
+
+/// A conexão da identidade com o TPM: a EK — conferida com `esperada`,
+/// a da área, ou aceita como vier, no nascimento — e o primário do cofre
+/// recriado, em guardas que os tiram do TPM em qualquer saída. Não toca
+/// índice nenhum: a senha da âncora deriva da identidade, e esta conexão
+/// leva uma zerada que nenhum comando usa.
+fn conectar_a_identidade(
+    esperada: Option<&[u8; 64]>,
+) -> Result<(Conectada, CofreAberto), ancora::Erro> {
+    let mut conectada = Conectada(Some(no_tpm(|t| {
+        ancora::Ancora::conectar(t, INDICE_DA_ANCORA, [0; 32], esperada)
+    })?));
+    let a = conectada.0.as_mut().expect("posta acima");
+    let cofre = CofreAberto(Some(no_tpm(|t| a.abrir_cofre(t, &[], &mut Sorteio))?));
+    Ok((conectada, cofre))
+}
+
+/// Se o TPM tem algum índice do Duke — a âncora, o nascimento, a geração:
+/// estado de uma instalação, que depende da identidade dela. O
+/// `TPM2_NV_ReadPublic` não pede autorização.
+pub(crate) fn indices_do_duke_no_tpm() -> Result<bool, ancora::Erro> {
+    no_tpm(|t| {
+        ancora::iniciar(t)?;
+        for indice in [INDICE_DA_ANCORA, INDICE_DO_NASCIMENTO, INDICE_DA_GERACAO] {
+            if ancora::ler_publico(t, indice)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
+/// Abre o selado da identidade no TPM da EK `ek`: a conexão confere a EK
+/// antes de qualquer sessão, e tudo sai do TPM no fim.
+pub(crate) fn abrir_a_identidade(
+    ek: &[u8; 64],
+    selado: &ancora::cofre::SeladoDaIdentidade,
+) -> Result<ancora::cofre::Semente, ancora::Erro> {
+    let (mut conectada, cofre) = conectar_a_identidade(Some(ek))?;
+    let a = conectada.0.as_mut().expect("posta na conexao");
+    let c = cofre.0.as_ref().expect("posto na conexao");
+    no_tpm(|t| a.abrir_identidade(t, c, selado, &mut Sorteio))
+}
+
+/// Sela a chave da identidade no TPM da máquina e a abre de volta: o selo
+/// que o disco vai guardar abre esta chave. Devolve a EK do TPM, que a
+/// área fixa, e o selado.
+pub(crate) fn selar_a_identidade(
+    chave: &[u8; 32],
+) -> Result<([u8; 64], ancora::cofre::SeladoDaIdentidade), ancora::Erro> {
+    let (mut conectada, cofre) = conectar_a_identidade(None)?;
+    let a = conectada.0.as_mut().expect("posta na conexao");
+    let c = cofre.0.as_ref().expect("posto na conexao");
+    let selado = no_tpm(|t| a.selar_identidade(t, c, chave, &mut Sorteio))?;
+    let aberta = no_tpm(|t| a.abrir_identidade(t, c, &selado, &mut Sorteio))?;
+    if aberta.como_bytes() != chave {
+        return Err(ancora::Erro::SeladoEstranho);
+    }
+    Ok((a.ponto_do_tpm(), selado))
+}
+
+/// Na bancada: o plano de quedas, lido antes do selo da identidade — que
+/// tem pontos dele —, e não só na abertura do journal.
+#[cfg(feature = "quedas")]
+pub(crate) fn carregar_o_plano_de_quedas() {
+    if let Ok(mut j) = janela() {
+        crate::quedas::carregar(&mut j);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // As operações de autoridade
 // ---------------------------------------------------------------------------
 
@@ -3806,6 +3958,25 @@ pub fn setores_crus_de_teste(inicio: u64, n: u64) -> Result<Vec<u8>, &'static st
 #[cfg(feature = "modo-teste")]
 pub fn setores_do_estado_de_teste() -> Result<u64, &'static str> {
     Ok(janela()?.setores)
+}
+
+/// Só para a suíte: a persistência fechada — a âncora fora do TPM, com a
+/// EK e a sessão —, como antes de o boot abri-la, que é quando o selo da
+/// identidade fala com o TPM. Quem chama a reabre com [`abrir`], de volta
+/// à imagem, como o boot.
+#[cfg(feature = "modo-teste")]
+pub fn fechar_de_teste() {
+    if let Some(velha) = com(|p| p.aberta.take()) {
+        crate::tpm::com_o_tpm(|t| velha.ancora.encerrar(t));
+    }
+    com(|p| p.estado = Estado::Fechada);
+}
+
+/// Só para a suíte: o que a abertura decide sem a identidade do Duke, com
+/// o disco de agora.
+#[cfg(feature = "modo-teste")]
+pub fn sem_identidade_de_teste() -> Result<Estado, &'static str> {
+    sem_identidade()
 }
 
 /// Só para a suíte: reaplica só os primeiros `k` registros da região atual

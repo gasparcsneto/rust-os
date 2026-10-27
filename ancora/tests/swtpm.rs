@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use ancora::cofre::{self, Cofre, Geracao, Selado};
+use ancora::cofre::{self, Cofre, Geracao, Selado, SeladoDaIdentidade};
+use ancora::identidade;
 use ancora::{Ancora, Erro, MAIOR_QUADRO, Sorteio, Tpm, atributo, codigo};
 
 const INDICE: u32 = 0x0180_D0E0;
@@ -1474,4 +1475,570 @@ fn as_aberturas_que_falham_nao_ocupam_o_tpm() {
         .abrir(&mut tpm, &mut c, &mut g, &selado, &mut DoSistema)
         .unwrap();
     assert_eq!(aberta.como_bytes(), &s);
+}
+
+// ---------------------------------------------------------------------------
+// A identidade
+// ---------------------------------------------------------------------------
+
+/// `TPM2_ObjectChangeAuth`.
+const OBJECT_CHANGE_AUTH: u32 = 0x150;
+/// `TPM_RC_AUTH_TYPE`: o papel de administração de um objeto com
+/// `adminWithPolicy` pede uma sessão de política, e veio outra —
+/// conferido contra o `swtpm`.
+const TIPO_DE_AUTORIZACAO: u32 = 0x124;
+
+/// A conexão da identidade num TPM: a EK — sem índice nenhum, que a senha
+/// zerada da âncora nunca chega a ser usada — e o primário. É o que o boot
+/// tem antes da persistência.
+fn identidade_nova<T: Tpm>(tpm: &mut T, esperada: Option<&[u8; 64]>) -> (Ancora, Cofre) {
+    let mut a = Ancora::conectar(tpm, INDICE, [0; 32], esperada).unwrap();
+    let c = a.abrir_cofre(tpm, &[], &mut DoSistema).unwrap();
+    (a, c)
+}
+
+/// O primário de armazenamento feito à mão, com o modelo do cofre: a mesma
+/// chave que o cofre recria, num handle à parte.
+fn primario_a_mao(tpm: &mut Swtpm) -> u32 {
+    let mut publico = Vec::new();
+    publico.extend_from_slice(&0x0023u16.to_be_bytes());
+    publico.extend_from_slice(&0x000Bu16.to_be_bytes());
+    publico.extend_from_slice(&cofre::objeto::DO_PRIMARIO.to_be_bytes());
+    tpm2b(&mut publico, &[]);
+    for v in [0x0006u16, 128, 0x0043, 0x0010, 0x0003, 0x0010] {
+        publico.extend_from_slice(&v.to_be_bytes());
+    }
+    tpm2b(&mut publico, &[0; 32]);
+    tpm2b(&mut publico, &[0; 32]);
+    let mut corpo = Vec::new();
+    corpo.extend_from_slice(&0x4000_0001u32.to_be_bytes());
+    corpo.extend_from_slice(&sessao_de_senha(&[]));
+    corpo.extend_from_slice(&[0, 4, 0, 0, 0, 0]);
+    tpm2b(&mut corpo, &publico);
+    tpm2b(&mut corpo, &[]);
+    corpo.extend_from_slice(&0u32.to_be_bytes());
+    let (rc, r) = mandar(tpm, &a_mao(0x8002, 0x131, &corpo));
+    assert_eq!(rc, 0, "o primario a mao nao foi criado");
+    u32::from_be_bytes(r[0..4].try_into().unwrap())
+}
+
+/// A parte pública de um *keyedhash* selado, com estes atributos, sem
+/// política, e o `unique`.
+fn publico_selado(atributos: u32, unico: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0x0008u16.to_be_bytes());
+    p.extend_from_slice(&0x000Bu16.to_be_bytes());
+    p.extend_from_slice(&atributos.to_be_bytes());
+    tpm2b(&mut p, &[]);
+    p.extend_from_slice(&0x0010u16.to_be_bytes());
+    tpm2b(&mut p, unico);
+    p
+}
+
+/// `TPM2_Create` à mão, pela senha vazia do pai: um selado com estes
+/// atributos e estes dados. Devolve o bloco privado e o `unique`.
+fn selar_a_mao(tpm: &mut Swtpm, pai: u32, atributos: u32, dados: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut sensivel = Vec::new();
+    tpm2b(&mut sensivel, &[]);
+    tpm2b(&mut sensivel, dados);
+    let mut corpo = Vec::new();
+    corpo.extend_from_slice(&pai.to_be_bytes());
+    corpo.extend_from_slice(&sessao_de_senha(&[]));
+    tpm2b(&mut corpo, &sensivel);
+    tpm2b(&mut corpo, &publico_selado(atributos, &[]));
+    tpm2b(&mut corpo, &[]);
+    corpo.extend_from_slice(&0u32.to_be_bytes());
+    let (rc, r) = mandar(tpm, &a_mao(0x8002, CREATE, &corpo));
+    assert_eq!(rc, 0, "o selado a mao nao foi criado");
+    // O tamanho dos parâmetros (4), o bloco privado e a parte pública.
+    let n = u16::from_be_bytes([r[4], r[5]]) as usize;
+    let privado = r[6..6 + n].to_vec();
+    let p = 6 + n + 2;
+    let m = u16::from_be_bytes([r[p - 2], r[p - 1]]) as usize;
+    let publico = &r[p..p + m];
+    let u = u16::from_be_bytes([publico[m - 34], publico[m - 33]]) as usize;
+    assert_eq!(u, 32);
+    (privado, publico[m - 32..].to_vec())
+}
+
+/// `TPM2_Load` à mão, pela senha vazia do pai. Devolve o código e o handle.
+fn carregar_a_mao(
+    tpm: &mut Swtpm,
+    pai: u32,
+    atributos: u32,
+    unico: &[u8],
+    privado: &[u8],
+) -> (u32, u32) {
+    let mut corpo = Vec::new();
+    corpo.extend_from_slice(&pai.to_be_bytes());
+    corpo.extend_from_slice(&sessao_de_senha(&[]));
+    tpm2b(&mut corpo, privado);
+    tpm2b(&mut corpo, &publico_selado(atributos, unico));
+    let (rc, r) = mandar(tpm, &a_mao(0x8002, LOAD, &corpo));
+    let alca = if rc == 0 {
+        u32::from_be_bytes(r[0..4].try_into().unwrap())
+    } else {
+        0
+    };
+    (rc, alca)
+}
+
+/// `TPM2_ObjectChangeAuth` à mão, pela senha vazia do objeto. Devolve o
+/// código.
+fn trocar_a_senha_a_mao(tpm: &mut Swtpm, objeto: u32, pai: u32) -> u32 {
+    let mut corpo = Vec::new();
+    corpo.extend_from_slice(&objeto.to_be_bytes());
+    corpo.extend_from_slice(&pai.to_be_bytes());
+    corpo.extend_from_slice(&sessao_de_senha(&[]));
+    tpm2b(&mut corpo, b"outra senha");
+    mandar(tpm, &a_mao(0x8002, OBJECT_CHANGE_AUTH, &corpo)).0
+}
+
+/// `TPM2_Unseal` à mão, pela senha vazia, numa sessão de senha: a resposta
+/// em claro.
+fn abrir_a_mao(tpm: &mut Swtpm, objeto: u32) -> Vec<u8> {
+    let mut corpo = Vec::new();
+    corpo.extend_from_slice(&objeto.to_be_bytes());
+    corpo.extend_from_slice(&sessao_de_senha(&[]));
+    let (rc, r) = mandar(tpm, &a_mao(0x8002, UNSEAL, &corpo));
+    assert_eq!(rc, 0, "o unseal a mao falhou");
+    let n = u16::from_be_bytes([r[4], r[5]]) as usize;
+    r[6..6 + n].to_vec()
+}
+
+/// Selar e abrir; a mesma chave selada duas vezes dá dois selados que
+/// abrem igual; e, depois de um boot, a área lida do disco — a EK fixada
+/// dela, o primário recriado — abre a mesma chave.
+#[test]
+fn a_identidade_sela_e_abre() {
+    let mut tpm = Swtpm::novo("identidade");
+    let (mut a, c) = identidade_nova(&mut tpm, None);
+    let chave = sorteada();
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    let outro = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    assert_ne!(outro, selado, "o TPM sorteia o sal do unique");
+    for s in [&selado, &outro, &selado] {
+        let aberta = a.abrir_identidade(&mut tpm, &c, s, &mut DoSistema).unwrap();
+        assert_eq!(aberta.como_bytes(), &chave);
+    }
+    let area = identidade::Area {
+        ek: a.ponto_do_tpm(),
+        publica: [0x77; 32],
+        selado,
+    };
+    let no_disco = area.em_bytes();
+    c.fechar(&mut tpm);
+    a.encerrar(&mut tpm);
+
+    tpm.reiniciar();
+    let identidade::Leitura::Valida(lida) = identidade::ler(&no_disco) else {
+        panic!("a area nao voltou do disco");
+    };
+    assert_eq!(lida, area);
+    let (mut a, c) = identidade_nova(&mut tpm, Some(&lida.ek));
+    let aberta = a
+        .abrir_identidade(&mut tpm, &c, &lida.selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+}
+
+/// A chave não passa em claro pelo barramento — nem na selagem, nem na
+/// abertura —, e a identidade não usa índice nem política: nenhum comando
+/// de NV, nenhum `TPM2_PolicyNV`.
+#[test]
+fn a_identidade_nao_passa_pelo_barramento() {
+    let mut tpm = Swtpm::novo("identidade-escuta");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, c) = identidade_nova(&mut i, None);
+    let chave = sorteada();
+    let selado = a
+        .selar_identidade(&mut i, &c, &chave, &mut DoSistema)
+        .unwrap();
+    let aberta = a
+        .abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+    let codigos: Vec<u32> = i.comandos.iter().map(|c| codigo_do_comando(c)).collect();
+    for esperado in [CREATE, LOAD, UNSEAL] {
+        assert!(
+            codigos.contains(&esperado),
+            "o comando {esperado:#x} nao passou"
+        );
+    }
+    for proibido in [POLICY_NV, NV_READ, 0x12A, 0x134, 0x137, 0x169] {
+        assert!(
+            !codigos.contains(&proibido),
+            "o comando {proibido:#x} passou"
+        );
+    }
+    for b in i.comandos.iter().chain(&i.respostas) {
+        assert!(
+            !b.windows(8).any(|w| chave.windows(8).any(|p| p == w)),
+            "a chave da identidade passou pelo barramento"
+        );
+    }
+}
+
+/// Outro TPM: a EK da área não é a dele, e a conexão recusa antes de
+/// qualquer sessão; sem a fixação, o primário dele é outro, e o selado não
+/// carrega.
+#[test]
+fn a_identidade_nao_abre_em_outro_tpm() {
+    let mut um = Swtpm::novo("identidade-um");
+    let mut outro = Swtpm::novo("identidade-outro");
+    let (mut a, c) = identidade_nova(&mut um, None);
+    let ek = a.ponto_do_tpm();
+    let selado = a
+        .selar_identidade(&mut um, &c, &sorteada(), &mut DoSistema)
+        .unwrap();
+    assert_eq!(
+        Ancora::conectar(&mut outro, INDICE, [0; 32], Some(&ek)).err(),
+        Some(Erro::ChaveDoTpmTrocada)
+    );
+    let (mut b, d) = identidade_nova(&mut outro, None);
+    assert_ne!(b.ponto_do_tpm(), ek);
+    assert_eq!(
+        b.abrir_identidade(&mut outro, &d, &selado, &mut DoSistema)
+            .err(),
+        Some(Erro::Codigo(INTEGRIDADE))
+    );
+}
+
+/// O TPM limpo depois do nascimento: a mesma EK — a conexão passa —, outro
+/// primário, e o selado não carrega. A identidade de antes está perdida.
+#[test]
+fn a_identidade_nao_abre_no_tpm_limpo() {
+    let mut tpm = Swtpm::novo("identidade-limpo");
+    let (mut a, c) = identidade_nova(&mut tpm, None);
+    let ek = a.ponto_do_tpm();
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &sorteada(), &mut DoSistema)
+        .unwrap();
+    c.fechar(&mut tpm);
+    a.encerrar(&mut tpm);
+    limpar(&mut tpm);
+    let (mut a, c) = identidade_nova(&mut tpm, Some(&ek));
+    assert_eq!(
+        a.abrir_identidade(&mut tpm, &c, &selado, &mut DoSistema)
+            .err(),
+        Some(Erro::Codigo(INTEGRIDADE))
+    );
+}
+
+/// O selado mexido não carrega: a integridade, o meio, o fim, o bloco
+/// cortado, o `unique`. E um selado não passa pelo outro: o de uma chave
+/// do cofre não abre como identidade, nem o da identidade como chave — a
+/// parte pública de um não é a do outro, e o nome entra na integridade.
+#[test]
+fn o_selo_da_identidade_mexido_e_recusado() {
+    let mut tpm = Swtpm::novo("identidade-mexida");
+    let (mut a, mut c, mut g, valor) = cofre_novo(&mut tpm);
+    let chave = semente(21);
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    let privado = selado.privado().to_vec();
+    let com_byte = |i: usize| {
+        let mut p = privado.clone();
+        p[i] ^= 0x01;
+        SeladoDaIdentidade::de_partes(selado.unico(), &p).unwrap()
+    };
+    let mut unico = *selado.unico();
+    unico[31] ^= 0x40;
+    let mexidos = [
+        ("um byte da integridade", com_byte(2)),
+        ("um byte do meio", com_byte(privado.len() / 2)),
+        ("o ultimo byte", com_byte(privado.len() - 1)),
+        (
+            "o bloco cortado",
+            SeladoDaIdentidade::de_partes(selado.unico(), &privado[..privado.len() - 1]).unwrap(),
+        ),
+        (
+            "um byte do unique",
+            SeladoDaIdentidade::de_partes(&unico, &privado).unwrap(),
+        ),
+    ];
+    for (qual, m) in &mexidos {
+        assert_eq!(
+            a.abrir_identidade(&mut tpm, &c, m, &mut DoSistema).err(),
+            Some(Erro::Codigo(INTEGRIDADE)),
+            "{qual}"
+        );
+    }
+    let da_chave = a
+        .selar(&mut tpm, &c, &g, valor, &semente(22), &mut DoSistema)
+        .unwrap();
+    let como_identidade =
+        SeladoDaIdentidade::de_partes(da_chave.unico(), da_chave.privado()).unwrap();
+    assert_eq!(
+        a.abrir_identidade(&mut tpm, &c, &como_identidade, &mut DoSistema)
+            .err(),
+        Some(Erro::Codigo(INTEGRIDADE))
+    );
+    let como_chave = Selado::de_partes(valor, selado.unico(), selado.privado()).unwrap();
+    assert_eq!(
+        a.abrir(&mut tpm, &mut c, &mut g, &como_chave, &mut DoSistema)
+            .err(),
+        Some(Erro::Codigo(INTEGRIDADE))
+    );
+    let aberta = a
+        .abrir_identidade(&mut tpm, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+}
+
+/// A resposta do `TPM2_Unseal` da identidade vem cifrada e autenticada: um
+/// byte do texto cifrado mexido, ou uma resposta de antes repetida, não
+/// viram chave — e nenhuma recusa deixa o objeto no TPM.
+#[test]
+fn a_resposta_do_unseal_da_identidade_mexida_ou_repetida_e_recusada() {
+    let mut tpm = Swtpm::novo("identidade-unseal");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, c) = identidade_nova(&mut i, None);
+    let chave = semente(23);
+    let selado = a
+        .selar_identidade(&mut i, &c, &chave, &mut DoSistema)
+        .unwrap();
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == UNSEAL {
+            r[16] ^= 0x01;
+        }
+    }));
+    for _ in 0..5 {
+        assert_eq!(
+            a.abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+                .err(),
+            Some(Erro::RespostaNaoAutenticada)
+        );
+    }
+    i.mexer = None;
+    let aberta = a
+        .abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+    let antiga = i
+        .respostas
+        .iter()
+        .zip(&i.comandos)
+        .rev()
+        .find(|(_, c)| codigo_do_comando(c) == UNSEAL)
+        .map(|(r, _)| r.clone())
+        .unwrap();
+    i.mexer = Some(Box::new(move |c, r, _| {
+        if codigo_do_comando(c) == UNSEAL {
+            *r = antiga.clone();
+        }
+    }));
+    for _ in 0..5 {
+        assert_eq!(
+            a.abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+                .err(),
+            Some(Erro::RespostaNaoAutenticada)
+        );
+    }
+    i.mexer = None;
+    let aberta = a
+        .abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+}
+
+/// O selado da identidade, como o TPM o criou, tem os atributos pedidos —
+/// conferidos bit a bit, com os bits escritos aqui pela especificação — e
+/// nenhuma política.
+#[test]
+fn o_selado_da_identidade_tem_os_atributos_pedidos() {
+    const FIXED_TPM: u32 = 1 << 1;
+    const FIXED_PARENT: u32 = 1 << 4;
+    const SENSITIVE_DATA_ORIGIN: u32 = 1 << 5;
+    const USER_WITH_AUTH: u32 = 1 << 6;
+    const ADMIN_WITH_POLICY: u32 = 1 << 7;
+    const NO_DA: u32 = 1 << 10;
+    let mut tpm = Swtpm::novo("identidade-atributos");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, c) = identidade_nova(&mut i, None);
+    a.selar_identidade(&mut i, &c, &semente(24), &mut DoSistema)
+        .unwrap();
+    let criado = resposta_a(&i, CREATE, |_| true);
+    let n = u16::from_be_bytes([criado[14], criado[15]]) as usize;
+    let p = 16 + n + 2;
+    assert_eq!(&criado[p..p + 2], &[0x00, 0x08], "o selado nao e keyedhash");
+    assert_eq!(&criado[p + 2..p + 4], &[0x00, 0x0B]);
+    let atributos = u32::from_be_bytes(criado[p + 4..p + 8].try_into().unwrap());
+    assert_eq!(
+        atributos,
+        FIXED_TPM | FIXED_PARENT | USER_WITH_AUTH | ADMIN_WITH_POLICY | NO_DA
+    );
+    assert_eq!(atributos & SENSITIVE_DATA_ORIGIN, 0);
+    assert_eq!(&criado[p + 8..p + 10], &[0, 0], "o selado tem politica");
+    assert_eq!(
+        &criado[p + 10..p + 12],
+        &[0x00, 0x10],
+        "o selado tem esquema"
+    );
+    assert_eq!(&criado[p + 12..p + 14], &[0x00, 0x20]);
+}
+
+/// Ninguém troca a senha do selado da identidade: `adminWithPolicy` com a
+/// política vazia fecha o `TPM2_ObjectChangeAuth` — que um selado igual,
+/// sem o bit, aceita.
+#[test]
+fn ninguem_troca_a_senha_da_identidade() {
+    let mut tpm = Swtpm::novo("identidade-senha");
+    let (mut a, c) = identidade_nova(&mut tpm, None);
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &semente(25), &mut DoSistema)
+        .unwrap();
+    c.fechar(&mut tpm);
+    a.encerrar(&mut tpm);
+    let pai = primario_a_mao(&mut tpm);
+    let (rc, objeto) = carregar_a_mao(
+        &mut tpm,
+        pai,
+        cofre::objeto::DA_IDENTIDADE,
+        selado.unico(),
+        selado.privado(),
+    );
+    assert_eq!(
+        rc, 0,
+        "o selado da identidade nao carregou sob o primario a mao"
+    );
+    assert_eq!(
+        trocar_a_senha_a_mao(&mut tpm, objeto, pai),
+        TIPO_DE_AUTORIZACAO,
+        "a senha da identidade foi trocada"
+    );
+    ancora::esquecer(&mut tpm, objeto).unwrap();
+    // O controle: o mesmo selado sem `adminWithPolicy`.
+    let sem_o_bit = cofre::objeto::DA_IDENTIDADE & !cofre::objeto::ADMINISTRACAO_PELA_POLITICA;
+    let (privado, unico) = selar_a_mao(&mut tpm, pai, sem_o_bit, &semente(26));
+    let (rc, objeto) = carregar_a_mao(&mut tpm, pai, sem_o_bit, &unico, &privado);
+    assert_eq!(rc, 0);
+    assert_eq!(trocar_a_senha_a_mao(&mut tpm, objeto, pai), 0);
+    ancora::esquecer(&mut tpm, objeto).unwrap();
+    ancora::esquecer(&mut tpm, pai).unwrap();
+}
+
+/// O preço da senha vazia, dito num teste: quem tem o bloco do disco **e**
+/// fala com o TPM da máquina abre o selado, por uma sessão de senha, sem
+/// sal e sem cifra. É o limite que o cabeçalho do cofre descreve — o que o
+/// selo protege é o disco sozinho, num outro TPM ou num TPM limpo.
+#[test]
+fn quem_tem_o_disco_e_a_maquina_abre_a_identidade() {
+    let mut tpm = Swtpm::novo("identidade-limite");
+    let (mut a, c) = identidade_nova(&mut tpm, None);
+    let chave = semente(27);
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    c.fechar(&mut tpm);
+    a.encerrar(&mut tpm);
+    let pai = primario_a_mao(&mut tpm);
+    let (rc, objeto) = carregar_a_mao(
+        &mut tpm,
+        pai,
+        cofre::objeto::DA_IDENTIDADE,
+        selado.unico(),
+        selado.privado(),
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(abrir_a_mao(&mut tpm, objeto), chave);
+    ancora::esquecer(&mut tpm, objeto).unwrap();
+    ancora::esquecer(&mut tpm, pai).unwrap();
+}
+
+/// O bloqueio do TPM contra força bruta não trava a identidade: com o TPM
+/// bloqueado por outra entidade, ela sela e abre.
+#[test]
+fn o_bloqueio_do_tpm_nao_trava_a_identidade() {
+    let mut tpm = Swtpm::novo("identidade-bloqueio");
+    let (mut a, c) = identidade_nova(&mut tpm, None);
+    let chave = semente(28);
+    let selado = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    bloquear(&mut tpm);
+    assert_eq!(criar_sob_um_primario_sem_no_da(&mut tpm), BLOQUEADO);
+    let aberta = a
+        .abrir_identidade(&mut tpm, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
+    let outro = a
+        .selar_identidade(&mut tpm, &c, &semente(29), &mut DoSistema)
+        .unwrap();
+    let aberta = a
+        .abrir_identidade(&mut tpm, &c, &outro, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &semente(29));
+}
+
+/// A identidade e o cofre sob o mesmo primário: a geração que anda mata a
+/// semente velha e não toca na identidade, que não tem geração.
+#[test]
+fn a_geracao_nao_toca_na_identidade() {
+    let mut tpm = Swtpm::novo("identidade-geracao");
+    let (mut a, mut c, mut g, valor) = cofre_novo(&mut tpm);
+    let chave = semente(30);
+    let identidade = a
+        .selar_identidade(&mut tpm, &c, &chave, &mut DoSistema)
+        .unwrap();
+    let velha = a
+        .selar(&mut tpm, &c, &g, valor, &semente(31), &mut DoSistema)
+        .unwrap();
+    for _ in 0..2 {
+        a.avancar_geracao(&mut tpm, &mut g, &mut DoSistema).unwrap();
+        assert_eq!(
+            a.abrir(&mut tpm, &mut c, &mut g, &velha, &mut DoSistema)
+                .err(),
+            Some(Erro::Codigo(POLITICA_RECUSADA))
+        );
+        let aberta = a
+            .abrir_identidade(&mut tpm, &c, &identidade, &mut DoSistema)
+            .unwrap();
+        assert_eq!(aberta.como_bytes(), &chave);
+    }
+}
+
+/// Aberturas que falham — o selado mexido, no `TPM2_Load`; a resposta
+/// mexida, depois dele — não deixam nada no TPM: dez de cada, num TPM de
+/// três vagas de objeto, e a seguinte abre.
+#[test]
+fn as_aberturas_da_identidade_que_falham_nao_ocupam_o_tpm() {
+    let mut tpm = Swtpm::novo("identidade-vagas");
+    let mut i = Interposto::novo(&mut tpm);
+    let (mut a, c) = identidade_nova(&mut i, None);
+    let chave = semente(32);
+    let selado = a
+        .selar_identidade(&mut i, &c, &chave, &mut DoSistema)
+        .unwrap();
+    let mut privado = selado.privado().to_vec();
+    privado[5] ^= 0x02;
+    let mexido = SeladoDaIdentidade::de_partes(selado.unico(), &privado).unwrap();
+    for _ in 0..10 {
+        assert_eq!(
+            a.abrir_identidade(&mut i, &c, &mexido, &mut DoSistema)
+                .err(),
+            Some(Erro::Codigo(INTEGRIDADE))
+        );
+    }
+    i.mexer = Some(Box::new(|c, r, _| {
+        if codigo_do_comando(c) == UNSEAL {
+            r[20] ^= 0x10;
+        }
+    }));
+    for _ in 0..10 {
+        assert!(
+            a.abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+                .is_err()
+        );
+    }
+    i.mexer = None;
+    let aberta = a
+        .abrir_identidade(&mut i, &c, &selado, &mut DoSistema)
+        .unwrap();
+    assert_eq!(aberta.como_bytes(), &chave);
 }

@@ -19,6 +19,7 @@ mod canal_tcp;
 mod codigo;
 mod disco_hostil;
 mod icp;
+mod identidade;
 mod persistencia;
 mod producao;
 mod rede_principal;
@@ -279,6 +280,7 @@ fn main() -> ExitCode {
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
         "atualizacao" => atualizar::atualizacao(arch, release),
+        "identidade" => identidade::identidade(arch, release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -449,6 +451,11 @@ COMANDOS:
                               escrita, instalada por quórum, tentada, confirmada
                               ou desfeita; recusas, quedas de energia em cada
                               passo e concorrência
+    identidade                a identidade do Duke numa máquina de produção:
+                              nascida no primeiro boot e selada no TPM, os
+                              boots seguintes, quedas de energia no
+                              nascimento, cópias do selo estragadas, sem TPM,
+                              o disco clonado, e a reinstalação
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -456,9 +463,10 @@ COMANDOS:
     provisionar <diretório> --imagem <imagem do slot>
                               a imagem de produção, do material do operador (a
                               política, os registros, as pessoas, a rede, as
-                              fontes de hora, as chaves de atualização): uma
-                              chave do Duke nova, nada da bancada, e a imagem
-                              publicada no slot A; --saida diz onde
+                              fontes de hora, as chaves de atualização): nada
+                              da bancada, nenhuma chave do Duke — ela nasce no
+                              primeiro boot —, e a imagem publicada no slot A;
+                              --saida diz onde
     chave <tipo> <arquivo> <nome> [papel]
                               uma chave de agente, administrador, editor ou de
                               atualização, e a linha do registro que a imagem leva
@@ -2932,6 +2940,23 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ),
     // E o journal se abre uma vez, no boot.
     ("persistencia::abrir()", &["kernel/src/main.rs"]),
+    // A identidade do Duke: estabelecida uma vez, no boot, antes do
+    // journal; a chave adotada — ou a falta dela — só pelo selo; e a área
+    // dele gravada só pelo selo, pela persistência, que é dona da janela
+    // de estado.
+    ("selo::estabelecer()", &["kernel/src/main.rs"]),
+    (
+        "adotar_a_chave(",
+        &["kernel/src/identidade.rs", "kernel/src/selo.rs"],
+    ),
+    (
+        "ficar_sem_chave(",
+        &["kernel/src/identidade.rs", "kernel/src/selo.rs"],
+    ),
+    (
+        "gravar_a_area_da_identidade(",
+        &["kernel/src/persistencia.rs", "kernel/src/selo.rs"],
+    ),
     // Uma operação administrativa: só depois da prova e da decisão.
     (
         "(operacao.executar)(",
@@ -3140,6 +3165,10 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("tipo::CHAVE_CRIADA,", &["kernel/src/persistencia.rs"]),
     (".abrir_cofre(", &["kernel/src/persistencia.rs"]),
     ("cofre::Geracao::nova(", &["kernel/src/persistencia.rs"]),
+    // E o selado da identidade do Duke também: só a persistência sela e
+    // abre, pela conexão da identidade — ver `kernel/src/selo.rs`.
+    (".selar_identidade(", &["kernel/src/persistencia.rs"]),
+    (".abrir_identidade(", &["kernel/src/persistencia.rs"]),
     // O registro antes do efeito: a assinatura (`key.sign`) e o pedido de
     // reiniciar ou desligar, que a energia leva ao journal antes de lançar
     // o fio que para a máquina — e a energia só é chamada pelos handlers e
@@ -6703,6 +6732,25 @@ fn zerar_o_estado(arch: Arquitetura) -> Result<(), String> {
     zerar_o_tpm(arch)
 }
 
+/// O TPM de `arch` tirado da máquina e guardado em `para`, com um outro,
+/// novo, no lugar dele: a máquina com outro chip.
+pub(crate) fn guardar_o_tpm(arch: Arquitetura, para: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(para);
+    let tpm = diretorio_do_tpm(arch);
+    std::fs::rename(&tpm, para)
+        .map_err(|e| format!("não foi possível guardar o TPM em {}: {e}", para.display()))?;
+    std::fs::create_dir_all(tpm.join("estado"))
+        .map_err(|e| format!("não foi possível criar {}: {e}", tpm.display()))
+}
+
+/// O TPM guardado em `de` de volta na máquina de `arch`.
+pub(crate) fn repor_o_tpm(arch: Arquitetura, de: &Path) -> Result<(), String> {
+    let tpm = diretorio_do_tpm(arch);
+    let _ = std::fs::remove_dir_all(&tpm);
+    std::fs::rename(de, &tpm)
+        .map_err(|e| format!("não foi possível repor o TPM de {}: {e}", de.display()))
+}
+
 /// O TPM e o signatário de `arch`, de volta ao começo — o par do journal
 /// zerado, ou de um disco novo.
 pub(crate) fn zerar_o_tpm(arch: Arquitetura) -> Result<(), String> {
@@ -9702,7 +9750,7 @@ impl AgenteNaPorta {
 
     /// Conecta pelo canal TCP de uma máquina de verdade, em `endereco`
     /// (`host:porta`), com a chave do agente e a pública do Duke que ele
-    /// fixa — a do `duke.publica` da imagem.
+    /// fixa — a que a máquina mostrou no console no primeiro boot.
     pub(crate) fn conectar_endereco(
         endereco: &str,
         chave: &[u8; 32],

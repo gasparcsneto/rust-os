@@ -25,6 +25,11 @@ politica = { path = "../politica" }
 # estado e os registros nelas, pelo cabeçalho em claro — sem a chave.
 diario = { path = "../diario" }
 
+# A área do selo da identidade do Duke na partição de estado, lida como o
+# kernel a lê: a bancada da identidade confere as duas cópias no disco, e
+# as estraga de propósito.
+ancora = { path = "../ancora" }
+
 # A atualização A/B: o manifesto assinado, o cabeçalho e o pacote de um
 # slot, e o controle de boot — os mesmos formatos que o iniciador e o
 # kernel leem. Com `assinar`: quem publica uma imagem assina o manifesto

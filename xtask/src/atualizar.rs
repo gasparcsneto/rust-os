@@ -274,7 +274,7 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_concorrencia,
     },
     Cenario {
-        nome: "a imagem de producao se atualiza pelo operador: publicada, escrita pelo agente dele, instalada pelo quorum dele",
+        nome: "a imagem de producao se atualiza pelo operador: publicada, escrita pelo agente dele, instalada pelo quorum dele, com a identidade nascida no primeiro boot",
         rodar: a_producao_se_atualiza,
     },
     Cenario {
@@ -304,6 +304,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
     Cenario {
         nome: "a versao nova que entra em panico na tentativa: o iniciador conta tres, e a velha volta e desfaz",
         rodar: o_panico_na_tentativa,
+    },
+    Cenario {
+        nome: "a imagem de producao cuja versao nova entra em panico na tentativa volta para a velha com a identidade nascida no primeiro boot",
+        rodar: a_producao_desfeita_com_a_identidade,
     },
 ];
 
@@ -1544,92 +1548,143 @@ fn a_concorrencia(b: &Bancada) -> Result<String, String> {
     r
 }
 
-/// O caminho do operador numa imagem de produção: a chave de atualização
-/// dele, a imagem publicada no slot A pelo `provisionar`, a versão 2
-/// escrita pelo agente `sistema` dele com o `encenar` do `operar`,
-/// instalada pelo quórum dos administradores dele, e o reinício pelo
-/// agente. A versão 2 boota, se confirma, e traz os programas do produto
-/// no pacote.
-fn a_producao_se_atualiza(b: &Bancada) -> Result<String, String> {
-    let arch = b.arch;
-    let dir = super::raiz_do_estado().join(format!("operador-atualizacao-{}", arch.nome()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let escrever = |nome: &str, conteudo: &str| {
-        std::fs::write(dir.join(nome), conteudo).map_err(|e| format!("{nome}: {e}"))
-    };
-    let exemplo = super::raiz_do_projeto().join("docs/exemplos/producao/politica");
-    escrever(
-        "politica",
-        &std::fs::read_to_string(&exemplo).map_err(|e| format!("{}: {e}", exemplo.display()))?,
-    )?;
-    escrever("nome", "bancada-atualizacao\n")?;
-    let (sistema, linha_do_sistema, _) =
-        producao::chave_nova("agente", "sistema-1", Some("sistema"))?;
-    escrever("agentes", &linha_do_sistema)?;
-    let mut administradores = String::new();
-    let mut arquivos_dos_administradores = Vec::new();
-    for nome in ["adm-a", "adm-b", "adm-c"] {
-        let (privada, linha, _) =
-            producao::chave_nova("administrador", nome, Some("administrador"))?;
-        administradores.push_str(&linha);
-        let arquivo = dir.join(format!("{nome}.chave"));
-        std::fs::write(&arquivo, privada).map_err(|e| format!("{nome}: {e}"))?;
-        arquivos_dos_administradores.push(arquivo);
-    }
-    escrever("administradores", &administradores)?;
-    let (publicador, linha_do_publicador, _) =
-        producao::chave_nova("atualizacao", "publicador-1", None)?;
-    escrever("atualizacao", &linha_do_publicador)?;
-    let op = producao::ler_o_operador(&dir)?;
-    let politica = producao::conferir(&op)?;
-    let duke = super::aleatorios()?;
-    let mut id = [0u8; 16];
-    id.copy_from_slice(&super::aleatorios()?[..16]);
-    let arquivos = producao::arquivos_da_raiz(&op, &politica, &duke, id)?;
-    let privada = producao::chave_de_atualizacao_de_texto(&publicador)?;
-    let kernel = slots::kernel_da_imagem(&slots::imagem_do_slot(&b.disco()?, Slot::A)?)?;
-    let pacote = producao::pacote_do_produto(arch)?;
-    let v1 = imagem(arch, &kernel, &pacote, "producao-1", 1, &privada)?;
-    let v2 = imagem(arch, &kernel, &pacote, "producao-2", 2, &privada)?;
-    slots::conferir_imagem(&v2.bytes, &op.atualizacao, arch)?;
-    let disco = super::raiz_do_estado().join(format!("producao-atualizacao-{}.img", arch.nome()));
-    producao::montar_o_disco(arch, false, &disco, &arquivos, &v1.bytes)?;
+/// Uma máquina de produção desta bancada: o material de um operador — a
+/// política de exemplo, o agente `sistema` dele, três administradores e a
+/// chave de atualização —, a imagem dele no slot A com o kernel desta
+/// compilação — a versão 1 —, e a versão 2 assinada pela mesma chave.
+/// Nenhuma chave do Duke: a identidade nasce no primeiro boot.
+struct Producao {
+    dir: PathBuf,
+    disco: PathBuf,
+    sistema: [u8; 32],
+    administradores: Vec<PathBuf>,
+    v2: slots::Imagem,
+}
 
-    let mut m = Ligada::subir_esperando(
-        arch,
-        &Artefato::Disco(disco.clone()),
-        Ambiente::ligar(arch, None)?.com_disco(disco.clone()),
-        espera(arch),
-    )?;
-    let r = (|| -> Result<String, String> {
-        let s = situacao(&mut m)?;
+impl Producao {
+    fn montar(b: &Bancada, nome: &str) -> Result<Producao, String> {
+        let arch = b.arch;
+        let dir = super::raiz_do_estado().join(format!("operador-{nome}-{}", arch.nome()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let escrever = |nome: &str, conteudo: &str| {
+            std::fs::write(dir.join(nome), conteudo).map_err(|e| format!("{nome}: {e}"))
+        };
+        let exemplo = super::raiz_do_projeto().join("docs/exemplos/producao/politica");
+        escrever(
+            "politica",
+            &std::fs::read_to_string(&exemplo)
+                .map_err(|e| format!("{}: {e}", exemplo.display()))?,
+        )?;
+        escrever("nome", &format!("bancada-{nome}\n"))?;
+        let (sistema, linha_do_sistema, _) =
+            producao::chave_nova("agente", "sistema-1", Some("sistema"))?;
+        escrever("agentes", &linha_do_sistema)?;
+        let mut administradores = String::new();
+        let mut arquivos_dos_administradores = Vec::new();
+        for nome in ["adm-a", "adm-b", "adm-c"] {
+            let (privada, linha, _) =
+                producao::chave_nova("administrador", nome, Some("administrador"))?;
+            administradores.push_str(&linha);
+            let arquivo = dir.join(format!("{nome}.chave"));
+            std::fs::write(&arquivo, privada).map_err(|e| format!("{nome}: {e}"))?;
+            arquivos_dos_administradores.push(arquivo);
+        }
+        escrever("administradores", &administradores)?;
+        let (publicador, linha_do_publicador, _) =
+            producao::chave_nova("atualizacao", "publicador-1", None)?;
+        escrever("atualizacao", &linha_do_publicador)?;
+        let op = producao::ler_o_operador(&dir)?;
+        let politica = producao::conferir(&op)?;
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&super::aleatorios()?[..16]);
+        let arquivos = producao::arquivos_da_raiz(&op, &politica, id)?;
+        let privada = producao::chave_de_atualizacao_de_texto(&publicador)?;
+        let kernel = slots::kernel_da_imagem(&slots::imagem_do_slot(&b.disco()?, Slot::A)?)?;
+        let pacote = producao::pacote_do_produto(arch)?;
+        let v1 = imagem(arch, &kernel, &pacote, "producao-1", 1, &privada)?;
+        let v2 = imagem(arch, &kernel, &pacote, "producao-2", 2, &privada)?;
+        slots::conferir_imagem(&v2.bytes, &op.atualizacao, arch)?;
+        let disco = super::raiz_do_estado().join(format!("producao-{nome}-{}.img", arch.nome()));
+        producao::montar_o_disco(arch, false, &disco, &arquivos, &v1.bytes)?;
+        Ok(Producao {
+            dir,
+            disco,
+            sistema: producao::chave_de_agente_de_texto(&sistema)?,
+            administradores: arquivos_dos_administradores,
+            v2,
+        })
+    }
+
+    fn subir(&self, arch: Arquitetura) -> Result<Ligada, String> {
+        Ligada::subir_esperando(
+            arch,
+            &Artefato::Disco(self.disco.clone()),
+            Ambiente::ligar(arch, None)?.com_disco(self.disco.clone()),
+            espera(arch),
+        )
+    }
+
+    /// O caminho do operador até a versão 2: o primeiro boot, com a
+    /// identidade nascida e mostrada; a versão 2 escrita pelo agente dele,
+    /// que fixa a pública mostrada, com o `encenar` do `operar`; instalada
+    /// pelo quórum dos administradores dele; e o reinício pelo agente.
+    /// Devolve a pública e os boots de antes do reinício.
+    fn instalar_a_versao_2(
+        &self,
+        arch: Arquitetura,
+        m: &mut Ligada,
+    ) -> Result<([u8; 32], u64), String> {
+        let s = situacao(m)?;
         s.na_versao("a imagem de producao", "a", 1)?;
         s.exigir("a versao publicada", s.versao == "producao-1")?;
-        let publica = sigilo::publica_de(&duke);
-        let chave = producao::chave_de_agente_de_texto(&sistema)?;
-        let mut agente = AgenteNaPorta::conectar_com_publica(arch, 1, &chave, &publica)?;
-        producao::encenar(&mut agente, &v2.bytes)?;
+        let publica = p::identidade_com_origem(m, "born")?;
+        let mut agente = AgenteNaPorta::conectar_com_publica(arch, 1, &self.sistema, &publica)?;
+        producao::encenar(&mut agente, &self.v2.bytes)?;
         let r = super::quorum_pelo_operador(
             &mut agente,
             "system.update",
-            &parametros("install", &v2.resumo),
-            &arquivos_dos_administradores[..2],
+            &parametros("install", &self.v2.resumo),
+            &self.administradores[..2],
         )?;
         if !p::executou(&r) {
             return Err(format!("o quorum do operador nao instalou\n  {r}"));
         }
-        let antes = p::persistencia_de(&mut m)?.boots;
+        let antes = p::persistencia_de(m)?.boots;
         let r = agente.pedir("system.reboot", "{}")?;
         if !r.contains(r#""state":"rebooting""#) {
             return Err(format!("o agente do operador nao reiniciou\n  {r}"));
         }
-        drop(agente);
+        Ok((publica, antes))
+    }
+
+    fn apagar(&self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_file(&self.disco);
+    }
+}
+
+/// O caminho do operador numa imagem de produção: a chave de atualização
+/// dele, a imagem publicada no slot A pelo `provisionar`, a identidade do
+/// Duke nascida no primeiro boot e fixada pelo agente, a versão 2 escrita
+/// pelo agente `sistema` dele com o `encenar` do `operar`, instalada pelo
+/// quórum dos administradores dele, e o reinício pelo agente. A versão 2
+/// boota, se confirma com a mesma identidade — aberta do selo —, e traz os
+/// programas do produto no pacote.
+fn a_producao_se_atualiza(b: &Bancada) -> Result<String, String> {
+    let arch = b.arch;
+    let pr = Producao::montar(b, "atualizacao")?;
+    let mut m = pr.subir(arch)?;
+    let r = (|| -> Result<String, String> {
+        let (publica, antes) = pr.instalar_a_versao_2(arch, &mut m)?;
         m.esperar_o_boot_ate(antes, espera(arch))?;
         let s = situacao(&mut m)?;
         s.na_versao("a imagem de producao, atualizada", "b", 2)?;
         s.exigir("a versao 2 confirmada", s.versao == "producao-2")?;
-        let mut agente = AgenteNaPorta::conectar_com_publica(arch, 1, &chave, &publica)?;
+        if p::identidade_com_origem(&mut m, "sealed")? != publica {
+            return Err("a versao 2 abriu outra identidade que a nascida na 1".into());
+        }
+        let mut agente = AgenteNaPorta::conectar_com_publica(arch, 1, &pr.sistema, &publica)?;
         let programas = agente.pedir(
             "fs.list",
             &format!(r#"{{"path":"/programas/{}"}}"#, arch.nome()),
@@ -1642,14 +1697,67 @@ fn a_producao_se_atualiza(b: &Bancada) -> Result<String, String> {
             }
         }
         Ok(format!(
-            "producao-1 -> producao-2 pelo agente e pelo quorum do operador; {} programas do produto no pacote",
+            "producao-1 -> producao-2 pelo agente e pelo quorum do operador, com a identidade nascida na 1 aberta do selo na 2; {} programas do produto no pacote",
             producao::PROGRAMAS_DO_PRODUTO.len()
         ))
     })();
     m.cortar_a_energia()?;
-    let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::remove_file(&disco);
+    pr.apagar();
     r
+}
+
+/// A imagem de produção cuja versão 2 entra em pânico antes de se
+/// confirmar, em toda tentativa: o iniciador conta três, a versão 1 volta e
+/// desfaz — e a identidade nascida no primeiro boot é a mesma nas
+/// tentativas e na volta. O agente que a fixou entra de novo.
+fn a_producao_desfeita_com_a_identidade(b: &Bancada) -> Result<String, String> {
+    let arch = b.arch;
+    let pr = Producao::montar(b, "desfeita")?;
+    let mut m = pr.subir(arch)?;
+    let r = pr.instalar_a_versao_2(arch, &mut m);
+    m.cortar_a_energia()?;
+    let (publica, boots) = r?;
+    p::plano(
+        &pr.disco,
+        p::Plano {
+            ponto: ponto::ANTES_DA_CONFIRMACAO,
+            bandeiras: PANICO_NA_CONFIRMACAO,
+            ..p::Plano::default()
+        },
+    )?;
+    let mut m = pr.subir(arch)?;
+    let r = (|| -> Result<u64, String> {
+        let s = situacao(&mut m)?;
+        s.na_versao("depois dos panicos", "a", 1)?;
+        s.exigir(
+            "a velha, desfeita",
+            s.modo == "desfeita" && s.reconciliacao == "desfazer",
+        )?;
+        if p::identidade_com_origem(&mut m, "sealed")? != publica {
+            return Err("a versao 1 de volta abriu outra identidade".into());
+        }
+        let depois = p::persistencia_de(&mut m)?.boots;
+        if depois < boots + u64::from(TENTATIVAS) + 1 {
+            return Err(format!(
+                "de {boots} a {depois} boots: as {TENTATIVAS} tentativas nao foram todas"
+            ));
+        }
+        let mut agente = AgenteNaPorta::conectar_com_publica(arch, 1, &pr.sistema, &publica)?;
+        let sessao = agente.pedir("agent.session", "{}")?;
+        if !sessao.contains(r#""agent":"sistema-1""#) {
+            return Err(format!(
+                "o agente do operador nao entrou de volta\n  {sessao}"
+            ));
+        }
+        Ok(depois - boots)
+    })();
+    m.cortar_a_energia()?;
+    pr.apagar();
+    let boots = r?;
+    Ok(format!(
+        "{boots} boots: {TENTATIVAS} tentativas da versao 2 em panico e a volta da 1, desfeita, com a identidade {} nascida no primeiro boot",
+        &sigilo::hex(&publica)[..8]
+    ))
 }
 
 /// No ARM, o kernel posto pelo `-kernel` não vem de um slot: com o journal

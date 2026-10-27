@@ -18147,6 +18147,378 @@ fn tpm_a_auditoria_nao_carrega_estado() -> Resultado {
     depois
 }
 
+// ---------------------------------------------------------------------------
+// identidade: a chave do Duke e o selo dela no TPM — ver `crate::selo`
+// ---------------------------------------------------------------------------
+
+/// Roda `f` com a persistência fechada — a âncora fora do TPM, como antes
+/// de o boot abri-la, que é quando o selo fala com o TPM: a conexão dele é
+/// própria, e o TPM tem três vagas de objeto —, e a reabre por cima da
+/// imagem, como o boot.
+fn com_a_persistencia_fechada<R>(f: impl FnOnce() -> R) -> R {
+    crate::persistencia::em_ordem(|| {
+        crate::persistencia::fechar_de_teste();
+        let r = f();
+        de_volta_a_imagem();
+        crate::persistencia::abrir();
+        r
+    })
+}
+
+/// As duas cópias da área do selo da identidade, cruas, como estão no
+/// disco.
+fn area_do_selo_crua() -> Result<[[u8; 512]; 2], &'static str> {
+    let base = crate::persistencia::setores_do_estado_de_teste()? - diario::RESERVA_NO_FIM;
+    let v = crate::persistencia::setores_crus_de_teste(base, 2)?;
+    let mut a = [[0u8; 512]; 2];
+    a[0].copy_from_slice(&v[..512]);
+    a[1].copy_from_slice(&v[512..]);
+    Ok(a)
+}
+
+/// Roda `f` e põe a área do selo de volta como estava: a imagem da suíte
+/// não tem selo — a chave dela é a da imagem —, e o caso seguinte a acha
+/// como o boot a deixou.
+fn com_a_area_do_selo_de_volta(f: impl FnOnce() -> Resultado) -> Resultado {
+    let antes = area_do_selo_crua()?;
+    let r = f();
+    for (copia, bytes) in antes.iter().enumerate() {
+        crate::persistencia::gravar_a_area_da_identidade(copia, bytes)?;
+    }
+    if area_do_selo_crua()? != antes {
+        return Err("a area do selo nao voltou ao que era");
+    }
+    r
+}
+
+/// Grava as duas cópias da área do selo com `bytes`.
+fn gravar_as_duas_copias(bytes: &[u8; 512]) -> Resultado {
+    for copia in 0..2 {
+        crate::persistencia::gravar_a_area_da_identidade(copia, bytes)?;
+    }
+    Ok(())
+}
+
+/// A identidade da suíte é a da imagem, e a máquina a mostra igual no
+/// `system.info` e no `agent.registry`. Nada adota outra chave por cima da
+/// que está em uso, nem a tira.
+fn identidade_a_da_imagem_e_a_que_a_maquina_mostra() -> Resultado {
+    use crate::identidade::{OrigemDaChave, SituacaoDaChave};
+    if crate::identidade::situacao_da_chave() != SituacaoDaChave::Em(OrigemDaChave::Imagem) {
+        return Err("a identidade da suite nao e a da imagem");
+    }
+    let em_uso = crate::identidade::publica_do_duke().ok_or("a suite nao tem chave do Duke")?;
+    let hex = sigilo::hex(&em_uso);
+    let info = chamar("system.info", "{}")?;
+    if !info.contains(&alloc::format!(
+        r#""identity":{{"origin":"image","key":"{hex}"}}"#
+    )) {
+        crate::log_error!("teste", "{}", info);
+        return Err("o system.info nao diz a identidade da imagem");
+    }
+    let registro = chamar("agent.registry", "{}")?;
+    if !registro.contains(&alloc::format!(r#""duke_key":"{hex}""#)) {
+        return Err("o agent.registry diz outra chave do Duke");
+    }
+    if crate::identidade::adotar_a_chave([0x5B; 32], OrigemDaChave::Nascida).is_ok() {
+        return Err("uma chave foi adotada por cima da que estava em uso");
+    }
+    crate::identidade::ficar_sem_chave("teste: uma recusa depois do boot");
+    if crate::identidade::publica_do_duke() != Some(em_uso)
+        || crate::identidade::situacao_da_chave() != SituacaoDaChave::Em(OrigemDaChave::Imagem)
+    {
+        return Err("a chave em uso mudou depois do boot");
+    }
+    Ok(())
+}
+
+/// O selo no TPM de verdade, pela conexão da identidade: a chave vai e
+/// volta, sem passar pelo barramento; a EK fixada é a do TPM do journal; a
+/// EK de outro TPM é recusada antes de qualquer sessão; e o selado mexido
+/// não carrega.
+fn identidade_o_selo_no_tpm() -> Resultado {
+    let ek_do_journal = crate::persistencia::ponto_da_ek().ok_or("sem a EK do journal")?;
+    let mut chave = [0u8; 32];
+    crate::aleatorio::preencher(&mut chave).map_err(|_| "sem entropia")?;
+    com_a_persistencia_fechada(|| -> Resultado {
+        crate::tpm::falhas::escutar(Some(chave));
+        let r = (|| -> Resultado {
+            let (ek, selado) =
+                crate::persistencia::selar_a_identidade(&chave).map_err(|e| e.motivo())?;
+            if ek != ek_do_journal {
+                return Err("o selo fixou outra EK que a do journal");
+            }
+            let aberta =
+                crate::persistencia::abrir_a_identidade(&ek, &selado).map_err(|e| e.motivo())?;
+            if aberta.como_bytes() != &chave {
+                return Err("o selo abriu outra chave");
+            }
+            let mut outra = ek;
+            outra[7] ^= 0x01;
+            if crate::persistencia::abrir_a_identidade(&outra, &selado).err()
+                != Some(ancora::Erro::ChaveDoTpmTrocada)
+            {
+                return Err("a EK de outro TPM nao foi recusada");
+            }
+            let mut privado = selado.privado().to_vec();
+            privado[3] ^= 0x01;
+            let mexido = ancora::cofre::SeladoDaIdentidade::de_partes(selado.unico(), &privado)
+                .map_err(|e| e.motivo())?;
+            if crate::persistencia::abrir_a_identidade(&ek, &mexido).err()
+                != Some(ancora::Erro::Codigo(ancora::codigo::INTEGRIDADE))
+            {
+                return Err("o selado mexido nao foi recusado pelo TPM");
+            }
+            Ok(())
+        })();
+        let visto = crate::tpm::falhas::visto();
+        crate::tpm::falhas::escutar(None);
+        r?;
+        if visto {
+            return Err("a chave da identidade passou pelo barramento");
+        }
+        Ok(())
+    })?;
+    if crate::persistencia::estado() != crate::persistencia::Estado::Disponivel {
+        return Err("a persistencia nao reabriu depois do selo");
+    }
+    Ok(())
+}
+
+/// O caminho do selo inteiro, sobre o disco e o TPM da suíte — com journal
+/// e com os índices do Duke —, sem adotar nada: sem selo, recusa e não
+/// nasce; nascida fora da decisão, abre; cada cópia estragada ou zerada, a
+/// outra abre e a repara; duas inteiras diferentes, a pública trocada, a
+/// EK de outro TPM, o selado mexido e as duas estragadas recusam.
+fn identidade_a_area_do_selo_e_a_decisao() -> Resultado {
+    use crate::identidade::OrigemDaChave;
+    use ancora::identidade::{Area, Leitura, Recusa};
+    let recusa = |esperada: &str, qual: &'static str| -> Resultado {
+        match crate::selo::pelo_selo_de_teste() {
+            Err(m) if m == esperada => Ok(()),
+            outro => {
+                crate::log_error!("teste", "{}: {:?}", qual, outro.map(|(p, o, _)| (p, o)));
+                Err(qual)
+            }
+        }
+    };
+    com_a_persistencia_fechada(|| {
+        com_a_area_do_selo_de_volta(|| {
+            if !crate::persistencia::ha_journal()? {
+                return Err("a suite nao tem journal no disco");
+            }
+            recusa(
+                Recusa::SemSelo.motivo(),
+                "sem selo e com journal, o selo nao recusou",
+            )?;
+            let publica = crate::selo::nascer_de_teste()?;
+            let [a, b] = crate::persistencia::ler_a_area_da_identidade()?;
+            let Leitura::Valida(area) = a.clone() else {
+                return Err("o nascimento nao gravou uma copia inteira");
+            };
+            if b != a || area.publica != publica {
+                return Err("as duas copias do nascimento nao sao a mesma area");
+            }
+            let (aberta, origem, reparo) = crate::selo::pelo_selo_de_teste()?;
+            if aberta != publica || origem != OrigemDaChave::Selada || reparo.is_some() {
+                return Err("o selo inteiro nao abriu a chave nascida");
+            }
+            let inteira = area.em_bytes();
+            for copia in 0..2 {
+                for estrago in [None, Some(100usize), Some(480)] {
+                    let mut ruim = [0u8; 512];
+                    if let Some(i) = estrago {
+                        ruim = inteira;
+                        ruim[i] ^= 0x10;
+                    }
+                    crate::persistencia::gravar_a_area_da_identidade(copia, &ruim)?;
+                    let (aberta, _, reparo) = crate::selo::pelo_selo_de_teste()?;
+                    if aberta != publica || reparo != Some((copia, Ok(()))) {
+                        return Err("a copia inteira nao abriu e reparou a outra");
+                    }
+                    if area_do_selo_crua()?[copia] != inteira {
+                        return Err("a copia reparada nao ficou igual a inteira");
+                    }
+                }
+            }
+            // Duas inteiras e diferentes: uma segunda chave nascida numa
+            // cópia, a primeira na outra.
+            crate::selo::nascer_de_teste()?;
+            crate::persistencia::gravar_a_area_da_identidade(1, &inteira)?;
+            recusa(
+                Recusa::CopiasDivergem.motivo(),
+                "duas copias inteiras e diferentes nao recusaram",
+            )?;
+            let trocada = Area {
+                publica: sigilo::publica_de(&[0x3D; 32]),
+                ..area.clone()
+            };
+            gravar_as_duas_copias(&trocada.em_bytes())?;
+            recusa(
+                "a chave aberta do selo nao e a publica da area",
+                "a publica trocada nao recusou",
+            )?;
+            let mut ek = area.ek;
+            ek[9] ^= 0x01;
+            gravar_as_duas_copias(&Area { ek, ..area.clone() }.em_bytes())?;
+            recusa(
+                "o TPM nao e o do nascimento da identidade: outra chave de endosso",
+                "a EK de outro TPM nao recusou",
+            )?;
+            let mut privado = area.selado.privado().to_vec();
+            privado[11] ^= 0x01;
+            let mexida = Area {
+                selado: ancora::cofre::SeladoDaIdentidade::de_partes(area.selado.unico(), &privado)
+                    .map_err(|e| e.motivo())?,
+                ..area.clone()
+            };
+            gravar_as_duas_copias(&mexida.em_bytes())?;
+            recusa(
+                "o selo da identidade nao abre neste TPM: limpo depois do nascimento, ou o selo foi mexido",
+                "o selado mexido nao recusou",
+            )?;
+            let mut lixo = inteira;
+            lixo[0] ^= 0xFF;
+            gravar_as_duas_copias(&lixo)?;
+            recusa(
+                Recusa::SemSelo.motivo(),
+                "as duas copias estragadas, com journal, nao recusaram",
+            )?;
+            Ok(())
+        })
+    })
+}
+
+/// Sem a identidade do Duke, e com journal no disco — o da suíte —, a
+/// abertura recusa: o que o journal guarda pode ser uma revogação, e as
+/// credenciais fecham.
+fn identidade_sem_ela_o_journal_recusa_a_persistencia() -> Resultado {
+    match crate::persistencia::sem_identidade_de_teste() {
+        Ok(crate::persistencia::Estado::Recusada(_)) => Ok(()),
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            Err("sem identidade e com journal, a persistencia nao foi recusada")
+        }
+    }
+}
+
+/// O barramento que mente no `TPM2_Unseal` da identidade — a resposta
+/// adulterada, repetida, perdida, ou o comando adulterado — não vira chave,
+/// e nada fica ocupado no TPM: a abertura seguinte abre.
+fn identidade_o_unseal_que_mente_nao_vira_chave() -> Resultado {
+    use crate::tpm::falhas::{Falha, armar, desarmar};
+    const UNSEAL: u32 = 0x15E;
+    com_a_persistencia_fechada(|| -> Resultado {
+        let chave = [0x6C; 32];
+        let (ek, selado) =
+            crate::persistencia::selar_a_identidade(&chave).map_err(|e| e.motivo())?;
+        for falha in [
+            Falha::RespostaAdulterada,
+            Falha::RespostaRepetida,
+            Falha::RespostaPerdida,
+            Falha::ComandoAdulterado,
+        ] {
+            let boa =
+                crate::persistencia::abrir_a_identidade(&ek, &selado).map_err(|e| e.motivo())?;
+            if boa.como_bytes() != &chave {
+                return Err("a abertura sem falha nao abriu a chave");
+            }
+            drop(boa);
+            armar(UNSEAL, falha, 1);
+            let r = crate::persistencia::abrir_a_identidade(&ek, &selado).map(|_| ());
+            desarmar();
+            let esperado = matches!(
+                (falha, &r),
+                (
+                    Falha::RespostaAdulterada | Falha::RespostaRepetida,
+                    Err(ancora::Erro::RespostaNaoAutenticada),
+                ) | (Falha::RespostaPerdida, Err(ancora::Erro::Transporte(_)))
+                    | (Falha::ComandoAdulterado, Err(ancora::Erro::Codigo(_)))
+            );
+            if !esperado {
+                crate::log_error!("teste", "{:?}: {:?}", falha, r);
+                return Err("o unseal com o barramento mentindo nao foi recusado como devia");
+            }
+        }
+        let boa = crate::persistencia::abrir_a_identidade(&ek, &selado).map_err(|e| e.motivo())?;
+        if boa.como_bytes() != &chave {
+            return Err("depois das falhas, a abertura nao abriu a chave");
+        }
+        Ok(())
+    })
+}
+
+/// Concorrência: quatro fios leem a chave em uso — a pública, a privada
+/// emprestada, a situação — e tentam adotar outra por cima, enquanto este
+/// fio faz o caminho do selo inteiro, pela conexão própria com o TPM. A
+/// chave em uso não muda em momento nenhum, nenhuma adoção passa, e o selo
+/// abre igual com os fios rodando.
+fn identidade_concorrencia_com_a_chave_em_uso() -> Resultado {
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    static PARAR: AtomicU32 = AtomicU32::new(0);
+    static PRONTOS: AtomicU32 = AtomicU32::new(0);
+    static LEITURAS: AtomicU64 = AtomicU64::new(0);
+    static ERROS: AtomicU32 = AtomicU32::new(0);
+    static EM_USO: crate::trava::Mutex<[u8; 32]> = crate::trava::Mutex::new([0; 32]);
+    extern "C" fn leitor(i: u64) -> ! {
+        let esperada = crate::arch::sem_interrupcoes(|| *EM_USO.lock());
+        while PARAR.load(Ordering::Acquire) == 0 {
+            let publica = crate::identidade::publica_do_duke();
+            let emprestada = crate::identidade::com_chave_do_duke(sigilo::publica_de);
+            if publica != Some(esperada) || emprestada != Some(esperada) {
+                ERROS.fetch_add(1, Ordering::AcqRel);
+            }
+            if crate::identidade::adotar_a_chave(
+                [i as u8 + 1; 32],
+                crate::identidade::OrigemDaChave::Nascida,
+            )
+            .is_ok()
+            {
+                ERROS.fetch_add(1, Ordering::AcqRel);
+            }
+            LEITURAS.fetch_add(1, Ordering::AcqRel);
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, Ordering::AcqRel);
+        crate::fios::terminar()
+    }
+    let em_uso = crate::identidade::publica_do_duke().ok_or("a suite nao tem chave do Duke")?;
+    crate::arch::sem_interrupcoes(|| *EM_USO.lock() = em_uso);
+    PARAR.store(0, Ordering::Release);
+    PRONTOS.store(0, Ordering::Release);
+    LEITURAS.store(0, Ordering::Release);
+    ERROS.store(0, Ordering::Release);
+    for i in 0..4 {
+        crate::fios::criar("teste-identidade", leitor, i)?;
+    }
+    let r = com_a_persistencia_fechada(|| {
+        com_a_area_do_selo_de_volta(|| {
+            for _ in 0..2 {
+                let publica = crate::selo::nascer_de_teste()?;
+                let (aberta, _, _) = crate::selo::pelo_selo_de_teste()?;
+                if aberta != publica {
+                    return Err("com os fios rodando, o selo abriu outra chave");
+                }
+            }
+            Ok(())
+        })
+    });
+    PARAR.store(1, Ordering::Release);
+    esperar_ate(|| PRONTOS.load(Ordering::Acquire) == 4, 400)
+        .map_err(|_| "os fios leitores nao terminaram")?;
+    r?;
+    if ERROS.load(Ordering::Acquire) != 0 {
+        return Err("um fio viu outra chave em uso, ou adotou uma por cima");
+    }
+    if LEITURAS.load(Ordering::Acquire) < 4 {
+        return Err("os fios leitores nao chegaram a ler");
+    }
+    if crate::identidade::publica_do_duke() != Some(em_uso) {
+        return Err("a chave em uso mudou");
+    }
+    Ok(())
+}
+
 /// O journal fixou uma EK, e o TPM da máquina tem outra: o journal foi
 /// levado para outro TPM — ou outro chip responde no lugar deste. Recusado
 /// antes de qualquer comando ao contador. E o journal que fala de duas
@@ -31649,6 +32021,30 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tpm: um registro so de auditoria nao carrega estado protegido",
         f: tpm_a_auditoria_nao_carrega_estado,
+    },
+    Caso {
+        nome: "identidade: a da imagem, e a maquina mostra a mesma; nenhuma outra por cima",
+        f: identidade_a_da_imagem_e_a_que_a_maquina_mostra,
+    },
+    Caso {
+        nome: "identidade: o selo no TPM abre a chave, que nao passa pelo barramento; a EK de outro TPM e o selado mexido recusam",
+        f: identidade_o_selo_no_tpm,
+    },
+    Caso {
+        nome: "identidade: a area do selo, as copias, o reparo e a decisao, sem nascer por cima do journal",
+        f: identidade_a_area_do_selo_e_a_decisao,
+    },
+    Caso {
+        nome: "identidade: sem ela, o journal no disco recusa a persistencia",
+        f: identidade_sem_ela_o_journal_recusa_a_persistencia,
+    },
+    Caso {
+        nome: "identidade: o unseal que mente no barramento nao vira chave",
+        f: identidade_o_unseal_que_mente_nao_vira_chave,
+    },
+    Caso {
+        nome: "identidade: concorrencia com a chave em uso e o selo trabalhando",
+        f: identidade_concorrencia_com_a_chave_em_uso,
     },
     Caso {
         nome: "compactacao: a regiao nova repoe o mesmo estado, e a velha nao confere mais",

@@ -55,8 +55,8 @@ As partições de antes não mudam de lugar; três entram depois delas:
 | partição | setores | o que guarda |
 |---|---|---|
 | ESP (FAT32) | 2048.. | só o iniciador, `\EFI\BOOT\BOOT{X64,AA64}.EFI` |
-| raiz (Btrfs) | 100352.. | a máquina: `/etc/duke` — a chave do Duke, os registros, a política, a rede, o registro de atualização |
-| estado | 428032.. | o journal (ICP-5) |
+| raiz (Btrfs) | 100352.. | a máquina: `/etc/duke` — os registros, a política, a rede, o registro de atualização |
+| estado | 428032.. | o journal (ICP-5) e, na reserva do fim, o selo da identidade do Duke (B2) |
 | armazém | 460800.. | o volume do armazém |
 | controle | 591872.., 1 MiB | as duas cópias do controle de boot |
 | slot A | 593920.., 48 MiB | uma imagem: cabeçalho, kernel, pacote |
@@ -65,7 +65,14 @@ As partições de antes não mudam de lugar; três entram depois delas:
 O código fica nos slots; o estado, fora deles. Uma versão nova troca o slot
 inteiro e não toca a raiz, o journal nem o armazém: a identidade, as
 credenciais, a política, as chaves seladas, o estado administrativo, os
-arquivos, a auditoria e a proveniência continuam onde estavam.
+arquivos, a auditoria e a proveniência continuam onde estavam. A
+identidade de uma máquina de produção nasce no primeiro boot, selada no
+TPM, e o selo mora na partição de estado — não num slot —, sem depender
+da medição do boot: a versão nova na tentativa, a confirmada e a velha de
+volta abrem a mesma (ver "A identidade do Duke" em
+[`OPERACAO.md`](OPERACAO.md)). A bancada confere as duas: a versão nova
+de uma imagem de produção se confirma com a identidade nascida na velha,
+e a que entra em pânico na tentativa volta para a velha com ela.
 
 ## A imagem de um slot
 
@@ -293,7 +300,8 @@ cargo xtask publicar ~/chaves/publicador-1 2026.11.0 2 --release
 # Uma máquina nova: o disco, com a imagem no slot A
 cargo xtask provisionar op --imagem target/atualizacao/2026.11.0-x86_64.slot
 
-# Uma máquina que já roda: escrever, instalar pelo quórum, reiniciar
+# Uma máquina que já roda: escrever, instalar pelo quórum, reiniciar. O
+# duke.publica é a pública que a máquina mostrou no console no primeiro boot.
 cargo xtask operar maquina:7070 update.stage --imagem target/atualizacao/2026.12.0-x86_64.slot \
     --chave sistema-1 --duke duke.publica
 cargo xtask operar maquina:7070 system.update '{"action":"install","manifest":"<resumo>"}' \

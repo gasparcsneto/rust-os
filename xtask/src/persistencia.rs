@@ -369,7 +369,7 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_signatario_recusa_geracao_menor,
     },
     Cenario {
-        nome: "a imagem de producao: so o material do operador, a marca dela, a chave do Duke dela, e nada da bancada",
+        nome: "a imagem de producao: so o material do operador, a marca dela, a identidade nascida no primeiro boot, e nada da bancada",
         rodar: a_imagem_de_producao,
     },
     Cenario {
@@ -962,10 +962,11 @@ fn o_disco_nvme_do_sistema(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 /// A imagem de produção, montada pelo provisionamento do material de um
 /// operador — a política de `docs/exemplos/producao`, a rede do emulador
 /// escrita, e chaves geradas aqui como `cargo xtask chave` as gera. No
-/// primeiro boot a persistência abre; o `system.info` diz produção, com o
-/// nome e o id da marca; só os agentes, os administradores e a pessoa do
-/// operador existem; o agente dele entra fixando a pública do Duke da
-/// imagem, e o da bancada é recusado; a prova de um administrador dele
+/// primeiro boot a identidade do Duke nasce, selada no TPM, e a
+/// persistência abre; o `system.info` diz produção, com o nome e o id da
+/// marca, e a pública da identidade nascida; só os agentes, os
+/// administradores e a pessoa do operador existem; o agente dele entra
+/// fixando a pública que a máquina mostrou, e o da bancada é recusado; a prova de um administrador dele
 /// registra um agente, e a do administrador da bancada não; nada da
 /// bancada está na raiz — nem a âncora TLS dela, nem a PocketIC, nem os
 /// arquivos da suíte —; a rede é a do arquivo; e a serial é `observador`:
@@ -1010,10 +1011,15 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
 
     let op = producao::ler_o_operador(&dir)?;
     let politica = producao::conferir(&op)?;
-    let duke = super::aleatorios()?;
     let mut id = [0u8; 16];
     id.copy_from_slice(&super::aleatorios()?[..16]);
-    let arquivos = producao::arquivos_da_raiz(&op, &politica, &duke, id)?;
+    let arquivos = producao::arquivos_da_raiz(&op, &politica, id)?;
+    if arquivos
+        .iter()
+        .any(|(nome, _)| nome == "etc/duke/privado/chave")
+    {
+        return Err("a raiz de producao leva uma chave do Duke".into());
+    }
     // A imagem do slot, como o `publicar` a monta: o kernel de produção
     // desta bancada — o do slot A do disco de testes —, o pacote do
     // produto, e o manifesto assinado pela chave de atualização do
@@ -1058,6 +1064,9 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         )) {
             return Err(format!("o system.info nao diz a imagem de producao\n  {r}"));
         }
+        // A identidade nasceu neste boot, e a máquina mostra a pública: a
+        // que o operador lê no console e dá aos agentes dele.
+        let publica = identidade_com_origem(&mut m, "born")?;
         let p = persistencia_de(&mut m)?;
         if p.estado != "available" {
             return Err(format!(
@@ -1066,6 +1075,11 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
             ));
         }
         let registro = m.pedir("agent.registry", "{}")?;
+        if !registro.contains(&format!(r#""duke_key":"{}""#, sigilo::hex(&publica))) {
+            return Err(format!(
+                "o agent.registry nao diz a identidade que o system.info mostrou\n  {registro}"
+            ));
+        }
         if !registro.contains("operador-1")
             || !registro.contains("sistema-1")
             || registro.contains("agente-1")
@@ -1091,9 +1105,8 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
             return Err(format!("a serial de observador leu a auditoria\n  {r}"));
         }
 
-        // O agente do operador entra, fixando a pública do Duke da imagem;
-        // o da bancada, não.
-        let publica = sigilo::publica_de(&duke);
+        // O agente do operador entra, fixando a pública que a máquina
+        // mostrou; o da bancada, não.
         let chave_do_operador = producao::chave_de_agente_de_texto(&operador)?;
         let mut agente =
             super::AgenteNaPorta::conectar_com_publica(arch, 1, &chave_do_operador, &publica)?;
@@ -1240,7 +1253,8 @@ fn a_imagem_de_producao(arch: Arquitetura, artefato: &Artefato) -> Result<String
             ));
         }
         Ok(format!(
-            "imagem `bancada-producao` ({id}): persistencia {}, agentes e pessoa do operador, a pessoa entra no Terminal pelo teclado, o agente e o administrador da bancada recusados, a raiz sem nada da bancada, a rede do arquivo",
+            "imagem `bancada-producao` ({id}): a identidade {} nascida no primeiro boot, persistencia {}, agentes e pessoa do operador, a pessoa entra no Terminal pelo teclado, o agente e o administrador da bancada recusados, a raiz sem nada da bancada, a rede do arquivo",
+            &sigilo::hex(&publica)[..8],
             p.estado
         ))
     })();
@@ -1826,7 +1840,12 @@ pub(crate) struct Rastro {
 
 /// A cauda da auditoria: os últimos 128 registros, pela serial.
 pub(crate) fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
-    let r = maquina.pedir("audit.tail", r#"{"count":128}"#)?;
+    rastros(&maquina.pedir("audit.tail", r#"{"count":128}"#)?)
+}
+
+/// Os registros de uma resposta do `audit.tail` — pela serial, ou por um
+/// agente que lê a auditoria.
+pub(crate) fn rastros(r: &str) -> Result<Vec<Rastro>, String> {
     let mut v = Vec::new();
     for pedaco in r.split(r#"{"seq":"#).skip(1) {
         let pedaco = format!(r#"{{"seq":{pedaco}"#);
@@ -3116,6 +3135,52 @@ fn as_mensagens_sobrevivem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
     ))
 }
 
+/// A identidade do Duke como a máquina a mostra no `system.info` — o que
+/// o operador lê no console no primeiro boot: de onde ela veio, a pública,
+/// e por que não há uma.
+pub(crate) struct IdentidadeVista {
+    pub(crate) origem: String,
+    pub(crate) publica: Option<[u8; 32]>,
+    pub(crate) erro: Option<String>,
+}
+
+/// O que o `system.info` de `m` diz da identidade do Duke.
+pub(crate) fn identidade_vista(m: &mut Ligada) -> Result<IdentidadeVista, String> {
+    let r = m.pedir("system.info", "{}")?;
+    let objeto = r
+        .split(r#""identity":{"#)
+        .nth(1)
+        .and_then(|resto| resto.split('}').next())
+        .ok_or_else(|| format!("o system.info nao diz a identidade do Duke\n  {r}"))?;
+    let texto = |campo: &str| {
+        objeto
+            .split(&format!(r#""{campo}":""#))
+            .nth(1)
+            .and_then(|resto| resto.split('"').next())
+            .map(String::from)
+    };
+    Ok(IdentidadeVista {
+        origem: texto("origin")
+            .ok_or_else(|| format!("a identidade do system.info nao diz a origem\n  {r}"))?,
+        publica: texto("key").and_then(|k| sigilo::de_hex(&k)),
+        erro: texto("error"),
+    })
+}
+
+/// A pública da identidade de `m`, se ela é a `origem` — `born`, `sealed`
+/// ou `image` —, ou o erro que diz o que a máquina mostrou.
+pub(crate) fn identidade_com_origem(m: &mut Ligada, origem: &str) -> Result<[u8; 32], String> {
+    let vista = identidade_vista(m)?;
+    match vista.publica {
+        Some(p) if vista.origem == origem => Ok(p),
+        _ => Err(format!(
+            "a identidade do Duke nao e {origem}: e {} ({})",
+            vista.origem,
+            vista.erro.as_deref().unwrap_or("sem motivo")
+        )),
+    }
+}
+
 /// Um campo de texto do resultado de uma resposta do agente.
 pub(crate) fn texto_do_resultado(r: &str, campo: &str) -> Option<String> {
     let resultado = r.split(r#""result":"#).nth(1)?;
@@ -3560,6 +3625,9 @@ pub(crate) mod ponto {
     pub const LIMPEZA_COMECOU: u8 = 21;
     pub const LIMPEZA_NO_MEIO: u8 = 22;
     pub const LIMPEZA_TERMINADA: u8 = 23;
+    pub const IDENTIDADE_SELADA: u8 = 27;
+    pub const PRIMEIRA_COPIA: u8 = 28;
+    pub const IDENTIDADE_GRAVADA: u8 = 29;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.
@@ -3803,7 +3871,17 @@ pub(crate) fn subir_ate_cair_em(
     artefato: &Artefato,
     espera: Duration,
 ) -> Result<u8, String> {
-    let mut ambiente = Ambiente::ligar(arch, None)?;
+    subir_ate_cair_com(arch, artefato, Ambiente::ligar(arch, None)?, espera)
+}
+
+/// [`subir_ate_cair_em`] no ambiente dado — o disco de uma imagem de
+/// produção, digamos.
+pub(crate) fn subir_ate_cair_com(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    mut ambiente: Ambiente,
+    espera: Duration,
+) -> Result<u8, String> {
     let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
     let limite = std::time::Instant::now() + espera;
     let conectado = loop {

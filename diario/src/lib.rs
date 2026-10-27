@@ -286,9 +286,20 @@ impl Percorrido {
     }
 }
 
-/// Os setores da partição que o journal não usa, no fim: a bancada põe ali
-/// o plano dela, e nenhuma região chega lá.
+/// Os setores da partição que o journal não usa, no fim: nenhuma região
+/// chega lá. O começo dela é a área do selo da identidade do Duke — duas
+/// cópias, uma por setor; ver `ancora::identidade` —, e o último setor, o
+/// plano de quedas da bancada.
 pub const RESERVA_NO_FIM: u64 = 64;
+
+/// Se `setor` começa por um registro do journal: a magia dele. Não diz se
+/// o registro é autêntico — isso só a chave diz —, só que alguém escreveu
+/// um journal ali. É a pergunta do boot antes de a identidade do Duke
+/// existir: uma região que começa por um registro é estado que depende
+/// dela.
+pub fn comeca_um_registro(setor: &[u8]) -> bool {
+    setor.get(..MAGIA.len()) == Some(&MAGIA[..])
+}
 
 /// As duas regiões de uma partição de `setores` setores: o começo e o
 /// tamanho de cada uma. Cada uma tem a metade do que sobra da reserva, ou

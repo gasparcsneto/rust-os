@@ -6,7 +6,10 @@
 //! um servidor e o `authorized_keys` dos usuários dele:
 //!
 //! - `/etc/duke/privado/chave`: a chave privada do Duke, que só o kernel lê
-//!   — ver [`crate::vfs::DIRETORIO_RESERVADO`];
+//!   — ver [`crate::vfs::DIRETORIO_RESERVADO`] —, na imagem da bancada e nas
+//!   máquinas de produção provisionadas antes do selo. Uma imagem de
+//!   produção de agora não a traz: a chave nasce no primeiro boot, selada
+//!   no TPM — ver [`crate::selo`];
 //! - `/etc/duke/agentes`: as chaves públicas dos agentes que podem abrir uma
 //!   porta, com o nome de cada um;
 //! - `/etc/duke/administradores`: as dos administradores, que podem provar
@@ -82,6 +85,41 @@ impl Origem {
     }
 }
 
+/// De onde veio a chave do Duke neste boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrigemDaChave {
+    /// Do arquivo da imagem: a da bancada, ou a de uma máquina de produção
+    /// provisionada antes do selo.
+    Imagem,
+    /// Do selo no TPM, nascida num boot anterior.
+    Selada,
+    /// Nascida neste boot, e selada.
+    Nascida,
+}
+
+impl OrigemDaChave {
+    /// O nome que vai para o relatório.
+    pub const fn como_str(self) -> &'static str {
+        match self {
+            OrigemDaChave::Imagem => "image",
+            OrigemDaChave::Selada => "sealed",
+            OrigemDaChave::Nascida => "born",
+        }
+    }
+}
+
+/// A chave do Duke neste boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SituacaoDaChave {
+    /// A imagem não traz a chave, e o selo ainda não decidiu — ou o boot
+    /// ainda não chegou lá.
+    Pendente,
+    /// Em uso, vinda daqui.
+    Em(OrigemDaChave),
+    /// Nenhuma chave neste boot, por este motivo.
+    Sem(&'static str),
+}
+
 /// Um agente que pode entrar.
 #[derive(Clone)]
 pub struct Agente {
@@ -127,6 +165,8 @@ struct Identidade {
     /// A chave privada do Duke. Nunca sai deste módulo: quem precisa dela
     /// pede uma operação em [`com_chave_do_duke`].
     chave: Option<[u8; TAM_CHAVE]>,
+    /// De onde ela veio, ou por que não há uma.
+    situacao: SituacaoDaChave,
     agentes: Vec<Agente>,
     administradores: Vec<Administrador>,
     /// Os editores de código, da imagem.
@@ -147,6 +187,7 @@ struct Identidade {
 
 static IDENTIDADE: Mutex<Identidade> = Mutex::new(Identidade {
     chave: None,
+    situacao: SituacaoDaChave::Pendente,
     agentes: Vec::new(),
     administradores: Vec::new(),
     editores: Vec::new(),
@@ -155,26 +196,42 @@ static IDENTIDADE: Mutex<Identidade> = Mutex::new(Identidade {
 });
 
 /// Lê as chaves do disco. No boot, depois de a raiz estar montada.
+///
+/// A chave do Duke daqui é só a da imagem. Sem o arquivo, ela fica
+/// pendente, e quem decide é o selo — ver [`crate::selo`] —, logo antes da
+/// persistência. Um arquivo que existe e não tem uma chave não deixa o selo
+/// decidir: a imagem diz que a chave é dela, e ela não está lá.
 pub fn carregar() {
-    let chave = match crate::vfs::ler_segredo(CAMINHO_DA_CHAVE) {
+    let (chave, situacao) = match crate::vfs::ler_segredo(CAMINHO_DA_CHAVE) {
         Ok(bytes) => {
             let texto = core::str::from_utf8(&bytes).unwrap_or("");
             let chave = sigilo::de_hex(texto);
             // O texto lido tinha a chave; ele não fica por aí.
             let mut bytes = bytes;
             sigilo::zeroize::Zeroize::zeroize(&mut bytes);
-            if chave.is_none() {
-                crate::log_error!("agent", "{} nao tem uma chave valida", CAMINHO_DA_CHAVE);
+            match chave {
+                Some(c) => (Some(c), SituacaoDaChave::Em(OrigemDaChave::Imagem)),
+                None => {
+                    crate::log_error!("agent", "{} nao tem uma chave valida", CAMINHO_DA_CHAVE);
+                    (None, SituacaoDaChave::Sem("a chave da imagem nao e valida"))
+                }
             }
-            chave
+        }
+        Err(crate::vfs::Erro::NaoEncontrado | crate::vfs::Erro::SemMontagem) => {
+            crate::log_info!(
+                "agent",
+                "a imagem nao traz a chave do Duke: ela vem do selo"
+            );
+            (None, SituacaoDaChave::Pendente)
         }
         Err(motivo) => {
-            crate::log_warn!(
+            crate::log_error!(
                 "agent",
-                "sem chave do Duke ({}): as portas de agente vao recusar o aperto",
+                "{} nao foi lido: {}",
+                CAMINHO_DA_CHAVE,
                 motivo.motivo()
             );
-            None
+            (None, SituacaoDaChave::Sem("a chave da imagem nao foi lida"))
         }
     };
 
@@ -201,20 +258,18 @@ pub fn carregar() {
     let editores = ler_editores();
     let fontes_de_hora = ler_fontes_de_hora();
 
-    if let Some(c) = &chave {
-        crate::log_info!(
-            "agent",
-            "chave do Duke {}, {} agentes, {} administradores, {} editores de codigo, {} fontes de hora",
-            impressao(&sigilo::publica_de(c)),
-            agentes.len(),
-            administradores.len(),
-            editores.len(),
-            fontes_de_hora.as_ref().map_or(0, |r| r.fontes().len())
-        );
-    }
+    crate::log_info!(
+        "agent",
+        "{} agentes, {} administradores, {} editores de codigo, {} fontes de hora",
+        agentes.len(),
+        administradores.len(),
+        editores.len(),
+        fontes_de_hora.as_ref().map_or(0, |r| r.fontes().len())
+    );
     crate::arch::sem_interrupcoes(|| {
         let mut id = IDENTIDADE.lock();
         id.chave = chave;
+        id.situacao = situacao;
         id.agentes = agentes;
         id.administradores = administradores;
         id.editores = editores;
@@ -501,6 +556,49 @@ pub fn com_chave_do_duke<R>(f: impl FnOnce(&[u8; TAM_CHAVE]) -> R) -> Option<R> 
 /// A chave pública do Duke: o que um agente precisa ter para o aperto.
 pub fn publica_do_duke() -> Option<[u8; TAM_CHAVE]> {
     crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().chave.map(|c| sigilo::publica_de(&c)))
+}
+
+/// De onde veio a chave do Duke neste boot, ou por que não há uma.
+pub fn situacao_da_chave() -> SituacaoDaChave {
+    crate::arch::sem_interrupcoes(|| IDENTIDADE.lock().situacao)
+}
+
+/// Por que não há chave do Duke, se não há: o motivo da recusa, ou o de
+/// uma chave que o boot ainda não estabeleceu.
+pub fn sem_chave_porque() -> Option<&'static str> {
+    match situacao_da_chave() {
+        SituacaoDaChave::Em(_) => None,
+        SituacaoDaChave::Pendente => Some("a identidade do Duke ainda nao foi estabelecida"),
+        SituacaoDaChave::Sem(m) => Some(m),
+    }
+}
+
+/// A chave do Duke deste boot, aberta do selo ou nascida nele. Só o selo
+/// chama, e só com a chave da imagem pendente: nenhuma chave em uso é
+/// trocada por outra.
+pub(crate) fn adotar_a_chave(
+    chave: [u8; TAM_CHAVE],
+    origem: OrigemDaChave,
+) -> Result<(), &'static str> {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        if id.situacao != SituacaoDaChave::Pendente || id.chave.is_some() {
+            return Err("a chave do Duke deste boot ja foi estabelecida");
+        }
+        id.chave = Some(chave);
+        id.situacao = SituacaoDaChave::Em(origem);
+        Ok(())
+    })
+}
+
+/// Nenhuma chave do Duke neste boot, por este motivo. Só o selo chama.
+pub(crate) fn ficar_sem_chave(motivo: &'static str) {
+    crate::arch::sem_interrupcoes(|| {
+        let mut id = IDENTIDADE.lock();
+        if id.situacao == SituacaoDaChave::Pendente {
+            id.situacao = SituacaoDaChave::Sem(motivo);
+        }
+    })
 }
 
 /// O nome do agente com esta chave, se ele estiver no registro.

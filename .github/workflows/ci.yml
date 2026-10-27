@@ -398,9 +398,11 @@ jobs:
   # instalada pelo quórum, tentada, confirmada ou desfeita; o controle
   # forjado e a versão velha reescrita, recusados abaixo do piso; as
   # recusas da instalação; a concorrência; sem TPM e com outro; o caminho
-  # do operador numa imagem de produção; e, sobre o kernel com os pontos de
-  # queda, o corte de energia em cada fronteira da instalação, da
-  # confirmação, da escrita e do desfazimento, e o pânico em toda tentativa.
+  # do operador numa imagem de produção, com a identidade nascida no
+  # primeiro boot; e, sobre o kernel com os pontos de queda, o corte de
+  # energia em cada fronteira da instalação, da confirmação, da escrita e
+  # do desfazimento, e o pânico em toda tentativa — numa imagem de produção
+  # também, que volta com a identidade dela.
   # Um job à parte, como a persistência: cada cenário é uma série de boots.
   atualizacao:
     name: Atualização (${{ matrix.arch }})
@@ -435,6 +437,49 @@ jobs:
 
       - name: Atualização A/B
         run: cargo xtask atualizacao --arch ${{ matrix.arch }}
+
+  # A bancada da identidade do Duke (B2): a imagem de produção do
+  # `provisionar`, sem chave do Duke nenhuma, pelo firmware, num disco e
+  # num TPM novos por cenário. A identidade nasce no primeiro boot, selada
+  # no TPM, e a máquina a mostra; os boots seguintes a abrem do selo; a
+  # energia cai em cada passo do nascimento; as cópias do selo estragadas,
+  # a máquina sem TPM, o disco clonado noutra máquina e a reinstalação —
+  # com o TPM limpo e sem ele — não fazem nascer outra por cima. Um job à
+  # parte, como a persistência e a atualização: cada cenário é uma série de
+  # boots pelo firmware.
+  identidade:
+    name: Identidade (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: identidade-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: identidade-${{ matrix.arch }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Identidade do Duke
+        run: cargo xtask identidade --arch ${{ matrix.arch }}
 
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
