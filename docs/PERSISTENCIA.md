@@ -1612,6 +1612,17 @@ Um disco devolvido a um journal de antes da confirmação é um journal atrás
 da âncora, recusado como qualquer outro; e, sem o journal, a autoridade
 não existe, para a versão velha nem para a nova.
 
+Na bancada de persistência, o x86 boota pelo firmware, e o kernel vem do
+slot A: o primeiro boot de um kernel vindo de um slot, numa máquina sem
+estado de atualização, grava o registro da **linha de base**, e os
+cenários que contam os registros do journal um a um contam este também.
+Ele é um registro de estado, que leva a auditoria pendente — a abertura
+da persistência, entre outras — se chega ao journal antes do coletor; e
+quem chega antes depende do tempo. Por isso o cenário da queda num
+registro só de auditoria sobe um boot comum antes do que cai: depois da
+abertura, nele, só o coletor grava. No ARM a bancada boota pelo
+`-kernel`, de fora de um slot, e não há linha de base.
+
 ## O disco hostil
 
 O arquivo de um disco emulado não perde nada: o que o emulador escreveu

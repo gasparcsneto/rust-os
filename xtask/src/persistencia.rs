@@ -3857,6 +3857,17 @@ fn agente_entra(arch: Arquitetura, privada: &[u8; 32], nome: &str) -> Result<boo
 /// cenários que contam registros contam este também.
 const CRIACAO_DO_VOLUME: u64 = 1;
 
+/// O registro da linha de base da atualização A/B — ver
+/// `docs/ATUALIZACAO.md`: o primeiro boot de um kernel vindo de um slot,
+/// numa máquina sem estado de atualização, grava um registro de estado, e a
+/// auditoria pendente vai junto com ele. Pelo firmware — o disco de testes,
+/// no x86 — o kernel vem do slot A; pelo `-kernel` — o ARM da bancada —, de
+/// fora de um slot, e a linha de base não existe. Os cenários que contam
+/// registros contam este também.
+fn linha_de_base(artefato: &Artefato) -> u64 {
+    u64::from(matches!(artefato, Artefato::Disco(_)))
+}
+
 /// O caso de uma queda dentro de uma gravação: o ponto, se a escrita sem
 /// descarga se perde, se a operação vale depois, e como se lê.
 pub(crate) type Caso = (u8, bool, bool, &'static str);
@@ -3965,12 +3976,12 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
 
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        // Valendo: abertura, a criação do volume, boot, a operação e o boot
-        // de agora.
+        // Valendo: abertura, a criação do volume, a linha de base, boot, a
+        // operação e o boot de agora.
         conferir_depois_da_queda(
             &p,
             caso,
-            CRIACAO_DO_VOLUME + if vale { 4 } else { 3 },
+            CRIACAO_DO_VOLUME + linha_de_base(artefato) + if vale { 4 } else { 3 },
             u64::from(vale),
         )?;
         if agente_entra(arch, &privada, &nome)? != vale {
@@ -4012,7 +4023,7 @@ fn as_quedas_numa_operacao(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         conferir_depois_da_queda(
             &p,
             caso,
-            CRIACAO_DO_VOLUME + if vale { 6 } else { 5 },
+            CRIACAO_DO_VOLUME + linha_de_base(artefato) + if vale { 6 } else { 5 },
             u64::from(vale) + 1,
         )?;
     }
@@ -4056,7 +4067,12 @@ fn as_quedas_numa_mensagem(arch: Arquitetura, artefato: &Artefato) -> Result<Str
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
         // A mensagem não sobe a geração.
-        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + if vale { 4 } else { 3 }, 0)?;
+        conferir_depois_da_queda(
+            &p,
+            caso,
+            CRIACAO_DO_VOLUME + linha_de_base(artefato) + if vale { 4 } else { 3 },
+            0,
+        )?;
         let lida = super::AgenteNaPorta::conectar(arch, 3)
             .and_then(|mut a| a.pedir("message.read", "{}"))?;
         m.cortar_a_energia()?;
@@ -4126,12 +4142,12 @@ fn as_quedas_numa_chave(arch: Arquitetura, artefato: &Artefato) -> Result<String
         let depois = super::AgenteNaPorta::conectar(arch, 1)
             .and_then(|mut a| Ok((a.pedir("key.read", CHAVE)?, a.pedir("key.create", CRIAR)?)));
         m.cortar_a_energia()?;
-        // Abertura, a criação do volume, o boot que caiu, a criação se
-        // valeu, e o boot de agora; a criação sobe a geração.
+        // Abertura, a criação do volume, a linha de base, o boot que caiu,
+        // a criação se valeu, e o boot de agora; a criação sobe a geração.
         conferir_depois_da_queda(
             &p,
             &format!("{caso}, na criacao"),
-            CRIACAO_DO_VOLUME + if vale { 4 } else { 3 },
+            CRIACAO_DO_VOLUME + linha_de_base(artefato) + if vale { 4 } else { 3 },
             u64::from(vale),
         )?;
         let (lida, de_novo) = depois?;
@@ -4629,11 +4645,22 @@ fn as_quedas_na_migracao(arch: Arquitetura, artefato: &Artefato) -> Result<Strin
 /// exatamente quando está no disco — o `persistence.open` do boot que
 /// caiu está na cadeia, ou não está —; a cadeia continua do que foi
 /// gravado e se verifica; e a próxima operação grava a decisão dela.
+///
+/// O boot que cai não é o primeiro da máquina, que tem gravações só dele:
+/// a criação, e — pelo firmware, de um slot — a linha de base da
+/// atualização A/B, um registro de estado que leva a auditoria pendente se
+/// ganha do coletor a corrida até o journal. Um boot antes, sem plano, até
+/// a auditoria dele estar gravada, e o que cai é um boot comum: depois da
+/// abertura, só o coletor grava.
 fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let disco = disco_de_testes()?;
     for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_AUDITORIA.into_iter().enumerate() {
         zerar_o_estado(arch)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let gravada = esperar_a_auditoria_gravada(&mut m);
+        m.cortar_a_energia()?;
+        gravada.map_err(|e| format!("{caso}: o boot antes da queda: {e}"))?;
         plano_de_queda(&disco, ponto, tipo::AUDITORIA, 1)?;
         // Ninguém pede nada: o `persistence.open` está pendente desde o
         // boot, e o coletor o grava sozinho.
@@ -4648,14 +4675,22 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
 
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        // Abertura, a criação do volume, o boot que caiu e o de agora; a
+        // Abertura, a criação do volume, a linha de base, os três boots; a
         // auditoria não sobe a geração.
-        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 3, 0)?;
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + linha_de_base(artefato) + 4, 0)?;
         let cauda = cauda_da_auditoria(&mut m)?;
         let comeco = comeco_do_boot(&cauda)?;
+        // O boot que caiu começa no `policy.load` dele, que o registro do
+        // boot levou; o de antes ficou para trás.
+        let caiu_em = cauda
+            .iter()
+            .filter(|r| r.metodo == "policy.load" && r.titular == "kernel" && r.seq < comeco)
+            .map(|r| r.seq)
+            .max()
+            .ok_or_else(|| format!("{caso}: a cauda nao tem o policy.load do boot que caiu"))?;
         let abertos = cauda
             .iter()
-            .filter(|r| r.metodo == "persistence.open" && r.seq < comeco)
+            .filter(|r| r.metodo == "persistence.open" && r.seq > caiu_em && r.seq < comeco)
             .count();
         if (abertos == 1) != vale || abertos > 1 {
             m.cortar_a_energia()?;
@@ -5583,7 +5618,8 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         sem_plano(&disco)?;
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
-        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 2, 0)?;
+        // A linha de base vem no boot de agora, depois da abertura.
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + linha_de_base(artefato) + 2, 0)?;
         let r = administrar(
             &mut m,
             &chaves.administrador,
@@ -5603,7 +5639,7 @@ fn as_quedas_na_criacao(arch: Arquitetura, artefato: &Artefato) -> Result<String
         let mut m = Ligada::subir(arch, artefato, None)?;
         let p = persistencia_de(&mut m)?;
         m.cortar_a_energia()?;
-        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + 4, 1)?;
+        conferir_depois_da_queda(&p, caso, CRIACAO_DO_VOLUME + linha_de_base(artefato) + 4, 1)?;
     }
     Ok(format!(
         "{} quedas na criacao: cada uma retomada ou completada no boot seguinte",
