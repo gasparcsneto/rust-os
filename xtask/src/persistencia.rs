@@ -74,10 +74,13 @@ impl Ligada {
         let fluxo = match canal_de_pe(&socket, filho.id(), espera) {
             Ok(f) => f,
             Err(e) => {
-                let estado = estado_do_emulador(arch);
+                let estado = match filho.try_wait() {
+                    Ok(Some(saida)) => format!("o emulador ja tinha saido ({saida})"),
+                    _ => format!("o emulador, pelo QMP: {}", estado_do_emulador(arch)),
+                };
                 let _ = filho.kill();
                 let _ = filho.wait();
-                return Err(format!("{e}\n  o emulador, pelo QMP: {estado}"));
+                return Err(format!("{e}\n  {estado}"));
             }
         };
         fluxo
@@ -190,9 +193,9 @@ impl Ligada {
     }
 }
 
-/// O que o emulador diz de si pelo QMP, para o boot que não atendeu: se
-/// roda, onde está cada processador — e se parado num `hlt` —, e o que o
-/// disco da máquina já leu e escreveu, com há quanto tempo está ocioso.
+/// O que o emulador vivo diz de si pelo QMP, para o boot que não atendeu:
+/// se roda, onde está cada processador — e se parado num `hlt` —, e o que
+/// o disco da máquina já leu e escreveu, com há quanto tempo está ocioso.
 ///
 /// Na CI 359, um primeiro boot parou no iniciador, lendo o kernel do slot,
 /// e a serial só dizia até onde o hóspede tinha escrito: não dizia se o
@@ -233,7 +236,8 @@ fn estado_do_emulador(arch: Arquitetura) -> String {
         }
         Ok(partes.join("; "))
     };
-    perguntar().unwrap_or_else(|e| format!("sem resposta ({e}): o emulador parou por dentro"))
+    perguntar()
+        .unwrap_or_else(|e| format!("sem resposta ({e}): o emulador vivo e parado por dentro"))
 }
 
 /// Liga o QEMU, sem esperar nada dele. Devolve o processo e o socket da
