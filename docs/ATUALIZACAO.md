@@ -386,6 +386,15 @@ passava por ela — um boot recusado reiniciava sem o porquê no journal, a
 não ser que o coletor da auditoria chegasse antes. A gravação da auditoria
 agora pede só o journal de pé.
 
+No ARM, quatro delas de novo, contra a bancada pelo AAVMF: a assinatura e
+a chave que o kernel confere (M02, M17), o resumo do kernel que o
+iniciador confere (M15) e o porquê do boot recusado (M18). O controle
+passou nos três cenários e no caso do boot recusado da suíte; a M02, a M15
+e a M17 foram reprovadas pelos mesmos cenários do x86. A M18 passou pela
+versão cancelada no ARM — o coletor chegou ao journal antes do reinício e
+levou o porquê, a corrida que o parágrafo acima descreve —, e o caso da
+suíte, que pausa o coletor, a reprovou: é ele o detector dela.
+
 ### O tamanho
 
 O kernel de produção (release) cresceu 84 904 bytes no x86 (+2,11%) e
