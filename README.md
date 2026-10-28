@@ -8229,6 +8229,58 @@ com o botão de energia apertado logo depois do Enter; e a imagem de
 produção, com a pessoa do operador. A bancada da atualização A/B troca a
 senha antes da versão nova, e confere que só a nova entra depois dela.
 
+### As mutações da troca da própria senha
+
+Trinta e quatro mutações contra o que a troca promete — uma de cada vez,
+no repositório, contra os cinco casos `senha:` e o `smp: senha:` da
+suíte, e a bancada `cargo xtask senha` para a que tira o journal; um
+subconjunto também no ARM. O controle, sem mutação, passa em tudo.
+**Na primeira rodada, trinta e duas reprovadas e duas sobreviventes** —
+a senha nova e o verificador novo no detalhe da auditoria —, e as duas
+eram vazamentos de verdade que a suíte não via. Com a conferência
+reforçada (`6cd32b1`), **as trinta e quatro reprovam**.
+
+| Mutação | Reprovada por |
+|---|---|
+| sem o gate: nenhuma decisão, nem antes das senhas nem na ordem | `senha: so a propria…`, `…a gravacao, o journal…` e `…o que vem no meio…` |
+| a decisão só antes das senhas, e não de novo na ordem das gravações | `senha: so a propria…` — a política que muda no meio — e `…o que vem no meio…` |
+| a política ignorada: a permissão vale para qualquer papel | `senha: so a propria…` — o sistema e a política sem a permissão |
+| o teto de um administrador se exerce | o mesmo caso |
+| a credencial suspensa troca | o mesmo, e a suspensão no meio |
+| o journal recusado não recusa a troca | `senha: a gravacao, o journal e a maquina que vai` |
+| a senha atual errada é aceita | três casos — a atual errada, a sessão de outra pessoa, e a troca concluída que não se repete com a prova velha |
+| a sessão como prova bastante: a atual nem se confere | os mesmos três |
+| a prova contra a credencial de qualquer pessoa, e não a da dona da sessão | `senha: so a propria…` — a sessão da dina com a senha da cai |
+| sem a janela de tentativas na troca | `senha: a prova, a nova e a desistencia` — a janela é a do login |
+| a troca alcança a credencial de outra pessoa | a troca de verdade, o que vem no meio e a concorrência; depois do reforço, também `senha: so a propria…`, que agora confere que muda exatamente a credencial da dona, e nenhuma outra do registro |
+| a anterior não se invalida: a nova entra ao lado, e as duas abrem sessão | a antiga que ainda entra depois da troca, e a concorrência |
+| a senha antiga continua: a troca responde sem mudar a credencial | os mesmos dois |
+| duas trocas ao mesmo tempo, sem a comparação com a credencial que conferiu | o `credential.rotate` no meio, e as duas trocas em quatro núcleos |
+| a pessoa revogada no meio troca | a revogação no meio, e a pessoa revogada |
+| o sal fixo | a segunda troca, que não pode repetir sal nenhum |
+| o custo mínimo nas credenciais novas | a credencial nova com o custo das novas |
+| a nova sem a confirmação; a nova curta; a nova igual à atual | `senha: a prova, a nova e a desistencia` (três mutações) |
+| só em memória: o journal não leva a troca | a troca de verdade e a gravação, e a bancada — depois do corte de energia, a nova não entrava |
+| ativa sem persistência: a gravação que falha deixa a nova valendo | `senha: a gravacao…` |
+| confirma antes do journal: a gravação que falha responde sucesso | o mesmo caso |
+| sem a persistência de pé, a troca começa; com a máquina desligando, a troca segue | o mesmo caso (duas mutações) |
+| o sucesso sem auditoria; as recusas sem auditoria | três e quatro casos |
+| a senha nova em claro na auditoria | **sobreviveu** na primeira rodada: o detalhe da auditoria tem teto de 96 bytes, a mutação punha a senha no fim, e o teto a cortava no último caractere — o registro levava 22 dos 23, e a conferência procurava a senha inteira. A conferência agora procura qualquer pedaço de doze bytes de cada senha, em todo campo da auditoria e em todo relatório: três casos a reprovam |
+| o verificador novo na auditoria | **sobreviveu** na primeira rodada: os campos da auditoria não eram conferidos pela forma escrita de uma credencial. Agora são — ela e os pedaços do sal e do verificador —, e três casos a reprovam |
+| a senha atual em claro no log | três casos, pelo `log.tail` |
+| a troca ecoa as senhas | a troca de verdade — a árvore e a tela |
+| um agente começa a troca pela árvore | `senha: so a propria…` |
+| um agente confirma a linha da troca; a árvore escreve nela | a troca de verdade (duas mutações) |
+
+No ARM, o controle e sete mutações — sem o gate, a senha atual errada,
+a troca que alcança outra pessoa, as duas trocas ao mesmo tempo, só em
+memória (também pela bancada) e as duas da auditoria, já com o reforço —
+dão o mesmo que no x86.
+
+O kernel de produção cresceu 19 712 bytes nos segmentos carregáveis no
+x86 (+0,47%) e 21 240 no ARM (+0,60%), contra o B3 (`a80c5b1`); o
+iniciador e os programas não mudaram.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
