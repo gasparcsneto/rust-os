@@ -14339,11 +14339,12 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
 // senha: a pessoa troca a própria senha
 // ---------------------------------------------------------------------------
 
-/// A senha nova dos casos da troca: do tamanho de uma senha, e só com o que
-/// se digita num console.
-const SENHA_NOVA: &str = "uma senha nova de teste";
+/// A senha nova dos casos da troca: do tamanho de uma senha, só com o que
+/// se digita num console, e sem pedaço em comum com mensagem nenhuma do
+/// sistema — ver [`PEDACO_SECRETO`].
+const SENHA_NOVA: &str = "jabuticaba pitanga quindim";
 /// Outra, para quando duas trocas disputam a mesma credencial.
-const OUTRA_SENHA_NOVA: &str = "outra senha nova de teste";
+const OUTRA_SENHA_NOVA: &str = "graviola cupuacu bacuri";
 
 /// A senha da suíte, como texto.
 fn senha_de_teste() -> &'static str {
@@ -14393,25 +14394,72 @@ fn uma_troca_gravada(
     }
 }
 
-/// Nenhum texto da auditoria, do log, do histórico do teclado e do
-/// `system.info` contém nenhuma das `senhas`.
-fn nenhuma_senha_em_lugar_nenhum(senhas: &[&str]) -> Resultado {
+/// O tamanho de um pedaço de segredo: doze bytes seguidos de uma senha,
+/// ou da forma escrita do sal ou do verificador de uma credencial. Um
+/// texto que leva um pedaço leva o segredo — inteiro, ou cortado no teto
+/// de um campo, como o detalhe da auditoria
+/// ([`politica::auditoria::MAIOR_DETALHE`]): a conferência pela senha
+/// inteira não via a nova cortada no último caractere. As senhas dos
+/// casos não têm pedaço em comum com mensagem nenhuma do sistema; o sal
+/// e o verificador, sorteados, também não.
+const PEDACO_SECRETO: usize = 12;
+
+/// Os pedaços — ver [`PEDACO_SECRETO`] — das `senhas`, e do sal e do
+/// verificador das `credenciais`.
+fn pedacos_secretos(
+    senhas: &[&str],
+    credenciais: &[sigilo::credencial::Credencial],
+) -> alloc::collections::BTreeSet<[u8; PEDACO_SECRETO]> {
+    let escritas: alloc::vec::Vec<alloc::string::String> =
+        credenciais.iter().map(|c| c.escrever()).collect();
+    let mut textos: alloc::vec::Vec<&[u8]> = senhas.iter().map(|s| s.as_bytes()).collect();
+    // `argon2id:m=..,t=..,p=..:<sal>:<verificador>`: os dois últimos.
+    for e in &escritas {
+        textos.extend(e.rsplitn(3, ':').take(2).map(str::as_bytes));
+    }
+    textos
+        .iter()
+        .flat_map(|t| t.windows(PEDACO_SECRETO))
+        .filter_map(|p| p.try_into().ok())
+        .collect()
+}
+
+/// `texto` leva um dos `pedacos`?
+fn leva_pedaco(texto: &[u8], pedacos: &alloc::collections::BTreeSet<[u8; PEDACO_SECRETO]>) -> bool {
+    texto
+        .windows(PEDACO_SECRETO)
+        .any(|j| <[u8; PEDACO_SECRETO]>::try_from(j).is_ok_and(|j| pedacos.contains(&j)))
+}
+
+/// `texto` leva um dos `pedacos`, ou a forma escrita de uma credencial?
+fn leva_segredo(texto: &str, pedacos: &alloc::collections::BTreeSet<[u8; PEDACO_SECRETO]>) -> bool {
+    texto.contains("argon2id:m=") || leva_pedaco(texto.as_bytes(), pedacos)
+}
+
+/// Nenhum texto da auditoria — campo nenhum de registro nenhum —, do log,
+/// do `system.info`, do registro de pessoas e do histórico do teclado leva
+/// um pedaço das `senhas`, do sal ou do verificador das `credenciais`, ou
+/// a forma escrita de credencial nenhuma.
+fn nenhum_segredo_em_lugar_nenhum(
+    senhas: &[&str],
+    credenciais: &[sigilo::credencial::Credencial],
+) -> Resultado {
+    let pedacos = pedacos_secretos(senhas, credenciais);
+    let leva = |t: &str| leva_segredo(t, &pedacos);
     let na_auditoria = crate::autorizacao::com_auditoria(|c| {
         c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
             .any(|r| {
                 let e = &r.evento;
-                senhas.iter().any(|s| {
-                    e.agente.contains(s)
-                        || e.recurso.contains(s)
-                        || e.detalhe.contains(s)
-                        || e.metodo.contains(s)
-                        || e.papel.contains(s)
-                })
+                leva(&e.agente)
+                    || leva(&e.recurso)
+                    || leva(&e.detalhe)
+                    || leva(&e.metodo)
+                    || leva(&e.papel)
             })
     })
     .unwrap_or(false);
     if na_auditoria {
-        return Err("uma senha foi para a auditoria");
+        return Err("um segredo, ou um pedaco dele, foi para a auditoria");
     }
     for (comando, params) in [
         ("log.tail", r#"{"count":64}"#),
@@ -14421,9 +14469,9 @@ fn nenhuma_senha_em_lugar_nenhum(senhas: &[&str]) -> Resultado {
         // A forma escrita de uma credencial começa assim: nenhum relatório
         // a mostra — nem a de agora, nem a de antes.
         let r = chamar(comando, params)?;
-        if senhas.iter().any(|s| r.contains(s)) || r.contains("argon2id:m=") {
+        if leva(&r) {
             crate::log_error!("teste", "{}: {}", comando, r);
-            return Err("uma senha, ou um verificador, saiu num relatorio");
+            return Err("um segredo, ou um pedaco dele, saiu num relatorio");
         }
     }
     let mut historico = alloc::string::String::new();
@@ -14431,8 +14479,8 @@ fn nenhuma_senha_em_lugar_nenhum(senhas: &[&str]) -> Resultado {
         historico.push(c);
         let _ = crate::teclado::ler();
     }
-    if senhas.iter().any(|s| historico.contains(s)) {
-        return Err("uma senha entrou no historico do teclado");
+    if leva(&historico) {
+        return Err("um segredo, ou um pedaco dele, entrou no historico do teclado");
     }
     Ok(())
 }
@@ -14553,15 +14601,17 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
             let arvore = chamar("ui.tree", "{}")?;
             let (console, _) = console_da_arvore(&arvore)?;
             let texto = texto_do_console(&console)?;
-            if texto.contains(atual)
-                || texto.contains(SENHA_NOVA)
+            if leva_segredo(&texto, &pedacos_secretos(&[atual, SENHA_NOVA], &[]))
                 || !texto.contains("senha trocada")
             {
                 crate::log_error!("teste", "{}", texto);
                 return Err("uma senha apareceu na tela, ou a resposta nao");
             }
         }
-        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA])?;
+        nenhum_segredo_em_lugar_nenhum(
+            &[atual, SENHA_NOVA],
+            &[antes.credencial.clone(), depois.credencial.clone()],
+        )?;
 
         // O journal: a operação, com o verificador novo e a decisão no mesmo
         // registro, e senha nenhuma dentro.
@@ -14600,9 +14650,10 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
         if !decisao {
             return Err("a decisao da troca nao foi no registro dela");
         }
-        let tem = |agulha: &[u8]| r.conteudo.windows(agulha.len()).any(|w| w == agulha);
-        if tem(atual.as_bytes()) || tem(SENHA_NOVA.as_bytes()) {
-            return Err("uma senha foi para o journal");
+        // O registro leva o verificador — dentro do journal cifrado —, e
+        // senha nenhuma, nem um pedaço dela.
+        if leva_pedaco(&r.conteudo, &pedacos_secretos(&[atual, SENHA_NOVA], &[])) {
+            return Err("uma senha, ou um pedaco dela, foi para o journal");
         }
 
         // O boot: a imagem, e o journal por cima — a senha nova, e não a
@@ -14767,7 +14818,10 @@ fn senha_a_prova_a_nova_e_a_desistencia() -> Resultado {
         if crate::interpretador::modo() == Modo::SenhaAtual {
             return Err("o console fisico entrou na troca de outro console");
         }
-        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA, OUTRA_SENHA_NOVA])
+        nenhum_segredo_em_lugar_nenhum(
+            &[atual, SENHA_NOVA, OUTRA_SENHA_NOVA],
+            core::slice::from_ref(&original),
+        )
     })();
     crate::interpretador::fechar_console(CONSOLE, "fim do caso");
     crate::pessoas::esquecer_registradas();
@@ -14795,8 +14849,9 @@ fn politica_sem_a_troca() -> Result<politica::Politica, &'static str> {
 ///   máxima não é curinga —, e o teto de um administrador não se exerce:
 ///   nem pelo console, nem chamando a troca direto;
 /// - a credencial suspensa não troca;
-/// - a troca de uma pessoa não toca a de outra; e a sessão de outra
-///   pessoa não serve: a prova é contra a credencial da dona da sessão;
+/// - a troca muda exatamente a credencial da dona da sessão, e nenhuma
+///   outra do registro; e a sessão de outra pessoa não serve: a prova é
+///   contra a credencial da dona da sessão;
 /// - uma sessão que acabou, ou que nunca existiu, e a pessoa revogada não
 ///   trocam nada.
 fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
@@ -14807,7 +14862,7 @@ fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
     use politica::auditoria::Titular;
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
-    const OUTRA_SENHA: &[u8] = b"a senha de outra pessoa";
+    const OUTRA_SENHA: &[u8] = b"caju umbu siriguela";
     let cai = crate::pessoas::registrar_de_teste("troca-cai", "operador", SENHA_DE_TESTE);
     let dina = crate::pessoas::registrar_de_teste("troca-dina", "observador", OUTRA_SENHA);
     let alta = crate::pessoas::registrar_de_teste("troca-alta", "sistema", SENHA_DE_TESTE);
@@ -14923,11 +14978,25 @@ fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
         // A própria, e não a de outra pessoa: a troca da cai não toca a da
         // dina, e a sessão da dina não troca nada com a senha da cai.
         let da_outra = credencial_da(dina)?;
+        let antes_da_troca = crate::pessoas::todas();
         let seq = seq_da_auditoria();
         digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
         let e = uma_troca_gravada(seq, Codigo::Allow, "trocada")?;
-        if e.recurso != cai.texto() || credencial_da(dina)? != da_outra {
-            return Err("a troca de uma pessoa alcancou a de outra");
+        // Exatamente a credencial da dona da sessão mudou: a dela, e
+        // nenhuma outra do registro.
+        let depois_da_troca = crate::pessoas::todas();
+        let mudou = |p: &sigilo::pessoas::Pessoa| {
+            antes_da_troca
+                .iter()
+                .find(|q| q.id == p.id)
+                .is_none_or(|q| q.credencial != p.credencial)
+        };
+        if e.recurso != cai.texto()
+            || depois_da_troca.len() != antes_da_troca.len()
+            || depois_da_troca.iter().any(|p| (p.id == cai) != mudou(p))
+            || credencial_da(dina)? != da_outra
+        {
+            return Err("a troca nao mudou exatamente a credencial da dona da sessao");
         }
         let s_dina =
             crate::pessoas::sessao_de_teste(Console::Terminal(3), "troca-dina", "observador");
@@ -14981,7 +15050,15 @@ fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
         {
             return Err("a pessoa revogada trocou a senha");
         }
-        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA, OUTRA_SENHA_NOVA])
+        nenhum_segredo_em_lugar_nenhum(
+            &[
+                atual,
+                SENHA_NOVA,
+                OUTRA_SENHA_NOVA,
+                core::str::from_utf8(OUTRA_SENHA).unwrap_or(""),
+            ],
+            &[original, depois, da_outra],
+        )
     })();
     crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
     crate::contencao::esquecer_de_teste();
