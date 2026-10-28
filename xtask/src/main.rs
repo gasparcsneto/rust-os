@@ -15,6 +15,7 @@
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
 mod atualizar;
+mod botao;
 mod canal_tcp;
 mod codigo;
 mod disco_hostil;
@@ -281,6 +282,7 @@ fn main() -> ExitCode {
         "persistencia" => persistencia::persistencia(arch, release),
         "atualizacao" => atualizar::atualizacao(arch, release),
         "identidade" => identidade::identidade(arch, release),
+        "botao" => botao::botao(arch, release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -457,6 +459,12 @@ COMANDOS:
                               nascimento — também com o cache do disco
                               perdido no corte —, cópias do selo estragadas,
                               sem TPM, o disco clonado, e a reinstalação
+    botao                     o botão de energia pelo emulador (o system_powerdown
+                              do QMP): o aperto desliga pelo gate, como o
+                              sistema; no meio das gravações, dois apertos, com
+                              o reinício a caminho, o corte no meio, o aperto
+                              antes do boot, sem persistência; e na imagem de
+                              produção, com a política que deixa e a que nega
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -3199,7 +3207,7 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ),
     (
         "nativo::responder_pelo_kernel(",
-        &["kernel/src/seguranca.rs"],
+        &["kernel/src/seguranca.rs", "kernel/src/botao.rs"],
     ),
     (
         "nativo::responder_pelo_kernel_esperando(",
@@ -3260,6 +3268,27 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "persistencia::parar_as_gravacoes(",
         &["kernel/src/energia.rs"],
     ),
+    // O botão de energia (ver `kernel/src/botao.rs`): só o `arch` diz um
+    // aperto — depois de ler e limpar o hardware — e o botão desligado
+    // numa tempestade; só o módulo do botão liga o hardware, no boot; e só
+    // o fio dele (e a suíte) faz uma rodada, que pede ao gate como o
+    // sistema — à energia, nunca: `energia::preparar(`, acima, não deixa.
+    (
+        "botao::apertado(",
+        &[
+            "kernel/src/arch/x86_64/botao.rs",
+            "kernel/src/arch/aarch64/botao.rs",
+        ],
+    ),
+    (
+        "botao::desligado_pelo_hardware(",
+        &[
+            "kernel/src/arch/x86_64/botao.rs",
+            "kernel/src/arch/aarch64/botao.rs",
+        ],
+    ),
+    ("arch::ligar_o_botao(", &["kernel/src/botao.rs"]),
+    ("botao::passo(", &[]),
     // E a falha numa tentativa da atualização A/B — o pânico, a falha
     // fatal —, que reinicia sem a ordem das gravações: as travas podem
     // estar presas por quem caiu, e o iniciador já contou a tentativa. Ver
@@ -4075,7 +4104,13 @@ fn conferir_codigo_conferido(raiz: &Path) -> Result<Vec<String>, String> {
 /// fora de ordem no `kernel/src/main.rs`.
 fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
     const ABRIR: &str = "persistencia::abrir()";
-    const DEPOIS: [&str; 2] = ["agent::atender(", "testes::executar_todos()"];
+    // O fio do botão de energia também é atendido: ele pede ao gate como o
+    // sistema, e a política que vale é a que o journal repôs.
+    const DEPOIS: [&str; 3] = [
+        "agent::atender(",
+        "testes::executar_todos()",
+        "botao::iniciar()",
+    ];
     let caminho = raiz.join("kernel/src/main.rs");
     let texto = std::fs::read_to_string(&caminho)
         .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;

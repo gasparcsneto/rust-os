@@ -97,6 +97,11 @@ pub use atual::{
 #[cfg_attr(feature = "modo-teste", allow(unused_imports))]
 pub use atual::{desligar_a_maquina, meios_da_energia, reiniciar_a_maquina};
 
+/// O botão de energia — ver [`crate::botao`]: liga o evento do hardware (o
+/// botão fixo da ACPI no x86, a tecla do device tree no ARM) e diz como a
+/// máquina avisa o aperto, ou por que ela não avisa.
+pub use atual::botao::ligar as ligar_o_botao;
+
 /// Só para a suíte: o par de conversões de permissão de cada backend.
 #[cfg(feature = "modo-teste")]
 pub use atual::permissoes_ida_e_volta;

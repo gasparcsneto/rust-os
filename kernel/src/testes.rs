@@ -34037,6 +34037,46 @@ static CASOS: &[Caso] = &[
         f: energia_a_maquina_diz_como_reinicia_e_desliga,
     },
     Caso {
+        nome: "botao: a maquina liga o aperto pelo hardware que ela tem",
+        f: botao_a_maquina_liga_o_aperto,
+    },
+    Caso {
+        nome: "botao: a FADT diz o botao fixo, ou por que nao",
+        f: botao_a_fadt_diz_o_botao_fixo,
+    },
+    Caso {
+        nome: "botao: o device tree diz a tecla de energia, ou por que nao",
+        f: botao_o_device_tree_diz_a_tecla,
+    },
+    Caso {
+        nome: "botao: o aperto pede ao gate como o sistema, e a maquina desliga",
+        f: botao_o_aperto_pede_ao_gate_como_o_sistema,
+    },
+    Caso {
+        nome: "botao: apertos repetidos sao um desligamento so",
+        f: botao_apertos_repetidos_sao_um_desligamento,
+    },
+    Caso {
+        nome: "botao: a politica decide, e o botao nao e autoridade",
+        f: botao_a_politica_decide_e_o_botao_nao_e_autoridade,
+    },
+    Caso {
+        nome: "botao: a energia recusa, e a maquina segue",
+        f: botao_a_energia_recusa_e_a_maquina_segue,
+    },
+    Caso {
+        nome: "botao: com o reinicio a caminho, o aperto nao pede",
+        f: botao_com_o_reinicio_a_caminho_nao_pede,
+    },
+    Caso {
+        nome: "botao: apertos em varios nucleos e os comandos juntos, um desligamento so",
+        f: botao_concorrencia_um_desligamento,
+    },
+    Caso {
+        nome: "botao: a tempestade na linha desliga o botao, e a maquina segue",
+        f: botao_a_tempestade_desliga_o_botao,
+    },
+    Caso {
         nome: "heap: o tamanho segue a memoria",
         f: heap_o_tamanho_segue_a_memoria,
     },
@@ -49929,6 +49969,965 @@ fn energia_a_maquina_diz_como_reinicia_e_desliga() -> Resultado {
     if reinicio != "psci-hvc" || desligamento != "psci-hvc" {
         crate::log_error!("teste", "{} {}", reinicio, desligamento);
         return Err("o device tree do emulador nao descreve a PSCI por hvc");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// botao: o botão de energia — um evento do hardware, e não uma autoridade
+// ---------------------------------------------------------------------------
+
+/// `apertos` apertos, como o tratador os diria depois de ler e limpar o
+/// hardware, e uma rodada.
+fn botao_apertar(apertos: u64) -> crate::botao::Passo {
+    for _ in 0..apertos {
+        crate::botao::apertar_de_teste();
+    }
+    crate::botao::passo()
+}
+
+/// A rodada que pediu: os apertos dela, o registro do aperto e o envelope
+/// da resposta. `Err` se ela não pediu.
+fn botao_pedido(p: crate::botao::Passo) -> Result<(u64, u64, alloc::string::String), &'static str> {
+    match p {
+        crate::botao::Passo::Pedido {
+            apertos,
+            evento,
+            envelope,
+        } => Ok((apertos, evento, envelope)),
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            Err("a rodada do botao nao pediu o desligamento")
+        }
+    }
+}
+
+/// Os registros da auditoria depois de `depois` que `f` aceita, com o
+/// número.
+fn registros_depois(
+    depois: u64,
+    f: impl Fn(&politica::auditoria::Evento) -> bool,
+) -> alloc::vec::Vec<(u64, politica::auditoria::Evento)> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq > depois && f(&r.evento))
+            .map(|r| (r.seq, r.evento.clone()))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Como o emulador avisa o aperto: o botão fixo da ACPI no x86, a tecla do
+/// device tree no ARM.
+#[cfg(target_arch = "x86_64")]
+const VIA_DO_BOTAO: &str = "acpi";
+#[cfg(target_arch = "aarch64")]
+const VIA_DO_BOTAO: &str = "gpio-keys";
+
+/// A máquina do emulador liga o botão pelo que ela tem — no x86, o botão
+/// fixo da ACPI, no modo ACPI, com só o botão habilitado e o SCI na linha 9
+/// do 8259, aberta; no ARM, a tecla do device tree no PL061, o pino 3 de
+/// entrada, sensível à borda de subida e habilitado, pela SPI 7 —, e o
+/// `system.info` diz como, sem motivo e sem desligamento.
+fn botao_a_maquina_liga_o_aperto() -> Resultado {
+    let r = fs_pedir(sistema_aqui(), "system.info", "{}");
+    let botao = Json(r.as_bytes())
+        .member("result")
+        .and_then(|x| x.member("power_button"))
+        .ok_or("o system.info nao diz o botao de energia")?;
+    let via = botao.member("via").and_then(|v| v.as_str()).unwrap_or("");
+    let sem_motivo = botao.member("reason").is_some_and(|m| m.is_null());
+    let ligado = botao.member("disabled").is_some_and(|m| m.is_null());
+    if via != VIA_DO_BOTAO || !sem_motivo || !ligado {
+        crate::log_error!("teste", "{}", r);
+        return Err("o system.info nao diz o botao que o emulador tem");
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::arch::atual::botao;
+        if botao::linha_de_teste() != Some(9) {
+            return Err("o SCI do emulador nao ficou na linha 9");
+        }
+        let (habilitacao, modo_acpi, aberta) =
+            botao::registradores_de_teste().ok_or("o botao fixo nao foi guardado")?;
+        if habilitacao != 1 << 8 || !modo_acpi || !aberta {
+            crate::log_error!(
+                "teste",
+                "habilitacao {:#x} modo ACPI {} linha aberta {}",
+                habilitacao,
+                modo_acpi,
+                aberta
+            );
+            return Err("o hardware nao ficou no modo ACPI, so com o botao, e com a linha aberta");
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::atual::botao;
+        if botao::linha_de_teste() != Some(32 + 7) {
+            return Err("a tecla do emulador nao ficou na SPI 7");
+        }
+        let (bit, habilitacao, evento, sensibilidade, direcao) =
+            botao::registradores_de_teste().ok_or("o PL061 da tecla nao foi guardado")?;
+        if bit != 1 << 3
+            || habilitacao & bit == 0
+            || evento & bit == 0
+            || sensibilidade & bit != 0
+            || direcao & bit != 0
+        {
+            crate::log_error!(
+                "teste",
+                "bit {:#x} ie {:#x} iev {:#x} is {:#x} dir {:#x}",
+                bit,
+                habilitacao,
+                evento,
+                sensibilidade,
+                direcao
+            );
+            return Err("o pino da tecla nao ficou de entrada, na borda de subida e habilitado");
+        }
+    }
+    Ok(())
+}
+
+/// O leitor do botão fixo da FADT: a da bancada — o bloco de eventos e o
+/// controle por portas, o SCI na 9, o `SMI_CMD`, o bloco de GPE —; o bloco
+/// estendido vencendo o de 32 bits, e o PM1b; e as recusas, cada uma com o
+/// motivo: o botão de método de controle, o hardware reduzido, sem bloco
+/// de eventos, o bloco de tamanho impossível, a FADT curta. O bloco de GPE
+/// de tamanho ímpar não conta. E a FADT do emulador tem o botão fixo.
+fn botao_a_fadt_diz_o_botao_fixo() -> Resultado {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        crate::log_info!("teste", "a FADT so existe no x86");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::arch::atual::acpi::{ESPACO_PORTA, Registrador, botao_da_fadt};
+        let base = || {
+            let mut f = alloc::vec![0u8; 276];
+            f[0..4].copy_from_slice(b"FACP");
+            f[4..8].copy_from_slice(&276u32.to_le_bytes());
+            f[46..48].copy_from_slice(&9u16.to_le_bytes());
+            f[48..52].copy_from_slice(&0xB2u32.to_le_bytes());
+            f[52] = 0xF1;
+            f[56..60].copy_from_slice(&0x600u32.to_le_bytes());
+            f[64..68].copy_from_slice(&0x604u32.to_le_bytes());
+            f[80..84].copy_from_slice(&0xAFE0u32.to_le_bytes());
+            f[88] = 4;
+            f[92] = 4;
+            f
+        };
+        let porta = |endereco| Registrador {
+            espaco: ESPACO_PORTA,
+            endereco,
+        };
+        let b = botao_da_fadt(&base()).map_err(|_| "a FADT da bancada foi recusada")?;
+        if b.eventos_a != porta(0x600)
+            || b.eventos_b.is_some()
+            || b.meio_do_bloco != 2
+            || b.sci != 9
+            || b.controle != Some(porta(0x604))
+            || b.smi_cmd != 0xB2
+            || b.acpi_enable != 0xF1
+            || b.gpe0 != Some((porta(0xAFE0), 4))
+            || b.gpe1.is_some()
+        {
+            crate::log_error!("teste", "{:?}", b);
+            return Err("o leitor leu errado a FADT da bancada");
+        }
+        let mut f = base();
+        f[148] = ESPACO_PORTA;
+        f[152..160].copy_from_slice(&0x1800u64.to_le_bytes());
+        f[60..64].copy_from_slice(&0x1900u32.to_le_bytes());
+        f[88] = 8;
+        let b = botao_da_fadt(&f).map_err(|_| "a FADT estendida foi recusada")?;
+        if b.eventos_a != porta(0x1800)
+            || b.eventos_b != Some(porta(0x1900))
+            || b.meio_do_bloco != 4
+        {
+            crate::log_error!("teste", "{:?}", b);
+            return Err("o leitor nao preferiu o bloco estendido, ou leu errado o PM1b");
+        }
+        type Estrago = fn(&mut [u8]);
+        let recusas: [(Estrago, &str); 6] = [
+            (|f| f[112] |= 1 << 4, "da AML, ou nao existe"),
+            (|f| f[114] |= 1 << 4, "hardware reduzido"),
+            (|f| f[56..60].fill(0), "bloco de eventos"),
+            (|f| f[88] = 2, "tamanho impossivel"),
+            (|f| f[88] = 5, "tamanho impossivel"),
+            (|f| f[88] = 0, "tamanho impossivel"),
+        ];
+        for (estragar, motivo) in recusas {
+            let mut f = base();
+            estragar(&mut f);
+            match botao_da_fadt(&f) {
+                Err(m) if m.contains(motivo) => {}
+                outro => {
+                    crate::log_error!("teste", "{}: {:?}", motivo, outro);
+                    return Err(
+                        "uma FADT sem o botao fixo foi aceita, ou recusada por outro motivo",
+                    );
+                }
+            }
+        }
+        if botao_da_fadt(&base()[..100]).is_ok() {
+            return Err("o leitor aceitou uma FADT curta demais");
+        }
+        let mut f = base();
+        f[92] = 3;
+        if botao_da_fadt(&f).map(|b| b.gpe0) != Ok(None) {
+            return Err("um bloco de GPE de tamanho impossivel foi aceito");
+        }
+        let b = crate::arch::atual::acpi::botao_fixo()
+            .map_err(|_| "a FADT do emulador nao tem o botao fixo")?;
+        if b.sci != 9 || b.eventos_a.espaco != ESPACO_PORTA {
+            crate::log_error!("teste", "{:?}", b);
+            return Err("a FADT do emulador nao diz o SCI na linha 9, por portas");
+        }
+        Ok(())
+    }
+}
+
+/// Um nó, uma propriedade ou o fim de um nó, para montar um device tree.
+#[cfg(target_arch = "aarch64")]
+enum ItemDoFdt<'a> {
+    Abre(&'a str),
+    Prop(&'a str, alloc::vec::Vec<u8>),
+    Fecha,
+}
+
+/// As células `v`, como o device tree as grava.
+#[cfg(target_arch = "aarch64")]
+fn celulas_do_fdt(v: &[u32]) -> alloc::vec::Vec<u8> {
+    v.iter().flat_map(|c| c.to_be_bytes()).collect()
+}
+
+/// Um device tree com os `itens`, na ordem: o cabeçalho, o mapa de
+/// reservas vazio, a estrutura e as strings.
+#[cfg(target_arch = "aarch64")]
+fn montar_fdt(itens: &[ItemDoFdt]) -> alloc::vec::Vec<u8> {
+    const CABECALHO: usize = 40;
+    const RESERVAS: usize = 16;
+    fn alinhar(v: &mut alloc::vec::Vec<u8>) {
+        while v.len() % 4 != 0 {
+            v.push(0);
+        }
+    }
+    let mut estrutura = alloc::vec::Vec::new();
+    let mut nomes = alloc::vec::Vec::new();
+    for item in itens {
+        match item {
+            ItemDoFdt::Abre(nome) => {
+                estrutura.extend_from_slice(&1u32.to_be_bytes());
+                estrutura.extend_from_slice(nome.as_bytes());
+                estrutura.push(0);
+                alinhar(&mut estrutura);
+            }
+            ItemDoFdt::Prop(nome, dados) => {
+                let deslocamento = nomes.len() as u32;
+                nomes.extend_from_slice(nome.as_bytes());
+                nomes.push(0);
+                estrutura.extend_from_slice(&3u32.to_be_bytes());
+                estrutura.extend_from_slice(&(dados.len() as u32).to_be_bytes());
+                estrutura.extend_from_slice(&deslocamento.to_be_bytes());
+                estrutura.extend_from_slice(dados);
+                alinhar(&mut estrutura);
+            }
+            ItemDoFdt::Fecha => estrutura.extend_from_slice(&2u32.to_be_bytes()),
+        }
+    }
+    estrutura.extend_from_slice(&9u32.to_be_bytes());
+    let off_struct = CABECALHO + RESERVAS;
+    let off_strings = off_struct + estrutura.len();
+    let total = off_strings + nomes.len();
+    let mut blob = alloc::vec::Vec::with_capacity(total);
+    for valor in [
+        0xd00d_feed,
+        total as u32,
+        off_struct as u32,
+        off_strings as u32,
+        CABECALHO as u32,
+        17,
+        16,
+        0,
+        nomes.len() as u32,
+        estrutura.len() as u32,
+    ] {
+        blob.extend_from_slice(&valor.to_be_bytes());
+    }
+    blob.extend_from_slice(&[0; RESERVAS]);
+    blob.extend_from_slice(&estrutura);
+    blob.extend_from_slice(&nomes);
+    blob
+}
+
+/// Uma árvore com a tecla de energia, como a da máquina `virt` — e o que
+/// cada caso muda nela.
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+struct ArvoreDaTecla {
+    codigo: u32,
+    gpios: Option<[u32; 3]>,
+    compativel: &'static [u8],
+    celulas: u32,
+    phandle: u32,
+    interrupcoes: bool,
+    funda: bool,
+}
+
+#[cfg(target_arch = "aarch64")]
+const TECLA_DA_VIRT: ArvoreDaTecla = ArvoreDaTecla {
+    codigo: 116,
+    gpios: Some([0x8004, 3, 0]),
+    compativel: b"arm,pl061\0arm,primecell\0",
+    celulas: 2,
+    phandle: 0x8004,
+    interrupcoes: true,
+    funda: false,
+};
+
+#[cfg(target_arch = "aarch64")]
+fn arvore_da_tecla(a: ArvoreDaTecla) -> alloc::vec::Vec<u8> {
+    use ItemDoFdt::{Abre, Fecha, Prop};
+    let mut itens = alloc::vec![
+        Abre(""),
+        Prop("#address-cells", celulas_do_fdt(&[2])),
+        Prop("#size-cells", celulas_do_fdt(&[2])),
+        Abre("gpio-keys"),
+        Prop("compatible", b"gpio-keys\0".to_vec()),
+        Abre("poweroff"),
+        Prop("label", b"GPIO Key Poweroff\0".to_vec()),
+        Prop("linux,code", celulas_do_fdt(&[a.codigo])),
+    ];
+    if let Some(g) = a.gpios {
+        itens.push(Prop("gpios", celulas_do_fdt(&g)));
+    }
+    itens.push(Fecha);
+    itens.push(Fecha);
+    if a.funda {
+        itens.push(Abre("barramento"));
+    }
+    itens.push(Abre("pl061@9030000"));
+    itens.push(Prop("compatible", a.compativel.to_vec()));
+    itens.push(Prop("reg", celulas_do_fdt(&[0, 0x0903_0000, 0, 0x1000])));
+    if a.interrupcoes {
+        itens.push(Prop("interrupts", celulas_do_fdt(&[0, 7, 4])));
+    }
+    itens.push(Prop("#gpio-cells", celulas_do_fdt(&[a.celulas])));
+    itens.push(Prop("phandle", celulas_do_fdt(&[a.phandle])));
+    itens.push(Fecha);
+    if a.funda {
+        itens.push(Fecha);
+    }
+    itens.push(Fecha);
+    montar_fdt(&itens)
+}
+
+/// O leitor da tecla de energia do device tree: a da máquina `virt` — o
+/// `gpio-keys` com `KEY_POWER` no pino 3 de um PL061, pela SPI 7 —; a
+/// tecla ativa em baixo; e as recusas, cada uma com o motivo: outra tecla,
+/// a tecla sem pino, o controlador que não é um PL061, o pino em três
+/// células, o phandle que não existe, o controlador sem interrupção e o
+/// que mora fundo demais. E o device tree do emulador tem a tecla.
+fn botao_o_device_tree_diz_a_tecla() -> Resultado {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        crate::log_info!("teste", "o device tree so existe no aarch64");
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::fdt::{Interrupcao, TeclaDeEnergia, encontrar_tecla_de_energia};
+        let ler = |a: ArvoreDaTecla| {
+            let blob = arvore_da_tecla(a);
+            // SAFETY: o blob é deste quadro, montado com a assinatura e os
+            // tamanhos certos; o que se afirma é como o leitor o entende.
+            unsafe { encontrar_tecla_de_energia(blob.as_ptr()) }
+        };
+        let da_virt = TeclaDeEnergia {
+            base: 0x0903_0000,
+            tamanho: 0x1000,
+            pino: 3,
+            ativa_em_baixo: false,
+            interrupcao: Interrupcao {
+                tipo: 0,
+                numero: 7,
+                flags: 4,
+            },
+        };
+        if ler(TECLA_DA_VIRT) != Ok(da_virt) {
+            crate::log_error!("teste", "{:?}", ler(TECLA_DA_VIRT));
+            return Err("o leitor nao achou a tecla na arvore da maquina virt");
+        }
+        let baixa = ArvoreDaTecla {
+            gpios: Some([0x8004, 3, 1]),
+            ..TECLA_DA_VIRT
+        };
+        if ler(baixa).map(|t| t.ativa_em_baixo) != Ok(true) {
+            return Err("a tecla ativa em baixo nao foi lida assim");
+        }
+        let recusas = [
+            (
+                ArvoreDaTecla {
+                    codigo: 115,
+                    ..TECLA_DA_VIRT
+                },
+                "nao tem a tecla",
+            ),
+            (
+                ArvoreDaTecla {
+                    gpios: None,
+                    ..TECLA_DA_VIRT
+                },
+                "nao diz o pino",
+            ),
+            (
+                ArvoreDaTecla {
+                    compativel: b"arm,pl031\0arm,primecell\0",
+                    ..TECLA_DA_VIRT
+                },
+                "nao e um PL061",
+            ),
+            (
+                ArvoreDaTecla {
+                    celulas: 3,
+                    ..TECLA_DA_VIRT
+                },
+                "duas celulas",
+            ),
+            (
+                ArvoreDaTecla {
+                    phandle: 0x8005,
+                    ..TECLA_DA_VIRT
+                },
+                "nao esta no device tree",
+            ),
+            (
+                ArvoreDaTecla {
+                    interrupcoes: false,
+                    ..TECLA_DA_VIRT
+                },
+                "(interrupts)",
+            ),
+            (
+                ArvoreDaTecla {
+                    funda: true,
+                    ..TECLA_DA_VIRT
+                },
+                "fundo demais",
+            ),
+        ];
+        for (arvore, motivo) in recusas {
+            match ler(arvore) {
+                Err(m) if m.contains(motivo) => {}
+                outro => {
+                    crate::log_error!("teste", "{}: {:?}", motivo, outro);
+                    return Err("uma arvore sem a tecla foi aceita, ou recusada por outro motivo");
+                }
+            }
+        }
+        // SAFETY: o ponteiro é o do device tree que o firmware entregou.
+        let real = unsafe { encontrar_tecla_de_energia(crate::arch::aarch64::dtb()) }
+            .map_err(|_| "o device tree do emulador nao tem a tecla de energia")?;
+        if real.pino != 3 || real.interrupcao.numero != 7 || real.ativa_em_baixo {
+            crate::log_error!("teste", "{:?}", real);
+            return Err("a tecla do emulador nao e a do pino 3 pela SPI 7");
+        }
+        // E o controlador se identifica: o PL061 da tecla sim; a PL031, que
+        // também é um PrimeCell da ARM, não.
+        use crate::arch::aarch64::botao::identifica_um_pl061_de_teste;
+        if !identifica_um_pl061_de_teste(real.base) {
+            return Err("o PL061 do emulador nao se identificou como um");
+        }
+        // SAFETY: o ponteiro é o do device tree que o firmware entregou.
+        let (rtc, _) = unsafe {
+            crate::arch::aarch64::fdt::encontrar_mmio(crate::arch::aarch64::dtb(), b"arm,pl031")
+        }
+        .ok_or("o emulador nao tem a PL031")?;
+        if identifica_um_pl061_de_teste(rtc) {
+            return Err("a PL031 do emulador passou por um PL061");
+        }
+        Ok(())
+    }
+}
+
+/// Um aperto pede o desligamento pelo gate, como o sistema: o aperto na
+/// auditoria, pelo kernel, com o recurso dizendo como a máquina avisou e o
+/// fio que pede; a decisão do gate sobre `system.poweroff`, uma só, pelo
+/// titular `system`, com o papel da linha `local` e o processo do kernel
+/// que pediu; o pedido de desligar, gravado uma vez e no journal antes de a
+/// rodada voltar; e o fio da energia entrega o desligamento — e não o
+/// reinício.
+fn botao_o_aperto_pede_ao_gate_como_o_sistema() -> Resultado {
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    let _ = crate::energia::executada_de_teste();
+    let fio = crate::fios::id_atual();
+    let (apertos_antes, pedidos_antes, _, _) = crate::botao::contas_de_teste();
+    let (apertos, evento, envelope) = botao_pedido(botao_apertar(1))?;
+    if apertos != 1
+        || fs_texto(&envelope, "state").as_deref() != Some("powering_off")
+        || fs_texto(&envelope, "action").as_deref() != Some("poweroff")
+    {
+        crate::log_error!("teste", "{}", envelope);
+        return Err("o aperto nao pediu o desligamento");
+    }
+    let aperto = registro_numero(evento).ok_or("o aperto nao esta na auditoria")?;
+    if aperto.metodo != "power.button"
+        || aperto.titular != Titular::Kernel
+        || aperto.recurso != VIA_DO_BOTAO
+        || aperto.codigo != Codigo::Allow
+        || !aperto.detalhe.contains("1 aperto(s)")
+        || !aperto.detalhe.contains(&alloc::format!("pelo fio {fio}"))
+    {
+        crate::log_error!("teste", "{:?}", aperto);
+        return Err("o aperto na auditoria nao diz o que foi, nem quem pede");
+    }
+    let pelo_processo = alloc::format!("pelo processo {fio} (kernel)");
+    let decisoes = registros_depois(evento, |e| {
+        e.metodo == "system.poweroff" && e.recurso != "poweroff"
+    });
+    let [(decisao, d)] = &decisoes[..] else {
+        crate::log_error!("teste", "{:?}", decisoes);
+        return Err("o gate nao decidiu um pedido so");
+    };
+    if d.titular != Titular::Sistema
+        || d.papel != "sistema"
+        || d.codigo != Codigo::Allow
+        || !d.detalhe.contains(&pelo_processo)
+    {
+        crate::log_error!("teste", "{:?}", d);
+        return Err("a decisao nao foi a do sistema, pelo papel da linha local");
+    }
+    let execucoes = registros_depois(*decisao, |e| {
+        e.metodo == "system.poweroff" && e.recurso == "poweroff"
+    });
+    let [(pedido, p)] = &execucoes[..] else {
+        crate::log_error!("teste", "{:?}", execucoes);
+        return Err("o pedido de desligar nao foi gravado uma vez");
+    };
+    if p.codigo != Codigo::Allow || !p.detalhe.contains("pedido; as gravacoes param") {
+        crate::log_error!("teste", "{:?}", p);
+        return Err("o pedido de desligar gravado nao diz o que vem");
+    }
+    if crate::persistencia::auditoria_gravada() < *pedido {
+        return Err("a rodada voltou antes de o pedido estar no journal");
+    }
+    if fs_numero(&envelope, "record") != Some(*pedido) {
+        return Err("a resposta nao diz o registro do pedido");
+    }
+    if energia_entregue() != Some(crate::energia::Acao::Desligar) {
+        return Err("o aperto nao desligou a maquina");
+    }
+    let (apertos_depois, pedidos_depois, _, _) = crate::botao::contas_de_teste();
+    if apertos_depois != apertos_antes + 1 || pedidos_depois != pedidos_antes + 1 {
+        return Err("as contas do botao nao fecham");
+    }
+    Ok(())
+}
+
+/// Apertos repetidos são um desligamento só: os que chegam juntos viram um
+/// pedido; os que chegam com a máquina já parando não pedem nada — nem vão
+/// à auditoria — e ficam contados como ignorados; uma rodada sem aperto
+/// novo não faz nada; e a energia entrega uma vez.
+fn botao_apertos_repetidos_sao_um_desligamento() -> Resultado {
+    use crate::botao::Passo;
+    use crate::energia::Acao;
+    let _ = crate::energia::executada_de_teste();
+    let (a0, p0, i0, _) = crate::botao::contas_de_teste();
+    let (apertos, evento, envelope) = botao_pedido(botao_apertar(5))?;
+    if apertos != 5 || fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
+        crate::log_error!("teste", "{} {}", apertos, envelope);
+        return Err("cinco apertos juntos nao viraram um pedido");
+    }
+    match botao_apertar(3) {
+        Passo::JaParando {
+            apertos: 3,
+            acao: Acao::Desligar,
+        } => {}
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            return Err("um aperto com a maquina ja parando nao foi ignorado");
+        }
+    }
+    if !matches!(crate::botao::passo(), Passo::Nada) {
+        return Err("uma rodada sem aperto novo fez alguma coisa");
+    }
+    if !registros_depois(evento, |e| e.metodo == "power.button").is_empty() {
+        return Err("um aperto ignorado foi a auditoria");
+    }
+    let decisoes = registros_depois(evento, |e| {
+        e.metodo == "system.poweroff" && e.recurso != "poweroff"
+    });
+    if decisoes.len() != 1 {
+        crate::log_error!("teste", "{:?}", decisoes);
+        return Err("o gate decidiu mais de um desligamento");
+    }
+    if energia_entregue() != Some(Acao::Desligar) {
+        return Err("o desligamento nao chegou ao fim");
+    }
+    let _ = esperar_cedendo(|| false, 20);
+    if crate::energia::executada_de_teste().is_some() {
+        return Err("a energia entregou duas vezes");
+    }
+    let (a1, p1, i1, _) = crate::botao::contas_de_teste();
+    if (a1 - a0, p1 - p0, i1 - i0) != (8, 1, 3) {
+        crate::log_error!("teste", "{} {} {}", a1 - a0, p1 - p0, i1 - i0);
+        return Err("as contas do botao nao dizem oito apertos, um pedido e tres ignorados");
+    }
+    Ok(())
+}
+
+/// O que a rodada de um fio de teste deu: zero enquanto ele não acabou.
+static BOTAO_SONDA: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Um aperto e uma rodada, com a autoridade do fio: 1 se o gate recusou
+/// com `DENY_PERMISSION`, 2 se não.
+extern "C" fn botao_rodada_recusada(_: u64) -> ! {
+    let recusada = match botao_apertar(1) {
+        crate::botao::Passo::Pedido { envelope, .. } => recusado_com(&envelope, "DENY_PERMISSION"),
+        _ => false,
+    };
+    BOTAO_SONDA.store(
+        if recusada { 1 } else { 2 },
+        core::sync::atomic::Ordering::SeqCst,
+    );
+    crate::fios::terminar()
+}
+
+/// O botão não é autoridade. Com a política dando à autoridade local o
+/// papel `operador` — que não tem `system.power` —, o aperto é recusado
+/// pelo gate com `DENY_PERMISSION`, pelo papel novo; o aperto e a recusa
+/// ficam na auditoria; e a máquina segue. E a rodada pede com a autoridade
+/// de quem a roda: num fio com a do tecido de segurança, o mesmo aperto é
+/// recusado pelo papel dele.
+fn botao_a_politica_decide_e_o_botao_nao_e_autoridade() -> Resultado {
+    use crate::autorizacao::{Autoridade, Servico};
+    use core::sync::atomic::Ordering;
+    use politica::Codigo;
+    let _ = crate::energia::executada_de_teste();
+    let nova = politica_trocada(&[("\nlocal sistema\n", "\nlocal operador\n")])?;
+    com_a_politica(nova, || {
+        let (_, evento, envelope) = botao_pedido(botao_apertar(1))?;
+        if !recusado_com(&envelope, "DENY_PERMISSION") {
+            crate::log_error!("teste", "{}", envelope);
+            return Err("sem system.power no papel local, o aperto nao foi recusado");
+        }
+        if registro_numero(evento).is_none_or(|e| e.metodo != "power.button") {
+            return Err("o aperto recusado nao esta na auditoria");
+        }
+        let decisoes = registros_depois(evento, |e| e.metodo == "system.poweroff");
+        let [(_, d)] = &decisoes[..] else {
+            crate::log_error!("teste", "{:?}", decisoes);
+            return Err("a recusa nao foi gravada uma vez");
+        };
+        if d.codigo != Codigo::DenyPermission || d.papel != "operador" {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("a recusa nao foi pelo papel que a politica da ao local");
+        }
+        Ok(())
+    })?;
+    BOTAO_SONDA.store(0, Ordering::SeqCst);
+    crate::fios::criar_como(
+        "teste-botao-nsf",
+        botao_rodada_recusada,
+        0,
+        Autoridade::Servico(Servico::Nsf),
+    )?;
+    esperar_cedendo(|| BOTAO_SONDA.load(Ordering::SeqCst) != 0, 300)
+        .map_err(|_| "o fio do teste nao fez a rodada")?;
+    if BOTAO_SONDA.load(Ordering::SeqCst) != 1 {
+        return Err("a rodada no fio do tecido de seguranca nao foi recusada pelo papel dele");
+    }
+    let _ = esperar_cedendo(|| false, 80);
+    if crate::energia::pedida().is_some() || crate::energia::executada_de_teste().is_some() {
+        return Err("um aperto recusado parou a maquina");
+    }
+    Ok(())
+}
+
+/// O sistema pede, o gate aceita, e a energia recusa — e a máquina segue:
+/// sem persistência, o pedido não chegaria ao journal; sem o meio no
+/// firmware, as gravações parariam e a máquina ficaria parada sem
+/// desligar. A recusa fica na auditoria, com o motivo.
+fn botao_a_energia_recusa_e_a_maquina_segue() -> Resultado {
+    let _ = crate::energia::executada_de_teste();
+    let anterior = crate::persistencia::estado();
+    crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Indisponivel("teste"));
+    let p = botao_apertar(1);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    let (_, evento, envelope) = botao_pedido(p)?;
+    if !envelope.contains("sem persistencia, a maquina nao para") {
+        crate::log_error!("teste", "{}", envelope);
+        return Err("sem persistencia, o aperto nao foi recusado pela energia");
+    }
+    let recusas = registros_depois(evento, |e| {
+        e.metodo == "system.poweroff" && e.codigo == politica::Codigo::Error
+    });
+    if recusas.len() != 1 || !recusas[0].1.detalhe.contains("sem persistencia") {
+        crate::log_error!("teste", "{:?}", recusas);
+        return Err("a recusa da energia nao foi gravada com o motivo");
+    }
+    crate::energia::sem_meio_de_teste(true);
+    let p = botao_apertar(1);
+    crate::energia::sem_meio_de_teste(false);
+    let (_, _, envelope) = botao_pedido(p)?;
+    if !envelope.contains("nao diz como desligar") {
+        crate::log_error!("teste", "{}", envelope);
+        return Err("sem o meio no firmware, o aperto nao foi recusado pela energia");
+    }
+    let _ = esperar_cedendo(|| false, 80);
+    if crate::energia::pedida().is_some() || crate::energia::executada_de_teste().is_some() {
+        return Err("um aperto que a energia recusou parou a maquina");
+    }
+    Ok(())
+}
+
+/// Com um reinício a caminho, o aperto não pede nada — nem troca o
+/// reinício por um desligamento —, e a energia entrega o reinício.
+fn botao_com_o_reinicio_a_caminho_nao_pede() -> Resultado {
+    use crate::botao::Passo;
+    use crate::energia::Acao;
+    let _ = crate::energia::executada_de_teste();
+    let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
+    if fs_texto(&r, "state").as_deref() != Some("rebooting") {
+        crate::log_error!("teste", "{}", r);
+        return Err("o reinicio do sistema nao foi aceito");
+    }
+    match botao_apertar(2) {
+        Passo::JaParando {
+            apertos: 2,
+            acao: Acao::Reiniciar,
+        } => {}
+        outro => {
+            crate::log_error!("teste", "{:?}", outro);
+            return Err("com o reinicio a caminho, o aperto pediu alguma coisa");
+        }
+    }
+    if energia_entregue() != Some(Acao::Reiniciar) {
+        return Err("o reinicio a caminho nao chegou ao fim, ou virou outro");
+    }
+    Ok(())
+}
+
+/// Os fios do caso da concorrência: quantos ficaram prontos, a largada, e
+/// o que as rodadas deles deram.
+static BOTAO_PRONTOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BOTAO_LARGADA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static BOTAO_PEDIDOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static BOTAO_FIM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// O par de cada rodada da segunda metade do caso: o comando e o botão, 1
+/// para aceito e 2 para não.
+static BOTAO_PAR: [core::sync::atomic::AtomicU8; 2] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 2];
+
+const BOTAO_FIOS: u64 = 4;
+const BOTAO_APERTOS_POR_FIO: u64 = 4;
+
+fn botao_esperar_a_largada() {
+    while !BOTAO_LARGADA.load(core::sync::atomic::Ordering::SeqCst) {
+        crate::fios::ceder();
+    }
+}
+
+/// Um fio do caso: aperta, espera a largada, roda duas vezes; aperta de
+/// novo e roda — tudo no meio segundo do pedido.
+extern "C" fn botao_fio_que_aperta(_: u64) -> ! {
+    use core::sync::atomic::Ordering::SeqCst;
+    for _ in 0..BOTAO_APERTOS_POR_FIO {
+        crate::botao::apertar_de_teste();
+    }
+    BOTAO_PRONTOS.fetch_add(1, SeqCst);
+    botao_esperar_a_largada();
+    for _ in 0..2 {
+        if let crate::botao::Passo::Pedido { .. } = crate::botao::passo() {
+            BOTAO_PEDIDOS.fetch_add(1, SeqCst);
+        }
+    }
+    if let crate::botao::Passo::Pedido { .. } = botao_apertar(BOTAO_APERTOS_POR_FIO) {
+        BOTAO_PEDIDOS.fetch_add(1, SeqCst);
+    }
+    BOTAO_FIM.fetch_add(1, SeqCst);
+    crate::fios::terminar()
+}
+
+/// O comando do par: `system.reboot` com 1, `system.poweroff` com 2.
+extern "C" fn botao_par_comando(acao: u64) -> ! {
+    botao_esperar_a_largada();
+    let metodo = if acao == 1 {
+        "system.reboot"
+    } else {
+        "system.poweroff"
+    };
+    let r = fs_pedir(sistema_no_armazem(crate::fios::id_atual()), metodo, "{}");
+    let aceito = fs_texto(&r, "state").is_some();
+    BOTAO_PAR[0].store(
+        if aceito { 1 } else { 2 },
+        core::sync::atomic::Ordering::SeqCst,
+    );
+    crate::fios::terminar()
+}
+
+/// O botão do par.
+extern "C" fn botao_par_botao(_: u64) -> ! {
+    botao_esperar_a_largada();
+    let aceito = match botao_apertar(1) {
+        crate::botao::Passo::Pedido { envelope, .. } => {
+            fs_texto(&envelope, "state").as_deref() == Some("powering_off")
+        }
+        _ => false,
+    };
+    BOTAO_PAR[1].store(
+        if aceito { 1 } else { 2 },
+        core::sync::atomic::Ordering::SeqCst,
+    );
+    crate::fios::terminar()
+}
+
+/// Muitos apertos em vários núcleos ao mesmo tempo, e o botão contra os
+/// comandos: um desligamento só. Quatro fios, um por núcleo, apertam,
+/// largam juntos e rodam juntos — uma rodada pede, as outras dão com a vez
+/// tomada ou sem aperto —, e apertam de novo, com a máquina parando:
+/// nenhuma pede, e nenhum aperto se perde da conta. Depois o aperto e o
+/// `system.poweroff` de um agente juntos, e o aperto e o `system.reboot`:
+/// em cada par, um só é aceito, e uma ação só chega à energia.
+fn botao_concorrencia_um_desligamento() -> Resultado {
+    use crate::energia::Acao;
+    use core::sync::atomic::Ordering::SeqCst;
+    let _ = crate::energia::executada_de_teste();
+    let (a0, p0, _, _) = crate::botao::contas_de_teste();
+    BOTAO_PRONTOS.store(0, SeqCst);
+    BOTAO_LARGADA.store(false, SeqCst);
+    BOTAO_PEDIDOS.store(0, SeqCst);
+    BOTAO_FIM.store(0, SeqCst);
+    let nucleos = crate::nucleos::ligados() as u64;
+    for i in 0..BOTAO_FIOS {
+        crate::fios::criar_no_nucleo(
+            "teste-botao",
+            botao_fio_que_aperta,
+            i,
+            (i % nucleos) as usize,
+        )?;
+    }
+    esperar_cedendo(|| BOTAO_PRONTOS.load(SeqCst) == BOTAO_FIOS, 300)
+        .map_err(|_| "os fios do botao nao apertaram")?;
+    BOTAO_LARGADA.store(true, SeqCst);
+    esperar_cedendo(|| BOTAO_FIM.load(SeqCst) == BOTAO_FIOS, 300)
+        .map_err(|_| "os fios do botao nao terminaram")?;
+    // Um aperto que ficou para trás de uma vez tomada: a rodada daqui o
+    // toma, com a máquina parando.
+    let _ = crate::botao::passo();
+    let (a1, p1, _, _) = crate::botao::contas_de_teste();
+    if BOTAO_PEDIDOS.load(SeqCst) != 1 || p1 - p0 != 1 {
+        crate::log_error!(
+            "teste",
+            "pedidos dos fios {} contados {}",
+            BOTAO_PEDIDOS.load(SeqCst),
+            p1 - p0
+        );
+        return Err("apertos em varios nucleos pediram mais de um desligamento");
+    }
+    if a1 - a0 != 2 * BOTAO_FIOS * BOTAO_APERTOS_POR_FIO || crate::botao::pendente_de_teste() {
+        return Err("um aperto se perdeu da conta, ou ficou sem rodada");
+    }
+    if energia_entregue() != Some(Acao::Desligar) {
+        return Err("o desligamento dos fios nao chegou ao fim");
+    }
+    let _ = esperar_cedendo(|| false, 20);
+    if crate::energia::executada_de_teste().is_some() {
+        return Err("a energia entregou duas vezes");
+    }
+    for (comando, esperada) in [(2u64, Acao::Desligar), (1, Acao::Reiniciar)] {
+        BOTAO_LARGADA.store(false, SeqCst);
+        for par in &BOTAO_PAR {
+            par.store(0, SeqCst);
+        }
+        crate::fios::criar_no_nucleo("teste-botao-cmd", botao_par_comando, comando, 0)?;
+        crate::fios::criar_no_nucleo(
+            "teste-botao-par",
+            botao_par_botao,
+            0,
+            (1 % nucleos) as usize,
+        )?;
+        BOTAO_LARGADA.store(true, SeqCst);
+        esperar_cedendo(|| BOTAO_PAR.iter().all(|p| p.load(SeqCst) != 0), 300)
+            .map_err(|_| "o par do botao nao terminou")?;
+        let resultado = [BOTAO_PAR[0].load(SeqCst), BOTAO_PAR[1].load(SeqCst)];
+        let entregue = energia_entregue();
+        let certo = match resultado {
+            [1, 2] => entregue == Some(esperada),
+            [2, 1] => entregue == Some(Acao::Desligar),
+            _ => false,
+        };
+        if !certo {
+            crate::log_error!("teste", "par {:?} entregue {:?}", resultado, entregue);
+            return Err("o botao e o comando juntos nao deram uma acao so");
+        }
+        let _ = esperar_cedendo(|| false, 20);
+        if crate::energia::executada_de_teste().is_some() {
+            return Err("a energia entregou duas vezes no par");
+        }
+    }
+    Ok(())
+}
+
+/// Uma tempestade na linha do botão desliga o botão, e a máquina segue:
+/// interrupções sem o botão abaixo do teto não bastam; uma que um
+/// dispositivo da linha reclama recomeça a conta; a do teto, seguida,
+/// desliga — a linha fechada, o `system.info` dizendo por quê, e a
+/// auditoria com o motivo, pela rodada seguinte. Nenhuma delas é aperto.
+fn botao_a_tempestade_desliga_o_botao() -> Resultado {
+    use crate::arch::atual::botao as hw;
+    let linha = hw::linha_de_teste().ok_or("o botao nao esta ligado")?;
+    let (a0, _, _, s0) = crate::botao::contas_de_teste();
+    let atender = |dispositivos| crate::arch::sem_interrupcoes(|| hw::atender(linha, dispositivos));
+    let resultado = (|| -> Resultado {
+        for _ in 1..hw::TETO_SEM_DONO {
+            atender(false);
+        }
+        atender(true);
+        for _ in 1..hw::TETO_SEM_DONO {
+            atender(false);
+        }
+        if hw::linha_de_teste().is_none() {
+            return Err("o botao foi desligado antes do teto");
+        }
+        atender(false);
+        if hw::linha_de_teste().is_some() {
+            return Err("o teto de interrupcoes sem dono nao desligou o botao");
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        if !matches!(crate::botao::passo(), crate::botao::Passo::Nada) {
+            return Err("a rodada depois da tempestade pediu alguma coisa");
+        }
+        let gravados = registros_depois(antes, |e| {
+            e.metodo == "power.button" && e.codigo == politica::Codigo::Error
+        });
+        if gravados.len() != 1 || !gravados[0].1.detalhe.contains("o botao foi desligado") {
+            crate::log_error!("teste", "{:?}", gravados);
+            return Err("o desligamento do botao nao foi gravado uma vez, com o motivo");
+        }
+        let r = fs_pedir(sistema_aqui(), "system.info", "{}");
+        if !r.contains("disparou seguidas vezes sem ele") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o system.info nao diz por que o botao foi desligado");
+        }
+        let (a1, _, _, s1) = crate::botao::contas_de_teste();
+        if a1 != a0 || s1 - s0 != 2 * u64::from(hw::TETO_SEM_DONO) - 1 {
+            crate::log_error!("teste", "apertos {} sem o botao {}", a1 - a0, s1 - s0);
+            return Err("uma interrupcao sem o botao virou aperto, ou nao foi contada");
+        }
+        Ok(())
+    })();
+    hw::religar_de_teste();
+    crate::botao::desligamento_de_teste(None);
+    resultado?;
+    if hw::linha_de_teste() != Some(linha) {
+        return Err("o botao nao voltou depois do caso");
     }
     Ok(())
 }

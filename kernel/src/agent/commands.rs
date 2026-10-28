@@ -3111,6 +3111,10 @@ fn system_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let (reinicio, desligamento) = crate::arch::meios_da_energia();
     w.field_str("reboot_via", reinicio)?;
     w.field_str("poweroff_via", desligamento)?;
+    // E o botão de energia: como a máquina avisa o aperto — ou por que não
+    // avisa —, e o que veio dele. Ver `crate::botao`.
+    w.key("power_button")?;
+    crate::botao::escrever(w)?;
     // O relógio de parede, cru: o que o RTC diz, em segundos desde 1970.
     // Cru de propósito — o tempo que vale para prazos é o lógico, que a
     // persistência mantém e nunca volta; este é o que o hardware diz.

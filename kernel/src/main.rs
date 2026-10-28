@@ -69,6 +69,7 @@ mod atividade;
 mod autorizacao;
 mod barra;
 mod bloco;
+mod botao;
 mod chaves;
 mod contencao;
 mod coordenacao;
@@ -535,6 +536,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Antes de qualquer serviço: um boot recusado não decide nada, e um que
     // precisa voltar para o slot bom reinicia aqui.
     slots::reconciliar();
+    // O botão de energia, com o journal aberto e a reconciliação feita: o
+    // evento do hardware ligado — o aperto de antes, o que ligou a máquina
+    // inclusive, é limpo e não pede nada — e o fio que pede o desligamento
+    // ao gate, como o sistema. Na suíte, só o hardware: cada caso faz as
+    // rodadas dele. Ver `botao`.
+    botao::iniciar();
     // O tecido de segurança, com a auditoria que o journal repôs como
     // história: ele lê pelo gate, com o papel do serviço `nsf` — ver
     // `docs/SEGURANCA.md`. Na suíte, cada caso faz as voltas dele.

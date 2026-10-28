@@ -113,6 +113,7 @@ cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do a
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
 cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, o cache do disco, cópias, sem TPM, clone, reinstalar
+cargo xtask botao                    # o botão de energia pelo emulador: desliga pelo gate, gravações, dois apertos, reinício, corte, produção
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -297,6 +298,7 @@ kernel/src/
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
 ├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta, e o término de um processo, que isola antes
 ├── energia.rs       reiniciar e desligar: o pedido no journal antes, as gravações paradas, e a máquina entregue ao firmware (ACPI, PSCI)
+├── botao.rs         o botão de energia: o aperto contado, e o desligamento pedido ao gate pelo sistema — o mesmo `system.poweroff`
 ├── slots.rs         a atualização A/B do lado do kernel: a imagem do slot conferida, o pacote montado, a reconciliação do boot com o journal, a escrita no slot inativo e a instalação por quórum
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
@@ -416,7 +418,8 @@ kernel/src/
     ├── x86_64/
     │   ├── mod.rs    entrada pelo iniciador UEFI, CPUID, portas de I/O
     │   ├── gdt.rs    GDT, um TSS por núcleo e as pilhas de emergência
-    │   ├── acpi.rs   as tabelas da ACPI: a MADT, que lista os núcleos
+    │   ├── acpi.rs   as tabelas da ACPI: a MADT, que lista os núcleos; a FADT, o `\_S5` e o botão fixo
+    │   ├── botao.rs  o botão de energia fixo da ACPI: o modo ACPI, o `PWRBTN` do PM1 e o SCI no 8259
     │   ├── smp.rs    a partida dos outros núcleos, o descarte de tradução e a parada, por NMI
     │   ├── idt.rs    IDT e handlers de exceção e interrupção
     │   ├── mouse.rs  o mouse PS/2, pela porta auxiliar do 8042
@@ -431,6 +434,7 @@ kernel/src/
         ├── mod.rs      boot em assembly, cabeçalho de imagem arm64, MIDR_EL1
         ├── vetores.rs  tabela de vetores de exceção (VBAR_EL1)
         ├── gic.rs      GIC v2, timer genérico e os avisos entre núcleos (SGI)
+        ├── botao.rs    a tecla de energia do device tree, num PL061: a borda do pino, pela SPI dele
         ├── smp.rs      a partida dos outros núcleos pelo PSCI, e a parada
         ├── mmu.rs      tabelas de tradução e ativação da MMU
         ├── contexto.rs troca de contexto
@@ -736,6 +740,7 @@ programas/           os programas de usuário, compilados à parte do kernel
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── atualizar.rs     a bancada da atualização A/B: a máquina de produção pelo firmware, a versão nova instalada, tentada, confirmada ou desfeita, as recusas, a concorrência e as quedas em cada fronteira
+├── botao.rs         a bancada do botão de energia: o `system_powerdown` do emulador nas imagens de desenvolvimento e de produção — o desligamento pelo gate, as gravações, dois apertos, o reinício a caminho, o corte, o aperto cedo, sem persistência, a política que nega
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
@@ -8060,6 +8065,51 @@ recusa sem auditoria, o nascimento sem a abertura de volta —, e a da
 recusa achou um motivo maior que o detalhe da auditoria. O kernel de
 produção cresceu 33 336 bytes no x86 (+0,81%) e 26 088 no ARM (+0,75%);
 o iniciador e os programas não mudaram.
+
+### O botão de energia
+
+O botão da máquina desliga — e não é ninguém. No x86 ele é o botão fixo da
+ACPI: o kernel entra no modo ACPI, desliga os GPEs que não tem quem atenda,
+limpa o aperto de antes e habilita só o `PWRBTN` do PM1, e o SCI chega
+numa linha do 8259 ([`arch/x86_64/botao.rs`](kernel/src/arch/x86_64/botao.rs)).
+No ARM, a máquina `virt` sem ACPI o descreve no device tree: uma tecla
+`gpio-keys` com o código `KEY_POWER` num pino de um PL061, que avisa pela
+SPI dele ([`arch/aarch64/botao.rs`](kernel/src/arch/aarch64/botao.rs)). Nos
+dois, o tratador só lê o estado, o limpa e conta o aperto.
+
+Quem pede o desligamento é o sistema: o fio `botao`
+([`kernel/src/botao.rs`](kernel/src/botao.rs)) grava o aperto na auditoria
+(`power.button`, pelo kernel) e pede `system.poweroff` ao gate com a
+autoridade dele — a local, a dos fios do kernel —, e a política decide
+pelo papel da linha `local`. Daí em diante é o comando de sempre: a
+decisão e o pedido na auditoria, o pedido no journal antes, meio segundo,
+as gravações paradas, e o S5 da ACPI ou o `SYSTEM_OFF` da PSCI. Nenhuma
+identidade, nenhum papel e nenhum comando novos: uma política sem
+`system.power` no papel local recusa o botão, e o aperto fica na
+auditoria, recusado. O `xtask` confere que só o `arch` diz um aperto, que
+só o fio do botão pede, pelo gate, e que a energia continua sendo chamada
+só pelos handlers e pelas operações administrativas.
+
+Apertos juntos são um pedido; os que chegam com a máquina já parando —
+por qualquer caminho — só contam. Antes do journal e da reconciliação da
+atualização, o botão não está ligado, e o aperto de antes não pede nada.
+Sem persistência a energia recusa, como recusa o comando. Uma linha que
+dispara sem o botão, ou um estado que não se limpa, desliga o botão e a
+máquina segue. O `system.info` diz tudo em `power_button` — ver
+[O botão de energia](docs/OPERACAO.md#o-botão-de-energia).
+
+Dez casos `botao:` na suíte — os leitores da FADT e do device tree contra
+tabelas e árvores montadas, o hardware do emulador programado, o aperto
+pelo gate com a auditoria e o journal, os apertos repetidos, a política que
+recusa e a autoridade do fio, as recusas da energia, o reinício a caminho,
+quatro núcleos e os comandos juntos, e a tempestade — e a bancada
+`cargo xtask botao`, com o aperto de verdade do emulador (o
+`system_powerdown` do QMP) nas imagens de desenvolvimento e de produção,
+nas duas arquiteturas: o desligamento com o pedido no journal, no meio de
+uma rajada de gravações, dois apertos, o reinício a caminho, a energia
+cortada no meio, o aperto durante o boot, sem persistência, e a política
+de produção que nega.
+
 
 ## Barramento PCI
 

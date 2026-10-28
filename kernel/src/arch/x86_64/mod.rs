@@ -8,6 +8,7 @@
 
 pub mod acpi;
 pub mod apic;
+pub mod botao;
 pub mod contexto;
 pub mod gdt;
 pub mod idt;
@@ -972,12 +973,41 @@ fn escrever_registrador(r: acpi::Registrador, valor: u16, largura: u8) {
 }
 
 /// Lê dezesseis bits do registrador genérico `r`, se ele é uma porta.
-// Na suíte a energia só anota a ação — ver `crate::energia`.
-#[cfg_attr(feature = "modo-teste", allow(dead_code))]
 fn ler_registrador(r: acpi::Registrador) -> Option<u16> {
     // SAFETY: leitura da porta que a FADT descreve como o controle do PM1.
     (r.espaco == acpi::ESPACO_PORTA)
         .then(|| unsafe { x86_64::instructions::port::Port::<u16>::new(r.endereco as u16).read() })
+}
+
+/// `SCI_EN`, no controle do PM1: a máquina está no modo ACPI.
+const MODO_ACPI: u16 = 1;
+
+/// Põe a máquina no modo ACPI se o firmware a deixou fora — o `SCI_EN`
+/// desligado no controle `pm1a` —, pelo valor `ACPI_ENABLE` na porta
+/// `SMI_CMD`, e espera o chipset ligar o bit. Devolve se ela está no modo.
+///
+/// O desligamento pelo S5 pede o modo antes de dormir; o botão de energia,
+/// antes de esperar o SCI — fora dele, o botão é do firmware. Um controle
+/// fora das portas, este kernel não lê: não há como saber, e nada se
+/// escreve.
+fn entrar_no_modo_acpi(pm1a: acpi::Registrador, smi_cmd: u32, acpi_enable: u8) -> bool {
+    match ler_registrador(pm1a) {
+        None => return false,
+        Some(v) if v & MODO_ACPI != 0 => return true,
+        Some(_) => {}
+    }
+    if smi_cmd == 0 || acpi_enable == 0 {
+        return false;
+    }
+    // SAFETY: a porta e o valor que a FADT dá para ligar o modo ACPI.
+    unsafe { x86_64::instructions::port::Port::<u8>::new(smi_cmd as u16).write(acpi_enable) };
+    for _ in 0..1_000_000 {
+        if ler_registrador(pm1a).is_some_and(|v| v & MODO_ACPI != 0) {
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
 }
 
 /// Gira um pouco, para o chipset ter tempo de agir antes do próximo modo.
@@ -1055,29 +1085,11 @@ pub fn reiniciar_a_maquina() -> ! {
 pub fn desligar_a_maquina() -> ! {
     /// `SLP_EN`, no controle do PM1.
     const DORMIR: u16 = 1 << 13;
-    /// `SCI_EN`: o modo ACPI está ligado.
-    const MODO_ACPI: u16 = 1;
     x86_64::instructions::interrupts::disable();
     match acpi::energia() {
         Ok(e) => match (e.pm1a, e.s5, e.controle_de_sono) {
             (Some(pm1a), Some((a, b)), _) => {
-                if ler_registrador(pm1a).is_some_and(|v| v & MODO_ACPI == 0)
-                    && e.smi_cmd != 0
-                    && e.acpi_enable != 0
-                {
-                    // SAFETY: a porta e o valor que a FADT dá para ligar o
-                    // modo ACPI.
-                    unsafe {
-                        x86_64::instructions::port::Port::<u8>::new(e.smi_cmd as u16)
-                            .write(e.acpi_enable)
-                    };
-                    for _ in 0..1_000_000 {
-                        if ler_registrador(pm1a).is_some_and(|v| v & MODO_ACPI != 0) {
-                            break;
-                        }
-                        core::hint::spin_loop();
-                    }
-                }
+                let _ = entrar_no_modo_acpi(pm1a, e.smi_cmd, e.acpi_enable);
                 let atual = ler_registrador(pm1a).unwrap_or(0) & !(7 << 10);
                 escrever_registrador(pm1a, atual | u16::from(a) << 10 | DORMIR, 16);
                 if let Some(pm1b) = e.pm1b {

@@ -481,6 +481,49 @@ jobs:
       - name: Identidade do Duke
         run: cargo xtask identidade --arch ${{ matrix.arch }}
 
+  # A bancada do botão de energia (B3, `docs/OPERACAO.md`): o
+  # `system_powerdown` do emulador — o aperto de verdade, pelo hardware que
+  # a máquina tem: o botão fixo da ACPI, pelo SCI, no x86; a tecla do
+  # device tree num PL061, no ARM —, nas imagens de desenvolvimento e de
+  # produção. O desligamento pelo gate, como o sistema; o aperto no meio
+  # das gravações, dois apertos, com o reinício a caminho, a energia
+  # cortada no meio do desligamento, o aperto antes do boot, a máquina sem
+  # persistência, e a política de produção que nega. Um job à parte, como
+  # a identidade: cada cenário é uma série de boots pelo firmware.
+  botao:
+    name: Botão de energia (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: botao-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: botao-${{ matrix.arch }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Botão de energia
+        run: cargo xtask botao --arch ${{ matrix.arch }}
+
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
   # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback

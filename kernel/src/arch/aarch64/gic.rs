@@ -44,7 +44,9 @@ register_structs! {
         (0x004 => _reservado0),
         /// Um bit por INTID: escrever 1 habilita aquela linha.
         (0x100 => isenabler: [ReadWrite<u32>; 32]),
-        (0x180 => _reservado1),
+        /// Um bit por INTID: escrever 1 desabilita aquela linha.
+        (0x180 => icenabler: [ReadWrite<u32>; 32]),
+        (0x200 => _reservado1),
         /// Um byte por INTID, e cada bit desse byte é um núcleo destino.
         ///
         /// Só vale para interrupções compartilhadas (SPIs, INTID >= 32): as
@@ -321,6 +323,21 @@ pub unsafe fn habilitar_spi(intid: u32) {
     habilitar_linha(intid);
 }
 
+/// Desabilita uma linha compartilhada no distribuidor: ela deixa de chegar
+/// a qualquer núcleo. É o que o botão de energia faz com a linha dele numa
+/// tempestade — ver `super::botao`.
+///
+/// # Safety
+///
+/// Desabilitar uma linha que alguém ainda espera deixa o sistema sem aquele
+/// evento, sem aviso nenhum.
+pub unsafe fn desabilitar_spi(intid: u32) {
+    if !(32..1020).contains(&intid) {
+        return;
+    }
+    distribuidor().icenabler[(intid / 32) as usize].set(1 << (intid % 32));
+}
+
 /// Reconhece a interrupção pendente e devolve o valor **inteiro** do
 /// registrador de reconhecimento.
 ///
@@ -460,8 +477,10 @@ pub fn tratar() -> bool {
     // As linhas que não são deste backend são dos dispositivos que o kernel
     // dirige. Perguntar a eles é o que evita uma tabela de handlers aqui —
     // e, com dois dispositivos, uma tabela seria generalidade sem cliente.
+    // E a do controlador da tecla de energia: ver `super::botao`.
     if intid != INTID_TIMER && intid != INTID_UART {
-        crate::virtio::atender_interrupcao(intid);
+        let dispositivos = crate::virtio::atender_interrupcao(intid);
+        super::botao::atender(intid, dispositivos);
     }
 
     crate::irq::contabilizar(intid as usize);

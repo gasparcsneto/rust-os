@@ -360,12 +360,27 @@ fn registrar(linha: u32, isr: Option<u64>, nome: u32) -> bool {
 /// suíte inteira passa, também no x86 com vídeo virtio, onde a linha é
 /// dividida. A janela é a de um dispositivo interromper entre duas leituras
 /// do mesmo handler, e nenhum caso consegue pô-lo lá.
-pub fn atender_interrupcao(linha: u32) {
+///
+/// Devolve se algum dono tinha interrompido: o botão de energia, que pode
+/// dividir a linha com um dispositivo, só conta como sem dono a interrupção
+/// que ninguém reclamou — ver `crate::botao`.
+pub fn atender_interrupcao(linha: u32) -> bool {
+    let mut alguem = false;
     for _ in 0..MAX_VOLTAS_NO_HANDLER {
         if !uma_volta(linha) {
-            return;
+            return alguem;
         }
+        alguem = true;
     }
+    alguem
+}
+
+/// Se algum dispositivo registrou `linha` como a dele: o botão de energia,
+/// numa tempestade, só fecha a linha que ninguém mais usa.
+pub fn linha_com_dono(linha: u32) -> bool {
+    REGISTROS
+        .iter()
+        .any(|registro| registro.linha_publicada() == Some(linha))
 }
 
 /// Quantas voltas [`atender_interrupcao`] dá, no máximo, numa entrega.

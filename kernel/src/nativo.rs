@@ -470,8 +470,9 @@ impl core::future::Future for ProximoPedido {
 /// suspensão, e devolve o envelope.
 ///
 /// É por aqui que o tecido de segurança pede: como um processo, com a
-/// autoridade dele, e sem nenhum passo a menos — ver `crate::seguranca`. O
-/// `xtask` confere que ninguém mais chama.
+/// autoridade dele, e sem nenhum passo a menos — ver `crate::seguranca`. E
+/// o fio do botão de energia, que pede o desligamento como o sistema — ver
+/// `crate::botao`. O `xtask` confere que ninguém mais chama.
 pub fn responder_pelo_kernel(chamador: Chamador, linha: &[u8]) -> Texto {
     // Sem suspensão, o comando responde: não há espera a largar.
     responder_como(chamador, linha, false).unwrap_or_default()

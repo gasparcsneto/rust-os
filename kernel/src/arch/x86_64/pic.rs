@@ -188,22 +188,46 @@ pub unsafe fn desmascarar(linha: u8) {
 ///
 /// O inverso de [`desmascarar`], e pela mesma razão uma leitura-modificação-
 /// escrita: mexer numa linha sem preservar as outras as reabilitaria em
-/// silêncio.
+/// silêncio. Uma linha do escravo se bloqueia nele só: a cascata fica
+/// aberta, porque as outras sete dele continuam passando por ela.
 ///
 /// # Safety
 ///
 /// Bloquear uma linha que alguém ainda espera deixa o sistema sem aquele
 /// evento, sem aviso nenhum.
 pub unsafe fn mascarar(linha: u8) {
-    if linha >= 8 {
+    if linha >= 16 {
         return;
     }
-    // SAFETY: porta de dados do PIC mestre; a consequência de bloquear a
+    // SAFETY: portas de dados dos dois PICs; a consequência de bloquear a
     // linha é do chamador.
     unsafe {
-        let mut dados_mestre = Port::<u8>::new(DADOS_MESTRE);
-        let atual: u8 = dados_mestre.read();
-        dados_mestre.write(atual | (1 << linha));
+        let (porta, bit) = if linha < 8 {
+            (DADOS_MESTRE, linha)
+        } else {
+            (DADOS_ESCRAVO, linha - 8)
+        };
+        let mut dados = Port::<u8>::new(porta);
+        let atual: u8 = dados.read();
+        dados.write(atual | (1 << bit));
+    }
+}
+
+/// Só para a suíte: se a linha está bloqueada — no escravo, a dele ou a
+/// cascata.
+#[cfg(feature = "modo-teste")]
+pub fn mascarada_de_teste(linha: u8) -> bool {
+    // SAFETY: ler a máscara não muda nada no PIC.
+    let (mestre, escravo) = unsafe {
+        (
+            Port::<u8>::new(DADOS_MESTRE).read(),
+            Port::<u8>::new(DADOS_ESCRAVO).read(),
+        )
+    };
+    match linha {
+        0..=7 => mestre & (1 << linha) != 0,
+        8..=15 => escravo & (1 << (linha - 8)) != 0 || mestre & (1 << IRQ_CASCATA) != 0,
+        _ => true,
     }
 }
 

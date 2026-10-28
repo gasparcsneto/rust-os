@@ -245,8 +245,13 @@ fn atender(linha: u8) -> bool {
 
         // As demais são dos dispositivos que o kernel dirige. Perguntar a
         // eles é o que evita uma tabela de handlers — e, com dois
-        // dispositivos, uma tabela seria generalidade sem cliente.
-        _ => crate::virtio::atender_interrupcao(linha as u32),
+        // dispositivos, uma tabela seria generalidade sem cliente. E do SCI
+        // da ACPI, que traz o botão de energia e pode dividir a linha com
+        // um deles: os dois são perguntados — ver `super::botao`.
+        _ => {
+            let dispositivos = crate::virtio::atender_interrupcao(linha as u32);
+            super::botao::atender(linha, dispositivos);
+        }
     }
 
     crate::irq::contabilizar(linha as usize);

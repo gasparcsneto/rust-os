@@ -870,6 +870,203 @@ pub unsafe fn encontrar_mmio(dtb: *const u8, compativel: &[u8]) -> Option<(u64, 
 }
 
 // ---------------------------------------------------------------------------
+// A tecla de energia
+// ---------------------------------------------------------------------------
+
+/// O código da tecla de energia no vocabulário que o `gpio-keys` usa — o
+/// das teclas do Linux, `KEY_POWER`.
+pub const TECLA_DE_ENERGIA: u32 = 116;
+
+/// A tecla de energia que o device tree descreve — ver
+/// [`encontrar_tecla_de_energia`]: o pino dela num PL061, e o controlador,
+/// onde ele está e por que interrupção ele avisa.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TeclaDeEnergia {
+    /// O primeiro par do `reg` do controlador, no espaço da CPU.
+    pub base: u64,
+    pub tamanho: u64,
+    /// O pino da tecla, e se apertada ela é o nível baixo
+    /// (`GPIO_ACTIVE_LOW`, o bit 0 das flags).
+    pub pino: u32,
+    pub ativa_em_baixo: bool,
+    /// A interrupção do controlador.
+    pub interrupcao: Interrupcao,
+}
+
+/// O que o primeiro percurso de [`encontrar_tecla_de_energia`] guarda de
+/// cada filho de um `gpio-keys`.
+#[derive(Clone, Copy)]
+struct Tecla {
+    no: u32,
+    codigo: Option<u32>,
+    gpio: Option<(u32, u32, u32)>,
+}
+
+/// Acha a tecla de energia: um filho de um nó `gpio-keys` filho da raiz,
+/// com `linux,code` igual a [`TECLA_DE_ENERGIA`] e um `gpios` de três
+/// células — o phandle do controlador, o pino e as flags —, e o
+/// controlador que esse phandle nomeia, que precisa ser um `arm,pl061`
+/// filho da raiz, com `#gpio-cells` igual a 2, `reg` e `interrupts` de três
+/// células. É como a máquina `virt` do QEMU, sem ACPI, descreve o botão de
+/// energia.
+///
+/// `Err` com o que falta: a máquina sem a tecla não tem botão; e a que a
+/// descreve de outro jeito — noutro controlador, por uma interrupção em vez
+/// de um pino, mais funda na árvore — também não, neste kernel.
+///
+/// Três percursos, pela razão de [`encontrar_barramento_pci`]: a ordem das
+/// propriedades dentro de um nó não é garantida. O primeiro acha a tecla,
+/// o segundo o nó do phandle dela, o terceiro lê esse nó.
+///
+/// # Safety
+///
+/// `dtb` precisa apontar para um device tree válido, ou ser nulo.
+pub unsafe fn encontrar_tecla_de_energia(dtb: *const u8) -> Result<TeclaDeEnergia, &'static str> {
+    use alloc::vec::Vec;
+
+    // Primeiro: os nós `gpio-keys` filhos da raiz, e os filhos deles. As
+    // propriedades de um nó vêm antes das dos filhos, então o grupo já é
+    // conhecido quando os filhos falam.
+    let mut grupos: Vec<u32> = Vec::new();
+    let mut teclas: Vec<Tecla> = Vec::new();
+    let mut ultimo = [0u32; MAIOR_PROFUNDIDADE];
+    let mut procurar = |prop: &Propriedade| {
+        if prop.profundidade < MAIOR_PROFUNDIDADE {
+            ultimo[prop.profundidade] = prop.no_seq;
+        }
+        if prop.profundidade == FILHO_DA_RAIZ && prop.nome == b"compatible" {
+            // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+            let lista = unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+            if lista.split(|&b| b == 0).any(|s| s == b"gpio-keys") {
+                grupos.push(prop.no_seq);
+            }
+            return;
+        }
+        if prop.profundidade != FILHO_DA_RAIZ + 1 || !grupos.contains(&ultimo[FILHO_DA_RAIZ]) {
+            return;
+        }
+        let i = match teclas.iter().position(|t| t.no == prop.no_seq) {
+            Some(i) => i,
+            None => {
+                teclas.push(Tecla {
+                    no: prop.no_seq,
+                    codigo: None,
+                    gpio: None,
+                });
+                teclas.len() - 1
+            }
+        };
+        match prop.nome {
+            // SAFETY: `prop_cabe` conferiu que há uma célula inteira.
+            b"linux,code" if prop_cabe(prop.tamanho) => {
+                teclas[i].codigo = Some(unsafe { be32(dtb, prop.dados) })
+            }
+            // Um pino só: o phandle e as duas células do PL061.
+            // SAFETY: o tamanho foi conferido — três células.
+            b"gpios" if prop.tamanho == 12 => {
+                teclas[i].gpio = Some(unsafe {
+                    (
+                        be32(dtb, prop.dados),
+                        be32(dtb, prop.dados + 4),
+                        be32(dtb, prop.dados + 8),
+                    )
+                })
+            }
+            _ => {}
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut procurar, "a tecla de energia") };
+    let tecla = teclas
+        .iter()
+        .find(|t| t.codigo == Some(TECLA_DE_ENERGIA))
+        .ok_or("o device tree nao tem a tecla de energia (gpio-keys, KEY_POWER)")?;
+    let (phandle, pino, flags) = tecla
+        .gpio
+        .ok_or("a tecla de energia nao diz o pino num controlador (gpios)")?;
+
+    // Segundo: o nó desse phandle.
+    let mut controlador: Option<(u32, usize)> = None;
+    let mut achar = |prop: &Propriedade| {
+        if controlador.is_none()
+            && (prop.nome == b"phandle" || prop.nome == b"linux,phandle")
+            && prop_cabe(prop.tamanho)
+            // SAFETY: `prop_cabe` conferiu que há uma célula inteira.
+            && unsafe { be32(dtb, prop.dados) } == phandle
+        {
+            controlador = Some((prop.no_seq, prop.profundidade));
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut achar, "o controlador da tecla de energia") };
+    let (no, profundidade) =
+        controlador.ok_or("o controlador da tecla de energia nao esta no device tree")?;
+    if profundidade != FILHO_DA_RAIZ {
+        return Err(
+            "o controlador da tecla de energia esta fundo demais na arvore para este leitor",
+        );
+    }
+
+    // Terceiro: o que o controlador diz de si.
+    let mut pl061 = false;
+    let mut celulas: Option<u32> = None;
+    let mut reg: Option<(u64, u64)> = None;
+    let mut interrupcao: Option<Interrupcao> = None;
+    let mut ler = |prop: &Propriedade| {
+        if prop.no_seq != no {
+            return;
+        }
+        match prop.nome {
+            b"compatible" => {
+                // SAFETY: o percurso garantiu que a faixa está dentro do blob.
+                let lista =
+                    unsafe { core::slice::from_raw_parts(dtb.add(prop.dados), prop.tamanho) };
+                pl061 = lista.split(|&b| b == 0).any(|s| s == b"arm,pl061");
+            }
+            // SAFETY: `prop_cabe` conferiu que há uma célula inteira.
+            b"#gpio-cells" if prop_cabe(prop.tamanho) => {
+                celulas = Some(unsafe { be32(dtb, prop.dados) })
+            }
+            // SAFETY: `prop` veio do percurso deste mesmo blob.
+            b"reg" => unsafe {
+                ler_reg(dtb, prop, |inicio, tamanho| {
+                    reg.get_or_insert((inicio, tamanho));
+                });
+            },
+            // SAFETY: o tamanho foi conferido — três células.
+            b"interrupts" if prop.tamanho == 12 => {
+                interrupcao = Some(unsafe {
+                    Interrupcao {
+                        tipo: be32(dtb, prop.dados),
+                        numero: be32(dtb, prop.dados + 4),
+                        flags: be32(dtb, prop.dados + 8),
+                    }
+                })
+            }
+            _ => {}
+        }
+    };
+    // SAFETY: delegada ao chamador.
+    unsafe { percorrer_relatando(dtb, &mut ler, "o controlador da tecla de energia") };
+    if !pl061 {
+        return Err("o controlador da tecla de energia nao e um PL061");
+    }
+    if celulas != Some(2) {
+        return Err("o PL061 da tecla nao descreve o pino com duas celulas");
+    }
+    let (base, tamanho) = reg.ok_or("o PL061 da tecla nao diz onde esta (reg)")?;
+    let interrupcao =
+        interrupcao.ok_or("o PL061 da tecla nao diz por que interrupcao avisa (interrupts)")?;
+    Ok(TeclaDeEnergia {
+        base,
+        tamanho,
+        pino,
+        ativa_em_baixo: flags & 1 != 0,
+        interrupcao,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Roteamento de interrupção
 // ---------------------------------------------------------------------------
 

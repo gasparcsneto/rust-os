@@ -340,6 +340,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         #[cfg(feature = "modo-teste")]
         crate::rede::bancada_hora::destravar();
         crate::seguranca::destravar();
+        crate::botao::destravar();
         crate::hora::destravar();
         crate::hora::civil::destravar();
         crate::virtio::teclado::destravar();

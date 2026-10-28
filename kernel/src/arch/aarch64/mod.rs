@@ -17,6 +17,7 @@
 //! Escrever a entrada para o pior dos dois casos é o que faz uma só servir
 //! aos dois. É por isso que este módulo tem assembly e o do x86 não.
 
+pub mod botao;
 pub mod contexto;
 pub(crate) mod fdt;
 pub mod gic;

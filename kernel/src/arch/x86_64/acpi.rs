@@ -35,13 +35,21 @@
 //! `SLP_TYP` do estado S5 — mora na DSDT, como o objeto `\_S5`. Ver
 //! [`energia`] e [`s5_do_aml`].
 //!
+//! # O botão de energia
+//!
+//! Também da FADT: o bloco de eventos do PM1 — o estado e a habilitação
+//! do botão fixo —, a linha do SCI e os blocos de GPE. Ver [`botao_fixo`]
+//! e `super::botao`.
+//!
 //! # O que este leitor não faz
 //!
 //! Não interpreta AML: do `\_S5` ele lê o pacote como os bytes que ele é,
 //! a declaração de nome mais comum — e se a DSDT o declara de outro jeito
 //! (dentro de um método, ou de um `If`), o desligamento pela ACPI não
-//! acontece, e a máquina para sem cortar a energia. Não acha o APIC de
-//! entrada e saída, nem lê outras tabelas.
+//! acontece, e a máquina para sem cortar a energia. Pela mesma razão, o
+//! botão de energia que a FADT diz ser de método de controle, e o do
+//! hardware reduzido, ficam sem quem os atenda. Não acha o APIC de entrada
+//! e saída, nem lê outras tabelas.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -266,6 +274,103 @@ pub fn energia() -> Result<Energia, &'static str> {
         e.s5 = s5_do_aml(&dsdt[36..]);
     }
     Ok(e)
+}
+
+/// O botão de energia fixo da ACPI, pelo que a FADT diz — ver
+/// `super::botao`: onde estão o estado e a habilitação do PM1, que têm o
+/// bit do botão; em que linha o SCI chega; como entrar no modo ACPI; e os
+/// blocos de GPE, que o kernel desliga por não ter quem os atenda.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BotaoFixo {
+    /// `PM1a_EVT_BLK`, e o `PM1b_EVT_BLK` quando há: o estado na primeira
+    /// metade de cada bloco, a habilitação na segunda.
+    pub eventos_a: Registrador,
+    pub eventos_b: Option<Registrador>,
+    /// Onde a habilitação começa dentro de cada bloco: metade do
+    /// `PM1_EVT_LEN`.
+    pub meio_do_bloco: u8,
+    /// `SCI_INT`: num PC que fala com o 8259, a linha dele em que o SCI
+    /// chega.
+    pub sci: u16,
+    /// O controle do PM1a, onde o `SCI_EN` diz se a máquina está no modo
+    /// ACPI, e a porta `SMI_CMD` e o valor `ACPI_ENABLE`, que a põem nele.
+    pub controle: Option<Registrador>,
+    pub smi_cmd: u32,
+    pub acpi_enable: u8,
+    /// Os blocos de GPE e quantos bytes cada um tem: a metade de baixo é o
+    /// estado, a de cima a habilitação, um byte por registrador.
+    pub gpe0: Option<(Registrador, u8)>,
+    pub gpe1: Option<(Registrador, u8)>,
+}
+
+/// O botão fixo do que a FADT `fadt` diz — ver [`BotaoFixo`]. `Err` com o
+/// motivo quando a máquina não o tem como recurso fixo: o botão de método
+/// de controle e o do hardware reduzido são eventos da AML, que este
+/// kernel não interpreta; sem bloco de eventos, ou com um de tamanho
+/// impossível, não há onde ler.
+pub fn botao_da_fadt(fadt: &[u8]) -> Result<BotaoFixo, &'static str> {
+    /// `PWR_BUTTON`: o botão é um dispositivo de método de controle — ou a
+    /// máquina não tem botão.
+    const BOTAO_POR_METODO: u32 = 1 << 4;
+    /// `HW_REDUCED_ACPI`.
+    const HARDWARE_REDUZIDO: u32 = 1 << 20;
+
+    let n = fadt.len();
+    if n < 116 {
+        return Err("a FADT e curta demais para dizer o botao de energia");
+    }
+    let flags = u32_em(fadt, 112).unwrap_or(0);
+    if flags & HARDWARE_REDUZIDO != 0 {
+        return Err("hardware reduzido: o botao de energia e um evento da AML");
+    }
+    if flags & BOTAO_POR_METODO != 0 {
+        return Err("o botao de energia nao e o fixo da ACPI: e da AML, ou nao existe");
+    }
+    // Os blocos estendidos da ACPI 2.0, quando há; senão os de 32 bits —
+    // a mesma escolha do controle, em `energia`.
+    let eventos_a = (n >= 160)
+        .then(|| Registrador::de(fadt, 148))
+        .flatten()
+        .or_else(|| Registrador::porta(fadt, 56))
+        .ok_or("a FADT nao tem o bloco de eventos do PM1")?;
+    let eventos_b = (n >= 172)
+        .then(|| Registrador::de(fadt, 160))
+        .flatten()
+        .or_else(|| Registrador::porta(fadt, 60));
+    let largura = fadt[88];
+    if largura < 4 || largura % 2 != 0 {
+        return Err("o bloco de eventos do PM1 tem um tamanho impossivel");
+    }
+    let gpe = |estendido: usize, legado: usize, tamanho: usize| {
+        let bytes = fadt[tamanho];
+        if bytes == 0 || bytes % 2 != 0 {
+            return None;
+        }
+        (n >= estendido + 12)
+            .then(|| Registrador::de(fadt, estendido))
+            .flatten()
+            .or_else(|| Registrador::porta(fadt, legado))
+            .map(|r| (r, bytes))
+    };
+    Ok(BotaoFixo {
+        eventos_a,
+        eventos_b,
+        meio_do_bloco: largura / 2,
+        sci: u16::from_le_bytes([fadt[46], fadt[47]]),
+        controle: (n >= 184)
+            .then(|| Registrador::de(fadt, 172))
+            .flatten()
+            .or_else(|| Registrador::porta(fadt, 64)),
+        smi_cmd: u32_em(fadt, 48).unwrap_or(0),
+        acpi_enable: fadt[52],
+        gpe0: gpe(220, 80, 92),
+        gpe1: gpe(232, 84, 93),
+    })
+}
+
+/// [`botao_da_fadt`], sobre a FADT desta máquina.
+pub fn botao_fixo() -> Result<BotaoFixo, &'static str> {
+    botao_da_fadt(da_raiz(b"FACP")?.ok_or("a ACPI nao tem FADT")?)
 }
 
 /// Os `SLP_TYP` do estado S5 — desligado — de um AML: o pacote do objeto

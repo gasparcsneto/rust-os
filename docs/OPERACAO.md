@@ -34,6 +34,7 @@ KVM ou no QEMU, ou uma nuvem que entregue os mesmos dispositivos.
 | Console | a serial COM1 (o log, para pessoas), COM2 (o canal do agente), o console virtio (agentes), TCP 7070 | a única PL011 da máquina (o canal do agente; o log sai por `log.tail`), o console virtio, TCP 7070 |
 | Vídeo | a VGA da máquina ou virtio-gpu | bochs-display ou virtio-gpu |
 | Energia | ACPI: o registrador de reinício da FADT, 0xCF9, o 8042; o S5 pela FADT e pela DSDT | PSCI `SYSTEM_RESET` e `SYSTEM_OFF` |
+| Botão de energia | o botão fixo da ACPI: o `PWRBTN` do PM1, pelo SCI numa linha do 8259 | a tecla `gpio-keys` (`KEY_POWER`) num PL061, pelo device tree |
 | Teclado | PS/2, USB (xHCI) | virtio, USB (xHCI) |
 
 Sem TPM a máquina sobe, mas nada de autoridade muda: o journal não tem
@@ -63,6 +64,7 @@ primeira máquina diz no log o que viu de cada uma.
 | Teclado | USB numa porta da raiz do xHCI — o driver não tem hub —, ou PS/2; o firmware solta o controlador, e o Duke o toma se ele não soltar | `qemu-xhci`, e a passagem numa memória comum na suíte |
 | Vídeo | o modo que o firmware deixa (o protocolo de vídeo da UEFI) | o da VGA do OVMF |
 | Energia | o registrador de reinício da FADT, 0xCF9 ou o 8042; o S5 pela FADT e pela DSDT | o mesmo ACPI |
+| Botão de energia | o botão fixo da ACPI, pelo SCI — a FADT que o diz de método de controle, e a de hardware reduzido, deixam a máquina sem botão, e o `system.info` diz por quê | o mesmo ACPI |
 | Relógio | o CMOS, e o TSC medido contra o canal 2 do PIT | o mesmo |
 
 O NVMe e a placa ficam atrás de uma porta raiz do PCIe, num barramento
@@ -413,6 +415,44 @@ diz como (`reboot_via`, `poweroff_via`); uma máquina cujo firmware não diz
 como desligar — nem o S5 da ACPI, nem a PSCI — recusa o pedido e segue
 ligada, em vez de parar as gravações e ficar parada.
 
+### O botão de energia
+
+Apertar o botão da máquina desliga como o `system.poweroff`, pelo mesmo
+caminho — e não por outro. O aperto é um evento do hardware, não uma
+autoridade: o kernel o conta, e quem pede o desligamento é o sistema — a
+autoridade local, a dos fios do kernel —, pelo gate, com o papel da linha
+`local` da política. Na política da imagem e na do exemplo de produção,
+esse papel é o `sistema`, que tem `system.power`; uma política que tire a
+permissão do papel local tira também o botão, e o aperto fica na auditoria,
+recusado (`DENY_PERMISSION`), com a máquina ligada. Daí em diante é o
+`system.poweroff`: o pedido no journal antes, meio segundo, as gravações
+paradas, o disco descarregado, e o firmware.
+
+- **Um desligamento, quantos apertos houver.** Os apertos que chegam juntos
+  viram um pedido; os que chegam com a máquina já parando — pelo botão,
+  por um comando, por uma operação administrativa — não pedem nada, e só
+  contam (`ignored`). Com um reinício a caminho, o aperto não o troca por um
+  desligamento.
+- **O que a auditoria diz.** O aperto (`power.button`, pelo kernel, com o
+  recurso dizendo como a máquina avisou — `acpi`, `gpio-keys`); a decisão
+  do gate sobre o `system.poweroff`, pelo titular `system`, com o papel da
+  linha `local`; e o pedido de desligar, no journal antes de a máquina
+  parar — ou a recusa e o motivo.
+- **Antes de o sistema estar de pé.** O botão só liga depois do journal e
+  da reconciliação da atualização; o aperto de antes — o que ligou a
+  máquina, inclusive — é limpo no hardware, e não pede nada.
+- **Sem persistência**, ou sem o meio no firmware, a energia recusa, como
+  recusa o comando, e a máquina segue ligada: cortar a energia continua
+  seguro, e segurar o botão — o desligamento forçado do chipset — também.
+- **Uma tempestade.** Uma linha que dispara seguidas vezes sem o botão, ou
+  um estado que não se limpa, desliga o botão — a linha fechada, se ninguém
+  mais a usa —, e a máquina segue; o `system.info` e a auditoria dizem por
+  quê.
+
+O `system.info` diz o botão em `power_button`: `via` (`acpi`, `gpio-keys` ou
+`nenhum`), `reason` (por que não há), `disabled` (por que foi desligado), e
+as contas: `presses`, `requests`, `ignored`, `without_button`.
+
 ## Quando algo dá errado
 
 | Sintoma | O que dizer à máquina | O que acontece |
@@ -427,6 +467,7 @@ ligada, em vez de parar as gravações e ficar parada.
 | A persistência indisponível | `system.info` | `persistence.state` e `persistence.reason`: o disco, o TPM, o journal recusado — ver [`PERSISTENCIA.md`](PERSISTENCIA.md) |
 | Por que um pedido foi recusado | `audit.tail` | quem pediu, por que processo, o papel, o recurso, o código da decisão e o motivo |
 | A máquina não responde | corte a energia | o journal e o volume do armazém são feitos para isso: o que estava confirmado volta igual, e a cadeia da auditoria continua |
+| O botão de energia não desliga | `system.info` (`power_button`), `audit.tail` | `via` e `reason` dizem se a máquina tem o botão e por que não; `disabled`, se uma tempestade o desligou; na auditoria, o aperto (`power.button`) e a decisão sobre o `system.poweroff` — recusada pela política, ou pela energia sem persistência. O comando, ou o corte de energia, seguem seguros |
 
 Cortar a energia é seguro — é o que a bancada de persistência faz centenas
 de vezes por execução, em cada fronteira de cada operação. Reiniciar pelo
@@ -530,7 +571,15 @@ da decisão como ela foi tomada.
 - **Invariantes.** A identidade do Duke e a custódia da chave dele; a
   confiança dos agentes no aperto de mão (eles fixam a pública).
 
-### O botão de energia
+### O botão de energia não faz nada
+
+**Feito no B3** — ver [O botão de energia](#o-botão-de-energia): o aperto é
+um evento, contado pelo kernel e gravado na auditoria; quem pede o
+desligamento é o sistema, a autoridade local, pelo gate e pela política —
+o mesmo `system.poweroff`, com a mesma permissão, o mesmo handler e a
+mesma energia. Nenhuma identidade nova, nenhuma autoridade nova: o botão
+não tem papel, e uma política sem `system.power` no papel local o recusa.
+O que segue é o registro da decisão como ela foi tomada.
 
 - **Problema.** O botão de energia da máquina (o evento ACPI) não faz
   nada: desligar é um comando.
