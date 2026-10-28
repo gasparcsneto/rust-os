@@ -433,6 +433,10 @@ paradas, o disco descarregado, e o firmware.
   por um comando, por uma operação administrativa — não pedem nada, e só
   contam (`ignored`). Com um reinício a caminho, o aperto não o troca por um
   desligamento.
+- **A atualização espera.** Com o desligamento a caminho — pelo botão, como
+  pelo comando —, nenhuma mudança da atualização começa: `update.stage` e
+  `system.update` são recusados (`CONFLICT`). Uma versão já armada é a que
+  o próximo boot tenta, como depois de um reinício.
 - **O que a auditoria diz.** O aperto (`power.button`, pelo kernel, com o
   recurso dizendo como a máquina avisou — `acpi`, `gpio-keys`); a decisão
   do gate sobre o `system.poweroff`, pelo titular `system`, com o papel da
@@ -444,10 +448,13 @@ paradas, o disco descarregado, e o firmware.
 - **Sem persistência**, ou sem o meio no firmware, a energia recusa, como
   recusa o comando, e a máquina segue ligada: cortar a energia continua
   seguro, e segurar o botão — o desligamento forçado do chipset — também.
-- **Uma tempestade.** Uma linha que dispara seguidas vezes sem o botão, ou
-  um estado que não se limpa, desliga o botão — a linha fechada, se ninguém
-  mais a usa —, e a máquina segue; o `system.info` e a auditoria dizem por
-  quê.
+- **Uma tempestade.** Um estado do botão que não se limpa nunca vira
+  aperto. Uma linha que dispara seguidas vezes sem o botão — ou com o
+  estado preso, no SCI em nível, como a ACPI o define — desliga o botão (a
+  linha fechada, se ninguém mais a usa), e a máquina segue; o
+  `system.info` e a auditoria dizem por quê. Num 8259 em borda — o do QEMU
+  com o OVMF —, o estado preso dá uma interrupção só, contada em
+  `without_button`.
 
 O `system.info` diz o botão em `power_button`: `via` (`acpi`, `gpio-keys` ou
 `nenhum`), `reason` (por que não há), `disabled` (por que foi desligado), e

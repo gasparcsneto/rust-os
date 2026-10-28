@@ -8087,22 +8087,26 @@ as gravações paradas, e o S5 da ACPI ou o `SYSTEM_OFF` da PSCI. Nenhuma
 identidade, nenhum papel e nenhum comando novos: uma política sem
 `system.power` no papel local recusa o botão, e o aperto fica na
 auditoria, recusado. O `xtask` confere que só o `arch` diz um aperto, que
-só o fio do botão pede, pelo gate, e que a energia continua sendo chamada
-só pelos handlers e pelas operações administrativas.
+só o fio do botão pede, pelo gate, que a energia continua sendo chamada
+só pelos handlers e pelas operações administrativas, e que o firmware só
+desliga ou reinicia pela energia — nem de dentro do próprio `arch`.
 
 Apertos juntos são um pedido; os que chegam com a máquina já parando —
 por qualquer caminho — só contam. Antes do journal e da reconciliação da
 atualização, o botão não está ligado, e o aperto de antes não pede nada.
-Sem persistência a energia recusa, como recusa o comando. Uma linha que
-dispara sem o botão, ou um estado que não se limpa, desliga o botão e a
-máquina segue. O `system.info` diz tudo em `power_button` — ver
+Sem persistência a energia recusa, como recusa o comando. Com o
+desligamento a caminho, nenhuma mudança da atualização A/B começa. Um
+estado que não se limpa nunca vira aperto; uma linha que dispara seguidas
+vezes sem o botão desliga o botão, e a máquina segue. O `system.info` diz
+tudo em `power_button` — ver
 [O botão de energia](docs/OPERACAO.md#o-botão-de-energia).
 
-Dez casos `botao:` na suíte — os leitores da FADT e do device tree contra
+Onze casos `botao:` na suíte — os leitores da FADT e do device tree contra
 tabelas e árvores montadas, o hardware do emulador programado, o aperto
 pelo gate com a auditoria e o journal, os apertos repetidos, a política que
 recusa e a autoridade do fio, as recusas da energia, o reinício a caminho,
-quatro núcleos e os comandos juntos, e a tempestade — e a bancada
+a atualização que não começa com o desligamento a caminho, quatro núcleos
+e os comandos juntos, e a tempestade — e a bancada
 `cargo xtask botao`, com o aperto de verdade do emulador (o
 `system_powerdown` do QMP) nas imagens de desenvolvimento e de produção,
 nas duas arquiteturas: o desligamento com o pedido no journal, no meio de
@@ -8110,6 +8114,47 @@ uma rajada de gravações, dois apertos, o reinício a caminho, a energia
 cortada no meio, o aperto durante o boot, sem persistência, e a política
 de produção que nega.
 
+### As mutações do botão de energia
+
+Vinte e oito mutações contra o que o botão promete — uma de cada vez, no
+repositório, contra os casos `botao:` e `energia:` da suíte (e os
+`atualizacao:`, para a última), a bancada `cargo xtask botao` e as
+invariantes do `xtask`; as que dependem da arquitetura, no ARM. O
+controle, sem mutação, passa em tudo, nas duas. **Vinte e sete
+reprovadas**; uma sobreviveu, e é equivalente no emulador.
+
+| Mutação | Reprovada por |
+|---|---|
+| a rodada chama a energia direto, sem o gate | as invariantes (`energia::preparar(` fora dos handlers; o pedido pelo kernel sumiu do botão) e quatro casos — o gate não decidiu, a política não recusou, a recusa da energia sem registro |
+| o tratador do SCI desliga a máquina no lugar de dizer o aperto | as invariantes e a bancada — a máquina desligou sem aperto nenhum no journal |
+| o tratador diz o aperto e também desliga direto (x86 e ARM) | a invariante do firmware só pela energia e a bancada, nas duas arquiteturas. Antes do `ca7b2a9` a invariante não via uma chamada de dentro do `arch`: a bancada era a única testemunha |
+| o aperto com a máquina já parando pede de novo | `botao: apertos repetidos…`, `…com o reinicio a caminho…` e a concorrência. A bancada não a pega: os registros do pedido indevido ficam na memória, e o reinício já levou o journal |
+| duas rodadas ao mesmo tempo, sem a vez | a concorrência — quatro núcleos pediram mais de um desligamento —, nas três rodadas da mutação |
+| o aperto sem a auditoria | quatro casos e a bancada — o boot seguinte não achou o aperto no journal |
+| o aperto só olha um desligamento a caminho, e não o reinício | `botao: com o reinicio a caminho…` e o cenário da bancada |
+| o SCI sem o bit do botão vira aperto | `botao: a tempestade…` |
+| o pedido de desligar sem ir ao journal antes | três casos `energia:`, dois `botao:` e a bancada do corte |
+| o botão pede o reinício no lugar do desligamento | cinco casos e a bancada — a máquina não se desligou |
+| a FADT aceita o botão de método de controle | `botao: a FADT diz o botao fixo…` |
+| a tempestade não desliga o botão (x86 e ARM) | `botao: a tempestade…`, nas duas |
+| o `PWRBTN_EN` não é habilitado | `botao: a maquina liga o aperto…` e a bancada — o aperto não chegou |
+| o estado velho do botão não é limpo (x86) | **sobreviveu**, equivalente no emulador: o PIIX4 do QEMU não guarda o `PWRBTN_STS` com o `PWRBTN_EN` desligado, e não há estado velho a limpar. A do ARM tem testemunha |
+| a borda velha da tecla não é limpa (ARM) | a bancada do aperto cedo — o PL061 guarda a borda: o aperto feito no boot contou quando o botão ligou, e a máquina se desligou antes de atender |
+| a borda de descida no lugar da de subida (ARM) | `botao: a maquina liga o aperto…` |
+| o botão liga antes do journal | a invariante da ordem do boot |
+| o tratador do SCI não limpa o estado | a bancada — o estado que não se limpa não vira aperto, e a máquina não se desligou |
+| o `system.info` não diz como o botão avisa | `botao: a maquina liga o aperto…` |
+| a rodada pede como o sistema, seja qual for o fio | `botao: a politica decide…` — no fio do tecido de segurança, a rodada não foi recusada pelo papel dele |
+| cada rodada toma um aperto só | quatro casos |
+| a interrupção do PL061 sem a borda vira aperto (ARM) | `botao: a tempestade…` |
+| o device tree aceita outra tecla (ARM) | `botao: o device tree diz a tecla…` |
+| a identidade do PL061 não confere a peça (ARM) | o mesmo caso — a PL031 do emulador passou por um PL061 |
+| a energia aceita duas ações juntas | `energia: quem nao pode ouve a recusa` e a concorrência — o botão e o comando juntos deram duas ações |
+| a atualização só recusa com o reinício a caminho | só `botao: com o desligamento pelo botao a caminho…` — o caso do B1 confere o reinício |
+
+O kernel de produção cresceu 22 120 bytes nos segmentos carregáveis no
+x86 (+0,53%) e 16 704 no ARM (+0,47%), contra o B2 (`709dd08`); o
+iniciador e os programas não mudaram.
 
 ## Barramento PCI
 

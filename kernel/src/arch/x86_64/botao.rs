@@ -36,6 +36,11 @@
 //! desligado — a habilitação zerada e, se nenhum dispositivo divide a
 //! linha, a linha fechada —, e o fio do botão registra por quê. A máquina
 //! segue; o botão, não.
+//!
+//! Isso é o SCI em nível, como a ACPI o define. Num 8259 que o firmware
+//! deixou em borda — o OVMF do QEMU zera o ELCR —, o estado preso dá uma
+//! interrupção só, e não uma tempestade: o aperto não conta, porque o
+//! estado não se limpou, e a linha fica quieta.
 
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
