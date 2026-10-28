@@ -34069,6 +34069,10 @@ static CASOS: &[Caso] = &[
         f: botao_com_o_reinicio_a_caminho_nao_pede,
     },
     Caso {
+        nome: "botao: com o desligamento pelo botao a caminho, nada da atualizacao comeca",
+        f: botao_com_o_desligamento_a_caminho_a_atualizacao_nao_comeca,
+    },
+    Caso {
         nome: "botao: apertos em varios nucleos e os comandos juntos, um desligamento so",
         f: botao_concorrencia_um_desligamento,
     },
@@ -50710,6 +50714,45 @@ fn botao_com_o_reinicio_a_caminho_nao_pede() -> Resultado {
     }
     if energia_entregue() != Some(Acao::Reiniciar) {
         return Err("o reinicio a caminho nao chegou ao fim, ou virou outro");
+    }
+    Ok(())
+}
+
+/// Com o desligamento pelo botão a caminho, nada da atualização começa —
+/// como com qualquer ação da energia a caminho: a escrita no slot inativo e
+/// a desistência de uma versão armada são recusadas pelo conflito, antes do
+/// disco; o estado da atualização no journal não muda; e a energia entrega
+/// o desligamento. Fora de um slot, a recusa diz que o kernel não veio de
+/// um.
+fn botao_com_o_desligamento_a_caminho_a_atualizacao_nao_comeca() -> Resultado {
+    use politica::Codigo;
+    let setor = [0u8; 512];
+    let _ = crate::energia::executada_de_teste();
+    let antes = crate::slots::estado_do_journal();
+    let (_, _, envelope) = botao_pedido(botao_apertar(1))?;
+    if fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
+        crate::log_error!("teste", "{}", envelope);
+        return Err("o aperto nao pediu o desligamento");
+    }
+    let escrita = crate::slots::encenar(0, &setor).map(|_| ());
+    let desistencia = crate::slots::cancelar(&"0".repeat(64)).map(|_| ());
+    let entregue = energia_entregue();
+    let no_slot = crate::slots::arranque().is_some();
+    for recusa in [escrita, desistencia] {
+        match recusa {
+            Err((Codigo::Conflict, m)) if no_slot && m.contains("desligando") => {}
+            Err((_, m)) if !no_slot && m.contains("nao veio de um slot") => {}
+            outro => {
+                crate::log_error!("teste", "{:?}", outro);
+                return Err("com o desligamento pelo botao a caminho, a atualizacao andou");
+            }
+        }
+    }
+    if entregue != Some(crate::energia::Acao::Desligar) {
+        return Err("o desligamento pelo botao nao chegou ao fim");
+    }
+    if crate::slots::estado_do_journal() != antes {
+        return Err("as recusas mudaram o estado da atualizacao");
     }
     Ok(())
 }

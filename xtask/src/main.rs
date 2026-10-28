@@ -3302,6 +3302,27 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         ],
     ),
     ("arch::desligar_a_maquina(", &["kernel/src/energia.rs"]),
+    // E de dentro do `arch` também: só a arquitetura define as duas, e
+    // nenhum outro arquivo dela as chama — o tratador do botão, ou outro
+    // qualquer, não desliga nem reinicia por fora da energia.
+    (
+        "desligar_a_maquina(",
+        &[
+            "kernel/src/energia.rs",
+            "kernel/src/arch/x86_64/mod.rs",
+            "kernel/src/arch/aarch64/mod.rs",
+        ],
+    ),
+    (
+        "reiniciar_a_maquina(",
+        &[
+            "kernel/src/energia.rs",
+            "kernel/src/main.rs",
+            "kernel/src/traps.rs",
+            "kernel/src/arch/x86_64/mod.rs",
+            "kernel/src/arch/aarch64/mod.rs",
+        ],
+    ),
     (
         "contencao::encerrar_processo(",
         &[
