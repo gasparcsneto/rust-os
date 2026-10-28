@@ -863,17 +863,22 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
             }
         }
         // A pessoa troca a própria senha antes da versão nova: a troca vai
-        // ao journal, que fica fora dos slots.
+        // ao journal, que fica fora dos slots. O teclado é o monitor do
+        // emulador, que atende uma conexão de cada vez, e o reinício não
+        // troca de emulador: esta fecha aqui, ou a de depois da versão nova
+        // fica na fila, e nenhuma tecla chega.
         let (_, _, senha) = c.pessoa_dev();
-        let mut t = super::senha::teclado(b.arch)?;
-        super::senha::terminal_atendendo(&mut m, &mut t)?;
-        let login = super::senha::entrar(&mut m, &mut t, chaves::NOME_DA_PESSOA_DEV, &senha)?;
-        if login != "ALLOW" {
-            return Err(format!("a pessoa de desenvolvimento nao entrou: {login}"));
-        }
-        let troca = super::senha::trocar(&mut m, &mut t, &senha, super::senha::SENHA_NOVA)?;
-        if troca.codigo != "ALLOW" || !troca.duravel {
-            return Err(format!("a troca da senha antes da versao nova: {troca:?}"));
+        {
+            let mut t = super::senha::teclado(b.arch)?;
+            super::senha::terminal_atendendo(&mut m, &mut t)?;
+            let login = super::senha::entrar(&mut m, &mut t, chaves::NOME_DA_PESSOA_DEV, &senha)?;
+            if login != "ALLOW" {
+                return Err(format!("a pessoa de desenvolvimento nao entrou: {login}"));
+            }
+            let troca = super::senha::trocar(&mut m, &mut t, &senha, super::senha::SENHA_NOVA)?;
+            if troca.codigo != "ALLOW" || !troca.duravel {
+                return Err(format!("a troca da senha antes da versao nova: {troca:?}"));
+            }
         }
         let antes = p::persistencia_de(&mut m)?;
 
