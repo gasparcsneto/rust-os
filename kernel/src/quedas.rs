@@ -124,6 +124,19 @@ pub enum Ponto {
     /// O nascimento da identidade: as duas cópias escritas, e a chave
     /// ainda não em uso — a persistência nem começou.
     IdentidadeGravada = 29,
+    /// A troca da própria senha: as três senhas digitadas, e nada
+    /// conferido ainda — nem a sessão, nem a atual, nem a nova.
+    TrocaDigitada = 30,
+    /// A troca da própria senha: a atual conferida, a nova aceita e a
+    /// credencial nova calculada, e a decisão ainda não refeita com a
+    /// ordem das gravações na mão.
+    SenhaConferida = 31,
+    /// A troca da própria senha: a decisão feita, a credencial nova em
+    /// memória e a decisão na cadeia da auditoria — e nada no journal.
+    TrocaAutorizada = 32,
+    /// A troca da própria senha: o registro dela confirmado pela âncora, e
+    /// a resposta à pessoa ainda não dada.
+    TrocaGravada = 33,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -242,6 +255,10 @@ pub fn aqui(p: Ponto) {
             | Ponto::IdentidadeSelada
             | Ponto::PrimeiraCopia
             | Ponto::IdentidadeGravada
+            | Ponto::TrocaDigitada
+            | Ponto::SenhaConferida
+            | Ponto::TrocaAutorizada
+            | Ponto::TrocaGravada
     );
     if p == Ponto::LoteNoVolume {
         // A gravação de estado que confirmaria o lote ainda não começou: a

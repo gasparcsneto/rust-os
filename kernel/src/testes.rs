@@ -14336,6 +14336,1138 @@ fn pessoas_estados_nao_se_confundem() -> Resultado {
 }
 
 // ---------------------------------------------------------------------------
+// senha: a pessoa troca a própria senha
+// ---------------------------------------------------------------------------
+
+/// A senha nova dos casos da troca: do tamanho de uma senha, e só com o que
+/// se digita num console.
+const SENHA_NOVA: &str = "uma senha nova de teste";
+/// Outra, para quando duas trocas disputam a mesma credencial.
+const OUTRA_SENHA_NOVA: &str = "outra senha nova de teste";
+
+/// A senha da suíte, como texto.
+fn senha_de_teste() -> &'static str {
+    core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("")
+}
+
+/// Digita a troca inteira num console: `senha`, a atual, a nova e a nova de
+/// novo, cada uma com o Enter.
+fn digitar_a_troca(console: crate::pessoas::Console, atual: &str, nova: &str, de_novo: &str) {
+    digitar_no_console(console, "senha\n");
+    digitar_no_console(console, &alloc::format!("{atual}\n"));
+    digitar_no_console(console, &alloc::format!("{nova}\n"));
+    digitar_no_console(console, &alloc::format!("{de_novo}\n"));
+}
+
+/// A credencial de agora da pessoa `id`.
+fn credencial_da(
+    id: sigilo::pessoas::IdPessoa,
+) -> Result<sigilo::credencial::Credencial, &'static str> {
+    crate::pessoas::pessoa(id)
+        .map(|p| p.credencial)
+        .ok_or("a pessoa do caso saiu do registro")
+}
+
+/// Os desfechos da troca da própria senha gravados depois de `seq`.
+fn trocas_depois(seq: u64) -> alloc::vec::Vec<(u64, politica::auditoria::Evento)> {
+    registros_depois(seq, |e| e.metodo == "credential.change_self")
+}
+
+/// O único desfecho da troca gravado depois de `seq`, com o código
+/// `codigo` e o motivo `motivo` no detalhe — ou o erro.
+fn uma_troca_gravada(
+    seq: u64,
+    codigo: politica::Codigo,
+    motivo: &str,
+) -> Result<politica::auditoria::Evento, &'static str> {
+    let trocas = trocas_depois(seq);
+    match trocas.as_slice() {
+        [(_, e)] if e.codigo == codigo && e.detalhe.contains(motivo) => Ok(e.clone()),
+        outras => {
+            for (_, e) in outras {
+                crate::log_error!("teste", "{:?}", e);
+            }
+            crate::log_error!("teste", "esperado {} com `{}`", codigo.nome(), motivo);
+            Err("a troca nao gravou o desfecho esperado, uma vez")
+        }
+    }
+}
+
+/// Nenhum texto da auditoria, do log, do histórico do teclado e do
+/// `system.info` contém nenhuma das `senhas`.
+fn nenhuma_senha_em_lugar_nenhum(senhas: &[&str]) -> Resultado {
+    let na_auditoria = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .any(|r| {
+                let e = &r.evento;
+                senhas.iter().any(|s| {
+                    e.agente.contains(s)
+                        || e.recurso.contains(s)
+                        || e.detalhe.contains(s)
+                        || e.metodo.contains(s)
+                        || e.papel.contains(s)
+                })
+            })
+    })
+    .unwrap_or(false);
+    if na_auditoria {
+        return Err("uma senha foi para a auditoria");
+    }
+    for (comando, params) in [
+        ("log.tail", r#"{"count":64}"#),
+        ("system.info", "{}"),
+        ("person.registry", "{}"),
+    ] {
+        // A forma escrita de uma credencial começa assim: nenhum relatório
+        // a mostra — nem a de agora, nem a de antes.
+        let r = chamar(comando, params)?;
+        if senhas.iter().any(|s| r.contains(s)) || r.contains("argon2id:m=") {
+            crate::log_error!("teste", "{}: {}", comando, r);
+            return Err("uma senha, ou um verificador, saiu num relatorio");
+        }
+    }
+    let mut historico = alloc::string::String::new();
+    while let Some(c) = crate::teclado::observar() {
+        historico.push(c);
+        let _ = crate::teclado::ler();
+    }
+    if senhas.iter().any(|s| historico.contains(s)) {
+        return Err("uma senha entrou no historico do teclado");
+    }
+    Ok(())
+}
+
+/// A troca de verdade, pelo console físico.
+///
+/// - `senha` pede a atual, a nova e a nova de novo, sem eco: nem na tela,
+///   nem na árvore semântica, nem no histórico do teclado; um agente não
+///   edita nem confirma essas linhas;
+/// - a troca é gravada uma vez, como da pessoa: o titular, a sessão, o
+///   papel, o recurso — a própria pessoa — e os parâmetros de pedido
+///   nenhum;
+/// - a pessoa é a mesma, a credencial nova tem o custo das novas e outro
+///   sal; a senha antiga não entra mais, a nova entra, e a sessão aberta
+///   continua;
+/// - o journal leva o registro da operação — o marcador, o verificador
+///   novo e a decisão, no mesmo registro —, sem senha nenhuma dentro;
+/// - repor o journal sobre a imagem, como o boot, dá a senha nova, e não a
+///   antiga;
+/// - a troca concluída não se repete: as mesmas senhas trazem a prova
+///   velha;
+/// - o sal é sorteado: a troca seguinte não repete nenhum dos de antes.
+fn senha_a_pessoa_troca_a_propria() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::{Console, RecusaDeLogin, autenticar};
+    use crate::ui::Origem;
+    use politica::auditoria::Titular;
+    use sigilo::credencial::{Credencial, Custo};
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    let ana = crate::pessoas::registrar_de_teste("troca-ana", "operador", SENHA_DE_TESTE);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let sessao = crate::interpretador::entrar_para_teste(Console::Fisico, "troca-ana", "operador");
+    let resultado = (|| -> Resultado {
+        let antes = crate::pessoas::pessoa(ana).ok_or("a pessoa do caso nao esta no registro")?;
+        let atual = senha_de_teste();
+        let seq = seq_da_auditoria();
+        digitar_no_console(Console::Fisico, "senha\n");
+        if crate::interpretador::modo() != Modo::SenhaAtual {
+            return Err("`senha` nao pediu a senha atual");
+        }
+        // A meio da atual: a árvore não a vê, o agente não a edita nem a
+        // confirma, e uma tecla de verdade não entra no histórico.
+        digitar_no_console(Console::Fisico, &atual[..6]);
+        if crate::interpretador::com_valor(|v| !v.is_empty()) {
+            return Err("a arvore viu a senha atual");
+        }
+        if crate::interpretador::definir("outra").is_ok() {
+            return Err("um agente editou a linha da senha atual");
+        }
+        if !crate::interpretador::confirmar(Origem::Agente(0)).is_empty()
+            || crate::interpretador::modo() != Modo::SenhaAtual
+        {
+            return Err("um agente confirmou a senha atual");
+        }
+        crate::teclado::esvaziar();
+        crate::teclado::evento(30, true); // `a`
+        crate::teclado::evento(30, false);
+        if crate::teclado::observar().is_some() {
+            return Err("uma tecla digitada durante a troca entrou no historico");
+        }
+        let _ = crate::teclado::ler();
+        digitar_no_console(Console::Fisico, &alloc::format!("{}\n", &atual[6..]));
+        if crate::interpretador::modo() != Modo::SenhaNova {
+            return Err("a senha atual nao levou a nova");
+        }
+        digitar_no_console(Console::Fisico, &alloc::format!("{SENHA_NOVA}\n"));
+        if crate::interpretador::modo() != Modo::SenhaDeNovo {
+            return Err("a senha nova nao levou a confirmacao");
+        }
+        if crate::interpretador::com_valor(|v| !v.is_empty())
+            || crate::interpretador::definir("x").is_ok()
+        {
+            return Err("a confirmacao apareceu na arvore, ou se editou pela arvore");
+        }
+        digitar_no_console(Console::Fisico, &alloc::format!("{SENHA_NOVA}\n"));
+        if crate::interpretador::modo() != Modo::Comando {
+            return Err("a troca deixou o console preso");
+        }
+        // Gravada uma vez, como da pessoa, sobre ela mesma.
+        let e = uma_troca_gravada(seq, politica::Codigo::Allow, "trocada")?;
+        if e.titular != Titular::Pessoa
+            || e.agente != ana.texto()
+            || e.recurso != ana.texto()
+            || e.sessao_de_pessoa != Some(sessao.0)
+            || e.papel != "operador"
+            || e.parametros != politica::auditoria::resumo_dos_parametros(&[])
+            || !e.detalhe.contains("console")
+        {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a troca nao foi gravada como da pessoa, sobre ela mesma");
+        }
+        // A mesma pessoa, com a credencial das novas.
+        let depois = crate::pessoas::pessoa(ana).ok_or("a pessoa saiu do registro")?;
+        if (depois.id, &depois.nome, &depois.papel, depois.estado)
+            != (antes.id, &antes.nome, &antes.papel, antes.estado)
+        {
+            return Err("a troca mudou a pessoa");
+        }
+        let Credencial::Senha { sal: sal_antes, .. } = antes.credencial;
+        match depois.credencial {
+            Credencial::Senha { custo, sal, .. } if custo == Custo::PADRAO && sal != sal_antes => {}
+            _ => return Err("a credencial nova nao tem o custo das novas e um sal novo"),
+        }
+        // A antiga não entra; a nova entra; a sessão aberta continua.
+        if autenticar(Console::Terminal(0), "troca-ana", SENHA_DE_TESTE)
+            != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("a senha antiga entrou depois da troca");
+        }
+        let nova = autenticar(Console::Terminal(0), "troca-ana", SENHA_NOVA.as_bytes())
+            .map_err(|_| "a senha nova nao entrou")?;
+        if pessoa_da_sessao(sessao)? != ana || pessoa_da_sessao(nova)? != ana {
+            return Err("a troca acabou a sessao aberta, ou a nova e de outra pessoa");
+        }
+        // A tela: a resposta, e senha nenhuma.
+        if crate::tela::tela().is_some() {
+            let arvore = chamar("ui.tree", "{}")?;
+            let (console, _) = console_da_arvore(&arvore)?;
+            let texto = texto_do_console(&console)?;
+            if texto.contains(atual)
+                || texto.contains(SENHA_NOVA)
+                || !texto.contains("senha trocada")
+            {
+                crate::log_error!("teste", "{}", texto);
+                return Err("uma senha apareceu na tela, ou a resposta nao");
+            }
+        }
+        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA])?;
+
+        // O journal: a operação, com o verificador novo e a decisão no mesmo
+        // registro, e senha nenhuma dentro.
+        let registros = registros_do_journal()?;
+        let marcador = |e: &&[u8]| {
+            diario::estado::ler_campos(e).is_ok_and(|c| {
+                c.first() == Some(&&diario::estado::tipo::OPERACAO.to_le_bytes()[..])
+                    && c.get(1) == Some(&&b"credential.change_self"[..])
+                    && c.get(2) == Some(&ana.texto().as_bytes())
+            })
+        };
+        let r = registros
+            .iter()
+            .rev()
+            .find(|r| {
+                r.tipo == diario::estado::tipo::OPERACAO
+                    && crate::persistencia::entradas_de_teste(r)
+                        .is_ok_and(|es| es.iter().any(marcador))
+            })
+            .ok_or("a troca nao esta no journal")?;
+        let linha = sigilo::pessoas::linha(&depois);
+        let leva_a_credencial = crate::persistencia::entradas_de_teste(r)?.iter().any(|e| {
+            diario::estado::ler_campos(e).is_ok_and(|c| {
+                c.first() == Some(&&diario::estado::tipo::CREDENCIAL_ROTACIONADA.to_le_bytes()[..])
+                    && c.get(1) == Some(&linha.as_bytes())
+            })
+        });
+        if !leva_a_credencial {
+            return Err("o registro da troca nao leva a credencial nova");
+        }
+        let decisao = auditoria_do_registro(r)?.iter().any(|(_, ev)| {
+            ev.metodo == "credential.change_self"
+                && ev.codigo == politica::Codigo::Allow
+                && ev.recurso == ana.texto()
+        });
+        if !decisao {
+            return Err("a decisao da troca nao foi no registro dela");
+        }
+        let tem = |agulha: &[u8]| r.conteudo.windows(agulha.len()).any(|w| w == agulha);
+        if tem(atual.as_bytes()) || tem(SENHA_NOVA.as_bytes()) {
+            return Err("uma senha foi para o journal");
+        }
+
+        // O boot: a imagem, e o journal por cima — a senha nova, e não a
+        // antiga.
+        estado_do_journal()?;
+        let reposta = crate::pessoas::todas()
+            .into_iter()
+            .find(|p| p.nome == "troca-ana")
+            .ok_or("o journal nao repos a pessoa da troca")?;
+        if reposta.credencial != depois.credencial || reposta.id != ana {
+            return Err("o journal reposto nao tem a credencial nova");
+        }
+        if autenticar(Console::Terminal(1), "troca-ana", SENHA_DE_TESTE)
+            != Err(RecusaDeLogin::NaoConfere)
+            || autenticar(Console::Terminal(1), "troca-ana", SENHA_NOVA.as_bytes()).is_err()
+        {
+            return Err("depois de repor o journal, a senha antiga entra ou a nova nao");
+        }
+
+        // A reposição recarregou o registro, e com ele as sessões: uma nova,
+        // da mesma pessoa, para o que segue.
+        let sessao = crate::pessoas::sessao_de_teste(Console::Fisico, "troca-ana", "operador");
+
+        // A troca concluída não se repete: as mesmas senhas de novo trazem
+        // a prova velha, que não confere mais — nada muda.
+        let r = crate::pessoas::trocar_a_propria_senha(
+            Console::Fisico,
+            sessao,
+            SENHA_DE_TESTE,
+            SENHA_NOVA.as_bytes(),
+            SENHA_NOVA.as_bytes(),
+        );
+        if !matches!(&r, Err((politica::Codigo::DenyNotAuthenticated, m)) if m.contains("nao confere"))
+            || credencial_da(ana)? != depois.credencial
+        {
+            return Err("a troca concluida se repetiu com a prova velha");
+        }
+
+        // O sal é sorteado a cada troca: a seguinte, da mesma pessoa, não
+        // repete o da anterior.
+        crate::pessoas::trocar_a_propria_senha(
+            Console::Fisico,
+            sessao,
+            SENHA_NOVA.as_bytes(),
+            OUTRA_SENHA_NOVA.as_bytes(),
+            OUTRA_SENHA_NOVA.as_bytes(),
+        )
+        .map_err(|_| "a segunda troca nao valeu")?;
+        let Credencial::Senha {
+            sal: sal_da_primeira,
+            ..
+        } = depois.credencial;
+        match credencial_da(ana)? {
+            Credencial::Senha { sal, .. } if sal != sal_da_primeira && sal != sal_antes => {}
+            _ => return Err("a segunda troca repetiu um sal: ele nao e sorteado"),
+        }
+        Ok(())
+    })();
+    de_volta_a_imagem();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// O que não troca, e não muda nada: a senha atual errada; a nova curta,
+/// diferente da confirmação, ou igual à atual; a linha vazia em qualquer
+/// passo, que desiste sem conferir nada; `senha` com algo na linha. E a
+/// janela de tentativas do console, a mesma do login: a troca não é um
+/// jeito de testar palpites que o login limita.
+fn senha_a_prova_a_nova_e_a_desistencia() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::{Console, RecusaDeLogin, TENTATIVAS, autenticar};
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    let ana = crate::pessoas::registrar_de_teste("troca-bea", "operador", SENHA_DE_TESTE);
+    const CONSOLE: Console = Console::Terminal(1);
+    crate::interpretador::abrir_console(CONSOLE);
+    crate::interpretador::entrar_para_teste(CONSOLE, "troca-bea", "operador");
+    let resultado = (|| -> Resultado {
+        let original = credencial_da(ana)?;
+        let atual = senha_de_teste();
+        let mesma = |quem: &'static str| -> Resultado {
+            if credencial_da(ana)? != original {
+                crate::log_error!("teste", "{}", quem);
+                return Err("uma troca recusada mudou a credencial");
+            }
+            Ok(())
+        };
+        // A atual errada.
+        let seq = seq_da_auditoria();
+        digitar_a_troca(CONSOLE, "nao e a senha dela", SENHA_NOVA, SENHA_NOVA);
+        uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "senha atual nao confere")?;
+        mesma("a atual errada")?;
+        // A nova curta, a confirmação diferente, a nova igual à atual.
+        for (nova, de_novo, motivo) in [
+            ("curta-11ch", "curta-11ch", "menos de 12"),
+            (SENHA_NOVA, OUTRA_SENHA_NOVA, "confirmacao nao conferem"),
+            (atual, atual, "mesma que a atual"),
+        ] {
+            let seq = seq_da_auditoria();
+            digitar_a_troca(CONSOLE, atual, nova, de_novo);
+            uma_troca_gravada(seq, Codigo::InvalidArgument, motivo)?;
+            mesma(motivo)?;
+        }
+        // A linha vazia, em cada passo: desiste, sem gravar nada, sem
+        // contar tentativa, e o teclado volta a gravar o histórico.
+        for passos in [
+            &["senha\n", "\n"][..],
+            &["senha\n", "x\n", "\n"][..],
+            &["senha\n", "x\n", "y\n", "\n"][..],
+        ] {
+            let seq = seq_da_auditoria();
+            for p in passos {
+                digitar_no_console(CONSOLE, p);
+            }
+            if crate::interpretador::pedindo_senha(CONSOLE) || !trocas_depois(seq).is_empty() {
+                return Err("a desistencia nao voltou ao comando, ou gravou uma troca");
+            }
+            mesma("a desistencia")?;
+        }
+        crate::teclado::esvaziar();
+        crate::teclado::evento(30, true);
+        crate::teclado::evento(30, false);
+        if crate::teclado::observar() != Some('a') {
+            return Err("o historico nao voltou depois da desistencia");
+        }
+        let _ = crate::teclado::ler();
+        // `senha` com algo na linha: nada é pedido, nada é usado.
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, &alloc::format!("senha {SENHA_NOVA}\n"));
+        if crate::interpretador::pedindo_senha(CONSOLE) || !trocas_depois(seq).is_empty() {
+            return Err("`senha` com algo na linha pediu senhas ou gravou uma troca");
+        }
+        mesma("senha com algo na linha")?;
+        // Quatro tentativas até aqui — as desistências não contam. A quinta
+        // ainda confere; a sexta, nem com a senha certa: RATE_LIMIT. E o
+        // login do mesmo console também para; o de outro, não.
+        for _ in 4..TENTATIVAS.quantos {
+            let seq = seq_da_auditoria();
+            digitar_a_troca(CONSOLE, "ainda errada", SENHA_NOVA, SENHA_NOVA);
+            uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "senha atual nao confere")?;
+        }
+        let seq = seq_da_auditoria();
+        digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
+        uma_troca_gravada(seq, Codigo::RateLimit, "tentativas demais")?;
+        mesma("o limite")?;
+        let limite = registros_depois(seq, |e| {
+            e.metodo == "credential.change_self"
+                && e.codigo == Codigo::RateLimit
+                && e.recurso == "terminal:1"
+        });
+        if limite.is_empty() {
+            return Err("o limite da troca nao foi gravado com o console");
+        }
+        if autenticar(CONSOLE, "troca-bea", SENHA_DE_TESTE) != Err(RecusaDeLogin::Tentativas) {
+            return Err("o limite da troca nao vale para o login do mesmo console");
+        }
+        autenticar(Console::Terminal(2), "troca-bea", SENHA_DE_TESTE)
+            .map_err(|_| "o limite de um console prendeu outro")?;
+        if crate::interpretador::modo() == Modo::SenhaAtual {
+            return Err("o console fisico entrou na troca de outro console");
+        }
+        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA, OUTRA_SENHA_NOVA])
+    })();
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// A política de agora sem `credential.change_self` em papel nenhum.
+fn politica_sem_a_troca() -> Result<politica::Politica, &'static str> {
+    let texto = crate::autorizacao::com_politica(|p| p.texto());
+    let sem: alloc::string::String = texto
+        .lines()
+        .map(|l| alloc::format!("{}\n", l.replace(" credential.change_self", "")))
+        .collect();
+    politica::Politica::ler(&sem).map_err(|_| "a politica sem a troca nao se le")
+}
+
+/// Só a própria, com a sessão e com a permissão.
+///
+/// - sem ninguém entrado, `senha` é `DENY_NOT_AUTHENTICATED`, gravado com
+///   o console, e nada é pedido; um agente não a confirma;
+/// - a política sem `credential.change_self`: `DENY_PERMISSION`, antes de
+///   pedir — e também quando ela muda no meio, entre as senhas e a troca;
+/// - o `sistema` como papel de pessoa não tem a permissão — a autoridade
+///   máxima não é curinga —, e o teto de um administrador não se exerce:
+///   nem pelo console, nem chamando a troca direto;
+/// - a credencial suspensa não troca;
+/// - a troca de uma pessoa não toca a de outra; e a sessão de outra
+///   pessoa não serve: a prova é contra a credencial da dona da sessão;
+/// - uma sessão que acabou, ou que nunca existiu, e a pessoa revogada não
+///   trocam nada.
+fn senha_so_a_propria_com_a_sessao_e_a_permissao() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::{Console, IdSessao, autenticar};
+    use crate::ui::Origem;
+    use politica::Codigo;
+    use politica::auditoria::Titular;
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    const OUTRA_SENHA: &[u8] = b"a senha de outra pessoa";
+    let cai = crate::pessoas::registrar_de_teste("troca-cai", "operador", SENHA_DE_TESTE);
+    let dina = crate::pessoas::registrar_de_teste("troca-dina", "observador", OUTRA_SENHA);
+    let alta = crate::pessoas::registrar_de_teste("troca-alta", "sistema", SENHA_DE_TESTE);
+    let teto = crate::pessoas::registrar_de_teste("troca-teto", "administrador", SENHA_DE_TESTE);
+    const CONSOLE: Console = Console::Terminal(2);
+    let resultado = (|| -> Resultado {
+        let atual = senha_de_teste();
+        // Sem ninguém entrado.
+        crate::interpretador::abrir_console(CONSOLE);
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        let e = uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "ninguem entrou")?;
+        if e.titular != Titular::Anonimo || e.recurso != "terminal:2" {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a troca sem login nao foi gravada com o console");
+        }
+        if crate::interpretador::pedindo_senha(CONSOLE) {
+            return Err("sem ninguem entrado, `senha` pediu uma senha");
+        }
+        // Um agente não confirma `senha`, nem com a pessoa no console.
+        crate::interpretador::abrir_console(Console::Fisico);
+        crate::interpretador::entrar_para_teste(Console::Fisico, "troca-cai", "operador");
+        crate::interpretador::definir("senha").map_err(|_| "a linha nao aceitou `senha`")?;
+        let seq = seq_da_auditoria();
+        crate::interpretador::confirmar(Origem::Agente(0));
+        if crate::interpretador::modo() != Modo::Comando || !trocas_depois(seq).is_empty() {
+            return Err("um agente comecou a troca da senha da pessoa");
+        }
+        crate::interpretador::desativar_para_teste();
+
+        // A política sem a permissão: recusada antes de pedir.
+        let sessao = crate::interpretador::entrar_para_teste(CONSOLE, "troca-cai", "operador");
+        let original = credencial_da(cai)?;
+        let sem = politica_sem_a_troca()?;
+        com_a_politica(sem, || {
+            let seq = seq_da_auditoria();
+            digitar_no_console(CONSOLE, "senha\n");
+            let e = uma_troca_gravada(seq, Codigo::DenyPermission, "nao tem a permissao")?;
+            if e.agente != cai.texto() || e.sessao_de_pessoa != Some(sessao.0) {
+                return Err("a recusa da politica nao foi gravada como da pessoa");
+            }
+            if crate::interpretador::pedindo_senha(CONSOLE) {
+                return Err("sem a permissao, `senha` pediu uma senha");
+            }
+            Ok(())
+        })?;
+        // A política muda no meio: entre as senhas e a troca.
+        fn sem_a_troca() {
+            if let Ok(p) = politica_sem_a_troca() {
+                crate::autorizacao::restaurar_politica(p);
+            }
+        }
+        let antes = crate::autorizacao::com_politica(|p| p.clone());
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_a_troca));
+        let seq = seq_da_auditoria();
+        digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes);
+        uma_troca_gravada(seq, Codigo::DenyPermission, "nao tem a permissao")?;
+        if credencial_da(cai)? != original {
+            return Err("a politica mudada no meio nao impediu a troca");
+        }
+        autenticar(Console::Terminal(3), "troca-cai", SENHA_DE_TESTE)
+            .map_err(|_| "a senha de antes nao entra depois da troca recusada")?;
+
+        // O sistema como papel de pessoa, e o teto de um administrador.
+        for (nome, papel, codigo) in [
+            ("troca-alta", "sistema", Codigo::DenyPermission),
+            ("troca-teto", "administrador", Codigo::DenyRole),
+        ] {
+            crate::interpretador::abrir_console(CONSOLE);
+            let s = crate::interpretador::entrar_para_teste(CONSOLE, nome, papel);
+            let seq = seq_da_auditoria();
+            digitar_no_console(CONSOLE, "senha\n");
+            uma_troca_gravada(seq, codigo, "")?;
+            if crate::interpretador::pedindo_senha(CONSOLE) {
+                return Err("o sistema, ou o teto, chegou a pedir a senha");
+            }
+            // Nem chamando a troca direto, sem o console, com a senha certa
+            // na mão: a decisão é da troca também.
+            let seq = seq_da_auditoria();
+            let r = crate::pessoas::trocar_a_propria_senha(
+                CONSOLE,
+                s,
+                SENHA_DE_TESTE,
+                OUTRA_SENHA_NOVA.as_bytes(),
+                OUTRA_SENHA_NOVA.as_bytes(),
+            );
+            if !matches!(r, Err((c, _)) if c == codigo) {
+                return Err("chamada direto, a troca passou por cima da decisao");
+            }
+            uma_troca_gravada(seq, codigo, "")?;
+        }
+        for id in [alta, teto] {
+            if crate::pessoas::pessoa(id).map(|p| p.credencial)
+                != Some(crate::pessoas::credencial_de_teste(SENHA_DE_TESTE))
+            {
+                return Err("a credencial do sistema ou do teto mudou");
+            }
+        }
+
+        // A credencial suspensa não troca.
+        crate::interpretador::abrir_console(CONSOLE);
+        let sessao = crate::interpretador::entrar_para_teste(CONSOLE, "troca-cai", "operador");
+        let alvo = crate::contencao::Alvo::Pessoa(cai);
+        crate::contencao::conter(&alvo).map_err(|_| "a credencial nao se suspendeu")?;
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        let suspensa = uma_troca_gravada(seq, Codigo::DenyCredential, "suspensa");
+        crate::contencao::soltar(&alvo);
+        suspensa?;
+
+        // A própria, e não a de outra pessoa: a troca da cai não toca a da
+        // dina, e a sessão da dina não troca nada com a senha da cai.
+        let da_outra = credencial_da(dina)?;
+        let seq = seq_da_auditoria();
+        digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
+        let e = uma_troca_gravada(seq, Codigo::Allow, "trocada")?;
+        if e.recurso != cai.texto() || credencial_da(dina)? != da_outra {
+            return Err("a troca de uma pessoa alcancou a de outra");
+        }
+        let s_dina =
+            crate::pessoas::sessao_de_teste(Console::Terminal(3), "troca-dina", "observador");
+        let seq = seq_da_auditoria();
+        let r = crate::pessoas::trocar_a_propria_senha(
+            Console::Terminal(3),
+            s_dina,
+            SENHA_NOVA.as_bytes(),
+            OUTRA_SENHA_NOVA.as_bytes(),
+            OUTRA_SENHA_NOVA.as_bytes(),
+        );
+        let e = uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "senha atual nao confere")?;
+        if !matches!(r, Err((Codigo::DenyNotAuthenticated, _)))
+            || e.recurso != dina.texto()
+            || credencial_da(dina)? != da_outra
+        {
+            return Err("a sessao de outra pessoa trocou alguma coisa com a senha da cai");
+        }
+        autenticar(Console::Terminal(0), "troca-dina", OUTRA_SENHA)
+            .map_err(|_| "a senha da outra pessoa deixou de entrar")?;
+
+        // A sessão que acabou, a que nunca existiu, e a pessoa revogada.
+        crate::pessoas::revogar_sessao(sessao).map_err(|_| "a sessao nao se revogou")?;
+        let nunca = IdSessao([0x5b; 8]);
+        for s in [sessao, nunca] {
+            let seq = seq_da_auditoria();
+            let r = crate::pessoas::trocar_a_propria_senha(
+                CONSOLE,
+                s,
+                SENHA_NOVA.as_bytes(),
+                OUTRA_SENHA_NOVA.as_bytes(),
+                OUTRA_SENHA_NOVA.as_bytes(),
+            );
+            if !matches!(r, Err((Codigo::DenyNotAuthenticated, _))) {
+                return Err("uma sessao que acabou, ou que nunca existiu, trocou uma senha");
+            }
+            uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "a sessao acabou")?;
+        }
+        let depois = credencial_da(cai)?;
+        crate::pessoas::revogar_pessoa(dina).map_err(|_| "a pessoa nao se revogou")?;
+        let r = crate::pessoas::trocar_a_propria_senha(
+            Console::Terminal(3),
+            s_dina,
+            OUTRA_SENHA,
+            OUTRA_SENHA_NOVA.as_bytes(),
+            OUTRA_SENHA_NOVA.as_bytes(),
+        );
+        if !matches!(r, Err((Codigo::DenyNotAuthenticated, _)))
+            || credencial_da(dina)? != da_outra
+            || credencial_da(cai)? != depois
+        {
+            return Err("a pessoa revogada trocou a senha");
+        }
+        nenhuma_senha_em_lugar_nenhum(&[atual, SENHA_NOVA, OUTRA_SENHA_NOVA])
+    })();
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::contencao::esquecer_de_teste();
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// A gravação, o journal e a máquina que vai.
+///
+/// - sem a persistência, nada é pedido: `ERROR`, gravado;
+/// - a gravação que falha: a credencial de antes volta — a senha atual
+///   continua, a nova não entra —, o contador do TPM não anda, e a
+///   persistência fica indisponível;
+/// - o journal recusado: nenhuma credencial vale, e a troca é
+///   `DENY_NOT_AUTHENTICATED`;
+/// - o boot recusado pela atualização A/B: sem a autoridade dele, nada
+///   troca;
+/// - com o desligamento pelo botão a caminho: `CONFLICT`, e nada muda.
+fn senha_a_gravacao_o_journal_e_a_maquina_que_vai() -> Resultado {
+    use crate::pessoas::{Console, RecusaDeLogin, autenticar};
+    use politica::Codigo;
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    let ana = crate::pessoas::registrar_de_teste("troca-eva", "operador", SENHA_DE_TESTE);
+    const CONSOLE: Console = Console::Terminal(3);
+    crate::interpretador::abrir_console(CONSOLE);
+    crate::interpretador::entrar_para_teste(CONSOLE, "troca-eva", "operador");
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        if anterior != crate::persistencia::Estado::Disponivel {
+            return Err("a suite roda com a persistencia de pe");
+        }
+        let original = credencial_da(ana)?;
+        let atual = senha_de_teste();
+        // Sem a persistência: nada é pedido.
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Indisponivel(
+            "indisponivel pela suite",
+        ));
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        uma_troca_gravada(seq, Codigo::Error, "persistencia indisponivel")?;
+        if crate::interpretador::pedindo_senha(CONSOLE) {
+            return Err("sem a persistencia, `senha` pediu uma senha");
+        }
+        // A gravação que falha.
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let antes = registros_do_journal()?.len();
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let seq = seq_da_auditoria();
+        digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        // A decisão, gravada antes da gravação — que ia levá-la junto —, e
+        // a falha depois dela: como numa operação administrativa.
+        let gravadas: alloc::vec::Vec<_> = trocas_depois(seq)
+            .into_iter()
+            .map(|(_, e)| (e.codigo, e.detalhe))
+            .collect();
+        match gravadas.as_slice() {
+            [(Codigo::Allow, _), (Codigo::Error, motivo)]
+                if motivo.contains("nao ficou gravada") => {}
+            outras => {
+                crate::log_error!("teste", "{:?}", outras);
+                return Err("a troca que nao se gravou nao disse a falha depois da decisao");
+            }
+        }
+        if credencial_da(ana)? != original {
+            return Err("a troca nao gravada ficou valendo");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador {
+            return Err("o contador do TPM andou sem a troca no disco");
+        }
+        if crate::persistencia::estado() == crate::persistencia::Estado::Disponivel {
+            return Err("a persistencia continuou disponivel depois de a troca nao se gravar");
+        }
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if registros_do_journal()?.len() != antes {
+            return Err("a troca que falhou deixou registro no journal");
+        }
+        if autenticar(Console::Terminal(0), "troca-eva", SENHA_NOVA.as_bytes())
+            != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("a senha da troca que falhou entrou");
+        }
+        autenticar(Console::Terminal(0), "troca-eva", SENHA_DE_TESTE)
+            .map_err(|_| "depois da troca que falhou, a senha atual nao entra")?;
+        // O journal recusado: nenhuma credencial vale.
+        crate::persistencia::forcar_estado_de_teste(crate::persistencia::Estado::Recusada(
+            "recusado pela suite",
+        ));
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        uma_troca_gravada(seq, Codigo::DenyNotAuthenticated, "journal recusado")?;
+        // O boot recusado pela atualização A/B.
+        const MOTIVO: &str = "a versao da suite foi recusada";
+        let devolver = crate::slots::recusar_de_teste(MOTIVO);
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        devolver();
+        let _ = crate::slots::reinicio_pedido_de_teste();
+        uma_troca_gravada(seq, Codigo::Error, MOTIVO)?;
+        // O desligamento pelo botão a caminho.
+        let _ = crate::energia::executada_de_teste();
+        let (_, _, envelope) = botao_pedido(botao_apertar(1))?;
+        if fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
+            crate::log_error!("teste", "{}", envelope);
+            return Err("o aperto nao pediu o desligamento");
+        }
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE, "senha\n");
+        let recusada = uma_troca_gravada(seq, Codigo::Conflict, "desligando");
+        if energia_entregue() != Some(crate::energia::Acao::Desligar) {
+            return Err("o desligamento pelo botao nao chegou ao fim");
+        }
+        recusada?;
+        if credencial_da(ana)? != original {
+            return Err("uma troca recusada mudou a credencial");
+        }
+        Ok(())
+    })();
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O que vem no meio da troca — entre a prova da senha atual e a gravação
+/// — com a ordem das gravações na mão: a sessão revogada, a pessoa
+/// revogada, a credencial suspensa e a credencial trocada pelo
+/// administrador. A decisão refeita vê cada um, e nada muda; a pessoa
+/// revogada não volta, e a credencial que o administrador pôs fica.
+fn senha_o_que_vem_no_meio() -> Resultado {
+    use crate::pessoas::{Console, RecusaDeLogin, autenticar};
+    use politica::Codigo;
+    use sigilo::pessoas::Estado;
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::registrar_administrador_de_teste(
+        sigilo::publica_de(&ADMIN_DE_TESTE),
+        "administrador",
+    );
+    const CONSOLE: Console = Console::Terminal(0);
+    let resultado = (|| -> Resultado {
+        let atual = senha_de_teste();
+        // Cada um com uma pessoa nova: a do caso, no console.
+        type NoMeio = fn();
+        fn revogar_a_sessao() {
+            if let Some((s, _)) = alvo_no_meio() {
+                let _ = crate::pessoas::revogar_sessao(s);
+            }
+        }
+        fn revogar_a_pessoa() {
+            if let Some((_, p)) = alvo_no_meio() {
+                let _ = crate::pessoas::revogar_pessoa(p);
+            }
+        }
+        fn suspender() {
+            if let Some((_, p)) = alvo_no_meio() {
+                let _ = crate::contencao::conter(&crate::contencao::Alvo::Pessoa(p));
+            }
+        }
+        fn rotacionar_pelo_administrador() {
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            let Some((_, p)) = alvo_no_meio() else {
+                return;
+            };
+            let nova = crate::pessoas::credencial_de_teste(b"a do administrador").escrever();
+            let ok = admin_espera(
+                0,
+                &ADMIN_DE_TESTE,
+                "credential.rotate",
+                &alloc::format!(r#"{{"person":"{}","credential":"{nova}"}}"#, p.texto()),
+                None,
+            )
+            .is_ok();
+            ROTACIONOU.store(ok, core::sync::atomic::Ordering::SeqCst);
+        }
+        let casos: [(&str, NoMeio, Codigo, &str); 4] = [
+            (
+                "troca-fia",
+                revogar_a_sessao,
+                Codigo::DenyNotAuthenticated,
+                "sessao de pessoa que acabou",
+            ),
+            (
+                "troca-gil",
+                revogar_a_pessoa,
+                Codigo::DenyNotAuthenticated,
+                "sessao de pessoa que acabou",
+            ),
+            ("troca-hal", suspender, Codigo::DenyCredential, "suspensa"),
+            (
+                "troca-ivo",
+                rotacionar_pelo_administrador,
+                Codigo::Conflict,
+                "a credencial mudou",
+            ),
+        ];
+        for (nome, no_meio, codigo, motivo) in casos {
+            let id = crate::pessoas::registrar_de_teste(nome, "operador", SENHA_DE_TESTE);
+            crate::interpretador::abrir_console(CONSOLE);
+            let s = crate::interpretador::entrar_para_teste(CONSOLE, nome, "operador");
+            armar_no_meio(s, id);
+            ROTACIONOU.store(false, core::sync::atomic::Ordering::SeqCst);
+            let original = credencial_da(id)?;
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(no_meio));
+            let seq = seq_da_auditoria();
+            digitar_a_troca(CONSOLE, atual, SENHA_NOVA, SENHA_NOVA);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::contencao::esquecer_de_teste();
+            let recusa = trocas_depois(seq)
+                .into_iter()
+                .find(|(_, e)| e.codigo != Codigo::Allow);
+            match recusa {
+                Some((_, e)) if e.codigo == codigo && e.detalhe.contains(motivo) => {}
+                outro => {
+                    crate::log_error!("teste", "{}: {:?}", nome, outro);
+                    return Err("o que veio no meio da troca nao a recusou como devia");
+                }
+            }
+            if trocas_depois(seq)
+                .iter()
+                .any(|(_, e)| e.codigo == Codigo::Allow)
+            {
+                return Err("a troca recusada no meio gravou um ALLOW");
+            }
+            let agora = credencial_da(id)?;
+            if autenticar(Console::Terminal(1), nome, SENHA_NOVA.as_bytes()).is_ok() {
+                return Err("a senha da troca recusada no meio entrou");
+            }
+            match nome {
+                "troca-gil" => {
+                    if crate::pessoas::pessoa(id).map(|p| p.estado) != Some(Estado::Revogada) {
+                        return Err("a pessoa revogada no meio voltou");
+                    }
+                    if agora != original {
+                        return Err("a pessoa revogada no meio teve a senha trocada");
+                    }
+                }
+                "troca-ivo" => {
+                    if !ROTACIONOU.load(core::sync::atomic::Ordering::SeqCst) {
+                        return Err("a rotacao do administrador nao foi executada");
+                    }
+                    if agora == original
+                        || autenticar(Console::Terminal(2), nome, b"a do administrador").is_err()
+                        || autenticar(Console::Terminal(2), nome, SENHA_DE_TESTE)
+                            != Err(RecusaDeLogin::NaoConfere)
+                    {
+                        return Err("a credencial do administrador nao ficou, ou a antiga voltou");
+                    }
+                }
+                _ => {
+                    if agora != original {
+                        return Err("a troca recusada no meio mudou a credencial");
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::contencao::esquecer_de_teste();
+    NO_MEIO_ARMADO.store(false, core::sync::atomic::Ordering::SeqCst);
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O alvo do que vem no meio: a sessão e a pessoa do caso, e se ele está
+/// armado. Atômicos, e não uma trava: o gancho roda com a ordem das
+/// gravações na mão, e a suíte confere a ordem das travas.
+static NO_MEIO: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+static NO_MEIO_ARMADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn armar_no_meio(s: crate::pessoas::IdSessao, p: sigilo::pessoas::IdPessoa) {
+    use core::sync::atomic::Ordering::SeqCst;
+    NO_MEIO[0].store(u64::from_le_bytes(s.0), SeqCst);
+    NO_MEIO[1].store(u64::from_le_bytes(p.0), SeqCst);
+    NO_MEIO_ARMADO.store(true, SeqCst);
+}
+
+/// O alvo armado, uma vez: quem o lê o desarma.
+fn alvo_no_meio() -> Option<(crate::pessoas::IdSessao, sigilo::pessoas::IdPessoa)> {
+    use core::sync::atomic::Ordering::SeqCst;
+    NO_MEIO_ARMADO.swap(false, SeqCst).then(|| {
+        (
+            crate::pessoas::IdSessao(NO_MEIO[0].load(SeqCst).to_le_bytes()),
+            sigilo::pessoas::IdPessoa(NO_MEIO[1].load(SeqCst).to_le_bytes()),
+        )
+    })
+}
+/// Se a rotação do administrador, no meio, foi executada.
+static ROTACIONOU: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// As sessões das duas trocas que disputam, o que cada uma deu, e a
+/// largada.
+static DISPUTA_SESSOES: [core::sync::atomic::AtomicU64; 2] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 2];
+static DISPUTA_DESFECHO: [core::sync::atomic::AtomicU8; 2] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 2];
+static DISPUTA_PRONTOS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static DISPUTA_LARGADA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// O desfecho de uma troca, num byte: 1 trocou, 2 `CONFLICT`, 3
+/// `DENY_NOT_AUTHENTICATED`, 4 outro.
+fn desfecho_da_disputa(r: &Result<(), crate::pessoas::RecusaDaTroca>) -> u8 {
+    match r {
+        Ok(()) => 1,
+        Err((politica::Codigo::Conflict, _)) => 2,
+        Err((politica::Codigo::DenyNotAuthenticated, _)) => 3,
+        Err(_) => 4,
+    }
+}
+
+/// Uma das duas trocas que disputam: espera a largada e troca, pela sessão
+/// dela, para a senha dela.
+fn trocar_na_disputa(i: usize) -> u8 {
+    use core::sync::atomic::Ordering::SeqCst;
+    let sessao = crate::pessoas::IdSessao(DISPUTA_SESSOES[i].load(SeqCst).to_le_bytes());
+    let nova = if i == 0 { SENHA_NOVA } else { OUTRA_SENHA_NOVA };
+    DISPUTA_PRONTOS.fetch_add(1, SeqCst);
+    while !DISPUTA_LARGADA.load(SeqCst) {
+        crate::fios::ceder();
+    }
+    let r = crate::pessoas::trocar_a_propria_senha(
+        crate::pessoas::Console::Terminal(i as u16 + 2),
+        sessao,
+        SENHA_DE_TESTE,
+        nova.as_bytes(),
+        nova.as_bytes(),
+    );
+    desfecho_da_disputa(&r)
+}
+
+extern "C" fn fio_da_disputa(_: u64) -> ! {
+    let d = trocar_na_disputa(0);
+    DISPUTA_DESFECHO[0].store(d, core::sync::atomic::Ordering::SeqCst);
+    crate::fios::terminar()
+}
+
+/// Duas trocas da mesma credencial ao mesmo tempo — a mesma pessoa, em dois
+/// consoles, em dois núcleos — e logins com a senha antiga enquanto isso:
+/// exatamente uma troca vale; a outra é `CONFLICT`, ou não confere — a
+/// senha atual já não é a dela —; e depois exatamente uma senha entra: a da
+/// troca que valeu. Nunca duas, nunca nenhuma, nunca a antiga.
+fn smp_senha_duas_trocas_e_o_login_ao_mesmo_tempo() -> Resultado {
+    use crate::pessoas::{Console, RecusaDeLogin, autenticar};
+    use core::sync::atomic::Ordering::SeqCst;
+    let Some(alvo) = nucleos_secundarios().next() else {
+        crate::log_info!("teste", "um nucleo so: as trocas nao correm juntas");
+        return Ok(());
+    };
+    crate::pessoas::esquecer_registradas();
+    crate::pessoas::registrar_de_teste("troca-par", "operador", SENHA_DE_TESTE);
+    let resultado = (|| -> Resultado {
+        for (i, s) in DISPUTA_SESSOES.iter().enumerate() {
+            let sessao = crate::pessoas::sessao_de_teste(
+                Console::Terminal(i as u16 + 2),
+                "troca-par",
+                "operador",
+            );
+            s.store(u64::from_le_bytes(sessao.0), SeqCst);
+            DISPUTA_DESFECHO[i].store(0, SeqCst);
+        }
+        DISPUTA_PRONTOS.store(0, SeqCst);
+        DISPUTA_LARGADA.store(false, SeqCst);
+        crate::fios::criar_no_nucleo("teste-troca", fio_da_disputa, 0, alvo)?;
+        esperar_cedendo(|| DISPUTA_PRONTOS.load(SeqCst) == 1, 300)
+            .map_err(|_| "o fio da troca nao ficou pronto")?;
+        DISPUTA_LARGADA.store(true, SeqCst);
+        let d = trocar_na_disputa(1);
+        DISPUTA_DESFECHO[1].store(d, SeqCst);
+        esperar_cedendo(|| DISPUTA_DESFECHO[0].load(SeqCst) != 0, 6000)
+            .map_err(|_| "a troca do outro nucleo nao terminou")?;
+        let desfechos = [
+            DISPUTA_DESFECHO[0].load(SeqCst),
+            DISPUTA_DESFECHO[1].load(SeqCst),
+        ];
+        let valeram = desfechos.iter().filter(|d| **d == 1).count();
+        if valeram != 1 || desfechos.contains(&4) {
+            crate::log_error!("teste", "desfechos {:?}", desfechos);
+            return Err("duas trocas da mesma credencial nao deram exatamente uma");
+        }
+        let (vale, nao) = if desfechos[0] == 1 {
+            (SENHA_NOVA, OUTRA_SENHA_NOVA)
+        } else {
+            (OUTRA_SENHA_NOVA, SENHA_NOVA)
+        };
+        if autenticar(Console::Terminal(0), "troca-par", vale.as_bytes()).is_err()
+            || autenticar(Console::Terminal(0), "troca-par", nao.as_bytes())
+                != Err(RecusaDeLogin::NaoConfere)
+            || autenticar(Console::Terminal(0), "troca-par", SENHA_DE_TESTE)
+                != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("depois da disputa, nao entra exatamente a senha da troca que valeu");
+        }
+        // O login com a senha antiga, correndo com uma troca: entra antes
+        // dela, ou não entra; depois dela, nunca.
+        DISPUTA_SESSOES[0].store(
+            u64::from_le_bytes(
+                crate::pessoas::sessao_de_teste(Console::Terminal(2), "troca-par", "operador").0,
+            ),
+            SeqCst,
+        );
+        DISPUTA_DESFECHO[0].store(0, SeqCst);
+        DISPUTA_PRONTOS.store(0, SeqCst);
+        DISPUTA_LARGADA.store(false, SeqCst);
+        // A senha atual agora é `vale`: a troca do fio parte dela.
+        TROCA_DO_FIO_PARTE_DE.store(if vale == SENHA_NOVA { 1 } else { 2 }, SeqCst);
+        crate::fios::criar_no_nucleo("teste-troca-login", fio_da_troca_com_login, 0, alvo)?;
+        esperar_cedendo(|| DISPUTA_PRONTOS.load(SeqCst) == 1, 300)
+            .map_err(|_| "o fio da troca nao ficou pronto")?;
+        DISPUTA_LARGADA.store(true, SeqCst);
+        let mut entradas = 0;
+        let mut tentativa = 0u16;
+        while DISPUTA_DESFECHO[0].load(SeqCst) == 0 && tentativa < 40 {
+            // Cada tentativa num console novo: a janela de tentativas não é
+            // o que este caso mede.
+            if autenticar(
+                Console::Terminal(100 + tentativa),
+                "troca-par",
+                vale.as_bytes(),
+            )
+            .is_ok()
+            {
+                entradas += 1;
+            }
+            tentativa += 1;
+        }
+        esperar_cedendo(|| DISPUTA_DESFECHO[0].load(SeqCst) != 0, 6000)
+            .map_err(|_| "a troca correndo com o login nao terminou")?;
+        if DISPUTA_DESFECHO[0].load(SeqCst) != 1 {
+            return Err("a troca correndo com o login nao valeu");
+        }
+        if autenticar(Console::Terminal(1), "troca-par", vale.as_bytes())
+            != Err(RecusaDeLogin::NaoConfere)
+        {
+            return Err("depois da troca, a senha de antes ainda entra");
+        }
+        crate::log_info!(
+            "teste",
+            "senha: {} logins com a senha de antes entraram antes da troca, em {}",
+            entradas,
+            tentativa
+        );
+        Ok(())
+    })();
+    DISPUTA_LARGADA.store(true, SeqCst);
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// De qual senha a troca do fio parte, no segundo tempo do caso da
+/// disputa: 1 a primeira nova, 2 a outra.
+static TROCA_DO_FIO_PARTE_DE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+extern "C" fn fio_da_troca_com_login(_: u64) -> ! {
+    use core::sync::atomic::Ordering::SeqCst;
+    let sessao = crate::pessoas::IdSessao(DISPUTA_SESSOES[0].load(SeqCst).to_le_bytes());
+    let atual = if TROCA_DO_FIO_PARTE_DE.load(SeqCst) == 1 {
+        SENHA_NOVA
+    } else {
+        OUTRA_SENHA_NOVA
+    };
+    DISPUTA_PRONTOS.fetch_add(1, SeqCst);
+    while !DISPUTA_LARGADA.load(SeqCst) {
+        crate::fios::ceder();
+    }
+    let r = crate::pessoas::trocar_a_propria_senha(
+        crate::pessoas::Console::Terminal(3),
+        sessao,
+        atual.as_bytes(),
+        b"a terceira senha de teste",
+        b"a terceira senha de teste",
+    );
+    DISPUTA_DESFECHO[0].store(desfecho_da_disputa(&r), SeqCst);
+    crate::fios::terminar()
+}
+
+// ---------------------------------------------------------------------------
 // consoles: o físico e cada Terminal, cada um com a sua sessão
 // ---------------------------------------------------------------------------
 
@@ -31859,6 +32991,26 @@ static CASOS: &[Caso] = &[
         f: pessoas_estados_nao_se_confundem,
     },
     Caso {
+        nome: "senha: a pessoa troca a propria, e a antiga nao entra mais",
+        f: senha_a_pessoa_troca_a_propria,
+    },
+    Caso {
+        nome: "senha: a prova, a nova e a desistencia",
+        f: senha_a_prova_a_nova_e_a_desistencia,
+    },
+    Caso {
+        nome: "senha: so a propria, com a sessao e a permissao",
+        f: senha_so_a_propria_com_a_sessao_e_a_permissao,
+    },
+    Caso {
+        nome: "senha: a gravacao, o journal e a maquina que vai",
+        f: senha_a_gravacao_o_journal_e_a_maquina_que_vai,
+    },
+    Caso {
+        nome: "senha: o que vem no meio da troca",
+        f: senha_o_que_vem_no_meio,
+    },
+    Caso {
         nome: "consoles: nada antes do login",
         f: consoles_nada_antes_do_login,
     },
@@ -32441,6 +33593,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o login nao entra no console reaberto",
         f: smp_o_login_nao_entra_no_console_reaberto,
+    },
+    Caso {
+        nome: "smp: senha: duas trocas e o login ao mesmo tempo",
+        f: smp_senha_duas_trocas_e_o_login_ao_mesmo_tempo,
     },
     Caso {
         nome: "smp: o relogio de parede lido em todos os nucleos",
@@ -42130,8 +43286,8 @@ fn tls_sem_random_read_nada_sai() -> Resultado {
     use politica::Codigo;
     crate::pessoas::esquecer_registradas();
     let sem = politica_trocada(&[(
-        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-        "message.send message.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
+        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+        "message.send message.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
     )])?;
     let resultado = com_a_politica(sem, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
@@ -55703,8 +56859,8 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 return Err("a conexao fora do alcance nao foi recusada pelo gate");
             }
             let sem_declarar = politica_da_bancada_icp(&[(
-                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "message.send message.read random.read key.create key.read key.sign key.destroy\nrecurso operador",
+                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
             )])?;
             com_a_politica(sem_declarar, || {
                 let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
@@ -56691,8 +57847,8 @@ fn icp_sem_chave_nada_se_assina() -> Resultado {
         let antes = crate::autorizacao::ultimo_registro();
         let sem_usar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -57442,8 +58598,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -57456,8 +58612,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -58743,8 +59899,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -58757,8 +59913,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -60379,8 +61535,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60393,8 +61549,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -63535,8 +64691,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -65815,8 +66971,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(

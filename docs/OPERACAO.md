@@ -319,6 +319,72 @@ pela política e vai ao journal como qualquer outra:
 - `policy.assign` (o papel de uma identidade), `policy.write` (a política);
 - `admin.revoke` — a revogação de um administrador, por quórum.
 
+A única mudança de credencial que não é administrativa é a da pessoa sobre
+a **própria** senha — ver [A própria senha](#a-própria-senha).
+
+### A própria senha
+
+A pessoa entrada num console troca a própria senha ali mesmo, sem
+administrador: `senha`, e o console pede a atual, a nova e a nova de novo,
+sem eco — nada aparece na tela, na árvore semântica ou no histórico do
+teclado, e um agente não edita nem confirma essas linhas. Uma linha vazia,
+em qualquer passo, desiste. Nada se digita junto da palavra: `senha <algo>`
+é recusado, porque o que viesse junto já teria ecoado.
+
+```text
+duke> senha
+senha atual:
+senha nova:
+a nova de novo:
+senha trocada: a antiga nao entra mais, e as sessoes abertas continuam
+```
+
+São duas perguntas, separadas:
+
+- **Quem é** — a autenticação: a senha atual, conferida pelo mesmo Argon2id
+  do login contra o verificador, e contada na mesma janela de tentativas do
+  console (cinco por minuto): a troca não é um jeito de testar palpites que
+  o login limita. Estar entrado não prova nada sozinho.
+- **O que pode** — a autorização: `credential.change_self` no papel da
+  pessoa **agora**, decidida pelo gate como toda ação de pessoa — a sessão
+  vale, o journal não foi recusado, a credencial não está suspensa, o papel
+  não é o teto de um administrador. A decisão é feita antes de pedir
+  qualquer senha, e de novo no ponto de gravar.
+
+O alvo é sempre a credencial da dona da sessão: não há parâmetro que diga
+de quem, e nenhum agente, processo, serial ou o `sistema` chega a ela — a
+troca é do console. Trocar a senha **de outra pessoa** continua sendo
+`credential.rotate`, administrativa, com a prova.
+
+A senha nova segue a regra do provisionamento — doze caracteres no mínimo
+—, não passa de 128 bytes, precisa ser igual à confirmação e diferente da
+atual. Vira um verificador novo: o mesmo Argon2id, o custo das credenciais
+novas e um sal sorteado pelo gerador do kernel. Vai ao journal como o de
+`credential.rotate`, no registro cifrado, com a decisão que a autorizou no
+mesmo registro, e a resposta só sai depois: uma troca respondida sobrevive
+à queda de energia, e uma que caiu antes de gravar não aconteceu. Nunca há
+duas senhas valendo. Se outra troca, um `credential.rotate`, a revogação da
+pessoa ou da sessão, a suspensão ou uma política nova vierem enquanto o
+Argon2id calcula, a troca é recusada — `CONFLICT` quando a credencial
+mudou —, e nada muda.
+
+As sessões abertas continuam, como numa `credential.rotate`: encerrá-las é
+`session.revoke`, de propósito separado. A senha antiga deixa de abrir
+sessão nova.
+
+Na política, `credential.change_self` é sensível — cada papel que a tem a
+escreve — e não tem alcance. O exemplo de produção a dá ao `observador` e
+ao `operador`, e ao teto do `administrador`, que os delega; o `sistema` não
+a tem: não é pessoa. Tirá-la de um papel faz da troca, para quem tem esse
+papel, uma operação só do administrador.
+
+A auditoria grava cada desfecho — `credential.change_self`, a pessoa e a
+sessão, o recurso `pessoa:<id>`, o console e o motivo de uma recusa —, e
+nunca uma senha, o verificador ou o sal. Uma máquina sem persistência, com
+o journal recusado, numa versão nova da atualização A/B ainda não
+confirmada, ou com um reinício ou desligamento a caminho, recusa a troca
+antes de pedir as senhas.
+
 ## A rede
 
 Por padrão, DHCP. Para uma máquina sem DHCP, a imagem leva
@@ -599,6 +665,16 @@ O que segue é o registro da decisão como ela foi tomada.
   identidade que não é pessoa, agente nem processo.
 
 ### A pessoa troca a própria senha
+
+**Feito no B4** — ver [A própria senha](#a-própria-senha): a palavra
+`senha` no console, a senha atual conferida pelo mesmo Argon2id e pela
+mesma janela de tentativas do login, a permissão `credential.change_self`
+decidida pelo gate — antes de pedir as senhas e de novo ao gravar —, o
+alvo sempre a credencial da dona da sessão, e o verificador novo no journal
+como o de `credential.rotate`, com a decisão no mesmo registro e a resposta
+depois. Nenhuma identidade, credencial ou criptografia nova; a troca da
+senha de outra pessoa continua administrativa. O que segue é o registro da
+decisão como ela foi tomada.
 
 - **Problema.** Só um administrador troca a credencial de uma pessoa
   (`credential.rotate`, pela prova).

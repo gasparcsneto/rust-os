@@ -3697,6 +3697,10 @@ pub(crate) mod ponto {
     pub const IDENTIDADE_SELADA: u8 = 27;
     pub const PRIMEIRA_COPIA: u8 = 28;
     pub const IDENTIDADE_GRAVADA: u8 = 29;
+    pub const TROCA_DIGITADA: u8 = 30;
+    pub const SENHA_CONFERIDA: u8 = 31;
+    pub const TROCA_AUTORIZADA: u8 = 32;
+    pub const TROCA_GRAVADA: u8 = 33;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.

@@ -49,6 +49,19 @@
 //! o boot o reaplica por cima do registro da imagem — ver
 //! [`crate::persistencia`].
 //!
+//! # A própria senha
+//!
+//! A pessoa troca a **própria** senha, sem administrador — ver
+//! [`trocar_a_propria_senha`]: no console, pela palavra `senha`, provando a
+//! atual. São duas perguntas separadas: a **autenticação** — a senha atual
+//! confere com o verificador, pelo mesmo Argon2id e a mesma janela de
+//! tentativas do login; a sessão sozinha não prova nada — e a
+//! **autorização** — `credential.change_self` no papel de agora, decidida
+//! pelo gate. O alvo é sempre a credencial da dona da sessão. A troca vai
+//! ao journal como a de [`rotacionar`], com a decisão no mesmo registro, e
+//! a resposta vem depois; as sessões abertas continuam, e a senha antiga
+//! não abre sessão nova.
+//!
 //! # A senha
 //!
 //! Nunca é guardada: o registro tem o verificador. O kernel a recebe só para
@@ -333,9 +346,29 @@ fn conferir(credencial: &Credencial, senha: &[u8]) -> Option<bool> {
     Some(igual)
 }
 
+/// A credencial de `senha`, com `sal` e `custo`: o mesmo Argon2id da
+/// conferência, com a memória de trabalho de frames, zerada antes de
+/// voltar. `None` sem memória, ou com um custo fora do aceitável.
+fn calcular(senha: &[u8], sal: [u8; TAM_SAL], custo: Custo) -> Option<Credencial> {
+    let mut memoria =
+        crate::grafico::memoria::Memoria::nova((custo.blocos() * 1024) as u64).ok()?;
+    let blocos = memoria.blocos_mut();
+    let verificador =
+        credencial::verificador_com_memoria(senha, &sal, custo, &mut blocos[..custo.blocos()]);
+    credencial::apagar(blocos);
+    Some(Credencial::Senha {
+        custo,
+        sal,
+        verificador: verificador.ok()?,
+    })
+}
+
 /// Conta uma tentativa no console. Falso se passou do limite — e, se é a
-/// primeira recusada da sequência, grava.
-fn contar_tentativa(console: Console) -> bool {
+/// primeira recusada da sequência, grava, com o `metodo` de quem tentou: o
+/// login, ou a troca da própria senha. A janela é uma só por console, para
+/// os dois: cada um confere uma senha contra um verificador, e a troca não
+/// pode ser o jeito de testar palpites que o login limita.
+fn contar_tentativa(console: Console, metodo: &str) -> bool {
     let agora = crate::tempo::uptime_ms();
     let (passou, suprimidas, primeira) = com_tabela(|t| {
         let i = match t.tentativas.iter().position(|(c, _, _)| *c == console) {
@@ -357,7 +390,7 @@ fn contar_tentativa(console: Console) -> bool {
         crate::autorizacao::auditar_pessoa(
             None,
             None,
-            "person.login",
+            metodo,
             &console.texto(),
             Codigo::RateLimit,
             &alloc::format!("{suprimidas} tentativas recusadas por limite"),
@@ -367,7 +400,7 @@ fn contar_tentativa(console: Console) -> bool {
         crate::autorizacao::auditar_pessoa(
             None,
             None,
-            "person.login",
+            metodo,
             &console.texto(),
             Codigo::RateLimit,
             "tentativas demais neste console",
@@ -384,7 +417,7 @@ fn contar_tentativa(console: Console) -> bool {
 /// que não é de ninguém não vai para a auditoria: pode ser uma senha
 /// digitada no lugar errado.
 pub fn autenticar(console: Console, nome: &str, senha: &[u8]) -> Result<IdSessao, RecusaDeLogin> {
-    if !contar_tentativa(console) {
+    if !contar_tentativa(console, "person.login") {
         return Err(RecusaDeLogin::Tentativas);
     }
     let recurso = console.texto();
@@ -710,6 +743,290 @@ pub fn revogar_sessao(id: IdSessao) -> Result<IdPessoa, Recusa> {
     Ok(dona)
 }
 
+// ---------------------------------------------------------------------------
+// A troca da própria senha
+// ---------------------------------------------------------------------------
+
+/// Por que a troca da própria senha não aconteceu: o código que a
+/// auditoria gravou, e o que se diz a quem pediu.
+pub type RecusaDaTroca = (Codigo, String);
+
+/// Grava a recusa de uma troca — o motivo, e o console onde ela foi
+/// pedida — e a devolve.
+fn recusar_troca(
+    sessao: IdSessao,
+    recurso: &str,
+    console: Console,
+    codigo: Codigo,
+    motivo: impl Into<String>,
+) -> Result<(), RecusaDaTroca> {
+    let motivo = motivo.into();
+    crate::autorizacao::auditar_troca_da_propria_senha(
+        sessao,
+        recurso,
+        codigo,
+        &alloc::format!("{motivo}; {}", console.texto()),
+    );
+    Err((codigo, motivo))
+}
+
+/// A troca pode ir ao journal agora? A persistência de pé — com a
+/// autoridade deste boot, que uma versão nova da atualização A/B ainda
+/// não confirmada não tem — e nenhum reinício ou desligamento a caminho:
+/// a máquina que já vai não aceita mais uma mudança de autoridade que a
+/// resposta não chegaria a confirmar.
+fn pronta_para_gravar() -> Result<(), (Codigo, String)> {
+    if let Err(motivo) = crate::persistencia::exigir() {
+        return Err((
+            Codigo::Error,
+            alloc::format!("persistencia indisponivel ({motivo}): a senha nao muda"),
+        ));
+    }
+    if crate::energia::pedida().is_some() {
+        return Err((
+            Codigo::Conflict,
+            String::from("a maquina esta reiniciando ou desligando: a senha nao muda"),
+        ));
+    }
+    Ok(())
+}
+
+/// O que se confere antes de pedir qualquer senha a quem digitou `senha`:
+/// a decisão — ver [`crate::autorizacao::decidir_troca_da_propria_senha`]
+/// — e se a troca poderia ir ao journal. Uma recusa vai para a auditoria;
+/// a permissão, não: o desfecho da troca é gravado quando ela termina.
+pub fn pode_trocar_a_propria_senha(
+    console: Console,
+    sessao: IdSessao,
+) -> Result<(), RecusaDaTroca> {
+    let recurso = dona_da_sessao(sessao)
+        .map(|p| p.texto())
+        .unwrap_or_default();
+    let (codigo, motivo) = crate::autorizacao::decidir_troca_da_propria_senha(sessao);
+    if !codigo.permite() {
+        return recusar_troca(sessao, &recurso, console, codigo, motivo);
+    }
+    if let Err((codigo, motivo)) = pronta_para_gravar() {
+        return recusar_troca(sessao, &recurso, console, codigo, motivo);
+    }
+    Ok(())
+}
+
+/// A senha nova: do tamanho de uma senha — a regra do provisionamento,
+/// [`sigilo::credencial::MENOR_SENHA`] —, dentro do teto que o kernel
+/// calcula, igual à confirmação, e outra que não a atual.
+fn validar_a_nova(atual: &[u8], nova: &[u8], de_novo: &[u8]) -> Result<(), String> {
+    if nova.len() < credencial::MENOR_SENHA {
+        return Err(alloc::format!(
+            "a senha nova tem menos de {} caracteres",
+            credencial::MENOR_SENHA
+        ));
+    }
+    if nova.len() > MAIOR_SENHA {
+        return Err(alloc::format!("a senha nova passa de {MAIOR_SENHA} bytes"));
+    }
+    if nova != de_novo {
+        return Err(String::from("a senha nova e a confirmacao nao conferem"));
+    }
+    if nova == atual {
+        return Err(String::from("a senha nova e a mesma que a atual"));
+    }
+    Ok(())
+}
+
+/// A credencial de uma senha nova: o mesmo Argon2id, com o custo das
+/// credenciais novas e um sal sorteado pelo gerador do kernel.
+fn credencial_nova(senha: &[u8]) -> Result<Credencial, &'static str> {
+    let mut sal = [0u8; TAM_SAL];
+    crate::aleatorio::preencher(&mut sal).map_err(|_| "sem entropia para o sal da senha nova")?;
+    calcular(senha, sal, Custo::PADRAO).ok_or("sem memoria para calcular a senha nova")
+}
+
+/// A pessoa da sessão `sessao` troca a **própria** senha, no `console`:
+/// `atual` é a prova, `nova` e `de_novo` a senha nova, digitada duas vezes.
+///
+/// # O alvo
+///
+/// A dona da sessão, e só ela: a credencial que muda é a da pessoa que a
+/// sessão diz, e nenhum parâmetro diz outra. Uma sessão não troca a senha
+/// de outra pessoa, e uma sessão que acabou não troca nenhuma.
+///
+/// # A ordem
+///
+/// 1. a sessão vale, e é de uma pessoa ativa;
+/// 2. a janela de tentativas do console — a mesma do login;
+/// 3. a **autenticação**: a senha atual contra a credencial de agora, pelo
+///    mesmo Argon2id do login — a sessão sozinha não prova nada;
+/// 4. a senha nova — ver [`validar_a_nova`];
+/// 5. a credencial nova — ver [`credencial_nova`];
+/// 6. a persistência de pé e a máquina sem reinício a caminho;
+/// 7. com a ordem das gravações na mão: a **autorização** de novo —
+///    `credential.change_self`, pelo registro e pela política de agora —;
+///    a troca, só se a credencial ainda é a que conferiu (`CONFLICT` se
+///    outra troca, um `credential.rotate` ou a revogação vieram no meio);
+///    a decisão gravada; e a gravação no journal, com a decisão no mesmo
+///    registro — ver [`crate::persistencia::concluir`].
+///
+/// A resposta vem depois do journal: uma troca respondida sobrevive à
+/// queda de energia. Se a gravação falha, a credencial de antes volta e a
+/// senha atual continua valendo; nunca há duas.
+///
+/// # O que não muda
+///
+/// A pessoa — o identificador, o nome, o papel — e as sessões abertas,
+/// como numa `credential.rotate`: encerrá-las é outra operação. A senha
+/// antiga deixa de abrir sessão nova.
+///
+/// Toda recusa é gravada, com o motivo; o sucesso também, uma vez. Nada
+/// secreto vai à auditoria, ao log ou ao journal: o journal leva o
+/// verificador novo, como o de toda credencial, dentro do registro cifrado.
+pub fn trocar_a_propria_senha(
+    console: Console,
+    sessao: IdSessao,
+    atual: &[u8],
+    nova: &[u8],
+    de_novo: &[u8],
+) -> Result<(), RecusaDaTroca> {
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::TrocaDigitada);
+    let dona = match self::sessao(sessao) {
+        EstadoDaSessao::Ativa { pessoa, .. } => self::pessoa(pessoa),
+        _ => None,
+    };
+    let Some(pessoa) = dona.filter(|p| p.estado == Estado::Ativa) else {
+        let recurso = dona_da_sessao(sessao)
+            .map(|p| p.texto())
+            .unwrap_or_default();
+        return recusar_troca(
+            sessao,
+            &recurso,
+            console,
+            Codigo::DenyNotAuthenticated,
+            "a sessao acabou: `login` para entrar de novo",
+        );
+    };
+    let recurso = pessoa.id.texto();
+    if !contar_tentativa(console, crate::autorizacao::TROCA_DA_PROPRIA_SENHA) {
+        // A janela já gravou a recusa, uma vez por sequência, como no
+        // login: uma enxurrada de tentativas não empurra a auditoria.
+        return Err((
+            Codigo::RateLimit,
+            String::from(RecusaDeLogin::Tentativas.resposta()),
+        ));
+    }
+    // A prova: a senha atual contra a credencial de agora, copiada para
+    // fora da tranca — o cálculo é longo.
+    let atual_cabe = atual.len() <= MAIOR_SENHA;
+    let Some(confere) = conferir(&pessoa.credencial, if atual_cabe { atual } else { &[] }) else {
+        return recusar_troca(
+            sessao,
+            &recurso,
+            console,
+            Codigo::Error,
+            "sem memoria para conferir a senha atual",
+        );
+    };
+    if !confere || !atual_cabe {
+        return recusar_troca(
+            sessao,
+            &recurso,
+            console,
+            Codigo::DenyNotAuthenticated,
+            "a senha atual nao confere; nada mudou",
+        );
+    }
+    if let Err(motivo) = validar_a_nova(atual, nova, de_novo) {
+        return recusar_troca(sessao, &recurso, console, Codigo::InvalidArgument, motivo);
+    }
+    let nova = match credencial_nova(nova) {
+        Ok(c) => c,
+        Err(motivo) => return recusar_troca(sessao, &recurso, console, Codigo::Error, motivo),
+    };
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::SenhaConferida);
+    if let Err((codigo, motivo)) = pronta_para_gravar() {
+        return recusar_troca(sessao, &recurso, console, codigo, motivo);
+    }
+    let detalhe = alloc::format!(
+        "senha atual conferida; trocada; permissao {}; {}",
+        crate::autorizacao::TROCA_DA_PROPRIA_SENHA,
+        console.texto()
+    );
+    let (feito, gravado) = crate::persistencia::em_ordem(|| {
+        // A decisão de novo, com a ordem das gravações na mão: a sessão
+        // revogada, a pessoa revogada, a credencial suspensa, o papel
+        // trocado ou a política nova que vieram durante o Argon2id gravam
+        // com esta mesma ordem — ou a decisão os vê, ou eles vêm depois da
+        // troca inteira.
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        let (codigo, motivo) = crate::autorizacao::decidir_troca_da_propria_senha(sessao);
+        if !codigo.permite() {
+            return (Err((codigo, String::from(motivo))), Ok(()));
+        }
+        let foto = crate::persistencia::Foto::tirar();
+        let trocada = com_tabela(|t| {
+            let Some(p) = t.pessoas.iter_mut().find(|p| p.id == pessoa.id) else {
+                return Err((Codigo::DenyNotAuthenticated, "pessoa desconhecida"));
+            };
+            if p.estado != Estado::Ativa {
+                return Err((Codigo::DenyNotAuthenticated, "pessoa revogada"));
+            }
+            if p.credencial != pessoa.credencial {
+                return Err((
+                    Codigo::Conflict,
+                    "a credencial mudou durante a troca; nada mudou",
+                ));
+            }
+            p.credencial = nova;
+            Ok(())
+        });
+        if let Err((codigo, motivo)) = trocada {
+            return (Err((codigo, String::from(motivo))), Ok(()));
+        }
+        let decisao = crate::autorizacao::auditar_troca_da_propria_senha(
+            sessao,
+            &recurso,
+            Codigo::Allow,
+            &detalhe,
+        );
+        #[cfg(feature = "quedas")]
+        crate::quedas::aqui(crate::quedas::Ponto::TrocaAutorizada);
+        let gravado = crate::persistencia::concluir(
+            &foto,
+            crate::autorizacao::TROCA_DA_PROPRIA_SENHA,
+            &recurso,
+            true,
+            decisao,
+        );
+        (Ok(()), gravado)
+    });
+    if let Err((codigo, motivo)) = feito {
+        return recusar_troca(sessao, &recurso, console, codigo, motivo);
+    }
+    if let Err(m) = gravado {
+        // A gravação falhou: [`crate::persistencia::concluir`] já pôs a
+        // credencial de antes de volta.
+        return recusar_troca(
+            sessao,
+            &recurso,
+            console,
+            Codigo::Error,
+            alloc::format!("a troca nao ficou gravada no journal ({m}); a senha atual continua"),
+        );
+    }
+    #[cfg(feature = "quedas")]
+    crate::quedas::aqui(crate::quedas::Ponto::TrocaGravada);
+    crate::log_info!(
+        "pessoas",
+        "{} ({}) trocou a propria senha em {}",
+        pessoa.nome,
+        recurso,
+        console.texto()
+    );
+    Ok(())
+}
+
 /// O registro de pessoas inteiro: o que a persistência compara antes e
 /// depois de uma operação.
 pub fn todas() -> Vec<Pessoa> {
@@ -787,19 +1104,7 @@ pub fn registrar_de_teste(nome: &str, papel: &str, senha: &[u8]) -> IdPessoa {
 /// heap inteiro.
 #[cfg(feature = "modo-teste")]
 pub fn credencial_de_teste(senha: &[u8]) -> Credencial {
-    let custo = Custo::MINIMO;
-    let sal = [9; TAM_SAL];
-    let mut memoria = crate::grafico::memoria::Memoria::nova((custo.blocos() * 1024) as u64)
-        .expect("a suite tem memoria para o argon2id");
-    let blocos = memoria.blocos_mut();
-    let verificador = credencial::verificador_com_memoria(senha, &sal, custo, blocos)
-        .expect("o custo minimo e aceitavel");
-    credencial::apagar(blocos);
-    Credencial::Senha {
-        custo,
-        sal,
-        verificador,
-    }
+    calcular(senha, [9; TAM_SAL], Custo::MINIMO).expect("a suite tem memoria para o argon2id")
 }
 
 /// Abre uma sessão direto, sem credencial nem limite de tentativas, para a

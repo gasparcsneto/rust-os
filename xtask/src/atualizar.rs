@@ -238,7 +238,7 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_primeiro_boot,
     },
     Cenario {
-        nome: "a versao nova escrita, instalada por quorum, tentada e confirmada; a identidade, as credenciais, o armazem e a auditoria continuam",
+        nome: "a versao nova escrita, instalada por quorum, tentada e confirmada; a identidade, as credenciais, a senha trocada, o armazem e a auditoria continuam",
         rodar: a_atualizacao_inteira,
     },
     Cenario {
@@ -862,6 +862,19 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
                 return Err(format!("{metodo} no armazem\n  {r}"));
             }
         }
+        // A pessoa troca a própria senha antes da versão nova: a troca vai
+        // ao journal, que fica fora dos slots.
+        let (_, _, senha) = c.pessoa_dev();
+        let mut t = super::senha::teclado(b.arch)?;
+        super::senha::terminal_atendendo(&mut m, &mut t)?;
+        let login = super::senha::entrar(&mut m, &mut t, chaves::NOME_DA_PESSOA_DEV, &senha)?;
+        if login != "ALLOW" {
+            return Err(format!("a pessoa de desenvolvimento nao entrou: {login}"));
+        }
+        let troca = super::senha::trocar(&mut m, &mut t, &senha, super::senha::SENHA_NOVA)?;
+        if troca.codigo != "ALLOW" || !troca.duravel {
+            return Err(format!("a troca da senha antes da versao nova: {troca:?}"));
+        }
         let antes = p::persistencia_de(&mut m)?;
 
         encenar(b.arch, &b.imagens.nova.bytes)?;
@@ -910,6 +923,19 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
         if !arquivo.contains("de antes da versao nova") {
             return Err(format!("o armazem perdeu o arquivo de antes\n  {arquivo}"));
         }
+        // A senha trocada antes: a versão nova a repôs do journal — a
+        // antiga não entra, a nova entra.
+        let mut t = super::senha::teclado(b.arch)?;
+        super::senha::terminal_atendendo(&mut m, &mut t)?;
+        if super::senha::entra_com(
+            &mut m,
+            &mut t,
+            chaves::NOME_DA_PESSOA_DEV,
+            &senha,
+            super::senha::SENHA_NOVA,
+        )? {
+            return Err("na versao nova, a senha de antes da troca entra".into());
+        }
         p::auditoria_verifica(&mut m)?;
         let depois = p::persistencia_de(&mut m)?;
         if depois.estado != "available"
@@ -932,7 +958,7 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
             s.modo == "normal" && s.reconciliacao == "seguir",
         )?;
         Ok(format!(
-            "slot a g1 -> slot b g{GERACAO_NOVA} ({VERSAO_NOVA}), piso {}; o agente, o armazem e a cadeia continuam; geracao administrativa {} -> {}",
+            "slot a g1 -> slot b g{GERACAO_NOVA} ({VERSAO_NOVA}), piso {}; o agente, o armazem, a senha trocada e a cadeia continuam; geracao administrativa {} -> {}",
             s.piso, antes.geracao, depois.geracao
         ))
     })();

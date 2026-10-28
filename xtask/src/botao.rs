@@ -674,8 +674,9 @@ fn sem_energia_no_sistema(texto: &str) -> Result<String, String> {
 /// O molde de produção: o material de um operador — a política do exemplo
 /// com a serial `sistema`, mudada por `mudar`; um agente `sistema`; três
 /// administradores; uma pessoa; e a chave de atualização —, o kernel desta
-/// bancada no slot A, assinado por ela, e nenhuma chave do Duke.
-fn molde_de_producao(
+/// bancada no slot A, assinado por ela, e nenhuma chave do Duke. A bancada
+/// da troca da própria senha usa o mesmo molde, com a pessoa dele.
+pub(crate) fn molde_de_producao(
     arch: Arquitetura,
     nome: &str,
     mudar: impl Fn(&str) -> Result<String, String>,

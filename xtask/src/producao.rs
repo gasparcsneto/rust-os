@@ -66,8 +66,9 @@ const EDITORES: &str = "editores";
 const REDE: &str = "rede";
 const ATUALIZACAO: &str = "atualizacao";
 
-/// O menor tamanho de senha que o provisionamento aceita.
-const MENOR_SENHA: usize = 12;
+/// O menor tamanho de senha que o provisionamento aceita: o mesmo da troca
+/// da própria senha, no kernel.
+const MENOR_SENHA: usize = sigilo::credencial::MENOR_SENHA;
 
 /// Os programas que a imagem de produção leva: os que o kernel lança no
 /// boot (o servidor de janelas e o terminal) e os que operam a rede

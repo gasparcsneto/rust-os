@@ -93,6 +93,12 @@ pub use permissao::Permissao;
 ///   alegação, gravada com os fatos do kernel, que nenhuma decisão lê —
 ///   no `sistema`, no `administrador` e no `operador`, que conecta; não no
 ///   `observador`, nem no tecido de segurança, que só observam.
+/// - `credential.change_self` — a pessoa troca a própria senha, provando a
+///   atual — no `administrador`, o teto, para que o `observador` e o
+///   `operador`, que a têm na padrão, sejam delegáveis; o teto não se
+///   exerce, e nenhuma pessoa tem o papel dele. Não no `sistema`: ele não
+///   é uma pessoa, não tem senha, e a autoridade máxima não ganha por isso
+///   um curinga sobre a credencial de ninguém.
 /// - `random.read` — os bytes do gerador do kernel — no `sistema`, no
 ///   `administrador` e no `operador`, que conecta; não no `observador`, que
 ///   não conecta a nada.
@@ -179,7 +185,7 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -220,6 +226,8 @@ servico nsf seguranca
 /// o mesmo que os testes deste pacote leem e conferem.
 ///
 /// - `observador` observa o estado do sistema e a tela; não lê arquivos;
+///   troca a própria senha (`credential.change_self`), como o `operador`
+///   — cada um a escreve: ela é sensível, e não vem pela inclusão;
 /// - `operador` observa e age: a tela, programas de `/bin` e
 ///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`; lê e
 ///   escreve no armazém compartilhado, `/armazem/compartilhado`; roda o
@@ -244,7 +252,8 @@ pub const PADRAO: &str = concat!(
 # terminal.attach, policy.*, agent.register, agent.revoke, person.*,
 # credential.rotate, session.revoke, lease.revoke, message.*, as contencoes
 # process.isolate, agent.suspend e credential.suspend, process.terminate,
-# system.power, system.update, time.*, audit.declare e key.*) nao atravessa a inclusao de
+# system.power, system.update, time.*, audit.declare, key.* e
+# credential.change_self) nao atravessa a inclusao de
 # outro papel: cada
 # papel que a tem a escreve. Toda permissao
 # de caminho, o message.send, o net.connect e as de chave tem o alcance
@@ -281,13 +290,16 @@ pub const PADRAO: &str = concat!(
 # quem pede —, e assina so no dominio ic-request do registro de dominios
 # (/etc/duke/dominios), a linha `dominios`. O sistema nao tem nenhuma de
 # chave. O administrador anula a chave de outra identidade com prova
-# (key.revoke), sem poder usa-la.
+# (key.revoke), sem poder usa-la. A pessoa troca a propria senha
+# (credential.change_self), provando a atual: o observador e o operador, e
+# so a da propria sessao. O sistema nao tem: nao e pessoa. Trocar a senha
+# de outra pessoa continua sendo credential.rotate, com prova.
 
-papel observador agent.read system.read log.read ui.read message.read
+papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943
@@ -630,19 +642,24 @@ mod testes {
     }
 
     /// O sistema é a autoridade máxima, e enumerada: tem cada permissão que
-    /// não é administrativa, nem a escrita bruta, nem de chave — sem incluir
-    /// papel nenhum, sem curinga —, e cada uma de caminho com o alcance
-    /// escrito: `/` para ler e executar, e só o armazém para escrever. As
-    /// de chave não: a chave é da identidade de quem a cria, e não há chave
-    /// do sistema.
+    /// não é administrativa, nem a escrita bruta, nem da identidade de
+    /// alguém — sem incluir papel nenhum, sem curinga —, e cada uma de
+    /// caminho com o alcance escrito: `/` para ler e executar, e só o
+    /// armazém para escrever. As de chave não: a chave é da identidade de
+    /// quem a cria, e não há chave do sistema. A da própria senha também
+    /// não: o sistema não é pessoa, e a autoridade máxima não vira um
+    /// curinga sobre a credencial de ninguém.
     #[test]
     fn o_sistema_e_maximo_e_enumerado() {
         let p = padrao();
         let sistema = p.papel("sistema").unwrap();
         assert!(sistema.inclui.is_empty(), "o sistema inclui outro papel");
         for perm in permissao::TODAS {
-            let de_chave = perm.recurso_e_chave() || perm == Permissao::KeyRevoke;
-            let esperado = !perm.administrativa() && perm != Permissao::FsRawWrite && !de_chave;
+            let de_identidade = perm.recurso_e_chave()
+                || perm == Permissao::KeyRevoke
+                || perm == Permissao::CredentialChangeSelf;
+            let esperado =
+                !perm.administrativa() && perm != Permissao::FsRawWrite && !de_identidade;
             assert_eq!(sistema.tem(perm), esperado, "{}", perm.nome());
             assert_eq!(
                 sistema.diretas.contains(&perm),
@@ -685,32 +702,43 @@ mod testes {
                 assert_eq!(sistema.recursos.get(&perm).unwrap(), &[alcance.to_string()]);
             }
         }
-        // Nenhum outro papel da padrão alcança mais que ele — fora as chaves
-        // do operador, que são da identidade dele, e que o sistema não tem
-        // de propósito.
-        for papel in ["observador", "tempo"] {
-            assert!(p.cabe_em(papel, "sistema").is_ok(), "{papel}");
-        }
-        let r = p.cabe_em("operador", "sistema");
+        // Nenhum outro papel da padrão alcança mais que ele — fora o que é
+        // da identidade de cada um: as chaves do operador e a própria senha
+        // do observador e do operador, que o sistema não tem de propósito.
+        assert!(p.cabe_em("tempo", "sistema").is_ok());
+        let r = p.cabe_em("observador", "sistema");
         assert!(
-            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.") || m.contains("dominio")),
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("credential.change_self")),
             "{r:?}"
         );
-        // Sem as de chave, o operador cabe no sistema.
-        let sem_chaves: alloc::string::String = PADRAO
+        let r = p.cabe_em("operador", "sistema");
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.") || m.contains("dominio") || m.contains("credential.change_self")),
+            "{r:?}"
+        );
+        // Sem as de chave e sem a da própria senha, os dois cabem no
+        // sistema.
+        let sem_identidade: alloc::string::String = PADRAO
             .lines()
             .filter(|l| {
                 !l.starts_with("recurso operador key.") && !l.starts_with("dominios operador")
             })
             .map(|l| {
+                let l = l.strip_suffix(" credential.change_self").unwrap_or(l);
                 let l = l
                     .strip_suffix(" key.create key.read key.sign key.destroy")
                     .unwrap_or(l);
                 alloc::format!("{l}\n")
             })
             .collect();
-        let q = Politica::ler(&sem_chaves).unwrap();
+        let q = Politica::ler(&sem_identidade).unwrap();
         assert!(!q.papel("operador").unwrap().tem(Permissao::KeySign));
+        assert!(
+            !q.papel("observador")
+                .unwrap()
+                .tem(Permissao::CredentialChangeSelf)
+        );
+        assert!(q.cabe_em("observador", "sistema").is_ok());
         assert!(q.cabe_em("operador", "sistema").is_ok());
     }
 
@@ -1203,6 +1231,76 @@ mod testes {
         let p = com("papel a ui.read system.power\npapel b @a\nserial a").unwrap();
         assert!(p.papel("a").unwrap().tem(SystemPower));
         assert!(!p.papel("b").unwrap().tem(SystemPower));
+    }
+
+    /// Trocar a própria senha: na padrão, o `observador` e o `operador` —
+    /// os papéis de pessoa —, cada um escrevendo a permissão; o teto do
+    /// administrador a contém, para delegá-los, nas duas políticas; o
+    /// `sistema` não, nas duas: não é pessoa, e a autoridade máxima não é
+    /// curinga. Nem os serviços. Sem recurso: decidida com nenhum, e um
+    /// papel que a escreve não precisa de linha `recurso`.
+    #[test]
+    fn quem_troca_a_propria_senha() {
+        use Permissao::CredentialChangeSelf;
+        let p = padrao();
+        for papel in ["observador", "operador", "administrador"] {
+            assert_eq!(
+                p.decidir(Some(papel), CredentialChangeSelf, None),
+                Codigo::Allow,
+                "{papel}"
+            );
+            assert_eq!(
+                p.decidir(Some(papel), CredentialChangeSelf, Some("")),
+                Codigo::Allow,
+                "{papel}"
+            );
+            assert!(
+                p.papel(papel)
+                    .unwrap()
+                    .diretas
+                    .contains(&CredentialChangeSelf),
+                "{papel}"
+            );
+        }
+        for papel in ["sistema", "tempo", "seguranca"] {
+            assert_eq!(
+                p.decidir(Some(papel), CredentialChangeSelf, None),
+                Codigo::DenyPermission,
+                "{papel}"
+            );
+        }
+        assert_eq!(
+            p.decidir(None, CredentialChangeSelf, None),
+            Codigo::DenyRole
+        );
+        // A de emergência: o teto a contém, o sistema não; os papéis de
+        // pessoa não existem nela.
+        let e = Politica::emergencia();
+        assert_eq!(
+            e.decidir(Some("administrador"), CredentialChangeSelf, None),
+            Codigo::Allow
+        );
+        assert_eq!(
+            e.decidir(Some("sistema"), CredentialChangeSelf, None),
+            Codigo::DenyPermission
+        );
+        assert_eq!(
+            e.decidir(Some("operador"), CredentialChangeSelf, None),
+            Codigo::DenyRole
+        );
+        // Os papéis de pessoa cabem no teto: o administrador os delega.
+        for papel in ["observador", "operador"] {
+            assert!(p.cabe_em(papel, "administrador").is_ok(), "{papel}");
+        }
+        // Sensível: incluir quem a tem não a traz, e sem alcance a
+        // escrever.
+        let q = com("papel a ui.read credential.change_self\npapel b @a\nserial a").unwrap();
+        assert!(q.papel("a").unwrap().tem(CredentialChangeSelf));
+        assert!(!q.papel("b").unwrap().tem(CredentialChangeSelf));
+        assert!(
+            com("papel a credential.change_self\nrecurso a credential.change_self x\nserial a")
+                .is_err()
+        );
     }
 
     /// O serviço não herda o sistema: uma política que lhe dê o papel da

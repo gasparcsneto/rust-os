@@ -40,6 +40,12 @@ pub const TAM_SAL: usize = 16;
 /// O tamanho do verificador, em bytes.
 pub const TAM_VERIFICADOR: usize = 32;
 
+/// O menor tamanho de uma senha nova, em caracteres: o que o
+/// provisionamento aceita para uma pessoa da imagem, e o que a pessoa que
+/// troca a própria senha precisa digitar. A senha de uma credencial que já
+/// existe não se mede — dela só existe o verificador.
+pub const MENOR_SENHA: usize = 12;
+
 /// O custo do Argon2id: memória em KiB, passadas e paralelismo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Custo {
@@ -222,7 +228,9 @@ impl Credencial {
 
 /// Faz a credencial de uma senha, com sal dado. Para quem registra: o
 /// administrador no hospedeiro — o kernel nunca recebe a senha num registro,
-/// só o verificador.
+/// só o verificador. A senha que a pessoa digita ao trocar a própria vira
+/// verificador no kernel, pelo mesmo cálculo com a memória de quem chama —
+/// [`verificador_com_memoria`].
 pub fn nova(senha: &[u8], sal: [u8; TAM_SAL], custo: Custo) -> Result<Credencial, Erro> {
     let mut memoria = alloc::vec![Block::default(); custo.blocos()];
     let verificador = verificador_com_memoria(senha, &sal, custo, &mut memoria);

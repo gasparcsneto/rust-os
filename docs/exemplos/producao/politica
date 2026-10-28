@@ -22,12 +22,19 @@
 # - sem o servico de hora: o relogio civil fica no RTC ate o operador
 #   registrar fontes de Roughtime - um /etc/duke/tempo, o papel `tempo` com
 #   net.connect e time.sync para cada fonte, e `servico hora tempo`.
+#
+# Como na da bancada, a pessoa troca a propria senha no console (`senha`),
+# provando a atual: credential.change_self, escrita no observador e no
+# operador - ela e sensivel, e nao vem pela inclusao - e no teto do
+# administrador, que os delega. O sistema nao a tem: nao e pessoa. Tire-a de
+# um papel para que so um administrador troque a senha de quem tem esse
+# papel (credential.rotate, com prova).
 
-papel observador agent.read system.read log.read ui.read message.read
+papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare credential.change_self
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador net.connect udp:192.0.2.53:53
@@ -53,7 +60,7 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update credential.change_self
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
 recurso administrador net.connect udp:192.0.2.53:53

@@ -1777,11 +1777,11 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
     Ok(())
 }
 
-/// Só para a suíte: o que roda no ponto de commit de uma mensagem ou de uma
-/// operação administrativa — com a ordem das gravações na mão —, ou de uma
-/// rodada de hora — com a vez da hora —, antes de a decisão ser feita de
-/// novo. É onde um caso põe a revogação ou a política nova "no meio" da
-/// operação.
+/// Só para a suíte: o que roda no ponto de commit de uma mensagem, de uma
+/// operação administrativa ou da troca da própria senha — com a ordem das
+/// gravações na mão —, ou de uma rodada de hora — com a vez da hora —,
+/// antes de a decisão ser feita de novo. É onde um caso põe a revogação ou
+/// a política nova "no meio" da operação.
 #[cfg(feature = "modo-teste")]
 static ANTES_DA_RECONFIRMACAO: Mutex<Option<fn()>> = Mutex::new(None);
 
@@ -2808,6 +2808,68 @@ pub fn autorizar_acao_da_pessoa(
         contar(&quem, "ui.act", Some(Permissao::UiAct));
     }
     codigo
+}
+
+/// O método da troca da própria senha — o nome da permissão —, na
+/// auditoria e no marcador da operação no journal.
+pub const TROCA_DA_PROPRIA_SENHA: &str = "credential.change_self";
+
+/// A pessoa da sessão `sessao` pode trocar a própria senha agora?
+/// `credential.change_self`, com o papel que o registro dá a ela **agora**,
+/// e as mesmas perguntas, na mesma ordem, de toda ação de pessoa: a sessão
+/// vale; o journal não foi recusado — senão nenhuma credencial vale —; a
+/// credencial não está suspensa; o papel não é um teto; e a política dá a
+/// permissão. Não há outro caminho: nem o `sistema`, nem a serial, nem um
+/// agente chegam aqui — só a sessão de uma pessoa, e a troca é da
+/// credencial da dona dela.
+///
+/// Decide quem **pode**, e não quem **é**: a prova da senha atual é a
+/// outra metade, feita pela troca — ver
+/// [`crate::pessoas::trocar_a_propria_senha`]. Não grava: quem pergunta
+/// grava o desfecho, uma vez, com [`auditar_troca_da_propria_senha`].
+pub fn decidir_troca_da_propria_senha(sessao: crate::pessoas::IdSessao) -> (Codigo, &'static str) {
+    let Ok(quem) = quem_da_pessoa(sessao) else {
+        return (Codigo::DenyNotAuthenticated, "sessao de pessoa que acabou");
+    };
+    if crate::persistencia::revogacoes_desconhecidas().is_some() {
+        return (
+            Codigo::DenyNotAuthenticated,
+            "journal recusado: as revogacoes nao se sabem",
+        );
+    }
+    if let Some(recusa) =
+        crate::contencao::recusa(Chamador::Pessoa(sessao), Autoridade::Pessoa { sessao })
+    {
+        return recusa;
+    }
+    if papel_de_teto(&quem) {
+        return TETO_NAO_SE_EXERCE;
+    }
+    decidir(quem.papel.as_deref(), Permissao::CredentialChangeSelf, "")
+}
+
+/// Grava um desfecho da troca da própria senha: a pessoa da sessão como
+/// titular — com o papel dela de agora, se a sessão ainda vale —, o
+/// recurso que a troca alcança — `pessoa:<id>`, a dona da sessão —, o
+/// código e o detalhe. Nada secreto vai junto: nem as senhas, nem o
+/// verificador, nem o sal — os parâmetros gravados são os de pedido
+/// nenhum. Devolve o número do registro; o que valeu conta na atividade.
+pub fn auditar_troca_da_propria_senha(
+    sessao: crate::pessoas::IdSessao,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) -> u64 {
+    let (Ok(quem) | Err(quem)) = quem_da_pessoa(sessao);
+    let seq = auditar(&quem, TROCA_DA_PROPRIA_SENHA, recurso, codigo, &[], detalhe);
+    if codigo.permite() {
+        contar(
+            &quem,
+            TROCA_DA_PROPRIA_SENHA,
+            Some(Permissao::CredentialChangeSelf),
+        );
+    }
+    seq
 }
 
 /// Pode nascer mais um processo com a autoridade `autoridade`? A cota de

@@ -114,6 +114,7 @@ cargo xtask persistencia             # vários boots sobre o mesmo disco e o mes
 cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
 cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, o cache do disco, cópias, sem TPM, clone, reinstalar
 cargo xtask botao                    # o botão de energia pelo emulador: desliga pelo gate, gravações, dois apertos, reinício, corte, produção
+cargo xtask senha                    # a troca da própria senha pelo teclado: o corte, a queda em cada fronteira, o botão, produção
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -749,6 +750,7 @@ xtask/src/
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
+├── senha.rs         a bancada da troca da própria senha: a pessoa no teclado da máquina, pelo Terminal — a nova sobrevive ao corte, a queda em cada fronteira da troca deixa exatamente uma senha valendo, a troca com o botão de energia, e a imagem de produção
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
 ├── slots.rs         a atualização do lado do hospedeiro: a imagem de um slot montada e assinada, conferida como o kernel a confere, o slot A e o controle do disco de testes
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
@@ -7342,6 +7344,25 @@ papel maior que o dele.
 
 O que elas mudam vai para o journal, e sobrevive ao reboot.
 
+**A própria senha não é administrar.** A pessoa entrada num console troca
+a **própria** senha ali — `senha`, e o console pede a atual, a nova e a
+nova de novo, sem eco. São duas perguntas separadas: a autenticação — a
+senha atual, pelo mesmo Argon2id e pela mesma janela de tentativas do
+login: a sessão sozinha não prova nada — e a autorização —
+`credential.change_self`, uma permissão do vocabulário, decidida pelo gate
+com o papel de agora, antes de pedir as senhas e de novo ao gravar. O alvo
+é sempre a credencial da dona da sessão: nenhum parâmetro diz de quem, e
+nem um agente, nem um processo, nem a serial, nem o `sistema` — que não a
+tem: não é pessoa — chegam a ela. A senha nova segue a regra do
+provisionamento (doze caracteres no mínimo), vira um verificador com o
+custo das credenciais novas e um sal sorteado, e vai ao journal como o de
+`credential.rotate`, com a decisão no mesmo registro e a resposta depois;
+se outra troca, a rotação, uma revogação ou a suspensão vêm no meio,
+`CONFLICT` ou a recusa, e nada muda. As sessões abertas continuam, e a
+senha antiga não entra mais. A auditoria grava cada desfecho, e nunca uma
+senha, o verificador ou o sal. Ver "A própria senha" em
+[`docs/OPERACAO.md`](docs/OPERACAO.md).
+
 **A pessoa de desenvolvimento.** A imagem de desenvolvimento e de testes
 traz uma pessoa, `dev`, para quem roda o Duke aqui ter com quem entrar — um
 mecanismo explícito de desenvolvimento, e não um login automático: a senha
@@ -7355,7 +7376,19 @@ cada login e saída; as recusas — senha errada, nome desconhecido, senha
 longa demais — e o limite de tentativas de um console sem prender outro; e
 os seis estados — registrada, autenticada, sessão ativa, credencial válida,
 sessão revogada, pessoa revogada — pelas operações de verdade, com a prova,
-sem que um se passe pelo outro.
+sem que um se passe pelo outro. E a troca da própria senha (`senha:`): a
+de verdade, pelo console, sem eco, com a decisão e o verificador novo no
+mesmo registro do journal — que, reposto sobre a imagem, dá a senha nova e
+não a antiga —; a atual errada, a nova inválida, a desistência e a janela
+de tentativas dividida com o login; sem login, um agente, a política sem a
+permissão — antes e no meio —, o `sistema` e o teto como papel de pessoa,
+a credencial suspensa, a sessão de outra pessoa, a sessão que acabou e a
+pessoa revogada; a persistência indisponível, a gravação que falha, o
+journal recusado, a versão da atualização A/B recusada e o desligamento a
+caminho; o que vem no meio — a sessão e a pessoa revogadas, a suspensão e
+o `credential.rotate` do administrador —; e duas trocas da mesma
+credencial, e o login, ao mesmo tempo em dois núcleos: exatamente uma
+troca, e exatamente uma senha valendo depois.
 
 ### Consoles
 
@@ -7387,6 +7420,14 @@ kernel não sabe para qual janela uma tecla vai virar senha, então não grava
 tecla nenhuma. Um agente não edita nem confirma a linha que pede nome ou
 senha, e não confirma `login` nem `logout`: o login é de quem está no
 teclado.
+
+**Trocar a própria senha.** `senha` pede a atual, a nova e a nova de novo,
+pelas mesmas regras da senha do login — sem eco, fora da árvore e do
+histórico, apagadas em toda saída, e só do teclado: um agente não as edita,
+nem confirma `senha`. É a quarta palavra do console, e a única que é uma
+operação — `credential.change_self`, decidida pelo gate —: uma senha não se
+digita numa linha de comando, e por isso o diálogo dela é do console, e não
+um comando do registro.
 
 **Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
 sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
@@ -8155,6 +8196,38 @@ reprovadas**; uma sobreviveu, e é equivalente no emulador.
 O kernel de produção cresceu 22 120 bytes nos segmentos carregáveis no
 x86 (+0,53%) e 16 704 no ARM (+0,47%), contra o B2 (`709dd08`); o
 iniciador e os programas não mudaram.
+
+### A troca da própria senha
+
+A pessoa troca a própria senha no console — `senha`, a atual, a nova e a
+nova de novo, sem eco ([`kernel/src/interpretador.rs`](kernel/src/interpretador.rs)).
+Nenhuma identidade, credencial ou criptografia nova: a prova é a senha
+atual, pelo mesmo Argon2id e pela mesma janela de tentativas do login
+([`kernel/src/pessoas.rs`](kernel/src/pessoas.rs)); a autorização é
+`credential.change_self`, uma permissão do vocabulário fechado
+([`politica/src/permissao.rs`](politica/src/permissao.rs)), sensível, sem
+alcance e não administrativa, decidida pelo gate com o papel de agora
+([`kernel/src/autorizacao.rs`](kernel/src/autorizacao.rs)) — antes de pedir
+as senhas e de novo com a ordem das gravações na mão. O alvo é sempre a
+credencial da dona da sessão. A troca vai ao journal pelo caminho de
+`credential.rotate` — a fotografia, a credencial nova só se a de antes
+ainda é a que conferiu, a decisão gravada e a gravação com ela no mesmo
+registro — e a resposta vem depois. Na política padrão e no exemplo de
+produção, o `observador` e o `operador` a têm, e o teto do `administrador`,
+que os delega; o `sistema`, não. Ver "A própria senha" em
+[`docs/OPERACAO.md`](docs/OPERACAO.md#a-própria-senha).
+
+Cinco casos `senha:` e um `smp: senha:` na suíte, e a bancada
+`cargo xtask senha`, com a pessoa no teclado da máquina — o `sendkey` do
+monitor do emulador, no Terminal —, nas duas arquiteturas: a nova
+sobrevive ao corte de energia; a queda em
+cada fronteira da troca — as senhas digitadas e nada conferido, a atual
+conferida, a decisão feita, cada passo da gravação, tudo gravado sem a
+resposta, e a resposta dada — deixa, no boot seguinte, exatamente uma
+senha valendo, a nova exatamente quando o registro está no disco; a troca
+com o botão de energia apertado logo depois do Enter; e a imagem de
+produção, com a pessoa do operador. A bancada da atualização A/B troca a
+senha antes da versão nova, e confere que só a nova entra depois dela.
 
 ## Barramento PCI
 

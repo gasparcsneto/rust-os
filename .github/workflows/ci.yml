@@ -524,6 +524,48 @@ jobs:
       - name: Botão de energia
         run: cargo xtask botao --arch ${{ matrix.arch }}
 
+  # A troca da própria senha pelo teclado da máquina (o `sendkey` do
+  # monitor, no Terminal): a nova sobrevive ao corte de energia; a queda em
+  # cada fronteira da troca — antes e depois de conferir, depois de
+  # autorizar, cada passo da gravação, antes e depois da resposta — deixa
+  # exatamente uma senha valendo, a nova exatamente quando o registro está
+  # no disco; a troca com o botão de energia apertado logo depois; e a
+  # imagem de produção. Um job à parte, como o do botão: cada cenário é uma
+  # série de boots pelo firmware.
+  senha:
+    name: Troca da própria senha (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: senha-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: senha-${{ matrix.arch }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Troca da própria senha
+        run: cargo xtask senha --arch ${{ matrix.arch }}
+
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
   # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback

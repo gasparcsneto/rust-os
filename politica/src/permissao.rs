@@ -55,6 +55,18 @@
 //! administrativa: anula a chave de outra identidade, por `admin.execute`,
 //! com prova — e não dá a ninguém o uso dela. Todas sensíveis: nenhuma vem
 //! pela inclusão de outro papel.
+//!
+//! # A própria credencial
+//!
+//! `credential.change_self` autoriza uma pessoa a trocar a **própria**
+//! senha, e nada mais: o alvo é sempre a credencial da dona da sessão que
+//! pede — nunca um parâmetro, nunca a de outra pessoa. Autoriza; não
+//! autentica: a troca exige, além dela, a prova da senha atual, conferida
+//! pelo kernel contra o verificador. Sem alcance — não há recurso a
+//! enumerar —, sensível — cada papel que a tem a escreve —, e não
+//! administrativa: a pessoa a exerce pelo gate, sem prova de
+//! administrador. Trocar a credencial **de outro** continua sendo
+//! `credential.rotate`, administrativa.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,11 +253,15 @@ pub enum Permissao {
     /// como o `system.power`: o `sistema` a exerce pelo gate; a instalação
     /// é do quórum.
     SystemUpdate,
+    /// Trocar a **própria** senha — a credencial da dona da sessão que
+    /// pede, provando a atual. Ver o cabeçalho do módulo. Sem recurso,
+    /// sensível, e não administrativa.
+    CredentialChangeSelf,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 49] = [
+pub const TODAS: [Permissao; 50] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -295,6 +311,7 @@ pub const TODAS: [Permissao; 49] = [
     Permissao::ProcessTerminate,
     Permissao::SystemPower,
     Permissao::SystemUpdate,
+    Permissao::CredentialChangeSelf,
 ];
 
 impl Permissao {
@@ -350,6 +367,7 @@ impl Permissao {
             Permissao::ProcessTerminate => "process.terminate",
             Permissao::SystemPower => "system.power",
             Permissao::SystemUpdate => "system.update",
+            Permissao::CredentialChangeSelf => "credential.change_self",
         }
     }
 
@@ -402,6 +420,7 @@ impl Permissao {
                 | Permissao::ProcessTerminate
                 | Permissao::SystemPower
                 | Permissao::SystemUpdate
+                | Permissao::CredentialChangeSelf
         )
     }
 
@@ -581,7 +600,8 @@ impl Permissao {
             | Permissao::KeyRevoke
             | Permissao::ProcessTerminate
             | Permissao::SystemPower
-            | Permissao::SystemUpdate => true,
+            | Permissao::SystemUpdate
+            | Permissao::CredentialChangeSelf => true,
         }
     }
 
@@ -768,11 +788,11 @@ mod testes {
         assert_eq!(e, Permissao::SystemPower);
         assert!(e.sensivel() && !e.administrativa() && e.muda_estado());
         assert!(!e.tem_alcance() && !e.alvo_e_papel() && !e.contencao());
-        assert_eq!(TODAS[TODAS.len() - 2], e);
+        assert_eq!(TODAS[47], e);
     }
 
     /// A atualização: como o `system.power` — sensível, não
-    /// administrativa, muda o estado, sem recurso —, e no fim da lista: a
+    /// administrativa, muda o estado, sem recurso —, depois dele: a
     /// posição é o bit do manifesto, e as que já existiam não se movem.
     #[test]
     fn atualizar() {
@@ -780,7 +800,34 @@ mod testes {
         assert_eq!(e, Permissao::SystemUpdate);
         assert!(e.sensivel() && !e.administrativa() && e.muda_estado());
         assert!(!e.tem_alcance() && !e.alvo_e_papel() && !e.contencao());
-        assert_eq!(TODAS.last(), Some(&e));
+        assert_eq!(TODAS[48], e);
+    }
+
+    /// Trocar a própria senha: sensível — cada papel que a tem a escreve —,
+    /// **não** administrativa — a pessoa a exerce pelo gate, sem prova de
+    /// administrador —, muda o estado, e sem recurso nenhum: o alvo é a
+    /// credencial da dona da sessão, e não algo que o papel enumere. Não é
+    /// a de trocar a de outro, que continua administrativa. E no fim da
+    /// lista: as de antes não mudam de bit.
+    #[test]
+    fn trocar_a_propria_senha() {
+        let p = Permissao::de_nome("credential.change_self").unwrap();
+        assert_eq!(p, Permissao::CredentialChangeSelf);
+        assert!(p.sensivel() && !p.administrativa() && p.muda_estado());
+        assert!(!p.tem_alcance() && !p.alvo_e_papel() && !p.contencao());
+        assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_chave());
+        assert!(!p.recurso_e_destino() && !p.recurso_e_papel());
+        let de_outro = Permissao::CredentialRotate;
+        assert_ne!(p, de_outro);
+        assert!(de_outro.administrativa());
+        assert_eq!(TODAS.last(), Some(&p));
+        assert_eq!(Permissao::CredentialChangeSelf as usize, 49);
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        assert_eq!(Permissao::de_nome("credential.*"), None);
+        assert_eq!(Permissao::de_nome("credential.change"), None);
+        assert_eq!(Permissao::de_nome("credential.change_other"), None);
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

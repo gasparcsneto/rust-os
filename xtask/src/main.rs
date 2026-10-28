@@ -24,6 +24,7 @@ mod identidade;
 mod persistencia;
 mod producao;
 mod rede_principal;
+mod senha;
 mod servidor_de_hora;
 mod slots;
 mod tempo;
@@ -283,6 +284,7 @@ fn main() -> ExitCode {
         "atualizacao" => atualizar::atualizacao(arch, release),
         "identidade" => identidade::identidade(arch, release),
         "botao" => botao::botao(arch, release),
+        "senha" => senha::senha(arch, release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -465,6 +467,11 @@ COMANDOS:
                               o reinício a caminho, o corte no meio, o aperto
                               antes do boot, sem persistência; e na imagem de
                               produção, com a política que deixa e a que nega
+    senha                     a pessoa troca a própria senha pelo teclado da
+                              máquina: a nova sobrevive ao corte, a queda em
+                              cada fronteira da troca deixa exatamente uma senha
+                              valendo, a troca com o botão de energia, e na
+                              imagem de produção
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -16692,7 +16699,7 @@ mod testes {
             assert!(politica::PADRAO.contains(de), "{de}");
             politica::Politica::ler(&politica::PADRAO.replace(de, para)).unwrap()
         };
-        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy\n";
+        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n";
         const TEMPO: &str = "papel tempo net.connect time.sync\n";
         const ALCANCE: &str =
             "recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";

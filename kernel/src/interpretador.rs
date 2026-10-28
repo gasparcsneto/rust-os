@@ -11,8 +11,14 @@
 //! Aqui o que se digita é despachado pelo **mesmo** registro, com os mesmos
 //! handlers. O que muda é só a renderização: o agente lê uma linha de JSON
 //! compacto, e uma pessoa lê o mesmo JSON quebrado em linhas. As exceções
-//! são as três palavras do próprio console — `login`, `logout` e `ajuda` —,
-//! que não são operações do sistema: dizem quem está no console.
+//! são as palavras do próprio console — `login`, `logout` e `ajuda`, que
+//! não são operações do sistema: dizem quem está no console —, e `senha`,
+//! a troca da própria senha: ela é uma operação, decidida pelo gate como
+//! `credential.change_self`, mas pede senhas, e uma senha não se digita
+//! numa linha de comando — ela ecoaria, entraria no histórico do teclado e
+//! na árvore semântica. Por isso o diálogo dela é do console, como o do
+//! login, e não um comando do registro: nenhum agente, processo ou canal a
+//! alcança.
 //!
 //! # Um console é uma sessão
 //!
@@ -38,6 +44,8 @@
 //!
 //! A senha não ecoa, não aparece na árvore semântica, não entra no
 //! histórico do teclado, e o buffer dela é apagado depois da conferência.
+//! Vale para as três da troca da própria senha — a atual, a nova e a nova
+//! de novo —, guardadas só até a última, e apagadas em toda saída.
 //!
 //! # A linha de comando do físico tem dois donos, e um caminho
 //!
@@ -85,6 +93,10 @@ use protocolo::usuario::terminal::PROMPT;
 pub const PROMPT_DO_NOME: &str = "nome: ";
 /// E a senha.
 pub const PROMPT_DA_SENHA: &str = "senha: ";
+/// Na troca da própria senha: a atual, a nova, e a nova de novo.
+pub const PROMPT_DA_ATUAL: &str = "senha atual: ";
+pub const PROMPT_DA_NOVA: &str = "senha nova: ";
+pub const PROMPT_DE_NOVO: &str = "a nova de novo: ";
 
 /// O que a linha de um console está pedindo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +107,38 @@ pub enum Modo {
     Nome,
     /// A senha. O que se digita não ecoa.
     Senha,
+    /// Na troca da própria senha, a atual — a prova. Não ecoa.
+    SenhaAtual,
+    /// A nova. Não ecoa.
+    SenhaNova,
+    /// A nova de novo, para conferir o que se digitou sem ver. Não ecoa.
+    SenhaDeNovo,
+}
+
+impl Modo {
+    /// O que se digita neste modo é uma senha: não ecoa, não aparece na
+    /// árvore semântica, não entra no histórico do teclado, e a linha é
+    /// apagada byte a byte.
+    pub const fn secreto(self) -> bool {
+        !matches!(self, Modo::Comando | Modo::Nome)
+    }
+
+    /// Um passo da troca da própria senha.
+    const fn da_troca(self) -> bool {
+        matches!(self, Modo::SenhaAtual | Modo::SenhaNova | Modo::SenhaDeNovo)
+    }
+
+    /// O que aparece antes do que se digita.
+    const fn prompt(self) -> &'static str {
+        match self {
+            Modo::Comando => PROMPT,
+            Modo::Nome => PROMPT_DO_NOME,
+            Modo::Senha => PROMPT_DA_SENHA,
+            Modo::SenhaAtual => PROMPT_DA_ATUAL,
+            Modo::SenhaNova => PROMPT_DA_NOVA,
+            Modo::SenhaDeNovo => PROMPT_DE_NOVO,
+        }
+    }
 }
 
 /// Um console: a linha, o modo e quem está nele.
@@ -122,6 +166,15 @@ struct Estado {
     /// a senha foi digitada, e só entra se ela não mudou — ver o modo
     /// [`Modo::Senha`] em [`tratar`].
     abertura: u64,
+    /// A troca da própria senha em curso: a sessão que a pediu, e as
+    /// senhas já digitadas — a atual e a nova — até a confirmação. Apagadas
+    /// em toda saída: a troca feita ou recusada, a desistência, o console
+    /// que fecha ou reabre. Ver [`Estado::largar_troca`].
+    troca: Option<IdSessao>,
+    atual: [u8; LINHA_MAX],
+    atual_tam: usize,
+    nova: [u8; LINHA_MAX],
+    nova_tam: usize,
 }
 
 impl Estado {
@@ -136,7 +189,22 @@ impl Estado {
         nome_tam: 0,
         sessao: None,
         abertura: 0,
+        troca: None,
+        atual: [0; LINHA_MAX],
+        atual_tam: 0,
+        nova: [0; LINHA_MAX],
+        nova_tam: 0,
     };
+
+    /// Esquece a troca da própria senha em curso, e apaga as senhas que
+    /// ela guardava — os bytes, e não só os tamanhos.
+    fn largar_troca(&mut self) {
+        self.troca = None;
+        sigilo::zeroize::Zeroize::zeroize(&mut self.atual);
+        sigilo::zeroize::Zeroize::zeroize(&mut self.nova);
+        self.atual_tam = 0;
+        self.nova_tam = 0;
+    }
 
     fn texto(&self) -> &str {
         // Só entram na linha caracteres ASCII, filtrados em [`digitar_em`] e
@@ -399,6 +467,7 @@ pub fn abrir_console(console: Console) {
     let sobra = com_estado(console, |e| {
         let sobra = e.sessao.take();
         e.zerar();
+        e.largar_troca();
         e.aberto = true;
         e.abertura += 1;
         e.modo = Modo::Comando;
@@ -413,6 +482,11 @@ pub fn abrir_console(console: Console) {
     })
     .flatten();
     largar_suspenso(console);
+    // A linha volta a pedir um comando: o teclado volta a gravar o
+    // histórico, se ela pedia uma senha.
+    if let Some(i) = indice(console) {
+        crate::teclado::pedindo_senha(i, false);
+    }
     if let Some(id) = sobra {
         crate::pessoas::encerrar_pelo_console(id, "o console reabriu");
     }
@@ -446,6 +520,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
     let Some((sessao, i)) = com_estado(console, |e| {
         let sessao = e.sessao.take();
         e.zerar();
+        e.largar_troca();
         e.aberto = false;
         e.abertura += 1;
         e.inicio = None;
@@ -673,11 +748,7 @@ fn aceito(c: char) -> bool {
 
 /// O prompt do modo, e onde o campo começa. Com o estado na mão.
 fn prompt_em(console: Console, e: &mut Estado) {
-    let prompt = match e.modo {
-        Modo::Comando => PROMPT,
-        Modo::Nome => PROMPT_DO_NOME,
-        Modo::Senha => PROMPT_DA_SENHA,
-    };
+    let prompt = e.modo.prompt();
     saida!(console, "{prompt}");
     if console == Console::Fisico {
         e.inicio = Some(crate::tela::console::cursor_em_celulas());
@@ -693,7 +764,7 @@ fn digitar_em(console: Console, e: &mut Estado, c: char) -> bool {
     }
     e.bytes[e.tam] = c as u8;
     e.tam += 1;
-    if e.modo != Modo::Senha {
+    if !e.modo.secreto() {
         saida!(console, "{c}");
     }
     true
@@ -712,7 +783,7 @@ fn apagar_em(console: Console, e: &mut Estado) {
     if e.tam > 0 {
         e.tam -= 1;
         e.bytes[e.tam] = 0;
-        if e.modo != Modo::Senha {
+        if !e.modo.secreto() {
             saida!(console, "\u{8} \u{8}");
         }
     }
@@ -741,7 +812,7 @@ pub fn limpar() {
 
 /// Desenha de novo o que está digitado no físico — nada, se é a senha.
 fn redesenhar(e: &Estado) {
-    if e.modo != Modo::Senha {
+    if !e.modo.secreto() {
         crate::serial_print!("{}", e.texto());
     }
 }
@@ -763,7 +834,7 @@ pub fn inicio_do_campo() -> Option<(u32, u32)> {
 /// vê a senha: no lugar dela, nada.
 pub fn com_valor<R>(f: impl FnOnce(&str) -> R) -> R {
     com_fisico(|e| {
-        if e.modo == Modo::Senha {
+        if e.modo.secreto() {
             f("")
         } else {
             f(e.texto())
@@ -827,6 +898,11 @@ pub fn definir(valor: &str) -> Result<(), &'static str> {
     definir_em(Console::Fisico, valor)
 }
 
+/// A recusa de quem edita, pela árvore, a linha que pede o nome ou uma
+/// senha: o login e a troca da própria senha são de quem está no teclado.
+const LINHA_DA_PESSOA: &str =
+    "a linha esta pedindo o nome ou uma senha de uma pessoa; so se digita pelo teclado";
+
 fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     let (aberto, modo, inicio) =
         com_estado(console, |e| (e.aberto, e.modo, e.inicio)).ok_or("console desconhecido")?;
@@ -842,7 +918,7 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     // Esvaziar a linha do login é o `APAGAR_A_LINHA` do Terminal, e vale;
     // escrever nela, não.
     if modo != Modo::Comando && !valor.is_empty() {
-        return Err("a linha esta pedindo o login de uma pessoa; so se digita pelo teclado");
+        return Err(LINHA_DA_PESSOA);
     }
     com_estado(console, |e| {
         while e.tam > 0 {
@@ -875,7 +951,7 @@ pub fn pode_definir(valor: &str) -> Result<(), &'static str> {
         return Err("o valor tem caracteres que nao se digitam na linha de comando");
     }
     if modo != Modo::Comando && !valor.is_empty() {
-        return Err("a linha esta pedindo o login de uma pessoa; so se digita pelo teclado");
+        return Err(LINHA_DA_PESSOA);
     }
     Ok(())
 }
@@ -886,7 +962,9 @@ pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
     if let Origem::Agente(_) = origem
         && com_fisico(|e| e.modo) != Modo::Comando
     {
-        return Err("a linha esta pedindo o login de uma pessoa; so se confirma pelo teclado");
+        return Err(
+            "a linha esta pedindo o nome ou uma senha de uma pessoa; so se confirma pelo teclado",
+        );
     }
     if ocupado(Console::Fisico) {
         return Err("o console espera um comando que ainda nao respondeu");
@@ -918,6 +996,10 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
     if modo != Modo::Comando {
         if let Origem::Agente(_) = origem {
             return alloc::string::String::new();
+        }
+        if modo.da_troca() {
+            trocar_passo(console);
+            return alloc::string::String::from("senha");
         }
         entrar_passo(console);
         return alloc::string::String::from("login");
@@ -1086,7 +1168,7 @@ fn entrar_passo(console: Console) {
             }
             mostrar_prompt(console);
         }
-        Modo::Comando => {}
+        Modo::Comando | Modo::SenhaAtual | Modo::SenhaNova | Modo::SenhaDeNovo => {}
     }
 }
 
@@ -1120,12 +1202,8 @@ pub fn por_cima(escrever_o_registro: impl FnOnce()) {
             escrever_o_registro();
             return;
         }
-        let prompt = match e.modo {
-            Modo::Comando => PROMPT.len(),
-            Modo::Nome => PROMPT_DO_NOME.len(),
-            Modo::Senha => PROMPT_DA_SENHA.len(),
-        };
-        let digitado = if e.modo == Modo::Senha { 0 } else { e.tam };
+        let prompt = e.modo.prompt().len();
+        let digitado = if e.modo.secreto() { 0 } else { e.tam };
         for _ in 0..prompt + digitado {
             crate::serial_print!("\u{8} \u{8}");
         }
@@ -1168,7 +1246,7 @@ pub fn console_aberto(console: Console) -> bool {
 /// quando a senha já saiu da linha e a conferência começou.
 #[cfg(feature = "modo-teste")]
 pub fn pedindo_senha(console: Console) -> bool {
-    com_estado(console, |e| e.modo == Modo::Senha).unwrap_or(false)
+    com_estado(console, |e| e.modo.secreto()).unwrap_or(false)
 }
 
 /// A pessoa que a suíte põe no console, e o papel dela.
@@ -1258,9 +1336,10 @@ fn executar(
             ajuda(console, origem);
             None
         }
-        // O login e a saída são da pessoa no console. Um agente que os
-        // confirmasse estaria entrando por alguém, ou tirando alguém dali.
-        ("login" | "logout", Origem::Agente(_)) => {
+        // O login, a saída e a troca da própria senha são da pessoa no
+        // console. Um agente que os confirmasse estaria entrando por alguém,
+        // tirando alguém dali, ou trocando a senha de alguém.
+        ("login" | "logout" | "senha", Origem::Agente(_)) => {
             saidaln!(console, "`{}` e da pessoa no console, pelo teclado", nome);
             None
         }
@@ -1270,6 +1349,10 @@ fn executar(
         }
         ("logout", Origem::Pessoa) => {
             sair(console);
+            None
+        }
+        ("senha", Origem::Pessoa) => {
+            comecar_troca(console, params);
             None
         }
         _ => despachar(console, nome, params, origem, permitir),
@@ -1304,6 +1387,141 @@ fn sair(console: Console) {
             saidaln!(console, "ate logo.");
         }
         None => saidaln!(console, "ninguem entrou neste console"),
+    }
+}
+
+/// `senha`: a pessoa do console troca a **própria** senha — a da sessão
+/// dela, e nenhuma outra: não há parâmetro que diga de quem.
+///
+/// Antes de pedir qualquer senha, o que não depende dela: alguém entrado,
+/// a decisão do gate com o papel de agora, a persistência de pé e a
+/// máquina sem reinício a caminho — ver
+/// [`crate::pessoas::pode_trocar_a_propria_senha`]. Recusado ali, nada é
+/// pedido. Depois, três linhas sem eco: a atual, a nova e a nova de novo;
+/// a troca é feita no Enter da última — ver [`trocar_passo`].
+///
+/// Nada se digita junto da palavra: uma senha na linha de comando já teria
+/// ecoado. `senha <algo>` é recusado, e o que veio junto não é usado.
+fn comecar_troca(console: Console, params: &str) {
+    let Some(i) = indice(console) else {
+        return;
+    };
+    if params != "{}" {
+        saidaln!(
+            console,
+            "`senha` nao recebe nada na linha: as senhas se digitam depois, sem eco"
+        );
+        return;
+    }
+    let Some(sessao) = sessao_valida(console) else {
+        autorizacao::recusar_sem_login(console, autorizacao::TROCA_DA_PROPRIA_SENHA, &[]);
+        saidaln!(
+            console,
+            "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
+        );
+        return;
+    };
+    if let Err((codigo, motivo)) = crate::pessoas::pode_trocar_a_propria_senha(console, sessao) {
+        saidaln!(console, "negado: {}; {}", codigo.nome(), motivo);
+        return;
+    }
+    com_estado(console, |e| {
+        e.largar_troca();
+        e.troca = Some(sessao);
+        e.modo = Modo::SenhaAtual;
+    });
+    crate::teclado::pedindo_senha(i, true);
+}
+
+/// O Enter no meio da troca da própria senha: a atual leva à nova, a nova
+/// à confirmação, e a confirmação à troca — feita fora da tranca, que o
+/// Argon2id é longo, com as senhas copiadas para fora e apagadas dos dois
+/// lugares. Uma linha vazia, em qualquer passo, desiste sem conferir nada.
+fn trocar_passo(console: Console) {
+    let Some(i) = indice(console) else {
+        return;
+    };
+    let modo = com_estado(console, |e| e.modo).unwrap_or(Modo::Comando);
+    match modo {
+        Modo::SenhaAtual | Modo::SenhaNova => {
+            let seguiu = com_estado(console, |e| {
+                saidaln!(console);
+                let seguiu = e.tam > 0;
+                if !seguiu {
+                    e.largar_troca();
+                    e.modo = Modo::Comando;
+                } else if e.modo == Modo::SenhaAtual {
+                    e.atual = e.bytes;
+                    e.atual_tam = e.tam;
+                    e.modo = Modo::SenhaNova;
+                } else {
+                    e.nova = e.bytes;
+                    e.nova_tam = e.tam;
+                    e.modo = Modo::SenhaDeNovo;
+                }
+                e.zerar();
+                if seguiu {
+                    prompt_em(console, e);
+                }
+                seguiu
+            })
+            .unwrap_or(false);
+            if !seguiu {
+                crate::teclado::pedindo_senha(i, false);
+                saidaln!(console, "troca de senha desistida: nada mudou");
+                mostrar_prompt(console);
+            }
+        }
+        Modo::SenhaDeNovo => {
+            let mut atual = [0u8; LINHA_MAX];
+            let mut nova = [0u8; LINHA_MAX];
+            let mut de_novo = [0u8; LINHA_MAX];
+            // A sessão que pediu a troca: se ela acabou no meio, a troca a
+            // encontra acabada, e recusa — gravando.
+            let (sessao, tamanhos) = com_estado(console, |e| {
+                let sessao = e.troca;
+                let tamanhos = (e.atual_tam, e.nova_tam, e.tam);
+                atual = e.atual;
+                nova = e.nova;
+                de_novo = e.bytes;
+                e.zerar();
+                e.largar_troca();
+                e.modo = Modo::Comando;
+                e.inicio = None;
+                saidaln!(console);
+                (sessao, tamanhos)
+            })
+            .unwrap_or((None, (0, 0, 0)));
+            crate::teclado::pedindo_senha(i, false);
+            let (ta, tn, td) = tamanhos;
+            let desfecho = match sessao {
+                Some(s) if td > 0 => Some(crate::pessoas::trocar_a_propria_senha(
+                    console,
+                    s,
+                    &atual[..ta],
+                    &nova[..tn],
+                    &de_novo[..td],
+                )),
+                _ => None,
+            };
+            sigilo::zeroize::Zeroize::zeroize(&mut atual);
+            sigilo::zeroize::Zeroize::zeroize(&mut nova);
+            sigilo::zeroize::Zeroize::zeroize(&mut de_novo);
+            match desfecho {
+                None => saidaln!(console, "troca de senha desistida: nada mudou"),
+                Some(Ok(())) => saidaln!(
+                    console,
+                    "senha trocada: a antiga nao entra mais, e as sessoes abertas continuam"
+                ),
+                Some(Err((codigo, motivo))) => {
+                    saidaln!(console, "senha nao trocada: {} ({})", motivo, codigo.nome())
+                }
+            }
+            // A sessão pode ter acabado no meio: o console fica sabendo.
+            let _ = sessao_valida(console);
+            mostrar_prompt(console);
+        }
+        Modo::Comando | Modo::Nome | Modo::Senha => {}
     }
 }
 
@@ -1431,6 +1649,12 @@ fn ajuda(console: Console, origem: Origem) {
         "Entra: pede o nome e a senha (`login nome` pede so a senha)."
     );
     saidaln!(console, "  {:<18} {}", "logout", "Sai.");
+    saidaln!(
+        console,
+        "  {:<18} {}",
+        "senha",
+        "Troca a propria senha: pede a atual e a nova, sem eco."
+    );
     saidaln!(console, "  {:<18} {}", "ajuda", "Esta lista.");
 }
 
