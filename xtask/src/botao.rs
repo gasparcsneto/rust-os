@@ -681,6 +681,18 @@ pub(crate) fn molde_de_producao(
     nome: &str,
     mudar: impl Fn(&str) -> Result<String, String>,
 ) -> Result<PathBuf, String> {
+    let agentes = producao::chave_nova("agente", "sistema-1", Some("sistema"))?.1;
+    molde_de_producao_com(arch, nome, mudar, &agentes)
+}
+
+/// [`molde_de_producao`], com o arquivo dos agentes dado: a bancada da
+/// cópia de segurança põe um agente operador, cuja privada ela guarda.
+pub(crate) fn molde_de_producao_com(
+    arch: Arquitetura,
+    nome: &str,
+    mudar: impl Fn(&str) -> Result<String, String>,
+    agentes: &str,
+) -> Result<PathBuf, String> {
     let raiz = super::raiz_do_estado();
     let dir = raiz.join(format!("operador-{nome}-{}", arch.nome()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -700,10 +712,7 @@ pub(crate) fn molde_de_producao(
     }
     escrever("politica", &mudar(&com_a_serial)?)?;
     escrever("nome", &format!("bancada-{nome}\n"))?;
-    escrever(
-        "agentes",
-        &producao::chave_nova("agente", "sistema-1", Some("sistema"))?.1,
-    )?;
+    escrever("agentes", agentes)?;
     let mut administradores = String::new();
     for adm in ["adm-a", "adm-b", "adm-c"] {
         administradores

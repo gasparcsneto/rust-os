@@ -1386,13 +1386,13 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "fs.draft",
-        resumo: "Acrescenta o anexo do pedido (ou `content`) a um rascunho para `path` — cria um sem `draft`. Os blocos vao para o volume ja, e contam na sua cota; fs.write com `draft` grava o rascunho inteiro num lote so. Um rascunho sem uso some em 5 minutos.",
+        resumo: "Acrescenta o anexo do pedido (ou `content`) a um rascunho para `path` — cria um sem `draft`. Os blocos vao para o volume ja, e contam na sua cota; fs.write com `draft` grava o rascunho inteiro num lote so, e fs.restore troca `path` pela copia de seguranca que ele tem. Um rascunho sem uso some em 5 minutos.",
         params: &[
             ParamSpec {
                 nome: "path",
                 tipo: TipoParam::Texto,
                 obrigatorio: true,
-                descricao: "Caminho absoluto, abaixo de /armazem.",
+                descricao: "Caminho absoluto, abaixo de /armazem — ou /armazem, para uma copia do armazem inteiro a restaurar.",
             },
             ParamSpec {
                 nome: "draft",
@@ -1497,6 +1497,76 @@ pub static COMANDOS: &[Command] = &[
         mais: Mais::Nada,
         plano: Plano::Controle,
         handler: fs_verify,
+    },
+    Command {
+        nome: "fs.backup",
+        resumo: "A copia de seguranca de `path` — /armazem inteiro, ou um no abaixo dele —: os diretorios, os arquivos e o conteudo num instante, cifrados para esta maquina — so ela, nesta instalacao, a abre. Sem `copy`, faz a copia num rascunho seu (na sua cota, com o prazo dos rascunhos) e diz `copy`, `size` e `id`; com `copy`, devolve ate `max` bytes dela a partir de `offset`, em base64; com `copy` e `discard`, a descarta. Nao leva identidade, credencial, politica, chave nem segredo: so os dados do armazem. O alcance e o do fs.read; para voltar, fs.draft no mesmo `path` e fs.restore.",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "/armazem para o armazem inteiro, ou um diretorio ou arquivo abaixo dele.",
+            },
+            ParamSpec {
+                nome: "copy",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A copia ja feita, para ler um pedaco ou descarta-la; sem ele, uma nova.",
+            },
+            ParamSpec {
+                nome: "offset",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "De que byte da copia ler (padrao: 0).",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos bytes da copia devolver (padrao e maximo: 49152).",
+            },
+            ParamSpec {
+                nome: "discard",
+                tipo: TipoParam::Booleano,
+                obrigatorio: false,
+                descricao: "Com `copy`: descarta a copia, com os blocos dela.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsRead),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fs_backup,
+    },
+    Command {
+        nome: "fs.restore",
+        resumo: "Troca a subarvore `path` pela copia de seguranca do rascunho `draft` (enviada por fs.draft para o mesmo `path`). A copia e conferida inteira antes de qualquer mudanca — desta maquina, desta instalacao, do mesmo caminho, sem um byte fora do lugar —, e a troca e atomica: tudo ou nada, num registro so, com a auditoria. Cada no restaurado ganha versao nova, e o dono passa a ser quem restaura. So dados do armazem: nada de identidade, credencial, politica ou lapide volta. `expect_version` e a versao de `path` agora (0 se nao ha no; a raiz do armazem e 0). Os arrendamentos de outro titular abaixo de `path` recusam (CONFLICT).",
+        params: &[
+            ParamSpec {
+                nome: "path",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O caminho de onde a copia veio: /armazem, ou um no abaixo dele.",
+            },
+            ParamSpec {
+                nome: "draft",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "O rascunho com a copia inteira, de fs.draft.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "A versao de `path` agora: 0 se nao existe; sempre 0 na raiz.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FsRestore),
+        recurso: Some("path"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fs_restore,
     },
     Command {
         nome: "keyboard.read",
@@ -5116,6 +5186,99 @@ fn fs_verify(params: Json, w: &mut JsonWriter) -> fmt::Result {
         Err(motivo) => w.field_str("error", motivo)?,
     }
     w.end_object()
+}
+
+/// `fs.backup`: faz a cópia de segurança de `path` num rascunho de quem
+/// pede — ou, com `copy`, devolve um pedaço dela, ou a descarta. Ver
+/// [`crate::copia`].
+fn fs_backup(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let numero = params.member("copy").and_then(|v| v.as_u64());
+    let descartar = params
+        .member("discard")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    match (numero, descartar) {
+        (None, true) => invalido(w, caminho, "discard pede `copy`"),
+        (None, false) => match crate::copia::fazer(caminho) {
+            Ok(f) => {
+                w.field_bool("ok", true)?;
+                w.field_str("path", caminho)?;
+                w.field_u64("copy", f.numero)?;
+                w.field_u64("size", f.tamanho)?;
+                w.field_str("id", &crate::copia::hex(&f.id))?;
+                w.field_u64("captured_version", f.versao)?;
+                w.field_u64("directories", f.totais.diretorios)?;
+                w.field_u64("files", f.totais.arquivos)?;
+                w.field_u64("bytes", f.totais.bytes)?;
+                w.end_object()
+            }
+            Err(f) => recusa_do_armazem(w, caminho, f),
+        },
+        (Some(n), true) => match crate::copia::descartar(caminho, n) {
+            Ok(()) => {
+                w.field_bool("ok", true)?;
+                w.end_object()
+            }
+            Err(f) => recusa_do_armazem(w, caminho, f),
+        },
+        (Some(n), false) => {
+            let de = params
+                .member("offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let max = params
+                .member("max")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(crate::copia::MAIOR_LEITURA)
+                .clamp(1, crate::copia::MAIOR_LEITURA);
+            match crate::copia::ler(caminho, n, de, max) {
+                Ok((mut bytes, tamanho)) => {
+                    w.field_bool("ok", true)?;
+                    w.field_u64("copy", n)?;
+                    w.field_u64("size", tamanho)?;
+                    w.field_u64("offset", de)?;
+                    w.field_u64("returned", bytes.len() as u64)?;
+                    w.field_str("encoding", "base64")?;
+                    w.key("content")?;
+                    w.begin_str()?;
+                    let escrito = em_base64(&bytes, |c| w.push_str(c));
+                    politica::sigiloso::zerar_bloco(&mut bytes);
+                    escrito?;
+                    w.end_str()?;
+                    w.end_object()
+                }
+                Err(f) => recusa_do_armazem(w, caminho, f),
+            }
+        }
+    }
+}
+
+/// `fs.restore`: troca `path` pela cópia de segurança do rascunho `draft`.
+/// Ver [`crate::copia`].
+fn fs_restore(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let caminho = params.member("path").and_then(|v| v.as_str()).unwrap_or("");
+    let numero = params.member("draft").and_then(|v| v.as_u64()).unwrap_or(0);
+    let esperada = versao_esperada(params.member("expect_version"));
+    match crate::copia::restaurar(caminho, numero, esperada) {
+        Ok(r) => {
+            w.field_bool("ok", true)?;
+            w.field_str("path", caminho)?;
+            w.field_u64("version", r.versao)?;
+            w.field_str("copy_id", &crate::copia::hex(&r.id))?;
+            w.field_u64("captured_version", r.versao_da_copia)?;
+            w.field_u64("removed", r.removidos)?;
+            w.field_u64("directories", r.totais.diretorios)?;
+            w.field_u64("files", r.totais.arquivos)?;
+            w.field_u64("bytes", r.totais.bytes)?;
+            // Só há sucesso confirmado: o armazém não muda só em memória.
+            w.field_bool("durable", true)?;
+            w.end_object()
+        }
+        Err(f) => recusa_do_armazem(w, caminho, f),
+    }
 }
 
 fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {

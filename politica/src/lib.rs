@@ -66,7 +66,8 @@ pub use permissao::Permissao;
 ///   todo nesta linha. As administrativas não estão nela: são do
 ///   `administrador`, com a prova. A escrita (`fs.write`) alcança só o
 ///   armazém, `/armazem` — ver `docs/ARMAZENAMENTO.md` —: é a única árvore
-///   gravável, e a linha a concede por escrito, como qualquer outra.
+///   gravável, e a linha a concede por escrito, como qualquer outra. A
+///   restauração (`fs.restore`) também: o armazém inteiro.
 /// - `administrador` é o **teto** do que um administrador delega: as
 ///   permissões comuns dele não se exercem — uma chave de administrador não
 ///   abre sessão de agente —, e dizem só o que ele pode conceder. Escritas
@@ -74,6 +75,7 @@ pub use permissao::Permissao;
 ///   do administrador, e o do administrador não muda em tempo de execução.
 ///   O `fs.write` dele é o do operador, `/armazem/compartilhado`: o teto
 ///   tem de conter o que o operador recebe, para o operador ser delegável.
+///   O `fs.restore`, pelo mesmo motivo, também.
 /// - `net.connect`, nos dois, alcança os sete destinos da bancada, sem
 ///   porta aberta no hospedeiro: o eco TCP, em `10.0.2.100:7` (um
 ///   `guestfwd` que roda um `cat` a cada conexão), o eco TLS, em
@@ -168,9 +170,10 @@ macro_rules! papeis_de_sistema {
     ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
         concat!(
             "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
+recurso sistema fs.restore /armazem
 recurso sistema net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 recurso sistema net.observe udp:10.0.2.3:53
 recurso sistema net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
@@ -185,11 +188,12 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
+recurso administrador fs.restore /armazem/compartilhado
 recurso administrador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 recurso administrador net.observe udp:10.0.2.3:53
 recurso administrador net.block tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943 udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
@@ -230,7 +234,8 @@ servico nsf seguranca
 ///   — cada um a escreve: ela é sensível, e não vem pela inclusão;
 /// - `operador` observa e age: a tela, programas de `/bin` e
 ///   `/programas`, arquivos de `/dados`, `/bin` e `/programas`; lê e
-///   escreve no armazém compartilhado, `/armazem/compartilhado`; roda o
+///   escreve no armazém compartilhado, `/armazem/compartilhado`, e o
+///   restaura de uma cópia desta máquina (`fs.restore`); roda o
 ///   código instalado em `/armazem/compartilhado/codigo` — só o selado
 ///   pelo editor `bancada`, em que ele confia —; e cria, lê, assina e
 ///   destrói as chaves `chave:bancada` e `chave:bancada-2` da própria
@@ -293,15 +298,20 @@ pub const PADRAO: &str = concat!(
 # (key.revoke), sem poder usa-la. A pessoa troca a propria senha
 # (credential.change_self), provando a atual: o observador e o operador, e
 # so a da propria sessao. O sistema nao tem: nao e pessoa. Trocar a senha
-# de outra pessoa continua sendo credential.rotate, com prova.
+# de outra pessoa continua sendo credential.rotate, com prova. Restaurar
+# uma subarvore do armazem de uma copia desta maquina (fs.restore) e uma
+# permissao propria, de caminho: o sistema no armazem inteiro, o operador no
+# compartilhado. A copia e uma leitura (fs.read), e sai cifrada para esta
+# maquina.
 
 papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
+recurso operador fs.restore /armazem/compartilhado
 recurso operador net.connect tcp:10.0.2.100:7 tcp:10.0.2.100:443 udp:10.0.2.2:69 udp:10.0.2.3:53 tcp:10.0.2.100:80 tcp:10.0.2.100:8443 tcp:10.0.2.100:4943
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas /armazem/compartilhado/codigo
@@ -694,7 +704,7 @@ mod testes {
                 );
             }
             if esperado && perm.recurso_e_caminho() {
-                let alcance = if perm == Permissao::FsWrite {
+                let alcance = if matches!(perm, Permissao::FsWrite | Permissao::FsRestore) {
                     "/armazem"
                 } else {
                     "/"
@@ -865,13 +875,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read key.create key.read key.sign key.destroy audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read key.create key.read key.sign key.destroy keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));
@@ -879,7 +889,7 @@ mod testes {
         // que resultaria não vale — um alcance para o que o papel não tem.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send fs.read fs.write message.send message.read key.create key.read key.sign key.destroy"
+                "papel operador @observador ui.act process.run net.send fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy"
             ),
             Err(Recusa::Invalida(_))
         ));
@@ -1705,7 +1715,7 @@ mod testes {
         // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
         // tem a prova, e a auditoria a grava.
         let delegado = mudar(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read key.create key.read key.sign key.destroy time.sync",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy time.sync",
         )
         .unwrap();
         assert_eq!(

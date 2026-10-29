@@ -1904,6 +1904,8 @@ pub(crate) struct Rastro {
     pub(crate) metodo: String,
     pub(crate) recurso: String,
     pub(crate) codigo: String,
+    /// O detalhe, até a primeira vírgula.
+    pub(crate) detalhe: String,
     pub(crate) duravel: bool,
 }
 
@@ -1928,6 +1930,7 @@ pub(crate) fn rastros(r: &str) -> Result<Vec<Rastro>, String> {
             metodo: campo("method"),
             recurso: campo("resource"),
             codigo: campo("code"),
+            detalhe: campo("detail"),
             duravel: campo("durable") == "true",
         });
     }
@@ -3701,6 +3704,11 @@ pub(crate) mod ponto {
     pub const SENHA_CONFERIDA: u8 = 31;
     pub const TROCA_AUTORIZADA: u8 = 32;
     pub const TROCA_GRAVADA: u8 = 33;
+    pub const COPIA_NO_MEIO: u8 = 34;
+    pub const RESTAURACAO_CONFERIDA: u8 = 35;
+    pub const RESTAURACAO_NA_PRIMEIRA_PARTE: u8 = 36;
+    pub const RESTAURACAO_NA_BASE: u8 = 37;
+    pub const RESTAURACAO_GRAVADA: u8 = 38;
 }
 
 /// Quanto esperar o aviso da queda depois do pedido que a provoca.

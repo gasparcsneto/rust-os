@@ -266,26 +266,117 @@ dele. O penúltimo caso da suíte, `armazem: nenhum bloco que vale se perdeu
 na suite`, reprova se qualquer um desses aconteceu — um auxiliar que lê um
 arquivo e segue não deixa a perda passar só para o log.
 
+## A cópia de segurança e a restauração
+
+`fs.backup` tira uma fotografia de uma subárvore do armazém — ou dele
+inteiro —, e `fs.restore` a põe de volta. São as únicas formas de levar os
+dados para fora da máquina e trazê-los de volta inteiros; o código é
+`kernel/src/copia.rs`, e o formato, `armazem/src/copia.rs`.
+
+**O que vai na cópia.** Só os dados do armazém: os diretórios, os
+arquivos e o conteúdo, como estavam num instante. Nada do estado de
+autoridade — pessoas, credenciais, política, lápides, chaves de
+assinatura, mensagens, auditoria, a atualização A/B —, que mora no journal
+de estado, e que a âncora do TPM existe para nunca voltar atrás; nem a
+identidade do Duke, nem segredo nenhum. Restaurar uma cópia de antes de
+uma revogação não desrevoga nada: a revogação não está nela.
+
+**O formato.** Um setor em claro — a magia `DUKECOP1`, o formato e a
+pública do Duke, só para a recusa dizer por quê — e uma **base** do
+`diario`: partes e fecho, cifradas, autenticadas e encadeadas como os
+registros do journal. A primeira entrada é o cabeçalho: a pública, a
+instalação (o identificador que o journal de estado sorteou ao nascer), a
+raiz da cópia, a versão da captura, a geração e o tempo. Depois, os nós em
+ordem estrita de caminho — a raiz da cópia primeiro, cada pai antes dos
+filhos —, cada arquivo seguido dos pedaços dele (até 60 KiB cada), e o
+fecho com os totais. As mesmas regras na escrita e na leitura: uma cópia
+que o escritor deixa sair é uma que o leitor aceita, e nenhuma outra.
+
+**A chave.** Derivada da chave do Duke por um rótulo próprio
+(`HKDF(sal "Duke copia v1", chave do Duke, "copia: registros")`), como as
+do journal e as do volume: calculada quando é usada, zerada depois, nunca
+guardada, nunca exportada. Só a identidade que fez a cópia a abre — e só
+na instalação dela: outra máquina (outra identidade) recusa com `a copia e
+de outra maquina`; a mesma imagem de desenvolvimento noutra máquina, ou
+esta mesma depois de reinstalada (outro journal), recusa com `a copia e de
+outra instalacao`. O setor em claro só diz por quê: quem o reescreve com a
+pública de outra máquina não muda nada, porque a outra máquina não tem a
+chave — a recusa passa a ser `a copia nao abre nesta maquina`. A cópia não
+leva a identidade: não clona a máquina, não migra nada, não cria
+autoridade.
+
+**A cópia** (`fs.backup {"path"}`) é uma leitura: o gate decide `fs.read`
+no caminho, com o alcance de sempre — ela não revela nada que a leitura
+não revele, e sai cifrada. Com a ordem das gravações na mão do começo ao
+fim, a fotografia é de um instante: nenhum lote entra no meio, e nenhum
+bloco lido é solto. A cópia fica num **rascunho** de quem pede — no volume,
+na cota dele, com o prazo e os tetos dos rascunhos —, e sai em pedaços de
+até 48 KiB (`fs.backup {"path","copy","offset","max"}`, em base64). Um
+rascunho de cópia não se grava como arquivo, não recebe mais bytes e não
+se restaura sem ter sido enviado. A auditoria registra a execução: `feita a
+copia <id>`, com a decisão — o `id` é o elo do fecho, que nomeia
+exatamente aquela cópia.
+
+**A restauração** (`fs.restore {"path","draft","expect_version"}`) tem a
+permissão própria, `fs.restore`, de caminho: trocar uma subárvore inteira
+é destrutivo de outro tamanho que uma escrita. A cópia chega por
+`fs.draft`, num rascunho do **mesmo caminho** de onde ela veio — a raiz
+também: `/armazem` aceita um rascunho só para isso —, e, com a ordem das
+gravações na mão:
+
+1. a persistência e o volume de pé, nenhum reinício ou desligamento a
+   caminho (`CONFLICT`), a autoridade de quem pediu decidida de novo, os
+   arrendamentos de outro titular em qualquer caminho abaixo (`CONFLICT`
+   `lease`), e a versão esperada do caminho (`CONFLICT` `version`);
+2. a cópia lida e conferida **inteira** — a magia, o formato, a pública, a
+   instalação, cada registro no lugar dele, as regras, o fecho, nada
+   depois —, com o conteúdo de cada arquivo indo para blocos livres, que
+   nenhum metadado aponta. Qualquer recusa (`INVALID_ARGUMENT`, com o
+   motivo) solta esses blocos, e nada mudou;
+3. o lote: a subárvore de agora sai — do mais fundo para cima — e a da
+   cópia entra, cada pai antes dos filhos, preparado pelo armazém como
+   qualquer lote: versões novas (nunca uma já vista), **o dono é quem
+   restaura** (como numa escrita), a cota dele e o teto dos metadados;
+4. a auditoria registra a execução, `restaurada a copia <id>`, com a
+   decisão;
+5. o armazém resultante vai ao volume como uma **base** na outra região
+   do journal dos metadados — o mesmo mecanismo da compactação —, e o
+   journal de estado a confirma com `ARMAZEM_CONFIRMADO` e a auditoria,
+   num registro só: **o ponto de commit**. Antes dele, nada mudou; depois,
+   tudo. Uma queda no meio deixa um ou outro — a bancada corta a energia
+   em cada fronteira (`cargo xtask copia`) —, nunca uma mistura;
+6. só então o lote vale em memória, os blocos do que saiu voltam a ser
+   livres, e o rascunho da cópia some.
+
+Os pedaços enviados contam na cota de quem envia, como qualquer
+rascunho; durante a restauração o volume guarda ao mesmo tempo a árvore
+de antes, a cópia enviada e o conteúdo novo, até o commit.
+
 ## A política padrão
 
 A capacidade é concedida **explicitamente**, por linhas da política — nunca
 por código:
 
 ```text
-papel sistema … fs.write …
+papel sistema … fs.write fs.restore …
 recurso sistema fs.write /armazem
+recurso sistema fs.restore /armazem
 armazem sistema 268435456 65536
-papel operador … fs.write …
+papel operador … fs.write fs.restore …
 recurso operador fs.read … /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
+recurso operador fs.restore /armazem/compartilhado
 armazem operador 16777216 4096
-papel administrador … fs.write …
+papel administrador … fs.write fs.restore …
 recurso administrador fs.write /armazem/compartilhado
+recurso administrador fs.restore /armazem/compartilhado
 armazem administrador 67108864 16384
 ```
 
-O observador não escreve nem lê. Um programa só escreve se o manifesto
-dele declara `fs.write`.
+O observador não escreve, não lê, não copia nem restaura. Um programa só
+escreve se o manifesto dele declara `fs.write`, e só restaura se declara
+`fs.restore`. Tirar `fs.restore` de um papel deixa ele escrever arquivo a
+arquivo, sem poder trocar uma subárvore inteira por uma cópia.
 
 - **O administrador.** O papel `administrador` — e o de qualquer credencial
   administrativa — é um **teto**: o que um administrador pode delegar
@@ -301,6 +392,13 @@ dele declara `fs.write`.
   escritas. Não há `ALLOW(*)`, curinga ou exceção de código.
 
 ## O que não está aqui
+
+- Restaurar num volume recusado, depois de perder o disco (e com ele o
+  selo da identidade), noutra máquina, ou o estado de autoridade: cada um
+  pede uma decisão nova — ver o grupo B em `docs/OPERACAO.md`. Hoje a
+  arquitetura recusa os quatro: o volume recusado não grava, a cópia de
+  outra identidade ou instalação não abre, e o estado de autoridade não
+  está na cópia.
 
 - Links, permissões por arquivo e listas de acesso: o alcance é o da
   política, por prefixo de caminho.

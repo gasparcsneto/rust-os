@@ -324,6 +324,14 @@ pub fn geracao() -> u64 {
     com(|p| p.geracao)
 }
 
+/// O identificador desta instalação: o que o journal sorteou ao nascer, e
+/// que a abertura dele traz a cada boot. Diz esta máquina, e não outra com a
+/// mesma imagem — uma cópia de segurança fica presa a ele (ver
+/// [`crate::copia`]). `None` sem journal aberto.
+pub fn instalacao() -> Option<[u8; 16]> {
+    com(|p| p.instalacao)
+}
+
 /// O relatório para o `system.info`: o que ele diz da persistência, lido
 /// de uma vez só — ver [`relatorio`].
 #[derive(Clone, Copy)]

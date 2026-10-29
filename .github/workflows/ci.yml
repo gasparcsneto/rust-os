@@ -566,6 +566,47 @@ jobs:
       - name: Troca da própria senha
         run: cargo xtask senha --arch ${{ matrix.arch }}
 
+  # A cópia de segurança e a restauração do armazém, por um agente na porta
+  # (o mesmo caminho do `operar --copia` e `--restaurar`): a cópia sai
+  # cifrada para esta máquina e volta numa confirmação que o corte não
+  # desfaz; a chave revogada depois da cópia continua revogada; a máquina
+  # reinstalada recusa a cópia de antes; a queda em cada fronteira deixa a
+  # árvore inteira a de antes ou a da cópia; e a imagem de produção, com a
+  # outra máquina que recusa a cópia. Um job à parte, como o da senha.
+  copia:
+    name: Cópia de segurança (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: copia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: copia-${{ matrix.arch }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Cópia de segurança e restauração
+        run: cargo xtask copia --arch ${{ matrix.arch }}
+
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
   # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback

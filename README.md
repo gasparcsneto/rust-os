@@ -269,6 +269,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `message.cancel` | Cancela uma mensagem mandada, enquanto ninguém a leu (`id`, `expect_version`) |
 | `message.status` | O estado de uma mensagem mandada ou recebida (`id`) |
 | `fs.verify` | Confere o armazém abaixo de `path`: cada bloco de cada versão viva abre (a cifra autenticada confere o que o disco devolveu) e nenhum está livre no mapa do volume. Só lê; diz o que conferiu, os arquivos que não abrem, os que mudaram no meio. O alcance é o do `fs.read` |
+| `fs.backup` | A cópia de segurança de `path` — `/armazem` inteiro, ou um nó abaixo dele —: os diretórios, os arquivos e o conteúdo num instante, cifrados para esta máquina e esta instalação, num rascunho de quem pede; com `copy`, um pedaço dela em base64, ou o descarte (`path`, `copy`, `offset`, `max`, `discard`). Só dados: nada de identidade, credencial, política ou segredo. O alcance é o do `fs.read` |
+| `fs.restore` | Troca a subárvore `path` pela cópia enviada num rascunho do mesmo caminho: conferida inteira antes de qualquer mudança, trocada num commit só, com versões novas e o dono que restaura (`path`, `draft`, `expect_version`). A permissão própria `fs.restore` |
 | `keyboard.read` | O que foi digitado no teclado da máquina desde a última leitura de quem pede, e os contadores dele (`max`) |
 | `log.tail` | Registros de log estruturados (`count`, `min_level`) |
 
@@ -305,6 +307,7 @@ kernel/src/
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
+├── copia.rs         a cópia de segurança do armazém e a restauração dela: cifrada para esta máquina e esta instalação, conferida inteira, trocada como uma base do volume num commit só
 ├── nativo.rs        a interface nativa: o registro como API dos programas, pelo mesmo gate
 ├── atividade.rs     quem está agindo: os agentes conectados e quem agiu por último
 ├── autorizacao.rs   o ponto único de decisão: papel, permissão, recurso, taxa e auditoria
@@ -619,7 +622,9 @@ armazem/src/         o armazém como conta pura: caminhos, diretórios, versões
 ├── bloco.rs         o bloco de 4 KiB do volume: XChaCha20-Poly1305 com o id do conteúdo e o índice no nonce
 ├── mapa.rs          os blocos em uso, refeitos dos metadados no boot; reservar e soltar faixas
 ├── registro.rs      as entradas do journal dos metadados: nós, extensões, movimentos, a geometria do volume
-└── testes.rs        criar, substituir, renomear, os diretórios, as cotas, os lotes sorteados e a reposição
+├── copia.rs         o formato da cópia de segurança: o setor em claro, uma base do journal sob a chave da cópia, e as regras que o escritor e o leitor conferem iguais
+├── testes.rs        criar, substituir, renomear, os diretórios, as cotas, os lotes sorteados e a reposição
+└── testes_da_copia.rs a cópia ida e volta, e cada byte, corte, registro e regra estragados recusados
 
 atualizacao/src/     a atualização A/B como conta pura: os formatos que o iniciador e o kernel leem, e as regras que o journal guarda
 ├── lib.rs           os slots, as arquiteturas, o resumo BLAKE2s e quem decide: o journal, e não o controle
@@ -744,6 +749,7 @@ xtask/src/
 ├── botao.rs         a bancada do botão de energia: o `system_powerdown` do emulador nas imagens de desenvolvimento e de produção — o desligamento pelo gate, as gravações, dois apertos, o reinício a caminho, o corte, o aperto cedo, sem persistência, a política que nega
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
+├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
@@ -8280,6 +8286,58 @@ dão o mesmo que no x86.
 O kernel de produção cresceu 19 712 bytes nos segmentos carregáveis no
 x86 (+0,47%) e 21 240 no ARM (+0,60%), contra o B3 (`a80c5b1`); o
 iniciador e os programas não mudaram.
+
+### A cópia de segurança e a restauração
+
+O operador tira uma cópia de uma subárvore do armazém — o sistema, do
+armazém inteiro — e a põe de volta depois, inteira, num registro só
+([`kernel/src/copia.rs`](kernel/src/copia.rs)). Nenhuma chave guardada,
+nenhuma identidade e nenhum mecanismo novo de trava, de log ou de journal:
+a cópia é uma **base** do `diario` — o formato do journal —, cifrada por
+uma chave derivada da chave do Duke por um rótulo próprio, calculada quando
+é usada e zerada depois, e presa à instalação: o cabeçalho cifrado leva a
+pública do Duke e o identificador que o journal de estado sorteou ao nascer
+([`armazem/src/copia.rs`](armazem/src/copia.rs)). Outra máquina recusa a
+cópia; esta mesma, reinstalada, também. Só os dados vão nela — nada do
+estado de autoridade, que mora no journal de estado e que a âncora do TPM
+não deixa voltar atrás: restaurar uma cópia de antes de uma revogação não
+desrevoga nada.
+
+Copiar é ler: `fs.backup` passa pelo gate como `fs.read` no caminho, com a
+ordem das gravações na mão do começo ao fim — a fotografia é de um
+instante —, e a cópia fica num rascunho de quem pede, na cota dele, e sai
+em pedaços. Restaurar é `fs.restore`, uma permissão nova do vocabulário
+fechado ([`politica/src/permissao.rs`](politica/src/permissao.rs)), de
+caminho — trocar uma subárvore inteira é destrutivo de outro tamanho que
+uma escrita —: a cópia volta por `fs.draft` ao mesmo caminho de onde veio,
+é conferida inteira antes de qualquer mudança, com o conteúdo indo para
+blocos livres, e o armazém resultante vai ao volume como uma base na outra
+região do journal dos metadados — o mecanismo da compactação —, que o
+journal de estado confirma junto com a auditoria, num registro só: o ponto
+de commit ([`kernel/src/volume.rs`](kernel/src/volume.rs)). Versões novas,
+nunca uma já vista; o dono é quem restaura. Na política padrão e no exemplo
+de produção, o `sistema` restaura o armazém inteiro e o `operador`, o
+compartilhado; o `administrador` tem a permissão no teto, para delegá-la.
+O `cargo xtask operar` só leva os bytes — `--copia <arquivo>` com
+`fs.backup`, gravado em `0600`, e `--restaurar <arquivo>` com
+`fs.restore` —; quem decide é o gate, pelo papel da chave. Ver "A cópia de
+segurança e a restauração" em
+[`docs/ARMAZENAMENTO.md`](docs/ARMAZENAMENTO.md#a-cópia-de-segurança-e-a-restauração)
+e "A cópia de segurança" em
+[`docs/OPERACAO.md`](docs/OPERACAO.md#a-cópia-de-segurança).
+
+Oito casos `copia:` na suíte, e a bancada `cargo xtask copia`, nas duas
+arquiteturas: a cópia volta e sobrevive ao corte de energia; a chave
+revogada depois da cópia continua revogada; a máquina reinstalada, com a
+mesma identidade da imagem, recusa a cópia de antes; a imagem de produção,
+com a chave do operador, copia e restaura, e outra máquina, outra
+identidade, recusa a cópia — e não a abre nem com a pública dela posta no
+setor em claro; e a queda em cada fronteira — a cópia no
+meio, a cópia enviada e conferida, a primeira parte da base, a base inteira
+sem a confirmação, cada passo da gravação do registro, tudo gravado sem a
+resposta — deixa, no boot seguinte, a árvore inteira de antes ou inteira
+a da cópia, nunca uma mistura, e a da cópia exatamente quando o registro
+está no disco.
 
 ## Barramento PCI
 

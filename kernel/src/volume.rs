@@ -743,26 +743,44 @@ fn compactar_se_preciso(chave: &[u8; 32], tamanho: usize) -> Result<(), &'static
 
 /// A compactação do journal dos metadados — ver [`compactar_se_preciso`].
 fn compactar(chave: &[u8; 32]) -> Result<(), &'static str> {
-    let (c, regiao, escritor) = com(|v| (v.confirmado, v.regiao, v.escritor.take()));
-    let (Some(c), Some(escritor)) = (c, escritor) else {
-        return Err("o volume do armazem nao esta aberto");
-    };
-    let outra = 1 - regiao;
-    let resultado = (|| {
-        let mut regs = regioes(&c.geometria)?;
-        let r = &mut regs[outra];
-        let mut base = escritor.base(r.setores())?;
-        // As entradas, em partes que cabem num registro.
-        let mut entradas: Vec<Vec<u8>> = crate::armazem::com_o_armazem(|a| {
-            a.todos()
-                .map(|(caminho, no)| registro::codificar_no(caminho, no))
-                .chain(core::iter::once(registro::proxima(a.proxima())))
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+    let entradas = crate::armazem::com_o_armazem(entradas_da_base)?;
+    escrever_base(chave, entradas, Porque::Compactacao)
+}
+
+/// Por que uma base é escrita: a compactação do journal dos metadados, ou
+/// a restauração de uma cópia — com o registro da auditoria da execução do
+/// comando, que vai no mesmo registro de estado que a confirma.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Porque {
+    Compactacao,
+    Restauracao { execucao: u64 },
+}
+
+/// As entradas da base de `a`: os nós em ordem de caminho, e a próxima
+/// versão.
+fn entradas_da_base(a: &Armazem) -> Result<Vec<Vec<u8>>, &'static str> {
+    a.todos()
+        .map(|(caminho, no)| registro::codificar_no(caminho, no))
+        .chain(core::iter::once(registro::proxima(a.proxima())))
+        .collect()
+}
+
+/// Escreve na outra região do journal dos metadados uma base com
+/// `entradas` — em partes que cabem num registro — e o fecho com a
+/// geometria, descarrega o disco, e a confirma no journal de estado. A
+/// região velha não é tocada: até a confirmação, ela é a que vale; depois,
+/// a nova. Com a ordem das gravações na mão.
+fn escrever_base(
+    chave: &[u8; 32],
+    mut entradas: Vec<Vec<u8>>,
+    porque: Porque,
+) -> Result<(), &'static str> {
+    // As entradas, em partes que cabem num registro.
+    let mut partes: Vec<Vec<u8>> = Vec::new();
+    let juntadas = (|| {
         let mut parte: Vec<&[u8]> = Vec::new();
         let mut tamanho = 0usize;
         let teto = diario::MAIOR_CONTEUDO - 64;
-        let mut partes: Vec<Vec<u8>> = Vec::new();
         for e in &entradas {
             if tamanho + e.len() + 2 > teto && !parte.is_empty() {
                 partes.push(diario::estado::campos(&parte)?);
@@ -775,26 +793,57 @@ fn compactar(chave: &[u8; 32]) -> Result<(), &'static str> {
         if !parte.is_empty() {
             partes.push(diario::estado::campos(&parte)?);
         }
-        for p in &partes {
+        Ok(())
+    })();
+    for e in &mut entradas {
+        politica::sigiloso::zerar_bloco(e);
+    }
+    let (c, regiao, escritor) = com(|v| (v.confirmado, v.regiao, v.escritor.take()));
+    let (Some(c), Some(escritor)) = (c, escritor) else {
+        for p in &mut partes {
+            politica::sigiloso::zerar_bloco(p);
+        }
+        return Err("o volume do armazem nao esta aberto");
+    };
+    let outra = 1 - regiao;
+    let resultado = juntadas.and_then(|()| {
+        let mut regs = regioes(&c.geometria)?;
+        let r = &mut regs[outra];
+        let mut base = escritor.base(r.setores())?;
+        for (i, p) in partes.iter().enumerate() {
             let pronta = base.parte(chave, nonce()?, 0, crate::persistencia::agora(), p)?;
             r.escrever(pronta.setor, &pronta.bytes)?;
+            #[cfg(feature = "quedas")]
+            if i == 0 && porque != Porque::Compactacao {
+                crate::quedas::aqui(crate::quedas::Ponto::RestauracaoNaPrimeiraParte);
+            }
+            #[cfg(not(feature = "quedas"))]
+            let _ = i;
         }
         let fecho = diario::estado::campos(&[&registro::volume(&c.geometria)?])?;
         let fechada = base.fechar(chave, nonce()?, 0, crate::persistencia::agora(), &fecho)?;
         r.escrever(fechada.setor, &fechada.bytes)?;
         r.descarregar()?;
-        for e in &mut entradas {
-            politica::sigiloso::zerar_bloco(e);
-        }
         let nova = Confirmado {
             geometria: c.geometria,
             ancora: fechada.ancora,
             elo: fechada.elo(),
         };
-        crate::persistencia::confirmar_armazem(&nova, 0)?;
+        let execucao = match porque {
+            Porque::Compactacao => 0,
+            Porque::Restauracao { execucao } => {
+                #[cfg(feature = "quedas")]
+                crate::quedas::aqui(crate::quedas::Ponto::RestauracaoNaBase);
+                execucao
+            }
+        };
+        crate::persistencia::confirmar_armazem(&nova, execucao)?;
         let ancora = fechada.ancora;
         Ok((fechada.confirmar(ancora)?, nova))
-    })();
+    });
+    for p in &mut partes {
+        politica::sigiloso::zerar_bloco(p);
+    }
     match resultado {
         Ok((novo, nova)) => {
             com(|v| {
@@ -802,21 +851,50 @@ fn compactar(chave: &[u8; 32]) -> Result<(), &'static str> {
                 v.regiao = outra;
                 v.confirmado = Some(nova);
             });
-            crate::log_info!(
-                "armazem",
-                "journal dos metadados compactado na regiao {}",
-                outra
-            );
+            match porque {
+                Porque::Compactacao => crate::log_info!(
+                    "armazem",
+                    "journal dos metadados compactado na regiao {}",
+                    outra
+                ),
+                Porque::Restauracao { .. } => crate::log_info!(
+                    "armazem",
+                    "restauracao gravada como base na regiao {}",
+                    outra
+                ),
+            }
             Ok(())
         }
         Err(m) => {
             com(|v| {
                 v.escritor = Some(escritor);
-                v.estado = Estado::Indisponivel("a compactacao do armazem falhou");
+                v.estado = Estado::Indisponivel(match porque {
+                    Porque::Compactacao => "a compactacao do armazem falhou",
+                    Porque::Restauracao { .. } => "a gravacao de uma restauracao falhou",
+                });
             });
             Err(m)
         }
     }
+}
+
+/// Troca o armazém inteiro, no volume, por `novo`: uma base com os nós
+/// dele na outra região do journal dos metadados, confirmada no journal de
+/// estado junto com a auditoria `execucao` — **o ponto de commit** de uma
+/// restauração (ver [`crate::copia`]). Os blocos do conteúdo novo já estão
+/// escritos; nada em memória muda aqui.
+///
+/// Na falha, o volume fica indisponível até o boot, como depois de uma
+/// compactação que falhou: se a confirmação chegou ao disco, o boot acha a
+/// base nova; se não, a de antes — nunca uma mistura.
+pub fn substituir(novo: &Armazem, execucao: u64) -> Result<(), &'static str> {
+    exigir()?;
+    if execucao == 0 {
+        return Err("uma restauracao sem o registro da auditoria do comando");
+    }
+    let (chave, _) = chaves().ok_or("sem a chave do Duke")?;
+    let entradas = entradas_da_base(novo)?;
+    escrever_base(&chave, entradas, Porque::Restauracao { execucao })
 }
 
 /// Só para a suíte: compacta agora o journal dos metadados.

@@ -137,6 +137,22 @@ pub enum Ponto {
     /// A troca da própria senha: o registro dela confirmado pela âncora, e
     /// a resposta à pessoa ainda não dada.
     TrocaGravada = 33,
+    /// A cópia de segurança: o setor em claro e a primeira parte dela no
+    /// rascunho, e o resto não.
+    CopiaNoMeio = 34,
+    /// A restauração: a cópia lida e conferida inteira, o conteúdo dela em
+    /// blocos livres do volume — que nenhum metadado aponta —, e nada
+    /// preparado.
+    RestauracaoConferida = 35,
+    /// A restauração: a primeira parte da base com o armazém restaurado
+    /// escrita na outra região do journal dos metadados, e nada mais.
+    RestauracaoNaPrimeiraParte = 36,
+    /// A restauração: a base inteira escrita e descarregada, e a
+    /// confirmação ainda não começada no journal de estado.
+    RestauracaoNaBase = 37,
+    /// A restauração: confirmada pela âncora e em vigor em memória, e a
+    /// resposta ainda não dada.
+    RestauracaoGravada = 38,
 }
 
 static PONTO: AtomicU8 = AtomicU8::new(0);
@@ -259,6 +275,11 @@ pub fn aqui(p: Ponto) {
             | Ponto::SenhaConferida
             | Ponto::TrocaAutorizada
             | Ponto::TrocaGravada
+            | Ponto::CopiaNoMeio
+            | Ponto::RestauracaoConferida
+            | Ponto::RestauracaoNaPrimeiraParte
+            | Ponto::RestauracaoNaBase
+            | Ponto::RestauracaoGravada
     );
     if p == Ponto::LoteNoVolume {
         // A gravação de estado que confirmaria o lote ainda não começou: a

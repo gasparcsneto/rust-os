@@ -32025,6 +32025,1364 @@ fn armazem_o_volume_so_vale_confirmado() -> Resultado {
 }
 
 // ---------------------------------------------------------------------------
+// copia: a cópia de segurança do armazém e a restauração — ver crate::copia
+// ---------------------------------------------------------------------------
+
+/// Um agente da suíte com o papel `papel`, pela chave da semente `semente`,
+/// como um processo do kernel no fio `fio`. Devolve o chamador e o dono
+/// dele no armazém.
+fn copia_agente(
+    semente: u8,
+    nome: &str,
+    papel: &str,
+    fio: u64,
+) -> (crate::autorizacao::Chamador, alloc::string::String) {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let chave = sigilo::publica_de(&[semente; 32]);
+    crate::identidade::registrar_agente_de_teste(chave, nome, papel);
+    (
+        Chamador::Processo {
+            fio,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(chave),
+            },
+            programa: Programa::Kernel,
+        },
+        alloc::format!("agente:{}", sigilo::hex(&chave)),
+    )
+}
+
+/// O pedido deu certo; senão, o envelope vai ao log e o caso recusa com
+/// `motivo`.
+fn copia_exigir(r: &str, motivo: &'static str) -> Resultado {
+    if fs_ok(r) {
+        return Ok(());
+    }
+    crate::log_error!("teste", "{}", r);
+    Err(motivo)
+}
+
+/// Faz a cópia de `caminho` em nome de `quem`, e a baixa inteira, em
+/// pedaços: o número dela, o identificador e os bytes.
+fn copia_baixada(
+    quem: crate::autorizacao::Chamador,
+    caminho: &str,
+) -> Result<(u64, alloc::string::String, alloc::vec::Vec<u8>), &'static str> {
+    let r = fs_pedir(
+        quem,
+        "fs.backup",
+        &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+    );
+    copia_exigir(&r, "a copia nao foi feita")?;
+    let n = fs_numero(&r, "copy").ok_or("a copia nao disse o numero")?;
+    let tamanho = fs_numero(&r, "size").ok_or("a copia nao disse o tamanho")?;
+    let id = fs_texto(&r, "id").ok_or("a copia nao disse o identificador")?;
+    let mut bytes = alloc::vec::Vec::with_capacity(tamanho as usize);
+    while (bytes.len() as u64) < tamanho {
+        let r = fs_pedir(
+            quem,
+            "fs.backup",
+            &alloc::format!(
+                r#"{{"path":"{caminho}","copy":{n},"offset":{}}}"#,
+                bytes.len()
+            ),
+        );
+        let pedaco = fs_texto(&r, "content")
+            .and_then(|t| de_base64(&t))
+            .filter(|p| fs_ok(&r) && !p.is_empty());
+        let Some(p) = pedaco else {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pedaco da copia nao veio");
+        };
+        bytes.extend_from_slice(&p);
+    }
+    Ok((n, id, bytes))
+}
+
+/// Envia `bytes` para um rascunho de `caminho`, em pedaços do maior anexo:
+/// o número do rascunho.
+fn copia_enviada(
+    quem: crate::autorizacao::Chamador,
+    caminho: &str,
+    bytes: &[u8],
+) -> Result<u64, &'static str> {
+    let mut numero: Option<u64> = None;
+    for pedaco in bytes.chunks(crate::autorizacao::MAIOR_ANEXO) {
+        let params = match numero {
+            Some(n) => alloc::format!(r#"{{"path":"{caminho}","draft":{n}}}"#),
+            None => alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        };
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            quem,
+            &pedido_rpc("fs.draft", &params),
+            pedaco,
+        );
+        numero = fs_numero(&r, "draft").filter(|_| fs_ok(&r));
+        if numero.is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("um pedaco do envio foi recusado");
+        }
+    }
+    numero.ok_or("nada a enviar")
+}
+
+/// `fs.restore` de `caminho` pelo rascunho `rascunho`, contra a versão
+/// `esperada`.
+fn copia_restaurar(
+    quem: crate::autorizacao::Chamador,
+    caminho: &str,
+    rascunho: u64,
+    esperada: u64,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "fs.restore",
+        &alloc::format!(r#"{{"path":"{caminho}","draft":{rascunho},"expect_version":{esperada}}}"#),
+    )
+}
+
+/// O caminho relativo à raiz do armazém de `caminho` — vazio na raiz.
+fn copia_relativo(caminho: &str) -> alloc::string::String {
+    if caminho == crate::armazem::RAIZ {
+        return alloc::string::String::new();
+    }
+    crate::armazem::relativo(caminho)
+        .map(|(_, r)| r)
+        .unwrap_or_default()
+}
+
+/// Uma subárvore como a suíte a compara: cada nó pelo caminho relativo a
+/// ela — vazio é ela —, com o conteúdo de cada arquivo.
+type Subarvore = alloc::vec::Vec<(alloc::string::String, Option<alloc::vec::Vec<u8>>)>;
+
+fn copia_subarvore(caminho: &str) -> Subarvore {
+    let rel = copia_relativo(caminho);
+    let nos: alloc::vec::Vec<(alloc::string::String, bool)> = crate::armazem::com_o_armazem(|a| {
+        a.todos()
+            .filter(|(c, _)| *c == rel || ::armazem::abaixo_de(c, &rel))
+            .map(|(c, n)| {
+                (
+                    alloc::string::String::from(c),
+                    n.tipo() == ::armazem::Tipo::Arquivo,
+                )
+            })
+            .collect()
+    });
+    nos.into_iter()
+        .map(|(c, arquivo)| {
+            let dentro = if rel.is_empty() {
+                c.clone()
+            } else if c == rel {
+                alloc::string::String::new()
+            } else {
+                alloc::string::String::from(&c[rel.len() + 1..])
+            };
+            let conteudo =
+                arquivo.then(|| crate::armazem::conteudo_de_teste(&c).unwrap_or_default());
+            (dentro, conteudo)
+        })
+        .collect()
+}
+
+/// A versão e o dono de cada nó da subárvore de `caminho`.
+fn copia_versoes_e_donos(caminho: &str) -> alloc::vec::Vec<(u64, alloc::string::String)> {
+    let rel = copia_relativo(caminho);
+    crate::armazem::com_o_armazem(|a| {
+        a.todos()
+            .filter(|(c, _)| *c == rel || ::armazem::abaixo_de(c, &rel))
+            .map(|(_, n)| (n.versao(), alloc::string::String::from(n.dono())))
+            .collect()
+    })
+}
+
+/// `agulha` aparece em `palheiro`.
+fn copia_contem(palheiro: &[u8], agulha: &[u8]) -> bool {
+    !agulha.is_empty() && palheiro.windows(agulha.len()).any(|w| w == agulha)
+}
+
+/// Uma árvore pequena em `p`, do `quem`: um texto com `marca`, um vazio, e
+/// um subdiretório com um binário de alguns blocos.
+fn copia_arvore(
+    quem: crate::autorizacao::Chamador,
+    p: &str,
+    marca: &str,
+) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    diretorios_acima(&alloc::format!("{p}/x"))?;
+    copia_exigir(
+        &fs_pedir(quem, "fs.mkdir", &alloc::format!(r#"{{"path":"{p}/sub"}}"#)),
+        "o subdiretorio do caso nao foi criado",
+    )?;
+    copia_exigir(
+        &fs_gravar(quem, &alloc::format!("{p}/a.txt"), 0, marca),
+        "o texto do caso nao foi gravado",
+    )?;
+    copia_exigir(
+        &fs_gravar(quem, &alloc::format!("{p}/vazio"), 0, ""),
+        "o vazio do caso nao foi gravado",
+    )?;
+    let binario: alloc::vec::Vec<u8> = (0..3 * ::armazem::bloco::CARGA + 100)
+        .map(|i| (i * 13 % 251) as u8)
+        .collect();
+    let b = alloc::format!("{p}/sub/b.bin");
+    let n = copia_enviada(quem, &b, &binario)?;
+    copia_exigir(
+        &fs_pedir(
+            quem,
+            "fs.write",
+            &alloc::format!(r#"{{"path":"{b}","draft":{n},"expect_version":0}}"#),
+        ),
+        "o binario do caso nao foi gravado",
+    )?;
+    Ok(binario)
+}
+
+/// Nada do que a cópia protege — os `segredos`, crus ou em hexadecimal, e
+/// a chave da cópia desta máquina — vai à auditoria (campo nenhum de
+/// registro nenhum), ao log ou ao `system.info`: um pedaço de doze bytes
+/// de qualquer um basta para reprovar (ver [`PEDACO_SECRETO`]).
+fn copia_nada_vaza(segredos: &[&[u8]]) -> Resultado {
+    let escritos: alloc::vec::Vec<alloc::string::String> =
+        segredos.iter().map(|s| crate::copia::hex(s)).collect();
+    let pedacos: alloc::collections::BTreeSet<[u8; PEDACO_SECRETO]> = segredos
+        .iter()
+        .copied()
+        .chain(escritos.iter().map(|e| e.as_bytes()))
+        .flat_map(|t| t.windows(PEDACO_SECRETO))
+        .filter_map(|p| p.try_into().ok())
+        .collect();
+    let leva = |t: &str| {
+        leva_pedaco(t.as_bytes(), &pedacos) || crate::copia::leva_a_chave_de_teste(t.as_bytes())
+    };
+    let na_auditoria = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .any(|r| {
+                let e = &r.evento;
+                leva(&e.agente)
+                    || leva(&e.recurso)
+                    || leva(&e.detalhe)
+                    || leva(&e.metodo)
+                    || leva(&e.papel)
+            })
+    })
+    .unwrap_or(false);
+    if na_auditoria {
+        return Err("um segredo da copia, ou um pedaco dele, foi para a auditoria");
+    }
+    for (comando, params) in [("log.tail", r#"{"count":64}"#), ("system.info", "{}")] {
+        let r = chamar(comando, params)?;
+        if leva(&r) {
+            crate::log_error!("teste", "{}", comando);
+            return Err("um segredo da copia, ou um pedaco dele, saiu num relatorio");
+        }
+    }
+    Ok(())
+}
+
+/// O último registro da auditoria com este método cujo detalhe tem
+/// `trecho` — o de um processo vem com o prefixo dele.
+fn copia_registro(metodo: &str, trecho: &str) -> Option<politica::auditoria::Evento> {
+    crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.metodo == metodo && r.evento.detalhe.contains(trecho))
+            .last()
+            .map(|r| r.evento.clone())
+    })
+    .flatten()
+}
+
+/// A volta inteira: a cópia de uma subárvore — um texto, um vazio, um
+/// binário de alguns blocos num subdiretório — sai cifrada para esta
+/// máquina, em pedaços, sem nada em claro; a árvore muda; a cópia volta
+/// por um rascunho e a restauração põe a subárvore exatamente como estava,
+/// numa confirmação só da âncora, com versões novas e o dono que
+/// restaurou. A auditoria liga a cópia e a restauração pelo identificador,
+/// cada uma com a decisão do gate; o rascunho some com os blocos, o volume
+/// reaberto do disco repõe o mesmo armazém, e o rascunho consumido não
+/// restaura de novo.
+fn copia_volta_inteira() -> Resultado {
+    let (agente, dono) = copia_agente(0x71, "agente-copia", "operador", 7_400_001);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/copia{unico}");
+    let resultado = (|| -> Resultado {
+        let marca = alloc::format!("marca-da-copia-{unico}");
+        let binario = copia_arvore(agente, &p, &marca)?;
+        let original = copia_subarvore(&p);
+        crate::armazem::vencer_rascunhos_de_teste();
+        let (n, id, bytes) = copia_baixada(agente, &p)?;
+        // O que sai: a magia, a pública do Duke, e nada em claro — nem o
+        // conteúdo, nem a chave do Duke.
+        let publica = crate::identidade::publica_do_duke().ok_or("sem a publica do Duke")?;
+        if !bytes.len().is_multiple_of(512) || !bytes.starts_with(b"DUKECOP1") {
+            return Err("a copia nao tem a forma de uma copia");
+        }
+        if bytes[16..48] != publica {
+            return Err("o setor em claro nao diz a publica desta maquina");
+        }
+        let privada = crate::identidade::com_chave_do_duke(|k| *k).ok_or("sem a chave do Duke")?;
+        if copia_contem(&bytes, marca.as_bytes()) || copia_contem(&bytes, &binario[..64]) {
+            return Err("o conteudo saiu em claro na copia");
+        }
+        if copia_contem(&bytes, &privada) {
+            return Err("a chave do Duke saiu na copia");
+        }
+        // Dentro dela, só a subárvore: nada mais viaja.
+        let (cabecalho, nos) = crate::copia::abrir_de_teste(&bytes)?;
+        if cabecalho.raiz != copia_relativo(&p) || nos != original {
+            crate::log_error!(
+                "teste",
+                "{:?}",
+                nos.iter().map(|(c, _)| c).collect::<alloc::vec::Vec<_>>()
+            );
+            return Err("a copia aberta nao e exatamente a subarvore");
+        }
+        if !copia_registro("fs.backup", &alloc::format!("feita a copia {}", &id[..16])).is_some_and(
+            |e| e.codigo == politica::Codigo::Allow && e.detalhe.contains("; decisao "),
+        ) {
+            return Err("a copia feita nao foi gravada na auditoria com a decisao");
+        }
+        // Baixada, descartada: o rascunho sai.
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        if crate::armazem::rascunhos_de_teste() != 0 {
+            return Err("a copia descartada continuou");
+        }
+        // A árvore muda depois da cópia.
+        let a = alloc::format!("{p}/a.txt");
+        copia_exigir(
+            &fs_gravar(agente, &a, versao_no_armazem(&a), "outra coisa"),
+            "a mudanca nao entrou",
+        )?;
+        let vazio = alloc::format!("{p}/vazio");
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.delete",
+                &alloc::format!(
+                    r#"{{"path":"{vazio}","expect_version":{}}}"#,
+                    versao_no_armazem(&vazio)
+                ),
+            ),
+            "o vazio nao saiu",
+        )?;
+        copia_exigir(
+            &fs_gravar(agente, &alloc::format!("{p}/novo.txt"), 0, "novo"),
+            "o novo nao entrou",
+        )?;
+        let sub = alloc::format!("{p}/sub");
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.rename",
+                &alloc::format!(
+                    r#"{{"path":"{sub}","to":"{p}/sub2","expect_version":{}}}"#,
+                    versao_no_armazem(&sub)
+                ),
+            ),
+            "o subdiretorio nao mudou de nome",
+        )?;
+        if copia_subarvore(&p) == original {
+            return Err("o caso nao mudou a arvore");
+        }
+        // A volta: o envio para o mesmo caminho, e a restauração.
+        let d = copia_enviada(agente, &p, &bytes)?;
+        let proxima = crate::armazem::com_o_armazem(|a| a.proxima());
+        let contador = crate::persistencia::ancora_no_tpm_de_teste()?;
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        copia_exigir(&r, "a restauracao foi recusada")?;
+        if fs_texto(&r, "copy_id").as_deref() != Some(id.as_str())
+            || fs_numero(&r, "files") != Some(3)
+            || fs_numero(&r, "directories") != Some(2)
+            || fs_numero(&r, "removed") != Some(5)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a resposta da restauracao nao diz o que voltou");
+        }
+        if crate::persistencia::ancora_no_tpm_de_teste()? != contador + 1 {
+            return Err("a restauracao nao foi uma confirmacao so");
+        }
+        if copia_subarvore(&p) != original {
+            return Err("a subarvore restaurada nao e a da copia");
+        }
+        // Versões novas, nunca uma já vista, do dono que restaurou.
+        for (versao, d) in copia_versoes_e_donos(&p) {
+            if versao < proxima || d != dono {
+                crate::log_error!("teste", "versao {} de {}, proxima {}", versao, d, proxima);
+                return Err("um no restaurado tem versao velha ou outro dono");
+            }
+        }
+        if fs_numero(&r, "version") != Some(versao_no_armazem(&p)) {
+            return Err("a resposta nao diz a versao do caminho restaurado");
+        }
+        // O rascunho da cópia some, e a auditoria liga a restauração à
+        // cópia, com a decisão — no mesmo registro que a confirmação.
+        if crate::armazem::rascunhos_de_teste() != 0 {
+            return Err("o rascunho da copia ficou depois da restauracao");
+        }
+        let e = copia_registro(
+            "fs.restore",
+            &alloc::format!("restaurada a copia {}", &id[..16]),
+        )
+        .ok_or("a restauracao nao foi gravada na auditoria")?;
+        if e.codigo != politica::Codigo::Allow || !e.detalhe.contains("; decisao ") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("o registro da restauracao nao tem a decisao");
+        }
+        // Nem a cópia nem a volta levaram para fora o que a cópia protege:
+        // o conteúdo, a chave do Duke e a chave da cópia — que também não
+        // vai dentro dela.
+        copia_nada_vaza(&[marca.as_bytes(), &binario[..64], &privada])?;
+        if crate::copia::leva_a_chave_de_teste(&bytes) {
+            return Err("a chave da copia foi dentro da copia");
+        }
+        // O rascunho consumido não restaura de novo.
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("nao ha esse rascunho") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o rascunho consumido restaurou de novo");
+        }
+        // Do disco: o volume reaberto repõe o mesmo armazém, e os blocos
+        // em uso são os mesmos — nenhum ficou reservado à toa.
+        let agora = retrato_do_armazem();
+        let usados = crate::volume::usados_de_teste();
+        crate::volume::reabrir_de_teste()?;
+        if retrato_do_armazem() != agora {
+            return Err("a restauracao nao se repos do volume");
+        }
+        if crate::volume::usados_de_teste() != usados {
+            return Err("a restauracao deixou blocos reservados que nenhum arquivo usa");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A cópia que não confere — a magia, o formato, a pública, um byte de um
+/// registro, cortada, com sobra, sem setores inteiros, só o setor em
+/// claro, de outro caminho — é recusada inteira: o armazém não muda, o
+/// volume não confirma nada, nenhum bloco fica reservado, e cada recusa vai
+/// para a auditoria com a decisão.
+fn copia_a_que_nao_confere_nao_muda_nada() -> Resultado {
+    let (agente, _) = copia_agente(0x72, "agente-copia-estragada", "operador", 7_400_101);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/estragada{unico}");
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "estragada")?;
+        let (n, _, boa) = copia_baixada(agente, &p)?;
+        let r = fs_pedir(
+            agente,
+            "fs.backup",
+            &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+        );
+        copia_exigir(&r, "a copia nao foi descartada")?;
+        let (n, _, de_outro_caminho) = copia_baixada(agente, &alloc::format!("{p}/sub"))?;
+        let r = fs_pedir(
+            agente,
+            "fs.backup",
+            &alloc::format!(r#"{{"path":"{p}/sub","copy":{n},"discard":true}}"#),
+        );
+        copia_exigir(&r, "a outra copia nao foi descartada")?;
+        let a = alloc::format!("{p}/a.txt");
+        copia_exigir(
+            &fs_gravar(agente, &a, versao_no_armazem(&a), "depois"),
+            "a mudanca nao entrou",
+        )?;
+        let mexida = |i: usize, x: u8| {
+            let mut b = boa.clone();
+            b[i] ^= x;
+            b
+        };
+        let mut sobra = boa.clone();
+        sobra.extend_from_slice(&[0x5A; 512]);
+        let estragadas: [(&str, alloc::vec::Vec<u8>, Option<&str>); 9] = [
+            (
+                "magia",
+                mexida(0, 1),
+                Some("nao e uma copia do armazem do Duke"),
+            ),
+            (
+                "formato",
+                mexida(8, 2),
+                Some("a copia e de um formato desconhecido"),
+            ),
+            ("publica", mexida(20, 1), Some("a copia e de outra maquina")),
+            ("um byte do registro", mexida(512 + 200, 0x40), None),
+            ("um byte do fim", mexida(boa.len() - 3, 0x08), None),
+            (
+                "cortada",
+                boa[..boa.len() - 512].to_vec(),
+                Some("a copia esta incompleta: falta o fecho"),
+            ),
+            (
+                "com sobra",
+                sobra,
+                Some("ha bytes depois do fecho da copia"),
+            ),
+            (
+                "sem setores inteiros",
+                boa[..boa.len() - 100].to_vec(),
+                Some("a copia nao tem setores inteiros"),
+            ),
+            (
+                "de outro caminho",
+                de_outro_caminho,
+                Some("a copia e de outro caminho"),
+            ),
+        ];
+        crate::armazem::vencer_rascunhos_de_teste();
+        let usados = crate::volume::usados_de_teste();
+        let confirmado = crate::volume::confirmado();
+        let antes = retrato_do_armazem();
+        for (nome, bytes, motivo) in estragadas.iter() {
+            let d = copia_enviada(agente, &p, bytes)?;
+            let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+            let recusa = fs_texto(&r, "error");
+            if fs_ok(&r)
+                || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT")
+                || motivo.is_some_and(|m| recusa.as_deref() != Some(m))
+            {
+                crate::log_error!("teste", "{}: {}", nome, r);
+                return Err("uma copia que nao confere teve outra resposta");
+            }
+            if retrato_do_armazem() != antes || crate::volume::confirmado() != confirmado {
+                crate::log_error!("teste", "{}", nome);
+                return Err("uma copia que nao confere mudou o armazem");
+            }
+            let e = ultimo_com_metodo("fs.restore").ok_or("a recusa nao foi gravada")?;
+            if e.codigo != politica::Codigo::InvalidArgument || !e.detalhe.contains("; decisao ") {
+                crate::log_error!("teste", "{}: {:?}", nome, e);
+                return Err("a recusa da copia nao foi gravada com a decisao");
+            }
+            copia_exigir(
+                &fs_pedir(
+                    agente,
+                    "fs.discard",
+                    &alloc::format!(r#"{{"path":"{p}","draft":{d}}}"#),
+                ),
+                "o envio recusado nao foi descartado",
+            )?;
+        }
+        // Só o setor em claro, de uma vez.
+        let d = copia_enviada(agente, &p, &boa[..512])?;
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        if fs_ok(&r)
+            || fs_texto(&r, "error").as_deref() != Some("a copia esta incompleta: falta o fecho")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia so com o setor em claro teve outra resposta");
+        }
+        crate::armazem::vencer_rascunhos_de_teste();
+        if crate::volume::usados_de_teste() != usados {
+            return Err("as recusas deixaram blocos reservados");
+        }
+        if retrato_do_armazem() != antes {
+            return Err("as recusas mudaram o armazem");
+        }
+        // Um arquivo grande, em vários registros da cópia, e um byte
+        // estragado no meio dele: a recusa vem com o arquivo pela metade, e
+        // os blocos que o conteúdo dele já tinha voltam a ser livres.
+        let grande = alloc::format!("{p}/grande.bin");
+        let conteudo: alloc::vec::Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 253) as u8).collect();
+        let n = copia_enviada(agente, &grande, &conteudo)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.write",
+                &alloc::format!(r#"{{"path":"{grande}","draft":{n},"expect_version":0}}"#),
+            ),
+            "o arquivo grande nao foi gravado",
+        )?;
+        let (n, _, mut no_meio) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia com o grande nao foi descartada",
+        )?;
+        let meio = no_meio.len() / 2;
+        no_meio[meio] ^= 0x10;
+        let usados = crate::volume::usados_de_teste();
+        let antes = retrato_do_armazem();
+        let d = copia_enviada(agente, &p, &no_meio)?;
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("INVALID_ARGUMENT") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia estragada no meio do arquivo grande teve outra resposta");
+        }
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.discard",
+                &alloc::format!(r#"{{"path":"{p}","draft":{d}}}"#),
+            ),
+            "o envio estragado nao foi descartado",
+        )?;
+        if crate::volume::usados_de_teste() != usados || retrato_do_armazem() != antes {
+            return Err(
+                "a recusa com o arquivo pela metade deixou blocos reservados ou mudou o armazem",
+            );
+        }
+        // E a boa, depois de tudo, ainda volta.
+        let d = copia_enviada(agente, &p, &boa)?;
+        copia_exigir(
+            &copia_restaurar(agente, &p, d, versao_no_armazem(&p)),
+            "a copia boa nao voltou depois das estragadas",
+        )?;
+        if fs_no_armazem(&a).1.as_deref() != Some(b"estragada".as_slice()) {
+            return Err("a copia boa nao pos o texto de volta");
+        }
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A autorização, pelo gate de sempre: o observador não tem `fs.read` nem
+/// `fs.restore`; o operador copia e restaura só no alcance dele — nem a
+/// raiz do armazém, nem o do sistema; sem `fs.restore` no papel, ele ainda
+/// escreve, e não restaura. E os rascunhos: o envio de outro dono não
+/// restaura, a cópia de outro dono não se lê, e a cópia feita aqui não é
+/// conteúdo, nem envio, nem se acrescenta. A cota conta a cópia, e os
+/// objetos da restauração.
+fn copia_so_quem_pode_e_so_onde_pode() -> Resultado {
+    let (agente, _) = copia_agente(0x73, "agente-copia-gate", "operador", 7_400_201);
+    let (outro, _) = copia_agente(0x74, "agente-copia-outro", "operador", 7_400_202);
+    let (observador, _) = copia_agente(0x75, "agente-copia-olha", "observador", 7_400_203);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/gate{unico}");
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "gate")?;
+        let decisao = |r: &str, esperada: &str| -> Resultado {
+            let d = decisao_do_envelope(r);
+            if d == esperada {
+                return Ok(());
+            }
+            crate::log_error!("teste", "{} em vez de {}: {}", d, esperada, r);
+            Err("o gate decidiu outra coisa")
+        };
+        // O observador: nem uma, nem outra.
+        decisao(
+            &fs_pedir(
+                observador,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}"}}"#),
+            ),
+            "DENY_PERMISSION",
+        )?;
+        decisao(&copia_restaurar(observador, &p, 1, 0), "DENY_PERMISSION")?;
+        // O operador, fora do alcance: a raiz, e o do sistema.
+        for c in ["/armazem", "/armazem/sistema"] {
+            decisao(
+                &fs_pedir(agente, "fs.backup", &alloc::format!(r#"{{"path":"{c}"}}"#)),
+                "DENY_RESOURCE",
+            )?;
+            decisao(&copia_restaurar(agente, c, 1, 0), "DENY_RESOURCE")?;
+        }
+        decisao(
+            &crate::nativo::responder_com_anexo_de_teste(
+                agente,
+                &pedido_rpc("fs.draft", r#"{"path":"/armazem"}"#),
+                b"x",
+            ),
+            "DENY_RESOURCE",
+        )?;
+        // O que não existe não se copia.
+        let r = fs_pedir(
+            agente,
+            "fs.backup",
+            &alloc::format!(r#"{{"path":"{p}/nada"}}"#),
+        );
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("nao ha nada nesse caminho") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia do que nao existe teve outra resposta");
+        }
+        // A cópia de um, e os rascunhos.
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        let r = fs_pedir(
+            outro,
+            "fs.backup",
+            &alloc::format!(r#"{{"path":"{p}","copy":{n}}}"#),
+        );
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro dono") {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro dono leu a copia");
+        }
+        let r = fs_pedir(
+            agente,
+            "fs.write",
+            &alloc::format!(
+                r#"{{"path":"{p}/a.txt","draft":{n},"expect_version":{}}}"#,
+                versao_no_armazem(&alloc::format!("{p}/a.txt"))
+            ),
+        );
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro caminho") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia foi gravada como conteudo noutro caminho");
+        }
+        let r = crate::nativo::responder_com_anexo_de_teste(
+            agente,
+            &pedido_rpc(
+                "fs.draft",
+                &alloc::format!(r#"{{"path":"{p}","draft":{n}}}"#),
+            ),
+            b"mais",
+        );
+        if fs_ok(&r)
+            || fs_texto(&r, "error").as_deref() != Some("o rascunho e uma copia: nao se acrescenta")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia feita aqui recebeu mais bytes");
+        }
+        let r = copia_restaurar(agente, &p, n, versao_no_armazem(&p));
+        if fs_ok(&r)
+            || fs_texto(&r, "error").as_deref() != Some("o rascunho e uma copia feita, nao enviada")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a copia feita aqui restaurou sem ter sido enviada");
+        }
+        let d = copia_enviada(agente, &p, &bytes)?;
+        let r = copia_restaurar(outro, &p, d, versao_no_armazem(&p));
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro dono") {
+            crate::log_error!("teste", "{}", r);
+            return Err("outro dono restaurou o envio de um");
+        }
+        // O envio para outro caminho — abaixo deste — não restaura este,
+        // mesmo sendo a cópia dele: o rascunho é do caminho que o gate
+        // decidiu quando ele chegou.
+        let sub = alloc::format!("{p}/sub");
+        let abaixo = copia_enviada(agente, &sub, &bytes)?;
+        let r = copia_restaurar(agente, &p, abaixo, versao_no_armazem(&p));
+        if fs_ok(&r) || fs_texto(&r, "error").as_deref() != Some("o rascunho e de outro caminho") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o envio para outro caminho restaurou este");
+        }
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.discard",
+                &alloc::format!(r#"{{"path":"{sub}","draft":{abaixo}}}"#),
+            ),
+            "o envio para outro caminho nao foi descartado",
+        )?;
+        // Sem `fs.restore` no papel: escreve, e não restaura.
+        let texto = antes.texto();
+        let sem: alloc::string::String = texto
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador fs.restore"))
+            .map(|l| {
+                if l.starts_with("papel operador ") {
+                    l.replace(" fs.restore", "")
+                } else {
+                    l.into()
+                }
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("\n");
+        let politica_sem =
+            politica::Politica::ler(&sem).map_err(|_| "a politica sem fs.restore nao se le")?;
+        crate::autorizacao::restaurar_politica(politica_sem);
+        let restaurar = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        let a = alloc::format!("{p}/a.txt");
+        let escrever = fs_gravar(agente, &a, versao_no_armazem(&a), "sem restore");
+        crate::autorizacao::restaurar_politica(antes.clone());
+        decisao(&restaurar, "DENY_PERMISSION")?;
+        copia_exigir(&escrever, "sem fs.restore, o operador deixou de escrever")?;
+        // A cota: a cópia conta nela, e a restauração conta os objetos.
+        fn com_cota(antes: &politica::Politica, linha: &str) -> Option<politica::Politica> {
+            let texto: alloc::string::String = antes
+                .texto()
+                .lines()
+                .map(|l| {
+                    if l.starts_with("armazem operador ") {
+                        linha.into()
+                    } else {
+                        l.into()
+                    }
+                })
+                .collect::<alloc::vec::Vec<alloc::string::String>>()
+                .join("\n");
+            politica::Politica::ler(&texto).ok()
+        }
+        let grande = alloc::format!("{p}/grande");
+        let sistema = sistema_no_armazem(7_400_204);
+        copia_exigir(
+            &fs_gravar(sistema, &grande, 0, &"g".repeat(30_000)),
+            "o arquivo grande do sistema nao entrou",
+        )?;
+        crate::armazem::vencer_rascunhos_de_teste();
+        crate::autorizacao::restaurar_politica(
+            com_cota(&antes, "armazem operador 20000 4096")
+                .ok_or("a politica da cota nao se le")?,
+        );
+        let r = fs_pedir(agente, "fs.backup", &alloc::format!(r#"{{"path":"{p}"}}"#));
+        let rascunhos = crate::armazem::rascunhos_de_teste();
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("DENY_QUOTA") || rascunhos != 0 {
+            crate::log_error!("teste", "{} ({} rascunhos)", r, rascunhos);
+            return Err("a copia maior que a cota nao foi recusada inteira");
+        }
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        let d = copia_enviada(agente, &p, &bytes)?;
+        let retrato = retrato_do_armazem();
+        crate::autorizacao::restaurar_politica(
+            com_cota(&antes, "armazem operador 16777216 3")
+                .ok_or("a politica da cota nao se le")?,
+        );
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("DENY_QUOTA") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a restauracao alem dos objetos da cota nao foi recusada");
+        }
+        if retrato_do_armazem() != retrato {
+            return Err("a restauracao recusada pela cota mudou o armazem");
+        }
+        crate::armazem::vencer_rascunhos_de_teste();
+        Ok(())
+    })();
+    crate::autorizacao::restaurar_politica(antes);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O que vem entre a decisão do gate e o commit, com a ordem das gravações
+/// na mão: o arrendamento de outro titular abaixo do caminho, a versão que
+/// mudou, a política que tirou o `fs.restore`, a chave revogada — e a
+/// máquina que vai desligar, onde nada começa. Cada um recusa sem mudar
+/// nada, e a recusa vai para a auditoria como o resultado do comando.
+fn copia_o_que_vem_no_meio() -> Resultado {
+    let (agente, _) = copia_agente(0x76, "agente-copia-meio", "operador", 7_400_301);
+    let (outro, _) = copia_agente(0x77, "agente-copia-arrenda", "operador", 7_400_302);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/meio{unico}");
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "meio")?;
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        let a = alloc::format!("{p}/a.txt");
+        copia_exigir(
+            &fs_gravar(agente, &a, versao_no_armazem(&a), "depois"),
+            "a mudanca nao entrou",
+        )?;
+        let d = copia_enviada(agente, &p, &bytes)?;
+        let retrato = retrato_do_armazem();
+        let igual = |nome: &str| -> Resultado {
+            if retrato_do_armazem() == retrato {
+                return Ok(());
+            }
+            crate::log_error!("teste", "{}", nome);
+            Err("uma restauracao recusada mudou o armazem")
+        };
+        // O arrendamento de outro, lá embaixo.
+        let b = alloc::format!("{p}/sub/b.bin");
+        copia_exigir(
+            &fs_pedir(outro, "fs.claim", &alloc::format!(r#"{{"path":"{b}"}}"#)),
+            "o arrendamento do outro nao foi dado",
+        )?;
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        let soltou = fs_pedir(outro, "fs.release", &alloc::format!(r#"{{"path":"{b}"}}"#));
+        if fs_ok(&r) || fs_texto(&r, "conflict").as_deref() != Some("lease") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arrendamento de outro abaixo do caminho nao recusou");
+        }
+        copia_exigir(&soltou, "o arrendamento nao foi solto")?;
+        igual("arrendamento")?;
+        // A versão que não é a de agora.
+        let v = versao_no_armazem(&p);
+        let r = copia_restaurar(agente, &p, d, v + 1);
+        if fs_ok(&r)
+            || fs_texto(&r, "conflict").as_deref() != Some("version")
+            || fs_numero(&r, "current_version") != Some(v)
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a versao errada nao recusou com a de agora");
+        }
+        igual("versao")?;
+        // A política muda no meio: sem fs.restore no operador.
+        fn sem_fs_restore() {
+            let texto = crate::autorizacao::com_politica(|p| p.texto());
+            let sem: alloc::string::String = texto
+                .lines()
+                .filter(|l| !l.starts_with("recurso operador fs.restore"))
+                .map(|l| {
+                    if l.starts_with("papel operador ") {
+                        l.replace(" fs.restore", "")
+                    } else {
+                        l.into()
+                    }
+                })
+                .collect::<alloc::vec::Vec<_>>()
+                .join("\n");
+            if let Ok(p) = politica::Politica::ler(&sem) {
+                crate::autorizacao::restaurar_politica(p);
+            }
+        }
+        crate::armazem::antes_do_commit_de_teste(Some(sem_fs_restore));
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        crate::armazem::antes_do_commit_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes.clone());
+        if decisao_do_envelope(&r) != "ALLOW"
+            || fs_texto(&r, "code").as_deref() != Some("DENY_PERMISSION")
+        {
+            crate::log_error!("teste", "{}", r);
+            return Err("a politica mudada no meio nao recusou a restauracao no commit");
+        }
+        igual("politica")?;
+        let e = ultimo_com_metodo("fs.restore").ok_or("a recusa nao foi gravada")?;
+        if e.codigo != politica::Codigo::DenyPermission || !e.detalhe.contains("; decisao ") {
+            crate::log_error!("teste", "{:?}", e);
+            return Err("a recusa no commit nao foi gravada como o resultado do comando");
+        }
+        // A máquina que vai: nada começa — nem a cópia, nem a restauração.
+        let _ = crate::energia::executada_de_teste();
+        let sistema = sistema_no_armazem(7_400_303);
+        let r = fs_pedir(sistema, "system.reboot", "{}");
+        if fs_texto(&r, "state").as_deref() != Some("rebooting") {
+            crate::log_error!("teste", "{}", r);
+            return Err("o reinicio nao foi pedido");
+        }
+        let copia = fs_pedir(agente, "fs.backup", &alloc::format!(r#"{{"path":"{p}"}}"#));
+        let restaurar = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        let entregue = energia_entregue();
+        for r in [&copia, &restaurar] {
+            if fs_ok(r)
+                || fs_texto(r, "code").as_deref() != Some("CONFLICT")
+                || fs_texto(r, "error").as_deref()
+                    != Some("a maquina esta reiniciando ou desligando")
+            {
+                crate::log_error!("teste", "{}", r);
+                return Err("com a maquina indo, a copia ou a restauracao comecou");
+            }
+        }
+        if entregue != Some(crate::energia::Acao::Reiniciar) {
+            return Err("o reinicio nao chegou ao fim");
+        }
+        igual("energia")?;
+        // A chave revogada no meio.
+        fn revogar() {
+            let _ = crate::identidade::revogar(&sigilo::publica_de(&[0x76; 32]));
+        }
+        crate::armazem::antes_do_commit_de_teste(Some(revogar));
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        crate::armazem::antes_do_commit_de_teste(None);
+        if decisao_do_envelope(&r) != "ALLOW" || fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave revogada no meio restaurou");
+        }
+        igual("revogacao")?;
+        Ok(())
+    })();
+    crate::armazem::antes_do_commit_de_teste(None);
+    crate::autorizacao::restaurar_politica(antes);
+    crate::armazem::vencer_rascunhos_de_teste();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A cópia é só dado: restaurar uma de antes de uma revogação não traz de
+/// volta a chave revogada, nem a pessoa revogada, nem muda a política, a
+/// geração da autoridade ou a cadeia da auditoria — o journal de estado
+/// segue para a frente. Os arquivos voltam, do dono que restaurou.
+fn copia_nao_traz_autoridade_de_volta() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador, Programa};
+    let (agente, _) = copia_agente(0x78, "agente-copia-revogado", "operador", 7_400_401);
+    let (outro, dono_outro) = copia_agente(0x79, "agente-copia-fica", "operador", 7_400_402);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/autoridade{unico}");
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "autoridade")?;
+        let original = copia_subarvore(&p);
+        let ana = crate::pessoas::registrar_de_teste("copia-ana", "operador", SENHA_DE_TESTE);
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        // Depois da cópia: a chave e a pessoa revogadas, e a árvore muda.
+        crate::identidade::revogar(&sigilo::publica_de(&[0x78; 32]))
+            .map_err(|_| "a chave do caso nao foi revogada")?;
+        crate::pessoas::revogar_pessoa(ana).map_err(|_| "a pessoa do caso nao foi revogada")?;
+        let a = alloc::format!("{p}/a.txt");
+        copia_exigir(
+            &fs_gravar(outro, &a, versao_no_armazem(&a), "depois"),
+            "a mudanca nao entrou",
+        )?;
+        let politica_antes = crate::autorizacao::com_politica(|p| p.texto());
+        let geracao = crate::persistencia::geracao();
+        let revogados = crate::identidade::administradores_revogados();
+        let seq = seq_da_auditoria();
+        // A volta, por quem continua.
+        let d = copia_enviada(outro, &p, &bytes)?;
+        copia_exigir(
+            &copia_restaurar(outro, &p, d, versao_no_armazem(&p)),
+            "a restauracao foi recusada",
+        )?;
+        if copia_subarvore(&p) != original {
+            return Err("a subarvore nao voltou");
+        }
+        if copia_versoes_e_donos(&p)
+            .iter()
+            .any(|(_, d)| *d != dono_outro)
+        {
+            return Err("um no restaurado nao e de quem restaurou");
+        }
+        // Nada da autoridade voltou.
+        let r = fs_pedir(agente, "fs.read", &alloc::format!(r#"{{"path":"{a}"}}"#));
+        if decisao_do_envelope(&r) == "ALLOW" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave revogada voltou a ler depois da restauracao");
+        }
+        if crate::pessoas::pessoa(ana).map(|p| p.estado) != Some(sigilo::pessoas::Estado::Revogada)
+        {
+            return Err("a pessoa revogada voltou com a restauracao");
+        }
+        if crate::autorizacao::com_politica(|p| p.texto()) != politica_antes
+            || crate::persistencia::geracao() != geracao
+            || crate::identidade::administradores_revogados() != revogados
+        {
+            return Err("a restauracao mudou o estado de autoridade");
+        }
+        if seq_da_auditoria() <= seq {
+            return Err("a cadeia da auditoria nao seguiu para a frente");
+        }
+        // E a chave revogada também não restaura: o gate não a conhece.
+        let revogado = Chamador::Processo {
+            fio: 7_400_403,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(sigilo::publica_de(&[0x78; 32])),
+            },
+            programa: Programa::Kernel,
+        };
+        let r = copia_restaurar(revogado, &p, d, versao_no_armazem(&p));
+        if decisao_do_envelope(&r) == "ALLOW" {
+            crate::log_error!("teste", "{}", r);
+            return Err("a chave revogada passou pelo gate da restauracao");
+        }
+        Ok(())
+    })();
+    crate::pessoas::esquecer_registradas();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// Duas restaurações da mesma subárvore, contra a mesma versão, em núcleos
+/// diferentes, com escritas abaixo dela e cópias dela ao mesmo tempo:
+/// exatamente uma restauração vale — a outra ouve o conflito de versão —,
+/// cada escrita vale inteira antes ou depois, cada cópia é a fotografia de
+/// um instante — a árvore inteira, o texto restaurado ou o escrito, nunca
+/// um bloco de outro —, e o armazém e o mapa conferem no fim.
+fn copia_a_disputa() -> Resultado {
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    static VALERAM: AtomicUsize = AtomicUsize::new(0);
+    static CONFLITOS: AtomicUsize = AtomicUsize::new(0);
+    static FALHAS: AtomicUsize = AtomicUsize::new(0);
+    static FOTOGRAFIAS: AtomicUsize = AtomicUsize::new(0);
+    static RASCUNHOS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    static ESPERADA: AtomicU64 = AtomicU64::new(0);
+    static UNICO: AtomicU64 = AtomicU64::new(0);
+    fn caminho() -> alloc::string::String {
+        alloc::format!("/armazem/compartilhado/disputa{}", UNICO.load(SeqCst))
+    }
+    fn quem(i: u64) -> crate::autorizacao::Chamador {
+        use crate::autorizacao::{Autoridade, Chamador, Programa};
+        Chamador::Processo {
+            fio: 7_400_500 + i,
+            autoridade: Autoridade::Sessao {
+                sessao: 3,
+                chave: Some(sigilo::publica_de(&[0x7A; 32])),
+            },
+            programa: Programa::Kernel,
+        }
+    }
+    extern "C" fn restaurar(i: u64) -> ! {
+        let p = caminho();
+        let r = copia_restaurar(
+            quem(i),
+            &p,
+            RASCUNHOS[i as usize].load(SeqCst),
+            ESPERADA.load(SeqCst),
+        );
+        if fs_ok(&r) {
+            VALERAM.fetch_add(1, SeqCst);
+        } else if fs_texto(&r, "conflict").as_deref() == Some("version") {
+            CONFLITOS.fetch_add(1, SeqCst);
+        } else {
+            crate::log_error!("teste", "{}", r);
+            FALHAS.fetch_add(1, SeqCst);
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn escrever(i: u64) -> ! {
+        let c = alloc::format!("{}/a.txt", caminho());
+        for _ in 0..6 {
+            let v = versao_no_armazem(&c);
+            let r = fs_gravar(quem(i), &c, v, "escrita");
+            if !fs_ok(&r)
+                && !matches!(fs_texto(&r, "conflict").as_deref(), Some("version"))
+                && fs_texto(&r, "error").as_deref() != Some("o diretorio pai nao existe")
+            {
+                crate::log_error!("teste", "{}", r);
+                FALHAS.fetch_add(1, SeqCst);
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    extern "C" fn copiar(i: u64) -> ! {
+        let p = caminho();
+        for _ in 0..3 {
+            let inteira = copia_baixada(quem(i), &p).and_then(|(n, _, bytes)| {
+                let r = fs_pedir(
+                    quem(i),
+                    "fs.backup",
+                    &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+                );
+                copia_exigir(&r, "a copia da disputa nao foi descartada")?;
+                let (_, nos) = crate::copia::abrir_de_teste(&bytes)?;
+                let forma: alloc::vec::Vec<&str> = nos.iter().map(|(c, _)| c.as_str()).collect();
+                let texto = nos
+                    .iter()
+                    .find(|(c, _)| c == "a.txt")
+                    .and_then(|(_, t)| t.as_deref());
+                if forma != ["", "a.txt", "sub", "sub/b.bin", "vazio"]
+                    || (texto != Some(b"disputa".as_slice())
+                        && texto != Some(b"escrita".as_slice()))
+                {
+                    crate::log_error!("teste", "{:?} {:?}", forma, texto);
+                    return Err("a copia da disputa nao e uma fotografia inteira");
+                }
+                Ok(())
+            });
+            match inteira {
+                Ok(()) => {
+                    FOTOGRAFIAS.fetch_add(1, SeqCst);
+                }
+                Err(e) => {
+                    crate::log_error!("teste", "{}", e);
+                    FALHAS.fetch_add(1, SeqCst);
+                }
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    let (agente, _) = copia_agente(0x7A, "agente-copia-disputa", "operador", 7_400_499);
+    UNICO.store(crate::tempo::uptime_ms(), SeqCst);
+    let p = caminho();
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "disputa")?;
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        for r in &RASCUNHOS {
+            r.store(copia_enviada(agente, &p, &bytes)?, SeqCst);
+        }
+        ESPERADA.store(versao_no_armazem(&p), SeqCst);
+        PRONTOS.store(0, SeqCst);
+        VALERAM.store(0, SeqCst);
+        CONFLITOS.store(0, SeqCst);
+        FALHAS.store(0, SeqCst);
+        FOTOGRAFIAS.store(0, SeqCst);
+        let ligados: alloc::vec::Vec<usize> = (0..crate::nucleos::MAX_NUCLEOS)
+            .filter(|i| crate::nucleos::mascara_dos_ligados() & (1 << i) != 0)
+            .collect();
+        let nucleo = |k: usize| ligados[k % ligados.len()];
+        crate::fios::criar_no_nucleo("teste-copia", restaurar, 0, nucleo(0))?;
+        crate::fios::criar_no_nucleo("teste-copia", restaurar, 1, nucleo(1))?;
+        crate::fios::criar_no_nucleo("teste-copia", escrever, 2, nucleo(2))?;
+        crate::fios::criar_no_nucleo("teste-copia", escrever, 3, nucleo(3))?;
+        crate::fios::criar_no_nucleo("teste-copia", copiar, 4, nucleo(4))?;
+        esperar_ate(|| PRONTOS.load(SeqCst) == 5, 60_000)?;
+        if VALERAM.load(SeqCst) != 1 || CONFLITOS.load(SeqCst) != 1 {
+            crate::log_error!(
+                "teste",
+                "valeram {}, conflitos {}",
+                VALERAM.load(SeqCst),
+                CONFLITOS.load(SeqCst)
+            );
+            return Err("as duas restauracoes disputadas nao tiveram exatamente um vencedor");
+        }
+        if FALHAS.load(SeqCst) != 0 || FOTOGRAFIAS.load(SeqCst) != 3 {
+            return Err(
+                "uma restauracao, uma escrita ou uma copia ouviu outra coisa que o conflito",
+            );
+        }
+        if !crate::armazem::com_o_armazem(|a| a.coerente()) {
+            return Err("o armazem nao confere depois da disputa");
+        }
+        let a = fs_no_armazem(&alloc::format!("{p}/a.txt")).1;
+        if a.as_deref() != Some(b"disputa".as_slice())
+            && a.as_deref() != Some(b"escrita".as_slice())
+        {
+            return Err("o texto da disputa nao e nem o restaurado nem o escrito");
+        }
+        crate::armazem::vencer_rascunhos_de_teste();
+        Ok(())
+    })();
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// A gravação que falha no ponto de commit: a base do armazém restaurado
+/// foi escrita na outra região do volume, e a confirmação no journal de
+/// estado não. O armazém em memória não muda, o volume fica indisponível
+/// até o boot, e o volume reaberto pelo que o journal confirma é o de
+/// antes, sem bloco reservado à toa. Depois, a restauração vale.
+fn copia_a_gravacao_que_falha() -> Resultado {
+    let (agente, _) = copia_agente(0x7B, "agente-copia-falha", "operador", 7_400_601);
+    let unico = crate::tempo::uptime_ms();
+    let p = alloc::format!("/armazem/compartilhado/falha{unico}");
+    let anterior = crate::persistencia::estado();
+    let resultado = (|| -> Resultado {
+        copia_arvore(agente, &p, "falha")?;
+        let original = copia_subarvore(&p);
+        let (n, _, bytes) = copia_baixada(agente, &p)?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia nao foi descartada",
+        )?;
+        let a = alloc::format!("{p}/a.txt");
+        copia_exigir(
+            &fs_gravar(agente, &a, versao_no_armazem(&a), "depois"),
+            "a mudanca nao entrou",
+        )?;
+        crate::armazem::vencer_rascunhos_de_teste();
+        let usados = crate::volume::usados_de_teste();
+        let d = copia_enviada(agente, &p, &bytes)?;
+        let antes = retrato_do_armazem();
+        let confirmado = crate::volume::confirmado();
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(true);
+        let r = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+        crate::persistencia::forcar_estado_de_teste(anterior);
+        if fs_ok(&r) || fs_texto(&r, "code").as_deref() != Some("ERROR") {
+            crate::log_error!("teste", "{}", r);
+            return Err("a restauracao sem a confirmacao foi dada como feita");
+        }
+        if retrato_do_armazem() != antes || crate::volume::confirmado() != confirmado {
+            return Err("a restauracao sem a confirmacao valeu");
+        }
+        if crate::volume::estado() == crate::volume::Estado::Disponivel {
+            return Err("o volume seguiu disponivel depois da gravacao que falhou");
+        }
+        // O boot: o volume pelo que o journal de estado confirma.
+        crate::volume::reabrir_de_teste()?;
+        if retrato_do_armazem() != antes || crate::volume::usados_de_teste() != usados {
+            return Err("o volume reaberto tem algo da restauracao nao confirmada");
+        }
+        // E ela vale, de novo.
+        let d = copia_enviada(agente, &p, &bytes)?;
+        copia_exigir(
+            &copia_restaurar(agente, &p, d, versao_no_armazem(&p)),
+            "depois da falha, a restauracao foi recusada",
+        )?;
+        if copia_subarvore(&p) != original {
+            return Err("depois da falha, a subarvore nao voltou");
+        }
+        Ok(())
+    })();
+    crate::persistencia::falhar_a_proxima_gravacao_de_teste(false);
+    crate::persistencia::forcar_estado_de_teste(anterior);
+    crate::identidade::esquecer_registrados();
+    resultado
+}
+
+/// O armazém inteiro, pelo sistema — o único com `fs.read` e `fs.restore`
+/// na raiz: a cópia leva cada nó do armazém e nada mais, volta pela raiz,
+/// e o armazém fica com o mesmo conteúdo, versões novas, tudo do sistema;
+/// o volume reaberto repõe o mesmo. Perto do fim da suíte: a reconstrução e
+/// a conta dos blocos, depois dele, cobrem o que ele fez.
+fn copia_o_armazem_inteiro() -> Resultado {
+    let sistema = sistema_no_armazem(7_400_701);
+    crate::coordenacao::esquecer();
+    crate::armazem::vencer_rascunhos_de_teste();
+    let original = copia_subarvore(crate::armazem::RAIZ);
+    let (n, _, bytes) = copia_baixada(sistema, crate::armazem::RAIZ)?;
+    let (cabecalho, nos) = crate::copia::abrir_de_teste(&bytes)?;
+    // A raiz do armazém não é nó: a cópia dele começa por ela.
+    let mut esperado = alloc::vec![(alloc::string::String::new(), None)];
+    esperado.extend(original.iter().cloned());
+    if !cabecalho.raiz.is_empty() || nos != esperado {
+        return Err("a copia do armazem inteiro nao e o armazem inteiro");
+    }
+    copia_exigir(
+        &fs_pedir(
+            sistema,
+            "fs.backup",
+            &alloc::format!(r#"{{"path":"/armazem","copy":{n},"discard":true}}"#),
+        ),
+        "a copia nao foi descartada",
+    )?;
+    let proxima = crate::armazem::com_o_armazem(|a| a.proxima());
+    let d = copia_enviada(sistema, crate::armazem::RAIZ, &bytes)?;
+    let r = copia_restaurar(sistema, crate::armazem::RAIZ, d, 1);
+    if fs_ok(&r) || fs_numero(&r, "current_version") != Some(0) {
+        crate::log_error!("teste", "{}", r);
+        return Err("a raiz restaurou contra uma versao que nao e a dela");
+    }
+    let r = copia_restaurar(sistema, crate::armazem::RAIZ, d, 0);
+    copia_exigir(&r, "a restauracao do armazem inteiro foi recusada")?;
+    if copia_subarvore(crate::armazem::RAIZ) != original {
+        return Err("o armazem restaurado nao e o da copia");
+    }
+    if copia_versoes_e_donos(crate::armazem::RAIZ)
+        .iter()
+        .any(|(v, d)| *v < proxima || d != "sistema")
+    {
+        return Err("um no do armazem restaurado tem versao velha ou outro dono");
+    }
+    let agora = retrato_do_armazem();
+    crate::volume::reabrir_de_teste()?;
+    if retrato_do_armazem() != agora {
+        return Err("o armazem inteiro restaurado nao se repos do volume");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // as sobreviventes da fase 6: um caso determinístico para cada contrato que
 // nenhum caso exercitava — ver README, "Mutações"
 // ---------------------------------------------------------------------------
@@ -33800,6 +35158,34 @@ static CASOS: &[Caso] = &[
         f: armazem_o_volume_so_vale_confirmado,
     },
     Caso {
+        nome: "copia: a copia volta inteira, num registro so",
+        f: copia_volta_inteira,
+    },
+    Caso {
+        nome: "copia: a copia que nao confere nao muda nada",
+        f: copia_a_que_nao_confere_nao_muda_nada,
+    },
+    Caso {
+        nome: "copia: so quem pode, e so onde pode",
+        f: copia_so_quem_pode_e_so_onde_pode,
+    },
+    Caso {
+        nome: "copia: o que vem no meio, e a maquina que vai",
+        f: copia_o_que_vem_no_meio,
+    },
+    Caso {
+        nome: "copia: a copia nao traz autoridade de volta",
+        f: copia_nao_traz_autoridade_de_volta,
+    },
+    Caso {
+        nome: "copia: duas restauracoes e escritas ao mesmo tempo",
+        f: copia_a_disputa,
+    },
+    Caso {
+        nome: "copia: a gravacao que falha deixa o armazem de antes",
+        f: copia_a_gravacao_que_falha,
+    },
+    Caso {
         nome: "consoles: reabrir encerra a sessao",
         f: consoles_reabrir_encerra_a_sessao,
     },
@@ -35512,6 +36898,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "tls: a validade pela hora autenticada, com rodadas e o NSF ao mesmo tempo",
         f: tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo,
+    },
+    // Antes da reconstrução e da conta dos blocos: elas cobrem o armazém
+    // inteiro restaurado.
+    Caso {
+        nome: "copia: o armazem inteiro, pelo sistema",
+        f: copia_o_armazem_inteiro,
     },
     // Perto do fim: a reposição cobre o que a suíte inteira gravou.
     Caso {
@@ -64768,8 +66160,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -67048,8 +68440,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(

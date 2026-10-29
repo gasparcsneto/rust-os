@@ -29,14 +29,22 @@
 # administrador, que os delega. O sistema nao a tem: nao e pessoa. Tire-a de
 # um papel para que so um administrador troque a senha de quem tem esse
 # papel (credential.rotate, com prova).
+#
+# A copia de seguranca do armazem e uma leitura (fs.read) e sai cifrada para
+# esta maquina; restaurar e fs.restore, uma permissao propria, de caminho: o
+# operador no armazem compartilhado, o sistema no armazem inteiro, e o teto
+# do administrador, que a delega. Tire-a do operador para que ele escreva
+# arquivos sem poder trocar a arvore inteira por uma copia. Ver
+# docs/OPERACAO.md.
 
 papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare credential.change_self
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare credential.change_self
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
+recurso operador fs.restore /armazem/compartilhado
 recurso operador net.connect udp:192.0.2.53:53
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
@@ -44,9 +52,10 @@ recurso operador message.send papel:operador papel:sistema
 taxa operador 50 100
 processos operador 8
 
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
+recurso sistema fs.restore /armazem
 recurso sistema net.connect udp:192.0.2.53:53
 recurso sistema net.observe udp:192.0.2.53:53
 recurso sistema net.block udp:192.0.2.53:53
@@ -60,9 +69,10 @@ recurso sistema process.terminate papel:observador papel:operador papel:sistema
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update credential.change_self
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update credential.change_self
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
+recurso administrador fs.restore /armazem/compartilhado
 recurso administrador net.connect udp:192.0.2.53:53
 recurso administrador net.observe udp:192.0.2.53:53
 recurso administrador net.block udp:192.0.2.53:53

@@ -1261,6 +1261,22 @@ exatamente quando o registro de estado está no disco; e o do volume
 devolvido a uma fotografia anterior confere que ele é recusado sem
 derrubar o estado de autoridade.
 
+**A restauração de uma cópia** (B5, ver "A cópia de segurança e a
+restauração" em [`ARMAZENAMENTO.md`](ARMAZENAMENTO.md)) usa a mesma
+entrada e nenhuma nova: o armazém restaurado vai ao volume como uma
+**base** na outra região do journal dos metadados — o mecanismo da
+compactação do volume —, e um registro `ARMAZEM` com `ARMAZEM_CONFIRMADO`
+apontando o fecho dela, e a auditoria da execução, é o ponto de commit.
+Até ele, a região de antes é a que vale; depois, a nova — um registro só,
+como um lote. A cópia não leva nada do journal de estado: restaurá-la não
+volta o contador, não desfaz uma revogação nem repõe uma lápide. Os pontos
+de queda dela são `CopiaNoMeio` (34), `RestauracaoConferida` (35),
+`RestauracaoNaPrimeiraParte` (36), `RestauracaoNaBase` (37) e
+`RestauracaoGravada` (38), mais os de dentro da gravação de estado; a
+bancada `cargo xtask copia` cai em cada um e confere que o boot seguinte
+tem a árvore inteira de antes ou inteira a da cópia — a da cópia
+exatamente quando o registro está no disco.
+
 ## As chaves de assinatura (ICP-3)
 
 As chaves de assinatura das identidades (ver [ICP.md](ICP.md), *A chamada

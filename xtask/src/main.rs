@@ -18,6 +18,7 @@ mod atualizar;
 mod botao;
 mod canal_tcp;
 mod codigo;
+mod copia;
 mod disco_hostil;
 mod icp;
 mod identidade;
@@ -236,6 +237,8 @@ fn main() -> ExitCode {
             "--admin",
             "--assinatura",
             "--imagem",
+            "--copia",
+            "--restaurar",
         ]
         .contains(&a.as_str())
         {
@@ -285,6 +288,7 @@ fn main() -> ExitCode {
         "identidade" => identidade::identidade(arch, release),
         "botao" => botao::botao(arch, release),
         "senha" => senha::senha(arch, release),
+        "copia" => copia::copia(arch, release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -337,19 +341,33 @@ fn main() -> ExitCode {
                     .filter(|w| w[0] == "--assinatura")
                     .map(|w| PathBuf::from(&w[1]))
                     .collect();
-                producao::operar(
-                    endereco,
-                    metodo,
-                    posicionais.get(3).copied().unwrap_or("{}"),
-                    Path::new(chave),
-                    duke,
-                    extrair_valor(&args, "--admin").map(Path::new),
-                    &assinaturas,
-                    extrair_valor(&args, "--imagem").map(Path::new),
-                )
+                let arquivos = [
+                    extrair_valor(&args, "--imagem")
+                        .map(|a| producao::Arquivo::Imagem(Path::new(a))),
+                    extrair_valor(&args, "--copia")
+                        .map(|a| producao::Arquivo::Copia(Path::new(a))),
+                    extrair_valor(&args, "--restaurar")
+                        .map(|a| producao::Arquivo::Restaurar(Path::new(a))),
+                ];
+                let mut arquivos = arquivos.into_iter().flatten();
+                match (arquivos.next(), arquivos.next()) {
+                    (_, Some(_)) => {
+                        Err("--imagem, --copia e --restaurar: um de cada vez".into())
+                    }
+                    (arquivo, None) => producao::operar(
+                        endereco,
+                        metodo,
+                        posicionais.get(3).copied().unwrap_or("{}"),
+                        Path::new(chave),
+                        duke,
+                        extrair_valor(&args, "--admin").map(Path::new),
+                        &assinaturas,
+                        arquivo,
+                    ),
+                }
             }
             _ => Err(
-                "uso: cargo xtask operar <host:porta> <método> [parâmetros] --chave <arquivo> --duke <pública> [--admin <arquivo>] [--assinatura <arquivo>]... [--imagem <imagem do slot>]"
+                "uso: cargo xtask operar <host:porta> <método> [parâmetros] --chave <arquivo> --duke <pública> [--admin <arquivo>] [--assinatura <arquivo>]... [--imagem <imagem do slot> | --copia <arquivo> | --restaurar <arquivo>]"
                     .into(),
             ),
         },
@@ -472,6 +490,11 @@ COMANDOS:
                               cada fronteira da troca deixa exatamente uma senha
                               valendo, a troca com o botão de energia, e na
                               imagem de produção
+    copia                     a cópia de segurança do armazém e a restauração,
+                              por um agente: a volta inteira e o corte, a
+                              autoridade que não volta, a máquina reinstalada
+                              que recusa, a queda em cada fronteira, e a
+                              produção com a outra máquina que recusa
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -490,9 +513,11 @@ COMANDOS:
                               um pedido a uma máquina de verdade pelo canal TCP;
                               --admin <arquivo> o faz administrativo,
                               --assinatura <arquivo> (uma por credencial) faz o
-                              admin.revoke ou o system.update pelo quórum, e
+                              admin.revoke ou o system.update pelo quórum,
                               update.stage --imagem <arquivo> escreve a imagem
-                              de uma versão no slot inativo
+                              de uma versão no slot inativo, fs.backup --copia
+                              <arquivo> baixa a cópia de segurança, e
+                              fs.restore --restaurar <arquivo> a põe de volta
     mainnet                   a rede principal do IC, de verdade: uma consulta
                               verificada ao livro-razão do ICP, à mão e fora da
                               CI — precisa de DNS e da porta 443 sem proxy;
@@ -2563,10 +2588,90 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_auditoria_so_relatada()?,
         conferir_a_porta_do_canal_tcp(),
         conferir_o_tempo(),
+        conferir_a_chave_da_copia()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// A chave da cópia de segurança do armazém: o sal e o rótulo dela só no
+/// módulo da cópia do kernel, uma vez cada — nenhum outro código deriva a
+/// mesma chave —, e a função que a dá privada a ele: a chave não sai de lá,
+/// nem para outro módulo do kernel. Ver `kernel/src/copia.rs`.
+fn conferir_a_chave_da_copia() -> Result<ExitCode, String> {
+    // Montados aqui, para este arquivo não ser um deles.
+    let agulhas = [
+        concat!("Duke copia", " v1"),
+        concat!("copia: ", "registros"),
+    ];
+    const MODULO: &str = "kernel/src/copia.rs";
+    let raiz = raiz_do_projeto();
+    let mut achados: Vec<(String, &str)> = Vec::new();
+    let entradas = std::fs::read_dir(&raiz)
+        .map_err(|e| format!("não foi possível listar {}: {e}", raiz.display()))?;
+    for entrada in entradas {
+        let dir = entrada
+            .map_err(|e| format!("erro ao listar {}: {e}", raiz.display()))?
+            .path()
+            .join("src");
+        if !dir.is_dir() {
+            continue;
+        }
+        percorrer_fontes(&dir, &mut |arquivo| {
+            let texto = std::fs::read_to_string(arquivo)
+                .map_err(|e| format!("não foi possível ler {}: {e}", arquivo.display()))?;
+            let nome = arquivo
+                .strip_prefix(&raiz)
+                .unwrap_or(arquivo)
+                .display()
+                .to_string();
+            for agulha in agulhas {
+                for _ in texto.matches(agulha) {
+                    achados.push((nome.clone(), agulha));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    let mut fora: Vec<String> = achados
+        .iter()
+        .filter(|(arquivo, _)| arquivo != MODULO)
+        .map(|(arquivo, agulha)| format!("{arquivo}: `{agulha}`"))
+        .collect();
+    for agulha in agulhas {
+        let no_modulo = achados
+            .iter()
+            .filter(|(a, g)| a == MODULO && *g == agulha)
+            .count();
+        if no_modulo != 1 {
+            fora.push(format!("{MODULO}: `{agulha}` {no_modulo} vezes, e nao uma"));
+        }
+    }
+    let modulo = std::fs::read_to_string(raiz.join(MODULO))
+        .map_err(|e| format!("não foi possível ler {MODULO}: {e}"))?;
+    let derivacao: Vec<&str> = modulo
+        .lines()
+        .filter(|l| l.contains("fn com_a_chave"))
+        .collect();
+    if derivacao.len() != 1 || !derivacao[0].starts_with("fn com_a_chave") {
+        fora.push(format!(
+            "{MODULO}: a funcao da chave da copia tem de ser uma, e privada: {derivacao:?}"
+        ));
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] a chave da copia de seguranca: o sal e o rotulo so no modulo da copia, \
+             e a funcao que a deriva privada a ele"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] a chave da copia de seguranca fora do lugar:");
+        for f in &fora {
+            eprintln!("  {f}");
+        }
         Ok(ExitCode::FAILURE)
     }
 }
@@ -3065,6 +3170,31 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     ("volume::abrir(", &["kernel/src/persistencia.rs"]),
     ("volume::sem_persistencia(", &["kernel/src/persistencia.rs"]),
     ("armazem::trocar(", &["kernel/src/volume.rs"]),
+    // A cópia de segurança e a restauração só pelos handlers de `fs.backup`
+    // e `fs.restore`, depois da decisão do gate. O armazém inteiro trocado
+    // no volume — uma base confirmada no journal de estado —, e um lote
+    // preparado e aplicado de fora do módulo do armazém, só pela
+    // restauração; os rascunhos de cópia, a leitura de um rascunho e os
+    // arrendamentos de tudo abaixo, também.
+    ("crate::copia::fazer(", &["kernel/src/agent/commands.rs"]),
+    ("crate::copia::ler(", &["kernel/src/agent/commands.rs"]),
+    (
+        "crate::copia::descartar(",
+        &["kernel/src/agent/commands.rs"],
+    ),
+    (
+        "crate::copia::restaurar(",
+        &["kernel/src/agent/commands.rs"],
+    ),
+    ("volume::substituir(", &["kernel/src/copia.rs"]),
+    ("armazem::preparar(", &["kernel/src/copia.rs"]),
+    ("armazem::aplicar_confirmado(", &["kernel/src/copia.rs"]),
+    ("armazem::abrir_copia(", &["kernel/src/copia.rs"]),
+    ("armazem::acrescentar_a_copia(", &["kernel/src/copia.rs"]),
+    ("armazem::rascunho_de(", &["kernel/src/copia.rs"]),
+    ("armazem::ler_do_rascunho(", &["kernel/src/copia.rs"]),
+    ("armazem::descartar_numero(", &["kernel/src/copia.rs"]),
+    ("armazem::conferir_arrendamentos(", &["kernel/src/copia.rs"]),
     ("coordenacao::conferir(", &["kernel/src/armazem.rs"]),
     ("coordenacao::tomar_por(", &["kernel/src/armazem.rs"]),
     ("coordenacao::soltar_por(", &["kernel/src/armazem.rs"]),
@@ -16699,7 +16829,7 @@ mod testes {
             assert!(politica::PADRAO.contains(de), "{de}");
             politica::Politica::ler(&politica::PADRAO.replace(de, para)).unwrap()
         };
-        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n";
+        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n";
         const TEMPO: &str = "papel tempo net.connect time.sync\n";
         const ALCANCE: &str =
             "recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";

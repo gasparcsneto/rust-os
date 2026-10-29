@@ -66,6 +66,7 @@
 extern crate alloc;
 
 pub mod bloco;
+pub mod copia;
 pub mod mapa;
 pub mod registro;
 
@@ -1144,3 +1145,5 @@ impl<'a> Vista<'a> {
 
 #[cfg(test)]
 mod testes;
+#[cfg(test)]
+mod testes_da_copia;

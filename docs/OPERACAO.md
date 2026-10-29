@@ -457,6 +457,8 @@ bancada, ou um agente pela porta dele — ou pelo console, por uma pessoa.
 | reiniciar, desligar | `system.reboot`, `system.poweroff` | `system.power` | sistema; administrador pela prova |
 | ver o disco | `disk.info` | `system.read` | observador, operador, sistema, administrador |
 | conferir o armazém | `fs.verify` | `fs.read`, no caminho | quem lê o caminho |
+| copiar o armazém | `fs.backup` | `fs.read`, no caminho | quem lê o caminho |
+| restaurar o armazém | `fs.restore` | `fs.restore`, no caminho | sistema, o armazém inteiro; operador, o compartilhado; administrador, o teto |
 | ver a rede | `net.info` | `system.read` | observador, operador, sistema, administrador |
 | ver a auditoria | `audit.tail`, `audit.verify` | `audit.read` | sistema, segurança, administrador |
 | ver o log | `log.tail` | `log.read` | observador, operador, sistema, administrador |
@@ -526,6 +528,46 @@ O `system.info` diz o botão em `power_button`: `via` (`acpi`, `gpio-keys` ou
 `nenhum`), `reason` (por que não há), `disabled` (por que foi desligado), e
 as contas: `presses`, `requests`, `ignored`, `without_button`.
 
+### A cópia de segurança
+
+A cópia é do **armazém** — os arquivos e os diretórios de `/armazem`, ou de
+uma subárvore dele —, e de nada mais: nem a identidade, nem as pessoas, as
+credenciais, a política, as revogações, a auditoria ou as chaves de
+assinatura, que moram no journal de estado e não voltam atrás. Ela sai
+cifrada para **esta máquina, nesta instalação**: o hospedeiro guarda bytes
+que não sabe abrir, outra máquina recusa (`a copia e de outra maquina`), e
+esta mesma, reinstalada, também (`a copia e de outra instalacao`). Ver "A
+cópia de segurança e a restauração" em
+[`ARMAZENAMENTO.md`](ARMAZENAMENTO.md).
+
+```bash
+# A cópia do armazém compartilhado, num arquivo do operador (0600, nunca por cima).
+cargo xtask operar 192.168.10.5:7070 fs.backup '{"path":"/armazem/compartilhado"}' \
+    --chave segredos/operador-1.chave --duke $(cat duke.publica) --copia compartilhado.copia
+# A volta: a versão de agora do caminho, e a restauração contra ela.
+cargo xtask operar 192.168.10.5:7070 fs.stat '{"path":"/armazem/compartilhado"}' \
+    --chave segredos/operador-1.chave --duke $(cat duke.publica)
+cargo xtask operar 192.168.10.5:7070 fs.restore '{"path":"/armazem/compartilhado","expect_version":7}' \
+    --chave segredos/operador-1.chave --duke $(cat duke.publica) --restaurar compartilhado.copia
+```
+
+O `operar` só leva os bytes: a cópia é feita pela máquina (`fs.backup`,
+num rascunho de quem pede, baixada em pedaços e descartada lá), e a
+restauração também (`fs.draft` em pedaços para o mesmo caminho, e
+`fs.restore`). Quem pode cada uma é o gate, pelo papel da chave: copiar é
+ler (`fs.read` no caminho); restaurar é `fs.restore` no caminho — o
+`sistema` no armazém inteiro, o operador no compartilhado. A restauração
+confere a cópia inteira antes de mudar qualquer coisa e troca a subárvore
+num commit só: depois de um corte de energia no meio, a árvore é inteira a
+de antes ou inteira a da cópia. Os arquivos restaurados ganham versões
+novas e passam a ser de quem restaurou; a auditoria diz `feita a copia
+<id>` e `restaurada a copia <id>`, com a decisão de cada uma.
+
+O que pede folga: a cópia e o envio dela contam na cota de quem os faz,
+como um rascunho, e até o commit o volume guarda a árvore de antes, a
+cópia enviada e o conteúdo novo. Enquanto uma cópia é feita, nenhuma outra
+gravação acontece — ela é uma fotografia de um instante.
+
 ## Quando algo dá errado
 
 | Sintoma | O que dizer à máquina | O que acontece |
@@ -548,16 +590,16 @@ comando é melhor só porque espera a operação em curso acabar.
 
 Um arquivo do armazém com um bloco que não abre está perdido: a cifra
 autenticada recusa o que o disco devolveu, e nada o devolve — apague-o
-(`fs.delete`) e grave de novo de onde ele veio. Não há cópia de segurança
-— ver [o grupo B](#cópia-de-segurança-e-restauração). A verificação não
+(`fs.delete`) e grave de novo de onde ele veio — ou restaure a subárvore
+dele de uma [cópia de segurança](#a-cópia-de-segurança). A verificação não
 para as gravações: um arquivo gravado de novo enquanto ela anda conta em
 `changed`, e não como bom nem como ruim — confira-o de novo.
 
 ### Recuperar a máquina
 
-Recuperar é o que a própria máquina faz com o que tem — e não é restaurar
-de uma cópia, que não existe ([grupo B](#cópia-de-segurança-e-restauração)).
-O que se recupera sem cópia nenhuma:
+Recuperar é o que a própria máquina faz com o que tem. Restaurar o armazém
+de uma cópia é a [cópia de segurança](#a-cópia-de-segurança) — dados, nesta
+máquina, nesta instalação. O que se recupera sem cópia nenhuma:
 
 - **Um corte de energia.** O boot seguinte reabre o journal contra a
   âncora: o que foi confirmado volta, o que não foi não conta. Vale também
@@ -687,6 +729,16 @@ decisão como ela foi tomada.
 
 ### Cópia de segurança e restauração
 
+**Feito no B5, para os dados** — ver [A cópia de
+segurança](#a-cópia-de-segurança): `fs.backup` e `fs.restore`, a cópia do
+armazém cifrada por uma chave derivada da do Duke, presa a esta
+instalação, conferida inteira antes de qualquer mudança, e a troca da
+subárvore como uma base do volume confirmada por um registro só do journal
+de estado, com a auditoria. Nenhuma identidade, credencial, criptografia
+ou semântica de persistência nova; o estado de autoridade não está na
+cópia. O que segue é o registro da decisão como ela foi tomada, e os
+quatro casos que continuam no grupo B.
+
 - **Problema.** Não há cópia do armazém nem do estado.
 - **Por que importa.** Um disco perdido leva tudo; um bloco que não abre
   é um arquivo perdido.
@@ -698,6 +750,35 @@ decisão como ela foi tomada.
   a âncora existe para recusar.
 - **Invariantes.** A âncora contra rollback e o que é "o estado atual" de
   uma máquina.
+
+Continuam no grupo B — cada um pede uma decisão nova, e hoje a arquitetura
+os recusa, de propósito:
+
+- **B5-1. Restaurar num volume recusado.** Um volume cujo journal dos
+  metadados não chega ao registro confirmado (estragado, trocado, de outro
+  tamanho) fica indisponível; restaurar exigiria recriá-lo — sobrepor uma
+  recusa da âncora — e continuar o contador de versões do armazém, que o
+  volume perdido levou (o journal de estado não guarda a próxima versão).
+  Alternativas: a próxima versão em `ARMAZEM_CONFIRMADO` (um formato novo
+  da entrada) e a recriação por uma operação autorizada; ou aceitar
+  versões que repetem números já lidos. Invariantes: a âncora, e "uma
+  versão nunca se repete".
+- **B5-2. Recuperar depois de perder o disco.** O selo da identidade mora
+  no disco; sem ele, a máquina reinstalada nasce com outra identidade, e a
+  cópia — cifrada por uma derivação da antiga — não abre. Alternativas:
+  uma chave de custódia do operador para as cópias (uma confiança nova),
+  ou uma cópia do selo (reabre o B2). Invariantes: a custódia da
+  identidade, e o que a máquina confia.
+- **B5-3. Restaurar noutra máquina, ou migrar.** Exigiria confiança entre
+  máquinas — uma recifrar a cópia para a outra — e uma semântica de
+  migração que hoje não existe; restaurar uma imagem não pode dar a duas
+  máquinas a mesma identidade. Invariantes: identidade, confiança entre
+  máquinas.
+- **B5-4. Restaurar o estado de autoridade.** Pessoas, credenciais,
+  política, lápides, chaves e mensagens de uma fotografia anterior
+  desfariam revogações (R1, não existe desrevogar) e voltariam o journal
+  atrás (R6, a âncora recusa). Exigiria uma política de replay nova.
+  Invariantes: R1, R6, a âncora.
 
 ## O que fica de fora de propósito (grupo C)
 

@@ -1040,13 +1040,20 @@ pub(crate) fn gerar_chave(
 
 /// Grava uma privada em `arquivo`, só para o dono, e nunca por cima.
 pub(crate) fn gravar_privada(arquivo: &Path, conteudo: &str) -> Result<(), String> {
+    gravar_so_do_dono(arquivo, conteudo.as_bytes())
+}
+
+/// Grava `bytes` num `arquivo` novo, só para o dono — nunca por cima de
+/// outro —, e descarrega: uma privada, ou uma cópia de segurança baixada.
+fn gravar_so_do_dono(arquivo: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(arquivo)
         .map_err(|e| format!("não foi possível criar {}: {e}", arquivo.display()))?;
-    f.write_all(conteudo.as_bytes())
+    f.write_all(bytes)
+        .and_then(|()| f.sync_all())
         .map_err(|e| format!("não foi possível escrever {}: {e}", arquivo.display()))
 }
 
@@ -1081,6 +1088,117 @@ pub(crate) fn encenar(agente: &mut super::AgenteNaPorta, bytes: &[u8]) -> Result
     ))
 }
 
+/// O maior pedaço que se pede de uma cópia de segurança de uma vez: o
+/// maior que uma resposta de `fs.backup` leva.
+const PEDACO_DA_COPIA: usize = 48 * 1024;
+
+/// O `path` dos parâmetros de um pedido.
+fn caminho_dos(params: &str) -> Result<String, String> {
+    protocolo::json::Json(params.as_bytes())
+        .member("path")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("os parâmetros não dizem o `path`: {params}"))
+}
+
+/// A cópia de segurança de `caminho`, feita pela máquina num rascunho do
+/// agente, baixada inteira em pedaços e então descartada lá: a cópia que
+/// fica é a baixada — cifrada para aquela máquina, naquela instalação, e
+/// que só ela abre. Devolve os bytes e a resposta do `fs.backup`.
+pub(crate) fn copia_baixada(
+    agente: &mut super::AgenteNaPorta,
+    caminho: &str,
+) -> Result<(Vec<u8>, String), String> {
+    let feita = agente.pedir("fs.backup", &format!(r#"{{"path":"{caminho}"}}"#))?;
+    if !feita.contains(r#""ok":true"#) {
+        return Err(format!("a cópia de {caminho} foi recusada\n  {feita}"));
+    }
+    let numero = super::campo_simples(&feita, "copy")
+        .ok_or_else(|| format!("a cópia não diz o número\n  {feita}"))?;
+    let tamanho: usize = super::campo_simples(&feita, "size")
+        .and_then(|t| t.parse().ok())
+        .ok_or_else(|| format!("a cópia não diz o tamanho\n  {feita}"))?;
+    let mut bytes = Vec::with_capacity(tamanho);
+    while bytes.len() < tamanho {
+        let r = agente.pedir(
+            "fs.backup",
+            &format!(
+                r#"{{"path":"{caminho}","copy":{numero},"offset":{},"max":{PEDACO_DA_COPIA}}}"#,
+                bytes.len()
+            ),
+        )?;
+        let pedaco = super::campo_simples(&r, "content")
+            .and_then(|t| super::copia::de_base64(&t))
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("a cópia parou no byte {} de {tamanho}\n  {r}", bytes.len()))?;
+        bytes.extend_from_slice(&pedaco);
+    }
+    let r = agente.pedir(
+        "fs.backup",
+        &format!(r#"{{"path":"{caminho}","copy":{numero},"discard":true}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err(format!(
+            "a cópia baixada não foi descartada da máquina\n  {r}"
+        ));
+    }
+    Ok((bytes, feita))
+}
+
+/// Envia `bytes` — uma cópia de segurança — para um rascunho de `caminho`,
+/// em pedaços do maior anexo. Devolve o número do rascunho.
+pub(crate) fn copia_enviada(
+    agente: &mut super::AgenteNaPorta,
+    caminho: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    let mut rascunho: Option<String> = None;
+    for (i, pedaco) in bytes.chunks(PEDACO_DA_ENCENACAO).enumerate() {
+        let params = match &rascunho {
+            Some(n) => format!(r#"{{"path":"{caminho}","draft":{n}}}"#),
+            None => format!(r#"{{"path":"{caminho}"}}"#),
+        };
+        let r = agente.pedir_com_anexo("fs.draft", &params, pedaco)?;
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!(
+                "o envio da cópia parou no byte {} de {}\n  {r}",
+                i * PEDACO_DA_ENCENACAO,
+                bytes.len()
+            ));
+        }
+        rascunho = super::campo_simples(&r, "draft");
+    }
+    rascunho.ok_or_else(|| "uma cópia vazia não se envia".into())
+}
+
+/// A restauração de `caminho` pela cópia `bytes`: enviada para um rascunho
+/// do mesmo caminho e restaurada contra a versão `esperada` — a que quem
+/// restaura viu, pelo `fs.stat`: 0 se não há nó lá. A resposta do
+/// `fs.restore`, aceita ou recusada; o rascunho de uma recusa fica com o
+/// prazo dos rascunhos.
+pub(crate) fn copia_restaurada(
+    agente: &mut super::AgenteNaPorta,
+    caminho: &str,
+    bytes: &[u8],
+    esperada: u64,
+) -> Result<String, String> {
+    let rascunho = copia_enviada(agente, caminho, bytes)?;
+    agente.pedir(
+        "fs.restore",
+        &format!(r#"{{"path":"{caminho}","draft":{rascunho},"expect_version":{esperada}}}"#),
+    )
+}
+
+/// O arquivo que um `operar` leva ou traz.
+pub(crate) enum Arquivo<'a> {
+    /// A imagem de uma versão, para o slot inativo (`update.stage`).
+    Imagem(&'a Path),
+    /// A cópia de segurança que sai (`fs.backup`).
+    Copia(&'a Path),
+    /// A cópia que volta (`fs.restore`).
+    Restaurar(&'a Path),
+}
+
 /// A pública do Duke de `texto`: o hexadecimal que a máquina mostra no
 /// console no primeiro boot (`system.info`, `identity.key`), ou o caminho
 /// de um arquivo com ele.
@@ -1099,8 +1217,11 @@ fn publica_do_duke(texto: &str) -> Result<[u8; 32], String> {
 /// a pública do Duke fixada em `duke`. Com `admin`, o pedido vai como
 /// operação administrativa: o desafio, a prova da credencial, e o
 /// `admin.execute`. Com `assinaturas`, uma operação de quórum —
-/// `admin.revoke` ou `system.update`. Com `imagem`, o `update.stage` da
-/// imagem inteira, em pedaços — ver [`encenar`].
+/// `admin.revoke` ou `system.update`. Com `arquivo`: a imagem inteira para
+/// o `update.stage`, em pedaços — ver [`encenar`] —; a cópia de segurança
+/// do `fs.backup`, baixada para o arquivo — ver [`copia_baixada`]; ou a do
+/// arquivo, de volta pelo `fs.restore` — ver [`copia_restaurada`]. O
+/// cliente não decide nada: quem pode é o gate, pelo papel da chave.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn operar(
     endereco: &str,
@@ -1110,17 +1231,40 @@ pub(crate) fn operar(
     duke: &str,
     admin: Option<&Path>,
     assinaturas: &[PathBuf],
-    imagem: Option<&Path>,
+    arquivo: Option<Arquivo<'_>>,
 ) -> Result<ExitCode, String> {
     let chave = chave_de_agente(chave)?;
     let duke = publica_do_duke(duke)?;
     let mut agente = super::AgenteNaPorta::conectar_endereco(endereco, &chave, &duke)?;
-    let resposta = if let Some(imagem) = imagem {
+    let resposta = if let Some(Arquivo::Imagem(imagem)) = arquivo {
         if metodo != "update.stage" {
             return Err("--imagem é do update.stage: a imagem vai para o slot inativo".into());
         }
         let bytes = std::fs::read(imagem).map_err(|e| format!("{}: {e}", imagem.display()))?;
         encenar(&mut agente, &bytes)?
+    } else if let Some(Arquivo::Copia(destino)) = arquivo {
+        if metodo != "fs.backup" {
+            return Err("--copia é do fs.backup: a cópia vai para o arquivo".into());
+        }
+        let caminho = caminho_dos(params)?;
+        let (bytes, feita) = copia_baixada(&mut agente, &caminho)?;
+        gravar_so_do_dono(destino, &bytes)?;
+        format!(
+            "{feita}\n# {} bytes em {}: cifrados para esta máquina, nesta instalação — só ela os abre",
+            bytes.len(),
+            destino.display()
+        )
+    } else if let Some(Arquivo::Restaurar(origem)) = arquivo {
+        if metodo != "fs.restore" {
+            return Err("--restaurar é do fs.restore: a cópia vem do arquivo".into());
+        }
+        let caminho = caminho_dos(params)?;
+        let esperada = protocolo::json::Json(params.as_bytes())
+            .member("expect_version")
+            .and_then(|v| v.as_u64())
+            .ok_or("--restaurar pede `expect_version` nos parâmetros: a versão de `path` agora, que o fs.stat diz (0 se não existe)")?;
+        let bytes = std::fs::read(origem).map_err(|e| format!("{}: {e}", origem.display()))?;
+        copia_restaurada(&mut agente, &caminho, &bytes, esperada)?
     } else if !assinaturas.is_empty() {
         super::quorum_pelo_operador(&mut agente, metodo, params, assinaturas)?
     } else if let Some(admin) = admin {
@@ -1451,6 +1595,22 @@ mod testes {
         so_do_dono(&imagem, false).unwrap();
         let modo = |c: &Path| std::fs::metadata(c).unwrap().permissions().mode() & 0o777;
         assert_eq!((modo(&montagem), modo(&imagem)), (0o700, 0o600));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copia_baixada_e_so_do_dono_e_nunca_por_cima() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("xtask-copia-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let arquivo = dir.join("compartilhado.copia");
+        gravar_so_do_dono(&arquivo, b"DUKECOP1").unwrap();
+        let modo = std::fs::metadata(&arquivo).unwrap().permissions().mode() & 0o777;
+        assert_eq!(modo, 0o600);
+        // Uma segunda cópia no mesmo arquivo é recusada, e a primeira fica.
+        assert!(gravar_so_do_dono(&arquivo, b"outra").is_err());
+        assert_eq!(std::fs::read(&arquivo).unwrap(), b"DUKECOP1");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

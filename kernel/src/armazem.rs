@@ -71,7 +71,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::armazem::bloco::{CARGA, TAM_BLOCO};
-use ::armazem::{Armazem, Conteudo, Cota, Extensao, Faixas, Op, Recusa, Tipo};
+use ::armazem::{Armazem, Conteudo, Cota, Extensao, Faixas, Lote, Op, Recusa, Tipo};
 use politica::Codigo;
 use politica::arrendamento::{Arrendamento, Titular};
 
@@ -313,14 +313,20 @@ pub enum Falha {
     /// Não há o registro da auditoria do comando — chamada fora de um
     /// comando autorizado.
     SemAuditoria,
+    /// Uma cópia de segurança que não se aceita aqui: de outra máquina,
+    /// estragada, cortada, de outro formato, ou sem o caminho pedido.
+    Copia(&'static str),
+    /// A máquina está reiniciando ou desligando: nada começa.
+    Desligando,
 }
 
 impl Falha {
     /// O código, como a auditoria e a resposta o dizem.
     pub fn codigo(self) -> Codigo {
         match self {
-            Falha::Caminho(_) | Falha::Rascunho(_) => Codigo::InvalidArgument,
+            Falha::Caminho(_) | Falha::Rascunho(_) | Falha::Copia(_) => Codigo::InvalidArgument,
             Falha::Persistencia(_) | Falha::SemAuditoria => Codigo::Error,
+            Falha::Desligando => Codigo::Conflict,
             Falha::Revogada(c, _) => c,
             Falha::Arrendamento(_) | Falha::Versao { .. } => Codigo::Conflict,
             Falha::Armazem(Recusa::Cheio) => Codigo::Error,
@@ -332,7 +338,8 @@ impl Falha {
     /// O motivo, em palavras.
     pub fn motivo(self) -> &'static str {
         match self {
-            Falha::Caminho(m) | Falha::Persistencia(m) | Falha::Rascunho(m) => m,
+            Falha::Caminho(m) | Falha::Persistencia(m) | Falha::Rascunho(m) | Falha::Copia(m) => m,
+            Falha::Desligando => "a maquina esta reiniciando ou desligando",
             Falha::Revogada(_, m) => m,
             Falha::Arrendamento(_) => "outro titular tem o arrendamento",
             Falha::Versao { .. } => "a versao esperada nao e a de agora",
@@ -362,12 +369,12 @@ impl From<Recusa> for Falha {
 
 /// O titular de quem o comando em execução age por — `None` para quem não
 /// arrenda, o `sistema`.
-fn titular() -> Option<Titular> {
+pub(crate) fn titular() -> Option<Titular> {
     crate::coordenacao::titular_da_autoridade(crate::autorizacao::autoridade_atual())
 }
 
 /// Registra o resultado de uma mutação recusada depois do gate.
-fn recusada(recurso: &str, f: Falha) -> Falha {
+pub(crate) fn recusada(recurso: &str, f: Falha) -> Falha {
     let detalhe = match f {
         Falha::Versao { atual } => format!("{}; versao atual {atual}", f.motivo()),
         _ => String::from(f.motivo()),
@@ -613,7 +620,7 @@ fn mudar_em_ordem(
 
 /// Confere os arrendamentos de `normal` — e, com `abaixo`, de tudo abaixo
 /// dele: o de outro titular recusa.
-fn conferir_arrendamentos(
+pub(crate) fn conferir_arrendamentos(
     normal: &str,
     titular: Option<Titular>,
     abaixo: bool,
@@ -826,12 +833,16 @@ fn acrescentar(
 }
 
 /// Um rascunho: o conteúdo que um dono escreve aos pedaços, para um
-/// caminho, antes de gravá-lo.
+/// caminho, antes de gravá-lo — ou uma cópia de segurança que o kernel fez
+/// para ele baixar (ver [`crate::copia`]).
 struct Rascunho {
     numero: u64,
     dono: String,
     /// O caminho, na forma normal: o que o gate decidiu ao criá-lo.
     caminho: String,
+    /// Uma cópia de segurança, e não um conteúdo: só se lê, pelo
+    /// `fs.backup`. Não se grava como arquivo, nem se acrescenta.
+    copia: bool,
     id: [u8; 16],
     /// Os blocos cheios já escritos, em ordem.
     faixas: Faixas,
@@ -863,7 +874,7 @@ fn com_rascunhos<R>(f: impl FnOnce(&mut Vec<Rascunho>) -> R) -> R {
 
 /// O que os rascunhos de `dono` ocupam — fora os de `exceto`, que o lote
 /// em curso já conta como conteúdo.
-fn reservado_em_rascunhos(dono: &str, exceto: &[u64]) -> u64 {
+pub(crate) fn reservado_em_rascunhos(dono: &str, exceto: &[u64]) -> u64 {
     com_rascunhos(|v| {
         v.iter()
             .filter(|r| r.dono == dono && !exceto.contains(&r.numero))
@@ -888,7 +899,7 @@ fn tirar_rascunhos(numeros: &[u64]) {
 }
 
 /// Os rascunhos vencidos saem, com os blocos deles.
-fn sumir_rascunhos_vencidos() {
+pub(crate) fn sumir_rascunhos_vencidos() {
     sumir_rascunhos_vencidos_em(crate::tempo::uptime_ms());
 }
 
@@ -928,6 +939,9 @@ fn fechar_rascunho(
         if r.caminho != normal {
             return Err(Falha::Rascunho("o rascunho e de outro caminho"));
         }
+        if r.copia {
+            return Err(Falha::Rascunho("o rascunho e uma copia, e nao um conteudo"));
+        }
         Ok((r.id, r.faixas.clone(), r.blocos, r.cauda.clone()))
     })?;
     reservadas.extend(faixas.iter().copied());
@@ -950,7 +964,9 @@ fn fechar_rascunho(
 /// e o tamanho. Os blocos cheios vão para o volume já; a cota de quem
 /// escreve conta o rascunho inteiro.
 pub fn rascunho(caminho: &str, numero: Option<u64>, dados: &[u8]) -> Result<(u64, u64), Falha> {
-    let (normal, _) = conferido(caminho).map_err(|f| recusada(caminho, f))?;
+    // A raiz também: uma cópia de segurança do armazém inteiro, enviada para
+    // a restauração dele. Nenhum `fs.write` a grava — a raiz não é nó.
+    let (normal, _) = conferido_ou_raiz(caminho).map_err(|f| recusada(caminho, f))?;
     let Some(dono) = crate::autorizacao::dono_no_armazem() else {
         return Err(recusada(
             &normal,
@@ -980,7 +996,6 @@ fn rascunho_em_ordem(
     if usado.saturating_add(dados.len() as u64) > cota.bytes {
         return Err(Falha::Armazem(Recusa::Cota));
     }
-    let agora = crate::tempo::uptime_ms();
     // Um novo, ou o pedido, que tem de ser deste dono e deste caminho.
     let numero = match numero {
         Some(n) => {
@@ -990,35 +1005,53 @@ fn rascunho_em_ordem(
                 Some(r) if r.caminho != normal => {
                     Err(Falha::Rascunho("o rascunho e de outro caminho"))
                 }
+                Some(r) if r.copia => {
+                    Err(Falha::Rascunho("o rascunho e uma copia: nao se acrescenta"))
+                }
                 Some(_) => Ok(()),
             })?;
             n
         }
-        None => {
-            let id = crate::volume::novo_id().map_err(Falha::Persistencia)?;
-            let n = PROXIMO_RASCUNHO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            com_rascunhos(|v| {
-                if v.len() >= MAIS_RASCUNHOS
-                    || v.iter().filter(|r| r.dono == dono).count() >= MAIS_RASCUNHOS_POR_DONO
-                {
-                    return Err(Falha::Rascunho("rascunhos demais abertos"));
-                }
-                v.push(Rascunho {
-                    numero: n,
-                    dono: String::from(dono),
-                    caminho: String::from(normal),
-                    id,
-                    faixas: Vec::new(),
-                    blocos: 0,
-                    cauda: Vec::new(),
-                    ultimo_uso_ms: agora,
-                });
-                Ok(())
-            })?;
-            n
-        }
+        None => novo_rascunho(dono, normal, false)?,
     };
-    // A cauda de antes e o que chega: os blocos cheios vão para o disco.
+    acrescentar_ao_rascunho(numero, dados)
+}
+
+/// Abre um rascunho vazio de `dono` para `normal` — um conteúdo, ou uma
+/// cópia de segurança —, dentro dos tetos dos rascunhos. Com a ordem das
+/// gravações na mão.
+fn novo_rascunho(dono: &str, normal: &str, copia: bool) -> Result<u64, Falha> {
+    let id = crate::volume::novo_id().map_err(Falha::Persistencia)?;
+    let n = PROXIMO_RASCUNHO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let agora = crate::tempo::uptime_ms();
+    com_rascunhos(|v| {
+        if v.len() >= MAIS_RASCUNHOS
+            || v.iter().filter(|r| r.dono == dono).count() >= MAIS_RASCUNHOS_POR_DONO
+        {
+            return Err(Falha::Rascunho("rascunhos demais abertos"));
+        }
+        v.push(Rascunho {
+            numero: n,
+            dono: String::from(dono),
+            caminho: String::from(normal),
+            copia,
+            id,
+            faixas: Vec::new(),
+            blocos: 0,
+            cauda: Vec::new(),
+            ultimo_uso_ms: agora,
+        });
+        Ok(())
+    })?;
+    Ok(n)
+}
+
+/// Acrescenta `dados` ao rascunho `numero`: a cauda de antes e o que chega
+/// — os blocos cheios vão para o disco, o resto fica na memória. Devolve o
+/// número e o tamanho. Com a ordem das gravações na mão; quem chama já
+/// conferiu o dono, o caminho e a cota.
+fn acrescentar_ao_rascunho(numero: u64, dados: &[u8]) -> Result<(u64, u64), Falha> {
+    let agora = crate::tempo::uptime_ms();
     let (id, blocos, mut juntos) = com_rascunhos(|v| {
         let r = v
             .iter_mut()
@@ -1061,7 +1094,7 @@ fn rascunho_em_ordem(
     Ok((numero, tamanho))
 }
 
-fn descartar_numero(numero: u64) {
+pub(crate) fn descartar_numero(numero: u64) {
     let fora: Vec<Rascunho> = com_rascunhos(|v| {
         let (fora, ficam): (Vec<_>, Vec<_>) = core::mem::take(v)
             .into_iter()
@@ -1107,6 +1140,259 @@ pub fn rascunhos_de_teste() -> usize {
 #[cfg(feature = "modo-teste")]
 pub fn vencer_rascunhos_de_teste() {
     crate::persistencia::em_ordem(|| sumir_rascunhos_vencidos_em(u64::MAX));
+}
+
+// A cópia de segurança e a restauração: o que [`crate::copia`] usa daqui —
+// os rascunhos, os blocos e o lote, cada um com as regras de sempre.
+
+/// Um caminho do pedido, conferido como em [`conferido`] — do armazém, e
+/// decidido pelo gate —, aceitando também a raiz do armazém: a cópia e a
+/// restauração alcançam o armazém inteiro, que não é um nó.
+pub(crate) fn conferido_ou_raiz(caminho: &str) -> Result<(String, String), Falha> {
+    let (normal, relativo) = match relativo(caminho) {
+        Some(r) => r,
+        None if politica::caminho::normalizar(caminho).as_deref() == Some(RAIZ) => {
+            (String::from(RAIZ), String::new())
+        }
+        None => return Err(Falha::Caminho("o caminho nao e do armazem")),
+    };
+    if !crate::autorizacao::recurso_decidido(&normal) {
+        return Err(Falha::Caminho("o caminho nao e um dos que o gate decidiu"));
+    }
+    Ok((normal, relativo))
+}
+
+/// Abre um rascunho de cópia de segurança de `dono` para `normal`: os
+/// tetos dos rascunhos valem, e o prazo também. Com a ordem das gravações
+/// na mão.
+pub(crate) fn abrir_copia(dono: &str, normal: &str) -> Result<u64, Falha> {
+    novo_rascunho(dono, normal, true)
+}
+
+/// Acrescenta à cópia `numero` — que quem chama abriu, com a ordem das
+/// gravações na mão: os blocos cheios vão ao volume. Devolve o tamanho.
+pub(crate) fn acrescentar_a_copia(numero: u64, dados: &[u8]) -> Result<u64, Falha> {
+    acrescentar_ao_rascunho(numero, dados).map(|(_, tamanho)| tamanho)
+}
+
+/// O rascunho `numero` é de `dono`, de `normal`, e uma cópia de segurança
+/// (`copia`) ou um conteúdo enviado: o tamanho dele, com o prazo renovado.
+pub(crate) fn rascunho_de(
+    numero: u64,
+    dono: &str,
+    normal: &str,
+    copia: bool,
+) -> Result<u64, Falha> {
+    let agora = crate::tempo::uptime_ms();
+    com_rascunhos(|v| {
+        let r = v
+            .iter_mut()
+            .find(|r| r.numero == numero)
+            .ok_or(Falha::Rascunho("nao ha esse rascunho"))?;
+        if r.dono != dono {
+            return Err(Falha::Rascunho("o rascunho e de outro dono"));
+        }
+        if r.caminho != normal {
+            return Err(Falha::Rascunho("o rascunho e de outro caminho"));
+        }
+        if r.copia != copia {
+            return Err(Falha::Rascunho(if copia {
+                "o rascunho nao e uma copia de seguranca"
+            } else {
+                "o rascunho e uma copia feita, nao enviada"
+            }));
+        }
+        r.ultimo_uso_ms = agora;
+        Ok(r.tamanho())
+    })
+}
+
+/// O bloco do volume com o bloco lógico `k` das `faixas`, tomadas em ordem.
+fn bloco_logico(faixas: &Faixas, mut k: u64) -> Option<u64> {
+    for &(de, ate) in faixas {
+        let n = ate - de;
+        if k < n {
+            return Some(de + k);
+        }
+        k -= n;
+    }
+    None
+}
+
+/// Lê do rascunho `numero`, a partir do byte `de`, até encher `destino` ou
+/// o rascunho acabar; devolve quantos bytes vieram. Os blocos cheios vêm do
+/// volume, abertos pela cifra deles; a cauda, da memória. Com a ordem das
+/// gravações na mão: nenhum rascunho sai no meio da leitura.
+pub(crate) fn ler_do_rascunho(numero: u64, de: u64, destino: &mut [u8]) -> Result<usize, Falha> {
+    let (id, faixas, blocos, mut cauda) = com_rascunhos(|v| {
+        v.iter()
+            .find(|r| r.numero == numero)
+            .map(|r| (r.id, r.faixas.clone(), r.blocos, r.cauda.clone()))
+    })
+    .ok_or(Falha::Rascunho("nao ha esse rascunho"))?;
+    let carga = CARGA as u64;
+    let total = blocos * carga + cauda.len() as u64;
+    let mut bloco: Box<[u8; TAM_BLOCO]> = Box::new([0; TAM_BLOCO]);
+    let mut feito = 0usize;
+    let mut pos = de;
+    let lido = (|| {
+        while feito < destino.len() && pos < total {
+            let k = pos / carga;
+            let n = if k < blocos {
+                let dentro = (pos % carga) as usize;
+                let b = bloco_logico(&faixas, k)
+                    .ok_or(Falha::Rascunho("o rascunho nao tem esse bloco"))?;
+                crate::volume::ler_bloco(b, &id, k, &mut bloco).map_err(Falha::Persistencia)?;
+                let n = (CARGA - dentro).min(destino.len() - feito);
+                destino[feito..feito + n].copy_from_slice(&bloco[dentro..dentro + n]);
+                n
+            } else {
+                let i = (pos - blocos * carga) as usize;
+                let n = (cauda.len() - i).min(destino.len() - feito);
+                destino[feito..feito + n].copy_from_slice(&cauda[i..i + n]);
+                n
+            };
+            feito += n;
+            pos += n as u64;
+        }
+        Ok(feito)
+    })();
+    politica::sigiloso::zerar(&mut bloco[..]);
+    politica::sigiloso::zerar_bloco(&mut cauda);
+    lido
+}
+
+/// Um conteúdo novo, escrito aos pedaços em blocos livres — o de um arquivo
+/// que a restauração põe de volta. Nenhum metadado o aponta até um lote
+/// confirmado o levar; [`ConteudoNovo::soltar`] devolve os blocos.
+pub(crate) struct ConteudoNovo {
+    id: [u8; 16],
+    faixas: Faixas,
+    blocos: u64,
+    cauda: Vec<u8>,
+    tamanho: u64,
+}
+
+impl ConteudoNovo {
+    pub(crate) fn novo() -> Result<ConteudoNovo, Falha> {
+        Ok(ConteudoNovo {
+            id: crate::volume::novo_id().map_err(Falha::Persistencia)?,
+            faixas: Vec::new(),
+            blocos: 0,
+            cauda: Vec::new(),
+            tamanho: 0,
+        })
+    }
+
+    /// Mais conteúdo: os blocos cheios vão ao volume já.
+    pub(crate) fn escrever(&mut self, dados: &[u8]) -> Result<(), Falha> {
+        self.tamanho += dados.len() as u64;
+        self.cauda.extend_from_slice(dados);
+        let cheios = self.cauda.len() / CARGA;
+        if cheios == 0 {
+            return Ok(());
+        }
+        let resto = self.cauda.split_off(cheios * CARGA);
+        let faixas = reservar(cheios as u64, "a restauracao")?;
+        juntar(&mut self.faixas, &faixas);
+        let escrito = crate::volume::escrever_blocos(&faixas, &self.id, self.blocos, &self.cauda);
+        politica::sigiloso::zerar_bloco(&mut self.cauda);
+        self.cauda = resto;
+        self.blocos += cheios as u64;
+        escrito.map_err(Falha::Persistencia)
+    }
+
+    /// O conteúdo inteiro: a cauda vai ao último bloco. As faixas dele vão
+    /// a `reservadas`, de quem chama — que as solta se o lote não valer.
+    pub(crate) fn fechar(mut self, reservadas: &mut Faixas) -> Result<Conteudo, Falha> {
+        let escrito: Result<(), Falha> = (|| {
+            if !self.cauda.is_empty() {
+                let ultima = reservar(1, "a cauda da restauracao")?;
+                juntar(&mut self.faixas, &ultima);
+                crate::volume::escrever_blocos(&ultima, &self.id, self.blocos, &self.cauda)
+                    .map_err(Falha::Persistencia)?;
+                self.blocos += 1;
+            }
+            Ok(())
+        })();
+        reservadas.extend(self.faixas.iter().copied());
+        escrito?;
+        Ok(conteudo_de(&self.faixas, self.id, 0, self.tamanho))
+    }
+
+    /// Os blocos voltam a ser livres: o conteúdo não vai a lote nenhum.
+    pub(crate) fn soltar(self) {
+        crate::volume::soltar(&::armazem::normalizar(self.faixas.clone()));
+    }
+}
+
+/// Acrescenta `novas` a `faixas`, em ordem, fundindo a primeira com a
+/// última de antes quando uma começa onde a outra acaba: menos extensões
+/// para o mesmo conteúdo — o teto delas é por arquivo.
+fn juntar(faixas: &mut Faixas, novas: &Faixas) {
+    for &(de, ate) in novas {
+        match faixas.last_mut() {
+            Some((_, fim)) if *fim == de => *fim = ate,
+            _ => faixas.push((de, ate)),
+        }
+    }
+}
+
+impl Drop for ConteudoNovo {
+    fn drop(&mut self) {
+        politica::sigiloso::zerar_bloco(&mut self.cauda);
+    }
+}
+
+/// Prepara sobre o armazém de agora o lote `ops` de `dono`: a cota dele —
+/// sem os rascunhos `exceto`, que o lote consome — e o teto dos metadados.
+/// Com a ordem das gravações na mão.
+pub(crate) fn preparar(ops: &[Op], dono: &str, exceto: &[u64]) -> Result<Lote, (usize, Falha)> {
+    let cota = crate::autorizacao::cota_no_armazem();
+    let reservado = reservado_em_rascunhos(dono, exceto);
+    com_o_armazem(|a| a.preparar(ops, dono, cota, reservado, teto_de_metadados()))
+        .map_err(|(i, r)| (i, Falha::from(r)))
+}
+
+/// O lote confirmado no journal de estado vale em memória: os blocos que ele
+/// deixou de usar voltam a ser livres — e os `reservadas` que ele não leva
+/// —, e os rascunhos `consumidos` saem, com os blocos deles. Com a ordem
+/// das gravações na mão.
+pub(crate) fn aplicar_confirmado(
+    lote: &Lote,
+    reservadas: &Faixas,
+    consumidos: &[u64],
+) -> Result<(), Falha> {
+    let aplicado = com_o_armazem_mut(|a| {
+        a.aplicar(lote).map(|saidas| {
+            let em_uso = a.blocos_em_uso();
+            let mut soltar = saidas;
+            soltar.extend(::armazem::subtrair(
+                &::armazem::normalizar(reservadas.clone()),
+                &em_uso,
+            ));
+            ::armazem::normalizar(soltar)
+        })
+    });
+    for n in consumidos {
+        descartar_numero(*n);
+    }
+    match aplicado {
+        Ok(soltar) => {
+            crate::volume::soltar(&soltar);
+            #[cfg(feature = "modo-teste")]
+            conferir_o_mapa("uma restauracao");
+            Ok(())
+        }
+        Err(r) => {
+            crate::log_error!(
+                "armazem",
+                "o lote confirmado nao se aplicou em memoria: {}",
+                r.motivo()
+            );
+            Err(Falha::Armazem(r))
+        }
+    }
 }
 
 /// O que se sabe de um caminho: o tipo, a versão, o tamanho, o dono e o
@@ -1443,6 +1729,15 @@ static ANTES_DO_COMMIT: Mutex<Option<fn()>> = Mutex::new(None);
 #[cfg(feature = "modo-teste")]
 pub fn antes_do_commit_de_teste(f: Option<fn()>) {
     crate::arch::sem_interrupcoes(|| *ANTES_DO_COMMIT.lock() = f);
+}
+
+/// Só na suíte: roda o que a suíte pôs para antes do commit — o gancho dos
+/// lotes, que a restauração também chama (ver [`crate::copia`]).
+#[cfg(feature = "modo-teste")]
+pub(crate) fn rodar_antes_do_commit() {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| *ANTES_DO_COMMIT.lock()) {
+        f();
+    }
 }
 
 /// Só para a suíte: o que a verificação chama antes de conferir cada

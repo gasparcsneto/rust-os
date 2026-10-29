@@ -67,6 +67,21 @@
 //! administrativa: a pessoa a exerce pelo gate, sem prova de
 //! administrador. Trocar a credencial **de outro** continua sendo
 //! `credential.rotate`, administrativa.
+//!
+//! # A restauração
+//!
+//! `fs.restore` autoriza trocar uma subárvore do armazém, inteira e de uma
+//! vez, pelo que uma cópia de segurança **desta máquina** diz dela — o que
+//! não está na cópia sai, o que está volta, tudo com versões novas. Uma
+//! permissão própria, e não a de escrever: `fs.write` muda um objeto de
+//! cada vez, contra a versão que quem pede leu; trocar a subárvore inteira
+//! sem olhar uma por uma é destrutivo de outro tamanho, e quem pode o menor
+//! não ganha o maior por tabela — o mesmo motivo de `message.purge_mailbox`.
+//! O recurso é o caminho, e o alcance de cada papel é enumerado, como o de
+//! `fs.write`. Sensível — cada papel que a tem a escreve —, e não
+//! administrativa: quem a tem a exerce pelo gate. Fazer a cópia não pede
+//! permissão nova: é uma leitura, com o alcance de `fs.read`, e sai
+//! cifrada para esta máquina. Ver `docs/ARMAZENAMENTO.md`.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -257,11 +272,15 @@ pub enum Permissao {
     /// pede, provando a atual. Ver o cabeçalho do módulo. Sem recurso,
     /// sensível, e não administrativa.
     CredentialChangeSelf,
+    /// Restaurar uma subárvore do armazém de uma cópia de segurança desta
+    /// máquina — `fs.restore`. Ver o cabeçalho do módulo. O recurso é o
+    /// caminho, com o alcance enumerado; sensível, e não administrativa.
+    FsRestore,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 50] = [
+pub const TODAS: [Permissao; 51] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -312,6 +331,7 @@ pub const TODAS: [Permissao; 50] = [
     Permissao::SystemPower,
     Permissao::SystemUpdate,
     Permissao::CredentialChangeSelf,
+    Permissao::FsRestore,
 ];
 
 impl Permissao {
@@ -368,6 +388,7 @@ impl Permissao {
             Permissao::SystemPower => "system.power",
             Permissao::SystemUpdate => "system.update",
             Permissao::CredentialChangeSelf => "credential.change_self",
+            Permissao::FsRestore => "fs.restore",
         }
     }
 
@@ -421,6 +442,7 @@ impl Permissao {
                 | Permissao::SystemPower
                 | Permissao::SystemUpdate
                 | Permissao::CredentialChangeSelf
+                | Permissao::FsRestore
         )
     }
 
@@ -462,7 +484,7 @@ impl Permissao {
     pub const fn recurso_e_caminho(self) -> bool {
         matches!(
             self,
-            Permissao::FsRead | Permissao::FsWrite | Permissao::ProcessRun
+            Permissao::FsRead | Permissao::FsWrite | Permissao::ProcessRun | Permissao::FsRestore
         )
     }
 
@@ -601,7 +623,8 @@ impl Permissao {
             | Permissao::ProcessTerminate
             | Permissao::SystemPower
             | Permissao::SystemUpdate
-            | Permissao::CredentialChangeSelf => true,
+            | Permissao::CredentialChangeSelf
+            | Permissao::FsRestore => true,
         }
     }
 
@@ -674,6 +697,7 @@ mod testes {
             "fs.write",
             "fs.raw_read",
             "fs.raw_write",
+            "fs.restore",
             "debug.trigger",
             "terminal.attach",
             "agent.register",
@@ -820,7 +844,7 @@ mod testes {
         let de_outro = Permissao::CredentialRotate;
         assert_ne!(p, de_outro);
         assert!(de_outro.administrativa());
-        assert_eq!(TODAS.last(), Some(&p));
+        assert_eq!(TODAS[49], p);
         assert_eq!(Permissao::CredentialChangeSelf as usize, 49);
         for (i, p) in TODAS.into_iter().enumerate() {
             assert_eq!(p as usize, i, "{}", p.nome());
@@ -828,6 +852,41 @@ mod testes {
         assert_eq!(Permissao::de_nome("credential.*"), None);
         assert_eq!(Permissao::de_nome("credential.change"), None);
         assert_eq!(Permissao::de_nome("credential.change_other"), None);
+    }
+
+    /// Restaurar: sensível — cada papel que a tem a escreve —, **não**
+    /// administrativa — quem a tem a exerce pelo gate —, muda o estado, e o
+    /// caminho como recurso, com o alcance enumerado, como o de `fs.write`.
+    /// Uma permissão própria, e não a de escrever: quem escreve um arquivo
+    /// não troca uma subárvore inteira por uma cópia por isso. A cópia não
+    /// tem permissão própria: é uma leitura. No fim da lista: as de antes não
+    /// mudam de bit.
+    #[test]
+    fn restaurar() {
+        let r = Permissao::de_nome("fs.restore").unwrap();
+        assert_eq!(r, Permissao::FsRestore);
+        assert_ne!(r, Permissao::FsWrite);
+        assert!(r.sensivel() && !r.administrativa() && r.muda_estado());
+        assert!(r.recurso_e_caminho() && r.tem_alcance());
+        assert!(!r.recurso_e_endereco() && !r.recurso_e_papel() && !r.recurso_e_chave());
+        assert!(!r.recurso_e_destino() && !r.contencao() && !r.alvo_e_papel());
+        assert_eq!(TODAS.last(), Some(&r));
+        assert_eq!(Permissao::FsRestore as usize, 50);
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        let de_caminho: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.recurso_e_caminho())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(
+            de_caminho,
+            ["fs.read", "fs.write", "process.run", "fs.restore"]
+        );
+        assert_eq!(Permissao::de_nome("fs.backup"), None);
+        assert_eq!(Permissao::de_nome("fs.*"), None);
+        assert_eq!(Permissao::de_nome("fs"), None);
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca
