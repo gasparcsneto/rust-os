@@ -32434,6 +32434,17 @@ fn copia_volta_inteira() -> Resultado {
             crate::log_error!("teste", "{:?}", e);
             return Err("o registro da restauracao nao tem a decisao");
         }
+        // E no mesmo registro do journal de estado que a confirmação do
+        // armazém — o ponto de commit —, e não num registro só dela antes:
+        // uma queda entre os dois deixaria a auditoria dizendo restaurada uma
+        // cópia que não voltou.
+        let detalhe = alloc::format!("restaurada a copia {}", &id[..16]);
+        let junto = crate::persistencia::algum_registro_de_teste(|r| {
+            r.tipo == diario::estado::tipo::ARMAZEM && copia_contem(&r.conteudo, detalhe.as_bytes())
+        })?;
+        if !junto {
+            return Err("a auditoria da restauracao nao foi no registro da confirmacao");
+        }
         // Nem a cópia nem a volta levaram para fora o que a cópia protege:
         // o conteúdo, a chave do Duke e a chave da cópia — que também não
         // vai dentro dela.
@@ -33101,9 +33112,12 @@ fn copia_nao_traz_autoridade_de_volta() -> Resultado {
 /// exatamente uma restauração vale — a outra ouve o conflito de versão —,
 /// cada escrita vale inteira antes ou depois, cada cópia é a fotografia de
 /// um instante — a árvore inteira, o texto restaurado ou o escrito, nunca
-/// um bloco de outro —, e o armazém e o mapa conferem no fim.
+/// um bloco de outro —, e o armazém e o mapa conferem no fim. E, sem
+/// depender da sorte: a escrita que outro núcleo tenta no meio de uma
+/// cópia — os nós já fotografados, o conteúdo ainda não lido — espera a
+/// cópia acabar, e a cópia leva o texto de antes dela.
 fn copia_a_disputa() -> Resultado {
-    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
     static PRONTOS: AtomicUsize = AtomicUsize::new(0);
     static VALERAM: AtomicUsize = AtomicUsize::new(0);
     static CONFLITOS: AtomicUsize = AtomicUsize::new(0);
@@ -33112,6 +33126,9 @@ fn copia_a_disputa() -> Resultado {
     static RASCUNHOS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
     static ESPERADA: AtomicU64 = AtomicU64::new(0);
     static UNICO: AtomicU64 = AtomicU64::new(0);
+    static ESCREVEU: AtomicBool = AtomicBool::new(false);
+    static ENTROU_NO_MEIO: AtomicBool = AtomicBool::new(false);
+    static OUTRO: AtomicUsize = AtomicUsize::new(0);
     fn caminho() -> alloc::string::String {
         alloc::format!("/armazem/compartilhado/disputa{}", UNICO.load(SeqCst))
     }
@@ -33199,6 +33216,33 @@ fn copia_a_disputa() -> Resultado {
         PRONTOS.fetch_add(1, SeqCst);
         crate::fios::terminar()
     }
+    extern "C" fn escrever_no_meio(i: u64) -> ! {
+        let c = alloc::format!("{}/a.txt", caminho());
+        let r = fs_gravar(quem(i), &c, versao_no_armazem(&c), "no meio");
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            FALHAS.fetch_add(1, SeqCst);
+        }
+        ESCREVEU.store(true, SeqCst);
+        crate::fios::terminar()
+    }
+    // O gancho do meio da cópia, com a ordem das gravações na mão: o
+    // escritor noutro núcleo, e tempo de sobra para a escrita entrar — se
+    // pudesse.
+    fn no_meio_da_copia() {
+        if crate::fios::criar_no_nucleo("teste-copia", escrever_no_meio, 5, OUTRO.load(SeqCst))
+            .is_err()
+        {
+            FALHAS.fetch_add(1, SeqCst);
+            return;
+        }
+        let ate = crate::tempo::uptime_ms() + 2_000;
+        girar_ate(
+            || ESCREVEU.load(SeqCst) || crate::tempo::uptime_ms() >= ate,
+            4_000_000_000,
+        );
+        ENTROU_NO_MEIO.store(ESCREVEU.load(SeqCst), SeqCst);
+    }
     let (agente, _) = copia_agente(0x7A, "agente-copia-disputa", "operador", 7_400_499);
     UNICO.store(crate::tempo::uptime_ms(), SeqCst);
     let p = caminho();
@@ -33255,9 +33299,45 @@ fn copia_a_disputa() -> Resultado {
         {
             return Err("o texto da disputa nao e nem o restaurado nem o escrito");
         }
+        // A escrita no meio de uma cópia espera por ela.
+        let Some(outro) = outro_nucleo() else {
+            crate::log_info!("teste", "um nucleo so: sem a escrita no meio da copia");
+            crate::armazem::vencer_rascunhos_de_teste();
+            return Ok(());
+        };
+        OUTRO.store(outro, SeqCst);
+        ESCREVEU.store(false, SeqCst);
+        ENTROU_NO_MEIO.store(false, SeqCst);
+        let c = alloc::format!("{p}/a.txt");
+        let antes = fs_no_armazem(&c).1;
+        crate::armazem::no_meio_da_copia_de_teste(Some(no_meio_da_copia));
+        let feita = copia_baixada(agente, &p);
+        crate::armazem::no_meio_da_copia_de_teste(None);
+        let (n, _, bytes) = feita?;
+        copia_exigir(
+            &fs_pedir(
+                agente,
+                "fs.backup",
+                &alloc::format!(r#"{{"path":"{p}","copy":{n},"discard":true}}"#),
+            ),
+            "a copia do meio nao foi descartada",
+        )?;
+        esperar_ate(|| ESCREVEU.load(SeqCst), 30_000)?;
+        if ENTROU_NO_MEIO.load(SeqCst) || FALHAS.load(SeqCst) != 0 {
+            return Err("uma escrita entrou no meio da copia");
+        }
+        let (_, nos) = crate::copia::abrir_de_teste(&bytes)?;
+        let na_copia = nos
+            .iter()
+            .find(|(c, _)| c == "a.txt")
+            .and_then(|(_, t)| t.clone());
+        if na_copia != antes || fs_no_armazem(&c).1.as_deref() != Some(b"no meio".as_slice()) {
+            return Err("a copia nao e a de antes da escrita, ou a escrita nao entrou depois dela");
+        }
         crate::armazem::vencer_rascunhos_de_teste();
         Ok(())
     })();
+    crate::armazem::no_meio_da_copia_de_teste(None);
     crate::identidade::esquecer_registrados();
     resultado
 }

@@ -197,6 +197,10 @@ fn fazer_em_ordem(normal: &str, relativo: &str, dono: &str) -> Result<Feita, Fal
             .collect();
         (a.proxima(), nos)
     });
+    // Na suíte: o que tenta mudar o armazém no meio da cópia — e que espera
+    // por ela, porque a ordem está na mão.
+    #[cfg(feature = "modo-teste")]
+    crate::armazem::rodar_no_meio_da_copia();
     if !relativo.is_empty() && nos.first().map(|(c, ..)| c.as_str()) != Some(relativo) {
         return Err(Falha::Armazem(::armazem::Recusa::NaoExiste));
     }

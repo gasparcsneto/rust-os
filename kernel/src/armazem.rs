@@ -1740,6 +1740,26 @@ pub(crate) fn rodar_antes_do_commit() {
     }
 }
 
+/// Só para a suíte: o que roda no meio de uma cópia de segurança — os nós
+/// já fotografados, o conteúdo deles ainda não lido —, com a ordem das
+/// gravações na mão (ver [`crate::copia`]).
+#[cfg(feature = "modo-teste")]
+static NO_MEIO_DA_COPIA: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) [`NO_MEIO_DA_COPIA`].
+#[cfg(feature = "modo-teste")]
+pub fn no_meio_da_copia_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *NO_MEIO_DA_COPIA.lock() = f);
+}
+
+/// Só na suíte: roda o que a suíte pôs para o meio de uma cópia.
+#[cfg(feature = "modo-teste")]
+pub(crate) fn rodar_no_meio_da_copia() {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| *NO_MEIO_DA_COPIA.lock()) {
+        f();
+    }
+}
+
 /// Só para a suíte: o que a verificação chama antes de conferir cada
 /// arquivo, com o caminho relativo dele — sem trava nenhuma na mão, depois
 /// de a lista estar feita.
@@ -1791,6 +1811,8 @@ pub unsafe fn destravar() {
         RASCUNHOS.force_unlock();
         #[cfg(feature = "modo-teste")]
         ANTES_DO_COMMIT.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        NO_MEIO_DA_COPIA.force_unlock();
         #[cfg(feature = "modo-teste")]
         NO_MEIO_DA_VERIFICACAO.force_unlock();
     }
