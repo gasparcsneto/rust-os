@@ -8339,6 +8339,65 @@ resposta — deixa, no boot seguinte, a árvore inteira de antes ou inteira
 a da cópia, nunca uma mistura, e a da cópia exatamente quando o registro
 está no disco.
 
+### As mutações da cópia de segurança
+
+Trinta e oito mutações contra o que a cópia e a restauração prometem — uma
+de cada vez, no repositório, contra os oito casos `copia:` da suíte, os
+testes do hospedeiro do formato (`armazem`), da política e do `operar`, e a
+bancada `cargo xtask copia` nas que só ela vê (a outra instalação, a outra
+máquina, o corte de energia); um subconjunto também no ARM. O controle, sem
+mutação, passa em tudo. Quatro conferências entraram enquanto a campanha
+era escrita, cada uma porque uma mutação planejada passaria sem ela: o
+vazamento por pedaços de doze bytes — o conteúdo, a chave do Duke e a chave
+da cópia — na auditoria, no log e no `system.info`; o envio para outro
+caminho; o arquivo grande que chega à recusa pela metade; e, na bancada, a
+outra máquina com a pública dela posta no setor em claro, que tem de
+recusar pela cifra. **Na primeira rodada, trinta e seis reprovadas e duas
+sobreviventes** — a auditoria num registro só dela antes da confirmação, e
+a cópia fora da ordem das gravações —; com a suíte reforçada (`986d872`),
+**as trinta e oito reprovam**.
+
+| Mutação | Reprovada por |
+|---|---|
+| a restauração decidida como `fs.write` | `copia: so quem pode…` — sem `fs.restore` no papel, o operador restaurava — e `…o que vem no meio…` |
+| o alcance ignorado: nem o gate nem o armazém conferem o caminho | os oito casos |
+| `fs.restore` sem alcance na política | 41 testes da política, e a imagem não se monta: `a politica da imagem nao se le` |
+| a autoridade não é decidida de novo antes do commit | `copia: o que vem no meio…` — a política mudada e a chave revogada no meio |
+| o envio de outro dono restaura; o envio para outro caminho restaura; a cópia feita restaura sem ter sido enviada | `copia: so quem pode…` (três mutações) |
+| o dono dos restaurados é o sistema, e não quem restaura | `…a copia volta inteira…` e `…nao traz autoridade…` |
+| o rascunho consumido não some | `…a copia volta inteira…` |
+| a cópia fora da cota | `copia: so quem pode…` |
+| o setor em claro não confere a pública | os testes do hospedeiro, a bancada de produção e `…a copia que nao confere…` |
+| a instalação não se confere | os testes do hospedeiro, e a bancada — a máquina reinstalada |
+| a cópia sem o fecho restaura o que leu | quatro testes do hospedeiro e `…a copia que nao confere…` — a cortada |
+| os bytes depois do fecho são aceitos | o hospedeiro e `…a copia que nao confere…` — a com sobra |
+| os totais do fecho não se conferem; os nós fora de ordem, ou repetidos, são aceitos | os testes do hospedeiro (duas mutações) |
+| a raiz da cópia não se confere contra o caminho | `…a copia que nao confere…` — a de outro caminho |
+| a recusa não solta os blocos do conteúdo novo; o arquivo pela metade não solta os dele | `…a copia que nao confere…` e `…a gravacao que falha…` (duas mutações) |
+| a chave da cópia sem a chave do Duke — uma constante | a bancada de produção: com a pública de B no setor em claro, B abria a cópia. A suíte não a vê: numa máquina só, a constante cifra e decifra igual |
+| a privada do Duke no setor em claro, no lugar da pública | `…a copia volta inteira…` |
+| a chave da cópia no log; o conteúdo restaurado no log | `…a copia volta inteira…`, pelos pedaços de doze bytes (duas mutações) |
+| a cópia feita sem auditoria; a restauração sem auditoria; o identificador na auditoria que não é o da cópia | `…a copia volta inteira…` (três mutações) |
+| o lote vale em memória antes do commit; a falha do commit responde sucesso | `…a gravacao que falha…` e `…o armazem inteiro…` (duas mutações) |
+| só em memória: nem o volume nem o journal | três casos, e a bancada — depois do corte, a árvore não era a da cópia |
+| dois registros: a auditoria sozinha, antes da confirmação | **sobreviveu** na primeira rodada: a âncora do TPM não a via — um registro só de auditoria não a avança —, e a bancada das quedas a pegaria, a suíte não. Agora `…a copia volta inteira…` confere que o registro que confirma o armazém leva, ele mesmo, a auditoria da restauração |
+| a restauração sem a ordem das gravações | a disputa, `…a gravacao que falha…` e `…o armazem inteiro…` |
+| a cópia sem a ordem das gravações | **sobreviveu** na primeira rodada: as escritas concorrentes da disputa não acertavam a janela. Agora a disputa põe, por um gancho da suíte no meio da cópia, uma escrita noutro núcleo, que tem de esperar a cópia acabar |
+| a versão esperada não se confere | três casos |
+| os arrendamentos abaixo não se conferem; com a máquina indo, a cópia e a restauração começam | `…o que vem no meio…` (duas mutações) |
+| a cópia de uma subárvore leva o armazém inteiro | sete casos |
+| o `operar` grava a cópia legível por todos; ou por cima de outro arquivo | o teste do `operar` (duas mutações) |
+
+No ARM, o controle e seis mutações — a restauração decidida como
+`fs.write`, a cópia sem o fecho, a restauração sem auditoria, o lote em
+memória antes do commit, só em memória (também pela bancada) e a
+restauração sem a ordem das gravações —, já com a suíte reforçada, dão o
+mesmo que no x86.
+
+O kernel de produção cresceu 87 184 bytes nos segmentos carregáveis no
+x86 (+2,08%) e 70 536 no ARM (+1,98%), contra o B4 (`c153c15`); o
+iniciador e os programas não mudaram.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
