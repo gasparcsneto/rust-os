@@ -241,4 +241,5 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
   processo, o desligamento a caminho, envios, leituras e a revogação ao
   mesmo tempo, o prazo que vence sozinho (o coletor tira a entrega e grava
   `fabric.expire`, sem o corpo; quem mandou vê `expired`, e o dono não a lê
-  mais), e o custo de uma entrega pelo gate inteiro.
+  mais), o nonce que saiu da janela dos 32 recentes (replay, com o corpo de
+  antes ou outro), e o custo de uma entrega pelo gate inteiro.

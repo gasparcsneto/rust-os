@@ -37020,6 +37020,10 @@ static CASOS: &[Caso] = &[
         f: malha_o_prazo_vence_sozinho,
     },
     Caso {
+        nome: "malha: o nonce fora da janela dos recentes e replay",
+        f: malha_o_nonce_fora_da_janela,
+    },
+    Caso {
         nome: "malha: o custo de uma entrega",
         f: malha_o_custo_de_uma_entrega,
     },
@@ -69750,18 +69754,24 @@ fn malha_o_aplicativo_a_entrega_ao_b() -> Resultado {
         r?;
         fim_das_fotos?;
         fim_do_correio?;
-        // O processo acabou: o endpoint fecha com ele, gravado pelo kernel.
+        // O processo acabou: o endpoint fecha com ele, gravado pelo kernel —
+        // pelo coletor, que o tira da tabela e grava depois, fora da trava
+        // dela: o registro se espera, como o endpoint.
         esperar_ate(|| crate::malha::contagem() == (0, 0), TETO_DA_MALHA)
             .map_err(|_| "o endpoint do correio ficou depois do fim do processo")?;
-        if !gravado_na_malha(
-            antes,
-            "fabric.withdraw",
-            &alloc::format!("endpoint:{endpoint}"),
-            politica::Codigo::Allow,
-            "fechado: o processo que o abriu acabou",
-        ) {
-            return Err("o fim do endpoint com o processo nao foi gravado");
-        }
+        esperar_ate(
+            || {
+                gravado_na_malha(
+                    antes,
+                    "fabric.withdraw",
+                    &alloc::format!("endpoint:{endpoint}"),
+                    politica::Codigo::Allow,
+                    "fechado: o processo que o abriu acabou",
+                )
+            },
+            TETO_DA_MALHA,
+        )
+        .map_err(|_| "o fim do endpoint com o processo nao foi gravado")?;
         Ok(())
     })
 }
@@ -70476,22 +70486,28 @@ fn malha_a_espera_e_o_fim_do_processo() -> Resultado {
         )
         .map_err(|_| "o fim do processo nao acabou a espera")?;
         drop(espera);
+        // Gravado pelo coletor depois de mudar a tabela, fora da trava dela:
+        // espera-se o registro, e não só o fim da espera.
         use politica::Codigo::Allow;
-        if !gravado_na_malha(
-            antes,
-            "fabric.withdraw",
-            &alloc::format!("endpoint:{endpoint}"),
-            Allow,
-            "fechado: o processo que o abriu acabou",
-        ) || !gravado_na_malha(
-            antes,
-            "fabric.void",
-            &alloc::format!("entrega:{id}"),
-            Allow,
-            "anulada: o processo do endpoint acabou",
-        ) {
-            return Err("o fim do processo na malha nao foi gravado");
-        }
+        esperar_ate(
+            || {
+                gravado_na_malha(
+                    antes,
+                    "fabric.withdraw",
+                    &alloc::format!("endpoint:{endpoint}"),
+                    Allow,
+                    "fechado: o processo que o abriu acabou",
+                ) && gravado_na_malha(
+                    antes,
+                    "fabric.void",
+                    &alloc::format!("entrega:{id}"),
+                    Allow,
+                    "anulada: o processo do endpoint acabou",
+                )
+            },
+            TETO_DA_MALHA,
+        )
+        .map_err(|_| "o fim do processo na malha nao foi gravado")?;
         let estado = fs_pedir(
             simulado_na_malha(7_894_001, bia, "fabric.send"),
             "fabric.status",
@@ -70800,6 +70816,67 @@ fn malha_o_prazo_vence_sozinho() -> Resultado {
                 || !nada_gravado_com(antes, "fora-do-prazo")
             {
                 return Err("o corpo de uma entrega foi para a auditoria");
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// O nonce que já saiu da janela dos recentes: o canal lembra os últimos
+/// trinta e dois, e um nonce abaixo do maior que ele já usou é replay mesmo
+/// fora dela — com o corpo de antes ou com outro. Trinta e três envios, cada
+/// um cancelado logo (a cota do canal nunca enche), e o primeiro de volta é
+/// `DENY_REPLAY`, sem nada criado; o que ainda está na janela, com outro
+/// corpo, também — pela outra conta.
+fn malha_o_nonce_fora_da_janela() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(71), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_899_001, bia, "fabric.send");
+            let janela = politica::malha::JANELA_DE_NONCES as u64;
+            for nonce in 1..=janela + 1 {
+                let r = mandar_na_malha(quem_manda, &endpoint, "na-janela", nonce);
+                let id = fs_texto(&r, "id").ok_or("um envio dentro da cota foi recusado")?;
+                let cancelado = fs_pedir(
+                    quem_manda,
+                    "fabric.cancel",
+                    &alloc::format!(r#"{{"id":"{id}"}}"#),
+                );
+                if !fs_ok(&cancelado) {
+                    crate::log_error!("teste", "{}", cancelado);
+                    return Err("um cancelamento antes da leitura foi recusado");
+                }
+            }
+            // O primeiro saiu da janela: replay, com o corpo de antes e com
+            // outro, e nada nasce.
+            for corpo in ["na-janela", "outro"] {
+                let r = mandar_na_malha(quem_manda, &endpoint, corpo, 1);
+                if desfecho_na_malha(&r) != "DENY_REPLAY" {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o nonce que saiu da janela dos recentes passou");
+                }
+            }
+            if crate::malha::contagem().1 != 0 {
+                return Err("o replay de um nonce fora da janela deixou uma entrega viva");
+            }
+            // O último ainda está nela: com outro corpo, a mesma recusa.
+            let r = mandar_na_malha(quem_manda, &endpoint, "outro", janela + 1);
+            if desfecho_na_malha(&r) != "DENY_REPLAY" {
+                crate::log_error!("teste", "{}", r);
+                return Err("o nonce da janela com outro corpo passou");
             }
             Ok(())
         })();
