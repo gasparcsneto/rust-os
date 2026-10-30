@@ -8454,6 +8454,67 @@ mesmo tempo; o prazo que vence sozinho, pelo coletor, e vai para a
 auditoria; o nonce que saiu da janela dos recentes, que continua replay;
 e o custo de uma entrega pelo gate inteiro.
 
+### As mutações da malha
+
+Trinta e quatro mutações contra o que a malha promete — uma de cada vez,
+no repositório, contra os casos `malha:` da suíte e os testes do
+hospedeiro da conta pura e da política; um subconjunto também no ARM. O
+controle, sem mutação, passa em tudo. Um caso entrou enquanto a campanha
+era escrita, porque três mutações planejadas passariam sem ele: o prazo
+que vence sozinho, pelo coletor — sem ele, o coletor que não vence a
+malha, o vencimento que não vai para a auditoria e o `ttl_ms` ignorado
+passariam, e só o hospedeiro veria a tabela que não vence. **As trinta e
+quatro reprovam.** Na campanha, duas reprovaram só pelos testes do
+hospedeiro — além das duas que rodam só nele, de propósito —, por razões
+diferentes. Mandar a um endpoint de outro titular pela tabela não tem
+como aparecer na suíte: o kernel acha o destino pela descoberta do próprio
+titular antes de a tabela conferir, e as duas conferências teriam de
+falhar juntas. O nonce abaixo do maior já usado, fora da janela dos
+recentes, aparecia, mas nenhum caso o pedia — a suíte só reenviava um
+nonce ainda na janela; com o caso novo (`71f0457`), a suíte também o
+reprova.
+
+| Mutação | Reprovada por |
+|---|---|
+| o gate resolve o endpoint, ou a entrega recebida, para qualquer processo | `malha: o impostor nao alcanca…` e `…a espera e o fim do processo` — outro processo do titular lia o endpoint do dono e confirmava a entrega dele (duas mutações) |
+| quem não é processo abre e lê um endpoint | `…o gate decide cada passo` — a sessão da pessoa deixava de ouvir `DENY_PERMISSION` do gate |
+| o recurso da malha sem a intenção | todos os casos |
+| o dono sem `fabric.offer` na política, ou isolado, ainda recebe | `…o gate decide cada passo` (duas mutações) |
+| sem decidir de novo com a ordem das gravações na mão | `…revogacao e politica no meio da operacao` |
+| a intenção que o gate não decidiu passa | `…o gate decide cada passo` — a malha chamada fora de uma decisão |
+| a chave revogada, ou a pessoa revogada, não chega à malha | `…a revogacao fecha e anula` (as duas); a da chave também por `…no meio da operacao` e pela concorrência com a revogação |
+| o fim do processo não fecha o endpoint | `…entrega ao aplicativo B…` e `…a espera e o fim do processo` |
+| na tabela: o endpoint que acaba não anula o que esperava; anular o titular não fecha os endpoints; nenhuma lápide fica | os testes do hospedeiro e a suíte — a falta de lápides, por todos os casos, que conferem a tabela coerente no fim (três mutações) |
+| na tabela: mandar a um endpoint de outro titular | só o hospedeiro — o kernel acha o destino pela descoberta do titular antes |
+| na tabela: a descoberta mostra os de outro titular | o hospedeiro e `…so o mesmo titular` |
+| o nonce velho, fora da janela dos recentes, passa | o hospedeiro; com `71f0457`, também `…o nonce fora da janela dos recentes e replay` |
+| o reenvio com o mesmo nonce não é reconhecido | o hospedeiro e `…entrega ao aplicativo B…` |
+| cancelar a entrega de outro canal; sem o teto de entregas do endpoint | o hospedeiro (duas mutações, só nele) |
+| o prazo não vence | o hospedeiro e `…o prazo vence sozinho…` |
+| o corpo vai para a auditoria | `…entrega ao aplicativo B…` e `…o prazo vence sozinho…` |
+| a entrega perde o programa que a mandou; o resumo não é o da imagem que o kernel carregou | `…entrega ao aplicativo B…` e `…o impostor…` (duas mutações) |
+| a entrega que chega, ou o endpoint que fecha, não acaba a espera | `…a espera e o fim do processo` (duas mutações) |
+| com o desligamento a caminho, a entrega ou o endpoint nasce | `…com o desligamento a caminho, nada nasce` (duas mutações) |
+| o registro aceita qualquer intenção | `…o gate decide cada passo` |
+| a política alcança qualquer intenção do papel | o hospedeiro e `…o gate decide cada passo` |
+| o envio não grava o destino | `…entrega ao aplicativo B…` |
+| o coletor não vence a malha; o vencimento pelo coletor não vai para a auditoria; o `ttl_ms` não chega à entrega | `…o prazo vence sozinho…` (três mutações) |
+
+No ARM, o controle e seis mutações — o endpoint resolvido para qualquer
+processo, quem não é processo abrindo e lendo um endpoint, sem decidir de
+novo com a ordem das gravações na mão, a chave revogada que não chega à
+malha, a entrega que não acaba a espera e o coletor que não vence a malha
+—, já com a suíte final, dão o mesmo que no x86.
+
+O kernel de produção cresceu 158 504 bytes nos segmentos carregáveis no
+x86 (+3,71%) e 110 468 no ARM (+3,05%), contra o B5 (`986d872`): a malha,
+os oito comandos e a conta pura. O iniciador não mudou. Dos programas que
+já existiam, 39 de 44 saem idênticos byte a byte; os cinco que ligam o TLS
+e o ICP diferem em 33 a 37 bytes, com as seções do mesmo tamanho —
+constantes que dependem da biblioteca `programas`, que ganhou o módulo da
+malha; nenhuma linha deles mudou. Os três novos são de teste: o `correio`
+e as `fotos` com 33 KiB, o `impostor` com 41 KiB.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de

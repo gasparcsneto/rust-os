@@ -243,3 +243,8 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
   `fabric.expire`, sem o corpo; quem mandou vê `expired`, e o dono não a lê
   mais), o nonce que saiu da janela dos 32 recentes (replay, com o corpo de
   antes ou outro), e o custo de uma entrega pelo gate inteiro.
+- **Mutações**: trinta e quatro, uma de cada vez — o gate, a revogação, a
+  conta pura, a proveniência, a espera, o desligamento, o registro, a
+  política e o prazo pelo coletor —, e as trinta e quatro reprovam; a
+  tabela, com o que pega cada uma, está no README ("As mutações da
+  malha").
