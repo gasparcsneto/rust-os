@@ -653,6 +653,7 @@ fn passada_do_coletor() {
     // malha.
     crate::mensagens::vencer_todos();
     crate::malha::vencer_todos();
+    crate::enlace::vencer_todos();
     // E a auditoria que nenhum registro levou ainda vai ao journal, de
     // tempos em tempos: as leituras e as recusas não mudam estado, e
     // não têm registro próprio.

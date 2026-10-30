@@ -63,6 +63,14 @@
 //! acontecem sob a trava da tabela, a mesma com que a entrega entra. Uma
 //! espera por endpoint: a segunda é recusada, como numa conexão.
 //!
+//! # A espera pela resposta de outro dispositivo
+//!
+//! E serve à espera de um pedido da malha a outro dispositivo: armada no
+//! pedido da tabela do enlace, ela acaba quando o par responde, quando o
+//! pedido falha — a revogação, a suspensão, o prazo —, ou no prazo da
+//! espera — ver [`crate::enlace`]. Acordado, o pedido é executado de novo,
+//! inteiro, pelo gate, e só então lê a resposta.
+//!
 //! # Uma espera de cada sentido por conexão
 //!
 //! Uma conexão tem um dono, e o dono pede uma coisa de cada vez pelo caminho
@@ -150,6 +158,9 @@ enum Causa {
     /// Uma entrega no endpoint `endpoint` da malha — a espera de um
     /// `fabric.recv`.
     Malha { endpoint: u64 },
+    /// A resposta do par ao pedido `pedido` do enlace — a espera de um
+    /// pedido da malha a outro dispositivo. Ver [`crate::enlace`].
+    Enlace { pedido: u64 },
 }
 
 /// O tique em que vence uma espera de `ms` milissegundos — no máximo
@@ -231,6 +242,20 @@ impl Espera {
         }))
     }
 
+    /// A espera pela resposta do par ao pedido `pedido` do enlace, por `ms`
+    /// milissegundos — no máximo [`PRAZO_MAXIMO_MS`]. `None` quando não há o
+    /// que esperar — ele terminou, ou saiu — e sem relógio.
+    pub fn pelo_enlace(pedido: u64, ms: u64) -> Option<Espera> {
+        let prazo = prazo_de(ms)?;
+        if !crate::enlace::armar_espera(pedido) {
+            return None;
+        }
+        Some(Espera {
+            causa: Causa::Enlace { pedido },
+            prazo,
+        })
+    }
+
     /// O tique em que a espera vence.
     pub fn prazo(&self) -> u64 {
         self.prazo
@@ -257,6 +282,7 @@ impl Espera {
                 crate::oleoduto::conferir(*principal, waker).then_some(Desfecho::Liberou)
             }
             Causa::Malha { endpoint } => crate::malha::conferir_espera(*endpoint, waker),
+            Causa::Enlace { pedido } => crate::enlace::conferir_espera(*pedido, waker),
         }
         .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
     }
@@ -278,6 +304,7 @@ impl Drop for Espera {
                 crate::oleoduto::esperou(crate::tempo::uptime_ms().saturating_sub(*desde_ms))
             }
             Causa::Malha { endpoint } => crate::malha::desarmar_espera(*endpoint),
+            Causa::Enlace { pedido } => crate::enlace::desarmar_espera(*pedido),
         }
     }
 }

@@ -37052,6 +37052,54 @@ static CASOS: &[Caso] = &[
     // Antes da reconstrução e da conta dos blocos: elas cobrem o armazém
     // inteiro restaurado.
     Caso {
+        nome: "enlace: o par entrega pela malha daqui, pelo gate",
+        f: enlace::enlace_o_par_entrega_pela_malha_daqui,
+    },
+    Caso {
+        nome: "enlace: so o conjunto fechado chega de outro dispositivo",
+        f: enlace::enlace_so_o_conjunto_fechado,
+    },
+    Caso {
+        nome: "enlace: a autoridade composta, pessoa e relacao e teto",
+        f: enlace::enlace_a_autoridade_composta,
+    },
+    Caso {
+        nome: "enlace: o aperto confere o registro de dispositivos",
+        f: enlace::enlace_o_aperto_confere_o_registro,
+    },
+    Caso {
+        nome: "enlace: o replay e o reenvio pelo canal remoto",
+        f: enlace::enlace_o_replay_e_o_reenvio,
+    },
+    Caso {
+        nome: "enlace: a revogacao derruba o enlace e anula",
+        f: enlace::enlace_a_revogacao_derruba_e_anula,
+    },
+    Caso {
+        nome: "enlace: a suspensao derruba e volta",
+        f: enlace::enlace_a_suspensao_derruba_e_volta,
+    },
+    Caso {
+        nome: "enlace: a revogacao no meio, na reconfirmacao",
+        f: enlace::enlace_a_reconfirmacao_no_commit,
+    },
+    Caso {
+        nome: "enlace: a origem decide e leva ao par",
+        f: enlace::enlace_a_origem_decide_e_leva,
+    },
+    Caso {
+        nome: "enlace: a origem recusa no gate daqui",
+        f: enlace::enlace_a_origem_recusa,
+    },
+    Caso {
+        nome: "enlace: a origem e a revogacao com o pedido a caminho",
+        f: enlace::enlace_a_origem_e_a_revogacao,
+    },
+    Caso {
+        nome: "enlace: mandar e revogar ao mesmo tempo",
+        f: enlace::enlace_mandar_e_revogar_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "copia: o armazem inteiro, pelo sistema",
         f: copia_o_armazem_inteiro,
     },

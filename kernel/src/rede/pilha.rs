@@ -332,7 +332,7 @@ struct Pilha {
     /// O socket de cada vaga do canal do agente por TCP — ver
     /// [`super::canal`]. Ficam na pilha do boot ao fim: quando uma conexão
     /// acaba, o socket volta a escutar.
-    vagas: [SocketHandle; canal::VAGAS as usize],
+    vagas: [SocketHandle; canal::TODAS as usize],
 }
 
 /// Um socket que o dono fechou, ou que caiu, e ainda termina o fecho com o
@@ -692,8 +692,8 @@ pub fn iniciar() {
     let dhcp = sockets.add(dhcpv4::Socket::new());
     // As vagas do canal do agente, escutando desde já: sem endereço ainda
     // não chega SYN nenhum, e quando o DHCP responder elas já estão lá.
-    let mut vagas = [SocketHandle::default(); canal::VAGAS as usize];
-    for vaga in vagas.iter_mut() {
+    let mut vagas = [SocketHandle::default(); canal::TODAS as usize];
+    for (i, vaga) in vagas.iter_mut().enumerate() {
         let mut socket = tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0u8; canal::BUFFER_DO_SOCKET]),
             tcp::SocketBuffer::new(vec![0u8; canal::BUFFER_DO_SOCKET]),
@@ -704,7 +704,7 @@ pub fn iniciar() {
         // As respostas saem inteiras de uma vez, cifradas: esperar o ACK do
         // pedaço anterior para mandar o último só atrasaria o agente.
         socket.set_nagle_enabled(false);
-        let _ = socket.listen(canal::PORTA);
+        let _ = socket.listen(canal::porta(i as u8 + 1));
         *vaga = sockets.add(socket);
     }
     let porta_inicial = PRIMEIRA_PORTA + (u16::from_le_bytes([semente[0], semente[1]]) % 4096);
@@ -787,10 +787,15 @@ impl Pilha {
         // a que ainda faz o aperto do TCP ou termina o fecho —, de quem
         // provou a chave nela.
         fluxos.push(Fluxo::escuta(canal::PORTA));
-        for v in 1..=canal::VAGAS {
+        // A do enlace, só com uma relação: sem par relacionado, o SYN de
+        // ninguém entra nela.
+        if crate::dispositivos::ha_relacao() {
+            fluxos.push(Fluxo::escuta(canal::PORTA_DO_ENLACE));
+        }
+        for v in 1..=canal::TODAS {
             if let Some((destino, dono)) = self.fluxo_da_vaga(v) {
                 fluxos.extend(firewall::fluxos(
-                    core::iter::once((destino, canal::PORTA, dono)),
+                    core::iter::once((destino, canal::porta(v), dono)),
                     regras,
                 ));
             }
@@ -820,7 +825,7 @@ impl Pilha {
         // e voltar a escutar. O que precisa de mais que a trava da pilha —
         // esquecer a sessão, gravar a recusa — fica para o coletor.
         let agora_ms = crate::tempo::uptime_ms();
-        for v in 1..=canal::VAGAS {
+        for v in 1..=canal::TODAS {
             let h = self.vagas[usize::from(v) - 1];
             let socket = self.sockets.get_mut::<tcp::Socket>(h);
             if let Some(d) = canal::bombear(v, socket, agora_ms) {
@@ -891,8 +896,10 @@ impl Pilha {
             ip: ip.octets(),
             porta: par.port,
         };
+        // A de um enlace não é de agente nenhum: a chave que provou o
+        // aperto nela é a de outro Duke.
         let dono = DonoDoFluxo {
-            agente: canal::chave_da_vaga(v),
+            agente: canal::chave_da_vaga(v).filter(|_| !canal::do_enlace(v)),
             ..DonoDoFluxo::default()
         };
         Some((destino, dono))
@@ -1778,7 +1785,7 @@ pub fn bloquear(
         // As conexões do canal do agente que a regra alcança caem também,
         // na mesma trava que a pôs: a escuta não protege ninguém.
         let mut sessoes = Vec::new();
-        for v in 1..=canal::VAGAS {
+        for v in 1..=canal::TODAS {
             let Some((par, dono)) = p.fluxo_da_vaga(v) else {
                 continue;
             };
@@ -1790,7 +1797,9 @@ pub fn bloquear(
             if let Some(geracao) = canal::derrubada(v) {
                 canal::deixar(v, canal::Desfecho::Acabou { geracao });
             }
-            sessoes.push((canal::sessao(v), par));
+            if !canal::do_enlace(v) {
+                sessoes.push((canal::sessao(v), par));
+            }
         }
         Ok((regra, nova, alcancadas, sessoes))
     })

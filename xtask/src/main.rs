@@ -3342,13 +3342,37 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "relogio::agora(",
         &["kernel/src/hora/mod.rs", "kernel/src/hora/civil.rs"],
     ),
+    // O respondedor do enlace leva ao gate, como o dispositivo, cada pedido
+    // que chega de outro Duke; o serviço de enlace pede o `net.*` dele pelo
+    // gate, esperando como o de hora. Ver `kernel/src/enlace.rs`.
     (
         "nativo::responder_pelo_kernel(",
-        &["kernel/src/seguranca.rs", "kernel/src/botao.rs"],
+        &[
+            "kernel/src/seguranca.rs",
+            "kernel/src/botao.rs",
+            "kernel/src/enlace.rs",
+        ],
     ),
     (
         "nativo::responder_pelo_kernel_esperando(",
-        &["kernel/src/hora/servico.rs"],
+        &["kernel/src/hora/servico.rs", "kernel/src/enlace.rs"],
+    ),
+    // O enlace entre dispositivos (ver `kernel/src/enlace.rs`): só o
+    // respondedor monta o chamador de outro dispositivo — o gate, a malha e
+    // o dono das conexões só o leem —, e só o fio do serviço de enlace fala
+    // como ele, com o papel da linha `servico enlace`.
+    (
+        "Chamador::Remoto {",
+        &[
+            "kernel/src/enlace.rs",
+            "kernel/src/autorizacao.rs",
+            "kernel/src/malha.rs",
+            "kernel/src/rede/conexoes.rs",
+        ],
+    ),
+    (
+        "Servico::Enlace",
+        &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
     ),
     // Quem descansa a cada interrupção continua pronto, e o núcleo dele não
     // vai para o ocioso: com mais fios descansando que núcleos, eles se

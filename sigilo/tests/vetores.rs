@@ -216,6 +216,37 @@ fn outro_prologo_nao_abre() {
     assert_eq!(r.err(), Some(Erro::Autenticacao));
 }
 
+/// O aperto de um enlace entre dispositivos não abre no respondedor do
+/// canal do agente, e o do agente não abre no do enlace: os dois prólogos
+/// separam as duas portas desde a primeira mensagem, com as mesmas chaves.
+#[test]
+fn o_enlace_e_o_agente_nao_se_abrem() {
+    for (de, para) in [
+        (sigilo::PROLOGO_DO_ENLACE, sigilo::PROLOGO),
+        (sigilo::PROLOGO, sigilo::PROLOGO_DO_ENLACE),
+    ] {
+        let ini = Iniciador::novo(de, &AGENTE, &sigilo::publica_de(&DUKE));
+        let mut a = vec![0u8; 1024];
+        let mut b = vec![0u8; 1024];
+        let (n, _) = ini.escrever([0x01; 32], b"", &mut a).unwrap();
+        let r = Respondedor::novo(para, &DUKE).ler(&a[..n], &mut b);
+        assert_eq!(r.err(), Some(Erro::Autenticacao));
+    }
+    // E com o mesmo prólogo, abre: o enlace é o mesmo aperto.
+    let ini = Iniciador::novo(
+        sigilo::PROLOGO_DO_ENLACE,
+        &AGENTE,
+        &sigilo::publica_de(&DUKE),
+    );
+    let mut a = vec![0u8; 1024];
+    let mut b = vec![0u8; 1024];
+    let (n, _) = ini.escrever([0x01; 32], b"", &mut a).unwrap();
+    let (_, recebido) = Respondedor::novo(sigilo::PROLOGO_DO_ENLACE, &DUKE)
+        .ler(&a[..n], &mut b)
+        .unwrap();
+    assert_eq!(recebido.remota(), sigilo::publica_de(&AGENTE));
+}
+
 /// Um aperto completo entre os dois lados do `sigilo`, para os casos de
 /// transporte abaixo.
 fn par() -> (Transporte, Transporte) {

@@ -1064,6 +1064,18 @@ pub fn pessoa(id: IdPessoa) -> Option<Pessoa> {
     com_tabela(|t| t.pessoas.iter().find(|p| p.id == id).cloned())
 }
 
+/// O papel da pessoa `id`, se ela está ativa: o que o gate compõe na
+/// decisão de um pedido que chega de outro dispositivo pela relação dela.
+/// Sem a credencial — a decisão não precisa dela.
+pub fn papel_ativo(id: IdPessoa) -> Option<String> {
+    com_tabela(|t| {
+        t.pessoas
+            .iter()
+            .find(|p| p.id == id && p.estado == sigilo::pessoas::Estado::Ativa)
+            .map(|p| p.papel.clone())
+    })
+}
+
 /// De quem é uma sessão aberta.
 pub fn dona_da_sessao(id: IdSessao) -> Option<IdPessoa> {
     com_tabela(|t| t.sessoes.iter().find(|s| s.id == id).map(|s| s.pessoa))

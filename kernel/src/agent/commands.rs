@@ -1171,12 +1171,22 @@ pub static COMANDOS: &[Command] = &[
                  identidade que o kernel conferiu: o nome do manifesto, o resumo da imagem e, \
                  para o codigo de fora dela, o editor. So os do mesmo titular, e so os que \
                  ainda receberiam. Descobrir nao concede nada: cada entrega e decidida.",
-        params: &[ParamSpec {
-            nome: "intent",
-            tipo: TipoParam::Formatado(Formato::Intencao),
-            obrigatorio: true,
-            descricao: "A intencao, `<espaco>.<nome>`.",
-        }],
+        params: &[
+            ParamSpec {
+                nome: "intent",
+                tipo: TipoParam::Formatado(Formato::Intencao),
+                obrigatorio: true,
+                descricao: "A intencao, `<espaco>.<nome>`.",
+            },
+            ParamSpec {
+                nome: "device",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Outro dispositivo, `dispositivo:<nome>`, relacionado a sua pessoa: o \
+                            pedido vai a malha dele pelo enlace. Decidido aqui, com `fabric.remote` \
+                            sobre ele, e la, pelo gate dele. A resposta dele vem em `remote`.",
+            },
+        ],
         acesso: Acesso::Exige(Permissao::FabricSend),
         recurso: Some("intent"),
         mais: Mais::Nada,
@@ -1221,6 +1231,14 @@ pub static COMANDOS: &[Command] = &[
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
                 descricao: "O prazo, ate 600000 ms; 60000 se ausente.",
+            },
+            ParamSpec {
+                nome: "device",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Outro dispositivo, `dispositivo:<nome>`, relacionado a sua pessoa: o \
+                            pedido vai a malha dele pelo enlace. Decidido aqui, com `fabric.remote` \
+                            sobre ele, e la, pelo gate dele. A resposta dele vem em `remote`.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FabricSend),
@@ -1314,6 +1332,14 @@ pub static COMANDOS: &[Command] = &[
                 obrigatorio: false,
                 descricao: "A versao conhecida; outra e CONFLICT.",
             },
+            ParamSpec {
+                nome: "device",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Outro dispositivo, `dispositivo:<nome>`, relacionado a sua pessoa: o \
+                            pedido vai a malha dele pelo enlace. Decidido aqui, com `fabric.remote` \
+                            sobre ele, e la, pelo gate dele. A resposta dele vem em `remote`.",
+            },
         ],
         acesso: Acesso::Exige(Permissao::FabricSend),
         recurso: Some("id"),
@@ -1324,12 +1350,22 @@ pub static COMANDOS: &[Command] = &[
     Command {
         nome: "fabric.status",
         resumo: "O estado de uma entrega que voce mandou, e a resposta de quem a confirmou.",
-        params: &[ParamSpec {
-            nome: "id",
-            tipo: TipoParam::Texto,
-            obrigatorio: true,
-            descricao: "O id da entrega.",
-        }],
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id da entrega.",
+            },
+            ParamSpec {
+                nome: "device",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Outro dispositivo, `dispositivo:<nome>`, relacionado a sua pessoa: o \
+                            pedido vai a malha dele pelo enlace. Decidido aqui, com `fabric.remote` \
+                            sobre ele, e la, pelo gate dele. A resposta dele vem em `remote`.",
+            },
+        ],
         acesso: Acesso::Exige(Permissao::FabricSend),
         recurso: Some("id"),
         mais: Mais::Nada,
@@ -3005,6 +3041,20 @@ fn device_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         w.str_value(&crate::identidade::impressao(&k))?;
     }
     w.end_array()?;
+    // Os enlaces que chegaram, de pé agora — e quantos pedidos daqui
+    // esperam um par. Volátil: nada disso é gravado.
+    w.key("links")?;
+    w.begin_array()?;
+    for (vaga, chave, confirmada) in crate::enlace::sessoes() {
+        w.begin_object()?;
+        w.field_u64("slot", u64::from(vaga))?;
+        w.field_str("key", &crate::identidade::impressao(&chave))?;
+        w.field_bool("confirmed", confirmada)?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.field_u64("pending", crate::enlace::pedidos() as u64)?;
+    w.field_bool("listening", crate::dispositivos::ha_relacao())?;
     w.end_object()
 }
 
@@ -6130,7 +6180,7 @@ fn origem_do_comando() -> Option<crate::ui::Origem> {
     match crate::autorizacao::pedinte()? {
         Pedinte::Canal(s) => Some(crate::ui::Origem::Agente(s)),
         Pedinte::Pessoa => Some(crate::ui::Origem::Pessoa),
-        Pedinte::Processo(_) | Pedinte::Kernel => None,
+        Pedinte::Processo(_) | Pedinte::Enlace | Pedinte::Kernel => None,
     }
 }
 
@@ -7550,6 +7600,10 @@ fn fabric_withdraw(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn fabric_discover(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A outro dispositivo: o enlace leva, e a malha de lá decide de novo.
+    if params.member("device").is_some() {
+        return crate::enlace::pelo_enlace("fabric.discover", params, w);
+    }
     w.begin_object()?;
     let ator = match ator_da_malha(w) {
         Ok(a) => a,
@@ -7580,6 +7634,10 @@ fn fabric_discover(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn fabric_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A outro dispositivo: o enlace leva, e a malha de lá decide de novo.
+    if params.member("device").is_some() {
+        return crate::enlace::pelo_enlace("fabric.send", params, w);
+    }
     w.begin_object()?;
     let ator = match ator_da_malha(w) {
         Ok(a) => a,
@@ -7675,6 +7733,20 @@ fn fabric_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
                 w.begin_object()?;
                 w.field_str("id", id)?;
                 w.field_str("intent", &l.intencao)?;
+                // De outro dispositivo: o nome que o registro daqui dá a
+                // ele. O programa de lá não é conferido aqui, e não vai.
+                if let politica::malha::Canal::Remoto { dispositivo, .. } = l.canal {
+                    let nome = crate::dispositivos::dispositivo(&dispositivo)
+                        .map(|d| {
+                            alloc::format!(
+                                "{}{}",
+                                politica::arquivo::PREFIXO_DE_DISPOSITIVO,
+                                d.nome
+                            )
+                        })
+                        .unwrap_or_default();
+                    w.field_str("device", &nome)?;
+                }
                 w.key("from")?;
                 match &l.de {
                     Some(p) => {
@@ -7733,6 +7805,10 @@ fn fabric_ack(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn fabric_cancel(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A outro dispositivo: o enlace leva, e a malha de lá decide de novo.
+    if params.member("device").is_some() {
+        return crate::enlace::pelo_enlace("fabric.cancel", params, w);
+    }
     w.begin_object()?;
     let ator = match ator_da_malha(w) {
         Ok(a) => a,
@@ -7753,6 +7829,10 @@ fn fabric_cancel(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn fabric_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A outro dispositivo: o enlace leva, e a malha de lá decide de novo.
+    if params.member("device").is_some() {
+        return crate::enlace::pelo_enlace("fabric.status", params, w);
+    }
     w.begin_object()?;
     let ator = match ator_da_malha(w) {
         Ok(a) => a,
@@ -8026,6 +8106,7 @@ fn especie_da_autoridade(a: crate::autorizacao::Autoridade) -> &'static str {
         Autoridade::Sessao { .. } => "agent",
         Autoridade::Pessoa { .. } => "person",
         Autoridade::Servico(_) => "service",
+        Autoridade::Remoto { .. } => "device",
     }
 }
 
@@ -8178,6 +8259,15 @@ fn conter_dispositivo(alvo: Option<Json>, conter: bool, w: &mut JsonWriter) -> f
     } else {
         crate::contencao::soltar(&alvo)
     };
+    // Suspenso, os enlaces dele caem, o que ele mandou e esperava é anulado,
+    // e nada daqui vai a ele.
+    if conter {
+        crate::enlace::dispositivo_saiu(
+            &d.chave,
+            politica::Codigo::DenyCredential,
+            "dispositivo suspenso",
+        );
+    }
     let estado = crate::contencao::desfecho(&alvo, conter, feito.mudou);
     crate::autorizacao::auditar_execucao(texto, politica::Codigo::Allow, estado);
     w.begin_object()?;

@@ -85,6 +85,14 @@ impl Dono {
             },
             Chamador::Pessoa(id) => Dono::Pessoa(id),
             Chamador::Processo { fio, .. } => Dono::Processo(fio),
+            // Outro dispositivo não abre conexão aqui — o gate só lhe deixa o
+            // conjunto fechado da malha —: uma sessão de canal nenhum, sem
+            // geração, que nada reconhece como viva.
+            Chamador::Remoto { .. } => Dono::Canal {
+                sessao: u8::MAX,
+                chave,
+                geracao: u64::MAX,
+            },
         }
     }
 
@@ -125,7 +133,10 @@ impl Dono {
                 chave: None,
             } => f.serial = true,
             Autoridade::Pessoa { sessao } => f.pessoa = Some(sessao.0),
-            Autoridade::Sistema | Autoridade::Sessao { .. } | Autoridade::Servico(_) => {}
+            Autoridade::Sistema
+            | Autoridade::Sessao { .. }
+            | Autoridade::Servico(_)
+            | Autoridade::Remoto { .. } => {}
         }
         f
     }

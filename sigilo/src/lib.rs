@@ -70,6 +70,12 @@ pub const NOME_DO_PROTOCOLO: &[u8] = b"Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// depois.
 pub const PROLOGO: &[u8] = b"Duke canal do agente v1";
 
+/// O prólogo do enlace entre dois Dukes relacionados: o mesmo aperto IK,
+/// com outro resumo desde o primeiro byte. A etiqueta que abre a estática
+/// só confere com o mesmo prólogo — um aperto de enlace não vira sessão de
+/// agente, nem o contrário, nem repetido.
+pub const PROLOGO_DO_ENLACE: &[u8] = b"Duke enlace entre dispositivos v1";
+
 /// O tamanho de uma chave X25519, pública ou privada.
 pub const TAM_CHAVE: usize = 32;
 

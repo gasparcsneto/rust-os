@@ -179,6 +179,14 @@ fn titular_de(autoridade: Autoridade) -> Option<Titular> {
             _ => None,
         },
         Autoridade::Servico(_) => None,
+        // Outro dispositivo age pela pessoa da relação: só alcança o que é
+        // dela — a regra do mesmo titular, do outro lado do enlace.
+        Autoridade::Remoto {
+            dispositivo,
+            relacao,
+            ..
+        } => crate::dispositivos::relacao(&dispositivo, &relacao)
+            .map(|(_, r)| Titular::Pessoa(r.pessoa)),
     }
 }
 
@@ -238,8 +246,32 @@ impl Ator {
                 }),
                 _ => None,
             },
+            // Outro dispositivo, pelo enlace: o canal dos nonces é o da
+            // relação, na época da origem; não há processo daqui.
+            Pedinte::Enlace => match autoridade {
+                Autoridade::Remoto {
+                    dispositivo,
+                    relacao,
+                    epoca,
+                } => Some(Ator {
+                    titular,
+                    canal: Canal::Remoto {
+                        dispositivo,
+                        relacao,
+                        epoca,
+                    },
+                    processo: None,
+                }),
+                _ => None,
+            },
             Pedinte::Kernel => None,
         }
+    }
+
+    /// O canal dos nonces de quem pede: o processo, a sessão, a pessoa —
+    /// ou a relação de outro dispositivo.
+    pub fn canal(&self) -> Canal {
+        self.canal
     }
 
     fn fio(&self) -> Option<u64> {
@@ -273,6 +305,24 @@ fn de_quem(chamador: Chamador, chave: Option<[u8; 32]>) -> Option<(Titular, Cana
         Chamador::Pessoa(id) => Some((
             titular_de(Autoridade::Pessoa { sessao: id })?,
             Canal::Pessoa(id.0),
+            None,
+        )),
+        Chamador::Remoto {
+            dispositivo,
+            relacao,
+            epoca,
+            ..
+        } => Some((
+            titular_de(Autoridade::Remoto {
+                dispositivo,
+                relacao,
+                epoca,
+            })?,
+            Canal::Remoto {
+                dispositivo,
+                relacao,
+                epoca,
+            },
             None,
         )),
     }
@@ -936,11 +986,33 @@ pub fn anular_titular(titular: Titular, motivo: &str) {
     auditar_do_kernel(&epoca, &anuladas, &format!("anulada: {motivo}"));
 }
 
+/// O dispositivo saiu — revogado, suspenso —: as entregas vivas que ele
+/// mandou, por qualquer relação e de qualquer época, são anuladas, cada uma
+/// para a auditoria, e as janelas dele saem. Chamada por
+/// [`crate::enlace::dispositivo_saiu`].
+pub fn anular_dispositivo(chave: &[u8; 32], motivo: &str) {
+    let feito = crate::persistencia::em_ordem(|| {
+        se_ha_tabela(|t| {
+            let anuladas = t.malha.anular_de(
+                |c| matches!(c, Canal::Remoto { dispositivo, .. } if dispositivo == chave),
+            );
+            (t.epoca, anuladas, acordaveis(t))
+        })
+    });
+    let Some((epoca, anuladas, wakers)) = feito else {
+        return;
+    };
+    acordar(wakers);
+    auditar_do_kernel(&epoca, &anuladas, &format!("anulada: {motivo}"));
+}
+
 /// O canal acabou — a sessão fechou, o processo morreu —: a janela de
 /// nonces dele sai, e, se era um processo, os endpoints dele fecham e o que
 /// esperava neles é anulado. O que ele mandou continua: quem recebe ainda
 /// lê e confirma.
 pub fn canal_acabou(canal: Canal) {
+    // Os pedidos dele a outros dispositivos saem também.
+    crate::enlace::canal_acabou(canal);
     let fio = match canal {
         Canal::Processo(f) => Some(f),
         _ => None,

@@ -318,6 +318,7 @@ kernel/src/
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
+├── enlace.rs        o enlace entre dispositivos: o pedido da malha a outro Duke, na origem (a tabela, o serviço que leva) e no destino (o respondedor, o gate como o dispositivo)
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
 ├── copia.rs         a cópia de segurança do armazém e a restauração dela: cifrada para esta máquina e esta instalação, conferida inteira, trocada como uma base do volume num commit só
@@ -518,6 +519,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
 ├── dispositivos.rs  os dispositivos relacionados: a chave de outro Duke, a relação com uma pessoa desta máquina, as lápides
+├── enlace.rs        o enlace, na origem: o conjunto fechado, os pedidos que esperam o par, os nonces da relação e o que cada canal mandou
 ├── manifesto.rs     o manifesto de um programa: o nome, o que ele exerce, e o resumo da imagem
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s

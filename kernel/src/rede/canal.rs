@@ -1,4 +1,5 @@
-//! O canal do agente por TCP: mais um transporte de sessão.
+//! O canal do agente por TCP: mais um transporte de sessão — e, nas vagas
+//! de cima, o transporte do enlace entre dispositivos.
 //!
 //! # O que é
 //!
@@ -44,6 +45,16 @@
 //!    prazo também ([`PRAZO_DO_FECHO_MS`]); passado ele, um RST. A sessão é
 //!    esquecida, e a vaga volta a escutar.
 //!
+//! # As vagas do enlace
+//!
+//! As vagas de [`VAGAS`] + 1 a [`TODAS`] escutam outra porta,
+//! [`PORTA_DO_ENLACE`]: a de outro Duke relacionado, que faz o aperto do
+//! enlace — ver [`crate::enlace`]. A mesma vida, os mesmos prazos e o mesmo
+//! fecho; outras vagas, para o enlace não esgotar as do agente, que são a
+//! porta do administrador. Não são sessões do agente: o que chega nelas vai
+//! ao respondedor do enlace, e o desfecho de cada conexão também. O firewall
+//! só deixa entrar o SYN nela enquanto há uma relação — ver `super::pilha`.
+//!
 //! # O que fica para fora das travas
 //!
 //! A pilha anda no fio da rede, que não pode esperar um disco: o fim de uma
@@ -86,6 +97,26 @@ pub const PORTA: u16 = 7070;
 
 /// Quantas conexões o canal aceita ao mesmo tempo: uma por vaga.
 pub const VAGAS: u8 = 4;
+
+/// A porta TCP do enlace entre dispositivos: outra porta, porque o
+/// `smoltcp` não escolhe o conjunto de vagas pelo primeiro quadro.
+pub const PORTA_DO_ENLACE: u16 = 7071;
+
+/// Quantos enlaces chegam ao mesmo tempo: as vagas depois das do agente.
+pub const VAGAS_DO_ENLACE: u8 = 4;
+
+/// Todas as vagas: as do agente, de 1 a [`VAGAS`], e as do enlace, depois.
+pub const TODAS: u8 = VAGAS + VAGAS_DO_ENLACE;
+
+/// Se a vaga `v` é do enlace.
+pub const fn do_enlace(v: u8) -> bool {
+    v > VAGAS && v <= TODAS
+}
+
+/// A porta que a vaga `v` escuta.
+pub const fn porta(v: u8) -> u16 {
+    if do_enlace(v) { PORTA_DO_ENLACE } else { PORTA }
+}
 
 /// A sessão da primeira vaga: depois da serial (0) e das portas do
 /// `virtio-console` (1 a 4).
@@ -181,12 +212,8 @@ impl Vaga {
     }
 }
 
-static VAGAS_DO_CANAL: [Mutex<Vaga>; VAGAS as usize] = [
-    Mutex::new(Vaga::nova()),
-    Mutex::new(Vaga::nova()),
-    Mutex::new(Vaga::nova()),
-    Mutex::new(Vaga::nova()),
-];
+static VAGAS_DO_CANAL: [Mutex<Vaga>; TODAS as usize] =
+    [const { Mutex::new(Vaga::nova()) }; TODAS as usize];
 
 /// Quantas conexões o canal aceitou, e quantos apertos venceram o prazo,
 /// desde o boot.
@@ -490,11 +517,11 @@ pub(super) fn bombear(v: u8, s: &mut tcp::Socket, agora_ms: u64) -> Option<Desfe
                 // outra porta dele. Fechada depois de um RST, só quando ele
                 // já saiu: até sair, o socket ainda tem o par.
                 State::TimeWait => {
-                    let _ = s.listen(PORTA);
+                    let _ = s.listen(porta(v));
                     return None;
                 }
                 State::Closed if s.remote_endpoint().is_none() => {
-                    let _ = s.listen(PORTA);
+                    let _ = s.listen(porta(v));
                     return None;
                 }
                 _ => return None,
@@ -665,8 +692,12 @@ pub fn atender_pendencias() {
     }
 }
 
-/// Trata um desfecho da vaga `v` — ver [`atender_pendencias`].
+/// Trata um desfecho da vaga `v` — ver [`atender_pendencias`]. O de uma
+/// vaga do enlace é do enlace.
 fn tratar(v: u8, d: Desfecho) {
+    if do_enlace(v) {
+        return crate::enlace::desfecho_da_vaga(v, d);
+    }
     let s = sessao(v);
     match d {
         Desfecho::Aceita { remoto, geracao } => {

@@ -242,6 +242,12 @@ pub fn recusa_de(processo: Option<u64>, autoridade: Autoridade) -> Option<(Codig
             Autoridade::Pessoa { .. } => pessoa
                 .filter(|p| c.pessoas.contains(&p.0))
                 .map(|_| (Codigo::DenyCredential, "credencial suspensa")),
+            // O dispositivo suspenso não pede nada aqui, mesmo com o enlace
+            // ainda de pé: a suspensão vale no pedido seguinte.
+            Autoridade::Remoto { dispositivo, .. } => c
+                .dispositivos
+                .contains(&dispositivo)
+                .then_some((Codigo::DenyCredential, "dispositivo suspenso")),
             _ => None,
         }
     })

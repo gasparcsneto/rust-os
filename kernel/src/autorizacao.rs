@@ -137,6 +137,10 @@ pub enum Principal {
     /// cada um, e não o do sistema, nem um só para os dois. Um serviço que
     /// pede demais não gasta a ficha do outro.
     Servico(Servico),
+    /// Outro dispositivo, pela relação: o balde é da relação, com a taxa do
+    /// papel dela — duas relações do mesmo par não gastam a ficha uma da
+    /// outra.
+    Relacao([u8; 16]),
 }
 
 impl Principal {
@@ -153,6 +157,9 @@ impl Principal {
             }
             Principal::Sistema => String::from("system"),
             Principal::Servico(s) => alloc::format!("service:{}", s.nome()),
+            Principal::Relacao(r) => {
+                alloc::format!("relation:{:02x}{:02x}{:02x}{:02x}", r[0], r[1], r[2], r[3])
+            }
         }
     }
 }
@@ -163,12 +170,19 @@ struct Taxas {
     /// do canal TCP —, e quantos ela recusou desde o último que passou.
     janelas: [Janela; crate::sessoes::CIFRADAS],
     apertos_suprimidos: [u64; crate::sessoes::CIFRADAS],
+    /// A janela de apertos de cada vaga do enlace — o mesmo limite da
+    /// política, outra conta: os apertos de outro Duke não gastam os do
+    /// agente.
+    janelas_do_enlace: [Janela; crate::rede::canal::VAGAS_DO_ENLACE as usize],
+    apertos_do_enlace_suprimidos: [u64; crate::rede::canal::VAGAS_DO_ENLACE as usize],
 }
 
 static TAXAS: Mutex<Taxas> = Mutex::new(Taxas {
     baldes: [None; BALDES],
     janelas: [Janela::NOVA; crate::sessoes::CIFRADAS],
     apertos_suprimidos: [0; crate::sessoes::CIFRADAS],
+    janelas_do_enlace: [Janela::NOVA; crate::rede::canal::VAGAS_DO_ENLACE as usize],
+    apertos_do_enlace_suprimidos: [0; crate::rede::canal::VAGAS_DO_ENLACE as usize],
 });
 
 /// O que roda num fio, para o gate: código do kernel, ou a imagem de um
@@ -319,6 +333,19 @@ pub enum Autoridade {
     /// tem papel. Só o fio do serviço age com ela — o `xtask` confere quem
     /// a escreve.
     Servico(Servico),
+    /// Outro dispositivo, pela relação — o que chega pelo enlace e a malha
+    /// executa por ele. Decide pelo papel da relação, pelo da pessoa dela e
+    /// pelo teto `remoto`, todos procurados a cada decisão: a relação
+    /// revogada, a pessoa que saiu do registro ou a linha `remoto` tirada
+    /// valem na hora. A época é a do boot da origem — a janela de nonces
+    /// é dela. Não é um agente, não é a pessoa: nasce só da decisão sobre
+    /// um `Chamador::Remoto`, que só o respondedor do enlace monta — o
+    /// `xtask` confere.
+    Remoto {
+        dispositivo: [u8; 32],
+        relacao: [u8; 16],
+        epoca: [u8; 8],
+    },
 }
 
 /// Um serviço do sistema com identidade própria: um nome do vocabulário
@@ -331,6 +358,10 @@ pub enum Servico {
     /// hora do registro — `time.request` e `time.sync` —, com o papel que a
     /// linha `servico hora` lhe dá. Não escolhe a hora, e não é o sistema.
     Hora,
+    /// O serviço de enlace: leva ao par os pedidos que o gate já decidiu —
+    /// `net.connect`, `net.send`, `net.recv` —, com o papel que a linha
+    /// `servico enlace` lhe dá. Não decide entrega nenhuma.
+    Enlace,
 }
 
 impl Servico {
@@ -339,6 +370,7 @@ impl Servico {
         match self {
             Servico::Nsf => "nsf",
             Servico::Hora => "hora",
+            Servico::Enlace => "enlace",
         }
     }
 }
@@ -440,6 +472,20 @@ struct Decidido {
     /// O programa de quem pediu, se é um processo: o manifesto dele limita
     /// a reconfirmação como limitou a decisão.
     programa: Option<Programa>,
+    /// O dispositivo de um pedido da malha a outro dispositivo, como a
+    /// decisão de `fabric.remote` o resolveu — ver [`dispositivo_decidido`].
+    remoto: Option<DispositivoDecidido>,
+}
+
+/// O dispositivo que a decisão de `fabric.remote` resolveu, no espaço da
+/// pessoa de quem pede: o handler leva o pedido a este, e não resolve de
+/// novo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispositivoDecidido {
+    /// `dispositivo:<nome>`, como o pedido o trouxe e a decisão o viu.
+    pub recurso: String,
+    pub chave: [u8; 32],
+    pub relacao: [u8; 16],
 }
 
 /// Quem pediu o comando em execução: a autoridade diz **por quem** ele
@@ -457,6 +503,9 @@ pub enum Pedinte {
     Pessoa,
     /// Um processo, pela interface nativa — o identificador do fio.
     Processo(u64),
+    /// Outro dispositivo, pelo enlace: o canal dos nonces é o da
+    /// autoridade remota — o dispositivo, a relação, a época da origem.
+    Enlace,
     /// O próprio kernel, chamando um handler com uma autoridade dita —
     /// só a suíte faz isso.
     #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
@@ -516,6 +565,13 @@ pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
 /// fora de um comando autorizado, e para quem não é processo.
 pub fn programa_decidido() -> Option<Programa> {
     do_comando_deste_fio(|c| c.decidido.as_ref().and_then(|d| d.programa)).flatten()
+}
+
+/// O dispositivo que a decisão de `fabric.remote` resolveu para o comando
+/// em execução neste fio — ver [`DispositivoDecidido`]. `None` fora de um
+/// pedido da malha a outro dispositivo, e em outro fio.
+pub fn dispositivo_decidido() -> Option<DispositivoDecidido> {
+    do_comando_deste_fio(|c| c.decidido.as_ref().and_then(|d| d.remoto.clone())).flatten()
 }
 
 /// Roda `f` como o comando de `autoridade`, pedido por `pedinte`, neste
@@ -656,6 +712,20 @@ struct Quem {
     /// O serviço, quando quem pede é um: de quem é o balde da taxa e a
     /// conta no caminho da auditoria — cada serviço o seu.
     servico: Option<Servico>,
+    /// Outro dispositivo, quando quem pede é um: a relação — de quem é o
+    /// balde da taxa — e os tetos que a decisão compõe com o papel dela. Numa
+    /// caixa: quem não é outro dispositivo não paga o tamanho.
+    remoto: Option<alloc::boxed::Box<QuemRemoto>>,
+}
+
+/// O que a decisão de um pedido que chegou pelo enlace compõe com o papel
+/// da relação: o papel da pessoa dela e o teto `remoto`. A permissão
+/// efetiva é a interseção dos três — ver [`decidir_de`]. Sem um deles, a
+/// decisão recusa.
+#[derive(Clone)]
+struct QuemRemoto {
+    relacao: [u8; 16],
+    tetos: [Option<String>; 2],
 }
 
 /// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
@@ -770,6 +840,7 @@ pub fn carregar() {
         papel: None,
         processo: None,
         servico: None,
+        remoto: None,
     };
     let (politica, codigo, detalhe, resumo) = match crate::vfs::ler_tudo(CAMINHO_DA_POLITICA) {
         Ok(bytes) => {
@@ -1007,6 +1078,7 @@ pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &
         papel: None,
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe)
 }
@@ -1028,6 +1100,9 @@ pub fn adotar_auditoria(mut do_journal: Cadeia) {
 
 /// Quem está na sessão `sessao`. `Err` com o que se sabe, se a sessão não é
 /// autenticada — uma porta sem aperto completo.
+// `Quem` vai por valor, um por decisão, e o `Err` leva quem pediu à
+// auditoria: numa caixa, seria uma alocação a cada pedido.
+#[allow(clippy::result_large_err)]
 fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
     if sessao == crate::agent::sessao::SERIAL {
         return Ok(Quem {
@@ -1039,6 +1114,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             papel: Some(com_politica(|p| p.serial().to_string())),
             processo: None,
             servico: None,
+            remoto: None,
         });
     }
     match crate::sessoes::identidade(sessao) {
@@ -1053,6 +1129,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         }),
         Some(id) => Ok(Quem {
             titular: Titular::Agente,
@@ -1063,6 +1140,7 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             chave: Some(id.chave),
             processo: None,
             servico: None,
+            remoto: None,
         }),
         None => Err(Quem {
             titular: Titular::Anonimo,
@@ -1073,12 +1151,16 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         }),
     }
 }
 
 /// Quem é uma sessão de pessoa, procurada agora. `Err` com o que se sabe,
 /// se a sessão não vale mais.
+// `Quem` vai por valor, um por decisão, e o `Err` leva quem pediu à
+// auditoria: numa caixa, seria uma alocação a cada pedido.
+#[allow(clippy::result_large_err)]
 fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
     match crate::pessoas::sessao(id) {
         crate::pessoas::EstadoDaSessao::Ativa { pessoa, papel, .. } => Ok(Quem {
@@ -1090,6 +1172,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
             papel: Some(papel),
             processo: None,
             servico: None,
+            remoto: None,
         }),
         _ => Err(Quem {
             titular: Titular::Anonimo,
@@ -1102,6 +1185,7 @@ fn quem_da_pessoa(id: crate::pessoas::IdSessao) -> Result<Quem, Quem> {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         }),
     }
 }
@@ -1117,6 +1201,7 @@ fn quem_sem_login() -> Quem {
         papel: None,
         processo: None,
         servico: None,
+        remoto: None,
     }
 }
 
@@ -1132,6 +1217,7 @@ fn quem_local(agente: &str) -> Quem {
         papel: Some(com_politica(|p| p.local().to_string())),
         processo: None,
         servico: None,
+        remoto: None,
     }
 }
 
@@ -1147,7 +1233,107 @@ fn quem_do_servico(s: Servico) -> Quem {
         papel: com_politica(|p| p.servico(s.nome()).map(ToString::to_string)),
         processo: None,
         servico: Some(s),
+        remoto: None,
     }
+}
+
+/// Outro dispositivo, pela relação `relacao`, procurado agora: o nome que o
+/// registro daqui dá a ele, o papel da relação, o da pessoa dela e o teto
+/// `remoto`. `Err` com o que se sabe, se a relação não existe mais — o
+/// dispositivo revogado, a relação que não é daquele par — ou a pessoa
+/// dela não está ativa. O programa que a origem atesta vai à auditoria, e
+/// a nada mais.
+// `Quem` vai por valor, um por decisão, e o `Err` leva quem pediu à
+// auditoria: numa caixa, seria uma alocação a cada pedido.
+#[allow(clippy::result_large_err)]
+fn quem_do_dispositivo(
+    dispositivo: [u8; 32],
+    relacao: [u8; 16],
+    programa: Option<[u8; 32]>,
+) -> Result<Quem, Quem> {
+    // O nome do dispositivo vai no registro como quem agiu; o detalhe diz
+    // a relação e o programa atestado, e cabe no teto dele com o motivo —
+    // ver `politica::auditoria::MAIOR_DETALHE`.
+    let pelo = |_nome: &str| {
+        let id = politica::dispositivos::id_texto(&relacao);
+        let mut d = alloc::format!("pela relacao {}", &id[..8]);
+        if let Some(p) = programa.filter(|p| *p != [0; 32]) {
+            d.push_str(&alloc::format!(
+                ", atestado {:02x}{:02x}{:02x}{:02x}",
+                p[0],
+                p[1],
+                p[2],
+                p[3]
+            ));
+        }
+        d
+    };
+    let sem = |nome: String| Quem {
+        titular: Titular::Dispositivo,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        processo: Some(pelo(&nome)),
+        agente: nome,
+        chave: Some(dispositivo),
+        papel: None,
+        servico: None,
+        remoto: Some(alloc::boxed::Box::new(QuemRemoto {
+            relacao,
+            tetos: [None, None],
+        })),
+    };
+    let Some((nome, rel)) = crate::dispositivos::relacao(&dispositivo, &relacao) else {
+        return Err(sem(String::new()));
+    };
+    let Some(papel_da_pessoa) = crate::pessoas::papel_ativo(sigilo::pessoas::IdPessoa(rel.pessoa))
+    else {
+        return Err(sem(nome));
+    };
+    let teto = com_politica(|p| p.remoto().map(ToString::to_string));
+    Ok(Quem {
+        titular: Titular::Dispositivo,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        processo: Some(pelo(&nome)),
+        agente: nome,
+        chave: Some(dispositivo),
+        papel: Some(rel.papel),
+        servico: None,
+        remoto: Some(alloc::boxed::Box::new(QuemRemoto {
+            relacao,
+            tetos: [Some(papel_da_pessoa), teto],
+        })),
+    })
+}
+
+/// A decisão de `quem` sobre uma permissão e um recurso: a do papel dele
+/// e, se ele é outro dispositivo, a dos tetos da relação também — o papel
+/// da relação ∩ o da pessoa dela ∩ o teto `remoto`, pela mesma política e
+/// pela mesma conta. O primeiro que não permite recusa, e a auditoria diz
+/// qual.
+fn decidir_de(quem: &Quem, permissao: Permissao, recurso: &str) -> (Codigo, &'static str) {
+    let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
+    let Some(r) = &quem.remoto else {
+        return (codigo, detalhe);
+    };
+    if !codigo.permite() {
+        return (codigo, detalhe);
+    }
+    let papeis = [
+        quem.papel.as_deref(),
+        r.tetos[0].as_deref(),
+        r.tetos[1].as_deref(),
+    ];
+    let todos = com_politica(|p| p.decidir_por_todos(&papeis, permissao, Some(recurso)));
+    if todos.permite() {
+        return (todos, "");
+    }
+    let detalhe = match com_politica(|p| p.decidir(r.tetos[0].as_deref(), permissao, Some(recurso)))
+    {
+        c if !c.permite() => "o papel da pessoa da relacao nao permite",
+        _ => "o teto remoto nao permite",
+    };
+    (todos, detalhe)
 }
 
 /// Quem é uma autoridade de sessão, procurado agora: o nome e o papel do
@@ -1164,6 +1350,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             papel: Some(com_politica(|p| p.serial().to_string())),
             processo: None,
             servico: None,
+            remoto: None,
         },
         (_, Some(k)) => Quem {
             titular: Titular::Agente,
@@ -1174,6 +1361,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             papel: crate::identidade::papel_do_agente(&k),
             processo: None,
             servico: None,
+            remoto: None,
         },
         (_, None) => Quem {
             titular: Titular::Anonimo,
@@ -1184,6 +1372,7 @@ fn quem_da_autoridade(sessao: u8, chave: Option<[u8; 32]>) -> Quem {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         },
     }
 }
@@ -1203,7 +1392,9 @@ struct Taxada {
 /// Uma sessão de qualquer canal do agente — a serial, uma porta, uma vaga
 /// do TCP — gasta do balde da chave: o transporte não muda quem pede.
 fn principal_da_taxa(quem: &Quem) -> Option<Principal> {
-    if let Some(s) = quem.servico {
+    if let Some(r) = &quem.remoto {
+        Some(Principal::Relacao(r.relacao))
+    } else if let Some(s) = quem.servico {
         Some(Principal::Servico(s))
     } else if crate::agent::sessao::Canal::da_sessao(quem.sessao).is_some() {
         Some(Principal::Chave(quem.chave))
@@ -1486,6 +1677,16 @@ pub enum Chamador {
         autoridade: Autoridade,
         programa: Programa,
     },
+    /// Outro dispositivo, pelo enlace: a chave que provou o aperto, a
+    /// relação que o pedido diz — só entre as daquele par —, a época do
+    /// boot da origem, e o resumo da imagem do programa que a origem atesta
+    /// — que vai à auditoria, e não é critério de nada.
+    Remoto {
+        dispositivo: [u8; 32],
+        relacao: [u8; 16],
+        epoca: [u8; 8],
+        programa: [u8; 32],
+    },
 }
 
 /// Os comandos que só um canal do agente pede: os que respondem pelo
@@ -1729,18 +1930,21 @@ pub fn alvo_decidido(texto: &str) -> bool {
 /// Não grava nada: a recusa é o resultado da execução do comando que o
 /// gate autorizou, e quem chama a grava assim.
 pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
-    let Some((autoridade, pedinte, permissao, recursos, programa)) = do_comando_deste_fio(|c| {
-        c.decidido.as_ref().map(|d| {
-            (
-                c.autoridade,
-                c.pedinte,
-                d.permissao,
-                d.recursos.clone(),
-                d.programa,
-            )
+    let Some((autoridade, pedinte, permissao, recursos, programa, remoto)) =
+        do_comando_deste_fio(|c| {
+            c.decidido.as_ref().map(|d| {
+                (
+                    c.autoridade,
+                    c.pedinte,
+                    d.permissao,
+                    d.recursos.clone(),
+                    d.programa,
+                    d.remoto.clone(),
+                )
+            })
         })
-    })
-    .flatten() else {
+        .flatten()
+    else {
         return Err((Codigo::Error, "fora de um comando autorizado"));
     };
     let Some(permissao) = permissao else {
@@ -1756,6 +1960,19 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
             }
         },
         Autoridade::Servico(s) => quem_do_servico(s),
+        Autoridade::Remoto {
+            dispositivo,
+            relacao,
+            ..
+        } => match quem_do_dispositivo(dispositivo, relacao, None) {
+            Ok(q) => q,
+            Err(_) => {
+                return Err((
+                    Codigo::DenyNotAuthenticated,
+                    "relacao ou pessoa que nao esta mais ativa",
+                ));
+            }
+        },
     };
     if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
         return Err((
@@ -1792,10 +2009,44 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         } else if permissao.alvo_e_papel() {
             decidir_contencao(quem.papel.as_deref(), permissao, metodo, r)
         } else {
-            decidir(quem.papel.as_deref(), permissao, r)
+            decidir_de(&quem, permissao, r)
         };
         if !c.permite() {
             return Err((c, d));
+        }
+    }
+    // O dispositivo de um pedido a outro dispositivo: `fabric.remote` de
+    // novo, e o mesmo dispositivo e a mesma relação no espaço da pessoa —
+    // revogado, suspenso ou trocado no meio, o pedido não sai.
+    if let Some(d) = remoto {
+        let (c, m) = decidir_de(&quem, Permissao::FabricRemote, &d.recurso);
+        if !c.permite() {
+            return Err((c, m));
+        }
+        if programa.is_some_and(|p| !p.permite(Permissao::FabricRemote)) {
+            return Err((
+                Codigo::DenyPermission,
+                "o manifesto nao declara fabric.remote",
+            ));
+        }
+        let pessoa = match autoridade {
+            Autoridade::Pessoa { sessao } => crate::pessoas::dona_da_sessao(sessao),
+            _ => None,
+        };
+        let mesmo = pessoa
+            .and_then(|p| {
+                politica::arquivo::nome_de_dispositivo(&d.recurso)
+                    .and_then(|nome| crate::dispositivos::da_pessoa(nome, &p.0))
+            })
+            .is_some_and(|(chave, rel)| chave == d.chave && rel.id == d.relacao);
+        if !mesmo {
+            return Err((
+                Codigo::DenyResource,
+                "o dispositivo nao existe mais para quem pede",
+            ));
+        }
+        if crate::contencao::dispositivo_suspenso(&d.chave) {
+            return Err((Codigo::DenyCredential, "dispositivo suspenso"));
         }
     }
     Ok(())
@@ -1842,6 +2093,9 @@ pub fn dono_no_armazem() -> Option<String> {
             crate::pessoas::dona_da_sessao(sessao).map(|id| alloc::format!("pessoa:{}", id.texto()))
         }
         Autoridade::Servico(s) => Some(alloc::format!("servico:{}", s.nome())),
+        // Outro dispositivo não é dono de nada aqui: o que ele pede é da
+        // malha, e a malha não grava.
+        Autoridade::Remoto { .. } => None,
     }
 }
 
@@ -2234,6 +2488,34 @@ fn decidir_o_pedido(
             }
             (q, autoridade)
         }
+        // Outro dispositivo: a relação e a pessoa dela, procuradas agora.
+        Chamador::Remoto {
+            dispositivo,
+            relacao,
+            epoca,
+            programa,
+        } => match quem_do_dispositivo(dispositivo, relacao, Some(programa)) {
+            Ok(q) => (
+                q,
+                Autoridade::Remoto {
+                    dispositivo,
+                    relacao,
+                    epoca,
+                },
+            ),
+            Err(q) => {
+                let motivo = "relacao ou pessoa que nao esta ativa";
+                let d = auditar(
+                    &q,
+                    comando.nome,
+                    "",
+                    Codigo::DenyNotAuthenticated,
+                    parametros,
+                    motivo,
+                );
+                return Err(recusa(Codigo::DenyNotAuthenticated, &q, "", motivo, d));
+            }
+        },
         Chamador::Sessao(sessao) => match quem_da_sessao(sessao) {
             Ok(q) => {
                 let chave = q.chave;
@@ -2271,6 +2553,31 @@ fn decidir_o_pedido(
             motivo,
         );
         return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
+    }
+    // De outro dispositivo só chega o conjunto fechado da malha — ver
+    // `politica::enlace::METODOS` —, e nunca com `device`: o pedido que
+    // chegou não vai a um terceiro.
+    if matches!(chamador, Chamador::Remoto { .. }) {
+        let motivo = if !politica::enlace::metodo_do_enlace(comando.nome) {
+            Some(
+                "de outro dispositivo so chegam fabric.send, fabric.discover, fabric.status e fabric.cancel",
+            )
+        } else if params.member(politica::enlace::PARAMETRO).is_some() {
+            Some("um pedido de outro dispositivo nao vai a um terceiro")
+        } else {
+            None
+        };
+        if let Some(motivo) = motivo {
+            let d = auditar(
+                &quem,
+                comando.nome,
+                "",
+                Codigo::DenyPermission,
+                parametros,
+                motivo,
+            );
+            return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
+        }
     }
     // Um journal recusado: as revogações que ele perdeu não se sabem, e
     // nenhuma credencial vale — ver `persistencia::revogacoes_desconhecidas`.
@@ -2351,7 +2658,14 @@ fn decidir_o_pedido(
             }
         }
     } else if exigida.is_some_and(Permissao::recurso_e_intencao) {
-        match crate::malha::recurso_do_pedido(chamador, quem.chave, comando, params) {
+        // Um pedido a outro dispositivo resolve a entrega no que este canal
+        // mandou a ele — ver `enlace::recurso_do_pedido`.
+        let resolvido = if params.member(politica::enlace::PARAMETRO).is_some() {
+            crate::enlace::recurso_do_pedido(chamador, comando, params)
+        } else {
+            crate::malha::recurso_do_pedido(chamador, quem.chave, comando, params)
+        };
+        match resolvido {
             Ok(intencao) => intencao,
             Err(motivo) => {
                 sem_recurso = Some(motivo);
@@ -2377,7 +2691,7 @@ fn decidir_o_pedido(
         // número existe; quem tem ouve `DENY_RESOURCE`, e a auditoria grava
         // o motivo.
         Acesso::Exige(permissao) if let Some(motivo) = sem_recurso => {
-            match decidir(quem.papel.as_deref(), permissao, "") {
+            match decidir_de(&quem, permissao, "") {
                 (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo),
                 outra => outra,
             }
@@ -2392,7 +2706,7 @@ fn decidir_o_pedido(
             decidir_contencao(quem.papel.as_deref(), permissao, comando.nome, &recurso)
         }
         Acesso::Exige(permissao) => todos_os_recursos(comando, &recurso, &mais)
-            .map(|r| decidir(quem.papel.as_deref(), permissao, r))
+            .map(|r| decidir_de(&quem, permissao, r))
             .find(|(c, _)| !c.permite())
             .unwrap_or((Codigo::Allow, "")),
     };
@@ -2409,6 +2723,26 @@ fn decidir_o_pedido(
                     (Codigo::DenyPolicy, sem_confianca.as_str())
                 }
                 None => (codigo, detalhe),
+            }
+        }
+        _ => (codigo, detalhe),
+    };
+    // O pedido da malha a outro dispositivo: a segunda permissão,
+    // `fabric.remote`, sobre o dispositivo — na mesma decisão, depois da
+    // primeira ter permitido.
+    let mut remoto = None;
+    let (codigo, detalhe) = match comando.acesso {
+        Acesso::Exige(_)
+            if codigo.permite()
+                && politica::enlace::metodo_do_enlace(comando.nome)
+                && params.member(politica::enlace::PARAMETRO).is_some() =>
+        {
+            match decidir_o_dispositivo(chamador, autoridade, &quem, params) {
+                Ok(d) => {
+                    remoto = Some(d);
+                    (codigo, detalhe)
+                }
+                Err(r) => r,
             }
         }
         _ => (codigo, detalhe),
@@ -2460,7 +2794,11 @@ fn decidir_o_pedido(
     }
     // O recurso da auditoria: todos, em ordem.
     let mut recurso_gravado = String::new();
-    for r in todos_os_recursos(comando, &recurso, &mais) {
+    let dispositivo_pedido = params
+        .member(politica::enlace::PARAMETRO)
+        .and_then(|v| v.as_str())
+        .filter(|_| politica::enlace::metodo_do_enlace(comando.nome));
+    for r in todos_os_recursos(comando, &recurso, &mais).chain(dispositivo_pedido) {
         if !recurso_gravado.is_empty() {
             recurso_gravado.push_str(" ; ");
         }
@@ -2492,6 +2830,7 @@ fn decidir_o_pedido(
         Chamador::Sessao(s) => (Pedinte::Canal(s), None),
         Chamador::Pessoa(_) => (Pedinte::Pessoa, None),
         Chamador::Processo { fio, programa, .. } => (Pedinte::Processo(fio), Some(programa)),
+        Chamador::Remoto { .. } => (Pedinte::Enlace, None),
     };
     let recursos: Vec<String> = todos_os_recursos(comando, &recurso, &mais)
         .map(String::from)
@@ -2508,8 +2847,63 @@ fn decidir_o_pedido(
             permissao,
             recursos,
             programa,
+            remoto,
         },
     }))
+}
+
+/// A segunda permissão de um pedido da malha a outro dispositivo:
+/// `fabric.remote` sobre `dispositivo:<nome>`, com o papel de quem pede —
+/// e o manifesto, se é um processo. Só quem age por uma pessoa fala com
+/// outro dispositivo, e o nome se resolve no espaço dela: o dispositivo de
+/// outra pessoa responde o mesmo que um que não existe. O suspenso não
+/// recebe nada daqui.
+fn decidir_o_dispositivo(
+    chamador: Chamador,
+    autoridade: Autoridade,
+    quem: &Quem,
+    params: Json,
+) -> Result<DispositivoDecidido, (Codigo, &'static str)> {
+    let pessoa = match autoridade {
+        Autoridade::Pessoa { sessao } => crate::pessoas::dona_da_sessao(sessao),
+        _ => None,
+    }
+    .ok_or((
+        Codigo::DenyPermission,
+        "so quem age por uma pessoa fala com outro dispositivo",
+    ))?;
+    if let Chamador::Processo { programa, .. } = chamador
+        && !programa.permite(Permissao::FabricRemote)
+    {
+        return Err((
+            Codigo::DenyPermission,
+            "o manifesto nao declara fabric.remote",
+        ));
+    }
+    let texto = params
+        .member(politica::enlace::PARAMETRO)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let nome = politica::arquivo::nome_de_dispositivo(texto).ok_or((
+        Codigo::InvalidArgument,
+        "`device` nao e `dispositivo:<nome>`",
+    ))?;
+    let (c, d) = decidir_de(quem, Permissao::FabricRemote, texto);
+    if !c.permite() {
+        return Err((c, d));
+    }
+    let (chave, relacao) = crate::dispositivos::da_pessoa(nome, &pessoa.0).ok_or((
+        Codigo::DenyResource,
+        "o dispositivo nao existe para quem pede",
+    ))?;
+    if crate::contencao::dispositivo_suspenso(&chave) {
+        return Err((Codigo::DenyCredential, "dispositivo suspenso"));
+    }
+    Ok(DispositivoDecidido {
+        recurso: String::from(texto),
+        chave,
+        relacao: relacao.id,
+    })
 }
 
 /// Grava um pedido que não chegou a ser um comando: JSON quebrado, método
@@ -2537,6 +2931,14 @@ pub fn auditar_invalido(chamador: Chamador, metodo: &str, parametros: &[u8], det
             q.processo = Some(pelo_processo(fio, &programa));
             q
         }
+        Chamador::Remoto {
+            dispositivo,
+            relacao,
+            programa,
+            ..
+        } => match quem_do_dispositivo(dispositivo, relacao, Some(programa)) {
+            Ok(q) | Err(q) => q,
+        },
     };
     if passar_pela_taxa(&quem, metodo, parametros).is_err() {
         return;
@@ -2718,7 +3120,9 @@ pub fn auditar_execucao_do_processo(
 fn credenciada(a: Autoridade) -> bool {
     matches!(
         a,
-        Autoridade::Sessao { chave: Some(_), .. } | Autoridade::Pessoa { .. }
+        Autoridade::Sessao { chave: Some(_), .. }
+            | Autoridade::Pessoa { .. }
+            | Autoridade::Remoto { .. }
     )
 }
 
@@ -2767,6 +3171,13 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
             Ok(q) | Err(q) => q,
         },
         AtorDeMensagem::Autoridade(Autoridade::Servico(s)) => quem_do_servico(s),
+        AtorDeMensagem::Autoridade(Autoridade::Remoto {
+            dispositivo,
+            relacao,
+            ..
+        }) => match quem_do_dispositivo(dispositivo, relacao, None) {
+            Ok(q) | Err(q) => q,
+        },
         AtorDeMensagem::Dono(Dono::Serial) => {
             quem_da_autoridade(crate::agent::sessao::SERIAL, None)
         }
@@ -2782,6 +3193,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 papel: crate::pessoas::pessoa(id).map(|p| p.papel),
                 processo: None,
                 servico: None,
+                remoto: None,
             }
         }
         AtorDeMensagem::Dono(Dono::Administrador(k)) => {
@@ -2795,6 +3207,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
                 papel: papel.and_then(|(_, p)| p),
                 processo: None,
                 servico: None,
+                remoto: None,
             }
         }
         AtorDeMensagem::Kernel => Quem {
@@ -2806,6 +3219,7 @@ fn quem_do_ator(ator: AtorDeMensagem) -> Quem {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         },
     }
 }
@@ -3053,6 +3467,13 @@ fn quem_do_processo(autoridade: Autoridade) -> Quem {
             Ok(q) | Err(q) => q,
         },
         Autoridade::Servico(s) => quem_do_servico(s),
+        Autoridade::Remoto {
+            dispositivo,
+            relacao,
+            ..
+        } => match quem_do_dispositivo(dispositivo, relacao, None) {
+            Ok(q) | Err(q) => q,
+        },
     }
 }
 
@@ -3138,6 +3559,7 @@ pub fn permitir_aperto(p: u8) -> bool {
             papel: None,
             processo: None,
             servico: None,
+            remoto: None,
         };
         auditar(
             &quem,
@@ -3173,8 +3595,81 @@ pub fn auditar_aperto(p: u8, chave: Option<[u8; 32]>, nome: &str, codigo: Codigo
         papel,
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, "session.open", "", codigo, &[], detalhe);
+}
+
+/// Se a vaga `v` do enlace pode fazer mais um aperto: o mesmo limite da
+/// política que o canal do agente, numa conta à parte. Grava a primeira
+/// recusa a mais da janela, e conta as outras.
+pub fn permitir_aperto_do_enlace(v: u8) -> bool {
+    let Some(i) = v
+        .checked_sub(crate::rede::canal::VAGAS + 1)
+        .map(usize::from)
+        .filter(|&i| i < crate::rede::canal::VAGAS_DO_ENLACE as usize)
+    else {
+        return false;
+    };
+    let limite = com_politica(|pol| pol.apertos());
+    let agora = crate::tempo::uptime_ms();
+    let (passou, primeiro) = crate::arch::sem_interrupcoes(|| {
+        let mut t = TAXAS.lock();
+        if t.janelas_do_enlace[i].contar(limite, agora) {
+            t.apertos_do_enlace_suprimidos[i] = 0;
+            (true, false)
+        } else {
+            t.apertos_do_enlace_suprimidos[i] += 1;
+            (false, t.apertos_do_enlace_suprimidos[i] == 1)
+        }
+    });
+    if !passou && primeiro {
+        auditar_aperto_do_enlace(
+            None,
+            "",
+            Codigo::RateLimit,
+            "apertos de enlace demais na janela",
+        );
+    }
+    passou
+}
+
+/// Só para a suíte: as janelas de apertos do enlace recomeçam — cada caso
+/// faz os apertos dele sem herdar a conta do anterior.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_apertos_do_enlace_de_teste() {
+    crate::arch::sem_interrupcoes(|| {
+        let mut t = TAXAS.lock();
+        t.janelas_do_enlace = [Janela::NOVA; crate::rede::canal::VAGAS_DO_ENLACE as usize];
+        t.apertos_do_enlace_suprimidos = [0; crate::rede::canal::VAGAS_DO_ENLACE as usize];
+    });
+}
+
+/// Grava um aperto de enlace: o que entrou, como o dispositivo do registro
+/// daqui; o recusado, de ninguém ainda, com a chave que ele alegou.
+pub fn auditar_aperto_do_enlace(
+    chave: Option<[u8; 32]>,
+    nome: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) {
+    let titular = if codigo.permite() {
+        Titular::Dispositivo
+    } else {
+        Titular::Anonimo
+    };
+    let quem = Quem {
+        titular,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: nome.to_string(),
+        chave,
+        papel: None,
+        processo: None,
+        servico: None,
+        remoto: None,
+    };
+    auditar(&quem, "link.open", "", codigo, &[], detalhe);
 }
 
 /// Decide uma operação administrativa, já com a prova conferida: o papel do
@@ -3210,6 +3705,7 @@ pub fn contar_administracao(nome: &str, papel: &str, metodo: &'static str, permi
         papel: Some(papel.to_string()),
         processo: None,
         servico: None,
+        remoto: None,
     };
     contar(&quem, metodo, Some(permissao));
 }
@@ -3242,6 +3738,7 @@ pub fn auditar_administracao(
         papel: papel.map(ToString::to_string),
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -3275,6 +3772,7 @@ pub fn auditar_quorum(
         papel: papel.map(ToString::to_string),
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, metodo, recurso, codigo, parametros, detalhe)
 }
@@ -3303,6 +3801,7 @@ pub fn auditar_pessoa(
         papel: papel.map(ToString::to_string),
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }
@@ -3333,6 +3832,7 @@ pub fn auditar_pessoa_recusada_com(
         papel: None,
         processo: None,
         servico: None,
+        remoto: None,
     };
     auditar(&quem, metodo, recurso, codigo, &[], detalhe);
 }

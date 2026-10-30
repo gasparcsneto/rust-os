@@ -196,6 +196,9 @@ pub struct Lida {
     pub intencao: String,
     /// O programa que mandou, se foi um processo — conferido pelo kernel.
     pub de: Option<Programa>,
+    /// O canal de quem mandou: um processo, uma sessão, ou outro
+    /// dispositivo pelo enlace — o que o kernel diz a quem recebe.
+    pub canal: Canal,
     pub corpo: Corpo,
     pub criada_ms: u64,
     pub vence_ms: u64,
@@ -618,6 +621,7 @@ impl Malha {
                 id: m.id,
                 intencao: m.intencao.clone(),
                 de: m.de.processo.as_ref().map(|(_, p)| p.clone()),
+                canal: m.de.canal,
                 corpo: m.corpo.clone(),
                 criada_ms: m.criada_ms,
                 vence_ms: m.vence_ms,
@@ -783,6 +787,14 @@ impl Malha {
         self.anular_onde(|m| mortos.contains(&m.para))
     }
 
+    /// Anula as entregas vivas mandadas pelos canais que `de` escolhe, e as
+    /// janelas deles saem — o dispositivo revogado ou suspenso: o que ele
+    /// mandou e ninguém confirmou não chega mais a quem recebe.
+    pub fn anular_de(&mut self, de: impl Fn(&Canal) -> bool) -> Vec<Transicao> {
+        self.janelas.retain(|c, _| !de(c));
+        self.anular_onde(|m| de(&m.de.canal))
+    }
+
     /// O canal acabou — a sessão fechou, o processo morreu —: a janela de
     /// nonces dele sai. Um canal novo conta do zero.
     pub fn canal_acabou(&mut self, canal: Canal) {
@@ -941,6 +953,82 @@ mod testes {
             assert!(!intencao_valida(ruim), "{ruim}");
         }
         assert!(!intencao_valida(&"a.b".repeat(17)));
+    }
+
+    /// O canal de outro dispositivo: a janela é da (chave, relação, época),
+    /// quem recebe vê de onde veio, e a revogação dele anula o que ele
+    /// mandou — e só o que ele mandou —, com a janela.
+    #[test]
+    fn o_canal_de_outro_dispositivo() {
+        let remoto = |epoca: u8| Canal::Remoto {
+            dispositivo: [0xD1; 32],
+            relacao: [0x5A; 16],
+            epoca: [epoca; 8],
+        };
+        let de = |c: Canal| Origem {
+            canal: c,
+            processo: None,
+        };
+        let (mut m, e) = com_correio();
+        let a = m
+            .enviar(P1, de(remoto(1)), e, "imagem.compartilhar", "x", 1, None, 0)
+            .0
+            .unwrap();
+        // O mesmo nonce, o mesmo conteúdo: o mesmo id. Outro conteúdo:
+        // replay.
+        let b = m
+            .enviar(P1, de(remoto(1)), e, "imagem.compartilhar", "x", 1, None, 0)
+            .0
+            .unwrap();
+        assert!(b.duplicata && b.id == a.id);
+        assert_eq!(
+            m.enviar(P1, de(remoto(1)), e, "imagem.compartilhar", "y", 1, None, 0)
+                .0,
+            Err(Recusa::Replay)
+        );
+        // Outra época — o boot seguinte da origem — é outro canal: o nonce
+        // 1 é novo nele.
+        let c = m
+            .enviar(P1, de(remoto(2)), e, "imagem.compartilhar", "y", 1, None, 0)
+            .0
+            .unwrap();
+        assert!(!c.duplicata);
+        // Um processo local manda também.
+        let d = m
+            .enviar(
+                P1,
+                de_processo(30, "fotos"),
+                e,
+                "imagem.compartilhar",
+                "z",
+                1,
+                None,
+                0,
+            )
+            .0
+            .unwrap();
+        // Quem recebe vê o canal de cada uma, e nenhum programa local nas
+        // remotas.
+        let lidas = m.receber(P1, 20, e, 0, 8, 0).0.unwrap();
+        assert_eq!(lidas.len(), 3);
+        assert_eq!((lidas[0].canal, lidas[0].de.is_none()), (remoto(1), true));
+        assert_eq!(lidas[2].canal, Canal::Processo(30));
+        // A revogação do dispositivo anula as duas dele, e não a local.
+        let anuladas = m.anular_de(
+            |c| matches!(c, Canal::Remoto { dispositivo, .. } if *dispositivo == [0xD1; 32]),
+        );
+        let ids: Vec<u64> = anuladas.iter().map(|t| t.id).collect();
+        assert_eq!(ids, alloc::vec![a.id, c.id]);
+        assert!(anuladas.iter().all(|t| t.estado == Estado::Anulada));
+        assert_eq!(m.quantas_vivas(), 1);
+        assert!(m.vivas.iter().any(|v| v.id == d.id));
+        // A janela dele saiu com elas: o mesmo nonce, depois, é novo.
+        let e2 = m
+            .enviar(P1, de(remoto(1)), e, "imagem.compartilhar", "w", 1, None, 0)
+            .0
+            .unwrap();
+        assert!(!e2.duplicata);
+        assert!(m.coerente());
     }
 
     #[test]

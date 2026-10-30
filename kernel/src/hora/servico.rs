@@ -238,8 +238,9 @@ fn datagrama(r: &[u8]) -> Option<Vec<u8>> {
 /// O base64 do gate — o pedido de `time.request`, o datagrama de
 /// `net.recv` —, de volta aos bytes. Estrito: múltiplo de quatro, o
 /// preenchimento só no fim. Cada cliente da interface tem o seu, como os
-/// programas; o do NSF é dele.
-fn de_base64(texto: &str) -> Option<Vec<u8>> {
+/// programas; o do NSF é dele. O serviço de enlace, outro fio do kernel que
+/// fala pelo gate, usa este.
+pub(crate) fn de_base64(texto: &str) -> Option<Vec<u8>> {
     let t = texto.as_bytes();
     if !t.len().is_multiple_of(4) {
         return None;

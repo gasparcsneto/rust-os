@@ -116,6 +116,16 @@ pub enum Canal {
     /// um processo que gastasse nonces da porta do agente recusaria os
     /// envios dele, ou os do agente que entrasse depois naquela porta.
     Processo(u64),
+    /// Outro dispositivo, pelo enlace: a chave dele, a relação pela qual
+    /// pede e a época do boot dele. A janela atravessa as reconexões do
+    /// enlace num mesmo boot da origem — o reenvio depois de uma queda é
+    /// reconhecido —, e um boot da origem é um canal novo: os nonces dela
+    /// recomeçam sem cair como replay na janela velha. Só a malha o usa.
+    Remoto {
+        dispositivo: [u8; 32],
+        relacao: [u8; 16],
+        epoca: [u8; 8],
+    },
 }
 
 /// Onde uma mensagem está.

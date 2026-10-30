@@ -47,6 +47,7 @@ pub mod caminho;
 pub mod codigo;
 pub mod dispositivos;
 pub mod endereco;
+pub mod enlace;
 pub mod explicacao;
 pub mod malha;
 pub mod manifesto;

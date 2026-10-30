@@ -2054,6 +2054,9 @@ fn revogar_dispositivo(
     }
     let saiu =
         crate::dispositivos::revogar(&alvo.chave).map_err(|r| falha(r.codigo(), r.motivo()))?;
+    // Com a lápide já no registro: os enlaces dele caem, as entregas que ele
+    // mandou e os pedidos daqui a ele são anulados.
+    crate::enlace::dispositivo_revogado(&saiu.chave);
     crate::log_info!(
         "admin",
         "dispositivo {} ({}) revogado: {} relacao(oes), lapide na chave",
@@ -2094,6 +2097,9 @@ fn conter_dispositivo_pela_prova(
     } else {
         crate::contencao::soltar(&alvo)
     };
+    if conter {
+        crate::enlace::dispositivo_saiu(&d.chave, Codigo::DenyCredential, "dispositivo suspenso");
+    }
     let _ = w.field_str("target", &alvo.texto());
     let _ = w.field_bool("contained", crate::contencao::contido(&alvo));
     let _ = w.field_bool("changed", feito.mudou);

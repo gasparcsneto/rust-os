@@ -77,6 +77,7 @@ mod copia;
 mod dispositivos;
 mod e1000;
 mod energia;
+mod enlace;
 mod eventos;
 mod fios;
 mod frames;
@@ -634,6 +635,16 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
                 "canal do agente por TCP na porta {}",
                 rede::canal::PORTA
             );
+            // E uma por vaga do enlace entre dispositivos, na porta dele: o
+            // firewall só deixa o SYN entrar com uma relação — ver
+            // `enlace` —, e o serviço que leva os pedidos daqui ao par.
+            const DO_ENLACE: [&str; rede::canal::VAGAS_DO_ENLACE as usize] =
+                ["enlace 1", "enlace 2", "enlace 3", "enlace 4"];
+            for (i, nome) in DO_ENLACE.iter().enumerate() {
+                let v = rede::canal::VAGAS + 1 + i as u8;
+                executor.lancar(tarefas::Tarefa::nova(nome, enlace::atender(v)));
+            }
+            enlace::iniciar();
         }
         executor.lancar(tarefas::Tarefa::nova("pulso", pulso()));
         // Os pedidos dos programas ao registro — ver `nativo`.

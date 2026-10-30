@@ -26,6 +26,10 @@
 //! - [`Tipo::Recusa`]: o Duke recusou o aperto. O corpo é o motivo, em
 //!   claro — não há chave com que cifrá-lo, e ele não diz nada que quem
 //!   tentou não saiba.
+//! - [`Tipo::InicioEnlace`]: a primeira mensagem do aperto de um enlace
+//!   entre dois Dukes — com o prólogo do enlace, consultando o registro de
+//!   dispositivos, e nunca o de agentes. A vaga do agente recusa este tipo,
+//!   e a do enlace recusa o [`Tipo::Inicio`].
 
 use alloc::vec::Vec;
 
@@ -46,6 +50,8 @@ pub enum Tipo {
     Dados = 3,
     /// O aperto foi recusado; o corpo é o motivo.
     Recusa = 4,
+    /// A primeira mensagem do aperto de um enlace entre dispositivos.
+    InicioEnlace = 5,
 }
 
 impl Tipo {
@@ -55,6 +61,7 @@ impl Tipo {
             2 => Self::Resposta,
             3 => Self::Dados,
             4 => Self::Recusa,
+            5 => Self::InicioEnlace,
             _ => return None,
         })
     }
@@ -169,6 +176,13 @@ mod testes {
         assert_eq!(q[0], (Tipo::Dados, b"a\nb\n".to_vec()));
         assert_eq!(q[1], (Tipo::Recusa, Vec::new()));
         assert_eq!(q[2], (Tipo::Inicio, alloc::vec![0u8; 300]));
+    }
+
+    #[test]
+    fn o_inicio_do_enlace_e_um_tipo_proprio() {
+        let q = ler_tudo(&montar(Tipo::InicioEnlace, b"ik").unwrap());
+        assert_eq!(q, alloc::vec![(Tipo::InicioEnlace, b"ik".to_vec())]);
+        assert_ne!(Tipo::InicioEnlace, Tipo::Inicio);
     }
 
     #[test]

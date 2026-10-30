@@ -117,8 +117,9 @@ pub fn titular_da_autoridade(autoridade: crate::autorizacao::Autoridade) -> Opti
             chave: Some(k),
         }),
         Autoridade::Pessoa { sessao } => titular_da_pessoa(sessao),
-        // Um serviço não arrenda nada: não é quem edita.
-        Autoridade::Servico(_) => None,
+        // Um serviço não arrenda nada: não é quem edita. Nem outro
+        // dispositivo: só a malha lhe responde.
+        Autoridade::Servico(_) | Autoridade::Remoto { .. } => None,
     }
 }
 

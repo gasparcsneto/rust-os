@@ -5,8 +5,9 @@
 //! e espera o que chega, com `fabric.recv` e `wait` — o pedido dorme no
 //! kernel, sem gastar a taxa a cada volta. Cada entrega nova ele diz
 //! `correio: recebi <corpo> de <programa> <resumo>` — o programa e o resumo
-//! que o kernel conferiu, ou `titular` se veio da sessão, sem programa — e
-//! a confirma com a resposta `guardada:<corpo>`.
+//! que o kernel conferiu, `titular` se veio da sessão, sem programa, ou o
+//! dispositivo, se veio de outro pelo enlace — e a confirma com a resposta
+//! `guardada:<corpo>`.
 //!
 //! O corpo [`FIM`] encerra o programa com [`CODIGO`]. Uma recusa do gate ou
 //! da malha — o endpoint que fechou, a pessoa que saiu, a chave revogada, a
@@ -60,8 +61,11 @@ fn principal() -> i64 {
             }
         };
         for e in entregas {
-            match &e.de {
-                Some((programa, resumo)) => {
+            match (&e.de, &e.dispositivo) {
+                (_, Some(dispositivo)) => {
+                    escreverln!("correio: recebi {} de {}", e.corpo, dispositivo);
+                }
+                (Some((programa, resumo)), None) => {
                     escreverln!(
                         "correio: recebi {} de {} {}",
                         e.corpo,
@@ -69,7 +73,7 @@ fn principal() -> i64 {
                         resumo.get(..8).unwrap_or(resumo)
                     );
                 }
-                None => {
+                (None, None) => {
                     escreverln!("correio: recebi {} de titular", e.corpo);
                 }
             }

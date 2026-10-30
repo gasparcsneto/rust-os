@@ -272,8 +272,9 @@ impl Remetente {
                 }
                 _ => return None,
             },
-            // Um serviço não tem caixa.
-            Autoridade::Servico(_) => return None,
+            // Um serviço não tem caixa, nem outro dispositivo: as mensagens
+            // são entre titulares daqui.
+            Autoridade::Servico(_) | Autoridade::Remoto { .. } => return None,
         };
         // Um programa age como quem o lançou, mas conta os nonces dele na
         // própria janela — ver [`Canal::Processo`].

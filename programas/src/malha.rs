@@ -90,8 +90,12 @@ pub struct Entrega {
     pub id: String,
     pub intencao: String,
     /// O programa que mandou, com o resumo — `None` se foi a sessão do
-    /// titular, sem programa.
+    /// titular, sem programa, ou outro dispositivo.
     pub de: Option<(String, String)>,
+    /// O dispositivo que mandou, `dispositivo:<nome>` como o registro daqui
+    /// o chama — `None` se veio desta máquina. O programa de lá não vem: o
+    /// kernel daqui não o conferiu.
+    pub dispositivo: Option<String>,
     pub corpo: String,
     pub estado: String,
     pub versao: u64,
@@ -201,6 +205,7 @@ pub fn receber(endpoint: &str, apos: Option<&str>, espera_ms: u64) -> Result<Vec
             id: texto(e, "id").ok_or(Falha::Resposta)?,
             intencao: texto(e, "intent").ok_or(Falha::Resposta)?,
             de,
+            dispositivo: texto(e, "device"),
             corpo: texto(e, "body").ok_or(Falha::Resposta)?,
             estado: texto(e, "state").ok_or(Falha::Resposta)?,
             versao: e

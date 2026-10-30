@@ -29,6 +29,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use politica::Codigo;
 pub use politica::dispositivos::{Dispositivo, Relacao, TAM_ID};
@@ -38,8 +39,18 @@ use crate::trava::Mutex;
 
 static REGISTRO: Mutex<Registro> = Mutex::new(Registro::novo());
 
+/// Se há ao menos uma relação: a porta do enlace só escuta com ela — ver
+/// [`ha_relacao`]. Um atômico, e não uma pergunta ao registro, porque quem
+/// pergunta é a pilha, com a trava dela na mão, a cada volta.
+static COM_RELACAO: AtomicBool = AtomicBool::new(false);
+
 fn com_registro<R>(f: impl FnOnce(&mut Registro) -> R) -> R {
-    crate::arch::sem_interrupcoes(|| f(&mut REGISTRO.lock()))
+    crate::arch::sem_interrupcoes(|| {
+        let mut r = REGISTRO.lock();
+        let x = f(&mut r);
+        COM_RELACAO.store(r.quantas_relacoes() > 0, Ordering::Release);
+        x
+    })
 }
 
 /// Por que um registro de dispositivo foi recusado.
@@ -195,6 +206,32 @@ pub fn dispositivo(chave: &[u8; 32]) -> Option<Dispositivo> {
 /// O dispositivo de nome `nome`.
 pub fn por_nome(nome: &str) -> Option<Dispositivo> {
     com_registro(|r| r.por_nome(nome).cloned())
+}
+
+/// A relação `id` do dispositivo `chave`, com o nome dele: o que o destino
+/// procura a cada pedido que chega pelo enlace. Sem ela — o dispositivo
+/// revogado, a relação que não é daquele par —, nada.
+pub fn relacao(chave: &[u8; 32], id: &[u8; TAM_ID]) -> Option<(String, Relacao)> {
+    com_registro(|r| {
+        let d = r.dispositivo(chave)?;
+        Some((d.nome.clone(), d.relacao(id)?.clone()))
+    })
+}
+
+/// O dispositivo de nome `nome` e a relação dele com a pessoa `pessoa`: o
+/// recurso `dispositivo:<nome>` se resolve no espaço de quem pede, e o
+/// nome de outra pessoa responde o mesmo que um que não existe.
+pub fn da_pessoa(nome: &str, pessoa: &[u8; 8]) -> Option<([u8; 32], Relacao)> {
+    com_registro(|r| {
+        r.da_pessoa(nome, pessoa)
+            .map(|(d, rel)| (d.chave, rel.clone()))
+    })
+}
+
+/// Se há ao menos uma relação: sem nenhuma, a porta do enlace não escuta —
+/// o firewall não deixa entrar o SYN.
+pub fn ha_relacao() -> bool {
+    COM_RELACAO.load(Ordering::Acquire)
 }
 
 /// Para o invariante da suíte: o registro nunca quebra as regras dele, e
