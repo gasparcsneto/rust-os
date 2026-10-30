@@ -117,7 +117,9 @@ fotografia, na diferença, na base da compactação e na reposição do boot.
    o dispositivo de outra pessoa não existe para quem pede
    (`DENY_RESOURCE`). Suspenso, `DENY_CREDENTIAL`.
 2. O pedido entra na **tabela da origem** (`politica::enlace`), na ordem
-   das gravações e reconfirmado; quem pede **suspende**. O nonce do
+   das gravações e **reconfirmado** — a política que perdeu
+   `fabric.remote`, o dispositivo revogado ou suspenso entre a decisão e o
+   commit recusam aqui, e nada entra na fila; quem pede **suspende**. O nonce do
    processo é mapeado para o nonce do enlace daquela relação: o reenvio
    com o mesmo nonce é o mesmo pedido; um nonce velho é replay, recusado
    aqui sem gastar nonce do enlace.
@@ -126,6 +128,9 @@ fotografia, na diferença, na base da compactação e na reposição do boot.
    ativa e o dispositivo não está suspenso, conecta ao endereço da relação
    **pelo gate** (`net.connect`, `net.send`, `net.recv`, `net.close`, cada
    um decidido e gravado), faz o aperto com a chave do Duke e leva a linha.
+   O que a revogação, a suspensão, o prazo ou o fim de quem pediu tirou do
+   caminho não chega ao par — nem o aperto, se saiu antes dele, nem a
+   linha, se saiu durante ele.
 4. A resposta acorda quem esperava, e a reexecução a lê: `{"ok":…,
    "device":…,"remote":{…}}` — a resposta da malha de lá — ou a recusa,
    com o código de quem recusou.
@@ -170,7 +175,10 @@ De cada lado, a auditoria única de sempre:
   `net.*` do serviço, e o desfecho (`respondido pelo par`, ou a recusa);
 - no destino: `link.open` (o aperto completo, com o nome e a chave; o
   recusado, com a chave alegada e o motivo), e cada pedido decidido pela
-  relação, com o programa que a origem atesta.
+  relação, com o programa que a origem atesta. O motivo de cada recusa de
+  lá cabe inteiro no teto do detalhe (96 bytes) depois da relação e do
+  programa — um comando de fora do conjunto fechado é recusado por isso,
+  antes de qualquer outra conferência.
 
 ## O que fica de fora
 
@@ -192,8 +200,11 @@ auditoria. O autosserviço da pessoa (D8) é do estágio 2.
   suspensão; a entrega pelo enlace, o conjunto fechado, a autoridade
   composta, o aperto contra o registro, o replay e o reenvio, a revogação
   e a suspensão derrubando o enlace, a revogação no meio (na
-  reconfirmação), a origem que decide e leva, as recusas da origem, a
-  revogação com o pedido a caminho, e mandar e revogar ao mesmo tempo.
+  reconfirmação), a origem que decide e leva, as recusas da origem — cada
+  uma da decisão, sem `ALLOW` nenhum —, a revogação com o pedido a caminho,
+  a revogação no meio do aperto do serviço, a origem que reconfirma no
+  commit (a política e a revogação entre a decisão e a fila), e mandar e
+  revogar ao mesmo tempo.
 - **Bancada de duas máquinas** (`cargo xtask enlace`): dois Dukes de pé ao
   mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
   rede do emulador e pela ponte da bancada. O administrador registra a
@@ -204,3 +215,24 @@ auditoria. O autosserviço da pessoa (D8) é do estágio 2.
   energia de B (a relação volta do journal), a revogação em B (a lápide,
   também depois de outro corte; a porta fechada) e em A. Nos quatro pares:
   x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64.
+- **Mutações**: vinte e nove, uma de cada vez — seis nas contas puras e
+  no `sigilo` (hospedeiro), vinte no kernel (os casos `enlace:` da suíte
+  x86) e três que só a bancada mostra (a porta que escuta sem relação, a
+  lápide e a relação que não voltam do journal). Todas reprovam. Na
+  primeira rodada sete sobreviveram, porque os casos conferiam só o
+  código, e outra camada devolvia o mesmo; os casos passaram a conferir o
+  motivo inteiro de cada recusa, nenhuma decisão `ALLOW` onde a origem
+  recusa, a política que deixa um comando de fora passar pela relação,
+  pela pessoa e pelo teto, a revogação no meio do aperto e a reconfirmação
+  da origem — e acharam dois motivos de recusa remota que passavam do teto
+  do detalhe da auditoria. A tabela está no README.
+
+## Medidas
+
+Pela bancada, com cada pedido num enlace novo (a conexão pelo gate, o
+aperto, o pedido, a decisão e a execução lá, a resposta), kernels de
+debug e as duas máquinas emuladas no mesmo hospedeiro: um pedido ao outro
+dispositivo leva de **0,7 a 2 s** — o aperto domina. O prazo da conversa
+(8 s) fica com folga de 4× sobre o pior medido; a espera de quem pede
+(10 s), com folga maior. O kernel de produção cresceu 300 672 bytes
+carregáveis no x86 e 185 460 no ARM, contra a malha.

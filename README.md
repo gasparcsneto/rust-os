@@ -8562,11 +8562,13 @@ se guarda para depois.
 **Testes.** No hospedeiro, as contas puras — o registro e a lápide, a
 tabela da origem, os nonces e as cotas, o canal remoto da malha — e o
 prólogo e o quadro do enlace. Na suíte, nas duas arquiteturas, cinco casos
-`dispositivos:` e doze `enlace:` — a entrega pela malha, o conjunto
+`dispositivos:` e catorze `enlace:` — a entrega pela malha, o conjunto
 fechado, a autoridade composta, o aperto contra o registro, o replay e o
 reenvio, a revogação e a suspensão derrubando o enlace, a revogação no
 meio (na reconfirmação), a origem que decide e leva, as recusas da origem,
-a revogação com o pedido a caminho, e mandar e revogar ao mesmo tempo. E a
+a revogação com o pedido a caminho, a revogação no meio do aperto do
+serviço, a origem que reconfirma no commit, e mandar e revogar ao mesmo
+tempo. E a
 **bancada de duas máquinas**, `cargo xtask enlace`: dois Dukes de pé ao
 mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
 rede do emulador; o administrador registra a relação nos dois, a pessoa
@@ -8575,6 +8577,66 @@ entra no Terminal das duas pelo teclado, o `carteiro` de uma manda ao
 suspensão nos dois lados, o corte de energia do destino, a revogação nos
 dois. Nos quatro pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e
 aarch64→aarch64.
+
+### As mutações do enlace
+
+Vinte e nove mutações contra o que o estágio promete — uma de cada vez,
+no repositório: seis contra as contas puras e o `sigilo`, que os testes
+do hospedeiro pegam; vinte contra o kernel, pelos casos `enlace:` da
+suíte x86; e três que só duas máquinas de pé mostram, pela bancada
+`cargo xtask enlace` (x86_64→aarch64). O controle, sem mutação, passa em
+tudo. Na primeira rodada, sete sobreviveram, e nenhuma por ser
+equivalente: os casos conferiam o código da resposta, e outra camada
+devolvia o mesmo código. Sem o conjunto fechado, ou com o `device`
+aceito de lá, o papel da relação, o teto e o "só um processo" recusavam
+com o mesmo `DENY_PERMISSION`; sem a recusa de `fabric.remote`, do
+manifesto ou do dispositivo suspenso na decisão da origem, a
+reconfirmação no commit recusava o mesmo — depois de o gate ter deixado;
+e nenhum caso tirava o pedido do caminho no meio do aperto do serviço,
+nem mudava a autoridade entre a decisão e o commit da origem. Os casos
+ganharam o motivo de cada recusa, inteiro; a política que deixa um
+comando de fora passar pela relação, pela pessoa e pelo teto; nenhuma
+decisão `ALLOW` onde a origem recusa; e dois casos novos — a revogação no
+meio do aperto e a origem que reconfirma no commit. **As vinte e nove
+reprovam.** O reforço achou um defeito: com a relação e o programa
+atestado na frente, dois motivos de recusa de outro dispositivo passavam
+do teto do detalhe da auditoria (96 bytes) e eram cortados; o conjunto
+fechado passou a ser conferido antes do "só um processo", com um motivo
+que cabe.
+
+| Mutação | Reprovada por |
+|---|---|
+| o conjunto fechado aceita qualquer método; o mesmo nonce com outro conteúdo não é replay na origem; a lápide não impede o registro de novo; a relação resolve para qualquer pessoa | os testes do hospedeiro de `politica::enlace` e `politica::dispositivos` (quatro mutações) |
+| o prólogo do enlace é o do canal do agente; o quadro de início do enlace é lido como o do agente | os testes do `sigilo` (duas mutações) |
+| a autoridade no destino é só o papel da relação; o papel da pessoa, ou o teto `remoto`, fora da interseção | `enlace: a autoridade composta…` (três mutações) |
+| de outro dispositivo chega qualquer comando; o pedido de lá vai a um terceiro | `enlace: so o conjunto fechado…`, pelo motivo da recusa (duas mutações) |
+| a reconfirmação no commit do destino deixa passar a relação que saiu | `enlace: a revogacao no meio, na reconfirmacao` |
+| o aperto aceita uma chave fora do registro, ou não confere a suspensão | `enlace: o aperto confere o registro…` e `…a suspensao derruba e volta` (duas mutações) |
+| a revogação e a suspensão não derrubam os enlaces; a revogação não anula as entregas vivas | `…a revogacao derruba o enlace e anula`, `…a suspensao derruba e volta` e, a segunda, `…mandar e revogar ao mesmo tempo` (duas mutações) |
+| a malha do destino atende o dispositivo como o sistema; o programa atestado não vai à auditoria de lá | `…o par entrega pela malha daqui` (duas mutações) |
+| a origem não decide `fabric.remote`; o manifesto sem `fabric.remote`; o dispositivo suspenso não é recusado na origem | `enlace: a origem recusa no gate daqui`, por nenhuma decisão `ALLOW` (três mutações) |
+| quem não age por uma pessoa fala com outro dispositivo; o dispositivo resolvido fora do espaço da pessoa | `enlace: a origem recusa no gate daqui` (duas mutações) |
+| a revogação não falha os pedidos daqui a caminho | `enlace: a origem e a revogacao com o pedido a caminho` |
+| o pedido sai ao par sem conferir que ainda está a caminho | `enlace: a origem e a revogacao no meio do aperto` |
+| a origem não reconfirma antes de pôr o pedido na fila | `enlace: a origem reconfirma no commit` |
+| a porta do enlace escuta sem relação | a bancada: revogada a relação no destino, o pedido da origem tinha de achar a porta fechada (`ERROR`), e achou o aperto recusado (`DENY_NOT_AUTHENTICATED`) |
+| a lápide, ou a relação, não volta do journal | a bancada, depois do corte de energia do destino: a chave revogada foi aceita de novo; a porta não escutava, sem a relação (duas mutações) |
+
+No ARM, o controle — os casos `enlace:`, `dispositivos:` e `malha:`, os
+reforçados e os novos — passa, com a correção do gate.
+
+O kernel de produção cresceu 300 672 bytes nos segmentos carregáveis no
+x86 (+6,78%) e 185 460 no ARM (+4,96%), contra a malha (`71f0457`): o
+registro de dispositivos, o enlace — o respondedor, a origem e o serviço
+—, a autoridade composta no gate e as contas puras da política. O
+iniciador não mudou. O `carteiro`, novo, é de teste: 33 696 bytes no x86,
+33 232 no ARM. Dos 47 programas que já existiam, 11 saem idênticos byte a
+byte; os outros 36 ligam as bibliotecas que mudaram — a `programas`, com o
+runtime remoto, e o `sigilo`, com o prólogo e o quadro do enlace —, e o
+código ligado se rearranja: o `.text` muda de −148 a +1 168 bytes, o
+arquivo fica do mesmo tamanho em 32 deles no x86 e em 35 no ARM, três
+programas TLS no x86 e um no ARM ocupam uma página a mais, e o
+`insistente` do x86, 24 bytes. Entre os 36, só a fonte do `correio` mudou.
 
 ## Barramento PCI
 
