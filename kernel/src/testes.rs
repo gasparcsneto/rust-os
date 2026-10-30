@@ -37016,6 +37016,10 @@ static CASOS: &[Caso] = &[
         f: malha_mandar_ler_e_revogar_ao_mesmo_tempo,
     },
     Caso {
+        nome: "malha: o prazo vence sozinho, e vai para a auditoria",
+        f: malha_o_prazo_vence_sozinho,
+    },
+    Caso {
         nome: "malha: o custo de uma entrega",
         f: malha_o_custo_de_uma_entrega,
     },
@@ -70570,7 +70574,7 @@ fn malha_com_o_desligamento_a_caminho_nada_nasce() -> Resultado {
     })
 }
 
-/// Ao mesmo tempo: quatro fios mandando ao mesmo endpoint, cada um pelo seu
+/// Ao mesmo tempo: três fios mandando ao mesmo endpoint, cada um pelo seu
 /// canal, enquanto o dono lê e confirma e a chave é revogada no meio. Ao
 /// fim, a tabela é coerente, nada da chave revogada está vivo, e cada
 /// entrega aceita teve fim gravado: confirmada pelo dono, ou anulada pela
@@ -70702,6 +70706,100 @@ fn malha_mandar_ler_e_revogar_ao_mesmo_tempo() -> Resultado {
                     crate::log_error!("teste", "{}: {} fins", e.recurso, fim.len());
                     return Err("uma entrega aceita ficou sem fim, ou com dois");
                 }
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// O prazo de uma entrega vence sem ninguém pedir nada: o coletor a tira
+/// das vivas e grava `fabric.expire` — sem o corpo —, quem a mandou vê
+/// `expired`, e o dono não a lê mais. E o prazo fora dos limites — zero, ou
+/// além de dez minutos — é recusado, sem nada criado.
+fn malha_o_prazo_vence_sozinho() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(70), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_898_001, bia, "fabric.send");
+            let mandar = |corpo: &str, nonce: u64, prazo: u64| {
+                fs_pedir(
+                    quem_manda,
+                    "fabric.send",
+                    &alloc::format!(
+                        r#"{{"endpoint":"{endpoint}","intent":"{INTENCAO_DA_MALHA}","body":"{corpo}","nonce":{nonce},"ttl_ms":{prazo}}}"#
+                    ),
+                )
+            };
+            // Fora dos limites: a tabela recusa, e nada nasce.
+            for (nonce, prazo) in [(1, 0), (2, politica::malha::MAIOR_PRAZO_MS + 1)] {
+                let r = mandar("fora-do-prazo", nonce, prazo);
+                if desfecho_na_malha(&r) != "INVALID_ARGUMENT" {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("um prazo fora dos limites foi aceito");
+                }
+            }
+            if crate::malha::contagem().1 != 0 {
+                return Err("um envio com o prazo fora dos limites deixou uma entrega viva");
+            }
+            // Um segundo, e ninguém lê nem manda: o coletor tira a entrega
+            // sozinho, e grava — a consulta e a leitura, que também vencem,
+            // só vêm depois.
+            let r = mandar("curta-do-prazo", 3, 1_000);
+            let id = fs_texto(&r, "id").ok_or("o envio com o prazo curto falhou")?;
+            let recurso = alloc::format!("entrega:{id}");
+            esperar_ate(
+                || {
+                    gravado_na_malha(
+                        antes,
+                        "fabric.expire",
+                        &recurso,
+                        politica::Codigo::Allow,
+                        "o prazo venceu; versao 2",
+                    )
+                },
+                600,
+            )
+            .map_err(|_| "a entrega vencida nao saiu sozinha, ou nao foi gravada")?;
+            if crate::malha::contagem().1 != 0 {
+                return Err("o coletor gravou o vencimento e a entrega continuou viva");
+            }
+            // Quem mandou vê `expired`; o dono não a lê mais.
+            let estado = fs_pedir(
+                quem_manda,
+                "fabric.status",
+                &alloc::format!(r#"{{"id":"{id}"}}"#),
+            );
+            if fs_texto(&estado, "state").as_deref() != Some("expired") {
+                crate::log_error!("teste", "{}", estado);
+                return Err("a entrega vencida nao disse expired");
+            }
+            let lida = fs_pedir(
+                dono.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            if !fs_ok(&lida) || lida.contains(&alloc::format!(r#""id":"{id}""#)) {
+                crate::log_error!("teste", "{}", lida);
+                return Err("a entrega vencida foi lida");
+            }
+            if !nada_gravado_com(antes, "curta-do-prazo")
+                || !nada_gravado_com(antes, "fora-do-prazo")
+            {
+                return Err("o corpo de uma entrega foi para a auditoria");
             }
             Ok(())
         })();

@@ -239,4 +239,6 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
   nenhum registro cortado), o impostor, só o mesmo titular, o gate em cada
   passo, a revogação, a decisão no meio da operação, a espera e o fim do
   processo, o desligamento a caminho, envios, leituras e a revogação ao
-  mesmo tempo, e o custo de uma entrega pelo gate inteiro.
+  mesmo tempo, o prazo que vence sozinho (o coletor tira a entrega e grava
+  `fabric.expire`, sem o corpo; quem mandou vê `expired`, e o dono não a lê
+  mais), e o custo de uma entrega pelo gate inteiro.

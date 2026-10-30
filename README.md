@@ -8443,14 +8443,15 @@ A outra metade do marco — dispositivo → malha → dispositivo — depende de
 uma decisão arquitetural nova, a confiança entre dispositivos, e não foi
 implementada.
 
-Dez casos `malha:` na suíte, nas duas arquiteturas, com programas de
+Onze casos `malha:` na suíte, nas duas arquiteturas, com programas de
 verdade — o `correio`, que atende; as `fotos`, que mandam; e o `impostor`,
 que diz ser o correio: a entrega de ponta a ponta, com cada passo gravado
 com o processo e o programa, e nenhum registro cortado no teto do detalhe;
 o impostor, que não alcança nada do outro; só o mesmo titular; o gate em
 cada passo; a revogação; a decisão no meio da operação; a espera e o fim do
 processo; o desligamento a caminho; envios, leituras e a revogação ao
-mesmo tempo; e o custo de uma entrega pelo gate inteiro.
+mesmo tempo; o prazo que vence sozinho, pelo coletor, e vai para a
+auditoria; e o custo de uma entrega pelo gate inteiro.
 
 ## Barramento PCI
 
