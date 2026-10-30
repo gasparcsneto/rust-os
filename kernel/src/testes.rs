@@ -37096,6 +37096,14 @@ static CASOS: &[Caso] = &[
         f: enlace::enlace_a_origem_e_a_revogacao,
     },
     Caso {
+        nome: "enlace: a origem e a revogacao no meio do aperto",
+        f: enlace::enlace_a_origem_e_a_revogacao_no_aperto,
+    },
+    Caso {
+        nome: "enlace: a origem reconfirma no commit",
+        f: enlace::enlace_a_origem_reconfirma_no_commit,
+    },
+    Caso {
         nome: "enlace: mandar e revogar ao mesmo tempo",
         f: enlace::enlace_mandar_e_revogar_ao_mesmo_tempo,
     },

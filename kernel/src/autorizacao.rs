@@ -2539,29 +2539,15 @@ fn decidir_o_pedido(
             }
         },
     };
-    // O endpoint da malha é de um processo, e só ele o abre, o fecha, lê o
-    // que chega por ele e confirma — ver `malha::so_de_processo`.
-    if crate::malha::so_de_processo(comando.nome) && !matches!(chamador, Chamador::Processo { .. })
-    {
-        let motivo = "so um processo pede este comando: o endpoint da malha e dele";
-        let d = auditar(
-            &quem,
-            comando.nome,
-            "",
-            Codigo::DenyPermission,
-            parametros,
-            motivo,
-        );
-        return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
-    }
     // De outro dispositivo só chega o conjunto fechado da malha — ver
     // `politica::enlace::METODOS` —, e nunca com `device`: o pedido que
-    // chegou não vai a um terceiro.
+    // chegou não vai a um terceiro. Antes de tudo o que vale para quem é
+    // daqui: um comando de fora do conjunto é recusado por isso. O motivo
+    // cabe no teto do detalhe com a relação e o programa atestado que o
+    // precedem — ver `quem_do_dispositivo`.
     if matches!(chamador, Chamador::Remoto { .. }) {
         let motivo = if !politica::enlace::metodo_do_enlace(comando.nome) {
-            Some(
-                "de outro dispositivo so chegam fabric.send, fabric.discover, fabric.status e fabric.cancel",
-            )
+            Some("de outro dispositivo so chega o conjunto fechado")
         } else if params.member(politica::enlace::PARAMETRO).is_some() {
             Some("um pedido de outro dispositivo nao vai a um terceiro")
         } else {
@@ -2578,6 +2564,21 @@ fn decidir_o_pedido(
             );
             return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
         }
+    }
+    // O endpoint da malha é de um processo, e só ele o abre, o fecha, lê o
+    // que chega por ele e confirma — ver `malha::so_de_processo`.
+    if crate::malha::so_de_processo(comando.nome) && !matches!(chamador, Chamador::Processo { .. })
+    {
+        let motivo = "so um processo pede este comando: o endpoint da malha e dele";
+        let d = auditar(
+            &quem,
+            comando.nome,
+            "",
+            Codigo::DenyPermission,
+            parametros,
+            motivo,
+        );
+        return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
     }
     // Um journal recusado: as revogações que ele perdeu não se sabem, e
     // nenhuma credencial vale — ver `persistencia::revogacoes_desconhecidas`.

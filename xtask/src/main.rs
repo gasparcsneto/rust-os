@@ -2819,7 +2819,8 @@ fn conferir_o_tempo() -> ExitCode {
 ///
 /// Em cada `politica_trocada(&[…])` da suíte, o texto que sai de cada troca
 /// — o primeiro do par — está em `politica::PADRAO`; e o de cada
-/// `PADRAO.replace("…"`, também.
+/// `PADRAO.replace("…"` e de cada `politica_com("…"` (a troca dos casos do
+/// enlace), também.
 ///
 /// O que a regra não alcança: um trecho montado na hora (`format!`) — esse,
 /// o caso confere sozinho, e reprova com o trecho no log.
@@ -2875,7 +2876,8 @@ fn conferir_os_trechos_da_politica() -> Result<ExitCode, String> {
 
 /// Os textos que a suíte tira da política padrão, com a posição de cada um
 /// na fonte: o primeiro de cada par de `politica_trocada(&[…])`, e o de
-/// `PADRAO.replace("…"`. Um trecho que não é literal fica de fora.
+/// `PADRAO.replace("…"` e de `politica_com("…"`. Um trecho que não é
+/// literal fica de fora.
 fn trechos_trocados(fonte: &str) -> Vec<(usize, String)> {
     let bytes = fonte.as_bytes();
     let mut trechos = Vec::new();
@@ -2916,16 +2918,18 @@ fn trechos_trocados(fonte: &str) -> Vec<(usize, String)> {
             i += 1;
         }
     }
-    const SUBSTITUI: &str = "PADRAO.replace(";
-    for (inicio, _) in fonte.match_indices(SUBSTITUI) {
-        let resto = &fonte[inicio + SUBSTITUI.len()..];
-        let i = fonte.len() - resto.trim_start().len();
-        if bytes.get(i) == Some(&b'"')
-            && let Some((texto, _)) = literal_de_rust(fonte, i)
-        {
-            trechos.push((i, texto));
+    for chamada in ["PADRAO.replace(", "politica_com("] {
+        for (inicio, _) in fonte.match_indices(chamada) {
+            let resto = &fonte[inicio + chamada.len()..];
+            let i = fonte.len() - resto.trim_start().len();
+            if bytes.get(i) == Some(&b'"')
+                && let Some((texto, _)) = literal_de_rust(fonte, i)
+            {
+                trechos.push((i, texto));
+            }
         }
     }
+    trechos.sort_by_key(|(i, _)| *i);
     trechos
 }
 
@@ -17155,6 +17159,9 @@ mod testes {
             );
             let u = politica::PADRAO.replace(&linha, "x");
             let fora = [("nao e troca", "nada")];
+            fn politica_com(de: &str, para: &str) -> Resultado {
+            politica_com("remoto remoto\n", "")?;
+            politica_com(&alloc::format!("{x}\n"), "")?;
         "#;
         let trechos: Vec<String> = trechos_trocados(fonte)
             .into_iter()
@@ -17166,6 +17173,7 @@ mod testes {
                 "papel operador a b\nrecurso operador",
                 "taxa operador 50 100",
                 "linha continuada",
+                "remoto remoto\n",
             ]
         );
     }

@@ -513,6 +513,10 @@ const OUTRA_RELACAO: &str = "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
 /// O resumo do programa que o par de teste atesta.
 const PROGRAMA_ATESTADO: [u8; 32] = [0xab; 32];
 
+/// O motivo, na auditoria, da recusa de um comando de fora do conjunto
+/// fechado pedido de outro dispositivo.
+const FORA_DO_CONJUNTO: &str = "de outro dispositivo so chega o conjunto fechado";
+
 /// A primeira vaga do enlace.
 const VAGA: u8 = crate::rede::canal::VAGAS + 1;
 
@@ -918,8 +922,10 @@ pub(super) fn enlace_o_par_entrega_pela_malha_daqui() -> Resultado {
 
 /// Só o conjunto fechado da malha chega de outro dispositivo: oferecer,
 /// ler, confirmar, retirar e qualquer comando fora da malha são recusados
-/// pelo gate, e gravados; um pedido de lá com `device` não vai a um
-/// terceiro; e a relação de outro par não é dele.
+/// pelo gate, e gravados, cada um pelo motivo dele; um pedido de lá com
+/// `device` não vai a um terceiro; com a relação, a pessoa e o teto
+/// `remoto` permitindo um comando de fora, ele ainda não chega; e a relação
+/// de outro par não é dele.
 pub(super) fn enlace_so_o_conjunto_fechado() -> Resultado {
     com_o_enlace(|| {
         let (_, bia) = pessoa_com_sessao("bia", "operador")?;
@@ -959,6 +965,49 @@ pub(super) fn enlace_so_o_conjunto_fechado() -> Resultado {
         if gravados.len() != fora.len() {
             crate::log_error!("teste", "{} de {}", gravados.len(), fora.len());
             return Err("as recusas do conjunto fechado nao foram todas gravadas");
+        }
+        // Cada recusa pelo motivo dela, inteiro — e não pelo de outra camada
+        // que recusasse o mesmo (o papel da relação, o da pessoa, o teto, o
+        // endpoint que é de um processo): fora do conjunto fechado, o
+        // conjunto fechado; com `device`, nada vai a um terceiro. E nenhum
+        // registro cortado no teto do detalhe: o motivo cabe com a relação e
+        // o programa atestado.
+        for (metodo, params) in &fora {
+            let motivo = if params.contains(r#""device""#) {
+                "um pedido de outro dispositivo nao vai a um terceiro"
+            } else {
+                FORA_DO_CONJUNTO
+            };
+            if !gravados.iter().any(|(_, e)| {
+                e.metodo == *metodo
+                    && e.detalhe.ends_with(motivo)
+                    && e.detalhe.len() < politica::auditoria::MAIOR_DETALHE
+            }) {
+                crate::log_error!("teste", "{}: sem `{}`", metodo, motivo);
+                return Err("um comando de outro dispositivo nao foi recusado pelo motivo dele");
+            }
+        }
+        // A relação, a pessoa e o teto `remoto` permitindo um comando de
+        // fora da malha: ele ainda não chega — o conjunto fechado é do gate,
+        // e não da política.
+        crate::autorizacao::trocar_politica(super::politica_trocada(&[
+            (
+                "papel dispositivo fabric.send\n",
+                "papel dispositivo fabric.send random.read\n",
+            ),
+            (
+                "papel remoto fabric.send\n",
+                "papel remoto fabric.send random.read\n",
+            ),
+        ])?);
+        let antes = crate::autorizacao::ultimo_registro();
+        let r = par.respondido("random.read", r#"{"bytes":8}"#)?;
+        let fechado = registros_depois(antes, |e| {
+            e.metodo == "random.read" && e.detalhe.ends_with(FORA_DO_CONJUNTO)
+        });
+        if codigo_do_envelope(&r) != "DENY_PERMISSION" || fechado.len() != 1 {
+            crate::log_error!("teste", "{}", r);
+            return Err("um comando fora do conjunto fechado passou com a politica deixando");
         }
         // A relação de outro par: o pedido não autentica.
         let r = par
@@ -1599,10 +1648,12 @@ pub(super) fn enlace_a_origem_decide_e_leva() -> Resultado {
     })
 }
 
-/// A origem recusa no gate daqui: a pessoa sem `fabric.remote`, o
-/// dispositivo de outra pessoa, o agente — que não age por uma pessoa —, o
-/// manifesto sem `fabric.remote`, o dispositivo suspenso; e o replay do
-/// nonce do processo, sem gastar nonce do enlace.
+/// A origem recusa no gate daqui: a pessoa sem `fabric.send`, a pessoa com
+/// ela e sem `fabric.remote`, o dispositivo de outra pessoa, o agente — que
+/// não age por uma pessoa —, o manifesto sem `fabric.remote`, o dispositivo
+/// suspenso; e o replay do nonce do processo, sem gastar nonce do enlace.
+/// Cada recusa é da decisão: a reconfirmação no commit recusaria o mesmo,
+/// mas depois de o gate ter deixado — e nenhuma decisão permite.
 pub(super) fn enlace_a_origem_recusa() -> Resultado {
     com_o_enlace(|| {
         let (sessao, bia) = pessoa_com_sessao("bia", "operador")?;
@@ -1671,6 +1722,7 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
             (agente, "dispositivo:par", "DENY_PERMISSION"),
             (sem_manifesto, "dispositivo:par", "DENY_PERMISSION"),
         ];
+        let antes = crate::autorizacao::ultimo_registro();
         for (n, (q, device, codigo)) in casos.iter().enumerate() {
             let c = mandar(*q, device, 10 + n as u64, "x");
             if c != *codigo {
@@ -1678,8 +1730,34 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
                 return Err("a origem nao recusou um pedido a outro dispositivo que devia recusar");
             }
         }
+        // A pessoa com `fabric.send` e sem `fabric.remote`: a primeira
+        // permissão passa, a segunda não.
+        let sem_remote = super::politica_trocada(&[
+            (
+                "fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "fabric.offer fabric.send\nrecurso operador",
+            ),
+            (
+                "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",
+                "",
+            ),
+        ])?;
+        let c = super::com_a_politica(sem_remote, || {
+            Ok(mandar(pessoa, "dispositivo:par", 16, "x"))
+        })?;
+        if c != "DENY_PERMISSION" {
+            crate::log_error!("teste", "sem fabric.remote: {}", c);
+            return Err("a pessoa sem fabric.remote falou com outro dispositivo");
+        }
         if crate::enlace::pedidos() != 0 {
             return Err("um pedido recusado entrou na fila do enlace");
+        }
+        if !registros_depois(antes, |e| {
+            e.metodo == "fabric.send" && e.codigo == Codigo::Allow
+        })
+        .is_empty()
+        {
+            return Err("a origem deixou na decisao um pedido que so o commit recusou");
         }
         // O replay do nonce do processo: o primeiro entra, o mesmo nonce com
         // outro corpo e um velho param aqui.
@@ -1697,10 +1775,18 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
             programa: crate::autorizacao::Programa::Kernel,
         };
         super::fs_pedir(sistema, "device.suspend", r#"{"device":"dispositivo:par"}"#);
+        let suspenso = crate::autorizacao::ultimo_registro();
         if mandar(pessoa, "dispositivo:par", 21, "quatro") != "DENY_CREDENTIAL"
             || mandar(pessoa, "dispositivo:par", 20, "um") != "DENY_CREDENTIAL"
         {
             return Err("um pedido ao dispositivo suspenso passou na origem");
+        }
+        if !registros_depois(suspenso, |e| {
+            e.metodo == "fabric.send" && e.codigo == Codigo::Allow
+        })
+        .is_empty()
+        {
+            return Err("a origem deixou na decisao um pedido ao dispositivo suspenso");
         }
         Ok(())
     })
@@ -1755,6 +1841,181 @@ pub(super) fn enlace_a_origem_e_a_revogacao() -> Resultado {
             return Err("o pedido ao dispositivo revogado, executado de novo, nao foi recusado");
         }
         Ok(())
+    })
+}
+
+/// O par de teste da origem que, ao receber o aperto, faz `no_aperto`
+/// antes de responder: o que muda no meio da conversa do serviço.
+struct ParQueMexeNoAperto<F: FnOnce()> {
+    par: ParQueResponde,
+    no_aperto: Option<F>,
+}
+
+impl<F: FnOnce()> crate::enlace::Via for ParQueMexeNoAperto<F> {
+    fn mandar(&mut self, bytes: &[u8]) -> Result<(), (Codigo, &'static str)> {
+        if let Some(f) = self.no_aperto.take() {
+            f();
+        }
+        self.par.mandar(bytes)
+    }
+
+    fn receber(&mut self, prazo_ms: u64) -> Result<Vec<u8>, (Codigo, &'static str)> {
+        self.par.receber(prazo_ms)
+    }
+}
+
+/// A revogação no meio do aperto do serviço: o pedido sai do caminho
+/// depois de o serviço o tomar e de o aperto partir, e antes de a linha
+/// partir — o par vê o aperto e nada mais, e quem esperava acorda.
+pub(super) fn enlace_a_origem_e_a_revogacao_no_aperto() -> Resultado {
+    com_o_enlace(|| {
+        let (sessao, bia) = pessoa_com_sessao("bia", "operador")?;
+        let par = sigilo::publica_de(&PAR_DA_ORIGEM);
+        admin(
+            "device.register",
+            &registro_de_dispositivo(
+                &par,
+                "par",
+                bia,
+                "dispositivo",
+                Some("tcp:10.0.2.100:7071"),
+                Some(RELACAO),
+            ),
+            None,
+        )?;
+        let quem = crate::autorizacao::Chamador::Pessoa(sessao);
+        let linha = super::pedido_rpc(
+            "fabric.discover",
+            &alloc::format!(
+                r#"{{"device":"dispositivo:par","intent":"{}"}}"#,
+                super::INTENCAO_DA_MALHA
+            ),
+        );
+        let espera = crate::nativo::responder_suspensivel_de_teste(quem, &linha)
+            .err()
+            .ok_or("o pedido a outro dispositivo nao suspendeu")?;
+        let t = crate::enlace::tomar().ok_or("o pedido nao entrou na fila")?;
+        let revogou = core::cell::Cell::new(false);
+        let mut via = ParQueMexeNoAperto {
+            par: ParQueResponde::novo(PAR_DA_ORIGEM, Some("{}")),
+            no_aperto: Some(|| {
+                revogou.set(admin("device.revoke", r#"{"name":"par"}"#, None).is_ok());
+            }),
+        };
+        crate::enlace::levar_pela_via_de_teste(&t, &mut via);
+        if !revogou.get() || via.par.viu_chave != crate::identidade::publica_do_duke() {
+            return Err("a revogacao nao aconteceu no meio do aperto do servico");
+        }
+        if !via.par.viu_mensagem.is_empty() {
+            crate::log_error!("teste", "{}", via.par.viu_mensagem);
+            return Err(
+                "o servico levou ao par um pedido que a revogacao no aperto tirou do caminho",
+            );
+        }
+        if espera.conferir(None) != Some(crate::rede::espera::Desfecho::Chegou) {
+            return Err("quem esperava o dispositivo revogado no aperto nao acordou");
+        }
+        Ok(())
+    })
+}
+
+/// A origem reconfirma no commit: o pedido a outro dispositivo foi
+/// decidido com tudo de pé, e entre a decisão e a entrada na fila do
+/// enlace — com a ordem das gravações na mão — a política perde
+/// `fabric.remote`, ou o dispositivo é revogado. A reconfirmação recusa:
+/// nada entra na fila, e quem pediu tem a recusa, e não a espera.
+pub(super) fn enlace_a_origem_reconfirma_no_commit() -> Resultado {
+    fn tirar_o_remote_no_meio() {
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        if let Ok(p) = super::politica_trocada(&[
+            (
+                "fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "fabric.offer fabric.send\nrecurso operador",
+            ),
+            (
+                "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",
+                "",
+            ),
+        ]) {
+            crate::autorizacao::trocar_politica(p);
+        }
+    }
+    fn revogar_no_meio() {
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        let par = sigilo::publica_de(&PAR_DA_ORIGEM);
+        let _ = crate::dispositivos::revogar(&par);
+        crate::enlace::dispositivo_revogado(&par);
+    }
+    com_o_enlace(|| {
+        let (sessao, bia) = pessoa_com_sessao("bia", "operador")?;
+        admin(
+            "device.register",
+            &registro_de_dispositivo(
+                &sigilo::publica_de(&PAR_DA_ORIGEM),
+                "par",
+                bia,
+                "dispositivo",
+                Some("tcp:10.0.2.100:7071"),
+                Some(RELACAO),
+            ),
+            None,
+        )?;
+        let quem = crate::autorizacao::Chamador::Pessoa(sessao);
+        let politica = crate::autorizacao::com_politica(|p| p.clone());
+        // A revogação por último: ela é para sempre.
+        let meios: [(fn(), &str, &str); 2] = [
+            (tirar_o_remote_no_meio, "DENY_PERMISSION", ""),
+            (
+                revogar_no_meio,
+                "DENY_RESOURCE",
+                "nao existe mais para quem pede",
+            ),
+        ];
+        let r = (|| -> Resultado {
+            for (n, (meio, codigo, motivo)) in meios.iter().enumerate() {
+                let antes = crate::autorizacao::ultimo_registro();
+                crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(*meio));
+                let linha = super::pedido_rpc(
+                    "fabric.send",
+                    &alloc::format!(
+                        r#"{{"device":"dispositivo:par","endpoint":"e:1","intent":"{}","body":"no-meio","nonce":{}}}"#,
+                        super::INTENCAO_DA_MALHA,
+                        n + 1
+                    ),
+                );
+                let c = match crate::nativo::responder_suspensivel_de_teste(quem, &linha) {
+                    Ok(r) => codigo_do_envelope(&r),
+                    Err(_) => String::from("SUSPENSO"),
+                };
+                crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+                crate::autorizacao::restaurar_politica(politica.clone());
+                let decidida = !registros_depois(antes, |e| {
+                    e.metodo == "fabric.send" && e.codigo == Codigo::Allow
+                })
+                .is_empty();
+                let recusada = !registros_depois(antes, |e| {
+                    e.metodo == "fabric.send"
+                        && e.codigo.nome() == *codigo
+                        && e.detalhe.contains(motivo)
+                })
+                .is_empty();
+                if c != *codigo || !decidida || !recusada || crate::enlace::pedidos() != 0 {
+                    crate::log_error!(
+                        "teste",
+                        "{}: {} {} {} {}",
+                        n,
+                        c,
+                        decidida,
+                        recusada,
+                        crate::enlace::pedidos()
+                    );
+                    return Err("a origem nao reconfirmou no commit o pedido a outro dispositivo");
+                }
+            }
+            Ok(())
+        })();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        r
     })
 }
 
