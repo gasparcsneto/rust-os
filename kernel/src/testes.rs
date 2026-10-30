@@ -28,6 +28,8 @@ use crate::agent::registry;
 use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
+mod enlace;
+
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
 /// para montar uma dinâmica; detalhes vão para o log antes do retorno.
 type Resultado = Result<(), &'static str>;
@@ -37026,6 +37028,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "malha: o custo de uma entrega",
         f: malha_o_custo_de_uma_entrega,
+    },
+    Caso {
+        nome: "dispositivos: o administrador relaciona, com prova, e a relacao vai ao journal",
+        f: enlace::dispositivos_o_administrador_relaciona_com_prova,
+    },
+    Caso {
+        nome: "dispositivos: as recusas do registro",
+        f: enlace::dispositivos_as_recusas_do_registro,
+    },
+    Caso {
+        nome: "dispositivos: a revogacao e o dispositivo inteiro, e permanente",
+        f: enlace::dispositivos_a_revogacao_e_permanente,
+    },
+    Caso {
+        nome: "dispositivos: uma chave, uma especie de principal",
+        f: enlace::dispositivos_uma_chave_uma_especie,
+    },
+    Caso {
+        nome: "dispositivos: a suspensao e reversivel, pelo gate e pela prova",
+        f: enlace::dispositivos_a_suspensao_e_reversivel,
     },
     // Antes da reconstrução e da conta dos blocos: elas cobrem o armazém
     // inteiro restaurado.

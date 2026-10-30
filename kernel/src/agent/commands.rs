@@ -82,6 +82,16 @@ pub static COMANDOS: &[Command] = &[
         handler: agent_registry,
     },
     Command {
+        nome: "device.registry",
+        resumo: "Os dispositivos relacionados: cada outro Duke, pela chave dele, com o nome local, se esta suspenso, e as relacoes dele com as pessoas desta maquina (o identificador, a pessoa, o papel e o endereco). E as chaves com lapide, pela impressao. Nenhuma relacao da nada sozinha: o que chega de um dispositivo e decidido pelo papel da pessoa, pelo da relacao e pelo teto `remoto`.",
+        params: &[],
+        acesso: Acesso::Exige(Permissao::AgentRead),
+        recurso: None,
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: device_registry,
+    },
+    Command {
         nome: "person.registry",
         resumo: "Quem pode entrar pelos consoles: cada pessoa registrada, com o \
                  identificador, o nome, o papel, o estado (ativa ou revogada, que fica no \
@@ -778,6 +788,36 @@ pub static COMANDOS: &[Command] = &[
         mais: Mais::Nada,
         plano: Plano::Controle,
         handler: agent_resume,
+    },
+    Command {
+        nome: "device.suspend",
+        resumo: "Suspende o dispositivo relacionado `device`: ele continua no registro, mas o aperto do enlace dele e recusado, os pedidos que chegam dele sao recusados (DENY_CONTAINED), nada daqui e levado a ele, e os enlaces com ele caem. Nao e revogacao; volatil. Idempotente.",
+        params: &[ParamSpec {
+            nome: "device",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O dispositivo, `dispositivo:<nome>`, o nome local. E o recurso que o gate decide.",
+        }],
+        acesso: Acesso::Exige(Permissao::DeviceSuspend),
+        recurso: Some("device"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: device_suspend,
+    },
+    Command {
+        nome: "device.resume",
+        resumo: "Retoma o dispositivo suspenso. Pela mesma permissao.",
+        params: &[ParamSpec {
+            nome: "device",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O dispositivo, `dispositivo:<nome>`.",
+        }],
+        acesso: Acesso::Exige(Permissao::DeviceSuspend),
+        recurso: Some("device"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: device_resume,
     },
     Command {
         nome: "credential.suspend",
@@ -2923,6 +2963,48 @@ fn agent_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         "admin_max_params",
         super::administracao::MAIORES_PARAMETROS as u64,
     )?;
+    w.end_object()
+}
+
+fn device_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    w.key("devices")?;
+    w.begin_array()?;
+    let relacoes = crate::dispositivos::relacoes();
+    let mut vistos: alloc::vec::Vec<[u8; 32]> = alloc::vec::Vec::new();
+    for (chave, nome, _) in &relacoes {
+        if vistos.contains(chave) {
+            continue;
+        }
+        vistos.push(*chave);
+        w.begin_object()?;
+        w.field_str("name", nome)?;
+        w.field_str("key", &sigilo::hex(chave))?;
+        w.field_bool("suspended", crate::contencao::dispositivo_suspenso(chave))?;
+        w.key("relations")?;
+        w.begin_array()?;
+        for (_, _, r) in relacoes.iter().filter(|(k, _, _)| k == chave) {
+            w.begin_object()?;
+            w.field_str("relation", &politica::dispositivos::id_texto(&r.id))?;
+            w.field_str("person", &sigilo::pessoas::IdPessoa(r.pessoa).texto())?;
+            w.field_str("role", &r.papel)?;
+            w.key("address")?;
+            match &r.endereco {
+                Some(e) => w.str_value(e)?,
+                None => w.null_value()?,
+            }
+            w.end_object()?;
+        }
+        w.end_array()?;
+        w.end_object()?;
+    }
+    w.end_array()?;
+    w.key("revoked")?;
+    w.begin_array()?;
+    for k in crate::dispositivos::lapides() {
+        w.str_value(&crate::identidade::impressao(&k))?;
+    }
+    w.end_array()?;
     w.end_object()
 }
 
@@ -8058,6 +8140,61 @@ fn agent_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {
 fn agent_resume(params: Json, w: &mut JsonWriter) -> fmt::Result {
     let alvo = chave_do_parametro(params.member("key")).map(crate::contencao::Alvo::Agente);
     conter_ou_soltar(alvo, false, w)
+}
+
+/// Suspende — ou retoma — o dispositivo `dispositivo:<nome>` que o gate
+/// decidiu: o nome resolvido aqui, depois da decisão, para a chave.
+fn conter_dispositivo(alvo: Option<Json>, conter: bool, w: &mut JsonWriter) -> fmt::Result {
+    let texto = alvo.and_then(|v| v.as_str()).unwrap_or("");
+    if !crate::autorizacao::alvo_decidido(texto) {
+        w.begin_object()?;
+        w.field_str("error", "o dispositivo nao e o que foi decidido")?;
+        return w.end_object();
+    }
+    let Some(d) =
+        politica::arquivo::nome_de_dispositivo(texto).and_then(crate::dispositivos::por_nome)
+    else {
+        crate::autorizacao::auditar_execucao(
+            texto,
+            politica::Codigo::DenyResource,
+            "dispositivo desconhecido",
+        );
+        w.begin_object()?;
+        w.field_str("error", "dispositivo desconhecido")?;
+        w.field_str("code", politica::Codigo::DenyResource.nome())?;
+        return w.end_object();
+    };
+    let alvo = crate::contencao::Alvo::Dispositivo(d.chave);
+    let feito = if conter {
+        match crate::contencao::conter(&alvo) {
+            Ok(f) => f,
+            Err(motivo) => {
+                crate::autorizacao::auditar_execucao(texto, politica::Codigo::Error, motivo);
+                w.begin_object()?;
+                w.field_str("error", motivo)?;
+                return w.end_object();
+            }
+        }
+    } else {
+        crate::contencao::soltar(&alvo)
+    };
+    let estado = crate::contencao::desfecho(&alvo, conter, feito.mudou);
+    crate::autorizacao::auditar_execucao(texto, politica::Codigo::Allow, estado);
+    w.begin_object()?;
+    w.field_str("target", &alvo.texto())?;
+    w.field_str("device", &d.nome)?;
+    w.field_bool("contained", crate::contencao::contido(&alvo))?;
+    w.field_bool("changed", feito.mudou)?;
+    w.field_str("state", estado)?;
+    w.end_object()
+}
+
+fn device_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    conter_dispositivo(params.member("device"), true, w)
+}
+
+fn device_resume(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    conter_dispositivo(params.member("device"), false, w)
 }
 
 /// O alvo de `credential.*`: a pessoa ou a chave — um dos dois.

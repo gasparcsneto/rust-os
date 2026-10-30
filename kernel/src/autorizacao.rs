@@ -1396,6 +1396,17 @@ fn decidir(papel: Option<&str>, permissao: Permissao, recurso: &str) -> (Codigo,
     (codigo, detalhe)
 }
 
+/// A decisão sobre uma permissão e um recurso já em texto, pela mesma conta
+/// do gate — para a operação administrativa cujo recurso vem dos
+/// parâmetros, como o dispositivo de `device.suspend`, `dispositivo:<nome>`.
+pub fn decidir_recurso(
+    papel: Option<&str>,
+    permissao: Permissao,
+    recurso: &str,
+) -> (Codigo, &'static str) {
+    decidir(papel, permissao, recurso)
+}
+
 /// A decisão de uma permissão cujo recurso é o papel de um destinatário —
 /// `message.send`. O destinatário é resolvido aqui, e o papel dele é o
 /// recurso: `papel:<nome>`, contra o alcance enumerado de quem pede.

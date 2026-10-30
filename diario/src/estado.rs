@@ -222,6 +222,19 @@ pub mod tipo {
     /// de agora.
     pub const ATUALIZACAO_ESTADO: u16 = 41;
 
+    /// A relação de outro dispositivo com uma pessoa desta máquina entrou no
+    /// registro: `[a linha da relação]`, como
+    /// `politica::dispositivos::linha` a escreve — a chave do Duke dele, o
+    /// nome local, o identificador da relação, a pessoa, o papel e o
+    /// endereço. O resultado inteiro: reposta, a relação volta igual. Sobe
+    /// a geração, como todo registro que concede.
+    pub const DISPOSITIVO_REGISTRADO: u16 = 42;
+    /// A lápide de um dispositivo: `[a chave X25519 do Duke dele]`.
+    /// Permanente: as relações dele saem, e a chave não volta a registro
+    /// nenhum — nenhum registro a desfaz, nenhuma imagem a apaga. Quem
+    /// revogou e por quê está na auditoria, com a decisão.
+    pub const DISPOSITIVO_REVOGADO: u16 = 43;
+
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.
     ///

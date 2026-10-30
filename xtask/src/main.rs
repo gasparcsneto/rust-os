@@ -2848,7 +2848,7 @@ fn conferir_travas_do_post_mortem() -> Result<ExitCode, String> {
             .strip_prefix(&fonte)
             .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?;
         let nome = relativo.to_string_lossy().replace('\\', "/");
-        if nome == "traps.rs" || nome == "testes.rs" {
+        if nome == "traps.rs" || da_suite(&nome) {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
@@ -3549,10 +3549,8 @@ fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
             .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        if matches!(
-            relativo.as_str(),
-            "autorizacao.rs" | "persistencia.rs" | "testes.rs"
-        ) {
+        if matches!(relativo.as_str(), "autorizacao.rs" | "persistencia.rs") || da_suite(&relativo)
+        {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
@@ -3887,7 +3885,7 @@ fn conferir_marca_so_no_system_info(raiz: &Path) -> Result<Vec<String>, String> 
             .unwrap_or(caminho)
             .display()
             .to_string();
-        if relativo == "kernel/src/imagem.rs" || relativo == "kernel/src/testes.rs" {
+        if relativo == "kernel/src/imagem.rs" || da_suite_no_projeto(&relativo) {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
@@ -4049,7 +4047,7 @@ fn conferir_http_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
                 .map_err(|_| format!("{} fora do projeto", caminho.display()))?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if relativo == "kernel/src/testes.rs" {
+            if da_suite_no_projeto(&relativo) {
                 return Ok(());
             }
             let texto = std::fs::read_to_string(caminho)
@@ -4154,7 +4152,7 @@ fn conferir_icp_do_programa(raiz: &Path) -> Result<Vec<String>, String> {
                 .map_err(|_| format!("{} fora do projeto", caminho.display()))?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if relativo == "kernel/src/testes.rs" {
+            if da_suite_no_projeto(&relativo) {
                 return Ok(());
             }
             let texto = std::fs::read_to_string(caminho)
@@ -4196,7 +4194,7 @@ fn conferir_codigo_conferido(raiz: &Path) -> Result<Vec<String>, String> {
             .map_err(|_| format!("{} fora do projeto", caminho.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        if relativo == "kernel/src/testes.rs" {
+        if da_suite_no_projeto(&relativo) {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
@@ -4313,7 +4311,7 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
             .map_err(|_| format!("{} fora do projeto", caminho.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        if relativo == "kernel/src/testes.rs" {
+        if da_suite_no_projeto(&relativo) {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
@@ -4971,6 +4969,18 @@ fn percorrer_fontes_e_ligacao(
 }
 
 /// Chama `f` para cada arquivo `.rs` sob `dir`.
+/// Se o arquivo, relativo a `kernel/src`, é da suíte: o `testes.rs` e os
+/// submódulos dele, em `testes/`. A suíte não é compilada sem `modo-teste`, e
+/// a conferência que a deixa de fora a deixa inteira.
+fn da_suite(relativo: &str) -> bool {
+    relativo == "testes.rs" || relativo.starts_with("testes/")
+}
+
+/// [`da_suite`], com o caminho relativo à raiz do projeto.
+fn da_suite_no_projeto(relativo: &str) -> bool {
+    relativo.strip_prefix("kernel/src/").is_some_and(da_suite)
+}
+
 fn percorrer_fontes(
     dir: &Path,
     f: &mut impl FnMut(&Path) -> Result<(), String>,

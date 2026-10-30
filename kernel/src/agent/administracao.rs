@@ -116,6 +116,9 @@ fn reconfirmar(
         Some(alvo) if permissao.alvo_e_papel() => {
             autorizacao::decidir_contencao(Some(papel), permissao, metodo, alvo).0
         }
+        Some(alvo) if permissao.recurso_e_dispositivo() => {
+            autorizacao::decidir_recurso(Some(papel), permissao, alvo).0
+        }
         Some(alvo) => autorizacao::decidir_destino(Some(papel), permissao, alvo).0,
         None => autorizacao::decidir_administracao(Some(papel), permissao),
     };
@@ -369,6 +372,45 @@ static OPERACOES: &[Operacao] = &[
         efeito: Efeito::Tira,
         executar: anular_chave,
     },
+    Operacao {
+        nome: "device.register",
+        resumo: "Registra a relacao de outro dispositivo com uma pessoa desta maquina: \
+                 {\"key\": a chave publica do Duke dele, em hex, \"name\": o nome local, \
+                 \"person\": \"pessoa:<16 hex>\", \"role\": o papel da relacao, \"address\": \
+                 \"tcp:<ipv4>:<porta>\" (opcional), \"relation\": 32 hex (opcional: o mesmo nos \
+                 dois dispositivos; sem ele, sorteado)}. O papel cabe no do administrador. A \
+                 chave nao e de agente, de administrador, nem a deste Duke. Fica gravado no \
+                 journal.",
+        permissao: Permissao::DeviceRegister,
+        efeito: Efeito::Concede,
+        executar: registrar_dispositivo,
+    },
+    Operacao {
+        nome: "device.revoke",
+        resumo: "Revoga um dispositivo: {\"key\"} ou {\"name\"}. Todas as relacoes dele saem e \
+                 a chave ganha lapide - nao volta, em registro nenhum -; os enlaces com ele \
+                 caem e as entregas vivas dele sao anuladas. Os papeis das relacoes cabem no \
+                 do administrador. Fica gravado no journal.",
+        permissao: Permissao::DeviceRevoke,
+        efeito: Efeito::Tira,
+        executar: revogar_dispositivo,
+    },
+    Operacao {
+        nome: "device.suspend",
+        resumo: "Suspende um dispositivo: {\"device\": \"dispositivo:<nome>\"}. O aperto do \
+                 enlace dele e recusado, os pedidos que chegam dele tambem, nada daqui vai a \
+                 ele, e os enlaces caem. Nao e revogacao; volatil.",
+        permissao: Permissao::DeviceSuspend,
+        efeito: Efeito::Nenhum,
+        executar: suspender_dispositivo,
+    },
+    Operacao {
+        nome: "device.resume",
+        resumo: "Retoma um dispositivo suspenso: {\"device\": \"dispositivo:<nome>\"}.",
+        permissao: Permissao::DeviceSuspend,
+        efeito: Efeito::Nenhum,
+        executar: retomar_dispositivo,
+    },
 ];
 
 /// Os nomes das operações, para o `agent.describe` e para o resumo.
@@ -616,7 +658,10 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
     // A prova disse quem; a política diz se o papel dele pode isto. A
     // permissão de destino tem o recurso nos parâmetros: o papel primeiro,
     // e o destinatário logo abaixo.
-    let decisao = if operacao.permissao.recurso_e_destino() || operacao.permissao.alvo_e_papel() {
+    let decisao = if operacao.permissao.recurso_e_destino()
+        || operacao.permissao.alvo_e_papel()
+        || operacao.permissao.recurso_e_dispositivo()
+    {
         autorizacao::papel_tem(papel.as_deref(), operacao.permissao)
     } else {
         autorizacao::decidir_administracao(papel.as_deref(), operacao.permissao)
@@ -667,6 +712,20 @@ fn conferir_e_executar(sessao: u8, pedido: Pedido, w: &mut JsonWriter) -> Result
             return Err(falha(codigo, motivo));
         }
         alvo_decidido = Some(alvo);
+    }
+    // O dispositivo de uma suspensão, pela mesma conta do gate, com o papel
+    // do administrador: `dispositivo:<nome>`, contra o alcance dele.
+    if operacao.permissao.recurso_e_dispositivo() {
+        let alvo = Json(parametros.as_bytes())
+            .member("device")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let (codigo, motivo) = autorizacao::decidir_recurso(Some(papel), operacao.permissao, alvo);
+        if !codigo.permite() {
+            gravar(codigo, alvo, motivo);
+            return Err(falha(codigo, motivo));
+        }
+        alvo_decidido = Some(alvo.to_string());
     }
 
     // A persistência, antes de qualquer coisa: sem ela confiável, nenhuma
@@ -1360,6 +1419,7 @@ fn recusa_do_registro(r: crate::identidade::Recusa) -> Falha {
     let codigo = match r {
         R::Cheio => Codigo::Error,
         R::Nome | R::ChaveRepetida | R::NomeRepetido | R::Desconhecido => Codigo::InvalidArgument,
+        R::Dispositivo => Codigo::DenyPolicy,
     };
     falha(codigo, r.motivo())
 }
@@ -1885,6 +1945,171 @@ fn suspender_credencial(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result
 
 fn retomar_credencial(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
     conter_pela_prova("credential.resume", params, false, w)
+}
+
+/// Registra a relação de um dispositivo com uma pessoa desta máquina.
+///
+/// O papel é **dado** — à relação, e por ela ao dispositivo, dentro do da
+/// pessoa e do teto `remoto` —: cabe no do administrador, e não é um teto.
+/// A pessoa existe e está ativa. A chave não é a deste Duke, nem a de um
+/// agente, nem a de um administrador — o registro confere. O
+/// identificador da relação, se não vem, é sorteado aqui: quem registra o
+/// segundo lado usa o que este devolveu.
+fn registrar_dispositivo(
+    pedinte: &Pedinte,
+    params: Json,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    use crate::dispositivos::{Relacao, TAM_ID};
+    let chave = chave(params, "key")?;
+    let nome = texto(params, "name")?;
+    let papel = texto(params, "role")?;
+    let pessoa = sigilo::pessoas::IdPessoa::ler(texto(params, "person")?)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "`person` nao e `pessoa:<16 hex>`"))?;
+    match crate::pessoas::pessoa(pessoa) {
+        Some(p) if p.estado == sigilo::pessoas::Estado::Ativa => {}
+        _ => {
+            return Err(falha(
+                Codigo::InvalidArgument,
+                "pessoa inexistente ou revogada",
+            ));
+        }
+    }
+    let endereco = match params.member("address") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or_else(|| falha(Codigo::InvalidArgument, "`address` nao e texto"))?
+                .to_string(),
+        ),
+    };
+    let id: [u8; TAM_ID] = match params.member("relation") {
+        Some(v) => v
+            .as_str()
+            .and_then(politica::dispositivos::ler_id)
+            .ok_or_else(|| {
+                falha(
+                    Codigo::InvalidArgument,
+                    "`relation` nao e um identificador de 32 hex",
+                )
+            })?,
+        None => {
+            let mut id = [0u8; TAM_ID];
+            crate::aleatorio::preencher(&mut id)
+                .map_err(|_| falha(Codigo::Error, "sem entropia para o identificador"))?;
+            id
+        }
+    };
+    atribuivel(pedinte, papel)?;
+    let relacao = Relacao {
+        id,
+        pessoa: pessoa.0,
+        papel: papel.to_string(),
+        endereco: endereco.clone(),
+    };
+    crate::dispositivos::registrar(chave, nome, relacao)
+        .map_err(|r| falha(r.codigo(), r.motivo()))?;
+    let id_texto = politica::dispositivos::id_texto(&id);
+    crate::log_info!(
+        "admin",
+        "dispositivo {} ({}) relacionado a {} como {}",
+        nome,
+        crate::identidade::impressao(&chave),
+        pessoa.texto(),
+        papel
+    );
+    let _ = w.field_str("device", nome);
+    let _ = w.field_str("key", &sigilo::hex(&chave));
+    let _ = w.field_str("relation", &id_texto);
+    let _ = w.field_str("person", &pessoa.texto());
+    let _ = w.field_str("role", papel);
+    let _ = w.key("address");
+    let _ = match &endereco {
+        Some(e) => w.str_value(e),
+        None => w.null_value(),
+    };
+    Ok(format!(
+        "{}{nome} ; relacao:{id_texto}",
+        politica::arquivo::PREFIXO_DE_DISPOSITIVO
+    ))
+}
+
+/// Revoga um dispositivo — pela chave, ou pelo nome —: todas as relações
+/// dele saem, e a chave ganha a lápide. Quem pode menos do que alguma das
+/// relações não a revoga: o papel de cada uma cabe no do administrador.
+fn revogar_dispositivo(
+    pedinte: &Pedinte,
+    params: Json,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let desconhecido = || falha(Codigo::InvalidArgument, "dispositivo desconhecido");
+    let alvo = match (params.member("key"), params.member("name")) {
+        (Some(_), None) => crate::dispositivos::dispositivo(&chave(params, "key")?),
+        (None, Some(_)) => crate::dispositivos::por_nome(texto(params, "name")?),
+        _ => return Err(falha(Codigo::InvalidArgument, "diga `key` ou `name`")),
+    }
+    .ok_or_else(desconhecido)?;
+    for r in &alvo.relacoes {
+        cabe(pedinte, &r.papel)?;
+    }
+    let saiu =
+        crate::dispositivos::revogar(&alvo.chave).map_err(|r| falha(r.codigo(), r.motivo()))?;
+    crate::log_info!(
+        "admin",
+        "dispositivo {} ({}) revogado: {} relacao(oes), lapide na chave",
+        saiu.nome,
+        crate::identidade::impressao(&saiu.chave),
+        saiu.relacoes.len()
+    );
+    let _ = w.field_str("device", &saiu.nome);
+    let _ = w.field_str("key", &sigilo::hex(&saiu.chave));
+    let _ = w.field_u64("relations", saiu.relacoes.len() as u64);
+    Ok(format!(
+        "{}{}",
+        politica::arquivo::PREFIXO_DE_DISPOSITIVO,
+        saiu.nome
+    ))
+}
+
+/// Suspende — ou retoma — o dispositivo que a decisão alcançou:
+/// `dispositivo:<nome>`, o mesmo texto que o papel do administrador
+/// decidiu.
+fn conter_dispositivo_pela_prova(
+    params: Json,
+    conter: bool,
+    w: &mut JsonWriter,
+) -> Result<String, Falha> {
+    let texto_do_alvo = texto(params, "device")?;
+    let nome = politica::arquivo::nome_de_dispositivo(texto_do_alvo).ok_or_else(|| {
+        falha(
+            Codigo::InvalidArgument,
+            "`device` nao e `dispositivo:<nome>`",
+        )
+    })?;
+    let d = crate::dispositivos::por_nome(nome)
+        .ok_or_else(|| falha(Codigo::InvalidArgument, "dispositivo desconhecido"))?;
+    let alvo = crate::contencao::Alvo::Dispositivo(d.chave);
+    let feito = if conter {
+        crate::contencao::conter(&alvo).map_err(|m| falha(Codigo::Error, m))?
+    } else {
+        crate::contencao::soltar(&alvo)
+    };
+    let _ = w.field_str("target", &alvo.texto());
+    let _ = w.field_bool("contained", crate::contencao::contido(&alvo));
+    let _ = w.field_bool("changed", feito.mudou);
+    let _ = w.field_str(
+        "state",
+        crate::contencao::desfecho(&alvo, conter, feito.mudou),
+    );
+    Ok(texto_do_alvo.to_string())
+}
+
+fn suspender_dispositivo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_dispositivo_pela_prova(params, true, w)
+}
+
+fn retomar_dispositivo(_: &Pedinte, params: Json, w: &mut JsonWriter) -> Result<String, Falha> {
+    conter_dispositivo_pela_prova(params, false, w)
 }
 
 /// A falha de uma operação de mensagem.

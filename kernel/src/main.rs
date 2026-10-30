@@ -74,6 +74,7 @@ mod chaves;
 mod contencao;
 mod coordenacao;
 mod copia;
+mod dispositivos;
 mod e1000;
 mod energia;
 mod eventos;

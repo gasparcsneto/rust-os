@@ -175,6 +175,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.list` | Os agentes conectados agora: a porta, o nome, o papel, há quanto tempo, quantos arrendamentos, o último comando e a última ação, cada um com há quanto tempo; quem agiu por último e o texto da barra — nunca parâmetros |
 | `agent.registry` | Quem pode entrar pelas portas: a chave do Duke e cada agente registrado, com a origem |
 | `person.registry` | Quem pode entrar pelos consoles: cada pessoa, com identificador, nome, papel, estado e sessões abertas — sem credencial |
+| `device.registry` | Os dispositivos relacionados: cada outro Duke pela chave dele, o nome local, se está suspenso, e as relações com as pessoas desta máquina (identificador, pessoa, papel, endereço); e as chaves com lápide |
 | `admin.challenge` | Um desafio de uso único para uma operação administrativa nesta sessão |
 | `admin.execute` | Uma operação administrativa com a prova de um administrador (`challenge`, `command`, `params`, `admin`, `proof`): `agent.register`, `agent.revoke`, `policy.assign`, `policy.write`, `person.register`, `person.revoke`, `credential.rotate`, `session.revoke`, `lease.revoke`, `message.send`, `message.read`, `message.ack`, `message.purge`, `message.purge_mailbox`, `time.confirm` — o salto de hora pendente, sem hora digitada —, `key.revoke` — anula a chave de assinatura de outra identidade, sem dar o uso dela a ninguém —; e, com as assinaturas de um quórum em `signatures`, `admin.revoke` |
 | `audit.tail` | Os registros mais recentes da auditoria encadeada, com o que basta para refazer cada elo, e quais já estão no journal; com `after`, os seguintes a um número, do mais velho ao mais novo — a leitura de quem acompanha a cadeia (`count`, `after`) |
@@ -256,6 +257,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `agent.resume` | Retoma o agente suspenso (`key`) |
 | `credential.suspend` | Suspende uma credencial — de pessoa ou de agente: login e aperto recusados com `DENY_CREDENTIAL`, as sessões não agem. Não é revogação (`person` ou `key`) |
 | `credential.resume` | Retoma a credencial suspensa (`person` ou `key`) |
+| `device.suspend` | Suspende um dispositivo relacionado: continua no registro, mas o aperto do enlace dele e os pedidos que chegam dele são recusados, e nada daqui vai a ele; os enlaces caem. Não é revogação; o alcance é o dispositivo (`device`, `dispositivo:<nome>`) |
+| `device.resume` | Retoma o dispositivo suspenso (`device`) |
 | `containment.list` | As contenções que valem agora, para quem investiga e recupera — voláteis: nenhuma sobrevive a um boot |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
@@ -307,7 +310,8 @@ kernel/src/
 ├── pessoas.rs       quem entra pelos consoles: o registro, as credenciais e as sessões
 ├── persistencia.rs  o journal na partição de estado, ancorado no TPM: o estado de autoridade que sobrevive ao boot
 ├── coordenacao.rs   versões e arrendamentos: quem edita cada campo agora
-├── contencao.rs     as contenções reversíveis — o processo isolado, o agente e a credencial suspensos —, que o gate consulta, e o término de um processo, que isola antes
+├── contencao.rs     as contenções reversíveis — o processo isolado, o agente, a credencial e o dispositivo suspensos —, que o gate consulta, e o término de um processo, que isola antes
+├── dispositivos.rs  os dispositivos relacionados: o registro, uma chave por espécie de principal, a lápide permanente, gravados no journal
 ├── energia.rs       reiniciar e desligar: o pedido no journal antes, as gravações paradas, e a máquina entregue ao firmware (ACPI, PSCI)
 ├── botao.rs         o botão de energia: o aperto contado, e o desligamento pedido ao gate pelo sistema — o mesmo `system.poweroff`
 ├── slots.rs         a atualização A/B do lado do kernel: a imagem do slot conferida, o pacote montado, a reconciliação do boot com o journal, a escrita no slot inativo e a instalação por quórum
@@ -366,6 +370,8 @@ kernel/src/
 ├── qemu.rs          encerramento do emulador para testes
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
+├── testes/
+│   └── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero

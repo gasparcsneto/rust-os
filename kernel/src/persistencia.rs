@@ -1832,6 +1832,8 @@ fn e_de_autoridade(t: u16) -> bool {
             | tipo::CREDENCIAL_ROTACIONADA
             | tipo::SESSAO_REVOGADA
             | tipo::LAPIDE
+            | tipo::DISPOSITIVO_REGISTRADO
+            | tipo::DISPOSITIVO_REVOGADO
     )
 }
 
@@ -3089,6 +3091,9 @@ pub struct Foto {
     /// pode anular as de uma identidade — `key.revoke`, a revogação do
     /// dono.
     chaves: Vec<(String, String, crate::chaves::Estado)>,
+    /// As relações dos dispositivos e as lápides deles.
+    dispositivos: Vec<([u8; 32], String, crate::dispositivos::Relacao)>,
+    lapides_de_dispositivos: Vec<[u8; 32]>,
 }
 
 impl Foto {
@@ -3099,6 +3104,8 @@ impl Foto {
             politica: crate::autorizacao::com_politica(|p| p.texto()),
             pessoas: crate::pessoas::todas(),
             chaves: crate::chaves::estados(),
+            dispositivos: crate::dispositivos::relacoes(),
+            lapides_de_dispositivos: crate::dispositivos::lapides(),
         }
     }
 
@@ -3111,6 +3118,7 @@ impl Foto {
             crate::autorizacao::restaurar_politica(p);
         }
         crate::pessoas::restaurar(&self.pessoas);
+        crate::dispositivos::restaurar(&self.dispositivos);
     }
 }
 
@@ -3340,6 +3348,22 @@ fn diferenca(foto: &Foto, nome: &str, recurso: &str) -> Result<Vec<Vec<u8>>, &'s
             Some(_) => {}
         }
     }
+
+    // Os dispositivos: a relação que entrou vai inteira, como a linha; a
+    // lápide que nasceu vai pela chave. Uma revogação tira as relações
+    // todas do dispositivo, e a lápide basta para tirá-las de novo na
+    // reposição.
+    for (chave, nome, rel) in crate::dispositivos::relacoes() {
+        if !foto.dispositivos.iter().any(|(_, _, r)| r.id == rel.id) {
+            let linha = politica::dispositivos::linha(&chave, &nome, &rel);
+            v.push(entrada(tipo::DISPOSITIVO_REGISTRADO, &[linha.as_bytes()])?);
+        }
+    }
+    for chave in crate::dispositivos::lapides() {
+        if !foto.lapides_de_dispositivos.contains(&chave) {
+            v.push(entrada(tipo::DISPOSITIVO_REVOGADO, &[&chave])?);
+        }
+    }
     Ok(v)
 }
 
@@ -3470,6 +3494,13 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
         }
         (tipo::LAPIDE, [k, _assinatura]) => {
             crate::identidade::aplicar_lapide(&chave(k)?);
+            Ok(())
+        }
+        (tipo::DISPOSITIVO_REGISTRADO, [linha]) => {
+            crate::dispositivos::restaurar_linha(texto(linha)?)
+        }
+        (tipo::DISPOSITIVO_REVOGADO, [k]) => {
+            crate::dispositivos::aplicar_lapide(&chave(k)?);
             Ok(())
         }
         (tipo::MENSAGEM_CRIADA, [id, de, para, criada, expira, corpo]) => {

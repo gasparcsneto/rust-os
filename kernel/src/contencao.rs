@@ -22,9 +22,13 @@
 //!   agente — não autentica: o login e o aperto são recusados, e as sessões
 //!   abertas com ela também não agem; as conexões caem, e os arrendamentos
 //!   são soltos.
+//! - `device.suspend`: o dispositivo relacionado continua no registro, mas
+//!   o aperto do enlace dele é recusado, todo pedido que chega dele é
+//!   recusado, e nada daqui é levado a ele; os enlaces com ele caem. A
+//!   máquina perdida que pode aparecer: revogar é o definitivo.
 //!
 //! Cada uma tem o seu inverso, pela mesma permissão: `process.release`,
-//! `agent.resume`, `credential.resume`.
+//! `agent.resume`, `credential.resume`, `device.resume`.
 //!
 //! # Idempotente
 //!
@@ -70,6 +74,8 @@ pub enum Alvo {
     ChaveDeAgente([u8; 32]),
     /// A credencial de uma pessoa: `credential.suspend {person}`.
     Pessoa(IdPessoa),
+    /// Um dispositivo relacionado, pela chave: `device.suspend`.
+    Dispositivo([u8; 32]),
 }
 
 /// A chave de um agente, em hexadecimal, de um parâmetro.
@@ -86,6 +92,7 @@ impl Alvo {
             Alvo::Processo(fio) => alloc::format!("process:{fio}"),
             Alvo::Agente(k) | Alvo::ChaveDeAgente(k) => alloc::format!("agent:{}", sigilo::hex(k)),
             Alvo::Pessoa(id) => id.texto(),
+            Alvo::Dispositivo(k) => alloc::format!("device:{}", sigilo::hex(k)),
         }
     }
 
@@ -157,6 +164,10 @@ impl Alvo {
                 Some(p) if p.estado == sigilo::pessoas::Estado::Ativa => Ok(p.papel),
                 _ => Err("pessoa inexistente"),
             },
+            // O recurso da suspensão de um dispositivo é ele mesmo,
+            // `dispositivo:<nome>`, e não o papel de ninguém: as relações
+            // dele têm papéis, e nenhum é dele.
+            Alvo::Dispositivo(_) => Err("um dispositivo nao tem papel: o recurso e ele mesmo"),
         }
     }
 }
@@ -171,6 +182,8 @@ struct Contidos {
     chaves: BTreeSet<[u8; 32]>,
     /// As pessoas com a credencial suspensa.
     pessoas: BTreeSet<[u8; 8]>,
+    /// Os dispositivos suspensos, pela chave.
+    dispositivos: BTreeSet<[u8; 32]>,
 }
 
 static CONTIDOS: Mutex<Contidos> = Mutex::new(Contidos {
@@ -178,6 +191,7 @@ static CONTIDOS: Mutex<Contidos> = Mutex::new(Contidos {
     suspensos: BTreeSet::new(),
     chaves: BTreeSet::new(),
     pessoas: BTreeSet::new(),
+    dispositivos: BTreeSet::new(),
 });
 
 fn com_contidos<R>(f: impl FnOnce(&mut Contidos) -> R) -> R {
@@ -243,6 +257,12 @@ pub fn pessoa_suspensa(id: IdPessoa) -> bool {
     com_contidos(|c| c.pessoas.contains(&id.0))
 }
 
+/// Este dispositivo está suspenso: o aperto do enlace dele é recusado, e
+/// nada daqui é levado a ele.
+pub fn dispositivo_suspenso(chave: &[u8; 32]) -> bool {
+    com_contidos(|c| c.dispositivos.contains(chave))
+}
+
 /// O que uma contenção mudou.
 #[derive(Debug, Default)]
 pub struct Feito {
@@ -281,6 +301,10 @@ pub fn conter(alvo: &Alvo) -> Result<Feito, &'static str> {
             Alvo::Agente(k) => (c.suspensos.len() >= MAIS_CONTIDOS, !c.suspensos.contains(k)),
             Alvo::ChaveDeAgente(k) => (c.chaves.len() >= MAIS_CONTIDOS, !c.chaves.contains(k)),
             Alvo::Pessoa(id) => (c.pessoas.len() >= MAIS_CONTIDOS, !c.pessoas.contains(&id.0)),
+            Alvo::Dispositivo(k) => (
+                c.dispositivos.len() >= MAIS_CONTIDOS,
+                !c.dispositivos.contains(k),
+            ),
         };
         if novo && conjunto_cheio {
             return Err("teto de contencoes desta especie");
@@ -290,6 +314,7 @@ pub fn conter(alvo: &Alvo) -> Result<Feito, &'static str> {
             Alvo::Agente(k) => c.suspensos.insert(*k),
             Alvo::ChaveDeAgente(k) => c.chaves.insert(*k),
             Alvo::Pessoa(id) => c.pessoas.insert(id.0),
+            Alvo::Dispositivo(k) => c.dispositivos.insert(*k),
         })
     })?;
     let mut feito = Feito {
@@ -299,7 +324,7 @@ pub fn conter(alvo: &Alvo) -> Result<Feito, &'static str> {
     if mudou {
         feito.derrubadas = derrubar(alvo);
         let motivo = match alvo {
-            Alvo::Processo(_) => None,
+            Alvo::Processo(_) | Alvo::Dispositivo(_) => None,
             Alvo::Agente(_) => Some("agente suspenso"),
             Alvo::ChaveDeAgente(_) | Alvo::Pessoa(_) => Some("credencial suspensa"),
         };
@@ -309,7 +334,7 @@ pub fn conter(alvo: &Alvo) -> Result<Feito, &'static str> {
                     crate::coordenacao::invalidar_chave(k, motivo)
                 }
                 Alvo::Pessoa(id) => crate::coordenacao::invalidar_da_pessoa(id.0, motivo),
-                Alvo::Processo(_) => {}
+                Alvo::Processo(_) | Alvo::Dispositivo(_) => {}
             }
         }
     }
@@ -361,6 +386,7 @@ pub fn soltar(alvo: &Alvo) -> Feito {
         Alvo::Agente(k) => c.suspensos.remove(k),
         Alvo::ChaveDeAgente(k) => c.chaves.remove(k),
         Alvo::Pessoa(id) => c.pessoas.remove(&id.0),
+        Alvo::Dispositivo(k) => c.dispositivos.remove(k),
     });
     Feito {
         mudou,
@@ -387,6 +413,7 @@ pub fn contido(alvo: &Alvo) -> bool {
         Alvo::Agente(k) => c.suspensos.contains(k),
         Alvo::ChaveDeAgente(k) => c.chaves.contains(k),
         Alvo::Pessoa(id) => c.pessoas.contains(&id.0),
+        Alvo::Dispositivo(k) => c.dispositivos.contains(k),
     })
 }
 
@@ -436,12 +463,13 @@ fn derrubar(alvo: &Alvo) -> Vec<(u64, politica::endereco::Destino)> {
 /// O estado, para quem investiga: cada contido, pelo texto do alvo.
 pub fn lista() -> Vec<(&'static str, String)> {
     podar();
-    let (isolados, suspensos, chaves, pessoas) = com_contidos(|c| {
+    let (isolados, suspensos, chaves, pessoas, dispositivos) = com_contidos(|c| {
         (
             c.isolados.iter().copied().collect::<Vec<_>>(),
             c.suspensos.iter().copied().collect::<Vec<_>>(),
             c.chaves.iter().copied().collect::<Vec<_>>(),
             c.pessoas.iter().copied().collect::<Vec<_>>(),
+            c.dispositivos.iter().copied().collect::<Vec<_>>(),
         )
     });
     let mut v = Vec::new();
@@ -456,6 +484,9 @@ pub fn lista() -> Vec<(&'static str, String)> {
     }
     for p in pessoas {
         v.push(("credential.suspend", Alvo::Pessoa(IdPessoa(p)).texto()));
+    }
+    for k in dispositivos {
+        v.push(("device.suspend", Alvo::Dispositivo(k).texto()));
     }
     v
 }
@@ -476,6 +507,14 @@ pub fn esquecer_pessoa(id: IdPessoa) {
     });
 }
 
+/// Esquece a suspensão de um dispositivo revogado: a lápide é o
+/// definitivo, e a chave não volta para herdar nada.
+pub fn esquecer_dispositivo(chave: &[u8; 32]) {
+    com_contidos(|c| {
+        c.dispositivos.remove(chave);
+    });
+}
+
 /// Só para a suíte: ninguém contido — cada caso começa do zero.
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_de_teste() {
@@ -484,6 +523,7 @@ pub fn esquecer_de_teste() {
         c.suspensos.clear();
         c.chaves.clear();
         c.pessoas.clear();
+        c.dispositivos.clear();
     });
 }
 

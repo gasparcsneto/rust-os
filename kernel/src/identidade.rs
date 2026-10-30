@@ -806,6 +806,9 @@ pub enum Recusa {
     Cheio,
     /// Não há agente com esta chave, ou com este nome.
     Desconhecido,
+    /// A chave é de um dispositivo relacionado, ou tem lápide de um: uma
+    /// chave, uma espécie de principal — um dispositivo não vira agente.
+    Dispositivo,
 }
 
 impl Recusa {
@@ -816,6 +819,7 @@ impl Recusa {
             Recusa::NomeRepetido => "nome ja usado por outra chave",
             Recusa::Cheio => "registro cheio",
             Recusa::Desconhecido => "agente desconhecido",
+            Recusa::Dispositivo => "a chave e de um dispositivo: um dispositivo nao e um agente",
         }
     }
 }
@@ -825,6 +829,12 @@ impl Recusa {
 pub fn registrar(chave: [u8; TAM_CHAVE], nome: &str, papel: &str) -> Result<(), Recusa> {
     if !registro::nome_valido(nome) {
         return Err(Recusa::Nome);
+    }
+    // Fora da trava daqui: a do registro de dispositivos não entra debaixo
+    // desta. Quem registra tem a ordem das gravações na mão, e um registro
+    // de dispositivo da mesma chave não passa no meio.
+    if crate::dispositivos::conhecida(&chave) {
+        return Err(Recusa::Dispositivo);
     }
     crate::arch::sem_interrupcoes(|| {
         let mut id = IDENTIDADE.lock();
