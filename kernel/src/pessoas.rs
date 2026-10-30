@@ -557,6 +557,7 @@ pub fn sair(id: IdSessao) -> bool {
     };
     crate::coordenacao::invalidar_pessoa(id, "a pessoa saiu");
     crate::mensagens::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
+    crate::malha::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
     crate::autorizacao::auditar_pessoa(
         Some((&sessao.pessoa.texto(), id.0)),
         None,
@@ -575,6 +576,7 @@ pub fn encerrar_pelo_console(id: IdSessao, detalhe: &str) {
     };
     crate::coordenacao::invalidar_pessoa(id, detalhe);
     crate::mensagens::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
+    crate::malha::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
     crate::autorizacao::auditar_pessoa(
         Some((&sessao.pessoa.texto(), id.0)),
         None,
@@ -703,10 +705,17 @@ pub fn revogar_pessoa(id: IdPessoa) -> Result<Vec<IdSessao>, Recusa> {
     for s in &encerradas {
         crate::coordenacao::invalidar_pessoa(*s, "a pessoa foi revogada");
         crate::mensagens::canal_acabou(politica::mensagens::Canal::Pessoa(s.0));
+        crate::malha::canal_acabou(politica::mensagens::Canal::Pessoa(s.0));
     }
     // As mensagens dela, as que mandou e as que ia receber: anuladas.
     crate::mensagens::anular_titular(
         politica::mensagens::Dono::Pessoa(id.0),
+        "com a pessoa revogada",
+    );
+    // E na malha: os endpoints dos programas dela fecham, e as entregas
+    // vivas entre eles são anuladas.
+    crate::malha::anular_titular(
+        politica::malha::Titular::Pessoa(id.0),
         "com a pessoa revogada",
     );
     // E as chaves de assinatura dela: anuladas, com a lápide.
@@ -740,6 +749,7 @@ pub fn revogar_sessao(id: IdSessao) -> Result<IdPessoa, Recusa> {
         .ok_or(Recusa::Desconhecida)?;
     crate::coordenacao::invalidar_pessoa(id, "a sessao foi revogada");
     crate::mensagens::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
+    crate::malha::canal_acabou(politica::mensagens::Canal::Pessoa(id.0));
     Ok(dona)
 }
 

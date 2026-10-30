@@ -649,8 +649,10 @@ fn passada_do_coletor() {
     // E os arrendamentos vencidos saem daqui, e vão para a auditoria:
     // um prazo vence sem ninguém pedir nada.
     crate::coordenacao::vencer_todos();
-    // E as mensagens vencidas, também sem ninguém pedir.
+    // E as mensagens vencidas, também sem ninguém pedir — e as entregas da
+    // malha.
     crate::mensagens::vencer_todos();
+    crate::malha::vencer_todos();
     // E a auditoria que nenhum registro levou ainda vai ao journal, de
     // tempos em tempos: as leituras e as recusas não mudam estado, e
     // não têm registro próprio.
@@ -946,8 +948,10 @@ pub fn recolher_terminados() -> usize {
         drop(morto);
         // A janela de nonces do processo, se ele mandou mensagens pela
         // interface nativa: o id não se repete, e a janela não serviria a
-        // mais ninguém. Fora da trava, como tudo que este laço larga.
+        // mais ninguém. Fora da trava, como tudo que este laço larga. E os
+        // endpoints dele na malha fecham, com o que esperava neles.
         crate::mensagens::canal_acabou(canal);
+        crate::malha::canal_acabou(canal);
         // Só agora a vaga volta a ser escolhível. O marcador sai sob a trava
         // e é largado fora dela, como todo fio deste módulo.
         let marcador = com_escalonador(|e| match &e.fios[vaga] {
@@ -2339,6 +2343,21 @@ pub fn autoridade_do_processo(id: u64) -> Option<crate::autorizacao::Autoridade>
                 f.id.numero() == id && f.nome == NOME_DO_PROCESSO && f.estado != Estado::Terminado
             })
             .map(|f| f.autoridade)
+    })
+}
+
+/// A autoridade e o programa de um processo vivo — ver
+/// [`autoridade_do_processo`]. `None` para um fio do kernel, ou um que
+/// acabou.
+pub fn processo(id: u64) -> Option<(crate::autorizacao::Autoridade, crate::autorizacao::Programa)> {
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .find(|f| {
+                f.id.numero() == id && f.nome == NOME_DO_PROCESSO && f.estado != Estado::Terminado
+            })
+            .map(|f| (f.autoridade, f.programa))
     })
 }
 

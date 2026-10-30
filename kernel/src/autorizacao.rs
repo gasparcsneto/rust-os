@@ -511,6 +511,13 @@ pub fn destino_decidido() -> Option<crate::mensagens::Destino> {
     do_comando_deste_fio(|c| c.destino.clone()).flatten()
 }
 
+/// O programa de quem pediu o comando em execução neste fio, se foi um
+/// processo — o que o kernel carregou, e não o que o programa diz. `None`
+/// fora de um comando autorizado, e para quem não é processo.
+pub fn programa_decidido() -> Option<Programa> {
+    do_comando_deste_fio(|c| c.decidido.as_ref().and_then(|d| d.programa)).flatten()
+}
+
 /// Roda `f` como o comando de `autoridade`, pedido por `pedinte`, neste
 /// fio.
 ///
@@ -2233,6 +2240,21 @@ fn decidir_o_pedido(
             }
         },
     };
+    // O endpoint da malha é de um processo, e só ele o abre, o fecha, lê o
+    // que chega por ele e confirma — ver `malha::so_de_processo`.
+    if crate::malha::so_de_processo(comando.nome) && !matches!(chamador, Chamador::Processo { .. })
+    {
+        let motivo = "so um processo pede este comando: o endpoint da malha e dele";
+        let d = auditar(
+            &quem,
+            comando.nome,
+            "",
+            Codigo::DenyPermission,
+            parametros,
+            motivo,
+        );
+        return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
+    }
     // Um journal recusado: as revogações que ele perdeu não se sabem, e
     // nenhuma credencial vale — ver `persistencia::revogacoes_desconhecidas`.
     if credenciada(autoridade)
@@ -2287,8 +2309,10 @@ fn decidir_o_pedido(
     // Um comando sobre uma conexão aberta — `net.send`, `net.recv`,
     // `net.close` — nomeia a conexão pelo número, e o recurso é o destino
     // dela, resolvido para quem pede: o número de outro titular, ou um que
-    // não existe, não resolve. Ver `rede::conexoes`.
-    let mut sem_conexao = None;
+    // não existe, não resolve. Ver `rede::conexoes`. Um comando da malha
+    // decide a intenção — a do pedido, ou a do endpoint ou da entrega que
+    // ele nomeia, resolvida do mesmo jeito. Ver `malha::recurso_do_pedido`.
+    let mut sem_recurso = None;
     let recurso = if exigida.is_some_and(Permissao::alvo_e_papel) {
         // O alvo de uma contenção — ou do término de um processo —, no
         // texto em que a auditoria o grava;
@@ -2305,7 +2329,15 @@ fn decidir_o_pedido(
         match crate::rede::conexoes::destino_para(numero, &dono) {
             Ok(destino) => destino.texto(),
             Err(motivo) => {
-                sem_conexao = Some(motivo);
+                sem_recurso = Some(motivo);
+                recurso_do_pedido(comando, params)
+            }
+        }
+    } else if exigida.is_some_and(Permissao::recurso_e_intencao) {
+        match crate::malha::recurso_do_pedido(chamador, quem.chave, comando, params) {
+            Ok(intencao) => intencao,
+            Err(motivo) => {
+                sem_recurso = Some(motivo);
                 recurso_do_pedido(comando, params)
             }
         }
@@ -2322,11 +2354,12 @@ fn decidir_o_pedido(
         // gravada lá, com o papel do administrador.
         Acesso::PorProva => (Codigo::Allow, "a autorizacao e a prova"),
         Acesso::Exige(_) if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
-        // A conexão que não resolveu: a permissão vem antes da existência,
-        // como num destinatário — quem não tem `net.connect` ouve
-        // `DENY_PERMISSION` e não descobre se o número existe; quem tem
-        // ouve `DENY_RESOURCE`, e a auditoria grava o motivo.
-        Acesso::Exige(permissao) if let Some(motivo) = sem_conexao => {
+        // A conexão — ou o endpoint, ou a entrega — que não resolveu: a
+        // permissão vem antes da existência, como num destinatário — quem
+        // não tem `net.connect` ouve `DENY_PERMISSION` e não descobre se o
+        // número existe; quem tem ouve `DENY_RESOURCE`, e a auditoria grava
+        // o motivo.
+        Acesso::Exige(permissao) if let Some(motivo) = sem_recurso => {
             match decidir(quem.papel.as_deref(), permissao, "") {
                 (Codigo::DenyResource, _) => (Codigo::DenyResource, motivo),
                 outra => outra,
@@ -2603,6 +2636,44 @@ pub fn autorizar_processo_com_decisao(
     };
     let decisao = auditar(&quem, metodo, recurso, codigo, &[], detalhe);
     (codigo, decisao)
+}
+
+/// Se o processo `fio`, vivo, exerceria agora `permissao` sobre `recurso`:
+/// a mesma conta do gate para um pedido dele — a autoridade de quem o
+/// lançou e o programa que ele executa, a sessão da pessoa, as revogações
+/// que o journal não perdeu, a contenção, o manifesto, o papel e a confiança
+/// no editor —, com a política e o registro de agora, sem gravar nada.
+///
+/// É a pergunta da malha sobre o **outro lado**: um endpoint só aparece na
+/// descoberta, e uma entrega só vai a ele, enquanto o dono receberia por
+/// ele — ver [`crate::malha`]. Quem pede já foi decidido pelo gate; esta
+/// conta não decide nada por ele.
+pub fn processo_exerceria(fio: u64, permissao: Permissao, recurso: &str) -> bool {
+    let Some((autoridade, programa)) = crate::fios::processo(fio) else {
+        return false;
+    };
+    if let Autoridade::Pessoa { sessao } = autoridade
+        && quem_da_pessoa(sessao).is_err()
+    {
+        return false;
+    }
+    if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
+        return false;
+    }
+    let chamador = Chamador::Processo {
+        fio,
+        autoridade,
+        programa,
+    };
+    if crate::contencao::recusa(chamador, autoridade).is_some() || !programa.permite(permissao) {
+        return false;
+    }
+    let quem = quem_do_processo(autoridade);
+    !papel_de_teto(&quem)
+        && decidir(quem.papel.as_deref(), permissao, recurso)
+            .0
+            .permite()
+        && editor_sem_confianca(&programa, quem.papel.as_deref()).is_none()
 }
 
 /// Grava o que a execução de uma chamada de sistema fez da decisão

@@ -23,7 +23,10 @@
 //!   decidiu, e que não concedem nada;
 //! - **o Internet Computer** — [`icp`], a consulta anônima verificada sobre
 //!   o HTTPS daqui: a prova do que os nós responderam, que também não
-//!   concede nada.
+//!   concede nada;
+//! - **a malha** — [`malha`], os programas de um titular cooperando por
+//!   intenções: oferecer, achar quem oferece, mandar, receber e responder,
+//!   cada passo pelo gate.
 //!
 //! # Como um programa se escreve
 //!
@@ -58,6 +61,7 @@ pub mod dns;
 pub mod http;
 pub mod icp;
 pub mod janela;
+pub mod malha;
 pub mod manifesto;
 pub mod monte;
 pub mod nativo;

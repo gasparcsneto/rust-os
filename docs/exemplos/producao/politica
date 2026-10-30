@@ -36,12 +36,20 @@
 # do administrador, que a delega. Tire-a do operador para que ele escreva
 # arquivos sem poder trocar a arvore inteira por uma copia. Ver
 # docs/OPERACAO.md.
+#
+# A malha liga os programas de um mesmo titular desta maquina: um oferece
+# uma intencao (fabric.offer) e outro a procura e entrega a ele
+# (fabric.send). O recurso e a intencao, inteira e enumerada -
+# intencao:<espaco>.<nome>, sem curinga -: troque as de exemplo pelas dos
+# programas da imagem. Nenhuma das duas da acesso a nada do outro lado:
+# quem recebe decide pelo proprio papel o que faz com a entrega. Ver
+# docs/MALHA.md.
 
 papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare credential.change_self
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare credential.change_self fabric.offer fabric.send
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador fs.restore /armazem/compartilhado
@@ -49,10 +57,12 @@ recurso operador net.connect udp:192.0.2.53:53
 armazem operador 16777216 4096
 recurso operador process.run /bin /programas
 recurso operador message.send papel:operador papel:sistema
+recurso operador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa operador 50 100
 processos operador 8
 
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update fabric.offer fabric.send
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema fs.restore /armazem
@@ -66,10 +76,12 @@ recurso sistema process.isolate papel:observador papel:operador papel:sistema
 recurso sistema agent.suspend papel:observador papel:operador papel:sistema
 recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 recurso sistema process.terminate papel:observador papel:operador papel:sistema
+recurso sistema fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso sistema fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update credential.change_self
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
 recurso administrador fs.write /armazem/compartilhado
 recurso administrador fs.restore /armazem/compartilhado
@@ -83,6 +95,8 @@ recurso administrador process.isolate papel:observador papel:operador papel:sist
 recurso administrador agent.suspend papel:observador papel:operador papel:sistema
 recurso administrador credential.suspend papel:observador papel:operador papel:sistema
 recurso administrador process.terminate papel:observador papel:operador papel:sistema
+recurso administrador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso administrador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa administrador 10 20
 processos administrador 8
 

@@ -30,7 +30,9 @@
 //!   escrito não é alcançado. E o de `key.create`, `key.read`, `key.sign`
 //!   e `key.destroy`: os nomes das chaves, `chave:<nome>`, enumerados — o
 //!   nome se resolve no espaço da identidade de quem pede, e não diz nada
-//!   das chaves de outra.
+//!   das chaves de outra. E o de `fabric.offer` e `fabric.send`: as
+//!   intenções da malha, `intencao:<espaço>.<nome>`, enumeradas, cada uma
+//!   inteira — sem curinga e sem prefixo (ver [`crate::malha`]).
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
@@ -339,6 +341,9 @@ pub enum ErroTipo {
     EnderecoInvalido(String),
     /// Uma chave que não é `chave:<nome>`, com o nome na regra.
     ChaveInvalida(String),
+    /// Uma intenção que não é `intencao:<espaço>.<nome>` — ver
+    /// [`crate::malha::intencao_valida`].
+    IntencaoInvalida(String),
     /// Falta a linha `serial`.
     SemSerial,
     /// Falta a linha `local`.
@@ -387,7 +392,7 @@ impl Erro {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
             ErroTipo::RecursoNaoECaminho(p) => format!(
-                "`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede, nem chave"
+                "`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede, nem chave, nem intencao"
             ),
             ErroTipo::RecursoFaltando(papel, p) => {
                 format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
@@ -402,6 +407,9 @@ impl Erro {
             ErroTipo::ChaveInvalida(c) => {
                 format!("chave invalida `{c}`: so `chave:<nome>`, sem curinga")
             }
+            ErroTipo::IntencaoInvalida(i) => format!(
+                "intencao invalida `{i}`: so `intencao:<espaco>.<nome>`, inteira, sem curinga"
+            ),
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
             ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
@@ -697,6 +705,16 @@ impl Politica {
                         let chave = alloc::format!("{PREFIXO_DE_CHAVE}{nome}");
                         if !prefixos.contains(&chave) {
                             prefixos.push(chave);
+                        }
+                    } else if p.recurso_e_intencao() {
+                        // Uma intenção inteira, e só: nada de curinga, nada
+                        // de prefixo — `intencao:imagem` não é intenção, e
+                        // não alcançaria `intencao:imagem.ver`.
+                        let nome = nome_de_intencao(c)
+                            .ok_or(erro(ErroTipo::IntencaoInvalida(c.to_string())))?;
+                        let intencao = alloc::format!("{PREFIXO_DE_INTENCAO}{nome}");
+                        if !prefixos.contains(&intencao) {
+                            prefixos.push(intencao);
                         }
                     } else {
                         let normal = caminho::normalizar(c)
@@ -1077,6 +1095,19 @@ impl Politica {
                 return Codigo::DenyResource;
             }
         }
+        if p.recurso_e_intencao() {
+            // A intenção inteira, igual a uma das enumeradas. Sem intenção,
+            // ou uma que não tem a forma: fechado.
+            let Some(alcance) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
+            let Some(alvo) = recurso.filter(|r| nome_de_intencao(r).is_some()) else {
+                return Codigo::DenyResource;
+            };
+            if !alcance.iter().any(|a| a == alvo) {
+                return Codigo::DenyResource;
+            }
+        }
         Codigo::Allow
     }
 
@@ -1443,7 +1474,10 @@ fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>
         (None, _) => true,
         (Some(_), None) => false,
         (Some(a), Some(b))
-            if p.recurso_e_papel() || p.recurso_e_endereco() || p.recurso_e_chave() =>
+            if p.recurso_e_papel()
+                || p.recurso_e_endereco()
+                || p.recurso_e_chave()
+                || p.recurso_e_intencao() =>
         {
             a.iter().all(|pa| b.contains(pa))
         }
@@ -1467,6 +1501,19 @@ pub fn nome_de_chave(texto: &str) -> Option<&str> {
     texto
         .strip_prefix(PREFIXO_DE_CHAVE)
         .filter(|n| nome_valido(n))
+}
+
+/// Como uma intenção se escreve no alcance de `fabric.offer` e
+/// `fabric.send`, e como a decisão a recebe: `intencao:<espaço>.<nome>`.
+pub const PREFIXO_DE_INTENCAO: &str = "intencao:";
+
+/// A intenção de `intencao:<espaço>.<nome>`, se o texto é isso e a
+/// intenção tem a forma — ver [`crate::malha::intencao_valida`].
+/// `intencao:*`, `intencao:imagem` e `intencao:` não são intenção.
+pub fn nome_de_intencao(texto: &str) -> Option<&str> {
+    texto
+        .strip_prefix(PREFIXO_DE_INTENCAO)
+        .filter(|n| crate::malha::intencao_valida(n))
 }
 
 /// Um número de 64 bits, para as cotas de armazém.
@@ -2365,6 +2412,117 @@ mod testes {
         );
         assert!(!h.papel("herdeiro").unwrap().tem(KeyCreate));
         assert!(h.papel("herdeiro").unwrap().dominios.is_empty());
+    }
+
+    /// A linha de alcance da malha: só `intencao:<espaço>.<nome>`, inteira;
+    /// obrigatória para quem oferece ou manda; a decisão alcança só a
+    /// intenção escrita — nem prefixo, nem curinga —; sensíveis, por
+    /// inclusão não vêm; e o teto contém exatamente as intenções.
+    #[test]
+    fn a_linha_da_malha() {
+        use Codigo::*;
+        use Permissao::{FabricOffer, FabricSend};
+        for ruim in [
+            "recurso operador fabric.send intencao:*",
+            "recurso operador fabric.send intencao:imagem.*",
+            "recurso operador fabric.send intencao:imagem",
+            "recurso operador fabric.send intencao:",
+            "recurso operador fabric.send intencao:Imagem.ver",
+            "recurso operador fabric.send imagem.compartilhar",
+            "recurso operador fabric.send *",
+            "recurso operador fabric.send papel:operador",
+            "recurso operador fabric.send chave:bancada",
+            "recurso operador fabric.send /dados",
+            "recurso operador fabric.send tcp:10.0.2.100:7",
+            "recurso operador fabric.offer",
+        ] {
+            let texto = alloc::format!("{}{ruim}\n", crate::PADRAO);
+            let erro = Politica::ler(&texto).unwrap_err();
+            assert!(
+                matches!(erro.tipo, ErroTipo::IntencaoInvalida(_) | ErroTipo::Sintaxe),
+                "{ruim}: {erro:?}"
+            );
+        }
+        assert_eq!(
+            Politica::ler(&alloc::format!(
+                "{}recurso operador fabric.offer intencao:*\n",
+                crate::PADRAO
+            ))
+            .unwrap_err()
+            .tipo,
+            ErroTipo::IntencaoInvalida("intencao:*".into())
+        );
+        // Sem a linha: recusada, e não "qualquer intenção".
+        for p in ["fabric.offer", "fabric.send"] {
+            let sem = crate::PADRAO
+                .lines()
+                .filter(|l| !l.starts_with(&alloc::format!("recurso operador {p}")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(matches!(
+                Politica::ler(&sem).unwrap_err().tipo,
+                ErroTipo::RecursoFaltando(papel, q) if papel == "operador" && q == p
+            ));
+        }
+        // A decisão: só a intenção escrita, inteira.
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for perm in [FabricOffer, FabricSend] {
+            for dentro in ["intencao:imagem.compartilhar", "intencao:pdf.anotar"] {
+                assert_eq!(p.decidir(Some("operador"), perm, Some(dentro)), Allow);
+                assert_eq!(p.decidir(Some("sistema"), perm, Some(dentro)), Allow);
+            }
+            for fora in [
+                "intencao:pdf.assinar",
+                "intencao:imagem",
+                "intencao:imagem.compartilhar.agora",
+                "intencao:imagem.*",
+                "intencao:*",
+                "intencao:",
+                "imagem.compartilhar",
+                "papel:operador",
+                "",
+            ] {
+                assert_eq!(
+                    p.decidir(Some("operador"), perm, Some(fora)),
+                    DenyResource,
+                    "{} {fora}",
+                    perm.nome()
+                );
+            }
+            assert_eq!(p.decidir(Some("operador"), perm, None), DenyResource);
+            // O observador não tem nenhuma das duas.
+            assert_eq!(
+                p.decidir(
+                    Some("observador"),
+                    perm,
+                    Some("intencao:imagem.compartilhar")
+                ),
+                DenyPermission
+            );
+        }
+        // Sensível: por inclusão não vem.
+        let incluida = alloc::format!(
+            "{}papel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(
+                Some("herdeiro"),
+                FabricSend,
+                Some("intencao:imagem.compartilhar")
+            ),
+            DenyPermission
+        );
+        // O teto contém as intenções exatas: uma a mais no operador não
+        // cabe no administrador.
+        let mais = alloc::format!(
+            "{}recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.assinar\n",
+            crate::PADRAO
+        );
+        let m = Politica::ler(&mais).unwrap();
+        assert!(m.cabe_em("operador", "administrador").is_err());
+        assert!(p.cabe_em("operador", "administrador").is_ok());
     }
 
     /// Os domínios de assinatura: lidos, escritos de volta iguais, só num

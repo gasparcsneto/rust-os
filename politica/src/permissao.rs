@@ -82,6 +82,21 @@
 //! administrativa: quem a tem a exerce pelo gate. Fazer a cópia não pede
 //! permissão nova: é uma leitura, com o alcance de `fs.read`, e sai
 //! cifrada para esta máquina. Ver `docs/ARMAZENAMENTO.md`.
+//!
+//! # A malha
+//!
+//! `fabric.offer` autoriza um **programa** a oferecer uma intenção — dizer
+//! "eu atendo `imagem.compartilhar`" —, a receber o que outro programa do
+//! mesmo titular lhe entrega por ela e a responder. `fabric.send` autoriza
+//! a procurar quem oferece uma intenção, a entregar a um deles e a
+//! acompanhar a entrega. O recurso das duas é a intenção, `intencao:<nome>`,
+//! e o alcance de cada papel é enumerado — sem curinga: oferecer
+//! `imagem.compartilhar` não é oferecer `pdf.anotar`. Nenhuma das duas dá
+//! acesso a nada do outro lado: o que se entrega é o que quem manda já tem,
+//! e o que quem recebe faz com isso continua decidido pelo papel dele. As
+//! duas sensíveis — cada papel que as tem as escreve —, e nenhuma
+//! administrativa: um programa as exerce pelo gate, com o manifesto dele.
+//! Ver [`crate::malha`].
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -276,11 +291,20 @@ pub enum Permissao {
     /// máquina — `fs.restore`. Ver o cabeçalho do módulo. O recurso é o
     /// caminho, com o alcance enumerado; sensível, e não administrativa.
     FsRestore,
+    /// Oferecer uma intenção na malha, receber o que chega por ela e
+    /// responder — `fabric.offer`. Ver o cabeçalho do módulo. O recurso é
+    /// a intenção, `intencao:<nome>`, com o alcance enumerado; sensível, e
+    /// não administrativa.
+    FabricOffer,
+    /// Procurar quem oferece uma intenção, entregar a um deles e acompanhar
+    /// a entrega — `fabric.send`. O recurso é a intenção, com o alcance
+    /// enumerado; sensível, e não administrativa.
+    FabricSend,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 51] = [
+pub const TODAS: [Permissao; 53] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -332,6 +356,8 @@ pub const TODAS: [Permissao; 51] = [
     Permissao::SystemUpdate,
     Permissao::CredentialChangeSelf,
     Permissao::FsRestore,
+    Permissao::FabricOffer,
+    Permissao::FabricSend,
 ];
 
 impl Permissao {
@@ -389,6 +415,8 @@ impl Permissao {
             Permissao::SystemUpdate => "system.update",
             Permissao::CredentialChangeSelf => "credential.change_self",
             Permissao::FsRestore => "fs.restore",
+            Permissao::FabricOffer => "fabric.offer",
+            Permissao::FabricSend => "fabric.send",
         }
     }
 
@@ -443,6 +471,8 @@ impl Permissao {
                 | Permissao::SystemUpdate
                 | Permissao::CredentialChangeSelf
                 | Permissao::FsRestore
+                | Permissao::FabricOffer
+                | Permissao::FabricSend
         )
     }
 
@@ -520,6 +550,16 @@ impl Permissao {
         self.recurso_e_papel() && !self.recurso_e_destino()
     }
 
+    /// O recurso desta permissão é uma intenção da malha —
+    /// `intencao:<nome>` —, e um papel o limita a uma lista enumerada de
+    /// intenções. Sem curinga, sem prefixo: `intencao:imagem` não alcança
+    /// `intencao:imagem.compartilhar`. Oferecer e mandar: as duas falam da
+    /// mesma intenção, e cada papel enumera o seu alcance de cada uma. Ver
+    /// [`crate::malha`].
+    pub const fn recurso_e_intencao(self) -> bool {
+        matches!(self, Permissao::FabricOffer | Permissao::FabricSend)
+    }
+
     /// Uma contenção reversível: só restringe, e tem o seu inverso na mesma
     /// permissão.
     pub const fn contencao(self) -> bool {
@@ -572,6 +612,9 @@ impl Permissao {
     /// mudam: criar e destruir mexem na tabela de chaves, anular também, e
     /// assinar é um ato da identidade que sai da máquina com efeito — quem
     /// assinou por último é quem agiu.
+    ///
+    /// As da malha mudam: oferecer põe um endpoint na tabela, e mandar põe
+    /// uma entrega na fila de outro programa — o que ele vê muda.
     pub const fn muda_estado(self) -> bool {
         match self {
             Permissao::AgentRead
@@ -624,7 +667,9 @@ impl Permissao {
             | Permissao::SystemPower
             | Permissao::SystemUpdate
             | Permissao::CredentialChangeSelf
-            | Permissao::FsRestore => true,
+            | Permissao::FsRestore
+            | Permissao::FabricOffer
+            | Permissao::FabricSend => true,
         }
     }
 
@@ -636,6 +681,7 @@ impl Permissao {
             || self.recurso_e_papel()
             || self.recurso_e_endereco()
             || self.recurso_e_chave()
+            || self.recurso_e_intencao()
     }
 }
 
@@ -870,7 +916,8 @@ mod testes {
         assert!(r.recurso_e_caminho() && r.tem_alcance());
         assert!(!r.recurso_e_endereco() && !r.recurso_e_papel() && !r.recurso_e_chave());
         assert!(!r.recurso_e_destino() && !r.contencao() && !r.alvo_e_papel());
-        assert_eq!(TODAS.last(), Some(&r));
+        assert!(!r.recurso_e_intencao());
+        assert_eq!(TODAS[50], r);
         assert_eq!(Permissao::FsRestore as usize, 50);
         for (i, p) in TODAS.into_iter().enumerate() {
             assert_eq!(p as usize, i, "{}", p.nome());
@@ -887,6 +934,41 @@ mod testes {
         assert_eq!(Permissao::de_nome("fs.backup"), None);
         assert_eq!(Permissao::de_nome("fs.*"), None);
         assert_eq!(Permissao::de_nome("fs"), None);
+    }
+
+    /// A malha: oferecer e mandar, sensíveis — cada papel que as tem as
+    /// escreve —, **não** administrativas — um programa as exerce pelo
+    /// gate —, mudam o estado, e a intenção como recurso, com o alcance
+    /// enumerado. Só elas têm a intenção como recurso, e nenhuma tem outro
+    /// tipo de alcance. No fim da lista: as de antes não mudam de bit.
+    #[test]
+    fn malha() {
+        let oferecer = Permissao::de_nome("fabric.offer").unwrap();
+        let mandar = Permissao::de_nome("fabric.send").unwrap();
+        assert_eq!(oferecer, Permissao::FabricOffer);
+        assert_eq!(mandar, Permissao::FabricSend);
+        for p in [oferecer, mandar] {
+            assert!(p.sensivel() && !p.administrativa() && p.muda_estado());
+            assert!(p.recurso_e_intencao() && p.tem_alcance());
+            assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_chave());
+            assert!(!p.recurso_e_destino() && !p.recurso_e_papel() && !p.alvo_e_papel());
+            assert!(!p.contencao());
+        }
+        assert_eq!(TODAS[51], oferecer);
+        assert_eq!(TODAS[52], mandar);
+        assert_eq!(TODAS.last(), Some(&mandar));
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        let de_intencao: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.recurso_e_intencao())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(de_intencao, ["fabric.offer", "fabric.send"]);
+        assert_eq!(Permissao::de_nome("fabric.*"), None);
+        assert_eq!(Permissao::de_nome("fabric"), None);
+        assert_eq!(Permissao::de_nome("fabric.recv"), None);
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

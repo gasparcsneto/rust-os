@@ -268,6 +268,14 @@ $ cargo xtask agent --canal 2 agent.session
 | `message.ack` | Confirma uma mensagem lida: ela sai da caixa (`id`, `expect_version`) |
 | `message.cancel` | Cancela uma mensagem mandada, enquanto ninguém a leu (`id`, `expect_version`) |
 | `message.status` | O estado de uma mensagem mandada ou recebida (`id`) |
+| `fabric.offer` | Oferece uma intenção na malha: abre um endpoint do processo que pede, por onde chegam as entregas dos programas do mesmo titular. Só um processo; a intenção é o recurso da decisão, enumerada na política (`intent`) |
+| `fabric.withdraw` | Fecha um endpoint seu: o que esperava nele é anulado (`endpoint`) |
+| `fabric.discover` | Os programas do seu titular que oferecem uma intenção, com a identidade que o kernel conferiu — o nome do manifesto, o resumo da imagem, o editor — e só os que ainda receberiam. Descobrir não concede nada (`intent`) |
+| `fabric.send` | Entrega um texto a um endpoint que oferece a intenção, de um programa do mesmo titular; quem manda é o processo ou a sessão que pede (`endpoint`, `intent`, `body`, `nonce`, `ttl_ms`) |
+| `fabric.recv` | Lê as entregas que esperam num endpoint seu, com o programa que mandou cada uma, sem consumir; com `wait`, espera uma chegar (`endpoint`, `after`, `max`, `wait`) |
+| `fabric.ack` | Confirma uma entrega lida, com uma resposta opcional para quem mandou: ela sai da fila (`id`, `reply`, `expect_version`) |
+| `fabric.cancel` | Cancela uma entrega que você mandou, enquanto ninguém a leu (`id`, `expect_version`) |
+| `fabric.status` | O estado de uma entrega que você mandou, e a resposta de quem a confirmou (`id`) |
 | `fs.verify` | Confere o armazém abaixo de `path`: cada bloco de cada versão viva abre (a cifra autenticada confere o que o disco devolveu) e nenhum está livre no mapa do volume. Só lê; diz o que conferiu, os arquivos que não abrem, os que mudaram no meio. O alcance é o do `fs.read` |
 | `fs.backup` | A cópia de segurança de `path` — `/armazem` inteiro, ou um nó abaixo dele —: os diretórios, os arquivos e o conteúdo num instante, cifrados para esta máquina e esta instalação, num rascunho de quem pede; com `copy`, um pedaço dela em base64, ou o descarte (`path`, `copy`, `offset`, `max`, `discard`). Só dados: nada de identidade, credencial, política ou segredo. O alcance é o do `fs.read` |
 | `fs.restore` | Troca a subárvore `path` pela cópia enviada num rascunho do mesmo caminho: conferida inteira antes de qualquer mudança, trocada num commit só, com versões novas e o dono que restaura (`path`, `draft`, `expect_version`). A permissão própria `fs.restore` |
@@ -305,6 +313,7 @@ kernel/src/
 ├── slots.rs         a atualização A/B do lado do kernel: a imagem do slot conferida, o pacote montado, a reconciliação do boot com o journal, a escrita no slot inativo e a instalação por quórum
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
+├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
 ├── copia.rs         a cópia de segurança do armazém e a restauração dela: cifrada para esta máquina e esta instalação, conferida inteira, trocada como uma base do volume num commit só
@@ -501,6 +510,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
+├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
 ├── manifesto.rs     o manifesto de um programa: o nome, o que ele exerce, e o resumo da imagem
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s
@@ -694,6 +704,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── conexao.rs   a conexão TCP de um programa, pelo gate: a recusa, o firewall, o outro lado e o prazo, sem se misturarem
     ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
     ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
+    ├── malha.rs     a malha de um programa: oferecer uma intenção, achar quem a oferece, mandar, receber e responder — cada passo pelo gate
     ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, assinadas pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
@@ -740,6 +751,9 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── livro.rs      a rede principal do IC, de verdade: o símbolo do livro-razão do ICP pelo DNS, o gate, o TLS público e a verificação pela raiz da imagem, cada parte medida
         ├── carteira.rs   o valor na bancada do IC, pela chave de quem a lançou: o saldo, a transferência do ICRC-1, a repetição que o ledger deduplica e ICP em cycles pelo CMC — cada resposta verificada, cada assinatura uma decisão do gate
         ├── implantacao.rs um canister na bancada do IC, pela chave de quem a lançou: a criação pelo ledger de cycles, a instalação de um módulo do armazém, o estado, o upgrade em pedaços que guarda o estado e a carga de cycles — cada resposta verificada, cada assinatura uma decisão do gate
+        ├── correio.rs    o aplicativo B da malha: oferece `imagem.compartilhar`, espera o que chega e confirma, dizendo de que programa veio
+        ├── fotos.rs      o aplicativo A da malha: procura quem oferece, escolhe pela identidade conferida, manda, consulta e reenvia, no passo da suíte
+        ├── impostor.rs   diz ser o `correio` e tenta, pela malha, o que é do outro: ler, fechar, confirmar, consultar, forjar — cada tentativa decidida e recusada
         ├── gestor.rs     os canisters de uma chave, por um pedido que quem o lançou grava no armazém: o saldo, criar, instalar até 8 MiB, o estado, parar, iniciar, os ajustes, desinstalar, apagar e as cargas — com o arrendamento do pedido, o registro que não executa duas vezes e o pedido em andamento que se retoma
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
@@ -8398,6 +8412,46 @@ O kernel de produção cresceu 87 184 bytes nos segmentos carregáveis no
 x86 (+2,08%) e 70 536 no ARM (+1,98%), contra o B4 (`c153c15`); o
 iniciador e os programas não mudaram.
 
+## A malha
+
+O primeiro marco do ecossistema Duke: os aplicativos de um titular
+cooperam sem se conhecer. Um programa **oferece** uma intenção —
+`imagem.compartilhar` — e recebe por um endpoint o que chega; outro
+**procura** quem a oferece, escolhe pela identidade que o kernel conferiu
+— o nome do manifesto, o resumo da imagem, o editor —, **manda** um texto
+e lê a resposta ([`kernel/src/malha.rs`](kernel/src/malha.rs), sobre a
+conta pura de [`politica/src/malha.rs`](politica/src/malha.rs)). A malha
+não é uma autoridade, nem um segundo gate: cada passo é um comando do
+registro (`fabric.offer`, `fabric.withdraw`, `fabric.discover`,
+`fabric.send`, `fabric.recv`, `fabric.ack`, `fabric.cancel`,
+`fabric.status`), decidido pelo gate com duas permissões novas do
+vocabulário fechado — `fabric.offer` e `fabric.send` — e a intenção como
+recurso enumerado na política, `intencao:<espaço>.<nome>`, sem curinga. O
+id de um endpoint ou de uma entrega se resolve **para quem pede**: o de
+outro titular, de outro processo, o forjado e o que não existe são o mesmo
+`DENY_RESOURCE`. Cada operação decide de novo com a ordem das gravações na
+mão; a revogação da chave ou da pessoa fecha os endpoints e anula as
+entregas vivas na hora; o fim do processo fecha os dele; a política que
+tira `fabric.offer` do dono, ou o dono isolado, o tira da descoberta e
+recusa a entrega. Só entre os programas do mesmo titular — entre titulares,
+a ferramenta é a mensagem —, volátil como um canal de eventos, e nunca o
+corpo na auditoria. O runtime dos programas é
+[`programas/src/malha.rs`](programas/src/malha.rs). Ver
+[`docs/MALHA.md`](docs/MALHA.md).
+
+A outra metade do marco — dispositivo → malha → dispositivo — depende de
+uma decisão arquitetural nova, a confiança entre dispositivos, e não foi
+implementada.
+
+Dez casos `malha:` na suíte, nas duas arquiteturas, com programas de
+verdade — o `correio`, que atende; as `fotos`, que mandam; e o `impostor`,
+que diz ser o correio: a entrega de ponta a ponta, com cada passo gravado
+com o processo e o programa, e nenhum registro cortado no teto do detalhe;
+o impostor, que não alcança nada do outro; só o mesmo titular; o gate em
+cada passo; a revogação; a decisão no meio da operação; a espera e o fim do
+processo; o desligamento a caminho; envios, leituras e a revogação ao
+mesmo tempo; e o custo de uma entrega pelo gate inteiro.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
@@ -9939,6 +9993,19 @@ padronizado.
       não presta. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md). A
       identidade gerada na máquina, o Secure Boot e o watchdog ficaram de
       fora.
+- [ ] **Fase 15 — O ecossistema Duke.** Aplicativos, computadores,
+      telefones, relógios, periféricos e serviços cooperando como partes de
+      um ambiente só, pela malha — descoberta, mensagens, capacidades,
+      continuidade —, sem que a malha vire uma autoridade: identidade,
+      autoridade e capacidades explícitas, política, gate, auditoria e
+      proveniência. (No pedido, a "Fase 10"; aqui, a fase seguinte às que
+      já existiam.) Começou pelo primeiro marco: aplicação → malha →
+      aplicação, entre os programas de um titular, pelo gate, com a
+      revogação e a auditoria de sempre. Ver [A malha](#a-malha) e
+      [`docs/MALHA.md`](docs/MALHA.md). Dispositivo → malha → dispositivo
+      espera a decisão sobre a confiança entre dispositivos; o handoff, os
+      recursos remotos, a continuidade, o SDK e os pacotes são os marcos
+      seguintes.
 
 ## Licença
 

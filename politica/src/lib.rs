@@ -44,6 +44,7 @@ pub mod caminho;
 pub mod codigo;
 pub mod endereco;
 pub mod explicacao;
+pub mod malha;
 pub mod manifesto;
 pub mod mensagens;
 pub mod permissao;
@@ -170,7 +171,7 @@ macro_rules! papeis_de_sistema {
     ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
         concat!(
             "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update fabric.offer fabric.send
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema fs.restore /armazem
@@ -185,10 +186,12 @@ recurso sistema process.isolate papel:observador papel:operador papel:sistema
 recurso sistema agent.suspend papel:observador papel:operador papel:sistema
 recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 recurso sistema process.terminate papel:observador papel:operador papel:sistema
+recurso sistema fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso sistema fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -205,6 +208,8 @@ recurso administrador process.isolate papel:observador papel:operador papel:sist
 recurso administrador agent.suspend papel:observador papel:operador papel:sistema
 recurso administrador credential.suspend papel:observador papel:operador papel:sistema
 recurso administrador process.terminate papel:observador papel:operador papel:sistema
+recurso administrador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso administrador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa administrador 10 20
 processos administrador 8
 ",
@@ -239,7 +244,9 @@ servico nsf seguranca
 ///   código instalado em `/armazem/compartilhado/codigo` — só o selado
 ///   pelo editor `bancada`, em que ele confia —; e cria, lê, assina e
 ///   destrói as chaves `chave:bancada` e `chave:bancada-2` da própria
-///   identidade, só no domínio `ic-request` do registro de domínios;
+///   identidade, só no domínio `ic-request` do registro de domínios; e,
+///   na malha, oferece e procura as intenções `imagem.compartilhar` e
+///   `pdf.anotar` (`fabric.offer`, `fabric.send`), entre os programas dele;
 /// - `tempo` é o papel do serviço de hora — a linha `servico hora tempo`:
 ///   apresenta evidência de hora (`time.sync`) e conecta às três fontes do
 ///   registro de fontes, `/etc/duke/tempo`, cada uma escrita por inteiro,
@@ -302,13 +309,17 @@ pub const PADRAO: &str = concat!(
 # uma subarvore do armazem de uma copia desta maquina (fs.restore) e uma
 # permissao propria, de caminho: o sistema no armazem inteiro, o operador no
 # compartilhado. A copia e uma leitura (fs.read), e sai cifrada para esta
-# maquina.
+# maquina. Na malha, um programa oferece uma intencao (fabric.offer) e outro
+# do mesmo titular a procura e entrega a ele (fabric.send): as intencoes
+# enumeradas, inteiras, imagem.compartilhar e pdf.anotar, para o operador,
+# o sistema e o teto do administrador. Nenhuma das duas da acesso a nada do
+# outro lado.
 
 papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador fs.restore /armazem/compartilhado
@@ -322,6 +333,8 @@ recurso operador key.read chave:bancada chave:bancada-2
 recurso operador key.sign chave:bancada chave:bancada-2
 recurso operador key.destroy chave:bancada chave:bancada-2
 dominios operador ic-request
+recurso operador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
+recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 taxa operador 50 100
 processos operador 8
 
@@ -734,11 +747,14 @@ mod testes {
                 !l.starts_with("recurso operador key.") && !l.starts_with("dominios operador")
             })
             .map(|l| {
-                let l = l.strip_suffix(" credential.change_self").unwrap_or(l);
-                let l = l
-                    .strip_suffix(" key.create key.read key.sign key.destroy")
-                    .unwrap_or(l);
-                alloc::format!("{l}\n")
+                if l.starts_with("papel operador ") || l.starts_with("papel observador ") {
+                    let l = l
+                        .replace(" key.create key.read key.sign key.destroy", "")
+                        .replace(" credential.change_self", "");
+                    alloc::format!("{l}\n")
+                } else {
+                    alloc::format!("{l}\n")
+                }
             })
             .collect();
         let q = Politica::ler(&sem_identidade).unwrap();
@@ -875,13 +891,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));
@@ -1715,7 +1731,7 @@ mod testes {
         // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
         // tem a prova, e a auditoria a grava.
         let delegado = mudar(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy time.sync",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy fabric.offer fabric.send time.sync",
         )
         .unwrap();
         assert_eq!(

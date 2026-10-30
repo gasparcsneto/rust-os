@@ -36979,6 +36979,46 @@ static CASOS: &[Caso] = &[
         nome: "tls: a validade pela hora autenticada, com rodadas e o NSF ao mesmo tempo",
         f: tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo,
     },
+    Caso {
+        nome: "malha: o aplicativo A entrega ao aplicativo B, pelo gate",
+        f: malha_o_aplicativo_a_entrega_ao_b,
+    },
+    Caso {
+        nome: "malha: o impostor nao alcanca o que e do outro",
+        f: malha_o_impostor_nao_alcanca_o_que_e_do_outro,
+    },
+    Caso {
+        nome: "malha: so o mesmo titular",
+        f: malha_so_o_mesmo_titular,
+    },
+    Caso {
+        nome: "malha: o gate decide cada passo",
+        f: malha_o_gate_decide_cada_passo,
+    },
+    Caso {
+        nome: "malha: a revogacao fecha e anula",
+        f: malha_a_revogacao_fecha_e_anula,
+    },
+    Caso {
+        nome: "malha: revogacao e politica no meio da operacao",
+        f: malha_revogacao_e_politica_no_meio,
+    },
+    Caso {
+        nome: "malha: a espera e o fim do processo",
+        f: malha_a_espera_e_o_fim_do_processo,
+    },
+    Caso {
+        nome: "malha: com o desligamento a caminho, nada nasce",
+        f: malha_com_o_desligamento_a_caminho_nada_nasce,
+    },
+    Caso {
+        nome: "malha: mandar, ler e revogar ao mesmo tempo",
+        f: malha_mandar_ler_e_revogar_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "malha: o custo de uma entrega",
+        f: malha_o_custo_de_uma_entrega,
+    },
     // Antes da reconstrução e da conta dos blocos: elas cobrem o armazém
     // inteiro restaurado.
     Caso {
@@ -44835,8 +44875,8 @@ fn tls_sem_random_read_nada_sai() -> Resultado {
     use politica::Codigo;
     crate::pessoas::esquecer_registradas();
     let sem = politica_trocada(&[(
-        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-        "message.send message.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+        "message.send message.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
     )])?;
     let resultado = com_a_politica(sem, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
@@ -58408,8 +58448,8 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 return Err("a conexao fora do alcance nao foi recusada pelo gate");
             }
             let sem_declarar = politica_da_bancada_icp(&[(
-                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
+                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             )])?;
             com_a_politica(sem_declarar, || {
                 let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
@@ -59396,8 +59436,8 @@ fn icp_sem_chave_nada_se_assina() -> Resultado {
         let antes = crate::autorizacao::ultimo_registro();
         let sem_usar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60147,8 +60187,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60161,8 +60201,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -61448,8 +61488,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -61462,8 +61502,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -63084,8 +63124,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -63098,8 +63138,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -66240,8 +66280,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -68520,8 +68560,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(
@@ -69221,4 +69261,1541 @@ fn tls_a_validade_pela_hora_com_rodadas_ao_mesmo_tempo() -> Resultado {
     });
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// A malha
+// ---------------------------------------------------------------------------
+//
+// Os casos `malha:` provam o primeiro marco do ecossistema: um aplicativo
+// entrega a outro, pela malha, sem se conhecerem — e nada disso contorna o
+// gate. Os aplicativos são programas de verdade (`correio`, que atende;
+// `fotos`, que manda; `impostor`, que diz ser o correio), lançados com a
+// autoridade de uma pessoa ou de um agente; e a suíte pede também como eles
+// — pelo fio e pelo programa que o kernel deu a cada um —, ou como um
+// processo simulado, para os pedidos que precisam de um passo exato.
+
+/// O teto de uma espera da malha: a de um passo de programa.
+const TETO_DA_MALHA: u64 = TETO_DO_HTTP;
+
+/// A intenção dos casos — enumerada para o operador na política padrão.
+const INTENCAO_DA_MALHA: &str = "imagem.compartilhar";
+
+/// Os canais por onde a suíte dita os passos — os programas têm os mesmos.
+const CANAL_DAS_FOTOS: &str = "teste-fotos";
+const CANAL_DO_IMPOSTOR: &str = "teste-impostor";
+
+/// Os passos de `fotos`.
+const FOTOS_DESCOBRIR: i64 = 1;
+const FOTOS_MANDAR: i64 = 2;
+const FOTOS_ESTADO: i64 = 3;
+const FOTOS_REENVIAR: i64 = 4;
+const FOTOS_VELHO: i64 = 5;
+const FOTOS_CANCELAR: i64 = 6;
+
+/// Os passos do `impostor`.
+const IMPOSTOR_OFERECER: i64 = 1;
+const IMPOSTOR_DESCOBRIR: i64 = 2;
+const IMPOSTOR_LER: i64 = 3;
+const IMPOSTOR_RETIRAR: i64 = 4;
+const IMPOSTOR_CONFIRMAR: i64 = 5;
+const IMPOSTOR_ESTADO: i64 = 6;
+const IMPOSTOR_FORJAR: i64 = 7;
+const IMPOSTOR_MANDAR_A: i64 = 8;
+
+/// Os códigos de saída dos programas da malha.
+const SAIDA_DO_CORREIO: i64 = 41;
+const SAIDA_DAS_FOTOS: i64 = 43;
+const SAIDA_DO_IMPOSTOR: i64 = 45;
+
+/// Um programa da malha em execução: o fio, e a autoridade e o programa que
+/// o kernel deu a ele — o que a suíte usa para pedir como ele.
+struct NaMalha {
+    fio: u64,
+    autoridade: crate::autorizacao::Autoridade,
+    programa: crate::autorizacao::Programa,
+}
+
+impl NaMalha {
+    /// Lança `nome` com `autoridade` e espera a linha que começa com
+    /// `pronto`; devolve o programa e o resto da linha.
+    fn lancar(
+        nome: &str,
+        autoridade: crate::autorizacao::Autoridade,
+        pronto: &str,
+    ) -> Result<(NaMalha, alloc::string::String), &'static str> {
+        let caminho = alloc::format!("{}/{nome}", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let desde = crate::log::total_emitidos();
+        let fio = crate::usuario::lancar_como(Some(&caminho), autoridade)?;
+        let resto = dito_na_malha(desde, pronto)?;
+        let (autoridade, programa) =
+            crate::fios::processo(fio).ok_or("o programa da malha nao esta vivo")?;
+        Ok((
+            NaMalha {
+                fio,
+                autoridade,
+                programa,
+            },
+            resto,
+        ))
+    }
+
+    /// O chamador que pede como este processo.
+    fn chamador(&self) -> crate::autorizacao::Chamador {
+        crate::autorizacao::Chamador::Processo {
+            fio: self.fio,
+            autoridade: self.autoridade,
+            programa: self.programa,
+        }
+    }
+
+    /// O resumo da imagem que o kernel carregou.
+    fn resumo(&self) -> [u8; 32] {
+        match self.programa {
+            crate::autorizacao::Programa::Imagem { resumo, .. } => resumo,
+            _ => [0; 32],
+        }
+    }
+
+    /// O começo do resumo, como os programas o dizem.
+    fn resumo8(&self) -> alloc::string::String {
+        alloc::string::String::from(&sigilo::hex(&self.resumo())[..8])
+    }
+}
+
+/// A primeira linha de programa, depois de `desde`, que começa com
+/// `prefixo` — o resto dela. Espera até o teto, atendendo os pedidos dos
+/// processos enquanto isso.
+fn dito_na_malha(desde: u64, prefixo: &str) -> Result<alloc::string::String, &'static str> {
+    let mut dito = None;
+    let _ = esperar_ate(
+        || {
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                if dito.is_none()
+                    && r.seq >= desde
+                    && r.subsistema == "usuario"
+                    && let Some(resto) = r.mensagem().strip_prefix(prefixo)
+                {
+                    dito = Some(alloc::string::String::from(resto));
+                }
+            });
+            dito.is_some()
+        },
+        TETO_DA_MALHA,
+    );
+    dito.ok_or_else(|| {
+        crate::log_error!("teste", "esperava `{}`", prefixo);
+        "um programa da malha nao disse o que se esperava"
+    })
+}
+
+/// Todas as linhas de programa, depois de `desde`, que começam com
+/// `prefixo` — o resto de cada uma, em ordem. Não espera.
+fn ditas_na_malha(desde: u64, prefixo: &str) -> alloc::vec::Vec<alloc::string::String> {
+    let mut v = alloc::vec::Vec::new();
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        if r.seq >= desde
+            && r.subsistema == "usuario"
+            && let Some(resto) = r.mensagem().strip_prefix(prefixo)
+        {
+            v.push(alloc::string::String::from(resto));
+        }
+    });
+    v
+}
+
+/// As `n` linhas de programa, depois de `desde`, que começam com
+/// `prefixo` — esperando até elas estarem todas: um programa diz uma linha
+/// por vez, e a primeira não traz as outras.
+fn n_ditas_na_malha(
+    desde: u64,
+    prefixo: &str,
+    n: usize,
+) -> Result<alloc::vec::Vec<alloc::string::String>, &'static str> {
+    let mut ditas = alloc::vec::Vec::new();
+    esperar_ate(
+        || {
+            ditas = ditas_na_malha(desde, prefixo);
+            ditas.len() >= n
+        },
+        TETO_DA_MALHA,
+    )
+    .map_err(|_| {
+        crate::log_error!("teste", "esperava {} de `{}`: {:?}", n, prefixo, ditas);
+        "um programa da malha nao disse todas as linhas que se esperava"
+    })?;
+    Ok(ditas)
+}
+
+/// Dita o passo `a`, com `b`, pelo `canal`, e espera a linha que começa
+/// com `prefixo`: devolve de quando o passo começou e o resto da linha.
+fn passo_na_malha(
+    canal: &str,
+    a: i64,
+    b: i64,
+    prefixo: &str,
+) -> Result<(u64, alloc::string::String), &'static str> {
+    use protocolo::usuario::evento::{Evento, tipo};
+    let desde = crate::log::total_emitidos();
+    crate::eventos::publicar(
+        canal,
+        Evento {
+            tipo: tipo::ACAO,
+            a,
+            b,
+            ..Default::default()
+        },
+    )
+    .map_err(|_| "o canal do programa da malha nao recebeu o passo")?;
+    Ok((desde, dito_na_malha(desde, prefixo)?))
+}
+
+/// Pede o fim de um programa que escuta `canal`, e espera ele sair com
+/// `codigo`.
+fn encerrar_na_malha(canal: &str, codigo: i64) -> Resultado {
+    use protocolo::usuario::evento::{Evento, tipo};
+    let desde = crate::log::total_emitidos();
+    let _ = crate::eventos::publicar(
+        canal,
+        Evento {
+            tipo: tipo::ENCERRAR,
+            ..Default::default()
+        },
+    );
+    esperar_ate(
+        || {
+            linhas_do_programa(
+                desde,
+                &alloc::format!("processo encerrou com codigo {codigo}"),
+            ) == 1
+        },
+        TETO_DA_MALHA,
+    )
+    .map_err(|_| "um programa da malha nao saiu quando pedido")
+}
+
+/// Um processo simulado — um fio que não existe — com a autoridade de um
+/// titular e um programa que declara `permite`: quem manda, nos passos que
+/// precisam ser exatos.
+fn simulado_na_malha(
+    fio: u64,
+    autoridade: crate::autorizacao::Autoridade,
+    permite: &str,
+) -> crate::autorizacao::Chamador {
+    crate::autorizacao::Chamador::Processo {
+        fio,
+        autoridade,
+        programa: crate::autorizacao::Programa::Imagem {
+            manifesto: Some(manifesto_de_teste("simulado", permite)),
+            resumo: [0x5a; 32],
+            editor: None,
+        },
+    }
+}
+
+/// O `fabric.send` de `quem` ao `endpoint`, com a intenção dos casos.
+fn mandar_na_malha(
+    quem: crate::autorizacao::Chamador,
+    endpoint: &str,
+    corpo: &str,
+    nonce: u64,
+) -> alloc::string::String {
+    fs_pedir(
+        quem,
+        "fabric.send",
+        &alloc::format!(
+            r#"{{"endpoint":"{endpoint}","intent":"{INTENCAO_DA_MALHA}","body":"{corpo}","nonce":{nonce}}}"#
+        ),
+    )
+}
+
+/// O correio de `autoridade` encerra pela entrega `fim`, de um processo
+/// simulado do mesmo titular.
+fn encerrar_o_correio(autoridade: crate::autorizacao::Autoridade, endpoint: &str) -> Resultado {
+    let desde = crate::log::total_emitidos();
+    let r = mandar_na_malha(
+        simulado_na_malha(7_890_999, autoridade, "fabric.send"),
+        endpoint,
+        "fim",
+        u64::MAX - 1,
+    );
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o fim nao chegou ao correio");
+    }
+    esperar_ate(
+        || {
+            linhas_do_programa(
+                desde,
+                &alloc::format!("processo encerrou com codigo {SAIDA_DO_CORREIO}"),
+            ) == 1
+        },
+        TETO_DA_MALHA,
+    )
+    .map_err(|_| "o correio nao saiu com o fim")
+}
+
+/// O código da recusa de um resultado `ok: false`, ou `ALLOW` se o comando
+/// fez; o código do gate se ele recusou.
+fn desfecho_na_malha(r: &str) -> alloc::string::String {
+    if decisao_do_envelope(r) != "ALLOW" {
+        return decisao_do_envelope(r);
+    }
+    if fs_ok(r) {
+        return alloc::string::String::from("ALLOW");
+    }
+    fs_texto(r, "code").unwrap_or_default()
+}
+
+/// Se algum registro depois de `seq` tem `metodo`, `recurso` e `codigo`, e
+/// o detalhe contém `trecho`.
+fn gravado_na_malha(
+    seq: u64,
+    metodo: &str,
+    recurso: &str,
+    codigo: politica::Codigo,
+    trecho: &str,
+) -> bool {
+    !registros_depois(seq, |e| {
+        e.metodo == metodo
+            && e.recurso == recurso
+            && e.codigo == codigo
+            && e.detalhe.contains(trecho)
+    })
+    .is_empty()
+}
+
+/// Nenhum registro depois de `seq` carrega `texto` — o corpo de uma
+/// entrega, ou a resposta.
+fn nada_gravado_com(seq: u64, texto: &str) -> bool {
+    registros_depois(seq, |e| {
+        e.detalhe.contains(texto) || e.recurso.contains(texto)
+    })
+    .is_empty()
+}
+
+/// Roda `f` com a malha vazia, e a deixa vazia e coerente; as pessoas e os
+/// agentes da suíte voltam ao que a imagem diz.
+fn com_a_malha(f: impl FnOnce() -> Resultado) -> Resultado {
+    crate::malha::esvaziar_de_teste();
+    let resultado = f();
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    let coerente = crate::malha::coerente();
+    crate::malha::esvaziar_de_teste();
+    crate::identidade::esquecer_registrados();
+    crate::identidade::esquecer_lapides_de_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::autorizacao::carregar();
+    resultado?;
+    if !coerente {
+        return Err("a malha ficou incoerente");
+    }
+    Ok(())
+}
+
+/// O primeiro marco, de ponta a ponta: o aplicativo A (`fotos`) entrega ao
+/// aplicativo B (`correio`) sem conhecê-lo — procura quem oferece a
+/// intenção, escolhe pela identidade que o kernel conferiu, manda e lê a
+/// resposta —, e cada passo é uma decisão do gate, gravada com o processo e
+/// o programa, e nenhum registro carrega o corpo. O reenvio devolve o mesmo
+/// id, o nonce velho é replay, o que já foi lido não se cancela, e o fim do
+/// processo fecha o endpoint.
+fn malha_o_aplicativo_a_entrega_ao_b() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(41), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (correio, endpoint) = NaMalha::lancar("correio", bia, "correio: endpoint ")?;
+        let (fotos, _) = NaMalha::lancar("fotos", bia, "fotos: pronto")?;
+        let r = (|| -> Resultado {
+            // Quem manda procura: um candidato, o correio, com o resumo da
+            // imagem que o kernel carregou.
+            let (desde, achei) =
+                passo_na_malha(CANAL_DAS_FOTOS, FOTOS_DESCOBRIR, 0, "fotos: achei ")?;
+            let candidatos = n_ditas_na_malha(desde, "fotos: candidato ", 1)?;
+            let esperado = alloc::format!("correio {} {endpoint}", correio.resumo8());
+            if achei != "1" || candidatos != [esperado] {
+                crate::log_error!("teste", "achei {} {:?}", achei, candidatos);
+                return Err("a descoberta nao mostrou o correio com a identidade conferida");
+            }
+            // Manda; o correio recebe, diz de quem — o programa e o resumo
+            // conferidos —, e confirma com a resposta.
+            let (desde, mandada) =
+                passo_na_malha(CANAL_DAS_FOTOS, FOTOS_MANDAR, 0, "fotos: mandei ")?;
+            let recebi = dito_na_malha(desde, "correio: recebi ")?;
+            if recebi != alloc::format!("foto-1.png de fotos {}", fotos.resumo8()) {
+                crate::log_error!("teste", "{}", recebi);
+                return Err("o correio nao recebeu do programa que mandou");
+            }
+            let mut estado = alloc::string::String::new();
+            esperar_ate(
+                || {
+                    estado = passo_na_malha(CANAL_DAS_FOTOS, FOTOS_ESTADO, 0, "fotos: estado ")
+                        .map(|(_, e)| e)
+                        .unwrap_or_default();
+                    estado == "acked guardada:foto-1.png"
+                },
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| {
+                crate::log_error!("teste", "{}", estado);
+                "quem mandou nao viu a confirmacao com a resposta"
+            })?;
+            // O reenvio: o mesmo id. Um nonce velho: replay. A confirmada
+            // não se cancela.
+            let (_, reenvio) =
+                passo_na_malha(CANAL_DAS_FOTOS, FOTOS_REENVIAR, 0, "fotos: reenvio ")?;
+            let (_, velho) = passo_na_malha(CANAL_DAS_FOTOS, FOTOS_VELHO, 0, "fotos: velho ")?;
+            let (_, cancelar) =
+                passo_na_malha(CANAL_DAS_FOTOS, FOTOS_CANCELAR, 0, "fotos: cancelar ")?;
+            if reenvio != "igual" || velho != "DENY_REPLAY" || cancelar != "CONFLICT" {
+                crate::log_error!("teste", "{} {} {}", reenvio, velho, cancelar);
+                return Err("o reenvio, o replay ou o cancelamento tardio nao foram o esperado");
+            }
+            // Cada passo, pelo gate, com o processo e o programa; e a
+            // execução de cada um, com os ids.
+            let intencao = alloc::format!("intencao:{INTENCAO_DA_MALHA}");
+            let pelo = |p: &NaMalha, nome: &str| {
+                alloc::format!("pelo processo {} ({nome} {}", p.fio, p.resumo8())
+            };
+            let entrega = alloc::format!("entrega:{mandada}");
+            use politica::Codigo::Allow;
+            let gravado = [
+                gravado_na_malha(
+                    antes,
+                    "fabric.offer",
+                    &intencao,
+                    Allow,
+                    &pelo(&correio, "correio"),
+                ),
+                // A execução de cada passo: os ids no recurso, o processo e o
+                // programa na frente do detalhe — tudo dentro do teto do
+                // registro, sem nada cortado.
+                gravado_na_malha(
+                    antes,
+                    "fabric.offer",
+                    &alloc::format!("endpoint:{endpoint} ; {intencao}"),
+                    Allow,
+                    &alloc::format!("{}): aberto; politica ", pelo(&correio, "correio")),
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.discover",
+                    &intencao,
+                    Allow,
+                    &pelo(&fotos, "fotos"),
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.send",
+                    &intencao,
+                    Allow,
+                    &pelo(&fotos, "fotos"),
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.send",
+                    &alloc::format!("{entrega} ; endpoint:{endpoint}"),
+                    Allow,
+                    &alloc::format!("{}): aceita, pendente; politica ", pelo(&fotos, "fotos")),
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.recv",
+                    &entrega,
+                    Allow,
+                    &alloc::format!(
+                        "{}): entregue; versao 2; decisao ",
+                        pelo(&correio, "correio")
+                    ),
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.ack",
+                    &entrega,
+                    Allow,
+                    &alloc::format!(
+                        "{}): confirmada; versao 3; decisao ",
+                        pelo(&correio, "correio")
+                    ),
+                ),
+            ];
+            if gravado.contains(&false) {
+                crate::log_error!("teste", "{:?}", gravado);
+                return Err("um passo da entrega nao foi gravado com quem e o que");
+            }
+            // Nenhum registro da malha chega ao teto do detalhe: um que
+            // chegasse teria sido cortado, e a cadeia perderia um elo.
+            let cortados = registros_depois(antes, |e| {
+                e.metodo.starts_with("fabric.")
+                    && e.detalhe.len() >= politica::auditoria::MAIOR_DETALHE
+            });
+            if !cortados.is_empty() {
+                crate::log_error!("teste", "{:?}", cortados[0].1.detalhe);
+                return Err("um registro da malha foi cortado no teto do detalhe");
+            }
+            if !nada_gravado_com(antes, "foto-1.png") || !nada_gravado_com(antes, "guardada:") {
+                return Err("a auditoria gravou o corpo ou a resposta de uma entrega");
+            }
+            Ok(())
+        })();
+        let fim_das_fotos = encerrar_na_malha(CANAL_DAS_FOTOS, SAIDA_DAS_FOTOS);
+        let fim_do_correio = encerrar_o_correio(bia, &endpoint);
+        r?;
+        fim_das_fotos?;
+        fim_do_correio?;
+        // O processo acabou: o endpoint fecha com ele, gravado pelo kernel.
+        esperar_ate(|| crate::malha::contagem() == (0, 0), TETO_DA_MALHA)
+            .map_err(|_| "o endpoint do correio ficou depois do fim do processo")?;
+        if !gravado_na_malha(
+            antes,
+            "fabric.withdraw",
+            &alloc::format!("endpoint:{endpoint}"),
+            politica::Codigo::Allow,
+            "fechado: o processo que o abriu acabou",
+        ) {
+            return Err("o fim do endpoint com o processo nao foi gravado");
+        }
+        Ok(())
+    })
+}
+
+/// O impostor diz ser o correio — o mesmo nome no manifesto — e a malha o
+/// mostra como é: dois `correio`, cada um com o resumo da própria imagem. E
+/// nada do outro se alcança pelo id: ler o endpoint dele, fechá-lo,
+/// confirmar ou consultar uma entrega dele, mandar com uma época forjada —
+/// cada tentativa é decidida, e recusada, e o correio continua recebendo.
+fn malha_o_impostor_nao_alcanca_o_que_e_do_outro() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(42), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (correio, endpoint) = NaMalha::lancar("correio", bia, "correio: endpoint ")?;
+        let (_fotos, _) = NaMalha::lancar("fotos", bia, "fotos: pronto")?;
+        let (impostor, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let (_, dele) = passo_na_malha(
+                CANAL_DO_IMPOSTOR,
+                IMPOSTOR_OFERECER,
+                0,
+                "impostor: endpoint ",
+            )?;
+            if correio.resumo() == impostor.resumo() {
+                return Err("o impostor e o correio tem a mesma imagem");
+            }
+            // Quem procura vê os dois, cada um com o resumo dele.
+            let (desde, achei) =
+                passo_na_malha(CANAL_DAS_FOTOS, FOTOS_DESCOBRIR, 0, "fotos: achei ")?;
+            let candidatos = n_ditas_na_malha(desde, "fotos: candidato ", 2)?;
+            let esperados = [
+                alloc::format!("correio {} {endpoint}", correio.resumo8()),
+                alloc::format!("correio {} {dele}", impostor.resumo8()),
+            ];
+            if achei != "2" || candidatos != esperados {
+                crate::log_error!("teste", "{} {:?}", achei, candidatos);
+                return Err("a descoberta nao distinguiu o impostor do correio pelo resumo");
+            }
+            let (_, achei) =
+                passo_na_malha(CANAL_DO_IMPOSTOR, IMPOSTOR_DESCOBRIR, 0, "impostor: achei ")?;
+            if achei != "2" {
+                return Err("o impostor nao viu os dois endpoints do titular");
+            }
+            // Ler e fechar o endpoint do correio: não existem para ele.
+            let (_, ler) = passo_na_malha(CANAL_DO_IMPOSTOR, IMPOSTOR_LER, 0, "impostor: ler ")?;
+            let (_, retirar) =
+                passo_na_malha(CANAL_DO_IMPOSTOR, IMPOSTOR_RETIRAR, 0, "impostor: retirar ")?;
+            // Uma entrega ao correio: confirmá-la ou consultá-la, como o
+            // impostor, não alcança nada.
+            let (_, mandada) = passo_na_malha(CANAL_DAS_FOTOS, FOTOS_MANDAR, 0, "fotos: mandei ")?;
+            let n = ordem_do_id(&mandada) as i64;
+            let (_, confirmar) = passo_na_malha(
+                CANAL_DO_IMPOSTOR,
+                IMPOSTOR_CONFIRMAR,
+                n,
+                "impostor: confirmar ",
+            )?;
+            let (_, estado) =
+                passo_na_malha(CANAL_DO_IMPOSTOR, IMPOSTOR_ESTADO, n, "impostor: estado ")?;
+            let num_do_correio = ordem_do_id(&endpoint) as i64;
+            let (_, forjar) = passo_na_malha(
+                CANAL_DO_IMPOSTOR,
+                IMPOSTOR_FORJAR,
+                num_do_correio,
+                "impostor: forjar ",
+            )?;
+            let codigos = [ler, retirar, confirmar, estado, forjar];
+            if codigos.iter().any(|c| c != "DENY_RESOURCE") {
+                crate::log_error!("teste", "{:?}", codigos);
+                return Err("o impostor alcancou o que e do correio");
+            }
+            // O correio continua com o endpoint dele, e recebeu.
+            let desde = crate::log::total_emitidos();
+            let (_, mandada) = passo_na_malha(CANAL_DAS_FOTOS, FOTOS_MANDAR, 0, "fotos: mandei ")?;
+            dito_na_malha(desde, "correio: recebi foto-2.png de fotos ")?;
+            if ordem_do_id(&mandada) == 0 {
+                return Err("a segunda entrega nao teve id");
+            }
+            // As tentativas, gravadas como dele: o processo e o programa que
+            // ele é — o resumo dele, não o do correio.
+            let pelo_impostor = alloc::format!(
+                "pelo processo {} (correio {}",
+                impostor.fio,
+                impostor.resumo8()
+            );
+            for metodo in [
+                "fabric.recv",
+                "fabric.withdraw",
+                "fabric.ack",
+                "fabric.status",
+            ] {
+                // Recusada pelo gate, que não resolveu o id para ele: a
+                // recusa é a decisão, e não o resultado de uma execução.
+                if registros_depois(antes, |e| {
+                    e.metodo == metodo
+                        && e.codigo == politica::Codigo::DenyResource
+                        && e.detalhe.contains(&pelo_impostor)
+                        && !e.detalhe.contains("; decisao ")
+                })
+                .is_empty()
+                {
+                    crate::log_error!("teste", "{}", metodo);
+                    return Err("uma tentativa do impostor nao foi gravada como dele");
+                }
+            }
+            Ok(())
+        })();
+        let fins = [
+            encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR),
+            encerrar_na_malha(CANAL_DAS_FOTOS, SAIDA_DAS_FOTOS),
+            encerrar_o_correio(bia, &endpoint),
+        ];
+        r?;
+        fins.into_iter().collect::<Result<(), _>>()
+    })
+}
+
+/// Só o mesmo titular: os endpoints de uma pessoa não existem para outra —
+/// a descoberta não os mostra, mandar ao id deles é `DENY_RESOURCE`, ler
+/// também — e a sessão da própria pessoa, sem programa, alcança os dela: a
+/// entrega chega sem `from`.
+fn malha_so_o_mesmo_titular() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let da_bia = crate::pessoas::sessao_de_teste(Console::Terminal(43), "bia", "operador");
+        let do_caio = crate::pessoas::sessao_de_teste(Console::Terminal(44), "caio", "operador");
+        let bia = Autoridade::Pessoa { sessao: da_bia };
+        let caio = Autoridade::Pessoa { sessao: do_caio };
+        let (_, endpoint) = NaMalha::lancar("correio", bia, "correio: endpoint ")?;
+        let (impostor, _) = NaMalha::lancar("impostor", caio, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let (_, achei) =
+                passo_na_malha(CANAL_DO_IMPOSTOR, IMPOSTOR_DESCOBRIR, 0, "impostor: achei ")?;
+            passo_na_malha(
+                CANAL_DO_IMPOSTOR,
+                IMPOSTOR_OFERECER,
+                0,
+                "impostor: endpoint ",
+            )?;
+            let (_, mandar) = passo_na_malha(
+                CANAL_DO_IMPOSTOR,
+                IMPOSTOR_MANDAR_A,
+                ordem_do_id(&endpoint) as i64,
+                "impostor: mandar ",
+            )?;
+            if achei != "0" || mandar != "DENY_RESOURCE" {
+                crate::log_error!("teste", "{} {}", achei, mandar);
+                return Err("o endpoint de uma pessoa existiu para outra");
+            }
+            // Ler o endpoint dela, como o processo do caio: o gate não o
+            // resolve para ele.
+            let ler = fs_pedir(
+                impostor.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            // A sessão do caio, sem programa: o endpoint da bia não aparece
+            // — o do impostor dele, sim —, e mandar ao id dela é a mesma
+            // recusa.
+            let pelo_caio = Chamador::Pessoa(do_caio);
+            let achados = fs_pedir(
+                pelo_caio,
+                "fabric.discover",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let mandar = mandar_na_malha(pelo_caio, &endpoint, "da sessao do caio", 1);
+            if desfecho_na_malha(&ler) != "DENY_RESOURCE"
+                || !fs_ok(&achados)
+                || achados.contains(&endpoint)
+                || desfecho_na_malha(&mandar) != "DENY_RESOURCE"
+            {
+                crate::log_error!("teste", "{} {} {}", ler, achados, mandar);
+                return Err("a outra pessoa alcancou o endpoint pela sessao");
+            }
+            // A sessão da bia alcança o dela: chega sem programa.
+            let pela_bia = Chamador::Pessoa(da_bia);
+            let achados = fs_pedir(
+                pela_bia,
+                "fabric.discover",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            if !achados.contains(&alloc::format!(r#""endpoint":"{endpoint}""#)) {
+                crate::log_error!("teste", "{}", achados);
+                return Err("a sessao da pessoa nao achou o endpoint dela");
+            }
+            let desde = crate::log::total_emitidos();
+            let mandada = mandar_na_malha(pela_bia, &endpoint, "da sessao", 1);
+            if !fs_ok(&mandada) {
+                crate::log_error!("teste", "{}", mandada);
+                return Err("a sessao da pessoa nao mandou ao endpoint dela");
+            }
+            dito_na_malha(desde, "correio: recebi da sessao de titular")?;
+            Ok(())
+        })();
+        let fins = [
+            encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR),
+            encerrar_o_correio(bia, &endpoint),
+        ];
+        r?;
+        fins.into_iter().collect::<Result<(), _>>()
+    })
+}
+
+/// O gate decide cada passo, e a malha não decide nada: a intenção fora da
+/// política, a de forma inválida, o manifesto que não declara, o papel que
+/// não tem, quem não é processo oferecendo ou lendo — cada um recusado com
+/// o código dele. Mandar com uma intenção que o endpoint não oferece é a
+/// recusa de um endpoint que não existe. E o dono que não receberia mais —
+/// a política tirou dele `fabric.offer`, ou ele foi isolado — some da
+/// descoberta, e a entrega a ele é recusada até ele voltar a receber.
+fn malha_o_gate_decide_cada_passo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(45), "bia", "operador");
+        let observadora =
+            crate::pessoas::sessao_de_teste(Console::Terminal(46), "dora", "observador");
+        let bia = Autoridade::Pessoa { sessao };
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let antes = crate::autorizacao::com_politica(|p| p.clone());
+        let r = (|| -> Resultado {
+            let oferecer = |intencao: &str| {
+                fs_pedir(
+                    dono.chamador(),
+                    "fabric.offer",
+                    &alloc::format!(r#"{{"intent":"{intencao}"}}"#),
+                )
+            };
+            let r = oferecer(INTENCAO_DA_MALHA);
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_891_001, bia, "fabric.send");
+            let descobrir = |quem: Chamador, intencao: &str| {
+                fs_pedir(
+                    quem,
+                    "fabric.discover",
+                    &alloc::format!(r#"{{"intent":"{intencao}"}}"#),
+                )
+            };
+            // A intenção fora da política, e as de forma inválida.
+            let casos = [
+                (
+                    desfecho_na_malha(&oferecer("imagem.apagar")),
+                    "DENY_RESOURCE",
+                ),
+                (
+                    desfecho_na_malha(&descobrir(quem_manda, "pdf.assinar")),
+                    "DENY_RESOURCE",
+                ),
+                (
+                    desfecho_na_malha(&descobrir(quem_manda, "imagem.*")),
+                    "intent",
+                ),
+                (
+                    desfecho_na_malha(&descobrir(quem_manda, "Imagem.ver")),
+                    "intent",
+                ),
+                (
+                    desfecho_na_malha(&descobrir(quem_manda, "imagem")),
+                    "intent",
+                ),
+                // O manifesto que não declara, e o papel que não tem.
+                (
+                    desfecho_na_malha(&descobrir(
+                        simulado_na_malha(7_891_002, bia, "system.read"),
+                        INTENCAO_DA_MALHA,
+                    )),
+                    "DENY_PERMISSION",
+                ),
+                (
+                    desfecho_na_malha(&descobrir(Chamador::Pessoa(observadora), INTENCAO_DA_MALHA)),
+                    "DENY_PERMISSION",
+                ),
+                // Só um processo oferece e lê: a sessão da pessoa, não — e
+                // quem recusa é o gate.
+                (
+                    decisao_do_envelope(&fs_pedir(
+                        Chamador::Pessoa(sessao),
+                        "fabric.offer",
+                        &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+                    )),
+                    "DENY_PERMISSION",
+                ),
+                (
+                    decisao_do_envelope(&fs_pedir(
+                        Chamador::Pessoa(sessao),
+                        "fabric.recv",
+                        &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+                    )),
+                    "DENY_PERMISSION",
+                ),
+                // A capacidade que o endpoint não oferece: o mesmo que um
+                // endpoint que não existe.
+                (
+                    desfecho_na_malha(&fs_pedir(
+                        quem_manda,
+                        "fabric.send",
+                        &alloc::format!(
+                            r#"{{"endpoint":"{endpoint}","intent":"pdf.anotar","body":"x","nonce":1}}"#
+                        ),
+                    )),
+                    "DENY_RESOURCE",
+                ),
+            ];
+            for (i, (visto, esperado)) in casos.iter().enumerate() {
+                if visto != esperado {
+                    crate::log_error!("teste", "caso {}: {} e nao {}", i, visto, esperado);
+                    return Err("um passo da malha nao foi decidido com o codigo dele");
+                }
+            }
+            // A malha chamada sem uma decisão do gate — o handler de um
+            // comando que o gate não autorizou — não age: a intenção não é
+            // a decidida, antes de qualquer outra conta.
+            let serial = crate::agent::sessao::SERIAL;
+            let sem_decisao = crate::autorizacao::como_canal_de_teste(
+                serial,
+                Autoridade::Sessao {
+                    sessao: serial,
+                    chave: None,
+                },
+                || {
+                    crate::malha::Ator::do_comando()
+                        .map(|ator| crate::malha::descobrir(&ator, INTENCAO_DA_MALHA).err())
+                },
+            );
+            if sem_decisao != Some(Some(crate::malha::Falha::NaoDecidida)) {
+                crate::log_error!("teste", "{:?}", sem_decisao);
+                return Err("a malha agiu sem a decisao do gate");
+            }
+            let ve = |quem| {
+                descobrir(quem, INTENCAO_DA_MALHA)
+                    .contains(&alloc::format!(r#""endpoint":"{endpoint}""#))
+            };
+            if !ve(quem_manda) || !fs_ok(&mandar_na_malha(quem_manda, &endpoint, "antes", 1)) {
+                return Err("o endpoint do dono nao recebia antes da politica nova");
+            }
+            // A política tira `fabric.offer`: o dono não receberia mais.
+            politica_sem("fabric.offer");
+            let mandada = mandar_na_malha(quem_manda, &endpoint, "durante", 2);
+            let ler = fs_pedir(
+                dono.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            if ve(quem_manda)
+                || desfecho_na_malha(&mandada) != "DENY_RESOURCE"
+                || desfecho_na_malha(&ler) != "DENY_PERMISSION"
+            {
+                crate::log_error!("teste", "{} {}", mandada, ler);
+                return Err("o dono sem fabric.offer continuou recebendo");
+            }
+            crate::autorizacao::restaurar_politica(antes.clone());
+            if !ve(quem_manda) || !fs_ok(&mandar_na_malha(quem_manda, &endpoint, "depois", 3)) {
+                return Err("o dono nao voltou a receber com a politica de volta");
+            }
+            // O dono isolado: some, e não recebe.
+            let alvo = crate::contencao::Alvo::Processo(dono.fio);
+            crate::contencao::conter(&alvo)?;
+            let isolado = !ve(quem_manda)
+                && desfecho_na_malha(&mandar_na_malha(quem_manda, &endpoint, "isolado", 4))
+                    == "DENY_RESOURCE";
+            let _ = crate::contencao::soltar(&alvo);
+            if !isolado {
+                return Err("o dono isolado continuou recebendo");
+            }
+            if !ve(quem_manda) {
+                return Err("o dono solto nao voltou a receber");
+            }
+            Ok(())
+        })();
+        crate::autorizacao::restaurar_politica(antes);
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// A revogação: a chave de um agente revogada fecha os endpoints dos
+/// programas que ele lançou e anula as entregas vivas, na hora, cada uma
+/// gravada; o canal velho não alcança mais nada — a sessão revogada não
+/// pede, e a mesma chave registrada de novo não recupera nada: as anuladas
+/// continuam anuladas. O mesmo com a pessoa revogada.
+fn malha_a_revogacao_fecha_e_anula() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    const SEMENTE: [u8; 32] = [0x7c; 32];
+    let chave = sigilo::publica_de(&SEMENTE);
+    com_a_malha(|| {
+        crate::identidade::registrar_agente_de_teste(chave, "malha-k", "operador");
+        let agente = Autoridade::Sessao {
+            sessao: 3,
+            chave: Some(chave),
+        };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (dono, _) = NaMalha::lancar("impostor", agente, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_892_001, agente, "fabric.send");
+            let a = fs_texto(&mandar_na_malha(quem_manda, &endpoint, "um", 1), "id")
+                .ok_or("a primeira entrega nao foi aceita")?;
+            let b = fs_texto(&mandar_na_malha(quem_manda, &endpoint, "dois", 2), "id")
+                .ok_or("a segunda entrega nao foi aceita")?;
+            if crate::malha::contagem() != (1, 2) {
+                return Err("as entregas nao ficaram vivas antes da revogacao");
+            }
+            crate::identidade::revogar(&chave).map_err(|_| "a chave nao foi revogada")?;
+            if crate::malha::contagem() != (0, 0) {
+                return Err("a revogacao deixou endpoint ou entrega viva");
+            }
+            use politica::Codigo::Allow;
+            let gravado = [
+                gravado_na_malha(
+                    antes,
+                    "fabric.withdraw",
+                    &alloc::format!("endpoint:{endpoint}"),
+                    Allow,
+                    "fechado: com a chave revogada",
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.void",
+                    &alloc::format!("entrega:{a}"),
+                    Allow,
+                    "anulada: com a chave revogada",
+                ),
+                gravado_na_malha(
+                    antes,
+                    "fabric.void",
+                    &alloc::format!("entrega:{b}"),
+                    Allow,
+                    "anulada: com a chave revogada",
+                ),
+            ];
+            if gravado.contains(&false) {
+                return Err("a revogacao na malha nao foi gravada");
+            }
+            // O canal velho: a chave revogada não pede nada — os processos
+            // dela não têm mais papel, e o gate recusa antes da malha.
+            let estado = fs_pedir(
+                quem_manda,
+                "fabric.status",
+                &alloc::format!(r#"{{"id":"{a}"}}"#),
+            );
+            let ler = fs_pedir(
+                dono.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            if decisao_do_envelope(&estado) != "DENY_ROLE"
+                || decisao_do_envelope(&ler) != "DENY_ROLE"
+            {
+                crate::log_error!("teste", "{} {}", estado, ler);
+                return Err("a chave revogada continuou pedindo pela malha");
+            }
+            // A mesma chave de volta ao registro: nada volta.
+            crate::identidade::registrar_agente_de_teste(chave, "malha-k", "operador");
+            let estado = fs_pedir(
+                quem_manda,
+                "fabric.status",
+                &alloc::format!(r#"{{"id":"{a}"}}"#),
+            );
+            let ler = fs_pedir(
+                dono.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            if fs_texto(&estado, "state").as_deref() != Some("voided")
+                || desfecho_na_malha(&ler) != "DENY_RESOURCE"
+            {
+                crate::log_error!("teste", "{} {}", estado, ler);
+                return Err("a chave registrada de novo recuperou o que a revogacao anulou");
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim?;
+        // A pessoa revogada.
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(47), "edu", "operador");
+        let edu = Autoridade::Pessoa { sessao };
+        let pessoa = pessoa_da_sessao(sessao)?;
+        let (dono, _) = NaMalha::lancar("impostor", edu, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let c = fs_texto(
+                &mandar_na_malha(
+                    simulado_na_malha(7_892_002, edu, "fabric.send"),
+                    &endpoint,
+                    "tres",
+                    1,
+                ),
+                "id",
+            )
+            .ok_or("a entrega da pessoa nao foi aceita")?;
+            crate::pessoas::revogar_pessoa(pessoa).map_err(|_| "a pessoa nao foi revogada")?;
+            if crate::malha::contagem() != (0, 0)
+                || !gravado_na_malha(
+                    antes,
+                    "fabric.void",
+                    &alloc::format!("entrega:{c}"),
+                    politica::Codigo::Allow,
+                    "anulada: com a pessoa revogada",
+                )
+            {
+                return Err("a pessoa revogada deixou o endpoint ou a entrega");
+            }
+            Ok(())
+        })();
+        // O processo da pessoa revogada não pede mais nada: sai pelo canal.
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// A decisão em curso: entre o gate e a mudança na tabela — com a ordem das
+/// gravações na mão —, a política tira a permissão, ou a chave de quem pede
+/// é revogada. A operação decide de novo, e é recusada: nada nasce depois
+/// de a autoridade acabar, e a recusa é gravada como o resultado do
+/// comando.
+fn malha_revogacao_e_politica_no_meio() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    const SEMENTE: [u8; 32] = [0x7d; 32];
+    let chave = sigilo::publica_de(&SEMENTE);
+    let antes = crate::autorizacao::com_politica(|p| p.clone());
+    let resultado = com_a_malha(|| {
+        crate::identidade::registrar_agente_de_teste(chave, "malha-meio", "operador");
+        let agente = Autoridade::Sessao {
+            sessao: 3,
+            chave: Some(chave),
+        };
+        let (dono, _) = NaMalha::lancar("impostor", agente, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let oferecer = || {
+                fs_pedir(
+                    dono.chamador(),
+                    "fabric.offer",
+                    &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+                )
+            };
+            // A política tira `fabric.offer` no meio da oferta.
+            fn sem_offer() {
+                politica_sem("fabric.offer");
+            }
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_offer));
+            let r = oferecer();
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::autorizacao::restaurar_politica(antes.clone());
+            if decisao_do_envelope(&r) != "ALLOW" || desfecho_na_malha(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}", r);
+                return Err("a politica mudada no meio nao recusou a oferta");
+            }
+            if crate::malha::contagem() != (0, 0) {
+                return Err("a oferta decidida com a politica velha abriu o endpoint");
+            }
+            let endpoint =
+                fs_texto(&oferecer(), "endpoint").ok_or("a oferta sem nada no meio falhou")?;
+            let quem_manda = simulado_na_malha(7_893_001, agente, "fabric.send");
+            // A política tira `fabric.send` no meio do envio.
+            fn sem_send() {
+                politica_sem("fabric.send");
+            }
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(sem_send));
+            let r = mandar_na_malha(quem_manda, &endpoint, "no meio", 1);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::autorizacao::restaurar_politica(antes.clone());
+            if decisao_do_envelope(&r) != "ALLOW" || desfecho_na_malha(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}", r);
+                return Err("a politica mudada no meio nao recusou o envio");
+            }
+            if crate::malha::contagem() != (1, 0) {
+                return Err("o envio decidido com a politica velha criou a entrega");
+            }
+            let e = ultimo_com_metodo("fabric.send").ok_or("a recusa nao foi gravada")?;
+            if e.codigo != politica::Codigo::DenyPermission || !e.detalhe.contains("; decisao ") {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("a recusa no meio nao foi gravada como o resultado do comando");
+            }
+            // A chave revogada no meio do envio: a revogação fecha o
+            // endpoint, e o envio decidido antes dela não cria nada depois.
+            fn revogar() {
+                let _ = crate::identidade::revogar(&sigilo::publica_de(&[0x7d; 32]));
+            }
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(revogar));
+            let r = mandar_na_malha(quem_manda, &endpoint, "revogada no meio", 2);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            if decisao_do_envelope(&r) != "ALLOW" || fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a chave revogada no meio mandou");
+            }
+            if crate::malha::contagem() != (0, 0) {
+                return Err("a entrega de uma chave revogada ficou viva");
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    crate::autorizacao::restaurar_politica(antes);
+    resultado
+}
+
+/// A espera de quem recebe, e o fim do processo: o `fabric.recv` com `wait`
+/// sem nada a ler suspende, e acaba quando a entrega chega; a segunda espera
+/// no mesmo endpoint é recusada; e o processo que acaba fecha o endpoint —
+/// a espera acaba com ele, e o que esperava lá é anulado, gravado em nome
+/// do kernel. Quem mandou vê `voided`.
+fn malha_a_espera_e_o_fim_do_processo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    use crate::rede::espera::Desfecho;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(48), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let (correio, do_correio) = NaMalha::lancar("correio", bia, "correio: endpoint ")?;
+        let r = (|| -> Result<(alloc::string::String, alloc::string::String, crate::rede::espera::Espera), &'static str> {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let n = ordem_do_id(&endpoint);
+            let ler = |apos: Option<&str>| {
+                let apos = apos.map_or(alloc::string::String::new(), |a| alloc::format!(r#","after":"{a}""#));
+                pedido_rpc(
+                    "fabric.recv",
+                    &alloc::format!(r#"{{"endpoint":"{endpoint}","wait":5000{apos}}}"#),
+                )
+            };
+            let Err(espera) = crate::nativo::responder_suspensivel_de_teste(dono.chamador(), &ler(None)) else {
+                return Err("a leitura sem nada a ler nao esperou");
+            };
+            if !crate::malha::tem_espera_de_teste(n) || espera.conferir(None).is_some() {
+                return Err("a espera nao ficou armada no endpoint");
+            }
+            // A segunda espera no mesmo endpoint: recusada.
+            let segunda = crate::nativo::responder_suspensivel_de_teste(dono.chamador(), &ler(None))
+                .map_err(|_| "a segunda espera no mesmo endpoint suspendeu")?;
+            if desfecho_na_malha(&segunda) != "CONFLICT" {
+                crate::log_error!("teste", "{}", segunda);
+                return Err("a segunda espera no mesmo endpoint nao foi recusada");
+            }
+            // Chega uma entrega: a espera acaba.
+            let quem_manda = simulado_na_malha(7_894_001, bia, "fabric.send");
+            let id = fs_texto(&mandar_na_malha(quem_manda, &endpoint, "acorda", 1), "id")
+                .ok_or("a entrega nao foi aceita")?;
+            if espera.conferir(None) != Some(Desfecho::Chegou) {
+                return Err("a entrega nao acabou a espera");
+            }
+            drop(espera);
+            if crate::malha::tem_espera_de_teste(n) {
+                return Err("a espera largada nao desarmou");
+            }
+            let lida = fs_pedir(dono.chamador(), "fabric.recv", &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#));
+            if !lida.contains(&alloc::format!(r#""id":"{id}""#)) || !lida.contains(r#""state":"delivered""#) {
+                crate::log_error!("teste", "{}", lida);
+                return Err("a leitura depois da espera nao entregou");
+            }
+            // Outro processo do mesmo titular, com `fabric.offer`: nem
+            // confirma a entrega lida, nem lê o endpoint do dono — o gate
+            // não os resolve para ele.
+            let roubar = fs_pedir(
+                correio.chamador(),
+                "fabric.ack",
+                &alloc::format!(r#"{{"id":"{id}","reply":"roubada"}}"#),
+            );
+            let espiar = fs_pedir(
+                correio.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            if decisao_do_envelope(&roubar) != "DENY_RESOURCE"
+                || decisao_do_envelope(&espiar) != "DENY_RESOURCE"
+            {
+                crate::log_error!("teste", "{} {}", roubar, espiar);
+                return Err("outro processo do titular alcancou a entrega ou o endpoint do dono");
+            }
+            // Uma espera nova, depois da lida: armada, sem nada.
+            let Err(espera) = crate::nativo::responder_suspensivel_de_teste(dono.chamador(), &ler(Some(&id))) else {
+                return Err("a leitura depois da ultima nao esperou");
+            };
+            Ok((endpoint, id, espera))
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        let fim_do_correio = encerrar_o_correio(bia, &do_correio);
+        let (endpoint, id, espera) = r?;
+        fim?;
+        fim_do_correio?;
+        // O processo acabou: o endpoint fecha, a espera acaba, e a entrega
+        // lida e não confirmada é anulada.
+        esperar_ate(
+            || espera.conferir(None) == Some(Desfecho::Sumiu),
+            TETO_DA_MALHA,
+        )
+        .map_err(|_| "o fim do processo nao acabou a espera")?;
+        drop(espera);
+        use politica::Codigo::Allow;
+        if !gravado_na_malha(
+            antes,
+            "fabric.withdraw",
+            &alloc::format!("endpoint:{endpoint}"),
+            Allow,
+            "fechado: o processo que o abriu acabou",
+        ) || !gravado_na_malha(
+            antes,
+            "fabric.void",
+            &alloc::format!("entrega:{id}"),
+            Allow,
+            "anulada: o processo do endpoint acabou",
+        ) {
+            return Err("o fim do processo na malha nao foi gravado");
+        }
+        let estado = fs_pedir(
+            simulado_na_malha(7_894_001, bia, "fabric.send"),
+            "fabric.status",
+            &alloc::format!(r#"{{"id":"{id}"}}"#),
+        );
+        if fs_texto(&estado, "state").as_deref() != Some("voided") {
+            crate::log_error!("teste", "{}", estado);
+            return Err("quem mandou nao viu a entrega anulada");
+        }
+        Ok(())
+    })
+}
+
+/// Com o reinício a caminho, nada novo nasce na malha: oferecer e mandar
+/// são `CONFLICT`; ler e consultar o que já existe continuam.
+fn malha_com_o_desligamento_a_caminho_nada_nasce() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(49), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_895_001, bia, "fabric.send");
+            let id = fs_texto(&mandar_na_malha(quem_manda, &endpoint, "antes", 1), "id")
+                .ok_or("a entrega de antes nao foi aceita")?;
+            let _ = crate::energia::executada_de_teste();
+            let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
+            if fs_texto(&r, "state").as_deref() != Some("rebooting") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o reinicio nao foi pedido");
+            }
+            let outra = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                r#"{"intent":"pdf.anotar"}"#,
+            );
+            let mandada = mandar_na_malha(quem_manda, &endpoint, "durante", 2);
+            let lida = fs_pedir(
+                dono.chamador(),
+                "fabric.recv",
+                &alloc::format!(r#"{{"endpoint":"{endpoint}"}}"#),
+            );
+            let estado = fs_pedir(
+                quem_manda,
+                "fabric.status",
+                &alloc::format!(r#"{{"id":"{id}"}}"#),
+            );
+            let entregue = energia_entregue();
+            for r in [&outra, &mandada] {
+                if fs_ok(r)
+                    || fs_texto(r, "code").as_deref() != Some("CONFLICT")
+                    || fs_texto(r, "error").as_deref()
+                        != Some("a maquina esta reiniciando ou desligando")
+                {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("com a maquina indo, algo novo nasceu na malha");
+                }
+            }
+            if !lida.contains(&alloc::format!(r#""id":"{id}""#))
+                || fs_texto(&estado, "state").as_deref() != Some("delivered")
+            {
+                crate::log_error!("teste", "{} {}", lida, estado);
+                return Err("com a maquina indo, ler ou consultar parou");
+            }
+            if entregue != Some(crate::energia::Acao::Reiniciar) {
+                return Err("o reinicio nao chegou ao fim");
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// Ao mesmo tempo: quatro fios mandando ao mesmo endpoint, cada um pelo seu
+/// canal, enquanto o dono lê e confirma e a chave é revogada no meio. Ao
+/// fim, a tabela é coerente, nada da chave revogada está vivo, e cada
+/// entrega aceita teve fim gravado: confirmada pelo dono, ou anulada pela
+/// revogação — nenhuma ficou para trás.
+fn malha_mandar_ler_e_revogar_ao_mesmo_tempo() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
+    const SEMENTE: [u8; 32] = [0x7e; 32];
+    const FIOS: u64 = 3;
+    const VOLTAS: u64 = 12;
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    static ACEITAS: AtomicUsize = AtomicUsize::new(0);
+    static ENDPOINT: crate::trava::Mutex<alloc::string::String> =
+        crate::trava::Mutex::new(alloc::string::String::new());
+    /// Quantos envios da primeira metade já saíram, de todos os fios.
+    static METADE: AtomicU64 = AtomicU64::new(0);
+    /// A revogação aconteceu: a segunda metade pode sair.
+    static REVOGADA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    let chave = sigilo::publica_de(&SEMENTE);
+    extern "C" fn mandar(qual: u64) -> ! {
+        let chave = sigilo::publica_de(&[0x7e; 32]);
+        let agente = crate::autorizacao::Autoridade::Sessao {
+            sessao: 3,
+            chave: Some(chave),
+        };
+        let endpoint = crate::arch::sem_interrupcoes(|| ENDPOINT.lock().clone());
+        let quem = simulado_na_malha(7_896_000 + qual, agente, "fabric.send");
+        for volta in 1..=VOLTAS {
+            // A segunda metade espera a revogação: ela cai no meio dos
+            // envios de todos os fios, e não antes nem depois.
+            if volta == VOLTAS / 2 + 1 {
+                while !REVOGADA.load(SeqCst) {
+                    crate::fios::ceder();
+                }
+            }
+            let r = mandar_na_malha(quem, &endpoint, "ao mesmo tempo", volta);
+            if fs_ok(&r) {
+                ACEITAS.fetch_add(1, SeqCst);
+            }
+            if volta <= VOLTAS / 2 {
+                METADE.fetch_add(1, SeqCst);
+            }
+            crate::fios::ceder();
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        crate::fios::terminar()
+    }
+    com_a_malha(|| {
+        crate::identidade::registrar_agente_de_teste(chave, "malha-junto", "operador");
+        let agente = Autoridade::Sessao {
+            sessao: 3,
+            chave: Some(chave),
+        };
+        let antes = crate::autorizacao::ultimo_registro();
+        let (dono, _) = NaMalha::lancar("impostor", agente, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            crate::arch::sem_interrupcoes(|| *ENDPOINT.lock() = endpoint.clone());
+            PRONTOS.store(0, SeqCst);
+            ACEITAS.store(0, SeqCst);
+            METADE.store(0, SeqCst);
+            REVOGADA.store(false, SeqCst);
+            for qual in 0..FIOS {
+                crate::fios::criar("teste-malha", mandar, qual)?;
+            }
+            // O dono lê e confirma enquanto os fios mandam, um tique por
+            // volta; com a primeira metade de todos fora, a chave é
+            // revogada — com envios, leituras e confirmações em curso.
+            let limite = crate::tempo::ticks().saturating_add(6 * TETO_DA_MALHA);
+            while PRONTOS.load(SeqCst) < FIOS as usize && crate::tempo::ticks() < limite {
+                let lida = fs_pedir(
+                    dono.chamador(),
+                    "fabric.recv",
+                    &alloc::format!(r#"{{"endpoint":"{endpoint}","max":16}}"#),
+                );
+                let raiz = Json(lida.as_bytes());
+                let entregas = raiz.member("result").and_then(|r| r.member("deliveries"));
+                for e in (0..).map_while(|i| entregas.and_then(|l| l.item(i))) {
+                    if let Some(id) = e.member("id").and_then(|v| v.as_str()) {
+                        let _ = fs_pedir(
+                            dono.chamador(),
+                            "fabric.ack",
+                            &alloc::format!(r#"{{"id":"{id}"}}"#),
+                        );
+                    }
+                }
+                if !REVOGADA.load(SeqCst) && METADE.load(SeqCst) >= FIOS * (VOLTAS / 2) {
+                    let _ = crate::identidade::revogar(&sigilo::publica_de(&[0x7e; 32]));
+                    REVOGADA.store(true, SeqCst);
+                }
+                let tique = crate::tempo::ticks();
+                while crate::tempo::ticks() == tique {
+                    crate::fios::ceder();
+                }
+            }
+            REVOGADA.store(true, SeqCst);
+            esperar_cedendo(|| PRONTOS.load(SeqCst) == FIOS as usize, TETO_DA_MALHA)
+                .map_err(|_| "os fios da malha nao terminaram")?;
+            if crate::malha::contagem() != (0, 0) || !crate::malha::coerente() {
+                crate::log_error!("teste", "{:?}", crate::malha::contagem());
+                return Err("depois da revogacao, a malha ficou com algo vivo ou incoerente");
+            }
+            // Cada aceita teve fim: confirmada, ou anulada.
+            let aceitas = registros_depois(antes, |e| {
+                e.metodo == "fabric.send"
+                    && e.codigo == politica::Codigo::Allow
+                    && e.detalhe.contains("aceita, pendente")
+            });
+            if aceitas.len() != ACEITAS.load(SeqCst) || aceitas.is_empty() {
+                crate::log_error!(
+                    "teste",
+                    "{} gravadas, {} aceitas",
+                    aceitas.len(),
+                    ACEITAS.load(SeqCst)
+                );
+                return Err("as entregas aceitas nao foram todas gravadas");
+            }
+            for (_, e) in &aceitas {
+                let fim = registros_depois(antes, |f| {
+                    Some(f.recurso.as_str()) == e.recurso.split(" ; ").next()
+                        && matches!(f.metodo.as_str(), "fabric.ack" | "fabric.void")
+                });
+                if fim.len() != 1 {
+                    crate::log_error!("teste", "{}: {} fins", e.recurso, fim.len());
+                    return Err("uma entrega aceita ficou sem fim, ou com dois");
+                }
+            }
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
+}
+
+/// O custo de uma entrega, pelo gate inteiro — a decisão, a reconfirmação
+/// com a ordem das gravações na mão, a tabela e a auditoria —, medido pela
+/// régua de ciclos do kernel: oferecer, descobrir, mandar, ler e
+/// confirmar, a média de dezesseis voltas. Não reprova por lentidão: diz
+/// os números, para o relatório, e confere só que cada passo passou.
+fn malha_o_custo_de_uma_entrega() -> Resultado {
+    use crate::autorizacao::Autoridade;
+    use crate::pessoas::Console;
+    const VOLTAS: u64 = 16;
+    let Some((hz, _)) = crate::arch::frequencia_dos_ciclos() else {
+        crate::log_info!("teste", "malha: sem a frequencia dos ciclos, nada a medir");
+        return Ok(());
+    };
+    let us = |ciclos: u64| ciclos.saturating_mul(1_000_000) / hz.max(1);
+    com_a_malha(|| {
+        let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(50), "bia", "operador");
+        let bia = Autoridade::Pessoa { sessao };
+        let (dono, _) = NaMalha::lancar("impostor", bia, "impostor: pronto")?;
+        let r = (|| -> Resultado {
+            let inicio = crate::arch::ciclos();
+            let r = fs_pedir(
+                dono.chamador(),
+                "fabric.offer",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let oferecer = crate::metricas::desde(inicio);
+            let endpoint = fs_texto(&r, "endpoint").ok_or("o dono nao abriu o endpoint")?;
+            let quem_manda = simulado_na_malha(7_897_001, bia, "fabric.send");
+            let inicio = crate::arch::ciclos();
+            let achados = fs_pedir(
+                quem_manda,
+                "fabric.discover",
+                &alloc::format!(r#"{{"intent":"{INTENCAO_DA_MALHA}"}}"#),
+            );
+            let descobrir = crate::metricas::desde(inicio);
+            if !achados.contains(&endpoint) {
+                return Err("a descoberta da medida nao achou o endpoint");
+            }
+            let (mut mandar, mut ler, mut confirmar) = (0u64, 0u64, 0u64);
+            for volta in 1..=VOLTAS {
+                let inicio = crate::arch::ciclos();
+                let r = mandar_na_malha(quem_manda, &endpoint, "medida", volta);
+                mandar += crate::metricas::desde(inicio);
+                let id = fs_texto(&r, "id").ok_or("um envio da medida falhou")?;
+                let inicio = crate::arch::ciclos();
+                let lida = fs_pedir(
+                    dono.chamador(),
+                    "fabric.recv",
+                    &alloc::format!(r#"{{"endpoint":"{endpoint}","after":"{}"}}"#, {
+                        let n = ordem_do_id(&id).saturating_sub(1);
+                        let epoca = id.split(':').next().unwrap_or("");
+                        alloc::format!("{epoca}:{n}")
+                    }),
+                );
+                ler += crate::metricas::desde(inicio);
+                if !lida.contains(&alloc::format!(r#""id":"{id}""#)) {
+                    crate::log_error!("teste", "{}", lida);
+                    return Err("uma leitura da medida nao trouxe a entrega");
+                }
+                let inicio = crate::arch::ciclos();
+                let ack = fs_pedir(
+                    dono.chamador(),
+                    "fabric.ack",
+                    &alloc::format!(r#"{{"id":"{id}","reply":"ok"}}"#),
+                );
+                confirmar += crate::metricas::desde(inicio);
+                if !fs_ok(&ack) {
+                    crate::log_error!("teste", "{}", ack);
+                    return Err("uma confirmacao da medida falhou");
+                }
+            }
+            crate::log_info!(
+                "teste",
+                "malha: custo pelo gate: oferecer {} us, descobrir {} us; por volta ({}): mandar {} us, ler {} us, confirmar {} us",
+                us(oferecer),
+                us(descobrir),
+                VOLTAS,
+                us(mandar / VOLTAS),
+                us(ler / VOLTAS),
+                us(confirmar / VOLTAS)
+            );
+            Ok(())
+        })();
+        let fim = encerrar_na_malha(CANAL_DO_IMPOSTOR, SAIDA_DO_IMPOSTOR);
+        r?;
+        fim
+    })
 }

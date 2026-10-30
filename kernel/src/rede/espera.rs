@@ -55,6 +55,14 @@
 //! conexão, e acordado — o journal gravou, o NSF leu, ou o prazo do `wait`
 //! venceu — executa o pedido de novo, inteiro, pelo gate.
 //!
+//! # A espera de quem recebe pela malha
+//!
+//! E serve à espera de um `fabric.recv` sem o que ler: armada no endpoint
+//! da malha, ela acaba quando uma entrega chega a ele, quando ele fecha, ou
+//! no prazo — ver [`crate::malha`]. A conferência e o registro do waker
+//! acontecem sob a trava da tabela, a mesma com que a entrega entra. Uma
+//! espera por endpoint: a segunda é recusada, como numa conexão.
+//!
 //! # Uma espera de cada sentido por conexão
 //!
 //! Uma conexão tem um dono, e o dono pede uma coisa de cada vez pelo caminho
@@ -139,6 +147,9 @@ enum Causa {
         /// Desde quando, em milissegundos: a conta das esperas.
         desde_ms: u64,
     },
+    /// Uma entrega no endpoint `endpoint` da malha — a espera de um
+    /// `fabric.recv`.
+    Malha { endpoint: u64 },
 }
 
 /// O tique em que vence uma espera de `ms` milissegundos — no máximo
@@ -203,6 +214,23 @@ impl Espera {
         })
     }
 
+    /// A espera de um `fabric.recv` no endpoint `endpoint`, por `ms`
+    /// milissegundos — no máximo [`PRAZO_MAXIMO_MS`]. `Ok(None)` quando não
+    /// há o que esperar — já há o que ler, ou o endpoint acabou — e sem
+    /// relógio; `Err` com o motivo quando o endpoint já tem quem espere.
+    pub fn pela_malha(endpoint: u64, ms: u64) -> Result<Option<Espera>, &'static str> {
+        let Some(prazo) = prazo_de(ms) else {
+            return Ok(None);
+        };
+        if !crate::malha::armar_espera(endpoint)? {
+            return Ok(None);
+        }
+        Ok(Some(Espera {
+            causa: Causa::Malha { endpoint },
+            prazo,
+        }))
+    }
+
     /// O tique em que a espera vence.
     pub fn prazo(&self) -> u64 {
         self.prazo
@@ -228,6 +256,7 @@ impl Espera {
             Causa::Auditoria { principal, .. } => {
                 crate::oleoduto::conferir(*principal, waker).then_some(Desfecho::Liberou)
             }
+            Causa::Malha { endpoint } => crate::malha::conferir_espera(*endpoint, waker),
         }
         .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
     }
@@ -248,6 +277,7 @@ impl Drop for Espera {
             Causa::Auditoria { desde_ms, .. } => {
                 crate::oleoduto::esperou(crate::tempo::uptime_ms().saturating_sub(*desde_ms))
             }
+            Causa::Malha { endpoint } => crate::malha::desarmar_espera(*endpoint),
         }
     }
 }

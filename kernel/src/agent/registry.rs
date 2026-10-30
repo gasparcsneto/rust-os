@@ -70,6 +70,11 @@ pub enum Formato {
     /// Um símbolo: ASCII imprimível sem espaço, aspas, barra invertida nem
     /// `;`, de 1 a [`MAIOR_SIMBOLO`] bytes.
     Simbolo,
+    /// Uma intenção da malha, `<espaço>.<nome>[.<nome>…]`: partes de
+    /// minúsculas, dígitos e `_`, cada uma começando por letra, até
+    /// [`politica::malha::MAIOR_INTENCAO`] bytes, sem curinga — a mesma
+    /// forma que a política enumera. Ver [`crate::malha`].
+    Intencao,
 }
 
 /// O maior nome de evento.
@@ -109,6 +114,7 @@ impl Formato {
                         .bytes()
                         .all(|c| c.is_ascii_graphic() && !matches!(c, b'"' | b'\\' | b';'))
             }
+            Formato::Intencao => politica::malha::intencao_valida(texto),
         }
     }
 }

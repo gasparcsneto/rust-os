@@ -870,6 +870,12 @@ pub fn revogar(chave: &[u8; TAM_CHAVE]) -> Result<String, Recusa> {
         politica::mensagens::Dono::Agente(*chave),
         "com a chave revogada",
     );
+    // E na malha: os endpoints dos programas que ela lançou fecham, e as
+    // entregas vivas entre eles são anuladas.
+    crate::malha::anular_titular(
+        politica::malha::Titular::Agente(*chave),
+        "com a chave revogada",
+    );
     // E as chaves de assinatura dele: anuladas, com a lápide. A mesma chave
     // registrada de novo não as recupera.
     crate::chaves::identidade_revogada(&alloc::format!("agente:{}", sigilo::hex(chave)));

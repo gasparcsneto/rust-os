@@ -252,6 +252,8 @@ fn entregar(id: u64, resposta: Texto) {
     if let Some(sobra) = crate::fios::responder_pedido(id, resposta) {
         drop(sobra);
         crate::mensagens::canal_acabou(politica::mensagens::Canal::Processo(id));
+        // E o endpoint que o comando possa ter aberto na malha.
+        crate::malha::canal_acabou(politica::mensagens::Canal::Processo(id));
     }
     ATENDIDOS.fetch_add(1, Ordering::Relaxed);
 }

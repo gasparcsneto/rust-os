@@ -246,6 +246,7 @@ fn esquecer_se(p: u8, dela: impl FnOnce(&Identificada) -> bool) -> Option<Identi
         // Os nonces da sessão também: a próxima sessão nesta porta conta do
         // zero — os quadros desta não se repetem lá, que tem outras chaves.
         crate::mensagens::canal_acabou(politica::mensagens::Canal::Sessao(p));
+        crate::malha::canal_acabou(politica::mensagens::Canal::Sessao(p));
         // E o que ela fez, no `agent.list`; e um agente a menos na barra.
         crate::atividade::sessao_acabou(p);
     }

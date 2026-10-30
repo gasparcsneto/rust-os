@@ -156,6 +156,16 @@ Tudo o mais está disponível, sob a política: um programa de um agente com
 `message.send` manda mensagem; um com `ui.read` lê a árvore; um do sistema
 lê `system.info` — se o papel `sistema` tiver a permissão, como hoje.
 
+### O que só um processo pede
+
+- **Os endpoints da malha** (`fabric.offer`, `fabric.withdraw`,
+  `fabric.recv`, `fabric.ack`). Um endpoint é de um processo — o programa
+  que o kernel carregou oferece a intenção — e some com ele. Uma sessão — o
+  canal de um agente, o console de uma pessoa — procura, manda, consulta e
+  cancela (`fabric.discover`, `fabric.send`, `fabric.status`,
+  `fabric.cancel`), mas não abre endpoint. Recusadas no gate, gravadas. Ver
+  [`MALHA.md`](MALHA.md).
+
 ### A taxa é do principal
 
 O balde deixa de ser da vaga de sessão e passa a ser de quem responde pelo

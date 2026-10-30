@@ -88,6 +88,7 @@ mod interpretador;
 mod irq;
 mod log;
 mod machine;
+mod malha;
 mod mensagens;
 mod metricas;
 mod mmio;

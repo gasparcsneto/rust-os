@@ -1091,6 +1091,212 @@ pub static COMANDOS: &[Command] = &[
         handler: message_status,
     },
     Command {
+        nome: "fabric.offer",
+        resumo: "Oferece uma intencao na malha: abre um endpoint do processo que pede, por onde \
+                 chegam as entregas dos outros programas do mesmo titular. So um processo \
+                 oferece, e o endpoint some com ele. A intencao e o recurso da decisao, \
+                 enumerada na politica. O mesmo processo oferecendo a mesma intencao de novo \
+                 recebe o mesmo endpoint.",
+        params: &[ParamSpec {
+            nome: "intent",
+            tipo: TipoParam::Formatado(Formato::Intencao),
+            obrigatorio: true,
+            descricao: "A intencao, `<espaco>.<nome>`: minusculas, digitos e `_`, cada parte \
+                        comecando por letra, ate 48 bytes, sem curinga.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricOffer),
+        recurso: Some("intent"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_offer,
+    },
+    Command {
+        nome: "fabric.withdraw",
+        resumo: "Fecha um endpoint seu da malha: o que esperava nele e anulado.",
+        params: &[ParamSpec {
+            nome: "endpoint",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id do endpoint, como `fabric.offer` o devolveu.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricOffer),
+        recurso: Some("endpoint"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_withdraw,
+    },
+    Command {
+        nome: "fabric.discover",
+        resumo: "Os programas do seu titular que oferecem uma intencao na malha, com a \
+                 identidade que o kernel conferiu: o nome do manifesto, o resumo da imagem e, \
+                 para o codigo de fora dela, o editor. So os do mesmo titular, e so os que \
+                 ainda receberiam. Descobrir nao concede nada: cada entrega e decidida.",
+        params: &[ParamSpec {
+            nome: "intent",
+            tipo: TipoParam::Formatado(Formato::Intencao),
+            obrigatorio: true,
+            descricao: "A intencao, `<espaco>.<nome>`.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricSend),
+        recurso: Some("intent"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_discover,
+    },
+    Command {
+        nome: "fabric.send",
+        resumo: "Entrega um texto a um endpoint da malha que oferece a intencao, de um \
+                 programa do mesmo titular. Quem manda e o seu processo ou a sua sessao, nunca \
+                 um parametro. A intencao e o recurso da decisao. O corpo e texto opaco, ate \
+                 512 bytes. O `nonce` cresce a cada pedido do canal; o mesmo pedido com o mesmo \
+                 nonce devolve o mesmo id.",
+        params: &[
+            ParamSpec {
+                nome: "endpoint",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O endpoint de destino, como `fabric.discover` o mostrou.",
+            },
+            ParamSpec {
+                nome: "intent",
+                tipo: TipoParam::Formatado(Formato::Intencao),
+                obrigatorio: true,
+                descricao: "A intencao, que o endpoint tem de oferecer.",
+            },
+            ParamSpec {
+                nome: "body",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O texto, ate 512 bytes. O kernel nao o interpreta.",
+            },
+            ParamSpec {
+                nome: "nonce",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: true,
+                descricao: "Maior que o ultimo deste canal; o mesmo de um pedido igual e o \
+                            reenvio dele.",
+            },
+            ParamSpec {
+                nome: "ttl_ms",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O prazo, ate 600000 ms; 60000 se ausente.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricSend),
+        recurso: Some("intent"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_send,
+    },
+    Command {
+        nome: "fabric.recv",
+        resumo: "Le as entregas que esperam num endpoint seu, em ordem, com o programa que \
+                 mandou cada uma. Ler nao consome: a entrega fica ate o `fabric.ack`. Sem \
+                 `wait`, nao espera; com `wait`, sem nada novo, espera uma entrega chegar, o \
+                 endpoint fechar ou o prazo vencer — e o pedido e decidido de novo antes de \
+                 responder.",
+        params: &[
+            ParamSpec {
+                nome: "endpoint",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id do endpoint.",
+            },
+            ParamSpec {
+                nome: "after",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "So as depois deste id.",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantas, de 1 a 16; 8 se ausente.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quanto esperar, em ms, ate 10000.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricOffer),
+        recurso: Some("endpoint"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_recv,
+    },
+    Command {
+        nome: "fabric.ack",
+        resumo: "Confirma uma entrega que chegou a um endpoint seu, ja lida, com uma resposta \
+                 opcional para quem mandou: ela sai da fila.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id da entrega.",
+            },
+            ParamSpec {
+                nome: "reply",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "A resposta, texto opaco ate 512 bytes.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A versao lida; outra e CONFLICT.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricOffer),
+        recurso: Some("id"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_ack,
+    },
+    Command {
+        nome: "fabric.cancel",
+        resumo: "Cancela uma entrega que voce mandou, enquanto ninguem a leu.",
+        params: &[
+            ParamSpec {
+                nome: "id",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id da entrega.",
+            },
+            ParamSpec {
+                nome: "expect_version",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "A versao conhecida; outra e CONFLICT.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricSend),
+        recurso: Some("id"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_cancel,
+    },
+    Command {
+        nome: "fabric.status",
+        resumo: "O estado de uma entrega que voce mandou, e a resposta de quem a confirmou.",
+        params: &[ParamSpec {
+            nome: "id",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id da entrega.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricSend),
+        recurso: Some("id"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: fabric_status,
+    },
+    Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
@@ -7168,6 +7374,322 @@ fn message_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.end_object()
         }
         Err(r) => recusa_de_mensagem(w, r.codigo(), r.motivo()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fabric.* — a malha
+// ---------------------------------------------------------------------------
+//
+// Quem pede vem do comando — o processo e o programa que o kernel carregou,
+// a sessão —, nunca dos parâmetros; a intenção, o endpoint e a entrega
+// foram decididos pelo gate, e a malha confere que age sobre o que foi
+// decidido. Ver `crate::malha`.
+
+/// Quem pede na malha, ou a recusa escrita.
+fn ator_da_malha(w: &mut JsonWriter) -> Result<crate::malha::Ator, fmt::Result> {
+    crate::malha::Ator::do_comando().ok_or_else(|| {
+        let f = crate::malha::Falha::SemTitular;
+        recusa_de_mensagem(w, f.codigo(), f.motivo())
+    })
+}
+
+fn falha_da_malha(w: &mut JsonWriter, f: crate::malha::Falha) -> fmt::Result {
+    recusa_de_mensagem(w, f.codigo(), f.motivo())
+}
+
+/// Um programa como a malha o mostra: o nome do manifesto, o resumo da
+/// imagem e, se veio de fora dela, quem a selou.
+fn escrever_programa(w: &mut JsonWriter, p: &politica::malha::Programa) -> fmt::Result {
+    w.field_str("program", &p.nome)?;
+    w.field_str("digest", &sigilo::hex(&p.resumo))?;
+    if let Some(e) = &p.editor {
+        w.field_str("publisher", &sigilo::hex(e))?;
+    }
+    Ok(())
+}
+
+/// Um texto do pedido, desescapado em `buffer`. `Ok(None)` sem o campo;
+/// `Err` quando ele não é texto.
+fn texto_desescapado<'b>(
+    valor: Option<Json>,
+    buffer: &'b mut alloc::vec::Vec<u8>,
+) -> Result<Option<&'b str>, ()> {
+    let Some(v) = valor else {
+        return Ok(None);
+    };
+    // O desescapado nunca é maior que o escrito: um buffer do tamanho do
+    // escrito sempre cabe, e o teto é conta da tabela.
+    buffer.resize(v.0.len(), 0);
+    v.desescapar_em(buffer).map(Some).ok_or(())
+}
+
+fn fabric_offer(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let intencao = params
+        .member("intent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match crate::malha::oferecer(&ator, intencao) {
+        Ok((endpoint, novo)) => {
+            w.field_bool("ok", true)?;
+            w.field_str("endpoint", &endpoint)?;
+            w.field_str("intent", intencao)?;
+            w.field_bool("created", novo)?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_withdraw(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let endpoint = params
+        .member("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match crate::malha::retirar(&ator, endpoint) {
+        Ok(anuladas) => {
+            w.field_bool("ok", true)?;
+            w.field_str("endpoint", endpoint)?;
+            w.field_u64("voided", anuladas as u64)?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_discover(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let intencao = params
+        .member("intent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match crate::malha::descobrir(&ator, intencao) {
+        Ok(vistos) => {
+            w.field_bool("ok", true)?;
+            w.field_str("intent", intencao)?;
+            w.key("endpoints")?;
+            w.begin_array()?;
+            for (id, e) in &vistos {
+                w.begin_object()?;
+                w.field_str("endpoint", id)?;
+                escrever_programa(w, &e.programa)?;
+                w.field_u64("since_ms", e.desde_ms)?;
+                w.end_object()?;
+            }
+            w.end_array()?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_send(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let endpoint = params
+        .member("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let intencao = params
+        .member("intent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let nonce = params.member("nonce").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prazo = params.member("ttl_ms").and_then(|v| v.as_u64());
+    let mut buffer = alloc::vec::Vec::new();
+    let Ok(Some(corpo)) = texto_desescapado(params.member("body"), &mut buffer) else {
+        crate::autorizacao::auditar_execucao(
+            &alloc::format!("intencao:{intencao}"),
+            politica::Codigo::InvalidArgument,
+            "o corpo nao e texto",
+        );
+        return recusa_de_mensagem(w, politica::Codigo::InvalidArgument, "o corpo nao e texto");
+    };
+    match crate::malha::enviar(&ator, endpoint, intencao, corpo, nonce, prazo) {
+        Ok((id, e)) => {
+            w.field_bool("ok", true)?;
+            w.field_str("id", &id)?;
+            w.field_u64("version", e.versao)?;
+            w.field_bool("duplicate", e.duplicata)?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+/// Arma a espera de um `fabric.recv` no endpoint `endpoint` do processo que
+/// pede e suspende o comando — ver `rede::espera`. `Ok(true)` suspenso;
+/// `Ok(false)` quando há o que ler agora, ou o endpoint não é do processo —
+/// e a resposta de sempre diz o quê. `Err` com o motivo de não esperar.
+fn suspender_na_malha(endpoint: &str, ms: u64) -> Result<bool, &'static str> {
+    let Some(ator) = crate::malha::Ator::do_comando() else {
+        return Ok(false);
+    };
+    let Some(n) = crate::malha::endpoint_do_processo(&ator, endpoint) else {
+        return Ok(false);
+    };
+    let Some(espera) = crate::rede::espera::Espera::pela_malha(n, ms)? else {
+        return Ok(false);
+    };
+    // Não pode suspender afinal: a espera volta, e largá-la a desarma.
+    Ok(crate::autorizacao::suspender(espera).is_ok())
+}
+
+fn fabric_recv(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let endpoint = params
+        .member("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // A espera antes de qualquer escrita: o comando que suspende não
+    // responde agora — ver `rede::espera`.
+    let espera_recusada = match params.member("wait").and_then(|v| v.as_u64()) {
+        Some(ms) if ms > 0 && crate::autorizacao::pode_suspender() => {
+            match suspender_na_malha(endpoint, ms) {
+                Ok(true) => return Ok(()),
+                Ok(false) => None,
+                Err(motivo) => Some(motivo),
+            }
+        }
+        _ => None,
+    };
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Some(motivo) = espera_recusada {
+        return recusa_de_mensagem(w, politica::Codigo::Conflict, motivo);
+    }
+    let apos = params.member("after").and_then(|v| v.as_str());
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8)
+        .clamp(1, politica::malha::MAIOR_LEITURA as u64) as usize;
+    match crate::malha::receber(&ator, endpoint, apos, max) {
+        Ok(lidas) => {
+            w.field_bool("ok", true)?;
+            w.field_str("endpoint", endpoint)?;
+            w.key("deliveries")?;
+            w.begin_array()?;
+            for (id, l) in &lidas {
+                w.begin_object()?;
+                w.field_str("id", id)?;
+                w.field_str("intent", &l.intencao)?;
+                w.key("from")?;
+                match &l.de {
+                    Some(p) => {
+                        w.begin_object()?;
+                        escrever_programa(w, p)?;
+                        w.end_object()?;
+                    }
+                    // Mandada pela sessão do titular, sem programa.
+                    None => w.null_value()?,
+                }
+                w.field_str("body", &l.corpo)?;
+                w.field_u64("sent_ms", l.criada_ms)?;
+                w.field_u64("expires_ms", l.vence_ms)?;
+                w.field_str("state", l.estado.nome())?;
+                w.field_u64("version", l.versao)?;
+                w.end_object()?;
+            }
+            w.end_array()?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_ack(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    let mut buffer = alloc::vec::Vec::new();
+    let Ok(resposta) = texto_desescapado(params.member("reply"), &mut buffer) else {
+        crate::autorizacao::auditar_execucao(
+            &alloc::format!("entrega:{id}"),
+            politica::Codigo::InvalidArgument,
+            "a resposta nao e texto",
+        );
+        return recusa_de_mensagem(
+            w,
+            politica::Codigo::InvalidArgument,
+            "a resposta nao e texto",
+        );
+    };
+    match crate::malha::confirmar(&ator, id, resposta, esperada) {
+        Ok(t) => {
+            w.field_bool("ok", true)?;
+            w.field_str("id", id)?;
+            w.field_str("state", t.estado.nome())?;
+            w.field_u64("version", t.versao)?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_cancel(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    let esperada = params.member("expect_version").and_then(|v| v.as_u64());
+    match crate::malha::cancelar(&ator, id, esperada) {
+        Ok(t) => {
+            w.field_bool("ok", true)?;
+            w.field_str("id", id)?;
+            w.field_str("state", t.estado.nome())?;
+            w.field_u64("version", t.versao)?;
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
+    }
+}
+
+fn fabric_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_da_malha(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let id = params.member("id").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::malha::estado(&ator, id) {
+        Ok(v) => {
+            w.field_bool("ok", true)?;
+            w.field_str("id", id)?;
+            w.field_str("intent", &v.intencao)?;
+            w.field_str("state", v.estado.nome())?;
+            w.field_u64("version", v.versao)?;
+            if let Some(r) = &v.resposta {
+                w.field_str("reply", r)?;
+            }
+            w.end_object()
+        }
+        Err(f) => falha_da_malha(w, f),
     }
 }
 
