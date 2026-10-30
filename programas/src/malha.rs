@@ -42,6 +42,24 @@
 //! let candidatos = malha::descobrir("imagem.compartilhar")?;
 //! let id = malha::enviar(&candidatos[0].endpoint, "imagem.compartilhar", "/foto.png", 1)?;
 //! ```
+//!
+//! # Outro dispositivo
+//!
+//! Os mesmos passos de quem manda — procurar, mandar, perguntar o estado,
+//! cancelar — vão à malha de outro Duke pelo [`Par`]: `dispositivo:<nome>`,
+//! como o registro de dispositivos desta máquina o chama, relacionado à
+//! pessoa por quem o processo age. O pedido é decidido aqui — a permissão
+//! do passo e `fabric.remote` sobre o dispositivo, com o manifesto
+//! declarando as duas — e lá, pelo gate de lá, com o papel da relação, o
+//! da pessoa de lá e o teto `remoto`. O que volta é a resposta da malha de
+//! lá; a recusa, daqui ou de lá, vem com o código de quem recusou.
+//!
+//! ```ignore
+//! let par = malha::Par("dispositivo:par");
+//! let candidatos = par.descobrir("imagem.compartilhar")?;
+//! let id = par.enviar(&candidatos[0].endpoint, "imagem.compartilhar", "/foto.png", 1)?;
+//! let (estado, resposta) = par.estado(&id)?;
+//! ```
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -151,7 +169,11 @@ pub fn retirar(endpoint: &str) -> Result<u64, Falha> {
 /// Quem oferece `intencao`, entre os programas do mesmo titular.
 pub fn descobrir(intencao: &str) -> Result<Vec<Candidato>, Falha> {
     let r = pedir("fabric.discover", |w| w.field_str("intent", intencao))?;
-    let res = resultado(&r)?;
+    candidatos(resultado(&r)?)
+}
+
+/// Os candidatos de uma resposta do `fabric.discover`.
+fn candidatos(res: Json) -> Result<Vec<Candidato>, Falha> {
     let lista = res.member("endpoints").ok_or(Falha::Resposta)?;
     let mut v = Vec::new();
     for e in (0..).map_while(|i| lista.item(i)) {
@@ -245,4 +267,121 @@ pub fn cancelar(id: &str) -> Result<String, Falha> {
     let r = pedir("fabric.cancel", |w| w.field_str("id", id))?;
     let res = resultado(&r)?;
     texto(res, "state").ok_or(Falha::Resposta)
+}
+
+/// Outro dispositivo, `dispositivo:<nome>`: os passos de quem manda, levados
+/// à malha dele pelo enlace — ver o topo do módulo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Par<'a>(pub &'a str);
+
+/// Quantas vezes perguntar de novo por um pedido a outro dispositivo que
+/// ainda está a caminho. Quem espera mais que o prazo da espera ouve
+/// `CONFLICT`, com o número do pedido, e o pedido segue: perguntar de novo,
+/// com os mesmos parâmetros, é esperar por ele, e não mandar outro.
+const PERGUNTAS_A_CAMINHO: u32 = 6;
+
+impl Par<'_> {
+    /// O pedido a outro dispositivo, perguntado de novo enquanto ele está
+    /// a caminho — ver [`PERGUNTAS_A_CAMINHO`].
+    fn pedir(
+        &self,
+        metodo: &str,
+        params: impl Fn(&mut nativo::JsonWriter) -> core::fmt::Result,
+    ) -> Result<Resposta, Falha> {
+        let mut r = pedir(metodo, &params)?;
+        for _ in 0..PERGUNTAS_A_CAMINHO {
+            if !a_caminho(&r) {
+                break;
+            }
+            r = pedir(metodo, &params)?;
+        }
+        Ok(r)
+    }
+
+    /// Quem oferece `intencao` lá, entre os programas da pessoa da relação.
+    pub fn descobrir(&self, intencao: &str) -> Result<Vec<Candidato>, Falha> {
+        let r = self.pedir("fabric.discover", |w| {
+            w.field_str("intent", intencao)?;
+            w.field_str("device", self.0)
+        })?;
+        candidatos(de_la(&r)?)
+    }
+
+    /// Entrega `corpo` ao `endpoint` de lá. O `nonce` é o deste processo,
+    /// como no [`enviar`]: o mesmo, com o mesmo conteúdo, é o reenvio, e
+    /// devolve o mesmo id.
+    pub fn enviar(
+        &self,
+        endpoint: &str,
+        intencao: &str,
+        corpo: &str,
+        nonce: u64,
+    ) -> Result<String, Falha> {
+        let r = self.pedir("fabric.send", |w| {
+            w.field_str("endpoint", endpoint)?;
+            w.field_str("intent", intencao)?;
+            w.field_str("body", corpo)?;
+            w.field_u64("nonce", nonce)?;
+            w.field_str("device", self.0)
+        })?;
+        texto(de_la(&r)?, "id").ok_or(Falha::Resposta)
+    }
+
+    /// Onde está, lá, uma entrega que este processo mandou, e a resposta de
+    /// quem a confirmou.
+    pub fn estado(&self, id: &str) -> Result<(String, Option<String>), Falha> {
+        let r = self.pedir("fabric.status", |w| {
+            w.field_str("id", id)?;
+            w.field_str("device", self.0)
+        })?;
+        let res = de_la(&r)?;
+        Ok((
+            texto(res, "state").ok_or(Falha::Resposta)?,
+            texto(res, "reply"),
+        ))
+    }
+
+    /// Cancela, lá, uma entrega que este processo mandou, enquanto ninguém a
+    /// leu.
+    pub fn cancelar(&self, id: &str) -> Result<String, Falha> {
+        let r = self.pedir("fabric.cancel", |w| {
+            w.field_str("id", id)?;
+            w.field_str("device", self.0)
+        })?;
+        texto(de_la(&r)?, "state").ok_or(Falha::Resposta)
+    }
+}
+
+/// Se a resposta diz que o pedido a outro dispositivo ainda está a caminho:
+/// `CONFLICT`, com o número do pedido.
+fn a_caminho(r: &Resposta) -> bool {
+    matches!(r.resultado(), Ok(res)
+        if res.member("ok").and_then(|v| v.as_bool()) == Some(false)
+            && texto(res, "code").as_deref() == Some("CONFLICT")
+            && res.member("request").is_some())
+}
+
+/// O `remote` de uma resposta a outro dispositivo — o que a malha de lá
+/// respondeu —, ou a recusa: a do gate daqui e a do enlace vêm como
+/// `ok: false` com o código; a do gate de lá também; a da malha de lá vem
+/// dentro de `remote`.
+fn de_la(r: &Resposta) -> Result<Json<'_>, Falha> {
+    let res = match r.resultado() {
+        Ok(res) => res,
+        Err(recusa) => {
+            return Err(Falha::Recusa {
+                codigo: String::from(recusa.motivo.unwrap_or("ERROR")),
+                motivo: String::from(recusa.mensagem),
+            });
+        }
+    };
+    let la = res.member("remote");
+    if res.member("ok").and_then(|v| v.as_bool()) == Some(true) {
+        return la.ok_or(Falha::Resposta);
+    }
+    let recusa = la.unwrap_or(res);
+    Err(Falha::Recusa {
+        codigo: texto(recusa, "code").unwrap_or_default(),
+        motivo: texto(recusa, "error").unwrap_or_default(),
+    })
 }

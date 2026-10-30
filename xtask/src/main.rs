@@ -20,6 +20,7 @@ mod canal_tcp;
 mod codigo;
 mod copia;
 mod disco_hostil;
+mod enlace;
 mod icp;
 mod identidade;
 mod persistencia;
@@ -289,6 +290,7 @@ fn main() -> ExitCode {
         "botao" => botao::botao(arch, release),
         "senha" => senha::senha(arch, release),
         "copia" => copia::copia(arch, release),
+        "enlace" => enlace::enlace(release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -495,6 +497,15 @@ COMANDOS:
                               autoridade que não volta, a máquina reinstalada
                               que recusa, a queda em cada fronteira, e a
                               produção com a outra máquina que recusa
+    enlace                    duas máquinas ao mesmo tempo, ligadas pela rede do
+                              emulador: o enlace entre dispositivos de ponta a
+                              ponta — o registro com prova nos dois Dukes, a
+                              pessoa no Terminal, o carteiro de um manda ao
+                              correio do outro, a auditoria dos dois lados —,
+                              a suspensão, a relação que sobrevive ao corte e a
+                              revogação com lápide; nos pares x86_64→aarch64,
+                              aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64
+                              (DUKE_PARES escolhe; --arch não se aplica)
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -6911,10 +6922,32 @@ fn diretorio_do_tftp() -> Result<PathBuf, String> {
 static RAIZ_DO_ESTADO: OnceLock<PathBuf> = OnceLock::new();
 
 fn raiz_do_estado() -> PathBuf {
+    if let Some(raiz) = RAIZ_DA_MAQUINA.with_borrow(Clone::clone) {
+        return raiz;
+    }
     RAIZ_DO_ESTADO
         .get()
         .cloned()
         .unwrap_or_else(|| raiz_do_projeto().join("target"))
+}
+
+thread_local! {
+    /// A raiz de uma das duas máquinas da bancada do enlace, enquanto ela é
+    /// ligada ou falada — ver [`na_raiz`].
+    static RAIZ_DA_MAQUINA: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `f` com o estado de uma máquina em `dir`, e não na raiz deste comando:
+/// os sockets dela, o TPM, o signatário e as variáveis da UEFI. É o que deixa
+/// a bancada do enlace ligar duas máquinas da mesma arquitetura ao mesmo
+/// tempo sem que uma tome o socket ou o TPM da outra — os caminhos são por
+/// arquitetura, e as duas são da mesma. Só neste fio, e só durante `f`.
+pub(crate) fn na_raiz<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
+    let antes = RAIZ_DA_MAQUINA.replace(Some(dir.to_path_buf()));
+    let r = f();
+    RAIZ_DA_MAQUINA.set(antes);
+    r
 }
 
 /// Este comando guarda o TPM e o signatário em `dir`, e não em `target/`.
@@ -7190,6 +7223,10 @@ struct Ambiente {
     /// física de referência — no x86, atrás de uma ponte PCI, como uma
     /// placa PCIe atrás da porta raiz de um PC. Ver `kernel/src/e1000.rs`.
     placa_intel: bool,
+    /// Opções a mais da rede do emulador: as pontas do enlace na bancada de
+    /// duas máquinas — o `hostfwd` da 7071 do destino, e o `guestfwd` da
+    /// origem com a ponte até ele. Ver [`enlace`].
+    encaminhamento: Option<String>,
 }
 
 impl Ambiente {
@@ -7238,6 +7275,7 @@ impl Ambiente {
             disco_nvme: false,
             disco_hostil: None,
             placa_intel: false,
+            encaminhamento: None,
         };
         // O QEMU recusa um chardev cujo socket ainda não existe.
         let limite = Instant::now() + Duration::from_secs(10);
@@ -7271,6 +7309,7 @@ impl Ambiente {
             disco_nvme: false,
             disco_hostil: None,
             placa_intel: false,
+            encaminhamento: None,
         }
     }
 
@@ -7304,6 +7343,13 @@ impl Ambiente {
     /// O mesmo ambiente, com a rede na 82574L — ver `placa_intel`.
     pub(crate) fn com_placa_intel(mut self) -> Ambiente {
         self.placa_intel = true;
+        self
+    }
+
+    /// O mesmo ambiente, com estas opções a mais na rede — ver
+    /// `encaminhamento`.
+    pub(crate) fn com_encaminhamento(mut self, opcoes: String) -> Ambiente {
+        self.encaminhamento = Some(opcoes);
         self
     }
 }
@@ -7652,10 +7698,16 @@ fn comando_qemu(
     // cada conexão, com os certificados do eco TLS — ver [`icp`]. Sem a
     // PocketIC ligada, cada conexão cai.
     let icp = icp::guestfwd()?;
+    // E as pontas do enlace, na bancada de duas máquinas — ver [`enlace`].
+    let enlace = ambiente
+        .encaminhamento
+        .as_deref()
+        .map(|o| format!(",{o}"))
+        .unwrap_or_default();
     qemu.args([
         "-netdev",
         &format!(
-            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp},{icp}"
+            "user,id=rede0,tftp={tftp},guestfwd=tcp:10.0.2.100:7-cmd:cat,guestfwd=tcp:10.0.2.100:9-cmd:sleep 30,{eco_tls},{http},{canal_tcp},{icp}{enlace}"
         ),
     ]);
     match (ambiente.placa_intel, arch) {
@@ -14811,14 +14863,25 @@ fn sob_barra(
 }
 
 /// O nome de uma tecla no `sendkey` do monitor, para um caractere do que a
-/// fumaça digita: letras minúsculas, dígitos, o ponto, o hífen e o Enter.
+/// fumaça digita: letras minúsculas, dígitos, o ponto, o hífen, a barra, a
+/// vírgula, o espaço e o Enter — e, com o shift junto, as chaves, as aspas,
+/// os dois-pontos e o sublinhado: o JSON de uma linha do interpretador,
+/// como a bancada do enlace a digita. O layout é o americano, o das tabelas
+/// do teclado do kernel (`kernel/src/teclado.rs`).
 fn tecla_do_monitor(c: char) -> Option<String> {
     match c {
         'a'..='z' | '0'..='9' => Some(c.to_string()),
         '.' => Some("dot".into()),
         '-' => Some("minus".into()),
+        '/' => Some("slash".into()),
+        ',' => Some("comma".into()),
         ' ' => Some("spc".into()),
         '\n' => Some("ret".into()),
+        '{' => Some("shift-bracket_left".into()),
+        '}' => Some("shift-bracket_right".into()),
+        '"' => Some("shift-apostrophe".into()),
+        ':' => Some("shift-semicolon".into()),
+        '_' => Some("shift-minus".into()),
         _ => None,
     }
 }
@@ -14840,7 +14903,14 @@ fn digitar_pelo_monitor(mon: &mut UnixStream, texto: &str, quem: &str) -> Result
         // As teclas que chegam nesse meio esperam na fila do PS/2 do
         // emulador, que é curta: medido, a vinte milissegundos por tecla o
         // Enter depois do nome se perdia, e a senha entrava ecoada no nome.
-        let respiro = if c == '\n' { 600 } else { 20 };
+        //
+        // Uma tecla com shift são quatro eventos na fila do emulador, e não
+        // dois: o dobro do respiro.
+        let respiro = match c {
+            '\n' => 600,
+            _ if nome.starts_with("shift-") => 40,
+            _ => 20,
+        };
         std::thread::sleep(Duration::from_millis(respiro));
     }
     Ok(())

@@ -1,13 +1,13 @@
 # A malha do Duke
 
-A malha é a fundação do ecossistema Duke: o lugar por onde as aplicações —
-e, nos próximos marcos, os dispositivos — cooperam como partes de um
-ambiente só. Este documento descreve o **primeiro marco**, o que está
-implementado e testado: **aplicação A → malha → aplicação B**, numa
-máquina, entre os programas de um mesmo titular. A outra metade do marco,
-**dispositivo A → malha → dispositivo B**, depende de uma decisão
-arquitetural nova — a confiança entre dispositivos — e não está
-implementada (ver [O que fica de fora](#o-que-fica-de-fora)).
+A malha é a fundação do ecossistema Duke: o lugar por onde as aplicações
+e os dispositivos cooperam como partes de um ambiente só. Este documento
+descreve o **primeiro marco**, o que está implementado e testado:
+**aplicação A → malha → aplicação B**, numa máquina, entre os programas de
+um mesmo titular. A outra metade do marco, **dispositivo A → malha →
+dispositivo B** — a malha de um Duke levada à de outro, relacionado a uma
+pessoa desta máquina —, é o estágio 1 de B-E1/B-E2, descrito em
+[ENLACE.md](ENLACE.md).
 
 ## O princípio
 
@@ -217,12 +217,11 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
 
 ## O que fica de fora
 
-- **Dispositivo → malha → dispositivo.** Exige decidir quem um Duke é para
-  outro (a identidade do Duke autenticando como cliente, ou um principal
-  novo de dispositivo), a relação pessoa ↔ dispositivo, quem a cria e
-  revoga, e com que papel o destino decide — e como um acha o outro sem
-  expor nada. É uma decisão arquitetural nova, apresentada à parte; nada
-  dela foi implementado.
+- **Dispositivo → malha → dispositivo** está em [ENLACE.md](ENLACE.md): o
+  dispositivo como principal próprio, a chave do Duke dele no Noise IK, a
+  relação com uma pessoa daqui, a autoridade composta no destino. O que
+  ainda fica de fora dele — pareamento, descoberta, propagação da
+  revogação, armazenamento-e-envio — está lá.
 - **Handoff, streams, recursos remotos, presença.** Os próximos marcos.
 - **Entre titulares.** De propósito: a mensagem já é esse caminho.
 - **Persistência.** A malha é volátil; uma entrega não sobrevive ao boot.

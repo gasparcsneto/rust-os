@@ -80,11 +80,21 @@ use crate::trava::Mutex;
 pub const MAIOR_LINHA: usize = 8 * 1024;
 
 /// Quanto o serviço espera o par em cada passo de rede.
-const PASSO_MS: u64 = 5_000;
+const PASSO_MS: u64 = 2_000;
 
-/// Quantos passos de rede o serviço dá até a resposta: o aperto do TCP, a
+/// Quantos passos de rede o serviço dá, no máximo, por quadro do par: a
 /// resposta do aperto, a do pedido — com folga para as voltas da pilha.
 const MAIS_PASSOS: usize = 8;
+
+/// Quanto o par tem para a conversa inteira — o aperto e a resposta —,
+/// desde o primeiro quadro: menos que a espera de quem pediu
+/// (`rede::espera::PRAZO_MAXIMO_MS`). Um par mudo — a porta dele fechada
+/// pelo firewall, a máquina parada — dá a quem espera um desfecho, e não
+/// um `CONFLICT` de pedido ainda a caminho; e não prende o serviço, que
+/// leva um pedido de cada vez, além disso. Medido na bancada de duas
+/// máquinas emuladas: um pedido inteiro, com o aperto, leva menos de um
+/// segundo e meio.
+const PRAZO_DA_CONVERSA_MS: u64 = 8_000;
 
 // ---------------------------------------------------------------------
 // A origem: a tabela, a espera e o serviço.
@@ -524,11 +534,13 @@ pub trait Via {
     fn receber(&mut self, prazo_ms: u64) -> Result<Vec<u8>, (Codigo, &'static str)>;
 }
 
-/// O par de um quadro: lê da via até um quadro inteiro.
+/// O par de um quadro: lê da via até um quadro inteiro, até o tempo de
+/// máquina `limite`, em ms.
 fn proximo_quadro(
     via: &mut impl Via,
     leitor: &mut Leitor,
     guardado: &mut Vec<u8>,
+    limite: u64,
 ) -> Result<(Tipo, Vec<u8>), (Codigo, &'static str)> {
     for _ in 0..MAIS_PASSOS {
         while !guardado.is_empty() {
@@ -539,7 +551,11 @@ fn proximo_quadro(
                 Err(_) => return Err((Codigo::Error, "o par mandou um quadro que nao se le")),
             }
         }
-        let chegou = via.receber(PASSO_MS)?;
+        let resta = limite.saturating_sub(crate::tempo::uptime_ms());
+        if resta == 0 {
+            break;
+        }
+        let chegou = via.receber(resta.min(PASSO_MS))?;
         if chegou.is_empty() {
             continue;
         }
@@ -586,10 +602,11 @@ pub fn conversar(
         .map_err(|_| (Codigo::Error, "o aperto nao se escreveu"))?;
     let q = quadro::montar(Tipo::InicioEnlace, &primeira[..n])
         .map_err(|_| (Codigo::Error, "o aperto nao cabe num quadro"))?;
+    let limite = crate::tempo::uptime_ms().saturating_add(PRAZO_DA_CONVERSA_MS);
     via.mandar(&q)?;
     let mut leitor = Leitor::novo();
     let mut guardado = Vec::new();
-    let (tipo, corpo) = proximo_quadro(via, &mut leitor, &mut guardado)?;
+    let (tipo, corpo) = proximo_quadro(via, &mut leitor, &mut guardado, limite)?;
     let mut transporte = match tipo {
         Tipo::Resposta => {
             let mut lixo = vec![0u8; corpo.len()];
@@ -630,7 +647,7 @@ pub fn conversar(
     // A resposta: quadros de dados até a quebra de linha.
     let mut texto = Vec::new();
     loop {
-        let (tipo, corpo) = proximo_quadro(via, &mut leitor, &mut guardado)?;
+        let (tipo, corpo) = proximo_quadro(via, &mut leitor, &mut guardado, limite)?;
         match tipo {
             Tipo::Dados => {
                 let mut claro = vec![0u8; corpo.len()];

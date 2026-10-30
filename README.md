@@ -115,6 +115,7 @@ cargo xtask atualizacao              # a atualização A/B pelo firmware: instal
 cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, o cache do disco, cópias, sem TPM, clone, reinstalar
 cargo xtask botao                    # o botão de energia pelo emulador: desliga pelo gate, gravações, dois apertos, reinício, corte, produção
 cargo xtask senha                    # a troca da própria senha pelo teclado: o corte, a queda em cada fronteira, o botão, produção
+cargo xtask enlace                   # duas máquinas pela rede do emulador: o enlace entre dispositivos de ponta a ponta, suspensão, corte, revogação
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -763,6 +764,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── correio.rs    o aplicativo B da malha: oferece `imagem.compartilhar`, espera o que chega e confirma, dizendo de que programa veio
         ├── fotos.rs      o aplicativo A da malha: procura quem oferece, escolhe pela identidade conferida, manda, consulta e reenvia, no passo da suíte
         ├── impostor.rs   diz ser o `correio` e tenta, pela malha, o que é do outro: ler, fechar, confirmar, consultar, forjar — cada tentativa decidida e recusada
+        ├── carteiro.rs   o aplicativo A do enlace: procura quem oferece `imagem.compartilhar` em outro dispositivo, manda, reenvia com o mesmo nonce e pergunta o estado — decidido aqui, com `fabric.remote`, e lá, pelo gate de lá
         ├── gestor.rs     os canisters de uma chave, por um pedido que quem o lançou grava no armazém: o saldo, criar, instalar até 8 MiB, o estado, parar, iniciar, os ajustes, desinstalar, apagar e as cargas — com o arrendamento do pedido, o registro que não executa duas vezes e o pedido em andamento que se retoma
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
 
@@ -774,6 +776,7 @@ xtask/src/
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
+├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
@@ -8448,9 +8451,8 @@ corpo na auditoria. O runtime dos programas é
 [`programas/src/malha.rs`](programas/src/malha.rs). Ver
 [`docs/MALHA.md`](docs/MALHA.md).
 
-A outra metade do marco — dispositivo → malha → dispositivo — depende de
-uma decisão arquitetural nova, a confiança entre dispositivos, e não foi
-implementada.
+A outra metade do marco — dispositivo → malha → dispositivo — é o enlace
+entre dispositivos: ver [O enlace entre dispositivos](#o-enlace-entre-dispositivos).
 
 Doze casos `malha:` na suíte, nas duas arquiteturas, com programas de
 verdade — o `correio`, que atende; as `fotos`, que mandam; e o `impostor`,
@@ -8523,6 +8525,56 @@ e o ICP diferem em 33 a 37 bytes, com as seções do mesmo tamanho —
 constantes que dependem da biblioteca `programas`, que ganhou o módulo da
 malha; nenhuma linha deles mudou. Os três novos são de teste: o `correio`
 e as `fotos` com 33 KiB, o `impostor` com 41 KiB.
+
+## O enlace entre dispositivos
+
+A outra metade do primeiro marco da malha: **Duke A → enlace → Duke B**. O
+estágio 1 de B-E1/B-E2, com as decisões D1–D10 aprovadas antes da
+implementação ([`docs/ENLACE.md`](docs/ENLACE.md)). Outro Duke é um
+**principal próprio** — nem agente, nem pessoa —, identificado pela chave
+X25519 do Duke dele (a de B2), relacionado a uma pessoa desta máquina por
+uma **relação** que o administrador registra com prova
+(`device.register`, pelo `admin.execute`) e revoga com **lápide**
+(`device.revoke`); a suspensão (`device.suspend`/`device.resume`) é
+contenção volátil ([`kernel/src/dispositivos.rs`](kernel/src/dispositivos.rs),
+sobre a conta pura de [`politica/src/dispositivos.rs`](politica/src/dispositivos.rs)).
+A relação, o registro e a lápide vão ao journal; o resto é volátil.
+
+O enlace é o **mesmo Noise IK** do canal do agente, com prólogo, quadro de
+início, porta (a 7071, só escutada com uma relação), vagas e registro
+próprios, e a chave do Duke como iniciador
+([`kernel/src/enlace.rs`](kernel/src/enlace.rs)). Na **origem**, um
+programa da pessoa pede `fabric.send` (ou `discover`, `status`,
+`cancel`) com `"device":"dispositivo:<nome>"`: o gate decide a intenção e
+`fabric.remote` sobre o dispositivo, resolvido no espaço da pessoa; o
+pedido entra na tabela da origem ([`politica/src/enlace.rs`](politica/src/enlace.rs)),
+e o serviço `enlace` o leva ao par pelo gate — `net.connect`, `net.send`,
+`net.recv`, cada um decidido e gravado. No **destino**, cada pedido chega
+ao gate como o dispositivo, decidido pela interseção do papel da relação,
+do papel da pessoa dela e do teto `remoto` da política, procurados a cada
+decisão e reconfirmados no commit; só o conjunto fechado da malha passa, e
+a entrega só chega aos programas da pessoa da relação. O programa que a
+origem atesta vai à auditoria do destino, e a nada mais. A revogação e a
+suspensão derrubam os enlaces na hora, anulam as entregas vivas e falham
+os pedidos a caminho. Nada se propaga a outro Duke, nada se descobre, nada
+se guarda para depois.
+
+**Testes.** No hospedeiro, as contas puras — o registro e a lápide, a
+tabela da origem, os nonces e as cotas, o canal remoto da malha — e o
+prólogo e o quadro do enlace. Na suíte, nas duas arquiteturas, cinco casos
+`dispositivos:` e doze `enlace:` — a entrega pela malha, o conjunto
+fechado, a autoridade composta, o aperto contra o registro, o replay e o
+reenvio, a revogação e a suspensão derrubando o enlace, a revogação no
+meio (na reconfirmação), a origem que decide e leva, as recusas da origem,
+a revogação com o pedido a caminho, e mandar e revogar ao mesmo tempo. E a
+**bancada de duas máquinas**, `cargo xtask enlace`: dois Dukes de pé ao
+mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
+rede do emulador; o administrador registra a relação nos dois, a pessoa
+entra no Terminal das duas pelo teclado, o `carteiro` de uma manda ao
+`correio` da outra, e a auditoria dos dois lados é conferida — depois, a
+suspensão nos dois lados, o corte de energia do destino, a revogação nos
+dois. Nos quatro pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e
+aarch64→aarch64.
 
 ## Barramento PCI
 

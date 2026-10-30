@@ -54877,6 +54877,10 @@ pub fn executar_todos() -> ! {
     crate::interpretador::pessoa_padrao_para_teste();
 
     let mut falhas = 0usize;
+    // Os casos que falharam, repetidos no fim: o log da suíte passa de oito
+    // mil linhas, e quem o lê pela cauda — a CI, que só mostra o fim — não
+    // acha a linha `FALHOU` no meio dele.
+    let mut falharam = alloc::vec::Vec::new();
 
     for caso in CASOS {
         // Cada caso começa sem arrendamento nenhum: um que outro caso deixou
@@ -54899,6 +54903,7 @@ pub fn executar_todos() -> ! {
             Ok(()) => crate::serial_println!("  {:<42} ok", caso.nome),
             Err(motivo) => {
                 falhas += 1;
+                falharam.push((caso.nome, motivo));
                 crate::serial_println!("  {:<42} FALHOU -- {}", caso.nome, motivo);
             }
         }
@@ -54908,6 +54913,9 @@ pub fn executar_todos() -> ! {
     crate::serial_println!("  {} de {} passaram", CASOS.len() - falhas, CASOS.len());
 
     if falhas > 0 {
+        for (nome, motivo) in &falharam {
+            crate::serial_println!("  falhou: {} -- {}", nome, motivo);
+        }
         crate::serial_println!("=====================================================");
         crate::serial_println!();
         crate::qemu::encerrar(crate::qemu::Resultado::Falha);

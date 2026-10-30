@@ -181,6 +181,13 @@ impl Ligada {
     /// chip sem energia não guarda o volátil; o que sobrevive é só o que ele
     /// já tinha gravado no NV, e é isso que matá-lo reproduz.
     pub(crate) fn cortar_a_energia(mut self) -> Result<(), String> {
+        self.cortar()
+    }
+
+    /// [`Ligada::cortar_a_energia`] sem largar a máquina: quem a tem fica com
+    /// ela morta — a bancada do enlace a troca pela do boot seguinte, no
+    /// lugar dela.
+    pub(crate) fn cortar(&mut self) -> Result<(), String> {
         let _ = self.filho.kill();
         let _ = self.filho.wait();
         match self._ambiente.tpm.as_mut() {

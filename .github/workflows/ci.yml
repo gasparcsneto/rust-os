@@ -607,6 +607,57 @@ jobs:
       - name: Cópia de segurança e restauração
         run: cargo xtask copia --arch ${{ matrix.arch }}
 
+  # O enlace entre dispositivos (B-E1/B-E2, estágio 1): duas máquinas de pé
+  # ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela,
+  # ligadas só pela rede do emulador e pela ponte da bancada. O registro com
+  # prova nos dois, a pessoa no Terminal pelo teclado, o `carteiro` de uma
+  # mandando ao `correio` da outra, a auditoria dos dois lados; a suspensão
+  # nos dois lados, o corte de energia do destino, a revogação com lápide
+  # nos dois. Um job por par de arquiteturas cruzadas e um pelas iguais,
+  # com dois núcleos por máquina: as duas dividem o runner.
+  enlace:
+    name: Enlace entre dispositivos (${{ matrix.nome }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nome: x86_64 e aarch64
+            pares: x86_64>aarch64|aarch64>x86_64
+            chave: cruzados
+          - nome: mesma arquitetura
+            pares: x86_64>x86_64|aarch64>aarch64
+            chave: iguais
+    env:
+      DUKE_PARES: ${{ matrix.pares }}
+      DUKE_NUCLEOS: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: enlace-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: enlace-${{ matrix.chave }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Enlace entre dispositivos
+        run: cargo xtask enlace
+
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
   # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback
