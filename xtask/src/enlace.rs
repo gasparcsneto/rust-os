@@ -78,6 +78,11 @@ const ESPERA_PELO_PROGRAMA: Duration = Duration::from_secs(180);
 /// política padrão), e um lançamento faz até seis.
 const JANELA_DOS_APERTOS: Duration = Duration::from_secs(11);
 
+/// Quanto esperar o gate decidir o `user.run` de uma linha digitada, e
+/// quantas vezes digitá-la — ver [`DePe::lancar`].
+const ESPERA_PELO_LANCAMENTO: Duration = Duration::from_secs(20);
+const VEZES_DE_DIGITAR: usize = 3;
+
 /// Os pares, na ordem em que rodam: origem e destino.
 const PARES: [(Arquitetura, Arquitetura); 4] = [
     (Arquitetura::X86_64, Arquitetura::Aarch64),
@@ -378,10 +383,52 @@ impl DePe {
     }
 
     /// A pessoa lança `programa` pelo Terminal: `user.run`, digitado.
+    ///
+    /// E espera o gate decidir o `user.run` dele. O teclado do emulador perde
+    /// tecla com a máquina ocupada — duas de pé no mesmo hospedeiro —, e a
+    /// linha estragada o interpretador recusa sem chegar ao gate: sem a
+    /// decisão gravada, digita de novo, depois de uma linha vazia que encerra
+    /// o que tiver ficado pela metade. Só digita de novo quem não viu o
+    /// `user.run` decidido: o programa não roda duas vezes.
     fn lancar(&mut self, programa: &str) -> Result<(), String> {
-        self.digitar(&format!(
-            "user.run {{\"path\":\"/programas/{}/{programa}\"}}\n",
-            self.arch.nome()
+        let caminho = format!("/programas/{}/{programa}", self.arch.nome());
+        for vez in 0..VEZES_DE_DIGITAR {
+            let desde = self.marca()?.auditoria;
+            if vez > 0 {
+                println!(
+                    "  [enlace]   {}: o user.run de {caminho} nao chegou ao gate; digitando de novo",
+                    self.papel
+                );
+                self.digitar("\n")?;
+            }
+            self.digitar(&format!("user.run {{\"path\":\"{caminho}\"}}\n"))?;
+            let limite = Instant::now() + ESPERA_PELO_LANCAMENTO;
+            loop {
+                self.ler()?;
+                let decidido = self
+                    .visto
+                    .gravados
+                    .range(desde + 1..)
+                    .map(|(_, g)| g)
+                    .find(|g| g.metodo == "user.run" && g.recurso == caminho);
+                if let Some(g) = decidido {
+                    if g.codigo != "ALLOW" {
+                        return Err(format!(
+                            "{}: user.run {caminho}: {} {}",
+                            self.papel, g.codigo, g.detalhe
+                        ));
+                    }
+                    return Ok(());
+                }
+                if Instant::now() >= limite {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+        Err(format!(
+            "{}: o user.run de {caminho} nao chegou ao gate em {VEZES_DE_DIGITAR} vezes",
+            self.papel
         ))
     }
 
