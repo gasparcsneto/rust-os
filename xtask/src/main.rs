@@ -2599,6 +2599,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_auditoria_so_relatada()?,
         conferir_a_porta_do_canal_tcp(),
         conferir_o_tempo(),
+        conferir_os_trechos_da_politica()?,
         conferir_a_chave_da_copia()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
@@ -2800,6 +2801,168 @@ fn conferir_o_tempo() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Confere que os trechos que a suíte troca na política padrão estão nela.
+///
+/// # Por que isto virou conferência
+///
+/// Um caso que tira uma permissão de um papel, ou aperta uma taxa, troca um
+/// trecho da política padrão por outro — por `politica_trocada` ou por
+/// `PADRAO.replace` — e acha o trecho pelo texto. Quando a política padrão
+/// muda, o trecho some, e o caso só reprova na suíte, uma hora depois do
+/// push: oito casos reprovaram assim, nas duas arquiteturas, quando
+/// `fabric.remote` entrou no fim da linha do papel `operador`. Aqui cada
+/// trecho é procurado na política padrão, em segundos.
+///
+/// # A regra
+///
+/// Em cada `politica_trocada(&[…])` da suíte, o texto que sai de cada troca
+/// — o primeiro do par — está em `politica::PADRAO`; e o de cada
+/// `PADRAO.replace("…"`, também.
+///
+/// O que a regra não alcança: um trecho montado na hora (`format!`) — esse,
+/// o caso confere sozinho, e reprova com o trecho no log.
+fn conferir_os_trechos_da_politica() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let fontes = raiz.join("kernel/src");
+    let mut faltam = Vec::new();
+    let mut achados = 0;
+    percorrer_fontes(&fontes, &mut |caminho| {
+        let relativo = caminho
+            .strip_prefix(&fontes)
+            .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !da_suite(&relativo) {
+            return Ok(());
+        }
+        let texto = std::fs::read_to_string(caminho)
+            .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        for (posicao, trecho) in trechos_trocados(&texto) {
+            achados += 1;
+            if !politica::PADRAO.contains(&trecho) {
+                let linha = texto[..posicao].matches('\n').count() + 1;
+                faltam.push(format!(
+                    "kernel/src/{relativo}:{linha}: \"{}\"",
+                    trecho.escape_debug()
+                ));
+            }
+        }
+        Ok(())
+    })?;
+    if achados == 0 {
+        faltam.push("nenhum trecho trocado na suíte: a conferência está cega".into());
+    }
+    if faltam.is_empty() {
+        println!(
+            "[xtask] a política na suíte: os {achados} trechos que os casos trocam estão na \
+             política padrão"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("[xtask] trechos que a suíte troca e a política padrão não tem:");
+        for f in &faltam {
+            println!("  {f}");
+        }
+        println!(
+            "\nO caso que troca um trecho que não existe reprova na suíte: atualize o trecho \
+             para a política padrão de agora."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Os textos que a suíte tira da política padrão, com a posição de cada um
+/// na fonte: o primeiro de cada par de `politica_trocada(&[…])`, e o de
+/// `PADRAO.replace("…"`. Um trecho que não é literal fica de fora.
+fn trechos_trocados(fonte: &str) -> Vec<(usize, String)> {
+    let bytes = fonte.as_bytes();
+    let mut trechos = Vec::new();
+    const TROCADA: &str = "politica_trocada(&[";
+    for (inicio, _) in fonte.match_indices(TROCADA) {
+        let mut i = inicio + TROCADA.len();
+        // A profundidade dentro da lista: 1 no par, mais nos argumentos de
+        // um `format!` dentro dele.
+        let mut fundo = 0usize;
+        let mut primeiro_do_par = false;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    let Some((texto, fim)) = literal_de_rust(fonte, i) else {
+                        break;
+                    };
+                    if primeiro_do_par {
+                        trechos.push((i, texto));
+                    }
+                    primeiro_do_par = false;
+                    i = fim;
+                    continue;
+                }
+                b'(' | b'[' => {
+                    fundo += 1;
+                    primeiro_do_par = fundo == 1 && bytes[i] == b'(';
+                }
+                b')' | b']' => {
+                    if fundo == 0 {
+                        break;
+                    }
+                    fundo -= 1;
+                    primeiro_do_par = false;
+                }
+                c if c.is_ascii_whitespace() => {}
+                _ => primeiro_do_par = false,
+            }
+            i += 1;
+        }
+    }
+    const SUBSTITUI: &str = "PADRAO.replace(";
+    for (inicio, _) in fonte.match_indices(SUBSTITUI) {
+        let resto = &fonte[inicio + SUBSTITUI.len()..];
+        let i = fonte.len() - resto.trim_start().len();
+        if bytes.get(i) == Some(&b'"')
+            && let Some((texto, _)) = literal_de_rust(fonte, i)
+        {
+            trechos.push((i, texto));
+        }
+    }
+    trechos
+}
+
+/// O texto do literal de string que começa em `fonte[inicio]` (as aspas),
+/// com os escapes resolvidos, e onde ele termina. `None` se ele não fecha
+/// ou tem um escape que esta leitura não conhece.
+fn literal_de_rust(fonte: &str, inicio: usize) -> Option<(String, usize)> {
+    let mut texto = String::new();
+    let mut caracteres = fonte[inicio + 1..].char_indices();
+    while let Some((i, c)) = caracteres.next() {
+        match c {
+            '"' => return Some((texto, inicio + 1 + i + 1)),
+            '\\' => match caracteres.next()?.1 {
+                'n' => texto.push('\n'),
+                't' => texto.push('\t'),
+                'r' => texto.push('\r'),
+                '0' => texto.push('\0'),
+                '\\' => texto.push('\\'),
+                '"' => texto.push('"'),
+                '\'' => texto.push('\''),
+                // A continuação de linha: a quebra e o recuo da próxima
+                // não fazem parte do texto.
+                '\n' => {
+                    let mut adiante = caracteres.clone();
+                    while let Some((_, c)) = adiante.next() {
+                        if !c.is_whitespace() {
+                            break;
+                        }
+                        caracteres = adiante.clone();
+                    }
+                }
+                _ => return None,
+            },
+            c => texto.push(c),
+        }
+    }
+    None
 }
 
 /// Confere que a porta do canal TCP que o emulador encaminha é a que o
@@ -5003,7 +5166,6 @@ fn percorrer_fontes_e_ligacao(
     Ok(())
 }
 
-/// Chama `f` para cada arquivo `.rs` sob `dir`.
 /// Se o arquivo, relativo a `kernel/src`, é da suíte: o `testes.rs` e os
 /// submódulos dele, em `testes/`. A suíte não é compilada sem `modo-teste`, e
 /// a conferência que a deixa de fora a deixa inteira.
@@ -5016,6 +5178,7 @@ fn da_suite_no_projeto(relativo: &str) -> bool {
     relativo.strip_prefix("kernel/src/").is_some_and(da_suite)
 }
 
+/// Chama `f` para cada arquivo `.rs` sob `dir`.
 fn percorrer_fontes(
     dir: &Path,
     f: &mut impl FnMut(&Path) -> Result<(), String>,
@@ -16968,6 +17131,42 @@ mod testes {
             manifesto.contains(&format!("name = \"{NOME_DO_BINARIO}\"")),
             "o pacote do kernel não se chama mais {NOME_DO_BINARIO}; \
              atualize NOME_DO_BINARIO"
+        );
+    }
+
+    /// Os trechos que a suíte troca na política: o primeiro texto de cada
+    /// par, com os escapes resolvidos e a linha continuada junta; o que é
+    /// montado na hora, e o par de fora de uma troca, ficam de fora.
+    #[test]
+    fn os_trechos_trocados_saem_dos_literais() {
+        use super::*;
+        let fonte = r#"
+            let sem = politica_trocada(&[(
+                "papel operador a b\nrecurso operador",
+                "papel operador a\nrecurso operador",
+            ), ("taxa operador 50 100", &alloc::format!("taxa {x} \"y\""))])?;
+            let montado = politica_trocada(&[(&alloc::format!("{linha}\n"), "outra")])?;
+            let nada = politica_trocada(&[])?;
+            let lista = politica_trocada(&trocas)?;
+            let t = politica::PADRAO.replace(
+                "linha \
+                 continuada",
+                "outra",
+            );
+            let u = politica::PADRAO.replace(&linha, "x");
+            let fora = [("nao e troca", "nada")];
+        "#;
+        let trechos: Vec<String> = trechos_trocados(fonte)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            trechos,
+            [
+                "papel operador a b\nrecurso operador",
+                "taxa operador 50 100",
+                "linha continuada",
+            ]
         );
     }
 }
