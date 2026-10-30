@@ -257,9 +257,11 @@ fn campo(estado: &str, nome: &str) -> Option<String> {
 }
 
 /// A PocketIC ligada, com a instância da bancada pronta. Largada, o
-/// servidor sai.
+/// servidor sai, e o estado dele com ele.
 pub(crate) struct Bancada {
     servidor: Child,
+    /// O `TMPDIR` do servidor — ver [`Bancada::ligar`].
+    temporario: PathBuf,
 }
 
 impl Bancada {
@@ -274,7 +276,28 @@ impl Bancada {
         let _ = std::fs::remove_file(dir.join("estado.json"));
         let registro = std::fs::File::create(dir.join("pocketic.log"))
             .map_err(|e| format!("não foi possível criar o registro da PocketIC: {e}"))?;
+        // O estado de cada instância — os checkpoints da réplica, uns 90 MB —
+        // vai para o `TMPDIR` do servidor, e ele só o apaga quando sai
+        // sozinho; a bancada o mata. No `/tmp` do hospedeiro, cada rodada da
+        // suíte deixava o seu, e uma campanha de mutações encheu o disco com
+        // milhares. Aqui o diretório é desta bancada, e sai com ela; o de uma
+        // que morreu sem largar — o `xtask` morto por um `timeout` — sai na
+        // próxima.
+        if let Ok(entradas) = std::fs::read_dir(&dir) {
+            for e in entradas.flatten() {
+                let nome = e.file_name();
+                if let Some(pid) = nome.to_str().and_then(|n| n.strip_prefix("tmp-"))
+                    && !Path::new("/proc").join(pid).exists()
+                {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        let temporario = dir.join(format!("tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&temporario)
+            .map_err(|e| format!("não foi possível criar {}: {e}", temporario.display()))?;
         let servidor = Command::new(&binario)
+            .env("TMPDIR", &temporario)
             .arg("--port-file")
             .arg(&porta)
             // Ociosa por seis horas, ela sai sozinha: um `xtask` morto sem
@@ -285,7 +308,10 @@ impl Bancada {
             .stderr(registro)
             .spawn()
             .map_err(|e| format!("não foi possível iniciar a PocketIC: {e}"))?;
-        let mut bancada = Bancada { servidor };
+        let mut bancada = Bancada {
+            servidor,
+            temporario,
+        };
         let inicio = Instant::now();
         let numero = loop {
             if let Ok(texto) = std::fs::read_to_string(&porta)
@@ -357,6 +383,7 @@ impl Drop for Bancada {
     fn drop(&mut self) {
         let _ = self.servidor.kill();
         let _ = self.servidor.wait();
+        let _ = std::fs::remove_dir_all(&self.temporario);
     }
 }
 
