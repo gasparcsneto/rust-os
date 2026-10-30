@@ -511,6 +511,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
+├── dispositivos.rs  os dispositivos relacionados: a chave de outro Duke, a relação com uma pessoa desta máquina, as lápides
 ├── manifesto.rs     o manifesto de um programa: o nome, o que ele exerce, e o resumo da imagem
 ├── sigiloso.rs      o texto que sai da memória zerado: o corpo e a resposta que o leva
 └── auditoria.rs     os registros e a cadeia de elos BLAKE2s

@@ -99,11 +99,15 @@ pub enum Titular {
     /// `servico` da política lhe dá. Entrou depois dos outros, no fim: o
     /// número de cada um é o que já está nos journals.
     Servico = 7,
+    /// Outro dispositivo, pela chave que provou o aperto do enlace e pela
+    /// relação dele com uma pessoa desta máquina — um pedido remoto. Também
+    /// no fim, pelo mesmo motivo.
+    Dispositivo = 8,
 }
 
 impl Titular {
     /// Todos, na ordem do número.
-    pub const TODOS: [Titular; 8] = [
+    pub const TODOS: [Titular; 9] = [
         Titular::Kernel,
         Titular::Sistema,
         Titular::Serial,
@@ -112,6 +116,7 @@ impl Titular {
         Titular::Administrador,
         Titular::Anonimo,
         Titular::Servico,
+        Titular::Dispositivo,
     ];
 
     /// O nome, como `audit.tail` o escreve.
@@ -125,6 +130,7 @@ impl Titular {
             Titular::Administrador => "admin",
             Titular::Anonimo => "anonymous",
             Titular::Servico => "service",
+            Titular::Dispositivo => "device",
         }
     }
 

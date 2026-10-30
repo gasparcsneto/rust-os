@@ -16829,7 +16829,7 @@ mod testes {
             assert!(politica::PADRAO.contains(de), "{de}");
             politica::Politica::ler(&politica::PADRAO.replace(de, para)).unwrap()
         };
-        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send\n";
+        const OPERADOR: &str = "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\n";
         const TEMPO: &str = "papel tempo net.connect time.sync\n";
         const ALCANCE: &str =
             "recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321\n";

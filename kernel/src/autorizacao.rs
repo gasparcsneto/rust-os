@@ -681,7 +681,13 @@ fn ator(quem: &Quem) -> Option<crate::atividade::Ator> {
         Titular::Administrador => Some(Ator::Administrador {
             nome: quem.agente.clone(),
         }),
-        Titular::Kernel | Titular::Sistema | Titular::Anonimo | Titular::Servico => None,
+        // Outro dispositivo não aparece na barra como quem age aqui: o que
+        // ele pede vai à auditoria, e a entrega chega ao programa da pessoa.
+        Titular::Kernel
+        | Titular::Sistema
+        | Titular::Anonimo
+        | Titular::Servico
+        | Titular::Dispositivo => None,
     }
 }
 

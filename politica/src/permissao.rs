@@ -97,6 +97,31 @@
 //! duas sensíveis — cada papel que as tem as escreve —, e nenhuma
 //! administrativa: um programa as exerce pelo gate, com o manifesto dele.
 //! Ver [`crate::malha`].
+//!
+//! # Os dispositivos
+//!
+//! Um **dispositivo relacionado** é outro Duke — a chave dele, a mesma que
+//! o identifica para os agentes — ligado a uma pessoa **desta** máquina
+//! por uma relação, que um administrador cria e revoga. Ver
+//! [`crate::dispositivos`].
+//!
+//! - `fabric.remote` autoriza um programa a levar uma entrega da malha a
+//!   outro dispositivo: o recurso é o dispositivo, `dispositivo:<nome>`,
+//!   com o alcance enumerado, e o nome se resolve no espaço da pessoa de
+//!   quem pede — como `chave:<nome>`. Um envio a outro dispositivo é
+//!   decidido duas vezes na origem: `fabric.send` pela intenção (o quê) e
+//!   `fabric.remote` pelo dispositivo (para onde). Não dá nada do outro
+//!   lado: lá, quem decide é o gate de lá, pelo papel da pessoa de lá.
+//!   Sensível, e não administrativa.
+//! - `device.register` e `device.revoke` criam e revogam a relação — e
+//!   revogar é o dispositivo inteiro, com lápide na chave: ela não volta,
+//!   em registro nenhum. Administrativas: só por `admin.execute`, com prova.
+//! - `device.suspend` é a contenção reversível e volátil de um dispositivo
+//!   — a máquina perdida que pode aparecer —, com o inverso na mesma
+//!   permissão. O recurso é o dispositivo, `dispositivo:<nome>`, com o
+//!   alcance enumerado. Sensível, e não administrativa.
+//!
+//! Sem curinga: não há `dispositivo:*`, nem `device.*`, nem `fabric.*`.
 
 /// Uma permissão.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -300,11 +325,26 @@ pub enum Permissao {
     /// a entrega — `fabric.send`. O recurso é a intenção, com o alcance
     /// enumerado; sensível, e não administrativa.
     FabricSend,
+    /// Levar uma operação da malha a outro dispositivo — `fabric.remote`.
+    /// Ver o cabeçalho do módulo. O recurso é o dispositivo,
+    /// `dispositivo:<nome>`, com o alcance enumerado; sensível, e não
+    /// administrativa.
+    FabricRemote,
+    /// Registrar a relação de um dispositivo com uma pessoa desta máquina
+    /// — `device.register`. Administrativa.
+    DeviceRegister,
+    /// Revogar um dispositivo, com lápide na chave — `device.revoke`.
+    /// Administrativa.
+    DeviceRevoke,
+    /// Suspender um dispositivo, e retomá-lo — `device.suspend`. A
+    /// contenção reversível; o recurso é o dispositivo, com o alcance
+    /// enumerado.
+    DeviceSuspend,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 53] = [
+pub const TODAS: [Permissao; 57] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -358,6 +398,10 @@ pub const TODAS: [Permissao; 53] = [
     Permissao::FsRestore,
     Permissao::FabricOffer,
     Permissao::FabricSend,
+    Permissao::FabricRemote,
+    Permissao::DeviceRegister,
+    Permissao::DeviceRevoke,
+    Permissao::DeviceSuspend,
 ];
 
 impl Permissao {
@@ -417,6 +461,10 @@ impl Permissao {
             Permissao::FsRestore => "fs.restore",
             Permissao::FabricOffer => "fabric.offer",
             Permissao::FabricSend => "fabric.send",
+            Permissao::FabricRemote => "fabric.remote",
+            Permissao::DeviceRegister => "device.register",
+            Permissao::DeviceRevoke => "device.revoke",
+            Permissao::DeviceSuspend => "device.suspend",
         }
     }
 
@@ -473,6 +521,10 @@ impl Permissao {
                 | Permissao::FsRestore
                 | Permissao::FabricOffer
                 | Permissao::FabricSend
+                | Permissao::FabricRemote
+                | Permissao::DeviceRegister
+                | Permissao::DeviceRevoke
+                | Permissao::DeviceSuspend
         )
     }
 
@@ -494,6 +546,8 @@ impl Permissao {
                 | Permissao::AdminRevoke
                 | Permissao::TimeConfirm
                 | Permissao::KeyRevoke
+                | Permissao::DeviceRegister
+                | Permissao::DeviceRevoke
         )
     }
 
@@ -560,12 +614,26 @@ impl Permissao {
         matches!(self, Permissao::FabricOffer | Permissao::FabricSend)
     }
 
+    /// O recurso desta permissão é um dispositivo relacionado —
+    /// `dispositivo:<nome>` —, e um papel o limita a uma lista enumerada de
+    /// nomes. Sem curinga, sem prefixo. O nome é o local, que quem registra
+    /// deu ao dispositivo, e nunca o que o par diz; para `fabric.remote`,
+    /// ele se resolve no espaço da pessoa de quem pede. Levar uma entrega a
+    /// outro dispositivo e conter um dispositivo. Ver
+    /// [`crate::dispositivos`].
+    pub const fn recurso_e_dispositivo(self) -> bool {
+        matches!(self, Permissao::FabricRemote | Permissao::DeviceSuspend)
+    }
+
     /// Uma contenção reversível: só restringe, e tem o seu inverso na mesma
     /// permissão.
     pub const fn contencao(self) -> bool {
         matches!(
             self,
-            Permissao::ProcessIsolate | Permissao::AgentSuspend | Permissao::CredentialSuspend
+            Permissao::ProcessIsolate
+                | Permissao::AgentSuspend
+                | Permissao::CredentialSuspend
+                | Permissao::DeviceSuspend
         )
     }
 
@@ -614,7 +682,9 @@ impl Permissao {
     /// assinou por último é quem agiu.
     ///
     /// As da malha mudam: oferecer põe um endpoint na tabela, e mandar põe
-    /// uma entrega na fila de outro programa — o que ele vê muda.
+    /// uma entrega na fila de outro programa — o que ele vê muda. Levar a
+    /// outro dispositivo também, e as de dispositivo mexem no registro ou
+    /// na contenção.
     pub const fn muda_estado(self) -> bool {
         match self {
             Permissao::AgentRead
@@ -669,19 +739,24 @@ impl Permissao {
             | Permissao::CredentialChangeSelf
             | Permissao::FsRestore
             | Permissao::FabricOffer
-            | Permissao::FabricSend => true,
+            | Permissao::FabricSend
+            | Permissao::FabricRemote
+            | Permissao::DeviceRegister
+            | Permissao::DeviceRevoke
+            | Permissao::DeviceSuspend => true,
         }
     }
 
     /// O papel limita o recurso desta permissão por uma linha `recurso`: de
-    /// caminho, de destinatário, de destino de rede ou de chave. A linha é
-    /// obrigatória para quem a tem.
+    /// caminho, de destinatário, de destino de rede, de chave, de intenção
+    /// ou de dispositivo. A linha é obrigatória para quem a tem.
     pub const fn tem_alcance(self) -> bool {
         self.recurso_e_caminho()
             || self.recurso_e_papel()
             || self.recurso_e_endereco()
             || self.recurso_e_chave()
             || self.recurso_e_intencao()
+            || self.recurso_e_dispositivo()
     }
 }
 
@@ -788,9 +863,10 @@ mod testes {
         assert!(TODAS.iter().filter(|p| p.recurso_e_destino()).count() == 1);
     }
 
-    /// As três contenções reversíveis: sensíveis, nenhuma administrativa — o
+    /// As contenções reversíveis: sensíveis, nenhuma administrativa — o
     /// tecido as exerce pelo gate, sem prova, quando o papel dele as tem —,
-    /// todas mudam o estado, e o recurso de cada uma é o papel do alvo.
+    /// todas mudam o estado. O recurso das três de antes é o papel do alvo;
+    /// o da suspensão de um dispositivo, o dispositivo.
     #[test]
     fn as_contencoes() {
         let nomes: alloc::vec::Vec<_> = TODAS
@@ -800,7 +876,12 @@ mod testes {
             .collect();
         assert_eq!(
             nomes,
-            ["process.isolate", "agent.suspend", "credential.suspend"]
+            [
+                "process.isolate",
+                "agent.suspend",
+                "credential.suspend",
+                "device.suspend"
+            ]
         );
         for p in TODAS.into_iter().filter(|p| p.contencao()) {
             assert!(
@@ -808,7 +889,14 @@ mod testes {
                 "{}",
                 p.nome()
             );
-            assert!(p.recurso_e_papel() && p.tem_alcance() && !p.recurso_e_destino());
+            assert_eq!(
+                p.recurso_e_papel(),
+                p != Permissao::DeviceSuspend,
+                "{}",
+                p.nome()
+            );
+            assert_eq!(p.recurso_e_dispositivo(), p == Permissao::DeviceSuspend);
+            assert!(p.tem_alcance() && !p.recurso_e_destino());
             assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco());
         }
         // O papel como recurso: o destinatário de uma mensagem, as três e
@@ -956,7 +1044,6 @@ mod testes {
         }
         assert_eq!(TODAS[51], oferecer);
         assert_eq!(TODAS[52], mandar);
-        assert_eq!(TODAS.last(), Some(&mandar));
         for (i, p) in TODAS.into_iter().enumerate() {
             assert_eq!(p as usize, i, "{}", p.nome());
         }
@@ -969,6 +1056,66 @@ mod testes {
         assert_eq!(Permissao::de_nome("fabric.*"), None);
         assert_eq!(Permissao::de_nome("fabric"), None);
         assert_eq!(Permissao::de_nome("fabric.recv"), None);
+    }
+
+    /// Os dispositivos: as quatro no fim da lista — as de antes não mudam
+    /// de bit —, todas sensíveis e todas mudam o estado. Registrar e
+    /// revogar só com prova; levar a outro dispositivo e suspender, pelo
+    /// gate, com o dispositivo como recurso enumerado. Nenhuma tem outro
+    /// tipo de alcance, e nenhum nome com curinga ou prefixo existe.
+    #[test]
+    fn dispositivos() {
+        let nomes: alloc::vec::Vec<_> = TODAS[53..].iter().map(|p| p.nome()).collect();
+        assert_eq!(
+            nomes,
+            [
+                "fabric.remote",
+                "device.register",
+                "device.revoke",
+                "device.suspend"
+            ]
+        );
+        assert_eq!(TODAS.len(), 57);
+        assert_eq!(TODAS.last(), Some(&Permissao::DeviceSuspend));
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        for p in &TODAS[53..] {
+            assert!(p.sensivel() && p.muda_estado(), "{}", p.nome());
+            assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_chave());
+            assert!(
+                !p.recurso_e_intencao() && !p.recurso_e_destino(),
+                "{}",
+                p.nome()
+            );
+        }
+        let remoto = Permissao::FabricRemote;
+        assert!(!remoto.administrativa() && remoto.recurso_e_dispositivo() && remoto.tem_alcance());
+        assert!(!remoto.contencao() && !remoto.recurso_e_papel());
+        for p in [Permissao::DeviceRegister, Permissao::DeviceRevoke] {
+            assert!(p.administrativa() && !p.tem_alcance() && !p.contencao());
+        }
+        let suspender = Permissao::DeviceSuspend;
+        assert!(!suspender.administrativa() && suspender.contencao());
+        assert!(suspender.recurso_e_dispositivo() && !suspender.alvo_e_papel());
+        let de_dispositivo: alloc::vec::Vec<_> = TODAS
+            .iter()
+            .filter(|p| p.recurso_e_dispositivo())
+            .map(|p| p.nome())
+            .collect();
+        assert_eq!(de_dispositivo, ["fabric.remote", "device.suspend"]);
+        for curinga in [
+            "device.*",
+            "device",
+            "remote.*",
+            "fabric.*",
+            "device.pair",
+            "device.forget",
+            "device.resume",
+            "remote.send",
+        ] {
+            assert_eq!(Permissao::de_nome(curinga), None, "{curinga}");
+        }
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

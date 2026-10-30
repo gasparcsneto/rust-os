@@ -314,6 +314,12 @@ pub fn principal(
         },
         Titular::Administrador => alloc::format!("admin:{agente}"),
         Titular::Servico => alloc::format!("service:{agente}"),
+        // Outro dispositivo: pela chave dele — a mesma em qualquer relação
+        // e em qualquer enlace —, e nunca pelo nome que ele tem aqui.
+        Titular::Dispositivo => match chave {
+            Some(k) => alloc::format!("device:{}", util::hex(k)),
+            None => alloc::format!("device-name:{agente}"),
+        },
         // Quem foi recusado na entrada: pelo que alegou ser — a chave, o
         // nome, a pessoa que se tentou ser —, ou pela porta e o console.
         Titular::Anonimo => match (chave, agente, sessao_de_pessoa) {

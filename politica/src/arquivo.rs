@@ -32,7 +32,10 @@
 //!   nome se resolve no espaço da identidade de quem pede, e não diz nada
 //!   das chaves de outra. E o de `fabric.offer` e `fabric.send`: as
 //!   intenções da malha, `intencao:<espaço>.<nome>`, enumeradas, cada uma
-//!   inteira — sem curinga e sem prefixo (ver [`crate::malha`]).
+//!   inteira — sem curinga e sem prefixo (ver [`crate::malha`]). E o de
+//!   `fabric.remote` e `device.suspend`: os dispositivos relacionados,
+//!   `dispositivo:<nome>`, enumerados pelo nome local — sem curinga e sem
+//!   prefixo (ver [`crate::dispositivos`]).
 //! - `taxa <papel> <por segundo> <rajada>`: o balde de pedidos do papel.
 //! - `processos <papel> <quantos>`: a cota de processos vivos de cada
 //!   titular do papel — uma sessão de agente, uma de pessoa, o sistema —,
@@ -79,10 +82,17 @@
 //!   sistema. Obrigatória. A pessoa num console não é a autoridade local:
 //!   decide pelo papel dela no registro de pessoas. Ela não é exceção à política:
 //!   decide pela mesma conta, com as permissões que o papel enumera.
+//! - `remoto <papel>`: o **teto** de tudo o que chega de outro
+//!   dispositivo. Um pedido que chega pelo enlace é decidido pelo papel da
+//!   pessoa local da relação, pelo papel da relação e por este — os três,
+//!   cada um com a mesma conta. Opcional: sem a linha, nada remoto passa.
+//!   O papel não pode ser o da serial nem o da autoridade local, e o
+//!   kernel e o `xtask` conferem que também não é o teto de um
+//!   administrador. Só a imagem a escreve. Ver [`crate::dispositivos`].
 //! - `servico <nome> <papel>`: o papel de um serviço do sistema com
 //!   identidade própria — o tecido de segurança, `nsf` (ver
-//!   `docs/SEGURANCA.md`), e o serviço de hora, `hora`; o vocabulário é
-//!   [`SERVICOS`]. Opcional: sem a linha, o serviço não tem papel, e o
+//!   `docs/SEGURANCA.md`), o serviço de hora, `hora`, e o do enlace entre
+//!   dispositivos, `enlace`; o vocabulário é [`SERVICOS`]. Opcional: sem a linha, o serviço não tem papel, e o
 //!   gate recusa tudo o que ele pede. O papel não pode ser o da serial nem
 //!   o da autoridade local — o serviço não herda o `sistema` —, e o kernel
 //!   e o `xtask` conferem que também não é o teto de um administrador. Só
@@ -233,9 +243,11 @@ pub const TETO_DE_OBJETOS_DO_ARMAZEM: u64 = 1 << 24;
 
 /// Os serviços que uma linha `servico` nomeia: um vocabulário fechado, como
 /// o das permissões. Um nome fora dele recusa a política. O tecido de
-/// segurança, `nsf` — ver `docs/SEGURANCA.md` —, e o serviço de hora,
-/// `hora`, que apresenta ao kernel a evidência das fontes de hora.
-pub const SERVICOS: &[&str] = &["nsf", "hora"];
+/// segurança, `nsf` — ver `docs/SEGURANCA.md` —, o serviço de hora,
+/// `hora`, que apresenta ao kernel a evidência das fontes de hora, e o do
+/// enlace, `enlace`, que leva aos outros dispositivos as entregas que o
+/// gate já decidiu — e não decide nenhuma.
+pub const SERVICOS: &[&str] = &["nsf", "hora", "enlace"];
 
 /// Um papel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +319,9 @@ pub struct Politica {
     quoruns: BTreeMap<String, Quorum>,
     /// O papel de cada serviço que a política nomeia — ver [`SERVICOS`].
     servicos: BTreeMap<String, String>,
+    /// O teto do que chega de outro dispositivo — a linha `remoto`. Sem
+    /// ela, nada remoto passa.
+    remoto: Option<String>,
 }
 
 /// O que há de errado numa política.
@@ -344,6 +359,8 @@ pub enum ErroTipo {
     /// Uma intenção que não é `intencao:<espaço>.<nome>` — ver
     /// [`crate::malha::intencao_valida`].
     IntencaoInvalida(String),
+    /// Um dispositivo que não é `dispositivo:<nome>`, com o nome na regra.
+    DispositivoInvalido(String),
     /// Falta a linha `serial`.
     SemSerial,
     /// Falta a linha `local`.
@@ -361,6 +378,10 @@ pub enum ErroTipo {
     /// Um serviço com o papel da serial ou da autoridade local: (serviço,
     /// papel).
     ServicoComPapelDoSistema(String, String),
+    /// Duas linhas `remoto`.
+    RemotoRepetido,
+    /// A linha `remoto` com o papel da serial ou da autoridade local.
+    RemotoComPapelDoSistema(String),
     /// Uma linha `editores` não vazia para um papel sem `process.run`.
     EditoresSemExecucao(String),
     /// Uma linha `dominios` não vazia para um papel sem `key.create` e sem
@@ -392,7 +413,7 @@ impl Erro {
                 format!("recurso para `{p}`, que o papel nao tem")
             }
             ErroTipo::RecursoNaoECaminho(p) => format!(
-                "`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede, nem chave, nem intencao"
+                "`{p}` nao tem alcance: nem caminho, nem destinatario, nem destino de rede, nem chave, nem intencao, nem dispositivo"
             ),
             ErroTipo::RecursoFaltando(papel, p) => {
                 format!("`{papel}` tem `{p}` sem a linha `recurso` que diz o alcance")
@@ -410,6 +431,9 @@ impl Erro {
             ErroTipo::IntencaoInvalida(i) => format!(
                 "intencao invalida `{i}`: so `intencao:<espaco>.<nome>`, inteira, sem curinga"
             ),
+            ErroTipo::DispositivoInvalido(d) => {
+                format!("dispositivo invalido `{d}`: so `dispositivo:<nome>`, sem curinga")
+            }
             ErroTipo::SemSerial => "falta a linha `serial`".to_string(),
             ErroTipo::SemLocal => "falta a linha `local`".to_string(),
             ErroTipo::OperacaoSemQuorum(o) => format!("`{o}` nao e uma operacao de quorum"),
@@ -421,6 +445,10 @@ impl Erro {
             ErroTipo::ServicoRepetido(n) => format!("servico `{n}` definido duas vezes"),
             ErroTipo::ServicoComPapelDoSistema(n, papel) => format!(
                 "o servico `{n}` teria o papel `{papel}`, da serial ou da autoridade local: um servico nao herda o sistema"
+            ),
+            ErroTipo::RemotoRepetido => "linha `remoto` definida duas vezes".to_string(),
+            ErroTipo::RemotoComPapelDoSistema(papel) => format!(
+                "o teto remoto teria o papel `{papel}`, da serial ou da autoridade local: o que chega de outro dispositivo nao herda o sistema"
             ),
             ErroTipo::EditoresSemExecucao(papel) => format!(
                 "`{papel}` confia em editores de codigo e nao tem process.run: nao ha o que rodar"
@@ -495,6 +523,7 @@ impl Politica {
             apertos: APERTOS_PADRAO,
             quoruns: BTreeMap::new(),
             servicos: BTreeMap::new(),
+            remoto: None,
         };
         let mut recursos_e_taxas: Vec<(usize, &str)> = Vec::new();
         for (i, linha) in texto.lines().enumerate() {
@@ -625,6 +654,12 @@ impl Politica {
         self.servicos.iter().map(|(n, p)| (n.as_str(), p.as_str()))
     }
 
+    /// O teto do que chega de outro dispositivo — a linha `remoto`. Sem
+    /// ela, `None`, e a decisão sem papel recusa: nada remoto passa.
+    pub fn remoto(&self) -> Option<&str> {
+        self.remoto.as_deref()
+    }
+
     /// Aplica uma linha já sem comentário.
     fn aplicar(&mut self, n: usize, linha: &str, modo: Modo) -> Result<(), Erro> {
         let erro = |tipo| Erro { linha: n, tipo };
@@ -715,6 +750,17 @@ impl Politica {
                         let intencao = alloc::format!("{PREFIXO_DE_INTENCAO}{nome}");
                         if !prefixos.contains(&intencao) {
                             prefixos.push(intencao);
+                        }
+                    } else if p.recurso_e_dispositivo() {
+                        // Um dispositivo pelo nome local, e só: nada de
+                        // curinga, nada de prefixo. A quem ele se relaciona
+                        // não se escreve — para `fabric.remote`, é sempre a
+                        // pessoa de quem pede.
+                        let nome = nome_de_dispositivo(c)
+                            .ok_or(erro(ErroTipo::DispositivoInvalido(c.to_string())))?;
+                        let dispositivo = alloc::format!("{PREFIXO_DE_DISPOSITIVO}{nome}");
+                        if !prefixos.contains(&dispositivo) {
+                            prefixos.push(dispositivo);
                         }
                     } else {
                         let normal = caminho::normalizar(c)
@@ -880,6 +926,18 @@ impl Politica {
                     self.local = nome.to_string();
                 }
             }
+            "remoto" => {
+                let papel = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
+                if partes.next().is_some() {
+                    return Err(erro(ErroTipo::Sintaxe));
+                }
+                if !nome_valido(papel) {
+                    return Err(erro(ErroTipo::NomeInvalido(papel.to_string())));
+                }
+                if self.remoto.replace(papel.to_string()).is_some() {
+                    return Err(erro(ErroTipo::RemotoRepetido));
+                }
+            }
             "servico" => {
                 let nome = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
                 let papel = partes.next().ok_or(erro(ErroTipo::Sintaxe))?;
@@ -979,8 +1037,9 @@ impl Politica {
     /// O papel de cada serviço existe, e não é o da serial nem o da
     /// autoridade local: um serviço tem identidade própria e decide pelo
     /// papel que a linha dele dá — não herda o `sistema`, que a serial e a
-    /// autoridade local exercem. Vale para a política lida e para a que
-    /// uma troca da serial produziria.
+    /// autoridade local exercem. O mesmo para o teto remoto: o que chega de
+    /// outro dispositivo não decide pelo papel do sistema. Vale para a
+    /// política lida e para a que uma troca da serial produziria.
     fn conferir_servicos(&self) -> Result<(), Erro> {
         let geral = |tipo| Erro { linha: 0, tipo };
         for (servico, papel) in &self.servicos {
@@ -992,6 +1051,14 @@ impl Politica {
                     servico.clone(),
                     papel.clone(),
                 )));
+            }
+        }
+        if let Some(papel) = &self.remoto {
+            if self.papel(papel).is_none() {
+                return Err(geral(ErroTipo::PapelDesconhecido(papel.clone())));
+            }
+            if *papel == self.serial || *papel == self.local {
+                return Err(geral(ErroTipo::RemotoComPapelDoSistema(papel.clone())));
             }
         }
         Ok(())
@@ -1108,7 +1175,44 @@ impl Politica {
                 return Codigo::DenyResource;
             }
         }
+        if p.recurso_e_dispositivo() {
+            // O dispositivo pelo nome, igual a um dos enumerados. Sem
+            // dispositivo, ou um que não é `dispositivo:<nome>`: fechado. A
+            // que pessoa ele se relaciona a decisão não diz — quem resolve o
+            // nome é quem pede, no espaço da pessoa dele.
+            let Some(alcance) = papel.recursos.get(&p) else {
+                return Codigo::DenyResource;
+            };
+            let Some(alvo) = recurso.filter(|r| nome_de_dispositivo(r).is_some()) else {
+                return Codigo::DenyResource;
+            };
+            if !alcance.iter().any(|a| a == alvo) {
+                return Codigo::DenyResource;
+            }
+        }
         Codigo::Allow
+    }
+
+    /// A decisão de uma autoridade composta: cada papel de `papeis` decide
+    /// com a mesma conta de [`Politica::decidir`], e o primeiro que não
+    /// permite recusa — a permissão efetiva é a **interseção** dos papéis.
+    /// Sem papel nenhum, ou com um ausente: `DENY_ROLE`. É a conta de um
+    /// pedido que chega de outro dispositivo: o papel da relação, o da
+    /// pessoa local dela e o teto `remoto`.
+    pub fn decidir_por_todos(
+        &self,
+        papeis: &[Option<&str>],
+        p: Permissao,
+        recurso: Option<&str>,
+    ) -> Codigo {
+        if papeis.is_empty() {
+            return Codigo::DenyRole;
+        }
+        papeis
+            .iter()
+            .map(|papel| self.decidir(*papel, p, recurso))
+            .find(|c| !c.permite())
+            .unwrap_or(Codigo::Allow)
     }
 
     /// Só o papel local — o do sistema — e o próprio papel de administrador
@@ -1158,9 +1262,11 @@ impl Politica {
     /// na imagem. `tetos` são os papéis dos administradores.
     pub fn conferir_tetos(&self, tetos: &[&str]) -> Result<(), String> {
         let servicos = self.servicos.values().map(|p| ("servico", p));
+        let remoto = self.remoto.iter().map(|p| ("remoto", p));
         for (linha, papel) in [("serial", &self.serial), ("local", &self.local)]
             .into_iter()
             .chain(servicos)
+            .chain(remoto)
         {
             if tetos.contains(&papel.as_str()) {
                 return Err(format!(
@@ -1250,7 +1356,7 @@ impl Politica {
             return Err(Recusa::Proibida(
                 "policy.write muda papel, recurso, taxa, processos, mensagens, armazem, \
                  editores ou dominios; a serial muda por policy.assign, e o papel local, o dos \
-                 servicos e os apertos so pela imagem"
+                 servicos, o teto remoto e os apertos so pela imagem"
                     .to_string(),
             ));
         }
@@ -1433,6 +1539,9 @@ impl Politica {
         for (servico, papel) in &self.servicos {
             let _ = writeln!(t, "servico {servico} {papel}");
         }
+        if let Some(papel) = &self.remoto {
+            let _ = writeln!(t, "remoto {papel}");
+        }
         let _ = writeln!(
             t,
             "apertos {} {}",
@@ -1477,7 +1586,8 @@ fn recurso_contido(p: Permissao, a: Option<&Vec<String>>, b: Option<&Vec<String>
             if p.recurso_e_papel()
                 || p.recurso_e_endereco()
                 || p.recurso_e_chave()
-                || p.recurso_e_intencao() =>
+                || p.recurso_e_intencao()
+                || p.recurso_e_dispositivo() =>
         {
             a.iter().all(|pa| b.contains(pa))
         }
@@ -1514,6 +1624,20 @@ pub fn nome_de_intencao(texto: &str) -> Option<&str> {
     texto
         .strip_prefix(PREFIXO_DE_INTENCAO)
         .filter(|n| crate::malha::intencao_valida(n))
+}
+
+/// Como um dispositivo se escreve no alcance de `fabric.remote` e
+/// `device.suspend`, e como a decisão o recebe: `dispositivo:<nome>`, o
+/// nome local.
+pub const PREFIXO_DE_DISPOSITIVO: &str = "dispositivo:";
+
+/// O nome de `dispositivo:<nome>`, se o texto é isso e o nome está na
+/// regra dos nomes. `dispositivo:*`, `dispositivo:` e um nome com
+/// maiúscula não são dispositivo.
+pub fn nome_de_dispositivo(texto: &str) -> Option<&str> {
+    texto
+        .strip_prefix(PREFIXO_DE_DISPOSITIVO)
+        .filter(|n| nome_valido(n))
 }
 
 /// Um número de 64 bits, para as cotas de armazém.
@@ -2706,6 +2830,302 @@ mod testes {
         assert!(
             matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.read")),
             "{r:?}"
+        );
+    }
+
+    /// A linha de alcance dos dispositivos: só `dispositivo:<nome>`,
+    /// inteira; obrigatória para quem leva a outro dispositivo ou suspende
+    /// um; a decisão alcança só o nome escrito — nem prefixo, nem curinga
+    /// —; sensíveis, por inclusão não vêm; e o teto contém exatamente os
+    /// nomes.
+    #[test]
+    fn a_linha_dos_dispositivos() {
+        use Codigo::*;
+        use Permissao::{DeviceSuspend, FabricRemote};
+        for ruim in [
+            "recurso operador fabric.remote dispositivo:*",
+            "recurso operador fabric.remote dispositivo:",
+            "recurso operador fabric.remote dispositivo:Par",
+            "recurso operador fabric.remote dispositivo:par*",
+            "recurso operador fabric.remote par",
+            "recurso operador fabric.remote *",
+            "recurso operador fabric.remote papel:operador",
+            "recurso operador fabric.remote chave:bancada",
+            "recurso operador fabric.remote intencao:imagem.compartilhar",
+            "recurso operador fabric.remote tcp:10.0.2.100:7071",
+            "recurso operador fabric.remote",
+            "recurso sistema device.suspend dispositivo:*",
+        ] {
+            let texto = alloc::format!(
+                "{}{ruim}
+",
+                crate::PADRAO
+            );
+            let erro = Politica::ler(&texto).unwrap_err();
+            assert!(
+                matches!(
+                    erro.tipo,
+                    ErroTipo::DispositivoInvalido(_) | ErroTipo::Sintaxe
+                ),
+                "{ruim}: {erro:?}"
+            );
+        }
+        assert_eq!(
+            Politica::ler(&alloc::format!(
+                "{}recurso operador fabric.remote dispositivo:*\n",
+                crate::PADRAO
+            ))
+            .unwrap_err()
+            .tipo,
+            ErroTipo::DispositivoInvalido("dispositivo:*".into())
+        );
+        // Sem a linha: recusada, e não "qualquer dispositivo".
+        let sem = crate::PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador fabric.remote"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            Politica::ler(&sem).unwrap_err().tipo,
+            ErroTipo::RecursoFaltando(papel, p) if papel == "operador" && p == "fabric.remote"
+        ));
+        // A decisão: só o nome escrito, inteiro.
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for dentro in ["dispositivo:par", "dispositivo:par-2"] {
+            assert_eq!(
+                p.decidir(Some("operador"), FabricRemote, Some(dentro)),
+                Allow
+            );
+            assert_eq!(
+                p.decidir(Some("sistema"), DeviceSuspend, Some(dentro)),
+                Allow
+            );
+        }
+        for fora in [
+            "dispositivo:intruso",
+            "dispositivo:*",
+            "dispositivo:",
+            "dispositivo:Par",
+            "dispositivo:pa",
+            "dispositivo:par-3",
+            "par",
+            "intencao:imagem.compartilhar",
+            "",
+        ] {
+            assert_eq!(
+                p.decidir(Some("operador"), FabricRemote, Some(fora)),
+                DenyResource,
+                "{fora}"
+            );
+            assert_eq!(
+                p.decidir(Some("sistema"), DeviceSuspend, Some(fora)),
+                DenyResource,
+                "{fora}"
+            );
+        }
+        assert_eq!(
+            p.decidir(Some("operador"), FabricRemote, None),
+            DenyResource
+        );
+        // Quem não a tem: o observador não leva a outro dispositivo, o
+        // sistema não leva — a relação é de uma pessoa —, e o operador não
+        // suspende.
+        assert_eq!(
+            p.decidir(Some("observador"), FabricRemote, Some("dispositivo:par")),
+            DenyPermission
+        );
+        assert_eq!(
+            p.decidir(Some("sistema"), FabricRemote, Some("dispositivo:par")),
+            DenyPermission
+        );
+        assert_eq!(
+            p.decidir(Some("operador"), DeviceSuspend, Some("dispositivo:par")),
+            DenyPermission
+        );
+        // Sensível: por inclusão não vem.
+        let incluida = alloc::format!(
+            "{}papel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(Some("herdeiro"), FabricRemote, Some("dispositivo:par")),
+            DenyPermission
+        );
+        // O teto contém exatamente os nomes: um papel com um nome que o
+        // administrador não alcança não cabe, e o com os dele cabe.
+        let mais = Politica::ler(&alloc::format!(
+            "{}papel viajante fabric.remote\nrecurso viajante fabric.remote dispositivo:par dispositivo:outro\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        let r = mais.cabe_em("viajante", "administrador");
+        assert!(
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("fabric.remote")),
+            "{r:?}"
+        );
+        let cabe = Politica::ler(&alloc::format!(
+            "{}papel viajante fabric.remote\nrecurso viajante fabric.remote dispositivo:par\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        assert!(cabe.cabe_em("viajante", "administrador").is_ok());
+        // E vai e volta pelo texto.
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+    }
+
+    /// A linha `remoto`: o teto do que chega de outro dispositivo. Opcional
+    /// — sem ela, nada remoto passa —, uma só, de um papel que existe, que
+    /// não é o da serial, nem o da autoridade local, nem o teto de um
+    /// administrador; só a imagem a escreve; vai e volta pelo texto; a de
+    /// emergência não a tem.
+    #[test]
+    fn a_linha_remoto() {
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert_eq!(p.remoto(), Some("remoto"));
+        assert!(p.texto().contains("\nremoto remoto\n"));
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+        assert_eq!(Politica::emergencia().remoto(), None);
+        assert!(!crate::EMERGENCIA.contains("\nremoto "));
+        // Sem a linha, a política vale, e não há teto: a decisão sem papel
+        // recusa.
+        let sem = crate::PADRAO.replace("\nremoto remoto\n", "\n");
+        let s = Politica::ler(&sem).unwrap();
+        assert_eq!(s.remoto(), None);
+        assert_eq!(
+            s.decidir(
+                s.remoto(),
+                Permissao::FabricSend,
+                Some("intencao:imagem.compartilhar")
+            ),
+            Codigo::DenyRole
+        );
+        let erro = |linha: &str| {
+            Politica::ler(&alloc::format!("{}{linha}\n", crate::PADRAO))
+                .unwrap_err()
+                .tipo
+        };
+        assert_eq!(erro("remoto operador"), ErroTipo::RemotoRepetido);
+        assert_eq!(
+            Politica::ler(&sem.replace("\nserial sistema\n", "\nremoto sistema\nserial sistema\n"))
+                .unwrap_err()
+                .tipo,
+            ErroTipo::RemotoComPapelDoSistema("sistema".into())
+        );
+        assert_eq!(
+            Politica::ler(&alloc::format!("{sem}remoto inexistente\n"))
+                .unwrap_err()
+                .tipo,
+            ErroTipo::PapelDesconhecido("inexistente".into())
+        );
+        for ruim in ["remoto", "remoto a b", "remoto *", "remoto Remoto"] {
+            assert!(
+                Politica::ler(&alloc::format!("{sem}{ruim}\n")).is_err(),
+                "{ruim}"
+            );
+        }
+        // O teto de um administrador não é teto remoto: delega, não se
+        // exerce.
+        let com_teto = Politica::ler(&alloc::format!("{sem}remoto administrador\n")).unwrap();
+        assert!(com_teto.conferir_tetos(&["administrador"]).is_err());
+        assert!(p.conferir_tetos(&["administrador"]).is_ok());
+        // Só a imagem: nenhum policy.write a muda.
+        for linha in ["remoto operador", "remoto remoto"] {
+            assert!(matches!(
+                p.com_linha(linha, "administrador", &[]),
+                Err(Recusa::Proibida(_))
+            ));
+        }
+        // E a serial que passasse a ser o teto remoto: recusada.
+        assert!(p.com_serial("remoto").is_err());
+    }
+
+    /// A interseção: cada papel decide com a mesma conta, e o primeiro que
+    /// não permite recusa. Sem papel nenhum, ou com um ausente, fechado.
+    #[test]
+    fn a_decisao_por_todos() {
+        use Codigo::*;
+        let p = Politica::ler(&alloc::format!(
+            "{}papel estreito fabric.send\nrecurso estreito fabric.send intencao:pdf.anotar\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        let send = Permissao::FabricSend;
+        let imagem = Some("intencao:imagem.compartilhar");
+        let pdf = Some("intencao:pdf.anotar");
+        let todos = [Some("dispositivo"), Some("operador"), Some("remoto")];
+        assert_eq!(p.decidir_por_todos(&todos, send, imagem), Allow);
+        // Um papel mais estreito no lugar de qualquer um dos três corta.
+        for i in 0..3 {
+            let mut t = todos;
+            t[i] = Some("estreito");
+            assert_eq!(p.decidir_por_todos(&t, send, imagem), DenyResource, "{i}");
+            assert_eq!(p.decidir_por_todos(&t, send, pdf), Allow, "{i}");
+        }
+        // Sem a permissão em um: recusa pela permissão.
+        let mut sem = todos;
+        sem[1] = Some("observador");
+        assert_eq!(p.decidir_por_todos(&sem, send, imagem), DenyPermission);
+        // Um papel ausente ou inexistente: pelo papel.
+        let mut ausente = todos;
+        ausente[2] = None;
+        assert_eq!(p.decidir_por_todos(&ausente, send, imagem), DenyRole);
+        ausente[2] = Some("inexistente");
+        assert_eq!(p.decidir_por_todos(&ausente, send, imagem), DenyRole);
+        assert_eq!(p.decidir_por_todos(&[], send, imagem), DenyRole);
+    }
+
+    /// O serviço do enlace: o terceiro nome do vocabulário dos serviços;
+    /// na padrão, com o papel `enlace` — conectar ao par da bancada, e
+    /// nada mais —; na de emergência, nenhum.
+    #[test]
+    fn o_servico_enlace() {
+        use Codigo::*;
+        assert_eq!(SERVICOS, ["nsf", "hora", "enlace"]);
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        assert_eq!(p.servico("enlace"), Some("enlace"));
+        assert_eq!(Politica::emergencia().servico("enlace"), None);
+        let papel = p.papel("enlace").unwrap();
+        assert_eq!(
+            papel.permissoes().collect::<Vec<_>>(),
+            [Permissao::NetConnect]
+        );
+        assert_eq!(
+            p.decidir(
+                Some("enlace"),
+                Permissao::NetConnect,
+                Some("tcp:10.0.2.100:7071")
+            ),
+            Allow
+        );
+        for fora in [
+            "tcp:10.0.2.100:7070",
+            "tcp:10.0.2.100:7",
+            "udp:10.0.2.100:7071",
+        ] {
+            assert_eq!(
+                p.decidir(Some("enlace"), Permissao::NetConnect, Some(fora)),
+                DenyResource,
+                "{fora}"
+            );
+        }
+        for nada in [
+            Permissao::FabricSend,
+            Permissao::FabricOffer,
+            Permissao::FabricRemote,
+            Permissao::DeviceRegister,
+        ] {
+            assert_eq!(
+                p.decidir(Some("enlace"), nada, Some("dispositivo:par")),
+                DenyPermission
+            );
+        }
+        // Um nome fora do vocabulário continua recusado.
+        assert_eq!(
+            Politica::ler(&alloc::format!("{}servico malha enlace\n", crate::PADRAO))
+                .unwrap_err()
+                .tipo,
+            ErroTipo::ServicoDesconhecido("malha".into())
         );
     }
 
