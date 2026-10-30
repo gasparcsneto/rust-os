@@ -52013,7 +52013,11 @@ fn processos_varios_encerrados_ao_mesmo_tempo() -> Resultado {
             }
         }
         // O primeiro, pedido de novo logo em seguida: ou ainda está
-        // morrendo, ou já não existe — e morre uma vez só.
+        // morrendo, ou já não existe — e morre uma vez só. "Já não existe"
+        // tem duas formas: morto antes da decisão, o gate não acha o alvo
+        // (`DENY_RESOURCE`); morto entre a decisão e a execução — ele gira
+        // noutro núcleo, e o primeiro término o alcança no próximo ponto
+        // seguro —, a execução não o acha ("processo inexistente").
         let r = fs_pedir(
             sistema,
             "process.terminate",
@@ -52021,6 +52025,7 @@ fn processos_varios_encerrados_ao_mesmo_tempo() -> Resultado {
         );
         if fs_texto(&r, "state").as_deref() != Some("terminating")
             && !recusado_com(&r, "DENY_RESOURCE")
+            && fs_texto(&r, "error").as_deref() != Some("processo inexistente")
         {
             crate::log_error!("teste", "{}", r);
             return Err("o segundo pedido de termino nao foi nem um nem outro");
