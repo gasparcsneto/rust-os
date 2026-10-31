@@ -8644,6 +8644,111 @@ arquivo fica do mesmo tamanho em 32 deles no x86 e em 35 no ARM, três
 programas TLS no x86 e um no ARM ocupam uma página a mais, e o
 `insistente` do x86, 24 bytes. Entre os 36, só a fonte do `correio` mudou.
 
+## O pareamento pela própria pessoa
+
+O D8 ([`docs/PAREAMENTO.md`](docs/PAREAMENTO.md)), com a DN-1 aprovada na
+opção A antes da implementação: a pessoa relaciona outro Duke dela com
+este **sem o administrador** — sem `admin.execute` —, numa cerimônia diante
+das duas máquinas, e desfaz a relação dela quando quiser. A relação que
+nasce é **a mesma** do estágio 1: o mesmo registro de dispositivos, o mesmo
+enlace, o mesmo gate, a mesma auditoria. E **parear não autoriza nada**: o
+outro Duke só pede o conjunto fechado do enlace, decidido por pessoa ∩
+relação ∩ `remoto`, com o papel da relação contido no da pessoa e os nomes
+enumerados na política, sem curinga.
+
+No console, pelo teclado, a pessoa abre a janela num Duke (`aceitar <nome>
+<papel>`, pela permissão `device.pair`) e inicia no outro (`parear <nome>
+<endereço> <papel>`). O aperto é o **mesmo Noise IK** do enlace, com a chave
+do Duke (B2) como única identidade de cada lado e um prólogo próprio: o
+Duke que aceita anuncia a pública dele com um desafio que só vale para a
+janela; quem inicia se compromete com um nonce antes de ver a efêmera do
+outro e só o abre depois da segunda mensagem; do resumo do aperto e do
+nonce saem dois códigos de 8 dígitos — cada tela mostra o que se digita na
+outra — e o identificador da relação, o mesmo nos dois lados, sem que
+nenhum o escolha ([`politica/src/pareamento.rs`](politica/src/pareamento.rs)).
+A confirmação pede o código do outro e a senha; cada lado só grava com a
+confirmação dele e o `conferido` do outro, com o gate decidindo **de novo
+no commit**, em ordem com a persistência
+([`kernel/src/pareamento.rs`](kernel/src/pareamento.rs)). O
+`device.forget` (`dispositivo:<nome>`, enumerado) desfaz só a relação da
+pessoa, com o registro 44 do journal (`RELACAO_DESFEITA`) — nunca lápide —,
+e não avisa o outro Duke. Se um lado grava e o outro cai antes, fica uma
+**meia relação**: sem autoridade a mais, visível no `device.registry`,
+inerte, auditável e removível pelo `device.forget` — não há transação
+distribuída.
+
+**Testes.** No hospedeiro, as contas da cerimônia — as derivações, o
+compromisso, a janela, a confirmação, a tabela de transições e passos
+sorteados — e o prólogo, os quadros e um vetor fixo do `sigilo`. Na suíte,
+nas duas arquiteturas, 32 casos `pareamento:` — o outro Duke é a suíte,
+com uma chave de teste, e a pessoa digita no console: os dois lados, o
+código errado, os prazos, o replay, o homem no meio, o compromisso, a
+chave que não é de Duke, a lápide, a suspensão, o papel, a concorrência
+(pair × pair, × revoke, × forget, × suspend, × poweroff, × política;
+confirm × expiry, × revoke, × confirm), o `device.forget`, a meia relação e
+a auditoria sem código nem nonce. E a **bancada de duas máquinas**,
+`cargo xtask pareamento`: dois Dukes de pé e a pessoa no teclado dos dois
+— a bancada lê o código de cada tela pela árvore semântica e o digita no
+outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
+o código errado, o homem no meio, a mesma relação nos dois e a entrega do
+estágio 1 por ela, o corte de energia dos dois, o `device.forget` de um
+lado, o corte durante a cerimônia, a meia relação e a lápide. Nos quatro
+pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64.
+
+### As mutações do pareamento
+
+Trinta e nove mutações contra o que o D8 promete — uma de cada vez, no
+repositório, no x86: as que mexem nas contas puras rodam também os testes
+do hospedeiro; todas rodam os casos `pareamento:` da suíte; e quatro rodam a
+bancada de duas máquinas (`cargo xtask pareamento`, x86_64→x86_64), porque
+só duas máquinas de pé mostram o journal reposto no boot. O controle, sem
+mutação, passa em tudo. Na primeira rodada, uma não compilou (a forma da
+P14; refeita) e duas sobreviveram, as duas por fraqueza do caso, e não do
+código: na P26 (a relação pareada decide sozinha, sem a interseção), nenhum
+caso pedia o que a relação deixa e a pessoa ou o teto `remoto` não — a
+relação `observador` era recusada pelo próprio papel; e a P34 (a decisão
+fora do registro do journal) era **equivalente** na forma escrita — a
+decisão passada como 0 a `concluir` ainda entra no mesmo registro, porque
+com 0 ele exige toda a auditoria até a última sequência —, e foi reescrita
+para tirar a decisão do registro de fato: a auditoria da gravação depois
+do `concluir`. O caso "parear não autoriza" ganhou a interseção a cada
+pedido — com a relação deixando, a pessoa sem a intenção e o teto `remoto`
+sem ela recusam, cada um com o motivo dele na auditoria —, e a bancada, que
+reprovava a P38 só por um sintoma (a cerimônia seguinte não mostrava os
+códigos), passou a conferir depois do boot que o esquecido não virou
+lápide. A P08 (o código só do resumo do aperto, sem o nonce) passa pela
+suíte e é reprovada no hospedeiro: os dois lados da suíte usam a mesma
+conta pura, e só os testes do hospedeiro e o vetor fixo do `sigilo` têm um
+oráculo de fora. **As trinta e nove reprovam.** A campanha também achou uma
+corrida na suíte — "o desligamento" abria a cerimônia depois de o fio da
+energia, meio segundo depois do pedido, ter entregue a máquina —, e a
+concorrência pedida ganhou o caso que faltava: o `device.forget` de outra
+pessoa no meio da cerimônia e dentro do commit.
+
+| Mutação | Reprovada por |
+|---|---|
+| o desafio da janela não conferido; o compromisso é o próprio nonce; `H(n) == c` não conferido; o código conferido com o da própria tela; grava sem o `conferido` do outro; aceita metade do código; segunda tentativa; a janela sem prazo; o B responde a mais de uma 1ª mensagem; o estado não apagado no fim; o iniciante deriva `R` sem o nonce; o código só de `h` | os testes do hospedeiro de `politica::pareamento` (doze mutações) e, menos a última, os casos da suíte |
+| o B grava a chave que a carga diz; a chave do próprio Duke, ou a de um agente, aceita | "o dispositivo falso não fecha o aperto", "uma chave, uma espécie" |
+| a relação para outra Pessoa; o papel sem `cabe_em`; a senha não conferida | "…os dois lados gravam a mesma relação", "o papel que não cabe", "a senha errada conta na janela" |
+| o prazo não refeito no commit; sem a reconfirmação do gate; o desligamento não barra | "o prazo no commit", "a reconfirmação no commit", "o desligamento" |
+| parear sem `device.pair`; sem conferir o alcance de `device.forget`; parear de um agente; a linha do código pela árvore | "a pessoa sem permissão não abre", "só pelo teclado" |
+| a sessão da cerimônia vira enlace; a relação pareada decide sem a interseção | "a sessão da cerimônia não é enlace", "parear não autoriza" |
+| `device.forget` fora do espaço da pessoa, ou com lápide; sem anular as entregas; derrubando o enlace de outra relação | "esquecer a própria relação", "…a de outra pessoa", "…e parear de novo", "parear e esquecer ao mesmo tempo" |
+| a revogação e a suspensão do par não desfazem a cerimônia | "o par suspenso…", "a reconfirmação no commit" |
+| o código no detalhe; a decisão fora do registro do journal; o detalhe sem `R` | "…os dois lados gravam a mesma relação" (a auditoria e o journal conferidos) |
+| a relação pareada não vai ao journal | a suíte e a bancada (a relação não está nos dois) |
+| o 44 não é reposto no boot; o 44 reposto como lápide | a bancada: depois do corte do destino, a relação esquecida voltou; a chave esquecida virou lápide |
+| a lápide não conferida na cerimônia | "a lápide no anúncio, no aperto e no commit" e a bancada (o aperto da chave revogada passou, antes do corte) |
+
+O kernel de produção cresceu 126 080 bytes nos segmentos carregáveis no
+x86 (+2,66%) e 129 152 no ARM (+3,29%), contra o fim do estágio 1
+(`488cefe`): a cerimônia e o `device.forget` no kernel, a decisão e a
+auditoria do pareamento no gate, e as contas puras da política e os
+quadros do `sigilo`. Na bancada, o par inteiro — oito passos, com os cortes
+e os boots — leva de 4 a 7 minutos no emulador; a cerimônia em si, uns 20
+segundos, quase todos do teclado do emulador, uma tecla de cada vez,
+conferida na tela.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de

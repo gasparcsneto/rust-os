@@ -208,12 +208,73 @@ compartilhada, a nuvem e a conta central.
   a coerência sob passos sorteados; e o `sigilo`: o prólogo e os quadros
   da cerimônia, que não abrem como enlace nem como agente, e um vetor fixo
   das efêmeras aos códigos e ao `R`.
-- **Suíte** (x86 e ARM): os casos `pareamento:` — o outro Duke é a suíte,
+- **Suíte** (x86 e ARM): 33 casos `pareamento:` — o outro Duke é a suíte,
   com uma chave de teste, iniciando pela vaga do enlace ou aceitando pela
-  via do fio da cerimônia, e a Pessoa digita no console.
+  via do fio da cerimônia, e a Pessoa digita no console. Os dois lados; o
+  código errado, expirado, reutilizado; o replay; o par no meio; outro Duke
+  no endereço; o dispositivo falso (que alega na carga a chave de outro);
+  as mensagens adulteradas e o compromisso errado; a Pessoa sem permissão,
+  sem sessão, com o papel que não cabe; a lápide e a suspensão antes, no
+  meio e no commit; uma chave, uma espécie; a sessão que não vira enlace;
+  parear não autoriza (a interseção a cada pedido: com a relação deixando,
+  a Pessoa ou o teto `remoto` sem a intenção recusam, e a auditoria diz
+  qual); só pelo teclado; a concorrência — pair × pair, × revoke, ×
+  política (no ponto do commit), × suspend, × poweroff, × forget (o
+  `device.forget` de outra Pessoa no meio da cerimônia e dentro do
+  commit), confirm × expiry, × revoke, × confirm, o commit duplicado —;
+  duas Pessoas e o mesmo dispositivo; o `device.forget` (o próprio, o de
+  outra Pessoa, e parear de novo); a senha errada na janela de tentativas;
+  a auditoria e a proveniência; a meia relação; e o outro que desiste
+  depois de este lado gravar.
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, com a senha. Uma
   ponte do meio no hospedeiro passa os bytes, faz o homem no meio com uma
-  chave dela, ou segura o que o destino manda depois do aperto. Nos quatro
-  pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64.
+  chave dela, ou segura o que o destino manda depois do aperto. Os passos:
+  B02 o código errado, B03 o homem no meio, B01 a cerimônia e a entrega do
+  estágio 1 pela relação, B05 o corte dos dois, B06 esquecer de um lado, B04
+  o corte durante a cerimônia (e, depois do boot, nem a relação esquecida
+  nem lápide) e a meia relação, B05 a lápide antes e depois do boot. Nos
+  quatro pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e
+  aarch64→aarch64 — o par inteiro leva de 4 a 7 minutos no emulador.
+
+## Mutações
+
+Trinta e nove (P01–P39), uma de cada vez, no x86: os testes do hospedeiro
+para as que mexem nas contas puras, os casos `pareamento:` para todas, e a
+bancada x86_64→x86_64 para as quatro que só o boot de duas máquinas mostra.
+**As trinta e nove reprovam.** Na primeira rodada:
+
+- **P26** (a relação pareada decide sozinha, sem a interseção) sobreviveu:
+  nenhum caso pedia o que a relação deixa e a Pessoa ou o teto não. O caso
+  "parear não autoriza" ganhou a interseção a cada pedido.
+- **P34** (a decisão fora do registro do journal) sobreviveu, e era
+  equivalente: a decisão passada como 0 a `concluir` ainda entra no mesmo
+  registro, porque com 0 ele exige toda a auditoria até a última sequência.
+  Reescrita para tirar a decisão de fato — a auditoria da gravação depois
+  do `concluir` —, reprova pela conferência do journal.
+- **P38** (o 44 reposto como lápide) reprovava só por um sintoma: a
+  cerimônia seguinte não mostrava os códigos. A bancada passou a conferir,
+  depois do boot do destino, que o esquecido não virou lápide.
+- **P08** (o código só do resumo do aperto, sem o nonce) passa pela suíte e
+  reprova no hospedeiro: os dois lados da suíte usam a mesma conta pura, e
+  só os testes do hospedeiro e o vetor fixo do `sigilo` têm um oráculo de
+  fora.
+- **P14** não compilou na primeira forma; a refeita reprova.
+
+A campanha também achou uma corrida na suíte: "o desligamento" abria a
+cerimônia depois de o fio da energia — meio segundo depois do pedido —
+ter entregue a máquina, e a abertura passava. A abertura recusada vai
+agora logo depois de um pedido só dela.
+
+## Medidas
+
+- O kernel de produção (release, segmentos carregáveis no arquivo), contra
+  o fim do estágio 1 (`488cefe`): x86_64 4 734 707 → 4 860 787 bytes
+  (+126 080, +2,66%); aarch64 3 921 647 → 4 050 799 (+129 152, +3,29%).
+- A bancada: o par inteiro leva cerca de 380 s no x86_64→x86_64 local e
+  240 s no aarch64→aarch64 da CI; os dois pares cruzados, juntos, 12
+  minutos na CI. A cerimônia completa (B01, com a entrega do estágio 1 pela
+  relação nova), uns 20 s — quase tudo é o teclado do emulador, uma tecla
+  de cada vez, conferida na tela antes do Enter.
+- Os casos `pareamento:` da suíte, os 33, levam uns 3 minutos no x86.
