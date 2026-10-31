@@ -3183,7 +3183,9 @@ pub(super) fn pareamento_parear_e_esquecer_ao_mesmo_tempo() -> Resultado {
         let r = esquecer(caio_sessao, NOME);
         if fs_bool(&r, "forgotten") != Some(true) || fs_bool(&r, "device_left") != Some(true) {
             crate::log_error!("teste", "{}", r);
-            return Err("a ultima relacao, esquecida no meio da cerimonia, nao tirou o dispositivo");
+            return Err(
+                "a ultima relacao, esquecida no meio da cerimonia, nao tirou o dispositivo",
+            );
         }
         if estado() != antes || linha(CONSOLE) != Linha::Codigo {
             return Err("o esquecimento de outra pessoa mexeu na cerimonia");
