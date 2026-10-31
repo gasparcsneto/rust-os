@@ -2974,6 +2974,114 @@ mod testes {
         assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
     }
 
+    /// O pareamento pela própria pessoa: `device.pair` sem alcance, e
+    /// `device.forget` com o dispositivo enumerado — nem prefixo, nem
+    /// curinga —; os dois sensíveis, só para quem os escreve; o sistema não
+    /// os tem (não é pessoa); o teto do administrador os contém.
+    #[test]
+    fn o_pareamento_na_politica() {
+        use Codigo::*;
+        use Permissao::{DeviceForget, DevicePair};
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        // Parear: o operador, sem recurso; o observador e o sistema, não.
+        assert_eq!(p.decidir(Some("operador"), DevicePair, None), Allow);
+        assert_eq!(
+            p.decidir(Some("observador"), DevicePair, None),
+            DenyPermission
+        );
+        assert_eq!(p.decidir(Some("sistema"), DevicePair, None), DenyPermission);
+        assert_eq!(
+            p.decidir(Some("dispositivo"), DevicePair, None),
+            DenyPermission
+        );
+        assert_eq!(p.decidir(Some("remoto"), DevicePair, None), DenyPermission);
+        assert_eq!(p.decidir(Some("enlace"), DevicePair, None), DenyPermission);
+        // Esquecer: só os nomes escritos, inteiros.
+        for dentro in ["dispositivo:par", "dispositivo:par-2"] {
+            assert_eq!(
+                p.decidir(Some("operador"), DeviceForget, Some(dentro)),
+                Allow
+            );
+            assert_eq!(
+                p.decidir(Some("sistema"), DeviceForget, Some(dentro)),
+                DenyPermission
+            );
+        }
+        for fora in [
+            "dispositivo:intruso",
+            "dispositivo:*",
+            "dispositivo:",
+            "dispositivo:Par",
+            "dispositivo:par-3",
+            "par",
+            "",
+        ] {
+            assert_eq!(
+                p.decidir(Some("operador"), DeviceForget, Some(fora)),
+                DenyResource,
+                "{fora}"
+            );
+        }
+        assert_eq!(
+            p.decidir(Some("operador"), DeviceForget, None),
+            DenyResource
+        );
+        // A linha do esquecer é a dos dispositivos: sem curinga, e
+        // obrigatória para quem esquece.
+        for ruim in [
+            "recurso operador device.forget dispositivo:*",
+            "recurso operador device.forget par",
+            "recurso operador device.forget chave:bancada",
+        ] {
+            let texto = alloc::format!("{}{ruim}\n", crate::PADRAO);
+            assert!(Politica::ler(&texto).is_err(), "{ruim}");
+        }
+        let sem = crate::PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador device.forget"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            Politica::ler(&sem).unwrap_err().tipo,
+            ErroTipo::RecursoFaltando(papel, q) if papel == "operador" && q == "device.forget"
+        ));
+        // Parear não tem linha de alcance: uma é recusada.
+        assert!(
+            Politica::ler(&alloc::format!(
+                "{}recurso operador device.pair dispositivo:par\n",
+                crate::PADRAO
+            ))
+            .is_err()
+        );
+        // Sensíveis: por inclusão não vêm.
+        let incluida = alloc::format!(
+            "{}papel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(Some("herdeiro"), DevicePair, None),
+            DenyPermission
+        );
+        assert_eq!(
+            h.decidir(Some("herdeiro"), DeviceForget, Some("dispositivo:par")),
+            DenyPermission
+        );
+        // O operador cabe no teto; um papel que esquece um nome que o teto
+        // não alcança, não.
+        assert!(p.cabe_em("operador", "administrador").is_ok());
+        let mais = Politica::ler(&alloc::format!(
+            "{}papel esquecido device.forget\nrecurso esquecido device.forget dispositivo:outro\n",
+            crate::PADRAO
+        ))
+        .unwrap();
+        assert!(mais.cabe_em("esquecido", "administrador").is_err());
+        // A de emergência não tem nenhuma das duas fora do teto.
+        let e = Politica::emergencia();
+        assert_eq!(e.decidir(Some("sistema"), DevicePair, None), DenyPermission);
+        assert_eq!(Politica::ler(&p.texto()).unwrap(), p);
+    }
+
     /// A linha `remoto`: o teto do que chega de outro dispositivo. Opcional
     /// — sem ela, nada remoto passa —, uma só, de um papel que existe, que
     /// não é o da serial, nem o da autoridade local, nem o teto de um

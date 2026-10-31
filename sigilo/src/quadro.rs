@@ -30,6 +30,12 @@
 //!   entre dois Dukes — com o prólogo do enlace, consultando o registro de
 //!   dispositivos, e nunca o de agentes. A vaga do agente recusa este tipo,
 //!   e a do enlace recusa o [`Tipo::Inicio`].
+//! - [`Tipo::PedidoDaChave`], [`Tipo::ChaveDoDuke`] e
+//!   [`Tipo::InicioPareamento`]: a cerimônia de pareamento. O primeiro, vazio,
+//!   pede ao Duke que aceita a pública dele; o segundo, em claro, a traz —
+//!   com o desafio da janela —; o terceiro é a primeira mensagem do aperto,
+//!   com o prólogo da cerimônia. A vaga do enlace só os aceita com uma
+//!   janela aberta, e uma sessão de cerimônia nunca vira enlace.
 
 use alloc::vec::Vec;
 
@@ -52,6 +58,14 @@ pub enum Tipo {
     Recusa = 4,
     /// A primeira mensagem do aperto de um enlace entre dispositivos.
     InicioEnlace = 5,
+    /// O iniciante de um pareamento pede a pública do Duke que aceita.
+    /// Vazio.
+    PedidoDaChave = 6,
+    /// O anúncio do Duke que aceita: a pública dele (32 bytes) e o desafio
+    /// da janela (16), em claro.
+    ChaveDoDuke = 7,
+    /// A primeira mensagem do aperto de um pareamento.
+    InicioPareamento = 8,
 }
 
 impl Tipo {
@@ -62,6 +76,9 @@ impl Tipo {
             3 => Self::Dados,
             4 => Self::Recusa,
             5 => Self::InicioEnlace,
+            6 => Self::PedidoDaChave,
+            7 => Self::ChaveDoDuke,
+            8 => Self::InicioPareamento,
             _ => return None,
         })
     }
@@ -186,9 +203,45 @@ mod testes {
     }
 
     #[test]
+    fn os_quadros_do_pareamento_sao_tipos_proprios() {
+        let mut fluxo = montar(Tipo::PedidoDaChave, b"").unwrap();
+        fluxo.extend(montar(Tipo::ChaveDoDuke, &[0x5a; 48]).unwrap());
+        fluxo.extend(montar(Tipo::InicioPareamento, b"ik").unwrap());
+        assert_eq!(&fluxo[..3], &[6, 0, 0]);
+        assert_eq!(&fluxo[3..6], &[7, 0, 48]);
+        let q = ler_tudo(&fluxo);
+        assert_eq!(
+            q,
+            alloc::vec![
+                (Tipo::PedidoDaChave, Vec::new()),
+                (Tipo::ChaveDoDuke, alloc::vec![0x5a; 48]),
+                (Tipo::InicioPareamento, b"ik".to_vec()),
+            ]
+        );
+        // Nenhum se confunde com os do agente ou do enlace.
+        for t in [
+            Tipo::PedidoDaChave,
+            Tipo::ChaveDoDuke,
+            Tipo::InicioPareamento,
+        ] {
+            for o in [
+                Tipo::Inicio,
+                Tipo::Resposta,
+                Tipo::Dados,
+                Tipo::Recusa,
+                Tipo::InicioEnlace,
+            ] {
+                assert_ne!(t as u8, o as u8);
+            }
+        }
+    }
+
+    #[test]
     fn tipo_desconhecido_e_erro() {
-        let mut l = Leitor::novo();
-        assert_eq!(l.empurrar(9).err(), Some(Erro::Quadro));
+        for b in [0u8, 9, 0xFF] {
+            let mut l = Leitor::novo();
+            assert_eq!(l.empurrar(b).err(), Some(Erro::Quadro), "{b}");
+        }
     }
 
     #[test]

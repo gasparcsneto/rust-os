@@ -1734,8 +1734,8 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
         // permissão passa, a segunda não.
         let sem_remote = super::politica_trocada(&[
             (
-                "fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "fabric.offer fabric.send\nrecurso operador",
+                "fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",
@@ -1929,8 +1929,8 @@ pub(super) fn enlace_a_origem_reconfirma_no_commit() -> Resultado {
         crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
         if let Ok(p) = super::politica_trocada(&[
             (
-                "fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "fabric.offer fabric.send\nrecurso operador",
+                "fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",

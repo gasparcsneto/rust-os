@@ -201,7 +201,7 @@ recurso sistema device.suspend dispositivo:par dispositivo:par-2
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send fabric.remote device.register device.revoke device.suspend",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send fabric.remote device.register device.revoke device.suspend device.pair device.forget",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -222,6 +222,7 @@ recurso administrador fabric.offer intencao:imagem.compartilhar intencao:pdf.ano
 recurso administrador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 recurso administrador fabric.remote dispositivo:par dispositivo:par-2
 recurso administrador device.suspend dispositivo:par dispositivo:par-2
+recurso administrador device.forget dispositivo:par dispositivo:par-2
 taxa administrador 10 20
 processos administrador 8
 ",
@@ -280,6 +281,13 @@ servico nsf seguranca
 ///   endereço da ponte da bancada, `tcp:10.0.2.100:7071`, e nada que
 ///   decida entrega. Só nesta política: a de emergência não tem `remoto`
 ///   nem `servico enlace` — sem política no disco, nada remoto passa;
+/// - o pareamento pela própria pessoa (ver [`pareamento`]): o `operador`
+///   abre a cerimônia (`device.pair`) e desfaz as relações dele com os
+///   dispositivos `par` e `par-2` (`device.forget`, com o nome resolvido no
+///   espaço dele); a relação que nasce na cerimônia tem de ser para um
+///   desses nomes. O teto do `administrador` tem as duas, com o mesmo
+///   alcance, para que o operador seja delegável; o `sistema` não — ele
+///   não é pessoa, e a relação é de uma pessoa;
 /// - `sistema` e `administrador`: ver `papeis_de_sistema`.
 pub const PADRAO: &str = concat!(
     "\
@@ -346,13 +354,20 @@ pub const PADRAO: &str = concat!(
 # no espaco da pessoa de quem pede. O que chega de outro dispositivo e
 # decidido pelo papel da pessoa local da relacao, pelo papel da relacao e
 # pelo teto da linha `remoto`, os tres. O servico enlace so leva o que o
-# gate ja decidiu: conecta ao par, e nada mais.
+# gate ja decidiu: conecta ao par, e nada mais. A propria pessoa tambem
+# relaciona um Duke dela a outro Duke dela, sem o administrador: numa
+# cerimonia no console (device.pair), com o codigo de conferencia digitado
+# nos dois teclados e a senha dela. A relacao e so dela, com um papel que
+# cabe no dela e nao e teto, para um nome que o device.forget dela alcanca;
+# e ela a desfaz (device.forget, dispositivo:<nome>, enumerado e resolvido
+# no espaco dela, sem lapide). Parear nao autoriza nada: o par so pede o
+# que a pessoa, a relacao e o remoto deixam.
 
 papel observador agent.read system.read log.read ui.read message.read credential.change_self
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador fs.restore /armazem/compartilhado
@@ -369,6 +384,7 @@ dominios operador ic-request
 recurso operador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
 recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
 recurso operador fabric.remote dispositivo:par dispositivo:par-2
+recurso operador device.forget dispositivo:par dispositivo:par-2
 taxa operador 50 100
 processos operador 8
 
@@ -720,7 +736,8 @@ mod testes {
     /// quem a cria, e não há chave do sistema. A da própria senha também
     /// não: o sistema não é pessoa, e a autoridade máxima não vira um
     /// curinga sobre a credencial de ninguém. Nem levar a outro
-    /// dispositivo: a relação é de uma pessoa, e o sistema não é pessoa.
+    /// dispositivo, nem parear, nem esquecer uma relação: a relação é de
+    /// uma pessoa, e o sistema não é pessoa.
     #[test]
     fn o_sistema_e_maximo_e_enumerado() {
         let p = padrao();
@@ -730,7 +747,9 @@ mod testes {
             let de_identidade = perm.recurso_e_chave()
                 || perm == Permissao::KeyRevoke
                 || perm == Permissao::CredentialChangeSelf
-                || perm == Permissao::FabricRemote;
+                || perm == Permissao::FabricRemote
+                || perm == Permissao::DevicePair
+                || perm == Permissao::DeviceForget;
             let esperado =
                 !perm.administrativa() && perm != Permissao::FsRawWrite && !de_identidade;
             assert_eq!(sistema.tem(perm), esperado, "{}", perm.nome());
@@ -786,24 +805,27 @@ mod testes {
         );
         let r = p.cabe_em("operador", "sistema");
         assert!(
-            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.") || m.contains("dominio") || m.contains("credential.change_self") || m.contains("fabric.remote")),
+            matches!(&r, Err(Recusa::Proibida(m)) if m.contains("key.") || m.contains("dominio") || m.contains("credential.change_self") || m.contains("fabric.remote") || m.contains("device.pair") || m.contains("device.forget")),
             "{r:?}"
         );
-        // Sem as de chave, sem a da própria senha e sem a de levar a outro
-        // dispositivo — as três da pessoa —, os dois cabem no sistema.
+        // Sem as de chave, sem a da própria senha e sem as dos dispositivos
+        // da pessoa — levar a um, parear e esquecer —, os dois cabem no
+        // sistema.
         let sem_identidade: alloc::string::String = PADRAO
             .lines()
             .filter(|l| {
                 !l.starts_with("recurso operador key.")
                     && !l.starts_with("dominios operador")
                     && !l.starts_with("recurso operador fabric.remote")
+                    && !l.starts_with("recurso operador device.forget")
             })
             .map(|l| {
                 if l.starts_with("papel operador ") || l.starts_with("papel observador ") {
                     let l = l
                         .replace(" key.create key.read key.sign key.destroy", "")
                         .replace(" credential.change_self", "")
-                        .replace(" fabric.remote", "");
+                        .replace(" fabric.remote", "")
+                        .replace(" device.pair device.forget", "");
                     alloc::format!("{l}\n")
                 } else {
                     alloc::format!("{l}\n")
@@ -944,13 +966,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));
@@ -1784,7 +1806,7 @@ mod testes {
         // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
         // tem a prova, e a auditoria a grava.
         let delegado = mudar(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote time.sync",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget time.sync",
         )
         .unwrap();
         assert_eq!(

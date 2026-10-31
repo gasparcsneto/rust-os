@@ -247,6 +247,32 @@ fn o_enlace_e_o_agente_nao_se_abrem() {
     assert_eq!(recebido.remota(), sigilo::publica_de(&AGENTE));
 }
 
+/// Os três prólogos separam as três portas: um aperto de pareamento não
+/// abre como enlace nem como agente, e nenhum dos dois abre como
+/// pareamento — com as mesmas chaves.
+#[test]
+fn o_pareamento_nao_abre_como_enlace_nem_como_agente() {
+    let todos = [
+        sigilo::PROLOGO,
+        sigilo::PROLOGO_DO_ENLACE,
+        sigilo::PROLOGO_DO_PAREAMENTO,
+    ];
+    for de in todos {
+        for para in todos {
+            let ini = Iniciador::novo(de, &AGENTE, &sigilo::publica_de(&DUKE));
+            let mut a = vec![0u8; 1024];
+            let mut b = vec![0u8; 1024];
+            let (n, _) = ini.escrever([0x01; 32], b"{}", &mut a).unwrap();
+            let r = Respondedor::novo(para, &DUKE).ler(&a[..n], &mut b);
+            if de == para {
+                assert_eq!(r.unwrap().1.remota(), sigilo::publica_de(&AGENTE));
+            } else {
+                assert_eq!(r.err(), Some(Erro::Autenticacao));
+            }
+        }
+    }
+}
+
 /// Um aperto completo entre os dois lados do `sigilo`, para os casos de
 /// transporte abaixo.
 fn par() -> (Transporte, Transporte) {

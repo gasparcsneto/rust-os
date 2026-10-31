@@ -50,3 +50,7 @@ argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "ze
 snow = { version = "0.9.6", default-features = false, features = ["default-resolver"] }
 # Para ler os arquivos de vetores, que são JSON.
 serde_json = "1"
+# As contas da cerimônia de pareamento — os códigos e o identificador da
+# relação, que saem do resumo do aperto —, para o vetor fixo da cerimônia
+# em `tests/pareamento.rs`. Só nos testes: o `sigilo` não sabe da política.
+politica = { path = "../politica" }

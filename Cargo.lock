@@ -2102,6 +2102,7 @@ dependencies = [
  "chacha20 0.10.2",
  "chacha20poly1305 0.11.0",
  "ed25519-dalek 3.0.0",
+ "politica",
  "serde_json",
  "snow",
  "subtle",

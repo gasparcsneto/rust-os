@@ -76,6 +76,13 @@ pub const PROLOGO: &[u8] = b"Duke canal do agente v1";
 /// agente, nem o contrário, nem repetido.
 pub const PROLOGO_DO_ENLACE: &[u8] = b"Duke enlace entre dispositivos v1";
 
+/// O prólogo da cerimônia de pareamento entre dois Dukes da mesma Pessoa:
+/// o mesmo aperto IK, com outro resumo ainda. Um aperto de cerimônia não
+/// abre como enlace nem como agente, e nenhum dos dois abre como cerimônia
+/// — o resumo do aperto, de onde saem os códigos de conferência e o
+/// identificador da relação, é só dela.
+pub const PROLOGO_DO_PAREAMENTO: &[u8] = b"Duke pareamento entre dispositivos v1";
+
 /// O tamanho de uma chave X25519, pública ou privada.
 pub const TAM_CHAVE: usize = 32;
 

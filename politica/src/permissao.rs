@@ -120,6 +120,22 @@
 //!   — a máquina perdida que pode aparecer —, com o inverso na mesma
 //!   permissão. O recurso é o dispositivo, `dispositivo:<nome>`, com o
 //!   alcance enumerado. Sensível, e não administrativa.
+//! - `device.pair` autoriza a **própria Pessoa**, no console, pelo teclado,
+//!   a abrir uma cerimônia de pareamento — a que relaciona, sem o
+//!   administrador, um Duke dela a outro Duke dela, com o código de
+//!   conferência digitado nos dois teclados e a senha dela. Autoriza; não
+//!   autentica nem concede: a relação que nasce é só da Pessoa que pareou,
+//!   com um papel que cabe no dela, e o dispositivo só pede o que Pessoa ∩
+//!   relação ∩ `remoto` deixam. Sem alcance — a relação nasce para um nome
+//!   que `device.forget` dela alcança, e é isso que o gate confere junto.
+//!   Sensível, e não administrativa.
+//! - `device.forget` desfaz uma relação **da própria Pessoa** — sem lápide:
+//!   a mesma chave pode voltar por uma cerimônia nova. O recurso é o
+//!   dispositivo, `dispositivo:<nome>`, com o alcance enumerado, e o nome
+//!   se resolve no espaço da Pessoa de quem pede: a relação de outra
+//!   responde o mesmo que a que não existe. Sensível, e não
+//!   administrativa. Revogar o dispositivo inteiro continua sendo
+//!   `device.revoke`.
 //!
 //! Sem curinga: não há `dispositivo:*`, nem `device.*`, nem `fabric.*`.
 
@@ -340,11 +356,18 @@ pub enum Permissao {
     /// contenção reversível; o recurso é o dispositivo, com o alcance
     /// enumerado.
     DeviceSuspend,
+    /// Abrir uma cerimônia de pareamento — `device.pair`: a própria Pessoa
+    /// relaciona um Duke dela a outro Duke dela. Ver o cabeçalho do módulo.
+    /// Sem recurso, sensível, e não administrativa.
+    DevicePair,
+    /// Desfazer uma relação da própria Pessoa — `device.forget`, sem
+    /// lápide. O recurso é o dispositivo, com o alcance enumerado.
+    DeviceForget,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 57] = [
+pub const TODAS: [Permissao; 59] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -402,6 +425,8 @@ pub const TODAS: [Permissao; 57] = [
     Permissao::DeviceRegister,
     Permissao::DeviceRevoke,
     Permissao::DeviceSuspend,
+    Permissao::DevicePair,
+    Permissao::DeviceForget,
 ];
 
 impl Permissao {
@@ -465,6 +490,8 @@ impl Permissao {
             Permissao::DeviceRegister => "device.register",
             Permissao::DeviceRevoke => "device.revoke",
             Permissao::DeviceSuspend => "device.suspend",
+            Permissao::DevicePair => "device.pair",
+            Permissao::DeviceForget => "device.forget",
         }
     }
 
@@ -525,6 +552,8 @@ impl Permissao {
                 | Permissao::DeviceRegister
                 | Permissao::DeviceRevoke
                 | Permissao::DeviceSuspend
+                | Permissao::DevicePair
+                | Permissao::DeviceForget
         )
     }
 
@@ -617,12 +646,15 @@ impl Permissao {
     /// O recurso desta permissão é um dispositivo relacionado —
     /// `dispositivo:<nome>` —, e um papel o limita a uma lista enumerada de
     /// nomes. Sem curinga, sem prefixo. O nome é o local, que quem registra
-    /// deu ao dispositivo, e nunca o que o par diz; para `fabric.remote`,
-    /// ele se resolve no espaço da pessoa de quem pede. Levar uma entrega a
-    /// outro dispositivo e conter um dispositivo. Ver
-    /// [`crate::dispositivos`].
+    /// deu ao dispositivo, e nunca o que o par diz; para `fabric.remote` e
+    /// `device.forget`, ele se resolve no espaço da pessoa de quem pede.
+    /// Levar uma entrega a outro dispositivo, conter um dispositivo e
+    /// desfazer a própria relação com ele. Ver [`crate::dispositivos`].
     pub const fn recurso_e_dispositivo(self) -> bool {
-        matches!(self, Permissao::FabricRemote | Permissao::DeviceSuspend)
+        matches!(
+            self,
+            Permissao::FabricRemote | Permissao::DeviceSuspend | Permissao::DeviceForget
+        )
     }
 
     /// Uma contenção reversível: só restringe, e tem o seu inverso na mesma
@@ -743,7 +775,9 @@ impl Permissao {
             | Permissao::FabricRemote
             | Permissao::DeviceRegister
             | Permissao::DeviceRevoke
-            | Permissao::DeviceSuspend => true,
+            | Permissao::DeviceSuspend
+            | Permissao::DevicePair
+            | Permissao::DeviceForget => true,
         }
     }
 
@@ -1058,11 +1092,12 @@ mod testes {
         assert_eq!(Permissao::de_nome("fabric.recv"), None);
     }
 
-    /// Os dispositivos: as quatro no fim da lista — as de antes não mudam
-    /// de bit —, todas sensíveis e todas mudam o estado. Registrar e
-    /// revogar só com prova; levar a outro dispositivo e suspender, pelo
-    /// gate, com o dispositivo como recurso enumerado. Nenhuma tem outro
-    /// tipo de alcance, e nenhum nome com curinga ou prefixo existe.
+    /// Os dispositivos: as seis no fim da lista — as de antes não mudam de
+    /// bit —, todas sensíveis e todas mudam o estado. Registrar e revogar
+    /// só com prova; levar a outro dispositivo, suspender e esquecer a
+    /// própria relação, pelo gate, com o dispositivo como recurso
+    /// enumerado; parear, pelo gate, sem recurso. Nenhuma tem outro tipo de
+    /// alcance, e nenhum nome com curinga ou prefixo existe.
     #[test]
     fn dispositivos() {
         let nomes: alloc::vec::Vec<_> = TODAS[53..].iter().map(|p| p.nome()).collect();
@@ -1072,11 +1107,13 @@ mod testes {
                 "fabric.remote",
                 "device.register",
                 "device.revoke",
-                "device.suspend"
+                "device.suspend",
+                "device.pair",
+                "device.forget"
             ]
         );
-        assert_eq!(TODAS.len(), 57);
-        assert_eq!(TODAS.last(), Some(&Permissao::DeviceSuspend));
+        assert_eq!(TODAS.len(), 59);
+        assert_eq!(TODAS.last(), Some(&Permissao::DeviceForget));
         for (i, p) in TODAS.into_iter().enumerate() {
             assert_eq!(p as usize, i, "{}", p.nome());
         }
@@ -1098,19 +1135,31 @@ mod testes {
         let suspender = Permissao::DeviceSuspend;
         assert!(!suspender.administrativa() && suspender.contencao());
         assert!(suspender.recurso_e_dispositivo() && !suspender.alvo_e_papel());
+        // Parear: a Pessoa, pelo gate, sem prova de administrador e sem
+        // recurso; não é contenção.
+        let parear = Permissao::DevicePair;
+        assert!(!parear.administrativa() && !parear.tem_alcance() && !parear.contencao());
+        // Esquecer: a Pessoa, pelo gate, com o dispositivo como recurso;
+        // não é contenção — não tem inverso — nem alcança papel.
+        let esquecer = Permissao::DeviceForget;
+        assert!(!esquecer.administrativa() && esquecer.recurso_e_dispositivo());
+        assert!(esquecer.tem_alcance() && !esquecer.contencao() && !esquecer.recurso_e_papel());
         let de_dispositivo: alloc::vec::Vec<_> = TODAS
             .iter()
             .filter(|p| p.recurso_e_dispositivo())
             .map(|p| p.nome())
             .collect();
-        assert_eq!(de_dispositivo, ["fabric.remote", "device.suspend"]);
+        assert_eq!(
+            de_dispositivo,
+            ["fabric.remote", "device.suspend", "device.forget"]
+        );
         for curinga in [
             "device.*",
             "device",
             "remote.*",
             "fabric.*",
-            "device.pair",
-            "device.forget",
+            "device.pairing",
+            "device.unpair",
             "device.resume",
             "remote.send",
         ] {
