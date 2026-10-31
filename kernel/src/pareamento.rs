@@ -510,7 +510,10 @@ fn contar_o_fim(f: Fim, ao_console: bool) -> String {
             }
         }
         Desfecho::Concluida => {
-            format!("pareado: {} ({par}), relacao {relacao}; o outro gravou", f.nome)
+            format!(
+                "pareado: {} ({par}), relacao {relacao}; o outro gravou",
+                f.nome
+            )
         }
         Desfecho::GravadaSemAviso => format!(
             "pareado aqui: {} ({par}), relacao {relacao}; o outro nao confirmou que gravou: confira nele (device.registry)",
@@ -576,7 +579,12 @@ fn papel_da_relacao(sessao: IdSessao, papel: &str) -> Result<(), (Codigo, String
     }
     let da_pessoa = match crate::pessoas::sessao(sessao) {
         EstadoDaSessao::Ativa { papel, .. } => papel,
-        _ => return Err((Codigo::DenyNotAuthenticated, String::from("a sessao acabou"))),
+        _ => {
+            return Err((
+                Codigo::DenyNotAuthenticated,
+                String::from("a sessao acabou"),
+            ));
+        }
     };
     crate::autorizacao::com_politica(|p| p.cabe_em(papel, &da_pessoa))
         .map_err(|r| (r.codigo(), r.motivo()))
@@ -614,7 +622,11 @@ fn par_aceitavel(chave: &[u8; 32]) -> Result<(), (Motivo, Codigo, &'static str)>
         return Err((motivo, r.codigo(), r.motivo()));
     }
     if crate::contencao::dispositivo_suspenso(chave) {
-        return Err((Motivo::ParSuspenso, Codigo::DenyCredential, "dispositivo suspenso"));
+        return Err((
+            Motivo::ParSuspenso,
+            Codigo::DenyCredential,
+            "dispositivo suspenso",
+        ));
     }
     Ok(())
 }
@@ -656,11 +668,18 @@ fn abrir(
         ));
     }
     if !politica::arquivo::nome_valido(papel) {
-        return Err(recusar(sessao, &recurso, Codigo::InvalidArgument, "papel fora da regra"));
+        return Err(recusar(
+            sessao,
+            &recurso,
+            Codigo::InvalidArgument,
+            "papel fora da regra",
+        ));
     }
     let endereco = match endereco {
         None => None,
-        Some(e) => match politica::endereco::normalizar(e).filter(|n| n.as_str() == e && n.starts_with("tcp:")) {
+        Some(e) => match politica::endereco::normalizar(e)
+            .filter(|n| n.as_str() == e && n.starts_with("tcp:"))
+        {
             Some(n) => Some(n),
             None => {
                 return Err(recusar(
@@ -700,7 +719,12 @@ fn abrir(
         return Err(recusar(sessao, &recurso, codigo, motivo));
     }
     if crate::identidade::publica_do_duke().is_none() {
-        return Err(recusar(sessao, &recurso, Codigo::Error, "o Duke nao tem chave"));
+        return Err(recusar(
+            sessao,
+            &recurso,
+            Codigo::Error,
+            "o Duke nao tem chave",
+        ));
     }
     let mut sorteio = [0u8; conta::TAM_NONCE];
     if crate::aleatorio::preencher(&mut sorteio).is_err() {
@@ -774,13 +798,26 @@ pub fn aceitar(console: Console, abertura: u64, sessao: IdSessao, args: &str) ->
         [n, r, e] => (n, r, Some(e)),
         _ => return String::from("uso: aceitar <nome> <papel> [<endereco>]"),
     };
-    if let Err(texto) = abrir(console, abertura, sessao, Lado::Aceita, nome, papel, endereco) {
+    if let Err(texto) = abrir(
+        console,
+        abertura,
+        sessao,
+        Lado::Aceita,
+        nome,
+        papel,
+        endereco,
+    ) {
         return texto;
     }
     let eu = impressao_de(crate::identidade::publica_do_duke());
     let onde = crate::rede::pilha::resumo()
         .and_then(|r| r.endereco)
-        .map(|([a, b, c, d], _)| format!("tcp:{a}.{b}.{c}.{d}:{}", crate::rede::canal::PORTA_DO_ENLACE))
+        .map(|([a, b, c, d], _)| {
+            format!(
+                "tcp:{a}.{b}.{c}.{d}:{}",
+                crate::rede::canal::PORTA_DO_ENLACE
+            )
+        })
         .unwrap_or_else(|| format!("a porta {}", crate::rede::canal::PORTA_DO_ENLACE));
     andar();
     format!(
@@ -811,13 +848,11 @@ pub fn parear(console: Console, abertura: u64, sessao: IdSessao, args: &str) -> 
     if let Err(texto) = lancar_o_fio(numero) {
         return texto;
     }
-    format!(
-        "pareando com {endereco}: esperando o outro Duke. Uma linha vazia desiste."
-    )
+    format!("pareando com {endereco}: esperando o outro Duke. Uma linha vazia desiste.")
 }
 
 /// Lança o fio que conduz a cerimônia do iniciante. Na suíte não há fio: o
-/// caso conduz com a via de teste dele ([`conduzir_de_teste`]).
+/// caso conduz com a via de teste dele (`conduzir_de_teste`).
 fn lancar_o_fio(numero: u64) -> Result<(), String> {
     #[cfg(feature = "modo-teste")]
     {
@@ -894,7 +929,7 @@ pub fn linha_digitada(
         return f.map(|f| contar_o_fim(f, false)).unwrap_or_default();
     }
     if pedida != linha {
-        return String::from("a cerimonia mudou; confira o que ela pede agora");
+        return ja_respondida();
     }
     if texto.is_empty() {
         let f = com(|g| viva(g, numero).and_then(|x| acabar(x, Motivo::Cancelada, true)));
@@ -931,14 +966,23 @@ fn digitar_codigo(numero: u64, texto: &[u8]) -> String {
     match r {
         Some(Ok(())) => String::from("codigo conferido. Agora a senha desta pessoa, neste Duke."),
         Some(Err(Some(f))) => contar_o_fim(f, false),
-        _ => String::from("a cerimonia nao pede o codigo agora"),
+        _ => ja_respondida(),
     }
+}
+
+/// A segunda entrada no mesmo passo: a primeira já o consumiu.
+fn ja_respondida() -> String {
+    format!(
+        "ja respondido: a cerimonia pede outra coisa agora ({})",
+        Codigo::Conflict.nome()
+    )
 }
 
 /// A senha da Pessoa, de novo. Certa, o `conferido` sai; e, se o do outro já
 /// chegou, a relação se grava — aqui, na vez do console.
 fn conferir_a_senha(console: Console, numero: u64, sessao: IdSessao, senha: &[u8]) -> String {
-    if let Err((codigo, motivo)) = crate::pessoas::conferir_para_o_pareamento(console, sessao, senha)
+    if let Err((codigo, motivo)) =
+        crate::pessoas::conferir_para_o_pareamento(console, sessao, senha)
     {
         let f = com(|g| {
             viva(g, numero).and_then(|x| {
@@ -962,9 +1006,9 @@ fn conferir_a_senha(console: Console, numero: u64, sessao: IdSessao, senha: &[u8
     andar();
     match r {
         Some(Ok(true)) => gravar(numero),
-        Some(Ok(false)) => {
-            String::from("conferido. Esperando o outro dispositivo conferir; uma linha vazia desiste.")
-        }
+        Some(Ok(false)) => String::from(
+            "conferido. Esperando o outro dispositivo conferir; uma linha vazia desiste.",
+        ),
         Some(Err(Some(f))) => contar_o_fim(f, false),
         _ => String::new(),
     }
@@ -1116,7 +1160,10 @@ fn gravar(numero: u64) -> String {
         }
         papel_da_relacao(d.sessao, &d.papel)?;
         if crate::pessoas::dona_da_sessao(d.sessao).map(|p| p.0) != Some(d.pessoa) {
-            return Err((Codigo::DenyNotAuthenticated, String::from("a sessao acabou")));
+            return Err((
+                Codigo::DenyNotAuthenticated,
+                String::from("a sessao acabou"),
+            ));
         }
         par_aceitavel(&d.par).map_err(|(_, c, m)| (c, String::from(m)))?;
         let foto = crate::persistencia::Foto::tirar();
@@ -1143,7 +1190,12 @@ fn gravar(numero: u64) -> String {
             true,
             decisao,
         )
-        .map_err(|m| (Codigo::Error, format!("a gravacao falhou ({m}): nada mudou")))?;
+        .map_err(|m| {
+            (
+                Codigo::Error,
+                format!("a gravacao falhou ({m}): nada mudou"),
+            )
+        })?;
         Ok(decisao)
     });
     match feito {
@@ -1203,7 +1255,16 @@ fn gravar(numero: u64) -> String {
             let f = com(|g| {
                 viva(g, numero).and_then(|x| {
                     x.recusa = Some((codigo, motivo));
-                    if let Ok(Desfecho::Desfeita(m)) = x.c.nao_gravada(Motivo::Recusada) {
+                    // O motivo que o outro ouve: o prazo que venceu no ponto
+                    // do commit; a desistência que esperava a gravação — a
+                    // revogação, a sessão que acabou —; ou a decisão, que
+                    // recusou.
+                    let m = if x.c.ainda_no_prazo(agora()) {
+                        x.c.pendente().unwrap_or(Motivo::Recusada)
+                    } else {
+                        Motivo::Prazo
+                    };
+                    if let Ok(Desfecho::Desfeita(m)) = x.c.nao_gravada(m) {
                         mandar(x, mensagem_desistiu(m.texto()).as_bytes());
                     }
                     fim_de(x)
@@ -1344,9 +1405,6 @@ fn primeira_mensagem(v: u8, g: u64, corpo: &[u8]) -> bool {
         encerrar_vaga(v, g);
         return false;
     }
-    if crate::energia::pedida().is_some() {
-        return recusar_na_vaga(v, g, None, Codigo::Conflict, "a maquina esta desligando");
-    }
     let mut carga = vec![0u8; corpo.len()];
     let lido = crate::identidade::com_chave_do_duke(|k| {
         Respondedor::novo(sigilo::PROLOGO_DO_PAREAMENTO, k).ler(corpo, &mut carga)
@@ -1377,6 +1435,15 @@ fn primeira_mensagem(v: u8, g: u64, corpo: &[u8]) -> bool {
             "a primeira mensagem nao traz o compromisso e o desafio",
         );
     };
+    if crate::energia::pedida().is_some() {
+        return recusar_na_vaga(
+            v,
+            g,
+            Some(chave),
+            Codigo::Conflict,
+            "a maquina esta desligando",
+        );
+    }
     if let Err((_, codigo, motivo)) = par_aceitavel(&chave) {
         return recusar_na_vaga(v, g, Some(chave), codigo, motivo);
     }
@@ -1437,7 +1504,10 @@ fn primeira_mensagem(v: u8, g: u64, corpo: &[u8]) -> bool {
             return Some(Err(None));
         }
         let Some((q, t)) = resposta else {
-            x.recusa = Some((Codigo::Error, String::from("a segunda mensagem nao se escreveu")));
+            x.recusa = Some((
+                Codigo::Error,
+                String::from("a segunda mensagem nao se escreveu"),
+            ));
             return Some(Err(acabar(x, Motivo::Conexao, false)));
         };
         x.resumo = Some(t.resumo_do_aperto());
@@ -1506,11 +1576,10 @@ impl Depois {
 /// O texto dos códigos, para a Pessoa: o que ela digita no **outro**, e as
 /// impressões das duas chaves.
 fn texto_dos_codigos(x: &Viva, eu: &str) -> String {
-    let k = x
-        .c
-        .codigo_a_mostrar()
-        .map(conta::texto_do_codigo)
-        .unwrap_or_default();
+    let k =
+        x.c.codigo_a_mostrar()
+            .map(conta::texto_do_codigo)
+            .unwrap_or_default();
     format!(
         "pareando com {}; este Duke e {eu}.\nNo outro dispositivo, digite: {k}\nAqui, digite so o codigo que aparece no seu outro dispositivo; ninguem mais precisa dele.",
         impressao_de(x.c.par())
@@ -1694,7 +1763,12 @@ pub fn nao_conectou(codigo: Codigo, motivo: &'static str) {
 }
 
 /// Acaba a cerimônia do fio, e conta.
-fn acabar_no_fio(numero: u64, motivo: Motivo, avisar_o_par: bool, recusa: Option<(Codigo, String)>) {
+fn acabar_no_fio(
+    numero: u64,
+    motivo: Motivo,
+    avisar_o_par: bool,
+    recusa: Option<(Codigo, String)>,
+) {
     let f = com(|g| {
         let x = viva(g, numero)?;
         if x.recusa.is_none() {
@@ -1755,12 +1829,19 @@ fn apertar_como_iniciante(
     leitor: &mut Leitor,
     guardado: &mut Vec<u8>,
 ) -> Result<(), FalhaDoAperto> {
-    let conexao = |m: &'static str| (Motivo::Conexao, false, Some((Codigo::Error, String::from(m))));
-    let pedido = quadro::montar(Tipo::PedidoDaChave, &[]).map_err(|_| conexao("o pedido nao se montou"))?;
+    let conexao = |m: &'static str| {
+        (
+            Motivo::Conexao,
+            false,
+            Some((Codigo::Error, String::from(m))),
+        )
+    };
+    let pedido =
+        quadro::montar(Tipo::PedidoDaChave, &[]).map_err(|_| conexao("o pedido nao se montou"))?;
     via.mandar(&pedido).map_err(|(_, m)| conexao(m))?;
     let limite = crate::tempo::uptime_ms().saturating_add(PRAZO_DO_QUADRO_MS);
-    let (tipo, corpo) =
-        crate::enlace::proximo_quadro(via, leitor, guardado, limite).map_err(|(_, m)| conexao(m))?;
+    let (tipo, corpo) = crate::enlace::proximo_quadro(via, leitor, guardado, limite)
+        .map_err(|(_, m)| conexao(m))?;
     let (pk, w) = match tipo {
         Tipo::ChaveDoDuke if corpo.len() == 32 + conta::TAM_DESAFIO => {
             let mut pk = [0u8; 32];
@@ -1828,8 +1909,8 @@ fn apertar_como_iniciante(
         .ok_or((Motivo::Prazo, false, None))?;
     // A segunda: o aperto fecha só com a chave anunciada.
     let limite = crate::tempo::uptime_ms().saturating_add(PRAZO_DO_QUADRO_MS);
-    let (tipo, corpo) =
-        crate::enlace::proximo_quadro(via, leitor, guardado, limite).map_err(|(_, m)| conexao(m))?;
+    let (tipo, corpo) = crate::enlace::proximo_quadro(via, leitor, guardado, limite)
+        .map_err(|(_, m)| conexao(m))?;
     let transporte = match tipo {
         Tipo::Resposta => {
             let mut lixo = vec![0u8; corpo.len()];
@@ -1868,7 +1949,13 @@ fn recusa_do_outro(corpo: &[u8]) -> FalhaDoAperto {
     let mut texto: String = corpo
         .iter()
         .take(MAIOR_MOTIVO_DO_OUTRO)
-        .map(|&c| if c.is_ascii_graphic() || c == b' ' { c as char } else { '?' })
+        .map(|&c| {
+            if c.is_ascii_graphic() || c == b' ' {
+                c as char
+            } else {
+                '?'
+            }
+        })
         .collect();
     if texto.is_empty() {
         texto = String::from("recusado");
@@ -1876,7 +1963,10 @@ fn recusa_do_outro(corpo: &[u8]) -> FalhaDoAperto {
     (
         Motivo::OutroDesistiu,
         false,
-        Some((Codigo::DenyNotAuthenticated, format!("o outro recusou: {texto}"))),
+        Some((
+            Codigo::DenyNotAuthenticated,
+            format!("o outro recusou: {texto}"),
+        )),
     )
 }
 
@@ -1948,9 +2038,17 @@ fn conversar(via: &mut impl Via, numero: u64, leitor: &mut Leitor, guardado: &mu
 // Os prazos, a revogação, o fim da sessão, o desligamento.
 // ---------------------------------------------------------------------
 
-/// A cada tique, pelo coletor: o prazo da janela e o da cerimônia; a sessão
-/// da Pessoa que acabou; o desligamento pedido. E a cerimônia acabada que
-/// ninguém precisa mais sai.
+/// O coletor, a cada tique: [`vencer`]. Na suíte, quem vence é o caso: ele
+/// conduz a cerimônia passo a passo, os dois lados, e o coletor de outro
+/// núcleo não a acaba — nem a libera — no meio de um passo dele.
+pub fn passada_do_coletor() {
+    #[cfg(not(feature = "modo-teste"))]
+    vencer();
+}
+
+/// O prazo da janela e o da cerimônia; a sessão da Pessoa que acabou; o
+/// desligamento pedido. E a cerimônia acabada que ninguém precisa mais
+/// sai.
 pub fn vencer() {
     if !HA.load(Ordering::Acquire) {
         return;
@@ -2039,16 +2137,21 @@ pub fn esquecer_pelo_comando(alvo: &str) -> Result<Esquecida, (Codigo, &'static 
         crate::autorizacao::Autoridade::Pessoa { sessao } => crate::pessoas::dona_da_sessao(sessao),
         _ => None,
     }
-    .ok_or((Codigo::DenyResource, "o dispositivo nao existe para quem pede"))?;
+    .ok_or((
+        Codigo::DenyResource,
+        "o dispositivo nao existe para quem pede",
+    ))?;
     let (chave, relacao, saiu, gravada) = crate::persistencia::em_ordem(|| {
         #[cfg(feature = "modo-teste")]
         crate::autorizacao::gancho_da_reconfirmacao();
         crate::autorizacao::reconfirmar()?;
-        let (chave, rel) = crate::dispositivos::da_pessoa(nome, &pessoa.0)
-            .ok_or((Codigo::DenyResource, "o dispositivo nao existe para quem pede"))?;
+        let (chave, rel) = crate::dispositivos::da_pessoa(nome, &pessoa.0).ok_or((
+            Codigo::DenyResource,
+            "o dispositivo nao existe para quem pede",
+        ))?;
         let foto = crate::persistencia::Foto::tirar();
-        let (_, saiu) = crate::dispositivos::esquecer(&chave, &rel.id)
-            .map_err(|r| (r.codigo(), r.motivo()))?;
+        let (_, saiu) =
+            crate::dispositivos::esquecer(&chave, &rel.id).map_err(|r| (r.codigo(), r.motivo()))?;
         let gravada = crate::persistencia::concluir(
             &foto,
             crate::autorizacao::ESQUECIMENTO,
@@ -2181,6 +2284,17 @@ pub fn adiantar_de_teste(ms: u64) {
 #[cfg(feature = "modo-teste")]
 pub fn estado_de_teste() -> Option<(Lado, Estado)> {
     com(|g| g.as_ref().map(|x| (x.c.lado(), x.c.estado())))
+}
+
+/// Só para a suíte: o commit pedido de novo na cerimônia de agora — o que
+/// um passo repetido do console pediria —, para conferir a resposta
+/// guardada: uma relação, um registro.
+#[cfg(feature = "modo-teste")]
+pub fn gravar_de_novo_de_teste() -> String {
+    match com(|g| g.as_ref().map(|x| x.numero)) {
+        Some(numero) => gravar(numero),
+        None => String::new(),
+    }
 }
 
 /// Só para a suíte: o desafio da janela aberta — o que o anúncio leva.

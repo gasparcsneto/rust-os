@@ -29,6 +29,7 @@ use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
 mod enlace;
+mod pareamento;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
 /// para montar uma dinâmica; detalhes vão para o log antes do retorno.
@@ -37106,6 +37107,134 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "enlace: mandar e revogar ao mesmo tempo",
         f: enlace::enlace_mandar_e_revogar_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "pareamento: aceitando, os dois lados gravam a mesma relacao",
+        f: pareamento::pareamento_aceitando_os_dois_gravam,
+    },
+    Caso {
+        nome: "pareamento: iniciando, os dois lados gravam a mesma relacao",
+        f: pareamento::pareamento_iniciando_os_dois_gravam,
+    },
+    Caso {
+        nome: "pareamento: o codigo errado desfaz os dois lados, sem segunda tentativa",
+        f: pareamento::pareamento_o_codigo_errado_desfaz,
+    },
+    Caso {
+        nome: "pareamento: o prazo da janela e o do codigo",
+        f: pareamento::pareamento_o_prazo_desfaz,
+    },
+    Caso {
+        nome: "pareamento: o codigo reutilizado e a segunda entrada",
+        f: pareamento::pareamento_o_codigo_reutilizado,
+    },
+    Caso {
+        nome: "pareamento: o replay nao ocupa a janela nem passa",
+        f: pareamento::pareamento_o_replay,
+    },
+    Caso {
+        nome: "pareamento: o par no meio nao confere, dos dois lados",
+        f: pareamento::pareamento_o_par_no_meio,
+    },
+    Caso {
+        nome: "pareamento: outro Duke no endereco",
+        f: pareamento::pareamento_outro_duke_no_endereco,
+    },
+    Caso {
+        nome: "pareamento: o dispositivo falso nao fecha o aperto",
+        f: pareamento::pareamento_o_dispositivo_falso,
+    },
+    Caso {
+        nome: "pareamento: a mensagem adulterada encerra",
+        f: pareamento::pareamento_a_mensagem_adulterada,
+    },
+    Caso {
+        nome: "pareamento: a pessoa sem permissao nao abre",
+        f: pareamento::pareamento_a_pessoa_sem_permissao,
+    },
+    Caso {
+        nome: "pareamento: sem identidade, nada abre; a chave fraca",
+        f: pareamento::pareamento_sem_identidade,
+    },
+    Caso {
+        nome: "pareamento: o papel que nao cabe",
+        f: pareamento::pareamento_o_papel,
+    },
+    Caso {
+        nome: "pareamento: a lapide no anuncio, no aperto e no commit",
+        f: pareamento::pareamento_a_lapide,
+    },
+    Caso {
+        nome: "pareamento: o par suspenso, antes, no meio e no commit",
+        f: pareamento::pareamento_o_par_suspenso,
+    },
+    Caso {
+        nome: "pareamento: uma chave, uma especie",
+        f: pareamento::pareamento_uma_chave_uma_especie,
+    },
+    Caso {
+        nome: "pareamento: a sessao da cerimonia nao e enlace",
+        f: pareamento::pareamento_a_sessao_da_cerimonia_nao_e_enlace,
+    },
+    Caso {
+        nome: "pareamento: parear nao autoriza",
+        f: pareamento::pareamento_parear_nao_autoriza,
+    },
+    Caso {
+        nome: "pareamento: so pelo teclado",
+        f: pareamento::pareamento_so_pelo_teclado,
+    },
+    Caso {
+        nome: "pareamento: pair x pair, e dois iniciantes na janela",
+        f: pareamento::pareamento_pair_x_pair,
+    },
+    Caso {
+        nome: "pareamento: a reconfirmacao no commit",
+        f: pareamento::pareamento_a_reconfirmacao_no_commit,
+    },
+    Caso {
+        nome: "pareamento: o desligamento",
+        f: pareamento::pareamento_o_desligamento,
+    },
+    Caso {
+        nome: "pareamento: o prazo no commit",
+        f: pareamento::pareamento_o_prazo_no_commit,
+    },
+    Caso {
+        nome: "pareamento: duas pessoas, o mesmo dispositivo",
+        f: pareamento::pareamento_duas_pessoas_o_mesmo_dispositivo,
+    },
+    Caso {
+        nome: "pareamento: esquecer a propria relacao",
+        f: pareamento::pareamento_esquecer_a_propria_relacao,
+    },
+    Caso {
+        nome: "pareamento: esquecer a de outra pessoa",
+        f: pareamento::pareamento_esquecer_a_de_outra_pessoa,
+    },
+    Caso {
+        nome: "pareamento: esquecer e parear de novo",
+        f: pareamento::pareamento_esquecer_e_parear_de_novo,
+    },
+    Caso {
+        nome: "pareamento: a senha errada conta na janela",
+        f: pareamento::pareamento_a_senha_errada,
+    },
+    Caso {
+        nome: "pareamento: a auditoria e a proveniencia",
+        f: pareamento::pareamento_a_auditoria_e_a_proveniencia,
+    },
+    Caso {
+        nome: "pareamento: o commit duplicado",
+        f: pareamento::pareamento_o_commit_duplicado,
+    },
+    Caso {
+        nome: "pareamento: a meia relacao",
+        f: pareamento::pareamento_a_meia_relacao,
+    },
+    Caso {
+        nome: "pareamento: o outro desiste depois de este gravar",
+        f: pareamento::pareamento_o_outro_desiste_depois_de_gravar,
     },
     Caso {
         nome: "copia: o armazem inteiro, pelo sistema",

@@ -375,7 +375,8 @@ kernel/src/
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
-│   └── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
+│   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
+│   └── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero

@@ -44,21 +44,21 @@ use super::persistencia::{self as p, Ligada};
 use super::{Ambiente, Arquitetura, Artefato, chaves};
 
 /// Como cada Duke chama o outro no registro de dispositivos.
-const NOME: &str = "par";
+pub(crate) const NOME: &str = "par";
 
 /// O dispositivo, como a pessoa e o programa o pedem — o `PAR` do
 /// carteiro.
-const DISPOSITIVO: &str = "dispositivo:par";
+pub(crate) const DISPOSITIVO: &str = "dispositivo:par";
 
 /// O papel da relação nos dois: o da política padrão.
-const PAPEL: &str = "dispositivo";
+pub(crate) const PAPEL: &str = "dispositivo";
 
 /// O endereço do destino, como a origem o registra: a ponte da bancada. É o
 /// que a linha `recurso enlace net.connect` da política padrão enumera.
-const ENDERECO: &str = "tcp:10.0.2.100:7071";
+pub(crate) const ENDERECO: &str = "tcp:10.0.2.100:7071";
 
 /// A porta do enlace no hóspede: `rede::canal::PORTA_DO_ENLACE`.
-const PORTA_DO_ENLACE: u16 = 7071;
+pub(crate) const PORTA_DO_ENLACE: u16 = 7071;
 
 /// A intenção que o correio oferece e o carteiro procura.
 const INTENCAO: &str = "imagem.compartilhar";
@@ -66,7 +66,7 @@ const INTENCAO: &str = "imagem.compartilhar";
 /// O código de saída do carteiro depois da confirmação de lá, e o da
 /// recusa (`programas/src/bin/carteiro.rs`).
 const CARTEIRO_CONFIRMOU: i64 = 44;
-const CARTEIRO_RECUSADO: i64 = 45;
+pub(crate) const CARTEIRO_RECUSADO: i64 = 45;
 
 /// Quanto esperar um programa lançado dizer o que se espera dele: cada
 /// pedido do carteiro é um enlace novo, com o aperto, entre duas máquinas
@@ -96,7 +96,7 @@ const PARES: [(Arquitetura, Arquitetura); 4] = [
 // ---------------------------------------------------------------------------
 
 /// Uma das duas máquinas, ainda desligada.
-struct Maquina {
+pub(crate) struct Maquina {
     /// `origem` ou `destino`: como a bancada a chama, e o nome da raiz dela.
     papel: &'static str,
     arch: Arquitetura,
@@ -114,7 +114,7 @@ impl Maquina {
     /// Compila o kernel de `arch` e monta o disco dela, com a chave do Duke
     /// `privada` no lugar da da bancada. Uma raiz de estado nova, e com ela
     /// um TPM novo.
-    fn nova(
+    pub(crate) fn nova(
         papel: &'static str,
         arch: Arquitetura,
         release: bool,
@@ -146,12 +146,12 @@ impl Maquina {
         })
     }
 
-    fn publica(&self) -> [u8; 32] {
+    pub(crate) fn publica(&self) -> [u8; 32] {
         sigilo::publica_de(&self.privada)
     }
 
     /// Liga a máquina, na raiz dela, e abre o teclado.
-    fn ligar(&self) -> Result<DePe, String> {
+    pub(crate) fn ligar(&self) -> Result<DePe, String> {
         super::na_raiz(&self.raiz, || {
             let m = Ligada::subir_com(
                 self.arch,
@@ -188,23 +188,23 @@ struct Visto {
 
 /// Um registro da auditoria, com o que a bancada confere dele.
 #[derive(Clone, Debug)]
-struct Gravado {
-    titular: String,
-    agente: String,
-    chave: String,
-    papel: String,
-    metodo: String,
-    recurso: String,
-    codigo: String,
-    detalhe: String,
+pub(crate) struct Gravado {
+    pub(crate) titular: String,
+    pub(crate) agente: String,
+    pub(crate) chave: String,
+    pub(crate) papel: String,
+    pub(crate) metodo: String,
+    pub(crate) recurso: String,
+    pub(crate) codigo: String,
+    pub(crate) detalhe: String,
 }
 
 /// Uma máquina de pé: o canal da serial, o teclado, e o que ela disse e
 /// gravou até agora.
-struct DePe {
-    papel: &'static str,
-    arch: Arquitetura,
-    m: Ligada,
+pub(crate) struct DePe {
+    pub(crate) papel: &'static str,
+    pub(crate) arch: Arquitetura,
+    pub(crate) m: Ligada,
     teclado: UnixStream,
     visto: Visto,
 }
@@ -221,7 +221,7 @@ fn valor(campos: &super::ObjetoPlano, nome: &str) -> String {
 impl DePe {
     /// Lê o log de agora e a auditoria desde a última leitura, e junta ao
     /// que já se viu.
-    fn ler(&mut self) -> Result<(), String> {
+    pub(crate) fn ler(&mut self) -> Result<(), String> {
         let r = self.m.pedir("log.tail", r#"{"count":128}"#)?;
         for campos in super::objetos_planos(super::apos(&r, r#""records":["#).unwrap_or(""))? {
             let Ok(seq) = valor(&campos, "seq").parse::<u64>() else {
@@ -276,7 +276,7 @@ impl DePe {
 
     /// Onde a máquina está agora: o último registro de log e o último da
     /// auditoria. O que vier depois é do passo seguinte.
-    fn marca(&mut self) -> Result<Marca, String> {
+    pub(crate) fn marca(&mut self) -> Result<Marca, String> {
         self.ler()?;
         Ok(Marca {
             log: self.visto.ultimo_log,
@@ -285,7 +285,7 @@ impl DePe {
     }
 
     /// Digita no teclado da máquina, no Terminal que tem o foco.
-    fn digitar(&mut self, texto: &str) -> Result<(), String> {
+    pub(crate) fn digitar(&mut self, texto: &str) -> Result<(), String> {
         super::digitar_pelo_monitor(&mut self.teclado, texto, self.papel)
     }
 
@@ -337,19 +337,19 @@ impl DePe {
     }
 
     /// Os registros da auditoria depois de `desde`.
-    fn gravados(&self, desde: u64) -> impl Iterator<Item = &Gravado> {
+    pub(crate) fn gravados(&self, desde: u64) -> impl Iterator<Item = &Gravado> {
         self.visto.gravados.range(desde + 1..).map(|(_, g)| g)
     }
 
     /// Uma operação administrativa, provada pelo administrador da imagem:
     /// a resposta.
-    fn administrar(&mut self, comando: &str, params: &str) -> Result<String, String> {
+    pub(crate) fn administrar(&mut self, comando: &str, params: &str) -> Result<String, String> {
         let chaves = chaves::Chaves::garantir()?;
         p::administrar(&mut self.m, &chaves.administrador, comando, params)
     }
 
     /// Como [`DePe::administrar`], e a operação tem de ter sido executada.
-    fn executar(&mut self, comando: &str, params: &str) -> Result<(), String> {
+    pub(crate) fn executar(&mut self, comando: &str, params: &str) -> Result<(), String> {
         let r = self.administrar(comando, params)?;
         if p::executou(&r) {
             Ok(())
@@ -362,12 +362,12 @@ impl DePe {
     }
 
     /// O registro de dispositivos, como `device.registry` o mostra.
-    fn registro(&mut self) -> Result<String, String> {
+    pub(crate) fn registro(&mut self) -> Result<String, String> {
         self.m.pedir("device.registry", "{}")
     }
 
     /// A pessoa de desenvolvimento entra no Terminal, pelo teclado.
-    fn entrar(&mut self) -> Result<(), String> {
+    pub(crate) fn entrar(&mut self) -> Result<(), String> {
         let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
         super::senha::terminal_atendendo(&mut self.m, &mut self.teclado)?;
         let codigo = super::senha::entrar(
@@ -434,7 +434,7 @@ impl DePe {
 
     /// O log das duas máquinas, para a falha: as últimas linhas de
     /// programa, e os últimos registros da auditoria.
-    fn mostrar(&mut self) {
+    pub(crate) fn mostrar(&mut self) {
         let _ = self.ler();
         println!("  [enlace]   {} ({}):", self.papel, self.arch.nome());
         let ditas: Vec<&String> = self.visto.ditas.values().map(|(_, l)| l).collect();
@@ -454,9 +454,9 @@ impl DePe {
 /// Onde uma máquina estava: o último registro de log e o último da
 /// auditoria.
 #[derive(Clone, Copy)]
-struct Marca {
-    log: u64,
-    auditoria: u64,
+pub(crate) struct Marca {
+    pub(crate) log: u64,
+    pub(crate) auditoria: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ struct Marca {
 
 /// Um lançamento do carteiro: o que ele disse, sem o prefixo, com o tempo
 /// de máquina de cada linha, e o código de saída.
-struct Corrida {
+pub(crate) struct Corrida {
     linhas: Vec<String>,
     horas: Vec<(u64, String)>,
     /// O tempo de máquina em que o processo entrou no anel sem privilégio.
@@ -475,11 +475,11 @@ struct Corrida {
 
 impl Corrida {
     /// O resto da primeira linha que começa com `prefixo`.
-    fn dito(&self, prefixo: &str) -> Option<&str> {
+    pub(crate) fn dito(&self, prefixo: &str) -> Option<&str> {
         self.linhas.iter().find_map(|l| l.strip_prefix(prefixo))
     }
 
-    fn texto(&self) -> String {
+    pub(crate) fn texto(&self) -> String {
         self.linhas.join(" | ")
     }
 
@@ -512,27 +512,27 @@ impl Corrida {
 }
 
 /// O par de pé: as duas máquinas, a relação e o resumo do carteiro.
-struct Par {
-    origem: DePe,
-    destino: DePe,
+pub(crate) struct Par {
+    pub(crate) origem: DePe,
+    pub(crate) destino: DePe,
     /// A chave pública de cada Duke.
-    da_origem: [u8; 32],
-    da_destino: [u8; 32],
-    relacao: String,
-    pessoa: String,
+    pub(crate) da_origem: [u8; 32],
+    pub(crate) da_destino: [u8; 32],
+    pub(crate) relacao: String,
+    pub(crate) pessoa: String,
     /// O começo do resumo da imagem do carteiro, como o destino grava o
     /// programa atestado.
-    atestado: String,
+    pub(crate) atestado: String,
     /// O fim do último lançamento do carteiro.
-    ultimo: Option<Instant>,
+    pub(crate) ultimo: Option<Instant>,
     /// Quanto levou cada pedido de cada entrega — ver [`Corrida::tempos`].
-    medidas: Vec<[u64; 4]>,
+    pub(crate) medidas: Vec<[u64; 4]>,
 }
 
 impl Par {
     /// A pessoa lança o carteiro na origem, e ele diz até o fim. Antes, o
     /// respiro da janela dos apertos.
-    fn carteiro(&mut self) -> Result<Corrida, String> {
+    pub(crate) fn carteiro(&mut self) -> Result<Corrida, String> {
         if let Some(ultimo) = self.ultimo {
             let pronto = ultimo + JANELA_DOS_APERTOS;
             let agora = Instant::now();
@@ -570,7 +570,7 @@ impl Par {
     /// caminho: aqui, o pedido decidido com `fabric.remote` e o serviço do
     /// enlace conectando pelo gate; lá, o aperto do dispositivo e as
     /// decisões pela relação, com o programa atestado.
-    fn entrega(&mut self, endpoint: &str) -> Result<String, String> {
+    pub(crate) fn entrega(&mut self, endpoint: &str) -> Result<String, String> {
         let antes_o = self.origem.marca()?;
         let antes_d = self.destino.marca()?;
         let c = self.carteiro()?;
@@ -770,7 +770,7 @@ impl Par {
 
     /// Se o destino escuta a porta do enlace — com uma relação, e só com
     /// ela —, e o registro dele diz a relação quando escuta.
-    fn destino_escuta(&mut self, deve: bool) -> Result<(), String> {
+    pub(crate) fn destino_escuta(&mut self, deve: bool) -> Result<(), String> {
         let registro = self.destino.registro()?;
         let escuta = registro.contains(r#""listening":true"#);
         let relacionado =
@@ -823,7 +823,7 @@ impl Par {
     }
 
     /// O correio do destino, lançado pela pessoa: o endpoint.
-    fn correio(&mut self) -> Result<String, String> {
+    pub(crate) fn correio(&mut self) -> Result<String, String> {
         let desde = self.destino.marca()?.log;
         self.destino.lancar("correio")?;
         match self.destino.esperar_dito(
@@ -870,7 +870,7 @@ fn registrar(
 }
 
 /// Uma porta livre do hospedeiro, para o `hostfwd` do destino.
-fn porta_livre() -> Result<u16, String> {
+pub(crate) fn porta_livre() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
@@ -880,7 +880,7 @@ fn porta_livre() -> Result<u16, String> {
 /// O resumo da imagem do carteiro de `arch` — o que o kernel de lá calcula
 /// ao carregá-la —, nos oito primeiros dígitos, como a auditoria do
 /// destino o grava.
-fn atestado_do_carteiro(arch: Arquitetura) -> Result<String, String> {
+pub(crate) fn atestado_do_carteiro(arch: Arquitetura) -> Result<String, String> {
     let caminho = super::raiz_do_projeto()
         .join("programas/target")
         .join(arch.alvo())

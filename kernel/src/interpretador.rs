@@ -965,7 +965,7 @@ pub fn definir(valor: &str) -> Result<(), &'static str> {
 /// A recusa de quem edita, pela árvore, a linha que pede o nome ou uma
 /// senha: o login e a troca da própria senha são de quem está no teclado.
 const LINHA_DA_PESSOA: &str =
-    "a linha esta pedindo o nome ou uma senha de uma pessoa; so se digita pelo teclado";
+    "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se digita pelo teclado";
 
 fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     let (aberto, modo, inicio) =
@@ -1027,7 +1027,7 @@ pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
         && com_fisico(|e| e.modo) != Modo::Comando
     {
         return Err(
-            "a linha esta pedindo o nome ou uma senha de uma pessoa; so se confirma pelo teclado",
+            "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se confirma pelo teclado",
         );
     }
     if ocupado(Console::Fisico) {
@@ -1332,6 +1332,13 @@ pub fn pedindo_senha(console: Console) -> bool {
 pub const PESSOA_DE_TESTE: &str = "pessoa-de-teste";
 #[cfg(feature = "modo-teste")]
 pub const PAPEL_DA_PESSOA_DE_TESTE: &str = "operador";
+
+/// Só para a suíte: a abertura de agora do console — a que a cerimônia de
+/// pareamento guarda ao abrir.
+#[cfg(feature = "modo-teste")]
+pub fn abertura_de_teste(console: Console) -> u64 {
+    com_estado(console, |e| e.abertura).unwrap_or(0)
+}
 
 /// Põe uma pessoa num console, direto — ver [`ativar_para_teste`].
 #[cfg(feature = "modo-teste")]

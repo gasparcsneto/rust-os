@@ -1102,12 +1102,12 @@ impl Lado {
             // dela até o fim — um quadro de enlace nela a encerra, ali.
             (EstadoDoLado::Aguardando, Tipo::PedidoDaChave | Tipo::InicioPareamento)
             | (EstadoDoLado::Pareamento, _) => {
-                self.estado = if crate::pareamento::quadro_na_vaga(self.v, self.geracao, tipo, &corpo)
-                {
-                    EstadoDoLado::Pareamento
-                } else {
-                    EstadoDoLado::Encerrada
-                };
+                self.estado =
+                    if crate::pareamento::quadro_na_vaga(self.v, self.geracao, tipo, &corpo) {
+                        EstadoDoLado::Pareamento
+                    } else {
+                        EstadoDoLado::Encerrada
+                    };
             }
             _ => self.encerrar(ponta, "quadro fora de ordem"),
         }

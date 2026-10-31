@@ -515,18 +515,18 @@ const PROGRAMA_ATESTADO: [u8; 32] = [0xab; 32];
 
 /// O motivo, na auditoria, da recusa de um comando de fora do conjunto
 /// fechado pedido de outro dispositivo.
-const FORA_DO_CONJUNTO: &str = "de outro dispositivo so chega o conjunto fechado";
+pub(super) const FORA_DO_CONJUNTO: &str = "de outro dispositivo so chega o conjunto fechado";
 
 /// A primeira vaga do enlace.
-const VAGA: u8 = crate::rede::canal::VAGAS + 1;
+pub(super) const VAGA: u8 = crate::rede::canal::VAGAS + 1;
 
 /// A ponta de teste de uma vaga do enlace: guarda o que o respondedor
 /// manda, a chave que ele confirmou e se ele encerrou.
 #[derive(Default)]
-struct PontaDeTeste {
+pub(super) struct PontaDeTeste {
     saida: Vec<u8>,
     confirmada: Option<[u8; 32]>,
-    encerrou: bool,
+    pub(super) encerrou: bool,
 }
 
 impl Ponta for PontaDeTeste {
@@ -554,9 +554,9 @@ impl Ponta for PontaDeTeste {
 /// Outro Duke, do lado de lá de uma vaga do enlace: a suíte, com a chave de
 /// teste dele, falando com o respondedor de verdade — o aperto, os
 /// quadros, a cifra.
-struct Par {
-    lado: Lado,
-    ponta: PontaDeTeste,
+pub(super) struct Par {
+    pub(super) lado: Lado,
+    pub(super) ponta: PontaDeTeste,
     leitor: Leitor,
     transporte: Option<sigilo::Transporte>,
     /// O quadro da primeira mensagem do último aperto, para repetir.
@@ -564,7 +564,7 @@ struct Par {
 }
 
 impl Par {
-    fn novo(v: u8, geracao: u64) -> Par {
+    pub(super) fn novo(v: u8, geracao: u64) -> Par {
         let mut lado = Lado::nova(v, 0);
         lado.conexao(geracao);
         Par {
@@ -598,7 +598,7 @@ impl Par {
 
     /// O aperto com a chave `privada` e a época `epoca`: `Ok(Ok)` com a
     /// resposta aberta, `Ok(Err)` com a recusa em claro.
-    fn apertar(
+    pub(super) fn apertar(
         &mut self,
         privada: &[u8; 32],
         epoca: [u8; 8],
@@ -631,7 +631,7 @@ impl Par {
     }
 
     /// Cifra e manda `claro` num quadro de dados.
-    fn mandar_dados(&mut self, claro: &[u8]) -> Result<(), &'static str> {
+    pub(super) fn mandar_dados(&mut self, claro: &[u8]) -> Result<(), &'static str> {
         let t = self.transporte.as_mut().ok_or("o par nao tem transporte")?;
         let mut c = alloc::vec![0u8; claro.len() + 64];
         let n = t
@@ -645,7 +645,7 @@ impl Par {
     /// Um pedido pelo enlace, pela relação `relacao`: `Ok(Ok)` com o
     /// envelope que o gate daqui escreveu, `Ok(Err)` com a recusa em claro
     /// de quem encerrou o enlace.
-    fn pedir(
+    pub(super) fn pedir(
         &mut self,
         relacao: &str,
         metodo: &str,
@@ -692,7 +692,7 @@ impl Par {
 
 /// O código de um envelope: `ALLOW` se o resultado diz `ok`, o da recusa do
 /// gate, ou o `code` do resultado.
-fn codigo_do_envelope(envelope: &str) -> String {
+pub(super) fn codigo_do_envelope(envelope: &str) -> String {
     let j = Json(envelope.as_bytes());
     if let Some(e) = j.member("error") {
         return e
@@ -714,7 +714,7 @@ fn codigo_do_envelope(envelope: &str) -> String {
 /// Roda `f` com a malha, os dispositivos e o enlace vazios, e confere no
 /// fim que a tabela do enlace, o registro e a malha não quebraram as regras
 /// deles.
-fn com_o_enlace(f: impl FnOnce() -> Resultado) -> Resultado {
+pub(super) fn com_o_enlace(f: impl FnOnce() -> Resultado) -> Resultado {
     super::com_a_malha(|| {
         com_dispositivos_de_teste(|| {
             crate::enlace::esvaziar_de_teste();
@@ -734,7 +734,7 @@ fn com_o_enlace(f: impl FnOnce() -> Resultado) -> Resultado {
 
 /// Relaciona o dispositivo de teste `n`, como `nome`, à pessoa `pessoa`,
 /// com o papel `papel` e a relação `relacao`.
-fn relacionar(
+pub(super) fn relacionar(
     pessoa: sigilo::pessoas::IdPessoa,
     nome: &str,
     n: u8,
@@ -753,7 +753,7 @@ fn relacionar(
 }
 
 /// A pessoa `nome` com uma sessão aberta: a sessão e o identificador.
-fn pessoa_com_sessao(
+pub(super) fn pessoa_com_sessao(
     nome: &str,
     papel: &str,
 ) -> Result<(crate::pessoas::IdSessao, sigilo::pessoas::IdPessoa), &'static str> {
@@ -764,7 +764,7 @@ fn pessoa_com_sessao(
 
 /// A política padrão com `de` trocado por `para`, posta em vigor. O caso
 /// volta à do disco no fim — ver `com_a_malha`.
-fn politica_com(de: &str, para: &str) -> Resultado {
+pub(super) fn politica_com(de: &str, para: &str) -> Resultado {
     let texto = politica::PADRAO.replace(de, para);
     if texto == politica::PADRAO {
         return Err("a troca da politica do caso nao achou o trecho");
@@ -776,7 +776,7 @@ fn politica_com(de: &str, para: &str) -> Resultado {
 
 /// O impostor de `autoridade`, oferecendo a intenção dos casos: ele não lê
 /// o que chega, e as entregas ficam pendentes. O endpoint.
-fn endpoint_que_nao_le(autoridade: Autoridade) -> Result<String, &'static str> {
+pub(super) fn endpoint_que_nao_le(autoridade: Autoridade) -> Result<String, &'static str> {
     super::NaMalha::lancar("impostor", autoridade, "impostor: pronto")?;
     let (_, endpoint) = super::passo_na_malha(
         super::CANAL_DO_IMPOSTOR,
