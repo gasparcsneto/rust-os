@@ -37205,6 +37205,10 @@ static CASOS: &[Caso] = &[
         f: pareamento::pareamento_duas_pessoas_o_mesmo_dispositivo,
     },
     Caso {
+        nome: "pareamento: parear e esquecer ao mesmo tempo",
+        f: pareamento::pareamento_parear_e_esquecer_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "pareamento: esquecer a propria relacao",
         f: pareamento::pareamento_esquecer_a_propria_relacao,
     },

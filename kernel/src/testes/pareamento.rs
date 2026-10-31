@@ -657,6 +657,13 @@ fn parear_aceitando(
 ) -> Result<Contas, &'static str> {
     aceitar(console, nome)?;
     let k = ate_os_codigos(console, ini)?;
+    concluir_aceitando(console, ini, k)?;
+    Ok(k)
+}
+
+/// Dos códigos ao fim, com este Duke aceitando: o código e a senha aqui, o
+/// `conferido` de lá, a gravação na vez do console, os dois `gravado`.
+fn concluir_aceitando(console: Console, ini: &mut Iniciante, k: Contas) -> Resultado {
     conferir_aqui(console, k.k_a)?;
     if ini.ouvir()?.mensagens != [CONFERIDO] {
         return Err("a confirmacao daqui nao mandou o conferido");
@@ -687,8 +694,7 @@ fn parear_aceitando(
         Lado::Aceita,
         Desfecho::Concluida,
         "o gravado do outro nao concluiu a cerimonia",
-    )?;
-    Ok(k)
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -3101,6 +3107,155 @@ pub(super) fn pareamento_duas_pessoas_o_mesmo_dispositivo() -> Resultado {
             Codigo::InvalidArgument,
         )?;
         digitar(CONSOLE, "");
+        Ok(())
+    })
+}
+
+/// A decisão do `device.forget` que [`esquecer_no_meio`] pediu.
+static ESQUECIDA_NO_MEIO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// No ponto do commit, dentro de `em_ordem`: a Pessoa de [`quem_no_meio`]
+/// esquece a relação dela com o dispositivo dos casos.
+fn esquecer_no_meio() {
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    if let Some((s, _)) = quem_no_meio() {
+        let r = esquecer(s, NOME);
+        let d = super::fs_numero(&r, "decision").unwrap_or(0);
+        ESQUECIDA_NO_MEIO.store(d, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// pair × forget: outra Pessoa esquece a relação dela com o dispositivo com
+/// que esta pareia — no meio da cerimônia, e no ponto do commit, dentro de
+/// `em_ordem`. O esquecimento é só o dela: a cerimônia não muda, segue e
+/// grava. A desfeita da última relação tira o dispositivo do registro, e a
+/// gravação o põe de volta, só com a relação nova. No journal, a desfeita
+/// que entrou no commit vem antes da gravação, cada uma com a decisão dela,
+/// e a reposição, na ordem do journal, dá o mesmo registro.
+pub(super) fn pareamento_parear_e_esquecer_ao_mesmo_tempo() -> Resultado {
+    use core::sync::atomic::Ordering;
+    com_a_cerimonia(|| {
+        let (_, bia) = entrar(CONSOLE, "bia")?;
+        let (caio_sessao, caio) = entrar(OUTRO_CONSOLE, "caio")?;
+        let chave = chave_de_dispositivo(1);
+        let mut c = Iniciante::novo(VAGA, 2_001_960, 1);
+        let kc = parear_aceitando(OUTRO_CONSOLE, NOME, &mut c)?;
+        gravada_como(NOME, caio, &chave, &kc.r, None)?;
+        // No meio: Bia nos códigos, com o mesmo dispositivo; Caio esquece a
+        // dele — a última do dispositivo.
+        recomecar();
+        let mut b = Iniciante::novo(VAGA, 2_001_961, 1);
+        aceitar(CONSOLE, NOME)?;
+        let kb = ate_os_codigos(CONSOLE, &mut b)?;
+        let antes = estado();
+        let r = esquecer(caio_sessao, NOME);
+        if fs_bool(&r, "forgotten") != Some(true) || fs_bool(&r, "device_left") != Some(true) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a ultima relacao, esquecida no meio da cerimonia, nao tirou o dispositivo");
+        }
+        if estado() != antes || linha(CONSOLE) != Linha::Codigo {
+            return Err("o esquecimento de outra pessoa mexeu na cerimonia");
+        }
+        if crate::dispositivos::dispositivo(&chave).is_some() {
+            return Err("a ultima relacao saiu e o dispositivo ficou no registro");
+        }
+        let seq_b = crate::autorizacao::ultimo_registro();
+        let antes_b = super::registros_do_journal()?.len();
+        concluir_aceitando(CONSOLE, &mut b, kb)?;
+        let rb = gravada_como(NOME, bia, &chave, &kb.r, None)?;
+        let d = crate::dispositivos::dispositivo(&chave)
+            .ok_or("a gravacao nao pos o dispositivo de volta")?;
+        if d.relacoes.len() != 1 {
+            return Err("o dispositivo voltou com mais que a relacao nova");
+        }
+        let r42b = no_journal(
+            antes_b,
+            &chave,
+            NOME,
+            &rb,
+            decisao_da_gravacao(seq_b, NOME, &chave, &kb.r, CONSOLE)?,
+        )?;
+        // No ponto do commit da cerimônia de Dani: Caio, que pareou de novo,
+        // esquece a dele dentro da gravação dela.
+        recomecar();
+        let seq_c = crate::autorizacao::ultimo_registro();
+        let antes_c = super::registros_do_journal()?.len();
+        let mut c2 = Iniciante::novo(VAGA, 2_001_962, 1);
+        let kc2 = parear_aceitando(OUTRO_CONSOLE, NOME, &mut c2)?;
+        let rc2 = gravada_como(NOME, caio, &chave, &kc2.r, None)?;
+        let r42c = no_journal(
+            antes_c,
+            &chave,
+            NOME,
+            &rc2,
+            decisao_da_gravacao(seq_c, NOME, &chave, &kc2.r, OUTRO_CONSOLE)?,
+        )?;
+        recomecar();
+        crate::interpretador::abrir_console(CONSOLE);
+        let (_, dani) = entrar(CONSOLE, "dani")?;
+        let seq_d = crate::autorizacao::ultimo_registro();
+        let antes_d = super::registros_do_journal()?.len();
+        let mut dn = Iniciante::novo(VAGA, 2_001_963, 1);
+        let kd = ate_o_commit(CONSOLE, NOME, &mut dn)?;
+        ESQUECIDA_NO_MEIO.store(0, Ordering::Release);
+        crate::arch::sem_interrupcoes(|| *NO_MEIO.lock() = Some((caio_sessao, caio)));
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(esquecer_no_meio));
+        crate::pareamento::no_console();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::arch::sem_interrupcoes(|| *NO_MEIO.lock() = None);
+        let o = dn.ouvir()?;
+        if o.mensagens != [gravado(&kd.r)] {
+            crate::log_error!("teste", "{:?}", o);
+            return Err("o esquecimento de outra pessoa no commit impediu a gravacao");
+        }
+        dn.mandar(&gravado(&kd.r))?;
+        acabou_com(
+            Lado::Aceita,
+            Desfecho::Concluida,
+            "a cerimonia com o esquecimento no commit nao concluiu",
+        )?;
+        let rd = gravada_como(NOME, dani, &chave, &kd.r, None)?;
+        if crate::dispositivos::da_pessoa(NOME, &caio.0).is_some() {
+            return Err("a relacao esquecida no commit ficou");
+        }
+        let d = crate::dispositivos::dispositivo(&chave).ok_or("o dispositivo saiu")?;
+        if d.relacoes.len() != 2 {
+            return Err("o dispositivo nao ficou com as relacoes de bia e de dani");
+        }
+        // O journal: a desfeita que entrou no commit, antes da gravação.
+        let esquecida = ESQUECIDA_NO_MEIO.load(Ordering::Acquire);
+        let r44 = desfeita_no_journal(antes_d, &chave, &kc2.r, NOME, esquecida)?;
+        let r42d = no_journal(
+            antes_d,
+            &chave,
+            NOME,
+            &rd,
+            decisao_da_gravacao(seq_d, NOME, &chave, &kd.r, CONSOLE)?,
+        )?;
+        let todos = super::registros_do_journal()?;
+        let pos = |x: &diario::Registro| todos.iter().position(|y| y == x);
+        if pos(&r44) >= pos(&r42d) {
+            return Err("no journal, a gravacao veio antes da desfeita que entrou no commit");
+        }
+        // A reposição, na ordem do journal.
+        let mut ordem = [r42b, r42c, r44, r42d];
+        ordem.sort_by_key(|x| pos(x));
+        crate::dispositivos::esquecer_de_teste();
+        crate::persistencia::em_ordem(|| -> Resultado {
+            for x in &ordem {
+                crate::persistencia::reaplicar_de_teste(x)?;
+            }
+            Ok(())
+        })?;
+        let todas = crate::dispositivos::relacoes();
+        if todas.len() != 2
+            || !todas.iter().any(|t| t.2 == rb)
+            || !todas.iter().any(|t| t.2 == rd)
+            || !crate::dispositivos::lapides().is_empty()
+        {
+            crate::log_error!("teste", "{:?}", todas);
+            return Err("a reposicao nao deu as relacoes de bia e de dani, sem lapide");
+        }
         Ok(())
     })
 }
