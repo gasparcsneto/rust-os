@@ -2828,7 +2828,8 @@ fn conferir_o_tempo() -> ExitCode {
 ///
 /// # A regra
 ///
-/// Em cada `politica_trocada(&[…])` da suíte, o texto que sai de cada troca
+/// Em cada `politica_trocada(&[…])` e `politica_da_bancada_icp(&[…])` da
+/// suíte, o texto que sai de cada troca
 /// — o primeiro do par — está em `politica::PADRAO`; e o de cada
 /// `PADRAO.replace("…"` e de cada `politica_com("…"` (a troca dos casos do
 /// enlace), também.
@@ -2886,15 +2887,21 @@ fn conferir_os_trechos_da_politica() -> Result<ExitCode, String> {
 }
 
 /// Os textos que a suíte tira da política padrão, com a posição de cada um
-/// na fonte: o primeiro de cada par de `politica_trocada(&[…])`, e o de
+/// na fonte: o primeiro de cada par de `politica_trocada(&[…])` e de
+/// `politica_da_bancada_icp(&[…])`, e o de
 /// `PADRAO.replace("…"` e de `politica_com("…"`. Um trecho que não é
 /// literal fica de fora.
 fn trechos_trocados(fonte: &str) -> Vec<(usize, String)> {
     let bytes = fonte.as_bytes();
     let mut trechos = Vec::new();
-    const TROCADA: &str = "politica_trocada(&[";
-    for (inicio, _) in fonte.match_indices(TROCADA) {
-        let mut i = inicio + TROCADA.len();
+    // `politica_da_bancada_icp` aplica as trocas dela sobre a política
+    // padrão, como `politica_trocada`: o trecho que sai também tem de estar
+    // lá.
+    let chamadas = ["politica_trocada(&[", "politica_da_bancada_icp(&["]
+        .iter()
+        .flat_map(|c| fonte.match_indices(c).map(move |(i, _)| i + c.len()));
+    for comeco in chamadas {
+        let mut i = comeco;
         // A profundidade dentro da lista: 1 no par, mais nos argumentos de
         // um `format!` dentro dele.
         let mut fundo = 0usize;
