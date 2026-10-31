@@ -13,8 +13,10 @@
 //!   lápide de dispositivo — ver [`conhecida`].
 //! - **Só por quem pode.** Registrar e revogar são operações
 //!   administrativas, com prova — `device.register` e `device.revoke`, em
-//!   `agent::administracao` —, e a reposição do journal no boot. Nada mais
-//!   muda o registro; o `xtask` confere.
+//!   `agent::administracao` —; a Pessoa registra a relação dela pela
+//!   cerimônia de pareamento e a desfaz por `device.forget`, os dois em
+//!   [`crate::pareamento`], decididos pelo gate; e a reposição do journal
+//!   no boot. Nada mais muda o registro; o `xtask` confere.
 //! - **Gravado antes de responder.** A operação muda a memória e a
 //!   persistência grava o resultado — a linha da relação, ou a lápide — no
 //!   journal, na mesma ordem das gravações; o que foi concedido e não ficou
@@ -114,12 +116,38 @@ fn chave_de_outro_principal(chave: &[u8; 32]) -> Result<(), Recusa> {
 }
 
 /// Registra a relação `relacao` do dispositivo `chave`, de nome `nome`. Só
-/// a operação administrativa chama, depois da prova e da decisão — e com a
+/// a operação administrativa chama, depois da prova e da decisão — e o
+/// commit da cerimônia de pareamento, depois da reconfirmação —, com a
 /// ordem das gravações na mão, como toda operação que concede: um registro
 /// de agente da mesma chave não passa entre a conferência e a inserção.
 pub fn registrar(chave: [u8; 32], nome: &str, relacao: Relacao) -> Result<(), Recusa> {
     chave_de_outro_principal(&chave)?;
     com_registro(|r| r.registrar(chave, nome, relacao)).map_err(Recusa::from)
+}
+
+/// A chave pode ser par de uma cerimônia de pareamento: não é a deste
+/// Duke, nem a de um agente, nem a de um administrador, e não tem lápide.
+/// O registro confere de novo no commit.
+pub fn pode_ser_par(chave: &[u8; 32]) -> Result<(), Recusa> {
+    chave_de_outro_principal(chave)?;
+    if com_registro(|r| r.revogada(chave)) {
+        return Err(Recusa::Registro(RecusaDoRegistro::Revogada));
+    }
+    Ok(())
+}
+
+/// Desfaz a relação `id` do dispositivo `chave` — `device.forget`, ou o
+/// lado da cerimônia que gravou e desfaz: só ela sai; se era a última, o
+/// dispositivo sai junto, **sem lápide**. Devolve a relação e se o
+/// dispositivo saiu. Quem chama grava (o registro 44, com a decisão) e
+/// desfaz o resto — os enlaces, as entregas.
+pub fn esquecer(chave: &[u8; 32], id: &[u8; TAM_ID]) -> Result<(Relacao, bool), Recusa> {
+    com_registro(|r| r.esquecer(chave, id)).map_err(Recusa::from)
+}
+
+/// Repõe uma relação desfeita, no boot: idempotente, e nunca lápide.
+pub fn aplicar_desfeita(chave: &[u8; 32], id: &[u8; TAM_ID]) {
+    com_registro(|r| r.aplicar_desfeita(chave, id));
 }
 
 /// Revoga o dispositivo `chave`: as relações saem, a chave ganha a lápide,

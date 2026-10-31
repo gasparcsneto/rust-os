@@ -3553,25 +3553,36 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
     ),
     // Quem escreve o registro de dispositivos (ver `kernel/src/dispositivos.rs`):
-    // a relação nasce pela operação administrativa, com prova; o dispositivo
-    // sai inteiro, com lápide, pela revogação dela; e o journal repõe, no
-    // boot, a linha e a lápide — e a foto devolve o que uma gravação que
-    // falhou não deixou valer. Nenhum outro caminho concede, tira ou põe
-    // lápide.
+    // a relação nasce pela operação administrativa, com prova, ou pelo
+    // commit da cerimônia de pareamento da Pessoa, reconfirmado pelo gate;
+    // uma relação sai pela Pessoa dela (`device.forget`, ou o lado que
+    // gravou e desfaz porque o outro desistiu), sem lápide; o dispositivo
+    // sai inteiro, com lápide, só pela revogação administrativa; e o
+    // journal repõe, no boot, a linha, a desfeita e a lápide — e a foto
+    // devolve o que uma gravação que falhou não deixou valer. Nenhum outro
+    // caminho concede, tira ou põe lápide.
     (
         "dispositivos::registrar(",
-        &["kernel/src/agent/administracao.rs"],
+        &[
+            "kernel/src/agent/administracao.rs",
+            "kernel/src/pareamento.rs",
+        ],
     ),
     (
         "dispositivos::revogar(",
         &["kernel/src/agent/administracao.rs"],
     ),
+    ("dispositivos::esquecer(", &["kernel/src/pareamento.rs"]),
     (
         "dispositivos::restaurar_linha(",
         &["kernel/src/persistencia.rs"],
     ),
     (
         "dispositivos::aplicar_lapide(",
+        &["kernel/src/persistencia.rs"],
+    ),
+    (
+        "dispositivos::aplicar_desfeita(",
         &["kernel/src/persistencia.rs"],
     ),
     ("dispositivos::restaurar(", &["kernel/src/persistencia.rs"]),

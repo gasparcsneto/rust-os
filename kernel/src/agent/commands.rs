@@ -805,6 +805,21 @@ pub static COMANDOS: &[Command] = &[
         handler: device_suspend,
     },
     Command {
+        nome: "device.forget",
+        resumo: "Desfaz a relacao da pessoa de quem pede com o dispositivo `device`: so ela sai, gravada no journal antes da resposta; se era a ultima do dispositivo, ele sai do registro, sem lapide, e os enlaces dele caem. As entregas que chegaram por ela sao anuladas, e os pedidos por ela falham. O nome se resolve no espaco de quem pede: a relacao de outra pessoa responde o mesmo que a que nao existe (DENY_RESOURCE). O outro dispositivo nao e avisado. Revogar o dispositivo inteiro e device.revoke.",
+        params: &[ParamSpec {
+            nome: "device",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O dispositivo, `dispositivo:<nome>`, o nome local. E o recurso que o gate decide.",
+        }],
+        acesso: Acesso::Exige(Permissao::DeviceForget),
+        recurso: Some("device"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: device_forget,
+    },
+    Command {
         nome: "device.resume",
         resumo: "Retoma o dispositivo suspenso. Pela mesma permissao.",
         params: &[ParamSpec {
@@ -3054,7 +3069,31 @@ fn device_registry(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
     w.end_array()?;
     w.field_u64("pending", crate::enlace::pedidos() as u64)?;
-    w.field_bool("listening", crate::dispositivos::ha_relacao())?;
+    w.field_bool(
+        "listening",
+        crate::dispositivos::ha_relacao() || crate::pareamento::escutando(),
+    )?;
+    // A cerimônia de pareamento em curso, se há uma: o lado, o passo, o
+    // nome, a impressão do par e o tempo que falta. Nunca o código, o
+    // nonce, o desafio ou o resumo do aperto. Volátil.
+    w.key("pairing")?;
+    match crate::pareamento::resumo() {
+        Some(r) => {
+            w.begin_object()?;
+            w.field_str("side", r.lado)?;
+            w.field_str("step", r.passo)?;
+            w.field_str("device", &r.nome)?;
+            w.key("peer")?;
+            match &r.par {
+                Some(p) => w.str_value(p)?,
+                None => w.null_value()?,
+            }
+            w.field_u64("remaining_ms", r.restante_ms)?;
+            w.field_str("console", &r.console)?;
+            w.end_object()?;
+        }
+        None => w.null_value()?,
+    }
     w.end_object()
 }
 
@@ -8285,6 +8324,39 @@ fn device_suspend(params: Json, w: &mut JsonWriter) -> fmt::Result {
 
 fn device_resume(params: Json, w: &mut JsonWriter) -> fmt::Result {
     conter_dispositivo(params.member("device"), false, w)
+}
+
+/// `device.forget`: a relação da pessoa de quem pede com o dispositivo sai —
+/// ver [`crate::pareamento::esquecer_pelo_comando`].
+fn device_forget(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let recurso = texto_de(params.member("device"));
+    match crate::pareamento::esquecer_pelo_comando(recurso) {
+        Ok(e) => {
+            let id = politica::dispositivos::id_texto(&e.relacao);
+            let registro = crate::autorizacao::auditar_execucao(
+                recurso,
+                politica::Codigo::Allow,
+                &alloc::format!(
+                    "relacao {} desfeita; {} entregas anuladas",
+                    &id[..8],
+                    e.anuladas
+                ),
+            );
+            w.field_bool("forgotten", true)?;
+            w.field_str("device", recurso)?;
+            w.field_str("key", &crate::identidade::impressao(&e.chave))?;
+            w.field_str("relation", &id)?;
+            w.field_bool("device_left", e.dispositivo_saiu)?;
+            w.field_u64("annulled", e.anuladas as u64)?;
+            w.field_u64("record", registro)?;
+            if let Some(d) = crate::autorizacao::decisao_atual() {
+                w.field_u64("decision", d)?;
+            }
+            w.end_object()
+        }
+        Err((codigo, motivo)) => falha_de_chave(w, "forgotten", recurso, codigo, motivo),
+    }
 }
 
 /// O alvo de `credential.*`: a pessoa ou a chave — um dos dois.

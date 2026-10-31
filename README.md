@@ -260,6 +260,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `credential.resume` | Retoma a credencial suspensa (`person` ou `key`) |
 | `device.suspend` | Suspende um dispositivo relacionado: continua no registro, mas o aperto do enlace dele e os pedidos que chegam dele são recusados, e nada daqui vai a ele; os enlaces caem. Não é revogação; o alcance é o dispositivo (`device`, `dispositivo:<nome>`) |
 | `device.resume` | Retoma o dispositivo suspenso (`device`) |
+| `device.forget` | Desfaz a relação **da pessoa de quem pede** com um dispositivo — só ela, sem lápide, gravada no journal antes da resposta; se era a última, o dispositivo sai do registro e os enlaces dele caem. As entregas que chegaram por ela são anuladas. O nome se resolve no espaço de quem pede: a relação de outra pessoa é `DENY_RESOURCE`, como a que não existe (`device`, `dispositivo:<nome>`) |
 | `containment.list` | As contenções que valem agora, para quem investiga e recupera — voláteis: nenhuma sobrevive a um boot |
 | `video.sample` | Amostra a tela numa grade de cores (`columns`, `rows`) |
 | `display.info` | A pilha gráfica: adaptador ativo, telas, as camadas do compositor, memória das superfícies, o último retângulo que chegou à tela e, no virtio-gpu, o que atravessou para o dispositivo |
@@ -320,6 +321,7 @@ kernel/src/
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
 ├── enlace.rs        o enlace entre dispositivos: o pedido da malha a outro Duke, na origem (a tabela, o serviço que leva) e no destino (o respondedor, o gate como o dispositivo)
+├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: `aceitar` e `parear` no console, o aperto na porta do enlace e no fio da cerimônia, o código e a senha, o commit reconfirmado pelo gate, e `device.forget`
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
 ├── volume.rs        o volume do armazém na partição própria: blocos cifrados, o journal dos metadados, o ponto de commit no de estado
 ├── copia.rs         a cópia de segurança do armazém e a restauração dela: cifrada para esta máquina e esta instalação, conferida inteira, trocada como uma base do volume num commit só

@@ -3375,6 +3375,118 @@ pub fn auditar_troca_da_propria_senha(
     seq
 }
 
+/// O método da cerimônia de pareamento — o nome da permissão —, na
+/// auditoria e no marcador da operação no journal.
+pub const PAREAMENTO: &str = "device.pair";
+
+/// O método de desfazer uma relação — o nome da permissão.
+pub const ESQUECIMENTO: &str = "device.forget";
+
+/// O método do aperto de uma cerimônia de pareamento, no Duke que aceita:
+/// como o `link.open` do enlace, de ninguém ainda.
+pub const APERTO_DO_PAREAMENTO: &str = "pair.open";
+
+/// A pessoa da sessão `sessao` pode abrir — ou gravar, no commit — uma
+/// cerimônia de pareamento para o dispositivo de nome `nome`? As mesmas
+/// perguntas, na mesma ordem, da troca da própria senha: a sessão vale; o
+/// journal não foi recusado; nem a sessão nem a credencial estão contidas;
+/// o papel não é um teto. E então a política: `device.pair` — sem alcance
+/// — **e** `device.forget dispositivo:<nome>`: ninguém cria uma relação que
+/// não consiga desfazer, e o nome fica enumerado pela política, como todo
+/// alcance de dispositivo. Só a sessão de uma pessoa chega aqui: nem o
+/// `sistema`, nem a serial, nem um agente, nem um processo.
+///
+/// Decide quem **pode**, e não quem **é**: a prova — o código digitado nos
+/// dois teclados e a senha — é a cerimônia. Não grava: quem pergunta grava
+/// o desfecho, com [`auditar_pareamento`].
+pub fn decidir_pareamento(sessao: crate::pessoas::IdSessao, nome: &str) -> (Codigo, &'static str) {
+    let Ok(quem) = quem_da_pessoa(sessao) else {
+        return (Codigo::DenyNotAuthenticated, "sessao de pessoa que acabou");
+    };
+    if crate::persistencia::revogacoes_desconhecidas().is_some() {
+        return (
+            Codigo::DenyNotAuthenticated,
+            "journal recusado: as revogacoes nao se sabem",
+        );
+    }
+    if let Some(recusa) =
+        crate::contencao::recusa(Chamador::Pessoa(sessao), Autoridade::Pessoa { sessao })
+    {
+        return recusa;
+    }
+    if papel_de_teto(&quem) {
+        return TETO_NAO_SE_EXERCE;
+    }
+    let (codigo, motivo) = decidir(quem.papel.as_deref(), Permissao::DevicePair, "");
+    if !codigo.permite() {
+        return (codigo, motivo);
+    }
+    let recurso = alloc::format!("{}{nome}", politica::arquivo::PREFIXO_DE_DISPOSITIVO);
+    match decidir(quem.papel.as_deref(), Permissao::DeviceForget, &recurso) {
+        (Codigo::Allow, _) => (Codigo::Allow, ""),
+        (Codigo::DenyPermission, _) => (
+            Codigo::DenyPermission,
+            "o papel nao tem device.forget: a relacao nao se desfaria",
+        ),
+        (codigo, _) => (
+            codigo,
+            "o nome nao esta no alcance de device.forget do papel",
+        ),
+    }
+}
+
+/// Grava um desfecho da cerimônia de pareamento — a abertura, a recusa, a
+/// gravação, o fim sem gravar —: a pessoa da sessão como titular, com o
+/// papel dela de agora, se a sessão ainda vale; o recurso,
+/// `dispositivo:<nome>`; o código e o detalhe. Nada da prova vai junto:
+/// nem o código de conferência, nem o nonce, nem a senha. Devolve o número
+/// do registro — o da gravação vai ao journal com a relação.
+pub fn auditar_pareamento(
+    sessao: crate::pessoas::IdSessao,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) -> u64 {
+    let (Ok(quem) | Err(quem)) = quem_da_pessoa(sessao);
+    let seq = auditar(&quem, PAREAMENTO, recurso, codigo, &[], detalhe);
+    if codigo.permite() {
+        contar(&quem, PAREAMENTO, Some(Permissao::DevicePair));
+    }
+    seq
+}
+
+/// Grava o desfazimento de uma relação que a própria cerimônia gravou e o
+/// outro lado desistiu de gravar: a pessoa da sessão como titular, o
+/// recurso `dispositivo:<nome>`. Tirar é a direção segura: o desfazimento
+/// não depende de a sessão ainda valer.
+pub fn auditar_esquecimento(
+    sessao: crate::pessoas::IdSessao,
+    recurso: &str,
+    codigo: Codigo,
+    detalhe: &str,
+) -> u64 {
+    let (Ok(quem) | Err(quem)) = quem_da_pessoa(sessao);
+    auditar(&quem, ESQUECIMENTO, recurso, codigo, &[], detalhe)
+}
+
+/// Grava um aperto de cerimônia de pareamento no Duke que aceita, de
+/// ninguém ainda, com a chave que ele alegou — ou nenhuma, se nem a
+/// primeira mensagem abriu.
+pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, detalhe: &str) {
+    let quem = Quem {
+        titular: Titular::Anonimo,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: String::new(),
+        chave,
+        papel: None,
+        processo: None,
+        servico: None,
+        remoto: None,
+    };
+    auditar(&quem, APERTO_DO_PAREAMENTO, "", codigo, &[], detalhe);
+}
+
 /// Pode nascer mais um processo com a autoridade `autoridade`? A cota de
 /// processos vivos do papel de quem é a autoridade — a linha `processos` da
 /// política —, contada por titular: uma sessão de agente, uma de pessoa, o

@@ -101,6 +101,7 @@ mod oleoduto;
 #[cfg(feature = "modo-teste")]
 mod ordem_das_travas;
 mod paginacao;
+mod pareamento;
 mod particoes;
 mod pci;
 mod persistencia;

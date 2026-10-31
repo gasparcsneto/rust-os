@@ -404,6 +404,27 @@ pub fn enviar_na_conexao(v: u8, geracao: u64, bytes: &[u8]) -> bool {
     enviar_se(v, Some(geracao), bytes)
 }
 
+/// Põe `bytes` na saída da conexão `geracao` da vaga `v`, sem fazer a pilha
+/// andar — quem chama a faz andar depois, com [`super::pilha::sondar`],
+/// fora das travas dele. É o que a cerimônia de pareamento usa para cifrar
+/// e enfileirar uma mensagem na mesma trava: a ordem em que elas se
+/// cifram é a ordem em que saem, venha de onde vier cada uma — ver
+/// [`crate::pareamento`].
+pub fn enfileirar_na_conexao(v: u8, geracao: u64, bytes: &[u8]) -> bool {
+    com_vaga(v, |f| {
+        if geracao != f.geracao || !f.aberta || f.fechar {
+            return false;
+        }
+        if f.saida.len() + bytes.len() > MAIOR_SAIDA {
+            f.perdidos_na_saida += bytes.len() as u64;
+            return false;
+        }
+        f.saida.extend(bytes.iter().copied());
+        true
+    })
+    .unwrap_or(false)
+}
+
 fn enviar_se(v: u8, geracao: Option<u64>, bytes: &[u8]) -> bool {
     let aceito = com_vaga(v, |f| {
         if geracao.is_some_and(|g| g != f.geracao) {

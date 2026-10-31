@@ -822,6 +822,35 @@ pub fn pode_trocar_a_propria_senha(
     Ok(())
 }
 
+/// A senha da dona da sessão `sessao`, de novo, na confirmação de uma
+/// cerimônia de pareamento: a mesma conferência do login — o mesmo
+/// Argon2id, contra a credencial de agora — e a mesma janela de tentativas
+/// do console, que a do login e a da troca de senha também contam. Uma
+/// sessão esquecida aberta não pareia nada. A recusa por senha errada não
+/// é gravada aqui: quem chama grava o desfecho da cerimônia, uma vez.
+pub fn conferir_para_o_pareamento(
+    console: Console,
+    sessao: IdSessao,
+    senha: &[u8],
+) -> Result<(), (Codigo, &'static str)> {
+    let dona = match self::sessao(sessao) {
+        EstadoDaSessao::Ativa { pessoa, .. } => self::pessoa(pessoa),
+        _ => None,
+    };
+    let Some(pessoa) = dona.filter(|p| p.estado == Estado::Ativa) else {
+        return Err((Codigo::DenyNotAuthenticated, "a sessao acabou"));
+    };
+    if !contar_tentativa(console, crate::autorizacao::PAREAMENTO) {
+        return Err((Codigo::RateLimit, RecusaDeLogin::Tentativas.resposta()));
+    }
+    let cabe = senha.len() <= MAIOR_SENHA;
+    match conferir(&pessoa.credencial, if cabe { senha } else { &[] }) {
+        None => Err((Codigo::Error, "sem memoria para conferir a senha")),
+        Some(true) if cabe => Ok(()),
+        Some(_) => Err((Codigo::DenyNotAuthenticated, "a senha nao conferiu")),
+    }
+}
+
 /// A senha nova: do tamanho de uma senha — a regra do provisionamento,
 /// [`sigilo::credencial::MENOR_SENHA`] —, dentro do teto que o kernel
 /// calcula, igual à confirmação, e outra que não a atual.

@@ -218,7 +218,8 @@ pub enum Motivo {
     ParSuspenso,
     /// A sessão da Pessoa acabou, ou ela foi revogada.
     FimDaSessao,
-    /// A decisão de novo, no commit, recusou — a política, o papel, o nome.
+    /// A decisão recusou — a política, o papel, o nome, a chave do par —, ao
+    /// conhecer a chave do outro ou de novo no commit.
     Recusada,
     /// A máquina está desligando.
     Desligamento,
@@ -226,6 +227,8 @@ pub enum Motivo {
     ForaDoProtocolo,
     /// O `gravado` do outro diz outra relação.
     RelacaoDiferente,
+    /// O aperto não fechou: quem respondeu não provou a chave que anunciou.
+    ParNaoProvou,
 }
 
 impl Motivo {
@@ -242,10 +245,11 @@ impl Motivo {
             Motivo::ParRevogado => "o par foi revogado",
             Motivo::ParSuspenso => "o par esta suspenso",
             Motivo::FimDaSessao => "a sessao acabou",
-            Motivo::Recusada => "a decisao no commit recusou",
+            Motivo::Recusada => "a decisao recusou",
             Motivo::Desligamento => "a maquina esta desligando",
             Motivo::ForaDoProtocolo => "quadro fora do protocolo",
             Motivo::RelacaoDiferente => "o outro gravou outra relacao",
+            Motivo::ParNaoProvou => "o par nao provou a chave",
         }
     }
 }
@@ -308,6 +312,9 @@ pub struct Cerimonia {
     gravada_aqui: bool,
     /// O `gravado` do outro chegou, com o mesmo `R`.
     gravado_la: bool,
+    /// A desistência que chegou durante a gravação: quem grava decide o
+    /// desfecho com ela — ver [`Cerimonia::desistir`].
+    pendente: Option<Motivo>,
 }
 
 impl Cerimonia {
@@ -344,6 +351,7 @@ impl Cerimonia {
             conferida_la: false,
             gravada_aqui: false,
             gravado_la: false,
+            pendente: None,
         }
     }
 
@@ -609,18 +617,41 @@ impl Cerimonia {
     }
 
     /// A gravação aqui terminou. Se o `gravado` do outro já veio, a
-    /// cerimônia acabou.
+    /// cerimônia acabou. Se uma desistência chegou durante a gravação, é
+    /// ela que acaba a cerimônia agora, com o que se gravou: o outro
+    /// desistiu (ou disse outra relação) — quem chama desfaz; qualquer
+    /// outra — a conexão, a sessão —, a relação fica deste lado, e o outro
+    /// não confirmou.
     pub fn gravada(&mut self) -> Result<(), Recusa> {
         if self.estado != Estado::Gravando {
             return Err(Recusa::ForaDeOrdem);
         }
         self.gravada_aqui = true;
-        if self.gravado_la {
-            self.terminar(Desfecho::Concluida);
-        } else {
-            self.estado = Estado::Gravada;
+        match self.pendente.take() {
+            Some(Motivo::OutroDesistiu | Motivo::RelacaoDiferente) => {
+                self.terminar(Desfecho::DesfazerAqui);
+            }
+            _ if self.gravado_la => self.terminar(Desfecho::Concluida),
+            Some(_) => self.terminar(Desfecho::GravadaSemAviso),
+            None => self.estado = Estado::Gravada,
         }
         Ok(())
+    }
+
+    /// A gravação aqui não aconteceu — a decisão de novo recusou, o
+    /// registro recusou, o journal falhou: nada gravado, por `motivo`.
+    pub fn nao_gravada(&mut self, motivo: Motivo) -> Result<Desfecho, Recusa> {
+        if self.estado != Estado::Gravando {
+            return Err(Recusa::ForaDeOrdem);
+        }
+        let d = Desfecho::Desfeita(motivo);
+        self.terminar(d);
+        Ok(d)
+    }
+
+    /// A desistência que espera a gravação em curso.
+    pub fn pendente(&self) -> Option<Motivo> {
+        self.pendente
     }
 
     /// O `gravado` do outro chegou, dizendo a relação `r`. Tem de ser a
@@ -652,9 +683,19 @@ impl Cerimonia {
     /// A cerimônia acaba por `motivo`. Devolve o desfecho: o que já estava
     /// gravado aqui fica — a menos que o outro tenha desistido ou dito outra
     /// relação, e então quem chama desfaz.
-    pub fn desistir(&mut self, motivo: Motivo) -> Desfecho {
+    ///
+    /// Com a gravação em curso, não acaba ainda: só ela sabe se gravou. A
+    /// desistência — a primeira — espera por ela, e `None`: o desfecho sai
+    /// de [`Cerimonia::gravada`] ou de [`Cerimonia::nao_gravada`].
+    pub fn desistir(&mut self, motivo: Motivo) -> Option<Desfecho> {
         if let Estado::Fim(d) = self.estado {
-            return d;
+            return Some(d);
+        }
+        if self.estado == Estado::Gravando {
+            if self.pendente.is_none() {
+                self.pendente = Some(motivo);
+            }
+            return None;
         }
         let d = if self.gravada_aqui {
             match motivo {
@@ -665,7 +706,7 @@ impl Cerimonia {
             Desfecho::Desfeita(motivo)
         };
         self.terminar(d);
-        d
+        Some(d)
     }
 
     /// Se o prazo venceu, a cerimônia acaba — e devolve o desfecho. A
@@ -679,7 +720,7 @@ impl Cerimonia {
             && self.estado == Estado::Aberta
             && agora.saturating_sub(self.aberta_em) >= JANELA_MS;
         if !self.no_prazo(agora) || janela_vencida {
-            return Some(self.desistir(Motivo::Prazo));
+            return self.desistir(Motivo::Prazo);
         }
         None
     }
@@ -691,6 +732,7 @@ impl Cerimonia {
 
     fn terminar(&mut self, d: Desfecho) {
         self.estado = Estado::Fim(d);
+        self.pendente = None;
         self.apagar();
     }
 
@@ -751,7 +793,9 @@ impl Cerimonia {
             || (self.gravada_aqui && self.gravado_la);
         let nada_gravado =
             !matches!(self.estado, Estado::Fim(Desfecho::Desfeita(_))) || !self.gravada_aqui;
-        segredos && resposta && digitou && duas && gravada && concluida && nada_gravado
+        // A desistência só espera a gravação em curso.
+        let pendente = self.pendente.is_none() || self.estado == Estado::Gravando;
+        segredos && resposta && digitou && duas && gravada && concluida && nada_gravado && pendente
     }
 }
 
@@ -1033,7 +1077,10 @@ mod testes {
         outra[0] ^= 1;
         assert_eq!(a.gravado_do_outro(&outra), Err(Recusa::RelacaoDiferente));
         // Quem chama desfaz o que gravou.
-        assert_eq!(a.desistir(Motivo::RelacaoDiferente), Desfecho::DesfazerAqui);
+        assert_eq!(
+            a.desistir(Motivo::RelacaoDiferente),
+            Some(Desfecho::DesfazerAqui)
+        );
         // E o `gravado` antes das duas confirmações é fora de ordem.
         b.digitado(100, kb).unwrap();
         assert_eq!(
@@ -1054,20 +1101,78 @@ mod testes {
             a.gravada().unwrap();
             a.desistir(m)
         };
-        assert_eq!(grava(Motivo::OutroDesistiu), Desfecho::DesfazerAqui);
-        assert_eq!(grava(Motivo::Conexao), Desfecho::GravadaSemAviso);
-        assert_eq!(grava(Motivo::Prazo), Desfecho::GravadaSemAviso);
+        assert_eq!(grava(Motivo::OutroDesistiu), Some(Desfecho::DesfazerAqui));
+        assert_eq!(grava(Motivo::Conexao), Some(Desfecho::GravadaSemAviso));
+        assert_eq!(grava(Motivo::Prazo), Some(Desfecho::GravadaSemAviso));
         // Antes de gravar, nada fica.
         let (mut a, _) = apertados(&H);
         assert_eq!(
             a.desistir(Motivo::OutroDesistiu),
-            Desfecho::Desfeita(Motivo::OutroDesistiu)
+            Some(Desfecho::Desfeita(Motivo::OutroDesistiu))
         );
         // E o fim é um só.
         assert_eq!(
             a.desistir(Motivo::Conexao),
-            Desfecho::Desfeita(Motivo::OutroDesistiu)
+            Some(Desfecho::Desfeita(Motivo::OutroDesistiu))
         );
+    }
+
+    /// A desistência que chega com a gravação em curso espera por ela: só
+    /// quem grava sabe se gravou. Gravada, o outro que desistiu pede o
+    /// desfazimento, e qualquer outra deixa a relação deste lado; não
+    /// gravada, nada ficou.
+    #[test]
+    fn desistir_durante_a_gravacao() {
+        let gravando = || {
+            let (mut a, _) = apertados(&H);
+            let k = a.codigos.unwrap().pedir;
+            a.digitado(100, k).unwrap();
+            a.conferido_do_outro(101).unwrap();
+            a.senha_conferida(102).unwrap();
+            a.gravar(103).unwrap();
+            a
+        };
+        // O outro desistiu no meio: gravada, desfaz-se aqui.
+        let mut a = gravando();
+        assert_eq!(a.desistir(Motivo::OutroDesistiu), None);
+        assert_eq!(a.estado(), Estado::Gravando);
+        assert_eq!(a.pendente(), Some(Motivo::OutroDesistiu));
+        // A primeira desistência é a que vale.
+        assert_eq!(a.desistir(Motivo::Conexao), None);
+        assert_eq!(a.pendente(), Some(Motivo::OutroDesistiu));
+        assert!(a.coerente());
+        a.gravada().unwrap();
+        assert_eq!(a.estado(), Estado::Fim(Desfecho::DesfazerAqui));
+        assert!(a.coerente() && a.pendente().is_none());
+        // A conexão caiu no meio: gravada, fica aqui sem aviso.
+        let mut a = gravando();
+        assert_eq!(a.desistir(Motivo::Conexao), None);
+        a.gravada().unwrap();
+        assert_eq!(a.estado(), Estado::Fim(Desfecho::GravadaSemAviso));
+        // O `gravado` do outro, e a conexão que cai depois: os dois gravaram.
+        let mut a = gravando();
+        let r = a.relacao().unwrap();
+        a.gravado_do_outro(&r).unwrap();
+        assert_eq!(a.desistir(Motivo::Conexao), None);
+        a.gravada().unwrap();
+        assert_eq!(a.estado(), Estado::Fim(Desfecho::Concluida));
+        // Não gravada: nada ficou, seja qual for a desistência.
+        let mut a = gravando();
+        assert_eq!(a.desistir(Motivo::OutroDesistiu), None);
+        assert_eq!(
+            a.nao_gravada(Motivo::Recusada),
+            Ok(Desfecho::Desfeita(Motivo::Recusada))
+        );
+        assert!(a.coerente() && !a.gravada_aqui);
+        // Fora da gravação, os dois passos são fora de ordem.
+        let (mut b, _) = apertados(&H);
+        assert_eq!(b.nao_gravada(Motivo::Recusada), Err(Recusa::ForaDeOrdem));
+        assert_eq!(b.gravada(), Err(Recusa::ForaDeOrdem));
+        // A gravação em curso não vence, e a desistência pelo prazo também
+        // espera.
+        let mut a = gravando();
+        assert_eq!(a.vencer(PRAZO_MS * 2), None);
+        assert_eq!(a.estado(), Estado::Gravando);
     }
 
     #[test]
@@ -1126,7 +1231,7 @@ mod testes {
                     1 => c.codigos.map(|x| x.mostrar).unwrap_or(0),
                     _ => sorteio(MODULO_DO_CODIGO) as u32,
                 };
-                match sorteio(13) {
+                match sorteio(14) {
                     0 => {
                         let w = if sorteio(4) == 0 { [1; TAM_DESAFIO] } else { W };
                         let _ = c.primeira_mensagem(agora, &w, KA, compromisso(&N));
@@ -1174,6 +1279,9 @@ mod testes {
                     11 => {
                         let _ = c.vencer(agora);
                     }
+                    12 => {
+                        let _ = c.nao_gravada(Motivo::Recusada);
+                    }
                     _ => {
                         let _ = c.desistir(Motivo::Cancelada);
                     }
@@ -1201,6 +1309,7 @@ mod testes {
             Motivo::Desligamento,
             Motivo::ForaDoProtocolo,
             Motivo::RelacaoDiferente,
+            Motivo::ParNaoProvou,
         ];
         let textos: Vec<&str> = todos.iter().map(|m| m.texto()).collect();
         for (i, t) in textos.iter().enumerate() {
@@ -1424,14 +1533,18 @@ mod testes {
     fn o_fim_recusa_todo_passo() {
         for (lado, caminho, _, _) in tabela() {
             let mut c = levada(lado, &caminho);
-            let d = c.desistir(Motivo::Cancelada);
+            let d = match c.desistir(Motivo::Cancelada) {
+                Some(d) => d,
+                // Gravando, a desistência espera a gravação.
+                None => c.nao_gravada(Motivo::Cancelada).unwrap(),
+            };
             assert!(c.acabou() && c.coerente());
             for p in PASSOS {
                 assert!(dar(&mut c, p, 60).is_err(), "{lado:?} {caminho:?} {p:?}");
                 assert_eq!(c.estado(), Estado::Fim(d));
             }
             // Desistir de novo devolve o mesmo desfecho, sem mudar nada.
-            assert_eq!(c.desistir(Motivo::OutroDesistiu), d);
+            assert_eq!(c.desistir(Motivo::OutroDesistiu), Some(d));
             assert_eq!(c.vencer(u64::MAX), None);
             assert!(c.codigo_a_mostrar().is_none() && c.compromisso_a_mandar().is_none());
         }

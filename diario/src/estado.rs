@@ -234,6 +234,13 @@ pub mod tipo {
     /// nenhum — nenhum registro a desfaz, nenhuma imagem a apaga. Quem
     /// revogou e por quê está na auditoria, com a decisão.
     pub const DISPOSITIVO_REVOGADO: u16 = 43;
+    /// Uma relação desfeita pela Pessoa dela — `device.forget`, ou o lado
+    /// que gravou e desfaz porque o outro desistiu da cerimônia:
+    /// `[a chave X25519 do Duke dele, o identificador da relação]`. Sem
+    /// lápide: só a relação sai — e o dispositivo, se era a última dele —,
+    /// e a mesma chave pode voltar por uma relação nova. Reposta na ordem
+    /// do journal; a decisão vai no mesmo registro.
+    pub const RELACAO_DESFEITA: u16 = 44;
 
     /// Se um registro de tipo `tipo` avança o contador do TPM — se ele é uma
     /// transição do estado que a âncora protege.

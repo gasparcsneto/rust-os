@@ -535,8 +535,9 @@ pub trait Via {
 }
 
 /// O par de um quadro: lê da via até um quadro inteiro, até o tempo de
-/// máquina `limite`, em ms.
-fn proximo_quadro(
+/// máquina `limite`, em ms. A cerimônia de pareamento lê o aperto dela por
+/// aqui também.
+pub(crate) fn proximo_quadro(
     via: &mut impl Via,
     leitor: &mut Leitor,
     guardado: &mut Vec<u8>,
@@ -847,6 +848,38 @@ fn chamador() -> Chamador {
     }
 }
 
+/// Lança o fio da cerimônia de pareamento do Duke que inicia — ver
+/// [`crate::pareamento`]: com a autoridade do serviço de enlace, e só ela,
+/// ele conecta ao endereço que a Pessoa digitou e conduz o protocolo, pelo
+/// gate. Não decide, não grava e não fala como a Pessoa: o commit é do
+/// console dela.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+pub fn lancar_o_pareamento() -> Result<(), &'static str> {
+    crate::fios::criar_como(
+        "pareamento",
+        laco_do_pareamento,
+        0,
+        Autoridade::Servico(Servico::Enlace),
+    )
+    .map(|_| ())
+}
+
+/// O fio da cerimônia: a conexão pelo gate, a conversa, o fecho.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+extern "C" fn laco_do_pareamento(_argumento: u64) -> ! {
+    if let Some(endereco) = crate::pareamento::endereco_do_iniciante() {
+        match ViaTcp::conectar(chamador(), &endereco) {
+            Ok(mut via) => {
+                crate::pareamento::conduzir(&mut via);
+                via.fechar();
+            }
+            Err((codigo, motivo)) => crate::pareamento::nao_conectou(codigo, motivo),
+        }
+    }
+    crate::pareamento::fio_saiu();
+    crate::fios::terminar()
+}
+
 /// Liga o serviço de enlace: o fio, com a autoridade do serviço.
 #[cfg_attr(feature = "modo-teste", allow(dead_code))]
 pub fn iniciar() {
@@ -966,6 +999,10 @@ impl Ponta for PontaDaVaga {
 enum EstadoDoLado {
     Aguardando,
     Estabelecida,
+    /// A sessão é de uma cerimônia de pareamento — ver
+    /// [`crate::pareamento`]: cada quadro vai a ela, e a sessão nunca vira
+    /// enlace.
+    Pareamento,
     Encerrada,
 }
 
@@ -1061,6 +1098,17 @@ impl Lado {
         match (self.estado, tipo) {
             (EstadoDoLado::Aguardando, Tipo::InicioEnlace) => self.apertar(&corpo, ponta),
             (EstadoDoLado::Estabelecida, Tipo::Dados) => self.decifrar(&corpo, ponta),
+            // A cerimônia de pareamento: o primeiro quadro diz, e a sessão é
+            // dela até o fim — um quadro de enlace nela a encerra, ali.
+            (EstadoDoLado::Aguardando, Tipo::PedidoDaChave | Tipo::InicioPareamento)
+            | (EstadoDoLado::Pareamento, _) => {
+                self.estado = if crate::pareamento::quadro_na_vaga(self.v, self.geracao, tipo, &corpo)
+                {
+                    EstadoDoLado::Pareamento
+                } else {
+                    EstadoDoLado::Encerrada
+                };
+            }
             _ => self.encerrar(ponta, "quadro fora de ordem"),
         }
     }
@@ -1312,6 +1360,9 @@ pub async fn atender(v: u8) {
 /// [`crate::rede::canal`]: quem chama é o coletor, fora das travas.
 pub fn desfecho_da_vaga(v: u8, d: crate::rede::canal::Desfecho) {
     use crate::rede::canal::{Desfecho as D, texto_do_par};
+    if let D::Acabou { geracao } | D::Expirou { geracao, .. } = d {
+        crate::pareamento::vaga_acabou(v, geracao);
+    }
     match d {
         D::Aceita { remoto, geracao } => {
             crate::log_info!(
@@ -1380,8 +1431,46 @@ pub fn desfecho_da_vaga(v: u8, d: crate::rede::canal::Desfecho) {
 /// O dispositivo saiu — revogado, ou suspenso —: as sessões de enlace dele
 /// caem na hora, com a recusa em claro; as entregas vivas que ele mandou à
 /// malha daqui são anuladas; os pedidos daqui a ele falham, e quem
-/// esperava acorda.
+/// esperava acorda. E a cerimônia de pareamento com a chave dele, se há
+/// uma, é desfeita — ver [`crate::pareamento::par_saiu`].
 pub fn dispositivo_saiu(chave: &[u8; 32], codigo: Codigo, motivo: &'static str) {
+    crate::pareamento::par_saiu(chave, codigo);
+    derrubar_sessoes(chave, motivo);
+    crate::malha::anular_dispositivo(chave, motivo);
+    let wakers = se_ha_origem(|o| {
+        let falharam = o.tabela.anular_dispositivo(chave, codigo, motivo);
+        de_quem_espera(o, &falharam)
+    })
+    .unwrap_or_default();
+    acordar(wakers);
+}
+
+/// A relação `relacao` do dispositivo `chave` foi desfeita pela Pessoa
+/// dela — `device.forget` —: as entregas que chegaram por ela são
+/// anuladas, os pedidos daqui por ela falham, e a contagem de nonces dela
+/// sai — o identificador não volta. Se era a última relação do
+/// dispositivo, os enlaces dele caem na hora, como na suspensão; se não,
+/// ficam: o dispositivo continua, pelas outras, e um pedido pela desfeita
+/// é recusado na decisão seguinte. Devolve quantas entregas anulou.
+pub fn relacao_saiu(chave: &[u8; 32], relacao: &[u8; 16], ultima: bool) -> usize {
+    const MOTIVO: &str = "relacao desfeita";
+    if ultima {
+        derrubar_sessoes(chave, MOTIVO);
+    }
+    let anuladas = crate::malha::anular_relacao(chave, relacao, MOTIVO);
+    let wakers = se_ha_origem(|o| {
+        let falharam =
+            o.tabela
+                .anular_relacao(chave, relacao, Codigo::DenyNotAuthenticated, MOTIVO);
+        de_quem_espera(o, &falharam)
+    })
+    .unwrap_or_default();
+    acordar(wakers);
+    anuladas
+}
+
+/// As sessões de enlace da chave caem na hora, com a recusa em claro.
+fn derrubar_sessoes(chave: &[u8; 32], motivo: &str) {
     let mut derrubar = Vec::new();
     for v in (crate::rede::canal::VAGAS + 1)..=crate::rede::canal::TODAS {
         let alvo = com_sessao(v, |s| {
@@ -1405,13 +1494,6 @@ pub fn dispositivo_saiu(chave: &[u8; 32], codigo: Codigo, motivo: &'static str) 
         crate::rede::canal::encerrar(v, g);
         crate::log_warn!("enlace", "vaga {}: {}; enlace encerrado", v, motivo);
     }
-    crate::malha::anular_dispositivo(chave, motivo);
-    let wakers = se_ha_origem(|o| {
-        let falharam = o.tabela.anular_dispositivo(chave, codigo, motivo);
-        de_quem_espera(o, &falharam)
-    })
-    .unwrap_or_default();
-    acordar(wakers);
 }
 
 /// O dispositivo foi revogado: além do que [`dispositivo_saiu`] faz, a

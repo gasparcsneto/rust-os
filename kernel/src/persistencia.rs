@@ -1834,6 +1834,7 @@ fn e_de_autoridade(t: u16) -> bool {
             | tipo::LAPIDE
             | tipo::DISPOSITIVO_REGISTRADO
             | tipo::DISPOSITIVO_REVOGADO
+            | tipo::RELACAO_DESFEITA
     )
 }
 
@@ -3352,16 +3353,25 @@ fn diferenca(foto: &Foto, nome: &str, recurso: &str) -> Result<Vec<Vec<u8>>, &'s
     // Os dispositivos: a relação que entrou vai inteira, como a linha; a
     // lápide que nasceu vai pela chave. Uma revogação tira as relações
     // todas do dispositivo, e a lápide basta para tirá-las de novo na
-    // reposição.
-    for (chave, nome, rel) in crate::dispositivos::relacoes() {
+    // reposição. A relação que saiu sem lápide — desfeita pela Pessoa dela
+    // — vai pela chave e pelo identificador: só ela sai na reposição.
+    let relacoes = crate::dispositivos::relacoes();
+    let lapides = crate::dispositivos::lapides();
+    for (chave, nome, rel) in &relacoes {
         if !foto.dispositivos.iter().any(|(_, _, r)| r.id == rel.id) {
-            let linha = politica::dispositivos::linha(&chave, &nome, &rel);
+            let linha = politica::dispositivos::linha(chave, nome, rel);
             v.push(entrada(tipo::DISPOSITIVO_REGISTRADO, &[linha.as_bytes()])?);
         }
     }
-    for chave in crate::dispositivos::lapides() {
-        if !foto.lapides_de_dispositivos.contains(&chave) {
-            v.push(entrada(tipo::DISPOSITIVO_REVOGADO, &[&chave])?);
+    for chave in &lapides {
+        if !foto.lapides_de_dispositivos.contains(chave) {
+            v.push(entrada(tipo::DISPOSITIVO_REVOGADO, &[chave])?);
+        }
+    }
+    for (chave, _, rel) in &foto.dispositivos {
+        let ficou = relacoes.iter().any(|(_, _, r)| r.id == rel.id);
+        if !ficou && !lapides.contains(chave) {
+            v.push(entrada(tipo::RELACAO_DESFEITA, &[chave, &rel.id])?);
         }
     }
     Ok(v)
@@ -3501,6 +3511,13 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
         }
         (tipo::DISPOSITIVO_REVOGADO, [k]) => {
             crate::dispositivos::aplicar_lapide(&chave(k)?);
+            Ok(())
+        }
+        (tipo::RELACAO_DESFEITA, [k, id]) => {
+            let id: [u8; crate::dispositivos::TAM_ID] = (*id)
+                .try_into()
+                .map_err(|_| "identificador de relacao invalido")?;
+            crate::dispositivos::aplicar_desfeita(&chave(k)?, &id);
             Ok(())
         }
         (tipo::MENSAGEM_CRIADA, [id, de, para, criada, expira, corpo]) => {

@@ -787,9 +787,10 @@ impl Pilha {
         // a que ainda faz o aperto do TCP ou termina o fecho —, de quem
         // provou a chave nela.
         fluxos.push(Fluxo::escuta(canal::PORTA));
-        // A do enlace, só com uma relação: sem par relacionado, o SYN de
-        // ninguém entra nela.
-        if crate::dispositivos::ha_relacao() {
+        // A do enlace, só com uma relação — ou com a janela de uma
+        // cerimônia de pareamento aberta: sem par relacionado nem janela, o
+        // SYN de ninguém entra nela.
+        if crate::dispositivos::ha_relacao() || crate::pareamento::escutando() {
             fluxos.push(Fluxo::escuta(canal::PORTA_DO_ENLACE));
         }
         for v in 1..=canal::TODAS {

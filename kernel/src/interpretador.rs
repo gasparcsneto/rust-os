@@ -97,6 +97,10 @@ pub const PROMPT_DA_SENHA: &str = "senha: ";
 pub const PROMPT_DA_ATUAL: &str = "senha atual: ";
 pub const PROMPT_DA_NOVA: &str = "senha nova: ";
 pub const PROMPT_DE_NOVO: &str = "a nova de novo: ";
+/// Na cerimônia de pareamento: enquanto ela espera o outro, o código que o
+/// outro mostra, e a senha de novo.
+pub const PROMPT_DO_PAREAMENTO: &str = "pareamento (linha vazia desiste): ";
+pub const PROMPT_DO_CODIGO: &str = "codigo do outro: ";
 
 /// O que a linha de um console está pedindo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +117,14 @@ pub enum Modo {
     SenhaNova,
     /// A nova de novo, para conferir o que se digitou sem ver. Não ecoa.
     SenhaDeNovo,
+    /// A cerimônia de pareamento deste console espera o outro dispositivo:
+    /// uma linha vazia desiste. Só pelo teclado, como o login.
+    Pareando,
+    /// O código que o **outro** dispositivo mostra. Ecoa — não é segredo —,
+    /// mas só o teclado o edita e o confirma.
+    CodigoDoPar,
+    /// A senha de quem está pareando, de novo. Não ecoa.
+    SenhaDoPareamento,
 }
 
 impl Modo {
@@ -120,7 +132,40 @@ impl Modo {
     /// árvore semântica, não entra no histórico do teclado, e a linha é
     /// apagada byte a byte.
     pub const fn secreto(self) -> bool {
-        !matches!(self, Modo::Comando | Modo::Nome)
+        !matches!(
+            self,
+            Modo::Comando | Modo::Nome | Modo::Pareando | Modo::CodigoDoPar
+        )
+    }
+
+    /// Um passo da cerimônia de pareamento.
+    const fn do_pareamento(self) -> bool {
+        matches!(
+            self,
+            Modo::Pareando | Modo::CodigoDoPar | Modo::SenhaDoPareamento
+        )
+    }
+
+    /// O modo da linha que a cerimônia de pareamento pede.
+    fn da_cerimonia(linha: crate::pareamento::Linha) -> Modo {
+        use crate::pareamento::Linha;
+        match linha {
+            Linha::Comando => Modo::Comando,
+            Linha::Esperando => Modo::Pareando,
+            Linha::Codigo => Modo::CodigoDoPar,
+            Linha::Senha => Modo::SenhaDoPareamento,
+        }
+    }
+
+    /// A linha da cerimônia que este modo pede, se é um passo dela.
+    fn linha_da_cerimonia(self) -> Option<crate::pareamento::Linha> {
+        use crate::pareamento::Linha;
+        match self {
+            Modo::Pareando => Some(Linha::Esperando),
+            Modo::CodigoDoPar => Some(Linha::Codigo),
+            Modo::SenhaDoPareamento => Some(Linha::Senha),
+            _ => None,
+        }
     }
 
     /// Um passo da troca da própria senha.
@@ -137,6 +182,9 @@ impl Modo {
             Modo::SenhaAtual => PROMPT_DA_ATUAL,
             Modo::SenhaNova => PROMPT_DA_NOVA,
             Modo::SenhaDeNovo => PROMPT_DE_NOVO,
+            Modo::Pareando => PROMPT_DO_PAREAMENTO,
+            Modo::CodigoDoPar => PROMPT_DO_CODIGO,
+            Modo::SenhaDoPareamento => PROMPT_DA_SENHA,
         }
     }
 }
@@ -175,6 +223,10 @@ struct Estado {
     atual_tam: usize,
     nova: [u8; LINHA_MAX],
     nova_tam: usize,
+    /// Uma linha confirmada está sendo executada: o aviso da cerimônia de
+    /// pareamento que chega no meio escreve, e o prompt fica para o fim
+    /// dela — ver [`aviso_do_pareamento`].
+    executando: bool,
 }
 
 impl Estado {
@@ -194,6 +246,7 @@ impl Estado {
         atual_tam: 0,
         nova: [0; LINHA_MAX],
         nova_tam: 0,
+        executando: false,
     };
 
     /// Esquece a troca da própria senha em curso, e apaga as senhas que
@@ -334,6 +387,7 @@ pub async fn atender() {
             Evento::Retomar => {
                 retomar_suspensos();
             }
+            Evento::Pareamento => crate::pareamento::no_console(),
         }
     }
 }
@@ -345,6 +399,9 @@ enum Evento {
     Entrada(crate::teclado::Entrada),
     /// A espera de um comando suspenso acabou.
     Retomar,
+    /// A cerimônia de pareamento deve um passo que só se dá na vez do
+    /// console: gravar, ou desfazer — ver [`crate::pareamento::no_console`].
+    Pareamento,
 }
 
 /// O próximo [`Evento`]: a entrada de um console livre ou de uma janela; o
@@ -365,6 +422,9 @@ impl core::future::Future for Proximo {
     ) -> core::task::Poll<Evento> {
         use core::task::Poll;
         let este = self.get_mut();
+        if crate::pareamento::deve_ao_console() {
+            return Poll::Ready(Evento::Pareamento);
+        }
         // Cada conferência deixa o waker desta tarefa no socket da conexão.
         let (acabou, prazo, ocupados) = crate::arch::sem_interrupcoes(|| {
             let tabela = SUSPENSOS.lock();
@@ -482,6 +542,9 @@ pub fn abrir_console(console: Console) {
     })
     .flatten();
     largar_suspenso(console);
+    // A cerimônia de pareamento deste console, se havia uma, acaba: quem a
+    // abriu não está mais nele.
+    crate::pareamento::console_mudou(console);
     // A linha volta a pedir um comando: o teclado volta a gravar o
     // histórico, se ela pedia uma senha.
     if let Some(i) = indice(console) {
@@ -533,6 +596,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         return;
     };
     largar_suspenso(console);
+    crate::pareamento::console_mudou(console);
     crate::teclado::pedindo_senha(i, false);
     if let Some(id) = sessao {
         crate::pessoas::encerrar_pelo_console(id, motivo);
@@ -1001,6 +1065,10 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
             trocar_passo(console);
             return alloc::string::String::from("senha");
         }
+        if modo.do_pareamento() {
+            parear_passo(console, modo);
+            return alloc::string::String::from("pareamento");
+        }
         entrar_passo(console);
         return alloc::string::String::from("login");
     }
@@ -1013,13 +1081,14 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
         copia[..tam].copy_from_slice(&e.bytes[..tam]);
         e.zerar();
         e.inicio = None;
+        e.executando = true;
         saidaln!(console);
         tam
     }) else {
         return alloc::string::String::new();
     };
     let linha = core::str::from_utf8(&copia[..tam]).unwrap_or("");
-    match executar(console, linha, origem, true) {
+    let r = match executar(console, linha, origem, true) {
         // O comando suspendeu: o console espera por ele, sem prompt, e o
         // interpretador o executa de novo quando a espera acabar.
         (nome, Some(espera)) => {
@@ -1027,10 +1096,13 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
             nome
         }
         (nome, None) => {
+            com_estado(console, |e| e.executando = false);
             mostrar_prompt(console);
             nome
         }
-    }
+    };
+    com_estado(console, |e| e.executando = false);
+    r
 }
 
 /// Guarda o comando que suspendeu no console, e acorda o interpretador:
@@ -1168,7 +1240,13 @@ fn entrar_passo(console: Console) {
             }
             mostrar_prompt(console);
         }
-        Modo::Comando | Modo::SenhaAtual | Modo::SenhaNova | Modo::SenhaDeNovo => {}
+        Modo::Comando
+        | Modo::SenhaAtual
+        | Modo::SenhaNova
+        | Modo::SenhaDeNovo
+        | Modo::Pareando
+        | Modo::CodigoDoPar
+        | Modo::SenhaDoPareamento => {}
     }
 }
 
@@ -1339,8 +1417,16 @@ fn executar(
         // O login, a saída e a troca da própria senha são da pessoa no
         // console. Um agente que os confirmasse estaria entrando por alguém,
         // tirando alguém dali, ou trocando a senha de alguém.
-        ("login" | "logout" | "senha", Origem::Agente(_)) => {
+        ("login" | "logout" | "senha" | "aceitar" | "parear", Origem::Agente(_)) => {
             saidaln!(console, "`{}` e da pessoa no console, pelo teclado", nome);
+            None
+        }
+        ("aceitar", Origem::Pessoa) => {
+            comecar_pareamento(console, true, params);
+            None
+        }
+        ("parear", Origem::Pessoa) => {
+            comecar_pareamento(console, false, params);
             None
         }
         ("login", Origem::Pessoa) => {
@@ -1383,6 +1469,7 @@ fn comecar_login(console: Console, params: &str) {
 fn sair(console: Console) {
     match com_estado(console, |e| e.sessao.take()).flatten() {
         Some(id) => {
+            crate::pareamento::console_mudou(console);
             crate::pessoas::sair(id);
             saidaln!(console, "ate logo.");
         }
@@ -1521,7 +1608,134 @@ fn trocar_passo(console: Console) {
             let _ = sessao_valida(console);
             mostrar_prompt(console);
         }
-        Modo::Comando | Modo::Nome | Modo::Senha => {}
+        Modo::Comando
+        | Modo::Nome
+        | Modo::Senha
+        | Modo::Pareando
+        | Modo::CodigoDoPar
+        | Modo::SenhaDoPareamento => {}
+    }
+}
+
+/// `aceitar <nome> <papel> [<endereço>]` e `parear <nome> <endereço>
+/// <papel>`: a pessoa do console abre uma cerimônia de pareamento — ver
+/// [`crate::pareamento`]. Sem ninguém entrado, nada: recusado e gravado.
+/// Aberta, a linha passa a pedir o que a cerimônia pede.
+fn comecar_pareamento(console: Console, aceitar: bool, params: &str) {
+    let Some(i) = indice(console) else {
+        return;
+    };
+    let Some(sessao) = sessao_valida(console) else {
+        autorizacao::recusar_sem_login(console, autorizacao::PAREAMENTO, &[]);
+        saidaln!(
+            console,
+            "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
+        );
+        return;
+    };
+    let abertura = com_estado(console, |e| e.abertura).unwrap_or(0);
+    let texto = if aceitar {
+        crate::pareamento::aceitar(console, abertura, sessao, params)
+    } else {
+        crate::pareamento::parear(console, abertura, sessao, params)
+    };
+    saidaln!(console, "{}", texto);
+    let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
+    com_estado(console, |e| e.modo = modo);
+    crate::teclado::pedindo_senha(i, modo.secreto());
+}
+
+/// O Enter numa linha da cerimônia de pareamento: o que se digitou sai da
+/// linha — e é apagado dos dois lugares, se era a senha —, vai à
+/// cerimônia, e a linha passa a pedir o que ela pede agora.
+fn parear_passo(console: Console, modo: Modo) {
+    let (Some(i), Some(linha)) = (indice(console), modo.linha_da_cerimonia()) else {
+        return;
+    };
+    let mut copia = [0u8; LINHA_MAX];
+    let (tam, abertura) = com_estado(console, |e| {
+        let tam = e.tam;
+        copia[..tam].copy_from_slice(&e.bytes[..tam]);
+        e.zerar();
+        e.inicio = None;
+        e.executando = true;
+        saidaln!(console);
+        (tam, e.abertura)
+    })
+    .unwrap_or((0, 0));
+    crate::teclado::pedindo_senha(i, false);
+    let sessao = sessao_valida(console);
+    let digitado = if modo.secreto() {
+        &copia[..tam]
+    } else {
+        copia[..tam].trim_ascii()
+    };
+    let texto = crate::pareamento::linha_digitada(console, abertura, sessao, linha, digitado);
+    sigilo::zeroize::Zeroize::zeroize(&mut copia);
+    if !texto.is_empty() {
+        saidaln!(console, "{}", texto);
+    }
+    let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
+    com_estado(console, |e| {
+        e.modo = modo;
+        e.executando = false;
+    });
+    crate::teclado::pedindo_senha(i, modo.secreto());
+    mostrar_prompt(console);
+}
+
+/// A cerimônia de pareamento escreve no console dela — os códigos, o
+/// desfecho — de fora da vez dele: a rede, o coletor, a revogação. Como um
+/// registro do log por cima da linha: a linha em edição sai, o texto entra,
+/// e o prompt volta com o que a cerimônia pede agora. Com uma linha sendo
+/// executada, só o texto: o prompt é do fim dela. Um console que reabriu ou
+/// fechado desde a abertura não recebe nada.
+pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
+    let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
+    let Some(i) = indice(console) else {
+        return;
+    };
+    let feito = com_estado(console, |e| {
+        if !e.aberto || e.abertura != abertura {
+            return false;
+        }
+        let parado = !e.executando;
+        if parado {
+            match console {
+                Console::Fisico if e.inicio.is_some() => {
+                    let prompt = e.modo.prompt().len();
+                    let digitado = if e.modo.secreto() { 0 } else { e.tam };
+                    for _ in 0..prompt + digitado {
+                        saida!(console, "\u{8} \u{8}");
+                    }
+                }
+                _ => saidaln!(console),
+            }
+        }
+        saidaln!(console, "{}", texto);
+        if e.modo != modo {
+            e.zerar();
+            e.modo = modo;
+        }
+        if parado {
+            prompt_em(console, e);
+            redesenhar_em(console, e);
+        }
+        true
+    })
+    .unwrap_or(false);
+    if feito {
+        crate::teclado::pedindo_senha(i, modo.secreto());
+        if console == Console::Fisico {
+            crate::ui::mudou();
+        }
+    }
+}
+
+/// Desenha de novo o que está digitado num console — nada, se é uma senha.
+fn redesenhar_em(console: Console, e: &Estado) {
+    if !e.modo.secreto() && e.tam > 0 {
+        saida!(console, "{}", e.texto());
     }
 }
 
@@ -1654,6 +1868,18 @@ fn ajuda(console: Console, origem: Origem) {
         "  {:<18} {}",
         "senha",
         "Troca a propria senha: pede a atual e a nova, sem eco."
+    );
+    saidaln!(
+        console,
+        "  {:<18} {}",
+        "aceitar",
+        "Abre, por 120 s, a janela para parear este Duke a outro seu: `aceitar <nome> <papel> [<endereco>]`."
+    );
+    saidaln!(
+        console,
+        "  {:<18} {}",
+        "parear",
+        "Pareia este Duke ao outro seu que aceitou: `parear <nome> <endereco> <papel>`; pede o codigo do outro e a senha."
     );
     saidaln!(console, "  {:<18} {}", "ajuda", "Esta lista.");
 }

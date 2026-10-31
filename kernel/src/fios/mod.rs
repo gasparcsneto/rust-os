@@ -654,6 +654,9 @@ fn passada_do_coletor() {
     crate::mensagens::vencer_todos();
     crate::malha::vencer_todos();
     crate::enlace::vencer_todos();
+    // E a cerimônia de pareamento: os prazos dela, a sessão que acabou e
+    // o desligamento — e a acabada que ninguém precisa mais sai.
+    crate::pareamento::vencer();
     // E a auditoria que nenhum registro levou ainda vai ao journal, de
     // tempos em tempos: as leituras e as recusas não mudam estado, e
     // não têm registro próprio.

@@ -395,6 +395,30 @@ impl Enlace {
         self.nonces.retain(|(d, _), _| d != dispositivo);
     }
 
+    /// A relação `relacao` do dispositivo foi desfeita — `device.forget` —:
+    /// o que esperava por **ela** falha com o motivo, e a contagem de nonces
+    /// dela sai (o identificador não volta). Os pedidos pelas outras
+    /// relações do mesmo dispositivo seguem, e o que os canais lembravam do
+    /// dispositivo também: ele continua, por elas. Devolve os que falharam.
+    pub fn anular_relacao(
+        &mut self,
+        dispositivo: &[u8; 32],
+        relacao: &[u8; 16],
+        codigo: Codigo,
+        motivo: &'static str,
+    ) -> Vec<u64> {
+        let mut falharam = Vec::new();
+        for p in &mut self.pedidos {
+            if p.dispositivo == *dispositivo && p.relacao == *relacao && !p.estado.terminado() {
+                p.estado = Estado::Falhou(codigo, motivo);
+                falharam.push(p.id);
+            }
+        }
+        self.nonces
+            .retain(|(d, r), _| !(d == dispositivo && r == relacao));
+        falharam
+    }
+
     /// O canal acabou — o processo, a sessão —: os pedidos dele, a janela
     /// e o que ele lembrava saem. Devolve os ids que saíram.
     pub fn canal_acabou(&mut self, canal: Canal) -> Vec<u64> {
@@ -667,6 +691,41 @@ mod testes {
         assert_eq!(e.quantos(), 2);
         e.vencer(100 + 2 * PRAZO_MS);
         assert_eq!(e.quantos(), 0);
+    }
+
+    /// Desfazer uma relação é ela só: os pedidos por ela falham, a
+    /// contagem de nonces dela sai; os pedidos pela outra relação do mesmo
+    /// dispositivo, e o que se lembrava dele, ficam.
+    #[test]
+    fn a_relacao_desfeita() {
+        const R2: [u8; 16] = [0x6B; 16];
+        let mut e = Enlace::nova();
+        assert_eq!(pedir(&mut e, P, 1, Some(1)), Ok(Andamento::Novo(1)));
+        let c = e.pedir(Q, resumo(2), B, R2, Some(1), [0; 32], linha, 0);
+        assert_eq!(c, Ok(Andamento::Novo(2)));
+        e.lembrar(P, B, "e1:1", "imagem.ver");
+        assert_eq!(
+            e.anular_relacao(&B, &R, Codigo::DenyNotAuthenticated, "relacao desfeita"),
+            alloc::vec![1]
+        );
+        assert_eq!(
+            pedir(&mut e, P, 1, Some(1)),
+            Ok(Andamento::Pronto(Err((
+                Codigo::DenyNotAuthenticated,
+                "relacao desfeita"
+            ))))
+        );
+        assert_eq!(e.pedido(2).map(|p| &p.estado), Some(&Estado::NaFila));
+        assert_eq!(e.intencao_lembrada(P, &B, "e1:1"), Some("imagem.ver"));
+        // A contagem da relação desfeita recomeçaria; a da outra, não.
+        assert!(!e.nonces.contains_key(&(B, R)));
+        assert!(e.nonces.contains_key(&(B, R2)));
+        // De novo, nada: idempotente.
+        assert!(
+            e.anular_relacao(&B, &R, Codigo::DenyNotAuthenticated, "relacao desfeita")
+                .is_empty()
+        );
+        assert!(e.coerente());
     }
 
     #[test]

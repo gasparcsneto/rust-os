@@ -1006,6 +1006,32 @@ pub fn anular_dispositivo(chave: &[u8; 32], motivo: &str) {
     auditar_do_kernel(&epoca, &anuladas, &format!("anulada: {motivo}"));
 }
 
+/// A relação `relacao` do dispositivo foi desfeita — `device.forget` —: as
+/// entregas vivas que chegaram por **ela** são anuladas, cada uma para a
+/// auditoria; as das outras relações do mesmo dispositivo seguem. Devolve
+/// quantas. Chamada por [`crate::enlace::relacao_saiu`].
+pub fn anular_relacao(chave: &[u8; 32], relacao: &[u8; 16], motivo: &str) -> usize {
+    let feito = crate::persistencia::em_ordem(|| {
+        se_ha_tabela(|t| {
+            let anuladas = t.malha.anular_de(|c| {
+                matches!(
+                    c,
+                    Canal::Remoto { dispositivo, relacao: r, .. }
+                        if dispositivo == chave && r == relacao
+                )
+            });
+            (t.epoca, anuladas, acordaveis(t))
+        })
+    });
+    let Some((epoca, anuladas, wakers)) = feito else {
+        return 0;
+    };
+    acordar(wakers);
+    let quantas = anuladas.len();
+    auditar_do_kernel(&epoca, &anuladas, &format!("anulada: {motivo}"));
+    quantas
+}
+
 /// O canal acabou — a sessão fechou, o processo morreu —: a janela de
 /// nonces dele sai, e, se era um processo, os endpoints dele fecham e o que
 /// esperava neles é anulado. O que ele mandou continua: quem recebe ainda
