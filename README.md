@@ -116,6 +116,7 @@ cargo xtask identidade               # a identidade nascida no primeiro boot: qu
 cargo xtask botao                    # o botão de energia pelo emulador: desliga pelo gate, gravações, dois apertos, reinício, corte, produção
 cargo xtask senha                    # a troca da própria senha pelo teclado: o corte, a queda em cada fronteira, o botão, produção
 cargo xtask enlace                   # duas máquinas pela rede do emulador: o enlace entre dispositivos de ponta a ponta, suspensão, corte, revogação
+cargo xtask pareamento               # duas máquinas e a Pessoa no teclado das duas: o pareamento sem administrador, o homem no meio, a meia relação, a lápide
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -784,6 +785,7 @@ xtask/src/
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
+├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── senha.rs         a bancada da troca da própria senha: a pessoa no teclado da máquina, pelo Terminal — a nova sobrevive ao corte, a queda em cada fronteira da troca deixa exatamente uma senha valendo, a troca com o botão de energia, e a imagem de produção

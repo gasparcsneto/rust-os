@@ -23,6 +23,7 @@ mod disco_hostil;
 mod enlace;
 mod icp;
 mod identidade;
+mod pareamento;
 mod persistencia;
 mod producao;
 mod rede_principal;
@@ -291,6 +292,7 @@ fn main() -> ExitCode {
         "senha" => senha::senha(arch, release),
         "copia" => copia::copia(arch, release),
         "enlace" => enlace::enlace(release),
+        "pareamento" => pareamento::pareamento(release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -506,6 +508,15 @@ COMANDOS:
                               revogação com lápide; nos pares x86_64→aarch64,
                               aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64
                               (DUKE_PARES escolhe; --arch não se aplica)
+    pareamento                duas máquinas ao mesmo tempo, e a Pessoa no teclado
+                              das duas: a cerimônia de pareamento sem
+                              administrador — o código errado, o homem no meio
+                              (a ponte da bancada com uma chave dela), a mesma
+                              relação nos dois e a entrega por ela, o corte dos
+                              dois, o device.forget de um lado, o corte durante a
+                              cerimônia e depois de um lado gravar (a meia
+                              relação), e a lápide antes e depois do boot; nos
+                              mesmos quatro pares (DUKE_PARES escolhe)
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -15078,6 +15089,7 @@ fn tecla_do_monitor(c: char) -> Option<String> {
         ',' => Some("comma".into()),
         ' ' => Some("spc".into()),
         '\n' => Some("ret".into()),
+        '\u{8}' => Some("backspace".into()),
         '{' => Some("shift-bracket_left".into()),
         '}' => Some("shift-bracket_right".into()),
         '"' => Some("shift-apostrophe".into()),

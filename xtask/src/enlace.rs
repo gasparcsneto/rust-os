@@ -113,15 +113,16 @@ pub(crate) struct Maquina {
 impl Maquina {
     /// Compila o kernel de `arch` e monta o disco dela, com a chave do Duke
     /// `privada` no lugar da da bancada. Uma raiz de estado nova, e com ela
-    /// um TPM novo.
+    /// um TPM novo, em `target/<bancada>/<papel>`.
     pub(crate) fn nova(
+        bancada: &str,
         papel: &'static str,
         arch: Arquitetura,
         release: bool,
         privada: [u8; 32],
         encaminhamento: String,
     ) -> Result<Maquina, String> {
-        let base = super::raiz_do_projeto().join("target").join("enlace");
+        let base = super::raiz_do_projeto().join("target").join(bancada);
         let raiz = base.join(papel);
         let _ = std::fs::remove_dir_all(&raiz);
         std::fs::create_dir_all(&raiz).map_err(|e| format!("{}: {e}", raiz.display()))?;
@@ -681,7 +682,7 @@ impl Par {
     /// O carteiro é recusado no primeiro pedido — na procura —, com `codigo`
     /// e um motivo que começa com `motivo`: o que o gate daqui diz a quem
     /// pede, ou o que o enlace diz do par.
-    fn recusado(&mut self, codigo: &str, motivo: &str) -> Result<Corrida, String> {
+    pub(crate) fn recusado(&mut self, codigo: &str, motivo: &str) -> Result<Corrida, String> {
         let c = self.carteiro()?;
         let recusa = c.dito("procurar ").unwrap_or("");
         if c.codigo != CARTEIRO_RECUSADO || !recusa.starts_with(&format!("{codigo} {motivo}")) {
@@ -695,7 +696,7 @@ impl Par {
 
     /// Nada do último lançamento chegou à rede: a origem não conectou, e o
     /// destino não viu aperto nenhum.
-    fn sem_rede(&mut self, antes_o: Marca, antes_d: Marca) -> Result<(), String> {
+    pub(crate) fn sem_rede(&mut self, antes_o: Marca, antes_d: Marca) -> Result<(), String> {
         self.origem.ler()?;
         self.destino.ler()?;
         // O serviço do enlace conectando ao par — e não o de hora, que
@@ -719,7 +720,7 @@ impl Par {
 
     /// O destino recusou o aperto da chave da origem, com `codigo` e um
     /// detalhe que começa com `motivo`.
-    fn aperto_recusado(
+    pub(crate) fn aperto_recusado(
         &mut self,
         antes_d: Marca,
         codigo: &str,
@@ -751,7 +752,12 @@ impl Par {
 
     /// A recusa do último lançamento no gate da origem: a decisão do
     /// primeiro pedido — a procura —, com `codigo` e o `detalhe`.
-    fn recusado_aqui(&mut self, antes_o: Marca, codigo: &str, detalhe: &str) -> Result<(), String> {
+    pub(crate) fn recusado_aqui(
+        &mut self,
+        antes_o: Marca,
+        codigo: &str,
+        detalhe: &str,
+    ) -> Result<(), String> {
         self.origem.ler()?;
         let recusado = self.origem.gravados(antes_o.auditoria).any(|g| {
             g.metodo == "fabric.discover"
@@ -900,6 +906,7 @@ fn um_par(origem: Arquitetura, destino: Arquitetura, release: bool) -> Result<Ve
         ));
     }
     let a = Maquina::nova(
+        "enlace",
         "origem",
         origem,
         release,
@@ -907,6 +914,7 @@ fn um_par(origem: Arquitetura, destino: Arquitetura, release: bool) -> Result<Ve
         format!("guestfwd=tcp:10.0.2.100:{PORTA_DO_ENLACE}-cmd:python3 {ponte} {porta}"),
     )?;
     let b = Maquina::nova(
+        "enlace",
         "destino",
         destino,
         release,
