@@ -2873,7 +2873,7 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
         entrar(CONSOLE, "bia")?;
         entrar(OUTRO_CONSOLE, "caio")?;
         let antes = super::registros_do_journal()?.len();
-        // No meio: o coletor a desfaz, e nada novo abre.
+        // No meio: o coletor a desfaz.
         let seq = crate::autorizacao::ultimo_registro();
         let mut ini = Iniciante::novo(VAGA, 2_001_700, 1);
         aceitar(CONSOLE, NOME)?;
@@ -2887,16 +2887,24 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
             conta::Motivo::Desligamento,
             Codigo::Conflict,
             true,
-        )
-        .and_then(|()| {
-            abertura_recusada(
-                OUTRO_CONSOLE,
-                &format!("aceitar {NOME_2} {PAPEL}"),
-                "dispositivo:par-2",
-                Codigo::Conflict,
-                "a maquina esta desligando",
-            )
-        });
+        );
+        if super::energia_entregue() != Some(crate::energia::Acao::Reiniciar) {
+            return Err("o reinicio nao chegou ao fim");
+        }
+        r?;
+        // E nada novo abre. Logo depois do pedido, e não depois de conferir
+        // o fim da de cima: na suíte, o fio da energia entrega a máquina
+        // meio segundo depois do pedido, e o pedido some com a entrega — a
+        // abertura que viesse depois disso abriria de verdade.
+        recomecar();
+        pedido()?;
+        let r = abertura_recusada(
+            OUTRO_CONSOLE,
+            &format!("aceitar {NOME_2} {PAPEL}"),
+            "dispositivo:par-2",
+            Codigo::Conflict,
+            "a maquina esta desligando",
+        );
         if super::energia_entregue() != Some(crate::energia::Acao::Reiniciar) {
             return Err("o reinicio nao chegou ao fim");
         }

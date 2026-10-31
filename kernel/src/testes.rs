@@ -58676,8 +58676,8 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 return Err("a conexao fora do alcance nao foi recusada pelo gate");
             }
             let sem_declarar = politica_da_bancada_icp(&[(
-                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             )])?;
             com_a_politica(sem_declarar, || {
                 let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
@@ -59664,8 +59664,8 @@ fn icp_sem_chave_nada_se_assina() -> Resultado {
         let antes = crate::autorizacao::ultimo_registro();
         let sem_usar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60415,8 +60415,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60429,8 +60429,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -61716,8 +61716,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -61730,8 +61730,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -63352,8 +63352,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -63366,8 +63366,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
