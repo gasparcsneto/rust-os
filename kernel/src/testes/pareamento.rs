@@ -2496,9 +2496,10 @@ pub(super) fn pareamento_a_sessao_da_cerimonia_nao_e_enlace() -> Resultado {
 
 /// Depois de pareado, o par pede pelo enlace só o conjunto fechado, e
 /// decidido pela interseção — a Pessoa, a relação e o teto `remoto`, a
-/// cada vez: a relação com o papel `observador` não manda nada; `device.pair`
-/// e `device.forget` não chegam de outro dispositivo; e o `R` de uma relação
-/// não fala por outra.
+/// cada vez: com a relação deixando, a Pessoa ou o teto sem a intenção
+/// recusam, e a auditoria diz qual; a relação com o papel `observador` não
+/// manda nada; `device.pair` e `device.forget` não chegam de outro
+/// dispositivo; e o `R` de uma relação não fala por outra.
 pub(super) fn pareamento_parear_nao_autoriza() -> Resultado {
     com_a_cerimonia(|| {
         entrar(CONSOLE, "bia")?;
@@ -2533,6 +2534,37 @@ pub(super) fn pareamento_parear_nao_autoriza() -> Resultado {
         };
         if pedir(&mut par, &r1, "fabric.discover", &intent)? != "ALLOW" {
             return Err("o par pareado nao pediu o que a relacao deixa");
+        }
+        // A interseção, a cada pedido: com a relação deixando, a Pessoa
+        // sem a intenção — ou o teto `remoto` sem ela — recusa, e a
+        // auditoria diz qual dos dois. A relação pareada não decide sozinha.
+        for (de, para, motivo) in [
+            (
+                "recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar\n",
+                "recurso operador fabric.send intencao:pdf.anotar\n",
+                "o papel da pessoa da relacao nao permite",
+            ),
+            (
+                "recurso remoto fabric.send intencao:imagem.compartilhar intencao:pdf.anotar\n",
+                "recurso remoto fabric.send intencao:pdf.anotar\n",
+                "o teto remoto nao permite",
+            ),
+        ] {
+            let antes = crate::autorizacao::ultimo_registro();
+            let codigo = super::com_a_politica(super::politica_trocada(&[(de, para)])?, || {
+                pedir(&mut par, &r1, "fabric.discover", &intent)
+            })?;
+            let dito = !super::registros_depois(antes, |e| {
+                e.codigo == Codigo::DenyResource && e.detalhe.contains(motivo)
+            })
+            .is_empty();
+            if codigo != "DENY_RESOURCE" || !dito {
+                crate::log_error!("teste", "{} (esperado DENY_RESOURCE: {})", codigo, motivo);
+                return Err("a relacao pareada decidiu sem a intersecao com a pessoa e o teto");
+            }
+        }
+        if pedir(&mut par, &r1, "fabric.discover", &intent)? != "ALLOW" {
+            return Err("com a politica de volta, o par pareado nao pediu");
         }
         for (metodo, params) in [
             ("device.forget", r#"{"device":"dispositivo:par"}"#),

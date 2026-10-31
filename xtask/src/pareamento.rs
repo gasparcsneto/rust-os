@@ -726,6 +726,18 @@ fn valor_plano(campos: &super::ObjetoPlano, nome: &str) -> Option<String> {
         .and_then(|(_, v)| v.clone())
 }
 
+/// As chaves com lápide no registro, pela impressão de cada uma.
+fn lapides(registro: &str) -> Vec<String> {
+    let Some(lista) = super::apos(registro, r#""revoked":["#) else {
+        return Vec::new();
+    };
+    lista[..lista.find(']').unwrap_or(lista.len())]
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// As relações do dispositivo de chave `chave` no registro.
 fn relacoes(registro: &str, chave: &[u8; 32]) -> Vec<Rel> {
     let Some(dispositivos) = super::apos(registro, r#""devices":["#) else {
@@ -950,6 +962,22 @@ impl Bancada {
             self.destino()
         };
         digitar_conferido(quem, PROMPT_DO_CODIGO, codigo)
+    }
+
+    /// Nenhum dos dois tem lápide para o outro: o que se esqueceu não virou
+    /// revogação, nem antes nem depois do boot.
+    fn sem_lapide(&mut self) -> Result<(), String> {
+        let (da_origem, da_destino) = (self.par.da_origem, self.par.da_destino);
+        let na_origem = lapides(&self.origem().registro()?);
+        let no_destino = lapides(&self.destino().registro()?);
+        if na_origem.contains(&impressao(&da_destino))
+            || no_destino.contains(&impressao(&da_origem))
+        {
+            return Err(format!(
+                "o que se esqueceu virou lapide: na origem {na_origem:?}, no destino {no_destino:?}"
+            ));
+        }
+        Ok(())
     }
 
     /// Nenhum dos dois tem relação com o outro.
@@ -1329,7 +1357,7 @@ fn esquecer_de_um_lado(p: &mut Bancada) -> Result<String, String> {
 ///
 /// Os códigos à mostra nos dois, a energia do destino cai: a origem desfaz
 /// pela conexão, nada gravado nela; o destino volta sem nada da cerimônia —
-/// ela era volátil —, e o que fora esquecido continua esquecido.
+/// ela era volátil —, e o que fora esquecido continua esquecido, sem lápide.
 fn o_corte_durante(p: &mut Bancada) -> Result<String, String> {
     let antes_a = p.origem().marca()?.auditoria;
     let (a, b) = p.ate_os_codigos()?;
@@ -1345,6 +1373,7 @@ fn o_corte_durante(p: &mut Bancada) -> Result<String, String> {
     p.par.destino = p.b.ligar()?;
     p.destino().entrar()?;
     p.nada_gravado()?;
+    p.sem_lapide()?;
     let registro = p.destino().registro()?;
     if registro.contains(r#""pairing":{"#) {
         return Err(format!(
