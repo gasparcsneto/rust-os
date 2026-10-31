@@ -381,6 +381,8 @@ struct Iniciante {
     primeira: Vec<u8>,
     /// Os quadros de dados mandados, para repetir.
     mandados: Vec<Vec<u8>>,
+    /// Uma chave que a carga da 1ª mensagem alega, além do que ela leva.
+    alegar: Option<[u8; 32]>,
 }
 
 impl Iniciante {
@@ -406,6 +408,7 @@ impl Iniciante {
             h: None,
             primeira: Vec::new(),
             mandados: Vec::new(),
+            alegar: None,
         }
     }
 
@@ -515,8 +518,12 @@ impl Iniciante {
         compromisso: &[u8; 32],
         w: &[u8; 16],
     ) -> Result<Result<(), String>, &'static str> {
+        let alegada = self
+            .alegar
+            .map(|k| format!(r#","chave":"{}""#, sigilo::hex(&k)))
+            .unwrap_or_default();
         let carga = format!(
-            r#"{{"commit":"{}","janela":"{}"}}"#,
+            r#"{{"commit":"{}","janela":"{}"{alegada}}}"#,
             sigilo::hex_de(compromisso),
             sigilo::hex_de(w)
         );
@@ -702,6 +709,8 @@ struct Aceitante {
     h: Option<[u8; 32]>,
     compromisso: Option<[u8; 32]>,
     janela: Option<[u8; 16]>,
+    /// A carga da 1ª mensagem, aberta, como chegou.
+    primeira_carga: String,
     /// O nonce que abriu o compromisso.
     nonce: Option<[u8; 32]>,
     /// A chave que o iniciante provou no aperto.
@@ -735,6 +744,7 @@ impl Aceitante {
             h: None,
             compromisso: None,
             janela: None,
+            primeira_carga: String::new(),
             nonce: None,
             viu_chave: None,
             mensagens: Vec::new(),
@@ -836,6 +846,7 @@ impl Aceitante {
             return;
         };
         self.viu_chave = Some(recebido.remota());
+        self.primeira_carga = String::from_utf8_lossy(&carga[..n]).into_owned();
         let j = Json(&carga[..n]);
         self.compromisso = j
             .member("commit")
@@ -1055,6 +1066,20 @@ pub(super) fn pareamento_iniciando_os_dois_gravam() -> Resultado {
             }
             if b.janela != Some(b.desafio) {
                 return Err("a 1a mensagem nao levou o desafio do anuncio");
+            }
+            // A 1ª mensagem leva o compromisso e o desafio, e nada mais: o
+            // nonce só sai depois da 2ª, e a chave só o aperto diz.
+            let carga = format!(
+                r#"{{"commit":"{}","janela":"{}"}}"#,
+                sigilo::hex_de(&b.compromisso.unwrap_or([0; 32])),
+                sigilo::hex_de(&b.desafio)
+            );
+            if b.primeira_carga != carga
+                || b.nonce
+                    .is_none_or(|n| b.primeira_carga.contains(&sigilo::hex_de(&n)))
+            {
+                crate::log_error!("teste", "{}", b.primeira_carga);
+                return Err("a 1a mensagem levou mais que o compromisso e o desafio");
             }
             let esperadas = [
                 format!(
@@ -1703,7 +1728,7 @@ pub(super) fn pareamento_outro_duke_no_endereco() -> Resultado {
 /// provou a chave.
 pub(super) fn pareamento_o_dispositivo_falso() -> Resultado {
     com_a_cerimonia(|| {
-        entrar(CONSOLE, "bia")?;
+        let (_, bia) = entrar(CONSOLE, "bia")?;
         let antes = super::registros_do_journal()?.len();
         for (falsa, motivo, codigo, trecho) in [
             (
@@ -1746,6 +1771,19 @@ pub(super) fn pareamento_o_dispositivo_falso() -> Resultado {
                 return Err("o fim nao diz a chave que o falso anunciou");
             }
             nada_gravado(antes, 0)?;
+        }
+        // Aceitando: quem inicia alega na carga da 1ª mensagem a chave de
+        // outro dispositivo. A carga não diz quem é o par — quem é, é a
+        // estática que o IK provou, e é ela que se grava.
+        recomecar();
+        let seq = crate::autorizacao::ultimo_registro();
+        let mut ini = Iniciante::novo(VAGA, 2_000_810, 1);
+        ini.alegar = Some(chave_de_dispositivo(2));
+        let k = parear_aceitando(CONSOLE, NOME, &mut ini)?;
+        gravada_como(NOME, bia, &ini.chave(), &k.r, None)?;
+        decisao_da_gravacao(seq, NOME, &ini.chave(), &k.r, CONSOLE)?;
+        if crate::dispositivos::dispositivo(&chave_de_dispositivo(2)).is_some() {
+            return Err("a chave que a carga alegou entrou no registro");
         }
         Ok(())
     })

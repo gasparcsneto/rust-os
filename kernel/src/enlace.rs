@@ -776,7 +776,27 @@ impl ViaTcp {
         let params = alloc::format!(r#"{{"connection":{}}}"#, self.conexao);
         let _ = pedir_ao_gate(self.quem, "net.close", &params, None);
     }
+
+    /// Depois da cerimônia, espera o outro fechar — no prazo de um fecho —,
+    /// e só então fecha daqui. A vaga do enlace do outro lado larga o que
+    /// chega junto com o FIN — o par fechou o sentido dele, e a sessão
+    /// acaba ali —, e o último que saiu daqui, o `desistiu` ou o `gravado`,
+    /// se perderia. Quem fecha primeiro é o aceitante, depois de ler.
+    #[cfg_attr(feature = "modo-teste", allow(dead_code))]
+    fn esperar_o_fecho(&mut self) {
+        let limite = crate::tempo::uptime_ms().saturating_add(ESPERA_DO_FECHO_MS);
+        while crate::tempo::uptime_ms() < limite {
+            if self.receber(PASSO_DO_FECHO_MS).is_err() {
+                return;
+            }
+        }
+    }
 }
+
+/// Quanto o fio da cerimônia espera o outro fechar, e de quanto em quanto
+/// olha — ver [`ViaTcp::esperar_o_fecho`].
+const ESPERA_DO_FECHO_MS: u64 = 5_000;
+const PASSO_DO_FECHO_MS: u64 = 500;
 
 impl Via for ViaTcp {
     fn mandar(&mut self, bytes: &[u8]) -> Result<(), (Codigo, &'static str)> {
@@ -871,6 +891,7 @@ extern "C" fn laco_do_pareamento(_argumento: u64) -> ! {
         match ViaTcp::conectar(chamador(), &endereco) {
             Ok(mut via) => {
                 crate::pareamento::conduzir(&mut via);
+                via.esperar_o_fecho();
                 via.fechar();
             }
             Err((codigo, motivo)) => crate::pareamento::nao_conectou(codigo, motivo),
