@@ -35,6 +35,9 @@
 //! - [`dispositivos`]: os dispositivos relacionados — outro Duke, pela
 //!   chave dele, ligado a uma pessoa desta máquina —, as relações e as
 //!   lápides, como conta pura.
+//! - [`pareamento`]: a cerimônia em que a pessoa liga, ela mesma, o Duke
+//!   dela a outro Duke dela — os estados, os prazos, o compromisso, os
+//!   códigos de conferência e o identificador da relação, como conta pura.
 
 #![no_std]
 
@@ -52,6 +55,7 @@ pub mod explicacao;
 pub mod malha;
 pub mod manifesto;
 pub mod mensagens;
+pub mod pareamento;
 pub mod permissao;
 pub mod procedencia;
 pub mod sigiloso;

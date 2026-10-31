@@ -36,6 +36,13 @@
 //! registro, e o kernel não a aceita nem como agente. A máquina recuperada
 //! volta com uma instalação nova, e outra chave.
 //!
+//! # A desfeita
+//!
+//! Esquecer é **uma** relação — a da Pessoa que esquece: as das outras
+//! ficam. Se era a última do dispositivo, ele sai do registro junto, e
+//! **sem lápide**: a mesma chave pode voltar por uma relação nova, com
+//! outro identificador.
+//!
 //! # O que este módulo não faz
 //!
 //! Não decide nada: o gate decide, pela política. Não sabe dos agentes, dos
@@ -249,6 +256,43 @@ impl Registro {
         if !self.lapides.contains(chave) {
             self.lapides.push(*chave);
         }
+    }
+
+    /// Desfaz a relação `id` do dispositivo de chave `chave`: só ela sai.
+    /// Se era a última dele, o dispositivo sai junto — sem lápide. Devolve a
+    /// relação que saiu e se o dispositivo saiu com ela.
+    ///
+    /// O identificador de uma relação de outro dispositivo não é dele:
+    /// `Desconhecido`, e nada muda.
+    pub fn esquecer(
+        &mut self,
+        chave: &[u8; 32],
+        id: &[u8; TAM_ID],
+    ) -> Result<(Relacao, bool), Recusa> {
+        let i = self
+            .dispositivos
+            .iter()
+            .position(|d| d.chave == *chave)
+            .ok_or(Recusa::Desconhecido)?;
+        let d = &mut self.dispositivos[i];
+        let j = d
+            .relacoes
+            .iter()
+            .position(|r| r.id == *id)
+            .ok_or(Recusa::Desconhecido)?;
+        let r = d.relacoes.remove(j);
+        let saiu = d.relacoes.is_empty();
+        if saiu {
+            self.dispositivos.remove(i);
+        }
+        Ok((r, saiu))
+    }
+
+    /// Aplica a desfeita da relação `id` de `chave` — a reposição do
+    /// journal: a relação sai, se estava; o dispositivo sai com a última.
+    /// Idempotente, e nunca põe lápide.
+    pub fn aplicar_desfeita(&mut self, chave: &[u8; 32], id: &[u8; TAM_ID]) {
+        let _ = self.esquecer(chave, id);
     }
 
     /// Se a chave tem lápide.
@@ -560,6 +604,110 @@ mod testes {
         assert!(r.coerente());
     }
 
+    // H06: esquecer é a relação da Pessoa, e só ela.
+    #[test]
+    fn esquecer_tira_so_a_relacao() {
+        let mut r = Registro::novo();
+        r.registrar(K1, "tablet", relacao(1, BIA)).unwrap();
+        r.registrar(K1, "tablet", relacao(2, CAIO)).unwrap();
+        r.registrar(K2, "telefone", relacao(3, BIA)).unwrap();
+        // A da Bia com o tablet sai; a do Caio com ele, e a da Bia com o
+        // telefone, ficam.
+        let (saiu, dispositivo_saiu) = r.esquecer(&K1, &[1; TAM_ID]).unwrap();
+        assert_eq!(saiu, relacao(1, BIA));
+        assert!(!dispositivo_saiu);
+        assert!(r.da_pessoa("tablet", &BIA).is_none());
+        assert_eq!(r.da_pessoa("tablet", &CAIO).unwrap().1.id, [2; TAM_ID]);
+        assert_eq!(r.da_pessoa("telefone", &BIA).unwrap().1.id, [3; TAM_ID]);
+        assert_eq!(r.quantas_relacoes(), 2);
+        assert!(r.coerente());
+        // O identificador de uma relação de outro dispositivo não é dele, e
+        // o que já saiu não sai de novo: nada muda.
+        let antes = r.clone();
+        assert_eq!(r.esquecer(&K2, &[2; TAM_ID]), Err(Recusa::Desconhecido));
+        assert_eq!(r.esquecer(&K1, &[1; TAM_ID]), Err(Recusa::Desconhecido));
+        assert_eq!(
+            r.esquecer(&[0x33; 32], &[2; TAM_ID]),
+            Err(Recusa::Desconhecido)
+        );
+        assert_eq!(r, antes);
+    }
+
+    #[test]
+    fn o_dispositivo_sai_com_a_ultima_e_sem_lapide() {
+        let mut r = Registro::novo();
+        r.registrar(K1, "tablet", relacao(1, BIA)).unwrap();
+        r.registrar(K1, "tablet", relacao(2, CAIO)).unwrap();
+        assert_eq!(r.esquecer(&K1, &[1; TAM_ID]).map(|x| x.1), Ok(false));
+        assert_eq!(r.esquecer(&K1, &[2; TAM_ID]).map(|x| x.1), Ok(true));
+        // O dispositivo saiu inteiro, sem lápide: o nome está livre.
+        assert!(r.dispositivo(&K1).is_none() && r.por_nome("tablet").is_none());
+        assert!(!r.revogada(&K1) && r.lapides().is_empty());
+        assert!(r.coerente());
+        // Parear de novo depois: a mesma chave volta, por uma relação nova —
+        // com outro identificador, e até com outro nome.
+        r.registrar(K1, "laptop", relacao(9, BIA)).unwrap();
+        assert_eq!(r.da_pessoa("laptop", &BIA).unwrap().1.id, [9; TAM_ID]);
+        assert!(r.coerente());
+    }
+
+    #[test]
+    fn a_desfeita_reposta_e_idempotente_e_a_lapide_ainda_barra() {
+        let mut r = Registro::novo();
+        r.registrar(K1, "tablet", relacao(1, BIA)).unwrap();
+        r.registrar(K1, "tablet", relacao(2, CAIO)).unwrap();
+        // A reposição do journal: uma, duas vezes, e a de uma relação que
+        // não existe — o mesmo registro.
+        r.aplicar_desfeita(&K1, &[1; TAM_ID]);
+        let depois = r.clone();
+        r.aplicar_desfeita(&K1, &[1; TAM_ID]);
+        r.aplicar_desfeita(&K2, &[7; TAM_ID]);
+        assert_eq!(r, depois);
+        assert_eq!(r.quantas_relacoes(), 1);
+        assert!(!r.revogada(&K1));
+        // A lápide do administrador continua por cima: esquecer não a tira,
+        // e a chave com lápide não volta.
+        r.revogar(&K1).unwrap();
+        assert_eq!(r.esquecer(&K1, &[2; TAM_ID]), Err(Recusa::Desconhecido));
+        r.aplicar_desfeita(&K1, &[2; TAM_ID]);
+        assert!(r.revogada(&K1));
+        assert_eq!(
+            r.registrar(K1, "tablet", relacao(3, BIA)),
+            Err(Recusa::Revogada)
+        );
+        assert!(r.coerente());
+    }
+
+    #[test]
+    fn esquecer_devolve_o_lugar_nos_tetos() {
+        let mut r = Registro::novo();
+        for p in 0..RELACOES_POR_DISPOSITIVO as u8 {
+            r.registrar(K1, "tablet", relacao(p, [p; 8])).unwrap();
+        }
+        assert_eq!(
+            r.registrar(K1, "tablet", relacao(200, [200; 8])),
+            Err(Recusa::Cheio)
+        );
+        r.esquecer(&K1, &[3; TAM_ID]).unwrap();
+        r.registrar(K1, "tablet", relacao(200, [200; 8])).unwrap();
+        let mut r = Registro::novo();
+        for i in 0..MAIS_DISPOSITIVOS as u8 {
+            let mut k = [0u8; 32];
+            k[0] = i;
+            let nome = alloc::format!("d{i}");
+            r.registrar(k, &nome, relacao(i, BIA)).unwrap();
+        }
+        assert_eq!(
+            r.registrar([0xFF; 32], "mais", relacao(250, BIA)),
+            Err(Recusa::Cheio)
+        );
+        let mut k0 = [0u8; 32];
+        k0[0] = 5;
+        r.esquecer(&k0, &[5; TAM_ID]).unwrap();
+        r.registrar([0xFF; 32], "mais", relacao(250, BIA)).unwrap();
+        assert!(r.coerente());
+    }
+
     #[test]
     fn os_tetos() {
         let mut r = Registro::novo();
@@ -651,12 +799,28 @@ mod testes {
                         assert_eq!(r, antes);
                     }
                 }
-                7 | 8 => {
+                7 => {
                     let tinha = r.dispositivo(&k).is_some();
                     assert_eq!(r.revogar(&k).is_ok(), tinha);
                     if tinha {
                         assert!(r.revogada(&k) && r.dispositivo(&k).is_none());
                     }
+                }
+                8 => {
+                    let id = [sorteio(90) as u8; TAM_ID];
+                    let lapides = r.lapides().to_vec();
+                    let tinha = r.relacao(&k, &id).is_some();
+                    let outras = r.dispositivo(&k).map_or(0, |d| d.relacoes.len());
+                    match r.esquecer(&k, &id) {
+                        Ok((saiu, sem_relacao)) => {
+                            assert!(tinha && saiu.id == id);
+                            assert_eq!(sem_relacao, outras == 1);
+                            assert_eq!(r.dispositivo(&k).is_none(), sem_relacao);
+                        }
+                        Err(e) => assert!(!tinha && e == Recusa::Desconhecido),
+                    }
+                    // Esquecer nunca põe nem tira lápide.
+                    assert_eq!(r.lapides(), &lapides[..]);
                 }
                 _ => r.aplicar_lapide(&k),
             }
