@@ -3552,6 +3552,29 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "Servico::Enlace",
         &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
     ),
+    // Quem escreve o registro de dispositivos (ver `kernel/src/dispositivos.rs`):
+    // a relação nasce pela operação administrativa, com prova; o dispositivo
+    // sai inteiro, com lápide, pela revogação dela; e o journal repõe, no
+    // boot, a linha e a lápide — e a foto devolve o que uma gravação que
+    // falhou não deixou valer. Nenhum outro caminho concede, tira ou põe
+    // lápide.
+    (
+        "dispositivos::registrar(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    (
+        "dispositivos::revogar(",
+        &["kernel/src/agent/administracao.rs"],
+    ),
+    (
+        "dispositivos::restaurar_linha(",
+        &["kernel/src/persistencia.rs"],
+    ),
+    (
+        "dispositivos::aplicar_lapide(",
+        &["kernel/src/persistencia.rs"],
+    ),
+    ("dispositivos::restaurar(", &["kernel/src/persistencia.rs"]),
     // Quem descansa a cada interrupção continua pronto, e o núcleo dele não
     // vai para o ocioso: com mais fios descansando que núcleos, eles se
     // revezam sem parar, e nenhum núcleo dorme (ver `fios::bloquear_em`).
