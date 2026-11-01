@@ -186,7 +186,9 @@ Pareamento, `device.pair`/`device.forget`, descoberta local, broadcast,
 nuvem, conta central, propagação da revogação entre Dukes, armazenamento-
 e-envio, handoff, recursos remotos, o programa de origem como critério,
 criptografia ou autoridade nova, um segundo gate ou uma segunda
-auditoria. O autosserviço da pessoa (D8) é do estágio 2.
+auditoria. O autosserviço da pessoa (D8) é do estágio 2 — o pareamento
+sem administrador e o `device.forget` —, e está em
+[PAREAMENTO.md](PAREAMENTO.md).
 
 ## Testes
 

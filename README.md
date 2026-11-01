@@ -8458,7 +8458,9 @@ corpo na auditoria. O runtime dos programas é
 [`docs/MALHA.md`](docs/MALHA.md).
 
 A outra metade do marco — dispositivo → malha → dispositivo — é o enlace
-entre dispositivos: ver [O enlace entre dispositivos](#o-enlace-entre-dispositivos).
+entre dispositivos: ver [O enlace entre dispositivos](#o-enlace-entre-dispositivos),
+e o pareamento pela própria pessoa, em [O pareamento pela própria
+pessoa](#o-pareamento-pela-própria-pessoa).
 
 Doze casos `malha:` na suíte, nas duas arquiteturas, com programas de
 verdade — o `correio`, que atende; as `fotos`, que mandam; e o `impostor`,
@@ -10287,9 +10289,15 @@ padronizado.
       quem publica, a instalação pelo quórum `system.update`, a tentativa
       contada pelo iniciador, a confirmação no journal ancorado no TPM — o
       piso de geração que não volta — e a volta sozinha quando a versão nova
-      não presta. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md). A
-      identidade gerada na máquina, o Secure Boot e o watchdog ficaram de
-      fora.
+      não presta. Ver [`docs/ATUALIZACAO.md`](docs/ATUALIZACAO.md). E, na
+      ordem, a identidade gerada na máquina, o botão de energia, a troca da
+      própria senha e a cópia de segurança — ver [A identidade do Duke nasce
+      no primeiro boot](#a-identidade-do-duke-nasce-no-primeiro-boot), [O
+      botão de energia](#o-botão-de-energia), [A troca da própria
+      senha](#a-troca-da-própria-senha) e [A cópia de segurança e a
+      restauração](#a-cópia-de-segurança-e-a-restauração). O Secure Boot
+      ficou de fora; o watchdog, de propósito: o pânico deixa a máquina
+      parada e inspecionável (ver [`docs/OPERACAO.md`](docs/OPERACAO.md)).
 - [ ] **Fase 15 — O ecossistema Duke.** Aplicativos, computadores,
       telefones, relógios, periféricos e serviços cooperando como partes de
       um ambiente só, pela malha — descoberta, mensagens, capacidades,
@@ -10299,10 +10307,18 @@ padronizado.
       já existiam.) Começou pelo primeiro marco: aplicação → malha →
       aplicação, entre os programas de um titular, pelo gate, com a
       revogação e a auditoria de sempre. Ver [A malha](#a-malha) e
-      [`docs/MALHA.md`](docs/MALHA.md). Dispositivo → malha → dispositivo
-      espera a decisão sobre a confiança entre dispositivos; o handoff, os
-      recursos remotos, a continuidade, o SDK e os pacotes são os marcos
-      seguintes.
+      [`docs/MALHA.md`](docs/MALHA.md). Depois, dispositivo → malha →
+      dispositivo, com a confiança entre dispositivos decidida antes
+      (D1–D10): o estágio 1 — outro Duke como principal próprio,
+      relacionado a uma pessoa daqui pelo administrador, com a chave do Duke
+      no Noise IK e a autoridade composta no destino (ver [O enlace entre
+      dispositivos](#o-enlace-entre-dispositivos)) —; e o estágio 2, o
+      pareamento pela própria pessoa, sem administrador — a cerimônia com o
+      código de conferência e a senha nos dois teclados, e o
+      `device.forget` (ver [O pareamento pela própria
+      pessoa](#o-pareamento-pela-própria-pessoa)). O handoff, os fluxos, os
+      recursos remotos, a presença, a continuidade, o SDK e os pacotes são
+      os marcos seguintes, e cada um pede uma decisão própria antes.
 
 ## Licença
 

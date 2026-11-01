@@ -219,10 +219,13 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
 
 - **Dispositivo → malha → dispositivo** está em [ENLACE.md](ENLACE.md): o
   dispositivo como principal próprio, a chave do Duke dele no Noise IK, a
-  relação com uma pessoa daqui, a autoridade composta no destino. O que
-  ainda fica de fora dele — pareamento, descoberta, propagação da
-  revogação, armazenamento-e-envio — está lá.
-- **Handoff, streams, recursos remotos, presença.** Os próximos marcos.
+  relação com uma pessoa daqui, a autoridade composta no destino; e o
+  pareamento pela própria pessoa, sem administrador, em
+  [PAREAMENTO.md](PAREAMENTO.md). O que ainda fica de fora dos dois —
+  descoberta, propagação da revogação, atualização do endereço,
+  armazenamento-e-envio — está lá.
+- **Handoff, streams, recursos remotos, presença.** Os próximos marcos,
+  cada um com uma decisão própria antes.
 - **Entre titulares.** De propósito: a mensagem já é esse caminho.
 - **Persistência.** A malha é volátil; uma entrega não sobrevive ao boot.
 
