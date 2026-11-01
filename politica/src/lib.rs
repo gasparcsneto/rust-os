@@ -52,6 +52,7 @@ pub mod dispositivos;
 pub mod endereco;
 pub mod enlace;
 pub mod explicacao;
+pub mod fluxo;
 pub mod malha;
 pub mod manifesto;
 pub mod mensagens;
@@ -180,7 +181,7 @@ macro_rules! papeis_de_sistema {
     ($chaves_do_administrador:literal, $alcance_das_chaves_do_administrador:literal) => {
         concat!(
             "\
-papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update fabric.offer fabric.send device.suspend
+papel sistema agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore fs.raw_read keyboard.read debug.trigger terminal.attach audit.read policy.read message.send message.read security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync audit.declare process.terminate system.power system.update fabric.offer fabric.send fabric.stream device.suspend
 recurso sistema fs.read /
 recurso sistema fs.write /armazem
 recurso sistema fs.restore /armazem
@@ -197,11 +198,12 @@ recurso sistema credential.suspend papel:observador papel:operador papel:sistema
 recurso sistema process.terminate papel:observador papel:operador papel:sistema
 recurso sistema fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
 recurso sistema fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
+recurso sistema fabric.stream intencao:imagem.compartilhar intencao:pdf.anotar
 recurso sistema device.suspend dispositivo:par dispositivo:par-2
 taxa sistema 400 800
 processos sistema 32
 
-papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send fabric.remote device.register device.revoke device.suspend device.pair device.forget",
+papel administrador agent.read system.read log.read ui.read ui.act process.run net.send net.connect fs.read fs.write fs.restore audit.read policy.read agent.register agent.revoke policy.assign policy.write person.register person.revoke credential.rotate session.revoke lease.revoke message.send message.read message.purge message.purge_mailbox admin.revoke security.read net.observe net.block process.isolate agent.suspend credential.suspend random.read time.sync time.confirm audit.declare process.terminate system.power system.update credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.register device.revoke device.suspend device.pair device.forget",
             $chaves_do_administrador,
             "
 recurso administrador fs.read /dados /bin /programas /armazem/compartilhado
@@ -220,6 +222,7 @@ recurso administrador credential.suspend papel:observador papel:operador papel:s
 recurso administrador process.terminate papel:observador papel:operador papel:sistema
 recurso administrador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
 recurso administrador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
+recurso administrador fabric.stream intencao:imagem.compartilhar intencao:pdf.anotar
 recurso administrador fabric.remote dispositivo:par dispositivo:par-2
 recurso administrador device.suspend dispositivo:par dispositivo:par-2
 recurso administrador device.forget dispositivo:par dispositivo:par-2
@@ -259,7 +262,8 @@ servico nsf seguranca
 ///   destrói as chaves `chave:bancada` e `chave:bancada-2` da própria
 ///   identidade, só no domínio `ic-request` do registro de domínios; e,
 ///   na malha, oferece e procura as intenções `imagem.compartilhar` e
-///   `pdf.anotar` (`fabric.offer`, `fabric.send`), entre os programas dele;
+///   `pdf.anotar` (`fabric.offer`, `fabric.send`), entre os programas dele,
+///   e abre e aceita fluxos delas (`fabric.stream`);
 /// - `tempo` é o papel do serviço de hora — a linha `servico hora tempo`:
 ///   apresenta evidência de hora (`time.sync`) e conecta às três fontes do
 ///   registro de fontes, `/etc/duke/tempo`, cada uma escrita por inteiro,
@@ -272,9 +276,10 @@ servico nsf seguranca
 ///   leva entregas aos dispositivos `par` e `par-2` da pessoa dele
 ///   (`fabric.remote`, com o nome resolvido no espaço dela); `dispositivo`
 ///   é o papel de exemplo de uma relação — o que o outro dispositivo pode
-///   pedir aqui, `fabric.send` para as intenções de exemplo e nada mais;
-///   `remoto` é o teto de tudo o que chega de outro dispositivo, a linha
-///   `remoto` — o mesmo `fabric.send` e nada mais —, e um pedido remoto é
+///   pedir aqui, `fabric.send` e `fabric.stream` para as intenções de
+///   exemplo e nada mais; `remoto` é o teto de tudo o que chega de outro
+///   dispositivo, a linha `remoto` — os mesmos `fabric.send` e
+///   `fabric.stream` e nada mais —, e um pedido remoto é
 ///   decidido pelo papel da pessoa local da relação, pelo da relação e por
 ///   este, os três; `enlace` é o papel do serviço que leva as entregas aos
 ///   outros dispositivos — a linha `servico enlace`: `net.connect` ao
@@ -346,7 +351,10 @@ pub const PADRAO: &str = concat!(
 # do mesmo titular a procura e entrega a ele (fabric.send): as intencoes
 # enumeradas, inteiras, imagem.compartilhar e pdf.anotar, para o operador,
 # o sistema e o teto do administrador. Nenhuma das duas da acesso a nada do
-# outro lado. Outro dispositivo (outro Duke, pela chave dele) se relaciona a
+# outro lado. Um fluxo (fabric.stream) leva bytes, quantos forem, na ordem,
+# entre dois programas do mesmo titular: abrir, aceitar, escrever e ler sao
+# decididos pelo gate de cada ponta, sobre a mesma intencao, e as duas
+# pontas precisam da linha. Outro dispositivo (outro Duke, pela chave dele) se relaciona a
 # uma pessoa desta maquina por uma relacao que o administrador registra com
 # prova (device.register) e revoga com lapide (device.revoke). Levar uma
 # entrega a ele e decidido duas vezes aqui: fabric.send pela intencao e
@@ -367,7 +375,7 @@ papel observador agent.read system.read log.read ui.read message.read credential
 taxa observador 20 40
 processos observador 2
 
-papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget
+papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget
 recurso operador fs.read /dados /bin /programas /armazem/compartilhado
 recurso operador fs.write /armazem/compartilhado
 recurso operador fs.restore /armazem/compartilhado
@@ -383,6 +391,7 @@ recurso operador key.destroy chave:bancada chave:bancada-2
 dominios operador ic-request
 recurso operador fabric.offer intencao:imagem.compartilhar intencao:pdf.anotar
 recurso operador fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
+recurso operador fabric.stream intencao:imagem.compartilhar intencao:pdf.anotar
 recurso operador fabric.remote dispositivo:par dispositivo:par-2
 recurso operador device.forget dispositivo:par dispositivo:par-2
 taxa operador 50 100
@@ -393,12 +402,14 @@ recurso tempo net.connect udp:10.0.2.2:5319 udp:10.0.2.2:5320 udp:10.0.2.2:5321
 taxa tempo 10 20
 servico hora tempo
 
-papel dispositivo fabric.send
+papel dispositivo fabric.send fabric.stream
 recurso dispositivo fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
+recurso dispositivo fabric.stream intencao:imagem.compartilhar intencao:pdf.anotar
 taxa dispositivo 50 100
 
-papel remoto fabric.send
+papel remoto fabric.send fabric.stream
 recurso remoto fabric.send intencao:imagem.compartilhar intencao:pdf.anotar
+recurso remoto fabric.stream intencao:imagem.compartilhar intencao:pdf.anotar
 taxa remoto 50 100
 remoto remoto
 
@@ -966,13 +977,13 @@ mod testes {
         ));
         // Dar ao operador o que o administrador tem: vale.
         let nova =
-            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget audit.read")
+            mudar("papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget audit.read")
                 .unwrap();
         assert!(nova.papel("operador").unwrap().tem(Permissao::AuditRead));
         // O que ele não tem: não.
         assert!(matches!(
             mudar(
-                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget keyboard.read"
+                "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget keyboard.read"
             ),
             Err(Recusa::Proibida(_))
         ));
@@ -1806,7 +1817,7 @@ mod testes {
         // Delegar `time.sync` ao operador cabe no teto: é decisão de quem
         // tem a prova, e a auditoria a grava.
         let delegado = mudar(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.remote device.pair device.forget time.sync",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read key.create key.read key.sign key.destroy fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget time.sync",
         )
         .unwrap();
         assert_eq!(

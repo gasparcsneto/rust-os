@@ -567,6 +567,18 @@ pub fn programa_decidido() -> Option<Programa> {
     do_comando_deste_fio(|c| c.decidido.as_ref().and_then(|d| d.programa)).flatten()
 }
 
+/// O programa que outro dispositivo atesta, no pedido que a decisão do
+/// comando em execução neste fio autorizou — atestado, e não conferido.
+/// `None` fora de um pedido do par.
+pub fn programa_atestado() -> Option<[u8; 32]> {
+    do_comando_deste_fio(|c| {
+        c.decidido
+            .as_ref()
+            .and_then(|d| d.quem.remoto.as_ref().map(|r| r.programa))
+    })
+    .flatten()
+}
+
 /// O dispositivo que a decisão de `fabric.remote` resolveu para o comando
 /// em execução neste fio — ver [`DispositivoDecidido`]. `None` fora de um
 /// pedido da malha a outro dispositivo, e em outro fio.
@@ -726,6 +738,9 @@ struct Quem {
 struct QuemRemoto {
     relacao: [u8; 16],
     tetos: [Option<String>; 2],
+    /// O programa que a origem atesta — atestado, e não conferido: vai à
+    /// auditoria e à outra ponta de um fluxo, e não é critério de nada.
+    programa: [u8; 32],
 }
 
 /// Quem está numa decisão, como a barra o mostra — ver [`crate::atividade`].
@@ -1280,6 +1295,7 @@ fn quem_do_dispositivo(
         remoto: Some(alloc::boxed::Box::new(QuemRemoto {
             relacao,
             tetos: [None, None],
+            programa: programa.unwrap_or([0; 32]),
         })),
     };
     let Some((nome, rel)) = crate::dispositivos::relacao(&dispositivo, &relacao) else {
@@ -1302,6 +1318,7 @@ fn quem_do_dispositivo(
         remoto: Some(alloc::boxed::Box::new(QuemRemoto {
             relacao,
             tetos: [Some(papel_da_pessoa), teto],
+            programa: programa.unwrap_or([0; 32]),
         })),
     })
 }
@@ -1679,14 +1696,65 @@ pub enum Chamador {
     },
     /// Outro dispositivo, pelo enlace: a chave que provou o aperto, a
     /// relação que o pedido diz — só entre as daquele par —, a época do
-    /// boot da origem, e o resumo da imagem do programa que a origem atesta
-    /// — que vai à auditoria, e não é critério de nada.
+    /// boot da origem, o resumo da imagem do programa que a origem atesta
+    /// — que vai à auditoria, e não é critério de nada — e o domínio por
+    /// onde o pedido chegou, que diz o conjunto fechado que o gate aceita
+    /// dele.
     Remoto {
         dispositivo: [u8; 32],
         relacao: [u8; 16],
         epoca: [u8; 8],
         programa: [u8; 32],
+        dominio: Dominio,
     },
+}
+
+/// Por onde chega o pedido de outro dispositivo: cada domínio tem o seu
+/// respondedor, o seu prólogo e o seu conjunto fechado de métodos — e o
+/// gate aceita, de cada um, só o dele. Não é autoridade: a autoridade é a
+/// mesma, a composição da relação, da pessoa dela e do teto `remoto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dominio {
+    /// O enlace do estágio 1: um pedido da malha por conexão — ver
+    /// `politica::enlace::METODOS`.
+    Enlace,
+    /// O fluxo entre dispositivos: o `abrir` e cada `dados` — ver
+    /// `politica::fluxo::METODOS_REMOTOS`. Montado só pela sessão de fluxo
+    /// entre Dukes, que chega com a modalidade remota.
+    #[allow(dead_code)]
+    Fluxo,
+}
+
+impl Dominio {
+    /// Se `metodo` é do conjunto fechado deste domínio.
+    pub fn aceita(self, metodo: &str) -> bool {
+        match self {
+            Dominio::Enlace => politica::enlace::metodo_do_enlace(metodo),
+            Dominio::Fluxo => politica::fluxo::metodo_remoto(metodo),
+        }
+    }
+}
+
+/// Outro dispositivo, como o chamador o diz: a chave, a relação, a época da
+/// origem e o programa atestado.
+pub type PeloPar = ([u8; 32], [u8; 16], [u8; 8], [u8; 32]);
+
+impl Chamador {
+    /// Se é outro dispositivo: a chave, a relação, a época da origem e o
+    /// programa atestado. Para quem lê o chamador sem montá-lo — só o
+    /// respondedor do enlace o monta, e o `xtask` confere.
+    pub fn remoto(&self) -> Option<PeloPar> {
+        match *self {
+            Chamador::Remoto {
+                dispositivo,
+                relacao,
+                epoca,
+                programa,
+                ..
+            } => Some((dispositivo, relacao, epoca, programa)),
+            _ => None,
+        }
+    }
 }
 
 /// Os comandos que só um canal do agente pede: os que respondem pelo
@@ -2340,19 +2408,28 @@ fn orcamento_do_pedido(
         Plano::Dados => false,
         Plano::Fecho => true,
     };
-    // O recurso aberto, pelo número que a abertura devolveu. Hoje, a
-    // conexão — o único recurso que se abre e se usa por número.
-    if comando.recurso != Some(crate::rede::conexoes::PARAMETRO) {
+    // O recurso aberto, pelo id que a abertura devolveu: a conexão, ou o
+    // fluxo — os dois recursos que se abrem e se usam por id.
+    let conexao = comando.recurso == Some(crate::rede::conexoes::PARAMETRO);
+    let fluxo = comando.recurso == Some(crate::fluxo::PARAMETRO);
+    if !conexao && !fluxo {
         return Orcamento::Taxa;
     }
     if crate::contencao::recusa(chamador, autoridade).is_some() {
         return Orcamento::Taxa;
     }
-    let dono = crate::rede::conexoes::Dono::do_chamador(chamador, quem.chave);
-    let numero = params
-        .member(crate::rede::conexoes::PARAMETRO)
-        .and_then(|v| v.as_u64());
-    if !crate::rede::conexoes::aberta(numero, &dono, cortada_vale) {
+    let aberto = if conexao {
+        let dono = crate::rede::conexoes::Dono::do_chamador(chamador, quem.chave);
+        let numero = params
+            .member(crate::rede::conexoes::PARAMETRO)
+            .and_then(|v| v.as_u64());
+        crate::rede::conexoes::aberta(numero, &dono, cortada_vale)
+    } else {
+        // O fluxo aberto, vivo, de que quem pede é ponta e de que não saiu
+        // — ver `fluxo::aberto_para_o_pedido`.
+        crate::fluxo::aberto_para_o_pedido(chamador, params)
+    };
+    if !aberto {
         return Orcamento::Taxa;
     }
     let principal = principal_da_capacidade(quem);
@@ -2376,6 +2453,17 @@ pub fn autorizar(
     let inicio = crate::arch::ciclos();
     let mut orcamento = Orcamento::Taxa;
     let r = decidir_o_pedido(chamador, comando, params, pode_adiar, &mut orcamento);
+    // A recusa de uma leitura ou escrita pela política encerra o fluxo: o
+    // fluxo nunca é autorização permanente — ver `fluxo::recusado_pelo_gate`.
+    if let Err(recusa) = &r {
+        crate::fluxo::recusado_pelo_gate(
+            chamador,
+            comando.nome,
+            params,
+            recusa.codigo,
+            &recusa.motivo,
+        );
+    }
     let codigo = match &r {
         // Adiado não é decisão: nada foi decidido nem gravado.
         Ok(Decisao::Adiada(_)) => return r,
@@ -2494,6 +2582,7 @@ fn decidir_o_pedido(
             relacao,
             epoca,
             programa,
+            ..
         } => match quem_do_dispositivo(dispositivo, relacao, Some(programa)) {
             Ok(q) => (
                 q,
@@ -2539,14 +2628,15 @@ fn decidir_o_pedido(
             }
         },
     };
-    // De outro dispositivo só chega o conjunto fechado da malha — ver
-    // `politica::enlace::METODOS` —, e nunca com `device`: o pedido que
-    // chegou não vai a um terceiro. Antes de tudo o que vale para quem é
-    // daqui: um comando de fora do conjunto é recusado por isso. O motivo
-    // cabe no teto do detalhe com a relação e o programa atestado que o
-    // precedem — ver `quem_do_dispositivo`.
-    if matches!(chamador, Chamador::Remoto { .. }) {
-        let motivo = if !politica::enlace::metodo_do_enlace(comando.nome) {
+    // De outro dispositivo só chega o conjunto fechado do domínio por onde
+    // o pedido veio — o da malha pelo enlace, `politica::enlace::METODOS`;
+    // o do fluxo, `politica::fluxo::METODOS_REMOTOS` —, e nunca com
+    // `device`: o pedido que chegou não vai a um terceiro. Antes de tudo o
+    // que vale para quem é daqui: um comando de fora do conjunto é
+    // recusado por isso. O motivo cabe no teto do detalhe com a relação e
+    // o programa atestado que o precedem — ver `quem_do_dispositivo`.
+    if let Chamador::Remoto { dominio, .. } = chamador {
+        let motivo = if !dominio.aceita(comando.nome) {
             Some("de outro dispositivo so chega o conjunto fechado")
         } else if params.member(politica::enlace::PARAMETRO).is_some() {
             Some("um pedido de outro dispositivo nao vai a um terceiro")
@@ -2570,6 +2660,29 @@ fn decidir_o_pedido(
     if crate::malha::so_de_processo(comando.nome) && !matches!(chamador, Chamador::Processo { .. })
     {
         let motivo = "so um processo pede este comando: o endpoint da malha e dele";
+        let d = auditar(
+            &quem,
+            comando.nome,
+            "",
+            Codigo::DenyPermission,
+            parametros,
+            motivo,
+        );
+        return Err(recusa(Codigo::DenyPermission, &quem, "", motivo, d));
+    }
+    // As pontas de um fluxo são processos — daqui, ou o par, pelo domínio
+    // do fluxo, que só chega aos dele. Ver `fluxo::so_de_processo`.
+    if crate::fluxo::so_de_processo(comando.nome)
+        && !matches!(chamador, Chamador::Processo { .. })
+        && !matches!(
+            chamador,
+            Chamador::Remoto {
+                dominio: Dominio::Fluxo,
+                ..
+            }
+        )
+    {
+        let motivo = "so um processo e ponta de um fluxo";
         let d = auditar(
             &quem,
             comando.nome,
@@ -2661,7 +2774,12 @@ fn decidir_o_pedido(
     } else if exigida.is_some_and(Permissao::recurso_e_intencao) {
         // Um pedido a outro dispositivo resolve a entrega no que este canal
         // mandou a ele — ver `enlace::recurso_do_pedido`.
-        let resolvido = if params.member(politica::enlace::PARAMETRO).is_some() {
+        let resolvido = if exigida == Some(Permissao::FabricStream) {
+            // O fluxo resolve o dele: a intenção do pedido, a do endpoint
+            // de quem aceita, a do fluxo de que quem pede é ponta — ver
+            // `fluxo::recurso_do_pedido`.
+            crate::fluxo::recurso_do_pedido(chamador, comando, params)
+        } else if params.member(politica::enlace::PARAMETRO).is_some() {
             crate::enlace::recurso_do_pedido(chamador, comando, params)
         } else {
             crate::malha::recurso_do_pedido(chamador, quem.chave, comando, params)
@@ -2730,15 +2848,27 @@ fn decidir_o_pedido(
     };
     // O pedido da malha a outro dispositivo: a segunda permissão,
     // `fabric.remote`, sobre o dispositivo — na mesma decisão, depois da
-    // primeira ter permitido.
+    // primeira ter permitido. O fluxo também: o `device` de quem abre, e o
+    // par de um fluxo aberto daqui, a cada escrita e leitura — ver
+    // `fluxo::dispositivo_do_pedido`.
     let mut remoto = None;
-    let (codigo, detalhe) = match comando.acesso {
-        Acesso::Exige(_)
-            if codigo.permite()
-                && politica::enlace::metodo_do_enlace(comando.nome)
-                && params.member(politica::enlace::PARAMETRO).is_some() =>
-        {
-            match decidir_o_dispositivo(chamador, autoridade, &quem, params) {
+    let do_fluxo = if exigida == Some(Permissao::FabricStream) {
+        crate::fluxo::dispositivo_do_pedido(chamador, comando, params)
+    } else {
+        None
+    };
+    // Um `device` que não é texto vai à decisão como o texto vazio, e ela
+    // o recusa: nunca passa por local.
+    let do_enlace = politica::enlace::metodo_do_enlace(comando.nome)
+        .then(|| {
+            params
+                .member(politica::enlace::PARAMETRO)
+                .map(|v| String::from(v.as_str().unwrap_or("")))
+        })
+        .flatten();
+    let (codigo, detalhe) = match (comando.acesso, do_enlace.as_deref().or(do_fluxo.as_deref())) {
+        (Acesso::Exige(_), Some(texto)) if codigo.permite() => {
+            match decidir_o_dispositivo(chamador, autoridade, &quem, texto) {
                 Ok(d) => {
                     remoto = Some(d);
                     (codigo, detalhe)
@@ -2798,7 +2928,8 @@ fn decidir_o_pedido(
     let dispositivo_pedido = params
         .member(politica::enlace::PARAMETRO)
         .and_then(|v| v.as_str())
-        .filter(|_| politica::enlace::metodo_do_enlace(comando.nome));
+        .filter(|_| politica::enlace::metodo_do_enlace(comando.nome))
+        .or(do_fluxo.as_deref().filter(|d| !d.is_empty()));
     for r in todos_os_recursos(comando, &recurso, &mais).chain(dispositivo_pedido) {
         if !recurso_gravado.is_empty() {
             recurso_gravado.push_str(" ; ");
@@ -2863,7 +2994,7 @@ fn decidir_o_dispositivo(
     chamador: Chamador,
     autoridade: Autoridade,
     quem: &Quem,
-    params: Json,
+    texto: &str,
 ) -> Result<DispositivoDecidido, (Codigo, &'static str)> {
     let pessoa = match autoridade {
         Autoridade::Pessoa { sessao } => crate::pessoas::dona_da_sessao(sessao),
@@ -2881,10 +3012,6 @@ fn decidir_o_dispositivo(
             "o manifesto nao declara fabric.remote",
         ));
     }
-    let texto = params
-        .member(politica::enlace::PARAMETRO)
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
     let nome = politica::arquivo::nome_de_dispositivo(texto).ok_or((
         Codigo::InvalidArgument,
         "`device` nao e `dispositivo:<nome>`",
@@ -3094,6 +3221,32 @@ pub fn processo_exerceria(fio: u64, permissao: Permissao, recurso: &str) -> bool
             .0
             .permite()
         && editor_sem_confianca(&programa, quem.papel.as_deref()).is_none()
+}
+
+/// Se o par `dispositivo`, pela relação `relacao`, exerceria agora
+/// `permissao` sobre `recurso`: a mesma conta do gate para um pedido dele —
+/// a relação ativa e a pessoa dela, o dispositivo não suspenso, as
+/// revogações que o journal não perdeu, e a interseção do papel da relação,
+/// do da pessoa e do teto `remoto` —, com a política e o registro de agora,
+/// sem gravar nada.
+///
+/// É a reconfirmação de quem abriu um fluxo vindo de outro Duke, no aceite —
+/// ver [`crate::fluxo`]. Não monta chamador nenhum: decide pela mesma conta.
+pub fn remoto_exerceria(
+    dispositivo: &[u8; 32],
+    relacao: &[u8; 16],
+    permissao: Permissao,
+    recurso: &str,
+) -> bool {
+    if crate::persistencia::revogacoes_desconhecidas().is_some()
+        || crate::contencao::dispositivo_suspenso(dispositivo)
+    {
+        return false;
+    }
+    let Ok(quem) = quem_do_dispositivo(*dispositivo, *relacao, None) else {
+        return false;
+    };
+    !papel_de_teto(&quem) && decidir_de(&quem, permissao, recurso).0.permite()
 }
 
 /// Grava o que a execução de uma chamada de sistema fez da decisão

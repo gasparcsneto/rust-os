@@ -2649,6 +2649,103 @@ mod testes {
         assert!(p.cabe_em("operador", "administrador").is_ok());
     }
 
+    /// A linha de alcance do fluxo: a mesma forma da malha — só
+    /// `intencao:<espaço>.<nome>`, inteira, obrigatória —; a decisão alcança
+    /// só a intenção escrita; por inclusão não vem; mandar entregas não dá
+    /// fluxo; e o teto `remoto` da padrão a tem, nas mesmas intenções.
+    #[test]
+    fn a_linha_do_fluxo() {
+        use Codigo::*;
+        use Permissao::FabricStream;
+        for ruim in [
+            "recurso operador fabric.stream intencao:*",
+            "recurso operador fabric.stream intencao:imagem.*",
+            "recurso operador fabric.stream intencao:imagem",
+            "recurso operador fabric.stream intencao:",
+            "recurso operador fabric.stream imagem.compartilhar",
+            "recurso operador fabric.stream *",
+            "recurso operador fabric.stream dispositivo:par",
+            "recurso operador fabric.stream",
+        ] {
+            let texto = alloc::format!("{}{ruim}\n", crate::PADRAO);
+            let erro = Politica::ler(&texto).unwrap_err();
+            assert!(
+                matches!(erro.tipo, ErroTipo::IntencaoInvalida(_) | ErroTipo::Sintaxe),
+                "{ruim}: {erro:?}"
+            );
+        }
+        // Sem a linha: recusada, e não "qualquer intenção".
+        let sem = crate::PADRAO
+            .lines()
+            .filter(|l| !l.starts_with("recurso operador fabric.stream"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            Politica::ler(&sem).unwrap_err().tipo,
+            ErroTipo::RecursoFaltando(papel, q) if papel == "operador" && q == "fabric.stream"
+        ));
+        let p = Politica::ler(crate::PADRAO).unwrap();
+        for papel in ["operador", "sistema", "dispositivo", "remoto"] {
+            for dentro in ["intencao:imagem.compartilhar", "intencao:pdf.anotar"] {
+                assert_eq!(
+                    p.decidir(Some(papel), FabricStream, Some(dentro)),
+                    Allow,
+                    "{papel} {dentro}"
+                );
+            }
+            for fora in ["intencao:pdf.assinar", "intencao:imagem", "intencao:*", ""] {
+                assert_eq!(
+                    p.decidir(Some(papel), FabricStream, Some(fora)),
+                    DenyResource,
+                    "{papel} {fora}"
+                );
+            }
+        }
+        assert_eq!(
+            p.decidir(
+                Some("observador"),
+                FabricStream,
+                Some("intencao:imagem.compartilhar")
+            ),
+            DenyPermission
+        );
+        // O teto `remoto` é a linha `remoto` da padrão.
+        assert_eq!(p.remoto(), Some("remoto"));
+        // Sensível: por inclusão não vem.
+        let incluida = alloc::format!(
+            "{}papel herdeiro @operador\nrecurso herdeiro process.run /bin\n",
+            crate::PADRAO
+        );
+        let h = Politica::ler(&incluida).unwrap();
+        assert_eq!(
+            h.decidir(
+                Some("herdeiro"),
+                FabricStream,
+                Some("intencao:imagem.compartilhar")
+            ),
+            DenyPermission
+        );
+        // Mandar entregas não é abrir fluxo: a linha de uma não vale para a
+        // outra.
+        let estreito = alloc::format!(
+            "{}papel estreito fabric.send\nrecurso estreito fabric.send intencao:pdf.anotar\n",
+            crate::PADRAO
+        );
+        let e = Politica::ler(&estreito).unwrap();
+        assert_eq!(
+            e.decidir(Some("estreito"), FabricStream, Some("intencao:pdf.anotar")),
+            DenyPermission
+        );
+        // O teto contém as intenções exatas.
+        let mais = alloc::format!(
+            "{}recurso operador fabric.stream intencao:imagem.compartilhar intencao:pdf.assinar\n",
+            crate::PADRAO
+        );
+        let m = Politica::ler(&mais).unwrap();
+        assert!(m.cabe_em("operador", "administrador").is_err());
+        assert!(p.cabe_em("operador", "administrador").is_ok());
+    }
+
     /// Os domínios de assinatura: lidos, escritos de volta iguais, só num
     /// papel que cria chave ou assina. O uso é do papel — sem papel,
     /// nenhum —, e a ordem e a repetição na linha não mudam o que ela diz.

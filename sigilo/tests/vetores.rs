@@ -247,15 +247,16 @@ fn o_enlace_e_o_agente_nao_se_abrem() {
     assert_eq!(recebido.remota(), sigilo::publica_de(&AGENTE));
 }
 
-/// Os três prólogos separam as três portas: um aperto de pareamento não
-/// abre como enlace nem como agente, e nenhum dos dois abre como
-/// pareamento — com as mesmas chaves.
+/// Os quatro prólogos separam os quatro domínios: um aperto de pareamento
+/// ou de fluxo não abre como enlace nem como agente, nem um como o outro,
+/// e nenhum dos outros abre como eles — com as mesmas chaves.
 #[test]
 fn o_pareamento_nao_abre_como_enlace_nem_como_agente() {
     let todos = [
         sigilo::PROLOGO,
         sigilo::PROLOGO_DO_ENLACE,
         sigilo::PROLOGO_DO_PAREAMENTO,
+        sigilo::PROLOGO_DO_FLUXO,
     ];
     for de in todos {
         for para in todos {

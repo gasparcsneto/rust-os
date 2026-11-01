@@ -58,6 +58,7 @@ extern crate alloc;
 pub mod conexao;
 pub mod desenho;
 pub mod dns;
+pub mod fluxo;
 pub mod http;
 pub mod icp;
 pub mod janela;

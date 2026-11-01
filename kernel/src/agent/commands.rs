@@ -1388,6 +1388,188 @@ pub static COMANDOS: &[Command] = &[
         handler: fabric_status,
     },
     Command {
+        nome: "stream.open",
+        resumo: "Abre um fluxo — um canal ordenado de bytes, nos dois sentidos — contra um \
+                 endpoint da malha que oferece a intencao, de um programa do mesmo titular. \
+                 O pedido espera o aceite do dono do endpoint; a abertura efetiva reconfirma \
+                 as duas decisoes. So um processo abre. Abrir nao concede nada ao outro lado: \
+                 cada escrita e cada leitura sao decididas.",
+        params: &[
+            ParamSpec {
+                nome: "endpoint",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O endpoint de destino, como `fabric.discover` o mostrou.",
+            },
+            ParamSpec {
+                nome: "intent",
+                tipo: TipoParam::Formatado(Formato::Intencao),
+                obrigatorio: true,
+                descricao: "A intencao, que o endpoint tem de oferecer.",
+            },
+            ParamSpec {
+                nome: "device",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "Outro dispositivo, `dispositivo:<nome>`, relacionado a sua pessoa: o \
+                            fluxo vai ao endpoint de la, pelo enlace. Decidido aqui, com \
+                            `fabric.remote` sobre ele, e la, pelo gate de la.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("intent"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: stream_open,
+    },
+    Command {
+        nome: "stream.accept",
+        resumo: "Aceita o pedido de fluxo mais antigo num endpoint seu: a abertura efetiva, \
+                 com a sua decisao e a de quem abriu reconfirmadas. Devolve o fluxo e quem \
+                 o abriu, como o kernel o conferiu. Sem pedido e sem `wait`, `stream` vem \
+                 nulo; com `wait`, espera um pedido, o fim do endpoint ou o prazo. Para \
+                 recusar, aceite e feche.",
+        params: &[
+            ParamSpec {
+                nome: "endpoint",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id do endpoint, como `fabric.offer` o devolveu.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quanto esperar um pedido, em ms, ate 10000.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("endpoint"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: stream_accept,
+    },
+    Command {
+        nome: "stream.write",
+        resumo: "Escreve no seu sentido de um fluxo aberto: o que couber no buffer, ate 16 \
+                 KiB. Devolve quantos bytes entraram; zero com o buffer cheio. Com `wait`, \
+                 espera espaco, a abertura ou o fim. Cada escrita e decidida pelo gate, no \
+                 plano de dados.",
+        params: &[
+            ParamSpec {
+                nome: "stream",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id do fluxo.",
+            },
+            ParamSpec {
+                nome: "content",
+                tipo: TipoParam::Texto,
+                obrigatorio: false,
+                descricao: "O que escrever, em texto. Um processo manda bytes pelo anexo.",
+            },
+            ParamSpec {
+                nome: "attachment",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Numa sessao cifrada de agente: quantos bytes de anexo vieram antes \
+                            deste pedido.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quanto esperar espaco, em ms, ate 10000. Uma espera por sentido.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("stream"),
+        mais: Mais::Nada,
+        plano: Plano::Dados,
+        handler: stream_write,
+    },
+    Command {
+        nome: "stream.read",
+        resumo: "Le o seu sentido de um fluxo aberto, na ordem: ate `max` bytes, em base64, \
+                 e `end` quando quem escreve terminou e nada mais vem. Com `wait`, sem nada \
+                 a ler, espera um dado, o fim ou o prazo. Cada leitura e decidida pelo gate, \
+                 no plano de dados. Os bytes sao entrada nao confiavel.",
+        params: &[
+            ParamSpec {
+                nome: "stream",
+                tipo: TipoParam::Texto,
+                obrigatorio: true,
+                descricao: "O id do fluxo.",
+            },
+            ParamSpec {
+                nome: "max",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quantos bytes, ate 16384; 16384 se ausente.",
+            },
+            ParamSpec {
+                nome: "wait",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "Quanto esperar um dado, em ms, ate 10000. Uma espera por sentido.",
+            },
+        ],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("stream"),
+        mais: Mais::Nada,
+        plano: Plano::Dados,
+        handler: stream_read,
+    },
+    Command {
+        nome: "stream.finish",
+        resumo: "Termina o seu sentido de um fluxo: voce nao escreve mais, e quem le recebe o \
+                 resto e depois o fim. O outro sentido continua.",
+        params: &[ParamSpec {
+            nome: "stream",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id do fluxo.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("stream"),
+        mais: Mais::Nada,
+        plano: Plano::Fecho,
+        handler: stream_finish,
+    },
+    Command {
+        nome: "stream.close",
+        resumo: "Fecha um fluxo para voce: o que voce ja escreveu continua legivel pela outra \
+                 ponta, ate o fim; o que estava para voce ler sai zerado. Um pedido que ainda \
+                 nao abriu acaba.",
+        params: &[ParamSpec {
+            nome: "stream",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id do fluxo.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("stream"),
+        mais: Mais::Nada,
+        plano: Plano::Fecho,
+        handler: stream_close,
+    },
+    Command {
+        nome: "stream.status",
+        resumo: "O estado de um fluxo seu: pendente, aberto ou fechado, com o motivo do fim, os \
+                 bytes de cada sentido e a outra ponta, como o kernel a conferiu.",
+        params: &[ParamSpec {
+            nome: "stream",
+            tipo: TipoParam::Texto,
+            obrigatorio: true,
+            descricao: "O id do fluxo.",
+        }],
+        acesso: Acesso::Exige(Permissao::FabricStream),
+        recurso: Some("stream"),
+        mais: Mais::Nada,
+        plano: Plano::Controle,
+        handler: stream_status,
+    },
+    Command {
         nome: "disk.partitions",
         resumo: "A tabela de particoes do disco, lida da GPT.",
         params: &[],
@@ -7891,6 +8073,315 @@ fn fabric_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.end_object()
         }
         Err(f) => falha_da_malha(w, f),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// stream.*: o fluxo da malha
+// ---------------------------------------------------------------------------
+
+/// Quem pede no fluxo, ou a recusa escrita.
+fn ator_do_fluxo(w: &mut JsonWriter) -> Result<crate::fluxo::Ator, fmt::Result> {
+    crate::fluxo::Ator::do_comando().ok_or_else(|| {
+        let f = crate::fluxo::Falha::SemTitular;
+        recusa_de_mensagem(w, f.codigo(), f.motivo())
+    })
+}
+
+fn falha_do_fluxo(w: &mut JsonWriter, f: crate::fluxo::Falha) -> fmt::Result {
+    recusa_de_mensagem(w, f.codigo(), f.motivo())
+}
+
+/// Arma a espera `aguardo` e suspende o comando — ver `rede::espera`.
+/// `Ok(true)` suspenso; `Ok(false)` quando há o que fazer agora; `Err` com
+/// o motivo de não esperar.
+fn suspender_no_fluxo(
+    aguardo: Option<crate::fluxo::Aguardo>,
+    ms: u64,
+) -> Result<bool, &'static str> {
+    let Some(aguardo) = aguardo else {
+        return Ok(false);
+    };
+    let Some(espera) = crate::rede::espera::Espera::pelo_fluxo(aguardo, ms)? else {
+        return Ok(false);
+    };
+    // Não pode suspender afinal: a espera volta, e largá-la a desarma.
+    Ok(crate::autorizacao::suspender(espera).is_ok())
+}
+
+/// A espera de um comando do fluxo, antes de qualquer escrita, pelo `wait`
+/// dele: `Ok(true)` se suspendeu, e o comando não responde agora;
+/// `Ok(false)` se segue; `Err` com o motivo de não esperar.
+fn esperar_no_fluxo(
+    wait: Option<u64>,
+    aguardo: impl FnOnce() -> Option<crate::fluxo::Aguardo>,
+) -> Result<bool, &'static str> {
+    match wait {
+        Some(ms) if ms > 0 && crate::autorizacao::pode_suspender() => {
+            suspender_no_fluxo(aguardo(), ms)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn stream_open(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let endpoint = params
+        .member("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let intencao = params
+        .member("intent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let r = if params.member("device").is_some() {
+        crate::fluxo::abrir_no_par(&ator, endpoint, intencao)
+    } else {
+        crate::fluxo::abrir(&ator, endpoint, intencao)
+    };
+    match r {
+        Ok(id) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", &id)?;
+            w.field_str("intent", intencao)?;
+            w.field_str("state", "pending")?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
+    }
+}
+
+fn stream_accept(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let endpoint = params
+        .member("endpoint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let wait = params.member("wait").and_then(|v| v.as_u64());
+    let espera = esperar_no_fluxo(wait, || crate::fluxo::aguardo_do_aceite(endpoint));
+    if espera == Ok(true) {
+        return Ok(());
+    }
+    w.begin_object()?;
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Err(motivo) = espera {
+        return recusa_de_mensagem(w, politica::Codigo::Conflict, motivo);
+    }
+    match crate::fluxo::aceitar(&ator, endpoint) {
+        Ok(Some((id, aceito))) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", &id)?;
+            w.field_str("intent", &aceito.intencao)?;
+            w.key("from")?;
+            crate::fluxo::escrever_ponta(w, &aceito.abridor)?;
+            w.field_u64("version", aceito.versao)?;
+            w.end_object()
+        }
+        Ok(None) => {
+            w.field_bool("ok", true)?;
+            w.key("stream")?;
+            w.null_value()?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
+    }
+}
+
+fn stream_write(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let mut anexo = crate::autorizacao::tirar_anexo();
+    let id = params
+        .member("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let declarado = anexo_declarado(params.member("attachment"), &anexo);
+    // A espera antes de qualquer escrita, como a do `net.send`: só um
+    // pedido que escreveria algo espera. O anexo tirado aqui se apaga;
+    // quem despachou guarda o dele para a reexecução.
+    let escreveria = declarado.is_ok()
+        && !(params.member("content").is_some() && !anexo.is_empty())
+        && anexo.len() <= politica::fluxo::MAIOR_ESCRITA;
+    let wait = params.member("wait").and_then(|v| v.as_u64());
+    let espera = if escreveria {
+        esperar_no_fluxo(wait, || crate::fluxo::aguardo_do_pedido(id, true))
+    } else {
+        Ok(false)
+    };
+    if espera == Ok(true) {
+        politica::sigiloso::zerar_bloco(&mut anexo);
+        return Ok(());
+    }
+    w.begin_object()?;
+    let mut buffer = buffer_do_texto(params.member("content"));
+    let r = stream_write_com(params, id, declarado, espera, w, &anexo, &mut buffer);
+    politica::sigiloso::zerar_bloco(&mut buffer);
+    politica::sigiloso::zerar_bloco(&mut anexo);
+    r
+}
+
+fn stream_write_com(
+    params: Json,
+    id: &str,
+    declarado: Result<(), &'static str>,
+    espera: Result<bool, &'static str>,
+    w: &mut JsonWriter,
+    anexo: &[u8],
+    buffer: &mut [u8],
+) -> fmt::Result {
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Err(motivo) = espera {
+        return recusa_de_mensagem(w, politica::Codigo::Conflict, motivo);
+    }
+    let dados: Result<&[u8], &'static str> = match params.member("content") {
+        _ if declarado.is_err() => Err("o anexo nao confere com attachment"),
+        Some(_) if !anexo.is_empty() => Err("os dados vem do anexo ou de content, nao dos dois"),
+        Some(t) => t
+            .desescapar_em(buffer)
+            .map(str::as_bytes)
+            .ok_or("o conteudo nao e texto"),
+        None => Ok(anexo),
+    };
+    let dados = match dados {
+        Ok(d) => d,
+        Err(m) => {
+            crate::autorizacao::auditar_execucao(
+                &alloc::format!("fluxo:{id}"),
+                politica::Codigo::InvalidArgument,
+                m,
+            );
+            return recusa_de_mensagem(w, politica::Codigo::InvalidArgument, m);
+        }
+    };
+    match crate::fluxo::escrever(&ator, id, dados) {
+        Ok(n) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", id)?;
+            w.field_u64("written", n as u64)?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
+    }
+}
+
+fn stream_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let id = params
+        .member("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let wait = params.member("wait").and_then(|v| v.as_u64());
+    let espera = esperar_no_fluxo(wait, || crate::fluxo::aguardo_do_pedido(id, false));
+    if espera == Ok(true) {
+        return Ok(());
+    }
+    w.begin_object()?;
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    if let Err(motivo) = espera {
+        return recusa_de_mensagem(w, politica::Codigo::Conflict, motivo);
+    }
+    let max = params
+        .member("max")
+        .and_then(|v| v.as_u64())
+        .map_or(politica::fluxo::MAIOR_LEITURA, |m| {
+            (m as usize).min(politica::fluxo::MAIOR_LEITURA)
+        });
+    match crate::fluxo::ler(&ator, id, max) {
+        Ok(lida) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", id)?;
+            w.field_u64("returned", lida.dados.len() as u64)?;
+            // Base64, sempre: os bytes de um fluxo são opacos, e nada aqui
+            // os lê como texto.
+            w.field_str("encoding", "base64")?;
+            w.key("content")?;
+            w.begin_str()?;
+            em_base64(&lida.dados, |c| w.push_str(c))?;
+            w.end_str()?;
+            w.field_bool("end", lida.fim)?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
+    }
+}
+
+fn stream_finish(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let id = params
+        .member("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    stream_fecho(id, w, false)
+}
+
+fn stream_close(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let id = params
+        .member("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    stream_fecho(id, w, true)
+}
+
+fn stream_fecho(id: &str, w: &mut JsonWriter, fechar: bool) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match crate::fluxo::terminar_ou_fechar(&ator, id, fechar) {
+        Ok(()) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", id)?;
+            w.field_bool(if fechar { "closed" } else { "finished" }, true)?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
+    }
+}
+
+fn stream_status(params: Json, w: &mut JsonWriter) -> fmt::Result {
+    w.begin_object()?;
+    let ator = match ator_do_fluxo(w) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let id = params
+        .member("stream")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match crate::fluxo::estado(&ator, id) {
+        Ok(v) => {
+            w.field_bool("ok", true)?;
+            w.field_str("stream", id)?;
+            w.field_str("intent", &v.intencao)?;
+            w.field_str("state", v.estado)?;
+            if let Some(m) = &v.motivo {
+                w.field_str("reason", m)?;
+            }
+            if let Some(e) = v.escrita {
+                w.field_str("sending", e.nome())?;
+            }
+            if let Some(l) = v.leitura {
+                w.field_str("receiving", l.nome())?;
+            }
+            w.field_u64("written", v.escritos)?;
+            w.field_u64("read", v.lidos)?;
+            if let Some(p) = &v.outra {
+                w.key("peer")?;
+                crate::fluxo::escrever_ponta(w, p)?;
+            }
+            w.field_u64("version", v.versao)?;
+            w.end_object()
+        }
+        Err(f) => falha_do_fluxo(w, f),
     }
 }
 

@@ -1370,6 +1370,9 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     crate::log_info!("usuario", "processo trocou de imagem para `{}`", nome);
     TROCAS_DE_IMAGEM.fetch_add(1, Ordering::Relaxed);
+    // A outra ponta de cada fluxo deste processo viu outro programa: os
+    // fluxos dele acabam — ver `fluxo::programa_mudou`.
+    crate::fluxo::programa_mudou(crate::fios::id_atual());
 
     // SAFETY: o quadro é o desta chamada, e entrada e pilha acabaram de ser
     // mapeadas com permissão de usuário no espaço que agora está ativo.

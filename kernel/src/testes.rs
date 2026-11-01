@@ -29,6 +29,7 @@ use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
 mod enlace;
+mod fluxo;
 mod pareamento;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
@@ -37031,6 +37032,86 @@ static CASOS: &[Caso] = &[
         f: malha_o_custo_de_uma_entrega,
     },
     Caso {
+        nome: "fluxo: abrir, aceitar e 1 MiB nos dois sentidos, entre programas",
+        f: fluxo::fluxo_entre_programas,
+    },
+    Caso {
+        nome: "fluxo: terminar um sentido, e o outro continua",
+        f: fluxo::fluxo_terminar_um_sentido,
+    },
+    Caso {
+        nome: "fluxo: fechar com dados pendentes",
+        f: fluxo::fluxo_fechar_com_dados_pendentes,
+    },
+    Caso {
+        nome: "fluxo: sem a permissao, cada lado e recusado",
+        f: fluxo::fluxo_sem_a_permissao,
+    },
+    Caso {
+        nome: "fluxo: o id nao e capacidade",
+        f: fluxo::fluxo_o_id_nao_e_capacidade,
+    },
+    Caso {
+        nome: "fluxo: o prazo do aceite e o endpoint que fecha",
+        f: fluxo::fluxo_o_prazo_do_aceite_e_o_endpoint,
+    },
+    Caso {
+        nome: "fluxo: a reconfirmacao na abertura efetiva",
+        f: fluxo::fluxo_a_reconfirmacao_no_aceite,
+    },
+    Caso {
+        nome: "fluxo: o plano de dados nao gasta a ficha",
+        f: fluxo::fluxo_o_plano_de_dados,
+    },
+    Caso {
+        nome: "fluxo: a contrapressao e as esperas",
+        f: fluxo::fluxo_a_contrapressao,
+    },
+    Caso {
+        nome: "fluxo: as cotas",
+        f: fluxo::fluxo_as_cotas,
+    },
+    Caso {
+        nome: "fluxo: a morte, a troca de imagem e a bifurcacao",
+        f: fluxo::fluxo_a_morte_a_troca_e_a_bifurcacao,
+    },
+    Caso {
+        nome: "fluxo: a revogacao e a politica nova encerram",
+        f: fluxo::fluxo_a_revogacao_e_a_politica_nova,
+    },
+    Caso {
+        nome: "fluxo: com o desligamento, nada abre e os vivos acabam",
+        f: fluxo::fluxo_o_desligamento,
+    },
+    Caso {
+        nome: "fluxo: a inatividade encerra",
+        f: fluxo::fluxo_a_inatividade,
+    },
+    Caso {
+        nome: "fluxo: a auditoria e a proveniencia, sem o conteudo",
+        f: fluxo::fluxo_a_auditoria_sem_o_conteudo,
+    },
+    Caso {
+        nome: "fluxo: os bytes nao autorizam",
+        f: fluxo::fluxo_os_bytes_nao_autorizam,
+    },
+    Caso {
+        nome: "fluxo: as corridas no meio da decisao",
+        f: fluxo::fluxo_corridas_no_meio,
+    },
+    Caso {
+        nome: "fluxo: as corridas ao mesmo tempo",
+        f: fluxo::fluxo_corridas_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "fluxo: abrir e desligar ao mesmo tempo",
+        f: fluxo::fluxo_abrir_e_desligar_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "fluxo: muitos fluxos e muitas escritas ao mesmo tempo",
+        f: fluxo::fluxo_muitos_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "dispositivos: o administrador relaciona, com prova, e a relacao vai ao journal",
         f: enlace::dispositivos_o_administrador_relaciona_com_prova,
     },
@@ -45094,8 +45175,8 @@ fn tls_sem_random_read_nada_sai() -> Resultado {
     use politica::Codigo;
     crate::pessoas::esquecer_registradas();
     let sem = politica_trocada(&[(
-        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-        "message.send message.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+        "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+        "message.send message.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
     )])?;
     let resultado = com_a_politica(sem, || {
         let sessao = crate::pessoas::sessao_de_teste(Console::Terminal(66), "tls-sem", "operador");
@@ -58680,8 +58761,8 @@ fn icp_o_alcance_e_a_permissao_sao_do_gate() -> Resultado {
                 return Err("a conexao fora do alcance nao foi recusada pelo gate");
             }
             let sem_declarar = politica_da_bancada_icp(&[(
-                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "message.send message.read random.read key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             )])?;
             com_a_politica(sem_declarar, || {
                 let p = icp.passo(ICP_OLA, REDE_BANCADA, 0, "ola bancada")?;
@@ -59668,8 +59749,8 @@ fn icp_sem_chave_nada_se_assina() -> Resultado {
         let antes = crate::autorizacao::ultimo_registro();
         let sem_usar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60419,8 +60500,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -60433,8 +60514,8 @@ fn icp_sem_key_sign_a_consulta_nao_se_assina() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -61720,8 +61801,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -61734,8 +61815,8 @@ fn icp_sem_key_sign_nada_se_transfere() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -63356,8 +63437,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         crate::chaves::esquecer_de_teste();
         let sem_ler_nem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.read chave:bancada chave:bancada-2\n",
@@ -63370,8 +63451,8 @@ fn icp_sem_key_sign_nada_se_implanta() -> Resultado {
         ])?;
         let sem_assinar = politica_da_bancada_icp(&[
             (
-                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
-                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
+                "random.read audit.declare key.create key.read key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador key.sign chave:bancada chave:bancada-2\n",
@@ -66512,8 +66593,8 @@ fn tempo_pessoa_e_agente_pela_mesma_politica() -> Resultado {
         comparar("observador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         comparar("operador", "DENY_PERMISSION", &mut agente, &mut sessao)?;
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             comparar("operador", "OK", &mut agente, &mut sessao)?;
@@ -68792,8 +68873,8 @@ fn hora_o_ponto_de_commit_da_rodada() -> Resultado {
         // A sessão da pessoa que faz a rodada acaba no meio: a versão é a
         // mesma, e a decisão refeita não vale mais.
         let delegado = politica_trocada(&[(
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget\n",
-            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.remote device.pair device.forget time.sync\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\n",
+            "papel operador @observador ui.act process.run net.send net.connect fs.read fs.write fs.restore message.send message.read random.read audit.declare key.create key.read key.sign key.destroy credential.change_self fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget time.sync\n",
         )])?;
         com_a_politica(delegado, || {
             let id = crate::pessoas::sessao_de_teste(

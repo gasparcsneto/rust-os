@@ -992,12 +992,12 @@ pub(super) fn enlace_so_o_conjunto_fechado() -> Resultado {
         // e não da política.
         crate::autorizacao::trocar_politica(super::politica_trocada(&[
             (
-                "papel dispositivo fabric.send\n",
-                "papel dispositivo fabric.send random.read\n",
+                "papel dispositivo fabric.send fabric.stream\n",
+                "papel dispositivo fabric.send fabric.stream random.read\n",
             ),
             (
-                "papel remoto fabric.send\n",
-                "papel remoto fabric.send random.read\n",
+                "papel remoto fabric.send fabric.stream\n",
+                "papel remoto fabric.send fabric.stream random.read\n",
             ),
         ])?);
         let antes = crate::autorizacao::ultimo_registro();
@@ -1734,7 +1734,7 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
         // permissão passa, a segunda não.
         let sem_remote = super::politica_trocada(&[
             (
-                "fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
                 "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
             ),
             (
@@ -1929,7 +1929,7 @@ pub(super) fn enlace_a_origem_reconfirma_no_commit() -> Resultado {
         crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
         if let Ok(p) = super::politica_trocada(&[
             (
-                "fabric.offer fabric.send fabric.remote device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
                 "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
             ),
             (

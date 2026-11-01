@@ -1,0 +1,1195 @@
+//! O fluxo da malha no kernel: um canal ordenado de bytes, nos dois
+//! sentidos, entre dois processos do mesmo titular — e nenhum caminho que
+//! contorne o gate.
+//!
+//! A conta — estados, sentidos, buffers, crédito, cotas, lápides — é a de
+//! [`politica::fluxo`]. Aqui ela ganha o relógio, quem pede, as esperas, os
+//! ganchos e a auditoria:
+//!
+//! - **Abrir, aceitar, escrever e ler são decisões do gate** de quem as
+//!   pede, com a permissão `fabric.stream` e a intenção como recurso
+//!   enumerado ([`crate::autorizacao::autorizar`]). Os comandos sobre um
+//!   fluxo nomeiam o fluxo pelo id, e o gate decide a intenção dele,
+//!   resolvida **para quem pede** ([`recurso_do_pedido`]): o id de outro
+//!   processo, de outro titular, ou um que não existe, não resolve — e quem
+//!   tem a permissão ouve `DENY_RESOURCE`, sem saber qual dos três.
+//! - **Quem pede** vem da autoridade e do caminho do comando — o processo e
+//!   o programa que o kernel carregou —, nunca dos parâmetros
+//!   ([`Ator::do_comando`]). As pontas são processos: só um processo abre,
+//!   aceita, escreve e lê ([`so_de_processo`]); a outra ponta de um fluxo
+//!   entre dois Dukes é o par, pela relação, decidido como
+//!   `Chamador::Remoto` no domínio do fluxo.
+//! - **A abertura efetiva é o aceite**, dentro da ordem das gravações: a
+//!   decisão de quem aceita é reconfirmada, e a de quem abriu também —
+//!   `processo_exerceria`, ou a interseção da relação, de novo, para o par.
+//!   O que passou entre o pedido e o aceite recusa aqui.
+//! - **Ler e escrever são o plano de dados**: cada pedido é decidido e
+//!   gravado, e por um fluxo aberto, vivo e de quem pede, gasta o caminho
+//!   da auditoria em vez da ficha da taxa — ver
+//!   [`crate::autorizacao`] sobre o orçamento. O fluxo nunca é autorização
+//!   permanente: a política nova, a revogação, a contenção valem no pedido
+//!   seguinte, e a recusa de uma leitura ou escrita pela política o
+//!   encerra ([`recusado_pelo_gate`]).
+//! - **Os bytes não são interpretados nem gravados.** A auditoria grava
+//!   ids, intenções, programas, motivos e contagens — nunca o conteúdo.
+//! - **Nenhuma autoridade viaja.** Quem lê ganha bytes; o que faz com eles
+//!   é decidido pelo papel dele, pedido a pedido.
+//!
+//! # Volátil
+//!
+//! O fluxo vive na memória: um boot o perde, e não há journal dele. A
+//! época, sorteada no primeiro uso, entra em cada id — `<época>:<n>` —, e
+//! um id de outro boot não é de nada. Com o desligamento a caminho, nada
+//! abre, e os vivos acabam.
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::task::Waker;
+
+use crate::agent::json::Json;
+use crate::agent::registry::Command;
+use crate::autorizacao::{Autoridade, Chamador, Pedinte};
+use crate::rede::espera::Desfecho;
+use crate::trava::Mutex;
+use politica::Codigo;
+use politica::Permissao;
+use politica::fluxo::{
+    Aceito, Encerramento, Fluxos, Lida, Ponta, Quem, Recusa, Titular, Vista, motivo,
+};
+
+/// O parâmetro que nomeia o fluxo nos comandos sobre ele.
+pub const PARAMETRO: &str = "stream";
+
+/// O prefixo do recurso que o gate decide.
+const PREFIXO: &str = politica::arquivo::PREFIXO_DE_INTENCAO;
+
+/// O que uma espera de fluxo espera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Aguardo {
+    /// O processo `fio` lê o fluxo `id`: um dado, o fim, o aborto.
+    Ler { id: u64, fio: u64 },
+    /// O processo `fio` escreve no fluxo `id`: espaço, a abertura, o
+    /// aborto.
+    Escrever { id: u64, fio: u64 },
+    /// O dono do endpoint `endpoint` aceita: um pedido, ou o fim do
+    /// endpoint.
+    Aceitar { endpoint: u64 },
+}
+
+impl Aguardo {
+    fn fluxo(self) -> Option<u64> {
+        match self {
+            Aguardo::Ler { id, .. } | Aguardo::Escrever { id, .. } => Some(id),
+            Aguardo::Aceitar { .. } => None,
+        }
+    }
+}
+
+/// A sessão de um fluxo com outro Duke, vista daqui: o fio que a conduz
+/// espera aqui o que fazer, e o motivo do fim fica para ele dizer ao par.
+#[derive(Default)]
+struct Sessao {
+    waker: Option<Waker>,
+    /// O fluxo acabou daqui, com este motivo: a sessão diz `fechar` e
+    /// acaba.
+    fim: Option<String>,
+}
+
+struct Tabela {
+    fluxos: Fluxos,
+    /// Sorteada no primeiro uso: um id de outro boot não é confundido com
+    /// um deste.
+    epoca: [u8; 8],
+    /// As esperas armadas: o waker de quem espera, depois da primeira
+    /// conferência. A espera que um encerramento tira daqui acabou.
+    esperas: BTreeMap<Aguardo, Option<Waker>>,
+    /// As sessões com o par, por fluxo remoto.
+    sessoes: BTreeMap<u64, Sessao>,
+    /// O desligamento já encerrou os vivos.
+    desligou: bool,
+}
+
+static TABELA: Mutex<Option<Tabela>> = Mutex::new(None);
+
+fn com_tabela<R>(f: impl FnOnce(&mut Tabela) -> R) -> R {
+    // A época sai do gerador antes da trava, como a da malha.
+    let precisa = crate::arch::sem_interrupcoes(|| TABELA.lock().is_none());
+    let nova = precisa.then(|| {
+        let mut epoca = [0u8; 8];
+        if crate::aleatorio::preencher(&mut epoca).is_err() {
+            epoca = crate::tempo::uptime_ms().to_le_bytes();
+        }
+        Tabela {
+            fluxos: Fluxos::nova(),
+            epoca,
+            esperas: BTreeMap::new(),
+            sessoes: BTreeMap::new(),
+            desligou: false,
+        }
+    });
+    crate::arch::sem_interrupcoes(|| {
+        let mut t = TABELA.lock();
+        if t.is_none() {
+            *t = nova;
+        }
+        f(t.as_mut().expect("a tabela acabou de ser criada"))
+    })
+}
+
+/// Como [`com_tabela`], sem criar a tabela: para quem só limpa.
+fn se_ha_tabela<R>(f: impl FnOnce(&mut Tabela) -> R) -> Option<R> {
+    crate::arch::sem_interrupcoes(|| TABELA.lock().as_mut().map(f))
+}
+
+/// O id de um fluxo como a resposta o escreve: a época e o número.
+fn id_texto(epoca: &[u8; 8], n: u64) -> String {
+    format!("{}:{n}", sigilo::hex_de(epoca))
+}
+
+/// O número de um id deste boot. Um id de outra época, ou malformado, não é
+/// de nada.
+fn ler_id(epoca: &[u8; 8], texto: &str) -> Option<u64> {
+    let (e, n) = texto.split_once(':')?;
+    (e == sigilo::hex_de(epoca)).then_some(())?;
+    n.parse().ok()
+}
+
+/// O recurso de um fluxo na auditoria.
+fn recurso_do_fluxo(epoca: &[u8; 8], n: u64) -> String {
+    format!("fluxo:{}", id_texto(epoca, n))
+}
+
+/// O recurso de uma intenção, como o gate o decide.
+fn recurso_da_intencao(intencao: &str) -> String {
+    format!("{PREFIXO}{intencao}")
+}
+
+/// Os comandos que só um processo pede: as pontas são processos. O gate os
+/// recusa a qualquer outro chamador daqui; o par, pelo domínio do fluxo,
+/// só chega aos dele — ver [`politica::fluxo::METODOS_REMOTOS`].
+pub fn so_de_processo(nome: &str) -> bool {
+    matches!(
+        nome,
+        "stream.open"
+            | "stream.accept"
+            | "stream.write"
+            | "stream.read"
+            | "stream.finish"
+            | "stream.close"
+            | "stream.status"
+    )
+}
+
+/// Os comandos cuja recusa pela política encerra o fluxo que nomeiam: ler
+/// e escrever. A taxa não encerra — é passageira.
+fn recusa_encerra(nome: &str, codigo: Codigo) -> bool {
+    matches!(nome, "stream.write" | "stream.read") && codigo_encerra(codigo)
+}
+
+/// Os códigos de uma recusa pela política — a autoridade, o papel, o
+/// recurso, a contenção, a credencial —, e não pela taxa nem pelo estado.
+fn codigo_encerra(codigo: Codigo) -> bool {
+    matches!(
+        codigo,
+        Codigo::DenyPermission
+            | Codigo::DenyResource
+            | Codigo::DenyPolicy
+            | Codigo::DenyRole
+            | Codigo::DenyContained
+            | Codigo::DenyCredential
+    )
+}
+
+/// O titular de um processo e a ponta dele, pelo chamador que o gate
+/// decide — ou o par, pela relação.
+fn de_quem(chamador: Chamador) -> Option<(Titular, Quem)> {
+    match chamador {
+        Chamador::Processo {
+            fio, autoridade, ..
+        } => Some((crate::malha::titular_de(autoridade)?, Quem::Processo(fio))),
+        outro => {
+            let (dispositivo, relacao, epoca, _) = outro.remoto()?;
+            let titular = crate::malha::titular_de(Autoridade::Remoto {
+                dispositivo,
+                relacao,
+                epoca,
+            })?;
+            Some((
+                titular,
+                Quem::Remoto {
+                    dispositivo,
+                    relacao,
+                },
+            ))
+        }
+    }
+}
+
+/// Quem age num fluxo: o titular e a ponta — o processo e o programa que o
+/// kernel conferiu, ou o par pela relação. Só se cria pelo comando que está
+/// rodando — nunca de um parâmetro.
+#[derive(Clone, Debug)]
+pub struct Ator {
+    titular: Titular,
+    ponta: Ponta,
+}
+
+impl Ator {
+    /// Quem pediu o comando que este fio executa. `None` fora de um
+    /// processo ou do par, ou sem titular.
+    pub fn do_comando() -> Option<Ator> {
+        let autoridade = crate::autorizacao::autoridade_atual();
+        let titular = crate::malha::titular_de(autoridade)?;
+        match crate::autorizacao::pedinte()? {
+            Pedinte::Processo(fio) => {
+                let programa =
+                    crate::malha::programa_de(&crate::autorizacao::programa_decidido()?)?;
+                Some(Ator {
+                    titular,
+                    ponta: Ponta::Processo { fio, programa },
+                })
+            }
+            Pedinte::Enlace => match autoridade {
+                Autoridade::Remoto {
+                    dispositivo,
+                    relacao,
+                    ..
+                } => Some(Ator {
+                    titular,
+                    ponta: Ponta::Remota {
+                        dispositivo,
+                        relacao,
+                        programa: crate::autorizacao::programa_atestado().unwrap_or([0; 32]),
+                    },
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn quem(&self) -> Quem {
+        self.ponta.quem()
+    }
+
+    fn fio(&self) -> Option<u64> {
+        match self.ponta {
+            Ponta::Processo { fio, .. } => Some(fio),
+            Ponta::Remota { .. } => None,
+        }
+    }
+}
+
+/// O recurso que o gate decide para um comando do fluxo: a intenção, como
+/// `intencao:<nome>`.
+///
+/// - `stream.open` decide a intenção do pedido, crua — o registro já
+///   recusou a que não tem a forma.
+/// - `stream.accept` decide a intenção do endpoint, se ele é **do processo
+///   que pede**.
+/// - Os comandos sobre um fluxo decidem a intenção dele, se quem pede é uma
+///   das pontas — viva, ou a lápide.
+///
+/// `Err` com o motivo exato, para a auditoria, quando o id não resolve para
+/// quem pede: o gate responde `DENY_RESOURCE` a quem tem a permissão, sem
+/// dizer se é de outro ou se não existe.
+pub fn recurso_do_pedido(
+    chamador: Chamador,
+    comando: &Command,
+    params: Json,
+) -> Result<String, &'static str> {
+    let texto = |nome: &str| params.member(nome).and_then(|v| v.as_str()).unwrap_or("");
+    match comando.recurso {
+        Some(crate::malha::PARAMETRO_DA_INTENCAO) => Ok(recurso_da_intencao(texto(
+            crate::malha::PARAMETRO_DA_INTENCAO,
+        ))),
+        Some("endpoint") => {
+            let (titular, quem) = de_quem(chamador).ok_or("quem pede nao tem titular")?;
+            let Quem::Processo(fio) = quem else {
+                return Err("so um processo aceita");
+            };
+            crate::malha::endpoint_e_intencao(titular, fio, texto("endpoint"))
+                .map(|(_, i)| recurso_da_intencao(&i))
+                .ok_or("o endpoint nao existe para quem pede")
+        }
+        Some(PARAMETRO) => {
+            let (titular, quem) = de_quem(chamador).ok_or("quem pede nao tem titular")?;
+            let id = texto(PARAMETRO);
+            com_tabela(|t| {
+                let n = ler_id(&t.epoca, id)?;
+                t.fluxos
+                    .intencao_para(titular, quem, n)
+                    .map(recurso_da_intencao)
+            })
+            .ok_or("o fluxo nao existe para quem pede")
+        }
+        _ => Ok(String::new()),
+    }
+}
+
+/// Se o pedido é sobre um fluxo aberto, vivo e de quem pede — o recurso
+/// aberto do plano de dados. Ver `autorizacao::orcamento_do_pedido`.
+pub fn aberto_para_o_pedido(chamador: Chamador, params: Json) -> bool {
+    let Some((titular, quem)) = de_quem(chamador) else {
+        return false;
+    };
+    let id = params
+        .member(PARAMETRO)
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    se_ha_tabela(|t| ler_id(&t.epoca, id).is_some_and(|n| t.fluxos.aberto_para(titular, quem, n)))
+        .unwrap_or(false)
+}
+
+/// O dispositivo do pedido que leva o fluxo a outro Duke — a segunda
+/// permissão, `fabric.remote`, decidida na mesma decisão: o `device` de
+/// quem abre, e o par de um fluxo aberto daqui, a cada escrita e leitura.
+/// `None` para o fluxo local.
+pub fn dispositivo_do_pedido(
+    chamador: Chamador,
+    comando: &Command,
+    params: Json,
+) -> Option<String> {
+    match comando.nome {
+        // Um `device` que não é texto vai à decisão como o texto vazio, e
+        // ela o recusa: nunca passa por local.
+        "stream.open" => params
+            .member(politica::enlace::PARAMETRO)
+            .map(|v| String::from(v.as_str().unwrap_or(""))),
+        "stream.write" | "stream.read" => {
+            let (titular, quem) = de_quem(chamador)?;
+            let Quem::Processo(_) = quem else {
+                return None;
+            };
+            let id = params.member(PARAMETRO).and_then(|v| v.as_str())?;
+            let chave = com_tabela(|t| {
+                let n = ler_id(&t.epoca, id)?;
+                t.fluxos.intencao_para(titular, quem, n)?;
+                match t.fluxos.par_de(n)? {
+                    Ponta::Remota { dispositivo, .. } => Some(*dispositivo),
+                    Ponta::Processo { .. } => None,
+                }
+            })?;
+            let d = crate::dispositivos::dispositivo(&chave)?;
+            Some(format!(
+                "{}{}",
+                politica::arquivo::PREFIXO_DE_DISPOSITIVO,
+                d.nome
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Por que uma operação do fluxo não aconteceu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Falha {
+    /// A conta da tabela recusou.
+    Fluxo(Recusa),
+    /// A decisão de agora, com a ordem das gravações na mão, não é mais a
+    /// do gate.
+    Reconfirmacao(Codigo, &'static str),
+    /// A máquina está reiniciando ou desligando: nada abre.
+    Desligando,
+    /// Quem pede não é titular de nada.
+    SemTitular,
+    /// Só um processo faz isto.
+    SoProcesso,
+    /// O recurso do pedido não é o que o gate decidiu.
+    NaoDecidida,
+}
+
+impl Falha {
+    /// O código da resposta e da auditoria.
+    pub fn codigo(&self) -> Codigo {
+        match self {
+            Falha::Fluxo(r) => r.codigo(),
+            Falha::Reconfirmacao(c, _) => *c,
+            Falha::Desligando => Codigo::Conflict,
+            Falha::SemTitular => Codigo::DenyNotAuthenticated,
+            Falha::SoProcesso => Codigo::DenyPermission,
+            Falha::NaoDecidida => Codigo::DenyResource,
+        }
+    }
+
+    /// O motivo, para quem pediu.
+    pub fn motivo(&self) -> &str {
+        match self {
+            Falha::Fluxo(r) => r.motivo(),
+            Falha::Reconfirmacao(_, m) => m,
+            Falha::Desligando => "a maquina esta reiniciando ou desligando",
+            Falha::SemTitular => "quem pede nao tem titular na malha",
+            Falha::SoProcesso => "so um processo e ponta de um fluxo",
+            Falha::NaoDecidida => "o recurso nao e o que o gate decidiu",
+        }
+    }
+}
+
+impl From<Recusa> for Falha {
+    fn from(r: Recusa) -> Falha {
+        Falha::Fluxo(r)
+    }
+}
+
+/// Grava a recusa de uma execução, em nome da decisão do gate, e a devolve.
+fn recusada<T>(recurso: &str, falha: Falha, exato: &str) -> Result<T, Falha> {
+    crate::autorizacao::auditar_execucao(recurso, falha.codigo(), exato);
+    Err(falha)
+}
+
+/// Se `intencao` é a que o gate decidiu para o comando em execução.
+fn decidida(intencao: &str) -> bool {
+    crate::autorizacao::alvo_decidido(&recurso_da_intencao(intencao))
+}
+
+/// Roda `f` com a ordem das gravações na mão, depois de decidir de novo o
+/// comando em execução — ver [`crate::autorizacao::reconfirmar`].
+fn sob_a_decisao<R>(recurso: &str, f: impl FnOnce() -> Result<R, Falha>) -> Result<R, Falha> {
+    crate::persistencia::em_ordem(|| {
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::gancho_da_reconfirmacao();
+        if let Err((c, m)) = crate::autorizacao::reconfirmar() {
+            return recusada(recurso, Falha::Reconfirmacao(c, m), m);
+        }
+        f()
+    })
+}
+
+/// Tira, das esperas, as de `id` — a espera que sai daqui acabou — e os
+/// wakers delas, e o da sessão com o par; com a tabela na mão.
+fn de_quem_espera(t: &mut Tabela, id: u64) -> Vec<Waker> {
+    let chaves: Vec<Aguardo> = t
+        .esperas
+        .keys()
+        .copied()
+        .filter(|a| a.fluxo() == Some(id))
+        .collect();
+    let mut w: Vec<Waker> = chaves
+        .into_iter()
+        .filter_map(|a| t.esperas.remove(&a).flatten())
+        .collect();
+    if let Some(s) = t.sessoes.get_mut(&id).and_then(|s| s.waker.take()) {
+        w.push(s);
+    }
+    w
+}
+
+/// Os wakers de quem espera no fluxo `id`, sem tirar as esperas: elas
+/// conferem de novo, e só acabam se há o que fazer.
+fn cutucar(t: &mut Tabela, id: u64) -> Vec<Waker> {
+    let mut w: Vec<Waker> = t
+        .esperas
+        .iter_mut()
+        .filter(|(a, _)| a.fluxo() == Some(id))
+        .filter_map(|(_, w)| w.take())
+        .collect();
+    if let Some(s) = t.sessoes.get_mut(&id).and_then(|s| s.waker.take()) {
+        w.push(s);
+    }
+    w
+}
+
+/// O waker de quem espera aceitar no endpoint `endpoint`.
+fn cutucar_o_aceite(t: &mut Tabela, endpoint: u64) -> Vec<Waker> {
+    t.esperas
+        .get_mut(&Aguardo::Aceitar { endpoint })
+        .and_then(Option::take)
+        .into_iter()
+        .collect()
+}
+
+fn acordar(wakers: Vec<Waker>) {
+    for w in wakers {
+        w.wake();
+    }
+}
+
+/// Com a tabela na mão: o que os encerramentos acordam — as esperas deles
+/// saem, a sessão com o par fica sabendo o motivo.
+fn encerrados_na_tabela(t: &mut Tabela, es: &[Encerramento]) -> Vec<Waker> {
+    let mut w = Vec::new();
+    for e in es {
+        if let Some(s) = t.sessoes.get_mut(&e.id) {
+            s.fim.get_or_insert_with(|| e.motivo.clone());
+        }
+        w.extend(de_quem_espera(t, e.id));
+    }
+    w
+}
+
+/// Grava os encerramentos, em nome do kernel: o motivo e as contas, nunca
+/// o conteúdo.
+fn auditar_encerrados(epoca: &[u8; 8], es: &[Encerramento]) {
+    for e in es {
+        crate::autorizacao::auditar_do_kernel(
+            "stream.end",
+            &recurso_do_fluxo(epoca, e.id),
+            Codigo::Allow,
+            &format!(
+                "{}; ida {}; volta {}; desc {}",
+                e.motivo, e.ida, e.volta, e.descartados
+            ),
+        );
+    }
+}
+
+/// Encerramentos feitos com a tabela na mão — acorda e grava, fora dela.
+fn depois(epoca: [u8; 8], es: Vec<Encerramento>, wakers: Vec<Waker>) {
+    acordar(wakers);
+    auditar_encerrados(&epoca, &es);
+}
+
+/// A identidade de uma ponta, como as respostas a escrevem.
+pub fn escrever_ponta(w: &mut crate::agent::json::JsonWriter, p: &Ponta) -> core::fmt::Result {
+    w.begin_object()?;
+    match p {
+        Ponta::Processo { programa, .. } => {
+            w.field_str("program", &programa.nome)?;
+            w.field_str("digest", &sigilo::hex(&programa.resumo))?;
+            if let Some(e) = &programa.editor {
+                w.field_str("publisher", &sigilo::hex(e))?;
+            }
+        }
+        Ponta::Remota {
+            dispositivo,
+            relacao,
+            programa,
+        } => {
+            // O nome que o registro daqui dá ao dispositivo, a relação e o
+            // programa que ele atesta — atestado, e não conferido.
+            let nome = crate::dispositivos::dispositivo(dispositivo)
+                .map(|d| format!("{}{}", politica::arquivo::PREFIXO_DE_DISPOSITIVO, d.nome))
+                .unwrap_or_default();
+            w.field_str("device", &nome)?;
+            let id = politica::dispositivos::id_texto(relacao);
+            w.field_str("relation", &id[..8])?;
+            w.field_str("attested", &sigilo::hex(programa))?;
+        }
+    }
+    w.end_object()
+}
+
+// ---------------------------------------------------------------------
+// Os comandos.
+// ---------------------------------------------------------------------
+
+/// `stream.open`, daqui: um pedido de abertura contra o endpoint
+/// `endpoint`, que tem de ser do titular de quem pede, oferecer `intencao`
+/// e ter um dono que receberia fluxo. Devolve o id.
+pub fn abrir(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> {
+    let recurso = recurso_da_intencao(intencao);
+    if a.fio().is_none() {
+        return recusada(&recurso, Falha::SoProcesso, Falha::SoProcesso.motivo());
+    }
+    if !decidida(intencao) {
+        return recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo());
+    }
+    sob_a_decisao(&recurso, || {
+        if crate::energia::pedida().is_some() {
+            return recusada(&recurso, Falha::Desligando, motivo::DESLIGANDO);
+        }
+        // O endpoint, como a malha o tem agora: só o do mesmo titular, com
+        // a intenção pedida — qualquer outro é a mesma recusa.
+        let Some((n, dono, programa)) =
+            crate::malha::endpoint_para_fluxo(a.titular, endpoint, intencao)
+        else {
+            return recusada(
+                &recurso,
+                Recusa::NaoExiste.into(),
+                "o endpoint nao existe para quem pede",
+            );
+        };
+        // O dono receberia fluxo agora? A mesma resposta de um que não
+        // existe.
+        let exerceria = |p| crate::autorizacao::processo_exerceria(dono, p, &recurso);
+        if !exerceria(Permissao::FabricStream) || !exerceria(Permissao::FabricOffer) {
+            return recusada(
+                &recurso,
+                Recusa::NaoExiste.into(),
+                "o dono do endpoint nao recebe fluxo agora",
+            );
+        }
+        let agora = crate::tempo::uptime_ms();
+        let (epoca, r, wakers) = com_tabela(|t| {
+            let r = t.fluxos.abrir(
+                a.titular,
+                a.ponta.clone(),
+                n,
+                Ponta::Processo {
+                    fio: dono,
+                    programa,
+                },
+                intencao,
+                agora,
+            );
+            let w = if r.is_ok() {
+                cutucar_o_aceite(t, n)
+            } else {
+                Vec::new()
+            };
+            (t.epoca, r, w)
+        });
+        acordar(wakers);
+        match r {
+            Ok(id) => {
+                crate::autorizacao::auditar_execucao(
+                    &format!(
+                        "{} ; endpoint:{endpoint} ; {recurso}",
+                        recurso_do_fluxo(&epoca, id)
+                    ),
+                    Codigo::Allow,
+                    &format!(
+                        "pedido; politica {}",
+                        crate::autorizacao::versao_da_politica()
+                    ),
+                );
+                Ok(id_texto(&epoca, id))
+            }
+            Err(r) => {
+                let m = String::from(r.motivo());
+                recusada(&recurso, r.into(), &m)
+            }
+        }
+    })
+}
+
+/// `stream.open` com `device`: o fluxo a outro Duke. Ainda não liga — a
+/// sessão com o par vem com o domínio do fluxo no enlace.
+pub fn abrir_no_par(a: &Ator, _endpoint: &str, intencao: &str) -> Result<String, Falha> {
+    let recurso = recurso_da_intencao(intencao);
+    let _ = a;
+    recusada(
+        &recurso,
+        Recusa::NaoExiste.into(),
+        "o fluxo entre dispositivos ainda nao liga",
+    )
+}
+
+/// Se a ponta `abridor` de um pedido exerceria ainda `fabric.stream` sobre
+/// a intenção: o processo daqui, ou o par, pela interseção da relação.
+fn abridor_exerceria(abridor: &Ponta, recurso: &str) -> bool {
+    match abridor {
+        Ponta::Processo { fio, .. } => {
+            crate::autorizacao::processo_exerceria(*fio, Permissao::FabricStream, recurso)
+        }
+        Ponta::Remota {
+            dispositivo,
+            relacao,
+            ..
+        } => crate::autorizacao::remoto_exerceria(
+            dispositivo,
+            relacao,
+            Permissao::FabricStream,
+            recurso,
+        ),
+    }
+}
+
+/// `stream.accept`: o pedido mais antigo no endpoint `endpoint` do processo
+/// que pede, aberto — a abertura efetiva. As duas decisões são
+/// reconfirmadas dentro da ordem: a de quem aceita, e a de quem abriu. O
+/// pedido cujo abridor não poderia mais acaba, e o seguinte é tentado.
+/// `Ok(None)` sem pedido na fila.
+pub fn aceitar(a: &Ator, endpoint: &str) -> Result<Option<(String, Aceito)>, Falha> {
+    let recurso = format!("endpoint:{endpoint}");
+    let Some(fio) = a.fio() else {
+        return recusada(&recurso, Falha::SoProcesso, Falha::SoProcesso.motivo());
+    };
+    sob_a_decisao(&recurso, || {
+        if crate::energia::pedida().is_some() {
+            return recusada(&recurso, Falha::Desligando, motivo::DESLIGANDO);
+        }
+        let Some((n, intencao)) = crate::malha::endpoint_e_intencao(a.titular, fio, endpoint)
+        else {
+            return recusada(
+                &recurso,
+                Recusa::NaoExiste.into(),
+                "o endpoint nao existe para quem pede",
+            );
+        };
+        if !decidida(&intencao) {
+            return recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo());
+        }
+        let alvo = recurso_da_intencao(&intencao);
+        loop {
+            let pedido = com_tabela(|t| {
+                let id = t.fluxos.primeiro_pedido(a.titular, fio, n)?;
+                let (abridor, _) = t.fluxos.pedido(id)?;
+                Some((t.epoca, id, abridor.clone()))
+            });
+            let Some((epoca, id, abridor)) = pedido else {
+                return Ok(None);
+            };
+            // A decisão de quem abriu, de novo: o que passou entre o pedido
+            // e o aceite recusa aqui.
+            if !abridor_exerceria(&abridor, &alvo) {
+                let (es, wakers) = com_tabela(|t| {
+                    let es: Vec<Encerramento> =
+                        t.fluxos.recusar(id, motivo::ABRIDOR).into_iter().collect();
+                    let w = encerrados_na_tabela(t, &es);
+                    (es, w)
+                });
+                depois(epoca, es, wakers);
+                continue;
+            }
+            let agora = crate::tempo::uptime_ms();
+            let (r, wakers) = com_tabela(|t| {
+                let r = t.fluxos.aceitar(a.titular, fio, id, agora);
+                let w = if r.is_ok() {
+                    cutucar(t, id)
+                } else {
+                    Vec::new()
+                };
+                (r, w)
+            });
+            acordar(wakers);
+            return match r {
+                Ok(aceito) => {
+                    crate::autorizacao::auditar_execucao(
+                        &format!(
+                            "{} ; endpoint:{endpoint} ; {alvo}",
+                            recurso_do_fluxo(&epoca, id)
+                        ),
+                        Codigo::Allow,
+                        &format!("aberto; versao {}", aceito.versao),
+                    );
+                    Ok(Some((id_texto(&epoca, id), aceito)))
+                }
+                Err(r) => {
+                    let m = String::from(r.motivo());
+                    recusada(&recurso, r.into(), &m)
+                }
+            };
+        }
+    })
+}
+
+/// O fluxo `id` de quem pede, como o gate o decidiu: o número, ou a recusa.
+fn alvo(a: &Ator, id: &str) -> Result<(String, u64), Falha> {
+    let recurso = format!("fluxo:{id}");
+    let numero = com_tabela(|t| {
+        let n = ler_id(&t.epoca, id)?;
+        let i = t.fluxos.intencao_para(a.titular, a.quem(), n)?;
+        Some((n, String::from(i)))
+    });
+    match numero {
+        Some((n, i)) if decidida(&i) => Ok((recurso, n)),
+        Some(_) => recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo()),
+        None => recusada(
+            &recurso,
+            Recusa::NaoExiste.into(),
+            "o fluxo nao existe para quem pede",
+        ),
+    }
+}
+
+/// A reconfirmação recusou, pela política, a leitura ou a escrita de agora
+/// no fluxo `n`: ele acaba, como na recusa do próprio gate — a decisão
+/// seguinte encerra, seja ela a do gate ou a de dentro da ordem. Ver
+/// [`recusado_pelo_gate`].
+fn recusada_na_reconfirmacao<T>(a: &Ator, n: u64, r: &Result<T, Falha>) {
+    let Err(Falha::Reconfirmacao(codigo, m)) = r else {
+        return;
+    };
+    if !codigo_encerra(*codigo) {
+        return;
+    }
+    let m = format!("{}: {m}", codigo.nome());
+    let (titular, quem) = (a.titular, a.quem());
+    encerrar_por_fora(|f| {
+        if f.aberto_para(titular, quem, n) {
+            f.abortar(n, &m).into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    });
+}
+
+/// `stream.write`: põe `dados` no sentido de quem pede — o que couber.
+/// Devolve quantos bytes entraram; zero com o buffer cheio.
+pub fn escrever(a: &Ator, id: &str, dados: &[u8]) -> Result<usize, Falha> {
+    let (recurso, n) = alvo(a, id)?;
+    let r = escrever_no(a, &recurso, n, dados);
+    recusada_na_reconfirmacao(a, n, &r);
+    r
+}
+
+fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {
+    sob_a_decisao(recurso, || {
+        let agora = crate::tempo::uptime_ms();
+        let (r, wakers) = com_tabela(|t| {
+            let r = t.fluxos.escrever(a.titular, a.quem(), n, dados, agora);
+            let w = match r {
+                Ok(k) if k > 0 => cutucar(t, n),
+                _ => Vec::new(),
+            };
+            (r, w)
+        });
+        acordar(wakers);
+        r.or_else(|r| {
+            let m = String::from(r.motivo());
+            recusada(recurso, r.into(), &m)
+        })
+    })
+}
+
+/// `stream.read`: até `max` bytes do sentido de quem pede, na ordem, e se
+/// o sentido terminou limpo depois deles.
+pub fn ler(a: &Ator, id: &str, max: usize) -> Result<Lida, Falha> {
+    let (recurso, n) = alvo(a, id)?;
+    let r = ler_no(a, &recurso, n, max);
+    recusada_na_reconfirmacao(a, n, &r);
+    r
+}
+
+fn ler_no(a: &Ator, recurso: &str, n: u64, max: usize) -> Result<Lida, Falha> {
+    sob_a_decisao(recurso, || {
+        let agora = crate::tempo::uptime_ms();
+        let (epoca, r, es, wakers) = com_tabela(|t| {
+            let r = t.fluxos.ler(a.titular, a.quem(), n, max, agora);
+            let mut w = Vec::new();
+            let mut es = Vec::new();
+            if let Ok((l, e)) = &r {
+                if !l.dados.is_empty() {
+                    w.extend(cutucar(t, n));
+                }
+                es.extend(e.iter().cloned());
+                w.extend(encerrados_na_tabela(t, &es));
+            }
+            (t.epoca, r, es, w)
+        });
+        depois(epoca, es, wakers);
+        match r {
+            Ok((l, _)) => Ok(l),
+            Err(r) => {
+                let m = String::from(r.motivo());
+                recusada(recurso, r.into(), &m)
+            }
+        }
+    })
+}
+
+/// `stream.finish` e `stream.close`: termina o sentido de quem pede, ou
+/// fecha o fluxo para ele.
+pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha> {
+    let (recurso, n) = alvo(a, id)?;
+    sob_a_decisao(&recurso, || {
+        let agora = crate::tempo::uptime_ms();
+        let (epoca, r, es, wakers) = com_tabela(|t| {
+            let r = if fechar {
+                t.fluxos.fechar(a.titular, a.quem(), n, agora)
+            } else {
+                t.fluxos.terminar(a.titular, a.quem(), n, agora)
+            };
+            let mut w = cutucar(t, n);
+            let es: Vec<Encerramento> = r.iter().flatten().cloned().collect();
+            w.extend(encerrados_na_tabela(t, &es));
+            (t.epoca, r, es, w)
+        });
+        depois(epoca, es, wakers);
+        match r {
+            Ok(_) => Ok(()),
+            Err(r) => {
+                let m = String::from(r.motivo());
+                recusada(&recurso, r.into(), &m)
+            }
+        }
+    })
+}
+
+/// `stream.status`: o que quem pede vê do fluxo — vivo ou lembrado.
+pub fn estado(a: &Ator, id: &str) -> Result<Vista, Falha> {
+    let (recurso, n) = alvo(a, id)?;
+    sob_a_decisao(&recurso, || {
+        com_tabela(|t| t.fluxos.estado(a.titular, a.quem(), n)).or_else(|r| {
+            let m = String::from(r.motivo());
+            recusada(&recurso, r.into(), &m)
+        })
+    })
+}
+
+// ---------------------------------------------------------------------
+// As esperas: a de ler, a de escrever, a de aceitar.
+// ---------------------------------------------------------------------
+
+/// O que esperar num `stream.read` ou `stream.write` de quem pede pelo
+/// fluxo `id` — se é dele. `None` quando não é, e a resposta de sempre diz
+/// por quê.
+pub fn aguardo_do_pedido(id: &str, escrever: bool) -> Option<Aguardo> {
+    let a = Ator::do_comando()?;
+    let fio = a.fio()?;
+    com_tabela(|t| {
+        let n = ler_id(&t.epoca, id)?;
+        t.fluxos.intencao_para(a.titular, a.quem(), n)?;
+        Some(if escrever {
+            Aguardo::Escrever { id: n, fio }
+        } else {
+            Aguardo::Ler { id: n, fio }
+        })
+    })
+}
+
+/// O que esperar num `stream.accept` do processo que pede pelo endpoint
+/// `endpoint` — se é dele.
+pub fn aguardo_do_aceite(endpoint: &str) -> Option<Aguardo> {
+    let a = Ator::do_comando()?;
+    let fio = a.fio()?;
+    let (n, _) = crate::malha::endpoint_e_intencao(a.titular, fio, endpoint)?;
+    Some(Aguardo::Aceitar { endpoint: n })
+}
+
+/// Se a espera `a` já tem o que dizer.
+fn pronta(t: &Tabela, a: Aguardo) -> bool {
+    match a {
+        Aguardo::Ler { id, fio } => t.fluxos.pode_ler(Quem::Processo(fio), id),
+        Aguardo::Escrever { id, fio } => t.fluxos.pode_escrever(Quem::Processo(fio), id),
+        Aguardo::Aceitar { endpoint } => t.fluxos.tem_pedido(endpoint),
+    }
+}
+
+/// Arma a espera `a`. `Ok(false)` quando não há o que esperar — já há o que
+/// fazer —; `Err` quando já há quem espere ali: uma espera por sentido, por
+/// fluxo, como numa conexão.
+pub fn armar_espera(a: Aguardo) -> Result<bool, &'static str> {
+    com_tabela(|t| {
+        if pronta(t, a) {
+            return Ok(false);
+        }
+        if t.esperas.contains_key(&a) {
+            return Err("o fluxo ja tem quem espere neste sentido");
+        }
+        t.esperas.insert(a, None);
+        Ok(true)
+    })
+}
+
+/// A espera `a` acabou? `Sumiu` se o fluxo ou o endpoint acabou — o
+/// encerramento a tirou daqui —; `Chegou` ou `Coube` se há o que fazer;
+/// senão `None`, e `waker` fica para o próximo evento. Sob a trava da
+/// tabela, a mesma com que cada operação muda o fluxo.
+pub fn conferir_espera(a: Aguardo, waker: Option<&Waker>) -> Option<Desfecho> {
+    se_ha_tabela(|t| {
+        if !t.esperas.contains_key(&a) {
+            return Some(Desfecho::Sumiu);
+        }
+        if pronta(t, a) {
+            return Some(match a {
+                Aguardo::Escrever { .. } => Desfecho::Coube,
+                _ => Desfecho::Chegou,
+            });
+        }
+        if let (Some(w), Some(slot)) = (waker, t.esperas.get_mut(&a)) {
+            *slot = Some(w.clone());
+        }
+        None
+    })
+    .unwrap_or(Some(Desfecho::Sumiu))
+}
+
+/// Desarma a espera `a`.
+pub fn desarmar_espera(a: Aguardo) {
+    se_ha_tabela(|t| t.esperas.remove(&a));
+}
+
+// ---------------------------------------------------------------------
+// Os ganchos: o kernel encerra por fora.
+// ---------------------------------------------------------------------
+
+/// Encerra, dentro da ordem, os fluxos que `f` diz — e acorda e grava.
+fn encerrar_por_fora(f: impl FnOnce(&mut Fluxos) -> Vec<Encerramento>) {
+    let feito = crate::persistencia::em_ordem(|| {
+        se_ha_tabela(|t| {
+            let es = f(&mut t.fluxos);
+            let w = encerrados_na_tabela(t, &es);
+            (t.epoca, es, w)
+        })
+    });
+    if let Some((epoca, es, w)) = feito {
+        depois(epoca, es, w);
+    }
+}
+
+/// O titular foi revogado: os fluxos dele acabam. Chamada pela malha, ao
+/// lado dos endpoints e das entregas dele.
+pub fn anular_titular(titular: Titular) {
+    encerrar_por_fora(|f| f.anular_titular(titular, motivo::REVOGADO));
+}
+
+/// O canal acabou: se era um processo, os fluxos de que ele é ponta acabam.
+/// Chamada pela malha, no fim de um processo.
+pub fn canal_acabou(canal: politica::mensagens::Canal) {
+    if let politica::mensagens::Canal::Processo(fio) = canal {
+        encerrar_por_fora(|f| f.processo_acabou(fio, motivo::PROCESSO));
+    }
+}
+
+/// O processo `fio` trocou de imagem: a outra ponta viu outro programa, e
+/// os fluxos dele acabam. Chamada pelo `process.exec`, depois do ponto sem
+/// volta.
+pub fn programa_mudou(fio: u64) {
+    encerrar_por_fora(|f| f.processo_acabou(fio, motivo::PROGRAMA));
+}
+
+/// O endpoint `endpoint` acabou: os pedidos que esperavam nele acabam, e a
+/// espera de quem aceitava por ele também. Chamada pela malha.
+pub fn endpoint_acabou(endpoint: u64) {
+    let feito = crate::persistencia::em_ordem(|| {
+        se_ha_tabela(|t| {
+            let es = t.fluxos.endpoint_acabou(endpoint);
+            let mut w = encerrados_na_tabela(t, &es);
+            if let Some(Some(x)) = t.esperas.remove(&Aguardo::Aceitar { endpoint }) {
+                w.push(x);
+            }
+            (t.epoca, es, w)
+        })
+    });
+    if let Some((epoca, es, w)) = feito {
+        depois(epoca, es, w);
+    }
+}
+
+/// O dispositivo saiu — revogado, suspenso —: os fluxos com ele acabam.
+/// Chamada pelo enlace.
+pub fn anular_dispositivo(chave: &[u8; 32], motivo: &str) {
+    encerrar_por_fora(|f| f.anular_remotos(motivo, |d, _| d == chave));
+}
+
+/// A relação `relacao` do dispositivo foi desfeita: os fluxos por ela
+/// acabam. Chamada pelo enlace.
+pub fn anular_relacao(chave: &[u8; 32], relacao: &[u8; 16]) {
+    encerrar_por_fora(|f| f.anular_remotos(motivo::RELACAO, |d, r| d == chave && r == relacao));
+}
+
+/// O gate recusou, pela política, uma leitura ou escrita do fluxo que o
+/// pedido nomeia: o fluxo acaba, com o motivo do gate. A taxa não encerra.
+/// Chamada por [`crate::autorizacao::autorizar`].
+pub fn recusado_pelo_gate(chamador: Chamador, nome: &str, params: Json, codigo: Codigo, m: &str) {
+    if !recusa_encerra(nome, codigo) {
+        return;
+    }
+    let Some((titular, quem)) = de_quem(chamador) else {
+        return;
+    };
+    let Some(n) = params
+        .member(PARAMETRO)
+        .and_then(|v| v.as_str())
+        .and_then(ler_id_global)
+    else {
+        return;
+    };
+    let m = format!("{}: {m}", codigo.nome());
+    encerrar_por_fora(|f| {
+        // Só o vivo de quem pede: a lápide e o de outro não são deste
+        // pedido.
+        if f.aberto_para(titular, quem, n) {
+            f.abortar(n, &m).into_iter().collect()
+        } else {
+            Vec::new()
+        }
+    });
+}
+
+/// O número de um id deste boot, pela época da tabela — fora dela.
+fn ler_id_global(texto: &str) -> Option<u64> {
+    let epoca = se_ha_tabela(|t| t.epoca)?;
+    ler_id(&epoca, texto)
+}
+
+/// Os prazos — o aceite, a inatividade — e o desligamento: o que venceu
+/// sai, e vai para a auditoria. Chamada pelo coletor de fios, uma vez por
+/// segundo basta.
+pub fn passada_do_coletor() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static ULTIMA: AtomicU64 = AtomicU64::new(0);
+    let agora = crate::tempo::uptime_ms();
+    let desligando = crate::energia::pedida().is_some();
+    if !desligando && agora.saturating_sub(ULTIMA.load(Ordering::Relaxed)) < 1_000 {
+        return;
+    }
+    ULTIMA.store(agora, Ordering::Relaxed);
+    let Some((vivos, desligou)) = se_ha_tabela(|t| (t.fluxos.contagem().0 > 0, t.desligou)) else {
+        return;
+    };
+    if desligando {
+        // Uma vez: o que abre depois já é recusado na abertura.
+        if !desligou {
+            encerrar_por_fora(|f| f.abortar_todos(motivo::DESLIGANDO));
+            se_ha_tabela(|t| t.desligou = true);
+        }
+        return;
+    }
+    if desligou {
+        // A ação acabou sem a máquina parar — só a suíte vê isto: o
+        // próximo desligamento encerra de novo.
+        se_ha_tabela(|t| t.desligou = false);
+    }
+    if vivos {
+        encerrar_por_fora(|f| f.vencer(agora));
+    }
+}
+
+/// Só para a suíte: os prazos como se o relógio marcasse `agora_ms` — o
+/// do aceite e o da inatividade vencem sem esperar o tempo de verdade.
+#[cfg(feature = "modo-teste")]
+pub fn vencer_de_teste(agora_ms: u64) {
+    encerrar_por_fora(|f| f.vencer(agora_ms));
+}
+
+/// Quantos fluxos vivos e quantos pedidos — para a suíte.
+#[cfg(feature = "modo-teste")]
+pub fn contagem() -> (usize, usize) {
+    se_ha_tabela(|t| t.fluxos.contagem()).unwrap_or((0, 0))
+}
+
+/// Para o invariante da suíte: a tabela nunca quebra as regras dela.
+#[cfg(feature = "modo-teste")]
+pub fn coerente() -> bool {
+    se_ha_tabela(|t| t.fluxos.coerente()).unwrap_or(true)
+}
+
+/// Só para a suíte: se há quem espere em `a`.
+#[cfg(feature = "modo-teste")]
+pub fn tem_espera_de_teste(a: Aguardo) -> bool {
+    se_ha_tabela(|t| t.esperas.contains_key(&a)).unwrap_or(false)
+}
+
+/// Só para a suíte: o número de um id deste boot.
+#[cfg(feature = "modo-teste")]
+pub fn numero_de_teste(texto: &str) -> Option<u64> {
+    ler_id_global(texto)
+}
+
+/// Esvazia a tabela, para a suíte: cada caso começa sem fluxos. A época
+/// continua: um id de um caso não vale no seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn esvaziar_de_teste() {
+    let feito = se_ha_tabela(|t| {
+        let es = t.fluxos.abortar_todos("teste");
+        // As lápides também saem: cada caso começa limpo.
+        let epoca = t.epoca;
+        let mut w = encerrados_na_tabela(t, &es);
+        w.extend(t.esperas.values_mut().filter_map(Option::take));
+        t.esperas.clear();
+        t.sessoes.clear();
+        t.fluxos.esquecer_lapides();
+        t.desligou = false;
+        (epoca, w)
+    });
+    if let Some((_, w)) = feito {
+        acordar(w);
+    }
+}
+
+/// Destrava a tabela à força, para uso exclusivo do caminho de falha fatal.
+///
+/// # Safety
+///
+/// Só pode ser chamada quando o kernel já está em falha irrecuperável e não
+/// há outro núcleo em execução. Ver [`crate::traps::fatal`].
+pub unsafe fn destravar() {
+    unsafe {
+        TABELA.force_unlock();
+    }
+}

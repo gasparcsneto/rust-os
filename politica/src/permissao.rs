@@ -98,6 +98,18 @@
 //! administrativa: um programa as exerce pelo gate, com o manifesto dele.
 //! Ver [`crate::malha`].
 //!
+//! `fabric.stream` autoriza um programa a abrir um **fluxo** — um canal
+//! ordenado de bytes, nos dois sentidos — contra um endpoint que oferece a
+//! intenção, a aceitar o que chega ao endpoint dele, e a escrever e ler o
+//! fluxo aberto. O recurso é a intenção, enumerada como nas outras duas, e
+//! a permissão é exigida **das duas pontas**: quem pode mandar uma entrega
+//! de 512 bytes não ganha um tubo de volume por isso, e quem recebe
+//! entregas não aceita fluxos sem a linha dela. Entre dois Dukes, o teto
+//! `remoto` também precisa dela. Abrir não dá nada ao aceitante, nem
+//! aceitar ao abridor: os bytes são entrada não confiável, e o que cada um
+//! faz com eles é decidido pelo papel dele. Sensível, e não administrativa.
+//! Ver [`crate::fluxo`].
+//!
 //! # Os dispositivos
 //!
 //! Um **dispositivo relacionado** é outro Duke — a chave dele, a mesma que
@@ -363,11 +375,16 @@ pub enum Permissao {
     /// Desfazer uma relação da própria Pessoa — `device.forget`, sem
     /// lápide. O recurso é o dispositivo, com o alcance enumerado.
     DeviceForget,
+    /// Abrir um fluxo contra um endpoint que oferece a intenção, aceitar o
+    /// que chega a um endpoint seu, e escrever e ler o fluxo aberto —
+    /// `fabric.stream`. Ver o cabeçalho do módulo. O recurso é a intenção,
+    /// com o alcance enumerado; sensível, e não administrativa.
+    FabricStream,
 }
 
 /// Todas, na ordem do relatório. As novas entram no fim: a posição é o bit
 /// do manifesto — ver [`crate::manifesto::Permissoes`].
-pub const TODAS: [Permissao; 59] = [
+pub const TODAS: [Permissao; 60] = [
     Permissao::AgentRead,
     Permissao::SystemRead,
     Permissao::LogRead,
@@ -427,6 +444,7 @@ pub const TODAS: [Permissao; 59] = [
     Permissao::DeviceSuspend,
     Permissao::DevicePair,
     Permissao::DeviceForget,
+    Permissao::FabricStream,
 ];
 
 impl Permissao {
@@ -492,6 +510,7 @@ impl Permissao {
             Permissao::DeviceSuspend => "device.suspend",
             Permissao::DevicePair => "device.pair",
             Permissao::DeviceForget => "device.forget",
+            Permissao::FabricStream => "fabric.stream",
         }
     }
 
@@ -554,6 +573,7 @@ impl Permissao {
                 | Permissao::DeviceSuspend
                 | Permissao::DevicePair
                 | Permissao::DeviceForget
+                | Permissao::FabricStream
         )
     }
 
@@ -640,7 +660,10 @@ impl Permissao {
     /// mesma intenção, e cada papel enumera o seu alcance de cada uma. Ver
     /// [`crate::malha`].
     pub const fn recurso_e_intencao(self) -> bool {
-        matches!(self, Permissao::FabricOffer | Permissao::FabricSend)
+        matches!(
+            self,
+            Permissao::FabricOffer | Permissao::FabricSend | Permissao::FabricStream
+        )
     }
 
     /// O recurso desta permissão é um dispositivo relacionado —
@@ -777,7 +800,8 @@ impl Permissao {
             | Permissao::DeviceRevoke
             | Permissao::DeviceSuspend
             | Permissao::DevicePair
-            | Permissao::DeviceForget => true,
+            | Permissao::DeviceForget
+            | Permissao::FabricStream => true,
         }
     }
 
@@ -1086,7 +1110,10 @@ mod testes {
             .filter(|p| p.recurso_e_intencao())
             .map(|p| p.nome())
             .collect();
-        assert_eq!(de_intencao, ["fabric.offer", "fabric.send"]);
+        assert_eq!(
+            de_intencao,
+            ["fabric.offer", "fabric.send", "fabric.stream"]
+        );
         assert_eq!(Permissao::de_nome("fabric.*"), None);
         assert_eq!(Permissao::de_nome("fabric"), None);
         assert_eq!(Permissao::de_nome("fabric.recv"), None);
@@ -1100,7 +1127,7 @@ mod testes {
     /// alcance, e nenhum nome com curinga ou prefixo existe.
     #[test]
     fn dispositivos() {
-        let nomes: alloc::vec::Vec<_> = TODAS[53..].iter().map(|p| p.nome()).collect();
+        let nomes: alloc::vec::Vec<_> = TODAS[53..59].iter().map(|p| p.nome()).collect();
         assert_eq!(
             nomes,
             [
@@ -1112,12 +1139,11 @@ mod testes {
                 "device.forget"
             ]
         );
-        assert_eq!(TODAS.len(), 59);
-        assert_eq!(TODAS.last(), Some(&Permissao::DeviceForget));
+        assert_eq!(TODAS[58], Permissao::DeviceForget);
         for (i, p) in TODAS.into_iter().enumerate() {
             assert_eq!(p as usize, i, "{}", p.nome());
         }
-        for p in &TODAS[53..] {
+        for p in &TODAS[53..59] {
             assert!(p.sensivel() && p.muda_estado(), "{}", p.nome());
             assert!(!p.recurso_e_caminho() && !p.recurso_e_endereco() && !p.recurso_e_chave());
             assert!(
@@ -1165,6 +1191,31 @@ mod testes {
         ] {
             assert_eq!(Permissao::de_nome(curinga), None, "{curinga}");
         }
+    }
+
+    /// O fluxo: abrir, aceitar, escrever e ler, a sexagésima, no fim da
+    /// lista — as de antes não mudam de bit. Sensível, **não**
+    /// administrativa, muda o estado, e a intenção como recurso, com o
+    /// alcance enumerado, como as outras duas da malha. Nenhum outro tipo
+    /// de alcance, e não é contenção.
+    #[test]
+    fn fluxo() {
+        let fluxo = Permissao::de_nome("fabric.stream").unwrap();
+        assert_eq!(fluxo, Permissao::FabricStream);
+        assert_eq!(TODAS.len(), 60);
+        assert_eq!(TODAS[59], fluxo);
+        assert_eq!(TODAS.last(), Some(&fluxo));
+        for (i, p) in TODAS.into_iter().enumerate() {
+            assert_eq!(p as usize, i, "{}", p.nome());
+        }
+        assert!(fluxo.sensivel() && !fluxo.administrativa() && fluxo.muda_estado());
+        assert!(fluxo.recurso_e_intencao() && fluxo.tem_alcance());
+        assert!(!fluxo.recurso_e_caminho() && !fluxo.recurso_e_endereco());
+        assert!(!fluxo.recurso_e_chave() && !fluxo.recurso_e_dispositivo());
+        assert!(!fluxo.recurso_e_destino() && !fluxo.recurso_e_papel());
+        assert!(!fluxo.contencao());
+        assert_eq!(Permissao::de_nome("fabric.streams"), None);
+        assert_eq!(Permissao::de_nome("stream.open"), None);
     }
 
     /// Conectar é sensível — não vem por inclusão: cada papel que disca

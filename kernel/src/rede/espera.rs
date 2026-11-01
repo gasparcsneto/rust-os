@@ -71,6 +71,16 @@
 //! espera — ver [`crate::enlace`]. Acordado, o pedido é executado de novo,
 //! inteiro, pelo gate, e só então lê a resposta.
 //!
+//! # A espera de um fluxo
+//!
+//! E serve às esperas de um fluxo da malha — ver [`crate::fluxo`]: a de um
+//! `stream.read` sem nada a ler, a de um `stream.write` sem espaço — ou com
+//! o fluxo ainda esperando o aceite —, e a de um `stream.accept` sem pedido
+//! na fila. Cada uma acaba quando há o que fazer, quando o fluxo ou o
+//! endpoint acaba, ou no prazo. A conferência e o registro do waker
+//! acontecem sob a trava da tabela de fluxos, a mesma com que cada operação
+//! muda o fluxo. Uma espera por sentido, por fluxo: a segunda é recusada.
+//!
 //! # Uma espera de cada sentido por conexão
 //!
 //! Uma conexão tem um dono, e o dono pede uma coisa de cada vez pelo caminho
@@ -161,6 +171,9 @@ enum Causa {
     /// A resposta do par ao pedido `pedido` do enlace — a espera de um
     /// pedido da malha a outro dispositivo. Ver [`crate::enlace`].
     Enlace { pedido: u64 },
+    /// Um fluxo da malha: um dado, espaço, um pedido de abertura — ver
+    /// [`crate::fluxo`].
+    Fluxo { aguardo: crate::fluxo::Aguardo },
 }
 
 /// O tique em que vence uma espera de `ms` milissegundos — no máximo
@@ -256,6 +269,26 @@ impl Espera {
         })
     }
 
+    /// A espera de um `stream.read`, de um `stream.write` ou de um
+    /// `stream.accept`, por `ms` milissegundos — no máximo
+    /// [`PRAZO_MAXIMO_MS`]. `Ok(None)` quando não há o que esperar e sem
+    /// relógio; `Err` com o motivo quando já há quem espere ali.
+    pub fn pelo_fluxo(
+        aguardo: crate::fluxo::Aguardo,
+        ms: u64,
+    ) -> Result<Option<Espera>, &'static str> {
+        let Some(prazo) = prazo_de(ms) else {
+            return Ok(None);
+        };
+        if !crate::fluxo::armar_espera(aguardo)? {
+            return Ok(None);
+        }
+        Ok(Some(Espera {
+            causa: Causa::Fluxo { aguardo },
+            prazo,
+        }))
+    }
+
     /// O tique em que a espera vence.
     pub fn prazo(&self) -> u64 {
         self.prazo
@@ -283,6 +316,7 @@ impl Espera {
             }
             Causa::Malha { endpoint } => crate::malha::conferir_espera(*endpoint, waker),
             Causa::Enlace { pedido } => crate::enlace::conferir_espera(*pedido, waker),
+            Causa::Fluxo { aguardo } => crate::fluxo::conferir_espera(*aguardo, waker),
         }
         .or_else(|| (crate::tempo::ticks() >= self.prazo).then_some(Desfecho::Venceu))
     }
@@ -305,6 +339,7 @@ impl Drop for Espera {
             }
             Causa::Malha { endpoint } => crate::malha::desarmar_espera(*endpoint),
             Causa::Enlace { pedido } => crate::enlace::desarmar_espera(*pedido),
+            Causa::Fluxo { aguardo } => crate::fluxo::desarmar_espera(*aguardo),
         }
     }
 }

@@ -71,7 +71,7 @@ use protocolo::json::{Json, JsonWriter};
 use sigilo::quadro::{self, Leitor, Tipo};
 use sigilo::{Iniciador, Respondedor, Transporte};
 
-use crate::autorizacao::{Autoridade, Chamador, Programa, Servico};
+use crate::autorizacao::{Autoridade, Chamador, Dominio, Programa, Servico};
 use crate::rede::espera::Desfecho;
 use crate::trava::Mutex;
 
@@ -1339,6 +1339,7 @@ impl Lado {
             relacao,
             epoca: self.epoca,
             programa,
+            dominio: Dominio::Enlace,
         };
         let resposta = crate::nativo::responder_pelo_kernel(chamador, rpc.0);
         let mut texto = resposta.como_bytes().to_vec();
@@ -1458,6 +1459,13 @@ pub fn dispositivo_saiu(chave: &[u8; 32], codigo: Codigo, motivo: &'static str) 
     crate::pareamento::par_saiu(chave, codigo);
     derrubar_sessoes(chave, motivo);
     crate::malha::anular_dispositivo(chave, motivo);
+    // Os fluxos com ele acabam — e o par ouve o `fechar`, sem propagação.
+    let do_fluxo = if codigo == Codigo::DenyCredential {
+        politica::fluxo::motivo::DISPOSITIVO_SUSPENSO
+    } else {
+        politica::fluxo::motivo::DISPOSITIVO_REVOGADO
+    };
+    crate::fluxo::anular_dispositivo(chave, do_fluxo);
     let wakers = se_ha_origem(|o| {
         let falharam = o.tabela.anular_dispositivo(chave, codigo, motivo);
         de_quem_espera(o, &falharam)
@@ -1479,6 +1487,8 @@ pub fn relacao_saiu(chave: &[u8; 32], relacao: &[u8; 16], ultima: bool) -> usize
         derrubar_sessoes(chave, MOTIVO);
     }
     let anuladas = crate::malha::anular_relacao(chave, relacao, MOTIVO);
+    // Os fluxos por ela acabam também.
+    crate::fluxo::anular_relacao(chave, relacao);
     let wakers = se_ha_origem(|o| {
         let falharam =
             o.tabela

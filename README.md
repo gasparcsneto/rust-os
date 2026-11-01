@@ -282,6 +282,13 @@ $ cargo xtask agent --canal 2 agent.session
 | `fabric.ack` | Confirma uma entrega lida, com uma resposta opcional para quem mandou: ela sai da fila (`id`, `reply`, `expect_version`) |
 | `fabric.cancel` | Cancela uma entrega que você mandou, enquanto ninguém a leu (`id`, `expect_version`) |
 | `fabric.status` | O estado de uma entrega que você mandou, e a resposta de quem a confirmou (`id`) |
+| `stream.open` | Abre um fluxo — um canal ordenado de bytes, nos dois sentidos — contra um endpoint que oferece a intenção, de um programa do mesmo titular; espera o aceite do dono. Só um processo; a intenção é o recurso da decisão, e com `device` vai a outro Duke da sua pessoa (`endpoint`, `intent`, `device`) |
+| `stream.accept` | Aceita o pedido de fluxo mais antigo num endpoint seu — a abertura efetiva, com as duas decisões reconfirmadas —, e diz quem o abriu, como o kernel o conferiu; com `wait`, espera um pedido (`endpoint`, `wait`) |
+| `stream.write` | Escreve no seu sentido de um fluxo aberto, o que couber no buffer de 16 KiB; cada escrita é uma decisão do gate, no plano de dados (`stream`, `content`, `attachment`, `wait`) |
+| `stream.read` | Lê o seu sentido de um fluxo, na ordem, em base64, e `end` depois do último byte; cada leitura é uma decisão do gate, no plano de dados (`stream`, `max`, `wait`) |
+| `stream.finish` | Termina o seu sentido de um fluxo: quem lê recebe o resto e o fim; o outro sentido continua (`stream`) |
+| `stream.close` | Fecha um fluxo para você: o que escreveu continua legível pela outra ponta; o que não leu sai zerado (`stream`) |
+| `stream.status` | O estado de um fluxo seu — pendente, aberto ou fechado, com o motivo —, os bytes de cada sentido e a outra ponta (`stream`) |
 | `fs.verify` | Confere o armazém abaixo de `path`: cada bloco de cada versão viva abre (a cifra autenticada confere o que o disco devolveu) e nenhum está livre no mapa do volume. Só lê; diz o que conferiu, os arquivos que não abrem, os que mudaram no meio. O alcance é o do `fs.read` |
 | `fs.backup` | A cópia de segurança de `path` — `/armazem` inteiro, ou um nó abaixo dele —: os diretórios, os arquivos e o conteúdo num instante, cifrados para esta máquina e esta instalação, num rascunho de quem pede; com `copy`, um pedaço dela em base64, ou o descarte (`path`, `copy`, `offset`, `max`, `discard`). Só dados: nada de identidade, credencial, política ou segredo. O alcance é o do `fs.read` |
 | `fs.restore` | Troca a subárvore `path` pela cópia enviada num rascunho do mesmo caminho: conferida inteira antes de qualquer mudança, trocada num commit só, com versões novas e o dono que restaura (`path`, `draft`, `expect_version`). A permissão própria `fs.restore` |
@@ -320,6 +327,7 @@ kernel/src/
 ├── slots.rs         a atualização A/B do lado do kernel: a imagem do slot conferida, o pacote montado, a reconciliação do boot com o journal, a escrita no slot inativo e a instalação por quórum
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
+├── fluxo.rs         o fluxo da malha: um canal ordenado de bytes entre dois processos do mesmo titular — abrir, aceitar, escrever e ler, cada passo pelo gate, no plano de dados, volátil
 ├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
 ├── enlace.rs        o enlace entre dispositivos: o pedido da malha a outro Duke, na origem (a tabela, o serviço que leva) e no destino (o respondedor, o gate como o dispositivo)
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: `aceitar` e `parear` no console, o aperto na porta do enlace e no fio da cerimônia, o código e a senha, o commit reconfirmado pelo gate, e `device.forget`
@@ -377,6 +385,7 @@ kernel/src/
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
+│   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   └── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
@@ -522,6 +531,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── taxa.rs          o balde de pedidos e a janela de apertos de mão
 ├── arrendamento.rs  a versão e o arrendamento de cada recurso compartilhado
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
+├── fluxo.rs         a conta do fluxo: os estados, os sentidos e os buffers, o fim e o aborto, o crédito com o par, as cotas e as lápides
 ├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
 ├── dispositivos.rs  os dispositivos relacionados: a chave de outro Duke, a relação com uma pessoa desta máquina, as lápides, a desfeita
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: os estados, os prazos, o compromisso, os códigos de conferência e o id da relação
@@ -720,6 +730,7 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
     ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
     ├── malha.rs     a malha de um programa: oferecer uma intenção, achar quem a oferece, mandar, receber e responder — cada passo pelo gate
+    ├── fluxo.rs     o fluxo de um programa: abrir, aceitar, escrever e ler um canal ordenado de bytes, com as esperas — cada passo pelo gate
     ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, assinadas pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
@@ -769,6 +780,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── correio.rs    o aplicativo B da malha: oferece `imagem.compartilhar`, espera o que chega e confirma, dizendo de que programa veio
         ├── fotos.rs      o aplicativo A da malha: procura quem oferece, escolhe pela identidade conferida, manda, consulta e reenvia, no passo da suíte
         ├── impostor.rs   diz ser o `correio` e tenta, pela malha, o que é do outro: ler, fechar, confirmar, consultar, forjar — cada tentativa decidida e recusada
+        ├── fluxos.rs     uma ponta de fluxo para a suíte: oferece `imagem.compartilhar`, abre ou aceita no passo ditado, escreve e lê o padrão determinístico, grava o que leu pelo papel dele, troca de imagem e se bifurca
         ├── carteiro.rs   o aplicativo A do enlace: procura quem oferece `imagem.compartilhar` em outro dispositivo, manda, reenvia com o mesmo nonce e pergunta o estado — decidido aqui, com `fabric.remote`, e lá, pelo gate de lá
         ├── gestor.rs     os canisters de uma chave, por um pedido que quem o lançou grava no armazém: o saldo, criar, instalar até 8 MiB, o estado, parar, iniciar, os ajustes, desinstalar, apagar e as cargas — com o arrendamento do pedido, o registro que não executa duas vezes e o pedido em andamento que se retoma
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal

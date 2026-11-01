@@ -36,6 +36,10 @@
 //!   com o desafio da janela —; o terceiro é a primeira mensagem do aperto,
 //!   com o prólogo da cerimônia. A vaga do enlace só os aceita com uma
 //!   janela aberta, e uma sessão de cerimônia nunca vira enlace.
+//! - [`Tipo::InicioFluxo`]: a primeira mensagem do aperto de um fluxo entre
+//!   dois Dukes, com o prólogo do fluxo. Uma sessão por fluxo; a vaga do
+//!   agente o recusa, e a sessão de um fluxo recusa os quadros do enlace e
+//!   da cerimônia.
 
 use alloc::vec::Vec;
 
@@ -66,6 +70,8 @@ pub enum Tipo {
     ChaveDoDuke = 7,
     /// A primeira mensagem do aperto de um pareamento.
     InicioPareamento = 8,
+    /// A primeira mensagem do aperto de um fluxo entre dispositivos.
+    InicioFluxo = 9,
 }
 
 impl Tipo {
@@ -79,6 +85,7 @@ impl Tipo {
             6 => Self::PedidoDaChave,
             7 => Self::ChaveDoDuke,
             8 => Self::InicioPareamento,
+            9 => Self::InicioFluxo,
             _ => return None,
         })
     }
@@ -237,8 +244,27 @@ mod testes {
     }
 
     #[test]
+    fn o_inicio_do_fluxo_e_um_tipo_proprio() {
+        let q = ler_tudo(&montar(Tipo::InicioFluxo, b"ik").unwrap());
+        assert_eq!(q, alloc::vec![(Tipo::InicioFluxo, b"ik".to_vec())]);
+        assert_eq!(Tipo::InicioFluxo as u8, 9);
+        for o in [
+            Tipo::Inicio,
+            Tipo::Resposta,
+            Tipo::Dados,
+            Tipo::Recusa,
+            Tipo::InicioEnlace,
+            Tipo::PedidoDaChave,
+            Tipo::ChaveDoDuke,
+            Tipo::InicioPareamento,
+        ] {
+            assert_ne!(Tipo::InicioFluxo as u8, o as u8);
+        }
+    }
+
+    #[test]
     fn tipo_desconhecido_e_erro() {
-        for b in [0u8, 9, 0xFF] {
+        for b in [0u8, 10, 0xFF] {
             let mut l = Leitor::novo();
             assert_eq!(l.empurrar(b).err(), Some(Erro::Quadro), "{b}");
         }

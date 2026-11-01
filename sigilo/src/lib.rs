@@ -83,6 +83,12 @@ pub const PROLOGO_DO_ENLACE: &[u8] = b"Duke enlace entre dispositivos v1";
 /// identificador da relação, é só dela.
 pub const PROLOGO_DO_PAREAMENTO: &[u8] = b"Duke pareamento entre dispositivos v1";
 
+/// O prólogo de um fluxo entre dois Dukes relacionados: o mesmo aperto IK,
+/// com outro resumo ainda — um por fluxo, com efêmeras novas. Um aperto de
+/// fluxo não abre como enlace, cerimônia ou agente, e nenhum deles abre
+/// como fluxo: a etiqueta da estática só confere com o mesmo prólogo.
+pub const PROLOGO_DO_FLUXO: &[u8] = b"Duke fluxo entre dispositivos v1";
+
 /// O tamanho de uma chave X25519, pública ou privada.
 pub const TAM_CHAVE: usize = 32;
 

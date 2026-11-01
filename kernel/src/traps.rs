@@ -358,6 +358,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::pareamento::destravar();
         crate::mensagens::destravar();
         crate::malha::destravar();
+        crate::fluxo::destravar();
         crate::armazem::destravar();
         crate::volume::destravar();
         crate::nativo::destravar();

@@ -165,7 +165,7 @@ pub fn so_de_processo(nome: &str) -> bool {
 /// O titular de uma autoridade, para a malha. `None` para quem não é
 /// titular de nada: um serviço, uma sessão sem aperto, a sessão de pessoa
 /// que acabou.
-fn titular_de(autoridade: Autoridade) -> Option<Titular> {
+pub(crate) fn titular_de(autoridade: Autoridade) -> Option<Titular> {
     match autoridade {
         Autoridade::Sistema => Some(Titular::Sistema),
         Autoridade::Sessao {
@@ -192,7 +192,7 @@ fn titular_de(autoridade: Autoridade) -> Option<Titular> {
 
 /// O programa de um processo, como a malha o mostra. `None` para quem não
 /// tem uma imagem com manifesto — que não exerce nada.
-fn programa_de(p: &crate::autorizacao::Programa) -> Option<Programa> {
+pub(crate) fn programa_de(p: &crate::autorizacao::Programa) -> Option<Programa> {
     match p {
         crate::autorizacao::Programa::Imagem {
             manifesto: Some(m),
@@ -638,6 +638,8 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
                     &format!("fechado; {} anulada(s)", anuladas.len()),
                 );
                 auditar_na_execucao(&epoca, &anuladas);
+                // Os pedidos de fluxo que esperavam nele acabam também.
+                crate::fluxo::endpoint_acabou(n);
                 Ok(anuladas.len())
             }
             Err(r) => recusada(&recurso, r.into(), r.motivo()),
@@ -897,6 +899,36 @@ pub fn estado(a: &Ator, id: &str) -> Result<Vista, Falha> {
     })
 }
 
+/// O endpoint `texto`, para quem abre um fluxo: do titular, oferecendo
+/// `intencao` — o número, o processo dono e o programa dele. `None` para o
+/// de outro titular, o que não oferece a intenção, o que não existe. Ver
+/// [`crate::fluxo`].
+pub fn endpoint_para_fluxo(
+    titular: Titular,
+    texto: &str,
+    intencao: &str,
+) -> Option<(u64, u64, Programa)> {
+    com_tabela(|t| {
+        let n = ler_id(&t.epoca, texto)?;
+        t.malha
+            .descobrir(titular, intencao)
+            .into_iter()
+            .find(|e| e.id == n)
+            .map(|e| (e.id, e.processo, e.programa))
+    })
+}
+
+/// O endpoint `texto` do processo `fio` de `titular` — o número e a
+/// intenção —, para quem aceita um fluxo por ele. Ver [`crate::fluxo`].
+pub fn endpoint_e_intencao(titular: Titular, fio: u64, texto: &str) -> Option<(u64, String)> {
+    com_tabela(|t| {
+        let n = ler_id(&t.epoca, texto)?;
+        t.malha
+            .intencao_do_endpoint(titular, fio, n)
+            .map(|i| (n, String::from(i)))
+    })
+}
+
 /// O número do endpoint `texto` do processo de `a`, se é dele — para armar
 /// a espera do `fabric.recv`.
 pub fn endpoint_do_processo(a: &Ator, texto: &str) -> Option<u64> {
@@ -971,6 +1003,8 @@ pub fn anular_titular(titular: Titular, motivo: &str) {
             (t.epoca, fechados, anuladas, acordaveis(t))
         })
     });
+    // Os fluxos do titular acabam com ele.
+    crate::fluxo::anular_titular(titular);
     let Some((epoca, fechados, anuladas, wakers)) = feito else {
         return;
     };
@@ -982,6 +1016,7 @@ pub fn anular_titular(titular: Titular, motivo: &str) {
             Codigo::Allow,
             &format!("fechado: {motivo}"),
         );
+        crate::fluxo::endpoint_acabou(n);
     }
     auditar_do_kernel(&epoca, &anuladas, &format!("anulada: {motivo}"));
 }
@@ -1037,8 +1072,10 @@ pub fn anular_relacao(chave: &[u8; 32], relacao: &[u8; 16], motivo: &str) -> usi
 /// esperava neles é anulado. O que ele mandou continua: quem recebe ainda
 /// lê e confirma.
 pub fn canal_acabou(canal: Canal) {
-    // Os pedidos dele a outros dispositivos saem também.
+    // Os pedidos dele a outros dispositivos saem também, e os fluxos de que
+    // ele é ponta acabam.
     crate::enlace::canal_acabou(canal);
+    crate::fluxo::canal_acabou(canal);
     let fio = match canal {
         Canal::Processo(f) => Some(f),
         _ => None,
@@ -1071,6 +1108,7 @@ pub fn canal_acabou(canal: Canal) {
             Codigo::Allow,
             "fechado: o processo que o abriu acabou",
         );
+        crate::fluxo::endpoint_acabou(n);
     }
     auditar_do_kernel(&epoca, &anuladas, "anulada: o processo do endpoint acabou");
 }

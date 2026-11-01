@@ -2787,8 +2787,8 @@ pub(super) fn pareamento_a_reconfirmacao_no_commit() -> Resultado {
     }
     fn tirar_o_papel() {
         trocar(
-            "papel dispositivo fabric.send\n",
-            "papel dispositivo fabric.send system.power\n",
+            "papel dispositivo fabric.send fabric.stream\n",
+            "papel dispositivo fabric.send fabric.stream system.power\n",
         );
     }
     com_a_cerimonia(|| {
