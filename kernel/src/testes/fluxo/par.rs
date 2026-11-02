@@ -1321,7 +1321,8 @@ pub(in crate::testes) fn fluxo_os_tetos_das_vagas() -> Resultado {
 /// sobre ele. O fio da sessão daqui manda o `fechar` ao Duke de lá com o
 /// motivo daqui mesmo quando o aceite, os dados, o crédito ou o fim de lá
 /// chegam depois de o fluxo acabar — um por fim: a sessão lê um, e vê o
-/// fim.
+/// fim —, e também quando a ponta daqui já tinha fechado, e o fluxo acaba
+/// sem lápide.
 pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
     com_o_par(|| {
         let (bia, _, _) = bia_relacionada("dispositivo")?;
@@ -1440,6 +1441,46 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
                 "a escrita recusada pela politica nova nao mandou o fechar ao par",
             )?;
             fim_gravado_com(antes, &id, "DENY_PERMISSION: ")?;
+            // O fecho daqui com dados esperando o crédito de lá, e a
+            // suspensão: a ponta daqui já tinha saído, e o fluxo acaba sem
+            // lápide — os dados de lá, a caminho, não acham mais o fluxo, e
+            // também não são o par fora do protocolo.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:7")?;
+            // O buffer do sentido está vazio — o par leu a `ida` —: cabe
+            // inteiro, sem esperar a sessão.
+            for pedaco in vec![0x5a; politica::fluxo::BUFFER_DO_SENTIDO].chunks(4096) {
+                super::escrito(
+                    &super::escrever(b.quem(), &id, pedaco),
+                    pedaco.len() as u64,
+                    "a ponta daqui nao encheu o buffer do sentido",
+                )?;
+            }
+            // O par recebe o que o crédito deixa — o dele menos a `ida` —, e
+            // o resto espera aqui.
+            let mut chegou = 0;
+            while chegou < politica::fluxo::BUFFER_DO_SENTIDO - 3 {
+                match Mensagem::ler(&par.mensagem()?) {
+                    Some(Mensagem::Dados(d)) => chegou += d.len(),
+                    outra => {
+                        crate::log_error!("teste", "{:?}", outra);
+                        return Err("o que o credito deixa nao chegou ao par");
+                    }
+                }
+            }
+            feito(
+                &sobre(b.quem(), "stream.close", &id),
+                "a ponta daqui nao fechou com dados esperando o credito",
+            )?;
+            par.guardar(&Mensagem::Dados(b"volta"))?;
+            admin("device.suspend", r#"{"device":"dispositivo:par"}"#, None)?;
+            fechado(
+                &mut par,
+                motivo::DISPOSITIVO_SUSPENSO,
+                "os dados de la depois do fecho daqui mudaram o fechar da suspensao",
+            )?;
+            fim_gravado_com(antes, &id, motivo::DISPOSITIVO_SUSPENSO)?;
+            crate::contencao::esquecer_de_teste();
             // A revogação, saindo, com os dados de lá a caminho.
             let antes = crate::autorizacao::ultimo_registro();
             let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:3")?;
