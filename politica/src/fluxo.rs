@@ -571,6 +571,16 @@ struct Lapide {
     sabem: [bool; 2],
 }
 
+/// O que o aviso da malha diz de uma ponta — ver [`Fluxos::prontidao`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prontidao {
+    /// Vivo, com estes bits de prontidão.
+    Vivo(u8),
+    /// Acabou; `ja_sabe` se a ponta já ouviu o motivo — e então não há o
+    /// que avisar.
+    Acabou { ja_sabe: bool },
+}
+
 /// Um fluxo que acabou, para a auditoria e para acordar quem espera.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Encerramento {
@@ -1518,6 +1528,47 @@ impl Fluxos {
         }
         let s = f.leitura_de(lado);
         f.saiu[lado.indice()] || s.estado != EstadoDoSentido::Aberto || s.anel.tamanho() > 0
+    }
+
+    /// O que o aviso da malha (DS-1) diz da ponta `quem` do fluxo `id`: o
+    /// que uma operação dela acharia agora — os bits de
+    /// [`crate::aviso::bits`] — ou que o fluxo acabou, e se ela já ouviu o
+    /// motivo. Uma ponta que fechou e saiu já sabe.
+    pub fn prontidao(&self, quem: Quem, id: u64) -> Prontidao {
+        use crate::aviso::bits;
+        if let Some(i) = self.i(id) {
+            let f = &self.vivos[i];
+            let Some(lado) = f.lado_de(quem) else {
+                return Prontidao::Vivo(0);
+            };
+            if f.saiu[lado.indice()] {
+                return Prontidao::Acabou { ja_sabe: true };
+            }
+            if f.estado == Estado::Pedido {
+                return Prontidao::Vivo(0);
+            }
+            let le = f.leitura_de(lado);
+            let es = f.escrita_de(lado);
+            let mut b = 0;
+            if le.anel.tamanho() > 0 || (le.estado == EstadoDoSentido::Fim && !le.fim_visto) {
+                b |= bits::LEGIVEL;
+            }
+            if (es.estado == EstadoDoSentido::Aberto && es.anel.livre() > 0)
+                || es.estado == EstadoDoSentido::Abortado
+            {
+                b |= bits::GRAVAVEL;
+            }
+            return Prontidao::Vivo(b);
+        }
+        match self.lapides.iter().find(|l| l.id == id) {
+            Some(l) if l.abridor == quem => Prontidao::Acabou {
+                ja_sabe: l.sabem[0],
+            },
+            Some(l) if l.aceitante == quem => Prontidao::Acabou {
+                ja_sabe: l.sabem[1],
+            },
+            _ => Prontidao::Acabou { ja_sabe: true },
+        }
     }
 
     /// Se `quem` pode escrever no fluxo `id` agora — ou se não há mais o
@@ -2624,5 +2675,69 @@ mod testes {
         assert_eq!(motivo_guardado("\u{7}\n"), motivo::PROTOCOLO);
         assert_eq!(motivo_guardado(&"x".repeat(100)).len(), MAIOR_MOTIVO);
         assert!(metodo_remoto("stream.write") && !metodo_remoto("stream.read"));
+    }
+    /// NH12: a prontidão de uma ponta, para o aviso da malha — o dado e o
+    /// fim não lido para quem lê, o espaço e o sentido abortado para quem
+    /// escreve, nada no pedido, e o fim com quem já sabe e quem não sabe.
+    #[test]
+    fn nh12_a_prontidao_da_ponta() {
+        use crate::aviso::bits::{FIM, GRAVAVEL, LEGIVEL};
+        let mut t = Fluxos::nova();
+        let id = t
+            .abrir(P1, processo(10), 7, processo(20), "a.b", 0)
+            .unwrap();
+        // O pedido: nada, nem para quem abriu.
+        assert_eq!(t.prontidao(q(10), id), Prontidao::Vivo(0));
+        // Quem ainda não é ponta não vê nada.
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(0));
+        t.aceitar(P1, 20, id, 0).unwrap();
+        // Aberto: os dois podem escrever, ninguém tem o que ler.
+        assert_eq!(t.prontidao(q(10), id), Prontidao::Vivo(GRAVAVEL));
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(GRAVAVEL));
+        // O dado chega a quem lê; o buffer cheio tira o espaço de quem
+        // escreve.
+        let cheio = alloc::vec![7u8; BUFFER_DO_SENTIDO];
+        assert_eq!(t.escrever(P1, q(10), id, &cheio, 1), Ok(BUFFER_DO_SENTIDO));
+        assert_eq!(t.prontidao(q(10), id), Prontidao::Vivo(0));
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(LEGIVEL | GRAVAVEL));
+        // A leitura abre espaço.
+        t.ler(P1, q(20), id, 10, 2).unwrap();
+        assert_eq!(t.prontidao(q(10), id), Prontidao::Vivo(GRAVAVEL));
+        let _ = ler_tudo(&mut t, q(20), id);
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(GRAVAVEL));
+        // O fim do sentido é legível até ser lido.
+        t.terminar(P1, q(10), id, 3).unwrap();
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(LEGIVEL | GRAVAVEL));
+        let (_, fim) = ler_tudo(&mut t, q(20), id);
+        assert!(fim);
+        assert_eq!(t.prontidao(q(20), id), Prontidao::Vivo(GRAVAVEL));
+        // Quem fecha sai: já sabe. O outro lado tem o fim do que ele
+        // escreveu para ler, e escreve num sentido abortado — o espaço
+        // avisa, e a escrita dirá o motivo.
+        let id2 = aberto(&mut t);
+        t.fechar(P1, q(20), id2, 4).unwrap();
+        assert_eq!(t.prontidao(q(20), id2), Prontidao::Acabou { ja_sabe: true });
+        assert_eq!(t.prontidao(q(10), id2), Prontidao::Vivo(LEGIVEL | GRAVAVEL));
+        // O aborto: os dois lados ficam sem saber até a operação.
+        let id3 = aberto(&mut t);
+        t.abortar(id3, motivo::REVOGADO);
+        assert_eq!(
+            t.prontidao(q(10), id3),
+            Prontidao::Acabou { ja_sabe: false }
+        );
+        assert_eq!(
+            t.prontidao(q(20), id3),
+            Prontidao::Acabou { ja_sabe: false }
+        );
+        assert!(t.escrever(P1, q(10), id3, b"x", 5).is_err());
+        assert_eq!(t.prontidao(q(10), id3), Prontidao::Acabou { ja_sabe: true });
+        assert_eq!(
+            t.prontidao(q(20), id3),
+            Prontidao::Acabou { ja_sabe: false }
+        );
+        // Um id que nunca existiu: nada a dizer.
+        assert_eq!(t.prontidao(q(10), 999), Prontidao::Acabou { ja_sabe: true });
+        // O bit FIM não é da conta daqui: é o aviso que o diz.
+        let _ = FIM;
     }
 }

@@ -38,6 +38,8 @@ extern crate alloc;
 pub mod dns;
 pub mod json;
 pub mod mapa;
+#[cfg(feature = "alloc")]
+pub mod quadro;
 pub mod usuario;
 
 /// `DUKEBOOT`, em little-endian.

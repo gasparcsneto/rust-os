@@ -46,6 +46,7 @@ extern crate alloc;
 pub mod arquivo;
 pub mod arrendamento;
 pub mod auditoria;
+pub mod aviso;
 pub mod caminho;
 pub mod codigo;
 pub mod dispositivos;

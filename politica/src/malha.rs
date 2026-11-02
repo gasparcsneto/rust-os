@@ -753,6 +753,17 @@ impl Malha {
         (vista.ok_or(Recusa::NaoExiste), vencidas)
     }
 
+    /// O que o aviso da malha (DS-1) diz do endpoint `endpoint`: se há uma
+    /// entrega pendente, que ninguém leu ainda, e se ele acabou.
+    pub fn prontidao_do_endpoint(&self, endpoint: u64) -> (bool, bool) {
+        let existe = self.endpoints.iter().any(|e| e.id == endpoint);
+        let pendente = self
+            .vivas
+            .iter()
+            .any(|m| m.para == endpoint && m.estado == Estado::Pendente);
+        (existe && pendente, !existe)
+    }
+
     /// Se há o que ler no endpoint `endpoint`: uma pendente — ou ele não
     /// existe mais, que também acaba a espera de quem lia.
     pub fn tem_o_que_ler(&self, endpoint: u64) -> bool {
@@ -1541,5 +1552,33 @@ mod testes {
             }
             assert!(m.coerente(), "passo {passo}");
         }
+    }
+    /// NH13: a prontidão de um endpoint, para o aviso da malha — a entrega
+    /// pendente até ser lida, e o fim do endpoint.
+    #[test]
+    fn nh13_a_prontidao_do_endpoint() {
+        let (mut m, e) = com_correio();
+        assert_eq!(m.prontidao_do_endpoint(e), (false, false));
+        let (r, _) = m.enviar(
+            P1,
+            de_processo(10, "carteiro"),
+            e,
+            "imagem.compartilhar",
+            "/foto.png",
+            1,
+            None,
+            0,
+        );
+        r.unwrap();
+        assert_eq!(m.prontidao_do_endpoint(e), (true, false));
+        // Ler não consome, mas a entrega deixa de ser pendente.
+        let (lidas, _) = m.receber(P1, 20, e, 0, 8, 1);
+        assert_eq!(lidas.unwrap().len(), 1);
+        assert_eq!(m.prontidao_do_endpoint(e), (false, false));
+        // O endpoint fechado acabou.
+        m.retirar(P1, 20, e).unwrap();
+        assert_eq!(m.prontidao_do_endpoint(e), (false, true));
+        // Um que nunca existiu também.
+        assert_eq!(m.prontidao_do_endpoint(999), (false, true));
     }
 }

@@ -173,10 +173,16 @@ pub mod nativo {
     /// TCP numa decisão, e não um.
     pub const BUFFER_DA_CONEXAO: usize = 16 * 1024;
 
-    /// A versão da interface nativa, que `system.info` publica. Cresce
-    /// quando uma chamada de mecanismo é acrescentada ou o envelope muda;
-    /// os comandos do registro se descrevem sozinhos, por `agent.describe`.
-    pub const VERSAO: u32 = 1;
+    /// A versão da interface nativa, que `system.info` publica — a do
+    /// contrato público do SDK (DS-2, `docs/SDK.md`). Cresce quando uma
+    /// chamada de mecanismo é acrescentada, o envelope muda ou o contrato é
+    /// refeito; dentro de uma versão, o contrato só cresce: comando novo,
+    /// parâmetro opcional novo, campo novo, tipo de evento novo, bit novo,
+    /// código novo. O que o kernel não conhece ele recusa, nunca ignora.
+    ///
+    /// A versão 1 é a de antes do contrato; a 2, a do contrato, com o aviso
+    /// da malha ([`tipo::MALHA`](super::evento::tipo::MALHA)).
+    pub const VERSAO: u32 = 2;
 }
 
 /// Erros devolvidos ao usuário, sempre negativos.
@@ -451,6 +457,37 @@ pub mod evento {
         /// [`TERMINAL`](crate::usuario::numero::TERMINAL). Sem campos: quem
         /// recebe lê o descritor até ele devolver zero.
         pub const SAIDA: u32 = 8;
+        /// Um objeto da malha deste processo ficou pronto — o aviso que ele
+        /// pediu com `notify` em `fabric.offer`, `stream.open` ou
+        /// `stream.accept` (DS-1). `a` é o tipo do objeto, `b` o número do
+        /// id dele (`<época>:<n>`) e `c` os bits de prontidão — ver
+        /// [`malha`](super::malha). Só isso: nenhum byte, nenhum motivo,
+        /// nenhuma autoridade. Quem recebe pede ao gate o que fazer — ler,
+        /// escrever, aceitar, receber —, e o pedido pode não achar nada.
+        pub const MALHA: u32 = 9;
+    }
+
+    /// Os campos de um evento [`tipo::MALHA`]: o tipo do objeto, em `a`, e
+    /// os bits de prontidão, em `c`. Quem lê ignora o bit que não conhece.
+    pub mod malha {
+        /// `a`: um endpoint deste processo — o id de `fabric.offer`.
+        pub const ENDPOINT: i64 = 1;
+        /// `a`: uma ponta de fluxo deste processo — o id de `stream.open`
+        /// ou de `stream.accept`.
+        pub const PONTA: i64 = 2;
+
+        /// `c`, ponta: há dado para ler, ou o fim do sentido ainda não lido.
+        pub const LEGIVEL: i64 = 1 << 0;
+        /// `c`, ponta: há espaço para escrever — depois de uma escrita que
+        /// não coube inteira —, ou a abertura, para quem abriu.
+        pub const GRAVAVEL: i64 = 1 << 1;
+        /// `c`: o objeto acabou; a próxima operação diz o motivo. É o último
+        /// aviso dele.
+        pub const FIM: i64 = 1 << 2;
+        /// `c`, endpoint: um pedido de fluxo esperando o aceite.
+        pub const PEDIDO: i64 = 1 << 3;
+        /// `c`, endpoint: uma entrega pendente, que ninguém leu ainda.
+        pub const ENTREGA: i64 = 1 << 4;
     }
 
     /// As ações de um evento [`tipo::ACAO`].
