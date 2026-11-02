@@ -15,7 +15,7 @@ use super::aviso::{
 use super::{
     CODIGO_INSTALADO, DO_MODELO, Instalador, NaMalha, PUBLICADOS, Resultado, TETO_DA_MALHA, chamar,
     com_a_bancada_http, decisoes_do_processo, ditas_na_malha, dito_na_malha, encerrar_na_malha,
-    esperar_ate, fs_no_armazem, fs_ok, fs_pedir, registro_que,
+    esperar_ate, fs_no_armazem, fs_ok, fs_pedir, registro_que, versao_no_armazem,
 };
 use crate::agent::json::Json;
 use crate::autorizacao::{Autoridade, Chamador};
@@ -40,8 +40,9 @@ const SAIDA_DO_ECO_DO_MODELO: i64 = 58;
 /// Quantos bytes o cliente do modelo manda.
 const TAMANHO_DO_MODELO: usize = 40 * 1024;
 
-/// O pedido do cliente do modelo.
+/// O pedido do cliente do modelo, e o diretório dele.
 const PAR_DO_MODELO: &str = "/armazem/compartilhado/modelo/par";
+const DIRETORIO_DO_MODELO: &str = "/armazem/compartilhado/modelo";
 
 // ---------------------------------------------------------------------------
 // NS26 — o eco-malha com três clientes
@@ -317,6 +318,33 @@ fn apagar_o_par(pessoa: Chamador) {
     );
 }
 
+/// Apaga o que o caso instalou — os arquivos do modelo e o diretório do
+/// pedido —, como a pessoa: o armazém volta a ser o de antes. A cópia do
+/// armazém inteiro, perto do fim da suíte, leva cada byte dele ao heap do
+/// kernel.
+fn apagar_o_instalado(pessoa: Chamador) -> Resultado {
+    let caminhos = DO_MODELO
+        .iter()
+        .map(|nome| ("fs.delete", format!("{CODIGO_INSTALADO}/{nome}")))
+        .chain([("fs.rmdir", String::from(DIRETORIO_DO_MODELO))]);
+    for (metodo, caminho) in caminhos {
+        let versao = versao_no_armazem(&caminho);
+        if versao == 0 {
+            continue;
+        }
+        let r = fs_pedir(
+            pessoa,
+            metodo,
+            &format!(r#"{{"path":"{caminho}","expect_version":{versao}}}"#),
+        );
+        if !fs_ok(&r) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o que o caso instalou nao foi apagado");
+        }
+    }
+    Ok(())
+}
+
 /// O programa feito fora do repositório — o `sdk/modelo`, copiado para
 /// fora do workspace, compilado contra o `programas`, selado pelo editor
 /// `bancada` e servido pela bancada — chega ao Duke como qualquer código de
@@ -404,7 +432,8 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
                 None => Ok(()),
             };
             let fim = instalador.encerrar();
-            r.and(fim_do_servidor).and(fim)
+            let limpo = apagar_o_instalado(pessoa);
+            r.and(fim_do_servidor).and(fim).and(limpo)
         })
     })
 }

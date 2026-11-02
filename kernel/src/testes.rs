@@ -33468,14 +33468,20 @@ fn copia_o_armazem_inteiro() -> Resultado {
     let sistema = sistema_no_armazem(7_400_701);
     crate::coordenacao::esquecer();
     crate::armazem::vencer_rascunhos_de_teste();
+    // Cada retrato do armazém inteiro — o original, os bytes da cópia, a
+    // cópia aberta, o retrato do volume — é todo o conteúdo dele no heap do
+    // kernel: cada um sai assim que não serve mais.
     let original = copia_subarvore(crate::armazem::RAIZ);
     let (n, _, bytes) = copia_baixada(sistema, crate::armazem::RAIZ)?;
-    let (cabecalho, nos) = crate::copia::abrir_de_teste(&bytes)?;
-    // A raiz do armazém não é nó: a cópia dele começa por ela.
-    let mut esperado = alloc::vec![(alloc::string::String::new(), None)];
-    esperado.extend(original.iter().cloned());
-    if !cabecalho.raiz.is_empty() || nos != esperado {
-        return Err("a copia do armazem inteiro nao e o armazem inteiro");
+    {
+        let (cabecalho, nos) = crate::copia::abrir_de_teste(&bytes)?;
+        // A raiz do armazém não é nó: a cópia dele começa por ela.
+        let inteiro = nos.split_first().is_some_and(|(raiz, resto)| {
+            raiz.0.is_empty() && raiz.1.is_none() && resto == original.as_slice()
+        });
+        if !cabecalho.raiz.is_empty() || !inteiro {
+            return Err("a copia do armazem inteiro nao e o armazem inteiro");
+        }
     }
     copia_exigir(
         &fs_pedir(
@@ -33487,6 +33493,7 @@ fn copia_o_armazem_inteiro() -> Resultado {
     )?;
     let proxima = crate::armazem::com_o_armazem(|a| a.proxima());
     let d = copia_enviada(sistema, crate::armazem::RAIZ, &bytes)?;
+    drop(bytes);
     let r = copia_restaurar(sistema, crate::armazem::RAIZ, d, 1);
     if fs_ok(&r) || fs_numero(&r, "current_version") != Some(0) {
         crate::log_error!("teste", "{}", r);
@@ -33497,6 +33504,7 @@ fn copia_o_armazem_inteiro() -> Resultado {
     if copia_subarvore(crate::armazem::RAIZ) != original {
         return Err("o armazem restaurado nao e o da copia");
     }
+    drop(original);
     if copia_versoes_e_donos(crate::armazem::RAIZ)
         .iter()
         .any(|(v, d)| *v < proxima || d != "sistema")
