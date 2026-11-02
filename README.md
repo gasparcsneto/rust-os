@@ -8935,6 +8935,150 @@ escrita é uma decisão do gate e um registro da auditoria, e o número mede
 isso, e não o transporte. O par inteiro, os dez passos, leva de 624 a
 709 s.
 
+## O SDK da malha
+
+O DN-3 ([`docs/SDK.md`](docs/SDK.md)), com as decisões DS-1 e DS-2
+aprovadas antes da implementação: o que falta para escrever, fora deste
+repositório, um programa do Duke que fala com a malha e com os fluxos sem
+travar num pedido só.
+
+**DS-1 — o aviso da malha no canal de eventos.** Um processo do Duke tem
+um fio, e um pedido que espera espera um objeto. Com `notify` — o
+descritor de um canal de eventos que o próprio processo escuta —,
+`fabric.offer`, `stream.open` e `stream.accept` **designam** o objeto, e o
+kernel avisa nesse canal quando ele fica pronto: um evento `MALHA` (9) com
+o tipo do objeto (endpoint ou ponta de fluxo), o número do id e os bits
+(`LEGIVEL`, `GRAVAVEL`, `FIM`, `PEDIDO`, `ENTREGA`). Nenhum byte, motivo,
+identidade ou autoridade: o aviso **só sinaliza prontidão**, e a operação
+seguinte passa pelo gate como sempre. A designação anda dentro da decisão
+do próprio comando — sem permissão nova, sem decisão a mais —, e o que não
+é canal do processo recusa o pedido inteiro (`INVALID_ARGUMENT`), nunca é
+ignorado. A conta de quando avisar é pura
+([`politica/src/aviso.rs`](politica/src/aviso.rs)): na borda, no máximo um
+aviso não consumido por objeto, rearmado pela operação do dono com o
+nível reavaliado; o espaço só para quem esbarrou no cheio e para quem
+abriu; o fim uma vez; o canal cheio deixa o aviso devido, e o coletor
+tenta de novo; e o aviso que ainda espera na fila do canal recebe os bits
+do seguinte do mesmo objeto. O `exec` larga as designações antes de os
+fluxos acabarem; a morte e o canal fechado as largam
+([`kernel/src/aviso.rs`](kernel/src/aviso.rs)).
+
+**DS-2 — o contrato público da interface nativa v2.** O que um programa
+fala com o kernel é uma lista explícita e versionada,
+[`sdk/contrato.txt`](sdk/contrato.txt): as chamadas, os erros, os tipos
+de evento, os bits do aviso, os tetos, os códigos de serviço e os comandos
+da malha com os parâmetros. O `cargo xtask invariantes` a confere contra o
+protocolo, o registro e a política; `system.info` diz `native_interface:
+2`.
+
+**O runtime e o modelo.** `programas::laco` é a única espera de um
+processo — a malha, os fluxos, a janela e o pseudo-terminal no mesmo
+canal —; `programas::quadro` leva mensagens com o tamanho na frente sobre
+um fluxo; `programas::fluxo` e `programas::malha` ganham as variantes
+avisadas. Os exemplos: o `eco-malha` (vários clientes num processo só, daqui
+e de outro Duke), a `conversa` (a janela e o fluxo no mesmo laço) e o
+`copiador`. O [`sdk/modelo`](sdk/modelo) é o projeto pronto para copiar —
+compilado fora do workspace contra o `programas`, com as opções, o
+`usuario.ld` e o toolchain que o `cargo xtask invariantes` confere —, e
+`cargo xtask selar`, `sdk-conferir` e `sdk-fora` o selam, conferem e
+compilam; o `instalador` o grava no armazém em pedaços, e o kernel só o
+roda com o selo de um editor em quem o papel confia.
+
+**Testes.** No hospedeiro, a conta do aviso — a borda, o rearme, o espaço
+só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
+codificação e o evento que só tem o tipo, o número e os bits —, o quadro, o
+selo e a lista do contrato (NH01–NH11). Na suíte, nas duas arquiteturas,
+26 casos `aviso:` e 6 `sdk:` — o programa `avisado`, que só espera no canal
+dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
+do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
+espaço para quem esbarrou, o fim do sentido, o fecho e o aborto, o
+endpoint, um canal só para a malha, os fluxos e os outros eventos, os dois
+sentidos sem impasse, nada mudado sem `notify`, o canal que não é do
+processo e o descritor que não é canal recusados, a recusa do gate que não
+designa, a revogação e a política nova entre o aviso e a leitura, o evento
+sem conteúdo, cada processo no seu canal, só processo designando, o fim
+contra a leitura, a troca de imagem, a morte e o canal sem ouvinte, o
+canal cheio, quatro fluxos e dois pares sob carga, o desligamento, a
+suspensão e o esquecimento do dispositivo, e os fluxos de e para outro
+Duke —; e o `eco-malha` com três clientes num processo só, a `conversa`, o
+programa de fora do repositório selado, instalado e rodado, o
+`agent.describe` contra o contrato, o `system.info` e as medidas do laço.
+As invariantes de fonte conferem o contrato contra o protocolo, o registro
+e a política (NI01–NI03); o job "SDK fora do repositório" compila,
+confere e sela o modelo fora de todo workspace (NX01–NX03). E a **bancada
+de duas máquinas**, `cargo xtask sdk`: o modelo nas duas, falando entre
+si; o `eco-malha` servindo um cliente de cada máquina ao mesmo tempo, e o
+segundo cliente remoto recusado pelo teto da relação; os dois sentidos ao
+mesmo tempo, sem impasse; as medidas e a vazão do laço contra o estilo
+bloqueante do DN-2; a pessoa digitando nas duas `conversa` pelo teclado da
+máquina; e a revogação no meio de um fluxo. Nos quatro pares.
+
+### As mutações do SDK da malha
+
+Trinta e duas mutações contra o que o DN-3 promete — N01 a N32 —, uma de
+cada vez, no repositório, no x86_64: as da conta pura do aviso, do quadro
+e do xtask (o selo, a conferência do contrato) rodam os testes do
+hospedeiro; as do kernel, do runtime e do contrato, os casos `aviso:` e
+`sdk:` da suíte — três delas, os dois. Na primeira rodada, cinco
+sobreviveram, as cinco por fraqueza dos testes, e não do código: na N03 (a
+recusa do gate que ainda designa o endpoint do pedido), o caso nomeava o
+endpoint que a oferta já tinha designado, e a designação a mais não mudava
+a conta; na N08 (o rearme sem reavaliar a prontidão — o despertar
+perdido), a campanha a rodou contra dois casos que não a veem, e o que a
+vê é o NS01b, em que três leituras deixam dado no fluxo e cada uma tem de
+avisar de novo; na N11 (o aviso depois da lápide vista), a janela entre o
+fecho do dono e o largar da designação não aparecia em caso nenhum; na
+N16 (a leitura depois do aviso sem o gate), o caso só lia depois de a
+escrita recusada ter acabado o fluxo — e, mesmo lendo antes, a
+reconfirmação do fluxo dentro da operação (DN-2) recusa a leitura com a
+primeira decisão pulada: nenhum byte sai, e o que muda é quem recusa —; e
+na N28 (a chave do canal sem a geração), nenhum caso
+reusava a vaga de um canal fechado. Os casos ganharam o que faltava: o
+aceite recusado num endpoint oferecido sem `notify`, que continua sem
+designação; um ponto só da suíte que faz a conta da ponta entre o fecho e
+o largar, como uma operação do par a faria — e nada é publicado para quem
+fechou —; a leitura de quem recebeu o aviso como a primeira operação
+depois da política nova, sem o dado e gravada como a recusa do gate — e
+não como uma decisão permitida que só a reconfirmação desfaz —; e canais da
+suíte até um cair na vaga do canal que o processo fechou, sem que o aviso
+cruze para ele. Na última rodada de cada uma, as trinta e duas são
+reprovadas.
+
+| Mutação | Reprovada por |
+|---|---|
+| a designação sem conferir que o processo escuta o canal; o descritor que não é canal, ignorado; o `notify` de um agente ou de uma pessoa aceito; a designação passando ao filho no `fork` | "o canal que o processo nao escuta e recusado", "o descritor que nao e canal e recusado", "so processo designa" |
+| a recusa do gate que ainda designa o endpoint do pedido | "a recusa do gate nao designa nada" — depois do reforço |
+| o primeiro byte do fluxo no aviso; o aviso da ponta no canal do par | "o evento so tem o tipo, o numero e os bits", "cada processo no seu canal" |
+| sem coalescência; sem rearme depois da operação do dono; o `GRAVAVEL` nunca publicado | os testes do hospedeiro de `politica::aviso` e os casos do dado, do espaço e dos dois sentidos |
+| o rearme sem reavaliar a prontidão | "um aviso de cada objeto no canal" |
+| o `FIM` não publicado no aborto | "o fim do sentido, o fecho e o aborto", "o desligamento avisa o fim", "a suspensao e o esquecimento do dispositivo avisam o fim" |
+| o aviso depois da lápide vista | "o fim contra a leitura" — depois do reforço |
+| o `exec` mantendo as designações | "a troca de imagem larga as designacoes" |
+| o canal sem ouvinte tentado para sempre; a chave do canal sem a geração | "a morte e o canal sem ouvinte" — a da geração depois do reforço |
+| o canal cheio descartando o aviso; o devido entregue duas vezes | "o canal cheio deixa o aviso devido" |
+| a leitura depois do aviso sem o gate | "a politica que tira a permissao no meio" — depois do reforço |
+| sem `PEDIDO` ou sem `ENTREGA` no endpoint | "o endpoint avisa o pedido e a entrega" |
+| o despertar da sessão remota sem o aviso; a ponta aceita de outro Duke sem aviso | "o fluxo saindo para outro Duke", "o fluxo chegando de outro Duke" |
+| um bit de coalescência partilhado entre os objetos do canal; o aviso seguinte do mesmo objeto noutro lugar da fila | "quatro fluxos avisando ao mesmo tempo", "um aviso de cada objeto no canal" |
+| o pedido que abre aceito no desligamento | "o desligamento avisa o fim" |
+| o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
+| `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
+| a conferência do contrato aceitando um parâmetro tirado; selar sem conferir o manifesto; o quadro aceitando a mensagem maior que o teto | os testes do hospedeiro do xtask e do `protocolo::quadro` |
+
+O kernel de release cresceu, nos segmentos carregados, 146 008 bytes (+2,8%)
+no x86_64 e 146 728 (+3,4%) no aarch64, contra o fim do DN-2. Na bancada —
+QEMU sem KVM, dois núcleos por máquina, as duas no mesmo hospedeiro de
+quatro (CI 401) —, o modelo de fora do repositório faz os 40 KiB de ida e
+volta entre os Dukes em 2,2 a 2,7 s; o `eco-malha` serve ao mesmo tempo os
+dois clientes de 4 MiB, e o segundo cliente remoto é recusado pelo teto da
+relação; 1 MiB de cada lado ao mesmo tempo passa sem impasse, a 52–62 KiB/s.
+O laço anda a 37–48 KiB/s entre os Dukes e a 56–74 KiB/s no local, contra
+56–66 KiB/s do estilo bloqueante do DN-2 entre os Dukes: cada leitura e cada
+escrita continua sendo uma decisão do gate e um registro da auditoria, e o
+aviso soma a volta pelo canal — do aviso à operação do dono, de 83 a 130 ms
+em média e até 1,9 s no pior caso, com os dois emuladores disputando o
+hospedeiro. O par inteiro, os seis passos, leva de 593 a 914 s.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
@@ -10504,10 +10648,15 @@ padronizado.
       malha, com as decisões DF-1 a DF-6 tomadas antes (DN-2): um canal
       ordenado de bytes entre dois processos do mesmo titular, nesta
       máquina ou entre dois Dukes da pessoa, cada passo pelo gate e nenhum
-      deles autoridade (ver [Os fluxos da malha](#os-fluxos-da-malha)). O
-      handoff, os recursos remotos, a presença, a continuidade, o SDK e os
-      pacotes são os marcos seguintes, e cada um pede uma decisão própria
-      antes.
+      deles autoridade (ver [Os fluxos da malha](#os-fluxos-da-malha)).
+      Depois, o SDK da malha, com as decisões DS-1 e DS-2 tomadas antes
+      (DN-3): o aviso da malha no canal de eventos do processo — um laço,
+      uma espera, para a malha, os fluxos, a janela e o pseudo-terminal —
+      e o contrato público e versionado da interface nativa (v2), com o
+      runtime, o modelo de projeto, o selo e a instalação de um programa
+      feito fora do repositório (ver [O SDK da malha](#o-sdk-da-malha)). O
+      handoff, os recursos remotos, a presença, a continuidade e os pacotes
+      são os marcos seguintes, e cada um pede uma decisão própria antes.
 
 ## Licença
 

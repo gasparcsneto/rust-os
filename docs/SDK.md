@@ -382,6 +382,145 @@ O `cargo xtask sdk-fora` faz os passos 1 a 4 com o modelo, numa cópia em
 modelo selado, e as variantes que o Duke recusa, como publica o `vindo`; o
 NS28 o instala e roda.
 
+## Testes
+
+- **No hospedeiro** (NH01–NH11): a conta pura do aviso
+  (`politica::aviso`) — a borda que publica uma vez, a operação que
+  rearma, o espaço só para quem o quer, o fim uma vez, o canal cheio, o
+  canal sem ouvinte, a codificação e o evento que só tem o tipo, o número e
+  os bits —; o quadro (`protocolo::quadro`); e no xtask, o selo e a lista
+  do contrato, com a conferência que acusa o parâmetro tirado.
+- **Na suíte**, nas duas arquiteturas: 26 casos `aviso:` (NS01–NS25 e o
+  NS01b) e 6 casos `sdk:` (NS26–NS31). O programa `avisado` só espera no
+  canal dele e diz no log cada aviso que chega; a suíte dita os passos a
+  ele — o caminho inteiro pelo runtime — ou pede **como** ele, pela mesma
+  função do gate, nos passos que precisam ser exatos. O que se confere é o
+  que o kernel publicou, quando e quantas vezes, e que cada operação depois
+  de um aviso continua sendo um pedido decidido pelo gate.
+- **As invariantes de fonte** (NI01–NI03): o contrato contra o protocolo,
+  o registro dos comandos e a política; nenhuma linha a mais, nenhuma a
+  menos.
+- **O SDK fora do repositório** (NX01–NX03): o modelo copiado para fora de
+  todo workspace, compilado contra o `programas`, conferido e selado, nas
+  duas arquiteturas, com os lints da cópia de fora.
+- **A bancada** `cargo xtask sdk` (NB01–NB06), nos quatro pares: o modelo
+  nas duas máquinas; o `eco-malha` com um cliente de cada máquina e o
+  segundo cliente remoto recusado pelo teto da relação; os dois sentidos ao
+  mesmo tempo; as medidas e a vazão do laço contra o estilo bloqueante; a
+  `conversa` com a pessoa digitando nas duas; a revogação no meio de um
+  fluxo.
+
+## Mutações
+
+Trinta e duas mutações — N01 a N32 —, uma de cada vez, no repositório, no
+x86_64. As da conta pura (`politica::aviso`) rodam os testes do
+hospedeiro e os casos da suíte que as veem; as do xtask e do quadro, só os
+testes do hospedeiro; as do kernel, do runtime e do protocolo, os casos
+`aviso:` e `sdk:` da suíte, filtrada a eles. Na primeira rodada de cada
+uma sobreviveram cinco — a N03, a N08, a N11, a N16 e a N28 —, as cinco
+por fraqueza dos testes, e não do código:
+
+- **N03** — o caso nomeava, no aceite recusado, o endpoint que a oferta já
+  tinha designado: a designação a mais caía sobre a que existia, e a conta
+  não mudava. O NS10 ganhou o aceite recusado num endpoint oferecido sem
+  `notify`, para outra intenção, que tem de continuar sem designação.
+- **N08** — a campanha a rodou contra o NS01 e o NS20, que não a veem: no
+  NS01 a leitura esvazia o fluxo, e no NS20 cada leitura também. Quem a vê
+  é o NS01b, em que três leituras deixam dado no fluxo e cada uma tem de
+  avisar de novo — o despertar perdido de um programa que lê menos que o
+  que há.
+- **N11** — a janela entre o fecho do dono e o largar da designação não
+  aparecia em caso nenhum. Um ponto só da suíte (`modo-teste`) faz a conta
+  da ponta nessa janela, como uma operação do par ou o coletor a fariam; o
+  NS16 fecha com ele armado, e nada é publicado para quem fechou.
+- **N16** — o NS15 só lia depois de a escrita recusada ter acabado o
+  fluxo, e a leitura ouvia o motivo, com o gate ou sem ele. A leitura de
+  quem recebeu o aviso passou a ser a primeira operação depois da política
+  nova — e a mutação ainda passou: dentro da operação, o fluxo reconfirma
+  a decisão com a ordem das gravações na mão (DN-2), e a reconfirmação
+  recusa a leitura mesmo com a primeira decisão pulada; nenhum byte sai. O
+  que a mutação muda é quem recusa — o gate gravaria a leitura como
+  permitida —, e o NS15 confere agora que a decisão gravada é a recusa do
+  gate.
+- **N28** — nenhum caso reusava a vaga de um canal fechado: a designação
+  cujo canal sumiu achava a vaga vazia, com ou sem a geração na chave. O
+  NS18 põe canais da suíte até um cair na vaga do canal que o processo
+  fechou, e o aviso não cruza para ele.
+
+Na última rodada de cada uma, as trinta e duas são reprovadas.
+
+| | Mutação | Reprovada por |
+|---|---|---|
+| N01 | a designação sem conferir que o processo escuta o canal | NS08 |
+| N02 | o descritor que não é canal, ignorado em silêncio | NS09 |
+| N03 | a recusa do gate que ainda designa o endpoint do pedido | NS10, depois do reforço |
+| N04 | o primeiro byte do fluxo no campo `b` do aviso | NS12 |
+| N05 | o aviso da ponta no canal do par | NS13 |
+| N06 | sem coalescência: toda mudança publica | NH01, NH05; NS01 |
+| N07 | sem rearme depois da operação do dono | NH02, NH03; NS01, NS26 |
+| N08 | o rearme sem reavaliar a prontidão | NS01b |
+| N09 | o `GRAVAVEL` nunca publicado | NH03, NH06; NS02, NS06 |
+| N10 | o `FIM` não publicado no aborto | NS03, NS22, NS23 |
+| N11 | o aviso depois da lápide vista | NS16, depois do reforço |
+| N12 | o `exec` mantendo as designações | NS17 |
+| N13 | o canal sem ouvinte tentado para sempre | NS18 |
+| N14 | o canal cheio descartando o aviso | NS19 |
+| N15 | o devido entregue duas vezes | NS19 |
+| N16 | a leitura depois do aviso sem o gate | NS15, depois do reforço |
+| N17 | o `notify` de um agente ou de uma pessoa aceito | NS14 |
+| N18 | sem `ENTREGA` no endpoint | NS04 |
+| N19 | sem `PEDIDO` no endpoint | NS04 |
+| N20 | o despertar da sessão remota sem o aviso | NS24 |
+| N21 | a ponta aceita de outro Duke, sem aviso | NS25 |
+| N22 | `native_interface` sem subir | NS30 |
+| N23 | a conferência do contrato aceitando um parâmetro tirado | o teste do hospedeiro do xtask |
+| N24 | selar sem conferir o manifesto | NH10 |
+| N25 | o laço parando no tipo de evento que não conhece | NS05 |
+| N26 | o quadro aceitando a mensagem maior que o teto | NH09 |
+| N27 | um bit de coalescência partilhado entre os objetos do canal | NS20 |
+| N28 | a chave do canal sem a geração | NS18, depois do reforço |
+| N29 | o pedido que abre, aceito no desligamento | NS22 |
+| N30 | a designação passando ao filho no `fork` | NS08 |
+| N31 | o aviso seguinte do mesmo objeto noutro lugar da fila | NS01b |
+| N32 | a latência do aviso sem medida | NS31 |
+
+## Medidas
+
+O kernel de release, nos segmentos carregados (a soma do `filesz` dos
+`LOAD`), contra o fim do DN-2:
+
+| | DN-2 | DN-3 | diferença |
+|---|---:|---:|---:|
+| x86_64 | 5 138 155 | 5 284 163 | +146 008 (+2,8%) |
+| aarch64 | 4 298 347 | 4 445 075 | +146 728 (+3,4%) |
+
+Na memória (a soma do `memsz`), +145 972 bytes no x86_64 e +131 904 no
+aarch64.
+
+A bancada `cargo xtask sdk` na CI 401 — QEMU sem KVM, dois núcleos por
+máquina, as duas no mesmo hospedeiro de quatro. "Laço" é o modelo e o
+`eco-malha`, um processo e uma espera no canal; "bloqueante" é o
+`remetente` e o `recebedor` do DN-2, cada pedido esperando. As vazões
+contam os dois sentidos.
+
+| Par | NB05: 40 KiB ida e volta | NB02: 1 MiB de cada lado | Laço entre os Dukes | Laço local | Bloqueante entre os Dukes | Do aviso à operação (média, origem / destino) | Pior | O par inteiro |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| x86_64→x86_64 | 2,66 s | 52 KiB/s | 37 KiB/s | 56 KiB/s | 56 KiB/s | 99 / 130 ms | 1,43 s | 914 s |
+| aarch64→aarch64 | 2,17 s | 62 KiB/s | 48 KiB/s | 69 KiB/s | 66 KiB/s | 83 / 107 ms | 1,46 s | 593 s |
+| x86_64→aarch64 | 2,32 s | 53 KiB/s | 43 KiB/s | 74 KiB/s | 61 KiB/s | 99 / 101 ms | 1,43 s | 824 s |
+| aarch64→x86_64 | 2,59 s | 61 KiB/s | 43 KiB/s | 56 KiB/s | 62 KiB/s | 85 / 128 ms | 1,93 s | 610 s |
+
+Cada leitura e cada escrita continua sendo uma decisão do gate e um
+registro da auditoria — o número mede isso, e não o transporte. O laço
+fica de 27% a 34% abaixo do bloqueante entre os Dukes: ele soma a volta
+pelo canal — o aviso publicado, o fio acordado no canal, a operação
+pedida ao gate —, e, na bancada, essa volta leva em média de 83 a 130 ms
+com os dois emuladores disputando o hospedeiro. Em troca, um processo
+serve vários fluxos, a janela e o pseudo-terminal numa espera só. Os
+avisos de uma troca de 4 MiB: de 420 a 440 publicados e de 430 a 460
+juntados na origem; de 800 a 1 010 publicados e de 1 350 a 1 450 juntados
+no destino — o canal nunca teve mais de um aviso do mesmo objeto.
+
 ## O que não existe
 
 - **Argumentos.** Um programa não recebe argumentos: o que ele deve fazer
