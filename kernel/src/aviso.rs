@@ -531,6 +531,27 @@ pub fn designacoes_de_teste(fio: u64) -> usize {
     com_designacoes(|t| t.iter().filter(|(o, e)| o.dono(e.canal) == fio).count())
 }
 
+/// Só para a suíte: no próximo fecho de um fluxo por um dono que tem a
+/// designação da ponta, a conta da ponta é feita entre o fecho e o largar —
+/// com ela ainda designada, como uma operação do par ou o coletor a fariam
+/// nessa janela. Quem fechou já sabe do fim: a conta só tira a designação.
+#[cfg(feature = "modo-teste")]
+static CONTA_NO_FECHO: AtomicBool = AtomicBool::new(false);
+
+/// Só para a suíte: arma a conta no próximo fecho ([`CONTA_NO_FECHO`]).
+#[cfg(feature = "modo-teste")]
+pub fn contar_no_proximo_fecho_de_teste() {
+    CONTA_NO_FECHO.store(true, Ordering::Release);
+}
+
+/// O ponto da conta no fecho: quem fecha passa por aqui antes de largar.
+#[cfg(feature = "modo-teste")]
+pub fn antes_de_largar_no_fecho_de_teste(obj: Objeto) {
+    if CONTA_NO_FECHO.swap(false, Ordering::AcqRel) {
+        avaliar(obj);
+    }
+}
+
 /// Destrava as tabelas à força, para uso exclusivo do caminho de falha
 /// fatal.
 ///

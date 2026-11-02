@@ -18,7 +18,7 @@ use super::{
     NaMalha, Resultado, TETO_DA_MALHA, com_a_malha, decisao_do_envelope, desfecho_na_malha,
     ditas_na_malha, dito_na_malha, encerrar_na_malha, energia_entregue, esperar_ate,
     esperar_cedendo, fs_ok, fs_pedir, fs_texto, gravado_na_malha, linhas_do_programa,
-    mandar_na_malha, politica_sem, politica_trocada, sistema_aqui,
+    mandar_na_malha, politica_sem, politica_trocada, registros_depois, sistema_aqui,
 };
 use crate::autorizacao::{Autoridade, Chamador};
 use crate::aviso::Objeto;
@@ -1135,6 +1135,42 @@ pub(super) fn aviso_a_recusa_do_gate_nao_designa() -> Resultado {
                 "DENY_PERMISSION",
                 "a politica sem a permissao ofereceu",
             )?;
+            // O aceite recusado nomeando um endpoint que ninguém designou —
+            // oferecido sem `notify`, para outra intenção: continua sem
+            // designação.
+            let r = fs_pedir(b.quem(), "fabric.offer", r#"{"intent":"pdf.anotar"}"#);
+            let outro = fs_texto(&r, "endpoint").ok_or("o dono nao abriu outro endpoint")?;
+            if outro == b.endpoint {
+                return Err("a oferta da outra intencao devolveu o mesmo endpoint");
+            }
+            let numero =
+                politica::aviso::numero_do_id(&outro).ok_or("o endpoint novo nao tem numero")?;
+            if crate::aviso::situacao_de_teste(Objeto::Endpoint(numero)).is_some() {
+                return Err("a oferta sem notify designou o endpoint");
+            }
+            politica_sem("fabric.stream");
+            let aceitar_no_outro = fs_pedir(
+                b.quem(),
+                "stream.accept",
+                &format!(r#"{{"endpoint":"{outro}","notify":{}}}"#, b.descritor),
+            );
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            recusado(
+                &aceitar_no_outro,
+                "DENY_PERMISSION",
+                "a politica sem a permissao aceitou no endpoint sem aviso",
+            )?;
+            if crate::aviso::situacao_de_teste(Objeto::Endpoint(numero)).is_some() {
+                return Err("o aceite recusado designou o endpoint que nomeou");
+            }
+            feito(
+                &fs_pedir(
+                    b.quem(),
+                    "fabric.withdraw",
+                    &format!(r#"{{"endpoint":"{outro}"}}"#),
+                ),
+                "o dono nao retirou o endpoint sem aviso",
+            )?;
             if crate::fluxo::contagem() != (0, 0) {
                 return Err("um pedido recusado criou um fluxo");
             }
@@ -1231,7 +1267,11 @@ pub(super) fn aviso_o_evento_so_tem_tipo_numero_e_bits() -> Resultado {
                 &sobre(a.quem(), "stream.finish", &id),
                 "o finish nao passou",
             )?;
-            b.esperar_aviso(desde, "fluxo", n, malha::LEGIVEL)?;
+            // O fim do sentido avisa de novo: o segundo aviso do fluxo — e,
+            // depois do sossego, nenhum outro.
+            esperar_ate(|| b.avisos_de(desde, "fluxo", n).len() >= 2, TETO_DA_MALHA)
+                .map_err(|_| "o fim do sentido nao avisou")?;
+            let _ = esperar_ate(|| false, SOSSEGO);
             let vistos = b.avisos(desde);
             for v in &vistos {
                 let conhecido = match v.tipo.as_str() {
@@ -1369,10 +1409,13 @@ pub(super) fn aviso_so_processo_designa() -> Resultado {
 // NS15 — a política que tira a permissão no meio
 // ---------------------------------------------------------------------------
 
-/// A política tira `fabric.stream` com o fluxo aberto: a escrita seguinte
-/// é recusada pelo gate, o fluxo acaba com o motivo do gate, e a outra
-/// ponta — livre, sem aviso pendente — recebe `FIM`; a leitura dela ouve o
-/// motivo; e nada mais vem.
+/// A política tira `fabric.stream` com o fluxo aberto. Com o dado avisado e
+/// ainda não lido, a leitura de quem recebeu o aviso é a primeira operação
+/// depois da política nova: o aviso não leva autoridade — o gate a recusa,
+/// o dado não sai, e o fluxo acaba com o motivo do gate. Noutro fluxo, a
+/// escrita seguinte é recusada pelo gate, o fluxo acaba com o motivo do
+/// gate, e a outra ponta — livre, sem aviso pendente — recebe `FIM`; a
+/// leitura dela ouve o motivo; e nada mais vem.
 pub(super) fn aviso_a_politica_que_tira_a_permissao() -> Resultado {
     com_os_avisos(|| {
         let (_, bia) = pessoa("bia", 415);
@@ -1380,6 +1423,38 @@ pub(super) fn aviso_a_politica_que_tira_a_permissao() -> Resultado {
         let b = Avisado::lancar(bia)?;
         let antes_da_politica = crate::autorizacao::com_politica(|p| p.clone());
         let r = (|| -> Resultado {
+            // A leitura avisada, primeira depois da política nova.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, n) = aberto(&a, &b, true, true)?;
+            let desde = crate::log::total_emitidos();
+            escrito(
+                &escrever(a.quem(), &id, b"avisado"),
+                7,
+                "a escrita nao entrou",
+            )?;
+            b.esperar_aviso(desde, "fluxo", n, malha::LEGIVEL)?;
+            politica_sem("fabric.stream");
+            let r = ler(b.quem(), &id, 10);
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            recusado(
+                &r,
+                "DENY_PERMISSION",
+                "a leitura avisada passou pela politica nova",
+            )?;
+            if fs_texto(&r, "content").is_some() {
+                return Err("a leitura recusada trouxe o dado");
+            }
+            // A recusa é a decisão do gate, gravada como tal: a
+            // reconfirmação dentro da operação é a segunda conferência, e
+            // não a única.
+            let lidas = registros_depois(antes, |e| e.metodo == "stream.read");
+            if lidas.is_empty() || lidas.iter().any(|(_, e)| e.codigo == Codigo::Allow) {
+                crate::log_error!("teste", "{:?}", lidas);
+                return Err("a leitura avisada nao foi recusada pela decisao do gate");
+            }
+            fim_gravado_com(antes, &id, "DENY_PERMISSION: ")?;
+            a.esperar_aviso(desde, "fluxo", n, malha::FIM)?;
+            // A escrita, primeira depois da política nova, noutro fluxo.
             let antes = crate::autorizacao::ultimo_registro();
             let (id, n) = aberto(&a, &b, true, true)?;
             let desde = crate::log::total_emitidos();
@@ -1472,6 +1547,25 @@ pub(super) fn aviso_o_fim_contra_a_leitura() -> Resultado {
                     crate::log_error!("teste", "{:?}", vistos);
                     return Err("o fim avisou mais de uma vez");
                 }
+            }
+            // O fecho de quem tem a designação, com a conta da ponta caindo
+            // entre o fecho e o largar — o que uma operação do par, ou o
+            // coletor, faria nessa janela: quem fechou já sabe do fim, e
+            // nada é publicado para ele.
+            let (id, n) = aberto(&a, &b, false, true)?;
+            let _ = esperar_ate(|| false, SOSSEGO);
+            let publicados = crate::aviso::medidas().publicados;
+            crate::aviso::contar_no_proximo_fecho_de_teste();
+            feito(
+                &sobre(b.quem(), "stream.close", &id),
+                "o dono nao fechou o fluxo",
+            )?;
+            let _ = esperar_ate(|| false, SOSSEGO);
+            if crate::aviso::medidas().publicados != publicados {
+                return Err("quem fechou foi avisado do fim que ja sabia");
+            }
+            if crate::aviso::situacao_de_teste(b.ponta(n)).is_some() {
+                return Err("a designacao ficou depois do fecho");
             }
             Ok(())
         })();
@@ -1587,24 +1681,56 @@ pub(super) fn aviso_a_morte_e_o_canal_sem_ouvinte() -> Resultado {
                 if crate::aviso::situacao_de_teste(c.ponta(n)).is_none() {
                     return Err("o outro canal nao foi designado");
                 }
+                let vaga = crate::eventos::vaga_de_teste(&format!("teste-avisado-{}-2", c.fio()))
+                    .ok_or("o outro canal nao esta aberto")?;
                 let desde = c.ditar(FECHAR_OUTRO, d2 as i64, 0)?;
                 if c.dito(desde, "fechei_outro ")? != "0" {
                     return Err("o avisado nao fechou o outro canal");
                 }
-                let largados = crate::aviso::medidas().largados;
-                escrito(
-                    &escrever(a.quem(), &id, b"sem canal"),
-                    9,
-                    "a escrita nao entrou",
-                )?;
-                esperar_ate(
-                    || crate::aviso::situacao_de_teste(c.ponta(n)).is_none(),
-                    TETO_DA_MALHA,
-                )
-                .map_err(|_| "a designacao sem ouvinte nao caiu")?;
-                if crate::aviso::medidas().largados <= largados {
-                    return Err("a designacao sem ouvinte nao foi contada");
+                // A vaga do canal fechado volta a ser de alguém — canais da
+                // suíte, até um cair nela: a designação guarda a geração do
+                // canal que acabou, e o canal novo na mesma vaga não é dele.
+                let ouvinte = crate::fios::id_atual();
+                let mut da_suite: Vec<crate::eventos::Chave> = Vec::new();
+                while !da_suite.iter().any(|k| k.vaga == vaga) {
+                    let nome = format!("teste-vaga-{}", da_suite.len());
+                    match crate::eventos::escutar(nome.as_bytes(), ouvinte) {
+                        Ok(k) => da_suite.push(k),
+                        Err(_) => break,
+                    }
                 }
+                let r = (|| -> Resultado {
+                    if !da_suite.iter().any(|k| k.vaga == vaga) {
+                        return Err("a vaga do canal fechado nao voltou a ser de ninguem");
+                    }
+                    let largados = crate::aviso::medidas().largados;
+                    escrito(
+                        &escrever(a.quem(), &id, b"sem canal"),
+                        9,
+                        "a escrita nao entrou",
+                    )?;
+                    esperar_ate(
+                        || crate::aviso::situacao_de_teste(c.ponta(n)).is_none(),
+                        TETO_DA_MALHA,
+                    )
+                    .map_err(|_| "a designacao sem ouvinte nao caiu")?;
+                    if crate::aviso::medidas().largados <= largados {
+                        return Err("a designacao sem ouvinte nao foi contada");
+                    }
+                    let cruzou = da_suite.iter().any(|k| {
+                        crate::eventos::nome_de(*k)
+                            .and_then(|nome| crate::eventos::estado(&nome))
+                            .is_some_and(|e| e.publicados > 0)
+                    });
+                    if cruzou {
+                        return Err("o aviso cruzou para o canal novo na mesma vaga");
+                    }
+                    Ok(())
+                })();
+                for k in da_suite {
+                    crate::eventos::largar(k, ouvinte);
+                }
+                r?;
                 // Nada mais tenta: o dado seguinte não acha designação.
                 let publicados = crate::aviso::medidas().publicados;
                 escrito(

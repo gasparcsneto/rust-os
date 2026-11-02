@@ -995,7 +995,10 @@ pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha>
     match a.fio() {
         // Quem fecha sai do fluxo: não há mais o que avisar a ele.
         Some(fio) if fechar => {
-            crate::aviso::largar(crate::aviso::Objeto::Ponta { fluxo: n, fio }, fio)
+            let obj = crate::aviso::Objeto::Ponta { fluxo: n, fio };
+            #[cfg(feature = "modo-teste")]
+            crate::aviso::antes_de_largar_no_fecho_de_teste(obj);
+            crate::aviso::largar(obj, fio)
         }
         _ => operou(a, n, &r, false),
     }

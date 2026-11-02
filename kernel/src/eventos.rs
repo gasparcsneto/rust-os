@@ -383,6 +383,16 @@ pub fn estado(nome: &str) -> Option<Estado> {
     })
 }
 
+/// Só para a suíte: a vaga do canal `nome`, se ele está aberto.
+#[cfg(feature = "modo-teste")]
+pub fn vaga_de_teste(nome: &str) -> Option<usize> {
+    com_canais(|canais| {
+        canais
+            .iter()
+            .position(|v| v.as_ref().is_some_and(|c| c.nome() == nome.as_bytes()))
+    })
+}
+
 /// Quantos canais de ouvinte morto já foram devolvidos.
 pub fn recuperados() -> u64 {
     RECUPERADOS.load(Ordering::Relaxed)
