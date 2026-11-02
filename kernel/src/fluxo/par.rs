@@ -587,9 +587,11 @@ impl Conduta {
                 let r = self.aplicar(|f| f.escrever(titular, quem, n, d, agora).map(|_| None));
                 match r {
                     Ok(_) => {}
-                    // A ponta daqui fechou: o que chega depois é descartado,
-                    // e o `fechar` já vai.
-                    Err(politica::fluxo::Recusa::Encerrado(_)) => {}
+                    // A ponta daqui fechou, ou o fluxo acabou daqui: o que
+                    // chega depois é descartado, e o `fechar` já vai.
+                    Err(
+                        politica::fluxo::Recusa::Encerrado(_) | politica::fluxo::Recusa::NaoExiste,
+                    ) => {}
                     Err(_) => self.fora_do_protocolo(c),
                 }
             }
@@ -605,16 +607,18 @@ impl Conduta {
                     Some(Err(_)) => self.fora_do_protocolo(c),
                 }
             }
+            // O crédito e o fim que vinham no caminho quando o fluxo acabou
+            // daqui não são o par fora do protocolo: descartados, e o
+            // `fechar` daqui, com o motivo daqui, vai na volta do laço.
             (_, true, Mensagem::Credito(k)) => {
-                if self
-                    .aplicar(|f| f.credito_do_par(n, u64::from(k)).map(|()| None))
-                    .is_err()
-                {
-                    self.fora_do_protocolo(c);
+                match self.aplicar(|f| f.credito_do_par(n, u64::from(k)).map(|()| None)) {
+                    Ok(_) | Err(politica::fluxo::Recusa::NaoExiste) => {}
+                    Err(_) => self.fora_do_protocolo(c),
                 }
             }
             (_, true, Mensagem::Fim) => match self.aplicar(|f| f.fim_do_par(n, agora)) {
                 Ok(_) => self.fim_recebido = true,
+                Err(politica::fluxo::Recusa::NaoExiste) => {}
                 Err(_) => self.fora_do_protocolo(c),
             },
             // Qualquer outra coisa — um `abrir` repetido, `dados` antes do
@@ -664,7 +668,8 @@ impl Conduta {
             })
         });
         let Some((epoca, versao, es, w, nome)) = feito else {
-            self.acabou = true;
+            // O fluxo acabou daqui antes de o aceite chegar: o `fechar`, com
+            // o motivo daqui, vai na volta do laço.
             return;
         };
         depois(epoca, es, w);

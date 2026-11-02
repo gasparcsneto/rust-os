@@ -76,6 +76,36 @@ pub const GENESE: [u8; 32] = [0; 32];
 /// O maior detalhe, em bytes.
 pub const MAIOR_DETALHE: usize = 96;
 
+/// O detalhe de um registro, composto: quem pediu, quando foi um processo
+/// (`pelo`, o processo e o programa), o `texto` e a `citacao` no fim — o
+/// número da decisão que uma execução cita. É o formato de sempre: `pelo`
+/// sozinho, `pelo: texto` ou `texto`, com a citação colada no texto.
+///
+/// Acima de [`MAIOR_DETALHE`], o que vem antes da citação perde o fim —
+/// o texto primeiro, numa fronteira de caractere —, e a citação fica
+/// inteira: o corte do fim, o de [`Cadeia::anexar`], a levaria pela
+/// metade, e um pedaço do número é o número de outro registro. Sem
+/// citação, o corte é o de sempre.
+pub fn detalhe_composto(pelo: Option<&str>, texto: &str, citacao: &str) -> String {
+    let corpo = alloc::format!("{texto}{citacao}");
+    let inteiro = match pelo {
+        Some(p) if corpo.is_empty() => String::from(p),
+        Some(p) => alloc::format!("{p}: {corpo}"),
+        None => corpo,
+    };
+    if inteiro.len() <= MAIOR_DETALHE || citacao.is_empty() || citacao.len() > MAIOR_DETALHE {
+        return inteiro;
+    }
+    let mut antes = String::from(&inteiro[..inteiro.len() - citacao.len()]);
+    let mut fim = MAIOR_DETALHE - citacao.len();
+    while !antes.is_char_boundary(fim) {
+        fim -= 1;
+    }
+    antes.truncate(fim);
+    antes.push_str(citacao);
+    antes
+}
+
 /// Que tipo de identidade agiu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -749,6 +779,74 @@ mod testes {
         // O mesmo tempo do anterior vale.
         c.repor(3, evento(6)).unwrap();
         assert_eq!(c.ultima_seq(), 3);
+    }
+
+    /// O detalhe composto é o de sempre quando cabe; acima do teto, o texto
+    /// encolhe — numa fronteira de caractere — e a citação da decisão fica
+    /// inteira no fim, sem nunca virar o número de outro registro.
+    #[test]
+    fn o_detalhe_composto_guarda_a_citacao() {
+        let pelo = "pelo processo 1707 (fluxos 91d8d1d6)";
+        // Cabe: o formato de sempre.
+        assert_eq!(detalhe_composto(None, "", ""), "");
+        assert_eq!(detalhe_composto(None, "x", ""), "x");
+        assert_eq!(detalhe_composto(Some(pelo), "", ""), pelo);
+        assert_eq!(
+            detalhe_composto(Some(pelo), "x", "; decisao 9"),
+            alloc::format!("{pelo}: x; decisao 9")
+        );
+        assert_eq!(
+            detalhe_composto(Some(pelo), "", "; decisao 9"),
+            alloc::format!("{pelo}: ; decisao 9")
+        );
+        assert_eq!(detalhe_composto(None, "x", "; decisao 9"), "x; decisao 9");
+        // O caso da suíte completa: o texto da gravação, longo, e a decisão
+        // 55876 — o corte do fim a deixava `decisao 5587`.
+        let texto = "lote a gravar: 1 operacoes, versoes 581..582";
+        let d = detalhe_composto(Some(pelo), texto, "; decisao 55876");
+        assert!(d.len() <= MAIOR_DETALHE, "{d}");
+        assert!(d.ends_with("; decisao 55876"), "{d}");
+        assert!(
+            d.starts_with(&alloc::format!("{pelo}: lote a gravar")),
+            "{d}"
+        );
+        let mut c = Cadeia::nova(4);
+        let mut e = evento(1);
+        e.detalhe = d.clone();
+        let n = c.anexar(e);
+        assert_eq!(
+            c.ultimos(1)
+                .next()
+                .map(|r| (r.seq, r.evento.detalhe.clone())),
+            Some((n, d))
+        );
+        // Sem processo, o mesmo.
+        let longo = "y".repeat(MAIOR_DETALHE);
+        let d = detalhe_composto(None, &longo, "; decisao 18446744073709551615");
+        assert_eq!(d.len(), MAIOR_DETALHE);
+        assert!(d.ends_with("; decisao 18446744073709551615"));
+        // O corte numa fronteira de caractere: `ç` e `ã` têm dois bytes.
+        for extra in 0..4 {
+            let texto = alloc::format!("{}{}", "a".repeat(extra), "ção".repeat(40));
+            let d = detalhe_composto(Some(pelo), &texto, "; decisao 123");
+            assert!(
+                d.len() <= MAIOR_DETALHE && d.len() >= MAIOR_DETALHE - 1,
+                "{d}"
+            );
+            assert!(d.ends_with("; decisao 123"), "{d}");
+        }
+        // Sem citação, nada muda: o corte é o do anel, no fim.
+        let d = detalhe_composto(Some(pelo), &longo, "");
+        assert_eq!(d, alloc::format!("{pelo}: {longo}"));
+        // O texto todo some antes de quem pediu encolher; e quem pediu
+        // encolhe antes da citação, que nunca encolhe.
+        let d = detalhe_composto(Some(&"p".repeat(74)), "texto", "; decisao 1234567890");
+        assert_eq!(
+            d,
+            alloc::format!("{}: ; decisao 1234567890", "p".repeat(74))
+        );
+        let d = detalhe_composto(Some(&"p".repeat(90)), "texto", "; decisao 1234567890");
+        assert_eq!(d, alloc::format!("{}; decisao 1234567890", "p".repeat(76)));
     }
 
     /// O tempo de um registro nunca fica abaixo do anterior, nem depois de

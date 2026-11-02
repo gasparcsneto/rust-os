@@ -1739,7 +1739,7 @@ pub(super) fn enlace_a_origem_recusa() -> Resultado {
         let sem_remote = super::politica_trocada(&[
             (
                 "fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
-                "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send fabric.stream device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",
@@ -1931,17 +1931,19 @@ pub(super) fn enlace_a_origem_e_a_revogacao_no_aperto() -> Resultado {
 pub(super) fn enlace_a_origem_reconfirma_no_commit() -> Resultado {
     fn tirar_o_remote_no_meio() {
         crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
-        if let Ok(p) = super::politica_trocada(&[
+        // Uma política que não se lê não troca nada — e o caso diz por quê.
+        match super::politica_trocada(&[
             (
                 "fabric.offer fabric.send fabric.stream fabric.remote device.pair device.forget\nrecurso operador",
-                "fabric.offer fabric.send device.pair device.forget\nrecurso operador",
+                "fabric.offer fabric.send fabric.stream device.pair device.forget\nrecurso operador",
             ),
             (
                 "recurso operador fabric.remote dispositivo:par dispositivo:par-2\n",
                 "",
             ),
         ]) {
-            crate::autorizacao::trocar_politica(p);
+            Ok(p) => crate::autorizacao::trocar_politica(p),
+            Err(e) => crate::log_error!("teste", "o gancho nao trocou a politica: {}", e),
         }
     }
     fn revogar_no_meio() {

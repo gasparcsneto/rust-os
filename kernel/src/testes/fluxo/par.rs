@@ -558,13 +558,28 @@ impl ParQueAceita {
         }
     }
 
-    fn mandar(&mut self, m: &Mensagem) -> Resultado {
+    /// `m` cifrada no transporte, num corpo de quadro de dados.
+    fn cifrada(&mut self, m: &Mensagem) -> Result<Vec<u8>, &'static str> {
         let claro = m.escrever();
         let t = self.transporte.as_mut().ok_or("sem transporte")?;
         let mut c = vec![0u8; claro.len() + 16];
         let n = t.cifrar(&claro, &mut c).map_err(|_| "nao se cifrou")?;
-        self.mandar_quadro(Tipo::Dados, &c[..n]);
+        c.truncate(n);
+        Ok(c)
+    }
+
+    fn mandar(&mut self, m: &Mensagem) -> Resultado {
+        let c = self.cifrada(m)?;
+        self.mandar_quadro(Tipo::Dados, &c);
         Ok(())
+    }
+
+    /// Põe `m` na linha sem acordar a sessão daqui: ela a acha quando
+    /// acordar por outra coisa — e antes do que mudou daqui, que o canal
+    /// confere depois dos quadros.
+    fn guardar(&mut self, m: &Mensagem) -> Resultado {
+        let c = self.cifrada(m)?;
+        com_linha(|l| l.para_ca.push_back((Tipo::Dados, c))).ok_or("sem linha")
     }
 
     /// A próxima mensagem da sessão daqui, decifrada.
@@ -1277,7 +1292,9 @@ pub(in crate::testes) fn fluxo_os_tetos_das_vagas() -> Resultado {
 
 /// Com o fluxo aberto, `device.suspend` e `device.revoke` o encerram na
 /// hora, com o motivo, e o par ouve o `fechar`; na origem, o mesmo — o fio
-/// da sessão daqui manda o `fechar` ao Duke de lá.
+/// da sessão daqui manda o `fechar` ao Duke de lá, com o motivo daqui
+/// mesmo quando o aceite, os dados, o crédito e o fim de lá chegam depois
+/// de o fluxo acabar.
 pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
     com_o_par(|| {
         let (bia, _, _) = bia_relacionada("dispositivo")?;
@@ -1297,25 +1314,63 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
             }
             fim_gravado_com(antes, &id, motivo::DISPOSITIVO_SUSPENSO)?;
             crate::contencao::esquecer_de_teste();
+            // Saindo: o pedido ao par, com o aperto e o `abrir` atendidos.
+            let saindo = |endpoint: &str| -> Result<(String, ParQueAceita), &'static str> {
+                let r = fs_pedir(
+                    b.quem(),
+                    "stream.open",
+                    &format!(
+                        r#"{{"endpoint":"{endpoint}","intent":"{INTENCAO}","device":"dispositivo:{NOME_DO_PAR}"}}"#
+                    ),
+                );
+                feito(&r, "o pedido de fluxo ao par nao passou")?;
+                let id = fs_texto(&r, "stream").ok_or("sem id")?;
+                let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
+                lancar_a_sessao_saindo(n)?;
+                let mut par = ParQueAceita::novo(DO_PAR);
+                par.aceitar_o_aperto()?;
+                let _ = par.mensagem()?;
+                Ok((id, par))
+            };
+            // A suspensão, saindo, com o aceite de lá a caminho: o pedido
+            // acaba daqui antes de o aceite chegar à sessão daqui — e o
+            // `fechar` leva o motivo daqui, em vez de a conexão só cair.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = saindo("e0e0e0e0e0e0e0e0:4")?;
+            par.guardar(&Mensagem::Aceito("e0e0e0e0e0e0e0e0:8"))?;
+            admin("device.suspend", r#"{"device":"dispositivo:par"}"#, None)?;
+            match Mensagem::ler(&par.mensagem()?) {
+                Some(Mensagem::Fechar(m)) if m == motivo::DISPOSITIVO_SUSPENSO => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("a suspensao antes do aceite nao mandou o fechar ao par");
+                }
+            }
+            fim_gravado_com(antes, &id, motivo::DISPOSITIVO_SUSPENSO)?;
+            esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
+                .map_err(|_| "a sessao daqui nao acabou depois do fechar")?;
+            crate::contencao::esquecer_de_teste();
             // A revogação, saindo: o fio da sessão daqui fecha com o par.
             let antes = crate::autorizacao::ultimo_registro();
-            let r = fs_pedir(
-                b.quem(),
-                "stream.open",
-                &format!(
-                    r#"{{"endpoint":"e0e0e0e0e0e0e0e0:3","intent":"{INTENCAO}","device":"dispositivo:{NOME_DO_PAR}"}}"#
-                ),
-            );
-            feito(&r, "o pedido de fluxo ao par nao passou")?;
-            let id = fs_texto(&r, "stream").ok_or("sem id")?;
-            let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
-            lancar_a_sessao_saindo(n)?;
-            let mut par = ParQueAceita::novo(DO_PAR);
-            par.aceitar_o_aperto()?;
-            let _ = par.mensagem()?;
+            let (id, mut par) = saindo("e0e0e0e0e0e0e0e0:3")?;
             par.mandar(&Mensagem::Aceito("e0e0e0e0e0e0e0e0:9"))?;
             esperar_no_par(|| estado(b.quem(), &id).0.as_deref() == Some("open"), TETO)
                 .map_err(|_| "o fluxo nao abriu com o aceito")?;
+            feito(
+                &super::escrever(b.quem(), &id, b"ida"),
+                "a ponta daqui nao escreveu no fluxo ao par",
+            )?;
+            let ida = par.mensagem()?;
+            if !matches!(Mensagem::ler(&ida), Some(Mensagem::Dados(d)) if d == b"ida") {
+                return Err("o par nao recebeu o que a ponta daqui escreveu");
+            }
+            // Os dados de lá, o crédito do que leu e o fim, a caminho quando
+            // o fluxo acaba daqui: a sessão daqui os acha antes do fim — e
+            // eles não são o par fora do protocolo; o `fechar` leva o motivo
+            // daqui.
+            par.guardar(&Mensagem::Dados(b"volta"))?;
+            par.guardar(&Mensagem::Credito(3))?;
+            par.guardar(&Mensagem::Fim)?;
             admin("device.revoke", r#"{"name":"par"}"#, None)?;
             match Mensagem::ler(&par.mensagem()?) {
                 Some(Mensagem::Fechar(m)) if m == motivo::DISPOSITIVO_REVOGADO => {}

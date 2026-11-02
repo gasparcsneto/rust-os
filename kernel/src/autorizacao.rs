@@ -1057,14 +1057,10 @@ fn auditar(
         recurso: recurso.to_string(),
         codigo,
         parametros: resumo_dos_parametros(parametros),
-        detalhe: match &quem.processo {
-            // O programa que pediu vai no detalhe: o titular é quem responde
-            // por ele, e o formato do registro — que o journal grava — não
-            // muda por isso.
-            Some(pelo) if detalhe.is_empty() => pelo.clone(),
-            Some(pelo) => alloc::format!("{pelo}: {detalhe}"),
-            None => detalhe.to_string(),
-        },
+        // O programa que pediu vai no detalhe: o titular é quem responde por
+        // ele, e o formato do registro — que o journal grava — não muda por
+        // isso.
+        detalhe: politica::auditoria::detalhe_composto(quem.processo.as_deref(), detalhe, ""),
     };
     let seq =
         crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)));
@@ -1836,7 +1832,7 @@ impl Autorizado {
 /// trata zero como recusa: uma mudança sem o registro do que foi feito não
 /// acontece.
 pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
-    let Some((quem, metodo, decisao)) = do_comando_deste_fio(|c| {
+    let Some((mut quem, metodo, decisao)) = do_comando_deste_fio(|c| {
         c.decidido
             .as_ref()
             .map(|d| (d.quem.clone(), d.metodo, d.decisao))
@@ -1844,8 +1840,20 @@ pub fn auditar_execucao(recurso: &str, codigo: Codigo, detalhe: &str) -> u64 {
     .flatten() else {
         return 0;
     };
-    let detalhe = alloc::format!("{detalhe}; decisao {decisao}");
+    let detalhe = citando(&mut quem, detalhe, decisao);
     auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
+}
+
+/// O detalhe de uma execução, com quem pediu na frente e a decisão `decisao`
+/// citada no fim — inteira mesmo acima do teto do detalhe: ver
+/// [`politica::auditoria::detalhe_composto`]. Quem pediu sai de `quem`, que
+/// [`auditar`] não o ponha duas vezes.
+fn citando(quem: &mut Quem, detalhe: &str, decisao: u64) -> String {
+    politica::auditoria::detalhe_composto(
+        quem.processo.take().as_deref(),
+        detalhe,
+        &alloc::format!("; decisao {decisao}"),
+    )
 }
 
 /// O número, na auditoria, da decisão do gate que autorizou o comando em
@@ -3264,7 +3272,7 @@ pub fn auditar_execucao_do_processo(
     if programa != Programa::Kernel {
         quem.processo = Some(pelo_processo(id, &programa));
     }
-    let detalhe = alloc::format!("{detalhe}; decisao {decisao}");
+    let detalhe = citando(&mut quem, detalhe, decisao);
     auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
 }
 

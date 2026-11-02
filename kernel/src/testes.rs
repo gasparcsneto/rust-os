@@ -20354,6 +20354,30 @@ fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
 /// a cadeia refeita dele continua verificável, e tem a mesma cabeça. Muito
 /// para um registro só vai em vários, na ordem. E uma operação cuja
 /// decisão saiu do anel não vai ao journal.
+/// A execução que cita a decisão, com um detalhe acima do teto: o texto
+/// encolhe, e a citação fica inteira no fim — o corte do fim a deixaria
+/// pela metade, e um pedaço do número é o número de outro registro.
+fn auditoria_a_citacao_fica_inteira() -> Resultado {
+    let texto = "x".repeat(politica::auditoria::MAIOR_DETALHE + 24);
+    let n = crate::autorizacao::auditar_execucao_do_processo(
+        "fs.write",
+        "/dados/citacao",
+        politica::Codigo::Allow,
+        &texto,
+        1_234_567,
+    );
+    let r = registro_da_auditoria(n).ok_or("o registro da execucao nao esta na auditoria")?;
+    let d = &r.evento.detalhe;
+    if d.len() > politica::auditoria::MAIOR_DETALHE
+        || !d.ends_with("; decisao 1234567")
+        || !d.contains("xxxx")
+    {
+        crate::log_error!("teste", "{}", d);
+        return Err("a citacao da decisao nao ficou inteira no fim do detalhe");
+    }
+    Ok(())
+}
+
 fn auditoria_a_lacuna() -> Resultado {
     let anterior = crate::persistencia::estado();
     let resultado = (|| -> Resultado {
@@ -34768,6 +34792,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "auditoria: o que sai do anel antes do disco e uma lacuna",
         f: auditoria_a_lacuna,
+    },
+    Caso {
+        nome: "auditoria: a citacao da decisao fica inteira acima do teto",
+        f: auditoria_a_citacao_fica_inteira,
     },
     Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
