@@ -593,6 +593,27 @@ impl ParQueAceita {
         com_linha(|l| l.guardados.push_back((Tipo::Dados, c))).ok_or("sem linha")
     }
 
+    /// Manda `ms` e fecha a linha de uma vez, antes de acordar a sessão
+    /// daqui: ela acha as mensagens na fila e a linha já caída — o par que
+    /// fecha, e a conexão que cai logo atrás.
+    fn mandar_e_cair(&mut self, ms: &[Mensagem]) -> Resultado {
+        let mut quadros = Vec::new();
+        for m in ms {
+            quadros.push(self.cifrada(m)?);
+        }
+        let w = com_linha(|l| {
+            l.para_ca
+                .extend(quadros.into_iter().map(|c| (Tipo::Dados, c)));
+            l.fechada = true;
+            l.waker.take()
+        })
+        .ok_or("sem linha")?;
+        if let Some(w) = w {
+            w.wake();
+        }
+        Ok(())
+    }
+
     /// A próxima mensagem da sessão daqui, decifrada.
     fn mensagem(&mut self) -> Result<Vec<u8>, &'static str> {
         let (tipo, corpo) = self.quadro()?;
@@ -1322,7 +1343,9 @@ pub(in crate::testes) fn fluxo_os_tetos_das_vagas() -> Resultado {
 /// motivo daqui mesmo quando o aceite, os dados, o crédito ou o fim de lá
 /// chegam depois de o fluxo acabar — um por fim: a sessão lê um, e vê o
 /// fim —, e também quando a ponta daqui já tinha fechado, e o fluxo acaba
-/// sem lápide.
+/// sem lápide. E o `fechar` de lá com a conexão caindo logo atrás: o envio
+/// daqui que falha não apaga o motivo do par — a sessão lê o que já tinha
+/// chegado.
 pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
     com_o_par(|| {
         let (bia, _, _) = bia_relacionada("dispositivo")?;
@@ -1408,6 +1431,29 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
                 esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
                     .map_err(|_| "a sessao daqui nao acabou depois do fechar")
             };
+            // A ponta daqui enche o buffer do sentido — vazio: o par leu a
+            // `ida` —, e o par recebe o que o crédito dele deixa, a `ida` de
+            // menos: três bytes ficam aqui, esperando o crédito.
+            let sem_credito = |id: &str, par: &mut ParQueAceita| -> Resultado {
+                for pedaco in vec![0x5a; politica::fluxo::BUFFER_DO_SENTIDO].chunks(4096) {
+                    super::escrito(
+                        &super::escrever(b.quem(), id, pedaco),
+                        pedaco.len() as u64,
+                        "a ponta daqui nao encheu o buffer do sentido",
+                    )?;
+                }
+                let mut chegou = 0;
+                while chegou < politica::fluxo::BUFFER_DO_SENTIDO - 3 {
+                    match Mensagem::ler(&par.mensagem()?) {
+                        Some(Mensagem::Dados(d)) => chegou += d.len(),
+                        outra => {
+                            crate::log_error!("teste", "{:?}", outra);
+                            return Err("o que o credito deixa nao chegou ao par");
+                        }
+                    }
+                }
+                Ok(())
+            };
             // A suspensão, saindo, com o crédito do que o par leu a caminho.
             let antes = crate::autorizacao::ultimo_registro();
             let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:5")?;
@@ -1447,27 +1493,7 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
             // também não são o par fora do protocolo.
             let antes = crate::autorizacao::ultimo_registro();
             let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:7")?;
-            // O buffer do sentido está vazio — o par leu a `ida` —: cabe
-            // inteiro, sem esperar a sessão.
-            for pedaco in vec![0x5a; politica::fluxo::BUFFER_DO_SENTIDO].chunks(4096) {
-                super::escrito(
-                    &super::escrever(b.quem(), &id, pedaco),
-                    pedaco.len() as u64,
-                    "a ponta daqui nao encheu o buffer do sentido",
-                )?;
-            }
-            // O par recebe o que o crédito deixa — o dele menos a `ida` —, e
-            // o resto espera aqui.
-            let mut chegou = 0;
-            while chegou < politica::fluxo::BUFFER_DO_SENTIDO - 3 {
-                match Mensagem::ler(&par.mensagem()?) {
-                    Some(Mensagem::Dados(d)) => chegou += d.len(),
-                    outra => {
-                        crate::log_error!("teste", "{:?}", outra);
-                        return Err("o que o credito deixa nao chegou ao par");
-                    }
-                }
-            }
+            sem_credito(&id, &mut par)?;
             feito(
                 &sobre(b.quem(), "stream.close", &id),
                 "a ponta daqui nao fechou com dados esperando o credito",
@@ -1481,6 +1507,18 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
             )?;
             fim_gravado_com(antes, &id, motivo::DISPOSITIVO_SUSPENSO)?;
             crate::contencao::esquecer_de_teste();
+            // O `fechar` de lá, e a conexão caindo logo atrás, com o crédito
+            // dele na frente: a sessão daqui manda o que o crédito novo
+            // deixa, o envio falha — e ela lê o `fechar` que já tinha
+            // chegado. O fluxo acaba com o motivo do par, e não `a conexao
+            // caiu`.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:2")?;
+            sem_credito(&id, &mut par)?;
+            par.mandar_e_cair(&[Mensagem::Credito(3), Mensagem::Fechar("fechado de la")])?;
+            fim_gravado_com(antes, &id, "par: fechado de la")?;
+            esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
+                .map_err(|_| "a sessao daqui nao acabou com a linha caida")?;
             // A revogação, saindo, com os dados de lá a caminho.
             let antes = crate::autorizacao::ultimo_registro();
             let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:3")?;
