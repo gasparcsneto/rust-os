@@ -145,6 +145,18 @@ pub mod motivo {
     pub const CONEXAO: &str = "a conexao caiu";
     /// O par mandou o que o protocolo não aceita.
     pub const PROTOCOLO: &str = "protocolo";
+    /// O aperto com o par não fechou: a chave, a resposta, a entropia.
+    pub const APERTO: &str = "o aperto com o par falhou";
+    /// O par não respondeu no prazo do aperto.
+    pub const PAR_MUDO: &str = "o par nao respondeu";
+    /// Não houve fio para levar a sessão com o par.
+    pub const SEM_FIO: &str = "sem fio para a sessao";
+}
+
+/// O motivo que o par deu — numa recusa ou num `fechar` —, guardado como
+/// os daqui: curto, só ASCII imprimível, e marcado como do par.
+pub fn motivo_do_par(texto: &str) -> String {
+    motivo_guardado(&alloc::format!("par: {texto}"))
 }
 
 /// Bytes que saem da memória zerados: o que uma leitura devolve.
@@ -590,6 +602,20 @@ pub struct Aceito {
     pub id: u64,
     pub intencao: String,
     pub abridor: Ponta,
+    pub versao: u64,
+}
+
+/// O que a sessão com o par lê de um fluxo vivo: quem é, o que pede e em
+/// que pé está — para escrever o `abrir`, saber do aceite e reconfirmar
+/// quem abriu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retrato {
+    pub titular: Titular,
+    pub intencao: String,
+    pub endpoint: Endpoint,
+    pub abridor: Ponta,
+    pub aceitante: Ponta,
+    pub estado: Estado,
     pub versao: u64,
 }
 
@@ -1274,6 +1300,36 @@ impl Fluxos {
         dados
     }
 
+    /// Se `n` bytes do par cabem agora no fluxo `id`: aberto, o sentido em
+    /// que ele escreve ainda aberto, e dentro do crédito concedido e do
+    /// buffer. A sessão confere antes de pedir ao gate: passar do crédito,
+    /// mandar antes do aceite ou depois do fim é protocolo — e não decisão
+    /// de autoridade nenhuma. `Encerrado` quando a ponta daqui já fechou: o
+    /// que chega é descartado, e o fecho vai ao par.
+    pub fn cabe_do_par(&self, id: u64, n: usize) -> Result<(), Recusa> {
+        let i = self.i(id).ok_or(Recusa::NaoExiste)?;
+        let f = &self.vivos[i];
+        let remoto = f
+            .lado_remoto()
+            .ok_or(Recusa::Protocolo("dados fora de hora"))?;
+        if f.estado != Estado::Aberto {
+            return Err(Recusa::Protocolo("dados antes do aceite"));
+        }
+        let s = f.escrita_de(remoto);
+        match s.estado {
+            EstadoDoSentido::Aberto => {}
+            EstadoDoSentido::Fim => return Err(Recusa::Protocolo("dados depois do fim")),
+            EstadoDoSentido::Abortado => {
+                return Err(Recusa::Encerrado(String::from(motivo::FECHADO)));
+            }
+        }
+        let concedido = f.credito.map_or(0, |c| c.concedido);
+        if n as u64 > concedido || n > s.anel.livre() {
+            return Err(Recusa::Protocolo("o par passou do credito"));
+        }
+        Ok(())
+    }
+
     /// O par concedeu `n` bytes a mais. Passar do buffer dele é erro de
     /// protocolo: ninguém concede o que não tem.
     pub fn credito_do_par(&mut self, id: u64, n: u64) -> Result<(), Recusa> {
@@ -1420,6 +1476,21 @@ impl Fluxos {
         })
     }
 
+    /// O fluxo vivo `id`, como a sessão com o par o lê. `None` se ele
+    /// acabou — ou nunca foi.
+    pub fn retrato(&self, id: u64) -> Option<Retrato> {
+        let f = &self.vivos[self.i(id)?];
+        Some(Retrato {
+            titular: f.titular,
+            intencao: f.intencao.clone(),
+            endpoint: f.endpoint.clone(),
+            abridor: f.abridor.clone(),
+            aceitante: f.aceitante.clone(),
+            estado: f.estado,
+            versao: f.versao,
+        })
+    }
+
     /// A ponta que o par é no fluxo `id`, se há uma.
     pub fn par_de(&self, id: u64) -> Option<&Ponta> {
         let f = &self.vivos[self.i(id)?];
@@ -1482,7 +1553,32 @@ impl Fluxos {
             || (sai.estado == EstadoDoSentido::Fim && sai.anel.tamanho() == 0 && !sai.fim_visto)
             || (c.a_devolver >= LIMIAR_DO_CREDITO as u64
                 && f.escrita_de(remoto).estado == EstadoDoSentido::Aberto)
-            || f.saiu[remoto.outro().indice()]
+            // A ponta daqui saiu e tudo o que ela escreveu já foi: o fecho.
+            // Antes disso — dados esperando crédito —, não há o que fazer
+            // até o par conceder.
+            || (f.saiu[remoto.outro().indice()] && sai.fim_visto)
+    }
+
+    /// Se o fluxo `id` ainda precisa da sessão com o par: o pedido, um
+    /// sentido em que o par ainda pode mandar, ou um que ainda não foi
+    /// inteiro a ele. Sem isso — os dois fins ditos, ou o fecho em ordem do
+    /// par —, o que sobra é só leitura daqui, e o fluxo vive sem a sessão
+    /// até quem lê acabar.
+    pub fn precisa_do_par(&self, id: u64) -> bool {
+        let Some(i) = self.i(id) else {
+            return false;
+        };
+        let f = &self.vivos[i];
+        let Some(remoto) = f.lado_remoto() else {
+            return false;
+        };
+        if f.estado == Estado::Pedido {
+            return true;
+        }
+        let chega = f.escrita_de(remoto);
+        let sai = f.leitura_de(remoto);
+        chega.estado == EstadoDoSentido::Aberto
+            || (sai.estado != EstadoDoSentido::Abortado && !sai.fim_visto)
     }
 
     /// Os ids vivos, em ordem.
@@ -2037,6 +2133,123 @@ mod testes {
             .unwrap();
         t.aceito_pelo_par(id, 0).unwrap();
         id
+    }
+
+    /// A ponta daqui que fecha com dados à espera de crédito não deixa a
+    /// sessão sem o que esperar: só o fecho, depois de tudo ir, é o que
+    /// fazer; e o fluxo precisa da sessão até os dois fins andarem.
+    #[test]
+    fn o_fecho_daqui_espera_o_credito() {
+        let mut t = Fluxos::nova();
+        let id = com_o_par(&mut t);
+        assert!(t.precisa_do_par(id));
+        // O crédito do par inteiro vai; o que se escreve depois espera.
+        let grande = alloc::vec![1u8; BUFFER_DO_SENTIDO];
+        assert_eq!(t.escrever(P1, q(10), id, &grande, 1), Ok(BUFFER_DO_SENTIDO));
+        assert_eq!(
+            t.tirar_para_o_par(id, usize::MAX, 1).len(),
+            BUFFER_DO_SENTIDO
+        );
+        assert_eq!(t.escrever(P1, q(10), id, &grande[..100], 1), Ok(100));
+        assert!(t.tirar_para_o_par(id, usize::MAX, 1).is_empty());
+        t.fechar(P1, q(10), id, 2).unwrap();
+        // Dados à espera, sem crédito: nada a fazer, e não o fecho.
+        assert!(!t.saiu_e_foi(id));
+        assert!(!t.par_tem_o_que_fazer(id));
+        assert!(t.precisa_do_par(id));
+        // O crédito chega: os dados, o fim e então o fecho.
+        t.credito_do_par(id, 100).unwrap();
+        assert!(t.par_tem_o_que_fazer(id));
+        assert_eq!(t.tirar_para_o_par(id, usize::MAX, 3).len(), 100);
+        assert!(t.par_tem_o_que_fazer(id));
+        assert!(t.fim_para_o_par(id));
+        assert!(t.saiu_e_foi(id));
+        assert!(t.par_tem_o_que_fazer(id));
+        assert!(t.coerente());
+    }
+
+    /// O que o par manda passa pela conta antes de qualquer decisão: dentro
+    /// do crédito cabe; além dele, antes do aceite e depois do fim é
+    /// protocolo; depois do fecho daqui é descartado.
+    #[test]
+    fn o_que_cabe_do_par() {
+        let mut t = Fluxos::nova();
+        let id = t
+            .abrir_no_par(P1, processo(10), par(9), "e:1", "a.b", 0)
+            .unwrap();
+        assert_eq!(
+            t.cabe_do_par(id, 1),
+            Err(Recusa::Protocolo("dados antes do aceite"))
+        );
+        t.aceito_pelo_par(id, 0).unwrap();
+        assert_eq!(t.cabe_do_par(id, BUFFER_DO_SENTIDO), Ok(()));
+        assert_eq!(
+            t.cabe_do_par(id, BUFFER_DO_SENTIDO + 1),
+            Err(Recusa::Protocolo("o par passou do credito"))
+        );
+        assert_eq!(t.escrever(P1, qpar(9), id, &[1; 100], 1), Ok(100));
+        assert_eq!(
+            t.cabe_do_par(id, BUFFER_DO_SENTIDO - 99),
+            Err(Recusa::Protocolo("o par passou do credito"))
+        );
+        assert_eq!(t.cabe_do_par(id, BUFFER_DO_SENTIDO - 100), Ok(()));
+        assert_eq!(t.fim_do_par(id, 2), Ok(None));
+        assert_eq!(
+            t.cabe_do_par(id, 1),
+            Err(Recusa::Protocolo("dados depois do fim"))
+        );
+        assert_eq!(t.cabe_do_par(id + 1, 1), Err(Recusa::NaoExiste));
+        let outro = t
+            .abrir_no_par(P1, processo(11), par(8), "e:2", "a.b", 0)
+            .unwrap();
+        t.aceito_pelo_par(outro, 0).unwrap();
+        t.fechar(P1, q(11), outro, 3).unwrap();
+        assert_eq!(
+            t.cabe_do_par(outro, 1),
+            Err(Recusa::Encerrado(String::from(motivo::FECHADO)))
+        );
+        assert!(t.coerente());
+    }
+
+    /// Os dois fins ditos: o fluxo não precisa mais da sessão, e quem lê
+    /// daqui lê o resto sem ela.
+    #[test]
+    fn depois_dos_dois_fins_o_fluxo_nao_precisa_do_par() {
+        let mut t = Fluxos::nova();
+        let id = com_o_par(&mut t);
+        assert_eq!(t.escrever(P1, qpar(9), id, b"resto", 1), Ok(5));
+        assert_eq!(t.fim_do_par(id, 1), Ok(None));
+        assert!(t.precisa_do_par(id));
+        t.terminar(P1, q(10), id, 2).unwrap();
+        assert!(t.fim_para_o_par(id));
+        assert!(!t.precisa_do_par(id));
+        let (l, e) = t.ler(P1, q(10), id, 100, 3).unwrap();
+        assert_eq!(&l.dados[..], b"resto");
+        assert!(l.fim);
+        assert_eq!(e.map(|e| e.motivo), Some(String::from(motivo::CONCLUIDO)));
+        assert!(!t.precisa_do_par(id));
+    }
+
+    /// O retrato que a sessão com o par lê: o pedido, o aberto, e nada do
+    /// que acabou.
+    #[test]
+    fn o_retrato_do_fluxo() {
+        let mut t = Fluxos::nova();
+        let id = t
+            .abrir_no_par(P1, processo(10), par(9), "e:1", "a.b", 0)
+            .unwrap();
+        let r = t.retrato(id).unwrap();
+        assert_eq!(r.estado, Estado::Pedido);
+        assert_eq!(r.titular, P1);
+        assert_eq!(r.intencao, "a.b");
+        assert_eq!(r.endpoint, Endpoint::DoPar(String::from("e:1")));
+        assert_eq!(r.abridor, processo(10));
+        assert_eq!(r.aceitante, par(9));
+        t.aceito_pelo_par(id, 1).unwrap();
+        assert_eq!(t.retrato(id).unwrap().estado, Estado::Aberto);
+        t.abortar(id, motivo::CONEXAO).unwrap();
+        assert_eq!(t.retrato(id), None);
+        assert_eq!(t.retrato(id + 1), None);
     }
 
     /// FH06: o crédito — concedido, consumido, devolvido; passar dele é

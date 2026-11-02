@@ -81,7 +81,11 @@ pub(super) fn com_dispositivos_de_teste(f: impl FnOnce() -> Resultado) -> Result
 
 /// Uma operação administrativa de teste, e o desfecho que as regras
 /// mandam: executada (`None`) ou recusada com o código.
-fn admin(comando: &str, params: &str, recusa: Option<&str>) -> Result<String, &'static str> {
+pub(super) fn admin(
+    comando: &str,
+    params: &str,
+    recusa: Option<&str>,
+) -> Result<String, &'static str> {
     let r = executar_admin_com(0, &ADMIN_DE_TESTE, comando, params, params)?;
     let certo = match recusa {
         Some(codigo) => {

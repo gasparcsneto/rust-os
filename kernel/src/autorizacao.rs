@@ -1719,9 +1719,8 @@ pub enum Dominio {
     /// `politica::enlace::METODOS`.
     Enlace,
     /// O fluxo entre dispositivos: o `abrir` e cada `dados` — ver
-    /// `politica::fluxo::METODOS_REMOTOS`. Montado só pela sessão de fluxo
-    /// entre Dukes, que chega com a modalidade remota.
-    #[allow(dead_code)]
+    /// `politica::fluxo::METODOS_REMOTOS`. Montado só pela sessão do fluxo
+    /// no Duke que recebe — ver `crate::fluxo::par`.
     Fluxo,
 }
 
@@ -3936,6 +3935,34 @@ pub fn auditar_aperto_do_enlace(
         remoto: None,
     };
     auditar(&quem, "link.open", "", codigo, &[], detalhe);
+}
+
+/// O método do aperto de uma sessão de fluxo, no Duke que recebe: como o
+/// `link.open` do enlace e o `pair.open` da cerimônia, de ninguém ainda
+/// quando recusado — ver [`crate::fluxo`].
+pub const APERTO_DO_FLUXO: &str = "stream.session";
+
+/// Grava um aperto de sessão de fluxo que chegou de outro Duke: o que
+/// entrou, com o nome do dispositivo, e o recusado, com a chave alegada. A
+/// relação e o programa atestado vão no detalhe, com o par.
+pub fn auditar_aperto_do_fluxo(chave: Option<[u8; 32]>, nome: &str, codigo: Codigo, detalhe: &str) {
+    let titular = if codigo.permite() {
+        Titular::Dispositivo
+    } else {
+        Titular::Anonimo
+    };
+    let quem = Quem {
+        titular,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: nome.to_string(),
+        chave,
+        papel: None,
+        processo: None,
+        servico: None,
+        remoto: None,
+    };
+    auditar(&quem, APERTO_DO_FLUXO, "", codigo, &[], detalhe);
 }
 
 /// Decide uma operação administrativa, já com a prova conferida: o papel do

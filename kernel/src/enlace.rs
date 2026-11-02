@@ -57,7 +57,7 @@
 //! perde. Só a relação, o registro e a lápide são gravados — ver
 //! [`crate::dispositivos`].
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -901,6 +901,184 @@ extern "C" fn laco_do_pareamento(_argumento: u64) -> ! {
     crate::fios::terminar()
 }
 
+// ---------------------------------------------------------------------
+// O fluxo entre dispositivos: o fio na origem, e o gate como o par no
+// destino — ver `crate::fluxo::par`.
+// ---------------------------------------------------------------------
+
+/// Pede ao gate, como o dispositivo `dispositivo` pela relação `relacao`,
+/// **no domínio do fluxo**: o `abrir` e cada `dados` que uma sessão de fluxo
+/// trouxe de outro Duke. O chamador é montado aqui, como o do estágio 1, e
+/// só aqui; o gate aceita dele só o conjunto do fluxo
+/// (`politica::fluxo::METODOS_REMOTOS`). Pode esperar — um `dados` com
+/// `wait` espera o caminho da auditoria —, no fio da sessão, que não é a
+/// tarefa de vaga nenhuma. Devolve o envelope.
+pub(crate) fn pedir_pelo_par_no_fluxo(
+    dispositivo: [u8; 32],
+    relacao: [u8; 16],
+    epoca: [u8; 8],
+    programa: [u8; 32],
+    pedido: &[u8],
+) -> Vec<u8> {
+    let chamador = Chamador::Remoto {
+        dispositivo,
+        relacao,
+        epoca,
+        programa,
+        dominio: Dominio::Fluxo,
+    };
+    crate::nativo::responder_pelo_kernel_esperando(chamador, pedido)
+        .como_bytes()
+        .to_vec()
+}
+
+/// Lança o fio da sessão de fluxo `numero`, que chegou de outro Duke por
+/// uma vaga do enlace: com a autoridade do serviço de enlace, e só ela, ele
+/// faz o aperto e conduz a sessão — ver `crate::fluxo::par`. Não decide
+/// nada: o `abrir` e cada `dados` do par vão ao gate como o dispositivo,
+/// por [`pedir_pelo_par_no_fluxo`].
+pub(crate) fn lancar_a_sessao_do_fluxo(numero: u64) -> Result<(), &'static str> {
+    crate::fios::criar_como(
+        "fluxo-par",
+        laco_da_sessao_do_fluxo,
+        numero,
+        Autoridade::Servico(Servico::Enlace),
+    )
+    .map(|_| ())
+}
+
+/// O fio de uma sessão de fluxo que chegou: a conduz, e sai.
+extern "C" fn laco_da_sessao_do_fluxo(numero: u64) -> ! {
+    crate::fluxo::par::sessao_que_chega(numero);
+    crate::fios::terminar()
+}
+
+/// Lança o fio do fluxo `n`, que sai daqui para outro Duke: com a
+/// autoridade do serviço de enlace, e só ela, ele conecta ao endereço da
+/// relação pelo gate e conduz a sessão — ver `crate::fluxo::par`. Não
+/// decide nada: leva o que os gates decidiram. Na suíte, o caso conduz no
+/// lugar dele, com o par de teste.
+pub fn lancar_o_fluxo(n: u64) -> Result<(), &'static str> {
+    #[cfg(feature = "modo-teste")]
+    {
+        let _ = n;
+        Ok(())
+    }
+    #[cfg(not(feature = "modo-teste"))]
+    crate::fios::criar_como(
+        "fluxo",
+        laco_do_fluxo,
+        n,
+        Autoridade::Servico(Servico::Enlace),
+    )
+    .map(|_| ())
+}
+
+/// O fio do fluxo: a conexão ao endereço da relação pelo gate, a sessão, e
+/// o fecho — quem aceitou fecha primeiro, e este espera.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+extern "C" fn laco_do_fluxo(n: u64) -> ! {
+    if let Some(endereco) = crate::fluxo::par::endereco_da_origem(n) {
+        match ViaTcp::conectar(chamador(), &endereco) {
+            Ok(via) => {
+                let mut canal = CanalTcp::novo(via);
+                crate::fluxo::par::conduzir_na_origem(n, &mut canal);
+                canal.via.esperar_o_fecho();
+                canal.via.fechar();
+            }
+            Err((codigo, motivo)) => crate::fluxo::par::nao_conectou(n, codigo, motivo),
+        }
+    }
+    crate::fios::terminar()
+}
+
+/// A conexão do fio do fluxo, como a sessão a vê: cada passo pelo gate, e
+/// a espera pela conexão legível **ou** pelo que mudar no fluxo daqui — o
+/// `net.recv` só quando há o que ler, para nunca prender a sessão longe do
+/// que o processo daqui escreve.
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+struct CanalTcp {
+    via: ViaTcp,
+    dono: crate::rede::conexoes::Dono,
+    leitor: Leitor,
+    guardado: VecDeque<u8>,
+}
+
+#[cfg_attr(feature = "modo-teste", allow(dead_code))]
+impl CanalTcp {
+    fn novo(via: ViaTcp) -> CanalTcp {
+        CanalTcp {
+            via,
+            dono: crate::rede::conexoes::Dono::Processo(crate::fios::id_atual()),
+            leitor: Leitor::novo(),
+            guardado: VecDeque::new(),
+        }
+    }
+
+    /// Um quadro inteiro do que já chegou, se há.
+    fn quadro_guardado(&mut self) -> Result<Option<(Tipo, Vec<u8>)>, &'static str> {
+        while let Some(b) = self.guardado.pop_front() {
+            match self.leitor.empurrar(b) {
+                Ok(Some((tipo, corpo))) => return Ok(Some((tipo, corpo.to_vec()))),
+                Ok(None) => {}
+                Err(_) => return Err("o par mandou um quadro que nao se le"),
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl crate::fluxo::par::Canal for CanalTcp {
+    fn mandar(&mut self, quadro: &[u8]) -> Result<(), &'static str> {
+        Via::mandar(&mut self.via, quadro).map_err(|(_, m)| m)
+    }
+
+    fn proximo(
+        &mut self,
+        ate_ms: u64,
+        local: crate::fluxo::par::Local,
+    ) -> Result<Option<(Tipo, Vec<u8>)>, &'static str> {
+        loop {
+            if let Some(q) = self.quadro_guardado()? {
+                return Ok(Some(q));
+            }
+            let agora = crate::tempo::uptime_ms();
+            if local(None) || agora >= ate_ms {
+                return Ok(None);
+            }
+            let espera = crate::rede::espera::Espera::armar(
+                self.via.conexao,
+                self.dono,
+                ate_ms - agora,
+                crate::rede::espera::Sentido::Leitura,
+            );
+            let legivel = match espera {
+                // Já há o que ler, ou o estado mudou — o `net.recv` diz.
+                Ok(None) | Err(_) => true,
+                Ok(Some(e)) => {
+                    let mut desfecho = None;
+                    crate::fios::bloquear_em(crate::fluxo::par::Esperar::ate(
+                        ate_ms,
+                        |w: &Waker| {
+                            if let Some(d) = e.conferir(Some(w)) {
+                                desfecho = Some(d);
+                                return true;
+                            }
+                            local(Some(w))
+                        },
+                    ));
+                    drop(e);
+                    !matches!(desfecho, None | Some(Desfecho::Venceu))
+                }
+            };
+            if legivel {
+                let chegou = Via::receber(&mut self.via, PASSO_MS).map_err(|(_, m)| m)?;
+                self.guardado.extend(chegou);
+            }
+        }
+    }
+}
+
 /// Liga o serviço de enlace: o fio, com a autoridade do serviço.
 #[cfg_attr(feature = "modo-teste", allow(dead_code))]
 pub fn iniciar() {
@@ -1024,6 +1202,10 @@ enum EstadoDoLado {
     /// [`crate::pareamento`]: cada quadro vai a ela, e a sessão nunca vira
     /// enlace.
     Pareamento,
+    /// A sessão é de um fluxo entre dispositivos — ver
+    /// `crate::fluxo::par`: cada quadro vai a ela, e a sessão nunca vira
+    /// enlace.
+    Fluxo,
     Encerrada,
 }
 
@@ -1126,6 +1308,16 @@ impl Lado {
                 self.estado =
                     if crate::pareamento::quadro_na_vaga(self.v, self.geracao, tipo, &corpo) {
                         EstadoDoLado::Pareamento
+                    } else {
+                        EstadoDoLado::Encerrada
+                    };
+            }
+            // O fluxo entre dispositivos: o primeiro quadro diz — o teto de
+            // sessões, antes do aperto —, e a sessão é dele até o fim.
+            (EstadoDoLado::Aguardando, Tipo::InicioFluxo) | (EstadoDoLado::Fluxo, _) => {
+                self.estado =
+                    if crate::fluxo::par::quadro_na_vaga(self.v, self.geracao, tipo, &corpo) {
+                        EstadoDoLado::Fluxo
                     } else {
                         EstadoDoLado::Encerrada
                     };
@@ -1384,6 +1576,7 @@ pub fn desfecho_da_vaga(v: u8, d: crate::rede::canal::Desfecho) {
     use crate::rede::canal::{Desfecho as D, texto_do_par};
     if let D::Acabou { geracao } | D::Expirou { geracao, .. } = d {
         crate::pareamento::vaga_acabou(v, geracao);
+        crate::fluxo::par::vaga_acabou(v, geracao);
     }
     match d {
         D::Aceita { remoto, geracao } => {
@@ -1466,6 +1659,7 @@ pub fn dispositivo_saiu(chave: &[u8; 32], codigo: Codigo, motivo: &'static str) 
         politica::fluxo::motivo::DISPOSITIVO_REVOGADO
     };
     crate::fluxo::anular_dispositivo(chave, do_fluxo);
+    crate::fluxo::par::dispositivo_saiu(chave);
     let wakers = se_ha_origem(|o| {
         let falharam = o.tabela.anular_dispositivo(chave, codigo, motivo);
         de_quem_espera(o, &falharam)

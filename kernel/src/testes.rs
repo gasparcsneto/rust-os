@@ -37112,6 +37112,46 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_muitos_ao_mesmo_tempo,
     },
     Caso {
+        nome: "fluxo: de outro Duke, pela vaga do enlace, de ponta a ponta",
+        f: fluxo::par::fluxo_chegando_de_outro_duke,
+    },
+    Caso {
+        nome: "fluxo: para outro Duke, pelo fio do fluxo, de ponta a ponta",
+        f: fluxo::par::fluxo_saindo_para_outro_duke,
+    },
+    Caso {
+        nome: "fluxo: o abrir de outro Duke decidido pela D4",
+        f: fluxo::par::fluxo_o_abrir_pela_d4,
+    },
+    Caso {
+        nome: "fluxo: o quadro 9 so no dominio dele",
+        f: fluxo::par::fluxo_o_quadro_9_so_no_dominio_dele,
+    },
+    Caso {
+        nome: "fluxo: o aperto com o par confere o registro",
+        f: fluxo::par::fluxo_o_aperto_confere_o_registro,
+    },
+    Caso {
+        nome: "fluxo: cada dados de outro Duke decidido aqui",
+        f: fluxo::par::fluxo_cada_dados_decidido_aqui,
+    },
+    Caso {
+        nome: "fluxo: o protocolo fechado com o par",
+        f: fluxo::par::fluxo_o_protocolo_fechado,
+    },
+    Caso {
+        nome: "fluxo: os tetos das vagas do enlace",
+        f: fluxo::par::fluxo_os_tetos_das_vagas,
+    },
+    Caso {
+        nome: "fluxo: a suspensao e a revogacao do par",
+        f: fluxo::par::fluxo_a_suspensao_e_a_revogacao,
+    },
+    Caso {
+        nome: "fluxo: o replay do aperto nao abre",
+        f: fluxo::par::fluxo_o_replay_nao_abre,
+    },
+    Caso {
         nome: "dispositivos: o administrador relaciona, com prova, e a relacao vai ao journal",
         f: enlace::dispositivos_o_administrador_relaciona_com_prova,
     },

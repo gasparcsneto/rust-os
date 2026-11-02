@@ -328,6 +328,8 @@ kernel/src/
 ├── chaves.rs        as chaves de assinatura das identidades: a privada só no kernel, o nome no espaço do dono, a lápide no journal, e a assinatura gravada antes de sair
 ├── mensagens.rs     as mensagens entre titulares: um recurso, pelo mesmo ponto de decisão
 ├── fluxo.rs         o fluxo da malha: um canal ordenado de bytes entre dois processos do mesmo titular — abrir, aceitar, escrever e ler, cada passo pelo gate, no plano de dados, volátil
+├── fluxo/
+│   └── par.rs       o fluxo entre dois Dukes: a sessão Noise com o prólogo do fluxo — no destino pela vaga do enlace, na origem pelo fio do fluxo —, o protocolo fechado, o crédito, e cada `abrir` e `dados` de fora decidido pelo gate daqui como o dispositivo
 ├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
 ├── enlace.rs        o enlace entre dispositivos: o pedido da malha a outro Duke, na origem (a tabela, o serviço que leva) e no destino (o respondedor, o gate como o dispositivo)
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: `aceitar` e `parear` no console, o aperto na porta do enlace e no fio da cerimônia, o código e a senha, o commit reconfirmado pelo gate, e `device.forget`
@@ -386,6 +388,8 @@ kernel/src/
 ├── testes/
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
+│   ├── fluxo/
+│   │   └── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
 │   └── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela

@@ -2612,12 +2612,304 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_o_tempo(),
         conferir_os_trechos_da_politica()?,
         conferir_a_chave_da_copia()?,
+        conferir_os_fluxos()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// O fluxo da malha nas fontes — o FH12, o FH13 e o FH15 da especificação
+/// dos fluxos; o FH14, quem mexe na tabela de fluxos, está em
+/// [`CHAMADAS_PROTEGIDAS`]:
+///
+/// - **os domínios** (FH12): o chamador de outro dispositivo continua
+///   montado só no `enlace.rs` (a regra de `Chamador::Remoto {`), em dois
+///   caminhos: o domínio `fluxo` sai só de `pedir_pelo_par_no_fluxo`, o da
+///   sessão do fluxo, e o `enlace` só de `atender`, o respondedor do
+///   estágio 1. Os dois fios do fluxo — o que sai e o que chega — nascem só
+///   com a autoridade do serviço de enlace, e só eles conduzem uma sessão;
+///   o módulo do fluxo não lança fio nenhum;
+/// - **os conjuntos fechados** (FH13): o do enlace é o da malha — `send`,
+///   `discover`, `status` e `cancel` —, e o do fluxo, `stream.open` e
+///   `stream.write`. São comandos que existem, um não toca o outro, nenhum
+///   outro comando passa por eles, e o gate confere cada domínio pelo seu;
+/// - **o plano de dados** (FH15): o orçamento de dados e o de fecho saem
+///   só de `orcamento_do_pedido`, depois de reconhecer o recurso aberto — a
+///   conexão, ou o fluxo aberto, vivo, de que quem pede é ponta e de que
+///   não saiu, pela conta pura.
+fn conferir_os_fluxos() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let ler = |arquivo: &str| {
+        std::fs::read_to_string(raiz.join(arquivo))
+            .map_err(|e| format!("não foi possível ler {arquivo}: {e}"))
+    };
+    let enlace = ler("kernel/src/enlace.rs")?;
+    let gate = ler("kernel/src/autorizacao.rs")?;
+    let fluxo = ler("kernel/src/fluxo.rs")?;
+    let par = ler("kernel/src/fluxo/par.rs")?;
+    let modelo = ler("politica/src/fluxo.rs")?;
+    let mut fora: Vec<String> = Vec::new();
+
+    // FH12 — cada domínio sai de um caminho só do enlace, e o chamador de
+    // fora é montado nesses dois, e em mais nenhum.
+    let mut montados = 0;
+    for (dominio, funcao) in [
+        ("Dominio::Fluxo", "fn pedir_pelo_par_no_fluxo("),
+        ("Dominio::Enlace", "fn atender(&mut self, linha: &[u8]"),
+    ] {
+        let Some(corpo) = corpo_pelo_recuo(&enlace, funcao) else {
+            fora.push(format!(
+                "kernel/src/enlace.rs: `{funcao}` não foi encontrada"
+            ));
+            continue;
+        };
+        let no_arquivo = fora_de_comentario(&enlace, dominio);
+        let no_caminho = fora_de_comentario(corpo, dominio);
+        if no_caminho == 0 || no_arquivo != no_caminho {
+            fora.push(format!(
+                "kernel/src/enlace.rs: `{dominio}` aparece {no_arquivo}x, {no_caminho}x em \
+                 `{funcao}`: o domínio sai de outro caminho"
+            ));
+        }
+        montados += fora_de_comentario(corpo, "Chamador::Remoto {");
+    }
+    let todos = fora_de_comentario(&enlace, "Chamador::Remoto {");
+    if montados != 2 || todos != 2 {
+        fora.push(format!(
+            "kernel/src/enlace.rs: o chamador de outro dispositivo é montado {todos}x, {montados}x \
+             nos dois caminhos dos domínios"
+        ));
+    }
+    // Os fios do fluxo: nascem com a autoridade do serviço de enlace, e só
+    // eles conduzem uma sessão.
+    let linhas: Vec<&str> = enlace.lines().collect();
+    for (laco, conduz) in [
+        ("laco_do_fluxo", "par::conduzir_na_origem("),
+        ("laco_da_sessao_do_fluxo", "par::sessao_que_chega("),
+    ] {
+        let definicao = format!("fn {laco}(");
+        let usos: Vec<usize> = linhas
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(laco) && !comentario(l) && !l.contains(&definicao))
+            .map(|(i, _)| i)
+            .collect();
+        let como_enlace = match usos.as_slice() {
+            [i] => {
+                let janela = linhas[i.saturating_sub(3)..(i + 4).min(linhas.len())].join("\n");
+                janela.contains("fios::criar_como(")
+                    && janela.contains("Autoridade::Servico(Servico::Enlace),")
+                    && !janela.contains("fios::criar(")
+            }
+            _ => false,
+        };
+        if !como_enlace {
+            fora.push(format!(
+                "kernel/src/enlace.rs: `{laco}` não nasce só pelo `criar_como`, com a autoridade \
+                 do serviço de enlace"
+            ));
+        }
+        match corpo_pelo_recuo(&enlace, &definicao) {
+            Some(corpo) if corpo.contains(conduz) && fora_de_comentario(&enlace, conduz) == 1 => {}
+            _ => fora.push(format!(
+                "kernel/src/enlace.rs: `{conduz}` não é chamada só por `{laco}`"
+            )),
+        }
+    }
+    for (arquivo, texto) in [
+        ("kernel/src/fluxo.rs", &fluxo),
+        ("kernel/src/fluxo/par.rs", &par),
+    ] {
+        if fora_de_comentario(texto, "fios::criar") > 0 {
+            fora.push(format!(
+                "{arquivo}: lança um fio — os do fluxo são do enlace"
+            ));
+        }
+    }
+
+    // FH13 — os conjuntos fechados.
+    let do_enlace = [
+        "fabric.send",
+        "fabric.discover",
+        "fabric.status",
+        "fabric.cancel",
+    ];
+    let do_fluxo = ["stream.open", "stream.write"];
+    if politica::enlace::METODOS != do_enlace {
+        fora.push(format!(
+            "politica::enlace::METODOS é {:?}, e não {do_enlace:?}",
+            politica::enlace::METODOS
+        ));
+    }
+    if politica::fluxo::METODOS_REMOTOS != do_fluxo {
+        fora.push(format!(
+            "politica::fluxo::METODOS_REMOTOS é {:?}, e não {do_fluxo:?}",
+            politica::fluxo::METODOS_REMOTOS
+        ));
+    }
+    let comandos = nomes_dos_comandos()?;
+    for m in do_enlace.iter().chain(&do_fluxo) {
+        if !comandos.iter().any(|c| c == m) {
+            fora.push(format!("`{m}`, de um conjunto fechado, não é um comando"));
+        }
+    }
+    for c in &comandos {
+        let enlace_diz = politica::enlace::metodo_do_enlace(c);
+        let fluxo_diz = politica::fluxo::metodo_remoto(c);
+        if enlace_diz != do_enlace.contains(&c.as_str())
+            || fluxo_diz != do_fluxo.contains(&c.as_str())
+            || (enlace_diz && fluxo_diz)
+        {
+            fora.push(format!(
+                "`{c}`: o conjunto fechado de um domínio não é o que diz ser"
+            ));
+        }
+    }
+    match corpo_pelo_recuo(&gate, "fn aceita(") {
+        Some(corpo)
+            if corpo.contains("Dominio::Enlace => politica::enlace::metodo_do_enlace(metodo),")
+                && corpo.contains("Dominio::Fluxo => politica::fluxo::metodo_remoto(metodo),") => {}
+        _ => fora.push(
+            "kernel/src/autorizacao.rs: `Dominio::aceita` não confere cada domínio pelo \
+             conjunto dele"
+                .into(),
+        ),
+    }
+    if !gate.contains("if !dominio.aceita(comando.nome) {") {
+        fora.push("kernel/src/autorizacao.rs: o gate não confere o conjunto do domínio".into());
+    }
+
+    // FH15 — o plano de dados só reconhece o recurso aberto.
+    match corpo_pelo_recuo(&gate, "fn orcamento_do_pedido(") {
+        Some(corpo) => {
+            for construcao in ["Orcamento::Dados(principal)", "Orcamento::Fecho(principal)"] {
+                if fora_de_comentario(&gate, construcao) != 1 || !corpo.contains(construcao) {
+                    fora.push(format!(
+                        "kernel/src/autorizacao.rs: `{construcao}` fora de `orcamento_do_pedido`"
+                    ));
+                }
+            }
+            for passo in [
+                "crate::rede::conexoes::aberta(numero, &dono, cortada_vale)",
+                "crate::fluxo::aberto_para_o_pedido(chamador, params)",
+                "if !aberto {\n        return Orcamento::Taxa;\n    }",
+            ] {
+                if !corpo.contains(passo) {
+                    fora.push(format!(
+                        "kernel/src/autorizacao.rs: `orcamento_do_pedido` não passa por `{}`",
+                        passo.lines().next().unwrap_or(passo)
+                    ));
+                }
+            }
+        }
+        None => {
+            fora.push("kernel/src/autorizacao.rs: `orcamento_do_pedido` não foi encontrada".into())
+        }
+    }
+    // Fora dela, o orçamento de dados só aparece como padrão de um `match`
+    // ou de um `if let` — lido, e nunca dado.
+    for (n, linha) in gate.lines().enumerate() {
+        if (linha.contains("Orcamento::Dados(") || linha.contains("Orcamento::Fecho("))
+            && !comentario(linha)
+            && !linha.contains("(principal)")
+            && !linha.contains("=>")
+            && !linha.trim_start().starts_with("if let ")
+        {
+            fora.push(format!(
+                "kernel/src/autorizacao.rs:{}: {}",
+                n + 1,
+                linha.trim()
+            ));
+        }
+    }
+    match corpo_pelo_recuo(&fluxo, "fn aberto_para_o_pedido(") {
+        Some(c)
+            if c.contains(".aberto_para(titular, quem, n)") && c.contains("de_quem(chamador)") => {}
+        _ => fora.push(
+            "kernel/src/fluxo.rs: `aberto_para_o_pedido` não reconhece pelo fluxo de quem pede"
+                .into(),
+        ),
+    }
+    match corpo_pelo_recuo(&modelo, "fn aberto_para(") {
+        Some(c)
+            if c.contains("self.resolver(titular, quem, id)")
+                && c.contains("f.estado == Estado::Aberto")
+                && c.contains("!f.saiu[lado.indice()]") => {}
+        _ => fora.push(
+            "politica/src/fluxo.rs: `aberto_para` não é o fluxo aberto, vivo, de quem pede".into(),
+        ),
+    }
+
+    if fora.is_empty() {
+        println!(
+            "[xtask] o fluxo da malha: cada domínio de outro dispositivo sai de um caminho só do \
+             enlace, com o conjunto fechado dele; os fios do fluxo falam só como o serviço de \
+             enlace; só os stream.*, os ganchos e o coletor mexem na tabela; e o plano de dados \
+             só reconhece o fluxo aberto, vivo, de quem pede"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] o fluxo da malha fora das regras dele:");
+        for f in &fora {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nO fluxo não é autoridade e o Noise não é autorização: cada domínio de fora tem o \
+             seu caminho e o seu conjunto fechado, e cada passo é do gate — ver `docs/FLUXOS.md`."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// O trecho de `assinatura` — uma função, em qualquer recuo — até a chave
+/// que a fecha no mesmo recuo, o formato do `rustfmt`.
+fn corpo_pelo_recuo<'t>(texto: &'t str, assinatura: &str) -> Option<&'t str> {
+    let de = texto.find(assinatura)?;
+    let comeco = texto[..de].rfind('\n').map_or(0, |i| i + 1);
+    let linha = &texto[comeco..de];
+    let recuo = &linha[..linha.len() - linha.trim_start().len()];
+    let fecho = format!("\n{recuo}}}\n");
+    let ate = texto[de..].find(&fecho)?;
+    Some(&texto[comeco..de + ate + fecho.len()])
+}
+
+/// Se a linha é um comentário.
+fn comentario(linha: &str) -> bool {
+    linha.trim_start().starts_with("//")
+}
+
+/// Quantas vezes `agulha` aparece em `texto`, fora das linhas de comentário.
+fn fora_de_comentario(texto: &str, agulha: &str) -> usize {
+    texto
+        .lines()
+        .filter(|l| !comentario(l))
+        .map(|l| l.matches(agulha).count())
+        .sum()
+}
+
+/// Os nomes dos comandos do agente, na ordem da tabela `COMANDOS`.
+fn nomes_dos_comandos() -> Result<Vec<String>, String> {
+    let caminho = raiz_do_projeto().join("kernel/src/agent/commands.rs");
+    let texto = std::fs::read_to_string(&caminho)
+        .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+    let de = texto
+        .find("pub static COMANDOS")
+        .ok_or("a tabela COMANDOS não foi encontrada")?;
+    let ate = texto[de..]
+        .find("\n];\n")
+        .ok_or("o fim da tabela COMANDOS não foi encontrado")?;
+    Ok(texto[de..de + ate]
+        .split("Command {")
+        .skip(1)
+        .filter_map(|b| {
+            entre_aspas_apos(b, "nome: \"")
+                .first()
+                .map(|s| s.to_string())
+        })
+        .collect())
 }
 
 /// A chave da cópia de segurança do armazém: o sal e o rótulo dela só no
@@ -3569,6 +3861,67 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     (
         "Servico::Enlace",
         &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
+    ),
+    // Os domínios de outro dispositivo (ver `autorizacao::Dominio`): só o
+    // `enlace.rs` monta cada um — o `fluxo` no caminho da sessão do fluxo,
+    // o `enlace` no respondedor do estágio 1, ver [`conferir_os_fluxos`] —,
+    // e o gate os lê. Nenhum outro arquivo escolhe o conjunto fechado de um
+    // pedido de fora.
+    (
+        "Dominio::Fluxo",
+        &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
+    ),
+    (
+        "Dominio::Enlace",
+        &["kernel/src/autorizacao.rs", "kernel/src/enlace.rs"],
+    ),
+    // A tabela de fluxos (ver `kernel/src/fluxo.rs`): só os handlers dos
+    // comandos `stream.*` abrem, aceitam, escrevem, leem, terminam e fecham
+    // — depois do gate —; e os ganchos, só por quem os dispara: a malha (o
+    // titular anulado, o canal e o endpoint que acabam), o carregador (a
+    // troca de imagem), o coletor, o enlace (o dispositivo e a relação que
+    // saem) e o gate (a recusa de uma leitura ou escrita). Mais ninguém
+    // mexe nela.
+    ("fluxo::abrir(", &["kernel/src/agent/commands.rs"]),
+    ("fluxo::abrir_no_par(", &["kernel/src/agent/commands.rs"]),
+    ("fluxo::aceitar(", &["kernel/src/agent/commands.rs"]),
+    ("fluxo::escrever(", &["kernel/src/agent/commands.rs"]),
+    ("fluxo::ler(", &["kernel/src/agent/commands.rs"]),
+    (
+        "fluxo::terminar_ou_fechar(",
+        &["kernel/src/agent/commands.rs"],
+    ),
+    ("fluxo::estado(", &["kernel/src/agent/commands.rs"]),
+    ("fluxo::anular_titular(", &["kernel/src/malha.rs"]),
+    ("fluxo::canal_acabou(", &["kernel/src/malha.rs"]),
+    ("fluxo::endpoint_acabou(", &["kernel/src/malha.rs"]),
+    ("fluxo::programa_mudou(", &["kernel/src/usuario/mod.rs"]),
+    ("fluxo::passada_do_coletor(", &["kernel/src/fios/mod.rs"]),
+    ("fluxo::anular_dispositivo(", &["kernel/src/enlace.rs"]),
+    ("fluxo::anular_relacao(", &["kernel/src/enlace.rs"]),
+    ("fluxo::recusado_pelo_gate(", &["kernel/src/autorizacao.rs"]),
+    // O fluxo entre dispositivos (ver `kernel/src/fluxo/par.rs`): só a vaga
+    // do enlace entrega à sessão que chega o quadro 9 e o fim da conexão, e
+    // só o enlace, o dispositivo que sai; só os fios do enlace conduzem uma
+    // sessão — a que sai e a que chega —, e só o enlace os lança, a pedido
+    // da abertura e da vaga; e só a sessão pede ao gate como o par, no
+    // domínio do fluxo.
+    ("par::quadro_na_vaga(", &["kernel/src/enlace.rs"]),
+    ("par::vaga_acabou(", &["kernel/src/enlace.rs"]),
+    ("par::dispositivo_saiu(", &["kernel/src/enlace.rs"]),
+    ("par::endereco_da_origem(", &["kernel/src/enlace.rs"]),
+    ("par::conduzir_na_origem(", &["kernel/src/enlace.rs"]),
+    ("par::nao_conectou(", &["kernel/src/enlace.rs"]),
+    ("par::sessao_que_chega(", &["kernel/src/enlace.rs"]),
+    ("par::sem_fio(", &["kernel/src/fluxo.rs"]),
+    ("enlace::lancar_o_fluxo(", &["kernel/src/fluxo.rs"]),
+    (
+        "enlace::lancar_a_sessao_do_fluxo(",
+        &["kernel/src/fluxo/par.rs"],
+    ),
+    (
+        "enlace::pedir_pelo_par_no_fluxo(",
+        &["kernel/src/fluxo/par.rs"],
     ),
     // Quem escreve o registro de dispositivos (ver `kernel/src/dispositivos.rs`):
     // a relação nasce pela operação administrativa, com prova, ou pelo

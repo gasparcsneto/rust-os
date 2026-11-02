@@ -24,6 +24,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use politica::Codigo;
 
+pub(in crate::testes) mod par;
+
 /// A intenção que o `fluxos` oferece.
 const INTENCAO: &str = "imagem.compartilhar";
 

@@ -59,6 +59,8 @@ use politica::fluxo::{
     Aceito, Encerramento, Fluxos, Lida, Ponta, Quem, Recusa, Titular, Vista, motivo,
 };
 
+pub(crate) mod par;
+
 /// O parâmetro que nomeia o fluxo nos comandos sobre ele.
 pub const PARAMETRO: &str = "stream";
 
@@ -575,14 +577,17 @@ pub fn escrever_ponta(w: &mut crate::agent::json::JsonWriter, p: &Ponta) -> core
 // Os comandos.
 // ---------------------------------------------------------------------
 
-/// `stream.open`, daqui: um pedido de abertura contra o endpoint
-/// `endpoint`, que tem de ser do titular de quem pede, oferecer `intencao`
-/// e ter um dono que receberia fluxo. Devolve o id.
+/// `stream.open` contra um endpoint daqui: um pedido de abertura contra o
+/// endpoint `endpoint`, que tem de ser do titular de quem pede, oferecer
+/// `intencao` e ter um dono que receberia fluxo. Devolve o id.
+///
+/// Quem pede é um processo daqui, ou o par — o `abrir` que a sessão do
+/// fluxo trouxe de outro Duke, que o gate decidiu como o dispositivo, no
+/// domínio do fluxo, pela pessoa da relação ([`par`]). O pedido do par
+/// nasce com a sessão dele na tabela: ela fica sabendo do aceite e do fim.
 pub fn abrir(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> {
     let recurso = recurso_da_intencao(intencao);
-    if a.fio().is_none() {
-        return recusada(&recurso, Falha::SoProcesso, Falha::SoProcesso.motivo());
-    }
+    let do_par = matches!(a.ponta, Ponta::Remota { .. });
     if !decidida(intencao) {
         return recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo());
     }
@@ -624,10 +629,14 @@ pub fn abrir(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> 
                 intencao,
                 agora,
             );
-            let w = if r.is_ok() {
-                cutucar_o_aceite(t, n)
-            } else {
-                Vec::new()
+            let w = match r {
+                Ok(id) => {
+                    if do_par {
+                        t.sessoes.insert(id, Sessao::default());
+                    }
+                    cutucar_o_aceite(t, n)
+                }
+                Err(_) => Vec::new(),
             };
             (t.epoca, r, w)
         });
@@ -641,7 +650,8 @@ pub fn abrir(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> 
                     ),
                     Codigo::Allow,
                     &format!(
-                        "pedido; politica {}",
+                        "{}; politica {}",
+                        if do_par { "pedido pelo par" } else { "pedido" },
                         crate::autorizacao::versao_da_politica()
                     ),
                 );
@@ -655,16 +665,91 @@ pub fn abrir(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> 
     })
 }
 
-/// `stream.open` com `device`: o fluxo a outro Duke. Ainda não liga — a
-/// sessão com o par vem com o domínio do fluxo no enlace.
-pub fn abrir_no_par(a: &Ator, _endpoint: &str, intencao: &str) -> Result<String, Falha> {
+/// `stream.open` com `device`: o fluxo a outro Duke da pessoa de quem pede.
+///
+/// O gate já decidiu as duas permissões — `fabric.stream` sobre a intenção
+/// e `fabric.remote` sobre o dispositivo, resolvido no espaço da pessoa
+/// ([`crate::autorizacao::dispositivo_decidido`]). Dentro da ordem, com a
+/// decisão reconfirmada, a relação ainda tem de ser da pessoa do fluxo e ter
+/// endereço; o pedido entra na tabela, com a sessão dele, e o fio do fluxo
+/// sobe para levá-lo ao par — sem fio, o fluxo acaba. O endpoint é o de lá,
+/// como a descoberta o deu; quem o confere é o gate de lá.
+pub fn abrir_no_par(a: &Ator, endpoint: &str, intencao: &str) -> Result<String, Falha> {
     let recurso = recurso_da_intencao(intencao);
-    let _ = a;
-    recusada(
-        &recurso,
-        Recusa::NaoExiste.into(),
-        "o fluxo entre dispositivos ainda nao liga",
-    )
+    if a.fio().is_none() {
+        return recusada(&recurso, Falha::SoProcesso, Falha::SoProcesso.motivo());
+    }
+    if !decidida(intencao) {
+        return recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo());
+    }
+    let Some(d) = crate::autorizacao::dispositivo_decidido() else {
+        return recusada(&recurso, Falha::NaoDecidida, Falha::NaoDecidida.motivo());
+    };
+    if !par::endpoint_valido(endpoint) {
+        return recusada(
+            &recurso,
+            Recusa::NaoExiste.into(),
+            "o endpoint do par nao tem a forma",
+        );
+    }
+    let aberto = sob_a_decisao(&recurso, || {
+        if crate::energia::pedida().is_some() {
+            return recusada(&recurso, Falha::Desligando, motivo::DESLIGANDO);
+        }
+        // A relação, agora: ainda ativa, da pessoa do fluxo, com endereço.
+        let relacao = crate::dispositivos::relacao(&d.chave, &d.relacao)
+            .filter(|(_, r)| Titular::Pessoa(r.pessoa) == a.titular && r.endereco.is_some());
+        if relacao.is_none() {
+            return recusada(
+                &recurso,
+                Recusa::NaoExiste.into(),
+                "o dispositivo nao existe para quem pede",
+            );
+        }
+        let par = Ponta::Remota {
+            dispositivo: d.chave,
+            relacao: d.relacao,
+            programa: [0; 32],
+        };
+        let agora = crate::tempo::uptime_ms();
+        let (epoca, r) = com_tabela(|t| {
+            let r =
+                t.fluxos
+                    .abrir_no_par(a.titular, a.ponta.clone(), par, endpoint, intencao, agora);
+            if let Ok(id) = r {
+                t.sessoes.insert(id, Sessao::default());
+            }
+            (t.epoca, r)
+        });
+        match r {
+            Ok(id) => {
+                crate::autorizacao::auditar_execucao(
+                    &format!(
+                        "{} ; {} ; endpoint:{endpoint} ; {recurso}",
+                        recurso_do_fluxo(&epoca, id),
+                        d.recurso
+                    ),
+                    Codigo::Allow,
+                    &format!(
+                        "pedido ao par; politica {}",
+                        crate::autorizacao::versao_da_politica()
+                    ),
+                );
+                Ok((epoca, id))
+            }
+            Err(r) => {
+                let m = String::from(r.motivo());
+                recusada(&recurso, r.into(), &m)
+            }
+        }
+    })?;
+    let (epoca, id) = aberto;
+    // O fio do fluxo, fora da ordem. Sem ele, o fluxo acaba já — e quem
+    // pediu o vê acabado, com o motivo.
+    if crate::enlace::lancar_o_fluxo(id).is_err() {
+        par::sem_fio(id);
+    }
+    Ok(id_texto(&epoca, id))
 }
 
 /// Se a ponta `abridor` de um pedido exerceria ainda `fabric.stream` sobre
@@ -1180,6 +1265,7 @@ pub fn esvaziar_de_teste() {
     if let Some((_, w)) = feito {
         acordar(w);
     }
+    par::esvaziar_de_teste();
 }
 
 /// Destrava a tabela à força, para uso exclusivo do caminho de falha fatal.
