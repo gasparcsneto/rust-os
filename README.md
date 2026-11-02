@@ -10285,6 +10285,20 @@ $ tcpdump -nr /tmp/fumaca.pcap.0 'tcp port 80'
 Detalhes, e a lista honesta do que **não** funciona num kernel (Miri, ASan,
 TSan, Tokio, `perf`) com o motivo de cada um, em [`docs/DEPURACAO.md`](docs/DEPURACAO.md).
 
+## Como o Duke é desenvolvido
+
+Por um coordenador e agentes especialistas — quantos o trabalho pedir, do
+um só, quando ele é pequeno ou estritamente sequencial, a vários, quando há
+paralelismo real e seguro —, numa linha só de desenvolvimento, com uma
+integração única, os testes completos e a validação final antes de cada
+trabalho ser dado por concluído. Sempre que possível, um agente adversário
+tenta quebrar o que os outros produziram. Os agentes podem ser muitos; a
+arquitetura, o Gate, a Policy, a cadeia de identidade e a auditoria
+continuam sendo um só cada. A política permanente — a análise antes de
+distribuir, as decisões [A], [B] e [C], as invariantes, a validação e o
+relatório — está em [`CLAUDE.md`](CLAUDE.md), e os papéis prontos dos
+agentes em `.claude/agents/`.
+
 ## Idioma
 
 O código e os comentários estão em português — o projeto é também um material
