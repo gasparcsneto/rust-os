@@ -398,6 +398,9 @@ struct Linha {
     para_la: VecDeque<u8>,
     /// Os quadros que a suíte mandou à sessão daqui.
     para_ca: VecDeque<(Tipo, Vec<u8>)>,
+    /// Os que a suíte guardou: chegam à sessão daqui com o que mudar daqui
+    /// — ver [`ParQueAceita::guardar`].
+    guardados: VecDeque<(Tipo, Vec<u8>)>,
     waker: Option<Waker>,
     fechada: bool,
     /// O fio da sessão daqui acabou.
@@ -454,7 +457,13 @@ impl Canal for CanalDeTeste {
                 Some(Err(())) => return Err("a linha fechou"),
                 None => {}
             }
-            if local(None) || crate::tempo::uptime_ms() >= ate_ms {
+            if local(None) {
+                // O que a suíte guardou chega com o que mudou daqui, e a
+                // sessão o lê antes de olhar a mudança: o par o mandou antes
+                // de saber dela.
+                return Ok(com_linha(|l| l.guardados.pop_front()).flatten());
+            }
+            if crate::tempo::uptime_ms() >= ate_ms {
                 return Ok(None);
             }
             crate::fios::bloquear_em(Esperar::ate(ate_ms, |w: &Waker| {
@@ -574,12 +583,14 @@ impl ParQueAceita {
         Ok(())
     }
 
-    /// Põe `m` na linha sem acordar a sessão daqui: ela a acha quando
-    /// acordar por outra coisa — e antes do que mudou daqui, que o canal
-    /// confere depois dos quadros.
+    /// Guarda `m` para a sessão daqui achar com o que mudar daqui, antes de
+    /// olhar a mudança — sem acordá-la, e nunca antes dela: o par a mandou
+    /// antes de saber do fim daqui. Uma por mudança: lida a primeira, a
+    /// sessão vê o fim e manda o `fechar`. Nada vai à linha depois dela —
+    /// a cifra conta as mensagens na ordem.
     fn guardar(&mut self, m: &Mensagem) -> Resultado {
         let c = self.cifrada(m)?;
-        com_linha(|l| l.para_ca.push_back((Tipo::Dados, c))).ok_or("sem linha")
+        com_linha(|l| l.guardados.push_back((Tipo::Dados, c))).ok_or("sem linha")
     }
 
     /// A próxima mensagem da sessão daqui, decifrada.
@@ -937,6 +948,20 @@ pub(in crate::testes) fn fluxo_saindo_para_outro_duke() -> Resultado {
             if lido != volta {
                 return Err("o que voltou de la nao e o que la mandou");
             }
+            // Cada escrita e cada leitura do processo daqui decidiu também
+            // `fabric.remote` sobre o par, na mesma decisão (DF-5): o recurso
+            // gravado é a intenção e o dispositivo.
+            let pelo = format!("pelo processo {} (", a.fio());
+            let ao_par = format!("intencao:{INTENCAO} ; dispositivo:{NOME_DO_PAR}");
+            for metodo in ["stream.write", "stream.read"] {
+                let decididas = registros_depois(antes, |e| {
+                    e.metodo == metodo && e.codigo == Codigo::Allow && e.detalhe.starts_with(&pelo)
+                });
+                if decididas.is_empty() || decididas.iter().any(|(_, e)| e.recurso != ao_par) {
+                    crate::log_error!("teste", "{}: {:?}", metodo, decididas);
+                    return Err("uma escrita ou leitura ao par nao decidiu o dispositivo");
+                }
+            }
             fim_gravado(
                 antes,
                 &id,
@@ -1291,10 +1316,12 @@ pub(in crate::testes) fn fluxo_os_tetos_das_vagas() -> Resultado {
 // ---------------------------------------------------------------------------
 
 /// Com o fluxo aberto, `device.suspend` e `device.revoke` o encerram na
-/// hora, com o motivo, e o par ouve o `fechar`; na origem, o mesmo — o fio
-/// da sessão daqui manda o `fechar` ao Duke de lá, com o motivo daqui
-/// mesmo quando o aceite, os dados, o crédito e o fim de lá chegam depois
-/// de o fluxo acabar.
+/// hora, com o motivo, e o par ouve o `fechar`; na origem, o mesmo — e a
+/// política nova também: cada escrita ao par decide de novo `fabric.remote`
+/// sobre ele. O fio da sessão daqui manda o `fechar` ao Duke de lá com o
+/// motivo daqui mesmo quando o aceite, os dados, o crédito ou o fim de lá
+/// chegam depois de o fluxo acabar — um por fim: a sessão lê um, e vê o
+/// fim.
 pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
     com_o_par(|| {
         let (bia, _, _) = bia_relacionada("dispositivo")?;
@@ -1350,35 +1377,79 @@ pub(in crate::testes) fn fluxo_a_suspensao_e_a_revogacao() -> Resultado {
             esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
                 .map_err(|_| "a sessao daqui nao acabou depois do fechar")?;
             crate::contencao::esquecer_de_teste();
-            // A revogação, saindo: o fio da sessão daqui fecha com o par.
-            let antes = crate::autorizacao::ultimo_registro();
-            let (id, mut par) = saindo("e0e0e0e0e0e0e0e0:3")?;
-            par.mandar(&Mensagem::Aceito("e0e0e0e0e0e0e0e0:9"))?;
-            esperar_no_par(|| estado(b.quem(), &id).0.as_deref() == Some("open"), TETO)
-                .map_err(|_| "o fluxo nao abriu com o aceito")?;
-            feito(
-                &super::escrever(b.quem(), &id, b"ida"),
-                "a ponta daqui nao escreveu no fluxo ao par",
-            )?;
-            let ida = par.mensagem()?;
-            if !matches!(Mensagem::ler(&ida), Some(Mensagem::Dados(d)) if d == b"ida") {
-                return Err("o par nao recebeu o que a ponta daqui escreveu");
-            }
-            // Os dados de lá, o crédito do que leu e o fim, a caminho quando
-            // o fluxo acaba daqui: a sessão daqui os acha antes do fim — e
-            // eles não são o par fora do protocolo; o `fechar` leva o motivo
-            // daqui.
-            par.guardar(&Mensagem::Dados(b"volta"))?;
-            par.guardar(&Mensagem::Credito(3))?;
-            par.guardar(&Mensagem::Fim)?;
-            admin("device.revoke", r#"{"name":"par"}"#, None)?;
-            match Mensagem::ler(&par.mensagem()?) {
-                Some(Mensagem::Fechar(m)) if m == motivo::DISPOSITIVO_REVOGADO => {}
-                outra => {
-                    crate::log_error!("teste", "{:?}", outra);
-                    return Err("a revogacao nao mandou o fechar ao par");
+            // Aberto, saindo: a ponta daqui escreveu `ida`, e o par a leu.
+            let com_a_ida = |endpoint: &str| -> Result<(String, ParQueAceita), &'static str> {
+                let (id, mut par) = saindo(endpoint)?;
+                par.mandar(&Mensagem::Aceito("e0e0e0e0e0e0e0e0:9"))?;
+                esperar_no_par(|| estado(b.quem(), &id).0.as_deref() == Some("open"), TETO)
+                    .map_err(|_| "o fluxo nao abriu com o aceito")?;
+                feito(
+                    &super::escrever(b.quem(), &id, b"ida"),
+                    "a ponta daqui nao escreveu no fluxo ao par",
+                )?;
+                let ida = par.mensagem()?;
+                if !matches!(Mensagem::ler(&ida), Some(Mensagem::Dados(d)) if d == b"ida") {
+                    return Err("o par nao recebeu o que a ponta daqui escreveu");
                 }
-            }
+                Ok((id, par))
+            };
+            // O `fechar` ao par com o motivo daqui — a mensagem guardada, lida
+            // antes do fim, não é o par fora do protocolo —, e a sessão daqui
+            // acaba.
+            let fechado = |par: &mut ParQueAceita, motivo: &str, erro: &'static str| -> Resultado {
+                match Mensagem::ler(&par.mensagem()?) {
+                    Some(Mensagem::Fechar(m)) if m.starts_with(motivo) => {}
+                    outra => {
+                        crate::log_error!("teste", "{:?}", outra);
+                        return Err(erro);
+                    }
+                }
+                esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
+                    .map_err(|_| "a sessao daqui nao acabou depois do fechar")
+            };
+            // A suspensão, saindo, com o crédito do que o par leu a caminho.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:5")?;
+            par.guardar(&Mensagem::Credito(3))?;
+            admin("device.suspend", r#"{"device":"dispositivo:par"}"#, None)?;
+            fechado(
+                &mut par,
+                motivo::DISPOSITIVO_SUSPENSO,
+                "o credito a caminho mudou o fechar da suspensao",
+            )?;
+            fim_gravado_com(antes, &id, motivo::DISPOSITIVO_SUSPENSO)?;
+            crate::contencao::esquecer_de_teste();
+            // A política nova, saindo: cada escrita ao par decide de novo
+            // `fabric.remote` sobre ele (DF-5) — sem a permissão no papel, a
+            // escrita é recusada e o fluxo acaba —, com o fim de lá a caminho.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:6")?;
+            let antes_da_politica = crate::autorizacao::com_politica(|p| p.clone());
+            politica_sem("fabric.remote");
+            par.guardar(&Mensagem::Fim)?;
+            let r = super::escrever(b.quem(), &id, b"sem o remoto");
+            crate::autorizacao::restaurar_politica(antes_da_politica);
+            recusado(
+                &r,
+                "DENY_PERMISSION",
+                "a politica sem fabric.remote nao recusou a escrita ao par",
+            )?;
+            fechado(
+                &mut par,
+                "DENY_PERMISSION",
+                "a escrita recusada pela politica nova nao mandou o fechar ao par",
+            )?;
+            fim_gravado_com(antes, &id, "DENY_PERMISSION: ")?;
+            // A revogação, saindo, com os dados de lá a caminho.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (id, mut par) = com_a_ida("e0e0e0e0e0e0e0e0:3")?;
+            par.guardar(&Mensagem::Dados(b"volta"))?;
+            admin("device.revoke", r#"{"name":"par"}"#, None)?;
+            fechado(
+                &mut par,
+                motivo::DISPOSITIVO_REVOGADO,
+                "a revogacao nao mandou o fechar ao par",
+            )?;
             fim_gravado_com(antes, &id, motivo::DISPOSITIVO_REVOGADO)
         })();
         encerrar_todas(r, &[&b])

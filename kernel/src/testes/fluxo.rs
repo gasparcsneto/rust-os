@@ -1488,6 +1488,10 @@ pub(super) fn fluxo_a_morte_a_troca_e_a_bifurcacao() -> Resultado {
                 let (desde, filho) = passo_na_malha(&a.canal, BIFURCAR, 0, "fluxos: filho ")?;
                 let filho: u64 = filho.parse().map_err(|_| "o pai nao disse o filho")?;
                 dito_na_malha(desde, &format!("fluxos: sou o filho {filho}"))?;
+                // O filho escuta o canal dele só depois de dizer quem é: até
+                // o `pronto` dele, o fim que se publicasse ali não teria
+                // ouvinte, e se perderia.
+                dito_na_malha(desde, &format!("fluxos: pronto {}", a.endpoint))?;
                 let r = (|| -> Resultado {
                     let do_filho = chamador_de(filho).ok_or("o filho nao esta vivo")?;
                     for r in [

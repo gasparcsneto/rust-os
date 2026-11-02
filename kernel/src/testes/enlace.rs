@@ -1424,12 +1424,29 @@ pub(super) fn enlace_a_reconfirmacao_no_commit() -> Resultado {
                 Codigo::Allow,
                 "pela relacao 5a5a5a5a",
             );
-            let recusada = !registros_depois(antes, |e| {
-                e.metodo == "fabric.send"
-                    && e.codigo == Codigo::DenyNotAuthenticated
-                    && e.detalhe.contains("nao esta mais ativa")
-            })
-            .is_empty();
+            // A recusa cita a decisão que a reconfirmação desfez — a da
+            // resposta —, inteira no fim do detalhe; o motivo vem antes, e
+            // encolhe no teto com o prefixo da relação e do programa.
+            let citacao = r
+                .as_deref()
+                .ok()
+                .and_then(super::explain_de)
+                .and_then(|e| e.member("decision"))
+                .and_then(|d| d.as_u64())
+                .map(|d| alloc::format!("; decisao {d}"));
+            let recusada = citacao.as_deref().is_some_and(|c| {
+                !registros_depois(antes, |e| {
+                    e.metodo == "fabric.send"
+                        && e.codigo == Codigo::DenyNotAuthenticated
+                        && super::cita_com_o_motivo(
+                            &e.detalhe,
+                            "relacao ou pessoa que nao esta mais ativa",
+                            "relacao ou pessoa que nao esta",
+                            c,
+                        )
+                })
+                .is_empty()
+            });
             if !decidida || !recusada || crate::malha::contagem().1 != 0 {
                 crate::log_error!("teste", "{:?} {} {}", r, decidida, recusada);
                 return Err("a revogacao no meio nao recusou a entrega remota no commit");

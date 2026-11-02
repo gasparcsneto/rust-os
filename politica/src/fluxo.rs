@@ -1990,6 +1990,21 @@ mod testes {
         assert!(t.coerente());
     }
 
+    /// O encerramento zera e conta o que sobrou num sentido que ninguém
+    /// abortou. Hoje todo caminho aborta os sentidos, ou os lê até o fim,
+    /// antes de encerrar — é a defesa de um caminho novo que esqueça.
+    #[test]
+    fn o_encerramento_conta_os_restos() {
+        let mut t = Fluxos::nova();
+        let id = aberto(&mut t);
+        t.escrever(P1, q(10), id, b"sobra", 1).unwrap();
+        t.escrever(P1, q(20), id, b"e mais", 1).unwrap();
+        let i = t.i(id).unwrap();
+        let e = t.encerrar(i, motivo::REVOGADO);
+        assert_eq!((e.ida, e.volta, e.descartados), (5, 6, 11));
+        assert!(t.coerente());
+    }
+
     /// FH03: o fecho deixa legível o que a ponta escreveu e tira o que ela
     /// não leu; o aborto tira tudo — com as contas.
     #[test]
@@ -2001,6 +2016,10 @@ mod testes {
             .unwrap();
         // 10 fecha: o que escreveu continua para 20; o que era dele, sai.
         assert_eq!(t.fechar(P1, q(10), id, 2), Ok(None));
+        // Sai na hora do fecho — o anel solto e zerado, os bytes contados —,
+        // e não só no fim do fluxo, que pode demorar o quanto 20 quiser.
+        let f = &t.vivos[t.i(id).unwrap()];
+        assert_eq!((f.volta.anel.tamanho(), f.volta.descartados), (0, 21));
         assert_eq!(
             t.escrever(P1, q(10), id, b"x", 2),
             Err(Recusa::Encerrado(String::from(motivo::FECHADO)))

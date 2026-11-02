@@ -20350,10 +20350,6 @@ fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
     resultado
 }
 
-/// O que sai do anel antes de chegar ao disco vira uma lacuna no journal:
-/// a cadeia refeita dele continua verificável, e tem a mesma cabeça. Muito
-/// para um registro só vai em vários, na ordem. E uma operação cuja
-/// decisão saiu do anel não vai ao journal.
 /// A execução que cita a decisão, com um detalhe acima do teto: o texto
 /// encolhe, e a citação fica inteira no fim — o corte do fim a deixaria
 /// pela metade, e um pedaço do número é o número de outro registro.
@@ -20378,6 +20374,29 @@ fn auditoria_a_citacao_fica_inteira() -> Resultado {
     Ok(())
 }
 
+/// O registro de uma execução guarda o `motivo` e cita a decisão: a
+/// `citacao` inteira no fim, e antes dela o motivo — inteiro ou, no teto do
+/// detalhe, encolhido pelo fim até o começo `essencial`, e não mais. Quem
+/// pediu, antes do motivo, não conta aqui. Ver
+/// [`politica::auditoria::detalhe_composto`].
+fn cita_com_o_motivo(detalhe: &str, motivo: &str, essencial: &str, citacao: &str) -> bool {
+    let Some(antes) = detalhe.strip_suffix(citacao) else {
+        return false;
+    };
+    if antes.ends_with(motivo) {
+        return true;
+    }
+    // O corte cai numa fronteira de caractere: até três bytes aquém do teto.
+    motivo.starts_with(essencial)
+        && detalhe.len() + 3 >= politica::auditoria::MAIOR_DETALHE
+        && (essencial.len()..motivo.len())
+            .any(|n| motivo.is_char_boundary(n) && antes.ends_with(&motivo[..n]))
+}
+
+/// O que sai do anel antes de chegar ao disco vira uma lacuna no journal:
+/// a cadeia refeita dele continua verificável, e tem a mesma cabeça. Muito
+/// para um registro só vai em vários, na ordem. E uma operação cuja
+/// decisão saiu do anel não vai ao journal.
 fn auditoria_a_lacuna() -> Resultado {
     let anterior = crate::persistencia::estado();
     let resultado = (|| -> Resultado {
@@ -42661,38 +42680,55 @@ fn chaves_a_declaracao_ancorada_na_assinatura() -> Resultado {
         let ambas = alloc::format!(
             r#"{{"event":"teste.assinado","subject":"pedido","outcome":"enviado","connection":1,"decision":{decisao}}}"#
         );
-        for (quem, params, detalhe) in [
+        // O número pedido fica inteiro no registro da recusa, e a citação
+        // da decisão dela no fim; o resto do motivo pode encolher no teto do
+        // detalhe — com o prefixo do processo, o maior número não cabe com
+        // o motivo inteiro.
+        for (quem, params, pedida, resto) in [
             (
                 outro,
                 ancorada(decisao),
-                alloc::format!("decisao {decisao} nao e de quem declara"),
+                Some(decisao),
+                "nao e de quem declara",
             ),
             (
                 pessoa,
                 ancorada(decisao),
-                alloc::format!("decisao {decisao} nao e de quem declara"),
+                Some(decisao),
+                "nao e de quem declara",
             ),
             (
                 processo,
                 ancorada(recusada),
-                alloc::format!("decisao {recusada} nao e de quem declara"),
+                Some(recusada),
+                "nao e de quem declara",
             ),
             (
                 processo,
                 ancorada(da_declaracao),
-                alloc::format!("decisao {da_declaracao} e outra declaracao"),
+                Some(da_declaracao),
+                "e outra declaracao",
             ),
             (
                 processo,
                 ancorada(u64::MAX / 2),
-                alloc::format!("decisao {} nao e de quem declara", u64::MAX / 2),
+                Some(u64::MAX / 2),
+                "nao e de quem declara",
             ),
             (
                 processo,
                 ambas,
-                alloc::string::String::from("uma ancora so: connection ou decision"),
+                None,
+                "uma ancora so: connection ou decision",
             ),
         ] {
+            let (motivo, essencial): (alloc::string::String, alloc::string::String) = match pedida {
+                Some(n) => (
+                    alloc::format!("decisao {n} {resto}"),
+                    alloc::format!("decisao {n}"),
+                ),
+                None => (resto.into(), resto.into()),
+            };
             let antes = crate::autorizacao::ultimo_registro();
             let r = declarar(quem, &params);
             if decisao_do_envelope(&r) != "ALLOW"
@@ -42705,13 +42741,18 @@ fn chaves_a_declaracao_ancorada_na_assinatura() -> Resultado {
             if declaracoes_desde(antes) != 0 {
                 return Err("uma ancora recusada declarou");
             }
+            let citacao = explain_de(&r)
+                .and_then(|e| e.member("decision"))
+                .and_then(|d| d.as_u64())
+                .map(|d| alloc::format!("; decisao {d}"))
+                .ok_or("a recusa da ancora nao disse a decisao")?;
             let gravada = registro_que(|e| e.metodo == "audit.declare").is_some_and(|(seq, e)| {
                 seq > antes
                     && e.codigo == politica::Codigo::InvalidArgument
-                    && e.detalhe.contains(detalhe.as_str())
+                    && cita_com_o_motivo(&e.detalhe, &motivo, &essencial, &citacao)
             });
             if !gravada {
-                crate::log_error!("teste", "{}", detalhe);
+                crate::log_error!("teste", "{} / {}", motivo, citacao);
                 return Err("a ancora recusada nao foi gravada com o numero pedido");
             }
         }
