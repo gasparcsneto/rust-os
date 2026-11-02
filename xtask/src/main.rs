@@ -10364,6 +10364,71 @@ fn botao_do_mouse(
     Ok(())
 }
 
+/// Leva o ponteiro da máquina a `(x, y)` e aperta o botão esquerdo, pelo
+/// QMP `qmp` — o caminho do mouse da fumaça ([`sob_mouse`]): a posição
+/// absoluta para o tablet e o deslocamento em passos para o mouse
+/// relativo, até o kernel dizer que o ponteiro chegou. `pedir` faz um
+/// pedido sem parâmetros ao canal do agente da máquina.
+pub(crate) fn clicar_em(
+    qmp: &Path,
+    pedir: &mut dyn FnMut(&str) -> Result<String, String>,
+    x: u32,
+    y: u32,
+) -> Result<(), String> {
+    let info = pedir("display.info")?;
+    let dimensao = |chave: &str| -> Result<u32, String> {
+        valor_de(&info, &format!(r#""{chave}":"#))
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("clique: display.info nao tem `{chave}`\n  {info}"))
+    };
+    let (largura, altura) = (dimensao("width")?, dimensao("height")?);
+    let ponteiro = |info: &str| -> (i64, i64) {
+        let p = info.find(r#""pointer":"#).map(|i| &info[i..]).unwrap_or("");
+        let n = |c: &str| valor_de(p, c).and_then(|v| v.parse().ok()).unwrap_or(0);
+        (n(r#""x":"#), n(r#""y":"#))
+    };
+    let (mut escrita, mut leitor) = qmp_abrir(qmp)?;
+    // A escala do QMP para posição absoluta vai de 0 a 32767.
+    let escala = |v: u32, lado: u32| (v as u64 * 32767 / (lado.max(2) - 1) as u64) as u32;
+    let absoluto = format!(
+        r#"{{"type":"abs","data":{{"axis":"x","value":{}}}}},{{"type":"abs","data":{{"axis":"y","value":{}}}}}"#,
+        escala(x, largura),
+        escala(y, altura)
+    );
+    qmp_eventos(&mut escrita, &mut leitor, &absoluto, "abs")?;
+    std::thread::sleep(Duration::from_millis(150));
+    // O relativo anda a diferença em passos de até cem — ver `sob_mouse`.
+    let (px, py) = ponteiro(&pedir("display.info")?);
+    let (mut faltam_x, mut faltam_y) = (x as i64 - px, y as i64 - py);
+    while faltam_x != 0 || faltam_y != 0 {
+        let (passo_x, passo_y) = (faltam_x.clamp(-100, 100), faltam_y.clamp(-100, 100));
+        let relativo = format!(
+            r#"{{"type":"rel","data":{{"axis":"x","value":{passo_x}}}}},{{"type":"rel","data":{{"axis":"y","value":{passo_y}}}}}"#
+        );
+        if !qmp_eventos(&mut escrita, &mut leitor, &relativo, "rel")? {
+            break;
+        }
+        faltam_x -= passo_x;
+        faltam_y -= passo_y;
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let limite = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (px, py) = ponteiro(&pedir("display.info")?);
+        if px.abs_diff(x as i64) <= 2 && py.abs_diff(y as i64) <= 2 {
+            break;
+        }
+        if std::time::Instant::now() >= limite {
+            return Err(format!(
+                "clique: o ponteiro nao chegou a ({x}, {y}); esta em ({px}, {py})"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    botao_do_mouse(&mut escrita, &mut leitor, true)?;
+    botao_do_mouse(&mut escrita, &mut leitor, false)
+}
+
 /// A moldura `(x, y, largura, altura)` do primeiro elemento da árvore
 /// depois de `marca`.
 fn moldura_depois(arvore: &str, marca: &str) -> Option<(u32, u32, u32, u32)> {

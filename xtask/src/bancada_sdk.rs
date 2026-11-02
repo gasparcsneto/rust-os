@@ -265,15 +265,24 @@ fn cliente(
     Ok(desde)
 }
 
-/// Espera o cliente lançado desde `desde` dizer o fim do eco, e confere.
-fn eco_conferido(quem: &mut DePe, desde: u64, bytes: usize) -> Result<Dito, String> {
-    let (i, resto) = quem.esperar_dito(
+/// Espera o cliente lançado desde `desde` dizer o fim do eco, e confere —
+/// pulando as linhas em `sem`, as de outro cliente do modelo na mesma
+/// máquina. O código de saída é o da primeira saída depois do eco: a do
+/// outro cliente, que saiu antes, não conta.
+fn eco_conferido(
+    quem: &mut DePe,
+    desde: u64,
+    bytes: usize,
+    sem: &[String],
+) -> Result<Dito, String> {
+    let (i, resto, onde) = quem.esperar_dito_sem(
         desde,
         &[
             "modelo: eco ",
             "modelo: a pergunta acabou",
             "modelo: a pergunta nao abriu",
         ],
+        sem,
         ESPERA_PELA_TROCA,
     )?;
     let dito = Dito::de(quem, desde, "modelo: ");
@@ -285,7 +294,7 @@ fn eco_conferido(quem: &mut DePe, desde: u64, bytes: usize) -> Result<Dito, Stri
             dito.texto()
         ));
     }
-    let codigo = saida(quem, desde, Duration::from_secs(30))?;
+    let codigo = saida(quem, onde, Duration::from_secs(30))?;
     if codigo != MODELO_CONFERIU {
         return Err(format!("{}: o cliente saiu com {codigo}", quem.papel));
     }
@@ -378,7 +387,7 @@ fn nb05(b: &mut Bancada) -> Result<String, String> {
     let (desde_b, _) = modelo_pronto(b.destino())?;
     let antes_a = b.origem().marca()?.auditoria;
     let desde_a = cliente(b.origem(), enlace::DISPOSITIVO, NB05_BYTES, "modelo")?;
-    let dito = eco_conferido(b.origem(), desde_a, NB05_BYTES)?;
+    let dito = eco_conferido(b.origem(), desde_a, NB05_BYTES, &[])?;
     let (_, ecoado) =
         b.destino()
             .esperar_dito(desde_b, &["modelo: ecoei "], Duration::from_secs(60))?;
@@ -414,22 +423,22 @@ fn nb01(b: &mut Bancada) -> Result<String, String> {
     // Duke de B aplica — a abertura sai daqui, e volta recusada de lá.
     let desde_2 = b.origem().marca()?.log;
     b.origem().lancar_caminho(MODELO)?;
-    let (i, recusa) = b.origem().esperar_dito(
-        desde_2,
-        &[
-            "modelo: a pergunta nao abriu: ",
-            "modelo: a pergunta acabou: ",
-            "modelo: eco ",
-        ],
-        ESPERA_PELA_TROCA,
-    )?;
+    let fins = [
+        "modelo: a pergunta nao abriu: ",
+        "modelo: a pergunta acabou: ",
+        "modelo: eco ",
+    ];
+    let (i, recusa) = b.origem().esperar_dito(desde_2, &fins, ESPERA_PELA_TROCA)?;
     if i == 2 || !recusa.contains("relacao") {
         return Err(format!(
             "o segundo fluxo remoto da mesma relacao nao foi recusado pelo teto dela: {recusa}"
         ));
     }
-    let r = eco_conferido(b.origem(), desde_r, NB01_BYTES)?;
-    let l = eco_conferido(b.destino(), desde_l, NB01_BYTES)?;
+    // A recusa é do segundo cliente, e não do primeiro: os dois são o
+    // modelo, na mesma máquina.
+    let do_segundo = [format!("{}{recusa}", fins[i])];
+    let r = eco_conferido(b.origem(), desde_r, NB01_BYTES, &do_segundo)?;
+    let l = eco_conferido(b.destino(), desde_l, NB01_BYTES, &[])?;
     let ecoados = b.destino().ditas_com_hora(desde_eco, "eco-malha: ecoei ");
     if ecoados.len() < 2
         || !ecoados
@@ -469,7 +478,7 @@ fn nb02(b: &mut Bancada) -> Result<String, String> {
     sem_pedido(b.destino())?;
     modelo_pronto(b.destino())?;
     let desde = cliente(b.origem(), enlace::DISPOSITIVO, NB02_BYTES, "modelo")?;
-    let d = eco_conferido(b.origem(), desde, NB02_BYTES)?;
+    let d = eco_conferido(b.origem(), desde, NB02_BYTES, &[])?;
     encerrar(b.destino(), &["modelo"])?;
     let ms = match (d.hora("perguntei "), d.hora("eco ")) {
         (Some(a), Some(z)) if z >= a => z - a,
@@ -544,8 +553,13 @@ fn esperar_na_arvore(quem: &mut DePe, valor: &str) -> Result<(), String> {
     ))
 }
 
-/// NB03: a conversa nas duas máquinas, a pessoa digitando nas duas.
-fn nb03(b: &mut Bancada) -> Result<String, String> {
+/// NB03: a conversa nas duas máquinas, a pessoa digitando nas duas. A
+/// tecla numa janela que não é de Terminal é de quem está entrado no
+/// console físico: a pessoa entra nele primeiro, nas duas, e lança a
+/// conversa de lá.
+fn nb03(b: &mut Bancada, maquinas: (&Maquina, &Maquina)) -> Result<String, String> {
+    b.par.origem.entrar_no_fisico(maquinas.0)?;
+    b.par.destino.entrar_no_fisico(maquinas.1)?;
     gravar_texto(b.origem(), PAR_DA_CONVERSA, enlace::DISPOSITIVO)?;
     let desde_b = b.destino().marca()?.log;
     b.destino().lancar("conversa")?;
@@ -578,11 +592,10 @@ fn nb03(b: &mut Bancada) -> Result<String, String> {
     if !de.starts_with(enlace::DISPOSITIVO) {
         return Err(format!("a conversa de B nao disse o outro Duke: `{de}`"));
     }
-    // As janelas saem, e o Terminal volta com o foco: o F1 da barra.
+    // As janelas saem; o que se digita depois vai ao console físico, onde
+    // a pessoa está entrada.
     for quem in [&mut b.par.origem, &mut b.par.destino] {
         encerrar(quem, &["conversa"])?;
-        quem.tecla("f1")?;
-        quem.terminal_atendendo()?;
     }
     Ok(format!(
         "NB03: a pessoa digitou nas duas conversas pelo teclado; cada linha chegou a outra pelo fluxo, lida pela arvore semantica; a de B aceitou de {de}"
@@ -671,7 +684,7 @@ fn passos(
     feito(nb01(b)?);
     feito(nb02(b)?);
     feito(nb06(b)?);
-    feito(nb03(b)?);
+    feito(nb03(b, maquinas)?);
     feito(nb04(b)?);
     Ok(())
 }

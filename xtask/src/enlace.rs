@@ -216,6 +216,51 @@ pub(crate) struct DePe {
     visto: Visto,
 }
 
+/// Um ponto da tela fora de toda janela — onde um clique devolve o
+/// teclado ao kernel —, pelas camadas que `display.info` diz: a primeira é
+/// o console, que cobre a tela; o cursor não conta.
+fn fora_das_janelas(info: &str) -> Option<(u32, u32)> {
+    let numero = |texto: &str, chave: &str| -> Option<i64> {
+        let resto = &texto[texto.find(chave)? + chave.len()..];
+        let fim = resto
+            .char_indices()
+            .find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-')))
+            .map_or(resto.len(), |(i, _)| i);
+        resto[..fim].parse().ok()
+    };
+    let largura = numero(info, r#""width":"#)?;
+    let altura = numero(info, r#""height":"#)?;
+    let camadas = &info[info.find(r#""layers":["#)?..];
+    let camadas = &camadas[..camadas.find(']')?];
+    let mut janelas = Vec::new();
+    for (i, c) in camadas.split(r#"{"id":"#).skip(1).enumerate() {
+        if i == 0 || c.contains(r#""name":"cursor""#) {
+            continue;
+        }
+        janelas.push((
+            numero(c, r#""x":"#)?,
+            numero(c, r#""y":"#)?,
+            numero(c, r#""width":"#)?,
+            numero(c, r#""height":"#)?,
+        ));
+    }
+    let candidatos = [
+        (largura - 4, altura - 4),
+        (4, altura - 4),
+        (largura - 4, altura / 2),
+        (largura / 2, altura - 4),
+        (4, altura / 2),
+    ];
+    candidatos
+        .into_iter()
+        .find(|&(x, y)| {
+            !janelas
+                .iter()
+                .any(|&(jx, jy, jl, ja)| x >= jx && x < jx + jl && y >= jy && y < jy + ja)
+        })
+        .map(|(x, y)| (x as u32, y as u32))
+}
+
 /// O valor de um campo de um objeto plano, ou nada.
 fn valor(campos: &super::ObjetoPlano, nome: &str) -> String {
     campos
@@ -304,13 +349,34 @@ impl DePe {
         prefixos: &[&str],
         espera: Duration,
     ) -> Result<(usize, String), String> {
+        self.esperar_dito_sem(desde, prefixos, &[], espera)
+            .map(|(i, resto, _)| (i, resto))
+    }
+
+    /// Como [`DePe::esperar_dito`], pulando as linhas inteiras em `sem` — as
+    /// de outro processo do mesmo programa —, e com o lugar da linha no log.
+    pub(crate) fn esperar_dito_sem(
+        &mut self,
+        desde: u64,
+        prefixos: &[&str],
+        sem: &[String],
+        espera: Duration,
+    ) -> Result<(usize, String, u64), String> {
         let limite = Instant::now() + espera;
         loop {
             self.ler()?;
-            for linha in self.visto.ditas.range(desde + 1..).map(|(_, (_, l))| l) {
+            for (onde, linha) in self
+                .visto
+                .ditas
+                .range(desde + 1..)
+                .map(|(n, (_, l))| (*n, l))
+            {
+                if sem.iter().any(|s| s == linha) {
+                    continue;
+                }
                 for (i, prefixo) in prefixos.iter().enumerate() {
                     if let Some(resto) = linha.strip_prefix(prefixo) {
-                        return Ok((i, resto.to_string()));
+                        return Ok((i, resto.to_string(), onde));
                     }
                 }
             }
@@ -455,20 +521,47 @@ impl DePe {
         ))
     }
 
-    /// Aperta a tecla `nome` do monitor — `f1`, `ret` —, como a pessoa.
-    pub(crate) fn tecla(&mut self, nome: &str) -> Result<(), String> {
-        use std::io::Write;
-        self.teclado
-            .write_all(format!("sendkey {nome}\n").as_bytes())
-            .and_then(|()| self.teclado.flush())
-            .map_err(|e| format!("{}: falha ao mandar `{nome}`: {e}", self.papel))?;
-        std::thread::sleep(Duration::from_millis(300));
-        Ok(())
-    }
-
-    /// O Terminal tem o teclado: o que se digita chega a ele.
-    pub(crate) fn terminal_atendendo(&mut self) -> Result<(), String> {
-        super::senha::terminal_atendendo(&mut self.m, &mut self.teclado)
+    /// A pessoa entra no console físico da máquina: um clique fora de toda
+    /// janela devolve o teclado ao kernel, e o `login` vai pelo teclado. A
+    /// tecla numa janela que não é de Terminal é de quem está entrado no
+    /// console físico — ver `interpretador::tratar_tecla_de_janela`.
+    pub(crate) fn entrar_no_fisico(&mut self, maquina: &Maquina) -> Result<(), String> {
+        let info = self.m.pedir("display.info", "{}")?;
+        let (x, y) = fora_das_janelas(&info).ok_or_else(|| {
+            format!(
+                "{}: nenhum ponto da tela fora das janelas\n  {info}",
+                self.papel
+            )
+        })?;
+        let qmp = maquina.na_raiz(|| super::caminho_qmp(self.arch));
+        super::clicar_em(&qmp, &mut |metodo| self.m.pedir(metodo, "{}"), x, y)?;
+        let desde = self.marca()?.auditoria;
+        let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
+        self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
+        let limite = Instant::now() + Duration::from_secs(120);
+        loop {
+            self.ler()?;
+            if let Some(g) = self
+                .gravados(desde)
+                .find(|g| g.metodo == "person.login")
+                .cloned()
+            {
+                if g.codigo != "ALLOW" || g.recurso.starts_with("terminal:") {
+                    return Err(format!(
+                        "{}: o login no console fisico deu {} em `{}`",
+                        self.papel, g.codigo, g.recurso
+                    ));
+                }
+                return Ok(());
+            }
+            if Instant::now() >= limite {
+                return Err(format!(
+                    "{}: o login no console fisico nao foi decidido",
+                    self.papel
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(700));
+        }
     }
 
     /// O log das duas máquinas, para a falha: as últimas linhas de
