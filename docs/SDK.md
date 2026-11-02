@@ -183,7 +183,10 @@ loop {
 ```
 
 A janela manda a entrada para o mesmo canal (`Janela` com a operação
-`ENTRADA`), e o pseudo-terminal também: um processo, uma espera.
+`ENTRADA`), e o pseudo-terminal também: um processo, uma espera. O nome
+`laco-<id>` é previsível: se outro processo já o tomou, `Laco::novo` tenta
+`laco-<id>-1`, `laco-<id>-2`… — quem toma o nome antes não impede o
+programa de subir (NS37).
 
 ### O que o aviso diz
 
@@ -224,7 +227,19 @@ O aviso é na **borda**, e a operação do dono o **rearma**:
   abertura. Quem nunca esbarrou não é acordado por espaço;
 - `FIM` sai uma vez, e só com o aviso anterior consumido. Depois da
   operação do dono que ouviu o fim, nada mais é publicado sobre o objeto,
-  e a designação sai;
+  e a designação sai. O objeto que acaba com um aviso ainda não consumido
+  não avisa o fim de novo: o `FIM` se junta ao evento desse aviso, se ele
+  ainda espera na fila — o dono lê os dois juntos —, e a designação sai
+  ali; se o dono já o tirou da fila, o fim espera a operação dele, a que
+  consome o aviso — e, se ela não ouviu o fim (a leitura do último dado,
+  que acabou com o fluxo, por exemplo), o `FIM` sai em seguida, uma vez
+  (NS03, NS32);
+- a operação do dono **recusada pelo gate** — a política, a taxa, a
+  contenção, ou a reconfirmação dentro da decisão — também consome o
+  aviso: senão o objeto ficaria mudo. O que ainda está pronto avisa de
+  novo na próxima mudança do objeto, ou pelo coletor, um segundo depois da
+  recusa — uma recusa que dura não vira um giro de aviso, recusa e aviso
+  (NS33);
 - **um aviso de cada objeto no canal**: a operação do dono consome o aviso
   mesmo que o evento ainda esteja na fila do canal — o programa que lê
   várias vezes seguidas, sem voltar ao laço, rearma a cada leitura. O
@@ -240,12 +255,20 @@ programa que oferece com o aviso e não usa entregas ainda assim chama
 ### O canal cheio, a morte, a troca de imagem
 
 - O canal guarda 64 eventos. Com ele cheio, o aviso fica **devido** e o
-  coletor o entrega depois, sem perder o objeto nem duplicar o aviso.
+  coletor o entrega depois, sem perder o objeto nem duplicar o aviso. O
+  fim de um objeto que acabou com o canal cheio fica devido. Ele e o fim
+  na espera da operação do dono são as únicas designações sem objeto vivo,
+  e um processo guarda no máximo 8 delas; passado disso, a mais antiga
+  cai, contada em `dropped`: um processo que não lê o canal, ou que lê e
+  não opera, não acumula objetos que já acabaram (NS32).
 - O canal que ninguém mais escuta — o processo fechou o descritor, ou
   morreu — larga as designações dele.
-- A troca de imagem (`exec`) larga as designações **antes** do resto: a
-  imagem nova não ouve os avisos da anterior. Os endpoints persistem, como
-  sempre persistiram; a imagem nova oferece com o aviso de novo, se quiser.
+- A troca de imagem (`exec`) larga as designações **antes** do resto, e
+  os avisos que ainda esperavam na fila dos canais do processo saem com
+  elas: a imagem nova herda os descritores, e não ouve os avisos da
+  anterior (NS17, NS36). Os endpoints persistem, como sempre persistiram
+  (a malha os mantém na troca de imagem); a imagem nova oferece com o
+  aviso de novo, se quiser.
 - O `fork` não passa designação nenhuma: o filho não é dono de pontas nem
   de endpoints, e um descritor herdado não o faz ouvinte do canal — o
   `notify` com ele é recusado.
@@ -266,16 +289,20 @@ agente é recusado como sempre, com o mesmo código com ou sem `notify`
 ### Auditoria e medidas
 
 O aviso não tem registro próprio na auditoria: a designação está no
-registro do comando que a pediu (com o canal), e cada operação depois do
-aviso está no registro dela. As medidas vão ao `security.metrics`, em
-`mesh_notices`: as designações vivas (`designations`), os avisos
+registro de execução do comando que a pediu, na mesma cadeia, com o nome
+do canal — só com letras, dígitos e `-_.:/`, o resto vira `_`: o nome é
+texto do processo, e não pode imitar a citação da decisão (NS35) —, e
+cada operação depois do aviso está no registro dela. As medidas vão ao
+`security.metrics`, em `mesh_notices`: as designações vivas
+(`designations`), os avisos
 publicados (`published`), os juntados a um do mesmo objeto ainda na fila
 (`merged`), as mudanças que não avisaram porque já havia um aviso não
 consumido (`coalesced`), os que acharam o canal cheio (`full_channel`) e
 os entregues depois (`delivered_later`), as designações largadas com o
 canal (`dropped`), os `notify` recusados (`refused`) e a latência do aviso
 publicado até a operação do dono que o consome (`to_operation_samples`,
-`to_operation_avg_ns`, `to_operation_max_ns`).
+`to_operation_avg_ns`, `to_operation_max_ns`). `dropped` conta também as
+designações acabadas que passaram do teto do processo.
 
 ## As entregas e os fluxos
 
@@ -294,6 +321,11 @@ plano de controle, vai sem `wait`. O que não coube na escrita espera numa
 [`EscritaPendente`](../programas/src/fluxo.rs), que escoa quando o
 `GRAVAVEL` vem. As variantes com espera do DN-2 continuam valendo, e um
 mesmo processo pode ter um fluxo com o aviso e outro sem.
+
+**Quem retira ou fecha.** Quem retira um endpoint que designou não é
+avisado do fim dele, e quem fecha um fluxo não é avisado de nada mais:
+sabem, porque fizeram. O fecho que a reconfirmação recusa deixa o fluxo
+vivo, e a designação com ele (NS34).
 
 **O fim e o fecho.** `Fluxo::terminar` termina o sentido daqui: o outro
 lado lê o resto e o fim (`LEGIVEL`). Quando o fluxo acabou de vez para o
@@ -357,6 +389,7 @@ continua sendo entrada não confiável.
 | canais escutados por processo | 2 (o laço e um de folga) |
 | eventos guardados por canal | 64 |
 | avisos não consumidos por objeto | 1 |
+| designações de objetos que já acabaram, por processo | 8 |
 | endpoints por processo / por titular | 4 / 16 |
 | fluxos por processo / por titular / na máquina | 4 / 8 / 16 |
 | pedidos esperando o aceite, por endpoint | 4 |
@@ -407,19 +440,27 @@ NS28 o instala e roda.
 
 ## Testes
 
-- **No hospedeiro** (NH01–NH13): a conta pura do aviso
+- **No hospedeiro** (NH01–NH16): a conta pura do aviso
   (`politica::aviso`) — a borda que publica uma vez, a operação que
   rearma, o espaço só para quem o quer, o fim uma vez, o canal cheio, o
   canal sem ouvinte, a codificação e o evento que só tem o tipo, o número e
-  os bits —; o quadro (`protocolo::quadro`); no xtask, o selo e a lista
-  do contrato, com a conferência que acusa o parâmetro tirado; e a
-  prontidão que o kernel pergunta, da ponta (`politica::fluxo`, NH12) e do
-  endpoint (`politica::malha`, NH13).
-- **Na suíte**, nas duas arquiteturas: 26 casos `aviso:` (NS01–NS25 e o
-  NS01b) e 6 casos `sdk:` (NS26–NS31). O programa `avisado` só espera no
-  canal dele e diz no log cada aviso que chega; a suíte dita os passos a
-  ele — o caminho inteiro pelo runtime — ou pede **como** ele, pela mesma
-  função do gate, nos passos que precisam ser exatos. O que se confere é o
+  os bits, o fim com o aviso não consumido — junto ao evento da fila, ou
+  na espera da operação do dono (NH14) — e o fim devido, no teto do
+  processo (NH15) —;
+  o quadro (`protocolo::quadro`); no xtask, o selo e a lista do contrato,
+  com a conferência que acusa o parâmetro tirado, e o ELF forjado recusado
+  sem pânico (NH16); e a prontidão que o kernel pergunta, da ponta
+  (`politica::fluxo`, NH12) e do endpoint (`politica::malha`, NH13).
+- **Na suíte**, nas duas arquiteturas: 31 casos `aviso:` (NS01–NS25, o
+  NS01b e NS32–NS36) e 7 casos `sdk:` (NS26–NS31 e NS37). Os NS32–NS37
+  vieram da validação final — os achados do agente adversário: o fim com o
+  aviso não consumido, junto ao da fila ou na espera do dono, e o teto das
+  designações acabadas; a recusa do gate que consome o aviso; quem retira
+  ou fecha; o nome do canal no registro; a fila na troca de imagem; e o
+  nome do laço tomado. O programa `avisado` só espera no canal dele e diz
+  no log cada aviso que chega; a suíte dita os passos a ele — o caminho
+  inteiro pelo runtime — ou pede **como** ele, pela mesma função do gate,
+  nos passos que precisam ser exatos. O que se confere é o
   que o kernel publicou, quando e quantas vezes, e que cada operação depois
   de um aviso continua sendo um pedido decidido pelo gate.
 - **As invariantes de fonte** (NI01–NI03): só `kernel::aviso` publica

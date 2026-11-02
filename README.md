@@ -8957,11 +8957,13 @@ ignorado. A conta de quando avisar é pura
 ([`politica/src/aviso.rs`](politica/src/aviso.rs)): na borda, no máximo um
 aviso não consumido por objeto, rearmado pela operação do dono com o
 nível reavaliado; o espaço só para quem esbarrou no cheio e para quem
-abriu; o fim uma vez; o canal cheio deixa o aviso devido, e o coletor
-tenta de novo; e o aviso que ainda espera na fila do canal recebe os bits
-do seguinte do mesmo objeto. O `exec` larga as designações antes de os
-fluxos acabarem; a morte e o canal fechado as largam
-([`kernel/src/aviso.rs`](kernel/src/aviso.rs)).
+abriu; o fim uma vez — o de um objeto que acaba com o aviso ainda não
+consumido se junta a ele na fila, ou espera a operação do dono —; o canal
+cheio deixa o aviso devido, e o coletor tenta de novo; o aviso que ainda
+espera na fila do canal recebe os bits do seguinte do mesmo objeto; e um
+processo guarda no máximo 8 designações de objetos que já acabaram. O
+`exec` larga as designações antes de os fluxos acabarem; a morte e o canal
+fechado as largam ([`kernel/src/aviso.rs`](kernel/src/aviso.rs)).
 
 **DS-2 — o contrato público da interface nativa v2.** O que um programa
 fala com o kernel é uma lista explícita e versionada,
@@ -8986,10 +8988,11 @@ roda com o selo de um editor em quem o papel confia.
 
 **Testes.** No hospedeiro, a conta do aviso — a borda, o rearme, o espaço
 só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
-codificação e o evento que só tem o tipo, o número e os bits —, o quadro, a
-prontidão da ponta e do endpoint, o selo e a lista do contrato
-(NH01–NH13). Na suíte, nas duas arquiteturas,
-26 casos `aviso:` e 6 `sdk:` — o programa `avisado`, que só espera no canal
+codificação e o evento que só tem o tipo, o número e os bits, o fim com o
+aviso não consumido — junto ao da fila, ou na espera do dono — e o fim
+devido —, o quadro, a prontidão da ponta e do endpoint, o selo, a lista do
+contrato e o ELF forjado (NH01–NH16). Na suíte, nas duas arquiteturas, 31
+casos `aviso:` e 7 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
 espaço para quem esbarrou, o fim do sentido, o fecho e o aborto, o
@@ -9000,10 +9003,14 @@ designa, a revogação e a política nova entre o aviso e a leitura, o evento
 sem conteúdo, cada processo no seu canal, só processo designando, o fim
 contra a leitura, a troca de imagem, a morte e o canal sem ouvinte, o
 canal cheio, quatro fluxos e dois pares sob carga, o desligamento, a
-suspensão e o esquecimento do dispositivo, e os fluxos de e para outro
-Duke —; e o `eco-malha` com três clientes num processo só, a `conversa`, o
-programa de fora do repositório selado, instalado e rodado, o
-`agent.describe` contra o contrato, o `system.info` e as medidas do laço.
+suspensão e o esquecimento do dispositivo, os fluxos de e para outro
+Duke, o fim com o aviso não consumido — junto ao da fila, ou na espera do
+dono, com o teto das designações acabadas —, a recusa do gate que consome
+o aviso, quem retira ou fecha, o nome do canal no registro e a fila na troca
+de imagem —; e o `eco-malha` com três clientes num processo só, a
+`conversa`, o programa de fora do repositório selado, instalado e rodado,
+o `agent.describe` contra o contrato, o `system.info`, as medidas do laço
+e o laço que sobe com o nome tomado.
 As invariantes de fonte conferem que só `kernel::aviso` publica o aviso,
 sem conteúdo, e o contrato contra o protocolo, o registro e a política
 (NI01–NI03); o job "SDK fora do repositório" compila,
