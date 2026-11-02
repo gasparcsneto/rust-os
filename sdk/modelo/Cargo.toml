@@ -1,0 +1,48 @@
+[package]
+# O modelo de um programa do Duke feito fora do repositório — ver
+# `docs/SDK.md`. Para fazer o seu: copie esta pasta, troque o nome (aqui, no
+# `[[bin]]` e no `manifesto!` de `src/main.rs`) e aponte o `programas` e o
+# `protocolo` para onde eles estão — por caminho, como aqui, ou por git
+# (`programas = { git = "<repositório>", rev = "<commit>" }`, e o mesmo
+# para o `protocolo`).
+#
+# O programa fala a interface nativa v2: a lista conferida dela é
+# `sdk/contrato.txt`, e o kernel diz a dele em `system.info`
+# (`native_interface`).
+name = "modelo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "modelo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+# O runtime: a entrada, as chamadas de sistema, o monte, a saída, a malha,
+# os fluxos, o laço e as mensagens sobre um fluxo.
+programas = { path = "../../programas" }
+# Os números do contrato: os tipos de evento, os erros, os bits do aviso.
+protocolo = { path = "../../protocolo", features = ["alloc", "arrays"] }
+
+# Sem `unwind`: não há quem desenrole a pilha no espaço do usuário, e um
+# pânico encerra o processo com um código.
+[profile.dev]
+panic = "abort"
+
+# Em release, pelo tamanho: o kernel lê o executável inteiro a cada
+# execução, e recusa o que passa de `protocolo::usuario::MAIOR_EXECUTAVEL`.
+# Sem a tabela de símbolos: nada no Duke a lê, e o manifesto (`.note.duke`)
+# fica.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+lto = true
+strip = "symbols"
+
+# Um workspace próprio: o alvo padrão é outro, e o ligador precisa do
+# `usuario.ld` daqui.
+[workspace]

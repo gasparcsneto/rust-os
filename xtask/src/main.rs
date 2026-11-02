@@ -15,6 +15,7 @@
 //! `A` é `x86_64` (padrão) ou `aarch64`. Aceita também `--release`.
 
 mod atualizar;
+mod bancada_sdk;
 mod botao;
 mod canal_tcp;
 mod codigo;
@@ -28,6 +29,7 @@ mod pareamento;
 mod persistencia;
 mod producao;
 mod rede_principal;
+mod sdk;
 mod senha;
 mod servidor_de_hora;
 mod slots;
@@ -295,6 +297,24 @@ fn main() -> ExitCode {
         "enlace" => enlace::enlace(release),
         "pareamento" => pareamento::pareamento(release),
         "fluxo" => fluxo::fluxo(release),
+        // O SDK: selar um programa de fora com a chave de um editor,
+        // conferir um executável, e o modelo compilado fora do workspace.
+        "selar" => match (posicionais.get(1), posicionais.get(2)) {
+            (Some(privada), Some(elf)) => sdk::selar(
+                Path::new(privada),
+                Path::new(elf),
+                extrair_valor(&args, "--saida").map(Path::new),
+            ),
+            _ => Err("uso: cargo xtask selar <privada do editor> <elf> [--saida <arquivo>]".into()),
+        },
+        "sdk-conferir" => match posicionais.get(1) {
+            Some(elf) => sdk::sdk_conferir(Path::new(elf)),
+            None => Err("uso: cargo xtask sdk-conferir <elf>".into()),
+        },
+        "sdk-fora" => sdk::sdk_fora(arch),
+        // A bancada do SDK: duas máquinas, o modelo de fora do repositório
+        // nas duas, os exemplos entre elas — ver [`bancada_sdk`].
+        "sdk" => bancada_sdk::sdk(release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -527,6 +547,22 @@ COMANDOS:
                               esquecimento, o corte e a revogação no meio do
                               fluxo; e as vagas da porta do enlace; nos mesmos
                               quatro pares (DUKE_PARES escolhe)
+    sdk                       duas máquinas e o SDK da malha (docs/SDK.md): o
+                              modelo de fora do repositório, selado, instalado
+                              no armazém das duas e falando entre elas; o
+                              eco-malha com um cliente daqui e um de lá, e o
+                              segundo de lá recusado pelo teto da relação; os
+                              dois sentidos ao mesmo tempo; a conversa pelo
+                              teclado; as medidas do aviso e da vazão; e a
+                              revogação no meio; nos mesmos quatro pares
+    sdk-fora [--arch A]       o sdk/modelo copiado para fora do workspace,
+                              compilado contra o programas, conferido e selado
+                              pelo editor bancada; o adulterado não confere
+    sdk-conferir <elf>        o manifesto, a nota, o tamanho contra o teto do
+                              kernel, o selo, se há, e o resumo de um executável
+    selar <privada> <elf> [--saida <arquivo>]
+                              sela um executável com a chave de um editor; lê
+                              só ela, recusa o ELF sem manifesto e o já selado
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto
@@ -2623,6 +2659,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_os_trechos_da_politica()?,
         conferir_a_chave_da_copia()?,
         conferir_os_fluxos()?,
+        sdk::conferir_o_contrato()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -5166,6 +5203,7 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
         "web3/src",
         "programas/src",
         "xtask/src",
+        "sdk/modelo/src",
     ] {
         percorrer_fontes_e_ligacao(&raiz.join(sub), &mut |caminho| {
             let nome = caminho
@@ -5180,6 +5218,11 @@ fn conferir_arvore_do_readme() -> Result<ExitCode, String> {
     // E o script de ligação dos programas, que mora fora de `src` — ao lado
     // do `Cargo.toml` que o usa, e não no meio do código.
     if raiz.join("programas").join("usuario.ld").is_file() {
+        *no_disco.entry("usuario.ld".to_string()).or_default() += 1;
+    }
+    // E o do modelo do SDK, a cópia que quem faz um programa fora do
+    // repositório leva — ver `xtask/src/sdk.rs`.
+    if raiz.join("sdk").join("modelo").join("usuario.ld").is_file() {
         *no_disco.entry("usuario.ld".to_string()).or_default() += 1;
     }
 

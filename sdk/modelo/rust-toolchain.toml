@@ -1,0 +1,12 @@
+# O toolchain de um programa do Duke: o canal do repositório (o
+# `rust-toolchain.toml` da raiz), com os dois alvos dos programas —
+# instalados pelo rustup na primeira compilação, sem passo manual. O
+# programa não pede recurso nenhum do nightly; o canal é o do repositório
+# para que o `programas` e o `protocolo` compilem fora como compilam dentro.
+# O `cargo xtask invariantes` confere que o canal é o mesmo e que os dois
+# alvos estão aqui.
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-none", "aarch64-unknown-none-softfloat"]
+profile = "minimal"

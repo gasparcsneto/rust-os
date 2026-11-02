@@ -151,6 +151,12 @@ impl Maquina {
         sigilo::publica_de(&self.privada)
     }
 
+    /// Roda `f` na raiz de estado desta máquina: os sockets dela — o das
+    /// portas dos agentes, entre eles — são os de lá.
+    pub(crate) fn na_raiz<R>(&self, f: impl FnOnce() -> R) -> R {
+        super::na_raiz(&self.raiz, f)
+    }
+
     /// Liga a máquina, na raiz dela, e abre o teclado.
     pub(crate) fn ligar(&self) -> Result<DePe, String> {
         super::na_raiz(&self.raiz, || {
@@ -403,6 +409,12 @@ impl DePe {
     /// `user.run` decidido: o programa não roda duas vezes.
     pub(crate) fn lancar(&mut self, programa: &str) -> Result<(), String> {
         let caminho = format!("/programas/{}/{programa}", self.arch.nome());
+        self.lancar_caminho(&caminho)
+    }
+
+    /// Como [`DePe::lancar`], o arquivo em `caminho` — o de fora da imagem,
+    /// no armazém, também: a mesma conferência do `user.run`.
+    pub(crate) fn lancar_caminho(&mut self, caminho: &str) -> Result<(), String> {
         for vez in 0..VEZES_DE_DIGITAR {
             let desde = self.marca()?.auditoria;
             if vez > 0 {
@@ -441,6 +453,22 @@ impl DePe {
             "{}: o user.run de {caminho} nao chegou ao gate em {VEZES_DE_DIGITAR} vezes",
             self.papel
         ))
+    }
+
+    /// Aperta a tecla `nome` do monitor — `f1`, `ret` —, como a pessoa.
+    pub(crate) fn tecla(&mut self, nome: &str) -> Result<(), String> {
+        use std::io::Write;
+        self.teclado
+            .write_all(format!("sendkey {nome}\n").as_bytes())
+            .and_then(|()| self.teclado.flush())
+            .map_err(|e| format!("{}: falha ao mandar `{nome}`: {e}", self.papel))?;
+        std::thread::sleep(Duration::from_millis(300));
+        Ok(())
+    }
+
+    /// O Terminal tem o teclado: o que se digita chega a ele.
+    pub(crate) fn terminal_atendendo(&mut self) -> Result<(), String> {
+        super::senha::terminal_atendendo(&mut self.m, &mut self.teclado)
     }
 
     /// O log das duas máquinas, para a falha: as últimas linhas de

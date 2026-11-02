@@ -1,0 +1,185 @@
+# O contrato público da interface nativa do Duke — versão 2 (DS-2).
+#
+# Esta é a lista conferida: o `cargo xtask invariantes` a compara com o
+# registro de comandos (kernel/src/agent/commands.rs), com o `protocolo`
+# (as chamadas, os erros, os eventos, os bits do aviso da malha e os tetos
+# do envelope) e com os códigos da política (politica/src/codigo.rs).
+# Tirar, renomear ou mudar o tipo de qualquer coisa daqui reprova; o que
+# entra no registro dentro do contrato — um parâmetro novo de um comando
+# daqui, uma chamada, um tipo de evento, um bit, um código — reprova até
+# entrar aqui também, revisado. O que está aqui é o que um programa de fora
+# do repositório pode usar e continuar usando: ver docs/SDK.md.
+#
+# As regras do contrato (DS-2):
+#   - só cresce dentro da versão: comando novo, parâmetro opcional novo,
+#     campo novo num resultado, tipo de evento novo, bit novo, código novo;
+#   - um nome nunca muda de sentido;
+#   - o que o kernel não conhece ele recusa, nunca ignora;
+#   - o programa ignora o que não conhece no que recebe;
+#   - remover só numa versão maior, por decisão própria, e o removido é
+#     recusado;
+#   - uma versão viva por kernel.
+#
+# A forma das linhas:
+#   versao  <n>                         protocolo::usuario::nativo::VERSAO
+#   chamada <NOME> <numero>             protocolo::usuario::numero
+#   erro    <NOME> <numero>             protocolo::usuario::erro
+#   evento  <NOME> <numero>             protocolo::usuario::evento::tipo
+#   malha   <NOME> <valor>              protocolo::usuario::evento::malha
+#   nativo  <NOME> <valor>              protocolo::usuario::nativo (os tetos)
+#   codigo  <NOME> <valor>              politica::Codigo
+#   comando <nome>                      um comando do contrato
+#   param   <comando> <nome> <tipo> <obrigatorio|opcional>
+#           o tipo: inteiro, texto, intencao, booleano, lista
+#
+# A forma binária do programa — o ELF dos dois alvos, o `usuario.ld`, a
+# entrada `principal` e a nota `Duke` com `duke-manifesto 1` — também é
+# contrato, sem mudança de formato; ela é conferida na carga de cada
+# programa, e não por esta lista.
+
+versao 2
+
+# As chamadas de mecanismo.
+chamada SAIR 0
+chamada ESCREVER 1
+chamada ID 2
+chamada CEDER 3
+chamada BIFURCAR 4
+chamada EXECUTAR 5
+chamada ABRIR 6
+chamada LER 7
+chamada FECHAR 8
+chamada ESPERAR 9
+chamada MAPEAR 10
+chamada ESCUTAR 11
+chamada SUPERFICIE 12
+chamada CONTROLAR 13
+chamada DESCREVER 14
+chamada TERMINAL 15
+chamada VALOR 16
+chamada PEDIR 17
+chamada RESPOSTA 18
+chamada PEDIR_COM_ANEXO 19
+
+# Os erros das chamadas.
+erro NUMERO_INVALIDO -1
+erro ENDERECO_INVALIDO -2
+erro TAMANHO_INVALIDO -3
+erro DESCRITOR_INVALIDO -4
+erro SEM_MEMORIA -5
+erro SEM_VAGA_DE_FIO -6
+erro PROGRAMA_DESCONHECIDO -7
+erro SEM_DESCRITOR -8
+erro NAO_ENCONTRADO -9
+erro NAO_EH_ARQUIVO -10
+erro SEM_FILHOS -11
+erro JA_MAPEADO -12
+erro OCUPADO -13
+erro ARGUMENTO_INVALIDO -14
+erro SEM_TELA -15
+erro NEGADO -16
+erro MUDOU -17
+erro SEM_SELO -18
+erro SELO_NAO_CONFERE -19
+erro EDITOR_NAO_CONFIADO -20
+
+# Os tipos de evento.
+evento TESTE 1
+evento PONTEIRO 2
+evento TECLA 3
+evento ABRIR 4
+evento FOCO_PERDIDO 5
+evento ENCERRAR 6
+evento ACAO 7
+evento SAIDA 8
+evento MALHA 9
+
+# O aviso da malha (DS-1): o tipo do objeto, no campo `a`, e os bits de
+# prontidão, no campo `c`.
+malha ENDPOINT 1
+malha PONTA 2
+malha LEGIVEL 1
+malha GRAVAVEL 2
+malha FIM 4
+malha PEDIDO 8
+malha ENTREGA 16
+
+# Os tetos do envelope.
+nativo MAIOR_PEDIDO 4096
+nativo MAIOR_ANEXO 61440
+
+# Os códigos de recusa e de desfecho.
+codigo ALLOW 0
+codigo DENY_NOT_AUTHENTICATED 1
+codigo DENY_ROLE 2
+codigo DENY_PERMISSION 3
+codigo DENY_RESOURCE 4
+codigo DENY_POLICY 5
+codigo RATE_LIMIT 6
+codigo INVALID_ARGUMENT 7
+codigo ERROR 8
+codigo CONFLICT 9
+codigo DENY_LEASE 10
+codigo DENY_REPLAY 11
+codigo DENY_QUOTA 12
+codigo DENY_CONTAINED 13
+codigo DENY_CREDENTIAL 14
+
+# Os comandos da malha: as entregas (Marco 1, Estágio 1).
+comando fabric.offer
+param fabric.offer intent intencao obrigatorio
+param fabric.offer notify inteiro opcional
+comando fabric.withdraw
+param fabric.withdraw endpoint texto obrigatorio
+comando fabric.discover
+param fabric.discover intent intencao obrigatorio
+param fabric.discover device texto opcional
+comando fabric.send
+param fabric.send endpoint texto obrigatorio
+param fabric.send intent intencao obrigatorio
+param fabric.send body texto obrigatorio
+param fabric.send nonce inteiro obrigatorio
+param fabric.send ttl_ms inteiro opcional
+param fabric.send device texto opcional
+comando fabric.recv
+param fabric.recv endpoint texto obrigatorio
+param fabric.recv after texto opcional
+param fabric.recv max inteiro opcional
+param fabric.recv wait inteiro opcional
+comando fabric.ack
+param fabric.ack id texto obrigatorio
+param fabric.ack reply texto opcional
+param fabric.ack expect_version inteiro opcional
+comando fabric.cancel
+param fabric.cancel id texto obrigatorio
+param fabric.cancel expect_version inteiro opcional
+param fabric.cancel device texto opcional
+comando fabric.status
+param fabric.status id texto obrigatorio
+param fabric.status device texto opcional
+
+# Os comandos da malha: os fluxos (DN-2), com o aviso (DS-1).
+comando stream.open
+param stream.open endpoint texto obrigatorio
+param stream.open intent intencao obrigatorio
+param stream.open device texto opcional
+param stream.open notify inteiro opcional
+comando stream.accept
+param stream.accept endpoint texto obrigatorio
+param stream.accept wait inteiro opcional
+param stream.accept notify inteiro opcional
+comando stream.write
+param stream.write stream texto obrigatorio
+param stream.write content texto opcional
+param stream.write attachment inteiro opcional
+param stream.write wait inteiro opcional
+comando stream.read
+param stream.read stream texto obrigatorio
+param stream.read max inteiro opcional
+param stream.read wait inteiro opcional
+comando stream.finish
+param stream.finish stream texto obrigatorio
+comando stream.close
+param stream.close stream texto obrigatorio
+comando stream.status
+param stream.status stream texto obrigatorio

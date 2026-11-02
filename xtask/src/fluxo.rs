@@ -114,7 +114,7 @@ const ESPERA_NO_MEIO: Duration = Duration::from_secs(200);
 const VEZES_DE_DIGITAR: usize = 3;
 
 /// Os pares, na ordem em que rodam: origem e destino.
-const PARES: [(Arquitetura, Arquitetura); 4] = [
+pub(crate) const PARES: [(Arquitetura, Arquitetura); 4] = [
     (Arquitetura::X86_64, Arquitetura::Aarch64),
     (Arquitetura::Aarch64, Arquitetura::X86_64),
     (Arquitetura::X86_64, Arquitetura::X86_64),
@@ -627,7 +627,7 @@ fn ate_o_fim(
 
 /// Encerra, pelo `process.terminate` da serial, os processos de `quem` cujo
 /// programa é um de `nomes`; espera eles saírem. Quantos eram.
-fn encerrar(quem: &mut DePe, nomes: &[&str]) -> Result<usize, String> {
+pub(crate) fn encerrar(quem: &mut DePe, nomes: &[&str]) -> Result<usize, String> {
     let ids = |quem: &mut DePe| -> Result<Vec<String>, String> {
         let r = quem.m.pedir("process.list", "{}")?;
         let lista = super::objetos_planos(super::apos(&r, r#""processes":["#).unwrap_or(""))?;
@@ -1535,7 +1535,7 @@ fn um_par(
 
 /// O armazém compartilhado de `quem`, onde o `recebedor` grava: pela
 /// serial, que é o sistema.
-fn armazem_compartilhado(quem: &mut DePe) -> Result<(), String> {
+pub(crate) fn armazem_compartilhado(quem: &mut DePe) -> Result<(), String> {
     let r = quem
         .m
         .pedir("fs.stat", r#"{"path":"/armazem/compartilhado"}"#)?;

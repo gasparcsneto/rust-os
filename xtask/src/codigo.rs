@@ -22,6 +22,13 @@
 //! | `<nome>-estranho` | selado por uma chave fora do registro | `CODE_UNTRUSTED` |
 //! | `<nome>-outro` | selado por `outro`, do registro, em quem nenhum papel confia | `CODE_UNTRUSTED` |
 //!
+//! # O modelo do SDK
+//!
+//! O `sdk/modelo` é publicado do mesmo jeito, com as mesmas cinco
+//! variantes ([`DO_SDK`]): compilado **fora** do workspace, como quem o
+//! copia o compilaria — ver `xtask/src/sdk.rs` —, e servido selado. É o
+//! programa feito fora do repositório que a suíte instala e roda (`sdk:`).
+//!
 //! # As chaves
 //!
 //! As privadas dos editores ficam em `target/chaves/`, como as dos agentes:
@@ -36,6 +43,10 @@ use super::Arquitetura;
 
 /// Os programas publicados: compilados, fora da imagem, servidos selados.
 pub(crate) const PUBLICADOS: &[&str] = &["vindo"];
+
+/// O programa do modelo do SDK, publicado com as mesmas variantes —
+/// compilado fora do workspace, e não com os programas da imagem.
+pub(crate) const DO_SDK: &str = super::sdk::NOME_DO_MODELO;
 
 /// Os editores do registro da imagem, pelo nome: `bancada`, em que a
 /// política de desenvolvimento confia, e `outro`, em que nenhum papel
@@ -131,16 +142,22 @@ fn gravar(caminho: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Publica os programas de `arch` na bancada: cada variante de cada um,
 /// conferida antes de ir para o lugar. Os programas já estão compilados —
-/// quem chama montou o disco antes, e o disco os compila.
+/// quem chama montou o disco antes, e o disco os compila —; o modelo do SDK
+/// é compilado aqui, fora do workspace (`sdk::compilar_o_modelo`).
 pub(crate) fn publicar(arch: Arquitetura) -> Result<PathBuf, String> {
     let chaves = super::chaves::Chaves::garantir()?;
     let dir = diretorio().join(arch.nome());
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("não foi possível criar {}: {e}", dir.display()))?;
+    let mut publicados = Vec::new();
     for nome in PUBLICADOS {
-        let codigo = elf(arch, nome)?;
+        publicados.push((*nome, elf(arch, nome)?));
+    }
+    // O modelo, copiado para fora do workspace e compilado lá.
+    publicados.push((DO_SDK, super::sdk::compilar_o_modelo(arch)?));
+    for (nome, codigo) in &publicados {
         for (sufixo, _) in VARIANTES {
-            let bytes = variante(&codigo, sufixo, &chaves)?;
+            let bytes = variante(codigo, sufixo, &chaves)?;
             conferir(&bytes, sufixo, &chaves).map_err(|e| format!("{nome}: {e}"))?;
             gravar(&dir.join(format!("{nome}{sufixo}")), &bytes)?;
         }
