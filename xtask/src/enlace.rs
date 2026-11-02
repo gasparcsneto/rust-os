@@ -292,7 +292,7 @@ impl DePe {
 
     /// Espera a primeira linha de programa depois de `desde` que comece com
     /// um dos `prefixos`: qual, e o resto dela.
-    fn esperar_dito(
+    pub(crate) fn esperar_dito(
         &mut self,
         desde: u64,
         prefixos: &[&str],
@@ -329,7 +329,7 @@ impl DePe {
     }
 
     /// Como [`DePe::ditas`], com o tempo de máquina de cada linha, em ms.
-    fn ditas_com_hora(&self, desde: u64, prefixo: &str) -> Vec<(u64, String)> {
+    pub(crate) fn ditas_com_hora(&self, desde: u64, prefixo: &str) -> Vec<(u64, String)> {
         self.visto
             .ditas
             .range(desde + 1..)
@@ -340,6 +340,16 @@ impl DePe {
     /// Os registros da auditoria depois de `desde`.
     pub(crate) fn gravados(&self, desde: u64) -> impl Iterator<Item = &Gravado> {
         self.visto.gravados.range(desde + 1..).map(|(_, g)| g)
+    }
+
+    /// O número do último registro visto com `metodo`, se houve um.
+    pub(crate) fn ultimo_com(&self, metodo: &str) -> Option<u64> {
+        self.visto
+            .gravados
+            .iter()
+            .rev()
+            .find(|(_, g)| g.metodo == metodo)
+            .map(|(s, _)| *s)
     }
 
     /// Uma operação administrativa, provada pelo administrador da imagem:
@@ -391,7 +401,7 @@ impl DePe {
     /// decisão gravada, digita de novo, depois de uma linha vazia que encerra
     /// o que tiver ficado pela metade. Só digita de novo quem não viu o
     /// `user.run` decidido: o programa não roda duas vezes.
-    fn lancar(&mut self, programa: &str) -> Result<(), String> {
+    pub(crate) fn lancar(&mut self, programa: &str) -> Result<(), String> {
         let caminho = format!("/programas/{}/{programa}", self.arch.nome());
         for vez in 0..VEZES_DE_DIGITAR {
             let desde = self.marca()?.auditoria;
@@ -844,7 +854,7 @@ impl Par {
 
     /// Corta a energia do destino e o liga de novo, no mesmo disco e no
     /// mesmo TPM: o que voltar, voltou do journal.
-    fn religar_o_destino(&mut self, maquina: &Maquina) -> Result<(), String> {
+    pub(crate) fn religar_o_destino(&mut self, maquina: &Maquina) -> Result<(), String> {
         self.destino.m.cortar()?;
         self.destino = maquina.ligar()?;
         Ok(())
@@ -857,7 +867,7 @@ impl Par {
 
 /// O registro da relação em `quem`: a chave do Duke do outro, a pessoa, a
 /// relação, e o endereço, se houver.
-fn registrar(
+pub(crate) fn registrar(
     quem: &mut DePe,
     outro: &[u8; 32],
     pessoa: &str,
@@ -887,10 +897,17 @@ pub(crate) fn porta_livre() -> Result<u16, String> {
 /// ao carregá-la —, nos oito primeiros dígitos, como a auditoria do
 /// destino o grava.
 pub(crate) fn atestado_do_carteiro(arch: Arquitetura) -> Result<String, String> {
+    atestado_de(arch, "carteiro")
+}
+
+/// O resumo da imagem do `programa` de `arch`, nos oito primeiros dígitos:
+/// o programa que a origem atesta, como a auditoria do destino o grava.
+pub(crate) fn atestado_de(arch: Arquitetura, programa: &str) -> Result<String, String> {
     let caminho = super::raiz_do_projeto()
         .join("programas/target")
         .join(arch.alvo())
-        .join("release/carteiro");
+        .join("release")
+        .join(programa);
     let bytes = std::fs::read(&caminho).map_err(|e| format!("{}: {e}", caminho.display()))?;
     Ok(sigilo::hex(&politica::manifesto::resumo_da_imagem(&bytes))[..8].to_string())
 }

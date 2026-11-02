@@ -21,6 +21,7 @@ mod codigo;
 mod copia;
 mod disco_hostil;
 mod enlace;
+mod fluxo;
 mod icp;
 mod identidade;
 mod pareamento;
@@ -293,6 +294,7 @@ fn main() -> ExitCode {
         "copia" => copia::copia(arch, release),
         "enlace" => enlace::enlace(release),
         "pareamento" => pareamento::pareamento(release),
+        "fluxo" => fluxo::fluxo(release),
         // A imagem de produção é sempre a de release: é a que vai para a
         // máquina de verdade. O iniciador dela compila aqui; o kernel vem
         // na imagem do slot, publicada antes.
@@ -517,6 +519,14 @@ COMANDOS:
                               cerimônia e depois de um lado gravar (a meia
                               relação), e a lápide antes e depois do boot; nos
                               mesmos quatro pares (DUKE_PARES escolhe)
+    fluxo                     duas máquinas ao mesmo tempo e os fluxos da malha
+                              entre elas: 4 MiB em cada sentido, local e entre
+                              os Dukes, com a auditoria dos dois lados; a
+                              contrapressão do leitor lento; a adulteração e o
+                              homem no meio na ponte; a política, a suspensão, o
+                              esquecimento, o corte e a revogação no meio do
+                              fluxo; e as vagas da porta do enlace; nos mesmos
+                              quatro pares (DUKE_PARES escolhe)
     publicar <chave> <versão> <geração>
                               a imagem de slot de uma versão: o kernel de
                               produção, o pacote do produto e o manifesto

@@ -1392,7 +1392,9 @@ pub(super) fn fluxo_as_cotas() -> Resultado {
 // ---------------------------------------------------------------------------
 
 /// O processo é a ponta: o que acaba leva os fluxos dele — `o processo
-/// acabou`, com o que estava no buffer descartado e contado —; o que troca
+/// acabou`, com o que estava no buffer descartado e contado —, menos o de
+/// que ele já saiu: fechado, o que ele escreveu segue legível pela outra
+/// ponta até o fim, como no fecho, mesmo depois da morte; o que troca
 /// de imagem também — `o programa mudou`: a outra ponta viu outro
 /// programa —; e o filho de uma bifurcação não herda nada — o id do pai
 /// não resolve para ele, e o fluxo do pai segue.
@@ -1421,6 +1423,47 @@ pub(super) fn fluxo_a_morte_a_troca_e_a_bifurcacao() -> Resultado {
                 "o processo acabou",
                 "quem ficou nao viu o fim pela morte da outra ponta",
             )?;
+            // A morte de quem já fechou: a ponta não era mais dele — o que
+            // escreveu segue legível pela outra, até o fim, como no fecho.
+            let g = Ponta::lancar(bia)?;
+            let id = match aberto(&a, &g) {
+                Ok(id) => id,
+                Err(e) => return encerrar_todas(Err(e), &[&g]),
+            };
+            let r = escrito(
+                &escrever(g.quem(), &id, b"antes do fim"),
+                12,
+                "a escrita de quem ia fechar nao entrou",
+            )
+            .and_then(|()| {
+                feito(
+                    &sobre(g.quem(), "stream.close", &id),
+                    "quem ia morrer nao fechou",
+                )
+            });
+            let retirado = format!("endpoint:{}", g.endpoint);
+            encerrar_todas(r, &[&g])?;
+            // O gancho do fim do processo já passou pelos fluxos quando o
+            // endpoint dele sai.
+            esperar_ate(
+                || {
+                    !registros_depois(antes, |e| {
+                        e.metodo == "fabric.withdraw" && e.recurso == retirado
+                    })
+                    .is_empty()
+                },
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "o endpoint de quem morreu nao saiu")?;
+            ler_e_conferir(
+                a.quem(),
+                &id,
+                100,
+                b"antes do fim",
+                true,
+                "a morte de quem ja tinha fechado levou o que ele escreveu",
+            )?;
+            fim_gravado(antes, &id, "fechado pela ponta; ida 0; volta 12; desc 0")?;
             // A troca de imagem de quem aceitou.
             let c = Ponta::lancar(bia)?;
             let id = match aberto(&a, &c) {

@@ -1029,8 +1029,14 @@ impl CanalTcp {
 }
 
 impl crate::fluxo::par::Canal for CanalTcp {
+    /// Um quadro de dados cheio passa do que um `net.send` leva — o buffer
+    /// da conexão: vai em pedaços, na ordem, cada um pelo gate. O TCP é um
+    /// fluxo de bytes, e o leitor do outro lado junta o quadro.
     fn mandar(&mut self, quadro: &[u8]) -> Result<(), &'static str> {
-        Via::mandar(&mut self.via, quadro).map_err(|(_, m)| m)
+        for pedaco in quadro.chunks(crate::rede::pilha::BUFFER_DA_CONEXAO) {
+            Via::mandar(&mut self.via, pedaco).map_err(|(_, m)| m)?;
+        }
+        Ok(())
     }
 
     fn proximo(

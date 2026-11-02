@@ -1222,6 +1222,21 @@ pub fn vencer_de_teste(agora_ms: u64) {
     encerrar_por_fora(|f| f.vencer(agora_ms));
 }
 
+/// As medidas dos fluxos, para `security.metrics`: os vivos, os que têm
+/// uma ponta noutro Duke, e o maior que um buffer de sentido chegou a ter
+/// desde o boot — a memória de um sentido nunca passa do teto dele, venha o
+/// que vier do par.
+pub fn medidas() -> (usize, usize, usize) {
+    se_ha_tabela(|t| {
+        (
+            t.fluxos.contagem().0,
+            t.fluxos.remotos_vivos(),
+            t.fluxos.pico_do_buffer(),
+        )
+    })
+    .unwrap_or((0, 0, 0))
+}
+
 /// Quantos fluxos vivos e quantos pedidos — para a suíte.
 #[cfg(feature = "modo-teste")]
 pub fn contagem() -> (usize, usize) {

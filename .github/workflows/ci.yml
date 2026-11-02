@@ -709,6 +709,55 @@ jobs:
       - name: Pareamento entre dispositivos
         run: cargo xtask pareamento
 
+  # Os fluxos da malha (DN-2): duas máquinas de pé e uma ponte do meio no
+  # runner. 4 MiB em cada sentido, local e entre os Dukes, com a auditoria
+  # dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento
+  # e o pico dos buffers; a adulteração e o homem no meio na ponte; a
+  # política, a suspensão, o esquecimento, o corte e a revogação no meio do
+  # fluxo; e as vagas da porta do enlace. Os mesmos pares do enlace.
+  fluxo:
+    name: Fluxos entre dispositivos (${{ matrix.nome }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nome: x86_64 e aarch64
+            pares: x86_64>aarch64|aarch64>x86_64
+            chave: cruzados
+          - nome: mesma arquitetura
+            pares: x86_64>x86_64|aarch64>aarch64
+            chave: iguais
+    env:
+      DUKE_PARES: ${{ matrix.pares }}
+      DUKE_NUCLEOS: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: fluxo-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: fluxo-${{ matrix.chave }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: Fluxos entre dispositivos
+        run: cargo xtask fluxo
+
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
   # ao gate; o pedido sai pela placa, a rede do emulador o leva ao loopback

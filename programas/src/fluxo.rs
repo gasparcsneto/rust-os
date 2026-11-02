@@ -314,3 +314,41 @@ impl Fluxo {
         })
     }
 }
+
+/// O byte `i` do padrão determinístico das bancadas, com a `semente` de
+/// cada sentido — a ida com 0, a volta com 1 —: quem lê confere o resumo do
+/// que chegou contra o mesmo padrão, e a bancada também.
+pub fn padrao(semente: u8, i: usize) -> u8 {
+    (((i * 7 + 3) % 251) as u8).wrapping_add(semente)
+}
+
+/// O FNV-1a de 64 bits, somado pedaço a pedaço: o resumo do que passou
+/// por um sentido, sem guardar os bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Resumo(u64);
+
+impl Resumo {
+    /// O resumo de nada.
+    pub const fn novo() -> Resumo {
+        Resumo(0xcbf2_9ce4_8422_2325)
+    }
+
+    /// Soma `bytes`, na ordem.
+    pub fn somar(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    /// O valor de agora.
+    pub fn valor(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for Resumo {
+    fn default() -> Resumo {
+        Resumo::novo()
+    }
+}

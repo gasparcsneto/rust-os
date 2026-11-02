@@ -705,6 +705,9 @@ pub struct Fluxos {
     vivos: Vec<Fluxo>,
     proximo: u64,
     lapides: VecDeque<Lapide>,
+    /// O maior que um buffer de sentido chegou a ter, em bytes — ver
+    /// [`Fluxos::pico_do_buffer`].
+    pico: usize,
 }
 
 impl Default for Fluxos {
@@ -719,6 +722,7 @@ impl Fluxos {
             vivos: Vec::new(),
             proximo: 1,
             lapides: VecDeque::new(),
+            pico: 0,
         }
     }
 
@@ -1103,12 +1107,14 @@ impl Fluxos {
         let s = f.escrita(lado);
         let n = s.anel.por(dados);
         s.escritos += n as u64;
+        let ocupado = s.anel.tamanho();
         if remoto && let Some(c) = f.credito.as_mut() {
             c.concedido -= n as u64;
         }
         if n > 0 {
             f.mudou(agora_ms);
         }
+        self.pico = self.pico.max(ocupado);
         Ok(n)
     }
 
@@ -1586,6 +1592,22 @@ impl Fluxos {
         self.vivos.iter().map(|f| f.id).collect()
     }
 
+    /// O maior que um buffer de sentido chegou a ter, em bytes, desde que
+    /// a tabela nasceu: a memória de um sentido nunca passa do
+    /// [`BUFFER_DO_SENTIDO`], venha a escrita de um processo daqui ou do
+    /// par, dentro do crédito. Para `security.metrics`.
+    pub fn pico_do_buffer(&self) -> usize {
+        self.pico
+    }
+
+    /// Quantos vivos têm uma ponta noutro Duke.
+    pub fn remotos_vivos(&self) -> usize {
+        self.vivos
+            .iter()
+            .filter(|f| f.lado_remoto().is_some())
+            .count()
+    }
+
     /// Quantos vivos — e, deles, quantos pedidos.
     pub fn contagem(&self) -> (usize, usize) {
         (
@@ -1632,11 +1654,15 @@ impl Fluxos {
 
     /// O processo `fio` acabou — ou trocou de programa: os fluxos de que ele
     /// é ponta acabam, e os pedidos que ele abriu também. O pedido que
-    /// esperava um endpoint dele acaba pelo endpoint.
+    /// esperava um endpoint dele acaba pelo endpoint. A ponta de que ele já
+    /// saiu — fechou — não é mais dele: o que ele escreveu segue legível
+    /// pela outra, até o fim do sentido, como no fecho.
     pub fn processo_acabou(&mut self, fio: u64, motivo: &str) -> Vec<Encerramento> {
         let q = Quem::Processo(fio);
         self.abortar_onde(motivo, |f| {
-            f.abridor.quem() == q || (f.estado == Estado::Aberto && f.aceitante.quem() == q)
+            let ainda = |l: Lado| !f.saiu[l.indice()];
+            (f.abridor.quem() == q && ainda(Lado::Abridor))
+                || (f.estado == Estado::Aberto && f.aceitante.quem() == q && ainda(Lado::Aceitante))
         })
     }
 
@@ -2009,6 +2035,30 @@ mod testes {
         let e = t.fechar(P1, q(10), id, 1).unwrap().unwrap();
         assert_eq!(e.motivo, motivo::FECHADO);
         assert!(t.coerente());
+        // A morte de quem só terminou o sentido dele aborta: ele ainda é
+        // ponta — ainda lê.
+        let id = aberto(&mut t);
+        t.escrever(P1, q(20), id, b"volta", 1).unwrap();
+        t.terminar(P1, q(20), id, 1).unwrap();
+        let e = t.processo_acabou(20, motivo::PROCESSO);
+        assert_eq!(e.len(), 1);
+        assert_eq!(
+            (e[0].motivo.as_str(), e[0].descartados),
+            (motivo::PROCESSO, 5)
+        );
+        // A de quem já fechou, não: a ponta não era mais dele, e o que ele
+        // escreveu segue legível pela outra, até o fim — como no fecho.
+        let id = aberto(&mut t);
+        t.escrever(P1, q(20), id, b"volta", 1).unwrap();
+        assert_eq!(t.fechar(P1, q(20), id, 1), Ok(None));
+        assert!(t.processo_acabou(20, motivo::PROCESSO).is_empty());
+        assert!(t.processo_acabou(20, motivo::PROGRAMA).is_empty());
+        let (l, e) = t.ler(P1, q(10), id, 100, 2).unwrap();
+        assert_eq!((&*l.dados, l.fim), (&b"volta"[..], true));
+        assert_eq!(e.expect("o fluxo acaba no fim").motivo, motivo::FECHADO);
+        // E a de quem fica, depois, também não acha nada: acabou.
+        assert!(t.processo_acabou(10, motivo::PROCESSO).is_empty());
+        assert!(t.coerente());
     }
 
     /// FH04: os prazos — o do aceite, o da inatividade, e a atividade que
@@ -2228,6 +2278,46 @@ mod testes {
         assert!(l.fim);
         assert_eq!(e.map(|e| e.motivo), Some(String::from(motivo::CONCLUIDO)));
         assert!(!t.precisa_do_par(id));
+    }
+
+    /// O pico dos buffers: o maior que um sentido chegou a ter, de um
+    /// processo daqui ou do par, nunca passa do buffer do sentido — e não
+    /// desce quando o buffer esvazia. E os vivos com uma ponta noutro Duke.
+    #[test]
+    fn o_pico_dos_buffers() {
+        let mut t = Fluxos::nova();
+        assert_eq!(t.pico_do_buffer(), 0);
+        let id = com_o_par(&mut t);
+        assert_eq!(t.remotos_vivos(), 1);
+        assert_eq!(t.escrever(P1, q(10), id, &[1; 1000], 1), Ok(1000));
+        assert_eq!(t.pico_do_buffer(), 1000);
+        let cheio = alloc::vec![7u8; BUFFER_DO_SENTIDO];
+        assert_eq!(
+            t.escrever(P1, qpar(9), id, &cheio, 1),
+            Ok(BUFFER_DO_SENTIDO)
+        );
+        assert_eq!(t.pico_do_buffer(), BUFFER_DO_SENTIDO);
+        // O par além do crédito é protocolo, e o pico não passa do buffer.
+        assert!(t.escrever(P1, qpar(9), id, b"x", 1).is_err());
+        assert_eq!(t.pico_do_buffer(), BUFFER_DO_SENTIDO);
+        // Daqui, o buffer cheio não aceita mais nada.
+        let mais = alloc::vec![2u8; BUFFER_DO_SENTIDO];
+        assert_eq!(
+            t.escrever(P1, q(10), id, &mais, 1),
+            Ok(BUFFER_DO_SENTIDO - 1000)
+        );
+        assert_eq!(t.escrever(P1, q(10), id, b"y", 1), Ok(0));
+        assert_eq!(t.pico_do_buffer(), BUFFER_DO_SENTIDO);
+        t.ler(P1, q(10), id, BUFFER_DO_SENTIDO, 2).unwrap();
+        assert_eq!(t.pico_do_buffer(), BUFFER_DO_SENTIDO);
+        let local = t
+            .abrir(P1, processo(20), 7, processo(21), "a.b", 3)
+            .unwrap();
+        assert_eq!(t.remotos_vivos(), 1);
+        t.abortar(id, motivo::CONEXAO).unwrap();
+        assert_eq!(t.remotos_vivos(), 0);
+        assert!(t.retrato(local).is_some());
+        assert!(t.coerente());
     }
 
     /// O retrato que a sessão com o par lê: o pedido, o aberto, e nada do

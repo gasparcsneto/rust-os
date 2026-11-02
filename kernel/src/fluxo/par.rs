@@ -732,13 +732,37 @@ impl Conduta {
         self.acabou || (self.fim_dito && self.fim_recebido)
     }
 
+    /// A conexão falhou ao mandar: o par pode ter acabado antes — e o
+    /// `fechar` dele, com o motivo, estar na fila, atrás do que se mandava.
+    /// Lê o que já chegou, sem entregar dado nenhum: o fim do par acaba o
+    /// fluxo com o motivo dele; sem ele, a conexão caiu.
+    fn caiu_ao_mandar(&mut self, c: &mut impl Canal) {
+        let ate = crate::tempo::uptime_ms().saturating_add(PASSO_MS);
+        while let Ok(Some((Tipo::Dados, corpo))) = c.proximo(ate, &mut |_| false) {
+            let mut claro = vec![0u8; corpo.len()];
+            let Ok(k) = self.transporte.decifrar(&corpo, &mut claro) else {
+                break;
+            };
+            if let Some(m @ (Mensagem::Fechar(_) | Mensagem::Recusado { .. })) =
+                Mensagem::ler(&claro[..k])
+            {
+                self.receber(c, m);
+            }
+            politica::sigiloso::zerar(&mut claro);
+            if self.acabou {
+                return;
+            }
+        }
+        self.abortar(motivo::CONEXAO);
+    }
+
     /// A sessão, até o fim: manda o que há, espera o par ou o que mudar
     /// daqui, e aplica o que chega.
     fn conduzir(&mut self, c: &mut impl Canal) {
         let n = self.n;
         while !self.terminada() {
             if let Err(_m) = self.mandar_o_que_ha(c) {
-                self.abortar(motivo::CONEXAO);
+                self.caiu_ao_mandar(c);
                 return;
             }
             if self.terminada() {

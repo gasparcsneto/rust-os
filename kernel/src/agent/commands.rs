@@ -2486,7 +2486,7 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "security.metrics",
-        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta, os arrendamentos soltos, por causa, a conferencia do codigo de fora da imagem (o selo e a confianca no editor), e o orcamento (`budget`): decisoes de controle (a taxa do papel), de dados e de fecho sobre um recurso ja aberto, recusas por taxa, esperas pelo caminho da auditoria, o atraso dela e o que saiu do anel antes do journal, a vazao do plano de dados e a justica entre os principais.",
+        resumo: "O custo e o efeito da seguranca, medidos: o gate (decisoes, recusas por codigo, latencia), a politica, a auditoria, o tecido (voltas, tempo de maquina, memoria, falsos positivos, contencoes desfeitas, repeticoes de recusa), a latencia da resposta, os arrendamentos soltos, por causa, a conferencia do codigo de fora da imagem (o selo e a confianca no editor), e o orcamento (`budget`): decisoes de controle (a taxa do papel), de dados e de fecho sobre um recurso ja aberto, recusas por taxa, esperas pelo caminho da auditoria, o atraso dela e o que saiu do anel antes do journal, a vazao do plano de dados e a justica entre os principais; e os fluxos (`streams`): os vivos, os remotos e o pico dos buffers contra o teto de cada sentido.",
         params: &[],
         acesso: Acesso::Exige(Permissao::SecurityRead),
         recurso: None,
@@ -9096,6 +9096,17 @@ fn security_metrics(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // — e o caminho da auditoria que o plano de dados respeita. Ver
     // `registry::Plano` e `crate::oleoduto`.
     orcamento(w)?;
+    // Os fluxos da malha: os vivos, os que têm uma ponta noutro Duke, e o
+    // pico dos buffers contra o teto de cada sentido — a contrapressão
+    // segura a memória. Ver `crate::fluxo`.
+    let (vivos, remotos, pico) = crate::fluxo::medidas();
+    w.key("streams")?;
+    w.begin_object()?;
+    w.field_u64("live", vivos as u64)?;
+    w.field_u64("remote", remotos as u64)?;
+    w.field_u64("buffer_peak", pico as u64)?;
+    w.field_u64("buffer_limit", politica::fluxo::BUFFER_DO_SENTIDO as u64)?;
+    w.end_object()?;
     w.end_object()
 }
 
