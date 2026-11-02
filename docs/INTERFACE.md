@@ -267,6 +267,17 @@ mecanismo só crescem; os comandos do registro se descrevem — um programa
 que precisa de um comando novo pergunta a `agent.describe` se ele existe,
 como um agente.
 
+A versão 2 (`native_interface: 2`, DN-3) é a do **contrato público
+explícito** (DS-2): a lista conferida das chamadas, dos erros, dos tipos de
+evento — o aviso da malha (`MALHA`, 9) entre eles —, dos bits do aviso,
+dos tetos, dos códigos de serviço e dos comandos da malha com os
+parâmetros mora em [`sdk/contrato.txt`](../sdk/contrato.txt), e o `cargo
+xtask invariantes` confere que o protocolo, o registro e a política dizem
+o mesmo. O que o kernel não conhece é recusado — uma chamada, um
+parâmetro, um `notify` que não é canal do processo —, nunca ignorado em
+silêncio. O SDK — o laço, os fluxos, as mensagens sobre um fluxo, o
+modelo de projeto, o selo e a instalação — está em [SDK.md](SDK.md).
+
 ## O roteiro, reorganizado
 
 A fase 7 deixa de ser a ABI do Linux. O que vinha depois dela muda de

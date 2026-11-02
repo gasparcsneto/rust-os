@@ -49,6 +49,7 @@ jobs:
           cargo fmt --all -- --check
           (cd iniciador && cargo fmt --all -- --check)
           (cd programas && cargo fmt --all -- --check)
+          rustfmt --edition 2024 --check sdk/modelo/src/main.rs
           cd kernel && cargo fmt --all -- --check
 
       # O xtask roda no host, então tem testes de unidade comuns. São poucos,
@@ -757,6 +758,97 @@ jobs:
 
       - name: Fluxos entre dispositivos
         run: cargo xtask fluxo
+
+  # O SDK da malha (DN-3), do lado de quem escreve um programa: o
+  # `sdk/modelo` copiado para fora do workspace — como faria quem começa um
+  # programa, com o `programas` e o `protocolo` apontados por caminho —,
+  # compilado nas duas arquiteturas, conferido (o manifesto, a nota, o teto
+  # do executável) e selado pelo editor da bancada; e a cópia adulterada
+  # depois do selo, recusada (NX01–NX03). A conferência do contrato
+  # (`sdk/contrato.txt` contra o código) mora nos invariantes de fonte; o
+  # modelo instalado e rodado no Duke, na suíte (`sdk:`) e na bancada
+  # abaixo. Aqui, também os lints da cópia, como os de um programa da
+  # imagem.
+  sdk-fora:
+    name: SDK fora do repositório
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: sdk-fora-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: sdk-fora-
+
+      - name: O modelo, compilado, conferido e selado nas duas arquiteturas
+        run: |
+          for arch in x86_64 aarch64; do
+            cargo xtask sdk-fora --arch "$arch"
+            cargo xtask sdk-conferir "target/sdk-fora/$arch/modelo.elf"
+            cargo xtask sdk-conferir "target/sdk-fora/$arch/modelo"
+          done
+
+      - name: Os lints da cópia de fora
+        run: |
+          cd target/sdk-fora/projeto
+          for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+            CARGO_TARGET_DIR=../target cargo clippy --release --target "$alvo" -- -D warnings
+          done
+
+  # A bancada do SDK (DN-3): duas máquinas de pé e a ponte do meio, como a
+  # dos fluxos. O modelo de fora do repositório, selado, instalado no
+  # armazém das duas pelo canal do agente e rodado pela pessoa; o eco-malha
+  # com um cliente daqui e um de lá, e o segundo de lá recusado pelo teto da
+  # relação; os dois sentidos ao mesmo tempo; a conversa pelo teclado; as
+  # medidas do aviso e da vazão; e a revogação no meio. Os mesmos pares.
+  sdk:
+    name: SDK da malha entre dispositivos (${{ matrix.nome }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nome: x86_64 e aarch64
+            pares: x86_64>aarch64|aarch64>x86_64
+            chave: cruzados
+          - nome: mesma arquitetura
+            pares: x86_64>x86_64|aarch64>aarch64
+            chave: iguais
+    env:
+      DUKE_PARES: ${{ matrix.pares }}
+      DUKE_NUCLEOS: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache do cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            kernel/target
+            programas/target
+          key: sdk-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: sdk-${{ matrix.chave }}-
+
+      - name: Instalar o emulador e as ferramentas de disco
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-system-arm \
+            gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
+            swtpm python3
+
+      - name: SDK da malha entre dispositivos
+        run: cargo xtask sdk
 
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo

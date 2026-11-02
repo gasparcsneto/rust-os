@@ -150,6 +150,21 @@ endpoint, pelo mesmo mecanismo da espera de rede, e acaba quando uma
 entrega chega, o endpoint fecha ou o prazo vence. Acordado, o pedido é
 executado de novo, inteiro, pelo gate. Uma espera por endpoint.
 
+### O aviso no canal de eventos (DN-3)
+
+A outra forma de esperar: `fabric.offer` com `notify` — o descritor de um
+canal de eventos do próprio processo — designa o endpoint, e o pedido de
+fluxo esperando o aceite, a entrega ainda não recebida e o fecho viram um
+evento `MALHA` (tipo 9) nesse canal: `a` = 1, o endpoint; `b` = o número
+do id; `c` = `PEDIDO`, `ENTREGA` ou `FIM`. O programa espera num lugar só — o canal — por tudo o que lhe
+interessa: a malha, os fluxos, a janela e o pseudo-terminal. O aviso só
+sinaliza prontidão: não leva corpo, intenção nem quem; não autoriza nada;
+a operação seguinte (`fabric.recv`, `stream.accept`) passa pelo gate como
+sempre. Só um processo designa, e só um canal de que ele é o ouvinte — o
+resto é recusado com o pedido inteiro, nunca ignorado. A regra — a borda,
+o rearme pela operação do dono, o canal cheio, a morte, a troca de imagem
+— está em [SDK.md](SDK.md).
+
 ## Energia
 
 Com um reinício ou um desligamento a caminho, nada novo nasce:
@@ -213,7 +228,9 @@ let (estado, resposta) = malha::estado(&id)?;
 ```
 
 O manifesto declara o que o programa exerce: `fabric.offer` para atender,
-`fabric.send` para mandar.
+`fabric.send` para mandar — e para descobrir: `fabric.discover` é decidido
+sob `fabric.send` na intenção. Com o laço do SDK, `malha::oferecer_avisando`
+oferece com o aviso no canal do processo; ver [SDK.md](SDK.md).
 
 ## O que fica de fora
 

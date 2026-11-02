@@ -118,6 +118,12 @@ cargo xtask senha                    # a troca da própria senha pelo teclado: o
 cargo xtask enlace                   # duas máquinas pela rede do emulador: o enlace entre dispositivos de ponta a ponta, suspensão, corte, revogação
 cargo xtask pareamento               # duas máquinas e a Pessoa no teclado das duas: o pareamento sem administrador, o homem no meio, a meia relação, a lápide
 cargo xtask fluxo                    # duas máquinas e os fluxos da malha entre elas: 4 MiB em cada sentido, a contrapressão, a adulteração e o homem no meio, a política, a suspensão, o corte, a revogação, as vagas
+cargo xtask sdk                      # duas máquinas e o SDK da malha: o modelo de fora do repositório nas duas, o eco-malha com clientes daqui e de lá, os dois sentidos, a conversa pelo teclado, as medidas, a revogação
+
+# O SDK da malha — ver docs/SDK.md
+cargo xtask sdk-fora                 # o sdk/modelo copiado para fora do workspace, compilado, conferido e selado
+cargo xtask sdk-conferir <elf>       # o manifesto, o tamanho, o selo e o resumo de um executável
+cargo xtask selar <privada> <elf> [--saida <arquivo>]  # sela com a chave de um editor; nenhuma outra chave é lida
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -332,6 +338,7 @@ kernel/src/
 ├── fluxo/
 │   └── par.rs       o fluxo entre dois Dukes: a sessão Noise com o prólogo do fluxo — no destino pela vaga do enlace, na origem pelo fio do fluxo —, o protocolo fechado, o crédito, e cada `abrir` e `dados` de fora decidido pelo gate daqui como o dispositivo
 ├── malha.rs         a malha: os programas de um titular cooperando por intenções — endpoints, entregas e esperas, cada passo pelo gate, voláteis
+├── aviso.rs         o aviso da malha (DS-1): o kernel avisa, no canal de eventos de um processo, que um endpoint ou uma ponta de fluxo dele ficou pronto — só o tipo, o número e a prontidão; o aviso não concede nada, e cada operação depois dele continua sendo um pedido ao gate
 ├── enlace.rs        o enlace entre dispositivos: o pedido da malha a outro Duke, na origem (a tabela, o serviço que leva) e no destino (o respondedor, o gate como o dispositivo)
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: `aceitar` e `parear` no console, o aperto na porta do enlace e no fio da cerimônia, o código e a senha, o commit reconfirmado pelo gate, e `device.forget`
 ├── armazem.rs       o armazém montado em /armazem: o lote, do gate ao commit — reconfirmação, arrendamento, cota, rascunhos, cada um no seu lugar
@@ -387,11 +394,15 @@ kernel/src/
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
+│   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio e a concorrência
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
-│   │   └── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
-│   └── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
+│   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
+│   │   └── par/
+│   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
+│   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
+│   └── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes, a `conversa` com a janela e o fluxo no mesmo laço, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, e as medidas do laço
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
@@ -503,7 +514,8 @@ protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os prog
 ├── json.rs          JSON sem alocação (streaming + varredura), do kernel e dos programas
 ├── dns.rs           a pergunta e a resposta do DNS, sem alocar: do programa que resolve, do NSF e da bancada
 ├── mapa.rs          onde cada coisa mora no espaço virtual
-└── usuario.rs       as chamadas de sistema, os erros e o mapa do espaço do usuário
+├── quadro.rs        as mensagens sobre os bytes de um fluxo: o tamanho em quatro bytes antes do corpo, e o leitor que junta os pedaços com o teto de quem lê
+└── usuario.rs       as chamadas de sistema, os erros, os eventos — o aviso da malha entre eles — e o mapa do espaço do usuário: a interface nativa v2
 
 tipografia/src/      a fonte e o desenho de texto, dos dois lados da fronteira
 └── lib.rs           os estilos, os glifos, a mistura e a escrita numa memória de pixels
@@ -538,6 +550,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── fluxo.rs         a conta do fluxo: os estados, os sentidos e os buffers, o fim e o aborto, o crédito com o par, as cotas e as lápides
 ├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
+├── aviso.rs         a conta do aviso da malha: os bits da prontidão, o aviso na borda e o rearme pela operação do dono, um aviso não consumido por objeto, o devido do canal cheio, o fim uma vez, e os três campos do evento
 ├── dispositivos.rs  os dispositivos relacionados: a chave de outro Duke, a relação com uma pessoa desta máquina, as lápides, a desfeita
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: os estados, os prazos, o compromisso, os códigos de conferência e o id da relação
 ├── enlace.rs        o enlace, na origem: o conjunto fechado, os pedidos que esperam o par, os nonces da relação e o que cada canal mandou
@@ -735,7 +748,9 @@ programas/           os programas de usuário, compilados à parte do kernel
     ├── tls.rs       o TLS de um programa: a semente, o relógio e as âncoras, cada um pelo gate, sobre a conexão
     ├── http.rs      o HTTP de um programa: o nome pelo DNS dele, o destino pelo gate, o TLS no meio, e a falha de quem falhou
     ├── malha.rs     a malha de um programa: oferecer uma intenção, achar quem a oferece, mandar, receber e responder — cada passo pelo gate
-    ├── fluxo.rs     o fluxo de um programa: abrir, aceitar, escrever e ler um canal ordenado de bytes, com as esperas — cada passo pelo gate
+    ├── fluxo.rs     o fluxo de um programa: abrir, aceitar, escrever e ler um canal ordenado de bytes, com as esperas ou pelo aviso, e a escrita pendente — cada passo pelo gate
+    ├── laco.rs      o laço: a espera única do processo, no canal de eventos dele — a janela, o pseudo-terminal e os avisos da malha num lugar só
+    ├── quadro.rs    as mensagens sobre um fluxo: juntar à saída pendente, e ler as mensagens inteiras pelo aviso
     ├── icp.rs       o Internet Computer de um programa: a consulta e a chamada verificadas do `web3` sobre o HTTPS dele, assinadas pela chave que o kernel guarda, e a declaração do desfecho pelo `audit.declare`
     ├── superficie.rs uma camada do compositor com os pixels no processo
     ├── janela.rs    a moldura, o arrasto e a caixa de fechar, e a interface dentro dela
@@ -790,13 +805,28 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── remetente.rs  o aplicativo A dos fluxos: procura quem oferece `imagem.compartilhar` aqui e, sem ninguém, no par; abre um fluxo, manda 4 MiB do padrão, termina e lê a volta até o fim, dizendo os resumos e as esperas da contrapressão
         ├── recebedor.rs  o aplicativo B dos fluxos: oferece `imagem.compartilhar`, aceita um fluxo, lê tudo, grava o resumo pelo `fs.write` dele e devolve o mesmo tanto — e, numa falha no meio, o que chegou até ali
         ├── recebedor-lento.rs o leitor lento dos fluxos: lê aos poucos, com uma espera decidida pelo gate entre as leituras, e segura quem manda pela contrapressão — o fluxo vivo o bastante para a bancada mexer no meio dele
+        ├── avisado.rs    um processo que espera a malha só no canal dele, para a suíte: oferece e abre com o aviso, diz cada aviso que chega, e faz o passo ditado — ler, escrever, os dois sentidos pelo laço ou no estilo bloqueante, trocar de imagem, bifurcar
+        ├── eco-malha.rs  o exemplo do SDK do servidor de vários clientes: um processo, uma espera só, ecoando cada fluxo aceito pelos avisos
+        ├── conversa.rs   o exemplo do SDK da janela e do fluxo: a entrada da janela e os avisos no mesmo laço, as linhas de duas conversas da mesma Pessoa, aqui ou entre dois Dukes
+        ├── copiador.rs   o exemplo do SDK das mensagens sobre um fluxo: um arquivo do armazém mandado a outro copiador, que o grava pelo `fs.write` dele — o fluxo não dá escrita nenhuma
         ├── gestor.rs     os canisters de uma chave, por um pedido que quem o lançou grava no armazém: o saldo, criar, instalar até 8 MiB, o estado, parar, iniciar, os ajustes, desinstalar, apagar e as cargas — com o arrendamento do pedido, o registro que não executa duas vezes e o pedido em andamento que se retoma
         └── terminal.rs   o Terminal: o interpretador numa janela, pelo pseudo-terminal
+
+sdk/                 o SDK da malha: o contrato público e o projeto de quem faz um programa fora do repositório
+├── contrato.txt     a lista conferida do contrato v2 da interface nativa: as chamadas, os erros, os eventos, os bits do aviso, os tetos, os códigos e os comandos da malha com os parâmetros
+└── modelo/          o projeto pronto para copiar, compilado fora do workspace contra o `programas`
+    ├── Cargo.toml   o pacote, o `programas` e o `protocolo` por caminho, e o perfil de release
+    ├── .cargo/config.toml as opções de compilação dos programas da imagem, linha a linha
+    ├── rust-toolchain.toml o canal do repositório e os dois alvos dos programas, instalados pelo rustup
+    ├── usuario.ld   o mapa de ligação, o mesmo dos programas
+    └── src/
+        └── main.rs  o modelo: um eco da malha com o laço, e o cliente de outro modelo quando o armazém pede
 
 xtask/src/
 ├── main.rs          a ferramenta de build, teste e diagnóstico do projeto
 ├── atualizar.rs     a bancada da atualização A/B: a máquina de produção pelo firmware, a versão nova instalada, tentada, confirmada ou desfeita, as recusas, a concorrência e as quedas em cada fronteira
 ├── botao.rs         a bancada do botão de energia: o `system_powerdown` do emulador nas imagens de desenvolvimento e de produção — o desligamento pelo gate, as gravações, dois apertos, o reinício a caminho, o corte, o aperto cedo, sem persistência, a política que nega
+├── bancada_sdk.rs   a bancada do SDK: duas máquinas, o modelo de fora do repositório instalado pelo gate no armazém das duas e falando entre elas, o eco-malha com clientes daqui e de lá e o teto da relação, os dois sentidos, a conversa pelo teclado, as medidas do aviso e da vazão, e a revogação no meio — nos quatro pares
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
@@ -808,6 +838,7 @@ xtask/src/
 ├── fluxo.rs         a bancada dos fluxos da malha: duas máquinas de pé e uma ponte do meio no hospedeiro — 4 MiB em cada sentido, local e entre os Dukes, com a auditoria dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento, com o pico dos buffers; a adulteração e o homem no meio na ponte; a política, a suspensão, o esquecimento, o corte e a revogação no meio do fluxo; e as vagas da porta do enlace com outro dispositivo que a bancada faz, nos quatro pares
 ├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+├── sdk.rs           o SDK da malha: o contrato público v2 conferido contra o protocolo, o registro e a política; o aviso só em `kernel::aviso`; `selar` e `sdk-conferir`; e o modelo compilado e selado fora do workspace
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── senha.rs         a bancada da troca da própria senha: a pessoa no teclado da máquina, pelo Terminal — a nova sobrevive ao corte, a queda em cada fronteira da troca deixa exatamente uma senha valendo, a troca com o botão de energia, e a imagem de produção
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte

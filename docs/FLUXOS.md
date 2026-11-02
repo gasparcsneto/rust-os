@@ -74,8 +74,8 @@ Todos pelo gate, com `fabric.stream`; só um processo abre e aceita.
 
 | Comando | Plano | O que faz |
 |---|---|---|
-| `stream.open` (`endpoint`, `intent`, `device`) | controle | Pede um fluxo ao endpoint que oferece a intenção, de um programa do mesmo titular; com `device`, ao endpoint de outro Duke da Pessoa — decidido aqui com `fabric.remote` sobre `dispositivo:<nome>` e lá pelo gate de lá. Devolve o id. |
-| `stream.accept` (`endpoint`, `wait`) | controle | Aceita o pedido mais antigo num endpoint seu: a abertura efetiva, com a decisão de quem aceita **e a de quem abriu** reconfirmadas na ordem das gravações. Diz quem abriu, como o kernel o conferiu (o programa, ou o dispositivo). |
+| `stream.open` (`endpoint`, `intent`, `device`, `notify`) | controle | Pede um fluxo ao endpoint que oferece a intenção, de um programa do mesmo titular; com `device`, ao endpoint de outro Duke da Pessoa — decidido aqui com `fabric.remote` sobre `dispositivo:<nome>` e lá pelo gate de lá. Devolve o id. Com `notify`, a ponta de quem abriu avisa no canal de eventos dele (DN-3). |
+| `stream.accept` (`endpoint`, `wait`, `notify`) | controle | Aceita o pedido mais antigo num endpoint seu: a abertura efetiva, com a decisão de quem aceita **e a de quem abriu** reconfirmadas na ordem das gravações. Diz quem abriu, como o kernel o conferiu (o programa, ou o dispositivo). |
 | `stream.write` (`stream`, `content`/anexo, `wait`) | dados | Escreve no seu sentido o que couber no buffer de 16 KiB; zero com ele cheio; com `wait`, espera espaço, a abertura ou o fim. |
 | `stream.read` (`stream`, `max`, `wait`) | dados | Lê o seu sentido, na ordem, até `max`, e `end` depois do último byte; com `wait`, espera um dado ou o fim. |
 | `stream.finish` (`stream`) | fecho | Termina o seu sentido: quem lê recebe o resto e o fim; o outro sentido continua. |
@@ -86,7 +86,25 @@ O id (`<época>:<n>`) **não é capacidade**: só resolve para as duas pontas,
 do titular do fluxo; para qualquer outro, a mesma recusa de um id que não
 existe. O runtime dos programas (`programas::fluxo`) dá `abrir`,
 `abrir_no_par`, `aceitar`, `escrever`, `ler`, `terminar`, `fechar` e
-`estado`.
+`estado` — e, para o laço do SDK, `abrir_avisando`,
+`abrir_no_par_avisando`, `aceitar_avisando`, `ler_agora`,
+`escrever_agora` e a `EscritaPendente`.
+
+### O aviso (DN-3)
+
+Com `notify` — o descritor de um canal de eventos do próprio processo —,
+`stream.open` e `stream.accept` designam a ponta: cada mudança dela vira
+um evento `MALHA` no canal (`a` = 2, a ponta; `b` = o número do id; `c` =
+`LEGIVEL`, `GRAVAVEL`, `FIM`). O aviso só sinaliza prontidão: não leva
+byte, motivo nem quem, não autoriza nada, e a operação seguinte passa pelo
+gate como sempre. É na borda — no máximo um aviso não consumido por ponta,
+rearmado pela operação do dono —; `GRAVAVEL` vai só a quem esbarrou no
+buffer cheio e a quem abriu, na abertura; e `FIM` sai uma vez. A abertura
+pedida ainda não aceita não aceita escrita (`CONFLICT`, "o fluxo ainda nao
+abriu"): quem abriu espera o `GRAVAVEL` da abertura. O `exec` larga as
+designações antes de abortar os fluxos — a imagem nova não ouve a
+anterior. A regra inteira, as medidas e o runtime estão em
+[SDK.md](SDK.md).
 
 ## Os estados
 
