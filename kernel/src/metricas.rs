@@ -106,6 +106,10 @@ pub static VENCIMENTO_MS: Medida = Medida::nova();
 /// A conferência do código de fora da imagem — o selo e a confiança no
 /// editor, sem a leitura do arquivo —, em ciclos.
 pub static CODIGO: Medida = Medida::nova();
+/// Do aviso da malha publicado à operação do dono que o consome — o
+/// despertar do processo, a volta do laço dele e o pedido até o gate —, em
+/// ciclos.
+pub static AVISO: Medida = Medida::nova();
 
 /// As decisões do gate por código, na ordem de [`Codigo::TODOS`].
 static POR_CODIGO: [AtomicU64; Codigo::TODOS.len()] =

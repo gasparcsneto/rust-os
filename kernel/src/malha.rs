@@ -540,10 +540,20 @@ fn acordaveis(t: &mut Tabela) -> Vec<Waker> {
         .collect()
 }
 
+/// Acorda as esperas, e dá os avisos da malha que a mudança pediu — os
+/// endpoints designados são avaliados de novo, fora da tabela.
 fn acordar(wakers: Vec<Waker>) {
     for w in wakers {
         w.wake();
     }
+    crate::aviso::tocar_endpoints();
+    crate::aviso::processar();
+}
+
+/// O que o aviso da malha (DS-1) diz do endpoint `n`: se há entrega
+/// pendente, e se ele acabou. Sem tabela, ele não existe.
+pub fn prontidao_do_endpoint(n: u64) -> (bool, bool) {
+    se_ha_tabela(|t| t.malha.prontidao_do_endpoint(n)).unwrap_or((false, true))
 }
 
 /// Os endpoints, dentre `candidatos`, cujo dono ainda receberia por eles:
@@ -638,6 +648,8 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
                     &format!("fechado; {} anulada(s)", anuladas.len()),
                 );
                 auditar_na_execucao(&epoca, &anuladas);
+                // Quem retira não precisa de aviso do que retirou.
+                crate::aviso::largar(crate::aviso::Objeto::Endpoint(n), fio);
                 // Os pedidos de fluxo que esperavam nele acabam também.
                 crate::fluxo::endpoint_acabou(n);
                 Ok(anuladas.len())
@@ -800,6 +812,10 @@ pub fn receber(
             .partition(|t| t.estado == Estado::Entregue);
         auditar_do_kernel(&epoca, &vencidas, "");
         auditar_na_execucao(&epoca, &lidas_agora);
+        // A operação do dono sobre o endpoint: o aviso dele está consumido.
+        if let Some(n) = politica::aviso::numero_do_id(endpoint) {
+            crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
+        }
         match lidas {
             Ok(lidas) => Ok(lidas
                 .into_iter()
@@ -1072,6 +1088,10 @@ pub fn anular_relacao(chave: &[u8; 32], relacao: &[u8; 16], motivo: &str) -> usi
 /// esperava neles é anulado. O que ele mandou continua: quem recebe ainda
 /// lê e confirma.
 pub fn canal_acabou(canal: Canal) {
+    // O processo que acabou não ouve mais aviso nenhum.
+    if let Canal::Processo(f) = canal {
+        crate::aviso::largar_do_processo(f);
+    }
     // Os pedidos dele a outros dispositivos saem também, e os fluxos de que
     // ele é ponta acabam.
     crate::enlace::canal_acabou(canal);

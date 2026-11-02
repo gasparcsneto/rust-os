@@ -727,6 +727,13 @@ fn escutar(ponteiro: u64, tamanho: u64) -> i64 {
         core::ptr::copy_nonoverlapping(ponteiro as *const u8, nome.as_mut_ptr(), tamanho as usize);
     }
     let ouvinte = crate::fios::id_atual();
+    // O teto por processo: um canal para o laço dele e um de folga. Os
+    // canais são da máquina inteira, e um processo que escutasse quantos
+    // nomes quisesse tiraria a vaga dos outros.
+    if crate::eventos::canais_de(ouvinte) >= crate::eventos::CANAIS_POR_PROCESSO {
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::OCUPADO;
+    }
     let chave = match crate::eventos::escutar(&nome[..tamanho as usize], ouvinte) {
         Ok(chave) => chave,
         Err(crate::eventos::Recusa::NomeInvalido) => {
@@ -1370,6 +1377,9 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     crate::log_info!("usuario", "processo trocou de imagem para `{}`", nome);
     TROCAS_DE_IMAGEM.fetch_add(1, Ordering::Relaxed);
+    // A imagem nova não ouve os avisos da malha da anterior: as designações
+    // saem antes de os fluxos acabarem.
+    crate::aviso::largar_do_processo(crate::fios::id_atual());
     // A outra ponta de cada fluxo deste processo viu outro programa: os
     // fluxos dele acabam — ver `fluxo::programa_mudou`.
     crate::fluxo::programa_mudou(crate::fios::id_atual());

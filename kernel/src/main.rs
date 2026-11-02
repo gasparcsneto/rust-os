@@ -67,6 +67,7 @@ mod arch;
 mod armazem;
 mod atividade;
 mod autorizacao;
+mod aviso;
 mod barra;
 mod bloco;
 mod botao;

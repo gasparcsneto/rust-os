@@ -1152,13 +1152,23 @@ pub static COMANDOS: &[Command] = &[
                  oferece, e o endpoint some com ele. A intencao e o recurso da decisao, \
                  enumerada na politica. O mesmo processo oferecendo a mesma intencao de novo \
                  recebe o mesmo endpoint.",
-        params: &[ParamSpec {
-            nome: "intent",
-            tipo: TipoParam::Formatado(Formato::Intencao),
-            obrigatorio: true,
-            descricao: "A intencao, `<espaco>.<nome>`: minusculas, digitos e `_`, cada parte \
-                        comecando por letra, ate 48 bytes, sem curinga.",
-        }],
+        params: &[
+            ParamSpec {
+                nome: "intent",
+                tipo: TipoParam::Formatado(Formato::Intencao),
+                obrigatorio: true,
+                descricao: "A intencao, `<espaco>.<nome>`: minusculas, digitos e `_`, cada \
+                            parte comecando por letra, ate 48 bytes, sem curinga.",
+            },
+            ParamSpec {
+                nome: "notify",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O descritor de um canal de eventos que este processo escuta: o kernel \
+                            avisa ali, com um evento MALHA, quando o endpoint (um pedido de fluxo, uma entrega, o fim) fica pronto. So \
+                            sinaliza: cada operacao continua decidida pelo gate.",
+            },
+        ],
         acesso: Acesso::Exige(Permissao::FabricOffer),
         recurso: Some("intent"),
         mais: Mais::Nada,
@@ -1415,6 +1425,14 @@ pub static COMANDOS: &[Command] = &[
                             fluxo vai ao endpoint de la, pelo enlace. Decidido aqui, com \
                             `fabric.remote` sobre ele, e la, pelo gate de la.",
             },
+            ParamSpec {
+                nome: "notify",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O descritor de um canal de eventos que este processo escuta: o kernel \
+                            avisa ali, com um evento MALHA, quando a sua ponta (a abertura, dado, espaco, o fim) fica pronto. So \
+                            sinaliza: cada operacao continua decidida pelo gate.",
+            },
         ],
         acesso: Acesso::Exige(Permissao::FabricStream),
         recurso: Some("intent"),
@@ -1441,6 +1459,14 @@ pub static COMANDOS: &[Command] = &[
                 tipo: TipoParam::Inteiro,
                 obrigatorio: false,
                 descricao: "Quanto esperar um pedido, em ms, ate 10000.",
+            },
+            ParamSpec {
+                nome: "notify",
+                tipo: TipoParam::Inteiro,
+                obrigatorio: false,
+                descricao: "O descritor de um canal de eventos que este processo escuta: o kernel \
+                            avisa ali, com um evento MALHA, quando a ponta aceita (dado, espaco, o fim) fica pronto. So \
+                            sinaliza: cada operacao continua decidida pelo gate.",
             },
         ],
         acesso: Acesso::Exige(Permissao::FabricStream),
@@ -7787,8 +7813,16 @@ fn fabric_offer(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .member("intent")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let aviso = match crate::aviso::canal_do_pedido(params.member("notify")) {
+        Ok(c) => c,
+        Err(m) => return recusa_do_aviso(w, &alloc::format!("intencao:{intencao}"), m),
+    };
     match crate::malha::oferecer(&ator, intencao) {
         Ok((endpoint, novo)) => {
+            if let (Some(c), Some(n)) = (aviso, politica::aviso::numero_do_id(&endpoint)) {
+                crate::aviso::designar_endpoint(n, c);
+                auditar_o_aviso(&alloc::format!("endpoint:{endpoint}"), c);
+            }
             w.field_bool("ok", true)?;
             w.field_str("endpoint", &endpoint)?;
             w.field_str("intent", intencao)?;
@@ -8092,6 +8126,24 @@ fn falha_do_fluxo(w: &mut JsonWriter, f: crate::fluxo::Falha) -> fmt::Result {
     recusa_de_mensagem(w, f.codigo(), f.motivo())
 }
 
+/// O `notify` do pedido não é um canal que o processo escuta: o comando
+/// falha antes de criar o objeto, e a falha vai à auditoria como a execução
+/// da decisão.
+fn recusa_do_aviso(w: &mut JsonWriter, recurso: &str, motivo: &str) -> fmt::Result {
+    crate::autorizacao::auditar_execucao(recurso, politica::Codigo::InvalidArgument, motivo);
+    recusa_de_mensagem(w, politica::Codigo::InvalidArgument, motivo)
+}
+
+/// A designação do aviso da malha, no registro da execução da decisão que a
+/// criou: o objeto e o canal. Os avisos não têm registro próprio.
+fn auditar_o_aviso(recurso: &str, canal: crate::aviso::Canal) {
+    crate::autorizacao::auditar_execucao(
+        recurso,
+        politica::Codigo::Allow,
+        &alloc::format!("aviso no canal {}", crate::aviso::nome_do_canal(canal)),
+    );
+}
+
 /// Arma a espera `aguardo` e suspende o comando — ver `rede::espera`.
 /// `Ok(true)` suspenso; `Ok(false)` quando há o que fazer agora; `Err` com
 /// o motivo de não esperar.
@@ -8138,6 +8190,10 @@ fn stream_open(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .member("intent")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let aviso = match crate::aviso::canal_do_pedido(params.member("notify")) {
+        Ok(c) => c,
+        Err(m) => return recusa_do_aviso(w, &alloc::format!("intencao:{intencao}"), m),
+    };
     let r = if params.member("device").is_some() {
         crate::fluxo::abrir_no_par(&ator, endpoint, intencao)
     } else {
@@ -8145,6 +8201,10 @@ fn stream_open(params: Json, w: &mut JsonWriter) -> fmt::Result {
     };
     match r {
         Ok(id) => {
+            if let (Some(c), Some(n)) = (aviso, politica::aviso::numero_do_id(&id)) {
+                crate::aviso::designar_ponta(n, c, true);
+                auditar_o_aviso(&alloc::format!("fluxo:{id}"), c);
+            }
             w.field_bool("ok", true)?;
             w.field_str("stream", &id)?;
             w.field_str("intent", intencao)?;
@@ -8160,8 +8220,15 @@ fn stream_accept(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .member("endpoint")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // O canal do aviso antes da espera: um `notify` que não é do processo
+    // recusa já, sem esperar por nada.
+    let aviso = crate::aviso::canal_do_pedido(params.member("notify"));
     let wait = params.member("wait").and_then(|v| v.as_u64());
-    let espera = esperar_no_fluxo(wait, || crate::fluxo::aguardo_do_aceite(endpoint));
+    let espera = if aviso.is_ok() {
+        esperar_no_fluxo(wait, || crate::fluxo::aguardo_do_aceite(endpoint))
+    } else {
+        Ok(false)
+    };
     if espera == Ok(true) {
         return Ok(());
     }
@@ -8170,11 +8237,19 @@ fn stream_accept(params: Json, w: &mut JsonWriter) -> fmt::Result {
         Ok(a) => a,
         Err(r) => return r,
     };
+    let aviso = match aviso {
+        Ok(c) => c,
+        Err(m) => return recusa_do_aviso(w, &alloc::format!("endpoint:{endpoint}"), m),
+    };
     if let Err(motivo) = espera {
         return recusa_de_mensagem(w, politica::Codigo::Conflict, motivo);
     }
     match crate::fluxo::aceitar(&ator, endpoint) {
         Ok(Some((id, aceito))) => {
+            if let (Some(c), Some(n)) = (aviso, politica::aviso::numero_do_id(&id)) {
+                crate::aviso::designar_ponta(n, c, false);
+                auditar_o_aviso(&alloc::format!("fluxo:{id}"), c);
+            }
             w.field_bool("ok", true)?;
             w.field_str("stream", &id)?;
             w.field_str("intent", &aceito.intencao)?;
@@ -9106,6 +9181,25 @@ fn security_metrics(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.field_u64("remote", remotos as u64)?;
     w.field_u64("buffer_peak", pico as u64)?;
     w.field_u64("buffer_limit", politica::fluxo::BUFFER_DO_SENTIDO as u64)?;
+    w.end_object()?;
+    // O aviso da malha (DS-1): os avisos não vão à auditoria, e por isso
+    // contam aqui.
+    let a = crate::aviso::medidas();
+    w.key("mesh_notices")?;
+    w.begin_object()?;
+    w.field_u64("designations", a.designacoes as u64)?;
+    w.field_u64("published", a.publicados)?;
+    w.field_u64("merged", a.juntados)?;
+    w.field_u64("coalesced", a.coalescidos)?;
+    w.field_u64("full_channel", a.devidos)?;
+    w.field_u64("delivered_later", a.entregues_depois)?;
+    w.field_u64("dropped", a.largados)?;
+    w.field_u64("refused", a.recusados)?;
+    // Do aviso publicado à operação do dono que o consome.
+    let (n, media, maior) = crate::metricas::AVISO.ler();
+    w.field_u64("to_operation_samples", n)?;
+    w.field_u64("to_operation_avg_ns", crate::metricas::nanos(media))?;
+    w.field_u64("to_operation_max_ns", crate::metricas::nanos(maior))?;
     w.end_object()?;
     w.end_object()
 }

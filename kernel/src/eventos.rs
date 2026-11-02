@@ -42,8 +42,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::trava::Mutex;
 use protocolo::usuario::evento::Evento;
 
-/// Quantos canais podem existir ao mesmo tempo.
-pub const CANAIS: usize = 8;
+/// Quantos canais podem existir ao mesmo tempo. Eram 8 — o servidor de
+/// janelas, o Terminal e os programas da suíte —; com o aviso da malha
+/// (DS-1), cada programa que espera a malha num lugar só escuta um canal, e
+/// o teto subiu. Cada canal custa a fila dele, `CAPACIDADE` eventos.
+pub const CANAIS: usize = 32;
+
+/// Quantos canais um processo escuta ao mesmo tempo, pela chamada
+/// `escutar`: um para o laço dele e um de folga. O teto é da chamada — os
+/// fios do kernel (a suíte) não passam por ela.
+pub const CANAIS_POR_PROCESSO: usize = 2;
 
 /// Quantos eventos não lidos um canal guarda.
 pub const CAPACIDADE: usize = 64;
@@ -201,6 +209,41 @@ pub fn publicar_em(chave: Chave, evento: Evento) -> Result<(), NaoPublicado> {
     })
 }
 
+/// Como foi publicado um evento por [`publicar_em_juntando`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Publicado {
+    /// Entrou na fila, como outro qualquer.
+    Novo,
+    /// Juntou-se a um evento que ainda esperava na fila: a fila não cresceu.
+    Junto,
+}
+
+/// Como [`publicar_em`], mas um evento que ainda espera na fila e que
+/// `juntar` aceita recebe o novo, em vez de outro entrar: `juntar(na_fila,
+/// novo)` diz se juntou. Junto, a fila não cresce — também cheia —, e o
+/// ouvinte já tem o que ler: não há quem acordar.
+pub fn publicar_em_juntando(
+    chave: Chave,
+    evento: Evento,
+    juntar: impl Fn(&mut Evento, &Evento) -> bool,
+) -> Result<Publicado, NaoPublicado> {
+    com_canais(|canais| {
+        let vaga = canais.get_mut(chave.vaga).ok_or(NaoPublicado::SemOuvinte)?;
+        if vaga.as_ref().is_none_or(|c| c.geracao != chave.geracao) {
+            return Err(NaoPublicado::SemOuvinte);
+        }
+        recuperar_se_orfao(vaga);
+        let canal = vaga.as_mut().ok_or(NaoPublicado::SemOuvinte)?;
+        for i in 0..canal.quantos {
+            let posicao = (canal.inicio + i) % CAPACIDADE;
+            if juntar(&mut canal.fila[posicao], &evento) {
+                return Ok(Publicado::Junto);
+            }
+        }
+        entregar(canal, evento).map(|()| Publicado::Novo)
+    })
+}
+
 /// Põe o evento na fila do canal e acorda o ouvinte, ou recusa e conta.
 fn entregar(canal: &mut Canal, evento: Evento) -> Result<(), NaoPublicado> {
     if canal.quantos == CAPACIDADE {
@@ -262,6 +305,29 @@ pub fn colher(chave: Chave, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
         canal.quantos -= n;
         canal.entregues += n as u64;
         Colheita::Entregues(n)
+    })
+}
+
+/// Quantos canais o `ouvinte` escuta agora.
+pub fn canais_de(ouvinte: u64) -> usize {
+    com_canais(|canais| {
+        canais.iter_mut().for_each(recuperar_se_orfao);
+        canais
+            .iter()
+            .flatten()
+            .filter(|c| c.ouvinte == ouvinte)
+            .count()
+    })
+}
+
+/// O nome do canal da `chave`, se ele está aberto.
+pub fn nome_de(chave: Chave) -> Option<alloc::string::String> {
+    com_canais(|canais| {
+        let c = canais.get(chave.vaga)?.as_ref()?;
+        if c.geracao != chave.geracao {
+            return None;
+        }
+        Some(alloc::string::String::from_utf8_lossy(c.nome()).into_owned())
     })
 }
 

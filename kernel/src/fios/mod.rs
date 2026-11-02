@@ -656,6 +656,8 @@ fn passada_do_coletor() {
     crate::enlace::vencer_todos();
     // E os fluxos: o prazo do aceite, a inatividade, o desligamento.
     crate::fluxo::passada_do_coletor();
+    // E os avisos da malha que o canal cheio deixou devidos.
+    crate::aviso::passada_do_coletor();
     // E a cerimônia de pareamento: os prazos dela, a sessão que acabou e
     // o desligamento — e a acabada que ninguém precisa mais sai.
     crate::pareamento::passada_do_coletor();
@@ -1892,6 +1894,23 @@ pub fn com_descritores<R>(
     f: impl FnOnce(&mut crate::usuario::descritores::Tabela) -> R,
 ) -> Option<R> {
     com_escalonador(|e| e.fio_atual_mut().map(|fio| f(&mut fio.descritores)))
+}
+
+/// Como [`com_descritores`], com a tabela do processo `id` — vivo — em vez
+/// da do fio que executa: para o executor, que roda o comando de um processo
+/// em nome dele e precisa resolver um descritor dele (o `notify` do aviso da
+/// malha). As mesmas regras: `f` roda com a trava do escalonador na mão.
+pub fn com_descritores_de<R>(
+    id: u64,
+    f: impl FnOnce(&mut crate::usuario::descritores::Tabela) -> R,
+) -> Option<R> {
+    com_escalonador(|e| {
+        e.fios
+            .iter_mut()
+            .flatten()
+            .find(|fio| fio.id.numero() == id && fio.estado != Estado::Terminado)
+            .map(|fio| f(&mut fio.descritores))
+    })
 }
 
 /// A pilha de kernel do fio que está executando.

@@ -462,6 +462,7 @@ fn sob_a_decisao<R>(recurso: &str, f: impl FnOnce() -> Result<R, Falha>) -> Resu
 /// Tira, das esperas, as de `id` — a espera que sai daqui acabou — e os
 /// wakers delas, e o da sessão com o par; com a tabela na mão.
 fn de_quem_espera(t: &mut Tabela, id: u64) -> Vec<Waker> {
+    crate::aviso::tocar_fluxo(id);
     let chaves: Vec<Aguardo> = t
         .esperas
         .keys()
@@ -481,6 +482,7 @@ fn de_quem_espera(t: &mut Tabela, id: u64) -> Vec<Waker> {
 /// Os wakers de quem espera no fluxo `id`, sem tirar as esperas: elas
 /// conferem de novo, e só acabam se há o que fazer.
 fn cutucar(t: &mut Tabela, id: u64) -> Vec<Waker> {
+    crate::aviso::tocar_fluxo(id);
     let mut w: Vec<Waker> = t
         .esperas
         .iter_mut()
@@ -495,6 +497,7 @@ fn cutucar(t: &mut Tabela, id: u64) -> Vec<Waker> {
 
 /// O waker de quem espera aceitar no endpoint `endpoint`.
 fn cutucar_o_aceite(t: &mut Tabela, endpoint: u64) -> Vec<Waker> {
+    crate::aviso::tocar_endpoint(endpoint);
     t.esperas
         .get_mut(&Aguardo::Aceitar { endpoint })
         .and_then(Option::take)
@@ -502,10 +505,13 @@ fn cutucar_o_aceite(t: &mut Tabela, endpoint: u64) -> Vec<Waker> {
         .collect()
 }
 
+/// Acorda as esperas, e dá os avisos da malha que as mudanças pediram —
+/// fora da tabela, como os wakers.
 fn acordar(wakers: Vec<Waker>) {
     for w in wakers {
         w.wake();
     }
+    crate::aviso::processar();
 }
 
 /// Com a tabela na mão: o que os encerramentos acordam — as esperas deles
@@ -778,6 +784,15 @@ fn abridor_exerceria(abridor: &Ponta, recurso: &str) -> bool {
 /// pedido cujo abridor não poderia mais acaba, e o seguinte é tentado.
 /// `Ok(None)` sem pedido na fila.
 pub fn aceitar(a: &Ator, endpoint: &str) -> Result<Option<(String, Aceito)>, Falha> {
+    let r = aceitar_no(a, endpoint);
+    // A operação do dono sobre o endpoint: o aviso dele está consumido.
+    if let (Some(fio), Some(n)) = (a.fio(), politica::aviso::numero_do_id(endpoint)) {
+        crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
+    }
+    r
+}
+
+fn aceitar_no(a: &Ator, endpoint: &str) -> Result<Option<(String, Aceito)>, Falha> {
     let recurso = format!("endpoint:{endpoint}");
     let Some(fio) = a.fio() else {
         return recusada(&recurso, Falha::SoProcesso, Falha::SoProcesso.motivo());
@@ -898,7 +913,22 @@ pub fn escrever(a: &Ator, id: &str, dados: &[u8]) -> Result<usize, Falha> {
     let (recurso, n) = alvo(a, id)?;
     let r = escrever_no(a, &recurso, n, dados);
     recusada_na_reconfirmacao(a, n, &r);
+    operou(a, n, &r, matches!(r, Ok(k) if k < dados.len()));
     r
+}
+
+/// A operação de `a` sobre o fluxo `n` acabou: o aviso da malha dele está
+/// consumido, e rearma — ou, se ela ouviu o fim, a designação sai.
+/// `esbarrou` diz que a escrita não coube inteira.
+fn operou<T>(a: &Ator, n: u64, r: &Result<T, Falha>, esbarrou: bool) {
+    let Some(fio) = a.fio() else {
+        return;
+    };
+    let obj = crate::aviso::Objeto::Ponta { fluxo: n, fio };
+    match r {
+        Err(Falha::Fluxo(Recusa::Encerrado(_))) => crate::aviso::largar(obj, fio),
+        _ => crate::aviso::operou(obj, fio, esbarrou),
+    }
 }
 
 fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {
@@ -926,6 +956,7 @@ pub fn ler(a: &Ator, id: &str, max: usize) -> Result<Lida, Falha> {
     let (recurso, n) = alvo(a, id)?;
     let r = ler_no(a, &recurso, n, max);
     recusada_na_reconfirmacao(a, n, &r);
+    operou(a, n, &r, false);
     r
 }
 
@@ -960,7 +991,19 @@ fn ler_no(a: &Ator, recurso: &str, n: u64, max: usize) -> Result<Lida, Falha> {
 /// fecha o fluxo para ele.
 pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha> {
     let (recurso, n) = alvo(a, id)?;
-    sob_a_decisao(&recurso, || {
+    let r = terminar_ou_fechar_no(a, &recurso, n, fechar);
+    match a.fio() {
+        // Quem fecha sai do fluxo: não há mais o que avisar a ele.
+        Some(fio) if fechar => {
+            crate::aviso::largar(crate::aviso::Objeto::Ponta { fluxo: n, fio }, fio)
+        }
+        _ => operou(a, n, &r, false),
+    }
+    r
+}
+
+fn terminar_ou_fechar_no(a: &Ator, recurso: &str, n: u64, fechar: bool) -> Result<(), Falha> {
+    sob_a_decisao(recurso, || {
         let agora = crate::tempo::uptime_ms();
         let (epoca, r, es, wakers) = com_tabela(|t| {
             let r = if fechar {
@@ -978,7 +1021,7 @@ pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha>
             Ok(_) => Ok(()),
             Err(r) => {
                 let m = String::from(r.motivo());
-                recusada(&recurso, r.into(), &m)
+                recusada(recurso, r.into(), &m)
             }
         }
     })
@@ -987,12 +1030,26 @@ pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha>
 /// `stream.status`: o que quem pede vê do fluxo — vivo ou lembrado.
 pub fn estado(a: &Ator, id: &str) -> Result<Vista, Falha> {
     let (recurso, n) = alvo(a, id)?;
-    sob_a_decisao(&recurso, || {
+    let r = sob_a_decisao(&recurso, || {
         com_tabela(|t| t.fluxos.estado(a.titular, a.quem(), n)).or_else(|r| {
             let m = String::from(r.motivo());
             recusada(&recurso, r.into(), &m)
         })
-    })
+    });
+    operou(a, n, &r, false);
+    r
+}
+
+/// O que o aviso da malha (DS-1) diz da ponta do processo `fio` no fluxo
+/// `n`, agora. Sem tabela, o fluxo não existe: nada a dizer.
+pub fn prontidao_da_ponta(n: u64, fio: u64) -> politica::fluxo::Prontidao {
+    se_ha_tabela(|t| t.fluxos.prontidao(Quem::Processo(fio), n))
+        .unwrap_or(politica::fluxo::Prontidao::Acabou { ja_sabe: true })
+}
+
+/// Se há um pedido de fluxo esperando o aceite no endpoint `n`.
+pub fn tem_pedido_em(n: u64) -> bool {
+    se_ha_tabela(|t| t.fluxos.tem_pedido(n)).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------
