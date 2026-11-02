@@ -98,6 +98,11 @@ fotografia, na diferença, na base da compactação e na reposição do boot.
 - **Confirmação**: o enlace só conta como de pé depois do primeiro quadro
   de dados que abre — é aí que a auditoria grava `link.open` com `ALLOW`.
   Um aperto que não chega a isso é gravado como recusado.
+- **As vagas partilhadas**: o primeiro quadro de uma conexão diz de quem
+  ela é até o fim — o 5, do enlace; o 6 e o 8, da cerimônia do pareamento
+  ([PAREAMENTO.md](PAREAMENTO.md)); o 9, de uma sessão de fluxo
+  ([FLUXOS.md](FLUXOS.md)) —, e um quadro de outro domínio a encerra. O
+  enlace não muda com os outros dois.
 - **Mensagens**: uma por enlace, numa linha JSON cifrada —
   `{"relation":"<32 hex>","program":"<64 hex>","rpc":{…}}` —, e a resposta,
   o envelope JSON-RPC do gate de lá. Até 8 KiB. O conjunto é **fechado**:
@@ -188,7 +193,8 @@ e-envio, handoff, recursos remotos, o programa de origem como critério,
 criptografia ou autoridade nova, um segundo gate ou uma segunda
 auditoria. O autosserviço da pessoa (D8) é do estágio 2 — o pareamento
 sem administrador e o `device.forget` —, e está em
-[PAREAMENTO.md](PAREAMENTO.md).
+[PAREAMENTO.md](PAREAMENTO.md); os fluxos entre dois Dukes, com o domínio
+próprio deles nas mesmas vagas, em [FLUXOS.md](FLUXOS.md).
 
 ## Testes
 

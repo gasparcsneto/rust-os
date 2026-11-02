@@ -224,8 +224,12 @@ O manifesto declara o que o programa exerce: `fabric.offer` para atender,
   [PAREAMENTO.md](PAREAMENTO.md). O que ainda fica de fora dos dois —
   descoberta, propagação da revogação, atualização do endereço,
   armazenamento-e-envio — está lá.
-- **Handoff, streams, recursos remotos, presença.** Os próximos marcos,
-  cada um com uma decisão própria antes.
+- **Fluxos.** Um canal ordenado de bytes entre dois programas do mesmo
+  titular, aqui ou entre dois Dukes da pessoa, está em
+  [FLUXOS.md](FLUXOS.md): a malha descobre o endpoint, o fluxo leva os
+  bytes, e cada passo é do gate.
+- **Handoff, recursos remotos, presença.** Os próximos marcos, cada um
+  com uma decisão própria antes.
 - **Entre titulares.** De propósito: a mensagem já é esse caminho.
 - **Persistência.** A malha é volátil; uma entrega não sobrevive ao boot.
 

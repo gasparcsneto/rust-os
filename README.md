@@ -6516,7 +6516,11 @@ detalhe  pelo processo 41 (verificado 3f2a…): conexao 7 tcp:10.0.2.100:4943; d
 No recurso, o que o programa disse; no detalhe, o processo, o programa, a
 conexão e o **destino real** dela pela tabela da pilha — ou `sem conexao`
 — e a decisão do gate, que é a da permissão `audit.declare` do papel, sem
-recurso. Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
+recurso. A citação da decisão fica inteira no fim mesmo quando o detalhe
+passa do teto de 96 bytes: quem encolhe é o texto antes dela — um pedaço
+do número seria o número de outro registro
+([`politica::auditoria::detalhe_composto`](politica/src/auditoria.rs)).
+Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
 as cotas, nem a contenção. Ela gasta a taxa de quem lançou o programa, e
 é recusada a um processo contido e a uma sessão que acabou. O desfecho é
 uma palavra — `verified`, `verified_reject`, `unverified_<etapa>`,
@@ -8772,6 +8776,134 @@ e os boots — leva de 4 a 7 minutos no emulador; a cerimônia em si, uns 20
 segundos, quase todos do teclado do emulador, uma tecla de cada vez,
 conferida na tela.
 
+## Os fluxos da malha
+
+O DN-2 ([`docs/FLUXOS.md`](docs/FLUXOS.md)), com as decisões DF-1 a DF-6
+aprovadas antes da implementação: o **fluxo** é um canal ordenado de
+bytes, nos dois sentidos, entre dois processos do mesmo titular — nesta
+máquina, ou entre dois Dukes da mesma pessoa. A malha descobre o endpoint;
+o fluxo leva os bytes, quantos forem, na ordem. E **o fluxo não é
+autoridade**: abrir não dá nada a quem aceita, aceitar não dá nada a quem
+abriu, nenhum token, chave ou decisão viaja por ele, e os bytes são
+entrada não confiável para quem os lê — `fluxo → bytes → programa →
+gate → operação`, nunca `fluxo → autorização`.
+
+Um processo pede o fluxo (`stream.open`, com `fabric.stream` sobre a
+intenção — a permissão nova, separada de `fabric.send`) ao endpoint de um
+programa do mesmo titular, e o dono do endpoint aceita (`stream.accept`):
+a **abertura efetiva**, com a decisão de quem aceita e a de quem abriu
+**reconfirmadas** na ordem das gravações. Aberto, cada `stream.write` e
+cada `stream.read` é uma decisão do gate, gravada, **no plano de dados**:
+não gasta a ficha da taxa de controle, como os `net.*` de uma conexão
+aberta, e a política nova vale na operação seguinte — a recusa pela
+política encerra o fluxo. O buffer de cada sentido tem 16 KiB, e a
+contrapressão segura quem escreve; o `finish` termina um sentido, e o
+`close` fecha para quem fecha, com o que ele escreveu legível até o fim
+pela outra ponta, como o FIN do TCP. A ponta é do processo: não se herda
+no `fork`, acaba no `exec` e na morte. Tudo é volátil: o reboot acaba os
+fluxos. Ver [`kernel/src/fluxo.rs`](kernel/src/fluxo.rs) e a conta pura em
+[`politica/src/fluxo.rs`](politica/src/fluxo.rs).
+
+**Entre dois Dukes**, com `device` no `stream.open`: decidido aqui com
+`fabric.remote` sobre o dispositivo, e lá pelo gate de lá. Um **fio do
+fluxo**, com a autoridade do serviço de enlace, conecta pelo gate ao
+endereço da relação e faz o mesmo Noise IK do enlace, com a chave do Duke,
+um prólogo próprio (`Duke fluxo entre dispositivos v1`) e um quadro de
+início próprio (9): o domínio do fluxo, separado do estágio 1 e do D8, que
+não mudam. No destino, a vaga do enlace que recebe um quadro 9 vira uma
+sessão de fluxo — no máximo duas ao mesmo tempo, recusadas antes do aperto
+acima disso —, e o `abrir` e cada `dados` de lá vão ao gate daqui **como o
+dispositivo**, pela composição já fechada: pessoa ∩ relação ∩ `remoto`,
+com o programa de lá atestado na auditoria. O protocolo é um conjunto
+fechado (`abrir`, `aceito`, `recusado`, `dados`, `credito`, `fim`,
+`fechar`), com crédito de 16 KiB por sentido; qualquer outra coisa é
+`protocolo`, e o fluxo acaba dos dois lados — mas o que o par mandou antes
+de saber do fim daqui é descartado, e o `fechar` leva o motivo daqui. A
+revogação, a suspensão, o `device.forget`, a morte, o desligamento e os
+prazos acabam o fluxo dos dois lados, sem propagação nenhuma: o outro ouve
+o `fechar`, ou vê a conexão cair
+([`kernel/src/fluxo/par.rs`](kernel/src/fluxo/par.rs)).
+
+**Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
+fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
+ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
+30 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
+a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
+fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de
+dados, a contrapressão, as cotas, a morte, o `exec` e o `fork`, a
+revogação e a política nova, o desligamento, a inatividade, a auditoria
+sem o conteúdo, as corridas, o quadro 9 só no domínio dele, o aperto
+contra o registro, cada `dados` decidido aqui, o protocolo fechado, os
+tetos das vagas, a suspensão, a revogação e a política nova com o par —
+cada escrita e leitura decide `fabric.remote` de novo, e o que ele mandou
+chegando depois do fim daqui não muda o motivo, nem a conexão que cai logo
+atrás do `fechar` dele apaga o dele — e o replay. E a **bancada de duas
+máquinas**, `cargo xtask fluxo`: 4 MiB em cada sentido, local e entre os
+Dukes, com a auditoria dos dois lados e nenhum byte do conteúdo nela; a
+contrapressão de um leitor lento, com o pico dos buffers; uma ponte do
+meio que troca um bit de um quadro, ou faz o homem no meio com uma chave
+dela; a política, a suspensão, o `device.forget`, o corte de energia e a
+revogação no meio do fluxo; e as vagas da 7071 com outro dispositivo que a
+bancada faz. Nos quatro pares.
+
+### As mutações dos fluxos
+
+Cinquenta e seis mutações contra o que o DN-2 promete — uma de cada vez,
+no repositório, no x86: as que mexem na conta pura rodam os testes do
+hospedeiro; as do kernel, os casos `fluxo:` da suíte (e os `enlace:`,
+quando mexem no domínio do `Chamador::Remoto`); duas, as invariantes de
+fonte; duas, a bancada de duas máquinas (`cargo xtask fluxo`,
+x86_64→x86_64), onde há uma conexão de verdade, com o buffer dela e a
+queda; e duas, o caso da citação na auditoria. O controle, sem mutação,
+passa em tudo. Na primeira rodada de cada uma, sete sobreviveram, as sete
+por fraqueza dos testes, e não do código: na F19 e na F20 (o sentido
+abortado e o encerramento que não zeram nem contam o que havia), nenhum
+teste da conta pura olhava os contadores por dentro; na F42 (a escrita e a
+leitura de um fluxo ao par sem `fabric.remote` sobre o dispositivo),
+nenhum caso conferia a segunda permissão no plano de dados; na F51, na F52
+e na F53 (o crédito, o fim e os dados de lá chegando depois do fim daqui,
+tratados como protocolo), o caso guardava as três mensagens antes da
+revogação, mas a sessão lê uma por volta do laço e então vê o fim — e o
+canal de teste ainda as entregava no fim do passo de 1 s, antes do fim
+daqui; e na F44 (a origem que não lê o `fechar` do par quando o envio
+falha), a bancada não teve a corrida — no x86_64→x86_64, a origem sempre
+leu o `fechar` antes de mandar. Os testes do hospedeiro passaram a
+conferir os restos; o caso de ponta a ponta para outro Duke confere o
+recurso de cada decisão de escrita e de leitura — a intenção e o
+dispositivo —; e o caso da suspensão e da revogação do par ganhou a
+política sem `fabric.remote` no meio do fluxo, um fim daqui para cada
+mensagem tardia, entregue junto com a mudança daqui, o fecho daqui com
+dados esperando o crédito de lá — a F53 só mexe no fluxo que acaba sem
+lápide; com a lápide, os dados de lá dão `Encerrado` —, e o `fechar` de lá
+com a linha caindo logo atrás, de uma vez: o envio daqui falha sempre. A
+F32 e a F33 (cada domínio do `Chamador::Remoto` aceitando os métodos do
+outro) só as invariantes reprovam na forma direta: o kernel monta o
+chamador de cada domínio num caminho só, e nenhum pedido da suíte chega ao
+outro conjunto por ele; a F32b, a mesma troca escrita para a suíte ver,
+reprova nos casos. Na última rodada de cada uma, as cinquenta e seis são
+reprovadas.
+
+| Mutação | Reprovada por |
+|---|---|
+| `stream.open`, `stream.accept`, `stream.write` ou `stream.read` com outra permissão no lugar de `fabric.stream`; o aceite sem reconfirmar quem abriu ou a própria decisão; o endpoint de qualquer titular | os casos de ponta a ponta, "sem a permissao, cada lado e recusado", "a reconfirmacao na abertura efetiva", "o id nao e capacidade" |
+| o plano de dados para quem já saiu ou para o pedido que não abriu; o id de outro titular; o crédito, o buffer, as cotas (máquina, titular, processo, fila do endpoint, a relação, os que saem), o sentido terminado, o fecho, o aborto e o encerramento sem os restos, os prazos, a morte de quem já fechou, `fabric.stream` sem o alcance de intenção, o detalhe composto que corta a citação | os testes do hospedeiro de `politica::fluxo`, `politica::dispositivos`, `politica::arquivo` e `politica::auditoria` |
+| a revogação do titular, a morte, a troca de imagem, o endpoint que acaba, o desligamento e o `device.forget` que não encerram | "a revogacao e a politica nova encerram", "a morte, a troca de imagem e a bifurcacao", "o prazo do aceite e o endpoint que fecha", "com o desligamento, nada abre…", "cada dados de outro Duke decidido aqui" |
+| os dados do par sem o gate de B; o quadro 9 no canal do agente; o aperto com o prólogo do enlace; o suspenso que passa o aperto; o teto de sessões; o orçamento do plano de dados para o que não está aberto | os casos de ponta a ponta entre Dukes, "o quadro 9 so no dominio dele", "o aperto com o par confere o registro", "os tetos das vagas do enlace", "o plano de dados nao gasta a ficha" |
+| cada domínio do `Chamador::Remoto` aceitando os métodos do outro | as invariantes de fonte (F32, F33); a suíte (F32b) |
+| a escrita e a leitura ao par sem `fabric.remote`; o aceite, o crédito, o fim e os dados de lá depois do fim daqui; a origem que não lê o `fechar` do par quando o envio falha | "para outro Duke, pelo fio do fluxo, de ponta a ponta", "a suspensao e a revogacao do par" — depois do reforço |
+| a execução do processo que cola a citação no texto | "auditoria: a citacao da decisao fica inteira acima do teto" |
+| o quadro de dados cheio num `net.send` só | a bancada (x86_64→x86_64): a troca de 4 MiB entre os Dukes não fecha — a conexão cai no primeiro quadro cheio |
+
+O kernel de release cresceu, nos segmentos carregados, 277 368 bytes no
+x86_64 (+5,7%) e 247 548 no aarch64 (+6,1%), contra o fim do D8. Na
+bancada — QEMU sem KVM, dois núcleos por máquina, as duas no mesmo
+hospedeiro de quatro —, de 84 a 107 KiB/s por fluxo entre os Dukes e de
+142 a 194 KiB/s no local, 4 MiB em cada medida: cada leitura e cada
+escrita é uma decisão do gate e um registro da auditoria, e o número mede
+isso, e não o transporte. O par inteiro, os dez passos, leva de 624 a
+709 s.
+
 ## Barramento PCI
 
 Até a fase 1, todo dispositivo que o kernel tocava tinha endereço conhecido de
@@ -10337,9 +10469,14 @@ padronizado.
       pareamento pela própria pessoa, sem administrador — a cerimônia com o
       código de conferência e a senha nos dois teclados, e o
       `device.forget` (ver [O pareamento pela própria
-      pessoa](#o-pareamento-pela-própria-pessoa)). O handoff, os fluxos, os
-      recursos remotos, a presença, a continuidade, o SDK e os pacotes são
-      os marcos seguintes, e cada um pede uma decisão própria antes.
+      pessoa](#o-pareamento-pela-própria-pessoa)). Depois, os fluxos da
+      malha, com as decisões DF-1 a DF-6 tomadas antes (DN-2): um canal
+      ordenado de bytes entre dois processos do mesmo titular, nesta
+      máquina ou entre dois Dukes da pessoa, cada passo pelo gate e nenhum
+      deles autoridade (ver [Os fluxos da malha](#os-fluxos-da-malha)). O
+      handoff, os recursos remotos, a presença, a continuidade, o SDK e os
+      pacotes são os marcos seguintes, e cada um pede uma decisão própria
+      antes.
 
 ## Licença
 
