@@ -140,11 +140,27 @@ pub struct Laco {
     nome: String,
 }
 
+/// Quantos nomes [`Laco::novo`] tenta.
+const NOMES: u64 = 16;
+
 impl Laco {
-    /// Escuta um canal só deste processo, `laco-<id>`. O erro é o da
-    /// chamada `escutar` — `OCUPADO` sem vaga, ou com o teto do processo.
+    /// Escuta um canal só deste processo: `laco-<id>`, ou, se outro processo
+    /// já tem esse nome, `laco-<id>-1`, `laco-<id>-2`… — o nome é previsível,
+    /// e quem o tomasse antes não deve impedir o programa de subir. O erro é
+    /// o da última tentativa da chamada `escutar` — `OCUPADO` com os nomes
+    /// tomados, sem vaga, ou com o teto do processo.
     pub fn novo() -> Result<Laco, i64> {
-        Laco::com_nome(&format!("laco-{}", sistema::id()))
+        let id = sistema::id();
+        let mut r = Laco::com_nome(&format!("laco-{id}"));
+        for k in 1..NOMES {
+            match r {
+                Err(e) if e == protocolo::usuario::erro::OCUPADO => {
+                    r = Laco::com_nome(&format!("laco-{id}-{k}"));
+                }
+                _ => break,
+            }
+        }
+        r
     }
 
     /// Escuta o canal `nome` — um que só este processo usa.

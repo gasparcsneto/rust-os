@@ -639,6 +639,12 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
             };
             (t.epoca, r, acordaveis(t))
         });
+        // Quem retira não precisa de aviso do que retirou: a designação sai
+        // antes de acordar quem espera — a conta do endpoint fechado diria
+        // `FIM` a quem o fechou.
+        if let Ok((n, _)) = &r {
+            crate::aviso::largar(crate::aviso::Objeto::Endpoint(*n), fio);
+        }
         acordar(wakers);
         match r {
             Ok((n, anuladas)) => {
@@ -648,8 +654,6 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
                     &format!("fechado; {} anulada(s)", anuladas.len()),
                 );
                 auditar_na_execucao(&epoca, &anuladas);
-                // Quem retira não precisa de aviso do que retirou.
-                crate::aviso::largar(crate::aviso::Objeto::Endpoint(n), fio);
                 // Os pedidos de fluxo que esperavam nele acabam também.
                 crate::fluxo::endpoint_acabou(n);
                 Ok(anuladas.len())
@@ -786,7 +790,7 @@ pub fn receber(
         Ok((f, _)) => f,
         Err(f) => return recusada(&recurso, f, f.motivo()),
     };
-    sob_a_decisao(&recurso, || {
+    let r = sob_a_decisao(&recurso, || {
         conferir_alvo(&recurso, |t| {
             let n = ler_id(&t.epoca, endpoint)?;
             t.malha
@@ -812,10 +816,6 @@ pub fn receber(
             .partition(|t| t.estado == Estado::Entregue);
         auditar_do_kernel(&epoca, &vencidas, "");
         auditar_na_execucao(&epoca, &lidas_agora);
-        // A operação do dono sobre o endpoint: o aviso dele está consumido.
-        if let Some(n) = politica::aviso::numero_do_id(endpoint) {
-            crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
-        }
         match lidas {
             Ok(lidas) => Ok(lidas
                 .into_iter()
@@ -823,7 +823,14 @@ pub fn receber(
                 .collect()),
             Err(r) => recusada(&recurso, r.into(), r.motivo()),
         }
-    })
+    });
+    // A operação do dono sobre o endpoint — também a que a reconfirmação
+    // recusou, dentro da decisão —: o aviso dele está consumido. Senão a
+    // recusa deixaria o endpoint mudo, com um aviso que nada consome.
+    if let Some(n) = politica::aviso::numero_do_id(endpoint) {
+        crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
+    }
+    r
 }
 
 /// `fabric.ack`: confirma uma entrega lida, que chegou a um endpoint do

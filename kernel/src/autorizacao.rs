@@ -2470,6 +2470,10 @@ pub fn autorizar(
             recusa.codigo,
             &recusa.motivo,
         );
+        // A recusa também é a decisão do gate sobre a operação do dono: o
+        // aviso da malha do objeto que o pedido nomeia está consumido — ver
+        // `aviso::recusado_pelo_gate`.
+        crate::aviso::recusado_pelo_gate(chamador, comando.nome, params);
     }
     let codigo = match &r {
         // Adiado não é decisão: nada foi decidido nem gravado.

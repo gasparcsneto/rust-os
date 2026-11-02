@@ -993,8 +993,11 @@ pub fn terminar_ou_fechar(a: &Ator, id: &str, fechar: bool) -> Result<(), Falha>
     let (recurso, n) = alvo(a, id)?;
     let r = terminar_ou_fechar_no(a, &recurso, n, fechar);
     match a.fio() {
-        // Quem fecha sai do fluxo: não há mais o que avisar a ele.
-        Some(fio) if fechar => {
+        // Quem fecha sai do fluxo: não há mais o que avisar a ele — se o
+        // fecho passou, ou ouviu o fim. O fecho recusado (a reconfirmação)
+        // deixa o fluxo vivo, e com ele a designação: é uma operação, que
+        // consome o aviso e rearma.
+        Some(fio) if fechar && matches!(r, Ok(()) | Err(Falha::Fluxo(Recusa::Encerrado(_)))) => {
             let obj = crate::aviso::Objeto::Ponta { fluxo: n, fio };
             #[cfg(feature = "modo-teste")]
             crate::aviso::antes_de_largar_no_fecho_de_teste(obj);

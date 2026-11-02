@@ -725,21 +725,15 @@ pub(crate) fn conferir_o_contrato() -> Result<ExitCode, String> {
 /// o kernel usa, lido pela mesma conta da política.
 pub(crate) fn manifesto_do_elf(bytes: &[u8]) -> Result<politica::manifesto::Manifesto, String> {
     use protocolo::usuario::manifesto::{SEGMENTO_DE_NOTAS, achar};
-    let u16_em = |i: usize| {
-        bytes
-            .get(i..i + 2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
-    };
-    let u32_em = |i: usize| {
-        bytes
-            .get(i..i + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
+    // Toda posição vem do arquivo, que pode ser forjado: as contas são
+    // conferidas, e o que passa do fim é `None` — nunca um pânico.
+    let fatia = |i: usize, n: usize| bytes.get(i..i.checked_add(n)?);
+    let u16_em = |i: usize| fatia(i, 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u32_em = |i: usize| fatia(i, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     let u64_em = |i: usize| {
-        bytes
-            .get(i..i + 8)
+        fatia(i, 8)
             .and_then(|b| b.try_into().ok())
-            .map(|b: [u8; 8]| u64::from_le_bytes(b) as usize)
+            .and_then(|b: [u8; 8]| usize::try_from(u64::from_le_bytes(b)).ok())
     };
     if bytes.get(..4) != Some(b"\x7fELF") || bytes.get(4) != Some(&2) || bytes.get(5) != Some(&1) {
         return Err(String::from("não é um ELF64 little-endian"));
@@ -748,11 +742,25 @@ pub(crate) fn manifesto_do_elf(bytes: &[u8]) -> Result<politica::manifesto::Mani
     else {
         return Err(String::from("o cabeçalho do ELF está cortado"));
     };
+    // O tamanho de um cabeçalho de programa do ELF64 — o que o kernel exige
+    // na carga.
+    if tamanho != 56 {
+        return Err(format!(
+            "o cabeçalho de programa tem {tamanho} bytes, e o do ELF64 tem 56"
+        ));
+    }
     let mut achado = None;
     for k in 0..quantos {
-        let ph = phoff + k * tamanho;
-        let (Some(tipo), Some(inicio), Some(n)) = (u32_em(ph), u64_em(ph + 8), u64_em(ph + 32))
-        else {
+        let ph = k
+            .checked_mul(tamanho)
+            .and_then(|d| phoff.checked_add(d))
+            .ok_or("os cabeçalhos de programa passam do fim do arquivo")?;
+        let campo = |d: usize| ph.checked_add(d);
+        let (Some(tipo), Some(inicio), Some(n)) = (
+            u32_em(ph),
+            campo(8).and_then(u64_em),
+            campo(32).and_then(u64_em),
+        ) else {
             return Err(String::from("um cabeçalho de programa está cortado"));
         };
         if tipo != SEGMENTO_DE_NOTAS {
@@ -1064,6 +1072,33 @@ mod testes {
         // O "código": bytes que não são nada, depois das notas.
         e.extend((0..300u32).map(|i| (i * 7) as u8));
         e
+    }
+
+    /// NH16: o ELF forjado — o cabeçalho de programa de outro tamanho, as
+    /// posições que passam do fim, as contas que transbordam — é recusado
+    /// com o motivo, sem pânico: `sdk-conferir` e `selar` leem arquivos de
+    /// fora.
+    #[test]
+    fn nh16_o_elf_forjado() {
+        let bom = elf_de_teste(Some("duke-manifesto 1\nnome forjado\n"));
+        assert!(manifesto_do_elf(&bom).is_ok());
+        let com = |f: &dyn Fn(&mut Vec<u8>)| {
+            let mut e = bom.clone();
+            f(&mut e);
+            manifesto_do_elf(&e)
+        };
+        // O cabeçalho de programa de outro tamanho que o do ELF64.
+        assert!(com(&|e| e[0x36..0x38].copy_from_slice(&55u16.to_le_bytes())).is_err());
+        assert!(com(&|e| e[0x36..0x38].copy_from_slice(&0u16.to_le_bytes())).is_err());
+        // Os cabeçalhos de programa que começam onde a conta transborda.
+        assert!(com(&|e| e[0x20..0x28].copy_from_slice(&u64::MAX.to_le_bytes())).is_err());
+        assert!(com(&|e| e[0x20..0x28].copy_from_slice(&(u64::MAX - 100).to_le_bytes())).is_err());
+        // Muitos cabeçalhos, além do fim do arquivo.
+        assert!(com(&|e| e[0x38..0x3a].copy_from_slice(&u16::MAX.to_le_bytes())).is_err());
+        // O segmento de notas que começa e acaba onde a conta transborda.
+        let ph = 64;
+        assert!(com(&|e| e[ph + 8..ph + 16].copy_from_slice(&u64::MAX.to_le_bytes())).is_err());
+        assert!(com(&|e| e[ph + 32..ph + 40].copy_from_slice(&u64::MAX.to_le_bytes())).is_err());
     }
 
     /// NH10: `selar` recusa o ELF sem manifesto e o já selado; o selo que

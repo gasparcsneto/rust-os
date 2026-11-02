@@ -113,6 +113,9 @@ pub struct Designacao {
     /// Quantas operações do dono já houve: o aviso de uma geração anterior
     /// já foi consumido.
     geracao: u32,
+    /// O objeto acabou com um aviso ainda não consumido: o `FIM` espera
+    /// ([`Designacao::fim_na_espera`]).
+    fim_na_espera: bool,
 }
 
 impl Designacao {
@@ -124,6 +127,7 @@ impl Designacao {
             quer_gravar: quem_abriu,
             mascara: bits::DA_PONTA,
             geracao: 0,
+            fim_na_espera: false,
         }
     }
 
@@ -134,6 +138,7 @@ impl Designacao {
             quer_gravar: false,
             mascara: bits::DO_ENDPOINT,
             geracao: 0,
+            fim_na_espera: false,
         }
     }
 
@@ -164,10 +169,18 @@ impl Designacao {
     ///
     /// Nada, com um aviso no canal ainda não consumido: o dono vai operar, e
     /// a operação rearma. Com um aviso devido, os bits se juntam a ele.
+    ///
+    /// O objeto que acaba com um aviso ainda não consumido também não avisa
+    /// o fim agora — no máximo um aviso não consumido por objeto —: o fim
+    /// fica na espera ([`Designacao::fim_na_espera`]).
     pub fn mudou(&mut self, nivel: u8) -> Option<Aviso> {
         let b = self.diria(nivel);
         match self.situacao {
-            Situacao::Dito | Situacao::Avisado => None,
+            Situacao::Dito => None,
+            Situacao::Avisado => {
+                self.fim_na_espera |= b & bits::FIM != 0;
+                None
+            }
             Situacao::Devido(d) => {
                 self.situacao = Situacao::Devido(d | b);
                 None
@@ -193,6 +206,7 @@ impl Designacao {
         }
         self.quer_gravar |= esbarrou && self.mascara & bits::GRAVAVEL != 0;
         self.situacao = Situacao::Livre;
+        self.fim_na_espera = false;
         self.geracao = self.geracao.wrapping_add(1);
     }
 
@@ -252,7 +266,44 @@ impl Designacao {
     pub const fn acabou(&self) -> bool {
         matches!(self.situacao, Situacao::Dito)
     }
+
+    /// Se o objeto acabou com um aviso ainda não consumido. O `FIM` não sai
+    /// como aviso novo — no máximo um aviso não consumido por objeto —: ele
+    /// se junta ao evento desse aviso, se o evento ainda espera na fila do
+    /// canal ([`Designacao::juntou_o_fim`]); senão o dono já o tirou de lá,
+    /// e o fim espera a operação dele, que consome o aviso — e, se ela não
+    /// ouviu o fim (a operação que acabou com o objeto, por exemplo, a
+    /// leitura do último dado), o `FIM` sai em seguida, uma vez.
+    pub const fn fim_na_espera(&self) -> bool {
+        matches!(self.situacao, Situacao::Avisado) && self.fim_na_espera
+    }
+
+    /// O fim que esperava se juntou ao evento do aviso ainda na fila: o
+    /// dono lê os dois juntos, e não há mais nada a dizer.
+    pub fn juntou_o_fim(&mut self) {
+        self.situacao = Situacao::Dito;
+    }
+
+    /// Se ela guarda o fim de um objeto que já acabou: devido, porque o
+    /// canal estava cheio, ou na espera da operação do dono. São as únicas
+    /// designações sem objeto vivo — e por isso o kernel as limita por
+    /// processo ([`ACABADOS_POR_PROCESSO`]).
+    pub const fn guarda_o_fim(&self) -> bool {
+        match self.situacao {
+            Situacao::Devido(d) => d & bits::FIM != 0,
+            Situacao::Avisado => self.fim_na_espera,
+            Situacao::Livre | Situacao::Dito => false,
+        }
+    }
 }
+
+/// Quantas designações de objetos que já acabaram um processo guarda — o
+/// fim devido, com o canal cheio, e o fim na espera da operação dele. As
+/// dos objetos vivos as cotas limitam (4 endpoints e 4 fluxos: no máximo 8
+/// avisos devidos). Passado disso, a designação acabada mais antiga cai: um
+/// processo que não lê o canal, ou que lê e não opera, não acumula
+/// designações de objetos que já acabaram.
+pub const ACABADOS_POR_PROCESSO: usize = 8;
 
 /// Os três campos do evento de um aviso: o tipo do objeto, o número dele e
 /// os bits. Nada mais cabe aqui — nem byte, nem motivo, nem quem.
@@ -482,6 +533,94 @@ mod testes {
         assert_eq!(numero_do_id("x:"), None);
         assert_eq!(numero_do_id("x:-1"), None);
         assert_eq!(numero_do_id("x:1a"), None);
+    }
+
+    /// NH14: o objeto que acaba com um aviso ainda não consumido: o `FIM`
+    /// não sai como aviso novo — no máximo um aviso não consumido por
+    /// objeto —, e fica na espera. Junto ao evento que ainda espera na fila,
+    /// ele está dito, e a designação acaba; senão, a operação do dono
+    /// consome o aviso, e o `FIM` sai em seguida, uma vez — a operação que
+    /// acabou com o objeto não ouviu o fim.
+    #[test]
+    fn nh14_o_fim_com_o_aviso_nao_consumido() {
+        let mut d = Designacao::da_ponta(true);
+        let a = d.mudou(GRAVAVEL).expect("a abertura avisa");
+        d.publicado(a);
+        assert_eq!(d.mudou(LEGIVEL), None);
+        assert!(!d.fim_na_espera());
+        assert!(!d.guarda_o_fim());
+        assert_eq!(d.mudou(FIM), None);
+        assert!(d.fim_na_espera());
+        assert!(d.guarda_o_fim());
+        assert!(!d.acabou());
+        assert_eq!(d.retentar(), None);
+        // Mais mudanças não tiram o fim da espera, nem avisam.
+        assert_eq!(d.mudou(FIM), None);
+        assert!(d.fim_na_espera());
+        // O fim junto ao evento que ainda espera na fila: dito.
+        d.juntou_o_fim();
+        assert!(d.acabou());
+        assert!(!d.fim_na_espera());
+        assert!(!d.guarda_o_fim());
+        assert_eq!(d.mudou(FIM), None);
+        // O endpoint também.
+        let mut e = Designacao::do_endpoint();
+        let a = e.mudou(PEDIDO).expect("avisa");
+        e.publicado(a);
+        assert_eq!(e.mudou(PEDIDO | FIM), None);
+        assert!(e.fim_na_espera());
+        e.juntou_o_fim();
+        assert!(e.acabou());
+        // O dono já tirou o aviso da fila: a operação dele o consome, e o
+        // `FIM` sai, uma vez.
+        let mut x = Designacao::da_ponta(false);
+        let a = x.mudou(LEGIVEL).expect("avisa");
+        x.publicado(a);
+        assert_eq!(x.mudou(FIM), None);
+        assert!(x.fim_na_espera());
+        x.operou(false);
+        assert!(!x.fim_na_espera());
+        assert!(!x.guarda_o_fim());
+        let a = x.mudou(FIM).expect("o fim avisa depois da operacao");
+        assert_eq!(a.bits, FIM);
+        x.publicado(a);
+        assert!(x.acabou());
+        assert_eq!(x.mudou(FIM), None);
+        // Sem aviso não consumido, o fim não espera: sai na hora.
+        let mut y = Designacao::da_ponta(false);
+        let a = y.mudou(FIM).expect("o fim avisa");
+        assert!(!y.fim_na_espera());
+        y.publicado(a);
+        assert!(y.acabou());
+    }
+
+    /// NH15: o fim que achou o canal cheio fica devido; ele e o fim na
+    /// espera são as designações sem objeto vivo, que o kernel conta no teto
+    /// do processo — e deixam de sê-lo quando saem.
+    #[test]
+    fn nh15_o_fim_devido() {
+        let mut d = Designacao::da_ponta(false);
+        assert!(!d.guarda_o_fim());
+        let a = d.mudou(LEGIVEL).expect("avisa");
+        d.cheio(a);
+        assert!(!d.guarda_o_fim());
+        assert_eq!(d.mudou(FIM), None);
+        assert!(d.guarda_o_fim());
+        assert!(!d.fim_na_espera());
+        let a = d.retentar().expect("o devido sai");
+        assert_eq!(a.bits, LEGIVEL | FIM);
+        d.cheio(a);
+        assert!(d.guarda_o_fim());
+        let a = d.retentar().expect("o devido sai");
+        d.publicado(a);
+        assert!(d.acabou());
+        assert!(!d.guarda_o_fim());
+        // O fim de quem estava livre, com o canal cheio.
+        let mut e = Designacao::do_endpoint();
+        let a = e.mudou(FIM).expect("o fim avisa");
+        e.cheio(a);
+        assert!(e.guarda_o_fim());
+        assert_eq!(ACABADOS_POR_PROCESSO, 8);
     }
 
     /// NH08: o evento só tem o tipo, o número e os bits — nenhum campo vem

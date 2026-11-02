@@ -33,8 +33,21 @@
 //! [`tocar_endpoint`], [`tocar_endpoints`]); quem
 //! acorda as esperas, fora da tabela, processa as marcas ([`processar`]) —
 //! pergunta o nível do objeto agora, faz a conta e publica. A operação do
-//! dono consome o aviso e rearma ([`operou`]). O coletor de fios tenta de
-//! novo o que ficou devido ([`passada_do_coletor`]).
+//! dono consome o aviso e rearma ([`operou`]) — e a recusa do gate a uma
+//! operação do dono também o consome, com o rearme pelo coletor, um tempo
+//! depois ([`recusado_pelo_gate`]). O coletor de fios tenta de novo o que
+//! ficou devido ([`passada_do_coletor`]).
+//!
+//! # O que fica guardado
+//!
+//! Uma designação por objeto vivo — as cotas limitam os objetos de um
+//! processo. Do objeto que acabou, só o fim que ainda não foi dito: o que
+//! acaba com um aviso ainda não consumido junta o fim ao evento desse
+//! aviso, se ele ainda espera na fila, e a designação sai na hora; se o
+//! dono já o tirou da fila, o fim espera a operação dele. O que acaba com o
+//! canal cheio guarda o fim devido. Os dois juntos, até
+//! [`ACABADOS_POR_PROCESSO`] por processo: passado disso, o mais antigo
+//! cai.
 //!
 //! A ordem das travas: a das marcas é folha — quem a toma não toma mais
 //! nada. A das designações nunca fica na mão enquanto se pergunta o nível
@@ -48,9 +61,10 @@
 //!
 //! Não é registro da auditoria — como os eventos de entrada e o aviso de
 //! saída do pseudo-terminal, ele não decide nada: a designação vai no
-//! registro da decisão que a criou, cada operação que segue é decidida e
-//! gravada, e os avisos contam nas medidas ([`medidas`]). Não atravessa o
-//! enlace: cada Duke avisa os processos dele. Não persiste.
+//! registro de execução do comando que a criou, na mesma cadeia, ligado à
+//! decisão dele; cada operação que segue é decidida e gravada, e os avisos
+//! contam nas medidas ([`medidas`]). Não atravessa o enlace: cada Duke
+//! avisa os processos dele. Não persiste.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -58,8 +72,14 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::agent::json::Json;
 use crate::trava::Mutex;
-use politica::aviso::{Aviso, Designacao, Situacao, bits};
+use politica::aviso::{ACABADOS_POR_PROCESSO, Aviso, Designacao, Situacao, bits};
 use protocolo::usuario::evento::{self, Evento};
+
+/// Quanto o rearme espera depois de uma recusa do gate: o que ainda está
+/// pronto avisa de novo pelo coletor, e não na hora — uma recusa que dura
+/// (a política, a contenção) não vira um giro de aviso, recusa e aviso; uma
+/// que passa (a taxa) volta a avisar em seguida.
+pub const REARME_DEPOIS_DA_RECUSA_MS: u64 = 1_000;
 
 // Os bits e os tipos do contrato são os da conta.
 const _: () = {
@@ -134,6 +154,10 @@ struct Entrada {
     /// que o consome: a latência do aviso ([`crate::metricas::AVISO`]). Zero
     /// sem aviso esperando.
     avisado_em: u64,
+    /// Quando o coletor reavalia o objeto, em ms desde o boot, depois de
+    /// uma recusa do gate ter consumido o aviso ([`recusado_pelo_gate`]).
+    /// Zero sem rearme marcado.
+    rearmar_em: u64,
 }
 
 /// As designações vivas.
@@ -199,9 +223,21 @@ pub fn canal_do_pedido(notify: Option<Json>) -> Result<Option<Canal>, &'static s
     Ok(Some(Canal { chave, dono: fio }))
 }
 
-/// O nome do canal, para o registro da designação.
+/// O nome do canal, para o registro da designação: só letras, dígitos e
+/// `-_.:/` — o resto vira `_`. O nome é texto do processo, e no detalhe da
+/// auditoria ele não pode imitar o que vem depois dele (`; decisao N`).
 pub fn nome_do_canal(canal: Canal) -> alloc::string::String {
-    crate::eventos::nome_de(canal.chave).unwrap_or_default()
+    crate::eventos::nome_de(canal.chave)
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Designa `obj` ao `canal`, depois da operação que o criou ou aceitou: dali
@@ -219,6 +255,7 @@ fn designar(obj: Objeto, canal: Canal, quem_abriu: bool) {
                 canal,
                 d,
                 avisado_em: 0,
+                rearmar_em: 0,
             },
         );
     });
@@ -269,6 +306,14 @@ pub fn largar_do_processo(fio: u64) {
         return;
     }
     com_designacoes(|t| t.retain(|obj, e| obj.dono(e.canal) != fio));
+}
+
+/// O processo `fio` trocou de imagem: as designações saem, e os avisos que
+/// ainda esperavam na fila dos canais dele também — a imagem nova herda os
+/// descritores, e não deve ouvir os avisos da anterior.
+pub fn trocou_de_imagem(fio: u64) {
+    largar_do_processo(fio);
+    crate::eventos::descartar(fio, TIPO_DO_AVISO);
 }
 
 /// Marca uma mudança, com a trava de quem mudou na mão; quem acorda as
@@ -348,17 +393,81 @@ pub fn operou(obj: Objeto, fio: u64, esbarrou: bool) {
     }
     let existe = com_designacoes(|t| match t.get_mut(&obj) {
         Some(e) if obj.dono(e.canal) == fio => {
-            if e.avisado_em != 0 {
-                crate::metricas::AVISO.somar(crate::metricas::desde(e.avisado_em));
-                e.avisado_em = 0;
-            }
-            e.d.operou(esbarrou);
+            consumir(e, esbarrou);
+            // A operação reavalia agora: o rearme marcado por uma recusa
+            // não tem mais o que fazer.
+            e.rearmar_em = 0;
             true
         }
         _ => false,
     });
     if existe {
         avaliar(obj);
+    }
+}
+
+/// O aviso da entrada `e` está consumido: a latência dele vai às medidas, e
+/// a conta rearma.
+fn consumir(e: &mut Entrada, esbarrou: bool) {
+    if e.avisado_em != 0 {
+        crate::metricas::AVISO.somar(crate::metricas::desde(e.avisado_em));
+        e.avisado_em = 0;
+    }
+    e.d.operou(esbarrou);
+}
+
+/// O gate recusou um pedido de `chamador` antes de qualquer operação — a
+/// taxa, a contenção, a política. A operação do dono sobre um objeto
+/// designado, decidida pelo gate, consome o aviso dele (a regra de
+/// `docs/SDK.md`), também quando a decisão é a recusa: senão o objeto ficaria mudo, com um
+/// aviso que nada consome. O que ainda está pronto avisa de novo pelo
+/// coletor, [`REARME_DEPOIS_DA_RECUSA_MS`] depois — ou antes, na próxima
+/// mudança do objeto.
+pub fn recusado_pelo_gate(chamador: crate::autorizacao::Chamador, nome: &str, params: Json) {
+    if QUANTAS.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let crate::autorizacao::Chamador::Processo { fio, .. } = chamador else {
+        return;
+    };
+    let Some(obj) = objeto_do_pedido(nome, params, fio) else {
+        return;
+    };
+    let quando = crate::tempo::uptime_ms()
+        .saturating_add(REARME_DEPOIS_DA_RECUSA_MS)
+        .max(1);
+    com_designacoes(|t| {
+        if let Some(e) = t.get_mut(&obj)
+            && obj.dono(e.canal) == fio
+        {
+            consumir(e, false);
+            e.rearmar_em = quando;
+        }
+    });
+}
+
+/// O objeto que o pedido `nome` do processo `fio` opera como dono: a ponta
+/// dele no fluxo do parâmetro `stream`, ou o endpoint do parâmetro
+/// `endpoint` de quem aceita, recebe ou retira. O de outro não é dele: a
+/// designação só é consumida pelo dono.
+fn objeto_do_pedido(nome: &str, params: Json, fio: u64) -> Option<Objeto> {
+    let numero = |parametro: &str| {
+        params
+            .member(parametro)
+            .and_then(|v| v.as_str())
+            .and_then(politica::aviso::numero_do_id)
+    };
+    match nome {
+        "stream.read" | "stream.write" | "stream.finish" | "stream.close" | "stream.status" => {
+            Some(Objeto::Ponta {
+                fluxo: numero(crate::fluxo::PARAMETRO)?,
+                fio,
+            })
+        }
+        "stream.accept" | "fabric.recv" | "fabric.withdraw" => {
+            Some(Objeto::Endpoint(numero("endpoint")?))
+        }
+        _ => None,
     }
 }
 
@@ -404,15 +513,93 @@ fn avaliar(obj: Objeto) {
             return;
         };
         let antes = e.d.situacao();
-        match e.d.mudou(n) {
+        let canal = e.canal;
+        let aviso = e.d.mudou(n);
+        if aviso.is_none()
+            && e.d.diria(n) != 0
+            && matches!(antes, Situacao::Avisado | Situacao::Devido(_))
+        {
+            COALESCIDOS.fetch_add(1, Ordering::Relaxed);
+        }
+        match aviso {
             Some(a) => publicar(t, obj, a, false),
-            None => {
-                if e.d.diria(n) != 0 && matches!(antes, Situacao::Avisado | Situacao::Devido(_)) {
-                    COALESCIDOS.fetch_add(1, Ordering::Relaxed);
-                }
+            // Acabou com um aviso ainda não consumido: o fim se junta ao
+            // evento dele, se ainda espera na fila, e a designação sai;
+            // senão o fim espera a operação do dono.
+            None if e.d.fim_na_espera() && juntar_o_fim(canal, obj) => {
+                e.d.juntou_o_fim();
+                t.remove(&obj);
             }
+            None => {}
+        }
+        // O fim que espera — devido, ou na espera do dono —: o teto do
+        // processo.
+        if t.get(&obj).is_some_and(|e| e.d.guarda_o_fim()) {
+            conter_os_acabados(t, obj.dono(canal));
         }
     });
+}
+
+/// O tipo do evento de um aviso — o único lugar do kernel que o nomeia.
+const TIPO_DO_AVISO: u32 = evento::tipo::MALHA;
+
+/// O evento do aviso de `obj` com os bits `b`: montado só aqui, pela conta
+/// de [`politica::aviso`] — o tipo do objeto, o número dele e os bits, e
+/// nada mais.
+fn evento_do_aviso(obj: Objeto, b: u8) -> Evento {
+    let (a, n, c) = politica::aviso::campos(obj.tipo(), obj.numero(), b);
+    Evento {
+        tipo: TIPO_DO_AVISO,
+        a,
+        b: n,
+        c,
+    }
+}
+
+/// Um aviso deste objeto que ainda espera na fila — publicado antes de uma
+/// operação do dono, e não lido — recebe os bits do novo: o canal tem no
+/// máximo um aviso de cada objeto, por mais que o dono opere.
+fn juntar_eventos(na_fila: &mut Evento, novo: &Evento) -> bool {
+    let mesmo = na_fila.tipo == novo.tipo && na_fila.a == novo.a && na_fila.b == novo.b;
+    if mesmo {
+        na_fila.c |= novo.c;
+    }
+    mesmo
+}
+
+/// O objeto acabou com um aviso ainda não consumido: o `FIM` junta-se ao
+/// evento dele que ainda espera na fila do canal, se espera — o dono lê os
+/// dois juntos —, e nenhum evento novo entra. Diz se juntou.
+fn juntar_o_fim(canal: Canal, obj: Objeto) -> bool {
+    let fim = evento_do_aviso(obj, bits::FIM);
+    let juntou = crate::eventos::juntar_na_fila(canal.chave, &fim, juntar_eventos);
+    if juntou {
+        JUNTADOS.fetch_add(1, Ordering::Relaxed);
+    }
+    juntou
+}
+
+/// O teto das designações acabadas do processo `dono`
+/// ([`ACABADOS_POR_PROCESSO`]): passado dele, a mais antiga — o fim devido,
+/// ou o fim na espera, de um objeto que já acabou — cai, contada com as
+/// designações largadas. As dos objetos vivos ficam sempre: as cotas as
+/// limitam.
+fn conter_os_acabados(t: &mut BTreeMap<Objeto, Entrada>, dono: u64) {
+    loop {
+        let acabadas = || {
+            t.iter()
+                .filter(|(o, e)| o.dono(e.canal) == dono && e.d.guarda_o_fim())
+                .map(|(o, _)| *o)
+        };
+        if acabadas().count() <= ACABADOS_POR_PROCESSO {
+            return;
+        }
+        let Some(velha) = acabadas().next() else {
+            return;
+        };
+        t.remove(&velha);
+        LARGADOS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Publica o aviso `a` de `obj` no canal da designação, com a tabela das
@@ -421,24 +608,8 @@ fn publicar(t: &mut BTreeMap<Objeto, Entrada>, obj: Objeto, a: Aviso, de_novo: b
     let Some(x) = t.get_mut(&obj) else {
         return;
     };
-    let (ta, tb, tc) = politica::aviso::campos(obj.tipo(), obj.numero(), a.bits);
-    let e = Evento {
-        tipo: evento::tipo::MALHA,
-        a: ta,
-        b: tb,
-        c: tc,
-    };
-    // Um aviso deste objeto que ainda espera na fila — publicado antes de
-    // uma operação do dono, e não lido — recebe os bits de agora: o canal
-    // tem no máximo um aviso de cada objeto, por mais que o dono opere.
-    let juntar = |na_fila: &mut Evento, novo: &Evento| {
-        let mesmo = na_fila.tipo == novo.tipo && na_fila.a == novo.a && na_fila.b == novo.b;
-        if mesmo {
-            na_fila.c |= novo.c;
-        }
-        mesmo
-    };
-    match crate::eventos::publicar_em_juntando(x.canal.chave, e, juntar) {
+    let e = evento_do_aviso(obj, a.bits);
+    match crate::eventos::publicar_em_juntando(x.canal.chave, e, juntar_eventos) {
         Ok(como) => {
             match como {
                 crate::eventos::Publicado::Novo => PUBLICADOS.fetch_add(1, Ordering::Relaxed),
@@ -467,14 +638,16 @@ fn publicar(t: &mut BTreeMap<Objeto, Entrada>, obj: Objeto, a: Aviso, de_novo: b
     }
 }
 
-/// A passada do coletor de fios: as marcas que sobraram, e os avisos que o
-/// canal cheio deixou devidos.
+/// A passada do coletor de fios: as marcas que sobraram, os avisos que o
+/// canal cheio deixou devidos, e o rearme dos objetos cujo aviso uma
+/// recusa do gate consumiu ([`recusado_pelo_gate`]).
 pub fn passada_do_coletor() {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
     }
     processar();
-    com_designacoes(|t| {
+    let agora = crate::tempo::uptime_ms();
+    let rearmar: Vec<Objeto> = com_designacoes(|t| {
         let devidos: Vec<(Objeto, Aviso)> = t
             .iter_mut()
             .filter_map(|(obj, e)| e.d.retentar().map(|a| (*obj, a)))
@@ -482,7 +655,18 @@ pub fn passada_do_coletor() {
         for (obj, a) in devidos {
             publicar(t, obj, a, true);
         }
+        t.iter_mut()
+            .filter(|(_, e)| e.rearmar_em != 0 && agora >= e.rearmar_em)
+            .map(|(obj, e)| {
+                e.rearmar_em = 0;
+                *obj
+            })
+            .collect()
     });
+    // Fora da trava das designações: a conta pergunta o nível às tabelas.
+    for obj in rearmar {
+        avaliar(obj);
+    }
 }
 
 /// O que se mede do aviso, para `security.metrics`.
@@ -529,6 +713,13 @@ pub fn situacao_de_teste(obj: Objeto) -> Option<Situacao> {
 #[cfg(feature = "modo-teste")]
 pub fn designacoes_de_teste(fio: u64) -> usize {
     com_designacoes(|t| t.iter().filter(|(o, e)| o.dono(e.canal) == fio).count())
+}
+
+/// Só para a suíte: se a designação de `obj` guarda o fim de um objeto que
+/// já acabou — devido, ou na espera da operação do dono.
+#[cfg(feature = "modo-teste")]
+pub fn guarda_o_fim_de_teste(obj: Objeto) -> bool {
+    com_designacoes(|t| t.get(&obj).is_some_and(|e| e.d.guarda_o_fim()))
 }
 
 /// Só para a suíte: no próximo fecho de um fluxo por um dono que tem a

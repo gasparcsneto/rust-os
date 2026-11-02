@@ -244,6 +244,67 @@ pub fn publicar_em_juntando(
     })
 }
 
+/// Junta `evento` a um que ainda espera na fila do canal da `chave` e que
+/// `juntar` aceita — e só isso: sem um assim, nada entra na fila, e o
+/// ouvinte não é acordado. Devolve se juntou.
+pub fn juntar_na_fila(
+    chave: Chave,
+    evento: &Evento,
+    juntar: impl Fn(&mut Evento, &Evento) -> bool,
+) -> bool {
+    com_canais(|canais| {
+        let Some(canal) = canais.get_mut(chave.vaga).and_then(Option::as_mut) else {
+            return false;
+        };
+        if canal.geracao != chave.geracao {
+            return false;
+        }
+        for i in 0..canal.quantos {
+            let posicao = (canal.inicio + i) % CAPACIDADE;
+            if juntar(&mut canal.fila[posicao], evento) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Quantos eventos [`descartar`] já tirou das filas.
+static DESCARTADOS: AtomicU64 = AtomicU64::new(0);
+
+/// Tira das filas dos canais que o `ouvinte` escuta os eventos do tipo
+/// `tipo`, na ordem em que os outros ficam: na troca de imagem, os avisos
+/// da malha que a imagem anterior não leu — a imagem nova não ouve os
+/// avisos da anterior. Devolve quantos saíram.
+pub fn descartar(ouvinte: u64, tipo: u32) -> usize {
+    let tirados = com_canais(|canais| {
+        let mut tirados = 0;
+        for canal in canais.iter_mut().flatten().filter(|c| c.ouvinte == ouvinte) {
+            let mut ficam = 0;
+            for i in 0..canal.quantos {
+                let e = canal.fila[(canal.inicio + i) % CAPACIDADE];
+                if e.tipo == tipo {
+                    tirados += 1;
+                } else {
+                    canal.fila[(canal.inicio + ficam) % CAPACIDADE] = e;
+                    ficam += 1;
+                }
+            }
+            canal.quantos = ficam;
+        }
+        tirados
+    });
+    DESCARTADOS.fetch_add(tirados as u64, Ordering::Relaxed);
+    tirados
+}
+
+/// Só para a suíte: quantos eventos as trocas de imagem já tiraram das
+/// filas.
+#[cfg(feature = "modo-teste")]
+pub fn descartados_de_teste() -> u64 {
+    DESCARTADOS.load(Ordering::Relaxed)
+}
+
 /// Põe o evento na fila do canal e acorda o ouvinte, ou recusa e conta.
 fn entregar(canal: &mut Canal, evento: Evento) -> Result<(), NaoPublicado> {
     if canal.quantos == CAPACIDADE {
