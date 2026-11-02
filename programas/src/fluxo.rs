@@ -54,6 +54,68 @@ use crate::nativo::{self, Json, Resposta};
 /// O maior pedaço de uma escrita e de uma leitura: o buffer de um sentido.
 pub const MAIOR_PEDACO: usize = 16 * 1024;
 
+/// O `wait` dos pedidos "agora": um milissegundo — um tique, no máximo —,
+/// só para o kernel poder segurar o pedido de dados com o caminho da
+/// auditoria cheio, em vez de cobrar a taxa do papel.
+const ESPERA_MINIMA_MS: u64 = 1;
+
+/// O que não coube no fluxo, esperando espaço: quem escreve junta aqui, e
+/// escoa quando o laço avisa `GRAVAVEL`. É o que desfaz o impasse dos dois
+/// sentidos — cada lado escreve o que cabe e volta a ler, sem dormir numa
+/// escrita.
+#[derive(Clone, Debug, Default)]
+pub struct EscritaPendente {
+    pendente: Vec<u8>,
+    /// Onde começa o que ainda não foi: o que já foi escrito fica antes,
+    /// até o próximo [`EscritaPendente::juntar`] o descartar — sem mover
+    /// o resto a cada escrita.
+    inicio: usize,
+}
+
+impl EscritaPendente {
+    /// Nada pendente.
+    pub const fn nova() -> EscritaPendente {
+        EscritaPendente {
+            pendente: Vec::new(),
+            inicio: 0,
+        }
+    }
+
+    /// Junta `dados` ao que espera.
+    pub fn juntar(&mut self, dados: &[u8]) {
+        if self.inicio > 0 {
+            self.pendente.drain(..self.inicio);
+            self.inicio = 0;
+        }
+        self.pendente.extend_from_slice(dados);
+    }
+
+    /// Escreve no fluxo o que couber, sem esperar. `true` quando não sobrou
+    /// nada; `false` quando o buffer encheu — o aviso diz quando seguir.
+    pub fn escoar(&mut self, f: &Fluxo) -> Result<bool, Falha> {
+        while self.inicio < self.pendente.len() {
+            let n = f.escrever_agora(&self.pendente[self.inicio..])?;
+            if n == 0 {
+                return Ok(false);
+            }
+            self.inicio += n;
+        }
+        self.pendente.clear();
+        self.inicio = 0;
+        Ok(true)
+    }
+
+    /// Quantos bytes esperam.
+    pub fn tamanho(&self) -> usize {
+        self.pendente.len() - self.inicio
+    }
+
+    /// Se não há nada esperando.
+    pub fn vazia(&self) -> bool {
+        self.tamanho() == 0
+    }
+}
+
 /// Por que um passo do fluxo não aconteceu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Falha {
@@ -96,6 +158,18 @@ impl Falha {
 pub struct Origem {
     pub programa: Option<(String, String)>,
     pub dispositivo: Option<String>,
+}
+
+impl Origem {
+    /// Quem abriu, numa linha: o dispositivo — `dispositivo:<nome>` — ou o
+    /// programa e o começo do resumo da imagem dele.
+    pub fn descrever(&self) -> String {
+        match (&self.dispositivo, &self.programa) {
+            (Some(d), _) => d.clone(),
+            (None, Some((p, r))) => alloc::format!("{p} {}", &r[..r.len().min(8)]),
+            (None, None) => String::from("?"),
+        }
+    }
 }
 
 /// O estado de um fluxo, como `stream.status` o diz.
@@ -175,12 +249,68 @@ pub fn abrir_no_par(dispositivo: &str, endpoint: &str, intencao: &str) -> Result
     do_resultado(&r)
 }
 
+/// [`abrir`], com o aviso da ponta no canal do `laco`: a abertura chega
+/// como `GRAVAVEL`, e depois o dado, o espaço e o fim.
+pub fn abrir_avisando(
+    endpoint: &str,
+    intencao: &str,
+    laco: &crate::laco::Laco,
+) -> Result<Fluxo, Falha> {
+    let r = pedir("stream.open", |w| {
+        w.field_str("endpoint", endpoint)?;
+        w.field_str("intent", intencao)?;
+        w.field_u64("notify", laco.descritor())
+    })?;
+    do_resultado(&r)
+}
+
+/// [`abrir_no_par`], com o aviso da ponta daqui no canal do `laco`. O aviso
+/// é deste Duke: o de lá avisa o programa de lá.
+pub fn abrir_no_par_avisando(
+    dispositivo: &str,
+    endpoint: &str,
+    intencao: &str,
+    laco: &crate::laco::Laco,
+) -> Result<Fluxo, Falha> {
+    let r = pedir("stream.open", |w| {
+        w.field_str("endpoint", endpoint)?;
+        w.field_str("intent", intencao)?;
+        w.field_str("device", dispositivo)?;
+        w.field_u64("notify", laco.descritor())
+    })?;
+    do_resultado(&r)
+}
+
 /// Aceita o pedido mais antigo no `endpoint` seu, esperando até `espera_ms`
 /// por um. `None` se nenhum chegou.
 pub fn aceitar(endpoint: &str, espera_ms: u64) -> Result<Option<(Fluxo, Origem)>, Falha> {
+    aceitar_com(endpoint, espera_ms, None)
+}
+
+/// Aceita o pedido mais antigo no `endpoint` seu, sem esperar — o aviso do
+/// laço disse que há um —, com o aviso da ponta aceita no canal do `laco`.
+/// `None` se outro evento o levou antes.
+pub fn aceitar_avisando(
+    endpoint: &str,
+    laco: &crate::laco::Laco,
+) -> Result<Option<(Fluxo, Origem)>, Falha> {
+    aceitar_com(endpoint, 0, Some(laco.descritor()))
+}
+
+fn aceitar_com(
+    endpoint: &str,
+    espera_ms: u64,
+    aviso: Option<u64>,
+) -> Result<Option<(Fluxo, Origem)>, Falha> {
     let r = pedir("stream.accept", |w| {
         w.field_str("endpoint", endpoint)?;
-        w.field_u64("wait", espera_ms)
+        if espera_ms > 0 {
+            w.field_u64("wait", espera_ms)?;
+        }
+        if let Some(d) = aviso {
+            w.field_u64("notify", d)?;
+        }
+        Ok(())
     })?;
     let res = resultado(&r)?;
     let Some(id) = texto(res, "stream") else {
@@ -203,6 +333,25 @@ impl Fluxo {
     /// O id.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// O número do id — o que o aviso do laço leva.
+    pub fn numero(&self) -> Option<u64> {
+        crate::laco::numero_do_id(&self.id)
+    }
+
+    /// Lê o que já chegou, até `max`, sem esperar dado: o aviso do laço
+    /// disse que há. Vazio e sem fim, se outro evento o levou antes. Leva o
+    /// `wait` mínimo — o dos pedidos de dados, para o caminho da auditoria
+    /// cheio segurar em vez de cobrar a taxa.
+    pub fn ler_agora(&self, max: usize) -> Result<(Vec<u8>, bool), Falha> {
+        self.ler(max, ESPERA_MINIMA_MS)
+    }
+
+    /// Escreve o que couber de `dados`, sem esperar espaço. Zero com o
+    /// buffer cheio: o aviso `GRAVAVEL` vem quando houver espaço.
+    pub fn escrever_agora(&self, dados: &[u8]) -> Result<usize, Falha> {
+        self.escrever(dados, ESPERA_MINIMA_MS)
     }
 
     /// Escreve o que couber de `dados`, até [`MAIOR_PEDACO`], esperando

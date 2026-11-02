@@ -8,8 +8,9 @@
 //!   `GET /codigo/<arquitetura>/<arquivo>`. O servidor serve o programa
 //!   publicado, selado ou não — ver `xtask/src/codigo.rs`;
 //! - **grava**: o corpo vai para o armazém pelo `fs.write`, no anexo do
-//!   pedido — é binário —, contra a versão de agora. O gate decide o
-//!   caminho; o que está sendo gravado é só bytes para ele;
+//!   pedido — é binário —, contra a versão de agora; acima do teto de um
+//!   anexo, em pedaços de um rascunho (`fs.draft`) gravado de uma vez. O
+//!   gate decide o caminho; o que está sendo gravado é só bytes para ele;
 //! - **roda**: o processo se bifurca, e o filho executa o arquivo gravado
 //!   pela chamada `executar` — a mesma conferência do `user.run`: o código
 //!   de fora da imagem só roda com o selo de um editor em que o papel de
@@ -61,12 +62,17 @@ const RODAR: i64 = 2;
 
 /// Os arquivos que a bancada publica, pela posição — ver
 /// `xtask/src/codigo.rs`.
-const ARQUIVOS: [&str; 5] = [
+const ARQUIVOS: [&str; 10] = [
     "vindo",
     "vindo-sem-selo",
     "vindo-adulterado",
     "vindo-estranho",
     "vindo-outro",
+    "modelo",
+    "modelo-sem-selo",
+    "modelo-adulterado",
+    "modelo-estranho",
+    "modelo-outro",
 ];
 
 /// Onde o código instalado mora: o diretório que a política deixa o
@@ -121,13 +127,74 @@ fn criar_diretorio(caminho: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Grava `bytes` em `caminho`, contra a versão `atual`: num anexo só, até
+/// o teto dele; acima, em pedaços de um rascunho (`fs.draft`), e o
+/// rascunho inteiro num `fs.write` só — quem lê o arquivo nunca vê a
+/// metade, e cada pedaço é um pedido ao gate, como a gravação.
+fn gravar(caminho: &str, atual: u64, bytes: &[u8]) -> Result<(), String> {
+    let teto = protocolo::usuario::nativo::MAIOR_ANEXO;
+    let mut rascunho = None;
+    if bytes.len() > teto {
+        for pedaco in bytes.chunks(teto) {
+            let r = nativo::pedir_com_anexo(
+                "fs.draft",
+                |w| {
+                    w.field_str("path", caminho)?;
+                    match rascunho {
+                        Some(n) => w.field_u64("draft", n),
+                        None => Ok(()),
+                    }
+                },
+                pedaco,
+            )
+            .map_err(|e| format!("fs.draft {e}"))?;
+            let n = r
+                .resultado()
+                .ok()
+                .and_then(|v| v.member("draft"))
+                .and_then(|v| v.as_u64());
+            match n {
+                Some(n) => rascunho = Some(n),
+                None => return Err(format!("fs.draft {:?}", codigo_de(&r))),
+            }
+        }
+    }
+    let gravado = match rascunho {
+        Some(n) => nativo::pedir("fs.write", |w| {
+            w.field_str("path", caminho)?;
+            w.field_u64("expect_version", atual)?;
+            w.field_u64("draft", n)
+        }),
+        None => nativo::pedir_com_anexo(
+            "fs.write",
+            |w| {
+                w.field_str("path", caminho)?;
+                w.field_u64("expect_version", atual)
+            },
+            bytes,
+        ),
+    }
+    .map_err(|e| format!("fs.write {e}"))?;
+    let ok = gravado
+        .resultado()
+        .ok()
+        .and_then(|v| v.member("ok"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    if !ok {
+        return Err(format!("fs.write {:?}", codigo_de(&gravado)));
+    }
+    Ok(())
+}
+
 /// Baixa `arquivo` da bancada e o grava no armazém. Os bytes, ou o que
 /// falhou — com o código de quem falhou.
 fn baixar(arquivo: &str, opcoes: &Opcoes<'_>) -> Result<usize, String> {
     let url = format!("{SERVIDOR}/codigo/{ARQUITETURA}/{arquivo}");
-    // O corpo inteiro vai num anexo: o teto é o dele.
+    // O teto do corpo é o do maior executável que o kernel lança: acima
+    // dele, não haveria o que rodar.
     let limites = Limites {
-        corpo: protocolo::usuario::nativo::MAIOR_ANEXO,
+        corpo: protocolo::usuario::MAIOR_EXECUTAVEL as usize,
         ..Limites::default()
     };
     let r = http::obter(&url, opcoes, &limites)
@@ -144,24 +211,7 @@ fn baixar(arquivo: &str, opcoes: &Opcoes<'_>) -> Result<usize, String> {
 
     let caminho = format!("{DIRETORIO}/{arquivo}");
     let atual = versao(&caminho)?;
-    let gravado = nativo::pedir_com_anexo(
-        "fs.write",
-        |w| {
-            w.field_str("path", &caminho)?;
-            w.field_u64("expect_version", atual)
-        },
-        &r.corpo,
-    )
-    .map_err(|e| format!("fs.write {e}"))?;
-    let ok = gravado
-        .resultado()
-        .ok()
-        .and_then(|v| v.member("ok"))
-        .and_then(|v| v.as_bool())
-        == Some(true);
-    if !ok {
-        return Err(format!("fs.write {:?}", codigo_de(&gravado)));
-    }
+    gravar(&caminho, atual, &r.corpo)?;
     Ok(r.corpo.len())
 }
 

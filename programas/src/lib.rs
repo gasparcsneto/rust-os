@@ -26,7 +26,11 @@
 //!   concede nada;
 //! - **a malha** — [`malha`], os programas de um titular cooperando por
 //!   intenções: oferecer, achar quem oferece, mandar, receber e responder,
-//!   cada passo pelo gate.
+//!   cada passo pelo gate; e [`fluxo`], os bytes, na ordem, entre dois deles;
+//! - **o laço** — [`laco`], a espera única do processo, no canal de eventos
+//!   dele: a janela, o pseudo-terminal e os avisos da malha num lugar só; e
+//!   [`quadro`], mensagens sobre os bytes de um fluxo. O SDK: ver
+//!   `docs/SDK.md`.
 //!
 //! # Como um programa se escreve
 //!
@@ -62,10 +66,12 @@ pub mod fluxo;
 pub mod http;
 pub mod icp;
 pub mod janela;
+pub mod laco;
 pub mod malha;
 pub mod manifesto;
 pub mod monte;
 pub mod nativo;
+pub mod quadro;
 pub mod saida;
 pub mod sistema;
 pub mod superficie;

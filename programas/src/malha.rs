@@ -157,6 +157,18 @@ pub fn oferecer(intencao: &str) -> Result<String, Falha> {
     texto(res, "endpoint").ok_or(Falha::Resposta)
 }
 
+/// [`oferecer`], com o aviso do endpoint no canal do `laco`: um pedido de
+/// fluxo, uma entrega e o fim do endpoint chegam ali. O mesmo processo
+/// oferecendo a mesma intenção de novo designa o mesmo endpoint.
+pub fn oferecer_avisando(intencao: &str, laco: &crate::laco::Laco) -> Result<String, Falha> {
+    let r = pedir("fabric.offer", |w| {
+        w.field_str("intent", intencao)?;
+        w.field_u64("notify", laco.descritor())
+    })?;
+    let res = resultado(&r)?;
+    texto(res, "endpoint").ok_or(Falha::Resposta)
+}
+
 /// Fecha o endpoint: o que esperava nele é anulado. Devolve quantas.
 pub fn retirar(endpoint: &str) -> Result<u64, Falha> {
     let r = pedir("fabric.withdraw", |w| w.field_str("endpoint", endpoint))?;
