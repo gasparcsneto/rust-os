@@ -119,13 +119,13 @@ cargo xtask enlace                   # duas máquinas pela rede do emulador: o e
 cargo xtask pareamento               # duas máquinas e a Pessoa no teclado das duas: o pareamento sem administrador, o homem no meio, a meia relação, a lápide
 cargo xtask fluxo                    # duas máquinas e os fluxos da malha entre elas: 4 MiB em cada sentido, a contrapressão, a adulteração e o homem no meio, a política, a suspensão, o corte, a revogação, as vagas
 cargo xtask sdk                      # duas máquinas e o SDK da malha: o modelo de fora do repositório nas duas, o eco-malha com clientes daqui e de lá, os dois sentidos, a conversa pelo teclado, as medidas, a revogação
+cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
+cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
 # O SDK da malha — ver docs/SDK.md
 cargo xtask sdk-fora                 # o sdk/modelo copiado para fora do workspace, compilado, conferido e selado
 cargo xtask sdk-conferir <elf>       # o manifesto, o tamanho, o selo e o resumo de um executável
 cargo xtask selar <privada> <elf> [--saida <arquivo>]  # sela com a chave de um editor; nenhuma outra chave é lida
-cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
-cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
 # Uma máquina de verdade — ver docs/OPERACAO.md e docs/ATUALIZACAO.md
 cargo xtask chave agente <arquivo> <nome> <papel>   # a chave de quem a opera; a privada fica com ele
@@ -281,7 +281,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `message.ack` | Confirma uma mensagem lida: ela sai da caixa (`id`, `expect_version`) |
 | `message.cancel` | Cancela uma mensagem mandada, enquanto ninguém a leu (`id`, `expect_version`) |
 | `message.status` | O estado de uma mensagem mandada ou recebida (`id`) |
-| `fabric.offer` | Oferece uma intenção na malha: abre um endpoint do processo que pede, por onde chegam as entregas dos programas do mesmo titular. Só um processo; a intenção é o recurso da decisão, enumerada na política (`intent`) |
+| `fabric.offer` | Oferece uma intenção na malha: abre um endpoint do processo que pede, por onde chegam as entregas dos programas do mesmo titular. Só um processo; a intenção é o recurso da decisão, enumerada na política (`intent`, `notify`) |
 | `fabric.withdraw` | Fecha um endpoint seu: o que esperava nele é anulado (`endpoint`) |
 | `fabric.discover` | Os programas do seu titular que oferecem uma intenção, com a identidade que o kernel conferiu — o nome do manifesto, o resumo da imagem, o editor — e só os que ainda receberiam. Descobrir não concede nada (`intent`) |
 | `fabric.send` | Entrega um texto a um endpoint que oferece a intenção, de um programa do mesmo titular; quem manda é o processo ou a sessão que pede (`endpoint`, `intent`, `body`, `nonce`, `ttl_ms`) |
@@ -289,8 +289,8 @@ $ cargo xtask agent --canal 2 agent.session
 | `fabric.ack` | Confirma uma entrega lida, com uma resposta opcional para quem mandou: ela sai da fila (`id`, `reply`, `expect_version`) |
 | `fabric.cancel` | Cancela uma entrega que você mandou, enquanto ninguém a leu (`id`, `expect_version`) |
 | `fabric.status` | O estado de uma entrega que você mandou, e a resposta de quem a confirmou (`id`) |
-| `stream.open` | Abre um fluxo — um canal ordenado de bytes, nos dois sentidos — contra um endpoint que oferece a intenção, de um programa do mesmo titular; espera o aceite do dono. Só um processo; a intenção é o recurso da decisão, e com `device` vai a outro Duke da sua pessoa (`endpoint`, `intent`, `device`) |
-| `stream.accept` | Aceita o pedido de fluxo mais antigo num endpoint seu — a abertura efetiva, com as duas decisões reconfirmadas —, e diz quem o abriu, como o kernel o conferiu; com `wait`, espera um pedido (`endpoint`, `wait`) |
+| `stream.open` | Abre um fluxo — um canal ordenado de bytes, nos dois sentidos — contra um endpoint que oferece a intenção, de um programa do mesmo titular; espera o aceite do dono. Só um processo; a intenção é o recurso da decisão, e com `device` vai a outro Duke da sua pessoa (`endpoint`, `intent`, `device`, `notify`) |
+| `stream.accept` | Aceita o pedido de fluxo mais antigo num endpoint seu — a abertura efetiva, com as duas decisões reconfirmadas —, e diz quem o abriu, como o kernel o conferiu; com `wait`, espera um pedido (`endpoint`, `wait`, `notify`) |
 | `stream.write` | Escreve no seu sentido de um fluxo aberto, o que couber no buffer de 16 KiB; cada escrita é uma decisão do gate, no plano de dados (`stream`, `content`, `attachment`, `wait`) |
 | `stream.read` | Lê o seu sentido de um fluxo, na ordem, em base64, e `end` depois do último byte; cada leitura é uma decisão do gate, no plano de dados (`stream`, `max`, `wait`) |
 | `stream.finish` | Termina o seu sentido de um fluxo: quem lê recebe o resto e o fim; o outro sentido continua (`stream`) |
@@ -8986,8 +8986,9 @@ roda com o selo de um editor em quem o papel confia.
 
 **Testes.** No hospedeiro, a conta do aviso — a borda, o rearme, o espaço
 só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
-codificação e o evento que só tem o tipo, o número e os bits —, o quadro, o
-selo e a lista do contrato (NH01–NH11). Na suíte, nas duas arquiteturas,
+codificação e o evento que só tem o tipo, o número e os bits —, o quadro, a
+prontidão da ponta e do endpoint, o selo e a lista do contrato
+(NH01–NH13). Na suíte, nas duas arquiteturas,
 26 casos `aviso:` e 6 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
@@ -9003,8 +9004,9 @@ suspensão e o esquecimento do dispositivo, e os fluxos de e para outro
 Duke —; e o `eco-malha` com três clientes num processo só, a `conversa`, o
 programa de fora do repositório selado, instalado e rodado, o
 `agent.describe` contra o contrato, o `system.info` e as medidas do laço.
-As invariantes de fonte conferem o contrato contra o protocolo, o registro
-e a política (NI01–NI03); o job "SDK fora do repositório" compila,
+As invariantes de fonte conferem que só `kernel::aviso` publica o aviso,
+sem conteúdo, e o contrato contra o protocolo, o registro e a política
+(NI01–NI03); o job "SDK fora do repositório" compila,
 confere e sela o modelo fora de todo workspace (NX01–NX03). E a **bancada
 de duas máquinas**, `cargo xtask sdk`: o modelo nas duas, falando entre
 si; o `eco-malha` servindo um cliente de cada máquina ao mesmo tempo, e o
@@ -9018,9 +9020,12 @@ máquina; e a revogação no meio de um fluxo. Nos quatro pares.
 Trinta e duas mutações contra o que o DN-3 promete — N01 a N32 —, uma de
 cada vez, no repositório, no x86_64: as da conta pura do aviso, do quadro
 e do xtask (o selo, a conferência do contrato) rodam os testes do
-hospedeiro; as do kernel, do runtime e do contrato, os casos `aviso:` e
-`sdk:` da suíte — três delas, os dois. Na primeira rodada, cinco
-sobreviveram, as cinco por fraqueza dos testes, e não do código: na N03 (a
+hospedeiro — e as da conta pura, também os casos da suíte que as veem —;
+as do kernel, do runtime e do contrato, a suíte filtrada aos casos
+`aviso:` e `sdk:` escolhidos para cada uma. Na primeira rodada, cinco
+sobreviveram, nenhuma por defeito do código — quatro por fraqueza dos
+testes, e a N08 porque a campanha não a rodava contra o caso que a vê: na
+N03 (a
 recusa do gate que ainda designa o endpoint do pedido), o caso nomeava o
 endpoint que a oferta já tinha designado, e a designação a mais não mudava
 a conta; na N08 (o rearme sem reavaliar a prontidão — o despertar
@@ -9052,7 +9057,7 @@ reprovadas.
 | sem coalescência; sem rearme depois da operação do dono; o `GRAVAVEL` nunca publicado | os testes do hospedeiro de `politica::aviso` e os casos do dado, do espaço e dos dois sentidos |
 | o rearme sem reavaliar a prontidão | "um aviso de cada objeto no canal" |
 | o `FIM` não publicado no aborto | "o fim do sentido, o fecho e o aborto", "o desligamento avisa o fim", "a suspensao e o esquecimento do dispositivo avisam o fim" |
-| o aviso depois da lápide vista | "o fim contra a leitura" — depois do reforço |
+| o aviso depois da lápide vista | "o fim contra a leitura, nada depois do fim ouvido" — depois do reforço |
 | o `exec` mantendo as designações | "a troca de imagem larga as designacoes" |
 | o canal sem ouvinte tentado para sempre; a chave do canal sem a geração | "a morte e o canal sem ouvinte" — a da geração depois do reforço |
 | o canal cheio descartando o aviso; o devido entregue duas vezes | "o canal cheio deixa o aviso devido" |
@@ -9073,11 +9078,13 @@ volta entre os Dukes em 2,2 a 2,7 s; o `eco-malha` serve ao mesmo tempo os
 dois clientes de 4 MiB, e o segundo cliente remoto é recusado pelo teto da
 relação; 1 MiB de cada lado ao mesmo tempo passa sem impasse, a 52–62 KiB/s.
 O laço anda a 37–48 KiB/s entre os Dukes e a 56–74 KiB/s no local, contra
-56–66 KiB/s do estilo bloqueante do DN-2 entre os Dukes: cada leitura e cada
-escrita continua sendo uma decisão do gate e um registro da auditoria, e o
-aviso soma a volta pelo canal — do aviso à operação do dono, de 83 a 130 ms
-em média e até 1,9 s no pior caso, com os dois emuladores disputando o
-hospedeiro. O par inteiro, os seis passos, leva de 593 a 914 s.
+56–66 KiB/s do estilo bloqueante do DN-2 entre os Dukes — uma comparação
+que não é limpa: o cliente remoto do laço divide a máquina de lá, e o
+`eco-malha`, com o cliente local, ao mesmo tempo, e o bloqueante corre
+sozinho. Cada leitura e cada escrita continua sendo uma decisão do gate e
+um registro da auditoria, e o aviso soma a volta pelo canal — do aviso à
+operação do dono, de 83 a 130 ms em média e até 1,9 s no pior caso, com os
+dois emuladores disputando o hospedeiro. O par inteiro, os seis passos, leva de 593 a 914 s.
 
 ## Barramento PCI
 

@@ -93,8 +93,8 @@ existe. O runtime dos programas (`programas::fluxo`) dá `abrir`,
 ### O aviso (DN-3)
 
 Com `notify` — o descritor de um canal de eventos do próprio processo —,
-`stream.open` e `stream.accept` designam a ponta: cada mudança dela vira
-um evento `MALHA` no canal (`a` = 2, a ponta; `b` = o número do id; `c` =
+`stream.open` e `stream.accept` designam a ponta: as mudanças dela viram
+eventos `MALHA` no canal (`a` = 2, a ponta; `b` = o número do id; `c` =
 `LEGIVEL`, `GRAVAVEL`, `FIM`). O aviso só sinaliza prontidão: não leva
 byte, motivo nem quem, não autoriza nada, e a operação seguinte passa pelo
 gate como sempre. É na borda — no máximo um aviso não consumido por ponta,

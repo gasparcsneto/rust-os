@@ -37,8 +37,10 @@ lançou, o manifesto dele e a política:
 aviso (só: este objeto, esta prontidão) → o programa acorda → pedido ao gate → operação
 ```
 
-e nunca `aviso → operação`. O caso da revogação entre o aviso e a leitura
-prova (NS11), e a mutação N16 o confere.
+e nunca `aviso → operação`. O caso da política que tira a permissão entre
+o aviso e a leitura prova (NS15) — a leitura avisada é recusada, e a
+decisão gravada é a recusa do gate —, e a mutação N16 o confere; o da
+revogação da pessoa (NS11) mostra que a leitura não traz o dado.
 
 ## Por que
 
@@ -72,12 +74,26 @@ programa.
 **As regras.** Dentro da versão o contrato só cresce: um comando novo,
 um parâmetro opcional novo, um campo novo num resultado, um tipo de evento
 novo, um bit novo, um código novo. Um nome nunca muda de sentido. O que o
-kernel não conhece ele **recusa** (`INVALID_ARGUMENT`), nunca ignora; o
-programa ignora, no que recebe, o que não conhece — um bit do aviso que
-esta versão do runtime não sabe não muda nenhuma resposta de
+kernel não conhece ele **recusa**, nunca ignora: o método desconhecido é o
+erro −32601 do JSON-RPC, e o parâmetro desconhecido ou de outro tipo, o
+−32602 com o nome dele (a auditoria os grava como `INVALID_ARGUMENT`); a
+chamada de mecanismo desconhecida, `NUMERO_INVALIDO`; a permissão
+desconhecida no manifesto recusa o programa na carga. O programa ignora,
+no que recebe, o que não conhece — um bit do aviso que esta versão do
+runtime não sabe não muda nenhuma resposta de
 [`Prontidao`](../programas/src/laco.rs). Remover é só numa versão maior,
 por decisão própria, e o removido é recusado. Um kernel tem uma versão
 viva.
+
+**O que não é contrato.** O resto do registro — fora `fabric.*` e
+`stream.*` — continua descrito pelo `agent.describe`, sem promessa, até
+uma decisão o pôr no contrato; e também não são contrato o texto do
+detalhe da auditoria, os tempos, as cotas e os tetos de
+[As cotas](#as-cotas) — fora os dois do envelope —, os programas da imagem,
+a política, e os módulos do runtime que este documento não descreve.
+`fluxo::padrao` e `fluxo::Resumo` são da bancada: o modelo os usa só para
+conferir os bytes da troca que a bancada mede, e um programa não precisa
+deles.
 
 **A conferência (NI01–NI03).** O `cargo xtask invariantes` lê a lista e
 as fontes e reprova:
@@ -240,9 +256,12 @@ O `notify` é conferido dentro da decisão do próprio comando: tem de ser um
 descritor de canal de eventos **deste processo**, de que ele é o ouvinte.
 Senão o pedido inteiro é recusado com `INVALID_ARGUMENT` e o motivo
 `notify nao e canal deste processo` — o objeto não é criado nem aceito, e
-nada é designado. Só um processo designa: só um processo oferece, abre e
-aceita, e o pedido de uma pessoa ou de um agente é recusado como sempre,
-com o mesmo código com ou sem `notify` (NS14).
+nada é designado. Um `notify` que não é inteiro não negativo nem chega à
+decisão: o registro o recusa pela forma (−32602, com o nome), e o comando
+que não tem `notify` o recusa pelo nome (NS09). Só um processo designa: só
+um processo oferece, abre e aceita, e o pedido de uma pessoa ou de um
+agente é recusado como sempre, com o mesmo código com ou sem `notify`
+(NS14).
 
 ### Auditoria e medidas
 
@@ -267,17 +286,19 @@ publicado até a operação do dono que o consome (`to_operation_samples`,
 | `fluxo::abrir_no_par_avisando` | `stream.open` com `device` e `notify` | o mesmo, deste Duke: o de lá avisa o programa de lá |
 | `fluxo::aceitar_avisando` | `stream.accept` com `notify` | a ponta aceita: `LEGIVEL`, `GRAVAVEL`, `FIM` |
 
-Os pedidos "agora" — `Fluxo::ler_agora`, `Fluxo::escrever_agora`,
-`aceitar_avisando` — não esperam dado nem espaço (levam a espera mínima do
-plano de dados, para o caminho da auditoria cheio poder segurá-los em vez
-de cobrar a taxa). O que não coube na escrita espera numa
+Os pedidos "agora" — `Fluxo::ler_agora`, `Fluxo::escrever_agora` e
+`aceitar_avisando` — não esperam dado, espaço nem pedido. Os dois de dados
+levam a espera mínima do plano de dados (1 ms), para o caminho da
+auditoria cheio poder segurá-los em vez de cobrar a taxa; o aceite, do
+plano de controle, vai sem `wait`. O que não coube na escrita espera numa
 [`EscritaPendente`](../programas/src/fluxo.rs), que escoa quando o
 `GRAVAVEL` vem. As variantes com espera do DN-2 continuam valendo, e um
 mesmo processo pode ter um fluxo com o aviso e outro sem.
 
 **O fim e o fecho.** `Fluxo::terminar` termina o sentido daqui: o outro
 lado lê o resto e o fim (`LEGIVEL`). Quando o fluxo acabou de vez para o
-dono — o outro lado fechou, foi revogado, o processo dele morreu, o
+dono — o outro lado fechou (lido o que ele mandou), foi revogado, o
+processo dele morreu, o
 dispositivo foi suspenso ou esquecido —, a ponta avisa `FIM`, e a próxima
 operação ouve `CONFLICT` com o motivo (`fechado pela ponta`, `revogado`,
 `o dispositivo foi suspenso`…).
@@ -320,11 +341,11 @@ continua sendo entrada não confiável.
 | O que | O que o programa vê |
 |---|---|
 | `notify` que não é canal deste processo | `INVALID_ARGUMENT`, `notify nao e canal deste processo`; nada criado |
-| a política tira a permissão entre o aviso e a operação | a operação é recusada pelo gate, com o código dela (NS11, NS15) |
-| o outro lado fechou | `FIM`; a próxima operação, `CONFLICT` `fechado pela ponta` |
+| a política tira a permissão, ou a pessoa é revogada, entre o aviso e a operação | a operação é recusada pelo gate, com o código dela (NS15), ou ouve o fim (NS11); o dado não sai |
+| o outro lado fechou | `LEGIVEL` enquanto há o que ler — o resto e o fim do sentido dele —; depois, `FIM` (ou `GRAVAVEL`, a quem esbarrou no cheio); a operação seguinte, `CONFLICT` `fechado pela ponta` (NS03) |
 | o processo do outro lado morreu | `FIM`; `CONFLICT` `o processo acabou` |
-| o dispositivo suspenso, esquecido ou revogado | `FIM`; `CONFLICT` com o motivo do dispositivo (NS23) |
-| o Duke desligando | `FIM` em cada objeto designado (NS22) |
+| o dispositivo suspenso, esquecido ou revogado | `FIM`; `CONFLICT` com o motivo do dispositivo (NS23; a revogação, NB04) |
+| o Duke desligando | `FIM` em cada ponta de fluxo designada, e a operação seguinte ouve `desligando`; nada novo abre nem é aceito (`CONFLICT`) (NS22) |
 | escrever num fluxo ainda pedido | `CONFLICT` `o fluxo ainda nao abriu` — espere o `GRAVAVEL` da abertura |
 | o canal de eventos cheio | nada: o aviso fica devido, e chega depois |
 
@@ -372,9 +393,11 @@ de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
 6. **Rode** com `user.run`, ou pela chamada `executar` de um processo. O
    código de fora da imagem só roda com o selo de um editor que está no
    registro da imagem e em quem o papel de quem lança confia; sem selo,
-   adulterado ou de editor estranho, é recusado na troca de imagem
-   (`CODE_UNSIGNED`, `CODE_TAMPERED`, `CODE_UNTRUSTED`). Um editor novo é
-   uma imagem nova.
+   adulterado ou de editor estranho, é recusado antes de rodar: o
+   `user.run` responde `launched: false` com `CODE_UNSIGNED`,
+   `CODE_TAMPERED` ou `CODE_UNTRUSTED`; o `executar` devolve `SEM_SELO`,
+   `SELO_NAO_CONFERE` ou `EDITOR_NAO_CONFIADO`, e o processo segue inteiro
+   (NS28). Um editor novo é uma imagem nova.
 
 O `cargo xtask sdk-fora` faz os passos 1 a 4 com o modelo, numa cópia em
 `target/sdk-fora/` — fora de todo workspace do repositório —, e é o job
@@ -384,12 +407,14 @@ NS28 o instala e roda.
 
 ## Testes
 
-- **No hospedeiro** (NH01–NH11): a conta pura do aviso
+- **No hospedeiro** (NH01–NH13): a conta pura do aviso
   (`politica::aviso`) — a borda que publica uma vez, a operação que
   rearma, o espaço só para quem o quer, o fim uma vez, o canal cheio, o
   canal sem ouvinte, a codificação e o evento que só tem o tipo, o número e
-  os bits —; o quadro (`protocolo::quadro`); e no xtask, o selo e a lista
-  do contrato, com a conferência que acusa o parâmetro tirado.
+  os bits —; o quadro (`protocolo::quadro`); no xtask, o selo e a lista
+  do contrato, com a conferência que acusa o parâmetro tirado; e a
+  prontidão que o kernel pergunta, da ponta (`politica::fluxo`, NH12) e do
+  endpoint (`politica::malha`, NH13).
 - **Na suíte**, nas duas arquiteturas: 26 casos `aviso:` (NS01–NS25 e o
   NS01b) e 6 casos `sdk:` (NS26–NS31). O programa `avisado` só espera no
   canal dele e diz no log cada aviso que chega; a suíte dita os passos a
@@ -397,9 +422,10 @@ NS28 o instala e roda.
   função do gate, nos passos que precisam ser exatos. O que se confere é o
   que o kernel publicou, quando e quantas vezes, e que cada operação depois
   de um aviso continua sendo um pedido decidido pelo gate.
-- **As invariantes de fonte** (NI01–NI03): o contrato contra o protocolo,
-  o registro dos comandos e a política; nenhuma linha a mais, nenhuma a
-  menos.
+- **As invariantes de fonte** (NI01–NI03): só `kernel::aviso` publica
+  `MALHA`, montado pela conta de `politica::aviso` (NI01), sem nada do
+  conteúdo (NI02); e o contrato contra o protocolo, o registro dos
+  comandos e a política, nas duas direções, dentro do contrato (NI03).
 - **O SDK fora do repositório** (NX01–NX03): o modelo copiado para fora de
   todo workspace, compilado contra o `programas`, conferido e selado, nas
   duas arquiteturas, com os lints da cópia de fora.
@@ -415,10 +441,12 @@ NS28 o instala e roda.
 Trinta e duas mutações — N01 a N32 —, uma de cada vez, no repositório, no
 x86_64. As da conta pura (`politica::aviso`) rodam os testes do
 hospedeiro e os casos da suíte que as veem; as do xtask e do quadro, só os
-testes do hospedeiro; as do kernel, do runtime e do protocolo, os casos
-`aviso:` e `sdk:` da suíte, filtrada a eles. Na primeira rodada de cada
-uma sobreviveram cinco — a N03, a N08, a N11, a N16 e a N28 —, as cinco
-por fraqueza dos testes, e não do código:
+testes do hospedeiro; as do kernel, do runtime e do protocolo, a suíte
+filtrada aos casos `aviso:` e `sdk:` escolhidos para cada uma — de um a
+quatro. Na primeira rodada de cada uma sobreviveram cinco — a N03, a N08,
+a N11, a N16 e a N28 —, nenhuma por defeito do código: quatro por fraqueza
+dos testes, e a N08 porque a campanha não a rodava contra o caso que a
+vê:
 
 - **N03** — o caso nomeava, no aceite recusado, o endpoint que a oferta já
   tinha designado: a designação a mais caía sobre a que existia, e a conta
@@ -512,14 +540,18 @@ contam os dois sentidos.
 
 Cada leitura e cada escrita continua sendo uma decisão do gate e um
 registro da auditoria — o número mede isso, e não o transporte. O laço
-fica de 27% a 34% abaixo do bloqueante entre os Dukes: ele soma a volta
-pelo canal — o aviso publicado, o fio acordado no canal, a operação
-pedida ao gate —, e, na bancada, essa volta leva em média de 83 a 130 ms
-com os dois emuladores disputando o hospedeiro. Em troca, um processo
-serve vários fluxos, a janela e o pseudo-terminal numa espera só. Os
-avisos de uma troca de 4 MiB: de 420 a 440 publicados e de 430 a 460
-juntados na origem; de 800 a 1 010 publicados e de 1 350 a 1 450 juntados
-no destino — o canal nunca teve mais de um aviso do mesmo objeto.
+fica de 27% a 34% abaixo do bloqueante entre os Dukes, e a comparação não
+é limpa: no NB01 o cliente remoto divide a máquina B — e o `eco-malha` —
+com o cliente local, ao mesmo tempo, e o bloqueante do NB06 corre
+sozinho; e o laço soma a volta pelo canal — o aviso publicado, o fio
+acordado no canal, a operação pedida ao gate —, que na bancada leva em
+média de 83 a 130 ms com os dois emuladores disputando o hospedeiro. Em
+troca, um processo serve vários fluxos, a janela e o pseudo-terminal numa
+espera só. Os avisos de cada máquina ao fim do NB05, do NB01 e do NB02 (o
+`security.metrics`, desde o boot): de 419 a 441 publicados e de 432 a 462
+juntados na origem; de 798 a 1 006 publicados e de 1 354 a 1 443 juntados
+no destino, que também tem as duas pontas do cliente local do NB01 — e o
+canal nunca teve mais de um aviso do mesmo objeto.
 
 ## O que não existe
 
