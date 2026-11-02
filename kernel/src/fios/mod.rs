@@ -374,6 +374,13 @@ static ESCALONADOR: Mutex<Escalonador> = Mutex::new(Escalonador {
 
 static PROXIMO_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Só para a suíte: o id do próximo fio — o de um processo lançado agora,
+/// se nenhum outro fio nascer antes.
+#[cfg(feature = "modo-teste")]
+pub fn proximo_id_de_teste() -> u64 {
+    PROXIMO_ID.load(Ordering::Relaxed)
+}
+
 /// Tiques restantes antes de preemptar o fio atual de cada núcleo.
 ///
 /// # Por que fora da trava do escalonador

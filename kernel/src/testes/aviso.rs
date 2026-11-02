@@ -1987,3 +1987,472 @@ pub(super) fn aviso_o_desligamento_avisa_o_fim() -> Resultado {
         encerrar_todos(r, &[&a, &b])
     })
 }
+
+// ---------------------------------------------------------------------------
+// NS32 — o fim com o aviso não consumido
+// ---------------------------------------------------------------------------
+
+/// Acorda o `parado` — parado no passo `PAUSAR`, que espera uma entrega no
+/// endpoint dele —: `quem` lhe manda uma.
+fn acordar_o_parado(quem: &Avisado, parado: &Avisado, nonce: u64) -> Resultado {
+    let r = mandar_na_malha(quem.quem(), &parado.endpoint, "acorda", nonce);
+    if !fs_ok(&r) {
+        crate::log_error!("teste", "{}", r);
+        return Err("a entrega que acorda nao foi mandada");
+    }
+    Ok(())
+}
+
+/// O objeto que acaba com um aviso que o dono ainda não consumiu não avisa
+/// o fim de novo — no máximo um aviso não consumido por objeto —, e nada
+/// fica guardado sem teto para um dono que não opera:
+///
+/// - com o aviso ainda na fila (`a` parado), o fim se junta ao evento dele,
+///   e a designação sai na hora: `a`, de volta, lê um aviso só de cada
+///   fluxo, com a abertura e o fim juntos;
+/// - com o aviso já tirado da fila e nenhuma operação de `a`, o fim espera
+///   a operação dele — no máximo `ACABADOS_POR_PROCESSO` designações
+///   acabadas; as que passam disso caem, contadas com as largadas. A
+///   operação de `a` que ouve o fim tira a designação, sem aviso nenhum (a
+///   que não o ouve, e acabou com o fluxo, recebe o `FIM` em seguida: o
+///   NS03);
+/// - com o canal cheio, o fim fica devido, no mesmo teto; com o canal
+///   esvaziando, os devidos saem, e as designações com eles.
+pub(super) fn aviso_o_fim_com_o_aviso_nao_consumido() -> Resultado {
+    use politica::aviso::{ACABADOS_POR_PROCESSO, Situacao};
+    // Quanto `a` fica parado, no máximo: a entrega que o acorda vem antes.
+    const PARADO_MS: i64 = 120_000;
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 432);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            // O aviso ainda na fila: o fim se junta a ele. `a` fica parado
+            // até a entrega que o acorda.
+            let antes = crate::aviso::medidas();
+            let desde_pausa = a.ditar(PAUSAR, PARADO_MS, 0)?;
+            a.dito(desde_pausa, "pausando")?;
+            let mut juntos = Vec::new();
+            for _ in 0..3 {
+                let (_, n) = aberto(&a, &b, true, false)?;
+                esperar_ate(
+                    || crate::aviso::situacao_de_teste(a.ponta(n)) == Some(Situacao::Avisado),
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o aviso da abertura nao saiu")?;
+                crate::fluxo::vencer_de_teste(u64::MAX);
+                esperar_ate(
+                    || crate::aviso::situacao_de_teste(a.ponta(n)).is_none(),
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o fim junto ao aviso da fila nao largou a designacao")?;
+                juntos.push(n);
+            }
+            if crate::aviso::medidas().juntados < antes.juntados + 3 {
+                return Err("o fim nao se juntou ao aviso que esperava na fila");
+            }
+            if crate::aviso::designacoes_de_teste(a.fio()) != 1 {
+                return Err("sobraram designacoes dos fluxos cujo fim se juntou");
+            }
+            acordar_o_parado(&b, &a, 9_432_001)?;
+            a.dito(desde_pausa, "voltei")?;
+            for &n in &juntos {
+                let _ = esperar_ate(
+                    || !a.avisos_de(desde_pausa, "fluxo", n).is_empty(),
+                    TETO_DA_MALHA,
+                );
+                if a.avisos_depois_do_sossego(desde_pausa, "fluxo", n)
+                    != [malha::GRAVAVEL | malha::FIM]
+                {
+                    crate::log_error!("teste", "{:?}", a.avisos(desde_pausa));
+                    return Err("o fim junto nao veio no aviso que esperava, uma vez");
+                }
+            }
+            // O aviso já fora da fila, e `a` sem operar: o fim espera, até o
+            // teto do processo.
+            let antes = crate::aviso::medidas();
+            let mut na_espera = Vec::new();
+            for _ in 0..ACABADOS_POR_PROCESSO + 4 {
+                let desde = crate::log::total_emitidos();
+                let (id, n) = aberto(&a, &b, true, false)?;
+                a.esperar_aviso(desde, "fluxo", n, malha::GRAVAVEL)?;
+                crate::fluxo::vencer_de_teste(u64::MAX);
+                esperar_ate(
+                    || crate::aviso::guarda_o_fim_de_teste(a.ponta(n)),
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o fim com o aviso fora da fila nao ficou na espera")?;
+                if a.avisos_depois_do_sossego(desde, "fluxo", n) != [malha::GRAVAVEL] {
+                    crate::log_error!("teste", "{:?}", a.avisos(desde));
+                    return Err("o fim avisou com o aviso anterior nao consumido");
+                }
+                na_espera.push((id, n));
+            }
+            if crate::aviso::designacoes_de_teste(a.fio()) != 1 + ACABADOS_POR_PROCESSO {
+                crate::log_error!(
+                    "teste",
+                    "{} designacoes",
+                    crate::aviso::designacoes_de_teste(a.fio())
+                );
+                return Err("as designacoes acabadas passaram do teto do processo");
+            }
+            if crate::aviso::medidas().largados < antes.largados + 4 {
+                return Err("as designacoes acabadas acima do teto nao foram contadas");
+            }
+            let (caidos, guardados) = na_espera.split_at(4);
+            if caidos
+                .iter()
+                .any(|(_, n)| crate::aviso::situacao_de_teste(a.ponta(*n)).is_some())
+                || guardados
+                    .iter()
+                    .any(|(_, n)| !crate::aviso::guarda_o_fim_de_teste(a.ponta(*n)))
+            {
+                return Err("o teto nao tirou as designacoes acabadas mais antigas");
+            }
+            // A operação de `a` consome o aviso e ouve o fim: a designação
+            // sai, sem aviso.
+            let desde = crate::log::total_emitidos();
+            for (id, n) in guardados {
+                feito(
+                    &sobre(a.quem(), "stream.status", id),
+                    "o status do fluxo acabado nao passou",
+                )?;
+                if crate::aviso::situacao_de_teste(a.ponta(*n)).is_some() {
+                    return Err("a operacao que ouviu o fim nao tirou a designacao");
+                }
+            }
+            for (_, n) in guardados {
+                if !a.avisos_depois_do_sossego(desde, "fluxo", *n).is_empty() {
+                    return Err("o fim ouvido pela operacao ainda avisou");
+                }
+            }
+            if crate::aviso::designacoes_de_teste(a.fio()) != 1 {
+                return Err("sobraram designacoes dos fluxos cujo fim foi ouvido");
+            }
+            // O canal de `a` cheio: o fim fica devido, no mesmo teto.
+            let antes = crate::aviso::medidas();
+            let desde_pausa = a.ditar(PAUSAR, PARADO_MS, 0)?;
+            a.dito(desde_pausa, "pausando")?;
+            let mut postos = 0;
+            while a
+                .publicar(Evento {
+                    tipo: tipo::TESTE,
+                    ..Default::default()
+                })
+                .is_ok()
+            {
+                postos += 1;
+                if postos > crate::eventos::CAPACIDADE {
+                    return Err("o canal nao encheu");
+                }
+            }
+            let mut devidos = Vec::new();
+            for _ in 0..ACABADOS_POR_PROCESSO + 4 {
+                let (_, n) = aberto(&a, &b, true, false)?;
+                crate::fluxo::vencer_de_teste(u64::MAX);
+                esperar_ate(
+                    || {
+                        crate::aviso::guarda_o_fim_de_teste(a.ponta(n))
+                            && matches!(
+                                crate::aviso::situacao_de_teste(a.ponta(n)),
+                                Some(Situacao::Devido(_))
+                            )
+                    },
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o fim no canal cheio nao ficou devido")?;
+                devidos.push(n);
+            }
+            if crate::aviso::designacoes_de_teste(a.fio()) != 1 + ACABADOS_POR_PROCESSO {
+                crate::log_error!(
+                    "teste",
+                    "{} designacoes",
+                    crate::aviso::designacoes_de_teste(a.fio())
+                );
+                return Err("os fins devidos passaram do teto do processo");
+            }
+            if crate::aviso::medidas().largados < antes.largados + 4 {
+                return Err("os fins devidos acima do teto nao foram contados");
+            }
+            // `a` volta a ler o canal: os fins que ficaram devidos saem, uma
+            // vez cada, e as designações deles com eles.
+            acordar_o_parado(&b, &a, 9_432_002)?;
+            esperar_ate(
+                || crate::aviso::designacoes_de_teste(a.fio()) == 1,
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "os fins devidos nao sairam quando o canal esvaziou")?;
+            for &n in &devidos[4..] {
+                let vistos = a.avisos_depois_do_sossego(desde_pausa, "fluxo", n);
+                if vistos.len() != 1 || vistos[0] & malha::FIM == 0 {
+                    crate::log_error!("teste", "{} {:?}", n, vistos);
+                    return Err("o fim devido nao saiu uma vez");
+                }
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS33 — a recusa do gate consome o aviso
+// ---------------------------------------------------------------------------
+
+/// O gancho da reconfirmação que tira `fabric.offer` da política entre a
+/// decisão e a operação.
+fn tirar_a_oferta() {
+    politica_sem("fabric.offer");
+}
+
+/// A operação do dono, decidida pelo gate, consome o aviso também quando a
+/// decisão é a recusa: senão o objeto ficaria mudo. O aceite de `b`,
+/// recusado pela política nova, consome o aviso do pedido; com a política
+/// de volta, o pedido que ainda espera avisa de novo pelo coletor, sem
+/// mudança nenhuma no endpoint, e o aceite passa. E a recepção que a
+/// reconfirmação recusa, dentro da decisão, também consome: a entrega que
+/// ainda espera avisa de novo.
+pub(super) fn aviso_a_recusa_do_gate_consome_o_aviso() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 433);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let antes_da_politica = crate::autorizacao::com_politica(|p| p.clone());
+        let r = (|| -> Resultado {
+            let e = b.numero_do_endpoint();
+            let desde = crate::log::total_emitidos();
+            let pedido = abrir(a.quem(), &b.endpoint);
+            let id = fs_texto(&pedido, "stream").ok_or_else(|| {
+                crate::log_error!("teste", "{}", pedido);
+                "o pedido de fluxo nao passou"
+            })?;
+            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            // Daqui em diante, o aviso do pedido só pode ser o de novo.
+            let desde = crate::log::total_emitidos();
+            politica_sem("fabric.stream");
+            let r = aceitar(b.quem(), &b.endpoint);
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            recusado(
+                &r,
+                "DENY_PERMISSION",
+                "a politica nova nao recusou o aceite",
+            )?;
+            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)
+                .map_err(|_| "a recusa do gate deixou o endpoint mudo")?;
+            let r = aceitar(b.quem(), &b.endpoint);
+            if fs_texto(&r, "stream").as_deref() != Some(id.as_str()) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o aceite depois do aviso de novo nao passou");
+            }
+            // A recepção recusada na reconfirmação.
+            let desde = crate::log::total_emitidos();
+            if !fs_ok(&mandar_na_malha(a.quem(), &b.endpoint, "um", 9_433_001)) {
+                return Err("a entrega nao foi mandada");
+            }
+            b.esperar_aviso(desde, "endpoint", e, malha::ENTREGA)?;
+            // A recepção recusada rearma na hora — a operação do dono
+            // consome o aviso, e a entrega ainda espera —: o aviso de novo
+            // pode vir antes de a recusa voltar ao teste.
+            let desde = crate::log::total_emitidos();
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(tirar_a_oferta));
+            let r = fs_pedir(
+                b.quem(),
+                "fabric.recv",
+                &format!(r#"{{"endpoint":"{}"}}"#, b.endpoint),
+            );
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            if fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a reconfirmacao nao recusou a recepcao");
+            }
+            b.esperar_aviso(desde, "endpoint", e, malha::ENTREGA)
+                .map_err(|_| "a recepcao recusada deixou o endpoint mudo")?;
+            Ok(())
+        })();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes_da_politica);
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS34 — quem retira ou fecha
+// ---------------------------------------------------------------------------
+
+/// O gancho da reconfirmação que tira `fabric.stream` da política entre a
+/// decisão e a operação.
+fn tirar_o_fluxo() {
+    politica_sem("fabric.stream");
+}
+
+/// Quem retira um endpoint que designou não é avisado do fim dele — sabe,
+/// porque o retirou. E o fecho que a reconfirmação recusa deixa o fluxo
+/// vivo, e com ele a designação: o dado que chega depois avisa.
+pub(super) fn aviso_quem_retira_ou_fecha() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 434);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let antes_da_politica = crate::autorizacao::com_politica(|p| p.clone());
+        let r = (|| -> Resultado {
+            let r = fs_pedir(
+                b.quem(),
+                "fabric.offer",
+                &format!(r#"{{"intent":"pdf.anotar","notify":{}}}"#, b.descritor),
+            );
+            let outro = fs_texto(&r, "endpoint").ok_or_else(|| {
+                crate::log_error!("teste", "{}", r);
+                "a oferta com o aviso nao passou"
+            })?;
+            let n = politica::aviso::numero_do_id(&outro).ok_or("o id do endpoint")?;
+            if crate::aviso::situacao_de_teste(Objeto::Endpoint(n)).is_none() {
+                return Err("o endpoint oferecido com o aviso nao foi designado");
+            }
+            let desde = crate::log::total_emitidos();
+            let r = fs_pedir(
+                b.quem(),
+                "fabric.withdraw",
+                &format!(r#"{{"endpoint":"{outro}"}}"#),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a retirada nao passou");
+            }
+            if !b.avisos_depois_do_sossego(desde, "endpoint", n).is_empty() {
+                return Err("quem retirou o endpoint foi avisado do fim dele");
+            }
+            if crate::aviso::situacao_de_teste(Objeto::Endpoint(n)).is_some() {
+                return Err("a retirada deixou a designacao");
+            }
+            // O fecho recusado na reconfirmação.
+            let (id, n) = aberto(&a, &b, false, true)?;
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(tirar_o_fluxo));
+            let r = sobre(b.quem(), "stream.close", &id);
+            crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            if fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a reconfirmacao nao recusou o fecho");
+            }
+            if estado(a.quem(), &id).0.as_deref() != Some("open") {
+                return Err("o fecho recusado fechou o fluxo");
+            }
+            let desde = crate::log::total_emitidos();
+            escrito(&escrever(a.quem(), &id, b"vivo"), 4, "a escrita nao entrou")?;
+            b.esperar_aviso(desde, "fluxo", n, malha::LEGIVEL)
+                .map_err(|_| "o fecho recusado largou a designacao do fluxo vivo")?;
+            Ok(())
+        })();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        crate::autorizacao::restaurar_politica(antes_da_politica);
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS35 — o nome do canal no registro da designação
+// ---------------------------------------------------------------------------
+
+/// O nome do canal é texto do processo: no registro da designação, ele vai
+/// só com letras, dígitos e `-_.:/`, e não imita o que vem depois dele no
+/// detalhe da auditoria — a citação da decisão.
+pub(super) fn aviso_o_nome_do_canal_no_registro() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 435);
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let chave = crate::eventos::escutar(b"x; decisao 1", b.fio())
+                .map_err(|_| "o canal de nome estranho nao abriu")?;
+            let d = crate::fios::com_descritores_de(b.fio(), |t| {
+                t.instalar(crate::usuario::descritores::Alvo::Eventos { chave })
+            })
+            .flatten()
+            .ok_or("o descritor do canal nao foi instalado")?;
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = fs_pedir(
+                b.quem(),
+                "fabric.offer",
+                &format!(r#"{{"intent":"pdf.anotar","notify":{d}}}"#),
+            );
+            let outro = fs_texto(&r, "endpoint").ok_or_else(|| {
+                crate::log_error!("teste", "{}", r);
+                "a oferta com o aviso nao passou"
+            })?;
+            let registros = registros_depois(antes, |e| e.detalhe.contains("aviso no canal"));
+            let ok = registros
+                .iter()
+                .any(|(_, e)| e.detalhe.contains("aviso no canal x__decisao_1"));
+            if !ok
+                || registros
+                    .iter()
+                    .any(|(_, e)| e.detalhe.contains("x; decisao 1"))
+            {
+                crate::log_error!("teste", "{:?}", registros);
+                return Err("o nome do canal entrou cru no registro da designacao");
+            }
+            let _ = fs_pedir(
+                b.quem(),
+                "fabric.withdraw",
+                &format!(r#"{{"endpoint":"{outro}"}}"#),
+            );
+            crate::eventos::largar(chave, b.fio());
+            Ok(())
+        })();
+        encerrar_todos(r, &[&b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS36 — a troca de imagem tira os avisos da fila
+// ---------------------------------------------------------------------------
+
+/// A imagem nova herda os descritores, e o canal: os avisos da malha que a
+/// imagem anterior não leu saem da fila na troca. A fila de `b`, parado,
+/// recebe a troca, quinze eventos de teste — a primeira leitura do laço
+/// leva dezesseis — e o aviso do dado: a troca acontece com o aviso ainda
+/// na fila, e ele sai dela.
+pub(super) fn aviso_a_troca_de_imagem_tira_os_avisos_da_fila() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 436);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let (id, _) = aberto(&a, &b, false, true)?;
+            let desde = b.ditar(PAUSAR, 3000, 0)?;
+            b.dito(desde, "pausando")?;
+            b.ditar(TROCAR, 0, 0)?;
+            for _ in 0..15 {
+                b.publicar(Evento {
+                    tipo: tipo::TESTE,
+                    ..Default::default()
+                })?;
+            }
+            let descartados = crate::eventos::descartados_de_teste();
+            escrito(
+                &escrever(a.quem(), &id, b"velho"),
+                5,
+                "a escrita nao entrou",
+            )?;
+            esperar_ate(
+                || crate::eventos::estado(&b.canal).is_some_and(|e| e.na_fila == 17),
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "o aviso do dado nao entrou na fila depois da troca")?;
+            b.dito(desde, "trocando")?;
+            esperar_ate(
+                || crate::eventos::descartados_de_teste() > descartados,
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "o aviso da imagem anterior ficou na fila da nova")?;
+            esperar_ate(
+                || linhas_do_programa(desde, &format!("processo encerrou com codigo {SAIDA}")) == 1,
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "a imagem nova nao terminou")?;
+            Ok(())
+        })();
+        // `b` já saiu.
+        encerrar_todos(r, &[&a])
+    })
+}

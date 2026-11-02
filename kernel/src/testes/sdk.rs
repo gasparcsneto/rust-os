@@ -645,3 +645,43 @@ pub(super) fn sdk_as_medidas_do_laco() -> Resultado {
         encerrar_todos(r, &[&a, &b])
     })
 }
+
+// ---------------------------------------------------------------------------
+// NS37 — o laço sobe com o nome tomado
+// ---------------------------------------------------------------------------
+
+/// O nome do canal do laço é previsível — `laco-<id>` —, e outro processo
+/// pode tomá-lo antes: o laço tenta os seguintes, e o programa sobe. A
+/// suíte toma os nomes dos próximos ids antes de lançar o `eco-malha`, que
+/// sobe com o primeiro nome livre dele.
+pub(super) fn sdk_o_laco_sobe_com_o_nome_tomado() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 441);
+        let eu = crate::fios::id_atual();
+        let primeiro = crate::fios::proximo_id_de_teste();
+        let tomados: Vec<crate::eventos::Chave> = (primeiro..primeiro + 8)
+            .filter_map(|id| crate::eventos::escutar(format!("laco-{id}").as_bytes(), eu).ok())
+            .collect();
+        let r = (|| -> Resultado {
+            if tomados.len() != 8 {
+                return Err("os nomes dos proximos lacos nao foram tomados");
+            }
+            let (eco, pronto) = NaMalha::lancar("eco-malha", bia, "eco-malha: pronto ")?;
+            let (_, canal) = pronto
+                .split_once(' ')
+                .ok_or("o eco-malha nao disse o canal")?;
+            let r = if canal == format!("laco-{}-1", eco.fio) {
+                Ok(())
+            } else {
+                crate::log_error!("teste", "{} {}", eco.fio, canal);
+                Err("o eco-malha nao subiu com o nome seguinte ao tomado")
+            };
+            let fim = encerrar_na_malha(canal, SAIDA_DO_ECO);
+            r.and(fim)
+        })();
+        for chave in tomados {
+            crate::eventos::largar(chave, eu);
+        }
+        r
+    })
+}

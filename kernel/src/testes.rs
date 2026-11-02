@@ -37313,6 +37313,26 @@ static CASOS: &[Caso] = &[
         f: fluxo::par::aviso::aviso_o_fluxo_chegando_de_outro_duke,
     },
     Caso {
+        nome: "aviso: o fim com o aviso nao consumido, junto ou na espera",
+        f: aviso::aviso_o_fim_com_o_aviso_nao_consumido,
+    },
+    Caso {
+        nome: "aviso: a recusa do gate consome o aviso",
+        f: aviso::aviso_a_recusa_do_gate_consome_o_aviso,
+    },
+    Caso {
+        nome: "aviso: quem retira ou fecha",
+        f: aviso::aviso_quem_retira_ou_fecha,
+    },
+    Caso {
+        nome: "aviso: o nome do canal no registro da designacao",
+        f: aviso::aviso_o_nome_do_canal_no_registro,
+    },
+    Caso {
+        nome: "aviso: a troca de imagem tira os avisos da fila",
+        f: aviso::aviso_a_troca_de_imagem_tira_os_avisos_da_fila,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },
@@ -37335,6 +37355,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "sdk: as medidas do laco",
         f: sdk::sdk_as_medidas_do_laco,
+    },
+    Caso {
+        nome: "sdk: o laco sobe com o nome tomado",
+        f: sdk::sdk_o_laco_sobe_com_o_nome_tomado,
     },
     Caso {
         nome: "dispositivos: o administrador relaciona, com prova, e a relacao vai ao journal",
