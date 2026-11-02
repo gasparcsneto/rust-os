@@ -28,9 +28,11 @@ use crate::agent::registry;
 use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
+mod aviso;
 mod enlace;
 mod fluxo;
 mod pareamento;
+mod sdk;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
 /// para montar uma dinâmica; detalhes vão para o log antes do retorno.
@@ -37199,6 +37201,134 @@ static CASOS: &[Caso] = &[
         f: fluxo::par::fluxo_o_replay_nao_abre,
     },
     Caso {
+        nome: "aviso: o dado avisa uma vez",
+        f: aviso::aviso_o_dado_avisa_uma_vez,
+    },
+    Caso {
+        nome: "aviso: um aviso de cada objeto no canal",
+        f: aviso::aviso_um_aviso_de_cada_objeto_no_canal,
+    },
+    Caso {
+        nome: "aviso: o espaco avisa quem esbarrou no cheio",
+        f: aviso::aviso_o_espaco_avisa_quem_esbarrou,
+    },
+    Caso {
+        nome: "aviso: o fim do sentido, o fecho e o aborto",
+        f: aviso::aviso_o_fim_do_sentido_o_fecho_e_o_aborto,
+    },
+    Caso {
+        nome: "aviso: o endpoint avisa o pedido e a entrega",
+        f: aviso::aviso_o_endpoint_avisa_o_pedido_e_a_entrega,
+    },
+    Caso {
+        nome: "aviso: um canal so, o endpoint, tres fluxos e os outros eventos",
+        f: aviso::aviso_um_canal_so,
+    },
+    Caso {
+        nome: "aviso: os dois sentidos ao mesmo tempo, sem impasse",
+        f: aviso::aviso_os_dois_sentidos_sem_impasse,
+    },
+    Caso {
+        nome: "aviso: sem notify, tudo como antes",
+        f: aviso::aviso_sem_notify_tudo_como_antes,
+    },
+    Caso {
+        nome: "aviso: o canal que o processo nao escuta e recusado",
+        f: aviso::aviso_o_canal_que_o_processo_nao_escuta,
+    },
+    Caso {
+        nome: "aviso: o descritor que nao e canal e recusado",
+        f: aviso::aviso_o_descritor_que_nao_e_canal,
+    },
+    Caso {
+        nome: "aviso: a recusa do gate nao designa nada",
+        f: aviso::aviso_a_recusa_do_gate_nao_designa,
+    },
+    Caso {
+        nome: "aviso: a revogacao entre o aviso e a leitura",
+        f: aviso::aviso_a_revogacao_entre_o_aviso_e_a_leitura,
+    },
+    Caso {
+        nome: "aviso: o evento so tem o tipo, o numero e os bits",
+        f: aviso::aviso_o_evento_so_tem_tipo_numero_e_bits,
+    },
+    Caso {
+        nome: "aviso: cada processo no seu canal",
+        f: aviso::aviso_cada_processo_no_seu_canal,
+    },
+    Caso {
+        nome: "aviso: so processo designa",
+        f: aviso::aviso_so_processo_designa,
+    },
+    Caso {
+        nome: "aviso: a politica que tira a permissao no meio",
+        f: aviso::aviso_a_politica_que_tira_a_permissao,
+    },
+    Caso {
+        nome: "aviso: o fim contra a leitura, nada depois do fim ouvido",
+        f: aviso::aviso_o_fim_contra_a_leitura,
+    },
+    Caso {
+        nome: "aviso: a troca de imagem larga as designacoes",
+        f: aviso::aviso_a_troca_de_imagem_larga_as_designacoes,
+    },
+    Caso {
+        nome: "aviso: a morte e o canal sem ouvinte",
+        f: aviso::aviso_a_morte_e_o_canal_sem_ouvinte,
+    },
+    Caso {
+        nome: "aviso: o canal cheio deixa o aviso devido",
+        f: aviso::aviso_o_canal_cheio_deixa_devido,
+    },
+    Caso {
+        nome: "aviso: quatro fluxos avisando ao mesmo tempo",
+        f: aviso::aviso_quatro_fluxos_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "aviso: dois pares sob carga, sem cruzamento",
+        f: aviso::aviso_dois_pares_sob_carga,
+    },
+    Caso {
+        nome: "aviso: o desligamento avisa o fim",
+        f: aviso::aviso_o_desligamento_avisa_o_fim,
+    },
+    Caso {
+        nome: "aviso: a suspensao e o esquecimento do dispositivo avisam o fim",
+        f: fluxo::par::aviso::aviso_a_suspensao_e_o_esquecimento,
+    },
+    Caso {
+        nome: "aviso: o fluxo saindo para outro Duke",
+        f: fluxo::par::aviso::aviso_o_fluxo_saindo_para_outro_duke,
+    },
+    Caso {
+        nome: "aviso: o fluxo chegando de outro Duke",
+        f: fluxo::par::aviso::aviso_o_fluxo_chegando_de_outro_duke,
+    },
+    Caso {
+        nome: "sdk: o eco-malha serve tres clientes, um processo so",
+        f: sdk::sdk_o_eco_serve_tres_clientes,
+    },
+    Caso {
+        nome: "sdk: a conversa, a janela e o fluxo no mesmo laco",
+        f: sdk::sdk_a_conversa_janela_e_fluxo_no_mesmo_laco,
+    },
+    Caso {
+        nome: "sdk: o programa de fora do repositorio, selado, instalado e rodado",
+        f: sdk::sdk_o_programa_de_fora_do_repositorio,
+    },
+    Caso {
+        nome: "sdk: o agent.describe confere com o contrato",
+        f: sdk::sdk_o_describe_confere_com_o_contrato,
+    },
+    Caso {
+        nome: "sdk: o system.info diz a interface nativa 2",
+        f: sdk::sdk_o_system_info_diz_a_interface_2,
+    },
+    Caso {
+        nome: "sdk: as medidas do laco",
+        f: sdk::sdk_as_medidas_do_laco,
+    },
+    Caso {
         nome: "dispositivos: o administrador relaciona, com prova, e a relacao vai ao journal",
         f: enlace::dispositivos_o_administrador_relaciona_com_prova,
     },
@@ -57427,6 +57557,26 @@ const PUBLICADOS: [&str; 5] = [
     "vindo-outro",
 ];
 
+/// Os arquivos do modelo do SDK, depois dos do `vindo` na lista do
+/// instalador — ver `xtask/src/codigo.rs` (`DO_SDK`).
+const DO_MODELO: [&str; 5] = [
+    "modelo",
+    "modelo-sem-selo",
+    "modelo-adulterado",
+    "modelo-estranho",
+    "modelo-outro",
+];
+
+/// O arquivo `i` da lista do instalador: os do `vindo`, e depois os do
+/// modelo.
+fn publicado(i: usize) -> &'static str {
+    PUBLICADOS
+        .get(i)
+        .or_else(|| DO_MODELO.get(i.wrapping_sub(PUBLICADOS.len())))
+        .copied()
+        .unwrap_or("?")
+}
+
 /// O código com que o `vindo` sai quando o pedido dele passa.
 const SAIDA_DO_VINDO: i64 = 92;
 
@@ -57470,7 +57620,7 @@ impl Instalador {
         } else {
             "rodou"
         };
-        let prefixo = alloc::format!("instalador: {verbo} {}: ", PUBLICADOS[arquivo]);
+        let prefixo = alloc::format!("instalador: {verbo} {}: ", publicado(arquivo));
         let mut dito = None;
         esperar_ate(
             || {
@@ -57498,7 +57648,7 @@ impl Instalador {
     fn baixar(&self, arquivo: usize) -> Resultado {
         let dito = self.passo(INSTALAR_BAIXAR, arquivo)?;
         if !dito.ends_with(" bytes") {
-            crate::log_error!("teste", "baixou {}: {}", PUBLICADOS[arquivo], dito);
+            crate::log_error!("teste", "baixou {}: {}", publicado(arquivo), dito);
             return Err("o instalador nao baixou o codigo da bancada");
         }
         Ok(())
@@ -57511,7 +57661,7 @@ impl Instalador {
             crate::log_error!(
                 "teste",
                 "rodou {}: {} (esperado saiu {})",
-                PUBLICADOS[arquivo],
+                publicado(arquivo),
                 dito,
                 codigo
             );

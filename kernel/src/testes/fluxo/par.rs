@@ -13,6 +13,8 @@
 
 use super::*;
 use crate::fluxo::par::{Abertura, Canal, Esperar, Local, Mensagem, NaVagaDeTeste};
+
+pub(in crate::testes) mod aviso;
 use crate::testes::enlace::{
     Par, PontaDeTeste, VAGA, admin, chave_de_dispositivo, com_o_enlace, pessoa_com_sessao,
     politica_com, privada_de_dispositivo, relacionar,

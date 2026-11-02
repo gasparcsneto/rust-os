@@ -44,7 +44,7 @@ fn padrao(i: usize) -> u8 {
 }
 
 /// O FNV-1a de 64 bits — o mesmo do programa.
-fn resumo(bytes: impl Iterator<Item = u8>) -> u64 {
+pub(in crate::testes) fn resumo(bytes: impl Iterator<Item = u8>) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         h ^= u64::from(b);
@@ -117,7 +117,7 @@ fn pessoa(nome: &str, terminal: u16) -> (crate::pessoas::IdSessao, Autoridade) {
 }
 
 /// O chamador de um processo vivo, como o kernel o tem agora.
-fn chamador_de(fio: u64) -> Option<Chamador> {
+pub(in crate::testes) fn chamador_de(fio: u64) -> Option<Chamador> {
     let (autoridade, programa) = crate::fios::processo(fio)?;
     Some(Chamador::Processo {
         fio,
@@ -127,7 +127,7 @@ fn chamador_de(fio: u64) -> Option<Chamador> {
 }
 
 /// `stream.open` de `quem` ao `endpoint`, com a intenção dos casos.
-fn abrir(quem: Chamador, endpoint: &str) -> String {
+pub(in crate::testes) fn abrir(quem: Chamador, endpoint: &str) -> String {
     fs_pedir(
         quem,
         "stream.open",
@@ -136,7 +136,7 @@ fn abrir(quem: Chamador, endpoint: &str) -> String {
 }
 
 /// `stream.accept` de `quem` no `endpoint`, sem esperar.
-fn aceitar(quem: Chamador, endpoint: &str) -> String {
+pub(in crate::testes) fn aceitar(quem: Chamador, endpoint: &str) -> String {
     fs_pedir(
         quem,
         "stream.accept",
@@ -146,7 +146,7 @@ fn aceitar(quem: Chamador, endpoint: &str) -> String {
 
 /// `stream.write` de `quem`, com `dados` no anexo — como um processo
 /// manda.
-fn escrever(quem: Chamador, id: &str, dados: &[u8]) -> String {
+pub(in crate::testes) fn escrever(quem: Chamador, id: &str, dados: &[u8]) -> String {
     crate::nativo::responder_com_anexo_de_teste(
         quem,
         &pedido_rpc("stream.write", &format!(r#"{{"stream":"{id}"}}"#)),
@@ -155,7 +155,7 @@ fn escrever(quem: Chamador, id: &str, dados: &[u8]) -> String {
 }
 
 /// `stream.read` de `quem`, até `max` bytes, sem esperar.
-fn ler(quem: Chamador, id: &str, max: usize) -> String {
+pub(in crate::testes) fn ler(quem: Chamador, id: &str, max: usize) -> String {
     fs_pedir(
         quem,
         "stream.read",
@@ -165,12 +165,12 @@ fn ler(quem: Chamador, id: &str, max: usize) -> String {
 
 /// Um comando que só nomeia o fluxo: `stream.finish`, `stream.close`,
 /// `stream.status`.
-fn sobre(quem: Chamador, metodo: &str, id: &str) -> String {
+pub(in crate::testes) fn sobre(quem: Chamador, metodo: &str, id: &str) -> String {
     fs_pedir(quem, metodo, &format!(r#"{{"stream":"{id}"}}"#))
 }
 
 /// Os bytes e o fim de uma leitura que passou.
-fn lidos(r: &str) -> Option<(Vec<u8>, bool)> {
+pub(in crate::testes) fn lidos(r: &str) -> Option<(Vec<u8>, bool)> {
     if !fs_ok(r) {
         return None;
     }
@@ -183,7 +183,7 @@ fn lidos(r: &str) -> Option<(Vec<u8>, bool)> {
 }
 
 /// A leitura de `quem` devolve `dados` e `fim`.
-fn ler_e_conferir(
+pub(in crate::testes) fn ler_e_conferir(
     quem: Chamador,
     id: &str,
     max: usize,
@@ -208,7 +208,7 @@ fn ler_e_conferir(
 }
 
 /// A escrita passou e pôs `n` bytes.
-fn escrito(r: &str, n: u64, erro: &'static str) -> Resultado {
+pub(in crate::testes) fn escrito(r: &str, n: u64, erro: &'static str) -> Resultado {
     if fs_ok(r) && fs_numero(r, "written") == Some(n) {
         return Ok(());
     }
@@ -217,7 +217,7 @@ fn escrito(r: &str, n: u64, erro: &'static str) -> Resultado {
 }
 
 /// O comando passou.
-fn feito(r: &str, erro: &'static str) -> Resultado {
+pub(in crate::testes) fn feito(r: &str, erro: &'static str) -> Resultado {
     if fs_ok(r) {
         return Ok(());
     }
@@ -226,7 +226,7 @@ fn feito(r: &str, erro: &'static str) -> Resultado {
 }
 
 /// O desfecho é `codigo` — o do gate, ou o do comando.
-fn recusado(r: &str, codigo: &str, erro: &'static str) -> Resultado {
+pub(in crate::testes) fn recusado(r: &str, codigo: &str, erro: &'static str) -> Resultado {
     if desfecho_na_malha(r) == codigo {
         return Ok(());
     }
@@ -236,7 +236,12 @@ fn recusado(r: &str, codigo: &str, erro: &'static str) -> Resultado {
 
 /// O comando foi autorizado pelo gate e recusado pelo fluxo, com `codigo`
 /// e o motivo `motivo`.
-fn recusado_com(r: &str, codigo: &str, motivo: &str, erro: &'static str) -> Resultado {
+pub(in crate::testes) fn recusado_com(
+    r: &str,
+    codigo: &str,
+    motivo: &str,
+    erro: &'static str,
+) -> Resultado {
     if decisao_do_envelope(r) == "ALLOW"
         && !fs_ok(r)
         && fs_texto(r, "code").as_deref() == Some(codigo)
@@ -271,7 +276,7 @@ fn pedido(quem: Chamador, b: &Ponta) -> Result<String, &'static str> {
 }
 
 /// O estado do fluxo `id` para `quem`: o `state` e o `reason`.
-fn estado(quem: Chamador, id: &str) -> (Option<String>, Option<String>) {
+pub(in crate::testes) fn estado(quem: Chamador, id: &str) -> (Option<String>, Option<String>) {
     let r = sobre(quem, "stream.status", id);
     (fs_texto(&r, "state"), fs_texto(&r, "reason"))
 }
@@ -279,7 +284,7 @@ fn estado(quem: Chamador, id: &str) -> (Option<String>, Option<String>) {
 /// O fluxo `id` acabou, com o detalhe `detalhe` gravado em nome do kernel
 /// depois de `antes` — espera o registro: o encerramento grava fora da
 /// trava da tabela.
-fn fim_gravado(antes: u64, id: &str, detalhe: &str) -> Resultado {
+pub(in crate::testes) fn fim_gravado(antes: u64, id: &str, detalhe: &str) -> Resultado {
     let recurso = format!("fluxo:{id}");
     esperar_ate(
         || {
@@ -301,7 +306,7 @@ fn fim_gravado(antes: u64, id: &str, detalhe: &str) -> Resultado {
 }
 
 /// O fluxo `id` acabou com um motivo que começa com `motivo`.
-fn fim_gravado_com(antes: u64, id: &str, motivo: &str) -> Resultado {
+pub(in crate::testes) fn fim_gravado_com(antes: u64, id: &str, motivo: &str) -> Resultado {
     let recurso = format!("fluxo:{id}");
     esperar_ate(
         || {
@@ -319,7 +324,7 @@ fn fim_gravado_com(antes: u64, id: &str, motivo: &str) -> Resultado {
 }
 
 /// Nada vivo na tabela — espera o que um gancho encerra fora da trava.
-fn nada_vivo(erro: &'static str) -> Resultado {
+pub(in crate::testes) fn nada_vivo(erro: &'static str) -> Resultado {
     esperar_ate(|| crate::fluxo::contagem() == (0, 0), TETO_DA_MALHA).map_err(|_| {
         crate::log_error!("teste", "vivos: {:?}", crate::fluxo::contagem());
         erro
