@@ -9,7 +9,7 @@
 //! gate, e que o que o contrato diz é o que o kernel faz.
 
 use super::aviso::{
-    ABRIR, Avisado, DUPLEX, MANDAR_BLOQ, MANDAR_LACO, RECEBER_BLOQ, RECEBER_LACO,
+    ABRIR, Avisado, DUPLEX, ESCREVER, FECHAR, MANDAR_BLOQ, MANDAR_LACO, RECEBER_BLOQ, RECEBER_LACO,
     aberto_pelos_programas_em, com_os_avisos, encerrar_todos, numero, padrao, pessoa,
 };
 use super::{
@@ -683,5 +683,60 @@ pub(super) fn sdk_o_laco_sobe_com_o_nome_tomado() -> Resultado {
             crate::eventos::largar(chave, eu);
         }
         r
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS44 — o eco-malha fecha o fluxo que o cliente largou
+// ---------------------------------------------------------------------------
+
+/// Um cliente enche o sentido de volta sem ler o eco, manda mais e fecha:
+/// o `eco-malha`, que escoa o que deve antes de ler, ouve que o sentido
+/// dele acabou — e fecha o fluxo antes de largar o cliente. O fluxo sai da
+/// tabela na hora, e a vaga da cota do eco volta; sem o fecho, ele ficaria
+/// vivo, contado na cota, até vencer a inatividade.
+pub(super) fn sdk_o_eco_fecha_o_fluxo_largado() -> Resultado {
+    const BUFFER: i64 = politica::fluxo::BUFFER_DO_SENTIDO as i64;
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4440);
+        let (eco, pronto) = NaMalha::lancar("eco-malha", bia, "eco-malha: pronto ")?;
+        let (endpoint, canal) = pronto
+            .split_once(' ')
+            .ok_or("o eco-malha nao disse o canal")?;
+        let canal = String::from(canal);
+        let r = (|| -> Resultado {
+            let do_eco = politica::aviso::numero_do_id(endpoint)
+                .ok_or("o endpoint do eco-malha nao tem numero")?;
+            let c = Avisado::lancar(bia)?;
+            let r = (|| -> Resultado {
+                let desde = c.ditar(ABRIR, 1, do_eco as i64)?;
+                let n = numero(&c.dito(desde, "abri ")?)?;
+                c.esperar_aviso(desde, "fluxo", n, malha::GRAVAVEL)?;
+                // Três buffers, sem ler o eco: o de volta enche, o eco
+                // guarda o que não coube e para de ler, e o terceiro fica
+                // no sentido de ida, sem ser lido.
+                for _ in 0..3 {
+                    let desde = c.ditar(ESCREVER, n as i64, BUFFER)?;
+                    c.dito(desde, "escrevi ")?;
+                    let _ = esperar_ate(|| false, 30);
+                }
+                if crate::fluxo::contagem().0 != 1 {
+                    crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                    return Err("o fluxo do cliente nao estava vivo antes do fecho");
+                }
+                let desde = c.ditar(FECHAR, n as i64, 0)?;
+                c.dito(desde, "fechei ")?;
+                // O eco ouve que o sentido dele acabou, e fecha.
+                if esperar_ate(|| crate::fluxo::contagem().0 == 0, TETO_DA_MALHA).is_err() {
+                    crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                    return Err("o eco-malha largou o cliente sem fechar o fluxo");
+                }
+                Ok(())
+            })();
+            encerrar_todos(r, &[&c])
+        })();
+        let _ = eco;
+        let fim = encerrar_na_malha(&canal, SAIDA_DO_ECO);
+        r.and(fim)
     })
 }

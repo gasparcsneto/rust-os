@@ -37337,6 +37337,26 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_a_recusa_do_comando_espaca_o_aviso,
     },
     Caso {
+        nome: "aviso: depois da recusa, so o novo avisa antes do rearme",
+        f: aviso::aviso_depois_da_recusa_so_o_novo_avisa,
+    },
+    Caso {
+        nome: "aviso: o fim na espera sai logo depois da operacao recusada",
+        f: aviso::aviso_o_fim_na_espera_e_a_operacao_recusada,
+    },
+    Caso {
+        nome: "aviso: a recepcao que rele o que ja leu nao gira",
+        f: aviso::aviso_a_recepcao_que_rele_nao_gira,
+    },
+    Caso {
+        nome: "aviso: o sentido fechado pelo par nao larga o fluxo vivo",
+        f: aviso::aviso_o_sentido_fechado_pelo_par,
+    },
+    Caso {
+        nome: "aviso: a vaga no meio da recusa avisa o pedido",
+        f: aviso::aviso_a_vaga_no_meio_da_recusa,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },
@@ -37359,6 +37379,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "sdk: as medidas do laco",
         f: sdk::sdk_as_medidas_do_laco,
+    },
+    Caso {
+        nome: "sdk: o eco-malha fecha o fluxo que o cliente largou",
+        f: sdk::sdk_o_eco_fecha_o_fluxo_largado,
     },
     Caso {
         nome: "sdk: o laco sobe com o nome tomado",

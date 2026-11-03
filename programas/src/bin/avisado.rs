@@ -115,6 +115,7 @@ const MANDAR_BLOQ: i64 = 19;
 const RECEBER_BLOQ: i64 = 20;
 const OUTRO_CANAL: i64 = 21;
 const FECHAR_OUTRO: i64 = 22;
+const DESCARTAR: i64 = 23;
 
 /// O teto do que um passo de um sentido lê: 4 MiB.
 const TETO: usize = 4 * 1024 * 1024;
@@ -331,6 +332,10 @@ impl Estado {
             RECEBER => match malha::receber(&self.endpoint, None, 0) {
                 Ok(v) => diz!("recebi {}", v.len()),
                 Err(e) => diz!("receber {}", e.codigo()),
+            },
+            DESCARTAR => match malha::descartar_entregas(&self.endpoint) {
+                Ok(n) => diz!("descartei {}", n),
+                Err(e) => diz!("descartar {}", e.codigo()),
             },
             ENVIAR => {
                 let Some(outro) = o_outro(&self.endpoint) else {
