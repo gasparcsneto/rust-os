@@ -654,7 +654,7 @@ impl Conduta {
                 && nome.as_ref().is_some_and(|d| {
                     crate::autorizacao::processo_exerceria(fio, Permissao::FabricRemote, d)
                 });
-            se_ha_tabela(|t| {
+            let feito = se_ha_tabela(|t| {
                 let (r, es) = if pode {
                     (t.fluxos.aceito_pelo_par(n, agora).ok(), Vec::new())
                 } else {
@@ -664,29 +664,32 @@ impl Conduta {
                 };
                 let mut w = cutucar(t, n);
                 w.extend(encerrados_na_tabela(t, &es));
-                (t.epoca, r, es, w, nome.clone())
-            })
+                (t.epoca, r, es, w)
+            })?;
+            // A abertura efetiva vai à auditoria ainda dentro da ordem das
+            // gravações, antes de acordar quem espera: a operação do
+            // processo sobre o fluxo, que passa pela ordem, vem depois dela
+            // na cadeia — mesmo a que um aviso dado por outro núcleo, nessa
+            // janela, tenha feito o processo pedir.
+            if let Some(v) = feito.1 {
+                crate::autorizacao::auditar_do_kernel(
+                    "stream.open",
+                    &format!(
+                        "{} ; {}",
+                        super::recurso_do_fluxo(&feito.0, n),
+                        nome.as_deref().unwrap_or_default()
+                    ),
+                    Codigo::Allow,
+                    &format!("aberto pelo par; versao {v}"),
+                );
+            }
+            Some(feito)
         });
-        let Some((epoca, versao, es, w, nome)) = feito else {
+        let Some((epoca, versao, es, w)) = feito else {
             // O fluxo acabou daqui antes de o aceite chegar: o `fechar`, com
             // o motivo daqui, vai na volta do laço.
             return;
         };
-        // A abertura efetiva vai à auditoria antes de acordar quem espera:
-        // a primeira operação do processo sobre o fluxo, decidida e gravada,
-        // vem depois dela na cadeia.
-        if let Some(v) = versao {
-            crate::autorizacao::auditar_do_kernel(
-                "stream.open",
-                &format!(
-                    "{} ; {}",
-                    super::recurso_do_fluxo(&epoca, n),
-                    nome.unwrap_or_default()
-                ),
-                Codigo::Allow,
-                &format!("aberto pelo par; versao {v}"),
-            );
-        }
         depois(epoca, es, w);
         match versao {
             Some(_) => self.aceito = true,

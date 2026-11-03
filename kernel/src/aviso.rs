@@ -495,7 +495,9 @@ fn consumir(e: &mut Entrada, esbarrou: bool) {
 /// já marcado não o empurra: fica o prazo mais cedo. Não esperam: o objeto
 /// que já acabou — o fim não gira: sai uma vez, e a designação com ele —,
 /// e a recusa que veio com uma vaga nova na cota do processo — a vaga
-/// chegou no meio da operação, e o pedido avisa de novo, uma vez.
+/// chegou no meio da operação, e o pedido avisa de novo, uma vez. E a conta
+/// é refeita depois da trava, sempre: o que mudou entre a pergunta do nível
+/// e a trava — o objeto que acabou, um bit novo — não espera o rearme.
 pub fn recusada(obj: Objeto, fio: u64) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
@@ -511,22 +513,22 @@ pub fn recusada(obj: Objeto, fio: u64) {
     // O nível que a operação recusada encontrou — perguntado fora da trava
     // das designações.
     let n = nivel(obj);
+    #[cfg(feature = "modo-teste")]
+    if FIM_NA_RECUSA.swap(false, Ordering::AcqRel) {
+        crate::fluxo::vencer_de_teste(u64::MAX);
+    }
     let agora = crate::tempo::uptime_ms();
-    let agora_mesmo = com_designacoes(|t| {
-        let Some(e) = t.get_mut(&obj) else {
-            return false;
-        };
+    // `Some(true)`: o que ela encontrou pronto espera o rearme.
+    let espacou = com_designacoes(|t| {
+        let e = t.get_mut(&obj)?;
         if obj.dono(e.canal) != fio {
-            return false;
+            return None;
         }
         consumir(e, false);
         let vaga = core::mem::take(&mut e.vaga);
-        let Some(n) = n.filter(|b| *b & bits::FIM == 0) else {
-            return true;
+        let Some(n) = n.filter(|b| *b & bits::FIM == 0 && !vaga) else {
+            return Some(false);
         };
-        if vaga {
-            return true;
-        }
         e.recusas = e.recusas.saturating_add(1);
         e.recusado = n;
         let quando = agora
@@ -537,9 +539,12 @@ pub fn recusada(obj: Objeto, fio: u64) {
         } else {
             e.rearmar_em.min(quando)
         };
-        false
+        Some(true)
     });
-    if agora_mesmo {
+    // A conta de agora, também depois da recusa espaçada: o filtro cala o
+    // que ela encontrou, e o que mudou depois do nível — o fim, um bit novo
+    // — sai.
+    if espacou.is_some() {
         avaliar(obj);
     }
 }
@@ -878,6 +883,20 @@ static VAGA_NA_RECUSA: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "modo-teste")]
 pub fn vaga_na_proxima_recusa_de_teste(fio: u64) {
     VAGA_NA_RECUSA.store(fio, Ordering::Release);
+}
+
+/// Só para a suíte: na próxima operação recusada, os fluxos acabam
+/// ([`crate::fluxo::vencer_de_teste`]) entre a pergunta do nível e a trava
+/// das designações — como a inatividade, a revogação ou o fim do processo
+/// do par acabariam o fluxo nessa janela.
+#[cfg(feature = "modo-teste")]
+static FIM_NA_RECUSA: AtomicBool = AtomicBool::new(false);
+
+/// Só para a suíte: arma o fim no meio da próxima recusa
+/// ([`FIM_NA_RECUSA`]).
+#[cfg(feature = "modo-teste")]
+pub fn acabar_na_proxima_recusa_de_teste() {
+    FIM_NA_RECUSA.store(true, Ordering::Release);
 }
 
 /// Destrava as tabelas à força, para uso exclusivo do caminho de falha

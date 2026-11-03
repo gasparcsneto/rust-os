@@ -596,6 +596,9 @@ pub struct Encerramento {
     /// Os que saíram sem ser lidos — o fecho, o aborto.
     pub descartados: u64,
     pub versao: u64,
+    /// Se o fluxo chegou a ser aceito: só então ele contava na cota de quem
+    /// aceitou. O pedido que acaba sem aceite só contava na de quem abriu.
+    pub aceito: bool,
 }
 
 /// O que uma leitura devolve: os bytes, na ordem, e se o sentido terminou
@@ -1038,6 +1041,7 @@ impl Fluxos {
             volta: f.volta.escritos,
             descartados: descartados + restos,
             versao: f.versao + 1,
+            aceito: f.estado == Estado::Aberto,
         };
         // A ponta remota sabe pelo protocolo; a que saiu, por ter saído.
         let sabe = |l: Lado| f.ponta(l).remota() || f.saiu[l.indice()];

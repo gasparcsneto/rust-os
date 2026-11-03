@@ -519,10 +519,14 @@ fn acordar(wakers: Vec<Waker>) {
 fn encerrados_na_tabela(t: &mut Tabela, es: &[Encerramento]) -> Vec<Waker> {
     let mut w = Vec::new();
     for e in es {
-        // O fluxo que acaba libera a cota dos processos dele: o dono de um
-        // endpoint com pedido esperando, que não pôde aceitá-lo por falta de
-        // vaga, é avisado na hora. Os outros endpoints não mudaram.
-        for q in [&e.abridor, &e.aceitante] {
+        // O fluxo que acaba libera a cota dos processos em que contava — a
+        // de quem abriu, sempre; a de quem aceitou, se foi aceito: o pedido
+        // que acaba sem aceite não contava na cota do dono do endpoint —: o
+        // dono de um endpoint com pedido esperando, que não pôde aceitá-lo
+        // por falta de vaga, é avisado na hora. Os outros endpoints não
+        // mudaram.
+        let liberadas = [Some(&e.abridor), e.aceito.then_some(&e.aceitante)];
+        for q in liberadas.into_iter().flatten() {
             if let Quem::Processo(fio) = q {
                 crate::aviso::vaga(*fio);
             }
@@ -943,22 +947,37 @@ fn operou<T>(a: &Ator, n: u64, r: &Result<T, Falha>, esbarrou: bool) {
         return;
     };
     let obj = crate::aviso::Objeto::Ponta { fluxo: n, fio };
+    #[cfg(feature = "modo-teste")]
+    if matches!(r, Err(Falha::Fluxo(Recusa::Encerrado(_))))
+        && FIM_NO_ENCERRADO.swap(false, core::sync::atomic::Ordering::AcqRel)
+    {
+        vencer_de_teste(u64::MAX);
+    }
     match r {
-        // O fim só do sentido de quem opera — o par fechou, e ainda há o que
-        // ler dele —: o fluxo vive, e a operação é como as outras; o resto
-        // e o fim ainda avisam.
-        Err(Falha::Fluxo(Recusa::Encerrado(_)))
-            if matches!(
-                prontidao_da_ponta(n, fio),
-                politica::fluxo::Prontidao::Vivo(_)
-            ) =>
-        {
-            crate::aviso::operou(obj, fio, false)
-        }
-        Err(Falha::Fluxo(Recusa::Encerrado(_))) => crate::aviso::largar(obj, fio),
+        // O fim — do fluxo, ouvido por ela, ou só do sentido de quem opera,
+        // com o fluxo vivo — é uma operação como as outras, e a conta de
+        // agora diz o resto: o que ainda há para ler do par avisa; o fim
+        // que ela não ouviu (o fluxo acabou depois dela) sai, uma vez; e o
+        // que ela ouviu tira a designação, sem aviso.
+        Err(Falha::Fluxo(Recusa::Encerrado(_))) => crate::aviso::operou(obj, fio, false),
         Err(_) => crate::aviso::recusada(obj, fio),
         Ok(_) => crate::aviso::operou(obj, fio, esbarrou),
     }
+}
+
+/// Só para a suíte: na próxima operação sobre uma ponta que ouvir
+/// `Encerrado`, os fluxos acabam ([`vencer_de_teste`]) entre a operação e a
+/// conta do aviso — como a inatividade, a revogação ou o desligamento
+/// acabariam o fluxo nessa janela.
+#[cfg(feature = "modo-teste")]
+static FIM_NO_ENCERRADO: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: arma o fim na próxima operação que ouvir `Encerrado`
+/// ([`FIM_NO_ENCERRADO`]).
+#[cfg(feature = "modo-teste")]
+pub fn acabar_no_proximo_encerrado_de_teste() {
+    FIM_NO_ENCERRADO.store(true, core::sync::atomic::Ordering::Release);
 }
 
 fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {

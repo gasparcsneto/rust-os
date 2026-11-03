@@ -136,15 +136,40 @@ fn falha(r: &nativo::Resposta) -> Option<String> {
     }
 }
 
-/// Cria `caminho` se ainda não existe.
+/// Se há um diretório em `caminho`, pelo `fs.stat`.
+fn eh_diretorio(caminho: &str) -> Result<bool, String> {
+    let r = nativo::pedir("fs.stat", |w| w.field_str("path", caminho))
+        .map_err(|e| format!("stat {e}"))?;
+    if let Some(c) = falha(&r) {
+        return Err(format!("stat {caminho} {c}"));
+    }
+    Ok(r.resultado()
+        .ok()
+        .and_then(|res| res.member("type"))
+        .and_then(|v| v.as_str())
+        == Some("dir"))
+}
+
+/// Cria `caminho` se ainda não existe. O `fs.mkdir` recusa o caminho que
+/// já tem alguma coisa — com `INVALID_ARGUMENT`, o mesmo código do pai que
+/// falta —, e o código não diz qual dos dois: o copiador pergunta antes, e
+/// de novo depois de uma recusa, porque outro processo pode tê-lo criado
+/// no meio.
 fn diretorio(caminho: &str) -> Result<(), String> {
+    if eh_diretorio(caminho)? {
+        return Ok(());
+    }
     let r = nativo::pedir("fs.mkdir", |w| w.field_str("path", caminho))
         .map_err(|e| format!("mkdir {e}"))?;
     match falha(&r) {
         None => Ok(()),
-        // Já existir, de uma volta anterior, não é erro.
-        Some(c) if c == "CONFLICT" => Ok(()),
-        Some(c) => Err(format!("mkdir {caminho} {c}")),
+        Some(c) => {
+            if eh_diretorio(caminho)? {
+                Ok(())
+            } else {
+                Err(format!("mkdir {caminho} {c}"))
+            }
+        }
     }
 }
 
@@ -350,7 +375,11 @@ fn principal() -> i64 {
                             None => {
                                 chegando.insert(n, c);
                             }
-                            Some(r) => dizer_recebido(r),
+                            // Acabou logo no aceite: fecha também.
+                            Some(r) => {
+                                let _ = c.f.fechar();
+                                dizer_recebido(r);
+                            }
                         }
                     }
                 }
@@ -368,6 +397,11 @@ fn principal() -> i64 {
                             None => {}
                             Some(Ok(dito)) => {
                                 let _ = escreverln!("copiador: mandei {}", dito);
+                                // O que foi escrito segue legível para o
+                                // outro até o fim do sentido; fechar libera
+                                // a cota daqui na hora, sem esperar a
+                                // inatividade.
+                                let _ = s.f.fechar();
                                 saindo.remove(&numero);
                             }
                             Some(Err(e)) => {
