@@ -39,6 +39,19 @@
 //! para o log do interpretador dizer quem executou — ver
 //! `protocolo::usuario::terminal`.
 //!
+//! Menos na linha que pede o nome, uma senha ou um passo do pareamento: ali
+//! o kernel recusa a ação da árvore quando ela entra, pela regra da linha do
+//! console físico, e ela nunca chega aqui — do lado de cá do pseudo-terminal,
+//! o console não saberia que o texto veio da árvore.
+//!
+//! # A senha passa por aqui
+//!
+//! O que a pessoa digita na janela — a senha do login, a da `senha`, a do
+//! pareamento — vem pelo canal e vai ao pseudo-terminal por este programa. O
+//! que ele guarda no caminho é zerado assim que o pseudo-terminal o aceita:
+//! a fila do que espera, o bloco que ela larga ao crescer, a tecla e os
+//! eventos de tecla já tratados.
+//!
 //! Cada coisa que o programa faz de notável vira uma linha no log,
 //! `terminal: ...`: é por elas que a suíte acompanha o que aconteceu.
 
@@ -50,6 +63,7 @@ programas::manifesto!("terminal", "terminal.attach");
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use programas::escreverln;
 use programas::janela::{Gesto, Janela};
@@ -84,7 +98,32 @@ struct Terminal {
     botoes: i64,
     /// O que foi digitado e o pseudo-terminal ainda não aceitou: a fila do
     /// teclado do kernel estava cheia.
-    pendente: String,
+    ///
+    /// Em bytes, e não num `String`, para poder zerar: pode ser uma senha.
+    /// O que o pseudo-terminal aceita é zerado antes de sair da conta — um
+    /// `drain` só moveria o resto, e os bytes aceitos ficariam no bloco —, e
+    /// o bloco que a fila larga ao crescer volta zerado ao alocador. Ver
+    /// [`zerar`].
+    pendente: Vec<u8>,
+}
+
+/// Zera `bytes` com escritas voláteis, que o compilador não tira — as de uma
+/// memória que ninguém mais lê seriam escritas mortas. O mesmo que
+/// `politica::sigiloso::zerar` faz no kernel, aqui do lado do programa.
+fn zerar(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        // SAFETY: `b` é um `&mut u8` válido desta fatia; a escrita volátil
+        // só impede o compilador de tirá-la.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+}
+
+/// Zera o que o evento de uma tecla já tratada guarda — o caractere. Ver
+/// [`zerar`].
+fn esquecer_a_tecla(e: &mut Evento) {
+    // SAFETY: `e.a` é um `i64` válido deste evento; a escrita volátil só
+    // impede o compilador de tirá-la.
+    unsafe { core::ptr::write_volatile(&mut e.a, 0) };
 }
 
 impl Terminal {
@@ -109,15 +148,34 @@ impl Terminal {
         if self.pendente.is_empty() {
             return;
         }
-        let aceitos = sistema::escrever(self.pty, self.pendente.as_bytes());
+        let aceitos = sistema::escrever(self.pty, &self.pendente);
         if aceitos > 0 {
-            self.pendente.drain(..aceitos as usize);
+            // O resto vai para o começo, e o que fica atrás dele — o que o
+            // pseudo-terminal aceitou, ou a cópia velha do resto — é zerado
+            // antes de sair da conta.
+            let aceitos = (aceitos as usize).min(self.pendente.len());
+            let resto = self.pendente.len() - aceitos;
+            self.pendente.copy_within(aceitos.., 0);
+            zerar(&mut self.pendente[resto..]);
+            self.pendente.truncate(resto);
         }
     }
 
     /// Digita no interpretador — o caminho da pessoa e o do agente.
     fn digitar(&mut self, texto: &str) {
-        self.pendente.push_str(texto);
+        let preciso = self.pendente.len() + texto.len();
+        if preciso > self.pendente.capacity() {
+            // Cresce à mão: o bloco antigo volta ao alocador zerado, e não
+            // com o que esperava nele.
+            let capacidade = preciso.max(2 * self.pendente.capacity()).max(64);
+            let mut maior = Vec::with_capacity(capacidade);
+            maior.extend_from_slice(&self.pendente);
+            let mut antigo = core::mem::replace(&mut self.pendente, maior);
+            let inteiro = antigo.capacity();
+            antigo.resize(inteiro, 0);
+            zerar(&mut antigo);
+        }
+        self.pendente.extend_from_slice(texto.as_bytes());
         self.digitar_pendente();
     }
 
@@ -125,6 +183,7 @@ impl Terminal {
         if let Some(c) = u32::try_from(codigo).ok().and_then(char::from_u32) {
             let mut um = [0u8; 4];
             self.digitar(c.encode_utf8(&mut um));
+            zerar(&mut um);
         }
     }
 
@@ -251,7 +310,7 @@ fn principal() -> i64 {
         janela,
         pty: pty as u64,
         botoes: 0,
-        pendente: String::new(),
+        pendente: Vec::new(),
     };
     // O que o console já imprimiu: o convite para entrar.
     t.ler_a_saida();
@@ -296,6 +355,13 @@ fn principal() -> i64 {
                     return 0;
                 }
                 _ => {}
+            }
+        }
+        // As teclas tratadas já estão na fila do que digitar: o caractere
+        // delas — pode ser uma letra da senha — sai dos eventos.
+        for e in &mut eventos[..n] {
+            if e.tipo == tipo::TECLA {
+                esquecer_a_tecla(e);
             }
         }
         // O que ficou pendente numa fila cheia: o interpretador já andou.
