@@ -324,8 +324,9 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   quadro conferido no canal, de cada lado: com a ordem solta e o fim já
   gravado —, e o fim por fora com a sessão na ordem (FS28) — a caminho
   dela, para mandar o fim, ou parada, esperando o par: um `stream.end` só,
-  o de fora, e o `fechar` com o motivo dele, que só sai com a ordem na mão
-  da sessão; com a ordem na mão da suíte, como a teria quem acabou o
+  o de fora, e o `fechar` com o motivo dele, que a sessão só decide com a
+  ordem na mão e que sai, com ela já solta, depois do fim na cadeia; com a
+  ordem na mão da suíte, como a teria quem acabou o
   fluxo antes de gravar, nada vai ao par. As mutações dos dois (N73 a
   N76, N80 e N81) estão em [`SDK.md`](SDK.md#mutações). E um caso
   `auditoria:`, a citação da decisão inteira acima do teto do detalhe.

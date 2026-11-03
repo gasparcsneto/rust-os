@@ -1794,7 +1794,12 @@ do total: segue enquanto chega algo novo na serial humana, nos contadores
 dos discos pelo QMP — bytes e operações de leitura, de escrita e de
 descarga, de todos os discos — ou no canal; desiste quando nada muda por
 dois minutos, e acaba no teto de cinco, andando ou não (`JANELA_SEM_ANDAR`
-e `TETO_DO_BOOT`, em `xtask/src/persistencia.rs`). Era um prazo de
+e `TETO_DO_BOOT`, em `xtask/src/persistencia.rs`). No boot seguinte a um
+reinício, com o canal já aberto, os sinais só contam depois que o boot de
+antes para de responder, e o canal não conta: o que chega nele é lido
+pela pergunta que espera a resposta — no ARM, só os discos dizem que a
+máquina anda, e o console do firmware desse boot não vai para a serial
+do cenário. Era um prazo de
 noventa segundos, e na CI 408 reprovou dois boots que andavam, num runner
 sem CPU: um no iniciador, conferindo o kernel de 15,8 MB — que ele lê do
 slot um mebibyte por vez, somando o resumo de cada pedaço antes de ler o
@@ -1827,9 +1832,9 @@ comentado —, e o do Ubuntu 24.04, medido, não escreve nada nele, nem na
 0xe9: com eles o log fica vazio, e o que o firmware diz sai no console,
 na COM1, que já está no fim da serial; um firmware de depuração escreve
 nele, e o boot que não atende mostra o fim. O ARM não tem `debugcon`: o
-AAVMF escreve o console na PL011, que na bancada é o canal, e o que as
-esperas leem do canal antes de a máquina atender vai para a serial do
-cenário. Na CI 359, o primeiro boot de uma rodada parou no iniciador,
+AAVMF escreve o console na PL011, que na bancada é o canal, e o que a
+espera da partida e a da queda leem do canal antes de a máquina atender
+vai para a serial do cenário. Na CI 359, o primeiro boot de uma rodada parou no iniciador,
 lendo o kernel do slot, e a serial não dizia mais que isso: se o
 processador esperava o disco, se o disco tinha um pedido pendurado, ou se
 o emulador inteiro tinha parado. A falha não se reproduziu aqui (três

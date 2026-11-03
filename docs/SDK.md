@@ -537,8 +537,9 @@ NS28 o instala e roda.
   antes do rearme, os dois não esperam linha nenhuma do `avisado`: o "uma
   vez" é provado pelo estado da designação, lido com a hora — o aviso
   visto só no rearme, ou depois, é a máquina que demorou, e o caso o diz
-  assim —, e o evento que não se perde, pela conta do canal (os
-  publicados e os entregues); só no fim, com o `avisado` ocioso, a suíte
+  assim —, e o evento que não se perde, pela conta do canal — os
+  publicados, logo depois; os entregues iguais aos publicados, no fim —;
+  só no fim, com o `avisado` ocioso, a suíte
   confere o log: cada evento dito uma vez, um ou dois — o do rearme pode
   se juntar ao da vaga, ainda na fila. O NS52 e o NS53 vieram da revisão
   adversária da vaga: a vaga cuja marca não coube nas marcas transbordadas
@@ -639,9 +640,10 @@ aviso da vaga não espaça, e o pedido avisa de novo na hora —, contra o
 NS50 e o NS51: reprovada pelos dois.
 
 E o fim que a própria sessão com o par conclui — o fim
-mandado ao par com o outro sentido já acabado, o fecho de quem saiu com
-tudo dito — ia à cadeia antes de acordar quem espera, mas fora da ordem
-das gravações (o V2 da validação de segurança): uma operação do dono que
+mandado ao par com o outro sentido já acabado, também o de quem fechou
+com tudo dito, que acaba `fechado pela ponta` — ia à cadeia antes de
+acordar quem espera, mas fora da ordem das gravações (um achado da
+validação de segurança do DN-3): uma operação do dono que
 entrasse na ordem nesse meio podia vir antes do fim na cadeia. O envio da
 sessão passou a decidir esse quadro com a ordem na mão, a gravar o fim
 ali mesmo, como os fins por fora, e só então, com a ordem solta, acordar
@@ -658,21 +660,26 @@ a N77, que o grava com a ordem já solta mas antes de acordar — e que o
 NS49 de antes deixava passar —, reprovada por ele.
 
 A revisão adversária dessas duas correções não achou bypass nem registro
-perdido; achou dois defeitos baixos que vinham de antes, e duas lacunas
-dos casos. A vaga se perdia quando as marcas transbordavam, e o rearme do
-coletor apagava a marca dela sem publicar o aviso: as duas correções
-cabem no que existe — o transbordo conta cada endpoint como talvez com
-uma vaga, e o rearme só tira a marca quando o aviso sai —, e o NS52 e o
-NS53 as provam; a N78 e a N79 as desfazem. O FS27 não via o quadro
-mandado com a ordem na mão: o canal de cada lado, na suíte, passou a
-conferir a hora de cada quadro, e a N80 manda os quadros da sessão com a
-ordem. E o fecho de um fluxo acabado por fora podia sair ao par antes do
-`stream.end` de quem o acabou: a sessão passou a decidi-lo também com a
-ordem na mão, e o FS28 o prova — a N81 o decide sem ela. As quatro, a
-rodar. E o NS50 e o NS51 deixaram de esperar a linha do `avisado` dentro
-da janela antes do rearme (o runner lento dava vermelho sem defeito): a
-N70 continua vista pelo estado lido logo depois da recusa que responde à
-vaga — e roda de novo contra eles.
+perdido; achou dois defeitos baixos que vinham de antes, uma ordem que
+também vinha de antes, e duas lacunas dos casos. A vaga se perdia quando
+as marcas transbordavam, e o rearme do coletor apagava a marca dela sem
+publicar o aviso: as duas correções cabem no que existe — o transbordo
+conta cada endpoint como talvez com uma vaga, e o rearme só tira a marca
+quando o aviso sai —, e o NS52 e o NS53 as provam; a N78 e a N79 as
+desfazem. E o fecho de um fluxo acabado por fora podia sair ao par antes
+do `stream.end` de quem o acabou: a sessão passou a decidi-lo também com
+a ordem na mão, e o FS28 o prova — a N81 o decide sem ela. As lacunas: o
+FS27 não via o quadro mandado com a ordem na mão — o canal de cada lado,
+na suíte, passou a conferir a hora de cada quadro, e a N80 manda os
+quadros da sessão com a ordem —; e o NS50 e o NS51 esperavam a linha do
+`avisado` dentro da janela antes do rearme, e num runner lento podiam dar
+vermelho sem defeito: deixaram de esperá-la ali. As quatro foram
+reprovadas: a N78 pelo NS52, a N79 pelo NS53, a N80 pelo FS27 e pelo
+FS28, a N81 pelo FS28. A N70 continua vista pelo estado lido logo depois
+da recusa que responde ao aviso da vaga, ou que o consome no meio, e,
+rodada de novo contra eles, foi reprovada pelos dois; as N73 a N77,
+rodadas de novo sobre o código corrigido, continuam reprovadas. A N71 e
+a N72 não foram usadas.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -745,7 +752,7 @@ vaga — e roda de novo contra eles.
 | N67 | a conta que publica o nível perguntado antes da operação do dono (o `FIM` que ela já ouviu) | NS48 |
 | N68 | o filtro do que é novo pelo nível cru, e não pelo que o dono ouviria | NH19 |
 | N69 | o fim por fora gravado depois de acordar quem espera | NS49 |
-| N70 | a marca da vaga que não sai com o aviso publicado (o segundo aviso da mesma vaga, na recusa que respondia ao primeiro) | NS50, NS51 |
+| N70 | a marca da vaga que não sai com o aviso publicado (o segundo aviso da mesma vaga: a recusa que responde ao aviso dela, ou a que o consome no meio, não espaça) | NS50, NS51 |
 | N73 | o fim que a sessão com o par conclui, de novo fora da ordem das gravações | FS27 |
 | N74 | o fim que a sessão com o par conclui, gravado depois de acordar quem espera | FS27 |
 | N75 | o fim que a sessão com o par conclui, gravado com a ordem já solta | FS27 |

@@ -49,7 +49,8 @@ decidido pelo papel dele, pedido a pedido.
 
 Um endpoint e uma entrega carregam o programa que o kernel carregou — o
 nome do manifesto, o resumo BLAKE2s da imagem e, para o código de fora da
-imagem, a chave do editor que o selou —, e não o que o programa diz ser.
+imagem, a chave do editor que o selou —, e não o que o programa diz ser
+(até a troca de imagem do processo: ver "Revogação e fim").
 Dois programas que declaram o mesmo nome aparecem como dois candidatos com
 resumos diferentes; quem procura escolhe pelo que eles **são**. A suíte
 prova isso com o `impostor`, que declara o nome `correio`.
@@ -140,6 +141,15 @@ todo comando.
 - **A sessão que acaba:** a janela de nonces dela sai; os programas da
   pessoa que saiu não pedem mais nada, e o dono que não receberia some da
   descoberta.
+- **A troca de imagem** (`exec`): os endpoints do processo continuam
+  abertos com o programa que os ofereceu — o nome, o resumo e o editor da
+  imagem anterior, que a descoberta mostra —; o que esperava neles passa à
+  imagem nova, que também continua com a janela de nonces do processo.
+  Cada operação dela passa pelo gate com o manifesto dela, no mesmo
+  titular — nenhuma autoridade a mais —, mas a identidade do endpoint
+  deixa de ser a do programa que roda. É um dos limites de
+  [`SDK.md`](SDK.md#limites-conhecidos); a regra é uma decisão pendente
+  (README, "Decisões pendentes").
 
 Não há canal velho com acesso indefinido: cada pedido é decidido de novo.
 

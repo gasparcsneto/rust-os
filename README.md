@@ -4895,6 +4895,15 @@ Sem ganho a medir, não há o que pagar com esse risco.
   de um papel, que vence pelo tempo lógico e sobrevive a um boot. Isso
   não se infere das invariantes; fica proposto, e não implementado, até
   uma decisão.
+- **O `exec` e a malha do processo** ([`docs/MALHA.md`](docs/MALHA.md),
+  "Revogação e fim"): na troca de imagem, os endpoints do processo
+  continuam abertos com o programa que os ofereceu, o que esperava neles
+  passa à imagem nova, e a janela de nonces do processo continua. Não é
+  autoridade a mais — cada operação da imagem nova passa pelo gate com o
+  manifesto dela —, mas a proveniência do endpoint deixa de ser a do
+  programa que roda. Fechar os endpoints como no fim do processo, ou mudar
+  a identidade deles, muda o ciclo de vida de um objeto da malha: fica
+  para uma decisão.
 
 ## O tempo
 
@@ -7983,8 +7992,8 @@ no journal, e para de responder. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
 A saída humana das máquinas de cada cenário — a COM1 do x86; no ARM, onde
-a única serial é o canal, o que as esperas leem dele antes de a máquina
-atender — vai para `target/persistencia-<arch>.serial`, esvaziado no
+a única serial é o canal, o que a espera da partida e a da queda leem
+dele antes de a máquina atender — vai para `target/persistencia-<arch>.serial`, esvaziado no
 começo do cenário, e o cenário que reprova mostra as últimas quarenta
 linhas dela, sem os controles de terminal do firmware: é o que diz onde
 parou uma máquina que não respondeu — o firmware, o iniciador ou um passo
@@ -7993,7 +8002,10 @@ prazo do total: ela segue enquanto chega algo novo na serial, nos discos
 (os contadores do QMP: o iniciador, que confere o kernel em silêncio, lê
 o slot um mebibyte por vez) ou no canal; desiste quando nada muda por
 dois minutos, e acaba no teto de cinco, andando ou não — o da bancada da
-atualização, que atravessa vários boots, é outro. As outras bancadas que
+atualização, que atravessa vários boots, é o dela: cinco minutos no x86
+e quinze no ARM. No boot seguinte a um reinício, os sinais só contam
+depois que o boot de antes para de responder, e o canal não conta: no
+ARM, ali, só os discos dizem que a máquina anda. As outras bancadas que
 sobem a máquina por aqui esperam do mesmo jeito. No fim, a bancada de
 persistência e a da atualização dizem o maior intervalo sem sinal novo que
 um boot que atendeu teve. O boot que
@@ -8890,8 +8902,9 @@ sessão com o par conclui, que espera a ordem das gravações na mão de outro
 e vai à cadeia dentro dela, antes de acordar quem espera e de o quadro
 sair — cada quadro conferido no canal, com a ordem solta e o fim já
 gravado —, e o fim por fora com a sessão a caminho da ordem ou parada: um
-`stream.end` só, o de fora, e o `fechar` ao par com o motivo dele, que só
-sai com a ordem na mão da sessão, depois do fim na cadeia. E a **bancada de duas
+`stream.end` só, o de fora, e o `fechar` ao par com o motivo dele, que a
+sessão só decide com a ordem na mão e que sai, com ela já solta, depois
+do fim na cadeia. E a **bancada de duas
 máquinas**, `cargo xtask fluxo`: 4 MiB em cada sentido, local e entre os
 Dukes, com a auditoria dos dois lados e nenhum byte do conteúdo nela; a
 contrapressão de um leitor lento, com o pico dos buffers; uma ponte do
@@ -9116,21 +9129,26 @@ que o programa ainda não tinha dito), as onze que dependem dele, do NS39
 e do NS43 rodaram de novo: as onze reprovadas. Depois do DN-3, a N70
 devolve a vaga que avisava duas vezes — a marca da vaga que não sai com o
 aviso publicado, e a recusa que responde a ele avisando de novo na
-hora —, contra os dois casos novos da vaga: reprovada pelos dois. E o fim que a
+hora —, contra os dois casos da vaga que avisa uma vez: reprovada pelos
+dois. E o fim que a
 própria sessão com o par conclui — que ia à cadeia fora da ordem das
 gravações — passou a ser gravado dentro dela, como os fins por fora, e as
-N73 a N76 conferem isso contra o caso novo do fluxo: as quatro reprovadas.
+N73 a N76 conferem isso contra o caso do fim que a sessão conclui: as
+quatro reprovadas.
 E o NS49 passou a conferir também que o fim por fora é gravado com a ordem
 na mão — a N77, que o grava com a ordem já solta mas antes de acordar, e
 que o NS49 de antes deixava passar, reprovada por ele. A revisão
 adversária dessas correções achou dois defeitos baixos de antes — a vaga
 que se perdia no transbordo das marcas, e o rearme que apagava a marca
-dela sem publicar o aviso — e duas lacunas: o quadro da sessão com a
-ordem na mão, que o caso do fluxo não via, e o fecho de um fluxo acabado
-por fora, que podia sair ao par antes do fim dele na cadeia. As
-correções cabem no que existe, com dois casos novos do aviso e um do
-fluxo; as N78 a N81 as desfazem, e as quatro foram reprovadas — e as N70
-e N73 a N77, rodadas de novo sobre o código corrigido, continuam
+dela sem publicar o aviso —, uma ordem que também vinha de antes — o
+fecho de um fluxo acabado por fora, que podia sair ao par antes do fim
+dele na cadeia — e duas lacunas dos casos: o quadro da sessão com a
+ordem na mão, que o caso do fluxo não via, e os dois casos da vaga que
+avisa uma vez, que esperavam a linha do programa dentro da janela antes
+do rearme. As correções cabem no que existe, com dois casos novos do
+aviso e um do fluxo; as N78, N79 e N81 as desfazem, a N80 manda o quadro
+da sessão com a ordem na mão, e as quatro foram reprovadas — e as N70 e
+N73 a N77, rodadas de novo sobre o código corrigido, continuam
 reprovadas.
 
 | Mutação | Reprovada por |
