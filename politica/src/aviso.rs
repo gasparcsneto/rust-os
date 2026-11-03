@@ -152,6 +152,23 @@ impl Designacao {
         self.quer_gravar
     }
 
+    /// Quantas operações do dono já houve. A conta que pergunta o nível
+    /// fora da trava confere, com ela na mão, que nenhuma operação veio
+    /// nesse meio: com uma, o nível perguntado é de antes dela, e a conta
+    /// da operação, com o de depois, é que decide.
+    pub const fn geracao(&self) -> u32 {
+        self.geracao
+    }
+
+    /// Até o rearme marcado por uma recusa, se o `nivel` de agora tem o que
+    /// é novo para este dono: um bit que ele ouviria ([`Designacao::diria`])
+    /// e que não estava no `recusado`. O espaço que ele não quer não é novo,
+    /// e não traz de volta o que a operação recusada encontrou. Ver
+    /// [`novo_depois_da_recusa`].
+    pub const fn novo_depois_da_recusa(&self, nivel: u8, recusado: u8) -> bool {
+        novo_depois_da_recusa(self.diria(nivel), recusado)
+    }
+
     /// O que o nível `nivel` diz a este dono: só os bits do tipo dele, e o
     /// espaço só se ele o quer. Zero é nada a dizer.
     pub const fn diria(&self, nivel: u8) -> u8 {
@@ -694,6 +711,26 @@ mod testes {
         assert!(novo_depois_da_recusa(FIM, PEDIDO | ENTREGA));
         assert!(novo_depois_da_recusa(GRAVAVEL, LEGIVEL));
         assert!(novo_depois_da_recusa(LEGIVEL, 0));
+    }
+
+    /// NH19: depois da recusa, o novo é o que o dono ouviria. O espaço que
+    /// quem aceitou não quer não é novo, e não traz de volta o dado que a
+    /// leitura recusada encontrou; quem esbarrou no cheio quer o espaço, e
+    /// para ele o espaço é novo; o fim é novo para todos.
+    #[test]
+    fn nh19_depois_da_recusa_o_novo_e_o_que_ele_ouviria() {
+        let aceitou = Designacao::da_ponta(false);
+        assert!(!aceitou.novo_depois_da_recusa(LEGIVEL | GRAVAVEL, LEGIVEL));
+        assert!(aceitou.novo_depois_da_recusa(LEGIVEL | FIM, LEGIVEL));
+        let mut esbarrou = Designacao::da_ponta(false);
+        esbarrou.operou(true);
+        assert!(esbarrou.novo_depois_da_recusa(LEGIVEL | GRAVAVEL, LEGIVEL));
+        let abriu = Designacao::da_ponta(true);
+        assert!(abriu.novo_depois_da_recusa(GRAVAVEL, 0));
+        // O endpoint não diz o espaço: um bit fora do tipo dele não é novo.
+        let e = Designacao::do_endpoint();
+        assert!(!e.novo_depois_da_recusa(PEDIDO | GRAVAVEL, PEDIDO));
+        assert!(e.novo_depois_da_recusa(PEDIDO | ENTREGA, PEDIDO));
     }
 
     /// NH08: o evento só tem o tipo, o número e os bits — nenhum campo vem

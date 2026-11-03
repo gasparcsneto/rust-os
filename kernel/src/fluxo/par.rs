@@ -81,7 +81,10 @@ use protocolo::json::{Json, JsonWriter};
 use sigilo::quadro::{self, Tipo};
 use sigilo::{Iniciador, Respondedor, Transporte};
 
-use super::{com_tabela, cutucar, depois, encerrados_na_tabela, id_texto, se_ha_tabela};
+use super::{
+    acordar_gravados, com_tabela, cutucar, depois, encerrados_na_tabela, gravar_na_ordem, id_texto,
+    se_ha_tabela,
+};
 use crate::trava::Mutex;
 
 /// Quanto a origem espera a resposta do aperto, e o destino o `abrir`: o
@@ -536,7 +539,7 @@ impl Conduta {
     ) -> Result<bool, politica::fluxo::Recusa> {
         let n = self.n;
         let feito = crate::persistencia::em_ordem(|| {
-            se_ha_tabela(|t| {
+            let (epoca, r, es, w) = se_ha_tabela(|t| {
                 let r = f(&mut t.fluxos);
                 let es: Vec<Encerramento> = match &r {
                     Ok(Some(e)) => alloc::vec![e.clone()],
@@ -545,13 +548,15 @@ impl Conduta {
                 let mut w = cutucar(t, n);
                 w.extend(encerrados_na_tabela(t, &es));
                 (t.epoca, r, es, w)
-            })
+            })?;
+            gravar_na_ordem(&epoca, &es);
+            Some((r, es, w))
         });
-        let Some((epoca, r, es, w)) = feito else {
+        let Some((r, es, w)) = feito else {
             return Ok(true);
         };
         let acabou = !es.is_empty();
-        depois(epoca, es, w);
+        acordar_gravados(&es, w);
         r.map(|_| acabou)
     }
 
@@ -683,14 +688,16 @@ impl Conduta {
                     &format!("aberto pelo par; versao {v}"),
                 );
             }
+            // E o fim de quem abriu e não pode mais, também.
+            gravar_na_ordem(&feito.0, &feito.2);
             Some(feito)
         });
-        let Some((epoca, versao, es, w)) = feito else {
+        let Some((_, versao, es, w)) = feito else {
             // O fluxo acabou daqui antes de o aceite chegar: o `fechar`, com
             // o motivo daqui, vai na volta do laço.
             return;
         };
-        depois(epoca, es, w);
+        acordar_gravados(&es, w);
         match versao {
             Some(_) => self.aceito = true,
             None => {
@@ -923,14 +930,16 @@ pub fn sem_fio(n: u64) {
 /// Encerra o fluxo `n` daqui, com `m`, e grava.
 fn abortar_daqui(n: u64, m: &str) {
     let feito = crate::persistencia::em_ordem(|| {
-        se_ha_tabela(|t| {
+        let (epoca, es, w) = se_ha_tabela(|t| {
             let es: Vec<Encerramento> = t.fluxos.abortar(n, m).into_iter().collect();
             let w = encerrados_na_tabela(t, &es);
             (t.epoca, es, w)
-        })
+        })?;
+        gravar_na_ordem(&epoca, &es);
+        Some((es, w))
     });
-    if let Some((epoca, es, w)) = feito {
-        depois(epoca, es, w);
+    if let Some((es, w)) = feito {
+        acordar_gravados(&es, w);
     }
 }
 

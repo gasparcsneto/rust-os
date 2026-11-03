@@ -432,6 +432,8 @@ pub fn operou(obj: Objeto, fio: u64, esbarrou: bool) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
     }
+    #[cfg(feature = "modo-teste")]
+    let velha = conta_velha_de_teste(obj);
     let existe = com_designacoes(|t| match t.get_mut(&obj) {
         Some(e) if obj.dono(e.canal) == fio => {
             consumir(e, esbarrou);
@@ -445,6 +447,10 @@ pub fn operou(obj: Objeto, fio: u64, esbarrou: bool) {
         }
         _ => false,
     });
+    #[cfg(feature = "modo-teste")]
+    if let Some((n, geracao)) = velha.filter(|_| existe) {
+        avaliar_com(obj, n, geracao);
+    }
     if existe {
         avaliar(obj);
     }
@@ -617,23 +623,39 @@ fn nivel(obj: Objeto) -> Option<u8> {
 
 /// A conta de um objeto: o nível de agora — perguntado fora da trava das
 /// designações —, e o aviso, se é hora, publicado com ela na mão.
+///
+/// A geração da designação vai junto com o nível: uma operação do dono
+/// entre a pergunta e a trava — outro núcleo, a conta atrasada — muda a
+/// geração, e esta conta não publica o nível de antes dela — o `FIM` que a
+/// operação já ouviu, o dado que ela já leu. A operação refaz a conta, com
+/// o nível de depois: nada se perde.
 fn avaliar(obj: Objeto) {
-    if com_designacoes(|t| !t.contains_key(&obj)) {
+    let Some(geracao) = com_designacoes(|t| t.get(&obj).map(|e| e.d.geracao())) else {
         return;
-    }
+    };
     let Some(n) = nivel(obj) else {
         // Acabou, e o dono já sabe: a designação sai, sem aviso.
         sair(obj);
         return;
     };
+    avaliar_com(obj, n, geracao);
+}
+
+/// A parte da conta com a trava das designações: o aviso de `obj` pelo
+/// nível `n`, perguntado quando a designação estava na geração `geracao`.
+fn avaliar_com(obj: Objeto, n: u8, geracao: u32) {
     com_designacoes(|t| {
         let Some(e) = t.get_mut(&obj) else {
             return;
         };
+        if e.d.geracao() != geracao {
+            return;
+        }
         // Depois de uma recusa, até o rearme, o que a operação recusada
         // já encontrou não avisa de novo — voltaria a ser recusado, e a
-        // mudança de outro objeto não o faz pronto de novo —: só o novo.
-        if e.rearmar_em != 0 && !politica::aviso::novo_depois_da_recusa(n, e.recusado) {
+        // mudança de outro objeto não o faz pronto de novo —: só o novo,
+        // o que o dono ouviria.
+        if e.rearmar_em != 0 && !e.d.novo_depois_da_recusa(n, e.recusado) {
             return;
         }
         let antes = e.d.situacao();
@@ -897,6 +919,39 @@ static FIM_NA_RECUSA: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "modo-teste")]
 pub fn acabar_na_proxima_recusa_de_teste() {
     FIM_NA_RECUSA.store(true, Ordering::Release);
+}
+
+/// Só para a suíte: na próxima operação do dono que passa, a conta de outro
+/// núcleo chega logo depois dela — com o nível guardado aqui, perguntado
+/// antes da operação, e a geração de antes dela. Zero desarma.
+#[cfg(feature = "modo-teste")]
+static NIVEL_VELHO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Só para a suíte: arma a conta atrasada ([`NIVEL_VELHO`]) com o nível
+/// `n`.
+#[cfg(feature = "modo-teste")]
+pub fn conta_atrasada_na_proxima_operacao_de_teste(n: u8) {
+    NIVEL_VELHO.store(n, Ordering::Release);
+}
+
+/// Só para a suíte: a conta atrasada armada, com a geração de agora — a de
+/// antes da operação que vai consumir o aviso.
+#[cfg(feature = "modo-teste")]
+fn conta_velha_de_teste(obj: Objeto) -> Option<(u8, u32)> {
+    let n = NIVEL_VELHO.swap(0, Ordering::AcqRel);
+    if n == 0 {
+        return None;
+    }
+    com_designacoes(|t| t.get(&obj).map(|e| (n, e.d.geracao())))
+}
+
+/// Só para a suíte: desarma todos os pontos da suíte deste módulo — o caso
+/// que falha antes de usar o seu não o deixa armado para o caso seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn desarmar_de_teste() {
+    VAGA_NA_RECUSA.store(0, Ordering::Release);
+    FIM_NA_RECUSA.store(false, Ordering::Release);
+    NIVEL_VELHO.store(0, Ordering::Release);
 }
 
 /// Destrava as tabelas à força, para uso exclusivo do caminho de falha

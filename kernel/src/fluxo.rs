@@ -552,13 +552,36 @@ fn auditar_encerrados(epoca: &[u8; 8], es: &[Encerramento]) {
                 e.motivo, e.ida, e.volta, e.descartados
             ),
         );
+        #[cfg(feature = "modo-teste")]
+        marcar_o_fim_gravado(e.id);
     }
 }
 
-/// Encerramentos feitos com a tabela na mão — acorda e grava, fora dela.
+/// Encerramentos feitos com a tabela na mão: grava, e só então acorda —
+/// quem o fim acorda opera depois dele na cadeia. As operações do processo
+/// chamam isto com a ordem das gravações na mão; o envio da sessão com o
+/// par, sem ela (ver os limites do aviso em `docs/SDK.md`).
 fn depois(epoca: [u8; 8], es: Vec<Encerramento>, wakers: Vec<Waker>) {
-    acordar(wakers);
     auditar_encerrados(&epoca, &es);
+    acordar(wakers);
+}
+
+/// Os encerramentos `es`, feitos com a tabela e a ordem das gravações na
+/// mão, gravados ali mesmo — quem chama ainda tem a ordem. A operação de um
+/// processo sobre o fluxo, que passa pela ordem, vem depois do fim na
+/// cadeia: também a que o aviso do fim, dado ao acordar, o fez pedir.
+fn gravar_na_ordem(epoca: &[u8; 8], es: &[Encerramento]) {
+    auditar_encerrados(epoca, es);
+}
+
+/// Acorda quem espera pelos encerramentos `es`, já gravados dentro da ordem
+/// ([`gravar_na_ordem`]), com a ordem já solta.
+fn acordar_gravados(es: &[Encerramento], wakers: Vec<Waker>) {
+    #[cfg(feature = "modo-teste")]
+    conferir_o_fim_na_cadeia(es);
+    #[cfg(not(feature = "modo-teste"))]
+    let _ = es;
+    acordar(wakers);
 }
 
 /// A identidade de uma ponta, como as respostas a escrevem.
@@ -980,6 +1003,79 @@ pub fn acabar_no_proximo_encerrado_de_teste() {
     FIM_NO_ENCERRADO.store(true, core::sync::atomic::Ordering::Release);
 }
 
+/// Só para a suíte: o fluxo cujo fim se confere na cadeia na hora de
+/// acordar quem espera por ele — o número mais um; zero, nenhum.
+#[cfg(feature = "modo-teste")]
+static FIM_A_CONFERIR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Só para a suíte: o que a conferência achou — 1, o fim já na cadeia ao
+/// acordar; 2, ainda não; 0, não conferiu.
+#[cfg(feature = "modo-teste")]
+static FIM_CONFERIDO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Só para a suíte: o `stream.end` do fluxo a conferir já foi gravado
+/// ([`auditar_encerrados`]).
+#[cfg(feature = "modo-teste")]
+static FIM_GRAVADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só para a suíte: na hora de acordar quem espera pelo fim do fluxo `n`
+/// ([`acordar_gravados`]), confere se o `stream.end` dele já está na
+/// cadeia.
+#[cfg(feature = "modo-teste")]
+pub fn conferir_o_fim_na_cadeia_de_teste(n: u64) {
+    use core::sync::atomic::Ordering;
+    FIM_CONFERIDO.store(0, Ordering::Release);
+    FIM_GRAVADO.store(false, Ordering::Release);
+    FIM_A_CONFERIR.store(n.saturating_add(1), Ordering::Release);
+}
+
+/// Só para a suíte: o que a conferência de [`conferir_o_fim_na_cadeia_de_teste`]
+/// achou — `Some(true)`, o fim já na cadeia ao acordar.
+#[cfg(feature = "modo-teste")]
+pub fn fim_na_cadeia_ao_acordar_de_teste() -> Option<bool> {
+    match FIM_CONFERIDO.load(core::sync::atomic::Ordering::Acquire) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Só para a suíte: o `stream.end` do fluxo `id` acabou de ser gravado.
+#[cfg(feature = "modo-teste")]
+fn marcar_o_fim_gravado(id: u64) {
+    use core::sync::atomic::Ordering;
+    if FIM_A_CONFERIR.load(Ordering::Acquire) == id.saturating_add(1) {
+        FIM_GRAVADO.store(true, Ordering::Release);
+    }
+}
+
+/// Só para a suíte: na hora de acordar, se o fim a conferir está entre os
+/// encerramentos `es`, anota se o `stream.end` dele já foi gravado.
+#[cfg(feature = "modo-teste")]
+fn conferir_o_fim_na_cadeia(es: &[Encerramento]) {
+    use core::sync::atomic::Ordering;
+    let alvo = FIM_A_CONFERIR.load(Ordering::Acquire);
+    let Some(n) = alvo.checked_sub(1) else {
+        return;
+    };
+    if !es.iter().any(|e| e.id == n) {
+        return;
+    }
+    let gravado = FIM_GRAVADO.swap(false, Ordering::AcqRel);
+    FIM_CONFERIDO.store(if gravado { 1 } else { 2 }, Ordering::Release);
+    FIM_A_CONFERIR.store(0, Ordering::Release);
+}
+
+/// Só para a suíte: desarma os pontos da suíte deste módulo — o caso que
+/// falha antes de usar o seu não o deixa armado para o caso seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn desarmar_de_teste() {
+    use core::sync::atomic::Ordering;
+    FIM_NO_ENCERRADO.store(false, Ordering::Release);
+    FIM_A_CONFERIR.store(0, Ordering::Release);
+    FIM_GRAVADO.store(false, Ordering::Release);
+}
+
 fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {
     sob_a_decisao(recurso, || {
         let agora = crate::tempo::uptime_ms();
@@ -1194,17 +1290,20 @@ pub fn desarmar_espera(a: Aguardo) {
 // Os ganchos: o kernel encerra por fora.
 // ---------------------------------------------------------------------
 
-/// Encerra, dentro da ordem, os fluxos que `f` diz — e acorda e grava.
+/// Encerra, dentro da ordem, os fluxos que `f` diz, e grava os fins ainda
+/// dentro dela; depois acorda.
 fn encerrar_por_fora(f: impl FnOnce(&mut Fluxos) -> Vec<Encerramento>) {
     let feito = crate::persistencia::em_ordem(|| {
-        se_ha_tabela(|t| {
+        let (epoca, es, w) = se_ha_tabela(|t| {
             let es = f(&mut t.fluxos);
             let w = encerrados_na_tabela(t, &es);
             (t.epoca, es, w)
-        })
+        })?;
+        gravar_na_ordem(&epoca, &es);
+        Some((es, w))
     });
-    if let Some((epoca, es, w)) = feito {
-        depois(epoca, es, w);
+    if let Some((es, w)) = feito {
+        acordar_gravados(&es, w);
     }
 }
 
@@ -1233,17 +1332,19 @@ pub fn programa_mudou(fio: u64) {
 /// espera de quem aceitava por ele também. Chamada pela malha.
 pub fn endpoint_acabou(endpoint: u64) {
     let feito = crate::persistencia::em_ordem(|| {
-        se_ha_tabela(|t| {
+        let (epoca, es, w) = se_ha_tabela(|t| {
             let es = t.fluxos.endpoint_acabou(endpoint);
             let mut w = encerrados_na_tabela(t, &es);
             if let Some(Some(x)) = t.esperas.remove(&Aguardo::Aceitar { endpoint }) {
                 w.push(x);
             }
             (t.epoca, es, w)
-        })
+        })?;
+        gravar_na_ordem(&epoca, &es);
+        Some((es, w))
     });
-    if let Some((epoca, es, w)) = feito {
-        depois(epoca, es, w);
+    if let Some((es, w)) = feito {
+        acordar_gravados(&es, w);
     }
 }
 
