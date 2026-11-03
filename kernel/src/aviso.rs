@@ -39,8 +39,9 @@
 //! que dobra a cada recusa seguida ([`recusada`],
 //! [`recusado_pelo_gate`]); até lá, só o que é novo no objeto avisa — o
 //! que a operação recusada já encontrou não, por mudança nenhuma de outro
-//! objeto —, e a vaga que um fluxo do processo deixa na cota dele avisa o
-//! pedido que ele não pôde aceitar ([`vaga`]). O objeto que já acabou não
+//! objeto —, e a vaga que um fluxo do processo deixa na cota dele avisa,
+//! uma vez, o pedido que ele não pôde aceitar ([`vaga`]): a recusa que
+//! responde a esse aviso espaça como as outras. O objeto que já acabou não
 //! espera o rearme: o fim sai na hora, uma vez. A operação do dono que não
 //! mudou nada no objeto — o aceite sem pedido, a recepção sem entrega nova
 //! — consome sem desfazer o rearme marcado ([`consumiu`]); e a recepção
@@ -174,9 +175,12 @@ struct Entrada {
     /// ([`politica::aviso::novo_depois_da_recusa`]). A vaga na cota do
     /// processo o limpa — era o que o aceite recusado esperava.
     recusado: u8,
-    /// Uma vaga na cota do processo chegou desde a última operação do dono:
-    /// a recusa que vier antes de ela ser usada — a vaga chegou no meio da
-    /// operação — não espaça o aviso.
+    /// Uma vaga na cota do processo chegou, e desde então nenhum aviso do
+    /// objeto saiu no canal, nem operação do dono passou, nem o rearme veio:
+    /// a recusa que vier antes — a vaga chegou com um aviso ainda não
+    /// consumido, ou no meio da operação — não espaça, e o aviso da vaga
+    /// sai, uma vez. O aviso publicado a tira ([`publicar`]): a recusa
+    /// seguinte já é a resposta a ele, e espaça.
     vaga: bool,
 }
 
@@ -378,7 +382,8 @@ pub fn tocar_endpoints() {
 
 /// Um fluxo do processo `fio` acabou, e a cota de fluxos dele tem uma vaga:
 /// os endpoints dele são avaliados de novo, e o pedido que ele não pôde
-/// aceitar por falta de vaga avisa, sem esperar o rearme da recusa.
+/// aceitar por falta de vaga avisa, sem esperar o rearme da recusa — uma
+/// vez: a recusa que responde a esse aviso espaça como as outras.
 pub fn vaga(fio: u64) {
     marcar(Tocado::Vaga(fio));
 }
@@ -405,7 +410,11 @@ pub fn processar() {
             let vaga = matches!(obj, Objeto::Endpoint(_)) && marcas.contains(&Tocado::Vaga(dono));
             if vaga {
                 // A vaga é o que o aceite recusado pela cota esperava: o
-                // pedido que ainda espera avisa de novo.
+                // pedido que ainda espera avisa de novo. A marca fica até um
+                // aviso do objeto sair (`publicar`): com o objeto livre, o
+                // desta conta; com um aviso ainda não consumido, o que sai
+                // depois da operação que o consome — e a recusa dele, que
+                // veio antes do aviso da vaga, não espaça.
                 e.recusado = 0;
                 e.vaga = true;
             }
@@ -502,10 +511,13 @@ fn consumir(e: &mut Entrada, esbarrou: bool) {
 /// ([`politica::aviso::novo_depois_da_recusa`]). Uma recusa com um rearme
 /// já marcado não o empurra: fica o prazo mais cedo. Não esperam: o objeto
 /// que já acabou — o fim não gira: sai uma vez, e a designação com ele —,
-/// e a recusa que veio com uma vaga nova na cota do processo — a vaga
-/// chegou no meio da operação, e o pedido avisa de novo, uma vez. E a conta
-/// é refeita depois da trava, sempre: o que mudou entre a pergunta do nível
-/// e a trava — o objeto que acabou, um bit novo — não espera o rearme.
+/// e a recusa que veio antes do aviso de uma vaga nova na cota do processo
+/// — a vaga chegou com um aviso ainda não consumido, ou no meio da operação
+/// —: o pedido avisa de novo, uma vez. A recusa que vem depois de o aviso
+/// da vaga sair é a resposta a ele, e espaça: a mesma vaga não avisa duas
+/// vezes. E a conta é refeita depois da trava, sempre: o que mudou entre a
+/// pergunta do nível e a trava — o objeto que acabou, um bit novo — não
+/// espera o rearme.
 pub fn recusada(obj: Objeto, fio: u64) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
@@ -770,6 +782,14 @@ fn publicar(t: &mut BTreeMap<Objeto, Entrada>, obj: Objeto, a: Aviso, de_novo: b
             if x.avisado_em == 0 {
                 x.avisado_em = crate::arch::ciclos().max(1);
             }
+            // O aviso está no canal: a vaga que a marca guardava foi dita.
+            // A recusa seguinte é a resposta a ele — ou uma operação que já
+            // estava a caminho, e que o dono refaz ao lê-lo —, e espaça como
+            // as outras: a mesma vaga não avisa duas vezes. Sob a trava em
+            // que a recusa toma a marca: ou ela a toma antes, e o aviso que
+            // ela refaz é o da vaga, ou a acha limpa. O canal cheio não a
+            // tira — o aviso devido ainda não foi dito.
+            x.vaga = false;
             x.d.publicado(a);
             if x.d.acabou() {
                 t.remove(&obj);
