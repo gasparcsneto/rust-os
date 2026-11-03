@@ -33,10 +33,12 @@
 //! [`tocar_endpoint`], [`tocar_endpoints`]); quem
 //! acorda as esperas, fora da tabela, processa as marcas ([`processar`]) —
 //! pergunta o nível do objeto agora, faz a conta e publica. A operação do
-//! dono consome o aviso e rearma ([`operou`]) — e a recusa do gate a uma
-//! operação do dono também o consome, com o rearme pelo coletor, um tempo
-//! depois ([`recusado_pelo_gate`]). O coletor de fios tenta de novo o que
-//! ficou devido ([`passada_do_coletor`]).
+//! dono consome o aviso e rearma ([`operou`]) — e a operação do dono que
+//! não passa, recusada pelo gate, pela reconfirmação ou pelo próprio
+//! comando, também o consome, com o rearme pelo coletor, um tempo depois,
+//! que dobra a cada recusa seguida ([`recusada`],
+//! [`recusado_pelo_gate`]). O coletor de fios tenta de novo o que ficou
+//! devido ([`passada_do_coletor`]).
 //!
 //! # O que fica guardado
 //!
@@ -74,12 +76,6 @@ use crate::agent::json::Json;
 use crate::trava::Mutex;
 use politica::aviso::{ACABADOS_POR_PROCESSO, Aviso, Designacao, Situacao, bits};
 use protocolo::usuario::evento::{self, Evento};
-
-/// Quanto o rearme espera depois de uma recusa do gate: o que ainda está
-/// pronto avisa de novo pelo coletor, e não na hora — uma recusa que dura
-/// (a política, a contenção) não vira um giro de aviso, recusa e aviso; uma
-/// que passa (a taxa) volta a avisar em seguida.
-pub const REARME_DEPOIS_DA_RECUSA_MS: u64 = 1_000;
 
 // Os bits e os tipos do contrato são os da conta.
 const _: () = {
@@ -155,9 +151,13 @@ struct Entrada {
     /// sem aviso esperando.
     avisado_em: u64,
     /// Quando o coletor reavalia o objeto, em ms desde o boot, depois de
-    /// uma recusa do gate ter consumido o aviso ([`recusado_pelo_gate`]).
-    /// Zero sem rearme marcado.
+    /// uma operação recusada ter consumido o aviso ([`recusada`]). Zero sem
+    /// rearme marcado.
     rearmar_em: u64,
+    /// As operações do dono recusadas em seguida, desde a última que
+    /// passou: o rearme dobra a cada uma
+    /// ([`politica::aviso::espera_depois_da_recusa`]).
+    recusas: u32,
 }
 
 /// As designações vivas.
@@ -256,6 +256,7 @@ fn designar(obj: Objeto, canal: Canal, quem_abriu: bool) {
                 d,
                 avisado_em: 0,
                 rearmar_em: 0,
+                recusas: 0,
             },
         );
     });
@@ -395,8 +396,9 @@ pub fn operou(obj: Objeto, fio: u64, esbarrou: bool) {
         Some(e) if obj.dono(e.canal) == fio => {
             consumir(e, esbarrou);
             // A operação reavalia agora: o rearme marcado por uma recusa
-            // não tem mais o que fazer.
+            // não tem mais o que fazer, e a conta das recusas recomeça.
             e.rearmar_em = 0;
+            e.recusas = 0;
             true
         }
         _ => false,
@@ -416,13 +418,42 @@ fn consumir(e: &mut Entrada, esbarrou: bool) {
     e.d.operou(esbarrou);
 }
 
+/// A operação do dono `fio` sobre `obj` não passou — recusada pelo gate,
+/// pela reconfirmação dentro da decisão, ou pelo próprio comando (a cota
+/// cheia, o estado do objeto). Ela consome o aviso, como a que passa (a
+/// regra de `docs/SDK.md`): senão o objeto ficaria mudo, com um aviso que
+/// nada consome. Mas o nível não é reavaliado na hora — o que ainda está
+/// pronto, e a operação não conseguiu fazer, voltaria a avisar e a ser
+/// recusado num giro —: o coletor reavalia depois de
+/// [`politica::aviso::espera_depois_da_recusa`], que dobra a cada recusa
+/// seguida, até um minuto. A mudança do objeto avisa antes. Uma recusa com
+/// um rearme já marcado não o empurra: fica o prazo mais cedo.
+pub fn recusada(obj: Objeto, fio: u64) {
+    if QUANTAS.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let agora = crate::tempo::uptime_ms();
+    com_designacoes(|t| {
+        if let Some(e) = t.get_mut(&obj)
+            && obj.dono(e.canal) == fio
+        {
+            consumir(e, false);
+            e.recusas = e.recusas.saturating_add(1);
+            let quando = agora
+                .saturating_add(politica::aviso::espera_depois_da_recusa(e.recusas))
+                .max(1);
+            e.rearmar_em = if e.rearmar_em == 0 {
+                quando
+            } else {
+                e.rearmar_em.min(quando)
+            };
+        }
+    });
+}
+
 /// O gate recusou um pedido de `chamador` antes de qualquer operação — a
-/// taxa, a contenção, a política. A operação do dono sobre um objeto
-/// designado, decidida pelo gate, consome o aviso dele (a regra de
-/// `docs/SDK.md`), também quando a decisão é a recusa: senão o objeto ficaria mudo, com um
-/// aviso que nada consome. O que ainda está pronto avisa de novo pelo
-/// coletor, [`REARME_DEPOIS_DA_RECUSA_MS`] depois — ou antes, na próxima
-/// mudança do objeto.
+/// taxa, a contenção, a política: se é a operação do dono sobre um objeto
+/// designado, ela foi recusada ([`recusada`]).
 pub fn recusado_pelo_gate(chamador: crate::autorizacao::Chamador, nome: &str, params: Json) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
@@ -430,20 +461,9 @@ pub fn recusado_pelo_gate(chamador: crate::autorizacao::Chamador, nome: &str, pa
     let crate::autorizacao::Chamador::Processo { fio, .. } = chamador else {
         return;
     };
-    let Some(obj) = objeto_do_pedido(nome, params, fio) else {
-        return;
-    };
-    let quando = crate::tempo::uptime_ms()
-        .saturating_add(REARME_DEPOIS_DA_RECUSA_MS)
-        .max(1);
-    com_designacoes(|t| {
-        if let Some(e) = t.get_mut(&obj)
-            && obj.dono(e.canal) == fio
-        {
-            consumir(e, false);
-            e.rearmar_em = quando;
-        }
-    });
+    if let Some(obj) = objeto_do_pedido(nome, params, fio) {
+        recusada(obj, fio);
+    }
 }
 
 /// O objeto que o pedido `nome` do processo `fio` opera como dono: a ponta

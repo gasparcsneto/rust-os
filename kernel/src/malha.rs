@@ -625,8 +625,25 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
         Ok((f, _)) => f,
         Err(f) => return recusada(&recurso, f, f.motivo()),
     };
-    sob_a_decisao(&recurso, || {
-        conferir_alvo(&recurso, |t| {
+    let r = retirar_sob_a_decisao(a, &recurso, endpoint, fio);
+    // A retirada recusada — a reconfirmação, o endpoint que não é dele — é
+    // uma operação do dono que não passou: consome o aviso, e rearma depois.
+    if r.is_err()
+        && let Some(n) = politica::aviso::numero_do_id(endpoint)
+    {
+        crate::aviso::recusada(crate::aviso::Objeto::Endpoint(n), fio);
+    }
+    r
+}
+
+fn retirar_sob_a_decisao(
+    a: &Ator,
+    recurso: &str,
+    endpoint: &str,
+    fio: u64,
+) -> Result<usize, Falha> {
+    sob_a_decisao(recurso, || {
+        conferir_alvo(recurso, |t| {
             let n = ler_id(&t.epoca, endpoint)?;
             t.malha
                 .intencao_do_endpoint(a.titular, fio, n)
@@ -658,7 +675,7 @@ pub fn retirar(a: &Ator, endpoint: &str) -> Result<usize, Falha> {
                 crate::fluxo::endpoint_acabou(n);
                 Ok(anuladas.len())
             }
-            Err(r) => recusada(&recurso, r.into(), r.motivo()),
+            Err(r) => recusada(recurso, r.into(), r.motivo()),
         }
     })
 }
@@ -826,9 +843,14 @@ pub fn receber(
     });
     // A operação do dono sobre o endpoint — também a que a reconfirmação
     // recusou, dentro da decisão —: o aviso dele está consumido. Senão a
-    // recusa deixaria o endpoint mudo, com um aviso que nada consome.
+    // recusa deixaria o endpoint mudo, com um aviso que nada consome. A
+    // recusada rearma pelo coletor, um tempo depois, e não na hora.
     if let Some(n) = politica::aviso::numero_do_id(endpoint) {
-        crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
+        let obj = crate::aviso::Objeto::Endpoint(n);
+        match r {
+            Ok(_) => crate::aviso::operou(obj, fio, false),
+            Err(_) => crate::aviso::recusada(obj, fio),
+        }
     }
     r
 }

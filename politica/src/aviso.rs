@@ -297,6 +297,34 @@ impl Designacao {
     }
 }
 
+/// Quanto o rearme espera depois da primeira recusa de uma operação do dono
+/// — pelo gate, pela reconfirmação ou pelo próprio comando (a cota, o
+/// estado): o que ainda está pronto avisa de novo pelo coletor, e não na
+/// hora.
+pub const REARME_DEPOIS_DA_RECUSA_MS: u64 = 1_000;
+
+/// O rearme mais longo: as recusas seguidas dobram a espera até aqui.
+pub const REARME_MAXIMO_MS: u64 = 60_000;
+
+/// Quanto o rearme espera depois da `recusas`-ésima recusa seguida de uma
+/// operação do dono sobre o objeto: um segundo na primeira, o dobro a cada
+/// recusa seguinte, até um minuto. A recusa que passa logo (a taxa) volta a
+/// avisar em seguida; a que dura (a cota cheia, a sessão que saiu) espaça
+/// os avisos, em vez de girar aviso, recusa e aviso. A operação que passa
+/// zera a conta; e a mudança do objeto avisa na hora, sem esperar.
+pub const fn espera_depois_da_recusa(recusas: u32) -> u64 {
+    let dobras = if recusas == 0 { 0 } else { recusas - 1 };
+    if dobras >= 6 {
+        return REARME_MAXIMO_MS;
+    }
+    let ms = REARME_DEPOIS_DA_RECUSA_MS << dobras;
+    if ms > REARME_MAXIMO_MS {
+        REARME_MAXIMO_MS
+    } else {
+        ms
+    }
+}
+
 /// Quantas designações de objetos que já acabaram um processo guarda — o
 /// fim devido, com o canal cheio, e o fim na espera da operação dele. As
 /// dos objetos vivos as cotas limitam (4 endpoints e 4 fluxos: no máximo 8
@@ -621,6 +649,25 @@ mod testes {
         e.cheio(a);
         assert!(e.guarda_o_fim());
         assert_eq!(ACABADOS_POR_PROCESSO, 8);
+    }
+
+    /// NH17: o rearme depois das recusas seguidas — um segundo, o dobro a
+    /// cada uma, até um minuto; a primeira não espera menos que um segundo.
+    #[test]
+    fn nh17_o_rearme_depois_das_recusas() {
+        assert_eq!(espera_depois_da_recusa(0), 1_000);
+        assert_eq!(espera_depois_da_recusa(1), 1_000);
+        assert_eq!(espera_depois_da_recusa(2), 2_000);
+        assert_eq!(espera_depois_da_recusa(3), 4_000);
+        assert_eq!(espera_depois_da_recusa(6), 32_000);
+        assert_eq!(espera_depois_da_recusa(7), REARME_MAXIMO_MS);
+        assert_eq!(espera_depois_da_recusa(u32::MAX), REARME_MAXIMO_MS);
+        let mut antes = 0;
+        for n in 1..40 {
+            let e = espera_depois_da_recusa(n);
+            assert!(e >= antes && e <= REARME_MAXIMO_MS);
+            antes = e;
+        }
     }
 
     /// NH08: o evento só tem o tipo, o número e os bits — nenhum campo vem

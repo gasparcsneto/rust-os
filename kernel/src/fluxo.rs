@@ -518,6 +518,11 @@ fn acordar(wakers: Vec<Waker>) {
 /// saem, a sessão com o par fica sabendo o motivo.
 fn encerrados_na_tabela(t: &mut Tabela, es: &[Encerramento]) -> Vec<Waker> {
     let mut w = Vec::new();
+    if !es.is_empty() {
+        // O fluxo que acaba libera a cota das pontas: o dono de um endpoint
+        // com pedido esperando, que não pôde aceitá-lo, é avisado na hora.
+        crate::aviso::tocar_endpoints();
+    }
     for e in es {
         if let Some(s) = t.sessoes.get_mut(&e.id) {
             s.fim.get_or_insert_with(|| e.motivo.clone());
@@ -785,9 +790,16 @@ fn abridor_exerceria(abridor: &Ponta, recurso: &str) -> bool {
 /// `Ok(None)` sem pedido na fila.
 pub fn aceitar(a: &Ator, endpoint: &str) -> Result<Option<(String, Aceito)>, Falha> {
     let r = aceitar_no(a, endpoint);
-    // A operação do dono sobre o endpoint: o aviso dele está consumido.
+    // A operação do dono sobre o endpoint: o aviso dele está consumido. A
+    // recusada — a cota cheia, a máquina desligando, a reconfirmação — não
+    // rearma na hora: o pedido que ainda espera voltaria a avisar e a ser
+    // recusado num giro.
     if let (Some(fio), Some(n)) = (a.fio(), politica::aviso::numero_do_id(endpoint)) {
-        crate::aviso::operou(crate::aviso::Objeto::Endpoint(n), fio, false);
+        let obj = crate::aviso::Objeto::Endpoint(n);
+        match r {
+            Ok(_) => crate::aviso::operou(obj, fio, false),
+            Err(_) => crate::aviso::recusada(obj, fio),
+        }
     }
     r
 }
@@ -918,8 +930,9 @@ pub fn escrever(a: &Ator, id: &str, dados: &[u8]) -> Result<usize, Falha> {
 }
 
 /// A operação de `a` sobre o fluxo `n` acabou: o aviso da malha dele está
-/// consumido, e rearma — ou, se ela ouviu o fim, a designação sai.
-/// `esbarrou` diz que a escrita não coube inteira.
+/// consumido, e rearma — ou, se ela ouviu o fim, a designação sai; ou, se
+/// foi recusada (a reconfirmação, o estado do fluxo), rearma pelo coletor,
+/// um tempo depois. `esbarrou` diz que a escrita não coube inteira.
 fn operou<T>(a: &Ator, n: u64, r: &Result<T, Falha>, esbarrou: bool) {
     let Some(fio) = a.fio() else {
         return;
@@ -927,7 +940,8 @@ fn operou<T>(a: &Ator, n: u64, r: &Result<T, Falha>, esbarrou: bool) {
     let obj = crate::aviso::Objeto::Ponta { fluxo: n, fio };
     match r {
         Err(Falha::Fluxo(Recusa::Encerrado(_))) => crate::aviso::largar(obj, fio),
-        _ => crate::aviso::operou(obj, fio, esbarrou),
+        Err(_) => crate::aviso::recusada(obj, fio),
+        Ok(_) => crate::aviso::operou(obj, fio, esbarrou),
     }
 }
 
