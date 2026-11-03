@@ -83,6 +83,13 @@ const JANELA_DOS_APERTOS: Duration = Duration::from_secs(11);
 const ESPERA_PELO_LANCAMENTO: Duration = Duration::from_secs(20);
 const VEZES_DE_DIGITAR: usize = 3;
 
+/// Quanto esperar o `person.login` de um `login` digitado — a senha passa
+/// pelo Argon2id no kernel, lento no emulador — antes de digitá-lo de novo:
+/// ver [`DePe::entrar`]. As [`VEZES_DE_DIGITAR`] tentativas, espaçadas
+/// assim, cabem no limite de tentativas de login do console (cinco por
+/// minuto).
+const ESPERA_PELO_LOGIN: Duration = Duration::from_secs(60);
+
 /// Os pares, na ordem em que rodam: origem e destino.
 const PARES: [(Arquitetura, Arquitetura); 4] = [
     (Arquitetura::X86_64, Arquitetura::Aarch64),
@@ -450,19 +457,58 @@ impl DePe {
     }
 
     /// A pessoa de desenvolvimento entra no Terminal, pelo teclado.
+    ///
+    /// O teclado do emulador perde tecla com as duas máquinas de pé no mesmo
+    /// hospedeiro (ver [`DePe::lancar`]): o `login` estragado — o comando, o
+    /// nome ou a senha — não chega ao gate, ou chega como uma senha errada.
+    /// Sem o `person.login` aceito, digita de novo, depois de uma linha vazia
+    /// que encerra o que tiver ficado pela metade. O aceito vale desde a
+    /// primeira tentativa: o login que só chega depois do prazo dela não é
+    /// digitado outra vez por cima.
     pub(crate) fn entrar(&mut self) -> Result<(), String> {
         let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
         super::senha::terminal_atendendo(&mut self.m, &mut self.teclado)?;
-        let codigo = super::senha::entrar(
-            &mut self.m,
-            &mut self.teclado,
-            chaves::NOME_DA_PESSOA_DEV,
-            &senha,
-        )?;
-        if codigo != "ALLOW" {
-            return Err(format!("{}: a pessoa nao entrou ({codigo})", self.papel));
+        let inicio = self.marca()?.auditoria;
+        let mut ultimo = String::from("nenhum person.login gravado");
+        for vez in 0..VEZES_DE_DIGITAR {
+            let desde = self.marca()?.auditoria;
+            if vez > 0 {
+                println!(
+                    "  [enlace]   {}: a pessoa nao entrou ({ultimo}); digitando o login de novo",
+                    self.papel
+                );
+                self.digitar("\n")?;
+            }
+            self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
+            let limite = Instant::now() + ESPERA_PELO_LOGIN;
+            loop {
+                self.ler()?;
+                let logins: Vec<(u64, &Gravado)> = self
+                    .visto
+                    .gravados
+                    .range(inicio + 1..)
+                    .filter(|(_, g)| g.metodo == "person.login")
+                    .map(|(s, g)| (*s, g))
+                    .collect();
+                if logins.iter().any(|(_, g)| g.codigo == "ALLOW") {
+                    return Ok(());
+                }
+                // A recusa desta tentativa — a senha estragada pelo teclado
+                // —: a próxima tentativa, sem esperar o prazo.
+                if let Some((_, g)) = logins.iter().find(|(s, _)| *s > desde) {
+                    ultimo = format!("{} {}", g.codigo, g.detalhe);
+                    break;
+                }
+                if Instant::now() >= limite {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
         }
-        Ok(())
+        Err(format!(
+            "{}: a pessoa nao entrou em {VEZES_DE_DIGITAR} vezes ({ultimo})",
+            self.papel
+        ))
     }
 
     /// A pessoa lança `programa` pelo Terminal: `user.run`, digitado.

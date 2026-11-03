@@ -216,7 +216,10 @@ próprio deles nas mesmas vagas, em [FLUXOS.md](FLUXOS.md).
 - **Bancada de duas máquinas** (`cargo xtask enlace`): dois Dukes de pé ao
   mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
   rede do emulador e pela ponte da bancada. O administrador registra a
-  relação nos dois; a pessoa entra no Terminal das duas pelo teclado; o
+  relação nos dois; a pessoa entra no Terminal das duas pelo teclado — o
+  teclado do emulador perde tecla com as duas máquinas de pé no mesmo
+  hospedeiro, e a bancada digita de novo, depois de uma linha vazia, o
+  `login` e o `user.run` que não chegaram ao gate —; o
   `carteiro` (um programa da pessoa em A) procura, manda, reenvia e
   pergunta o estado ao `correio` (um programa da pessoa em B); a auditoria
   dos dois lados é conferida. Depois: a suspensão em B e em A, o corte de
