@@ -727,18 +727,20 @@ fn escutar(ponteiro: u64, tamanho: u64) -> i64 {
         core::ptr::copy_nonoverlapping(ponteiro as *const u8, nome.as_mut_ptr(), tamanho as usize);
     }
     let ouvinte = crate::fios::id_atual();
-    // O teto por processo: um canal para o laço dele e um de folga. Os
-    // canais são da máquina inteira, e um processo que escutasse quantos
-    // nomes quisesse tiraria a vaga dos outros.
-    if crate::eventos::canais_de(ouvinte) >= crate::eventos::CANAIS_POR_PROCESSO {
-        RECUSADAS.fetch_add(1, Ordering::Relaxed);
-        return erro::OCUPADO;
-    }
+    // O teto por processo — um canal para o laço dele e um de folga — é
+    // conferido em `eventos::escutar`, na mesma seção crítica que insere e
+    // na mesma varredura: os canais são da máquina inteira, e um processo
+    // que escutasse quantos nomes quisesse tiraria a vaga dos outros. A
+    // recusa dele é o mesmo `OCUPADO` de sempre.
     let chave = match crate::eventos::escutar(&nome[..tamanho as usize], ouvinte) {
         Ok(chave) => chave,
         Err(crate::eventos::Recusa::NomeInvalido) => {
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::TAMANHO_INVALIDO;
+        }
+        Err(crate::eventos::Recusa::TetoDoOuvinte) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            return erro::OCUPADO;
         }
         Err(crate::eventos::Recusa::Ocupado) => return erro::OCUPADO,
     };
@@ -1575,8 +1577,9 @@ pub fn lancar_conferido(
             }
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
-            // acontecem, o escalonador tem dezesseis vagas — deixaria a
-            // imagem inteira no heap para sempre.
+            // acontecem: a tabela do escalonador tem um teto, `MAX_FIOS`, e
+            // a cota do papel de quem lança, outro — deixaria a imagem
+            // inteira no heap para sempre.
             if argumento != 0 {
                 // SAFETY: o ponteiro veio do `into_raw` acima e não foi
                 // entregue a ninguém, porque `criar` falhou.

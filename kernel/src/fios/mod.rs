@@ -2404,6 +2404,24 @@ pub fn vivo(id: u64) -> bool {
     })
 }
 
+/// Os ids dos fios que existem e não terminaram — os que [`vivo`] diria
+/// vivos —, escritos em `destino`; devolve quantos. Uma tomada da trava do
+/// escalonador para todos: é a fotografia com que [`crate::eventos`]
+/// confere os ouvintes de uma varredura inteira, em vez de uma pergunta — e
+/// uma tomada — por canal.
+pub fn ids_vivos(destino: &mut [u64; MAX_FIOS]) -> usize {
+    com_escalonador(|e| {
+        let mut quantos = 0;
+        for fio in e.fios.iter().flatten() {
+            if fio.estado != Estado::Terminado {
+                destino[quantos] = fio.id.numero();
+                quantos += 1;
+            }
+        }
+        quantos
+    })
+}
+
 /// O fio atual não pode continuar de onde estava?
 ///
 /// Vale para os dois motivos que existem hoje — ele terminou, ou está
