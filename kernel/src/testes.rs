@@ -6570,6 +6570,30 @@ fn linha_da_senha_no_terminal() -> Resultado {
     if crate::pessoas::dona_da_sessao(entrou) != Some(lia) {
         return Err("a sessao aberta no terminal nao e da pessoa que digitou");
     }
+    // A troca da própria senha, pela janela: a linha da senha atual também
+    // é da pessoa — a mesma regra, para as linhas da troca. A pessoa
+    // desiste com a linha vazia, e o console volta a pedir um comando.
+    digitar_pelo_teclado("senha\n")?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::SenhaAtual, 0))
+        },
+        600,
+    )
+    .map_err(|_| "`senha` digitada na janela do terminal nao pediu a senha atual")?;
+    recusada("set_value", r#","value":"intrusa""#, LINHA_DA_PESSOA)?;
+    recusada("cancel", "", LINHA_DA_PESSOA)?;
+    recusada("confirm", "", CONFIRMAR_A_LINHA_DA_PESSOA)?;
+    digitar_pelo_teclado("\n")?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, 0))
+        },
+        600,
+    )
+    .map_err(|_| "a linha vazia nao desistiu da troca no terminal")?;
     if ultimo_que(|e| {
         e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
     })
@@ -6577,7 +6601,15 @@ fn linha_da_senha_no_terminal() -> Resultado {
     {
         return Err("uma tecla da pessoa no terminal foi CONFLICT");
     }
-    if ultimo_que(|e| e.metodo == "ui.claim" && e.recurso == recurso).is_some() {
+    // Do agente: as teclas da pessoa depois do login — o `senha` — arrendam o
+    // campo para ela, implicitamente, e isso também fica gravado.
+    if ultimo_que(|e| {
+        e.metodo == "ui.claim"
+            && e.recurso == recurso
+            && e.titular == politica::auditoria::Titular::Agente
+    })
+    .is_some()
+    {
         return Err("uma acao recusada arrendou o campo do terminal");
     }
 
@@ -15110,6 +15142,14 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
         if crate::interpretador::definir("outra").is_ok() {
             return Err("um agente editou a linha da senha atual");
         }
+        // E a regra de fora, a de quem pede pela árvore, conferida antes de
+        // arrendar a linha: nem escrever, nem esvaziar, nem confirmar.
+        if crate::interpretador::pode_definir("outra").is_ok()
+            || crate::interpretador::pode_definir("").is_ok()
+            || crate::interpretador::pode_confirmar(Origem::Agente(0)).is_ok()
+        {
+            return Err("a arvore escreveria, esvaziaria ou confirmaria a senha atual");
+        }
         if !crate::interpretador::confirmar(Origem::Agente(0)).is_empty()
             || crate::interpretador::modo() != Modo::SenhaAtual
         {
@@ -15132,6 +15172,8 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
         }
         if crate::interpretador::com_valor(|v| !v.is_empty())
             || crate::interpretador::definir("x").is_ok()
+            || crate::interpretador::pode_definir("").is_ok()
+            || crate::interpretador::pode_confirmar(Origem::Agente(0)).is_ok()
         {
             return Err("a confirmacao apareceu na arvore, ou se editou pela arvore");
         }
