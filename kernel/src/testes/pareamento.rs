@@ -3407,13 +3407,26 @@ pub(super) fn pareamento_esquecer_a_propria_relacao() -> Resultado {
                     super::INTENCAO_DA_MALHA
                 ),
             );
+            // O journal e a auditoria de antes vêm antes do pedido: ler o
+            // journal inteiro leva segundos num runner lento, e o pedido que
+            // falhou só fica na tabela do enlace até o prazo dele
+            // (`politica::enlace::PRAZO_MS`, contado de quando foi feito) —
+            // conferido depois de duas leituras, ele já tinha saído, e quem
+            // esperava ouvia `Sumiu` (CI 417, x86_64).
+            let antes = super::registros_do_journal()?.len();
+            let seq = crate::autorizacao::ultimo_registro();
             let quem = Chamador::Pessoa(bia_sessao);
             let espera = crate::nativo::responder_suspensivel_de_teste(quem, &linha_rpc)
                 .err()
                 .ok_or("o pedido ao dispositivo nao suspendeu")?;
-            let antes = super::registros_do_journal()?.len();
-            let seq = crate::autorizacao::ultimo_registro();
             let r = esquecer(bia_sessao, NOME);
+            // Quem esperava acorda com a desfeita: conferido logo, antes de
+            // ler o journal de novo.
+            let acordou = espera.conferir(None);
+            drop(espera);
+            if acordou != Some(crate::rede::espera::Desfecho::Chegou) {
+                return Err("o pedido que esperava pela relacao esquecida nao acordou");
+            }
             if fs_bool(&r, "forgotten") != Some(true)
                 || super::fs_texto(&r, "relation").as_deref() != Some(RELACAO_DE_BIA)
                 || fs_bool(&r, "device_left") != Some(false)
@@ -3440,10 +3453,6 @@ pub(super) fn pareamento_esquecer_a_propria_relacao() -> Resultado {
             {
                 return Err("a entrega pela relacao esquecida nao foi anulada e gravada");
             }
-            if espera.conferir(None) != Some(crate::rede::espera::Desfecho::Chegou) {
-                return Err("o pedido que esperava pela relacao esquecida nao acordou");
-            }
-            drop(espera);
             let de_novo = crate::nativo::responder_de_teste(quem, &linha_rpc);
             if codigo_do_envelope(&de_novo) != "DENY_RESOURCE" {
                 crate::log_error!("teste", "{}", de_novo);
