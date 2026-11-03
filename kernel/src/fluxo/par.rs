@@ -66,11 +66,15 @@
 //!
 //! O fim do fluxo vai à cadeia, em nome do kernel, dentro da ordem das
 //! gravações e antes de acordar quem espera — também o que a própria sessão
-//! conclui: o fim mandado ao par com o outro sentido já acabado, e o fecho
+//! conclui: o fim mandado ao par com o outro sentido já acabado — o de quem
+//! fechou com tudo dito também, que acaba `fechado pela ponta` —, e o fecho
 //! de quem saiu com tudo dito. O envio decide esse quadro com a ordem na
 //! mão, grava o fim ali mesmo e só então, com a ordem solta, acorda quem
 //! espera e manda o quadro: a operação do dono vem antes da conclusão ou
-//! depois do fim gravado, e a ordem nunca fica presa na rede.
+//! depois do fim gravado, e a ordem nunca fica presa na rede. E o fecho de
+//! um fluxo que já acabou daqui — por fora, pelo processo, pela sessão —
+//! também se decide com a ordem na mão: sai ao par depois do fim na
+//! cadeia, que quem o acabou grava com a ordem.
 
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -398,7 +402,9 @@ enum Saida {
     Fechar(String),
     /// Há o fim, ou o fecho de quem saiu com tudo dito, a mandar — e ele
     /// pode concluir o fluxo: só se decide com a ordem das gravações na mão.
-    /// Nada mudou na tabela; a sessão pede a ordem e decide de novo.
+    /// Ou o fluxo já acabou daqui, e o fecho dele só sai com o fim na
+    /// cadeia: quem o acabou o grava com a ordem na mão. Nada mudou na
+    /// tabela; a sessão pede a ordem e decide de novo.
     NaOrdem,
 }
 
@@ -430,7 +436,11 @@ impl Conduta {
     /// O fim e o fecho de quem saiu podem concluir o fluxo, e só se decidem
     /// com a ordem das gravações na mão (`na_ordem`): sem ela, a sessão só
     /// fica sabendo que há o que mandar ali ([`Saida::NaOrdem`]), sem mudar
-    /// nada na tabela, e nenhum encerramento sai daqui.
+    /// nada na tabela, e nenhum encerramento sai daqui. O fecho de um fluxo
+    /// que já acabou também: quem o acabou — por fora, o processo, esta
+    /// sessão — larga a tabela antes de gravar o fim, ainda com a ordem na
+    /// mão, e a passada com ela vem depois da gravação: o fecho nunca sai
+    /// ao par antes de o fim estar na cadeia.
     fn proximo_a_mandar(
         &mut self,
         agora: u64,
@@ -442,10 +452,17 @@ impl Conduta {
         let fim_dito = self.fim_dito;
         com_tabela(|t| {
             let epoca = t.epoca;
-            let fim = t.sessoes.get(&n).and_then(|s| s.fim.clone());
             let Some(r) = t.fluxos.retrato(n) else {
-                // Acabou daqui: o motivo vai ao par — no destino, antes do
-                // aceite, como a recusa do pedido.
+                if !na_ordem {
+                    // Acabou daqui, e quem o acabou pode estar entre a
+                    // tabela e a gravação do fim, com a ordem na mão: o
+                    // fecho espera a ordem.
+                    return (Saida::NaOrdem, epoca, Vec::new(), Vec::new());
+                }
+                // Acabou daqui, e quem o acabou já gravou o fim: o motivo vai
+                // ao par — no destino, antes do aceite, como a recusa do
+                // pedido.
+                let fim = t.sessoes.get(&n).and_then(|s| s.fim.clone());
                 let m = fim.unwrap_or_else(|| String::from(motivo::CONEXAO));
                 let s = if lado == Lado::Destino && !aceito {
                     Saida::Recusado(m)
@@ -499,7 +516,13 @@ impl Conduta {
             }
             if t.fluxos.saiu_e_foi(n) {
                 // A ponta daqui fechou, e tudo o que ela escreveu já foi: o
-                // fecho vai ao par, e o fluxo acaba daqui.
+                // fecho vai ao par, e o fluxo acaba daqui. Defensivo: com a
+                // conta de hoje, um fluxo vivo não chega aqui — o fecho
+                // aborta o sentido que chega a quem fecha, e o fim do que sai,
+                // dito no ramo de cima, conclui o fluxo na mesma passada
+                // (`fechado pela ponta`); o fecho que segue é o do fluxo que
+                // já acabou. Fica para a conta que mudar, e uma mutação só
+                // deste ramo é equivalente.
                 let es: Vec<Encerramento> =
                     t.fluxos.abortar(n, motivo::FECHADO).into_iter().collect();
                 let w = encerrados_na_tabela(t, &es);
@@ -512,15 +535,17 @@ impl Conduta {
     /// Manda o que há a mandar, até não haver mais. `Err` com o motivo se a
     /// conexão não leva.
     ///
-    /// O que não conclui o fluxo — o aceite, os dados, o crédito, o fecho de
-    /// um fluxo que já acabou — se decide sem a ordem das gravações. O fim e
-    /// o fecho de quem saiu com tudo dito podem concluí-lo: a sessão os
-    /// decide de novo com a ordem na mão, e o fim do fluxo vai à cadeia
-    /// ainda dentro dela, como os fins por fora ([`gravar_na_ordem`]) — a
-    /// operação do dono que entra na ordem vem antes da conclusão, ou depois
-    /// do fim gravado, nunca no meio. Só então, com a ordem solta, acorda
-    /// quem espera ([`acordar_gravados`]) e o quadro sai: a ordem nunca fica
-    /// presa no envio.
+    /// O que não conclui o fluxo — o aceite, os dados, o crédito — se decide
+    /// sem a ordem das gravações. O fim e o fecho de quem saiu com tudo dito
+    /// podem concluí-lo: a sessão os decide de novo com a ordem na mão, e o
+    /// fim do fluxo vai à cadeia ainda dentro dela, como os fins por fora
+    /// ([`gravar_na_ordem`]) — a operação do dono que entra na ordem vem
+    /// antes da conclusão, ou depois do fim gravado, nunca no meio. O fecho
+    /// de um fluxo que já acabou daqui também se decide com a ordem: quem o
+    /// acabou grava o fim com ela na mão, e o fecho sai depois dele na
+    /// cadeia. Só então, com a ordem solta, acorda quem espera
+    /// ([`acordar_gravados`]) e o quadro sai: a ordem nunca fica presa no
+    /// envio.
     ///
     /// A conclusão vem antes de o quadro sair, como sempre veio: este lado já
     /// acabou o fluxo — os dois sentidos andaram daqui. O envio que falha, e
@@ -1346,6 +1371,8 @@ struct CanalDaVaga {
 
 impl Canal for CanalDaVaga {
     fn mandar(&mut self, q: &[u8]) -> Result<(), &'static str> {
+        #[cfg(feature = "modo-teste")]
+        conferir_a_hora_do_quadro_de_teste();
         if por_na_vaga(self.v, self.g, q) {
             Ok(())
         } else {
@@ -1680,24 +1707,60 @@ pub fn tirar_das_vagas_de_teste() -> Vec<NaVagaDeTeste> {
 static VIGIADO: AtomicU64 = AtomicU64::new(0);
 
 /// Só para a suíte: a sessão do fluxo vigiado teve o fim, ou o fecho de
-/// quem saiu com tudo dito, a mandar, e foi pedir a ordem das gravações.
+/// quem saiu com tudo dito, a mandar — ou o fluxo já tinha acabado, e o
+/// fecho dele —, e foi pedir a ordem das gravações.
 #[cfg(feature = "modo-teste")]
 static A_CAMINHO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Só para a suíte: depois de a sessão vigiada ir pedir a ordem, um quadro
+/// saiu ao par com a ordem na mão de quem o mandou, ou antes de o fim do
+/// fluxo a conferir ([`super::conferir_o_fim_na_cadeia_de_teste`]) estar
+/// gravado — ver [`conferir_a_hora_do_quadro_de_teste`].
+#[cfg(feature = "modo-teste")]
+static QUADRO_FORA_DE_HORA: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Só para a suíte: vigia a sessão do fluxo `n` — ver
-/// [`a_caminho_da_ordem_de_teste`].
+/// [`a_caminho_da_ordem_de_teste`] e [`quadro_fora_de_hora_de_teste`].
 #[cfg(feature = "modo-teste")]
 pub fn vigiar_a_ordem_de_teste(n: u64) {
     A_CAMINHO.store(false, Ordering::Release);
+    QUADRO_FORA_DE_HORA.store(false, Ordering::Release);
     VIGIADO.store(n.saturating_add(1), Ordering::Release);
 }
 
 /// Só para a suíte: se a sessão do fluxo vigiado ([`vigiar_a_ordem_de_teste`])
-/// já teve o fim ou o fecho que podem concluir o fluxo, e foi pedir a ordem
-/// das gravações para decidi-lo — sem ter mudado nada na tabela ainda.
+/// já teve o fim ou o fecho que podem concluir o fluxo — ou o fecho do
+/// fluxo que já acabou —, e foi pedir a ordem das gravações para decidi-lo,
+/// sem ter mudado nada na tabela ainda.
 #[cfg(feature = "modo-teste")]
 pub fn a_caminho_da_ordem_de_teste() -> bool {
     A_CAMINHO.load(Ordering::Acquire)
+}
+
+/// Só para a suíte: o canal de cada lado passa por aqui antes de mandar um
+/// quadro ao par — a vaga, no destino; o canal da suíte, na origem. Depois
+/// de a sessão vigiada ir pedir a ordem das gravações
+/// ([`a_caminho_da_ordem_de_teste`]), o quadro sai com a ordem solta — um
+/// par que não lê não segura as gravações da máquina — e com o fim do
+/// fluxo a conferir já gravado; senão, fica anotado
+/// ([`quadro_fora_de_hora_de_teste`]).
+#[cfg(feature = "modo-teste")]
+pub fn conferir_a_hora_do_quadro_de_teste() {
+    if A_CAMINHO.load(Ordering::Acquire)
+        && (crate::persistencia::ordem_na_mao_sem_trava()
+            || super::fim_gravado_na_ordem_de_teste().is_none())
+    {
+        QUADRO_FORA_DE_HORA.store(true, Ordering::Release);
+    }
+}
+
+/// Só para a suíte: se, desde [`vigiar_a_ordem_de_teste`] ou desde a última
+/// pergunta, um quadro saiu fora de hora
+/// ([`conferir_a_hora_do_quadro_de_teste`]) — e esquece.
+#[cfg(feature = "modo-teste")]
+pub fn quadro_fora_de_hora_de_teste() -> bool {
+    QUADRO_FORA_DE_HORA.swap(false, Ordering::AcqRel)
 }
 
 /// Só para a suíte: a sessão do fluxo `n` vai pedir a ordem das gravações.
@@ -1714,6 +1777,7 @@ fn a_caminho_da_ordem(n: u64) {
 pub fn esvaziar_de_teste() {
     VIGIADO.store(0, Ordering::Release);
     A_CAMINHO.store(false, Ordering::Release);
+    QUADRO_FORA_DE_HORA.store(false, Ordering::Release);
     com_vagas(|vs| {
         for s in vs.iter_mut() {
             s.acabou = true;
