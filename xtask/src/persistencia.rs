@@ -1249,24 +1249,19 @@ impl Ligada {
         teto: Duration,
     ) -> Result<Persistencia, String> {
         let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
-        let mut ultimo = String::from("nenhuma resposta");
         loop {
             if let Ok(Some(status)) = self.filho.try_wait() {
                 return Err(format!("a maquina saiu em vez de reiniciar: {status}"));
             }
-            let reiniciando = match persistencia_de(self) {
+            // A última resposta — o boot de antes, ou o erro do canal — vai na
+            // desistência.
+            let (reiniciando, ultimo) = match persistencia_de(self) {
                 Ok(p) if p.boots > boots => {
                     registrar_a_parada(andamento.maior_parada_ate(Instant::now()));
                     return Ok(p);
                 }
-                Ok(p) => {
-                    ultimo = format!("ainda o boot {}", p.boots);
-                    false
-                }
-                Err(e) => {
-                    ultimo = e;
-                    true
-                }
+                Ok(p) => (false, format!("ainda o boot {}", p.boots)),
+                Err(e) => (true, e),
             };
             let agora = Instant::now();
             let sinais = reiniciando.then(|| self.olhos.sinais(agora));
