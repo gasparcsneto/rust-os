@@ -14,8 +14,9 @@ use super::aviso::{
 };
 use super::{
     CODIGO_INSTALADO, DO_MODELO, Instalador, NaMalha, PUBLICADOS, Resultado, TETO_DA_MALHA, chamar,
-    com_a_bancada_http, decisoes_do_processo, ditas_na_malha, dito_na_malha, encerrar_na_malha,
-    esperar_ate, fs_no_armazem, fs_ok, fs_pedir, registro_que, versao_no_armazem,
+    com_a_bancada_http, decisoes_do_processo, diretorios_acima, ditas_na_malha, dito_na_malha,
+    encerrar_na_malha, esperar_ate, fs_no_armazem, fs_ok, fs_pedir, registro_que,
+    versao_no_armazem,
 };
 use crate::agent::json::Json;
 use crate::autorizacao::{Autoridade, Chamador};
@@ -738,5 +739,110 @@ pub(super) fn sdk_o_eco_fecha_o_fluxo_largado() -> Resultado {
         let _ = eco;
         let fim = encerrar_na_malha(&canal, SAIDA_DO_ECO);
         r.and(fim)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS47 — o copiador fecha o fluxo de cada cópia
+// ---------------------------------------------------------------------------
+
+/// Uma cópia entre dois copiadores deste Duke: o que recebe sobe primeiro;
+/// o que manda acha o pedido de envio, manda o arquivo e fecha o fluxo; o
+/// que recebe grava o arquivo, pelo `fs.write` dele, e fecha. O conteúdo
+/// chega inteiro, e o fluxo sai da tabela na hora — não fica vivo, contado
+/// nas cotas, até vencer a inatividade.
+pub(super) fn sdk_o_copiador_fecha_cada_copia() -> Resultado {
+    const BASE: &str = "/armazem/compartilhado/copiador";
+    const ORIGEM: &str = "/armazem/compartilhado/copiador/origem.txt";
+    const PEDIDO: &str = "/armazem/compartilhado/copiador/enviar";
+    const RECEBIDOS: &str = "/armazem/compartilhado/copiador/recebidos";
+    const RECEBIDO: &str = "/armazem/compartilhado/copiador/recebidos/origem.txt";
+    const CONTEUDO: &str = "ola, copiador";
+    /// O código com que o `copiador` sai no fim pedido.
+    const SAIDA_DO_COPIADOR: i64 = 53;
+    com_os_avisos(|| {
+        let (sessao, bia) = pessoa("bia", 4470);
+        let quem = Chamador::Pessoa(sessao);
+        let gravar = |caminho: &str, conteudo: &str| -> Resultado {
+            let versao = versao_no_armazem(caminho);
+            let r = fs_pedir(
+                quem,
+                "fs.write",
+                &format!(
+                    r#"{{"path":"{caminho}","content":"{conteudo}","expect_version":{versao}}}"#
+                ),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("um arquivo do copiador nao foi gravado");
+            }
+            Ok(())
+        };
+        let r = (|| -> Resultado {
+            // O `/armazem/compartilhado` pode não existir ainda, com o caso
+            // rodando sozinho: o armazém não cria pai de passagem.
+            diretorios_acima(BASE)?;
+            let r = fs_pedir(quem, "fs.mkdir", &format!(r#"{{"path":"{BASE}"}}"#));
+            if !fs_ok(&r) && !r.contains("ja ha algo nesse caminho") {
+                crate::log_error!("teste", "{}", r);
+                return Err("o diretorio do copiador nao foi criado");
+            }
+            gravar(ORIGEM, CONTEUDO)?;
+            let (_, pronto) = NaMalha::lancar("copiador", bia, "copiador: pronto ")?;
+            let (_, recebe) = pronto
+                .split_once(' ')
+                .ok_or("o copiador que recebe nao disse o canal")?;
+            let recebe = String::from(recebe);
+            let r = (|| -> Resultado {
+                gravar(PEDIDO, ORIGEM)?;
+                let desde = crate::log::total_emitidos();
+                let (_, pronto) = NaMalha::lancar("copiador", bia, "copiador: pronto ")?;
+                let (_, manda) = pronto
+                    .split_once(' ')
+                    .ok_or("o copiador que manda nao disse o canal")?;
+                let manda = String::from(manda);
+                let r = (|| -> Resultado {
+                    dito_na_malha(desde, "copiador: mandei ")?;
+                    dito_na_malha(desde, "copiador: recebi ")?;
+                    let (_, recebido) = fs_no_armazem(RECEBIDO);
+                    if recebido.as_deref() != Some(CONTEUDO.as_bytes()) {
+                        crate::log_error!("teste", "{:?}", recebido);
+                        return Err("o copiador nao gravou o que recebeu");
+                    }
+                    if esperar_ate(|| crate::fluxo::contagem().0 == 0, TETO_DA_MALHA).is_err() {
+                        crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                        return Err("o copiador largou o fluxo da copia sem fechar");
+                    }
+                    Ok(())
+                })();
+                r.and(encerrar_na_malha(&manda, SAIDA_DO_COPIADOR))
+            })();
+            r.and(encerrar_na_malha(&recebe, SAIDA_DO_COPIADOR))
+        })();
+        // O armazém volta a ser o de antes.
+        let caminhos = [
+            ("fs.delete", PEDIDO),
+            ("fs.delete", ORIGEM),
+            ("fs.delete", RECEBIDO),
+            ("fs.rmdir", RECEBIDOS),
+            ("fs.rmdir", BASE),
+        ];
+        let mut limpo = Ok(());
+        for (metodo, caminho) in caminhos {
+            let versao = versao_no_armazem(caminho);
+            if versao == 0 {
+                continue;
+            }
+            let r = fs_pedir(
+                quem,
+                metodo,
+                &format!(r#"{{"path":"{caminho}","expect_version":{versao}}}"#),
+            );
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                limpo = Err("o que o caso do copiador gravou nao foi apagado");
+            }
+        }
+        r.and(limpo)
     })
 }

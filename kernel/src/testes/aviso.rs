@@ -28,6 +28,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
 use politica::Codigo;
+use politica::aviso::Situacao;
 use protocolo::usuario::evento::{Evento, malha, tipo};
 
 /// A intenção que o `avisado` oferece.
@@ -2598,10 +2599,14 @@ pub(super) fn aviso_a_recusa_do_comando_espaca_o_aviso() -> Resultado {
 /// Depois de uma recusa, até o rearme, o que a operação recusada já
 /// encontrou não avisa de novo por mudança nenhuma que não o faça novo: as
 /// entregas de outra pessoa a um endpoint dela — a malha muda, e os
-/// endpoints todos são avaliados de novo — e um segundo pedido no endpoint
-/// de `b`, que já tinha um, não trazem o pedido que `b` não pôde aceitar; e
-/// o aviso não diz a `b` quando outra pessoa mexeu na malha. O novo avisa
-/// na hora: a entrega ao endpoint de `b` traz o `ENTREGA`, com o pedido.
+/// endpoints todos são avaliados de novo —, um segundo pedido no endpoint
+/// de `b`, que já tinha um, um terceiro pedido que quem abriu fecha — o
+/// pedido que acaba sem aceite não contava na cota de `b`: não é vaga — e
+/// um fluxo da outra pessoa aberto, aceito e fechado — a vaga é dos
+/// processos dele — não trazem o pedido que `b` não pôde aceitar; e o aviso
+/// não diz a `b` quando outra pessoa mexeu na malha. O novo avisa na hora,
+/// já na entrega: a entrega ao endpoint de `b` traz o `ENTREGA`, com o
+/// pedido.
 pub(super) fn aviso_depois_da_recusa_so_o_novo_avisa() -> Resultado {
     // O rearme da terceira recusa seguida.
     const JANELA_MS: u64 = 4_000;
@@ -2658,6 +2663,27 @@ pub(super) fn aviso_depois_da_recusa_so_o_novo_avisa() -> Resultado {
                 crate::log_error!("teste", "{}", segundo);
                 return Err("o segundo pedido nao ficou esperando");
             }
+            // Um terceiro pedido, que quem abriu fecha sem aceite, e um
+            // fluxo da outra pessoa, aberto, aceito e fechado: nenhuma das
+            // vagas é de `b`.
+            let pedido3 = abrir(c.quem(), &b.endpoint);
+            let Some(terceiro) = fs_texto(&pedido3, "stream") else {
+                crate::log_error!("teste", "{}", pedido3);
+                return Err("o terceiro pedido nao ficou esperando");
+            };
+            feito(
+                &sobre(c.quem(), "stream.close", &terceiro),
+                "o close do terceiro pedido nao passou",
+            )?;
+            let (alheio, _) = aberto(&d1, &d2, false, false)?;
+            feito(
+                &sobre(d1.quem(), "stream.close", &alheio),
+                "o close de d1 nao passou",
+            )?;
+            feito(
+                &sobre(d2.quem(), "stream.close", &alheio),
+                "o close de d2 nao passou",
+            )?;
             let ate = recusa.saturating_add(JANELA_MS / 2);
             let agora = crate::tempo::uptime_ms();
             if agora < ate {
@@ -2670,20 +2696,20 @@ pub(super) fn aviso_depois_da_recusa_so_o_novo_avisa() -> Resultado {
                 crate::log_error!("teste", "{:?}", b.avisos(marca));
                 return Err("o que nao era novo trouxe o pedido recusado antes do rearme");
             }
-            // O novo avisa na hora: uma entrega ao endpoint de `b`.
+            // O novo avisa na hora: uma entrega ao endpoint de `b` — o aviso
+            // sai na própria entrega, sem esperar o rearme.
             let marca = crate::log::total_emitidos();
-            let antes = crate::tempo::uptime_ms();
             let r = mandar_na_malha(a.quem(), &b.endpoint, "nova", 9_439_011);
             if !fs_ok(&r) {
                 crate::log_error!("teste", "{}", r);
                 return Err("a entrega ao endpoint de b nao foi mandada");
             }
-            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO | malha::ENTREGA)?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(antes);
-            if demora >= 1_000 {
-                crate::log_error!("teste", "{} ms", demora);
+            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+            if agora != Some(Situacao::Avisado) {
+                crate::log_error!("teste", "{:?}", agora);
                 return Err("a entrega nova nao avisou na hora, depois da recusa");
             }
+            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO | malha::ENTREGA)?;
             Ok(())
         })();
         encerrar_todos(r, &[&a, &b, &c, &d1, &d2])
@@ -2725,19 +2751,15 @@ pub(super) fn aviso_o_fim_na_espera_e_a_operacao_recusada() -> Resultado {
                 crate::log_error!("teste", "{}", r);
                 return Err("a politica nova nao recusou o status");
             }
-            let recusa = crate::tempo::uptime_ms();
-            a.esperar_aviso(desde, "fluxo", n, malha::FIM)?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(recusa);
-            if demora >= 900 {
-                crate::log_error!("teste", "{} ms", demora);
+            // O fim foi dito na própria recusa: a designação já saiu.
+            if let Some(s) = crate::aviso::situacao_de_teste(a.ponta(n)) {
+                crate::log_error!("teste", "{:?}", s);
                 return Err("o fim na espera esperou o rearme da operacao recusada");
             }
+            a.esperar_aviso(desde, "fluxo", n, malha::FIM)?;
             if a.avisos_depois_do_sossego(desde, "fluxo", n) != [malha::FIM] {
                 crate::log_error!("teste", "{:?}", a.avisos(desde));
                 return Err("o fim depois da operacao recusada nao veio uma vez");
-            }
-            if crate::aviso::situacao_de_teste(a.ponta(n)).is_some() {
-                return Err("o fim dito nao tirou a designacao");
             }
             Ok(())
         })();
@@ -2933,30 +2955,136 @@ pub(super) fn aviso_a_vaga_no_meio_da_recusa() -> Resultado {
                 "DENY_POLICY",
                 "o aceite acima da cota nao foi recusado",
             )?;
-            let recusa = crate::tempo::uptime_ms();
-            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(recusa);
-            if demora >= 700 {
-                crate::log_error!("teste", "{} ms", demora);
+            // O pedido foi avisado na própria recusa.
+            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+            if agora != Some(Situacao::Avisado) {
+                crate::log_error!("teste", "{:?}", agora);
                 return Err("a vaga no meio da recusa nao avisou o pedido na hora");
             }
-            // Sem vaga nova, a recusa seguinte espaça de novo.
+            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
+            // Sem vaga nova, a recusa seguinte espaça de novo: nada avisado
+            // na recusa, e o pedido só no rearme.
             let marca = crate::log::total_emitidos();
             recusado(
                 &aceitar(b.quem(), &b.endpoint),
                 "DENY_POLICY",
                 "o aceite acima da cota nao foi recusado",
             )?;
-            let recusa = crate::tempo::uptime_ms();
-            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(recusa);
-            if demora < 700 {
-                crate::log_error!("teste", "{} ms", demora);
+            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+            if agora != Some(Situacao::Livre) {
+                crate::log_error!("teste", "{:?}", agora);
                 return Err("a vaga ja usada ainda tirou o espacamento da recusa");
             }
+            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
             Ok(())
         })();
         crate::aviso::vaga_na_proxima_recusa_de_teste(0);
         encerrar_todos(r, &[&a, &b, &c])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS45 — o fim entre o nível e a trava da recusa
+// ---------------------------------------------------------------------------
+
+/// O fluxo acaba entre a pergunta do nível e a trava da operação recusada —
+/// como a inatividade, a revogação ou o fim do processo do par o acabariam
+/// nessa janela —, com o aviso da abertura tirado da fila e não consumido:
+/// a recusa refaz a conta depois da trava, e o `FIM` sai nela mesma, uma
+/// vez — em vez de esperar o rearme, ou de se perder se a lápide saísse
+/// antes dele.
+pub(super) fn aviso_o_fim_no_meio_da_recusa() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4450);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let antes_da_politica = crate::autorizacao::com_politica(|p| p.clone());
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            let (id, n) = aberto(&a, &b, true, false)?;
+            a.esperar_aviso(desde, "fluxo", n, malha::GRAVAVEL)?;
+            // A operação de `a`, recusada pelo gate, com o fluxo acabando
+            // entre o nível e a trava.
+            let desde = crate::log::total_emitidos();
+            crate::aviso::acabar_na_proxima_recusa_de_teste();
+            politica_sem("fabric.stream");
+            let r = sobre(a.quem(), "stream.status", &id);
+            crate::autorizacao::restaurar_politica(antes_da_politica.clone());
+            if fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a politica nova nao recusou o status");
+            }
+            if crate::fluxo::contagem().0 != 0 {
+                crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                return Err("o fluxo nao acabou no meio da recusa");
+            }
+            // O fim foi dito na própria recusa: a designação já saiu.
+            if let Some(s) = crate::aviso::situacao_de_teste(a.ponta(n)) {
+                crate::log_error!("teste", "{:?}", s);
+                return Err("o fim no meio da recusa esperou o rearme");
+            }
+            a.esperar_aviso(desde, "fluxo", n, malha::FIM)?;
+            if a.avisos_depois_do_sossego(desde, "fluxo", n) != [malha::FIM] {
+                crate::log_error!("teste", "{:?}", a.avisos(desde));
+                return Err("o fim no meio da recusa nao veio uma vez");
+            }
+            Ok(())
+        })();
+        crate::autorizacao::restaurar_politica(antes_da_politica);
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS46 — o sentido fechado pelo par, e o fluxo acabando logo depois
+// ---------------------------------------------------------------------------
+
+/// O sentido de `b` fechado pelo par, e o fluxo acabando logo depois da
+/// escrita que ouviu isso — antes da conta do aviso, como a inatividade, a
+/// revogação ou o desligamento o acabariam nessa janela —: a designação não
+/// sai em silêncio; o `FIM` que `b` não ouviu sai, uma vez.
+pub(super) fn aviso_o_fim_depois_do_sentido_fechado() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4460);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let (id, n) = aberto(&a, &b, false, true)?;
+            let desde = crate::log::total_emitidos();
+            escrito(
+                &escrever(a.quem(), &id, b"ola"),
+                3,
+                "a escrita de a nao entrou",
+            )?;
+            b.esperar_aviso(desde, "fluxo", n, malha::LEGIVEL)?;
+            feito(
+                &sobre(a.quem(), "stream.close", &id),
+                "o close de a nao passou",
+            )?;
+            // `b` escreve antes de ler, e o fluxo acaba entre a escrita e a
+            // conta do aviso.
+            let desde = crate::log::total_emitidos();
+            crate::fluxo::acabar_no_proximo_encerrado_de_teste();
+            let r = escrever(b.quem(), &id, b"tarde");
+            if fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a escrita no sentido fechado pelo par passou");
+            }
+            if crate::fluxo::contagem().0 != 0 {
+                crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                return Err("o fluxo nao acabou depois da escrita");
+            }
+            b.esperar_aviso(desde, "fluxo", n, malha::FIM)
+                .map_err(|_| "o fim depois do sentido fechado nao foi avisado")?;
+            if b.avisos_depois_do_sossego(desde, "fluxo", n) != [malha::FIM] {
+                crate::log_error!("teste", "{:?}", b.avisos(desde));
+                return Err("o fim depois do sentido fechado nao veio uma vez");
+            }
+            if crate::aviso::situacao_de_teste(b.ponta(n)).is_some() {
+                return Err("o fim dito nao tirou a designacao");
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b])
     })
 }

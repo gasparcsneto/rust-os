@@ -37361,6 +37361,14 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_a_vaga_no_meio_da_recusa,
     },
     Caso {
+        nome: "aviso: o fim entre o nivel e a trava da recusa sai na hora",
+        f: aviso::aviso_o_fim_no_meio_da_recusa,
+    },
+    Caso {
+        nome: "aviso: o fluxo que acaba depois do sentido fechado avisa o fim",
+        f: aviso::aviso_o_fim_depois_do_sentido_fechado,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },
@@ -37387,6 +37395,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "sdk: o eco-malha fecha o fluxo que o cliente largou",
         f: sdk::sdk_o_eco_fecha_o_fluxo_largado,
+    },
+    Caso {
+        nome: "sdk: o copiador fecha o fluxo de cada copia",
+        f: sdk::sdk_o_copiador_fecha_cada_copia,
     },
     Caso {
         nome: "sdk: o laco sobe com o nome tomado",
