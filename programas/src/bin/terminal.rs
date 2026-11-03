@@ -41,8 +41,11 @@
 //!
 //! Menos na linha que pede o nome, uma senha ou um passo do pareamento: ali
 //! o kernel recusa a ação da árvore quando ela entra, pela regra da linha do
-//! console físico, e ela nunca chega aqui — do lado de cá do pseudo-terminal,
-//! o console não saberia que o texto veio da árvore.
+//! console físico, e ela não chega aqui — salvo na corrida com o Enter da
+//! pessoa, a ação que entrou antes de a linha mudar (ver as decisões
+//! pendentes no README). Do lado de cá do pseudo-terminal, o apagar da linha
+//! e o texto são caracteres que o console não distingue dos da pessoa; o
+//! Enter do agente ele reconhece, e nessas linhas não confirma.
 //!
 //! # A senha passa por aqui
 //!

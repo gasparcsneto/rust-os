@@ -1919,7 +1919,8 @@ borda —, e é, portanto, o que a pessoa vê, seja quem for que digitou. O
 digita no pseudo-terminal, pelo mesmo caminho das teclas da pessoa. Menos
 quando o console pede o nome, uma senha ou um passo do pareamento: aí o
 kernel recusa a ação ao recebê-la, pela regra da linha do físico, e ela não
-chega ao Terminal — ver [Consoles](#consoles).
+chega ao Terminal — ver [Consoles](#consoles) (fica uma corrida com o Enter
+da Pessoa: ver [Decisões pendentes](#decisões-pendentes)).
 
 Duas coisas no interpretador tornaram isso possível sem adivinhar nada.
 Apagar a linha inteira — o Ctrl-U dos terminais —, para trocar o que está
@@ -4911,9 +4912,11 @@ Sem ganho a medir, não há o que pagar com esse risco.
   [Consoles](#consoles)): a barra entrega o `ABRIR` a quem escuta os
   nomes `terminal` e `janelas`, e `escutar` não reserva nome nenhum; e
   qualquer processo dono de uma superfície, até invisível, pede o foco do
-  teclado quando quer. Um processo de outro principal que tomou o nome
-  com o Terminal fechado, ou que tomou o foco, recebe o que a Pessoa
-  digita — a senha também, com uma Pessoa entrada no console físico —, e
+  teclado quando quer. Um processo de outro principal que tomou um desses
+  nomes — o `terminal` com o Terminal fechado; o `janelas` com o servidor
+  fora do ar, e a barra publica nele o "Sobre" e o Terminal quando não há
+  um no ar —, ou que tomou o foco, recebe o que a Pessoa digita — a senha
+  também, com uma Pessoa entrada no console físico —, e
   a captura não deixa registro: essas chamadas não passam pelo gate. A
   senha capturada não abre nada pelo canal do agente, pela malha nem pelo
   enlace (o login só existe no teclado de um console), mas serve a quem
@@ -4923,7 +4926,15 @@ Sem ganho a medir, não há o que pagar com esse risco.
   decisão. Até lá, também, a regra da linha da pessoa num Terminal é
   conferida quando a ação da árvore entra no kernel: uma ação que entra
   enquanto o Enter da Pessoa ainda vai a caminho do console é conferida
-  contra a linha de antes, e o texto dela pode chegar à linha seguinte.
+  contra a linha de antes: o texto dela pode chegar à linha seguinte, e o
+  campo fica arrendado a quem a pediu — as teclas da Pessoa nessa linha
+  são `CONFLICT` até o arrendamento vencer (60 s depois da última edição)
+  ou ser solto. E o `ui.claim` de um agente não passa por essa regra: ele
+  arrenda a linha do nome, da senha ou da cerimônia por até 300 s,
+  renováveis, e as teclas da Pessoa nela são `CONFLICT` enquanto durar —
+  sem ler nem escrever nada, e gravado. Recusá-lo ali daria à Pessoa uma
+  prioridade que a regra da coordenação ("sem prioridade entre eles") não
+  dá: fica para a mesma decisão.
 
 ## O tempo
 
@@ -7537,8 +7548,11 @@ conhecido ou não, uma tecla de função, um clique na barra — é
 
 **Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
 A senha não ecoa, não aparece na árvore semântica — o valor da linha
-fica vazio —, e o buffer dela é apagado depois da conferência. Enquanto um
-console pede senha, nada entra no histórico que `keyboard.read` devolve: o
+fica vazio —, e o buffer dela é apagado depois da conferência; num
+Terminal, o programa também zera o que guarda dela no caminho ao
+pseudo-terminal — a fila do que espera, o bloco que ela larga ao crescer, a
+tecla já tratada. Enquanto um console pede senha, nada entra no histórico
+que `keyboard.read` devolve: o
 kernel não sabe para qual janela uma tecla vai virar senha, então não grava
 tecla nenhuma. Um agente não edita — nem para esvaziar — nem confirma a
 linha que pede nome ou senha, e não confirma `login` nem `logout`: o login
@@ -7547,15 +7561,19 @@ cada Terminal, que a árvore mostra como o campo da janela dele: o
 `set_value`, o `cancel` e o `confirm` de um agente nesse campo são
 recusados quando a ação entra no kernel, com o mesmo motivo e pela mesma
 regra do interpretador que valem no físico, antes de o campo ser arrendado
-— e não chegam ao Terminal, que os digitaria no pseudo-terminal, onde o
-console só vê caracteres e não saberia que vieram da árvore. A decisão do
-`ui.act` continua a do gate, gravada; a recusa é da linha, e vai para o
-log.
+— e não chegam ao Terminal, que digitaria no pseudo-terminal o apagar da
+linha e o texto, caracteres que o console não distingue dos da pessoa (o
+Enter do agente o console reconhece, e com ele não confirma essas linhas).
+A decisão do `ui.act` continua a do gate, gravada; a recusa é da linha, e
+vai para o log. Fica uma corrida com o Enter da Pessoa: ver [Decisões
+pendentes](#decisões-pendentes).
 
 **Trocar a própria senha.** `senha` pede a atual, a nova e a nova de novo,
 pelas mesmas regras da senha do login — sem eco, fora da árvore e do
 histórico, apagadas em toda saída, e só do teclado: um agente não as edita,
-nem confirma `senha`. É a quarta palavra do console, e a única que é uma
+não as esvazia nem as confirma — nem no console físico, nem num Terminal,
+pelo campo da janela dele —, e não confirma `senha`. É a quarta palavra do
+console, e a única que é uma
 operação — `credential.change_self`, decidida pelo gate —: uma senha não se
 digita numa linha de comando, e por isso o diálogo dela é do console, e não
 um comando do registro.
@@ -8428,7 +8446,7 @@ reforçada (`6cd32b1`), **as trinta e quatro reprovam**.
 | a senha atual em claro no log | três casos, pelo `log.tail` |
 | a troca ecoa as senhas | a troca de verdade — a árvore e a tela |
 | um agente começa a troca pela árvore | `senha: so a propria…` |
-| um agente confirma a linha da troca; a árvore escreve nela | a troca de verdade (duas mutações) |
+| um agente confirma a linha da troca; a árvore escreve nela | a troca de verdade (duas mutações) — rodadas de novo depois da regra da linha da pessoa num Terminal, como N90 e N91: reprovadas |
 
 No ARM, o controle e sete mutações — sem o gate, a senha atual errada,
 a troca que alcança outra pessoa, as duas trocas ao mesmo tempo, só em
@@ -9208,15 +9226,24 @@ que o escalonador comporta: 190, estáticos, ~409 KB de RAM fixa, no
 408 896 bytes no `.bss` (a de antes, 68 880 no `.data`, dentro da
 imagem); os segmentos carregados encolheram 61 744 bytes no x86_64
 (−1,2%) e 96 960 no aarch64 (−2,2%), e a memória que eles ocupam cresceu
-344 084 e 328 240 bytes (+4,1% e +6,3%) — quase toda, a tabela. O teto por processo foi para dentro da mesma seção crítica que
-insere, e a varredura de cada `escutar` confere os ouvintes contra uma
-fotografia dos fios vivos — uma tomada da tranca do escalonador por
-varredura. Dois casos `eventos:` novos, o pior caso dos processos e o
-terceiro canal do processo; as N82, N83, N86 e N87 os põem à prova, e
-as quatro foram reprovadas. Fora do SDK, na mesma numeração, as N88 e
-N89 desfazem a regra da linha da pessoa no campo da janela do Terminal e
-no `cancel` da árvore no físico (ver [Consoles](#consoles)): as duas
-reprovadas.
+344 084 e 328 240 bytes (+4,1% e +6,3%) — a tabela, 340 016 bytes a
+mais que a de antes: quase todo o crescimento no x86_64, e mais que ele no
+aarch64, onde o resto encolheu 11 776 bytes. O teto por processo foi para
+dentro da mesma seção crítica que insere, e a varredura de cada
+`escutar` confere os ouvintes contra uma fotografia dos fios vivos — uma
+tomada da tranca do escalonador por varredura. Dois casos `eventos:`
+novos, o pior caso dos processos e o terceiro canal do processo; as N82,
+N83, N86 e N87 os põem à prova, e as quatro foram reprovadas. Fora do
+SDK, na mesma numeração: a N85, a mutação antiga da fase do NSF — a
+leitura da auditoria que não avança —, rodada de novo contra o caso
+reescrito, reprovada; e as N88 e N89 desfazem a regra da linha da pessoa
+no campo da janela do Terminal e no `cancel` da árvore no físico (ver
+[Consoles](#consoles)): as duas reprovadas. As N90 e N91 rodam de novo as
+duas do B4 que tiravam a conta de dentro nas linhas da troca da senha —
+reprovadas —, e as N92 e N93 estreitam a regra de fora: a N92, só no
+login, reprovada; a N93, sem as linhas da troca, sobreviveu até os casos
+da troca e do Terminal pedirem pela árvore nessas linhas, e então foi
+reprovada.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9263,6 +9290,7 @@ reprovadas.
 | a tabela de canais de volta a 32 (N82), ou com dois canais por vaga de trabalho (N83); a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos (N87) | "eventos: o pior caso dos processos cabe na tabela" |
 | o `escutar` sem o teto por processo (N86) | "eventos: o terceiro canal do processo e recusado", "eventos: o pior caso dos processos cabe na tabela" |
 | fora do SDK: o campo da janela do Terminal sem a regra da linha da pessoa (N88); o `cancel` da árvore que esvazia a linha da senha do físico (N89) | "terminal: o agente nao edita nem confirma a linha da senha"; "consoles: login e logout" |
+| fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |

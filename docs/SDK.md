@@ -322,10 +322,12 @@ confirma cada uma, e o aviso se cala (NS41).
   elas: a imagem nova herda os descritores, e não ouve os avisos da
   anterior (NS17, NS36). Os endpoints persistem, como sempre persistiram
   (a malha os mantém na troca de imagem); a imagem nova oferece com o
-  aviso de novo, se quiser. Os canais herdados continuam escutados pelo
-  processo e contam no teto dos dois: a imagem nova que quer o seu laço
-  fecha antes os descritores que não vai usar — como o Terminal faz ao
-  entrar —, ou o `Laco::novo` ouve `OCUPADO` em todos os nomes.
+  aviso de novo, se quiser. Os canais que a imagem anterior escutava
+  continuam escutados pelo processo — o mesmo fio — e contam no teto dos
+  dois: com os dois ocupados, a imagem nova que quer o seu laço fecha antes
+  os que não vai usar, ou o `Laco::novo` ouve `OCUPADO` em todos os nomes.
+  Os descritores herdados de um `fork` — como os que o Terminal fecha ao
+  entrar — não contam: o filho não é ouvinte deles.
 - O `fork` não passa designação nenhuma: o filho não é dono de pontas nem
   de endpoints, e um descritor herdado não o faz ouvinte do canal — o
   `notify` com ele é recusado.
@@ -569,7 +571,7 @@ NS28 o instala e roda.
   nos passos que precisam ser exatos. O que se confere é o
   que o kernel publicou, quando e quantas vezes, e que cada operação depois
   de um aviso continua sendo um pedido decidido pelo gate.
-- **Os canais**, nas duas arquiteturas: 2 casos `eventos:`, da tabela no
+- **Os canais**, nas duas arquiteturas: 2 casos `eventos:` novos, da tabela no
   pior caso dos processos (o primeiro dos [Limites
   conhecidos](#limites-conhecidos)). `eventos: o pior caso dos processos
   cabe na tabela`: quatro `avisado`s com dois canais cada, pela chamada; e
@@ -758,6 +760,20 @@ e o `cancel` pela árvore também deixou de esvaziar essas linhas (ver
 Terminal, e a N89 devolve ao `cancel` da árvore o esvaziar da linha da
 senha do físico: as duas reprovadas.
 
+A revisão da documentação pediu que se rodassem de novo as duas mutações
+do B4 que tiravam a conta de dentro nas linhas da troca da senha: a última
+rodada delas era anterior a esta regra, e, com duas camadas no físico,
+tirar uma só podia sobreviver. A N90 (o agente que confirma a troca) e a
+N91 (o texto que se escreve nela) continuam reprovadas — o caso da troca
+chama a conta de dentro direto. E duas estreitam a regra de fora: a N92,
+só no nome e na senha do login, reprovada pelo `pareamento: so pelo
+teclado`; a N93, sem as linhas da troca — num Terminal, o `set_value` do
+agente chegaria à senha atual ou à nova —, **sobreviveu**: nenhum caso
+pedia pela árvore nessas linhas. O caso da troca passou a conferir a regra
+de fora no físico, e o do Terminal, a pedir a troca pela janela e
+conferir as três recusas na senha atual: a N93, rodada de novo, foi
+reprovada pelos dois.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -847,6 +863,10 @@ senha do físico: as duas reprovadas.
 | N87 | a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos | `eventos: o pior caso dos processos cabe na tabela` |
 | N88 | o campo da janela do Terminal sem a regra da linha da pessoa: o `set_value`, o `cancel` e o `confirm` de um agente chegam à linha do nome ou da senha | `terminal: o agente nao edita nem confirma a linha da senha` |
 | N89 | o `cancel` da árvore que esvazia a linha da senha do console físico | `consoles: login e logout` |
+| N90 | fora do SDK: o agente que confirma as linhas da troca da senha na conta do console (a M33 do B4, de novo depois da regra) | `senha: a pessoa troca a propria, e a antiga nao entra mais` |
+| N91 | fora do SDK: o texto que se escreve nas linhas da troca da senha na conta do console (a M34 do B4, com o texto de hoje) | `senha: a pessoa troca a propria, e a antiga nao entra mais` |
+| N92 | fora do SDK: a regra de fora da linha da pessoa só no nome e na senha do login | `pareamento: so pelo teclado` |
+| N93 | fora do SDK: a regra de fora da linha da pessoa sem as linhas da troca da senha | `senha: a pessoa troca a propria, e a antiga nao entra mais`, `terminal: o agente nao edita nem confirma a linha da senha` — depois do reforço |
 
 ## Medidas
 

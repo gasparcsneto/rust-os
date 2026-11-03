@@ -61,8 +61,11 @@ No console, pelo teclado — como `login` e `senha`, um agente não os
 confirma, e as linhas da cerimônia não se editam pela árvore semântica,
 nem para esvaziar: nem no console físico, nem num Terminal, onde a árvore
 as mostra como o campo da janela dele e o kernel recusa a ação antes de
-ela chegar ao programa (o caso "terminal: o agente nao edita nem confirma a
-linha da senha", no [README](../README.md#consoles)):
+ela chegar ao programa — a regra das linhas do login e da troca da
+senha, que o caso "terminal: o agente nao edita nem confirma a linha da
+senha" confere
+([README](../README.md#consoles)); as linhas da cerimônia num Terminal não
+têm caso próprio:
 
 - `aceitar <nome> <papel> [<endereço>]` — abre a janela (120 s): a 7071
   passa a escutar, e a tela mostra a impressão deste Duke e o endereço;
