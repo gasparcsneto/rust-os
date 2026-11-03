@@ -180,7 +180,9 @@ struct Entrada {
     vaga: bool,
 }
 
-/// As designações vivas.
+/// As designações guardadas: as dos objetos vivos e as dos que já acabaram
+/// com o fim ainda por dizer ou por ouvir (no teto de
+/// [`ACABADOS_POR_PROCESSO`] por processo).
 static DESIGNACOES: Mutex<BTreeMap<Objeto, Entrada>> = Mutex::new(BTreeMap::new());
 
 /// Quantas há: o atalho de quem toca sem designação nenhuma.
@@ -822,7 +824,8 @@ pub fn passada_do_coletor() {
 /// O que se mede do aviso, para `security.metrics`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Medidas {
-    /// As designações vivas.
+    /// As designações guardadas — também as dos objetos que já acabaram,
+    /// com o fim ainda por dizer ou por ouvir.
     pub designacoes: usize,
     /// Os avisos publicados.
     pub publicados: u64,

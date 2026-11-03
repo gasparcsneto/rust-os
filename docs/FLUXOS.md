@@ -240,14 +240,24 @@ nenhum:
   `stream.read`, …), com o programa que pediu;
 - na origem: o pedido ao par (`fluxo:<id> ; dispositivo:<nome> ;
   endpoint:… ; intencao:…`, `pedido ao par; politica N`), a abertura
-  efetiva pelo kernel (`aberto pelo par; versao V`) e o `net.connect` do
-  serviço de enlace;
+  efetiva pelo kernel (`aberto pelo par; versao V`) — gravada dentro da
+  ordem das gravações, antes de acordar quem espera: a operação do
+  processo sobre o fluxo, que passa pela ordem, vem depois dela na cadeia —
+  e o `net.connect` do serviço de enlace;
 - no destino: a sessão (`stream.session`, com a impressão da chave, a
   relação e o atestado do programa de lá), e cada decisão como o
   dispositivo (`pela relacao <R>, atestado <P>`);
 - o fim, dos dois lados, em nome do kernel: `stream.end`, com o motivo, os
   bytes de cada sentido e os descartados (`<motivo>; ida N; volta M; desc
-  D`).
+  D`) — gravado antes de acordar quem espera, e dentro da ordem das
+  gravações quando o fim vem com ela: o pedido pelo processo, e o que vem
+  de fora (a inatividade e o prazo do aceite, a revogação, a leitura ou a
+  escrita que a política recusa, o fim do processo e o `exec`, o
+  desligamento, o endpoint que acaba, o dispositivo ou a relação que sai,
+  o aborto da sessão, o que chega do par, o aceite que quem abriu não pode
+  mais confirmar). O fim que o envio da sessão conclui é gravado fora da
+  ordem (ver os limites do aviso em
+  [`SDK.md`](SDK.md#limites-conhecidos)).
 
 A execução que cita a decisão (`…; decisao N`) a cita inteira mesmo
 quando o detalhe passa do teto de 96 bytes: quem encolhe é o texto antes

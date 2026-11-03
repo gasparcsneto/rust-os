@@ -394,7 +394,7 @@ kernel/src/
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
-│   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio e a concorrência
+│   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
@@ -402,7 +402,7 @@ kernel/src/
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
-│   └── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes, a `conversa` com a janela e o fluxo no mesmo laço, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, e as medidas do laço
+│   └── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
@@ -550,7 +550,7 @@ politica/src/        a política de autorização, a mesma no kernel e no hosped
 ├── mensagens.rs     as caixas, os estados, as cotas e os nonces das mensagens
 ├── fluxo.rs         a conta do fluxo: os estados, os sentidos e os buffers, o fim e o aborto, o crédito com o par, as cotas e as lápides
 ├── malha.rs         a conta da malha: a forma da intenção, os endpoints, as entregas, os estados, os nonces e as cotas
-├── aviso.rs         a conta do aviso da malha: os bits da prontidão, o aviso na borda e o rearme pela operação do dono, um aviso não consumido por objeto, o devido do canal cheio, o fim uma vez, e os três campos do evento
+├── aviso.rs         a conta do aviso da malha: os bits da prontidão, o aviso na borda e o rearme pela operação do dono, um aviso não consumido por objeto, o devido do canal cheio, o fim uma vez, o rearme espaçado depois da recusa e o que é novo até ele, a geração da designação, e os três campos do evento
 ├── dispositivos.rs  os dispositivos relacionados: a chave de outro Duke, a relação com uma pessoa desta máquina, as lápides, a desfeita
 ├── pareamento.rs    a cerimônia de pareamento pela própria pessoa: os estados, os prazos, o compromisso, os códigos de conferência e o id da relação
 ├── enlace.rs        o enlace, na origem: o conjunto fechado, os pedidos que esperam o par, os nonces da relação e o que cada canal mandou
@@ -8957,9 +8957,15 @@ ignorado. A conta de quando avisar é pura
 ([`politica/src/aviso.rs`](politica/src/aviso.rs)): na borda, no máximo um
 aviso não consumido por objeto, rearmado pela operação do dono com o
 nível reavaliado — a operação que não passa (o gate, a reconfirmação, o
-próprio comando) também consome o aviso, e o que ainda está pronto avisa
-pelo coletor um segundo depois, e o dobro a cada recusa seguida, em vez de
-girar —; o espaço só para quem esbarrou no cheio e para quem
+próprio comando), e a recepção que relê o que já leu, também consomem o
+aviso, e o que ela encontrou pronto avisa pelo coletor um segundo depois, e
+o dobro a cada recusa seguida, em vez de girar; até lá só o que é novo no
+objeto — o que o dono ouviria — avisa, e a vaga que o fim de um fluxo dá
+na cota dos processos em que ele contava (quem abriu, sempre; quem
+aceitou, se aceitou) avisa o pedido; e a conta da recusa é refeita depois
+de ela consumir o aviso, para o que mudou depois de ela perguntar o nível
+não esperar o rearme —; a conta que perguntou o nível antes de uma operação
+do dono não o publica depois dela; o espaço só para quem esbarrou no cheio e para quem
 abriu; o fim uma vez — o de um objeto que acaba com o aviso ainda não
 consumido se junta a ele na fila, ou espera a operação do dono —; o canal
 cheio deixa o aviso devido, e o coletor tenta de novo; o aviso que ainda
@@ -8993,9 +8999,10 @@ roda com o selo de um editor em quem o papel confia.
 só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
 codificação e o evento que só tem o tipo, o número e os bits, o fim com o
 aviso não consumido — junto ao da fila, ou na espera do dono —, o fim
-devido e o rearme depois das recusas seguidas —, o quadro, a prontidão da
+devido, o rearme depois das recusas seguidas e, até ele, só o novo
+avisando — o que o dono ouviria —, o quadro, a prontidão da
 ponta e do endpoint, o selo, a lista do contrato e o ELF forjado
-(NH01–NH17). Na suíte, nas duas arquiteturas, 32 casos `aviso:` e 7
+(NH01–NH19). Na suíte, nas duas arquiteturas, 41 casos `aviso:` e 9
 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
@@ -9011,9 +9018,17 @@ suspensão e o esquecimento do dispositivo, os fluxos de e para outro
 Duke, o fim com o aviso não consumido — junto ao da fila, ou na espera do
 dono, com o teto das designações acabadas —, a recusa do gate que consome
 o aviso, a recusa do próprio comando que espaça o aviso — e a vaga que
-avisa o pedido —, quem retira ou fecha, o nome do canal no registro e a fila na troca
-de imagem —; e o `eco-malha` com três clientes num processo só, a
-`conversa`, o programa de fora do repositório selado, instalado e rodado,
+avisa o pedido, também no meio da recusa —, só o novo avisando antes do
+rearme, com outra pessoa mexendo na malha, o fim logo depois da operação
+recusada, a recepção que relê sem girar e o descarte das entregas, o
+sentido fechado pelo par com o fluxo vivo, o fim que chega no meio da
+operação recusada ou logo depois da escrita no sentido fechado, a conta
+atrasada de outro núcleo que não diz o fim já ouvido, o fim por fora que
+vai à cadeia antes de acordar, quem retira ou fecha, o nome do canal no
+registro e a fila na troca de imagem —; e o `eco-malha` com três clientes num processo só, o que fecha o fluxo
+largado pelo cliente, uma cópia inteira entre dois `copiador`, que fecham
+o fluxo dos dois lados, a `conversa`, o programa de fora do repositório
+selado, instalado e rodado,
 o `agent.describe` contra o contrato, o `system.info`, as medidas do laço
 e o laço que sobe com o nome tomado.
 As invariantes de fonte conferem que só `kernel::aviso` publica o aviso,
@@ -9061,19 +9076,22 @@ suíte até um cair na vaga do canal que o processo fechou, sem que o aviso
 cruze para ele. Na última rodada de cada uma, as trinta e duas são
 reprovadas.
 
-Mais dezessete, N33 a N49, conferem as correções da validação final — os
-achados do agente adversário, nas duas rodadas: todas reprovadas. A N45 é
-a primeira forma da correção do A1 (largar a designação na hora), que o
-NS03 pegou como regressão; e a N47 (o rearme sem o recuo), reprovada pelo
-teste do hospedeiro, passou no caso da suíte até ele aceitar no máximo
-três tentativas na janela, em vez de cinco.
+Mais trinta e sete, N33 a N69, conferem as correções da validação final —
+os achados do agente adversário, nas cinco rodadas, e o que os casos novos
+acharam. A N45 é a primeira forma da correção do A1 (largar a designação
+na hora), que o NS03 pegou como regressão; e a N47 (o rearme sem o
+recuo), reprovada pelo teste do hospedeiro, passou no caso da suíte até
+ele aceitar no máximo três tentativas na janela, em vez de cinco. Depois
+da terceira, da quarta e da quinta rodadas, que mexeram no rearme, na
+vaga, na recepção, na conta e no fim do fluxo, as sessenta e nove rodaram
+de novo contra o código final: todas reprovadas, nenhuma sobrevivente.
 
 | Mutação | Reprovada por |
 |---|---|
 | a designação sem conferir que o processo escuta o canal; o descritor que não é canal, ignorado; o `notify` de um agente ou de uma pessoa aceito; a designação passando ao filho no `fork` | "o canal que o processo nao escuta e recusado", "o descritor que nao e canal e recusado", "so processo designa" |
 | a recusa do gate que ainda designa o endpoint do pedido | "a recusa do gate nao designa nada" — depois do reforço |
 | o primeiro byte do fluxo no aviso; o aviso da ponta no canal do par | "o evento so tem o tipo, o numero e os bits", "cada processo no seu canal" |
-| sem coalescência; sem rearme depois da operação do dono; o `GRAVAVEL` nunca publicado | os testes do hospedeiro de `politica::aviso` e os casos do dado, do espaço e dos dois sentidos |
+| sem coalescência; sem rearme depois da operação do dono; o `GRAVAVEL` nunca publicado | os testes do hospedeiro de `politica::aviso` e os casos do dado, do espaço e dos dois sentidos — o rearme, também "sdk: o eco-malha serve tres clientes, um processo so" |
 | o rearme sem reavaliar a prontidão | "um aviso de cada objeto no canal" |
 | o `FIM` não publicado no aborto | "o fim do sentido, o fecho e o aborto", "o desligamento avisa o fim", "a suspensao e o esquecimento do dispositivo avisam o fim" |
 | o aviso depois da lápide vista | "o fim contra a leitura, nada depois do fim ouvido" — depois do reforço |
@@ -9085,34 +9103,48 @@ três tentativas na janela, em vez de cinco.
 | o despertar da sessão remota sem o aviso; a ponta aceita de outro Duke sem aviso | "o fluxo saindo para outro Duke", "o fluxo chegando de outro Duke" |
 | um bit de coalescência partilhado entre os objetos do canal; o aviso seguinte do mesmo objeto noutro lugar da fila | "quatro fluxos avisando ao mesmo tempo", "um aviso de cada objeto no canal" |
 | o pedido que abre aceito no desligamento | "o desligamento avisa o fim" |
-| o fim com o aviso não consumido que não fica na espera, ou que não se junta ao aviso da fila; as designações acabadas sem o teto | "o fim com o aviso nao consumido, junto ou na espera" |
-| o fim com o aviso não consumido largado na hora (a primeira forma da correção do A1) | "o fim do sentido, o fecho e o aborto" |
+| o fim com o aviso não consumido que não fica na espera, ou que não se junta ao aviso da fila; as designações acabadas sem o teto | "o fim com o aviso nao consumido, junto ou na espera" — a da espera, também o teste do hospedeiro |
+| o fim com o aviso não consumido largado na hora (a primeira forma da correção do A1) | "o fim do sentido, o fecho e o aborto", "o fim com o aviso nao consumido, junto ou na espera" — também os testes do hospedeiro |
 | a recusa do gate, ou a recepção recusada, que não consome o aviso | "a recusa do gate consome o aviso" |
 | a retirada que avisa o fim a quem retirou; o fecho recusado que larga a designação | "quem retira ou fecha" |
 | o nome do canal cru no registro da designação | "o nome do canal no registro da designacao" |
 | a troca de imagem que deixa os avisos na fila | "a troca de imagem tira os avisos da fila" |
-| o laço que não tenta outro nome | "o laco sobe com o nome tomado" |
+| o laço que não tenta outro nome | "sdk: o laco sobe com o nome tomado" |
 | a leitura do ELF sem conferir o cabeçalho e as contas | o teste do hospedeiro do ELF forjado |
-| a recusa do comando que rearma na hora; o rearme sem o recuo; a recusa seguida que empurra o rearme; o fim do fluxo que não reavalia os endpoints | "a recusa do comando espaca o aviso, e a vaga avisa o pedido" — o recuo, também o teste do hospedeiro |
+| a recusa do comando que rearma na hora; o rearme sem o recuo; a recusa seguida que empurra o rearme; o fim do fluxo que não dá a vaga aos processos dele; a vaga que não esquece o nível recusado | "a recusa do comando espaca o aviso, e a vaga avisa o pedido" — o recuo, também o teste do hospedeiro |
+| sem o filtro do que é novo; o filtro que segura também o novo; o novo contado ao contrário na conta pura; a vaga dada pelo pedido que acaba sem aceite, ou aos endpoints de qualquer processo | "depois da recusa, so o novo avisa antes do rearme" — a primeira, também o caso da recusa do comando; a da conta pura, também o teste do hospedeiro |
+| o objeto acabado que espera o rearme da recusa | "o fim na espera sai logo depois da operacao recusada" |
+| a vaga que chega no meio da recusa, ignorada | "a vaga no meio da recusa avisa o pedido" |
+| a recepção que relê o que já leu, contada como a que passou; o aceite sem pedido que desfaz o espaçamento; o descarte que lê e não confirma | "a recepcao que rele o que ja leu nao gira" |
+| o fim só do sentido que larga a designação do fluxo vivo | "o sentido fechado pelo par nao larga o fluxo vivo" |
+| a recusa espaçada que não refaz a conta depois da trava | "o fim entre o nivel e a trava da recusa sai na hora" |
+| o `Encerrado` que larga a designação quando o fluxo acabou depois da operação | "o fluxo que acaba depois do sentido fechado avisa o fim" |
+| a conta que publica o nível de antes da operação do dono | "a conta atrasada nao diz o fim que a operacao ouviu" |
+| o filtro do que é novo pelo nível cru | o teste do hospedeiro do que o dono ouviria |
+| o fim por fora gravado depois de acordar | "o fim por fora vai a cadeia antes de acordar" |
+| o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
 | a conferência do contrato aceitando um parâmetro tirado; selar sem conferir o manifesto; o quadro aceitando a mensagem maior que o teto | os testes do hospedeiro do xtask e do `protocolo::quadro` |
 
-O kernel de release cresceu, nos segmentos carregados, 134 592 bytes (+2,6%)
-no x86_64 e 143 688 (+3,3%) no aarch64, contra o fim do DN-2. Na bancada —
-QEMU sem KVM, dois núcleos por máquina, as duas no mesmo hospedeiro de
-quatro (CI 401) —, o modelo de fora do repositório faz os 40 KiB de ida e
-volta entre os Dukes em 2,2 a 2,7 s; o `eco-malha` serve ao mesmo tempo os
-dois clientes de 4 MiB, e o segundo cliente remoto é recusado pelo teto da
-relação; 1 MiB de cada lado ao mesmo tempo passa sem impasse, a 52–62 KiB/s.
-O laço anda a 37–48 KiB/s entre os Dukes e a 56–74 KiB/s no local, contra
-56–66 KiB/s do estilo bloqueante do DN-2 entre os Dukes — uma comparação
+O kernel de release cresceu, nos segmentos carregados, 174 464 bytes (+3,4%)
+no x86_64 e 160 840 (+3,7%) no aarch64, contra o fim do DN-2 — o código
+final, depois das cinco rodadas. Na bancada — QEMU sem KVM, dois núcleos
+por máquina, as duas no mesmo hospedeiro de quatro (CI 410, o código
+final; os pares da mesma arquitetura num hospedeiro perto de duas vezes
+mais rápido que o dos cruzados) —, o modelo de fora do repositório faz os
+40 KiB de ida e volta entre os Dukes em 1,1 a 2,5 s; o `eco-malha` serve
+ao mesmo tempo os dois clientes de 4 MiB, e o segundo cliente remoto é
+recusado pelo teto da relação; 1 MiB de cada lado ao mesmo tempo passa sem
+impasse, a 52–106 KiB/s. O laço anda a 44–95 KiB/s entre os Dukes e a
+57–145 KiB/s no local, contra 56–123 KiB/s do estilo bloqueante do DN-2
+entre os Dukes — de 21% a 29% abaixo dele, par a par, numa comparação
 que não é limpa: o cliente remoto do laço divide a máquina de lá, e o
 `eco-malha`, com o cliente local, ao mesmo tempo, e o bloqueante corre
 sozinho. Cada leitura e cada escrita continua sendo uma decisão do gate e
 um registro da auditoria, e o aviso soma a volta pelo canal — do aviso à
-operação do dono, de 83 a 130 ms em média e até 1,9 s no pior caso, com os
-dois emuladores disputando o hospedeiro. O par inteiro, os seis passos, leva de 593 a 914 s.
+operação do dono, de 50 a 132 ms em média e até 1,5 s no pior caso, com os
+dois emuladores disputando o hospedeiro. O par inteiro, os seis passos, leva de 355 a 849 s.
 
 ## Barramento PCI
 

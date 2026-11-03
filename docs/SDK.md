@@ -213,7 +213,8 @@ Nenhum byte do fluxo, nenhum corpo de entrega, nenhum motivo, nenhum quem.
 O aviso é na **borda**, e a operação do dono o **rearma**:
 
 - um objeto tem **no máximo um aviso não consumido**. Enquanto ele não é
-  consumido, nada mais desse objeto é publicado — nem o `FIM`;
+  consumido, nada mais desse objeto vira aviso novo — o `FIM`, no máximo,
+  junta-se a ele, se ele ainda espera na fila (abaixo);
 - **a operação do dono sobre o objeto consome o aviso** — ler, escrever,
   aceitar, receber, ver o estado —, e o nível de agora é reavaliado: o que
   ainda está pronto avisa de novo;
@@ -225,25 +226,48 @@ O aviso é na **borda**, e a operação do dono o **rearma**:
 - `GRAVAVEL` é só para quem esbarrou no cheio — a escrita que não coube
   inteira pede o próximo espaço —, e para quem abriu o fluxo, na
   abertura. Quem nunca esbarrou não é acordado por espaço;
-- `FIM` sai uma vez, e só com o aviso anterior consumido. Depois da
-  operação do dono que ouviu o fim, nada mais é publicado sobre o objeto,
-  e a designação sai. O objeto que acaba com um aviso ainda não consumido
-  não avisa o fim de novo: o `FIM` se junta ao evento desse aviso, se ele
-  ainda espera na fila — o dono lê os dois juntos —, e a designação sai
-  ali; se o dono já o tirou da fila, o fim espera a operação dele, a que
-  consome o aviso — e, se ela não ouviu o fim (a leitura do último dado,
-  que acabou com o fluxo, por exemplo), o `FIM` sai em seguida, uma vez
-  (NS03, NS32);
+- `FIM` sai uma vez: como aviso novo, só com o aviso anterior consumido.
+  Depois da operação do dono que ouviu o fim, nada mais é publicado sobre
+  o objeto, e a designação sai. O objeto que acaba com um aviso ainda não
+  consumido não avisa o fim de novo: o `FIM` se junta ao evento desse
+  aviso, se ele ainda espera na fila — o dono lê os dois juntos —, e a
+  designação sai ali; se o dono já o tirou da fila, o fim espera a
+  operação dele, a que consome o aviso — e, se ela não ouviu o fim (a
+  leitura do último dado, que acabou com o fluxo, ou a operação recusada),
+  o `FIM` sai em seguida, uma vez (NS03, NS32, NS40). A conta de outro
+  núcleo que perguntou o nível antes da operação do dono não publica
+  depois dela: a operação muda a geração da designação, e a conta dela,
+  com o nível de depois, é que decide — o `FIM` que a operação ouviu, o
+  dado que ela leu, não voltam como aviso (NS48);
 - a operação do dono **que não passa** — recusada pelo gate (a política,
   a taxa, a contenção), pela reconfirmação dentro da decisão, ou pelo
   próprio comando (a cota de fluxos cheia, o estado do objeto) — também
-  consome o aviso: senão o objeto ficaria mudo. Mas o que ainda está pronto
-  não avisa de novo na hora — voltaria a ser recusado, num giro de aviso,
-  recusa e aviso —: avisa na próxima mudança do objeto, ou pelo coletor um
-  segundo depois da recusa, e o dobro a cada recusa seguida, até um
-  minuto; a operação que passa zera a conta (NS33, NS38). O fim de um
-  fluxo reavalia os endpoints: o dono que não pôde aceitar por falta de
-  vaga é avisado do pedido assim que uma vaga abre (NS38);
+  consome o aviso: senão o objeto ficaria mudo. Mas o que ela encontrou
+  pronto não avisa de novo na hora — voltaria a ser recusado, num giro de
+  aviso, recusa e aviso —: avisa pelo coletor um segundo depois da recusa,
+  e o dobro a cada recusa seguida, até um minuto (a recusa seguida não
+  adia o rearme já marcado), e até lá só o que é **novo** no objeto avisa —
+  um bit que o dono ouviria e que não estava pronto na recusa (o espaço
+  que ele não quer não conta, NH19): a entrega que chega ao endpoint
+  cujo aceite foi recusado, o fim. A mudança de outro objeto (uma entrega
+  a outro endpoint, o fim de um fluxo alheio) e o mesmo bit de novo (um
+  segundo pedido) não trazem de volta o que foi recusado, e o aviso não
+  diz a ninguém quando outro mexeu na malha. A operação que passa zera a
+  conta (NS33, NS38, NS39). O fim de um fluxo dá uma **vaga** na cota dos
+  processos em que ele contava — o de quem abriu, sempre; o de quem aceitou,
+  se ele foi aceito: o pedido que acaba sem aceite não contava na cota do
+  dono do endpoint —: o dono que não pôde aceitar por falta de vaga é
+  avisado do pedido assim que ela abre — também quando ela abre no meio do
+  aceite recusado (NS38, NS39, NS43). O objeto que já acabou não espera o
+  rearme: depois da operação recusada, o `FIM` sai na hora (NS40). E a
+  conta da recusa é refeita depois de ela consumir o aviso, sempre: o que
+  mudou depois de ela perguntar o nível — o objeto que acabou, um bit novo
+  — também não espera o rearme (NS45);
+- a operação que passa **sem mudar nada** — o aceite sem pedido na fila, a
+  recepção sem entrega nova — consome o aviso sem desfazer o rearme
+  espaçado de uma recusa; e a recepção que não tira nenhuma entrega da
+  pendência, com pendente ainda lá (a que relê as já lidas, sem `after`),
+  conta como a que não passa (NS41);
 - **um aviso de cada objeto no canal**: a operação do dono consome o aviso
   mesmo que o evento ainda esteja na fila do canal — o programa que lê
   várias vezes seguidas, sem voltar ao laço, rearma a cada leitura. O
@@ -252,9 +276,14 @@ O aviso é na **borda**, e a operação do dono o **rearma**:
   dois eventos do mesmo objeto, e um fluxo agitado não enche o canal de
   avisos velhos (NS01b).
 
-O endpoint avisa `ENTREGA` enquanto houver entrega ainda não recebida: um
-programa que oferece com o aviso e não usa entregas ainda assim chama
-`malha::receber` quando o bit vem — ou o aviso volta a cada operação.
+O endpoint avisa `ENTREGA` enquanto houver entrega **pendente** — que
+nenhuma recepção leu. Quem usa entregas recebe com `after` — a página
+seguinte, depois da última lida — até vir vazia, e confirma
+(`malha::confirmar`) o que tratou: a recepção sem `after` relê as já
+lidas, que ficam até a confirmação ou o prazo, e não alcança as seguintes.
+O programa que oferece com o aviso e não usa entregas chama
+`malha::descartar_entregas` quando o bit vem: ela recebe página a página e
+confirma cada uma, e o aviso se cala (NS41).
 
 ### O canal cheio, a morte, a troca de imagem
 
@@ -262,9 +291,11 @@ programa que oferece com o aviso e não usa entregas ainda assim chama
   coletor o entrega depois, sem perder o objeto nem duplicar o aviso. O
   fim de um objeto que acabou com o canal cheio fica devido. Ele e o fim
   na espera da operação do dono são as únicas designações sem objeto vivo,
-  e um processo guarda no máximo 8 delas; passado disso, a mais antiga
-  cai, contada em `dropped`: um processo que não lê o canal, ou que lê e
-  não opera, não acumula objetos que já acabaram (NS32).
+  e um processo guarda no máximo 8 delas; passado disso, cai a de menor
+  chave — os endpoints antes das pontas e, entre as do mesmo tipo, a mais
+  antiga (ver [Limites conhecidos](#limites-conhecidos)) —, contada em
+  `dropped`: um processo que não lê o canal, ou que lê e não opera, não
+  acumula objetos que já acabaram (NS32).
 - O canal que ninguém mais escuta — o processo fechou o descritor, ou
   morreu — larga as designações dele.
 - A troca de imagem (`exec`) larga as designações **antes** do resto, e
@@ -294,11 +325,12 @@ agente é recusado como sempre, com o mesmo código com ou sem `notify`
 
 O aviso não tem registro próprio na auditoria: a designação está no
 registro de execução do comando que a pediu, na mesma cadeia, com o nome
-do canal — só com letras, dígitos e `-_.:/`, o resto vira `_`: o nome é
-texto do processo, e não pode imitar a citação da decisão (NS35) —, e
-cada operação depois do aviso está no registro dela. As medidas vão ao
-`security.metrics`, em `mesh_notices`: as designações vivas
-(`designations`), os avisos
+do canal — só com letras e dígitos ASCII e `-_.:/`, o resto vira `_`: o
+nome é texto do processo, e não pode imitar a citação da decisão (NS35)
+—, e cada operação depois do aviso está no registro dela. As medidas vão ao
+`security.metrics`, em `mesh_notices`: as designações guardadas
+(`designations`) — também as dos objetos que já acabaram, no teto do
+processo —, os avisos
 publicados (`published`), os juntados a um do mesmo objeto ainda na fila
 (`merged`), as mudanças que não avisaram porque já havia um aviso não
 consumido (`coalesced`), os que acharam o canal cheio (`full_channel`) e
@@ -327,9 +359,10 @@ plano de controle, vai sem `wait`. O que não coube na escrita espera numa
 mesmo processo pode ter um fluxo com o aviso e outro sem.
 
 **Quem retira ou fecha.** Quem retira um endpoint que designou não é
-avisado do fim dele, e quem fecha um fluxo não é avisado de nada mais:
-sabem, porque fizeram. O fecho que a reconfirmação recusa deixa o fluxo
-vivo, e a designação com ele (NS34).
+avisado do fim dele (salvo a corrida estreita de [Limites
+conhecidos](#limites-conhecidos)), e quem fecha um fluxo não é avisado de
+nada mais: sabem, porque fizeram. O fecho que a reconfirmação recusa deixa
+o fluxo vivo, e a designação com ele (NS34).
 
 **O fim e o fecho.** `Fluxo::terminar` termina o sentido daqui: o outro
 lado lê o resto e o fim (`LEGIVEL`). Quando o fluxo acabou de vez para o
@@ -337,7 +370,15 @@ dono — o outro lado fechou (lido o que ele mandou), foi revogado, o
 processo dele morreu, o
 dispositivo foi suspenso ou esquecido —, a ponta avisa `FIM`, e a próxima
 operação ouve `CONFLICT` com o motivo (`fechado pela ponta`, `revogado`,
-`o dispositivo foi suspenso`…).
+`o dispositivo foi suspenso`…). A escrita de quem ficou, com o sentido
+dela fechado pelo par, ouve `CONFLICT` — e a designação fica, enquanto
+ainda há o que ler do par: o resto e o fim ainda avisam (NS42); se o fluxo
+acaba logo depois dela, o fim que ela não ouviu é avisado (NS46). Quem
+desiste de um fluxo, ou acabou com ele, o fecha (`Fluxo::fechar`) antes de
+largar o estado — o que já escreveu segue legível para o outro até o fim
+do sentido —; senão ele fica vivo, contado nas cotas, até vencer a
+inatividade. Os exemplos fecham: o `eco-malha` o fluxo largado pelo
+cliente (NS44), e o `copiador` o de cada cópia, dos dois lados (NS47).
 
 **Entre Dukes.** O aviso é sempre local: o Duke daqui avisa o programa
 daqui, pelo crédito e pelos dados que chegam do par; nada do aviso
@@ -368,7 +409,8 @@ continua sendo entrada não confiável.
 - **Mensagens sobre um fluxo** —
   [`copiador`](../programas/src/bin/copiador.rs). Um arquivo do armazém
   mandado a outro copiador, que o grava pelo `fs.write` **dele**: o fluxo
-  não dá escrita nenhuma.
+  não dá escrita nenhuma. Os dois fecham o fluxo quando a cópia acaba.
+  NS47.
 - **O modelo** — [`sdk/modelo`](../sdk/modelo/src/main.rs): o eco com o
   laço, e o cliente de outro modelo quando o armazém tem o pedido. NS28.
 
@@ -383,7 +425,7 @@ continua sendo entrada não confiável.
 | o dispositivo suspenso, esquecido ou revogado | `FIM`; `CONFLICT` com o motivo do dispositivo (NS23; a revogação, NB04) |
 | o Duke desligando | `FIM` em cada ponta de fluxo designada, e a operação seguinte ouve `desligando`; nada novo abre nem é aceito (`CONFLICT`) (NS22) |
 | escrever num fluxo ainda pedido | `CONFLICT` `o fluxo ainda nao abriu` — espere o `GRAVAVEL` da abertura |
-| o canal de eventos cheio | nada: o aviso fica devido, e chega depois |
+| o canal de eventos cheio | nada: o aviso fica devido, e chega depois — o fim devido, até o teto de 8 designações acabadas do processo ([Limites conhecidos](#limites-conhecidos)) |
 
 ## As cotas
 
@@ -444,26 +486,36 @@ NS28 o instala e roda.
 
 ## Testes
 
-- **No hospedeiro** (NH01–NH17): a conta pura do aviso
+- **No hospedeiro** (NH01–NH19): a conta pura do aviso
   (`politica::aviso`) — a borda que publica uma vez, a operação que
   rearma, o espaço só para quem o quer, o fim uma vez, o canal cheio, o
   canal sem ouvinte, a codificação e o evento que só tem o tipo, o número e
   os bits, o fim com o aviso não consumido — junto ao evento da fila, ou
   na espera da operação do dono (NH14) —, o fim devido, no teto do
-  processo (NH15), e o rearme depois das recusas seguidas (NH17) —;
+  processo (NH15), o rearme depois das recusas seguidas (NH17) e, até
+  ele, só o que é novo avisando (NH18) — o que o dono ouviria (NH19) —;
   o quadro (`protocolo::quadro`); no xtask, o selo e a lista do contrato,
   com a conferência que acusa o parâmetro tirado, e o ELF forjado recusado
   sem pânico (NH16); e a prontidão que o kernel pergunta, da ponta
   (`politica::fluxo`, NH12) e do endpoint (`politica::malha`, NH13).
-- **Na suíte**, nas duas arquiteturas: 32 casos `aviso:` (NS01–NS25, o
-  NS01b, NS32–NS36 e NS38) e 7 casos `sdk:` (NS26–NS31 e NS37). Os
-  NS32–NS38 vieram da validação final — os achados do agente adversário,
-  nas duas rodadas: o fim com o aviso não consumido, junto ao da fila ou
-  na espera do dono, e o teto das designações acabadas; a recusa do gate
-  que consome o aviso; quem retira ou fecha; o nome do canal no registro;
-  a fila na troca de imagem; o nome do laço tomado; e a recusa do próprio
-  comando, que espaça o aviso em vez de girar, com a vaga que avisa o
-  pedido. O programa `avisado` só espera no canal dele e diz
+- **Na suíte**, nas duas arquiteturas: 41 casos `aviso:` (NS01–NS25, o
+  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48 e NS49) e 9 casos `sdk:`
+  (NS26–NS31, NS37, NS44 e NS47). Os NS32–NS49 vieram da validação final —
+  os achados do agente adversário, nas cinco rodadas: o fim com o aviso não consumido, junto ao
+  da fila ou na espera do dono, e o teto das designações acabadas; a
+  recusa do gate que consome o aviso; quem retira ou fecha; o nome do
+  canal no registro; a fila na troca de imagem; o nome do laço tomado; a
+  recusa do próprio comando, que espaça o aviso em vez de girar, com a
+  vaga que avisa o pedido; só o novo avisando antes do rearme, com outra
+  pessoa mexendo na malha; o fim logo depois da operação recusada; a
+  recepção que relê sem girar, e o descarte das entregas; o sentido
+  fechado pelo par, com o fluxo vivo; a vaga no meio da recusa; o fim que
+  chega entre a operação recusada e a conta dela, e o que chega logo
+  depois da escrita no sentido fechado; a conta atrasada de outro núcleo,
+  que não diz o fim que a operação já ouviu; o fim por fora, que vai à
+  cadeia antes de acordar quem espera; o `eco-malha` que fecha o fluxo
+  largado pelo cliente; e uma cópia inteira entre dois `copiador`, que
+  fecham o fluxo dos dois lados. O programa `avisado` só espera no canal dele e diz
   no log cada aviso que chega; a suíte dita os passos a ele — o caminho
   inteiro pelo runtime — ou pede **como** ele, pela mesma função do gate,
   nos passos que precisam ser exatos. O que se confere é o
@@ -524,17 +576,24 @@ vê:
 
 Na última rodada de cada uma, as trinta e duas são reprovadas.
 
-**As da validação final.** Mais dezessete — N33 a N49 — conferem as
-correções dos achados do agente adversário, nas duas rodadas, cada uma
-contra o caso que a vê. Todas são reprovadas, com duas notas. A N45 é a
-primeira forma da correção do A1 — largar a designação na hora —, que o
-NS03 pegou como regressão antes de ela virar mutação. A N47 (o rearme sem
-o recuo) foi reprovada pelo teste do hospedeiro, mas passou no NS38, que
-aceitava cinco tentativas na janela: com a mutação, as recusas 3 a 6
-rearmam em um segundo e a sétima já cai no teto de um minuto — cinco. O
-caso passou a aceitar no máximo três (com o recuo, são duas), e a N47 é
-reprovada por ele também. As N35 a N38 rodaram de novo depois da segunda
-rodada, que mexeu nos caminhos delas.
+**As da validação final.** Mais trinta e sete — N33 a N69 — conferem as
+correções da validação final — os achados do agente adversário, nas cinco
+rodadas, e o que os casos novos acharam —, cada uma contra o caso que a
+vê. Duas notas. A N45 é a primeira forma da correção do A1 — largar a
+designação na hora —, que o NS03 pegou como regressão antes de ela virar
+mutação. A N47 (o rearme sem o recuo) foi reprovada pelo teste do
+hospedeiro, mas passou no NS38, que aceitava cinco tentativas na janela:
+com a mutação, as recusas 3 a 6 rearmam em um segundo e a sétima já cai
+no teto de um minuto — cinco. O caso passou a aceitar no máximo três (com
+o recuo, são duas), e a N47 é reprovada por ele também.
+
+**A rodada final.** A terceira, a quarta e a quinta rodadas mexeram no
+rearme, na vaga, na recepção, na conta e no fim do fluxo, e as sessenta e
+nove rodaram de novo, uma de cada vez, contra o código final — dezesseis
+delas (N04, N05, N06, N08, N12, N20, N27, N31, N32, N36, N48, N49, N50,
+N52, N54 e N59) com o trecho reescrito, porque o código em volta mudou,
+para o mesmo efeito. A tabela é o resultado dessa rodada: as sessenta e
+nove reprovadas, nenhuma sobrevivente.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -543,10 +602,10 @@ rodada, que mexeu nos caminhos delas.
 | N03 | a recusa do gate que ainda designa o endpoint do pedido | NS10, depois do reforço |
 | N04 | o primeiro byte do fluxo no campo `b` do aviso | NS12 |
 | N05 | o aviso da ponta no canal do par | NS13 |
-| N06 | sem coalescência: toda mudança publica | NH01, NH05; NS01 |
-| N07 | sem rearme depois da operação do dono | NH02, NH03; NS01, NS26 |
+| N06 | sem coalescência: toda mudança publica | NH01, NH05, NH14; NS01 |
+| N07 | sem rearme depois da operação do dono | NH02, NH03, NH14; NS01, NS26 |
 | N08 | o rearme sem reavaliar a prontidão | NS01b |
-| N09 | o `GRAVAVEL` nunca publicado | NH03, NH06; NS02, NS06 |
+| N09 | o `GRAVAVEL` nunca publicado | NH03, NH06, NH14, NH19; NS02, NS06 |
 | N10 | o `FIM` não publicado no aborto | NS03, NS22, NS23 |
 | N11 | o aviso depois da lápide vista | NS16, depois do reforço |
 | N12 | o `exec` mantendo as designações | NS17 |
@@ -582,11 +641,31 @@ rodada, que mexeu nos caminhos delas.
 | N42 | a leitura do ELF com a conta que transborda | NH16 |
 | N43 | o laço que não tenta outro nome | NS37 |
 | N44 | o fim que não se junta ao aviso que espera na fila | NS32 |
-| N45 | o fim com o aviso não consumido largado na hora (o `FIM` perdido) | NH01, NH14; NS03 |
+| N45 | o fim com o aviso não consumido largado na hora (o `FIM` perdido) | NH01, NH14; NS03, NS32 |
 | N46 | o aceite recusado pelo comando que rearma na hora (o giro) | NS38 |
 | N47 | o rearme sem o recuo | NH17; NS38, depois do reforço |
-| N48 | o fim do fluxo que não reavalia os endpoints | NS38 |
+| N48 | o fim do fluxo que não dá a vaga aos processos dele | NS38 |
 | N49 | a recusa seguida que empurra o rearme marcado | NS38 |
+| N50 | sem o filtro do que é novo: a mudança alheia traz o aviso recusado antes do rearme | NS38, NS39 |
+| N51 | a vaga que não esquece o nível recusado | NS38 |
+| N52 | o filtro que segura também o novo | NS39 |
+| N53 | o novo contado ao contrário na conta pura | NH18, NH19; NS39 |
+| N54 | o objeto acabado que espera o rearme da recusa | NS40 |
+| N55 | a vaga que chega no meio da recusa, ignorada | NS43 |
+| N56 | a recepção que relê o que já leu, contada como a que passou (o giro do `ENTREGA`) | NS41 |
+| N57 | o aceite sem pedido que desfaz o espaçamento | NS41 |
+| N58 | o descarte que lê e não confirma | NS41 |
+| N59 | o fim só do sentido que larga a designação do fluxo vivo | NS42 |
+| N60 | o `eco-malha` que larga o cliente sem fechar o fluxo | NS44 |
+| N61 | a vaga dada ao dono do endpoint pelo pedido que acaba sem aceite | NS39 |
+| N62 | a vaga dada aos endpoints de qualquer processo | NS39 |
+| N63 | a recusa espaçada que não refaz a conta depois da trava (o fim no meio dela, perdido) | NS45 |
+| N64 | o `Encerrado` que larga a designação quando o fluxo acabou depois da operação | NS46 |
+| N65 | o `copiador` que manda e não fecha o fluxo | NS47 |
+| N66 | o `copiador` que não reconhece o diretório que já existe (só a primeira cópia de cada Duke) | NS47 |
+| N67 | a conta que publica o nível perguntado antes da operação do dono (o `FIM` que ela já ouviu) | NS48 |
+| N68 | o filtro do que é novo pelo nível cru, e não pelo que o dono ouviria | NH19 |
+| N69 | o fim por fora gravado depois de acordar quem espera | NS49 |
 
 ## Medidas
 
@@ -595,38 +674,42 @@ O kernel de release, nos segmentos carregados (a soma do `filesz` dos
 
 | | DN-2 | DN-3 | diferença |
 |---|---:|---:|---:|
-| x86_64 | 5 138 155 | 5 272 747 | +134 592 (+2,6%) |
-| aarch64 | 4 298 347 | 4 442 035 | +143 688 (+3,3%) |
+| x86_64 | 5 138 155 | 5 312 619 | +174 464 (+3,4%) |
+| aarch64 | 4 298 347 | 4 459 187 | +160 840 (+3,7%) |
 
-Na memória (a soma do `memsz`), +133 648 bytes no x86_64 e +132 960 no
-aarch64. A medida é do código final do DN-3, depois das duas rodadas do
+Na memória (a soma do `memsz`), +174 616 bytes no x86_64 e +133 728 no
+aarch64. A medida é do código final do DN-3, depois das cinco rodadas do
 agente adversário.
 
-A bancada `cargo xtask sdk` na CI 401 — QEMU sem KVM, dois núcleos por
-máquina, as duas no mesmo hospedeiro de quatro. "Laço" é o modelo e o
-`eco-malha`, um processo e uma espera no canal; "bloqueante" é o
-`remetente` e o `recebedor` do DN-2, cada pedido esperando. As vazões
-contam os dois sentidos.
+A bancada `cargo xtask sdk` na CI 410 — o código final, QEMU sem KVM,
+dois núcleos por máquina, as duas no mesmo hospedeiro de quatro. "Laço" é
+o modelo e o `eco-malha`, um processo e uma espera no canal; "bloqueante"
+é o `remetente` e o `recebedor` do DN-2, cada pedido esperando. As vazões
+contam os dois sentidos. Os pares da mesma arquitetura e os cruzados
+correm em jobs — e hospedeiros — diferentes, e os números só se comparam
+dentro de cada par: o hospedeiro dos pares da mesma arquitetura andou
+perto do dobro do dos cruzados em tudo, também no bloqueante do DN-2, que
+o DN-3 não mudou.
 
 | Par | NB05: 40 KiB ida e volta | NB02: 1 MiB de cada lado | Laço entre os Dukes | Laço local | Bloqueante entre os Dukes | Do aviso à operação (média, origem / destino) | Pior | O par inteiro |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| x86_64→x86_64 | 2,66 s | 52 KiB/s | 37 KiB/s | 56 KiB/s | 56 KiB/s | 99 / 130 ms | 1,43 s | 914 s |
-| aarch64→aarch64 | 2,17 s | 62 KiB/s | 48 KiB/s | 69 KiB/s | 66 KiB/s | 83 / 107 ms | 1,46 s | 593 s |
-| x86_64→aarch64 | 2,32 s | 53 KiB/s | 43 KiB/s | 74 KiB/s | 61 KiB/s | 99 / 101 ms | 1,43 s | 824 s |
-| aarch64→x86_64 | 2,59 s | 61 KiB/s | 43 KiB/s | 56 KiB/s | 62 KiB/s | 85 / 128 ms | 1,93 s | 610 s |
+| x86_64→x86_64 | 1,27 s | 93 KiB/s | 84 KiB/s | 134 KiB/s | 108 KiB/s | 55 / 56 ms | 0,83 s | 496 s |
+| aarch64→aarch64 | 1,11 s | 106 KiB/s | 95 KiB/s | 145 KiB/s | 123 KiB/s | 50 / 51 ms | 0,70 s | 355 s |
+| x86_64→aarch64 | 2,31 s | 52 KiB/s | 44 KiB/s | 57 KiB/s | 56 KiB/s | 100 / 132 ms | 1,33 s | 849 s |
+| aarch64→x86_64 | 2,45 s | 60 KiB/s | 44 KiB/s | 59 KiB/s | 62 KiB/s | 86 / 124 ms | 1,53 s | 635 s |
 
 Cada leitura e cada escrita continua sendo uma decisão do gate e um
 registro da auditoria — o número mede isso, e não o transporte. O laço
-fica de 27% a 34% abaixo do bloqueante entre os Dukes, e a comparação não
+fica de 21% a 29% abaixo do bloqueante entre os Dukes, e a comparação não
 é limpa: no NB01 o cliente remoto divide a máquina B — e o `eco-malha` —
 com o cliente local, ao mesmo tempo, e o bloqueante do NB06 corre
 sozinho; e o laço soma a volta pelo canal — o aviso publicado, o fio
 acordado no canal, a operação pedida ao gate —, que na bancada leva em
-média de 83 a 130 ms com os dois emuladores disputando o hospedeiro. Em
+média de 50 a 132 ms com os dois emuladores disputando o hospedeiro. Em
 troca, um processo serve vários fluxos, a janela e o pseudo-terminal numa
 espera só. Os avisos de cada máquina ao fim do NB05, do NB01 e do NB02 (o
-`security.metrics`, desde o boot): de 419 a 441 publicados e de 432 a 462
-juntados na origem; de 798 a 1 006 publicados e de 1 354 a 1 443 juntados
+`security.metrics`, desde o boot): de 407 a 447 publicados e de 439 a 473
+juntados na origem; de 753 a 1 016 publicados e de 1 319 a 1 405 juntados
 no destino, que também tem as duas pontas do cliente local do NB01 — e o
 canal nunca teve mais de um aviso do mesmo objeto.
 
@@ -649,8 +732,42 @@ Os residuais da validação final — nenhum é bypass de autoridade:
   do endpoint e o largar ainda pode avisar `FIM` a quem retirou — um
   aviso a mais, sem efeito: a operação seguinte diz que o endpoint não
   existe.
+- **A conta atrasada** de outro núcleo não publica o nível de antes de uma
+  operação do dono (NS48) — salvo se chega à trava entre a operação e o
+  consumo do aviso, a janela em que a operação ainda acorda quem espera e
+  grava o que fez: então ela ainda pode dizer o que a operação acabou de
+  mudar — o fim que ela ouviu, o dado que ela leu. Um aviso a mais, sem
+  efeito: a operação seguinte diz o que há.
+- **O fim que a sessão com o par conclui** — o fim mandado ao par com o
+  outro sentido já acabado, o fecho de quem saiu com tudo dito — vai à
+  cadeia antes de acordar quem espera, mas fora da ordem das gravações:
+  uma operação do dono que não foi acordada por ele, e que entra na ordem
+  nesse meio, pode vir antes do fim na cadeia. Os outros fins por fora —
+  a inatividade e o prazo do aceite, a revogação, a leitura ou a escrita
+  que a política recusa, o fim do processo e a troca de imagem, o
+  desligamento, o endpoint que acaba, o dispositivo ou a relação que sai,
+  o aborto da sessão, o que chega do par e o aceite que quem abriu não
+  pode mais confirmar — vão à cadeia dentro da ordem, antes de acordar
+  quem espera (NS49, pela inatividade). Nenhum registro falta.
 - **Os endpoints persistem na troca de imagem** (`exec`), como sempre
   persistiram na malha; as designações e os avisos na fila, não.
+- **O filtro do que é novo é por objeto**: ele guarda o nível inteiro que a
+  operação recusada encontrou, e não só os bits dela. Uma entrega que chega
+  entre o aviso do pedido e o aceite recusado pela cota só avisa no rearme
+  — embora a recepção passasse —; e a recepção que passa desfaz o
+  espaçamento do aceite recusado — o pedido avisa de novo, uma vez por
+  entrega. Nenhum dos dois gira: o primeiro espera no máximo o rearme; o
+  segundo é uma tentativa a mais por entrega. A vaga, do mesmo jeito,
+  esquece o nível recusado inteiro dos endpoints do processo, e não só o
+  pedido: o fim de um fluxo que contava na cota dele — um que ele abriu,
+  ou que aceitou — traz de volta o que outra operação recusada dele tinha
+  encontrado: um aviso na hora, e a recusa seguinte sobre o mesmo
+  endpoint, que usa a vaga, ainda não espaça — uma tentativa a mais por
+  vaga, sem giro: a recusa depois dela espaça de novo.
+- **A recusa pela forma do pedido** — o `notify` que não é canal do
+  processo, o `wait` que não cabe, o id que não é de um fluxo dele — não
+  chega ao objeto e não consome o aviso: o objeto fica com o aviso não
+  consumido, e só o próprio dono fica sem notícia dele até operar direito.
 
 ## O que não existe
 
