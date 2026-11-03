@@ -175,12 +175,15 @@ struct Entrada {
     /// ([`politica::aviso::novo_depois_da_recusa`]). A vaga na cota do
     /// processo o limpa — era o que o aceite recusado esperava.
     recusado: u8,
-    /// Uma vaga na cota do processo chegou, e desde então nenhum aviso do
-    /// objeto saiu no canal, nem operação do dono passou, nem o rearme veio:
-    /// a recusa que vier antes — a vaga chegou com um aviso ainda não
-    /// consumido, ou no meio da operação — não espaça, e o aviso da vaga
-    /// sai, uma vez. O aviso publicado a tira ([`publicar`]): a recusa
-    /// seguinte já é a resposta a ele, e espaça.
+    /// Uma vaga na cota do processo chegou — ou as marcas transbordaram, e
+    /// a marca dela pode ter sido a que não coube ([`processar`]) —, e desde
+    /// então nenhum aviso do objeto saiu no canal, nem operação do dono
+    /// passou: a recusa que vier antes — a vaga chegou com um aviso ainda
+    /// não consumido, ou no meio da operação — não espaça, e o aviso da vaga
+    /// sai, uma vez. O aviso publicado a tira ([`publicar`]), também o do
+    /// rearme: a recusa seguinte já é a resposta a ele, e espaça. O rearme
+    /// que não publica — o aviso de antes ainda não consumido — não a tira
+    /// ([`passada_do_coletor`]).
     vaga: bool,
 }
 
@@ -356,6 +359,11 @@ fn marcar(x: Tocado) {
         if m.contains(&x) {
             return;
         }
+        #[cfg(feature = "modo-teste")]
+        if transbordada_de_teste(x) {
+            TRANSBORDOU.store(true, Ordering::Release);
+            return;
+        }
         if m.len() >= MARCAS {
             TRANSBORDOU.store(true, Ordering::Release);
             return;
@@ -407,14 +415,22 @@ pub fn processar() {
         let mut objetos = Vec::new();
         for (obj, e) in t.iter_mut() {
             let dono = obj.dono(e.canal);
-            let vaga = matches!(obj, Objeto::Endpoint(_)) && marcas.contains(&Tocado::Vaga(dono));
+            // A vaga do dono: a marca dela, ou o transbordo — a marca que
+            // não coube pode ter sido a dela, e perdê-la deixaria o pedido
+            // mudo até o rearme da recusa, que dobra até um minuto. No
+            // transbordo, cada endpoint conta como talvez com uma vaga: no
+            // máximo um aviso a mais por endpoint, sem giro — o aviso
+            // publicado tira a marca, e a recusa que responde a ele espaça.
+            let vaga = matches!(obj, Objeto::Endpoint(_))
+                && (tudo || marcas.contains(&Tocado::Vaga(dono)));
             if vaga {
                 // A vaga é o que o aceite recusado pela cota esperava: o
                 // pedido que ainda espera avisa de novo. A marca fica até um
                 // aviso do objeto sair (`publicar`): com o objeto livre, o
                 // desta conta; com um aviso ainda não consumido, o que sai
                 // depois da operação que o consome — e a recusa dele, que
-                // veio antes do aviso da vaga, não espaça.
+                // veio antes do aviso da vaga, não espaça. O rearme que não
+                // publica não a tira.
                 e.recusado = 0;
                 e.vaga = true;
             }
@@ -528,6 +544,10 @@ pub fn recusada(obj: Objeto, fio: u64) {
         if fio_da_vaga != 0 {
             vaga(fio_da_vaga);
             processar();
+            if REARME_NA_RECUSA.swap(false, Ordering::AcqRel) {
+                vencer_o_rearme_de_teste(obj);
+                passada_do_coletor();
+            }
         }
     }
     // O nível que a operação recusada encontrou — perguntado fora da trava
@@ -810,7 +830,10 @@ fn publicar(t: &mut BTreeMap<Objeto, Entrada>, obj: Objeto, a: Aviso, de_novo: b
 /// A passada do coletor de fios: as marcas que sobraram, os avisos que o
 /// canal cheio deixou devidos, e o rearme dos objetos cujo aviso uma
 /// operação recusada consumiu ([`recusada`]) — no prazo, tudo o que ainda
-/// está pronto avisa.
+/// está pronto avisa. A marca de uma vaga fica: se o rearme publica, o
+/// aviso dela sai, e [`publicar`] a tira; se não publica — o aviso de antes
+/// ainda não foi consumido —, ela fica para a recusa que vier, que não
+/// espaça, e o aviso da vaga sai logo depois dela.
 pub fn passada_do_coletor() {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
@@ -830,7 +853,6 @@ pub fn passada_do_coletor() {
             .map(|(obj, e)| {
                 e.rearmar_em = 0;
                 e.recusado = 0;
-                e.vaga = false;
                 *obj
             })
             .collect()
@@ -927,7 +949,71 @@ static VAGA_NA_RECUSA: AtomicU64 = AtomicU64::new(0);
 /// ([`VAGA_NA_RECUSA`]); zero desarma.
 #[cfg(feature = "modo-teste")]
 pub fn vaga_na_proxima_recusa_de_teste(fio: u64) {
+    REARME_NA_RECUSA.store(false, Ordering::Release);
     VAGA_NA_RECUSA.store(fio, Ordering::Release);
+}
+
+/// Só para a suíte: com a vaga no meio da próxima recusa
+/// ([`VAGA_NA_RECUSA`]), logo depois dela o rearme do objeto da recusa
+/// vence, e o coletor passa — como o rearme da recusa anterior que caísse
+/// nessa janela.
+#[cfg(feature = "modo-teste")]
+static REARME_NA_RECUSA: AtomicBool = AtomicBool::new(false);
+
+/// Só para a suíte: arma a vaga e o rearme no meio da próxima recusa
+/// ([`VAGA_NA_RECUSA`], [`REARME_NA_RECUSA`]); zero desarma.
+#[cfg(feature = "modo-teste")]
+pub fn vaga_e_rearme_na_proxima_recusa_de_teste(fio: u64) {
+    REARME_NA_RECUSA.store(fio != 0, Ordering::Release);
+    VAGA_NA_RECUSA.store(fio, Ordering::Release);
+}
+
+/// Só para a suíte: o rearme de `obj` vence agora — o coletor que passar
+/// o acha no prazo, também se nenhum estava marcado.
+#[cfg(feature = "modo-teste")]
+fn vencer_o_rearme_de_teste(obj: Objeto) {
+    com_designacoes(|t| {
+        if let Some(e) = t.get_mut(&obj) {
+            e.rearmar_em = 1;
+        }
+    });
+}
+
+/// Só para a suíte: o processo cuja próxima marca de vaga acha as marcas
+/// cheias — como se outras [`MARCAS`] tivessem chegado antes dela, entre
+/// duas passadas —, e é largada, com o transbordo de pé; zero, nenhum.
+/// Encher as marcas de verdade, pela suíte, seria uma corrida com o
+/// coletor, que as processa a cada tique.
+#[cfg(feature = "modo-teste")]
+static VAGA_TRANSBORDADA: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: arma o transbordo na próxima marca de vaga do processo
+/// `fio` ([`VAGA_TRANSBORDADA`]); zero desarma.
+#[cfg(feature = "modo-teste")]
+pub fn transbordar_a_vaga_de_teste(fio: u64) {
+    VAGA_TRANSBORDADA.store(fio, Ordering::Release);
+}
+
+/// Só para a suíte: depois de [`transbordar_a_vaga_de_teste`], se a marca
+/// da vaga já foi largada no transbordo.
+#[cfg(feature = "modo-teste")]
+pub fn vaga_transbordou_de_teste() -> bool {
+    VAGA_TRANSBORDADA.load(Ordering::Acquire) == 0
+}
+
+/// Só para a suíte, com a trava das marcas na mão: se `x` é a marca de
+/// vaga que o transbordo armado larga ([`VAGA_TRANSBORDADA`]).
+#[cfg(feature = "modo-teste")]
+fn transbordada_de_teste(x: Tocado) -> bool {
+    match x {
+        Tocado::Vaga(fio) => {
+            fio != 0
+                && VAGA_TRANSBORDADA
+                    .compare_exchange(fio, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// Só para a suíte: na próxima operação recusada, os fluxos acabam
@@ -973,6 +1059,8 @@ fn conta_velha_de_teste(obj: Objeto) -> Option<(u8, u32)> {
 #[cfg(feature = "modo-teste")]
 pub fn desarmar_de_teste() {
     VAGA_NA_RECUSA.store(0, Ordering::Release);
+    REARME_NA_RECUSA.store(false, Ordering::Release);
+    VAGA_TRANSBORDADA.store(0, Ordering::Release);
     FIM_NA_RECUSA.store(false, Ordering::Release);
     NIVEL_VELHO.store(0, Ordering::Release);
 }
