@@ -484,9 +484,16 @@ impl Widget for LinhaDeComando {
         Resposta::Acionado(self.codigo)
     }
 
+    /// O valor vai sem os marcadores do pedido: o Enter de um agente e o
+    /// apagar da linha só entram pelas ações que os pedem — um valor que os
+    /// trouxesse confirmaria ou apagaria a linha sem `confirm` nem `cancel`.
     fn definir_valor(&mut self, valor: &str) -> Resposta {
         self.pedido.push(APAGAR_A_LINHA);
-        self.pedido.push_str(valor);
+        self.pedido.extend(
+            valor
+                .chars()
+                .filter(|&c| c != CONFIRMAR_PELO_AGENTE && c != APAGAR_A_LINHA),
+        );
         Resposta::Acionado(self.codigo)
     }
 }
