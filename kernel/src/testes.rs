@@ -1100,6 +1100,40 @@ fn mostra_o_console(pontos: &[(u32, u32)]) -> Resultado {
     Ok(())
 }
 
+/// [`mostra_o_console`], esperando até `teto_em_ticks` a tela chegar lá.
+///
+/// Para conferir a tela depois de outro núcleo agir — um processo que
+/// morre, o coletor que tira a camada dele. Uma leitura só confere um
+/// instante em que a tela pode estar, com razão, um passo atrás do console:
+///
+/// - a composição feita em outro núcleo só aparece quando o dos
+///   dispositivos a apresenta — no cutucão, no tique dele, ou na leitura
+///   daqui, se a trava do compositor estiver livre (ver
+///   [`crate::grafico::apresentar_pendente`]);
+/// - cada linha do log é ecoada no console por quem a registra, em qualquer
+///   núcleo, e o eco rola o console — move a memória da camada — antes de
+///   compô-lo. A composição do eco é por `try_lock`: com a trava tomada,
+///   inclusive por quem lê a tela, ela fica para o tique do núcleo dos
+///   dispositivos (ver [`crate::tela::descarregar`]). Até lá, o console já
+///   subiu uma linha, e a tela não.
+///
+/// As tentativas não registram nada — o registro de cada uma seria mais um
+/// eco no console —, e só a última, se a tela não chegou, diz onde.
+fn ate_mostrar_o_console(pontos: &[(u32, u32)], teto_em_ticks: u64) -> Resultado {
+    let mostra = || {
+        pontos.iter().all(|&(x, y)| {
+            matches!(
+                (pixel_na_tela(x, y), pixel_no_console(x, y)),
+                (Ok(tela), Ok(console)) if tela == console
+            )
+        })
+    };
+    if esperar_ate(mostra, teto_em_ticks).is_ok() {
+        return Ok(());
+    }
+    mostra_o_console(pontos)
+}
+
 /// Confere que a tela mostra `cor` em cada ponto.
 fn mostra_a_cor(cor: crate::tela::Cor, pontos: &[(u32, u32)]) -> Resultado {
     for &(x, y) in pontos {
@@ -4683,7 +4717,15 @@ fn superficies_o_processo_desenha_e_some() -> Resultado {
         );
         return Err("a conta das superficies nao fecha: sete criadas, duas recolhidas");
     }
-    mostra_o_console(&[(x + 100, y), (x + 115, y + 15)])
+    // A tela chega ao console onde a segunda estava — mas não no mesmo
+    // instante em que a camada sai da pilha. Logo depois de tirá-la, o
+    // coletor registra o que recolheu, e o eco dessa linha rola o console
+    // antes de a composição da rolagem chegar à tela. Uma leitura só, logo
+    // que a contagem fechou, pegou a tela uma linha atrás do console na
+    // integração contínua, no x86. Medido aqui, a diferença durou menos de
+    // um tique, e nenhuma leitura viu a superfície morta. Espera-se a tela,
+    // com teto.
+    ate_mostrar_o_console(&[(x + 100, y), (x + 115, y + 15)], 200)
         .map_err(|_| "a tela ainda mostra a superficie de um processo morto")?;
     let _ = esperar_ate(|| false, 30);
     let livres_depois = crate::frames::estatisticas().0;
@@ -11129,10 +11171,17 @@ fn sem_framebuffer() -> Resultado {
 ///
 /// # Por que mascarar as interrupções resolve
 ///
-/// Porque a máquina tem um núcleo, e quem tira a vez de um fio é o timer.
-/// Sem a interrupção dele, nenhum outro fio roda até o fim de `f`, e o que
-/// está na tela é só o que o caso escreveu. O tique não se perde: fica
-/// pendente e chega quando elas voltam.
+/// Porque, neste núcleo, quem tira a vez de um fio é o timer. Sem a
+/// interrupção dele, nenhum outro fio roda aqui até o fim de `f`. O tique
+/// não se perde: fica pendente e chega quando elas voltam.
+///
+/// Quando isto foi escrito, a máquina tinha um núcleo, e bastava. Com
+/// vários — quatro, na suíte —, a máscara só vale para este: um fio sem
+/// núcleo fixo, como o coletor, pode rodar em outro e imprimir no meio de
+/// `f`. A janela ficou estreita — `f` é curta, e o coletor só registra
+/// quando recolhe um morto —, mas não fechada. Um caso que confere a tela
+/// **depois** de outro núcleo agir não usa isto: espera a tela chegar lá,
+/// como [`ate_mostrar_o_console`].
 ///
 /// `f` não pode esperar por interrupção nenhuma — ela não viria. Os casos
 /// que usam isto desenham, leem memória e falam com o `virtio-gpu`, que
