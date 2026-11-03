@@ -450,7 +450,7 @@ continua sendo entrada não confiável.
 
 | O quê | Quanto |
 |---|---|
-| canais de eventos na máquina | 32 |
+| canais de eventos na máquina | 190: dois por fio que o escalonador comporta, o pior caso dos processos — estáticos, ~409 KB de RAM fixa |
 | canais escutados por processo | 2 (o laço e um de folga) |
 | eventos guardados por canal | 64 |
 | avisos não consumidos por objeto | 1 |
@@ -566,6 +566,22 @@ NS28 o instala e roda.
   nos passos que precisam ser exatos. O que se confere é o
   que o kernel publicou, quando e quantas vezes, e que cada operação depois
   de um aviso continua sendo um pedido decidido pelo gate.
+- **Os canais**, nas duas arquiteturas: 2 casos `eventos:`, da tabela no
+  pior caso dos processos (o primeiro dos [Limites
+  conhecidos](#limites-conhecidos)). `eventos: o pior caso dos processos
+  cabe na tabela`: quatro `avisado`s com dois canais cada, pela chamada; e
+  o resto das vagas do escalonador com fios do kernel, até `criar` recusar
+  por falta de vaga, cada um pedindo três canais pelo mesmo `escutar` da
+  chamada — dois passam, o terceiro ouve o teto, nenhum ouve `OCUPADO` por
+  falta de vaga na tabela de canais —; com a tabela de fios cheia, um laço
+  a mais ainda sobe, e a varredura dele pergunta uma vez só ao
+  escalonador. São fios do kernel, e não processos, que enchem a tabela
+  de fios: a suíte não lança noventa programas — a cota de cada titular e
+  o custo no ARM —, e o que se prova é a conta: todo fio vivo, com o teto
+  dele, cabe. `eventos: o terceiro canal do processo e recusado`: com o
+  laço e o segundo abertos, o terceiro canal do `avisado` é recusado com
+  `OCUPADO`, com vaga na tabela e o nome livre, e passa com o segundo
+  fechado — antes, nenhum caso via o teto por processo.
 - **As invariantes de fonte** (NI01–NI03): só `kernel::aviso` publica
   `MALHA`, montado pela conta de `politica::aviso` (NI01), sem nada do
   conteúdo (NI02); e o contrato contra o protocolo, o registro dos
@@ -711,6 +727,19 @@ pedido espaçado só avisa no rearme. A N78 foi redefinida — a marca da
 vaga sujeita ao teto das marcas dos objetos, perdida no transbordo —, e
 a N84 devolve a primeira forma: as duas, a rodar.
 
+E a tabela de canais (o primeiro dos [Limites
+conhecidos](#limites-conhecidos)): a conta de dois canais por vaga de
+trabalho do escalonador não valia — as vagas de trabalho são o mínimo
+garantido, e com menos núcleos os processos passam delas —, e a tabela
+passou a ter dois canais por fio que o escalonador comporta, 190,
+estáticos; o teto por processo foi para dentro da mesma seção crítica que
+insere, e a varredura de cada `escutar` passou a conferir os ouvintes
+contra uma fotografia dos fios vivos — uma tomada da tranca do
+escalonador por varredura, e não uma por canal. A N82 devolve a tabela a
+32, a N83 a põe em dois canais por vaga de trabalho (64), a N86 tira o
+teto por processo e a N87 troca a fotografia pela pergunta por canal: as
+quatro, a rodar.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -792,7 +821,11 @@ a N84 devolve a primeira forma: as duas, a rodar.
 | N79 | o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela | NS53 |
 | N80 | o quadro da sessão com o par mandado com a ordem das gravações na mão | FS27, FS28 |
 | N81 | o fecho de um fluxo acabado decidido sem a ordem das gravações | FS28 |
+| N82 | a tabela de canais de volta a 32 | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
+| N83 | a tabela de canais com dois por vaga de trabalho, 64 | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
 | N84 | o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas | NS54 — a rodar |
+| N86 | o `escutar` sem o teto por processo | `eventos: o terceiro canal do processo e recusado`, `eventos: o pior caso dos processos cabe na tabela` — a rodar |
+| N87 | a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
 
 ## Medidas
 
@@ -844,10 +877,16 @@ canal nunca teve mais de um aviso do mesmo objeto.
 
 Os residuais da validação final — nenhum é bypass de autoridade:
 
-- **Os canais da máquina são 32**, e cada processo escuta no máximo 2: um
-  principal com muitos processos pode ocupar todos, e o laço de outro não
-  sobe. O `Laco::novo` tenta 16 nomes (`laco-<id>`, `laco-<id>-1`…), que
-  são previsíveis; quem tomar todos impede o laço daquele processo.
+- **Os nomes do laço são previsíveis.** A tabela de canais não enche
+  mais: são 190 — dois por fio que o escalonador comporta, o pior caso dos
+  processos —, estáticos, ~409 KB de RAM fixa; cada processo escuta no
+  máximo 2, contados na mesma seção crítica que insere, e nenhum
+  principal, nem um conjunto deles, ocupa todos. Mas o `Laco::novo` tenta
+  16 nomes (`laco-<id>`, `laco-<id>-1`…), que são previsíveis, e quem os
+  tomar todos — 8 processos de uma sessão de operador, com 2 canais cada
+  — impede o laço daquele processo. O canal sem nome, que fecharia isso,
+  seria crescimento do contrato (decisão revisada, DS-2), e não está
+  feito.
 - **O teto das designações acabadas** (8 por processo) larga primeiro a
   de menor chave — os endpoints antes das pontas —, e pode largar o `FIM`
   devido de um objeto de que o dono nunca ouviu aviso. Só age com o canal

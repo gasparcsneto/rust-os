@@ -9162,6 +9162,18 @@ diz a ninguém que outro mexeu na malha. A N78 foi redefinida — a marca
 da vaga sujeita ao teto das marcas —, e a N84 devolve a primeira forma:
 as duas, a rodar.
 
+E a tabela de canais de eventos, o primeiro dos limites conhecidos do
+SDK: a conta de dois canais por vaga de trabalho do escalonador não
+valia — as vagas de trabalho são o mínimo garantido, e com menos núcleos
+os processos passam delas —, e a tabela passou a ter dois canais por fio
+que o escalonador comporta: 190, estáticos, ~409 KB de RAM fixa, no
+`.bss`. O teto por processo foi para dentro da mesma seção crítica que
+insere, e a varredura de cada `escutar` confere os ouvintes contra uma
+fotografia dos fios vivos — uma tomada da tranca do escalonador por
+varredura. Dois casos `eventos:` novos, o pior caso dos processos e o
+terceiro canal do processo; as N82, N83, N86 e N87 os põem à prova — a
+rodar.
+
 | Mutação | Reprovada por |
 |---|---|
 | a designação sem conferir que o processo escuta o canal; o descritor que não é canal, ignorado; o `notify` de um agente ou de uma pessoa aceito; a designação passando ao filho no `fork` | "o canal que o processo nao escuta e recusado", "o descritor que nao e canal e recusado", "so processo designa" |
@@ -9204,6 +9216,8 @@ as duas, a rodar.
 | a marca da vaga sujeita ao teto das marcas dos objetos, perdida no transbordo (N78, redefinida — a rodar); o rearme que apaga a marca da vaga sem publicar o aviso dela (N79) | "a vaga com as marcas transbordadas avisa o pedido", "o rearme no meio da recusa nao apaga a vaga" |
 | o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas (N84 — a rodar) | "o transbordo das marcas nao diz que outro mexeu na malha" |
 | o quadro da sessão com o par mandado com a ordem das gravações na mão (N80); o fecho de um fluxo acabado decidido sem a ordem (N81) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem", "fluxo: o fim por fora com a sessao na ordem grava um fim so" |
+| a tabela de canais de volta a 32 (N82), ou com dois canais por vaga de trabalho (N83); a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos (N87) | "eventos: o pior caso dos processos cabe na tabela" — a rodar |
+| o `escutar` sem o teto por processo (N86) | "eventos: o terceiro canal do processo e recusado", "eventos: o pior caso dos processos cabe na tabela" — a rodar |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
