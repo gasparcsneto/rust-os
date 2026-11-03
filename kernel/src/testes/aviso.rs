@@ -3215,6 +3215,108 @@ pub(super) fn aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar() -> Resultado 
 }
 
 // ---------------------------------------------------------------------------
+// A janela antes do rearme: o que o NS50, o NS51 e o NS52 leem nela
+// ---------------------------------------------------------------------------
+
+/// O rearme da primeira recusa seguida.
+const REARME_MS: u64 = politica::aviso::REARME_DEPOIS_DA_RECUSA_MS;
+
+/// O fim da janela que a suíte lê: esta folga antes do rearme.
+const FOLGA_DO_REARME_MS: u64 = 100;
+
+/// Quanto esperar depois do rearme para dizer que ele já passou: o coletor
+/// o faz no primeiro tique depois do prazo.
+const DEPOIS_DO_REARME_MS: u64 = 300;
+
+/// A falha de quando a suíte não viu a janela antes do rearme: a máquina
+/// demorou — e isso não diz nada do kernel.
+const DEMOROU: &str = "a maquina demorou demais para ver a janela do rearme";
+
+/// O estado do endpoint `e`, lido logo depois de uma operação, com o rearme
+/// marcado para `rearme` (ms de máquina) ou depois. O `Avisado` lido já no
+/// rearme, ou depois, pode ser dele, e a suíte não sabe quem avisou:
+/// [`DEMOROU`]. O `Livre` vale a qualquer hora — só uma operação do dono
+/// tira o aviso, e nenhuma veio.
+fn lido_antes_do_rearme(e: u64, rearme: u64) -> Result<Option<Situacao>, &'static str> {
+    let s = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+    if s == Some(Situacao::Avisado) && crate::tempo::uptime_ms() >= rearme {
+        return Err(DEMOROU);
+    }
+    Ok(s)
+}
+
+/// Como a janela antes do rearme acabou, vista pela suíte.
+#[derive(Debug, PartialEq, Eq)]
+enum NaJanela {
+    /// O endpoint ficou `Avisado` antes do rearme: quem avisou não foi ele.
+    Avisado,
+    /// A janela passou, até a folga antes do rearme, sem aviso.
+    Livre,
+}
+
+/// Espera o endpoint `e` avisado antes do rearme marcado para `rearme` (ms
+/// de máquina) ou depois — só pelo estado da designação e pela hora, sem
+/// linha nenhuma do `avisado`. O estado é lido entre duas horas: o
+/// `Avisado` lido antes do rearme não é dele; o `Livre` lido já na folga
+/// antes do rearme diz que a janela passou sem aviso. O `Avisado` visto só
+/// no rearme, ou depois, não diz quem avisou: [`DEMOROU`].
+fn na_janela_do_rearme(e: u64, rearme: u64) -> Result<NaJanela, &'static str> {
+    let fim = rearme.saturating_sub(FOLGA_DO_REARME_MS);
+    loop {
+        let desde = crate::tempo::uptime_ms();
+        let s = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+        let ate = crate::tempo::uptime_ms();
+        if s == Some(Situacao::Avisado) {
+            return if ate < rearme {
+                Ok(NaJanela::Avisado)
+            } else {
+                Err(DEMOROU)
+            };
+        }
+        if desde >= fim {
+            return Ok(NaJanela::Livre);
+        }
+        crate::nativo::atender_pendentes();
+        core::hint::spin_loop();
+    }
+}
+
+/// Os eventos que entraram até agora no canal de `b` — cada aviso novo; o
+/// que se junta a um que ainda espera na fila não entra.
+fn publicados_no_canal(b: &Avisado) -> Result<u64, &'static str> {
+    crate::eventos::estado(&b.canal)
+        .map(|c| c.publicados)
+        .ok_or("o canal do avisado sumiu")
+}
+
+/// Com `b` ocioso: o que entrou no canal dele desde a conta `publicados`
+/// foi entregue e dito, cada evento uma vez — um aviso do pedido no
+/// endpoint `e`, e nada mais —, e foram um ou dois: o da vaga e o do
+/// rearme, ou o do rearme junto ao da vaga, que ainda esperava na fila.
+fn o_da_vaga_e_o_do_rearme(b: &Avisado, desde: u64, e: u64, publicados: u64) -> Resultado {
+    b.esperar_ocioso()?;
+    let canal = crate::eventos::estado(&b.canal).ok_or("o canal do avisado sumiu")?;
+    let novos = canal.publicados.saturating_sub(publicados);
+    let ditos = b.avisos_de(desde, "endpoint", e);
+    if canal.entregues != canal.publicados
+        || !(1..=2).contains(&novos)
+        || ditos.len() as u64 != novos
+        || ditos.iter().any(|&bits| bits != malha::PEDIDO)
+    {
+        crate::log_error!(
+            "teste",
+            "{} eventos novos ({} publicados, {} entregues); ditos {:?}",
+            novos,
+            canal.publicados,
+            canal.entregues,
+            b.avisos(desde)
+        );
+        return Err("o pedido nao foi avisado pela vaga e pelo rearme, cada evento uma vez");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // NS50 — a vaga avisa uma vez, e a recusa que responde a ela espaça
 // ---------------------------------------------------------------------------
 
@@ -3225,11 +3327,11 @@ pub(super) fn aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar() -> Resultado 
 /// na cota dele —, e o aceite que responde ao aviso da vaga é recusado de
 /// novo: essa recusa espaça como as outras — a vaga já foi dita —, e o
 /// pedido só avisa de novo no rearme da primeira, e não na hora, uma
-/// segunda vez pela mesma vaga. O estado da designação diz o que o kernel
-/// fez e quando; o log de `b`, lido com ele ocioso, conta os avisos.
+/// segunda vez pela mesma vaga. Dentro da janela antes do rearme, nada
+/// espera a linha de `b`: o estado da designação diz o que o kernel fez e
+/// quando, e a conta do canal, que o evento da vaga entrou nele; no fim,
+/// com `b` ocioso, cada evento foi dito uma vez.
 pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
-    // O rearme da primeira recusa.
-    const REARME_MS: u64 = politica::aviso::REARME_DEPOIS_DA_RECUSA_MS;
     com_os_avisos(|| {
         let (_, bia) = pessoa("bia", 4500);
         let a = Avisado::lancar(bia)?;
@@ -3237,7 +3339,7 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
         let c = Avisado::lancar(bia)?;
         let r = (|| -> Resultado {
             // A cota de `b` cheia — os fluxos de `a`, aceitos —, e um pedido
-            // de `c` esperando, avisado e dito.
+            // de `c` esperando, avisado e dito: `b` ocioso, o canal vazio.
             let mut abertos = Vec::new();
             for _ in 0..politica::fluxo::FLUXOS_POR_PROCESSO {
                 abertos.push(aberto(&a, &b, false, false)?);
@@ -3252,20 +3354,21 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
             pedido_avisado_e_dito(&b, desde, e)?;
             // A primeira recusa consome o aviso e marca o rearme: o pedido
             // fica sem aviso pendente.
-            let antes = crate::tempo::uptime_ms();
+            let rearme = crate::tempo::uptime_ms().saturating_add(REARME_MS);
             recusado(
                 &aceitar(b.quem(), &b.endpoint),
                 "DENY_POLICY",
                 "o aceite acima da cota nao foi recusado",
             )?;
-            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+            let agora = lido_antes_do_rearme(e, rearme)?;
             if agora != Some(Situacao::Livre) {
                 crate::log_error!("teste", "{:?}", agora);
                 return Err("a primeira recusa nao espacou o aviso do pedido");
             }
             // Um fluxo de `b` acaba: a vaga avisa o pedido na hora — antes
-            // do rearme —, uma vez.
+            // do rearme —, num evento novo no canal de `b`.
             let desde = crate::log::total_emitidos();
+            let publicados = publicados_no_canal(&b)?;
             let (fechado, _) = &abertos[0];
             feito(
                 &sobre(a.quem(), "stream.close", fechado),
@@ -3275,20 +3378,11 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
                 &sobre(b.quem(), "stream.close", fechado),
                 "o close de b nao passou",
             )?;
-            esperar_ate(
-                || crate::aviso::situacao_de_teste(Objeto::Endpoint(e)) == Some(Situacao::Avisado),
-                TETO_DA_MALHA,
-            )
-            .map_err(|_| "a vaga nao avisou o pedido")?;
-            // Visto perto do rearme, o aviso pode ser o dele, e não o da vaga.
-            if crate::tempo::uptime_ms() >= antes.saturating_add(REARME_MS - 100) {
-                return Err("a vaga nao avisou antes do rearme, ou a maquina demorou demais");
+            if na_janela_do_rearme(e, rearme)? != NaJanela::Avisado {
+                return Err("a vaga nao avisou o pedido antes do rearme");
             }
-            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
-            b.esperar_ocioso()?;
-            if b.avisos_de(desde, "endpoint", e) != [malha::PEDIDO] {
-                crate::log_error!("teste", "{:?}", b.avisos(desde));
-                return Err("a vaga nao avisou o pedido uma vez");
+            if publicados_no_canal(&b)? != publicados + 1 {
+                return Err("o aviso da vaga nao entrou no canal de b como um evento");
             }
             // `b` toma a vaga antes de responder ao aviso dela: abre um
             // fluxo, que conta na cota dele.
@@ -3299,18 +3393,12 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
             }
             // O aceite que responde ao aviso da vaga, recusado pela cota de
             // novo: espaça — nada avisado na própria recusa.
-            let marca = crate::log::total_emitidos();
             recusado(
                 &aceitar(b.quem(), &b.endpoint),
                 "DENY_POLICY",
                 "o aceite com a vaga tomada nao foi recusado",
             )?;
-            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
-            // Tudo até aqui antes do rearme da primeira recusa: o estado
-            // lido é o da recusa, e não o do rearme.
-            if crate::tempo::uptime_ms() >= antes.saturating_add(REARME_MS - 100) {
-                return Err("a maquina demorou demais para ver a janela do rearme");
-            }
+            let agora = lido_antes_do_rearme(e, rearme)?;
             if agora != Some(Situacao::Livre) {
                 crate::log_error!("teste", "{:?}", agora);
                 return Err("a recusa que respondia ao aviso da vaga nao espacou");
@@ -3322,20 +3410,12 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
                 TETO_DA_MALHA,
             )
             .map_err(|_| "o pedido nao avisou de novo no rearme")?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(antes);
-            if demora < REARME_MS {
-                crate::log_error!("teste", "{} ms", demora);
+            if crate::tempo::uptime_ms() < rearme {
                 return Err("o pedido avisou de novo antes do rearme");
             }
-            // E `b`, ocioso, disse um aviso só do pedido depois da recusa: o
-            // do rearme.
-            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
-            b.esperar_ocioso()?;
-            if b.avisos_de(marca, "endpoint", e) != [malha::PEDIDO] {
-                crate::log_error!("teste", "{:?}", b.avisos(marca));
-                return Err("o pedido avisou mais de uma vez ate o rearme");
-            }
-            Ok(())
+            // E `b`, ocioso, disse cada evento uma vez: o da vaga e o do
+            // rearme — ou um só, se o do rearme se juntou ao da vaga.
+            o_da_vaga_e_o_do_rearme(&b, desde, e, publicados)
         })();
         encerrar_todos(r, &[&a, &b, &c])
     })
@@ -3350,11 +3430,10 @@ pub(super) fn aviso_a_vaga_avisa_uma_vez() -> Resultado {
 /// aviso pendente, porque a recusa anterior o consumiu. O aviso da vaga sai
 /// na hora, antes de a recusa tomar a trava das designações, e tira a
 /// marca; a recusa o consome e espaça, como as outras. Nada se perde: o
-/// evento fica no canal, e `b` o diz, uma vez — o pedido não avisa de novo
-/// na recusa, e só volta no rearme da primeira.
+/// evento entra no canal — a conta dele diz, sem esperar a linha de `b` —,
+/// e `b`, ocioso no fim, o disse, uma vez; o pedido não avisa de novo na
+/// recusa, e só volta no rearme da primeira.
 pub(super) fn aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente() -> Resultado {
-    // O rearme da primeira recusa.
-    const REARME_MS: u64 = politica::aviso::REARME_DEPOIS_DA_RECUSA_MS;
     com_os_avisos(|| {
         let (_, bia) = pessoa("bia", 4510);
         let a = Avisado::lancar(bia)?;
@@ -3373,7 +3452,7 @@ pub(super) fn aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente() -> Resultado {
             }
             pedido_avisado_e_dito(&b, desde, e)?;
             // A primeira recusa consome o aviso e marca o rearme.
-            let antes = crate::tempo::uptime_ms();
+            let rearme = crate::tempo::uptime_ms().saturating_add(REARME_MS);
             recusado(
                 &aceitar(b.quem(), &b.endpoint),
                 "DENY_POLICY",
@@ -3382,31 +3461,23 @@ pub(super) fn aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente() -> Resultado {
             // A vaga chega no meio da segunda, com o pedido sem aviso
             // pendente: o aviso dela sai antes da trava da recusa, e a
             // recusa o consome.
-            let marca = crate::log::total_emitidos();
+            let desde = crate::log::total_emitidos();
+            let publicados = publicados_no_canal(&b)?;
             crate::aviso::vaga_na_proxima_recusa_de_teste(b.fio());
             recusado(
                 &aceitar(b.quem(), &b.endpoint),
                 "DENY_POLICY",
                 "o aceite acima da cota nao foi recusado",
             )?;
-            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
-            // Antes do rearme da primeira recusa: o estado lido é o da
-            // segunda, e não o do rearme.
-            if crate::tempo::uptime_ms() >= antes.saturating_add(REARME_MS - 100) {
-                return Err("a maquina demorou demais para ver a janela do rearme");
-            }
+            let agora = lido_antes_do_rearme(e, rearme)?;
             if agora != Some(Situacao::Livre) {
                 crate::log_error!("teste", "{:?}", agora);
                 return Err("a recusa que consumiu o aviso da vaga nao espacou");
             }
-            // O evento da vaga ficou no canal: `b` o diz — e ainda antes do
-            // rearme, que deixaria o pedido avisado de novo.
-            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)
-                .map_err(|_| "o aviso da vaga consumido pela recusa nao chegou a b")?;
-            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
-            if agora != Some(Situacao::Livre) {
-                crate::log_error!("teste", "{:?}", agora);
-                return Err("o aviso da vaga so chegou a b depois do rearme");
+            // O evento da vaga entrou no canal de `b`, uma vez: a conta do
+            // canal diz, sem esperar a linha dele.
+            if publicados_no_canal(&b)? != publicados + 1 {
+                return Err("o aviso da vaga consumido pela recusa nao entrou no canal de b");
             }
             // O pedido avisa de novo no rearme da primeira recusa, e não
             // antes.
@@ -3415,22 +3486,188 @@ pub(super) fn aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente() -> Resultado {
                 TETO_DA_MALHA,
             )
             .map_err(|_| "o pedido nao avisou de novo no rearme")?;
-            let demora = crate::tempo::uptime_ms().saturating_sub(antes);
-            if demora < REARME_MS {
-                crate::log_error!("teste", "{} ms", demora);
+            if crate::tempo::uptime_ms() < rearme {
                 return Err("o pedido avisou de novo antes do rearme");
             }
-            // `b`, ocioso, disse dois avisos do pedido desde a segunda
-            // recusa: o da vaga, uma vez, e o do rearme.
+            // `b`, ocioso, disse cada evento uma vez: o da vaga e o do
+            // rearme — ou um só, se o do rearme se juntou ao da vaga.
+            o_da_vaga_e_o_do_rearme(&b, desde, e, publicados)
+        })();
+        crate::aviso::vaga_na_proxima_recusa_de_teste(0);
+        encerrar_todos(r, &[&a, &b, &c])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS52 — a vaga com as marcas transbordadas
+// ---------------------------------------------------------------------------
+
+/// A vaga na cota de `b` chega com as marcas transbordadas — mais de 64
+/// mudanças entre duas passadas, e a marca da vaga entre as que não
+/// couberam: o ponto da suíte a larga, como se as outras tivessem chegado
+/// antes dela. A passada que acha o transbordo avalia tudo, e conta cada
+/// endpoint como talvez com uma vaga: o pedido que o aceite recusado
+/// espaçou avisa na hora, e não só no rearme da recusa — uma vez: o
+/// rearme, depois, acha o aviso ainda não consumido, e não avisa de novo.
+/// Dentro da janela antes do rearme, nada espera a linha de `b`.
+pub(super) fn aviso_a_vaga_com_as_marcas_transbordadas() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4520);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let c = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let mut abertos = Vec::new();
+            for _ in 0..politica::fluxo::FLUXOS_POR_PROCESSO {
+                abertos.push(aberto(&a, &b, false, false)?);
+            }
+            let e = b.numero_do_endpoint();
+            let desde = crate::log::total_emitidos();
+            let pedido = abrir(c.quem(), &b.endpoint);
+            if fs_texto(&pedido, "stream").is_none() {
+                crate::log_error!("teste", "{}", pedido);
+                return Err("o pedido acima da cota de quem aceita nao ficou esperando");
+            }
+            pedido_avisado_e_dito(&b, desde, e)?;
+            // A recusa consome o aviso e marca o rearme: até ele, o filtro
+            // do que é novo cala o pedido.
+            let rearme = crate::tempo::uptime_ms().saturating_add(REARME_MS);
+            recusado(
+                &aceitar(b.quem(), &b.endpoint),
+                "DENY_POLICY",
+                "o aceite acima da cota nao foi recusado",
+            )?;
+            // O rearme vem até aqui: a recusa o marcou antes desta hora.
+            let rearmado = crate::tempo::uptime_ms().saturating_add(REARME_MS);
+            let agora = lido_antes_do_rearme(e, rearme)?;
+            if agora != Some(Situacao::Livre) {
+                crate::log_error!("teste", "{:?}", agora);
+                return Err("a recusa nao espacou o aviso do pedido");
+            }
+            // Um fluxo de `b` acaba, e a marca da vaga dele não cabe.
+            let desde = crate::log::total_emitidos();
+            let publicados = publicados_no_canal(&b)?;
+            crate::aviso::transbordar_a_vaga_de_teste(b.fio());
+            let (fechado, _) = &abertos[0];
+            feito(
+                &sobre(a.quem(), "stream.close", fechado),
+                "o close de a nao passou",
+            )?;
+            feito(
+                &sobre(b.quem(), "stream.close", fechado),
+                "o close de b nao passou",
+            )?;
+            if !crate::aviso::vaga_transbordou_de_teste() {
+                return Err("a marca da vaga de b nao foi largada no transbordo");
+            }
+            // A passada que acha o transbordo — no acordar do fecho, ou a de
+            // outro núcleo que tomou as marcas — avisa o pedido antes do
+            // rearme, num evento novo no canal de `b`.
+            if na_janela_do_rearme(e, rearme)? != NaJanela::Avisado {
+                return Err(
+                    "a vaga com as marcas transbordadas nao avisou o pedido antes do rearme",
+                );
+            }
+            if publicados_no_canal(&b)? != publicados + 1 {
+                return Err("o aviso da vaga transbordada nao entrou no canal de b como um evento");
+            }
+            // Uma vez: o rearme da recusa acha o aviso ainda não consumido,
+            // e não avisa de novo.
+            let depois = rearmado.saturating_add(DEPOIS_DO_REARME_MS);
+            let _ = esperar_ate(|| crate::tempo::uptime_ms() >= depois, TETO_DA_MALHA);
+            if publicados_no_canal(&b)? != publicados + 1 {
+                return Err(
+                    "o pedido avisou de novo depois da vaga transbordada, sem operacao de b",
+                );
+            }
+            b.esperar_ocioso()?;
+            if b.avisos_de(desde, "endpoint", e) != [malha::PEDIDO] {
+                crate::log_error!("teste", "{:?}", b.avisos(desde));
+                return Err("b nao disse o aviso da vaga transbordada uma vez");
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b, &c])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS53 — o rearme no meio da recusa não apaga a vaga
+// ---------------------------------------------------------------------------
+
+/// O aceite de `b`, recusado pela cota cheia, consome o aviso do pedido e
+/// marca o rearme; uma entrega nova avisa o endpoint de novo — é nova: o
+/// pedido e a entrega —, e `b` a diz sem operar: o aviso fica sem
+/// consumir, com o rearme marcado. No meio do aceite seguinte, também
+/// recusado, chegam a vaga — um fluxo de `b` que acaba — e o rearme — o
+/// coletor que passa no prazo dele —, os dois com o aviso ainda não
+/// consumido: nenhum publica, e o rearme não apaga a marca da vaga. A
+/// recusa veio antes de o aviso da vaga sair: não espaça, e o aviso sai
+/// logo depois dela, uma vez — e não só no rearme seguinte, dois segundos
+/// adiante.
+pub(super) fn aviso_o_rearme_no_meio_da_recusa_nao_apaga_a_vaga() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4530);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let c = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            for _ in 0..politica::fluxo::FLUXOS_POR_PROCESSO {
+                aberto(&a, &b, false, false)?;
+            }
+            let e = b.numero_do_endpoint();
+            let desde = crate::log::total_emitidos();
+            let pedido = abrir(c.quem(), &b.endpoint);
+            if fs_texto(&pedido, "stream").is_none() {
+                crate::log_error!("teste", "{}", pedido);
+                return Err("o pedido acima da cota de quem aceita nao ficou esperando");
+            }
+            pedido_avisado_e_dito(&b, desde, e)?;
+            // A primeira recusa consome o aviso e marca o rearme.
+            recusado(
+                &aceitar(b.quem(), &b.endpoint),
+                "DENY_POLICY",
+                "o aceite acima da cota nao foi recusado",
+            )?;
+            // A entrega nova avisa na hora, com o rearme marcado; `b` a diz,
+            // e não opera.
+            let desde = crate::log::total_emitidos();
+            let r = mandar_na_malha(a.quem(), &b.endpoint, "nova", 9_453_001);
+            if !fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a entrega ao endpoint de b nao foi mandada");
+            }
             esperar_ate(
-                || b.avisos_de(marca, "endpoint", e).len() >= 2,
+                || crate::aviso::situacao_de_teste(Objeto::Endpoint(e)) == Some(Situacao::Avisado),
                 TETO_DA_MALHA,
             )
-            .map_err(|_| "b nao disse o aviso do rearme")?;
+            .map_err(|_| "a entrega nova nao avisou o endpoint depois da recusa")?;
+            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO | malha::ENTREGA)?;
             b.esperar_ocioso()?;
-            if b.avisos_de(marca, "endpoint", e) != [malha::PEDIDO, malha::PEDIDO] {
-                crate::log_error!("teste", "{:?}", b.avisos(marca));
-                return Err("a vaga no meio da recusa nao avisou o pedido uma vez");
+            // A vaga e o rearme no meio do aceite seguinte, recusado: a
+            // recusa não espaça, e o aviso da vaga sai logo depois dela.
+            let desde = crate::log::total_emitidos();
+            let publicados = publicados_no_canal(&b)?;
+            crate::aviso::vaga_e_rearme_na_proxima_recusa_de_teste(b.fio());
+            recusado(
+                &aceitar(b.quem(), &b.endpoint),
+                "DENY_POLICY",
+                "o aceite acima da cota nao foi recusado",
+            )?;
+            let agora = crate::aviso::situacao_de_teste(Objeto::Endpoint(e));
+            if agora != Some(Situacao::Avisado) {
+                crate::log_error!("teste", "{:?}", agora);
+                return Err("o rearme no meio da recusa apagou a vaga: o aviso dela nao saiu");
+            }
+            if publicados_no_canal(&b)? != publicados + 1 {
+                return Err("o aviso da vaga nao entrou no canal de b como um evento");
+            }
+            // `b`, ocioso, diz o aviso da vaga, uma vez: o pedido e a
+            // entrega, que ainda esperam.
+            b.esperar_ocioso()?;
+            if b.avisos_de(desde, "endpoint", e) != [malha::PEDIDO | malha::ENTREGA] {
+                crate::log_error!("teste", "{:?}", b.avisos(desde));
+                return Err("b nao disse o aviso da vaga uma vez");
             }
             Ok(())
         })();

@@ -37273,6 +37273,10 @@ static CASOS: &[Caso] = &[
         f: fluxo::par::fluxo_o_fim_da_sessao_na_ordem,
     },
     Caso {
+        nome: "fluxo: o fim por fora com a sessao na ordem grava um fim so",
+        f: fluxo::par::fluxo_o_fim_por_fora_com_a_sessao_na_ordem,
+    },
+    Caso {
         nome: "aviso: o dado avisa uma vez",
         f: aviso::aviso_o_dado_avisa_uma_vez,
     },
@@ -37443,6 +37447,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "aviso: a vaga no meio da recusa, sem aviso pendente, avisa uma vez",
         f: aviso::aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente,
+    },
+    Caso {
+        nome: "aviso: a vaga com as marcas transbordadas avisa o pedido",
+        f: aviso::aviso_a_vaga_com_as_marcas_transbordadas,
+    },
+    Caso {
+        nome: "aviso: o rearme no meio da recusa nao apaga a vaga",
+        f: aviso::aviso_o_rearme_no_meio_da_recusa_nao_apaga_a_vaga,
     },
     Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",

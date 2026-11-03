@@ -1,6 +1,7 @@
 //! Os casos do fluxo entre dois Dukes — o DN-2 entre dispositivos
-//! (FS19–FS26) — e o fim que a sessão com o par conclui, gravado dentro da
-//! ordem das gravações (FS27).
+//! (FS19–FS26) —, o fim que a sessão com o par conclui, gravado dentro da
+//! ordem das gravações (FS27), e o fecho de um fluxo acabado por fora, que
+//! só sai ao par com a ordem na mão da sessão (FS28).
 //!
 //! A suíte faz o outro Duke, com a chave de teste de um dispositivo
 //! relacionado, como nos casos do enlace e do pareamento:
@@ -428,11 +429,15 @@ fn fechar_a_linha() {
     }
 }
 
-/// O canal da sessão daqui, saindo, na suíte.
+/// O canal da sessão daqui, saindo, na suíte. Cada quadro passa pela
+/// conferência da hora, como os da vaga no destino: depois de a sessão
+/// vigiada ir pedir a ordem, ele sai com a ordem solta e o fim já gravado
+/// ([`crate::fluxo::par::conferir_a_hora_do_quadro_de_teste`]).
 struct CanalDeTeste;
 
 impl Canal for CanalDeTeste {
     fn mandar(&mut self, q: &[u8]) -> Result<(), &'static str> {
+        crate::fluxo::par::conferir_a_hora_do_quadro_de_teste();
         com_linha(|l| {
             if l.fechada {
                 return Err("a linha fechou");
@@ -1699,15 +1704,19 @@ fn fim_do_kernel(fim: &politica::auditoria::Evento, detalhe: &str) -> Resultado 
 
 /// O fim que a própria sessão com o par conclui vai à cadeia como os fins
 /// por fora — dentro da ordem das gravações, antes de acordar quem espera
-/// —, nos dois casos: o fim mandado ao par com o outro sentido já acabado
-/// (chegando: os dados e o fim de lá lidos até o fim, e o fim do sentido
-/// daqui) e o fecho de quem saiu com tudo dito (saindo: o que a ponta daqui
-/// escreveu já foi, e ela fecha). Com a ordem na mão da suíte, a sessão
-/// chega à conclusão e espera: o fluxo segue vivo — o dono que ainda está
-/// nele o vê aberto —, nada vai ao par e nenhum fim à cadeia. Solta a
-/// ordem, o fim vai à cadeia uma vez, com a ordem na mão da sessão e antes
-/// de acordar; só então o quadro sai ao par; e a operação do dono que vem
-/// depois ouve o fim, depois dele na cadeia.
+/// —, nos dois lados: chegando, o fim mandado ao par com o outro sentido já
+/// acabado (os dados e o fim de lá lidos até o fim, e o fim do sentido
+/// daqui); saindo, o fim de quem fecha com tudo dito (o que a ponta daqui
+/// escreveu já foi, e ela fecha: o fecho aborta o sentido que chega a ela,
+/// e o fim do que sai, que a sessão manda, conclui o fluxo — `fechado pela
+/// ponta` —; o `fechar` vai atrás, já do fluxo acabado). Com a ordem na
+/// mão da suíte, a sessão chega à conclusão e espera: o fluxo segue vivo —
+/// o dono que ainda está nele o vê aberto —, nada vai ao par e nenhum fim à
+/// cadeia. Solta a ordem, o fim vai à cadeia uma vez, com a ordem na mão da
+/// sessão e antes de acordar; só então o quadro sai ao par — cada quadro
+/// conferido no canal, de cada lado: com a ordem solta e o fim já gravado
+/// —; e a operação do dono que vem depois ouve o fim, depois dele na
+/// cadeia.
 pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
     use politica::fluxo::motivo;
     com_o_par(|| {
@@ -1763,6 +1772,10 @@ pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
             if la.esperar_o_fim()?.is_some() {
                 return Err("o fluxo concluido pela sessao terminou com fechar");
             }
+            // E o quadro saiu com a ordem solta, e o fim já gravado.
+            if crate::fluxo::par::quadro_fora_de_hora_de_teste() {
+                return Err("a sessao mandou o fim com a ordem na mao, ou antes de grava-lo");
+            }
             // A operação do dono que vem depois ouve o fim — e vem depois
             // dele na cadeia.
             recusado_com(
@@ -1780,7 +1793,8 @@ pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
                 return Err("a operacao do dono que ouviu o fim veio antes dele na cadeia");
             }
             nada_vivo("o fluxo concluido pela sessao ficou vivo")?;
-            // Saindo: o fecho de quem saiu com tudo dito.
+            // Saindo: a ponta daqui fecha com tudo dito, e o fim que a sessão
+            // manda conclui o fluxo, `fechado pela ponta`.
             let antes = crate::autorizacao::ultimo_registro();
             let r = fs_pedir(
                 b.quem(),
@@ -1825,7 +1839,8 @@ pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
                 || com_linha(|l| l.para_la.is_empty()).ok_or("sem linha"),
             )?;
             fim_do_kernel(&fim, "fechado pela ponta; ida 9; volta 0; desc 0")?;
-            // Só então o fim sai ao par, e o fecho atrás dele.
+            // Só então o fim sai ao par, e o fecho atrás dele — o do fluxo
+            // já acabado, decidido também com a ordem na mão.
             match Mensagem::ler(&par.mensagem()?) {
                 Some(Mensagem::Fim) => {}
                 outra => {
@@ -1842,7 +1857,127 @@ pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
             }
             esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
                 .map_err(|_| "a sessao daqui nao acabou depois do fecho")?;
+            // Os dois quadros saíram com a ordem solta, e o fim já gravado.
+            if crate::fluxo::par::quadro_fora_de_hora_de_teste() {
+                return Err(
+                    "a sessao mandou o fim ou o fecho com a ordem na mao, ou antes do fim gravado",
+                );
+            }
             nada_vivo("o fluxo fechado pela ponta ficou vivo")
+        })();
+        crate::fluxo::desarmar_de_teste();
+        encerrar_todas(r, &[&b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FS28 — o fim por fora com a sessão na ordem.
+// ---------------------------------------------------------------------------
+
+/// O par ouve o `fechar` com `motivo` — o do fim por fora — e a sessão
+/// acaba; o fluxo `id` acabou com um `stream.end` só, o de fora, com esse
+/// motivo; nenhum quadro saiu ao par com a ordem na mão da sessão, ou antes
+/// de o fim estar gravado; e nada ficou vivo.
+fn fechado_por_fora(la: &mut DeLa, id: &str, antes: u64, motivo: &str) -> Resultado {
+    match la.esperar_o_fim()? {
+        Some(m) if m == motivo => {}
+        outro => {
+            crate::log_error!("teste", "esperava `{}`: {:?}", motivo, outro);
+            return Err("o par nao ouviu o motivo do fim por fora");
+        }
+    }
+    let recurso = format!("fluxo:{id}");
+    let fins = registros_depois(antes, |e| e.metodo == "stream.end" && e.recurso == recurso);
+    if fins.len() != 1 || !fins[0].1.detalhe.starts_with(motivo) {
+        crate::log_error!("teste", "{:?}", fins);
+        return Err("o fim por fora com a sessao na ordem nao foi gravado uma vez so");
+    }
+    if crate::fluxo::par::quadro_fora_de_hora_de_teste() {
+        return Err("a sessao mandou o fecho com a ordem na mao, ou antes de o fim estar gravado");
+    }
+    nada_vivo("o fluxo acabado por fora ficou vivo")
+}
+
+/// O fluxo acaba por fora — a inatividade, como a revogação, o fim do
+/// processo ou o dispositivo que sai —, com a sessão daqui de dois jeitos.
+/// A caminho da ordem das gravações, esperando-a para mandar o fim que
+/// concluiria o fluxo: o fim por fora vem antes, e a sessão, com a ordem,
+/// acha o fluxo acabado. E parada, esperando o par: o fim por fora a
+/// acorda com a ordem na mão da suíte — como a teria quem acabou o fluxo,
+/// entre a tabela e a gravação do fim —, e ela não manda o fecho sem a
+/// ordem: vai pedi-la e espera, e nada sai ao par. Nos dois, um
+/// `stream.end` só, o de fora, com o motivo dele, e o par ouve o `fechar`
+/// com esse motivo, que só sai com o fim já na cadeia.
+pub(in crate::testes) fn fluxo_o_fim_por_fora_com_a_sessao_na_ordem() -> Resultado {
+    use politica::fluxo::motivo;
+    com_o_par(|| {
+        let (bia, _, _) = bia_relacionada("dispositivo")?;
+        let b = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            // A caminho da ordem: o fim de lá lido até o fim, e o fim do
+            // sentido daqui, que concluiria o fluxo; com a ordem na mão da
+            // suíte, a sessão espera, e o fluxo acaba por fora antes.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (mut la, id) = aberto_de_la(&b, VAGA)?;
+            let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
+            la.mandar(&Mensagem::Fim)?;
+            esperar_no_par(
+                || matches!(lidos(&ler(b.quem(), &id, 100)), Some((_, true)) | None),
+                TETO,
+            )?;
+            crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+            crate::fluxo::par::vigiar_a_ordem_de_teste(n);
+            crate::persistencia::em_ordem(|| -> Resultado {
+                feito(
+                    &sobre(b.quem(), "stream.finish", &id),
+                    "o fim do sentido daqui nao passou",
+                )?;
+                esperar_cedendo(crate::fluxo::par::a_caminho_da_ordem_de_teste, TETO)
+                    .map_err(|_| "a sessao nao chegou a ordem")?;
+                // O fim por fora, antes de a sessão ter a ordem.
+                crate::fluxo::vencer_de_teste(u64::MAX);
+                Ok(())
+            })?;
+            fechado_por_fora(&mut la, &id, antes, motivo::OCIOSO)?;
+            // Parada: o fim por fora a acorda com a ordem na mão da suíte.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (mut la, id) = aberto_de_la(&b, VAGA)?;
+            let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
+            crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+            crate::fluxo::par::vigiar_a_ordem_de_teste(n);
+            crate::persistencia::em_ordem(|| -> Resultado {
+                // Se algo já chegou ao par desta sessão.
+                let mut ao_par = || -> Result<bool, &'static str> {
+                    la.colher()?;
+                    Ok(!la.chegou.is_empty() || la.encerrada)
+                };
+                crate::fluxo::vencer_de_teste(u64::MAX);
+                let mut visto: Result<bool, &'static str> = Ok(false);
+                esperar_cedendo(
+                    || {
+                        visto = ao_par();
+                        visto != Ok(false) || crate::fluxo::par::a_caminho_da_ordem_de_teste()
+                    },
+                    TETO,
+                )
+                .map_err(|_| "a sessao parada nao acordou com o fim por fora")?;
+                if visto? {
+                    return Err("o fecho do fluxo acabado por fora saiu ao par sem a ordem");
+                }
+                // A folga: a sessão que não esperasse a ordem mandaria aqui.
+                let _ = esperar_cedendo(
+                    || {
+                        visto = ao_par();
+                        visto != Ok(false)
+                    },
+                    FOLGA_DA_ORDEM,
+                );
+                if visto? {
+                    return Err("o fecho do fluxo acabado por fora saiu ao par sem a ordem");
+                }
+                Ok(())
+            })?;
+            fechado_por_fora(&mut la, &id, antes, motivo::OCIOSO)
         })();
         crate::fluxo::desarmar_de_teste();
         encerrar_todas(r, &[&b])
