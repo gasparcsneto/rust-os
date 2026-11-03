@@ -6162,28 +6162,41 @@ fn terminal_operado() -> Resultado {
         600,
     )
     .map_err(|_| "o comando do agente nao chegou a linha de comando do terminal")?;
-    // Pelo agente da sessão 3: o número atravessa a ação, o Terminal e o
-    // pseudo-terminal até o log do interpretador — e até o ponto de decisão,
-    // que decide como a sessão 3. Ela não tem aperto: a linha é recusada,
-    // e a recusa aparece no Terminal. O Terminal não é atalho para o que o
-    // canal recusaria.
-    //
-    // A linha é de quem a editou — o agente 0, que a solta: confirmar a
-    // linha arrendada por outro seria `CONFLICT`, e não chegaria ao
-    // interpretador. A sessão 3, sem aperto, não tem titular, e confirma só
-    // a linha livre.
-    let titular_0 = crate::coordenacao::titular_do_agente(0).ok_or("a serial sem titular")?;
-    crate::coordenacao::soltar(&crate::coordenacao::recurso(linha), titular_0)
-        .map_err(|_| "o agente 0 nao tinha a linha que editou")?;
-    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(3))?;
-    esperar_ate(
+    // Pelo agente da sessão 3, sem aperto: ninguém está na sessão, e o
+    // Enter que ela pedisse não seria de ninguém. O `confirm` é recusado
+    // quando a ação entra, antes da conta, e nada chega ao Terminal nem ao
+    // interpretador — ver "terminal: o Enter pedido e so da conexao que o
+    // pediu". O Terminal não é atalho para o que o canal recusaria.
+    let marca = crate::log::total_emitidos();
+    match crate::ui::agir(linha, Acao::Confirmar, None, Origem::Agente(3)) {
+        Err(r) if r.motivo == crate::interpretador::AGENTE_FORA_DA_SESSAO => {}
+        outro => {
+            crate::log_error!("teste", "confirm da sessao 3: {:?}", outro);
+            return Err(
+                "o confirm de uma sessao sem ninguem no terminal nao foi recusado na entrada",
+            );
+        }
+    }
+    let _ = esperar_ate(
         || {
             atender();
-            executado("agent.ping", 3)
+            false
         },
-        600,
-    )
-    .map_err(|_| "o confirm do agente no terminal nao executou, ou o log nao diz que foi ele")?;
+        20,
+    );
+    let depois = |subsistema: &str, trecho: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= marca && r.subsistema == subsistema && r.mensagem().contains(trecho))
+                as usize;
+        });
+        n
+    };
+    if depois("usuario", "terminal: o agente digitou") != 0
+        || depois("console", "executado: agent.ping") != 0
+    {
+        return Err("o confirm recusado de uma sessao sem ninguem chegou ao terminal");
+    }
     let na_grade = |texto: &str| {
         crate::superficies::com_descricao(camada.id, |d| {
             d.elementos.iter().any(|e| {
@@ -6192,17 +6205,48 @@ fn terminal_operado() -> Resultado {
         })
         .unwrap_or(false)
     };
-    // A recusa diz o que fazer, numa frase, e o código e o registro logo
-    // abaixo, para quem investiga.
+    // A recusa do gate aparece no Terminal: a pessoa entrada no console — o
+    // `operador` — escreve e confirma pela árvore uma linha que o papel dela
+    // não alcança (`keyboard.read`, só do `sistema`). A recusa diz o que
+    // fazer, numa frase, e o código e o registro logo abaixo, para quem
+    // investiga. A linha estava arrendada a quem a editou — o agente 0, que
+    // a solta: editá-la arrendada por outro seria `CONFLICT`.
+    let titular_0 = crate::coordenacao::titular_do_agente(0).ok_or("a serial sem titular")?;
+    crate::coordenacao::soltar(&crate::coordenacao::recurso(linha), titular_0)
+        .map_err(|_| "o agente 0 nao tinha a linha que editou")?;
+    crate::ui::agir(
+        linha,
+        Acao::DefinirValor,
+        Some("keyboard.read"),
+        Origem::Pessoa,
+    )?;
     esperar_ate(
         || {
             atender();
-            na_grade("negado: Ninguem identificado pediu agent.ping")
-                && na_grade("(DENY_NOT_AUTHENTICATED; registro ")
+            valor_da_linha().as_deref() == Some("keyboard.read")
         },
         600,
     )
-    .map_err(|_| "a linha de uma sessao sem aperto nao foi recusada no terminal")?;
+    .map_err(|_| "a linha que o papel da pessoa nao alcanca nao chegou ao terminal")?;
+    crate::ui::agir(linha, Acao::Confirmar, None, Origem::Pessoa)?;
+    esperar_ate(
+        || {
+            atender();
+            na_grade("negado: Seu papel (operador) nao permite keyboard.read")
+                && na_grade("(DENY_PERMISSION; registro ")
+        },
+        600,
+    )
+    .map_err(|_| {
+        crate::superficies::com_descricao(camada.id, |d| {
+            for e in d.elementos.iter().filter(|e| e.rotulo == "terminal") {
+                let v = e.valor.as_deref().unwrap_or("");
+                let fim = v.len().saturating_sub(400);
+                crate::log_error!("teste", "grade: {:?}", v.get(fim..).unwrap_or(v));
+            }
+        });
+        "a recusa do gate a linha da pessoa nao apareceu no terminal"
+    })?;
     // E pela sessão 0, a serial, com o papel dela: a resposta aparece.
     crate::ui::agir(
         linha,
@@ -6344,12 +6388,19 @@ fn terminal_operado() -> Resultado {
 ///
 /// - o Enter da sessão 0 e o de uma sessão qualquer, sem pedido, não
 ///   executam nada, a linha fica como estava, e o log diz descartado;
-/// - pedido o da sessão 7, o Enter de outra sessão continua descartado, e o
-///   da 7 executa a linha como `agente 7`;
+/// - pedido o da serial, o Enter de outra sessão continua descartado, e o
+///   da serial executa a linha como `agente 0`;
 /// - o mesmo Enter de novo, sem um pedido novo, é descartado;
+/// - a sessão sem ninguém não reserva Enter, nem uma chave que não é a da
+///   sessão; e os pedidos têm teto: cheios, o seguinte é recusado, sem
+///   despejar o mais velho — os quatro continuam valendo;
 /// - o console que fecha esquece os pedidos.
+///
+/// O pedido de um agente pelo canal, amarrado à conexão dele, está em
+/// "terminal: o Enter pedido e so da conexao que o pediu".
 fn terminal_o_enter_de_agente_sem_pedido_e_descartado() -> Resultado {
-    use crate::interpretador::Modo;
+    use crate::agent::sessao::SERIAL;
+    use crate::interpretador::{AGENTE_FORA_DA_SESSAO, ENTER_DEMAIS, Modo, pedir_enter_do_agente};
     use crate::pessoas::Console;
     use protocolo::usuario::terminal::{APAGAR_A_LINHA, confirmar_pelo_agente};
     const CONSOLE: Console = Console::Terminal(3);
@@ -6384,33 +6435,63 @@ fn terminal_o_enter_de_agente_sem_pedido_e_descartado() -> Resultado {
             }
             crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
         }
-        // Pedido o Enter da 7: o da 9 não é ele, e o da 7 vale, uma vez.
-        crate::interpretador::pedir_enter_do_agente(CONSOLE, 7);
+        // Pedido o Enter da serial: o da 9 não é ele, e o da serial vale,
+        // uma vez.
+        pedir_enter_do_agente(CONSOLE, SERIAL, None)?;
         let marca = crate::log::total_emitidos();
         digitar("agent.ping");
         crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(9));
         if contar(marca, "executado: agent.ping") != 0 {
             return Err("o Enter de uma sessao valeu pelo pedido de outra");
         }
-        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
-        if contar(marca, "executado: agent.ping (agente 7)") != 1 {
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(SERIAL));
+        if contar(marca, "executado: agent.ping (agente 0)") != 1 {
             return Err("o Enter pedido pela arvore nao executou a linha como do agente");
         }
         let _ = esperar_ate(|| linha() == Some((Modo::Comando, 0)), 200);
         let marca = crate::log::total_emitidos();
         digitar("agent.ping");
-        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(SERIAL));
         if contar(marca, "executado: agent.ping") != 0 {
             return Err("o mesmo Enter pedido valeu duas vezes");
         }
         crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
+        // Sem ninguém na sessão, ou com a chave de outro, não há o que
+        // reservar.
+        if pedir_enter_do_agente(CONSOLE, 9, None) != Err(AGENTE_FORA_DA_SESSAO) {
+            return Err("a sessao sem ninguem reservou um Enter");
+        }
+        if pedir_enter_do_agente(CONSOLE, SERIAL, Some([0x5A; 32])) != Err(AGENTE_FORA_DA_SESSAO) {
+            return Err("um Enter foi reservado com uma chave que nao e a da sessao");
+        }
+        // O teto: com os pedidos cheios, o seguinte é recusado, e os que já
+        // estavam continuam valendo — nenhum foi despejado.
+        let mut cheios = 0;
+        while pedir_enter_do_agente(CONSOLE, SERIAL, None).is_ok() {
+            cheios += 1;
+            if cheios > 64 {
+                return Err("os pedidos de Enter do console nao tem teto");
+            }
+        }
+        if pedir_enter_do_agente(CONSOLE, SERIAL, None) != Err(ENTER_DEMAIS) {
+            return Err("os pedidos cheios nao recusaram com o motivo deles");
+        }
+        let marca = crate::log::total_emitidos();
+        for _ in 0..cheios {
+            digitar("agent.ping");
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(SERIAL));
+            let _ = esperar_ate(|| linha() == Some((Modo::Comando, 0)), 200);
+        }
+        if contar(marca, "executado: agent.ping (agente 0)") != cheios {
+            return Err("com os pedidos cheios, um pedido que ja estava se perdeu");
+        }
         // O console que fecha e reabre esquece o pedido que sobrou.
-        crate::interpretador::pedir_enter_do_agente(CONSOLE, 7);
+        pedir_enter_do_agente(CONSOLE, SERIAL, None)?;
         crate::interpretador::fechar_console(CONSOLE, "o caso reabre");
         crate::interpretador::abrir_console(CONSOLE);
         let marca = crate::log::total_emitidos();
         digitar("agent.ping");
-        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(SERIAL));
         if contar(marca, "executado: agent.ping") != 0 {
             return Err("o pedido de antes de o console fechar valeu depois");
         }
@@ -6418,6 +6499,156 @@ fn terminal_o_enter_de_agente_sem_pedido_e_descartado() -> Resultado {
     })();
     crate::interpretador::fechar_console(CONSOLE, "fim do caso");
     resultado
+}
+
+/// O Enter que a árvore pediu vale só para a conexão de quem o pediu — o
+/// O1 do adversário ο.
+///
+/// O número da sessão é a vaga do transporte: quando a conexão acaba, outra
+/// ocupa a vaga — a mesma chave, outra, ou um aperto do TCP repetido por
+/// quem o capturou, ainda sem confirmação. O pedido guarda a conexão e a
+/// chave, e o Enter que chega depois não vale para quem estiver na vaga.
+/// Com os agentes de teste pelo canal TCP, direto no interpretador de um
+/// console de Terminal:
+///
+/// - com a chave de outro agente, não se reserva o Enter da sessão; pela
+///   conexão do agente, o Enter dele executa a linha como dele;
+/// - pedido o Enter, a conexão acaba antes de ele chegar: ele é descartado,
+///   no log, e nada executa — nem depois que o mesmo agente volta, noutra
+///   conexão;
+/// - o aperto do agente repetido por outra conexão, sem confirmação, não é
+///   ninguém: não reserva Enter, e o gate recusa o pedido em nome dele.
+fn terminal_o_enter_pedido_e_so_da_conexao_que_o_pediu() -> Resultado {
+    use crate::autorizacao::Chamador;
+    use crate::interpretador::{AGENTE_FORA_DA_SESSAO, Modo, pedir_enter_do_agente};
+    use crate::pessoas::Console;
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, confirmar_pelo_agente};
+    const CONSOLE: Console = Console::Terminal(3);
+    let contar = |marca: u64, prefixo: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= marca && r.subsistema == "console" && r.mensagem().contains(prefixo))
+                as usize;
+        });
+        n
+    };
+    let digitar = |texto: &str| {
+        for c in texto.chars() {
+            crate::interpretador::tratar(CONSOLE, c);
+        }
+    };
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE);
+    com_canal_tcp(|| {
+        crate::interpretador::abrir_console(CONSOLE);
+        let resultado = (|| -> Resultado {
+            let chave = sigilo::publica_de(&chave_de_teste(1));
+            let a = AgenteTcpDeTeste::conectar(1)?;
+            let sa = a.sessao();
+            if pedir_enter_do_agente(CONSOLE, sa, Some(sigilo::publica_de(&chave_de_teste(2))))
+                != Err(AGENTE_FORA_DA_SESSAO)
+            {
+                return Err("a chave de outro agente reservou o Enter da sessao");
+            }
+            pedir_enter_do_agente(CONSOLE, sa, Some(chave))?;
+            let marca = crate::log::total_emitidos();
+            digitar("agent.ping");
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(sa));
+            if contar(
+                marca,
+                &alloc::format!("executado: agent.ping (agente {sa})"),
+            ) != 1
+            {
+                return Err("o Enter pedido pela conexao do agente nao executou a linha como dele");
+            }
+            let _ = esperar_ate(|| linha() == Some((Modo::Comando, 0)), 200);
+            // Pedido, e a conexão acaba antes do Enter.
+            pedir_enter_do_agente(CONSOLE, sa, Some(chave))?;
+            drop(a);
+            esperar_cedendo(|| crate::sessoes::identidade(sa).is_none(), 800)
+                .map_err(|_| "a sessao da conexao que acabou ficou de pe")?;
+            let marca = crate::log::total_emitidos();
+            digitar("agent.ping");
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(sa));
+            if contar(marca, "executado: agent.ping") != 0 {
+                return Err("o Enter pedido valeu depois de a conexao de quem pediu acabar");
+            }
+            if contar(marca, "nao e mais da conexao que o pediu; descartado") != 1 {
+                return Err("o Enter da conexao que acabou nao foi descartado no log");
+            }
+            crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
+            // O mesmo agente volta, noutra conexão — na mesma vaga ou não: o
+            // pedido da conexão de antes não vale.
+            let b = AgenteTcpDeTeste::conectar(1)?;
+            let sb = b.sessao();
+            pedir_enter_do_agente(CONSOLE, sb, Some(chave))?;
+            drop(b);
+            esperar_cedendo(|| crate::sessoes::identidade(sb).is_none(), 800)
+                .map_err(|_| "a sessao da segunda conexao ficou de pe")?;
+            let c = AgenteTcpDeTeste::conectar(1)?;
+            let marca = crate::log::total_emitidos();
+            digitar("agent.ping");
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(sb));
+            if contar(marca, "executado: agent.ping") != 0 {
+                crate::log_error!("teste", "tcp: vaga {} e depois {}", sb, c.sessao());
+                return Err("o Enter pedido por uma conexao valeu na conexao seguinte do agente");
+            }
+            crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
+            // O comando que o Enter de um agente executou e que esperou: a
+            // conexão dele acaba no meio da espera, e o comando não é
+            // executado de novo — quem estiver na vaga depois não é ele.
+            let e = AgenteTcpDeTeste::conectar(2)?;
+            let se = e.sessao();
+            let conexao = eco_estabelecido(Chamador::Sessao(se))?;
+            pedir_enter_do_agente(CONSOLE, se, Some(sigilo::publica_de(&chave_de_teste(2))))?;
+            digitar(&alloc::format!(
+                "net.recv {{\"connection\":{conexao},\"wait\":3000}}"
+            ));
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(se));
+            if !crate::interpretador::ocupado(CONSOLE) {
+                return Err("a leitura com espera do agente nao deixou o console esperando");
+            }
+            let marca = crate::log::total_emitidos();
+            drop(e);
+            esperar_cedendo(|| crate::sessoes::identidade(se).is_none(), 800)
+                .map_err(|_| "a sessao do agente que esperava ficou de pe")?;
+            esperar_cedendo(
+                || {
+                    let _ = crate::interpretador::retomar_suspensos();
+                    !crate::interpretador::ocupado(CONSOLE)
+                },
+                800,
+            )
+            .map_err(|_| "a espera do agente que saiu nao acabou")?;
+            if contar(marca, "executado: net.recv") != 0 {
+                return Err("o comando do agente que saiu da conexao foi executado de novo");
+            }
+            if contar(marca, "saiu da conexao durante a espera") != 1 {
+                return Err("o comando do agente que saiu nao foi largado no log");
+            }
+            // O aperto do agente repetido por outra conexão, sem confirmação.
+            let mut d = AgenteTcpDeTeste::abrir(3)?;
+            let sd = d.sessao();
+            d.mandar(&c.inicio)?;
+            d.esperar(|d| !d.quadros.is_empty() || d.fechada, 800)
+                .map_err(|_| "o aperto repetido nao teve resposta")?;
+            if crate::sessoes::identidade(sd).is_none_or(|id| id.confirmada) {
+                return Err("o aperto repetido nao deixou a sessao sem confirmacao");
+            }
+            if pedir_enter_do_agente(CONSOLE, sd, Some(chave)) != Err(AGENTE_FORA_DA_SESSAO) {
+                return Err("a sessao do aperto repetido reservou o Enter do agente");
+            }
+            if so_a_decisao(Chamador::Sessao(sd), "agent.ping", "{}")?
+                != politica::Codigo::DenyNotAuthenticated
+            {
+                return Err("o gate decidiu pela sessao do aperto repetido como do agente");
+            }
+            drop(d);
+            drop(c);
+            Ok(())
+        })();
+        crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+        resultado
+    })
 }
 
 /// Um agente não edita, não esvazia e não confirma, pela árvore, a linha de
@@ -6631,6 +6862,9 @@ fn linha_da_senha_no_terminal() -> Resultado {
     ] {
         recusada("set_value", valor, CARACTERE_QUE_NAO_SE_DIGITA)?;
     }
+    // E o `set_value` sem o valor, recusado antes da conta como o que não
+    // cabe: não arrenda o campo nem faz a versão crescer.
+    recusada("set_value", "", "set_value precisa de `value`")?;
 
     // O nome: a pessoa digita `login` pela janela, e o console o pede.
     digitar_pelo_teclado("login\n")?;
@@ -35323,6 +35557,10 @@ static CASOS: &[Caso] = &[
         f: terminal_o_enter_de_agente_sem_pedido_e_descartado,
     },
     Caso {
+        nome: "terminal: o Enter pedido e so da conexao que o pediu",
+        f: terminal_o_enter_pedido_e_so_da_conexao_que_o_pediu,
+    },
+    Caso {
         nome: "toolkit: o agente preenche um formulario",
         f: toolkit_o_agente_preenche_um_formulario,
     },
@@ -40929,9 +41167,16 @@ fn rede_o_console_espera_e_segura_a_entrada() -> Resultado {
                 return Err("a tecla do fisico que ficou na fila se perdeu");
             }
         }
-        // Outra linha não é confirmada enquanto este espera.
+        // Outra linha não é confirmada enquanto este espera — nem o Enter de
+        // um agente pela árvore é reservado: ficaria na fila até a espera
+        // acabar, e quem estivesse na sessão dele então não é quem pediu.
         if !crate::interpretador::confirmar_de_teste(console, "agent.ping").is_empty() {
             return Err("o console confirmou outra linha enquanto um comando esperava");
+        }
+        if crate::interpretador::pedir_enter_do_agente(console, crate::agent::sessao::SERIAL, None)
+            != Err(crate::interpretador::CONSOLE_OCUPADO)
+        {
+            return Err("com o console esperando, o Enter de um agente foi reservado");
         }
         pilha::mandar(conexao, &dono, b"eco do console").map_err(|_| "o eco nao recebeu")?;
         esperar_cedendo(|| crate::interpretador::retomar_suspensos() > 0, 300)

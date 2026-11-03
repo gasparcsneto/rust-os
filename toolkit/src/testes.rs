@@ -853,4 +853,17 @@ fn o_agente_na_linha_de_comando_vira_o_que_digitar() {
     // O `press` não é da linha.
     assert_eq!(ui.acao(1, acao::PRESSIONAR), Resposta::Nada);
     assert_eq!(pedido(&mut ui), "");
+    // Os marcadores só entram pelas ações: dentro de um valor, ficam de
+    // fora — o Enter do agente não vem num `set_value`.
+    assert_eq!(
+        ui.definir_valor(
+            1,
+            &alloc::format!("agent{CONFIRMAR_PELO_AGENTE}.ping{APAGAR_A_LINHA}")
+        ),
+        Resposta::Acionado(DIGITAR)
+    );
+    assert_eq!(
+        pedido(&mut ui),
+        alloc::format!("{APAGAR_A_LINHA}agent.ping")
+    );
 }
