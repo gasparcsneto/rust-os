@@ -41,7 +41,11 @@
 //! que a operação recusada já encontrou não, por mudança nenhuma de outro
 //! objeto —, e a vaga que um fluxo do processo deixa na cota dele avisa,
 //! uma vez, o pedido que ele não pôde aceitar ([`vaga`]): a recusa que
-//! responde a esse aviso espaça como as outras. O objeto que já acabou não
+//! responde a esse aviso espaça como as outras. As marcas são da máquina
+//! inteira: passado o teto delas, a passada avalia todas as designações
+//! com a mesma conta — o transbordo não traz de volta o que foi recusado,
+//! e não diz a ninguém que outro mexeu na malha —, e a marca da vaga fica
+//! fora desse teto, e não se perde. O objeto que já acabou não
 //! espera o rearme: o fim sai na hora, uma vez. A operação do dono que não
 //! mudou nada no objeto — o aceite sem pedido, a recepção sem entrega nova
 //! — consome sem desfazer o rearme marcado ([`consumiu`]); e a recepção
@@ -144,15 +148,15 @@ pub struct Canal {
     dono: u64,
 }
 
-/// O que mudou, como quem muda o vê: um fluxo inteiro (as duas pontas), um
-/// endpoint, os endpoints todos — a malha mudou —, ou a cota de fluxos do
-/// processo — um fluxo dele acabou, e há uma vaga.
+/// O que mudou num objeto, como quem muda o vê: um fluxo inteiro (as duas
+/// pontas), um endpoint, ou os endpoints todos — a malha mudou. A vaga na
+/// cota de fluxos de um processo — um fluxo dele acabou — tem a marca dela
+/// à parte ([`Marcas`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tocado {
     Fluxo(u64),
     Endpoint(u64),
     Endpoints,
-    Vaga(u64),
 }
 
 struct Entrada {
@@ -175,8 +179,8 @@ struct Entrada {
     /// ([`politica::aviso::novo_depois_da_recusa`]). A vaga na cota do
     /// processo o limpa — era o que o aceite recusado esperava.
     recusado: u8,
-    /// Uma vaga na cota do processo chegou — ou as marcas transbordaram, e
-    /// a marca dela pode ter sido a que não coube ([`processar`]) —, e desde
+    /// Uma vaga na cota do processo chegou — a marca dela, que não se perde
+    /// quando as marcas dos objetos transbordam ([`Marcas`]) —, e desde
     /// então nenhum aviso do objeto saiu no canal, nem operação do dono
     /// passou: a recusa que vier antes — a vaga chegou com um aviso ainda
     /// não consumido, ou no meio da operação — não espaça, e o aviso da vaga
@@ -196,13 +200,87 @@ static DESIGNACOES: Mutex<BTreeMap<Objeto, Entrada>> = Mutex::new(BTreeMap::new(
 static QUANTAS: AtomicUsize = AtomicUsize::new(0);
 
 /// As marcas, esperando quem as processe. A trava é folha.
-static TOCADOS: Mutex<Vec<Tocado>> = Mutex::new(Vec::new());
+static TOCADOS: Mutex<Marcas> = Mutex::new(Marcas {
+    objetos: Vec::new(),
+    transbordou: false,
+    vagas: Vec::new(),
+});
 
-/// Quantas marcas cabem; passou disso, avalia-se tudo.
+/// Há marcas guardadas, ou o transbordo delas: o atalho da passada sem
+/// designação nenhuma, que só toma a trava das marcas para levá-las. Quem
+/// marca o liga, e quem as leva o desliga — os dois com a trava na mão.
+static GUARDADAS: AtomicBool = AtomicBool::new(false);
+
+/// Quantas marcas de objetos cabem — objetos distintos: o que muda de novo
+/// antes da passada não conta outra vez —; passou disso, avalia-se tudo.
 const MARCAS: usize = 64;
 
-/// As marcas não couberam: a próxima passada avalia todas as designações.
-static TRANSBORDOU: AtomicBool = AtomicBool::new(false);
+/// Quantas marcas de vaga cabem: uma por fio que o escalonador comporta.
+///
+/// A marca de vaga é uma por processo, e o processo era ponta de um fluxo
+/// da tabela — um fio do escalonador: o fim dos fluxos de um processo que
+/// acabou ([`crate::malha::canal_acabou`]) vem com uma passada, antes de o
+/// fio dele sair dele. Toda passada de [`processar`] leva as marcas todas —
+/// também sem designação nenhuma —, e quem marca a chama logo depois, fora
+/// da tabela: o que fica guardado é só de quem marcou e ainda não passou.
+/// O teto não é alcançado; passado dele, a marca cairia com o transbordo —
+/// o pedido esperaria o rearme da recusa, o atraso de antes —, e nada se
+/// diria a ninguém.
+const VAGAS: usize = crate::fios::MAX_FIOS;
+
+/// As marcas guardadas entre duas passadas de [`processar`].
+#[derive(Default)]
+struct Marcas {
+    /// Os objetos que mudaram, cada um uma vez: no máximo [`MARCAS`].
+    objetos: Vec<Tocado>,
+    /// A mudança de um objeto não coube: a passada avalia todas as
+    /// designações. Só isso — o transbordo não conta ninguém como talvez
+    /// com uma vaga: as marcas são da máquina inteira, as mudanças de
+    /// qualquer processo, de qualquer pessoa, as transbordam, e o pedido que
+    /// a recusa espaçou avisaria antes do rearme — o aviso diria ao dono que
+    /// outro mexeu na malha.
+    transbordou: bool,
+    /// Os processos cuja cota de fluxos ganhou uma vaga, cada um uma vez —
+    /// fora do teto das [`MARCAS`], no das [`VAGAS`]: a vaga não se perde
+    /// quando as mudanças dos objetos transbordam.
+    vagas: Vec<u64>,
+}
+
+impl Marcas {
+    /// A mudança do objeto `x`, uma vez; passado o teto, o transbordo.
+    fn marcar_objeto(&mut self, x: Tocado) {
+        if self.objetos.contains(&x) {
+            return;
+        }
+        if self.objetos.len() >= MARCAS {
+            self.transbordou = true;
+            #[cfg(feature = "modo-teste")]
+            TRANSBORDOS.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        self.objetos.push(x);
+    }
+
+    /// A vaga na cota do processo `fio`, uma vez.
+    fn marcar_vaga(&mut self, fio: u64) {
+        if self.vagas.contains(&fio) {
+            return;
+        }
+        if self.vagas.len() >= VAGAS {
+            // Não acontece (o teto das vagas); se acontecesse, a marca cai,
+            // e a passada avalia tudo sem contar ninguém como talvez com uma
+            // vaga.
+            self.transbordou = true;
+            return;
+        }
+        self.vagas.push(fio);
+    }
+
+    /// Nada a avaliar.
+    fn vazias(&self) -> bool {
+        self.objetos.is_empty() && !self.transbordou && self.vagas.is_empty()
+    }
+}
 
 static PUBLICADOS: AtomicU64 = AtomicU64::new(0);
 static COALESCIDOS: AtomicU64 = AtomicU64::new(0);
@@ -348,27 +426,18 @@ pub fn trocou_de_imagem(fio: u64) {
     crate::eventos::descartar(fio, TIPO_DO_AVISO);
 }
 
-/// Marca uma mudança, com a trava de quem mudou na mão; quem acorda as
-/// esperas, fora dela, chama [`processar`].
+/// Marca a mudança de um objeto, com a trava de quem mudou na mão; quem
+/// acorda as esperas, fora dela, chama [`processar`].
 fn marcar(x: Tocado) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
     }
     crate::arch::sem_interrupcoes(|| {
         let mut m = TOCADOS.lock();
-        if m.contains(&x) {
-            return;
-        }
         #[cfg(feature = "modo-teste")]
-        if transbordada_de_teste(x) {
-            TRANSBORDOU.store(true, Ordering::Release);
-            return;
-        }
-        if m.len() >= MARCAS {
-            TRANSBORDOU.store(true, Ordering::Release);
-            return;
-        }
-        m.push(x);
+        transbordar_se_armado_de_teste(&mut m, TRANSBORDO_NA_MUDANCA);
+        m.marcar_objeto(x);
+        GUARDADAS.store(true, Ordering::Release);
     });
 }
 
@@ -391,38 +460,54 @@ pub fn tocar_endpoints() {
 /// Um fluxo do processo `fio` acabou, e a cota de fluxos dele tem uma vaga:
 /// os endpoints dele são avaliados de novo, e o pedido que ele não pôde
 /// aceitar por falta de vaga avisa, sem esperar o rearme da recusa — uma
-/// vez: a recusa que responde a esse aviso espaça como as outras.
+/// vez: a recusa que responde a esse aviso espaça como as outras. A marca
+/// da vaga fica à parte das dos objetos, fora do teto delas: não se perde
+/// quando elas transbordam ([`Marcas`]).
 pub fn vaga(fio: u64) {
-    marcar(Tocado::Vaga(fio));
+    if QUANTAS.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    crate::arch::sem_interrupcoes(|| {
+        let mut m = TOCADOS.lock();
+        #[cfg(feature = "modo-teste")]
+        transbordar_se_armado_de_teste(&mut m, fio);
+        m.marcar_vaga(fio);
+        GUARDADAS.store(true, Ordering::Release);
+    });
 }
 
 /// Fora de qualquer trava: avalia os objetos marcados, e publica o que a
-/// conta mandar.
+/// conta mandar. Leva as marcas todas de uma vez — as dos objetos, o
+/// transbordo e as das vagas —, também sem designação nenhuma.
 pub fn processar() {
-    if QUANTAS.load(Ordering::Acquire) == 0 {
-        // Nenhuma designação: as marcas não servem a ninguém.
-        if TRANSBORDOU.swap(false, Ordering::AcqRel) {
-            crate::arch::sem_interrupcoes(|| TOCADOS.lock().clear());
-        }
+    if QUANTAS.load(Ordering::Acquire) == 0 && !GUARDADAS.load(Ordering::Acquire) {
         return;
     }
-    let marcas = crate::arch::sem_interrupcoes(|| core::mem::take(&mut *TOCADOS.lock()));
-    let tudo = TRANSBORDOU.swap(false, Ordering::AcqRel);
-    if marcas.is_empty() && !tudo {
+    let marcas = crate::arch::sem_interrupcoes(|| {
+        let mut m = TOCADOS.lock();
+        GUARDADAS.store(false, Ordering::Release);
+        core::mem::take(&mut *m)
+    });
+    // Nenhuma designação: as marcas não servem a ninguém — a designação que
+    // nascer depois é avaliada ao nascer, e nenhuma recusa dela veio antes
+    // destas vagas.
+    if QUANTAS.load(Ordering::Acquire) == 0 || marcas.vazias() {
         return;
     }
+    let tudo = marcas.transbordou;
     let objetos: Vec<Objeto> = com_designacoes(|t| {
         let mut objetos = Vec::new();
         for (obj, e) in t.iter_mut() {
             let dono = obj.dono(e.canal);
-            // A vaga do dono: a marca dela, ou o transbordo — a marca que
-            // não coube pode ter sido a dela, e perdê-la deixaria o pedido
-            // mudo até o rearme da recusa, que dobra até um minuto. No
-            // transbordo, cada endpoint conta como talvez com uma vaga: no
-            // máximo um aviso a mais por endpoint, sem giro — o aviso
-            // publicado tira a marca, e a recusa que responde a ele espaça.
-            let vaga = matches!(obj, Objeto::Endpoint(_))
-                && (tudo || marcas.contains(&Tocado::Vaga(dono)));
+            // A vaga do dono: só a marca dela, que não se perde no
+            // transbordo — fica fora do teto das marcas dos objetos. O
+            // transbordo não conta ninguém como talvez com uma vaga: as
+            // marcas são da máquina inteira, e as mudanças de qualquer
+            // processo, de qualquer pessoa, as transbordam — o pedido que a
+            // recusa espaçou avisaria antes do rearme, e o aviso diria ao
+            // dono que outro mexeu na malha. No transbordo, a conta de cada
+            // designação é refeita, e o filtro do que é novo continua.
+            let vaga = matches!(obj, Objeto::Endpoint(_)) && marcas.vagas.contains(&dono);
             if vaga {
                 // A vaga é o que o aceite recusado pela cota esperava: o
                 // pedido que ainda espera avisa de novo. A marca fica até um
@@ -435,7 +520,7 @@ pub fn processar() {
                 e.vaga = true;
             }
             let tocado = vaga
-                || marcas.iter().any(|m| match (m, obj) {
+                || marcas.objetos.iter().any(|m| match (m, obj) {
                     (Tocado::Fluxo(n), Objeto::Ponta { fluxo, .. }) => n == fluxo,
                     (Tocado::Endpoint(n), Objeto::Endpoint(x)) => n == x,
                     (Tocado::Endpoints, Objeto::Endpoint(_)) => true,
@@ -979,40 +1064,72 @@ fn vencer_o_rearme_de_teste(obj: Objeto) {
     });
 }
 
-/// Só para a suíte: o processo cuja próxima marca de vaga acha as marcas
-/// cheias — como se outras [`MARCAS`] tivessem chegado antes dela, entre
-/// duas passadas —, e é largada, com o transbordo de pé; zero, nenhum.
-/// Encher as marcas de verdade, pela suíte, seria uma corrida com o
-/// coletor, que as processa a cada tique.
+/// Só para a suíte: o que dispara o transbordo das marcas — zero, nada;
+/// [`TRANSBORDO_NA_MUDANCA`], a próxima mudança de um objeto, de quem for;
+/// outro valor, a próxima vaga na cota daquele processo. Encher as marcas
+/// pela suíte, de fora, seria uma corrida com o coletor, que as leva a cada
+/// tique: o ponto as enche sob a trava delas, logo antes da marca que o
+/// dispara, pelo caminho de sempre ([`transbordar_se_armado_de_teste`]).
 #[cfg(feature = "modo-teste")]
-static VAGA_TRANSBORDADA: AtomicU64 = AtomicU64::new(0);
+static TRANSBORDO_ARMADO: AtomicU64 = AtomicU64::new(0);
 
-/// Só para a suíte: arma o transbordo na próxima marca de vaga do processo
-/// `fio` ([`VAGA_TRANSBORDADA`]); zero desarma.
+/// Só para a suíte: o gatilho da próxima mudança de um objeto
+/// ([`TRANSBORDO_ARMADO`]) — nenhum fio tem este id.
 #[cfg(feature = "modo-teste")]
-pub fn transbordar_a_vaga_de_teste(fio: u64) {
-    VAGA_TRANSBORDADA.store(fio, Ordering::Release);
+const TRANSBORDO_NA_MUDANCA: u64 = u64::MAX;
+
+/// Só para a suíte: as mudanças de objetos que não couberam nas
+/// [`MARCAS`], desde o boot — cada uma, um transbordo de verdade.
+#[cfg(feature = "modo-teste")]
+static TRANSBORDOS: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: a próxima vaga na cota do processo `fio` acha as
+/// marcas dos objetos transbordadas — [`MARCAS`] objetos que não existem,
+/// e mais um que não coube, como se tivessem mudado antes dela, entre duas
+/// passadas ([`TRANSBORDO_ARMADO`]).
+#[cfg(feature = "modo-teste")]
+pub fn transbordar_antes_da_vaga_de_teste(fio: u64) {
+    TRANSBORDO_ARMADO.store(fio, Ordering::Release);
 }
 
-/// Só para a suíte: depois de [`transbordar_a_vaga_de_teste`], se a marca
-/// da vaga já foi largada no transbordo.
+/// Só para a suíte: a próxima mudança de um objeto, de quem for, acha as
+/// marcas cheias e as transborda — como as de muitos objetos de outros
+/// processos, entre duas passadas ([`TRANSBORDO_ARMADO`]).
 #[cfg(feature = "modo-teste")]
-pub fn vaga_transbordou_de_teste() -> bool {
-    VAGA_TRANSBORDADA.load(Ordering::Acquire) == 0
+pub fn transbordar_na_proxima_mudanca_de_teste() {
+    TRANSBORDO_ARMADO.store(TRANSBORDO_NA_MUDANCA, Ordering::Release);
 }
 
-/// Só para a suíte, com a trava das marcas na mão: se `x` é a marca de
-/// vaga que o transbordo armado larga ([`VAGA_TRANSBORDADA`]).
+/// Só para a suíte: se o transbordo armado ainda não disparou.
 #[cfg(feature = "modo-teste")]
-fn transbordada_de_teste(x: Tocado) -> bool {
-    match x {
-        Tocado::Vaga(fio) => {
-            fio != 0
-                && VAGA_TRANSBORDADA
-                    .compare_exchange(fio, 0, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-        }
-        _ => false,
+pub fn transbordo_armado_de_teste() -> bool {
+    TRANSBORDO_ARMADO.load(Ordering::Acquire) != 0
+}
+
+/// Só para a suíte: os transbordos das marcas desde o boot
+/// ([`TRANSBORDOS`]).
+#[cfg(feature = "modo-teste")]
+pub fn transbordos_de_teste() -> u64 {
+    TRANSBORDOS.load(Ordering::Acquire)
+}
+
+/// Só para a suíte, com a trava das marcas na mão, antes da marca de
+/// `gatilho` — o processo da vaga, ou [`TRANSBORDO_NA_MUDANCA`]: se é o
+/// armado, as marcas dos objetos transbordam pelo caminho de sempre —
+/// [`MARCAS`] objetos que não existem, e mais um, que não cabe. A marca de
+/// quem disparou vem depois, e acha as dos objetos cheias.
+#[cfg(feature = "modo-teste")]
+fn transbordar_se_armado_de_teste(m: &mut Marcas, gatilho: u64) {
+    if gatilho == 0
+        || TRANSBORDO_ARMADO
+            .compare_exchange(gatilho, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    // Fluxos que não existem: os números dos fluxos contam de baixo.
+    for i in 0..=MARCAS as u64 {
+        m.marcar_objeto(Tocado::Fluxo(u64::MAX - i));
     }
 }
 
@@ -1060,7 +1177,7 @@ fn conta_velha_de_teste(obj: Objeto) -> Option<(u8, u32)> {
 pub fn desarmar_de_teste() {
     VAGA_NA_RECUSA.store(0, Ordering::Release);
     REARME_NA_RECUSA.store(false, Ordering::Release);
-    VAGA_TRANSBORDADA.store(0, Ordering::Release);
+    TRANSBORDO_ARMADO.store(0, Ordering::Release);
     FIM_NA_RECUSA.store(false, Ordering::Release);
     NIVEL_VELHO.store(0, Ordering::Release);
 }
