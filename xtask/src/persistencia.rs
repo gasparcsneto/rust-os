@@ -21,15 +21,67 @@
 //! O TPM morre junto — ver [`Ligada::cortar_a_energia`] —, e o estado
 //! dele fica no diretório, como o NV de um chip sem energia.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use super::disco_hostil::{Corte, DiscoHostil, Faixa, Gatilho, Sentido};
 use super::{
     Ambiente, Arquitetura, Artefato, BufReader, Child, Command, Duration, ExitCode, Path, Teclado,
-    UnixStream, Video, build, caminho_socket, canal_de_pe, comando_qemu, diretorio_do_tpm, disco,
-    disco_de_testes, escrever_no_estado, ler_o_estado, pedir_pela_serial, zerar_o_estado,
+    UnixStream, Video, build, caminho_socket, canal_de_pe_com, comando_qemu, diretorio_do_tpm,
+    disco, disco_de_testes, escrever_no_estado, ler_o_estado, pedir_pela_serial, zerar_o_estado,
 };
 
-/// Quanto esperar o canal de uma máquina recém-ligada responder.
-const ESPERA_PELO_BOOT: Duration = Duration::from_secs(90);
+/// Quanto uma máquina que sobe pode ficar sem andar antes de a bancada
+/// desistir dela: nenhum byte novo na serial humana, nenhuma leitura,
+/// escrita ou descarga nos discos, nada no canal — ver [`AndamentoDoBoot`].
+///
+/// # Por que a espera é pelo andamento
+///
+/// Ela era um prazo do boot inteiro, de noventa segundos, e reprovou na CI
+/// 408 dois boots que andavam: num runner sem CPU, um parou nos noventa
+/// segundos ainda no iniciador, conferindo o kernel de 15,8 MB — o disco
+/// tinha lido 16,4 MB e estava ocioso havia 0,28 s —, e outro no kernel,
+/// antes de ligar os outros núcleos — o disco ocioso havia 1,1 s. O que se
+/// quer reprovar não é o boot lento, é o boot **parado** — o firmware da
+/// CI 413, com a serial muda e o disco ocioso havia 253 segundos —, como a
+/// suíte já faz com a [`super::JANELA_SEM_PROGRESSO`] dela.
+///
+/// # O que conta como andar
+///
+/// O que se vê de fora, sem mudar o firmware, o iniciador nem o kernel:
+///
+/// - a serial humana do cenário — a COM1 do x86, ver [`serial_do_cenario`]
+///   —, que tem o console do firmware, o relatório do iniciador e os passos
+///   do kernel;
+/// - os contadores dos discos pelo QMP — bytes e operações de leitura, de
+///   escrita e de descarga, de todos: o do firmware e o do kernel. É o que
+///   cobre o trecho mudo do iniciador: ele lê o kernel do slot em pedaços
+///   de um mebibyte, somando o resumo e o CRC de cada um antes de ler o
+///   seguinte, e cada pedaço é uma leitura nova no disco;
+/// - o que a máquina escreve no canal antes de atender — no ARM, onde a
+///   única serial é o canal, o console do firmware e o relatório do
+///   iniciador.
+///
+/// # Por que dois minutos
+///
+/// O trecho mudo mais longo de um boot que anda é o do firmware antes do
+/// console: medido aqui, com o firmware do Ubuntu 24.04 (edk2 2024.02; o da
+/// CI é o 2025.11), o OVMF escreveu o primeiro byte na COM1 seis segundos
+/// depois de o emulador abrir o QMP, e o disco, meio segundo depois; o
+/// AAVMF escreveu na PL011 meio segundo depois, e leu o disco um segundo
+/// depois disso. Dois minutos são vinte vezes isso, e mais que os noventa
+/// segundos do prazo antigo: um boot que passava nele passa aqui. A
+/// bancada de persistência e a da atualização dizem no fim o maior
+/// intervalo sem sinal novo que um boot que atendeu teve — ver
+/// [`relatar_a_maior_parada`] —, para que esta conta se refaça com o
+/// número da CI.
+pub(crate) const JANELA_SEM_ANDAR: Duration = Duration::from_secs(120);
+
+/// O teto de um boot que anda sem o canal atender: a máquina que reinicia
+/// em laço, ou que só escreve, anda para sempre. Mais de três vezes o
+/// prazo antigo de noventa segundos, para o runner lento da CI 408.
+const TETO_DO_BOOT: Duration = Duration::from_secs(300);
 
 /// Uma máquina de produção de pé, com o canal da serial aberto.
 pub(crate) struct Ligada {
@@ -37,6 +89,9 @@ pub(crate) struct Ligada {
     escrita: UnixStream,
     leitor: BufReader<UnixStream>,
     id: u32,
+    /// O que a bancada olha desta máquina de fora, com os caminhos da
+    /// partida — ver [`Olhos`].
+    olhos: Olhos,
     // Por último: o TPM sai depois do QEMU — ver o `Drop`.
     _ambiente: Ambiente,
 }
@@ -58,29 +113,53 @@ impl Ligada {
         artefato: &Artefato,
         ambiente: Ambiente,
     ) -> Result<Ligada, String> {
-        Ligada::subir_esperando(arch, artefato, ambiente, ESPERA_PELO_BOOT)
+        Ligada::subir_esperando(arch, artefato, ambiente, TETO_DO_BOOT)
     }
 
-    /// [`Ligada::subir_com`], esperando o canal por `espera`: a máquina que
-    /// reinicia sozinha antes de atender — a versão nova que entra em
-    /// pânico, as tentativas que o iniciador conta — leva vários boots.
+    /// [`Ligada::subir_com`], com o teto `teto`: a máquina que reinicia
+    /// sozinha antes de atender — a versão nova que entra em pânico, as
+    /// tentativas que o iniciador conta — leva vários boots.
+    ///
+    /// A espera é pelo andamento da máquina: ela segue enquanto a máquina
+    /// anda, e desiste quando ela fica [`JANELA_SEM_ANDAR`] sem andar, ou
+    /// no teto — ver [`AndamentoDoBoot`]. Desistindo, diz onde a máquina
+    /// parou: o que o emulador diz de si pelo QMP, o TPM — se o `swtpm`
+    /// vive, e o fim do log dele — e o fim do log de depuração do firmware.
+    /// O fim da serial, quem mostra é o cenário que reprova (ver
+    /// [`mostrar_o_fim_da_serial`]).
     pub(crate) fn subir_esperando(
         arch: Arquitetura,
         artefato: &Artefato,
-        ambiente: Ambiente,
-        espera: Duration,
+        mut ambiente: Ambiente,
+        teto: Duration,
     ) -> Result<Ligada, String> {
-        let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
-        let fluxo = match canal_de_pe(&socket, filho.id(), espera) {
-            Ok(f) => f,
+        let (mut filho, socket, firmware) = lancar(arch, artefato, &ambiente)?;
+        let mut olhos = Olhos::da_partida(arch, firmware);
+        let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
+        let de_pe = canal_de_pe_com(&socket, |lidos| {
+            olhos.ouvir_o_canal(lidos);
+            if matches!(filho.try_wait(), Ok(Some(_))) {
+                return Err("o emulador saiu antes de o canal atender".to_string());
+            }
+            let agora = Instant::now();
+            andamento
+                .olhar(agora, Some(olhos.sinais(agora)))
+                .map_err(|d| d.to_string())
+        });
+        let fluxo = match de_pe {
+            Ok(f) => {
+                registrar_a_parada(andamento.maior_parada_ate(Instant::now()));
+                f
+            }
             Err(e) => {
                 let estado = match filho.try_wait() {
                     Ok(Some(saida)) => format!("o emulador ja tinha saido ({saida})"),
-                    _ => format!("o emulador, pelo QMP: {}", estado_do_emulador(arch)),
+                    _ => format!("o emulador, pelo QMP: {}", estado_do_emulador(&olhos.qmp)),
                 };
+                let tpm = tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref());
                 let _ = filho.kill();
                 let _ = filho.wait();
-                return Err(format!("{e}\n  {estado}"));
+                return Err(format!("{e}\n  {estado}{tpm}"));
             }
         };
         fluxo
@@ -96,6 +175,7 @@ impl Ligada {
             // Longe das faixas da fumaça, que ninguém mais usa aqui, mas um
             // número reconhecível no log ajuda a ler uma falha.
             id: 70_000,
+            olhos,
             _ambiente: ambiente,
         })
     }
@@ -200,18 +280,24 @@ impl Ligada {
     }
 }
 
-/// O que o emulador vivo diz de si pelo QMP, para o boot que não atendeu:
-/// se roda, onde está cada processador — e se parado num `hlt` —, e o que
-/// o disco da máquina já leu e escreveu, com há quanto tempo está ocioso.
+/// O que o emulador vivo diz de si pelo QMP `qmp`, para o boot que não
+/// atendeu: se roda, onde está cada processador — e se parado num `hlt` —,
+/// e o que cada disco da máquina já leu e escreveu, com há quanto tempo
+/// está ocioso.
 ///
 /// Na CI 359, um primeiro boot parou no iniciador, lendo o kernel do slot,
 /// e a serial só dizia até onde o hóspede tinha escrito: não dizia se o
 /// processador girava à espera do disco, se o disco tinha um pedido
 /// pendurado, ou se o próprio emulador tinha parado. Um emulador que não
 /// responde ao QMP é essa terceira resposta.
-fn estado_do_emulador(arch: Arquitetura) -> String {
+///
+/// Os discos são todos os que já leram ou escreveram, e não só o do
+/// kernel: no x86, o firmware e o iniciador leem o disco de testes pelo
+/// controlador padrão da máquina (`ide0-hd0`), e o kernel, pelo virtio
+/// (`disco0`) — o mesmo arquivo.
+fn estado_do_emulador(qmp: &Path) -> String {
     let perguntar = || -> Result<String, String> {
-        let (mut escrita, mut leitor) = super::qmp_abrir(&super::caminho_qmp(arch))?;
+        let (mut escrita, mut leitor) = super::qmp_abrir(qmp)?;
         let mut pedir = |pedido: &str| super::qmp_pedir(&mut escrita, &mut leitor, pedido);
         let status = pedir(r#"{"execute":"query-status"}"#)?;
         let monitor = |comando: &str| {
@@ -231,13 +317,15 @@ fn estado_do_emulador(arch: Arquitetura) -> String {
         ];
         // A saída do monitor humano vem dentro de uma string JSON, com as
         // quebras de linha escapadas.
-        for linha in registros.split("\\r\\n").chain(disco.split("\\r\\n")) {
+        for linha in registros.split("\\r\\n") {
             let linha = linha.trim();
-            if linha.starts_with("CPU#")
-                || linha.starts_with("RIP=")
-                || linha.starts_with("PC=")
-                || linha.starts_with("disco0")
-            {
+            if linha.starts_with("CPU#") || linha.starts_with("RIP=") || linha.starts_with("PC=") {
+                partes.push(linha.to_string());
+            }
+        }
+        for linha in disco.split("\\r\\n") {
+            let linha = linha.trim().trim_start_matches("{\"return\": \"");
+            if atividade_dos_discos(linha).is_some_and(|a| a > 0) {
                 partes.push(linha.to_string());
             }
         }
@@ -247,13 +335,13 @@ fn estado_do_emulador(arch: Arquitetura) -> String {
         .unwrap_or_else(|e| format!("sem resposta ({e}): o emulador vivo e parado por dentro"))
 }
 
-/// Liga o QEMU, sem esperar nada dele. Devolve o processo e o socket da
-/// serial do agente.
+/// Liga o QEMU, sem esperar nada dele. Devolve o processo, o socket da
+/// serial do agente e, no x86, o arquivo do log de depuração do firmware.
 fn lancar(
     arch: Arquitetura,
     artefato: &Artefato,
     ambiente: &Ambiente,
-) -> Result<(Child, std::path::PathBuf), String> {
+) -> Result<(Child, PathBuf, Option<PathBuf>), String> {
     let socket = caminho_socket(arch);
     let mut qemu = comando_qemu(
         arch,
@@ -263,6 +351,30 @@ fn lancar(
         Video::Linear,
         ambiente,
     )?;
+    // O log de depuração do firmware do x86: o EDK II escreve as mensagens
+    // de depuração na porta 0x402, o `debugcon` do emulador, e é lá que
+    // estaria o que um firmware parado esperava — o da CI 413 parou depois
+    // do console, antes de carregar a opção de boot. O OVMF da CI — o do
+    // Ubuntu 26.04, edk2 2025.11 — é uma compilação de release, sem as
+    // mensagens (`BUILD_TYPE ?= RELEASE` no `debian/rules` do pacote, e o
+    // `DEBUG_ON_SERIAL_PORT` comentado); o do Ubuntu 24.04, medido, não
+    // escreve nada nem na 0x402 nem na 0xe9. Com eles o arquivo fica vazio;
+    // um firmware de depuração escreve, e o boot que não atende mostra o
+    // fim. O ARM não tem `debugcon`: o que o AAVMF diz vai para a PL011,
+    // que na bancada é o canal — ver [`Olhos::ouvir_o_canal`]. O arquivo é
+    // por raiz, como o QMP, e cada emulador que a bancada liga o começa de
+    // novo; os boots de um mesmo emulador — o reinício pelo comando, a
+    // tentativa que entra em pânico — vão um depois do outro nele.
+    let firmware = (arch == Arquitetura::X86_64)
+        .then(|| super::raiz_do_estado().join(format!("firmware-{}.log", arch.nome())));
+    if let Some(caminho) = &firmware {
+        qemu.args([
+            "-debugcon",
+            &format!("file:{}", caminho.display()),
+            "-global",
+            "isa-debugcon.iobase=0x402",
+        ]);
+    }
     // A saída humana do x86 (COM1) não vai para o terminal: um terminal
     // cheio de log do firmware a cada boot esconderia o resultado. Na
     // bancada de persistência ela vai para a serial do cenário, que só
@@ -280,7 +392,370 @@ fn lancar(
     let filho = qemu
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
-    Ok((filho, socket))
+    Ok((filho, socket, firmware))
+}
+
+/// O que a bancada vê de uma máquina que sobe, de fora, numa olhada: o
+/// tamanho da serial humana do cenário, a soma do que os discos já fizeram
+/// e os bytes que o canal já mostrou. Cada um só cresce; a máquina anda
+/// quando algum muda — ver [`AndamentoDoBoot`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sinais {
+    pub(crate) serial: u64,
+    pub(crate) discos: u64,
+    pub(crate) canal: u64,
+}
+
+/// A espera de uma máquina pelo andamento dela: segue enquanto algum dos
+/// [`Sinais`] muda, desiste quando nenhum muda por `janela` — contada do
+/// último que mudou, ou da partida —, e acaba no `teto`, andando ou não.
+///
+/// É só a conta, com o tempo dado por quem olha: as esperas da bancada —
+/// o aperto de mão de um boot, o boot seguinte a um reinício, o aviso de
+/// uma queda no boot — olham a máquina e perguntam aqui.
+#[derive(Debug)]
+pub(crate) struct AndamentoDoBoot {
+    janela: Duration,
+    teto: Duration,
+    inicio: Instant,
+    /// Quando um sinal mudou pela última vez — a partida, antes do primeiro.
+    andou: Instant,
+    /// Os sinais da última olhada; a primeira é a base.
+    vistos: Option<Sinais>,
+    /// O maior intervalo sem sinal novo até a última mudança.
+    maior_parada: Duration,
+}
+
+/// Por que a espera de uma máquina acabou sem ela atender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Desistencia {
+    /// Nenhum sinal mudou por `parada`; o último mudou `andou` depois da
+    /// partida.
+    Parou { parada: Duration, andou: Duration },
+    /// O teto passou, com a máquina andando: o último sinal mudou há
+    /// `parada`.
+    Teto { teto: Duration, parada: Duration },
+}
+
+impl std::fmt::Display for Desistencia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Desistencia::Parou { parada, andou } => write!(
+                f,
+                "a maquina parou de andar: nada novo na serial, nos discos nem no canal ha {}s (o ultimo sinal veio {}s depois da partida)",
+                parada.as_secs(),
+                andou.as_secs()
+            ),
+            Desistencia::Teto { teto, parada } => write!(
+                f,
+                "a maquina passou do teto de {}s andando (o ultimo sinal veio ha {}s)",
+                teto.as_secs(),
+                parada.as_secs()
+            ),
+        }
+    }
+}
+
+impl AndamentoDoBoot {
+    /// A espera de uma máquina ligada em `inicio`.
+    pub(crate) fn novo(inicio: Instant, janela: Duration, teto: Duration) -> AndamentoDoBoot {
+        AndamentoDoBoot {
+            janela,
+            teto,
+            inicio,
+            andou: inicio,
+            vistos: None,
+            maior_parada: Duration::ZERO,
+        }
+    }
+
+    /// Uma olhada na máquina, em `agora`, com os sinais dela — ou sem
+    /// sinais: a olhada que não sabe nada novo só passa o tempo. `Ok`
+    /// enquanto a espera segue.
+    ///
+    /// A primeira olhada com sinais é a base, e não conta como andar: o
+    /// que veio antes dela não se sabe quando veio, e a janela já corre
+    /// desde a partida.
+    pub(crate) fn olhar(
+        &mut self,
+        agora: Instant,
+        sinais: Option<Sinais>,
+    ) -> Result<(), Desistencia> {
+        match (self.vistos, sinais) {
+            (None, Some(s)) => self.vistos = Some(s),
+            (Some(antes), Some(s)) if antes != s => {
+                self.maior_parada = self
+                    .maior_parada
+                    .max(agora.saturating_duration_since(self.andou));
+                self.vistos = Some(s);
+                self.andou = agora;
+            }
+            _ => {}
+        }
+        let parada = agora.saturating_duration_since(self.andou);
+        if parada >= self.janela {
+            return Err(Desistencia::Parou {
+                parada,
+                andou: self.andou.saturating_duration_since(self.inicio),
+            });
+        }
+        if agora.saturating_duration_since(self.inicio) >= self.teto {
+            return Err(Desistencia::Teto {
+                teto: self.teto,
+                parada,
+            });
+        }
+        Ok(())
+    }
+
+    /// O maior intervalo sem sinal novo de uma máquina que atendeu em
+    /// `agora`: o trecho do último sinal até o atendimento conta também —
+    /// passando da janela, ela não teria atendido.
+    pub(crate) fn maior_parada_ate(&self, agora: Instant) -> Duration {
+        self.maior_parada
+            .max(agora.saturating_duration_since(self.andou))
+    }
+}
+
+/// O quanto os discos de uma máquina já fizeram, somado — os bytes e as
+/// operações de leitura, de escrita e de descarga de cada um —, pela
+/// resposta do `info blockstats` que o QMP devolve: uma linha por disco,
+/// `<nome>: rd_bytes=… wr_bytes=… …`, dentro de uma string JSON com as
+/// quebras de linha escapadas. Os tempos ficam de fora: o `idle_time_ns`
+/// anda com o relógio, com o disco parado. `None` se a resposta não traz
+/// contador nenhum — o QMP que ainda não respondeu, ou outra resposta.
+pub(crate) fn atividade_dos_discos(resposta: &str) -> Option<u64> {
+    const CONTADORES: [&str; 5] = [
+        "rd_bytes",
+        "wr_bytes",
+        "rd_operations",
+        "wr_operations",
+        "flush_operations",
+    ];
+    let mut soma: Option<u64> = None;
+    for palavra in resposta.split(|c: char| c.is_whitespace() || c == '\\' || c == '"') {
+        if let Some((nome, valor)) = palavra.split_once('=')
+            && CONTADORES.contains(&nome)
+            && let Ok(v) = valor.parse::<u64>()
+        {
+            soma = Some(soma.unwrap_or(0).saturating_add(v));
+        }
+    }
+    soma
+}
+
+/// Os discos de uma máquina, pelo QMP `qmp`: [`atividade_dos_discos`].
+fn discos_pelo_qmp(qmp: &Path) -> Option<u64> {
+    let (mut escrita, mut leitor) = super::qmp_abrir(qmp).ok()?;
+    let r = super::qmp_pedir(
+        &mut escrita,
+        &mut leitor,
+        r#"{"execute":"human-monitor-command","arguments":{"command-line":"info blockstats"}}"#,
+    )
+    .ok()?;
+    atividade_dos_discos(&r)
+}
+
+/// Quem olha uma máquina de fora, para o [`AndamentoDoBoot`]: a serial
+/// humana do cenário, os discos pelo QMP e o que o canal mostrou.
+///
+/// Os caminhos são os da partida. A raiz de uma máquina é a do fio que a
+/// ligou — ver [`super::na_raiz`] —, e quem espera por ela depois, num
+/// reinício, pode estar fora dessa raiz.
+struct Olhos {
+    /// O QMP do emulador.
+    qmp: PathBuf,
+    /// A serial humana do cenário — ver [`serial_do_cenario`].
+    serial: Option<PathBuf>,
+    /// O log de depuração do firmware, no x86 — ver [`lancar`].
+    firmware: Option<PathBuf>,
+    /// No ARM a única serial é o canal: o que as esperas leem dele antes de
+    /// a máquina atender vai para a serial do cenário, como a COM1 do x86.
+    canal_na_serial: bool,
+    /// Os discos na última olhada que o QMP respondeu.
+    discos: u64,
+    /// Os bytes que o canal mostrou até aqui.
+    canal: u64,
+    /// Quando o QMP foi perguntado pela última vez: uma vez por segundo
+    /// basta, e cada pergunta é uma conexão.
+    qmp_olhado: Option<Instant>,
+}
+
+impl Olhos {
+    /// Os olhos de uma máquina que `arch` acaba de ligar, com o log de
+    /// depuração do firmware em `firmware`.
+    fn da_partida(arch: Arquitetura, firmware: Option<PathBuf>) -> Olhos {
+        Olhos {
+            qmp: super::caminho_qmp(arch),
+            serial: serial_do_cenario(),
+            firmware,
+            canal_na_serial: arch == Arquitetura::Aarch64,
+            discos: 0,
+            canal: 0,
+            qmp_olhado: None,
+        }
+    }
+
+    /// O que uma espera leu do canal antes de a máquina atender: conta como
+    /// andamento, e, no ARM, vai para a serial do cenário — é por ela que o
+    /// cenário que reprova mostra onde o firmware e o iniciador pararam. São
+    /// amostras, e não o fluxo inteiro (ver [`super::canal_de_pe_com`]):
+    /// cada uma acaba numa quebra de linha, para não emendar na seguinte.
+    fn ouvir_o_canal(&mut self, lidos: &[u8]) {
+        use std::io::Write;
+        if lidos.is_empty() {
+            return;
+        }
+        self.canal = self.canal.saturating_add(lidos.len() as u64);
+        if self.canal_na_serial
+            && let Some(caminho) = &self.serial
+            && let Ok(mut arquivo) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(caminho)
+        {
+            let _ = arquivo.write_all(lidos);
+            if !lidos.ends_with(b"\n") {
+                let _ = arquivo.write_all(b"\n");
+            }
+        }
+    }
+
+    /// Os sinais da máquina em `agora`. O QMP que não responde deixa os
+    /// discos como estavam.
+    fn sinais(&mut self, agora: Instant) -> Sinais {
+        if self
+            .qmp_olhado
+            .is_none_or(|t| agora.saturating_duration_since(t) >= Duration::from_secs(1))
+        {
+            self.qmp_olhado = Some(agora);
+            if let Some(d) = discos_pelo_qmp(&self.qmp) {
+                self.discos = d;
+            }
+        }
+        Sinais {
+            serial: self
+                .serial
+                .as_deref()
+                .and_then(|c| std::fs::metadata(c).ok())
+                .map_or(0, |m| m.len()),
+            discos: self.discos,
+            canal: self.canal,
+        }
+    }
+}
+
+/// Quantas linhas do fim do log do `swtpm` o diagnóstico mostra.
+const LINHAS_DO_TPM: usize = 15;
+
+/// Quantas linhas do fim do log de depuração do firmware o diagnóstico
+/// mostra.
+const LINHAS_DO_FIRMWARE: usize = 25;
+
+/// O TPM e o firmware de uma máquina que não atendeu, para o diagnóstico:
+/// se o `swtpm` vive, o fim do log dele — no nível dos erros, que não
+/// mostra segredo (ver [`Ambiente::ligar`]) —, e o fim do log de depuração
+/// do firmware — ou que cada um está vazio. Cada parte numa linha nova, com
+/// o recuo do diagnóstico.
+///
+/// Na CI 413, o firmware parou depois de um reinício pedido pelo kernel,
+/// antes de carregar a opção de boot, e o TPM — que essa fase usa — era o
+/// suspeito; nem o log do `swtpm` nem o do firmware saíam da CI.
+fn tpm_e_firmware(ambiente: &mut Ambiente, firmware: Option<&Path>) -> String {
+    let mut s = String::new();
+    let log = ambiente.log_do_tpm();
+    match ambiente.tpm.as_mut() {
+        None => s.push_str("\n  sem TPM nesta maquina"),
+        Some((tpm, _)) => {
+            let estado = match tpm.try_wait() {
+                Ok(None) => "vivo".to_string(),
+                Ok(Some(saida)) => format!("saiu ({saida})"),
+                Err(e) => format!("sem estado ({e})"),
+            };
+            s.push_str(&format!("\n  o swtpm: {estado}"));
+            if let Some(log) = log {
+                s.push_str(&fim_do_log("swtpm", &log, LINHAS_DO_TPM, "nenhum erro"));
+            }
+        }
+    }
+    if let Some(firmware) = firmware {
+        s.push_str(&fim_do_log(
+            "firmware",
+            firmware,
+            LINHAS_DO_FIRMWARE,
+            "um firmware de release nao escreve no debugcon",
+        ));
+    }
+    s
+}
+
+/// O fim de um log para o diagnóstico: as últimas `n` linhas, sem os
+/// controles de terminal, cada uma com o rótulo — ou uma linha que diz que
+/// ele está vazio, e o que isso quer dizer, `vazio`.
+fn fim_do_log(rotulo: &str, caminho: &Path, n: usize, vazio: &str) -> String {
+    let texto = std::fs::read(caminho)
+        .map(|b| sem_controles(&b))
+        .unwrap_or_default();
+    if texto.trim().is_empty() {
+        return format!(
+            "\n  o log do {rotulo} esta vazio ({}): {vazio}",
+            caminho.display()
+        );
+    }
+    let linhas = ultimas_linhas(&texto, n);
+    let mut s = format!(
+        "\n  as ultimas {} linhas do log do {rotulo} ({}):",
+        linhas.len(),
+        caminho.display()
+    );
+    for linha in linhas {
+        s.push_str(&format!("\n  [{rotulo}] {linha}"));
+    }
+    s
+}
+
+/// O texto de uma saída de terminal, legível numa linha de log: os
+/// controles — o escape das sequências do console do firmware, o retorno
+/// de carro — viram espaço, e o resto fica como veio. As sequências ficam à
+/// vista de propósito: na CI 413, as do firmware depois do pânico eram a
+/// prova de que ele tinha voltado, e parado antes de escrever texto.
+pub(crate) fn sem_controles(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
+}
+
+/// As últimas `n` linhas de `texto`, sem o espaço do fim.
+pub(crate) fn ultimas_linhas(texto: &str, n: usize) -> Vec<&str> {
+    let linhas: Vec<&str> = texto.lines().map(str::trim_end).collect();
+    linhas[linhas.len().saturating_sub(n)..].to_vec()
+}
+
+/// O maior intervalo sem sinal novo que um boot que atendeu teve nesta
+/// execução, em milissegundos — ver [`relatar_a_maior_parada`].
+static MAIOR_PARADA_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Guarda o intervalo sem sinal novo de um boot que atendeu.
+fn registrar_a_parada(parada: Duration) {
+    MAIOR_PARADA_MS.fetch_max(
+        u64::try_from(parada.as_millis()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+/// Diz, no fim de uma bancada, o maior intervalo sem sinal novo que um boot
+/// que atendeu teve: é o número com que a [`JANELA_SEM_ANDAR`] se refaz,
+/// como a suíte faz com a dela.
+pub(crate) fn relatar_a_maior_parada(bancada: &str) {
+    let ms = MAIOR_PARADA_MS.load(Ordering::Relaxed);
+    if ms > 0 {
+        println!(
+            "[xtask] {bancada}: o maior intervalo sem sinal novo num boot que atendeu foi de {}s (a janela e de {}s)",
+            ms / 1000,
+            JANELA_SEM_ANDAR.as_secs()
+        );
+    }
 }
 
 impl Drop for Ligada {
@@ -573,6 +1048,7 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     }
     // O disco fica zerado para quem vier depois, como todo comando o deixa.
     zerar_o_estado(arch)?;
+    relatar_a_maior_parada("persistencia");
     if falhas > 0 {
         println!("\n[xtask] persistencia: {falhas} cenario(s) falharam");
         return Ok(ExitCode::FAILURE);
@@ -587,13 +1063,16 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
 pub(crate) static SERIAL_DA_BANCADA: std::sync::OnceLock<std::path::PathBuf> =
     std::sync::OnceLock::new();
 
-/// Onde vai a saída humana das máquinas do cenário que roda (a COM1 do
-/// x86): cada boot acrescenta a sua, e o começo de cada cenário a esvazia.
-/// Com `DUKE_BANCADA_LOG`, vai para esse arquivo, que acumula todos.
+/// Onde vai a saída humana das máquinas do cenário que roda — a COM1 do
+/// x86; no ARM, onde a única serial é o canal, o que as esperas leem dele
+/// antes de a máquina atender (ver [`Olhos::ouvir_o_canal`]): cada boot
+/// acrescenta a sua, e o começo de cada cenário a esvazia. Com
+/// `DUKE_BANCADA_LOG`, vai para esse arquivo, que acumula todos.
 ///
 /// Ela existe para o cenário que reprova: na CI 335, o primeiro boot de um
 /// cenário não respondeu em 90 s, e nada dizia onde a máquina parou — o
-/// firmware, o iniciador, ou que passo do kernel.
+/// firmware, o iniciador, ou que passo do kernel. E o tamanho dela é um dos
+/// sinais de que a máquina anda — ver [`JANELA_SEM_ANDAR`].
 pub(crate) fn serial_do_cenario() -> Option<std::path::PathBuf> {
     std::env::var_os("DUKE_BANCADA_LOG")
         .map(std::path::PathBuf::from)
@@ -601,7 +1080,7 @@ pub(crate) fn serial_do_cenario() -> Option<std::path::PathBuf> {
 }
 
 /// O fim da serial do cenário que reprovou, na saída: as últimas linhas,
-/// sem os controles de terminal do firmware.
+/// sem os controles de terminal do firmware — ver [`sem_controles`].
 pub(crate) fn mostrar_o_fim_da_serial() {
     const LINHAS: usize = 40;
     let Some(caminho) = serial_do_cenario() else {
@@ -610,18 +1089,15 @@ pub(crate) fn mostrar_o_fim_da_serial() {
     let Ok(bytes) = std::fs::read(&caminho) else {
         return;
     };
-    let texto: String = String::from_utf8_lossy(&bytes)
-        .chars()
-        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
-        .collect();
-    let linhas: Vec<&str> = texto.lines().collect();
+    let texto = sem_controles(&bytes);
+    let linhas = ultimas_linhas(&texto, LINHAS);
     println!(
         "  [persistencia]   as ultimas {} linhas da serial ({}):",
-        LINHAS.min(linhas.len()),
+        linhas.len(),
         caminho.display()
     );
-    for linha in &linhas[linhas.len().saturating_sub(LINHAS)..] {
-        println!("  [serial] {}", linha.trim_end());
+    for linha in linhas {
+        println!("  [serial] {linha}");
     }
 }
 
@@ -752,34 +1228,57 @@ impl Ligada {
     }
 
     /// Espera o boot seguinte ao de `boots` responder — a máquina reiniciou
-    /// sozinha, e o canal da serial é o mesmo —, até [`ESPERA_PELO_BOOT`].
-    /// Os pedidos feitos no meio do reinício se perdem, e são feitos de
-    /// novo.
+    /// sozinha, e o canal da serial é o mesmo —, pelo andamento dela, até o
+    /// [`TETO_DO_BOOT`]. Os pedidos feitos no meio do reinício se perdem, e
+    /// são feitos de novo.
     pub(crate) fn esperar_o_boot_seguinte(&mut self, boots: u64) -> Result<Persistencia, String> {
-        self.esperar_o_boot_ate(boots, ESPERA_PELO_BOOT)
+        self.esperar_o_boot_ate(boots, TETO_DO_BOOT)
     }
 
-    /// [`Ligada::esperar_o_boot_seguinte`], até `espera`: a atualização
-    /// atravessa vários boots antes de um atender.
+    /// [`Ligada::esperar_o_boot_seguinte`], com o teto `teto`: a
+    /// atualização atravessa vários boots antes de um atender.
+    ///
+    /// A espera é pelo andamento, como a da partida (ver
+    /// [`Ligada::subir_esperando`]), com uma diferença: enquanto o boot de
+    /// antes ainda responde, os sinais não contam — a serial e os discos que
+    /// ele mexe para responder não são o reinício andando. A máquina que não
+    /// reinicia desiste na janela, e não no teto.
     pub(crate) fn esperar_o_boot_ate(
         &mut self,
         boots: u64,
-        espera: Duration,
+        teto: Duration,
     ) -> Result<Persistencia, String> {
-        let limite = std::time::Instant::now() + espera;
+        let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
         let mut ultimo = String::from("nenhuma resposta");
-        while std::time::Instant::now() < limite {
+        loop {
             if let Ok(Some(status)) = self.filho.try_wait() {
                 return Err(format!("a maquina saiu em vez de reiniciar: {status}"));
             }
-            match persistencia_de(self) {
-                Ok(p) if p.boots > boots => return Ok(p),
-                Ok(p) => ultimo = format!("ainda o boot {}", p.boots),
-                Err(e) => ultimo = e,
+            let reiniciando = match persistencia_de(self) {
+                Ok(p) if p.boots > boots => {
+                    registrar_a_parada(andamento.maior_parada_ate(Instant::now()));
+                    return Ok(p);
+                }
+                Ok(p) => {
+                    ultimo = format!("ainda o boot {}", p.boots);
+                    false
+                }
+                Err(e) => {
+                    ultimo = e;
+                    true
+                }
+            };
+            let agora = Instant::now();
+            let sinais = reiniciando.then(|| self.olhos.sinais(agora));
+            if let Err(d) = andamento.olhar(agora, sinais) {
+                let estado = estado_do_emulador(&self.olhos.qmp);
+                let tpm = tpm_e_firmware(&mut self._ambiente, self.olhos.firmware.as_deref());
+                return Err(format!(
+                    "o boot seguinte nao respondeu: {d}; a ultima resposta: {ultimo}\n  o emulador, pelo QMP: {estado}{tpm}"
+                ));
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-        Err(format!("o boot seguinte nao respondeu: {ultimo}"))
     }
 }
 
@@ -3896,26 +4395,44 @@ fn aviso_de_queda(linha: &str) -> Option<u8> {
 
 /// Lê linhas de `leitor` até o aviso da queda, ou até `espera` passar.
 fn esperar_o_aviso(leitor: &mut BufReader<UnixStream>, espera: Duration) -> Result<u8, String> {
+    let limite = Instant::now() + espera;
+    esperar_o_aviso_com(leitor, |_| {
+        if Instant::now() >= limite {
+            Err(format!(
+                "a maquina nao avisou a queda em {}s",
+                espera.as_secs()
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// [`esperar_o_aviso`], com a espera decidida por quem chama: depois de
+/// cada leitura que não trouxe o aviso, `seguir` recebe o que ela trouxe —
+/// uma linha, a metade de uma num tempo sem nada, ou nada — e o erro dele
+/// encerra a espera com ele.
+fn esperar_o_aviso_com(
+    leitor: &mut BufReader<UnixStream>,
+    mut seguir: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<u8, String> {
     use std::io::BufRead;
-    let limite = std::time::Instant::now() + espera;
     let mut linha = String::new();
-    while std::time::Instant::now() < limite {
+    loop {
+        let antes = linha.len();
         match leitor.read_line(&mut linha) {
             Ok(0) => return Err("o canal fechou antes do aviso da queda".into()),
             Ok(_) => {
                 if let Some(p) = aviso_de_queda(&linha) {
                     return Ok(p);
                 }
+                seguir(linha.as_bytes().get(antes..).unwrap_or_default())?;
                 linha.clear();
             }
             // Um tempo sem nada: o que veio pela metade continua em `linha`.
-            Err(_) => {}
+            Err(_) => seguir(linha.as_bytes().get(antes..).unwrap_or_default())?,
         }
     }
-    Err(format!(
-        "a maquina nao avisou a queda em {}s",
-        espera.as_secs()
-    ))
 }
 
 impl Ligada {
@@ -3949,42 +4466,65 @@ impl Ligada {
 /// Liga a máquina com um plano que a faz cair no boot, antes de o canal
 /// atender: lê a serial desde o começo até o aviso, e corta a energia.
 pub(crate) fn subir_ate_cair(arch: Arquitetura, artefato: &Artefato) -> Result<u8, String> {
-    subir_ate_cair_em(arch, artefato, ESPERA_PELO_BOOT)
+    subir_ate_cair_em(arch, artefato, TETO_DO_BOOT)
 }
 
-/// [`subir_ate_cair`], esperando o aviso por `espera`: a queda num boot que
-/// vem depois de outros — uma tentativa da atualização — demora mais.
+/// [`subir_ate_cair`], com o teto `teto`: a queda num boot que vem depois
+/// de outros — uma tentativa da atualização — demora mais.
 pub(crate) fn subir_ate_cair_em(
     arch: Arquitetura,
     artefato: &Artefato,
-    espera: Duration,
+    teto: Duration,
 ) -> Result<u8, String> {
-    subir_ate_cair_com(arch, artefato, Ambiente::ligar(arch, None)?, espera)
+    subir_ate_cair_com(arch, artefato, Ambiente::ligar(arch, None)?, teto)
 }
 
 /// [`subir_ate_cair_em`] no ambiente dado — o disco de uma imagem de
 /// produção, digamos.
+///
+/// A espera pelo aviso é pelo andamento da máquina, como a da partida —
+/// ver [`Ligada::subir_esperando`] —, e o que se lê do canal até o aviso
+/// conta como andamento: no ARM é o console do firmware e o relatório do
+/// iniciador. Desistindo, diz onde a máquina parou, como lá.
 pub(crate) fn subir_ate_cair_com(
     arch: Arquitetura,
     artefato: &Artefato,
     mut ambiente: Ambiente,
-    espera: Duration,
+    teto: Duration,
 ) -> Result<u8, String> {
-    let (mut filho, socket) = lancar(arch, artefato, &ambiente)?;
-    let limite = std::time::Instant::now() + espera;
+    let (mut filho, socket, firmware) = lancar(arch, artefato, &ambiente)?;
+    let mut olhos = Olhos::da_partida(arch, firmware);
+    let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
+    let mut seguir = |lidos: &[u8]| -> Result<(), String> {
+        olhos.ouvir_o_canal(lidos);
+        if matches!(filho.try_wait(), Ok(Some(_))) {
+            return Err("o emulador saiu antes do aviso".to_string());
+        }
+        let agora = Instant::now();
+        andamento
+            .olhar(agora, Some(olhos.sinais(agora)))
+            .map_err(|d| d.to_string())
+    };
     let conectado = loop {
         if let Ok(f) = UnixStream::connect(&socket) {
             break Ok(f);
         }
-        if std::time::Instant::now() >= limite {
-            break Err("o socket da serial nao abriu".to_string());
+        if let Err(e) = seguir(&[]) {
+            break Err(format!("o socket da serial nao abriu: {e}"));
         }
         std::thread::sleep(Duration::from_millis(50));
     };
     let caiu = conectado.and_then(|f| {
         f.set_read_timeout(Some(Duration::from_secs(1)))
             .map_err(|e| e.to_string())?;
-        esperar_o_aviso(&mut BufReader::new(f), espera)
+        esperar_o_aviso_com(&mut BufReader::new(f), &mut seguir)
+    });
+    let caiu = caiu.map_err(|e| {
+        format!(
+            "a maquina nao avisou a queda: {e}\n  o emulador, pelo QMP: {}{}",
+            estado_do_emulador(&olhos.qmp),
+            tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref())
+        )
     });
     let _ = filho.kill();
     let _ = filho.wait();
@@ -5873,4 +6413,354 @@ fn a_fotografia_da_fronteira_e_recusada(
         motivos.push(p.motivo);
     }
     Ok(motivos.join("; "))
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    fn s(segundos: u64) -> Duration {
+        Duration::from_secs(segundos)
+    }
+
+    fn sinais(serial: u64, discos: u64, canal: u64) -> Option<Sinais> {
+        Some(Sinais {
+            serial,
+            discos,
+            canal,
+        })
+    }
+
+    /// A máquina que anda passa da janela sem a espera desistir — o limite
+    /// é do andamento, e não do total —, e a que para desiste exatamente na
+    /// janela, contada do último sinal novo.
+    #[test]
+    fn a_janela_e_do_andamento_e_nao_do_total() {
+        let t0 = Instant::now();
+        let mut a = AndamentoDoBoot::novo(t0, s(120), s(1000));
+        assert_eq!(a.olhar(t0, sinais(0, 0, 0)), Ok(()));
+        // Um sinal novo a cada 100 s, por 500 s: quatro janelas no total.
+        for (i, t) in [100, 200, 300, 400, 500].into_iter().enumerate() {
+            assert_eq!(a.olhar(t0 + s(t), sinais(i as u64 + 1, 0, 0)), Ok(()));
+        }
+        // Parada desde os 500: segue até 619, e desiste nos 620.
+        assert_eq!(a.olhar(t0 + s(619), sinais(5, 0, 0)), Ok(()));
+        assert_eq!(
+            a.olhar(t0 + s(620), sinais(5, 0, 0)),
+            Err(Desistencia::Parou {
+                parada: s(120),
+                andou: s(500)
+            })
+        );
+    }
+
+    /// Nenhum sinal muda desde a partida: a janela corre desde ela, e a
+    /// primeira olhada — com a serial e os discos já andados — é a base, e
+    /// não conta como andar.
+    #[test]
+    fn a_primeira_olhada_e_a_base() {
+        let t0 = Instant::now();
+        let mut a = AndamentoDoBoot::novo(t0, s(120), s(1000));
+        assert_eq!(a.olhar(t0 + s(30), sinais(4096, 900, 0)), Ok(()));
+        assert_eq!(a.olhar(t0 + s(119), sinais(4096, 900, 0)), Ok(()));
+        assert_eq!(
+            a.olhar(t0 + s(120), sinais(4096, 900, 0)),
+            Err(Desistencia::Parou {
+                parada: s(120),
+                andou: s(0)
+            })
+        );
+    }
+
+    /// Cada sinal sozinho é andamento: a serial, os discos — o iniciador
+    /// que confere o kernel em silêncio, lendo um pedaço por vez —, e o
+    /// canal.
+    #[test]
+    fn cada_sinal_sozinho_e_andamento() {
+        let mudancas: [fn(Sinais) -> Sinais; 3] = [
+            |x| Sinais {
+                serial: x.serial + 1,
+                ..x
+            },
+            |x| Sinais {
+                discos: x.discos + 1_048_576,
+                ..x
+            },
+            |x| Sinais {
+                canal: x.canal + 1,
+                ..x
+            },
+        ];
+        for mudar in mudancas {
+            let t0 = Instant::now();
+            let mut a = AndamentoDoBoot::novo(t0, s(120), s(1000));
+            let mut x = Sinais::default();
+            assert_eq!(a.olhar(t0, Some(x)), Ok(()));
+            for t in (100..=900).step_by(100) {
+                x = mudar(x);
+                assert_eq!(a.olhar(t0 + s(t), Some(x)), Ok(()), "aos {t} s: {x:?}");
+            }
+            assert!(a.olhar(t0 + s(1020), Some(x)).is_err());
+        }
+    }
+
+    /// A olhada sem sinais só passa o tempo: o boot de antes que ainda
+    /// responde não é o reinício andando.
+    #[test]
+    fn a_olhada_sem_sinais_nao_anda() {
+        let t0 = Instant::now();
+        let mut a = AndamentoDoBoot::novo(t0, s(120), s(1000));
+        assert_eq!(a.olhar(t0 + s(1), sinais(1, 1, 1)), Ok(()));
+        for t in (10..120).step_by(10) {
+            assert_eq!(a.olhar(t0 + s(t), None), Ok(()));
+        }
+        assert!(matches!(
+            a.olhar(t0 + s(120), None),
+            Err(Desistencia::Parou { .. })
+        ));
+    }
+
+    /// O teto vale com a máquina andando: a que reinicia em laço não
+    /// pendura a bancada.
+    #[test]
+    fn o_teto_vale_andando() {
+        let t0 = Instant::now();
+        let mut a = AndamentoDoBoot::novo(t0, s(120), s(300));
+        let mut serial = 0;
+        for t in (0..300).step_by(50) {
+            serial += 80;
+            assert_eq!(a.olhar(t0 + s(t), sinais(serial, 0, 0)), Ok(()));
+        }
+        assert_eq!(
+            a.olhar(t0 + s(300), sinais(serial, 0, 0)),
+            Err(Desistencia::Teto {
+                teto: s(300),
+                parada: s(50)
+            })
+        );
+    }
+
+    /// O maior intervalo sem sinal novo conta da partida ao primeiro, entre
+    /// dois, e do último ao atendimento.
+    #[test]
+    fn o_maior_intervalo_sem_sinal_novo() {
+        let t0 = Instant::now();
+        let mut a = AndamentoDoBoot::novo(t0, s(120), s(1000));
+        for (t, serial) in [(5, 0), (30, 1), (100, 2), (110, 3)] {
+            assert_eq!(a.olhar(t0 + s(t), sinais(serial, 0, 0)), Ok(()));
+        }
+        // Da partida ao primeiro sinal novo, 30; dos 30 aos 100, 70.
+        assert_eq!(a.maior_parada_ate(t0 + s(150)), s(70));
+        assert_eq!(a.maior_parada_ate(t0 + s(200)), s(90));
+    }
+
+    /// A desistência diz quanto tempo a máquina ficou sem andar, e quando
+    /// foi o último sinal.
+    #[test]
+    fn a_desistencia_diz_os_segundos() {
+        let parou = Desistencia::Parou {
+            parada: s(120),
+            andou: s(254),
+        }
+        .to_string();
+        assert!(
+            parou.contains("ha 120s") && parou.contains("254s depois da partida"),
+            "{parou}"
+        );
+        let teto = Desistencia::Teto {
+            teto: s(300),
+            parada: s(3),
+        }
+        .to_string();
+        assert!(
+            teto.contains("teto de 300s") && teto.contains("ha 3s"),
+            "{teto}"
+        );
+    }
+
+    /// A resposta do `info blockstats` pelo QMP, como o QEMU a escreve — o
+    /// 8.2 do Ubuntu 24.04 e o 10.2 da CI, que a CI 413 mostrou igual: os
+    /// contadores de cada disco somados, e os tempos de fora — o ocioso
+    /// anda com o disco parado.
+    #[test]
+    fn os_discos_somam_os_contadores_e_nao_os_tempos() {
+        let resposta = |rd: u64, ocioso: u64| {
+            format!(
+                r#"{{"return": "pflash0: rd_bytes=0 wr_bytes=0 rd_operations=0 wr_operations=0 flush_operations=0 wr_total_time_ns=0 rd_total_time_ns=0 flush_total_time_ns=0 rd_merged=0 wr_merged=0 idle_time_ns=0\r\nide0-hd0: rd_bytes={rd} wr_bytes=512 rd_operations=17 wr_operations=1 flush_operations=1 wr_total_time_ns=123 rd_total_time_ns=456 flush_total_time_ns=789 rd_merged=0 wr_merged=0 idle_time_ns={ocioso}\r\n"}}"#
+            )
+        };
+        assert_eq!(
+            atividade_dos_discos(&resposta(13_312, 1_000)),
+            Some(13_312 + 512 + 17 + 1 + 1)
+        );
+        // Só o tempo andou: nada mudou.
+        assert_eq!(
+            atividade_dos_discos(&resposta(13_312, 9_000_000_000)),
+            atividade_dos_discos(&resposta(13_312, 1_000))
+        );
+        // Um pedaço do kernel lido: mudou.
+        assert_ne!(
+            atividade_dos_discos(&resposta(13_312 + 1_048_576, 0)),
+            atividade_dos_discos(&resposta(13_312, 0))
+        );
+        assert_eq!(
+            atividade_dos_discos(r#"{"error": {"class": "GenericError", "desc": "x"}}"#),
+            None
+        );
+        assert_eq!(atividade_dos_discos(""), None);
+    }
+
+    /// O console do firmware como a CI 413 o viu depois do pânico: o escape
+    /// vira espaço, e as sequências ficam à vista — eram a prova de que o
+    /// firmware tinha voltado.
+    #[test]
+    fn as_sequencias_do_console_ficam_a_vista() {
+        let serial = b"!!! PANICO NO KERNEL !!!\r\ntentativa da versao nova: reiniciando\r\n\
+\x1b[2J\x1b[001;001H\x1b[=3h\x1b[2J\x1b[001;001H\x1b[8;056;240t\r\n\
+BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
+        let texto = sem_controles(serial);
+        assert_eq!(
+            ultimas_linhas(&texto, 3),
+            [
+                "tentativa da versao nova: reiniciando",
+                " [2J [001;001H [=3h [2J [001;001H [8;056;240t",
+                "BdsDxe: loading Boot0001 \"UEFI Misc Device\"",
+            ]
+        );
+    }
+
+    /// As linhas do kernel passam como estão; os outros controles viram
+    /// espaço; o UTF-8 inválido, o caractere de substituição; e um escape
+    /// cortado no fim do arquivo não derruba nada.
+    #[test]
+    fn as_linhas_do_kernel_e_os_restos() {
+        let texto =
+            sem_controles(b"[   12]     34ms info  boot pronto\nsino\x07aqui\n\xffx\n\n\x1b[1");
+        assert_eq!(
+            ultimas_linhas(&texto, 40),
+            [
+                "[   12]     34ms info  boot pronto",
+                "sino aqui",
+                "\u{fffd}x",
+                "",
+                " [1"
+            ]
+        );
+        assert_eq!(ultimas_linhas(&texto, 2), ["", " [1"]);
+        assert!(ultimas_linhas("", 5).is_empty());
+    }
+
+    /// Um arquivo deste teste, por nome, no diretório temporário.
+    fn temporario(nome: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xtask-persistencia-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(nome)
+    }
+
+    /// Os olhos de uma máquina sem QMP: os discos ficam onde estavam.
+    fn olhos(serial: &Path, canal_na_serial: bool) -> Olhos {
+        Olhos {
+            qmp: temporario("sem-qmp.sock"),
+            serial: Some(serial.to_path_buf()),
+            firmware: None,
+            canal_na_serial,
+            discos: 0,
+            canal: 0,
+            qmp_olhado: None,
+        }
+    }
+
+    /// No ARM, o que as esperas leem do canal vai para a serial do cenário,
+    /// cada amostra acabando numa linha; no x86, não. Nos dois, conta como
+    /// andamento.
+    #[test]
+    fn o_canal_do_arm_vai_para_a_serial() {
+        let serial = temporario("arm.serial");
+        std::fs::write(&serial, b"").unwrap();
+        let mut arm = olhos(&serial, true);
+        arm.ouvir_o_canal(b"UEFI firmware (version 2024.02)\r\n");
+        arm.ouvir_o_canal(b"");
+        arm.ouvir_o_canal(b"BdsDxe: loading Boot0001");
+        assert_eq!(
+            std::fs::read(&serial).unwrap(),
+            b"UEFI firmware (version 2024.02)\r\nBdsDxe: loading Boot0001\n"
+        );
+        let agora = Instant::now();
+        let vistos = arm.sinais(agora);
+        assert_eq!(vistos.canal, 33 + 24);
+        assert_eq!(vistos.serial, 33 + 25);
+        assert_eq!(vistos.discos, 0);
+
+        let x86 = temporario("x86.serial");
+        std::fs::write(&x86, b"").unwrap();
+        let mut olhos_do_x86 = olhos(&x86, false);
+        olhos_do_x86.ouvir_o_canal(b"lixo da UART\n");
+        assert_eq!(std::fs::read(&x86).unwrap(), b"");
+        assert_eq!(olhos_do_x86.sinais(agora).canal, 13);
+        let _ = std::fs::remove_file(serial);
+        let _ = std::fs::remove_file(x86);
+    }
+
+    /// O diagnóstico de uma máquina que não atendeu: sem TPM, diz; o log de
+    /// depuração do firmware, o fim dele, com o rótulo — ou que está vazio.
+    #[test]
+    fn o_diagnostico_do_tpm_e_do_firmware() {
+        let firmware = temporario("firmware.log");
+        std::fs::write(&firmware, b"").unwrap();
+        let mut sem_tpm = Ambiente::sem_tpm(None);
+        let vazio = tpm_e_firmware(&mut sem_tpm, Some(&firmware));
+        assert!(vazio.contains("sem TPM nesta maquina"), "{vazio}");
+        assert!(vazio.contains("o log do firmware esta vazio"), "{vazio}");
+
+        let linhas: String = (0..40).map(|i| format!("Loading driver {i}\r\n")).collect();
+        std::fs::write(&firmware, linhas).unwrap();
+        let cheio = tpm_e_firmware(&mut sem_tpm, Some(&firmware));
+        assert!(
+            cheio.contains(&format!(
+                "as ultimas {LINHAS_DO_FIRMWARE} linhas do log do firmware"
+            )),
+            "{cheio}"
+        );
+        assert!(
+            cheio.contains("\n  [firmware] Loading driver 39"),
+            "{cheio}"
+        );
+        assert!(!cheio.contains("Loading driver 14\n"), "{cheio}");
+        assert!(
+            cheio.contains("\n  [firmware] Loading driver 15"),
+            "{cheio}"
+        );
+        // Sem firmware — o ARM —, nada dele.
+        assert!(!tpm_e_firmware(&mut sem_tpm, None).contains("firmware"));
+        let _ = std::fs::remove_file(firmware);
+    }
+
+    /// O `swtpm` da máquina que não atendeu: se vive ou saiu, e o fim do
+    /// log dele, que mora ao lado do socket de controle — ver
+    /// `Ambiente::ligar`.
+    #[test]
+    fn o_diagnostico_diz_se_o_swtpm_vive() {
+        let log = temporario("swtpm.log");
+        std::fs::write(&log, b"erro um\nerro dois\n").unwrap();
+        let filho = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut ambiente = Ambiente::sem_tpm(None);
+        ambiente.tpm = Some((filho, log.with_file_name("controle.sock")));
+        let vivo = tpm_e_firmware(&mut ambiente, None);
+        assert!(vivo.contains("\n  o swtpm: vivo"), "{vivo}");
+        assert!(
+            vivo.contains("as ultimas 2 linhas do log do swtpm"),
+            "{vivo}"
+        );
+        assert!(
+            vivo.ends_with("\n  [swtpm] erro um\n  [swtpm] erro dois"),
+            "{vivo}"
+        );
+        if let Some((tpm, _)) = ambiente.tpm.as_mut() {
+            tpm.kill().unwrap();
+            tpm.wait().unwrap();
+        }
+        let morto = tpm_e_firmware(&mut ambiente, None);
+        assert!(morto.contains("\n  o swtpm: saiu ("), "{morto}");
+        let _ = std::fs::remove_file(log);
+    }
 }

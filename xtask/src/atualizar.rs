@@ -76,9 +76,15 @@ const PANICO_NA_CONFIRMACAO: u8 = 32;
 const OPERACAO: u16 = diario::estado::tipo::OPERACAO;
 const ATUALIZACAO: u16 = diario::estado::tipo::ATUALIZACAO;
 
-/// Quanto esperar um boot que atende: a atualização atravessa vários —
-/// três tentativas que entram em pânico, e a volta — antes de um atender,
-/// e o ARM, emulado, demora mais em cada um.
+/// O teto da espera por um boot que atende: a atualização atravessa
+/// vários — três tentativas que entram em pânico, e a volta — antes de um
+/// atender, e o ARM, emulado, demora mais em cada um.
+///
+/// É o teto, e não a espera: a bancada espera pelo andamento da máquina, e
+/// desiste antes dele quando ela fica
+/// [`super::persistencia::JANELA_SEM_ANDAR`] sem andar —
+/// ver [`Ligada::subir_esperando`]. Na CI 413, o firmware parado depois do
+/// reinício só reprovou nos 300 segundos.
 fn espera(arch: Arquitetura) -> Duration {
     match arch {
         Arquitetura::X86_64 => Duration::from_secs(300),
@@ -370,6 +376,7 @@ pub(crate) fn atualizacao(arch: Arquitetura, release: bool) -> Result<ExitCode, 
     }
     // O disco fica zerado para quem vier depois, como todo comando o deixa.
     zerar_o_estado(arch)?;
+    p::relatar_a_maior_parada("atualizacao");
     if falhas > 0 {
         println!("\n[xtask] atualizacao: {falhas} cenario(s) falharam");
         return Ok(ExitCode::FAILURE);

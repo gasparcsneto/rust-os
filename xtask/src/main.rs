@@ -7878,6 +7878,16 @@ impl Ambiente {
             ));
         }
         let _ = std::fs::remove_file(&socket_do_tpm);
+        // O log no nível 1, o dos erros, e não acima: do nível 2 em diante o
+        // `swtpm` escreve cada comando e cada resposta inteiros, em
+        // hexadecimal, e com eles o que o TPM guarda para a máquina, como a
+        // resposta de um `TPM2_Unseal`. Medido com o 0.7.3 do Ubuntu 24.04:
+        // os bytes de um `TPM2_GetRandom` saem no log do nível 2. O nível de
+        // uma linha é o recuo dela no código do `swtpm`; o 0.10.1 da CI, no
+        // Ubuntu 26.04, não foi medido, e o nível 1 é o dos erros nos dois.
+        // O fim deste log entra no diagnóstico de um boot que não atende
+        // (ver `persistencia::Ligada::subir_esperando`): ele não pode
+        // mostrar segredo.
         let tpm = Command::new(swtpm)
             .args([
                 "socket",
@@ -7887,7 +7897,7 @@ impl Ambiente {
                 "--ctrl",
                 &format!("type=unixio,path={}", socket_do_tpm.display()),
                 "--log",
-                &format!("file={},level=1", dir.join("swtpm.log").display()),
+                &format!("file={},level=1", dir.join(LOG_DO_TPM).display()),
             ])
             .spawn()
             .map_err(|e| format!("não foi possível iniciar o swtpm: {e}"))?;
@@ -7910,7 +7920,7 @@ impl Ambiente {
             {
                 return Err(format!(
                     "o swtpm saiu antes de abrir o socket ({saida}); ver {}",
-                    dir.join("swtpm.log").display()
+                    dir.join(LOG_DO_TPM).display()
                 ));
             }
             if Instant::now() >= limite {
@@ -7922,7 +7932,17 @@ impl Ambiente {
     }
 }
 
+/// O log do `swtpm`, no diretório do TPM da máquina — ver [`Ambiente::ligar`].
+const LOG_DO_TPM: &str = "swtpm.log";
+
 impl Ambiente {
+    /// O log do `swtpm` desta máquina, se ela tem TPM: ao lado do socket de
+    /// controle dele, no diretório que [`Ambiente::ligar`] lhe deu.
+    fn log_do_tpm(&self) -> Option<PathBuf> {
+        let (_, socket) = self.tpm.as_ref()?;
+        Some(socket.parent()?.join(LOG_DO_TPM))
+    }
+
     /// Uma máquina sem TPM.
     fn sem_tpm(relogio: Option<&str>) -> Ambiente {
         Ambiente {
@@ -8956,9 +8976,55 @@ fn sob_estouro(
 ///
 /// É o aperto de mão da fumaça, separado dela porque a bancada de
 /// persistência sobe a mesma máquina várias vezes, e cada boot precisa dele
-/// igual.
+/// igual. Aqui com um prazo do total, `espera`; a bancada espera pelo
+/// andamento da máquina — ver [`canal_de_pe_com`].
 fn canal_de_pe(socket: &Path, qemu: u32, espera: Duration) -> Result<UnixStream, String> {
     let limite = std::time::Instant::now() + espera;
+    canal_de_pe_com(socket, |_| {
+        if std::time::Instant::now() >= limite {
+            Err(format!(
+                "o canal não respondeu em {}s (qemu pid {qemu})",
+                espera.as_secs()
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// Um leitor que guarda uma cópia do que leu: o aperto de mão de
+/// [`canal_de_pe_com`] entrega a quem espera o que a máquina escreveu no
+/// canal antes de atender.
+struct Copiado<'a> {
+    fluxo: &'a UnixStream,
+    copia: &'a mut Vec<u8>,
+}
+
+impl Read for Copiado<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut fluxo = self.fluxo;
+        let n = fluxo.read(buf)?;
+        self.copia.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+}
+
+/// [`canal_de_pe`], com a espera decidida por quem chama: `seguir` roda
+/// antes de cada tentativa do aperto de mão, com os bytes que a tentativa
+/// anterior leu do canal sem que fossem a resposta — vazio na primeira, e
+/// na que nem conectou —, e o erro dele encerra a espera com ele.
+///
+/// Os bytes são o que a máquina escreveu no canal antes de atender: no ARM,
+/// onde a única serial é o canal, o console do firmware e o relatório do
+/// iniciador; no x86, o lixo de uma UART que sobe. São amostras, e não o
+/// fluxo inteiro: cada tentativa lê até a primeira quebra de linha, e o que
+/// chega entre duas conexões se perde. A bancada os conta como andamento da
+/// máquina — ver `persistencia::AndamentoDoBoot`.
+fn canal_de_pe_com(
+    socket: &Path,
+    mut seguir: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<UnixStream, String> {
+    let mut lidos: Vec<u8> = Vec::new();
 
     // Conectar não é o mesmo que ser atendido. O QEMU aceita a conexão assim
     // que cria o chardev — muito antes de o kernel bootar —, e os bytes
@@ -8979,12 +9045,8 @@ fn canal_de_pe(socket: &Path, qemu: u32, espera: Duration) -> Result<UnixStream,
     let mut rodada: u32 = 0;
     let fluxo = loop {
         rodada += 1;
-        if std::time::Instant::now() >= limite {
-            return Err(format!(
-                "o canal não respondeu em {}s (qemu pid {qemu})",
-                espera.as_secs()
-            ));
-        }
+        seguir(&lidos)?;
+        lidos.clear();
 
         let Ok(tentativa) = UnixStream::connect(socket) else {
             std::thread::sleep(Duration::from_millis(200));
@@ -9027,7 +9089,12 @@ fn canal_de_pe(socket: &Path, qemu: u32, espera: Duration) -> Result<UnixStream,
             .is_ok()
             && {
                 let mut eco = String::new();
-                BufReader::new(&tentativa).read_line(&mut eco).is_ok()
+                BufReader::new(Copiado {
+                    fluxo: &tentativa,
+                    copia: &mut lidos,
+                })
+                .read_line(&mut eco)
+                .is_ok()
                     && eco.starts_with(&format!(r#"{{"jsonrpc":"2.0","id":{id_do_aperto},"#))
             };
 
@@ -17420,6 +17487,88 @@ mod testes {
         // Um caso a cada 0,4 s por 2,4 s — mais que a janela no total: sai sozinho.
         let (d, t) = correr("for i in 1 2 3 4 5 6; do sleep 0.4; echo \"  caso $i  ok\"; done");
         assert!(matches!(d, Desfecho::Codigo(0)) && t > Duration::from_secs(2));
+    }
+
+    /// O aperto de mão do canal entrega a quem espera o que a máquina
+    /// escreveu antes de atender — no ARM, o console do firmware — e
+    /// atende na tentativa que traz a resposta; o erro de quem espera
+    /// encerra a espera com ele.
+    #[test]
+    fn o_aperto_de_mao_entrega_o_que_veio_antes_da_resposta() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("xtask-aperto-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("canal.sock");
+        let _ = std::fs::remove_file(&socket);
+        let ouvinte = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // O id do ping de uma conexão, lido até a linha dele; `None` se ela
+        // fechou antes.
+        let ping = |leitor: &mut BufReader<UnixStream>| -> Option<String> {
+            loop {
+                let mut linha = String::new();
+                if leitor.read_line(&mut linha).ok()? == 0 {
+                    return None;
+                }
+                if let Some(id) = campo_simples(&linha, "id") {
+                    return Some(id);
+                }
+            }
+        };
+        let maquina = std::thread::spawn(move || {
+            // A primeira conexão recebe o console do firmware — escrito
+            // antes de o ping chegar, como o firmware escreve —, e não a
+            // resposta; a seguinte, a resposta.
+            let mut primeira = true;
+            loop {
+                let (conexao, _) = ouvinte.accept().unwrap();
+                let mut leitor = BufReader::new(conexao.try_clone().unwrap());
+                if primeira {
+                    primeira = false;
+                    let _ = (&conexao).write_all(b"UEFI firmware (version 2024.02)\r\n");
+                    let _ = ping(&mut leitor);
+                    continue;
+                }
+                let Some(id) = ping(&mut leitor) else {
+                    continue;
+                };
+                let resposta = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{}}}}\n");
+                let _ = (&conexao).write_all(resposta.as_bytes());
+                std::thread::sleep(Duration::from_secs(2));
+                return;
+            }
+        });
+        let inicio = Instant::now();
+        let mut vistos: Vec<Vec<u8>> = Vec::new();
+        let fluxo = canal_de_pe_com(&socket, |lidos| {
+            vistos.push(lidos.to_vec());
+            if inicio.elapsed() > Duration::from_secs(30) {
+                return Err("o teste esperou demais".to_string());
+            }
+            Ok(())
+        });
+        assert!(fluxo.is_ok(), "{:?}", fluxo.err());
+        assert!(vistos[0].is_empty(), "{vistos:?}");
+        let com_bytes: Vec<&Vec<u8>> = vistos.iter().filter(|v| !v.is_empty()).collect();
+        assert_eq!(
+            com_bytes,
+            [b"UEFI firmware (version 2024.02)\r\n"],
+            "{vistos:?}"
+        );
+        maquina.join().unwrap();
+
+        // Ninguém atende, e quem espera desiste na terceira tentativa.
+        let _ = std::fs::remove_file(&socket);
+        let mut tentativas = 0;
+        let desistiu = canal_de_pe_com(&socket, |_| {
+            tentativas += 1;
+            if tentativas == 3 {
+                Err("parou de andar".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(desistiu.err().as_deref(), Some("parou de andar"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
