@@ -619,6 +619,23 @@ da vaga que não sai com o aviso publicado — a recusa que responde ao
 aviso da vaga não espaça, e o pedido avisa de novo na hora —, contra o
 NS50 e o NS51: reprovada pelos dois.
 
+E o fim que a própria sessão com o par conclui — o fim
+mandado ao par com o outro sentido já acabado, o fecho de quem saiu com
+tudo dito — ia à cadeia antes de acordar quem espera, mas fora da ordem
+das gravações (o V2 da validação de segurança): uma operação do dono que
+entrasse na ordem nesse meio podia vir antes do fim na cadeia. O envio da
+sessão passou a decidir esse quadro com a ordem na mão, a gravar o fim
+ali mesmo, como os fins por fora, e só então, com a ordem solta, acordar
+quem espera e mandar o quadro. O caso `fluxo: o fim que a sessao com o
+par conclui vai a cadeia na ordem` (FS27, em [`FLUXOS.md`](FLUXOS.md))
+confere o fim e o fecho, chegando e saindo, com a ordem na mão da suíte;
+e as N73 a N76 o põem à prova: a conclusão e o fim de novo fora da ordem,
+o fim gravado depois de acordar, o fim gravado com a ordem já solta, e o
+envio que conclui sem pedir a ordem: as quatro reprovadas por ele. O NS49
+passou a conferir também que o fim por fora é gravado com a ordem na mão:
+a N77, que o grava com a ordem já solta mas antes de acordar — e que o
+NS49 de antes deixava passar —, reprovada por ele.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -691,6 +708,11 @@ NS50 e o NS51: reprovada pelos dois.
 | N68 | o filtro do que é novo pelo nível cru, e não pelo que o dono ouviria | NH19 |
 | N69 | o fim por fora gravado depois de acordar quem espera | NS49 |
 | N70 | a marca da vaga que não sai com o aviso publicado (o segundo aviso da mesma vaga, na recusa que respondia ao primeiro) | NS50, NS51 |
+| N73 | o fim que a sessão com o par conclui, de novo fora da ordem das gravações | FS27 |
+| N74 | o fim que a sessão com o par conclui, gravado depois de acordar quem espera | FS27 |
+| N75 | o fim que a sessão com o par conclui, gravado com a ordem já solta | FS27 |
+| N76 | o envio da sessão que conclui o fluxo sem pedir a ordem | FS27 |
+| N77 | o fim por fora gravado com a ordem já solta, antes de acordar | NS49 |
 
 ## Medidas
 
@@ -763,17 +785,6 @@ Os residuais da validação final — nenhum é bypass de autoridade:
   grava o que fez: então ela ainda pode dizer o que a operação acabou de
   mudar — o fim que ela ouviu, o dado que ela leu. Um aviso a mais, sem
   efeito: a operação seguinte diz o que há.
-- **O fim que a sessão com o par conclui** — o fim mandado ao par com o
-  outro sentido já acabado, o fecho de quem saiu com tudo dito — vai à
-  cadeia antes de acordar quem espera, mas fora da ordem das gravações:
-  uma operação do dono que não foi acordada por ele, e que entra na ordem
-  nesse meio, pode vir antes do fim na cadeia. Os outros fins por fora —
-  a inatividade e o prazo do aceite, a revogação, a leitura ou a escrita
-  que a política recusa, o fim do processo e a troca de imagem, o
-  desligamento, o endpoint que acaba, o dispositivo ou a relação que sai,
-  o aborto da sessão, o que chega do par e o aceite que quem abriu não
-  pode mais confirmar — vão à cadeia dentro da ordem, antes de acordar
-  quem espera (NS49, pela inatividade). Nenhum registro falta.
 - **Os endpoints persistem na troca de imagem** (`exec`), como sempre
   persistiram na malha; as designações e os avisos na fila, não.
 - **O filtro do que é novo é por objeto**: ele guarda o nível inteiro que a

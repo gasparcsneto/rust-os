@@ -8858,7 +8858,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-30 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+31 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de
@@ -8869,7 +8869,10 @@ contra o registro, cada `dados` decidido aqui, o protocolo fechado, os
 tetos das vagas, a suspensão, a revogação e a política nova com o par —
 cada escrita e leitura decide `fabric.remote` de novo, e o que ele mandou
 chegando depois do fim daqui não muda o motivo, nem a conexão que cai logo
-atrás do `fechar` dele apaga o dele — e o replay. E a **bancada de duas
+atrás do `fechar` dele apaga o dele —, o replay, e o fim que a própria
+sessão com o par conclui, que espera a ordem das gravações na mão de outro
+e vai à cadeia dentro dela, antes de acordar quem espera e de o quadro
+sair. E a **bancada de duas
 máquinas**, `cargo xtask fluxo`: 4 MiB em cada sentido, local e entre os
 Dukes, com a auditoria dos dois lados e nenhum byte do conteúdo nela; a
 contrapressão de um leitor lento, com o pico dos buffers; uma ponte do
@@ -9093,7 +9096,13 @@ que o programa ainda não tinha dito), as onze que dependem dele, do NS39
 e do NS43 rodaram de novo: as onze reprovadas. Depois do DN-3, a N70
 devolve a vaga que avisava duas vezes — a marca da vaga que não sai com o
 aviso publicado, e a recusa que responde a ele avisando de novo na
-hora —, contra os dois casos novos da vaga: reprovada pelos dois.
+hora —, contra os dois casos novos da vaga: reprovada pelos dois. E o fim que a
+própria sessão com o par conclui — que ia à cadeia fora da ordem das
+gravações — passou a ser gravado dentro dela, como os fins por fora, e as
+N73 a N76 conferem isso contra o caso novo do fluxo: as quatro reprovadas.
+E o NS49 passou a conferir também que o fim por fora é gravado com a ordem
+na mão — a N77, que o grava com a ordem já solta mas antes de acordar, e
+que o NS49 de antes deixava passar, reprovada por ele.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9132,6 +9141,8 @@ hora —, contra os dois casos novos da vaga: reprovada pelos dois.
 | a conta que publica o nível de antes da operação do dono | "a conta atrasada nao diz o fim que a operacao ouviu" |
 | o filtro do que é novo pelo nível cru | o teste do hospedeiro do que o dono ouviria |
 | o fim por fora gravado depois de acordar | "o fim por fora vai a cadeia antes de acordar" |
+| o fim que a sessão com o par conclui de novo fora da ordem das gravações, gravado depois de acordar, ou com a ordem já solta; o envio que conclui sem pedir a ordem (N73 a N76, depois do DN-3) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem" |
+| o fim por fora gravado com a ordem já solta, antes de acordar (N77, depois do DN-3) | "o fim por fora vai a cadeia antes de acordar" |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |

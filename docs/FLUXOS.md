@@ -249,15 +249,18 @@ nenhum:
   dispositivo (`pela relacao <R>, atestado <P>`);
 - o fim, dos dois lados, em nome do kernel: `stream.end`, com o motivo, os
   bytes de cada sentido e os descartados (`<motivo>; ida N; volta M; desc
-  D`) — gravado antes de acordar quem espera, e dentro da ordem das
-  gravações quando o fim vem com ela: o pedido pelo processo, e o que vem
-  de fora (a inatividade e o prazo do aceite, a revogação, a leitura ou a
-  escrita que a política recusa, o fim do processo e o `exec`, o
-  desligamento, o endpoint que acaba, o dispositivo ou a relação que sai,
-  o aborto da sessão, o que chega do par, o aceite que quem abriu não pode
-  mais confirmar). O fim que o envio da sessão conclui é gravado fora da
-  ordem (ver os limites do aviso em
-  [`SDK.md`](SDK.md#limites-conhecidos)).
+  D`) — gravado antes de acordar quem espera, e sempre dentro da ordem das
+  gravações: o pedido pelo processo; o que vem de fora (a inatividade e o
+  prazo do aceite, a revogação, a leitura ou a escrita que a política
+  recusa, o fim do processo e o `exec`, o desligamento, o endpoint que
+  acaba, o dispositivo ou a relação que sai, o aborto da sessão, o que
+  chega do par, o aceite que quem abriu não pode mais confirmar); e o que
+  a própria sessão com o par conclui — o fim mandado ao par com o outro
+  sentido já acabado, o fecho de quem saiu com tudo dito —, que o envio
+  decide com a ordem na mão, grava ali mesmo e só então, com a ordem
+  solta, acorda quem espera e manda ao par. A operação do processo sobre o
+  fluxo, que passa pela ordem, vem antes da conclusão ou depois do fim na
+  cadeia, nunca no meio — também a que o aviso do fim o fez pedir.
 
 A execução que cita a decisão (`…; decisao N`) a cita inteira mesmo
 quando o detalhe passa do teto de 96 bytes: quem encolhe é o texto antes
@@ -283,7 +286,7 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 30 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 31 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo
@@ -305,8 +308,14 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   também com o aceite, os dados, o crédito ou o fim de lá chegando depois
   do fim daqui, um a cada fim, com os dados de lá depois do fecho daqui,
   quando o fluxo acaba sem lápide, e com o `fechar` de lá e a linha caindo
-  logo atrás — e o replay do aperto. E um caso `auditoria:`, a citação da
-  decisão inteira acima do teto do detalhe.
+  logo atrás —, o replay do aperto, e o fim que a própria sessão conclui
+  (FS27) — chegando, o fim mandado com o outro sentido já acabado; saindo,
+  o fecho de quem saiu com tudo dito: com a ordem das gravações na mão da
+  suíte, a sessão chega à conclusão e espera — o fluxo segue vivo, o dono
+  que ainda está nele o vê aberto, nada vai ao par e nenhum fim à cadeia
+  —; solta a ordem, o fim vai à cadeia uma vez, gravado com a ordem na
+  mão e antes de acordar quem espera, e só então o quadro sai. E um caso
+  `auditoria:`, a citação da decisão inteira acima do teto do detalhe.
 - **Invariantes de fonte** (`cargo xtask invariantes`): cada domínio do
   `Chamador::Remoto` sai de um caminho só do enlace, os conjuntos fechados
   são os dois de sempre, os fios do fluxo falam só como o serviço de
