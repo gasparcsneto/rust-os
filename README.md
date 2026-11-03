@@ -837,7 +837,7 @@ xtask/src/
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── fluxo.rs         a bancada dos fluxos da malha: duas máquinas de pé e uma ponte do meio no hospedeiro — 4 MiB em cada sentido, local e entre os Dukes, com a auditoria dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento, com o pico dos buffers; a adulteração e o homem no meio na ponte; a política, a suspensão, o esquecimento, o corte e a revogação no meio do fluxo; e as vagas da porta do enlace com outro dispositivo que a bancada faz, nos quatro pares
 ├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
-├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia
+├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia; e a espera de um boot pelo andamento da máquina, a de todas as bancadas
 ├── sdk.rs           o SDK da malha: o contrato público v2 conferido contra o protocolo, o registro e a política; o aviso só em `kernel::aviso`; `selar` e `sdk-conferir`; e o modelo compilado e selado fora do workspace
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── senha.rs         a bancada da troca da própria senha: a pessoa no teclado da máquina, pelo Terminal — a nova sobrevive ao corte, a queda em cada fronteira da troca deixa exatamente uma senha valendo, a troca com o botão de energia, e a imagem de produção
@@ -7982,14 +7982,30 @@ reabre sozinho é recusada até a bancada religar —, devolve erro de mídia
 no journal, e para de responder. O desenho, os requisitos e o que
 falta estão em [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md).
 
-A saída humana das máquinas de cada cenário (a COM1 do x86) vai para
-`target/persistencia-<arch>.serial`, esvaziado no começo do cenário, e o
-cenário que reprova mostra as últimas quarenta linhas dela: é o que diz
-onde parou uma máquina que não respondeu — o firmware, o iniciador ou um
-passo do kernel. O boot que não atende diz também o que o emulador diz
-de si pelo QMP: se roda, onde está cada processador, e há quanto tempo o
-disco está ocioso. `DUKE_CENARIOS` escolhe os cenários por pedaços do nome,
-e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
+A saída humana das máquinas de cada cenário — a COM1 do x86; no ARM, onde
+a única serial é o canal, o que as esperas leem dele antes de a máquina
+atender — vai para `target/persistencia-<arch>.serial`, esvaziado no
+começo do cenário, e o cenário que reprova mostra as últimas quarenta
+linhas dela, sem os controles de terminal do firmware: é o que diz onde
+parou uma máquina que não respondeu — o firmware, o iniciador ou um passo
+do kernel. A espera por um boot é pelo andamento da máquina, e não um
+prazo do total: ela segue enquanto chega algo novo na serial, nos discos
+(os contadores do QMP: o iniciador, que confere o kernel em silêncio, lê
+o slot um mebibyte por vez) ou no canal; desiste quando nada muda por
+dois minutos, e acaba no teto de cinco, andando ou não — o da bancada da
+atualização, que atravessa vários boots, é outro. As outras bancadas que
+sobem a máquina por aqui esperam do mesmo jeito. No fim, a bancada de
+persistência e a da atualização dizem o maior intervalo sem sinal novo que
+um boot que atendeu teve. O boot que
+não atende diz também o que o emulador diz de si pelo QMP — se roda, onde
+está cada processador, e há quanto tempo cada disco está ocioso —, se o
+`swtpm` vive e o fim do log dele, e, no x86, o fim do log de depuração do
+firmware (o `debugcon` da porta 0x402, em `target/firmware-x86_64.log`).
+O log do `swtpm` fica no nível dos erros: do nível 2 em diante ele escreve
+cada comando e cada resposta do TPM inteiros, e com eles o que o TPM
+guarda. E o OVMF do Ubuntu, o da CI, é uma compilação de release, que não
+escreve no `debugcon`. `DUKE_CENARIOS` escolhe os cenários por pedaços do
+nome, e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
 ## Operação
 

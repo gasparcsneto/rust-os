@@ -1789,11 +1789,47 @@ gravação confirmada e três reconexões recusadas, e os dois cenários que
 cortam pelo gatilho — este e o do nascimento da identidade — conferem que
 a máquina cortada não teve o disco de volta.
 
-Um boot da bancada que não atende em noventa segundos diz, além do fim
-da serial, o que o emulador diz de si pelo QMP — se roda, onde está cada
-processador e se parado num `hlt`, e quanto o disco leu e escreveu, com
-há quanto tempo está ocioso — e, sobre o disco hostil, o que o servidor
-atendeu. Na CI 359, o primeiro boot de uma rodada parou no iniciador,
+A bancada espera cada boot pelo andamento da máquina, e não por um prazo
+do total: segue enquanto chega algo novo na serial humana, nos contadores
+dos discos pelo QMP — bytes e operações de leitura, de escrita e de
+descarga, de todos os discos — ou no canal; desiste quando nada muda por
+dois minutos, e acaba no teto de cinco, andando ou não (`JANELA_SEM_ANDAR`
+e `TETO_DO_BOOT`, em `xtask/src/persistencia.rs`). Era um prazo de
+noventa segundos, e na CI 408 reprovou dois boots que andavam, num runner
+sem CPU: um no iniciador, conferindo o kernel de 15,8 MB — que ele lê do
+slot um mebibyte por vez, somando o resumo de cada pedaço antes de ler o
+seguinte, e cada pedaço é uma leitura nova no disco; no prazo, o disco
+tinha lido 16,4 MB e estava ocioso havia 0,28 s —, e outro no kernel,
+antes de ligar os outros núcleos, com o disco ocioso havia 1,1 s. Uma
+máquina parada, como o firmware da CI 413 — a serial muda e o disco
+ocioso havia 253 segundos —, continua reprovando, em dois minutos. O
+trecho mudo mais longo de um boot que anda é o do firmware antes do
+console: medido aqui, com o firmware do Ubuntu 24.04 (edk2 2024.02; a CI,
+no Ubuntu 26.04, usa o 2025.11), o OVMF escreve o primeiro byte na COM1
+seis segundos depois de o emulador abrir o QMP, e o AAVMF, meio segundo
+depois. No fim, a bancada diz o maior intervalo sem sinal novo que um boot
+que atendeu teve, para a janela se refazer com o número da CI.
+
+Um boot da bancada que não atende diz, além do fim da serial, o que o
+emulador diz de si pelo QMP — se roda, onde está cada processador e se
+parado num `hlt`, e quanto cada disco leu e escreveu, com há quanto tempo
+está ocioso —; se o `swtpm` vive, e o fim do log dele; no x86, o fim do
+log de depuração do firmware; e, sobre o disco hostil, o que o servidor
+atendeu. O log do `swtpm` fica no nível 1, o dos erros: do nível 2 em
+diante ele escreve cada comando e cada resposta do TPM inteiros, em
+hexadecimal — medido com o 0.7.3 do Ubuntu 24.04: os bytes de um
+`TPM2_GetRandom` saem nele; a CI usa o 0.10.1 —, e com eles o que o TPM
+guarda para a máquina. O log de depuração do firmware é o `debugcon` da
+porta 0x402, onde o EDK II escreve as mensagens de depuração. O OVMF da
+CI, do Ubuntu 26.04, é uma compilação de release — `BUILD_TYPE ?=
+RELEASE` no `debian/rules` do pacote, e o `DEBUG_ON_SERIAL_PORT`
+comentado —, e o do Ubuntu 24.04, medido, não escreve nada nele, nem na
+0xe9: com eles o log fica vazio, e o que o firmware diz sai no console,
+na COM1, que já está no fim da serial; um firmware de depuração escreve
+nele, e o boot que não atende mostra o fim. O ARM não tem `debugcon`: o
+AAVMF escreve o console na PL011, que na bancada é o canal, e o que as
+esperas leem do canal antes de a máquina atender vai para a serial do
+cenário. Na CI 359, o primeiro boot de uma rodada parou no iniciador,
 lendo o kernel do slot, e a serial não dizia mais que isso: se o
 processador esperava o disco, se o disco tinha um pedido pendurado, ou se
 o emulador inteiro tinha parado. A falha não se reproduziu aqui (três
