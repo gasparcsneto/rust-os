@@ -37457,6 +37457,10 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_o_rearme_no_meio_da_recusa_nao_apaga_a_vaga,
     },
     Caso {
+        nome: "aviso: o transbordo das marcas nao diz que outro mexeu na malha",
+        f: aviso::aviso_o_transbordo_nao_diz_que_outro_mexeu,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },
