@@ -725,7 +725,8 @@ transbordar as marcas de verdade, pelo caminho de sempre, logo antes da
 vaga; o NS54 transborda-as na entrega de outra pessoa e confere que o
 pedido espaçado só avisa no rearme. A N78 foi redefinida — a marca da
 vaga sujeita ao teto das marcas dos objetos, perdida no transbordo —, e
-a N84 devolve a primeira forma: as duas, a rodar.
+a N84 devolve a primeira forma: as duas reprovadas, e as N70 e N79,
+rodadas de novo sobre o código novo, continuam reprovadas.
 
 E a tabela de canais (o primeiro dos [Limites
 conhecidos](#limites-conhecidos)): a conta de dois canais por vaga de
@@ -738,7 +739,7 @@ contra uma fotografia dos fios vivos — uma tomada da tranca do
 escalonador por varredura, e não uma por canal. A N82 devolve a tabela a
 32, a N83 a põe em dois canais por vaga de trabalho (64), a N86 tira o
 teto por processo e a N87 troca a fotografia pela pergunta por canal: as
-quatro, a rodar.
+quatro reprovadas.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -817,15 +818,15 @@ quatro, a rodar.
 | N75 | o fim que a sessão com o par conclui, gravado com a ordem já solta | FS27 |
 | N76 | o envio da sessão que conclui o fluxo sem pedir a ordem | FS27 |
 | N77 | o fim por fora gravado com a ordem já solta, antes de acordar | NS49 |
-| N78 | a marca da vaga sujeita ao teto das marcas dos objetos, perdida no transbordo: o pedido só avisa no rearme (redefinida) | NS52 — a rodar |
+| N78 | a marca da vaga sujeita ao teto das marcas dos objetos, perdida no transbordo: o pedido só avisa no rearme (redefinida) | NS52 |
 | N79 | o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela | NS53 |
 | N80 | o quadro da sessão com o par mandado com a ordem das gravações na mão | FS27, FS28 |
 | N81 | o fecho de um fluxo acabado decidido sem a ordem das gravações | FS28 |
-| N82 | a tabela de canais de volta a 32 | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
-| N83 | a tabela de canais com dois por vaga de trabalho, 64 | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
-| N84 | o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas | NS54 — a rodar |
-| N86 | o `escutar` sem o teto por processo | `eventos: o terceiro canal do processo e recusado`, `eventos: o pior caso dos processos cabe na tabela` — a rodar |
-| N87 | a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos | `eventos: o pior caso dos processos cabe na tabela` — a rodar |
+| N82 | a tabela de canais de volta a 32 | `eventos: o pior caso dos processos cabe na tabela` |
+| N83 | a tabela de canais com dois por vaga de trabalho, 64 | `eventos: o pior caso dos processos cabe na tabela` |
+| N84 | o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas | NS54 |
+| N86 | o `escutar` sem o teto por processo | `eventos: o terceiro canal do processo e recusado`, `eventos: o pior caso dos processos cabe na tabela` |
+| N87 | a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos | `eventos: o pior caso dos processos cabe na tabela` |
 
 ## Medidas
 
