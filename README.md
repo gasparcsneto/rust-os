@@ -8874,7 +8874,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-31 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+32 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de
@@ -8885,10 +8885,13 @@ contra o registro, cada `dados` decidido aqui, o protocolo fechado, os
 tetos das vagas, a suspensão, a revogação e a política nova com o par —
 cada escrita e leitura decide `fabric.remote` de novo, e o que ele mandou
 chegando depois do fim daqui não muda o motivo, nem a conexão que cai logo
-atrás do `fechar` dele apaga o dele —, o replay, e o fim que a própria
+atrás do `fechar` dele apaga o dele —, o replay, o fim que a própria
 sessão com o par conclui, que espera a ordem das gravações na mão de outro
 e vai à cadeia dentro dela, antes de acordar quem espera e de o quadro
-sair. E a **bancada de duas
+sair — cada quadro conferido no canal, com a ordem solta e o fim já
+gravado —, e o fim por fora com a sessão a caminho da ordem ou parada: um
+`stream.end` só, o de fora, e o `fechar` ao par com o motivo dele, que só
+sai com a ordem na mão da sessão, depois do fim na cadeia. E a **bancada de duas
 máquinas**, `cargo xtask fluxo`: 4 MiB em cada sentido, local e entre os
 Dukes, com a auditoria dos dois lados e nenhum byte do conteúdo nela; a
 contrapressão de um leitor lento, com o pico dos buffers; uma ponte do
@@ -9022,7 +9025,7 @@ aviso não consumido — junto ao da fila, ou na espera do dono —, o fim
 devido, o rearme depois das recusas seguidas e, até ele, só o novo
 avisando — o que o dono ouviria —, o quadro, a prontidão da
 ponta e do endpoint, o selo, a lista do contrato e o ELF forjado
-(NH01–NH19). Na suíte, nas duas arquiteturas, 43 casos `aviso:` e 9
+(NH01–NH19). Na suíte, nas duas arquiteturas, 45 casos `aviso:` e 9
 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
@@ -9039,8 +9042,9 @@ Duke, o fim com o aviso não consumido — junto ao da fila, ou na espera do
 dono, com o teto das designações acabadas —, a recusa do gate que consome
 o aviso, a recusa do próprio comando que espaça o aviso — e a vaga que
 avisa o pedido uma vez, também no meio da recusa, com o aviso de antes
-dela ainda não consumido ou já consumido, e a recusa que responde ao
-aviso dela espaçando —, só o novo avisando antes do
+dela ainda não consumido ou já consumido, com o rearme passando no meio
+sem apagar a marca dela, ou com as marcas transbordadas, e a recusa que
+responde ao aviso dela espaçando —, só o novo avisando antes do
 rearme, com outra pessoa mexendo na malha, o fim logo depois da operação
 recusada, a recepção que relê sem girar e o descarte das entregas, o
 sentido fechado pelo par com o fluxo vivo, o fim que chega no meio da
@@ -9118,7 +9122,16 @@ gravações — passou a ser gravado dentro dela, como os fins por fora, e as
 N73 a N76 conferem isso contra o caso novo do fluxo: as quatro reprovadas.
 E o NS49 passou a conferir também que o fim por fora é gravado com a ordem
 na mão — a N77, que o grava com a ordem já solta mas antes de acordar, e
-que o NS49 de antes deixava passar, reprovada por ele.
+que o NS49 de antes deixava passar, reprovada por ele. A revisão
+adversária dessas correções achou dois defeitos baixos de antes — a vaga
+que se perdia no transbordo das marcas, e o rearme que apagava a marca
+dela sem publicar o aviso — e duas lacunas: o quadro da sessão com a
+ordem na mão, que o caso do fluxo não via, e o fecho de um fluxo acabado
+por fora, que podia sair ao par antes do fim dele na cadeia. As
+correções cabem no que existe, com dois casos novos do aviso e um do
+fluxo; as N78 a N81 as desfazem, e as quatro foram reprovadas — e as N70
+e N73 a N77, rodadas de novo sobre o código corrigido, continuam
+reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9159,6 +9172,8 @@ que o NS49 de antes deixava passar, reprovada por ele.
 | o fim por fora gravado depois de acordar | "o fim por fora vai a cadeia antes de acordar" |
 | o fim que a sessão com o par conclui de novo fora da ordem das gravações, gravado depois de acordar, ou com a ordem já solta; o envio que conclui sem pedir a ordem (N73 a N76, depois do DN-3) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem" |
 | o fim por fora gravado com a ordem já solta, antes de acordar (N77, depois do DN-3) | "o fim por fora vai a cadeia antes de acordar" |
+| a vaga só pelas marcas, perdida no transbordo (N78); o rearme que apaga a marca da vaga sem publicar o aviso dela (N79) | "a vaga com as marcas transbordadas avisa o pedido", "o rearme no meio da recusa nao apaga a vaga" |
+| o quadro da sessão com o par mandado com a ordem das gravações na mão (N80); o fecho de um fluxo acabado decidido sem a ordem (N81) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem", "fluxo: o fim por fora com a sessao na ordem grava um fim so" |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |

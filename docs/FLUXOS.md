@@ -256,11 +256,16 @@ nenhum:
   acaba, o dispositivo ou a relação que sai, o aborto da sessão, o que
   chega do par, o aceite que quem abriu não pode mais confirmar); e o que
   a própria sessão com o par conclui — o fim mandado ao par com o outro
-  sentido já acabado, o fecho de quem saiu com tudo dito —, que o envio
-  decide com a ordem na mão, grava ali mesmo e só então, com a ordem
-  solta, acorda quem espera e manda ao par. A operação do processo sobre o
-  fluxo, que passa pela ordem, vem antes da conclusão ou depois do fim na
-  cadeia, nunca no meio — também a que o aviso do fim o fez pedir.
+  sentido já acabado, também o de quem fechou com tudo dito, que acaba
+  `fechado pela ponta` —, que o envio decide com a ordem na mão, grava ali
+  mesmo e só então, com a ordem solta, acorda quem espera e manda ao par.
+  A operação do processo sobre o fluxo, que passa pela ordem, vem antes
+  da conclusão ou depois do fim na cadeia, nunca no meio — também a que o
+  aviso do fim o fez pedir. E o `fechar` que a sessão manda ao par de um
+  fluxo que já acabou — por fora, pelo processo ou por ela mesma — também
+  se decide com a ordem na mão: quem acabou o fluxo larga a tabela antes
+  de gravar o fim, ainda com a ordem, e o `fechar` só sai depois do fim na
+  cadeia. A ordem nunca fica presa na rede: o quadro sai com ela solta.
 
 A execução que cita a decisão (`…; decisao N`) a cita inteira mesmo
 quando o detalhe passa do teto de 96 bytes: quem encolhe é o texto antes
@@ -286,7 +291,7 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 31 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 32 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo
@@ -308,13 +313,21 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   também com o aceite, os dados, o crédito ou o fim de lá chegando depois
   do fim daqui, um a cada fim, com os dados de lá depois do fecho daqui,
   quando o fluxo acaba sem lápide, e com o `fechar` de lá e a linha caindo
-  logo atrás —, o replay do aperto, e o fim que a própria sessão conclui
+  logo atrás —, o replay do aperto, o fim que a própria sessão conclui
   (FS27) — chegando, o fim mandado com o outro sentido já acabado; saindo,
-  o fecho de quem saiu com tudo dito: com a ordem das gravações na mão da
+  o de quem fecha com tudo dito, que conclui o fluxo `fechado pela
+  ponta`, com o `fechar` atrás: com a ordem das gravações na mão da
   suíte, a sessão chega à conclusão e espera — o fluxo segue vivo, o dono
   que ainda está nele o vê aberto, nada vai ao par e nenhum fim à cadeia
   —; solta a ordem, o fim vai à cadeia uma vez, gravado com a ordem na
-  mão e antes de acordar quem espera, e só então o quadro sai. E um caso
+  mão e antes de acordar quem espera, e só então o quadro sai — cada
+  quadro conferido no canal, de cada lado: com a ordem solta e o fim já
+  gravado —, e o fim por fora com a sessão na ordem (FS28) — a caminho
+  dela, para mandar o fim, ou parada, esperando o par: um `stream.end` só,
+  o de fora, e o `fechar` com o motivo dele, que só sai com a ordem na mão
+  da sessão; com a ordem na mão da suíte, como a teria quem acabou o
+  fluxo antes de gravar, nada vai ao par. As mutações dos dois (N73 a
+  N76, N80 e N81) estão em [`SDK.md`](SDK.md#mutações). E um caso
   `auditoria:`, a citação da decisão inteira acima do teto do detalhe.
 - **Invariantes de fonte** (`cargo xtask invariantes`): cada domínio do
   `Chamador::Remoto` sai de um caminho só do enlace, os conjuntos fechados

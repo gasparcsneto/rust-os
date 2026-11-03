@@ -260,7 +260,13 @@ O aviso é na **borda**, e a operação do dono o **rearma**:
   avisado do pedido assim que ela abre, uma vez — também quando ela abre no
   meio do aceite recusado, ou com um aviso de antes dela ainda não
   consumido: a recusa que vem antes de o aviso da vaga sair não espaça, e
-  ele sai logo depois dela (NS38, NS39, NS43). A recusa que responde ao
+  ele sai logo depois dela (NS38, NS39, NS43), também se o rearme da
+  recusa anterior passou no meio, com o aviso de antes ainda não
+  consumido — o rearme que não publica não apaga a marca da vaga (NS53).
+  E a vaga não se perde quando as marcas transbordam — mais de 64
+  mudanças entre duas passadas, e a dela entre as que não couberam —: a
+  passada que avalia tudo conta cada endpoint como talvez com uma vaga, e
+  o pedido avisa na hora, e não só no rearme (NS52). A recusa que responde ao
   aviso da vaga — com a vaga já tomada pelo próprio dono, que abriu ou
   aceitou outro fluxo — espaça como as outras: a mesma vaga não avisa duas
   vezes (NS50). E a recusa no meio da qual o aviso da vaga já saiu — o
@@ -505,8 +511,8 @@ NS28 o instala e roda.
   com a conferência que acusa o parâmetro tirado, e o ELF forjado recusado
   sem pânico (NH16); e a prontidão que o kernel pergunta, da ponta
   (`politica::fluxo`, NH12) e do endpoint (`politica::malha`, NH13).
-- **Na suíte**, nas duas arquiteturas: 43 casos `aviso:` (NS01–NS25, o
-  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48–NS51) e 9 casos `sdk:`
+- **Na suíte**, nas duas arquiteturas: 45 casos `aviso:` (NS01–NS25, o
+  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48–NS53) e 9 casos `sdk:`
   (NS26–NS31, NS37, NS44 e NS47). Os NS32–NS49 vieram da validação final —
   os achados do agente adversário, nas cinco rodadas: o fim com o aviso não consumido, junto ao
   da fila ou na espera do dono, e o teto das designações acabadas; a
@@ -527,7 +533,20 @@ NS28 o instala e roda.
   — a vaga já tomada pelo próprio dono — espaçando até o rearme, em vez de
   avisar de novo na hora; e a vaga que chega no meio de uma recusa, com o
   pedido sem aviso pendente — a ordem contrária à do NS43 —, cujo aviso a
-  recusa consome e espaça, sem que o evento se perca. O programa `avisado` só espera no canal dele e diz
+  recusa consome e espaça, sem que o evento se perca. Dentro da janela
+  antes do rearme, os dois não esperam linha nenhuma do `avisado`: o "uma
+  vez" é provado pelo estado da designação, lido com a hora — o aviso
+  visto só no rearme, ou depois, é a máquina que demorou, e o caso o diz
+  assim —, e o evento que não se perde, pela conta do canal (os
+  publicados e os entregues); só no fim, com o `avisado` ocioso, a suíte
+  confere o log: cada evento dito uma vez, um ou dois — o do rearme pode
+  se juntar ao da vaga, ainda na fila. O NS52 e o NS53 vieram da revisão
+  adversária da vaga: a vaga cuja marca não coube nas marcas transbordadas
+  — um ponto só da suíte a larga, como se outras 64 tivessem chegado antes
+  —, que avisa o pedido na hora, uma vez, e não só no rearme; e o rearme
+  que passa no meio de uma recusa, com o aviso de antes ainda não
+  consumido, sem apagar a marca da vaga — a recusa não espaça, e o aviso
+  da vaga sai logo depois dela. O programa `avisado` só espera no canal dele e diz
   no log cada aviso que chega; a suíte dita os passos a ele — o caminho
   inteiro pelo runtime — ou pede **como** ele, pela mesma função do gate,
   nos passos que precisam ser exatos. O que se confere é o
@@ -628,13 +647,32 @@ sessão passou a decidir esse quadro com a ordem na mão, a gravar o fim
 ali mesmo, como os fins por fora, e só então, com a ordem solta, acordar
 quem espera e mandar o quadro. O caso `fluxo: o fim que a sessao com o
 par conclui vai a cadeia na ordem` (FS27, em [`FLUXOS.md`](FLUXOS.md))
-confere o fim e o fecho, chegando e saindo, com a ordem na mão da suíte;
+confere o fim, chegando e saindo — saindo, o de quem fecha com tudo dito,
+que conclui o fluxo `fechado pela ponta`, com o `fechar` atrás —, com a
+ordem na mão da suíte;
 e as N73 a N76 o põem à prova: a conclusão e o fim de novo fora da ordem,
 o fim gravado depois de acordar, o fim gravado com a ordem já solta, e o
 envio que conclui sem pedir a ordem: as quatro reprovadas por ele. O NS49
 passou a conferir também que o fim por fora é gravado com a ordem na mão:
 a N77, que o grava com a ordem já solta mas antes de acordar — e que o
 NS49 de antes deixava passar —, reprovada por ele.
+
+A revisão adversária dessas duas correções não achou bypass nem registro
+perdido; achou dois defeitos baixos que vinham de antes, e duas lacunas
+dos casos. A vaga se perdia quando as marcas transbordavam, e o rearme do
+coletor apagava a marca dela sem publicar o aviso: as duas correções
+cabem no que existe — o transbordo conta cada endpoint como talvez com
+uma vaga, e o rearme só tira a marca quando o aviso sai —, e o NS52 e o
+NS53 as provam; a N78 e a N79 as desfazem. O FS27 não via o quadro
+mandado com a ordem na mão: o canal de cada lado, na suíte, passou a
+conferir a hora de cada quadro, e a N80 manda os quadros da sessão com a
+ordem. E o fecho de um fluxo acabado por fora podia sair ao par antes do
+`stream.end` de quem o acabou: a sessão passou a decidi-lo também com a
+ordem na mão, e o FS28 o prova — a N81 o decide sem ela. As quatro, a
+rodar. E o NS50 e o NS51 deixaram de esperar a linha do `avisado` dentro
+da janela antes do rearme (o runner lento dava vermelho sem defeito): a
+N70 continua vista pelo estado lido logo depois da recusa que responde à
+vaga — e roda de novo contra eles.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -713,6 +751,10 @@ NS49 de antes deixava passar —, reprovada por ele.
 | N75 | o fim que a sessão com o par conclui, gravado com a ordem já solta | FS27 |
 | N76 | o envio da sessão que conclui o fluxo sem pedir a ordem | FS27 |
 | N77 | o fim por fora gravado com a ordem já solta, antes de acordar | NS49 |
+| N78 | a vaga só pelas marcas: a que o transbordo largou não avisa o pedido antes do rearme | NS52 |
+| N79 | o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela | NS53 |
+| N80 | o quadro da sessão com o par mandado com a ordem das gravações na mão | FS27, FS28 |
+| N81 | o fecho de um fluxo acabado decidido sem a ordem das gravações | FS28 |
 
 ## Medidas
 
@@ -802,9 +844,16 @@ Os residuais da validação final — nenhum é bypass de autoridade:
   mais por vaga, sem giro: a recusa que responde a esse aviso espaça de
   novo, e a mesma vaga não avisa duas vezes (NS50). Só não espaça a
   recusa que vem antes de o aviso da vaga sair — a vaga chegou com um
-  aviso ainda não consumido, que é ela que consome (NS43) —, e o aviso da
-  vaga sai logo depois dela, uma vez; a recusa no meio da qual ele já saiu
-  o consome e espaça, e o evento fica no canal (NS51).
+  aviso ainda não consumido, que é ela que consome (NS43), também com o
+  rearme passando no meio (NS53) —, e o aviso da vaga sai logo depois
+  dela, uma vez; a recusa no meio da qual ele já saiu o consome e espaça,
+  e o evento fica no canal (NS51). E no transbordo das marcas — mais de
+  64 mudanças entre duas passadas —, a passada que avalia tudo conta cada
+  endpoint designado, de qualquer processo, como talvez com uma vaga: o
+  nível recusado de todos eles é esquecido, e cada um pode avisar o que a
+  recusa espaçou — no máximo um aviso a mais por endpoint em cada
+  transbordo, sem giro: o aviso tira a marca, e a recusa que responde a
+  ele espaça (NS52).
 - **A recusa pela forma do pedido** — o `notify` que não é canal do
   processo, o `wait` que não cabe, o id que não é de um fluxo dele — não
   chega ao objeto e não consome o aviso: o objeto fica com o aviso não
