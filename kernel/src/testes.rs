@@ -29452,6 +29452,62 @@ fn esperar_cedendo(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Re
     Err("a condicao nao se cumpriu dentro do teto de tempo")
 }
 
+/// Por que [`esperar_andando`] desistiu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Desistiu {
+    /// O andamento ficou parado pela janela inteira.
+    Parou,
+    /// O teto passou, com o andamento mudando.
+    Teto,
+}
+
+/// [`esperar_cedendo`] pelo andamento: espera `condicao` enquanto
+/// `andamento` — um contador do que os fios esperados já fizeram — muda,
+/// e desiste quando ele fica parado por `janela_em_ticks`, contados da
+/// última mudança, ou da partida; e no `teto_em_ticks`, mudando ou não.
+///
+/// Para trabalho que anda no passo que a máquina dá: num kernel lento — o
+/// ARM pelo boot UEFI, num hospedeiro disputado —, o mesmo trabalho leva
+/// mais tiques, e um prazo do total reprova o que só andava devagar (CI
+/// 408, o `nsf: le junto com quem pede`). O que se quer reprovar é o
+/// trabalho parado. O teto fica abaixo da janela da suíte sem caso
+/// terminado — a do `xtask`, de dez minutos —, para que o caso diga a
+/// própria falha antes de o emulador ser encerrado.
+fn esperar_andando(
+    mut condicao: impl FnMut() -> bool,
+    mut andamento: impl FnMut() -> u64,
+    janela_em_ticks: u64,
+    teto_em_ticks: u64,
+) -> Result<(), Desistiu> {
+    let inicio = crate::tempo::ticks();
+    let mut visto = andamento();
+    let mut andou = inicio;
+    loop {
+        if condicao() {
+            return Ok(());
+        }
+        let agora = crate::tempo::ticks();
+        let novo = andamento();
+        if novo != visto {
+            visto = novo;
+            andou = agora;
+        }
+        let desistiu = if agora.saturating_sub(andou) >= janela_em_ticks {
+            Some(Desistiu::Parou)
+        } else if agora.saturating_sub(inicio) >= teto_em_ticks {
+            Some(Desistiu::Teto)
+        } else {
+            None
+        };
+        if let Some(d) = desistiu {
+            // A última chance, como em `esperar_cedendo`: o que se cumpriu
+            // no meio da conta não reprova.
+            return if condicao() { Ok(()) } else { Err(d) };
+        }
+        crate::fios::ceder();
+    }
+}
+
 /// A tela tem as cores e as medidas da linguagem visual.
 ///
 /// # Por que este caso existe
@@ -51417,12 +51473,37 @@ fn dns_o_nsf_le_a_rajada_inteira() -> Resultado {
 /// tempo — e eles pedem, uma vez por volta dele, até o NSF dar três voltas
 /// com eles. O NSF lê tudo, na ordem, sem lacuna nem elo que não confere,
 /// e sem pedir nada que ninguém tenha provocado.
+///
+/// As esperas são pelo andamento, e não por prazos de tiques: os fios
+/// pedem até o NSF dar as três voltas, num kernel rápido ou lento, e a
+/// suíte só desiste deles quando param — nenhum pedido feito nem fio
+/// terminado por `JANELA` tiques —, ou no `TETO`. Os prazos fixos (dois
+/// mil tiques para os fios, três mil para a espera deles) reprovaram na CI
+/// 408 uma suíte que só andava devagar: o ARM pelo boot UEFI, num
+/// hospedeiro disputado, no mesmo passo em que ela passou 336 segundos sem
+/// terminar caso nenhum.
+///
+/// As voltas do NSF não contam como andamento de quem pede: ele dá voltas
+/// sozinho, peçam ou não, e contá-las esconderia um fio que pede e parou.
+/// Elas andam por dentro — cada fio pede uma vez por volta —, e o caso
+/// confere no fim que foram três.
 fn nsf_le_junto_com_quem_pede() -> Resultado {
     use crate::autorizacao::{Autoridade, Servico};
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    /// Quantos tiques os fios do caso podem ficar sem pedir nem terminar:
+    /// cobre uma volta inteira do NSF, que eles esperam para pedir de novo,
+    /// num kernel lento — o dobro do prazo do total que o caso tinha.
+    const JANELA: u64 = 6_000;
+    /// O teto das esperas, andando: a metade dos dez minutos sem caso
+    /// terminado em que o `xtask` encerra a suíte, para que o caso diga a
+    /// própria falha antes — também com os tiques atrás do relógio, num
+    /// hospedeiro que atrasa as interrupções do timer.
+    const TETO: u64 = 30_000;
     static PARAR: AtomicBool = AtomicBool::new(false);
     static VOLTAS: AtomicUsize = AtomicUsize::new(0);
     static PEDIDOS: AtomicUsize = AtomicUsize::new(0);
+    /// Os pedidos que os fios que pedem já fizeram: o andamento deles.
+    static FEITOS: AtomicUsize = AtomicUsize::new(0);
     static PRONTOS: AtomicUsize = AtomicUsize::new(0);
     extern "C" fn nsf(_: u64) -> ! {
         while !PARAR.load(Ordering::Acquire) {
@@ -51441,22 +51522,29 @@ fn nsf_le_junto_com_quem_pede() -> Resultado {
     }
     extern "C" fn quem_pede(n: u64) -> ! {
         let quem = sistema_no_armazem(crate::fios::id_atual());
+        let pedir = |metodo: &str, params: &str| {
+            let _ = fs_pedir(quem, metodo, params);
+            FEITOS.fetch_add(1, Ordering::AcqRel);
+        };
         for _ in 0..40 {
-            let _ = fs_pedir(quem, "system.info", "{}");
+            if PARAR.load(Ordering::Acquire) {
+                break;
+            }
+            pedir("system.info", "{}");
             if n.is_multiple_of(2) {
-                let _ = fs_pedir(quem, "fs.list", r#"{"path":"/dados"}"#);
+                pedir("fs.list", r#"{"path":"/dados"}"#);
             }
         }
         // Num kernel rápido, o que vem acima cabe numa volta só do NSF — e
         // ele não leu junto com ninguém. Os fios seguem pedindo, um pedido
-        // por volta dele, até ele dar três voltas com eles — ou o prazo. Pelo
-        // passo do NSF, e não do relógio: num kernel lento, uma volta leva
-        // segundos, e pedir pelo relógio deixaria mais do que ele lê.
-        let prazo = crate::tempo::ticks() + 2000;
+        // por volta dele, até ele dar três voltas com eles — ou a suíte
+        // mandar parar, desistindo deles. Pelo passo do NSF, e não do
+        // relógio: num kernel lento, uma volta leva segundos, e pedir pelo
+        // relógio deixaria mais do que ele lê.
         let mut vista = VOLTAS.load(Ordering::Acquire);
-        while vista < 3 && crate::tempo::ticks() < prazo {
-            let _ = fs_pedir(quem, "system.info", "{}");
-            while VOLTAS.load(Ordering::Acquire) == vista && crate::tempo::ticks() < prazo {
+        while vista < 3 && !PARAR.load(Ordering::Acquire) {
+            pedir("system.info", "{}");
+            while VOLTAS.load(Ordering::Acquire) == vista && !PARAR.load(Ordering::Acquire) {
                 crate::fios::ceder();
             }
             vista = VOLTAS.load(Ordering::Acquire);
@@ -51468,16 +51556,44 @@ fn nsf_le_junto_com_quem_pede() -> Resultado {
         PARAR.store(false, Ordering::Release);
         VOLTAS.store(0, Ordering::Release);
         PEDIDOS.store(0, Ordering::Release);
+        FEITOS.store(0, Ordering::Release);
         PRONTOS.store(0, Ordering::Release);
         crate::fios::criar_como("nsf-teste", nsf, 0, Autoridade::Servico(Servico::Nsf))?;
         for n in 0..4 {
             crate::fios::criar("pede", quem_pede, n)?;
         }
-        let pediram = esperar_cedendo(|| PRONTOS.load(Ordering::Acquire) == 4, 3000);
+        // O andamento de quem pede: os pedidos feitos e os fios prontos.
+        let andamento =
+            || (FEITOS.load(Ordering::Acquire) + PRONTOS.load(Ordering::Acquire)) as u64;
+        let pediram = esperar_andando(
+            || PRONTOS.load(Ordering::Acquire) == 4,
+            andamento,
+            JANELA,
+            TETO,
+        );
         PARAR.store(true, Ordering::Release);
-        esperar_cedendo(|| PRONTOS.load(Ordering::Acquire) == 5, 600)
-            .map_err(|_| "o fio do NSF nao parou")?;
-        pediram.map_err(|_| "os fios que pedem nao terminaram")?;
+        let pararam = esperar_andando(
+            || PRONTOS.load(Ordering::Acquire) == 5,
+            andamento,
+            JANELA,
+            TETO,
+        );
+        if pediram.is_err() || pararam.is_err() {
+            crate::log_error!(
+                "teste",
+                "{} voltas, {} pedidos feitos, {} fios prontos",
+                VOLTAS.load(Ordering::Acquire),
+                FEITOS.load(Ordering::Acquire),
+                PRONTOS.load(Ordering::Acquire)
+            );
+        }
+        pararam.map_err(|_| "os fios do caso nao pararam")?;
+        pediram.map_err(|d| match d {
+            Desistiu::Parou => {
+                "os fios que pedem pararam de pedir sem terminar (presos num pedido, ou esperando uma volta do NSF)"
+            }
+            Desistiu::Teto => "os fios que pedem andaram ate o teto sem terminar",
+        })?;
         // A última volta, com tudo parado: o NSF alcança a cabeça.
         let _ = crate::seguranca::passo();
         let cabeca = seq_da_auditoria();
