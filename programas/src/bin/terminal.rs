@@ -74,7 +74,9 @@ use programas::sistema;
 
 use protocolo::usuario::evento::origem;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
-use protocolo::usuario::terminal::{CONFIRMAR_PELO_AGENTE, PROMPT, confirmar_pelo_agente};
+use protocolo::usuario::terminal::{
+    APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE, PROMPT, confirmar_pelo_agente,
+};
 use toolkit::{AreaDeTexto, Indice, Interface, LinhaDeComando};
 
 /// A grade: colunas e linhas.
@@ -217,8 +219,14 @@ impl Terminal {
                     .filter_map(|c| {
                         if c == CONFIRMAR_PELO_AGENTE {
                             enter
-                        } else {
+                        } else if c == APAGAR_A_LINHA || c.is_ascii_graphic() || c == ' ' {
                             Some(c)
+                        } else {
+                            // Do pedido da árvore só se digita texto: um `\n`
+                            // ou o Enter de outra sessão dentro de um valor
+                            // confirmariam a linha em nome de outro. O kernel
+                            // já recusa o valor com eles; aqui, de novo.
+                            None
                         }
                     })
                     .collect();
