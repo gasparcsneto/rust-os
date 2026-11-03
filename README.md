@@ -8956,7 +8956,10 @@ do próprio comando — sem permissão nova, sem decisão a mais —, e o que n�
 ignorado. A conta de quando avisar é pura
 ([`politica/src/aviso.rs`](politica/src/aviso.rs)): na borda, no máximo um
 aviso não consumido por objeto, rearmado pela operação do dono com o
-nível reavaliado; o espaço só para quem esbarrou no cheio e para quem
+nível reavaliado — a operação que não passa (o gate, a reconfirmação, o
+próprio comando) também consome o aviso, e o que ainda está pronto avisa
+pelo coletor um segundo depois, e o dobro a cada recusa seguida, em vez de
+girar —; o espaço só para quem esbarrou no cheio e para quem
 abriu; o fim uma vez — o de um objeto que acaba com o aviso ainda não
 consumido se junta a ele na fila, ou espera a operação do dono —; o canal
 cheio deixa o aviso devido, e o coletor tenta de novo; o aviso que ainda
@@ -8989,10 +8992,11 @@ roda com o selo de um editor em quem o papel confia.
 **Testes.** No hospedeiro, a conta do aviso — a borda, o rearme, o espaço
 só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
 codificação e o evento que só tem o tipo, o número e os bits, o fim com o
-aviso não consumido — junto ao da fila, ou na espera do dono — e o fim
-devido —, o quadro, a prontidão da ponta e do endpoint, o selo, a lista do
-contrato e o ELF forjado (NH01–NH16). Na suíte, nas duas arquiteturas, 31
-casos `aviso:` e 7 `sdk:` — o programa `avisado`, que só espera no canal
+aviso não consumido — junto ao da fila, ou na espera do dono —, o fim
+devido e o rearme depois das recusas seguidas —, o quadro, a prontidão da
+ponta e do endpoint, o selo, a lista do contrato e o ELF forjado
+(NH01–NH17). Na suíte, nas duas arquiteturas, 32 casos `aviso:` e 7
+`sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
 espaço para quem esbarrou, o fim do sentido, o fecho e o aborto, o
@@ -9006,7 +9010,8 @@ canal cheio, quatro fluxos e dois pares sob carga, o desligamento, a
 suspensão e o esquecimento do dispositivo, os fluxos de e para outro
 Duke, o fim com o aviso não consumido — junto ao da fila, ou na espera do
 dono, com o teto das designações acabadas —, a recusa do gate que consome
-o aviso, quem retira ou fecha, o nome do canal no registro e a fila na troca
+o aviso, a recusa do próprio comando que espaça o aviso — e a vaga que
+avisa o pedido —, quem retira ou fecha, o nome do canal no registro e a fila na troca
 de imagem —; e o `eco-malha` com três clientes num processo só, a
 `conversa`, o programa de fora do repositório selado, instalado e rodado,
 o `agent.describe` contra o contrato, o `system.info`, as medidas do laço
@@ -9056,6 +9061,13 @@ suíte até um cair na vaga do canal que o processo fechou, sem que o aviso
 cruze para ele. Na última rodada de cada uma, as trinta e duas são
 reprovadas.
 
+Mais dezessete, N33 a N49, conferem as correções da validação final — os
+achados do agente adversário, nas duas rodadas: todas reprovadas. A N45 é
+a primeira forma da correção do A1 (largar a designação na hora), que o
+NS03 pegou como regressão; e a N47 (o rearme sem o recuo), reprovada pelo
+teste do hospedeiro, passou no caso da suíte até ele aceitar no máximo
+três tentativas na janela, em vez de cinco.
+
 | Mutação | Reprovada por |
 |---|---|
 | a designação sem conferir que o processo escuta o canal; o descritor que não é canal, ignorado; o `notify` de um agente ou de uma pessoa aceito; a designação passando ao filho no `fork` | "o canal que o processo nao escuta e recusado", "o descritor que nao e canal e recusado", "so processo designa" |
@@ -9073,6 +9085,15 @@ reprovadas.
 | o despertar da sessão remota sem o aviso; a ponta aceita de outro Duke sem aviso | "o fluxo saindo para outro Duke", "o fluxo chegando de outro Duke" |
 | um bit de coalescência partilhado entre os objetos do canal; o aviso seguinte do mesmo objeto noutro lugar da fila | "quatro fluxos avisando ao mesmo tempo", "um aviso de cada objeto no canal" |
 | o pedido que abre aceito no desligamento | "o desligamento avisa o fim" |
+| o fim com o aviso não consumido que não fica na espera, ou que não se junta ao aviso da fila; as designações acabadas sem o teto | "o fim com o aviso nao consumido, junto ou na espera" |
+| o fim com o aviso não consumido largado na hora (a primeira forma da correção do A1) | "o fim do sentido, o fecho e o aborto" |
+| a recusa do gate, ou a recepção recusada, que não consome o aviso | "a recusa do gate consome o aviso" |
+| a retirada que avisa o fim a quem retirou; o fecho recusado que larga a designação | "quem retira ou fecha" |
+| o nome do canal cru no registro da designação | "o nome do canal no registro da designacao" |
+| a troca de imagem que deixa os avisos na fila | "a troca de imagem tira os avisos da fila" |
+| o laço que não tenta outro nome | "o laco sobe com o nome tomado" |
+| a leitura do ELF sem conferir o cabeçalho e as contas | o teste do hospedeiro do ELF forjado |
+| a recusa do comando que rearma na hora; o rearme sem o recuo; a recusa seguida que empurra o rearme; o fim do fluxo que não reavalia os endpoints | "a recusa do comando espaca o aviso, e a vaga avisa o pedido" — o recuo, também o teste do hospedeiro |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
 | a conferência do contrato aceitando um parâmetro tirado; selar sem conferir o manifesto; o quadro aceitando a mensagem maior que o teto | os testes do hospedeiro do xtask e do `protocolo::quadro` |
