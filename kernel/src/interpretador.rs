@@ -57,6 +57,16 @@
 //! como a sessão **dele**, com o papel dele — nunca como a pessoa do
 //! console. E não digita o login de ninguém: a linha que pede nome ou senha
 //! só se edita pelo teclado.
+//!
+//! # A linha da pessoa, no físico e em cada Terminal
+//!
+//! A árvore alcança também a linha de cada Terminal: o campo da janela
+//! dele, que o programa digita no pseudo-terminal. Ali o console só vê
+//! caracteres, um a um, sem saber se vieram de uma tecla ou da árvore. Por
+//! isso a regra da linha que pede o nome, uma senha ou um passo do
+//! pareamento — [`pode_editar_pela_arvore`] e [`pode_confirmar_pela_arvore`]
+//! — vale quando a ação **entra**, em [`crate::ui`], com quem pediu
+//! conhecido: a mesma para as duas linhas, e antes do arrendamento do campo.
 
 // Em `modo-teste` o laço do agente é trocado pelo executor da suíte, e o
 // interpretador — que é uma tarefa desse laço — não é lançado. O resto do
@@ -707,10 +717,7 @@ pub fn tratar_tecla_de_janela(c: char) {
         tratar(Console::Fisico, c);
         return;
     };
-    let terminal = crate::pseudoterminal::donos()
-        .iter()
-        .position(|d| *d == Some(janela.dono))
-        .map(|i| Console::Terminal(i as u16));
+    let terminal = crate::pseudoterminal::console_do_dono(janela.dono);
     let console = terminal.unwrap_or(Console::Fisico);
     let titular = crate::coordenacao::titular(Origem::Pessoa, console);
     if terminal.is_none() && titular.is_none() {
@@ -964,8 +971,11 @@ pub fn definir(valor: &str) -> Result<(), &'static str> {
 
 /// A recusa de quem edita, pela árvore, a linha que pede o nome ou uma
 /// senha: o login e a troca da própria senha são de quem está no teclado.
-const LINHA_DA_PESSOA: &str =
+pub const LINHA_DA_PESSOA: &str =
     "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se digita pelo teclado";
+
+/// E a de um agente que a confirma pela árvore.
+pub const CONFIRMAR_A_LINHA_DA_PESSOA: &str = "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se confirma pelo teclado";
 
 fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     let (aberto, modo, inicio) =
@@ -979,8 +989,9 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     if !valor.chars().all(aceito) {
         return Err("o valor tem caracteres que nao se digitam na linha de comando");
     }
-    // Esvaziar a linha do login é o `APAGAR_A_LINHA` do Terminal, e vale;
-    // escrever nela, não.
+    // Esvaziar a linha do login é o `APAGAR_A_LINHA` do Terminal, e vale
+    // aqui; escrever nela, não. Quem pede pela árvore já passou, antes, por
+    // uma regra mais estrita — nem esvaziar: ver [`pode_editar_pela_arvore`].
     if modo != Modo::Comando && !valor.is_empty() {
         return Err(LINHA_DA_PESSOA);
     }
@@ -998,13 +1009,14 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A linha do físico aceitaria este valor? A conferência de [`definir`],
-/// sem mudar nada: quem pede confere antes de pedir o arrendamento — ver
-/// [`crate::coordenacao`] —, para uma recusa por valor não fazer a versão
-/// crescer.
+/// A linha do físico aceitaria este valor pela árvore — o `set_value`, e o
+/// `cancel` com o valor vazio? A conferência de [`definir`], sem mudar
+/// nada, e a regra da linha da pessoa — [`pode_editar_pela_arvore`]: quem
+/// pede confere antes de pedir o arrendamento — ver [`crate::coordenacao`]
+/// —, para uma recusa não arrendar a linha nem fazer a versão crescer.
 pub fn pode_definir(valor: &str) -> Result<(), &'static str> {
-    let (aberto, modo, inicio) = com_estado(Console::Fisico, |e| (e.aberto, e.modo, e.inicio))
-        .unwrap_or((false, Modo::Comando, None));
+    let (aberto, inicio) =
+        com_estado(Console::Fisico, |e| (e.aberto, e.inicio)).unwrap_or((false, None));
     if !aberto || inicio.is_none() {
         return Err("a linha de comando nao esta atendendo");
     }
@@ -1014,24 +1026,55 @@ pub fn pode_definir(valor: &str) -> Result<(), &'static str> {
     if !valor.chars().all(aceito) {
         return Err("o valor tem caracteres que nao se digitam na linha de comando");
     }
-    if modo != Modo::Comando && !valor.is_empty() {
+    pode_editar_pela_arvore(Console::Fisico)
+}
+
+/// A linha do físico aceitaria o `confirm` de `origem`? Um agente não
+/// confirma a linha do login — [`pode_confirmar_pela_arvore`] —, e ninguém
+/// confirma outra linha enquanto um comando espera.
+pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
+    pode_confirmar_pela_arvore(Console::Fisico, origem)?;
+    if ocupado(Console::Fisico) {
+        return Err("o console espera um comando que ainda nao respondeu");
+    }
+    Ok(())
+}
+
+/// A linha de `console` pede o que só a pessoa no teclado digita — o nome,
+/// uma senha, um passo da cerimônia de pareamento —, e não um comando?
+fn pede_a_pessoa(console: Console) -> bool {
+    com_estado(console, |e| e.modo != Modo::Comando).unwrap_or(false)
+}
+
+/// A regra da linha da pessoa, para quem a **edita** pela árvore semântica
+/// — o `set_value` e o `cancel` de [`crate::ui`]: a linha que pede o nome,
+/// uma senha ou um passo da cerimônia de pareamento só se edita pelo
+/// teclado. Nem para esvaziar: apagar o que a pessoa digitou é editar, e a
+/// edição arrendaria a linha a quem a pediu — as teclas dela, em seguida,
+/// seriam `CONFLICT`.
+///
+/// Uma regra só, para as duas linhas que a árvore alcança: a do físico, por
+/// [`pode_definir`], e a de cada Terminal, que a árvore mostra como o campo
+/// da janela dele e que o programa digita no pseudo-terminal. O console de
+/// um Terminal recebe só caracteres, sem saber de onde vieram — por isso a
+/// regra vale quando a ação entra, em `crate::ui`, e não quando ela chega
+/// aqui.
+pub fn pode_editar_pela_arvore(console: Console) -> Result<(), &'static str> {
+    if pede_a_pessoa(console) {
         return Err(LINHA_DA_PESSOA);
     }
     Ok(())
 }
 
-/// A linha do físico aceitaria o `confirm` de `origem`? Um agente não
-/// confirma a linha do login.
-pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
+/// E para quem a **confirma**: um agente não confirma a linha que pede o
+/// nome, uma senha ou um passo da cerimônia — entraria por alguém. A
+/// pessoa, pela árvore, confirma como no Enter. A mesma para o físico, por
+/// [`pode_confirmar`], e para cada Terminal — ver [`pode_editar_pela_arvore`].
+pub fn pode_confirmar_pela_arvore(console: Console, origem: Origem) -> Result<(), &'static str> {
     if let Origem::Agente(_) = origem
-        && com_fisico(|e| e.modo) != Modo::Comando
+        && pede_a_pessoa(console)
     {
-        return Err(
-            "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se confirma pelo teclado",
-        );
-    }
-    if ocupado(Console::Fisico) {
-        return Err("o console espera um comando que ainda nao respondeu");
+        return Err(CONFIRMAR_A_LINHA_DA_PESSOA);
     }
     Ok(())
 }
@@ -1325,6 +1368,15 @@ pub fn console_aberto(console: Console) -> bool {
 #[cfg(feature = "modo-teste")]
 pub fn pedindo_senha(console: Console) -> bool {
     com_estado(console, |e| e.modo.secreto()).unwrap_or(false)
+}
+
+/// O que a linha de um console pede, e quantos caracteres ela tem — sem o
+/// que eles são. Só para a suíte, que confere que a árvore não mexeu na
+/// linha da senha de um Terminal: o console não ecoa a senha, e a grade
+/// não a mostra.
+#[cfg(feature = "modo-teste")]
+pub fn linha_de_teste(console: Console) -> Option<(Modo, usize)> {
+    com_estado(console, |e| (e.modo, e.tam))
 }
 
 /// A pessoa que a suíte põe no console, e o papel dela.

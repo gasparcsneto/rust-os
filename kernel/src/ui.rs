@@ -458,6 +458,11 @@ pub enum Efeito {
 /// Elemento que não existe, ação que ele não aceita, valor que não caberia
 /// na linha ou que uma pessoa não conseguiria digitar. Recusar antes de
 /// mexer em qualquer coisa: uma ação recusada não deixa rastro na tela.
+///
+/// E a linha que pede o nome, uma senha ou um passo do pareamento: ela não
+/// se edita nem se esvazia pela árvore, e um agente não a confirma — no
+/// console físico, e no campo da janela de um Terminal, que é a linha do
+/// console dele. Ver [`crate::interpretador::pode_editar_pela_arvore`].
 pub fn agir(id: u32, acao: Acao, valor: Option<&str>, origem: Origem) -> Result<Efeito, Recusada> {
     // Sem comando por trás — a tecla de função, o clique na barra —, quem
     // age é a origem: o agente da sessão, ou a pessoa no console físico.
@@ -542,6 +547,19 @@ fn executar(
         {
             return Err("o valor nao cabe no campo".into());
         }
+        // A janela de um Terminal: o campo é a linha do console dele, e o
+        // que se pede nele o programa digita no pseudo-terminal, onde o
+        // console só vê caracteres — sem saber que vieram da árvore. A regra
+        // da linha da pessoa vale aqui como na do físico: a mesma, do
+        // interpretador, conferida quando a ação entra, e antes da conta,
+        // pelo motivo de lá — a recusa não arrenda o campo.
+        if let Some(console) = console_do_campo(id) {
+            if acao == Acao::Confirmar {
+                crate::interpretador::pode_confirmar_pela_arvore(console, origem)?;
+            } else {
+                crate::interpretador::pode_editar_pela_arvore(console)?;
+            }
+        }
         match acao {
             Acao::Confirmar => confirmar()?,
             _ => editar()?,
@@ -582,6 +600,16 @@ fn executar(
             Ok(Efeito::Pressionado)
         }
     }
+}
+
+/// O console cuja linha o campo `id` edita, se ele é o campo da janela de
+/// um Terminal: o dono da janela tem um pseudo-terminal aberto, e o que a
+/// árvore pede no campo vira o que ele digita no console dele. O mesmo mapa
+/// da tecla da janela com o foco — ver
+/// [`crate::pseudoterminal::console_do_dono`].
+fn console_do_campo(id: u32) -> Option<crate::pessoas::Console> {
+    let (camada, _) = elemento_de(id)?;
+    crate::pseudoterminal::console_do_dono(crate::superficies::dono_da_camada(camada)?)
 }
 
 /// Leva ao processo dono da janela uma ação num campo que ele descreveu:

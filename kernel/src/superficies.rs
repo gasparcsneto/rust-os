@@ -496,6 +496,17 @@ pub fn destino_da_camada(camada: u32) -> Option<Destino> {
     })
 }
 
+/// O fio dono da superfície cuja camada é `camada`, se ela for de processo.
+pub fn dono_da_camada(camada: u32) -> Option<u64> {
+    com_vagas(|vagas| {
+        vagas
+            .iter()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .map(|v| v.dono)
+    })
+}
+
 /// A janela com o foco, para quem decide uma tecla: para onde ela vai, de
 /// quem é a janela, e o campo que a descrição declara que recebe as teclas
 /// — o índice dele na descrição, o identificador do processo e o valor.

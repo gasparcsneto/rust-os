@@ -567,6 +567,21 @@ pub fn donos() -> [Option<u64>; TERMINAIS] {
     crate::arch::sem_interrupcoes(|| DONOS.lock().map(|d| d.dono().map(|d| d.fio)))
 }
 
+/// O console do pseudo-terminal que `fio` tem aberto, se tem um — um
+/// processo, um console.
+///
+/// É o mapa de quem pergunta "esta janela é de um Terminal, e de qual
+/// console?": a tecla da janela com o foco
+/// ([`crate::interpretador::tratar_tecla_de_janela`]) e a ação da árvore no
+/// campo de uma janela (`crate::ui`). Um só, para os dois chegarem ao mesmo
+/// console.
+pub fn console_do_dono(fio: u64) -> Option<Console> {
+    donos()
+        .iter()
+        .position(|d| *d == Some(fio))
+        .map(|i| Console::Terminal(i as u16))
+}
+
 /// Destrava os anéis e os donos à força, para o caminho de falha fatal.
 ///
 /// # Safety
