@@ -1129,6 +1129,23 @@ fn quem_da_sessao(sessao: u8) -> Result<Quem, Quem> {
         });
     }
     match crate::sessoes::identidade(sessao) {
+        // Um aperto do TCP ainda sem confirmação não é de agente nenhum:
+        // quem o fez pode só ter repetido o de outro, capturado na rede — ver
+        // `sessoes::Identificada::confirmada`. O canal só entrega pedidos
+        // depois da confirmação; quem resolve a sessão pelo número mais
+        // tarde — um Enter pedido pela árvore, um comando de console que
+        // esperou — também não a vê como do agente cuja chave ela alega.
+        Some(id) if !id.confirmada => Err(Quem {
+            titular: Titular::Anonimo,
+            sessao,
+            sessao_de_pessoa: None,
+            agente: String::new(),
+            chave: None,
+            papel: None,
+            processo: None,
+            servico: None,
+            remoto: None,
+        }),
         // A chave saiu do registro depois do aperto: a revogação vale na
         // hora, mesmo que a sessão ainda não tenha sido derrubada.
         Some(id) if crate::identidade::agente(&id.chave).is_none() => Err(Quem {

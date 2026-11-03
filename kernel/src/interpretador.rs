@@ -78,6 +78,7 @@ use crate::trava::Mutex;
 
 use crate::agent::json::{Json, JsonWriter};
 use crate::agent::registry;
+use crate::agent::sessao::Amarrada;
 use crate::autorizacao::{self, Chamador};
 use crate::pessoas::{Console, EstadoDaSessao, IdSessao};
 use crate::ui::Origem;
@@ -238,9 +239,9 @@ struct Estado {
     /// dela — ver [`aviso_do_pareamento`].
     executando: bool,
     /// Os Enter de agente que a árvore entregou ao Terminal deste console e
-    /// que o pseudo-terminal ainda não trouxe — a sessão de cada um. Ver
-    /// [`pedir_enter_do_agente`].
-    enter_pedido: [Option<u8>; ENTER_PEDIDOS],
+    /// que o pseudo-terminal ainda não trouxe — cada um amarrado à conexão e
+    /// à chave de quem o pediu. Ver [`pedir_enter_do_agente`].
+    enter_pedido: [Option<Amarrada>; ENTER_PEDIDOS],
 }
 
 impl Estado {
@@ -306,13 +307,15 @@ impl Estado {
 static ESTADOS: Mutex<[Estado; CONSOLES]> = Mutex::new([const { Estado::NOVO }; CONSOLES]);
 
 /// Um comando de console que suspendeu — ver [`crate::rede::espera`]: a
-/// linha, executada de novo quando a espera acabar; quem a confirmou; a
-/// abertura do console quando ela foi confirmada — reaberto ou fechado, o
-/// console não espera mais por ela —; e a espera.
+/// linha, executada de novo quando a espera acabar; quem a confirmou — e,
+/// se foi um agente, a conexão dele ([`Amarrada`]); a abertura do console
+/// quando ela foi confirmada — reaberto ou fechado, o console não espera
+/// mais por ela —; e a espera.
 struct Suspenso {
     abertura: u64,
     linha: politica::sigiloso::Texto,
     origem: Origem,
+    amarrada: Option<Amarrada>,
     espera: crate::rede::espera::Espera,
 }
 
@@ -483,9 +486,12 @@ impl core::future::Future for Proximo {
 /// Executa de novo os comandos suspensos cuja espera acabou — conferida sem
 /// registrar waker nenhum —, cada um no console dele, e devolve quantos.
 ///
-/// Pelo mesmo caminho da primeira vez: a mesma linha, o mesmo gate, com a
-/// sessão de quem está no console agora. Um console que reabriu ou fechou
-/// durante a espera não recebe nada.
+/// Pelo mesmo caminho da primeira vez: a mesma linha, o mesmo gate — a
+/// pessoa, pela sessão de quem está no console agora; um agente, só se ele
+/// ainda está na conexão de onde confirmou, como a reexecução do canal
+/// (`agent::reexecutar`): a sessão dele é a vaga do transporte, e quem
+/// estiver nela depois não é ele. Um console que reabriu ou fechou durante
+/// a espera não recebe nada.
 pub fn retomar_suspensos() -> usize {
     let prontos: alloc::vec::Vec<(Console, Suspenso, crate::rede::espera::Desfecho)> =
         crate::arch::sem_interrupcoes(|| {
@@ -506,6 +512,7 @@ pub fn retomar_suspensos() -> usize {
             abertura,
             linha,
             origem,
+            amarrada,
             espera,
         } = suspenso;
         drop(espera);
@@ -516,6 +523,19 @@ pub fn retomar_suspensos() -> usize {
                 console.texto(),
                 desfecho
             );
+            continue;
+        }
+        if let Origem::Agente(sessao) = origem
+            && !amarrada.is_some_and(|a| a.vale())
+        {
+            crate::log_info!(
+                "console",
+                "{}: o agente {} que confirmou a linha saiu da conexao durante a espera ({:?}); nada a executar",
+                console.texto(),
+                sessao,
+                desfecho
+            );
+            mostrar_prompt(console);
             continue;
         }
         let texto = core::str::from_utf8(linha.como_bytes()).unwrap_or("");
@@ -685,15 +705,22 @@ pub fn tratar(console: Console, c: char) {
         // o número dentro do caractere não é autoridade.
         c if agente_que_confirmou(c).is_some() => {
             if let Some(sessao) = agente_que_confirmou(c) {
-                if tomar_enter_pedido(console, sessao) {
-                    confirmar_em(console, Origem::Agente(sessao));
-                } else {
-                    crate::log_warn!(
+                match tomar_enter_pedido(console, sessao) {
+                    Tomado::Valido => {
+                        confirmar_em(console, Origem::Agente(sessao));
+                    }
+                    Tomado::DeOutraConexao => crate::log_warn!(
+                        "console",
+                        "{}: o Enter do agente {} nao e mais da conexao que o pediu; descartado",
+                        console.texto(),
+                        sessao
+                    ),
+                    Tomado::Nenhum => crate::log_warn!(
                         "console",
                         "{}: o Enter do agente {} nao foi pedido pela arvore; descartado",
                         console.texto(),
                         sessao
-                    );
+                    ),
                 }
             }
         }
@@ -1076,10 +1103,13 @@ pub fn pode_definir_em(console: Console, valor: &str) -> Result<(), &'static str
 pub fn pode_confirmar(origem: Origem) -> Result<(), &'static str> {
     pode_confirmar_pela_arvore(Console::Fisico, origem)?;
     if ocupado(Console::Fisico) {
-        return Err("o console espera um comando que ainda nao respondeu");
+        return Err(CONSOLE_OCUPADO);
     }
     Ok(())
 }
+
+/// A recusa de um `confirm` com o console esperando um comando.
+pub const CONSOLE_OCUPADO: &str = "o console espera um comando que ainda nao respondeu";
 
 /// A linha de `console` pede o que só a pessoa no teclado digita — o nome,
 /// uma senha, um passo da cerimônia de pareamento —, e não um comando?
@@ -1121,47 +1151,130 @@ pub fn pode_confirmar_pela_arvore(console: Console, origem: Origem) -> Result<()
 }
 
 /// Quantos Enter de agente pedidos pela árvore um console guarda à espera
-/// do pseudo-terminal. Mais que isso ao mesmo tempo, o mais velho sai.
+/// do pseudo-terminal. Com todos ocupados, o `confirm` seguinte é recusado:
+/// despejar o mais velho perderia o Enter de quem já ouviu que o pedido foi
+/// aceito.
 const ENTER_PEDIDOS: usize = 4;
 
-/// O `confirm` da sessão `sessao` no campo do Terminal de `console` passou
-/// pela regra e vai ao programa: o Enter dela, quando o pseudo-terminal o
-/// trouxer, vale — uma vez.
+/// A recusa do Enter de um agente com os pedidos do console cheios.
+pub const ENTER_DEMAIS: &str = "o console ja espera o Enter de agentes demais";
+
+/// A recusa do Enter de um agente que não está mais na sessão de onde
+/// pediu — a conexão acabou, ou a sessão é de outra.
+pub const AGENTE_FORA_DA_SESSAO: &str = "o agente nao esta mais na sessao de onde pediu";
+
+/// Reserva no console o Enter que o `confirm` da sessão `sessao` no campo
+/// do Terminal dele vai digitar: quando o pseudo-terminal o trouxer, ele
+/// vale — uma vez —, se quem o pediu ainda estiver na mesma conexão.
+/// `chave` é a que o gate decidiu para o pedido: a sessão tem de ser ainda
+/// a dela. Quem chama reserva antes da conta da coordenação, e desiste com
+/// [`desistir_do_enter_do_agente`] se o `confirm` não chega ao programa.
 ///
 /// O Enter de um agente chega ao interpretador como um caractere que diz a
 /// sessão (ver [`protocolo::usuario::terminal::confirmar_pelo_agente`]), pelo
 /// pseudo-terminal que o Terminal escreve. Sem o pedido, o número dentro do
 /// caractere seria a autoridade: quem escreve no pseudo-terminal confirmaria
-/// a linha em nome de qualquer sessão. Com ele, a autoridade é a da ação que
-/// o kernel conferiu e entregou.
-pub fn pedir_enter_do_agente(console: Console, sessao: u8) {
+/// a linha em nome de qualquer sessão. E o pedido não guarda só o número: o
+/// número é a vaga do transporte, que outra conexão ocupa quando esta acaba
+/// — a mesma chave, outra, ou um aperto do TCP repetido por quem o capturou
+/// ([`Amarrada`]). O Enter que chega para uma conexão que já não é a de
+/// quem pediu não confirma nada.
+///
+/// Recusa, como no físico, com o console esperando um comando — o Enter
+/// ficaria na fila até a espera acabar, e quem estivesse na sessão então
+/// não é quem pediu —, com a sessão que não é mais de quem pediu, e com os
+/// pedidos cheios.
+pub fn pedir_enter_do_agente(
+    console: Console,
+    sessao: u8,
+    chave: Option<[u8; 32]>,
+) -> Result<Amarrada, &'static str> {
+    if ocupado(console) {
+        return Err(CONSOLE_OCUPADO);
+    }
+    let amarrada = Amarrada::agora(sessao)
+        .filter(|a| a.chave() == chave)
+        .ok_or(AGENTE_FORA_DA_SESSAO)?;
+    // Os pedidos de conexões que acabaram não ocupam lugar: conferidos fora
+    // da trava do estado, que não toma a das sessões.
+    esquecer_enter_de_outras_conexoes(console);
     com_estado(console, |e| {
-        if let Some(vaga) = e.enter_pedido.iter_mut().find(|v| v.is_none()) {
-            *vaga = Some(sessao);
-        } else {
-            e.enter_pedido.rotate_left(1);
-            e.enter_pedido[ENTER_PEDIDOS - 1] = Some(sessao);
+        let vaga = e
+            .enter_pedido
+            .iter_mut()
+            .find(|v| v.is_none())
+            .ok_or(ENTER_DEMAIS)?;
+        *vaga = Some(amarrada);
+        Ok(amarrada)
+    })
+    .unwrap_or(Err("console desconhecido"))
+}
+
+/// Desfaz um [`pedir_enter_do_agente`]: o `confirm` não chegou ao programa.
+pub fn desistir_do_enter_do_agente(console: Console, amarrada: Amarrada) {
+    com_estado(console, |e| {
+        if let Some(v) = e
+            .enter_pedido
+            .iter_mut()
+            .rev()
+            .find(|v| **v == Some(amarrada))
+        {
+            *v = None;
         }
     });
 }
 
-/// Desfaz um [`pedir_enter_do_agente`]: o `confirm` não chegou ao programa.
-pub fn desistir_do_enter_do_agente(console: Console, sessao: u8) {
-    let _ = tomar_enter_pedido(console, sessao);
+/// Tira dos pedidos do console os de conexões que acabaram.
+fn esquecer_enter_de_outras_conexoes(console: Console) {
+    let pedidos = com_estado(console, |e| e.enter_pedido).unwrap_or([None; ENTER_PEDIDOS]);
+    for velho in pedidos.into_iter().flatten().filter(|a| !a.vale()) {
+        com_estado(console, |e| {
+            for v in e.enter_pedido.iter_mut().filter(|v| **v == Some(velho)) {
+                *v = None;
+            }
+        });
+    }
 }
 
-/// Tira um Enter pedido da sessão `sessao`, se há.
-fn tomar_enter_pedido(console: Console, sessao: u8) -> bool {
+/// O que o Enter de um agente achou nos pedidos do console.
+enum Tomado {
+    /// Um pedido da sessão, da conexão de quem o pediu: vale.
+    Valido,
+    /// Só pedidos da sessão de conexões que acabaram: tirados, e nada vale.
+    DeOutraConexao,
+    /// Nenhum pedido da sessão.
+    Nenhum,
+}
+
+/// Tira um Enter pedido da sessão `sessao` que ainda valha, e os dela que
+/// são de conexões que acabaram.
+fn tomar_enter_pedido(console: Console, sessao: u8) -> Tomado {
+    let pedidos = com_estado(console, |e| e.enter_pedido).unwrap_or([None; ENTER_PEDIDOS]);
+    let da_sessao = || {
+        pedidos
+            .into_iter()
+            .flatten()
+            .filter(move |a| a.sessao() == sessao)
+    };
+    if da_sessao().next().is_none() {
+        return Tomado::Nenhum;
+    }
+    let valido = da_sessao().find(|a| a.vale());
     com_estado(console, |e| {
-        match e.enter_pedido.iter_mut().find(|v| **v == Some(sessao)) {
+        for v in e.enter_pedido.iter_mut() {
+            if v.is_some_and(|a| a.sessao() == sessao && Some(a) != valido) {
+                *v = None;
+            }
+        }
+        match valido.and_then(|a| e.enter_pedido.iter_mut().find(|v| **v == Some(a))) {
             Some(v) => {
                 *v = None;
-                true
+                Tomado::Valido
             }
-            None => false,
+            None => Tomado::DeOutraConexao,
         }
     })
-    .unwrap_or(false)
+    .unwrap_or(Tomado::Nenhum)
 }
 
 /// Executa a linha do físico, como o Enter. É o `confirm` da árvore.
@@ -1220,7 +1333,9 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
         // O comando suspendeu: o console espera por ele, sem prompt, e o
         // interpretador o executa de novo quando a espera acabar.
         (nome, Some(espera)) => {
-            suspender(console, linha, origem, espera);
+            if !suspender(console, linha, origem, espera) {
+                mostrar_prompt(console);
+            }
             nome
         }
         (nome, None) => {
@@ -1235,10 +1350,24 @@ fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
 
 /// Guarda o comando que suspendeu no console, e acorda o interpretador:
 /// quem confirmou pode ter sido outra tarefa — um agente, pela árvore —, e
-/// é a tarefa do interpretador que espera pela conexão.
-fn suspender(console: Console, linha: &str, origem: Origem, espera: crate::rede::espera::Espera) {
+/// é a tarefa do interpretador que espera pela conexão. O de um agente vai
+/// amarrado à conexão dele; se ele já saiu dela, não há o que guardar, e
+/// devolve falso — a espera é largada.
+fn suspender(
+    console: Console,
+    linha: &str,
+    origem: Origem,
+    espera: crate::rede::espera::Espera,
+) -> bool {
     let (Some(i), Some(abertura)) = (indice(console), com_estado(console, |e| e.abertura)) else {
-        return;
+        return false;
+    };
+    let amarrada = match origem {
+        Origem::Agente(sessao) => match Amarrada::agora(sessao) {
+            Some(a) => Some(a),
+            None => return false,
+        },
+        Origem::Pessoa => None,
     };
     let mut texto = politica::sigiloso::Texto::novo();
     texto.acrescentar(linha.as_bytes());
@@ -1247,6 +1376,7 @@ fn suspender(console: Console, linha: &str, origem: Origem, espera: crate::rede:
             abertura,
             linha: texto,
             origem,
+            amarrada,
             espera,
         })
     });
@@ -1254,6 +1384,7 @@ fn suspender(console: Console, linha: &str, origem: Origem, espera: crate::rede:
     // espera dele é desarmada aqui, fora da trava.
     drop(anterior);
     crate::teclado::despertar_o_interpretador();
+    true
 }
 
 /// Só para a suíte: põe `linha` na linha do console e a confirma, como a

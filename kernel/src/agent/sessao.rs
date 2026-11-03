@@ -175,3 +175,64 @@ impl Canal {
         }
     }
 }
+
+/// Uma sessão do canal amarrada à conexão em que está agora e à chave que
+/// provou nela: o "quem" de um agente que tem de valer depois do pedido — o
+/// Enter que a árvore pediu e o Terminal ainda vai digitar, o comando de
+/// console que esperou.
+///
+/// O número da sessão é a vaga do transporte, e não o agente: quando a
+/// conexão acaba, outra ocupa a vaga — a mesma chave, outra chave, ou um
+/// aperto do TCP repetido por quem o capturou, ainda sem confirmação. A
+/// amarração é a mesma do dono de uma conexão de rede
+/// ([`crate::rede::conexoes::Dono`]) e da reexecução de um pedido suspenso
+/// do canal ([`Canal::na_conexao`]): a mesma conexão, aberta, com a mesma
+/// chave, confirmada.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Amarrada {
+    sessao: Sessao,
+    chave: Option<[u8; 32]>,
+    geracao: u64,
+}
+
+impl Amarrada {
+    /// A sessão `sessao` como está agora: a serial, ou a sessão cifrada da
+    /// conexão aberta do transporte, com a chave confirmada nela. `None` se
+    /// não há ninguém nela — a conexão acabou, a sessão é de outra conexão
+    /// ainda na tabela, ou o aperto do TCP não foi confirmado.
+    pub fn agora(sessao: Sessao) -> Option<Amarrada> {
+        let canal = Canal::da_sessao(sessao)?;
+        let geracao = canal.geracao();
+        if !canal.na_conexao(geracao) {
+            return None;
+        }
+        if sessao == SERIAL {
+            return Some(Amarrada {
+                sessao,
+                chave: None,
+                geracao,
+            });
+        }
+        let id = crate::sessoes::identidade(sessao)?;
+        (id.confirmada && id.geracao == geracao).then_some(Amarrada {
+            sessao,
+            chave: Some(id.chave),
+            geracao,
+        })
+    }
+
+    /// A sessão.
+    pub const fn sessao(self) -> Sessao {
+        self.sessao
+    }
+
+    /// A chave que ela provou — nenhuma, na serial.
+    pub const fn chave(self) -> Option<[u8; 32]> {
+        self.chave
+    }
+
+    /// Ainda é ela: a mesma conexão, aberta, com a mesma chave confirmada.
+    pub fn vale(self) -> bool {
+        Amarrada::agora(self.sessao) == Some(self)
+    }
+}

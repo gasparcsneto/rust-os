@@ -540,12 +540,17 @@ fn executar(
         && let Some(do_processo) = com_elemento(id, |e| e.id)
         && acao != Acao::Pressionar
     {
-        // A recusa por valor que não cabe vem antes da conta: uma ação
-        // recusada não faz a versão crescer.
-        if let (Acao::DefinirValor, Some(v)) = (acao, valor)
-            && v.len() > protocolo::usuario::descricao::MAIOR_TEXTO
-        {
-            return Err("o valor nao cabe no campo".into());
+        // A recusa por valor que não cabe — ou que não veio — vem antes da
+        // conta: uma ação recusada não arrenda o campo nem faz a versão
+        // crescer.
+        match (acao, valor) {
+            (Acao::DefinirValor, None) => return Err("set_value precisa de `value`".into()),
+            (Acao::DefinirValor, Some(v))
+                if v.len() > protocolo::usuario::descricao::MAIOR_TEXTO =>
+            {
+                return Err("o valor nao cabe no campo".into());
+            }
+            _ => {}
         }
         // A janela de um Terminal: o campo é a linha do console dele, e o
         // que se pede nele o programa digita no pseudo-terminal, onde o
@@ -565,25 +570,34 @@ fn executar(
                 _ => crate::interpretador::pode_editar_pela_arvore(console)?,
             }
         }
-        match acao {
-            Acao::Confirmar => confirmar()?,
-            _ => editar()?,
-        };
         // O Enter que o Terminal vai digitar por este `confirm` de um agente:
-        // o console o espera, e só ele vale — ver
-        // `interpretador::pedir_enter_do_agente`.
+        // reservado no console, amarrado à conexão de quem pediu e à chave
+        // que o gate decidiu — só ele vale, ver
+        // `interpretador::pedir_enter_do_agente`. Antes da conta, como as
+        // recusas de cima: o console ocupado, a sessão que já não é de quem
+        // pediu e os pedidos cheios não arrendam o campo.
         let enter = match (console, acao, origem) {
             (Some(console), Acao::Confirmar, Origem::Agente(sessao)) => {
-                crate::interpretador::pedir_enter_do_agente(console, sessao);
-                Some((console, sessao))
+                let chave = match titular {
+                    Some(politica::arrendamento::Titular::Agente { chave, .. }) => chave,
+                    _ => None,
+                };
+                Some((
+                    console,
+                    crate::interpretador::pedir_enter_do_agente(console, sessao, chave)?,
+                ))
             }
             _ => None,
         };
-        let r = agir_no_campo(id, do_processo, acao, valor, origem);
-        if let (Err(_), Some((console, sessao))) = (&r, enter) {
-            crate::interpretador::desistir_do_enter_do_agente(console, sessao);
+        let r = match acao {
+            Acao::Confirmar => confirmar(),
+            _ => editar(),
         }
-        return r.map_err(Into::into);
+        .and_then(|_| agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into));
+        if let (Err(_), Some((console, amarrada))) = (&r, enter) {
+            crate::interpretador::desistir_do_enter_do_agente(console, amarrada);
+        }
+        return r;
     }
     match acao {
         Acao::DefinirValor => {
