@@ -9098,8 +9098,8 @@ três tentativas na janela, em vez de cinco.
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
 | a conferência do contrato aceitando um parâmetro tirado; selar sem conferir o manifesto; o quadro aceitando a mensagem maior que o teto | os testes do hospedeiro do xtask e do `protocolo::quadro` |
 
-O kernel de release cresceu, nos segmentos carregados, 146 008 bytes (+2,8%)
-no x86_64 e 146 728 (+3,4%) no aarch64, contra o fim do DN-2. Na bancada —
+O kernel de release cresceu, nos segmentos carregados, 134 592 bytes (+2,6%)
+no x86_64 e 143 688 (+3,3%) no aarch64, contra o fim do DN-2. Na bancada —
 QEMU sem KVM, dois núcleos por máquina, as duas no mesmo hospedeiro de
 quatro (CI 401) —, o modelo de fora do repositório faz os 40 KiB de ida e
 volta entre os Dukes em 2,2 a 2,7 s; o `eco-malha` serve ao mesmo tempo os

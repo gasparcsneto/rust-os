@@ -595,11 +595,12 @@ O kernel de release, nos segmentos carregados (a soma do `filesz` dos
 
 | | DN-2 | DN-3 | diferença |
 |---|---:|---:|---:|
-| x86_64 | 5 138 155 | 5 284 163 | +146 008 (+2,8%) |
-| aarch64 | 4 298 347 | 4 445 075 | +146 728 (+3,4%) |
+| x86_64 | 5 138 155 | 5 272 747 | +134 592 (+2,6%) |
+| aarch64 | 4 298 347 | 4 442 035 | +143 688 (+3,3%) |
 
-Na memória (a soma do `memsz`), +145 972 bytes no x86_64 e +131 904 no
-aarch64.
+Na memória (a soma do `memsz`), +133 648 bytes no x86_64 e +132 960 no
+aarch64. A medida é do código final do DN-3, depois das duas rodadas do
+agente adversário.
 
 A bancada `cargo xtask sdk` na CI 401 — QEMU sem KVM, dois núcleos por
 máquina, as duas no mesmo hospedeiro de quatro. "Laço" é o modelo e o
