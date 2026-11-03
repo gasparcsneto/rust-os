@@ -893,14 +893,22 @@ pub(in crate::testes) fn fluxo_saindo_para_outro_duke() -> Resultado {
             la.credito = CREDITO;
             esperar_no_par(|| estado(a.quem(), &id).0.as_deref() == Some("open"), TETO)
                 .map_err(|_| "o fluxo nao abriu com o aceito")?;
-            let aberto = registros_depois(antes, |e| {
-                e.metodo == "stream.open"
-                    && e.agente == "kernel"
-                    && e.recurso.ends_with(&format!("dispositivo:{NOME_DO_PAR}"))
-                    && e.detalhe.starts_with("aberto pelo par; versao")
-            });
-            if aberto.len() != 1 {
-                return Err("a abertura efetiva nao foi gravada pelo kernel");
+            // O kernel grava a abertura efetiva logo depois de abrir o fluxo
+            // e acordar quem espera: o estado `open` pode ser visto antes do
+            // registro.
+            let abertos = || {
+                registros_depois(antes, |e| {
+                    e.metodo == "stream.open"
+                        && e.agente == "kernel"
+                        && e.recurso.ends_with(&format!("dispositivo:{NOME_DO_PAR}"))
+                        && e.detalhe.starts_with("aberto pelo par; versao")
+                })
+                .len()
+            };
+            esperar_no_par(|| abertos() >= 1, TETO)
+                .map_err(|_| "a abertura efetiva nao foi gravada pelo kernel")?;
+            if abertos() != 1 {
+                return Err("a abertura efetiva foi gravada mais de uma vez");
             }
             // A ida: escrita pelo processo daqui, levada dentro do crédito.
             // Cada escrita é lida inteira lá antes da seguinte — a sessão

@@ -37333,6 +37333,10 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_a_troca_de_imagem_tira_os_avisos_da_fila,
     },
     Caso {
+        nome: "aviso: a recusa do comando espaca o aviso, e a vaga avisa o pedido",
+        f: aviso::aviso_a_recusa_do_comando_espaca_o_aviso,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },

@@ -2456,3 +2456,123 @@ pub(super) fn aviso_a_troca_de_imagem_tira_os_avisos_da_fila() -> Resultado {
         encerrar_todos(r, &[&a])
     })
 }
+
+// ---------------------------------------------------------------------------
+// NS38 — a recusa do próprio comando espaça o aviso
+// ---------------------------------------------------------------------------
+
+/// O dono que não pode aceitar — a cota de fluxos do processo cheia — não
+/// gira aviso e recusa: o aceite recusado pelo próprio comando consome o
+/// aviso, e o pedido que ainda espera avisa de novo pelo coletor, um
+/// segundo depois, e o dobro a cada recusa seguida; a recusa seguida sem
+/// aviso entre elas não empurra o rearme já marcado. Um processo que tenta
+/// aceitar a cada aviso, como os exemplos, faz poucas tentativas em oito
+/// segundos (com o rearme na hora, seriam dezenas, até a taxa da sessão).
+/// E quando um fluxo dele acaba, a vaga avisa o pedido na hora — antes do
+/// rearme, que as recusas seguidas puseram longe —, e o aceite passa.
+pub(super) fn aviso_a_recusa_do_comando_espaca_o_aviso() -> Resultado {
+    // A janela em que `b` tenta aceitar a cada aviso.
+    const JANELA_MS: u64 = 8_000;
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 438);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let c = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            // A cota de `b` cheia: os fluxos de `a`, aceitos.
+            let mut abertos = Vec::new();
+            for _ in 0..politica::fluxo::FLUXOS_POR_PROCESSO {
+                abertos.push(aberto(&a, &b, false, false)?);
+            }
+            let e = b.numero_do_endpoint();
+            let desde = crate::log::total_emitidos();
+            let pedido = abrir(c.quem(), &b.endpoint);
+            let id = fs_texto(&pedido, "stream").ok_or_else(|| {
+                crate::log_error!("teste", "{}", pedido);
+                "o pedido acima da cota de quem aceita nao ficou esperando"
+            })?;
+            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            // Duas recusas seguidas, sem aviso entre elas: o pedido avisa
+            // de novo pelo coletor, e não na hora — e a segunda recusa não
+            // empurra o rearme que a primeira marcou: um segundo depois da
+            // primeira, e não dois depois da segunda.
+            let primeira = crate::tempo::uptime_ms();
+            let marca = crate::log::total_emitidos();
+            for _ in 0..2 {
+                let r = aceitar(b.quem(), &b.endpoint);
+                recusado(&r, "DENY_POLICY", "o aceite acima da cota nao foi recusado")?;
+            }
+            b.esperar_aviso(marca, "endpoint", e, malha::PEDIDO)?;
+            let demora = crate::tempo::uptime_ms().saturating_sub(primeira);
+            if demora < 900 {
+                crate::log_error!("teste", "{} ms", demora);
+                return Err("o pedido avisou de novo antes do rearme");
+            }
+            if demora >= 1_800 {
+                crate::log_error!("teste", "{} ms", demora);
+                return Err("a recusa seguida empurrou o rearme marcado");
+            }
+            // `b` tenta aceitar a cada aviso do pedido.
+            let fim_da_janela = crate::tempo::uptime_ms().saturating_add(JANELA_MS);
+            let mut tentativas = 0u32;
+            loop {
+                let r = aceitar(b.quem(), &b.endpoint);
+                let d = desfecho_na_malha(&r);
+                if d != "DENY_POLICY" && d != "RATE_LIMIT" {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o aceite acima da cota nao foi recusado");
+                }
+                tentativas += 1;
+                let marca = crate::log::total_emitidos();
+                let agora = crate::tempo::uptime_ms();
+                if agora >= fim_da_janela {
+                    break;
+                }
+                let ticks = (fim_da_janela - agora) / 10 + 1;
+                if esperar_ate(
+                    || b.avisos_de(marca, "endpoint", e).contains(&malha::PEDIDO),
+                    ticks,
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
+            // Com o recuo, a janela vê duas: logo depois da primeira dupla
+            // de recusas, e quatro segundos depois. Sem o recuo, uma por
+            // segundo; com o rearme na hora, dezenas.
+            if tentativas > 3 {
+                crate::log_error!("teste", "{} tentativas", tentativas);
+                return Err("o aceite recusado pela cota girou aviso e recusa");
+            }
+            if tentativas < 2 {
+                return Err("o pedido que espera nao avisou de novo depois da recusa");
+            }
+            // Um fluxo de `b` acaba: a vaga avisa o pedido na hora.
+            let (fechado, _) = &abertos[0];
+            let desde = crate::log::total_emitidos();
+            let antes = crate::tempo::uptime_ms();
+            feito(
+                &sobre(a.quem(), "stream.close", fechado),
+                "o close de a nao passou",
+            )?;
+            feito(
+                &sobre(b.quem(), "stream.close", fechado),
+                "o close de b nao passou",
+            )?;
+            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            let demora = crate::tempo::uptime_ms().saturating_sub(antes);
+            if demora > 2_000 {
+                crate::log_error!("teste", "{} ms", demora);
+                return Err("a vaga que abriu nao avisou o pedido na hora");
+            }
+            let r = aceitar(b.quem(), &b.endpoint);
+            if fs_texto(&r, "stream").as_deref() != Some(id.as_str()) {
+                crate::log_error!("teste", "{}", r);
+                return Err("o aceite com a vaga aberta nao passou");
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b, &c])
+    })
+}
