@@ -9085,6 +9085,9 @@ ele aceitar no máximo três tentativas na janela, em vez de cinco. Depois
 da terceira, da quarta e da quinta rodadas, que mexeram no rearme, na
 vaga, na recepção, na conta e no fim do fluxo, as sessenta e nove rodaram
 de novo contra o código final: todas reprovadas, nenhuma sobrevivente.
+Depois da correção do NS38 (CI 413: o caso esperava a linha de um aviso
+que o programa ainda não tinha dito), as onze que dependem dele, do NS39
+e do NS43 rodaram de novo: as onze reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|

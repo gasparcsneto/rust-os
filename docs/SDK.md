@@ -593,7 +593,14 @@ nove rodaram de novo, uma de cada vez, contra o código final — dezesseis
 delas (N04, N05, N06, N08, N12, N20, N27, N31, N32, N36, N48, N49, N50,
 N52, N54 e N59) com o trecho reescrito, porque o código em volta mudou,
 para o mesmo efeito. A tabela é o resultado dessa rodada: as sessenta e
-nove reprovadas, nenhuma sobrevivente.
+nove reprovadas, nenhuma sobrevivente. Depois, a CI 413 achou o NS38
+medindo mal — o kernel tinha feito o certo —: o `avisado` diz cada aviso
+no log depois de tirá-lo do canal, a primeira espera do caso casava com a
+linha atrasada do aviso de um fluxo do preparo, e a linha do aviso
+publicado antes das recusas passava pelo de depois delas. O NS38, o NS39
+e o NS43 passaram a esperar o `avisado` ocioso — o canal vazio e ele
+parado nele — antes da marca, e as onze mutações que eles reprovam (N46 a
+N53, N55, N61 e N62) rodaram de novo contra eles: as onze reprovadas.
 
 | | Mutação | Reprovada por |
 |---|---|---|
