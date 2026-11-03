@@ -515,6 +515,9 @@ impl Bancada<'_> {
 struct Hora {
     /// A hora do hospedeiro no meio do pedido.
     hospedeiro_ms: i64,
+    /// A ida e volta do pedido, na hora do hospedeiro: o civil foi lido em
+    /// algum ponto dela, e o meio dela erra até a metade.
+    ida_e_volta_ms: i64,
     uptime_ms: u64,
     rtc_s: Option<u64>,
     estado: String,
@@ -630,8 +633,10 @@ fn hora(m: &mut Ligada) -> Result<Hora, String> {
     let antes = servidor_de_hora::agora_ms();
     let r = m.pedir("system.info", "{}")?;
     let depois = servidor_de_hora::agora_ms();
-    ler_a_hora(&r, antes + (depois - antes) / 2)
-        .ok_or_else(|| format!("o system.info nao diz o tempo como se espera\n  {r}"))
+    let mut h = ler_a_hora(&r, antes + (depois - antes) / 2)
+        .ok_or_else(|| format!("o system.info nao diz o tempo como se espera\n  {r}"))?;
+    h.ida_e_volta_ms = depois - antes;
+    Ok(h)
 }
 
 fn ler_a_hora(r: &str, hospedeiro_ms: i64) -> Option<Hora> {
@@ -690,6 +695,7 @@ fn ler_a_hora(r: &str, hospedeiro_ms: i64) -> Option<Hora> {
     };
     Some(Hora {
         hospedeiro_ms,
+        ida_e_volta_ms: 0,
         uptime_ms: numero(topo, "uptime_ms")?,
         rtc_s: numero(topo, "rtc"),
         estado: texto(t, "state"),
@@ -3492,7 +3498,15 @@ fn a_perda_e_a_recuperacao(b: &mut Bancada) -> Result<String, String> {
                 "o civil voltou no ajuste gradual: {anterior} e depois {h}"
             ));
         }
-        maior_passo = maior_passo.max((civil - real) / real);
+        // A hora do hospedeiro de cada leitura é o meio do pedido: erra até
+        // a metade da ida e volta dele. Um runner carregado segura uma
+        // resposta da serial por mais de um segundo, e sem descontar isso a
+        // leitura de dois segundos vê o civil "correr" dezenas de por cento
+        // (CI 417: 57%, com a média da absorção em 5,0%). O salto que a
+        // leitura procura — o desvio inteiro de uma vez — passa da incerteza
+        // por segundos.
+        let incerteza = (h.ida_e_volta_ms + anterior.ida_e_volta_ms) as f64 / 2.0;
+        maior_passo = maior_passo.max((civil - real - incerteza) / real);
         anterior = h.clone();
         if (4_000..=6_000).contains(&h.desvio_ms()) {
             break h;
@@ -3501,13 +3515,15 @@ fn a_perda_e_a_recuperacao(b: &mut Bancada) -> Result<String, String> {
             return Err(format!("o desvio nao foi absorvido em 140 s: {h}"));
         }
     };
-    // Leitura a leitura, a ida e volta da serial pesa uns 20 ms em 2 s — daí
-    // a folga até 8% —; na absorção inteira, a taxa tem de ser a do teto.
+    // Leitura a leitura, além da incerteza das duas pontas, a folga vai até
+    // 8%; na absorção inteira, a taxa tem de ser a do teto, também descontada
+    // a incerteza das duas pontas.
     let real = (absorvido.hospedeiro_ms - h4.hospedeiro_ms) as f64;
-    let taxa = (absorvido.civil_ms as f64 - h4.civil_ms as f64 - real) / real;
+    let incerteza = (absorvido.ida_e_volta_ms + h4.ida_e_volta_ms) as f64 / 2.0;
+    let taxa = (absorvido.civil_ms as f64 - h4.civil_ms as f64 - real - incerteza) / real;
     if maior_passo > 0.08 || taxa > 0.055 {
         return Err(format!(
-            "o ajuste gradual correu {:.1}% mais rapido que o hospedeiro em media, e {:.1}% numa leitura; o teto e 5%",
+            "o ajuste gradual correu {:.1}% mais rapido que o hospedeiro em media, e {:.1}% numa leitura, alem da incerteza da ida e volta de cada uma; o teto e 5%",
             taxa * 100.0,
             maior_passo * 100.0
         ));
