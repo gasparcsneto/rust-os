@@ -9038,7 +9038,7 @@ aviso não consumido — junto ao da fila, ou na espera do dono —, o fim
 devido, o rearme depois das recusas seguidas e, até ele, só o novo
 avisando — o que o dono ouviria —, o quadro, a prontidão da
 ponta e do endpoint, o selo, a lista do contrato e o ELF forjado
-(NH01–NH19). Na suíte, nas duas arquiteturas, 45 casos `aviso:` e 9
+(NH01–NH19). Na suíte, nas duas arquiteturas, 46 casos `aviso:` e 9
 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
@@ -9058,7 +9058,8 @@ avisa o pedido uma vez, também no meio da recusa, com o aviso de antes
 dela ainda não consumido ou já consumido, com o rearme passando no meio
 sem apagar a marca dela, ou com as marcas transbordadas, e a recusa que
 responde ao aviso dela espaçando —, só o novo avisando antes do
-rearme, com outra pessoa mexendo na malha, o fim logo depois da operação
+rearme, com outra pessoa mexendo na malha — também com as marcas
+transbordadas, sem dizer a ninguém que outro mexeu nela —, o fim logo depois da operação
 recusada, a recepção que relê sem girar e o descarte das entregas, o
 sentido fechado pelo par com o fluxo vivo, o fim que chega no meio da
 operação recusada ou logo depois da escrita no sentido fechado, a conta
@@ -9149,7 +9150,17 @@ do rearme. As correções cabem no que existe, com dois casos novos do
 aviso e um do fluxo; as N78, N79 e N81 as desfazem, a N80 manda o quadro
 da sessão com a ordem na mão, e as quatro foram reprovadas — e as N70 e
 N73 a N77, rodadas de novo sobre o código corrigido, continuam
-reprovadas.
+reprovadas. A primeira forma da correção da vaga no transbordo — contar
+cada endpoint, de qualquer processo, como talvez com uma vaga — criava
+um sinal entre pessoas: as mudanças de qualquer processo transbordam as
+marcas, e o pedido que a recusa de outro espaçou avisava antes do
+rearme. A marca da vaga passou a ficar à parte, fora do teto das marcas
+dos objetos, e o transbordo voltou a não contar ninguém como talvez com
+uma vaga; o caso da vaga com as marcas transbordadas passou a
+transbordá-las de verdade, e um caso novo confere que o transbordo não
+diz a ninguém que outro mexeu na malha. A N78 foi redefinida — a marca
+da vaga sujeita ao teto das marcas —, e a N84 devolve a primeira forma:
+as duas, a rodar.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9190,7 +9201,8 @@ reprovadas.
 | o fim por fora gravado depois de acordar | "o fim por fora vai a cadeia antes de acordar" |
 | o fim que a sessão com o par conclui de novo fora da ordem das gravações, gravado depois de acordar, ou com a ordem já solta; o envio que conclui sem pedir a ordem (N73 a N76, depois do DN-3) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem" |
 | o fim por fora gravado com a ordem já solta, antes de acordar (N77, depois do DN-3) | "o fim por fora vai a cadeia antes de acordar" |
-| a vaga só pelas marcas, perdida no transbordo (N78); o rearme que apaga a marca da vaga sem publicar o aviso dela (N79) | "a vaga com as marcas transbordadas avisa o pedido", "o rearme no meio da recusa nao apaga a vaga" |
+| a marca da vaga sujeita ao teto das marcas dos objetos, perdida no transbordo (N78, redefinida — a rodar); o rearme que apaga a marca da vaga sem publicar o aviso dela (N79) | "a vaga com as marcas transbordadas avisa o pedido", "o rearme no meio da recusa nao apaga a vaga" |
+| o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas (N84 — a rodar) | "o transbordo das marcas nao diz que outro mexeu na malha" |
 | o quadro da sessão com o par mandado com a ordem das gravações na mão (N80); o fecho de um fluxo acabado decidido sem a ordem (N81) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem", "fluxo: o fim por fora com a sessao na ordem grava um fim so" |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
