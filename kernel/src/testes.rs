@@ -37377,6 +37377,14 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar,
     },
     Caso {
+        nome: "aviso: a vaga avisa uma vez, e a recusa que responde a ela espaca",
+        f: aviso::aviso_a_vaga_avisa_uma_vez,
+    },
+    Caso {
+        nome: "aviso: a vaga no meio da recusa, sem aviso pendente, avisa uma vez",
+        f: aviso::aviso_a_vaga_no_meio_da_recusa_sem_aviso_pendente,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },
