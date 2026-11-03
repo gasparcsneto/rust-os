@@ -1929,8 +1929,9 @@ da área de uso privado que nenhum teclado produz: o que chega pelo
 pseudo-terminal vem pela fila do teclado, e sem ele um comando que o
 agente executou pelo Terminal ficaria no log como da pessoa. O caso da
 suíte e a fumaça conferem os dois: o agente digita, esvazia, digita de
-novo e executa, e o log diz `executado: agent.ping (agente 3)` — o número
-da sessão do agente, que o Terminal leva junto com o Enter. O número não
+novo e executa, e o log diz `executado: agent.ping (agente 0)` — o número
+da sessão do agente, que o Terminal leva junto com o Enter; e o caso do
+canal TCP, o de um agente numa vaga, com o número dela. O número não
 é autoridade: o console só aceita o Enter da sessão `N` quando o kernel
 entregou ao Terminal dele o `confirm` daquela sessão — conferido pelo gate
 e pela regra da linha —, uma vez; escrito por conta própria por quem tem o
@@ -1941,7 +1942,13 @@ recusado quando a ação entra. Antes das duas regras, o Terminal digitava o
 valor como vinha, e um agente com `ui.act` executava a linha em nome de
 outro — como a serial, o `sistema`, pelo Enter da sessão 0, ou como a
 Pessoa entrada no console, pelo `\n` (achado do adversário ξ; ver
-[Consoles](#consoles)).
+[Consoles](#consoles)). E o Enter pedido vale só para a conexão de quem o
+pediu, com a chave que o gate decidiu: o número da sessão é a vaga do
+transporte, que outra conexão ocupa quando esta acaba — a mesma chave,
+outra, ou um aperto do TCP repetido —, e o Enter que chega depois disso é
+descartado (achado do adversário ο). Com o console esperando um comando,
+ou com quatro Enter de agentes já a caminho, o `confirm` de um agente é
+recusado antes da conta, sem arrendar o campo.
 
 Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
 várias só depois de o caso ser reforçado. Seis das oito da
@@ -2639,7 +2646,9 @@ recusa a entrega, e o dado fica na conexão. Uma leitura que espera custa
 duas decisões — a que suspendeu e a da entrega —, e não uma por volta de
 um laço. O cliente que sai durante a espera não recebe nada, e o seguinte
 na mesma porta não herda a resposta; o console que fecha ou reabre larga
-o comando que esperava.
+o comando que esperava; e o comando que um agente confirmou num console
+só é executado de novo se ele ainda está na conexão de onde confirmou — a
+sessão é a vaga do transporte, e quem estiver nela depois não é ele.
 
 **A espera é pelo que quem pede ainda não sabe.** A conexão guarda o
 último estado que uma resposta disse ao dono — a de `net.connect`,
@@ -2853,8 +2862,13 @@ seguraria uma vaga — e diria, a quem lista os agentes e a quem lê a
 auditoria, que o dono da chave estava conectado. Por isso, no TCP, o
 aperto só termina no primeiro quadro de dados que abre, e só então a
 sessão é do agente: para a auditoria, que grava ali o aperto completo;
-para `agent.list` e a barra, que só então o contam; e para o firewall, de
-quem a conexão passa a ser o fluxo dele. O prazo do aperto — dez segundos
+para `agent.list` e a barra, que só então o contam; para o firewall, de
+quem a conexão passa a ser o fluxo dele; e para o gate, que até lá não a
+vê como de agente nenhum — o canal só entrega pedidos depois da
+confirmação, mas o que se resolve mais tarde pelo número da sessão, um
+Enter que a árvore pediu ou um comando de console que esperou, também não
+toma a sessão repetida pelo dono da chave alegada (achado do adversário
+ο). O prazo do aperto — dez segundos
 desde a conexão — corre até lá. A sessão que acaba sem a confirmação — o
 prazo, um quadro que não abre, a conexão que cai — vai à auditoria como
 um aperto recusado, com a chave alegada e o par ("a chave do aperto nao
@@ -4948,7 +4962,10 @@ Sem ganho a medir, não há o que pagar com esse risco.
   por outra porta, gravado como dela; e a senha digitada adiantado, antes
   de o console pedi-la (com ele ocupado), entra no histórico do teclado,
   que só o `sistema` lê — o histórico grava a tecla quando ela chega, e o
-  console passa a pedir a senha quando trata o Enter.
+  console passa a pedir a senha quando trata o Enter. E uma terceira, pelo
+  adversário ο, da mesma raiz que a DT-1a: o processo que tem o
+  pseudo-terminal escolhe a linha que o Enter pedido por um agente
+  confirma — quem pode ser "o Terminal" é a decisão.
 
 ## O tempo
 
@@ -9276,7 +9293,17 @@ tira do campo do Terminal a regra do que se digita, a N96 deixa o Enter de
 um agente valer sem pedido e a N97 tira o pedido do `confirm` legítimo —
 as três reprovadas —; a N95 tira o filtro do programa do Terminal e
 sobrevive: o kernel recusa o valor antes, e o filtro é só defesa em
-profundidade.
+profundidade. Depois da correção do O1 do adversário ο, a N94 e a N95
+rodaram de novo sobre o código novo — a N94 reprovada, a N95 sobrevivendo
+pelo mesmo motivo —, e a N96 e a N97 foram redefinidas sobre o pedido
+amarrado e rodadas de novo: reprovadas. E as do ο: a N98 amarra o pedido
+só ao número da sessão; a N99 deixa o gate ver o aperto do TCP sem
+confirmação como do agente, e a N100 deixa a amarração aceitá-lo; a N101
+executa de novo o comando suspenso de um agente que saiu da conexão; a
+N102 reserva o Enter com o console esperando; a N103 despeja o pedido mais
+velho com os pedidos cheios; a N104 recusa o `set_value` sem valor só
+depois da conta; e a N105 deixa os marcadores do pedido dentro do valor,
+no toolkit — as oito reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9324,6 +9351,11 @@ profundidade.
 | o `escutar` sem o teto por processo (N86) | "eventos: o terceiro canal do processo e recusado", "eventos: o pior caso dos processos cabe na tabela" |
 | fora do SDK: o campo da janela do Terminal sem a regra da linha da pessoa (N88); o `cancel` da árvore que esvazia a linha da senha do físico (N89) | "terminal: o agente nao edita nem confirma a linha da senha"; "consoles: login e logout" |
 | fora do SDK: o campo do Terminal sem a regra do que se digita — o `set_value` com o Enter da pessoa ou de uma sessão (N94); o Enter de um agente que vale sem pedido (N96); o `confirm` do agente que não pede o Enter (N97) | "terminal: o agente nao edita nem confirma a linha da senha"; "terminal: o Enter de agente que a arvore nao pediu e descartado" |
+| fora do SDK: o Enter pedido amarrado só ao número da sessão (N98); o gate que vê o aperto do TCP sem confirmação como do agente (N99); a amarração que aceita a sessão sem confirmação (N100); o comando suspenso de um agente reexecutado sem a amarração (N101) | "terminal: o Enter pedido e so da conexao que o pediu" |
+| fora do SDK: o Enter de agente reservado com o console esperando (N102) | "rede: o console espera e segura a entrada" |
+| fora do SDK: os pedidos de Enter cheios que despejam o mais velho (N103) | "terminal: o Enter de agente que a arvore nao pediu e descartado" |
+| fora do SDK: o `set_value` sem valor recusado só depois da conta (N104) | "terminal: o agente nao edita nem confirma a linha da senha" |
+| fora do SDK: os marcadores do pedido dentro do valor, no toolkit (N105) | o teste do toolkit `o_agente_na_linha_de_comando_vira_o_que_digitar` |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

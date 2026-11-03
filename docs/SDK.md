@@ -781,7 +781,17 @@ digita, e o Enter de um agente só vale quando o kernel entregou o
 tira a regra, a N96 deixa o Enter valer sem pedido, a N97 tira o pedido
 do `confirm` legítimo: as três reprovadas. A N95 tira o filtro do
 programa do Terminal e sobrevive — o kernel recusa antes; o filtro é
-defesa em profundidade.
+defesa em profundidade. Depois, o adversário ο achou que o pedido do Enter
+guardava só o número da sessão — a vaga do transporte, que outra conexão
+ocupa quando a do agente acaba, inclusive com um aperto do TCP repetido e
+sem confirmação. O pedido passou a ser amarrado à conexão e à chave, como
+o dono de uma conexão de rede; o gate deixou de ver a sessão sem
+confirmação como do agente; o comando de console que um agente confirmou
+e que esperou só é executado de novo na mesma conexão; e o `confirm` de um
+agente é recusado com o console esperando ou com os pedidos cheios. A N96
+e a N97, redefinidas sobre o código novo, e as N98–N105, reprovadas, as
+dez; a N94 e a N95, rodadas de novo: a N94 reprovada, a N95 sobrevivendo
+pelo mesmo motivo.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -880,6 +890,14 @@ defesa em profundidade.
 | N95 | fora do SDK: o Terminal que digita do pedido da árvore qualquer caractere | **sobreviveu**: o kernel recusa o valor antes; o filtro do programa é defesa em profundidade |
 | N96 | fora do SDK: o Enter de um agente que vale sem pedido — o número dentro do caractere de novo como autoridade | `terminal: o Enter de agente que a arvore nao pediu e descartado` |
 | N97 | fora do SDK: o `confirm` de um agente no Terminal que não pede o Enter dele | `terminal: o agente nao edita nem confirma a linha da senha` |
+| N98 | fora do SDK: o Enter pedido amarrado só ao número da sessão — vale para quem estiver na vaga | `terminal: o Enter pedido e so da conexao que o pediu` |
+| N99 | fora do SDK: o gate que vê o aperto do TCP sem confirmação como do agente cuja chave ele alega | `terminal: o Enter pedido e so da conexao que o pediu` |
+| N100 | fora do SDK: a amarração que aceita a sessão do TCP sem confirmação | `terminal: o Enter pedido e so da conexao que o pediu` |
+| N101 | fora do SDK: o comando suspenso de um agente reexecutado sem a amarração | `terminal: o Enter pedido e so da conexao que o pediu` |
+| N102 | fora do SDK: o Enter de agente reservado com o console esperando um comando | `rede: o console espera e segura a entrada` |
+| N103 | fora do SDK: os pedidos de Enter cheios que despejam o mais velho | `terminal: o Enter de agente que a arvore nao pediu e descartado` |
+| N104 | fora do SDK: o `set_value` sem valor num campo de janela recusado só depois da conta | `terminal: o agente nao edita nem confirma a linha da senha` |
+| N105 | fora do SDK: os marcadores do pedido dentro do valor, na linha de comando do toolkit | o teste do toolkit `o_agente_na_linha_de_comando_vira_o_que_digitar` |
 
 ## Medidas
 
