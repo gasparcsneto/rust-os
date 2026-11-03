@@ -37369,6 +37369,14 @@ static CASOS: &[Caso] = &[
         f: aviso::aviso_o_fim_depois_do_sentido_fechado,
     },
     Caso {
+        nome: "aviso: a conta atrasada nao diz o fim que a operacao ouviu",
+        f: aviso::aviso_a_conta_atrasada_nao_diz_o_fim_ouvido,
+    },
+    Caso {
+        nome: "aviso: o fim por fora vai a cadeia antes de acordar",
+        f: aviso::aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar,
+    },
+    Caso {
         nome: "sdk: o eco-malha serve tres clientes, um processo so",
         f: sdk::sdk_o_eco_serve_tres_clientes,
     },

@@ -243,9 +243,13 @@ pub(in crate::testes) fn encerrar_todos(r: Resultado, quem: &[&Avisado]) -> Resu
 /// dos fluxos ficou coerente e nenhuma designação sobrou: os processos
 /// acabaram, e as deles saíram.
 pub(in crate::testes) fn com_os_avisos(f: impl FnOnce() -> Resultado) -> Resultado {
+    desarmar_os_pontos();
     crate::fluxo::esvaziar_de_teste();
     com_a_malha(|| {
         let r = f();
+        // O caso que falhou antes de usar um ponto da suíte não o deixa
+        // armado para o seguinte.
+        desarmar_os_pontos();
         crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
         let coerente = crate::fluxo::coerente();
         crate::fluxo::esvaziar_de_teste();
@@ -263,6 +267,12 @@ pub(in crate::testes) fn com_os_avisos(f: impl FnOnce() -> Resultado) -> Resulta
         }
         Ok(())
     })
+}
+
+/// Os pontos só da suíte do aviso e dos fluxos, todos desarmados.
+fn desarmar_os_pontos() {
+    crate::aviso::desarmar_de_teste();
+    crate::fluxo::desarmar_de_teste();
 }
 
 /// O número de um fluxo que o `avisado` disse — `abri <n>`, `aceitei <n>`.
@@ -3084,6 +3094,85 @@ pub(super) fn aviso_o_fim_depois_do_sentido_fechado() -> Resultado {
                 return Err("o fim dito nao tirou a designacao");
             }
             Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS48 — a conta atrasada de outro núcleo, depois da operação que ouviu o fim
+// ---------------------------------------------------------------------------
+
+/// O fluxo acaba com o aviso de `a` não consumido — o `FIM` espera a
+/// operação dele —, e a escrita de `a` ouve o fim; a conta de outro núcleo,
+/// com o nível de antes da escrita, chega logo depois dela. Ela não diz o
+/// `FIM` que a escrita já ouviu: a operação mudou a geração da designação,
+/// e a conta dela, com o nível de depois, tira a designação.
+pub(super) fn aviso_a_conta_atrasada_nao_diz_o_fim_ouvido() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4480);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let desde = crate::log::total_emitidos();
+            let (id, n) = aberto(&a, &b, true, false)?;
+            a.esperar_aviso(desde, "fluxo", n, malha::GRAVAVEL)?;
+            // O fluxo acaba, com o aviso de `a` não consumido.
+            crate::fluxo::vencer_de_teste(u64::MAX);
+            if crate::fluxo::contagem().0 != 0 {
+                crate::log_error!("teste", "{:?}", crate::fluxo::contagem());
+                return Err("o fluxo nao acabou");
+            }
+            // A escrita de `a` ouve o fim, e a conta atrasada, com o fim no
+            // nível de antes dela, chega logo depois.
+            let desde = crate::log::total_emitidos();
+            crate::aviso::conta_atrasada_na_proxima_operacao_de_teste(malha::FIM as u8);
+            let r = escrever(a.quem(), &id, b"x");
+            crate::aviso::desarmar_de_teste();
+            if fs_ok(&r) {
+                crate::log_error!("teste", "{}", r);
+                return Err("a escrita no fluxo acabado passou");
+            }
+            if let Some(s) = crate::aviso::situacao_de_teste(a.ponta(n)) {
+                crate::log_error!("teste", "{:?}", s);
+                return Err("o fim ouvido pela escrita nao tirou a designacao");
+            }
+            let vieram = a.avisos_depois_do_sossego(desde, "fluxo", n);
+            if !vieram.is_empty() {
+                crate::log_error!("teste", "{:?}", vieram);
+                return Err("a conta atrasada disse o fim que a escrita ja tinha ouvido");
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a, &b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// NS49 — o fim por fora vai à cadeia antes de acordar quem espera
+// ---------------------------------------------------------------------------
+
+/// O fluxo acaba por fora — a inatividade, como a revogação, o fim do
+/// processo do par ou o dispositivo que sai —: o `stream.end` dele vai à
+/// cadeia ainda dentro da ordem das gravações, e já está lá quando quem
+/// espera acorda. A operação que o aviso do fim faz o dono pedir vem depois
+/// do fim na cadeia.
+pub(super) fn aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar() -> Resultado {
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4490);
+        let a = Avisado::lancar(bia)?;
+        let b = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let (_, n) = aberto(&a, &b, false, true)?;
+            let desde = crate::log::total_emitidos();
+            crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+            crate::fluxo::vencer_de_teste(u64::MAX);
+            match crate::fluxo::fim_na_cadeia_ao_acordar_de_teste() {
+                Some(true) => {}
+                Some(false) => return Err("o fim por fora acordou antes de ir a cadeia"),
+                None => return Err("o fim por fora nao acordou ninguem"),
+            }
+            b.esperar_aviso(desde, "fluxo", n, malha::FIM)
         })();
         encerrar_todos(r, &[&a, &b])
     })
