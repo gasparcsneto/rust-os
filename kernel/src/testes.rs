@@ -6332,6 +6332,94 @@ fn terminal_operado() -> Resultado {
     Ok(())
 }
 
+/// O Enter de um agente só vale como a árvore o pediu.
+///
+/// O `confirm` de um agente no campo do Terminal chega ao interpretador
+/// como um caractere que diz a sessão, pelo pseudo-terminal que o Terminal
+/// escreve. O número dentro dele era a autoridade: quem escrevesse o
+/// caractere da sessão 0 executava a linha como a serial, o `sistema`. Agora
+/// o console só aceita o Enter da sessão `N` quando o kernel entregou ao
+/// Terminal o `confirm` dela — uma vez —, e descarta o resto, no log. Aqui,
+/// direto no interpretador de um console de Terminal:
+///
+/// - o Enter da sessão 0 e o de uma sessão qualquer, sem pedido, não
+///   executam nada, a linha fica como estava, e o log diz descartado;
+/// - pedido o da sessão 7, o Enter de outra sessão continua descartado, e o
+///   da 7 executa a linha como `agente 7`;
+/// - o mesmo Enter de novo, sem um pedido novo, é descartado;
+/// - o console que fecha esquece os pedidos.
+fn terminal_o_enter_de_agente_sem_pedido_e_descartado() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::Console;
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, confirmar_pelo_agente};
+    const CONSOLE: Console = Console::Terminal(3);
+    let contar = |marca: u64, prefixo: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= marca && r.subsistema == "console" && r.mensagem().contains(prefixo))
+                as usize;
+        });
+        n
+    };
+    let digitar = |texto: &str| {
+        for c in texto.chars() {
+            crate::interpretador::tratar(CONSOLE, c);
+        }
+    };
+    crate::interpretador::abrir_console(CONSOLE);
+    let resultado = (|| -> Resultado {
+        let linha = || crate::interpretador::linha_de_teste(CONSOLE);
+        for sessao in [0u8, 9] {
+            let marca = crate::log::total_emitidos();
+            digitar("agent.ping");
+            crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(sessao));
+            if contar(marca, "executado: agent.ping") != 0 {
+                return Err("um Enter de agente sem pedido executou a linha");
+            }
+            if contar(marca, "nao foi pedido pela arvore; descartado") != 1 {
+                return Err("o Enter de agente sem pedido nao foi descartado no log");
+            }
+            if linha() != Some((Modo::Comando, "agent.ping".len())) {
+                return Err("o Enter de agente sem pedido mexeu na linha");
+            }
+            crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
+        }
+        // Pedido o Enter da 7: o da 9 não é ele, e o da 7 vale, uma vez.
+        crate::interpretador::pedir_enter_do_agente(CONSOLE, 7);
+        let marca = crate::log::total_emitidos();
+        digitar("agent.ping");
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(9));
+        if contar(marca, "executado: agent.ping") != 0 {
+            return Err("o Enter de uma sessao valeu pelo pedido de outra");
+        }
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
+        if contar(marca, "executado: agent.ping (agente 7)") != 1 {
+            return Err("o Enter pedido pela arvore nao executou a linha como do agente");
+        }
+        let _ = esperar_ate(|| linha() == Some((Modo::Comando, 0)), 200);
+        let marca = crate::log::total_emitidos();
+        digitar("agent.ping");
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
+        if contar(marca, "executado: agent.ping") != 0 {
+            return Err("o mesmo Enter pedido valeu duas vezes");
+        }
+        crate::interpretador::tratar(CONSOLE, APAGAR_A_LINHA);
+        // O console que fecha e reabre esquece o pedido que sobrou.
+        crate::interpretador::pedir_enter_do_agente(CONSOLE, 7);
+        crate::interpretador::fechar_console(CONSOLE, "o caso reabre");
+        crate::interpretador::abrir_console(CONSOLE);
+        let marca = crate::log::total_emitidos();
+        digitar("agent.ping");
+        crate::interpretador::tratar(CONSOLE, confirmar_pelo_agente(7));
+        if contar(marca, "executado: agent.ping") != 0 {
+            return Err("o pedido de antes de o console fechar valeu depois");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(CONSOLE, "fim do caso");
+    resultado
+}
+
 /// Um agente não edita, não esvazia e não confirma, pela árvore, a linha de
 /// um Terminal que pede o nome ou a senha: a regra da linha do físico, no
 /// campo da janela do Terminal.
@@ -6355,7 +6443,16 @@ fn terminal_operado() -> Resultado {
 /// - a linha fica como a pessoa a deixou, e ela continua digitando — sem
 ///   `CONFLICT` — e entra;
 /// - com o console pedindo um comando, o mesmo `set_value` passa e chega à
-///   linha do console.
+///   linha do console, e o `confirm` do agente a executa como dele — o
+///   Enter que o Terminal digita é o que o kernel entregou;
+/// - e o valor do `set_value` só leva o que uma pessoa digitaria: com o
+///   Enter dela (`\n`), com o Enter de uma sessão (o da serial, a 0), ou
+///   com o login inteiro dentro, é recusado pela regra do físico — sem
+///   ninguém entrado e com a pessoa entrada. Sem isso, o Terminal digitava o
+///   valor como veio, e o `set_value` executava a linha em nome de outro: um
+///   agente `operador` mandava comandos como o `sistema`, ou como a pessoa;
+/// - na troca da própria senha pela janela, a linha da senha atual também é
+///   da pessoa.
 fn terminal_o_agente_nao_edita_a_linha_da_senha() -> Resultado {
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
@@ -6409,7 +6506,9 @@ fn campo_do_terminal() -> Option<u32> {
 }
 
 fn linha_da_senha_no_terminal() -> Resultado {
-    use crate::interpretador::{CONFIRMAR_A_LINHA_DA_PESSOA, LINHA_DA_PESSOA, Modo};
+    use crate::interpretador::{
+        CARACTERE_QUE_NAO_SE_DIGITA, CONFIRMAR_A_LINHA_DA_PESSOA, LINHA_DA_PESSOA, Modo,
+    };
     use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
     use alloc::format;
     use politica::Codigo;
@@ -6520,6 +6619,19 @@ fn linha_da_senha_no_terminal() -> Resultado {
         Ok(())
     };
 
+    // Sem ninguém entrado, com o console pedindo um comando: o valor com o
+    // Enter da pessoa (`\n`), com o Enter de uma sessão — a da serial, a
+    // 0 —, ou com o login inteiro dentro, é recusado pela regra do físico,
+    // antes da conta. Sem ela, o Terminal digitava o valor como veio, e o
+    // `set_value` executava a linha em nome de outro.
+    for valor in [
+        r#","value":"agent.ping\n""#,
+        r#","value":"keyboard.read\uf600""#,
+        r#","value":"login\nlia\n""#,
+    ] {
+        recusada("set_value", valor, CARACTERE_QUE_NAO_SE_DIGITA)?;
+    }
+
     // O nome: a pessoa digita `login` pela janela, e o console o pede.
     digitar_pelo_teclado("login\n")?;
     esperar_ate(
@@ -6594,6 +6706,13 @@ fn linha_da_senha_no_terminal() -> Resultado {
         600,
     )
     .map_err(|_| "a linha vazia nao desistiu da troca no terminal")?;
+    // Com a pessoa entrada, o valor com o Enter dela também não passa: o
+    // comando rodaria com o papel dela.
+    recusada(
+        "set_value",
+        r#","value":"agent.ping\n""#,
+        CARACTERE_QUE_NAO_SE_DIGITA,
+    )?;
     if ultimo_que(|e| {
         e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
     })
@@ -6641,7 +6760,53 @@ fn linha_da_senha_no_terminal() -> Resultado {
         600,
     )
     .map_err(|_| "o set_value pedindo um comando nao chegou ao console pelo terminal")?;
-    // A linha volta vazia, e o campo, livre.
+    // O `confirm` do agente executa a linha como dele — a sessão dele, no
+    // log —: o Enter que o Terminal digita é o que o kernel entregou, e o
+    // console o esperava. A linha volta vazia, e o campo, livre.
+    let marca = crate::log::total_emitidos();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"confirm""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o confirm no terminal pedindo um comando foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender_consoles();
+            linhas_desde(marca, "console", "executado: agent.ping (agente ") > 0
+                && linha() == Some((Modo::Comando, 0))
+        },
+        600,
+    )
+    .map_err(|_| "o confirm do agente no terminal nao executou a linha como dele")?;
+    if linhas_desde(marca, "console", "executado: agent.ping (pessoa") != 0 {
+        return Err("o confirm do agente no terminal executou como a pessoa");
+    }
+    // De novo, e a linha volta vazia pelo `cancel`, com o campo livre.
+    let marca = crate::log::total_emitidos();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"set_value","value":"agent.ping""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o segundo set_value no terminal pedindo um comando foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, "agent.ping".len()))
+                && linhas_desde(marca, "usuario", "terminal: o agente digitou") > 0
+        },
+        600,
+    )
+    .map_err(|_| "o segundo set_value nao chegou ao console pelo terminal")?;
     let r = pela_porta(
         &mut agente,
         &mut sessao,
@@ -35152,6 +35317,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: o agente nao edita nem confirma a linha da senha",
         f: terminal_o_agente_nao_edita_a_linha_da_senha,
+    },
+    Caso {
+        nome: "terminal: o Enter de agente que a arvore nao pediu e descartado",
+        f: terminal_o_enter_de_agente_sem_pedido_e_descartado,
     },
     Caso {
         nome: "toolkit: o agente preenche um formulario",
