@@ -1,5 +1,6 @@
 //! Os casos do fluxo entre dois Dukes — o DN-2 entre dispositivos
-//! (FS19–FS26).
+//! (FS19–FS26) — e o fim que a sessão com o par conclui, gravado dentro da
+//! ordem das gravações (FS27).
 //!
 //! A suíte faz o outro Duke, com a chave de teste de um dispositivo
 //! relacionado, como nos casos do enlace e do pareamento:
@@ -1588,6 +1589,262 @@ pub(in crate::testes) fn fluxo_o_replay_nao_abre() -> Resultado {
             }
             nada_vivo("o replay deixou um fluxo")
         })();
+        encerrar_todas(r, &[&b])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FS27 — o fim que a sessão conclui, dentro da ordem.
+// ---------------------------------------------------------------------------
+
+/// Quanto a suíte dá à sessão, com a ordem das gravações na mão dela, para a
+/// sessão concluir o fluxo se não esperasse a ordem: dez tiques.
+const FOLGA_DA_ORDEM: u64 = 10;
+
+/// Com a ordem das gravações na mão da suíte — como a teria a operação de um
+/// processo daqui, ou o journal —, `gatilho` dá à sessão do fluxo `n` o fim
+/// que o conclui. A sessão chega à ordem e espera por ela: enquanto a suíte
+/// a tem, o fluxo segue vivo, nenhum `stream.end` dele vai à cadeia, nada
+/// sai para o par (`nada_ao_par`) e o `dono`, se ainda está no fluxo, o vê
+/// aberto — a operação dele, que entra na ordem nesse meio, vem antes da
+/// conclusão. Solta a ordem, a sessão conclui: o fim vai à cadeia uma vez,
+/// gravado com a ordem na mão e antes de acordar quem espera. Devolve o
+/// número e o registro do fim.
+fn concluido_na_ordem(
+    n: u64,
+    id: &str,
+    antes: u64,
+    dono: Option<Chamador>,
+    gatilho: impl FnOnce() -> Resultado,
+    mut nada_ao_par: impl FnMut() -> Result<bool, &'static str>,
+) -> Result<(u64, politica::auditoria::Evento), &'static str> {
+    let recurso = format!("fluxo:{id}");
+    let fins = || registros_depois(antes, |e| e.metodo == "stream.end" && e.recurso == recurso);
+    let vivos = crate::fluxo::contagem().0;
+    crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+    crate::fluxo::par::vigiar_a_ordem_de_teste(n);
+    crate::persistencia::em_ordem(|| -> Resultado {
+        // O que a sessão faria sem esperar a ordem: concluir o fluxo, gravar
+        // o fim, mandar o quadro.
+        let mut sem_a_ordem = || -> Resultado {
+            if crate::fluxo::contagem().0 < vivos {
+                return Err("a sessao concluiu o fluxo sem a ordem das gravacoes");
+            }
+            if !fins().is_empty() {
+                return Err("o fim que a sessao conclui foi a cadeia sem a ordem das gravacoes");
+            }
+            if !nada_ao_par()? {
+                return Err("o quadro do fim saiu ao par antes de a sessao ter a ordem");
+            }
+            Ok(())
+        };
+        gatilho()?;
+        let mut visto: Resultado = Ok(());
+        esperar_cedendo(
+            || {
+                visto = sem_a_ordem();
+                visto.is_err() || crate::fluxo::par::a_caminho_da_ordem_de_teste()
+            },
+            TETO,
+        )
+        .map_err(|_| "a sessao nao chegou ao fim que conclui o fluxo")?;
+        visto?;
+        // A folga: a sessão que não esperasse a ordem concluiria aqui.
+        let _ = esperar_cedendo(
+            || {
+                visto = sem_a_ordem();
+                visto.is_err()
+            },
+            FOLGA_DA_ORDEM,
+        );
+        visto?;
+        // A operação do dono que entra na ordem nesse meio vê o fluxo vivo:
+        // ela vem antes da conclusão na cadeia.
+        if let Some(dono) = dono
+            && estado(dono, id).0.as_deref() != Some("open")
+        {
+            return Err("o dono viu o fluxo acabado com a ordem na mao dele");
+        }
+        Ok(())
+    })?;
+    // Solta a ordem, a sessão conclui: o fim foi à cadeia com a ordem na mão
+    // dela, antes de acordar quem espera — uma vez.
+    esperar_no_par(
+        || crate::fluxo::fim_na_cadeia_ao_acordar_de_teste().is_some(),
+        TETO,
+    )
+    .map_err(|_| "o fim que a sessao conclui nao acordou ninguem")?;
+    if crate::fluxo::fim_na_cadeia_ao_acordar_de_teste() != Some(true) {
+        return Err("o fim que a sessao conclui acordou antes de ir a cadeia");
+    }
+    if crate::fluxo::fim_gravado_na_ordem_de_teste() != Some(true) {
+        return Err("o fim que a sessao conclui foi gravado sem a ordem das gravacoes");
+    }
+    let mut gravados = fins();
+    if gravados.len() != 1 {
+        crate::log_error!("teste", "{:?}", gravados);
+        return Err("o fim que a sessao conclui nao foi gravado uma vez so");
+    }
+    Ok(gravados.remove(0))
+}
+
+/// O registro `fim` é o `stream.end` do kernel, permitido, com `detalhe`.
+fn fim_do_kernel(fim: &politica::auditoria::Evento, detalhe: &str) -> Resultado {
+    if fim.agente == "kernel" && fim.codigo == Codigo::Allow && fim.detalhe == detalhe {
+        return Ok(());
+    }
+    crate::log_error!("teste", "esperava `{}`: {:?}", detalhe, fim);
+    Err("o fim que a sessao conclui nao foi gravado com o motivo e as contas")
+}
+
+/// O fim que a própria sessão com o par conclui vai à cadeia como os fins
+/// por fora — dentro da ordem das gravações, antes de acordar quem espera
+/// —, nos dois casos: o fim mandado ao par com o outro sentido já acabado
+/// (chegando: os dados e o fim de lá lidos até o fim, e o fim do sentido
+/// daqui) e o fecho de quem saiu com tudo dito (saindo: o que a ponta daqui
+/// escreveu já foi, e ela fecha). Com a ordem na mão da suíte, a sessão
+/// chega à conclusão e espera: o fluxo segue vivo — o dono que ainda está
+/// nele o vê aberto —, nada vai ao par e nenhum fim à cadeia. Solta a
+/// ordem, o fim vai à cadeia uma vez, com a ordem na mão da sessão e antes
+/// de acordar; só então o quadro sai ao par; e a operação do dono que vem
+/// depois ouve o fim, depois dele na cadeia.
+pub(in crate::testes) fn fluxo_o_fim_da_sessao_na_ordem() -> Resultado {
+    use politica::fluxo::motivo;
+    com_o_par(|| {
+        let (bia, _, _) = bia_relacionada("dispositivo")?;
+        let b = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            // Chegando: o fim mandado ao par com o outro sentido já acabado.
+            let antes = crate::autorizacao::ultimo_registro();
+            let (mut la, id) = aberto_de_la(&b, VAGA)?;
+            let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
+            la.mandar(&Mensagem::Dados(b"de la"))?;
+            la.mandar(&Mensagem::Fim)?;
+            let mut lido = Vec::new();
+            esperar_no_par(
+                || match lidos(&ler(b.quem(), &id, 100)) {
+                    Some((d, fim)) => {
+                        lido.extend_from_slice(&d);
+                        fim
+                    }
+                    None => true,
+                },
+                TETO,
+            )?;
+            if lido != b"de la" {
+                crate::log_error!("teste", "{:?}", lido);
+                return Err("o processo daqui nao leu ate o fim o que veio de la");
+            }
+            let (fim_seq, fim) = concluido_na_ordem(
+                n,
+                &id,
+                antes,
+                Some(b.quem()),
+                || {
+                    feito(
+                        &sobre(b.quem(), "stream.finish", &id),
+                        "o fim do sentido daqui nao passou",
+                    )
+                },
+                || {
+                    la.colher()?;
+                    Ok(la.chegou.is_empty())
+                },
+            )?;
+            fim_do_kernel(&fim, "concluido; ida 5; volta 0; desc 0")?;
+            // Só então o fim sai ao par; o fluxo concluído acaba sem fechar.
+            match Mensagem::ler(&la.mensagem()?) {
+                Some(Mensagem::Fim) => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("o fim daqui nao chegou ao par depois de gravado");
+                }
+            }
+            if la.esperar_o_fim()?.is_some() {
+                return Err("o fluxo concluido pela sessao terminou com fechar");
+            }
+            // A operação do dono que vem depois ouve o fim — e vem depois
+            // dele na cadeia.
+            recusado_com(
+                &ler(b.quem(), &id, 10),
+                "CONFLICT",
+                motivo::CONCLUIDO,
+                "a leitura depois do fim nao ouviu o fluxo concluido",
+            )?;
+            let recurso = format!("fluxo:{id}");
+            let lidas = registros_depois(antes, |e| {
+                e.metodo == "stream.read" && e.recurso == recurso && e.codigo == Codigo::Conflict
+            });
+            if lidas.is_empty() || lidas.iter().any(|(s, _)| *s < fim_seq) {
+                crate::log_error!("teste", "fim {}: {:?}", fim_seq, lidas);
+                return Err("a operacao do dono que ouviu o fim veio antes dele na cadeia");
+            }
+            nada_vivo("o fluxo concluido pela sessao ficou vivo")?;
+            // Saindo: o fecho de quem saiu com tudo dito.
+            let antes = crate::autorizacao::ultimo_registro();
+            let r = fs_pedir(
+                b.quem(),
+                "stream.open",
+                &format!(
+                    r#"{{"endpoint":"e0e0e0e0e0e0e0e0:3","intent":"{INTENCAO}","device":"dispositivo:{NOME_DO_PAR}"}}"#
+                ),
+            );
+            feito(&r, "o pedido de fluxo ao par nao passou")?;
+            let id = fs_texto(&r, "stream").ok_or("sem id")?;
+            let n = crate::fluxo::numero_de_teste(&id).ok_or("o id nao e deste boot")?;
+            lancar_a_sessao_saindo(n)?;
+            let mut par = ParQueAceita::novo(DO_PAR);
+            par.aceitar_o_aperto()?;
+            let _abrir = par.mensagem()?;
+            par.mandar(&Mensagem::Aceito("e0e0e0e0e0e0e0e0:9"))?;
+            esperar_no_par(|| estado(b.quem(), &id).0.as_deref() == Some("open"), TETO)
+                .map_err(|_| "o fluxo nao abriu com o aceito")?;
+            escrito(
+                &escrever(b.quem(), &id, b"tudo dito"),
+                9,
+                "a ponta daqui nao escreveu no fluxo ao par",
+            )?;
+            match Mensagem::ler(&par.mensagem()?) {
+                Some(Mensagem::Dados(d)) if d == b"tudo dito" => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("o par nao recebeu o que a ponta daqui escreveu");
+                }
+            }
+            let (_, fim) = concluido_na_ordem(
+                n,
+                &id,
+                antes,
+                None,
+                || {
+                    feito(
+                        &sobre(b.quem(), "stream.close", &id),
+                        "o fecho daqui nao passou",
+                    )
+                },
+                || com_linha(|l| l.para_la.is_empty()).ok_or("sem linha"),
+            )?;
+            fim_do_kernel(&fim, "fechado pela ponta; ida 9; volta 0; desc 0")?;
+            // Só então o fim sai ao par, e o fecho atrás dele.
+            match Mensagem::ler(&par.mensagem()?) {
+                Some(Mensagem::Fim) => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("o fim do fecho daqui nao chegou ao par depois de gravado");
+                }
+            }
+            match Mensagem::ler(&par.mensagem()?) {
+                Some(Mensagem::Fechar(m)) if m == motivo::FECHADO => {}
+                outra => {
+                    crate::log_error!("teste", "{:?}", outra);
+                    return Err("o fecho daqui nao chegou ao par com o motivo");
+                }
+            }
+            esperar_no_par(|| com_linha(|l| l.acabou).unwrap_or(true), TETO)
+                .map_err(|_| "a sessao daqui nao acabou depois do fecho")?;
+            nada_vivo("o fluxo fechado pela ponta ficou vivo")
+        })();
+        crate::fluxo::desarmar_de_teste();
         encerrar_todas(r, &[&b])
     })
 }

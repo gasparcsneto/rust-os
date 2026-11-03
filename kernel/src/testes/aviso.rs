@@ -3203,6 +3203,11 @@ pub(super) fn aviso_o_fim_por_fora_vai_a_cadeia_antes_de_acordar() -> Resultado 
                 Some(false) => return Err("o fim por fora acordou antes de ir a cadeia"),
                 None => return Err("o fim por fora nao acordou ninguem"),
             }
+            // E foi gravado com a ordem das gravações na mão: a operação do
+            // dono que entra na ordem não fica entre o fim e a cadeia.
+            if crate::fluxo::fim_gravado_na_ordem_de_teste() != Some(true) {
+                return Err("o fim por fora foi gravado sem a ordem das gravacoes");
+            }
             b.esperar_aviso(desde, "fluxo", n, malha::FIM)
         })();
         encerrar_todos(r, &[&a, &b])

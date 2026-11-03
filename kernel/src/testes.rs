@@ -37213,6 +37213,10 @@ static CASOS: &[Caso] = &[
         f: fluxo::par::fluxo_o_replay_nao_abre,
     },
     Caso {
+        nome: "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem",
+        f: fluxo::par::fluxo_o_fim_da_sessao_na_ordem,
+    },
+    Caso {
         nome: "aviso: o dado avisa uma vez",
         f: aviso::aviso_o_dado_avisa_uma_vez,
     },
