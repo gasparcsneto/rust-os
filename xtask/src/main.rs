@@ -10397,25 +10397,41 @@ pub(crate) fn clicar_em(
     );
     qmp_eventos(&mut escrita, &mut leitor, &absoluto, "abs")?;
     std::thread::sleep(Duration::from_millis(150));
-    // O relativo anda a diferença em passos de até cem — ver `sob_mouse`.
-    let (px, py) = ponteiro(&pedir("display.info")?);
-    let (mut faltam_x, mut faltam_y) = (x as i64 - px, y as i64 - py);
-    while faltam_x != 0 || faltam_y != 0 {
-        let (passo_x, passo_y) = (faltam_x.clamp(-100, 100), faltam_y.clamp(-100, 100));
-        let relativo = format!(
-            r#"{{"type":"rel","data":{{"axis":"x","value":{passo_x}}}}},{{"type":"rel","data":{{"axis":"y","value":{passo_y}}}}}"#
-        );
-        if !qmp_eventos(&mut escrita, &mut leitor, &relativo, "rel")? {
+    // O relativo anda a diferença em passos de até cem — ver `sob_mouse`. O
+    // mouse do emulador perde movimento com a máquina ocupada — duas de pé
+    // no mesmo hospedeiro, como o teclado perde tecla —: o ponteiro que não
+    // chega anda de novo o que falta, de onde parou, até três vezes.
+    let chegou = |(px, py): (i64, i64)| px.abs_diff(x as i64) <= 2 && py.abs_diff(y as i64) <= 2;
+    'andar: for _ in 0..3 {
+        let (px, py) = ponteiro(&pedir("display.info")?);
+        if chegou((px, py)) {
             break;
         }
-        faltam_x -= passo_x;
-        faltam_y -= passo_y;
-        std::thread::sleep(Duration::from_millis(30));
+        let (mut faltam_x, mut faltam_y) = (x as i64 - px, y as i64 - py);
+        while faltam_x != 0 || faltam_y != 0 {
+            let (passo_x, passo_y) = (faltam_x.clamp(-100, 100), faltam_y.clamp(-100, 100));
+            let relativo = format!(
+                r#"{{"type":"rel","data":{{"axis":"x","value":{passo_x}}}}},{{"type":"rel","data":{{"axis":"y","value":{passo_y}}}}}"#
+            );
+            if !qmp_eventos(&mut escrita, &mut leitor, &relativo, "rel")? {
+                break 'andar;
+            }
+            faltam_x -= passo_x;
+            faltam_y -= passo_y;
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let ate = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < ate {
+            if chegou(ponteiro(&pedir("display.info")?)) {
+                break 'andar;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
     let limite = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         let (px, py) = ponteiro(&pedir("display.info")?);
-        if px.abs_diff(x as i64) <= 2 && py.abs_diff(y as i64) <= 2 {
+        if chegou((px, py)) {
             break;
         }
         if std::time::Instant::now() >= limite {
