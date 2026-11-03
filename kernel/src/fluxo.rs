@@ -558,9 +558,10 @@ fn auditar_encerrados(epoca: &[u8; 8], es: &[Encerramento]) {
 }
 
 /// Encerramentos feitos com a tabela na mão: grava, e só então acorda —
-/// quem o fim acorda opera depois dele na cadeia. As operações do processo
-/// chamam isto com a ordem das gravações na mão; o envio da sessão com o
-/// par, sem ela (ver os limites do aviso em `docs/SDK.md`).
+/// quem o fim acorda opera depois dele na cadeia. Só as operações do
+/// processo chamam isto, com a ordem das gravações na mão; os fins por fora
+/// e os que a sessão com o par conclui gravam com [`gravar_na_ordem`] e
+/// acordam com [`acordar_gravados`].
 fn depois(epoca: [u8; 8], es: Vec<Encerramento>, wakers: Vec<Waker>) {
     auditar_encerrados(&epoca, &es);
     acordar(wakers);
@@ -1018,14 +1019,21 @@ static FIM_CONFERIDO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU
 #[cfg(feature = "modo-teste")]
 static FIM_GRAVADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Só para a suíte: como o `stream.end` do fluxo a conferir foi gravado,
+/// antes de acordar quem espera — 1, com a ordem das gravações na mão de
+/// quem gravou; 2, sem ela; 0, ainda não foi.
+#[cfg(feature = "modo-teste")]
+static FIM_NA_ORDEM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Só para a suíte: na hora de acordar quem espera pelo fim do fluxo `n`
 /// ([`acordar_gravados`]), confere se o `stream.end` dele já está na
-/// cadeia.
+/// cadeia — e, quando ele é gravado, se com a ordem das gravações na mão.
 #[cfg(feature = "modo-teste")]
 pub fn conferir_o_fim_na_cadeia_de_teste(n: u64) {
     use core::sync::atomic::Ordering;
     FIM_CONFERIDO.store(0, Ordering::Release);
     FIM_GRAVADO.store(false, Ordering::Release);
+    FIM_NA_ORDEM.store(0, Ordering::Release);
     FIM_A_CONFERIR.store(n.saturating_add(1), Ordering::Release);
 }
 
@@ -1040,11 +1048,27 @@ pub fn fim_na_cadeia_ao_acordar_de_teste() -> Option<bool> {
     }
 }
 
-/// Só para a suíte: o `stream.end` do fluxo `id` acabou de ser gravado.
+/// Só para a suíte: se o `stream.end` do fluxo de
+/// [`conferir_o_fim_na_cadeia_de_teste`] foi gravado, antes de acordar quem
+/// espera, com a ordem das gravações na mão — `Some(true)` —, sem ela —
+/// `Some(false)` —, ou se não foi gravado antes de acordar — `None`.
+#[cfg(feature = "modo-teste")]
+pub fn fim_gravado_na_ordem_de_teste() -> Option<bool> {
+    match FIM_NA_ORDEM.load(core::sync::atomic::Ordering::Acquire) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Só para a suíte: o `stream.end` do fluxo `id` acabou de ser gravado — e
+/// fica anotado se quem o gravou tinha a ordem das gravações na mão.
 #[cfg(feature = "modo-teste")]
 fn marcar_o_fim_gravado(id: u64) {
     use core::sync::atomic::Ordering;
     if FIM_A_CONFERIR.load(Ordering::Acquire) == id.saturating_add(1) {
+        let na_ordem = crate::persistencia::ordem_na_mao_sem_trava();
+        FIM_NA_ORDEM.store(if na_ordem { 1 } else { 2 }, Ordering::Release);
         FIM_GRAVADO.store(true, Ordering::Release);
     }
 }
@@ -1074,6 +1098,7 @@ pub fn desarmar_de_teste() {
     FIM_NO_ENCERRADO.store(false, Ordering::Release);
     FIM_A_CONFERIR.store(0, Ordering::Release);
     FIM_GRAVADO.store(false, Ordering::Release);
+    FIM_NA_ORDEM.store(0, Ordering::Release);
 }
 
 fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {
