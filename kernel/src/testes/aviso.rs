@@ -213,6 +213,19 @@ impl Avisado {
         Ok(())
     }
 
+    /// Espera o programa ocioso: o canal dele vazio, e ele parado nele. O
+    /// `avisado` diz cada aviso depois de tirá-lo do canal, e só volta a
+    /// esperar nele depois de dizer tudo o que tirou: ocioso, nenhum aviso
+    /// já publicado sai mais no log — o que sair depois de uma marca tomada
+    /// agora é aviso novo.
+    pub(in crate::testes) fn esperar_ocioso(&self) -> Resultado {
+        esperar_ate(
+            || crate::eventos::estado(&self.canal).is_some_and(|e| e.na_fila == 0 && e.esperando),
+            TETO_DA_MALHA,
+        )
+        .map_err(|_| "o avisado nao ficou ocioso")
+    }
+
     /// Os avisos do objeto `tipo` `numero` que ele disse desde `desde`,
     /// depois do sossego: o que veio, e só.
     pub(in crate::testes) fn avisos_depois_do_sossego(
@@ -273,6 +286,23 @@ pub(in crate::testes) fn com_os_avisos(f: impl FnOnce() -> Resultado) -> Resulta
 fn desarmar_os_pontos() {
     crate::aviso::desarmar_de_teste();
     crate::fluxo::desarmar_de_teste();
+}
+
+/// O pedido de fluxo no endpoint `e` de `b` avisado — publicado pelo
+/// kernel e dito por `b` desde `desde` — e `b` ocioso. Os fluxos do preparo
+/// também avisaram o pedido de cada um, e `b` diz cada aviso depois de
+/// tirá-lo do canal: sem o ocioso, o aviso de um deles, ou o do pedido,
+/// podia sair no log depois de uma marca tomada em seguida, e passar pelo
+/// aviso que a marca procura (CI 413). Daqui em diante, um aviso do endpoint
+/// no log é um aviso novo.
+fn pedido_avisado_e_dito(b: &Avisado, desde: u64, e: u64) -> Resultado {
+    esperar_ate(
+        || crate::aviso::situacao_de_teste(Objeto::Endpoint(e)) == Some(Situacao::Avisado),
+        TETO_DA_MALHA,
+    )
+    .map_err(|_| "o pedido no endpoint nao foi avisado")?;
+    b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+    b.esperar_ocioso()
 }
 
 /// O número de um fluxo que o `avisado` disse — `abri <n>`, `aceitei <n>`.
@@ -2506,7 +2536,7 @@ pub(super) fn aviso_a_recusa_do_comando_espaca_o_aviso() -> Resultado {
                 crate::log_error!("teste", "{}", pedido);
                 "o pedido acima da cota de quem aceita nao ficou esperando"
             })?;
-            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            pedido_avisado_e_dito(&b, desde, e)?;
             // Duas recusas seguidas, sem aviso entre elas: o pedido avisa
             // de novo pelo coletor, e não na hora — e a segunda recusa não
             // empurra o rearme que a primeira marcou: um segundo depois da
@@ -2575,6 +2605,7 @@ pub(super) fn aviso_a_recusa_do_comando_espaca_o_aviso() -> Resultado {
             }
             // Um fluxo de `b` acaba: a vaga avisa o pedido na hora.
             let (fechado, _) = &abertos[0];
+            b.esperar_ocioso()?;
             let desde = crate::log::total_emitidos();
             let antes = crate::tempo::uptime_ms();
             feito(
@@ -2640,7 +2671,7 @@ pub(super) fn aviso_depois_da_recusa_so_o_novo_avisa() -> Resultado {
                 crate::log_error!("teste", "{}", pedido);
                 return Err("o pedido acima da cota de quem aceita nao ficou esperando");
             }
-            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            pedido_avisado_e_dito(&b, desde, e)?;
             // Duas recusas, cada uma com o aviso de novo no rearme; a
             // terceira põe o rearme quatro segundos adiante.
             for _ in 0..2 {
@@ -2956,7 +2987,7 @@ pub(super) fn aviso_a_vaga_no_meio_da_recusa() -> Resultado {
                 crate::log_error!("teste", "{}", pedido);
                 return Err("o pedido acima da cota de quem aceita nao ficou esperando");
             }
-            b.esperar_aviso(desde, "endpoint", e, malha::PEDIDO)?;
+            pedido_avisado_e_dito(&b, desde, e)?;
             // A vaga chega no meio da recusa: o pedido avisa na hora.
             let marca = crate::log::total_emitidos();
             crate::aviso::vaga_na_proxima_recusa_de_teste(b.fio());
