@@ -772,7 +772,16 @@ agente chegaria à senha atual ou à nova —, **sobreviveu**: nenhum caso
 pedia pela árvore nessas linhas. O caso da troca passou a conferir a regra
 de fora no físico, e o do Terminal, a pedir a troca pela janela e
 conferir as três recusas na senha atual: a N93, rodada de novo, foi
-reprovada pelos dois.
+reprovada pelos dois. E o adversário ξ achou que o valor do `set_value`
+no campo do Terminal ia cru ao programa, com o `\n` e o Enter de qualquer
+sessão dentro — um agente executava a linha como a serial, o `sistema`,
+ou como a pessoa. O campo passou a ter a regra do físico para o que se
+digita, e o Enter de um agente só vale quando o kernel entregou o
+`confirm` daquela sessão (ver [Consoles](../README.md#consoles)). A N94
+tira a regra, a N96 deixa o Enter valer sem pedido, a N97 tira o pedido
+do `confirm` legítimo: as três reprovadas. A N95 tira o filtro do
+programa do Terminal e sobrevive — o kernel recusa antes; o filtro é
+defesa em profundidade.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -867,6 +876,10 @@ reprovada pelos dois.
 | N91 | fora do SDK: o texto que se escreve nas linhas da troca da senha na conta do console (a M34 do B4, com o texto de hoje) | `senha: a pessoa troca a propria, e a antiga nao entra mais` |
 | N92 | fora do SDK: a regra de fora da linha da pessoa só no nome e na senha do login | `pareamento: so pelo teclado` |
 | N93 | fora do SDK: a regra de fora da linha da pessoa sem as linhas da troca da senha | `senha: a pessoa troca a propria, e a antiga nao entra mais`, `terminal: o agente nao edita nem confirma a linha da senha` — depois do reforço |
+| N94 | fora do SDK: o campo do Terminal sem a regra do que se digita — o `set_value` com o `\n` ou o Enter de uma sessão passa | `terminal: o agente nao edita nem confirma a linha da senha` |
+| N95 | fora do SDK: o Terminal que digita do pedido da árvore qualquer caractere | **sobreviveu**: o kernel recusa o valor antes; o filtro do programa é defesa em profundidade |
+| N96 | fora do SDK: o Enter de um agente que vale sem pedido — o número dentro do caractere de novo como autoridade | `terminal: o Enter de agente que a arvore nao pediu e descartado` |
+| N97 | fora do SDK: o `confirm` de um agente no Terminal que não pede o Enter dele | `terminal: o agente nao edita nem confirma a linha da senha` |
 
 ## Medidas
 

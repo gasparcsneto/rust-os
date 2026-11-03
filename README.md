@@ -1930,10 +1930,18 @@ pseudo-terminal vem pela fila do teclado, e sem ele um comando que o
 agente executou pelo Terminal ficaria no log como da pessoa. O caso da
 suíte e a fumaça conferem os dois: o agente digita, esvazia, digita de
 novo e executa, e o log diz `executado: agent.ping (agente 3)` — o número
-da sessão do agente, que o Terminal leva junto com o Enter. Um processo
-com o pseudo-terminal pode escrever o Enter do agente sem ter sido pedido
-— atribuir ao agente o que a pessoa fez é o erro menos grave, e o registro
-que a pessoa confira é da fase 13.
+da sessão do agente, que o Terminal leva junto com o Enter. O número não
+é autoridade: o console só aceita o Enter da sessão `N` quando o kernel
+entregou ao Terminal dele o `confirm` daquela sessão — conferido pelo gate
+e pela regra da linha —, uma vez; escrito por conta própria por quem tem o
+pseudo-terminal, ele é descartado, e o log diz. E o valor de um
+`set_value` no campo do Terminal só leva o que uma pessoa digitaria, como
+na linha do físico: com um `\n` ou com o Enter de uma sessão dentro, é
+recusado quando a ação entra. Antes das duas regras, o Terminal digitava o
+valor como vinha, e um agente com `ui.act` executava a linha em nome de
+outro — como a serial, o `sistema`, pelo Enter da sessão 0, ou como a
+Pessoa entrada no console, pelo `\n` (achado do adversário ξ; ver
+[Consoles](#consoles)).
 
 Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
 várias só depois de o caso ser reforçado. Seis das oito da
@@ -4934,7 +4942,13 @@ Sem ganho a medir, não há o que pagar com esse risco.
   renováveis, e as teclas da Pessoa nela são `CONFLICT` enquanto durar —
   sem ler nem escrever nada, e gravado. Recusá-lo ali daria à Pessoa uma
   prioridade que a regra da coordenação ("sem prioridade entre eles") não
-  dá: fica para a mesma decisão.
+  dá: fica para a mesma decisão. Com ela, duas mais, achadas pelo
+  adversário ξ: o `press` de um agente na caixa de fechar do Terminal
+  fecha o console e encerra a sessão da Pessoa que está nele — o `logout`
+  por outra porta, gravado como dela; e a senha digitada adiantado, antes
+  de o console pedi-la (com ele ocupado), entra no histórico do teclado,
+  que só o `sistema` lê — o histórico grava a tecla quando ela chega, e o
+  console passa a pedir a senha quando trata o Enter.
 
 ## O tempo
 
@@ -7552,7 +7566,8 @@ fica vazio —, e o buffer dela é apagado depois da conferência; num
 Terminal, o programa também zera o que guarda dela no caminho ao
 pseudo-terminal — a fila do que espera, o bloco que ela larga ao crescer, a
 tecla já tratada. Enquanto um console pede senha, nada entra no histórico
-que `keyboard.read` devolve: o
+que `keyboard.read` devolve (a senha digitada antes de ele pedir, com ele
+ocupado, entra: ver [Decisões pendentes](#decisões-pendentes)): o
 kernel não sabe para qual janela uma tecla vai virar senha, então não grava
 tecla nenhuma. Um agente não edita — nem para esvaziar — nem confirma a
 linha que pede nome ou senha, e não confirma `login` nem `logout`: o login
@@ -7567,6 +7582,19 @@ Enter do agente o console reconhece, e com ele não confirma essas linhas).
 A decisão do `ui.act` continua a do gate, gravada; a recusa é da linha, e
 vai para o log. Fica uma corrida com o Enter da Pessoa: ver [Decisões
 pendentes](#decisões-pendentes).
+
+Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
+pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
+no físico, desde sempre; no campo de um Terminal, desde a análise do
+adversário ξ, que achou o valor passando inteiro ao programa, com o `\n`
+— o Enter da Pessoa — e o Enter de qualquer sessão dentro. Um agente
+`operador` pedia `set_value` com `agent.ping` seguido do Enter da sessão 0
+e o comando rodava como a serial, o `sistema`; com o `\n`, rodava como a
+Pessoa entrada no console; com `login\nnome\nsenha\n`, entrava por ela. O
+valor com esses caracteres é recusado com o motivo do físico, quando a
+ação entra; e o Enter de um agente só vale quando o kernel entregou ao
+Terminal o `confirm` daquela sessão — ver "O Terminal, pelo agente", em
+[Userspace](#userspace).
 
 **Trocar a própria senha.** `senha` pede a atual, a nova e a nova de novo,
 pelas mesmas regras da senha do login — sem eco, fora da árvore e do
@@ -9243,7 +9271,12 @@ duas do B4 que tiravam a conta de dentro nas linhas da troca da senha —
 reprovadas —, e as N92 e N93 estreitam a regra de fora: a N92, só no
 login, reprovada; a N93, sem as linhas da troca, sobreviveu até os casos
 da troca e do Terminal pedirem pela árvore nessas linhas, e então foi
-reprovada.
+reprovada. E as do X1 do adversário ξ (ver [Consoles](#consoles)): a N94
+tira do campo do Terminal a regra do que se digita, a N96 deixa o Enter de
+um agente valer sem pedido e a N97 tira o pedido do `confirm` legítimo —
+as três reprovadas —; a N95 tira o filtro do programa do Terminal e
+sobrevive: o kernel recusa o valor antes, e o filtro é só defesa em
+profundidade.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9290,6 +9323,7 @@ reprovada.
 | a tabela de canais de volta a 32 (N82), ou com dois canais por vaga de trabalho (N83); a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos (N87) | "eventos: o pior caso dos processos cabe na tabela" |
 | o `escutar` sem o teto por processo (N86) | "eventos: o terceiro canal do processo e recusado", "eventos: o pior caso dos processos cabe na tabela" |
 | fora do SDK: o campo da janela do Terminal sem a regra da linha da pessoa (N88); o `cancel` da árvore que esvazia a linha da senha do físico (N89) | "terminal: o agente nao edita nem confirma a linha da senha"; "consoles: login e logout" |
+| fora do SDK: o campo do Terminal sem a regra do que se digita — o `set_value` com o Enter da pessoa ou de uma sessão (N94); o Enter de um agente que vale sem pedido (N96); o `confirm` do agente que não pede o Enter (N97) | "terminal: o agente nao edita nem confirma a linha da senha"; "terminal: o Enter de agente que a arvore nao pediu e descartado" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
