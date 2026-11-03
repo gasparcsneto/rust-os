@@ -54,9 +54,10 @@ pub(in crate::testes) const MANDAR_LACO: i64 = 17;
 pub(in crate::testes) const RECEBER_LACO: i64 = 18;
 pub(in crate::testes) const MANDAR_BLOQ: i64 = 19;
 pub(in crate::testes) const RECEBER_BLOQ: i64 = 20;
-const OUTRO_CANAL: i64 = 21;
-const FECHAR_OUTRO: i64 = 22;
+pub(in crate::testes) const OUTRO_CANAL: i64 = 21;
+pub(in crate::testes) const FECHAR_OUTRO: i64 = 22;
 const DESCARTAR: i64 = 23;
+pub(in crate::testes) const TERCEIRO_CANAL: i64 = 24;
 
 /// O buffer de um sentido.
 const BUFFER: usize = politica::fluxo::BUFFER_DO_SENTIDO;
@@ -1737,7 +1738,7 @@ pub(super) fn aviso_a_morte_e_o_canal_sem_ouvinte() -> Resultado {
                 let mut da_suite: Vec<crate::eventos::Chave> = Vec::new();
                 while !da_suite.iter().any(|k| k.vaga == vaga) {
                     let nome = format!("teste-vaga-{}", da_suite.len());
-                    match crate::eventos::escutar(nome.as_bytes(), ouvinte) {
+                    match crate::eventos::escutar_sem_teto(nome.as_bytes(), ouvinte) {
                         Ok(k) => da_suite.push(k),
                         Err(_) => break,
                     }

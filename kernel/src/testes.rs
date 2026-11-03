@@ -4212,6 +4212,272 @@ fn eventos_canal_dorme_entrega_e_recusa() -> Resultado {
     Ok(())
 }
 
+/// O teto da chamada: um processo escuta no máximo
+/// [`crate::eventos::CANAIS_POR_PROCESSO`] canais.
+///
+/// O `avisado` tem o laço e abre o segundo; o terceiro é recusado com
+/// `OCUPADO`, com vaga na tabela e o nome livre — a recusa é o teto, e o
+/// terceiro recusado não abre canal nenhum. Com o segundo fechado, o mesmo
+/// terceiro passa. É o teto que sustenta o pior caso da tabela — ver
+/// [`eventos_o_pior_caso_dos_processos_cabe_na_tabela`] —: sem ele, um
+/// processo sozinho a encheria. Antes deste caso, nenhum pedia um terceiro
+/// nome com dois abertos, e tirar a conferência passava pela suíte.
+fn eventos_o_terceiro_canal_do_processo_e_recusado() -> Resultado {
+    use crate::testes::aviso::{
+        Avisado, FECHAR_OUTRO, OUTRO_CANAL, TERCEIRO_CANAL, com_os_avisos, encerrar_todos, pessoa,
+    };
+    use protocolo::usuario::erro;
+
+    // O que o `avisado` disse depois do passo, em número: o descritor, ou o
+    // erro da chamada.
+    fn dito_em_numero(a: &Avisado, desde: u64, passo: &str) -> Result<i64, &'static str> {
+        a.dito(desde, passo)?
+            .trim()
+            .parse()
+            .map_err(|_| "o avisado nao disse um numero")
+    }
+
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4540);
+        let a = Avisado::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let desde = a.ditar(OUTRO_CANAL, 0, 0)?;
+            let outro = dito_em_numero(&a, desde, "outro ")?;
+            if outro < 0 {
+                crate::log_error!("teste", "o segundo canal: {}", outro);
+                return Err("o segundo canal do processo foi recusado");
+            }
+            let terceiro = alloc::format!("teste-avisado-{}-3", a.fio());
+            if crate::eventos::abertos_de_teste() >= crate::eventos::CANAIS
+                || crate::eventos::vaga_de_teste(&terceiro).is_some()
+            {
+                return Err("a tabela estava cheia, ou o nome do terceiro, tomado");
+            }
+            let desde = a.ditar(TERCEIRO_CANAL, 0, 0)?;
+            let recusa = dito_em_numero(&a, desde, "terceiro ")?;
+            if recusa != erro::OCUPADO {
+                crate::log_error!("teste", "o terceiro canal: {}", recusa);
+                return Err("o terceiro canal do processo nao foi recusado");
+            }
+            let dele = crate::eventos::canais_de_teste(a.fio());
+            if crate::eventos::vaga_de_teste(&terceiro).is_some()
+                || dele != crate::eventos::CANAIS_POR_PROCESSO
+            {
+                return Err("a recusa abriu o terceiro, ou tirou um dos dois");
+            }
+            // Com o segundo fechado, o mesmo terceiro passa: era o teto.
+            let desde = a.ditar(FECHAR_OUTRO, outro, 0)?;
+            if dito_em_numero(&a, desde, "fechei_outro ")? != 0 {
+                return Err("o avisado nao fechou o segundo canal");
+            }
+            let desde = a.ditar(TERCEIRO_CANAL, 0, 0)?;
+            let descritor = dito_em_numero(&a, desde, "terceiro ")?;
+            if descritor < 0 {
+                crate::log_error!("teste", "o terceiro, com o segundo fechado: {}", descritor);
+                return Err("com o segundo fechado, o terceiro canal nao passou");
+            }
+            Ok(())
+        })();
+        encerrar_todos(r, &[&a])
+    })
+}
+
+/// O pior caso dos processos cabe na tabela de canais: todo fio que o
+/// escalonador comporta, com os canais que o teto da chamada lhe dá, e
+/// ainda sobra vaga para mais um laço.
+///
+/// # As duas pernas
+///
+/// - **pela chamada**: quatro `avisado`s, cada um com o laço e o segundo
+///   canal — dois por processo, pelo `escutar` de verdade;
+/// - **pela tabela de fios**: o resto das vagas do escalonador, com fios do
+///   kernel até `criar` recusar por falta de vaga, cada um pedindo três
+///   canais pelo [`crate::eventos::escutar`] da chamada — o teto e a
+///   varredura são os dela: dois passam, e o terceiro ouve o teto. É o
+///   equivalente honesto dos processos que a suíte não lança — a cota de
+///   cada titular (32 do sistema, 8 de cada sessão) e o custo de lançar
+///   noventa programas no ARM —, e o que ele prova é a conta: todo fio
+///   vivo, com o teto dele, cabe.
+///
+/// Com a tabela de fios cheia, nenhum fio ouviu `Ocupado` — a tabela de
+/// canais sem vaga —, e um `escutar` a mais, o laço de alguém, passa, com
+/// uma pergunta só ao escalonador na varredura dele. Com a tabela de 32
+/// (N82), ou com dois canais por vaga de trabalho, 64 (N83), os fios ouvem
+/// `Ocupado` antes de a tabela de fios encher; com a pergunta por canal no
+/// lugar da fotografia (N87), a varredura da tabela cheia pergunta uma vez
+/// por canal.
+fn eventos_o_pior_caso_dos_processos_cabe_na_tabela() -> Resultado {
+    use crate::eventos::{CANAIS_POR_PROCESSO, Recusa};
+    use crate::testes::aviso::{Avisado, OUTRO_CANAL, com_os_avisos, encerrar_todos, pessoa};
+    use core::sync::atomic::AtomicUsize;
+
+    // Os processos da perna pela chamada.
+    const PELA_CHAMADA: usize = 4;
+
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    static PRONTOS: AtomicUsize = AtomicUsize::new(0);
+    static VIVOS: AtomicUsize = AtomicUsize::new(0);
+    static ABERTOS: AtomicUsize = AtomicUsize::new(0);
+    static NO_TETO: AtomicUsize = AtomicUsize::new(0);
+    static SEM_VAGA: AtomicUsize = AtomicUsize::new(0);
+    static OUTRAS: AtomicUsize = AtomicUsize::new(0);
+
+    // Um fio que escuta como um processo: pelo `escutar` da chamada, com o
+    // teto, e um nome a mais que o teto. Fica com o que passou até a suíte
+    // soltar, e larga tudo antes de sair.
+    extern "C" fn ouvinte(_argumento: u64) -> ! {
+        let eu = crate::fios::id_atual();
+        let mut chaves = [None; CANAIS_POR_PROCESSO + 1];
+        for (k, lugar) in chaves.iter_mut().enumerate() {
+            let nome = alloc::format!("teste-pior-{eu}-{k}");
+            match crate::eventos::escutar(nome.as_bytes(), eu) {
+                Ok(chave) => {
+                    *lugar = Some(chave);
+                    ABERTOS.fetch_add(1, SeqCst);
+                }
+                Err(Recusa::TetoDoOuvinte) => {
+                    NO_TETO.fetch_add(1, SeqCst);
+                }
+                Err(Recusa::Ocupado) => {
+                    SEM_VAGA.fetch_add(1, SeqCst);
+                }
+                Err(Recusa::NomeInvalido) => {
+                    OUTRAS.fetch_add(1, SeqCst);
+                }
+            }
+        }
+        PRONTOS.fetch_add(1, SeqCst);
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::ceder();
+        }
+        for chave in chaves.into_iter().flatten() {
+            crate::eventos::largar(chave, eu);
+        }
+        VIVOS.fetch_sub(1, SeqCst);
+        crate::fios::terminar()
+    }
+
+    // A perna pela tabela de fios: enche a do escalonador de `ouvinte`s,
+    // confere a conta, pede o laço a mais, e solta tudo antes de concluir —
+    // a suíte segue precisando de vagas de fio.
+    fn pela_tabela_de_fios() -> Resultado {
+        for contador in [&PRONTOS, &VIVOS, &ABERTOS, &NO_TETO, &SEM_VAGA, &OUTRAS] {
+            contador.store(0, SeqCst);
+        }
+        SOLTAR.store(false, SeqCst);
+        let recolhidos_antes = crate::fios::recolhidos();
+        let mut criados = 0usize;
+        let mut outra_recusa = None;
+        for _ in 0..crate::fios::MAX_FIOS {
+            match crate::fios::criar("teste-pior", ouvinte, 0) {
+                Ok(_) => {
+                    criados += 1;
+                    VIVOS.fetch_add(1, SeqCst);
+                }
+                Err(motivo) if motivo.contains("vaga") => break,
+                Err(motivo) => {
+                    outra_recusa = Some(motivo);
+                    break;
+                }
+            }
+        }
+        let r = (|| -> Resultado {
+            if let Some(motivo) = outra_recusa {
+                crate::log_error!("teste", "a criacao recusou: {}", motivo);
+                return Err("um fio nao nasceu por outro motivo que a falta de vaga");
+            }
+            if criados == 0 {
+                return Err("nenhum fio nasceu: a tabela de fios nao foi enchida");
+            }
+            esperar_andando(
+                || PRONTOS.load(SeqCst) == criados,
+                || PRONTOS.load(SeqCst) as u64,
+                1500,
+                30_000,
+            )
+            .map_err(|_| "os fios nao pediram os canais deles")?;
+            let (abertos, no_teto) = (ABERTOS.load(SeqCst), NO_TETO.load(SeqCst));
+            let (sem_vaga, outras) = (SEM_VAGA.load(SeqCst), OUTRAS.load(SeqCst));
+            crate::log_info!(
+                "teste",
+                "{} fios ate a tabela de fios encher: {} canais, {} no teto, {} sem vaga; {} de {} abertos",
+                criados,
+                abertos,
+                no_teto,
+                sem_vaga,
+                crate::eventos::abertos_de_teste(),
+                crate::eventos::CANAIS
+            );
+            if sem_vaga != 0 || outras != 0 {
+                return Err("a tabela de canais encheu antes da de fios");
+            }
+            if abertos != criados * CANAIS_POR_PROCESSO || no_teto != criados {
+                return Err("cada fio devia ter dois canais e o terceiro recusado");
+            }
+            // O laço de alguém ainda sobe, e a varredura dele, com a tabela
+            // cheia, pergunta uma vez só ao escalonador.
+            let eu = crate::fios::id_atual();
+            let _ = crate::eventos::mais_consultas_de_teste();
+            let laco = crate::eventos::escutar(b"teste-pior-laco", eu)
+                .map_err(|_| "com a tabela de fios cheia, o laco a mais nao subiu")?;
+            let consultas = crate::eventos::mais_consultas_de_teste();
+            crate::eventos::largar(laco, eu);
+            if consultas != 1 {
+                crate::log_error!("teste", "a varredura perguntou {} vezes", consultas);
+                return Err("a varredura nao perguntou uma vez so ao escalonador");
+            }
+            Ok(())
+        })();
+        SOLTAR.store(true, SeqCst);
+        let soltos = esperar_andando(
+            || VIVOS.load(SeqCst) == 0,
+            || VIVOS.load(SeqCst) as u64,
+            1500,
+            30_000,
+        )
+        .map_err(|_| "os fios que enchiam a tabela nao sairam");
+        let recolhidos = esperar_andando(
+            || crate::fios::recolhidos() >= recolhidos_antes + criados as u64,
+            crate::fios::recolhidos,
+            1500,
+            30_000,
+        )
+        .map_err(|_| "os fios que enchiam a tabela nao foram recolhidos");
+        r.and(soltos).and(recolhidos)
+    }
+
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 4550);
+        let antes = crate::eventos::abertos_de_teste();
+        let mut avisados: alloc::vec::Vec<Avisado> = alloc::vec::Vec::new();
+        let r = (|| -> Resultado {
+            for _ in 0..PELA_CHAMADA {
+                avisados.push(Avisado::lancar(bia)?);
+            }
+            for a in &avisados {
+                let desde = a.ditar(OUTRO_CANAL, 0, 0)?;
+                let outro: i64 = a
+                    .dito(desde, "outro ")?
+                    .trim()
+                    .parse()
+                    .map_err(|_| "o avisado nao disse o segundo descritor")?;
+                let dele = crate::eventos::canais_de_teste(a.fio());
+                if outro < 0 || dele != CANAIS_POR_PROCESSO {
+                    crate::log_error!("teste", "o segundo canal de {}: {}", a.fio(), outro);
+                    return Err("um processo nao ficou com os dois canais pela chamada");
+                }
+            }
+            pela_tabela_de_fios()
+        })();
+        let quem: alloc::vec::Vec<&Avisado> = avisados.iter().collect();
+        encerrar_todos(r, &quem)?;
+        // Os `avisado`s saem sem fechar: os canais deles voltam na
+        // varredura, e nada do caso fica na tabela.
+        esperar_cedendo(|| crate::eventos::abertos_de_teste() <= antes, 600)
+            .map_err(|_| "os canais do caso nao voltaram todos")
+    })
+}
+
 /// Uma superfície de processo: o que ele desenha aparece na tela, o `fork`
 /// não a leva ao filho, fechar a tira da tela e da memória, e a de um
 /// processo morto sai sozinha.
@@ -34477,6 +34743,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "eventos: o canal dorme, entrega e recusa",
         f: eventos_canal_dorme_entrega_e_recusa,
+    },
+    Caso {
+        nome: "eventos: o terceiro canal do processo e recusado",
+        f: eventos_o_terceiro_canal_do_processo_e_recusado,
+    },
+    Caso {
+        nome: "eventos: o pior caso dos processos cabe na tabela",
+        f: eventos_o_pior_caso_dos_processos_cabe_na_tabela,
     },
     Caso {
         nome: "superficies: o processo desenha, bifurca, fecha e morre",

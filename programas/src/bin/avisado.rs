@@ -50,6 +50,9 @@
 //!   ele nunca lê; diz `outro <descritor>`. [`FECHAR_OUTRO`] fecha o
 //!   descritor `b`; diz `fechei_outro <r>` — o canal fica sem ouvinte, com o
 //!   processo vivo.
+//! - [`TERCEIRO_CANAL`]: pede um terceiro canal, `teste-avisado-<id>-3`, e
+//!   diz `terceiro <descritor ou erro>` — com o laço e o segundo abertos, o
+//!   teto da chamada o recusa com `OCUPADO`.
 //!
 //! Cada falha diz o passo e o código, e o programa segue escutando. O
 //! [`tipo::ENCERRAR`] o encerra com [`CODIGO`] — também no meio de um passo
@@ -116,6 +119,7 @@ const RECEBER_BLOQ: i64 = 20;
 const OUTRO_CANAL: i64 = 21;
 const FECHAR_OUTRO: i64 = 22;
 const DESCARTAR: i64 = 23;
+const TERCEIRO_CANAL: i64 = 24;
 
 /// O teto do que um passo de um sentido lê: 4 MiB.
 const TETO: usize = 4 * 1024 * 1024;
@@ -434,6 +438,10 @@ impl Estado {
                 sistema::escutar(&format!("teste-avisado-{}-2", sistema::id()))
             ),
             FECHAR_OUTRO => diz!("fechei_outro {}", sistema::fechar(b.max(0) as u64)),
+            TERCEIRO_CANAL => diz!(
+                "terceiro {}",
+                sistema::escutar(&format!("teste-avisado-{}-3", sistema::id()))
+            ),
             outro => diz!("passo desconhecido {}", outro),
         }
     }

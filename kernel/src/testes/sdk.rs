@@ -654,14 +654,17 @@ pub(super) fn sdk_as_medidas_do_laco() -> Resultado {
 /// O nome do canal do laço é previsível — `laco-<id>` —, e outro processo
 /// pode tomá-lo antes: o laço tenta os seguintes, e o programa sobe. A
 /// suíte toma os nomes dos próximos ids antes de lançar o `eco-malha`, que
-/// sobe com o primeiro nome livre dele.
+/// sobe com o primeiro nome livre dele. Oito nomes de um fio só passam do
+/// teto da chamada: a suíte os toma sem ele.
 pub(super) fn sdk_o_laco_sobe_com_o_nome_tomado() -> Resultado {
     com_os_avisos(|| {
         let (_, bia) = pessoa("bia", 441);
         let eu = crate::fios::id_atual();
         let primeiro = crate::fios::proximo_id_de_teste();
         let tomados: Vec<crate::eventos::Chave> = (primeiro..primeiro + 8)
-            .filter_map(|id| crate::eventos::escutar(format!("laco-{id}").as_bytes(), eu).ok())
+            .filter_map(|id| {
+                crate::eventos::escutar_sem_teto(format!("laco-{id}").as_bytes(), eu).ok()
+            })
             .collect();
         let r = (|| -> Resultado {
             if tomados.len() != 8 {
