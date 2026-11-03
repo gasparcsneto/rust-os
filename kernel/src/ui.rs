@@ -549,22 +549,41 @@ fn executar(
         }
         // A janela de um Terminal: o campo é a linha do console dele, e o
         // que se pede nele o programa digita no pseudo-terminal, onde o
-        // console só vê caracteres — sem saber que vieram da árvore. A regra
-        // da linha da pessoa vale aqui como na do físico: a mesma, do
-        // interpretador, conferida quando a ação entra, e antes da conta,
-        // pelo motivo de lá — a recusa não arrenda o campo.
-        if let Some(console) = console_do_campo(id) {
-            if acao == Acao::Confirmar {
-                crate::interpretador::pode_confirmar_pela_arvore(console, origem)?;
-            } else {
-                crate::interpretador::pode_editar_pela_arvore(console)?;
+        // console só vê caracteres. As regras da linha do físico valem aqui
+        // inteiras, as mesmas, do interpretador: a da linha da pessoa, e a
+        // do que se digita — o valor de um `set_value` só com o que uma
+        // pessoa digitaria, sem o Enter dela nem o de outra sessão dentro.
+        // Conferidas quando a ação entra, e antes da conta, pelo motivo de
+        // lá: a recusa não arrenda o campo.
+        let console = console_do_campo(id);
+        if let Some(console) = console {
+            match (acao, valor) {
+                (Acao::Confirmar, _) => {
+                    crate::interpretador::pode_confirmar_pela_arvore(console, origem)?
+                }
+                (Acao::DefinirValor, Some(v)) => crate::interpretador::pode_definir_em(console, v)?,
+                _ => crate::interpretador::pode_editar_pela_arvore(console)?,
             }
         }
         match acao {
             Acao::Confirmar => confirmar()?,
             _ => editar()?,
         };
-        return agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into);
+        // O Enter que o Terminal vai digitar por este `confirm` de um agente:
+        // o console o espera, e só ele vale — ver
+        // `interpretador::pedir_enter_do_agente`.
+        let enter = match (console, acao, origem) {
+            (Some(console), Acao::Confirmar, Origem::Agente(sessao)) => {
+                crate::interpretador::pedir_enter_do_agente(console, sessao);
+                Some((console, sessao))
+            }
+            _ => None,
+        };
+        let r = agir_no_campo(id, do_processo, acao, valor, origem);
+        if let (Err(_), Some((console, sessao))) = (&r, enter) {
+            crate::interpretador::desistir_do_enter_do_agente(console, sessao);
+        }
+        return r.map_err(Into::into);
     }
     match acao {
         Acao::DefinirValor => {

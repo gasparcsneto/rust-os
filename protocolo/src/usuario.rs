@@ -658,10 +658,13 @@ pub mod terminal {
     /// privado do Unicode, como as teclas de função do kernel: nenhum
     /// teclado o produz.
     ///
-    /// Um processo com o pseudo-terminal pode escrevê-lo sem ter sido
-    /// pedido por um agente. Atribuir ao agente o que a pessoa fez é o erro
-    /// menos grave dos dois; o registro que a pessoa possa conferir é da
-    /// fase 12.
+    /// O número dentro dele não é autoridade: o interpretador só aceita o
+    /// Enter da sessão `N` num console quando o kernel entregou ao Terminal
+    /// dele o `confirm` daquela sessão — conferido pelo gate e pela regra
+    /// da linha. Escrito por conta própria por quem tem o pseudo-terminal, é
+    /// descartado, e o log diz. E o valor de um `set_value` não o leva: no
+    /// campo do Terminal, o kernel recusa o valor com o que uma pessoa não
+    /// digitaria — este caractere, o `\n` —, como na linha do físico.
     ///
     /// Um caractere por sessão, de U+F600 a U+F6FF.
     pub const fn confirmar_pelo_agente(sessao: u8) -> char {

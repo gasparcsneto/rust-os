@@ -237,6 +237,10 @@ struct Estado {
     /// pareamento que chega no meio escreve, e o prompt fica para o fim
     /// dela — ver [`aviso_do_pareamento`].
     executando: bool,
+    /// Os Enter de agente que a árvore entregou ao Terminal deste console e
+    /// que o pseudo-terminal ainda não trouxe — a sessão de cada um. Ver
+    /// [`pedir_enter_do_agente`].
+    enter_pedido: [Option<u8>; ENTER_PEDIDOS],
 }
 
 impl Estado {
@@ -257,6 +261,7 @@ impl Estado {
         nova: [0; LINHA_MAX],
         nova_tam: 0,
         executando: false,
+        enter_pedido: [None; ENTER_PEDIDOS],
     };
 
     /// Esquece a troca da própria senha em curso, e apaga as senhas que
@@ -542,6 +547,7 @@ pub fn abrir_console(console: Console) {
         e.abertura += 1;
         e.modo = Modo::Comando;
         e.nome_tam = 0;
+        e.enter_pedido = [None; ENTER_PEDIDOS];
         saidaln!(
             console,
             "Duke, {}. Ninguem entrou: `login` para entrar, `ajuda` para saber mais.",
@@ -600,6 +606,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.modo = Modo::Comando;
         e.nome = [0; NOME_MAX];
         e.nome_tam = 0;
+        e.enter_pedido = [None; ENTER_PEDIDOS];
         sessao
     })
     .zip(indice(console)) else {
@@ -672,9 +679,22 @@ pub fn tratar(console: Console, c: char) {
         APAGAR_A_LINHA => {
             let _ = definir_em(console, "");
         }
+        // O Enter de um agente vale só como a árvore o pediu: o `confirm`
+        // daquela sessão, entregue ao Terminal deste console. Escrito por
+        // conta própria por quem tem o pseudo-terminal, não confirma nada —
+        // o número dentro do caractere não é autoridade.
         c if agente_que_confirmou(c).is_some() => {
             if let Some(sessao) = agente_que_confirmou(c) {
-                confirmar_em(console, Origem::Agente(sessao));
+                if tomar_enter_pedido(console, sessao) {
+                    confirmar_em(console, Origem::Agente(sessao));
+                } else {
+                    crate::log_warn!(
+                        "console",
+                        "{}: o Enter do agente {} nao foi pedido pela arvore; descartado",
+                        console.texto(),
+                        sessao
+                    );
+                }
             }
         }
         // Só o que é texto entra na linha. Teclas sem caractere já não
@@ -977,6 +997,11 @@ pub const LINHA_DA_PESSOA: &str =
 /// E a de um agente que a confirma pela árvore.
 pub const CONFIRMAR_A_LINHA_DA_PESSOA: &str = "a linha esta pedindo o nome, uma senha ou um codigo de uma pessoa; so se confirma pelo teclado";
 
+/// A recusa de um valor com algo que uma pessoa não digita na linha — um
+/// Enter, o Enter de um agente, um controle.
+pub const CARACTERE_QUE_NAO_SE_DIGITA: &str =
+    "o valor tem caracteres que nao se digitam na linha de comando";
+
 fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     let (aberto, modo, inicio) =
         com_estado(console, |e| (e.aberto, e.modo, e.inicio)).ok_or("console desconhecido")?;
@@ -987,7 +1012,7 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
         return Err("o valor nao cabe na linha de comando");
     }
     if !valor.chars().all(aceito) {
-        return Err("o valor tem caracteres que nao se digitam na linha de comando");
+        return Err(CARACTERE_QUE_NAO_SE_DIGITA);
     }
     // Esvaziar a linha do login é o `APAGAR_A_LINHA` do Terminal, e vale
     // aqui; escrever nela, não. Quem pede pela árvore já passou, antes, por
@@ -1020,13 +1045,29 @@ pub fn pode_definir(valor: &str) -> Result<(), &'static str> {
     if !aberto || inicio.is_none() {
         return Err("a linha de comando nao esta atendendo");
     }
+    pode_definir_em(Console::Fisico, valor)
+}
+
+/// A conferência do valor de um `set_value` na linha de `console` — a do
+/// físico, ou a de um Terminal, que a árvore mostra como o campo da janela
+/// dele: o valor cabe na linha, só tem o que uma pessoa digitaria nela, e a
+/// linha não pede o que só a pessoa digita ([`pode_editar_pela_arvore`]).
+///
+/// No Terminal, o valor vai ao programa, que o digita no pseudo-terminal
+/// caractere por caractere, pelo mesmo caminho das teclas: um `\n` dentro
+/// dele seria o Enter da pessoa, e um caractere de
+/// [`protocolo::usuario::terminal::confirmar_pelo_agente`], o Enter de outra
+/// sessão — a da serial também. O `set_value` executaria a linha em nome de
+/// outro. Por isso a regra do físico vale lá inteira: só passa o que se
+/// digita.
+pub fn pode_definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     if valor.len() > LINHA_MAX {
         return Err("o valor nao cabe na linha de comando");
     }
     if !valor.chars().all(aceito) {
-        return Err("o valor tem caracteres que nao se digitam na linha de comando");
+        return Err(CARACTERE_QUE_NAO_SE_DIGITA);
     }
-    pode_editar_pela_arvore(Console::Fisico)
+    pode_editar_pela_arvore(console)
 }
 
 /// A linha do físico aceitaria o `confirm` de `origem`? Um agente não
@@ -1077,6 +1118,50 @@ pub fn pode_confirmar_pela_arvore(console: Console, origem: Origem) -> Result<()
         return Err(CONFIRMAR_A_LINHA_DA_PESSOA);
     }
     Ok(())
+}
+
+/// Quantos Enter de agente pedidos pela árvore um console guarda à espera
+/// do pseudo-terminal. Mais que isso ao mesmo tempo, o mais velho sai.
+const ENTER_PEDIDOS: usize = 4;
+
+/// O `confirm` da sessão `sessao` no campo do Terminal de `console` passou
+/// pela regra e vai ao programa: o Enter dela, quando o pseudo-terminal o
+/// trouxer, vale — uma vez.
+///
+/// O Enter de um agente chega ao interpretador como um caractere que diz a
+/// sessão (ver [`protocolo::usuario::terminal::confirmar_pelo_agente`]), pelo
+/// pseudo-terminal que o Terminal escreve. Sem o pedido, o número dentro do
+/// caractere seria a autoridade: quem escreve no pseudo-terminal confirmaria
+/// a linha em nome de qualquer sessão. Com ele, a autoridade é a da ação que
+/// o kernel conferiu e entregou.
+pub fn pedir_enter_do_agente(console: Console, sessao: u8) {
+    com_estado(console, |e| {
+        if let Some(vaga) = e.enter_pedido.iter_mut().find(|v| v.is_none()) {
+            *vaga = Some(sessao);
+        } else {
+            e.enter_pedido.rotate_left(1);
+            e.enter_pedido[ENTER_PEDIDOS - 1] = Some(sessao);
+        }
+    });
+}
+
+/// Desfaz um [`pedir_enter_do_agente`]: o `confirm` não chegou ao programa.
+pub fn desistir_do_enter_do_agente(console: Console, sessao: u8) {
+    let _ = tomar_enter_pedido(console, sessao);
+}
+
+/// Tira um Enter pedido da sessão `sessao`, se há.
+fn tomar_enter_pedido(console: Console, sessao: u8) -> bool {
+    com_estado(console, |e| {
+        match e.enter_pedido.iter_mut().find(|v| **v == Some(sessao)) {
+            Some(v) => {
+                *v = None;
+                true
+            }
+            None => false,
+        }
+    })
+    .unwrap_or(false)
 }
 
 /// Executa a linha do físico, como o Enter. É o `confirm` da árvore.
