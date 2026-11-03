@@ -663,7 +663,8 @@ fn passada_do_coletor() {
     crate::enlace::vencer_todos();
     // E os fluxos: o prazo do aceite, a inatividade, o desligamento.
     crate::fluxo::passada_do_coletor();
-    // E os avisos da malha que o canal cheio deixou devidos.
+    // E os avisos da malha que o canal cheio deixou devidos, e os que uma
+    // operação recusada espaçou.
     crate::aviso::passada_do_coletor();
     // E a cerimônia de pareamento: os prazos dela, a sessão que acabou e
     // o desligamento — e a acabada que ninguém precisa mais sai.

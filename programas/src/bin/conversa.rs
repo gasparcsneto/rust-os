@@ -244,7 +244,7 @@ impl Conversa {
     /// outra faz a mesma conta, com os mesmos dois endpoints.
     fn aceitar(&mut self, prontidao: programas::laco::Prontidao) {
         if prontidao.entrega() {
-            let _ = malha::receber(&self.endpoint, None, 0);
+            let _ = malha::descartar_entregas(&self.endpoint);
         }
         while let Ok(Some((f, origem))) = fluxo::aceitar_avisando(&self.endpoint, &self.laco) {
             let _ = escreverln!("conversa: aceitei de {}", origem.descrever());

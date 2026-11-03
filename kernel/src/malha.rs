@@ -807,6 +807,10 @@ pub fn receber(
         Ok((f, _)) => f,
         Err(f) => return recusada(&recurso, f, f.motivo()),
     };
+    // Se a leitura tirou alguma entrega da pendência, e se ainda ficou
+    // alguma pendente — para o aviso.
+    let mut progrediu = false;
+    let mut pendente = false;
     let r = sob_a_decisao(&recurso, || {
         conferir_alvo(&recurso, |t| {
             let n = ler_id(&t.epoca, endpoint)?;
@@ -815,7 +819,7 @@ pub fn receber(
                 .map(String::from)
         })?;
         let agora = crate::tempo::uptime_ms();
-        let (epoca, r) = com_tabela(|t| {
+        let (epoca, r, ainda) = com_tabela(|t| {
             let n = ler_id(&t.epoca, endpoint);
             let apos = match apos {
                 None => Some(0),
@@ -825,12 +829,15 @@ pub fn receber(
                 (Some(n), Some(apos)) => t.malha.receber(a.titular, fio, n, apos, max, agora),
                 _ => (Err(Recusa::NaoExiste), Vec::new()),
             };
-            (t.epoca, r)
+            let ainda = n.is_some_and(|n| t.malha.prontidao_do_endpoint(n).0);
+            (t.epoca, r, ainda)
         });
         let (lidas, transicoes) = r;
         let (lidas_agora, vencidas): (Vec<Transicao>, Vec<Transicao>) = transicoes
             .into_iter()
             .partition(|t| t.estado == Estado::Entregue);
+        progrediu = !lidas_agora.is_empty();
+        pendente = ainda;
         auditar_do_kernel(&epoca, &vencidas, "");
         auditar_na_execucao(&epoca, &lidas_agora);
         match lidas {
@@ -844,11 +851,17 @@ pub fn receber(
     // A operação do dono sobre o endpoint — também a que a reconfirmação
     // recusou, dentro da decisão —: o aviso dele está consumido. Senão a
     // recusa deixaria o endpoint mudo, com um aviso que nada consome. A
-    // recusada rearma pelo coletor, um tempo depois, e não na hora.
+    // recusada rearma pelo coletor, um tempo depois, e não na hora. A
+    // leitura que não tirou nenhuma entrega da pendência, com pendente
+    // ainda lá — releu as já lidas, sem `after` —, é como a recusada: o
+    // aviso voltaria a cada leitura igual, num giro. A que não tirou nada,
+    // e nada ficou, não mudou nada: não desfaz o rearme de uma recusa.
     if let Some(n) = politica::aviso::numero_do_id(endpoint) {
         let obj = crate::aviso::Objeto::Endpoint(n);
         match r {
-            Ok(_) => crate::aviso::operou(obj, fio, false),
+            Ok(_) if progrediu => crate::aviso::operou(obj, fio, false),
+            Ok(_) if pendente => crate::aviso::recusada(obj, fio),
+            Ok(_) => crate::aviso::consumiu(obj, fio),
             Err(_) => crate::aviso::recusada(obj, fio),
         }
     }

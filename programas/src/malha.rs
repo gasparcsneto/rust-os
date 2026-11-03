@@ -251,6 +251,28 @@ pub fn receber(endpoint: &str, apos: Option<&str>, espera_ms: u64) -> Result<Vec
     Ok(v)
 }
 
+/// Recebe e confirma, sem usar, as entregas que esperam no `endpoint` —
+/// página a página, depois da última lida, até vir vazia. É o que faz, no
+/// `ENTREGA`, o programa que oferece com o aviso e não usa entregas: a lida
+/// sai da pendência, e o aviso se cala; a confirmada sai da fila e libera a
+/// vaga do endpoint. A confirmação que não passa (a taxa) deixa a entrega
+/// lida: o aviso não volta por ela, e o prazo a tira. Devolve quantas leu.
+pub fn descartar_entregas(endpoint: &str) -> Result<usize, Falha> {
+    let mut apos: Option<String> = None;
+    let mut lidas = 0;
+    loop {
+        let pagina = receber(endpoint, apos.as_deref(), 0)?;
+        let Some(ultima) = pagina.last() else {
+            return Ok(lidas);
+        };
+        apos = Some(ultima.id.clone());
+        for e in &pagina {
+            let _ = confirmar(&e.id, None);
+        }
+        lidas += pagina.len();
+    }
+}
+
 /// Confirma uma entrega lida, com a resposta opcional para quem mandou.
 pub fn confirmar(id: &str, resposta: Option<&str>) -> Result<(), Falha> {
     let r = pedir("fabric.ack", |w| {

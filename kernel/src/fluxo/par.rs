@@ -672,21 +672,24 @@ impl Conduta {
             // o motivo daqui, vai na volta do laço.
             return;
         };
+        // A abertura efetiva vai à auditoria antes de acordar quem espera:
+        // a primeira operação do processo sobre o fluxo, decidida e gravada,
+        // vem depois dela na cadeia.
+        if let Some(v) = versao {
+            crate::autorizacao::auditar_do_kernel(
+                "stream.open",
+                &format!(
+                    "{} ; {}",
+                    super::recurso_do_fluxo(&epoca, n),
+                    nome.unwrap_or_default()
+                ),
+                Codigo::Allow,
+                &format!("aberto pelo par; versao {v}"),
+            );
+        }
         depois(epoca, es, w);
         match versao {
-            Some(v) => {
-                self.aceito = true;
-                crate::autorizacao::auditar_do_kernel(
-                    "stream.open",
-                    &format!(
-                        "{} ; {}",
-                        super::recurso_do_fluxo(&epoca, n),
-                        nome.unwrap_or_default()
-                    ),
-                    Codigo::Allow,
-                    &format!("aberto pelo par; versao {v}"),
-                );
-            }
+            Some(_) => self.aceito = true,
             None => {
                 let _ = self.mandar(c, &Mensagem::Fechar(motivo::ABRIDOR));
                 self.acabou = true;

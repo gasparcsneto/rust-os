@@ -311,7 +311,8 @@ pub const REARME_MAXIMO_MS: u64 = 60_000;
 /// recusa seguinte, até um minuto. A recusa que passa logo (a taxa) volta a
 /// avisar em seguida; a que dura (a cota cheia, a sessão que saiu) espaça
 /// os avisos, em vez de girar aviso, recusa e aviso. A operação que passa
-/// zera a conta; e a mudança do objeto avisa na hora, sem esperar.
+/// zera a conta; e o que é novo no objeto avisa na hora, sem esperar
+/// ([`novo_depois_da_recusa`]).
 pub const fn espera_depois_da_recusa(recusas: u32) -> u64 {
     let dobras = if recusas == 0 { 0 } else { recusas - 1 };
     if dobras >= 6 {
@@ -325,12 +326,22 @@ pub const fn espera_depois_da_recusa(recusas: u32) -> u64 {
     }
 }
 
+/// Até o rearme marcado por uma recusa, o objeto só avisa o que é novo: um
+/// bit do `nivel` de agora que não estava no `recusado` — o nível que a
+/// operação recusada encontrou. O que já estava lá voltaria a ser
+/// recusado, e a mudança de outro objeto não o faz pronto de novo; o novo
+/// (uma entrega que chegou, a abertura, o espaço, o fim) avisa na hora.
+pub const fn novo_depois_da_recusa(nivel: u8, recusado: u8) -> bool {
+    nivel & !recusado != 0
+}
+
 /// Quantas designações de objetos que já acabaram um processo guarda — o
 /// fim devido, com o canal cheio, e o fim na espera da operação dele. As
 /// dos objetos vivos as cotas limitam (4 endpoints e 4 fluxos: no máximo 8
-/// avisos devidos). Passado disso, a designação acabada mais antiga cai: um
-/// processo que não lê o canal, ou que lê e não opera, não acumula
-/// designações de objetos que já acabaram.
+/// avisos devidos). Passado disso, uma delas cai — no kernel, a de menor
+/// chave: os endpoints antes das pontas e, entre as do mesmo tipo, a mais
+/// antiga —: um processo que não lê o canal, ou que lê e não opera, não
+/// acumula designações de objetos que já acabaram.
 pub const ACABADOS_POR_PROCESSO: usize = 8;
 
 /// Os três campos do evento de um aviso: o tipo do objeto, o número dele e
@@ -668,6 +679,21 @@ mod testes {
             assert!(e >= antes && e <= REARME_MAXIMO_MS);
             antes = e;
         }
+    }
+
+    /// NH18: até o rearme da recusa, só o novo avisa — o bit que não estava
+    /// no nível que a operação recusada encontrou. O mesmo nível, ou menos,
+    /// não avisa; um bit a mais, sim — o fim inclusive.
+    #[test]
+    fn nh18_depois_da_recusa_so_o_novo() {
+        assert!(!novo_depois_da_recusa(PEDIDO, PEDIDO));
+        assert!(!novo_depois_da_recusa(0, PEDIDO));
+        assert!(!novo_depois_da_recusa(LEGIVEL, LEGIVEL | GRAVAVEL));
+        assert!(!novo_depois_da_recusa(PEDIDO, PEDIDO | ENTREGA));
+        assert!(novo_depois_da_recusa(PEDIDO | ENTREGA, PEDIDO));
+        assert!(novo_depois_da_recusa(FIM, PEDIDO | ENTREGA));
+        assert!(novo_depois_da_recusa(GRAVAVEL, LEGIVEL));
+        assert!(novo_depois_da_recusa(LEGIVEL, 0));
     }
 
     /// NH08: o evento só tem o tipo, o número e os bits — nenhum campo vem

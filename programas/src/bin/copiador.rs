@@ -335,7 +335,7 @@ fn principal() -> i64 {
             match a {
                 Acontecimento::Endpoint { prontidao, .. } => {
                     if prontidao.entrega() {
-                        let _ = malha::receber(&endpoint, None, 0);
+                        let _ = malha::descartar_entregas(&endpoint);
                     }
                     while let Ok(Some((f, origem))) = fluxo::aceitar_avisando(&endpoint, &laco) {
                         let Some(n) = f.numero() else { continue };
@@ -357,6 +357,9 @@ fn principal() -> i64 {
                 Acontecimento::Fluxo { numero, .. } => {
                     if let Some(c) = chegando.get_mut(&numero) {
                         if let Some(r) = c.andar() {
+                            // Acabou, bem ou mal: fecha, e a vaga da cota
+                            // volta na hora.
+                            let _ = c.f.fechar();
                             chegando.remove(&numero);
                             dizer_recebido(r);
                         }
@@ -369,6 +372,7 @@ fn principal() -> i64 {
                             }
                             Some(Err(e)) => {
                                 let _ = escreverln!("copiador: nao mandei: {}", e);
+                                let _ = s.f.fechar();
                                 saindo.remove(&numero);
                             }
                         }

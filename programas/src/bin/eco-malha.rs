@@ -159,7 +159,9 @@ fn principal() -> i64 {
                         return 4;
                     }
                     if prontidao.entrega() {
-                        let _ = malha::receber(&endpoint, None, 0);
+                        // O eco não usa entregas: recebe e confirma, e o
+                        // aviso se cala.
+                        let _ = malha::descartar_entregas(&endpoint);
                     }
                     aceitar_todos(&endpoint, &laco, &mut clientes);
                 }
@@ -175,7 +177,11 @@ fn principal() -> i64 {
                         }
                         Err(e) => {
                             let _ = escreverln!("eco-malha: {} acabou: {}", numero, e.motivo());
-                            clientes.remove(&numero);
+                            // Fecha antes de largar: senão o fluxo fica
+                            // vivo, na cota, até vencer a inatividade.
+                            if let Some(c) = clientes.remove(&numero) {
+                                let _ = c.f.fechar();
+                            }
                         }
                     }
                 }

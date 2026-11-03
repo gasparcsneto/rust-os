@@ -319,8 +319,8 @@ fn principal() -> i64 {
                     }
                     if prontidao.entrega() {
                         // O modelo não usa entregas, mas o aviso só se cala
-                        // quando elas são lidas.
-                        let _ = malha::receber(&endpoint, None, 0);
+                        // quando elas saem da pendência: recebe e confirma.
+                        let _ = malha::descartar_entregas(&endpoint);
                     }
                     aceitar_todos(&endpoint, &laco, &mut ecos);
                 }
@@ -363,7 +363,11 @@ fn principal() -> i64 {
                         }
                         Err(e) => {
                             escreverln!("modelo: {} acabou: {}", numero, e.motivo());
-                            ecos.remove(&numero);
+                            // Fecha antes de largar: senão o fluxo fica
+                            // vivo, na cota, até vencer a inatividade.
+                            if let Some(eco) = ecos.remove(&numero) {
+                                let _ = eco.f.fechar();
+                            }
                         }
                     }
                 }

@@ -37,8 +37,16 @@
 //! não passa, recusada pelo gate, pela reconfirmação ou pelo próprio
 //! comando, também o consome, com o rearme pelo coletor, um tempo depois,
 //! que dobra a cada recusa seguida ([`recusada`],
-//! [`recusado_pelo_gate`]). O coletor de fios tenta de novo o que ficou
-//! devido ([`passada_do_coletor`]).
+//! [`recusado_pelo_gate`]); até lá, só o que é novo no objeto avisa — o
+//! que a operação recusada já encontrou não, por mudança nenhuma de outro
+//! objeto —, e a vaga que um fluxo do processo deixa na cota dele avisa o
+//! pedido que ele não pôde aceitar ([`vaga`]). O objeto que já acabou não
+//! espera o rearme: o fim sai na hora, uma vez. A operação do dono que não
+//! mudou nada no objeto — o aceite sem pedido, a recepção sem entrega nova
+//! — consome sem desfazer o rearme marcado ([`consumiu`]); e a recepção
+//! que releu o que já tinha lido, com entrega pendente ainda lá, conta como
+//! a que não passa. O coletor de fios tenta de novo o que ficou devido
+//! ([`passada_do_coletor`]).
 //!
 //! # O que fica guardado
 //!
@@ -48,8 +56,9 @@
 //! aviso, se ele ainda espera na fila, e a designação sai na hora; se o
 //! dono já o tirou da fila, o fim espera a operação dele. O que acaba com o
 //! canal cheio guarda o fim devido. Os dois juntos, até
-//! [`ACABADOS_POR_PROCESSO`] por processo: passado disso, o mais antigo
-//! cai.
+//! [`ACABADOS_POR_PROCESSO`] por processo: passado disso, cai o de menor
+//! chave — os endpoints antes das pontas e, entre os do mesmo tipo, o mais
+//! antigo.
 //!
 //! A ordem das travas: a das marcas é folha — quem a toma não toma mais
 //! nada. A das designações nunca fica na mão enquanto se pergunta o nível
@@ -135,12 +144,14 @@ pub struct Canal {
 }
 
 /// O que mudou, como quem muda o vê: um fluxo inteiro (as duas pontas), um
-/// endpoint, ou os endpoints todos — a malha mudou.
+/// endpoint, os endpoints todos — a malha mudou —, ou a cota de fluxos do
+/// processo — um fluxo dele acabou, e há uma vaga.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tocado {
     Fluxo(u64),
     Endpoint(u64),
     Endpoints,
+    Vaga(u64),
 }
 
 struct Entrada {
@@ -158,6 +169,15 @@ struct Entrada {
     /// passou: o rearme dobra a cada uma
     /// ([`politica::aviso::espera_depois_da_recusa`]).
     recusas: u32,
+    /// O nível que a última operação recusada encontrou: até o rearme, só o
+    /// que não estava nele avisa
+    /// ([`politica::aviso::novo_depois_da_recusa`]). A vaga na cota do
+    /// processo o limpa — era o que o aceite recusado esperava.
+    recusado: u8,
+    /// Uma vaga na cota do processo chegou desde a última operação do dono:
+    /// a recusa que vier antes de ela ser usada — a vaga chegou no meio da
+    /// operação — não espaça o aviso.
+    vaga: bool,
 }
 
 /// As designações vivas.
@@ -257,6 +277,8 @@ fn designar(obj: Objeto, canal: Canal, quem_abriu: bool) {
                 avisado_em: 0,
                 rearmar_em: 0,
                 recusas: 0,
+                recusado: 0,
+                vaga: false,
             },
         );
     });
@@ -352,6 +374,13 @@ pub fn tocar_endpoints() {
     marcar(Tocado::Endpoints);
 }
 
+/// Um fluxo do processo `fio` acabou, e a cota de fluxos dele tem uma vaga:
+/// os endpoints dele são avaliados de novo, e o pedido que ele não pôde
+/// aceitar por falta de vaga avisa, sem esperar o rearme da recusa.
+pub fn vaga(fio: u64) {
+    marcar(Tocado::Vaga(fio));
+}
+
 /// Fora de qualquer trava: avalia os objetos marcados, e publica o que a
 /// conta mandar.
 pub fn processar() {
@@ -368,17 +397,28 @@ pub fn processar() {
         return;
     }
     let objetos: Vec<Objeto> = com_designacoes(|t| {
-        t.keys()
-            .copied()
-            .filter(|obj| {
-                tudo || marcas.iter().any(|m| match (m, obj) {
+        let mut objetos = Vec::new();
+        for (obj, e) in t.iter_mut() {
+            let dono = obj.dono(e.canal);
+            let vaga = matches!(obj, Objeto::Endpoint(_)) && marcas.contains(&Tocado::Vaga(dono));
+            if vaga {
+                // A vaga é o que o aceite recusado pela cota esperava: o
+                // pedido que ainda espera avisa de novo.
+                e.recusado = 0;
+                e.vaga = true;
+            }
+            let tocado = vaga
+                || marcas.iter().any(|m| match (m, obj) {
                     (Tocado::Fluxo(n), Objeto::Ponta { fluxo, .. }) => n == fluxo,
-                    (Tocado::Endpoint(n), Objeto::Endpoint(e)) => n == e,
+                    (Tocado::Endpoint(n), Objeto::Endpoint(x)) => n == x,
                     (Tocado::Endpoints, Objeto::Endpoint(_)) => true,
                     _ => false,
-                })
-            })
-            .collect()
+                });
+            if tudo || tocado {
+                objetos.push(*obj);
+            }
+        }
+        objetos
     });
     for obj in objetos {
         avaliar(obj);
@@ -399,6 +439,29 @@ pub fn operou(obj: Objeto, fio: u64, esbarrou: bool) {
             // não tem mais o que fazer, e a conta das recusas recomeça.
             e.rearmar_em = 0;
             e.recusas = 0;
+            e.recusado = 0;
+            e.vaga = false;
+            true
+        }
+        _ => false,
+    });
+    if existe {
+        avaliar(obj);
+    }
+}
+
+/// O dono operou sobre o objeto, pelo gate, sem mudar nada nele — o aceite
+/// sem pedido na fila, a recepção sem entrega nova —: o aviso está
+/// consumido, e o nível de agora rearma; mas o rearme espaçado por uma
+/// recusa continua marcado — a operação que não fez nada não o desfaz, e
+/// até ele só o novo avisa.
+pub fn consumiu(obj: Objeto, fio: u64) {
+    if QUANTAS.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let existe = com_designacoes(|t| match t.get_mut(&obj) {
+        Some(e) if obj.dono(e.canal) == fio => {
+            consumir(e, false);
             true
         }
         _ => false,
@@ -420,35 +483,65 @@ fn consumir(e: &mut Entrada, esbarrou: bool) {
 
 /// A operação do dono `fio` sobre `obj` não passou — recusada pelo gate,
 /// pela reconfirmação dentro da decisão, ou pelo próprio comando (a cota
-/// cheia, o estado do objeto). Ela consome o aviso, como a que passa (a
-/// regra de `docs/SDK.md`): senão o objeto ficaria mudo, com um aviso que
-/// nada consome. Mas o nível não é reavaliado na hora — o que ainda está
-/// pronto, e a operação não conseguiu fazer, voltaria a avisar e a ser
-/// recusado num giro —: o coletor reavalia depois de
-/// [`politica::aviso::espera_depois_da_recusa`], que dobra a cada recusa
-/// seguida, até um minuto. A mudança do objeto avisa antes. Uma recusa com
-/// um rearme já marcado não o empurra: fica o prazo mais cedo.
+/// cheia, o estado do objeto) —, ou passou sem conseguir nada, com o que
+/// esperava ainda lá (a recepção que releu as entregas já lidas). Ela
+/// consome o aviso, como a que passa (a regra de `docs/SDK.md`): senão o
+/// objeto ficaria mudo, com um aviso que nada consome. Mas o que ainda está
+/// pronto, e a operação não conseguiu fazer, não avisa de novo na hora —
+/// voltaria a ser tentado e recusado num giro —: o coletor reavalia depois
+/// de [`politica::aviso::espera_depois_da_recusa`], que dobra a cada
+/// recusa seguida, até um minuto, e até lá só o que é novo no objeto avisa
+/// ([`politica::aviso::novo_depois_da_recusa`]). Uma recusa com um rearme
+/// já marcado não o empurra: fica o prazo mais cedo. Não esperam: o objeto
+/// que já acabou — o fim não gira: sai uma vez, e a designação com ele —,
+/// e a recusa que veio com uma vaga nova na cota do processo — a vaga
+/// chegou no meio da operação, e o pedido avisa de novo, uma vez.
 pub fn recusada(obj: Objeto, fio: u64) {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
     }
-    let agora = crate::tempo::uptime_ms();
-    com_designacoes(|t| {
-        if let Some(e) = t.get_mut(&obj)
-            && obj.dono(e.canal) == fio
-        {
-            consumir(e, false);
-            e.recusas = e.recusas.saturating_add(1);
-            let quando = agora
-                .saturating_add(politica::aviso::espera_depois_da_recusa(e.recusas))
-                .max(1);
-            e.rearmar_em = if e.rearmar_em == 0 {
-                quando
-            } else {
-                e.rearmar_em.min(quando)
-            };
+    #[cfg(feature = "modo-teste")]
+    {
+        let fio_da_vaga = VAGA_NA_RECUSA.swap(0, Ordering::AcqRel);
+        if fio_da_vaga != 0 {
+            vaga(fio_da_vaga);
+            processar();
         }
+    }
+    // O nível que a operação recusada encontrou — perguntado fora da trava
+    // das designações.
+    let n = nivel(obj);
+    let agora = crate::tempo::uptime_ms();
+    let agora_mesmo = com_designacoes(|t| {
+        let Some(e) = t.get_mut(&obj) else {
+            return false;
+        };
+        if obj.dono(e.canal) != fio {
+            return false;
+        }
+        consumir(e, false);
+        let vaga = core::mem::take(&mut e.vaga);
+        let Some(n) = n.filter(|b| *b & bits::FIM == 0) else {
+            return true;
+        };
+        if vaga {
+            return true;
+        }
+        e.recusas = e.recusas.saturating_add(1);
+        e.recusado = n;
+        let quando = agora
+            .saturating_add(politica::aviso::espera_depois_da_recusa(e.recusas))
+            .max(1);
+        e.rearmar_em = if e.rearmar_em == 0 {
+            quando
+        } else {
+            e.rearmar_em.min(quando)
+        };
+        false
     });
+    if agora_mesmo {
+        avaliar(obj);
+    }
 }
 
 /// O gate recusou um pedido de `chamador` antes de qualquer operação — a
@@ -532,6 +625,12 @@ fn avaliar(obj: Objeto) {
         let Some(e) = t.get_mut(&obj) else {
             return;
         };
+        // Depois de uma recusa, até o rearme, o que a operação recusada
+        // já encontrou não avisa de novo — voltaria a ser recusado, e a
+        // mudança de outro objeto não o faz pronto de novo —: só o novo.
+        if e.rearmar_em != 0 && !politica::aviso::novo_depois_da_recusa(n, e.recusado) {
+            return;
+        }
         let antes = e.d.situacao();
         let canal = e.canal;
         let aviso = e.d.mudou(n);
@@ -600,9 +699,10 @@ fn juntar_o_fim(canal: Canal, obj: Objeto) -> bool {
 }
 
 /// O teto das designações acabadas do processo `dono`
-/// ([`ACABADOS_POR_PROCESSO`]): passado dele, a mais antiga — o fim devido,
-/// ou o fim na espera, de um objeto que já acabou — cai, contada com as
-/// designações largadas. As dos objetos vivos ficam sempre: as cotas as
+/// ([`ACABADOS_POR_PROCESSO`]): passado dele, a de menor chave — o fim
+/// devido, ou o fim na espera, de um objeto que já acabou; os endpoints
+/// antes das pontas e, entre as do mesmo tipo, a mais antiga — cai, contada
+/// com as designações largadas. As dos objetos vivos ficam sempre: as cotas as
 /// limitam.
 fn conter_os_acabados(t: &mut BTreeMap<Objeto, Entrada>, dono: u64) {
     loop {
@@ -660,7 +760,8 @@ fn publicar(t: &mut BTreeMap<Objeto, Entrada>, obj: Objeto, a: Aviso, de_novo: b
 
 /// A passada do coletor de fios: as marcas que sobraram, os avisos que o
 /// canal cheio deixou devidos, e o rearme dos objetos cujo aviso uma
-/// recusa do gate consumiu ([`recusado_pelo_gate`]).
+/// operação recusada consumiu ([`recusada`]) — no prazo, tudo o que ainda
+/// está pronto avisa.
 pub fn passada_do_coletor() {
     if QUANTAS.load(Ordering::Acquire) == 0 {
         return;
@@ -679,6 +780,8 @@ pub fn passada_do_coletor() {
             .filter(|(_, e)| e.rearmar_em != 0 && agora >= e.rearmar_em)
             .map(|(obj, e)| {
                 e.rearmar_em = 0;
+                e.recusado = 0;
+                e.vaga = false;
                 *obj
             })
             .collect()
@@ -704,7 +807,8 @@ pub struct Medidas {
     pub devidos: u64,
     /// Os devidos entregues numa nova tentativa.
     pub entregues_depois: u64,
-    /// As designações que caíram porque o canal sumiu.
+    /// As designações que caíram porque o canal sumiu, ou porque passaram
+    /// do teto das acabadas do processo.
     pub largados: u64,
     /// Os `notify` recusados: o canal não é do processo que pede.
     pub recusados: u64,
@@ -761,6 +865,19 @@ pub fn antes_de_largar_no_fecho_de_teste(obj: Objeto) {
     if CONTA_NO_FECHO.swap(false, Ordering::AcqRel) {
         avaliar(obj);
     }
+}
+
+/// Só para a suíte: o processo cuja cota de fluxos ganha uma vaga no meio
+/// da próxima operação recusada — entre a recusa e a conta dela, como um
+/// fluxo dele que acabasse nessa janela —; zero, nenhum.
+#[cfg(feature = "modo-teste")]
+static VAGA_NA_RECUSA: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: arma a vaga no meio da próxima recusa
+/// ([`VAGA_NA_RECUSA`]); zero desarma.
+#[cfg(feature = "modo-teste")]
+pub fn vaga_na_proxima_recusa_de_teste(fio: u64) {
+    VAGA_NA_RECUSA.store(fio, Ordering::Release);
 }
 
 /// Destrava as tabelas à força, para uso exclusivo do caminho de falha
