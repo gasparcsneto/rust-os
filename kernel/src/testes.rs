@@ -6332,6 +6332,309 @@ fn terminal_operado() -> Resultado {
     Ok(())
 }
 
+/// Um agente não edita, não esvazia e não confirma, pela árvore, a linha de
+/// um Terminal que pede o nome ou a senha: a regra da linha do físico, no
+/// campo da janela do Terminal.
+///
+/// # O que este caso protege
+///
+/// O que a árvore pede no campo do Terminal o programa digita no
+/// pseudo-terminal — apagar a linha, e o texto, caractere a caractere —, e
+/// o console, que só vê caracteres, não sabe que vieram da árvore. Antes, o
+/// `set_value` de um agente passava por aí: apagava o que a pessoa tinha
+/// digitado, punha o texto dele na linha da senha, e o arrendamento
+/// implícito do campo deixava as teclas dela `CONFLICT`. Aqui a pessoa
+/// digita pela máquina — a janela com o foco, o Terminal, o
+/// pseudo-terminal —, um agente pede pela porta dele, e:
+///
+/// - com o console pedindo o nome, e depois a senha, o `set_value`, o
+///   `cancel` e o `confirm` do agente no campo são recusados com o motivo da
+///   linha do físico, sem código da coordenação, e o log os diz recusados;
+///   nada chega ao Terminal, o campo não é arrendado e a versão não cresce.
+///   O `ui.act` em si é a decisão do gate, gravada como sempre;
+/// - a linha fica como a pessoa a deixou, e ela continua digitando — sem
+///   `CONFLICT` — e entra;
+/// - com o console pedindo um comando, o mesmo `set_value` passa e chega à
+///   linha do console.
+fn terminal_o_agente_nao_edita_a_linha_da_senha() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(linha_da_senha_no_terminal);
+    let encerrar = protocolo::usuario::evento::Evento {
+        tipo: protocolo::usuario::evento::tipo::ENCERRAR,
+        ..Default::default()
+    };
+    let _ = crate::eventos::publicar(protocolo::usuario::evento::CANAL_DO_TERMINAL, encerrar);
+    let _ = crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, encerrar);
+    let _ = esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Digita `texto` pelo teclado da máquina, tecla a tecla e sem shift: vai
+/// para a janela com o foco, como o que a pessoa digita.
+fn digitar_pelo_teclado(texto: &str) -> Resultado {
+    for c in texto.chars() {
+        let codigo = (1..u8::MAX)
+            .find(|&k| crate::teclado::caractere(k) == Some(c))
+            .ok_or("um caractere que o teclado nao produz sem shift")?;
+        teclar(codigo);
+    }
+    Ok(())
+}
+
+/// O campo da linha de comando da janela do Terminal, como a árvore o
+/// publica.
+fn campo_do_terminal() -> Option<u32> {
+    let mut camada = None;
+    crate::grafico::camadas(|c| {
+        if c.nome == crate::superficies::NOME_DA_CAMADA
+            && crate::superficies::com_descricao(c.id, |d| d.titulo == "Terminal") == Some(true)
+        {
+            camada = Some(c.id);
+        }
+    });
+    let camada = camada?;
+    let indice = crate::superficies::com_descricao(camada, |d| {
+        d.elementos
+            .iter()
+            .position(|e| e.rotulo == "linha de comando")
+    })
+    .flatten()?;
+    crate::ui::id_do_elemento(camada, indice)
+}
+
+fn linha_da_senha_no_terminal() -> Resultado {
+    use crate::interpretador::{CONFIRMAR_A_LINHA_DA_PESSOA, LINHA_DA_PESSOA, Modo};
+    use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
+    use alloc::format;
+    use politica::Codigo;
+
+    if crate::tela::tela_fisica().is_none() {
+        return sem_framebuffer();
+    }
+    let lia = crate::pessoas::registrar_de_teste("lia", "operador", SENHA_DE_TESTE);
+    let senha = senha_de_teste();
+    // Quantas linhas do log de um subsistema começam com `prefixo`, desde
+    // a `marca`.
+    let linhas_desde = |marca: u64, subsistema: &str, prefixo: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= marca && r.subsistema == subsistema && r.mensagem().starts_with(prefixo))
+                as usize;
+        });
+        n
+    };
+
+    // O Terminal, lançado pelo servidor como a barra o pede, com o foco.
+    let desde = crate::log::total_emitidos();
+    esperar_sem_servidor_de_janelas()?;
+    lancar_o_servidor_de_janelas_da_suite()?;
+    esperar_ate(
+        || linhas_desde(desde, "usuario", "janelas: pronto") > 0,
+        600,
+    )
+    .map_err(|_| "o servidor de janelas nao subiu")?;
+    crate::ui::agir(
+        ID_DO_BOTAO_TERMINAL,
+        Acao::Pressionar,
+        None,
+        Origem::Agente(0),
+    )?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linhas_desde(desde, "usuario", "terminal: pronto") > 0
+        },
+        600,
+    )
+    .map_err(|_| "o terminal nao subiu")?;
+    let console = console_do_terminal().ok_or("o terminal nao abriu um pseudo-terminal")?;
+    if crate::superficies::janela_com_foco()
+        .and_then(|j| crate::pseudoterminal::console_do_dono(j.dono))
+        != Some(console)
+    {
+        return Err("o terminal abriu sem o foco");
+    }
+    esperar_ate(|| campo_do_terminal().is_some(), 200)
+        .map_err(|_| "o terminal nao descreveu a linha de comando")?;
+    let campo = campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+    let recurso = crate::coordenacao::recurso(campo);
+    let linha = || crate::interpretador::linha_de_teste(console);
+    let (mut agente, mut sessao) = conectado(1)?;
+
+    // Uma ação do agente no campo, recusada como na linha do físico: o
+    // motivo de lá, sem código da coordenação, e a recusa no log; a decisão
+    // do `ui.act`, a do gate, gravada; o campo livre e na mesma versão; nada
+    // no Terminal; e a linha do console como estava.
+    let mut recusada = |acao: &str, extra: &str, motivo: &str| -> Resultado {
+        let antes = linha();
+        let versao = crate::coordenacao::estado(&recurso).versao;
+        let marca = crate::log::total_emitidos();
+        let r = pela_porta(
+            &mut agente,
+            &mut sessao,
+            "ui.act",
+            &format!(r#"{{"id":{campo},"action":"{acao}"{extra}}}"#),
+        )?;
+        if !r.contains(r#""ok":false"#)
+            || !r.contains(&format!(r#""error":"{motivo}""#))
+            || r.contains(r#""code":"#)
+        {
+            crate::log_error!("teste", "{}: {}", acao, r);
+            return Err(
+                "a acao do agente na linha da pessoa no terminal nao foi recusada como no fisico",
+            );
+        }
+        let recusa = format!("agente 1: {acao} no elemento {campo} recusado: {motivo}");
+        if linhas_desde(marca, "ui", &recusa) != 1 {
+            return Err("a recusa no terminal nao ficou no log como recusa");
+        }
+        if !ultimo_com_metodo("ui.act")
+            .is_some_and(|e| e.codigo == Codigo::Allow && e.recurso == format!("{campo}"))
+        {
+            return Err("o ui.act recusado no terminal ficou sem a decisao do gate gravada");
+        }
+        let estado = crate::coordenacao::estado(&recurso);
+        if estado.arrendamento.is_some() || estado.versao != versao {
+            return Err("a recusa no terminal arrendou o campo, ou fez a versao crescer");
+        }
+        // O que tivesse ido ao Terminal chegaria ao console logo depois.
+        let _ = esperar_ate(
+            || {
+                atender_consoles();
+                false
+            },
+            20,
+        );
+        if linhas_desde(marca, "usuario", "terminal: o agente digitou") != 0 {
+            return Err("a acao recusada chegou ao terminal");
+        }
+        if linha() != antes {
+            return Err("a acao recusada mexeu na linha do console do terminal");
+        }
+        Ok(())
+    };
+
+    // O nome: a pessoa digita `login` pela janela, e o console o pede.
+    digitar_pelo_teclado("login\n")?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Nome, 0))
+        },
+        600,
+    )
+    .map_err(|_| "o login digitado na janela do terminal nao pediu o nome")?;
+    recusada("set_value", r#","value":"intrusa""#, LINHA_DA_PESSOA)?;
+    // A pessoa digita o nome — sem `CONFLICT` —, e o console pede a senha.
+    digitar_pelo_teclado("lia\n")?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Senha, 0))
+        },
+        600,
+    )
+    .map_err(|_| "o nome digitado na janela do terminal nao pediu a senha")?;
+    // A senha, até a metade: o agente não a edita, não a esvazia e não a
+    // confirma.
+    let (comeco, resto) = senha.split_at(6);
+    digitar_pelo_teclado(comeco)?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Senha, comeco.len()))
+        },
+        600,
+    )
+    .map_err(|_| "o comeco da senha nao chegou ao console do terminal")?;
+    recusada("set_value", r#","value":"intrusa""#, LINHA_DA_PESSOA)?;
+    recusada("cancel", "", LINHA_DA_PESSOA)?;
+    recusada("confirm", "", CONFIRMAR_A_LINHA_DA_PESSOA)?;
+    // A pessoa termina — sem `CONFLICT` —, e a senha que ela digitou entra.
+    digitar_pelo_teclado(&format!("{resto}\n"))?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            crate::interpretador::sessao_do_console(console).is_some()
+        },
+        600,
+    )
+    .map_err(|_| "a pessoa nao entrou pelo terminal depois das recusas")?;
+    let entrou = crate::interpretador::sessao_do_console(console).ok_or("sem sessao")?;
+    if crate::pessoas::dona_da_sessao(entrou) != Some(lia) {
+        return Err("a sessao aberta no terminal nao e da pessoa que digitou");
+    }
+    if ultimo_que(|e| {
+        e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
+    })
+    .is_some()
+    {
+        return Err("uma tecla da pessoa no terminal foi CONFLICT");
+    }
+    if ultimo_que(|e| e.metodo == "ui.claim" && e.recurso == recurso).is_some() {
+        return Err("uma acao recusada arrendou o campo do terminal");
+    }
+
+    // Com o console pedindo um comando, o mesmo `set_value` passa, e o
+    // Terminal o digita na linha do console.
+    if linha() != Some((Modo::Comando, 0)) {
+        return Err("depois do login o console do terminal nao pediu um comando");
+    }
+    let marca = crate::log::total_emitidos();
+    let no_campo = |extra: &str| format!(r#"{{"id":{campo}{extra}}}"#);
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"set_value","value":"agent.ping""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o set_value no terminal pedindo um comando foi recusado");
+    }
+    // Pelo Terminal: ele diz no log o que digitou logo depois de escrever no
+    // pseudo-terminal, e as duas coisas podem chegar em qualquer ordem.
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, "agent.ping".len()))
+                && linhas_desde(marca, "usuario", "terminal: o agente digitou") > 0
+        },
+        600,
+    )
+    .map_err(|_| "o set_value pedindo um comando nao chegou ao console pelo terminal")?;
+    // A linha volta vazia, e o campo, livre.
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"cancel""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o cancel no terminal pedindo um comando foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, 0))
+        },
+        600,
+    )
+    .map_err(|_| "o cancel no terminal pedindo um comando nao esvaziou a linha")?;
+    if !pela_porta(&mut agente, &mut sessao, "ui.release", &no_campo(""))?.contains(r#""ok":true"#)
+    {
+        return Err("o agente nao soltou o campo do terminal");
+    }
+    Ok(())
+}
+
 /// Um formulário feito com o toolkit, preenchido por um agente pela árvore
 /// e por uma pessoa pelo teclado.
 ///
@@ -16000,6 +16303,22 @@ fn consoles_login_e_logout() -> Resultado {
         }
         if crate::interpretador::definir("outra").is_ok() {
             return Err("um agente editou a linha da senha");
+        }
+        // Nem esvaziar, pela árvore: o `cancel` de um agente na linha da
+        // senha é recusado antes da conta — não arrenda a linha, e o que a
+        // pessoa digitou fica para a senha certa entrar, logo abaixo.
+        if crate::tela::tela().is_some()
+            && !matches!(
+                crate::ui::agir(
+                    crate::ui::ID_DA_LINHA_DE_COMANDO,
+                    crate::ui::Acao::Cancelar,
+                    None,
+                    Origem::Agente(0),
+                ),
+                Err(r) if r.motivo == crate::interpretador::LINHA_DA_PESSOA
+            )
+        {
+            return Err("um agente esvaziou a linha da senha pela arvore");
         }
         if !crate::interpretador::confirmar(Origem::Agente(0)).is_empty()
             || crate::interpretador::modo() != Modo::Senha
@@ -34787,6 +35106,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: digita e mostra a resposta",
         f: terminal_digita_e_mostra_a_resposta,
+    },
+    Caso {
+        nome: "terminal: o agente nao edita nem confirma a linha da senha",
+        f: terminal_o_agente_nao_edita_a_linha_da_senha,
     },
     Caso {
         nome: "toolkit: o agente preenche um formulario",
