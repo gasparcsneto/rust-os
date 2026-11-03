@@ -898,6 +898,7 @@ pelo mesmo motivo.
 | N103 | fora do SDK: os pedidos de Enter cheios que despejam o mais velho | `terminal: o Enter de agente que a arvore nao pediu e descartado` |
 | N104 | fora do SDK: o `set_value` sem valor num campo de janela recusado só depois da conta | `terminal: o agente nao edita nem confirma a linha da senha` |
 | N105 | fora do SDK: os marcadores do pedido dentro do valor, na linha de comando do toolkit | o teste do toolkit `o_agente_na_linha_de_comando_vira_o_que_digitar` |
+| N106 | fora do SDK: a camada que sai da pilha sem recompor o lugar dela — a da corrida do caso das superfícies na CI 419 | `compositor: a camada de cima vence`, `compositor: escrever debaixo nao vaza`, `compositor: camada na borda`, `compositor: transparencia`; o caso das superfícies não a vê: a rolagem do eco do coletor recompõe o console por cima |
 
 ## Medidas
 

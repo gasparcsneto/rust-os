@@ -9303,7 +9303,12 @@ executa de novo o comando suspenso de um agente que saiu da conexão; a
 N102 reserva o Enter com o console esperando; a N103 despeja o pedido mais
 velho com os pedidos cheios; a N104 recusa o `set_value` sem valor só
 depois da conta; e a N105 deixa os marcadores do pedido dentro do valor,
-no toolkit — as oito reprovadas.
+no toolkit — as oito reprovadas. E a da corrida do caso das superfícies na
+CI 419, que passou a esperar a tela chegar ao console depois que o processo
+morre: a N106 deixa a camada sair da pilha sem recompor o lugar dela —
+reprovada pelos casos do compositor, que soltam a camada e conferem a tela
+no núcleo deles; o caso das superfícies não a vê, porque a rolagem do eco
+do coletor recompõe o console inteiro por cima.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9356,6 +9361,7 @@ no toolkit — as oito reprovadas.
 | fora do SDK: os pedidos de Enter cheios que despejam o mais velho (N103) | "terminal: o Enter de agente que a arvore nao pediu e descartado" |
 | fora do SDK: o `set_value` sem valor recusado só depois da conta (N104) | "terminal: o agente nao edita nem confirma a linha da senha" |
 | fora do SDK: os marcadores do pedido dentro do valor, no toolkit (N105) | o teste do toolkit `o_agente_na_linha_de_comando_vira_o_que_digitar` |
+| fora do SDK: a camada que sai da pilha sem recompor o lugar dela (N106) | "compositor: a camada de cima vence", "compositor: escrever debaixo nao vaza", "compositor: camada na borda", "compositor: transparencia" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
