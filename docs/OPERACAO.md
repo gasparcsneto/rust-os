@@ -327,9 +327,10 @@ a **própria** senha — ver [A própria senha](#a-própria-senha).
 A pessoa entrada num console troca a própria senha ali mesmo, sem
 administrador: `senha`, e o console pede a atual, a nova e a nova de novo,
 sem eco — nada aparece na tela, na árvore semântica ou no histórico do
-teclado, e um agente não edita nem confirma essas linhas. Uma linha vazia,
-em qualquer passo, desiste. Nada se digita junto da palavra: `senha <algo>`
-é recusado, porque o que viesse junto já teria ecoado.
+teclado, e um agente não edita, não esvazia nem confirma essas linhas: nem
+no console físico, nem num Terminal, pelo campo da janela dele. Uma linha
+vazia, em qualquer passo, desiste. Nada se digita junto da palavra:
+`senha <algo>` é recusado, porque o que viesse junto já teria ecoado.
 
 ```text
 duke> senha

@@ -322,7 +322,10 @@ confirma cada uma, e o aviso se cala (NS41).
   elas: a imagem nova herda os descritores, e não ouve os avisos da
   anterior (NS17, NS36). Os endpoints persistem, como sempre persistiram
   (a malha os mantém na troca de imagem); a imagem nova oferece com o
-  aviso de novo, se quiser.
+  aviso de novo, se quiser. Os canais herdados continuam escutados pelo
+  processo e contam no teto dos dois: a imagem nova que quer o seu laço
+  fecha antes os descritores que não vai usar — como o Terminal faz ao
+  entrar —, ou o `Laco::novo` ouve `OCUPADO` em todos os nomes.
 - O `fork` não passa designação nenhuma: o filho não é dono de pontas nem
   de endpoints, e um descritor herdado não o faz ouvinte do canal — o
   `notify` com ele é recusado.
@@ -741,6 +744,20 @@ escalonador por varredura, e não uma por canal. A N82 devolve a tabela a
 teto por processo e a N87 troca a fotografia pela pergunta por canal: as
 quatro reprovadas.
 
+Fora do SDK, na mesma numeração: a N85 é a mutação antiga da fase do
+NSF — a leitura da auditoria que não avança —, rodada de novo contra o
+`nsf: le junto com quem pede` reescrito para esperar pelo andamento dos
+fios, e não por prazos de tiques: reprovada. E uma análise de segurança
+do Terminal achou que o `set_value` de um agente no campo da janela dele
+escapava da regra da linha da pessoa — o Terminal o digitava no
+pseudo-terminal, e o texto entrava na linha do nome ou da senha, com o
+campo arrendado ao agente e as teclas da pessoa `CONFLICT`. A regra
+passou a valer quando a ação entra no kernel, a mesma do console físico,
+e o `cancel` pela árvore também deixou de esvaziar essas linhas (ver
+[Consoles](../README.md#consoles)). A N88 tira a conferência do campo do
+Terminal, e a N89 devolve ao `cancel` da árvore o esvaziar da linha da
+senha do físico: as duas reprovadas.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -825,8 +842,11 @@ quatro reprovadas.
 | N82 | a tabela de canais de volta a 32 | `eventos: o pior caso dos processos cabe na tabela` |
 | N83 | a tabela de canais com dois por vaga de trabalho, 64 | `eventos: o pior caso dos processos cabe na tabela` |
 | N84 | o transbordo que conta todo endpoint como talvez com uma vaga — a primeira forma da correção, o sinal entre pessoas | NS54 |
+| N85 | fora do SDK: a leitura da auditoria do NSF que não avança — a mutação antiga da fase do NSF, contra o caso reescrito para esperar pelo andamento | `nsf: le junto com quem pede` |
 | N86 | o `escutar` sem o teto por processo | `eventos: o terceiro canal do processo e recusado`, `eventos: o pior caso dos processos cabe na tabela` |
 | N87 | a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos | `eventos: o pior caso dos processos cabe na tabela` |
+| N88 | o campo da janela do Terminal sem a regra da linha da pessoa: o `set_value`, o `cancel` e o `confirm` de um agente chegam à linha do nome ou da senha | `terminal: o agente nao edita nem confirma a linha da senha` |
+| N89 | o `cancel` da árvore que esvazia a linha da senha do console físico | `consoles: login e logout` |
 
 ## Medidas
 

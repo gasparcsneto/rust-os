@@ -1916,7 +1916,10 @@ dela, o mesmo par que o console publica. O valor da linha é lido da grade
 — o que vem depois do prompt, até o cursor, inclusive quando quebra na
 borda —, e é, portanto, o que a pessoa vê, seja quem for que digitou. O
 `set_value`, o `cancel` e o `confirm` do agente viram o que o Terminal
-digita no pseudo-terminal, pelo mesmo caminho das teclas da pessoa.
+digita no pseudo-terminal, pelo mesmo caminho das teclas da pessoa. Menos
+quando o console pede o nome, uma senha ou um passo do pareamento: aí o
+kernel recusa a ação ao recebê-la, pela regra da linha do físico, e ela não
+chega ao Terminal — ver [Consoles](#consoles).
 
 Duas coisas no interpretador tornaram isso possível sem adivinhar nada.
 Apagar a linha inteira — o Ctrl-U dos terminais —, para trocar o que está
@@ -4755,7 +4758,7 @@ até a suíte forçar a corrida que ela abre.
 | a espera depois da recusa não dobra | `nsf: le pelo gate com o papel dele` |
 | o NSF não casa a própria ação | `nsf: contem agente e pessoa pelo mesmo caminho` — o incidente não dizia a decisão do gate |
 | depois da recusa, planeja de novo | `nsf: a recusa encerra o objetivo` — o NSF pediu de novo |
-| a leitura não avança | `nsf: le junto com quem pede` |
+| a leitura não avança | `nsf: le junto com quem pede` — e de novo depois que o caso passou a esperar pelo andamento dos fios, e não por prazos de tiques (a N85 de `docs/SDK.md`) |
 | a taxa da linha de base sem a história | `ueba::testes::a_rajada_de_quem_chegou_nao_e_taxa`, no hospedeiro; na suíte, a outra metade da correção — a resolução na duração da janela — a mascara |
 | o NSF pede como o sistema | `nsf: le pelo gate com o papel dele` — a leitura não foi gravada como do serviço |
 | a sondagem pede quatro métodos | `regras::testes::a_sondagem`, `janela_e_recarga` |
@@ -4904,6 +4907,23 @@ Sem ganho a medir, não há o que pagar com esse risco.
   programa que roda. Fechar os endpoints como no fim do processo, ou mudar
   a identidade deles, muda o ciclo de vida de um objeto da malha: fica
   para uma decisão.
+- **O Terminal, o servidor de janelas e o teclado da Pessoa** (ver
+  [Consoles](#consoles)): a barra entrega o `ABRIR` a quem escuta os
+  nomes `terminal` e `janelas`, e `escutar` não reserva nome nenhum; e
+  qualquer processo dono de uma superfície, até invisível, pede o foco do
+  teclado quando quer. Um processo de outro principal que tomou o nome
+  com o Terminal fechado, ou que tomou o foco, recebe o que a Pessoa
+  digita — a senha também, com uma Pessoa entrada no console físico —, e
+  a captura não deixa registro: essas chamadas não passam pelo gate. A
+  senha capturada não abre nada pelo canal do agente, pela malha nem pelo
+  enlace (o login só existe no teclado de um console), mas serve a quem
+  tem um teclado nesta máquina. Fechar isso pede regras que não existem —
+  quem pode ser "o Terminal" e "o servidor" para o kernel, quem move o
+  teclado da Pessoa, por onde uma credencial entra —: fica para uma
+  decisão. Até lá, também, a regra da linha da pessoa num Terminal é
+  conferida quando a ação da árvore entra no kernel: uma ação que entra
+  enquanto o Enter da Pessoa ainda vai a caminho do console é conferida
+  contra a linha de antes, e o texto dela pode chegar à linha seguinte.
 
 ## O tempo
 
@@ -7520,9 +7540,17 @@ A senha não ecoa, não aparece na árvore semântica — o valor da linha
 fica vazio —, e o buffer dela é apagado depois da conferência. Enquanto um
 console pede senha, nada entra no histórico que `keyboard.read` devolve: o
 kernel não sabe para qual janela uma tecla vai virar senha, então não grava
-tecla nenhuma. Um agente não edita nem confirma a linha que pede nome ou
-senha, e não confirma `login` nem `logout`: o login é de quem está no
-teclado.
+tecla nenhuma. Um agente não edita — nem para esvaziar — nem confirma a
+linha que pede nome ou senha, e não confirma `login` nem `logout`: o login
+é de quem está no teclado. Vale para a linha do console físico e para a de
+cada Terminal, que a árvore mostra como o campo da janela dele: o
+`set_value`, o `cancel` e o `confirm` de um agente nesse campo são
+recusados quando a ação entra no kernel, com o mesmo motivo e pela mesma
+regra do interpretador que valem no físico, antes de o campo ser arrendado
+— e não chegam ao Terminal, que os digitaria no pseudo-terminal, onde o
+console só vê caracteres e não saberia que vieram da árvore. A decisão do
+`ui.act` continua a do gate, gravada; a recusa é da linha, e vai para o
+log.
 
 **Trocar a própria senha.** `senha` pede a atual, a nova e a nova de novo,
 pelas mesmas regras da senha do login — sem eco, fora da árvore e do
@@ -7550,7 +7578,15 @@ a mesma pessoa no físico e num Terminal ao mesmo tempo, com linhas e
 sessões independentes; a sessão revogada voltando ao login; um fio lançado
 pela pessoa decidindo pelo papel dela, e por nada depois da revogação; e
 os pseudo-terminais — um console por instância, a saída de um que não vai
-para o outro, a sessão que acaba quando o Terminal fecha ou morre. A fumaça
+para o outro, a sessão que acaba quando o Terminal fecha ou morre. E a
+linha da pessoa pela árvore: no físico, o `cancel` de um agente na linha
+da senha recusado; num Terminal de verdade, com a pessoa digitando pela
+janela, o `set_value` na linha do nome e o `set_value`, o `cancel` e o
+`confirm` na da senha, de um agente pela porta dele, recusados com o
+motivo do físico — sem arrendar o campo, sem a versão crescer, sem nada
+chegar ao Terminal —, a pessoa entrando em seguida sem `CONFLICT`, e o
+mesmo `set_value` passando com o console pedindo um comando ("terminal: o
+agente nao edita nem confirma a linha da senha"). A fumaça
 entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
 de ver o comando antes do login recusado e gravado, e com a senha fora do
 histórico; e no console físico, depois de um clique fora das janelas —
@@ -9168,12 +9204,19 @@ SDK: a conta de dois canais por vaga de trabalho do escalonador não
 valia — as vagas de trabalho são o mínimo garantido, e com menos núcleos
 os processos passam delas —, e a tabela passou a ter dois canais por fio
 que o escalonador comporta: 190, estáticos, ~409 KB de RAM fixa, no
-`.bss`. O teto por processo foi para dentro da mesma seção crítica que
+`.bss`. Medido no kernel de release, contra o do fim do DN-3: a tabela,
+408 896 bytes no `.bss` (a de antes, 68 880 no `.data`, dentro da
+imagem); os segmentos carregados encolheram 61 744 bytes no x86_64
+(−1,2%) e 96 960 no aarch64 (−2,2%), e a memória que eles ocupam cresceu
+344 084 e 328 240 bytes (+4,1% e +6,3%) — quase toda, a tabela. O teto por processo foi para dentro da mesma seção crítica que
 insere, e a varredura de cada `escutar` confere os ouvintes contra uma
 fotografia dos fios vivos — uma tomada da tranca do escalonador por
 varredura. Dois casos `eventos:` novos, o pior caso dos processos e o
 terceiro canal do processo; as N82, N83, N86 e N87 os põem à prova, e
-as quatro foram reprovadas.
+as quatro foram reprovadas. Fora do SDK, na mesma numeração, as N88 e
+N89 desfazem a regra da linha da pessoa no campo da janela do Terminal e
+no `cancel` da árvore no físico (ver [Consoles](#consoles)): as duas
+reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9219,6 +9262,7 @@ as quatro foram reprovadas.
 | o quadro da sessão com o par mandado com a ordem das gravações na mão (N80); o fecho de um fluxo acabado decidido sem a ordem (N81) | "fluxo: o fim que a sessao com o par conclui vai a cadeia na ordem", "fluxo: o fim por fora com a sessao na ordem grava um fim so" |
 | a tabela de canais de volta a 32 (N82), ou com dois canais por vaga de trabalho (N83); a varredura que pergunta ao escalonador por canal, e não pela fotografia dos fios vivos (N87) | "eventos: o pior caso dos processos cabe na tabela" |
 | o `escutar` sem o teto por processo (N86) | "eventos: o terceiro canal do processo e recusado", "eventos: o pior caso dos processos cabe na tabela" |
+| fora do SDK: o campo da janela do Terminal sem a regra da linha da pessoa (N88); o `cancel` da árvore que esvazia a linha da senha do físico (N89) | "terminal: o agente nao edita nem confirma a linha da senha"; "consoles: login e logout" |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
 | `native_interface` sem subir; a latência do aviso sem medida | "sdk: o system.info diz a interface nativa 2", "sdk: as medidas do laco" |
