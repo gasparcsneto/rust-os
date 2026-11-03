@@ -8962,7 +8962,8 @@ aviso, e o que ela encontrou pronto avisa pelo coletor um segundo depois, e
 o dobro a cada recusa seguida, em vez de girar; até lá só o que é novo no
 objeto — o que o dono ouviria — avisa, e a vaga que o fim de um fluxo dá
 na cota dos processos em que ele contava (quem abriu, sempre; quem
-aceitou, se aceitou) avisa o pedido; e a conta da recusa é refeita depois
+aceitou, se aceitou) avisa o pedido, uma vez — a recusa que responde a
+esse aviso espaça como as outras —; e a conta da recusa é refeita depois
 de ela consumir o aviso, para o que mudou depois de ela perguntar o nível
 não esperar o rearme —; a conta que perguntou o nível antes de uma operação
 do dono não o publica depois dela; o espaço só para quem esbarrou no cheio e para quem
@@ -9002,7 +9003,7 @@ aviso não consumido — junto ao da fila, ou na espera do dono —, o fim
 devido, o rearme depois das recusas seguidas e, até ele, só o novo
 avisando — o que o dono ouviria —, o quadro, a prontidão da
 ponta e do endpoint, o selo, a lista do contrato e o ELF forjado
-(NH01–NH19). Na suíte, nas duas arquiteturas, 41 casos `aviso:` e 9
+(NH01–NH19). Na suíte, nas duas arquiteturas, 43 casos `aviso:` e 9
 `sdk:` — o programa `avisado`, que só espera no canal
 dele, com a suíte ditando os passos ou pedindo como ele, pela mesma função
 do gate: o dado que avisa uma vez, um aviso de cada objeto no canal, o
@@ -9018,7 +9019,9 @@ suspensão e o esquecimento do dispositivo, os fluxos de e para outro
 Duke, o fim com o aviso não consumido — junto ao da fila, ou na espera do
 dono, com o teto das designações acabadas —, a recusa do gate que consome
 o aviso, a recusa do próprio comando que espaça o aviso — e a vaga que
-avisa o pedido, também no meio da recusa —, só o novo avisando antes do
+avisa o pedido uma vez, também no meio da recusa, com o aviso de antes
+dela ainda não consumido ou já consumido, e a recusa que responde ao
+aviso dela espaçando —, só o novo avisando antes do
 rearme, com outra pessoa mexendo na malha, o fim logo depois da operação
 recusada, a recepção que relê sem girar e o descarte das entregas, o
 sentido fechado pelo par com o fluxo vivo, o fim que chega no meio da
@@ -9087,7 +9090,10 @@ vaga, na recepção, na conta e no fim do fluxo, as sessenta e nove rodaram
 de novo contra o código final: todas reprovadas, nenhuma sobrevivente.
 Depois da correção do NS38 (CI 413: o caso esperava a linha de um aviso
 que o programa ainda não tinha dito), as onze que dependem dele, do NS39
-e do NS43 rodaram de novo: as onze reprovadas.
+e do NS43 rodaram de novo: as onze reprovadas. Depois do DN-3, a N70
+devolve a vaga que avisava duas vezes — a marca da vaga que não sai com o
+aviso publicado, e a recusa que responde a ele avisando de novo na
+hora —, contra os dois casos novos da vaga: reprovada pelos dois.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9118,6 +9124,7 @@ e do NS43 rodaram de novo: as onze reprovadas.
 | sem o filtro do que é novo; o filtro que segura também o novo; o novo contado ao contrário na conta pura; a vaga dada pelo pedido que acaba sem aceite, ou aos endpoints de qualquer processo | "depois da recusa, so o novo avisa antes do rearme" — a primeira, também o caso da recusa do comando; a da conta pura, também o teste do hospedeiro |
 | o objeto acabado que espera o rearme da recusa | "o fim na espera sai logo depois da operacao recusada" |
 | a vaga que chega no meio da recusa, ignorada | "a vaga no meio da recusa avisa o pedido" |
+| a marca da vaga que não sai com o aviso publicado (o segundo aviso da mesma vaga) | "a vaga avisa uma vez, e a recusa que responde a ela espaca", "a vaga no meio da recusa, sem aviso pendente, avisa uma vez" |
 | a recepção que relê o que já leu, contada como a que passou; o aceite sem pedido que desfaz o espaçamento; o descarte que lê e não confirma | "a recepcao que rele o que ja leu nao gira" |
 | o fim só do sentido que larga a designação do fluxo vivo | "o sentido fechado pelo par nao larga o fluxo vivo" |
 | a recusa espaçada que não refaz a conta depois da trava | "o fim entre o nivel e a trava da recusa sai na hora" |

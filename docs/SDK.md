@@ -257,12 +257,19 @@ O aviso é na **borda**, e a operação do dono o **rearma**:
   processos em que ele contava — o de quem abriu, sempre; o de quem aceitou,
   se ele foi aceito: o pedido que acaba sem aceite não contava na cota do
   dono do endpoint —: o dono que não pôde aceitar por falta de vaga é
-  avisado do pedido assim que ela abre — também quando ela abre no meio do
-  aceite recusado (NS38, NS39, NS43). O objeto que já acabou não espera o
-  rearme: depois da operação recusada, o `FIM` sai na hora (NS40). E a
-  conta da recusa é refeita depois de ela consumir o aviso, sempre: o que
-  mudou depois de ela perguntar o nível — o objeto que acabou, um bit novo
-  — também não espera o rearme (NS45);
+  avisado do pedido assim que ela abre, uma vez — também quando ela abre no
+  meio do aceite recusado, ou com um aviso de antes dela ainda não
+  consumido: a recusa que vem antes de o aviso da vaga sair não espaça, e
+  ele sai logo depois dela (NS38, NS39, NS43). A recusa que responde ao
+  aviso da vaga — com a vaga já tomada pelo próprio dono, que abriu ou
+  aceitou outro fluxo — espaça como as outras: a mesma vaga não avisa duas
+  vezes (NS50). E a recusa no meio da qual o aviso da vaga já saiu — o
+  pedido estava sem aviso pendente — o consome e espaça também; o evento
+  fica no canal, e o dono o lê, uma vez (NS51). O objeto que já acabou não
+  espera o rearme: depois da operação recusada, o `FIM` sai na hora
+  (NS40). E a conta da recusa é refeita depois de ela consumir o aviso,
+  sempre: o que mudou depois de ela perguntar o nível — o objeto que
+  acabou, um bit novo — também não espera o rearme (NS45);
 - a operação que passa **sem mudar nada** — o aceite sem pedido na fila, a
   recepção sem entrega nova — consome o aviso sem desfazer o rearme
   espaçado de uma recusa; e a recepção que não tira nenhuma entrega da
@@ -498,8 +505,8 @@ NS28 o instala e roda.
   com a conferência que acusa o parâmetro tirado, e o ELF forjado recusado
   sem pânico (NH16); e a prontidão que o kernel pergunta, da ponta
   (`politica::fluxo`, NH12) e do endpoint (`politica::malha`, NH13).
-- **Na suíte**, nas duas arquiteturas: 41 casos `aviso:` (NS01–NS25, o
-  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48 e NS49) e 9 casos `sdk:`
+- **Na suíte**, nas duas arquiteturas: 43 casos `aviso:` (NS01–NS25, o
+  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48–NS51) e 9 casos `sdk:`
   (NS26–NS31, NS37, NS44 e NS47). Os NS32–NS49 vieram da validação final —
   os achados do agente adversário, nas cinco rodadas: o fim com o aviso não consumido, junto ao
   da fila ou na espera do dono, e o teto das designações acabadas; a
@@ -515,7 +522,12 @@ NS28 o instala e roda.
   que não diz o fim que a operação já ouviu; o fim por fora, que vai à
   cadeia antes de acordar quem espera; o `eco-malha` que fecha o fluxo
   largado pelo cliente; e uma cópia inteira entre dois `copiador`, que
-  fecham o fluxo dos dois lados. O programa `avisado` só espera no canal dele e diz
+  fecham o fluxo dos dois lados. O NS50 e o NS51 vieram depois do DN-3: a
+  vaga que avisa o pedido uma vez, com a recusa que responde a esse aviso
+  — a vaga já tomada pelo próprio dono — espaçando até o rearme, em vez de
+  avisar de novo na hora; e a vaga que chega no meio de uma recusa, com o
+  pedido sem aviso pendente — a ordem contrária à do NS43 —, cujo aviso a
+  recusa consome e espaça, sem que o evento se perca. O programa `avisado` só espera no canal dele e diz
   no log cada aviso que chega; a suíte dita os passos a ele — o caminho
   inteiro pelo runtime — ou pede **como** ele, pela mesma função do gate,
   nos passos que precisam ser exatos. O que se confere é o
@@ -602,6 +614,11 @@ e o NS43 passaram a esperar o `avisado` ocioso — o canal vazio e ele
 parado nele — antes da marca, e as onze mutações que eles reprovam (N46 a
 N53, N55, N61 e N62) rodaram de novo contra eles: as onze reprovadas.
 
+**Depois do DN-3.** A N70 devolve a vaga que avisava duas vezes: a marca
+da vaga que não sai com o aviso publicado — a recusa que responde ao
+aviso da vaga não espaça, e o pedido avisa de novo na hora —, contra o
+NS50 e o NS51: reprovada pelos dois.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -673,6 +690,7 @@ N53, N55, N61 e N62) rodaram de novo contra eles: as onze reprovadas.
 | N67 | a conta que publica o nível perguntado antes da operação do dono (o `FIM` que ela já ouviu) | NS48 |
 | N68 | o filtro do que é novo pelo nível cru, e não pelo que o dono ouviria | NH19 |
 | N69 | o fim por fora gravado depois de acordar quem espera | NS49 |
+| N70 | a marca da vaga que não sai com o aviso publicado (o segundo aviso da mesma vaga, na recusa que respondia ao primeiro) | NS50, NS51 |
 
 ## Medidas
 
@@ -767,10 +785,15 @@ Os residuais da validação final — nenhum é bypass de autoridade:
   segundo é uma tentativa a mais por entrega. A vaga, do mesmo jeito,
   esquece o nível recusado inteiro dos endpoints do processo, e não só o
   pedido: o fim de um fluxo que contava na cota dele — um que ele abriu,
-  ou que aceitou — traz de volta o que outra operação recusada dele tinha
-  encontrado: um aviso na hora, e a recusa seguinte sobre o mesmo
-  endpoint, que usa a vaga, ainda não espaça — uma tentativa a mais por
-  vaga, sem giro: a recusa depois dela espaça de novo.
+  ou que aceitou — traz de volta, num aviso na hora, o que outra operação
+  recusada dele tinha encontrado, também o que nada tem com a cota (a
+  entrega que a recepção recusada pela taxa encontrou) — uma tentativa a
+  mais por vaga, sem giro: a recusa que responde a esse aviso espaça de
+  novo, e a mesma vaga não avisa duas vezes (NS50). Só não espaça a
+  recusa que vem antes de o aviso da vaga sair — a vaga chegou com um
+  aviso ainda não consumido, que é ela que consome (NS43) —, e o aviso da
+  vaga sai logo depois dela, uma vez; a recusa no meio da qual ele já saiu
+  o consome e espaça, e o evento fica no canal (NS51).
 - **A recusa pela forma do pedido** — o `notify` que não é canal do
   processo, o `wait` que não cabe, o id que não é de um fluxo dele — não
   chega ao objeto e não consome o aviso: o objeto fica com o aviso não
