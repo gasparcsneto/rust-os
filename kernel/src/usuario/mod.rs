@@ -1291,13 +1291,26 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// # A execução da decisão, na auditoria
 ///
 /// A decisão que o gate grava aqui ganha na cadeia o registro da execução
-/// dela, que a cita, em três casos em que a troca permitida não acontece: o
-/// código que não confere (`DENY_POLICY`), a imagem que falha antes do
-/// ponto sem volta (`ERROR`, com o motivo), e a ordem que foi para outro fio
-/// **depois** de decidida (`CONFLICT`, "adiada"). Esta última não muda nada
-/// — a volta seguinte decide de novo, com a política de então —, e dizê-la
-/// é o que impede a cadeia de mostrar um `process.exec` permitido sem troca
-/// nenhuma.
+/// dela, que a cita, em cada um dos cinco casos em que a troca permitida
+/// não chega ao fim:
+///
+/// - o arquivo que não se lê (`ERROR`, com o motivo da leitura);
+/// - o código que não confere (`DENY_POLICY`);
+/// - a imagem que falha antes do ponto sem volta (`ERROR`, com o motivo);
+/// - a ordem que foi para outro fio **depois** de decidida (`CONFLICT`,
+///   "adiada");
+/// - a imagem nova que não se mapeia **depois** do ponto sem volta
+///   (`ERROR`, com o motivo).
+///
+/// Nos quatro primeiros o processo segue intacto. A volta adiada não muda
+/// nada — a seguinte decide de novo, com a política de então. No último não
+/// há para onde voltar: os fluxos de quem era ponta já acabaram na troca
+/// (`o programa mudou`), o registro vai em nome do processo como ele está —
+/// com o programa que ele já adotou, que é o que o fio diz —, e o processo
+/// acaba. Dizer cada um é o que impede a cadeia de mostrar um
+/// `process.exec` permitido sem troca nenhuma, ou sem o fim que a troca
+/// teve. A que chega ao fim não grava execução: a imagem nova roda, e é o
+/// que a decisão permitiu.
 ///
 /// Quem não é ponta de fluxo nenhum não toma a ordem: não há fim a gravar.
 /// E não vira ponta no meio da chamada — abrir e aceitar um fluxo são
@@ -1368,9 +1381,26 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     // O código, lido e conferido pela mesma regra do `user.run`: o de fora
     // da imagem só com o selo de um editor em que o papel confia. O que é
     // conferido é o que se carrega — ver `codigo`.
-    let codigo = match codigo::obter(&caminho, crate::fios::autoridade_atual()) {
+    let lido = codigo::obter(&caminho, crate::fios::autoridade_atual());
+    #[cfg(feature = "modo-teste")]
+    let lido = if falha_da_troca_de_teste::falhar(fio, falha_da_troca_de_teste::Etapa::Leitura) {
+        Err(codigo::Recusa::Leitura(falha_da_troca_de_teste::LEITURA))
+    } else {
+        lido
+    };
+    let codigo = match lido {
         Ok(c) => c,
+        // O gate deixou o caminho, e o arquivo não se lê: o processo segue
+        // inteiro — nada foi trocado —, e a execução da decisão diz que a
+        // troca falhou, e por quê.
         Err(codigo::Recusa::Leitura(motivo)) => {
+            crate::autorizacao::auditar_execucao_do_processo(
+                "process.exec",
+                &caminho,
+                politica::Codigo::Error,
+                motivo.motivo(),
+                decisao,
+            );
             crate::log_warn!(
                 "usuario",
                 "executar: `{}` nao pode ser lido: {}",
@@ -1406,11 +1436,12 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     let preparada = programa::preparar(&imagem, editor);
     #[cfg(feature = "modo-teste")]
-    let preparada = if falha_da_preparacao_de_teste::falhar(fio) {
-        Err(falha_da_preparacao_de_teste::MOTIVO)
-    } else {
-        preparada
-    };
+    let preparada =
+        if falha_da_troca_de_teste::falhar(fio, falha_da_troca_de_teste::Etapa::Preparacao) {
+            Err(falha_da_troca_de_teste::PREPARACAO)
+        } else {
+            preparada
+        };
     let preparada = match preparada {
         Ok(preparada) => preparada,
 
@@ -1492,7 +1523,20 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // depois do ponto de não retorno faz em qualquer sistema. Os fluxos
         // de quem era ponta já acabaram na troca — o programa já tinha
         // mudado —, e a morte não acha mais nenhum.
+        //
+        // A decisão do gate já foi gravada: a execução dela diz que a troca
+        // não chegou ao fim, e por quê, antes de o processo acabar. Vai em
+        // nome do processo como ele está agora — o programa que ele adotou
+        // na troca é o que o fio diz —, e a citação a liga à decisão, gravada
+        // em nome do programa que pediu.
         Err(motivo) => {
+            crate::autorizacao::auditar_execucao_do_processo(
+                "process.exec",
+                &caminho,
+                politica::Codigo::Error,
+                motivo,
+                decisao,
+            );
             crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return sair(erro::SEM_MEMORIA);
@@ -1594,36 +1638,69 @@ pub mod pausa_da_troca_de_teste {
     }
 }
 
-/// Só para a suíte: a próxima troca de imagem do processo armado falha no
-/// primeiro passo — como falharia a imagem que o validador recusa, ou o
-/// espaço novo sem memória —, depois do gate e antes do ponto sem volta. O
-/// caso "fluxo: a troca de imagem que falha antes do ponto sem volta" a arma
-/// para um processo que é ponta de fluxo. Fora da suíte não existe.
+/// Só para a suíte: a próxima troca de imagem do processo armado falha
+/// numa etapa escolhida, depois do gate, como falharia de verdade:
+///
+/// - `Etapa::Leitura`: o arquivo não se lê — a leitura de
+///   [`crate::usuario::codigo::obter`] devolve o erro `LEITURA`;
+/// - `Etapa::Preparacao`: o primeiro passo da carga, antes do ponto sem
+///   volta — como a imagem que o validador recusa, ou o espaço novo sem
+///   memória;
+/// - `Etapa::Mapeamento`: o terceiro passo
+///   ([`crate::usuario::programa::Trocada::mapear`]), **depois** do ponto
+///   sem volta e de o que era da imagem anterior sair — como a falta de
+///   memória ao mapear os segmentos.
+///
+/// Os casos "fluxo: a troca de imagem cujo arquivo nao se le", "... que
+/// falha antes do ponto sem volta" e "... que falha depois do ponto sem
+/// volta" a armam para um processo que é ponta de fluxo. Fora da suíte não
+/// existe.
 #[cfg(feature = "modo-teste")]
-pub mod falha_da_preparacao_de_teste {
+pub mod falha_da_troca_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};
 
-    /// O motivo da falha, como a execução da decisão o grava.
-    pub const MOTIVO: &str = "a preparacao da imagem falhou de proposito";
-
-    /// O processo cuja troca falha, como `fio + 1`; zero, nenhum.
-    static ARMADA: AtomicU64 = AtomicU64::new(0);
-
-    /// A próxima troca de imagem do processo `fio` falha no primeiro passo.
-    pub fn armar(fio: u64) {
-        ARMADA.store(fio + 1, Ordering::Release);
+    /// A etapa da troca de imagem que falha.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Etapa {
+        /// A leitura do arquivo.
+        Leitura,
+        /// O primeiro passo da carga, antes do ponto sem volta.
+        Preparacao,
+        /// O terceiro passo da carga, depois do ponto sem volta.
+        Mapeamento,
     }
 
-    /// Desarma — o caso que falha antes de usá-la não a deixa armada para o
-    /// seguinte.
+    /// O erro da leitura que falha — o do dispositivo que recusa —; o
+    /// motivo dele é o que a execução da decisão grava.
+    pub const LEITURA: crate::vfs::Erro = crate::vfs::Erro::DoDispositivo;
+
+    /// O motivo da preparação que falha, como a execução da decisão o grava.
+    pub const PREPARACAO: &str = "a preparacao da imagem falhou de proposito";
+
+    /// O motivo do mapeamento que falha, como a execução da decisão o grava.
+    pub const MAPEAMENTO: &str = "o mapeamento da imagem falhou de proposito";
+
+    /// O processo cuja troca falha em cada etapa, como `fio + 1`; zero,
+    /// nenhum.
+    static ARMADA: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+    /// A próxima troca de imagem do processo `fio` falha na etapa `etapa`.
+    pub fn armar(fio: u64, etapa: Etapa) {
+        ARMADA[etapa as usize].store(fio + 1, Ordering::Release);
+    }
+
+    /// Desarma as três etapas — o caso que falha antes de usar a sua não a
+    /// deixa armada para o seguinte.
     pub fn desarmar() {
-        ARMADA.store(0, Ordering::Release);
+        for armada in &ARMADA {
+            armada.store(0, Ordering::Release);
+        }
     }
 
-    /// Se a troca do processo `fio` falha agora — uma vez: a pergunta
-    /// desarma.
-    pub(super) fn falhar(fio: u64) -> bool {
-        ARMADA
+    /// Se a troca do processo `fio` falha agora na etapa `etapa` — uma vez:
+    /// a pergunta desarma.
+    pub(super) fn falhar(fio: u64, etapa: Etapa) -> bool {
+        ARMADA[etapa as usize]
             .compare_exchange(fio + 1, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }

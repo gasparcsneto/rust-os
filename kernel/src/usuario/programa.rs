@@ -379,6 +379,16 @@ impl Trocada<'_> {
         // troca.
         drop(anterior);
 
+        // Na suíte: a falta de memória ao mapear, com a anterior já fora —
+        // ver `super::falha_da_troca_de_teste`.
+        #[cfg(feature = "modo-teste")]
+        if super::falha_da_troca_de_teste::falhar(
+            crate::fios::id_atual(),
+            super::falha_da_troca_de_teste::Etapa::Mapeamento,
+        ) {
+            return Err(super::falha_da_troca_de_teste::MAPEAMENTO);
+        }
+
         for (i, segmento) in elf.segmentos().iter().enumerate() {
             let permissoes = Permissoes {
                 escrita: segmento.escrita,

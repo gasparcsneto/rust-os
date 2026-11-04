@@ -11,9 +11,9 @@ use super::{
     ContasDoPlano, NaMalha, Resultado, TETO_DA_MALHA, com_a_malha, de_base64, decisao_do_envelope,
     desfecho_na_malha, diretorios_acima, dito_na_malha, encerrar_na_malha, encerrar_o_correio,
     energia_entregue, esperar_ate, esperar_cedendo, fs_numero, fs_ok, fs_pedir, fs_texto,
-    gravado_na_malha, linhas_do_programa, nada_gravado_com, passo_na_malha, pedido_rpc,
-    pessoa_da_sessao, politica_sem, politica_trocada, registros_depois, simulado_na_malha,
-    sistema_aqui, sistema_no_armazem, versao_no_armazem,
+    gravado_na_malha, linhas_do_programa, linhas_que_comecam, nada_gravado_com, passo_na_malha,
+    pedido_rpc, pessoa_da_sessao, politica_sem, politica_trocada, registros_depois,
+    simulado_na_malha, sistema_aqui, sistema_no_armazem, versao_no_armazem,
 };
 use crate::agent::json::Json;
 use crate::autorizacao::{Autoridade, Chamador};
@@ -1626,14 +1626,27 @@ fn decisoes_de_troca(antes: u64) -> usize {
 }
 
 /// A execução de uma decisão de troca é a de `codigo`, gravada em nome do
-/// processo `fio`, com `motivo` e a citação da decisão `decisao` no fim.
+/// processo `fio`, com `motivo` e a citação da decisão `decisao` no fim — o
+/// detalhe inteiro como a auditoria o compõe
+/// (`politica::auditoria::detalhe_composto`): passando do teto do detalhe,
+/// o motivo perde o fim, e a citação fica.
 fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decisao: u64) -> bool {
-    r.1.codigo == codigo
-        && r.0 > decisao
-        && r.1.detalhe.starts_with(&format!("pelo processo {fio} ("))
-        && r.1
-            .detalhe
-            .ends_with(&format!("): {motivo}; decisao {decisao}"))
+    let pelo = format!("pelo processo {fio} (");
+    // O programa com que o processo foi gravado — o de antes da troca, ou o
+    // que ele já adotou: quem chama confere qual.
+    let Some((programa, _)) =
+        r.1.detalhe
+            .strip_prefix(&pelo)
+            .and_then(|resto| resto.split_once("): "))
+    else {
+        return false;
+    };
+    let esperado = politica::auditoria::detalhe_composto(
+        Some(&format!("{pelo}{programa})")),
+        motivo,
+        &format!("; decisao {decisao}"),
+    );
+    r.1.codigo == codigo && r.0 > decisao && r.1.detalhe == esperado
 }
 
 /// A troca de imagem de quem não é ponta de fluxo nenhum não toma a ordem
@@ -2050,9 +2063,45 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
 /// passando bytes; nenhum fim é gravado. E a decisão do gate, já gravada,
 /// termina dita: a execução dela, `ERROR`, com o motivo e a citação.
 pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
-    use crate::usuario::falha_da_preparacao_de_teste as falha;
+    use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
+    troca_de_ponta_que_falha_intacta(
+        331,
+        Etapa::Preparacao,
+        protocolo::usuario::erro::SEM_MEMORIA,
+        falha::PREPARACAO,
+    )
+}
+
+/// A troca de imagem de quem é ponta de fluxo cujo arquivo não se lê — o
+/// gate deixou o caminho, e a leitura falha, como falharia o dispositivo que
+/// recusa — é como a que falha antes do ponto sem volta: o processo recebe
+/// o erro (`PROGRAMA_DESCONHECIDO`) e segue o que era, o fluxo continua, e
+/// nenhum fim é gravado. A decisão do gate termina dita: a execução dela,
+/// `ERROR`, com o motivo da leitura e a citação — o motivo do dispositivo é
+/// longo, e o detalhe o corta no teto, com a citação inteira no fim.
+pub(super) fn fluxo_a_troca_cujo_arquivo_nao_se_le() -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
+    troca_de_ponta_que_falha_intacta(
+        332,
+        Etapa::Leitura,
+        protocolo::usuario::erro::PROGRAMA_DESCONHECIDO,
+        falha::LEITURA.motivo(),
+    )
+}
+
+/// A troca de imagem de quem é ponta de fluxo que falha na `etapa`, sem
+/// chegar ao ponto sem volta: o processo recebe `devolvido` e segue o que
+/// era, ponta do fluxo, que continua passando bytes; nenhum fim é gravado; e
+/// a decisão do gate tem uma execução, `ERROR`, que a cita com `motivo`.
+fn troca_de_ponta_que_falha_intacta(
+    terminal: u16,
+    etapa: crate::usuario::falha_da_troca_de_teste::Etapa,
+    devolvido: i64,
+    motivo: &str,
+) -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste as falha;
     com_os_fluxos(|| {
-        let (_, bia) = pessoa("bia", 331);
+        let (_, bia) = pessoa("bia", terminal);
         let antes = crate::autorizacao::ultimo_registro();
         let a = Ponta::lancar(bia)?;
         let r = (|| -> Resultado {
@@ -2061,10 +2110,10 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
                 let id = aberto(&a, &c)?;
                 let trocas = trocas_feitas();
                 let desde_o_pedido = crate::autorizacao::ultimo_registro();
-                falha::armar(c.fio());
+                falha::armar(c.fio(), etapa);
                 let desde = c.ditar(TROCAR, 0)?;
                 let devolveu = dito_na_malha(desde, "fluxos: trocar devolveu ")?;
-                if devolveu != format!("{}", protocolo::usuario::erro::SEM_MEMORIA) {
+                if devolveu != format!("{devolvido}") {
                     crate::log_error!("teste", "trocar devolveu {}", devolveu);
                     return Err("a troca que falhou antes do ponto sem volta nao devolveu o erro");
                 }
@@ -2087,13 +2136,7 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
                 let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
                     ([(decisao, d)], [execucao]) => {
                         d.codigo == Codigo::Allow
-                            && execucao_da_troca(
-                                execucao,
-                                Codigo::Error,
-                                c.fio(),
-                                falha::MOTIVO,
-                                *decisao,
-                            )
+                            && execucao_da_troca(execucao, Codigo::Error, c.fio(), motivo, *decisao)
                     }
                     _ => false,
                 };
@@ -2124,6 +2167,131 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
             falha::desarmar();
             encerrar_todas(r, &[&c])
         })();
+        encerrar_todas(r, &[&a])
+    })
+}
+
+/// A troca de imagem de quem é ponta de fluxo que falha **depois** do ponto
+/// sem volta — a imagem nova não se mapeia, como na falta de memória ao
+/// mapear os segmentos, com o que era da anterior já fora — não tem para
+/// onde voltar: o processo acaba, com `SEM_MEMORIA`, sem ouvir o retorno da
+/// chamada. O fluxo já tinha acabado na troca, com `o programa mudou` —
+/// gravado dentro da ordem das gravações, trazida de fora pela troca, antes
+/// de acordar quem espera, como na troca que dá certo —, e a morte não o
+/// acaba de novo. A decisão do gate termina dita: a execução dela, `ERROR`,
+/// com o motivo e a citação, gravada em nome do processo como ele estava —
+/// com o programa que ele já tinha adotado, o `ola`.
+pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
+    use protocolo::usuario::erro;
+    com_os_fluxos(|| {
+        let (_, bia) = pessoa("bia", 333);
+        let antes = crate::autorizacao::ultimo_registro();
+        let a = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let c = Ponta::lancar(bia)?;
+            let r = (|| -> Resultado {
+                let id = aberto(&a, &c)?;
+                let n =
+                    crate::fluxo::numero_de_teste(&id).ok_or("o id do fluxo nao e deste boot")?;
+                crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+                let desde_o_pedido = crate::autorizacao::ultimo_registro();
+                falha::armar(c.fio(), Etapa::Mapeamento);
+                let desde = c.ditar(TROCAR, 0)?;
+                // O processo acaba pelo `sair` da troca, com o erro — e não
+                // volta ao programa que chamou, nem morre de uma falha.
+                esperar_ate(
+                    || {
+                        linhas_do_programa(
+                            desde,
+                            &format!("processo encerrou com codigo {}", erro::SEM_MEMORIA),
+                        ) == 1
+                    },
+                    TETO_DA_MALHA,
+                )
+                .map_err(
+                    |_| "a troca que falhou depois do ponto sem volta nao encerrou o processo",
+                )?;
+                esperar_ate(|| crate::fios::processo(c.fio()).is_none(), TETO_DA_MALHA)
+                    .map_err(|_| "o processo da troca que falhou depois do ponto sem volta vive")?;
+                if linhas_que_comecam(desde, "fluxos: trocar devolveu ") != 0 {
+                    return Err("a troca que falhou depois do ponto sem volta voltou ao programa");
+                }
+                // O fluxo acabou na troca — uma vez, com `o programa mudou` —,
+                // dentro da ordem, e quem ficou vê o motivo.
+                fim_gravado(antes, &id, "o programa mudou; ida 0; volta 0; desc 0")?;
+                let recurso = format!("fluxo:{id}");
+                let fins =
+                    registros_depois(antes, |e| e.metodo == "stream.end" && e.recurso == recurso);
+                if fins.len() != 1 || crate::fluxo::contagem().0 != 0 {
+                    crate::log_error!("teste", "fins: {:?}", fins);
+                    return Err(
+                        "o fluxo da troca que falhou depois do ponto sem volta acabou de novo",
+                    );
+                }
+                if crate::fluxo::fim_gravado_na_ordem_de_teste() != Some(true) {
+                    return Err("o fim da troca que falhou nao foi gravado com a ordem na mao");
+                }
+                if crate::fluxo::troca_com_a_ordem_trazida_de_teste() != Some(true) {
+                    return Err("o fim da troca que falhou nao veio com a ordem trazida de fora");
+                }
+                if crate::fluxo::fim_na_cadeia_ao_acordar_de_teste() != Some(true) {
+                    return Err("quem esperava o fluxo acordou antes do fim na cadeia");
+                }
+                if estado(a.quem(), &id).1.as_deref() != Some("o programa mudou") {
+                    return Err("quem ficou nao viu a troca de imagem que falhou");
+                }
+                // A decisão, em nome do programa que pediu, e a execução dela
+                // que a cita, em nome do que o processo já tinha adotado.
+                let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
+                let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
+                    ([(decisao, d)], [execucao]) => {
+                        crate::log_info!(
+                            "teste",
+                            "decisao {}: {}; execucao {}: {}",
+                            decisao,
+                            d.detalhe,
+                            execucao.0,
+                            execucao.1.detalhe
+                        );
+                        d.codigo == Codigo::Allow
+                            && d.detalhe.starts_with(&format!(
+                                "pelo processo {} ({})",
+                                c.fio(),
+                                c.p.programa.descricao()
+                            ))
+                            && execucao_da_troca(
+                                execucao,
+                                Codigo::Error,
+                                c.fio(),
+                                falha::MAPEAMENTO,
+                                *decisao,
+                            )
+                            && execucao
+                                .1
+                                .detalhe
+                                .starts_with(&format!("pelo processo {} (ola ", c.fio()))
+                    }
+                    _ => false,
+                };
+                if !dita {
+                    crate::log_error!(
+                        "teste",
+                        "decisoes {:?}; execucoes {:?}",
+                        decisoes,
+                        execucoes
+                    );
+                    return Err("a decisao da troca que falhou nao tem a execucao que a cita");
+                }
+                Ok(())
+            })();
+            falha::desarmar();
+            // O processo só segue vivo — o mesmo programa — se o caso falhou
+            // antes de ele acabar.
+            let vivo = crate::fios::processo(c.fio()).map(|(_, p)| p) == Some(c.p.programa);
+            if vivo { encerrar_todas(r, &[&c]) } else { r }
+        })();
+        crate::fluxo::desarmar_de_teste();
         encerrar_todas(r, &[&a])
     })
 }

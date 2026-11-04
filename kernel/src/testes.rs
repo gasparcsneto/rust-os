@@ -38312,6 +38312,14 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_troca_que_falha_antes_do_ponto_sem_volta,
     },
     Caso {
+        nome: "fluxo: a troca de imagem cujo arquivo nao se le",
+        f: fluxo::fluxo_a_troca_cujo_arquivo_nao_se_le,
+    },
+    Caso {
+        nome: "fluxo: a troca de imagem que falha depois do ponto sem volta",
+        f: fluxo::fluxo_a_troca_que_falha_depois_do_ponto_sem_volta,
+    },
+    Caso {
         nome: "fluxo: a revogacao e a politica nova encerram",
         f: fluxo::fluxo_a_revogacao_e_a_politica_nova,
     },
