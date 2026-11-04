@@ -4113,3 +4113,107 @@ pub(super) fn pareamento_o_fim_no_meio_da_senha_no_fisico() -> Resultado {
         r
     })
 }
+
+/// O fim que chega com a linha da senha já confirmada — o Enter da Pessoa
+/// levou a senha, e a conferência roda — não deixa o console engolindo: não
+/// há resto a engolir, e engolir comeria a linha seguinte dela. Um fio
+/// noutro núcleo vence a cerimônia no meio da conferência — o Argon2id —, e
+/// a linha seguinte executa. A corrida pode não acontecer — o fio não vê a
+/// conferência em curso —: o caso tenta de novo, e só reprova se nunca a
+/// vê. Com um núcleo só, não há com quem correr.
+pub(super) fn smp_o_fim_com_a_senha_ja_confirmada_nao_engole() -> Resultado {
+    use crate::interpretador::{self as interp, Modo};
+    use core::sync::atomic::{AtomicU8, Ordering::SeqCst};
+    /// As tentativas da corrida.
+    const VEZES: u64 = 4;
+    /// Do fio: 0, saindo; 1, pronto; 2, armado, à espera da conferência; 3,
+    /// venceu a cerimônia no meio dela; 4, não a viu.
+    static FASE: AtomicU8 = AtomicU8::new(0);
+
+    extern "C" fn vencer_na_conferencia(_argumento: u64) -> ! {
+        FASE.store(1, SeqCst);
+        loop {
+            match FASE.load(SeqCst) {
+                0 => break,
+                2 => {}
+                _ => {
+                    core::hint::spin_loop();
+                    continue;
+                }
+            }
+            // O Enter tomou a senha — a linha vazia — e o modo ainda é o
+            // dela: a conferência roda. A linha com a senha ainda é antes do
+            // Enter; outro modo, a conferência já passou.
+            let limite = crate::tempo::uptime_ms() + 10_000;
+            loop {
+                match interp::linha_de_teste(CONSOLE) {
+                    Some((Modo::SenhaDoPareamento, 0)) => {
+                        crate::pareamento::adiantar_de_teste(conta::PRAZO_MS);
+                        crate::pareamento::vencer();
+                        FASE.store(3, SeqCst);
+                        break;
+                    }
+                    Some((Modo::SenhaDoPareamento, _)) if crate::tempo::uptime_ms() < limite => {}
+                    _ => {
+                        FASE.store(4, SeqCst);
+                        break;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+        }
+        crate::fios::terminar()
+    }
+
+    let Some(alvo) = super::nucleos_secundarios().next() else {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o fim nao corre junto com a conferencia"
+        );
+        return Ok(());
+    };
+    FASE.store(0, SeqCst);
+    crate::fios::criar_no_nucleo("teste-fim-na-conferencia", vencer_na_conferencia, 0, alvo)?;
+    let resultado = com_a_cerimonia(|| {
+        super::esperar_ate(|| FASE.load(SeqCst) == 1, 300)
+            .map_err(|_| "o fio do caso nao subiu")?;
+        entrar(CONSOLE, "bia")?;
+        for n in 0..VEZES {
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_002_800 + n, 1);
+            let k = ate_os_codigos(CONSOLE, &mut ini)?;
+            digitar(CONSOLE, &texto(k.k_a));
+            if linha(CONSOLE) != Linha::Senha {
+                return Err("o codigo certo nao pediu a senha");
+            }
+            // A senha, e o fio armado; então o Enter, e a conferência.
+            super::digitar_no_console(CONSOLE, SENHA);
+            FASE.store(2, SeqCst);
+            let _ = saida_do_console();
+            super::digitar_no_console(CONSOLE, "\n");
+            super::esperar_ate(|| FASE.load(SeqCst) >= 3, 1200)
+                .map_err(|_| "o fio do caso nao respondeu")?;
+            if FASE.swap(1, SeqCst) == 4 {
+                crate::log_info!("teste", "volta {}: o fio nao viu a conferencia em curso", n);
+                continue;
+            }
+            // O fim chegou no meio: o console não engole, e a linha
+            // seguinte executa.
+            if interp::engolindo_de_teste(CONSOLE) {
+                return Err("o fim com a senha ja confirmada pos o console a engolir");
+            }
+            if !saida_do_console().contains("pareamento desfeito") {
+                return Err("o fim no meio da conferencia nao chegou ao console");
+            }
+            digitar(CONSOLE, "agent.ping");
+            if !saida_do_console().contains("\"pong\"") {
+                return Err("a linha seguinte ao fim no meio da conferencia nao executou");
+            }
+            return Ok(());
+        }
+        Err("em nenhuma volta o fio viu a conferencia em curso")
+    });
+    FASE.store(0, SeqCst);
+    resultado
+}

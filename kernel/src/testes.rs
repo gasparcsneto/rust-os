@@ -39337,6 +39337,10 @@ static CASOS: &[Caso] = &[
         f: pareamento::pareamento_o_fim_no_meio_da_senha_no_fisico,
     },
     Caso {
+        nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",
+        f: pareamento::smp_o_fim_com_a_senha_ja_confirmada_nao_engole,
+    },
+    Caso {
         nome: "copia: o armazem inteiro, pelo sistema",
         f: copia_o_armazem_inteiro,
     },
