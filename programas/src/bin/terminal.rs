@@ -53,7 +53,11 @@
 //! pareamento — vem pelo canal e vai ao pseudo-terminal por este programa. O
 //! que ele guarda no caminho é zerado assim que o pseudo-terminal o aceita:
 //! a fila do que espera, o bloco que ela larga ao crescer, a tecla e os
-//! eventos de tecla já tratados.
+//! eventos de tecla do lote. E, no fim — também quando ele sai no meio de
+//! um lote —, o que sobrou do lote e o bloco inteiro da fila. A leitura do
+//! canal, no runtime, zera o que o kernel escreveu
+//! ([`programas::sistema::ler_eventos`]); do lado do kernel, o anel do
+//! canal e as pilhas da leitura e da escrita também não guardam a tecla.
 //!
 //! Cada coisa que o programa faz de notável vira uma linha no log,
 //! `terminal: ...`: é por elas que a suíte acompanha o que aconteceu.
@@ -68,9 +72,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use programas::escreverln;
 use programas::janela::{Gesto, Janela};
 use programas::sistema;
+use programas::{escreverln, esquecer_as_teclas, zerar};
 
 use protocolo::usuario::evento::origem;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
@@ -106,29 +110,21 @@ struct Terminal {
     ///
     /// Em bytes, e não num `String`, para poder zerar: pode ser uma senha.
     /// O que o pseudo-terminal aceita é zerado antes de sair da conta — um
-    /// `drain` só moveria o resto, e os bytes aceitos ficariam no bloco —, e
-    /// o bloco que a fila larga ao crescer volta zerado ao alocador. Ver
-    /// [`zerar`].
+    /// `drain` só moveria o resto, e os bytes aceitos ficariam no bloco —, o
+    /// bloco que a fila larga ao crescer volta zerado ao alocador, e na saída
+    /// o bloco inteiro é zerado. Ver [`zerar`].
     pendente: Vec<u8>,
 }
 
-/// Zera `bytes` com escritas voláteis, que o compilador não tira — as de uma
-/// memória que ninguém mais lê seriam escritas mortas. O mesmo que
-/// `politica::sigiloso::zerar` faz no kernel, aqui do lado do programa.
-fn zerar(bytes: &mut [u8]) {
-    for b in bytes.iter_mut() {
-        // SAFETY: `b` é um `&mut u8` válido desta fatia; a escrita volátil
-        // só impede o compilador de tirá-la.
-        unsafe { core::ptr::write_volatile(b, 0) };
-    }
-}
-
-/// Zera o que o evento de uma tecla já tratada guarda — o caractere. Ver
-/// [`zerar`].
-fn esquecer_a_tecla(e: &mut Evento) {
-    // SAFETY: `e.a` é um `i64` válido deste evento; a escrita volátil só
-    // impede o compilador de tirá-la.
-    unsafe { core::ptr::write_volatile(&mut e.a, 0) };
+/// Como o laço do Terminal acaba.
+enum Fim {
+    /// A janela foi fechada: a caixa de fechar, pelo clique ou pelo `press`
+    /// da árvore.
+    Fechado,
+    /// O pedido de encerrar, que só a suíte manda.
+    Encerrado,
+    /// A leitura do canal falhou: o código de saída.
+    Falha(i64),
 }
 
 impl Terminal {
@@ -277,6 +273,27 @@ impl Terminal {
         self.focar();
         escreverln!("terminal: frente");
     }
+
+    /// Sai, por qualquer caminho do laço: o que ainda esperava o
+    /// pseudo-terminal — pode ser uma senha — é zerado, o bloco inteiro da
+    /// fila, e não só o que ela tem; e o código de saída.
+    fn sair(&mut self, fim: Fim) -> i64 {
+        let inteiro = self.pendente.capacity();
+        self.pendente.resize(inteiro, 0);
+        zerar(&mut self.pendente);
+        self.pendente.clear();
+        match fim {
+            Fim::Fechado => {
+                escreverln!("terminal: fechado");
+                0
+            }
+            Fim::Encerrado => {
+                escreverln!("terminal: encerrado");
+                0
+            }
+            Fim::Falha(codigo) => codigo,
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -332,23 +349,26 @@ fn principal() -> i64 {
     escreverln!("terminal: pronto");
 
     let mut eventos = [Evento::default(); 16];
-    loop {
+    let fim = loop {
         let n = match sistema::ler_eventos(canal, &mut eventos) {
             Ok(n) => n,
             Err(e) => {
                 escreverln!("terminal: a leitura do canal falhou: {}", e);
-                return 6;
+                break Fim::Falha(6);
             }
         };
         let mut mudou = false;
+        // O laço do lote não sai do programa: marca o fim, e o lote acaba —
+        // o que sobrou dele ainda é zerado, logo abaixo.
+        let mut fim = None;
         for e in &eventos[..n] {
             match e.tipo {
                 tipo::SAIDA => mudou |= t.ler_a_saida(),
                 tipo::TECLA => t.tecla(e.a),
                 tipo::PONTEIRO => {
                     if t.ponteiro(e.a, e.b, e.c) {
-                        escreverln!("terminal: fechado");
-                        return 0;
+                        fim = Some(Fim::Fechado);
+                        break;
                     }
                 }
                 tipo::FOCO_PERDIDO => t.janela.focar(false),
@@ -357,28 +377,29 @@ fn principal() -> i64 {
                 // clique —, ou uma ação na linha de comando.
                 tipo::ACAO => {
                     if t.acao(e.a, e.b, e.c) {
-                        escreverln!("terminal: fechado");
-                        return 0;
+                        fim = Some(Fim::Fechado);
+                        break;
                     }
                 }
                 tipo::ENCERRAR => {
-                    escreverln!("terminal: encerrado");
-                    return 0;
+                    fim = Some(Fim::Encerrado);
+                    break;
                 }
                 _ => {}
             }
         }
-        // As teclas tratadas já estão na fila do que digitar: o caractere
-        // delas — pode ser uma letra da senha — sai dos eventos.
-        for e in &mut eventos[..n] {
-            if e.tipo == tipo::TECLA {
-                esquecer_a_tecla(e);
-            }
+        // As teclas do lote saem dos eventos — as tratadas, que já estão na
+        // fila do que digitar, e as que um fim deixou para trás: o caractere
+        // delas pode ser uma letra da senha.
+        esquecer_as_teclas(&mut eventos[..n]);
+        if let Some(fim) = fim {
+            break fim;
         }
         // O que ficou pendente numa fila cheia: o interpretador já andou.
         t.digitar_pendente();
         if mudou {
             t.janela.atualizar(GRADE);
         }
-    }
+    };
+    t.sair(fim)
 }

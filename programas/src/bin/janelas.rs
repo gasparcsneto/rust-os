@@ -469,6 +469,7 @@ fn principal() -> i64 {
                 return 2;
             }
         };
+        let mut encerrar = false;
         for e in &eventos[..quantos] {
             match e.tipo {
                 tipo::PONTEIRO => servidor.ponteiro(e.a, e.b, e.c),
@@ -477,15 +478,22 @@ fn principal() -> i64 {
                 tipo::FOCO_PERDIDO => servidor.foco_perdido(),
                 tipo::ACAO => servidor.acao(e.a, e.b),
                 tipo::ENCERRAR => {
-                    while let Some(j) = servidor.janelas.last() {
-                        let id = j.id;
-                        servidor.fechar(id);
-                    }
-                    escreverln!("janelas: encerrado");
-                    return 0;
+                    encerrar = true;
+                    break;
                 }
                 _ => {}
             }
+        }
+        // As teclas do lote saem dos eventos, tratadas ou não: a de uma
+        // janela dele pode ser de uma senha — ver o cabeçalho.
+        programas::esquecer_as_teclas(&mut eventos[..quantos]);
+        if encerrar {
+            while let Some(j) = servidor.janelas.last() {
+                let id = j.id;
+                servidor.fechar(id);
+            }
+            escreverln!("janelas: encerrado");
+            return 0;
         }
     }
 }

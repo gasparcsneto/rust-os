@@ -81,6 +81,35 @@ pub mod tls;
 #[doc(hidden)]
 pub use protocolo as __protocolo;
 
+/// Zera `bytes` com escritas voláteis, que o compilador não tira — as de uma
+/// memória que ninguém mais lê seriam escritas mortas. O mesmo que
+/// `politica::sigiloso::zerar` faz no kernel, aqui do lado dos programas: o
+/// que passa por um programa pode ser uma senha — a tecla da janela do
+/// Terminal, a fila do que ele digita no pseudo-terminal —, e o que ele
+/// largou na memória dele fica lá até ser sobrescrito.
+pub fn zerar(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        // SAFETY: `b` é um `&mut u8` válido desta fatia; a escrita volátil
+        // só impede o compilador de tirá-la.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+}
+
+/// Zera o caractere de cada tecla de `eventos` — o `a` de um evento
+/// [`TECLA`](protocolo::usuario::evento::tipo::TECLA) —, tratada ou não: os
+/// eventos são cópias do que o kernel entregou, e a tecla pode ser de uma
+/// senha. Ver [`zerar`].
+pub fn esquecer_as_teclas(eventos: &mut [protocolo::usuario::evento::Evento]) {
+    for e in eventos
+        .iter_mut()
+        .filter(|e| e.tipo == protocolo::usuario::evento::tipo::TECLA)
+    {
+        // SAFETY: `e.a` é um `i64` válido deste evento; a escrita volátil só
+        // impede o compilador de tirá-la.
+        unsafe { core::ptr::write_volatile(&mut e.a, 0) };
+    }
+}
+
 // A função que cada programa define. O nome é o contrato — ver o cabeçalho.
 unsafe extern "Rust" {
     fn principal() -> i64;

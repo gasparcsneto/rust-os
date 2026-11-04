@@ -119,11 +119,16 @@ pub fn escutar(nome: &str) -> i64 {
 
 /// Lê eventos de um canal para `destino`, e devolve quantos vieram — ou um
 /// erro. **Bloqueia** enquanto não houver nenhum.
+///
+/// Os bytes que o kernel escreveu, e a cópia de cada evento, são zerados
+/// antes de voltar ([`crate::zerar`]): um evento pode ser uma tecla, e a
+/// tecla pode ser de uma senha. O que fica é `destino`, de quem chamou.
 pub fn ler_eventos(descritor: u64, destino: &mut [Evento]) -> Result<usize, i64> {
     let mut bytes = [0u8; 16 * evento::TAMANHO];
     let cabem = destino.len().min(16);
     let lidos = ler(descritor, &mut bytes[..cabem * evento::TAMANHO]);
     if lidos < 0 {
+        crate::zerar(&mut bytes);
         return Err(lidos);
     }
     let quantos = lidos as usize / evento::TAMANHO;
@@ -131,7 +136,9 @@ pub fn ler_eventos(descritor: u64, destino: &mut [Evento]) -> Result<usize, i64>
         let mut um = [0u8; evento::TAMANHO];
         um.copy_from_slice(&bytes[i * evento::TAMANHO..(i + 1) * evento::TAMANHO]);
         *alvo = Evento::de_bytes(&um);
+        crate::zerar(&mut um);
     }
+    crate::zerar(&mut bytes);
     Ok(quantos)
 }
 

@@ -456,6 +456,10 @@ static DESCARTADOS: AtomicU64 = AtomicU64::new(0);
 /// `tipo`, na ordem em que os outros ficam: na troca de imagem, os avisos
 /// da malha que a imagem anterior não leu — a imagem nova não ouve os
 /// avisos da anterior. Devolve quantos saíram.
+///
+/// As posições que a fila deixa de usar ficam em zero: compactar copia os
+/// que ficam para a frente, e o que estava atrás deles — uma tecla, que
+/// pode ser de uma senha — ficaria no anel em dobro, até ser sobrescrito.
 pub fn descartar(ouvinte: u64, tipo: u32) -> usize {
     let tirados = com_canais(|canais| {
         let mut tirados = 0;
@@ -472,6 +476,9 @@ pub fn descartar(ouvinte: u64, tipo: u32) -> usize {
                     canal.fila[(canal.inicio + ficam) % CAPACIDADE] = e;
                     ficam += 1;
                 }
+            }
+            for i in ficam..canal.quantos {
+                canal.fila[(canal.inicio + i) % CAPACIDADE] = EVENTO_ZERADO;
             }
             canal.quantos = ficam;
         }
@@ -528,6 +535,13 @@ pub enum Colheita {
 /// janela em que um evento chegasse entre "está vazio" e "vou dormir": quem
 /// publica toma a mesma tranca, e só vê o ouvinte depois de ele estar
 /// marcado como esperando.
+///
+/// # O que é entregue sai do anel
+///
+/// A posição de cada evento entregue volta a zero. Copiar e só mexer no
+/// começo deixaria o evento no anel até outro cair na mesma posição — e o
+/// evento pode ser uma tecla da janela de um Terminal, que pode ser de uma
+/// senha. Quem leu tem a cópia dele, e é ele quem a guarda ou zera.
 pub fn colher(chave: Chave, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
     com_canais(|canais| {
         let Some(canal) = canais.get_mut(chave.vaga).filter(|c| c.e_da(chave)) else {
@@ -543,7 +557,9 @@ pub fn colher(chave: Chave, ouvinte: u64, destino: &mut [Evento]) -> Colheita {
         }
         let n = destino.len().min(canal.quantos);
         for (i, alvo) in destino.iter_mut().take(n).enumerate() {
-            *alvo = canal.fila[(canal.inicio + i) % CAPACIDADE];
+            let posicao = (canal.inicio + i) % CAPACIDADE;
+            *alvo = canal.fila[posicao];
+            canal.fila[posicao] = EVENTO_ZERADO;
         }
         canal.inicio = (canal.inicio + n) % CAPACIDADE;
         canal.quantos -= n;

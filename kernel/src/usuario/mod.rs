@@ -930,6 +930,10 @@ fn terminal(canal: u64) -> i64 {
 }
 
 /// `escrever` no pseudo-terminal: digitar no interpretador.
+///
+/// O que o Terminal digita pode ser uma senha — a do login, a da `senha`, a
+/// do pareamento —, e a cópia que passa pela pilha do kernel é zerada antes
+/// de a chamada voltar, também quando ela recusa o texto.
 fn escrever_no_terminal(chave: crate::pseudoterminal::Chave, ponteiro: u64, tamanho: u64) -> i64 {
     if let Err(e) = validar_faixa(ponteiro, tamanho) {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
@@ -943,9 +947,17 @@ fn escrever_no_terminal(chave: crate::pseudoterminal::Chave, ponteiro: u64, tama
     unsafe {
         core::ptr::copy_nonoverlapping(ponteiro as *const u8, copia.as_mut_ptr(), n);
     }
+    let digitados = digitar_no_terminal(chave, &copia[..n]);
+    politica::sigiloso::zerar(&mut copia);
+    digitados
+}
+
+/// Digita `copia` no pseudo-terminal da `chave` — o miolo de
+/// [`escrever_no_terminal`], que zera a cópia na volta.
+fn digitar_no_terminal(chave: crate::pseudoterminal::Chave, copia: &[u8]) -> i64 {
     // Um caractere cortado no fim do pedaço não é texto inválido: é o começo
     // do próximo pedaço. Só o que vem antes dele é digitado agora.
-    let texto = match core::str::from_utf8(&copia[..n]) {
+    let texto = match core::str::from_utf8(copia) {
         Ok(texto) => texto,
         Err(e) if e.error_len().is_none() && e.valid_up_to() > 0 => {
             // SAFETY: `valid_up_to` é, por contrato, onde o UTF-8 válido acaba.
@@ -1034,6 +1046,11 @@ fn valor(descritor: u64, ponteiro: u64, tamanho: u64) -> i64 {
 /// cópia na escrita e passar pelo tratador de falha, e isso não é coisa
 /// para se fazer com a tranca de um recurso que handlers de interrupção
 /// também tomam.
+///
+/// E o buffer é zerado antes de a chamada voltar — os eventos e os bytes de
+/// cada um: um evento pode ser uma tecla da janela do Terminal, de uma
+/// senha. O anel do canal já não a guarda (ver [`crate::eventos::colher`]);
+/// a pilha do kernel também não.
 fn ler_eventos(chave: crate::eventos::Chave, ponteiro: u64, tamanho: u64) -> i64 {
     let tamanho_do_evento = evento::TAMANHO as u64;
     // Um buffer menor que um evento é recusado, em vez de receber metade de
@@ -1050,10 +1067,11 @@ fn ler_eventos(chave: crate::eventos::Chave, ponteiro: u64, tamanho: u64) -> i64
     }
 
     let mut eventos = [evento::Evento::default(); EVENTOS_POR_LEITURA];
-    match crate::eventos::colher(chave, crate::fios::id_atual(), &mut eventos[..cabem]) {
+    let lidos = match crate::eventos::colher(chave, crate::fios::id_atual(), &mut eventos[..cabem])
+    {
         crate::eventos::Colheita::Entregues(n) => {
             for (i, e) in eventos[..n].iter().enumerate() {
-                let bytes = e.em_bytes();
+                let mut bytes = e.em_bytes();
                 // SAFETY: `validar_escrita` confirmou os `cabem` eventos no
                 // espaço do usuário, mapeados e graváveis, e `i < n <= cabem`.
                 unsafe {
@@ -1063,6 +1081,7 @@ fn ler_eventos(chave: crate::eventos::Chave, ponteiro: u64, tamanho: u64) -> i64
                         bytes.len(),
                     );
                 }
+                politica::sigiloso::zerar(&mut bytes);
             }
             (n as u64 * tamanho_do_evento) as i64
         }
@@ -1073,7 +1092,13 @@ fn ler_eventos(chave: crate::eventos::Chave, ponteiro: u64, tamanho: u64) -> i64
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::DESCRITOR_INVALIDO
         }
+    };
+    for e in eventos.iter_mut() {
+        // SAFETY: `e` é um `&mut Evento` válido deste vetor; a escrita
+        // volátil só impede o compilador de tirá-la — o vetor morre aqui.
+        unsafe { core::ptr::write_volatile(e, evento::Evento::default()) };
     }
+    lidos
 }
 
 /// `fechar(descritor)`: devolve a vaga à tabela do processo.
