@@ -133,6 +133,18 @@ A ponta é **do processo**: não se herda no `fork`, não sobrevive ao `exec`
 ponta (`o processo acabou`). A ponta de que ele já **saiu** — fechou — não
 é mais dele: o que escreveu segue legível pela outra até o fim.
 
+O `exec` de quem é ponta encerra os fluxos dentro da ordem das gravações,
+logo depois do ponto sem volta e antes de a imagem nova rodar — sem
+esperar a ordem dentro da chamada de sistema (o achado AE-1): a chamada a
+toma sem esperar e a segura só pela troca e pelo fim dos fluxos; largar o
+espaço anterior e mapear a imagem nova vêm com ela solta. Sob contenção, a
+chamada dá a vez e roda de novo, com o processo intacto; se a ordem foi
+para outro fio depois de o gate decidir, a auditoria mostra a decisão
+adiada — a execução dela, `CONFLICT`, que a cita —, e a volta seguinte
+decide de novo. Quem não é ponta não toma a ordem. O `exec` que falha antes
+do ponto sem volta não encerra fluxo nenhum, e a execução da decisão diz a
+falha (`ERROR`).
+
 ## A autoridade
 
 - **Abrir**: `fabric.stream` sobre `intencao:<nome>`, no papel de quem

@@ -9308,7 +9308,32 @@ CI 419, que passou a esperar a tela chegar ao console depois que o processo
 morre: a N106 deixa a camada sair da pilha sem recompor o lugar dela —
 reprovada pelos casos do compositor, que soltam a camada e conferem a tela
 no núcleo deles; o caso das superfícies não a vê, porque a rolagem do eco
-do coletor recompõe o console inteiro por cima.
+do coletor recompõe o console inteiro por cima. E as do AE-1, o achado da
+diretriz de continuidade: a troca de imagem de quem é ponta de fluxo
+esperava a ordem das gravações dentro da chamada de sistema — no x86, com
+as interrupções mascaradas; no ARM, na pilha de exceção do núcleo. A
+correção a toma sem esperar — depois dos ajustes, só pelo ponto sem volta
+e pelo fim dos fluxos —, e, com ela nas mãos de outro fio, a chamada dá a
+vez e roda de novo (ver [`docs/FLUXOS.md`](docs/FLUXOS.md)). A N107 tira a
+conferência sem espera antes do gate, e a espera decide e grava a cada
+volta; a N108 espera a ordem no ponto sem volta, dentro do handler; a N109
+faz toda troca tomar a ordem, também a de quem não é ponta; e a N110
+encerra os fluxos num fio do kernel, depois de a imagem nova rodar — as
+quatro reprovadas, e de novo sobre o código dos ajustes que o adversário
+dela pediu, que trouxeram as N111 a N121: a N111 e a N112 tiram a execução
+da decisão — `CONFLICT`, na volta adiada depois de decidida, e `ERROR`, na
+troca que falha antes do ponto sem volta —; a N113 carrega a imagem nova
+com a ordem na mão; a N114 esvazia a janela das interrupções do x86, e a
+N115 a deixa sem o `nop` — o núcleo da troca adiada conta zero tique em
+trinta do relógio —; a N116 faz ponta quem tiver qualquer fluxo vivo na
+máquina; a N117 compacta na ordem tomada sem esperar; a N118 tira a
+cessão da repetição; a N119 solta a ordem entre a troca e o fim dos
+fluxos, sem a asserção da depuração, como na release; a N120 encerra os
+fluxos na troca que falha antes do ponto sem volta; e a N121 trata a ponta
+como quem não é, e a conferência da premissa que a suíte faz depois da
+troca para o kernel na hora. Todas reprovadas, a N118 no aarch64: no x86
+ela sobrevive por construção — `estacionar` cede sempre, com a cessão
+pedida ou não.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9362,6 +9387,15 @@ do coletor recompõe o console inteiro por cima.
 | fora do SDK: o `set_value` sem valor recusado só depois da conta (N104) | "terminal: o agente nao edita nem confirma a linha da senha" |
 | fora do SDK: os marcadores do pedido dentro do valor, no toolkit (N105) | o teste do toolkit `o_agente_na_linha_de_comando_vira_o_que_digitar` |
 | fora do SDK: a camada que sai da pilha sem recompor o lugar dela (N106) | "compositor: a camada de cima vence", "compositor: escrever debaixo nao vaza", "compositor: camada na borda", "compositor: transparencia" |
+| fora do SDK: a troca de imagem de quem é ponta sem a conferência sem espera antes do gate — a espera decide e grava a cada volta (N107) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem" |
+| fora do SDK: a ordem esperada no ponto sem volta, dentro do handler (N108) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio"; "fluxo: a troca de imagem com a ordem tomada no meio" — a asserção da espera mascarada |
+| fora do SDK: toda troca de imagem tomando a ordem, também a de quem não é ponta (N109); a ponta contada por qualquer fluxo vivo na máquina (N116) | "fluxo: a troca de imagem sem fluxo nao espera a ordem" |
+| fora do SDK: o fim dos fluxos da troca num fio do kernel, depois de a imagem nova rodar (N110); o resto da carga com a ordem na mão (N113); a ordem tomada sem esperar que compacta (N117); a ordem solta entre a troca e o fim dos fluxos, sem a asserção da depuração (N119) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem" |
+| fora do SDK: a volta adiada depois de decidida sem a execução da decisão (N111) | "fluxo: a troca de imagem com a ordem tomada no meio" |
+| fora do SDK: a troca que falha antes do ponto sem volta sem a execução da decisão (N112), ou encerrando os fluxos (N120) | "fluxo: a troca de imagem que falha antes do ponto sem volta" |
+| fora do SDK: a janela das interrupções do x86 vazia (N114), ou sem o `nop` (N115) | "fluxo: a troca de imagem adiada abre a janela das interrupcoes" |
+| fora do SDK: a repetição da troca adiada sem a cessão (N118) | "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", no aarch64; no x86, **sobrevive** por construção — `estacionar` cede sempre |
+| fora do SDK: a ponta tratada como quem não é (N121) | a conferência da premissa, na suíte, depois da troca: o kernel para com "o processo virou ponta de fluxo no meio da troca de imagem sem a ordem" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
