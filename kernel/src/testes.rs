@@ -1543,6 +1543,10 @@ fn barra_f1_da_pessoa_pressiona() -> Resultado {
         return Err("F1 entrou no historico do que foi digitado");
     }
     crate::interpretador::tratar_tecla(tecla);
+    // Nem quando o console a consome: o histórico é o que foi digitado.
+    if crate::teclado::observar().is_some() {
+        return Err("F1 entrou no historico quando o console a consumiu");
+    }
 
     if crate::barra::pressionado() != antes + 1 {
         return Err("F1 nao pressionou o botao");
@@ -15730,13 +15734,15 @@ fn senha_a_pessoa_troca_a_propria() -> Resultado {
         {
             return Err("um agente confirmou a senha atual");
         }
+        // Uma tecla de verdade, consumida pelo console no meio da senha
+        // atual, não entra no histórico; o apagar a tira da linha.
         crate::teclado::esvaziar();
-        crate::teclado::evento(30, true); // `a`
-        crate::teclado::evento(30, false);
+        teclar(30); // `a`
+        teclar(14); // o apagar
+        atender_consoles();
         if crate::teclado::observar().is_some() {
             return Err("uma tecla digitada durante a troca entrou no historico");
         }
-        let _ = crate::teclado::ler();
         digitar_no_console(Console::Fisico, &alloc::format!("{}\n", &atual[6..]));
         if crate::interpretador::modo() != Modo::SenhaNova {
             return Err("a senha atual nao levou a nova");
@@ -15972,13 +15978,14 @@ fn senha_a_prova_a_nova_e_a_desistencia() -> Resultado {
             }
             mesma("a desistencia")?;
         }
+        // A tecla entra no histórico quando o console físico a consome — ele
+        // está fechado, e a consome sem efeito.
         crate::teclado::esvaziar();
-        crate::teclado::evento(30, true);
-        crate::teclado::evento(30, false);
+        teclar(30);
+        atender_consoles();
         if crate::teclado::observar() != Some('a') {
             return Err("o historico nao voltou depois da desistencia");
         }
-        let _ = crate::teclado::ler();
         // `senha` com algo na linha: nada é pedido, nada é usado.
         let seq = seq_da_auditoria();
         digitar_no_console(CONSOLE, &alloc::format!("senha {SENHA_NOVA}\n"));
@@ -16995,13 +17002,16 @@ fn consoles_login_e_logout() -> Resultado {
         {
             return Err("um agente confirmou a senha");
         }
+        // Uma tecla de verdade, consumida pelo console no meio da senha, não
+        // entra no histórico; o apagar a tira da linha, e a senha fica como
+        // estava.
         crate::teclado::esvaziar();
-        crate::teclado::evento(30, true); // `a`
-        crate::teclado::evento(30, false);
+        teclar(30); // `a`
+        teclar(14); // o apagar
+        atender_consoles();
         if crate::teclado::observar().is_some() {
             return Err("uma tecla digitada durante a senha entrou no historico");
         }
-        let _ = crate::teclado::ler();
         let resto = core::str::from_utf8(&SENHA_DE_TESTE["cavalo".len()..]).unwrap_or("");
         digitar_no_console(Console::Fisico, &alloc::format!("{resto}\n"));
         let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
@@ -17019,13 +17029,14 @@ fn consoles_login_e_logout() -> Resultado {
                 return Err("a senha apareceu na tela, ou a saudacao nao");
             }
         }
-        // Depois da senha o histórico volta a gravar.
-        crate::teclado::evento(30, true);
-        crate::teclado::evento(30, false);
+        // Depois da senha o histórico volta a gravar, quando o console
+        // consome a tecla — que fica na linha, e sai antes do comando.
+        teclar(30);
+        atender_consoles();
         if crate::teclado::observar() != Some('a') {
             return Err("o historico nao voltou depois da senha");
         }
-        let _ = crate::teclado::ler();
+        digitar_no_console(Console::Fisico, "\u{8}");
 
         // Um comando, com o papel da pessoa, gravado como dela.
         digitar_no_console(Console::Fisico, "agent.ping\n");
@@ -17069,6 +17080,62 @@ fn consoles_login_e_logout() -> Resultado {
             return Err("a senha errada abriu sessao, ou prendeu o console");
         }
         Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    resultado
+}
+
+/// A senha digitada adiantado — antes de o console tratar o Enter que a
+/// pede, com ele ocupado ou com a máquina carregada — não entra no
+/// histórico do teclado: a tecla do console físico entra quando ele a
+/// consome, já sabendo se a linha pede uma senha. Com o `login`, o nome e
+/// a senha inteiros na fila antes de o console consumir a primeira tecla,
+/// o histórico fica com o `login` e o nome, e nada da senha — nem o Enter
+/// dela —; a sessão abre; e o histórico volta a gravar depois.
+fn consoles_a_senha_digitada_adiantado() -> Resultado {
+    use crate::pessoas::Console;
+    const NOME: &str = "bia";
+    crate::pessoas::esquecer_registradas();
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    let senha = core::str::from_utf8(SENHA_DE_TESTE).map_err(|_| "a senha de teste nao e texto")?;
+    let bia = crate::pessoas::registrar_de_teste(NOME, "operador", SENHA_DE_TESTE);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        // Tudo na fila, e nada consumido: o console ainda pede um comando
+        // quando a senha chega.
+        digitar_pelo_teclado(&alloc::format!("login\n{NOME}\n{senha}\n"))?;
+        if crate::teclado::observar().is_some() {
+            return Err("uma tecla entrou no historico antes de o console consumi-la");
+        }
+        atender_consoles();
+        let sessao = crate::interpretador::sessao_do_console(Console::Fisico)
+            .ok_or("a senha digitada adiantado nao abriu sessao")?;
+        if crate::pessoas::dona_da_sessao(sessao) != Some(bia) {
+            return Err("a sessao aberta nao e da pessoa que entrou");
+        }
+        // O histórico inteiro: o `login` e o nome, e só. Não vai ao log, nem
+        // na falha: poderia levar a senha.
+        let mut historico = alloc::string::String::new();
+        while let Some(c) = crate::teclado::observar() {
+            historico.push(c);
+        }
+        if leva_segredo(&historico, &pedacos_secretos(&[senha], &[])) {
+            return Err("a senha digitada adiantado entrou no historico");
+        }
+        if historico != alloc::format!("login\n{NOME}\n") {
+            crate::log_error!("teste", "o historico tem {} tecla(s)", historico.len());
+            return Err("o historico nao ficou com o login e o nome, e so");
+        }
+        // Depois da senha, o histórico volta a gravar.
+        teclar(30);
+        atender_consoles();
+        if crate::teclado::observar() != Some('a') {
+            return Err("o historico nao voltou depois da senha digitada adiantado");
+        }
+        nenhum_segredo_em_lugar_nenhum(&[senha], &[])
     })();
     crate::interpretador::desativar_para_teste();
     crate::pessoas::esquecer_registradas();
@@ -17959,8 +18026,10 @@ fn coordenacao_teclado_por_leitor() -> Resultado {
             r.contains(&alloc::format!(r#""text":"{texto}""#))
                 && r.contains(&alloc::format!(r#""missed":{perdidas}"#))
         };
+        // O histórico grava a tecla do console físico quando ele a consome.
         teclar(0x2D); // x
         teclar(0x15); // y
+        atender_consoles();
         let ra = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
         let rb = pela_porta(&mut b, &mut sb, "keyboard.read", "{}")?;
         if !leu(&ra, "xy", 0) || !leu(&rb, "xy", 0) {
@@ -17968,6 +18037,7 @@ fn coordenacao_teclado_por_leitor() -> Resultado {
             return Err("os dois leitores nao leram as mesmas teclas");
         }
         teclar(0x2D);
+        atender_consoles();
         let ra = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
         let de_novo = pela_porta(&mut a, &mut sa, "keyboard.read", "{}")?;
         if !leu(&ra, "x", 0) || !leu(&de_novo, "", 0) {
@@ -35924,6 +35994,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "consoles: login e logout",
         f: consoles_login_e_logout,
+    },
+    Caso {
+        nome: "consoles: a senha digitada adiantado nao entra no historico",
+        f: consoles_a_senha_digitada_adiantado,
     },
     Caso {
         nome: "consoles: pessoas e consoles nao se confundem",
