@@ -38300,6 +38300,18 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_troca_com_a_ordem_tomada_no_meio,
     },
     Caso {
+        nome: "fluxo: a troca de imagem adiada abre a janela das interrupcoes",
+        f: fluxo::fluxo_a_troca_adiada_abre_a_janela_das_interrupcoes,
+    },
+    Caso {
+        nome: "fluxo: a troca de imagem adiada da a vez a quem tem a ordem",
+        f: fluxo::fluxo_a_troca_adiada_da_a_vez_a_quem_tem_a_ordem,
+    },
+    Caso {
+        nome: "fluxo: a troca de imagem que falha antes do ponto sem volta",
+        f: fluxo::fluxo_a_troca_que_falha_antes_do_ponto_sem_volta,
+    },
+    Caso {
         nome: "fluxo: a revogacao e a politica nova encerram",
         f: fluxo::fluxo_a_revogacao_e_a_politica_nova,
     },
