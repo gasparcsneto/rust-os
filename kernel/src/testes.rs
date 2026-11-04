@@ -6570,6 +6570,44 @@ fn terminal_operado() -> Resultado {
         })
     };
     let fechar = crate::ui::id_do_elemento(camada.id, 0).ok_or("id de elemento fora da faixa")?;
+    // O `press` que não chega ao Terminal — a fila dele cheia, com ele preso
+    // ao núcleo da suíte e as interrupções mascaradas: não roda no meio —
+    // é recusado, e a anotação de quem apertou se desfaz. Senão, o clique da
+    // pessoa, depois, sairia no registro como o `press` do agente.
+    let processo = crate::pseudoterminal::donos()
+        .into_iter()
+        .flatten()
+        .find(|f| crate::fios::vivo(*f))
+        .ok_or("o terminal no ar nao tem pseudo-terminal")?;
+    prender_no_nucleo_da_suite(processo)?;
+    let recusado = crate::arch::sem_interrupcoes(|| {
+        for _ in 0..crate::eventos::CAPACIDADE {
+            let _ = crate::eventos::publicar(
+                protocolo::usuario::evento::CANAL_DO_TERMINAL,
+                Evento {
+                    tipo: tipo::TESTE,
+                    ..Default::default()
+                },
+            );
+        }
+        crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0)).is_err()
+    });
+    soltar_da_suite(processo);
+    if !recusado {
+        return Err("o press com a fila do terminal cheia foi aceito");
+    }
+    if crate::interpretador::quem_fechou(console) != "o terminal fechou pelo clique da pessoa" {
+        return Err("a anotacao do press que nao chegou ao terminal ficou");
+    }
+    // O Terminal atende o que encheu a fila, e volta a esperar.
+    esperar_ate(
+        || {
+            crate::eventos::estado(protocolo::usuario::evento::CANAL_DO_TERMINAL)
+                .is_some_and(|e| e.na_fila == 0 && e.esperando)
+        },
+        600,
+    )
+    .map_err(|_| "o terminal nao esvaziou a fila cheia")?;
     let seq = seq_da_auditoria();
     crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_vezes("terminal: fechado", 1)?;
