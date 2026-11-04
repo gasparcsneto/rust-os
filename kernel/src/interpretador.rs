@@ -2152,6 +2152,12 @@ fn engolir(console: Console, c: char) -> bool {
     true
 }
 
+/// O console engole o resto de uma senha? Só para a suíte.
+#[cfg(feature = "modo-teste")]
+pub fn engolindo_de_teste(console: Console) -> bool {
+    com_estado(console, |e| e.engolindo).unwrap_or(false)
+}
+
 /// Desenha de novo o que está digitado num console — nada, se é uma senha.
 fn redesenhar_em(console: Console, e: &Estado) {
     if !e.modo.secreto() && e.tam > 0 {

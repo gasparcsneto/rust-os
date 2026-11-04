@@ -3933,3 +3933,183 @@ pub(super) fn pareamento_o_outro_desiste_depois_de_gravar() -> Resultado {
         Ok(())
     })
 }
+
+// ---------------------------------------------------------------------
+// N5 — a cerimônia que acaba no meio da senha.
+// ---------------------------------------------------------------------
+
+/// O que o console do Terminal da Pessoa imprimiu desde a última leitura.
+fn saida_do_console() -> String {
+    let Console::Terminal(i) = CONSOLE else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(i as u8)).into_owned()
+}
+
+/// A cerimônia acaba por fora — o outro desistiu, ou o prazo venceu — com a
+/// linha da senha parada no meio do que a Pessoa digita. O console engole o
+/// resto, até o Enter: nada ecoa, nada vira comando, nada vai à auditoria;
+/// a árvore não edita nem confirma a linha nesse meio-tempo; e o Enter
+/// devolve o console, que volta a atender.
+pub(super) fn pareamento_o_fim_no_meio_da_senha_engole_o_resto() -> Resultado {
+    use crate::interpretador::{self as interp, Modo};
+    use crate::ui::Origem;
+    /// Como a cerimônia acaba por fora.
+    type Acabar = fn(&mut Iniciante) -> Resultado;
+    com_a_cerimonia(|| {
+        entrar(CONSOLE, "bia")?;
+        let fins: [(u64, Acabar, conta::Motivo); 2] = [
+            // O outro desistiu: o aviso chega na hora, pela conexão.
+            (
+                2_002_600,
+                |ini| ini.mandar(&desistiu(conta::Motivo::Cancelada.texto())),
+                conta::Motivo::OutroDesistiu,
+            ),
+            // O prazo venceu: o coletor — que na suíte não vence — o vê.
+            (
+                2_002_601,
+                |_| {
+                    crate::pareamento::adiantar_de_teste(conta::PRAZO_MS);
+                    crate::pareamento::vencer();
+                    Ok(())
+                },
+                conta::Motivo::Prazo,
+            ),
+        ];
+        for (n, acabar, motivo) in fins {
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, n, 1);
+            let k = ate_os_codigos(CONSOLE, &mut ini)?;
+            digitar(CONSOLE, &texto(k.k_a));
+            if linha(CONSOLE) != Linha::Senha {
+                return Err("o codigo certo nao pediu a senha");
+            }
+            let _ = saida_do_console();
+            // Metade da senha, sem o Enter: e a cerimônia acaba.
+            super::digitar_no_console(CONSOLE, "senha de");
+            let seq = crate::autorizacao::ultimo_registro();
+            acabar(&mut ini)?;
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(motivo),
+                "a cerimonia nao acabou no meio da senha",
+            )?;
+            // O desfecho chegou ao console sem a vez dele, e o aviso de que
+            // ele engole — sem o prompt, que é do Enter.
+            let aviso = saida_do_console();
+            if !aviso.contains("pareamento desfeito")
+                || !aviso.contains(interp::AVISO_DO_ENGOLIR)
+                || aviso.contains(protocolo::usuario::terminal::PROMPT)
+            {
+                crate::log_error!("teste", "{:?}", aviso);
+                return Err("o fim no meio da senha nao avisou que o console engole");
+            }
+            if !interp::engolindo_de_teste(CONSOLE) {
+                return Err("o fim no meio da senha nao pos o console a engolir");
+            }
+            // A árvore não mexe na linha que ainda é a da senha.
+            if interp::pode_editar_pela_arvore(CONSOLE) != Err(interp::LINHA_DA_PESSOA)
+                || interp::pode_confirmar_pela_arvore(CONSOLE, Origem::Agente(0))
+                    != Err(interp::CONFIRMAR_A_LINHA_DA_PESSOA)
+            {
+                return Err("a arvore editaria ou confirmaria a linha que engole");
+            }
+            // O resto da senha, e o Enter: engolidos.
+            super::digitar_no_console(CONSOLE, " teste\n");
+            let depois = saida_do_console();
+            if depois.contains("teste") || depois.contains("comando desconhecido") {
+                crate::log_error!("teste", "{:?}", depois);
+                return Err("o resto da senha ecoou, ou virou comando");
+            }
+            if !depois.contains(protocolo::usuario::terminal::PROMPT) {
+                return Err("o Enter que acaba o engolir nao devolveu o prompt");
+            }
+            if interp::engolindo_de_teste(CONSOLE)
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0))
+            {
+                return Err("o Enter nao acabou o engolir, ou a linha ficou com algo");
+            }
+            if !super::registros_depois(seq, |e| e.metodo.contains("teste")).is_empty() {
+                return Err("o resto da senha foi a auditoria");
+            }
+            // E o console atende de novo.
+            digitar(CONSOLE, "agent.ping");
+            if !saida_do_console().contains("\"pong\"") {
+                return Err("o console nao atendeu depois do Enter que acabou o engolir");
+            }
+        }
+        Ok(())
+    })
+}
+
+/// O mesmo no console físico, pelo caminho de verdade do teclado: a senha
+/// e o resto dela vão pela fila do teclado da máquina, e o console os
+/// consome. Nada vai ao histórico — o bit da senha fica ligado enquanto o
+/// console engole —, nem à tela; e, depois do Enter, o histórico volta a
+/// gravar e a linha volta a ecoar.
+pub(super) fn pareamento_o_fim_no_meio_da_senha_no_fisico() -> Resultado {
+    use crate::interpretador as interp;
+    /// O resto da senha: uma palavra que nada mais na tela tem.
+    const RESTO: &str = "jabuticaba";
+    com_a_cerimonia(|| {
+        crate::superficies::devolver_foco();
+        crate::interpretador::abrir_console(Console::Fisico);
+        let r = (|| -> Resultado {
+            entrar(Console::Fisico, "bia")?;
+            aceitar(Console::Fisico, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_002_700, 1);
+            let k = ate_os_codigos(Console::Fisico, &mut ini)?;
+            digitar(Console::Fisico, &texto(k.k_a));
+            if linha(Console::Fisico) != Linha::Senha {
+                return Err("o codigo certo nao pediu a senha");
+            }
+            crate::teclado::esvaziar();
+            super::digitar_pelo_teclado("senha de")?;
+            super::atender_consoles();
+            ini.mandar(&desistiu(conta::Motivo::Cancelada.texto()))?;
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::OutroDesistiu),
+                "a cerimonia nao acabou no meio da senha",
+            )?;
+            if !interp::engolindo_de_teste(Console::Fisico)
+                || interp::pode_editar_pela_arvore(Console::Fisico) != Err(interp::LINHA_DA_PESSOA)
+            {
+                return Err("o fisico nao engole, ou a arvore editaria a linha dele");
+            }
+            super::digitar_pelo_teclado(&format!(" {RESTO}\n"))?;
+            super::atender_consoles();
+            // Nada no histórico: nem a senha, nem o resto, nem o Enter.
+            if crate::teclado::observar().is_some() {
+                return Err("a senha, o resto dela ou o Enter entrou no historico");
+            }
+            if interp::engolindo_de_teste(Console::Fisico) {
+                return Err("o Enter nao acabou o engolir no fisico");
+            }
+            // Nem na tela.
+            if crate::tela::tela().is_some() {
+                let arvore = super::chamar("ui.tree", "{}")?;
+                let (console, _) = super::console_da_arvore(&arvore)?;
+                let texto = super::texto_do_console(&console)?;
+                if texto.contains(RESTO) || !texto.contains(interp::AVISO_DO_ENGOLIR) {
+                    crate::log_error!("teste", "{}", texto);
+                    return Err("o resto da senha apareceu na tela, ou o aviso nao");
+                }
+            }
+            // Depois do Enter, o histórico volta, e a linha ecoa.
+            super::teclar(30);
+            super::atender_consoles();
+            if crate::teclado::observar() != Some('a') {
+                return Err("o historico nao voltou depois do Enter que acabou o engolir");
+            }
+            if interp::linha_de_teste(Console::Fisico) != Some((interp::Modo::Comando, 1)) {
+                return Err("a linha nao voltou a receber o que se digita");
+            }
+            Ok(())
+        })();
+        crate::interpretador::desativar_para_teste();
+        crate::teclado::esvaziar();
+        r
+    })
+}

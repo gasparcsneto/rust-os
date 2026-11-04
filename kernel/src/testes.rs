@@ -39088,6 +39088,14 @@ static CASOS: &[Caso] = &[
         f: pareamento::pareamento_o_outro_desiste_depois_de_gravar,
     },
     Caso {
+        nome: "pareamento: o fim no meio da senha engole o resto",
+        f: pareamento::pareamento_o_fim_no_meio_da_senha_engole_o_resto,
+    },
+    Caso {
+        nome: "pareamento: o fim no meio da senha no fisico nao vai ao historico",
+        f: pareamento::pareamento_o_fim_no_meio_da_senha_no_fisico,
+    },
+    Caso {
         nome: "copia: o armazem inteiro, pelo sistema",
         f: copia_o_armazem_inteiro,
     },
