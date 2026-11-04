@@ -166,6 +166,10 @@ static PENDENTES: [AtomicBool; TERMINAIS] = [const { AtomicBool::new(false) }; T
 static PROXIMA_GERACAO: AtomicU64 = AtomicU64::new(1);
 /// Bytes que saíram de um anel sem ninguém lê-los; avisos entregues; teclas
 /// digitadas pelos pseudo-terminais.
+///
+/// A última conta é só da suíte (`digitados_de_teste`): ela crescia um
+/// por caractere, também os de uma senha, e nenhum relatório a publica —
+/// ver [`estatisticas`].
 static PERDIDOS: AtomicU64 = AtomicU64::new(0);
 static AVISOS: AtomicU64 = AtomicU64::new(0);
 static DIGITADOS: AtomicU64 = AtomicU64::new(0);
@@ -553,13 +557,25 @@ pub fn pausar_o_coletor_de_teste(pausado: bool) {
     }
 }
 
-/// `(bytes perdidos, avisos entregues, teclas digitadas)`.
-pub fn estatisticas() -> (u64, u64, u64) {
+/// `(bytes perdidos, avisos entregues)`, para os relatórios.
+///
+/// Sem a conta das teclas digitadas: ela dá o tamanho e o ritmo de uma
+/// senha digitada num Terminal, e uma senha não vai a relatório nenhum — a
+/// regra do `system.info` e das mensagens de diagnóstico. A conta continua
+/// aqui dentro, para a suíte: `digitados_de_teste`.
+pub fn estatisticas() -> (u64, u64) {
     (
         PERDIDOS.load(Ordering::Relaxed),
         AVISOS.load(Ordering::Relaxed),
-        DIGITADOS.load(Ordering::Relaxed),
     )
+}
+
+/// Só para a suíte: quantos caracteres os pseudo-terminais digitaram no
+/// console deles — a prova de que um pseudo-terminal digitou exatamente a
+/// linha.
+#[cfg(feature = "modo-teste")]
+pub fn digitados_de_teste() -> u64 {
+    DIGITADOS.load(Ordering::Relaxed)
 }
 
 /// Os fios que têm um pseudo-terminal aberto, por instância.

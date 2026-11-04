@@ -5493,7 +5493,7 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
         // aceita e engolida, e nada vai para o teclado da máquina.
         crate::teclado::esvaziar();
         while pty::proxima_entrada(|_| false).is_some() {}
-        let digitados = pty::estatisticas().2;
+        let digitados = pty::digitados_de_teste();
         let linha = "\u{F704}ab\n";
         if pty::escrever(chave, eu, linha) != Some(linha.len()) {
             return Err("a escrita no pseudo-terminal nao aceitou a linha inteira");
@@ -5505,7 +5505,7 @@ fn terminal_o_anel_a_fila_e_a_posse() -> Resultado {
             }
             fila.push(c);
         }
-        if fila != "ab\n" || pty::estatisticas().2 != digitados + 3 {
+        if fila != "ab\n" || pty::digitados_de_teste() != digitados + 3 {
             crate::log_error!("teste", "a fila recebeu {:?}", fila);
             return Err("o pseudo-terminal digitou o que nao e texto");
         }
@@ -5660,7 +5660,8 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
         });
         achou
     };
-    let (_, avisos, digitados) = pty::estatisticas();
+    let (_, avisos) = pty::estatisticas();
+    let digitados = pty::digitados_de_teste();
     crate::teclado::esvaziar();
 
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/pseudo")))?;
@@ -5679,7 +5680,8 @@ fn terminal_o_interpretador_do_outro_lado() -> Resultado {
 
     // O que passou pelo pseudo-terminal: a linha sem a tecla de função, e
     // pelo menos um aviso.
-    let (_, avisos_depois, digitados_depois) = pty::estatisticas();
+    let (_, avisos_depois) = pty::estatisticas();
+    let digitados_depois = pty::digitados_de_teste();
     if digitados_depois != digitados + "duke-pty\n".len() as u64 {
         crate::log_error!("teste", "{} teclas digitadas", digitados_depois - digitados);
         return Err("o pseudo-terminal nao digitou exatamente a linha");

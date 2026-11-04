@@ -6010,10 +6010,15 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     w.end_object()?;
 
     // Os pseudo-terminais: quem tem cada um aberto, quantos avisos de saída
-    // foram entregues, quantas teclas eles digitaram, e quantos bytes da
-    // saída saíram de um anel sem ninguém lê-los. O último é o que diz se um
-    // Terminal está perdendo o que o console dele imprime.
-    let (perdidos, avisos, digitados) = crate::pseudoterminal::estatisticas();
+    // foram entregues, e quantos bytes da saída saíram de um anel sem
+    // ninguém lê-los. O último é o que diz se um Terminal está perdendo o
+    // que o console dele imprime.
+    //
+    // Quantas teclas eles digitaram não vai: a conta crescia um por
+    // caractere, também os da senha digitada num Terminal, e dava a quem lê
+    // este relatório — `system.read` — o tamanho e o ritmo dela. Uma senha
+    // não vai a relatório nenhum, nem a conta dos caracteres dela.
+    let (perdidos, avisos) = crate::pseudoterminal::estatisticas();
     w.key("terminal")?;
     w.begin_object()?;
     w.key("owners")?;
@@ -6026,7 +6031,6 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
     w.end_array()?;
     w.field_u64("notices", avisos)?;
-    w.field_u64("typed", digitados)?;
     w.field_u64("dropped", perdidos)?;
     w.end_object()?;
     w.field_u64("updates", r.atualizacoes)?;
