@@ -4843,6 +4843,15 @@ fn janelas_operadas() -> Resultado {
         });
         n
     };
+    // E quantas começam com `prefixo`.
+    let comecam = |prefixo: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(prefixo))
+                as usize;
+        });
+        n
+    };
     // O ponteiro, como um tablet o moveria, e o botão, como um mouse.
     let mover = |x: i64, y: i64| {
         crate::ponteiro::absoluto(x as u32, y as u32, w - 1, h - 1);
@@ -4922,13 +4931,26 @@ fn janelas_operadas() -> Resultado {
     }
 
     // Uma tecla, com o foco na janela: vai para o servidor, e não para o
-    // console.
+    // console. O servidor a põe no campo, que tem o foco da janela — e é
+    // por ele que a suíte a vê: o servidor não grava a tecla no log, que é
+    // uma saída sem gate, e o que se digita numa janela pode ser uma senha.
     crate::teclado::evento(0x1E, true);
     crate::teclado::evento(0x1E, false);
     atender_consoles();
-    esperar_linha("janelas: tecla 97 em 1")?;
-    // A fila do console, e não o histórico de diagnóstico, que registra a
-    // tecla nos dois casos.
+    esperar_ate(
+        || {
+            crate::superficies::janela_com_foco()
+                .and_then(|j| j.campo)
+                .is_some_and(|(_, v)| v == "a")
+        },
+        600,
+    )
+    .map_err(|_| "com o foco na janela, a tecla nao chegou ao campo dela")?;
+    if comecam("janelas: tecla") != 0 {
+        return Err("o servidor de janelas gravou a tecla no log");
+    }
+    // A fila do console, e não o histórico de diagnóstico, que grava a
+    // tecla da janela quando ela chega.
     if crate::teclado::ler().is_some() {
         return Err("com o foco numa janela, a tecla chegou ao console");
     }
@@ -5183,6 +5205,16 @@ fn arvore_das_janelas() -> Resultado {
             "o servidor de janelas nao fez o que devia"
         })
     };
+    // Quantas linhas do servidor, desde o começo do caso, começam com
+    // `prefixo`.
+    let comecam = |prefixo: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= desde && r.subsistema == "usuario" && r.mensagem().starts_with(prefixo))
+                as usize;
+        });
+        n
+    };
     let publicar = |tipo: u32, a: i64| {
         crate::eventos::publicar(
             CANAL_DAS_JANELAS,
@@ -5250,7 +5282,7 @@ fn arvore_das_janelas() -> Resultado {
                     })
                 })
             },
-            200,
+            600,
         )
         .map_err(|_| {
             crate::log_error!("teste", "arvore: {:?}", chamar("ui.tree", "{}"));
@@ -5261,16 +5293,19 @@ fn arvore_das_janelas() -> Resultado {
     // A pessoa digita: o que chega vai ao campo, que tem o foco da janela,
     // e o Enter o confirma. Depois do foco, e não da abertura: o servidor o
     // pede logo depois de abrir, e uma tecla que chegasse antes iria,
-    // corretamente, para o console — medido, uma vez em cinco no ARM.
+    // corretamente, para o console — medido, uma vez em cinco no ARM. A
+    // tecla se vê no valor do campo, e não no log: o servidor não a grava.
     esperar_linha("janelas: foco 1")?;
     crate::teclado::evento(0x1E, true);
     crate::teclado::evento(0x30, true);
     atender_consoles();
-    esperar_linha("janelas: tecla 98 em 1")?;
     valor_na_arvore(
         "ab",
         "o texto digitado nao chegou ao valor do campo na arvore",
     )?;
+    if comecam("janelas: tecla") != 0 {
+        return Err("o servidor de janelas gravou a tecla no log");
+    }
     crate::teclado::evento(0x1C, true);
     atender_consoles();
     esperar_linha("janelas: escrito 1 [ab]")?;
@@ -5857,6 +5892,32 @@ fn entradas_separadas() -> Resultado {
     .map_err(|_| "o servidor de janelas nao escuta o canal")?;
     esperar_vezes("janelas: foco 1", 1)?;
     let (jx, jy) = ((w as i64 - 320) / 2, (h as i64 - 160) / 2);
+    // O campo da janela do servidor, pela descrição que ele manda ao
+    // kernel: a tecla que chega a ele vai para ali — e não para o log, que
+    // não a grava (ver `programas/src/bin/janelas.rs`).
+    let do_servidor = crate::grafico::camada_em(jx as u32 + 100, jy as u32 + 100)
+        .filter(|c| c.nome == crate::superficies::NOME_DA_CAMADA)
+        .ok_or("a janela do servidor nao esta na tela")?
+        .id;
+    let campo_do_servidor = || {
+        crate::superficies::com_descricao(do_servidor, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == "texto")
+                .and_then(|e| e.valor.clone())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+    };
+    let teclas_no_log = || {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= desde
+                && r.subsistema == "usuario"
+                && r.mensagem().starts_with("janelas: tecla")) as usize;
+        });
+        n
+    };
 
     // E a outra janela, de outro processo, com o canal de entrada dela.
     crate::usuario::lancar(Some(&format!("{DIRETORIO_DOS_COMPILADOS}/entrada")))?;
@@ -5883,7 +5944,7 @@ fn entradas_separadas() -> Resultado {
     // A tecla segue o foco: ao programa, e não ao servidor nem ao console.
     digitar_a();
     esperar_vezes("entrada: tecla 97", 1)?;
-    if vezes("janelas: tecla 97 em 1") != 0 || crate::teclado::ler().is_some() {
+    if !campo_do_servidor().is_empty() || crate::teclado::ler().is_some() {
         return Err("a tecla com o foco no programa chegou a outro lugar");
     }
 
@@ -5896,8 +5957,18 @@ fn entradas_separadas() -> Resultado {
     if crate::superficies::destino_do_foco().map(|d| d.entrada) != Some(None) {
         return Err("o aperto na janela do servidor nao lhe devolveu o foco");
     }
+    // O servidor atende o canal na ordem: o aperto dele já foi tratado, e
+    // uma tecla de antes que tivesse chegado a ele, atrasada, já estaria no
+    // campo.
+    if !campo_do_servidor().is_empty() {
+        return Err("a tecla com o foco no programa chegou ao servidor, atrasada");
+    }
     digitar_a();
-    esperar_vezes("janelas: tecla 97 em 1", 1)?;
+    esperar_ate(|| campo_do_servidor() == "a", 600)
+        .map_err(|_| "a tecla com o foco de volta no servidor nao chegou ao campo dele")?;
+    if teclas_no_log() != 0 {
+        return Err("o servidor de janelas gravou a tecla no log");
+    }
 
     // Fora de tudo: o servidor perde o foco; o programa, que não o tinha,
     // não é avisado de novo.
@@ -7561,15 +7632,43 @@ fn sobre_o_duke() -> Resultado {
     // O texto dela é fixo: a tecla chega ao servidor — e não ao console —,
     // e não muda nada. A descrição dela, e não a árvore inteira: o console
     // está na árvore, e muda sozinho.
+    //
+    // E é o cenário em que uma senha vazava: a Pessoa digitando a do login,
+    // a da `senha` ou a do pareamento, e o "Sobre" aberto por cima dela —
+    // pela F2, ou pelo `press` de um agente —, com o foco. O servidor
+    // gravava cada tecla no log, que `log.tail` entrega. Uma senha inteira,
+    // então: as teclas chegam ao servidor, ele as atende, e não diz nada.
     let descricao = || crate::superficies::com_descricao(camada, Clone::clone);
     let antes = descricao().ok_or("a janela Sobre nao foi descrita")?;
     crate::teclado::esvaziar();
-    crate::teclado::evento(0x1E, true);
+    let publicados = crate::eventos::estado(CANAL_DAS_JANELAS).map_or(0, |e| e.publicados);
+    let desde_as_teclas = crate::log::total_emitidos();
+    const SENHA: &str = "segredo";
+    digitar_pelo_teclado(SENHA)?;
     if crate::teclado::ler().is_some() {
         return Err("com o foco na janela Sobre, a tecla foi para o console");
     }
     atender_consoles();
-    esperar_linha("janelas: tecla 97 em 1")?;
+    // Publicadas ao servidor, tiradas da fila, e ele de volta à espera:
+    // atendeu todas.
+    esperar_ate(
+        || {
+            crate::eventos::estado(CANAL_DAS_JANELAS).is_some_and(|e| {
+                e.publicados >= publicados + SENHA.len() as u64 && e.na_fila == 0 && e.esperando
+            })
+        },
+        600,
+    )
+    .map_err(|_| "o servidor de janelas nao atendeu as teclas da janela Sobre")?;
+    let mut disse = 0;
+    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+        disse += (r.seq >= desde_as_teclas
+            && r.subsistema == "usuario"
+            && r.mensagem().starts_with("janelas:")) as usize;
+    });
+    if disse != 0 {
+        return Err("o servidor de janelas gravou as teclas da janela Sobre no log");
+    }
     if descricao() != Some(antes.clone()) {
         return Err("digitar na janela Sobre mudou o texto dela");
     }
