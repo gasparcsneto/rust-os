@@ -2007,6 +2007,32 @@ fn agente_display_info_descreve_a_pilha() -> Resultado {
         return Err("display.info descreveu outra geometria");
     }
 
+    // Os pseudo-terminais: o dono de cada um, os avisos e os bytes que
+    // saíram do anel — e não a conta do que se digita neles, que cresce um
+    // por caractere de uma senha e dava o tamanho e o ritmo dela a quem lê
+    // este relatório.
+    let Some(terminal) = resposta.member("terminal") else {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info nao descreveu os pseudo-terminais");
+    };
+    if terminal.member("owners").is_none()
+        || terminal
+            .member("notices")
+            .and_then(|v| v.as_u64())
+            .is_none()
+        || terminal
+            .member("dropped")
+            .and_then(|v| v.as_u64())
+            .is_none()
+    {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info nao trouxe o dono, os avisos e as perdas dos pseudo-terminais");
+    }
+    if terminal.member("typed").is_some() {
+        crate::log_error!("teste", "resposta: {}", buffer.como_str());
+        return Err("display.info conta o que se digita num pseudo-terminal");
+    }
+
     // E a pergunta que um agente faz depois de mandar desenhar — "o que
     // mudou?" — tem de responder o último retângulo que chegou à tela. Os
     // contadores são os da máquina, e é a suíte registrando um retângulo
