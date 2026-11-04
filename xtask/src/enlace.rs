@@ -571,43 +571,80 @@ impl DePe {
     /// janela devolve o teclado ao kernel, e o `login` vai pelo teclado. A
     /// tecla numa janela que não é de Terminal é de quem está entrado no
     /// console físico — ver `interpretador::tratar_tecla_de_janela`.
+    ///
+    /// O teclado do emulador perde tecla, e o mouse perde movimento, com as
+    /// duas máquinas de pé no mesmo hospedeiro — ver [`DePe::entrar`], que
+    /// digita de novo pelo mesmo motivo. Sem o `person.login` aceito do
+    /// console físico, clica de novo fora das janelas e digita de novo,
+    /// depois de uma linha vazia que encerra o que tiver ficado pela metade,
+    /// até [`VEZES_DE_DIGITAR`] vezes, espaçadas por [`ESPERA_PELO_LOGIN`].
+    /// O aceito vale desde a primeira tentativa: o login que só chega depois
+    /// do prazo dela não é digitado outra vez por cima. O `login` que chega
+    /// a um Terminal, e não ao console físico, continua uma falha — o
+    /// clique não devolveu o teclado ao kernel.
     pub(crate) fn entrar_no_fisico(&mut self, maquina: &Maquina) -> Result<(), String> {
-        let info = self.m.pedir("display.info", "{}")?;
-        let (x, y) = fora_das_janelas(&info).ok_or_else(|| {
-            format!(
-                "{}: nenhum ponto da tela fora das janelas\n  {info}",
-                self.papel
-            )
-        })?;
-        let qmp = maquina.na_raiz(|| super::caminho_qmp(self.arch));
-        super::clicar_em(&qmp, &mut |metodo| self.m.pedir(metodo, "{}"), x, y)?;
-        let desde = self.marca()?.auditoria;
         let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
-        self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
-        let limite = Instant::now() + Duration::from_secs(120);
-        loop {
-            self.ler()?;
-            if let Some(g) = self
-                .gravados(desde)
-                .find(|g| g.metodo == "person.login")
-                .cloned()
-            {
-                if g.codigo != "ALLOW" || g.recurso.starts_with("terminal:") {
+        let qmp = maquina.na_raiz(|| super::caminho_qmp(self.arch));
+        let inicio = self.marca()?.auditoria;
+        let mut ultimo = String::from("nenhum person.login gravado");
+        for vez in 0..VEZES_DE_DIGITAR {
+            if vez > 0 {
+                println!(
+                    "  [enlace]   {}: o login no console fisico nao entrou ({ultimo}); clicando e digitando de novo",
+                    self.papel
+                );
+            }
+            let info = self.m.pedir("display.info", "{}")?;
+            let (x, y) = fora_das_janelas(&info).ok_or_else(|| {
+                format!(
+                    "{}: nenhum ponto da tela fora das janelas\n  {info}",
+                    self.papel
+                )
+            })?;
+            super::clicar_em(&qmp, &mut |metodo| self.m.pedir(metodo, "{}"), x, y)?;
+            let desde = self.marca()?.auditoria;
+            if vez > 0 {
+                self.digitar("\n")?;
+            }
+            self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
+            let limite = Instant::now() + ESPERA_PELO_LOGIN;
+            loop {
+                self.ler()?;
+                let logins: Vec<(u64, &Gravado)> = self
+                    .visto
+                    .gravados
+                    .range(inicio + 1..)
+                    .filter(|(_, g)| g.metodo == "person.login")
+                    .map(|(s, g)| (*s, g))
+                    .collect();
+                if let Some((_, g)) = logins
+                    .iter()
+                    .find(|(_, g)| g.recurso.starts_with("terminal:"))
+                {
                     return Err(format!(
                         "{}: o login no console fisico deu {} em `{}`",
                         self.papel, g.codigo, g.recurso
                     ));
                 }
-                return Ok(());
+                if logins.iter().any(|(_, g)| g.codigo == "ALLOW") {
+                    return Ok(());
+                }
+                // A recusa desta tentativa — o nome ou a senha estragados
+                // pelo teclado —: a próxima tentativa, sem esperar o prazo.
+                if let Some((_, g)) = logins.iter().find(|(s, _)| *s > desde) {
+                    ultimo = format!("{} {}", g.codigo, g.detalhe);
+                    break;
+                }
+                if Instant::now() >= limite {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(700));
             }
-            if Instant::now() >= limite {
-                return Err(format!(
-                    "{}: o login no console fisico nao foi decidido",
-                    self.papel
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(700));
         }
+        Err(format!(
+            "{}: o login no console fisico nao foi decidido em {VEZES_DE_DIGITAR} vezes ({ultimo})",
+            self.papel
+        ))
     }
 
     /// O log das duas máquinas, para a falha: as últimas linhas de

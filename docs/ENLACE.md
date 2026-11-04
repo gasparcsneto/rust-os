@@ -221,7 +221,9 @@ próprio deles nas mesmas vagas, em [FLUXOS.md](FLUXOS.md).
   relação nos dois; a pessoa entra no Terminal das duas pelo teclado — o
   teclado do emulador perde tecla com as duas máquinas de pé no mesmo
   hospedeiro, e a bancada digita de novo, depois de uma linha vazia, o
-  `login` e o `user.run` que não chegaram ao gate —; o
+  `login` e o `user.run` que não chegaram ao gate; o `login` no console
+  físico, o da bancada do SDK, também, depois de clicar de novo fora das
+  janelas —; o
   `carteiro` (um programa da pessoa em A) procura, manda, reenvia e
   pergunta o estado ao `correio` (um programa da pessoa em B); a auditoria
   dos dois lados é conferida. Depois: a suspensão em B e em A, o corte de
