@@ -209,12 +209,13 @@ impl Programa {
 /// sistema — conferido antes, por [`super::codigo::obter`]. Vai para o
 /// programa do fio junto com o manifesto e o resumo.
 pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
-    // Tudo até a troca de espaço é recuperável — o primeiro passo —, e o que
-    // vem depois dela não é: os dois `map_err` dizem isso uma vez cada, em
-    // vez de em cada `?`.
+    // Tudo até a troca de espaço é recuperável — o primeiro passo —, a troca
+    // não falha, e o que vem depois dela não tem volta: os dois `map_err`
+    // dizem isso uma vez cada, em vez de em cada `?`.
     preparar(imagem, editor)
         .map_err(Falha::ProcessoIntacto)?
         .trocar()
+        .mapear()
         .map_err(Falha::SemVolta)
 }
 
@@ -226,14 +227,15 @@ pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Fal
 /// o espaço novo, que nunca esteve ativo: é recusar como recusa uma falha
 /// [`Falha::ProcessoIntacto`].
 ///
-/// # Por que em dois passos
+/// # Por que em três passos
 ///
 /// Para quem precisa de alguma coisa **no** ponto sem volta, e só pode
 /// tentá-la antes dele: a troca de imagem de um processo que é ponta de
-/// fluxo toma a ordem das gravações, sem esperar, entre os dois passos, e a
-/// segura pelo segundo e pelo fim dos fluxos — ver `usuario::executar`.
-/// Ouvindo que ela está com outro fio, larga a preparada, e o processo
-/// continua o que era.
+/// fluxo toma a ordem das gravações, sem esperar, entre o primeiro passo e
+/// o segundo, e a segura só pelo segundo — a troca, que não falha — e pelo
+/// fim dos fluxos; o terceiro ([`Trocada::mapear`]) vem com ela já solta —
+/// ver `usuario::executar`. Ouvindo que ela está com outro fio, larga a
+/// preparada, e o processo continua o que era.
 pub struct Preparada<'a> {
     elf: super::elf::Imagem<'a>,
     faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
@@ -292,12 +294,13 @@ pub fn preparar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Preparada<'_>
     })
 }
 
-impl Preparada<'_> {
+impl<'a> Preparada<'a> {
     /// O segundo passo de [`carregar`]: o ponto sem volta — o fio adota o
-    /// espaço novo e o programa da imagem, e o anterior é largado — e os
-    /// segmentos e a pilha mapeados no espaço novo. Um erro aqui é sem volta:
-    /// a imagem anterior já não existe.
-    pub fn trocar(self) -> Result<Programa, &'static str> {
+    /// espaço novo e o programa da imagem, e o espaço novo, ainda vazio,
+    /// passa a ser o ativo. Não falha, e não volta: a imagem anterior deixa
+    /// de existir aqui, e o que era dela — o espaço e a resposta que ela não
+    /// buscou — vai com a [`Trocada`], para sair no terceiro passo.
+    pub fn trocar(self) -> Trocada<'a> {
         let Preparada {
             elf,
             faixas,
@@ -306,7 +309,7 @@ impl Preparada<'_> {
         } = self;
 
         // Entregar o espaço ao fio antes de instalá-lo é o que garante que
-        // ele seja devolvido mesmo que algo abaixo falhe: a partir daqui quem
+        // ele seja devolvido mesmo que algo depois falhe: a partir daqui quem
         // o destrói é a morte do fio, não um caminho de erro. Depois de
         // `adotar_imagem` o fio já é dono do espaço novo, e o antigo só pode
         // ser largado do outro lado da troca — não há mais como voltar atrás
@@ -315,15 +318,65 @@ impl Preparada<'_> {
         // O espaço e o programa trocam juntos: a imagem nova nunca roda com o
         // manifesto da anterior, nem a anterior com o da nova.
         let (anterior, resposta_da_anterior) = crate::fios::adotar_imagem(espaco, programa);
-        drop(resposta_da_anterior);
 
         // SAFETY: a raiz saiu de `Espaco::novo`, que copia as entradas de
         // topo do kernel — então o código que executa esta linha e a pilha
         // deste fio seguem mapeados do outro lado da troca.
         unsafe { crate::arch::trocar_espaco(raiz) };
 
-        // Só agora: o espaço anterior deste fio, se havia, deixou de estar
-        // ativo.
+        Trocada {
+            elf,
+            faixas,
+            anterior,
+            resposta_da_anterior,
+        }
+    }
+}
+
+/// A imagem nova adotada — o espaço dela ativo e ainda vazio, e o programa
+/// dela já o do fio — e o que era da anterior, por largar: o que o segundo
+/// passo de [`carregar`] deixa para o terceiro, [`Trocada::mapear`].
+///
+/// # Por que o resto vem à parte
+///
+/// Largar o espaço anterior desmonta-o página a página — tanto quanto o
+/// processo tiver mapeado —, e mapear a imagem nova copia e zera os
+/// segmentos — tanto quanto ela pedir. Nenhum dos dois precisa do ponto sem
+/// volta, e quem o atravessa com a ordem das gravações na mão — a troca de
+/// imagem de quem é ponta de fluxo — a solta antes deles: a ordem serializa
+/// o journal, os comandos, as revogações e o coletor da máquina inteira, e
+/// não espera por um trabalho que o processo dimensiona — ver
+/// `usuario::executar`.
+#[must_use = "a imagem nova precisa ser mapeada, e o que era da anterior, largado"]
+pub struct Trocada<'a> {
+    elf: super::elf::Imagem<'a>,
+    faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
+    anterior: Option<crate::paginacao::Espaco>,
+    resposta_da_anterior: crate::fios::EstadoDoPedido,
+}
+
+impl Trocada<'_> {
+    /// O terceiro passo de [`carregar`]: o que era da imagem anterior sai —
+    /// o espaço dela, que deixou de estar ativo na troca, e a resposta que
+    /// ela não buscou —, e os segmentos e a pilha da nova são mapeados no
+    /// espaço dela. Um erro aqui é sem volta: a imagem anterior já não
+    /// existe.
+    pub fn mapear(self) -> Result<Programa, &'static str> {
+        let Trocada {
+            elf,
+            faixas,
+            anterior,
+            resposta_da_anterior,
+        } = self;
+
+        // Na suíte: com que mão este trabalho roda — ver `carga_de_teste`.
+        // No começo dele, para ir junto aonde ele for.
+        #[cfg(feature = "modo-teste")]
+        carga_de_teste::anotar();
+
+        drop(resposta_da_anterior);
+        // O espaço anterior deste fio, se havia, deixou de estar ativo na
+        // troca.
         drop(anterior);
 
         for (i, segmento) in elf.segmentos().iter().enumerate() {
@@ -382,6 +435,52 @@ impl Preparada<'_> {
             // As duas ABIs exigem alinhamento de 16 no ponteiro de pilha.
             topo_da_pilha: TOPO_DA_PILHA & !0xF,
         })
+    }
+}
+
+/// Só para a suíte: com que mão o terceiro passo da carga
+/// ([`crate::usuario::programa::Trocada::mapear`]) rodou para o processo
+/// vigiado — com a ordem das gravações, ou sem ela. A troca de imagem de
+/// quem é ponta de fluxo a solta antes dele, e os casos da troca com a
+/// ordem com outro fio conferem. Fora da suíte não existe.
+#[cfg(feature = "modo-teste")]
+pub mod carga_de_teste {
+    use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+
+    /// O processo vigiado, como `fio + 1`; zero, nenhum.
+    static VIGIADO: AtomicU64 = AtomicU64::new(0);
+    /// O que se viu: 0, nada ainda; 1, sem a ordem; 2, com ela.
+    static VISTO: AtomicU8 = AtomicU8::new(0);
+
+    /// Vigia a próxima carga do processo `fio`, e esquece o que se viu.
+    pub fn vigiar(fio: u64) {
+        VISTO.store(0, Ordering::Release);
+        VIGIADO.store(fio + 1, Ordering::Release);
+    }
+
+    /// Para de vigiar — o caso que falha no meio não deixa a vigia armada
+    /// para o seguinte.
+    pub fn esquecer() {
+        VIGIADO.store(0, Ordering::Release);
+        VISTO.store(0, Ordering::Release);
+    }
+
+    /// Se a carga vigiada rodou com a ordem das gravações na mão; `None`, se
+    /// ainda não rodou.
+    pub fn com_a_ordem() -> Option<bool> {
+        match VISTO.load(Ordering::Acquire) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Chamada no começo do terceiro passo.
+    pub(super) fn anotar() {
+        if VIGIADO.load(Ordering::Acquire) == crate::fios::id_atual() + 1 {
+            let com = crate::persistencia::ordem_na_mao();
+            VISTO.store(if com { 2 } else { 1 }, Ordering::Release);
+        }
     }
 }
 

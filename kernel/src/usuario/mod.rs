@@ -1276,17 +1276,33 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 ///
 /// Então quem é ponta toma a ordem **sem esperar**
 /// ([`crate::persistencia::em_ordem_sem_esperar`]), depois de tudo o que
-/// pode falhar e antes do ponto sem volta, e a segura por ele e pelo fim
-/// dos fluxos. Com ela nas mãos de outro fio, a chamada larga o que
-/// preparou — o processo segue intacto —, dá a vez e roda de novo
-/// ([`crate::fios::ceder_e_reexecutar`]): a espera de `em_ordem`, ceder e
-/// tentar outra vez, feita do lado de fora do handler. E isso já antes do
-/// gate: com a ordem com outro, a chamada dá a vez sem decidir, e a espera
-/// não grava uma decisão a cada volta.
+/// pode falhar e antes do ponto sem volta, e a segura só por ele — a troca,
+/// que não falha — e pelo fim dos fluxos. Largar o espaço anterior e mapear
+/// a imagem nova vêm depois, com a ordem já solta: um trabalho do tamanho
+/// do que o processo mapeou e do que a imagem pede, que a ordem — o ponto
+/// de serialização do journal, dos comandos, das revogações e do coletor —
+/// não segura (ver `programa::Trocada`). Com ela nas mãos de outro fio, a
+/// chamada larga o que preparou — o processo segue intacto —, dá a vez e
+/// roda de novo ([`crate::fios::ceder_e_reexecutar`]): a espera de
+/// `em_ordem`, ceder e tentar outra vez, feita do lado de fora do handler.
+/// E isso já antes do gate: com a ordem com outro, a chamada dá a vez sem
+/// decidir, e a espera não grava uma decisão a cada volta.
+///
+/// # A execução da decisão, na auditoria
+///
+/// A decisão que o gate grava aqui ganha na cadeia o registro da execução
+/// dela, que a cita, em três casos em que a troca permitida não acontece: o
+/// código que não confere (`DENY_POLICY`), a imagem que falha antes do
+/// ponto sem volta (`ERROR`, com o motivo), e a ordem que foi para outro fio
+/// **depois** de decidida (`CONFLICT`, "adiada"). Esta última não muda nada
+/// — a volta seguinte decide de novo, com a política de então —, e dizê-la
+/// é o que impede a cadeia de mostrar um `process.exec` permitido sem troca
+/// nenhuma.
 ///
 /// Quem não é ponta de fluxo nenhum não toma a ordem: não há fim a gravar.
 /// E não vira ponta no meio da chamada — abrir e aceitar um fluxo são
-/// pedidos do próprio processo, e ele está aqui.
+/// pedidos do próprio processo, e ele está aqui. Na suíte, que pede como o
+/// processo de outro fio, a premissa é conferida depois da troca.
 ///
 /// # Safety
 ///
@@ -1388,19 +1404,37 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     let editor = codigo.selo.as_ref().map(|s| s.editor);
     let imagem = codigo.imagem;
 
-    let preparada = match programa::preparar(&imagem, editor) {
+    let preparada = programa::preparar(&imagem, editor);
+    #[cfg(feature = "modo-teste")]
+    let preparada = if falha_da_preparacao_de_teste::falhar(fio) {
+        Err(falha_da_preparacao_de_teste::MOTIVO)
+    } else {
+        preparada
+    };
+    let preparada = match preparada {
         Ok(preparada) => preparada,
 
         // Falhou antes do ponto de não retorno: o processo que chamou está
-        // inteiro — a imagem dele mapeada, a pilha no lugar — e devolver um
-        // erro é o que um `execve` faz quando recusa o arquivo.
+        // inteiro — a imagem dele mapeada, a pilha no lugar, os fluxos dele
+        // abertos — e devolver um erro é o que um `execve` faz quando recusa
+        // o arquivo.
         //
         // Esta distinção não existia, e o tratamento era o do pior caso para
         // os dois: qualquer falha matava o processo. Uma imagem malformada ou
         // uma falta momentânea de memória em `Espaco::novo`, as duas
         // recuperáveis, custavam o processo inteiro por uma premissa — "sem a
         // anterior" — que só vale do outro lado da troca.
+        //
+        // A decisão do gate já foi gravada: a execução dela diz que a troca
+        // falhou, e por quê — como a do código que não confere.
         Err(motivo) => {
+            crate::autorizacao::auditar_execucao_do_processo(
+                "process.exec",
+                &caminho,
+                politica::Codigo::Error,
+                motivo,
+                decisao,
+            );
             crate::log_warn!("usuario", "executar recusado: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::SEM_MEMORIA;
@@ -1418,18 +1452,46 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
             Some(trocada) => trocada,
             // A ordem foi para outro fio depois da conferência lá de cima:
             // a preparada saiu com a closure, o processo segue intacto, e a
-            // chamada roda de novo.
-            None => return adiar_a_troca(),
+            // chamada roda de novo. A decisão desta volta já foi gravada: a
+            // execução dela diz que ficou para depois — a volta seguinte
+            // decide de novo.
+            None => {
+                crate::autorizacao::auditar_execucao_do_processo(
+                    "process.exec",
+                    &caminho,
+                    politica::Codigo::Conflict,
+                    "adiada: a ordem das gravacoes com outro fio",
+                    decisao,
+                );
+                return adiar_a_troca();
+            }
         }
     } else {
-        trocar_a_imagem(preparada, fio, false)
+        let trocada = trocar_a_imagem(preparada, fio, false);
+        // A premissa de quem não é ponta: ninguém o fez ponta no meio da
+        // chamada — em produção, só pedidos dele o fariam, e ele está aqui.
+        // A suíte pede como o processo, de outro fio: se um caso a quebrar,
+        // a imagem nova estaria com o fluxo da anterior, e o erro aparece
+        // aqui, na hora.
+        #[cfg(feature = "modo-teste")]
+        assert!(
+            !crate::fluxo::processo_e_ponta(fio),
+            "o processo virou ponta de fluxo no meio da troca de imagem sem a ordem"
+        );
+        trocada
     };
-    let novo = match trocada {
+
+    // Depois do ponto sem volta, e com a ordem das gravações já solta — ou
+    // sem ela, para quem não é ponta: o que era da imagem anterior sai, e a
+    // nova é mapeada.
+    let novo = match trocada.mapear() {
         Ok(programa) => programa,
 
         // Aqui sim: sem imagem e sem a anterior, não há para onde voltar.
         // Encerrar é o único desfecho honesto, e é o que um `execve` que falha
-        // depois do ponto de não retorno faz em qualquer sistema.
+        // depois do ponto de não retorno faz em qualquer sistema. Os fluxos
+        // de quem era ponta já acabaram na troca — o programa já tinha
+        // mudado —, e a morte não acha mais nenhum.
         Err(motivo) => {
             crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
@@ -1447,28 +1509,30 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 }
 
 /// O ponto sem volta de [`executar`] e o que vem com ele: a imagem nova no
-/// lugar da anterior; as designações da malha da anterior fora, e os avisos
-/// que ainda esperavam na fila dos canais do processo com elas — antes de os
-/// fluxos acabarem: a imagem nova não ouve os avisos da anterior —; e, se o
-/// processo é `ponta`, os fluxos dele encerrados: a outra ponta de cada um
-/// viu outro programa — ver `fluxo::programa_mudou`. A ponta chega aqui com
-/// a ordem das gravações na mão.
-fn trocar_a_imagem(
-    preparada: programa::Preparada<'_>,
+/// lugar da anterior, o espaço dela ativo e ainda vazio; as designações da
+/// malha da anterior fora, e os avisos que ainda esperavam na fila dos
+/// canais do processo com elas — antes de os fluxos acabarem: a imagem nova
+/// não ouve os avisos da anterior —; e, se o processo é `ponta`, os fluxos
+/// dele encerrados: a outra ponta de cada um viu outro programa — ver
+/// `fluxo::programa_mudou`. A ponta chega aqui com a ordem das gravações na
+/// mão, e é só isto que ela segura: o resto da carga
+/// ([`programa::Trocada::mapear`]) vem depois de soltá-la.
+fn trocar_a_imagem<'a>(
+    preparada: programa::Preparada<'a>,
     fio: u64,
     ponta: bool,
-) -> Result<programa::Programa, &'static str> {
-    let novo = preparada.trocar()?;
+) -> programa::Trocada<'a> {
+    let trocada = preparada.trocar();
     crate::aviso::trocou_de_imagem(fio);
     if ponta {
         crate::fluxo::programa_mudou(fio);
     }
-    Ok(novo)
+    trocada
 }
 
 /// A troca não segue agora — a ordem das gravações está com outro fio — e
-/// não mudou nada: dá a vez e roda de novo, como a espera de
-/// [`crate::persistencia::em_ordem`]. Ver [`executar`].
+/// não mudou nada que a volta seguinte refaça: dá a vez e roda de novo, como
+/// a espera de [`crate::persistencia::em_ordem`]. Ver [`executar`].
 fn adiar_a_troca() -> i64 {
     TROCAS_ADIADAS.fetch_add(1, Ordering::Relaxed);
     crate::fios::ceder_e_reexecutar();
@@ -1527,6 +1591,41 @@ pub mod pausa_da_troca_de_teste {
             core::hint::spin_loop();
             voltas += 1;
         }
+    }
+}
+
+/// Só para a suíte: a próxima troca de imagem do processo armado falha no
+/// primeiro passo — como falharia a imagem que o validador recusa, ou o
+/// espaço novo sem memória —, depois do gate e antes do ponto sem volta. O
+/// caso "fluxo: a troca de imagem que falha antes do ponto sem volta" a arma
+/// para um processo que é ponta de fluxo. Fora da suíte não existe.
+#[cfg(feature = "modo-teste")]
+pub mod falha_da_preparacao_de_teste {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// O motivo da falha, como a execução da decisão o grava.
+    pub const MOTIVO: &str = "a preparacao da imagem falhou de proposito";
+
+    /// O processo cuja troca falha, como `fio + 1`; zero, nenhum.
+    static ARMADA: AtomicU64 = AtomicU64::new(0);
+
+    /// A próxima troca de imagem do processo `fio` falha no primeiro passo.
+    pub fn armar(fio: u64) {
+        ARMADA.store(fio + 1, Ordering::Release);
+    }
+
+    /// Desarma — o caso que falha antes de usá-la não a deixa armada para o
+    /// seguinte.
+    pub fn desarmar() {
+        ARMADA.store(0, Ordering::Release);
+    }
+
+    /// Se a troca do processo `fio` falha agora — uma vez: a pergunta
+    /// desarma.
+    pub(super) fn falhar(fio: u64) -> bool {
+        ARMADA
+            .compare_exchange(fio + 1, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 

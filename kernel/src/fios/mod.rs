@@ -2109,8 +2109,12 @@ pub fn tirar_cessao() -> bool {
 /// troca de fio sobre o quadro de fora, como na cessão, e a volta ao `svc`
 /// passa por EL0 com as IRQs ligadas.
 ///
-/// Só para a chamada cuja segunda vez não repete o efeito da primeira — a
-/// mesma regra de [`Estado::Esperando`].
+/// Só para a chamada que, até aqui, não mudou nada que a segunda vez refaça
+/// — a regra de [`Estado::Esperando`]. O que ela já gravou na auditoria
+/// fica, e diz o que houve: a troca de imagem que decidiu antes de ouvir
+/// que a ordem foi para outro fio grava a execução dessa decisão — adiada
+/// —, e a segunda vez decide de novo, pela política de então, numa decisão
+/// sua.
 pub fn ceder_e_reexecutar() {
     com_escalonador(|e| {
         if let Some(fio) = e.fio_atual_mut() {

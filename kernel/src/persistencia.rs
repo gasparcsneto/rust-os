@@ -1764,11 +1764,55 @@ fn compactacao_solta() -> bool {
 /// compactação é adiada. Quem toma a ordem de fora ainda não mudou nada.
 fn compactar_na_vez() {
     #[cfg(feature = "modo-teste")]
+    vez_de_compactar_de_teste::anotar();
+    #[cfg(feature = "modo-teste")]
     if QUEM_TOMA_A_ORDEM_NAO_COMPACTA.load(Ordering::Acquire) {
         return;
     }
     if compactacao_solta() && precisa_compactar() {
         let _ = compactar();
+    }
+}
+
+/// Só para a suíte: se o fio vigiado chegou à vez de compactar
+/// (`compactar_na_vez`) — a de quem toma a ordem das gravações de fora. A
+/// troca de imagem de quem é ponta de fluxo a toma sem esperar e sem
+/// compactar ([`crate::persistencia::em_ordem_sem_esperar`]), dentro do
+/// handler da chamada de sistema, e não chega lá. Anotado antes de qualquer
+/// conferência de se há o que compactar: a resposta não depende de como está
+/// o journal. Fora da suíte não existe.
+#[cfg(feature = "modo-teste")]
+pub mod vez_de_compactar_de_teste {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// O fio vigiado, como `id + 1`; zero, nenhum.
+    static VIGIADO: AtomicU64 = AtomicU64::new(0);
+    static CHEGOU: AtomicBool = AtomicBool::new(false);
+
+    /// Vigia o fio `fio`, e esquece o que se viu.
+    pub fn vigiar(fio: u64) {
+        CHEGOU.store(false, Ordering::Release);
+        VIGIADO.store(fio + 1, Ordering::Release);
+    }
+
+    /// Para de vigiar — o caso que falha no meio não deixa a vigia armada
+    /// para o seguinte.
+    pub fn esquecer() {
+        VIGIADO.store(0, Ordering::Release);
+        CHEGOU.store(false, Ordering::Release);
+    }
+
+    /// Se o fio vigiado chegou à vez de compactar desde [`vigiar`].
+    pub fn chegou() -> bool {
+        CHEGOU.load(Ordering::Acquire)
+    }
+
+    /// Chamada por quem chega à vez de compactar, com a ordem na mão.
+    pub(super) fn anotar() {
+        let vigiado = VIGIADO.load(Ordering::Acquire);
+        if vigiado != 0 && vigiado == crate::fios::id_atual() + 1 {
+            CHEGOU.store(true, Ordering::Release);
+        }
     }
 }
 

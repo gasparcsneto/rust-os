@@ -577,9 +577,9 @@ fn gravar_na_ordem(epoca: &[u8; 8], es: &[Encerramento]) {
 
 /// Acorda quem espera pelos encerramentos `es`, já gravados dentro da ordem
 /// ([`gravar_na_ordem`]), com a ordem já solta — ou ainda na mão de quem a
-/// reentrou: a troca de imagem a segura até a imagem nova poder rodar (ver
-/// [`programa_mudou`]). Quem acorda e pede a ordem espera por ela, e opera
-/// depois do fim na cadeia do mesmo jeito.
+/// reentrou: a troca de imagem a segura até o fim dos fluxos dela voltar
+/// (ver [`programa_mudou`]). Quem acorda e pede a ordem espera por ela, e
+/// opera depois do fim na cadeia do mesmo jeito.
 fn acordar_gravados(es: &[Encerramento], wakers: Vec<Waker>) {
     #[cfg(feature = "modo-teste")]
     conferir_o_fim_na_cadeia(es);
@@ -1028,16 +1028,42 @@ static FIM_GRAVADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 #[cfg(feature = "modo-teste")]
 static FIM_NA_ORDEM: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
+/// Só para a suíte: como a última troca de imagem chegou ao fim dos fluxos
+/// ([`programa_mudou`]) — 1, com a ordem das gravações já na mão, trazida de
+/// fora pela troca; 2, sem ela; 0, nenhuma desde a última conferência.
+#[cfg(feature = "modo-teste")]
+static ORDEM_TRAZIDA_NA_TROCA: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
 /// Só para a suíte: na hora de acordar quem espera pelo fim do fluxo `n`
 /// ([`acordar_gravados`]), confere se o `stream.end` dele já está na
 /// cadeia — e, quando ele é gravado, se com a ordem das gravações na mão.
+/// Esquece também como a última troca de imagem chegou ao fim dos fluxos
+/// ([`troca_com_a_ordem_trazida_de_teste`]).
 #[cfg(feature = "modo-teste")]
 pub fn conferir_o_fim_na_cadeia_de_teste(n: u64) {
     use core::sync::atomic::Ordering;
     FIM_CONFERIDO.store(0, Ordering::Release);
     FIM_GRAVADO.store(false, Ordering::Release);
     FIM_NA_ORDEM.store(0, Ordering::Release);
+    ORDEM_TRAZIDA_NA_TROCA.store(0, Ordering::Release);
     FIM_A_CONFERIR.store(n.saturating_add(1), Ordering::Release);
+}
+
+/// Só para a suíte: se a última troca de imagem chegou ao fim dos fluxos
+/// ([`programa_mudou`]) com a ordem das gravações já na mão, trazida de fora
+/// — `Some(true)` —, ou sem ela — `Some(false)`. `None`, nenhuma desde
+/// [`conferir_o_fim_na_cadeia_de_teste`].
+///
+/// O fim gravado dentro da ordem ([`fim_gravado_na_ordem_de_teste`]) não
+/// basta: sem ela trazida, [`encerrar_por_fora`] a tomaria por conta
+/// própria — de dentro do handler, esperando se estivesse com outro.
+#[cfg(feature = "modo-teste")]
+pub fn troca_com_a_ordem_trazida_de_teste() -> Option<bool> {
+    match ORDEM_TRAZIDA_NA_TROCA.load(core::sync::atomic::Ordering::Acquire) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// Só para a suíte: o que a conferência de [`conferir_o_fim_na_cadeia_de_teste`]
@@ -1102,6 +1128,7 @@ pub fn desarmar_de_teste() {
     FIM_A_CONFERIR.store(0, Ordering::Release);
     FIM_GRAVADO.store(false, Ordering::Release);
     FIM_NA_ORDEM.store(0, Ordering::Release);
+    ORDEM_TRAZIDA_NA_TROCA.store(0, Ordering::Release);
 }
 
 fn escrever_no(a: &Ator, recurso: &str, n: u64, dados: &[u8]) -> Result<usize, Falha> {
@@ -1350,18 +1377,25 @@ pub fn canal_acabou(canal: politica::mensagens::Canal) {
 }
 
 /// O processo `fio` trocou de imagem: a outra ponta viu outro programa, e
-/// os fluxos dele acabam. Chamada pelo `process.exec`, depois do ponto sem
-/// volta e antes de a imagem nova rodar, dentro do handler da chamada de
-/// sistema — e com a ordem das gravações já na mão: quem é ponta
-/// ([`processo_e_ponta`]) a toma sem esperar antes do ponto sem volta, e a
-/// segura até aqui. [`encerrar_por_fora`] a reentra: nada espera a ordem
-/// nem compacta o journal dentro do handler. Sem ela na mão, a espera
-/// voltaria — a asserção abaixo é esse erro, na hora, em vez de só quando
-/// outro fio tivesse a ordem.
+/// os fluxos dele acabam. Chamada pelo `process.exec`, logo depois do ponto
+/// sem volta — antes de a imagem nova ser mapeada, e de rodar —, dentro do
+/// handler da chamada de sistema e com a ordem das gravações já na mão: quem
+/// é ponta ([`processo_e_ponta`]) a toma sem esperar antes do ponto sem
+/// volta, e a segura até aqui. [`encerrar_por_fora`] a reentra: nada espera
+/// a ordem nem compacta o journal dentro do handler. Sem ela na mão, a
+/// espera voltaria — a asserção abaixo é esse erro, na hora, em vez de só
+/// quando outro fio tivesse a ordem; e a suíte o confere também fora da
+/// depuração (`troca_com_a_ordem_trazida_de_teste`).
 pub fn programa_mudou(fio: u64) {
+    let trazida = crate::persistencia::ordem_na_mao();
     debug_assert!(
-        crate::persistencia::ordem_na_mao(),
+        trazida,
         "o fim dos fluxos da troca de imagem sem a ordem das gravacoes na mao"
+    );
+    #[cfg(feature = "modo-teste")]
+    ORDEM_TRAZIDA_NA_TROCA.store(
+        if trazida { 1 } else { 2 },
+        core::sync::atomic::Ordering::Release,
     );
     encerrar_por_fora(|f| f.processo_acabou(fio, motivo::PROGRAMA));
 }
