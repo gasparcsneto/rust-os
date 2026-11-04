@@ -632,6 +632,19 @@ pub fn estado(nome: &str) -> Option<Estado> {
     })
 }
 
+/// Só para a suíte: alguma posição do anel do canal da `chave` — a fila e o
+/// que ficou fora dela — satisfaz `f`? É o que diz se um evento entregue ou
+/// descartado ficou para trás.
+#[cfg(feature = "modo-teste")]
+pub fn guarda_de_teste(chave: Chave, f: impl Fn(&Evento) -> bool) -> bool {
+    com_canais(|canais| {
+        canais
+            .get(chave.vaga)
+            .filter(|c| c.e_da(chave))
+            .is_some_and(|c| c.fila.iter().any(&f))
+    })
+}
+
 /// Só para a suíte: a vaga do canal `nome`, se ele está aberto.
 #[cfg(feature = "modo-teste")]
 pub fn vaga_de_teste(nome: &str) -> Option<usize> {

@@ -4149,6 +4149,72 @@ fn usuario_programas_compilados_rodam() -> Resultado {
     Ok(())
 }
 
+/// O que a fila de um canal entrega sai do anel: a posição volta a zero. E
+/// o que `descartar` tira também — a compactação não deixa, atrás dos que
+/// ficam, a cópia de um que andou para a frente. Uma tecla da janela de um
+/// Terminal passa por aqui, e pode ser de uma senha.
+fn eventos_a_fila_nao_guarda_o_que_entregou() -> Resultado {
+    use crate::eventos::{self, Colheita};
+    use protocolo::usuario::evento::{Evento, tipo};
+    let eu = crate::fios::id_atual();
+    let chave =
+        eventos::escutar_sem_teto(b"teste-anel", eu).map_err(|_| "o canal do caso nao abriu")?;
+    let evento = |tipo: u32, a: i64| Evento {
+        tipo,
+        a,
+        b: 0,
+        c: 0,
+    };
+    let tecla = |c: char| move |e: &Evento| e.tipo == tipo::TECLA && e.a == c as i64;
+    let resultado = (|| -> Resultado {
+        let mut recebidos = [Evento::default(); 8];
+        // Uma tecla entre outros eventos. Antes de colher, o anel a guarda:
+        // é o controle de que a pergunta enxerga o anel.
+        for e in [
+            evento(tipo::TESTE, 1),
+            evento(tipo::TECLA, 'q' as i64),
+            evento(tipo::TESTE, 2),
+        ] {
+            eventos::publicar_em(chave, e).map_err(|_| "o canal recusou um evento")?;
+        }
+        if !eventos::guarda_de_teste(chave, tecla('q')) {
+            return Err("o anel nao mostrou a tecla que esperava na fila");
+        }
+        match eventos::colher(chave, eu, &mut recebidos) {
+            Colheita::Entregues(3) if recebidos[1] == evento(tipo::TECLA, 'q' as i64) => {}
+            _ => return Err("a colheita nao entregou os tres eventos, na ordem"),
+        }
+        if eventos::guarda_de_teste(chave, tecla('q')) {
+            return Err("a tecla entregue ficou no anel do canal");
+        }
+        // A tecla entre dois avisos da malha, que a troca de imagem
+        // descarta: ela anda para a frente, e o lugar de onde saiu não a
+        // guarda em dobro.
+        for e in [
+            evento(tipo::MALHA, 1),
+            evento(tipo::TECLA, 'w' as i64),
+            evento(tipo::MALHA, 2),
+        ] {
+            eventos::publicar_em(chave, e).map_err(|_| "o canal recusou um evento")?;
+        }
+        if eventos::descartar(eu, tipo::MALHA) != 2 {
+            return Err("o descarte nao tirou os dois avisos da malha");
+        }
+        match eventos::colher(chave, eu, &mut recebidos) {
+            Colheita::Entregues(1) if recebidos[0] == evento(tipo::TECLA, 'w' as i64) => {}
+            _ => return Err("depois do descarte, a fila nao tinha so a tecla"),
+        }
+        if eventos::guarda_de_teste(chave, tecla('w'))
+            || eventos::guarda_de_teste(chave, |e| e.tipo == tipo::MALHA)
+        {
+            return Err("o descarte, ou a colheita depois dele, deixou um evento no anel");
+        }
+        Ok(())
+    })();
+    eventos::largar(chave, eu);
+    resultado
+}
+
 /// Um canal de eventos: o ouvinte dorme com a fila vazia, recebe em ordem o
 /// que o kernel publica, e o que não cabe é recusado e contado.
 ///
@@ -35802,6 +35868,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "eventos: o canal dorme, entrega e recusa",
         f: eventos_canal_dorme_entrega_e_recusa,
+    },
+    Caso {
+        nome: "eventos: a fila do canal nao guarda o que entregou",
+        f: eventos_a_fila_nao_guarda_o_que_entregou,
     },
     Caso {
         nome: "eventos: o terceiro canal do processo e recusado",
