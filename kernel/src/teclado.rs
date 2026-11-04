@@ -42,6 +42,27 @@ pub const HISTORIA: usize = 256;
 
 /// O que foi digitado, para quem pergunta de fora — `keyboard.read`.
 ///
+/// # Quando uma tecla entra
+///
+/// A do console físico, quando o console a **consome** — ver [`consumida`]
+/// —, e não quando ela chega: só aí se sabe se a linha pede uma senha. A
+/// senha digitada adiantado — antes de o console tratar o Enter que a pede,
+/// com ele ocupado ou com a máquina carregada — chegava antes de o console
+/// passar a pedi-la, e entrava. A de uma janela, quando chega: ela vai ao
+/// dono da janela, e o kernel não a consome.
+///
+/// Por isso o que se lê aqui é o que o console físico consumiu, e não o que
+/// chegou, e:
+///
+/// - com o console esperando um comando suspenso, a tecla aparece depois
+///   que ele responde e o console a consome;
+/// - a tecla que a fila cheia descartou não aparece — o `dropped` de
+///   `keyboard.read` a conta;
+/// - numa troca de foco com teclas do físico ainda na fila, as da janela
+///   podem aparecer antes delas;
+/// - as teclas que chegaram com o console pedindo uma senha e que ele
+///   consome já pedindo um comando aparecem: elas não são a senha.
+///
 /// # Por que não a fila do teclado
 ///
 /// Porque a fila do teclado tem **dono**: o interpretador, que atende quem
@@ -66,7 +87,9 @@ struct Historia {
 }
 
 // Tomada pelo tratador da interrupção — que já roda com as interrupções
-// mascaradas — e por `sem_interrupcoes` do resto. Solta no caminho fatal.
+// mascaradas: a tecla de uma janela — e por `sem_interrupcoes` do resto: a
+// tarefa do interpretador, quando o console físico consome a tecla, e os
+// leitores. Solta no caminho fatal.
 static HISTORICO: crate::trava::Mutex<Historia> = crate::trava::Mutex::new(Historia {
     teclas: ['\0'; HISTORIA],
     total: 0,
@@ -102,6 +125,13 @@ static PARA_JANELAS: Fila<char, CAPACIDADE> = Fila::nova();
 /// diagnóstico de ninguém. O kernel não sabe para qual janela uma tecla vai
 /// virar senha, então não grava tecla nenhuma até o último console sair do
 /// pedido de senha.
+///
+/// No console físico, o bit é conferido quando ele **consome** a tecla
+/// ([`consumida`]): toda mudança de modo dele liga ou desliga o bit dentro
+/// do tratamento de uma tecla, antes de a seguinte ser consumida, e então o
+/// bit dele é o modo da linha. Numa janela, a tecla é conferida quando
+/// chega: a senha digitada num Terminal antes de o console dele pedi-la
+/// ainda entra.
 static PEDINDO_SENHA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Marca se o console `indice` está pedindo uma senha. Chamada pelo
@@ -297,7 +327,8 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
     // entrega é a tarefa do interpretador, depois de decidir: ver
     // [`PARA_JANELAS`]. Se, na hora de entregar, não houver quem escute — o
     // dono morreu e o coletor ainda não passou para devolver o foco —, ele
-    // segue para o console, em vez de sumir.
+    // segue para o console, em vez de sumir. Entra no histórico agora: o
+    // kernel não o consome.
     if crate::superficies::foco_ativo() {
         let _ = PARA_JANELAS.enfileirar(c);
         registrar_no_historico(c);
@@ -309,8 +340,11 @@ pub fn evento(codigo_da_tecla: u8, pressionada: bool) {
     // Fila cheia é fila cheia: o contador de descartados da própria fila
     // guarda quantos se perderam, e não há para quem reclamar aqui dentro —
     // isto roda num handler de interrupção.
+    //
+    // O histórico, não: a tecla do console físico entra nele quando o
+    // console a consome, já sabendo se a linha pede uma senha — ver
+    // [`consumida`].
     let _ = TECLADO.enfileirar(c);
-    registrar_no_historico(c);
 
     // E avisar quem espera. Depois de enfileirar, nunca antes: um waker
     // acordado para uma fila ainda vazia faz a tarefa consultar, não achar
@@ -342,6 +376,22 @@ pub fn caractere(codigo_da_tecla: u8) -> Option<char> {
 /// de [`HISTORICO`] sobre por que um segundo leitor rouba em vez de observar.
 pub fn ler() -> Option<char> {
     TECLADO.desenfileirar()
+}
+
+/// A tecla `c`, tirada da fila do teclado da máquina, que o console físico
+/// consome agora: vai ao histórico se é um caractere digitado — as teclas
+/// de função e o clique, que a mesma fila leva, são da área de uso privado
+/// do Unicode, e o histórico é o que foi **digitado** — e nenhum console
+/// pede uma senha.
+///
+/// Chamada pelo interpretador antes de tratar a tecla, e não depois: vale o
+/// estado em que ela é consumida. O Enter do nome ainda entra; a primeira
+/// letra da senha, com o console já pedindo-a, não; o Enter da senha
+/// também não. Ver [`HISTORICO`].
+pub fn consumida(c: char) {
+    if c.is_ascii() {
+        registrar_no_historico(c);
+    }
 }
 
 /// O que um leitor leu do histórico.

@@ -48,7 +48,10 @@
 //! pedir o login.
 //!
 //! A senha não ecoa, não aparece na árvore semântica, não entra no
-//! histórico do teclado, e o buffer dela é apagado depois da conferência.
+//! histórico do teclado, e o buffer dela é apagado depois da conferência. No
+//! console físico, a tecla entra no histórico quando o console a consome, já
+//! sabendo se a linha pede uma senha: a senha digitada adiantado — antes de
+//! o console tratar o Enter que a pede — também fica de fora.
 //! Vale para as três da troca da própria senha — a atual, a nova e a nova
 //! de novo —, guardadas só até a última, e apagadas em toda saída.
 //!
@@ -405,6 +408,9 @@ pub async fn atender() {
 
     loop {
         match (Proximo { relogio: None }).await {
+            Evento::Entrada(crate::teclado::Entrada::Console(Console::Fisico, c)) => {
+                consumir_do_teclado(c)
+            }
             Evento::Entrada(crate::teclado::Entrada::Console(console, c)) => tratar(console, c),
             Evento::Entrada(crate::teclado::Entrada::Janela(c)) => tratar_tecla_de_janela(c),
             Evento::Retomar => {
@@ -649,8 +655,26 @@ pub fn fechar_console(console: Console, motivo: &str) {
 ///
 /// Separado do laço para a suíte alcançá-lo: em modo de teste não há
 /// executor, e sem isto o caminho da pessoa só seria exercitado pela fumaça.
+/// É o mesmo consumo da produção — ver [`consumir_do_teclado`].
 #[cfg(feature = "modo-teste")]
 pub fn tratar_tecla(c: char) {
+    consumir_do_teclado(c);
+}
+
+/// O console físico consome uma tecla da fila do teclado da máquina: ela
+/// entra no histórico do teclado — se é texto, e se nenhum console pede uma
+/// senha **agora**, com a linha como está — e então é tratada. Ver
+/// [`crate::teclado::consumida`].
+///
+/// O histórico antes de tratar, e não depois: vale o modo em que a tecla é
+/// consumida. O Enter que leva à senha entra; a primeira letra dela, com a
+/// linha já pedindo-a, não. A tecla de uma janela que cai no físico — sem
+/// quem a escute — não passa por aqui: ela entrou no histórico quando
+/// chegou.
+///
+/// Um caminho só para a produção e para a suíte, como o de [`separar`].
+fn consumir_do_teclado(c: char) {
+    crate::teclado::consumida(c);
     tratar(Console::Fisico, c);
 }
 
