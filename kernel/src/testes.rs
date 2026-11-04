@@ -6536,21 +6536,49 @@ fn terminal_operado() -> Resultado {
 
     // A caixa de fechar, pelos dois caminhos: o programa sai, e o
     // pseudo-terminal fica livre. Primeiro o `press` do agente na árvore.
+    //
+    // O Terminal fecha o pseudo-terminal antes de sair: livre o
+    // pseudo-terminal, ele ainda pode estar no ar, com o canal dele — e o
+    // botão mandaria o pedido a ele, que sai, e não ao servidor. Então
+    // também o canal sem ouvinte.
     let livre = || {
         esperar_ate(
             || {
                 !crate::pseudoterminal::donos()
                     .iter()
                     .any(|d| d.is_some_and(crate::fios::vivo))
+                    && crate::eventos::estado(protocolo::usuario::evento::CANAL_DO_TERMINAL)
+                        .is_none()
             },
             200,
         )
-        .map_err(|_| "o terminal fechado continuou com o pseudo-terminal")
+        .map_err(|_| "o terminal fechado continuou com o pseudo-terminal, ou no ar")
+    };
+    // E o registro do `logout` da pessoa que estava no console diz quem o
+    // fechou. Depois de `seq`: a vaga do pseudo-terminal se repete.
+    let logout_com = |console: crate::pessoas::Console, seq: u64, detalhe: &str| -> Resultado {
+        let do_console = |e: &politica::auditoria::Evento| {
+            e.metodo == "person.logout" && e.recurso == console.texto()
+        };
+        esperar_ate(
+            || !registros_depois(seq, |e| do_console(e) && e.detalhe == detalhe).is_empty(),
+            600,
+        )
+        .map_err(|_| {
+            crate::log_error!("teste", "{:?}", registros_depois(seq, do_console));
+            "o logout do terminal fechado nao disse quem o fechou"
+        })
     };
     let fechar = crate::ui::id_do_elemento(camada.id, 0).ok_or("id de elemento fora da faixa")?;
+    let seq = seq_da_auditoria();
     crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
     esperar_vezes("terminal: fechado", 1)?;
     livre()?;
+    logout_com(
+        console,
+        seq,
+        "o terminal fechou pelo press de agente 0 na arvore",
+    )?;
     // Depois o clique da pessoa, num Terminal lançado de novo. Contado
     // daqui: o log que o caso lê é o das últimas linhas.
     let desde = crate::log::total_emitidos();
@@ -6570,10 +6598,18 @@ fn terminal_operado() -> Resultado {
     )?;
     esperar_ate(|| de_novo("terminal: pronto") == 1, 600)
         .map_err(|_| "o terminal nao foi lancado de novo")?;
+    let console = console_do_terminal().ok_or("o terminal nao abriu um pseudo-terminal")?;
+    crate::interpretador::entrar_para_teste(
+        console,
+        crate::interpretador::PESSOA_DE_TESTE,
+        crate::interpretador::PAPEL_DA_PESSOA_DE_TESTE,
+    );
+    let seq = seq_da_auditoria();
     apertar(tx + largura - 12, ty + 11);
     esperar_ate(|| de_novo("terminal: fechado") == 1, 600)
         .map_err(|_| "o clique na caixa de fechar nao fechou o terminal")?;
     livre()?;
+    logout_com(console, seq, "o terminal fechou pelo clique da pessoa")?;
 
     crate::eventos::publicar(
         CANAL_DAS_JANELAS,
@@ -26984,6 +27020,99 @@ fn smp_o_coletor_nao_fecha_o_console_do_dono_seguinte() -> Resultado {
     resultado
 }
 
+/// O registro do `logout` diz quem fechou o Terminal: o `press` de um agente
+/// — ou de uma pessoa — pela árvore, que o kernel anota no console antes de
+/// entregá-lo; o clique da pessoa, sem anotação; e a queda, que o coletor
+/// acha. A anotação desfeita, porque o evento não chegou, é o clique. No
+/// nível do kernel, sem programa: o pseudo-terminal aberto para este fio, e
+/// fechado por ele, ou para um fio que não existe.
+fn terminal_o_logout_diz_quem_fechou() -> Resultado {
+    use crate::pseudoterminal as pty;
+    use crate::ui::Origem;
+    const CANAL: &str = "teste-quem-fechou";
+    // Um fio que não existe: maior que qualquer um da suíte.
+    const MORTO: u64 = u64::MAX - 9;
+    if pty::donos()
+        .iter()
+        .any(|d| d.is_some_and(crate::fios::vivo))
+    {
+        return Err("um pseudo-terminal ja tinha dono vivo antes do caso");
+    }
+    let eu = crate::fios::id_atual();
+    let canal =
+        crate::eventos::escutar(CANAL.as_bytes(), eu).map_err(|_| "o canal do caso nao abriu")?;
+    pty::pausar_o_coletor_de_teste(true);
+    // Os detalhes dos `logout` do console depois de `seq`.
+    let logout = |console: crate::pessoas::Console, seq: u64| {
+        registros_depois(seq, |e| {
+            e.metodo == "person.logout" && e.recurso == console.texto()
+        })
+        .into_iter()
+        .map(|(_, e)| e.detalhe)
+        .collect::<alloc::vec::Vec<_>>()
+    };
+    let resultado = (|| -> Resultado {
+        // A queda: o dono morreu sem fechar, e o coletor o acha.
+        let morta = pty::abrir(MORTO, canal).map_err(|_| "a instancia do dono morto nao abriu")?;
+        crate::interpretador::entrar_para_teste(morta.console(), "quem-fechou", "operador");
+        let seq = seq_da_auditoria();
+        pty::avisar_se_preciso();
+        if logout(morta.console(), seq) != ["o terminal morreu"] {
+            crate::log_error!("teste", "{:?}", logout(morta.console(), seq));
+            return Err("a queda do terminal nao foi gravada como queda");
+        }
+        // O Terminal que fecha o pseudo-terminal: com o `press` da árvore
+        // anotado, sem anotação, e com a anotação desfeita.
+        for (anotada, desfeita, esperado) in [
+            (
+                Some(Origem::Agente(5)),
+                false,
+                "o terminal fechou pelo press de agente 5 na arvore",
+            ),
+            (
+                Some(Origem::Pessoa),
+                false,
+                "o terminal fechou pelo press de pessoa na arvore",
+            ),
+            (None, false, "o terminal fechou pelo clique da pessoa"),
+            (
+                Some(Origem::Agente(5)),
+                true,
+                "o terminal fechou pelo clique da pessoa",
+            ),
+        ] {
+            let chave = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal do caso nao abriu")?;
+            let console = chave.console();
+            crate::interpretador::entrar_para_teste(console, "quem-fechou", "operador");
+            if let Some(origem) = anotada {
+                let anterior = crate::interpretador::press_pela_arvore(console, origem);
+                if desfeita {
+                    crate::interpretador::desfazer_press_pela_arvore(console, anterior);
+                }
+            }
+            let seq = seq_da_auditoria();
+            pty::fechar(chave, eu);
+            if logout(console, seq) != [esperado] {
+                crate::log_error!("teste", "{:?}, e nao {}", logout(console, seq), esperado);
+                return Err("o logout do terminal fechado nao disse quem o fechou");
+            }
+            // E a anotação não sobra para a abertura seguinte da vaga.
+            if crate::interpretador::quem_fechou(console)
+                != "o terminal fechou pelo clique da pessoa"
+            {
+                return Err("a anotacao do press sobrou no console fechado");
+            }
+        }
+        Ok(())
+    })();
+    pty::avisar_se_preciso();
+    pty::pausar_o_coletor_de_teste(false);
+    crate::eventos::largar(canal, eu);
+    while pty::proxima_entrada(|_| false).is_some() {}
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// O `abrir` não toma a vaga que o coletor largou e ainda está fechando.
 ///
 /// O caso de cima corre o coletor e o `abrir` em núcleos diferentes, e o
@@ -36640,6 +36769,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o coletor nao fecha o console do dono seguinte",
         f: smp_o_coletor_nao_fecha_o_console_do_dono_seguinte,
+    },
+    Caso {
+        nome: "terminal: o logout diz quem fechou",
+        f: terminal_o_logout_diz_quem_fechou,
     },
     Caso {
         nome: "pty: o abrir nao toma a vaga que o coletor fecha",
