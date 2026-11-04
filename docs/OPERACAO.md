@@ -695,7 +695,11 @@ desligamento é o sistema, a autoridade local, pelo gate e pela política —
 o mesmo `system.poweroff`, com a mesma permissão, o mesmo handler e a
 mesma energia. Nenhuma identidade nova, nenhuma autoridade nova: o botão
 não tem papel, e uma política sem `system.power` no papel local o recusa.
-O que segue é o registro da decisão como ela foi tomada.
+O que segue é o registro da análise de prontidão, antes da decisão. A
+recomendação (b) dela não foi a seguida: o usuário fixou, em 28/10, o
+fluxo "evento físico → evento de hardware → decisão/ação de sistema →
+Policy → Gate → system.power → Audit / Provenance → execução", que é o
+feito acima.
 
 - **Problema.** O botão de energia da máquina (o evento ACPI) não faz
   nada: desligar é um comando.

@@ -111,10 +111,14 @@ segurança paralelo.
   estruturas, refatorações, organização dos testes, mecanismos
   equivalentes: o agente decide sozinho. Não se pede autorização para
   decisão puramente interna.
-- **[C] nova decisão arquitetural** — nunca inventada em silêncio. Pare
-  só naquele ponto e: explique o problema; apresente as alternativas;
-  as vantagens; os riscos; o impacto; recomende uma solução; aguarde a
-  decisão. O trabalho que não depende dela continua.
+- **[C] nova decisão arquitetural ou mudança de semântica de segurança**
+  (a redação da diretriz de continuidade do usuário, de 4/11/2026) —
+  exige aprovação explícita do usuário antes da implementação; um
+  relatório, uma especificação ou uma recomendação não são aprovação.
+  Nunca inventada em silêncio. Pare só naquele ponto e: explique o
+  problema; apresente as alternativas; as vantagens; os riscos; o
+  impacto; recomende uma solução; aguarde a decisão. O trabalho que não
+  depende dela continua.
 
 Nenhum agente reabre uma decisão fechada (CLOSED) só porque achou uma
 alternativa tecnicamente interessante.

@@ -3,9 +3,9 @@
 Como o Duke troca o código que decide — o kernel e os programas — sem
 perder a máquina: dois slots, um manifesto assinado, a instalação por
 quórum, a tentativa contada pelo iniciador, a confirmação no journal e a
-volta sozinha quando a versão nova não presta. É o B1 do relatório de
-prontidão (a decisão 15.1: "A/B + assinatura criptográfica + anti-rollback
-protegido pelo TPM").
+volta sozinha quando a versão nova não presta. É o B1, a decisão 15.1 do
+relatório de prontidão, aprovada pelo usuário em 26/10 com estas palavras:
+"A/B + assinatura criptográfica + anti-rollback protegido pelo TPM".
 
 O código: o crate [`atualizacao/`](../atualizacao) (os formatos e as regras,
 testados no hospedeiro, com uma simulação de quedas de energia),

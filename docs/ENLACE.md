@@ -53,8 +53,10 @@ As dez decisões do estágio, aprovadas antes da implementação:
 - **D10 — a relação é (dispositivo, id, pessoa)**: um dispositivo pode ter
   relações com várias pessoas desta máquina, uma por pessoa.
 
-**Uma divergência**, já combinada: o enlace escuta numa **porta TCP
-própria, a 7071**, e não na 7070 do canal do agente com outras vagas. A
+**Uma divergência** da especificação aprovada, escolhida na implementação
+do Estágio 1 e citada depois pelo usuário (31/10, no pareamento; 1/11, na
+DF-4): o enlace escuta numa **porta TCP própria, a 7071**, e não na 7070
+do canal do agente com outras vagas. A
 pilha (`smoltcp`) não escolhe o conjunto de vagas pela mensagem que ainda
 vai chegar: numa porta só, um enlace podia ocupar a vaga de um agente, ou
 o contrário. Com a porta própria, as quatro vagas do enlace (5 a 8) são só
