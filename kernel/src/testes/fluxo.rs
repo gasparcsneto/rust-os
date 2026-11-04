@@ -21,7 +21,7 @@ use crate::pessoas::Console;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use politica::Codigo;
 
 pub(in crate::testes) mod par;
@@ -1529,6 +1529,294 @@ pub(super) fn fluxo_a_morte_a_troca_e_a_bifurcacao() -> Resultado {
             })();
             encerrar_todas(r, &[&d])
         })();
+        encerrar_todas(r, &[&a])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FS11b — a troca de imagem com a ordem das gravações nas mãos de outro fio
+// ---------------------------------------------------------------------------
+
+/// Onde está a ordem das gravações de [`OrdemPresa`].
+static ORDEM_PRESA: AtomicU8 = AtomicU8::new(ORDEM_LIVRE);
+const ORDEM_LIVRE: u8 = 0;
+const ORDEM_NA_MAO: u8 = 1;
+const ORDEM_A_SOLTAR: u8 = 2;
+
+/// A ordem das gravações nas mãos de um fio do kernel, até a suíte soltá-la
+/// — como a teriam o executor no meio de um comando, o coletor ou uma
+/// gravação do journal. Largar solta: o caso que falha no meio não deixa a
+/// ordem presa para os seguintes.
+///
+/// Enquanto ela está presa, quem espera um processo espera com
+/// [`esperar_cedendo`], e não com [`esperar_ate`]: este atende os pedidos
+/// dos processos, e um pedido que tomasse a ordem esperaria por ela no fio
+/// da suíte — que é quem a solta.
+struct OrdemPresa;
+
+impl OrdemPresa {
+    /// Um fio do kernel toma a ordem, de fora, e a segura cedendo a CPU.
+    fn prender() -> Result<OrdemPresa, &'static str> {
+        extern "C" fn segurar(_: u64) -> ! {
+            crate::persistencia::em_ordem(|| {
+                ORDEM_PRESA.store(ORDEM_NA_MAO, SeqCst);
+                while ORDEM_PRESA.load(SeqCst) == ORDEM_NA_MAO {
+                    crate::fios::ceder();
+                }
+            });
+            ORDEM_PRESA.store(ORDEM_LIVRE, SeqCst);
+            crate::fios::terminar()
+        }
+        ORDEM_PRESA.store(ORDEM_LIVRE, SeqCst);
+        crate::fios::criar("teste-ordem-presa", segurar, 0)?;
+        esperar_cedendo(|| ORDEM_PRESA.load(SeqCst) == ORDEM_NA_MAO, TETO_DA_MALHA)
+            .map_err(|_| "o fio do kernel nao tomou a ordem das gravacoes")?;
+        Ok(OrdemPresa)
+    }
+
+    /// A ordem segue presa.
+    fn presa(&self) -> bool {
+        ORDEM_PRESA.load(SeqCst) == ORDEM_NA_MAO
+    }
+}
+
+impl Drop for OrdemPresa {
+    fn drop(&mut self) {
+        if ORDEM_PRESA
+            .compare_exchange(ORDEM_NA_MAO, ORDEM_A_SOLTAR, SeqCst, SeqCst)
+            .is_ok()
+        {
+            let _ = esperar_cedendo(|| ORDEM_PRESA.load(SeqCst) == ORDEM_LIVRE, TETO_DA_MALHA);
+        }
+    }
+}
+
+/// As trocas de imagem já feitas — ver `usuario::estatisticas_de_processo`.
+fn trocas_feitas() -> u64 {
+    crate::usuario::estatisticas_de_processo().1
+}
+
+/// As decisões do gate sobre o `process.exec` do `ola` — a imagem da troca
+/// do `fluxos` — gravadas depois de `antes`.
+fn decisoes_de_troca(antes: u64) -> usize {
+    let ola = format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    registros_depois(antes, |e| e.metodo == "process.exec" && e.recurso == ola).len()
+}
+
+/// A troca de imagem de quem não é ponta de fluxo nenhum não toma a ordem
+/// das gravações: com ela nas mãos de outro fio, a troca acontece sem
+/// esperar e sem adiar — não há fluxo a encerrar. Esperar a ordem ali seria
+/// esperar dentro do handler da chamada de sistema: no x86, com as
+/// interrupções mascaradas pelo `SFMask`; no ARM, na pilha de exceção do
+/// núcleo, de onde não se cede a CPU.
+pub(super) fn fluxo_a_troca_sem_fluxo_nao_espera_a_ordem() -> Resultado {
+    com_os_fluxos(|| {
+        let (_, bia) = pessoa("bia", 326);
+        let c = Ponta::lancar(bia)?;
+        let trocas = trocas_feitas();
+        let adiadas = crate::usuario::trocas_adiadas_de_teste();
+        let presa = match OrdemPresa::prender() {
+            Ok(p) => p,
+            Err(e) => return encerrar_todas(Err(e), &[&c]),
+        };
+        let desde = match c.ditar(TROCAR, 0) {
+            Ok(d) => d,
+            Err(e) => {
+                drop(presa);
+                return encerrar_todas(Err(e), &[&c]);
+            }
+        };
+        // A troca acontece — ou é adiada, que é o defeito — com a ordem
+        // presa do começo ao fim.
+        let andou = esperar_cedendo(
+            || trocas_feitas() != trocas || crate::usuario::trocas_adiadas_de_teste() != adiadas,
+            TETO_DA_MALHA,
+        );
+        let trocou = trocas_feitas() == trocas + 1;
+        let adiou = crate::usuario::trocas_adiadas_de_teste() != adiadas;
+        let presa_o_tempo_todo = presa.presa();
+        drop(presa);
+        andou.map_err(|_| "a troca de imagem sem fluxo nao aconteceu com a ordem presa")?;
+        if adiou || !trocou {
+            return Err("a troca de imagem sem fluxo esperou a ordem das gravacoes");
+        }
+        if !presa_o_tempo_todo {
+            return Err("a ordem das gravacoes nao ficou presa durante a troca");
+        }
+        // A imagem nova — o `ola` — roda e sai com o código dela.
+        esperar_ate(
+            || linhas_do_programa(desde, &format!("processo encerrou com codigo {SAIDA}")) == 1,
+            TETO_DA_MALHA,
+        )
+        .map_err(|_| "o programa trocado nao terminou")
+    })
+}
+
+/// A troca de imagem de quem é ponta de um fluxo, com a ordem das gravações
+/// nas mãos de outro fio desde antes da chamada. O fim do fluxo é gravado
+/// dentro da ordem, antes de a imagem nova rodar — e a chamada não espera a
+/// ordem dentro do handler: confere que ela está com outro, e dá a vez e
+/// roda de novo antes de decidir — nada se grava a cada volta —, com o
+/// processo intacto. Solta a ordem, a troca acontece: o fim `o programa
+/// mudou` gravado com a ordem na mão, antes de acordar quem espera, e a
+/// outra ponta o vê.
+pub(super) fn fluxo_a_troca_com_fluxo_e_a_ordem_com_outro() -> Resultado {
+    troca_de_ponta_com_a_ordem_presa(327, false)
+}
+
+/// A ordem das gravações tomada por outro fio **depois** de a troca de quem
+/// é ponta de fluxo conferir que ela estava livre — no meio da chamada,
+/// decidida e com a imagem preparada, antes do ponto sem volta; a janela,
+/// aberta por uma pausa da suíte. A ordem tomada sem esperar ouve que ela
+/// está com outro: a chamada larga a imagem preparada — o processo segue o
+/// que era, ponta do fluxo —, dá a vez e roda de novo, e até a ordem ser
+/// solta não decide mais nada. Solta, a troca acontece, decidida de novo,
+/// com o fim do fluxo gravado na ordem.
+pub(super) fn fluxo_a_troca_com_a_ordem_tomada_no_meio() -> Resultado {
+    if super::outro_nucleo().is_none() {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: a pausa no handler precisa de outro nucleo"
+        );
+        return Ok(());
+    }
+    troca_de_ponta_com_a_ordem_presa(328, true)
+}
+
+/// Os dois casos da troca de quem é ponta de fluxo com a ordem das gravações
+/// presa por outro fio: presa antes da chamada, ou tomada `no_meio` dela —
+/// ver [`crate::usuario::pausa_da_troca_de_teste`].
+fn troca_de_ponta_com_a_ordem_presa(terminal: u16, no_meio: bool) -> Resultado {
+    use crate::usuario::pausa_da_troca_de_teste as pausa;
+    com_os_fluxos(|| {
+        let (_, bia) = pessoa("bia", terminal);
+        let antes = crate::autorizacao::ultimo_registro();
+        let a = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let c = Ponta::lancar(bia)?;
+            let id = match aberto(&a, &c) {
+                Ok(id) => id,
+                Err(e) => return encerrar_todas(Err(e), &[&c]),
+            };
+            let Some(n) = crate::fluxo::numero_de_teste(&id) else {
+                return encerrar_todas(Err("o id do fluxo nao e deste boot"), &[&c]);
+            };
+            crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+            let trocas = trocas_feitas();
+            let desde_o_pedido = crate::autorizacao::ultimo_registro();
+            let (desde, presa) = if no_meio {
+                // A pausa gira dentro do handler, com as interrupções
+                // mascaradas: o processo para num núcleo que não é o da
+                // suíte. Este fio é o do boot, preso ao núcleo dos
+                // dispositivos; o processo escalonado ali e parado não
+                // deixaria a suíte voltar para soltá-lo — nem o relógio
+                // andar.
+                let preso = super::outro_nucleo()
+                    .is_some_and(|outro| crate::fios::fixar(c.fio(), Some(outro)));
+                if !preso {
+                    return encerrar_todas(Err("o processo nao foi preso a outro nucleo"), &[&c]);
+                }
+                pausa::armar(c.fio());
+                let desde = match c.ditar(TROCAR, 0) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        pausa::soltar();
+                        return encerrar_todas(Err(e), &[&c]);
+                    }
+                };
+                // A chamada confere — a ordem livre —, decide, prepara a
+                // imagem e para antes de tomá-la; e a ordem vai para outro.
+                let presa = match esperar_cedendo(pausa::parada, TETO_DA_MALHA) {
+                    Ok(()) => OrdemPresa::prender(),
+                    Err(_) => Err("a troca de quem e ponta nao parou antes do ponto sem volta"),
+                };
+                pausa::soltar();
+                (desde, presa?)
+            } else {
+                let presa = match OrdemPresa::prender() {
+                    Ok(p) => p,
+                    Err(e) => return encerrar_todas(Err(e), &[&c]),
+                };
+                match c.ditar(TROCAR, 0) {
+                    Ok(desde) => (desde, presa),
+                    Err(e) => {
+                        drop(presa);
+                        return encerrar_todas(Err(e), &[&c]);
+                    }
+                }
+            };
+            // A chamada dá a vez e roda de novo — mais de uma vez, com a
+            // ordem ainda presa —, ou troca, que é o defeito.
+            let adiadas = crate::usuario::trocas_adiadas_de_teste();
+            let andou = esperar_cedendo(
+                || {
+                    trocas_feitas() != trocas
+                        || crate::usuario::trocas_adiadas_de_teste() >= adiadas + 2
+                },
+                TETO_DA_MALHA,
+            );
+            let trocou_com_a_ordem_presa = trocas_feitas() != trocas;
+            let vivo_com_a_ordem_presa = crate::fluxo::contagem().0 == 1;
+            let o_mesmo_programa =
+                crate::fios::processo(c.fio()).map(|(_, p)| p) == Some(c.p.programa);
+            let decidiu_com_a_ordem_presa = decisoes_de_troca(desde_o_pedido);
+            let presa_o_tempo_todo = presa.presa();
+            drop(presa);
+            if trocou_com_a_ordem_presa && vivo_com_a_ordem_presa {
+                return Err("a imagem nova rodou com o fluxo da anterior vivo");
+            }
+            if trocou_com_a_ordem_presa {
+                return Err("a troca de quem e ponta de fluxo nao esperou a ordem");
+            }
+            andou.map_err(|_| "a troca com a ordem presa nao deu a vez nem trocou")?;
+            if !vivo_com_a_ordem_presa || !o_mesmo_programa {
+                return Err("a troca que esperava a ordem nao deixou o processo intacto");
+            }
+            // A volta que parou no meio já tinha decidido; nenhuma outra
+            // decide enquanto a ordem está com o outro.
+            let decididas = usize::from(no_meio);
+            if decidiu_com_a_ordem_presa != decididas {
+                crate::log_error!(
+                    "teste",
+                    "{} decisoes de troca com a ordem presa; esperava {}",
+                    decidiu_com_a_ordem_presa,
+                    decididas
+                );
+                return Err("a troca que esperava a ordem decidiu e gravou a cada volta");
+            }
+            if !presa_o_tempo_todo {
+                return Err("a ordem das gravacoes nao ficou presa durante a espera");
+            }
+            // Solta a ordem: a troca acontece, e o fim vem com ela.
+            esperar_ate(|| trocas_feitas() == trocas + 1, TETO_DA_MALHA)
+                .map_err(|_| "solta a ordem, a troca nao aconteceu")?;
+            if crate::fluxo::contagem().0 != 0 {
+                return Err("a imagem nova rodou com o fluxo da anterior vivo");
+            }
+            fim_gravado(antes, &id, "o programa mudou; ida 0; volta 0; desc 0")?;
+            if crate::fluxo::fim_gravado_na_ordem_de_teste() != Some(true) {
+                return Err("o fim da troca nao foi gravado com a ordem na mao");
+            }
+            if crate::fluxo::fim_na_cadeia_ao_acordar_de_teste() != Some(true) {
+                return Err("quem esperava o fluxo acordou antes do fim na cadeia");
+            }
+            // A troca que aconteceu passou pelo gate — de novo, a que parou
+            // no meio.
+            if decisoes_de_troca(desde_o_pedido) <= decididas {
+                return Err("a troca de imagem nao passou pelo gate");
+            }
+            esperar_ate(
+                || linhas_do_programa(desde, &format!("processo encerrou com codigo {SAIDA}")) == 1,
+                TETO_DA_MALHA,
+            )
+            .map_err(|_| "o programa trocado nao terminou")?;
+            if estado(a.quem(), &id).1.as_deref() != Some("o programa mudou") {
+                return Err("quem ficou nao viu a troca de imagem");
+            }
+            Ok(())
+        })();
+        pausa::soltar();
+        crate::fluxo::desarmar_de_teste();
         encerrar_todas(r, &[&a])
     })
 }

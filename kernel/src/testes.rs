@@ -38288,6 +38288,18 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_morte_a_troca_e_a_bifurcacao,
     },
     Caso {
+        nome: "fluxo: a troca de imagem sem fluxo nao espera a ordem",
+        f: fluxo::fluxo_a_troca_sem_fluxo_nao_espera_a_ordem,
+    },
+    Caso {
+        nome: "fluxo: a troca de imagem com fluxo e a ordem com outro fio",
+        f: fluxo::fluxo_a_troca_com_fluxo_e_a_ordem_com_outro,
+    },
+    Caso {
+        nome: "fluxo: a troca de imagem com a ordem tomada no meio",
+        f: fluxo::fluxo_a_troca_com_a_ordem_tomada_no_meio,
+    },
+    Caso {
         nome: "fluxo: a revogacao e a politica nova encerram",
         f: fluxo::fluxo_a_revogacao_e_a_politica_nova,
     },
