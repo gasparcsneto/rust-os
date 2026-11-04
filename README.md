@@ -6218,7 +6218,9 @@ falha fechado:
    o `user.run` responde `launched: false`, com o `code` e a explicação de
    razão `DENY_PROVENANCE`; o `executar` devolve `SEM_SELO` (−18),
    `SELO_NAO_CONFERE` (−19) ou `EDITOR_NAO_CONFIADO` (−20), e o processo
-   segue inteiro — nada foi trocado;
+   segue inteiro — nada foi trocado. No `executar`, o arquivo que o gate
+   deixou e não se lê também ganha a execução da decisão, `ERROR` com o
+   motivo da leitura, e o processo ouve `PROGRAMA_DESCONHECIDO` (−7);
 4. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
    de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`.
@@ -9333,7 +9335,15 @@ fluxos na troca que falha antes do ponto sem volta; e a N121 trata a ponta
 como quem não é, e a conferência da premissa que a suíte faz depois da
 troca para o kernel na hora. Todas reprovadas, a N118 no aarch64: no x86
 ela sobrevive por construção — `estacionar` cede sempre, com a cessão
-pedida ou não.
+pedida ou não. E as do AE-1c, os dois casos em que a cadeia ainda mostrava
+um `process.exec` permitido sem o que veio depois — o arquivo que não se
+lê e a imagem nova que não se mapeia depois do ponto sem volta —, que
+ganharam a execução da decisão, `ERROR` com o motivo: a N122 e a N123 a
+tiram de cada um; a N124 trata a falha do mapeamento como a de antes do
+ponto sem volta e devolve o erro ao processo, que volta a um espaço sem
+imagem e morre de falha de página na própria instrução; e a N125 provoca a
+falha do mapeamento antes do ponto sem volta — o processo ouve o erro e
+segue vivo. As quatro reprovadas no x86.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9396,6 +9406,8 @@ pedida ou não.
 | fora do SDK: a janela das interrupções do x86 vazia (N114), ou sem o `nop` (N115) | "fluxo: a troca de imagem adiada abre a janela das interrupcoes" |
 | fora do SDK: a repetição da troca adiada sem a cessão (N118) | "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", no aarch64; no x86, **sobrevive** por construção — `estacionar` cede sempre |
 | fora do SDK: a ponta tratada como quem não é (N121) | a conferência da premissa, na suíte, depois da troca: o kernel para com "o processo virou ponta de fluxo no meio da troca de imagem sem a ordem" |
+| fora do SDK: o arquivo que não se lê sem a execução da decisão (N122) | "fluxo: a troca de imagem cujo arquivo nao se le" |
+| fora do SDK: a imagem que não se mapeia depois do ponto sem volta sem a execução da decisão (N123), tratada como a falha de antes dele — o erro devolvido ao processo sem imagem (N124) —, ou provocada antes dele (N125) | "fluxo: a troca de imagem que falha depois do ponto sem volta" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

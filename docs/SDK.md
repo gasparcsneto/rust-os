@@ -914,6 +914,10 @@ pelo mesmo motivo.
 | N119 | fora do SDK (AE-1): a ordem solta entre a troca e o fim dos fluxos, sem a asserção da depuração — como na release | os quatro casos da troca de quem é ponta com a ordem com outro fio |
 | N120 | fora do SDK (AE-1): a troca que falha antes do ponto sem volta encerrando os fluxos | `fluxo: a troca de imagem que falha antes do ponto sem volta` |
 | N121 | fora do SDK (AE-1): a ponta tratada como quem não é | a conferência da premissa, na suíte, depois da troca: o kernel para com `o processo virou ponta de fluxo no meio da troca de imagem sem a ordem` |
+| N122 | fora do SDK (AE-1c): o arquivo que não se lê, depois do gate, sem a execução da decisão (`ERROR`) | `fluxo: a troca de imagem cujo arquivo nao se le` |
+| N123 | fora do SDK (AE-1c): a imagem nova que não se mapeia, depois do ponto sem volta, sem a execução da decisão (`ERROR`) | `fluxo: a troca de imagem que falha depois do ponto sem volta` |
+| N124 | fora do SDK (AE-1c): a falha do mapeamento tratada como a de antes do ponto sem volta — o erro devolvido ao processo, que volta sem imagem | `fluxo: a troca de imagem que falha depois do ponto sem volta` — o processo morre de falha de página na própria instrução, e não sai com `SEM_MEMORIA` |
+| N125 | fora do SDK (AE-1c): a falha do mapeamento provocada antes do ponto sem volta — o gancho que não chega lá | `fluxo: a troca de imagem que falha depois do ponto sem volta` — o processo ouve o erro e segue vivo |
 
 ## Medidas
 

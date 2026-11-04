@@ -141,9 +141,15 @@ espaço anterior e mapear a imagem nova vêm com ela solta. Sob contenção, a
 chamada dá a vez e roda de novo, com o processo intacto; se a ordem foi
 para outro fio depois de o gate decidir, a auditoria mostra a decisão
 adiada — a execução dela, `CONFLICT`, que a cita —, e a volta seguinte
-decide de novo. Quem não é ponta não toma a ordem. O `exec` que falha antes
-do ponto sem volta não encerra fluxo nenhum, e a execução da decisão diz a
-falha (`ERROR`).
+decide de novo. Quem não é ponta não toma a ordem. O `exec` cujo arquivo
+não se lê, ou que falha antes do ponto sem volta, não encerra fluxo nenhum:
+o processo ouve o erro e segue o que era, e a execução da decisão diz a
+falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
+que não se mapeia — não tem para onde voltar: os fluxos já acabaram na
+troca, com `o programa mudou`, gravado dentro da ordem como na troca que dá
+certo; a execução da decisão diz `ERROR`, com o motivo, em nome do processo
+como ele está — com o programa que ele já adotou —, e o processo acaba
+(`SEM_MEMORIA`).
 
 ## A autoridade
 
