@@ -79,8 +79,10 @@ const ESPERA_PELO_PROGRAMA: Duration = Duration::from_secs(180);
 const JANELA_DOS_APERTOS: Duration = Duration::from_secs(11);
 
 /// Quanto esperar o gate decidir o `user.run` de uma linha digitada, e
-/// quantas vezes digitá-la — ver [`DePe::lancar`].
-const ESPERA_PELO_LANCAMENTO: Duration = Duration::from_secs(20);
+/// quantas vezes digitá-la — ver [`DePe::lancar`]. A espera é a do login:
+/// com as duas máquinas ocupadas, a linha que só demora não pode ganhar uma
+/// segunda cópia, que lançaria o programa duas vezes.
+const ESPERA_PELO_LANCAMENTO: Duration = Duration::from_secs(60);
 const VEZES_DE_DIGITAR: usize = 3;
 
 /// Quanto esperar o `person.login` de um `login` digitado — a senha passa
@@ -516,9 +518,13 @@ impl DePe {
     /// E espera o gate decidir o `user.run` dele. O teclado do emulador perde
     /// tecla com a máquina ocupada — duas de pé no mesmo hospedeiro —, e a
     /// linha estragada o interpretador recusa sem chegar ao gate: sem a
-    /// decisão gravada, digita de novo, depois de uma linha vazia que encerra
-    /// o que tiver ficado pela metade. Só digita de novo quem não viu o
-    /// `user.run` decidido: o programa não roda duas vezes.
+    /// decisão gravada em [`ESPERA_PELO_LANCAMENTO`], apaga a linha e digita
+    /// de novo. Apaga, e não encerra com uma linha vazia: a linha que perdeu
+    /// só o Enter é um `user.run` inteiro, e o Enter de agora o rodaria, e a
+    /// cópia digitada depois rodaria o programa outra vez — foi o que a CI
+    /// 426 mostrou, com dois `recebedor` de pé no destino e o segundo
+    /// atendendo o fluxo do passo seguinte. O decidido vale desde a primeira
+    /// tentativa.
     pub(crate) fn lancar(&mut self, programa: &str) -> Result<(), String> {
         let caminho = format!("/programas/{}/{programa}", self.arch.nome());
         self.lancar_caminho(&caminho)
@@ -527,23 +533,27 @@ impl DePe {
     /// Como [`DePe::lancar`], o arquivo em `caminho` — o de fora da imagem,
     /// no armazém, também: a mesma conferência do `user.run`.
     pub(crate) fn lancar_caminho(&mut self, caminho: &str) -> Result<(), String> {
+        let linha = format!("user.run {{\"path\":\"{caminho}\"}}");
+        let inicio = self.marca()?.auditoria;
         for vez in 0..VEZES_DE_DIGITAR {
-            let desde = self.marca()?.auditoria;
             if vez > 0 {
                 println!(
-                    "  [enlace]   {}: o user.run de {caminho} nao chegou ao gate; digitando de novo",
+                    "  [enlace]   {}: o user.run de {caminho} nao chegou ao gate; apagando a linha e digitando de novo",
                     self.papel
                 );
-                self.digitar("\n")?;
+                // Um apagar a mais por caractere da linha, e uns de folga: o
+                // que sobrou da tentativa anterior — inteira, sem o Enter, ou
+                // pela metade — sai sem rodar.
+                self.digitar(&"\u{8}".repeat(linha.len() + 4))?;
             }
-            self.digitar(&format!("user.run {{\"path\":\"{caminho}\"}}\n"))?;
+            self.digitar(&format!("{linha}\n"))?;
             let limite = Instant::now() + ESPERA_PELO_LANCAMENTO;
             loop {
                 self.ler()?;
                 let decidido = self
                     .visto
                     .gravados
-                    .range(desde + 1..)
+                    .range(inicio + 1..)
                     .map(|(_, g)| g)
                     .find(|g| g.metodo == "user.run" && g.recurso == caminho);
                 if let Some(g) = decidido {
