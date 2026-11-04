@@ -702,6 +702,13 @@ fn agir_no_campo(
 /// Pelo canal de entrada da janela, como o clique da pessoa: quem decide o
 /// que o botão faz é o dono dela, e ele o faz pelo mesmo caminho do clique —
 /// o agente e a pessoa acionam a mesma coisa.
+///
+/// Na caixa de fechar da janela de um Terminal — o elemento 0, a base da
+/// janela pela convenção do runtime (`programas::janela`) —, o kernel anota
+/// no console dele quem a apertou, antes de publicar: o Terminal fecha o
+/// pseudo-terminal, e o registro do `logout` diz quem fechou — ver
+/// [`crate::interpretador::quem_fechou`]. Se o evento não chega, a anotação
+/// se desfaz. Não recusa nada: só registra quem foi.
 fn pressionar_no_processo(
     id: u32,
     id_do_processo: i64,
@@ -711,7 +718,14 @@ fn pressionar_no_processo(
     let destino = elemento_de(id)
         .and_then(|(camada, _)| crate::superficies::destino_da_camada(camada))
         .ok_or("a janela do elemento fechou")?;
-    match crate::superficies::publicar_para(
+    let anotado = match (elemento_de(id), console_do_campo(id)) {
+        (Some((_, 0)), Some(console)) => Some((
+            console,
+            crate::interpretador::press_pela_arvore(console, origem),
+        )),
+        _ => None,
+    };
+    let publicado = crate::superficies::publicar_para(
         destino,
         Evento {
             tipo: tipo::ACAO,
@@ -719,7 +733,11 @@ fn pressionar_no_processo(
             b: acao::PRESSIONAR,
             c: origem.codigo(),
         },
-    ) {
+    );
+    if let (Err(_), Some((console, anterior))) = (&publicado, anotado) {
+        crate::interpretador::desfazer_press_pela_arvore(console, anterior);
+    }
+    match publicado {
         Ok(()) => Ok(()),
         Err(crate::eventos::NaoPublicado::SemOuvinte) => {
             Err("o dono da janela nao escuta o canal dela")

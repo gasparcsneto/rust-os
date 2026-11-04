@@ -277,6 +277,15 @@ impl Terminal {
     /// Sai, por qualquer caminho do laço: o que ainda esperava o
     /// pseudo-terminal — pode ser uma senha — é zerado, o bloco inteiro da
     /// fila, e não só o que ela tem; e o código de saída.
+    ///
+    /// Fechado pela caixa de fechar, o Terminal fecha o pseudo-terminal
+    /// antes de sair: o console dele fecha, a sessão de quem estava nele
+    /// acaba, e o registro do `logout` diz quem fechou — o `press` de um
+    /// agente pela árvore, que o kernel anotou, ou o clique da pessoa. Sem
+    /// isso, o coletor acharia o dono morto, e o registro diria só que o
+    /// terminal morreu — o mesmo da queda. O log vem depois: quem espera
+    /// `terminal: fechado` já acha o `logout` gravado. O encerrar e as
+    /// falhas não fecham: caem no coletor.
     fn sair(&mut self, fim: Fim) -> i64 {
         let inteiro = self.pendente.capacity();
         self.pendente.resize(inteiro, 0);
@@ -284,6 +293,7 @@ impl Terminal {
         self.pendente.clear();
         match fim {
             Fim::Fechado => {
+                sistema::fechar(self.pty);
                 escreverln!("terminal: fechado");
                 0
             }

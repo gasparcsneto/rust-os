@@ -256,6 +256,10 @@ struct Estado {
     /// da árvore e do histórico do teclado. Ver [`aviso_do_pareamento`] e
     /// [`engolir`].
     engolindo: bool,
+    /// O `press` que a árvore entregou na caixa de fechar da janela do
+    /// Terminal deste console, e de quem: o registro do `logout` diz quem
+    /// fechou. Ver [`press_pela_arvore`] e [`quem_fechou`].
+    press_pela_arvore: Option<Origem>,
 }
 
 impl Estado {
@@ -278,6 +282,7 @@ impl Estado {
         executando: false,
         enter_pedido: [None; ENTER_PEDIDOS],
         engolindo: false,
+        press_pela_arvore: None,
     };
 
     /// Esquece a troca da própria senha em curso, e apaga as senhas que
@@ -587,6 +592,7 @@ pub fn abrir_console(console: Console) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        e.press_pela_arvore = None;
         saidaln!(
             console,
             "Duke, {}. Ninguem entrou: `login` para entrar, `ajuda` para saber mais.",
@@ -613,6 +619,45 @@ pub fn abrir_console(console: Console) {
     }
 }
 
+/// A árvore entrega ao Terminal deste console o `press` de `origem` na
+/// caixa de fechar da janela dele: anota, para o registro do `logout` dizer
+/// quem fechou — ver [`quem_fechou`] —, e devolve a anotação anterior, para
+/// [`desfazer_press_pela_arvore`]. Chamada por `crate::ui` **antes** de
+/// publicar o evento: noutro núcleo, o Terminal pode fechar e o console
+/// acabar antes de a publicação voltar.
+///
+/// Só diz quem foi; não decide nada, e não recusa nada. A decisão do
+/// `press` é a do `ui.act`, gravada antes, com o nome de quem pediu.
+pub fn press_pela_arvore(console: Console, origem: Origem) -> Option<Origem> {
+    com_estado(console, |e| e.press_pela_arvore.replace(origem)).flatten()
+}
+
+/// Desfaz um [`press_pela_arvore`]: o evento não chegou ao Terminal.
+pub fn desfazer_press_pela_arvore(console: Console, anterior: Option<Origem>) {
+    com_estado(console, |e| e.press_pela_arvore = anterior);
+}
+
+/// Quem fechou o Terminal deste console, para o registro do `logout`.
+///
+/// - Com o `press` da árvore anotado ([`press_pela_arvore`]): `o terminal
+///   fechou pelo press de agente N na arvore` — ou `de pessoa`, a pessoa
+///   que pediu pela árvore. A sessão `N` é a vaga do transporte, que outra
+///   conexão ocupa depois; o `ui.act` gravado diz o nome.
+/// - Sem: `o terminal fechou pelo clique da pessoa`. O Terminal só fecha o
+///   pseudo-terminal por um gesto de fechar, e o que não veio da árvore
+///   veio do ponteiro, que é o mouse da máquina.
+///
+/// A queda, o término e a saída sem fechar não passam por aqui: o coletor
+/// os acha, e diz `o terminal morreu`. Com a pessoa clicando e um agente
+/// apertando ao mesmo tempo, diz o agente — o `press` dele foi entregue
+/// antes do fechamento —, e o `ui.act` gravado desempata.
+pub fn quem_fechou(console: Console) -> alloc::string::String {
+    match com_estado(console, |e| e.press_pela_arvore).flatten() {
+        Some(origem) => alloc::format!("o terminal fechou pelo press de {origem} na arvore"),
+        None => alloc::string::String::from("o terminal fechou pelo clique da pessoa"),
+    }
+}
+
 /// Larga o comando suspenso do console, se há um: o console reabriu ou
 /// fechou, e quem confirmou a linha não está mais nele. A espera desarma, e
 /// a entrada do console volta a ser lida. Fora das duas travas.
@@ -633,7 +678,8 @@ fn largar_suspenso(console: Console) {
 
 /// Fecha um console: a sessão de quem estava nele acaba, e o que ele
 /// guardava se apaga. Chamada pelo pseudo-terminal quando o Terminal fecha,
-/// ou o processo dele morre.
+/// ou o processo dele morre. O `motivo` vai ao registro do `logout`: quem
+/// fechou — ver [`quem_fechou`] —, ou a queda.
 pub fn fechar_console(console: Console, motivo: &str) {
     let Some((sessao, i)) = com_estado(console, |e| {
         let sessao = e.sessao.take();
@@ -647,6 +693,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        e.press_pela_arvore = None;
         sessao
     })
     .zip(indice(console)) else {

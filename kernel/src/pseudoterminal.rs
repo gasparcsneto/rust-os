@@ -412,7 +412,23 @@ pub fn proxima_entrada(pular: impl Fn(usize) -> bool) -> Option<(Console, char)>
 }
 
 /// Fecha o pseudo-terminal, se a `chave` for a abertura de `fio`. O console
-/// dele fecha junto: a sessão de quem estava nele acaba.
+/// dele fecha junto: a sessão de quem estava nele acaba, e o registro do
+/// `logout` diz quem fechou — o `press` de um agente pela árvore, ou o
+/// clique da pessoa: ver [`crate::interpretador::quem_fechou`].
+///
+/// É o Terminal que fecha, quando a janela dele é fechada: o `logout` sai
+/// na chamada `fechar` dele, e não um tique depois, no coletor — que fica
+/// com a queda ([`avisar_se_preciso`]).
+///
+/// # Dentro da chamada de sistema
+///
+/// O fechamento do console roda no handler da chamada: no x86 com as
+/// interrupções mascaradas, no ARM na pilha de exceção do núcleo. Nada nele
+/// espera a ordem das gravações nem cede a CPU — o console, a cerimônia de
+/// pareamento dele, a sessão da pessoa e o que ela tinha na coordenação,
+/// nas mensagens e na malha só tomam travas mascaradas e gravam na cadeia
+/// da auditoria em memória —, como o `abrir`, que já fecha e abre o
+/// console na chamada `terminal`.
 pub fn fechar(chave: Chave, fio: u64) {
     let fechou = crate::arch::sem_interrupcoes(|| {
         let mut donos = DONOS.lock();
@@ -428,7 +444,8 @@ pub fn fechar(chave: Chave, fio: u64) {
         }
     });
     if fechou {
-        encerrar_e_soltar(usize::from(chave.indice), "o terminal fechou");
+        let motivo = crate::interpretador::quem_fechou(chave.console());
+        encerrar_e_soltar(usize::from(chave.indice), &motivo);
     }
 }
 
@@ -442,6 +459,11 @@ fn encerrar_e_soltar(i: usize, motivo: &str) {
 /// Avisa cada dono, no canal dele, que há saída nova; e fecha o console de
 /// um dono que morreu sem fechar. Chamada pelo coletor de fios a cada volta
 /// — ver o cabeçalho sobre por que o aviso é adiado.
+///
+/// O registro do `logout` desse fechamento diz `o terminal morreu`: a
+/// queda, o `process.terminate`, ou a saída sem fechar o pseudo-terminal.
+/// O Terminal fechado pela caixa de fechar fecha por [`fechar`], que diz
+/// quem fechou.
 ///
 /// Um aviso por volta, e não um por impressão: o dono lê tudo o que houver
 /// quando acordar.
