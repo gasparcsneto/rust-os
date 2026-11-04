@@ -46,7 +46,13 @@
 //! última é a de cima —, e o compositor é avisado a cada mudança.
 //!
 //! Cada coisa que o servidor faz vira uma linha no log, `janelas: ...`: é
-//! por elas que a suíte acompanha o que aconteceu do lado de cá.
+//! por elas que a suíte acompanha o que aconteceu do lado de cá. Menos a
+//! tecla: o que a Pessoa digita numa janela dele pode ser uma senha — a
+//! janela que tomou o foco enquanto ela digitava a do login, a da `senha`
+//! ou a do pareamento —, e o log é uma saída sem gate, que `log.tail`
+//! entrega a quem tem `log.read`. Nem o código, nem uma linha por tecla,
+//! que daria a conta e o ritmo dela. A suíte confere a tecla pelo valor do
+//! campo da janela e pela fila do canal.
 
 #![no_std]
 #![no_main]
@@ -311,7 +317,8 @@ impl Servidor {
         self.atender(id, gesto);
     }
 
-    /// Uma tecla, com o foco numa janela: vai ao widget com o foco nela.
+    /// Uma tecla, com o foco numa janela: vai ao widget com o foco nela. Sem
+    /// linha no log — ver o cabeçalho.
     fn tecla(&mut self, codigo: i64) {
         let Some(id) = self.foco else {
             return;
@@ -322,7 +329,6 @@ impl Servidor {
         let Some(i) = self.indice(id) else {
             return;
         };
-        escreverln!("janelas: tecla {} em {}", codigo, id);
         let gesto = self.janelas[i].janela.tecla(c);
         self.atender(id, gesto);
     }
