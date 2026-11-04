@@ -282,7 +282,9 @@ struct Fio {
     ocioso: bool,
     /// A chamada de sistema em curso pediu para ser reexecutada — ver
     /// [`tirar_reexecucao`]. Posto junto com [`Estado::Esperando`], na mesma
-    /// seção crítica, e só por quem põe o fio nesse estado.
+    /// seção crítica, e só por quem põe o fio nesse estado — ou, sem
+    /// estacionar, por [`ceder_e_reexecutar`], junto com o pedido de vez: a
+    /// chamada que não pôde seguir agora e ainda não mudou nada.
     reexecutar: bool,
     /// A chamada de sistema em curso pediu a vez para outro fio ao voltar —
     /// ver [`pedir_cessao`]. Posto e tirado pelo próprio fio, dentro da
@@ -2088,6 +2090,34 @@ pub fn tirar_cessao() -> bool {
         e.fio_atual_mut()
             .is_some_and(|f| core::mem::take(&mut f.ceder_ao_voltar))
     })
+}
+
+/// A chamada de sistema em curso não pode seguir agora, e ainda não mudou
+/// nada: o fio dá a vez ao voltar, como em [`pedir_cessao`], e a chamada
+/// roda de novo quando ele voltar a ser escolhido — ver
+/// [`tirar_reexecucao`]. Sem estacionar: ninguém precisa acordá-lo, ele
+/// continua pronto.
+///
+/// É a espera de quem não pode esperar dentro do handler: a ordem das
+/// gravações nas mãos de outro fio, na troca de imagem de um processo que é
+/// ponta de fluxo — ver `usuario::executar` e
+/// [`crate::persistencia::em_ordem_sem_esperar`]. De fora, é o laço de
+/// [`crate::persistencia::em_ordem`] — ceder e tentar de novo —, e quem o
+/// dá é o backend, onde ele já troca de fio: no x86, `estacionar` cede uma
+/// vez e abre uma janela para as interrupções — o despacho roda mascarado —,
+/// e o laço do despacho repete a chamada; no ARM, o `svc` recua e o handler
+/// troca de fio sobre o quadro de fora, como na cessão, e a volta ao `svc`
+/// passa por EL0 com as IRQs ligadas.
+///
+/// Só para a chamada cuja segunda vez não repete o efeito da primeira — a
+/// mesma regra de [`Estado::Esperando`].
+pub fn ceder_e_reexecutar() {
+    com_escalonador(|e| {
+        if let Some(fio) = e.fio_atual_mut() {
+            fio.reexecutar = true;
+            fio.ceder_ao_voltar = true;
+        }
+    });
 }
 
 /// Tira o fio atual de circulação até [`acordar`] o devolver.

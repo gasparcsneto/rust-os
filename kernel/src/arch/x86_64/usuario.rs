@@ -387,7 +387,10 @@ extern "C" fn despachar_chamada(quadro: *mut QuadroDeUsuario) -> i64 {
         // controle a um processo que já não existe — ou está esperando, e
         // volta quando o acordarem (ou na hora, se já o acordaram). Nesse
         // caso o `resultado` acima é descartado e a chamada roda de novo,
-        // agora com o que colher.
+        // agora com o que colher. Ou, de pé, a chamada só pediu a vez e a
+        // repetição, sem ter mudado nada — ver `fios::ceder_e_reexecutar`:
+        // `estacionar` cede uma vez, abre uma janela para as interrupções e
+        // volta, e ela roda de novo.
         estacionar();
     }
 }
@@ -406,6 +409,7 @@ fn estacionar() {
     loop {
         crate::arch::ceder_cpu();
         if !crate::fios::atual_parado() {
+            janela_de_interrupcoes();
             return;
         }
         // Se voltamos aqui é porque não havia outro fio pronto. Só uma
@@ -415,6 +419,38 @@ fn estacionar() {
         // `esperar_interrupcao` não serve neste ponto.
         crate::arch::dormir_parado();
     }
+}
+
+/// Uma janela para as interrupções deste núcleo, antes de a chamada rodar de
+/// novo.
+///
+/// O despacho roda mascarado — o `SFMask` —, e quem volta de [`estacionar`]
+/// de pé repete a chamada sem passar pelo anel do usuário. A chamada que só
+/// pediu a vez e a repetição (`fios::ceder_e_reexecutar`: a ordem das
+/// gravações com outro fio, na troca de imagem de quem é ponta de fluxo)
+/// pode repetir muitas vezes, e, sem outro fio pronto a quem ceder, giraria
+/// aqui com as interrupções mascaradas: o timer, os dispositivos e os
+/// cutucões deste núcleo parados enquanto ela espera — a espera mascarada que
+/// [`crate::persistencia::em_ordem`] recusa. Com a janela, cada volta deixa
+/// entrar o que estava pendente, como entra para quem espera a ordem num fio
+/// do kernel; e a preempção que vier nela troca de fio como em
+/// `dormir_parado`, que já liga as interrupções neste mesmo ponto.
+///
+/// No ARM a repetição volta ao `svc` pelo `eret`, com as IRQs ligadas em
+/// EL0, e a janela já existe.
+fn janela_de_interrupcoes() {
+    // Já ligadas, a janela já está aberta — e o `cli` abaixo as fecharia
+    // para quem não as fechou.
+    if x86_64::instructions::interrupts::are_enabled() {
+        return;
+    }
+    // SAFETY: ligar as interrupções aqui é o que `dormir_parado` já faz no
+    // mesmo ponto do despacho: a pilha é a do fio, o `GS` é o do processo e
+    // nenhum handler o olha, e nenhuma trava está na mão. Uma interrupção
+    // pendente é entregue depois da instrução seguinte ao `sti` — o `nop` —,
+    // e o `cli` devolve a máscara que o despacho espera. Sem `nomem`: o que
+    // o handler mudar na memória não fica num registrador de antes.
+    unsafe { core::arch::asm!("sti", "nop", "cli", options(nostack)) };
 }
 
 /// Desce para ring 3 e começa a executar em `entrada`. Nunca retorna.

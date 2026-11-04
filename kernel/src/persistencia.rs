@@ -257,7 +257,9 @@ static FALHAR_A_PROXIMA: core::sync::atomic::AtomicBool =
 /// Reentrante pelo mesmo fio — uma operação de autoridade grava o registro
 /// dela, e o que ela chama pode querer gravar —, e quem espera cede a CPU
 /// em vez de girar: quem tem a ordem pode estar preemptado, e só volta se
-/// alguém lhe der o processador. Nunca com as interrupções desligadas.
+/// alguém lhe der o processador. Nunca com as interrupções desligadas, e
+/// nunca de dentro de um handler — uma chamada de sistema: ali, quem precisa
+/// da ordem a pede sem esperar, com [`em_ordem_sem_esperar`].
 #[track_caller]
 pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
     let eu = crate::fios::id_atual() + 1;
@@ -287,6 +289,58 @@ pub fn em_ordem<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     DONO_DA_ORDEM.store(0, Ordering::Release);
     r
+}
+
+/// Como [`em_ordem`], sem esperar e sem compactar: roda `f` com a ordem das
+/// gravações na mão se ela está livre — ou já é deste fio —, e devolve
+/// `None`, sem rodar `f`, se ela está com outro fio.
+///
+/// # Para quem não pode esperar
+///
+/// Uma chamada de sistema roda num handler: no x86, com as interrupções
+/// mascaradas pelo `SFMask`; no ARM, na pilha de exceção do núcleo, de onde
+/// ceder a CPU é um pânico (`ceder_cpu`). [`em_ordem`] espera cedendo, e ali
+/// não pode — a asserção de depuração dele é esse erro. Quem ouve `None` não
+/// mudou nada, e tenta de novo de fora do handler: a chamada dá a vez e roda
+/// outra vez (`fios::ceder_e_reexecutar`), que é a espera de [`em_ordem`] —
+/// ceder e tentar de novo — feita do lado de fora.
+///
+/// # Sem compactar
+///
+/// Quem toma a ordem de fora, num ponto seguro, compacta em [`em_ordem`]
+/// ([`compactar_na_vez`]); aqui a compactação — o disco e o TPM — correria
+/// dentro do handler. O coletor e o próximo que tomar a ordem por
+/// [`em_ordem`] compactam.
+///
+/// O pedido sem espera não entra na conferência da ordem das travas como
+/// aresta — como o `try_lock`: sem espera, não há impasse —; o que se pede
+/// com a ordem na mão entra, como em [`em_ordem`].
+pub fn em_ordem_sem_esperar<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let eu = crate::fios::id_atual() + 1;
+    if DONO_DA_ORDEM.load(Ordering::Acquire) == eu {
+        return Some(f());
+    }
+    DONO_DA_ORDEM
+        .compare_exchange(0, eu, Ordering::Acquire, Ordering::Relaxed)
+        .ok()?;
+    let r = f();
+    DONO_DA_ORDEM.store(0, Ordering::Release);
+    Some(r)
+}
+
+/// A ordem das gravações está com outro fio agora? Sem tomá-la nem esperar:
+/// para quem prefere dar a vez antes de fazer qualquer coisa — a troca de
+/// imagem de quem é ponta de fluxo, que de outro modo decidiria e gravaria a
+/// cada volta. A resposta vale para o instante: quem precisa da ordem a toma
+/// com [`em_ordem_sem_esperar`].
+pub fn ordem_com_outro() -> bool {
+    let dono = DONO_DA_ORDEM.load(Ordering::Acquire);
+    dono != 0 && dono != crate::fios::id_atual() + 1
+}
+
+/// Se o fio que executa tem a ordem das gravações na mão.
+pub fn ordem_na_mao() -> bool {
+    DONO_DA_ORDEM.load(Ordering::Acquire) == crate::fios::id_atual() + 1
 }
 
 /// Se o fio deste núcleo tem a ordem das gravações, sem tomar trava

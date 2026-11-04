@@ -576,7 +576,10 @@ fn gravar_na_ordem(epoca: &[u8; 8], es: &[Encerramento]) {
 }
 
 /// Acorda quem espera pelos encerramentos `es`, já gravados dentro da ordem
-/// ([`gravar_na_ordem`]), com a ordem já solta.
+/// ([`gravar_na_ordem`]), com a ordem já solta — ou ainda na mão de quem a
+/// reentrou: a troca de imagem a segura até a imagem nova poder rodar (ver
+/// [`programa_mudou`]). Quem acorda e pede a ordem espera por ela, e opera
+/// depois do fim na cadeia do mesmo jeito.
 fn acordar_gravados(es: &[Encerramento], wakers: Vec<Waker>) {
     #[cfg(feature = "modo-teste")]
     conferir_o_fim_na_cadeia(es);
@@ -1348,9 +1351,26 @@ pub fn canal_acabou(canal: politica::mensagens::Canal) {
 
 /// O processo `fio` trocou de imagem: a outra ponta viu outro programa, e
 /// os fluxos dele acabam. Chamada pelo `process.exec`, depois do ponto sem
-/// volta.
+/// volta e antes de a imagem nova rodar, dentro do handler da chamada de
+/// sistema — e com a ordem das gravações já na mão: quem é ponta
+/// ([`processo_e_ponta`]) a toma sem esperar antes do ponto sem volta, e a
+/// segura até aqui. [`encerrar_por_fora`] a reentra: nada espera a ordem
+/// nem compacta o journal dentro do handler. Sem ela na mão, a espera
+/// voltaria — a asserção abaixo é esse erro, na hora, em vez de só quando
+/// outro fio tivesse a ordem.
 pub fn programa_mudou(fio: u64) {
+    debug_assert!(
+        crate::persistencia::ordem_na_mao(),
+        "o fim dos fluxos da troca de imagem sem a ordem das gravacoes na mao"
+    );
     encerrar_por_fora(|f| f.processo_acabou(fio, motivo::PROGRAMA));
+}
+
+/// Se o processo `fio` é ponta de algum fluxo vivo: se a troca de imagem ou
+/// a morte dele encerraria algum ([`programa_mudou`], [`canal_acabou`]). O
+/// `process.exec` só toma a ordem das gravações quando há o que encerrar.
+pub fn processo_e_ponta(fio: u64) -> bool {
+    se_ha_tabela(|t| t.fluxos.processo_e_ponta(fio)).unwrap_or(false)
 }
 
 /// O endpoint `endpoint` acabou: os pedidos que esperavam nele acabam, e a

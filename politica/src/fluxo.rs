@@ -543,6 +543,18 @@ impl Fluxo {
             || (self.estado == Estado::Aberto && self.aceitante.quem() == Quem::Processo(fio))
     }
 
+    /// Se o processo `fio` ainda é ponta deste fluxo: abriu, ou aceitou — e
+    /// o fluxo abriu —, e não saiu. É o que o fim do processo, ou a troca de
+    /// programa, encerra — ver [`Fluxos::processo_acabou`].
+    fn do_processo(&self, fio: u64) -> bool {
+        let q = Quem::Processo(fio);
+        let ainda = |l: Lado| !self.saiu[l.indice()];
+        (self.abridor.quem() == q && ainda(Lado::Abridor))
+            || (self.estado == Estado::Aberto
+                && self.aceitante.quem() == q
+                && ainda(Lado::Aceitante))
+    }
+
     /// Os dois sentidos terminaram: o fluxo acabou.
     fn concluido(&self) -> bool {
         self.estado == Estado::Aberto && self.ida.terminado() && self.volta.terminado()
@@ -1713,12 +1725,15 @@ impl Fluxos {
     /// saiu — fechou — não é mais dele: o que ele escreveu segue legível
     /// pela outra, até o fim do sentido, como no fecho.
     pub fn processo_acabou(&mut self, fio: u64, motivo: &str) -> Vec<Encerramento> {
-        let q = Quem::Processo(fio);
-        self.abortar_onde(motivo, |f| {
-            let ainda = |l: Lado| !f.saiu[l.indice()];
-            (f.abridor.quem() == q && ainda(Lado::Abridor))
-                || (f.estado == Estado::Aberto && f.aceitante.quem() == q && ainda(Lado::Aceitante))
-        })
+        self.abortar_onde(motivo, |f| f.do_processo(fio))
+    }
+
+    /// Se o processo `fio` é ponta de algum fluxo vivo: se
+    /// [`processo_acabou`](Self::processo_acabou) encerraria algum. Pela
+    /// mesma conta, sem mudar nada — para o kernel saber, antes de uma troca
+    /// de programa, se há fim a gravar.
+    pub fn processo_e_ponta(&self, fio: u64) -> bool {
+        self.vivos.iter().any(|f| f.do_processo(fio))
     }
 
     /// O endpoint daqui `endpoint` acabou: os pedidos que esperavam nele
@@ -2114,7 +2129,9 @@ mod testes {
         let id = aberto(&mut t);
         t.escrever(P1, q(20), id, b"volta", 1).unwrap();
         t.terminar(P1, q(20), id, 1).unwrap();
+        assert!(t.processo_e_ponta(20) && t.processo_e_ponta(10));
         let e = t.processo_acabou(20, motivo::PROCESSO);
+        assert!(!t.processo_e_ponta(20) && !t.processo_e_ponta(10));
         assert_eq!(e.len(), 1);
         assert_eq!(
             (e[0].motivo.as_str(), e[0].descartados),
@@ -2125,6 +2142,7 @@ mod testes {
         let id = aberto(&mut t);
         t.escrever(P1, q(20), id, b"volta", 1).unwrap();
         assert_eq!(t.fechar(P1, q(20), id, 1), Ok(None));
+        assert!(!t.processo_e_ponta(20) && t.processo_e_ponta(10));
         assert!(t.processo_acabou(20, motivo::PROCESSO).is_empty());
         assert!(t.processo_acabou(20, motivo::PROGRAMA).is_empty());
         let (l, e) = t.ler(P1, q(10), id, 100, 2).unwrap();
@@ -2580,7 +2598,12 @@ mod testes {
                     if proximo() % 10 == 0 {
                         t.anular_titular(ti, motivo::REVOGADO);
                     } else {
-                        t.processo_acabou(fio, motivo::PROCESSO);
+                        // A pergunta e o fim pela mesma conta: é ponta se,
+                        // e só se, o fim encerra algum — e depois não é.
+                        let era = t.processo_e_ponta(fio);
+                        let e = t.processo_acabou(fio, motivo::PROCESSO);
+                        assert_eq!(era, !e.is_empty(), "passo {passo}");
+                        assert!(!t.processo_e_ponta(fio), "passo {passo}");
                     }
                 }
                 10 => {

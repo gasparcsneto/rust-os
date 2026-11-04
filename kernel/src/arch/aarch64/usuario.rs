@@ -70,8 +70,11 @@ pub fn atender_chamada(quadro: &mut Quadro) {
         )
     };
 
-    // A chamada pediu para ser reexecutada — hoje só `esperar` faz isso, ao
-    // não achar filho para colher.
+    // A chamada pediu para ser reexecutada: a que estacionou o fio — `esperar`
+    // sem filho para colher, a leitura de um canal vazio, `pedir` —, ou a que
+    // só pediu a vez e a repetição, sem ter mudado nada
+    // (`fios::ceder_e_reexecutar`): a vez, o handler a dá sobre o quadro de
+    // fora, como na cessão, e o fio volta no `svc`.
     //
     // # Por que reexecutar o `svc`, e não voltar para dentro do despacho
     //

@@ -209,11 +209,43 @@ impl Programa {
 /// sistema — conferido antes, por [`super::codigo::obter`]. Vai para o
 /// programa do fio junto com o manifesto e o resumo.
 pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Falha> {
-    // Tudo até a troca de espaço é recuperável, e é este `map_err` que diz
-    // isso uma vez em vez de em cada `?`.
-    let antes = Falha::ProcessoIntacto;
+    // Tudo até a troca de espaço é recuperável — o primeiro passo —, e o que
+    // vem depois dela não é: os dois `map_err` dizem isso uma vez cada, em
+    // vez de em cada `?`.
+    preparar(imagem, editor)
+        .map_err(Falha::ProcessoIntacto)?
+        .trocar()
+        .map_err(Falha::SemVolta)
+}
 
-    let elf = super::elf::validar(imagem).map_err(antes)?;
+/// Uma imagem conferida e o espaço novo dela, ainda não adotado: tudo o que
+/// [`carregar`] faz antes do ponto sem volta.
+///
+/// O processo que chamou segue intacto — a imagem dele mapeada, a pilha no
+/// lugar. Largar uma `Preparada` sem [`trocar`](Preparada::trocar) larga só
+/// o espaço novo, que nunca esteve ativo: é recusar como recusa uma falha
+/// [`Falha::ProcessoIntacto`].
+///
+/// # Por que em dois passos
+///
+/// Para quem precisa de alguma coisa **no** ponto sem volta, e só pode
+/// tentá-la antes dele: a troca de imagem de um processo que é ponta de
+/// fluxo toma a ordem das gravações, sem esperar, entre os dois passos, e a
+/// segura pelo segundo e pelo fim dos fluxos — ver `usuario::executar`.
+/// Ouvindo que ela está com outro fio, larga a preparada, e o processo
+/// continua o que era.
+pub struct Preparada<'a> {
+    elf: super::elf::Imagem<'a>,
+    faixas: [(u64, u64); super::elf::MAX_SEGMENTOS],
+    programa: crate::autorizacao::Programa,
+    espaco: crate::paginacao::Espaco,
+}
+
+/// O primeiro passo de [`carregar`]: a imagem conferida — o ELF, as faixas
+/// de página dos segmentos, o manifesto —, o programa que ela é, e o espaço
+/// novo, criado e ainda não adotado. Um erro aqui deixa o processo intacto.
+pub fn preparar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Preparada<'_>, &'static str> {
+    let elf = super::elf::validar(imagem)?;
 
     // As faixas de página de cada segmento, conferidas antes de qualquer
     // mapeamento: descobrir a sobreposição no meio da carga deixaria o espaço
@@ -221,33 +253,25 @@ pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Fal
     let mut faixas = [(0u64, 0u64); super::elf::MAX_SEGMENTOS];
     let segmentos = elf.segmentos();
     for (i, segmento) in segmentos.iter().enumerate() {
-        faixas[i] =
-            faixa_de_paginas(segmento.destino, segmento.bytes_na_memoria as u64).map_err(antes)?;
+        faixas[i] = faixa_de_paginas(segmento.destino, segmento.bytes_na_memoria as u64)?;
     }
     for i in 0..segmentos.len() {
         for j in (i + 1)..segmentos.len() {
             if faixas[i].0 < faixas[j].1 && faixas[j].0 < faixas[i].1 {
-                return Err(antes("dois segmentos dividem a mesma pagina"));
+                return Err("dois segmentos dividem a mesma pagina");
             }
         }
         // A pilha é do kernel para dar, não do programa para pedir.
         if faixas[i].0 < TOPO_DA_PILHA && GUARD_DA_PILHA < faixas[i].1 {
-            return Err(antes("um segmento invade a pilha do processo"));
+            return Err("um segmento invade a pilha do processo");
         }
     }
 
-    // O espaço próprio vem antes de qualquer mapeamento, porque é *nele* que
-    // os mapeamentos precisam cair. Entregá-lo ao fio antes de instalá-lo é o
-    // que garante que ele seja devolvido mesmo que algo abaixo falhe: a partir
-    // daqui quem o destrói é a morte do fio, não um caminho de erro.
-    // O último passo recuperável. Depois de `adotar_imagem` o fio já é dono do
-    // espaço novo, e o antigo só pode ser largado do outro lado da troca — não
-    // há mais como voltar atrás sem largar um espaço ativo.
     // O programa que a imagem é: o manifesto que ela declara — lido aqui,
     // onde recusar ainda deixa o processo intacto — e o resumo dela. Um
     // manifesto que não se lê recusa a imagem: não é um manifesto vazio.
     let manifesto = match elf.manifesto() {
-        Some(texto) => Some(politica::manifesto::ler(texto).map_err(|e| antes(e.motivo()))?),
+        Some(texto) => Some(politica::manifesto::ler(texto).map_err(|e| e.motivo())?),
         None => None,
     };
     let programa = crate::autorizacao::Programa::Imagem {
@@ -256,79 +280,109 @@ pub fn carregar(imagem: &[u8], editor: Option<[u8; 32]>) -> Result<Programa, Fal
         editor,
     };
 
-    let espaco = crate::paginacao::Espaco::novo(ENTRADA_PRIVADA).map_err(antes)?;
-    let raiz = espaco.raiz();
-    // O espaço e o programa trocam juntos: a imagem nova nunca roda com o
-    // manifesto da anterior, nem a anterior com o da nova.
-    let (anterior, resposta_da_anterior) = crate::fios::adotar_imagem(espaco, programa);
-    drop(resposta_da_anterior);
-
-    // SAFETY: a raiz saiu de `Espaco::novo`, que copia as entradas de topo do
-    // kernel — então o código que executa esta linha e a pilha deste fio
-    // seguem mapeados do outro lado da troca.
-    unsafe { crate::arch::trocar_espaco(raiz) };
-
-    // Só agora: o espaço anterior deste fio, se havia, deixou de estar ativo.
-    drop(anterior);
-
-    for (i, segmento) in segmentos.iter().enumerate() {
-        let permissoes = Permissoes {
-            escrita: segmento.escrita,
-            executavel: segmento.executavel,
-            dispositivo: false,
-            usuario: true,
-        };
-
-        let (inicio, fim) = faixas[i];
-        let conteudo = elf.conteudo(segmento);
-
-        crate::paginacao::mapear_faixa_preenchendo(
-            inicio,
-            (fim - inicio) / TAMANHO_PAGINA,
-            permissoes,
-            || {
-                // SAFETY: as páginas que cobrem
-                // `[destino, destino + bytes_na_memoria)` estão mapeadas com
-                // escrita no espaço deste processo enquanto esta closure roda,
-                // e o validador garantiu que a faixa inteira está no espaço do
-                // usuário.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        conteudo.as_ptr(),
-                        segmento.destino as *mut u8,
-                        conteudo.len(),
-                    );
-
-                    // O que o segmento pede além do que o arquivo traz é a
-                    // `.bss`, e ela **precisa** chegar zerada. `mapear_novo` já
-                    // entrega páginas limpas, mas depender disso seria depender
-                    // de um detalhe de outro módulo para uma garantia que é
-                    // deste.
-                    let resto = segmento.bytes_na_memoria - conteudo.len();
-                    core::ptr::write_bytes(
-                        (segmento.destino + conteudo.len() as u64) as *mut u8,
-                        0,
-                        resto,
-                    );
-                }
-            },
-        )
-        .map_err(Falha::SemVolta)?;
-    }
-
-    for i in 0..protocolo::usuario::PAGINAS_DA_PILHA {
-        crate::paginacao::mapear_novo(
-            BASE_DA_PILHA + i * TAMANHO_PAGINA,
-            Permissoes::DADOS_USUARIO,
-        )
-        .map_err(Falha::SemVolta)?;
-    }
-
-    Ok(Programa {
-        entrada: elf.entrada(),
-        // As duas ABIs exigem alinhamento de 16 no ponteiro de pilha.
-        topo_da_pilha: TOPO_DA_PILHA & !0xF,
+    // O espaço próprio vem antes de qualquer mapeamento, porque é *nele* que
+    // os mapeamentos precisam cair. É o último passo recuperável: largado
+    // antes de o fio adotá-lo, ele nunca esteve ativo.
+    let espaco = crate::paginacao::Espaco::novo(ENTRADA_PRIVADA)?;
+    Ok(Preparada {
+        elf,
+        faixas,
+        programa,
+        espaco,
     })
+}
+
+impl Preparada<'_> {
+    /// O segundo passo de [`carregar`]: o ponto sem volta — o fio adota o
+    /// espaço novo e o programa da imagem, e o anterior é largado — e os
+    /// segmentos e a pilha mapeados no espaço novo. Um erro aqui é sem volta:
+    /// a imagem anterior já não existe.
+    pub fn trocar(self) -> Result<Programa, &'static str> {
+        let Preparada {
+            elf,
+            faixas,
+            programa,
+            espaco,
+        } = self;
+
+        // Entregar o espaço ao fio antes de instalá-lo é o que garante que
+        // ele seja devolvido mesmo que algo abaixo falhe: a partir daqui quem
+        // o destrói é a morte do fio, não um caminho de erro. Depois de
+        // `adotar_imagem` o fio já é dono do espaço novo, e o antigo só pode
+        // ser largado do outro lado da troca — não há mais como voltar atrás
+        // sem largar um espaço ativo.
+        let raiz = espaco.raiz();
+        // O espaço e o programa trocam juntos: a imagem nova nunca roda com o
+        // manifesto da anterior, nem a anterior com o da nova.
+        let (anterior, resposta_da_anterior) = crate::fios::adotar_imagem(espaco, programa);
+        drop(resposta_da_anterior);
+
+        // SAFETY: a raiz saiu de `Espaco::novo`, que copia as entradas de
+        // topo do kernel — então o código que executa esta linha e a pilha
+        // deste fio seguem mapeados do outro lado da troca.
+        unsafe { crate::arch::trocar_espaco(raiz) };
+
+        // Só agora: o espaço anterior deste fio, se havia, deixou de estar
+        // ativo.
+        drop(anterior);
+
+        for (i, segmento) in elf.segmentos().iter().enumerate() {
+            let permissoes = Permissoes {
+                escrita: segmento.escrita,
+                executavel: segmento.executavel,
+                dispositivo: false,
+                usuario: true,
+            };
+
+            let (inicio, fim) = faixas[i];
+            let conteudo = elf.conteudo(segmento);
+
+            crate::paginacao::mapear_faixa_preenchendo(
+                inicio,
+                (fim - inicio) / TAMANHO_PAGINA,
+                permissoes,
+                || {
+                    // SAFETY: as páginas que cobrem
+                    // `[destino, destino + bytes_na_memoria)` estão mapeadas
+                    // com escrita no espaço deste processo enquanto esta
+                    // closure roda, e o validador garantiu que a faixa
+                    // inteira está no espaço do usuário.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            conteudo.as_ptr(),
+                            segmento.destino as *mut u8,
+                            conteudo.len(),
+                        );
+
+                        // O que o segmento pede além do que o arquivo traz é
+                        // a `.bss`, e ela **precisa** chegar zerada.
+                        // `mapear_novo` já entrega páginas limpas, mas
+                        // depender disso seria depender de um detalhe de
+                        // outro módulo para uma garantia que é deste.
+                        let resto = segmento.bytes_na_memoria - conteudo.len();
+                        core::ptr::write_bytes(
+                            (segmento.destino + conteudo.len() as u64) as *mut u8,
+                            0,
+                            resto,
+                        );
+                    }
+                },
+            )?;
+        }
+
+        for i in 0..protocolo::usuario::PAGINAS_DA_PILHA {
+            crate::paginacao::mapear_novo(
+                BASE_DA_PILHA + i * TAMANHO_PAGINA,
+                Permissoes::DADOS_USUARIO,
+            )?;
+        }
+
+        Ok(Programa {
+            entrada: elf.entrada(),
+            // As duas ABIs exigem alinhamento de 16 no ponteiro de pilha.
+            topo_da_pilha: TOPO_DA_PILHA & !0xF,
+        })
+    }
 }
 
 /// As páginas que cobrem `[inicio, inicio + tamanho)`.

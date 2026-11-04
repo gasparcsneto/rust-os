@@ -175,6 +175,9 @@ const MAX_NOME: usize = MAX_CAMINHO;
 static CHAMADAS: AtomicU64 = AtomicU64::new(0);
 static BIFURCACOES: AtomicU64 = AtomicU64::new(0);
 static TROCAS_DE_IMAGEM: AtomicU64 = AtomicU64::new(0);
+/// Quantas vezes uma troca de imagem deu a vez e pediu para rodar de novo,
+/// com a ordem das gravações nas mãos de outro fio — ver [`executar`].
+static TROCAS_ADIADAS: AtomicU64 = AtomicU64::new(0);
 static RECUSADAS: AtomicU64 = AtomicU64::new(0);
 static BYTES_ESCRITOS: AtomicU64 = AtomicU64::new(0);
 /// Quantas chamadas a `mapear` deram certo, e quantas páginas elas deram.
@@ -1253,10 +1256,37 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// # O detalhe que não pode ser invertido
 ///
 /// O nome é copiado para a pilha do kernel **antes** de a imagem ser trocada.
-/// `programa::carregar` instala um espaço de endereços novo, e no instante em
-/// que isso acontece o ponteiro do usuário deixa de significar qualquer coisa:
-/// ele apontava para memória que já não está mapeada. Ler depois seria ler o
-/// programa novo achando que é o nome.
+/// A troca (`programa::Preparada::trocar`) instala um espaço de endereços
+/// novo, e no instante em que isso acontece o ponteiro do usuário deixa de
+/// significar qualquer coisa: ele apontava para memória que já não está
+/// mapeada. Ler depois seria ler o programa novo achando que é o nome.
+///
+/// # A ordem das gravações, que não se espera aqui
+///
+/// Os fluxos de que o processo é ponta acabam na troca — `o programa mudou`
+/// (a DF-1) —, antes de a imagem nova rodar; e o fim muda a tabela dos
+/// fluxos e vai à cadeia dentro da ordem das gravações, antes de acordar
+/// quem espera (a regra do DN-2). Mas esta chamada roda num handler — no x86
+/// com as interrupções mascaradas pelo `SFMask`, no ARM na pilha de exceção
+/// do núcleo —, e ali não se espera a ordem nem se compacta o journal:
+/// esperá-la era, na depuração, a asserção de
+/// [`crate::persistencia::em_ordem`] nas duas arquiteturas; na de release,
+/// o pânico de `ceder_cpu` no ARM e, no x86, um giro com as interrupções
+/// mascaradas.
+///
+/// Então quem é ponta toma a ordem **sem esperar**
+/// ([`crate::persistencia::em_ordem_sem_esperar`]), depois de tudo o que
+/// pode falhar e antes do ponto sem volta, e a segura por ele e pelo fim
+/// dos fluxos. Com ela nas mãos de outro fio, a chamada larga o que
+/// preparou — o processo segue intacto —, dá a vez e roda de novo
+/// ([`crate::fios::ceder_e_reexecutar`]): a espera de `em_ordem`, ceder e
+/// tentar outra vez, feita do lado de fora do handler. E isso já antes do
+/// gate: com a ordem com outro, a chamada dá a vez sem decidir, e a espera
+/// não grava uma decisão a cada volta.
+///
+/// Quem não é ponta de fluxo nenhum não toma a ordem: não há fim a gravar.
+/// E não vira ponta no meio da chamada — abrir e aceitar um fluxo são
+/// pedidos do próprio processo, e ele está aqui.
 ///
 /// # Safety
 ///
@@ -1297,6 +1327,15 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     } else {
         alloc::format!("{}/{}", crate::vfs::DIRETORIO_DOS_PROGRAMAS, nome)
     };
+
+    // Quem é ponta de fluxo troca com a ordem das gravações na mão — ver o
+    // cabeçalho. Com ela já com outro fio, a vez vai antes do gate: nada se
+    // decide nem se grava a cada volta da espera.
+    let fio = crate::fios::id_atual();
+    let ponta = crate::fluxo::processo_e_ponta(fio);
+    if ponta && crate::persistencia::ordem_com_outro() {
+        return adiar_a_troca();
+    }
 
     // A decisão é sobre o caminho já resolvido: um nome sem barra vira o de
     // `/bin`, e é esse que a política confere.
@@ -1349,8 +1388,8 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     let editor = codigo.selo.as_ref().map(|s| s.editor);
     let imagem = codigo.imagem;
 
-    let novo = match programa::carregar(&imagem, editor) {
-        Ok(programa) => programa,
+    let preparada = match programa::preparar(&imagem, editor) {
+        Ok(preparada) => preparada,
 
         // Falhou antes do ponto de não retorno: o processo que chamou está
         // inteiro — a imagem dele mapeada, a pilha no lugar — e devolver um
@@ -1361,16 +1400,37 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // uma falta momentânea de memória em `Espaco::novo`, as duas
         // recuperáveis, custavam o processo inteiro por uma premissa — "sem a
         // anterior" — que só vale do outro lado da troca.
-        Err(programa::Falha::ProcessoIntacto(motivo)) => {
+        Err(motivo) => {
             crate::log_warn!("usuario", "executar recusado: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return erro::SEM_MEMORIA;
         }
+    };
+
+    // O ponto sem volta. Para quem é ponta de fluxo, com a ordem das
+    // gravações na mão — tomada sem esperar — até os fluxos acabarem.
+    #[cfg(feature = "modo-teste")]
+    if ponta {
+        pausa_da_troca_de_teste::talvez_pausar(fio);
+    }
+    let trocada = if ponta {
+        match crate::persistencia::em_ordem_sem_esperar(|| trocar_a_imagem(preparada, fio, true)) {
+            Some(trocada) => trocada,
+            // A ordem foi para outro fio depois da conferência lá de cima:
+            // a preparada saiu com a closure, o processo segue intacto, e a
+            // chamada roda de novo.
+            None => return adiar_a_troca(),
+        }
+    } else {
+        trocar_a_imagem(preparada, fio, false)
+    };
+    let novo = match trocada {
+        Ok(programa) => programa,
 
         // Aqui sim: sem imagem e sem a anterior, não há para onde voltar.
         // Encerrar é o único desfecho honesto, e é o que um `execve` que falha
         // depois do ponto de não retorno faz em qualquer sistema.
-        Err(programa::Falha::SemVolta(motivo)) => {
+        Err(motivo) => {
             crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             return sair(erro::SEM_MEMORIA);
@@ -1379,18 +1439,95 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     crate::log_info!("usuario", "processo trocou de imagem para `{}`", nome);
     TROCAS_DE_IMAGEM.fetch_add(1, Ordering::Relaxed);
-    // A imagem nova não ouve os avisos da malha da anterior: as designações
-    // saem antes de os fluxos acabarem, e os avisos que ainda esperavam na
-    // fila dos canais do processo saem com elas.
-    crate::aviso::trocou_de_imagem(crate::fios::id_atual());
-    // A outra ponta de cada fluxo deste processo viu outro programa: os
-    // fluxos dele acabam — ver `fluxo::programa_mudou`.
-    crate::fluxo::programa_mudou(crate::fios::id_atual());
 
     // SAFETY: o quadro é o desta chamada, e entrada e pilha acabaram de ser
     // mapeadas com permissão de usuário no espaço que agora está ativo.
     unsafe { crate::arch::redirecionar_para(quadro, novo.entrada(), novo.topo_da_pilha()) };
     0
+}
+
+/// O ponto sem volta de [`executar`] e o que vem com ele: a imagem nova no
+/// lugar da anterior; as designações da malha da anterior fora, e os avisos
+/// que ainda esperavam na fila dos canais do processo com elas — antes de os
+/// fluxos acabarem: a imagem nova não ouve os avisos da anterior —; e, se o
+/// processo é `ponta`, os fluxos dele encerrados: a outra ponta de cada um
+/// viu outro programa — ver `fluxo::programa_mudou`. A ponta chega aqui com
+/// a ordem das gravações na mão.
+fn trocar_a_imagem(
+    preparada: programa::Preparada<'_>,
+    fio: u64,
+    ponta: bool,
+) -> Result<programa::Programa, &'static str> {
+    let novo = preparada.trocar()?;
+    crate::aviso::trocou_de_imagem(fio);
+    if ponta {
+        crate::fluxo::programa_mudou(fio);
+    }
+    Ok(novo)
+}
+
+/// A troca não segue agora — a ordem das gravações está com outro fio — e
+/// não mudou nada: dá a vez e roda de novo, como a espera de
+/// [`crate::persistencia::em_ordem`]. Ver [`executar`].
+fn adiar_a_troca() -> i64 {
+    TROCAS_ADIADAS.fetch_add(1, Ordering::Relaxed);
+    crate::fios::ceder_e_reexecutar();
+    0
+}
+
+/// Só para a suíte: uma pausa na troca de imagem de quem é ponta de fluxo,
+/// depois de tudo o que pode falhar e antes de tomar a ordem das gravações —
+/// a janela em que outro fio a toma depois da conferência do começo da
+/// chamada, e a ordem tomada sem esperar ouve que ela está com outro. O caso
+/// "fluxo: a troca de imagem com a ordem tomada no meio" a abre, uma vez,
+/// para um processo só. Fora da suíte não existe.
+#[cfg(feature = "modo-teste")]
+pub mod pausa_da_troca_de_teste {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// O processo que para, como `fio + 1`; zero, nenhum.
+    static ARMADA: AtomicU64 = AtomicU64::new(0);
+    static PARADA: AtomicBool = AtomicBool::new(false);
+    static SOLTA: AtomicBool = AtomicBool::new(false);
+
+    /// A próxima troca de imagem do processo `fio`, se ele é ponta de fluxo,
+    /// para antes de tomar a ordem.
+    pub fn armar(fio: u64) {
+        SOLTA.store(false, Ordering::Release);
+        PARADA.store(false, Ordering::Release);
+        ARMADA.store(fio + 1, Ordering::Release);
+    }
+
+    /// O processo chegou à pausa.
+    pub fn parada() -> bool {
+        PARADA.load(Ordering::Acquire)
+    }
+
+    /// Solta o processo parado, e desarma.
+    pub fn soltar() {
+        ARMADA.store(0, Ordering::Release);
+        SOLTA.store(true, Ordering::Release);
+    }
+
+    /// Chamada pela troca de imagem de quem é ponta. Gira, e não dorme: é o
+    /// handler da chamada de sistema, com as interrupções mascaradas — quem
+    /// arma prende o processo a um núcleo que não é o da suíte. Um teto de
+    /// voltas, para um caso que não soltasse não travar o núcleo para
+    /// sempre; a suíte solta assim que toma a ordem, muito antes dele.
+    pub(super) fn talvez_pausar(fio: u64) {
+        if ARMADA
+            .compare_exchange(fio + 1, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        PARADA.store(true, Ordering::Release);
+        let mut voltas = 0u64;
+        while !SOLTA.load(Ordering::Acquire) && voltas < 400_000_000 {
+            core::hint::spin_loop();
+            voltas += 1;
+        }
+    }
 }
 
 /// Lança um programa no anel sem privilégio, num fio próprio.
@@ -1623,6 +1760,14 @@ pub fn estatisticas_de_processo() -> (u64, u64, u64) {
         TROCAS_DE_IMAGEM.load(Ordering::Relaxed),
         SAIDAS.load(Ordering::SeqCst),
     )
+}
+
+/// Só para a suíte: quantas vezes uma troca de imagem deu a vez e pediu
+/// para rodar de novo, com a ordem das gravações nas mãos de outro fio —
+/// ver [`executar`].
+#[cfg(feature = "modo-teste")]
+pub fn trocas_adiadas_de_teste() -> u64 {
+    TROCAS_ADIADAS.load(Ordering::Relaxed)
 }
 
 /// O código de saída do último processo encerrado, se houve algum.
