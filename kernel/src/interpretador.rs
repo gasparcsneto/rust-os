@@ -37,7 +37,12 @@
 //!
 //! Um console sem ninguém entrado aceita `login` e `ajuda`. Todo o resto —
 //! um comando, uma tecla de função, um clique — é recusado com
-//! `DENY_NOT_AUTHENTICATED` e vai para a auditoria. Depois do login, cada
+//! `DENY_NOT_AUTHENTICATED` e vai para a auditoria: o comando com o nome e
+//! o resumo dos parâmetros, se ele existe; senão, com o marcador
+//! [`autorizacao::COMANDO_DESCONHECIDO`], sem resumo — uma linha que não é
+//! comando pode ser uma senha digitada no lugar errado, e não vai ao
+//! registro, nem em claro nem num resumo que se adivinha fora da máquina.
+//! A resposta é a mesma nos dois casos. Depois do login, cada
 //! comando passa pela decisão com o papel que o registro dá à pessoa
 //! **agora**: uma revogação vale no comando seguinte, e o console volta a
 //! pedir o login.
@@ -2025,13 +2030,25 @@ fn despachar(
 ) -> Option<crate::rede::espera::Espera> {
     // Quem pede: o agente que confirmou, como a sessão dele; ou a pessoa do
     // console, pela sessão dela. Sem ninguém entrado, nada: o pedido é
-    // recusado antes de se saber se o comando existe, e gravado.
+    // recusado sem dizer se o comando existe — a resposta é a mesma —, e
+    // gravado: o nome e o resumo dos parâmetros só do comando que existe. O
+    // que não é comando vai com o marcador, sem resumo: pode ser uma senha
+    // digitada no lugar errado — ver `autorizacao::recusar_sem_login`.
     let chamador = match origem {
         Origem::Agente(sessao) => Chamador::Sessao(sessao),
         Origem::Pessoa => match sessao_valida(console) {
             Some(id) => Chamador::Pessoa(id),
             None => {
-                autorizacao::recusar_sem_login(console, nome, params.as_bytes());
+                match registry::encontrar(nome) {
+                    Some(comando) => {
+                        autorizacao::recusar_sem_login(console, comando.nome, params.as_bytes())
+                    }
+                    None => autorizacao::recusar_sem_login(
+                        console,
+                        autorizacao::COMANDO_DESCONHECIDO,
+                        &[],
+                    ),
+                }
                 saidaln!(
                     console,
                     "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
