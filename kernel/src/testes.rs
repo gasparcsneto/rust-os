@@ -16676,11 +16676,21 @@ fn ultimo_que(
 /// uma tecla de função e um clique são `DENY_NOT_AUTHENTICATED`, gravados
 /// com o console; `ajuda` diz só como entrar. Um agente que confirma a linha
 /// age como ele mesmo, e não entra por ninguém.
+///
+/// O registro leva o nome e o resumo dos parâmetros só do comando que
+/// existe. O que não é comando vai com o marcador e o resumo do vazio: a
+/// senha digitada no lugar errado não chega à auditoria — nem a primeira
+/// palavra em claro, nem o resto num resumo —, nem ao log, nem ao
+/// histórico.
 fn consoles_nada_antes_do_login() -> Resultado {
+    use crate::autorizacao::COMANDO_DESCONHECIDO;
     use crate::pessoas::Console;
     use crate::ui::Origem;
     use politica::Codigo;
-    use politica::auditoria::Titular;
+    use politica::auditoria::{Titular, resumo_dos_parametros};
+    /// Uma senha digitada onde se pede um comando: longa, com espaço, e
+    /// sem pedaço em comum com nada que o sistema escreve.
+    const NO_LUGAR_ERRADO: &str = "pitanga madura no pe";
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
     crate::interpretador::abrir_console(Console::Fisico);
@@ -16696,14 +16706,25 @@ fn consoles_nada_antes_do_login() -> Resultado {
                     && r.evento.recurso.starts_with("console")
             })
         };
-        for (linha, metodo) in [
-            ("system.info\n", "system.info"),
-            ("agent.ping\n", "agent.ping"),
-            ("nao-existe\n", "nao-existe"),
+        let sem_login_com = |metodo: &str, parametros: &[u8]| {
+            sem_login(metodo)
+                && ultimo_registro()
+                    .is_some_and(|r| r.evento.parametros == resumo_dos_parametros(parametros))
+        };
+        let senha_no_lugar_errado = alloc::format!("{NO_LUGAR_ERRADO}\n");
+        for (linha, metodo, parametros) in [
+            ("system.info\n", "system.info", &b"{}"[..]),
+            ("agent.ping\n", "agent.ping", b"{}"),
+            // Um comando que existe, com parâmetros: o nome, e o resumo
+            // deles.
+            ("log.tail {\"count\":4}\n", "log.tail", br#"{"count":4}"#),
+            // O que não é comando: o marcador, e o resumo do vazio.
+            ("nao-existe\n", COMANDO_DESCONHECIDO, b""),
+            (senha_no_lugar_errado.as_str(), COMANDO_DESCONHECIDO, b""),
         ] {
             let antes = crate::log::total_emitidos();
             digitar_no_console(Console::Fisico, linha);
-            if !sem_login(metodo) {
+            if !sem_login_com(metodo, parametros) {
                 crate::log_error!("teste", "{:?}", ultimo_registro().map(|r| r.evento));
                 return Err("um comando antes do login nao foi recusado e gravado");
             }
@@ -16714,6 +16735,38 @@ fn consoles_nada_antes_do_login() -> Resultado {
             if executou {
                 return Err("um comando antes do login chegou a executar");
             }
+        }
+        // A mesma linha no console de um Terminal sem ninguém: o mesmo
+        // caminho, gravado com o recurso dele. Numa vaga sem dono, que
+        // nenhum programa está usando.
+        if let Some(k) = crate::pseudoterminal::donos()
+            .iter()
+            .position(Option::is_none)
+        {
+            let terminal = Console::Terminal(k as u16);
+            crate::interpretador::abrir_console(terminal);
+            crate::interpretador::confirmar_de_teste(terminal, NO_LUGAR_ERRADO);
+            let gravado = ultimo_registro().is_some_and(|r| {
+                r.evento.metodo == COMANDO_DESCONHECIDO
+                    && r.evento.parametros == resumo_dos_parametros(&[])
+                    && r.evento.recurso == terminal.texto()
+                    && r.evento.codigo == Codigo::DenyNotAuthenticated
+            });
+            crate::interpretador::fechar_console(terminal, "fim do caso");
+            let _ = crate::pseudoterminal::tirar_de_teste(k as u8);
+            if !gravado {
+                crate::log_error!("teste", "{:?}", ultimo_registro().map(|r| r.evento));
+                return Err(
+                    "a linha que nao e comando, num Terminal sem ninguem, nao foi gravada com o marcador",
+                );
+            }
+        }
+        // A senha no lugar errado não ficou em lugar nenhum: a auditoria, o
+        // log, os relatórios e o histórico do teclado.
+        nenhum_segredo_em_lugar_nenhum(&[NO_LUGAR_ERRADO], &[])?;
+        // E o marcador não é nome de comando nenhum.
+        if crate::agent::registry::encontrar(COMANDO_DESCONHECIDO).is_some() {
+            return Err("o marcador do comando desconhecido e nome de um comando");
         }
         // A tecla de função: a barra não é acionada — `ui::agir` registra
         // toda ação, feita ou recusada —, e a recusa é gravada.
