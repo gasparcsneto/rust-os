@@ -22831,6 +22831,9 @@ fn reconstrucao_imagem_limpa_e_journal_inteiro() -> Resultado {
         programa: Programa::Kernel,
     };
     let caminho = "/armazem/sistema/reconstrucao.txt";
+    // O diretório vem de outros casos do armazém; numa rodada só com este
+    // caso ele não existe, e o armazém não cria pai de passagem.
+    diretorios_acima(caminho)?;
     let (v, _) = fs_no_armazem(caminho);
     if !fs_ok(&fs_gravar(sistema, caminho, v, "depois da reconstrucao")) {
         return Err("a gravacao depois da reconstrucao foi recusada");
