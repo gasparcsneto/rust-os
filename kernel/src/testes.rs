@@ -22453,24 +22453,37 @@ fn auditoria_a_decisao_nunca_vai_antes() -> Resultado {
 
 /// A execução que cita a decisão, com um detalhe acima do teto: o texto
 /// encolhe, e a citação fica inteira no fim — o corte do fim a deixaria
-/// pela metade, e um pedaço do número é o número de outro registro.
+/// pela metade, e um pedaço do número é o número de outro registro. O
+/// texto perde o fim numa palavra inteira, com a marca do corte no lugar
+/// do que saiu; uma palavra só, maior que o lugar, sai toda.
 fn auditoria_a_citacao_fica_inteira() -> Resultado {
-    let texto = "x".repeat(politica::auditoria::MAIOR_DETALHE + 24);
-    let n = crate::autorizacao::auditar_execucao_do_processo(
-        "fs.write",
-        "/dados/citacao",
-        politica::Codigo::Allow,
-        &texto,
-        1_234_567,
-    );
-    let r = registro_da_auditoria(n).ok_or("o registro da execucao nao esta na auditoria")?;
-    let d = &r.evento.detalhe;
-    if d.len() > politica::auditoria::MAIOR_DETALHE
-        || !d.ends_with("; decisao 1234567")
-        || !d.contains("xxxx")
-    {
-        crate::log_error!("teste", "{}", d);
-        return Err("a citacao da decisao nao ficou inteira no fim do detalhe");
+    use politica::auditoria::{MAIOR_DETALHE, MARCA_DO_CORTE, OMITIDO};
+    let palavras = "xx ".repeat(MAIOR_DETALHE / 3 + 8);
+    let palavra = "x".repeat(MAIOR_DETALHE + 24);
+    for (texto, guardado) in [(palavras.as_str(), None), (palavra.as_str(), Some(OMITIDO))] {
+        let n = crate::autorizacao::auditar_execucao_do_processo(
+            "fs.write",
+            "/dados/citacao",
+            politica::Codigo::Allow,
+            texto,
+            1_234_567,
+        );
+        let r = registro_da_auditoria(n).ok_or("o registro da execucao nao esta na auditoria")?;
+        let d = &r.evento.detalhe;
+        let antes = d.strip_suffix("; decisao 1234567");
+        let certo = match (antes, guardado) {
+            (Some(antes), Some(g)) => antes.ends_with(g) && !antes.contains('x'),
+            (Some(antes), None) => antes
+                .rsplit_once("): ")
+                .map_or(antes, |(_, t)| t)
+                .strip_suffix(MARCA_DO_CORTE)
+                .is_some_and(|t| t.contains("xx xx") && texto.starts_with(&alloc::format!("{t} "))),
+            (None, _) => false,
+        };
+        if d.len() > MAIOR_DETALHE || !certo {
+            crate::log_error!("teste", "{}", d);
+            return Err("a citacao da decisao nao ficou inteira no fim do detalhe");
+        }
     }
     Ok(())
 }
@@ -22481,17 +22494,31 @@ fn auditoria_a_citacao_fica_inteira() -> Resultado {
 /// pediu, antes do motivo, não conta aqui. Ver
 /// [`politica::auditoria::detalhe_composto`].
 fn cita_com_o_motivo(detalhe: &str, motivo: &str, essencial: &str, citacao: &str) -> bool {
+    use politica::auditoria::{MAIOR_DETALHE, MARCA_DO_CORTE};
     let Some(antes) = detalhe.strip_suffix(citacao) else {
         return false;
     };
     if antes.ends_with(motivo) {
         return true;
     }
-    // O corte cai numa fronteira de caractere: até três bytes aquém do teto.
+    // O corte cai no fim de uma palavra do motivo, com a marca no lugar do
+    // que saiu, e só no teto: a palavra seguinte não caberia.
+    let Some(antes) = antes.strip_suffix(MARCA_DO_CORTE) else {
+        return false;
+    };
     motivo.starts_with(essencial)
-        && detalhe.len() + 3 >= politica::auditoria::MAIOR_DETALHE
-        && (essencial.len()..motivo.len())
-            .any(|n| motivo.is_char_boundary(n) && antes.ends_with(&motivo[..n]))
+        && (essencial.len()..motivo.len()).any(|n| {
+            if motivo.as_bytes()[n] != b' ' || !antes.ends_with(&motivo[..n]) {
+                return false;
+            }
+            // O que o detalhe cresceria com a palavra seguinte — a última
+            // leva a marca embora.
+            let crescimento = match motivo[n + 1..].find(' ') {
+                Some(palavra) => 1 + palavra,
+                None => (motivo.len() - n).saturating_sub(MARCA_DO_CORTE.len()),
+            };
+            detalhe.len() + crescimento > MAIOR_DETALHE
+        })
 }
 
 /// O que sai do anel antes de chegar ao disco vira uma lacuna no journal:

@@ -2236,6 +2236,22 @@ pub fn usa_o_dominio(dominio: &str) -> bool {
 /// janela é a da memória, deste boot: um processo não sobrevive ao boot, e
 /// o registro dele também não precisa — o rollback do rabo da auditoria
 /// não muda o que se decide (ver `persistencia`).
+///
+/// # A descrição abreviada
+///
+/// Acima do teto do detalhe, a auditoria abrevia a descrição do programa
+/// do processo — `(? <resumo> de <editor>)`, ver
+/// [`politica::auditoria::detalhe_composto`] —, com citação ou sem. A
+/// comparação aqui é com o `pelo` inteiro, e um registro abreviado não é
+/// âncora: o mais restrito. Para o processo cuja descrição sozinha passa
+/// do teto — o código de fora da imagem com o nome e o editor longos, e o
+/// fio de três dígitos ou mais — nada muda: as decisões dele vão
+/// abreviadas, como antes iam cortadas no anel, sem o `)`, e ele não se
+/// ancora em decisão nenhuma; declara ancorado na conexão, ou sem âncora.
+/// Para os outros, a decisão que permite, sem texto, continua inteira e
+/// continua âncora; um `ALLOW` com texto que passa do teto — a bifurcação,
+/// `a autorizacao e a prova` — vai abreviado e deixa de servir, onde antes
+/// servia cortado no fim.
 pub fn decisao_de_quem_pede(seq: u64) -> Result<String, &'static str> {
     let Some(quem) =
         do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.quem.clone())).flatten()
@@ -3813,7 +3829,10 @@ pub fn auditar_nascimento(recurso: &str, filho: u64, selado: Option<(&str, &[u8;
 }
 
 /// Grava uma bifurcação, em nome do processo que bifurcou — a autoridade e
-/// o programa do fio que chama —, com o fio do filho.
+/// o programa do fio que chama —, com o fio do filho, inteiro: acima do
+/// teto do detalhe, é a descrição do programa que encolhe (ver
+/// [`politica::auditoria::detalhe_composto`]). O pedaço do número seria o
+/// de outro processo, e o NSF daria a criação dele a quem bifurcou.
 pub fn auditar_bifurcacao(filho: u64) {
     let mut quem = quem_do_processo(crate::fios::autoridade_atual());
     let (id, programa) = crate::fios::programa_atual();

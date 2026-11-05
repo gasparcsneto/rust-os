@@ -1630,8 +1630,9 @@ fn decisoes_de_troca(antes: u64) -> usize {
 /// detalhe inteiro como a auditoria o compõe
 /// (`politica::auditoria::detalhe_composto`): passando do teto do detalhe,
 /// a descrição do programa encolhe primeiro — o nome sai —, depois o
-/// motivo perde o fim, e a citação fica. O motivo só é cortado com a
-/// descrição toda encolhida, conferido aqui sem a conta da auditoria.
+/// motivo perde o fim, numa palavra inteira e com a marca do corte, e a
+/// citação fica. O motivo só é cortado com a descrição toda encolhida,
+/// conferido aqui sem a conta da auditoria.
 fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decisao: u64) -> bool {
     let pelo = format!("pelo processo {fio} (");
     let citacao = format!("; decisao {decisao}");
@@ -1651,7 +1652,12 @@ fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decis
     );
     let texto_certo = match texto.strip_suffix(&citacao) {
         Some(t) if t == motivo => true,
-        Some(t) => motivo.starts_with(t) && toda_encolhida(programa),
+        Some(t) => {
+            let cortado = t
+                .strip_suffix(politica::auditoria::MARCA_DO_CORTE)
+                .is_some_and(|t| motivo.starts_with(&format!("{t} ")));
+            (cortado || t == politica::auditoria::OMITIDO) && toda_encolhida(programa)
+        }
         None => false,
     };
     r.1.codigo == codigo

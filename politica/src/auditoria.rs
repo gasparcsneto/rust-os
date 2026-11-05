@@ -77,23 +77,32 @@ pub const GENESE: [u8; 32] = [0; 32];
 pub const MAIOR_DETALHE: usize = 96;
 
 /// O que fica, na descrição do programa que pediu, no lugar do nome — e do
-/// editor — que [`detalhe_composto`] tirou acima do teto. Nenhum nome de
-/// programa nem de editor é `?`: os dois são de `a-z`, `0-9`, `-`, `_` e
-/// `.`. Por isso a descrição abreviada nunca é a inteira de outro programa —
-/// ver [`descricao_abreviada`].
+/// editor — que [`detalhe_composto`] tirou acima do teto; e, no fim de um
+/// texto que perdeu o fim, no lugar das palavras que saíram (ver
+/// [`MARCA_DO_CORTE`]). Nenhum nome de programa nem de editor é `?`: os
+/// dois são de `a-z`, `0-9`, `-`, `_` e `.`. Por isso a descrição abreviada
+/// nunca é a inteira de outro programa — ver [`descricao_abreviada`] —, e o
+/// texto cortado nunca termina num nome, nem num número, que não estava lá.
 pub const OMITIDO: &str = "?";
+
+/// O fim de um texto que [`detalhe_composto`] cortou no teto: um espaço e
+/// [`OMITIDO`], depois da última palavra que coube inteira. Quem lê o
+/// texto para reconhecer o que ele diz tira a marca antes — ver
+/// [`crate::procedencia::Falta::do_motivo`].
+pub const MARCA_DO_CORTE: &str = " ?";
 
 /// O detalhe de um registro, composto: quem pediu, quando foi um processo
 /// (`pelo`, o processo e o programa), o `texto` e a `citacao` no fim — o
 /// número da decisão que uma execução cita. É o formato de sempre: `pelo`
 /// sozinho, `pelo: texto` ou `texto`, com a citação colada no texto.
 ///
-/// # Acima do teto, com a citação
+/// # Acima do teto
 ///
-/// Acima de [`MAIOR_DETALHE`], a citação fica inteira no fim: o corte do
-/// fim, o de [`Cadeia::anexar`], a levaria pela metade, e um pedaço do
-/// número é o número de outro registro. O que encolhe é o que vem antes
-/// dela, e nesta ordem — cada passo só quando o anterior não bastou:
+/// Acima de [`MAIOR_DETALHE`], o detalhe encolhe aqui, com a citação ou
+/// sem ela, e nunca chega ao corte do anel ([`Cadeia::anexar`]), que leva o
+/// fim às cegas. A citação fica inteira no fim: um pedaço do número é o
+/// número de outro registro. O que encolhe é o que vem antes dela, e nesta
+/// ordem — cada passo só quando o anterior não bastou:
 ///
 /// 1. o **nome** do programa sai da descrição de quem pediu: `pelo
 ///    processo N (<nome> <resumo> de <editor>)` vira `pelo processo N (?
@@ -102,29 +111,48 @@ pub const OMITIDO: &str = "?";
 ///    auditoria nem o texto nem quem selou o código;
 /// 2. o **editor** sai também: `(? <resumo> de ?)`. O `de` fica — o código
 ///    de fora da imagem não passa pelo da imagem;
-/// 3. o **texto** perde o fim, numa fronteira de caractere.
+/// 3. o **texto** perde o fim, numa fronteira de palavra: o corte recua até
+///    o espaço antes da palavra que não coube, e [`MARCA_DO_CORTE`] fica no
+///    lugar do que saiu — `…no editor ?`, `…de ?`. Nenhuma palavra fica pela
+///    metade: o pedaço de um nome é o nome válido de outro editor ou
+///    programa, e o de um número, outro número. Um texto de uma palavra só,
+///    maior que o lugar, vira [`OMITIDO`].
 ///
-/// O texto vem antes da descrição porque é ele que diz o que a execução
-/// fez, e quem lê a auditoria o reconhece — o NSF vê o código adulterado
-/// pelo motivo (ver [`crate::procedencia::Falta::do_motivo`]), e o
-/// nascimento de um processo pelo `processo N lancado` —; a descrição
-/// inteira está no registro da decisão, que a citação aponta. O começo do
-/// resumo — o que o programa **é** — fica sempre, e o lugar do que saiu
-/// fica com [`OMITIDO`]: a abreviada nunca é a descrição inteira de outro
-/// programa, nem a de um código da imagem. Quem pediu sem a forma `pelo
-/// processo N (…)` com o resumo — a relação de outro dispositivo, o
-/// processo `(kernel)` ou `(sem imagem)` — não encolhe: o texto encolhe
-/// direto.
+/// O texto vem antes da descrição porque é ele que diz o que o registro
+/// conta, e quem lê a auditoria o reconhece — o NSF vê o código adulterado
+/// pelo motivo (ver [`crate::procedencia::Falta::do_motivo`]), a recusa do
+/// manifesto por `o manifesto nao declara`, o nascimento pelo `processo N
+/// lancado` e pelo `filho N` —, e o `)` da descrição, mesmo abreviada, é o
+/// que diz de que processo o registro é. O começo do resumo — o que o
+/// programa **é** — fica sempre, e o lugar do que saiu fica com
+/// [`OMITIDO`]: a abreviada nunca é a descrição inteira de outro programa,
+/// nem a de um código da imagem. Quem pediu sem a forma `pelo processo N
+/// (…)` com o resumo — a relação de outro dispositivo, o processo
+/// `(kernel)` ou `(sem imagem)` — não encolhe: o texto encolhe direto.
 ///
-/// # Sem citação
+/// # Com e sem citação
 ///
-/// Nada encolhe aqui: o corte é o de sempre, o do anel, no fim. O registro
-/// de uma decisão é o que guarda a descrição inteira, e quem confere uma
-/// decisão pelo começo do detalhe — a âncora de uma declaração — a compara
-/// com o `pelo` inteiro.
+/// A regra é a mesma. Com a citação — a execução de uma decisão —, a
+/// descrição inteira está no registro da decisão que ela aponta. Sem
+/// citação — a decisão do gate, a bifurcação, o pedido inválido —, a
+/// decisão que permite tem o texto vazio e guarda a descrição inteira
+/// sempre que ela cabe no teto; o `pelo` sozinho passa dele só no código de
+/// fora da imagem com nome e editor longos, e então vai abreviado, com o
+/// `)`. A recusa guarda o motivo antes da descrição: é ele que diz o que
+/// faltou.
+///
+/// Quem confere uma decisão pelo começo do detalhe — a âncora de uma
+/// declaração, `autorizacao::decisao_de_quem_pede` no kernel — a compara
+/// com o `pelo` inteiro: um registro abreviado não serve de âncora, e o
+/// processo cuja descrição passa do teto não se ancora em decisão
+/// nenhuma — como já não se ancorava quando o anel cortava a decisão dele.
+///
+/// Um `pelo` que não cabe nem com o texto todo omitido — o kernel não
+/// escreve um: o maior, abreviado, tem 52 bytes — perde o fim numa
+/// fronteira de caractere, antes da citação.
 pub fn detalhe_composto(pelo: Option<&str>, texto: &str, citacao: &str) -> String {
     let inteiro = composto(pelo, texto, citacao);
-    if inteiro.len() <= MAIOR_DETALHE || citacao.is_empty() || citacao.len() > MAIOR_DETALHE {
+    if inteiro.len() <= MAIOR_DETALHE || citacao.len() > MAIOR_DETALHE {
         return inteiro;
     }
     // A descrição do programa encolhe antes do texto: o nome, depois o
@@ -140,7 +168,16 @@ pub fn detalhe_composto(pelo: Option<&str>, texto: &str, citacao: &str) -> Strin
         }
         pelo = Some(curto);
     }
-    // Ainda acima do teto: o texto perde o fim, e a citação fica inteira.
+    // Ainda acima do teto: o texto perde o fim numa fronteira de palavra, e
+    // a citação fica inteira. O lugar do texto é o que sobra de quem pediu
+    // — com o `: ` — e da citação.
+    let de_quem_pediu = pelo.as_deref().map_or(0, |p| p.len() + ": ".len());
+    if let Some(lugar) = MAIOR_DETALHE.checked_sub(de_quem_pediu + citacao.len())
+        && lugar >= OMITIDO.len()
+    {
+        return composto(pelo.as_deref(), &sem_o_fim(texto, lugar), citacao);
+    }
+    // Quem pediu não cabe nem sem o texto: perde o fim, antes da citação.
     let inteiro = composto(pelo.as_deref(), texto, citacao);
     let mut antes = String::from(&inteiro[..inteiro.len() - citacao.len()]);
     let mut fim = MAIOR_DETALHE - citacao.len();
@@ -150,6 +187,28 @@ pub fn detalhe_composto(pelo: Option<&str>, texto: &str, citacao: &str) -> Strin
     antes.truncate(fim);
     antes.push_str(citacao);
     antes
+}
+
+/// `texto` sem o fim, em até `lugar` bytes — `texto` não cabe nele, e o
+/// lugar tem pelo menos o de [`OMITIDO`]: as palavras inteiras que cabem
+/// com [`MARCA_DO_CORTE`] depois delas, ou só [`OMITIDO`], quando nem a
+/// primeira cabe. A palavra vai até o espaço: o corte cai sempre num
+/// espaço, que é ASCII — uma fronteira de caractere.
+fn sem_o_fim(texto: &str, lugar: usize) -> String {
+    let fim = texto
+        .bytes()
+        .enumerate()
+        .take_while(|&(i, _)| i + MARCA_DO_CORTE.len() <= lugar)
+        .filter(|&(_, b)| b == b' ')
+        .map(|(i, _)| i)
+        .last();
+    match fim
+        .map(|i| texto[..i].trim_end_matches(' '))
+        .filter(|antes| !antes.is_empty())
+    {
+        Some(antes) => alloc::format!("{antes}{MARCA_DO_CORTE}"),
+        None => String::from(OMITIDO),
+    }
 }
 
 /// `pelo: texto`, com a citação colada no texto — o formato de sempre, sem
@@ -223,6 +282,19 @@ fn resumo_e_editor(descricao: &str) -> Option<(&str, Option<&str>)> {
 /// descreve inteiro.
 pub fn descricao_abreviada(descricao: &str) -> bool {
     descricao.split(' ').any(|parte| parte == OMITIDO)
+}
+
+/// O começo do resumo — os 8 dígitos hexadecimais — da descrição de um
+/// programa com imagem, inteira ou abreviada: `<nome> <resumo>[ de
+/// <editor>]`, `sem manifesto <resumo>…` ou `? <resumo>…`. `None` para a
+/// descrição sem resumo — `kernel`, `sem imagem` — e para o que não tem
+/// essa forma.
+///
+/// É o que o programa **é**, e fica na abreviada: quem lê a auditoria
+/// compara uma descrição abreviada com a inteira que já conhece por ele —
+/// o mesmo resumo é o mesmo programa; outro resumo, outro programa.
+pub fn resumo_da_descricao(descricao: &str) -> Option<&str> {
+    resumo_e_editor(descricao).map(|(resumo, _)| resumo)
 }
 
 /// Que tipo de identidade agiu.
@@ -939,27 +1011,41 @@ mod testes {
                 .map(|r| (r.seq, r.evento.detalhe.clone())),
             Some((n, d))
         );
-        // Sem processo, o mesmo.
-        let longo = "y".repeat(MAIOR_DETALHE);
+        // Sem processo, o mesmo: o texto perde o fim numa palavra inteira,
+        // com a marca, e a citação fica.
+        let longo = "yy ".repeat(MAIOR_DETALHE / 3);
         let d = detalhe_composto(None, &longo, "; decisao 18446744073709551615");
-        assert_eq!(d.len(), MAIOR_DETALHE);
-        assert!(d.ends_with("; decisao 18446744073709551615"));
-        // O corte numa fronteira de caractere: `ç` e `ã` têm dois bytes. O
-        // nome já saiu, e o texto ainda não cabia.
+        assert_eq!(
+            d,
+            alloc::format!("{}?; decisao 18446744073709551615", "yy ".repeat(21))
+        );
+        // A palavra seguinte, com a marca, não caberia.
+        assert!(d.len() <= MAIOR_DETALHE && d.len() + "yy ".len() > MAIOR_DETALHE);
+        // O corte cai num espaço — uma fronteira de caractere: `ç` e `ã` têm
+        // dois bytes. O nome já saiu, e o texto ainda não cabia.
         for extra in 0..4 {
-            let texto = alloc::format!("{}{}", "a".repeat(extra), "ção".repeat(40));
+            let texto = alloc::format!("{}{}", "a".repeat(extra), "ação ".repeat(30));
             let d = detalhe_composto(Some(pelo), &texto, "; decisao 123");
-            assert!(
-                d.len() <= MAIOR_DETALHE && d.len() >= MAIOR_DETALHE - 1,
-                "{d}"
-            );
-            assert!(d.ends_with("; decisao 123"), "{d}");
+            assert!(d.len() <= MAIOR_DETALHE, "{d}");
+            assert!(d.ends_with(" ?; decisao 123"), "{d}");
             assert!(d.starts_with("pelo processo 1707 (? 91d8d1d6): "), "{d}");
+            let guardado = texto_de(&d, "; decisao 123")
+                .strip_suffix(MARCA_DO_CORTE)
+                .expect("a marca do corte");
+            assert!(texto.starts_with(&alloc::format!("{guardado} ")), "{d}");
+            // A palavra seguinte, com a marca, não caberia.
+            assert!(d.len() + "ação ".len() > MAIOR_DETALHE, "{d}");
         }
-        // Sem citação, nada muda: nem a descrição encolhe — o registro de
-        // uma decisão a guarda inteira —, e o corte é o do anel, no fim.
+        // Sem citação, igual: a descrição encolhe antes, e o texto perde o
+        // fim numa palavra inteira, com a marca — o anel não corta nada.
         let d = detalhe_composto(Some(pelo), &longo, "");
-        assert_eq!(d, alloc::format!("{pelo}: {longo}"));
+        assert_eq!(
+            d,
+            alloc::format!("pelo processo 1707 (? 91d8d1d6): {}?", "yy ".repeat(20))
+        );
+        // Uma palavra só, maior que o lugar: nada dela fica.
+        let d = detalhe_composto(Some(pelo), &"z".repeat(MAIOR_DETALHE), "; decisao 12");
+        assert_eq!(d, "pelo processo 1707 (? 91d8d1d6): ?; decisao 12");
         // Quem pediu sem a forma de um processo não encolhe pela
         // descrição: o texto todo some antes de quem pediu encolher; e quem
         // pediu encolhe antes da citação, que nunca encolhe.
@@ -1049,7 +1135,7 @@ mod testes {
             "pelo processo 1234 (? abcd1234 de bancada): o selo nao confere com o codigo; decisao 123456"
         );
         // Quem pediu sem descrição com resumo não encolhe: o texto perde o
-        // fim, como antes.
+        // fim, numa palavra inteira, com a marca.
         for pelo in [
             "pelo processo 1234 (kernel)",
             "pelo processo 1234 (sem imagem)",
@@ -1057,15 +1143,24 @@ mod testes {
             "pelo processo 1234 (loja abcd123 de duke)",
             "pelo processo x (loja abcd1234)",
         ] {
-            let texto = "t".repeat(MAIOR_DETALHE);
-            let d = detalhe_composto(Some(pelo), &texto, "; decisao 123456");
-            assert_eq!(d.len(), MAIOR_DETALHE, "{d}");
-            assert!(d.starts_with(&alloc::format!("{pelo}: tttt")), "{d}");
-            assert!(d.ends_with("; decisao 123456"), "{d}");
+            let texto = "tt ".repeat(MAIOR_DETALHE / 3);
+            for citacao in ["; decisao 123456", ""] {
+                let d = detalhe_composto(Some(pelo), &texto, citacao);
+                assert!(d.len() <= MAIOR_DETALHE, "{d}");
+                assert!(d.len() + "tt ".len() > MAIOR_DETALHE, "{d}");
+                assert!(d.starts_with(&alloc::format!("{pelo}: tt tt")), "{d}");
+                assert!(d.ends_with(&alloc::format!("tt ?{citacao}")), "{d}");
+            }
         }
-        // Sem citação, a descrição nunca encolhe aqui.
+        // Sem citação, a descrição encolhe igual: o motivo vai inteiro.
         let d = detalhe_composto(Some(&pelo), Falta::NaoConfere.motivo(), "");
-        assert_eq!(d, alloc::format!("{pelo}: {}", Falta::NaoConfere.motivo()));
+        assert_eq!(
+            d,
+            alloc::format!(
+                "pelo processo 1234 (? abcd1234 de bancada): {}",
+                Falta::NaoConfere.motivo()
+            )
+        );
     }
 
     /// A descrição abreviada nunca é a de outro programa: o lugar do que
@@ -1164,9 +1259,13 @@ mod testes {
             );
             assert!(d.ends_with(citacao), "{d}");
             let texto = texto_de(&d, citacao);
-            if texto.len() < motivo.len() {
+            if texto != motivo.as_str() {
                 cortados += 1;
-                assert!(motivo.starts_with(texto), "{d}");
+                // Cortado numa palavra inteira do motivo, com a marca.
+                let guardado = texto
+                    .strip_suffix(MARCA_DO_CORTE)
+                    .expect("a marca do corte");
+                assert!(motivo.starts_with(&alloc::format!("{guardado} ")), "{d}");
             }
             assert_eq!(Falta::do_motivo(texto), Some(f), "{d}");
         }
@@ -1176,6 +1275,227 @@ mod testes {
         let texto = texto_de(&d, citacao);
         assert!(!texto.starts_with(Falta::NaoConfere.motivo()), "{d}");
         assert!(cortados >= 3, "{cortados}");
+    }
+
+    /// O resíduo do F1: acima do teto, a descrição do programa encolhe
+    /// também no registro sem citação — a decisão do gate, a bifurcação —,
+    /// e o texto chega inteiro: `o manifesto nao declara` (o achado 1 do
+    /// adversário), o `filho N` (achado 2), o `)` da decisão cujo `pelo`
+    /// sozinho passa do teto (achado 3) e o `teto` (7a). O anel cortava o
+    /// fim de cada um.
+    #[test]
+    fn a_descricao_encolhe_tambem_sem_citacao() {
+        let nome = "n".repeat(crate::manifesto::MAIOR_NOME);
+        let editor = "e".repeat(crate::arquivo::MAIOR_NOME);
+        // A recusa do manifesto de um código de fora de nome longo: o
+        // `pelo` tem 78 bytes, e o anel deixava `o manifesto nao `.
+        let pelo = alloc::format!("pelo processo 1234 ({nome} abcd1234 de duke-oficial)");
+        assert_eq!(pelo.len(), 78);
+        for permissao in [
+            "fs.read",
+            "key.sign",
+            "net.observe",
+            "credential.change_self",
+        ] {
+            let texto = alloc::format!("o manifesto nao declara {permissao}");
+            assert!(composto(Some(&pelo), &texto, "").len() > MAIOR_DETALHE);
+            assert_eq!(
+                detalhe_composto(Some(&pelo), &texto, ""),
+                alloc::format!("pelo processo 1234 (? abcd1234 de duke-oficial): {texto}")
+            );
+        }
+        // A bifurcação, com os editores de 19 e de 21 bytes do ataque: o
+        // anel deixava `filho 123` e `filho 5`. O filho vai inteiro, com
+        // qualquer número de dígitos.
+        for de in ["fornecedor-externo1", "fornecedor-externo-ab"] {
+            let pelo = alloc::format!("pelo processo 1234 ({nome} abcd1234 de {de})");
+            for filho in [1235u64, 5000, u64::MAX] {
+                let texto = alloc::format!("filho {filho}");
+                assert!(composto(Some(&pelo), &texto, "").len() > MAIOR_DETALHE);
+                assert_eq!(
+                    detalhe_composto(Some(&pelo), &texto, ""),
+                    alloc::format!("pelo processo 1234 (? abcd1234 de {de}): {texto}")
+                );
+            }
+        }
+        // O `pelo` sozinho acima do teto — o maior nome e o maior editor,
+        // com o fio de três dígitos ou mais: a decisão que permite, de texto
+        // vazio, vai abreviada e termina no `)`; a que recusa, com o motivo
+        // inteiro.
+        for fio in [123u64, 1234, u64::MAX] {
+            let pelo = alloc::format!("pelo processo {fio} ({nome} abcd1234 de {editor})");
+            assert!(pelo.len() > MAIOR_DETALHE);
+            assert_eq!(
+                detalhe_composto(Some(&pelo), "", ""),
+                alloc::format!("pelo processo {fio} (? abcd1234 de {editor})")
+            );
+            let motivo = "recurso fora do alcance do papel";
+            let d = detalhe_composto(Some(&pelo), motivo, "");
+            assert!(
+                d == alloc::format!("pelo processo {fio} (? abcd1234 de {editor}): {motivo}")
+                    || d == alloc::format!("pelo processo {fio} (? abcd1234 de ?): {motivo}"),
+                "{d}"
+            );
+            assert!(d.len() <= MAIOR_DETALHE, "{d}");
+        }
+        // O motivo do teto, com o nome de 32 bytes e o editor de 13: a
+        // descrição encolhe toda, e o texto perde só a última palavra — o
+        // `teto` fica.
+        let pelo = alloc::format!("pelo processo 1234 ({nome} abcd1234 de {})", &editor[..13]);
+        let d = detalhe_composto(
+            Some(&pelo),
+            "o papel e o teto de um administrador: delega, nao se exerce",
+            "",
+        );
+        assert_eq!(
+            d,
+            "pelo processo 1234 (? abcd1234 de ?): o papel e o teto de um administrador: delega, nao se ?"
+        );
+        // O que cabe não muda: a descrição inteira, com o texto.
+        let pelo = "pelo processo 1234 (loja abcd1234 de duke-oficial)";
+        assert_eq!(
+            detalhe_composto(Some(pelo), "o manifesto nao declara fs.read", ""),
+            alloc::format!("{pelo}: o manifesto nao declara fs.read")
+        );
+    }
+
+    /// O achado 4 do adversário do F1: o texto que perde o fim não deixa
+    /// uma palavra pela metade — o pedaço de um nome é o nome válido de
+    /// outro editor, e o de um número, outro número. O corte recua até o
+    /// espaço, a marca fica no lugar do que saiu, e a falta continua
+    /// reconhecida.
+    #[test]
+    fn o_corte_nao_deixa_palavra_pela_metade() {
+        use crate::procedencia::{Falta, nao_confiado};
+        assert_eq!(MARCA_DO_CORTE, alloc::format!(" {OMITIDO}"));
+        // O editor em quem o papel não confia, de 25 bytes, no motivo: o
+        // corte de caractere deixava `fornecedor-ex`.
+        let editor = "fornecedor-externo-abcdef";
+        let d = detalhe_composto(
+            Some(&alloc::format!(
+                "pelo processo 1234 (loja abcd1234 de {editor})"
+            )),
+            &nao_confiado(editor),
+            "; decisao 123456",
+        );
+        assert_eq!(
+            d,
+            "pelo processo 1234 (? abcd1234 de ?): o papel nao confia no editor ?; decisao 123456"
+        );
+        assert_eq!(
+            Falta::do_motivo(texto_de(&d, "; decisao 123456")),
+            Some(Falta::NaoConfiado)
+        );
+        // O nascimento de um código de fora, pedido por um da imagem: o
+        // corte deixava `de duke-of`.
+        let d = detalhe_composto(
+            Some("pelo processo 94 (instalador 0a1b2c3d)"),
+            "processo 1234 lancado: codigo abcd1234 de duke-oficial",
+            "; decisao 123456",
+        );
+        assert_eq!(
+            d,
+            "pelo processo 94 (? 0a1b2c3d): processo 1234 lancado: codigo abcd1234 de ?; decisao 123456"
+        );
+        // Um número no fim: sai inteiro — o corte deixava `581..5`.
+        let d = detalhe_composto(
+            Some("pelo processo 1707 (fluxos 91d8d1d6)"),
+            "lote a gravar: 1 operacoes, versoes 581..582",
+            "; decisao 12345678901",
+        );
+        assert_eq!(
+            d,
+            "pelo processo 1707 (? 91d8d1d6): lote a gravar: 1 operacoes, versoes ?; decisao 12345678901"
+        );
+        // Em qualquer combinação: o detalhe cabe, a citação fica inteira no
+        // fim, e o texto que perdeu o fim é um começo dele que termina numa
+        // palavra inteira, com a marca — ou só a marca —, e a palavra
+        // seguinte não caberia.
+        let nome = "n".repeat(crate::manifesto::MAIOR_NOME);
+        let maior = "e".repeat(crate::arquivo::MAIOR_NOME);
+        let textos = [
+            String::from(Falta::NaoConfere.motivo()),
+            String::from(Falta::EditorDesconhecido.motivo()),
+            nao_confiado(&maior),
+            alloc::format!("processo {} lancado: codigo abcd1234 de {maior}", u64::MAX),
+            String::from("o manifesto nao declara credential.change_self"),
+            String::from("adiada: a ordem das gravacoes com outro fio"),
+            "ação ".repeat(30),
+            "z".repeat(120),
+            alloc::format!("filho {}", u64::MAX),
+        ];
+        let pelos = [
+            None,
+            Some(String::from("pelo processo 7 (kernel)")),
+            Some(String::from("pela relacao 5a5a5a5a, atestado 01020304")),
+            Some(alloc::format!(
+                "pelo processo 1234567 ({nome} abcd1234 de {maior})"
+            )),
+            Some(alloc::format!(
+                "pelo processo {} ({nome} abcd1234)",
+                u64::MAX
+            )),
+        ];
+        for texto in &textos {
+            for pelo in &pelos {
+                for citacao in ["", "; decisao 123456", "; decisao 18446744073709551615"] {
+                    let d = detalhe_composto(pelo.as_deref(), texto, citacao);
+                    assert!(d.len() <= MAIOR_DETALHE, "{d}");
+                    let antes = d.strip_suffix(citacao).expect("a citacao no fim");
+                    let gravado = match pelo.as_deref() {
+                        Some(p) if p.starts_with("pelo processo ") => {
+                            antes.split_once("): ").expect("quem pediu").1
+                        }
+                        Some(p) => antes
+                            .strip_prefix(&alloc::format!("{p}: "))
+                            .expect("quem pediu"),
+                        None => antes,
+                    };
+                    if gravado == texto.as_str() {
+                        continue;
+                    }
+                    if gravado == OMITIDO {
+                        let primeira = texto.split(' ').next().unwrap_or_default();
+                        assert!(
+                            d.len() - OMITIDO.len() + primeira.len() + MARCA_DO_CORTE.len()
+                                > MAIOR_DETALHE,
+                            "{d}"
+                        );
+                        continue;
+                    }
+                    let guardado = gravado.strip_suffix(MARCA_DO_CORTE).expect("a marca");
+                    assert!(
+                        texto.starts_with(&alloc::format!("{guardado} ")),
+                        "{d} / {texto}"
+                    );
+                    if let Some(proximo) = texto[guardado.len() + 1..].find(' ') {
+                        assert!(d.len() + proximo + 1 > MAIOR_DETALHE, "{d} / {texto}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// O começo do resumo de uma descrição, inteira ou abreviada; nenhum
+    /// para a descrição sem resumo ou fora da forma.
+    #[test]
+    fn o_resumo_da_descricao() {
+        for (descricao, resumo) in [
+            ("loja abcd1234", Some("abcd1234")),
+            ("loja abcd1234 de duke-oficial", Some("abcd1234")),
+            ("sem manifesto abcd1234", Some("abcd1234")),
+            ("sem manifesto abcd1234 de duke", Some("abcd1234")),
+            ("? abcd1234", Some("abcd1234")),
+            ("? abcd1234 de duke-oficial", Some("abcd1234")),
+            ("? abcd1234 de ?", Some("abcd1234")),
+            ("kernel", None),
+            ("sem imagem", None),
+            ("loja abcd123", None),
+            ("loja abcd1234 do x", None),
+            ("loja ABCD1234", None),
+        ] {
+            assert_eq!(resumo_da_descricao(descricao), resumo, "{descricao}");
+        }
     }
 
     /// O tempo de um registro nunca fica abaixo do anterior, nem depois de

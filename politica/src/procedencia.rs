@@ -24,10 +24,13 @@
 //! `auditoria::detalhe_composto`); o motivo só perde o fim quando ela já
 //! encolheu toda e ainda não cabe — o nome do editor de
 //! [`Falta::NaoConfiado`] no motivo, ou o fio e a decisão com muitos
-//! dígitos. Mesmo assim o reconhecimento não depende do motivo inteiro: o
-//! começo [`Falta::essencial`] já diz a falta, e [`Falta::do_motivo`]
-//! reconhece o motivo cortado no fim enquanto ele guarda esse começo — o
-//! NSF vê o código adulterado também ali.
+//! dígitos. O corte termina numa palavra inteira, com a marca
+//! (`auditoria::MARCA_DO_CORTE`, ` ?`) no lugar do que saiu: o pedaço de um
+//! nome de editor seria o nome de outro. Mesmo assim o reconhecimento não
+//! depende do motivo inteiro: o começo [`Falta::essencial`] já diz a falta,
+//! e [`Falta::do_motivo`] tira a marca e reconhece o motivo cortado no fim
+//! enquanto ele guarda esse começo — o NSF vê o código adulterado também
+//! ali.
 //!
 //! # Não é uma segunda política
 //!
@@ -102,9 +105,16 @@ impl Falta {
     /// A falta que um motivo gravado diz, se diz uma: o motivo dela
     /// inteiro, com o que vier depois — o editor de [`Falta::NaoConfiado`] —,
     /// ou o motivo cortado no fim, enquanto guarda o começo
-    /// [`essencial`](Falta::essencial). Um texto que segue outro caminho
-    /// depois do começo não é o motivo de falta nenhuma.
+    /// [`essencial`](Falta::essencial). O corte da auditoria termina numa
+    /// palavra inteira e deixa a marca no lugar do que saiu
+    /// ([`crate::auditoria::MARCA_DO_CORTE`]): ela sai antes da comparação —
+    /// `o papel nao confia no editor ?` é o motivo inteiro, sem o editor. Um
+    /// texto que segue outro caminho depois do começo não é o motivo de
+    /// falta nenhuma.
     pub fn do_motivo(motivo: &str) -> Option<Falta> {
+        let motivo = motivo
+            .strip_suffix(crate::auditoria::MARCA_DO_CORTE)
+            .unwrap_or(motivo);
         Falta::TODAS.into_iter().find(|f| {
             motivo.starts_with(f.motivo())
                 || (f.motivo().starts_with(motivo) && motivo.starts_with(f.essencial()))
@@ -136,10 +146,18 @@ mod testes {
             Falta::do_motivo("o selo nao confere com o codigo; decisao 12"),
             Some(Falta::NaoConfere)
         );
+        // O editor que não coube, com a marca do corte no lugar.
+        assert_eq!(
+            Falta::do_motivo("o papel nao confia no editor ?"),
+            Some(Falta::NaoConfiado)
+        );
         for outro in [
             "",
+            "?",
+            " ?",
             "bloqueado pelo firewall, regra 3",
             "o manifesto nao declara fs.read",
+            "o manifesto nao declara ?",
             "o papel operador nao permite",
         ] {
             assert_eq!(Falta::do_motivo(outro), None, "{outro}");
@@ -167,6 +185,12 @@ mod testes {
                 let cortado = &motivo[..n];
                 let esperado = (n >= f.essencial().len()).then_some(f);
                 assert_eq!(Falta::do_motivo(cortado), esperado, "{cortado:?}");
+                // O corte da auditoria, numa palavra inteira, com a marca:
+                // o mesmo reconhecimento.
+                if motivo.as_bytes().get(n) == Some(&b' ') {
+                    let marcado = alloc::format!("{cortado}{}", crate::auditoria::MARCA_DO_CORTE);
+                    assert_eq!(Falta::do_motivo(&marcado), esperado, "{marcado:?}");
+                }
             }
         }
         // Nenhum começo é o de outra falta: o cortado nunca vira outra.
