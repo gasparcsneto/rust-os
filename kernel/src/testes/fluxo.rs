@@ -2589,6 +2589,9 @@ pub(super) fn fluxo_o_desligamento() -> Resultado {
                 return Err("o leitor sem nada nao esperou");
             };
             let _ = crate::energia::executada_de_teste();
+            // O fio da energia fica parado antes de parar as gravações até
+            // a suíte soltar: o que se pede não depende do meio segundo.
+            let segura = crate::energia::Segura::de_teste();
             let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
             if fs_texto(&r, "state").as_deref() != Some("rebooting") {
                 crate::log_error!("teste", "{}", r);
@@ -2600,6 +2603,7 @@ pub(super) fn fluxo_o_desligamento() -> Resultado {
             let feitos = esperar_ate(|| crate::fluxo::contagem() == (0, 0), 600);
             let acabou = espera.conferir(None);
             drop(espera);
+            drop(segura);
             let entregue = energia_entregue();
             recusado_com(
                 &abrir_agora,
@@ -3231,10 +3235,15 @@ pub(super) fn fluxo_abrir_e_desligar_ao_mesmo_tempo() -> Resultado {
             esperar_cedendo(|| ABRIU.load(SeqCst) >= 3, TETO_DA_MALHA)
                 .map_err(|_| "o fio nao abriu pedidos")?;
             let _ = crate::energia::executada_de_teste();
+            // O fio da energia fica parado antes de parar as gravações até
+            // o fio que abre acabar: a abertura depois da resposta não
+            // depende do meio segundo.
+            let segura = crate::energia::Segura::de_teste();
             let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
             let abertos = ABRIU.load(SeqCst);
             let pronto = esperar_cedendo(|| PRONTOS.load(SeqCst) == 1, TETO_DA_MALHA);
             let feitos = esperar_ate(|| crate::fluxo::contagem() == (0, 0), 600);
+            drop(segura);
             let entregue = energia_entregue();
             if fs_texto(&r, "state").as_deref() != Some("rebooting") {
                 crate::log_error!("teste", "{}", r);

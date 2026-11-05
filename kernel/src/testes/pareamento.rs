@@ -2891,7 +2891,9 @@ pub(super) fn pareamento_a_reconfirmacao_no_commit() -> Resultado {
 /// pair × poweroff: com o desligamento pedido, o coletor desfaz a
 /// cerimônia viva — e o outro sabe —, nada novo abre, a 1ª mensagem que
 /// chegar é recusada; e o pedido que chega no ponto do commit é visto
-/// nele. Nada gravado.
+/// nele. Nada gravado. Em cada passo, o fio da energia fica parado antes de
+/// parar as gravações (`energia::Segura`) até o passo conferir: o que se
+/// pede com a ação a caminho não depende do meio segundo.
 pub(super) fn pareamento_o_desligamento() -> Resultado {
     fn reiniciar() -> alloc::string::String {
         super::fs_pedir(super::sistema_aqui(), "system.reboot", "{}")
@@ -2916,6 +2918,7 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
         let mut ini = Iniciante::novo(VAGA, 2_001_700, 1);
         aceitar(CONSOLE, NOME)?;
         ate_os_codigos(CONSOLE, &mut ini)?;
+        let segura = crate::energia::Segura::de_teste();
         pedido()?;
         crate::pareamento::vencer();
         let r = desfeita_aceitando(
@@ -2926,15 +2929,17 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
             Codigo::Conflict,
             true,
         );
+        drop(segura);
         if super::energia_entregue() != Some(crate::energia::Acao::Reiniciar) {
             return Err("o reinicio nao chegou ao fim");
         }
         r?;
         // E nada novo abre. Logo depois do pedido, e não depois de conferir
-        // o fim da de cima: na suíte, o fio da energia entrega a máquina
-        // meio segundo depois do pedido, e o pedido some com a entrega — a
-        // abertura que viesse depois disso abriria de verdade.
+        // o fim da de cima: o pedido some com a entrega da máquina, e a
+        // abertura que viesse depois dela abriria de verdade. O fio da
+        // energia fica parado antes da entrega até a abertura ser recusada.
         recomecar();
+        let segura = crate::energia::Segura::de_teste();
         pedido()?;
         let r = abertura_recusada(
             OUTRO_CONSOLE,
@@ -2943,6 +2948,7 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
             Codigo::Conflict,
             "a maquina esta desligando",
         );
+        drop(segura);
         if super::energia_entregue() != Some(crate::energia::Acao::Reiniciar) {
             return Err("o reinicio nao chegou ao fim");
         }
@@ -2950,6 +2956,7 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
         // A janela aberta antes do pedido: a 1ª mensagem depois dele.
         recomecar();
         aceitar(CONSOLE, NOME)?;
+        let segura = crate::energia::Segura::de_teste();
         pedido()?;
         let r = aperto_recusado(
             &mut Iniciante::novo(VAGA, 2_001_701, 1),
@@ -2957,6 +2964,7 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
             Codigo::Conflict,
         );
         crate::pareamento::vencer();
+        drop(segura);
         if super::energia_entregue() != Some(crate::energia::Acao::Reiniciar) {
             return Err("o reinicio nao chegou ao fim");
         }
@@ -2967,9 +2975,11 @@ pub(super) fn pareamento_o_desligamento() -> Resultado {
         let mut ini = Iniciante::novo(VAGA, 2_001_702, 1);
         ate_o_commit(CONSOLE, NOME, &mut ini)?;
         let _ = crate::energia::executada_de_teste();
+        let segura = crate::energia::Segura::de_teste();
         crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(reiniciar_no_meio));
         crate::pareamento::no_console();
         crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        drop(segura);
         let entregue = super::energia_entregue();
         desfeita_aceitando_por(
             &mut ini,

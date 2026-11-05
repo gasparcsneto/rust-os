@@ -31,6 +31,14 @@
 //! O fio faz tudo, menos a última chamada: com as travas na mão, ele anota
 //! a ação em vez de entregá-la ao firmware, e acaba. É o que os casos
 //! conferem.
+//!
+//! O caso que pede alguma coisa com a ação a caminho — e espera `CONFLICT`,
+//! `desligando` ou `rebooting` — não pode depender do meio segundo: numa
+//! suíte carregada, o fio parava as gravações e a ação deixava de estar a
+//! caminho antes de o caso pedir. O caso segura o fio ([`Segura`]) antes
+//! da ação: o fio espera o meio segundo, como sempre, e fica parado ali,
+//! antes de parar as gravações, até o caso soltar — com a ação a caminho,
+//! como na janela. Fora da suíte, o gancho não existe.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -187,6 +195,8 @@ extern "C" fn parar(argumento: u64) -> ! {
         crate::fios::terminar()
     };
     crate::fios::bloquear_em(crate::tarefas::relogio::por_ms(ESPERA_MS));
+    #[cfg(feature = "modo-teste")]
+    esperar_a_suite();
     crate::log_warn!("energia", "{}: as gravacoes param agora", acao.nome());
     crate::persistencia::parar_as_gravacoes(|| entregar(acao));
     terminar_na_suite()
@@ -215,4 +225,59 @@ fn terminar_na_suite() -> ! {
 #[cfg(feature = "modo-teste")]
 pub fn executada_de_teste() -> Option<Acao> {
     Acao::de(u64::from(EXECUTADA.swap(0, Ordering::AcqRel)))
+}
+
+/// Só na suíte: quantas [`Segura`] estão vivas. Com alguma, o fio que
+/// acaba a espera fica parado antes de parar as gravações.
+#[cfg(feature = "modo-teste")]
+static SEGURAS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Só na suíte: o fio está parado no gancho agora.
+#[cfg(feature = "modo-teste")]
+static PARADO_NA_SUITE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Só na suíte: enquanto viva, o fio `energia` que acabar a espera fica
+/// parado antes de parar as gravações — com a ação a caminho, como na
+/// janela do meio segundo —, para o caso pedir o que depende dela sem
+/// depender do relógio. Tomada **antes** da ação; largada antes de
+/// esperar a entrega (`energia_entregue`, na suíte). Largar solta — também
+/// o caso que falha no meio não deixa o fio parado para os seguintes.
+#[cfg(feature = "modo-teste")]
+#[must_use = "largada na hora, a Segura nao segura nada"]
+pub struct Segura(());
+
+#[cfg(feature = "modo-teste")]
+impl Segura {
+    pub fn de_teste() -> Segura {
+        SEGURAS.fetch_add(1, Ordering::SeqCst);
+        Segura(())
+    }
+}
+
+#[cfg(feature = "modo-teste")]
+impl Drop for Segura {
+    fn drop(&mut self) {
+        SEGURAS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Só na suíte: o fio está parado no gancho de [`Segura`] — acabou a
+/// espera, e não parou as gravações.
+#[cfg(feature = "modo-teste")]
+pub fn parado_na_suite_de_teste() -> bool {
+    PARADO_NA_SUITE.load(Ordering::SeqCst)
+}
+
+/// O gancho de [`Segura`]: com alguma viva, o fio fica aqui, dormindo de
+/// tique em tique, até a última ser largada.
+#[cfg(feature = "modo-teste")]
+fn esperar_a_suite() {
+    if SEGURAS.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    PARADO_NA_SUITE.store(true, Ordering::SeqCst);
+    while SEGURAS.load(Ordering::SeqCst) > 0 {
+        crate::fios::bloquear_em(crate::tarefas::relogio::por_ms(2));
+    }
+    PARADO_NA_SUITE.store(false, Ordering::SeqCst);
 }

@@ -9017,12 +9017,16 @@ fn atualizacao_a_escrita_e_o_reinicio() -> Resultado {
         }
     }
     let _ = crate::energia::executada_de_teste();
+    // O fio da energia fica parado antes de parar as gravações até a
+    // escrita ser recusada: a recusa não depende do meio segundo.
+    let segura = crate::energia::Segura::de_teste();
     let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
     if fs_numero(&r, "record").is_none() {
         crate::log_error!("teste", "{}", r);
         return Err("o reinicio nao foi aceito");
     }
     let durante = crate::slots::encenar(0, &setor);
+    drop(segura);
     let entregue = energia_entregue();
     match durante {
         Err((Codigo::Conflict, m)) if m.contains("reiniciando") => {}
@@ -17133,8 +17137,10 @@ fn senha_a_gravacao_o_journal_e_a_maquina_que_vai() -> Resultado {
         devolver();
         let _ = crate::slots::reinicio_pedido_de_teste();
         uma_troca_gravada(seq, Codigo::Error, MOTIVO)?;
-        // O desligamento pelo botão a caminho.
+        // O desligamento pelo botão a caminho — o fio da energia parado
+        // antes de parar as gravações até a troca ser recusada.
         let _ = crate::energia::executada_de_teste();
+        let segura = crate::energia::Segura::de_teste();
         let (_, _, envelope) = botao_pedido(botao_apertar(1))?;
         if fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
             crate::log_error!("teste", "{}", envelope);
@@ -17143,6 +17149,7 @@ fn senha_a_gravacao_o_journal_e_a_maquina_que_vai() -> Resultado {
         let seq = seq_da_auditoria();
         digitar_no_console(CONSOLE, "senha\n");
         let recusada = uma_troca_gravada(seq, Codigo::Conflict, "desligando");
+        drop(segura);
         if energia_entregue() != Some(crate::energia::Acao::Desligar) {
             return Err("o desligamento pelo botao nao chegou ao fim");
         }
@@ -35338,7 +35345,10 @@ fn copia_o_que_vem_no_meio() -> Resultado {
             return Err("a recusa no commit nao foi gravada como o resultado do comando");
         }
         // A máquina que vai: nada começa — nem a cópia, nem a restauração.
+        // O fio da energia fica parado antes de parar as gravações até as
+        // duas serem recusadas.
         let _ = crate::energia::executada_de_teste();
+        let segura = crate::energia::Segura::de_teste();
         let sistema = sistema_no_armazem(7_400_303);
         let r = fs_pedir(sistema, "system.reboot", "{}");
         if fs_texto(&r, "state").as_deref() != Some("rebooting") {
@@ -35347,6 +35357,7 @@ fn copia_o_que_vem_no_meio() -> Resultado {
         }
         let copia = fs_pedir(agente, "fs.backup", &alloc::format!(r#"{{"path":"{p}"}}"#));
         let restaurar = copia_restaurar(agente, &p, d, versao_no_armazem(&p));
+        drop(segura);
         let entregue = energia_entregue();
         for r in [&copia, &restaurar] {
             if fs_ok(r)
@@ -55599,6 +55610,9 @@ fn rede_o_endereco_do_arquivo_sem_dhcp() -> Resultado {
 
 /// Espera o fio `energia` chegar ao fim — com a ordem e a tranca do disco
 /// na mão — e devolve a ação que ele entregaria ao firmware.
+///
+/// O caso que segurou o fio (`energia::Segura`) o solta antes: segurado,
+/// ele não entrega nada.
 fn energia_entregue() -> Option<crate::energia::Acao> {
     let mut entregue = None;
     let _ = esperar_cedendo(
@@ -55625,6 +55639,10 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
         ("system.poweroff", Acao::Desligar, "powering_off"),
     ] {
         let (_, descargas_antes) = crate::bloco::com_o_disco(|d| d.contadores()).unwrap_or((0, 0));
+        // O fio da energia fica parado antes de parar as gravações até o
+        // segundo pedido ser recusado: o `system.info` e a recusa não
+        // dependem do meio segundo.
+        let segura = crate::energia::Segura::de_teste();
         let pedido_em = crate::tempo::uptime_ms();
         let r = fs_pedir(sistema, metodo, "{}");
         let registro = fs_numero(&r, "record").ok_or_else(|| {
@@ -55664,6 +55682,7 @@ fn energia_o_pedido_vai_ao_journal_antes_e_as_gravacoes_param_depois() -> Result
             crate::log_error!("teste", "{}", segundo);
             return Err("um segundo pedido foi aceito com o primeiro a caminho");
         }
+        drop(segura);
         let entregue = energia_entregue();
         let passou = crate::tempo::uptime_ms() - pedido_em;
         if entregue != Some(acao) {
@@ -55764,7 +55783,10 @@ fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
         }
         // Com um reinício a caminho, pedido pelo gate, o desligamento pela
         // prova — que não passa pelo handler do comando — é recusado pela
-        // própria energia: uma ação de cada vez, por qualquer caminho.
+        // própria energia: uma ação de cada vez, por qualquer caminho. O
+        // fio da energia fica parado antes de parar as gravações até a
+        // prova ser recusada.
+        let segura = crate::energia::Segura::de_teste();
         let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
         if !r.contains(r#""state":"rebooting""#) {
             crate::log_error!("teste", "{}", r);
@@ -55782,6 +55804,7 @@ fn energia_quem_nao_pode_ouve_a_recusa() -> Resultado {
             crate::log_error!("teste", "{}", r);
             return Err("com um reinicio a caminho, o administrador desligou pela prova");
         }
+        drop(segura);
         if energia_entregue() != Some(Acao::Reiniciar) {
             return Err("o reinicio a caminho nao chegou ao fim");
         }
@@ -56469,6 +56492,9 @@ fn botao_apertos_repetidos_sao_um_desligamento() -> Resultado {
     use crate::energia::Acao;
     let _ = crate::energia::executada_de_teste();
     let (a0, p0, i0, _) = crate::botao::contas_de_teste();
+    // O fio da energia fica parado antes de parar as gravações até os
+    // apertos com a máquina parando serem ignorados.
+    let segura = crate::energia::Segura::de_teste();
     let (apertos, evento, envelope) = botao_pedido(botao_apertar(5))?;
     if apertos != 5 || fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
         crate::log_error!("teste", "{} {}", apertos, envelope);
@@ -56497,6 +56523,7 @@ fn botao_apertos_repetidos_sao_um_desligamento() -> Resultado {
         crate::log_error!("teste", "{:?}", decisoes);
         return Err("o gate decidiu mais de um desligamento");
     }
+    drop(segura);
     if energia_entregue() != Some(Acao::Desligar) {
         return Err("o desligamento nao chegou ao fim");
     }
@@ -56623,6 +56650,9 @@ fn botao_com_o_reinicio_a_caminho_nao_pede() -> Resultado {
     use crate::botao::Passo;
     use crate::energia::Acao;
     let _ = crate::energia::executada_de_teste();
+    // O fio da energia fica parado antes de parar as gravações até o
+    // aperto ser ignorado.
+    let segura = crate::energia::Segura::de_teste();
     let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
     if fs_texto(&r, "state").as_deref() != Some("rebooting") {
         crate::log_error!("teste", "{}", r);
@@ -56638,6 +56668,7 @@ fn botao_com_o_reinicio_a_caminho_nao_pede() -> Resultado {
             return Err("com o reinicio a caminho, o aperto pediu alguma coisa");
         }
     }
+    drop(segura);
     if energia_entregue() != Some(Acao::Reiniciar) {
         return Err("o reinicio a caminho nao chegou ao fim, ou virou outro");
     }
@@ -56655,6 +56686,9 @@ fn botao_com_o_desligamento_a_caminho_a_atualizacao_nao_comeca() -> Resultado {
     let setor = [0u8; 512];
     let _ = crate::energia::executada_de_teste();
     let antes = crate::slots::estado_do_journal();
+    // O fio da energia fica parado antes de parar as gravações até as
+    // duas recusas.
+    let segura = crate::energia::Segura::de_teste();
     let (_, _, envelope) = botao_pedido(botao_apertar(1))?;
     if fs_texto(&envelope, "state").as_deref() != Some("powering_off") {
         crate::log_error!("teste", "{}", envelope);
@@ -56662,6 +56696,7 @@ fn botao_com_o_desligamento_a_caminho_a_atualizacao_nao_comeca() -> Resultado {
     }
     let escrita = crate::slots::encenar(0, &setor).map(|_| ());
     let desistencia = crate::slots::cancelar(&"0".repeat(64)).map(|_| ());
+    drop(segura);
     let entregue = energia_entregue();
     let no_slot = crate::slots::arranque().is_some();
     for recusa in [escrita, desistencia] {
@@ -56774,6 +56809,10 @@ fn botao_concorrencia_um_desligamento() -> Resultado {
     BOTAO_PEDIDOS.store(0, SeqCst);
     BOTAO_FIM.store(0, SeqCst);
     let nucleos = crate::nucleos::ligados() as u64;
+    // O fio da energia fica parado antes de parar as gravações até os
+    // apertos com a máquina parando serem contados: eles não dependem do
+    // meio segundo.
+    let segura = crate::energia::Segura::de_teste();
     for i in 0..BOTAO_FIOS {
         crate::fios::criar_no_nucleo(
             "teste-botao",
@@ -56803,6 +56842,7 @@ fn botao_concorrencia_um_desligamento() -> Resultado {
     if a1 - a0 != 2 * BOTAO_FIOS * BOTAO_APERTOS_POR_FIO || crate::botao::pendente_de_teste() {
         return Err("um aperto se perdeu da conta, ou ficou sem rodada");
     }
+    drop(segura);
     if energia_entregue() != Some(Acao::Desligar) {
         return Err("o desligamento dos fios nao chegou ao fim");
     }
@@ -56815,6 +56855,9 @@ fn botao_concorrencia_um_desligamento() -> Resultado {
         for par in &BOTAO_PAR {
             par.store(0, SeqCst);
         }
+        // O segundo do par é recusado pela ação a caminho, e não pelo
+        // relógio.
+        let segura = crate::energia::Segura::de_teste();
         crate::fios::criar_no_nucleo("teste-botao-cmd", botao_par_comando, comando, 0)?;
         crate::fios::criar_no_nucleo(
             "teste-botao-par",
@@ -56826,6 +56869,7 @@ fn botao_concorrencia_um_desligamento() -> Resultado {
         esperar_cedendo(|| BOTAO_PAR.iter().all(|p| p.load(SeqCst) != 0), 300)
             .map_err(|_| "o par do botao nao terminou")?;
         let resultado = [BOTAO_PAR[0].load(SeqCst), BOTAO_PAR[1].load(SeqCst)];
+        drop(segura);
         let entregue = energia_entregue();
         let certo = match resultado {
             [1, 2] => entregue == Some(esperada),
@@ -74470,6 +74514,9 @@ fn malha_com_o_desligamento_a_caminho_nada_nasce() -> Resultado {
             let id = fs_texto(&mandar_na_malha(quem_manda, &endpoint, "antes", 1), "id")
                 .ok_or("a entrega de antes nao foi aceita")?;
             let _ = crate::energia::executada_de_teste();
+            // O fio da energia fica parado antes de parar as gravações até
+            // os quatro pedidos.
+            let segura = crate::energia::Segura::de_teste();
             let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
             if fs_texto(&r, "state").as_deref() != Some("rebooting") {
                 crate::log_error!("teste", "{}", r);
@@ -74491,6 +74538,7 @@ fn malha_com_o_desligamento_a_caminho_nada_nasce() -> Resultado {
                 "fabric.status",
                 &alloc::format!(r#"{{"id":"{id}"}}"#),
             );
+            drop(segura);
             let entregue = energia_entregue();
             for r in [&outra, &mandada] {
                 if fs_ok(r)

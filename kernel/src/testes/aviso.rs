@@ -1984,6 +1984,11 @@ pub(super) fn aviso_dois_pares_sob_carga() -> Resultado {
 /// Com o reinício a caminho, os fluxos que avisam acabam com `desligando`
 /// e cada ponta livre ouve `FIM`; nada novo abre nem é aceito — `CONFLICT`
 /// —, e o `notify` desses pedidos não designa nada.
+///
+/// O caso pede depois do meio segundo do fio da energia, com o fio parado
+/// antes de parar as gravações (`energia::Segura`): a ação continua a
+/// caminho, como na janela, e o que se pede não depende do relógio. Sem
+/// o gancho, o fio não para ali, e o caso o diz.
 pub(super) fn aviso_o_desligamento_avisa_o_fim() -> Resultado {
     com_os_avisos(|| {
         let (_, bia) = pessoa("bia", 422);
@@ -2002,14 +2007,20 @@ pub(super) fn aviso_o_desligamento_avisa_o_fim() -> Resultado {
             }
             let desde = crate::log::total_emitidos();
             let _ = crate::energia::executada_de_teste();
+            let segura = crate::energia::Segura::de_teste();
             let r = fs_pedir(sistema_aqui(), "system.reboot", "{}");
             if fs_texto(&r, "state").as_deref() != Some("rebooting") {
                 crate::log_error!("teste", "{}", r);
                 return Err("o reinicio nao foi pedido");
             }
+            // O meio segundo passou, e o fio está parado antes de parar as
+            // gravações: a ação continua a caminho.
+            esperar_ate(crate::energia::parado_na_suite_de_teste, 600)
+                .map_err(|_| "o fio da energia nao ficou parado depois da espera")?;
             let designacoes = crate::aviso::designacoes_de_teste(a.fio());
             let abrir_agora = abrir_avisando(&a, &b.endpoint);
             let aceitar_agora = aceitar_avisando(&b);
+            drop(segura);
             let entregue = energia_entregue();
             for r in [&abrir_agora, &aceitar_agora] {
                 if desfecho_na_malha(r) != "CONFLICT" {
