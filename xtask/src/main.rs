@@ -3675,9 +3675,10 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "interpretador::desistir_da_edicao_da_arvore(",
         &["kernel/src/ui.rs"],
     ),
+    ("interpretador::edicao_nao_entregue(", &["kernel/src/ui.rs"]),
     (
         "coordenacao::soltar_o_da_edicao_recusada(",
-        &["kernel/src/interpretador.rs"],
+        &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
     ),
     // Quebrar o arrendamento de outro só pela operação administrativa,
     // com a prova.
@@ -4985,11 +4986,90 @@ fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// Os nomes que só aparecem nas fontes dos donos — sozinhos, como palavra
+/// inteira, em qualquer linha: a chamada, o `use` que a renomeia ou a traz
+/// sem o caminho, a chamada partida em duas linhas, o ponteiro de função.
+/// [`CHAMADAS_PROTEGIDAS`] procura a chamada com o caminho, e por texto
+/// aquilo se contorna (o achado 8 do adversário do passo 1); aqui, o nome
+/// em qualquer forma. Só nomes que não se repetem noutro módulo: o dono
+/// inclui o que os define.
+const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
+    // A soltura do arrendamento pela recusa de uma edição da árvore: só o
+    // console, que a recusa, e a interface, que a entrega — e o rastro que
+    // ela recebe só a coordenação constrói.
+    (
+        "soltar_o_da_edicao_recusada",
+        &[
+            "kernel/src/coordenacao.rs",
+            "kernel/src/interpretador.rs",
+            "kernel/src/ui.rs",
+        ],
+    ),
+    // As reservas das edições da árvore: só a interface e o console.
+    (
+        "reservar_edicao_da_arvore",
+        &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
+    ),
+    (
+        "anotar_a_edicao_da_arvore",
+        &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
+    ),
+    (
+        "desistir_da_edicao_da_arvore",
+        &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
+    ),
+    (
+        "edicao_nao_entregue",
+        &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
+    ),
+];
+
+/// Se `linha` tem `nome` como palavra inteira: nem letra, nem dígito, nem
+/// `_` antes ou depois.
+fn tem_a_palavra(linha: &str, nome: &str) -> bool {
+    let de_nome = |c: char| c.is_alphanumeric() || c == '_';
+    linha.match_indices(nome).any(|(i, _)| {
+        !linha[..i].chars().next_back().is_some_and(de_nome)
+            && !linha[i + nome.len()..].chars().next().is_some_and(de_nome)
+    })
+}
+
+#[cfg(test)]
+mod testes_dos_nomes_protegidos {
+    use super::tem_a_palavra;
+
+    /// As formas que a conferência por texto da chamada com o caminho não
+    /// via (o achado 8 do adversário do passo 1), e as que não são o nome.
+    #[test]
+    fn o_nome_sozinho_em_qualquer_forma() {
+        let nome = "soltar_o_da_edicao_recusada";
+        for linha in [
+            "use crate::coordenacao::soltar_o_da_edicao_recusada as s;",
+            "use crate::coordenacao::{recurso, soltar_o_da_edicao_recusada};",
+            "    soltar_o_da_edicao_recusada(&r, &x, m);",
+            // A chamada partida em duas linhas: a segunda.
+            "        soltar_o_da_edicao_recusada(",
+            "let f = crate::coordenacao::soltar_o_da_edicao_recusada;",
+        ] {
+            assert!(tem_a_palavra(linha, nome), "{linha}");
+        }
+        for linha in [
+            "fn soltar_o_da_edicao_recusada_de_teste() {}",
+            "x_soltar_o_da_edicao_recusada(1)",
+            "soltar_o_da_edicao",
+        ] {
+            assert!(!tem_a_palavra(linha, nome), "{linha}");
+        }
+    }
+}
+
 fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     let raiz = raiz_do_projeto();
     let fonte = raiz.join("kernel/src");
     let mut fora: Vec<String> = Vec::new();
     let mut achadas = vec![0usize; CHAMADAS_PROTEGIDAS.len()];
+    let mut nomes_achados: Vec<std::collections::BTreeSet<String>> =
+        vec![std::collections::BTreeSet::new(); NOMES_PROTEGIDOS.len()];
     percorrer_fontes(&fonte, &mut |caminho| {
         let relativo = caminho
             .strip_prefix(&raiz)
@@ -5012,9 +5092,32 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
                     fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
                 }
             }
+            // Um comentário não chama nada: a menção na documentação fica.
+            let comentario = linha.trim_start().starts_with("//");
+            for (i, (nome, donos)) in NOMES_PROTEGIDOS.iter().enumerate() {
+                if comentario || !tem_a_palavra(linha, nome) {
+                    continue;
+                }
+                if donos.contains(&relativo.as_str()) {
+                    nomes_achados[i].insert(relativo.clone());
+                } else {
+                    fora.push(format!(
+                        "{relativo}:{}: `{nome}` fora de {donos:?}: {}",
+                        n + 1,
+                        linha.trim()
+                    ));
+                }
+            }
         }
         Ok(())
     })?;
+    for ((nome, donos), achados) in NOMES_PROTEGIDOS.iter().zip(&nomes_achados) {
+        if achados.len() < donos.len() {
+            fora.push(format!(
+                "`{nome}` não aparece em todos de {donos:?}: a conferência está cega"
+            ));
+        }
+    }
     // A compilação com os pontos de queda é só da bancada: a feature não
     // aparece em nenhum outro lugar do `xtask`, e nenhuma outra compilação
     // a pede.

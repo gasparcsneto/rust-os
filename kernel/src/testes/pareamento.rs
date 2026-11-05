@@ -4804,10 +4804,17 @@ pub(super) fn pareamento_a_edicao_que_corre_com_o_enter_do_aceitar() -> Resultad
                 return Err("a edicao do agente entrou na linha da cerimonia");
             }
             let soltos = super::registros_depois(seq, |e| {
-                e.metodo == "ui.release"
+                e.metodo == "lease.invalidate"
                     && e.recurso == recurso
                     && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
             });
+            if !super::registros_depois(seq, |e| {
+                e.metodo == "ui.release" && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+            })
+            .is_empty()
+            {
+                return Err("a soltura pela recusa foi gravada como um ui.release do agente");
+            }
             if crate::coordenacao::estado(recurso).arrendamento.is_some() || soltos.len() != 1 {
                 return Err("a edicao recusada na linha da cerimonia nao soltou o arrendamento");
             }
@@ -4894,6 +4901,7 @@ pub(super) fn pareamento_a_edicao_recusada_na_cerimonia_fica_recusada() -> Resul
             CAMPO,
             Origem::Agente(crate::agent::sessao::SERIAL),
             Acao::DefinirValor,
+            None,
         )?;
         let rastro = crate::coordenacao::editar_com_rastro(&recurso, Some(serial), None, "ui.act")
             .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;

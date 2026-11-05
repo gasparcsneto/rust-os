@@ -390,6 +390,24 @@ pub fn enfileirar_valor(camada: u32, id: i64, texto: &str) -> Result<Destino, &'
     })
 }
 
+/// Se um texto de campo para a janela da `camada` caberia agora na fila
+/// dela: a janela de pé, e menos de [`MAIS_VALORES`] esperando. Não guarda
+/// nada — para quem confere antes de mudar alguma coisa, como a interface
+/// antes da conta da coordenação.
+pub fn caberia_um_valor(camada: u32) -> Result<(), &'static str> {
+    com_vagas(|vagas| {
+        let v = vagas
+            .iter()
+            .flatten()
+            .find(|v| v.camada.id() == camada)
+            .ok_or("a janela do campo fechou")?;
+        if v.valores.len() == MAIS_VALORES {
+            return Err("o dono da janela nao tirou os valores anteriores");
+        }
+        Ok(())
+    })
+}
+
 /// Desiste do último texto guardado para a janela da `camada`: o aviso dele
 /// não chegou ao processo, e um texto sem aviso ficaria na frente do texto
 /// do próximo.
@@ -472,6 +490,15 @@ pub fn publicar_para(
     match destino.entrada {
         Some(canal) => crate::eventos::publicar_em(canal, evento),
         None => crate::eventos::publicar(protocolo::usuario::evento::CANAL_DAS_JANELAS, evento),
+    }
+}
+
+/// Se um evento publicado agora para `destino` entraria — ver
+/// [`crate::eventos::caberia_em`]. Não publica nada.
+pub fn caberia_para(destino: Destino) -> Result<(), crate::eventos::NaoPublicado> {
+    match destino.entrada {
+        Some(canal) => crate::eventos::caberia_em(canal),
+        None => crate::eventos::caberia(protocolo::usuario::evento::CANAL_DAS_JANELAS),
     }
 }
 

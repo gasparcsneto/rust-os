@@ -307,9 +307,18 @@ struct EdicaoPedida {
     campo: u32,
     origem: Origem,
     acao: crate::ui::Acao,
+    /// O agente que pediu, amarrado à conexão e à chave que o gate decidiu —
+    /// como o Enter dele ([`pedir_enter_do_agente`]): conferido de novo
+    /// quando o console consome a edição, e a de quem já não vale é
+    /// descartada. `None` para a pessoa.
+    amarrada: Option<Amarrada>,
     /// O que a conta da coordenação fez no campo — anotado depois dela;
     /// `None` até lá.
     rastro: Option<crate::coordenacao::Rastro>,
+    /// Recusada antes de chegar: a linha passou a pedir a pessoa com ela a
+    /// caminho — ver [`recusar_as_edicoes_a_caminho`]. O que chegar marcado
+    /// dela é descartado.
+    recusada: bool,
 }
 
 /// O que o console está consumindo da árvore — ver [`pela_arvore`].
@@ -1302,7 +1311,44 @@ pub fn sessao_do_console(console: Console) -> Option<IdSessao> {
 /// lá. E a linha que pede o nome ou a senha não se edita por aqui: o login é
 /// de quem está no teclado.
 pub fn definir(valor: &str) -> Result<(), &'static str> {
-    definir_em(Console::Fisico, valor)
+    definir_pela_arvore_em(Console::Fisico, valor)
+}
+
+/// [`definir_em`], pela árvore: a regra da linha da pessoa conferida de
+/// novo na seção que edita — nem escrever, nem esvaziar, nem a linha que
+/// engole. Quem chama a conferiu antes ([`pode_definir`]) e contou a edição
+/// na coordenação; entre as duas, a linha poderia ter mudado — fechado por
+/// construção: o `ui.act` do físico roda no executor que consome as teclas,
+/// e a corrida não se alcança.
+fn definir_pela_arvore_em(console: Console, valor: &str) -> Result<(), &'static str> {
+    let (aberto, inicio) =
+        com_estado(console, |e| (e.aberto, e.inicio)).ok_or("console desconhecido")?;
+    if !aberto || (console == Console::Fisico && inicio.is_none()) {
+        return Err("a linha de comando nao esta atendendo");
+    }
+    if valor.len() > LINHA_MAX {
+        return Err("o valor nao cabe na linha de comando");
+    }
+    if !valor.chars().all(aceito) {
+        return Err(CARACTERE_QUE_NAO_SE_DIGITA);
+    }
+    com_estado(console, |e| {
+        if pede_a_pessoa_em(e) {
+            return Err(LINHA_DA_PESSOA);
+        }
+        while e.tam > 0 {
+            apagar_em(console, e);
+        }
+        for c in valor.chars() {
+            digitar_em(console, e, c);
+        }
+        Ok(())
+    })
+    .ok_or("console desconhecido")??;
+    if console == Console::Fisico {
+        crate::ui::mudou();
+    }
+    Ok(())
 }
 
 /// A recusa de quem edita, pela árvore, a linha que pede o nome ou uma
@@ -1550,12 +1596,28 @@ static EDICOES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// própria, a marca de quem tem o pseudo-terminal toma, no máximo, a
 /// reserva de uma edição que a interface entregou a ele — a que ele mesmo
 /// digitaria. Sem reserva, a marca não solta nada.
+///
+/// A edição de um agente é amarrada à conexão de onde ele pediu e à chave
+/// que o gate decidiu — `chave` —, como o Enter dele: quem já não está nela
+/// é recusado aqui, antes da conta, e a edição de quem saiu depois é
+/// descartada quando o console a consome (o achado 7 do adversário do
+/// passo 1).
 pub fn reservar_edicao_da_arvore(
     console: Console,
     campo: u32,
     origem: Origem,
     acao: crate::ui::Acao,
+    chave: Option<[u8; 32]>,
 ) -> Result<u64, &'static str> {
+    // Fora da trava do estado, que não toma a das sessões.
+    let amarrada = match origem {
+        Origem::Agente(sessao) => Some(
+            Amarrada::agora(sessao)
+                .filter(|a| a.chave() == chave)
+                .ok_or(AGENTE_FORA_DA_SESSAO)?,
+        ),
+        Origem::Pessoa => None,
+    };
     let numero = EDICOES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     com_estado(console, |e| {
         let vaga = e
@@ -1568,7 +1630,9 @@ pub fn reservar_edicao_da_arvore(
             campo,
             origem,
             acao,
+            amarrada,
             rastro: None,
+            recusada: false,
         });
         Ok(numero)
     })
@@ -1577,21 +1641,43 @@ pub fn reservar_edicao_da_arvore(
 
 /// Anota na reserva `numero` o que a conta da coordenação fez no campo —
 /// ver [`crate::coordenacao::Rastro`]. Uma reserva que o console já tomou,
-/// ou que se foi com ele, fica como está.
+/// ou que se foi com ele, fica como está. A que a linha recusou com ela a
+/// caminho, antes de a conta ser anotada — a virada noutro núcleo, entre a
+/// conferência da entrada e a conta —, solta aqui o que tomou, pela regra
+/// de [`recusar_as_edicoes_a_caminho`].
 pub fn anotar_a_edicao_da_arvore(
     console: Console,
     numero: u64,
     rastro: crate::coordenacao::Rastro,
 ) {
-    com_estado(console, |e| {
-        if let Some(p) = e.edicoes.iter_mut().flatten().find(|p| p.numero == numero) {
-            p.rastro = Some(rastro);
+    let soltar = com_estado(console, |e| {
+        let p = e
+            .edicoes
+            .iter_mut()
+            .flatten()
+            .find(|p| p.numero == numero)?;
+        p.rastro = Some(rastro);
+        if !p.recusada {
+            return None;
         }
-    });
+        let campo = p.campo;
+        let continua = rastro.tomou() || e.recusadas == Some(rastro.antes());
+        e.recusadas = continua.then(|| rastro.depois());
+        continua.then_some((campo, rastro))
+    })
+    .flatten();
+    if let Some((campo, rastro)) = soltar {
+        soltar_o_que_ela_deixou(
+            console,
+            campo,
+            &rastro,
+            crate::coordenacao::PorQueSolta::LinhaDaPessoa,
+        );
+    }
 }
 
-/// Desfaz um [`reservar_edicao_da_arvore`]: a edição não chegou ao
-/// programa — a conta da coordenação a recusou, ou o aviso não foi entregue.
+/// Desfaz um [`reservar_edicao_da_arvore`] antes da conta: a coordenação
+/// recusou a edição, e ela não mudou nada no campo.
 pub fn desistir_da_edicao_da_arvore(console: Console, numero: u64) {
     com_estado(console, |e| {
         for v in e.edicoes.iter_mut() {
@@ -1600,6 +1686,142 @@ pub fn desistir_da_edicao_da_arvore(console: Console, numero: u64) {
             }
         }
     });
+}
+
+/// A edição `numero`, contada pela coordenação, não chegou ao programa — o
+/// aviso não foi entregue —: a reserva sai, e o que ela fez no campo não
+/// fica (o achado 1 do adversário do passo 1).
+///
+/// - Se ela tomou o arrendamento, ele sai já, se o campo ainda está
+///   exatamente como ela o deixou (`PorQueSolta::NaoChegou`).
+/// - Se só o renovou — o campo já era de quem pediu, por uma edição antes
+///   dela —, a sequência das recusadas não pode se quebrar nela: o console
+///   nunca vai consumi-la, e a edição seguinte não começaria onde a
+///   anterior deixou o campo. Então a renovação vai para a edição que ela
+///   continuou — a reserva a caminho que deixou o campo onde ela começou
+///   ([`crate::coordenacao::Rastro::seguida_de`]) —, ou para a sequência
+///   das já recusadas, se é dela que ela começou. Recusada a anterior, o
+///   arrendamento que a sequência tomou sai com o estado que esta deixou.
+pub fn edicao_nao_entregue(console: Console, numero: u64) {
+    let soltar = com_estado(console, |e| {
+        let i = e
+            .edicoes
+            .iter()
+            .position(|v| v.is_some_and(|p| p.numero == numero))?;
+        let p = e.edicoes[i].take()?;
+        let rastro = p.rastro?;
+        if rastro.tomou() {
+            return Some((p.campo, rastro));
+        }
+        let anterior = e
+            .edicoes
+            .iter_mut()
+            .flatten()
+            .filter(|q| {
+                !q.recusada
+                    && q.numero < numero
+                    && q.rastro.is_some_and(|r| r.depois() == rastro.antes())
+            })
+            .max_by_key(|q| q.numero);
+        match anterior {
+            Some(q) => q.rastro = q.rastro.and_then(|r| r.seguida_de(rastro)),
+            None if e.recusadas == Some(rastro.antes()) => e.recusadas = Some(rastro.depois()),
+            None => {}
+        }
+        None
+    })
+    .flatten();
+    if let Some((campo, rastro)) = soltar {
+        soltar_o_que_ela_deixou(
+            console,
+            campo,
+            &rastro,
+            crate::coordenacao::PorQueSolta::NaoChegou,
+        );
+    }
+}
+
+/// Solta o arrendamento que a edição do `rastro` deixou no `campo`, se ele
+/// ainda é exatamente o dela — ver
+/// [`crate::coordenacao::soltar_o_da_edicao_recusada`] —; solto, a sequência
+/// das recusadas do console acaba: não há o que a seguinte continue.
+fn soltar_o_que_ela_deixou(
+    console: Console,
+    campo: u32,
+    rastro: &crate::coordenacao::Rastro,
+    motivo: crate::coordenacao::PorQueSolta,
+) -> bool {
+    let solto = crate::coordenacao::soltar_o_da_edicao_recusada(
+        &crate::coordenacao::recurso(campo),
+        rastro,
+        motivo,
+    );
+    if solto {
+        com_estado(console, |e| e.recusadas = None);
+    }
+    solto
+}
+
+/// A linha de `console` passou a pedir a pessoa — o Enter do `login`, da
+/// `senha`, do `aceitar` ou do `parear`, o aviso da cerimônia, o começo do
+/// engolir. As edições da árvore a caminho — reservadas e ainda não
+/// consumidas — seriam recusadas quando chegassem, pela regra da linha da
+/// pessoa, e o arrendamento delas só sairia ali: a tecla da Pessoa, nesse
+/// meio-tempo, seria `CONFLICT`. São recusadas aqui, todas, na ordem (o
+/// achado 2 do adversário do passo 1): o arrendamento que a sequência delas
+/// tomou sai já, pela regra de sempre — o estado exato, e cada uma
+/// começando onde a anterior deixou o campo —, e o que chegar marcado delas
+/// depois é descartado, mesmo que a linha volte a pedir um comando. Uma
+/// linha no log por edição, como a recusa no consumo.
+///
+/// O que fica: a tecla da Pessoa entre a entrada da edição e o consumo do
+/// Enter, com a linha ainda pedindo um comando, coordenada na janela contra
+/// o arrendamento de quem editou — a coordenação no consumo, como a do
+/// físico, é uma mudança de desenho da família DT-1, pendente.
+fn recusar_as_edicoes_a_caminho(console: Console) {
+    let Some((recusadas, soltar)) = com_estado(console, |e| {
+        let mut ordem: alloc::vec::Vec<usize> = (0..EDICOES_PEDIDAS)
+            .filter(|&i| e.edicoes[i].is_some_and(|p| !p.recusada))
+            .collect();
+        ordem.sort_by_key(|&i| e.edicoes[i].map_or(u64::MAX, |p| p.numero));
+        let mut quem = alloc::vec::Vec::new();
+        let mut soltar = None;
+        for i in ordem {
+            let Some(p) = e.edicoes[i].as_mut() else {
+                continue;
+            };
+            p.recusada = true;
+            quem.push((p.origem, p.acao, p.campo));
+            // A sem a conta anotada solta quando a anotação chegar.
+            let Some(r) = p.rastro else {
+                continue;
+            };
+            let continua = r.tomou() || e.recusadas == Some(r.antes());
+            e.recusadas = continua.then(|| r.depois());
+            soltar = continua.then_some((p.campo, r));
+        }
+        (quem, soltar)
+    }) else {
+        return;
+    };
+    if let Some((campo, rastro)) = soltar {
+        soltar_o_que_ela_deixou(
+            console,
+            campo,
+            &rastro,
+            crate::coordenacao::PorQueSolta::LinhaDaPessoa,
+        );
+    }
+    for (origem, acao, campo) in recusadas {
+        crate::log_info!(
+            "ui",
+            "{}: {} no elemento {} recusado no console: {}",
+            origem,
+            acao.nome(),
+            campo,
+            LINHA_DA_PESSOA
+        );
+    }
 }
 
 /// Tira das reservas do console a mais velha — a da edição que o apagar
@@ -1622,12 +1844,14 @@ enum DaArvore {
     NaoCoube,
     /// Descartado: a edição já tinha sido recusada.
     Descartado,
-    /// Recusado agora, pela regra da linha da pessoa — a primeira recusa da
-    /// edição —: quem a pediu, o quê e em que campo, se ela tinha reserva; e
-    /// o estado do campo cujo arrendamento sai, se é o de edições recusadas.
+    /// Recusado agora — a primeira recusa da edição —, pela regra da linha
+    /// da pessoa ou porque quem a pediu saiu da sessão: quem a pediu, o quê
+    /// e em que campo, se ela tinha reserva; o rastro do arrendamento que
+    /// sai, se é o de edições recusadas; e o porquê.
     Recusado {
         quem: Option<(Origem, crate::ui::Acao, u32)>,
-        soltar: Option<politica::arrendamento::Estado>,
+        soltar: Option<crate::coordenacao::Rastro>,
+        motivo: crate::coordenacao::PorQueSolta,
     },
 }
 
@@ -1674,10 +1898,31 @@ enum DaArvore {
 /// console físico não há o que marcar: a árvore edita a linha dele direto,
 /// em [`definir`], e o que chegasse marcado é descartado.
 fn pela_arvore(console: Console, c: char) {
+    use crate::coordenacao::PorQueSolta;
     use protocolo::usuario::terminal::APAGAR_A_LINHA;
     if console == Console::Fisico {
         return;
     }
+    // O apagar marcado começa uma edição: a do agente que já não está na
+    // conexão de onde pediu, com a chave que o gate decidiu, é descartada —
+    // conferido aqui, fora da trava do estado, que não toma a das sessões,
+    // como o Enter do agente. A reserva que ele vai tomar é a mais velha, e
+    // só o executor as tira e põe.
+    let fora_da_sessao = if c == APAGAR_A_LINHA {
+        com_estado(console, |e| {
+            e.edicoes
+                .iter()
+                .flatten()
+                .min_by_key(|p| p.numero)
+                .filter(|p| !p.recusada)
+                .and_then(|p| p.amarrada.map(|a| (p.numero, a)))
+        })
+        .flatten()
+        .filter(|(_, a)| !a.vale())
+        .map(|(numero, _)| numero)
+    } else {
+        None
+    };
     let Some(feito) = com_estado(console, |e| {
         if c == APAGAR_A_LINHA || e.na_arvore.is_none() {
             let pedida = if c == APAGAR_A_LINHA {
@@ -1685,20 +1930,26 @@ fn pela_arvore(console: Console, c: char) {
             } else {
                 None
             };
+            // A recusada com ela a caminho: descartada, sem outra linha no
+            // log — a recusa já foi dita, e o arrendamento já saiu.
+            let ja_recusada = pedida.is_some_and(|p| p.recusada);
             e.na_arvore = Some(EmCurso {
                 pedida,
-                recusada: false,
+                recusada: ja_recusada,
             });
         }
-        let pede = pede_a_pessoa_em(e);
         let recusadas = e.recusadas;
+        let pede = pede_a_pessoa_em(e);
         let Some(em_curso) = e.na_arvore.as_mut() else {
             return DaArvore::Descartado;
         };
         if em_curso.recusada {
             return DaArvore::Descartado;
         }
-        if pede {
+        let saiu = em_curso
+            .pedida
+            .is_some_and(|p| Some(p.numero) == fora_da_sessao);
+        if pede || saiu {
             em_curso.recusada = true;
             let pedida = em_curso.pedida;
             // O arrendamento que sai: o que esta edição tomou, ou o de uma
@@ -1706,16 +1957,20 @@ fn pela_arvore(console: Console, c: char) {
             // anterior deixou o campo.
             let soltar = pedida
                 .and_then(|p| p.rastro)
-                .filter(|r| r.tomou() || recusadas == Some(r.antes))
-                .map(|r| r.depois);
+                .filter(|r| r.tomou() || recusadas == Some(r.antes()));
             // O que veio sem reserva não é edição de ninguém: não começa nem
             // corta a sequência.
             if pedida.is_some() {
-                e.recusadas = soltar;
+                e.recusadas = soltar.map(|r| r.depois());
             }
             return DaArvore::Recusado {
                 quem: pedida.map(|p| (p.origem, p.acao, p.campo)),
                 soltar,
+                motivo: if pede {
+                    PorQueSolta::LinhaDaPessoa
+                } else {
+                    PorQueSolta::ForaDaSessao
+                },
             };
         }
         if c == APAGAR_A_LINHA {
@@ -1732,19 +1987,13 @@ fn pela_arvore(console: Console, c: char) {
         return;
     };
     match feito {
-        DaArvore::Recusado { quem, soltar } => {
-            let solto = match (quem, soltar) {
-                (Some((_, _, campo)), Some(depois)) => {
-                    crate::coordenacao::soltar_o_da_edicao_recusada(
-                        &crate::coordenacao::recurso(campo),
-                        depois,
-                    )
-                }
-                _ => false,
-            };
-            if solto {
-                // Solto, não há o que a seguinte continue.
-                com_estado(console, |e| e.recusadas = None);
+        DaArvore::Recusado {
+            quem,
+            soltar,
+            motivo,
+        } => {
+            if let (Some((_, _, campo)), Some(rastro)) = (quem, soltar) {
+                soltar_o_que_ela_deixou(console, campo, &rastro, motivo);
             }
             match quem {
                 // A recusa da linha, no formato da recusa na entrada (ver
@@ -1757,7 +2006,10 @@ fn pela_arvore(console: Console, c: char) {
                     origem,
                     acao.nome(),
                     campo,
-                    LINHA_DA_PESSOA
+                    match motivo {
+                        PorQueSolta::ForaDaSessao => AGENTE_FORA_DA_SESSAO,
+                        _ => LINHA_DA_PESSOA,
+                    }
                 ),
                 None => crate::log_warn!(
                     "console",
@@ -1839,7 +2091,20 @@ pub fn confirmar(origem: Origem) -> alloc::string::String {
     confirmar_em(Console::Fisico, origem)
 }
 
+/// Confirma a linha de `console`, como o Enter de `origem` — e, se ela
+/// passou a pedir a pessoa com isso (o `login`, a `senha`, o `aceitar`, o
+/// `parear`), recusa as edições da árvore a caminho: ver
+/// [`recusar_as_edicoes_a_caminho`].
 fn confirmar_em(console: Console, origem: Origem) -> alloc::string::String {
+    let antes = pede_a_pessoa(console);
+    let nome = confirmar_a_linha(console, origem);
+    if !antes && pede_a_pessoa(console) {
+        recusar_as_edicoes_a_caminho(console);
+    }
+    nome
+}
+
+fn confirmar_a_linha(console: Console, origem: Origem) -> alloc::string::String {
     let Some((modo, engolindo)) = com_estado(console, |e| (e.modo, e.engolindo)) else {
         return alloc::string::String::new();
     };
@@ -2593,6 +2858,7 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
         if !e.aberto || e.abertura != abertura {
             return None;
         }
+        let pedia_a_pessoa = pede_a_pessoa_em(e);
         let parado = !e.executando;
         if parado {
             match console {
@@ -2637,12 +2903,18 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
                 redesenhar_em(console, e);
             }
         }
-        Some((comecou, e.engolindo, e.modo))
+        let virou = !pedia_a_pessoa && pede_a_pessoa_em(e);
+        Some((comecou, e.engolindo, e.modo, virou))
     })
     .flatten();
-    let Some((comecou, engolindo, modo)) = feito else {
+    let Some((comecou, engolindo, modo, virou)) = feito else {
         return;
     };
+    // A linha passou a pedir a pessoa — a cerimônia, o começo do engolir:
+    // as edições da árvore a caminho são recusadas agora.
+    if virou {
+        recusar_as_edicoes_a_caminho(console);
+    }
     // Conforme o modo em que a linha ficou — a da senha do login continua
     // pedindo a senha —, e ligado enquanto o console engole: as teclas que
     // chegam nesse meio-tempo são o resto de uma senha — também as da

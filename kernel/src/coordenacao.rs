@@ -325,13 +325,32 @@ pub fn editar(
 
 /// O que uma edição fez num recurso: o estado dele logo antes e logo depois
 /// dela, lidos na mesma seção da tabela que a fez — a versão e o
-/// arrendamento inteiro, com o desde, o vencimento e o prazo. É o que
-/// identifica o arrendamento que **ela** deixou: ver
+/// arrendamento inteiro, com o desde, o vencimento e o prazo —, e de que
+/// recurso. É o que identifica o arrendamento que **ela** deixou: ver
 /// [`soltar_o_da_edicao_recusada`].
+///
+/// Os campos são privados, e só [`editar_com_rastro`] o constrói — e
+/// [`Rastro::seguida_de`], de dois que ela construiu: quem solta um
+/// arrendamento pela recusa de uma edição não escolhe o estado a soltar, e
+/// o estado de agora, lido por fora, não solta nada (o achado 8 do
+/// adversário do passo 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rastro {
-    pub antes: Estado,
-    pub depois: Estado,
+    /// O resumo do nome do recurso — o rastro de um não solta o de outro.
+    recurso: u64,
+    antes: Estado,
+    depois: Estado,
+}
+
+/// O FNV-1a de 64 bits do nome de um recurso, para o [`Rastro`] dizer de
+/// qual ele é sem guardar o nome.
+fn resumo_do_recurso(recurso: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in recurso.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 impl Rastro {
@@ -339,6 +358,30 @@ impl Rastro {
     /// de quem editou — o implícito.
     pub fn tomou(&self) -> bool {
         self.antes.arrendamento.is_none() && self.depois.arrendamento.is_some()
+    }
+
+    /// O estado do recurso logo antes da edição.
+    pub fn antes(&self) -> Estado {
+        self.antes
+    }
+
+    /// O estado do recurso logo depois da edição — o que ela deixou.
+    pub fn depois(&self) -> Estado {
+        self.depois
+    }
+
+    /// As duas edições juntas: `self`, e `depois`, que começou exatamente
+    /// onde `self` deixou o recurso — o antes de uma e o depois da outra.
+    /// `None` se `depois` não começou ali, ou é de outro recurso. É a edição
+    /// que só renovou o arrendamento e não chegou ao programa, somada à que
+    /// ela continuou: a sequência das recusadas atravessa a que o console
+    /// nunca vai consumir — ver `interpretador::edicao_nao_entregue`.
+    pub fn seguida_de(self, depois: Rastro) -> Option<Rastro> {
+        (self.recurso == depois.recurso && self.depois == depois.antes).then_some(Rastro {
+            recurso: self.recurso,
+            antes: self.antes,
+            depois: depois.depois,
+        })
     }
 }
 
@@ -366,6 +409,7 @@ pub fn editar_com_rastro(
             return Err(Codigo::Conflict);
         }
         return Ok(Rastro {
+            recurso: resumo_do_recurso(recurso),
             antes: estado,
             depois: estado,
         });
@@ -388,6 +432,7 @@ pub fn editar_com_rastro(
             let _ = t.soltar(recurso, titular, agora);
         }
         let r = r.map(|_| Rastro {
+            recurso: resumo_do_recurso(recurso),
             antes,
             depois: t.estado(recurso, agora),
         });
@@ -421,27 +466,72 @@ pub fn editar_com_rastro(
 }
 
 /// O detalhe do arrendamento que [`soltar_o_da_edicao_recusada`] solta, na
-/// auditoria.
+/// auditoria, quando o console recusou a edição pela regra da linha da
+/// pessoa.
 pub const SOLTO_PELA_RECUSA: &str =
     "arrendamento implicito solto: a edicao pela arvore foi recusada na linha da pessoa";
 
+/// O detalhe, quando a edição contada não chegou à linha — o programa não a
+/// recebeu, ou a linha do físico mudou entre a conferência e a edição.
+pub const SOLTO_SEM_ENTREGA: &str =
+    "arrendamento implicito solto: a edicao pela arvore nao chegou a linha";
+
+/// O detalhe, quando quem pediu a edição já não estava na sessão de onde
+/// pediu quando o console a consumiu.
+pub const SOLTO_FORA_DA_SESSAO: &str =
+    "arrendamento implicito solto: quem pediu a edicao pela arvore saiu da sessao";
+
+/// Por que a edição que tomou o arrendamento não ficou — o detalhe da
+/// soltura, na auditoria.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PorQueSolta {
+    /// O console a recusou pela regra da linha da pessoa:
+    /// [`SOLTO_PELA_RECUSA`].
+    LinhaDaPessoa,
+    /// Contada, ela não chegou à linha: [`SOLTO_SEM_ENTREGA`].
+    NaoChegou,
+    /// Quem a pediu saiu da sessão antes de o console a consumir:
+    /// [`SOLTO_FORA_DA_SESSAO`].
+    ForaDaSessao,
+}
+
+impl PorQueSolta {
+    pub const fn detalhe(self) -> &'static str {
+        match self {
+            PorQueSolta::LinhaDaPessoa => SOLTO_PELA_RECUSA,
+            PorQueSolta::NaoChegou => SOLTO_SEM_ENTREGA,
+            PorQueSolta::ForaDaSessao => SOLTO_FORA_DA_SESSAO,
+        }
+    }
+}
+
 /// Solta o arrendamento que uma edição recusada deixou — a do campo de um
 /// Terminal que o console dele recusou, pela regra da linha da pessoa,
-/// quando a consumiu: ver `crate::interpretador` —, se o recurso ainda está
-/// **exatamente** como ela o deixou: `depois`, o estado lido na seção da
-/// tabela que a fez — o mesmo titular, desde o mesmo instante, com o mesmo
-/// vencimento e o mesmo prazo, e na mesma versão.
+/// quando a consumiu, ou quando a linha passou a pedir a pessoa com ela a
+/// caminho; a de quem saiu da sessão; a que não chegou ao programa ou à
+/// linha: ver `crate::interpretador` e `crate::ui` —, se o recurso ainda
+/// está **exatamente** como ela o deixou: o depois do `rastro`, lido na
+/// seção da tabela que a fez — o mesmo titular, desde o mesmo instante, com
+/// o mesmo vencimento e o mesmo prazo, e na mesma versão.
 ///
 /// Qualquer coisa depois dela muda um desses: outra edição, a versão; um
 /// `ui.claim` do mesmo titular, o vencimento e o prazo; o arrendamento
 /// solto e tomado de novo, o desde; o de outro titular, o titular. E aí
 /// nada se solta: o arrendamento que outra ação renovou não é mais só o
 /// dela, e soltar o de outro é preempção — que não há. Também não se solta
-/// o que venceu: o coletor o grava, como sempre.
+/// o que venceu: o coletor o grava, como sempre. O rastro é o que
+/// [`editar_com_rastro`] devolveu, e de `recurso`: o estado não se escolhe.
 ///
-/// Grava em nome de quem o tinha, como o arrendamento implícito da edição
-/// foi gravado ao ser tomado — [`SOLTO_PELA_RECUSA`]. Devolve se soltou.
-pub fn soltar_o_da_edicao_recusada(recurso: &str, depois: Estado) -> bool {
+/// Grava como o kernel grava o arrendamento que sai sem pedido do titular —
+/// `lease.invalidate`, como a sessão que acabou e a revogação, em nome de
+/// quem o tinha —, com o motivo no detalhe ([`PorQueSolta::detalhe`]): não
+/// é o `ui.release` que o titular não pediu (o achado 5 do adversário do
+/// passo 1). Devolve se soltou.
+pub fn soltar_o_da_edicao_recusada(recurso: &str, rastro: &Rastro, motivo: PorQueSolta) -> bool {
+    if rastro.recurso != resumo_do_recurso(recurso) {
+        return false;
+    }
+    let depois = rastro.depois;
     let Some(deixado) = depois.arrendamento else {
         return false;
     };
@@ -459,10 +549,10 @@ pub fn soltar_o_da_edicao_recusada(recurso: &str, depois: Estado) -> bool {
     };
     gravar(
         Some(&a.titular),
-        "ui.release",
+        "lease.invalidate",
         recurso,
         Codigo::Allow,
-        SOLTO_PELA_RECUSA,
+        motivo.detalhe(),
     );
     true
 }

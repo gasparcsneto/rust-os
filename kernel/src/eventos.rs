@@ -390,6 +390,44 @@ pub fn publicar_em(chave: Chave, evento: Evento) -> Result<(), NaoPublicado> {
     })
 }
 
+/// Se um evento publicado agora no canal `nome` entraria: há quem escute, e
+/// a fila tem lugar. Não publica nem conta nada — para quem precisa recusar
+/// antes de mudar alguma coisa, como a interface antes da conta da
+/// coordenação. A resposta vale para o instante.
+pub fn caberia(nome: &str) -> Result<(), NaoPublicado> {
+    com_canais(|canais| {
+        let canal = canais
+            .iter_mut()
+            .find(|c| c.chama(nome.as_bytes()))
+            .ok_or(NaoPublicado::SemOuvinte)?;
+        recuperar_se_orfao(canal, ainda_vive);
+        caberia_no(canal)
+    })
+}
+
+/// [`caberia`], pelo canal da `chave`.
+pub fn caberia_em(chave: Chave) -> Result<(), NaoPublicado> {
+    com_canais(|canais| {
+        let canal = canais
+            .get_mut(chave.vaga)
+            .filter(|c| c.e_da(chave))
+            .ok_or(NaoPublicado::SemOuvinte)?;
+        recuperar_se_orfao(canal, ainda_vive);
+        caberia_no(canal)
+    })
+}
+
+/// A conferência de [`entregar`], sem entregar.
+fn caberia_no(canal: &Canal) -> Result<(), NaoPublicado> {
+    if !canal.aberto() {
+        return Err(NaoPublicado::SemOuvinte);
+    }
+    if canal.quantos == CAPACIDADE {
+        return Err(NaoPublicado::Cheio);
+    }
+    Ok(())
+}
+
 /// Como foi publicado um evento por [`publicar_em_juntando`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Publicado {

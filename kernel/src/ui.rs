@@ -534,7 +534,8 @@ fn executar(
     // [`crate::coordenacao`].
     let recurso = crate::coordenacao::recurso(id);
     let editar = || {
-        crate::coordenacao::editar(&recurso, titular, esperada, "ui.act").map_err(da_coordenacao)
+        crate::coordenacao::editar_com_rastro(&recurso, titular, esperada, "ui.act")
+            .map_err(da_coordenacao)
     };
     let confirmar = || {
         crate::coordenacao::confirmar(&recurso, titular, esperada, "ui.act").map_err(da_coordenacao)
@@ -575,6 +576,15 @@ fn executar(
                 _ => crate::interpretador::pode_editar_pela_arvore(console)?,
             }
         }
+        // A entrega, antes da conta, como as reservas: a janela ainda de pé,
+        // a fila de valores dela com lugar para o texto de um `set_value`, e
+        // a fila de eventos do dono com quem escute e com lugar para o
+        // aviso. Sem isso, a conta arrendava o campo e fazia a versão
+        // crescer, e a entrega falhava depois — "uma ação recusada não
+        // arrenda o campo" (o achado 1 do adversário do passo 1). O que
+        // ainda falhar depois da conta — a janela que fecha noutro núcleo —
+        // tem o que fez no campo desfeito abaixo.
+        conferir_a_entrega(id, acao)?;
         // O Enter que o Terminal vai digitar por este `confirm` de um agente:
         // reservado no console, amarrado à conexão de quem pediu e à chave
         // que o gate decidiu — só ele vale, ver
@@ -602,43 +612,95 @@ fn executar(
         // Ver `interpretador::reservar_edicao_da_arvore`. Antes da conta,
         // como o Enter: as reservas cheias não arrendam o campo.
         let edicao = match (console, acao) {
-            (Some(console), Acao::DefinirValor | Acao::Cancelar) => Some((
-                console,
-                crate::interpretador::reservar_edicao_da_arvore(console, id, origem, acao)?,
-            )),
+            (Some(console), Acao::DefinirValor | Acao::Cancelar) => {
+                let chave = match titular {
+                    Some(politica::arrendamento::Titular::Agente { chave, .. }) => chave,
+                    _ => None,
+                };
+                Some((
+                    console,
+                    crate::interpretador::reservar_edicao_da_arvore(
+                        console, id, origem, acao, chave,
+                    )?,
+                ))
+            }
             _ => None,
         };
-        let r = match acao {
-            Acao::Confirmar => confirmar().map(|_| ()),
-            _ => crate::coordenacao::editar_com_rastro(&recurso, titular, esperada, "ui.act")
-                .map_err(da_coordenacao)
-                .map(|rastro| {
-                    if let Some((console, numero)) = edicao {
-                        crate::interpretador::anotar_a_edicao_da_arvore(console, numero, rastro);
-                    }
-                }),
+        let contada = match acao {
+            Acao::Confirmar => confirmar().map(|_| None),
+            _ => editar().map(Some),
+        };
+        let rastro = match contada {
+            Ok(rastro) => rastro,
+            // A coordenação recusou: nada mudou no campo.
+            Err(recusa) => {
+                if let Some((console, amarrada)) = enter {
+                    crate::interpretador::desistir_do_enter_do_agente(console, amarrada);
+                }
+                if let Some((console, numero)) = edicao {
+                    crate::interpretador::desistir_da_edicao_da_arvore(console, numero);
+                }
+                return Err(recusa);
+            }
+        };
+        if let (Some((console, numero)), Some(rastro)) = (edicao, rastro) {
+            crate::interpretador::anotar_a_edicao_da_arvore(console, numero, rastro);
         }
-        .and_then(|_| agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into));
-        if let (Err(_), Some((console, amarrada))) = (&r, enter) {
-            crate::interpretador::desistir_do_enter_do_agente(console, amarrada);
-        }
-        if let (Err(_), Some((console, numero))) = (&r, edicao) {
-            crate::interpretador::desistir_da_edicao_da_arvore(console, numero);
+        let r = agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into);
+        if r.is_err() {
+            if let Some((console, amarrada)) = enter {
+                crate::interpretador::desistir_do_enter_do_agente(console, amarrada);
+            }
+            // Contada, a edição não chegou ao programa: o arrendamento que
+            // ela tomou sai; o que só renovou, no Terminal, segue a
+            // sequência das recusadas — ver
+            // `interpretador::edicao_nao_entregue`.
+            match (edicao, rastro) {
+                (Some((console, numero)), _) => {
+                    crate::interpretador::edicao_nao_entregue(console, numero);
+                }
+                (None, Some(rastro)) if rastro.tomou() => {
+                    crate::coordenacao::soltar_o_da_edicao_recusada(
+                        &recurso,
+                        &rastro,
+                        crate::coordenacao::PorQueSolta::NaoChegou,
+                    );
+                }
+                _ => {}
+            }
         }
         return r;
     }
+    // A linha do físico: conferida, contada e editada. Se a edição não
+    // chega à linha depois da conta — a regra da linha da pessoa, conferida
+    // de novo na seção que edita —, o arrendamento que ela tomou sai.
+    let definir_contado = |valor: &str| -> Result<(), Recusada> {
+        crate::interpretador::pode_definir(valor)?;
+        let rastro = editar()?;
+        if let Err(motivo) = crate::interpretador::definir(valor) {
+            if rastro.tomou() {
+                crate::coordenacao::soltar_o_da_edicao_recusada(
+                    &recurso,
+                    &rastro,
+                    if motivo == crate::interpretador::LINHA_DA_PESSOA {
+                        crate::coordenacao::PorQueSolta::LinhaDaPessoa
+                    } else {
+                        crate::coordenacao::PorQueSolta::NaoChegou
+                    },
+                );
+            }
+            return Err(motivo.into());
+        }
+        Ok(())
+    };
     match acao {
         Acao::DefinirValor => {
             let valor = valor.ok_or("set_value precisa de `value`")?;
-            crate::interpretador::pode_definir(valor)?;
-            editar()?;
-            crate::interpretador::definir(valor)?;
+            definir_contado(valor)?;
             Ok(Efeito::ValorDefinido)
         }
         Acao::Cancelar => {
-            crate::interpretador::pode_definir("")?;
-            editar()?;
-            crate::interpretador::definir("")?;
+            definir_contado("")?;
             Ok(Efeito::Cancelado)
         }
         Acao::Confirmar => {
@@ -661,6 +723,23 @@ fn executar(
             Ok(Efeito::Pressionado)
         }
     }
+}
+
+/// A entrega de `acao` no campo `id` de uma janela daria certo agora: a
+/// janela de pé, a fila de valores dela com lugar — no `set_value` —, e a
+/// fila de eventos do dono com quem escute e com lugar. Conferida antes da
+/// conta da coordenação, com os motivos de [`agir_no_campo`].
+fn conferir_a_entrega(id: u32, acao: Acao) -> Result<(), &'static str> {
+    let (camada, _) = elemento_de(id).ok_or("o elemento nao e de uma janela")?;
+    if acao == Acao::DefinirValor {
+        crate::superficies::caberia_um_valor(camada)?;
+    }
+    let destino =
+        crate::superficies::destino_da_camada(camada).ok_or("a janela do elemento fechou")?;
+    crate::superficies::caberia_para(destino).map_err(|motivo| match motivo {
+        crate::eventos::NaoPublicado::SemOuvinte => "o dono da janela nao escuta o canal dela",
+        crate::eventos::NaoPublicado::Cheio => "a fila do dono da janela esta cheia",
+    })
 }
 
 /// O console cuja linha o campo `id` edita, se ele é o campo da janela de

@@ -7501,13 +7501,22 @@ fn edicao_que_corre_com_o_enter(
             return Err("a edicao recusada no console deixou o campo arrendado");
         }
         let soltos = registros_depois(seq, |e| {
-            e.metodo == "ui.release"
+            e.metodo == "lease.invalidate"
                 && e.recurso == recurso
                 && e.codigo == Codigo::Allow
                 && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
         });
         if soltos.len() != 1 || soltos[0].1.titular != politica::auditoria::Titular::Agente {
             return Err("o arrendamento solto pela recusa nao ficou gravado em nome do agente");
+        }
+        // Gravado como o kernel grava o arrendamento que sai sem pedido do
+        // titular, e não como um `ui.release` que o agente não pediu.
+        if !registros_depois(seq, |e| {
+            e.metodo == "ui.release" && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+        })
+        .is_empty()
+        {
+            return Err("a soltura pela recusa foi gravada como um ui.release do agente");
         }
         if no_log(marca, "", "intrusa") != 0 {
             return Err("o texto da edicao recusada foi ao log");
@@ -7628,6 +7637,7 @@ fn edicao_que_corre_com_o_enter(
         campo,
         crate::ui::Origem::Agente(crate::agent::sessao::SERIAL),
         crate::ui::Acao::Cancelar,
+        None,
     ) {
         reservadas.push(n);
         if reservadas.len() > 64 {
@@ -7771,8 +7781,11 @@ fn terminal_a_marca_sem_reserva() -> Resultado {
 /// - uma edição recusada solta o que tomou — na linha do nome, na da senha
 ///   do login (`login lia`) e na da senha atual da troca (`senha`), as
 ///   linhas da pessoa que a regra cobre, e nada entra nelas;
-/// - duas em voo, o `set_value` e o `cancel`, as duas recusadas: a primeira
-///   não solta — a segunda já o renovou —, e a segunda solta;
+/// - duas em voo, o `set_value` e o `cancel`: a linha passa a pedir o nome
+///   com as duas a caminho, e o console as recusa ali, no Enter — a
+///   primeira tomou o arrendamento, a segunda o renovou, e ele sai uma vez,
+///   com o estado que a segunda deixou —; o que chega marcado delas depois
+///   é descartado;
 /// - outro titular arrendou o campo depois da edição: o dele fica;
 /// - o mesmo titular o renovou depois por um `ui.claim`: fica — e a edição
 ///   seguinte, que começou do que o `ui.claim` deixou, também não o solta;
@@ -7803,6 +7816,7 @@ fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
             CAMPO_DA_MARCA,
             Origem::Agente(crate::agent::sessao::SERIAL),
             acao,
+            None,
         )?;
         match crate::coordenacao::editar_com_rastro(&recurso, Some(serial), None, "ui.act") {
             Ok(rastro) => {
@@ -7831,14 +7845,26 @@ fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
         }
         Ok(())
     };
+    // Os soltos pela recusa: gravados como o kernel grava o arrendamento que
+    // sai sem pedido do titular. A soltura gravada com o método do comando
+    // da serial — um `ui.release` que ela não pediu — estraga a conta de
+    // qualquer passo; o `ui.release` que o caso pede por ela tem o detalhe
+    // do comando, e não conta.
     let soltos = |seq: u64| {
         registros_depois(seq, |e| {
-            e.metodo == "ui.release"
-                && e.recurso == recurso
+            e.recurso == recurso
                 && e.codigo == Codigo::Allow
                 && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
         })
-        .len()
+        .iter()
+        .map(|(_, e)| {
+            if e.metodo == "lease.invalidate" {
+                1
+            } else {
+                100
+            }
+        })
+        .sum::<usize>()
     };
     let resultado = (|| -> Resultado {
         // Uma edição, recusada em cada linha da pessoa que a regra cobre — a
@@ -7875,18 +7901,21 @@ fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
             }
         }
 
-        // Duas em voo, as duas recusadas: a segunda solta.
+        // Duas em voo: recusadas as duas no Enter, e o arrendamento delas
+        // sai ali, uma vez.
         let seq = comecar();
         entra(Acao::DefinirValor)?;
         entra(Acao::Cancelar)?;
         o_enter()?;
-        digitar_marcado("\u{15}intrusa");
-        if do_campo().map(|a| a.titular) != Some(serial) || soltos(seq) != 0 {
-            return Err("a primeira de duas edicoes soltou o arrendamento que a segunda renovou");
+        if do_campo().is_some() || soltos(seq) != 1 {
+            return Err("as duas edicoes a caminho do Enter nao soltaram o arrendamento delas ali");
         }
+        digitar_marcado("\u{15}intrusa");
         digitar_marcado("\u{15}");
         if linha() != Some((Modo::Nome, 0)) || do_campo().is_some() || soltos(seq) != 1 {
-            return Err("a segunda de duas edicoes recusadas nao soltou o arrendamento delas");
+            return Err(
+                "o que chegou marcado das edicoes recusadas no Enter entrou, ou soltou de novo",
+            );
         }
 
         // Outro titular arrendou depois: o dele fica.
@@ -7954,6 +7983,7 @@ fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
                 CAMPO_DA_MARCA,
                 Origem::Agente(crate::agent::sessao::SERIAL),
                 Acao::Cancelar,
+                None,
             )
         };
         let mut cheias = 0;
