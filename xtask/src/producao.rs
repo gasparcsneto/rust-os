@@ -958,6 +958,14 @@ pub(crate) fn chave_nova(
             "`{nome}` ou o papel fora da regra (minúsculas, dígitos, `-`, `_`, `.`, até 32)"
         ));
     }
+    // O registro de editores — e o de atualização, no mesmo formato — não
+    // aceita o nome que a auditoria dá à chave que ele não tem: a linha não
+    // entraria na imagem.
+    if matches!(tipo, "editor" | "atualizacao") && nome == sigilo::registro::EDITOR_DESCONHECIDO {
+        return Err(format!(
+            "`{nome}` é o nome reservado ao editor que o registro não tem"
+        ));
+    }
     Ok(match (tipo, papel) {
         ("agente", Some(papel)) => {
             let privada = aleatorios()?;
@@ -1414,6 +1422,36 @@ mod testes {
     #[test]
     fn o_material_do_operador_passa() {
         assert!(operador_de_teste("valido", |_| {}).is_ok());
+    }
+
+    /// O editor com o nome que a auditoria dá à chave fora do registro —
+    /// `desconhecido` — é recusado: na chave nova, e no registro de
+    /// editores do operador, antes de a imagem ser montada. Um editor de
+    /// outro nome passa.
+    #[test]
+    fn o_editor_desconhecido_e_recusado() {
+        let nome = sigilo::registro::EDITOR_DESCONHECIDO;
+        for tipo in ["editor", "atualizacao"] {
+            let r = chave_nova(tipo, nome, None);
+            assert!(r.as_ref().is_err_and(|e| e.contains("reservado")), "{r:?}");
+        }
+        let linha = sigilo::registro::linha_de_editor(
+            &sigilo::codigo::publica_do_editor(&[0x41; 32]),
+            nome,
+        );
+        let r = operador_de_teste("editor-desconhecido", |dir| {
+            std::fs::write(dir.join(EDITORES), &linha).unwrap();
+        });
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains(EDITORES) && e.contains("reservado")),
+            "{r:?}"
+        );
+        let linha = chave_nova("editor", "fornecedor", None).unwrap().1;
+        let r = operador_de_teste("editor-fornecedor", |dir| {
+            std::fs::write(dir.join(EDITORES), &linha).unwrap();
+        });
+        assert!(r.is_ok(), "{r:?}");
     }
 
     #[test]

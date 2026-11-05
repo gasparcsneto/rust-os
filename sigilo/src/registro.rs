@@ -66,6 +66,8 @@ pub enum ErroDeLinha {
     Sobra,
     /// A chave de assinatura não é `ed25519:` com 64 dígitos hexadecimais.
     Assinatura,
+    /// O nome é o reservado — ver [`EDITOR_DESCONHECIDO`].
+    Reservado,
 }
 
 impl ErroDeLinha {
@@ -77,6 +79,7 @@ impl ErroDeLinha {
             ErroDeLinha::Papel => "papel fora da regra",
             ErroDeLinha::Sobra => "algo depois do papel",
             ErroDeLinha::Assinatura => "chave de assinatura que nao e ed25519 com 64 digitos",
+            ErroDeLinha::Reservado => "nome reservado ao editor que o registro nao tem",
         }
     }
 }
@@ -168,11 +171,21 @@ pub fn linha_de_administrador(
 /// editor sela, e o nome dele.
 pub type EntradaDeEditor<'a> = ([u8; TAM_CHAVE], &'a str);
 
+/// O nome com que a auditoria diz o editor de uma chave que o registro não
+/// tem — `<nome> <resumo> de desconhecido`, na descrição do programa. É
+/// reservado: nenhum editor do registro se chama assim, e
+/// [`ler_linha_de_editor`] recusa a linha que tenta. Sem isso, o editor
+/// registrado com esse nome não se distinguia, na auditoria, da chave que
+/// ninguém registrou. O formato da linha não muda; o registro de chaves de
+/// atualização, que é lido pelo mesmo leitor, também não tem esse nome.
+pub const EDITOR_DESCONHECIDO: &str = "desconhecido";
+
 /// Lê uma linha do registro de editores — `ed25519:<hex> <nome>` — ver
 /// [`crate::codigo`]. A chave tem o prefixo de sempre, e tem de servir de
 /// chave de editor: uma que não é ponto da curva, ou que é de ordem
 /// pequena, é recusada aqui, e não descoberta no primeiro selo que não
-/// confere.
+/// confere. O nome [`EDITOR_DESCONHECIDO`] é recusado:
+/// [`ErroDeLinha::Reservado`].
 pub fn ler_linha_de_editor(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, ErroDeLinha> {
     let linha = linha.trim();
     if linha.is_empty() || linha.starts_with('#') {
@@ -189,6 +202,9 @@ pub fn ler_linha_de_editor(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, E
         .next()
         .filter(|n| nome_valido(n))
         .ok_or(ErroDeLinha::Nome)?;
+    if nome == EDITOR_DESCONHECIDO {
+        return Err(ErroDeLinha::Reservado);
+    }
     if partes.next().is_some() {
         return Err(ErroDeLinha::Sobra);
     }
@@ -332,6 +348,26 @@ mod testes {
             ler_linha_de_editor(&alloc::format!("ed25519:{k} bancada sobra")),
             Err(ErroDeLinha::Sobra)
         );
+    }
+
+    /// O nome que a auditoria dá à chave fora do registro é reservado: a
+    /// linha que o usa é recusada, e um nome que só o contém não.
+    #[test]
+    fn o_editor_desconhecido_e_reservado() {
+        let chave = crate::codigo::publica_do_editor(&[0x41; 32]);
+        assert_eq!(
+            ler_linha_de_editor(&linha_de_editor(&chave, EDITOR_DESCONHECIDO)),
+            Err(ErroDeLinha::Reservado)
+        );
+        assert!(nome_valido(EDITOR_DESCONHECIDO));
+        assert!(!ErroDeLinha::Reservado.motivo().is_empty());
+        for parecido in ["desconhecido-1", "o-desconhecido", "desconhecid"] {
+            assert_eq!(
+                ler_linha_de_editor(&linha_de_editor(&chave, parecido)),
+                Ok(Some((chave, parecido))),
+                "{parecido}"
+            );
+        }
     }
 
     #[test]

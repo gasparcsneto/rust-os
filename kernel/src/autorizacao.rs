@@ -251,9 +251,12 @@ impl Programa {
                     resumo[2],
                     resumo[3]
                 );
+                // A chave que o registro não tem: o nome reservado, que
+                // nenhum editor do registro usa — ver
+                // `sigilo::registro::EDITOR_DESCONHECIDO`.
                 if let Some(chave) = editor {
                     let quem = crate::identidade::editor(chave)
-                        .unwrap_or_else(|| String::from("desconhecido"));
+                        .unwrap_or_else(|| String::from(sigilo::registro::EDITOR_DESCONHECIDO));
                     d.push_str(" de ");
                     d.push_str(&quem);
                 }
