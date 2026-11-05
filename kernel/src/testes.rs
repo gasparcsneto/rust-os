@@ -38392,6 +38392,10 @@ static CASOS: &[Caso] = &[
         f: nsf_ve_a_lacuna_da_auditoria,
     },
     Caso {
+        nome: "nsf: ve o codigo adulterado de quem tem descricao longa",
+        f: nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa,
+    },
+    Caso {
         nome: "firewall: so restringe, depois do gate",
         f: firewall_so_restringe_depois_do_gate,
     },
@@ -59780,6 +59784,143 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
             r.and(fim)
         })
     })
+}
+
+/// O achado F1: o `process.exec` de um código adulterado, pedido por um
+/// processo de descrição longa — um programa selado, com o maior nome e o
+/// maior editor que se aceitam, `pelo processo N (<nome> <resumo> de
+/// <editor>)` —, é recusado como sempre, e a execução da decisão guarda o
+/// motivo: acima do teto do detalhe, a descrição do programa encolhe antes
+/// dele — o nome sai, depois o editor —, e a citação fica inteira. O NSF vê
+/// o código adulterado, e não toma a descrição abreviada por outro programa
+/// do processo. O corte de antes levava o motivo, e o alerta não saía: quem
+/// quisesse evitá-lo só precisava de um nome longo.
+///
+/// O fio da suíte pede como o processo desse programa — pela mesma
+/// `autorizar_processo_com_decisao` do `executar` —, e grava a execução da
+/// decisão com o motivo do selo que não confere, pela mesma
+/// `auditar_execucao_do_processo` com que o `executar` a grava.
+fn nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa() -> Resultado {
+    use crate::autorizacao::Programa;
+    use politica::Codigo;
+    use politica::procedencia::Falta;
+    use seguranca::grafo::{Aresta, No};
+    use seguranca::regras::Regra;
+    const NOME: &str = "programa-com-o-maior-nome-aceito";
+    const EDITOR: ([u8; 32], &str) = ([0x5d; 32], "editor-com-o-maior-nome-aceito-1");
+    const _: () = assert!(NOME.len() == politica::manifesto::MAIOR_NOME);
+    const _: () = assert!(EDITOR.1.len() == sigilo::registro::MAIOR_NOME);
+    let chave = sigilo::codigo::publica_do_editor(&EDITOR.0);
+    let caminho = alloc::format!("{CODIGO_INSTALADO}/adulterado-de-descricao-longa");
+    let da_imagem = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+    let mut com_o_longo = da_imagem.clone();
+    com_o_longo.push(crate::identidade::Editor {
+        chave,
+        nome: EDITOR.1.into(),
+    });
+    crate::identidade::trocar_editores_de_teste(com_o_longo);
+    let confia = alloc::format!("editores sistema bancada {}", EDITOR.1);
+    let r = politica_trocada(&[("editores sistema bancada", &confia)]).and_then(|p| {
+        com_a_politica(p, || {
+            com_o_nsf(|| {
+                let programa = Programa::Imagem {
+                    manifesto: Some(manifesto_de_teste(NOME, "process.run")),
+                    resumo: [0xcd; 32],
+                    editor: Some(chave),
+                };
+                let fio = crate::fios::id_atual();
+                let pelo = alloc::format!("pelo processo {fio} ({})", programa.descricao());
+                let (codigo, decisao, execucao) =
+                    crate::fios::com_programa_de_teste(programa, || {
+                        let (codigo, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
+                            politica::Permissao::ProcessRun,
+                            &caminho,
+                            "process.exec",
+                        );
+                        let execucao = crate::autorizacao::auditar_execucao_do_processo(
+                            "process.exec",
+                            &caminho,
+                            Codigo::DenyPolicy,
+                            Falta::NaoConfere.motivo(),
+                            decisao,
+                        );
+                        (codigo, decisao, execucao)
+                    });
+                if codigo != Codigo::Allow {
+                    return Err("o gate nao deixou o processo de descricao longa executar");
+                }
+                // A decisão guarda a descrição como sempre — sem citação,
+                // nada encolhe —; a execução, a descrição toda encolhida, o
+                // motivo inteiro e a citação inteira.
+                let decidida = registro_numero(decisao).ok_or("a decisao saiu do anel")?;
+                let executada = registro_numero(execucao).ok_or("a execucao saiu do anel")?;
+                let esperado = alloc::format!(
+                    "pelo processo {fio} (? cdcdcdcd de ?): {}; decisao {decisao}",
+                    Falta::NaoConfere.motivo()
+                );
+                if !pelo.starts_with(&decidida.detalhe)
+                    || decidida.detalhe.len() < pelo.len().min(politica::auditoria::MAIOR_DETALHE)
+                {
+                    crate::log_error!("teste", "{} / {}", decidida.detalhe, pelo);
+                    return Err("a decisao do processo de descricao longa nao guardou a descricao");
+                }
+                if executada.detalhe != esperado || executada.codigo != Codigo::DenyPolicy {
+                    crate::log_error!("teste", "{} / {}", executada.detalhe, esperado);
+                    return Err(
+                        "a execucao do processo de descricao longa nao tem a descricao toda encolhida, o motivo e a citacao",
+                    );
+                }
+                // O NSF lê as duas, e o código adulterado é um incidente,
+                // de alerta, que ninguém contém.
+                let mut pedidos = 0;
+                for _ in 0..64 {
+                    pedidos += crate::seguranca::passo().pedidos;
+                    if crate::seguranca::com_motor_de_teste(|m| m.lido() >= execucao) == Some(true)
+                    {
+                        break;
+                    }
+                }
+                let viu = crate::seguranca::com_motor_de_teste(|m| {
+                    m.incidentes.todos().any(|i| {
+                        i.deteccoes.iter().any(|d| {
+                            d.regra == Regra::CodigoAdulterado
+                                && d.registros == [execucao]
+                                && d.explicacao.contains(&caminho)
+                        })
+                    })
+                });
+                if viu != Some(true) {
+                    return Err("o NSF nao viu o codigo adulterado de quem tem descricao longa");
+                }
+                if pedidos != 0 {
+                    return Err("o NSF pediu uma contencao pelo codigo adulterado");
+                }
+                // E o grafo do NSF não toma a descrição abreviada por outro
+                // programa do processo.
+                let abreviado = crate::seguranca::com_motor_de_teste(|m| {
+                    m.eventos()
+                        .find(|e| e.seq == execucao)
+                        .map(|e| No::Processo {
+                            epoca: e.epoca,
+                            fio,
+                        })
+                        .is_none_or(|no| {
+                            m.grafo.vizinhos(&no).iter().any(|(aresta, outro, _)| {
+                                *aresta == Aresta::Executa
+                                    && matches!(outro, No::Programa(p)
+                                        if politica::auditoria::descricao_abreviada(p))
+                            })
+                        })
+                });
+                if abreviado != Some(false) {
+                    return Err("o NSF tomou a descricao abreviada por outro programa");
+                }
+                Ok(())
+            })
+        })
+    });
+    crate::identidade::trocar_editores_de_teste(da_imagem);
+    r
 }
 
 /// A confiança, a contenção e o processo entre baixar e rodar — o que muda
