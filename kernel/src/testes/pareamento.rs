@@ -4957,7 +4957,10 @@ pub(super) fn pareamento_a_edicao_recusada_na_cerimonia_fica_recusada() -> Resul
 /// - na da senha (`login bia`), ela continua pedindo a senha, sem engolir —
 ///   antes, o console engolia a senha até o Enter, e o login se perdia —, e
 ///   o bit da senha continua ligado: a tecla do teclado da máquina não
-///   entra no histórico.
+///   entra no histórico;
+/// - e na da senha atual da troca (`senha`, com a Pessoa entrada), também:
+///   ela continua pedindo a senha atual, sem engolir, e a linha vazia
+///   desiste da troca.
 pub(super) fn pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login() -> Resultado {
     use crate::interpretador::{self as interp, Modo, NoMeio};
     /// A Pessoa, com o aviso a caminho: a linha vazia que desiste de
@@ -4972,6 +4975,11 @@ pub(super) fn pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login() -> Resulta
         super::digitar_no_console(CONSOLE, "\n");
         super::digitar_no_console(CONSOLE, "logout\n");
         super::digitar_no_console(CONSOLE, "login bia\n");
+    }
+    /// E, entrada, a troca da própria senha: a linha pede a senha atual.
+    fn desistir_e_trocar_a_senha() {
+        super::digitar_no_console(CONSOLE, "\n");
+        super::digitar_no_console(CONSOLE, "senha\n");
     }
     com_a_cerimonia(|| {
         crate::superficies::devolver_foco();
@@ -5044,7 +5052,30 @@ pub(super) fn pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login() -> Resulta
                 return Err("com a linha pedindo a senha, a tecla entrou no historico");
             }
             let _ = saida_de(CONSOLE);
-            entrar_de_novo()
+            entrar_de_novo()?;
+
+            // A linha da senha atual da troca.
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            interp::no_meio_de_teste(Some((NoMeio::DoAviso, desistir_e_trocar_a_senha)));
+            vencer_no_meio();
+            interp::no_meio_de_teste(None);
+            if interp::engolindo_de_teste(CONSOLE)
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::SenhaAtual, 0))
+            {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}, engolindo: {}",
+                    interp::linha_de_teste(CONSOLE),
+                    interp::engolindo_de_teste(CONSOLE)
+                );
+                return Err("o aviso atrasado da cerimonia mudou a linha da senha atual da troca");
+            }
+            super::digitar_no_console(CONSOLE, "\n");
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0)) {
+                return Err("a linha vazia nao desistiu da troca depois do aviso atrasado");
+            }
+            Ok(())
         })();
         interp::no_meio_de_teste(None);
         crate::teclado::esvaziar();
