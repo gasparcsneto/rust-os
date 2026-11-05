@@ -8419,7 +8419,11 @@ fn interface_o_definir_do_fisico_confere_a_linha_da_pessoa() -> Resultado {
         }
         Ok(())
     })();
-    crate::interpretador::abrir_console(Console::Fisico);
+    // O físico volta ao estado em que a suíte o deixa entre os casos: a
+    // pessoa de teste entrada, sem a linha atendendo — o caso seguinte do
+    // formulário digita pelo teclado da máquina, e sem ninguém entrado a
+    // tecla é recusada.
+    crate::interpretador::desativar_para_teste();
     resultado
 }
 
