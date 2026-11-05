@@ -5431,7 +5431,7 @@ e exige folga de um quarto: no perfil de depuração, 42 048 bytes dos
 ### O que a suíte, a fumaça e a bancada conferem
 
 A suíte tem três servidores de Roughtime dentro do kernel de teste, com
-chaves sorteadas a cada caso, e vinte casos `hora:` além dos oito `tempo:`
+chaves sorteadas a cada caso, e vinte e um casos `hora:` além dos oito `tempo:`
 do passo anterior: a régua e os três relógios; uma rodada honesta ponta a
 ponta pelo gate — a primeira sincronização, cada passo gravado como do
 serviço, o `system.info` sem nonce nem resposta —; cada resposta ruim como
@@ -5457,10 +5457,12 @@ sem `time.confirm`, a credencial revogada antes e no meio, a política sem
 muda outra coisa sem trocar a evidência —; os estados e a
 recuperação; a resposta atrasada na rede — com o fio da rodada fora do
 rodízio enquanto espera —; a revogação e a política no meio da rodada; o
-ponto de commit; a rodada na pilha de um fio; a concorrência; e nenhum
-caminho fora do gate. E um caso do escalonador, `fios: quem bloqueia sai do
-rodizio`: o fio bloqueado num prazo fica esperando, sem ser escalonado, até
-o tique; o waker o devolve; e o aviso que chega antes do sono não se perde.
+ponto de commit; a rodada na pilha de um fio; a concorrência; o retrato
+do `system.info` — a rodada contada com o civil dela, também com o leitor
+esperando a vez no ponto de commit —; e nenhum caminho fora do gate. E
+um caso do escalonador, `fios: quem bloqueia sai do rodizio`: o fio
+bloqueado num prazo fica esperando, sem ser escalonado, até o tique; o
+waker o devolve; e o aviso que chega antes do sono não se perde.
 E outro, `fios: quem volta do bloqueio volta rodando`: o fio da suíte, no
 núcleo sem ocioso, bloqueia duzentas vezes num futuro que fica pronto sem
 acordar ninguém, e volta de cada uma rodando — com os outros fios presos a
