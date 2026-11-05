@@ -4964,6 +4964,74 @@ pub(super) fn pareamento_a_edicao_recusada_na_cerimonia_fica_recusada() -> Resul
     })
 }
 
+/// O aviso dos códigos que leu o que a cerimônia pedia antes de ela acabar
+/// — o prazo vence entre a leitura e a trava do console
+/// (`interpretador::NoMeio::DoAvisoLido`), e o aviso do fim devolve a linha
+/// a um comando antes dele — não põe a linha numa cerimônia morta (o
+/// achado 6 do adversário do passo 1): o aviso leva o número da cerimônia,
+/// e o console, o da dele; o de outra só escreve. A linha continua pedindo
+/// um comando, e o comando seguinte da Pessoa executa como comando.
+///
+/// O fim é o prazo, e não a linha vazia da Pessoa: nesse meio-tempo a
+/// linha dela ainda é a da espera, e a cerimônia já pede o código — o
+/// Enter dela é um passo já respondido, e não desiste de nada.
+pub(super) fn pareamento_o_aviso_lido_antes_do_fim_nao_muda_a_linha() -> Resultado {
+    use crate::interpretador::{self as interp, Modo, NoMeio};
+    com_a_cerimonia(|| {
+        let r = (|| -> Resultado {
+            entrar(CONSOLE, "bia")?;
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_001_900, 1);
+            let (pk, w) = ini.pedir_a_chave()?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "o pedido da chave foi recusado com a janela aberta"
+            })?;
+            ini.apertar(&pk, &w)?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "a 1a mensagem foi recusada com a janela aberta"
+            })?;
+            no_estado(
+                (Lado::Aceita, Estado::Ocupada),
+                "a 1a mensagem nao ocupou a janela",
+            )?;
+            // O nonce põe os códigos à mostra, e o aviso deles lê a linha do
+            // código; o prazo vence antes de ele tomar a trava do console, e
+            // o aviso do fim passa na frente.
+            interp::no_meio_de_teste(Some((NoMeio::DoAvisoLido, vencer_no_meio)));
+            ini.mandar_o_nonce()?;
+            let _ = ini.ouvir();
+            super::esperar_ate(
+                || crate::pareamento::numero_do_console(CONSOLE).is_none(),
+                600,
+            )
+            .map_err(|_| "o prazo vencido no meio do aviso nao acabou a cerimonia")?;
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::Prazo),
+                "a cerimonia nao acabou pelo prazo vencido no meio do aviso",
+            )?;
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0)) {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o aviso lido antes do fim pos a linha numa cerimonia que acabou");
+            }
+            let _ = saida_de(CONSOLE);
+            super::digitar_no_console(CONSOLE, "agent.ping\n");
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0))
+                || !saida_de(CONSOLE).contains("pong")
+            {
+                return Err("o comando da pessoa depois do aviso atrasado nao executou");
+            }
+            Ok(())
+        })();
+        interp::no_meio_de_teste(None);
+        r
+    })
+}
+
 /// O aviso do fim da cerimônia sai de outro fio e pode chegar atrasado —
 /// a suíte o segura entre a cerimônia e a linha (`interpretador::NoMeio`) —:
 /// nesse meio-tempo a Pessoa desiste da linha que esperava, sai e começa o
