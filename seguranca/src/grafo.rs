@@ -248,21 +248,26 @@ impl Grafo {
     /// `politica::auditoria::detalhe_composto` —, e o resumo fica: é ele
     /// que diz qual programa é.
     ///
-    /// - Com o **mesmo resumo** do programa que o grafo conhece no
-    ///   processo, a abreviada é o mesmo programa: nada muda.
-    /// - Com **outro resumo**, é uma troca de verdade — o primeiro pedido,
-    ///   abreviado, do programa que o `executar` trouxe —: o processo passa
-    ///   a executar o programa da abreviada, como numa troca com a
-    ///   descrição inteira.
-    /// - A descrição **inteira** que chega depois, com o mesmo resumo da
-    ///   abreviada que o grafo guardou, é o mesmo programa, agora com o
-    ///   nome: o processo fica com ela, e não há outra troca — nem outra
-    ///   aresta.
+    /// - Do **mesmo programa** que o grafo conhece no processo — o mesmo
+    ///   resumo, a mesma forma do `de` (as duas com ele, o código de fora,
+    ///   ou as duas sem, o da imagem) e, quando as duas dizem o editor, o
+    ///   mesmo editor ([`o_mesmo_programa`]) —, a abreviada não muda nada.
+    /// - De **outro** — outro resumo; o código de fora no lugar do da
+    ///   imagem, ou o contrário; outro editor —, é uma troca de verdade — o
+    ///   primeiro pedido, abreviado, do programa que o `executar` trouxe —:
+    ///   o processo passa a executar o programa da abreviada, como numa
+    ///   troca com a descrição inteira. O resumo tem 32 bits: o código de
+    ///   fora com os quatro primeiros bytes do resumo de um programa da
+    ///   imagem não passa por ele — o `de` o separa —, nem um editor por
+    ///   outro (o achado 3 do adversário do passo 1).
+    /// - A descrição **inteira** que chega depois, do mesmo programa que a
+    ///   abreviada que o grafo guardou, é ele, agora com o nome: o processo
+    ///   fica com ela, e não há outra troca — nem outra aresta.
     ///
     /// De um processo que o grafo não conhece, a abreviada não diz nada que
     /// se compare: não vira nó.
     pub fn executa(&mut self, epoca: u32, fio: u64, programa: &str) {
-        use politica::auditoria::{descricao_abreviada, resumo_da_descricao};
+        use politica::auditoria::descricao_abreviada;
         let abreviada = descricao_abreviada(programa);
         let Some(p) = self.processos.get_mut(&(epoca, fio)) else {
             if !abreviada {
@@ -278,8 +283,7 @@ impl Grafo {
         if atual == Some(programa) {
             return;
         }
-        let resumo = resumo_da_descricao(programa);
-        let mesmo = resumo.is_some() && atual.and_then(resumo_da_descricao) == resumo;
+        let mesmo = atual.is_some_and(|a| o_mesmo_programa(a, programa));
         if mesmo && abreviada {
             return;
         }
@@ -382,6 +386,28 @@ impl Grafo {
     }
 }
 
+/// Se as descrições `a` e `b` — inteiras ou abreviadas, ver
+/// `politica::auditoria::detalhe_composto` — dizem o mesmo programa: o
+/// mesmo resumo; a mesma forma do `de`, as duas com ele — o código de fora
+/// — ou as duas sem — o da imagem —; e, quando as duas dizem o editor (não
+/// o [`politica::auditoria::OMITIDO`]), o mesmo editor. Sem resumo, nenhuma
+/// é a outra.
+pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
+    use politica::auditoria::{OMITIDO, editor_da_descricao, resumo_da_descricao};
+    let (Some(ra), Some(rb)) = (resumo_da_descricao(a), resumo_da_descricao(b)) else {
+        return false;
+    };
+    let (Some(ea), Some(eb)) = (editor_da_descricao(a), editor_da_descricao(b)) else {
+        return false;
+    };
+    ra == rb
+        && ea.is_some() == eb.is_some()
+        && match (ea, eb) {
+            (Some(x), Some(y)) if x != OMITIDO && y != OMITIDO => x == y,
+            _ => true,
+        }
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -436,11 +462,11 @@ mod testes {
         );
         g.executa(0, 7, "loja abcd1234 de duke-oficial");
         let arestas = g.arestas();
-        for abreviada in [
-            "? abcd1234 de duke-oficial",
-            "? abcd1234 de ?",
-            "? abcd1234",
-        ] {
+        // As abreviadas que o kernel compõe dela: o nome, e depois o
+        // editor, no lugar de `?` — o `de` fica. A `? abcd1234`, sem ele, é
+        // a de um código da imagem com o mesmo resumo: outro programa (ver
+        // `o_mesmo_resumo_com_outro_de_ou_outro_editor_e_uma_troca`).
+        for abreviada in ["? abcd1234 de duke-oficial", "? abcd1234 de ?"] {
             g.executa(0, 7, abreviada);
             // E de um processo que o grafo não conhece, também nada.
             g.executa(0, 8, abreviada);
@@ -454,6 +480,60 @@ mod testes {
         g.executa(0, 7, "outro 01020304");
         assert_eq!(programa(&g).as_deref(), Some("outro 01020304"));
         assert_eq!(g.arestas(), arestas + 1);
+    }
+
+    /// O achado 3 do adversário do passo 1: o resumo tem 32 bits, e o mesmo
+    /// resumo não basta para ser o mesmo programa. O código da imagem e o
+    /// de fora — com o `de` e sem ele — são outros programas, e dois
+    /// editores também: a abreviada de um deles depois do outro é uma
+    /// troca, com a aresta. O editor omitido (`?`) casa com qualquer um, e
+    /// o mesmo editor é o mesmo programa.
+    #[test]
+    fn o_mesmo_resumo_com_outro_de_ou_outro_editor_e_uma_troca() {
+        let novo = |g: &mut Grafo, fio: u64| {
+            assert!(g.nasceu(
+                0,
+                fio,
+                p(Criador::Principal("agent:aa".into()), Aresta::Lancou, fio),
+            ));
+        };
+        let programa = |g: &Grafo, fio: u64| g.processo(0, fio).and_then(|p| p.programa.clone());
+        let mut g = Grafo::novo();
+        // O da imagem, e a abreviada do mesmo resumo de código de fora: troca.
+        novo(&mut g, 1);
+        g.executa(0, 1, "loja abcd1234");
+        let arestas = g.arestas();
+        g.executa(0, 1, "? abcd1234 de outro");
+        assert_eq!(programa(&g, 1).as_deref(), Some("? abcd1234 de outro"));
+        assert_eq!(g.arestas(), arestas + 1);
+        // O de fora, abreviado, e a inteira do mesmo resumo da imagem: troca.
+        novo(&mut g, 2);
+        g.executa(0, 2, "? abcd1234 de ?");
+        let arestas = g.arestas();
+        g.executa(0, 2, "loja abcd1234");
+        assert_eq!(programa(&g, 2).as_deref(), Some("loja abcd1234"));
+        assert_eq!(g.arestas(), arestas + 1, "da imagem e de fora: uma aresta");
+        // Um editor, e outro, com o mesmo resumo: troca.
+        novo(&mut g, 3);
+        g.executa(0, 3, "? abcd1234 de editor-a");
+        let arestas = g.arestas();
+        g.executa(0, 3, "x abcd1234 de editor-b");
+        assert_eq!(programa(&g, 3).as_deref(), Some("x abcd1234 de editor-b"));
+        assert_eq!(g.arestas(), arestas + 1, "outro editor: uma aresta");
+        // O controle: o editor omitido casa com qualquer um, e o mesmo
+        // editor é o mesmo programa — a inteira que chega depois fica, sem
+        // aresta, e a abreviada dela de novo não muda nada.
+        novo(&mut g, 4);
+        g.executa(0, 4, "? abcd1234 de ?");
+        let arestas = g.arestas();
+        g.executa(0, 4, "x abcd1234 de editor-b");
+        g.executa(0, 4, "? abcd1234 de editor-b");
+        g.executa(0, 4, "? abcd1234 de ?");
+        assert_eq!(programa(&g, 4).as_deref(), Some("x abcd1234 de editor-b"));
+        assert_eq!(g.arestas(), arestas);
+        assert!(o_mesmo_programa("x abcd1234 de e", "? abcd1234 de e"));
+        assert!(!o_mesmo_programa("x abcd1234", "? abcd1234 de e"));
+        assert!(!o_mesmo_programa("kernel", "kernel"));
     }
 
     /// O achado 5 do adversário do F1: a abreviada de **outro** resumo é
@@ -476,9 +556,8 @@ mod testes {
         g.executa(0, 7, "? deadbeef");
         assert_eq!(programa(&g).as_deref(), Some("? deadbeef"));
         assert_eq!(g.arestas(), arestas + 1);
-        // A mesma abreviada, ou outra do mesmo resumo: nada.
+        // A mesma abreviada: nada.
         g.executa(0, 7, "? deadbeef");
-        g.executa(0, 7, "? deadbeef de ?");
         assert_eq!(programa(&g).as_deref(), Some("? deadbeef"));
         assert_eq!(g.arestas(), arestas + 1);
         // A inteira do mesmo resumo: o nome volta, sem outra troca.

@@ -297,6 +297,20 @@ pub fn resumo_da_descricao(descricao: &str) -> Option<&str> {
     resumo_e_editor(descricao).map(|(resumo, _)| resumo)
 }
 
+/// O editor da descrição de um programa com imagem, inteira ou abreviada —
+/// o que vem depois do ` de ` —: `Some(None)` para a descrição sem `de` (o
+/// código da imagem), `Some(Some(editor))` para a do código de fora — o
+/// editor, ou [`OMITIDO`] na abreviada que o tirou —, e `None` para o que
+/// não tem a forma de [`resumo_da_descricao`].
+///
+/// O resumo tem 32 bits: dois programas com o mesmo nome, o mesmo editor e
+/// os mesmos quatro primeiros bytes do resumo têm a mesma descrição. Quem
+/// compara uma abreviada com a que já conhece confere também o `de` e o
+/// editor — ver `seguranca::grafo`.
+pub fn editor_da_descricao(descricao: &str) -> Option<Option<&str>> {
+    resumo_e_editor(descricao).map(|(_, editor)| editor)
+}
+
 /// Que tipo de identidade agiu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

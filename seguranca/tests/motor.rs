@@ -1150,6 +1150,78 @@ fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
     );
 }
 
+/// O achado 3 do adversário do passo 1, virado para provar o certo: um
+/// processo roda um programa da imagem, `loja abcd1234`, e troca de imagem
+/// para um código de fora, selado por um editor confiado de nome longo,
+/// com o nome de 32 bytes e os mesmos quatro primeiros bytes do resumo —
+/// uma segunda pré-imagem de 32 bits, uns 2^32 resumos. Toda decisão dele
+/// daí em diante tem o `pelo` acima do teto e sai abreviada, `(? abcd1234
+/// de <editor>)`; o `de` diz que é código de fora, e o grafo grava a troca:
+/// o processo passa a executar a abreviada, com a aresta nova. Antes, só o
+/// resumo entrava na conta, e o processo continuava `loja abcd1234`, um
+/// programa da imagem. O controle, com outro resumo, grava a troca igual.
+#[test]
+fn a_troca_para_o_codigo_de_fora_do_mesmo_resumo_fica_no_grafo() {
+    use politica::auditoria::{MAIOR_DETALHE, detalhe_composto};
+    let editor = "fornecedor-externo-confiado-abc";
+    let nome = "n".repeat(32);
+    let executa = |m: &Motor| -> Vec<No> {
+        m.grafo
+            .vizinhos(&No::Processo {
+                epoca: 0,
+                fio: 1234,
+            })
+            .into_iter()
+            .filter(|(aresta, _, sai)| *aresta == Aresta::Executa && *sai)
+            .map(|(_, no, _)| no)
+            .collect()
+    };
+    for resumo in ["abcd1234", "deadbeef"] {
+        let mut a = Auditoria::nova();
+        a.gravar(do_agente(
+            "user.run",
+            "/bin/loja",
+            Codigo::Allow,
+            "processo 1234 lancado; decisao 1",
+        ));
+        for metodo in ["fs.read", "process.exec"] {
+            a.gravar(do_agente(
+                metodo,
+                "/armazem/q",
+                Codigo::Allow,
+                "pelo processo 1234 (loja abcd1234)",
+            ));
+        }
+        // Depois da troca: as decisões do programa novo, compostas como o
+        // kernel as compõe.
+        let pelo = format!("pelo processo 1234 ({nome} {resumo} de {editor})");
+        assert!(pelo.len() > MAIOR_DETALHE, "o pelo sozinho passa do teto");
+        let abreviada = format!("? {resumo} de {editor}");
+        let decisao = detalhe_composto(Some(&pelo), "", "");
+        assert_eq!(decisao, format!("pelo processo 1234 ({abreviada})"));
+        for metodo in ["fs.read", "net.connect", "fs.write"] {
+            a.gravar(do_agente(metodo, "/armazem/y", Codigo::Allow, &decisao));
+        }
+        let mut m = Motor::novo();
+        ler(&mut m, &a);
+        assert_eq!(
+            m.grafo
+                .processo(0, 1234)
+                .and_then(|p| p.programa.as_deref()),
+            Some(abreviada.as_str()),
+            "{resumo}"
+        );
+        assert_eq!(
+            executa(&m),
+            [
+                No::Programa("loja abcd1234".to_string()),
+                No::Programa(abreviada.clone())
+            ],
+            "{resumo}"
+        );
+    }
+}
+
 /// O achado 6: `security.provenance` casa a regra do firewall com a
 /// conexão do processo pelo fio — que nunca se repete no boot —, e não
 /// pelo programa: acima do teto, a execução que o firewall barrou sai com
