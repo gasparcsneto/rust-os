@@ -8007,6 +8007,422 @@ fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
     resultado
 }
 
+/// A edição pela árvore no campo da janela de um Terminal que a coordenação
+/// contaria e que não chegaria ao programa — a fila de valores da janela
+/// cheia — é recusada antes da conta: nem o arrendamento, nem a versão (o
+/// caso 1 do adversário do passo 1). Pelo caminho de verdade, o `ui.act`
+/// pela porta.
+fn terminal_a_edicao_que_nao_chega_nao_arrenda() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        pareamento::com_o_terminal_de_verdade(edicao_que_nao_chega_ao_programa)
+    });
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+fn edicao_que_nao_chega_ao_programa(
+    _console: crate::pessoas::Console,
+    camada: u32,
+    recurso: &str,
+) -> Resultado {
+    use alloc::format;
+    let campo = campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+    let (mut agente, mut sessao) = conectado(1)?;
+    // A fila de valores da janela, cheia: textos sem aviso, que o programa
+    // não tira.
+    for _ in 0..crate::superficies::MAIS_VALORES {
+        crate::superficies::enfileirar_valor(camada, 0, "x")
+            .map_err(|_| "a suite nao encheu a fila de valores da janela")?;
+    }
+    let antes = crate::coordenacao::estado(recurso);
+    let seq = seq_da_auditoria();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &format!(r#"{{"id":{campo},"action":"set_value","value":"ls"}}"#),
+    );
+    for _ in 0..crate::superficies::MAIS_VALORES {
+        crate::superficies::desistir_do_valor(camada);
+    }
+    let r = r?;
+    if !r.contains(r#""ok":false"#) || !r.contains("nao tirou os valores anteriores") {
+        crate::log_error!("teste", "{}", r);
+        return Err("o set_value com a fila de valores cheia nao foi recusado pela entrega");
+    }
+    let depois = crate::coordenacao::estado(recurso);
+    if depois.arrendamento.is_some() || depois.versao != antes.versao {
+        crate::log_error!("teste", "antes {:?}, depois {:?}", antes, depois);
+        return Err("a edicao recusada na entrega arrendou o campo ou fez a versao crescer");
+    }
+    if !registros_depois(seq, |e| {
+        e.metodo == "ui.claim" || e.metodo == "lease.invalidate"
+    })
+    .is_empty()
+    {
+        return Err("a edicao recusada na entrega tomou e soltou o arrendamento");
+    }
+    // Com a fila vazia, a mesma ação passa, e arrenda.
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &format!(r#"{{"id":{campo},"action":"set_value","value":"ls"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) || crate::coordenacao::estado(recurso).arrendamento.is_none() {
+        crate::log_error!("teste", "{}", r);
+        return Err("com a fila vazia, o set_value nao passou");
+    }
+    let _ = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.release",
+        &format!(r#"{{"id":{campo}}}"#),
+    );
+    let _ = esperar_ate(
+        || {
+            atender_consoles();
+            false
+        },
+        30,
+    );
+    Ok(())
+}
+
+/// A edição contada que não chega ao programa não arrenda o campo, nem
+/// quebra a sequência das recusadas (os achados 1 do adversário do passo
+/// 1): direto no console da marca, com a suíte no papel da interface — a
+/// reserva, a conta, a anotação e, quando a entrega falha, o que
+/// `ui::executar` faz, `edicao_nao_entregue`.
+///
+/// - Sozinha, ela tomou o arrendamento: ele sai já, gravado como
+///   `lease.invalidate` com o motivo de quem não chegou.
+/// - A quinta de cinco, que só renovou o que as quatro antes dela tomaram
+///   e renovaram: a Pessoa dá o Enter do `login`, as quatro são recusadas
+///   na linha do nome, e o arrendamento sai com o estado que a quinta
+///   deixou — uma vez, como `lease.invalidate` de quem o tinha.
+fn terminal_a_recusada_solta_mesmo_com_uma_que_nao_chegou() -> Resultado {
+    use crate::coordenacao::{SOLTO_PELA_RECUSA, SOLTO_SEM_ENTREGA};
+    use crate::interpretador::Modo;
+    use crate::ui::{Acao, Origem};
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    let serial = crate::coordenacao::titular_do_agente(crate::agent::sessao::SERIAL)
+        .ok_or("a serial nao tem titular")?;
+    let soltos = |seq: u64, detalhe: &str| {
+        registros_depois(seq, |e| {
+            e.metodo == "lease.invalidate" && e.recurso == recurso && e.detalhe == detalhe
+        })
+        .len()
+    };
+    // O que `ui::executar` faz com uma edição: a reserva, a conta e a
+    // anotação; e, se `entregue` é falso, a entrega que falhou.
+    let entra = |entregue: bool| -> Resultado {
+        let numero = crate::interpretador::reservar_edicao_da_arvore(
+            CONSOLE_DA_MARCA,
+            CAMPO_DA_MARCA,
+            Origem::Agente(crate::agent::sessao::SERIAL),
+            Acao::DefinirValor,
+            None,
+        )?;
+        let rastro = crate::coordenacao::editar_com_rastro(&recurso, Some(serial), None, "ui.act")
+            .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
+        crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
+        if !entregue {
+            crate::interpretador::edicao_nao_entregue(CONSOLE_DA_MARCA, numero);
+        }
+        Ok(())
+    };
+    crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+    crate::coordenacao::esquecer();
+    let resultado = (|| -> Resultado {
+        // Sozinha, ela tomou: sai já.
+        let seq = seq_da_auditoria();
+        entra(false)?;
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some()
+            || soltos(seq, SOLTO_SEM_ENTREGA) != 1
+        {
+            return Err("a edicao que tomou o campo e nao chegou ao programa nao o soltou");
+        }
+        // A quinta de cinco, que só renovou.
+        let seq = seq_da_auditoria();
+        digitar_no_console(CONSOLE_DA_MARCA, "login");
+        for _ in 0..4 {
+            entra(true)?;
+        }
+        entra(false)?;
+        if crate::coordenacao::estado(&recurso)
+            .arrendamento
+            .map(|a| a.titular)
+            != Some(serial)
+        {
+            return Err("as quatro edicoes a caminho perderam o arrendamento antes do Enter");
+        }
+        digitar_no_console(CONSOLE_DA_MARCA, "\n");
+        if linha() != Some((Modo::Nome, 0)) {
+            return Err("o login nao pediu o nome");
+        }
+        for _ in 0..4 {
+            digitar_marcado("\u{15}intrusa");
+        }
+        if linha() != Some((Modo::Nome, 0)) {
+            return Err("uma edicao recusada entrou na linha do nome");
+        }
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some()
+            || soltos(seq, SOLTO_PELA_RECUSA) != 1
+        {
+            return Err(
+                "as edicoes recusadas deixaram o campo arrendado: a quinta, que nao chegou, quebrou a sequencia",
+            );
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+    crate::coordenacao::esquecer();
+    resultado
+}
+
+/// A tecla da Pessoa depois do Enter que fez a linha pedir o nome, com a
+/// edição de um agente ainda a caminho, não é `CONFLICT` (o achado 2 do
+/// adversário do passo 1): o console consome o Enter do `login`, a linha
+/// passa a pedir o nome, e ali mesmo recusa a edição que vem atrás e solta
+/// o arrendamento dela — antes de consumi-la. A Pessoa digita o começo do
+/// nome com a edição ainda na fila do pseudo-terminal, e as teclas passam
+/// pela janela e chegam à linha. O que fica de fora é a tecla digitada
+/// antes de o console consumir o Enter, com a linha ainda pedindo um
+/// comando: pendente, na família DT-1.
+fn terminal_a_tecla_depois_do_enter_com_a_edicao_a_caminho() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        pareamento::com_o_terminal_de_verdade(tecla_depois_do_enter_com_a_edicao_a_caminho)
+    });
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+fn tecla_depois_do_enter_com_a_edicao_a_caminho(
+    console: crate::pessoas::Console,
+    _camada: u32,
+    recurso: &str,
+) -> Resultado {
+    use crate::interpretador::Modo;
+    use alloc::format;
+    use politica::Codigo;
+    let campo = campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+    let linha = || crate::interpretador::linha_de_teste(console);
+    let (mut agente, mut sessao) = conectado(1)?;
+    digitar_pelo_teclado("login")?;
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, 5))
+        },
+        600,
+    )
+    .map_err(|_| "o login digitado na janela do terminal nao chegou ao console")?;
+    // O Enter vai à janela, e o console ainda não o consumiu.
+    digitar_pelo_teclado("\n")?;
+    so_a_janela();
+    let seq = seq_da_auditoria();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &format!(r#"{{"id":{campo},"action":"set_value","value":"intrusa"}}"#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err("a acao do agente com a linha pedindo um comando foi recusada na entrada");
+    }
+    // O console consome só o Enter: a linha pede o nome, e a edição, atrás
+    // dele na fila, ainda não chegou.
+    let mut enter = false;
+    let _ = esperar_ate(
+        || {
+            if let Some((c, tecla)) = crate::pseudoterminal::proxima_entrada(|_| false) {
+                crate::interpretador::tratar(c, tecla);
+                enter = c == console && tecla == '\n';
+            }
+            enter
+        },
+        600,
+    );
+    if !enter || linha() != Some((Modo::Nome, 0)) {
+        crate::log_error!("teste", "a linha ficou {:?}", linha());
+        return Err("o console nao consumiu o Enter do login antes da edicao");
+    }
+    if crate::coordenacao::estado(recurso).arrendamento.is_some() {
+        return Err(
+            "o Enter que fez a linha pedir o nome nao soltou o arrendamento da edicao a caminho",
+        );
+    }
+    // A Pessoa continua o nome, com a edição a caminho.
+    digitar_pelo_teclado("li")?;
+    so_a_janela();
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Nome, 2))
+        },
+        600,
+    )
+    .map_err(|_| "o comeco do nome digitado com a edicao a caminho se perdeu")?;
+    if !registros_depois(seq, |e| {
+        e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
+    })
+    .is_empty()
+    {
+        return Err("a tecla da pessoa com a edicao recusada a caminho foi CONFLICT");
+    }
+    if registros_depois(seq, |e| {
+        e.metodo == "lease.invalidate"
+            && e.recurso == recurso
+            && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+    })
+    .len()
+        != 1
+    {
+        return Err("o arrendamento da edicao recusada no Enter nao saiu uma vez");
+    }
+    // Sai do nome sem entrar: a linha vazia volta a pedir um comando.
+    digitar_pelo_teclado("\u{8}\u{8}\n")?;
+    let _ = esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, 0))
+        },
+        600,
+    );
+    Ok(())
+}
+
+/// A edição em voo de um agente que saiu da conexão de onde a pediu é
+/// descartada quando o console a consome — numa linha de comando também —,
+/// como o Enter dele (o achado 7 do adversário do passo 1). Com os agentes
+/// de teste pelo canal TCP, direto no console da marca: a reserva amarra a
+/// conexão e a chave; com a chave de outro agente, nem se reserva.
+fn terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada() -> Resultado {
+    use crate::interpretador::{AGENTE_FORA_DA_SESSAO, Modo};
+    use crate::ui::{Acao, Origem};
+    use politica::arrendamento::Titular;
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    com_canal_tcp(|| {
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        crate::coordenacao::esquecer();
+        let resultado = (|| -> Resultado {
+            let chave = sigilo::publica_de(&chave_de_teste(1));
+            let a = AgenteTcpDeTeste::conectar(1)?;
+            let sa = a.sessao();
+            let outra = Some(sigilo::publica_de(&chave_de_teste(2)));
+            if crate::interpretador::reservar_edicao_da_arvore(
+                CONSOLE_DA_MARCA,
+                CAMPO_DA_MARCA,
+                Origem::Agente(sa),
+                Acao::DefinirValor,
+                outra,
+            ) != Err(AGENTE_FORA_DA_SESSAO)
+            {
+                return Err("a chave de outro agente reservou uma edicao da sessao");
+            }
+            let titular = Titular::Agente {
+                sessao: sa,
+                chave: Some(chave),
+            };
+            let numero = crate::interpretador::reservar_edicao_da_arvore(
+                CONSOLE_DA_MARCA,
+                CAMPO_DA_MARCA,
+                Origem::Agente(sa),
+                Acao::DefinirValor,
+                Some(chave),
+            )?;
+            let rastro =
+                crate::coordenacao::editar_com_rastro(&recurso, Some(titular), None, "ui.act")
+                    .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
+            crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
+            // A conexão acaba com a edição a caminho.
+            drop(a);
+            esperar_cedendo(|| crate::sessoes::identidade(sa).is_none(), 800)
+                .map_err(|_| "a sessao da conexao que acabou ficou de pe")?;
+            let marca = crate::log::total_emitidos();
+            digitar_marcado("\u{15}agent.ping");
+            if linha() != Some((Modo::Comando, 0)) {
+                crate::log_error!("teste", "a linha ficou {:?}", linha());
+                return Err("a edicao de quem saiu da sessao entrou na linha");
+            }
+            if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
+                return Err("a edicao de quem saiu da sessao deixou o campo arrendado");
+            }
+            let mut recusas = 0;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                recusas += (r.seq >= marca
+                    && r.mensagem().ends_with(&alloc::format!(
+                        "recusado no console: {AGENTE_FORA_DA_SESSAO}"
+                    ))) as usize;
+            });
+            if recusas != 1 {
+                return Err("a edicao de quem saiu da sessao nao foi recusada no log, uma vez");
+            }
+            Ok(())
+        })();
+        crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+        crate::coordenacao::esquecer();
+        resultado
+    })
+}
+
+/// O `definir` do console físico pela árvore confere a regra da linha da
+/// pessoa na seção que edita — nem escrever, nem esvaziar —, e não só antes
+/// da conta da coordenação (o item 4 do passo 1). Pelo caminho de verdade
+/// a corrida não se alcança — o `ui.act` do físico roda no executor que
+/// consome as teclas —; o caso chama `definir` direto, com a linha já
+/// pedindo o nome, como a corrida o chamaria.
+fn interface_o_definir_do_fisico_confere_a_linha_da_pessoa() -> Resultado {
+    use crate::interpretador::{LINHA_DA_PESSOA, Modo};
+    use crate::pessoas::Console;
+    let linha = || crate::interpretador::linha_de_teste(Console::Fisico);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        digitar_no_console(Console::Fisico, "login\nli");
+        if linha() != Some((Modo::Nome, 2)) {
+            return Err("o login no fisico nao pediu o nome");
+        }
+        for valor in ["", "outro"] {
+            if crate::interpretador::definir(valor) != Err(LINHA_DA_PESSOA) {
+                return Err("o definir da arvore editou a linha do nome do fisico");
+            }
+            if linha() != Some((Modo::Nome, 2)) {
+                return Err("o definir recusado mexeu na linha do nome do fisico");
+            }
+        }
+        // O Ctrl-U da Pessoa continua esvaziando a linha dela.
+        digitar_no_console(
+            Console::Fisico,
+            &alloc::string::String::from(protocolo::usuario::terminal::APAGAR_A_LINHA),
+        );
+        if linha() != Some((Modo::Nome, 0)) {
+            return Err("o apagar da pessoa nao esvaziou a linha do nome");
+        }
+        digitar_no_console(Console::Fisico, "\n");
+        if crate::interpretador::definir("agent.ping").is_err()
+            || linha() != Some((Modo::Comando, "agent.ping".len()))
+        {
+            return Err("o definir da arvore nao editou a linha de comando do fisico");
+        }
+        Ok(())
+    })();
+    crate::interpretador::abrir_console(Console::Fisico);
+    resultado
+}
+
 /// Um formulário feito com o toolkit, preenchido por um agente pela árvore
 /// e por uma pessoa pelo teclado.
 ///
@@ -36844,6 +37260,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: a marca da arvore sem reserva nao solta nem passa nada",
         f: terminal_a_marca_sem_reserva,
+    },
+    Caso {
+        nome: "terminal: a edicao que nao chega ao programa nao arrenda o campo",
+        f: terminal_a_edicao_que_nao_chega_nao_arrenda,
+    },
+    Caso {
+        nome: "terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou",
+        f: terminal_a_recusada_solta_mesmo_com_uma_que_nao_chegou,
+    },
+    Caso {
+        nome: "terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT",
+        f: terminal_a_tecla_depois_do_enter_com_a_edicao_a_caminho,
+    },
+    Caso {
+        nome: "terminal: a edicao de quem saiu da sessao e descartada",
+        f: terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada,
+    },
+    Caso {
+        nome: "interface: o definir do fisico confere a linha da pessoa onde edita",
+        f: interface_o_definir_do_fisico_confere_a_linha_da_pessoa,
     },
     Caso {
         nome: "terminal: so se solta o arrendamento que as edicoes recusadas deixaram",
