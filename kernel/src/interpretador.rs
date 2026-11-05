@@ -839,6 +839,8 @@ pub fn tratar(console: Console, c: char) {
     if engolir(console, c) {
         return;
     }
+    #[cfg(feature = "modo-teste")]
+    no_meio(NoMeio::DaTecla);
     if console == Console::Fisico && !tecla_coordenada(c) {
         return;
     }
@@ -2154,6 +2156,8 @@ fn parear_passo(console: Console, modo: Modo) {
     let (Some(i), Some(linha)) = (indice(console), modo.linha_da_cerimonia()) else {
         return;
     };
+    #[cfg(feature = "modo-teste")]
+    no_meio(NoMeio::DoEnter);
     let mut copia = [0u8; LINHA_MAX];
     let tomada = com_estado(console, |e| {
         if e.engolindo {
@@ -2356,6 +2360,66 @@ fn fim_do_engolir(console: Console) {
 #[cfg(feature = "modo-teste")]
 pub fn engolindo_de_teste(console: Console) -> bool {
     com_estado(console, |e| e.engolindo).unwrap_or(false)
+}
+
+/// Só para a suíte: põe `texto` direto na linha do console, sem conferir
+/// nada — o que entrasse nela por um caminho que não confere o engolir.
+/// Para o caso conferir a defesa de [`Estado::parar_de_engolir`].
+#[cfg(feature = "modo-teste")]
+pub fn por_na_linha_de_teste(console: Console, texto: &str) {
+    com_estado(console, |e| {
+        for c in texto.chars() {
+            digitar_em(console, e, c);
+        }
+    });
+}
+
+/// Só para a suíte: os pontos entre duas tomadas da trava dos consoles em
+/// que um caso põe o fim de uma cerimônia "no meio" — como o fio de outro
+/// núcleo o poria.
+#[cfg(feature = "modo-teste")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoMeio {
+    /// Em [`tratar`]: a tecla passou por [`engolir`] — o console não
+    /// engolia — e ainda não chegou à linha.
+    DaTecla,
+    /// Em [`parear_passo`]: o Enter da Pessoa leu o modo da linha, em
+    /// [`confirmar_em`], e ainda não a tomou.
+    DoEnter,
+}
+
+/// Só para a suíte: o ponto, e o que roda nele.
+#[cfg(feature = "modo-teste")]
+pub type Gancho = (NoMeio, fn());
+
+/// Só para a suíte: o que roda, uma vez, no ponto [`NoMeio`] que o caso
+/// escolheu.
+#[cfg(feature = "modo-teste")]
+static NO_MEIO: Mutex<Option<Gancho>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda no ponto [`NoMeio`].
+#[cfg(feature = "modo-teste")]
+pub fn no_meio_de_teste(gancho: Option<Gancho>) {
+    crate::arch::sem_interrupcoes(|| *NO_MEIO.lock() = gancho);
+}
+
+/// Só para a suíte: roda o gancho de `ponto`, se é o que o caso pôs — e o
+/// tira: uma vez só. Fora da trava dos consoles.
+#[cfg(feature = "modo-teste")]
+fn no_meio(ponto: NoMeio) {
+    let gancho = crate::arch::sem_interrupcoes(|| {
+        let mut g = NO_MEIO.lock();
+        match *g {
+            Some((p, f)) if p == ponto => {
+                *g = None;
+                Some(f)
+            }
+            _ => None,
+        }
+    });
+    if let Some(f) = gancho {
+        f();
+    }
 }
 
 /// Desenha de novo o que está digitado num console — nada, se é uma senha.

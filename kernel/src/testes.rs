@@ -7000,9 +7000,8 @@ fn digitar_pelo_teclado(texto: &str) -> Resultado {
     Ok(())
 }
 
-/// O campo da linha de comando da janela do Terminal, como a árvore o
-/// publica.
-fn campo_do_terminal() -> Option<u32> {
+/// A camada da janela do Terminal, como a árvore a publica.
+fn camada_do_terminal() -> Option<u32> {
     let mut camada = None;
     crate::grafico::camadas(|c| {
         if c.nome == crate::superficies::NOME_DA_CAMADA
@@ -7011,7 +7010,13 @@ fn campo_do_terminal() -> Option<u32> {
             camada = Some(c.id);
         }
     });
-    let camada = camada?;
+    camada
+}
+
+/// O campo da linha de comando da janela do Terminal, como a árvore o
+/// publica.
+fn campo_do_terminal() -> Option<u32> {
+    let camada = camada_do_terminal()?;
     let indice = crate::superficies::com_descricao(camada, |d| {
         d.elementos
             .iter()
@@ -27061,9 +27066,11 @@ fn smp_o_coletor_nao_fecha_o_console_do_dono_seguinte() -> Resultado {
 /// O registro do `logout` diz quem fechou o Terminal: o `press` de um agente
 /// — ou de uma pessoa — pela árvore, que o kernel anota no console antes de
 /// entregá-lo; o clique da pessoa, sem anotação; e a queda, que o coletor
-/// acha. A anotação desfeita, porque o evento não chegou, é o clique. No
-/// nível do kernel, sem programa: o pseudo-terminal aberto para este fio, e
-/// fechado por ele, ou para um fio que não existe.
+/// acha. A anotação desfeita, porque o evento não chegou, é o clique; e o
+/// desfazer só desfaz a anotação que ainda é a sua — a que veio depois
+/// fica, e a de uma abertura que fechou não volta na seguinte. No nível do
+/// kernel, sem programa: o pseudo-terminal aberto para este fio, e fechado
+/// por ele, ou para um fio que não existe.
 fn terminal_o_logout_diz_quem_fechou() -> Resultado {
     use crate::pseudoterminal as pty;
     use crate::ui::Origem;
@@ -27140,6 +27147,44 @@ fn terminal_o_logout_diz_quem_fechou() -> Resultado {
             {
                 return Err("a anotacao do press sobrou no console fechado");
             }
+        }
+        // O desfazer compara antes de restaurar: só desfaz a anotação que
+        // ainda é a sua. Duas anotações, e a primeira desfeita depois da
+        // segunda: fica a segunda — às cegas, o desfazer poria de volta a
+        // de antes da primeira, e o `press` que chegou sairia como o clique.
+        let chave = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal do caso nao abriu")?;
+        let console = chave.console();
+        crate::interpretador::entrar_para_teste(console, "quem-fechou", "operador");
+        let primeira = crate::interpretador::press_pela_arvore(console, Origem::Agente(5));
+        crate::interpretador::press_pela_arvore(console, Origem::Agente(6));
+        crate::interpretador::desfazer_press_pela_arvore(primeira);
+        let seq = seq_da_auditoria();
+        pty::fechar(chave, eu);
+        if logout(console, seq) != ["o terminal fechou pelo press de agente 6 na arvore"] {
+            crate::log_error!("teste", "{:?}", logout(console, seq));
+            return Err("o desfazer de uma anotacao apagou a que veio depois dela");
+        }
+        // E a de uma abertura que fechou não volta na seguinte: desfeita
+        // com o console reaberto na mesma vaga, não muda nada — às cegas,
+        // poria de volta a anotação de antes dela, e o fechamento seguinte
+        // culparia o agente 5.
+        let chave = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal do caso nao abriu")?;
+        let console = chave.console();
+        crate::interpretador::entrar_para_teste(console, "quem-fechou", "operador");
+        crate::interpretador::press_pela_arvore(console, Origem::Agente(5));
+        let velha = crate::interpretador::press_pela_arvore(console, Origem::Agente(6));
+        pty::fechar(chave, eu);
+        let chave = pty::abrir(eu, canal).map_err(|_| "o pseudo-terminal do caso nao abriu")?;
+        if chave.console() != console {
+            return Err("a vaga reaberta nao e a mesma");
+        }
+        crate::interpretador::entrar_para_teste(console, "quem-fechou", "operador");
+        crate::interpretador::desfazer_press_pela_arvore(velha);
+        let seq = seq_da_auditoria();
+        pty::fechar(chave, eu);
+        if logout(console, seq) != ["o terminal fechou pelo clique da pessoa"] {
+            crate::log_error!("teste", "{:?}", logout(console, seq));
+            return Err("o desfazer de uma abertura que fechou mexeu na seguinte");
         }
         Ok(())
     })();
@@ -39335,6 +39380,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "pareamento: o fim no meio da senha no fisico nao vai ao historico",
         f: pareamento::pareamento_o_fim_no_meio_da_senha_no_fisico,
+    },
+    Caso {
+        nome: "pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte",
+        f: pareamento::pareamento_o_fim_entre_duas_tomadas_da_linha,
+    },
+    Caso {
+        nome: "pareamento: o terminal de verdade engole fora da coordenacao",
+        f: pareamento::pareamento_o_terminal_de_verdade_engole_fora_da_coordenacao,
+    },
+    Caso {
+        nome: "pareamento: a tecla engolida que o terminal morto nao recebe some",
+        f: pareamento::pareamento_a_engolida_do_terminal_morto_some,
+    },
+    Caso {
+        nome: "pareamento: o terminal fechado com a cerimonia viva sonda a rede na chamada",
+        f: pareamento::pareamento_o_terminal_fechado_com_a_cerimonia_viva,
     },
     Caso {
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",

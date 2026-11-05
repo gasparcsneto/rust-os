@@ -4222,3 +4222,439 @@ pub(super) fn smp_o_fim_com_a_senha_ja_confirmada_nao_engole() -> Resultado {
     FASE.store(0, SeqCst);
     resultado
 }
+
+// ---------------------------------------------------------------------
+// O fim entre duas tomadas da linha, e o Terminal de verdade.
+// ---------------------------------------------------------------------
+
+/// O fim da cerimônia pelo prazo, "no meio" — ver `interpretador::NoMeio`:
+/// o que o coletor, noutro núcleo, faria entre duas tomadas da trava dos
+/// consoles.
+fn vencer_no_meio() {
+    crate::pareamento::adiantar_de_teste(conta::PRAZO_MS);
+    crate::pareamento::vencer();
+}
+
+/// O fim da cerimônia corre com a tecla e com o Enter da Pessoa: chega de
+/// outro núcleo entre duas tomadas da trava dos consoles. A suíte o põe ali
+/// com um gancho — ver `interpretador::NoMeio` —, num Terminal e no físico:
+///
+/// - entre o engolir e a linha, a tecla que não foi engolida chega à linha
+///   depois do fim: é o resto da senha — não ecoa, não fica na linha e não
+///   vai à frente do comando seguinte;
+/// - o que entrasse na linha nesse meio-tempo por outro caminho sai no
+///   Enter que acaba o engolir;
+/// - entre o Enter ler o modo da linha e tomá-la, o Enter já foi digitado:
+///   ele acaba o engolir — a linha seguinte da Pessoa executa, e o bit do
+///   histórico volta.
+pub(super) fn pareamento_o_fim_entre_duas_tomadas_da_linha() -> Resultado {
+    com_a_cerimonia(|| {
+        crate::superficies::devolver_foco();
+        crate::teclado::esvaziar();
+        let r = (|| -> Resultado {
+            corridas_no_console(CONSOLE, 2_003_000)?;
+            crate::interpretador::abrir_console(Console::Fisico);
+            corridas_no_console(Console::Fisico, 2_003_100)
+        })();
+        // O gancho não sobra para o caso seguinte, nem num caso que
+        // desistiu antes de a tecla chegar a ele.
+        crate::interpretador::no_meio_de_teste(None);
+        crate::interpretador::desativar_para_teste();
+        crate::teclado::esvaziar();
+        r
+    })
+}
+
+/// As duas corridas de [`pareamento_o_fim_entre_duas_tomadas_da_linha`] no
+/// console `console`; `n` numera as conexões do outro Duke.
+fn corridas_no_console(console: Console, n: u64) -> Resultado {
+    use crate::interpretador::{self as interp, Modo, NoMeio};
+    /// A tecla que corre com o fim: nada que o console escreva a tem.
+    const NO_MEIO: &str = "Q";
+    entrar(console, "bia")?;
+    // Até a linha da senha: o outro Duke só serve para chegar lá — o fim é
+    // o prazo, que o gancho vence.
+    let ate_a_senha = |n: u64| -> Result<Iniciante, &'static str> {
+        recomecar();
+        aceitar(console, NOME)?;
+        let mut ini = Iniciante::novo(VAGA, n, 1);
+        let k = ate_os_codigos(console, &mut ini)?;
+        digitar(console, &texto(k.k_a));
+        if linha(console) != Linha::Senha {
+            return Err("o codigo certo nao pediu a senha");
+        }
+        Ok(ini)
+    };
+    let a_linha_vazia = || interp::linha_de_teste(console) == Some((Modo::Comando, 0));
+
+    // O fim entre o engolir e a linha: a letra que já tinha passado pelo
+    // engolir.
+    let ini = ate_a_senha(n)?;
+    let _ = saida_de(console);
+    super::digitar_no_console(console, "senha");
+    interp::no_meio_de_teste(Some((NoMeio::DaTecla, vencer_no_meio)));
+    super::digitar_no_console(console, NO_MEIO);
+    interp::no_meio_de_teste(None);
+    acabou_com(
+        Lado::Aceita,
+        Desfecho::Desfeita(conta::Motivo::Prazo),
+        "o fim no meio da tecla nao acabou a cerimonia",
+    )?;
+    if !interp::engolindo_de_teste(console) {
+        return Err("o fim no meio da tecla nao pos o console a engolir");
+    }
+    if !a_linha_vazia() || saida_de(console).contains(NO_MEIO) {
+        return Err("a tecla que correu com o fim ficou na linha, ou ecoou");
+    }
+    // O que entrasse na linha por outro caminho, enquanto ela engole, sai
+    // no Enter que acaba o engolir.
+    interp::por_na_linha_de_teste(console, "agent.ping");
+    super::digitar_no_console(console, " resto\n");
+    if interp::engolindo_de_teste(console) || !a_linha_vazia() {
+        return Err("o Enter que acabou o engolir deixou algo na linha");
+    }
+    executa_de_novo(console)?;
+    drop(ini);
+
+    // O fim entre o Enter ler o modo da linha e tomá-la: a senha inteira, e
+    // o Enter.
+    let ini = ate_a_senha(n + 1)?;
+    super::digitar_no_console(console, SENHA);
+    interp::no_meio_de_teste(Some((NoMeio::DoEnter, vencer_no_meio)));
+    super::digitar_no_console(console, "\n");
+    interp::no_meio_de_teste(None);
+    acabou_com(
+        Lado::Aceita,
+        Desfecho::Desfeita(conta::Motivo::Prazo),
+        "o fim no meio do Enter nao acabou a cerimonia",
+    )?;
+    if interp::engolindo_de_teste(console) || !a_linha_vazia() {
+        return Err("o Enter que correu com o fim deixou o console engolindo");
+    }
+    // O bit do histórico, desligado: a tecla do teclado da máquina entra
+    // nele — no físico, também na linha, que volta a ficar vazia.
+    crate::teclado::esvaziar();
+    super::teclar(30);
+    super::atender_consoles();
+    let lida = crate::teclado::observar();
+    if console == Console::Fisico {
+        super::digitar_no_console(console, "\u{8}");
+    }
+    if lida != Some('a') {
+        return Err("o bit do historico ficou ligado depois do Enter que correu com o fim");
+    }
+    executa_de_novo(console)?;
+    drop(ini);
+    Ok(())
+}
+
+/// O que o console imprimiu desde a última leitura — só o de um Terminal:
+/// o do físico vai à tela, com o log.
+fn saida_de(console: Console) -> String {
+    match console {
+        Console::Terminal(i) => {
+            String::from_utf8_lossy(&crate::pseudoterminal::tirar_de_teste(i as u8)).into_owned()
+        }
+        Console::Fisico => String::new(),
+    }
+}
+
+/// O console executa de novo uma linha da Pessoa, e só ela: `agent.ping`,
+/// executado nele, sem nada na frente.
+fn executa_de_novo(console: Console) -> Resultado {
+    let desde = crate::log::total_emitidos();
+    digitar(console, "agent.ping");
+    let procurada = format!("executado: agent.ping (pessoa) em {}", console.texto());
+    let mut executou = false;
+    crate::log::ultimos(32, crate::log::Level::Trace, |r| {
+        executou |= r.seq >= desde && r.mensagem() == procurada;
+    });
+    if !executou || crate::interpretador::linha_de_teste(console).is_none_or(|(_, n)| n != 0) {
+        return Err("a linha seguinte da Pessoa nao executou, ou nao sozinha");
+    }
+    Ok(())
+}
+
+/// O Terminal de verdade, lançado pelo servidor de janelas como a barra o
+/// pede, com o foco: `f` recebe o console dele, a camada da janela e o
+/// recurso do campo da linha de comando. No fim, o Terminal e o servidor
+/// saem, e o foco volta ao kernel.
+fn com_o_terminal_de_verdade(f: impl FnOnce(Console, u32, &str) -> Resultado) -> Resultado {
+    use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
+    use protocolo::usuario::evento::{CANAL_DAS_JANELAS, CANAL_DO_TERMINAL, Evento, tipo};
+    if crate::tela::tela_fisica().is_none() {
+        return super::sem_framebuffer();
+    }
+    let desde = crate::log::total_emitidos();
+    let disse = |procurada: &str| {
+        let mut achou = false;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            achou |= r.seq >= desde && r.subsistema == "usuario" && r.mensagem() == procurada;
+        });
+        achou
+    };
+    let r = (|| -> Resultado {
+        super::esperar_sem_servidor_de_janelas()?;
+        super::lancar_o_servidor_de_janelas_da_suite()?;
+        super::esperar_ate(|| disse("janelas: pronto"), 600)
+            .map_err(|_| "o servidor de janelas nao subiu")?;
+        crate::ui::agir(
+            ID_DO_BOTAO_TERMINAL,
+            Acao::Pressionar,
+            None,
+            Origem::Agente(0),
+        )?;
+        super::esperar_ate(
+            || {
+                super::atender_consoles();
+                disse("terminal: pronto")
+            },
+            600,
+        )
+        .map_err(|_| "o terminal nao subiu")?;
+        let console =
+            super::console_do_terminal().ok_or("o terminal nao abriu um pseudo-terminal")?;
+        if crate::superficies::janela_com_foco()
+            .and_then(|j| crate::pseudoterminal::console_do_dono(j.dono))
+            != Some(console)
+        {
+            return Err("o terminal abriu sem o foco");
+        }
+        super::esperar_ate(|| super::campo_do_terminal().is_some(), 200)
+            .map_err(|_| "o terminal nao descreveu a linha de comando")?;
+        let camada = super::camada_do_terminal().ok_or("a janela do terminal sumiu")?;
+        let campo =
+            super::campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+        f(console, camada, &crate::coordenacao::recurso(campo))
+    })();
+    let encerrar = Evento {
+        tipo: tipo::ENCERRAR,
+        ..Default::default()
+    };
+    let _ = crate::eventos::publicar(CANAL_DO_TERMINAL, encerrar);
+    let _ = crate::eventos::publicar(CANAL_DAS_JANELAS, encerrar);
+    let _ = super::esperar_ate(|| !crate::superficies::foco_ativo(), 200);
+    crate::superficies::devolver_foco();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    r
+}
+
+/// No Terminal de verdade do console `console`: a Pessoa entra, abre a
+/// cerimônia, chega à senha e digita o começo dela pela janela — que chega
+/// ao console e passa pela coordenação, como toda tecla da senha (a decisão
+/// pendente da credencial) —, e o outro desiste: o console engole. `n`
+/// numera a conexão do outro Duke.
+fn o_terminal_engolindo(console: Console, n: u64) -> Resultado {
+    use crate::interpretador::{self as interp, Modo};
+    entrar(console, "bia")?;
+    aceitar(console, NOME)?;
+    let mut ini = Iniciante::novo(VAGA, n, 1);
+    let k = ate_os_codigos(console, &mut ini)?;
+    digitar(console, &texto(k.k_a));
+    if linha(console) != Linha::Senha {
+        return Err("o codigo certo nao pediu a senha");
+    }
+    super::digitar_pelo_teclado("senha")?;
+    super::esperar_ate(
+        || {
+            super::atender_consoles();
+            interp::linha_de_teste(console) == Some((Modo::SenhaDoPareamento, 5))
+        },
+        600,
+    )
+    .map_err(|_| "o comeco da senha nao chegou ao console do terminal")?;
+    ini.mandar(&desistiu(conta::Motivo::Cancelada.texto()))?;
+    acabou_com(
+        Lado::Aceita,
+        Desfecho::Desfeita(conta::Motivo::OutroDesistiu),
+        "a cerimonia nao acabou no meio da senha",
+    )?;
+    if !interp::engolindo_de_teste(console) {
+        return Err("o fim no meio da senha nao pos o terminal a engolir");
+    }
+    Ok(())
+}
+
+/// A tecla do resto da senha que a janela do Terminal não consegue
+/// entregar some: não cai no console físico, que a ecoaria. A janela só
+/// "não entrega" a quem não escuta — a fila cheia conta como entregue —:
+/// o Terminal morreu de repente — o `process.terminate`, como a queda, sem
+/// fechar nada —, e o coletor, segurado antes na desmontagem de outro morto
+/// (`fios::PAUSAR_NA_DESMONTAGEM`), ainda não recolheu a janela dele, com o
+/// foco, nem o console, que engole.
+pub(super) fn pareamento_a_engolida_do_terminal_morto_some() -> Resultado {
+    use crate::fios::{PAUSA_ARMADA, PAUSA_SEGURANDO, PAUSAR_NA_DESMONTAGEM};
+    use crate::interpretador::{self as interp, Modo};
+    use core::sync::atomic::Ordering::SeqCst;
+    extern "C" fn morto(_argumento: u64) -> ! {
+        crate::fios::terminar()
+    }
+    com_a_cerimonia(|| {
+        com_o_terminal_de_verdade(|console, _, _| {
+            o_terminal_engolindo(console, 2_003_300)?;
+            let processo = crate::pseudoterminal::donos()
+                .into_iter()
+                .flatten()
+                .find(|f| crate::fios::vivo(*f))
+                .ok_or("o terminal no ar nao tem pseudo-terminal")?;
+            // O físico aberto, sem ninguém e sem arrendamento: a tecla que
+            // caísse nele iria à linha.
+            crate::interpretador::abrir_console(Console::Fisico);
+            crate::coordenacao::esquecer();
+            // O coletor segurado antes de o Terminal morrer: no primeiro
+            // morto que ele desmonta, um fio que só termina. Segurado depois,
+            // uma passada podia ver o Terminal morto antes de poder tirá-lo
+            // da tabela, e recolher a janela e o console dele na mesma volta.
+            PAUSAR_NA_DESMONTAGEM.store(PAUSA_ARMADA, SeqCst);
+            let r = (|| -> Resultado {
+                crate::fios::criar("teste-segura-o-coletor", morto, 0)
+                    .map_err(|_| "o fio que segura o coletor nao nasceu")?;
+                super::esperar_ate(
+                    || PAUSAR_NA_DESMONTAGEM.load(SeqCst) == PAUSA_SEGURANDO,
+                    300,
+                )
+                .map_err(|_| "o coletor nao chegou a desmontar um morto")?;
+                // O término: o Terminal morre sem rodar nada dele — sem
+                // fechar a janela nem o pseudo-terminal, como na queda. Ele
+                // dorme na leitura do canal, e morre na volta dela: um
+                // evento que ele não trata o acorda.
+                let r = super::fs_pedir(
+                    super::sistema_no_armazem(7_203_001),
+                    "process.terminate",
+                    &format!(r#"{{"process":{processo}}}"#),
+                );
+                if super::fs_texto(&r, "state").as_deref() != Some("terminating") {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o termino do terminal nao foi aceito");
+                }
+                let _ = crate::eventos::publicar(
+                    protocolo::usuario::evento::CANAL_DO_TERMINAL,
+                    protocolo::usuario::evento::Evento {
+                        tipo: protocolo::usuario::evento::tipo::TESTE,
+                        ..Default::default()
+                    },
+                );
+                super::esperar_ate(|| !crate::fios::vivo(processo), 600)
+                    .map_err(|_| "o terminal nao morreu")?;
+                if !interp::engolindo_de_teste(console)
+                    || crate::superficies::janela_com_foco()
+                        .and_then(|j| crate::pseudoterminal::console_do_dono(j.dono))
+                        != Some(console)
+                {
+                    return Err("o terminal morto nao ficou com a janela, o foco e o console");
+                }
+                crate::interpretador::tratar_tecla_de_janela('x');
+                if interp::linha_de_teste(Console::Fisico) != Some((Modo::Comando, 0)) {
+                    return Err("a tecla do resto que o terminal morto nao recebeu caiu no fisico");
+                }
+                Ok(())
+            })();
+            PAUSAR_NA_DESMONTAGEM.store(0, SeqCst);
+            crate::interpretador::desativar_para_teste();
+            r
+        })
+    })
+}
+
+/// Num Terminal de verdade — a janela com o foco, o programa, o
+/// pseudo-terminal —, a cerimônia acaba no meio da senha, e o resto dela,
+/// digitado pela janela, não passa pela coordenação: não faz a versão do
+/// campo crescer nem o arrenda — e, num campo de outro, não seria
+/// `CONFLICT`: a tecla nem chega à coordenação. O Enter que acaba o
+/// engolir também não; as teclas de depois dele, que o console não engole,
+/// passam — mesmo as que a janela recebe antes de o console tratar o Enter.
+pub(super) fn pareamento_o_terminal_de_verdade_engole_fora_da_coordenacao() -> Resultado {
+    use crate::interpretador::{self as interp, Modo};
+    com_a_cerimonia(|| {
+        com_o_terminal_de_verdade(|console, _, recurso| {
+            let esperar_a_linha = |esperada: (Modo, usize), erro: &'static str| -> Resultado {
+                super::esperar_ate(
+                    || {
+                        super::atender_consoles();
+                        interp::linha_de_teste(console) == Some(esperada)
+                    },
+                    600,
+                )
+                .map_err(|_| erro)
+            };
+            o_terminal_engolindo(console, 2_003_200)?;
+            // O resto, o Enter e o começo da linha seguinte, todos pela
+            // janela antes de o console tratar o Enter: só os dois depois
+            // dele passam pela coordenação.
+            let versao = crate::coordenacao::estado(recurso).versao;
+            super::digitar_pelo_teclado(" resto\nab")?;
+            esperar_a_linha(
+                (Modo::Comando, 2),
+                "o que veio depois do Enter nao chegou a linha do terminal",
+            )?;
+            let depois = crate::coordenacao::estado(recurso).versao;
+            if interp::engolindo_de_teste(console) || depois != versao + 2 {
+                crate::log_error!("teste", "a versao do campo foi de {} a {}", versao, depois);
+                return Err(
+                    "o resto da senha passou pela coordenacao, ou o que veio depois do Enter nao",
+                );
+            }
+            Ok(())
+        })
+    })
+}
+
+/// A janela do Terminal fechada pela caixa de fechar, com uma cerimônia
+/// viva no console dele: a chamada `fechar` do Terminal fecha o console, e
+/// a cerimônia acaba ali dentro — `andar`, que, com a saída da cerimônia
+/// nas vagas de verdade, sonda a pilha de rede, roda no handler da chamada:
+/// no x86 com as interrupções mascaradas, no ARM na pilha de exceção do
+/// núcleo. O Terminal fecha, a cerimônia acaba pela sessão que acabou, e o
+/// `logout` diz quem fechou — a chamada, e não o coletor.
+pub(super) fn pareamento_o_terminal_fechado_com_a_cerimonia_viva() -> Resultado {
+    use crate::ui::{Acao, Origem};
+    com_a_cerimonia(|| {
+        com_o_terminal_de_verdade(|console, camada, _| {
+            entrar(console, "bia")?;
+            // A saída da cerimônia nas vagas de verdade: `andar` sonda a
+            // pilha de rede.
+            crate::pareamento::saida_de_teste(false);
+            aceitar(console, NOME)?;
+            let fechar =
+                crate::ui::id_do_elemento(camada, 0).ok_or("id de elemento fora da faixa")?;
+            let seq = super::seq_da_auditoria();
+            let desde = crate::log::total_emitidos();
+            crate::ui::agir(fechar, Acao::Pressionar, None, Origem::Agente(0))?;
+            super::esperar_ate(
+                || {
+                    super::atender_consoles();
+                    let mut fechou = false;
+                    crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                        fechou |= r.seq >= desde
+                            && r.subsistema == "usuario"
+                            && r.mensagem() == "terminal: fechado";
+                    });
+                    fechou
+                },
+                600,
+            )
+            .map_err(|_| "a caixa de fechar nao fechou o terminal")?;
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::FimDaSessao),
+                "a cerimonia viva nao acabou com o terminal fechado",
+            )?;
+            let logout = super::registros_depois(seq, |e| {
+                e.metodo == "person.logout" && e.recurso == console.texto()
+            });
+            if logout
+                .iter()
+                .map(|(_, e)| e.detalhe.as_str())
+                .collect::<Vec<_>>()
+                != ["o terminal fechou pelo press de agente 0 na arvore"]
+            {
+                crate::log_error!("teste", "{:?}", logout);
+                return Err(
+                    "o logout do terminal fechado com a cerimonia viva nao veio da chamada",
+                );
+            }
+            Ok(())
+        })
+    })
+}
