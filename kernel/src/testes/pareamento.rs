@@ -4131,11 +4131,15 @@ pub(super) fn smp_o_fim_com_a_senha_ja_confirmada_nao_engole() -> Resultado {
     static FASE: AtomicU8 = AtomicU8::new(0);
 
     extern "C" fn vencer_na_conferencia(_argumento: u64) -> ! {
+        // Um prazo para o fio inteiro: o caso que desiste antes de ele subir
+        // não o deixa girando num núcleo pelo resto da suíte.
+        let fim = crate::tempo::uptime_ms() + 120_000;
         FASE.store(1, SeqCst);
         loop {
             match FASE.load(SeqCst) {
                 0 => break,
                 2 => {}
+                _ if crate::tempo::uptime_ms() > fim => break,
                 _ => {
                     core::hint::spin_loop();
                     continue;
@@ -4143,20 +4147,21 @@ pub(super) fn smp_o_fim_com_a_senha_ja_confirmada_nao_engole() -> Resultado {
             }
             // O Enter tomou a senha — a linha vazia — e o modo ainda é o
             // dela: a conferência roda. A linha com a senha ainda é antes do
-            // Enter; outro modo, a conferência já passou.
+            // Enter; outro modo, a conferência já passou. O caso que desiste
+            // — a fase deixa de ser 2 — solta o fio, e o desfecho só se grava
+            // por cima do 2: nunca por cima do zero do fim do caso, que o
+            // deixaria girando.
             let limite = crate::tempo::uptime_ms() + 10_000;
-            loop {
+            while FASE.load(SeqCst) == 2 {
                 match interp::linha_de_teste(CONSOLE) {
                     Some((Modo::SenhaDoPareamento, 0)) => {
                         crate::pareamento::adiantar_de_teste(conta::PRAZO_MS);
                         crate::pareamento::vencer();
-                        FASE.store(3, SeqCst);
-                        break;
+                        let _ = FASE.compare_exchange(2, 3, SeqCst, SeqCst);
                     }
                     Some((Modo::SenhaDoPareamento, _)) if crate::tempo::uptime_ms() < limite => {}
                     _ => {
-                        FASE.store(4, SeqCst);
-                        break;
+                        let _ = FASE.compare_exchange(2, 4, SeqCst, SeqCst);
                     }
                 }
                 core::hint::spin_loop();
