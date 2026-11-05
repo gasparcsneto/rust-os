@@ -59699,8 +59699,17 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
                             && e.codigo == Codigo::DenyPolicy
                     })
                     .ok_or("a recusa do executar nao foi gravada")?;
-                    let certo = e.detalhe.starts_with("pelo processo ")
-                        && e.detalhe.contains("(instalador ")
+                    // O processo — o filho do instalador, que executa — e o
+                    // programa: o nome sai antes do motivo quando o detalhe
+                    // passa do teto, e o resumo fica. O motivo inteiro, e a
+                    // decisão.
+                    let programa = e
+                        .detalhe
+                        .strip_prefix("pelo processo ")
+                        .and_then(|resto| resto.split_once(" ("))
+                        .map(|(_, programa)| programa);
+                    let certo = programa
+                        .is_some_and(|p| p.starts_with("instalador ") || p.starts_with("? "))
                         && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
                     if !certo {
                         crate::log_error!("teste", "{:?}", e);

@@ -712,6 +712,77 @@ pub(crate) mod testes {
         );
     }
 
+    /// O detalhe de uma execução cuja descrição de programa encolheu acima
+    /// do teto — ver `politica::auditoria::detalhe_composto` —: o processo,
+    /// a decisão e o motivo se leem como sempre, e o programa é o abreviado.
+    #[test]
+    fn o_detalhe_abreviado() {
+        for (detalhe, programa) in [
+            (
+                "pelo processo 1234 (? abcd1234 de duke-oficial): o selo nao confere com o codigo; decisao 123456",
+                "? abcd1234 de duke-oficial",
+            ),
+            (
+                "pelo processo 1234 (? abcd1234 de ?): o selo nao confere com o codigo; decisao 123456",
+                "? abcd1234 de ?",
+            ),
+            (
+                "pelo processo 1234 (? abcd1234): o selo nao confere com o codigo; decisao 123456",
+                "? abcd1234",
+            ),
+        ] {
+            let d = ler_detalhe(detalhe);
+            assert_eq!(d.processo, Some((1234, programa.to_string())));
+            assert_eq!(d.decisao, Some(123_456));
+            assert_eq!(d.resto, "o selo nao confere com o codigo");
+            assert!(politica::auditoria::descricao_abreviada(programa));
+        }
+    }
+
+    /// O achado F1: o `process.exec` recusado por um processo de descrição
+    /// longa — o maior nome e o maior editor —, com a decisão de seis
+    /// dígitos ou mais, guarda o motivo, e cada falta é reconhecida; também
+    /// a que perde o fim, com o fio e a decisão enormes.
+    #[test]
+    fn a_falta_de_quem_tem_descricao_longa() {
+        use politica::procedencia::{Falta, nao_confiado};
+        let editor = "e".repeat(32);
+        let motivos = [
+            String::from(Falta::SemSelo.motivo()),
+            String::from(Falta::NaoConfere.motivo()),
+            String::from(Falta::EditorDesconhecido.motivo()),
+            nao_confiado(&editor),
+        ];
+        for (fio, decisao) in [
+            (1234u64, 123_456u64),
+            (1234, 12_345_678),
+            (1_234_567, u64::MAX),
+        ] {
+            let pelo = alloc::format!(
+                "pelo processo {fio} ({} abcd1234 de {editor})",
+                "n".repeat(32)
+            );
+            for (f, motivo) in Falta::TODAS.into_iter().zip(&motivos) {
+                let detalhe = politica::auditoria::detalhe_composto(
+                    Some(&pelo),
+                    motivo,
+                    &alloc::format!("; decisao {decisao}"),
+                );
+                let r = registro(9, [0; 32], |r| {
+                    r.metodo = "process.exec".to_string();
+                    r.recurso = "/armazem/compartilhado/codigo/x".to_string();
+                    r.codigo = Codigo::DenyPolicy;
+                    r.detalhe = detalhe.clone();
+                });
+                let e = Evento::de(&r, 0);
+                assert_eq!(e.tipo, Tipo::Execucao, "{detalhe}");
+                assert_eq!(e.processo, Some((fio, "? abcd1234 de ?".to_string())));
+                assert_eq!(e.decisao, Some(decisao), "{detalhe}");
+                assert_eq!(e.falta_de_procedencia(), Some(f), "{detalhe}");
+            }
+        }
+    }
+
     #[test]
     fn os_tipos() {
         let tipo = |f: fn(&mut Registro)| Evento::de(&registro(1, [0; 32], f), 0).tipo;

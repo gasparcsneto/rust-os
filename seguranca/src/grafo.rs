@@ -231,7 +231,15 @@ impl Grafo {
 
     /// Um processo apareceu executando `programa`: o primeiro pedido dele,
     /// ou o primeiro depois de um `executar`.
+    ///
+    /// A descrição que o detalhe de uma execução abreviou acima do teto —
+    /// `? <resumo> de <editor>`, ver `politica::auditoria::detalhe_composto`
+    /// — não é outro programa: é o mesmo processo, que o registro da decisão
+    /// citada descreve inteiro. Não muda o programa dele nem vira um nó.
     pub fn executa(&mut self, epoca: u32, fio: u64, programa: &str) {
+        if politica::auditoria::descricao_abreviada(programa) {
+            return;
+        }
         if let Some(p) = self.processos.get_mut(&(epoca, fio)) {
             if p.programa.as_deref() == Some(programa) {
                 return;
@@ -371,6 +379,39 @@ mod testes {
         // Outro boot: o fio 12 de lá não é este.
         assert!(!g.proveniencia(2, 12).completa());
         assert!(g.proveniencia(2, 12).cadeia.is_empty());
+    }
+
+    /// A descrição que o detalhe de uma execução abreviou acima do teto não
+    /// troca o programa do processo nem vira um nó: é o mesmo processo. O
+    /// `executar` de verdade troca.
+    #[test]
+    fn a_descricao_abreviada_nao_troca_o_programa() {
+        let mut g = Grafo::novo();
+        g.nasceu(
+            0,
+            7,
+            p(Criador::Principal("serial".into()), Aresta::Lancou, 1),
+        );
+        g.executa(0, 7, "loja abcd1234 de duke-oficial");
+        let arestas = g.arestas();
+        for abreviada in [
+            "? abcd1234 de duke-oficial",
+            "? abcd1234 de ?",
+            "? abcd1234",
+        ] {
+            g.executa(0, 7, abreviada);
+            // E de um processo que o grafo não conhece, também nada.
+            g.executa(0, 8, abreviada);
+        }
+        assert_eq!(g.arestas(), arestas);
+        let programa = |g: &Grafo| g.processo(0, 7).and_then(|p| p.programa.clone());
+        assert_eq!(
+            programa(&g).as_deref(),
+            Some("loja abcd1234 de duke-oficial")
+        );
+        g.executa(0, 7, "outro 01020304");
+        assert_eq!(programa(&g).as_deref(), Some("outro 01020304"));
+        assert_eq!(g.arestas(), arestas + 1);
     }
 
     /// O criador que saiu da memória: a cadeia para, e diz que parou.

@@ -732,6 +732,69 @@ fn o_codigo_adulterado_alerta_e_nao_contem() {
     assert_eq!(quantas, 1);
 }
 
+/// O achado F1: o `process.exec` de um código adulterado por um processo de
+/// descrição longa — um programa selado, com o maior nome e o maior editor
+/// —, com a decisão de seis dígitos ou mais. O detalhe, composto como o
+/// kernel o compõe, encolhe a descrição e guarda o motivo, e o NSF alerta;
+/// o corte de antes levava o motivo, e o alerta não saía. A descrição
+/// abreviada não vira outro programa do processo no grafo: o programa dele é
+/// o da decisão, descrito inteiro.
+#[test]
+fn o_codigo_adulterado_de_quem_tem_descricao_longa() {
+    use politica::auditoria::{MAIOR_DETALHE, detalhe_composto};
+    use politica::procedencia::Falta;
+    let caminho = "/armazem/compartilhado/codigo/vindo-adulterado";
+    let programa = format!("{} 0a1b2c3d de {}", "n".repeat(32), "e".repeat(32));
+    let pelo = format!("pelo processo 41 ({programa})");
+    for decisao in [123_456u64, 12_345_678, 1_234_567_890] {
+        let mut a = Auditoria::nova();
+        let mut m = Motor::novo();
+        // A decisão do gate, com a descrição inteira: sem citação, nada
+        // encolhe.
+        let decidida = detalhe_composto(Some(&pelo), "", "");
+        assert_eq!(decidida, pelo);
+        a.gravar(do_agente("process.exec", caminho, Codigo::Allow, &decidida));
+        // A execução dela, que recusa o código adulterado.
+        let detalhe = detalhe_composto(
+            Some(&pelo),
+            Falta::NaoConfere.motivo(),
+            &format!("; decisao {decisao}"),
+        );
+        assert!(detalhe.len() <= MAIOR_DETALHE, "{detalhe}");
+        let adulterado = a.gravar(do_agente(
+            "process.exec",
+            caminho,
+            Codigo::DenyPolicy,
+            &detalhe,
+        ));
+        ler(&mut m, &a);
+        let d = m
+            .incidentes
+            .todos()
+            .flat_map(|i| i.deteccoes.iter().cloned())
+            .find(|d| d.regra == Regra::CodigoAdulterado)
+            .unwrap_or_else(|| panic!("o codigo adulterado nao foi detectado: {detalhe}"));
+        assert_eq!(d.registros, vec![adulterado]);
+        assert_eq!(d.severidade, Severidade::Alta);
+        assert!(d.explicacao.contains(caminho), "{}", d.explicacao);
+        assert!(
+            d.explicacao.contains("pelo processo 41 (? 0a1b2c3d de ?)"),
+            "{}",
+            d.explicacao
+        );
+        assert!(m.pedidos().is_empty());
+        // O grafo: o processo executa o programa da decisão, e só ele.
+        let executa: Vec<No> = m
+            .grafo
+            .vizinhos(&No::Processo { epoca: 0, fio: 41 })
+            .into_iter()
+            .filter(|(aresta, _, sai)| *aresta == Aresta::Executa && *sai)
+            .map(|(_, no, _)| no)
+            .collect();
+        assert_eq!(executa, vec![No::Programa(programa.clone())], "{decisao}");
+    }
+}
+
 /// Só um incidente alto leva a saída a ser contida. Três pedidos distintos
 /// fora do alcance — o primeiro degrau — são de olhar: uma observação, sem
 /// incidente, e a conexão que vem depois é só registrada. O mesmo pedido

@@ -1629,12 +1629,15 @@ fn decisoes_de_troca(antes: u64) -> usize {
 /// processo `fio`, com `motivo` e a citação da decisão `decisao` no fim — o
 /// detalhe inteiro como a auditoria o compõe
 /// (`politica::auditoria::detalhe_composto`): passando do teto do detalhe,
-/// o motivo perde o fim, e a citação fica.
+/// a descrição do programa encolhe primeiro — o nome sai —, depois o
+/// motivo perde o fim, e a citação fica. O motivo só é cortado com a
+/// descrição toda encolhida, conferido aqui sem a conta da auditoria.
 fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decisao: u64) -> bool {
     let pelo = format!("pelo processo {fio} (");
+    let citacao = format!("; decisao {decisao}");
     // O programa com que o processo foi gravado — o de antes da troca, ou o
     // que ele já adotou: quem chama confere qual.
-    let Some((programa, _)) =
+    let Some((programa, texto)) =
         r.1.detalhe
             .strip_prefix(&pelo)
             .and_then(|resto| resto.split_once("): "))
@@ -1644,9 +1647,28 @@ fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decis
     let esperado = politica::auditoria::detalhe_composto(
         Some(&format!("{pelo}{programa})")),
         motivo,
-        &format!("; decisao {decisao}"),
+        &citacao,
     );
-    r.1.codigo == codigo && r.0 > decisao && r.1.detalhe == esperado
+    let texto_certo = match texto.strip_suffix(&citacao) {
+        Some(t) if t == motivo => true,
+        Some(t) => motivo.starts_with(t) && toda_encolhida(programa),
+        None => false,
+    };
+    r.1.codigo == codigo
+        && r.0 > decisao
+        && r.1.detalhe == esperado
+        && r.1.detalhe.len() <= politica::auditoria::MAIOR_DETALHE
+        && texto_certo
+}
+
+/// Se a descrição de programa de um registro é a que encolheu toda: o
+/// nome fora e, de um código de fora da imagem, o editor também — `?
+/// <resumo>` ou `? <resumo> de ?`.
+fn toda_encolhida(programa: &str) -> bool {
+    match programa.strip_prefix("? ") {
+        Some(resto) => !resto.contains(' ') || resto.ends_with(" de ?"),
+        None => false,
+    }
 }
 
 /// A troca de imagem de quem não é ponta de fluxo nenhum não toma a ordem
@@ -2078,7 +2100,8 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
 /// o erro (`PROGRAMA_DESCONHECIDO`) e segue o que era, o fluxo continua, e
 /// nenhum fim é gravado. A decisão do gate termina dita: a execução dela,
 /// `ERROR`, com o motivo da leitura e a citação — o motivo do dispositivo é
-/// longo, e o detalhe o corta no teto, com a citação inteira no fim.
+/// longo: acima do teto, o nome do programa sai da descrição antes, o
+/// motivo perde só o que ainda não cabe, e a citação fica inteira no fim.
 pub(super) fn fluxo_a_troca_cujo_arquivo_nao_se_le() -> Resultado {
     use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
     troca_de_ponta_que_falha_intacta(
@@ -2659,13 +2682,16 @@ pub(super) fn fluxo_os_bytes_nao_autorizam() -> Resultado {
                 e.metodo == "fs.write" && e.recurso == caminho && e.codigo == Codigo::Allow
             });
             // A decisão do gate e a execução que a cita — as duas em nome de
-            // quem leu, e de mais ninguém.
-            let dele = format!("pelo processo {} (fluxos", b.fio());
+            // quem leu, e de mais ninguém. A execução passa do teto do
+            // detalhe com a decisão de cinco dígitos: a descrição do programa
+            // encolhe — o nome sai, o resumo fica — e o texto vai inteiro.
+            let dele = format!("pelo processo {} (fluxos {})", b.fio(), b.p.resumo8());
+            let abreviado = format!("pelo processo {} (? {})", b.fio(), b.p.resumo8());
             let certo = match gravado.as_slice() {
                 [(decisao, d), (_, x)] => {
                     d.detalhe.starts_with(&dele)
                         && !d.detalhe.contains("decisao ")
-                        && x.detalhe.starts_with(&dele)
+                        && (x.detalhe.starts_with(&dele) || x.detalhe.starts_with(&abreviado))
                         && x.detalhe.ends_with(&format!("; decisao {decisao}"))
                 }
                 _ => false,
