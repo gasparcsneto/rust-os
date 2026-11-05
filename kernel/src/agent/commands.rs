@@ -2075,12 +2075,12 @@ pub static COMANDOS: &[Command] = &[
     },
     Command {
         nome: "keyboard.read",
-        resumo: "O que foi digitado no teclado da maquina, e os contadores dele. Tira da fila o que devolve.",
+        resumo: "O que foi digitado no teclado da maquina desde a ultima leitura de quem pede, e os contadores dele. Le do historico, com um cursor por leitor: nao tira nada de ninguem.",
         params: &[ParamSpec {
             nome: "max",
             tipo: TipoParam::Inteiro,
             obrigatorio: false,
-            descricao: "Quantos caracteres tirar da fila (padrao: 64, maximo: 64).",
+            descricao: "Quantos caracteres ler do historico, a partir do cursor de quem pede (padrao: 64, maximo: 64).",
         }],
         acesso: Acesso::Exige(Permissao::KeyboardRead),
         recurso: None,
@@ -6020,8 +6020,11 @@ fn display_info(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     //
     // Quantas teclas eles digitaram não vai: a conta crescia um por
     // caractere, também os da senha digitada num Terminal, e dava a quem lê
-    // este relatório — `system.read` — o tamanho e o ritmo dela. Uma senha
-    // não vai a relatório nenhum, nem a conta dos caracteres dela.
+    // este relatório — `system.read` — o tamanho e o ritmo dela. Este
+    // relatório não dá a conta dos caracteres de uma senha; outros ainda
+    // andam com cada tecla — o `scheduled` do fio do Terminal em
+    // `threads.list`, a linha do teclado em `irq.stats` —, e isso é das
+    // decisões pendentes (README).
     let (perdidos, avisos) = crate::pseudoterminal::estatisticas();
     w.key("terminal")?;
     w.begin_object()?;

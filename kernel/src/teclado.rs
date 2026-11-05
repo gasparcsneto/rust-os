@@ -127,11 +127,13 @@ static PARA_JANELAS: Fila<char, CAPACIDADE> = Fila::nova();
 /// pedido de senha.
 ///
 /// No console físico, o bit é conferido quando ele **consome** a tecla
-/// ([`consumida`]): toda mudança de modo dele liga ou desliga o bit dentro
-/// do tratamento de uma tecla, antes de a seguinte ser consumida, e então o
-/// bit dele é o modo da linha. Numa janela, a tecla é conferida quando
-/// chega: a senha digitada num Terminal antes de o console dele pedi-la
-/// ainda entra.
+/// ([`consumida`]): as mudanças de modo dele ligam ou desligam o bit no
+/// tratamento de uma tecla, antes de a seguinte ser consumida; a única de
+/// fora — o fim da cerimônia de pareamento, que só sai de um modo secreto
+/// — o deixa ligado enquanto o console engole o resto da senha. No
+/// consumo, o bit dele é o modo da linha, ou o engolir. Numa janela, a
+/// tecla é conferida quando chega: a senha digitada num Terminal antes de
+/// o console dele pedi-la ainda entra.
 static PEDINDO_SENHA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Marca se o console `indice` está pedindo uma senha. Chamada pelo

@@ -280,8 +280,9 @@ impl Terminal {
     ///
     /// Fechado pela caixa de fechar, o Terminal fecha o pseudo-terminal
     /// antes de sair: o console dele fecha, a sessão de quem estava nele
-    /// acaba, e o registro do `logout` diz quem fechou — o `press` de um
-    /// agente pela árvore, que o kernel anotou, ou o clique da pessoa. Sem
+    /// acaba, e o registro do `logout` diz quem fechou — o `press` pela
+    /// árvore, de um agente ou da pessoa, que o kernel anotou, ou o clique
+    /// da pessoa. Sem
     /// isso, o coletor acharia o dono morto, e o registro diria só que o
     /// terminal morreu — o mesmo da queda. O log vem depois: quem espera
     /// `terminal: fechado` já acha o `logout` gravado. O encerrar e as

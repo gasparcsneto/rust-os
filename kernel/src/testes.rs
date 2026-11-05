@@ -16959,8 +16959,11 @@ fn ultimo_que(
 /// O registro leva o nome e o resumo dos parâmetros só do comando que
 /// existe. O que não é comando vai com o marcador e o resumo do vazio: a
 /// senha digitada no lugar errado não chega à auditoria — nem a primeira
-/// palavra em claro, nem o resto num resumo —, nem ao log, nem ao
-/// histórico.
+/// palavra em claro, nem o resto num resumo —, nem ao log, nem aos
+/// relatórios. A linha entra direto no console, e não pelo teclado: o
+/// histórico, aqui, não a vê — a de verdade, digitada no teclado numa
+/// linha que pede um comando, ecoa e entra no histórico, e isso é das
+/// decisões pendentes (README).
 fn consoles_nada_antes_do_login() -> Resultado {
     use crate::autorizacao::COMANDO_DESCONHECIDO;
     use crate::pessoas::Console;
@@ -17040,8 +17043,9 @@ fn consoles_nada_antes_do_login() -> Resultado {
                 );
             }
         }
-        // A senha no lugar errado não ficou em lugar nenhum: a auditoria, o
-        // log, os relatórios e o histórico do teclado.
+        // A senha no lugar errado não ficou na auditoria, no log nem nos
+        // relatórios. O histórico do teclado, aqui, não a vê: a linha entrou
+        // direto no console.
         nenhum_segredo_em_lugar_nenhum(&[NO_LUGAR_ERRADO], &[])?;
         // E o marcador não é nome de comando nenhum.
         if crate::agent::registry::encontrar(COMANDO_DESCONHECIDO).is_some() {

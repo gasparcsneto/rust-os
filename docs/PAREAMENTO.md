@@ -131,10 +131,19 @@ O fim pode chegar enquanto a Pessoa digita a senha — o outro desistiu, a
 conexão caiu, o prazo venceu, a sessão acabou. A linha volta a pedir um
 comando, mas ela não sabe, e continua digitando: o console então **engole**
 o que ela digitar até o Enter seguinte. Não ecoa, não vai à árvore
-semântica nem ao histórico do teclado, e não vira comando; o console diz
-que engole, sem prompt, e o Enter devolve o prompt sem executar nada. A
-árvore não edita nem confirma a linha nesse meio-tempo. Com a senha já
-levada pelo Enter — a conferência em curso —, não há o que engolir.
+semântica nem ao histórico do teclado, não passa pela coordenação, e não
+vira comando; o console diz que engole, sem prompt, e o Enter devolve o
+prompt sem executar nada, com a linha vazia. A árvore não edita a linha
+nesse meio-tempo, e um agente não a confirma; a confirmação da Pessoa pela
+árvore vale como o Enter que acaba o engolir, sem executar nada. Com a
+senha já levada pelo Enter — a conferência em curso —, não há o que
+engolir. O fim chega de outro núcleo e pode correr com a tecla e com o
+Enter: a tecla que chega à linha depois dele é engolida ali, e o Enter que
+leu a linha da senha antes dele e a toma depois é o que acaba o engolir —
+a linha seguinte da Pessoa não é engolida. Num Terminal, as teclas que a
+janela recebe até o Enter vão ao programa sem passar pela coordenação; as
+de depois dele passam; e a que o Terminal não recebe — ele morreu — some,
+em vez de cair no console físico.
 
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
@@ -224,7 +233,7 @@ compartilhada, a nuvem e a conta central.
   a coerência sob passos sorteados; e o `sigilo`: o prólogo e os quadros
   da cerimônia, que não abrem como enlace nem como agente, e um vetor fixo
   das efêmeras aos códigos e ao `R`.
-- **Suíte** (x86 e ARM): 33 casos `pareamento:` — o outro Duke é a suíte,
+- **Suíte** (x86 e ARM): 39 casos `pareamento:` — o outro Duke é a suíte,
   com uma chave de teste, iniciando pela vaga do enlace ou aceitando pela
   via do fio da cerimônia, e a Pessoa digita no console. Os dois lados; o
   código errado, expirado, reutilizado; o replay; o par no meio; outro Duke
@@ -240,8 +249,14 @@ compartilhada, a nuvem e a conta central.
   commit), confirm × expiry, × revoke, × confirm, o commit duplicado —;
   duas Pessoas e o mesmo dispositivo; o `device.forget` (o próprio, o de
   outra Pessoa, e parear de novo); a senha errada na janela de tentativas;
-  a auditoria e a proveniência; a meia relação; e o outro que desiste
-  depois de este lado gravar.
+  a auditoria e a proveniência; a meia relação; o outro que desiste
+  depois de este lado gravar; o fim no meio da senha — o resto dela
+  engolido até o Enter, num Terminal e no físico, fora do histórico —; o
+  fim que corre com a tecla e com o Enter, entre duas tomadas da linha; o
+  Terminal de verdade, em que o resto engolido não passa pela
+  coordenação, e o que morre engolindo, cuja tecla não cai no console
+  físico; e o Terminal fechado pela caixa de fechar com a cerimônia viva,
+  que acaba dentro da chamada `fechar` dele.
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, com a senha. Uma
@@ -293,4 +308,5 @@ agora logo depois de um pedido só dela.
   minutos na CI. A cerimônia completa (B01, com a entrega do estágio 1 pela
   relação nova), uns 20 s — quase tudo é o teclado do emulador, uma tecla
   de cada vez, conferida na tela antes do Enter.
-- Os casos `pareamento:` da suíte, os 33, levam uns 3 minutos no x86.
+- Os casos `pareamento:` da suíte, os 39, levam uns 4 minutos no x86 e uns
+  3 no ARM.

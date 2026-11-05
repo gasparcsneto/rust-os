@@ -804,7 +804,11 @@ tecla zeradas (N139–N143); quem fechou o Terminal no registro do `logout`
 (N144–N147); e o `display.info` sem a conta do que se digita (N148). As
 vinte com caso, reprovadas no x86; a N141, a N142 e a N143 ficam sem
 caso: a suíte não observa a pilha de outro fio nem a memória de um
-processo.
+processo. E as dos ajustes do passo 1, depois do adversário e do revisor
+(N149–N156): o resto da senha engolido também quando o fim da cerimônia
+corre com a tecla e com o Enter, e na janela do Terminal; e o desfazer
+da anotação de quem fechou, que compara antes de restaurar. Reprovadas no
+x86, menos a N150, equivalente; a N155, depois do reforço do caso.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -946,14 +950,22 @@ processo.
 | N138 | fora do SDK (passo 1, N5): engolir também com a linha da senha já confirmada — a linha seguinte some | `smp: o fim da cerimonia com a senha ja confirmada nao engole` |
 | N139 | fora do SDK (passo 1, X5): `eventos::colher` sem zerar a posição entregue | `eventos: a fila do canal nao guarda o que entregou` |
 | N140 | fora do SDK (passo 1, X5): `eventos::descartar` sem zerar as posições que sobram | `eventos: a fila do canal nao guarda o que entregou` |
-| N141 | fora do SDK (passo 1, X5): `escrever_no_terminal` sem zerar a cópia na pilha do kernel | **sem caso**: a pilha do kernel de outro fio não é observável pela suíte — a defesa é a revisão e a `politica::sigiloso::zerar`, testada no hospedeiro |
-| N142 | fora do SDK (passo 1, X5): `ler_eventos` do kernel sem zerar os eventos e os bytes | **sem caso**, pelo mesmo motivo |
-| N143 | fora do SDK (passo 1, X5): o runtime — ou o Terminal na saída no meio do lote — sem zerar | **sem caso**: a memória do processo não é observável pela suíte |
+| N141 | fora do SDK (passo 1, X5): `escrever_no_terminal` sem zerar a cópia na pilha do kernel | **sem caso**: a pilha do kernel de outro fio não é observável pela suíte — a defesa é a revisão da `politica::sigiloso::zerar`, cujo efeito nenhum teste confere (os do hospedeiro conferem o `zerar_bloco`) |
+| N142 | fora do SDK (passo 1, X5): `ler_eventos` do kernel sem zerar os bytes de cada evento | **sem caso**, pelo mesmo motivo |
+| N143 | fora do SDK (passo 1, X5): o runtime sem zerar a leitura dos eventos — a cópia de cada um e os bytes, na volta com eventos | **sem caso**: a memória do processo não é observável pela suíte |
 | N144 | fora do SDK (passo 1): o `press` da árvore na caixa de fechar do Terminal sem a anotação | `terminal: digita e mostra a resposta` — o `logout` do agente sai como o clique |
-| N145 | fora do SDK (passo 1): o Terminal sai sem fechar o pseudo-terminal | `terminal: digita e mostra a resposta` — o clique sai como `o terminal morreu` |
+| N145 | fora do SDK (passo 1): o Terminal sai sem fechar o pseudo-terminal | `terminal: digita e mostra a resposta` — o `press` do agente, o primeiro fechamento do caso, sai como `o terminal morreu` |
 | N146 | fora do SDK (passo 1): `pseudoterminal::fechar` sem olhar a anotação | `terminal: o logout diz quem fechou`, `terminal: digita e mostra a resposta` |
 | N147 | fora do SDK (passo 1): a anotação que não se desfaz quando o evento não chega ao Terminal | `terminal: digita e mostra a resposta` — a fila do Terminal cheia, com ele preso ao núcleo da suíte |
 | N148 | fora do SDK (passo 1, N3): o `display.info` com `terminal.typed` de novo | `agente: display.info descreve a pilha` |
+| N149 | fora do SDK (ajustes do passo 1, A1): a letra que passou pelo engolir antes do fim chega à linha sem conferir o engolir | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` |
+| N150 | fora do SDK (ajustes do passo 1, A1): o apagar sem conferir o engolir | **sobrevive**: equivalente — o fim que põe o console a engolir apaga a linha, e o apagar numa linha vazia não muda nada |
+| N151 | fora do SDK (ajustes do passo 1, A1): o Enter que acaba o engolir sem apagar a linha | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` — o caso põe algo na linha enquanto ela engole |
+| N152 | fora do SDK (ajustes do passo 1, A2): o Enter que leu a linha da senha antes do fim não acaba o engolir | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` — o console fica engolindo |
+| N153 | fora do SDK (ajustes do passo 1, A6): a janela do Terminal põe na coordenação o que o console engole | `pareamento: o terminal de verdade engole fora da coordenacao` |
+| N154 | fora do SDK (ajustes do passo 1, A6): a janela não conta o Enter, e as teclas depois dele também ficam fora da coordenação | `pareamento: o terminal de verdade engole fora da coordenacao` |
+| N155 | fora do SDK (ajustes do passo 1, A6): a tecla engolida que a janela não entrega cai no console físico | `pareamento: a tecla engolida que o terminal morto nao recebe some` — depois do reforço: com a fila do Terminal cheia, que conta como entregue, sobrevivia |
+| N156 | fora do SDK (ajustes do passo 1, I1): o desfazer da anotação de quem fechou restaura às cegas | `terminal: o logout diz quem fechou` |
 
 ## Medidas
 

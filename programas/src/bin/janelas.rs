@@ -52,7 +52,9 @@
 //! ou a do pareamento —, e o log é uma saída sem gate, que `log.tail`
 //! entrega a quem tem `log.read`. Nem o código, nem uma linha por tecla,
 //! que daria a conta e o ritmo dela. A suíte confere a tecla pelo valor do
-//! campo da janela e pela fila do canal.
+//! campo da janela e pela fila do canal. A janela de teste, que só a suíte
+//! abre — a barra publica só o "Sobre" e o Terminal —, ainda grava o texto
+//! do campo dela no Enter (`janelas: escrito <id> [<texto>]`).
 
 #![no_std]
 #![no_main]
