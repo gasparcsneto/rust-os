@@ -4235,6 +4235,21 @@ fn vencer_no_meio() {
     crate::pareamento::vencer();
 }
 
+/// [`vencer_no_meio`], e algo na linha logo depois do fim, posto por fora —
+/// o que entrasse nela por um caminho que não confere o engolir: o apagar
+/// que correu com o fim não pode tirar nada dela. Um por console, que o
+/// gancho não recebe argumento.
+fn vencer_e_por_no_terminal() {
+    vencer_no_meio();
+    crate::interpretador::por_na_linha_de_teste(CONSOLE, "ab");
+}
+
+/// O mesmo, no físico.
+fn vencer_e_por_no_fisico() {
+    vencer_no_meio();
+    crate::interpretador::por_na_linha_de_teste(Console::Fisico, "ab");
+}
+
 /// O fim da cerimônia corre com a tecla e com o Enter da Pessoa: chega de
 /// outro núcleo entre duas tomadas da trava dos consoles. A suíte o põe ali
 /// com um gancho — ver `interpretador::NoMeio` —, num Terminal e no físico:
@@ -4243,7 +4258,8 @@ fn vencer_no_meio() {
 ///   depois do fim: é o resto da senha — não ecoa, não fica na linha e não
 ///   vai à frente do comando seguinte;
 /// - o que entrasse na linha nesse meio-tempo por outro caminho sai no
-///   Enter que acaba o engolir;
+///   Enter que acaba o engolir, e o apagar que correu com o fim não o tira
+///   — a suíte o põe na linha por fora, porque nenhum caminho de hoje põe;
 /// - entre o Enter ler o modo da linha e tomá-la, o Enter já foi digitado:
 ///   ele acaba o engolir — a linha seguinte da Pessoa executa, e o bit do
 ///   histórico volta.
@@ -4265,7 +4281,7 @@ pub(super) fn pareamento_o_fim_entre_duas_tomadas_da_linha() -> Resultado {
     })
 }
 
-/// As duas corridas de [`pareamento_o_fim_entre_duas_tomadas_da_linha`] no
+/// As corridas de [`pareamento_o_fim_entre_duas_tomadas_da_linha`] no
 /// console `console`; `n` numera as conexões do outro Duke.
 fn corridas_no_console(console: Console, n: u64) -> Resultado {
     use crate::interpretador::{self as interp, Modo, NoMeio};
@@ -4310,6 +4326,36 @@ fn corridas_no_console(console: Console, n: u64) -> Resultado {
     // no Enter que acaba o engolir.
     interp::por_na_linha_de_teste(console, "agent.ping");
     super::digitar_no_console(console, " resto\n");
+    if interp::engolindo_de_teste(console) || !a_linha_vazia() {
+        return Err("o Enter que acabou o engolir deixou algo na linha");
+    }
+    executa_de_novo(console)?;
+    drop(ini);
+
+    // O mesmo com o apagar: o que estivesse na linha enquanto ela engole —
+    // posto por fora, logo depois do fim — o apagar que correu com ele não
+    // tira; e o Enter o apaga.
+    let ini = ate_a_senha(n + 2)?;
+    super::digitar_no_console(console, "senha");
+    let gancho: fn() = if console == Console::Fisico {
+        vencer_e_por_no_fisico
+    } else {
+        vencer_e_por_no_terminal
+    };
+    interp::no_meio_de_teste(Some((NoMeio::DaTecla, gancho)));
+    super::digitar_no_console(console, "\u{8}");
+    interp::no_meio_de_teste(None);
+    acabou_com(
+        Lado::Aceita,
+        Desfecho::Desfeita(conta::Motivo::Prazo),
+        "o fim no meio do apagar nao acabou a cerimonia",
+    )?;
+    if !interp::engolindo_de_teste(console)
+        || interp::linha_de_teste(console) != Some((Modo::Comando, 2))
+    {
+        return Err("o apagar que correu com o fim mexeu na linha que engole");
+    }
+    super::digitar_no_console(console, "\n");
     if interp::engolindo_de_teste(console) || !a_linha_vazia() {
         return Err("o Enter que acabou o engolir deixou algo na linha");
     }
