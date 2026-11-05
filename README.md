@@ -6252,7 +6252,9 @@ falha fechado:
    `SELO_NAO_CONFERE` (−19) ou `EDITOR_NAO_CONFIADO` (−20), e o processo
    segue inteiro — nada foi trocado. No `executar`, o arquivo que o gate
    deixou e não se lê também ganha a execução da decisão, `ERROR` com o
-   motivo da leitura, e o processo ouve `PROGRAMA_DESCONHECIDO` (−7);
+   motivo da leitura, e o processo ouve `PROGRAMA_DESCONHECIDO` (−7) — ou
+   `SEM_MEMORIA` (−5), quando o que faltou foi um pedaço do heap do
+   tamanho do arquivo: ler de novo depois pode dar certo;
 4. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
    de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`.
@@ -6271,6 +6273,25 @@ de uma fonte adulterada —, e a confiança da detecção é média; o NSF não
 planeja contenção por ela: alerta, com o incidente, e a contenção fica com
 quem tem a autoridade. O código sem selo e o editor em quem não se confia
 são política, e não incidente.
+
+A regra reconhece a recusa pelo motivo, e o motivo vai no detalhe do
+registro, que tem teto de 96 bytes, depois de quem pediu — `pelo processo
+N (<nome> <resumo> de <editor>)`, com o nome e o editor de até 32 bytes
+cada — e antes da decisão citada. O corte antigo encolhia o texto
+primeiro: um `executar` de código adulterado por um processo de descrição
+longa, ou com o número da decisão grande, chegava à auditoria sem o
+motivo, e o alerta não saía — e o nome é escolhido por quem escreve o
+programa. Agora, acima do teto, a descrição do programa encolhe antes do
+motivo: o nome sai (`? <resumo> de <editor>`), depois o editor (`?
+<resumo> de ?`), e só então o texto perde o fim. O resumo — o que o
+programa é — fica sempre, e o `?` no lugar do que saiu não é nome de
+programa nem de editor nenhum: a descrição abreviada nunca é a de outro
+programa, nem a de um código da imagem; a inteira está no registro da
+decisão, que a citação aponta, e o grafo do NSF não toma a abreviada por
+outro programa do processo. E o motivo cortado ainda diz a falta, enquanto
+guarda o começo essencial dela (`politica::procedencia::Falta::essencial`):
+o reconhecimento não depende do motivo inteiro. Sem citação — o registro
+de uma decisão — nada encolhe: é ele que guarda a descrição inteira.
 
 O `xtask invariantes` confere o desenho: só `usuario/mod.rs` chama
 `obter` e `programa::carregar`; nada mais em `usuario/` lê um executável
@@ -6653,9 +6674,12 @@ No recurso, o que o programa disse; no detalhe, o processo, o programa, a
 conexão e o **destino real** dela pela tabela da pilha — ou `sem conexao`
 — e a decisão do gate, que é a da permissão `audit.declare` do papel, sem
 recurso. A citação da decisão fica inteira no fim mesmo quando o detalhe
-passa do teto de 96 bytes: quem encolhe é o texto antes dela — um pedaço
-do número seria o número de outro registro
-([`politica::auditoria::detalhe_composto`](politica/src/auditoria.rs)).
+passa do teto de 96 bytes — um pedaço do número seria o número de outro
+registro: quem encolhe é o que vem antes dela, primeiro a descrição do
+programa — o nome, depois o editor —, e só então o texto
+([`politica::auditoria::detalhe_composto`](politica/src/auditoria.rs);
+ver *O NSF vê o adulterado*, em [O código de fora da
+imagem](#o-código-de-fora-da-imagem)).
 Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
 as cotas, nem a contenção. Ela gasta a taxa de quem lançou o programa, e
 é recusada a um processo contido e a uma sessão que acabou. O desfecho é
@@ -9492,7 +9516,17 @@ isso as duas defesas não mudam nada que se veja; a N150 sobreviveu à
 primeira forma do caso, que não punha. A N155 sobreviveu à primeira forma
 do caso, com a fila do Terminal cheia — a fila cheia conta como entregue
 —; o caso passou a matar o Terminal com o coletor segurado, e ela
-reprova.
+reprova. E as do achado F1 do adversário do AE-1 e do #292: a N157 volta
+o corte antigo do detalhe composto — o texto perde o fim antes de a
+descrição do programa encolher —, e o NSF deixa de ver o código adulterado
+de quem tem descrição longa; a N158 reconhece a falta só pelo motivo
+inteiro; a N159 devolve `PROGRAMA_DESCONHECIDO` à leitura que falhou sem
+heap; a N160 deixa o grafo do NSF tomar a descrição abreviada por outro
+programa do processo; e a N161 tira o editor da descrição sem deixar o `de
+?`. Todas reprovadas, uma de cada vez: a N157, a N160 e a N161 pelos testes
+do hospedeiro e pela suíte do x86; a N159, que é do kernel, pela suíte; e a
+N158 só pelos do hospedeiro — com a descrição encolhendo antes, a suíte
+não produz um motivo de procedência cortado.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9573,6 +9607,11 @@ reprova.
 | fora do SDK: a janela do Terminal que põe na coordenação o que o console engole (N153), ou que não conta o Enter (N154) | "pareamento: o terminal de verdade engole fora da coordenacao" |
 | fora do SDK: a tecla engolida que o Terminal morto não recebeu caindo no console físico (N155) | "pareamento: a tecla engolida que o terminal morto nao recebe some" — depois do reforço: a fila cheia conta como entregue |
 | fora do SDK: o desfazer da anotação de quem fechou o Terminal às cegas (N156) | "terminal: o logout diz quem fechou" |
+| fora do SDK (F1): o corte antigo do detalhe composto, com o texto perdendo o fim antes de a descrição do programa encolher (N157) | "nsf: ve o codigo adulterado de quem tem descricao longa", "fluxo: a troca de imagem cujo arquivo nao se le", "fluxo: a troca de imagem cujo arquivo nao cabe no heap"; e os testes do hospedeiro do `politica::auditoria`, do `seguranca::evento` e do motor |
+| fora do SDK (F1): a falta reconhecida só pelo motivo inteiro (N158) | os testes do hospedeiro do `politica::procedencia`, do `politica::auditoria` e do `seguranca::evento` — a suíte não corta o motivo de procedência depois do encolhimento da descrição |
+| fora do SDK (#292): a leitura sem heap no `executar` dizendo `PROGRAMA_DESCONHECIDO` (N159) | "fluxo: a troca de imagem cujo arquivo nao cabe no heap" |
+| fora do SDK (F1): o grafo do NSF tomando a descrição abreviada por outro programa (N160) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `seguranca::grafo` e do motor |
+| fora do SDK (F1): o editor que sai da descrição sem o `de ?` (N161) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `politica::auditoria`, do `seguranca::evento` e do motor |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

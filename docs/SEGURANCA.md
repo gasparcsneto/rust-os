@@ -208,7 +208,7 @@ dispararam:
 | `process-chain` | processos lançados em profundidade ou em rajada a partir do mesmo ator |
 | `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador |
 | `egress-after-probing` | quem tem um incidente alto aberto usa a rede |
-| `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada |
+| `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada. Reconhece o motivo também quando o detalhe passa do teto: a descrição do programa que pediu encolhe antes dele (`? <resumo> de ?`), e o motivo cortado ainda diz a falta enquanto guarda o começo essencial dela — um nome longo não apaga o alerta |
 | `clock-jump` | o relógio civil saltou dentro do envelope da incerteza, ou na primeira sincronização — a gravidade pelo tamanho, a confiança baixa: é o relógio sendo corrigido |
 | `clock-jump-beyond-envelope` | o salto que a incerteza não explica: o contador derivou, ou as fontes se moveram juntas |
 | `clock-jump-pending` | o salto acima do teto, ou para trás fora do envelope, que só uma pessoa confirma: recomenda `time.confirm {round}` com a rodada dele |

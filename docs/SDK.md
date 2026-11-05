@@ -808,7 +808,19 @@ processo. E as dos ajustes do passo 1, depois do adversário e do revisor
 (N149–N156): o resto da senha engolido também quando o fim da cerimônia
 corre com a tecla e com o Enter, e na janela do Terminal; e o desfazer
 da anotação de quem fechou, que compara antes de restaurar. Reprovadas no
-x86; a N150 e a N155, depois do reforço dos casos.
+x86; a N150 e a N155, depois do reforço dos casos. E as do achado F1 do
+adversário do AE-1 — o motivo que o corte do detalhe tirava, e o NSF que
+deixava de ver o código adulterado — e do #292, o erro da leitura sem heap
+no `executar` (N157–N161): o corte antigo, que encolhia o texto antes da
+descrição do programa (N157); o reconhecimento da falta só pelo motivo
+inteiro (N158); a leitura sem heap dizendo `PROGRAMA_DESCONHECIDO` (N159);
+o grafo do NSF tomando a descrição abreviada por outro programa do
+processo (N160); e o editor que sai da descrição sem deixar o `de ?` — o
+código de fora da imagem passando pelo da imagem (N161). Todas reprovadas:
+a N157, a N160 e a N161 pelos testes do hospedeiro e pela suíte do x86; a
+N159, que é do kernel, pela suíte; e a N158 só pelos do hospedeiro — com a
+descrição encolhendo antes, a suíte não produz um motivo de procedência
+cortado.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -966,6 +978,11 @@ x86; a N150 e a N155, depois do reforço dos casos.
 | N154 | fora do SDK (ajustes do passo 1, A6): a janela não conta o Enter, e as teclas depois dele também ficam fora da coordenação | `pareamento: o terminal de verdade engole fora da coordenacao` |
 | N155 | fora do SDK (ajustes do passo 1, A6): a tecla engolida que a janela não entrega cai no console físico | `pareamento: a tecla engolida que o terminal morto nao recebe some` — depois do reforço: com a fila do Terminal cheia, que conta como entregue, sobrevivia |
 | N156 | fora do SDK (ajustes do passo 1, I1): o desfazer da anotação de quem fechou restaura às cegas | `terminal: o logout diz quem fechou` |
+| N157 | fora do SDK (F1): o corte antigo do detalhe composto — a descrição do programa não encolhe, e o texto perde o fim primeiro | hospedeiro: `auditoria::testes::a_descricao_encolhe_antes_do_motivo`, `a_descricao_abreviada_nao_e_a_de_outro_programa`, `o_motivo_cortado_ainda_diz_a_falta`, `o_detalhe_composto_guarda_a_citacao`; `evento::testes::a_falta_de_quem_tem_descricao_longa`; `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa`, `fluxo: a troca de imagem cujo arquivo nao se le`, `fluxo: a troca de imagem cujo arquivo nao cabe no heap` |
+| N158 | fora do SDK (F1): a falta reconhecida só pelo motivo inteiro, sem o começo essencial | hospedeiro: `procedencia::testes::o_motivo_cortado_ainda_diz_a_falta`, `auditoria::testes::o_motivo_cortado_ainda_diz_a_falta`, `evento::testes::a_falta_de_quem_tem_descricao_longa` — a suíte não corta o motivo de procedência depois do encolhimento da descrição |
+| N159 | fora do SDK (#292): a leitura que falhou sem heap no `executar` volta a dizer `PROGRAMA_DESCONHECIDO` | `fluxo: a troca de imagem cujo arquivo nao cabe no heap` |
+| N160 | fora do SDK (F1): o grafo do NSF toma a descrição abreviada por outro programa do processo | hospedeiro: `grafo::testes::a_descricao_abreviada_nao_troca_o_programa`, `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
+| N161 | fora do SDK (F1): o editor sai da descrição sem deixar o `de ?` — o código de fora da imagem passa pelo da imagem | hospedeiro: `auditoria::testes::a_descricao_encolhe_antes_do_motivo`, `a_descricao_abreviada_nao_e_a_de_outro_programa`, `o_motivo_cortado_ainda_diz_a_falta`; `evento::testes::a_falta_de_quem_tem_descricao_longa`; `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
 
 ## Medidas
 

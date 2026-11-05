@@ -143,8 +143,9 @@ para outro fio depois de o gate decidir, a auditoria mostra a decisão
 adiada — a execução dela, `CONFLICT`, que a cita —, e a volta seguinte
 decide de novo. Quem não é ponta não toma a ordem. O `exec` cujo arquivo
 não se lê, ou que falha antes do ponto sem volta, não encerra fluxo nenhum:
-o processo ouve o erro e segue o que era, e a execução da decisão diz a
-falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
+o processo ouve o erro e segue o que era — da leitura,
+`PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para ler o
+arquivo —, e a execução da decisão diz a falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
 que não se mapeia — não tem para onde voltar: os fluxos já acabaram na
 troca, com `o programa mudou`, gravado dentro da ordem como na troca que dá
 certo; a execução da decisão diz `ERROR`, com o motivo, em nome do processo
@@ -286,10 +287,20 @@ nenhum:
   cadeia. A ordem nunca fica presa na rede: o quadro sai com ela solta.
 
 A execução que cita a decisão (`…; decisao N`) a cita inteira mesmo
-quando o detalhe passa do teto de 96 bytes: quem encolhe é o texto antes
+quando o detalhe passa do teto de 96 bytes: quem encolhe é o que vem antes
 dela. O corte do fim — o de sempre, que a suíte completa achou num
 `fs.write` de um processo — deixava `decisao 5587` no lugar de `decisao
-55876`, o número de outro registro.
+55876`, o número de outro registro. E o que encolhe primeiro é a
+descrição do programa que pediu, e não o texto (o achado F1): o nome sai
+— `pelo processo N (? <resumo>)`, ou `(? <resumo> de <editor>)` no código
+de fora da imagem —, depois o editor (`de ?`), e só então o texto perde o
+fim. A gravação daquele `fs.write` vai inteira, `versoes 581..582`, e não
+`581..5`; o motivo do adiamento (`CONFLICT`) e o do mapeamento (`ERROR`)
+também; o da leitura, o mais longo, perde só o que ainda não cabe depois
+de o nome sair — e o NSF reconhece o código adulterado pelo motivo (ver o
+README, *O NSF vê o adulterado*). O resumo fica sempre, e o `?` não é
+nome de nada: a abreviada nunca é a descrição de outro programa. O
+registro da decisão, sem citação, guarda a descrição inteira.
 
 ## O que fica de fora
 
