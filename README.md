@@ -6315,7 +6315,14 @@ falha fechado:
    deixou e não se lê também ganha a execução da decisão, `ERROR` com o
    motivo da leitura, e o processo ouve `PROGRAMA_DESCONHECIDO` (−7) — ou
    `SEM_MEMORIA` (−5), quando o que faltou foi um pedaço do heap do
-   tamanho do arquivo: ler de novo depois pode dar certo;
+   tamanho do arquivo: ler de novo depois pode dar certo. Toda execução da
+   decisão de uma chamada de sistema vai em nome de quem o gate decidiu —
+   o titular, a sessão, o papel e o processo com o programa que pediu,
+   guardados na decisão (`autorizacao::DecisaoDoProcesso`), como a de um
+   comando: a pessoa que sai entre a decisão e a gravação não a faz
+   anônima, e o programa que o processo adotou depois do ponto sem volta,
+   que não rodou uma instrução, não aparece no lugar de quem pediu (o F2
+   do adversário do AE-1);
 4. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
    de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`. Acima
@@ -6375,8 +6382,8 @@ sondagem de privilégio da pessoa que o lançou. A bifurcação guarda o
 dava a criação dele a quem bifurcou. O NSF ainda se defende do registro
 cortado: um `filho N` com N até o fio do pai não é nascimento, e um
 processo nasce uma vez só no boot. No grafo, a abreviada do mesmo resumo
-é o mesmo programa; a de outro resumo é uma troca — a do `executar` que
-falha depois do ponto sem volta. A âncora de uma declaração numa decisão
+é o mesmo programa; a de outro resumo é uma troca — o primeiro pedido,
+abreviado, do programa que o `executar` trouxe. A âncora de uma declaração numa decisão
 compara o `pelo` inteiro: o processo cuja descrição passa do teto não se
 ancora em decisão nenhuma — como já não se ancorava com a decisão cortada:
 a que ele pedir é `INVALID_ARGUMENT` —, e declara ancorado na conexão, ou
@@ -9298,7 +9305,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-42 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+43 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de

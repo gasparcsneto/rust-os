@@ -1787,6 +1787,30 @@ fn execucao_da_troca(r: &Registro, codigo: Codigo, fio: u64, motivo: &str, decis
         && texto_certo
 }
 
+/// Se a execução `e` foi gravada em nome de quem a decisão `d` diz: o mesmo
+/// titular, a mesma sessão, o mesmo principal e o mesmo papel, e o detalhe
+/// composto do `pelo` da decisão — o processo com o programa que pediu —,
+/// com `motivo` e a citação de `decisao`.
+fn em_nome_da_decisao(
+    d: &politica::auditoria::Evento,
+    e: &politica::auditoria::Evento,
+    motivo: &str,
+    decisao: u64,
+) -> bool {
+    let esperado = politica::auditoria::detalhe_composto(
+        Some(&d.detalhe),
+        motivo,
+        &format!("; decisao {decisao}"),
+    );
+    d.titular == e.titular
+        && d.sessao == e.sessao
+        && d.sessao_de_pessoa == e.sessao_de_pessoa
+        && d.agente == e.agente
+        && d.chave == e.chave
+        && d.papel == e.papel
+        && e.detalhe == esperado
+}
+
 /// Se a descrição de programa de um registro é a que encolheu toda: o
 /// nome fora e, de um código de fora da imagem, o editor também — `?
 /// <resumo>` ou `? <resumo> de ?`.
@@ -2337,6 +2361,63 @@ fn troca_de_ponta_que_falha_intacta(
     })
 }
 
+/// A execução de uma decisão de troca vai em nome de quem o gate decidiu,
+/// como a de um comando — o F2 do adversário do AE-1: a pessoa que sai
+/// entre a decisão e a gravação não faz a execução sair anônima. A leitura
+/// armada falha depois da decisão, e a sessão da pessoa acaba ali, antes de
+/// a execução ser gravada: o `person.logout` fica entre as duas, e a
+/// execução tem o titular, a sessão, a pessoa e o papel da decisão, e o
+/// processo com o programa que pediu. O processo ouve o erro da leitura.
+pub(super) fn fluxo_a_execucao_da_troca_vai_em_nome_da_decisao() -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste as falha;
+    com_os_fluxos(|| {
+        let (sessao, bia) = pessoa("bia", 336);
+        let c = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let desde_o_pedido = crate::autorizacao::ultimo_registro();
+            falha::armar_leitura(c.fio(), falha::LEITURA);
+            falha::acabar_a_sessao_no_meio(sessao);
+            let desde = c.ditar(TROCAR, 0)?;
+            let devolveu = dito_na_malha(desde, "fluxos: trocar devolveu ")?;
+            if devolveu != format!("{}", protocolo::usuario::erro::PROGRAMA_DESCONHECIDO) {
+                crate::log_error!("teste", "trocar devolveu {}", devolveu);
+                return Err("a troca com a leitura armada nao devolveu o erro da leitura");
+            }
+            let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
+            let saidas = registros_depois(desde_o_pedido, |e| e.metodo == "person.logout");
+            let ([(decisao, d)], [execucao], [(saiu, _)]) =
+                (decisoes.as_slice(), execucoes.as_slice(), saidas.as_slice())
+            else {
+                crate::log_error!(
+                    "teste",
+                    "decisoes {:?}; execucoes {:?}; saidas {:?}",
+                    decisoes,
+                    execucoes,
+                    saidas
+                );
+                return Err("a troca nao teve uma decisao, uma saida da pessoa e uma execucao");
+            };
+            if !(decisao < saiu && *saiu < execucao.0) {
+                return Err("a sessao nao acabou entre a decisao e a execucao");
+            }
+            if d.codigo != Codigo::Allow || d.titular != politica::auditoria::Titular::Pessoa {
+                crate::log_error!("teste", "{:?}", d);
+                return Err("a decisao da troca nao foi a da pessoa");
+            }
+            let motivo = falha::LEITURA.motivo();
+            if !execucao_da_troca(execucao, Codigo::Error, c.fio(), motivo, *decisao)
+                || !em_nome_da_decisao(d, &execucao.1, motivo, *decisao)
+            {
+                crate::log_error!("teste", "decisao {:?}; execucao {:?}", d, execucao);
+                return Err("a execucao da troca nao foi gravada em nome de quem o gate decidiu");
+            }
+            Ok(())
+        })();
+        falha::desarmar();
+        encerrar_todas(r, &[&c])
+    })
+}
+
 /// A troca de imagem de quem é ponta de fluxo que falha **depois** do ponto
 /// sem volta — a imagem nova não se mapeia, como na falta de memória ao
 /// mapear os segmentos, com o que era da anterior já fora — não tem para
@@ -2345,8 +2426,10 @@ fn troca_de_ponta_que_falha_intacta(
 /// gravado dentro da ordem das gravações, trazida de fora pela troca, antes
 /// de acordar quem espera, como na troca que dá certo —, e a morte não o
 /// acaba de novo. A decisão do gate termina dita: a execução dela, `ERROR`,
-/// com o motivo e a citação, gravada em nome do processo como ele estava —
-/// com o programa que ele já tinha adotado, o `ola`.
+/// com o motivo e a citação, gravada em nome de quem o gate decidiu — o
+/// titular e o principal da decisão, e o processo com o programa que pediu,
+/// o `fluxos`: o `ola`, adotado na troca, não rodou uma instrução (o F2 do
+/// adversário do AE-1).
 pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
     use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
     use protocolo::usuario::erro;
@@ -2407,8 +2490,8 @@ pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
                 if estado(a.quem(), &id).1.as_deref() != Some("o programa mudou") {
                     return Err("quem ficou nao viu a troca de imagem que falhou");
                 }
-                // A decisão, em nome do programa que pediu, e a execução dela
-                // que a cita, em nome do que o processo já tinha adotado.
+                // A decisão e a execução dela que a cita, as duas em nome do
+                // programa que pediu e do mesmo principal.
                 let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
                 let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
                     ([(decisao, d)], [execucao]) => {
@@ -2433,10 +2516,7 @@ pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
                                 falha::MAPEAMENTO,
                                 *decisao,
                             )
-                            && execucao
-                                .1
-                                .detalhe
-                                .starts_with(&format!("pelo processo {} (ola ", c.fio()))
+                            && em_nome_da_decisao(d, &execucao.1, falha::MAPEAMENTO, *decisao)
                     }
                     _ => false,
                 };

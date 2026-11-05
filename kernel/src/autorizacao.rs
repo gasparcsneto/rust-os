@@ -3172,19 +3172,41 @@ pub fn encher_a_taxa_do_servico_de_teste() {
 /// enumera, e não um passe livre. O de um agente decide pelo papel do
 /// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
-    autorizar_processo_com_decisao(permissao, recurso, metodo).0
+    autorizar_processo_com_decisao(permissao, recurso, metodo).codigo()
 }
 
-/// [`autorizar_processo`], com o número do registro da decisão — para quem
-/// grava depois o que a execução fez dela, como `executar` com o código que
-/// não confere.
-pub fn autorizar_processo_com_decisao(
-    permissao: Permissao,
-    recurso: &str,
-    metodo: &str,
-) -> (Codigo, u64) {
-    // Uma sessão de pessoa que acabou não tem papel, e o papel vazio
-    // recusa.
+/// A decisão do gate sobre uma chamada de sistema de um processo, guardada
+/// para a execução dela: o código, o número do registro e quem o gate
+/// decidiu — o titular, o principal e o processo com o programa que pediu,
+/// como a decisão os gravou. A execução ([`auditar_execucao_do_processo`])
+/// vai em nome dele, como a de um comando ([`auditar_execucao`]): a sessão
+/// que acaba entre a decisão e a gravação, ou o programa que o processo
+/// adotou depois do ponto sem volta do `executar`, não mudam quem agiu.
+pub struct DecisaoDoProcesso {
+    codigo: Codigo,
+    numero: u64,
+    quem: Quem,
+}
+
+impl DecisaoDoProcesso {
+    /// O código da decisão.
+    pub fn codigo(&self) -> Codigo {
+        self.codigo
+    }
+
+    /// O número do registro da decisão, na auditoria — a execução o cita
+    /// sozinha; só a suíte o pergunta.
+    #[cfg(feature = "modo-teste")]
+    pub fn numero(&self) -> u64 {
+        self.numero
+    }
+}
+
+/// Quem pede uma chamada de sistema, como a decisão o grava: a autoridade
+/// do fio — a de quem o lançou; uma sessão de pessoa que acabou não tem
+/// papel, e o papel vazio recusa — e, de um processo, o programa que ele
+/// executa.
+fn quem_da_chamada() -> (Quem, u64, Programa) {
     let mut quem = quem_do_processo(crate::fios::autoridade_atual());
     // O programa do fio: um processo é gravado como tal, e o manifesto dele
     // limita o que a autoridade alcançaria. Um fio do kernel não tem
@@ -3193,6 +3215,18 @@ pub fn autorizar_processo_com_decisao(
     if programa != Programa::Kernel {
         quem.processo = Some(pelo_processo(id, &programa));
     }
+    (quem, id, programa)
+}
+
+/// [`autorizar_processo`], com a decisão inteira — o número do registro e
+/// quem o gate decidiu —, para quem grava depois o que a execução fez dela,
+/// como `executar` com o código que não confere.
+pub fn autorizar_processo_com_decisao(
+    permissao: Permissao,
+    recurso: &str,
+    metodo: &str,
+) -> DecisaoDoProcesso {
+    let (quem, id, programa) = quem_da_chamada();
     let nao_declarada;
     let autoridade = crate::fios::autoridade_atual();
     // O processo isolado, o agente suspenso, a credencial suspensa: as
@@ -3228,8 +3262,24 @@ pub fn autorizar_processo_com_decisao(
         }
         _ => (codigo, detalhe),
     };
-    let decisao = auditar(&quem, metodo, recurso, codigo, &[], detalhe);
-    (codigo, decisao)
+    let numero = auditar(&quem, metodo, recurso, codigo, &[], detalhe);
+    DecisaoDoProcesso {
+        codigo,
+        numero,
+        quem,
+    }
+}
+
+/// Só na suíte: uma decisão de número `numero` sobre uma chamada do fio
+/// atual, como [`autorizar_processo_com_decisao`] a guardaria, sem decidir
+/// nem gravar — para o caso que confere só a forma da execução.
+#[cfg(feature = "modo-teste")]
+pub fn decisao_do_processo_de_teste(numero: u64) -> DecisaoDoProcesso {
+    DecisaoDoProcesso {
+        codigo: Codigo::Allow,
+        numero,
+        quem: quem_da_chamada().0,
+    }
 }
 
 /// Se o processo `fio`, vivo, exerceria agora `permissao` sobre `recurso`:
@@ -3297,22 +3347,22 @@ pub fn remoto_exerceria(
 }
 
 /// Grava o que a execução de uma chamada de sistema fez da decisão
-/// `decisao`, em nome do processo que chama — a autoridade e o programa do
-/// fio: o `executar` que o gate deixou, e que o código lido recusou. O
-/// detalhe leva a decisão no fim, como o de uma execução de comando.
+/// `decisao` — o `executar` que o gate deixou, e que o código lido recusou,
+/// que a ordem adiou ou que falhou —, em nome do mesmo principal que o gate
+/// decidiu: o titular, o principal e o processo com o programa que pediu,
+/// guardados na decisão, como a execução de um comando
+/// ([`auditar_execucao`]). Não os monta de novo: a sessão que acabou no
+/// meio sairia anônima, e o processo que trocou de imagem sairia em nome
+/// do programa novo, que não pediu nada. O detalhe leva a decisão no fim.
 pub fn auditar_execucao_do_processo(
+    decisao: &DecisaoDoProcesso,
     metodo: &str,
     recurso: &str,
     codigo: Codigo,
     detalhe: &str,
-    decisao: u64,
 ) -> u64 {
-    let mut quem = quem_do_processo(crate::fios::autoridade_atual());
-    let (id, programa) = crate::fios::programa_atual();
-    if programa != Programa::Kernel {
-        quem.processo = Some(pelo_processo(id, &programa));
-    }
-    let detalhe = citando(&mut quem, detalhe, decisao);
+    let mut quem = decisao.quem.clone();
+    let detalhe = citando(&mut quem, detalhe, decisao.numero);
     auditar(&quem, metodo, recurso, codigo, &[], &detalhe)
 }
 

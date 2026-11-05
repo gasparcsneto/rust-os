@@ -153,9 +153,13 @@ o processo ouve o erro e segue o que era — da leitura,
 arquivo —, e a execução da decisão diz a falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
 que não se mapeia — não tem para onde voltar: os fluxos já acabaram na
 troca, com `o programa mudou`, gravado dentro da ordem como na troca que dá
-certo; a execução da decisão diz `ERROR`, com o motivo, em nome do processo
-como ele está — com o programa que ele já adotou —, e o processo acaba
-(`SEM_MEMORIA`).
+certo; a execução da decisão diz `ERROR`, com o motivo, e o processo acaba
+(`SEM_MEMORIA`). Toda execução da decisão do `exec` vai em nome de quem o
+gate decidiu — o titular, a sessão, o papel e o processo com o programa
+que pediu —, como a de um comando: o programa adotado na troca, que não
+rodou uma instrução, não aparece no lugar de quem pediu, e a pessoa que
+sai entre a decisão e a gravação não a faz anônima (o F2 do adversário do
+AE-1).
 
 ## A autoridade
 
@@ -335,14 +339,15 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 42 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 43 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo
   do aceite e o endpoint que fecha, a reconfirmação na abertura efetiva, o
   plano de dados que não gasta a ficha, a contrapressão e as esperas, as
   cotas, a morte (também a de quem já fechou, e a do zumbi antes da
-  colheita), o `exec` e o `fork`, a
+  colheita), o `exec` e o `fork` (e a execução da decisão do `exec` em
+  nome de quem o gate decidiu, com a sessão acabada no meio), a
   revogação e a política nova, o desligamento, a inatividade, a auditoria
   sem o conteúdo, os bytes que não autorizam, e as corridas (no meio da
   decisão, ao mesmo tempo, abrir e desligar, muitos fluxos e muitas

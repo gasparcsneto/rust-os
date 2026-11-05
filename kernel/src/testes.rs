@@ -22469,11 +22469,11 @@ fn auditoria_a_citacao_fica_inteira() -> Resultado {
     let palavra = "x".repeat(MAIOR_DETALHE + 24);
     for (texto, guardado) in [(palavras.as_str(), None), (palavra.as_str(), Some(OMITIDO))] {
         let n = crate::autorizacao::auditar_execucao_do_processo(
+            &crate::autorizacao::decisao_do_processo_de_teste(1_234_567),
             "fs.write",
             "/dados/citacao",
             politica::Codigo::Allow,
             texto,
-            1_234_567,
         );
         let r = registro_da_auditoria(n).ok_or("o registro da execucao nao esta na auditoria")?;
         let d = &r.evento.detalhe;
@@ -39560,6 +39560,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fluxo: a troca de imagem cujo arquivo nao cabe no heap",
         f: fluxo::fluxo_a_troca_cujo_arquivo_nao_cabe_no_heap,
+    },
+    Caso {
+        nome: "fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio",
+        f: fluxo::fluxo_a_execucao_da_troca_vai_em_nome_da_decisao,
     },
     Caso {
         nome: "fluxo: a troca de imagem que falha depois do ponto sem volta",
@@ -60708,19 +60712,19 @@ fn adulterado_de_descricao_longa() -> alloc::string::String {
 fn executa_o_adulterado() -> [u64; 3] {
     use politica::Codigo;
     let caminho = adulterado_de_descricao_longa();
-    let (codigo, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
+    let decisao = crate::autorizacao::autorizar_processo_com_decisao(
         politica::Permissao::ProcessRun,
         &caminho,
         "process.exec",
     );
     let execucao = crate::autorizacao::auditar_execucao_do_processo(
+        &decisao,
         "process.exec",
         &caminho,
         Codigo::DenyPolicy,
         politica::procedencia::Falta::NaoConfere.motivo(),
-        decisao,
     );
-    [codigo as u64, decisao, execucao]
+    [decisao.codigo() as u64, decisao.numero(), execucao]
 }
 
 /// O achado F1: o `process.exec` de um código adulterado, pedido por um

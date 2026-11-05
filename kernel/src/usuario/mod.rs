@@ -1393,12 +1393,12 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
 
     // A decisão é sobre o caminho já resolvido: um nome sem barra vira o de
     // `/bin`, e é esse que a política confere.
-    let (decidido, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
+    let decisao = crate::autorizacao::autorizar_processo_com_decisao(
         Permissao::ProcessRun,
         &caminho,
         "process.exec",
     );
-    if !decidido.permite() {
+    if !decisao.codigo().permite() {
         RECUSADAS.fetch_add(1, Ordering::Relaxed);
         return erro::NEGADO;
     }
@@ -1421,11 +1421,11 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // —; o resto, `PROGRAMA_DESCONHECIDO`.
         Err(recusa @ codigo::Recusa::Leitura(_)) => {
             crate::autorizacao::auditar_execucao_do_processo(
+                &decisao,
                 "process.exec",
                 &caminho,
                 politica::Codigo::Error,
                 recusa.motivo(),
-                decisao,
             );
             crate::log_warn!(
                 "usuario",
@@ -1441,11 +1441,11 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // segue inteiro — nada foi trocado.
         Err(recusa) => {
             crate::autorizacao::auditar_execucao_do_processo(
+                &decisao,
                 "process.exec",
                 &caminho,
                 politica::Codigo::DenyPolicy,
                 recusa.motivo(),
-                decisao,
             );
             crate::log_warn!(
                 "usuario",
@@ -1486,11 +1486,11 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // falhou, e por quê — como a do código que não confere.
         Err(motivo) => {
             crate::autorizacao::auditar_execucao_do_processo(
+                &decisao,
                 "process.exec",
                 &caminho,
                 politica::Codigo::Error,
                 motivo,
-                decisao,
             );
             crate::log_warn!("usuario", "executar recusado: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
@@ -1514,11 +1514,11 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
             // decide de novo.
             None => {
                 crate::autorizacao::auditar_execucao_do_processo(
+                    &decisao,
                     "process.exec",
                     &caminho,
                     politica::Codigo::Conflict,
                     "adiada: a ordem das gravacoes com outro fio",
-                    decisao,
                 );
                 return adiar_a_troca();
             }
@@ -1552,16 +1552,16 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         //
         // A decisão do gate já foi gravada: a execução dela diz que a troca
         // não chegou ao fim, e por quê, antes de o processo acabar. Vai em
-        // nome do processo como ele está agora — o programa que ele adotou
-        // na troca é o que o fio diz —, e a citação a liga à decisão, gravada
-        // em nome do programa que pediu.
+        // nome de quem o gate decidiu — o programa que pediu, e não o que o
+        // processo adotou na troca, que não rodou uma instrução —, como as
+        // outras execuções da decisão, e a citação a liga a ela.
         Err(motivo) => {
             crate::autorizacao::auditar_execucao_do_processo(
+                &decisao,
                 "process.exec",
                 &caminho,
                 politica::Codigo::Error,
                 motivo,
-                decisao,
             );
             crate::log_error!("usuario", "executar falhou depois de trocar: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
@@ -1741,24 +1741,45 @@ pub mod falha_da_troca_de_teste {
         ARMADA[Etapa::Leitura as usize].store(fio + 1, Ordering::Release);
     }
 
+    /// A sessão de pessoa que acaba quando a leitura armada falha — depois
+    /// da decisão do gate e antes de a execução dela ser gravada —: os oito
+    /// bytes dela, e se há uma.
+    static SESSAO_NO_MEIO: AtomicU64 = AtomicU64::new(0);
+    static HA_SESSAO_NO_MEIO: AtomicBool = AtomicBool::new(false);
+
+    /// Com a leitura armada, a sessão `sessao` acaba quando ela falha:
+    /// entre a decisão do gate e a gravação da execução — a pessoa que sai
+    /// com a troca dela no meio.
+    pub fn acabar_a_sessao_no_meio(sessao: crate::pessoas::IdSessao) {
+        SESSAO_NO_MEIO.store(u64::from_le_bytes(sessao.0), Ordering::Release);
+        HA_SESSAO_NO_MEIO.store(true, Ordering::Release);
+    }
+
     /// Desarma as três etapas — o caso que falha antes de usar a sua não a
-    /// deixa armada para o seguinte.
+    /// deixa armada para o seguinte —, e a sessão que acabaria no meio.
     pub fn desarmar() {
         for armada in &ARMADA {
             armada.store(0, Ordering::Release);
         }
         LEITURA_SEM_HEAP.store(false, Ordering::Release);
+        HA_SESSAO_NO_MEIO.store(false, Ordering::Release);
     }
 
     /// Se a leitura da troca do processo `fio` falha agora — uma vez, como
-    /// [`falhar`] —, e com que erro.
+    /// [`falhar`] —, e com que erro. Falhando, a sessão de
+    /// [`acabar_a_sessao_no_meio`] acaba aqui.
     pub(super) fn leitura(fio: u64) -> Option<crate::vfs::Erro> {
-        falhar(fio, Etapa::Leitura).then(|| {
-            if LEITURA_SEM_HEAP.load(Ordering::Acquire) {
-                crate::vfs::Erro::SemMemoria
-            } else {
-                LEITURA
-            }
+        if !falhar(fio, Etapa::Leitura) {
+            return None;
+        }
+        if HA_SESSAO_NO_MEIO.swap(false, Ordering::AcqRel) {
+            let sessao = SESSAO_NO_MEIO.load(Ordering::Acquire).to_le_bytes();
+            crate::pessoas::sair(crate::pessoas::IdSessao(sessao));
+        }
+        Some(if LEITURA_SEM_HEAP.load(Ordering::Acquire) {
+            crate::vfs::Erro::SemMemoria
+        } else {
+            LEITURA
         })
     }
 

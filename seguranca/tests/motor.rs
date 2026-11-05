@@ -1054,11 +1054,13 @@ fn o_teto_de_nome_longo_alerta() {
     assert!(m.deteccoes().any(|d| d.regra == Regra::TetoExercido));
 }
 
-/// O achado 5: a troca de imagem que falha depois do ponto sem volta grava
-/// a execução em nome do programa novo, e acima do teto a descrição sai
-/// abreviada — com outro resumo. O grafo grava a troca, como gravava com a
-/// descrição inteira antes do F1. A abreviada do mesmo resumo continua sem
-/// trocar nada.
+/// O achado 5: um registro em nome do programa novo, depois de uma troca de
+/// imagem, que acima do teto sai abreviado — com outro resumo. O grafo grava
+/// a troca, como gravava com a descrição inteira antes do F1. A abreviada
+/// do mesmo resumo continua sem trocar nada. (O kernel gravava assim a
+/// execução da troca que falha depois do ponto sem volta; desde o F2 do
+/// adversário do AE-1, ela vai em nome do programa que pediu, e a forma é a
+/// do primeiro pedido, abreviado, do programa que a troca trouxe.)
 #[test]
 fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
     use politica::auditoria::detalhe_composto;

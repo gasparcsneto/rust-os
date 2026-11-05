@@ -250,10 +250,10 @@ impl Grafo {
     ///
     /// - Com o **mesmo resumo** do programa que o grafo conhece no
     ///   processo, a abreviada é o mesmo programa: nada muda.
-    /// - Com **outro resumo**, é uma troca de verdade — o `executar` cuja
-    ///   imagem nova não se mapeou depois do ponto sem volta grava a
-    ///   execução em nome do programa novo —: o processo passa a executar o
-    ///   programa da abreviada, como numa troca com a descrição inteira.
+    /// - Com **outro resumo**, é uma troca de verdade — o primeiro pedido,
+    ///   abreviado, do programa que o `executar` trouxe —: o processo passa
+    ///   a executar o programa da abreviada, como numa troca com a
+    ///   descrição inteira.
     /// - A descrição **inteira** que chega depois, com o mesmo resumo da
     ///   abreviada que o grafo guardou, é o mesmo programa, agora com o
     ///   nome: o processo fica com ela, e não há outra troca — nem outra
