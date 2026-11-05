@@ -3648,6 +3648,17 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // arrendamento e a versão antes.
     ("interpretador::definir(", &["kernel/src/ui.rs"]),
     ("interpretador::confirmar(", &["kernel/src/ui.rs"]),
+    // A tecla do console físico entra no histórico do teclado quando o
+    // console a consome — e só o interpretador a consome, já sabendo se a
+    // linha pede uma senha.
+    ("teclado::consumida(", &["kernel/src/interpretador.rs"]),
+    // Quem fechou o Terminal: o `press` da árvore na caixa de fechar se
+    // anota só onde a árvore o entrega ao programa, e se desfaz só ali.
+    ("interpretador::press_pela_arvore(", &["kernel/src/ui.rs"]),
+    (
+        "interpretador::desfazer_press_pela_arvore(",
+        &["kernel/src/ui.rs"],
+    ),
     // Quebrar o arrendamento de outro só pela operação administrativa,
     // com a prova.
     (
