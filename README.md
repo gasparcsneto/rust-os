@@ -1683,10 +1683,12 @@ janela vive, e o de uma janela que fechou não aponta para a seguinte.
 `ui.act press` num botão descrito vira um evento `ACAO` no canal, com o
 identificador do servidor; o servidor faz o que o clique faria. A caixa de
 fechar fecha pelos dois caminhos — o do agente e o da pessoa —, e o log diz
-quem foi. O caso da suíte lê a árvore do `ui.tree` de verdade, digita na
-janela e espera o que digitou no valor, confere que o que não é botão não
-aceita `press`, e fecha a janela pelo botão da árvore. Outro caso confere
-o parser: a descrição válida lida como escrita, e oito formas de texto que
+quem foi; no Terminal, o registro do `logout` da pessoa que estava nele
+também (ver [Consoles](#consoles)). O caso da suíte lê a árvore do
+`ui.tree` de verdade, digita na janela e espera o que digitou no valor,
+confere que o que não é botão não aceita `press`, e fecha a janela pelo
+botão da árvore. Outro caso confere o parser: a descrição válida lida como
+escrita, e oito formas de texto que
 o kernel não entende, recusadas. Doze mutações, onze reprovadas. A que passa tira o aviso de que
 a árvore mudou quando a descrição muda; ela muda sempre junto com um
 desenho e uma linha do servidor no console, que avisam também, e o caso
@@ -1789,8 +1791,11 @@ não pelo `_print`: o `_print` roda dentro da tranca do escalonador, e
 publicar ali acordaria o ouvinte tomando a mesma tranca. Um dono de cada
 vez, com uma geração na chave, como os canais e as superfícies; o dono
 morto não segura o pseudo-terminal. `display.info` ganhou `terminal`: o
-dono, os avisos, as teclas digitadas e os bytes que saíram do anel sem
-ninguém lê-los.
+dono, os avisos e os bytes que saíram do anel sem ninguém lê-los. Contava
+também as teclas digitadas, e deixou de contar (N3, no passo 1 da
+continuidade): a conta crescia um por caractere de uma senha digitada num
+Terminal, e dava a quem lê o relatório — `system.read`, o `observador`
+também — o tamanho e o ritmo dela.
 
 Com as pessoas, o Terminal deixou de ser outra janela sobre o mesmo
 interpretador: cada um tem um pseudo-terminal e um console seus, com a
@@ -4959,13 +4964,29 @@ Sem ganho a medir, não há o que pagar com esse risco.
   dá: fica para a mesma decisão. Com ela, duas mais, achadas pelo
   adversário ξ: o `press` de um agente na caixa de fechar do Terminal
   fecha o console e encerra a sessão da Pessoa que está nele — o `logout`
-  por outra porta, gravado como dela; e a senha digitada adiantado, antes
-  de o console pedi-la (com ele ocupado), entra no histórico do teclado,
-  que só o `sistema` lê — o histórico grava a tecla quando ela chega, e o
-  console passa a pedir a senha quando trata o Enter. E uma terceira, pelo
+  por outra porta, gravado como dela, com o agente no detalhe (o passo 1
+  da continuidade registra quem fechou, e não recusa nada); e a senha
+  digitada adiantado num Terminal, antes de o console pedi-la, entra no
+  histórico do teclado, que só o `sistema` lê — o histórico grava a tecla
+  da janela quando ela chega, e o console passa a pedir a senha quando
+  trata o Enter (no console físico, a tecla entra quando o console a
+  consome, e a senha adiantada fica de fora). E uma terceira, pelo
   adversário ο, da mesma raiz que a DT-1a: o processo que tem o
   pseudo-terminal escolhe a linha que o Enter pedido por um agente
-  confirma — quem pode ser "o Terminal" é a decisão.
+  confirma — quem pode ser "o Terminal" é a decisão. O que não esperava a
+  decisão — só aplica a regra de que a senha não vai à auditoria, ao log,
+  às mensagens de diagnóstico nem ao `system.info` — entrou como [B] no
+  passo 1 da continuidade: a linha que não é comando, num console sem
+  ninguém, vai à auditoria com um marcador, e não com a primeira palavra; o
+  servidor de janelas não grava a tecla no log; a tecla do console físico
+  entra no histórico quando ele a consome; o console engole o resto da
+  senha quando a cerimônia de pareamento acaba no meio dela; as cópias da
+  tecla que ninguém zerava são zeradas; e o `display.info` não conta mais o
+  que se digita num pseudo-terminal (ver [Consoles](#consoles)). Continuam
+  com a decisão: o foco do teclado tomado — uma janela que pede o foco
+  enquanto a Pessoa digita uma senha recebe as teclas dela —, a senha
+  adiantada num Terminal, e a versão e o prazo do campo, e o `revision` da
+  árvore, que crescem a cada tecla, também da senha.
 
 ## O tempo
 
@@ -7572,26 +7593,48 @@ A saída de cada console vai para o lugar dele — a do físico para a tela e a
 COM1, a de um Terminal para o anel do pseudo-terminal dele —, e o que se
 digita num não aparece no outro. O log do kernel continua no console
 físico. Fechar o Terminal, ou o processo dele morrer, fecha o console e
-acaba a sessão de quem estava nele.
+acaba a sessão de quem estava nele — e o registro do `person.logout` diz
+como: `o terminal fechou pelo clique da pessoa`, na caixa de fechar;
+`o terminal fechou pelo press de agente N na arvore`, o `press` de um
+agente pela árvore, com a sessão dele (o `ui.act` gravado diz o nome; a
+pessoa que pede pela árvore sai como `de pessoa`); ou `o terminal morreu`
+— a queda, o `process.terminate` ou a saída sem fechar. O Terminal fechado
+pela caixa de fechar fecha o pseudo-terminal antes de sair, e o `logout`
+sai na chamada dele; a queda, o coletor acha. Com a Pessoa clicando e um
+agente apertando ao mesmo tempo, o registro diz o agente — o `press` dele
+foi entregue antes —, e o `ui.act` gravado desempata.
 
 **Antes do login, nada além de entrar.** Um console sem ninguém aceita
 `login` e `ajuda` — a ajuda diz só como entrar. Todo o resto — um comando,
 conhecido ou não, uma tecla de função, um clique na barra — é
-`DENY_NOT_AUTHENTICATED`, gravado com o console. Não há login automático.
+`DENY_NOT_AUTHENTICATED`, gravado com o console: o comando que existe, com
+o nome e o resumo dos parâmetros; o que não é comando, com o marcador
+`(comando desconhecido)` e sem resumo. Uma linha que não é comando pode ser
+uma senha digitada no lugar errado, e o registro vai ao journal: nem a
+primeira palavra em claro, nem o resto num resumo sem chave, que se
+adivinha fora da máquina. A resposta é a mesma nos dois casos — quem
+digitou não fica sabendo se o comando existe. Não há login automático.
 
 **Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
 A senha não ecoa, não aparece na árvore semântica — o valor da linha
 fica vazio —, e o buffer dela é apagado depois da conferência; num
 Terminal, o programa também zera o que guarda dela no caminho ao
 pseudo-terminal — a fila do que espera, o bloco que ela larga ao crescer, a
-tecla já tratada. Enquanto um console pede senha, nada entra no histórico
-que `keyboard.read` devolve (a senha digitada antes de ele pedir, com ele
-ocupado, entra: ver [Decisões pendentes](#decisões-pendentes)): o
+tecla e o lote de eventos dela, e, quando ele sai, o que sobrou do lote e
+da fila —; o runtime zera a leitura dos eventos, e o kernel não guarda a
+tecla no anel do canal nem nas pilhas da leitura e da escrita. Enquanto um
+console pede senha, nada entra no histórico que `keyboard.read` devolve: o
 kernel não sabe para qual janela uma tecla vai virar senha, então não grava
-tecla nenhuma. Um agente não edita — nem para esvaziar — nem confirma a
-linha que pede nome ou senha, e não confirma `login` nem `logout`: o login
-é de quem está no teclado. Vale para a linha do console físico e para a de
-cada Terminal, que a árvore mostra como o campo da janela dele: o
+tecla nenhuma. No console físico, a tecla entra no histórico quando o
+console a **consome**, já sabendo se a linha pede uma senha: a senha
+digitada adiantado — antes de o console tratar o Enter que a pede, com ele
+ocupado ou com a máquina carregada — fica de fora. Numa janela, a tecla
+entra quando chega, e a senha digitada adiantado num Terminal ainda entra:
+ver [Decisões pendentes](#decisões-pendentes). Um agente não edita — nem
+para esvaziar — nem confirma a linha que pede nome ou senha, e não
+confirma `login` nem `logout`: o login é de quem está no teclado. Vale
+para a linha do console físico e para a de cada Terminal, que a árvore
+mostra como o campo da janela dele: o
 `set_value`, o `cancel` e o `confirm` de um agente nesse campo são
 recusados quando a ação entra no kernel, com o mesmo motivo e pela mesma
 regra do interpretador que valem no físico, antes de o campo ser arrendado
@@ -7625,6 +7668,17 @@ operação — `credential.change_self`, decidida pelo gate —: uma senha não 
 digita numa linha de comando, e por isso o diálogo dela é do console, e não
 um comando do registro.
 
+**A cerimônia que acaba no meio da senha.** O fim da cerimônia de
+pareamento chega de fora — o outro desistiu, a conexão caiu, o prazo
+venceu, a sessão acabou —, e pode chegar com a Pessoa no meio da senha. A
+linha volta a pedir um comando, mas ela não sabe, e continua digitando:
+então o console **engole** o que ela digitar até o Enter seguinte. Não
+ecoa, não vai à árvore nem ao histórico — o bit da senha fica ligado
+enquanto ele engole —, não passa pela coordenação, e não vira comando; o
+console diz isso, sem prompt, e o Enter devolve o prompt sem executar
+nada. A árvore não edita a linha nem a confirma por um agente nesse
+meio-tempo: é a linha da pessoa, que ainda não deixou de ser a da senha.
+
 **Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
 sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
 console no comando seguinte, que é recusado, e o console volta a pedir o
@@ -7636,15 +7690,25 @@ Um agente que confirma uma linha num console continua sendo ele mesmo: age
 como a sessão dele, com o papel dele, entrado alguém no console ou não.
 
 A suíte confere, num console sem ninguém, os comandos e a F2 recusados e
-gravados, e a ajuda atendida; o login de verdade — o nome, a senha sem eco
+gravados — o que existe com o nome e o resumo dos parâmetros, o que não é
+comando com o marcador e sem resumo, e uma senha digitada no lugar errado
+em lugar nenhum: a auditoria, o log, os relatórios, o histórico —, e a
+ajuda atendida; a senha digitada adiantado no físico, o `login`, o nome e a
+senha inteiros na fila antes de o console consumir a primeira tecla, fora
+do histórico ("consoles: a senha digitada adiantado nao entra no
+historico"); o login de verdade — o nome, a senha sem eco
 na árvore e fora do histórico, o comando gravado como da pessoa, o que o
 papel dela não deixa recusado, o `logout`; duas pessoas no mesmo console e
 a mesma pessoa no físico e num Terminal ao mesmo tempo, com linhas e
 sessões independentes; a sessão revogada voltando ao login; um fio lançado
 pela pessoa decidindo pelo papel dela, e por nada depois da revogação; e
 os pseudo-terminais — um console por instância, a saída de um que não vai
-para o outro, a sessão que acaba quando o Terminal fecha ou morre. E a
-linha da pessoa pela árvore: no físico, o `cancel` de um agente na linha
+para o outro, a sessão que acaba quando o Terminal fecha ou morre, e o
+registro do `logout` dizendo quem o fechou — o `press` de um agente, o de
+uma pessoa pela árvore, o clique, a queda ("terminal: o logout diz quem
+fechou"; com o programa de verdade, "terminal: digita e mostra a
+resposta", também com o `press` que não chega ao Terminal e não deixa a
+anotação). E a linha da pessoa pela árvore: no físico, o `cancel` de um agente na linha
 da senha recusado; num Terminal de verdade, com a pessoa digitando pela
 janela, o `set_value` na linha do nome e o `set_value`, o `cancel` e o
 `confirm` na da senha, de um agente pela porta dele, recusados com o
@@ -7708,7 +7772,9 @@ a mudança que valeu.
 **O teclado tem um cursor por leitor.** `keyboard.read` lê do histórico —
 as últimas 256 teclas — a partir do cursor de quem pede: dois agentes lendo
 recebem as mesmas teclas, sem roubar um do outro, e quem ficou para trás
-além do anel recebe `missed`, quantas perdeu.
+além do anel recebe `missed`, quantas perdeu. A tecla do console físico
+entra no histórico quando o console a consome, e não quando ela chega (ver
+[Operar por uma pessoa](#operar-por-uma-pessoa)).
 
 **A cota de processos.** Cada papel tem um teto de processos vivos — a
 linha `processos <papel> <n>`, de 1 a 64, 4 sem ela; na imagem, 32 para o
@@ -7718,9 +7784,12 @@ processo além da cota — lançado ou bifurcado — não nasce, e a recusa vai
 para a auditoria.
 
 O `cargo xtask invariantes` confere que só o canal chama
-`ui::agir_com_versao`, que só a administração revoga um arrendamento, e que
-a linha do interpretador só muda pela árvore. A suíte confere os cenários
-de concorrência entre dois agentes — duas leituras e uma mudança, exclusivo
+`ui::agir_com_versao`, que só a administração revoga um arrendamento, que
+a linha do interpretador só muda pela árvore, que só o interpretador põe no
+histórico do teclado a tecla que o console físico consome, e que só a
+interface anota quem apertou a caixa de fechar do Terminal. A suíte
+confere os cenários de concorrência entre dois agentes — duas leituras e
+uma mudança, exclusivo
 até soltar, revogado, vencido, confirmação com a versão velha —; pessoa
 contra agente, agente contra pessoa, duas pessoas, o `logout` e o
 `lease.revoke` com e sem a prova; os campos de uma janela, com o foco
@@ -8867,16 +8936,17 @@ distribuída.
 **Testes.** No hospedeiro, as contas da cerimônia — as derivações, o
 compromisso, a janela, a confirmação, a tabela de transições e passos
 sorteados — e o prólogo, os quadros e um vetor fixo do `sigilo`. Na suíte,
-nas duas arquiteturas, 32 casos `pareamento:` — o outro Duke é a suíte,
+nas duas arquiteturas, 35 casos `pareamento:` — o outro Duke é a suíte,
 com uma chave de teste, e a pessoa digita no console: os dois lados, o
 código errado, os prazos, o replay, o homem no meio, o compromisso, a
 chave que não é de Duke, a lápide, a suspensão, o papel, a concorrência
 (pair × pair, × revoke, × forget, × suspend, × poweroff, × política;
-confirm × expiry, × revoke, × confirm), o `device.forget`, a meia relação e
-a auditoria sem código nem nonce. E a **bancada de duas máquinas**,
-`cargo xtask pareamento`: dois Dukes de pé e a pessoa no teclado dos dois
-— a bancada lê o código de cada tela pela árvore semântica e o digita no
-outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
+confirm × expiry, × revoke, × confirm), o `device.forget`, a meia relação,
+a auditoria sem código nem nonce, e o fim no meio da senha — o resto dela
+engolido até o Enter, num Terminal e no físico, fora do histórico. E a
+**bancada de duas máquinas**, `cargo xtask pareamento`: dois Dukes de pé e
+a pessoa no teclado dos dois — a bancada lê o código de cada tela pela
+árvore semântica e o digita no outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
 o código errado, o homem no meio, a mesma relação nos dois e a entrega do
 estágio 1 por ela, o corte de energia dos dois, o `device.forget` de um
 lado, o corte durante a cerimônia, a meia relação e a lápide. Nos quatro
@@ -9343,7 +9413,28 @@ tiram de cada um; a N124 trata a falha do mapeamento como a de antes do
 ponto sem volta e devolve o erro ao processo, que volta a um espaço sem
 imagem e morre de falha de página na própria instrução; e a N125 provoca a
 falha do mapeamento antes do ponto sem volta — o processo ouve o erro e
-segue vivo. As quatro reprovadas no x86.
+segue vivo. As quatro reprovadas no x86. E as do passo 1 da continuidade,
+a senha fora da auditoria, do log e do histórico (ver
+[Consoles](#consoles)): a N126 grava de novo o nome de qualquer linha
+como método num console sem ninguém, a N127 o marcador com o resumo dos
+parâmetros, e a N128 o comando que existe com o marcador; a N129 devolve ao
+servidor de janelas a linha com o código da tecla, e a N130, uma linha por
+tecla sem o código; a N131 grava a tecla do físico no histórico quando ela
+chega, a N132 grava no consumo também a tecla de função e o clique, e a
+N133, no consumo, sem a guarda de quem pede senha; a N134 não engole o
+resto da senha, a N135 não deixa o Enter acabar o engolir, a N136 deixa a
+árvore editar a linha que engole, a N137 desliga o bit da senha enquanto o
+console engole, e a N138 engole também com a linha da senha já confirmada
+— a linha seguinte da Pessoa sumiria —; a N139 e a N140 deixam a tecla no
+anel do canal, na colheita e no descarte; a N144 tira a anotação do
+`press` na caixa de fechar do Terminal, a N145 deixa o Terminal sair sem
+fechar o pseudo-terminal, a N146 faz o fechamento ignorar a anotação, e a
+N147 a deixa ficar quando o evento não chega; e a N148 devolve o `typed`
+ao `display.info`. Todas reprovadas no x86. A N141, a N142 e a N143 — a
+cópia da tecla na pilha do kernel, na escrita e na leitura, e na memória
+do programa — ficam sem caso: a suíte não observa a pilha de outro fio
+nem a memória de um processo, e a defesa é a revisão e a mesma `zerar`,
+testada no hospedeiro.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9408,6 +9499,18 @@ segue vivo. As quatro reprovadas no x86.
 | fora do SDK: a ponta tratada como quem não é (N121) | a conferência da premissa, na suíte, depois da troca: o kernel para com "o processo virou ponta de fluxo no meio da troca de imagem sem a ordem" |
 | fora do SDK: o arquivo que não se lê sem a execução da decisão (N122) | "fluxo: a troca de imagem cujo arquivo nao se le" |
 | fora do SDK: a imagem que não se mapeia depois do ponto sem volta sem a execução da decisão (N123), tratada como a falha de antes dele — o erro devolvido ao processo sem imagem (N124) —, ou provocada antes dele (N125) | "fluxo: a troca de imagem que falha depois do ponto sem volta" |
+| fora do SDK: num console sem ninguém, o nome de qualquer linha como método (N126), o marcador com o resumo (N127), o comando que existe com o marcador (N128) | "consoles: nada antes do login" |
+| fora do SDK: o servidor de janelas que grava a tecla no log, com o código (N129) ou sem ele (N130) | "janelas: o servidor abre, foca, arrasta e fecha", "janelas: a arvore semantica atravessa a fronteira", "janelas: sobre o duke pela barra", "janelas: cada superficie recebe a sua entrada" |
+| fora do SDK: a tecla do físico no histórico quando chega (N131), ou no consumo sem a guarda de quem pede senha (N133) | "consoles: a senha digitada adiantado nao entra no historico" — a N133, também "consoles: login e logout" |
+| fora do SDK: o consumo que grava a tecla de função e o clique (N132) | "barra: F1 da pessoa pressiona" |
+| fora do SDK: o fim no meio da senha que não engole (N134), o Enter que não acaba o engolir (N135), a árvore que edita a linha que engole (N136) | "pareamento: o fim no meio da senha engole o resto" |
+| fora do SDK: o bit da senha desligado enquanto o console engole (N137) | "pareamento: o fim no meio da senha no fisico nao vai ao historico" |
+| fora do SDK: engolir também com a linha da senha já confirmada (N138) | "smp: o fim da cerimonia com a senha ja confirmada nao engole" |
+| fora do SDK: a tecla que fica no anel do canal, na colheita (N139) ou no descarte (N140) | "eventos: a fila do canal nao guarda o que entregou" |
+| fora do SDK: a cópia da tecla na pilha do kernel, na escrita (N141) e na leitura (N142), e na memória do programa (N143) | **sem caso**: a suíte não observa a pilha de outro fio nem a memória de um processo |
+| fora do SDK: o `press` da árvore sem a anotação (N144); o Terminal que sai sem fechar o pseudo-terminal (N145); a anotação que não se desfaz quando o evento não chega (N147) | "terminal: digita e mostra a resposta" |
+| fora do SDK: o fechamento que ignora a anotação (N146) | "terminal: o logout diz quem fechou", "terminal: digita e mostra a resposta" |
+| fora do SDK: o `display.info` com o `typed` de volta (N148) | "agente: display.info descreve a pilha" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
@@ -9525,10 +9628,28 @@ própria e uma tabela de tradução, e desemboca no mesmo lugar. O que cada
 driver faz é extrair o par `(código, pressionada)` do formato dele.
 
 **O teclado tem dono.** A fila de teclas é consumida pelo interpretador, e só
-por ele. `keyboard.read` lê um histórico paralelo, escrito junto e consumido
-separado — porque um segundo consumidor da mesma fila não observa o que foi
-digitado, rouba. Foi medido: com os dois lendo a mesma fila, a sonda recebeu
-uma das três teclas que mandou.
+por ele. `keyboard.read` lê um histórico paralelo, consumido separado —
+porque um segundo consumidor da mesma fila não observa o que foi digitado,
+rouba. Foi medido: com os dois lendo a mesma fila, a sonda recebeu uma das
+três teclas que mandou.
+
+O histórico é escrito quando a tecla chega a uma janela, ou quando o
+console físico a consome — e não quando ela chega ao console: só ao
+consumir ele sabe se a linha pede uma senha, e a senha digitada adiantado,
+antes de o console tratar o Enter que a pede, ficava no histórico. Para
+quem lê `keyboard.read`, isso muda quatro coisas, e nada mais:
+
+- a tecla do físico aparece quando o console a consome — com ele
+  esperando um comando suspenso, só depois que o comando responde;
+- a tecla que a fila cheia (64) descartou não aparece — `dropped` a conta;
+- numa troca de foco com teclas do físico ainda na fila, as da janela podem
+  aparecer antes delas;
+- as teclas que chegam com o console pedindo uma senha e que ele consome
+  já pedindo um comando — as digitadas logo depois do Enter da senha —
+  aparecem; antes se perdiam. Não são senha.
+
+Numa janela, a senha digitada adiantado num Terminal ainda entra: ver
+[Decisões pendentes](#decisões-pendentes).
 
 ## A árvore semântica
 

@@ -5884,6 +5884,10 @@ fn keyboard_read(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // Cada leitor tem o seu cursor no histórico — a autoridade de quem pede
     // é o leitor —: dois agentes lendo não roubam um do outro, e cada um lê
     // tudo o que foi digitado desde a última leitura dele.
+    //
+    // A tecla do console físico está no histórico quando o console a
+    // consome, e não quando ela chega — com a senha pedida, nem então: ver
+    // `teclado::HISTORICO`, que diz o que isso muda para quem lê aqui.
     w.key("text")?;
     w.begin_str()?;
     let mut lidos = 0;

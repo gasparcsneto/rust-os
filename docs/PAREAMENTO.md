@@ -127,6 +127,15 @@ console da Pessoa — no Enter da senha, ou quando o `conferido` do outro
 chega depois —, e uma desistência que chega durante a gravação espera por
 ela: o fim sai da gravação, e não da corrida.
 
+O fim pode chegar enquanto a Pessoa digita a senha — o outro desistiu, a
+conexão caiu, o prazo venceu, a sessão acabou. A linha volta a pedir um
+comando, mas ela não sabe, e continua digitando: o console então **engole**
+o que ela digitar até o Enter seguinte. Não ecoa, não vai à árvore
+semântica nem ao histórico do teclado, e não vira comando; o console diz
+que engole, sem prompt, e o Enter devolve o prompt sem executar nada. A
+árvore não edita nem confirma a linha nesse meio-tempo. Com a senha já
+levada pelo Enter — a conferência em curso —, não há o que engolir.
+
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
 a tela diz para conferir nele); `DesfazerAqui` (o outro desistiu depois

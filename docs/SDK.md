@@ -793,6 +793,19 @@ e a N97, redefinidas sobre o código novo, e as N98–N105, reprovadas, as
 dez; a N94 e a N95, rodadas de novo: a N94 reprovada, a N95 sobrevivendo
 pelo mesmo motivo.
 
+E as do passo 1 da continuidade, a senha fora da auditoria, do log e do
+histórico (ver [Consoles](../README.md#consoles)): a linha que não é
+comando num console sem ninguém, gravada com um marcador e sem resumo
+(N126–N128); o servidor de janelas sem a linha da tecla no log
+(N129–N130); a tecla do console físico no histórico quando o console a
+consome (N131–N133); o resto da senha engolido até o Enter quando a
+cerimônia de pareamento acaba no meio dela (N134–N138); as cópias da
+tecla zeradas (N139–N143); quem fechou o Terminal no registro do `logout`
+(N144–N147); e o `display.info` sem a conta do que se digita (N148). As
+vinte com caso, reprovadas no x86; a N141, a N142 e a N143 ficam sem
+caso: a suíte não observa a pilha de outro fio nem a memória de um
+processo.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -918,6 +931,29 @@ pelo mesmo motivo.
 | N123 | fora do SDK (AE-1c): a imagem nova que não se mapeia, depois do ponto sem volta, sem a execução da decisão (`ERROR`) | `fluxo: a troca de imagem que falha depois do ponto sem volta` |
 | N124 | fora do SDK (AE-1c): a falha do mapeamento tratada como a de antes do ponto sem volta — o erro devolvido ao processo, que volta sem imagem | `fluxo: a troca de imagem que falha depois do ponto sem volta` — o processo morre de falha de página na própria instrução, e não sai com `SEM_MEMORIA` |
 | N125 | fora do SDK (AE-1c): a falha do mapeamento provocada antes do ponto sem volta — o gancho que não chega lá | `fluxo: a troca de imagem que falha depois do ponto sem volta` — o processo ouve o erro e segue vivo |
+| N126 | fora do SDK (passo 1, N6): num console sem ninguém, o nome de qualquer linha gravado como método, como antes | `consoles: nada antes do login` |
+| N127 | fora do SDK (passo 1, N6): o marcador da linha que não é comando gravado com o resumo dos parâmetros | `consoles: nada antes do login` — o resumo do marcador não é o do vazio |
+| N128 | fora do SDK (passo 1, N6): o comando que existe gravado com o marcador | `consoles: nada antes do login` |
+| N129 | fora do SDK (passo 1, N2): o servidor de janelas grava de novo `janelas: tecla <código> em <id>` | `janelas: o servidor abre, foca, arrasta e fecha`, `janelas: a arvore semantica atravessa a fronteira`, `janelas: sobre o duke pela barra`, `janelas: cada superficie recebe a sua entrada` |
+| N130 | fora do SDK (passo 1, N2): uma linha por tecla, sem o código — a conta e o ritmo da senha | os mesmos quatro casos `janelas:` |
+| N131 | fora do SDK (passo 1): a tecla do console físico no histórico quando chega, e não quando o console a consome | `consoles: a senha digitada adiantado nao entra no historico` |
+| N132 | fora do SDK (passo 1): o consumo grava a tecla de função e o clique | `barra: F1 da pessoa pressiona` |
+| N133 | fora do SDK (passo 1): o consumo grava sem a guarda de quem pede senha | `consoles: a senha digitada adiantado nao entra no historico`, `consoles: login e logout` |
+| N134 | fora do SDK (passo 1, N5): o fim da cerimônia no meio da senha não engole — o resto ecoa e vira comando | `pareamento: o fim no meio da senha engole o resto` |
+| N135 | fora do SDK (passo 1, N5): o Enter não acaba o engolir | `pareamento: o fim no meio da senha engole o resto` — o console não volta |
+| N136 | fora do SDK (passo 1, N5): a árvore edita e confirma a linha que engole | `pareamento: o fim no meio da senha engole o resto` |
+| N137 | fora do SDK (passo 1, N5): o bit da senha desligado enquanto o console engole | `pareamento: o fim no meio da senha no fisico nao vai ao historico` |
+| N138 | fora do SDK (passo 1, N5): engolir também com a linha da senha já confirmada — a linha seguinte some | `smp: o fim da cerimonia com a senha ja confirmada nao engole` |
+| N139 | fora do SDK (passo 1, X5): `eventos::colher` sem zerar a posição entregue | `eventos: a fila do canal nao guarda o que entregou` |
+| N140 | fora do SDK (passo 1, X5): `eventos::descartar` sem zerar as posições que sobram | `eventos: a fila do canal nao guarda o que entregou` |
+| N141 | fora do SDK (passo 1, X5): `escrever_no_terminal` sem zerar a cópia na pilha do kernel | **sem caso**: a pilha do kernel de outro fio não é observável pela suíte — a defesa é a revisão e a `politica::sigiloso::zerar`, testada no hospedeiro |
+| N142 | fora do SDK (passo 1, X5): `ler_eventos` do kernel sem zerar os eventos e os bytes | **sem caso**, pelo mesmo motivo |
+| N143 | fora do SDK (passo 1, X5): o runtime — ou o Terminal na saída no meio do lote — sem zerar | **sem caso**: a memória do processo não é observável pela suíte |
+| N144 | fora do SDK (passo 1): o `press` da árvore na caixa de fechar do Terminal sem a anotação | `terminal: digita e mostra a resposta` — o `logout` do agente sai como o clique |
+| N145 | fora do SDK (passo 1): o Terminal sai sem fechar o pseudo-terminal | `terminal: digita e mostra a resposta` — o clique sai como `o terminal morreu` |
+| N146 | fora do SDK (passo 1): `pseudoterminal::fechar` sem olhar a anotação | `terminal: o logout diz quem fechou`, `terminal: digita e mostra a resposta` |
+| N147 | fora do SDK (passo 1): a anotação que não se desfaz quando o evento não chega ao Terminal | `terminal: digita e mostra a resposta` — a fila do Terminal cheia, com ele preso ao núcleo da suíte |
+| N148 | fora do SDK (passo 1, N3): o `display.info` com `terminal.typed` de novo | `agente: display.info descreve a pilha` |
 
 ## Medidas
 

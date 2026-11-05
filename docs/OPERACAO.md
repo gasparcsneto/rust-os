@@ -327,8 +327,11 @@ a **própria** senha — ver [A própria senha](#a-própria-senha).
 A pessoa entrada num console troca a própria senha ali mesmo, sem
 administrador: `senha`, e o console pede a atual, a nova e a nova de novo,
 sem eco — nada aparece na tela, na árvore semântica ou no histórico do
-teclado, e um agente não edita, não esvazia nem confirma essas linhas: nem
-no console físico, nem num Terminal, pelo campo da janela dele. Uma linha
+teclado; no console físico, nem a tecla digitada antes de ele pedir, que
+entra no histórico só quando ele a consome (num Terminal, ela ainda pode
+entrar — ver as [decisões pendentes](../README.md#decisões-pendentes)) —,
+e um agente não edita, não esvazia nem confirma essas linhas: nem no
+console físico, nem num Terminal, pelo campo da janela dele. Uma linha
 vazia, em qualquer passo, desiste. Nada se digita junto da palavra:
 `senha <algo>` é recusado, porque o que viesse junto já teria ecoado.
 
@@ -582,6 +585,7 @@ gravação acontece — ela é uma fotografia de um instante.
 | O disco dá erro | `disk.info` | `alive` falso: o dispositivo parou de responder e foi desligado, e a persistência fica indisponível — a máquina segue, sem gravar; `errors` conta as recusas de leitura, escrita e descarga, com a última |
 | A persistência indisponível | `system.info` | `persistence.state` e `persistence.reason`: o disco, o TPM, o journal recusado — ver [`PERSISTENCIA.md`](PERSISTENCIA.md) |
 | Por que um pedido foi recusado | `audit.tail` | quem pediu, por que processo, o papel, o recurso, o código da decisão e o motivo |
+| Quem fechou o Terminal — e acabou a sessão de quem estava nele | `audit.tail` (`person.logout`, com o recurso `terminal:N`) | o detalhe: `o terminal fechou pelo clique da pessoa`, `o terminal fechou pelo press de agente N na arvore` — o `ui.act` gravado logo antes diz o nome do agente — ou `o terminal morreu`, a queda |
 | A máquina não responde | corte a energia | o journal e o volume do armazém são feitos para isso: o que estava confirmado volta igual, e a cadeia da auditoria continua |
 | O botão de energia não desliga | `system.info` (`power_button`), `audit.tail` | `via` e `reason` dizem se a máquina tem o botão e por que não; `disabled`, se uma tempestade o desligou; na auditoria, o aperto (`power.button`) e a decisão sobre o `system.poweroff` — recusada pela política, ou pela energia sem persistência. O comando, ou o corte de energia, seguem seguros |
 
