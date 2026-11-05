@@ -823,7 +823,7 @@ descrição encolhendo antes, a suíte não produz um motivo de procedência
 cortado. E as do passo 1 da continuidade que fecham a corrida do L1 — a
 edição da árvore que corre com o Enter da Pessoa, conferida de novo
 quando o console a consome — e o #297 — o aviso atrasado do fim da
-cerimônia, que mudava a linha do login (N162–N171; ver
+cerimônia, que mudava a linha do login (N162–N172; ver
 [Consoles](../README.md#consoles)): a conferência do consumo tirada, e a
 corrida volta (N162); o arrendamento solto sem conferir de quem é (N163);
 o arrendamento da recusada não solto (N164); o que vem marcado sem
@@ -832,8 +832,9 @@ em qualquer linha (N166); a sequência de recusadas sem conferir que cada
 edição começa onde a anterior deixou o campo (N167); a recusa que não
 fica com a edição inteira (N168); o bit do histórico pelo modo da
 cerimônia, e não pelo da linha que ficou (N169); o arrendamento que a
-edição só renovou, solto (N170); e a sequência que não conta — só a
-edição que tomou o arrendamento o solta (N171). Todas reprovadas no x86,
+edição só renovou, solto (N170); a sequência que não conta — só a
+edição que tomou o arrendamento o solta (N171); e o aviso que mexe de novo
+nas linhas da troca da senha, e só nelas (N172). Todas reprovadas no x86,
 uma de cada vez.
 
 | | Mutação | Reprovada por |
@@ -1007,6 +1008,7 @@ uma de cada vez.
 | N169 | fora do SDK (passo 1, #297): o bit do histórico pelo modo que a cerimônia pede, e não pelo da linha que ficou | `pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login` — a tecla entra no histórico com a linha pedindo a senha |
 | N170 | fora do SDK (passo 1, L1): o arrendamento que a edição só renovou, solto | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a edição que começou do que um `ui.claim` renovou solta o dele |
 | N171 | fora do SDK (passo 1, L1): sem a sequência — só a edição que tomou o arrendamento o solta, e duas recusadas em voo o deixam | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` |
+| N172 | fora do SDK (passo 1, #297): o aviso da cerimônia mexe de novo nas linhas da troca da senha — só nelas; as do login ficam | `pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login` — a linha da senha atual da troca vira uma linha de comando que engole |
 
 ## Medidas
 

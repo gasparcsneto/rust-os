@@ -9627,9 +9627,10 @@ cerimônia mexer de novo em qualquer linha; a N167 conta como da sequência
 de recusadas a edição que não começou onde a anterior deixou o campo; a
 N168 não deixa a recusa com a edição inteira; a N169 liga o bit do
 histórico pelo modo que a cerimônia pede, e não pelo da linha que ficou; a
-N170 solta o arrendamento que a edição só renovou; e a N171 tira a
-sequência — só a edição que tomou o arrendamento o solta. Todas
-reprovadas no x86, uma de cada vez.
+N170 solta o arrendamento que a edição só renovou; a N171 tira a
+sequência — só a edição que tomou o arrendamento o solta —; e a N172
+deixa o aviso mexer de novo nas linhas da troca da senha, e só nelas.
+Todas reprovadas no x86, uma de cada vez.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9719,7 +9720,7 @@ reprovadas no x86, uma de cada vez.
 | fora do SDK (passo 1, L1): o arrendamento solto sem conferir de quem é (N163); a sequência de recusadas sem conferir que cada edição começa onde a anterior deixou o campo (N167); o arrendamento que a edição só renovou, solto (N170); a sequência que não conta (N171) | "terminal: so se solta o arrendamento que as edicoes recusadas deixaram" |
 | fora do SDK (passo 1, L1): o que vem marcado sem reserva passando como a tecla da Pessoa (N165) | "terminal: a marca da arvore sem reserva nao solta nem passa nada", "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando" |
 | fora do SDK (passo 1, L1): a recusa que não fica com a edição inteira (N168) | "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando", "terminal: a marca da arvore sem reserva nao solta nem passa nada" |
-| fora do SDK (passo 1, #297): o aviso da cerimônia que mexe de novo em qualquer linha (N166); o bit do histórico pelo modo que a cerimônia pede (N169) | "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login" |
+| fora do SDK (passo 1, #297): o aviso da cerimônia que mexe de novo em qualquer linha (N166); o bit do histórico pelo modo que a cerimônia pede (N169); o aviso que mexe de novo só nas linhas da troca da senha (N172) | "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login" — a N172, pela linha da senha atual da troca |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
