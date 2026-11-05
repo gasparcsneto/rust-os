@@ -9484,13 +9484,15 @@ a N152 não deixa o Enter que leu a linha da senha antes do fim acabar o
 engolir; a N153 põe na coordenação o que a janela do Terminal engole, a
 N154 não deixa a janela contar o Enter, e a N155 deixa cair no console
 físico a tecla engolida que o Terminal morto não recebeu; e a N156 desfaz
-às cegas a anotação de quem fechou o Terminal. Reprovadas no x86, menos a
-N150, equivalente: o fim que põe o console a engolir apaga a linha — o
-modo muda —, e o apagar numa linha vazia não muda nada. A N151 reprova
-porque o caso põe algo na linha enquanto ela engole, de propósito: nada a
-edita nesse meio-tempo. A N155 sobreviveu à primeira forma do caso, com a
-fila do Terminal cheia — a fila cheia conta como entregue —; o caso
-passou a matar o Terminal com o coletor segurado, e ela reprova.
+às cegas a anotação de quem fechou o Terminal. Todas reprovadas no x86.
+A N150 e a N151 reprovam porque o caso põe algo na linha enquanto ela
+engole, de propósito: nenhum caminho de hoje põe — o fim que põe o
+console a engolir apaga a linha, e o texto confere o engolir —, e sem
+isso as duas defesas não mudam nada que se veja; a N150 sobreviveu à
+primeira forma do caso, que não punha. A N155 sobreviveu à primeira forma
+do caso, com a fila do Terminal cheia — a fila cheia conta como entregue
+—; o caso passou a matar o Terminal com o coletor segurado, e ela
+reprova.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9567,8 +9569,7 @@ passou a matar o Terminal com o coletor segurado, e ela reprova.
 | fora do SDK: o `press` da árvore sem a anotação (N144); o Terminal que sai sem fechar o pseudo-terminal (N145); a anotação que não se desfaz quando o evento não chega (N147) | "terminal: digita e mostra a resposta" |
 | fora do SDK: o fechamento que ignora a anotação (N146) | "terminal: o logout diz quem fechou", "terminal: digita e mostra a resposta" |
 | fora do SDK: o `display.info` com o `typed` de volta (N148) | "agente: display.info descreve a pilha" |
-| fora do SDK: a letra que correu com o fim da cerimônia chegando à linha sem conferir o engolir (N149); o Enter que acaba o engolir sem apagar a linha (N151); o Enter que leu a linha da senha antes do fim sem acabar o engolir (N152) | "pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte" — a N151, porque o caso põe algo na linha enquanto ela engole |
-| fora do SDK: o apagar que correu com o fim, sem conferir o engolir (N150) | **sobrevive**: equivalente — o fim que põe o console a engolir apaga a linha, e o apagar numa linha vazia não muda nada |
+| fora do SDK: a letra que correu com o fim da cerimônia chegando à linha sem conferir o engolir (N149); o apagar que correu com o fim, sem conferir o engolir (N150); o Enter que acaba o engolir sem apagar a linha (N151); o Enter que leu a linha da senha antes do fim sem acabar o engolir (N152) | "pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte" — a N150 e a N151, porque o caso põe algo na linha enquanto ela engole; a N150, depois do reforço |
 | fora do SDK: a janela do Terminal que põe na coordenação o que o console engole (N153), ou que não conta o Enter (N154) | "pareamento: o terminal de verdade engole fora da coordenacao" |
 | fora do SDK: a tecla engolida que o Terminal morto não recebeu caindo no console físico (N155) | "pareamento: a tecla engolida que o terminal morto nao recebe some" — depois do reforço: a fila cheia conta como entregue |
 | fora do SDK: o desfazer da anotação de quem fechou o Terminal às cegas (N156) | "terminal: o logout diz quem fechou" |

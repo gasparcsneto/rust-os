@@ -808,7 +808,7 @@ processo. E as dos ajustes do passo 1, depois do adversário e do revisor
 (N149–N156): o resto da senha engolido também quando o fim da cerimônia
 corre com a tecla e com o Enter, e na janela do Terminal; e o desfazer
 da anotação de quem fechou, que compara antes de restaurar. Reprovadas no
-x86, menos a N150, equivalente; a N155, depois do reforço do caso.
+x86; a N150 e a N155, depois do reforço dos casos.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -959,7 +959,7 @@ x86, menos a N150, equivalente; a N155, depois do reforço do caso.
 | N147 | fora do SDK (passo 1): a anotação que não se desfaz quando o evento não chega ao Terminal | `terminal: digita e mostra a resposta` — a fila do Terminal cheia, com ele preso ao núcleo da suíte |
 | N148 | fora do SDK (passo 1, N3): o `display.info` com `terminal.typed` de novo | `agente: display.info descreve a pilha` |
 | N149 | fora do SDK (ajustes do passo 1, A1): a letra que passou pelo engolir antes do fim chega à linha sem conferir o engolir | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` |
-| N150 | fora do SDK (ajustes do passo 1, A1): o apagar sem conferir o engolir | **sobrevive**: equivalente — o fim que põe o console a engolir apaga a linha, e o apagar numa linha vazia não muda nada |
+| N150 | fora do SDK (ajustes do passo 1, A1): o apagar sem conferir o engolir | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` — depois do reforço: o caso põe algo na linha enquanto ela engole, o que nenhum caminho de hoje põe; sem isso sobrevivia, equivalente |
 | N151 | fora do SDK (ajustes do passo 1, A1): o Enter que acaba o engolir sem apagar a linha | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` — o caso põe algo na linha enquanto ela engole |
 | N152 | fora do SDK (ajustes do passo 1, A2): o Enter que leu a linha da senha antes do fim não acaba o engolir | `pareamento: o fim entre duas tomadas da linha nao deixa a senha nem engole a seguinte` — o console fica engolindo |
 | N153 | fora do SDK (ajustes do passo 1, A6): a janela do Terminal põe na coordenação o que o console engole | `pareamento: o terminal de verdade engole fora da coordenacao` |
