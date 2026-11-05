@@ -243,10 +243,18 @@ struct Fio {
     /// O pai já colheu este fio?
     ///
     /// Um fio terminado que **ainda não** foi colhido é um zumbi: a vaga
-    /// continua ocupada, mas tudo o que resta dela é o código de saída,
-    /// guardado para uma pergunta que ainda não foi feita. Ver
-    /// [`recolher_terminados`].
+    /// continua ocupada, com o código de saída guardado para uma pergunta
+    /// que ainda não foi feita — e com o espaço de endereços e a pilha, que
+    /// vão embora com a vaga. O que a morte solta fora do fio já saiu: ver
+    /// [`limpo`](Fio::limpo) e [`recolher_terminados`].
     colhido: bool,
+    /// O que a morte solta fora do fio já foi solto: a malha — os
+    /// endpoints, o que esperava neles, as entregas, as designações e as
+    /// janelas —, os fluxos, os pedidos ao enlace e a janela das mensagens
+    /// (ver [`limpar_a_morte`]). Posto pelo coletor, sob a trava, quando ele
+    /// limpa um zumbi — a morte, e não a colheita, é o fim do processo (a
+    /// DF-1) —; o recolhimento do fio, depois, não limpa de novo.
+    limpo: bool,
     /// Com que autoridade este fio age: a de quem o lançou.
     ///
     /// Mora aqui pelo mesmo motivo dos descritores: morre com o processo, e
@@ -571,6 +579,7 @@ pub fn init() {
             pai: None,
             saida: None,
             colhido: false,
+            limpo: false,
             autoridade: crate::autorizacao::Autoridade::Sistema,
             na_cpu: Some(cpu),
             // O fio do canal do agente fica no núcleo que recebe as
@@ -840,7 +849,8 @@ impl alloc::task::Wake for Sinal {
 }
 
 /// Tira da tabela os fios que já terminaram e devolve o que eles ocupavam:
-/// a pilha de kernel, e o espaço de endereços quando havia um.
+/// a pilha de kernel, e o espaço de endereços quando havia um. Antes, solta
+/// o que a morte dos zumbis solta fora do fio — ver abaixo.
 ///
 /// Devolve quantos foram recolhidos.
 ///
@@ -856,6 +866,20 @@ impl alloc::task::Wake for Sinal {
 /// cujo pai já morreu, e um já colhido vão embora na mesma volta em que
 /// iriam antes — que é o que mantém o coletor recolhendo os fios da suíte
 /// como ele sempre recolheu.
+///
+/// # O zumbi já morreu
+///
+/// O que fica do zumbi é o código de saída — e a vaga, a pilha e o espaço
+/// de endereços, que saem com ela. O resto da morte não espera a colheita:
+/// a malha, os fluxos, o enlace e as mensagens dele ([`limpar_a_morte`])
+/// saem na primeira passada depois de ele largar o núcleo, como os de um
+/// morto sem pai — a DF-1 diz que a morte encerra o fluxo, e a outra ponta
+/// não pode ficar esperando um pai que talvez nunca pergunte. Uma vez só:
+/// a passada marca o zumbi ([`Fio::limpo`]) sob a trava, e solta fora
+/// dela; o recolhimento, quando o pai colher, não solta de novo. As
+/// superfícies, o pseudo-terminal, os canais de eventos, as conexões de
+/// rede e a contenção já saíam na morte: perguntam por [`vivo`], que dá o
+/// zumbi por morto.
 ///
 /// A parte que **não** é opcional é o pai morto liberar o filho. Sem ela, um
 /// processo que bifurca e sai sem esperar deixa o filho ocupando uma das
@@ -904,6 +928,10 @@ impl alloc::task::Wake for Sinal {
 pub fn recolher_terminados() -> usize {
     let mut quantos = 0;
 
+    // A morte dos zumbis primeiro: o que eles soltam fora do fio sai já, e
+    // o código de saída fica até a colheita.
+    limpar_os_zumbis();
+
     loop {
         let morto = com_escalonador(|e| {
             // `na_cpu`, e não "diferente do atual": com vários núcleos há
@@ -941,6 +969,7 @@ pub fn recolher_terminados() -> usize {
                 pai: None,
                 saida: None,
                 colhido: true,
+                limpo: false,
                 autoridade: crate::autorizacao::Autoridade::NENHUMA,
                 na_cpu: None,
                 fixo: None,
@@ -973,13 +1002,12 @@ pub fn recolher_terminados() -> usize {
             }
         }
         let canal = politica::mensagens::Canal::Processo(morto.id.numero());
+        // O zumbi que o pai colheu já soltou a morte dele: uma vez só.
+        let limpo = morto.limpo;
         drop(morto);
-        // A janela de nonces do processo, se ele mandou mensagens pela
-        // interface nativa: o id não se repete, e a janela não serviria a
-        // mais ninguém. Fora da trava, como tudo que este laço larga. E os
-        // endpoints dele na malha fecham, com o que esperava neles.
-        crate::mensagens::canal_acabou(canal);
-        crate::malha::canal_acabou(canal);
+        if !limpo {
+            limpar_a_morte(canal);
+        }
         // Só agora a vaga volta a ser escolhível. O marcador sai sob a trava
         // e é largado fora dela, como todo fio deste módulo.
         let marcador = com_escalonador(|e| match &e.fios[vaga] {
@@ -1000,6 +1028,98 @@ pub fn recolher_terminados() -> usize {
         RECOLHIDOS.fetch_add(quantos as u64, Ordering::Relaxed);
     }
     quantos
+}
+
+/// O que a morte de um processo solta fora do fio, fora da trava do
+/// escalonador: a janela de nonces dele, se mandou mensagens pela interface
+/// nativa — o id não se repete, e a janela não serviria a mais ninguém —; e
+/// a malha: os endpoints dele fecham, com o que esperava neles, os fluxos
+/// de que ele é ponta acabam (`o processo acabou`), os pedidos dele a
+/// outros dispositivos saem, e as designações e as janelas também (ver
+/// `malha::canal_acabou`). Chamada uma vez por fio: pela passada dos
+/// zumbis ([`limpar_os_zumbis`]) ou pelo recolhimento.
+fn limpar_a_morte(canal: politica::mensagens::Canal) {
+    crate::mensagens::canal_acabou(canal);
+    crate::malha::canal_acabou(canal);
+    #[cfg(feature = "modo-teste")]
+    if let politica::mensagens::Canal::Processo(id) = canal
+        && VIGIADO.load(Ordering::SeqCst) == id
+    {
+        LIMPEZAS_DO_VIGIADO.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A morte dos zumbis: cada fio terminado, fora de todo núcleo, que o pai
+/// ainda pode colher e cuja morte ainda não foi solta é marcado
+/// ([`Fio::limpo`]) sob a trava — um de cada vez, como o recolhimento —, e
+/// a morte dele sai fora dela ([`limpar_a_morte`]). O fio fica na tabela,
+/// com o código de saída. Devolve quantos.
+///
+/// Fora de todo núcleo pela regra do recolhimento: um fio que acabou de se
+/// marcar terminado ainda roda, no kernel, até ceder a vez — e só depois
+/// disso nada mais dele pede coisa alguma.
+fn limpar_os_zumbis() -> usize {
+    let mut quantos = 0;
+    loop {
+        let canal = com_escalonador(|e| {
+            let vaga = (0..MAX_FIOS).find(|&i| {
+                matches!(&e.fios[i], Some(fio)
+                        if fio.estado == Estado::Terminado
+                            && fio.na_cpu.is_none()
+                            && !fio.limpo
+                            && e.e_zumbi(i))
+            })?;
+            let fio = e.fios[vaga].as_mut()?;
+            fio.limpo = true;
+            Some(politica::mensagens::Canal::Processo(fio.id.numero()))
+        });
+        let Some(canal) = canal else {
+            break;
+        };
+        limpar_a_morte(canal);
+        quantos += 1;
+    }
+    quantos
+}
+
+/// O processo cujas limpezas da morte a suíte conta — ver
+/// [`vigiar_a_limpeza`].
+#[cfg(feature = "modo-teste")]
+static VIGIADO: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Quantas vezes a morte do vigiado foi solta.
+#[cfg(feature = "modo-teste")]
+static LIMPEZAS_DO_VIGIADO: AtomicU64 = AtomicU64::new(0);
+
+/// A suíte passa a contar quantas vezes a morte do processo `id` é solta
+/// pelo coletor — a passada dos zumbis ou o recolhimento: uma vez só.
+#[cfg(feature = "modo-teste")]
+pub fn vigiar_a_limpeza(id: u64) {
+    LIMPEZAS_DO_VIGIADO.store(0, Ordering::SeqCst);
+    VIGIADO.store(id, Ordering::SeqCst);
+}
+
+/// Quantas vezes a morte do vigiado foi solta desde [`vigiar_a_limpeza`].
+#[cfg(feature = "modo-teste")]
+pub fn limpezas_vigiadas() -> u64 {
+    LIMPEZAS_DO_VIGIADO.load(Ordering::SeqCst)
+}
+
+/// O processo `id` é um zumbi agora: terminou, e o pai — vivo — ainda não
+/// o colheu.
+#[cfg(feature = "modo-teste")]
+pub fn zumbi_de_teste(id: u64) -> bool {
+    com_escalonador(|e| {
+        (0..MAX_FIOS)
+            .any(|i| e.fios[i].as_ref().is_some_and(|f| f.id.numero() == id) && e.e_zumbi(i))
+    })
+}
+
+/// O fio `id` ainda ocupa uma vaga — vivo, zumbi, ou terminado à espera do
+/// coletor.
+#[cfg(feature = "modo-teste")]
+pub fn na_tabela_de_teste(id: u64) -> bool {
+    com_escalonador(|e| e.fios.iter().flatten().any(|f| f.id.numero() == id))
 }
 
 /// Quantos fios o coletor já desmontou.
@@ -1277,6 +1397,7 @@ fn nascer(
             pai,
             saida: None,
             colhido: false,
+            limpo: false,
             autoridade,
             na_cpu: None,
             fixo,
@@ -1362,6 +1483,7 @@ fn nascer(
             pai,
             saida: None,
             colhido: false,
+            limpo: false,
             autoridade,
             na_cpu: None,
             fixo,
@@ -1429,6 +1551,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             pai: None,
             saida: None,
             colhido: false,
+            limpo: false,
             autoridade: crate::autorizacao::Autoridade::Sistema,
             na_cpu: None,
             fixo: Some(cpu),

@@ -21,6 +21,9 @@
 //!   [`CODIGO`]: os fluxos dele acabam.
 //! - [`BIFURCAR`]: duplica o processo; o pai diz `fluxos: filho <id>`, e o
 //!   filho escuta o canal dele.
+//! - [`COLHER`] o filho `b`: espera ele (`esperar`) e diz `fluxos: colhi
+//!   <id> <codigo>` — ou `fluxos: colher <erro>`. Até a suíte mandar, o
+//!   filho que saiu é um zumbi.
 //!
 //! O resumo é o FNV-1a de 64 bits: a suíte o confere contra o dos bytes que
 //! o padrão determinístico dá. Cada falha diz o código e o passo, e o
@@ -59,6 +62,7 @@ const MANDAR: i64 = 1;
 const RECEBER: i64 = 2;
 const TROCAR: i64 = 3;
 const BIFURCAR: i64 = 4;
+const COLHER: i64 = 5;
 
 /// O código de saída no fim pedido. A suíte do kernel o procura — e é o
 /// mesmo do `ola`, a imagem da troca.
@@ -254,6 +258,17 @@ fn escutar(meu: &str) -> i64 {
                     }
                     erro => {
                         escreverln!("fluxos: bifurcar devolveu {}", erro);
+                    }
+                },
+                COLHER => match sistema::esperar(e.b.max(0) as u64) {
+                    Ok((id, Some(codigo))) => {
+                        escreverln!("fluxos: colhi {} {}", id, codigo);
+                    }
+                    Ok((id, None)) => {
+                        escreverln!("fluxos: colhi {} falha", id);
+                    }
+                    Err(erro) => {
+                        escreverln!("fluxos: colher {}", erro);
                     }
                 },
                 outro => {

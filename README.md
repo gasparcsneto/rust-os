@@ -800,7 +800,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── correio.rs    o aplicativo B da malha: oferece `imagem.compartilhar`, espera o que chega e confirma, dizendo de que programa veio
         ├── fotos.rs      o aplicativo A da malha: procura quem oferece, escolhe pela identidade conferida, manda, consulta e reenvia, no passo da suíte
         ├── impostor.rs   diz ser o `correio` e tenta, pela malha, o que é do outro: ler, fechar, confirmar, consultar, forjar — cada tentativa decidida e recusada
-        ├── fluxos.rs     uma ponta de fluxo para a suíte: oferece `imagem.compartilhar`, abre ou aceita no passo ditado, escreve e lê o padrão determinístico, grava o que leu pelo papel dele, troca de imagem e se bifurca
+        ├── fluxos.rs     uma ponta de fluxo para a suíte: oferece `imagem.compartilhar`, abre ou aceita no passo ditado, escreve e lê o padrão determinístico, grava o que leu pelo papel dele, troca de imagem, se bifurca e colhe o filho quando a suíte manda
         ├── carteiro.rs   o aplicativo A do enlace: procura quem oferece `imagem.compartilhar` em outro dispositivo, manda, reenvia com o mesmo nonce e pergunta o estado — decidido aqui, com `fabric.remote`, e lá, pelo gate de lá
         ├── remetente.rs  o aplicativo A dos fluxos: procura quem oferece `imagem.compartilhar` aqui e, sem ninguém, no par; abre um fluxo, manda 4 MiB do padrão, termina e lê a volta até o fim, dizendo os resumos e as esperas da contrapressão
         ├── recebedor.rs  o aplicativo B dos fluxos: oferece `imagem.compartilhar`, aceita um fluxo, lê tudo, grava o resumo pelo `fs.write` dele e devolve o mesmo tanto — e, numa falha no meio, o que chegou até ali
@@ -9268,8 +9268,11 @@ política encerra o fluxo. O buffer de cada sentido tem 16 KiB, e a
 contrapressão segura quem escreve; o `finish` termina um sentido, e o
 `close` fecha para quem fecha, com o que ele escreveu legível até o fim
 pela outra ponta, como o FIN do TCP. A ponta é do processo: não se herda
-no `fork`, acaba no `exec` e na morte. Tudo é volátil: o reboot acaba os
-fluxos. Ver [`kernel/src/fluxo.rs`](kernel/src/fluxo.rs) e a conta pura em
+no `fork`, acaba no `exec` e na morte — a saída, e não a colheita: o
+filho que saiu e que o pai ainda não colheu, o zumbi, guarda só o código
+de saída, e o coletor solta a malha, os fluxos, o enlace e as mensagens
+dele na primeira passada, uma vez só (o AE-5). Tudo é volátil: o reboot
+acaba os fluxos. Ver [`kernel/src/fluxo.rs`](kernel/src/fluxo.rs) e a conta pura em
 [`politica/src/fluxo.rs`](politica/src/fluxo.rs).
 
 **Entre dois Dukes**, com `device` no `stream.open`: decidido aqui com
@@ -9295,7 +9298,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-41 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+42 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de

@@ -39515,6 +39515,10 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_morte_a_troca_e_a_bifurcacao,
     },
     Caso {
+        nome: "fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita",
+        f: fluxo::fluxo_o_zumbi_solta_a_morte_antes_da_colheita,
+    },
+    Caso {
         nome: "fluxo: a troca de imagem sem fluxo nao espera a ordem",
         f: fluxo::fluxo_a_troca_sem_fluxo_nao_espera_a_ordem,
     },

@@ -37,6 +37,7 @@ const MANDAR: i64 = 1;
 const RECEBER: i64 = 2;
 const TROCAR: i64 = 3;
 const BIFURCAR: i64 = 4;
+const COLHER: i64 = 5;
 
 /// O byte `i` do padrão determinístico — o mesmo do programa.
 fn padrao(i: usize) -> u8 {
@@ -1530,6 +1531,125 @@ pub(super) fn fluxo_a_morte_a_troca_e_a_bifurcacao() -> Resultado {
             encerrar_todas(r, &[&d])
         })();
         encerrar_todas(r, &[&a])
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FS11c — o zumbi: a morte, e não a colheita (AE-5)
+// ---------------------------------------------------------------------------
+
+/// O filho de uma bifurcação que sai sem ser colhido é um zumbi: guarda o
+/// código de saída até o pai perguntar. Mas a morte dele já é a morte — a
+/// DF-1 —: o fluxo de que ele é ponta acaba com `o processo acabou`, com o
+/// que estava no buffer descartado e contado; a outra ponta ouve o `FIM`
+/// no canal dela, uma vez, e a leitura dela ouve o motivo; e o endpoint
+/// que ele ofereceu fecha — tudo com o filho ainda zumbi. Depois o pai
+/// colhe o código certo, e a morte não é solta de novo: nem pela colheita,
+/// nem pelo recolhimento da vaga.
+pub(super) fn fluxo_o_zumbi_solta_a_morte_antes_da_colheita() -> Resultado {
+    use super::aviso::{Avisado, abrir_avisando, com_os_avisos, numero_do_fluxo};
+    use protocolo::usuario::evento::malha;
+    com_os_avisos(|| {
+        let (_, bia) = pessoa("bia", 317);
+        let antes = crate::autorizacao::ultimo_registro();
+        let pai = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let d = Avisado::lancar(bia)?;
+            let r = (|| -> Resultado {
+                let (desde, filho) = passo_na_malha(&pai.canal, BIFURCAR, 0, "fluxos: filho ")?;
+                let filho: u64 = filho.parse().map_err(|_| "o pai nao disse o filho")?;
+                dito_na_malha(desde, &format!("fluxos: sou o filho {filho}"))?;
+                dito_na_malha(desde, &format!("fluxos: pronto {}", pai.endpoint))?;
+                let do_filho = chamador_de(filho).ok_or("o filho nao esta vivo")?;
+                // O endpoint do filho, e um fluxo da outra ponta até ele: a
+                // outra ponta com o aviso, o filho sem.
+                let r = fs_pedir(
+                    do_filho,
+                    "fabric.offer",
+                    &format!(r#"{{"intent":"{INTENCAO}"}}"#),
+                );
+                let endpoint = fs_texto(&r, "endpoint").ok_or_else(|| {
+                    crate::log_error!("teste", "{}", r);
+                    "o filho nao ofereceu o endpoint dele"
+                })?;
+                let desde_d = crate::log::total_emitidos();
+                let r = abrir_avisando(&d, &endpoint);
+                let id = fs_texto(&r, "stream").ok_or_else(|| {
+                    crate::log_error!("teste", "{}", r);
+                    "o pedido de fluxo ao filho nao passou"
+                })?;
+                let r = aceitar(do_filho, &endpoint);
+                if fs_texto(&r, "stream").as_deref() != Some(id.as_str()) {
+                    crate::log_error!("teste", "{}", r);
+                    return Err("o filho nao aceitou o fluxo");
+                }
+                let n = numero_do_fluxo(&id)?;
+                d.esperar_aviso(desde_d, "fluxo", n, malha::GRAVAVEL)?;
+                escrito(
+                    &escrever(d.quem(), &id, b"em transito"),
+                    11,
+                    "a escrita ao filho nao entrou",
+                )?;
+                // O filho sai, e o pai não pergunta por ele.
+                crate::fios::vigiar_a_limpeza(filho);
+                let desde_d = crate::log::total_emitidos();
+                encerrar_na_malha(&format!("teste-fluxos-{filho}"), SAIDA)?;
+                fim_gravado(antes, &id, "o processo acabou; ida 11; volta 0; desc 11")?;
+                d.esperar_aviso(desde_d, "fluxo", n, malha::FIM)?;
+                let retirado = format!("endpoint:{endpoint}");
+                esperar_ate(
+                    || {
+                        !registros_depois(antes, |e| {
+                            e.metodo == "fabric.withdraw"
+                                && e.recurso == retirado
+                                && e.detalhe == "fechado: o processo que o abriu acabou"
+                        })
+                        .is_empty()
+                    },
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o endpoint do filho nao fechou na morte dele")?;
+                recusado_com(
+                    &ler(d.quem(), &id, 10),
+                    "CONFLICT",
+                    "o processo acabou",
+                    "a outra ponta nao ouviu a morte do filho",
+                )?;
+                if d.avisos_depois_do_sossego(desde_d, "fluxo", n) != [malha::FIM] {
+                    crate::log_error!("teste", "{:?}", d.avisos(desde_d));
+                    return Err("a morte do filho avisou o fim mais de uma vez");
+                }
+                // Tudo isso com o filho zumbi: o pai ainda não perguntou.
+                if !crate::fios::zumbi_de_teste(filho) {
+                    return Err(
+                        "o filho nao ficou zumbi: o caso nao viu a morte antes da colheita",
+                    );
+                }
+                if crate::fios::limpezas_vigiadas() != 1 {
+                    crate::log_error!("teste", "{}", crate::fios::limpezas_vigiadas());
+                    return Err("a morte do zumbi nao foi solta uma vez");
+                }
+                // O pai colhe o código certo; a vaga sai, e a morte não é
+                // solta de novo.
+                let (_, colhido) =
+                    passo_na_malha(&pai.canal, COLHER, filho as i64, "fluxos: colhi ")?;
+                if colhido != format!("{filho} {SAIDA}") {
+                    crate::log_error!("teste", "colhido: {}", colhido);
+                    return Err("o pai nao colheu o codigo de saida do filho");
+                }
+                esperar_ate(|| !crate::fios::na_tabela_de_teste(filho), TETO_DA_MALHA)
+                    .map_err(|_| "o filho colhido nao saiu da tabela")?;
+                if crate::fios::limpezas_vigiadas() != 1 {
+                    crate::log_error!("teste", "{}", crate::fios::limpezas_vigiadas());
+                    return Err("o recolhimento do zumbi soltou a morte dele de novo");
+                }
+                Ok(())
+            })();
+            let fim = d.encerrar();
+            r.and(fim)
+        })();
+        crate::fios::vigiar_a_limpeza(u64::MAX);
+        encerrar_todas(r, &[&pai])
     })
 }
 

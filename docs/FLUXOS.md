@@ -130,8 +130,13 @@ próxima operação de cada ponta ouve o motivo. Depois do fim fica uma
 
 A ponta é **do processo**: não se herda no `fork`, não sobrevive ao `exec`
 (`o programa mudou`) e a morte dele aborta os fluxos de que ele ainda é
-ponta (`o processo acabou`). A ponta de que ele já **saiu** — fechou — não
-é mais dele: o que escreveu segue legível pela outra até o fim.
+ponta (`o processo acabou`). A morte é a saída, e não a colheita: o filho
+de `fork` que saiu e que o pai ainda não colheu — o zumbi, que guarda só
+o código de saída — tem a morte solta pelo coletor na primeira passada,
+como a de um processo sem pai: os fluxos dele acabam, a outra ponta ouve
+o `FIM`, e o endpoint dele fecha, uma vez só (o AE-5; antes, tudo isso
+esperava o pai colher). A ponta de que ele já **saiu** — fechou — não é
+mais dele: o que escreveu segue legível pela outra até o fim.
 
 O `exec` de quem é ponta encerra os fluxos dentro da ordem das gravações,
 logo depois do ponto sem volta e antes de a imagem nova rodar — sem
@@ -330,13 +335,14 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 41 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 42 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo
   do aceite e o endpoint que fecha, a reconfirmação na abertura efetiva, o
   plano de dados que não gasta a ficha, a contrapressão e as esperas, as
-  cotas, a morte (também a de quem já fechou), o `exec` e o `fork`, a
+  cotas, a morte (também a de quem já fechou, e a do zumbi antes da
+  colheita), o `exec` e o `fork`, a
   revogação e a política nova, o desligamento, a inatividade, a auditoria
   sem o conteúdo, os bytes que não autorizam, e as corridas (no meio da
   decisão, ao mesmo tempo, abrir e desligar, muitos fluxos e muitas
