@@ -256,6 +256,11 @@ struct Estado {
     /// da árvore e do histórico do teclado. Ver [`aviso_do_pareamento`] e
     /// [`engolir`].
     engolindo: bool,
+    /// Num Terminal que engole: o Enter que acaba o engolir já passou pela
+    /// janela dele, a caminho do console. As teclas da janela até ele são o
+    /// resto da senha, e não passam pela coordenação; as de depois, o
+    /// console não engole, e passam. Ver [`engolida_na_janela`].
+    enter_na_janela: bool,
     /// O `press` que a árvore entregou na caixa de fechar da janela do
     /// Terminal deste console, e de quem: o registro do `logout` diz quem
     /// fechou. Ver [`press_pela_arvore`] e [`quem_fechou`].
@@ -282,6 +287,7 @@ impl Estado {
         executando: false,
         enter_pedido: [None; ENTER_PEDIDOS],
         engolindo: false,
+        enter_na_janela: false,
         press_pela_arvore: None,
     };
 
@@ -307,6 +313,18 @@ impl Estado {
     fn zerar(&mut self) {
         self.bytes = [0; LINHA_MAX];
         self.tam = 0;
+    }
+
+    /// O console para de engolir: o Enter da Pessoa chegou — ver
+    /// [`engolir`]. E a linha se apaga, por defesa: o fim da cerimônia a
+    /// deixou vazia, e nada a edita enquanto ela engole — o texto e o
+    /// apagar conferem o engolir na mesma seção que editam, em [`tratar`]
+    /// —; o que entrasse nela por outro caminho seria o resto da senha, e
+    /// iria à frente do comando seguinte.
+    fn parar_de_engolir(&mut self) {
+        self.engolindo = false;
+        self.enter_na_janela = false;
+        self.zerar();
     }
 }
 
@@ -592,6 +610,7 @@ pub fn abrir_console(console: Console) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        e.enter_na_janela = false;
         e.press_pela_arvore = None;
         saidaln!(
             console,
@@ -693,6 +712,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        e.enter_na_janela = false;
         e.press_pela_arvore = None;
         sessao
     })
@@ -777,12 +797,21 @@ pub fn tratar(console: Console, c: char) {
     if console == Console::Fisico && !tecla_coordenada(c) {
         return;
     }
+    // O apagar e o texto conferem o engolir de novo, na mesma seção que
+    // editam a linha: [`engolir`] solta a trava, e o fim da cerimônia,
+    // noutro núcleo, pode pô-la a engolir antes desta tecla chegar à linha —
+    // e então ela é o resto da senha: sem eco, e fora da linha. O Enter
+    // confere em [`confirmar_em`]; o resto não edita a linha.
     match c {
         '\n' => {
             confirmar_em(console, Origem::Pessoa);
         }
         '\u{8}' => {
-            com_estado(console, |e| apagar_em(console, e));
+            com_estado(console, |e| {
+                if !e.engolindo {
+                    apagar_em(console, e);
+                }
+            });
         }
         // A linha inteira, e o Enter de um agente: o que o Terminal escreve
         // pelo pseudo-terminal quando a ação vem da árvore — o `cancel` e o
@@ -820,7 +849,13 @@ pub fn tratar(console: Console, c: char) {
         // desalinharia a conta entre o que está no buffer e o que está
         // desenhado.
         c if aceito(c) => {
-            let coube = com_estado(console, |e| digitar_em(console, e, c)).unwrap_or(true);
+            let coube = com_estado(console, |e| {
+                if e.engolindo {
+                    return true;
+                }
+                digitar_em(console, e, c)
+            })
+            .unwrap_or(true);
             if !coube {
                 com_estado(console, |e| {
                     saidaln!(console);
@@ -848,8 +883,14 @@ pub fn tratar(console: Console, c: char) {
 ///   a tecla que o edita passa pela coordenação como a do console físico —
 ///   arrenda o campo livre, e é recusada (`CONFLICT`, gravado) no campo de
 ///   outro. O Enter de um campo com algo pede o arrendamento.
+/// - Menos o resto de uma senha que o console do Terminal engole — ver
+///   [`engolir`] e [`engolida_na_janela`]: como no físico, o que se engole
+///   não arrenda o campo, não aumenta a versão dele e não é `CONFLICT`. A
+///   tecla vai ao Terminal, que a escreve no pseudo-terminal, e o console a
+///   descarta.
 /// - Sem quem escute na janela — o dono morreu e o foco ainda não voltou
-///   —, a tecla vai para o console físico, em vez de sumir.
+///   —, a tecla vai para o console físico, em vez de sumir. A que o console
+///   do Terminal engolia, não: é o resto de uma senha, e some.
 pub fn tratar_tecla_de_janela(c: char) {
     let Some(janela) = crate::superficies::janela_com_foco() else {
         tratar(Console::Fisico, c);
@@ -862,7 +903,9 @@ pub fn tratar_tecla_de_janela(c: char) {
         crate::autorizacao::recusar_sem_login(Console::Fisico, "keyboard", &[]);
         return;
     }
-    if let Some((indice, valor)) = &janela.campo
+    let engolida = terminal.is_some_and(|console| engolida_na_janela(console, c));
+    if !engolida
+        && let Some((indice, valor)) = &janela.campo
         && let Some(id) = crate::ui::id_do_elemento(janela.camada, *indice)
     {
         let recurso = crate::coordenacao::recurso(id);
@@ -890,9 +933,36 @@ pub fn tratar_tecla_de_janela(c: char) {
         b: 0,
         c: 0,
     };
-    if !crate::superficies::entregar(janela.destino, evento) {
+    if !crate::superficies::entregar(janela.destino, evento) && !engolida {
         tratar(Console::Fisico, c);
     }
+}
+
+/// A tecla `c`, que vai à janela do Terminal do console `console`, é o
+/// resto de uma senha que ele engole — ver [`engolir`]?
+///
+/// O console engole quando trata a tecla, e a janela a recebe antes: entre
+/// as duas, o Terminal e a fila do pseudo-terminal. Então a janela conta o
+/// Enter que passa por ela: até ele — inclusive —, as teclas são o resto
+/// da senha, que o console vai engolir; as de depois, ele não engole, e
+/// voltam a passar pela coordenação mesmo que o console ainda não tenha
+/// tratado o Enter. O console que para de engolir, ou que abre e fecha,
+/// zera a conta.
+///
+/// Fica de fora só a borda: a tecla que passou pela janela antes de o fim
+/// da cerimônia chegar já passou pela coordenação — como a do físico que
+/// passa por [`engolir`] antes dele —; e a que vem depois de um Enter
+/// digitado antes do fim, ainda a caminho, não passa até o console tratar
+/// esse Enter.
+fn engolida_na_janela(console: Console, c: char) -> bool {
+    com_estado(console, |e| {
+        let engolida = e.engolindo && !e.enter_na_janela;
+        if engolida && c == '\n' {
+            e.enter_na_janela = true;
+        }
+        engolida
+    })
+    .unwrap_or(false)
 }
 
 /// A tecla da pessoa na linha do console físico, pela coordenação — ver
@@ -2028,21 +2098,36 @@ fn comecar_pareamento(console: Console, aceitar: bool, params: &str) {
 /// O Enter numa linha da cerimônia de pareamento: o que se digitou sai da
 /// linha — e é apagado dos dois lugares, se era a senha —, vai à
 /// cerimônia, e a linha passa a pedir o que ela pede agora.
+///
+/// O Enter leu o modo da linha em [`confirmar_em`], numa tomada da trava, e
+/// a toma aqui, noutra. Se o fim da cerimônia chegou entre as duas — de
+/// outro núcleo, com a linha ainda parada, porque o Enter ainda não a tinha
+/// tomado —, ele já zerou a senha e pôs o console a engolir. Então este
+/// Enter é o que acaba o engolir, como em [`engolir`]: nada vai à
+/// cerimônia, e a linha seguinte da Pessoa não é engolida.
 fn parear_passo(console: Console, modo: Modo) {
     let (Some(i), Some(linha)) = (indice(console), modo.linha_da_cerimonia()) else {
         return;
     };
     let mut copia = [0u8; LINHA_MAX];
-    let (tam, abertura) = com_estado(console, |e| {
+    let tomada = com_estado(console, |e| {
+        if e.engolindo {
+            e.parar_de_engolir();
+            return None;
+        }
         let tam = e.tam;
         copia[..tam].copy_from_slice(&e.bytes[..tam]);
         e.zerar();
         e.inicio = None;
         e.executando = true;
         saidaln!(console);
-        (tam, e.abertura)
+        Some((tam, e.abertura))
     })
-    .unwrap_or((0, 0));
+    .flatten();
+    let Some((tam, abertura)) = tomada else {
+        fim_do_engolir(console);
+        return;
+    };
     crate::teclado::pedindo_senha(i, false);
     let sessao = sessao_valida(console);
     let digitado = if modo.secreto() {
@@ -2086,6 +2171,14 @@ pub const AVISO_DO_ENGOLIR: &str = "(o que se digitar ate o Enter e descartado)"
 /// [`engolir`] —, e diz isso ([`AVISO_DO_ENGOLIR`]), sem prompt: o prompt
 /// é do Enter. O bit do histórico fica ligado enquanto ele engole. Com a
 /// linha sendo executada, não: o Enter dela já levou a senha.
+///
+/// O fim roda noutro fio, e pode correr com a tecla e com o Enter da
+/// Pessoa, que leem a linha numa tomada da trava e a editam ou tomam
+/// noutra. A tecla que passou por [`engolir`] antes do fim confere o
+/// engolir de novo na seção que edita a linha ([`tratar`]); o Enter que
+/// leu a linha da senha antes do fim, e a toma depois, é o que acaba o
+/// engolir ([`parear_passo`]). Num Terminal, a janela, que recebe a tecla
+/// antes do console, conta o Enter — ver [`engolida_na_janela`].
 pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
     let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
     let Some(i) = indice(console) else {
@@ -2117,6 +2210,7 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
         let comecou = parado && e.modo.secreto() && !modo.secreto();
         if comecou {
             e.engolindo = true;
+            e.enter_na_janela = false;
         }
         if e.modo != modo {
             e.zerar();
@@ -2161,19 +2255,26 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
 
 /// Se o console engole o resto de uma senha — ver [`aviso_do_pareamento`]
 /// —, descarta `c` e devolve verdadeiro: sem eco, fora da linha, da árvore
-/// e do histórico, e sem passar pela coordenação.
+/// e do histórico, e sem passar pela coordenação — no físico; num Terminal,
+/// a tecla já passou pela janela, que não a pôs na coordenação: ver
+/// [`engolida_na_janela`].
 ///
 /// O Enter acaba o engolir: o console volta a pedir o que a linha pede —
-/// um comando —, com o prompt, o bit do histórico conforme ela, e nada se
-/// executa. O Enter de um agente que chegue nesse meio-tempo — só numa
-/// corrida: a árvore não reserva Enter na linha que engole — sai dos
-/// pedidos, para não ficar órfão, e é descartado.
+/// um comando —, com o prompt, o bit do histórico conforme ela, a linha
+/// vazia ([`Estado::parar_de_engolir`]), e nada se executa. O Enter de um
+/// agente que chegue nesse meio-tempo — só numa corrida: a árvore não
+/// reserva Enter na linha que engole — sai dos pedidos, para não ficar
+/// órfão, e é descartado.
+///
+/// Solta a trava antes de devolver: a tecla que passou daqui sem ser
+/// engolida confere o engolir de novo na seção que edita a linha — ver
+/// [`tratar`].
 fn engolir(console: Console, c: char) -> bool {
     use protocolo::usuario::terminal::agente_que_confirmou;
     let Some(acabou) = com_estado(console, |e| {
         e.engolindo.then(|| {
             if c == '\n' {
-                e.engolindo = false;
+                e.parar_de_engolir();
             }
             !e.engolindo
         })
@@ -2182,11 +2283,7 @@ fn engolir(console: Console, c: char) -> bool {
         return false;
     };
     if acabou {
-        let modo = com_estado(console, |e| e.modo).unwrap_or(Modo::Comando);
-        if let Some(i) = indice(console) {
-            crate::teclado::pedindo_senha(i, modo.secreto());
-        }
-        mostrar_prompt(console);
+        fim_do_engolir(console);
     } else if let Some(sessao) = agente_que_confirmou(c) {
         let _ = tomar_enter_pedido(console, sessao);
         crate::log_warn!(
@@ -2197,6 +2294,17 @@ fn engolir(console: Console, c: char) -> bool {
         );
     }
     true
+}
+
+/// O console parou de engolir, no Enter da Pessoa: volta a pedir o que a
+/// linha pede — um comando —, com o bit do histórico conforme ela, e o
+/// prompt. Fora da trava.
+fn fim_do_engolir(console: Console) {
+    let modo = com_estado(console, |e| e.modo).unwrap_or(Modo::Comando);
+    if let Some(i) = indice(console) {
+        crate::teclado::pedindo_senha(i, modo.secreto());
+    }
+    mostrar_prompt(console);
 }
 
 /// O console engole o resto de uma senha? Só para a suíte.
