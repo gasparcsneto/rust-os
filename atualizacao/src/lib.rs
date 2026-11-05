@@ -30,7 +30,10 @@
 //!
 //! O registro das chaves de atualização da máquina, `/etc/duke/atualizacao`,
 //! tem o formato do registro de editores — `ed25519:<hex> <nome>` por
-//! linha —, e o mesmo leitor, `sigilo::registro::ler_linha_de_editor`.
+//! linha —, sem a reserva do nome `desconhecido` dele: o leitor é
+//! `sigilo::registro::ler_linha_de_atualizacao`, e a busca da chave que
+//! assinou, `sigilo::registro::chave_de_atualizacao`, a mesma no kernel e
+//! no `xtask`.
 //!
 //! # Quem decide
 //!

@@ -323,26 +323,16 @@ pub(crate) fn conferir_imagem(
     let c = cabecalho::ler(bytes).map_err(|m| format!("o cabecalho do slot: {m}"))?;
     let m = Manifesto::ler(c.manifesto)
         .map_err(|(linha, motivo)| format!("o manifesto, linha {linha}: {motivo}"))?;
-    let mut chave = None;
-    for (n, linha) in registro.lines().enumerate() {
-        match sigilo::registro::ler_linha_de_editor(linha) {
-            Ok(Some((publica, nome))) if publica == c.chave => chave = Some(nome.to_string()),
-            Ok(_) => {}
-            Err(e) => {
-                return Err(format!(
-                    "o registro de atualizacao, linha {}: {}",
-                    n + 1,
-                    e.motivo()
-                ));
-            }
-        }
-    }
-    let chave = chave.ok_or_else(|| {
-        format!(
-            "a chave que assinou ({}) nao esta no registro de atualizacao",
-            sigilo::hex(&c.chave)
-        )
-    })?;
+    // A busca do kernel (`slots::chave_do_registro`), a mesma função.
+    let chave = sigilo::registro::chave_de_atualizacao(registro, &c.chave)
+        .map_err(|(linha, e)| format!("o registro de atualizacao, linha {linha}: {}", e.motivo()))?
+        .ok_or_else(|| {
+            format!(
+                "a chave que assinou ({}) nao esta no registro de atualizacao",
+                sigilo::hex(&c.chave)
+            )
+        })?
+        .to_string();
     if !manifesto::conferir(c.manifesto, &c.assinatura, &c.chave) {
         return Err("a assinatura do manifesto nao confere".into());
     }
@@ -453,5 +443,46 @@ mod testes {
         );
         assert_eq!(i.bytes.len() % 512, 0);
         assert_eq!(cabecalho::tamanho_da_imagem(&m), Some(i.bytes.len() as u64));
+    }
+
+    /// O registro de atualização de uma máquina de antes da reserva do
+    /// nome `desconhecido` (o registro de editores a tem; este, não): a
+    /// imagem continua conferindo, com a chave reservada antes da que
+    /// assinou, ou sendo ela. Uma linha errada antes da chave recusa o
+    /// registro, como no kernel.
+    #[test]
+    fn o_registro_de_atualizacao_com_o_nome_reservado() {
+        let kernel = b"\x7fELF um kernel de mentira".repeat(100);
+        let pacote = pacote::montar(&[("programas/x86_64/livro", b"livro")]).unwrap();
+        let privada = [11u8; 32];
+        let p = Pedido {
+            arch: Arquitetura::X86_64,
+            kernel: &kernel,
+            pacote: &pacote,
+            versao: "b1.2",
+            geracao: 2,
+            estado: (1, 1),
+        };
+        let i = imagem(&p, &privada).unwrap();
+        let assinou = manifesto::publica_de(&privada);
+        let outra = sigilo::codigo::publica_do_editor(&[0x41; 32]);
+        let reservado = sigilo::registro::EDITOR_DESCONHECIDO;
+        let antes = format!(
+            "{}{}",
+            sigilo::registro::linha_de_editor(&outra, reservado),
+            sigilo::registro::linha_de_editor(&assinou, "publicador-1"),
+        );
+        let c = conferir_imagem(&i.bytes, &antes, Arquitetura::X86_64).unwrap();
+        assert_eq!(c.chave, "publicador-1");
+        let ela = sigilo::registro::linha_de_editor(&assinou, reservado);
+        let c = conferir_imagem(&i.bytes, &ela, Arquitetura::X86_64).unwrap();
+        assert_eq!(c.chave, reservado);
+        let errada = format!("ed25519:{} Torto\n{antes}", sigilo::hex(&outra));
+        let r = conferir_imagem(&i.bytes, &errada, Arquitetura::X86_64);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("linha 1")),
+            "{:?}",
+            r.err()
+        );
     }
 }

@@ -6258,8 +6258,18 @@ do papel e do manifesto, como para qualquer programa.
 O registro de editores mora na imagem, como o dos agentes:
 `/etc/duke/editores`, uma linha por editor, `ed25519:<chave pública em
 hex> <nome>`. A chave de ordem pequena é recusada na leitura — com ela,
-nenhum selo conferiria, e o editor existiria só no nome. Em quem cada
-papel confia é da política ([`politica::arquivo`](politica/src/arquivo.rs)):
+nenhum selo conferiria, e o editor existiria só no nome. O nome
+`desconhecido` é reservado (ver *O NSF vê o adulterado*, adiante): a
+linha que o usa é pulada com um aviso, e numa máquina de antes da
+reserva o editor dela some — o código dele deixa de rodar até a linha
+ganhar outro nome, falha fechada. O registro de chaves de atualização,
+`/etc/duke/atualizacao`, tem o mesmo formato e não tem a reserva
+(`sigilo::registro::ler_linha_de_atualizacao`): o nome de uma chave de
+atualização não vai à descrição de um programa, e o kernel recusa o
+registro inteiro pela primeira linha que não se lê — com a reserva, a
+máquina de antes dela, com uma chave de atualização assim, ficaria presa
+à versão que roda. Em quem cada papel confia é da política
+([`politica::arquivo`](politica/src/arquivo.rs)):
 
 ```text
 editores operador bancada

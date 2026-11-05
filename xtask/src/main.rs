@@ -6277,7 +6277,9 @@ mod chaves {
 
         /// O registro de chaves de atualização da imagem: a pública da
         /// bancada, no formato do registro de editores — lido de volta pelo
-        /// mesmo leitor do kernel antes de ir para a imagem.
+        /// mesmo leitor do kernel (`ler_linha_de_atualizacao`, sem a
+        /// reserva do nome do registro de editores) antes de ir para a
+        /// imagem.
         pub fn registro_de_atualizacao(&self) -> Result<String, String> {
             let publica = atualizacao::manifesto::publica_de(&self.atualizacao);
             let mut texto = String::from(
@@ -6289,7 +6291,7 @@ mod chaves {
                 super::slots::CHAVE_DA_BANCADA,
             ));
             for linha in texto.lines() {
-                sigilo::registro::ler_linha_de_editor(linha)
+                sigilo::registro::ler_linha_de_atualizacao(linha)
                     .map_err(|e| format!("o registro de chaves de atualizacao nao se le: {e:?}"))?;
             }
             Ok(texto)

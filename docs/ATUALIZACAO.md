@@ -120,7 +120,15 @@ da máquina não vêm numa atualização.
 - **A máquina** tem o registro das chaves públicas em que confia,
   `/etc/duke/atualizacao` — na raiz, do provisionamento, no formato do
   registro de editores. Uma atualização não o troca (o pacote não tem
-  `etc/`).
+  `etc/`). O nome `desconhecido`, reservado no registro de editores, não
+  é reservado aqui (`sigilo::registro::ler_linha_de_atualizacao`): o nome
+  de uma chave de atualização não vai à descrição de um programa. O kernel
+  acha a chave que assinou pela primeira linha que a tem, e recusa o
+  registro inteiro por uma linha errada antes dela
+  (`sigilo::registro::chave_de_atualizacao`, a mesma busca no `xtask`) —
+  com a reserva, a máquina de antes dela, com uma chave de atualização
+  assim, ficaria presa à versão que roda. Na migração, nada muda neste
+  registro.
 - **O kernel** confere a imagem inteira duas vezes: na instalação — o
   cabeçalho, a assinatura com uma chave do registro, a arquitetura, o
   formato do estado, o tamanho no slot, o kernel e o pacote pelos resumos,

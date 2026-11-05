@@ -412,9 +412,11 @@ fn ler_arquivo(caminho: &str, administradores: bool) -> Vec<Entrada> {
 
 /// Os editores de código do arquivo da imagem. Como os outros registros:
 /// uma linha errada — uma chave que não é de editor, um nome fora da regra
-/// — é pulada com um aviso, uma chave ou um nome repetidos também, e um
-/// arquivo ausente é um registro vazio: a máquina que só roda o código da
-/// imagem.
+/// ou o reservado (`sigilo::registro::EDITOR_DESCONHECIDO`) — é pulada com
+/// um aviso, uma chave ou um nome repetidos também, e um arquivo ausente é
+/// um registro vazio: a máquina que só roda o código da imagem. A linha de
+/// antes da reserva com o nome reservado some assim, e o código daquele
+/// editor deixa de rodar até a linha ganhar outro nome — falha fechada.
 fn ler_editores() -> Vec<Editor> {
     let Ok(bytes) = crate::vfs::ler_tudo(CAMINHO_DOS_EDITORES) else {
         crate::log_info!(

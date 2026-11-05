@@ -173,20 +173,43 @@ pub type EntradaDeEditor<'a> = ([u8; TAM_CHAVE], &'a str);
 
 /// O nome com que a auditoria diz o editor de uma chave que o registro não
 /// tem — `<nome> <resumo> de desconhecido`, na descrição do programa. É
-/// reservado: nenhum editor do registro se chama assim, e
+/// reservado no registro de editores: nenhum editor se chama assim, e
 /// [`ler_linha_de_editor`] recusa a linha que tenta. Sem isso, o editor
 /// registrado com esse nome não se distinguia, na auditoria, da chave que
-/// ninguém registrou. O formato da linha não muda; o registro de chaves de
-/// atualização, que é lido pelo mesmo leitor, também não tem esse nome.
+/// ninguém registrou. O formato da linha não muda.
+///
+/// Só no registro de editores. O registro de chaves de atualização tem o
+/// mesmo formato e não tem a reserva ([`ler_linha_de_atualizacao`]): o
+/// nome de uma chave de atualização não vai à descrição de um programa, e
+/// uma máquina de antes da reserva, com uma chave de atualização com esse
+/// nome, ficaria presa à versão que roda — o kernel recusa o registro
+/// inteiro pela primeira linha que não se lê (ver
+/// [`chave_de_atualizacao`]).
+///
+/// A migração: no registro de editores, a linha antiga com esse nome é
+/// pulada com um aviso, como as outras linhas erradas, e o editor some — o
+/// código dele deixa de rodar até a linha ganhar outro nome (falha
+/// fechada). No de atualização, nada muda.
 pub const EDITOR_DESCONHECIDO: &str = "desconhecido";
 
 /// Lê uma linha do registro de editores — `ed25519:<hex> <nome>` — ver
-/// [`crate::codigo`]. A chave tem o prefixo de sempre, e tem de servir de
-/// chave de editor: uma que não é ponto da curva, ou que é de ordem
-/// pequena, é recusada aqui, e não descoberta no primeiro selo que não
-/// confere. O nome [`EDITOR_DESCONHECIDO`] é recusado:
-/// [`ErroDeLinha::Reservado`].
+/// [`crate::codigo`]: a de [`ler_linha_de_atualizacao`], e o nome
+/// [`EDITOR_DESCONHECIDO`] recusado: [`ErroDeLinha::Reservado`].
 pub fn ler_linha_de_editor(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, ErroDeLinha> {
+    let entrada = ler_linha_de_atualizacao(linha)?;
+    if entrada.is_some_and(|(_, nome)| nome == EDITOR_DESCONHECIDO) {
+        return Err(ErroDeLinha::Reservado);
+    }
+    Ok(entrada)
+}
+
+/// Lê uma linha do registro de chaves de atualização,
+/// `/etc/duke/atualizacao` — o formato do de editores, `ed25519:<hex>
+/// <nome>`, sem a reserva do nome (ver [`EDITOR_DESCONHECIDO`]). A chave
+/// tem o prefixo de sempre, e tem de servir de chave Ed25519 de quem
+/// assina: uma que não é ponto da curva, ou que é de ordem pequena, é
+/// recusada aqui, e não descoberta na primeira assinatura que não confere.
+pub fn ler_linha_de_atualizacao(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, ErroDeLinha> {
     let linha = linha.trim();
     if linha.is_empty() || linha.starts_with('#') {
         return Ok(None);
@@ -202,13 +225,31 @@ pub fn ler_linha_de_editor(linha: &str) -> Result<Option<EntradaDeEditor<'_>>, E
         .next()
         .filter(|n| nome_valido(n))
         .ok_or(ErroDeLinha::Nome)?;
-    if nome == EDITOR_DESCONHECIDO {
-        return Err(ErroDeLinha::Reservado);
-    }
     if partes.next().is_some() {
         return Err(ErroDeLinha::Sobra);
     }
     Ok(Some((chave, nome)))
+}
+
+/// O nome, no registro de chaves de atualização `texto`, da chave
+/// `publica` — a busca que o kernel faz antes de conferir a assinatura de
+/// uma imagem dos slots, e que o `xtask` faz igual. A primeira linha com a
+/// chave dá o nome; `Ok(None)` se nenhuma a tem. Uma linha que não se lê
+/// antes dela recusa o registro inteiro — o número dela, contado de 1, e o
+/// porquê —: um registro meio lido seria uma confiança que ninguém
+/// escreveu. As linhas depois da que achou não são lidas.
+pub fn chave_de_atualizacao<'a>(
+    texto: &'a str,
+    publica: &[u8; TAM_CHAVE],
+) -> Result<Option<&'a str>, (usize, ErroDeLinha)> {
+    for (i, linha) in texto.lines().enumerate() {
+        match ler_linha_de_atualizacao(linha) {
+            Ok(Some((chave, nome))) if chave == *publica => return Ok(Some(nome)),
+            Ok(_) => {}
+            Err(e) => return Err((i + 1, e)),
+        }
+    }
+    Ok(None)
 }
 
 /// A linha de um editor, com a quebra no fim.
@@ -368,6 +409,94 @@ mod testes {
                 "{parecido}"
             );
         }
+    }
+
+    /// O registro de chaves de atualização tem o formato do de editores e
+    /// as recusas dele, menos a reserva do nome: a linha com
+    /// `desconhecido` se lê.
+    #[test]
+    fn a_linha_de_atualizacao_nao_tem_a_reserva() {
+        let chave = crate::codigo::publica_do_editor(&[0x41; 32]);
+        assert_eq!(
+            ler_linha_de_atualizacao(&linha_de_editor(&chave, EDITOR_DESCONHECIDO)),
+            Ok(Some((chave, EDITOR_DESCONHECIDO)))
+        );
+        assert_eq!(
+            ler_linha_de_atualizacao(&linha_de_editor(&chave, "publicador-1")),
+            Ok(Some((chave, "publicador-1")))
+        );
+        assert_eq!(ler_linha_de_atualizacao("# chaves"), Ok(None));
+        let k = hex(&chave);
+        for (ruim, erro) in [
+            (alloc::format!("{k} bancada"), ErroDeLinha::Assinatura),
+            (alloc::format!("ed25519:{k}"), ErroDeLinha::Nome),
+            (alloc::format!("ed25519:{k} Bancada"), ErroDeLinha::Nome),
+            (
+                alloc::format!("ed25519:{k} bancada sobra"),
+                ErroDeLinha::Sobra,
+            ),
+        ] {
+            assert_eq!(ler_linha_de_atualizacao(&ruim), Err(erro), "{ruim}");
+        }
+        let mut identidade = [0u8; 32];
+        identidade[0] = 1;
+        assert_eq!(
+            ler_linha_de_atualizacao(&linha_de_editor(&identidade, "fraco")),
+            Err(ErroDeLinha::Assinatura)
+        );
+    }
+
+    /// A busca da chave que assinou uma imagem dos slots: o registro de uma
+    /// máquina de antes da reserva, com uma chave `desconhecido` antes da
+    /// que assinou — ou sendo ela —, continua achando a chave. Uma linha
+    /// errada antes dela recusa o registro; depois, não é lida.
+    #[test]
+    fn a_busca_da_chave_de_atualizacao() {
+        let reservada = crate::codigo::publica_do_editor(&[0x41; 32]);
+        let assinou = crate::codigo::publica_do_editor(&[0x42; 32]);
+        let fora = crate::codigo::publica_do_editor(&[0x43; 32]);
+        let texto = alloc::format!(
+            "# as chaves\n{}{}",
+            linha_de_editor(&reservada, EDITOR_DESCONHECIDO),
+            linha_de_editor(&assinou, "bancada"),
+        );
+        assert_eq!(chave_de_atualizacao(&texto, &assinou), Ok(Some("bancada")));
+        assert_eq!(
+            chave_de_atualizacao(&texto, &reservada),
+            Ok(Some(EDITOR_DESCONHECIDO))
+        );
+        assert_eq!(chave_de_atualizacao(&texto, &fora), Ok(None));
+        assert_eq!(chave_de_atualizacao("", &assinou), Ok(None));
+        // A primeira linha com a chave dá o nome.
+        let repetida = alloc::format!(
+            "{}{}",
+            linha_de_editor(&assinou, "primeira"),
+            linha_de_editor(&assinou, "segunda"),
+        );
+        assert_eq!(
+            chave_de_atualizacao(&repetida, &assinou),
+            Ok(Some("primeira"))
+        );
+        // A linha errada antes da chave recusa o registro, com o número
+        // dela; depois da chave, não é lida.
+        let errada = alloc::format!("ed25519:{} Torto\n", hex(&fora));
+        let antes = alloc::format!("{errada}{texto}");
+        assert_eq!(
+            chave_de_atualizacao(&antes, &assinou),
+            Err((1, ErroDeLinha::Nome))
+        );
+        let depois = alloc::format!("{texto}{errada}");
+        assert_eq!(chave_de_atualizacao(&depois, &assinou), Ok(Some("bancada")));
+        assert_eq!(
+            chave_de_atualizacao(&depois, &fora),
+            Err((4, ErroDeLinha::Nome))
+        );
+        // O registro de editores, lido com a mesma linha, recusa a
+        // reservada — e só ela.
+        assert_eq!(
+            ler_linha_de_editor(texto.lines().nth(1).unwrap()),
+            Err(ErroDeLinha::Reservado)
+        );
     }
 
     #[test]

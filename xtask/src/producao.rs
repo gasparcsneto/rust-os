@@ -412,12 +412,12 @@ pub(crate) fn conferir(op: &Operador) -> Result<politica::Politica, String> {
 }
 
 /// As chaves de um registro de atualização — o texto de
-/// `/etc/duke/atualizacao`, no formato do de editores —, lidas pelo leitor
-/// do kernel: a pública e o nome.
+/// `/etc/duke/atualizacao`, no formato do de editores, sem a reserva do
+/// nome dele —, lidas pelo leitor do kernel: a pública e o nome.
 pub(crate) fn registro_de_atualizacao(texto: &str) -> Result<Vec<([u8; 32], String)>, String> {
     let mut chaves = Vec::new();
     for (n, linha) in texto.lines().enumerate() {
-        match sigilo::registro::ler_linha_de_editor(linha) {
+        match sigilo::registro::ler_linha_de_atualizacao(linha) {
             Ok(None) => {}
             Ok(Some((chave, nome))) => {
                 if chaves
@@ -958,10 +958,11 @@ pub(crate) fn chave_nova(
             "`{nome}` ou o papel fora da regra (minúsculas, dígitos, `-`, `_`, `.`, até 32)"
         ));
     }
-    // O registro de editores — e o de atualização, no mesmo formato — não
-    // aceita o nome que a auditoria dá à chave que ele não tem: a linha não
-    // entraria na imagem.
-    if matches!(tipo, "editor" | "atualizacao") && nome == sigilo::registro::EDITOR_DESCONHECIDO {
+    // O registro de editores não aceita o nome que a auditoria dá à chave
+    // que ele não tem: a linha não entraria na imagem. O de atualização, no
+    // mesmo formato, não tem a reserva — o nome de uma chave de atualização
+    // não vai à descrição de um programa.
+    if tipo == "editor" && nome == sigilo::registro::EDITOR_DESCONHECIDO {
         return Err(format!(
             "`{nome}` é o nome reservado ao editor que o registro não tem"
         ));
@@ -1427,14 +1428,13 @@ mod testes {
     /// O editor com o nome que a auditoria dá à chave fora do registro —
     /// `desconhecido` — é recusado: na chave nova, e no registro de
     /// editores do operador, antes de a imagem ser montada. Um editor de
-    /// outro nome passa.
+    /// outro nome passa. A chave de atualização com esse nome, não: o
+    /// registro dela não tem a reserva.
     #[test]
     fn o_editor_desconhecido_e_recusado() {
         let nome = sigilo::registro::EDITOR_DESCONHECIDO;
-        for tipo in ["editor", "atualizacao"] {
-            let r = chave_nova(tipo, nome, None);
-            assert!(r.as_ref().is_err_and(|e| e.contains("reservado")), "{r:?}");
-        }
+        let r = chave_nova("editor", nome, None);
+        assert!(r.as_ref().is_err_and(|e| e.contains("reservado")), "{r:?}");
         let linha = sigilo::registro::linha_de_editor(
             &sigilo::codigo::publica_do_editor(&[0x41; 32]),
             nome,
@@ -1452,6 +1452,23 @@ mod testes {
             std::fs::write(dir.join(EDITORES), &linha).unwrap();
         });
         assert!(r.is_ok(), "{r:?}");
+    }
+
+    /// O registro de atualização de uma máquina de antes da reserva do
+    /// nome, com uma chave `desconhecido`: o material do operador passa, e
+    /// a chave nova com esse nome também.
+    #[test]
+    fn a_chave_de_atualizacao_desconhecido_passa() {
+        let nome = sigilo::registro::EDITOR_DESCONHECIDO;
+        let (_, linha, _) = chave_nova("atualizacao", nome, None).unwrap();
+        let mais = chave_nova("atualizacao", "publicador-2", None).unwrap().1;
+        let r = operador_lido("atualizacao-desconhecido", |dir| {
+            std::fs::write(dir.join(ATUALIZACAO), format!("{linha}{mais}")).unwrap();
+        });
+        let (op, _) = r.unwrap();
+        let chaves = registro_de_atualizacao(&op.atualizacao).unwrap();
+        let nomes: Vec<&str> = chaves.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(nomes, [nome, "publicador-2"]);
     }
 
     #[test]

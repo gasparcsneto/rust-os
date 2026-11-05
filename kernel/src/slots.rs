@@ -321,19 +321,19 @@ struct Conferida {
     pacote: manifesto::Parte,
 }
 
-/// A chave do registro da máquina que é `publica`, pelo nome.
+/// A chave do registro da máquina que é `publica`, pelo nome — a busca de
+/// `sigilo::registro::chave_de_atualizacao`, a mesma do `xtask`: sem a
+/// reserva do nome do registro de editores, e o registro inteiro recusado
+/// por uma linha errada antes da chave.
 fn chave_do_registro(publica: &[u8; 32]) -> Result<String, &'static str> {
     let bytes = crate::vfs::ler_tudo(CAMINHO_DAS_CHAVES)
         .map_err(|_| "a maquina nao tem o registro de chaves de atualizacao")?;
     let texto = core::str::from_utf8(&bytes).map_err(|_| "o registro de chaves nao e texto")?;
-    for linha in texto.lines() {
-        match sigilo::registro::ler_linha_de_editor(linha) {
-            Ok(Some((chave, nome))) if chave == *publica => return Ok(nome.to_string()),
-            Ok(_) => {}
-            Err(_) => return Err("o registro de chaves de atualizacao tem uma linha invalida"),
-        }
+    match sigilo::registro::chave_de_atualizacao(texto, publica) {
+        Ok(Some(nome)) => Ok(nome.to_string()),
+        Ok(None) => Err("a chave que assinou nao esta no registro de atualizacao da maquina"),
+        Err(_) => Err("o registro de chaves de atualizacao tem uma linha invalida"),
     }
-    Err("a chave que assinou nao esta no registro de atualizacao da maquina")
 }
 
 /// Confere o cabeçalho e o manifesto de um slot: o resumo, se `esperado`;
