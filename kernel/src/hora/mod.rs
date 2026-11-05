@@ -42,6 +42,19 @@
 //!
 //! O `xtask` confere que ninguém mais chama os dois.
 //!
+//! # O retrato do `system.info`
+//!
+//! O objeto `time` do `system.info` ([`escrever`]) diz o civil — o
+//! pendente e a rodada dele, as marcas — e as rodadas — as abertas, as
+//! fechadas, a última e o efeito dela. Cada caminho que os muda, muda os
+//! dois juntos: o fechamento de uma rodada ([`civil::rodada`] e a conta
+//! dela no resumo) e a confirmação de um salto ([`civil::confirmar`] e a
+//! conta dela) acontecem com a trava do resumo na mão, e a do civil dentro
+//! dela; o fechamento inteiro, de `entregar` a `aplicar`, com a vez da
+//! hora. O `system.info` lê com as mesmas, na mesma ordem — a vez, o
+//! resumo, o civil —: nunca a rodada contada com o civil de antes dela,
+//! nem o civil dela com a rodada ainda por contar ou ainda aberta.
+//!
 //! # A auditoria
 //!
 //! Cada `time.sync` grava, além da decisão do gate, um registro de
@@ -115,6 +128,8 @@ impl<T> Vez<T> {
             .compare_exchange(0, eu, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            #[cfg(feature = "modo-teste")]
+            ESPERAS_DA_VEZ.fetch_add(1, Ordering::AcqRel);
             debug_assert!(
                 crate::arch::interrupcoes_habilitadas(),
                 "a vez da hora esperada com as interrupcoes mascaradas"
@@ -131,6 +146,19 @@ impl<T> Vez<T> {
 
 /// Os pedidos e as rodadas — ver [`rodada`].
 static VEZ: Vez<rodada::Tabelas> = Vez::nova(rodada::Tabelas::novas());
+
+/// Só na suíte: quantas voltas os fios já deram esperando a vez da hora com
+/// outro fio — ver [`esperas_da_vez_de_teste`].
+#[cfg(feature = "modo-teste")]
+static ESPERAS_DA_VEZ: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: quantas voltas os fios já deram esperando a vez da
+/// hora. Com a vez na mão, quem lê este número subir sabe que outro fio
+/// a espera agora.
+#[cfg(feature = "modo-teste")]
+pub fn esperas_da_vez_de_teste() -> u64 {
+    ESPERAS_DA_VEZ.load(Ordering::Acquire)
+}
 
 /// Se o fio deste núcleo tem a vez da hora, sem tomar trava nenhuma: a
 /// conferência da ordem das travas pergunta de dentro de cada `lock`.
@@ -193,6 +221,10 @@ impl UltimaRodada {
 }
 
 /// O que `system.info` diz das rodadas: contagens e a última que fechou.
+///
+/// Muda junto com o civil, e é lido junto com ele — ver "O retrato do
+/// `system.info`", no topo do módulo.
+#[derive(Clone, Copy)]
 struct Resumo {
     rodadas: u64,
     com_acordo: u64,
@@ -218,6 +250,9 @@ static RESUMO: Mutex<Resumo> = Mutex::new(Resumo {
     primeira_sincronizacao_ms: None,
 });
 
+/// Roda `f` com o resumo. Com ele na mão, só a trava do civil — folha, ver
+/// [`civil`] —, e nada que espere: o resumo é tomado depois da vez da hora,
+/// quando quem chama a tem, e antes do civil, nunca o contrário.
 fn com_resumo<R>(f: impl FnOnce(&mut Resumo) -> R) -> R {
     crate::arch::sem_interrupcoes(|| f(&mut RESUMO.lock()))
 }
@@ -509,11 +544,12 @@ fn aplicar(f: &rodada::Fechamento) -> Result<Option<civil::Mudanca>, &'static st
     }
     let logico_antes = crate::persistencia::agora();
     let referencia = Some(crate::persistencia::piso().saturating_mul(1000));
-    let mudanca = civil::rodada(&f.desfecho, referencia, f.numero());
-    let logico_depois = crate::persistencia::agora();
-    let uptime = crate::tempo::uptime_ms();
     let ultima = UltimaRodada::de(f);
-    com_resumo(|r| {
+    // O civil e a conta da rodada juntos, com a trava do resumo na mão: o
+    // `system.info` lê os dois com ela — ver "O retrato do `system.info`",
+    // no topo do módulo.
+    let mudanca = com_resumo(|r| {
+        let mudanca = civil::rodada(&f.desfecho, referencia, f.numero());
         r.rodadas += 1;
         match f.desfecho {
             Desfecho::Acordo(_) => r.com_acordo += 1,
@@ -527,9 +563,11 @@ fn aplicar(f: &rodada::Fechamento) -> Result<Option<civil::Mudanca>, &'static st
         if r.primeira_sincronizacao_ms.is_none()
             && mudanca.is_some_and(|m| m.depois.estado == Estado::Sincronizado)
         {
-            r.primeira_sincronizacao_ms = Some(uptime);
+            r.primeira_sincronizacao_ms = Some(crate::tempo::uptime_ms());
         }
+        mudanca
     });
+    let logico_depois = crate::persistencia::agora();
     auditar_o_fechamento(f, mudanca.as_ref(), (logico_antes, logico_depois));
     Ok(mudanca)
 }
@@ -681,7 +719,17 @@ fn auditar_o_fechamento(f: &rodada::Fechamento, m: Option<&civil::Mudanca>, logi
 /// motivo diz a rodada pedida e a do pendente, para o registro.
 pub fn confirmar(rodada: u64) -> Result<String, (Codigo, String)> {
     let logico_antes = crate::persistencia::agora();
-    let (m, aplicada) = civil::confirmar(rodada).map_err(|recusa| {
+    // O salto e a conta dele juntos, com a trava do resumo na mão — ver
+    // "O retrato do `system.info`", no topo do módulo.
+    let confirmada = com_resumo(|r| {
+        let confirmada = civil::confirmar(rodada);
+        if let Ok((m, _)) = &confirmada {
+            r.confirmacoes += 1;
+            r.ultimo_efeito = Some(m.efeito);
+        }
+        confirmada
+    });
+    let (m, aplicada) = confirmada.map_err(|recusa| {
         let motivo = match recusa {
             civil::Recusa::SemPendente => String::from("nenhum salto de hora pendente"),
             civil::Recusa::OutraRodada(Some(pendente)) => {
@@ -698,10 +746,6 @@ pub fn confirmar(rodada: u64) -> Result<String, (Codigo, String)> {
         Efeito::Salto { desvio_ms, .. } => desvio_ms,
         _ => 0,
     };
-    com_resumo(|r| {
-        r.confirmacoes += 1;
-        r.ultimo_efeito = Some(m.efeito);
-    });
     Ok(alloc::format!(
         "salto {:+} r{} civil {}>{} logico {}>{}",
         desvio,
@@ -717,9 +761,31 @@ pub fn confirmar(rodada: u64) -> Result<String, (Codigo, String)> {
 /// marcas —, o lógico e quanto ele está adiantado, as fontes em resumo, a
 /// régua e a taxa do monotônico. Nenhum nonce, nenhum id, nenhuma resposta:
 /// os pedidos são de cada principal, e não aparecem aqui.
+///
+/// As rodadas e o civil saem de um retrato só: as rodadas abertas, o civil
+/// e o resumo das que fecharam lidos com a vez da hora na mão, e o civil e
+/// o resumo com a trava do resumo — as mesmas com que o fechamento de uma
+/// rodada e a confirmação de um salto os mudam, na mesma ordem. Lidos um de
+/// cada vez, como eram, uma leitura que esperasse a vez no meio deles —
+/// enquanto a última fonte de uma rodada era conferida — via o civil de
+/// antes do fechamento e as contagens de depois: a rodada honesta que tirou
+/// o salto pendente contada como a última, `nada`, com o pendente ainda
+/// ali. Foi o que a bancada de tempo do ARM viu (a CI 432).
 pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
-    let leitura = civil::ler_com_o_pendente();
-    let logico = crate::persistencia::agora();
+    // O RTC antes, fora das travas: o retrato não espera o CMOS.
+    civil::reler_o_rtc();
+    let registro = crate::identidade::fontes_de_hora();
+    let (leitura, resumo, logico, (abertos_do_servico, abertos_dos_outros), rodadas_abertas) = VEZ
+        .com(|t| {
+            let (leitura, resumo) = com_resumo(|r| (civil::retrato(), *r));
+            (
+                leitura,
+                resumo,
+                crate::persistencia::agora(),
+                t.abertos(),
+                t.rodadas_abertas(),
+            )
+        });
     w.begin_object()?;
     match leitura {
         Some((l, rodada_do_pendente)) => {
@@ -768,11 +834,6 @@ pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
         }
     }
 
-    let registro = crate::identidade::fontes_de_hora();
-    let (abertos_do_servico, abertos_dos_outros, rodadas_abertas) = VEZ.com(|t| {
-        let (s, o) = t.abertos();
-        (s, o, t.rodadas_abertas())
-    });
     w.key("sources")?;
     w.begin_object()?;
     match &registro {
@@ -788,31 +849,18 @@ pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
     }
     w.end_object()?;
 
-    let (rodadas, com_acordo, sem_acordo, perdidas, confirmacoes, ultima, efeito, primeira) =
-        com_resumo(|r| {
-            (
-                r.rodadas,
-                r.com_acordo,
-                r.sem_acordo,
-                r.perdidas,
-                r.confirmacoes,
-                r.ultima,
-                r.ultimo_efeito,
-                r.primeira_sincronizacao_ms,
-            )
-        });
     w.key("rounds")?;
     w.begin_object()?;
-    w.field_u64("closed", rodadas)?;
-    w.field_u64("with_agreement", com_acordo)?;
-    w.field_u64("without_agreement", sem_acordo)?;
-    w.field_u64("lost", perdidas)?;
-    w.field_u64("confirmed_jumps", confirmacoes)?;
+    w.field_u64("closed", resumo.rodadas)?;
+    w.field_u64("with_agreement", resumo.com_acordo)?;
+    w.field_u64("without_agreement", resumo.sem_acordo)?;
+    w.field_u64("lost", resumo.perdidas)?;
+    w.field_u64("confirmed_jumps", resumo.confirmacoes)?;
     w.field_u64("open", rodadas_abertas as u64)?;
     w.field_u64("open_requests_service", abertos_do_servico as u64)?;
     w.field_u64("open_requests_others", abertos_dos_outros as u64)?;
     w.key("last")?;
-    match ultima {
+    match resumo.ultima {
         Some(f) => {
             w.begin_object()?;
             w.field_u64("number", f.numero)?;
@@ -823,7 +871,7 @@ pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
                 w.field_u64("uncertainty_ms", a.incerteza_ms())?;
             }
             w.field_u64("accepted", f.aceitas as u64)?;
-            if let Some(e) = efeito {
+            if let Some(e) = resumo.ultimo_efeito {
                 w.field_str("effect", nome_do_efeito(&e))?;
             }
             w.key("sources")?;
@@ -840,7 +888,7 @@ pub fn escrever(w: &mut JsonWriter) -> fmt::Result {
         None => w.null_value()?,
     }
     w.key("first_sync_uptime_ms")?;
-    match primeira {
+    match resumo.primeira_sincronizacao_ms {
         Some(ms) => w.u64_value(ms)?,
         None => w.null_value()?,
     }

@@ -5325,6 +5325,23 @@ da ordem das travas a vê como uma classe. A versão da política é lida com
 a vez na mão: lida antes, podia ser de antes de uma troca que outro fio já
 viu, e largaria as rodadas abertas sob a nova.
 
+**O retrato do `system.info time`.** O civil e as rodadas saem do
+`system.info` de uma vez. O fechamento de uma rodada muda o civil e a
+conta dela — as fechadas, a última, o efeito — com a trava do resumo das
+rodadas na mão e a do civil dentro dela, e acontece inteiro com a vez da
+hora; a confirmação de um salto muda o civil e a conta dela com a mesma
+trava do resumo. O `system.info` lê as rodadas abertas, o civil e o resumo
+com as mesmas travas, na mesma ordem — a vez, o resumo, o civil —, e
+nenhum caminho as toma na ordem inversa. Antes, ele lia o civil, esperava
+a vez e lia o resumo depois: a leitura que pegasse o civil enquanto a
+última fonte de uma rodada era conferida via a rodada já contada, com o
+civil de antes dela. Foi o que a bancada de tempo do ARM viu na CI 432: a
+rodada honesta que tirou o salto para trás contada como a última, `nada`,
+com o pendente que ela tirou ainda no civil — e a bancada, que espera a
+rodada seguinte ser contada e confere o pendente na mesma leitura,
+reprovou. O lógico é lido logo depois, com a vez ainda na mão; as fontes
+do registro e a releitura do RTC vêm antes, fora das travas do retrato.
+
 ### O que cada operação faz depois do gate
 
 - **`time.request {source}`** responde `{id, source, to, round, request}`,
@@ -5465,7 +5482,11 @@ o caso lê o `pending_round` e confirma — logo, na corrida, ou depois de
 mais duas rodadas fecharem —; cada confirmação aplica o salto da rodada que
 nomeou, e a resposta e o registro a nomeiam, ou é um conflito gravado, e o
 civil e o lógico não saltam; as atrasadas são sempre conflito de outra
-rodada, e o lógico nunca volta. E os consumidores (ver [Os consumidores
+rodada, e o lógico nunca volta. E o retrato do `system.info time`: no
+ponto de commit de uma rodada, um leitor pede o `system.info`, e o
+fechamento só segue depois de ele esperar a vez da hora — na rodada que
+põe um salto pendente e na honesta que o tira, o leitor vê a rodada
+contada com o civil dela. E os consumidores (ver [Os consumidores
 da hora](#os-consumidores-da-hora)): o `system.info time` lido pela regra
 dos programas em cada estado, e três programas `validade` conferindo pelo
 civil enquanto rodadas e o NSF correm ao lado.
@@ -5988,6 +6009,16 @@ as do pedido por mais de um caso.
 | a rodada como texto | os mesmos dois |
 | o conflito do `time.confirm` sem registro | `tempo: confirmar so com prova`, `hora: a confirmacao nomeia a rodada` — a decisão sem o conflito depois dela —, `hora: confirmacao e rodada nova ao mesmo tempo` |
 | a rodada nova troca o salto e deixa o número da anterior | `hora: a confirmacao nomeia a rodada` — B não trocou o pendente pelo dela; `hora: confirmacao e rodada nova ao mesmo tempo` |
+
+O retrato do `system.info time` (a CI 432; ver [A rodada](#a-rodada)) teve
+a sua: o civil lido antes de esperar a vez da hora, como era — a N182, na
+numeração do [docs/SDK.md](docs/SDK.md) —, reprovada no x86 por `hora: o
+system.info le as rodadas e o civil num retrato so`: o leitor viu a rodada
+do pendente contada, a última, `pendente`, sem o pendente dela. A
+confirmação de um salto muda o civil e a conta dela numa seção só da trava
+do resumo; separar as duas de novo, como era, não tem caso que a reprove
+de forma determinística: a leitura teria de cair entre elas, e não há
+gancho ali que a segure.
 
 ### As mutações dos consumidores
 

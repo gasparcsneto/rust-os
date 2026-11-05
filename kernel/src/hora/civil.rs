@@ -29,6 +29,12 @@
 //! tomar a dele. Quem lê o civil, em qualquer núcleo, lê um instantâneo
 //! inteiro: a âncora, a correção e a régua do mesmo momento.
 //!
+//! Uma trava só é tomada antes dela, com ela dentro: a do resumo das
+//! rodadas (`super::RESUMO`). O fechamento de uma rodada ([`rodada`]) e a
+//! confirmação de um salto ([`confirmar`]) mudam o civil e o resumo juntos,
+//! e o `system.info` lê os dois juntos ([`retrato`]): um retrato só — ver
+//! `super::escrever`.
+//!
 //! # O que não está aqui
 //!
 //! Decisão. Nenhuma autorização lê o civil — o gate decide pelo relógio do
@@ -93,8 +99,9 @@ pub fn parametros() -> Option<Parametros> {
 }
 
 /// Relê o RTC, se o civil ainda está nele e passou o intervalo: fora da
-/// trava do civil, e por um fio de cada vez.
-fn reler_o_rtc() {
+/// trava do civil, e por um fio de cada vez. Quem lê o civil com outra
+/// trava na mão relê antes, sem ela, e lê com [`retrato`].
+pub(super) fn reler_o_rtc() {
     let devida = com(|c| {
         let local = super::contador::agora_ms();
         local >= c.releitura_ms && c.relogio.ler(local).estado == Estado::Rtc
@@ -224,10 +231,20 @@ pub(super) fn confirmar(rodada: u64) -> Result<(Mudanca, u64), Recusa> {
     .unwrap_or(Err(Recusa::SemPendente))
 }
 
-/// O civil agora, com a rodada que pediu o salto pendente, se há um — do
-/// mesmo instante.
+/// Só para a suíte: o civil agora, com a rodada que pediu o salto
+/// pendente, se há um — do mesmo instante. O kernel lê assim só no
+/// `system.info`, pelo [`retrato`].
+#[cfg(feature = "modo-teste")]
 pub fn ler_com_o_pendente() -> Option<(Leitura, Option<u64>)> {
     reler_o_rtc();
+    retrato()
+}
+
+/// O civil agora, com a rodada que pediu o salto pendente, se há um — do
+/// mesmo instante —, sem reler o RTC: para o `system.info`, que lê o civil
+/// com a trava do resumo das rodadas na mão, e não espera o RTC com ela.
+/// Quem chama relê antes ([`reler_o_rtc`]).
+pub(super) fn retrato() -> Option<(Leitura, Option<u64>)> {
     com(|c| {
         let l = c.relogio.ler(super::contador::agora_ms());
         let rodada = c.pendente_da_rodada.filter(|_| l.pendente_ms.is_some());

@@ -39407,6 +39407,10 @@ static CASOS: &[Caso] = &[
         f: hora_confirmacao_e_rodada_nova_ao_mesmo_tempo,
     },
     Caso {
+        nome: "hora: o system.info le as rodadas e o civil num retrato so",
+        f: hora_o_system_info_num_retrato_so,
+    },
+    Caso {
         nome: "hora: nenhum caminho fora do gate",
         f: hora_nenhum_caminho_fora_do_gate,
     },
@@ -72753,6 +72757,179 @@ fn hora_confirmacao_e_rodada_nova_ao_mesmo_tempo() -> Resultado {
         Ok(())
     });
     crate::identidade::esquecer_registrados();
+    r
+}
+
+/// Concorrência: o `system.info time` lê as rodadas e o civil num retrato
+/// só. No ponto de commit de uma rodada — quem fecha tem a vez da hora —,
+/// um leitor pede o `system.info`, e o fechamento só segue depois de o
+/// leitor esperar a vez. Duas vezes: na rodada que põe um salto pendente,
+/// e na honesta que o tira. Nas duas, o leitor vê a rodada contada com o
+/// civil dela. Lidos um de cada vez, o leitor via o civil de antes do
+/// fechamento e as contagens de depois dele: a rodada do pendente contada
+/// sem o pendente, e a honesta contada como a última, `nada`, com o
+/// pendente que ela tirou ainda ali — o que a bancada de tempo do ARM viu
+/// na CI 432.
+fn hora_o_system_info_num_retrato_so() -> Resultado {
+    use crate::hora::servico::Desfecho;
+    use crate::rede::bancada_hora as bancada;
+    use alloc::string::String;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+    static QUEM_FECHA: AtomicU64 = AtomicU64::new(u64::MAX);
+    static VAI: AtomicBool = AtomicBool::new(false);
+    static ESPEROU: AtomicBool = AtomicBool::new(false);
+    static LIDO: crate::trava::Mutex<Option<String>> = crate::trava::Mutex::new(None);
+
+    extern "C" fn leitor(_: u64) -> ! {
+        let _ = esperar_cedendo(|| VAI.load(SeqCst), 3_000);
+        let r = fs_pedir(
+            sistema_no_armazem(crate::fios::id_atual()),
+            "system.info",
+            "{}",
+        );
+        crate::arch::sem_interrupcoes(|| *LIDO.lock() = Some(r));
+        crate::fios::terminar()
+    }
+    // No ponto de commit, no fio que fecha a rodada e tem a vez da hora: o
+    // leitor vai, e o fechamento espera ele esperar a vez.
+    fn no_commit() {
+        if crate::fios::id_atual() != QUEM_FECHA.load(SeqCst)
+            || !crate::hora::vez_na_mao_sem_trava()
+            || VAI.load(SeqCst)
+        {
+            return;
+        }
+        let antes = crate::hora::esperas_da_vez_de_teste();
+        VAI.store(true, SeqCst);
+        if esperar_cedendo(|| crate::hora::esperas_da_vez_de_teste() > antes, 500).is_ok() {
+            ESPEROU.store(true, SeqCst);
+        }
+    }
+    // Uma rodada do serviço com o leitor no commit dela: o desfecho, e o
+    // objeto `time` que o leitor leu.
+    let rodada_com_o_leitor = || -> Result<(Desfecho, String), &'static str> {
+        VAI.store(false, SeqCst);
+        ESPEROU.store(false, SeqCst);
+        crate::arch::sem_interrupcoes(|| *LIDO.lock() = None);
+        crate::fios::criar("teste-hora-retrato", leitor, 0)?;
+        QUEM_FECHA.store(crate::fios::id_atual(), SeqCst);
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(Some(no_commit));
+        let d = rodada_do_servico();
+        crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+        QUEM_FECHA.store(u64::MAX, SeqCst);
+        // Uma rodada que não chegou ao commit não deixa o leitor esperando.
+        VAI.store(true, SeqCst);
+        esperar_cedendo(
+            || crate::arch::sem_interrupcoes(|| LIDO.lock().is_some()),
+            3_000,
+        )?;
+        if !ESPEROU.load(SeqCst) {
+            crate::log_error!("teste", "{:?}", d);
+            return Err("o leitor nao esperou a vez da hora no ponto de commit da rodada");
+        }
+        let r = crate::arch::sem_interrupcoes(|| LIDO.lock().take()).unwrap_or_default();
+        let t = Json(r.as_bytes())
+            .member("result")
+            .and_then(|v| v.member("time"))
+            .ok_or("o leitor nao leu o system.info time")?;
+        Ok((d, String::from_utf8_lossy(t.0).into_owned()))
+    };
+    // O que um `time` diz das rodadas e do salto pendente.
+    struct Visto {
+        fechadas: u64,
+        ultima: u64,
+        efeito: String,
+        /// A rodada do salto pendente.
+        pendente: Option<u64>,
+        /// O tamanho do salto pendente aparece.
+        com_tamanho: bool,
+        /// A marca `pendente`.
+        marcado: bool,
+    }
+    let visto = |t: &str| -> Result<Visto, &'static str> {
+        let t = Json(t.as_bytes());
+        let rodadas = t.member("rounds").ok_or("o time sem as rodadas")?;
+        let ultima = rodadas
+            .member("last")
+            .filter(|u| !u.is_null())
+            .ok_or("o time sem a ultima rodada")?;
+        let mut marcado = false;
+        if let Some(marcas) = t.member("marks") {
+            let mut i = 0;
+            while let Some(m) = marcas.item(i) {
+                marcado |= m.as_str() == Some("pendente");
+                i += 1;
+            }
+        }
+        Ok(Visto {
+            fechadas: rodadas
+                .member("closed")
+                .and_then(|v| v.as_u64())
+                .ok_or("o time sem as rodadas fechadas")?,
+            ultima: ultima
+                .member("number")
+                .and_then(|v| v.as_u64())
+                .ok_or("a ultima rodada sem numero")?,
+            efeito: String::from(
+                ultima
+                    .member("effect")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ),
+            pendente: t.member("pending_round").and_then(|v| v.as_u64()),
+            com_tamanho: t.member("pending_ms").is_some_and(|v| !v.is_null()),
+            marcado,
+        })
+    };
+    let todas = |s: i64| {
+        for i in 0..3 {
+            bancada::deslocamento_de_teste(i, s);
+        }
+    };
+    let r = com_a_bancada_de_hora(2, 86_400, 60, || {
+        crate::hora::civil::reiniciar_de_teste(parametros_curtos());
+        for i in 0..3 {
+            bancada::raio_de_teste(i, 1);
+        }
+        fechou_com(&rodada_do_servico(), &["nada", "gradual"], "sincronizado")?;
+        let antes = visto(&tempo_no_system_info()?)?.fechadas;
+
+        // A rodada que põe o salto pendente: 14 s adiante, acima do teto.
+        todas(14);
+        let (d, t) = rodada_com_o_leitor()?;
+        fechou_com(&d, &["pendente"], "sincronizado")?;
+        let v = visto(&t)?;
+        if v.fechadas != antes + 1
+            || v.efeito != "pendente"
+            || v.pendente != Some(v.ultima)
+            || !v.com_tamanho
+            || !v.marcado
+        {
+            crate::log_error!("teste", "antes {} fechadas: {}", antes, t);
+            return Err("o system.info viu a rodada do pendente contada sem o pendente dela");
+        }
+        let do_pendente = v.ultima;
+
+        // A rodada honesta que o tira.
+        todas(0);
+        let (d, t) = rodada_com_o_leitor()?;
+        fechou_com(&d, &["nada", "gradual"], "sincronizado")?;
+        let v = visto(&t)?;
+        if v.fechadas != antes + 2
+            || v.ultima == do_pendente
+            || !matches!(v.efeito.as_str(), "nada" | "gradual")
+            || v.pendente.is_some()
+            || v.com_tamanho
+            || v.marcado
+        {
+            crate::log_error!("teste", "antes {} fechadas: {}", antes, t);
+            return Err("o system.info viu a rodada honesta contada com o pendente que ela tirou");
+        }
+        Ok(())
+    });
+    crate::autorizacao::antes_da_reconfirmacao_de_teste(None);
+    QUEM_FECHA.store(u64::MAX, SeqCst);
+    VAI.store(true, SeqCst);
     r
 }
 

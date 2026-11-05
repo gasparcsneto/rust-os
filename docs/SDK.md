@@ -852,7 +852,10 @@ ou repetido, um motivo de procedência cortado, uma troca abreviada, uma
 execução barrada de descrição longa, um editor com o nome reservado. E a
 N160 de novo, na forma do código novo — o grafo toma a abreviada por
 outro programa —: reprovada pelos testes do hospedeiro e pela suíte do
-x86.
+x86. E a do retrato do `system.info time` (a CI 432; ver *O retrato do
+`system.info time`*, em [A rodada](../README.md#a-rodada)): o
+civil lido antes de esperar a vez da hora, como era (N182) — reprovada
+pela suíte do x86.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1035,6 +1038,7 @@ x86.
 | N179 | fora do SDK (resíduo do F1): a regra do firewall casada também pelo programa, no `security.provenance` | o motor: `o_firewall_casa_a_conexao_pelo_fio` — a suíte não barra no firewall um processo de descrição longa |
 | N180 | fora do SDK (resíduo do F1): o corte sem a marca — o texto perde palavras e nada diz | hospedeiro: os cinco de `auditoria` da N176; suíte x86, filtrada aos casos da mutação (893 de 895 na conta do harness): `auditoria: a citacao da decisao fica inteira acima do teto`, `chaves: a declaracao se ancora so na decisao de quem declara` |
 | N181 | fora do SDK (resíduo do F1, 7c): o editor `desconhecido` aceito no registro | hospedeiro: `registro::testes::o_editor_desconhecido_e_reservado` (sigilo), `producao::testes::o_editor_desconhecido_e_recusado` (xtask) — a imagem da suíte não tem o nome |
+| N182 | fora do SDK (a CI 432): o `system.info` lê o civil antes de esperar a vez da hora — a leitura de antes da correção | suíte x86, filtrada aos casos `hora:` (895 de 896 na conta do harness, que dá os pulados como passados): `hora: o system.info le as rodadas e o civil num retrato so` — o leitor viu a rodada do pendente contada (`closed` 57, a última r67 `pendente`) sem o pendente dela (`pending_round` nulo) |
 
 ## Medidas
 
