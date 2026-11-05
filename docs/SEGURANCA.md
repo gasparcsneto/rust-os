@@ -172,6 +172,21 @@ nenhuma para o que é história.
 As entidades de um boot não se confundem com as de outro: o `policy.load`
 do kernel abre uma época, e um processo é `(época, fio)`.
 
+Acima do teto do detalhe (96 bytes), a auditoria abrevia a descrição do
+programa — `pelo processo N (? <resumo> de <editor>)`, depois `(? <resumo>
+de ?)` — antes de cortar o texto, com citação ou sem; e o texto que ainda
+não cabe perde as últimas palavras inteiras, com ` ?` no lugar do que
+saiu: o pedaço de um nome é o nome de outro editor, e o de um número, o de
+outro processo (ver `politica::auditoria::detalhe_composto`). O processo
+é o fio, e o resumo diz o programa: no grafo, a abreviada do mesmo resumo
+é o mesmo programa, a de outro resumo é uma troca, e a inteira que chega
+depois com o mesmo resumo não é outra troca. Um processo nasce uma vez só
+na época — um segundo nascimento do mesmo fio não muda o criador nem a
+autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
+pedaço do número de outro processo, num registro cortado. Na
+proveniência, a regra do firewall de uma conexão casa pelo fio, e não
+pelo programa.
+
 ### Risco e UEBA
 
 O risco de um principal é uma soma de fatores com teto, cada um com o
@@ -198,7 +213,7 @@ dispararam:
 | Regra | Dispara com |
 |---|---|
 | `privilege-probing` | recusas por permissão — do papel — em métodos distintos, do mesmo ator, numa janela |
-| `outside-manifest` | um programa pediu o que o manifesto dele não declara: o papel de quem o lançou tem a permissão, e a atenuação recusou — um sinal do programa, médio, que não conta como sondagem de quem o lançou |
+| `outside-manifest` | um programa pediu o que o manifesto dele não declara: o papel de quem o lançou tem a permissão, e a atenuação recusou — um sinal do programa, médio, que não conta como sondagem de quem o lançou. Também o de nome longo: acima do teto do detalhe, a descrição do programa encolhe antes do motivo, e `o manifesto nao declara` chega inteiro — o corte do fim o levava, e as recusas viravam `privilege-probing`, alta |
 | `credential-abuse` | recusas de autenticação da mesma identidade: chave revogada, sessão que acabou, login recusado |
 | `out-of-scope` | recusas de recurso repetidas do mesmo ator |
 | `policy-change` | mudança de política ou de papel executada; recusas de mudança repetidas |
@@ -208,7 +223,7 @@ dispararam:
 | `process-chain` | processos lançados em profundidade ou em rajada a partir do mesmo ator |
 | `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador |
 | `egress-after-probing` | quem tem um incidente alto aberto usa a rede |
-| `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada. Reconhece o motivo também quando o detalhe passa do teto: a descrição do programa que pediu encolhe antes dele (`? <resumo> de ?`), e o motivo cortado ainda diz a falta enquanto guarda o começo essencial dela — um nome longo não apaga o alerta |
+| `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada. Reconhece o motivo também quando o detalhe passa do teto: a descrição do programa que pediu encolhe antes dele (`? <resumo> de ?`), e o motivo cortado — numa palavra inteira, com ` ?` no lugar do que saiu — ainda diz a falta enquanto guarda o começo essencial dela — um nome longo não apaga o alerta |
 | `clock-jump` | o relógio civil saltou dentro do envelope da incerteza, ou na primeira sincronização — a gravidade pelo tamanho, a confiança baixa: é o relógio sendo corrigido |
 | `clock-jump-beyond-envelope` | o salto que a incerteza não explica: o contador derivou, ou as fontes se moveram juntas |
 | `clock-jump-pending` | o salto acima do teto, ou para trás fora do envelope, que só uma pessoa confirma: recomenda `time.confirm {round}` com a rodada dele |

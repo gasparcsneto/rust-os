@@ -6275,7 +6275,11 @@ falha fechado:
    tamanho do arquivo: ler de novo depois pode dar certo;
 4. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
-   de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`.
+   de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`. Acima
+   do teto do detalhe, abreviados: o pedido sai `(? <resumo> de bancada)`
+   ou `(? <resumo> de ?)`, e o nascimento pode perder o editor, `…codigo
+   <resumo> de ?`; o resumo e o `de` ficam sempre, e nenhum nome sai pela
+   metade (ver *O NSF vê o adulterado*).
 
 **A confiança é perguntada a cada pedido**, como o papel: cada pedido ao
 registro, cada chamada de sistema que o gate decide e cada `fork` ou
@@ -6301,15 +6305,38 @@ longa, ou com o número da decisão grande, chegava à auditoria sem o
 motivo, e o alerta não saía — e o nome é escolhido por quem escreve o
 programa. Agora, acima do teto, a descrição do programa encolhe antes do
 motivo: o nome sai (`? <resumo> de <editor>`), depois o editor (`?
-<resumo> de ?`), e só então o texto perde o fim. O resumo — o que o
-programa é — fica sempre, e o `?` no lugar do que saiu não é nome de
-programa nem de editor nenhum: a descrição abreviada nunca é a de outro
-programa, nem a de um código da imagem; a inteira está no registro da
-decisão, que a citação aponta, e o grafo do NSF não toma a abreviada por
-outro programa do processo. E o motivo cortado ainda diz a falta, enquanto
-guarda o começo essencial dela (`politica::procedencia::Falta::essencial`):
-o reconhecimento não depende do motivo inteiro. Sem citação — o registro
-de uma decisão — nada encolhe: é ele que guarda a descrição inteira.
+<resumo> de ?`), e só então o texto perde o fim — numa palavra inteira,
+com ` ?` no lugar do que saiu: o pedaço do nome de um editor é o nome de
+outro, e o de um número, outro número. O resumo — o que o programa é —
+fica sempre, e o `?` no lugar do que saiu não é nome de programa nem de
+editor nenhum: a descrição abreviada nunca é a de outro programa, nem a
+de um código da imagem; a inteira está no registro da decisão, que a
+citação aponta, quando ela cabe no teto. E o motivo cortado ainda diz a
+falta, enquanto guarda o começo essencial dela
+(`politica::procedencia::Falta::essencial`): o reconhecimento tira a
+marca e não depende do motivo inteiro.
+
+O registro sem citação encolhe do mesmo jeito (o resíduo do F1). A
+decisão que permite tem o texto vazio, e guarda a descrição inteira
+**quando ela cabe no teto**: o `pelo` sozinho só passa dele no código de
+fora da imagem com o nome e o editor longos e o fio de três dígitos ou
+mais, e então vai abreviado, com o `)` — o anel o cortava no meio do
+editor, e as decisões deixavam de ser do processo para o NSF. A recusa
+guarda o motivo antes da descrição: `o manifesto nao declara` chega
+inteiro, e a recusa do manifesto de um programa de nome longo não vira
+sondagem de privilégio da pessoa que o lançou. A bifurcação guarda o
+`filho` inteiro — o pedaço do número era o de outro processo, e o NSF
+dava a criação dele a quem bifurcou. O NSF ainda se defende do registro
+cortado: um `filho N` com N até o fio do pai não é nascimento, e um
+processo nasce uma vez só no boot. No grafo, a abreviada do mesmo resumo
+é o mesmo programa; a de outro resumo é uma troca — a do `executar` que
+falha depois do ponto sem volta. A âncora de uma declaração numa decisão
+compara o `pelo` inteiro: o processo cuja descrição passa do teto não se
+ancora em decisão nenhuma — como já não se ancorava com a decisão cortada
+—, e declara ancorado na conexão. E o editor fora do registro vai como
+`desconhecido`, um nome que o registro de editores recusa
+(`sigilo::registro::EDITOR_DESCONHECIDO`): nenhum editor registrado se
+passa por ele.
 
 O `xtask invariantes` confere o desenho: só `usuario/mod.rs` chama
 `obter` e `programa::carregar`; nada mais em `usuario/` lê um executável
@@ -6694,10 +6721,13 @@ conexão e o **destino real** dela pela tabela da pilha — ou `sem conexao`
 recurso. A citação da decisão fica inteira no fim mesmo quando o detalhe
 passa do teto de 96 bytes — um pedaço do número seria o número de outro
 registro: quem encolhe é o que vem antes dela, primeiro a descrição do
-programa — o nome, depois o editor —, e só então o texto
+programa — o nome, depois o editor —, e só então o texto, numa palavra
+inteira, com ` ?` no lugar do que saiu
 ([`politica::auditoria::detalhe_composto`](politica/src/auditoria.rs);
 ver *O NSF vê o adulterado*, em [O código de fora da
-imagem](#o-código-de-fora-da-imagem)).
+imagem](#o-código-de-fora-da-imagem)). A âncora numa decisão é o
+registro dela com a descrição inteira do processo: o processo cuja
+descrição passa do teto se ancora na conexão.
 Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
 as cotas, nem a contenção. Ela gasta a taxa de quem lançou o programa, e
 é recusada a um processo contido e a uma sessão que acabou. O desfecho é

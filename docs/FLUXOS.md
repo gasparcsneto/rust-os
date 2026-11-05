@@ -294,13 +294,21 @@ dela. O corte do fim — o de sempre, que a suíte completa achou num
 descrição do programa que pediu, e não o texto (o achado F1): o nome sai
 — `pelo processo N (? <resumo>)`, ou `(? <resumo> de <editor>)` no código
 de fora da imagem —, depois o editor (`de ?`), e só então o texto perde o
-fim. A gravação daquele `fs.write` vai inteira, `versoes 581..582`, e não
-`581..5`; o motivo do adiamento (`CONFLICT`) e o do mapeamento (`ERROR`)
-também; o da leitura, o mais longo, perde só o que ainda não cabe depois
-de o nome sair — e o NSF reconhece o código adulterado pelo motivo (ver o
-README, *O NSF vê o adulterado*). O resumo fica sempre, e o `?` não é
-nome de nada: a abreviada nunca é a descrição de outro programa. O
-registro da decisão, sem citação, guarda a descrição inteira.
+fim, numa palavra inteira, com ` ?` no lugar do que saiu: nenhum nome nem
+número fica pela metade. A gravação daquele `fs.write` vai inteira,
+`versoes 581..582`, e não `581..5`. O motivo do adiamento (`CONFLICT`, 43
+bytes) e o do mapeamento (`ERROR`) vão inteiros enquanto cabem depois da
+descrição encolhida — o adiamento, com os dígitos do fio e da decisão
+somando até 14 num programa da imagem, ou até 9 num código de fora; além
+disso, perdem as últimas palavras. O da leitura, o mais longo, perde só o
+que ainda não cabe depois de o nome sair — e o NSF reconhece o código
+adulterado pelo motivo (ver o README, *O NSF vê o adulterado*). O resumo
+fica sempre, e o `?` não é nome de nada: a abreviada nunca é a descrição
+de outro programa. O registro sem citação — a decisão do gate, a
+bifurcação — encolhe do mesmo jeito: a decisão que permite, de texto
+vazio, guarda a descrição inteira sempre que ela cabe no teto (o `pelo`
+sozinho só passa dele no código de fora da imagem com o nome e o editor
+longos), e a que recusa guarda o motivo antes da descrição.
 
 ## O que fica de fora
 
