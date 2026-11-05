@@ -146,7 +146,20 @@ espaço anterior e mapear a imagem nova vêm com ela solta. Sob contenção, a
 chamada dá a vez e roda de novo, com o processo intacto; se a ordem foi
 para outro fio depois de o gate decidir, a auditoria mostra a decisão
 adiada — a execução dela, `CONFLICT`, que a cita —, e a volta seguinte
-decide de novo. Quem não é ponta não toma a ordem. O `exec` cujo arquivo
+decide de novo. A espera da ordem não tem fila nem justiça (o A3, e o F3
+do adversário do AE-1): medida pelo caso `fluxo: a troca grande com
+escritas sem parar, medida` — a troca de quem é ponta para o `livro`, uns
+850 KiB lidos do disco, sozinha e com três processos escrevendo e lendo
+sem parar, um pedido de cada vez, como o executor os atende —, no x86, a
+troca sozinha levou 670 ms, e com os escritores, 920 ms, sem volta
+nenhuma, e nada da auditoria se perdeu. Com os três escritores em fios
+paralelos, um aperto além do que o executor produz, três rodadas deram de
+1,4 s a 4,6 s, de 1 a 8 voltas no meio (dois registros cada: a decisão e a
+execução adiada que a cita) e, numa delas, uma lacuna de 119 registros no
+journal — não das voltas da troca, mas do coletor, que leva a auditoria
+ao journal e pede a mesma ordem sem fila. Sem inanição nem ruído da troca
+no ritmo do executor, nada mudou; a lacuna sob o aperto paralelo está
+relatada, pendente. Quem não é ponta não toma a ordem. O `exec` cujo arquivo
 não se lê, ou que falha antes do ponto sem volta, não encerra fluxo nenhum:
 o processo ouve o erro e segue o que era — da leitura,
 `PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para ler o
@@ -339,7 +352,7 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 43 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 45 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo
@@ -347,7 +360,10 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   plano de dados que não gasta a ficha, a contrapressão e as esperas, as
   cotas, a morte (também a de quem já fechou, e a do zumbi antes da
   colheita), o `exec` e o `fork` (e a execução da decisão do `exec` em
-  nome de quem o gate decidiu, com a sessão acabada no meio), a
+  nome de quem o gate decidiu, com a sessão acabada no meio; a volta "no
+  meio" também num núcleo só, por um gancho que faz a ordem tomada sem
+  esperar ouvir "com outro" uma vez; e a medida da troca de um programa
+  grande com três processos escrevendo sem parar), a
   revogação e a política nova, o desligamento, a inatividade, a auditoria
   sem o conteúdo, os bytes que não autorizam, e as corridas (no meio da
   decisão, ao mesmo tempo, abrir e desligar, muitos fluxos e muitas

@@ -9305,7 +9305,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-43 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+45 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de

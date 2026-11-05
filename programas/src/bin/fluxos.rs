@@ -18,7 +18,9 @@
 //!   `fluxos: devolvi <n>`.
 //! - [`TROCAR`]: troca de imagem (`executar`, decidido sobre
 //!   `process.run`) para o `ola` do disco — [`OLA`] —, que sai com o mesmo
-//!   [`CODIGO`]: os fluxos dele acabam.
+//!   [`CODIGO`]: os fluxos dele acabam. Com `b` 1, para um programa grande
+//!   do disco — [`GRANDE`], uns 850 KiB —, que a suíte encerra: a medida da
+//!   troca sob escritas sem parar.
 //! - [`BIFURCAR`]: duplica o processo; o pai diz `fluxos: filho <id>`, e o
 //!   filho escuta o canal dele.
 //! - [`COLHER`] o filho `b`: espera ele (`esperar`) e diz `fluxos: colhi
@@ -74,6 +76,12 @@ const CODIGO: i64 = 61;
 const OLA: &str = "/programas/x86_64/ola";
 #[cfg(target_arch = "aarch64")]
 const OLA: &str = "/programas/aarch64/ola";
+
+/// O programa grande da troca medida: o `livro`, do disco dos programas.
+#[cfg(target_arch = "x86_64")]
+const GRANDE: &str = "/programas/x86_64/livro";
+#[cfg(target_arch = "aarch64")]
+const GRANDE: &str = "/programas/aarch64/livro";
 
 /// Quanto cada pedido espera, no máximo: o teto do `wait`.
 const ESPERA_MS: u64 = 10_000;
@@ -245,7 +253,7 @@ fn escutar(meu: &str) -> i64 {
                 RECEBER => receber(meu, e.b),
                 TROCAR => {
                     escreverln!("fluxos: trocando");
-                    let r = sistema::executar(OLA);
+                    let r = sistema::executar(if e.b == 1 { GRANDE } else { OLA });
                     escreverln!("fluxos: trocar devolveu {}", r);
                 }
                 BIFURCAR => match sistema::bifurcar() {

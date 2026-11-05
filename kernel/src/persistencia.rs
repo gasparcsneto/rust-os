@@ -320,12 +320,41 @@ pub fn em_ordem_sem_esperar<R>(f: impl FnOnce() -> R) -> Option<R> {
     if DONO_DA_ORDEM.load(Ordering::Acquire) == eu {
         return Some(f());
     }
+    #[cfg(feature = "modo-teste")]
+    if COM_OUTRO_UMA_VEZ
+        .compare_exchange(eu, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        return None;
+    }
     DONO_DA_ORDEM
         .compare_exchange(0, eu, Ordering::Acquire, Ordering::Relaxed)
         .ok()?;
     let r = f();
     DONO_DA_ORDEM.store(0, Ordering::Release);
     Some(r)
+}
+
+/// Só na suíte: o fio, como `id + 1`, cuja próxima ordem tomada sem esperar
+/// ([`em_ordem_sem_esperar`]) ouve que ela está com outro — uma vez —, ou
+/// zero. É a volta "no meio" da troca de quem é ponta de fluxo num núcleo
+/// só: sem outro núcleo, nenhum fio toma a ordem entre a conferência do
+/// começo da chamada e o ponto sem volta (o F5 do adversário do AE-1).
+#[cfg(feature = "modo-teste")]
+static COM_OUTRO_UMA_VEZ: AtomicU64 = AtomicU64::new(0);
+
+/// Só na suíte: a próxima ordem tomada sem esperar pelo fio `fio` ouve que
+/// ela está com outro, uma vez — ver [`COM_OUTRO_UMA_VEZ`].
+#[cfg(feature = "modo-teste")]
+pub fn com_outro_uma_vez_de_teste(fio: u64) {
+    COM_OUTRO_UMA_VEZ.store(fio + 1, Ordering::Release);
+}
+
+/// Só na suíte: desarma [`com_outro_uma_vez_de_teste`]; devolve se ainda
+/// estava armado — a ordem não chegou a ser pedida.
+#[cfg(feature = "modo-teste")]
+pub fn desarmar_com_outro_de_teste() -> bool {
+    COM_OUTRO_UMA_VEZ.swap(0, Ordering::AcqRel) != 0
 }
 
 /// A ordem das gravações está com outro fio agora? Sem tomá-la nem esperar:

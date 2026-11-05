@@ -39550,6 +39550,14 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_troca_adiada_da_a_vez_a_quem_tem_a_ordem,
     },
     Caso {
+        nome: "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so",
+        f: fluxo::fluxo_a_troca_ouve_a_ordem_com_outro_no_meio,
+    },
+    Caso {
+        nome: "fluxo: a troca grande com escritas sem parar, medida",
+        f: fluxo::fluxo_a_troca_grande_com_escritas_sem_parar,
+    },
+    Caso {
         nome: "fluxo: a troca de imagem que falha antes do ponto sem volta",
         f: fluxo::fluxo_a_troca_que_falha_antes_do_ponto_sem_volta,
     },

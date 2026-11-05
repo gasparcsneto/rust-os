@@ -2228,6 +2228,317 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
     })
 }
 
+/// A volta "no meio" da troca de quem é ponta de fluxo, também com um
+/// núcleo só — o F5 do adversário do AE-1. A ordem tomada sem esperar ouve,
+/// uma vez, que está com outro fio (`persistencia::com_outro_uma_vez_de_teste`)
+/// — depois de a chamada conferir que ela estava livre, decidir e preparar a
+/// imagem —: a chamada larga a imagem preparada, e o processo segue o que
+/// era, ponta do fluxo; grava a execução da decisão que tinha tomado —
+/// adiada, `CONFLICT`, em nome de quem o gate decidiu —, dá a vez e roda de
+/// novo: decide outra vez, e troca, com o fim do fluxo gravado na ordem. O
+/// caso da ordem tomada no meio por outro fio precisa de outro núcleo; este
+/// não.
+pub(super) fn fluxo_a_troca_ouve_a_ordem_com_outro_no_meio() -> Resultado {
+    const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";
+    com_os_fluxos(|| {
+        let (_, bia) = pessoa("bia", 338);
+        let antes = crate::autorizacao::ultimo_registro();
+        let a = Ponta::lancar(bia)?;
+        let r = (|| -> Resultado {
+            let c = Ponta::lancar(bia)?;
+            let r = (|| -> Resultado {
+                let id = aberto(&a, &c)?;
+                let n =
+                    crate::fluxo::numero_de_teste(&id).ok_or("o id do fluxo nao e deste boot")?;
+                crate::fluxo::conferir_o_fim_na_cadeia_de_teste(n);
+                let trocas = trocas_feitas();
+                let adiadas = crate::usuario::trocas_adiadas_de_teste();
+                let desde_o_pedido = crate::autorizacao::ultimo_registro();
+                crate::persistencia::com_outro_uma_vez_de_teste(c.fio());
+                let desde = c.ditar(TROCAR, 0)?;
+                let trocou = esperar_ate(|| trocas_feitas() == trocas + 1, TETO_DA_MALHA);
+                let ainda_armado = crate::persistencia::desarmar_com_outro_de_teste();
+                trocou.map_err(|_| "a troca que ouviu a ordem com outro nao aconteceu depois")?;
+                if ainda_armado {
+                    return Err("a troca de quem e ponta nao pediu a ordem sem esperar");
+                }
+                if crate::usuario::trocas_adiadas_de_teste() == adiadas {
+                    return Err("a troca que ouviu a ordem com outro nao deu a vez");
+                }
+                if crate::fluxo::contagem().0 != 0 {
+                    return Err("a imagem nova rodou com o fluxo da anterior vivo");
+                }
+                fim_gravado(antes, &id, "o programa mudou; ida 0; volta 0; desc 0")?;
+                if crate::fluxo::fim_gravado_na_ordem_de_teste() != Some(true) {
+                    return Err("o fim da troca nao foi gravado com a ordem na mao");
+                }
+                if crate::fluxo::troca_com_a_ordem_trazida_de_teste() != Some(true) {
+                    return Err("o fim da troca nao veio com a ordem trazida de fora");
+                }
+                // A volta do meio decidiu e gravou a execução adiada que cita
+                // a decisão, em nome dela; a seguinte decidiu de novo e
+                // trocou, sem execução.
+                let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
+                let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
+                    ([(primeira, d), _], [execucao]) => {
+                        execucao_da_troca(execucao, Codigo::Conflict, c.fio(), ADIADA, *primeira)
+                            && em_nome_da_decisao(d, &execucao.1, ADIADA, *primeira)
+                    }
+                    _ => false,
+                };
+                if !dita {
+                    crate::log_error!(
+                        "teste",
+                        "decisoes {:?}; execucoes {:?}",
+                        decisoes,
+                        execucoes
+                    );
+                    return Err("a volta do meio nao tem a execucao adiada que cita a decisao");
+                }
+                esperar_ate(
+                    || {
+                        linhas_do_programa(desde, &format!("processo encerrou com codigo {SAIDA}"))
+                            == 1
+                    },
+                    TETO_DA_MALHA,
+                )
+                .map_err(|_| "o programa trocado nao terminou")?;
+                if estado(a.quem(), &id).1.as_deref() != Some("o programa mudou") {
+                    return Err("quem ficou nao viu a troca de imagem");
+                }
+                Ok(())
+            })();
+            crate::persistencia::desarmar_com_outro_de_teste();
+            // O processo só segue o `fluxos` se o caso falhou antes da troca.
+            let vivo = crate::fios::processo(c.fio()).map(|(_, p)| p) == Some(c.p.programa);
+            if vivo { encerrar_todas(r, &[&c]) } else { r }
+        })();
+        crate::fluxo::desarmar_de_teste();
+        encerrar_todas(r, &[&a])
+    })
+}
+
+/// Os fios do caso que mede a troca sob escritas sem parar: o processo que
+/// escreve, o que lê e o fluxo de cada um.
+static ESCRITORES: crate::trava::Mutex<Vec<(u64, u64, String)>> =
+    crate::trava::Mutex::new(Vec::new());
+/// Os escritores param.
+static PARAR_DE_ESCREVER: AtomicBool = AtomicBool::new(false);
+/// Quantas escritas e leituras passaram.
+static OPERACOES: AtomicU64 = AtomicU64::new(0);
+/// Quantos escritores acabaram.
+static ESCRITORES_FORA: AtomicUsize = AtomicUsize::new(0);
+
+/// Um fio que escreve e lê sem parar nos fluxos de [`ESCRITORES`], um de
+/// cada vez, como as duas pontas de cada um — cada operação uma decisão do
+/// gate, que toma a ordem das gravações —, até a suíte mandar parar ou uma
+/// ponta acabar. Um fio só, como o executor, que atende os pedidos dos
+/// programas um de cada vez.
+extern "C" fn escritor_sem_parar(_: u64) -> ! {
+    let pares = crate::arch::sem_interrupcoes(|| ESCRITORES.lock().clone());
+    'escrevendo: while !PARAR_DE_ESCREVER.load(SeqCst) {
+        for (escreve, le, id) in &pares {
+            let (Some(escreve), Some(le)) = (chamador_de(*escreve), chamador_de(*le)) else {
+                break 'escrevendo;
+            };
+            if fs_ok(&escrever(escreve, id, &[0x5a; 2048])) {
+                OPERACOES.fetch_add(1, SeqCst);
+            }
+            if fs_ok(&ler(le, id, 2048)) {
+                OPERACOES.fetch_add(1, SeqCst);
+            }
+        }
+    }
+    ESCRITORES_FORA.fetch_add(1, SeqCst);
+    crate::fios::terminar()
+}
+
+/// A troca do `fluxos` para o programa grande — o `b` do passo [`TROCAR`].
+const PARA_O_GRANDE: i64 = 1;
+
+/// O que uma troca medida deu: quanto tempo levou, quantas voltas deu, e
+/// as decisões e as execuções dela na auditoria.
+struct TrocaMedida {
+    ms: u64,
+    voltas: u64,
+    decisoes: Vec<Registro>,
+    execucoes: Vec<Registro>,
+}
+
+/// A troca do `fluxos` de `p` para o programa grande, medida. `Err` se ela
+/// não aconteceu.
+fn trocar_para_o_grande(p: &Ponta, caminho: &str) -> Result<TrocaMedida, &'static str> {
+    let trocas = trocas_feitas();
+    let adiadas = crate::usuario::trocas_adiadas_de_teste();
+    let desde = crate::autorizacao::ultimo_registro();
+    let comeco = crate::tempo::uptime_ms();
+    p.ditar(TROCAR, PARA_O_GRANDE)?;
+    let trocou = esperar_cedendo(|| trocas_feitas() != trocas, TETO_DA_MALHA);
+    let ms = crate::tempo::uptime_ms() - comeco;
+    let voltas = crate::usuario::trocas_adiadas_de_teste() - adiadas;
+    trocou.map_err(|_| "a troca para o programa grande nao aconteceu")?;
+    let (decisoes, execucoes) = registros_depois(desde, |e| {
+        e.metodo == "process.exec" && e.recurso == caminho
+    })
+    .into_iter()
+    .partition(|(_, e)| !e.detalhe.contains("; decisao "));
+    Ok(TrocaMedida {
+        ms,
+        voltas,
+        decisoes,
+        execucoes,
+    })
+}
+
+/// A medida do F3 do adversário do AE-1: a troca de imagem de quem é ponta
+/// de fluxo para um programa grande — o `livro`, uns 850 KiB lidos do disco
+/// —, primeiro sozinha, a referência, e depois com três outros processos
+/// escrevendo e lendo sem parar nos fluxos deles — cada operação uma decisão
+/// do gate, com a ordem das gravações, pedidas por um fio do kernel como os
+/// processos, uma de cada vez, como o executor as atenderia. A espera da ordem não
+/// tem fila: a troca que a acha com outro dá a vez e roda de novo, antes do
+/// gate (nada decide nem grava) ou no meio (a decisão e a execução dela,
+/// adiada). O caso diz no log, para as duas: o tempo até a troca, as voltas
+/// antes do gate e no meio, os registros da troca, as operações dos
+/// escritores e a auditoria perdida — as lacunas do journal —; e confere o
+/// que a ordem garante: a troca acontece, cada volta no meio grava dois
+/// registros — a decisão e a execução adiada que a cita —, e nada da
+/// auditoria se perde.
+pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
+    const PONTAS: usize = 3;
+    const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";
+    com_os_fluxos(|| {
+        let (_, bia) = pessoa("bia", 339);
+        let mut pontas = Vec::new();
+        for _ in 0..PONTAS + 3 {
+            match Ponta::lancar(bia) {
+                Ok(p) => pontas.push(p),
+                Err(e) => {
+                    let todas: Vec<&Ponta> = pontas.iter().collect();
+                    return encerrar_todas(Err(e), &todas);
+                }
+            }
+        }
+        PARAR_DE_ESCREVER.store(false, SeqCst);
+        OPERACOES.store(0, SeqCst);
+        ESCRITORES_FORA.store(0, SeqCst);
+        let mut lancados = 0;
+        let r = (|| -> Resultado {
+            let (sozinha, p, q, escritores) = (&pontas[0], &pontas[1], &pontas[2], &pontas[3..]);
+            // As duas que trocam são pontas: a da referência com a outra,
+            // e a outra com quem lê.
+            aberto(sozinha, p)?;
+            aberto(p, q)?;
+            let mut pares = Vec::new();
+            for w in escritores {
+                pares.push((w.fio(), q.fio(), aberto(w, q)?));
+            }
+            let caminho = format!("{}/livro", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+            let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+            // A referência: sozinha.
+            let TrocaMedida {
+                ms,
+                voltas,
+                decisoes,
+                execucoes,
+            } = trocar_para_o_grande(sozinha, &caminho)?;
+            crate::log_info!(
+                "teste",
+                "a troca grande sozinha: {} ms; {} voltas, {} no meio; {} decisoes e {} execucoes da troca",
+                ms,
+                voltas,
+                execucoes.len(),
+                decisoes.len(),
+                execucoes.len()
+            );
+            crate::arch::sem_interrupcoes(|| *ESCRITORES.lock() = pares);
+            crate::fios::criar("teste-escritor", escritor_sem_parar, 0)?;
+            lancados += 1;
+            esperar_cedendo(|| OPERACOES.load(SeqCst) >= 64, TETO_DA_MALHA)
+                .map_err(|_| "os escritores nao escreveram")?;
+            // Só os escritores, por um tempo — a auditoria que eles perdem
+            // sozinhos, sem a troca.
+            let so_escritores = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+            let operacoes = OPERACOES.load(SeqCst);
+            let comeco = crate::tempo::uptime_ms();
+            let _ = esperar_cedendo(|| false, 300);
+            let _ = crate::persistencia::gravar_auditoria();
+            crate::log_info!(
+                "teste",
+                "so os escritores: {} ms; {} operacoes; {} registros perdidos",
+                crate::tempo::uptime_ms() - comeco,
+                OPERACOES.load(SeqCst) - operacoes,
+                crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - so_escritores
+            );
+            let na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+            let operacoes = OPERACOES.load(SeqCst);
+            let trocou = trocar_para_o_grande(p, &caminho);
+            let operacoes = OPERACOES.load(SeqCst) - operacoes;
+            let perdidas_na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - na_troca;
+            PARAR_DE_ESCREVER.store(true, SeqCst);
+            esperar_cedendo(|| ESCRITORES_FORA.load(SeqCst) == lancados, TETO_DA_MALHA)
+                .map_err(|_| "os escritores nao pararam")?;
+            // A auditoria da janela vai ao journal, e a que não chegou a ele
+            // é a lacuna.
+            let _ = crate::persistencia::gravar_auditoria();
+            let perdidas = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - perdida;
+            let TrocaMedida {
+                ms,
+                voltas,
+                decisoes,
+                execucoes,
+            } = trocou?;
+            let no_meio = execucoes.len() as u64;
+            crate::log_info!(
+                "teste",
+                "a troca grande com {} pontas escrevendo: {} ms; {} voltas, {} antes do gate e {} no meio; {} decisoes e {} execucoes da troca; {} operacoes dos escritores; {} registros perdidos durante ela, {} no caso todo",
+                PONTAS,
+                ms,
+                voltas,
+                voltas.saturating_sub(no_meio),
+                no_meio,
+                decisoes.len(),
+                execucoes.len(),
+                operacoes,
+                perdidas_na_troca,
+                perdidas
+            );
+            if decisoes.len() as u64 != no_meio + 1 {
+                return Err("a troca grande nao teve uma decisao por volta no meio, e a da troca");
+            }
+            let citadas = execucoes.iter().all(|x| {
+                decisoes.iter().any(|(numero, d)| {
+                    execucao_da_troca(x, Codigo::Conflict, p.fio(), ADIADA, *numero)
+                        && em_nome_da_decisao(d, &x.1, ADIADA, *numero)
+                })
+            });
+            if !citadas {
+                crate::log_error!("teste", "execucoes {:?}", execucoes);
+                return Err("uma volta no meio nao gravou a execucao adiada que cita a decisao");
+            }
+            if perdidas != 0 {
+                return Err("a troca grande sob escritas sem parar perdeu auditoria");
+            }
+            Ok(())
+        })();
+        PARAR_DE_ESCREVER.store(true, SeqCst);
+        let _ = esperar_cedendo(|| ESCRITORES_FORA.load(SeqCst) == lancados, TETO_DA_MALHA);
+        // Os processos que trocaram rodam o programa grande: a suíte os
+        // encerra.
+        for p in &pontas[..2] {
+            if crate::fios::processo(p.fio()).is_some_and(|(_, pr)| pr != p.p.programa) {
+                let _ = crate::fios::pedir_termino(p.fio());
+                let _ = esperar_cedendo(|| crate::fios::processo(p.fio()).is_none(), TETO_DA_MALHA);
+            }
+        }
+        let vivas: Vec<&Ponta> = pontas
+            .iter()
+            .filter(|x| crate::fios::processo(x.fio()).map(|(_, pr)| pr) == Some(x.p.programa))
+            .collect();
+        encerrar_todas(r, &vivas)
+    })
+}
+
 /// A troca de imagem de quem é ponta de fluxo que falha antes do ponto sem
 /// volta — a preparação da imagem nova falha, como falharia o ELF que o
 /// validador recusa ou o espaço novo sem memória — não encerra nada: o
