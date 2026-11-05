@@ -708,7 +708,9 @@ fn agir_no_campo(
 /// no console dele quem a apertou, antes de publicar: o Terminal fecha o
 /// pseudo-terminal, e o registro do `logout` diz quem fechou — ver
 /// [`crate::interpretador::quem_fechou`]. Se o evento não chega, a anotação
-/// se desfaz. Não recusa nada: só registra quem foi.
+/// se desfaz — se ainda for a dela: ver
+/// [`crate::interpretador::desfazer_press_pela_arvore`]. Não recusa nada:
+/// só registra quem foi.
 fn pressionar_no_processo(
     id: u32,
     id_do_processo: i64,
@@ -719,10 +721,9 @@ fn pressionar_no_processo(
         .and_then(|(camada, _)| crate::superficies::destino_da_camada(camada))
         .ok_or("a janela do elemento fechou")?;
     let anotado = match (elemento_de(id), console_do_campo(id)) {
-        (Some((_, 0)), Some(console)) => Some((
-            console,
-            crate::interpretador::press_pela_arvore(console, origem),
-        )),
+        (Some((_, 0)), Some(console)) => {
+            Some(crate::interpretador::press_pela_arvore(console, origem))
+        }
         _ => None,
     };
     let publicado = crate::superficies::publicar_para(
@@ -734,8 +735,8 @@ fn pressionar_no_processo(
             c: origem.codigo(),
         },
     );
-    if let (Err(_), Some((console, anterior))) = (&publicado, anotado) {
-        crate::interpretador::desfazer_press_pela_arvore(console, anterior);
+    if let (Err(_), Some(anotacao)) = (&publicado, anotado) {
+        crate::interpretador::desfazer_press_pela_arvore(anotacao);
     }
     match publicado {
         Ok(()) => Ok(()),

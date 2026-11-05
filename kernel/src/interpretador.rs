@@ -264,7 +264,15 @@ struct Estado {
     /// O `press` que a árvore entregou na caixa de fechar da janela do
     /// Terminal deste console, e de quem: o registro do `logout` diz quem
     /// fechou. Ver [`press_pela_arvore`] e [`quem_fechou`].
-    press_pela_arvore: Option<Origem>,
+    press_pela_arvore: Option<PressAnotado>,
+}
+
+/// Uma anotação de [`press_pela_arvore`]: quem apertou, e um número que é
+/// só dela — o desfazer confere que a anotação do console ainda é a sua.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PressAnotado {
+    origem: Origem,
+    numero: u64,
 }
 
 impl Estado {
@@ -638,22 +646,55 @@ pub fn abrir_console(console: Console) {
     }
 }
 
+/// O que [`press_pela_arvore`] devolve, para [`desfazer_press_pela_arvore`]:
+/// o console, o número da anotação que ela pôs, e a que havia antes.
+#[derive(Clone, Copy, Debug)]
+pub struct Anotacao {
+    console: Console,
+    posta: u64,
+    anterior: Option<PressAnotado>,
+}
+
+/// O número da próxima anotação de [`press_pela_arvore`]: um por anotação,
+/// desde o boot.
+static ANOTACOES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// A árvore entrega ao Terminal deste console o `press` de `origem` na
 /// caixa de fechar da janela dele: anota, para o registro do `logout` dizer
-/// quem fechou — ver [`quem_fechou`] —, e devolve a anotação anterior, para
+/// quem fechou — ver [`quem_fechou`] —, e devolve a [`Anotacao`], para
 /// [`desfazer_press_pela_arvore`]. Chamada por `crate::ui` **antes** de
 /// publicar o evento: noutro núcleo, o Terminal pode fechar e o console
 /// acabar antes de a publicação voltar.
 ///
 /// Só diz quem foi; não decide nada, e não recusa nada. A decisão do
 /// `press` é a do `ui.act`, gravada antes, com o nome de quem pediu.
-pub fn press_pela_arvore(console: Console, origem: Origem) -> Option<Origem> {
-    com_estado(console, |e| e.press_pela_arvore.replace(origem)).flatten()
+pub fn press_pela_arvore(console: Console, origem: Origem) -> Anotacao {
+    let numero = ANOTACOES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let posta = PressAnotado { origem, numero };
+    let anterior = com_estado(console, |e| e.press_pela_arvore.replace(posta)).flatten();
+    Anotacao {
+        console,
+        posta: numero,
+        anterior,
+    }
 }
 
 /// Desfaz um [`press_pela_arvore`]: o evento não chegou ao Terminal.
-pub fn desfazer_press_pela_arvore(console: Console, anterior: Option<Origem>) {
-    com_estado(console, |e| e.press_pela_arvore = anterior);
+///
+/// Compara antes de restaurar: só desfaz se a anotação do console ainda é
+/// a que ela pôs. Outra anotação depois dela — um `press` que chegou —, ou
+/// o console que fechou ou reabriu no meio, que apaga as anotações, ficam
+/// como estão. Restaurar às cegas poria a anotação de antes no lugar da de
+/// um `press` que chegou ao Terminal, ou no console reaberto, e o registro
+/// do `logout` seguinte culparia quem não fechou.
+pub fn desfazer_press_pela_arvore(anotacao: Anotacao) {
+    com_estado(anotacao.console, |e| {
+        if e.press_pela_arvore
+            .is_some_and(|p| p.numero == anotacao.posta)
+        {
+            e.press_pela_arvore = anotacao.anterior;
+        }
+    });
 }
 
 /// Quem fechou o Terminal deste console, para o registro do `logout`.
@@ -662,17 +703,21 @@ pub fn desfazer_press_pela_arvore(console: Console, anterior: Option<Origem>) {
 ///   fechou pelo press de agente N na arvore` — ou `de pessoa`, a pessoa
 ///   que pediu pela árvore. A sessão `N` é a vaga do transporte, que outra
 ///   conexão ocupa depois; o `ui.act` gravado diz o nome.
-/// - Sem: `o terminal fechou pelo clique da pessoa`. O Terminal só fecha o
-///   pseudo-terminal por um gesto de fechar, e o que não veio da árvore
-///   veio do ponteiro, que é o mouse da máquina.
+/// - Sem: `o terminal fechou pelo clique da pessoa` — uma dedução: o dono
+///   do pseudo-terminal o fechou sem um `press` da árvore anotado. O
+///   Terminal só fecha o pseudo-terminal por um gesto de fechar, e o que
+///   não veio da árvore veio do ponteiro, que é o mouse da máquina; quem
+///   pode ser "o Terminal" — o dono do pseudo-terminal — é a decisão
+///   pendente do nome `terminal`.
 ///
 /// A queda, o término e a saída sem fechar não passam por aqui: o coletor
 /// os acha, e diz `o terminal morreu`. Com a pessoa clicando e um agente
 /// apertando ao mesmo tempo, diz o agente — o `press` dele foi entregue
-/// antes do fechamento —, e o `ui.act` gravado desempata.
+/// antes do fechamento —, ainda que o clique tenha fechado: o clique numa
+/// janela não é gravado.
 pub fn quem_fechou(console: Console) -> alloc::string::String {
     match com_estado(console, |e| e.press_pela_arvore).flatten() {
-        Some(origem) => alloc::format!("o terminal fechou pelo press de {origem} na arvore"),
+        Some(p) => alloc::format!("o terminal fechou pelo press de {} na arvore", p.origem),
         None => alloc::string::String::from("o terminal fechou pelo clique da pessoa"),
     }
 }

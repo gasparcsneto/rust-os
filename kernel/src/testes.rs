@@ -27123,9 +27123,9 @@ fn terminal_o_logout_diz_quem_fechou() -> Resultado {
             let console = chave.console();
             crate::interpretador::entrar_para_teste(console, "quem-fechou", "operador");
             if let Some(origem) = anotada {
-                let anterior = crate::interpretador::press_pela_arvore(console, origem);
+                let anotacao = crate::interpretador::press_pela_arvore(console, origem);
                 if desfeita {
-                    crate::interpretador::desfazer_press_pela_arvore(console, anterior);
+                    crate::interpretador::desfazer_press_pela_arvore(anotacao);
                 }
             }
             let seq = seq_da_auditoria();
