@@ -273,8 +273,8 @@ compartilhada, a nuvem e a conta central.
   com o Enter do `aceitar` no Terminal de verdade, descartada na linha da
   cerimônia com o arrendamento solto, e a que continua recusada quando o
   fim, no meio dela, devolve a linha a um comando; e o aviso do fim que
-  chega atrasado, depois do `logout` e do `login`, sem mudar a linha do
-  nome nem a da senha.
+  chega atrasado, depois do `logout` e do `login` ou do `senha`, sem mudar
+  a linha do nome, a da senha nem a da senha atual da troca.
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, com a senha. Uma
