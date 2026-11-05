@@ -173,6 +173,9 @@ struct Fim {
     sessao: IdSessao,
     console: Console,
     abertura: u64,
+    /// O número da cerimônia — ver [`Viva::numero`]: o aviso ao console o
+    /// leva, e o console ignora a mudança de linha do aviso de outra.
+    numero: u64,
     nome: String,
     recurso: String,
     par: Option<[u8; 32]>,
@@ -424,6 +427,7 @@ fn fim_de(x: &mut Viva) -> Option<Fim> {
         sessao: x.sessao,
         console: x.console,
         abertura: x.abertura,
+        numero: x.numero,
         nome: x.nome.clone(),
         recurso: recurso(&x.nome),
         par: x.c.par(),
@@ -538,15 +542,31 @@ fn contar_o_fim(f: Fim, ao_console: bool) -> String {
         par
     );
     if ao_console {
-        avisar(f.console, f.abertura, &texto);
+        avisar(f.console, f.abertura, f.numero, &texto);
     }
     texto
 }
 
 /// Escreve no console da cerimônia, por cima da linha, e a linha passa ao
-/// que a cerimônia pede agora.
-fn avisar(console: Console, abertura: u64, texto: &str) {
-    crate::interpretador::aviso_do_pareamento(console, abertura, texto);
+/// que a cerimônia de número `numero` pede agora — se ela ainda é a do
+/// console: ver `interpretador::aviso_do_pareamento`.
+fn avisar(console: Console, abertura: u64, numero: u64, texto: &str) {
+    crate::interpretador::aviso_do_pareamento(console, abertura, numero, texto);
+}
+
+/// O número da cerimônia viva do console `console`, se há uma — a que o
+/// `aceitar` ou o `parear` dele abriu e que ainda não acabou. O console o
+/// guarda, e ignora a mudança de linha do aviso de outra cerimônia (o
+/// achado 6 do adversário do passo 1).
+pub fn numero_do_console(console: Console) -> Option<u64> {
+    if !HA.load(Ordering::Acquire) {
+        return None;
+    }
+    com(|g| {
+        g.as_ref()
+            .filter(|x| x.console == console && !x.c.acabou())
+            .map(|x| x.numero)
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1055,7 +1075,7 @@ pub fn no_console() {
         Devido::Desfazer => desfazer(numero),
     };
     if !texto.is_empty() {
-        avisar(console, abertura, &texto);
+        avisar(console, abertura, numero, &texto);
     }
 }
 
@@ -1548,8 +1568,9 @@ fn primeira_mensagem(v: u8, g: u64, corpo: &[u8]) -> bool {
 #[derive(Default)]
 struct Depois {
     fim: Option<Fim>,
-    /// O aperto fechou: os códigos à mostra, no console da cerimônia.
-    codigos: Option<(Console, u64, String)>,
+    /// O aperto fechou: os códigos à mostra, no console da cerimônia — o
+    /// console, a abertura dele e o número da cerimônia.
+    codigos: Option<(Console, u64, u64, String)>,
     /// A chave do iniciante se provou: o prazo do aperto da vaga para.
     identificar: Option<(u8, u64, [u8; 32])>,
     acordar_o_console: bool,
@@ -1561,8 +1582,8 @@ impl Depois {
             identificar_na_vaga(v, g, k);
         }
         andar();
-        if let Some((console, abertura, texto)) = self.codigos {
-            avisar(console, abertura, &texto);
+        if let Some((console, abertura, numero, texto)) = self.codigos {
+            avisar(console, abertura, numero, &texto);
         }
         if self.acordar_o_console {
             crate::teclado::despertar_o_interpretador();
@@ -1615,7 +1636,8 @@ fn receber_dados(x: &mut Viva, corpo: &[u8], eu: &str, depois: &mut Depois) -> b
                     if let (Some((v, g)), Some(k)) = (x.vaga, x.c.par()) {
                         depois.identificar = Some((v, g, k));
                     }
-                    depois.codigos = Some((x.console, x.abertura, texto_dos_codigos(x, eu)));
+                    depois.codigos =
+                        Some((x.console, x.abertura, x.numero, texto_dos_codigos(x, eu)));
                     true
                 }
                 Err(Recusa::CompromissoErrado) => {
@@ -1934,7 +1956,7 @@ fn apertar_como_iniciante(
                 x.resumo = Some(h);
                 mandar(x, mensagem_do_nonce(&nonce).as_bytes());
                 politica::sigiloso::zerar(&mut nonce);
-                depois.codigos = Some((x.console, x.abertura, texto_dos_codigos(x, &eu)));
+                depois.codigos = Some((x.console, x.abertura, x.numero, texto_dos_codigos(x, &eu)));
                 Some(())
             }
             Err(_) => None,

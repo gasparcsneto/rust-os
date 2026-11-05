@@ -284,6 +284,12 @@ struct Estado {
     /// arrendamento dele: a seguinte que começar dali é da mesma sequência.
     /// Ver [`pela_arvore`].
     recusadas: Option<politica::arrendamento::Estado>,
+    /// O número da cerimônia de pareamento que este console abriu e que
+    /// ainda não acabou para ele — guardado pelo `aceitar`, pelo `parear` e
+    /// pelo Enter numa linha dela, e esquecido quando a linha volta a pedir
+    /// um comando. O aviso de outra não muda a linha: ver
+    /// [`aviso_do_pareamento`].
+    cerimonia: Option<u64>,
 }
 
 /// Quantas edições da árvore um console guarda à espera do pseudo-terminal.
@@ -365,6 +371,7 @@ impl Estado {
         edicoes: [None; EDICOES_PEDIDAS],
         na_arvore: None,
         recusadas: None,
+        cerimonia: None,
     };
 
     /// Esquece as edições da árvore: as reservadas, a que estava sendo
@@ -691,6 +698,7 @@ pub fn abrir_console(console: Console) {
         e.aberto = true;
         e.abertura += 1;
         e.modo = Modo::Comando;
+        e.cerimonia = None;
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
@@ -830,6 +838,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.abertura += 1;
         e.inicio = None;
         e.modo = Modo::Comando;
+        e.cerimonia = None;
         e.nome = [0; NOME_MAX];
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
@@ -2746,7 +2755,11 @@ fn comecar_pareamento(console: Console, aceitar: bool, params: &str) {
     };
     saidaln!(console, "{}", texto);
     let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
-    com_estado(console, |e| e.modo = modo);
+    let cerimonia = crate::pareamento::numero_do_console(console);
+    com_estado(console, |e| {
+        e.modo = modo;
+        e.cerimonia = cerimonia;
+    });
     crate::teclado::pedindo_senha(i, modo.secreto());
 }
 
@@ -2798,8 +2811,10 @@ fn parear_passo(console: Console, modo: Modo) {
         saidaln!(console, "{}", texto);
     }
     let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
+    let cerimonia = crate::pareamento::numero_do_console(console);
     com_estado(console, |e| {
         e.modo = modo;
+        e.cerimonia = cerimonia;
         e.executando = false;
     });
     crate::teclado::pedindo_senha(i, modo.secreto());
@@ -2847,10 +2862,16 @@ pub const AVISO_DO_ENGOLIR: &str = "(o que se digitar ate o Enter e descartado)"
 /// o nome e a senha que ela digitasse adiantado ecoando, indo à árvore e ao
 /// histórico; a da senha, engolida. Nessas linhas, o aviso só escreve o
 /// texto, por cima, e a linha continua a que ela era.
-pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
+pub fn aviso_do_pareamento(console: Console, abertura: u64, cerimonia: u64, texto: &str) {
     #[cfg(feature = "modo-teste")]
     no_meio(NoMeio::DoAviso);
+    // O que a cerimônia pede, lido fora da trava do console — relido
+    // dentro, inverteria a ordem das travas. Ela pode acabar entre a leitura
+    // e a trava, e a linha voltar a pedir um comando: o número da cerimônia
+    // diz, dentro da trava, se o aviso ainda é da cerimônia do console.
     let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
+    #[cfg(feature = "modo-teste")]
+    no_meio(NoMeio::DoAvisoLido);
     let Some(i) = indice(console) else {
         return;
     };
@@ -2876,8 +2897,13 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
         }
         saidaln!(console, "{}", texto);
         // A cerimônia só mexe na linha que é dela ou que pede um comando —
-        // ver acima: a do login e as da troca da senha ficam como estão.
-        let da_cerimonia = e.modo == Modo::Comando || e.modo.do_pareamento();
+        // ver acima: a do login e as da troca da senha ficam como estão —, e
+        // só a cerimônia do console: o aviso atrasado de uma que acabou — o
+        // prazo venceu com ele a caminho, e o aviso do fim passou na frente
+        // — não põe a linha numa cerimônia morta (o achado 6 do adversário
+        // do passo 1).
+        let da_cerimonia =
+            (e.modo == Modo::Comando || e.modo.do_pareamento()) && e.cerimonia == Some(cerimonia);
         // A linha pedia a senha da cerimônia, parada — a Pessoa no meio dela
         // —, e a cerimônia a tirou do modo secreto: o resto, até o Enter, é
         // engolido.
@@ -2889,6 +2915,10 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
         if da_cerimonia && e.modo != modo {
             e.zerar();
             e.modo = modo;
+        }
+        // A linha que a cerimônia devolveu a um comando não é mais dela.
+        if da_cerimonia && modo == Modo::Comando {
+            e.cerimonia = None;
         }
         if parado {
             if e.engolindo {
@@ -3022,6 +3052,10 @@ pub enum NoMeio {
     /// já foi contado — e ainda não chegou à linha; o fio que o leva pode
     /// demorar, e a Pessoa, digitar.
     DoAviso,
+    /// Em [`aviso_do_pareamento`]: o aviso já leu o que a cerimônia pede da
+    /// linha, e ainda não tomou a trava do console — a cerimônia pode
+    /// acabar nesse meio-tempo.
+    DoAvisoLido,
 }
 
 /// Só para a suíte: o ponto, e o que roda nele.
