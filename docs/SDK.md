@@ -835,7 +835,24 @@ cerimônia, e não pelo da linha que ficou (N169); o arrendamento que a
 edição só renovou, solto (N170); a sequência que não conta — só a
 edição que tomou o arrendamento o solta (N171); e o aviso que mexe de novo
 nas linhas da troca da senha, e só nelas (N172). Todas reprovadas no x86,
-uma de cada vez.
+uma de cada vez. E as do resíduo do F1, depois do adversário dele — os
+registros sem citação que o anel cortava, o corte no meio de um nome e as
+regressões do NSF (N173–N181; ver *O NSF vê o adulterado*, no
+[README](../README.md#o-código-de-fora-da-imagem)): a saída antecipada de
+volta, e o registro sem citação não encolhe (N173); o nascimento que
+sobrescreve o processo que já nasceu (N174); o `filho N` até o fio do pai
+aceito como nascimento (N175); o texto cortado no meio da palavra (N176);
+a falta reconhecida sem tirar a marca do corte (N177); o grafo que ignora
+a abreviada de outro resumo (N178); a regra do firewall casada também
+pelo programa (N179); o corte sem a marca (N180); e o editor
+`desconhecido` aceito no registro (N181). Todas reprovadas pelos testes
+do hospedeiro, uma de cada vez; a N173, a N176 e a N180 também pela suíte
+do x86 — as outras mexem no que a suíte não produz: um registro cortado
+ou repetido, um motivo de procedência cortado, uma troca abreviada, uma
+execução barrada de descrição longa, um editor com o nome reservado. E a
+N160 de novo, na forma do código novo — o grafo toma a abreviada por
+outro programa —: reprovada pelos testes do hospedeiro e pela suíte do
+x86.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -996,7 +1013,7 @@ uma de cada vez.
 | N157 | fora do SDK (F1): o corte antigo do detalhe composto — a descrição do programa não encolhe, e o texto perde o fim primeiro | hospedeiro: `auditoria::testes::a_descricao_encolhe_antes_do_motivo`, `a_descricao_abreviada_nao_e_a_de_outro_programa`, `o_motivo_cortado_ainda_diz_a_falta`, `o_detalhe_composto_guarda_a_citacao`; `evento::testes::a_falta_de_quem_tem_descricao_longa`; `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa`, `fluxo: a troca de imagem cujo arquivo nao se le`, `fluxo: a troca de imagem cujo arquivo nao cabe no heap` |
 | N158 | fora do SDK (F1): a falta reconhecida só pelo motivo inteiro, sem o começo essencial | hospedeiro: `procedencia::testes::o_motivo_cortado_ainda_diz_a_falta`, `auditoria::testes::o_motivo_cortado_ainda_diz_a_falta`, `evento::testes::a_falta_de_quem_tem_descricao_longa` — a suíte não corta o motivo de procedência depois do encolhimento da descrição |
 | N159 | fora do SDK (#292): a leitura que falhou sem heap no `executar` volta a dizer `PROGRAMA_DESCONHECIDO` | `fluxo: a troca de imagem cujo arquivo nao cabe no heap` |
-| N160 | fora do SDK (F1): o grafo do NSF toma a descrição abreviada por outro programa do processo | hospedeiro: `grafo::testes::a_descricao_abreviada_nao_troca_o_programa`, `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
+| N160 | fora do SDK (F1): o grafo do NSF toma a descrição abreviada por outro programa do processo — rodada de novo no resíduo do F1, na forma do código novo | hospedeiro: `grafo::testes::a_descricao_abreviada_nao_troca_o_programa`, `a_abreviada_de_outro_resumo_e_uma_troca`; o motor: `o_codigo_adulterado_de_quem_tem_descricao_longa`, `a_troca_que_morre_no_mapeamento_fica_no_grafo`; suíte x86, 894 de 895: `nsf: ve o codigo adulterado de quem tem descricao longa` |
 | N161 | fora do SDK (F1): o editor sai da descrição sem deixar o `de ?` — o código de fora da imagem passa pelo da imagem | hospedeiro: `auditoria::testes::a_descricao_encolhe_antes_do_motivo`, `a_descricao_abreviada_nao_e_a_de_outro_programa`, `o_motivo_cortado_ainda_diz_a_falta`; `evento::testes::a_falta_de_quem_tem_descricao_longa`; `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
 | N162 | fora do SDK (passo 1, L1): a conferência do consumo tirada — o que vem marcado da árvore entra em qualquer linha, e a corrida volta | `terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome`, `terminal: so se solta o arrendamento que as edicoes recusadas deixaram`, `pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia`, `pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando`, `terminal: a marca da arvore sem reserva nao solta nem passa nada` |
 | N163 | fora do SDK (passo 1, L1): o arrendamento solto sem conferir de quem é — sai o de quem estiver no campo | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a primeira de duas edições em voo solta o que a segunda renovou |
@@ -1009,6 +1026,15 @@ uma de cada vez.
 | N170 | fora do SDK (passo 1, L1): o arrendamento que a edição só renovou, solto | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a edição que começou do que um `ui.claim` renovou solta o dele |
 | N171 | fora do SDK (passo 1, L1): sem a sequência — só a edição que tomou o arrendamento o solta, e duas recusadas em voo o deixam | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` |
 | N172 | fora do SDK (passo 1, #297): o aviso da cerimônia mexe de novo nas linhas da troca da senha — só nelas; as do login ficam | `pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login` — a linha da senha atual da troca vira uma linha de comando que engole |
+| N173 | fora do SDK (resíduo do F1): a saída antecipada sem citação de volta — o registro sem citação não encolhe, e o anel corta o fim | hospedeiro: `auditoria::testes::a_descricao_encolhe_tambem_sem_citacao`, `a_descricao_encolhe_antes_do_motivo`, `o_corte_nao_deixa_palavra_pela_metade`, `o_detalhe_composto_guarda_a_citacao`; o motor: `a_recusa_do_manifesto_de_nome_longo_nao_e_sondagem`, `a_bifurcacao_de_nome_longo_liga_o_filho`, `a_decisao_de_pelo_acima_do_teto_e_do_processo`, `o_teto_de_nome_longo_alerta`; suíte x86, 891 de 895: `nsf: ve o codigo adulterado de quem tem descricao longa`, `nsf: a recusa do manifesto de quem tem descricao longa e do manifesto`, `nsf: a bifurcacao de quem tem descricao longa liga o filho`, `nsf: a decisao de quem tem descricao acima do teto e do processo` |
+| N174 | fora do SDK (resíduo do F1): `Grafo::nasceu` sobrescreve o processo que já nasceu na época | hospedeiro: `grafo::testes::um_processo_nasce_uma_vez_so`; o motor: `a_bifurcacao_de_nome_longo_liga_o_filho` — a suíte não grava um nascimento repetido |
+| N175 | fora do SDK (resíduo do F1): o `filho N` até o fio do pai aceito como nascimento | hospedeiro: `evento::testes::os_tipos`; o motor: `a_bifurcacao_de_nome_longo_liga_o_filho` — o registro cortado de um processo que o grafo não conhece; a suíte não grava um filho assim |
+| N176 | fora do SDK (resíduo do F1): o texto cortado no meio da palavra, em qualquer fronteira de caractere | hospedeiro: `auditoria::testes::o_corte_nao_deixa_palavra_pela_metade`, `a_descricao_encolhe_tambem_sem_citacao`, `a_descricao_encolhe_antes_do_motivo`, `o_detalhe_composto_guarda_a_citacao`, `o_motivo_cortado_ainda_diz_a_falta`; suíte x86, 893 de 895: `auditoria: a citacao da decisao fica inteira acima do teto`, `chaves: a declaracao se ancora so na decisao de quem declara` |
+| N177 | fora do SDK (resíduo do F1): `Falta::do_motivo` sem tirar a marca do corte | hospedeiro: `procedencia::testes::o_motivo_cortado_ainda_diz_a_falta`, `auditoria::testes::o_motivo_cortado_ainda_diz_a_falta`, `evento::testes::a_falta_de_quem_tem_descricao_longa` — a suíte não corta o motivo de procedência depois do encolhimento da descrição |
+| N178 | fora do SDK (resíduo do F1): `Grafo::executa` ignora a abreviada de outro resumo — a troca que morre no mapeamento some | hospedeiro: `grafo::testes::a_abreviada_de_outro_resumo_e_uma_troca`; o motor: `a_troca_que_morre_no_mapeamento_fica_no_grafo` — a troca da suíte que falha depois do ponto sem volta vai com a descrição inteira |
+| N179 | fora do SDK (resíduo do F1): a regra do firewall casada também pelo programa, no `security.provenance` | o motor: `o_firewall_casa_a_conexao_pelo_fio` — a suíte não barra no firewall um processo de descrição longa |
+| N180 | fora do SDK (resíduo do F1): o corte sem a marca — o texto perde palavras e nada diz | hospedeiro: os cinco de `auditoria` da N176; suíte x86, 893 de 895: `auditoria: a citacao da decisao fica inteira acima do teto`, `chaves: a declaracao se ancora so na decisao de quem declara` |
+| N181 | fora do SDK (resíduo do F1, 7c): o editor `desconhecido` aceito no registro | hospedeiro: `registro::testes::o_editor_desconhecido_e_reservado` (sigilo), `producao::testes::o_editor_desconhecido_e_recusado` (xtask) — a imagem da suíte não tem o nome |
 
 ## Medidas
 

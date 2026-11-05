@@ -9660,7 +9660,21 @@ histórico pelo modo que a cerimônia pede, e não pelo da linha que ficou; a
 N170 solta o arrendamento que a edição só renovou; a N171 tira a
 sequência — só a edição que tomou o arrendamento o solta —; e a N172
 deixa o aviso mexer de novo nas linhas da troca da senha, e só nelas.
-Todas reprovadas no x86, uma de cada vez.
+Todas reprovadas no x86, uma de cada vez. E as do resíduo do F1, depois
+do adversário dele (ver *O NSF vê o adulterado*, em [O código de fora da
+imagem](#o-código-de-fora-da-imagem)): a N173 põe de volta a saída
+antecipada sem citação — o registro sem citação não encolhe, e o anel
+corta o motivo do manifesto, o `filho` da bifurcação e o `)` da decisão;
+a N174 deixa o nascimento sobrescrever o processo que já nasceu; a N175
+aceita o `filho N` até o fio do pai como nascimento; a N176 corta o
+texto no meio da palavra; a N177 reconhece a falta sem tirar a marca do
+corte; a N178 faz o grafo ignorar a abreviada de outro resumo; a N179
+casa a regra do firewall também pelo programa; a N180 corta sem a marca;
+e a N181 aceita o editor `desconhecido` no registro. Todas reprovadas
+pelos testes do hospedeiro, uma de cada vez; a N173, a N176 e a N180
+também pela suíte do x86 — as outras mexem no que a suíte não produz. E
+a N160, rodada de novo na forma do código novo, reprova pelos testes do
+hospedeiro e pela suíte do x86.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9744,13 +9758,16 @@ Todas reprovadas no x86, uma de cada vez.
 | fora do SDK (F1): o corte antigo do detalhe composto, com o texto perdendo o fim antes de a descrição do programa encolher (N157) | "nsf: ve o codigo adulterado de quem tem descricao longa", "fluxo: a troca de imagem cujo arquivo nao se le", "fluxo: a troca de imagem cujo arquivo nao cabe no heap"; e os testes do hospedeiro do `politica::auditoria`, do `seguranca::evento` e do motor |
 | fora do SDK (F1): a falta reconhecida só pelo motivo inteiro (N158) | os testes do hospedeiro do `politica::procedencia`, do `politica::auditoria` e do `seguranca::evento` — a suíte não corta o motivo de procedência depois do encolhimento da descrição |
 | fora do SDK (#292): a leitura sem heap no `executar` dizendo `PROGRAMA_DESCONHECIDO` (N159) | "fluxo: a troca de imagem cujo arquivo nao cabe no heap" |
-| fora do SDK (F1): o grafo do NSF tomando a descrição abreviada por outro programa (N160) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `seguranca::grafo` e do motor |
+| fora do SDK (F1): o grafo do NSF tomando a descrição abreviada por outro programa (N160; rodada de novo no resíduo do F1) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `seguranca::grafo` e do motor |
 | fora do SDK (F1): o editor que sai da descrição sem o `de ?` (N161) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `politica::auditoria`, do `seguranca::evento` e do motor |
 | fora do SDK (passo 1, L1): a conferência do consumo tirada, e a corrida de volta (N162); o arrendamento da edição recusada que não sai (N164) | "terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome", "pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia", "terminal: so se solta o arrendamento que as edicoes recusadas deixaram", "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando" — a N162, também "terminal: a marca da arvore sem reserva nao solta nem passa nada" |
 | fora do SDK (passo 1, L1): o arrendamento solto sem conferir de quem é (N163); a sequência de recusadas sem conferir que cada edição começa onde a anterior deixou o campo (N167); o arrendamento que a edição só renovou, solto (N170); a sequência que não conta (N171) | "terminal: so se solta o arrendamento que as edicoes recusadas deixaram" |
 | fora do SDK (passo 1, L1): o que vem marcado sem reserva passando como a tecla da Pessoa (N165) | "terminal: a marca da arvore sem reserva nao solta nem passa nada", "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando" |
 | fora do SDK (passo 1, L1): a recusa que não fica com a edição inteira (N168) | "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando", "terminal: a marca da arvore sem reserva nao solta nem passa nada" |
 | fora do SDK (passo 1, #297): o aviso da cerimônia que mexe de novo em qualquer linha (N166); o bit do histórico pelo modo que a cerimônia pede (N169); o aviso que mexe de novo só nas linhas da troca da senha (N172) | "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login" — a N172, pela linha da senha atual da troca |
+| fora do SDK (resíduo do F1): o registro sem citação que não encolhe — a saída antecipada de volta (N173) | "nsf: ve o codigo adulterado de quem tem descricao longa", "nsf: a recusa do manifesto de quem tem descricao longa e do manifesto", "nsf: a bifurcacao de quem tem descricao longa liga o filho", "nsf: a decisao de quem tem descricao acima do teto e do processo"; e os testes do hospedeiro do `politica::auditoria` e do motor |
+| fora do SDK (resíduo do F1): o texto cortado no meio da palavra (N176), ou sem a marca do corte (N180) | "auditoria: a citacao da decisao fica inteira acima do teto", "chaves: a declaracao se ancora so na decisao de quem declara"; e os testes do hospedeiro do `politica::auditoria` |
+| fora do SDK (resíduo do F1): o nascimento que sobrescreve (N174); o `filho N` até o fio do pai aceito (N175); a falta sem tirar a marca do corte (N177); o grafo que ignora a abreviada de outro resumo (N178); o firewall casado pelo programa (N179); o editor `desconhecido` aceito (N181) | os testes do hospedeiro do `seguranca::grafo`, do `seguranca::evento`, do `politica::procedencia`, do motor, do `sigilo::registro` e do xtask — a suíte não produz um registro cortado ou repetido, um motivo de procedência cortado, uma troca abreviada, uma execução barrada de descrição longa nem um editor com o nome reservado |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
