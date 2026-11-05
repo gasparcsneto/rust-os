@@ -3659,6 +3659,26 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "interpretador::desfazer_press_pela_arvore(",
         &["kernel/src/ui.rs"],
     ),
+    // A edição da árvore no campo de um Terminal se reserva no console, se
+    // anota e se desfaz só onde a interface a entrega ao programa; e o
+    // arrendamento que ela tomou só sai pela recusa do console, quando ele a
+    // consome — e só se ainda for exatamente o que ela deixou.
+    (
+        "interpretador::reservar_edicao_da_arvore(",
+        &["kernel/src/ui.rs"],
+    ),
+    (
+        "interpretador::anotar_a_edicao_da_arvore(",
+        &["kernel/src/ui.rs"],
+    ),
+    (
+        "interpretador::desistir_da_edicao_da_arvore(",
+        &["kernel/src/ui.rs"],
+    ),
+    (
+        "coordenacao::soltar_o_da_edicao_recusada(",
+        &["kernel/src/interpretador.rs"],
+    ),
     // Quebrar o arrendamento de outro só pela operação administrativa,
     // com a prova.
     (

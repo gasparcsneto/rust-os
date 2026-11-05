@@ -41,11 +41,13 @@
 //!
 //! Menos na linha que pede o nome, uma senha ou um passo do pareamento: ali
 //! o kernel recusa a ação da árvore quando ela entra, pela regra da linha do
-//! console físico, e ela não chega aqui — salvo na corrida com o Enter da
-//! pessoa, a ação que entrou antes de a linha mudar (ver as decisões
-//! pendentes no README). Do lado de cá do pseudo-terminal, o apagar da linha
-//! e o texto são caracteres que o console não distingue dos da pessoa; o
-//! Enter do agente ele reconhece, e nessas linhas não confirma.
+//! console físico, e ela não chega aqui. E a que entrou antes de a linha
+//! mudar — o Enter da pessoa já ia a caminho — chega, mas marcada: o apagar
+//! da linha e o texto que a árvore pede vão ao pseudo-terminal com a marca
+//! da árvore ([`da_arvore`]), e o console confere a mesma regra quando os
+//! consome, contra a linha de agora — na linha da pessoa, descarta, e solta
+//! o arrendamento que a ação tomou. O Enter do agente ele reconhece, e
+//! nessas linhas não confirma. As teclas da pessoa vão sem marca.
 //!
 //! # A senha passa por aqui
 //!
@@ -79,7 +81,7 @@ use programas::{escreverln, esquecer_as_teclas, zerar};
 use protocolo::usuario::evento::origem;
 use protocolo::usuario::evento::{BOTAO_ESQUERDO, CANAL_DO_TERMINAL, Evento, janela, tipo};
 use protocolo::usuario::terminal::{
-    APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE, PROMPT, confirmar_pelo_agente,
+    CONFIRMAR_PELO_AGENTE, PROMPT, confirmar_pelo_agente, da_arvore,
 };
 use toolkit::{AreaDeTexto, Indice, Interface, LinhaDeComando};
 
@@ -207,6 +209,9 @@ impl Terminal {
                 } else {
                     origem::sessao(quem).map(confirmar_pelo_agente)
                 };
+                // O apagar da linha e o texto vão marcados: o console sabe
+                // que vieram da árvore, e confere a regra da linha da pessoa
+                // quando os consome — ver `protocolo::usuario::terminal::da_arvore`.
                 let pedido: String = self
                     .janela
                     .com_widget::<LinhaDeComando, _>(LINHA, |l| l.tirar_pedido())
@@ -215,14 +220,13 @@ impl Terminal {
                     .filter_map(|c| {
                         if c == CONFIRMAR_PELO_AGENTE {
                             enter
-                        } else if c == APAGAR_A_LINHA || c.is_ascii_graphic() || c == ' ' {
-                            Some(c)
                         } else {
                             // Do pedido da árvore só se digita texto: um `\n`
                             // ou o Enter de outra sessão dentro de um valor
                             // confirmariam a linha em nome de outro. O kernel
-                            // já recusa o valor com eles; aqui, de novo.
-                            None
+                            // já recusa o valor com eles; aqui, de novo — a
+                            // marca não os tem.
+                            da_arvore(c)
                         }
                     })
                     .collect();

@@ -685,6 +685,66 @@ pub mod terminal {
             None
         }
     }
+
+    /// Onde começam os caracteres marcados da árvore — ver [`da_arvore`].
+    const BASE_DA_ARVORE: u32 = 0xF500;
+
+    /// Um caractere que o pedido da árvore pode ter: o apagar da linha, ou
+    /// o que uma pessoa digitaria — uma letra, um número, um sinal, o
+    /// espaço.
+    const fn do_pedido(n: u32) -> bool {
+        n == APAGAR_A_LINHA as u32 || (n >= 0x20 && n <= 0x7E)
+    }
+
+    /// O caractere `c` do pedido da árvore — o apagar da linha que começa
+    /// um `set_value` ou um `cancel`, ou uma letra do texto do `set_value`
+    /// —, marcado: é o que o Terminal digita no pseudo-terminal no lugar
+    /// dele. `None` para o que o pedido não tem: o Enter da pessoa, o de um
+    /// agente, um controle — o Terminal não os digita pela árvore.
+    ///
+    /// # Por que marcar
+    ///
+    /// Porque o que o Terminal digita chega ao console pela fila do
+    /// pseudo-terminal, a mesma das teclas da pessoa, e o console o consome
+    /// depois de a ação entrar no kernel — com o programa e a fila no meio.
+    /// O Enter da pessoa que já ia a caminho quando a ação entrou pode, nesse
+    /// meio-tempo, fazer a linha pedir o nome, uma senha ou um passo do
+    /// pareamento: a regra da linha da pessoa, conferida contra a linha de
+    /// antes, deixava o texto da árvore entrar na linha seguinte. Marcado,
+    /// o console sabe que ele veio da árvore, e confere a regra de novo
+    /// quando o consome, contra a linha de agora.
+    ///
+    /// # A marca não é autoridade
+    ///
+    /// Ela só torna as coisas mais estritas para quem a escreve: o que vem
+    /// marcado passa pela regra da linha da pessoa; o que vem sem marca
+    /// chega ao console como as teclas da pessoa, como sempre. O que ela
+    /// faz a mais é apontar a edição que o kernel reservou no console quando
+    /// a ação entrou — e a reserva, não a marca, diz que arrendamento soltar
+    /// se o console a recusar. O que vem marcado sem reserva não solta nada.
+    ///
+    /// Da área de uso privado do Unicode, como o Enter de um agente, e de
+    /// U+F515 a U+F57E: nenhum teclado os produz, e o valor de um
+    /// `set_value` que os trouxesse é recusado — no campo do Terminal, o
+    /// kernel só aceita o que uma pessoa digitaria.
+    pub const fn da_arvore(c: char) -> Option<char> {
+        let n = c as u32;
+        if do_pedido(n) {
+            char::from_u32(BASE_DA_ARVORE + n)
+        } else {
+            None
+        }
+    }
+
+    /// O caractere que `c` traz, se `c` é um caractere marcado da árvore —
+    /// o inverso de [`da_arvore`].
+    pub const fn veio_da_arvore(c: char) -> Option<char> {
+        let n = c as u32;
+        if n < BASE_DA_ARVORE || !do_pedido(n - BASE_DA_ARVORE) {
+            return None;
+        }
+        char::from_u32(n - BASE_DA_ARVORE)
+    }
 }
 
 pub mod descricao {
@@ -1023,10 +1083,73 @@ mod testes {
         );
         assert_eq!(agente_que_confirmou('\u{F5FF}'), None);
         assert_eq!(agente_que_confirmou('\u{F700}'), None);
+        for c in "\u{F515}\u{F520}\u{F57E}".chars() {
+            assert_eq!(agente_que_confirmou(c), None);
+        }
         use super::evento::origem;
         assert_eq!(origem::sessao(origem::agente(3)), Some(3));
         assert_eq!(origem::sessao(origem::PESSOA), None);
         assert_eq!(origem::sessao(256), None);
+    }
+
+    /// A marca da árvore: o pedido inteiro vai e volta — o apagar, cada
+    /// letra que uma pessoa digitaria e o espaço —; o que o pedido não tem
+    /// não se marca; e só um caractere marcado se desmarca, nunca um de
+    /// verdade, o Enter de um agente ou uma tecla de função.
+    #[test]
+    fn a_marca_da_arvore_vai_e_volta() {
+        use super::terminal::{
+            APAGAR_A_LINHA, CONFIRMAR_PELO_AGENTE, confirmar_pelo_agente, da_arvore, veio_da_arvore,
+        };
+        let pedido = core::iter::once(APAGAR_A_LINHA).chain((0x20u8..=0x7E).map(char::from));
+        let mut marcados = alloc::vec::Vec::new();
+        for c in pedido {
+            let m = da_arvore(c).expect("o pedido da arvore se marca");
+            assert_ne!(m, c);
+            assert_eq!(veio_da_arvore(m), Some(c));
+            assert_eq!(
+                veio_da_arvore(c),
+                None,
+                "um caractere de verdade nao e marcado"
+            );
+            marcados.push(m);
+        }
+        // Um marcado para cada um: nenhuma colisão.
+        let mut unicos = marcados.clone();
+        unicos.sort();
+        unicos.dedup();
+        assert_eq!(unicos.len(), marcados.len());
+        assert_eq!(da_arvore(APAGAR_A_LINHA), Some('\u{F515}'));
+        assert_eq!(da_arvore('~'), Some('\u{F57E}'));
+        for c in [
+            '\n',
+            '\u{8}',
+            '\t',
+            '\u{7F}',
+            '\u{14}',
+            'é',
+            CONFIRMAR_PELO_AGENTE,
+            confirmar_pelo_agente(0),
+            '\u{F515}',
+        ] {
+            assert_eq!(da_arvore(c), None, "{c:?} nao e do pedido da arvore");
+        }
+        for c in [
+            '\u{F500}',
+            '\u{F50A}',
+            '\u{F514}',
+            '\u{F516}',
+            '\u{F51F}',
+            '\u{F57F}',
+            '\u{F580}',
+            '\u{F4FF}',
+            confirmar_pelo_agente(0x15),
+            confirmar_pelo_agente(0x20),
+            '\u{F704}',
+            CONFIRMAR_PELO_AGENTE,
+        ] {
+            assert_eq!(veio_da_arvore(c), None, "{c:?} nao e um marcado da arvore");
+        }
     }
 
     #[test]

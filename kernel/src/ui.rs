@@ -462,7 +462,11 @@ pub enum Efeito {
 /// E a linha que pede o nome, uma senha ou um passo do pareamento: ela não
 /// se edita nem se esvazia pela árvore, e um agente não a confirma — no
 /// console físico, e no campo da janela de um Terminal, que é a linha do
-/// console dele. Ver [`crate::interpretador::pode_editar_pela_arvore`].
+/// console dele. Ver [`crate::interpretador::pode_editar_pela_arvore`]. No
+/// Terminal, a regra vale quando a ação entra e de novo quando o console
+/// consome o que o programa digitou, marcado: a edição que ele recusa ali
+/// solta o arrendamento que tomou aqui — ver
+/// [`crate::interpretador::reservar_edicao_da_arvore`].
 pub fn agir(id: u32, acao: Acao, valor: Option<&str>, origem: Origem) -> Result<Efeito, Recusada> {
     // Sem comando por trás — a tecla de função, o clique na barra —, quem
     // age é a origem: o agente da sessão, ou a pessoa no console físico.
@@ -553,13 +557,14 @@ fn executar(
             _ => {}
         }
         // A janela de um Terminal: o campo é a linha do console dele, e o
-        // que se pede nele o programa digita no pseudo-terminal, onde o
-        // console só vê caracteres. As regras da linha do físico valem aqui
-        // inteiras, as mesmas, do interpretador: a da linha da pessoa, e a
-        // do que se digita — o valor de um `set_value` só com o que uma
-        // pessoa digitaria, sem o Enter dela nem o de outra sessão dentro.
-        // Conferidas quando a ação entra, e antes da conta, pelo motivo de
-        // lá: a recusa não arrenda o campo.
+        // que se pede nele o programa digita no pseudo-terminal. As regras
+        // da linha do físico valem aqui inteiras, as mesmas, do
+        // interpretador: a da linha da pessoa, e a do que se digita — o
+        // valor de um `set_value` só com o que uma pessoa digitaria, sem o
+        // Enter dela nem o de outra sessão dentro. Conferidas quando a ação
+        // entra, e antes da conta, pelo motivo de lá: a recusa não arrenda o
+        // campo. E a da linha da pessoa, de novo quando o console consome o
+        // que o programa digitou: ver a reserva da edição, abaixo.
         let console = console_do_campo(id);
         if let Some(console) = console {
             match (acao, valor) {
@@ -589,13 +594,36 @@ fn executar(
             }
             _ => None,
         };
+        // A edição que o Terminal vai digitar por este `set_value` ou
+        // `cancel`: reservada no console, que a confere de novo quando a
+        // consome — o Enter da Pessoa que já ia a caminho pode ter mudado a
+        // linha no meio —, com o que a conta da coordenação fez no campo,
+        // para soltar o arrendamento que ela tomou se o console a recusar.
+        // Ver `interpretador::reservar_edicao_da_arvore`. Antes da conta,
+        // como o Enter: as reservas cheias não arrendam o campo.
+        let edicao = match (console, acao) {
+            (Some(console), Acao::DefinirValor | Acao::Cancelar) => Some((
+                console,
+                crate::interpretador::reservar_edicao_da_arvore(console, id, origem, acao)?,
+            )),
+            _ => None,
+        };
         let r = match acao {
-            Acao::Confirmar => confirmar(),
-            _ => editar(),
+            Acao::Confirmar => confirmar().map(|_| ()),
+            _ => crate::coordenacao::editar_com_rastro(&recurso, titular, esperada, "ui.act")
+                .map_err(da_coordenacao)
+                .map(|rastro| {
+                    if let Some((console, numero)) = edicao {
+                        crate::interpretador::anotar_a_edicao_da_arvore(console, numero, rastro);
+                    }
+                }),
         }
         .and_then(|_| agir_no_campo(id, do_processo, acao, valor, origem).map_err(Into::into));
         if let (Err(_), Some((console, amarrada))) = (&r, enter) {
             crate::interpretador::desistir_do_enter_do_agente(console, amarrada);
+        }
+        if let (Err(_), Some((console, numero))) = (&r, edicao) {
+            crate::interpretador::desistir_da_edicao_da_arvore(console, numero);
         }
         return r;
     }

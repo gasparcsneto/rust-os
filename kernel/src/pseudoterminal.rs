@@ -356,11 +356,12 @@ pub fn ler(chave: Chave, fio: u64, destino: &mut [u8]) -> Option<usize> {
 /// # O que não é texto é consumido e descartado
 ///
 /// Só passa o que mexe na linha do interpretador: texto, a quebra de linha,
-/// o apagar, o apagar da linha inteira e o Enter de um agente — ver
-/// `protocolo::usuario::terminal`. As teclas de função e o clique são do
-/// console físico; um processo que os escrevesse apertaria botões da barra
-/// por um canal que só deveria digitar. O resto conta como aceito, porque
-/// recusá-lo deixaria quem escreve repetindo para sempre o mesmo caractere.
+/// o apagar, o apagar da linha inteira, o Enter de um agente e o que o
+/// Terminal digita pela árvore, marcado — ver `protocolo::usuario::terminal`.
+/// As teclas de função e o clique são do console físico; um processo que os
+/// escrevesse apertaria botões da barra por um canal que só deveria digitar.
+/// O resto conta como aceito, porque recusá-lo deixaria quem escreve
+/// repetindo para sempre o mesmo caractere.
 pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
     if !confere(chave, fio) {
         return None;
@@ -384,10 +385,11 @@ pub fn escrever(chave: Chave, fio: u64, texto: &str) -> Option<usize> {
 
 /// Um caractere que o pseudo-terminal deixa chegar ao interpretador.
 fn e_digitavel(c: char) -> bool {
-    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou};
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou, veio_da_arvore};
     c.is_ascii_graphic()
         || matches!(c, ' ' | '\n' | '\u{8}' | APAGAR_A_LINHA)
         || agente_que_confirmou(c).is_some()
+        || veio_da_arvore(c).is_some()
 }
 
 /// O próximo caractere digitado em algum pseudo-terminal, com o console de

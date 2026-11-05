@@ -28,6 +28,10 @@
 //! - **Confirmar** pede o arrendamento: quem confirma é quem editou, ou quem
 //!   tomou com `ui.claim`. Confirmado, o arrendamento é solto: a linha volta
 //!   vazia e livre.
+//! - Uma edição recusada não arrenda o campo. A que o console de um Terminal
+//!   recusa depois de ela entrar — a regra da linha da pessoa, conferida de
+//!   novo quando o que o Terminal digitou chega a ele — solta o arrendamento
+//!   que ela mesma tomou, e só ele: ver [`soltar_o_da_edicao_recusada`].
 //!
 //! Pessoa e agente seguem a mesma regra, sem prioridade entre eles; e o
 //! `sistema` não tem passe: quebrar o arrendamento de outro é
@@ -316,10 +320,42 @@ pub fn editar(
     esperada: Option<u64>,
     metodo: &str,
 ) -> Result<u64, Codigo> {
+    editar_com_rastro(recurso, titular, esperada, metodo).map(|r| r.depois.versao)
+}
+
+/// O que uma edição fez num recurso: o estado dele logo antes e logo depois
+/// dela, lidos na mesma seção da tabela que a fez — a versão e o
+/// arrendamento inteiro, com o desde, o vencimento e o prazo. É o que
+/// identifica o arrendamento que **ela** deixou: ver
+/// [`soltar_o_da_edicao_recusada`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rastro {
+    pub antes: Estado,
+    pub depois: Estado,
+}
+
+impl Rastro {
+    /// A edição tomou o arrendamento: o recurso estava livre, e ficou com o
+    /// de quem editou — o implícito.
+    pub fn tomou(&self) -> bool {
+        self.antes.arrendamento.is_none() && self.depois.arrendamento.is_some()
+    }
+}
+
+/// [`editar`], devolvendo o [`Rastro`] da edição em vez da versão nova —
+/// para quem precisa saber, depois, se o arrendamento do recurso ainda é o
+/// que ela deixou: a interface, que entrega a edição ao Terminal de um
+/// console, e o console, que a confere de novo quando a consome.
+pub fn editar_com_rastro(
+    recurso: &str,
+    titular: Option<Titular>,
+    esperada: Option<u64>,
+    metodo: &str,
+) -> Result<Rastro, Codigo> {
     let agora = crate::tempo::uptime_ms();
     let Some(titular) = titular else {
-        let livre = estado(recurso).arrendamento.is_none();
-        if !livre {
+        let estado = estado(recurso);
+        if estado.arrendamento.is_some() {
             gravar(
                 None,
                 metodo,
@@ -329,12 +365,15 @@ pub fn editar(
             );
             return Err(Codigo::Conflict);
         }
-        return Ok(estado(recurso).versao);
+        return Ok(Rastro {
+            antes: estado,
+            depois: estado,
+        });
     };
     let (implicito, vencido, r) = com_tabela(|t| {
         let mut vencidos = None;
-        let antes = t.estado(recurso, agora).arrendamento;
-        let implicito = antes.is_none();
+        let antes = t.estado(recurso, agora);
+        let implicito = antes.arrendamento.is_none();
         if implicito {
             let (r, v) = t.tomar(recurso, titular, agora, PRAZO_IMPLICITO_MS);
             vencidos = v;
@@ -348,11 +387,15 @@ pub fn editar(
             // tomar: a recusa não muda nada.
             let _ = t.soltar(recurso, titular, agora);
         }
+        let r = r.map(|_| Rastro {
+            antes,
+            depois: t.estado(recurso, agora),
+        });
         (implicito && r.is_ok(), vencidos.or(v), r)
     });
     gravar_vencido(recurso, vencido);
     match r {
-        Ok(versao) => {
+        Ok(rastro) => {
             if implicito {
                 gravar(
                     Some(&titular),
@@ -362,7 +405,7 @@ pub fn editar(
                     "arrendamento implicito pela edicao",
                 );
             }
-            Ok(versao)
+            Ok(rastro)
         }
         Err(recusa) => {
             gravar(
@@ -375,6 +418,53 @@ pub fn editar(
             Err(recusa.codigo())
         }
     }
+}
+
+/// O detalhe do arrendamento que [`soltar_o_da_edicao_recusada`] solta, na
+/// auditoria.
+pub const SOLTO_PELA_RECUSA: &str =
+    "arrendamento implicito solto: a edicao pela arvore foi recusada na linha da pessoa";
+
+/// Solta o arrendamento que uma edição recusada deixou — a do campo de um
+/// Terminal que o console dele recusou, pela regra da linha da pessoa,
+/// quando a consumiu: ver `crate::interpretador` —, se o recurso ainda está
+/// **exatamente** como ela o deixou: `depois`, o estado lido na seção da
+/// tabela que a fez — o mesmo titular, desde o mesmo instante, com o mesmo
+/// vencimento e o mesmo prazo, e na mesma versão.
+///
+/// Qualquer coisa depois dela muda um desses: outra edição, a versão; um
+/// `ui.claim` do mesmo titular, o vencimento e o prazo; o arrendamento
+/// solto e tomado de novo, o desde; o de outro titular, o titular. E aí
+/// nada se solta: o arrendamento que outra ação renovou não é mais só o
+/// dela, e soltar o de outro é preempção — que não há. Também não se solta
+/// o que venceu: o coletor o grava, como sempre.
+///
+/// Grava em nome de quem o tinha, como o arrendamento implícito da edição
+/// foi gravado ao ser tomado — [`SOLTO_PELA_RECUSA`]. Devolve se soltou.
+pub fn soltar_o_da_edicao_recusada(recurso: &str, depois: Estado) -> bool {
+    let Some(deixado) = depois.arrendamento else {
+        return false;
+    };
+    let agora = crate::tempo::uptime_ms();
+    let (saiu, vencido) = com_tabela(|t| {
+        if t.estado(recurso, agora) != depois {
+            return (None, None);
+        }
+        let (r, v) = t.soltar(recurso, deixado.titular, agora);
+        (r.ok(), v)
+    });
+    gravar_vencido(recurso, vencido);
+    let Some(a) = saiu else {
+        return false;
+    };
+    gravar(
+        Some(&a.titular),
+        "ui.release",
+        recurso,
+        Codigo::Allow,
+        SOLTO_PELA_RECUSA,
+    );
+    true
 }
 
 /// Uma confirmação em nome de `titular`: pede o arrendamento, e confere a

@@ -69,12 +69,18 @@
 //! # A linha da pessoa, no físico e em cada Terminal
 //!
 //! A árvore alcança também a linha de cada Terminal: o campo da janela
-//! dele, que o programa digita no pseudo-terminal. Ali o console só vê
-//! caracteres, um a um, sem saber se vieram de uma tecla ou da árvore. Por
-//! isso a regra da linha que pede o nome, uma senha ou um passo do
-//! pareamento — [`pode_editar_pela_arvore`] e [`pode_confirmar_pela_arvore`]
-//! — vale quando a ação **entra**, em [`crate::ui`], com quem pediu
-//! conhecido: a mesma para as duas linhas, e antes do arrendamento do campo.
+//! dele, que o programa digita no pseudo-terminal. A regra da linha que pede
+//! o nome, uma senha ou um passo do pareamento — [`pode_editar_pela_arvore`]
+//! e [`pode_confirmar_pela_arvore`] — vale quando a ação **entra**, em
+//! [`crate::ui`], com quem pediu conhecido: a mesma para as duas linhas, e
+//! antes do arrendamento do campo. E vale de novo onde o caractere é
+//! consumido: entre a entrada e o console há o programa e a fila do
+//! pseudo-terminal, e o Enter da Pessoa que já ia a caminho pode, nesse
+//! meio-tempo, mudar a linha. O Terminal digita marcado o que veio da
+//! árvore, a interface reserva no console a edição que entregou, e o console
+//! confere a regra contra a linha de agora — ver [`pela_arvore`]. Um Enter
+//! de agente, o console reconhece pelo caractere, e só vale o que a árvore
+//! pediu ([`pedir_enter_do_agente`]).
 
 // Em `modo-teste` o laço do agente é trocado pelo executor da suíte, e o
 // interpretador — que é uma tarefa desse laço — não é lançado. O resto do
@@ -265,6 +271,56 @@ struct Estado {
     /// Terminal deste console, e de quem: o registro do `logout` diz quem
     /// fechou. Ver [`press_pela_arvore`] e [`quem_fechou`].
     press_pela_arvore: Option<PressAnotado>,
+    /// As edições da árvore — o `set_value` e o `cancel` no campo da janela
+    /// do Terminal deste console — que a interface entregou ao programa e
+    /// que o pseudo-terminal ainda não trouxe: quem pediu, e o que cada uma
+    /// fez no arrendamento do campo. Ver [`reservar_edicao_da_arvore`].
+    edicoes: [Option<EdicaoPedida>; EDICOES_PEDIDAS],
+    /// A edição da árvore que o console está consumindo agora: o que veio
+    /// marcado desde o último apagar marcado. Ver [`pela_arvore`].
+    na_arvore: Option<EmCurso>,
+    /// O estado do campo deixado pela última edição de uma sequência de
+    /// edições da árvore recusadas no consumo, que começou tomando o
+    /// arrendamento dele: a seguinte que começar dali é da mesma sequência.
+    /// Ver [`pela_arvore`].
+    recusadas: Option<politica::arrendamento::Estado>,
+}
+
+/// Quantas edições da árvore um console guarda à espera do pseudo-terminal.
+/// Com todas ocupadas, a seguinte é recusada quando entra, antes da conta
+/// da coordenação: ver [`reservar_edicao_da_arvore`].
+const EDICOES_PEDIDAS: usize = 8;
+
+/// A recusa de uma edição da árvore com as reservas do console cheias.
+pub const EDICOES_DEMAIS: &str = "o console ja espera edicoes da arvore demais";
+
+/// Uma edição que a interface entregou ao Terminal de um console — ver
+/// [`reservar_edicao_da_arvore`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EdicaoPedida {
+    /// O número da reserva: um por edição, desde o boot. É a ordem em que o
+    /// console as espera, e o que [`anotar_a_edicao_da_arvore`] e
+    /// [`desistir_da_edicao_da_arvore`] procuram.
+    numero: u64,
+    /// O campo da janela do Terminal — o elemento da árvore —, quem pediu,
+    /// e o quê: o recurso do arrendamento, e o log da recusa.
+    campo: u32,
+    origem: Origem,
+    acao: crate::ui::Acao,
+    /// O que a conta da coordenação fez no campo — anotado depois dela;
+    /// `None` até lá.
+    rastro: Option<crate::coordenacao::Rastro>,
+}
+
+/// O que o console está consumindo da árvore — ver [`pela_arvore`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EmCurso {
+    /// A reserva que o apagar marcado apontou; `None` para o que veio
+    /// marcado sem reserva.
+    pedida: Option<EdicaoPedida>,
+    /// A regra da linha da pessoa já recusou um caractere dela: o resto é
+    /// descartado também, mesmo que a linha volte a pedir um comando.
+    recusada: bool,
 }
 
 /// Uma anotação de [`press_pela_arvore`]: quem apertou, e um número que é
@@ -297,7 +353,18 @@ impl Estado {
         engolindo: false,
         enter_na_janela: false,
         press_pela_arvore: None,
+        edicoes: [None; EDICOES_PEDIDAS],
+        na_arvore: None,
+        recusadas: None,
     };
+
+    /// Esquece as edições da árvore: as reservadas, a que estava sendo
+    /// consumida e a sequência das recusadas. O console abriu ou fechou.
+    fn largar_edicoes(&mut self) {
+        self.edicoes = [None; EDICOES_PEDIDAS];
+        self.na_arvore = None;
+        self.recusadas = None;
+    }
 
     /// Esquece a troca da própria senha em curso, e apaga as senhas que
     /// ela guardava — os bytes, e não só os tamanhos.
@@ -620,6 +687,7 @@ pub fn abrir_console(console: Console) {
         e.engolindo = false;
         e.enter_na_janela = false;
         e.press_pela_arvore = None;
+        e.largar_edicoes();
         saidaln!(
             console,
             "Duke, {}. Ninguem entrou: `login` para entrar, `ajuda` para saber mais.",
@@ -759,6 +827,7 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.engolindo = false;
         e.enter_na_janela = false;
         e.press_pela_arvore = None;
+        e.largar_edicoes();
         sessao
     })
     .zip(indice(console)) else {
@@ -801,7 +870,7 @@ fn consumir_do_teclado(c: char) {
 
 /// O que um caractere faz num console.
 pub fn tratar(console: Console, c: char) {
-    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou};
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, agente_que_confirmou, veio_da_arvore};
     // Um clique e as teclas de função são do console físico — os
     // pseudo-terminais não os deixam passar — e acionam a barra pelo mesmo
     // caminho do `press` do agente ([`crate::ui::agir`]), depois da decisão
@@ -833,6 +902,16 @@ pub fn tratar(console: Console, c: char) {
     if !com_estado(console, |e| e.aberto).unwrap_or(false) {
         return;
     }
+    // O que o Terminal digitou pela árvore vem marcado: a regra da linha da
+    // pessoa é conferida aqui, contra a linha de agora — ver [`pela_arvore`].
+    if let Some(original) = veio_da_arvore(c) {
+        pela_arvore(console, original);
+        return;
+    }
+    // O que vem sem marca é a tecla da Pessoa — ou o que quem escreve no
+    // pseudo-terminal digitou sem marcar, que chega como ela —, e acaba a
+    // edição da árvore que o console consumia.
+    com_estado(console, |e| e.na_arvore = None);
     // O resto de uma senha cuja cerimônia acabou no meio: descartado até o
     // Enter, antes da coordenação — o que se engole não arrenda a linha,
     // não aumenta a versão dela e não é recusado como `CONFLICT`.
@@ -860,9 +939,11 @@ pub fn tratar(console: Console, c: char) {
                 }
             });
         }
-        // A linha inteira, e o Enter de um agente: o que o Terminal escreve
-        // pelo pseudo-terminal quando a ação vem da árvore — o `cancel` e o
-        // `confirm` da linha de comando dele. Ver `protocolo::usuario::terminal`.
+        // A linha inteira, sem marca: como o Ctrl-U da pessoa — nenhum
+        // teclado o produz, e o Terminal digita o da árvore marcado (ver
+        // [`pela_arvore`]); sem marca, é o que quem escreve no
+        // pseudo-terminal digitou por conta própria, e chega como a tecla da
+        // pessoa. Ver `protocolo::usuario::terminal`.
         APAGAR_A_LINHA => {
             let _ = definir_em(console, "");
         }
@@ -1249,9 +1330,11 @@ fn definir_em(console: Console, valor: &str) -> Result<(), &'static str> {
     if !valor.chars().all(aceito) {
         return Err(CARACTERE_QUE_NAO_SE_DIGITA);
     }
-    // Esvaziar a linha do login é o `APAGAR_A_LINHA` do Terminal, e vale
-    // aqui; escrever nela, não. Quem pede pela árvore já passou, antes, por
-    // uma regra mais estrita — nem esvaziar: ver [`pode_editar_pela_arvore`].
+    // Esvaziar a linha do login é o `APAGAR_A_LINHA` sem marca — o Ctrl-U de
+    // quem digita —, e vale aqui; escrever nela, não. O que vem da árvore
+    // passa por uma regra mais estrita — nem esvaziar —: na entrada, ver
+    // [`pode_editar_pela_arvore`]; e, num Terminal, de novo quando o console
+    // consome o que o programa digitou, marcado — ver [`pela_arvore`].
     if modo != Modo::Comando && !valor.is_empty() {
         return Err(LINHA_DA_PESSOA);
     }
@@ -1325,7 +1408,13 @@ pub const CONSOLE_OCUPADO: &str = "o console espera um comando que ainda nao res
 /// de ser a da senha até o Enter da Pessoa, e a árvore não a edita nem a
 /// confirma por um agente nesse meio-tempo.
 fn pede_a_pessoa(console: Console) -> bool {
-    com_estado(console, |e| e.modo != Modo::Comando || e.engolindo).unwrap_or(false)
+    com_estado(console, |e| pede_a_pessoa_em(e)).unwrap_or(false)
+}
+
+/// [`pede_a_pessoa`], com o estado na mão: a mesma regra, para quem a
+/// confere na seção que edita a linha — ver [`pela_arvore`].
+fn pede_a_pessoa_em(e: &Estado) -> bool {
+    e.modo != Modo::Comando || e.engolindo
 }
 
 /// A regra da linha da pessoa, para quem a **edita** pela árvore semântica
@@ -1337,10 +1426,11 @@ fn pede_a_pessoa(console: Console) -> bool {
 ///
 /// Uma regra só, para as duas linhas que a árvore alcança: a do físico, por
 /// [`pode_definir`], e a de cada Terminal, que a árvore mostra como o campo
-/// da janela dele e que o programa digita no pseudo-terminal. O console de
-/// um Terminal recebe só caracteres, sem saber de onde vieram — por isso a
-/// regra vale quando a ação entra, em `crate::ui`, e não quando ela chega
-/// aqui.
+/// da janela dele e que o programa digita no pseudo-terminal. Ela vale
+/// quando a ação entra, em `crate::ui` — com quem pediu conhecido, e antes
+/// do arrendamento do campo —; e, num Terminal, de novo quando o console
+/// consome o que o programa digitou, marcado, contra a linha de agora: ver
+/// [`pela_arvore`].
 pub fn pode_editar_pela_arvore(console: Console) -> Result<(), &'static str> {
     if pede_a_pessoa(console) {
         return Err(LINHA_DA_PESSOA);
@@ -1433,6 +1523,259 @@ pub fn desistir_do_enter_do_agente(console: Console, amarrada: Amarrada) {
             *v = None;
         }
     });
+}
+
+/// O número da próxima reserva de [`reservar_edicao_da_arvore`]: uma por
+/// edição, desde o boot.
+static EDICOES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Reserva no console a edição que a interface vai entregar ao Terminal
+/// dele — o `set_value` ou o `cancel` de `origem` no `campo` da janela —, e
+/// devolve o número dela.
+///
+/// O programa digita a edição no pseudo-terminal marcada (ver
+/// `protocolo::usuario::terminal::da_arvore`), e o console a consome depois
+/// — com o Enter da Pessoa que já ia a caminho, talvez, na frente. Ali, em
+/// [`pela_arvore`], ela é conferida de novo pela regra da linha da pessoa,
+/// e a reserva diz o que a edição fez no arrendamento do campo: na recusa,
+/// o que ela mesma tomou sai.
+///
+/// Quem chama reserva antes da conta da coordenação — as reservas cheias
+/// recusam a ação sem arrendar o campo —, anota o que a conta fez com
+/// [`anotar_a_edicao_da_arvore`], e desiste com
+/// [`desistir_da_edicao_da_arvore`] se a edição não chega ao programa.
+///
+/// As reservas são a ordem em que o console espera as edições: o apagar
+/// marcado que começa cada uma toma a mais velha. Escrita por conta
+/// própria, a marca de quem tem o pseudo-terminal toma, no máximo, a
+/// reserva de uma edição que a interface entregou a ele — a que ele mesmo
+/// digitaria. Sem reserva, a marca não solta nada.
+pub fn reservar_edicao_da_arvore(
+    console: Console,
+    campo: u32,
+    origem: Origem,
+    acao: crate::ui::Acao,
+) -> Result<u64, &'static str> {
+    let numero = EDICOES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    com_estado(console, |e| {
+        let vaga = e
+            .edicoes
+            .iter_mut()
+            .find(|v| v.is_none())
+            .ok_or(EDICOES_DEMAIS)?;
+        *vaga = Some(EdicaoPedida {
+            numero,
+            campo,
+            origem,
+            acao,
+            rastro: None,
+        });
+        Ok(numero)
+    })
+    .unwrap_or(Err("console desconhecido"))
+}
+
+/// Anota na reserva `numero` o que a conta da coordenação fez no campo —
+/// ver [`crate::coordenacao::Rastro`]. Uma reserva que o console já tomou,
+/// ou que se foi com ele, fica como está.
+pub fn anotar_a_edicao_da_arvore(
+    console: Console,
+    numero: u64,
+    rastro: crate::coordenacao::Rastro,
+) {
+    com_estado(console, |e| {
+        if let Some(p) = e.edicoes.iter_mut().flatten().find(|p| p.numero == numero) {
+            p.rastro = Some(rastro);
+        }
+    });
+}
+
+/// Desfaz um [`reservar_edicao_da_arvore`]: a edição não chegou ao
+/// programa — a conta da coordenação a recusou, ou o aviso não foi entregue.
+pub fn desistir_da_edicao_da_arvore(console: Console, numero: u64) {
+    com_estado(console, |e| {
+        for v in e.edicoes.iter_mut() {
+            if v.is_some_and(|p| p.numero == numero) {
+                *v = None;
+            }
+        }
+    });
+}
+
+/// Tira das reservas do console a mais velha — a da edição que o apagar
+/// marcado começa.
+fn tirar_a_reserva(e: &mut Estado) -> Option<EdicaoPedida> {
+    let vaga = e
+        .edicoes
+        .iter_mut()
+        .filter(|v| v.is_some())
+        .min_by_key(|v| v.as_ref().map_or(u64::MAX, |p| p.numero))?;
+    vaga.take()
+}
+
+/// O que um caractere marcado da árvore fez no console — ver
+/// [`pela_arvore`].
+enum DaArvore {
+    /// Entrou na linha, como entraria sem marca numa linha de comando.
+    Editado,
+    /// Não coube: a linha passaria do teto.
+    NaoCoube,
+    /// Descartado: a edição já tinha sido recusada.
+    Descartado,
+    /// Recusado agora, pela regra da linha da pessoa — a primeira recusa da
+    /// edição —: quem a pediu, o quê e em que campo, se ela tinha reserva; e
+    /// o estado do campo cujo arrendamento sai, se é o de edições recusadas.
+    Recusado {
+        quem: Option<(Origem, crate::ui::Acao, u32)>,
+        soltar: Option<politica::arrendamento::Estado>,
+    },
+}
+
+/// Um caractere que o Terminal digitou pela árvore — o apagar da linha que
+/// começa um `set_value` ou um `cancel`, ou uma letra do texto —, já sem a
+/// marca (ver `protocolo::usuario::terminal::da_arvore`).
+///
+/// # A regra, onde o caractere é consumido
+///
+/// A interface confere a regra da linha da pessoa quando a ação entra
+/// ([`pode_editar_pela_arvore`]) e recusa cedo, com o motivo, sem arrendar o
+/// campo. Mas entre a entrada e o console há o programa e a fila do
+/// pseudo-terminal, e o Enter da Pessoa que já ia a caminho pode, nesse
+/// meio-tempo, fazer a linha pedir o nome, uma senha ou um passo do
+/// pareamento. Aqui a mesma regra ([`pede_a_pessoa`]) é conferida contra a
+/// linha de agora, na mesma seção que a edita: na linha da pessoa, o que
+/// veio da árvore é descartado — sem eco, fora da linha, da árvore e do
+/// histórico, e sem passar pela coordenação. E a edição inteira: recusada
+/// uma letra, as seguintes também, mesmo que a linha volte a pedir um
+/// comando no meio — o resto dela não vai à frente do que a Pessoa digitar.
+/// A recusa vai ao log, uma linha por edição e sem o texto: a linha pode
+/// ser a de uma senha.
+///
+/// # O arrendamento que ela tomou
+///
+/// Uma ação recusada não arrenda o campo. Na primeira recusa, o console
+/// solta o arrendamento que a própria edição tomou quando entrou — e só ele:
+/// se depois dela o campo mudou por qualquer outro caminho — outro titular o
+/// arrendou, um `ui.claim` o renovou, uma tecla o editou —, nada se solta
+/// ([`crate::coordenacao::soltar_o_da_edicao_recusada`]). Uma sequência de
+/// edições da árvore em voo, todas recusadas, conta como uma: o
+/// arrendamento que a primeira tomou e as seguintes só renovaram sai na
+/// recusa da última — cada uma começou exatamente onde a anterior deixou o
+/// campo, conferido pelo estado inteiro dele, e nada mais o mexeu.
+///
+/// # A marca não é autoridade
+///
+/// Ela só aponta a edição que a interface reservou, a mais velha do console
+/// ([`reservar_edicao_da_arvore`]): o apagar marcado começa uma edição e toma
+/// a reserva; as letras marcadas seguintes são dela, até o que vier sem
+/// marca. O que vem marcado sem reserva passa pela mesma regra e não solta
+/// nada; o que vem sem marca chega como a tecla da Pessoa, como sempre —
+/// quem pode ser "o Terminal" é a decisão pendente do nome `terminal`. No
+/// console físico não há o que marcar: a árvore edita a linha dele direto,
+/// em [`definir`], e o que chegasse marcado é descartado.
+fn pela_arvore(console: Console, c: char) {
+    use protocolo::usuario::terminal::APAGAR_A_LINHA;
+    if console == Console::Fisico {
+        return;
+    }
+    let Some(feito) = com_estado(console, |e| {
+        if c == APAGAR_A_LINHA || e.na_arvore.is_none() {
+            let pedida = if c == APAGAR_A_LINHA {
+                tirar_a_reserva(e)
+            } else {
+                None
+            };
+            e.na_arvore = Some(EmCurso {
+                pedida,
+                recusada: false,
+            });
+        }
+        let pede = pede_a_pessoa_em(e);
+        let recusadas = e.recusadas;
+        let Some(em_curso) = e.na_arvore.as_mut() else {
+            return DaArvore::Descartado;
+        };
+        if em_curso.recusada {
+            return DaArvore::Descartado;
+        }
+        if pede {
+            em_curso.recusada = true;
+            let pedida = em_curso.pedida;
+            // O arrendamento que sai: o que esta edição tomou, ou o de uma
+            // sequência de recusadas que ela continua — começou onde a
+            // anterior deixou o campo.
+            let soltar = pedida
+                .and_then(|p| p.rastro)
+                .filter(|r| r.tomou() || recusadas == Some(r.antes))
+                .map(|r| r.depois);
+            // O que veio sem reserva não é edição de ninguém: não começa nem
+            // corta a sequência.
+            if pedida.is_some() {
+                e.recusadas = soltar;
+            }
+            return DaArvore::Recusado {
+                quem: pedida.map(|p| (p.origem, p.acao, p.campo)),
+                soltar,
+            };
+        }
+        if c == APAGAR_A_LINHA {
+            while e.tam > 0 {
+                apagar_em(console, e);
+            }
+            DaArvore::Editado
+        } else if digitar_em(console, e, c) {
+            DaArvore::Editado
+        } else {
+            DaArvore::NaoCoube
+        }
+    }) else {
+        return;
+    };
+    match feito {
+        DaArvore::Recusado { quem, soltar } => {
+            let solto = match (quem, soltar) {
+                (Some((_, _, campo)), Some(depois)) => {
+                    crate::coordenacao::soltar_o_da_edicao_recusada(
+                        &crate::coordenacao::recurso(campo),
+                        depois,
+                    )
+                }
+                _ => false,
+            };
+            if solto {
+                // Solto, não há o que a seguinte continue.
+                com_estado(console, |e| e.recusadas = None);
+            }
+            match quem {
+                // A recusa da linha, no formato da recusa na entrada (ver
+                // `crate::ui::agir_com_versao`), e sem o texto: a linha pode
+                // ser a de uma senha. O arrendamento solto vai à auditoria,
+                // como o implícito foi quando a edição o tomou.
+                Some((origem, acao, campo)) => crate::log_info!(
+                    "ui",
+                    "{}: {} no elemento {} recusado no console: {}",
+                    origem,
+                    acao.nome(),
+                    campo,
+                    LINHA_DA_PESSOA
+                ),
+                None => crate::log_warn!(
+                    "console",
+                    "{}: o que veio marcado da arvore sem reserva chegou a linha da pessoa; descartado",
+                    console.texto()
+                ),
+            }
+        }
+        DaArvore::NaoCoube => {
+            com_estado(console, |e| {
+                saidaln!(console);
+                saidaln!(console, "linha longa demais; ate {} caracteres", LINHA_MAX);
+                e.zerar();
+                prompt_em(console, e);
+            });
+        }
+        DaArvore::Editado | DaArvore::Descartado => {}
+    }
 }
 
 /// Tira dos pedidos do console os de conexões que acabaram.
