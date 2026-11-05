@@ -2228,7 +2228,20 @@ pub const AVISO_DO_ENGOLIR: &str = "(o que se digitar ate o Enter e descartado)"
 /// leu a linha da senha antes do fim, e a toma depois, é o que acaba o
 /// engolir ([`parear_passo`]). Num Terminal, a janela, que recebe a tecla
 /// antes do console, conta o Enter — ver [`engolida_na_janela`].
+///
+/// # A linha que não é da cerimônia
+///
+/// O aviso só muda o modo — e só começa a engolir — de uma linha que é da
+/// cerimônia, um passo dela, ou que pede um comando. A do login e as da
+/// troca da própria senha não são: o aviso que sai do outro fio pode chegar
+/// atrasado, depois de a Pessoa ter desistido da cerimônia, saído e
+/// começado o `login` — e a linha do nome viraria uma linha de comando, com
+/// o nome e a senha que ela digitasse adiantado ecoando, indo à árvore e ao
+/// histórico; a da senha, engolida. Nessas linhas, o aviso só escreve o
+/// texto, por cima, e a linha continua a que ela era.
 pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
+    #[cfg(feature = "modo-teste")]
+    no_meio(NoMeio::DoAviso);
     let modo = Modo::da_cerimonia(crate::pareamento::linha_do_console(console));
     let Some(i) = indice(console) else {
         return;
@@ -2253,15 +2266,18 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
             }
         }
         saidaln!(console, "{}", texto);
-        // A linha pedia uma senha, parada — a Pessoa no meio dela —, e a
-        // cerimônia a tirou do modo secreto: o resto, até o Enter, é
+        // A cerimônia só mexe na linha que é dela ou que pede um comando —
+        // ver acima: a do login e as da troca da senha ficam como estão.
+        let da_cerimonia = e.modo == Modo::Comando || e.modo.do_pareamento();
+        // A linha pedia a senha da cerimônia, parada — a Pessoa no meio dela
+        // —, e a cerimônia a tirou do modo secreto: o resto, até o Enter, é
         // engolido.
-        let comecou = parado && e.modo.secreto() && !modo.secreto();
+        let comecou = da_cerimonia && parado && e.modo.secreto() && !modo.secreto();
         if comecou {
             e.engolindo = true;
             e.enter_na_janela = false;
         }
-        if e.modo != modo {
+        if da_cerimonia && e.modo != modo {
             e.zerar();
             e.modo = modo;
         }
@@ -2278,15 +2294,16 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, texto: &str) {
                 redesenhar_em(console, e);
             }
         }
-        Some((comecou, e.engolindo))
+        Some((comecou, e.engolindo, e.modo))
     })
     .flatten();
-    let Some((comecou, engolindo)) = feito else {
+    let Some((comecou, engolindo, modo)) = feito else {
         return;
     };
-    // Ligado enquanto o console engole: as teclas que chegam nesse meio-
-    // tempo são o resto de uma senha — também as da janela de um Terminal,
-    // que entram no histórico quando chegam.
+    // Conforme o modo em que a linha ficou — a da senha do login continua
+    // pedindo a senha —, e ligado enquanto o console engole: as teclas que
+    // chegam nesse meio-tempo são o resto de uma senha — também as da
+    // janela de um Terminal, que entram no histórico quando chegam.
     crate::teclado::pedindo_senha(i, modo.secreto() || engolindo);
     if comecou {
         // Uma linha, e nenhuma por tecla: a conta delas seria o tamanho do
@@ -2374,9 +2391,9 @@ pub fn por_na_linha_de_teste(console: Console, texto: &str) {
     });
 }
 
-/// Só para a suíte: os pontos entre duas tomadas da trava dos consoles em
-/// que um caso põe o fim de uma cerimônia "no meio" — como o fio de outro
-/// núcleo o poria.
+/// Só para a suíte: os pontos em que um caso põe algo "no meio" — o fim de
+/// uma cerimônia entre duas tomadas da trava dos consoles, ou as teclas da
+/// Pessoa entre o fim e o aviso dele —, como o fio de outro núcleo o poria.
 #[cfg(feature = "modo-teste")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoMeio {
@@ -2386,6 +2403,10 @@ pub enum NoMeio {
     /// Em [`parear_passo`]: o Enter da Pessoa leu o modo da linha, em
     /// [`confirmar_em`], e ainda não a tomou.
     DoEnter,
+    /// Em [`aviso_do_pareamento`]: o aviso saiu da cerimônia — o fim dela
+    /// já foi contado — e ainda não chegou à linha; o fio que o leva pode
+    /// demorar, e a Pessoa, digitar.
+    DoAviso,
 }
 
 /// Só para a suíte: o ponto, e o que roda nele.
