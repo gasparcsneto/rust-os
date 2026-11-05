@@ -2112,6 +2112,22 @@ pub(super) fn fluxo_a_troca_cujo_arquivo_nao_se_le() -> Resultado {
     )
 }
 
+/// A troca de imagem de quem é ponta de fluxo cujo arquivo não cabe agora
+/// no heap — o gate deixou o caminho, e a leitura falha sem um pedaço livre
+/// do tamanho do arquivo — é como a cujo arquivo não se lê, e o processo
+/// ouve o erro da falta de heap, `SEM_MEMORIA`: ler de novo depois pode dar
+/// certo, e `PROGRAMA_DESCONHECIDO` diria que o programa não existe. A
+/// execução da decisão leva o motivo da leitura.
+pub(super) fn fluxo_a_troca_cujo_arquivo_nao_cabe_no_heap() -> Resultado {
+    use crate::usuario::falha_da_troca_de_teste as falha;
+    troca_de_ponta_que_falha_intacta(
+        334,
+        |fio| falha::armar_leitura(fio, crate::vfs::Erro::SemMemoria),
+        protocolo::usuario::erro::SEM_MEMORIA,
+        crate::vfs::Erro::SemMemoria.motivo(),
+    )
+}
+
 /// A troca de imagem de quem é ponta de fluxo que falha onde `armar` a
 /// armou, sem chegar ao ponto sem volta: o processo recebe `devolvido` e
 /// segue o que era, ponta do fluxo, que continua passando bytes; nenhum fim

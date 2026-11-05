@@ -38864,6 +38864,10 @@ static CASOS: &[Caso] = &[
         f: fluxo::fluxo_a_troca_cujo_arquivo_nao_se_le,
     },
     Caso {
+        nome: "fluxo: a troca de imagem cujo arquivo nao cabe no heap",
+        f: fluxo::fluxo_a_troca_cujo_arquivo_nao_cabe_no_heap,
+    },
+    Caso {
         nome: "fluxo: a troca de imagem que falha depois do ponto sem volta",
         f: fluxo::fluxo_a_troca_que_falha_depois_do_ponto_sem_volta,
     },
