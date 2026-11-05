@@ -753,11 +753,17 @@ pub fn proveniencia(m: &Motor, epoca: u32, fio: u64, w: &mut JsonWriter) -> fmt:
                 }
                 None => w.null_value()?,
             }
-            // A regra do firewall que barrou um pedido deste fluxo.
+            // A regra do firewall que barrou um pedido deste fluxo: a
+            // execução da decisão, ou a de outro pedido do mesmo processo ao
+            // mesmo destino. O processo é o fio, que nunca se repete no
+            // boot — e não o programa: acima do teto do detalhe, a execução
+            // sai com a descrição abreviada, e a decisão, com a inteira.
             let regra = m.eventos().find_map(|x| match x.tipo {
                 Tipo::Firewall { regra }
                     if x.decisao == Some(e.seq)
-                        || (x.recurso == e.recurso && x.processo == e.processo) =>
+                        || (x.recurso == e.recurso
+                            && x.epoca == e.epoca
+                            && x.processo.as_ref().map(|(f, _)| f) == Some(&fio)) =>
                 {
                     Some(regra)
                 }

@@ -173,11 +173,14 @@ pub fn registros(resultado: &[u8]) -> Result<Vec<Registro>, &'static str> {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Detalhe {
     /// O processo que pediu: o fio e o programa, como `pelo processo N
-    /// (programa)`.
+    /// (programa)`. Acima do teto do detalhe, o programa vem abreviado —
+    /// `? <resumo>…`, ver `politica::auditoria::descricao_abreviada` —, e o
+    /// fio é o mesmo.
     pub processo: Option<(u64, String)>,
     /// A decisão de que este registro é execução: `decisao D`, no fim.
     pub decisao: Option<u64>,
-    /// O que sobra.
+    /// O que sobra. Acima do teto, termina na marca do corte
+    /// (`politica::auditoria::MARCA_DO_CORTE`) quando perdeu palavras.
     pub resto: String,
 }
 
@@ -546,8 +549,13 @@ fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
     {
         return Tipo::Nascimento { filho };
     }
+    // O fio do filho é sempre maior que o do pai: os fios só crescem, e o
+    // filho nasce depois. Um `filho N` com N até o fio do pai é um registro
+    // cortado ou inconsistente — o pedaço do número é o de outro processo,
+    // talvez de outra identidade —, e não um nascimento.
     if r.metodo == "process.fork"
         && let Some(filho) = numero_apos(&d.resto, "filho ")
+        && d.processo.as_ref().is_none_or(|(pai, _)| filho > *pai)
     {
         return Tipo::Nascimento { filho };
     }
@@ -739,6 +747,28 @@ pub(crate) mod testes {
         }
     }
 
+    /// O detalhe cujo texto perdeu o fim numa palavra inteira, com a marca
+    /// do corte: o processo e a decisão se leem como sempre, e o resto
+    /// guarda a marca — quem o reconhece a tira.
+    #[test]
+    fn o_detalhe_cortado_numa_palavra() {
+        let d = ler_detalhe(
+            "pelo processo 1234 (? abcd1234 de ?): o papel nao confia no editor ?; decisao 123456",
+        );
+        assert_eq!(d.processo, Some((1234, "? abcd1234 de ?".to_string())));
+        assert_eq!(d.decisao, Some(123_456));
+        assert_eq!(d.resto, "o papel nao confia no editor ?");
+        assert_eq!(
+            politica::procedencia::Falta::do_motivo(&d.resto),
+            Some(politica::procedencia::Falta::NaoConfiado)
+        );
+        let d = ler_detalhe("pelo processo 1234 (? abcd1234 de ?): o manifesto nao declara ?");
+        assert_eq!(
+            (d.decisao, d.resto.as_str()),
+            (None, "o manifesto nao declara ?")
+        );
+    }
+
     /// O achado F1: o `process.exec` recusado por um processo de descrição
     /// longa — o maior nome e o maior editor —, com a decisão de seis
     /// dígitos ou mais, guarda o motivo, e cada falta é reconhecida; também
@@ -785,6 +815,9 @@ pub(crate) mod testes {
 
     #[test]
     fn os_tipos() {
+        fn tipo_de(f: impl FnOnce(&mut Registro)) -> Tipo {
+            Evento::de(&registro(1, [0; 32], f), 0).tipo
+        }
         let tipo = |f: fn(&mut Registro)| Evento::de(&registro(1, [0; 32], f), 0).tipo;
         assert_eq!(tipo(|_| {}), Tipo::Decisao);
         assert_eq!(
@@ -807,6 +840,28 @@ pub(crate) mod testes {
                 r.detalhe = "pelo processo 3 (x 00000000): filho 14".to_string();
             }),
             Tipo::Nascimento { filho: 14 }
+        );
+        // O filho até o fio do pai não nasceu: é o pedaço de um número — o
+        // corte do anel deixava `filho 123` do filho 1235 —, ou um registro
+        // inconsistente. E a bifurcação cortada antes do número, nem isso.
+        for detalhe in [
+            "pelo processo 1234 (? abcd1234 de x): filho 123",
+            "pelo processo 1234 (? abcd1234 de x): filho 5",
+            "pelo processo 1234 (? abcd1234 de x): filho 1234",
+            "pelo processo 1234 (? abcd1234 de x): filho ?",
+        ] {
+            let tipo = tipo_de(|r| {
+                r.metodo = "process.fork".to_string();
+                r.detalhe = detalhe.to_string();
+            });
+            assert_eq!(tipo, Tipo::Decisao, "{detalhe}");
+        }
+        assert_eq!(
+            tipo_de(|r| {
+                r.metodo = "process.fork".to_string();
+                r.detalhe = "pelo processo 1234 (? abcd1234 de x): filho 1235".to_string();
+            }),
+            Tipo::Nascimento { filho: 1235 }
         );
         assert_eq!(
             tipo(|r| {

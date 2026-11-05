@@ -204,8 +204,18 @@ impl Grafo {
         self.ordem.push_back(a);
     }
 
-    /// Um processo nasceu.
-    pub fn nasceu(&mut self, epoca: u32, fio: u64, p: Processo) {
+    /// Um processo nasceu. Devolve se o nascimento entrou.
+    ///
+    /// Um processo nasce uma vez só em cada boot: o fio nunca se repete. Um
+    /// segundo nascimento do mesmo `(época, fio)` é um registro cortado ou
+    /// inconsistente — o pedaço do número de outro filho —, e não entra:
+    /// nem o criador, nem a autoridade, nem uma aresta mudam, e o primeiro
+    /// fica como era. Sem isso, um nascimento falso dava a criação de um
+    /// processo antigo, e a raiz dele, a quem não o criou.
+    pub fn nasceu(&mut self, epoca: u32, fio: u64, p: Processo) -> bool {
+        if self.processos.contains_key(&(epoca, fio)) {
+            return false;
+        }
         let criador = match &p.criador {
             Criador::Processo(c) => No::Processo { epoca, fio: *c },
             Criador::Principal(q) => No::Principal(q.clone()),
@@ -218,34 +228,66 @@ impl Grafo {
                 No::Programa(prog.clone()),
             );
         }
-        if !self.processos.contains_key(&(epoca, fio)) {
-            if self.ordem_dos_processos.len() == MAIS_PROCESSOS
-                && let Some(velho) = self.ordem_dos_processos.pop_front()
-            {
-                self.processos.remove(&velho);
-            }
-            self.ordem_dos_processos.push_back((epoca, fio));
+        if self.ordem_dos_processos.len() == MAIS_PROCESSOS
+            && let Some(velho) = self.ordem_dos_processos.pop_front()
+        {
+            self.processos.remove(&velho);
         }
+        self.ordem_dos_processos.push_back((epoca, fio));
         self.processos.insert((epoca, fio), p);
+        true
     }
 
     /// Um processo apareceu executando `programa`: o primeiro pedido dele,
     /// ou o primeiro depois de um `executar`.
     ///
-    /// A descrição que o detalhe de uma execução abreviou acima do teto —
-    /// `? <resumo> de <editor>`, ver `politica::auditoria::detalhe_composto`
-    /// — não é outro programa: é o mesmo processo, que o registro da decisão
-    /// citada descreve inteiro. Não muda o programa dele nem vira um nó.
+    /// # A descrição abreviada
+    ///
+    /// Acima do teto do detalhe, a auditoria abrevia a descrição do
+    /// programa — `? <resumo> de <editor>`, ver
+    /// `politica::auditoria::detalhe_composto` —, e o resumo fica: é ele
+    /// que diz qual programa é.
+    ///
+    /// - Com o **mesmo resumo** do programa que o grafo conhece no
+    ///   processo, a abreviada é o mesmo programa: nada muda.
+    /// - Com **outro resumo**, é uma troca de verdade — o `executar` cuja
+    ///   imagem nova não se mapeou depois do ponto sem volta grava a
+    ///   execução em nome do programa novo —: o processo passa a executar o
+    ///   programa da abreviada, como numa troca com a descrição inteira.
+    /// - A descrição **inteira** que chega depois, com o mesmo resumo da
+    ///   abreviada que o grafo guardou, é o mesmo programa, agora com o
+    ///   nome: o processo fica com ela, e não há outra troca — nem outra
+    ///   aresta.
+    ///
+    /// De um processo que o grafo não conhece, a abreviada não diz nada que
+    /// se compare: não vira nó.
     pub fn executa(&mut self, epoca: u32, fio: u64, programa: &str) {
-        if politica::auditoria::descricao_abreviada(programa) {
+        use politica::auditoria::{descricao_abreviada, resumo_da_descricao};
+        let abreviada = descricao_abreviada(programa);
+        let Some(p) = self.processos.get_mut(&(epoca, fio)) else {
+            if !abreviada {
+                self.ligar(
+                    No::Processo { epoca, fio },
+                    Aresta::Executa,
+                    No::Programa(programa.to_string()),
+                );
+            }
+            return;
+        };
+        let atual = p.programa.as_deref();
+        if atual == Some(programa) {
             return;
         }
-        if let Some(p) = self.processos.get_mut(&(epoca, fio)) {
-            if p.programa.as_deref() == Some(programa) {
-                return;
-            }
-            p.programa = Some(programa.to_string());
+        let resumo = resumo_da_descricao(programa);
+        let mesmo = resumo.is_some() && atual.and_then(resumo_da_descricao) == resumo;
+        if mesmo && abreviada {
+            return;
         }
+        if mesmo && atual.is_some_and(descricao_abreviada) {
+            p.programa = Some(programa.to_string());
+            return;
+        }
+        p.programa = Some(programa.to_string());
         self.ligar(
             No::Processo { epoca, fio },
             Aresta::Executa,
@@ -412,6 +454,91 @@ mod testes {
         g.executa(0, 7, "outro 01020304");
         assert_eq!(programa(&g).as_deref(), Some("outro 01020304"));
         assert_eq!(g.arestas(), arestas + 1);
+    }
+
+    /// O achado 5 do adversário do F1: a abreviada de **outro** resumo é
+    /// uma troca de verdade — a troca que falhou depois do ponto sem volta
+    /// grava a execução em nome do programa novo, e acima do teto ela sai
+    /// abreviada. A inteira que chega depois, com o mesmo resumo, não é
+    /// outra troca; e a abreviada do mesmo resumo continua sem mudar nada.
+    #[test]
+    fn a_abreviada_de_outro_resumo_e_uma_troca() {
+        let mut g = Grafo::novo();
+        g.nasceu(
+            0,
+            7,
+            p(Criador::Principal("serial".into()), Aresta::Lancou, 1),
+        );
+        g.executa(0, 7, "loja abcd1234");
+        let arestas = g.arestas();
+        let programa = |g: &Grafo| g.processo(0, 7).and_then(|p| p.programa.clone());
+        // O programa novo, abreviado: a troca entra.
+        g.executa(0, 7, "? deadbeef");
+        assert_eq!(programa(&g).as_deref(), Some("? deadbeef"));
+        assert_eq!(g.arestas(), arestas + 1);
+        // A mesma abreviada, ou outra do mesmo resumo: nada.
+        g.executa(0, 7, "? deadbeef");
+        g.executa(0, 7, "? deadbeef de ?");
+        assert_eq!(programa(&g).as_deref(), Some("? deadbeef"));
+        assert_eq!(g.arestas(), arestas + 1);
+        // A inteira do mesmo resumo: o nome volta, sem outra troca.
+        let inteira = alloc::format!("{} deadbeef", "n".repeat(32));
+        g.executa(0, 7, &inteira);
+        assert_eq!(programa(&g).as_deref(), Some(inteira.as_str()));
+        assert_eq!(g.arestas(), arestas + 1);
+        // E a abreviada dela de novo: nada.
+        g.executa(0, 7, "? deadbeef");
+        assert_eq!(programa(&g).as_deref(), Some(inteira.as_str()));
+        assert_eq!(g.arestas(), arestas + 1);
+        // O primeiro programa que o grafo vê num processo que ele conhece,
+        // abreviado — o `pelo` que passa do teto vai sempre abreviado —: é
+        // o programa dele, e a inteira que vier depois não é outra troca.
+        g.nasceu(
+            0,
+            8,
+            p(Criador::Principal("serial".into()), Aresta::Lancou, 2),
+        );
+        let arestas = g.arestas();
+        g.executa(0, 8, "? cdcdcdcd de editor-longo");
+        assert_eq!(
+            g.processo(0, 8).and_then(|p| p.programa.as_deref()),
+            Some("? cdcdcdcd de editor-longo")
+        );
+        assert_eq!(g.arestas(), arestas + 1);
+        g.executa(0, 8, "programa-longo cdcdcdcd de editor-longo");
+        assert_eq!(
+            g.processo(0, 8).and_then(|p| p.programa.as_deref()),
+            Some("programa-longo cdcdcdcd de editor-longo")
+        );
+        assert_eq!(g.arestas(), arestas + 1);
+    }
+
+    /// O achado 2 do adversário do F1, a defesa no grafo: um processo nasce
+    /// uma vez só no boot. O segundo nascimento do mesmo fio — o pedaço do
+    /// número de outro filho — não muda o criador, a autoridade nem as
+    /// arestas; o primeiro fica. Em outro boot, o mesmo fio nasce de novo.
+    #[test]
+    fn um_processo_nasce_uma_vez_so() {
+        let mut g = Grafo::novo();
+        let vitima = Processo {
+            autoridade: "person:01".to_string(),
+            ..p(Criador::Principal("person:01".into()), Aresta::Lancou, 1)
+        };
+        assert!(g.nasceu(0, 5, vitima.clone()));
+        g.nasceu(
+            0,
+            1234,
+            p(Criador::Principal("agent:aa".into()), Aresta::Lancou, 2),
+        );
+        let arestas = g.arestas();
+        // O nascimento falso: o 5 "bifurcado" pelo 1234.
+        assert!(!g.nasceu(0, 5, p(Criador::Processo(1234), Aresta::Bifurcou, 3)));
+        assert_eq!(g.processo(0, 5), Some(&vitima));
+        assert_eq!(g.arestas(), arestas);
+        assert_eq!(g.proveniencia(0, 5).raiz.as_deref(), Some("person:01"));
+        assert!(g.descendentes(0, 1234).is_empty());
+        // Outro boot: outro processo.
+        assert!(g.nasceu(1, 5, p(Criador::Processo(1234), Aresta::Bifurcou, 4)));
     }
 
     /// O criador que saiu da memória: a cadeia para, e diz que parou.
