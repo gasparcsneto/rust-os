@@ -1926,8 +1926,11 @@ borda —, e é, portanto, o que a pessoa vê, seja quem for que digitou. O
 digita no pseudo-terminal, pelo mesmo caminho das teclas da pessoa. Menos
 quando o console pede o nome, uma senha ou um passo do pareamento: aí o
 kernel recusa a ação ao recebê-la, pela regra da linha do físico, e ela não
-chega ao Terminal — ver [Consoles](#consoles) (fica uma corrida com o Enter
-da Pessoa: ver [Decisões pendentes](#decisões-pendentes)).
+chega ao Terminal. E a que entrou antes de a linha mudar — o Enter da
+Pessoa ainda ia a caminho do console — o Terminal digita marcada, e o
+console a confere de novo quando a consome: na linha da pessoa, ela é
+descartada, e o arrendamento que tomou ao entrar sai — ver
+[Consoles](#consoles).
 
 Duas coisas no interpretador tornaram isso possível sem adivinhar nada.
 Apagar a linha inteira — o Ctrl-U dos terminais —, para trocar o que está
@@ -1955,7 +1958,13 @@ transporte, que outra conexão ocupa quando esta acaba — a mesma chave,
 outra, ou um aperto do TCP repetido —, e o Enter que chega depois disso é
 descartado (achado do adversário ο). Com o console esperando um comando,
 ou com quatro Enter de agentes já a caminho, o `confirm` de um agente é
-recusado antes da conta, sem arrendar o campo.
+recusado antes da conta, sem arrendar o campo. E o apagar da linha e o
+texto que a árvore pede vão marcados — cada caractere trocado por um da
+mesma área de uso privado (`protocolo::usuario::terminal::da_arvore`) —,
+para o console saber, quando os consome, que vieram da árvore, e conferir
+de novo a regra da linha da pessoa contra a linha de agora: com oito
+edições já a caminho, a seguinte é recusada antes da conta, como o Enter
+— ver [Consoles](#consoles).
 
 Noventa e seis mutações nas seis etapas, e as noventa e seis reprovadas —
 várias só depois de o caso ser reforçado. Seis das oito da
@@ -4952,13 +4961,13 @@ Sem ganho a medir, não há o que pagar com esse risco.
   tem um teclado nesta máquina. Fechar isso pede regras que não existem —
   quem pode ser "o Terminal" e "o servidor" para o kernel, quem move o
   teclado da Pessoa, por onde uma credencial entra —: fica para uma
-  decisão. Até lá, também, a regra da linha da pessoa num Terminal é
-  conferida quando a ação da árvore entra no kernel: uma ação que entra
-  enquanto o Enter da Pessoa ainda vai a caminho do console é conferida
-  contra a linha de antes: o texto dela pode chegar à linha seguinte, e o
-  campo fica arrendado a quem a pediu — as teclas da Pessoa nessa linha
-  são `CONFLICT` até o arrendamento vencer (60 s depois da última edição)
-  ou ser solto. E o `ui.claim` de um agente não passa por essa regra: ele
+  decisão. Até lá, também, quem escreve no pseudo-terminal sem a marca da
+  árvore digita como a Pessoa: o console confere a regra da linha da
+  pessoa, quando consome, no que o Terminal digita marcado — o que veio da
+  árvore —, e o que o processo dono do pseudo-terminal digitar sem marcar
+  chega a ele como as teclas dela (o resto da corrida com o Enter da
+  Pessoa, fechada no passo 1: ver [Consoles](#consoles)). E o `ui.claim` de
+  um agente não passa pela regra da linha da pessoa: ele
   arrenda a linha do nome, da senha ou da cerimônia por até 300 s,
   renováveis, e as teclas da Pessoa nela são `CONFLICT` enquanto durar —
   sem ler nem escrever nada, e gravado. Recusá-lo ali daria à Pessoa uma
@@ -4985,7 +4994,16 @@ Sem ganho a medir, não há o que pagar com esse risco.
   senha quando a cerimônia de pareamento acaba no meio dela; as cópias da
   tecla que ninguém zerava são zeradas; e o `display.info` não conta mais o
   que se digita num pseudo-terminal (ver [Consoles](#consoles); o
-  `display.info`, em [Userspace](#userspace)). Continuam com a decisão: o
+  `display.info`, em [Userspace](#userspace)). E, também como [B] — a
+  regra dos consoles, aplicada onde o caractere é consumido, e "uma ação
+  recusada não arrenda o campo" —, a edição da árvore que corria com o
+  Enter da Pessoa é conferida de novo quando o console a consome, e a
+  recusada ali solta o arrendamento que ela mesma tomou ao entrar, e só ele;
+  e o aviso do fim da cerimônia que chega atrasado não muda mais a linha do
+  login nem as da troca da senha — a do nome virava uma linha de comando, e
+  o nome e a senha digitados adiantado ecoavam (ver [Consoles](#consoles)).
+  Continuam com a decisão: o processo que escreve no pseudo-terminal sem a
+  marca da árvore, que digita como a Pessoa; o
   foco do teclado tomado — uma janela que pede o foco enquanto a Pessoa
   digita uma senha recebe as teclas dela —; a senha adiantada num
   Terminal; a senha digitada no lugar errado — numa linha que pede um
@@ -7682,12 +7700,50 @@ mostra como o campo da janela dele: o
 `set_value`, o `cancel` e o `confirm` de um agente nesse campo são
 recusados quando a ação entra no kernel, com o mesmo motivo e pela mesma
 regra do interpretador que valem no físico, antes de o campo ser arrendado
-— e não chegam ao Terminal, que digitaria no pseudo-terminal o apagar da
-linha e o texto, caracteres que o console não distingue dos da pessoa (o
-Enter do agente o console reconhece, e com ele não confirma essas linhas).
-A decisão do `ui.act` continua a do gate, gravada; a recusa é da linha, e
-vai para o log. Fica uma corrida com o Enter da Pessoa: ver [Decisões
-pendentes](#decisões-pendentes).
+— e não chegam ao Terminal. A decisão do `ui.act` continua a do gate,
+gravada; a recusa é da linha, e vai para o log.
+
+**A corrida com o Enter da Pessoa.** A regra conferida quando a ação entra
+vê a linha de antes. O Enter da Pessoa num `login` pode já estar a caminho
+— na fila do Terminal, ou na do pseudo-terminal — quando o `set_value` de
+um agente entra: a ação é aceita, arrenda o campo, e o Terminal digita os
+dois na ordem — o console passa a pedir o nome antes de a edição chegar a
+ele. Por isso a regra vale também onde o caractere é consumido. O Terminal
+digita marcado o que veio da árvore — o apagar da linha e o texto de um
+`set_value` ou de um `cancel`, cada caractere trocado por um da área de uso
+privado (`protocolo::usuario::terminal::da_arvore`), que nenhum teclado
+produz e que o valor de um `set_value` não pode trazer —; a interface, ao
+entregar a edição ao programa, a reserva no console, com quem a pediu e o
+que a conta da coordenação fez no campo; e o console confere a mesma regra
+quando consome o que veio marcado, contra a linha de agora, na mesma seção
+que a edita. Na linha da pessoa — a do nome, as das senhas, as da
+cerimônia, a que engole —, a edição é descartada inteira, mesmo que a linha
+volte a pedir um comando no meio dela: sem eco, fora da linha, da árvore e
+do histórico, e sem passar pela coordenação. A recusa vai ao log, uma
+linha por edição e sem o texto, no formato da recusa na entrada — `agente
+1: set_value no elemento <id> recusado no console: <o motivo da linha>`
+—; o que veio marcado sem reserva, com um aviso do console. E o
+arrendamento implícito que a edição
+tomou ao entrar sai, gravado em nome de quem o tinha (`ui.release`, `Allow`,
+"arrendamento implicito solto: a edicao pela arvore foi recusada na linha
+da pessoa") — uma ação recusada não arrenda o campo. Só o dela: o
+arrendamento sai se o campo ainda está exatamente como a edição o deixou —
+o mesmo titular, desde o mesmo instante, com o mesmo prazo e vencimento, e
+na mesma versão. Se depois dela outro titular o arrendou, um `ui.claim` o
+renovou ou outra ação o editou, ele fica: soltar o de outro seria
+preempção. Duas edições em voo, as duas recusadas, contam como uma — o
+arrendamento que a primeira tomou e a segunda só renovou sai na recusa da
+segunda, que começou exatamente onde a primeira deixou o campo. A marca não
+é autoridade: ela só aponta a reserva mais velha do console, e só torna as
+coisas mais estritas para quem a escreve — o que vem marcado sem reserva
+passa pela regra e não solta nada; o que um processo escreve no
+pseudo-terminal sem a marca chega ao console como a tecla da Pessoa, como
+sempre — quem pode ser "o Terminal" é a decisão pendente (ver [Decisões
+pendentes](#decisões-pendentes)). O Enter de um agente não muda — o console
+o reconhece, só vale o que a árvore pediu, e nessas linhas não confirma —,
+nem a regra do valor do `set_value`. O console físico não tem a corrida: a
+árvore edita a linha dele direto, sem programa nem fila no meio, e o Enter
+da Pessoa e o `ui.act` rodam no mesmo executor, um depois do outro.
 
 Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
 pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
@@ -7733,7 +7789,15 @@ engole vão ao programa sem passar por ela, e as de depois dele passam,
 mesmo que o console ainda não o tenha tratado; e a que o Terminal não
 recebe — ele morreu — some, em vez de cair no console físico. Só a borda
 fica de fora: a tecla que passou pela coordenação antes de o fim chegar
-já fez a versão crescer.
+já fez a versão crescer. E o aviso do fim sai de outro fio e pode chegar
+atrasado — depois de a Pessoa desistir da linha que esperava, sair e
+começar o `login`: ele só muda a linha que é da cerimônia ou que pede um
+comando, e só começa a engolir a partir da senha da cerimônia. A do nome,
+a da senha do login e as da troca da senha ficam como estão, e o bit do
+histórico segue a linha que ficou — antes, a do nome virava uma linha de
+comando, e o nome e a senha digitados adiantado ecoavam, iam à árvore e
+ao histórico; a da senha era engolida ("pareamento: o aviso atrasado do
+fim nao muda a linha do nome nem a da senha do login").
 
 **Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
 sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
@@ -7774,7 +7838,26 @@ janela, o `set_value` na linha do nome e o `set_value`, o `cancel` e o
 motivo do físico — sem arrendar o campo, sem a versão crescer, sem nada
 chegar ao Terminal —, a pessoa entrando em seguida sem `CONFLICT`, e o
 mesmo `set_value` passando com o console pedindo um comando ("terminal: o
-agente nao edita nem confirma a linha da senha"). A fumaça
+agente nao edita nem confirma a linha da senha"). E a corrida com o Enter
+da Pessoa: num Terminal de verdade, o Enter do `login` a caminho do console
+quando o `set_value` e, noutra volta, o `cancel` de um agente entram — a
+ação aceita na entrada, com a decisão do gate gravada, e descartada no
+consumo, sem tirar o começo do nome que a Pessoa digitou adiantado e sem
+nada na grade, com a recusa no log e o arrendamento solto em nome do
+agente, e a Pessoa entrando sem `CONFLICT` ("terminal: a edicao da arvore
+que corre com o Enter da pessoa nao entra na linha do nome"); o mesmo com o
+`aceitar` e a linha da cerimônia ("pareamento: a edicao da arvore que corre
+com o Enter do aceitar nao entra na linha da cerimonia"), e a edição que a
+linha da cerimônia recusou e que continua recusada quando o fim da
+cerimônia, no meio dela, devolve a linha a um comando ("pareamento: a
+edicao recusada na linha da cerimonia continua recusada quando a linha
+volta a pedir um comando"); o que vem marcado sem reserva, que não tira
+nada da linha do nome nem solta o arrendamento de outro ("terminal: a marca
+da arvore sem reserva nao solta nem passa nada"); e o arrendamento que só
+sai se for o que edições recusadas deixaram — duas em voo, as duas
+recusadas, soltam na segunda; o de outro titular, o renovado por um
+`ui.claim` e o de antes da edição ficam ("terminal: so se solta o
+arrendamento que as edicoes recusadas deixaram"). A fumaça
 entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
 de ver o comando antes do login recusado e gravado, e com a senha fora do
 histórico; e no console físico, depois de um clique fora das janelas —
@@ -7806,7 +7889,12 @@ e editar de novo renova; confirmar exige o arrendamento — sem ele,
 `DENY_LEASE` — e o solta depois. No campo de outro, editar ou arrendar é
 `CONFLICT`, sem tirar ninguém: não há preempção. O arrendamento acaba
 quando vence, quando a sessão acaba — o `logout`, a porta que cai —, quando
-a chave ou a pessoa é revogada, e quando um administrador o revoga.
+a chave ou a pessoa é revogada, e quando um administrador o revoga. E uma
+ação recusada não arrenda o campo: a edição que o console de um Terminal
+recusa depois de ela entrar — a que correu com o Enter da Pessoa, ver
+[Consoles](#consoles) — não deixa o arrendamento implícito que tomou; ele
+sai, gravado em nome de quem o tinha, se o campo ainda está exatamente
+como ela o deixou.
 
 **A pessoa pelo mesmo caminho.** A primeira tecla de uma pessoa na linha
 livre a arrenda para a sessão dela, uma vez na auditoria, e cada tecla
@@ -7845,8 +7933,11 @@ para a auditoria.
 O `cargo xtask invariantes` confere que só o canal chama
 `ui::agir_com_versao`, que só a administração revoga um arrendamento, que
 a linha do interpretador só muda pela árvore, que só o interpretador põe no
-histórico do teclado a tecla que o console físico consome, e que só a
-interface anota quem apertou a caixa de fechar do Terminal. A suíte
+histórico do teclado a tecla que o console físico consome, que só a
+interface anota quem apertou a caixa de fechar do Terminal, que só ela
+reserva, anota e desfaz no console a edição da árvore que o Terminal vai
+digitar, e que só o console solta o arrendamento da edição que ele recusou
+ao consumi-la. A suíte
 confere os cenários de concorrência entre dois agentes — duas leituras e
 uma mudança, exclusivo
 até soltar, revogado, vencido, confirmação com a versão velha —; pessoa
@@ -9526,7 +9617,19 @@ programa do processo; e a N161 tira o editor da descrição sem deixar o `de
 ?`. Todas reprovadas, uma de cada vez: a N157, a N160 e a N161 pelos testes
 do hospedeiro e pela suíte do x86; a N159, que é do kernel, pela suíte; e a
 N158 só pelos do hospedeiro — com a descrição encolhendo antes, a suíte
-não produz um motivo de procedência cortado.
+não produz um motivo de procedência cortado. E as do passo 1 que fecham a
+corrida do L1 e o #297 (ver [Consoles](#consoles)): a N162 tira a
+conferência do consumo — o que vem marcado da árvore entra em qualquer
+linha, e a corrida volta —; a N163 solta o arrendamento do campo sem
+conferir de quem é; a N164 não o solta; a N165 deixa o que vem marcado
+sem reserva passar como a tecla da Pessoa; a N166 deixa o aviso da
+cerimônia mexer de novo em qualquer linha; a N167 conta como da sequência
+de recusadas a edição que não começou onde a anterior deixou o campo; a
+N168 não deixa a recusa com a edição inteira; a N169 liga o bit do
+histórico pelo modo que a cerimônia pede, e não pelo da linha que ficou; a
+N170 solta o arrendamento que a edição só renovou; e a N171 tira a
+sequência — só a edição que tomou o arrendamento o solta. Todas
+reprovadas no x86, uma de cada vez.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9612,6 +9715,11 @@ não produz um motivo de procedência cortado.
 | fora do SDK (#292): a leitura sem heap no `executar` dizendo `PROGRAMA_DESCONHECIDO` (N159) | "fluxo: a troca de imagem cujo arquivo nao cabe no heap" |
 | fora do SDK (F1): o grafo do NSF tomando a descrição abreviada por outro programa (N160) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `seguranca::grafo` e do motor |
 | fora do SDK (F1): o editor que sai da descrição sem o `de ?` (N161) | "nsf: ve o codigo adulterado de quem tem descricao longa"; e os testes do hospedeiro do `politica::auditoria`, do `seguranca::evento` e do motor |
+| fora do SDK (passo 1, L1): a conferência do consumo tirada, e a corrida de volta (N162); o arrendamento da edição recusada que não sai (N164) | "terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome", "pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia", "terminal: so se solta o arrendamento que as edicoes recusadas deixaram", "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando" — a N162, também "terminal: a marca da arvore sem reserva nao solta nem passa nada" |
+| fora do SDK (passo 1, L1): o arrendamento solto sem conferir de quem é (N163); a sequência de recusadas sem conferir que cada edição começa onde a anterior deixou o campo (N167); o arrendamento que a edição só renovou, solto (N170); a sequência que não conta (N171) | "terminal: so se solta o arrendamento que as edicoes recusadas deixaram" |
+| fora do SDK (passo 1, L1): o que vem marcado sem reserva passando como a tecla da Pessoa (N165) | "terminal: a marca da arvore sem reserva nao solta nem passa nada", "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando" |
+| fora do SDK (passo 1, L1): a recusa que não fica com a edição inteira (N168) | "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando", "terminal: a marca da arvore sem reserva nao solta nem passa nada" |
+| fora do SDK (passo 1, #297): o aviso da cerimônia que mexe de novo em qualquer linha (N166); o bit do histórico pelo modo que a cerimônia pede (N169) | "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

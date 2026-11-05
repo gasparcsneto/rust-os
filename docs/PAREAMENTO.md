@@ -63,9 +63,13 @@ nem para esvaziar: nem no console físico, nem num Terminal, onde a árvore
 as mostra como o campo da janela dele e o kernel recusa a ação antes de
 ela chegar ao programa — a regra das linhas do login e da troca da
 senha, que o caso "terminal: o agente nao edita nem confirma a linha da
-senha" confere
-([README](../README.md#consoles)); as linhas da cerimônia num Terminal não
-têm caso próprio:
+senha" confere ([README](../README.md#consoles)). E a ação que entrou
+antes de a linha virar da cerimônia — o Enter do `aceitar` ou do `parear`
+ainda ia a caminho do console — o Terminal digita marcada, e o console a
+descarta quando a consome, e solta o arrendamento que ela tomou; nas
+linhas da cerimônia num Terminal, o caso é "pareamento: a edicao da
+arvore que corre com o Enter do aceitar nao entra na linha da cerimonia",
+que confere também a recusa quando a ação entra:
 
 - `aceitar <nome> <papel> [<endereço>]` — abre a janela (120 s): a 7071
   passa a escutar, e a tela mostra a impressão deste Duke e o endereço;
@@ -144,6 +148,15 @@ a linha seguinte da Pessoa não é engolida. Num Terminal, as teclas que a
 janela recebe até o Enter vão ao programa sem passar pela coordenação; as
 de depois dele passam; e a que o Terminal não recebe — ele morreu — some,
 em vez de cair no console físico.
+
+O aviso do fim, que sai de outro fio, pode chegar atrasado: a Pessoa já
+desistiu da linha que esperava, saiu e começou o `login`. Ele só muda a
+linha que é da cerimônia, ou que pede um comando, e só começa a engolir a
+partir da senha da cerimônia: a linha do nome, a da senha do login e as
+da troca da senha ficam como estão, com o bit do histórico conforme elas.
+Antes, a do nome virava uma linha de comando — o nome e a senha digitados
+adiantado ecoavam, iam à árvore e ao histórico —, e a da senha era
+engolida.
 
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
@@ -255,8 +268,13 @@ compartilhada, a nuvem e a conta central.
   fim que corre com a tecla e com o Enter, entre duas tomadas da linha; o
   Terminal de verdade, em que o resto engolido não passa pela
   coordenação, e o que morre engolindo, cuja tecla não cai no console
-  físico; e o Terminal fechado pela caixa de fechar com a cerimônia viva,
-  que acaba dentro da chamada `fechar` dele.
+  físico; o Terminal fechado pela caixa de fechar com a cerimônia viva,
+  que acaba dentro da chamada `fechar` dele; a edição da árvore que corre
+  com o Enter do `aceitar` no Terminal de verdade, descartada na linha da
+  cerimônia com o arrendamento solto, e a que continua recusada quando o
+  fim, no meio dela, devolve a linha a um comando; e o aviso do fim que
+  chega atrasado, depois do `logout` e do `login`, sem mudar a linha do
+  nome nem a da senha.
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, com a senha. Uma

@@ -820,7 +820,21 @@ código de fora da imagem passando pelo da imagem (N161). Todas reprovadas:
 a N157, a N160 e a N161 pelos testes do hospedeiro e pela suíte do x86; a
 N159, que é do kernel, pela suíte; e a N158 só pelos do hospedeiro — com a
 descrição encolhendo antes, a suíte não produz um motivo de procedência
-cortado.
+cortado. E as do passo 1 da continuidade que fecham a corrida do L1 — a
+edição da árvore que corre com o Enter da Pessoa, conferida de novo
+quando o console a consome — e o #297 — o aviso atrasado do fim da
+cerimônia, que mudava a linha do login (N162–N171; ver
+[Consoles](../README.md#consoles)): a conferência do consumo tirada, e a
+corrida volta (N162); o arrendamento solto sem conferir de quem é (N163);
+o arrendamento da recusada não solto (N164); o que vem marcado sem
+reserva passando como a tecla da Pessoa (N165); o aviso que mexe de novo
+em qualquer linha (N166); a sequência de recusadas sem conferir que cada
+edição começa onde a anterior deixou o campo (N167); a recusa que não
+fica com a edição inteira (N168); o bit do histórico pelo modo da
+cerimônia, e não pelo da linha que ficou (N169); o arrendamento que a
+edição só renovou, solto (N170); e a sequência que não conta — só a
+edição que tomou o arrendamento o solta (N171). Todas reprovadas no x86,
+uma de cada vez.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -983,6 +997,16 @@ cortado.
 | N159 | fora do SDK (#292): a leitura que falhou sem heap no `executar` volta a dizer `PROGRAMA_DESCONHECIDO` | `fluxo: a troca de imagem cujo arquivo nao cabe no heap` |
 | N160 | fora do SDK (F1): o grafo do NSF toma a descrição abreviada por outro programa do processo | hospedeiro: `grafo::testes::a_descricao_abreviada_nao_troca_o_programa`, `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
 | N161 | fora do SDK (F1): o editor sai da descrição sem deixar o `de ?` — o código de fora da imagem passa pelo da imagem | hospedeiro: `auditoria::testes::a_descricao_encolhe_antes_do_motivo`, `a_descricao_abreviada_nao_e_a_de_outro_programa`, `o_motivo_cortado_ainda_diz_a_falta`; `evento::testes::a_falta_de_quem_tem_descricao_longa`; `o_codigo_adulterado_de_quem_tem_descricao_longa` (o motor); suíte: `nsf: ve o codigo adulterado de quem tem descricao longa` |
+| N162 | fora do SDK (passo 1, L1): a conferência do consumo tirada — o que vem marcado da árvore entra em qualquer linha, e a corrida volta | `terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome`, `terminal: so se solta o arrendamento que as edicoes recusadas deixaram`, `pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia`, `pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando`, `terminal: a marca da arvore sem reserva nao solta nem passa nada` |
+| N163 | fora do SDK (passo 1, L1): o arrendamento solto sem conferir de quem é — sai o de quem estiver no campo | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a primeira de duas edições em voo solta o que a segunda renovou |
+| N164 | fora do SDK (passo 1, L1): o arrendamento que a edição recusada tomou não sai | `terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome`, `terminal: so se solta o arrendamento que as edicoes recusadas deixaram`, `pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia`, `pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando` |
+| N165 | fora do SDK (passo 1, L1): a marca aceita sem reserva — o que vem marcado sem reserva passa como a tecla da Pessoa | `terminal: a marca da arvore sem reserva nao solta nem passa nada`, `pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando` — a linha que engole |
+| N166 | fora do SDK (passo 1, #297): o aviso da cerimônia mexe de novo em qualquer linha | `pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login` |
+| N167 | fora do SDK (passo 1, L1): a sequência de recusadas sem conferir que cada edição começa onde a anterior deixou o campo | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a edição seguinte ao `ui.claim` |
+| N168 | fora do SDK (passo 1, L1): a recusa que não fica com a edição inteira — o resto entra se a linha volta a pedir um comando | `pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando`; `terminal: a marca da arvore sem reserva nao solta nem passa nada` — um aviso por caractere, e não um por vez |
+| N169 | fora do SDK (passo 1, #297): o bit do histórico pelo modo que a cerimônia pede, e não pelo da linha que ficou | `pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login` — a tecla entra no histórico com a linha pedindo a senha |
+| N170 | fora do SDK (passo 1, L1): o arrendamento que a edição só renovou, solto | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` — a edição que começou do que um `ui.claim` renovou solta o dele |
+| N171 | fora do SDK (passo 1, L1): sem a sequência — só a edição que tomou o arrendamento o solta, e duas recusadas em voo o deixam | `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` |
 
 ## Medidas
 

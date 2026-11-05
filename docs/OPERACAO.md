@@ -331,8 +331,13 @@ teclado; no console físico, nem a tecla digitada antes de ele pedir, que
 entra no histórico só quando ele a consome (num Terminal, ela ainda pode
 entrar — ver as [decisões pendentes](../README.md#decisões-pendentes)) —,
 e um agente não edita, não esvazia nem confirma essas linhas: nem no
-console físico, nem num Terminal, pelo campo da janela dele. Uma linha
-vazia, em qualquer passo, desiste. Nada se digita junto da palavra:
+console físico, nem num Terminal, pelo campo da janela dele — conferido
+quando a ação entra, e, num Terminal, de novo quando o console consome o
+que o programa digitou pela árvore, marcado: a edição que corria com o
+Enter da `senha` é descartada ali, e o arrendamento que ela tomou sai (ver
+[Consoles](../README.md#consoles)). E o aviso atrasado do fim de uma
+cerimônia de pareamento não muda essas linhas. Uma linha vazia, em
+qualquer passo, desiste. Nada se digita junto da palavra:
 `senha <algo>` é recusado, porque o que viesse junto já teria ecoado.
 
 ```text
