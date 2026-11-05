@@ -6277,9 +6277,11 @@ falha fechado:
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
    de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`. Acima
    do teto do detalhe, abreviados: o pedido sai `(? <resumo> de bancada)`
-   ou `(? <resumo> de ?)`, e o nascimento pode perder o editor, `…codigo
-   <resumo> de ?`; o resumo e o `de` ficam sempre, e nenhum nome sai pela
-   metade (ver *O NSF vê o adulterado*).
+   ou `(? <resumo> de ?)`, e na descrição o resumo e o `de` ficam sempre.
+   O nascimento, que é texto, perde as últimas palavras inteiras: primeiro
+   o editor, `…codigo <resumo> de ?`, e, com o fio de quem lança, o do
+   filho e o número da decisão longos, também o `de` e o resumo. Nenhum
+   nome sai pela metade (ver *O NSF vê o adulterado*).
 
 **A confiança é perguntada a cada pedido**, como o papel: cada pedido ao
 registro, cada chamada de sistema que o gate decide e cada `fork` ou
@@ -6320,8 +6322,9 @@ O registro sem citação encolhe do mesmo jeito (o resíduo do F1). A
 decisão que permite tem o texto vazio, e guarda a descrição inteira
 **quando ela cabe no teto**: o `pelo` sozinho só passa dele no código de
 fora da imagem com o nome e o editor longos e o fio de três dígitos ou
-mais, e então vai abreviado, com o `)` — o anel o cortava no meio do
-editor, e as decisões deixavam de ser do processo para o NSF. A recusa
+mais, e então vai abreviado, com o `)` — o anel lhe tirava o `)` e, do
+fio de quatro dígitos em diante, também o fim do editor, e as decisões
+deixavam de ser do processo para o NSF. A recusa
 guarda o motivo antes da descrição: `o manifesto nao declara` chega
 inteiro, e a recusa do manifesto de um programa de nome longo não vira
 sondagem de privilégio da pessoa que o lançou. A bifurcação guarda o
@@ -6332,8 +6335,9 @@ processo nasce uma vez só no boot. No grafo, a abreviada do mesmo resumo
 é o mesmo programa; a de outro resumo é uma troca — a do `executar` que
 falha depois do ponto sem volta. A âncora de uma declaração numa decisão
 compara o `pelo` inteiro: o processo cuja descrição passa do teto não se
-ancora em decisão nenhuma — como já não se ancorava com a decisão cortada
-—, e declara ancorado na conexão. E o editor fora do registro vai como
+ancora em decisão nenhuma — como já não se ancorava com a decisão cortada:
+a que ele pedir é `INVALID_ARGUMENT` —, e declara ancorado na conexão, ou
+sem âncora. E o editor fora do registro vai como
 `desconhecido`, um nome que o registro de editores recusa
 (`sigilo::registro::EDITOR_DESCONHECIDO`): nenhum editor registrado se
 passa por ele.
@@ -6727,7 +6731,7 @@ inteira, com ` ?` no lugar do que saiu
 ver *O NSF vê o adulterado*, em [O código de fora da
 imagem](#o-código-de-fora-da-imagem)). A âncora numa decisão é o
 registro dela com a descrição inteira do processo: o processo cuja
-descrição passa do teto se ancora na conexão.
+descrição passa do teto só se ancora na conexão, ou declara sem âncora.
 Nenhuma decisão lê a declaração: nem o gate, nem o firewall, nem
 as cotas, nem a contenção. Ela gasta a taxa de quem lançou o programa, e
 é recusada a um processo contido e a uma sessão que acabou. O desfecho é
@@ -9116,7 +9120,7 @@ distribuída.
 **Testes.** No hospedeiro, as contas da cerimônia — as derivações, o
 compromisso, a janela, a confirmação, a tabela de transições e passos
 sorteados — e o prólogo, os quadros e um vetor fixo do `sigilo`. Na suíte,
-nas duas arquiteturas, 39 casos `pareamento:` — o outro Duke é a suíte,
+nas duas arquiteturas, 42 casos `pareamento:` — o outro Duke é a suíte,
 com uma chave de teste, e a pessoa digita no console: os dois lados, o
 código errado, os prazos, o replay, o homem no meio, o compromisso, a
 chave que não é de Duke, a lápide, a suspensão, o papel, a concorrência
@@ -9126,9 +9130,15 @@ a auditoria sem código nem nonce, e o fim no meio da senha — o resto dela
 engolido até o Enter, num Terminal e no físico, fora do histórico; o fim
 que corre com a tecla e com o Enter, entre duas tomadas da linha; o
 Terminal de verdade, em que o resto engolido não passa pela coordenação,
-e o que morre engolindo, cuja tecla não cai no console físico; e o
+e o que morre engolindo, cuja tecla não cai no console físico; o
 Terminal fechado pela caixa de fechar com a cerimônia viva, que a acaba
-dentro da chamada `fechar` dele, com a pilha de rede sondada ali. E a
+dentro da chamada `fechar` dele, com a pilha de rede sondada ali; a
+edição da árvore que corre com o Enter do `aceitar` no Terminal de
+verdade, descartada na linha da cerimônia com o arrendamento solto, e a
+que continua recusada quando o fim, no meio dela, devolve a linha a um
+comando; e o aviso do fim que chega atrasado, depois do `logout` e do
+`login` ou do `senha`, sem mudar a linha do nome, a da senha nem a da
+senha atual da troca. E a
 **bancada de duas máquinas**, `cargo xtask pareamento`: dois Dukes de pé e
 a pessoa no teclado dos dois — a bancada lê o código de cada tela pela
 árvore semântica e o digita no outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
@@ -9242,7 +9252,7 @@ o `fechar`, ou vê a conexão cair
 **Testes.** No hospedeiro, a conta do fluxo — os estados, os sentidos, o
 fecho e o aborto, os prazos, as cotas, o crédito, o que cabe do par, a
 ordem e a coerência sob passos sorteados. Na suíte, nas duas arquiteturas,
-32 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
+41 casos `fluxo:` — dois programas com a autoridade de uma pessoa e a
 suíte ditando os passos, e, entre os Dukes, a suíte como o outro Duke, com
 a chave de teste de um dispositivo: os bytes nos dois sentidos, o fim e o
 fecho, a permissão, o id que não é capacidade, a reconfirmação, o plano de
@@ -9767,7 +9777,7 @@ hospedeiro e pela suíte do x86.
 | fora do SDK (passo 1, #297): o aviso da cerimônia que mexe de novo em qualquer linha (N166); o bit do histórico pelo modo que a cerimônia pede (N169); o aviso que mexe de novo só nas linhas da troca da senha (N172) | "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login" — a N172, pela linha da senha atual da troca |
 | fora do SDK (resíduo do F1): o registro sem citação que não encolhe — a saída antecipada de volta (N173) | "nsf: ve o codigo adulterado de quem tem descricao longa", "nsf: a recusa do manifesto de quem tem descricao longa e do manifesto", "nsf: a bifurcacao de quem tem descricao longa liga o filho", "nsf: a decisao de quem tem descricao acima do teto e do processo"; e os testes do hospedeiro do `politica::auditoria` e do motor |
 | fora do SDK (resíduo do F1): o texto cortado no meio da palavra (N176), ou sem a marca do corte (N180) | "auditoria: a citacao da decisao fica inteira acima do teto", "chaves: a declaracao se ancora so na decisao de quem declara"; e os testes do hospedeiro do `politica::auditoria` |
-| fora do SDK (resíduo do F1): o nascimento que sobrescreve (N174); o `filho N` até o fio do pai aceito (N175); a falta sem tirar a marca do corte (N177); o grafo que ignora a abreviada de outro resumo (N178); o firewall casado pelo programa (N179); o editor `desconhecido` aceito (N181) | os testes do hospedeiro do `seguranca::grafo`, do `seguranca::evento`, do `politica::procedencia`, do motor, do `sigilo::registro` e do xtask — a suíte não produz um registro cortado ou repetido, um motivo de procedência cortado, uma troca abreviada, uma execução barrada de descrição longa nem um editor com o nome reservado |
+| fora do SDK (resíduo do F1): o nascimento que sobrescreve (N174); o `filho N` até o fio do pai aceito (N175); a falta sem tirar a marca do corte (N177); o grafo que ignora a abreviada de outro resumo (N178); o firewall casado pelo programa (N179); o editor `desconhecido` aceito (N181) | os testes do hospedeiro do `seguranca::grafo`, do `seguranca::evento`, do `politica::procedencia`, do `politica::auditoria`, do motor, do `sigilo::registro` e do xtask — a suíte não produz um registro cortado ou repetido, um motivo de procedência cortado, uma troca abreviada, uma execução barrada de descrição longa nem um editor com o nome reservado |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

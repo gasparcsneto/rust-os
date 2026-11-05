@@ -246,7 +246,7 @@ compartilhada, a nuvem e a conta central.
   a coerência sob passos sorteados; e o `sigilo`: o prólogo e os quadros
   da cerimônia, que não abrem como enlace nem como agente, e um vetor fixo
   das efêmeras aos códigos e ao `R`.
-- **Suíte** (x86 e ARM): 39 casos `pareamento:` — o outro Duke é a suíte,
+- **Suíte** (x86 e ARM): 42 casos `pareamento:` — o outro Duke é a suíte,
   com uma chave de teste, iniciando pela vaga do enlace ou aceitando pela
   via do fio da cerimônia, e a Pessoa digita no console. Os dois lados; o
   código errado, expirado, reutilizado; o replay; o par no meio; outro Duke
@@ -326,5 +326,5 @@ agora logo depois de um pedido só dela.
   minutos na CI. A cerimônia completa (B01, com a entrega do estágio 1 pela
   relação nova), uns 20 s — quase tudo é o teclado do emulador, uma tecla
   de cada vez, conferida na tela antes do Enter.
-- Os casos `pareamento:` da suíte, os 39, levam uns 4 minutos no x86 e uns
-  3 no ARM.
+- Os casos `pareamento:` da suíte — 39 quando medidos, 42 hoje — levavam
+  uns 4 minutos no x86 e uns 3 no ARM.

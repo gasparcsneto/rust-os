@@ -301,8 +301,10 @@ bytes) e o do mapeamento (`ERROR`) vão inteiros enquanto cabem depois da
 descrição encolhida — o adiamento, com os dígitos do fio e da decisão
 somando até 14 num programa da imagem, ou até 9 num código de fora; além
 disso, perdem as últimas palavras. O da leitura, o mais longo, perde só o
-que ainda não cabe depois de o nome sair — e o NSF reconhece o código
-adulterado pelo motivo (ver o README, *O NSF vê o adulterado*). O resumo
+que ainda não cabe depois de a descrição encolher toda — o nome e, no
+código de fora da imagem, também o editor. E o da procedência, o do
+código que não prova de onde veio, o NSF reconhece mesmo cortado (ver o
+README, *O NSF vê o adulterado*). O resumo
 fica sempre, e o `?` não é nome de nada: a abreviada nunca é a descrição
 de outro programa. O registro sem citação — a decisão do gate, a
 bifurcação — encolhe do mesmo jeito: a decisão que permite, de texto
@@ -328,7 +330,7 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   pontas, o motivo guardado, a ordem dos bytes e a coerência da tabela sob
   passos sorteados; a permissão `fabric.stream` e a linha da política; e
   no `sigilo`, o quadro 9 como tipo próprio.
-- **Suíte** (x86 e ARM): 32 casos `fluxo:`. Os locais — dois programas
+- **Suíte** (x86 e ARM): 41 casos `fluxo:`. Os locais — dois programas
   `fluxos` com a autoridade de uma pessoa e a suíte ditando os passos —:
   1 MiB nos dois sentidos, terminar um sentido, fechar com dados
   pendentes, cada lado sem a permissão, o id que não é capacidade, o prazo

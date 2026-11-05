@@ -173,8 +173,9 @@ As entidades de um boot não se confundem com as de outro: o `policy.load`
 do kernel abre uma época, e um processo é `(época, fio)`.
 
 Acima do teto do detalhe (96 bytes), a auditoria abrevia a descrição do
-programa — `pelo processo N (? <resumo> de <editor>)`, depois `(? <resumo>
-de ?)` — antes de cortar o texto, com citação ou sem; e o texto que ainda
+programa — `pelo processo N (? <resumo>)` no da imagem; no código de
+fora, `(? <resumo> de <editor>)`, depois `(? <resumo> de ?)` — antes de
+cortar o texto, com citação ou sem; e o texto que ainda
 não cabe perde as últimas palavras inteiras, com ` ?` no lugar do que
 saiu: o pedaço de um nome é o nome de outro editor, e o de um número, o de
 outro processo (ver `politica::auditoria::detalhe_composto`). O processo
@@ -811,7 +812,10 @@ contido pelo despertador.
   com os elos de verdade — da sondagem à contenção, a recusa que encerra o
   objetivo, a história que não pede, a ação sem plano, a adulteração e a
   lacuna, a proveniência, o DNS nas duas ordens, pessoa e agente pela
-  mesma conta, e só o incidente alto levando à contenção; e as regras de
+  mesma conta, e só o incidente alto levando à contenção; a descrição
+  acima do teto do detalhe — o código adulterado, a recusa do manifesto, a
+  bifurcação e o teto de nome longo, a decisão do `pelo` acima do teto, a
+  troca que morre no mapeamento e o firewall casado pelo fio —; e as regras de
   tempo sobre uma rodada escrita como o kernel a escreve, a confirmação que
   para o lógico, a contenção por taxa suspensa com ele parado e com a
   janela contada parada, o contorno que contém parado, e a janela que volta
@@ -829,7 +833,8 @@ contido pelo despertador.
   restringindo, depois do gate; os quadros sem fluxo, o ICMP e o aviso da
   conexão derrubada; o `resolvedor` contra a bancada; e a resposta que não
   dá acesso — religada, forjada, muda, malformada, de um servidor fora do
-  alcance.
+  alcance; e o processo de descrição longa: o código adulterado, a recusa
+  do manifesto, a bifurcação e a decisão acima do teto.
 - **Na fumaça**, o kernel de produção com o fio do NSF de verdade: a
   leitura pelo gate, a sondagem que abre o incidente sem ação, a saída
   contida pelo gate em poucos segundos, o firewall barrando só o operador,
