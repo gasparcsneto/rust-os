@@ -7356,6 +7356,627 @@ fn linha_da_senha_no_terminal() -> Resultado {
     Ok(())
 }
 
+/// A corrida que a regra da linha da pessoa conferida só na entrada deixava
+/// (a do L1): o Enter da Pessoa num `login` já está na fila do Terminal
+/// quando a edição de um agente entra — conferida contra a linha de antes,
+/// um comando, ela é aceita e arrenda o campo ao agente —, e o Terminal
+/// digita os dois na ordem: o console passa a pedir o nome antes de a
+/// edição chegar a ele.
+///
+/// Com o Terminal de verdade e a suíte no papel do interpretador — ela
+/// entrega à janela as teclas da Pessoa e só depois deixa o console
+/// consumi-las —, para o `set_value` e para o `cancel` de um agente pela
+/// porta:
+///
+/// - a ação é aceita quando entra, com a decisão do gate gravada, e arrenda
+///   o campo;
+/// - o console consome o Enter, o começo do nome que a Pessoa digitou
+///   adiantado e a edição, marcada: a edição é descartada — o apagar não
+///   tira o que a Pessoa digitou, e o texto não entra na linha, nem na grade
+///   —, a recusa vai ao log, sem o texto, e o arrendamento que ela tomou
+///   sai, gravado em nome do agente;
+/// - a Pessoa termina o nome e a senha sem `CONFLICT`, e entra;
+/// - com o console pedindo um comando, a edição do agente entra como
+///   sempre, e o campo continua dele até ele o soltar;
+/// - e, com as reservas de edição do console cheias, a seguinte é recusada
+///   quando entra, com o motivo, antes da conta: sem arrendar o campo, sem
+///   a versão crescer e sem chegar ao Terminal.
+fn terminal_a_edicao_que_corre_com_o_enter() -> Resultado {
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    let resultado = com_agentes_de_teste(|| {
+        pareamento::com_o_terminal_de_verdade(edicao_que_corre_com_o_enter)
+    });
+    crate::teclado::esvaziar();
+    crate::coordenacao::esquecer();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// Entrega à janela com o foco as teclas que esperam, sem deixar console
+/// nenhum consumir nada: a tecla vai ao programa, e fica a caminho.
+fn so_a_janela() {
+    while let Some(c) = crate::teclado::ler_para_janela() {
+        crate::interpretador::tratar_tecla_de_janela(c);
+    }
+}
+
+fn edicao_que_corre_com_o_enter(
+    console: crate::pessoas::Console,
+    camada: u32,
+    recurso: &str,
+) -> Resultado {
+    use crate::interpretador::{LINHA_DA_PESSOA, Modo};
+    use alloc::format;
+    use politica::Codigo;
+
+    let lia = crate::pessoas::registrar_de_teste("lia", "operador", SENHA_DE_TESTE);
+    let senha = senha_de_teste();
+    let campo = campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+    let linha = || crate::interpretador::linha_de_teste(console);
+    let no_log = |marca: u64, subsistema: &str, trecho: &str| {
+        let mut n = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            n += (r.seq >= marca
+                && (subsistema.is_empty() || r.subsistema == subsistema)
+                && r.mensagem().contains(trecho)) as usize;
+        });
+        n
+    };
+    // A última linha da grade do Terminal: o que a Pessoa vê.
+    let na_grade = || {
+        crate::superficies::com_descricao(camada, |d| {
+            d.elementos
+                .iter()
+                .find(|e| e.rotulo == "terminal")
+                .and_then(|e| e.valor.clone())
+        })
+        .flatten()
+        .unwrap_or_default()
+    };
+    let (mut agente, mut sessao) = conectado(1)?;
+    let do_agente =
+        crate::coordenacao::titular_do_agente(1).ok_or("o agente da porta 1 nao tem titular")?;
+    let no_campo = |extra: &str| format!(r#"{{"id":{campo}{extra}}}"#);
+
+    for (acao, extra) in [
+        ("set_value", r#","action":"set_value","value":"intrusa""#),
+        ("cancel", r#","action":"cancel""#),
+    ] {
+        // O `login`, consumido: o console pede um comando, com ele na linha.
+        digitar_pelo_teclado("login")?;
+        esperar_ate(
+            || {
+                atender_consoles();
+                linha() == Some((Modo::Comando, 5))
+            },
+            600,
+        )
+        .map_err(|_| "o login digitado na janela do terminal nao chegou ao console")?;
+        // O Enter e o começo do nome, adiantado: o Terminal os recebe, e o
+        // console ainda não os consumiu — a linha ainda pede um comando.
+        digitar_pelo_teclado("\nli")?;
+        so_a_janela();
+        if linha() != Some((Modo::Comando, 5)) {
+            return Err("o console consumiu o Enter da pessoa antes de a acao do agente entrar");
+        }
+        let seq = seq_da_auditoria();
+        let marca = crate::log::total_emitidos();
+        let r = pela_porta(&mut agente, &mut sessao, "ui.act", &no_campo(extra))?;
+        if !r.contains(r#""ok":true"#) {
+            crate::log_error!("teste", "{}: {}", acao, r);
+            return Err("a acao do agente com a linha pedindo um comando foi recusada na entrada");
+        }
+        if !ultimo_com_metodo("ui.act")
+            .is_some_and(|e| e.codigo == Codigo::Allow && e.recurso == format!("{campo}"))
+        {
+            return Err("o ui.act da corrida ficou sem a decisao do gate gravada");
+        }
+        if crate::coordenacao::estado(recurso)
+            .arrendamento
+            .map(|a| a.titular)
+            != Some(do_agente)
+        {
+            return Err("a acao aceita na entrada nao arrendou o campo ao agente");
+        }
+        // O console consome: o Enter, que pede o nome; o começo dele; e a
+        // edição, marcada, que a linha do nome recusa — no log, como a recusa
+        // na entrada, inteira.
+        let recusa =
+            format!("agente 1: {acao} no elemento {campo} recusado no console: {LINHA_DA_PESSOA}");
+        esperar_ate(
+            || {
+                atender_consoles();
+                no_log(marca, "ui", &recusa) > 0
+            },
+            600,
+        )
+        .map_err(|_| "a edicao do agente que correu com o Enter nao foi recusada no console")?;
+        if linha() != Some((Modo::Nome, 2)) {
+            crate::log_error!("teste", "{}: a linha ficou {:?}", acao, linha());
+            return Err("a edicao do agente que correu com o Enter mexeu na linha do nome");
+        }
+        if crate::coordenacao::estado(recurso).arrendamento.is_some() {
+            return Err("a edicao recusada no console deixou o campo arrendado");
+        }
+        let soltos = registros_depois(seq, |e| {
+            e.metodo == "ui.release"
+                && e.recurso == recurso
+                && e.codigo == Codigo::Allow
+                && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+        });
+        if soltos.len() != 1 || soltos[0].1.titular != politica::auditoria::Titular::Agente {
+            return Err("o arrendamento solto pela recusa nao ficou gravado em nome do agente");
+        }
+        if no_log(marca, "", "intrusa") != 0 {
+            return Err("o texto da edicao recusada foi ao log");
+        }
+        // A grade mostra o começo do nome, e não o que o agente pediu.
+        esperar_ate(
+            || {
+                atender_consoles();
+                na_grade().rsplit('\n').next() == Some("nome: li")
+            },
+            600,
+        )
+        .map_err(|_| "a grade do terminal nao mostra o comeco do nome depois da corrida")?;
+        if na_grade().contains("intrusa") {
+            return Err("o texto da edicao recusada apareceu na grade do terminal");
+        }
+        // A Pessoa termina o nome e a senha — sem `CONFLICT` —, e entra.
+        digitar_pelo_teclado("a\n")?;
+        esperar_ate(
+            || {
+                atender_consoles();
+                linha() == Some((Modo::Senha, 0))
+            },
+            600,
+        )
+        .map_err(|_| "o nome digitado depois da corrida nao pediu a senha")?;
+        digitar_pelo_teclado(&format!("{senha}\n"))?;
+        esperar_ate(
+            || {
+                atender_consoles();
+                crate::interpretador::sessao_do_console(console).is_some()
+            },
+            600,
+        )
+        .map_err(|_| "a pessoa nao entrou pelo terminal depois da corrida")?;
+        let entrou = crate::interpretador::sessao_do_console(console).ok_or("sem sessao")?;
+        if crate::pessoas::dona_da_sessao(entrou) != Some(lia) {
+            return Err("a sessao aberta depois da corrida nao e da pessoa que digitou");
+        }
+        if !registros_depois(seq, |e| {
+            e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
+        })
+        .is_empty()
+        {
+            return Err("uma tecla da pessoa depois da corrida foi CONFLICT");
+        }
+        // E sai, para a volta seguinte começar sem ninguém.
+        digitar_pelo_teclado("logout\n")?;
+        esperar_ate(
+            || {
+                atender_consoles();
+                crate::interpretador::sessao_do_console(console).is_none()
+                    && linha() == Some((Modo::Comando, 0))
+            },
+            600,
+        )
+        .map_err(|_| "o logout depois da corrida nao saiu")?;
+    }
+
+    // Com o console pedindo um comando, a edição do agente entra, como
+    // sempre — marcada, conferida no consumo e aceita —, e o campo continua
+    // dele até ele o soltar.
+    let marca = crate::log::total_emitidos();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"set_value","value":"agent.ping""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("o set_value no terminal pedindo um comando foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, "agent.ping".len()))
+        },
+        600,
+    )
+    .map_err(|_| "o set_value pedindo um comando nao chegou a linha depois da corrida")?;
+    if no_log(marca, "ui", "recusado no console") != 0
+        || crate::coordenacao::estado(recurso)
+            .arrendamento
+            .map(|a| a.titular)
+            != Some(do_agente)
+    {
+        return Err("a edicao aceita no consumo foi recusada, ou nao ficou com o arrendamento");
+    }
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"cancel""#),
+    )?;
+    if !r.contains(r#""ok":true"#) {
+        return Err("o cancel no terminal pedindo um comando foi recusado");
+    }
+    esperar_ate(
+        || {
+            atender_consoles();
+            linha() == Some((Modo::Comando, 0))
+        },
+        600,
+    )
+    .map_err(|_| "o cancel pedindo um comando nao esvaziou a linha depois da corrida")?;
+    if !pela_porta(&mut agente, &mut sessao, "ui.release", &no_campo(""))?.contains(r#""ok":true"#)
+    {
+        return Err("o agente nao soltou o campo do terminal");
+    }
+
+    // O teto: com as reservas do console cheias, a edição seguinte é recusada
+    // quando entra, com o motivo, antes da conta — sem arrendar o campo, sem
+    // a versão crescer e sem chegar ao Terminal.
+    let mut reservadas = alloc::vec::Vec::new();
+    while let Ok(n) = crate::interpretador::reservar_edicao_da_arvore(
+        console,
+        campo,
+        crate::ui::Origem::Agente(crate::agent::sessao::SERIAL),
+        crate::ui::Acao::Cancelar,
+    ) {
+        reservadas.push(n);
+        if reservadas.len() > 64 {
+            return Err("as reservas de edicao do console nao tem teto");
+        }
+    }
+    let versao = crate::coordenacao::estado(recurso).versao;
+    let marca = crate::log::total_emitidos();
+    let r = pela_porta(
+        &mut agente,
+        &mut sessao,
+        "ui.act",
+        &no_campo(r#","action":"set_value","value":"agent.ping""#),
+    )?;
+    let cheio = r.contains(r#""ok":false"#)
+        && r.contains(crate::interpretador::EDICOES_DEMAIS)
+        && !r.contains(r#""code":"#);
+    for n in reservadas {
+        crate::interpretador::desistir_da_edicao_da_arvore(console, n);
+    }
+    if !cheio {
+        crate::log_error!("teste", "{}", r);
+        return Err("com as reservas cheias, a edicao nao foi recusada com o motivo delas");
+    }
+    let _ = esperar_ate(
+        || {
+            atender_consoles();
+            false
+        },
+        20,
+    );
+    let estado = crate::coordenacao::estado(recurso);
+    if estado.arrendamento.is_some()
+        || estado.versao != versao
+        || no_log(marca, "usuario", "terminal: o agente digitou") != 0
+        || linha() != Some((Modo::Comando, 0))
+    {
+        return Err(
+            "a edicao recusada pelas reservas cheias arrendou o campo ou chegou ao terminal",
+        );
+    }
+    Ok(())
+}
+
+/// O console de um Terminal aberto à mão, sem programa, para os casos que
+/// digitam nele o que o programa digitaria — ver
+/// `terminal_a_marca_sem_reserva` e `terminal_so_se_solta_o_das_recusadas`.
+const CONSOLE_DA_MARCA: crate::pessoas::Console = crate::pessoas::Console::Terminal(3);
+
+/// O campo da janela desse console, como a interface o numeraria: só o
+/// recurso dele importa à coordenação.
+const CAMPO_DA_MARCA: u32 = 0x8000_7FE1;
+
+/// Digita no console da marca, como o programa do Terminal: cada caractere
+/// marcado da árvore.
+fn digitar_marcado(texto: &str) {
+    for c in texto.chars() {
+        if let Some(m) = protocolo::usuario::terminal::da_arvore(c) {
+            crate::interpretador::tratar(CONSOLE_DA_MARCA, m);
+        }
+    }
+}
+
+/// O que veio marcado sem reserva não é edição de ninguém: no console que
+/// pede o nome, nem o apagar nem o texto entram — a regra da linha da
+/// pessoa vale para eles, e o log diz —, e o arrendamento que outro titular
+/// tem no campo fica; no que pede um comando, o texto entra como entraria
+/// sem marca — a marca não faz passar nada que a regra recuse. Quem escreve
+/// no pseudo-terminal sem a reserva só torna as coisas mais estritas para si.
+fn terminal_a_marca_sem_reserva() -> Resultado {
+    use crate::interpretador::Modo;
+    use politica::arrendamento::Titular;
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+    crate::coordenacao::esquecer();
+    let resultado = (|| -> Resultado {
+        digitar_no_console(CONSOLE_DA_MARCA, "login\nli");
+        if linha() != Some((Modo::Nome, 2)) {
+            return Err("o login digitado no console nao pediu o nome");
+        }
+        let outro = Titular::Agente {
+            sessao: 7,
+            chave: Some([7; 32]),
+        };
+        crate::coordenacao::tomar(&recurso, outro, 60_000)
+            .map_err(|_| "o outro titular nao arrendou o campo")?;
+        let seq = seq_da_auditoria();
+        let marca = crate::log::total_emitidos();
+        // O apagar e o texto, e — depois de uma tecla sem marca, que acaba o
+        // que vinha marcado — o texto sozinho: marcados, sem reserva.
+        digitar_marcado("\u{15}intrusa");
+        digitar_no_console(CONSOLE_DA_MARCA, "x\u{8}");
+        digitar_marcado("intrusa");
+        if linha() != Some((Modo::Nome, 2)) {
+            return Err("o que veio marcado sem reserva mexeu na linha do nome");
+        }
+        if crate::coordenacao::estado(&recurso)
+            .arrendamento
+            .map(|a| a.titular)
+            != Some(outro)
+            || !registros_depois(seq, |e| e.metodo == "ui.release").is_empty()
+        {
+            return Err("o que veio marcado sem reserva soltou um arrendamento");
+        }
+        let mut avisos = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            avisos += (r.seq >= marca
+                && r.subsistema == "console"
+                && r.mensagem().contains("veio marcado da arvore sem reserva"))
+                as usize;
+        });
+        if avisos != 2 {
+            crate::log_error!("teste", "{} avisos", avisos);
+            return Err("o que veio marcado sem reserva nao foi descartado com um aviso por vez");
+        }
+        // O nome vazio volta a pedir um comando: o marcado entra como
+        // entraria sem marca.
+        digitar_no_console(CONSOLE_DA_MARCA, "\u{8}\u{8}\n");
+        if linha() != Some((Modo::Comando, 0)) {
+            return Err("o nome vazio nao voltou a pedir um comando");
+        }
+        digitar_marcado("abc");
+        if linha() != Some((Modo::Comando, 3)) {
+            return Err("o que veio marcado sem reserva nao entrou na linha que pede um comando");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+    crate::coordenacao::esquecer();
+    resultado
+}
+
+/// O arrendamento que sai quando o console recusa uma edição da árvore é só
+/// o que edições recusadas deixaram. Direto no console de um Terminal, com a
+/// suíte no papel da interface — a reserva, a conta da coordenação e a
+/// anotação, como em `ui::executar` — e no do programa — o que ela digita
+/// marcado —, com a Pessoa pedindo `login` e o Enter dela consumido depois
+/// de as edições entrarem:
+///
+/// - uma edição recusada solta o que tomou — na linha do nome, na da senha
+///   do login (`login lia`) e na da senha atual da troca (`senha`), as
+///   linhas da pessoa que a regra cobre, e nada entra nelas;
+/// - duas em voo, o `set_value` e o `cancel`, as duas recusadas: a primeira
+///   não solta — a segunda já o renovou —, e a segunda solta;
+/// - outro titular arrendou o campo depois da edição: o dele fica;
+/// - o mesmo titular o renovou depois por um `ui.claim`: fica — e a edição
+///   seguinte, que começou do que o `ui.claim` deixou, também não o solta;
+/// - o arrendamento de antes da edição — um `ui.claim` que ela só renovou
+///   —: fica;
+/// - a edição aceita, numa linha que pede um comando, entra, e o
+///   arrendamento continua de quem editou;
+/// - e as reservas têm teto — a seguinte é recusada com o motivo —, e o
+///   console que reabre as esquece.
+fn terminal_so_se_solta_o_das_recusadas() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::ui::{Acao, Origem};
+    use politica::Codigo;
+    use politica::arrendamento::Titular;
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    let serial = crate::coordenacao::titular_do_agente(crate::agent::sessao::SERIAL)
+        .ok_or("a serial nao tem titular")?;
+    let outro = Titular::Agente {
+        sessao: 7,
+        chave: Some([7; 32]),
+    };
+    let do_campo = || crate::coordenacao::estado(&recurso).arrendamento;
+    // A edição da serial entra: a reserva, a conta e a anotação.
+    let entra = |acao: Acao| -> Resultado {
+        let numero = crate::interpretador::reservar_edicao_da_arvore(
+            CONSOLE_DA_MARCA,
+            CAMPO_DA_MARCA,
+            Origem::Agente(crate::agent::sessao::SERIAL),
+            acao,
+        )?;
+        match crate::coordenacao::editar_com_rastro(&recurso, Some(serial), None, "ui.act") {
+            Ok(rastro) => {
+                crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
+                Ok(())
+            }
+            Err(_) => {
+                crate::interpretador::desistir_da_edicao_da_arvore(CONSOLE_DA_MARCA, numero);
+                Err("a edicao do caso foi recusada pela coordenacao")
+            }
+        }
+    };
+    // Do zero: o console aberto, a tabela vazia, e a Pessoa com o `login`
+    // digitado — o Enter dele ainda não.
+    let comecar = || {
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        crate::coordenacao::esquecer();
+        digitar_no_console(CONSOLE_DA_MARCA, "login");
+        seq_da_auditoria()
+    };
+    // O Enter da Pessoa, consumido: a linha pede o nome.
+    let o_enter = || -> Resultado {
+        digitar_no_console(CONSOLE_DA_MARCA, "\n");
+        if linha() != Some((Modo::Nome, 0)) {
+            return Err("o login nao pediu o nome");
+        }
+        Ok(())
+    };
+    let soltos = |seq: u64| {
+        registros_depois(seq, |e| {
+            e.metodo == "ui.release"
+                && e.recurso == recurso
+                && e.codigo == Codigo::Allow
+                && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+        })
+        .len()
+    };
+    let resultado = (|| -> Resultado {
+        // Uma edição, recusada em cada linha da pessoa que a regra cobre — a
+        // do nome, a da senha do login e a da senha atual da troca, que pede
+        // alguém entrado —: nada entra, e o arrendamento que ela tomou sai.
+        for (digitado, pedida) in [
+            ("login", Modo::Nome),
+            ("login lia", Modo::Senha),
+            ("senha", Modo::SenhaAtual),
+        ] {
+            crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+            crate::coordenacao::esquecer();
+            if digitado == "senha" {
+                crate::interpretador::entrar_para_teste(
+                    CONSOLE_DA_MARCA,
+                    crate::interpretador::PESSOA_DE_TESTE,
+                    crate::interpretador::PAPEL_DA_PESSOA_DE_TESTE,
+                );
+            }
+            digitar_no_console(CONSOLE_DA_MARCA, digitado);
+            let seq = seq_da_auditoria();
+            entra(Acao::DefinirValor)?;
+            digitar_no_console(CONSOLE_DA_MARCA, "\n");
+            if linha() != Some((pedida, 0)) {
+                crate::log_error!("teste", "`{}`: a linha ficou {:?}", digitado, linha());
+                return Err("o Enter da pessoa nao levou a linha da pessoa");
+            }
+            digitar_marcado("\u{15}intrusa");
+            if linha() != Some((pedida, 0)) || do_campo().is_some() || soltos(seq) != 1 {
+                crate::log_error!("teste", "`{}`: a linha ficou {:?}", digitado, linha());
+                return Err(
+                    "a edicao recusada na linha da pessoa entrou, ou nao soltou o que tomou",
+                );
+            }
+        }
+
+        // Duas em voo, as duas recusadas: a segunda solta.
+        let seq = comecar();
+        entra(Acao::DefinirValor)?;
+        entra(Acao::Cancelar)?;
+        o_enter()?;
+        digitar_marcado("\u{15}intrusa");
+        if do_campo().map(|a| a.titular) != Some(serial) || soltos(seq) != 0 {
+            return Err("a primeira de duas edicoes soltou o arrendamento que a segunda renovou");
+        }
+        digitar_marcado("\u{15}");
+        if linha() != Some((Modo::Nome, 0)) || do_campo().is_some() || soltos(seq) != 1 {
+            return Err("a segunda de duas edicoes recusadas nao soltou o arrendamento delas");
+        }
+
+        // Outro titular arrendou depois: o dele fica.
+        let seq = comecar();
+        entra(Acao::DefinirValor)?;
+        crate::coordenacao::soltar(&recurso, serial).map_err(|_| "a serial nao soltou")?;
+        crate::coordenacao::tomar(&recurso, outro, 60_000).map_err(|_| "o outro nao tomou")?;
+        o_enter()?;
+        digitar_marcado("\u{15}intrusa");
+        if do_campo().map(|a| a.titular) != Some(outro) || soltos(seq) != 0 {
+            return Err("a edicao recusada soltou o arrendamento de outro titular");
+        }
+
+        // O mesmo titular o renovou por um `ui.claim`, e outra edição entrou
+        // depois dele: fica.
+        let seq = comecar();
+        entra(Acao::DefinirValor)?;
+        crate::coordenacao::tomar(&recurso, serial, 120_000)
+            .map_err(|_| "o ui.claim da serial nao renovou")?;
+        entra(Acao::DefinirValor)?;
+        o_enter()?;
+        digitar_marcado("\u{15}um");
+        digitar_marcado("\u{15}dois");
+        if linha() != Some((Modo::Nome, 0))
+            || do_campo().map(|a| (a.titular, a.prazo_ms)) != Some((serial, 120_000))
+            || soltos(seq) != 0
+        {
+            return Err("a edicao recusada soltou o arrendamento que um ui.claim renovou");
+        }
+
+        // O arrendamento de antes da edição, que ela só renovou: fica.
+        let seq = comecar();
+        crate::coordenacao::tomar(&recurso, serial, 60_000)
+            .map_err(|_| "o ui.claim da serial nao tomou")?;
+        entra(Acao::DefinirValor)?;
+        o_enter()?;
+        digitar_marcado("\u{15}intrusa");
+        if do_campo().map(|a| a.titular) != Some(serial) || soltos(seq) != 0 {
+            return Err("a edicao recusada soltou o arrendamento que ela so renovou");
+        }
+
+        // Aceita: com a linha pedindo um comando, entra, e o arrendamento
+        // continua de quem editou.
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        crate::coordenacao::esquecer();
+        let marca = crate::log::total_emitidos();
+        entra(Acao::DefinirValor)?;
+        digitar_marcado("\u{15}agent.ping");
+        let mut recusas = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            recusas += (r.seq >= marca && r.mensagem().contains("recusado no console")) as usize;
+        });
+        if linha() != Some((Modo::Comando, "agent.ping".len()))
+            || do_campo().map(|a| a.titular) != Some(serial)
+            || recusas != 0
+        {
+            return Err("a edicao aceita no consumo nao entrou, ou perdeu o arrendamento");
+        }
+
+        // O teto das reservas, e o console que reabre as esquece.
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        let reservar = || {
+            crate::interpretador::reservar_edicao_da_arvore(
+                CONSOLE_DA_MARCA,
+                CAMPO_DA_MARCA,
+                Origem::Agente(crate::agent::sessao::SERIAL),
+                Acao::Cancelar,
+            )
+        };
+        let mut cheias = 0;
+        while reservar().is_ok() {
+            cheias += 1;
+            if cheias > 64 {
+                return Err("as reservas de edicao do console nao tem teto");
+            }
+        }
+        if reservar() != Err(crate::interpretador::EDICOES_DEMAIS) {
+            return Err("as reservas cheias nao recusaram com o motivo delas");
+        }
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        if reservar().is_err() {
+            return Err("o console que reabriu nao esqueceu as reservas");
+        }
+        Ok(())
+    })();
+    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+    crate::coordenacao::esquecer();
+    resultado
+}
+
 /// Um formulário feito com o toolkit, preenchido por um agente pela árvore
 /// e por uma pessoa pelo teclado.
 ///
@@ -36146,6 +36767,18 @@ static CASOS: &[Caso] = &[
         f: terminal_o_enter_pedido_e_so_da_conexao_que_o_pediu,
     },
     Caso {
+        nome: "terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome",
+        f: terminal_a_edicao_que_corre_com_o_enter,
+    },
+    Caso {
+        nome: "terminal: a marca da arvore sem reserva nao solta nem passa nada",
+        f: terminal_a_marca_sem_reserva,
+    },
+    Caso {
+        nome: "terminal: so se solta o arrendamento que as edicoes recusadas deixaram",
+        f: terminal_so_se_solta_o_das_recusadas,
+    },
+    Caso {
         nome: "toolkit: o agente preenche um formulario",
         f: toolkit_o_agente_preenche_um_formulario,
     },
@@ -39408,6 +40041,18 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "pareamento: o terminal fechado com a cerimonia viva sonda a rede na chamada",
         f: pareamento::pareamento_o_terminal_fechado_com_a_cerimonia_viva,
+    },
+    Caso {
+        nome: "pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia",
+        f: pareamento::pareamento_a_edicao_que_corre_com_o_enter_do_aceitar,
+    },
+    Caso {
+        nome: "pareamento: a edicao recusada na linha da cerimonia continua recusada quando a linha volta a pedir um comando",
+        f: pareamento::pareamento_a_edicao_recusada_na_cerimonia_fica_recusada,
+    },
+    Caso {
+        nome: "pareamento: o aviso atrasado do fim nao muda a linha do nome nem a da senha do login",
+        f: pareamento::pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login,
     },
     Caso {
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",

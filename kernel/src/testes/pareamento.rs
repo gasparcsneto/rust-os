@@ -4425,7 +4425,9 @@ fn executa_de_novo(console: Console) -> Resultado {
 /// pede, com o foco: `f` recebe o console dele, a camada da janela e o
 /// recurso do campo da linha de comando. No fim, o Terminal e o servidor
 /// saem, e o foco volta ao kernel.
-fn com_o_terminal_de_verdade(f: impl FnOnce(Console, u32, &str) -> Resultado) -> Resultado {
+pub(super) fn com_o_terminal_de_verdade(
+    f: impl FnOnce(Console, u32, &str) -> Resultado,
+) -> Resultado {
     use crate::ui::{Acao, ID_DO_BOTAO_TERMINAL, Origem};
     use protocolo::usuario::evento::{CANAL_DAS_JANELAS, CANAL_DO_TERMINAL, Evento, tipo};
     if crate::tela::tela_fisica().is_none() {
@@ -4702,5 +4704,350 @@ pub(super) fn pareamento_o_terminal_fechado_com_a_cerimonia_viva() -> Resultado 
             }
             Ok(())
         })
+    })
+}
+
+// ---------------------------------------------------------------------
+// A árvore e o aviso nas linhas da cerimônia e do login.
+// ---------------------------------------------------------------------
+
+/// A corrida do L1 numa linha da cerimônia, no Terminal de verdade: a
+/// Pessoa, entrada nele, digita `aceitar` pela janela, e o Enter dela ainda
+/// vai a caminho do console quando o `set_value` de um agente entra —
+/// conferido contra a linha de antes, um comando, ele é aceito e arrenda o
+/// campo. O console consome o Enter, abre a cerimônia e passa a esperar o
+/// outro dispositivo; a edição, que vem marcada depois, é descartada ali —
+/// nada entra na linha da cerimônia —, com a recusa no log e o arrendamento
+/// solto. A Pessoa segue na linha da cerimônia sem `CONFLICT`; e, com a
+/// linha já da cerimônia, a ação do agente é recusada quando entra, com o
+/// motivo — o caso das linhas da cerimônia num Terminal.
+pub(super) fn pareamento_a_edicao_que_corre_com_o_enter_do_aceitar() -> Resultado {
+    use crate::interpretador::{self as interp, LINHA_DA_PESSOA, Modo};
+    use crate::ui::{Acao, Origem};
+    com_a_cerimonia(|| {
+        com_o_terminal_de_verdade(|console, _, recurso| {
+            entrar(console, "bia")?;
+            let campo =
+                super::campo_do_terminal().ok_or("o terminal nao descreveu a linha de comando")?;
+            let linha = || interp::linha_de_teste(console);
+            let serial = crate::coordenacao::titular_do_agente(crate::agent::sessao::SERIAL)
+                .ok_or("a serial nao tem titular")?;
+            let comando = format!("aceitar {NOME} {PAPEL}");
+            super::digitar_pelo_teclado(&comando)?;
+            super::esperar_ate(
+                || {
+                    super::atender_consoles();
+                    linha() == Some((Modo::Comando, comando.len()))
+                },
+                600,
+            )
+            .map_err(|_| "o aceitar digitado na janela nao chegou ao console")?;
+            // O Enter, só até o Terminal: o console ainda pede um comando.
+            super::digitar_pelo_teclado("\n")?;
+            super::so_a_janela();
+            if linha() != Some((Modo::Comando, comando.len())) || estado().is_some() {
+                return Err("o console consumiu o Enter do aceitar antes de a acao entrar");
+            }
+            let seq = super::seq_da_auditoria();
+            let marca = crate::log::total_emitidos();
+            crate::ui::agir(
+                campo,
+                Acao::DefinirValor,
+                Some("intrusa"),
+                Origem::Agente(0),
+            )
+            .map_err(|_| "o set_value com a linha pedindo um comando foi recusado na entrada")?;
+            if crate::coordenacao::estado(recurso)
+                .arrendamento
+                .map(|a| a.titular)
+                != Some(serial)
+            {
+                return Err("o set_value aceito na entrada nao arrendou o campo ao agente");
+            }
+            let recusa = format!(
+                "agente 0: set_value no elemento {campo} recusado no console: {LINHA_DA_PESSOA}"
+            );
+            let recusada = || {
+                let mut n = 0;
+                crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                    n +=
+                        (r.seq >= marca && r.subsistema == "ui" && r.mensagem() == recusa) as usize;
+                });
+                n > 0
+            };
+            super::esperar_ate(
+                || {
+                    super::atender_consoles();
+                    recusada()
+                },
+                600,
+            )
+            .map_err(
+                |_| "a edicao que correu com o Enter do aceitar nao foi recusada no console",
+            )?;
+            no_estado(
+                (Lado::Aceita, Estado::Aberta),
+                "o aceitar que correu com a edicao nao abriu a janela",
+            )?;
+            if linha() != Some((Modo::Pareando, 0)) {
+                crate::log_error!("teste", "a linha ficou {:?}", linha());
+                return Err("a edicao do agente entrou na linha da cerimonia");
+            }
+            let soltos = super::registros_depois(seq, |e| {
+                e.metodo == "ui.release"
+                    && e.recurso == recurso
+                    && e.detalhe == crate::coordenacao::SOLTO_PELA_RECUSA
+            });
+            if crate::coordenacao::estado(recurso).arrendamento.is_some() || soltos.len() != 1 {
+                return Err("a edicao recusada na linha da cerimonia nao soltou o arrendamento");
+            }
+            // A Pessoa digita na linha da cerimônia, sem `CONFLICT`.
+            super::digitar_pelo_teclado("x")?;
+            super::esperar_ate(
+                || {
+                    super::atender_consoles();
+                    linha() == Some((Modo::Pareando, 1))
+                },
+                600,
+            )
+            .map_err(|_| "a tecla da pessoa nao chegou a linha da cerimonia")?;
+            if !super::registros_depois(seq, |e| {
+                e.metodo == "keyboard" && e.recurso == recurso && e.codigo == Codigo::Conflict
+            })
+            .is_empty()
+            {
+                return Err("uma tecla da pessoa na linha da cerimonia foi CONFLICT");
+            }
+            // Já na linha da cerimônia, a ação do agente é recusada quando
+            // entra, com o motivo, e não chega ao Terminal.
+            match crate::ui::agir(
+                campo,
+                Acao::DefinirValor,
+                Some("intrusa"),
+                Origem::Agente(0),
+            ) {
+                Err(r) if r.motivo == LINHA_DA_PESSOA && r.codigo.is_none() => {}
+                outro => {
+                    crate::log_error!("teste", "{:?}", outro);
+                    return Err(
+                        "a acao do agente na linha da cerimonia nao foi recusada na entrada",
+                    );
+                }
+            }
+            // A Pessoa desiste: a linha vazia.
+            super::digitar_pelo_teclado("\u{8}\n")?;
+            super::esperar_ate(
+                || {
+                    super::atender_consoles();
+                    linha() == Some((Modo::Comando, 0))
+                },
+                600,
+            )
+            .map_err(|_| "a linha vazia nao desistiu da cerimonia no terminal")?;
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::Cancelada),
+                "a linha vazia nao cancelou a cerimonia",
+            )
+        })
+    })
+}
+
+/// A edição da árvore que o console recusa numa linha da cerimônia fica
+/// recusada inteira, mesmo que a linha volte a pedir um comando no meio
+/// dela — o fim da cerimônia chega de outro núcleo entre o apagar e o texto
+/// —: o resto não entra na linha que volta, na frente do que a Pessoa
+/// digitar. Direto no console, com a suíte no papel da interface e no do
+/// programa, como em "terminal: so se solta o arrendamento que as edicoes
+/// recusadas deixaram". E a linha que engole o resto da senha da cerimônia
+/// é da pessoa também: o que vem marcado é descartado ali, sem acabar o
+/// engolir, que só o Enter da Pessoa acaba.
+pub(super) fn pareamento_a_edicao_recusada_na_cerimonia_fica_recusada() -> Resultado {
+    use crate::interpretador::{self as interp, Modo};
+    use crate::ui::{Acao, Origem};
+    use protocolo::usuario::terminal::{APAGAR_A_LINHA, da_arvore};
+    const CAMPO: u32 = 0x8000_7FE2;
+    com_a_cerimonia(|| {
+        entrar(CONSOLE, "bia")?;
+        let recurso = crate::coordenacao::recurso(CAMPO);
+        let serial = crate::coordenacao::titular_do_agente(crate::agent::sessao::SERIAL)
+            .ok_or("a serial nao tem titular")?;
+        let marcado = |c: char| {
+            if let Some(m) = da_arvore(c) {
+                interp::tratar(CONSOLE, m);
+            }
+        };
+        // O `aceitar` da Pessoa, sem o Enter; a edição da serial entra.
+        super::digitar_no_console(CONSOLE, &format!("aceitar {NOME} {PAPEL}"));
+        let numero = interp::reservar_edicao_da_arvore(
+            CONSOLE,
+            CAMPO,
+            Origem::Agente(crate::agent::sessao::SERIAL),
+            Acao::DefinirValor,
+        )?;
+        let rastro = crate::coordenacao::editar_com_rastro(&recurso, Some(serial), None, "ui.act")
+            .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
+        interp::anotar_a_edicao_da_arvore(CONSOLE, numero, rastro);
+        // O Enter: a cerimônia abre, e a linha espera o outro.
+        super::digitar_no_console(CONSOLE, "\n");
+        no_estado((Lado::Aceita, Estado::Aberta), "aceitar nao abriu a janela")?;
+        // O apagar da edição, recusado na linha da cerimônia.
+        marcado(APAGAR_A_LINHA);
+        if interp::linha_de_teste(CONSOLE) != Some((Modo::Pareando, 0))
+            || crate::coordenacao::estado(&recurso).arrendamento.is_some()
+        {
+            return Err("o apagar da edicao nao foi recusado na linha da cerimonia");
+        }
+        // O fim, de outro núcleo, no meio da edição: a linha volta a pedir
+        // um comando.
+        vencer_no_meio();
+        if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0)) {
+            return Err("o fim da cerimonia nao devolveu a linha a um comando");
+        }
+        // O resto da edição: descartado com ela.
+        for c in "agent.ping".chars() {
+            marcado(c);
+        }
+        if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0)) {
+            return Err("o resto da edicao recusada entrou na linha que voltou a pedir um comando");
+        }
+        // A linha seguinte da Pessoa executa sozinha.
+        executa_de_novo(CONSOLE)?;
+
+        // E a linha que engole o resto de uma senha — a cerimônia acabou no
+        // meio dela —: o que vem marcado também é descartado ali, e não acaba
+        // o engolir; o Enter da Pessoa, sim.
+        recomecar();
+        aceitar(CONSOLE, NOME)?;
+        let mut ini = Iniciante::novo(VAGA, 2_003_400, 1);
+        let k = ate_os_codigos(CONSOLE, &mut ini)?;
+        digitar(CONSOLE, &texto(k.k_a));
+        if linha(CONSOLE) != Linha::Senha {
+            return Err("o codigo certo nao pediu a senha");
+        }
+        super::digitar_no_console(CONSOLE, "sen");
+        ini.mandar(&desistiu(conta::Motivo::Cancelada.texto()))?;
+        if !interp::engolindo_de_teste(CONSOLE) {
+            return Err("o fim no meio da senha nao pos o console a engolir");
+        }
+        for c in "\u{15}intrusa".chars() {
+            marcado(c);
+        }
+        if !interp::engolindo_de_teste(CONSOLE)
+            || interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0))
+        {
+            return Err("o que veio marcado mexeu na linha que engole, ou acabou o engolir");
+        }
+        super::digitar_no_console(CONSOLE, "\n");
+        if interp::engolindo_de_teste(CONSOLE) {
+            return Err("o Enter da pessoa nao acabou o engolir");
+        }
+        executa_de_novo(CONSOLE)
+    })
+}
+
+/// O aviso do fim da cerimônia sai de outro fio e pode chegar atrasado —
+/// a suíte o segura entre a cerimônia e a linha (`interpretador::NoMeio`) —:
+/// nesse meio-tempo a Pessoa desiste da linha que esperava, sai e começa o
+/// `login`. O aviso não muda a linha que já não é da cerimônia:
+///
+/// - na do nome, ela continua pedindo o nome — antes, virava uma linha de
+///   comando, e o nome e a senha digitados adiantado ecoavam, iam à árvore
+///   e ao histórico —; a Pessoa digita o nome e a senha, e entra;
+/// - na da senha (`login bia`), ela continua pedindo a senha, sem engolir —
+///   antes, o console engolia a senha até o Enter, e o login se perdia —, e
+///   o bit da senha continua ligado: a tecla do teclado da máquina não
+///   entra no histórico.
+pub(super) fn pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login() -> Resultado {
+    use crate::interpretador::{self as interp, Modo, NoMeio};
+    /// A Pessoa, com o aviso a caminho: a linha vazia que desiste de
+    /// esperar, o `logout` e o `login`.
+    fn sair_e_pedir_o_nome() {
+        super::digitar_no_console(CONSOLE, "\n");
+        super::digitar_no_console(CONSOLE, "logout\n");
+        super::digitar_no_console(CONSOLE, "login\n");
+    }
+    /// O mesmo, com o nome junto: a linha pede a senha.
+    fn sair_e_pedir_a_senha() {
+        super::digitar_no_console(CONSOLE, "\n");
+        super::digitar_no_console(CONSOLE, "logout\n");
+        super::digitar_no_console(CONSOLE, "login bia\n");
+    }
+    com_a_cerimonia(|| {
+        crate::superficies::devolver_foco();
+        crate::teclado::esvaziar();
+        let r = (|| -> Resultado {
+            entrar(CONSOLE, "bia")?;
+            let entrar_de_novo = || -> Resultado {
+                super::digitar_no_console(CONSOLE, &format!("{SENHA}\n"));
+                if interp::sessao_do_console(CONSOLE).is_none() {
+                    return Err("a pessoa nao entrou depois do aviso atrasado");
+                }
+                if saida_de(CONSOLE).contains(SENHA) {
+                    return Err("a senha digitada depois do aviso atrasado ecoou");
+                }
+                Ok(())
+            };
+
+            // A linha do nome.
+            aceitar(CONSOLE, NOME)?;
+            interp::no_meio_de_teste(Some((NoMeio::DoAviso, sair_e_pedir_o_nome)));
+            vencer_no_meio();
+            interp::no_meio_de_teste(None);
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::Prazo),
+                "o prazo nao acabou a cerimonia",
+            )?;
+            if interp::sessao_do_console(CONSOLE).is_some() {
+                return Err("o gancho do aviso nao rodou: a pessoa nao saiu");
+            }
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Nome, 0)) {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o aviso atrasado da cerimonia mudou a linha do nome");
+            }
+            super::digitar_no_console(CONSOLE, "bia\n");
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Senha, 0)) {
+                return Err("o nome digitado depois do aviso atrasado nao pediu a senha");
+            }
+            let _ = saida_de(CONSOLE);
+            entrar_de_novo()?;
+
+            // A linha da senha.
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            interp::no_meio_de_teste(Some((NoMeio::DoAviso, sair_e_pedir_a_senha)));
+            vencer_no_meio();
+            interp::no_meio_de_teste(None);
+            if interp::sessao_do_console(CONSOLE).is_some() {
+                return Err("o gancho do aviso nao rodou: a pessoa nao saiu");
+            }
+            if interp::engolindo_de_teste(CONSOLE)
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::Senha, 0))
+            {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}, engolindo: {}",
+                    interp::linha_de_teste(CONSOLE),
+                    interp::engolindo_de_teste(CONSOLE)
+                );
+                return Err("o aviso atrasado da cerimonia mudou a linha da senha do login");
+            }
+            crate::teclado::esvaziar();
+            super::teclar(30);
+            super::atender_consoles();
+            if crate::teclado::observar().is_some() {
+                return Err("com a linha pedindo a senha, a tecla entrou no historico");
+            }
+            let _ = saida_de(CONSOLE);
+            entrar_de_novo()
+        })();
+        interp::no_meio_de_teste(None);
+        crate::teclado::esvaziar();
+        r
     })
 }
