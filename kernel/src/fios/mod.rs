@@ -383,6 +383,16 @@ pub fn proximo_id_de_teste() -> u64 {
     PROXIMO_ID.load(Ordering::Relaxed)
 }
 
+/// Só para a suíte: o próximo fio nasce com id `minimo`, pelo menos — o
+/// número de um processo de produção, com os dígitos que ele tem depois
+/// de o sistema rodar um tempo, para o caso que depende do tamanho do
+/// número rodar igual numa rodada filtrada. Os ids só crescem: pular
+/// adiante não repete nenhum.
+#[cfg(feature = "modo-teste")]
+pub fn saltar_ids_de_teste(minimo: u64) {
+    PROXIMO_ID.fetch_max(minimo, Ordering::Relaxed);
+}
+
 /// Tiques restantes antes de preemptar o fio atual de cada núcleo.
 ///
 /// # Por que fora da trava do escalonador

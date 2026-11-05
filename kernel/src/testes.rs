@@ -39056,6 +39056,18 @@ static CASOS: &[Caso] = &[
         f: nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa,
     },
     Caso {
+        nome: "nsf: a recusa do manifesto de quem tem descricao longa e do manifesto",
+        f: nsf_a_recusa_do_manifesto_de_quem_tem_descricao_longa,
+    },
+    Caso {
+        nome: "nsf: a bifurcacao de quem tem descricao longa liga o filho",
+        f: nsf_a_bifurcacao_de_quem_tem_descricao_longa_liga_o_filho,
+    },
+    Caso {
+        nome: "nsf: a decisao de quem tem descricao acima do teto e do processo",
+        f: nsf_a_decisao_de_quem_tem_descricao_acima_do_teto_e_do_processo,
+    },
+    Caso {
         nome: "firewall: so restringe, depois do gate",
         f: firewall_so_restringe_depois_do_gate,
     },
@@ -60371,6 +60383,33 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
                     (3, "o editor do codigo nao esta no registro"),
                     (4, "o papel nao confia no editor outro"),
                 ];
+                // Quem executa é um filho do instalador — as bifurcações
+                // dele dizem quais —, ainda com o programa do instalador: o
+                // resumo dele, que os pedidos do instalador dizem.
+                let do_instalador = alloc::format!("pelo processo {fio} (instalador ");
+                let resumo = registro_que(|e| e.detalhe.starts_with(&do_instalador))
+                    .and_then(|(_, e)| {
+                        e.detalhe[do_instalador.len()..]
+                            .get(..8)
+                            .map(alloc::string::String::from)
+                    })
+                    .ok_or("o instalador nao pediu nada com o programa dele")?;
+                let bifurcou = alloc::format!("pelo processo {fio} (");
+                let filhos: alloc::vec::Vec<u64> = crate::autorizacao::com_auditoria(|c| {
+                    c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                        .filter(|r| {
+                            r.evento.metodo == "process.fork"
+                                && r.evento.detalhe.starts_with(&bifurcou)
+                        })
+                        .filter_map(|r| {
+                            r.evento
+                                .detalhe
+                                .rsplit_once("): filho ")
+                                .and_then(|(_, f)| f.parse().ok())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
                 for (arquivo, motivo) in motivos {
                     let caminho = alloc::format!("{CODIGO_INSTALADO}/{}", PUBLICADOS[arquivo]);
                     let (_, e) = registro_que(|e| {
@@ -60380,21 +60419,25 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
                     })
                     .ok_or("a recusa do executar nao foi gravada")?;
                     // O processo — o filho do instalador, que executa — e o
-                    // programa: o nome sai antes do motivo quando o detalhe
-                    // passa do teto, e o resumo fica. O motivo inteiro, e a
-                    // decisão.
-                    let programa = e
+                    // programa, o do instalador: o nome sai antes do motivo
+                    // quando o detalhe passa do teto, e o resumo fica. O
+                    // motivo inteiro, e a decisão.
+                    let quem = e
                         .detalhe
                         .strip_prefix("pelo processo ")
                         .and_then(|resto| resto.split_once(" ("))
-                        .map(|(_, programa)| programa);
-                    let certo = programa
-                        .is_some_and(|p| p.starts_with("instalador ") || p.starts_with("? "))
-                        && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
+                        .and_then(|(f, resto)| {
+                            Some((f.parse::<u64>().ok()?, resto.split_once("): ")?.0))
+                        });
+                    let certo = quem.is_some_and(|(filho, programa)| {
+                        filhos.contains(&filho)
+                            && (programa == alloc::format!("instalador {resumo}")
+                                || programa == alloc::format!("? {resumo}"))
+                    }) && e.detalhe.contains(&alloc::format!("): {motivo}; decisao "));
                     if !certo {
-                        crate::log_error!("teste", "{:?}", e);
+                        crate::log_error!("teste", "{:?} {:?} {}", e, filhos, resumo);
                         return Err(
-                            "a recusa do executar nao diz o processo, o motivo e a decisao",
+                            "a recusa do executar nao diz o filho do instalador, o programa dele, o motivo e a decisao",
                         );
                     }
                 }
@@ -60462,6 +60505,169 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
     })
 }
 
+// ---------------------------------------------------------------------------
+// A descrição longa: o maior nome e o maior editor que se aceitam, e o
+// detalhe da auditoria, que tem teto
+// ---------------------------------------------------------------------------
+
+/// O nome do programa dos casos de descrição longa: o maior que um
+/// manifesto aceita.
+const NOME_LONGO: &str = "programa-com-o-maior-nome-aceito";
+
+/// O editor dos casos de descrição longa: a privada com que ele sela, e o
+/// maior nome que o registro de editores aceita.
+const EDITOR_LONGO: ([u8; 32], &str) = ([0x5d; 32], "editor-com-o-maior-nome-aceito-1");
+
+const _: () = assert!(NOME_LONGO.len() == politica::manifesto::MAIOR_NOME);
+const _: () = assert!(EDITOR_LONGO.1.len() == sigilo::registro::MAIOR_NOME);
+
+/// O menor fio de produção dos casos de descrição longa: três dígitos, e o
+/// `pelo` do programa de [`programa_de_descricao_longa`] já passa do teto
+/// do detalhe sozinho — 97 bytes. A suíte filtrada chega aqui com fios de
+/// um ou dois dígitos; a completa, com mais.
+const FIO_DE_PRODUCAO: u64 = 100;
+
+/// O programa de descrição longa, selado pelo [`EDITOR_LONGO`], com o
+/// manifesto que declara `permite`: `pelo processo N (<NOME_LONGO>
+/// cdcdcdcd de <EDITOR_LONGO>)`.
+fn programa_de_descricao_longa(permite: &str) -> crate::autorizacao::Programa {
+    crate::autorizacao::Programa::Imagem {
+        manifesto: Some(manifesto_de_teste(NOME_LONGO, permite)),
+        resumo: [0xcd; 32],
+        editor: Some(sigilo::codigo::publica_do_editor(&EDITOR_LONGO.0)),
+    }
+}
+
+/// Roda `f` com o [`EDITOR_LONGO`] no registro de editores — e a
+/// confiança nele dos `papeis`, na linha `editores` de cada um —, e com o
+/// NSF começando agora. Põe o registro e a política de volta, também
+/// quando `f` falha.
+fn com_o_editor_longo(papeis: &[&str], f: impl FnOnce() -> Resultado) -> Resultado {
+    let da_imagem = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
+    let mut com_o_longo = da_imagem.clone();
+    com_o_longo.push(crate::identidade::Editor {
+        chave: sigilo::codigo::publica_do_editor(&EDITOR_LONGO.0),
+        nome: EDITOR_LONGO.1.into(),
+    });
+    crate::identidade::trocar_editores_de_teste(com_o_longo);
+    let trocas: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> = papeis
+        .iter()
+        .map(|p| {
+            (
+                alloc::format!("editores {p} bancada"),
+                alloc::format!("editores {p} bancada {}", EDITOR_LONGO.1),
+            )
+        })
+        .collect();
+    let trocas: alloc::vec::Vec<(&str, &str)> = trocas
+        .iter()
+        .map(|(de, para)| (de.as_str(), para.as_str()))
+        .collect();
+    let r = politica_trocada(&trocas).and_then(|p| com_a_politica(p, || com_o_nsf(f)));
+    crate::identidade::trocar_editores_de_teste(da_imagem);
+    r
+}
+
+/// O NSF lê a auditoria até o registro `ate`; devolve quantos pedidos ele
+/// fez ao gate nessas voltas.
+fn nsf_le_ate(ate: u64) -> usize {
+    let mut pedidos = 0;
+    for _ in 0..64 {
+        pedidos += crate::seguranca::passo().pedidos;
+        if crate::seguranca::com_motor_de_teste(|m| m.lido() >= ate) == Some(true) {
+            break;
+        }
+    }
+    pedidos
+}
+
+/// O que um caso pede ao fio de [`como_processo_num_fio`]: o programa que o
+/// fio executa, e o que ele faz como o processo desse programa.
+struct ComoProcesso {
+    programa: crate::autorizacao::Programa,
+    acao: fn() -> [u64; 3],
+}
+
+/// O que o fio de [`como_processo_num_fio`] devolveu: o id dele — zero,
+/// ainda nada — e os números da ação.
+static COMO_PROCESSO: [core::sync::atomic::AtomicU64; 4] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 4];
+
+extern "C" fn fio_como_processo(argumento: u64) -> ! {
+    use core::sync::atomic::Ordering;
+    // SAFETY: o ponteiro veio do `Box::into_raw` de `como_processo_num_fio`,
+    // este fio é o único que o recebeu, e o reconstrói uma vez só.
+    let pedido = unsafe { alloc::boxed::Box::from_raw(argumento as *mut ComoProcesso) };
+    let feito = crate::fios::com_programa_de_teste(pedido.programa, pedido.acao);
+    for (n, valor) in COMO_PROCESSO[1..].iter().zip(feito) {
+        n.store(valor, Ordering::SeqCst);
+    }
+    COMO_PROCESSO[0].store(crate::fios::id_atual(), Ordering::SeqCst);
+    crate::fios::terminar()
+}
+
+/// Roda `acao` como o processo de `programa`, num fio novo do kernel com o
+/// id [`FIO_DE_PRODUCAO`] ou maior: o fio da suíte tem um número de um
+/// dígito, e o tamanho do `pelo` depende do número. É a mesma conta de um
+/// processo — `crate::fios::com_programa_de_teste`, a autoridade do
+/// sistema — sem precisar de um programa com o maior nome. Devolve o fio e
+/// os números da ação.
+fn como_processo_num_fio(
+    programa: crate::autorizacao::Programa,
+    acao: fn() -> [u64; 3],
+) -> Result<(u64, [u64; 3]), &'static str> {
+    use core::sync::atomic::Ordering;
+    for n in &COMO_PROCESSO {
+        n.store(0, Ordering::SeqCst);
+    }
+    crate::fios::saltar_ids_de_teste(FIO_DE_PRODUCAO);
+    let pedido =
+        alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ComoProcesso { programa, acao }));
+    if let Err(e) = crate::fios::criar("teste-descricao-longa", fio_como_processo, pedido as u64) {
+        // SAFETY: o fio não nasceu, e o ponteiro não foi a ninguém.
+        drop(unsafe { alloc::boxed::Box::from_raw(pedido) });
+        return Err(e);
+    }
+    esperar_cedendo(|| COMO_PROCESSO[0].load(Ordering::SeqCst) != 0, 500)
+        .map_err(|_| "o fio do processo de descricao longa nao respondeu")?;
+    let fio = COMO_PROCESSO[0].load(Ordering::SeqCst);
+    if fio < FIO_DE_PRODUCAO {
+        return Err("o fio do processo de descricao longa nao tem o numero de producao");
+    }
+    Ok((
+        fio,
+        core::array::from_fn(|i| COMO_PROCESSO[i + 1].load(Ordering::SeqCst)),
+    ))
+}
+
+/// O código adulterado que o processo de descrição longa pede para
+/// executar.
+fn adulterado_de_descricao_longa() -> alloc::string::String {
+    alloc::format!("{CODIGO_INSTALADO}/adulterado-de-descricao-longa")
+}
+
+/// O `executar` do código adulterado, como o processo de descrição longa:
+/// a decisão do gate e a execução dela com o motivo do selo que não
+/// confere, pelas mesmas funções do `executar`. O código da decisão, o
+/// número dela e o da execução.
+fn executa_o_adulterado() -> [u64; 3] {
+    use politica::Codigo;
+    let caminho = adulterado_de_descricao_longa();
+    let (codigo, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
+        politica::Permissao::ProcessRun,
+        &caminho,
+        "process.exec",
+    );
+    let execucao = crate::autorizacao::auditar_execucao_do_processo(
+        "process.exec",
+        &caminho,
+        Codigo::DenyPolicy,
+        politica::procedencia::Falta::NaoConfere.motivo(),
+        decisao,
+    );
+    [codigo as u64, decisao, execucao]
+}
+
 /// O achado F1: o `process.exec` de um código adulterado, pedido por um
 /// processo de descrição longa — um programa selado, com o maior nome e o
 /// maior editor que se aceitam, `pelo processo N (<nome> <resumo> de
@@ -60472,130 +60678,345 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
 /// do processo. O corte de antes levava o motivo, e o alerta não saía: quem
 /// quisesse evitá-lo só precisava de um nome longo.
 ///
-/// O fio da suíte pede como o processo desse programa — pela mesma
+/// O processo tem o fio de produção — três dígitos ou mais —, e então o
+/// `pelo` sozinho passa do teto (o achado 3 do adversário do F1): a decisão
+/// do gate, sem texto, também encolhe — o nome sai, o editor fica — e
+/// termina no `)`, do processo. O anel a cortava no meio do editor.
+///
+/// Um fio do kernel pede como o processo desse programa — pela mesma
 /// `autorizar_processo_com_decisao` do `executar` —, e grava a execução da
 /// decisão com o motivo do selo que não confere, pela mesma
 /// `auditar_execucao_do_processo` com que o `executar` a grava.
 fn nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa() -> Resultado {
-    use crate::autorizacao::Programa;
     use politica::Codigo;
     use politica::procedencia::Falta;
     use seguranca::grafo::{Aresta, No};
     use seguranca::regras::Regra;
-    const NOME: &str = "programa-com-o-maior-nome-aceito";
-    const EDITOR: ([u8; 32], &str) = ([0x5d; 32], "editor-com-o-maior-nome-aceito-1");
-    const _: () = assert!(NOME.len() == politica::manifesto::MAIOR_NOME);
-    const _: () = assert!(EDITOR.1.len() == sigilo::registro::MAIOR_NOME);
-    let chave = sigilo::codigo::publica_do_editor(&EDITOR.0);
-    let caminho = alloc::format!("{CODIGO_INSTALADO}/adulterado-de-descricao-longa");
-    let da_imagem = crate::identidade::trocar_editores_de_teste(alloc::vec::Vec::new());
-    let mut com_o_longo = da_imagem.clone();
-    com_o_longo.push(crate::identidade::Editor {
-        chave,
-        nome: EDITOR.1.into(),
-    });
-    crate::identidade::trocar_editores_de_teste(com_o_longo);
-    let confia = alloc::format!("editores sistema bancada {}", EDITOR.1);
-    let r = politica_trocada(&[("editores sistema bancada", &confia)]).and_then(|p| {
-        com_a_politica(p, || {
-            com_o_nsf(|| {
-                let programa = Programa::Imagem {
-                    manifesto: Some(manifesto_de_teste(NOME, "process.run")),
-                    resumo: [0xcd; 32],
-                    editor: Some(chave),
-                };
-                let fio = crate::fios::id_atual();
-                let pelo = alloc::format!("pelo processo {fio} ({})", programa.descricao());
-                let (codigo, decisao, execucao) =
-                    crate::fios::com_programa_de_teste(programa, || {
-                        let (codigo, decisao) = crate::autorizacao::autorizar_processo_com_decisao(
-                            politica::Permissao::ProcessRun,
-                            &caminho,
-                            "process.exec",
-                        );
-                        let execucao = crate::autorizacao::auditar_execucao_do_processo(
-                            "process.exec",
-                            &caminho,
-                            Codigo::DenyPolicy,
-                            Falta::NaoConfere.motivo(),
-                            decisao,
-                        );
-                        (codigo, decisao, execucao)
-                    });
-                if codigo != Codigo::Allow {
-                    return Err("o gate nao deixou o processo de descricao longa executar");
-                }
-                // A decisão guarda a descrição como sempre — sem citação,
-                // nada encolhe —; a execução, a descrição toda encolhida, o
-                // motivo inteiro e a citação inteira.
-                let decidida = registro_numero(decisao).ok_or("a decisao saiu do anel")?;
-                let executada = registro_numero(execucao).ok_or("a execucao saiu do anel")?;
-                let esperado = alloc::format!(
-                    "pelo processo {fio} (? cdcdcdcd de ?): {}; decisao {decisao}",
-                    Falta::NaoConfere.motivo()
-                );
-                if !pelo.starts_with(&decidida.detalhe)
-                    || decidida.detalhe.len() < pelo.len().min(politica::auditoria::MAIOR_DETALHE)
-                {
-                    crate::log_error!("teste", "{} / {}", decidida.detalhe, pelo);
-                    return Err("a decisao do processo de descricao longa nao guardou a descricao");
-                }
-                if executada.detalhe != esperado || executada.codigo != Codigo::DenyPolicy {
-                    crate::log_error!("teste", "{} / {}", executada.detalhe, esperado);
-                    return Err(
-                        "a execucao do processo de descricao longa nao tem a descricao toda encolhida, o motivo e a citacao",
-                    );
-                }
-                // O NSF lê as duas, e o código adulterado é um incidente,
-                // de alerta, que ninguém contém.
-                let mut pedidos = 0;
-                for _ in 0..64 {
-                    pedidos += crate::seguranca::passo().pedidos;
-                    if crate::seguranca::com_motor_de_teste(|m| m.lido() >= execucao) == Some(true)
-                    {
-                        break;
-                    }
-                }
-                let viu = crate::seguranca::com_motor_de_teste(|m| {
-                    m.incidentes.todos().any(|i| {
-                        i.deteccoes.iter().any(|d| {
-                            d.regra == Regra::CodigoAdulterado
-                                && d.registros == [execucao]
-                                && d.explicacao.contains(&caminho)
-                        })
-                    })
-                });
-                if viu != Some(true) {
-                    return Err("o NSF nao viu o codigo adulterado de quem tem descricao longa");
-                }
-                if pedidos != 0 {
-                    return Err("o NSF pediu uma contencao pelo codigo adulterado");
-                }
-                // E o grafo do NSF não toma a descrição abreviada por outro
-                // programa do processo.
-                let abreviado = crate::seguranca::com_motor_de_teste(|m| {
-                    m.eventos()
-                        .find(|e| e.seq == execucao)
-                        .map(|e| No::Processo {
-                            epoca: e.epoca,
-                            fio,
-                        })
-                        .is_none_or(|no| {
-                            m.grafo.vizinhos(&no).iter().any(|(aresta, outro, _)| {
-                                *aresta == Aresta::Executa
-                                    && matches!(outro, No::Programa(p)
-                                        if politica::auditoria::descricao_abreviada(p))
-                            })
-                        })
-                });
-                if abreviado != Some(false) {
-                    return Err("o NSF tomou a descricao abreviada por outro programa");
-                }
-                Ok(())
-            })
+    let caminho = adulterado_de_descricao_longa();
+    com_o_editor_longo(&["sistema"], || {
+        let programa = programa_de_descricao_longa("process.run");
+        let (fio, [codigo, decisao, execucao]) =
+            como_processo_num_fio(programa, executa_o_adulterado)?;
+        if codigo != Codigo::Allow as u64 {
+            return Err("o gate nao deixou o processo de descricao longa executar");
+        }
+        let pelo = alloc::format!("pelo processo {fio} ({})", programa.descricao());
+        if pelo.len() <= politica::auditoria::MAIOR_DETALHE {
+            crate::log_error!("teste", "{}", pelo);
+            return Err("o pelo do processo de descricao longa nao passa do teto");
+        }
+        // A decisão — sem texto — com a descrição sem o nome, e o `)`; a
+        // execução, com a descrição toda encolhida, o motivo inteiro e a
+        // citação inteira.
+        let decidida = registro_numero(decisao).ok_or("a decisao saiu do anel")?;
+        let executada = registro_numero(execucao).ok_or("a execucao saiu do anel")?;
+        let decisao_esperada =
+            alloc::format!("pelo processo {fio} (? cdcdcdcd de {})", EDITOR_LONGO.1);
+        if decidida.detalhe != decisao_esperada {
+            crate::log_error!("teste", "{} / {}", decidida.detalhe, decisao_esperada);
+            return Err(
+                "a decisao do processo de descricao longa nao terminou no `)`, com a descricao sem o nome",
+            );
+        }
+        let esperado = alloc::format!(
+            "pelo processo {fio} (? cdcdcdcd de ?): {}; decisao {decisao}",
+            Falta::NaoConfere.motivo()
+        );
+        if executada.detalhe != esperado || executada.codigo != Codigo::DenyPolicy {
+            crate::log_error!("teste", "{} / {}", executada.detalhe, esperado);
+            return Err(
+                "a execucao do processo de descricao longa nao tem a descricao toda encolhida, o motivo e a citacao",
+            );
+        }
+        // O NSF lê as duas: a decisão é do processo, e o código adulterado
+        // é um incidente, de alerta, que ninguém contém.
+        let pedidos = nsf_le_ate(execucao);
+        let do_processo = crate::seguranca::com_motor_de_teste(|m| {
+            m.eventos()
+                .find(|e| e.seq == decisao)
+                .and_then(|e| e.processo.as_ref().map(|(f, _)| *f))
         })
+        .flatten();
+        if do_processo != Some(fio) {
+            return Err("o NSF nao leu a decisao do processo de descricao longa como dele");
+        }
+        let viu = crate::seguranca::com_motor_de_teste(|m| {
+            m.incidentes.todos().any(|i| {
+                i.deteccoes.iter().any(|d| {
+                    d.regra == Regra::CodigoAdulterado
+                        && d.registros == [execucao]
+                        && d.explicacao.contains(&caminho)
+                })
+            })
+        });
+        if viu != Some(true) {
+            return Err("o NSF nao viu o codigo adulterado de quem tem descricao longa");
+        }
+        if pedidos != 0 {
+            return Err("o NSF pediu uma contencao pelo codigo adulterado");
+        }
+        // E o grafo do NSF não toma a descrição abreviada por outro
+        // programa do processo.
+        let abreviado = crate::seguranca::com_motor_de_teste(|m| {
+            m.eventos()
+                .find(|e| e.seq == execucao)
+                .map(|e| No::Processo {
+                    epoca: e.epoca,
+                    fio,
+                })
+                .is_none_or(|no| {
+                    m.grafo.vizinhos(&no).iter().any(|(aresta, outro, _)| {
+                        *aresta == Aresta::Executa
+                            && matches!(outro, No::Programa(p)
+                                if politica::auditoria::descricao_abreviada(p))
+                    })
+                })
+        });
+        if abreviado != Some(false) {
+            return Err("o NSF tomou a descricao abreviada por outro programa");
+        }
+        Ok(())
+    })
+}
+
+/// O achado 1 do adversário do F1: a recusa do manifesto de um programa de
+/// descrição longa — o nome é escolhido por quem escreve o programa —
+/// guarda `o manifesto nao declara`, e o NSF a lê como a recusa do
+/// manifesto: um sinal do programa, médio, e não a sondagem de privilégio
+/// da pessoa que o lançou, e nada é contido. O anel cortava o fim — o
+/// motivo, e com o fio de produção até o `)` —, e três métodos recusados
+/// viravam sondagem, alta.
+///
+/// Os pedidos vão pelo gate de um comando, com o processo — o fio de
+/// produção, a pessoa operadora que o lançou e o programa — no chamador.
+/// O papel dela tem cada permissão; o manifesto não declara nenhuma.
+fn nsf_a_recusa_do_manifesto_de_quem_tem_descricao_longa() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    use seguranca::regras::Regra;
+    const FIO: u64 = 7_000_123;
+    crate::pessoas::esquecer_registradas();
+    let r = com_o_editor_longo(&[], || {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(84), "manifesto-longo", "operador");
+        let chamador = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa: programa_de_descricao_longa("process.run"),
+        };
+        let antes = crate::autorizacao::ultimo_registro();
+        for (metodo, permissao) in [
+            ("system.info", "system.read"),
+            ("agent.list", "agent.read"),
+            ("log.tail", "log.read"),
+        ] {
+            let r = crate::nativo::responder_de_teste(chamador, &pedido_rpc(metodo, "{}"));
+            if decisao_do_envelope(&r) != "DENY_PERMISSION" {
+                crate::log_error!("teste", "{}: {}", metodo, r);
+                return Err("o manifesto do programa de descricao longa nao recusou");
+            }
+            let (seq, e) = registro_que(|e| {
+                e.metodo == metodo && e.codigo == politica::Codigo::DenyPermission
+            })
+            .ok_or("a recusa do manifesto nao foi gravada")?;
+            let esperado = alloc::format!(
+                "pelo processo {FIO} (? cdcdcdcd de ?): o manifesto nao declara {permissao}"
+            );
+            if seq <= antes || e.detalhe != esperado {
+                crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
+                return Err("a recusa do manifesto de descricao longa nao guardou o motivo");
+            }
+        }
+        let ate = crate::autorizacao::ultimo_registro();
+        let pedidos = nsf_le_ate(ate);
+        let regras = crate::seguranca::com_motor_de_teste(|m| {
+            let fora = m
+                .eventos()
+                .filter(|e| e.seq > antes && e.fora_do_manifesto())
+                .count();
+            let regras: alloc::vec::Vec<Regra> = m.deteccoes().map(|d| d.regra).collect();
+            (fora, regras)
+        })
+        .ok_or("o NSF nao esta ligado")?;
+        if regras.0 != 3 {
+            crate::log_error!("teste", "{} recusas do manifesto", regras.0);
+            return Err(
+                "o NSF nao leu as recusas do manifesto de descricao longa como do manifesto",
+            );
+        }
+        if !regras.1.contains(&Regra::ForaDoManifesto)
+            || regras.1.contains(&Regra::SondagemDePrivilegio)
+        {
+            crate::log_error!("teste", "{:?}", regras.1);
+            return Err("a recusa do manifesto de descricao longa virou sondagem de privilegio");
+        }
+        if pedidos != 0 {
+            return Err("o NSF pediu uma contencao pela recusa do manifesto");
+        }
+        Ok(())
     });
-    crate::identidade::trocar_editores_de_teste(da_imagem);
+    crate::pessoas::esquecer_registradas();
+    r
+}
+
+extern "C" fn fio_que_so_acaba(_: u64) -> ! {
+    crate::fios::terminar()
+}
+
+/// A bifurcação do processo de descrição longa: o filho nasce — um fio do
+/// kernel que só acaba —, e a bifurcação é gravada pela mesma
+/// `auditar_bifurcacao` do `bifurcar`. O filho; zero, se não nasceu.
+fn bifurca_com_descricao_longa() -> [u64; 3] {
+    match crate::fios::criar("teste-filho-longo", fio_que_so_acaba, 0) {
+        Ok(filho) => {
+            crate::autorizacao::auditar_bifurcacao(filho.numero());
+            [filho.numero(), 0, 0]
+        }
+        Err(_) => [0; 3],
+    }
+}
+
+/// O achado 2 do adversário do F1: a bifurcação de um processo de
+/// descrição longa guarda o `filho` inteiro, e o NSF liga o filho a ele —
+/// a proveniência de um processo é de quem o criou. O anel cortava o fim:
+/// com o fio de produção, até o `)`, e nada nascia; um pouco mais curto, o
+/// pedaço do número do filho, que é o número de outro processo — e a
+/// criação desse outro passava a quem bifurcou.
+fn nsf_a_bifurcacao_de_quem_tem_descricao_longa_liga_o_filho() -> Resultado {
+    use seguranca::evento::Tipo;
+    use seguranca::grafo::{Aresta, Criador};
+    com_o_editor_longo(&[], || {
+        let programa = programa_de_descricao_longa("process.run");
+        let (pai, [filho, _, _]) = como_processo_num_fio(programa, bifurca_com_descricao_longa)?;
+        if filho <= pai {
+            return Err("o filho da bifurcacao de descricao longa nao nasceu");
+        }
+        let (seq, e) = registro_que(|e| {
+            e.metodo == "process.fork"
+                && e.detalhe
+                    .starts_with(&alloc::format!("pelo processo {pai} ("))
+        })
+        .ok_or("a bifurcacao de descricao longa nao foi gravada")?;
+        let esperado = alloc::format!(
+            "pelo processo {pai} (? cdcdcdcd de {}): filho {filho}",
+            EDITOR_LONGO.1
+        );
+        if e.detalhe != esperado || e.codigo != politica::Codigo::Allow {
+            crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
+            return Err("a bifurcacao de descricao longa nao guardou o filho inteiro");
+        }
+        let _ = nsf_le_ate(seq);
+        let ligado = crate::seguranca::com_motor_de_teste(|m| {
+            let e = m.eventos().find(|e| e.seq == seq)?;
+            let p = m.grafo.processo(e.epoca, filho)?;
+            Some(
+                e.tipo == Tipo::Nascimento { filho }
+                    && p.criador == Criador::Processo(pai)
+                    && p.via == Aresta::Bifurcou
+                    && m.grafo.descendentes(e.epoca, pai) == [filho],
+            )
+        })
+        .flatten();
+        if ligado != Some(true) {
+            return Err("o NSF nao ligou o filho ao processo de descricao longa que bifurcou");
+        }
+        Ok(())
+    })
+}
+
+/// O achado 3 do adversário do F1: o `pelo` sozinho passa do teto — o
+/// maior nome, o maior editor e o fio de produção —, e as decisões do gate
+/// sobre os pedidos do processo vão com a descrição abreviada, do processo:
+/// a que permite, sem texto, termina no `)`, com o editor; a que recusa
+/// guarda o motivo. O NSF as lê como do processo — o dono da rede é o
+/// processo, e não a pessoa inteira —, e a proveniência dele mostra a
+/// conexão recusada. O anel cortava o `)`, e as decisões saíam do
+/// processo.
+fn nsf_a_decisao_de_quem_tem_descricao_acima_do_teto_e_do_processo() -> Resultado {
+    use crate::autorizacao::{Autoridade, Chamador};
+    use crate::pessoas::Console;
+    const FIO: u64 = 7_000_124;
+    const LONGE: &str = "tcp:10.0.2.99:80";
+    crate::pessoas::esquecer_registradas();
+    let r = com_o_editor_longo(&["operador"], || {
+        let sessao =
+            crate::pessoas::sessao_de_teste(Console::Terminal(86), "decisao-longa", "operador");
+        let programa = programa_de_descricao_longa("system.read net.connect");
+        let chamador = Chamador::Processo {
+            fio: FIO,
+            autoridade: Autoridade::Pessoa { sessao },
+            programa,
+        };
+        let pelo = alloc::format!("pelo processo {FIO} ({})", programa.descricao());
+        if pelo.len() <= politica::auditoria::MAIOR_DETALHE {
+            return Err("o pelo do processo de descricao longa nao passa do teto");
+        }
+        let antes = crate::autorizacao::ultimo_registro();
+        let r = crate::nativo::responder_de_teste(chamador, &pedido_rpc("system.info", "{}"));
+        if decisao_do_envelope(&r) != "ALLOW" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o gate nao deixou o processo de descricao longa ler o sistema");
+        }
+        let (permitida, e) = registro_que(|e| {
+            e.metodo == "system.info"
+                && e.codigo == politica::Codigo::Allow
+                && e.detalhe
+                    .starts_with(&alloc::format!("pelo processo {FIO} ("))
+                && !e.detalhe.contains("; decisao ")
+        })
+        .ok_or("a decisao do system.info nao foi gravada")?;
+        let esperado = alloc::format!("pelo processo {FIO} (? cdcdcdcd de {})", EDITOR_LONGO.1);
+        if permitida <= antes || e.detalhe != esperado {
+            crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
+            return Err("a decisao de descricao acima do teto nao terminou no `)`");
+        }
+        let r = crate::nativo::responder_de_teste(
+            chamador,
+            &pedido_rpc("net.connect", &alloc::format!(r#"{{"to":"{LONGE}"}}"#)),
+        );
+        if decisao_do_envelope(&r) != "DENY_RESOURCE" {
+            crate::log_error!("teste", "{}", r);
+            return Err("o gate nao recusou o destino fora do alcance");
+        }
+        let (recusada, e) = registro_que(|e| {
+            e.metodo == "net.connect"
+                && e.recurso == LONGE
+                && e.codigo == politica::Codigo::DenyResource
+        })
+        .ok_or("a recusa da conexao nao foi gravada")?;
+        let esperado = alloc::format!(
+            "pelo processo {FIO} (? cdcdcdcd de ?): recurso fora do alcance do papel"
+        );
+        if e.detalhe != esperado {
+            crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
+            return Err("a recusa de descricao acima do teto nao guardou o motivo");
+        }
+        // O NSF: as duas são do processo, e a rede tem dono — o processo.
+        let _ = nsf_le_ate(recusada);
+        let donos = crate::seguranca::com_motor_de_teste(|m| {
+            [permitida, recusada]
+                .map(|seq| m.eventos().find(|e| e.seq == seq).and_then(|e| e.dono()))
+        })
+        .ok_or("o NSF nao esta ligado")?;
+        let do_processo = Some(alloc::format!("process:{FIO}"));
+        if donos != [do_processo.clone(), do_processo] {
+            crate::log_error!("teste", "{:?}", donos);
+            return Err("o NSF nao leu as decisoes de descricao acima do teto como do processo");
+        }
+        let r = consulta_de_seguranca(
+            "security.provenance",
+            &alloc::format!(r#"{{"process":{FIO}}}"#),
+        );
+        let conexao = alloc::format!(
+            r#""network":[{{"decision":{recusada},"to":"{LONGE}","code":"DENY_RESOURCE""#
+        );
+        if !r.contains(&conexao) {
+            crate::log_error!("teste", "{}", r);
+            return Err("a proveniencia do processo de descricao longa nao mostra a conexao");
+        }
+        Ok(())
+    });
+    crate::pessoas::esquecer_registradas();
     r
 }
 

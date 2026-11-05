@@ -749,8 +749,8 @@ fn o_codigo_adulterado_de_quem_tem_descricao_longa() {
     for decisao in [123_456u64, 12_345_678, 1_234_567_890] {
         let mut a = Auditoria::nova();
         let mut m = Motor::novo();
-        // A decisão do gate, com a descrição inteira: sem citação, nada
-        // encolhe.
+        // A decisão do gate, com a descrição inteira: o `pelo` tem 96
+        // bytes, e cabe.
         let decidida = detalhe_composto(Some(&pelo), "", "");
         assert_eq!(decidida, pelo);
         a.gravar(do_agente("process.exec", caminho, Codigo::Allow, &decidida));
@@ -792,6 +792,394 @@ fn o_codigo_adulterado_de_quem_tem_descricao_longa() {
             .map(|(_, no, _)| no)
             .collect();
         assert_eq!(executa, vec![No::Programa(programa.clone())], "{decisao}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// O resíduo do F1: os registros sem citação, o corte no meio de um nome e as
+// regressões do NSF — os achados do adversário do F1, que antes passavam
+// provando o defeito, provando o certo.
+// ---------------------------------------------------------------------------
+
+/// O detalhe como o kernel o grava: `auditar` o compõe com
+/// `detalhe_composto` — sem citação, ou com a da execução — e o anel o
+/// guarda, com o corte dele no teto.
+fn como_o_kernel_grava(pelo: &str, texto: &str, citacao: &str) -> String {
+    use politica::auditoria::{Cadeia, detalhe_composto};
+    let mut c = Cadeia::nova(1);
+    let seq = c.anexar(DaCadeia {
+        ts_ms: 1,
+        titular: Titular::Agente,
+        sessao: 1,
+        sessao_de_pessoa: None,
+        agente: String::new(),
+        chave: None,
+        papel: String::new(),
+        metodo: String::new(),
+        recurso: String::new(),
+        codigo: Codigo::Allow,
+        parametros: [0; 32],
+        detalhe: detalhe_composto(Some(pelo), texto, citacao),
+    });
+    c.registro(seq).expect("o registro").evento.detalhe.clone()
+}
+
+/// O achado 1: a recusa do manifesto de um código de fora de nome longo —
+/// o nome é de quem escreve o programa — guarda `o manifesto nao declara`,
+/// e o NSF a lê como a recusa do manifesto: um sinal do programa, médio, e
+/// não a sondagem de quem o lançou; a rede da mesma identidade, depois,
+/// não é contida. O anel cortava o motivo, e três recusas viravam
+/// sondagem de privilégio, alta, com o `net.block` pedido.
+#[test]
+fn a_recusa_do_manifesto_de_nome_longo_nao_e_sondagem() {
+    let pelo = format!(
+        "pelo processo 1234 ({} abcd1234 de duke-oficial)",
+        "n".repeat(32)
+    );
+    let mut a = Auditoria::nova();
+    for metodo in ["fs.read", "key.sign", "net.observe"] {
+        let d = como_o_kernel_grava(&pelo, &format!("o manifesto nao declara {metodo}"), "");
+        assert_eq!(
+            d,
+            format!(
+                "pelo processo 1234 (? abcd1234 de duke-oficial): o manifesto nao declara {metodo}"
+            )
+        );
+        a.gravar(do_agente(metodo, "", Codigo::DenyPermission, &d));
+    }
+    // Outro processo da mesma identidade usa a rede.
+    a.gravar(do_agente(
+        "net.connect",
+        ECO,
+        Codigo::Allow,
+        "pelo processo 77 (navegador 01020304)",
+    ));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    assert_eq!(m.eventos().filter(|e| e.fora_do_manifesto()).count(), 3);
+    let regras: Vec<Regra> = m.deteccoes().map(|d| d.regra).collect();
+    assert!(regras.contains(&Regra::ForaDoManifesto), "{regras:?}");
+    assert!(!regras.contains(&Regra::SondagemDePrivilegio), "{regras:?}");
+    assert!(m.pedidos().is_empty());
+}
+
+/// O achado 2: a bifurcação de um código de fora de nome longo guarda o
+/// `filho` inteiro, e o grafo liga o filho certo; o processo antigo de
+/// outra identidade fica com a origem dele. O anel cortava o número — o
+/// `filho 5000` virava `filho 5`, e o processo 5 passava a ser do
+/// atacante. E o NSF se defende do registro cortado de antes: o filho até
+/// o fio do pai não nasce, e um processo não nasce duas vezes.
+#[test]
+fn a_bifurcacao_de_nome_longo_liga_o_filho() {
+    use seguranca::grafo::Criador;
+    const VITIMA: [u8; 32] = [0xB2; 32];
+    let pelo = format!(
+        "pelo processo 1234 ({} abcd1234 de fornecedor-externo-ab)",
+        "n".repeat(32)
+    );
+    let bifurcou = como_o_kernel_grava(&pelo, "filho 5000", "");
+    assert_eq!(
+        bifurcou,
+        "pelo processo 1234 (? abcd1234 de fornecedor-externo-ab): filho 5000"
+    );
+    let mut a = Auditoria::nova();
+    a.gravar(R {
+        agente: "vitima",
+        chave: Some(VITIMA),
+        ..do_agente(
+            "user.run",
+            "/bin/terminal",
+            Codigo::Allow,
+            "processo 5 lancado; decisao 1",
+        )
+    });
+    a.gravar(do_agente(
+        "user.run",
+        "/armazem/x",
+        Codigo::Allow,
+        "processo 1234 lancado; decisao 2",
+    ));
+    a.gravar(do_agente("process.fork", "", Codigo::Allow, &bifurcou));
+    // Os registros que o anel cortava — o pedaço do número de um processo
+    // que o grafo conhece, e o de um que ele não conhece —, e o nascimento
+    // repetido do 5 por outro processo: nenhum muda nada.
+    let cortado = format!("{pelo}: filho 5");
+    assert_eq!(cortado.len(), politica::auditoria::MAIOR_DETALHE);
+    a.gravar(do_agente("process.fork", "", Codigo::Allow, &cortado));
+    let cortado_de_ninguem = "pelo processo 1234 (? abcd1234 de x): filho 12";
+    a.gravar(do_agente(
+        "process.fork",
+        "",
+        Codigo::Allow,
+        cortado_de_ninguem,
+    ));
+    a.gravar(do_agente(
+        "process.fork",
+        "",
+        Codigo::Allow,
+        "pelo processo 3 (x 00000000): filho 5",
+    ));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    for cortado in [cortado.as_str(), cortado_de_ninguem] {
+        let e = m
+            .eventos()
+            .find(|e| e.detalhe == cortado)
+            .expect("o registro cortado");
+        assert_eq!(e.tipo, Tipo::Decisao, "{cortado}");
+    }
+    assert!(m.grafo.processo(0, 12).is_none());
+    let filho = m.grafo.processo(0, 5000).expect("o filho");
+    assert_eq!(filho.criador, Criador::Processo(1234));
+    assert_eq!(filho.via, Aresta::Bifurcou);
+    let vitima = format!("agent:{}", hex(&VITIMA));
+    let p5 = m.grafo.processo(0, 5).expect("o processo 5");
+    assert_eq!(p5.criador, Criador::Principal(vitima.clone()));
+    assert_eq!(p5.autoridade, vitima);
+    assert_eq!(m.grafo.proveniencia(0, 5).raiz, Some(vitima.clone()));
+    assert_eq!(m.grafo.descendentes(0, 1234), [5000]);
+    assert!(m.grafo.descendentes(0, 3).is_empty());
+    let mut s = String::new();
+    seguranca::relatorio::proveniencia(&m, 0, 5, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(s.contains(&hex(&VITIMA)), "{s}");
+    assert!(!s.contains(&hex(&CHAVE)), "{s}");
+}
+
+/// O achado 3: o `pelo` sozinho acima do teto — o maior nome e o maior
+/// editor, com o fio de três dígitos —: a decisão vai abreviada, termina
+/// no `)` e é do processo. O DNS que ele resolveu se liga à conexão
+/// recusada, a proveniência dele mostra a rede, e o dono é o processo — e
+/// não a identidade inteira. O anel cortava o `)`, e as decisões saíam do
+/// processo.
+#[test]
+fn a_decisao_de_pelo_acima_do_teto_e_do_processo() {
+    use protocolo::dns::{Nome, pergunta, resposta};
+    let editor = "e".repeat(32);
+    let pelo = format!(
+        "pelo processo 123 ({} abcd1234 de {editor})",
+        "n".repeat(32)
+    );
+    assert_eq!(pelo.len(), 97);
+    let decidida = como_o_kernel_grava(&pelo, "", "");
+    assert_eq!(
+        decidida,
+        format!("pelo processo 123 (? abcd1234 de {editor})")
+    );
+    let recusada = como_o_kernel_grava(&pelo, "recurso fora do alcance do papel", "");
+    assert_eq!(
+        recusada,
+        "pelo processo 123 (? abcd1234 de ?): recurso fora do alcance do papel"
+    );
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente(
+        "user.run",
+        "/armazem/x",
+        Codigo::Allow,
+        "processo 123 lancado; decisao 1",
+    ));
+    let dns = a.gravar(do_agente(
+        "net.connect",
+        "udp:10.0.2.53:53",
+        Codigo::Allow,
+        &decidida,
+    ));
+    ler(&mut m, &a);
+    let conexao = m.eventos().last().expect("a conexao");
+    assert_eq!(conexao.processo.as_ref().map(|(f, _)| *f), Some(123));
+    assert_eq!(conexao.dono().as_deref(), Some("process:123"));
+    // O processo resolve um nome pelo servidor, e conecta ao endereço.
+    let mut b = [0u8; 512];
+    let n = pergunta(5, &Nome::de_texto("proibido.duke").unwrap(), &mut b).unwrap();
+    let q = b[..n].to_vec();
+    let n = resposta(
+        5,
+        &Nome::de_texto("proibido.duke").unwrap(),
+        &[[10, 0, 2, 99]],
+        60,
+        0,
+        &mut b,
+    )
+    .unwrap();
+    let r = b[..n].to_vec();
+    let captura = format!(
+        r#"{{"records":[{{"seq":1,"ts_ms":10250,"after_record":{dns},"connection":3,"owner":"process:123","to":"udp:10.0.2.53:53","direction":"out","size":{},"data":"{}"}},{{"seq":2,"ts_ms":10260,"after_record":{dns},"connection":3,"owner":"process:123","to":"udp:10.0.2.53:53","direction":"in","size":{},"data":"{}"}}]}}"#,
+        q.len(),
+        seguranca::util::base64(&q),
+        r.len(),
+        seguranca::util::base64(&r)
+    );
+    assert_eq!(m.ler_captura("udp:10.0.2.53:53", captura.as_bytes()), Ok(2));
+    a.gravar(do_agente(
+        "net.connect",
+        "tcp:10.0.2.99:80",
+        Codigo::DenyResource,
+        &recusada,
+    ));
+    ler(&mut m, &a);
+    assert!(
+        m.deteccoes().any(|d| d.regra == Regra::DnsContraAPolitica),
+        "{:?}",
+        m.deteccoes().collect::<Vec<_>>()
+    );
+    let mut s = String::new();
+    seguranca::relatorio::proveniencia(&m, 0, 123, &mut JsonWriter::new(&mut s)).unwrap();
+    let rede = Json(s.as_bytes()).member("network").expect("a rede");
+    assert!(rede.item(0).is_some() && rede.item(1).is_some(), "{s}");
+    assert!(s.contains(r#""name":"proibido.duke""#), "{s}");
+}
+
+/// O 7a: o motivo do teto, de um código de fora de nome longo, guarda o
+/// `teto` — a descrição encolhe toda, e o texto perde só a última palavra
+/// —, e a regra alerta. Inalcançável num processo de hoje — a sessão e a
+/// atribuição recusam o papel de teto —, mas o texto é o de qualquer
+/// recusa.
+#[test]
+fn o_teto_de_nome_longo_alerta() {
+    let pelo = format!(
+        "pelo processo 1234 ({} abcd1234 de {})",
+        "n".repeat(32),
+        "e".repeat(13)
+    );
+    let d = como_o_kernel_grava(
+        &pelo,
+        "o papel e o teto de um administrador: delega, nao se exerce",
+        "",
+    );
+    assert!(d.contains(": o papel e o teto de um administrador"), "{d}");
+    let mut a = Auditoria::nova();
+    a.gravar(do_agente("fs.read", "", Codigo::DenyRole, &d));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    assert!(m.deteccoes().any(|d| d.regra == Regra::TetoExercido));
+}
+
+/// O achado 5: a troca de imagem que falha depois do ponto sem volta grava
+/// a execução em nome do programa novo, e acima do teto a descrição sai
+/// abreviada — com outro resumo. O grafo grava a troca, como gravava com a
+/// descrição inteira antes do F1. A abreviada do mesmo resumo continua sem
+/// trocar nada.
+#[test]
+fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
+    use politica::auditoria::detalhe_composto;
+    let novo = format!("pelo processo 7000 ({} deadbeef)", "n".repeat(32));
+    let executa = |m: &Motor, fio: u64| -> Vec<No> {
+        m.grafo
+            .vizinhos(&No::Processo { epoca: 0, fio })
+            .into_iter()
+            .filter(|(aresta, _, sai)| *aresta == Aresta::Executa && *sai)
+            .map(|(_, no, _)| no)
+            .collect()
+    };
+    let mut a = Auditoria::nova();
+    a.gravar(do_agente(
+        "user.run",
+        "/bin/loja",
+        Codigo::Allow,
+        "processo 7000 lancado; decisao 1",
+    ));
+    let decisao = a.gravar(do_agente(
+        "process.exec",
+        "/armazem/novo",
+        Codigo::Allow,
+        "pelo processo 7000 (loja abcd1234)",
+    ));
+    let morreu = detalhe_composto(
+        Some(&novo),
+        "memoria fisica esgotada",
+        &format!("; decisao {decisao}"),
+    );
+    assert_eq!(
+        morreu,
+        format!("pelo processo 7000 (? deadbeef): memoria fisica esgotada; decisao {decisao}")
+    );
+    a.gravar(do_agente(
+        "process.exec",
+        "/armazem/novo",
+        Codigo::Error,
+        &morreu,
+    ));
+    // O controle: outro processo da loja, com uma execução abreviada do
+    // programa que ele executa.
+    a.gravar(do_agente(
+        "user.run",
+        "/bin/loja",
+        Codigo::Allow,
+        "processo 7001 lancado; decisao 4",
+    ));
+    let decisao = a.gravar(do_agente(
+        "process.exec",
+        "/armazem/adulterado",
+        Codigo::Allow,
+        "pelo processo 7001 (loja abcd1234)",
+    ));
+    a.gravar(do_agente(
+        "process.exec",
+        "/armazem/adulterado",
+        Codigo::DenyPolicy,
+        &format!(
+            "pelo processo 7001 (? abcd1234): o selo nao confere com o codigo; decisao {decisao}"
+        ),
+    ));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    assert_eq!(
+        m.grafo
+            .processo(0, 7000)
+            .and_then(|p| p.programa.as_deref()),
+        Some("? deadbeef")
+    );
+    assert_eq!(
+        executa(&m, 7000),
+        [
+            No::Programa("loja abcd1234".to_string()),
+            No::Programa("? deadbeef".to_string())
+        ]
+    );
+    assert_eq!(
+        m.grafo
+            .processo(0, 7001)
+            .and_then(|p| p.programa.as_deref()),
+        Some("loja abcd1234")
+    );
+    assert_eq!(
+        executa(&m, 7001),
+        [No::Programa("loja abcd1234".to_string())]
+    );
+}
+
+/// O achado 6: `security.provenance` casa a regra do firewall com a
+/// conexão do processo pelo fio — que nunca se repete no boot —, e não
+/// pelo programa: acima do teto, a execução que o firewall barrou sai com
+/// a descrição abreviada, e a decisão da conexão, com a inteira.
+#[test]
+fn o_firewall_casa_a_conexao_pelo_fio() {
+    use politica::auditoria::detalhe_composto;
+    for nome in ["loja".to_string(), "n".repeat(32)] {
+        let pelo = format!("pelo processo 9 ({nome} 0a0b0c0d)");
+        let mut a = Auditoria::nova();
+        a.gravar(do_agente("net.connect", ECO, Codigo::Allow, &pelo));
+        let envio = a.gravar(do_agente("net.send", ECO, Codigo::Allow, &pelo));
+        let barrado = detalhe_composto(
+            Some(&pelo),
+            "bloqueado pelo firewall, regra 3",
+            &format!("; decisao {envio}"),
+        );
+        assert_eq!(
+            barrado.starts_with("pelo processo 9 (? 0a0b0c0d): "),
+            nome.len() == 32,
+            "{barrado}"
+        );
+        a.gravar(do_agente("net.send", ECO, Codigo::DenyPolicy, &barrado));
+        let mut m = Motor::novo();
+        ler(&mut m, &a);
+        assert!(matches!(
+            m.eventos().last().map(|e| e.tipo),
+            Some(Tipo::Firewall { regra: 3 })
+        ));
+        let mut s = String::new();
+        seguranca::relatorio::proveniencia(&m, 0, 9, &mut JsonWriter::new(&mut s)).unwrap();
+        assert!(s.contains(r#""firewall_rule":3"#), "{s}");
     }
 }
 
