@@ -2088,7 +2088,7 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
     use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
     troca_de_ponta_que_falha_intacta(
         331,
-        Etapa::Preparacao,
+        |fio| falha::armar(fio, Etapa::Preparacao),
         protocolo::usuario::erro::SEM_MEMORIA,
         falha::PREPARACAO,
     )
@@ -2103,22 +2103,23 @@ pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
 /// longo: acima do teto, o nome do programa sai da descrição antes, o
 /// motivo perde só o que ainda não cabe, e a citação fica inteira no fim.
 pub(super) fn fluxo_a_troca_cujo_arquivo_nao_se_le() -> Resultado {
-    use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
+    use crate::usuario::falha_da_troca_de_teste as falha;
     troca_de_ponta_que_falha_intacta(
         332,
-        Etapa::Leitura,
+        |fio| falha::armar_leitura(fio, falha::LEITURA),
         protocolo::usuario::erro::PROGRAMA_DESCONHECIDO,
         falha::LEITURA.motivo(),
     )
 }
 
-/// A troca de imagem de quem é ponta de fluxo que falha na `etapa`, sem
-/// chegar ao ponto sem volta: o processo recebe `devolvido` e segue o que
-/// era, ponta do fluxo, que continua passando bytes; nenhum fim é gravado; e
-/// a decisão do gate tem uma execução, `ERROR`, que a cita com `motivo`.
+/// A troca de imagem de quem é ponta de fluxo que falha onde `armar` a
+/// armou, sem chegar ao ponto sem volta: o processo recebe `devolvido` e
+/// segue o que era, ponta do fluxo, que continua passando bytes; nenhum fim
+/// é gravado; e a decisão do gate tem uma execução, `ERROR`, que a cita com
+/// `motivo`.
 fn troca_de_ponta_que_falha_intacta(
     terminal: u16,
-    etapa: crate::usuario::falha_da_troca_de_teste::Etapa,
+    armar: impl Fn(u64),
     devolvido: i64,
     motivo: &str,
 ) -> Resultado {
@@ -2133,7 +2134,7 @@ fn troca_de_ponta_que_falha_intacta(
                 let id = aberto(&a, &c)?;
                 let trocas = trocas_feitas();
                 let desde_o_pedido = crate::autorizacao::ultimo_registro();
-                falha::armar(c.fio(), etapa);
+                armar(c.fio());
                 let desde = c.ditar(TROCAR, 0)?;
                 let devolveu = dito_na_malha(desde, "fluxos: trocar devolveu ")?;
                 if devolveu != format!("{devolvido}") {

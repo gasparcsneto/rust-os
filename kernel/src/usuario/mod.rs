@@ -1408,32 +1408,33 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     // conferido é o que se carrega — ver `codigo`.
     let lido = codigo::obter(&caminho, crate::fios::autoridade_atual());
     #[cfg(feature = "modo-teste")]
-    let lido = if falha_da_troca_de_teste::falhar(fio, falha_da_troca_de_teste::Etapa::Leitura) {
-        Err(codigo::Recusa::Leitura(falha_da_troca_de_teste::LEITURA))
-    } else {
-        lido
+    let lido = match falha_da_troca_de_teste::leitura(fio) {
+        Some(e) => Err(codigo::Recusa::Leitura(e)),
+        None => lido,
     };
     let codigo = match lido {
         Ok(c) => c,
         // O gate deixou o caminho, e o arquivo não se lê: o processo segue
         // inteiro — nada foi trocado —, e a execução da decisão diz que a
-        // troca falhou, e por quê.
-        Err(codigo::Recusa::Leitura(motivo)) => {
+        // troca falhou, e por quê. O processo ouve o erro da leitura: a
+        // falta de heap, `SEM_MEMORIA` — ler de novo depois pode dar certo
+        // —; o resto, `PROGRAMA_DESCONHECIDO`.
+        Err(recusa @ codigo::Recusa::Leitura(_)) => {
             crate::autorizacao::auditar_execucao_do_processo(
                 "process.exec",
                 &caminho,
                 politica::Codigo::Error,
-                motivo.motivo(),
+                recusa.motivo(),
                 decisao,
             );
             crate::log_warn!(
                 "usuario",
                 "executar: `{}` nao pode ser lido: {}",
                 caminho,
-                motivo.motivo()
+                recusa.motivo()
             );
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
-            return erro::PROGRAMA_DESCONHECIDO;
+            return recusa.erro();
         }
         // O gate deixou o caminho, e o arquivo não prova de onde veio: a
         // execução recusa, em nome do processo, com a decisão. O processo
@@ -1667,7 +1668,9 @@ pub mod pausa_da_troca_de_teste {
 /// numa etapa escolhida, depois do gate, como falharia de verdade:
 ///
 /// - `Etapa::Leitura`: o arquivo não se lê — a leitura de
-///   [`crate::usuario::codigo::obter`] devolve o erro `LEITURA`;
+///   [`crate::usuario::codigo::obter`] devolve o erro `LEITURA`, o do
+///   dispositivo que recusa, ou, armada por `armar_leitura`, o da falta de
+///   heap;
 /// - `Etapa::Preparacao`: o primeiro passo da carga, antes do ponto sem
 ///   volta — como a imagem que o validador recusa, ou o espaço novo sem
 ///   memória;
@@ -1676,13 +1679,13 @@ pub mod pausa_da_troca_de_teste {
 ///   sem volta e de o que era da imagem anterior sair — como a falta de
 ///   memória ao mapear os segmentos.
 ///
-/// Os casos "fluxo: a troca de imagem cujo arquivo nao se le", "... que
-/// falha antes do ponto sem volta" e "... que falha depois do ponto sem
-/// volta" a armam para um processo que é ponta de fluxo. Fora da suíte não
-/// existe.
+/// Os casos "fluxo: a troca de imagem cujo arquivo nao se le", "... cujo
+/// arquivo nao cabe no heap", "... que falha antes do ponto sem volta" e
+/// "... que falha depois do ponto sem volta" a armam para um processo que é
+/// ponta de fluxo. Fora da suíte não existe.
 #[cfg(feature = "modo-teste")]
 pub mod falha_da_troca_de_teste {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// A etapa da troca de imagem que falha.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1696,8 +1699,13 @@ pub mod falha_da_troca_de_teste {
     }
 
     /// O erro da leitura que falha — o do dispositivo que recusa —; o
-    /// motivo dele é o que a execução da decisão grava.
+    /// motivo dele é o que a execução da decisão grava. É o de [`armar`];
+    /// o da falta de heap se arma com [`armar_leitura`].
     pub const LEITURA: crate::vfs::Erro = crate::vfs::Erro::DoDispositivo;
+
+    /// Se a leitura armada falha sem heap — `vfs::Erro::SemMemoria` — em
+    /// vez do dispositivo que recusa ([`LEITURA`]).
+    static LEITURA_SEM_HEAP: AtomicBool = AtomicBool::new(false);
 
     /// O motivo da preparação que falha, como a execução da decisão o grava.
     pub const PREPARACAO: &str = "a preparacao da imagem falhou de proposito";
@@ -1709,9 +1717,28 @@ pub mod falha_da_troca_de_teste {
     /// nenhum.
     static ARMADA: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 
-    /// A próxima troca de imagem do processo `fio` falha na etapa `etapa`.
+    /// A próxima troca de imagem do processo `fio` falha na etapa `etapa` —
+    /// a leitura, com o erro do dispositivo ([`LEITURA`]).
     pub fn armar(fio: u64, etapa: Etapa) {
+        if etapa == Etapa::Leitura {
+            LEITURA_SEM_HEAP.store(false, Ordering::Release);
+        }
         ARMADA[etapa as usize].store(fio + 1, Ordering::Release);
+    }
+
+    /// A próxima troca de imagem do processo `fio` falha na leitura, com
+    /// `erro`: o do dispositivo que recusa ([`LEITURA`]), que o processo
+    /// ouve como `PROGRAMA_DESCONHECIDO`, ou o da falta de heap,
+    /// `vfs::Erro::SemMemoria`, que ele ouve como `SEM_MEMORIA`. Outro erro
+    /// é engano do caso.
+    pub fn armar_leitura(fio: u64, erro: crate::vfs::Erro) {
+        use crate::vfs::Erro;
+        assert!(
+            matches!(erro, Erro::DoDispositivo | Erro::SemMemoria),
+            "a leitura da troca falha so pelo dispositivo ou sem heap"
+        );
+        LEITURA_SEM_HEAP.store(erro == Erro::SemMemoria, Ordering::Release);
+        ARMADA[Etapa::Leitura as usize].store(fio + 1, Ordering::Release);
     }
 
     /// Desarma as três etapas — o caso que falha antes de usar a sua não a
@@ -1720,6 +1747,19 @@ pub mod falha_da_troca_de_teste {
         for armada in &ARMADA {
             armada.store(0, Ordering::Release);
         }
+        LEITURA_SEM_HEAP.store(false, Ordering::Release);
+    }
+
+    /// Se a leitura da troca do processo `fio` falha agora — uma vez, como
+    /// [`falhar`] —, e com que erro.
+    pub(super) fn leitura(fio: u64) -> Option<crate::vfs::Erro> {
+        falhar(fio, Etapa::Leitura).then(|| {
+            if LEITURA_SEM_HEAP.load(Ordering::Acquire) {
+                crate::vfs::Erro::SemMemoria
+            } else {
+                LEITURA
+            }
+        })
     }
 
     /// Se a troca do processo `fio` falha agora na etapa `etapa` — uma vez:
