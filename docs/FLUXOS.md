@@ -150,18 +150,26 @@ decide de novo. A espera da ordem não tem fila nem justiça (o A3, e o F3
 do adversário do AE-1): medida pelo caso `fluxo: a troca grande com
 escritas sem parar, medida` — a troca de quem é ponta para o `livro`, uns
 850 KiB lidos do disco, sozinha e com três processos escrevendo e lendo
-sem parar, um pedido de cada vez, como o executor os atende —, no x86, a
-troca sozinha levou 670 ms, e com os escritores, 920 ms, sem volta
-nenhuma, e nada da auditoria se perdeu. Com os três escritores em fios
-paralelos, um aperto além do que o executor produz, três rodadas deram de
-1,4 s a 4,6 s, de 1 a 8 voltas no meio (dois registros cada: a decisão e a
-execução adiada que a cita) e, numa delas, uma lacuna de 119 registros no
-journal — não das voltas da troca, mas do coletor, que leva a auditoria
-ao journal e pede a mesma ordem sem fila. Sem inanição nem ruído da troca
-no ritmo do executor, nada mudou; a lacuna sob o aperto paralelo está
-relatada, pendente. Quem não é ponta não toma a ordem. O `exec` cujo arquivo
-não se lê, ou que falha antes do ponto sem volta, não encerra fluxo nenhum:
-o processo ouve o erro e segue o que era — da leitura,
+sem parar, um pedido de cada vez, como o executor os atende, e com o
+journal drenando a auditoria, como fora da suíte —: no x86, a troca
+sozinha levou 370 ms, e com os escritores, 570 ms; no aarch64, 440 ms e
+500 ms; sem volta nenhuma, e nada da auditoria se perdeu — os escritores
+sozinhos fizeram umas 400 operações em pouco mais de 3 s, também sem
+perda. Na suíte completa do aarch64, depois de todos os casos de antes,
+460 ms e 970 ms, com duas voltas no meio — a ordem com outro fio, um
+escritor ou o coletor —, cada uma com a decisão e a execução adiada que a
+cita, e nada perdido. Com os três escritores em fios paralelos, um aperto
+além do que o executor produz (medido no x86, com a gravação periódica da
+auditoria pausada, o padrão da suíte), três rodadas deram de 1,4 s a 4,6 s
+e de 1 a 8 voltas no meio (dois registros cada: a decisão e a execução
+adiada que a cita). A lacuna de 119 registros que uma delas mostrou não era da troca
+nem da ordem: com a gravação pausada, o anel transbordou entre duas
+gravações pedidas — a explicação de antes, o coletor sem a vez, estava
+errada, e o caso passou a medir com o journal drenando. Sem inanição nem
+ruído da troca no ritmo do executor, nada mudou. Quem não é ponta não
+toma a ordem. O `exec` cujo arquivo não se lê, ou que falha antes do
+ponto sem volta, não encerra fluxo nenhum: o processo ouve o erro e segue
+o que era — da leitura,
 `PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para ler o
 arquivo —, e a execução da decisão diz a falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
 que não se mapeia — não tem para onde voltar: os fluxos já acabaram na

@@ -855,7 +855,25 @@ outro programa —: reprovada pelos testes do hospedeiro e pela suíte do
 x86. E a do retrato do `system.info time` (a CI 432; ver *O retrato do
 `system.info time`*, em [A rodada](../README.md#a-rodada)): o
 civil lido antes de esperar a vez da hora, como era (N182) — reprovada
-pela suíte do x86.
+pela suíte do x86. E as do AE-5 e dos achados do adversário do passo 1
+(N183–N197): a reserva do nome `desconhecido` de volta no registro de
+chaves de atualização (N183, o achado 4); o recolhimento que não limpa os
+zumbis (N184) e a colheita que limpa de novo a morte que o zumbi já soltou
+(N185), o item 1; o fio da energia sem o gancho da suíte (N186, o item 2);
+a execução da decisão que recalcula quem pede (N187, o F2); a volta "no
+meio" sem a execução adiada (N188, o F5, num núcleo só); a entrega sem a
+conferência antes da conta (N189) e a edição que só renovou e não chegou
+sem passar a renovação adiante (N190), o achado 1; a linha que passa a
+pedir a pessoa sem recusar as edições a caminho (N191, o achado 2); a
+soltura gravada de novo como `ui.release` (N192, o achado 5); o consumo
+sem conferir de novo quem pediu a edição (N193, o achado 7); a
+conferência do `xtask` só pela chamada com o caminho (N194, o achado 8); o
+`definir` do físico sem a regra da linha da pessoa na seção que edita
+(N195, o item 4); o grafo do NSF comparando a abreviada só pelo resumo
+(N196, o achado 3); e o aviso de qualquer cerimônia mudando a linha (N197,
+o achado 6). Todas reprovadas, uma de cada vez: a N183, a N194 e a N196
+pelos testes do hospedeiro; as outras pela suíte do x86, filtrada aos
+casos de cada uma — a N188 num núcleo só (`DUKE_NUCLEOS=1`).
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1039,6 +1057,21 @@ pela suíte do x86.
 | N180 | fora do SDK (resíduo do F1): o corte sem a marca — o texto perde palavras e nada diz | hospedeiro: os cinco de `auditoria` da N176; suíte x86, filtrada aos casos da mutação (893 de 895 na conta do harness): `auditoria: a citacao da decisao fica inteira acima do teto`, `chaves: a declaracao se ancora so na decisao de quem declara` |
 | N181 | fora do SDK (resíduo do F1, 7c): o editor `desconhecido` aceito no registro | hospedeiro: `registro::testes::o_editor_desconhecido_e_reservado` (sigilo), `producao::testes::o_editor_desconhecido_e_recusado` (xtask) — a imagem da suíte não tem o nome |
 | N182 | fora do SDK (a CI 432): o `system.info` lê o civil antes de esperar a vez da hora — a leitura de antes da correção | suíte x86, filtrada aos casos `hora:` (895 de 896 na conta do harness, que dá os pulados como passados): `hora: o system.info le as rodadas e o civil num retrato so` — o leitor viu a rodada do pendente contada (`closed` 57, a última r67 `pendente`) sem o pendente dela (`pending_round` nulo) |
+| N183 | fora do SDK (AE-5, o achado 4 do adversário do passo 1): a reserva do nome `desconhecido` de volta no leitor da linha do registro de chaves de atualização | hospedeiro: `registro::testes::a_busca_da_chave_de_atualizacao`, `a_linha_de_atualizacao_nao_tem_a_reserva` (sigilo); `slots::testes::o_registro_de_atualizacao_com_o_nome_reservado`, `producao::testes::a_chave_de_atualizacao_desconhecido_passa` (xtask) |
+| N184 | fora do SDK (AE-5, item 1): o recolhimento sem limpar os zumbis — a morte só sai na colheita, como antes | suíte x86, filtrada (905 de 906 na conta do harness, que dá os pulados como passados): `fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita` |
+| N185 | fora do SDK (AE-5, item 1): a colheita limpa de novo a morte que o zumbi já soltou | suíte x86, filtrada (905 de 906): o mesmo caso — duas limpezas da mesma morte |
+| N186 | fora do SDK (AE-5, item 2): o fio da energia sem o gancho que a suíte segura (`energia::Segura`) | suíte x86, filtrada (905 de 906): `aviso: o desligamento avisa o fim` — o fio não parou ali |
+| N187 | fora do SDK (AE-5, o F2 do adversário do AE-1): a execução da decisão do `exec` recalcula quem pede, em vez de ir em nome de quem o gate decidiu | suíte x86, filtrada (904 de 906): `fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio`, `fluxo: a troca de imagem que falha depois do ponto sem volta` |
+| N188 | fora do SDK (AE-5, o F5): a volta "no meio" da troca de quem é ponta sem a execução adiada | suíte x86 num núcleo só (`DUKE_NUCLEOS=1`), filtrada (905 de 906): `fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so` |
+| N189 | fora do SDK (AE-5, o achado 1): a entrega sem a conferência antes da conta da coordenação | suíte x86, filtrada (905 de 906): `terminal: a edicao que nao chega ao programa nao arrenda o campo` |
+| N190 | fora do SDK (AE-5, o achado 1): a edição que só renovou e não chegou não passa a renovação à que ela continuou | suíte x86, filtrada (905 de 906): `terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou` — a quinta de cinco quebra a sequência |
+| N191 | fora do SDK (AE-5, o achado 2): o Enter que faz a linha pedir a pessoa sem recusar as edições a caminho | suíte x86, filtrada (904 de 906): `terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT`, `terminal: so se solta o arrendamento que as edicoes recusadas deixaram` |
+| N192 | fora do SDK (AE-5, o achado 5): a soltura gravada como o `ui.release` do agente | suíte x86, filtrada (902 de 906): os casos que contam a soltura — `terminal: a edicao da arvore que corre com o Enter da pessoa nao entra na linha do nome`, `terminal: so se solta o arrendamento que as edicoes recusadas deixaram`, `terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou`, `pareamento: a edicao da arvore que corre com o Enter do aceitar nao entra na linha da cerimonia` |
+| N193 | fora do SDK (AE-5, o achado 7): o consumo sem conferir de novo quem pediu a edição | suíte x86, filtrada (905 de 906): `terminal: a edicao de quem saiu da sessao e descartada` |
+| N194 | fora do SDK (AE-5, o achado 8): a conferência do `xtask` só pela chamada com o caminho | hospedeiro: `testes_dos_nomes_protegidos::o_nome_sozinho_em_qualquer_forma` (xtask) |
+| N195 | fora do SDK (AE-5, o item 4): o `definir` do físico sem a regra da linha da pessoa na seção que edita | suíte x86, filtrada (905 de 906): `interface: o definir do fisico confere a linha da pessoa onde edita` |
+| N196 | fora do SDK (AE-5, o achado 3): o grafo do NSF compara a abreviada só pelo resumo | hospedeiro: `grafo::testes::o_mesmo_resumo_com_outro_de_ou_outro_editor_e_uma_troca`; o motor: `a_troca_para_o_codigo_de_fora_do_mesmo_resumo_fica_no_grafo` — a suíte não produz um código de fora com o resumo de um da imagem |
+| N197 | fora do SDK (AE-5, o achado 6): o aviso de qualquer cerimônia muda a linha | suíte x86, filtrada (905 de 906): `pareamento: o aviso lido antes do fim da cerimonia nao muda a linha` |
 
 ## Medidas
 

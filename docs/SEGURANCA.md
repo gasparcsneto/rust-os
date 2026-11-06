@@ -179,9 +179,18 @@ cortar o texto, com citação ou sem; e o texto que ainda
 não cabe perde as últimas palavras inteiras, com ` ?` no lugar do que
 saiu: o pedaço de um nome é o nome de outro editor, e o de um número, o de
 outro processo (ver `politica::auditoria::detalhe_composto`). O processo
-é o fio, e o resumo diz o programa: no grafo, a abreviada do mesmo resumo
-é o mesmo programa, a de outro resumo é uma troca, e a inteira que chega
-depois com o mesmo resumo não é outra troca. Um processo nasce uma vez só
+é o fio, e o resumo diz o programa: no grafo, a abreviada é o mesmo
+programa quando tem o mesmo resumo, a mesma forma do `de` (o código de
+fora com ele, o da imagem sem) e, quando as duas dizem o editor, o mesmo
+editor (`seguranca::grafo::o_mesmo_programa`); a de outro programa é uma
+troca, e a inteira que chega depois, do mesmo programa, não é outra
+troca. O resumo tem 32 bits — os 8 dígitos hexadecimais do começo do
+BLAKE2s —: só ele não separa o código de fora de um da imagem com o
+mesmo começo do resumo (o achado 3 do adversário do passo 1), e o `de` e
+o editor separam. Com o mesmo nome, o mesmo editor e o mesmo começo do
+resumo, dois executáveis têm a mesma descrição; aumentar o resumo muda o
+formato do detalhe e a conta do teto, e é uma decisão pendente, [C] (o
+achado 9). Um processo nasce uma vez só
 na época — um segundo nascimento do mesmo fio não muda o criador nem a
 autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
 pedaço do número de outro processo, num registro cortado. Na

@@ -158,6 +158,27 @@ Antes, a do nome virava uma linha de comando — o nome e a senha digitados
 adiantado ecoavam, iam à árvore e ao histórico —, e a da senha era
 engolida.
 
+E só a linha da cerimônia **do console**. O aviso lê o que a cerimônia pede
+da linha antes de tomar a trava do console — relê-lo dentro inverteria a
+ordem das travas —, e a cerimônia pode acabar entre a leitura e a trava —
+o prazo vence, a sessão acaba, o par sai —, e o aviso do fim devolver a
+linha a um comando antes dele. O aviso leva o número da cerimônia, e o
+console guarda o da dele — pelo `aceitar`, pelo `parear` e por cada passo
+dela, e o esquece quando a linha volta a um comando —: o aviso de outra
+não muda a linha. A linha vazia da Pessoa nesse meio-tempo não acaba a
+cerimônia: a linha dela ainda é a da espera, e a cerimônia já pede o
+código — é um passo já respondido.
+Antes, o aviso dos códigos lido assim punha a linha de comando no código
+do par de uma cerimônia morta, e o comando seguinte da Pessoa se perdia
+nela (o achado 6 do adversário do passo 1).
+
+A linha que passa a pedir a Pessoa — o Enter do `aceitar` ou do `parear`,
+o aviso que a leva a um passo da cerimônia ou que começa o engolir —
+recusa ali as edições da
+árvore a caminho, e o arrendamento delas sai já: a tecla da Pessoa que
+chega à linha da cerimônia depois disso não é `CONFLICT` (o achado 2; ver
+"A corrida com o Enter da Pessoa", nos Consoles do README).
+
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
 a tela diz para conferir nele); `DesfazerAqui` (o outro desistiu depois
@@ -274,7 +295,10 @@ compartilhada, a nuvem e a conta central.
   cerimônia com o arrendamento solto, e a que continua recusada quando o
   fim, no meio dela, devolve a linha a um comando; e o aviso do fim que
   chega atrasado, depois do `logout` e do `login` ou do `senha`, sem mudar
-  a linha do nome, a da senha nem a da senha atual da troca.
+  a linha do nome, a da senha nem a da senha atual da troca; e o aviso
+  dos códigos lido antes de o prazo vencer e entregue depois do aviso do
+  fim, que não muda a linha — o comando seguinte da Pessoa roda
+  ("pareamento: o aviso lido antes do fim da cerimonia nao muda a linha").
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, com a senha. Uma

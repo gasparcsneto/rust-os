@@ -5002,8 +5002,18 @@ Sem ganho a medir, não há o que pagar com esse risco.
   e o aviso do fim da cerimônia que chega atrasado não muda mais a linha do
   login nem as da troca da senha — a do nome virava uma linha de comando, e
   o nome e a senha digitados adiantado ecoavam (ver [Consoles](#consoles)).
-  Continuam com a decisão: o processo que escreve no pseudo-terminal sem a
-  marca da árvore, que digita como a Pessoa; o
+  E, como [B], pelos achados do adversário do passo 1: a linha que passa a
+  pedir a pessoa recusa ali as edições a caminho e solta já o arrendamento
+  delas; a edição contada que não chega ao programa não arrenda o campo; a
+  de quem saiu da sessão é descartada no consumo; a soltura vai à
+  auditoria como `lease.invalidate`; e o aviso de outra cerimônia não muda
+  a linha (ver [Consoles](#consoles)). Continuam com a decisão: a tecla da
+  Pessoa digitada entre a entrada de uma edição da árvore e o consumo do
+  Enter que faz a linha pedir a pessoa — a linha ainda pede um comando, a
+  janela coordena a tecla contra o arrendamento legítimo de quem editou, e
+  ela é `CONFLICT` (o resto do achado 2): coordená-la onde é consumida,
+  como a do físico, é desenho da mesma família; o processo que escreve no
+  pseudo-terminal sem a marca da árvore, que digita como a Pessoa; o
   foco do teclado tomado — uma janela que pede o foco enquanto a Pessoa
   digita uma senha recebe as teclas dela —; a senha adiantada num
   Terminal; a senha digitada no lugar errado — numa linha que pede um
@@ -5016,6 +5026,16 @@ Sem ganho a medir, não há o que pagar com esse risco.
   e os despertares das tarefas, as trocas de contexto e as chamadas de
   sistema também, misturados ao resto. Tirar deles o ritmo de uma senha
   muda o que esses relatórios prometem, ou a quem.
+- **O tamanho do resumo na descrição de um programa** (o achado 9 do
+  adversário do passo 1): a auditoria e o NSF nomeiam um programa pelo
+  nome, pelos 8 dígitos hexadecimais do começo do BLAKE2s do executável —
+  32 bits — e pelo editor. Com o mesmo nome e o mesmo editor, dois
+  executáveis com os mesmos quatro primeiros bytes do resumo têm a mesma
+  descrição, byte a byte — uma segunda pré-imagem de 32 bits, uns 2^32
+  resumos. Já era assim antes do F1; o grafo do NSF agora separa o código
+  de fora do da imagem e um editor de outro (o achado 3), e o resto é o
+  tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
+  de 96 bytes: fica para uma decisão.
 
 ## O tempo
 
@@ -6381,9 +6401,21 @@ sondagem de privilégio da pessoa que o lançou. A bifurcação guarda o
 `filho` inteiro — o pedaço do número era o de outro processo, e o NSF
 dava a criação dele a quem bifurcou. O NSF ainda se defende do registro
 cortado: um `filho N` com N até o fio do pai não é nascimento, e um
-processo nasce uma vez só no boot. No grafo, a abreviada do mesmo resumo
-é o mesmo programa; a de outro resumo é uma troca — o primeiro pedido,
-abreviado, do programa que o `executar` trouxe. A âncora de uma declaração numa decisão
+processo nasce uma vez só no boot. No grafo, a abreviada é o mesmo
+programa quando tem o mesmo resumo, a mesma forma do `de` — as duas com
+ele, o código de fora, ou as duas sem, o da imagem — e, quando as duas
+dizem o editor, o mesmo editor (`seguranca::grafo::o_mesmo_programa`);
+senão, é uma troca — o primeiro pedido, abreviado, do programa que o
+`executar` trouxe. O resumo da descrição tem **32 bits** (os 8 dígitos
+hexadecimais do começo do BLAKE2s): comparada só por ele, a abreviada de
+um código de fora com os mesmos quatro primeiros bytes de um programa da
+imagem — uma segunda pré-imagem de 32 bits — passava por ele, e a troca
+sumia do grafo (o achado 3 do adversário do passo 1); o `de` e o editor
+agora a separam. Com o mesmo nome, o mesmo editor e o mesmo começo do
+resumo, dois executáveis ainda têm a mesma descrição, byte a byte — já
+era assim antes do F1. Aumentar o resumo muda o formato do detalhe e a
+conta do teto: é uma decisão pendente, [C] (o achado 9 do mesmo
+adversário). A âncora de uma declaração numa decisão
 compara o `pelo` inteiro: o processo cuja descrição passa do teto não se
 ancora em decisão nenhuma — como já não se ancorava com a decisão cortada:
 a que ele pedir é `INVALID_ARGUMENT` —, e declara ancorado na conexão, ou
@@ -7807,10 +7839,16 @@ do histórico, e sem passar pela coordenação. A recusa vai ao log, uma
 linha por edição e sem o texto, no formato da recusa na entrada — `agente
 1: set_value no elemento <id> recusado no console: <o motivo da linha>`
 —; o que veio marcado sem reserva, com um aviso do console. E o
-arrendamento implícito que a edição
-tomou ao entrar sai, gravado em nome de quem o tinha (`ui.release`, `Allow`,
-"arrendamento implicito solto: a edicao pela arvore foi recusada na linha
-da pessoa") — uma ação recusada não arrenda o campo. Só o dela: o
+arrendamento implícito que a edição tomou ao entrar sai — uma ação
+recusada não arrenda o campo —, gravado como o kernel grava o
+arrendamento que sai sem pedido do titular, na sessão que acabou e na
+revogação: `lease.invalidate`, `Allow`, em nome de quem o tinha, com o
+motivo no detalhe ("arrendamento implicito solto: a edicao pela arvore
+foi recusada na linha da pessoa"). Era um `ui.release` em nome do agente
+— o método do comando dele, que ele não pediu (o achado 5 do adversário
+do passo 1). O NSF lê o `lease.invalidate` como os outros: um registro do
+kernel em nome de quem tinha o arrendamento, que o perfil dele conta como
+conta o vencimento e a sessão que acabou. Só o dela: o
 arrendamento sai se o campo ainda está exatamente como a edição o deixou —
 o mesmo titular, desde o mesmo instante, com o mesmo prazo e vencimento, e
 na mesma versão. Se depois dela outro titular o arrendou, um `ui.claim` o
@@ -7818,9 +7856,13 @@ renovou ou outra ação o editou, ele fica: soltar o de outro seria
 preempção. Duas edições em voo, as duas recusadas, contam como uma — o
 arrendamento que a primeira tomou e a segunda só renovou sai na recusa da
 segunda, que começou exatamente onde a primeira deixou o campo. A marca não
-é autoridade: ela só aponta a reserva mais velha do console, e só torna as
-coisas mais estritas para quem a escreve — o que vem marcado sem reserva
-passa pela regra e não solta nada; o que um processo escreve no
+é autoridade: ela só aponta a reserva mais velha do console, e não dá nada
+a quem a escreve. Mas não é inócua: o processo que tem o pseudo-terminal
+pode forjar o apagar marcado e, numa linha da pessoa, fazer o console
+recusar a edição mais velha que a interface entregou a ele — e soltar o
+arrendamento que ela tomou, só no campo do próprio programa, gravado como
+`lease.invalidate`, e não como um pedido do agente. O que vem marcado sem
+reserva passa pela regra e não solta nada; o que um processo escreve no
 pseudo-terminal sem a marca chega ao console como a tecla da Pessoa, como
 sempre — quem pode ser "o Terminal" é a decisão pendente (ver [Decisões
 pendentes](#decisões-pendentes)). O Enter de um agente não muda — o console
@@ -7828,6 +7870,58 @@ o reconhece, só vale o que a árvore pediu, e nessas linhas não confirma —,
 nem a regra do valor do `set_value`. O console físico não tem a corrida: a
 árvore edita a linha dele direto, sem programa nem fila no meio, e o Enter
 da Pessoa e o `ui.act` rodam no mesmo executor, um depois do outro.
+
+**A linha que passa a pedir a pessoa.** O arrendamento das edições que o
+console recusa só saía quando ele as consumia, e a tecla da Pessoa nesse
+meio-tempo — o nome, depois do Enter do `login` — era `CONFLICT` na
+janela (o achado 2 do adversário do passo 1). Agora, quando o console
+consome o que faz a linha pedir a pessoa — o Enter do `login`, da
+`senha`, do `aceitar` ou do `parear`; o aviso da cerimônia que leva a
+linha a um passo dela, ou que começa o engolir —, as edições da
+árvore a caminho são recusadas ali, todas, na ordem, com uma linha no log
+por edição, e o arrendamento que a sequência delas tomou sai já, pela
+mesma regra do estado exato; o que chegar marcado delas depois é
+descartado, mesmo que a linha volte a pedir um comando. Fica a tecla
+digitada entre a entrada da edição e o consumo do Enter: a linha ainda
+pede um comando, e o arrendamento de quem editou é legítimo — a janela a
+coordena contra ele, e ela é `CONFLICT`. Coordenar a tecla do Terminal
+onde ela é consumida, como a do físico, é uma mudança de desenho da
+família da DT-1, pendente (ver [Decisões pendentes](#decisões-pendentes)).
+
+**A edição que não chega.** A interface confere a entrega antes da conta
+da coordenação, como as reservas: a janela de pé, a fila de valores dela
+com lugar para o texto de um `set_value`, e a fila de eventos do dono com
+quem escute e com lugar para o aviso. Antes, a conta arrendava o campo e
+fazia a versão crescer, a entrega falhava depois, e o agente ficava com o
+campo por 60 s com a ação recusada — e a sequência das recusadas se
+quebrava na edição que não chegou, que o console nunca consumiria (o
+achado 1). O que ainda falhar depois da conta — a janela que fecha noutro
+núcleo — desfaz o que a edição fez no campo: o arrendamento que ela tomou
+sai, pela mesma regra ("arrendamento implicito solto: a edicao pela
+arvore nao chegou a linha"); a que só o renovou não quebra a sequência —
+a renovação passa à edição a caminho que ela continuou, e sai com a
+recusa dela. No físico, a regra da linha da pessoa é conferida de novo na
+seção que edita a linha, e o arrendamento que a edição tomou sai se ela
+não chegou — uma corrida que o caminho de verdade não alcança, porque o
+`ui.act` do físico roda no executor que consome as teclas.
+
+**Quem pediu, de novo, no consumo.** A edição de um agente é amarrada à
+conexão de onde ele pediu e à chave que o gate decidiu, como o Enter
+dele: quem já não está nela é recusado antes da conta, e a edição de quem
+saiu depois — a conexão acabou, ou outra ocupou a sessão — é descartada
+quando o console a consome, numa linha de comando também, com a recusa no
+log; o arrendamento dela, se ainda é o que ela deixou, sai pela mesma
+regra ("arrendamento implicito solto: quem pediu a edicao pela arvore
+saiu da sessao"; o achado 7).
+
+**Quem solta.** O estado que a soltura confere é o rastro que a conta da
+coordenação devolveu — de que recurso, o antes e o depois —, com os
+campos privados: só `coordenacao::editar_com_rastro` o constrói, quem
+solta não escolhe o estado a soltar, e o de agora, lido por fora, não
+solta nada (o achado 8). E o `cargo xtask invariantes` confere quem chama
+a soltura, a reserva, a anotação, a desistência e a entrega que falhou
+pelo nome sozinho, em qualquer forma — com o caminho ou sem ele, num
+`use`, renomeado —, e não só pela chamada com o caminho.
 
 Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
 pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
@@ -7876,7 +7970,13 @@ fica de fora: a tecla que passou pela coordenação antes de o fim chegar
 já fez a versão crescer. E o aviso do fim sai de outro fio e pode chegar
 atrasado — depois de a Pessoa desistir da linha que esperava, sair e
 começar o `login`: ele só muda a linha que é da cerimônia ou que pede um
-comando, e só começa a engolir a partir da senha da cerimônia. A do nome,
+comando, e só começa a engolir a partir da senha da cerimônia. E só a da
+cerimônia do console: o aviso leva o número da cerimônia, e o console
+guarda o da dele — o aviso lido antes de ela acabar e entregue depois,
+com a linha já de volta a um comando, não a põe numa cerimônia morta, e
+o comando seguinte da Pessoa não se perde nela (o achado 6 do adversário
+do passo 1; "pareamento: o aviso lido antes do fim da cerimonia nao muda
+a linha"). A do nome,
 a da senha do login e as da troca da senha ficam como estão, e o bit do
 histórico segue a linha que ficou — antes, a do nome virava uma linha de
 comando, e o nome e a senha digitados adiantado ecoavam, iam à árvore e
@@ -7928,8 +8028,12 @@ quando o `set_value` e, noutra volta, o `cancel` de um agente entram — a
 ação aceita na entrada, com a decisão do gate gravada, e descartada no
 consumo, sem tirar o começo do nome que a Pessoa digitou adiantado e sem
 nada na grade, com a recusa no log e o arrendamento solto em nome do
-agente, e a Pessoa entrando sem `CONFLICT` ("terminal: a edicao da arvore
-que corre com o Enter da pessoa nao entra na linha do nome"); o mesmo com o
+agente, e a Pessoa, depois de o console consumir o Enter, entrando sem
+`CONFLICT` ("terminal: a edicao da arvore que corre com o Enter da pessoa
+nao entra na linha do nome"); a tecla dela depois do Enter, com a edição
+ainda na fila, passando pela janela — a edição recusada no Enter, e o
+arrendamento solto ali ("terminal: a tecla da pessoa depois do Enter, com
+a edicao a caminho, nao e CONFLICT"); o mesmo com o
 `aceitar` e a linha da cerimônia ("pareamento: a edicao da arvore que corre
 com o Enter do aceitar nao entra na linha da cerimonia"), e a edição que a
 linha da cerimônia recusou e que continua recusada quando o fim da
@@ -7941,7 +8045,18 @@ da arvore sem reserva nao solta nem passa nada"); e o arrendamento que só
 sai se for o que edições recusadas deixaram — duas em voo, as duas
 recusadas, soltam na segunda; o de outro titular, o renovado por um
 `ui.claim` e o de antes da edição ficam ("terminal: so se solta o
-arrendamento que as edicoes recusadas deixaram"). A fumaça
+arrendamento que as edicoes recusadas deixaram"); o `set_value` com a
+fila de valores da janela cheia, recusado na entrega antes da conta, sem
+arrendar nem fazer a versão crescer ("terminal: a edicao que nao chega ao
+programa nao arrenda o campo"); a edição contada que não chegou ao
+programa, que solta o que tomou, e a quinta de cinco, que só renovou, sem
+quebrar a sequência das quatro recusadas ("terminal: a recusada solta o
+arrendamento mesmo com uma edicao que nao chegou"); a edição de quem saiu
+da sessão, descartada no consumo, e a reserva com a chave de outro
+agente, recusada ("terminal: a edicao de quem saiu da sessao e
+descartada"); e o `definir` do físico, que confere a linha da pessoa onde
+edita ("interface: o definir do fisico confere a linha da pessoa onde
+edita"). A fumaça
 entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
 de ver o comando antes do login recusado e gravado, e com a senha fora do
 histórico; e no console físico, depois de um clique fora das janelas —
@@ -9737,7 +9852,24 @@ e a N181 aceita o editor `desconhecido` no registro. Todas reprovadas
 pelos testes do hospedeiro, uma de cada vez; a N173, a N176 e a N180
 também pela suíte do x86 — as outras mexem no que a suíte não produz. E
 a N160, rodada de novo na forma do código novo, reprova pelos testes do
-hospedeiro e pela suíte do x86.
+hospedeiro e pela suíte do x86. E as do AE-5 e dos achados do adversário
+do passo 1 (N183–N197, na numeração do [docs/SDK.md](docs/SDK.md)): a N183
+põe de volta a reserva do nome `desconhecido` no registro de chaves de
+atualização; a N184 tira a limpeza dos zumbis no recolhimento, e a N185
+limpa de novo, na colheita, a morte que o zumbi já soltou; a N186 tira o
+gancho que segura o fio da energia; a N187 recalcula quem pede na
+execução da decisão do `exec`; a N188 tira a execução adiada da volta "no
+meio"; a N189 tira a conferência da entrega antes da conta; a N190 não
+passa a renovação da edição que não chegou à que ela continuou; a N191
+tira a recusa das edições a caminho no Enter que faz a linha pedir a
+pessoa; a N192 grava a soltura de novo como `ui.release`; a N193 não
+confere de novo, no consumo, quem pediu a edição; a N194 faz o `xtask`
+procurar só a chamada com o caminho; a N195 tira a regra da linha da
+pessoa da seção que edita, no `definir` do físico; a N196 faz o grafo
+comparar a abreviada só pelo resumo; e a N197 deixa o aviso de qualquer
+cerimônia mudar a linha. Todas reprovadas, uma de cada vez: a N183, a
+N194 e a N196 pelos testes do hospedeiro; as outras pela suíte do x86 —
+a N188 num núcleo só.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9831,6 +9963,9 @@ hospedeiro e pela suíte do x86.
 | fora do SDK (resíduo do F1): o registro sem citação que não encolhe — a saída antecipada de volta (N173) | "nsf: ve o codigo adulterado de quem tem descricao longa", "nsf: a recusa do manifesto de quem tem descricao longa e do manifesto", "nsf: a bifurcacao de quem tem descricao longa liga o filho", "nsf: a decisao de quem tem descricao acima do teto e do processo"; e os testes do hospedeiro do `politica::auditoria` e do motor |
 | fora do SDK (resíduo do F1): o texto cortado no meio da palavra (N176), ou sem a marca do corte (N180) | "auditoria: a citacao da decisao fica inteira acima do teto", "chaves: a declaracao se ancora so na decisao de quem declara"; e os testes do hospedeiro do `politica::auditoria` |
 | fora do SDK (resíduo do F1): o nascimento que sobrescreve (N174); o `filho N` até o fio do pai aceito (N175); a falta sem tirar a marca do corte (N177); o grafo que ignora a abreviada de outro resumo (N178); o firewall casado pelo programa (N179); o editor `desconhecido` aceito (N181) | os testes do hospedeiro do `seguranca::grafo`, do `seguranca::evento`, do `politica::procedencia`, do `politica::auditoria`, do motor, do `sigilo::registro` e do xtask — a suíte não produz um registro cortado ou repetido, um motivo de procedência cortado, uma troca abreviada, uma execução barrada de descrição longa nem um editor com o nome reservado |
+| fora do SDK (AE-5): a reserva do nome `desconhecido` de volta no registro de chaves de atualização (N183); a conferência do `xtask` só pela chamada com o caminho (N194); o grafo do NSF comparando a abreviada só pelo resumo (N196) | os testes do hospedeiro do `sigilo::registro`, do xtask, do `seguranca::grafo` e do motor |
+| fora do SDK (AE-5, itens 1 a 3): o recolhimento sem limpar os zumbis (N184); a colheita que limpa de novo (N185); o fio da energia sem o gancho da suíte (N186); a execução da decisão que recalcula quem pede (N187); a volta "no meio" sem a execução adiada (N188) | "fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita"; "aviso: o desligamento avisa o fim"; "fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio"; "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" — num núcleo só |
+| fora do SDK (AE-5, item 4 e os achados 1, 2, 5, 6 e 7 do adversário do passo 1): a entrega sem a conferência antes da conta (N189); a renovação que não passa adiante (N190); o Enter sem recusar as edições a caminho (N191); a soltura como `ui.release` (N192); o consumo sem conferir quem pediu (N193); o `definir` do físico sem a regra na seção (N195); o aviso de qualquer cerimônia (N197) | "terminal: a edicao que nao chega ao programa nao arrenda o campo"; "terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou"; "terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT"; os casos que contam a soltura; "terminal: a edicao de quem saiu da sessao e descartada"; "interface: o definir do fisico confere a linha da pessoa onde edita"; "pareamento: o aviso lido antes do fim da cerimonia nao muda a linha" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
