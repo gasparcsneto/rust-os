@@ -877,15 +877,18 @@ conferência do `xtask` só pela chamada com o caminho (N194, o achado 8); o
 o achado 6). Todas reprovadas, uma de cada vez: a N183, a N194 e a N196
 pelos testes do hospedeiro; as outras pela suíte do x86, filtrada aos
 casos de cada uma — a N188 num núcleo só (`DUKE_NUCLEOS=1`). E as dos
-achados do adversário do passo 1b (N198–N203): o consumo da edição da
-árvore sem perguntar à contenção (N198, o achado 2); o Enter que escreve
+achados do adversário do passo 1b (N198–N204): o consumo da edição da
+árvore sem perguntar à contenção (N198) e a soltura de quem foi contido
+com o motivo de quem saiu da sessão (N204), o achado 2; o Enter que escreve
 na linha o passo que leu, mesmo de antes do que ela mostra (N199), o que
 põe de volta na linha a cerimônia que acabou depois da leitura (N200), e
 o aviso atrasado que volta a linha a um passo de antes (N201), o achado
 3; e o `xtask` que deixa passar o `#[path]` fora da suíte (N202) e a
 conta que devolve o rastro fora dos nomes protegidos (N203), o achado 6.
 Todas reprovadas, uma de cada vez: a N202 e a N203 pelos testes do
-hospedeiro; as outras pela suíte do x86, filtrada aos casos de cada uma.
+hospedeiro; as outras pela suíte do x86, filtrada aos casos de cada uma
+— a N204 depois do reforço do caso da contenção, que passou a conferir a
+conta que corre com ela.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1090,6 +1093,7 @@ hospedeiro; as outras pela suíte do x86, filtrada aos casos de cada uma.
 | N201 | fora do SDK (AE-5, o achado 3 do adversário do passo 1b): o aviso atrasado volta a linha a um passo de antes do que ela mostra | suíte x86, filtrada (907 de 908): `pareamento: o passo lido antes do aviso nao volta a linha` — a volta do aviso atrasado: a linha da senha voltou ao código |
 | N202 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `xtask` deixa passar o `#[path]` no kernel fora da suíte | hospedeiro: `testes_dos_nomes_protegidos::o_atributo_de_caminho` (xtask) |
 | N203 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): a conta que devolve o rastro fora dos nomes protegidos | hospedeiro: `testes_dos_nomes_protegidos::o_rastro_so_se_fabrica_nos_donos` (xtask) |
+| N204 | fora do SDK (AE-5, o achado 2 do adversário do passo 1b): a soltura do arrendamento de quem foi contido com o motivo de quem saiu da sessão | suíte x86, filtrada (907 de 908): `terminal: a edicao de quem foi contido e descartada` — a conta que correu com a contenção, depois do reforço |
 
 ## Medidas
 
