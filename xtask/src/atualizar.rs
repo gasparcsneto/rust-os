@@ -846,6 +846,9 @@ fn o_primeiro_boot(b: &Bancada) -> Result<String, String> {
 /// da auditoria, a geração administrativa.
 fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
     let c = chaves::Chaves::garantir()?;
+    // O ritmo da digitação, dos dois boots em que a pessoa digita: o de
+    // antes da versão nova, e o dela — ver `digitacao`.
+    let ritmo = super::digitacao::ritmo_novo();
     let mut m = b.subir()?;
     let r = (|| -> Result<String, String> {
         let r = p::administrar(
@@ -876,7 +879,7 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
         // fica na fila, e nenhuma tecla chega.
         let (_, _, senha) = c.pessoa_dev();
         {
-            let mut t = super::senha::teclado(b.arch)?;
+            let mut t = super::senha::teclado(b.arch, &ritmo, "atualizacao")?;
             super::senha::terminal_atendendo(&mut m, &mut t)?;
             let login = super::senha::entrar(&mut m, &mut t, chaves::NOME_DA_PESSOA_DEV, &senha)?;
             if login != "ALLOW" {
@@ -937,7 +940,7 @@ fn a_atualizacao_inteira(b: &Bancada) -> Result<String, String> {
         }
         // A senha trocada antes: a versão nova a repôs do journal — a
         // antiga não entra, a nova entra.
-        let mut t = super::senha::teclado(b.arch)?;
+        let mut t = super::senha::teclado(b.arch, &ritmo, "atualizacao")?;
         super::senha::terminal_atendendo(&mut m, &mut t)?;
         if super::senha::entra_com(
             &mut m,

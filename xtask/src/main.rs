@@ -20,6 +20,7 @@ mod botao;
 mod canal_tcp;
 mod codigo;
 mod copia;
+mod digitacao;
 mod disco_hostil;
 mod enlace;
 mod fluxo;
@@ -15796,34 +15797,12 @@ fn tecla_do_monitor(c: char) -> Option<String> {
     }
 }
 
-/// Digita um texto no teclado da máquina, pelo monitor, uma tecla por vez.
+/// Digita um texto no teclado da máquina, pelo monitor, uma tecla por vez,
+/// no ritmo base, sem conferir: a fumaça e a imagem de produção da
+/// persistência, uma máquina só. As bancadas que digitam como a pessoa
+/// conferem a linha e adaptam o ritmo — ver [`digitacao`].
 fn digitar_pelo_monitor(mon: &mut UnixStream, texto: &str, quem: &str) -> Result<(), String> {
-    for c in texto.chars() {
-        let nome = tecla_do_monitor(c)
-            .ok_or_else(|| format!("{quem}: a fumaca nao sabe digitar {c:?}"))?;
-        mon.write_all(format!("sendkey {nome}\n").as_bytes())
-            .and_then(|()| mon.flush())
-            .map_err(|e| format!("{quem}: falha ao mandar `{nome}`: {e}"))?;
-        // O emulador entrega uma tecla por vez, e mandá-las sem respiro faz
-        // algumas se perderem entre o monitor e o dispositivo.
-        //
-        // E depois do Enter, mais: no console da máquina, cheio, cada linha
-        // nova rola a tela e a recompõe inteira, com as interrupções
-        // desligadas — no build de depuração, perto de um quarto de segundo.
-        // As teclas que chegam nesse meio esperam na fila do PS/2 do
-        // emulador, que é curta: medido, a vinte milissegundos por tecla o
-        // Enter depois do nome se perdia, e a senha entrava ecoada no nome.
-        //
-        // Uma tecla com shift são quatro eventos na fila do emulador, e não
-        // dois: o dobro do respiro.
-        let respiro = match c {
-            '\n' => 600,
-            _ if nome.starts_with("shift-") => 40,
-            _ => 20,
-        };
-        std::thread::sleep(Duration::from_millis(respiro));
-    }
-    Ok(())
+    digitacao::mandar(mon, texto, quem, digitacao::Ritmo::default())
 }
 
 /// As sessões abertas da pessoa de desenvolvimento, pelos consoles delas,

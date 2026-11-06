@@ -35,11 +35,11 @@
 //! raiz de estado dela — ver [`super::na_raiz`].
 
 use std::collections::BTreeMap;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use super::digitacao::{self, PROMPT, Ritmo, RitmoDaMaquina, Teclado, Tela, VEZES_DE_DIGITAR};
 use super::persistencia::{self as p, Ligada};
 use super::{Ambiente, Arquitetura, Artefato, chaves};
 
@@ -78,18 +78,19 @@ const ESPERA_PELO_PROGRAMA: Duration = Duration::from_secs(180);
 /// política padrão), e um lançamento faz até seis.
 const JANELA_DOS_APERTOS: Duration = Duration::from_secs(11);
 
-/// Quanto esperar o gate decidir o `user.run` de uma linha digitada, e
-/// quantas vezes digitá-la — ver [`DePe::lancar`]. A espera é a do login:
-/// com as duas máquinas ocupadas, a linha que só demora não pode ganhar uma
-/// segunda cópia, que lançaria o programa duas vezes.
+/// Quanto esperar o gate decidir o comando de uma linha digitada — o
+/// `user.run`, o `device.forget` — antes de digitá-la de novo: ver
+/// [`DePe::decidido`]. A espera é a do login: com as duas máquinas ocupadas,
+/// a linha que só demora não pode ganhar uma segunda cópia, que lançaria o
+/// programa duas vezes.
 const ESPERA_PELO_LANCAMENTO: Duration = Duration::from_secs(60);
-const VEZES_DE_DIGITAR: usize = 3;
 
 /// Quanto esperar o `person.login` de um `login` digitado — a senha passa
 /// pelo Argon2id no kernel, lento no emulador — antes de digitá-lo de novo:
 /// ver [`DePe::entrar`]. As [`VEZES_DE_DIGITAR`] tentativas, espaçadas
 /// assim, cabem no limite de tentativas de login do console (cinco por
-/// minuto).
+/// minuto) — e a senha, conferida pela conta das teclas antes do Enter, não
+/// chega estragada ao gate.
 const ESPERA_PELO_LOGIN: Duration = Duration::from_secs(60);
 
 /// Os pares, na ordem em que rodam: origem e destino.
@@ -117,6 +118,10 @@ pub(crate) struct Maquina {
     privada: [u8; 32],
     /// As opções da rede da ponta do enlace dela.
     encaminhamento: String,
+    /// O ritmo da digitação nela: o fator de respiro, que cresce a cada
+    /// perda de tecla e vale até o fim do par — também nos boots depois de
+    /// um corte de energia. Ver [`digitacao`].
+    ritmo: RitmoDaMaquina,
 }
 
 impl Maquina {
@@ -153,7 +158,13 @@ impl Maquina {
             artefato,
             privada,
             encaminhamento,
+            ritmo: digitacao::ritmo_novo(),
         })
+    }
+
+    /// O ritmo da digitação nela, até agora: as perdas e o fator.
+    pub(crate) fn ritmo(&self) -> Ritmo {
+        self.ritmo.get()
     }
 
     pub(crate) fn publica(&self) -> [u8; 32] {
@@ -176,12 +187,13 @@ impl Maquina {
                     .com_disco(self.disco.clone())
                     .com_encaminhamento(self.encaminhamento.clone()),
             )?;
-            let teclado = super::senha::teclado(self.arch)?;
+            let teclado = super::senha::teclado(self.arch, &self.ritmo, self.papel)?;
             Ok(DePe {
                 papel: self.papel,
                 arch: self.arch,
                 m,
                 teclado,
+                tela: Tela::Terminal,
                 visto: Visto::default(),
             })
         })
@@ -221,7 +233,10 @@ pub(crate) struct DePe {
     pub(crate) papel: &'static str,
     pub(crate) arch: Arquitetura,
     pub(crate) m: Ligada,
-    teclado: UnixStream,
+    teclado: Teclado,
+    /// Onde aparece a linha que o teclado edita: o Terminal, que tem o foco
+    /// desde o boot, ou o console físico, depois de [`DePe::entrar_no_fisico`].
+    tela: Tela,
     visto: Visto,
 }
 
@@ -345,9 +360,70 @@ impl DePe {
         })
     }
 
-    /// Digita no teclado da máquina, no Terminal que tem o foco.
-    pub(crate) fn digitar(&mut self, texto: &str) -> Result<(), String> {
-        super::digitar_pelo_monitor(&mut self.teclado, texto, self.papel)
+    /// A pessoa digita `texto` na linha que pede `prompt` — no Terminal, ou
+    /// no console físico, onde o teclado estiver —, conferido na tela antes
+    /// do Enter, que vai contado. Ver [`digitacao::linha`].
+    pub(crate) fn linha(&mut self, prompt: &str, texto: &str) -> Result<(), String> {
+        digitacao::linha(&mut self.m, &mut self.teclado, self.tela, prompt, texto)
+    }
+
+    /// A pessoa digita a `senha` na linha que pede `prompt`: não ecoa, e se
+    /// confere pela conta das teclas do kernel antes do Enter. Ver
+    /// [`digitacao::senha`].
+    pub(crate) fn senha(&mut self, prompt: &str, senha: &str) -> Result<(), String> {
+        digitacao::senha(
+            &mut self.m,
+            &mut self.teclado,
+            self.tela,
+            prompt,
+            senha,
+            digitacao::Fim::Contado,
+        )
+    }
+
+    /// Só o Enter, contado: a linha vazia — a de quem desiste de uma
+    /// cerimônia.
+    pub(crate) fn enter(&mut self) -> Result<(), String> {
+        digitacao::enter(&mut self.m, &mut self.teclado)
+    }
+
+    /// A pessoa digita `texto` no campo `rotulo` da janela que tem o foco,
+    /// conferido na árvore antes do Enter. Ver [`digitacao::no_campo`].
+    pub(crate) fn no_campo(&mut self, rotulo: &str, texto: &str) -> Result<(), String> {
+        digitacao::no_campo(&mut self.m, &mut self.teclado, rotulo, texto)
+    }
+
+    /// O ritmo da digitação nesta máquina, até agora.
+    pub(crate) fn ritmo(&self) -> Ritmo {
+        self.teclado.ritmo()
+    }
+
+    /// Os `person.login` gravados depois de `desde`, com o número de cada um.
+    fn logins(&self, desde: u64) -> Vec<(u64, &Gravado)> {
+        self.visto
+            .gravados
+            .range(desde + 1..)
+            .filter(|(_, g)| g.metodo == "person.login")
+            .map(|(s, g)| (*s, g))
+            .collect()
+    }
+
+    /// A decisão de `metodo` sobre `recurso` gravada depois de `desde`, se já
+    /// houver.
+    fn decidido_desde(
+        &mut self,
+        desde: u64,
+        metodo: &str,
+        recurso: &str,
+    ) -> Result<Option<Gravado>, String> {
+        self.ler()?;
+        Ok(self
+            .visto
+            .gravados
+            .range(desde + 1..)
+            .map(|(_, g)| g)
+            .find(|g| g.metodo == metodo && g.recurso == recurso)
+            .cloned())
     }
 
     /// Espera a primeira linha de programa depois de `desde` que comece com
@@ -461,47 +537,58 @@ impl DePe {
     /// A pessoa de desenvolvimento entra no Terminal, pelo teclado.
     ///
     /// O teclado do emulador perde tecla com as duas máquinas de pé no mesmo
-    /// hospedeiro (ver [`DePe::lancar`]): o `login` estragado — o comando, o
-    /// nome ou a senha — não chega ao gate, ou chega como uma senha errada.
-    /// Sem o `person.login` aceito, digita de novo, depois de uma linha vazia
-    /// que encerra o que tiver ficado pela metade. O aceito vale desde a
-    /// primeira tentativa: o login que só chega depois do prazo dela não é
-    /// digitado outra vez por cima.
+    /// hospedeiro — ver [`digitacao`] —: o `login` vai conferido — o comando
+    /// e o nome na tela, a senha pela conta das teclas do kernel, cada Enter
+    /// contado —, e a linha que perde tecla se apaga e se digita de novo antes
+    /// do Enter, num ritmo mais lento. Sem o `person.login` aceito — a recusa,
+    /// ou nada no prazo —, é uma perda também: a linha volta ao comando, e o
+    /// login se digita de novo, até [`VEZES_DE_DIGITAR`] vezes. O aceito vale
+    /// desde a primeira tentativa: o login que só chega depois do prazo dela
+    /// não é digitado outra vez por cima.
     pub(crate) fn entrar(&mut self) -> Result<(), String> {
         let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
         super::senha::terminal_atendendo(&mut self.m, &mut self.teclado)?;
         let inicio = self.marca()?.auditoria;
         let mut ultimo = String::from("nenhum person.login gravado");
         for vez in 0..VEZES_DE_DIGITAR {
-            let desde = self.marca()?.auditoria;
             if vez > 0 {
+                self.teclado
+                    .perda(&format!("a pessoa nao entrou: {ultimo}"));
                 println!(
-                    "  [enlace]   {}: a pessoa nao entrou ({ultimo}); digitando o login de novo",
+                    "  [enlace]   {}: a pessoa nao entrou; digitando o login de novo",
                     self.papel
                 );
-                self.digitar("\n")?;
+                digitacao::voltar_ao_comando(&mut self.m, &mut self.teclado, Tela::Terminal)?;
+                self.ler()?;
+                if self.logins(inicio).iter().any(|(_, g)| g.codigo == "ALLOW") {
+                    return Ok(());
+                }
             }
-            self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
+            let desde = self.marca()?.auditoria;
+            if let Err(e) = digitacao::login(
+                &mut self.m,
+                &mut self.teclado,
+                Tela::Terminal,
+                chaves::NOME_DA_PESSOA_DEV,
+                &senha,
+            ) {
+                ultimo = e;
+                continue;
+            }
             let limite = Instant::now() + ESPERA_PELO_LOGIN;
             loop {
                 self.ler()?;
-                let logins: Vec<(u64, &Gravado)> = self
-                    .visto
-                    .gravados
-                    .range(inicio + 1..)
-                    .filter(|(_, g)| g.metodo == "person.login")
-                    .map(|(s, g)| (*s, g))
-                    .collect();
+                let logins = self.logins(inicio);
                 if logins.iter().any(|(_, g)| g.codigo == "ALLOW") {
                     return Ok(());
                 }
-                // A recusa desta tentativa — a senha estragada pelo teclado
-                // —: a próxima tentativa, sem esperar o prazo.
+                // A recusa desta tentativa: a próxima, sem esperar o prazo.
                 if let Some((_, g)) = logins.iter().find(|(s, _)| *s > desde) {
                     ultimo = format!("{} {}", g.codigo, g.detalhe);
                     break;
                 }
                 if Instant::now() >= limite {
+                    ultimo = format!("nenhum person.login em {} s", ESPERA_PELO_LOGIN.as_secs());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -513,18 +600,9 @@ impl DePe {
         ))
     }
 
-    /// A pessoa lança `programa` pelo Terminal: `user.run`, digitado.
-    ///
-    /// E espera o gate decidir o `user.run` dele. O teclado do emulador perde
-    /// tecla com a máquina ocupada — duas de pé no mesmo hospedeiro —, e a
-    /// linha estragada o interpretador recusa sem chegar ao gate: sem a
-    /// decisão gravada em [`ESPERA_PELO_LANCAMENTO`], apaga a linha e digita
-    /// de novo. Apaga, e não encerra com uma linha vazia: a linha que perdeu
-    /// só o Enter é um `user.run` inteiro, e o Enter de agora o rodaria, e a
-    /// cópia digitada depois rodaria o programa outra vez — foi o que a CI
-    /// 426 mostrou, com dois `recebedor` de pé no destino e o segundo
-    /// atendendo o fluxo do passo seguinte. O decidido vale desde a primeira
-    /// tentativa.
+    /// A pessoa lança `programa` pelo Terminal: `user.run`, digitado, até o
+    /// gate o decidir — ver [`DePe::decidido`]. Um `user.run` recusado é uma
+    /// falha, com o código e o motivo do gate.
     pub(crate) fn lancar(&mut self, programa: &str) -> Result<(), String> {
         let caminho = format!("/programas/{}/{programa}", self.arch.nome());
         self.lancar_caminho(&caminho)
@@ -534,36 +612,58 @@ impl DePe {
     /// no armazém, também: a mesma conferência do `user.run`.
     pub(crate) fn lancar_caminho(&mut self, caminho: &str) -> Result<(), String> {
         let linha = format!("user.run {{\"path\":\"{caminho}\"}}");
+        let g = self.decidido(&linha, "user.run", caminho)?;
+        if g.codigo != "ALLOW" {
+            return Err(format!(
+                "{}: user.run {caminho}: {} {}",
+                self.papel, g.codigo, g.detalhe
+            ));
+        }
+        Ok(())
+    }
+
+    /// A pessoa digita a linha de comando `texto` até o gate decidir
+    /// `metodo` sobre `recurso`: a decisão, qualquer que seja.
+    ///
+    /// A linha vai conferida na tela antes do Enter, que vai contado — ver
+    /// [`digitacao`]: a tecla perdida se vê antes de a linha rodar. Sem a
+    /// decisão gravada em [`ESPERA_PELO_LANCAMENTO`], é uma perda: espera a
+    /// linha voltar ao prompt — o comando que só demorou responde antes, e o
+    /// gate o grava antes de responder —, olha a auditoria de novo, e só sem a
+    /// decisão digita de novo, depois de apagar o que tiver ficado na linha.
+    /// Apaga, e não encerra com uma linha vazia: a linha que perdeu só o Enter
+    /// é um comando inteiro, e o Enter de agora o rodaria, e a cópia digitada
+    /// depois o rodaria outra vez — foi o que a CI 426 mostrou, com dois
+    /// `recebedor` de pé no destino e o segundo atendendo o fluxo do passo
+    /// seguinte. O decidido vale desde a primeira tentativa, até
+    /// [`VEZES_DE_DIGITAR`] vezes.
+    pub(crate) fn decidido(
+        &mut self,
+        texto: &str,
+        metodo: &str,
+        recurso: &str,
+    ) -> Result<Gravado, String> {
         let inicio = self.marca()?.auditoria;
         for vez in 0..VEZES_DE_DIGITAR {
             if vez > 0 {
+                self.teclado.perda(&format!(
+                    "o {metodo} de {recurso} nao chegou ao gate em {} s",
+                    ESPERA_PELO_LANCAMENTO.as_secs()
+                ));
                 println!(
-                    "  [enlace]   {}: o user.run de {caminho} nao chegou ao gate; apagando a linha e digitando de novo",
+                    "  [enlace]   {}: o {metodo} de {recurso} nao chegou ao gate; apagando a linha e digitando de novo",
                     self.papel
                 );
-                // Um apagar a mais por caractere da linha, e uns de folga: o
-                // que sobrou da tentativa anterior — inteira, sem o Enter, ou
-                // pela metade — sai sem rodar.
-                self.digitar(&"\u{8}".repeat(linha.len() + 4))?;
+                digitacao::esperar_a_linha(&mut self.m, &mut self.teclado, self.tela, PROMPT)?;
+                if let Some(g) = self.decidido_desde(inicio, metodo, recurso)? {
+                    return Ok(g);
+                }
             }
-            self.digitar(&format!("{linha}\n"))?;
+            self.linha(PROMPT, texto)?;
             let limite = Instant::now() + ESPERA_PELO_LANCAMENTO;
             loop {
-                self.ler()?;
-                let decidido = self
-                    .visto
-                    .gravados
-                    .range(inicio + 1..)
-                    .map(|(_, g)| g)
-                    .find(|g| g.metodo == "user.run" && g.recurso == caminho);
-                if let Some(g) = decidido {
-                    if g.codigo != "ALLOW" {
-                        return Err(format!(
-                            "{}: user.run {caminho}: {} {}",
-                            self.papel, g.codigo, g.detalhe
-                        ));
-                    }
-                    return Ok(());
+                if let Some(g) = self.decidido_desde(inicio, metodo, recurso)? {
+                    return Ok(g);
                 }
                 if Instant::now() >= limite {
                     break;
@@ -572,7 +672,7 @@ impl DePe {
             }
         }
         Err(format!(
-            "{}: o user.run de {caminho} nao chegou ao gate em {VEZES_DE_DIGITAR} vezes",
+            "{}: o {metodo} de {recurso} nao chegou ao gate em {VEZES_DE_DIGITAR} vezes",
             self.papel
         ))
     }
@@ -580,18 +680,23 @@ impl DePe {
     /// A pessoa entra no console físico da máquina: um clique fora de toda
     /// janela devolve o teclado ao kernel, e o `login` vai pelo teclado. A
     /// tecla numa janela que não é de Terminal é de quem está entrado no
-    /// console físico — ver `interpretador::tratar_tecla_de_janela`.
+    /// console físico — ver `interpretador::tratar_tecla_de_janela`. Daqui
+    /// em diante, a linha que a bancada digita nesta máquina é a do console
+    /// físico.
     ///
     /// O teclado do emulador perde tecla, e o mouse perde movimento, com as
-    /// duas máquinas de pé no mesmo hospedeiro — ver [`DePe::entrar`], que
-    /// digita de novo pelo mesmo motivo. Sem o `person.login` aceito do
-    /// console físico, clica de novo fora das janelas e digita de novo,
-    /// depois de uma linha vazia que encerra o que tiver ficado pela metade,
-    /// até [`VEZES_DE_DIGITAR`] vezes, espaçadas por [`ESPERA_PELO_LOGIN`].
-    /// O aceito vale desde a primeira tentativa: o login que só chega depois
-    /// do prazo dela não é digitado outra vez por cima. O `login` que chega
-    /// a um Terminal, e não ao console físico, continua uma falha — o
-    /// clique não devolveu o teclado ao kernel.
+    /// duas máquinas de pé no mesmo hospedeiro. O `login` vai conferido como
+    /// o do Terminal — ver [`DePe::entrar`] —, na tela do console físico: a
+    /// linha que não aparece nela, com as teclas na conta do kernel, foi a
+    /// outra janela, e o clique não devolveu o teclado. Sem o `person.login`
+    /// aceito do console físico — a linha que não entrou, a recusa, ou nada
+    /// no prazo —, é uma perda: clica de novo fora das janelas, leva a linha
+    /// de volta ao comando e digita de novo, até [`VEZES_DE_DIGITAR`] vezes,
+    /// espaçadas por [`ESPERA_PELO_LOGIN`]. O aceito vale desde a primeira
+    /// tentativa: o login que só chega depois do prazo dela não é digitado
+    /// outra vez por cima. O `login` que chega a um Terminal, e não ao
+    /// console físico, continua uma falha — o clique não devolveu o teclado
+    /// ao kernel.
     pub(crate) fn entrar_no_fisico(&mut self, maquina: &Maquina) -> Result<(), String> {
         let (_, _, senha) = chaves::Chaves::garantir()?.pessoa_dev();
         let qmp = maquina.na_raiz(|| super::caminho_qmp(self.arch));
@@ -599,8 +704,10 @@ impl DePe {
         let mut ultimo = String::from("nenhum person.login gravado");
         for vez in 0..VEZES_DE_DIGITAR {
             if vez > 0 {
+                self.teclado
+                    .perda(&format!("o login no console fisico nao entrou: {ultimo}"));
                 println!(
-                    "  [enlace]   {}: o login no console fisico nao entrou ({ultimo}); clicando e digitando de novo",
+                    "  [enlace]   {}: o login no console fisico nao entrou; clicando e digitando de novo",
                     self.papel
                 );
             }
@@ -612,21 +719,28 @@ impl DePe {
                 )
             })?;
             super::clicar_em(&qmp, &mut |metodo| self.m.pedir(metodo, "{}"), x, y)?;
+            self.tela = Tela::Fisico;
             let desde = self.marca()?.auditoria;
-            if vez > 0 {
-                self.digitar("\n")?;
+            let digitado = (|| {
+                if vez > 0 {
+                    digitacao::voltar_ao_comando(&mut self.m, &mut self.teclado, self.tela)?;
+                }
+                digitacao::login(
+                    &mut self.m,
+                    &mut self.teclado,
+                    self.tela,
+                    chaves::NOME_DA_PESSOA_DEV,
+                    &senha,
+                )
+            })();
+            if let Err(e) = digitado {
+                ultimo = e;
+                continue;
             }
-            self.digitar(&format!("login\n{}\n{senha}\n", chaves::NOME_DA_PESSOA_DEV))?;
             let limite = Instant::now() + ESPERA_PELO_LOGIN;
             loop {
                 self.ler()?;
-                let logins: Vec<(u64, &Gravado)> = self
-                    .visto
-                    .gravados
-                    .range(inicio + 1..)
-                    .filter(|(_, g)| g.metodo == "person.login")
-                    .map(|(s, g)| (*s, g))
-                    .collect();
+                let logins = self.logins(inicio);
                 if let Some((_, g)) = logins
                     .iter()
                     .find(|(_, g)| g.recurso.starts_with("terminal:"))
@@ -639,13 +753,13 @@ impl DePe {
                 if logins.iter().any(|(_, g)| g.codigo == "ALLOW") {
                     return Ok(());
                 }
-                // A recusa desta tentativa — o nome ou a senha estragados
-                // pelo teclado —: a próxima tentativa, sem esperar o prazo.
+                // A recusa desta tentativa: a próxima, sem esperar o prazo.
                 if let Some((_, g)) = logins.iter().find(|(s, _)| *s > desde) {
                     ultimo = format!("{} {}", g.codigo, g.detalhe);
                     break;
                 }
                 if Instant::now() >= limite {
+                    ultimo = format!("nenhum person.login em {} s", ESPERA_PELO_LOGIN.as_secs());
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(700));
@@ -658,10 +772,15 @@ impl DePe {
     }
 
     /// O log das duas máquinas, para a falha: as últimas linhas de
-    /// programa, e os últimos registros da auditoria.
+    /// programa, os últimos registros da auditoria, e o ritmo do teclado.
     pub(crate) fn mostrar(&mut self) {
         let _ = self.ler();
-        println!("  [enlace]   {} ({}):", self.papel, self.arch.nome());
+        println!(
+            "  [enlace]   {} ({}): o teclado com {}",
+            self.papel,
+            self.arch.nome(),
+            self.ritmo().texto()
+        );
         let ditas: Vec<&String> = self.visto.ditas.values().map(|(_, l)| l).collect();
         for l in &ditas[ditas.len().saturating_sub(20)..] {
             println!("  [{}] {l}", self.papel);
@@ -1099,6 +1218,19 @@ pub(crate) fn registrar(
     quem.executar("device.register", &params)
 }
 
+/// O ritmo da digitação nas duas máquinas de um par, no fim dele: as perdas
+/// de tecla de cada uma e o fator de respiro em que ficou — ver
+/// [`digitacao`].
+pub(crate) fn o_teclado(a: &Maquina, b: &Maquina) -> String {
+    format!(
+        "o teclado: {} com {}; {} com {}",
+        a.papel,
+        a.ritmo().texto(),
+        b.papel,
+        b.ritmo().texto()
+    )
+}
+
 /// Uma porta livre do hospedeiro, para o `hostfwd` do destino.
 pub(crate) fn porta_livre() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -1172,6 +1304,7 @@ fn um_par(origem: Arquitetura, destino: Arquitetura, release: bool) -> Result<Ve
         par.origem.mostrar();
         par.destino.mostrar();
     }
+    println!("  [enlace]   {}", o_teclado(&a, &b));
     let (origem, destino) = (par.origem, par.destino);
     let _ = origem.m.cortar_a_energia();
     let _ = destino.m.cortar_a_energia();

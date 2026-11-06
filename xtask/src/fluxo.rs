@@ -110,9 +110,6 @@ const ADULTERADO: usize = 6;
 /// Quanto a ponte do meio espera cada lado falar.
 const ESPERA_NO_MEIO: Duration = Duration::from_secs(200);
 
-/// Quantas vezes digitar uma linha que o gate não viu chegar.
-const VEZES_DE_DIGITAR: usize = 3;
-
 /// Os pares, na ordem em que rodam: origem e destino.
 pub(crate) const PARES: [(Arquitetura, Arquitetura); 4] = [
     (Arquitetura::X86_64, Arquitetura::Aarch64),
@@ -910,41 +907,6 @@ impl Bancada {
             Err(format!("{}: nenhum stream.end com `{motivo}`", quem.papel))
         }
     }
-
-    /// A pessoa digita `linha` no Terminal de `quem`, até o gate decidir um
-    /// `metodo` sobre `recurso`: o código dele.
-    fn digitar_decidido(
-        quem: &mut DePe,
-        linha: &str,
-        metodo: &str,
-        recurso: &str,
-    ) -> Result<String, String> {
-        for vez in 0..VEZES_DE_DIGITAR {
-            let desde = quem.marca()?.auditoria;
-            if vez > 0 {
-                quem.digitar("\n")?;
-            }
-            quem.digitar(&format!("{linha}\n"))?;
-            let limite = Instant::now() + Duration::from_secs(20);
-            loop {
-                quem.ler()?;
-                if let Some(g) = quem
-                    .gravados(desde)
-                    .find(|g| g.metodo == metodo && g.recurso == recurso)
-                {
-                    return Ok(g.codigo.clone());
-                }
-                if Instant::now() >= limite {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-        Err(format!(
-            "{}: `{linha}` nao chegou ao gate em {VEZES_DE_DIGITAR} vezes",
-            quem.papel
-        ))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,12 +1207,14 @@ fn fb05(b: &mut Bancada) -> Result<String, String> {
     // O esquecimento, na origem, pela pessoa, no Terminal.
     let antes_o = b.origem().marca()?.auditoria;
     let (desde_a, desde_b) = b.lento_ate_o_meio()?;
-    let codigo = Bancada::digitar_decidido(
-        b.origem(),
-        &format!(r#"device.forget {{"device":"{DISPOSITIVO}"}}"#),
-        "device.forget",
-        DISPOSITIVO,
-    )?;
+    let codigo = b
+        .origem()
+        .decidido(
+            &format!(r#"device.forget {{"device":"{DISPOSITIVO}"}}"#),
+            "device.forget",
+            DISPOSITIVO,
+        )?
+        .codigo;
     let fins = b.lento_ate_o_fim(desde_a, desde_b);
     // A relação de volta na origem, pelo administrador.
     let (da_destino, pessoa, relacao) = (
@@ -1527,6 +1491,7 @@ fn um_par(
         bancada.par.origem.mostrar();
         bancada.par.destino.mostrar();
     }
+    println!("  [fluxo]   {}", enlace::o_teclado(&a, &b));
     let Bancada { par, .. } = bancada;
     let _ = par.origem.m.cortar_a_energia();
     let _ = par.destino.m.cortar_a_energia();

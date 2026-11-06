@@ -58,6 +58,10 @@ const MODELO: &str = "/armazem/compartilhado/codigo/modelo";
 const PAR_DO_MODELO: &str = "/armazem/compartilhado/modelo/par";
 const PAR_DA_CONVERSA: &str = "/armazem/compartilhado/conversa/par";
 
+/// O campo da `conversa` onde a pessoa digita, pelo rótulo dele na árvore
+/// semântica (`programas/src/bin/conversa.rs`).
+const CAMPO_DA_CONVERSA: &str = "mensagem";
+
 /// Os códigos de saída do modelo: o fim pedido, o eco conferido, e a
 /// pergunta que não abriu — ver `sdk/modelo/src/main.rs`.
 const MODELO_ENCERRADO: i64 = 57;
@@ -569,8 +573,9 @@ fn nb03(b: &mut Bancada, maquinas: (&Maquina, &Maquina)) -> Result<String, Strin
     b.origem().lancar("conversa")?;
     b.origem()
         .esperar_dito(desde_a, &["conversa: pronta "], ESPERA_PELO_PRONTO)?;
-    // A janela nova tem o foco: o que a pessoa digita vai ao campo dela.
-    b.origem().digitar("ola de a\n")?;
+    // A janela nova tem o foco: o que a pessoa digita vai ao campo dela,
+    // conferido na árvore antes do Enter — ver `digitacao`.
+    b.origem().no_campo(CAMPO_DA_CONVERSA, "ola de a")?;
     b.origem()
         .esperar_dito(desde_a, &["conversa: mandei ola de a"], ESPERA_PELO_PRONTO)?;
     b.destino()
@@ -578,7 +583,7 @@ fn nb03(b: &mut Bancada, maquinas: (&Maquina, &Maquina)) -> Result<String, Strin
     esperar_na_arvore(b.destino(), "< ola de a")?;
     esperar_na_arvore(b.origem(), "> ola de a")?;
     // E de volta, pelo mesmo fluxo, enquanto ele corre.
-    b.destino().digitar("oi de b\n")?;
+    b.destino().no_campo(CAMPO_DA_CONVERSA, "oi de b")?;
     b.origem()
         .esperar_dito(desde_a, &["conversa: recebi oi de b"], ESPERA_PELA_TROCA)?;
     esperar_na_arvore(b.origem(), "< oi de b")?;
@@ -750,6 +755,7 @@ fn um_par(
         bancada.par.origem.mostrar();
         bancada.par.destino.mostrar();
     }
+    println!("  [sdk]   {}", enlace::o_teclado(&a, &b));
     let Bancada { par, .. } = bancada;
     let _ = par.origem.m.cortar_a_energia();
     let _ = par.destino.m.cortar_a_energia();

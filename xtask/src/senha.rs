@@ -28,6 +28,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use super::digitacao::{
+    self, Fim, PROMPT, PROMPT_DA_ATUAL, PROMPT_DA_NOVA, PROMPT_DE_NOVO, RitmoDaMaquina, Teclado,
+    Tela, VEZES_DE_DIGITAR,
+};
 use super::persistencia::{self as p, Ligada, Rastro};
 use super::{Ambiente, Arquitetura, Artefato, chaves};
 
@@ -47,6 +51,10 @@ const ESPERA_PELO_DESFECHO: Duration = Duration::from_secs(120);
 /// Quanto esperar a máquina sair sozinha depois do aperto do botão.
 const ESPERA_PELO_DESLIGAMENTO: Duration = Duration::from_secs(120);
 
+/// Quanto esperar a recusa gravada de um comando digitado antes do login —
+/// ver [`terminal_atendendo`] — antes de digitá-lo de novo.
+const ESPERA_PELA_RECUSA: Duration = Duration::from_secs(30);
+
 /// A bancada: as duas compilações do kernel de produção — sem e com os
 /// pontos de queda: a segunda só depois dos cenários da primeira, porque
 /// substitui a primeira no disco de testes —, o disco do cenário de
@@ -57,6 +65,9 @@ struct Bancada {
     quedas: Option<Artefato>,
     disco: PathBuf,
     producao: Option<PathBuf>,
+    /// O ritmo da digitação, de todos os boots da bancada — ver
+    /// [`digitacao`].
+    ritmo: RitmoDaMaquina,
 }
 
 /// Um cenário: um nome que se lê como afirmação, e a função que a confere.
@@ -102,9 +113,15 @@ const CENARIOS: &[Cenario] = &[
 // A pessoa no teclado da máquina
 // ---------------------------------------------------------------------------
 
-/// O teclado da máquina: o monitor do emulador.
-pub(crate) fn teclado(arch: Arquitetura) -> Result<UnixStream, String> {
+/// O teclado da máquina: o monitor do emulador, no `ritmo` — o da máquina,
+/// que atravessa os boots dela. `quem` é como as mensagens a chamam.
+pub(crate) fn teclado(
+    arch: Arquitetura,
+    ritmo: &RitmoDaMaquina,
+    quem: &'static str,
+) -> Result<Teclado, String> {
     UnixStream::connect(super::caminho_monitor(arch))
+        .map(|monitor| Teclado::novo(monitor, ritmo.clone(), quem))
         .map_err(|e| format!("o monitor nao aceitou conexao: {e}"))
 }
 
@@ -147,43 +164,80 @@ fn esperar_registro(
 
 /// O Terminal atende o teclado: um comando digitado antes do login é
 /// recusado e gravado com o console dele.
-pub(crate) fn terminal_atendendo(m: &mut Ligada, t: &mut UnixStream) -> Result<(), String> {
+///
+/// O Terminal pode ainda estar subindo: a linha espera o prompt dele. E o
+/// teclado do emulador perde tecla: a linha vai conferida na tela antes do
+/// Enter, que vai contado — ver [`digitacao`]. Sem a recusa gravada em
+/// [`ESPERA_PELA_RECUSA`], é uma perda, e se digita de novo, num ritmo mais
+/// lento, até [`VEZES_DE_DIGITAR`] vezes; a recusa vale desde a primeira.
+pub(crate) fn terminal_atendendo(m: &mut Ligada, t: &mut Teclado) -> Result<(), String> {
     let seq = ultima_seq(m)?;
-    super::digitar_pelo_monitor(t, "\nagent.ping\n", "senha")?;
-    esperar_registro(m, "agent.ping", seq, Duration::from_secs(60), |r| {
-        r.codigo == "DENY_NOT_AUTHENTICATED" && r.recurso.starts_with("terminal:")
-    })
-    .map(|_| ())
-    .map_err(|e| format!("o Terminal nao atendeu o teclado: {e}"))
+    let mut ultimo = String::new();
+    for vez in 0..VEZES_DE_DIGITAR {
+        if vez > 0 {
+            t.perda(&format!(
+                "o agent.ping antes do login nao foi recusado: {ultimo}"
+            ));
+        }
+        if let Err(e) = digitacao::linha(m, t, Tela::Terminal, PROMPT, "agent.ping") {
+            ultimo = e;
+            continue;
+        }
+        match esperar_registro(m, "agent.ping", seq, ESPERA_PELA_RECUSA, |r| {
+            r.codigo == "DENY_NOT_AUTHENTICATED" && r.recurso.starts_with("terminal:")
+        }) {
+            Ok(_) => return Ok(()),
+            Err(e) => ultimo = e,
+        }
+    }
+    Err(format!(
+        "o Terminal nao atendeu o teclado em {VEZES_DE_DIGITAR} vezes: {ultimo}"
+    ))
 }
 
 /// `login` pelo teclado, no Terminal: o código do desfecho gravado —
-/// `ALLOW`, a sessão aberta; uma recusa, não.
+/// `ALLOW`, a sessão aberta; uma recusa, não. O comando e o nome vão
+/// conferidos na tela, a senha pela conta das teclas do kernel, cada Enter
+/// contado — ver [`digitacao::login`] —: a recusa é da senha que se quis
+/// digitar, e não de uma tecla que o teclado perdeu. Esta bancada conta as
+/// recusas de propósito, e o login não se digita de novo.
 pub(crate) fn entrar(
     m: &mut Ligada,
-    t: &mut UnixStream,
+    t: &mut Teclado,
     nome: &str,
     senha: &str,
 ) -> Result<String, String> {
     let seq = ultima_seq(m)?;
-    super::digitar_pelo_monitor(t, &format!("login\n{nome}\n{senha}\n"), "senha")?;
+    digitacao::login(m, t, Tela::Terminal, nome, senha)?;
     esperar_registro(m, "person.login", seq, ESPERA_PELO_DESFECHO, |_| true).map(|r| r.codigo)
 }
 
-/// Só digita a troca: `senha`, a atual, a nova e a nova de novo.
-fn digitar_a_troca(t: &mut UnixStream, atual: &str, nova: &str) -> Result<(), String> {
-    super::digitar_pelo_monitor(t, &format!("senha\n{atual}\n{nova}\n{nova}\n"), "senha")
+/// Só digita a troca: `senha`, a atual, a nova e a nova de novo — o comando
+/// conferido na tela, as senhas pela conta das teclas do kernel. O último
+/// Enter vai como `fim` diz: contado, ou só mandado, quando a máquina não
+/// sobrevive a ele.
+fn digitar_a_troca(
+    m: &mut Ligada,
+    t: &mut Teclado,
+    atual: &str,
+    nova: &str,
+    fim: Fim,
+) -> Result<(), String> {
+    digitacao::linha(m, t, Tela::Terminal, PROMPT, "senha")?;
+    digitacao::senha(m, t, Tela::Terminal, PROMPT_DA_ATUAL, atual, Fim::Contado)?;
+    digitacao::senha(m, t, Tela::Terminal, PROMPT_DA_NOVA, nova, Fim::Contado)?;
+    digitacao::senha(m, t, Tela::Terminal, PROMPT_DE_NOVO, nova, fim)
 }
 
 /// `senha` pelo teclado, no Terminal: o registro do desfecho gravado.
 pub(crate) fn trocar(
     m: &mut Ligada,
-    t: &mut UnixStream,
+    t: &mut Teclado,
     atual: &str,
     nova: &str,
 ) -> Result<Rastro, String> {
     let seq = ultima_seq(m)?;
-    digitar_a_troca(t, atual, nova)?;
+    digitar_a_troca(m, t, atual, nova, Fim::Contado)?;
     esperar_registro(
         m,
         "credential.change_self",
@@ -198,7 +252,7 @@ pub(crate) fn trocar(
 /// códigos se não for exatamente uma.
 pub(crate) fn entra_com(
     m: &mut Ligada,
-    t: &mut UnixStream,
+    t: &mut Teclado,
     nome: &str,
     primeira: &str,
     segunda: &str,
@@ -248,7 +302,7 @@ fn a_troca_sobrevive_ao_corte(b: &Bancada) -> Result<String, String> {
     let mut m = Ligada::subir(b.arch, &b.dev, None)?;
     let antes = (|| -> Result<(u64, u64), String> {
         let estado = de_pe(&mut m)?;
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         let login = entrar(&mut m, &mut t, DEV, &atual)?;
         if login != "ALLOW" {
@@ -281,7 +335,7 @@ fn a_troca_sobrevive_ao_corte(b: &Bancada) -> Result<String, String> {
             return Err("a decisao da troca nao voltou do journal".into());
         }
         p::auditoria_verifica(&mut m)?;
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         if entra_com(&mut m, &mut t, DEV, &atual, SENHA_NOVA)? {
             return Err("depois do corte, a senha antiga entra".into());
@@ -396,7 +450,7 @@ fn as_quedas_na_troca(b: &Bancada) -> Result<String, String> {
         let mut m = Ligada::subir(b.arch, quedas, None)?;
         let preparada = (|| -> Result<(), String> {
             de_pe(&mut m)?;
-            let mut t = teclado(b.arch)?;
+            let mut t = teclado(b.arch, &b.ritmo, "senha")?;
             terminal_atendendo(&mut m, &mut t)?;
             let login = entrar(&mut m, &mut t, DEV, &atual)?;
             if login != "ALLOW" {
@@ -408,7 +462,7 @@ fn as_quedas_na_troca(b: &Bancada) -> Result<String, String> {
                     return Err(format!("{caso}: a troca nao valeu: {troca:?}"));
                 }
             } else {
-                digitar_a_troca(&mut t, &atual, SENHA_NOVA)?;
+                digitar_a_troca(&mut m, &mut t, &atual, SENHA_NOVA, Fim::Solto)?;
             }
             Ok(())
         })();
@@ -440,7 +494,7 @@ fn as_quedas_na_troca(b: &Bancada) -> Result<String, String> {
                     if vale { "vale" } else { "nao vale" }
                 ));
             }
-            let mut t = teclado(b.arch)?;
+            let mut t = teclado(b.arch, &b.ritmo, "senha")?;
             terminal_atendendo(&mut m, &mut t)?;
             let antiga = entra_com(&mut m, &mut t, DEV, &atual, SENHA_NOVA)
                 .map_err(|e| format!("{caso}: {e}"))?;
@@ -487,13 +541,13 @@ fn a_troca_e_o_botao(b: &Bancada) -> Result<String, String> {
     let mut m = Ligada::subir(b.arch, &b.dev, None)?;
     let preparada = (|| -> Result<(), String> {
         de_pe(&mut m)?;
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         let login = entrar(&mut m, &mut t, DEV, &atual)?;
         if login != "ALLOW" {
             return Err(format!("a pessoa nao entrou ({login})"));
         }
-        digitar_a_troca(&mut t, &atual, SENHA_NOVA)?;
+        digitar_a_troca(&mut m, &mut t, &atual, SENHA_NOVA, Fim::Solto)?;
         apertar(b.arch)
     })();
     if let Err(e) = preparada {
@@ -509,7 +563,7 @@ fn a_troca_e_o_botao(b: &Bancada) -> Result<String, String> {
     let depois = (|| -> Result<String, String> {
         de_pe(&mut m)?;
         let no_journal = troca_no_journal(&mut m)?;
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         let antiga = entra_com(&mut m, &mut t, DEV, &atual, SENHA_NOVA)?;
         if antiga == no_journal {
@@ -559,7 +613,7 @@ fn a_producao_troca_a_senha(b: &Bancada) -> Result<String, String> {
     let mut m = b.ligar_producao(true)?;
     let antes = (|| -> Result<(), String> {
         de_pe(&mut m)?;
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         let login = entrar(&mut m, &mut t, ANA, SENHA_DA_ANA)?;
         if login != "ALLOW" {
@@ -581,7 +635,7 @@ fn a_producao_troca_a_senha(b: &Bancada) -> Result<String, String> {
         if !troca_no_journal(&mut m)? {
             return Err("a decisao da troca nao voltou do journal".into());
         }
-        let mut t = teclado(b.arch)?;
+        let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
         if entra_com(&mut m, &mut t, ANA, SENHA_DA_ANA, SENHA_NOVA)? {
             return Err("na imagem de producao, depois do corte, a senha antiga entra".into());
@@ -620,6 +674,7 @@ pub(crate) fn senha(arch: Arquitetura, release: bool) -> Result<ExitCode, String
         } else {
             None
         },
+        ritmo: digitacao::ritmo_novo(),
     };
     println!(
         "[xtask] senha: {} cenarios, cada um numa maquina nova ({})",
@@ -645,6 +700,7 @@ pub(crate) fn senha(arch: Arquitetura, release: bool) -> Result<ExitCode, String
             }
         }
     }
+    println!("  [senha]   o teclado: {}", bancada.ritmo.get().texto());
     super::zerar_o_estado(arch)?;
     if let Some(molde) = &bancada.producao {
         let _ = std::fs::remove_file(molde);

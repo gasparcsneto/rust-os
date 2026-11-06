@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use politica::pareamento as conta;
 use sigilo::quadro::{self, Tipo};
 
+use super::digitacao::{self, PROMPT, PROMPT_DA_SENHA, Tela, fim_da_tela, ultima_linha};
 use super::enlace::{self, DePe, Gravado, Maquina, Par};
 use super::{Arquitetura, chaves};
 
@@ -64,11 +65,10 @@ const ENDERECO: &str = enlace::ENDERECO;
 /// destino esquecer o par — ver [`esquecer_de_um_lado`].
 const OUTRO: &str = "par-2";
 
-/// O que a linha de cada passo mostra, como `kernel/src/interpretador.rs`
-/// os escreve: o comando, o código do outro e a senha.
-const PROMPT: &str = protocolo::usuario::terminal::PROMPT;
+/// O que a linha de cada passo da cerimônia mostra, como
+/// `kernel/src/interpretador.rs` os escreve: o código do outro, e a linha da
+/// cerimônia aberta. O do comando e o da senha são os de [`digitacao`].
 const PROMPT_DO_CODIGO: &str = "codigo do outro: ";
-const PROMPT_DA_SENHA: &str = "senha: ";
 const PROMPT_DO_PAREAMENTO: &str = "pareamento (linha vazia desiste): ";
 
 /// O texto dos códigos, como `kernel/src/pareamento.rs` o escreve: a linha
@@ -80,18 +80,10 @@ const DIGITE: &str = "No outro dispositivo, digite: ";
 
 /// Quanto esperar cada coisa: os códigos nas duas telas (o fio da origem
 /// conecta pelo gate, pela ponte, e faz o aperto), o fim de uma cerimônia,
-/// e a tela mostrar o que se digitou.
+/// e a linha da cerimônia de volta à tela.
 const ESPERA_PELOS_CODIGOS: Duration = Duration::from_secs(90);
 const ESPERA_PELO_FIM: Duration = Duration::from_secs(90);
 const ESPERA_PELA_LINHA: Duration = Duration::from_secs(20);
-const ESPERA_PELO_ECO: Duration = Duration::from_secs(4);
-
-/// Quantas vezes digitar uma linha que a tela mostrou estragada.
-const VEZES_DE_DIGITAR: usize = 4;
-
-/// O respiro entre as teclas da senha: ela não ecoa, e uma tecla perdida
-/// não se vê antes do Enter.
-const RESPIRO_DA_SENHA: Duration = Duration::from_millis(80);
 
 /// Quantas vezes abrir uma cerimônia que a de antes, ainda saindo, ocupa, e
 /// o respiro entre uma e outra — ver [`Bancada::abrir`].
@@ -478,58 +470,13 @@ fn ouvir(s: &mut TcpStream, t: &mut sigilo::Transporte, mut guardar: impl FnMut(
 /// linhas de baixo da grade, até o teto do valor de um elemento.
 fn tela(quem: &mut DePe) -> Result<String, String> {
     let arvore = quem.m.pedir("ui.tree", "{}")?;
-    texto_do_terminal(&arvore).ok_or_else(|| {
+    digitacao::texto_da_tela(&arvore, Tela::Terminal).ok_or_else(|| {
         format!(
             "{}: a arvore semantica nao mostra o Terminal\n  {}",
             quem.papel,
             &arvore[..arvore.len().min(600)]
         )
     })
-}
-
-fn texto_do_terminal(arvore: &str) -> Option<String> {
-    let resto = super::apos(arvore, r#""role":"text_area","label":"terminal""#)?;
-    texto_json(super::apos(resto, r#""value":""#)?)
-}
-
-/// Um texto JSON, do começo até a aspa que o fecha, sem os escapes.
-fn texto_json(s: &str) -> Option<String> {
-    let mut texto = String::new();
-    let mut c = s.chars();
-    while let Some(x) = c.next() {
-        match x {
-            '"' => return Some(texto),
-            '\\' => match c.next()? {
-                'n' => texto.push('\n'),
-                't' => texto.push('\t'),
-                'r' => texto.push('\r'),
-                'b' => texto.push('\u{8}'),
-                'f' => texto.push('\u{c}'),
-                'u' => {
-                    let hex: String = c.by_ref().take(4).collect();
-                    texto.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
-                }
-                outro => texto.push(outro),
-            },
-            outro => texto.push(outro),
-        }
-    }
-    None
-}
-
-/// A última linha da tela — a do cursor —, sem os espaços do fim.
-fn ultima_linha(tela: &str) -> &str {
-    tela.rsplit('\n').next().unwrap_or("").trim_end()
-}
-
-/// As últimas linhas da tela, para a mensagem de uma falha.
-fn fim_da_tela(tela: &str) -> String {
-    let linhas: Vec<&str> = tela.lines().collect();
-    linhas[linhas.len().saturating_sub(8)..]
-        .iter()
-        .map(|l| format!("    | {l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Espera a tela de `quem` satisfazer `f`, e a devolve.
@@ -555,67 +502,6 @@ fn esperar_tela(
         }
         std::thread::sleep(Duration::from_millis(400));
     }
-}
-
-/// Digita `texto` na linha de `quem` que mostra `prompt`, confere na tela o
-/// que entrou e só então dá o Enter.
-///
-/// O teclado do emulador perde tecla com as duas máquinas de pé, e uma linha
-/// da cerimônia não se repete: o código errado — ou fora da forma — acaba
-/// com ela nos dois lados. A linha que a tela mostra estragada se apaga,
-/// tecla por tecla, e se digita de novo; o Enter só sai com a linha certa.
-fn digitar_conferido(quem: &mut DePe, prompt: &str, texto: &str) -> Result<(), String> {
-    let vazia = prompt.trim_end().to_string();
-    let certa = format!("{prompt}{texto}").trim_end().to_string();
-    for vez in 0..VEZES_DE_DIGITAR {
-        esperar_tela(
-            quem,
-            ESPERA_PELA_LINHA,
-            &format!("a linha `{vazia}` vazia"),
-            |t| ultima_linha(t) == vazia,
-        )?;
-        if vez > 0 {
-            println!(
-                "  [pareamento]   {}: a linha `{certa}` entrou estragada; digitando de novo",
-                quem.papel
-            );
-        }
-        quem.digitar(texto)?;
-        let limite = Instant::now() + ESPERA_PELO_ECO;
-        let ultima = loop {
-            let t = tela(quem)?;
-            let ultima = ultima_linha(&t).to_string();
-            if ultima == certa || Instant::now() >= limite {
-                break ultima;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        };
-        if ultima == certa {
-            return quem.digitar("\n");
-        }
-        // O que entrou depois do prompt, e duas a mais: apagar numa linha
-        // vazia não faz nada.
-        let entrou = ultima.chars().count().saturating_sub(vazia.chars().count()) + 2;
-        quem.digitar(&"\u{8}".repeat(entrou))?;
-    }
-    Err(format!(
-        "{}: a linha `{certa}` nao entrou certa em {VEZES_DE_DIGITAR} vezes",
-        quem.papel
-    ))
-}
-
-/// A senha da Pessoa, na linha da senha: não ecoa, e cada tecla vai com
-/// mais respiro.
-fn digitar_a_senha(quem: &mut DePe, senha: &str) -> Result<(), String> {
-    let vazia = PROMPT_DA_SENHA.trim_end();
-    esperar_tela(quem, ESPERA_PELA_LINHA, "a linha da senha", |t| {
-        ultima_linha(t) == vazia
-    })?;
-    for c in senha.chars() {
-        quem.digitar(&c.to_string())?;
-        std::thread::sleep(RESPIRO_DA_SENHA);
-    }
-    quem.digitar("\n")
 }
 
 /// O que a tela de um Duke mostra quando a cerimônia chega aos códigos.
@@ -884,7 +770,7 @@ impl Bancada {
         let recurso = format!("dispositivo:{NOME}");
         for _ in 0..VEZES_DE_ABRIR {
             let desde = quem.marca()?.auditoria;
-            digitar_conferido(quem, PROMPT, linha)?;
+            quem.linha(PROMPT, linha)?;
             let g = esperar_gravado(quem, desde, &format!("a abertura `{linha}`"), |g| {
                 g.metodo == "device.pair" && g.recurso == recurso
             })?;
@@ -941,7 +827,11 @@ impl Bancada {
     }
 
     /// A Pessoa digita em `quem` o código que a outra tela mostra, e a senha
-    /// dela.
+    /// dela. O teclado do emulador perde tecla com as duas máquinas de pé, e
+    /// uma linha da cerimônia não se repete: o código errado — ou fora da
+    /// forma — acaba com ela nos dois lados. O código vai conferido na tela
+    /// antes do Enter, e a senha, que não ecoa, pela conta das teclas do
+    /// kernel — ver [`digitacao`].
     fn confirmar(&mut self, origem: bool, codigo: &str) -> Result<(), String> {
         let senha = self.senha.clone();
         let quem = if origem {
@@ -949,8 +839,8 @@ impl Bancada {
         } else {
             self.destino()
         };
-        digitar_conferido(quem, PROMPT_DO_CODIGO, codigo)?;
-        digitar_a_senha(quem, &senha)
+        quem.linha(PROMPT_DO_CODIGO, codigo)?;
+        quem.senha(PROMPT_DA_SENHA, &senha)
     }
 
     /// A Pessoa digita em `quem` um código que não confere: não há senha a
@@ -961,7 +851,7 @@ impl Bancada {
         } else {
             self.destino()
         };
-        digitar_conferido(quem, PROMPT_DO_CODIGO, codigo)
+        quem.linha(PROMPT_DO_CODIGO, codigo)
     }
 
     /// Nenhum dos dois tem lápide para o outro: o que se esqueceu não virou
@@ -1002,8 +892,7 @@ impl Bancada {
             self.destino()
         };
         let desde = quem.marca()?.auditoria;
-        digitar_conferido(
-            quem,
+        quem.linha(
             PROMPT,
             &format!(r#"device.forget {{"device":"dispositivo:{nome}"}}"#),
         )?;
@@ -1095,7 +984,7 @@ fn codigo_errado(p: &mut Bancada) -> Result<String, String> {
     escuta(p.destino(), true, "com a janela aberta")?;
     let certo = conta::ler_codigo(&b.mostrado).ok_or("o codigo do destino nao se le")?;
     let errado = conta::texto_do_codigo((certo + 1) % 100_000_000);
-    digitar_conferido(p.origem(), PROMPT_DO_CODIGO, &errado)?;
+    p.origem().linha(PROMPT_DO_CODIGO, &errado)?;
     let (do_destino, da_origem) = (impressao(&p.par.da_destino), impressao(&p.par.da_origem));
     let fa = fim(p.origem(), antes_a)?;
     desfeita(
@@ -1525,7 +1414,7 @@ fn a_lapide(p: &mut Bancada) -> Result<String, String> {
             "a linha da cerimonia",
             |t| ultima_linha(t) == PROMPT_DO_PAREAMENTO.trim_end(),
         )?;
-        p.destino().digitar("\n")?;
+        p.destino().enter()?;
         let fb = fim(p.destino(), antes_b)?;
         desfeita("destino", &fb, conta::Motivo::Cancelada.texto(), "-")?;
         p.nada_gravado()?;
@@ -1624,6 +1513,10 @@ fn um_par(origem: Arquitetura, destino: Arquitetura, release: bool) -> Result<Ve
     if r.is_err() {
         bancada.mostrar();
     }
+    println!(
+        "  [pareamento]   {}",
+        enlace::o_teclado(&bancada.a, &bancada.b)
+    );
     let _ = bancada.par.origem.m.cortar_a_energia();
     let _ = bancada.par.destino.m.cortar_a_energia();
     r.map(|()| feitos)
@@ -1714,7 +1607,7 @@ mod testes {
     fn o_texto_do_terminal_sai_da_arvore_sem_escapes() {
         let arvore = r#"{"revision":3,"root":{"id":1,"role":"screen","label":"tela","children":[{"id":9,"role":"window","label":"Terminal","children":[{"id":10,"role":"text_area","label":"terminal","frame":{"x":1,"y":2,"width":3,"height":4},"value":"duke> a\n\"b\" \\ é","actions":[],"children":[]}]}]}}"#;
         assert_eq!(
-            texto_do_terminal(arvore).as_deref(),
+            digitacao::texto_da_tela(arvore, Tela::Terminal).as_deref(),
             Some("duke> a\n\"b\" \\ é")
         );
         assert_eq!(ultima_linha("x\ncodigo do outro: "), "codigo do outro:");
