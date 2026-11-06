@@ -8382,6 +8382,109 @@ fn terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada() -> Resultado {
     })
 }
 
+/// A edição em voo de quem foi contido com ela a caminho é descartada
+/// quando o console a consome, como a de quem saiu da sessão (o achado 2 do
+/// adversário do passo 1b): a suspensão não desconecta o agente, e a
+/// `Amarrada` dele continua valendo — o consumo pergunta à contenção, como
+/// o ponto de commit do pedido em curso. Três voltas: o agente suspenso
+/// (`agent.suspend`), a credencial da chave dele (`credential.suspend`) e a
+/// credencial da pessoa que editou. O arrendamento já saiu com a contenção;
+/// o que o caso confere é a linha, que fica vazia, e a recusa no log, com o
+/// motivo da contenção.
+fn terminal_a_edicao_de_quem_foi_contido_e_descartada() -> Resultado {
+    use crate::contencao::Alvo;
+    use crate::interpretador::Modo;
+    use crate::ui::{Acao, Origem};
+    use politica::arrendamento::Titular;
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    let chave = sigilo::publica_de(&chave_de_teste(1));
+    // Reserva, conta e anota, como o `ui.act`; contém; e o console consome.
+    let a_caminho = |origem: Origem, titular: Titular, alvo: &Alvo| -> Resultado {
+        let numero = crate::interpretador::reservar_edicao_da_arvore(
+            CONSOLE_DA_MARCA,
+            CAMPO_DA_MARCA,
+            origem,
+            Acao::DefinirValor,
+            Some(titular),
+        )?;
+        let rastro = crate::coordenacao::editar_com_rastro(&recurso, Some(titular), None, "ui.act")
+            .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
+        crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
+        crate::contencao::conter(alvo).map_err(|_| "a contencao do caso foi recusada")?;
+        if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
+            return Err("a contencao nao soltou o arrendamento de quem editou");
+        }
+        let marca = crate::log::total_emitidos();
+        digitar_marcado("\u{15}agent.ping");
+        if linha() != Some((Modo::Comando, 0)) {
+            crate::log_error!("teste", "{:?}: a linha ficou {:?}", alvo, linha());
+            return Err("a edicao de quem foi contido entrou na linha da pessoa");
+        }
+        let mut recusas = 0;
+        crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+            let m = r.mensagem();
+            recusas += (r.seq >= marca
+                && (m.ends_with("recusado no console: agente suspenso")
+                    || m.ends_with("recusado no console: credencial suspensa")))
+                as usize;
+        });
+        if recusas != 1 {
+            return Err("a edicao de quem foi contido nao foi recusada no log, uma vez");
+        }
+        Ok(())
+    };
+    for alvo in [Alvo::Agente(chave), Alvo::ChaveDeAgente(chave)] {
+        com_canal_tcp(|| {
+            crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+            crate::coordenacao::esquecer();
+            let resultado = (|| -> Resultado {
+                let a = AgenteTcpDeTeste::conectar(1)?;
+                let sa = a.sessao();
+                let titular = Titular::Agente {
+                    sessao: sa,
+                    chave: Some(chave),
+                };
+                let r = a_caminho(Origem::Agente(sa), titular, &alvo);
+                // A contenção não derrubou a sessão: o caso mede o que quer.
+                if r.is_ok() && crate::sessoes::identidade(sa).is_none() {
+                    return Err("a suspensao derrubou a sessao: o caso nao mede o que quer");
+                }
+                drop(a);
+                r
+            })();
+            let _ = crate::contencao::soltar(&alvo);
+            crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+            crate::coordenacao::esquecer();
+            resultado
+        })?;
+    }
+    // A pessoa, pela sessão dela.
+    crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+    crate::coordenacao::esquecer();
+    let sessao = crate::pessoas::sessao_de_teste(
+        crate::pessoas::Console::Terminal(5),
+        "pessoa-contida",
+        "operador",
+    );
+    let pessoa = crate::pessoas::dona_da_sessao(sessao);
+    let resultado = (|| -> Resultado {
+        let pessoa = pessoa.ok_or("a sessao de teste nao tem pessoa")?;
+        let titular = Titular::Pessoa {
+            sessao: sessao.0,
+            pessoa: pessoa.0,
+        };
+        a_caminho(Origem::Pessoa, titular, &Alvo::Pessoa(pessoa))
+    })();
+    if let Some(pessoa) = pessoa {
+        let _ = crate::contencao::soltar(&Alvo::Pessoa(pessoa));
+    }
+    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+    crate::coordenacao::esquecer();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// O `definir` do console físico pela árvore confere a regra da linha da
 /// pessoa na seção que edita — nem escrever, nem esvaziar —, e não só antes
 /// da conta da coordenação (o item 4 do passo 1). Pelo caminho de verdade
@@ -37283,6 +37386,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: a edicao de quem saiu da sessao e descartada",
         f: terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada,
+    },
+    Caso {
+        nome: "terminal: a edicao de quem foi contido e descartada",
+        f: terminal_a_edicao_de_quem_foi_contido_e_descartada,
     },
     Caso {
         nome: "interface: o definir do fisico confere a linha da pessoa onde edita",
