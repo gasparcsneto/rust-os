@@ -1882,9 +1882,9 @@ seguinte:
   atualização e o `system.reboot`, as mantêm;
 - o TPM, pelo TIS — o `TPM2_Startup`, os PCRs e o registro do boot medido
   —, com o NV como o `swtpm` o gravou por último; o volátil morre no corte;
-- o disco, pelo IDE e pelo virtio: a GPT, cada partição sondada pelos
-  drivers de sistema de arquivos — a de estado e a do armazém também —, a
-  FAT da ESP e o `BOOTX64.EFI`;
+- o disco, pelo IDE e — até a ordem de boot, abaixo — pelo virtio: a GPT,
+  cada partição sondada pelos drivers de sistema de arquivos — a de estado
+  e a do armazém também —, a FAT da ESP e o `BOOTX64.EFI`;
 - o `fw_cfg`: a ordem de boot, a ACPI, o SMBIOS;
 - os consoles: a COM1 e a COM2, que é o canal do agente — o aperto de mão
   da bancada escreve nela as linhas do `agent.ping` enquanto o firmware
@@ -1893,7 +1893,8 @@ seguinte:
 - e o gerador de números (`virtio-rng`), que o OVMF liga sempre, e a placa
   de rede, com a pilha de rede inteira do firmware por cima dela, que o
   `EfiBootManagerConnectAll` do BDS liga porque a máquina não diz uma ordem
-  de boot ao firmware.
+  de boot ao firmware — até a CI 438: ver [A ordem de
+  boot](#a-ordem-de-boot), abaixo.
 
 O que um corte pode deixar num estado incomum para o firmware é só o disco
 — o journal e o controle como o kernel os deixou — e o NV do TPM; as
@@ -1964,13 +1965,9 @@ a pilha de rede de novo —; é provável que tenha sido o mesmo defeito.
 Nem a bancada, nem o estado que uma queda deixa, nem o kernel entram nisso:
 o firmware para antes do iniciador, sobre um estado zerado. A bancada
 continua reprovando o boot que não atende — não há segunda tentativa, que
-esconderia a falha. Evitar o gatilho na máquina da bancada — dizer ao OVMF
-uma ordem de boot (`bootindex` no disco), para ele ligar só o caminho do
-boot em vez do `ConnectAll`, e a pilha de rede não subir; ou um OVMF com a
-correção — muda a máquina de todas as bancadas e da suíte, e é uma decisão
-que ainda não foi tomada. Medido só no firmware: com `bootindex=0` no disco
-do boot, o OVMF da CI não lê o disco virtio nem liga a rede, e chega à opção
-de boot em 4,2 a 4,7 segundos (três boots).
+esconderia a falha. O que mudou, depois da segunda ocorrência, na CI 438,
+foi a máquina: ela não dá mais o gatilho — ver [A ordem de
+boot](#a-ordem-de-boot), abaixo.
 
 **As rodadas aqui.** O firmware da CI sozinho: 300 boots sem a CPU
 disputada, nenhum parado; 200 com ela, um parado — o boot 27, acima. O
@@ -1993,3 +1990,102 @@ iniciador (`iniciador.pdb`, pelo CodeView, com o `virtio-net.efidrv` do
 iPXE na pilha), e no meio do firmware da CI, com os estacionados em
 `CpuDxe+0xd0d1` —, e na memória da máquina que parou, acima. As mutações
 N210–N220 estão em [`SDK.md`](SDK.md).
+
+### A ordem de boot
+
+**A segunda vez.** Na CI 438 (`9174cb8`), o mesmo job — a atualização do
+x86 — reprovou do mesmo jeito, noutro cenário ("sem o TPM, ou com outro, a
+tentativa nao se confirma e volta; com o TPM de volta, a velha desfaz pelo
+journal"): o processador 0 em `0x6c7e370`, fora de um `hlt`, com as
+interrupções ligadas; os outros três em `0x6c650d1`, num `hlt`; o `swtpm`
+vivo; o último sinal 22 segundos depois da partida. O commit da CI 438 é
+anterior ao diagnóstico novo, e a linha dos módulos não saiu; os endereços
+bastam: com o mesmo firmware e a mesma máquina, as imagens do DXE ficam nos
+mesmos lugares — o `Stall` do `GetRNG`, e os estacionados.
+
+**A máquina.** Desde então, toda máquina que o `xtask` liga pelo firmware
+— as bancadas, a suíte do x86, as fumaças, a sonda do iniciador, a máquina
+com o disco no NVMe e a do disco hostil, os pares — diz ao firmware por
+onde ela boota: o disco do boot leva `bootindex=0`, e só ele
+(`argumentos_dos_discos`, em [`xtask/src/main.rs`](../xtask/src/main.rs)).
+No x86 com o disco no virtio, é o IDE, sobre o mesmo arquivo — declarado
+agora por `-drive if=none` e `-device ide-hd`, no primeiro canal, como
+unidade mestre, onde o `-drive` sem `if=` o punha, e com o mesmo nome,
+`ide0-hd0` —; no x86 com o disco no NVMe, o NVMe; no ARM, o `disco0`, no
+virtio-blk ou no NVMe. Sem firmware — o ARM pelo `-kernel` —, nenhum. E a
+linha inteira é conferida antes de o emulador existir
+(`conferir_o_disco_do_boot`): numa máquina que sobe pelo firmware, um
+dispositivo só leva a ordem, com o valor 0, e é o disco do boot; sem
+firmware, nenhum. Uma ordem a mais — numa placa de rede, para o PXE — ou a
+menos não impediria a máquina de subir: o firmware bootaria de outro lugar,
+ou voltaria ao `ConnectAll`, calado. A recusa diz o que achou. O que a
+suíte e a sonda do iniciador acrescentam à linha — o NVMe dos casos e a
+placa Intel — não leva ordem.
+
+Com um `bootindex`, o QEMU entrega ao firmware o arquivo `bootorder` pelo
+`fw_cfg`, e o BDS do OVMF (`PlatformBdsConnectSequence`) e o do AAVMF (no
+2025.11 da CI, a `PlatformBootManagerLibLight` do `ArmVirtQemu`) chamam o
+`ConnectDevicesFromQemu`: ligam só os caminhos da ordem, e os filhos deles
+— medido nos dois firmwares de cada arquitetura, o da CI e o daqui,
+abaixo. O `EfiBootManagerConnectAll` fica para quando a ordem falta, ou
+quando nenhum caminho dela se traduz. O resto continua como
+era: as pontes PCI, que dão endereço a todo dispositivo; os consoles — a
+COM1, a COM2, a tela, o console virtio, o teclado —; e o gerador de
+números, que os dois ligam sempre. A placa de rede fica sem driver do
+firmware, e a pilha de rede não sobe — e no OVMF da CI, fora dela, só o
+`VirtioRngDxe` e o `RngDxe`, que produzem o `EFI_RNG_PROTOCOL`, e o shell,
+que não roda, citam o protocolo. O kernel recebe a placa como o emulador a
+criou — como já a recebia no ARM pelo `-kernel`, sem firmware nenhum —,
+e, no x86, o disco virtio sem o firmware ter lido nada dele. O iniciador
+acha o disco de onde veio pelo caminho da própria imagem
+(`iniciador/src/slots.rs`), que é o que o firmware ligou. E, no x86, o
+CD vazio que o QEMU acrescenta à máquina `pc` (`ide1-cd0`) sai: ele só
+entra quando nenhum disco é declarado por `-device ide-hd`.
+
+**A prova.** No firmware sozinho, parando a máquina no `BdsDxe: loading`,
+com um disco virtio a mais, sem ordem, que só o `ConnectAll` lê (a placa
+"intocada" é a de estado zerado no `x-query-virtio-status`: nenhum driver
+a iniciou):
+
+| Firmware | Sem a ordem | Com a ordem |
+|---|---|---|
+| OVMF da CI (2025.11), o disco no virtio | a placa de rede com `DRIVER_OK`; o `disco0` com 79 leituras e o disco a mais com 10; a opção de boot aos 4,2 s | a placa intocada; o `disco0` e o disco a mais sem nenhuma leitura; a opção de boot aos 3,1 s |
+| OVMF daqui (2024.02), o disco no virtio | o mesmo; 4,5 s | o mesmo; 3,5 s |
+| OVMF da CI, o disco no NVMe | — | a placa intocada; o disco a mais sem leitura; 2,3 s |
+| AAVMF da CI (2025.11), o `disco0` no virtio-blk e no NVMe | a placa com `DRIVER_OK`; o disco a mais com 10 leituras | a placa intocada; o disco a mais sem leitura |
+| AAVMF daqui (2024.02) | o mesmo | o mesmo |
+
+E o estresse que pegou a parada da CI 436 — o firmware da CI até a opção
+de boot, com a CPU disputada por quatro processos ocupados, os estímulos
+da espera da bancada, um TPM novo e uma cópia nova das variáveis a cada
+boot —, com a linha nova: 400 boots, nenhum parado, e em todos, parada a
+máquina no `BdsDxe: loading`, a placa de rede intocada e o `disco0` sem
+leitura; a opção de boot aos 7,0 segundos em média, de 5,3 a 8,7 — sem a
+ordem, eram 8,4, até 10,6, e um parado em duzentos. A contagem sozinha não
+provaria: com uma parada em duzentos, quatrocentos boots sem nenhuma
+aconteceriam cerca de uma vez em sete. O que prova é a placa intocada em
+todos: sem driver nela, a pilha de rede não sobe, e nada chama o gerador
+de dentro de um temporizador.
+
+E as rodadas inteiras, com a máquina nova, uma de cada vez, todas
+passando: a sonda do iniciador do x86 — o relatório inteiro: o controle na
+cópia 0, sequência 1, o slot A lido e conferido pelo protocolo de bloco do
+disco do boot, o mapa e a tela; o kernel assumindo a máquina; os quatro
+kernels estragados recusados —; a fumaça do teclado USB; a suíte do x86
+inteira, 910 de 910; o par de duas máquinas do x86, cada uma com a ordem
+no IDE do próprio disco; a bancada da atualização do x86 inteira, os
+dezoito cenários, em duas rodadas — os doze primeiros e os seis de queda;
+a da persistência do x86 em quatorze cenários, escolhidos pelo que mudam
+no boot — o disco do sistema no NVMe; o disco hostil por trás dele, no
+cache que se perde, no erro de mídia e no disco que para de responder; a
+placa Intel como a única; o reinício e o desligamento pelo comando; a máquina
+de 1 GiB; o TPM pela CRB, e sem TPM; a imagem de produção; os dois boots
+sobre o mesmo TPM; a partição de estado; e a queda em cada fronteira de
+uma operação —; e, no ARM, a sonda do iniciador com a suíte inteira pelo
+AAVMF, 908 de 908, e a bancada da atualização em quatro cenários — o
+primeiro boot pelo firmware, a versão nova tentada e confirmada, o
+cenário da CI 438 (sem o TPM, ou com outro) e o disco que falha no slot
+inativo, com o firmware bootando do NVMe sobre o disco hostil. Nada no
+kernel mudou, nem no iniciador.
+
+As mutações N221–N228 estão em [`SDK.md`](SDK.md).

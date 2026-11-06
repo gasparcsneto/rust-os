@@ -8654,6 +8654,20 @@ OVMF 2025.11, que o EDK II corrigiu no `edk2-stable202602` — está em
 [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-firmware-parado-da-ci-436),
 com a reprodução.
 
+Depois da segunda vez, na CI 438, a máquina não dá mais esse gatilho: em
+toda máquina que o `xtask` liga pelo firmware — as bancadas, a suíte do
+x86, as fumaças, a sonda do iniciador, os pares —, o disco de onde o
+firmware boota leva `bootindex=0`, e só ele (`argumentos_dos_discos`, em
+[`xtask/src/main.rs`](xtask/src/main.rs)): o IDE no x86 com o disco no
+virtio, o NVMe no x86 com o disco nele, o `disco0` no ARM. Com a ordem de
+boot, o OVMF e o AAVMF ligam só o caminho do boot, os consoles e o gerador
+de números, e não a placa de rede, com a pilha de rede por cima dela, que
+chamava o gerador. A linha inteira do emulador é conferida antes de ele
+existir (`conferir_o_disco_do_boot`), e uma ordem a mais ou a menos é
+recusada com o que se achou. A prova — o que cada firmware liga, com e sem
+a ordem, e o estresse com o firmware da CI e a CPU disputada — está em
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#a-ordem-de-boot).
+
 `DUKE_CENARIOS` escolhe os cenários por pedaços do nome, e
 `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
@@ -10043,7 +10057,13 @@ da pilha repetidos, o `\r` dos registradores, a seção GUID lida sem o
 para os dados de uma imagem tomado por retorno, a pilha no fim da memória
 que não se lê nada e o arquivo de enchimento do volume tomado pelo espaço
 livre — todas reprovadas pelos
-testes do hospedeiro do `xtask`, a N212 depois do reforço do teste.
+testes do hospedeiro do `xtask`, a N212 depois do reforço do teste. E as
+da ordem de boot (#313, N221–N228): o IDE do boot sem `bootindex`, o
+`disco0` do NVMe e do ARM sem ele, o x86 com o disco no virtio bootando
+pelo `disco0`, a máquina sem firmware com ordem, e a conferência da linha
+que aceita duas ordens, a ordem noutro dispositivo, a ordem numa máquina
+sem firmware e outro valor — todas reprovadas pelos testes do hospedeiro
+do `xtask`.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10146,6 +10166,7 @@ testes do hospedeiro do `xtask`, a N212 depois do reforço do teste.
 | fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `path` visto só logo depois do `#[` (N207) | os testes do hospedeiro do xtask |
 | fora do SDK (CI 437): a troca que chega ao fim gravando também uma execução da decisão (N209); a volta adiada sem a execução, de novo contra a conta nova (N111) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida" — a N209; a N111, os três primeiros que adiam (o 327 pelo sinal novo, o 328 e o 338) |
 | fora do SDK (#310): o cabeçalho comparado com o `ImageBase` da memória (N210); a imagem de baixo sem conferir o tamanho (N211); o caminho do CodeView lido do lugar errado (N212, N213); os valores vizinhos da pilha repetidos (N214); o `\r` dos registradores (N215); a seção GUID lida sem o `DataOffset` (N216); a faixa vazia de uma página só (N217); o ponteiro para os dados de uma imagem tomado por retorno (N218); a pilha no fim da memória que não se lê nada (N219); o arquivo de enchimento do volume tomado pelo espaço livre (N220) | os testes do hospedeiro do xtask (`firmware::testes`) — a N212 depois do reforço |
+| fora do SDK (#313): o IDE do boot sem `bootindex` (N221); o `disco0` do NVMe e do ARM sem ele (N222); o x86 com o disco no virtio bootando pelo `disco0` (N223); a máquina sem firmware com ordem (N224); a conferência da linha que aceita duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa máquina sem firmware (N227) e outro valor (N228) | os testes do hospedeiro do xtask (`so_o_disco_do_boot_leva_a_ordem_de_boot`, `a_ordem_de_boot_errada_e_recusada`) |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

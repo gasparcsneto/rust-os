@@ -913,6 +913,14 @@ enchimento do volume tomado pelo espaço livre (N220).
 Todas reprovadas, uma de cada vez, pelos testes do hospedeiro do `xtask`;
 a N212 sobreviveu à primeira rodada — o caminho lido quatro bytes antes
 ainda acabava no mesmo nome — e foi reprovada depois do reforço do teste.
+E as da ordem de boot da máquina (#313, N221–N228; ver *A ordem de boot*
+em [`PERSISTENCIA.md`](PERSISTENCIA.md#a-ordem-de-boot)): o IDE do boot
+sem `bootindex` (N221), o `disco0` do NVMe e do ARM sem ele (N222), o x86
+com o disco no virtio bootando pelo `disco0` (N223), a máquina sem
+firmware com ordem (N224), e a conferência da linha do emulador que aceita
+duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa
+máquina sem firmware (N227) e outro valor (N228). Todas reprovadas, uma
+de cada vez, na primeira rodada, pelos testes do hospedeiro do `xtask`.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1135,6 +1143,14 @@ ainda acabava no mesmo nome — e foi reprovada depois do reforço do teste.
 | N218 | fora do SDK (#310): o valor da pilha que cai nos dados de uma imagem tomado por retorno | hospedeiro: `firmware::testes::onde_estavam_os_processadores_da_ci_436` (xtask) |
 | N219 | fora do SDK (#310): a pilha que não se lê inteira — no fim da memória — não se lê nada | hospedeiro: `firmware::testes::a_pilha_no_fim_da_memoria` (xtask) |
 | N220 | fora do SDK (#310): o arquivo de enchimento do volume — o nome todo em `0xff` — tomado pelo espaço livre, e o resto do volume perdido | hospedeiro: `firmware::testes::os_modulos_do_arquivo_do_firmware` (xtask) — achado ao ler o AAVMF, que tem um logo depois do `PeiCore` |
+| N221 | fora do SDK (#313): o IDE de onde o firmware do x86 boota sem `bootindex` | hospedeiro: `testes::so_o_disco_do_boot_leva_a_ordem_de_boot` (xtask) — o x86 com o disco no virtio sem ordem nenhuma |
+| N222 | fora do SDK (#313): o `disco0` sem `bootindex` quando o firmware boota dele — o NVMe do x86, o disco do ARM | hospedeiro: `testes::so_o_disco_do_boot_leva_a_ordem_de_boot` (xtask) — o x86 com o NVMe sem ordem |
+| N223 | fora do SDK (#313): o x86 com o disco no virtio bootando pelo `disco0`, sem o IDE | hospedeiro: `testes::so_o_disco_do_boot_leva_a_ordem_de_boot` (xtask) — a ordem no virtio, e não no IDE |
+| N224 | fora do SDK (#313): a máquina sem firmware — o ARM pelo `-kernel` — com ordem de boot | hospedeiro: `testes::so_o_disco_do_boot_leva_a_ordem_de_boot` (xtask) |
+| N225 | fora do SDK (#313): a conferência da linha aceita mais de um dispositivo com ordem, tomando o primeiro | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — o PXE na placa de rede |
+| N226 | fora do SDK (#313): a conferência não olha de que unidade é o dispositivo com a ordem | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — a ordem no disco do kernel, e não no do firmware |
+| N227 | fora do SDK (#313): a conferência aceita ordem numa máquina sem firmware | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) |
+| N228 | fora do SDK (#313): a conferência aceita a ordem do disco do boot com outro valor | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — `bootindex=1` |
 
 ## Medidas
 

@@ -42,6 +42,12 @@ Sem TPM a máquina sobe, mas nada de autoridade muda: o journal não tem
 [`PERSISTENCIA.md`](PERSISTENCIA.md). Sem disco, idem. Sem rede, tudo o que
 não é rede continua.
 
+No QEMU, o disco de onde o firmware boota leva a ordem de boot —
+`bootindex=0` no `-device` dele, e em nenhum outro —, como em toda máquina
+da bancada: sem ela, o OVMF e o AAVMF ligam todos os dispositivos, e com a
+placa de rede a pilha de rede do firmware, que no OVMF 2025.11 pode parar o
+boot para sempre — ver [A ordem de boot](PERSISTENCIA.md#a-ordem-de-boot).
+
 O que não é suportado está em [O que fica de fora de
 propósito](#o-que-fica-de-fora-de-propósito-grupo-c): placas de rede além
 da virtio e da Intel 82574L, controladores de disco além do NVMe e do
