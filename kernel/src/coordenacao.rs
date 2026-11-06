@@ -481,6 +481,12 @@ pub const SOLTO_SEM_ENTREGA: &str =
 pub const SOLTO_FORA_DA_SESSAO: &str =
     "arrendamento implicito solto: quem pediu a edicao pela arvore saiu da sessao";
 
+/// O detalhe, quando quem pediu a edição estava contido quando o console a
+/// consumiu — o agente suspenso, a credencial dele ou a da pessoa
+/// suspensa.
+pub const SOLTO_PELA_CONTENCAO: &str =
+    "arrendamento implicito solto: quem pediu a edicao pela arvore foi contido";
+
 /// Por que a edição que tomou o arrendamento não ficou — o detalhe da
 /// soltura, na auditoria.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,6 +499,9 @@ pub enum PorQueSolta {
     /// Quem a pediu saiu da sessão antes de o console a consumir:
     /// [`SOLTO_FORA_DA_SESSAO`].
     ForaDaSessao,
+    /// Quem a pediu foi contido antes de o console a consumir:
+    /// [`SOLTO_PELA_CONTENCAO`].
+    Contido,
 }
 
 impl PorQueSolta {
@@ -501,6 +510,7 @@ impl PorQueSolta {
             PorQueSolta::LinhaDaPessoa => SOLTO_PELA_RECUSA,
             PorQueSolta::NaoChegou => SOLTO_SEM_ENTREGA,
             PorQueSolta::ForaDaSessao => SOLTO_FORA_DA_SESSAO,
+            PorQueSolta::Contido => SOLTO_PELA_CONTENCAO,
         }
     }
 }

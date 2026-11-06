@@ -8322,13 +8322,16 @@ fn terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada() -> Resultado {
             let chave = sigilo::publica_de(&chave_de_teste(1));
             let a = AgenteTcpDeTeste::conectar(1)?;
             let sa = a.sessao();
-            let outra = Some(sigilo::publica_de(&chave_de_teste(2)));
+            let outra = Titular::Agente {
+                sessao: sa,
+                chave: Some(sigilo::publica_de(&chave_de_teste(2))),
+            };
             if crate::interpretador::reservar_edicao_da_arvore(
                 CONSOLE_DA_MARCA,
                 CAMPO_DA_MARCA,
                 Origem::Agente(sa),
                 Acao::DefinirValor,
-                outra,
+                Some(outra),
             ) != Err(AGENTE_FORA_DA_SESSAO)
             {
                 return Err("a chave de outro agente reservou uma edicao da sessao");
@@ -8342,7 +8345,7 @@ fn terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada() -> Resultado {
                 CAMPO_DA_MARCA,
                 Origem::Agente(sa),
                 Acao::DefinirValor,
-                Some(chave),
+                Some(titular),
             )?;
             let rastro =
                 crate::coordenacao::editar_com_rastro(&recurso, Some(titular), None, "ui.act")

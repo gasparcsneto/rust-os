@@ -612,18 +612,12 @@ fn executar(
         // Ver `interpretador::reservar_edicao_da_arvore`. Antes da conta,
         // como o Enter: as reservas cheias não arrendam o campo.
         let edicao = match (console, acao) {
-            (Some(console), Acao::DefinirValor | Acao::Cancelar) => {
-                let chave = match titular {
-                    Some(politica::arrendamento::Titular::Agente { chave, .. }) => chave,
-                    _ => None,
-                };
-                Some((
-                    console,
-                    crate::interpretador::reservar_edicao_da_arvore(
-                        console, id, origem, acao, chave,
-                    )?,
-                ))
-            }
+            (Some(console), Acao::DefinirValor | Acao::Cancelar) => Some((
+                console,
+                crate::interpretador::reservar_edicao_da_arvore(
+                    console, id, origem, acao, titular,
+                )?,
+            )),
             _ => None,
         };
         let contada = match acao {

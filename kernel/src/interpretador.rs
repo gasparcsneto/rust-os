@@ -315,9 +315,12 @@ struct EdicaoPedida {
     acao: crate::ui::Acao,
     /// O agente que pediu, amarrado à conexão e à chave que o gate decidiu —
     /// como o Enter dele ([`pedir_enter_do_agente`]): conferido de novo
-    /// quando o console consome a edição, e a de quem já não vale é
-    /// descartada. `None` para a pessoa.
+    /// quando o console consome a edição, e a de quem já não vale — saiu da
+    /// conexão, ou foi contido — é descartada. `None` para a pessoa.
     amarrada: Option<Amarrada>,
+    /// A sessão da pessoa que pediu, para a mesma pergunta à contenção no
+    /// consumo — a credencial dela suspensa. `None` para o agente.
+    pessoa: Option<crate::pessoas::IdSessao>,
     /// O que a conta da coordenação fez no campo — anotado depois dela;
     /// `None` até lá.
     rastro: Option<crate::coordenacao::Rastro>,
@@ -1607,25 +1610,42 @@ static EDICOES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// digitaria. Sem reserva, a marca não solta nada.
 ///
 /// A edição de um agente é amarrada à conexão de onde ele pediu e à chave
-/// que o gate decidiu — `chave` —, como o Enter dele: quem já não está nela
-/// é recusado aqui, antes da conta, e a edição de quem saiu depois é
-/// descartada quando o console a consome (o achado 7 do adversário do
-/// passo 1).
+/// que o gate decidiu — a do `titular` —, como o Enter dele: quem já não
+/// está nela é recusado aqui, antes da conta, e a edição de quem saiu
+/// depois é descartada quando o console a consome (o achado 7 do adversário
+/// do passo 1). A da pessoa guarda a sessão dela. No consumo, a contenção
+/// é perguntada também: a edição de quem foi contido com ela a caminho — o
+/// agente suspenso, a credencial dele ou a da pessoa — é descartada, como o
+/// pedido em curso que a contenção recusa no ponto de commit (o achado 2 do
+/// adversário do passo 1b).
 pub fn reservar_edicao_da_arvore(
     console: Console,
     campo: u32,
     origem: Origem,
     acao: crate::ui::Acao,
-    chave: Option<[u8; 32]>,
+    titular: Option<politica::arrendamento::Titular>,
 ) -> Result<u64, &'static str> {
+    use politica::arrendamento::Titular;
     // Fora da trava do estado, que não toma a das sessões.
-    let amarrada = match origem {
-        Origem::Agente(sessao) => Some(
-            Amarrada::agora(sessao)
-                .filter(|a| a.chave() == chave)
-                .ok_or(AGENTE_FORA_DA_SESSAO)?,
-        ),
-        Origem::Pessoa => None,
+    let (amarrada, pessoa) = match origem {
+        Origem::Agente(sessao) => {
+            let chave = match titular {
+                Some(Titular::Agente { chave, .. }) => chave,
+                _ => None,
+            };
+            (
+                Some(
+                    Amarrada::agora(sessao)
+                        .filter(|a| a.chave() == chave)
+                        .ok_or(AGENTE_FORA_DA_SESSAO)?,
+                ),
+                None,
+            )
+        }
+        Origem::Pessoa => match titular {
+            Some(Titular::Pessoa { sessao, .. }) => (None, Some(crate::pessoas::IdSessao(sessao))),
+            _ => (None, None),
+        },
     };
     let numero = EDICOES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     com_estado(console, |e| {
@@ -1640,6 +1660,7 @@ pub fn reservar_edicao_da_arvore(
             origem,
             acao,
             amarrada,
+            pessoa,
             rastro: None,
             recusada: false,
         });
@@ -1833,6 +1854,35 @@ fn recusar_as_edicoes_a_caminho(console: Console) {
     }
 }
 
+/// Se quem pediu uma edição já não vale, quando o console a consome: o
+/// agente que não está mais na conexão de onde pediu, com a chave que o
+/// gate decidiu ([`AGENTE_FORA_DA_SESSAO`]); ou o agente, a credencial dele
+/// ou a da pessoa, contidos — a mesma pergunta que a contenção faz ao
+/// pedido em curso no ponto de commit ([`crate::contencao::recusa_de`]),
+/// com o motivo dela. Toma as travas das sessões e da contenção: chamada
+/// fora da do estado.
+fn quem_ja_nao_vale(
+    amarrada: Option<Amarrada>,
+    pessoa: Option<crate::pessoas::IdSessao>,
+) -> Option<(crate::coordenacao::PorQueSolta, &'static str)> {
+    use crate::autorizacao::Autoridade;
+    use crate::coordenacao::PorQueSolta;
+    let autoridade = match (amarrada, pessoa) {
+        (Some(a), _) => {
+            if !a.vale() {
+                return Some((PorQueSolta::ForaDaSessao, AGENTE_FORA_DA_SESSAO));
+            }
+            Autoridade::Sessao {
+                sessao: a.sessao(),
+                chave: a.chave(),
+            }
+        }
+        (None, Some(sessao)) => Autoridade::Pessoa { sessao },
+        (None, None) => return None,
+    };
+    crate::contencao::recusa_de(None, autoridade).map(|(_, motivo)| (PorQueSolta::Contido, motivo))
+}
+
 /// Tira das reservas do console a mais velha — a da edição que o apagar
 /// marcado começa.
 fn tirar_a_reserva(e: &mut Estado) -> Option<EdicaoPedida> {
@@ -1861,6 +1911,7 @@ enum DaArvore {
         quem: Option<(Origem, crate::ui::Acao, u32)>,
         soltar: Option<crate::coordenacao::Rastro>,
         motivo: crate::coordenacao::PorQueSolta,
+        texto: &'static str,
     },
 }
 
@@ -1912,23 +1963,25 @@ fn pela_arvore(console: Console, c: char) {
     if console == Console::Fisico {
         return;
     }
-    // O apagar marcado começa uma edição: a do agente que já não está na
-    // conexão de onde pediu, com a chave que o gate decidiu, é descartada —
-    // conferido aqui, fora da trava do estado, que não toma a das sessões,
-    // como o Enter do agente. A reserva que ele vai tomar é a mais velha, e
-    // só o executor as tira e põe.
-    let fora_da_sessao = if c == APAGAR_A_LINHA {
+    // O apagar marcado começa uma edição: a de quem já não vale — o agente
+    // que não está na conexão de onde pediu, com a chave que o gate decidiu;
+    // o agente ou a pessoa contidos — é descartada. Conferido aqui, fora da
+    // trava do estado, que não toma a das sessões nem a da contenção, como o
+    // Enter do agente. A reserva que ele vai tomar é a mais velha, e só o
+    // executor as tira e põe.
+    let ja_nao_vale = if c == APAGAR_A_LINHA {
         com_estado(console, |e| {
             e.edicoes
                 .iter()
                 .flatten()
                 .min_by_key(|p| p.numero)
                 .filter(|p| !p.recusada)
-                .and_then(|p| p.amarrada.map(|a| (p.numero, a)))
+                .map(|p| (p.numero, p.amarrada, p.pessoa))
         })
         .flatten()
-        .filter(|(_, a)| !a.vale())
-        .map(|(numero, _)| numero)
+        .and_then(|(numero, amarrada, pessoa)| {
+            quem_ja_nao_vale(amarrada, pessoa).map(|motivo| (numero, motivo))
+        })
     } else {
         None
     };
@@ -1955,10 +2008,10 @@ fn pela_arvore(console: Console, c: char) {
         if em_curso.recusada {
             return DaArvore::Descartado;
         }
-        let saiu = em_curso
-            .pedida
-            .is_some_and(|p| Some(p.numero) == fora_da_sessao);
-        if pede || saiu {
+        let saiu = ja_nao_vale
+            .filter(|(numero, _)| em_curso.pedida.is_some_and(|p| p.numero == *numero))
+            .map(|(_, motivo)| motivo);
+        if pede || saiu.is_some() {
             em_curso.recusada = true;
             let pedida = em_curso.pedida;
             // O arrendamento que sai: o que esta edição tomou, ou o de uma
@@ -1972,14 +2025,15 @@ fn pela_arvore(console: Console, c: char) {
             if pedida.is_some() {
                 e.recusadas = soltar.map(|r| r.depois());
             }
+            let (motivo, texto) = match saiu {
+                Some(quem) if !pede => quem,
+                _ => (PorQueSolta::LinhaDaPessoa, LINHA_DA_PESSOA),
+            };
             return DaArvore::Recusado {
                 quem: pedida.map(|p| (p.origem, p.acao, p.campo)),
                 soltar,
-                motivo: if pede {
-                    PorQueSolta::LinhaDaPessoa
-                } else {
-                    PorQueSolta::ForaDaSessao
-                },
+                motivo,
+                texto,
             };
         }
         if c == APAGAR_A_LINHA {
@@ -2000,6 +2054,7 @@ fn pela_arvore(console: Console, c: char) {
             quem,
             soltar,
             motivo,
+            texto,
         } => {
             if let (Some((_, _, campo)), Some(rastro)) = (quem, soltar) {
                 soltar_o_que_ela_deixou(console, campo, &rastro, motivo);
@@ -2015,10 +2070,7 @@ fn pela_arvore(console: Console, c: char) {
                     origem,
                     acao.nome(),
                     campo,
-                    match motivo {
-                        PorQueSolta::ForaDaSessao => AGENTE_FORA_DA_SESSAO,
-                        _ => LINHA_DA_PESSOA,
-                    }
+                    texto
                 ),
                 None => crate::log_warn!(
                     "console",
