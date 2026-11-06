@@ -323,14 +323,12 @@ struct EdicaoPedida {
     campo: u32,
     origem: Origem,
     acao: crate::ui::Acao,
-    /// O agente que pediu, amarrado à conexão e à chave que o gate decidiu —
-    /// como o Enter dele ([`pedir_enter_do_agente`]): conferido de novo
-    /// quando o console consome a edição, e a de quem já não vale — saiu da
-    /// conexão, ou foi contido — é descartada. `None` para a pessoa.
-    amarrada: Option<Amarrada>,
-    /// A sessão da pessoa que pediu, para a mesma pergunta à contenção no
-    /// consumo — a credencial dela suspensa. `None` para o agente.
-    pessoa: Option<crate::pessoas::IdSessao>,
+    /// Quem pediu — o agente, amarrado à conexão e à chave que o gate
+    /// decidiu, como o Enter dele ([`pedir_enter_do_agente`]); ou a pessoa,
+    /// pela sessão de onde pediu —, conferido de novo quando o console
+    /// consome a edição: a de quem já não vale — saiu da conexão ou da
+    /// sessão, ou foi contido — é descartada ([`quem_ja_nao_vale`]).
+    quem: QuemPediu,
     /// O que a conta da coordenação fez no campo — anotado depois dela;
     /// `None` até lá.
     rastro: Option<crate::coordenacao::Rastro>,
@@ -338,6 +336,18 @@ struct EdicaoPedida {
     /// caminho — ver [`recusar_as_edicoes_a_caminho`]. O que chegar marcado
     /// dela é descartado.
     recusada: bool,
+}
+
+/// Quem pediu uma edição da árvore, para as perguntas do consumo — ver
+/// [`quem_ja_nao_vale`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuemPediu {
+    /// O agente, amarrado à conexão de onde pediu e à chave que o gate
+    /// decidiu.
+    Agente(Amarrada),
+    /// A pessoa, pela sessão de onde pediu, e quem é ela: a sessão tem de
+    /// estar ainda aberta, e ser dela.
+    Pessoa(IdSessao, sigilo::pessoas::IdPessoa),
 }
 
 /// O que o console está consumindo da árvore — ver [`pela_arvore`].
@@ -1536,6 +1546,14 @@ pub const ENTER_DEMAIS: &str = "o console ja espera o Enter de agentes demais";
 /// pediu — a conexão acabou, ou a sessão é de outra.
 pub const AGENTE_FORA_DA_SESSAO: &str = "o agente nao esta mais na sessao de onde pediu";
 
+/// A recusa, no consumo, da edição de uma pessoa que não está mais na
+/// sessão de onde pediu — ela saiu, a sessão foi revogada, ou a pessoa.
+pub const PESSOA_FORA_DA_SESSAO: &str = "a pessoa nao esta mais na sessao de onde pediu";
+
+/// A recusa da reserva de uma edição de pessoa sem a sessão dela: o
+/// consumo não teria o que conferir.
+pub const PESSOA_SEM_SESSAO: &str = "a edicao de uma pessoa vai com a sessao dela";
+
 /// Reserva no console o Enter que o `confirm` da sessão `sessao` no campo
 /// do Terminal dele vai digitar: quando o pseudo-terminal o trouxer, ele
 /// vale — uma vez —, se quem o pediu ainda estiver na mesma conexão.
@@ -1627,8 +1645,12 @@ static EDICOES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::n
 /// que o gate decidiu — a do `titular` —, como o Enter dele: quem já não
 /// está nela é recusado aqui, antes da conta, e a edição de quem saiu
 /// depois é descartada quando o console a consome (o achado 7 do adversário
-/// do passo 1). A da pessoa guarda a sessão dela. No consumo, a contenção
-/// é perguntada também: a edição de quem foi contido com ela a caminho — o
+/// do passo 1). A da pessoa guarda a sessão e a pessoa do `titular`, e a
+/// de uma pessoa sem ele é recusada aqui: no consumo, a sessão tem de
+/// estar ainda aberta e ser dela, e a edição da pessoa que saiu, da sessão
+/// revogada ou da pessoa revogada é descartada, como a do agente que saiu
+/// (o achado 1 do adversário do passo 1c). No consumo, a contenção é
+/// perguntada também: a edição de quem foi contido com ela a caminho — o
 /// agente suspenso, a credencial dele ou a da pessoa — é descartada, como o
 /// pedido em curso que a contenção recusa no ponto de commit (o achado 2 do
 /// adversário do passo 1b).
@@ -1641,24 +1663,23 @@ pub fn reservar_edicao_da_arvore(
 ) -> Result<u64, &'static str> {
     use politica::arrendamento::Titular;
     // Fora da trava do estado, que não toma a das sessões.
-    let (amarrada, pessoa) = match origem {
+    let quem = match origem {
         Origem::Agente(sessao) => {
             let chave = match titular {
                 Some(Titular::Agente { chave, .. }) => chave,
                 _ => None,
             };
-            (
-                Some(
-                    Amarrada::agora(sessao)
-                        .filter(|a| a.chave() == chave)
-                        .ok_or(AGENTE_FORA_DA_SESSAO)?,
-                ),
-                None,
+            QuemPediu::Agente(
+                Amarrada::agora(sessao)
+                    .filter(|a| a.chave() == chave)
+                    .ok_or(AGENTE_FORA_DA_SESSAO)?,
             )
         }
         Origem::Pessoa => match titular {
-            Some(Titular::Pessoa { sessao, .. }) => (None, Some(crate::pessoas::IdSessao(sessao))),
-            _ => (None, None),
+            Some(Titular::Pessoa { sessao, pessoa }) => {
+                QuemPediu::Pessoa(IdSessao(sessao), sigilo::pessoas::IdPessoa(pessoa))
+            }
+            _ => return Err(PESSOA_SEM_SESSAO),
         },
     };
     let numero = EDICOES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1673,8 +1694,7 @@ pub fn reservar_edicao_da_arvore(
             campo,
             origem,
             acao,
-            amarrada,
-            pessoa,
+            quem,
             rastro: None,
             recusada: false,
         });
@@ -1885,19 +1905,20 @@ fn recusar_as_edicoes_a_caminho(console: Console) {
 
 /// Se quem pediu uma edição já não vale, quando o console a consome: o
 /// agente que não está mais na conexão de onde pediu, com a chave que o
-/// gate decidiu ([`AGENTE_FORA_DA_SESSAO`]); ou o agente, a credencial dele
-/// ou a da pessoa, contidos — a mesma pergunta que a contenção faz ao
-/// pedido em curso no ponto de commit ([`crate::contencao::recusa_de`]),
-/// com o motivo dela. Toma as travas das sessões e da contenção: chamada
-/// fora da do estado.
-fn quem_ja_nao_vale(
-    amarrada: Option<Amarrada>,
-    pessoa: Option<crate::pessoas::IdSessao>,
-) -> Option<(crate::coordenacao::PorQueSolta, &'static str)> {
+/// gate decidiu ([`AGENTE_FORA_DA_SESSAO`]); a pessoa cuja sessão acabou ou
+/// é de outra — ela saiu, a sessão foi revogada, a pessoa foi revogada
+/// ([`PESSOA_FORA_DA_SESSAO`]); ou o agente, a credencial dele ou a da
+/// pessoa, contidos — a mesma pergunta que a contenção faz ao pedido em
+/// curso no ponto de commit ([`crate::contencao::recusa_de`]), com o motivo
+/// dela. A sessão vem antes da contenção: a contenção da pessoa é procurada
+/// pela sessão, e a revogação esquece a suspensão (o achado 1 do adversário
+/// do passo 1c). Toma as travas das sessões, das pessoas e da contenção:
+/// chamada fora da do estado.
+fn quem_ja_nao_vale(quem: QuemPediu) -> Option<(crate::coordenacao::PorQueSolta, &'static str)> {
     use crate::autorizacao::Autoridade;
     use crate::coordenacao::PorQueSolta;
-    let autoridade = match (amarrada, pessoa) {
-        (Some(a), _) => {
+    let autoridade = match quem {
+        QuemPediu::Agente(a) => {
             if !a.vale() {
                 return Some((PorQueSolta::ForaDaSessao, AGENTE_FORA_DA_SESSAO));
             }
@@ -1906,8 +1927,16 @@ fn quem_ja_nao_vale(
                 chave: a.chave(),
             }
         }
-        (None, Some(sessao)) => Autoridade::Pessoa { sessao },
-        (None, None) => return None,
+        QuemPediu::Pessoa(sessao, pessoa) => {
+            let ainda_dela = match crate::pessoas::sessao(sessao) {
+                EstadoDaSessao::Ativa { pessoa: dona, .. } => dona == pessoa,
+                _ => false,
+            };
+            if !ainda_dela {
+                return Some((PorQueSolta::ForaDaSessao, PESSOA_FORA_DA_SESSAO));
+            }
+            Autoridade::Pessoa { sessao }
+        }
     };
     crate::contencao::recusa_de(None, autoridade).map(|(_, motivo)| (PorQueSolta::Contido, motivo))
 }
@@ -1994,7 +2023,8 @@ fn pela_arvore(console: Console, c: char) {
     }
     // O apagar marcado começa uma edição: a de quem já não vale — o agente
     // que não está na conexão de onde pediu, com a chave que o gate decidiu;
-    // o agente ou a pessoa contidos — é descartada. Conferido aqui, fora da
+    // a pessoa fora da sessão de onde pediu; o agente ou a pessoa contidos —
+    // é descartada. Conferido aqui, fora da
     // trava do estado, que não toma a das sessões nem a da contenção, como o
     // Enter do agente. A reserva que ele vai tomar é a mais velha, e só o
     // executor as tira e põe.
@@ -2005,12 +2035,10 @@ fn pela_arvore(console: Console, c: char) {
                 .flatten()
                 .min_by_key(|p| p.numero)
                 .filter(|p| !p.recusada)
-                .map(|p| (p.numero, p.amarrada, p.pessoa))
+                .map(|p| (p.numero, p.quem))
         })
         .flatten()
-        .and_then(|(numero, amarrada, pessoa)| {
-            quem_ja_nao_vale(amarrada, pessoa).map(|motivo| (numero, motivo))
-        })
+        .and_then(|(numero, quem)| quem_ja_nao_vale(quem).map(|motivo| (numero, motivo)))
     } else {
         None
     };
