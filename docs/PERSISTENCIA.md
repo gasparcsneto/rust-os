@@ -1840,3 +1840,156 @@ processador esperava o disco, se o disco tinha um pedido pendurado, ou se
 o emulador inteiro tinha parado. A falha não se reproduziu aqui (três
 execuções inteiras do cenário, 24 boots); a próxima ocorrência diz qual
 das três foi.
+
+## O firmware parado da CI 436
+
+Na CI 436 (`05e0383`), no job da atualização do x86, o cenário "a queda em
+cada fronteira do desfazimento" reprovou num boot que não atendeu: nada
+novo na serial, nos discos nem no canal por 120 segundos, e o último sinal
+4 segundos depois da partida. O QMP disse `running`, o processador 0 em
+`0x6c7e370`, com as interrupções ligadas e fora de um `hlt`, e os outros
+três parados num `hlt` em `0x6c650d1`; os dois discos — o `ide0-hd0` e o
+`disco0`, o mesmo arquivo — com 79 leituras e 152 KiB cada um, ociosos
+havia 121 segundos; o `swtpm` vivo, com o log vazio; o `debugcon` vazio,
+de um firmware de release. Na serial, só a abertura do console do
+firmware: as limpezas de tela e as duas trocas de tamanho, 240×56 e
+160×42 — os 146 bytes que um boot que anda escreve antes do `BdsDxe:
+loading`.
+
+**Que boot era.** Pelos horários do log, o primeiro boot do cenário, e não
+o que segue uma queda planejada dele: cada máquina que a bancada liga
+publica os programas antes (`comando_qemu` → `codigo::publicar`, as
+linhas do cargo no log), e entre o fim do cenário de antes e a reprovação
+houve uma só, às 05:25:53, com a reprovação 125 segundos depois — os 120 da
+janela e os 4 do último sinal. Antes dele, a última máquina do cenário de
+antes foi cortada (`SIGKILL` no QEMU e no `swtpm`), e o `zerar_o_estado`
+zerou a partição de estado e o armazém, restaurou o slot A e o controle, e
+recriou o diretório do TPM.
+
+**O que a queda deixa, e o que o firmware lê.** Numa queda planejada, o
+kernel com a feature `quedas` lê o plano no último setor da partição de
+estado, avisa `{"queda":N}` no canal no ponto, e congela — ou, no ponto
+antes da confirmação e com a bandeira 5 do plano, entra em pânico —; a
+bancada lê o aviso e corta a energia — o `SIGKILL` no QEMU e no `swtpm` —,
+apaga o plano e liga outra máquina: outro processo do QEMU, outro `swtpm`
+sobre o mesmo diretório e o mesmo arquivo de disco. O firmware lê, no boot
+seguinte:
+
+- o código, só de leitura;
+- as variáveis da UEFI, que são uma cópia nova do modelo a cada máquina que
+  a bancada liga (`firmware_uefi`): nada passa de uma máquina para outra
+  por elas — só os reinícios dentro de um mesmo processo, as tentativas da
+  atualização e o `system.reboot`, as mantêm;
+- o TPM, pelo TIS — o `TPM2_Startup`, os PCRs e o registro do boot medido
+  —, com o NV como o `swtpm` o gravou por último; o volátil morre no corte;
+- o disco, pelo IDE e pelo virtio: a GPT, cada partição sondada pelos
+  drivers de sistema de arquivos — a de estado e a do armazém também —, a
+  FAT da ESP e o `BOOTX64.EFI`;
+- o `fw_cfg`: a ordem de boot, a ACPI, o SMBIOS;
+- os consoles: a COM1 e a COM2, que é o canal do agente — o aperto de mão
+  da bancada escreve nela as linhas do `agent.ping` enquanto o firmware
+  roda, e elas chegam ao `ConIn` dele como teclas, sem um `ESC` nem uma
+  tecla de função, que levariam ao menu;
+- e o gerador de números (`virtio-rng`), que o OVMF liga sempre, e a placa
+  de rede, com a pilha de rede inteira do firmware por cima dela, que o
+  `EfiBootManagerConnectAll` do BDS liga porque a máquina não diz uma ordem
+  de boot ao firmware.
+
+O que um corte pode deixar num estado incomum para o firmware é só o disco
+— o journal e o controle como o kernel os deixou — e o NV do TPM; as
+variáveis, nunca. No boot que parou na CI 436, nem isso: o estado tinha
+sido zerado e o TPM recriado antes dele.
+
+**Onde estavam os processadores.** Com o firmware da CI — o `ovmf-generic`
+2025.11-3ubuntu7.3, baixado do arquivo do Ubuntu — e a máquina da bancada,
+o QEMU 8.2 daqui põe as imagens do DXE nos mesmos endereços que o 10.2 da
+CI: os processadores estacionados param aqui também em `0x6c650d1`, que é
+`CpuDxe+0xd0d1`, logo depois do `hlt` do `CpuSleep` (`hlt; ret`), com as
+interrupções desligadas. E `0x6c7e370` é `Metronome+0x370`: o salto de
+volta do laço que lê o relógio da ACPI (`pause; jmp`), dentro do
+`gBS->Stall`. Os módulos que esperam com uma cópia própria desse laço —
+o `Tcg2Dxe`, o `AtaAtapiPassThruDxe`, o `Ps2KeyboardDxe`, o `CpuDxe` e o
+núcleo do DXE — teriam o processador neles: a espera pelo TPM ou pelo
+disco IDE não estava ali. Os que esperam pelo `gBS->Stall` são outros: a
+`VirtioLib` dos drivers virtio (o `VirtioFlush`, que espera o dispositivo
+sem prazo), o `PciSioSerialDxe`, o `BdsDxe`, o `VirtioSerialDxe` e o iPXE
+da placa de rede.
+
+**Quando.** Aqui, com o firmware da CI, os dois discos chegam a 79 leituras
+e 155 648 bytes aos 4,6 segundos — exatamente onde os da CI pararam —, e o
+IDE lê os setores seguintes 0,26 segundo depois, antes do `BdsDxe:
+loading`: o fim do `PlatformBootManagerAfterConsole` — a pilha de rede
+ligada sobre a placa, as opções de boot gravadas nas variáveis, as medidas
+do `Tcg2Dxe` — e o BDS antes de carregar a opção de boot.
+
+**A causa, reproduzida.** O firmware da CI, subido sozinho até o `BdsDxe:
+loading` na máquina da bancada, com os estímulos da espera da bancada — o
+QMP a cada segundo, o aperto de mão na COM2 —, um TPM novo e uma cópia nova
+das variáveis a cada boot: 300 boots sem parar nenhum, de 4,8 a 7,1
+segundos até a opção de boot. Com a CPU disputada por quatro processos
+ocupados, como num runner sem folga: o boot 27 parou como o da CI — o
+processador 0 em `0x6c7e370`, os outros em `0x6c650d1`, os mesmos 146 bytes
+na COM1 — e a memória e as pilhas ficaram guardadas. O diagnóstico novo,
+sobre elas:
+
+```
+CPU#0 em 0x6c7e370: Metronome+0x370 (a imagem em 0x6c7e000, de 0xa00 bytes; o nome pelo arquivo do firmware); na pilha: Metronome+0x3cf, DxeCore+0x283, DxeCore+0x2ea, DxeCore+0x2ef, VirtioRngDxe+0x709, Ip4Dxe+0x94df, DxeCore+0x5a71, DxeCore+0x5bea
+CPU#1, CPU#2 e CPU#3 em 0x6c650d1: CpuDxe+0xd0d1 (a imagem em 0x6c58000, de 0x16d80 bytes; o nome pelo arquivo do firmware); na pilha: CpuDxe+0x9e38
+```
+
+O `Stall` é o do `VirtioFlush` dentro do `GetRNG` do `VirtioRngDxe`
+(`VirtioRngDxe+0x709`, o retorno da chamada ao `gBS->Stall` no laço que
+compara o índice usado do anel com o esperado), e quem pediu os números foi
+o `Ip4Dxe` (`Ip4Dxe+0x94df`): o `PseudoRandom` da pilha de rede — o
+`LocateProtocol` do `EFI_RNG_PROTOCOL` e um `GetRNG` de 4 bytes por
+algoritmo —, no `Start` do driver, chamado do `ConnectAll` do BDS. O anel
+do gerador mostra o resto: o índice disponível e o usado valem 14 — o
+dispositivo respondeu a tudo —, e o `GetRNG` de fora espera o 13 (o `r15`
+dele). Um segundo `GetRNG` entrou durante a espera do primeiro — só o
+`GetRNG` põe pedidos nesse anel, e no meio do `Stall` só roda a
+notificação de um evento de temporizador, num TPL acima; quem chama o
+gerador no firmware da CI são os drivers da pilha de rede —, usou o mesmo
+descritor 0, e foi respondido; o laço do primeiro — `while
+(*Ring->Used.Idx != NextAvailIdx)` — não acaba mais. É um defeito do EDK II: o
+`VirtioRngGetRNG` sem proteção de TPL. O EDK II o corrigiu a partir do
+`edk2-stable202602` — o `GetRNG` sobe ao `TPL_NOTIFY` em volta do pedido
+—; o OVMF do Ubuntu 26.04, o da CI (2025.11-3ubuntu7.3), não tem a
+correção, nem o 2024.02 daqui. A parada pede um temporizador da rede no
+meio de um `GetRNG`, e o `GetRNG` espera a resposta do laço principal do
+QEMU: com a CPU do hospedeiro disputada, a janela cresce. A CI 413 parou no
+mesmo trecho do boot — depois do console, antes de carregar a opção de
+boot, no boot que seguia um reinício pedido pelo kernel, em que o BDS liga
+a pilha de rede de novo —; é provável que tenha sido o mesmo defeito.
+
+Nem a bancada, nem o estado que uma queda deixa, nem o kernel entram nisso:
+o firmware para antes do iniciador, sobre um estado zerado. A bancada
+continua reprovando o boot que não atende — não há segunda tentativa, que
+esconderia a falha. Evitar o gatilho na máquina da bancada — dizer ao OVMF
+uma ordem de boot (`bootindex` no disco), para ele ligar só o caminho do
+boot em vez do `ConnectAll`, e a pilha de rede não subir; ou um OVMF com a
+correção — muda a máquina de todas as bancadas e da suíte, e é uma decisão
+que ainda não foi tomada. Medido só no firmware: com `bootindex=0` no disco
+do boot, o OVMF da CI não lê o disco virtio nem liga a rede, e chega à opção
+de boot em 4,2 a 4,7 segundos (três boots).
+
+**As rodadas aqui.** O firmware da CI sozinho: 300 boots sem a CPU
+disputada, nenhum parado; 200 com ela, um parado — o boot 27, acima. O
+cenário inteiro, com o firmware daqui (2024.02): três rodadas, 27 boots,
+nenhum parado — e nele a parada não tem como acontecer: no OVMF 2024.02
+do Ubuntu 24.04, só o `VirtioRngDxe` e o shell citam o `EFI_RNG_PROTOCOL`,
+e a pilha de rede não o chama; no 2025.11 da CI, chamam o `Ip4Dxe`, o
+`Ip6Dxe`, o `Udp4Dxe`, o `Udp6Dxe`, o `TcpDxe`, os dois DHCP, o DNS, o PXE,
+o HTTP e o iSCSI. O QEMU e o `swtpm` daqui não são os da CI (8.2.2 e 0.7.3
+aqui; 10.2.1 e 0.10.1 lá), e a parada saiu com o QEMU daqui: o defeito é do
+firmware.
+
+**O diagnóstico novo.** O boot que não atende diz agora em que módulo cada
+processador está, e os valores da pilha dele que caem no código de uma
+imagem ([`xtask/src/firmware.rs`](../xtask/src/firmware.rs); o que ele
+imprime está no README, na serial da bancada). Conferido em máquinas
+paradas de propósito pelo QMP — no meio do firmware daqui
+(`AtaAtapiPassThruDxe`, lendo o disco, e o `CpuDxe` dos estacionados), no
+iniciador (`iniciador.pdb`, pelo CodeView, com o `virtio-net.efidrv` do
+iPXE na pilha), e no meio do firmware da CI, com os estacionados em
+`CpuDxe+0xd0d1` —, e na memória da máquina que parou, acima. As mutações
+N210–N220 estão em [`SDK.md`](SDK.md).

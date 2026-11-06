@@ -899,7 +899,20 @@ cada uma. E as da CI 437 — a conta dos casos da ordem presa, que passou a
 aceitar as voltas que o coletor adia depois da soltura, cada uma dita —:
 a troca que chega ao fim gravando também uma execução da decisão (N209),
 e de novo a N111, a volta adiada sem a execução, contra a conta nova. As
-duas reprovadas pela suíte do x86, filtrada aos casos da troca.
+duas reprovadas pela suíte do x86, filtrada aos casos da troca. E as do
+diagnóstico do firmware parado (#310, N210–N220; ver *O firmware parado da
+CI 436* em [`PERSISTENCIA.md`](PERSISTENCIA.md#o-firmware-parado-da-ci-436)):
+o cabeçalho comparado com o `ImageBase` da memória (N210), a imagem de
+baixo sem conferir que vai até o endereço (N211), o caminho do CodeView
+lido do lugar errado (N212, N213), os valores vizinhos da pilha repetidos
+(N214), o `\r` dos registradores (N215), a seção GUID lida sem o
+`DataOffset` (N216), a procura da pilha que marca vazia só uma página
+(N217), o ponteiro para os dados de uma imagem tomado por retorno (N218),
+a pilha no fim da memória que não se lê nada (N219) e o arquivo de
+enchimento do volume tomado pelo espaço livre (N220).
+Todas reprovadas, uma de cada vez, pelos testes do hospedeiro do `xtask`;
+a N212 sobreviveu à primeira rodada — o caminho lido quatro bytes antes
+ainda acabava no mesmo nome — e foi reprovada depois do reforço do teste.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1111,6 +1124,17 @@ duas reprovadas pela suíte do x86, filtrada aos casos da troca.
 | N208 | fora do SDK (AE-5, o achado 3 do adversário do passo 1c): o aviso da cerimônia escreve o bit do histórico de novo depois de soltar a trava | suíte x86, filtrada (909 de 910): `pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou` — a tecla da senha foi ao histórico |
 | N209 | fora do SDK (CI 437): a troca que chega ao fim grava também uma execução da decisão | suíte x86, filtrada (904 de 910): os quatro modos da ordem presa — `fluxo: a troca de imagem com fluxo e a ordem com outro fio`, `fluxo: a troca de imagem com a ordem tomada no meio`, `fluxo: a troca de imagem adiada abre a janela das interrupcoes`, `fluxo: a troca de imagem adiada da a vez a quem tem a ordem` —, `fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so` e `fluxo: a troca grande com escritas sem parar, medida` |
 | N111, de novo | fora do SDK (CI 437): a volta adiada sem a execução da decisão, contra a conta nova | suíte x86, filtrada (907 de 910): `fluxo: a troca de imagem com fluxo e a ordem com outro fio`, pelo sinal novo, `fluxo: a troca de imagem com a ordem tomada no meio` e `fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so` |
+| N210 | fora do SDK (#310): o cabeçalho da imagem na memória comparado com o `ImageBase` que o carregador reescreveu | hospedeiro: `firmware::testes::o_cabecalho_pe_sem_o_image_base`, `os_modulos_do_arquivo_do_firmware`, `onde_estavam_os_processadores_da_ci_436`, `a_pilha_nao_gasta_as_procuras_com_os_dados` e `a_pilha_no_fim_da_memoria` (xtask) — o da CI 436 depois do reforço: os módulos dele passaram a vir com o `ImageBase` do arquivo, e não com o da memória |
+| N211 | fora do SDK (#310): a imagem de baixo aceita sem conferir que ela vai até o endereço | hospedeiro: `firmware::testes::a_imagem_pelo_cabecalho_abaixo`, `o_codeview_primeiro_e_as_linhas_sem_nome` e `a_pilha_nao_gasta_as_procuras_com_os_dados` (xtask) |
+| N212 | fora do SDK (#310): o caminho do `NB10` lido quatro bytes antes | hospedeiro: `firmware::testes::o_nome_no_codeview` (xtask) — depois do reforço: com um caminho de diretórios, o nome lido do lugar errado ainda acabava no mesmo último componente, e a mutação sobreviveu; o teste ganhou nomes sem diretório e letras, e não zeros, entre a assinatura e o caminho |
+| N213 | fora do SDK (#310): o caminho do `MTOC` lido quatro bytes depois | hospedeiro: `firmware::testes::o_nome_no_codeview` (xtask) |
+| N214 | fora do SDK (#310): os valores iguais e vizinhos da pilha repetidos | hospedeiro: `firmware::testes::onde_estavam_os_processadores_da_ci_436` (xtask) |
+| N215 | fora do SDK (#310): o `\r` escapado do `info registers` deixado no texto | hospedeiro: `firmware::testes::os_processadores_pelo_info_registers` (xtask) |
+| N216 | fora do SDK (#310): os dados da seção GUID lidos do fim do cabeçalho, e não de onde o `DataOffset` diz | hospedeiro: `firmware::testes::os_modulos_do_arquivo_do_firmware` (xtask) — a seção do teste tem quatro bytes a mais no cabeçalho, como a do CRC32: sem eles, o fim do cabeçalho e o `DataOffset` coincidem |
+| N217 | fora do SDK (#310): a procura da pilha que não acha imagem marca vazia só a página do valor | hospedeiro: `firmware::testes::a_pilha_nao_gasta_as_procuras_com_os_dados` (xtask) — as procuras acabam antes do retorno para o núcleo do DXE |
+| N218 | fora do SDK (#310): o valor da pilha que cai nos dados de uma imagem tomado por retorno | hospedeiro: `firmware::testes::onde_estavam_os_processadores_da_ci_436` (xtask) |
+| N219 | fora do SDK (#310): a pilha que não se lê inteira — no fim da memória — não se lê nada | hospedeiro: `firmware::testes::a_pilha_no_fim_da_memoria` (xtask) |
+| N220 | fora do SDK (#310): o arquivo de enchimento do volume — o nome todo em `0xff` — tomado pelo espaço livre, e o resto do volume perdido | hospedeiro: `firmware::testes::os_modulos_do_arquivo_do_firmware` (xtask) — achado ao ler o AAVMF, que tem um logo depois do `PeiCore` |
 
 ## Medidas
 

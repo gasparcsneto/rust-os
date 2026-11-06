@@ -8618,8 +8618,44 @@ firmware (o `debugcon` da porta 0x402, em `target/firmware-x86_64.log`).
 O log do `swtpm` fica no nível dos erros: do nível 2 em diante ele escreve
 cada comando e cada resposta do TPM inteiros, e com eles o que o TPM
 guarda. E o OVMF do Ubuntu, o da CI, é uma compilação de release, que não
-escreve no `debugcon`. `DUKE_CENARIOS` escolhe os cenários por pedaços do
-nome, e `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
+escreve no `debugcon`.
+
+Por isso o boot que não atende diz também em que módulo cada processador
+está ([`xtask/src/firmware.rs`](xtask/src/firmware.rs)). Depois de
+perguntar se o emulador roda, a bancada o para (`stop`) — os
+registradores, a memória e a pilha que ela lê a seguir são de um instante
+só, e a máquina é desligada logo depois —, e lê pelo QMP (o `memsave`,
+pelas tabelas de páginas do processador) a memória abaixo do endereço de
+cada um, página a página, até o cabeçalho PE da imagem que o contém, a até
+4 MiB. O nome vem do registro CodeView da imagem — o `iniciador.pdb`, o
+`virtio-net.efidrv` do iPXE — ou, sem ele (o OVMF do Ubuntu, o daqui e o
+da CI, não grava o diretório de depuração), do módulo de mesmo cabeçalho,
+menos o `ImageBase`, no arquivo do firmware com que a máquina subiu, com a
+parte em LZMA aberta pelo `xz` do hospedeiro. Uma linha por endereço, com
+os processadores que estão nele: o módulo e o deslocamento, onde está a
+imagem e de que tamanho, de onde veio o nome, e os valores da pilha que
+caem no código de uma imagem, do topo para baixo — os primeiros costumam
+ser os retornos: quem chamou o laço em que o processador gira. Sem
+imagem, a linha diz por quê: o endereço depois do fim da imagem de baixo,
+nenhum cabeçalho a 4 MiB, ou a memória que não se lê. Numa máquina parada
+de propósito no meio do firmware da CI (o `ovmf-generic` 2025.11 do
+Ubuntu 26.04), lendo o disco:
+
+```
+  onde cada processador esta, pela memoria:
+    CPU#0 em 0x680bbfc: AtaAtapiPassThruDxe+0x1bfc (a imagem em 0x680a000, de 0x6a00 bytes; o nome pelo arquivo do firmware); na pilha: AtaAtapiPassThruDxe+0x934, AtaAtapiPassThruDxe+0x1c3c, AtaAtapiPassThruDxe+0x52d0, CpuIo2Dxe+0x364, AtaAtapiPassThruDxe+0x5549, AtaAtapiPassThruDxe+0x934, AtaBusDxe+0xf8d, AtaBusDxe+0x2578
+    CPU#1, CPU#2 e CPU#3 em 0x6c650d1: CpuDxe+0xd0d1 (a imagem em 0x6c58000, de 0x16d80 bytes; o nome pelo arquivo do firmware); na pilha: CpuDxe+0x9e38
+```
+
+O firmware parado da CI 436 — o processador 0 no `gBS->Stall` do `GetRNG`
+do `VirtioRngDxe`, que o `Ip4Dxe` chamou e que um segundo `GetRNG`, de um
+temporizador da pilha de rede, deixou esperando para sempre: um defeito do
+OVMF 2025.11, que o EDK II corrigiu no `edk2-stable202602` — está em
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-firmware-parado-da-ci-436),
+com a reprodução.
+
+`DUKE_CENARIOS` escolhe os cenários por pedaços do nome, e
+`DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
 ## Operação
 
@@ -9998,7 +10034,16 @@ num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida"
 volta adiada — reprovada por "fluxo: a troca de imagem com fluxo e a ordem
 com outro fio", pelo sinal novo, "fluxo: a troca de imagem com a ordem
 tomada no meio" e "fluxo: a troca de imagem ouve a ordem com outro no
-meio, tambem num nucleo so" (907 de 910).
+meio, tambem num nucleo so" (907 de 910). E as do diagnóstico do firmware
+parado (#310, N210–N220): o cabeçalho da imagem comparado com o
+`ImageBase` da memória, a imagem de baixo sem conferir que vai até o
+endereço, o caminho do CodeView lido do lugar errado, os valores vizinhos
+da pilha repetidos, o `\r` dos registradores, a seção GUID lida sem o
+`DataOffset`, a procura da pilha que marca vazia só uma página e o ponteiro
+para os dados de uma imagem tomado por retorno, a pilha no fim da memória
+que não se lê nada e o arquivo de enchimento do volume tomado pelo espaço
+livre — todas reprovadas pelos
+testes do hospedeiro do `xtask`, a N212 depois do reforço do teste.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10100,6 +10145,7 @@ meio, tambem num nucleo so" (907 de 910).
 | fora do SDK (AE-5, os achados 1 e 3 do adversário do passo 1c): a sessão da pessoa que acabou aceita no consumo (N205); a reserva de pessoa sem a sessão (N206); o bit do histórico escrito de novo fora da trava (N208) | "terminal: a edicao da pessoa que saiu da sessao e descartada"; "pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou" |
 | fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `path` visto só logo depois do `#[` (N207) | os testes do hospedeiro do xtask |
 | fora do SDK (CI 437): a troca que chega ao fim gravando também uma execução da decisão (N209); a volta adiada sem a execução, de novo contra a conta nova (N111) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida" — a N209; a N111, os três primeiros que adiam (o 327 pelo sinal novo, o 328 e o 338) |
+| fora do SDK (#310): o cabeçalho comparado com o `ImageBase` da memória (N210); a imagem de baixo sem conferir o tamanho (N211); o caminho do CodeView lido do lugar errado (N212, N213); os valores vizinhos da pilha repetidos (N214); o `\r` dos registradores (N215); a seção GUID lida sem o `DataOffset` (N216); a faixa vazia de uma página só (N217); o ponteiro para os dados de uma imagem tomado por retorno (N218); a pilha no fim da memória que não se lê nada (N219); o arquivo de enchimento do volume tomado pelo espaço livre (N220) | os testes do hospedeiro do xtask (`firmware::testes`) — a N212 depois do reforço |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
