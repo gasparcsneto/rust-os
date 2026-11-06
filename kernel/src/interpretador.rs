@@ -728,6 +728,12 @@ pub fn abrir_console(console: Console) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        // A linha volta a pedir um comando: o teclado volta a gravar o
+        // histórico, se ela pedia uma senha — na seção que muda o modo, como
+        // toda escrita do bit: ver [`crate::teclado::pedindo_senha`].
+        if let Some(i) = indice(console) {
+            crate::teclado::pedindo_senha(i, false);
+        }
         e.enter_na_janela = false;
         e.press_pela_arvore = None;
         e.largar_edicoes();
@@ -744,11 +750,6 @@ pub fn abrir_console(console: Console) {
     // A cerimônia de pareamento deste console, se havia uma, acaba: quem a
     // abriu não está mais nele.
     crate::pareamento::console_mudou(console);
-    // A linha volta a pedir um comando: o teclado volta a gravar o
-    // histórico, se ela pedia uma senha.
-    if let Some(i) = indice(console) {
-        crate::teclado::pedindo_senha(i, false);
-    }
     if let Some(id) = sobra {
         crate::pessoas::encerrar_pelo_console(id, "o console reabriu");
     }
@@ -856,7 +857,7 @@ fn largar_suspenso(console: Console) {
 /// ou o processo dele morre. O `motivo` vai ao registro do `logout`: quem
 /// fechou — ver [`quem_fechou`] —, ou a queda.
 pub fn fechar_console(console: Console, motivo: &str) {
-    let Some((sessao, i)) = com_estado(console, |e| {
+    let Some(sessao) = com_estado(console, |e| {
         let sessao = e.sessao.take();
         e.zerar();
         e.largar_troca();
@@ -870,17 +871,18 @@ pub fn fechar_console(console: Console, motivo: &str) {
         e.nome_tam = 0;
         e.enter_pedido = [None; ENTER_PEDIDOS];
         e.engolindo = false;
+        if let Some(i) = indice(console) {
+            crate::teclado::pedindo_senha(i, false);
+        }
         e.enter_na_janela = false;
         e.press_pela_arvore = None;
         e.largar_edicoes();
         sessao
-    })
-    .zip(indice(console)) else {
+    }) else {
         return;
     };
     largar_suspenso(console);
     crate::pareamento::console_mudou(console);
-    crate::teclado::pedindo_senha(i, false);
     if let Some(id) = sessao {
         crate::pessoas::encerrar_pelo_console(id, motivo);
     }
@@ -2400,12 +2402,12 @@ fn entrar_passo(console: Console) {
                 e.nome = [0; NOME_MAX];
                 e.nome_tam = 0;
                 e.modo = Modo::Comando;
+                crate::teclado::pedindo_senha(i, false);
                 e.inicio = None;
                 saidaln!(console);
                 (tam, nome_tam, e.abertura)
             })
             .unwrap_or((0, 0, 0));
-            crate::teclado::pedindo_senha(i, false);
             let nome_texto = core::str::from_utf8(&nome[..nome_tam]).unwrap_or("");
             let desfecho = crate::pessoas::autenticar(console, nome_texto, &senha[..tam]);
             sigilo::zeroize::Zeroize::zeroize(&mut senha);
@@ -2739,8 +2741,8 @@ fn comecar_troca(console: Console, params: &str) {
         e.largar_troca();
         e.troca = Some(sessao);
         e.modo = Modo::SenhaAtual;
+        crate::teclado::pedindo_senha(i, true);
     });
-    crate::teclado::pedindo_senha(i, true);
 }
 
 /// O Enter no meio da troca da própria senha: a atual leva à nova, a nova
@@ -2760,6 +2762,7 @@ fn trocar_passo(console: Console) {
                 if !seguiu {
                     e.largar_troca();
                     e.modo = Modo::Comando;
+                    crate::teclado::pedindo_senha(i, false);
                 } else if e.modo == Modo::SenhaAtual {
                     e.atual = e.bytes;
                     e.atual_tam = e.tam;
@@ -2777,7 +2780,6 @@ fn trocar_passo(console: Console) {
             })
             .unwrap_or(false);
             if !seguiu {
-                crate::teclado::pedindo_senha(i, false);
                 saidaln!(console, "troca de senha desistida: nada mudou");
                 mostrar_prompt(console);
             }
@@ -2797,12 +2799,12 @@ fn trocar_passo(console: Console) {
                 e.zerar();
                 e.largar_troca();
                 e.modo = Modo::Comando;
+                crate::teclado::pedindo_senha(i, false);
                 e.inicio = None;
                 saidaln!(console);
                 (sessao, tamanhos)
             })
             .unwrap_or((None, (0, 0, 0)));
-            crate::teclado::pedindo_senha(i, false);
             let (ta, tn, td) = tamanhos;
             let desfecho = match sessao {
                 Some(s) if td > 0 => Some(crate::pessoas::trocar_a_propria_senha(
@@ -2869,12 +2871,10 @@ fn comecar_pareamento(console: Console, aceitar: bool, params: &str) {
     let lida = crate::pareamento::linha_e_numero_do_console(console);
     #[cfg(feature = "modo-teste")]
     no_meio(NoMeio::DoPassoLido);
-    let modo = com_estado(console, |e| {
+    com_estado(console, |e| {
         seguir_a_cerimonia(e, lida, true);
-        e.modo
-    })
-    .unwrap_or(Modo::Comando);
-    crate::teclado::pedindo_senha(i, modo.secreto());
+        crate::teclado::pedindo_senha(i, e.modo.secreto());
+    });
 }
 
 /// A linha de um console segue a cerimônia dele, com o que o `aceitar`, o
@@ -2945,6 +2945,7 @@ fn parear_passo(console: Console, modo: Modo) {
     let tomada = com_estado(console, |e| {
         if e.engolindo {
             e.parar_de_engolir();
+            crate::teclado::pedindo_senha(i, e.modo.secreto());
             return None;
         }
         let tam = e.tam;
@@ -2952,15 +2953,15 @@ fn parear_passo(console: Console, modo: Modo) {
         e.zerar();
         e.inicio = None;
         e.executando = true;
+        crate::teclado::pedindo_senha(i, false);
         saidaln!(console);
         Some((tam, e.abertura))
     })
     .flatten();
     let Some((tam, abertura)) = tomada else {
-        fim_do_engolir(console);
+        mostrar_prompt(console);
         return;
     };
-    crate::teclado::pedindo_senha(i, false);
     let sessao = sessao_valida(console);
     let digitado = if modo.secreto() {
         &copia[..tam]
@@ -2975,13 +2976,11 @@ fn parear_passo(console: Console, modo: Modo) {
     let lida = crate::pareamento::linha_e_numero_do_console(console);
     #[cfg(feature = "modo-teste")]
     no_meio(NoMeio::DoPassoLido);
-    let modo = com_estado(console, |e| {
+    com_estado(console, |e| {
         seguir_a_cerimonia(e, lida, false);
         e.executando = false;
-        e.modo
-    })
-    .unwrap_or(Modo::Comando);
-    crate::teclado::pedindo_senha(i, modo.secreto());
+        crate::teclado::pedindo_senha(i, e.modo.secreto());
+    });
     mostrar_prompt(console);
 }
 
@@ -3123,13 +3122,25 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, cerimonia: u64, text
                 redesenhar_em(console, e);
             }
         }
+        // O bit do histórico, conforme o modo em que a linha ficou — a da
+        // senha do login continua pedindo a senha —, e ligado enquanto o
+        // console engole: as teclas que chegam nesse meio-tempo são o resto
+        // de uma senha — também as da janela de um Terminal, que entram no
+        // histórico quando chegam. Escrito nesta seção, que mudou o modo, e
+        // não depois de soltá-la: o aviso de outro fio parado entre as duas
+        // apagaria o bit que o Enter da Pessoa ligou nesse meio-tempo, e a
+        // senha dela iria ao histórico (o achado 3 do adversário do passo
+        // 1c).
+        crate::teclado::pedindo_senha(i, e.modo.secreto() || e.engolindo);
         let virou = !pedia_a_pessoa && pede_a_pessoa_em(e);
-        Some((comecou, e.engolindo, e.modo, virou))
+        Some((comecou, virou))
     })
     .flatten();
-    let Some((comecou, engolindo, modo, virou)) = feito else {
+    let Some((comecou, virou)) = feito else {
         return;
     };
+    #[cfg(feature = "modo-teste")]
+    no_meio(NoMeio::DoAvisoEscrito);
     // A linha passou a pedir a pessoa: as edições da árvore a caminho são
     // recusadas agora. Hoje não acontece — a cerimônia começa pelo Enter,
     // que já é a virada, e o engolir só começa de uma linha que já pedia a
@@ -3137,11 +3148,6 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, cerimonia: u64, text
     if virou {
         recusar_as_edicoes_a_caminho(console);
     }
-    // Conforme o modo em que a linha ficou — a da senha do login continua
-    // pedindo a senha —, e ligado enquanto o console engole: as teclas que
-    // chegam nesse meio-tempo são o resto de uma senha — também as da
-    // janela de um Terminal, que entram no histórico quando chegam.
-    crate::teclado::pedindo_senha(i, modo.secreto() || engolindo);
     if comecou {
         // Uma linha, e nenhuma por tecla: a conta delas seria o tamanho do
         // resto da senha.
@@ -3178,6 +3184,11 @@ fn engolir(console: Console, c: char) -> bool {
         e.engolindo.then(|| {
             if c == '\n' {
                 e.parar_de_engolir();
+                // O bit do histórico conforme a linha, na seção que parou de
+                // engolir: ver [`crate::teclado::pedindo_senha`].
+                if let Some(i) = indice(console) {
+                    crate::teclado::pedindo_senha(i, e.modo.secreto());
+                }
             }
             !e.engolindo
         })
@@ -3186,7 +3197,7 @@ fn engolir(console: Console, c: char) -> bool {
         return false;
     };
     if acabou {
-        fim_do_engolir(console);
+        mostrar_prompt(console);
     } else if let Some(sessao) = agente_que_confirmou(c) {
         let _ = tomar_enter_pedido(console, sessao);
         crate::log_warn!(
@@ -3197,17 +3208,6 @@ fn engolir(console: Console, c: char) -> bool {
         );
     }
     true
-}
-
-/// O console parou de engolir, no Enter da Pessoa: volta a pedir o que a
-/// linha pede — um comando —, com o bit do histórico conforme ela, e o
-/// prompt. Fora da trava.
-fn fim_do_engolir(console: Console) {
-    let modo = com_estado(console, |e| e.modo).unwrap_or(Modo::Comando);
-    if let Some(i) = indice(console) {
-        crate::teclado::pedindo_senha(i, modo.secreto());
-    }
-    mostrar_prompt(console);
 }
 
 /// O console engole o resto de uma senha? Só para a suíte.
@@ -3253,6 +3253,11 @@ pub enum NoMeio {
     /// lido, e a linha ainda não o mostra — um aviso pode chegar nesse
     /// meio-tempo.
     DoPassoLido,
+    /// No aviso da cerimônia ([`aviso_do_pareamento`]), logo depois da seção
+    /// que mudou a linha e escreveu o bit do histórico: o Enter da Pessoa
+    /// pode levar a linha adiante nesse meio-tempo, e nada do aviso escreve
+    /// o bit depois dele.
+    DoAvisoEscrito,
 }
 
 /// Só para a suíte: o ponto, e o que roda nele.

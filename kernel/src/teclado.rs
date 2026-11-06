@@ -126,18 +126,26 @@ static PARA_JANELAS: Fila<char, CAPACIDADE> = Fila::nova();
 /// virar senha, então não grava tecla nenhuma até o último console sair do
 /// pedido de senha.
 ///
+/// O interpretador escreve o bit de um console na mesma seção da trava do
+/// console que muda o modo da linha — no tratamento de uma tecla, no aviso
+/// da cerimônia de pareamento, que vem de fora, e na abertura e no
+/// fechamento do console —: o bit segue a ordem da trava, e quem o escreve
+/// por último é quem mudou o modo por último. Antes, o aviso o escrevia
+/// depois de soltar a trava, e um aviso parado entre as duas apagava o bit
+/// que o Enter da Pessoa tinha ligado nesse meio-tempo (o achado 3 do
+/// adversário do passo 1c).
+///
 /// No console físico, o bit é conferido quando ele **consome** a tecla
-/// ([`consumida`]): as mudanças de modo dele ligam ou desligam o bit no
-/// tratamento de uma tecla, antes de a seguinte ser consumida; a única de
-/// fora — o fim da cerimônia de pareamento, que só sai de um modo secreto
-/// — o deixa ligado enquanto o console engole o resto da senha. No
-/// consumo, o bit dele é o modo da linha, ou o engolir. Numa janela, a
+/// ([`consumida`]): no consumo, o bit dele é o modo da linha, ou o engolir
+/// — o fim da cerimônia de pareamento, que só sai de um modo secreto, o
+/// deixa ligado enquanto o console engole o resto da senha. Numa janela, a
 /// tecla é conferida quando chega: a senha digitada num Terminal antes de
 /// o console dele pedi-la ainda entra.
 static PEDINDO_SENHA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Marca se o console `indice` está pedindo uma senha. Chamada pelo
-/// interpretador.
+/// interpretador, na seção da trava do console que muda o modo da linha —
+/// ver o `PEDINDO_SENHA`.
 pub fn pedindo_senha(indice: usize, pedindo: bool) {
     let bit = 1u32 << (indice % 32);
     if pedindo {
