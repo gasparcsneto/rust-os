@@ -7943,36 +7943,46 @@ não chegou — uma corrida que o caminho de verdade não alcança, porque o
 `ui.act` do físico roda no executor que consome as teclas.
 
 **Quem pediu, de novo, no consumo.** A edição de um agente é amarrada à
-conexão de onde ele pediu e à chave que o gate decidiu, como o Enter
-dele: quem já não está nela é recusado antes da conta, e a edição de quem
-saiu depois — a conexão acabou, ou outra ocupou a sessão — é descartada
-quando o console a consome, numa linha de comando também, com a recusa no
-log; o arrendamento dela, se ainda é o que ela deixou, sai pela mesma
-regra ("arrendamento implicito solto: quem pediu a edicao pela arvore
-saiu da sessao"; o achado 7). E o consumo pergunta à contenção, como o
-ponto de commit do pedido em curso: a edição de um agente suspenso, ou
-com a credencial suspensa — o agente continua conectado, e a amarração
-continua valendo —, e a de uma pessoa com a credencial suspensa, cuja
-sessão a reserva guarda, são descartadas do mesmo jeito, com o motivo da
-contenção no log ("agente suspenso", "credencial suspensa"). O
-arrendamento dela já saiu com a contenção; se a conta correu com a
-contenção, noutro núcleo, e o tomou depois, ele sai pela mesma regra
+conexão de onde ele pediu e à chave que o gate decidiu, como o Enter dele:
+quem já não está nela é recusado antes da conta, e a edição de quem saiu
+depois — a conexão acabou, ou outra ocupou a sessão — é descartada quando
+o console a consome, numa linha de comando também, com a recusa no log; o
+arrendamento dela, se ainda é o que ela deixou, sai pela mesma regra
+("arrendamento implicito solto: quem pediu a edicao pela arvore saiu da
+sessao"; o achado 7). A de uma pessoa vai com a sessão de onde ela pediu e
+com quem ela é — a de uma pessoa sem sessão nem se reserva —, e no consumo
+a sessão tem de estar ainda aberta e ser dela: a edição da pessoa que
+saiu, da sessão revogada ou da pessoa revogada é descartada como a do
+agente que saiu ("a pessoa nao esta mais na sessao de onde pediu"; o
+achado 1 do adversário do passo 1c). E o consumo pergunta à contenção,
+como o ponto de commit do pedido em curso: a edição de um agente suspenso,
+ou com a credencial suspensa — o agente continua conectado, e a amarração
+continua valendo —, e a de uma pessoa com a credencial suspensa e a sessão
+ainda aberta são descartadas do mesmo jeito, com o motivo da contenção no
+log ("agente suspenso", "credencial suspensa"). A sessão vem antes: a
+contenção da pessoa é procurada pela sessão, e a revogação esquece a
+suspensão. O arrendamento dela já saiu com a contenção; se a conta correu
+com a contenção, noutro núcleo, e o tomou depois, ele sai pela mesma regra
 ("arrendamento implicito solto: quem pediu a edicao pela arvore foi
 contido"; o achado 2 do adversário do passo 1b).
 
 **Quem solta.** O estado que a soltura confere é o rastro que a conta da
-coordenação devolveu — de que recurso, o antes e o depois —, com os
-campos privados: só `coordenacao::editar_com_rastro` o constrói — e
-`Rastro::seguida_de`, que soma dois que ela devolveu, para a edição que
-só renovou e não chegou —; quem solta não escolhe o estado a soltar, e o
-de agora, lido por fora, não solta nada (o achado 8). E o `cargo xtask
+coordenação devolveu — de que recurso, o antes e o depois —, com os campos
+privados: só `coordenacao::editar_com_rastro` o constrói — e
+`Rastro::seguida_de`, que soma dois que ela devolveu, para a edição que só
+renovou e não chegou —; quem solta não escolhe o estado a soltar, e o de
+agora, lido por fora, não solta nada (o achado 8). E o `cargo xtask
 invariantes` confere quem chama a soltura, a reserva, a anotação, a
 desistência, a entrega que falhou, a conta que devolve o rastro e a soma
 de dois rastros pelo nome sozinho, em qualquer forma — com o caminho ou
 sem ele, num `use`, renomeado —, e não só pela chamada com o caminho; e
-recusa o atributo `#[path]` no kernel fora da suíte, que a conferência
-deixa de fora pelo caminho do arquivo (o achado 6 do adversário do passo
-1b).
+recusa, no kernel fora da suíte, o que traz o código de outro arquivo — a
+suíte, que a conferência deixa de fora pelo caminho do arquivo —,
+conferido no arquivo inteiro, fora dos comentários e dos textos: o
+atributo com a palavra `path` em qualquer forma — `#[path = …]`, no
+`cfg_attr`, partido em linhas, `r#path` —, o atributo montado por uma
+macro (`#[$…]`) e o `include!` (o achado 6 do adversário do passo 1b e o
+achado 2 do passo 1c).
 
 Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
 pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
@@ -8036,7 +8046,15 @@ frente: o console guarda também o passo da cerimônia que a linha mostra, e
 o Enter numa linha dela, que lê o passo antes de escrever, não volta a
 linha que um aviso levou adiante nesse meio-tempo — nem o aviso atrasado a
 que o Enter levou adiante (o achado 3 do adversário do passo 1b;
-"pareamento: o passo lido antes do aviso nao volta a linha").
+"pareamento: o passo lido antes do aviso nao volta a linha"). E o bit do
+histórico é escrito na mesma seção da trava do console que muda o modo da
+linha — no aviso, no Enter, na abertura e no fechamento do console —, e
+segue a ordem dela: o aviso dos códigos, de outro fio, parado logo depois
+da seção dele, não apaga o bit que o Enter da Pessoa ligou nesse
+meio-tempo ao levar a linha à senha — antes, ele o escrevia depois de
+soltar a trava, e a senha seguinte ia ao histórico (o achado 3 do
+adversário do passo 1c; "pareamento: o aviso dos codigos nao apaga o bit
+que o Enter ligou").
 
 **Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
 sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
@@ -8113,9 +8131,12 @@ descartada"); a de quem foi contido com ela a caminho — o agente
 suspenso, a credencial dele, a da pessoa —, descartada no consumo, com o
 motivo da contenção no log, e o arrendamento que a conta tomou correndo
 com a contenção, solto ali com o motivo dela ("terminal: a edicao de quem
-foi contido e descartada"); e o `definir` do físico, que confere a linha
-da pessoa onde edita ("interface: o definir do fisico confere a linha da
-pessoa onde edita"). A fumaça
+foi contido e descartada"); a da pessoa que saiu da sessão com ela a
+caminho — suspensa e saiu, revogada, a sessão revogada —, descartada no
+consumo, e a reserva de pessoa sem a sessão dela, recusada ("terminal: a
+edicao da pessoa que saiu da sessao e descartada"); e o `definir` do
+físico, que confere a linha da pessoa onde edita ("interface: o definir
+do fisico confere a linha da pessoa onde edita"). A fumaça
 entra pelo teclado da máquina com a pessoa da imagem: no Terminal, depois
 de ver o comando antes do login recusado e gravado, e com a senha fora do
 histórico; e no console físico, depois de um clique fora das janelas —
@@ -9352,7 +9373,7 @@ distribuída.
 **Testes.** No hospedeiro, as contas da cerimônia — as derivações, o
 compromisso, a janela, a confirmação, a tabela de transições e passos
 sorteados — e o prólogo, os quadros e um vetor fixo do `sigilo`. Na suíte,
-nas duas arquiteturas, 44 casos `pareamento:` — o outro Duke é a suíte,
+nas duas arquiteturas, 45 casos `pareamento:` — o outro Duke é a suíte,
 com uma chave de teste, e a pessoa digita no console: os dois lados, o
 código errado, os prazos, o replay, o homem no meio, o compromisso, a
 chave que não é de Duke, a lápide, a suspensão, o papel, a concorrência
@@ -9374,7 +9395,9 @@ senha atual da troca; o aviso dos códigos lido antes de o prazo vencer e
 entregue depois do aviso do fim, que não muda a linha; e o Enter que leu
 a cerimônia antes de um aviso dela, que não volta a linha — nem à espera
 depois dos códigos, nem a uma cerimônia que acabou —, e o aviso dos
-códigos lido antes do Enter que leva a linha à senha, que não a volta. E a
+códigos lido antes do Enter que leva a linha à senha, que não a volta; e
+o aviso dos códigos parado depois da seção dele, que não apaga o bit do
+histórico que o Enter ligou. E a
 **bancada de duas máquinas**, `cargo xtask pareamento`: dois Dukes de pé e
 a pessoa no teclado dos dois — a bancada lê o código de cada tela pela
 árvore semântica e o digita no outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
@@ -9955,7 +9978,13 @@ kernel fora da suíte, e a N203 tira dos nomes protegidos a conta que
 devolve o rastro. Todas reprovadas, uma de cada vez: a N202 e a N203 pelos
 testes do hospedeiro do `xtask`; as outras pela suíte do x86 — a N204
 depois do reforço do caso da contenção, que passou a conferir a conta que
-corre com ela.
+corre com ela. E as dos achados do adversário do passo 1c (N205–N208): a
+N205 aceita no consumo a sessão da pessoa que acabou, e a N206 reserva a
+edição de pessoa sem a sessão dela; a N207 faz o `xtask` ver o `path` só
+logo depois do `#[`; e a N208 faz o aviso da cerimônia escrever o bit do
+histórico de novo depois de soltar a trava. Todas reprovadas, uma de cada
+vez: a N207 pelos testes do hospedeiro do `xtask`; as outras pela suíte
+do x86.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10054,6 +10083,8 @@ corre com ela.
 | fora do SDK (AE-5, item 4 e os achados 1, 2, 5, 6 e 7 do adversário do passo 1): a entrega sem a conferência antes da conta (N189); a renovação que não passa adiante (N190); o Enter sem recusar as edições a caminho (N191); a soltura como `ui.release` (N192); o consumo sem conferir quem pediu (N193); o `definir` do físico sem a regra na seção (N195); o aviso de qualquer cerimônia (N197) | "terminal: a edicao que nao chega ao programa nao arrenda o campo"; "terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou"; "terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT"; os casos que contam a soltura; "terminal: a edicao de quem saiu da sessao e descartada"; "interface: o definir do fisico confere a linha da pessoa onde edita"; "pareamento: o aviso lido antes do fim da cerimonia nao muda a linha" |
 | fora do SDK (AE-5, os achados 2 e 3 do adversário do passo 1b): o consumo sem perguntar à contenção (N198); a soltura de quem foi contido com o motivo de quem saiu da sessão (N204), depois do reforço; o Enter que volta a linha a um passo de antes (N199), ou a uma cerimônia que acabou (N200); o aviso atrasado que volta a linha (N201) | "terminal: a edicao de quem foi contido e descartada"; "pareamento: o passo lido antes do aviso nao volta a linha" |
 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `#[path]` fora da suíte (N202); a conta que devolve o rastro fora dos nomes protegidos (N203) | os testes do hospedeiro do xtask |
+| fora do SDK (AE-5, os achados 1 e 3 do adversário do passo 1c): a sessão da pessoa que acabou aceita no consumo (N205); a reserva de pessoa sem a sessão (N206); o bit do histórico escrito de novo fora da trava (N208) | "terminal: a edicao da pessoa que saiu da sessao e descartada"; "pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou" |
+| fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `path` visto só logo depois do `#[` (N207) | os testes do hospedeiro do xtask |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

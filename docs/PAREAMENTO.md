@@ -189,6 +189,14 @@ voltava a linha dos códigos à da espera, e o código digitado em seguida
 ouvia "ja respondido"; e o Enter que leu a cerimônia viva antes do fim a
 punha de volta na linha (o achado 3 do adversário do passo 1b).
 
+O bit do histórico do teclado — ligado enquanto uma linha pede uma senha,
+para ela não ir ao `keyboard.read` — é escrito na mesma seção da trava do
+console que muda o modo da linha, no aviso e no Enter: segue a ordem da
+trava. O aviso dos códigos o escrevia depois de soltá-la, e, parado entre
+as duas, apagava o bit que o Enter do código tinha ligado ao levar a
+linha à senha: a senha seguinte ia ao histórico (o achado 3 do adversário
+do passo 1c).
+
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
 a tela diz para conferir nele); `DesfazerAqui` (o outro desistiu depois
@@ -277,7 +285,7 @@ compartilhada, a nuvem e a conta central.
   a coerência sob passos sorteados; e o `sigilo`: o prólogo e os quadros
   da cerimônia, que não abrem como enlace nem como agente, e um vetor fixo
   das efêmeras aos códigos e ao `R`.
-- **Suíte** (x86 e ARM): 44 casos `pareamento:` — o outro Duke é a suíte,
+- **Suíte** (x86 e ARM): 45 casos `pareamento:` — o outro Duke é a suíte,
   com uma chave de teste, iniciando pela vaga do enlace ou aceitando pela
   via do fio da cerimônia, e a Pessoa digita no console. Os dois lados; o
   código errado, expirado, reutilizado; o replay; o par no meio; outro Duke
@@ -312,7 +320,10 @@ compartilhada, a nuvem e a conta central.
   e o Enter que leu a cerimônia antes de um aviso dela, que não volta a
   linha — a dos códigos à espera, nem a de um comando a uma cerimônia que
   acabou —, nem o aviso dos códigos lido antes do Enter que leva a linha
-  à senha ("pareamento: o passo lido antes do aviso nao volta a linha").
+  à senha ("pareamento: o passo lido antes do aviso nao volta a linha");
+  e o aviso dos códigos parado logo depois da seção dele, que não apaga o
+  bit do histórico que o Enter ligou ao levar a linha à senha
+  ("pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou").
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, conferido na tela
@@ -374,5 +385,5 @@ suíte): o que pede com a ação a caminho não depende do meio segundo.
   das bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)), o par
   aarch64→aarch64 levou 230 s no hospedeiro de desenvolvimento, e o
   x86_64→aarch64, 299 s; o B01, 20 s nos dois.
-- Os casos `pareamento:` da suíte — 39 quando medidos, 44 hoje — levavam
+- Os casos `pareamento:` da suíte — 39 quando medidos, 45 hoje — levavam
   uns 4 minutos no x86 e uns 3 no ARM.

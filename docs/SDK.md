@@ -888,7 +888,14 @@ conta que devolve o rastro fora dos nomes protegidos (N203), o achado 6.
 Todas reprovadas, uma de cada vez: a N202 e a N203 pelos testes do
 hospedeiro; as outras pela suíte do x86, filtrada aos casos de cada uma
 — a N204 depois do reforço do caso da contenção, que passou a conferir a
-conta que corre com ela.
+conta que corre com ela. E as dos achados do adversário do passo 1c
+(N205–N208): o consumo que aceita a sessão da pessoa que acabou (N205) e
+a reserva de pessoa sem a sessão dela (N206), o achado 1; o `xtask` que só
+vê o `path` logo depois do `#[` (N207), o achado 2; e o aviso da
+cerimônia que escreve o bit do histórico de novo depois de soltar a trava
+(N208), o achado 3. Todas reprovadas, uma de cada vez: a N207 pelos
+testes do hospedeiro; as outras pela suíte do x86, filtrada aos casos de
+cada uma.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1094,6 +1101,10 @@ conta que corre com ela.
 | N202 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `xtask` deixa passar o `#[path]` no kernel fora da suíte | hospedeiro: `testes_dos_nomes_protegidos::o_atributo_de_caminho` (xtask) |
 | N203 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): a conta que devolve o rastro fora dos nomes protegidos | hospedeiro: `testes_dos_nomes_protegidos::o_rastro_so_se_fabrica_nos_donos` (xtask) |
 | N204 | fora do SDK (AE-5, o achado 2 do adversário do passo 1b): a soltura do arrendamento de quem foi contido com o motivo de quem saiu da sessão | suíte x86, filtrada (907 de 908): `terminal: a edicao de quem foi contido e descartada` — a conta que correu com a contenção, depois do reforço |
+| N205 | fora do SDK (AE-5, o achado 1 do adversário do passo 1c): o consumo aceita a edição da pessoa cuja sessão acabou | suíte x86, filtrada (909 de 910): `terminal: a edicao da pessoa que saiu da sessao e descartada` |
+| N206 | fora do SDK (AE-5, o achado 1 do adversário do passo 1c): a reserva de uma edição de pessoa sem a sessão dela passa | suíte x86, filtrada (909 de 910): `terminal: a edicao da pessoa que saiu da sessao e descartada` — a reserva sem sessão |
+| N207 | fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `xtask` só vê o `path` logo depois do `#[` | hospedeiro: `testes_dos_nomes_protegidos::o_caminho_de_outro_arquivo_em_qualquer_forma` (xtask) — o `cfg_attr` e o `r#path` |
+| N208 | fora do SDK (AE-5, o achado 3 do adversário do passo 1c): o aviso da cerimônia escreve o bit do histórico de novo depois de soltar a trava | suíte x86, filtrada (909 de 910): `pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou` — a tecla da senha foi ao histórico |
 
 ## Medidas
 

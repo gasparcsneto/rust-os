@@ -578,9 +578,9 @@ pub fn linha_e_numero_do_console(console: Console) -> (Linha, Option<(u64, u8)>)
 
 /// Em que passo a cerimônia está, contado na ordem em que ela anda — a
 /// janela aberta, a ocupada, os códigos, o código certo, a confirmação
-/// daqui, a gravação, a gravada, o fim. Ela só anda para a frente (a senha
-/// errada que ainda tem tentativa fica no código certo): o console não deixa
-/// a linha voltar a um passo de antes do que já mostrou.
+/// daqui, a gravação, a gravada, o fim. Ela só anda para a frente — a senha
+/// errada a acaba (`conferir_a_senha`), e todo fim é o mesmo passo —: o
+/// console não deixa a linha voltar a um passo de antes do que já mostrou.
 pub fn passo_de(estado: Estado) -> u8 {
     match estado {
         Estado::Aberta => 0,
