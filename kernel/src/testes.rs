@@ -8532,6 +8532,128 @@ fn terminal_a_edicao_de_quem_foi_contido_e_descartada() -> Resultado {
     Ok(())
 }
 
+/// A edição em voo de uma pessoa é descartada no consumo também quando a
+/// sessão dela acabou com a edição a caminho — como a do agente que saiu da
+/// conexão (o achado 7 do adversário do passo 1) —: a sessão tem de estar
+/// ainda aberta, e ser da mesma pessoa (o achado 1 do adversário do passo
+/// 1c). A contenção da pessoa é procurada pela sessão, e a revogação esquece
+/// a suspensão: só a pergunta à contenção deixava passar as três voltas.
+///
+/// - suspensa, e depois saiu (`logout`, que não passa pelo gate);
+/// - revogada — o definitivo: as sessões acabam e a suspensão some;
+/// - a sessão revogada, sem contenção nenhuma.
+///
+/// E a reserva de uma edição de pessoa sem a sessão dela — sem titular, ou
+/// com o de um agente — é recusada: o consumo não teria o que conferir.
+fn terminal_a_edicao_da_pessoa_que_saiu_da_sessao_e_descartada() -> Resultado {
+    use crate::contencao::Alvo;
+    use crate::interpretador::{Modo, PESSOA_FORA_DA_SESSAO, PESSOA_SEM_SESSAO};
+    use crate::ui::{Acao, Origem};
+    use politica::arrendamento::Titular;
+    #[derive(Clone, Copy, Debug)]
+    enum Fim {
+        SuspensaESaiu,
+        Revogada,
+        SessaoRevogada,
+    }
+    let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
+    let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
+    // Sem a sessão da pessoa, nem se reserva.
+    crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+    let sem_sessao = [
+        None,
+        Some(Titular::Agente {
+            sessao: crate::agent::sessao::SERIAL,
+            chave: None,
+        }),
+    ]
+    .into_iter()
+    .all(|titular| {
+        crate::interpretador::reservar_edicao_da_arvore(
+            CONSOLE_DA_MARCA,
+            CAMPO_DA_MARCA,
+            Origem::Pessoa,
+            Acao::DefinirValor,
+            titular,
+        ) == Err(PESSOA_SEM_SESSAO)
+    });
+    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+    if !sem_sessao {
+        return Err("a edicao de uma pessoa sem a sessao dela foi reservada");
+    }
+    for fim in [Fim::SuspensaESaiu, Fim::Revogada, Fim::SessaoRevogada] {
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        crate::coordenacao::esquecer();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(5),
+            "pessoa-que-saiu",
+            "operador",
+        );
+        let pessoa = crate::pessoas::dona_da_sessao(sessao);
+        let resultado = (|| -> Resultado {
+            let pessoa = pessoa.ok_or("a sessao de teste nao tem pessoa")?;
+            let titular = Titular::Pessoa {
+                sessao: sessao.0,
+                pessoa: pessoa.0,
+            };
+            // Reservada, contada e anotada, como o `ui.act` da pessoa.
+            let numero = crate::interpretador::reservar_edicao_da_arvore(
+                CONSOLE_DA_MARCA,
+                CAMPO_DA_MARCA,
+                Origem::Pessoa,
+                Acao::DefinirValor,
+                Some(titular),
+            )?;
+            let rastro =
+                crate::coordenacao::editar_com_rastro(&recurso, Some(titular), None, "ui.act")
+                    .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
+            crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
+            // A edição a caminho; a sessão acaba.
+            match fim {
+                Fim::SuspensaESaiu => {
+                    crate::contencao::conter(&Alvo::Pessoa(pessoa))
+                        .map_err(|_| "a contencao do caso foi recusada")?;
+                    if !crate::pessoas::sair(sessao) {
+                        return Err("a pessoa suspensa nao conseguiu sair");
+                    }
+                }
+                Fim::Revogada => {
+                    crate::pessoas::revogar_pessoa(pessoa)
+                        .map_err(|_| "a revogacao do caso foi recusada")?;
+                }
+                Fim::SessaoRevogada => {
+                    crate::pessoas::revogar_sessao(sessao)
+                        .map_err(|_| "a revogacao da sessao do caso foi recusada")?;
+                }
+            }
+            let marca = crate::log::total_emitidos();
+            digitar_marcado("\u{15}agent.ping");
+            if linha() != Some((Modo::Comando, 0)) {
+                crate::log_error!("teste", "{:?}: a linha ficou {:?}", fim, linha());
+                return Err("a edicao da pessoa que saiu da sessao entrou na linha");
+            }
+            let recusa = alloc::format!("recusado no console: {PESSOA_FORA_DA_SESSAO}");
+            let mut recusas = 0;
+            crate::log::ultimos(64, crate::log::Level::Trace, |r| {
+                recusas += (r.seq >= marca && r.mensagem().ends_with(recusa.as_str())) as usize;
+            });
+            if recusas != 1 {
+                crate::log_error!("teste", "{:?}: {} recusas no log", fim, recusas);
+                return Err("a edicao da pessoa que saiu nao foi recusada no log, uma vez");
+            }
+            Ok(())
+        })();
+        if let Some(pessoa) = pessoa {
+            let _ = crate::contencao::soltar(&Alvo::Pessoa(pessoa));
+        }
+        crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+        crate::coordenacao::esquecer();
+        crate::pessoas::esquecer_registradas();
+        resultado?;
+    }
+    Ok(())
+}
+
 /// O `definir` do console físico pela árvore confere a regra da linha da
 /// pessoa na seção que edita — nem escrever, nem esvaziar —, e não só antes
 /// da conta da coordenação (o item 4 do passo 1). Pelo caminho de verdade
@@ -37437,6 +37559,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "terminal: a edicao de quem foi contido e descartada",
         f: terminal_a_edicao_de_quem_foi_contido_e_descartada,
+    },
+    Caso {
+        nome: "terminal: a edicao da pessoa que saiu da sessao e descartada",
+        f: terminal_a_edicao_da_pessoa_que_saiu_da_sessao_e_descartada,
     },
     Caso {
         nome: "interface: o definir do fisico confere a linha da pessoa onde edita",
