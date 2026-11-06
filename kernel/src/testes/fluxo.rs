@@ -1811,6 +1811,50 @@ fn em_nome_da_decisao(
         && e.detalhe == esperado
 }
 
+/// O motivo da execução de uma volta adiada da troca de quem é ponta de
+/// fluxo.
+const ADIADA_PELA_ORDEM: &str = "adiada: a ordem das gravacoes com outro fio";
+
+/// Tira do começo de uma troca de imagem de quem é ponta de fluxo as voltas
+/// adiadas: cada decisão, menos a última, tem exatamente uma execução, entre
+/// ela e a seguinte — `CONFLICT`, adiada pela ordem com outro fio, gravada
+/// em nome do processo `fio` como a decisão a diz, e citando-a
+/// ([`execucao_da_troca`], [`em_nome_da_decisao`]). As decisões e as
+/// execuções vêm na ordem da auditoria. Devolve quantas voltas foram
+/// adiadas, a última decisão e as execuções que vêm depois dela; `None`, se
+/// não é isso.
+///
+/// A ordem das gravações pode ir a outro fio entre a conferência do começo
+/// da chamada e a tomada sem esperar, mesmo solta pela suíte: o coletor
+/// roda a cada tique e a toma — as mensagens vencidas, uma vez por segundo,
+/// a coordenação, a auditoria, a compactação —, e a volta que decidiu fica
+/// adiada, dita pela execução dela, e a seguinte decide de novo, como o
+/// cabeçalho de `usuario::executar` diz. A conta dos casos supunha que
+/// ninguém a tomava depois da soltura (a CI 437).
+fn tirar_as_adiadas<'r>(
+    decisoes: &'r [Registro],
+    execucoes: &'r [Registro],
+    fio: u64,
+) -> Option<(usize, &'r Registro, &'r [Registro])> {
+    let (ultima, adiadas) = decisoes.split_last()?;
+    let mut resto = execucoes;
+    for (i, (numero, d)) in adiadas.iter().enumerate() {
+        let seguinte = decisoes[i + 1].0;
+        let (e, depois) = resto.split_first()?;
+        let dita = e.0 < seguinte
+            && execucao_da_troca(e, Codigo::Conflict, fio, ADIADA_PELA_ORDEM, *numero)
+            && em_nome_da_decisao(d, &e.1, ADIADA_PELA_ORDEM, *numero);
+        if !dita {
+            return None;
+        }
+        resto = depois;
+    }
+    if resto.first().is_some_and(|e| e.0 < ultima.0) {
+        return None;
+    }
+    Some((adiadas.len(), ultima, resto))
+}
+
 /// Se a descrição de programa de um registro é a que encolheu toda: o
 /// nome fora e, de um código de fora da imagem, o editor também — `?
 /// <resumo>` ou `? <resumo> de ?`.
@@ -1895,9 +1939,12 @@ pub(super) fn fluxo_a_troca_sem_fluxo_nao_espera_a_ordem() -> Resultado {
 /// dentro da ordem, antes de a imagem nova rodar — e a chamada não espera a
 /// ordem dentro do handler: confere que ela está com outro, e dá a vez e
 /// roda de novo antes de decidir — nada se grava a cada volta —, com o
-/// processo intacto. Solta a ordem, a troca acontece: o fim `o programa
-/// mudou` gravado com a ordem na mão, antes de acordar quem espera, e a
-/// outra ponta o vê.
+/// processo intacto. Solta a ordem, a primeira volta que decide ouve, uma
+/// vez, que ela está com outro fio (`persistencia::com_outro_uma_vez_de_teste`)
+/// — o que o coletor faz quando a toma entre a conferência do começo da
+/// chamada e a tomada sem esperar —, e fica adiada, dita pela execução dela;
+/// a seguinte troca: o fim `o programa mudou` gravado com a ordem na mão,
+/// antes de acordar quem espera, e a outra ponta o vê (a CI 437).
 pub(super) fn fluxo_a_troca_com_fluxo_e_a_ordem_com_outro() -> Resultado {
     troca_de_ponta_com_a_ordem_presa(327, Presa::Antes)
 }
@@ -2136,6 +2183,15 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
                 crate::fios::processo(c.fio()).map(|(_, p)| p) == Some(c.p.programa);
             let decidiu_com_a_ordem_presa = decisoes_de_troca(desde_o_pedido);
             let presa_o_tempo_todo = presa.presa();
+            // No modo `Antes`, a primeira volta depois da soltura ouve, uma
+            // vez, que a ordem está com outro fio — o que o coletor faz quando
+            // a toma entre a conferência do começo da chamada e a tomada sem
+            // esperar (a CI 437). Com a ordem presa, as voltas param na
+            // conferência de antes do gate e não pedem a ordem: o sinal fica
+            // para a volta que decide depois da soltura.
+            if modo == Presa::Antes {
+                crate::persistencia::com_outro_uma_vez_de_teste(c.fio());
+            }
             drop(presa);
             if trocou_com_a_ordem_presa && vivo_com_a_ordem_presa {
                 return Err("a imagem nova rodou com o fluxo da anterior vivo");
@@ -2166,6 +2222,9 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
             // Solta a ordem: a troca acontece, e o fim vem com ela.
             esperar_ate(|| trocas_feitas() == trocas + 1, TETO_DA_MALHA)
                 .map_err(|_| "solta a ordem, a troca nao aconteceu")?;
+            if modo == Presa::Antes && crate::persistencia::desarmar_com_outro_de_teste() {
+                return Err("a troca depois da soltura nao pediu a ordem sem esperar");
+            }
             if crate::fluxo::contagem().0 != 0 {
                 return Err("a imagem nova rodou com o fluxo da anterior vivo");
             }
@@ -2189,27 +2248,30 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
                 return Err("a troca de imagem chegou a vez de compactar dentro do handler");
             }
             // A troca que aconteceu passou pelo gate — de novo, a que parou
-            // no meio. E toda decisão termina dita: a que parou no meio, pela
-            // execução dela, adiada; nenhuma outra tem execução.
+            // no meio. E toda decisão termina dita: a da troca, sem
+            // execução; cada uma de antes, pela execução dela, adiada — a que
+            // parou no meio (`NoMeio`), a que ouviu o sinal da suíte depois
+            // da soltura (`Antes`), e qualquer outra que achou a ordem, já
+            // solta, com o coletor (a CI 437; ver [`tirar_as_adiadas`]).
             let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
             if decisoes.len() <= decididas {
                 return Err("a troca de imagem nao passou pelo gate");
             }
-            let dita = match (modo, decisoes.first(), execucoes.as_slice()) {
-                (Presa::NoMeio, Some((primeira, _)), [execucao]) => execucao_da_troca(
-                    execucao,
-                    Codigo::Conflict,
-                    c.fio(),
-                    "adiada: a ordem das gravacoes com outro fio",
-                    *primeira,
-                ),
-                (Presa::NoMeio, _, _) => false,
-                (_, _, execucoes) => execucoes.is_empty(),
+            let minimo = if modo == Presa::Antes { 1 } else { decididas };
+            let adiadas = match tirar_as_adiadas(&decisoes, &execucoes, c.fio()) {
+                Some((adiadas, _, [])) if adiadas >= minimo => Some(adiadas),
+                _ => None,
             };
-            if !dita {
-                crate::log_error!("teste", "execucoes: {:?}", execucoes);
+            let Some(adiadas) = adiadas else {
+                crate::log_error!(
+                    "teste",
+                    "decisoes: {:?}; execucoes: {:?}",
+                    decisoes,
+                    execucoes
+                );
                 return Err("a decisao adiada no meio nao tem a execucao que a cita");
-            }
+            };
+            crate::log_info!("teste", "{} voltas adiadas antes da troca", adiadas);
             esperar_ate(
                 || linhas_do_programa(desde, &format!("processo encerrou com codigo {SAIDA}")) == 1,
                 TETO_DA_MALHA,
@@ -2223,6 +2285,7 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
         pausa::soltar();
         carga::esquecer();
         compactar::esquecer();
+        crate::persistencia::desarmar_com_outro_de_teste();
         crate::fluxo::desarmar_de_teste();
         encerrar_todas(r, &[&a])
     })
@@ -2235,11 +2298,11 @@ fn troca_de_ponta_com_a_ordem_presa(terminal: u16, modo: Presa) -> Resultado {
 /// imagem —: a chamada larga a imagem preparada, e o processo segue o que
 /// era, ponta do fluxo; grava a execução da decisão que tinha tomado —
 /// adiada, `CONFLICT`, em nome de quem o gate decidiu —, dá a vez e roda de
-/// novo: decide outra vez, e troca, com o fim do fluxo gravado na ordem. O
-/// caso da ordem tomada no meio por outro fio precisa de outro núcleo; este
-/// não.
+/// novo: decide outra vez, e troca, com o fim do fluxo gravado na ordem. Se
+/// o coletor tomar a ordem no meio da volta seguinte, ela fica adiada
+/// também, dita do mesmo jeito (a CI 437). O caso da ordem tomada no meio
+/// por outro fio precisa de outro núcleo; este não.
 pub(super) fn fluxo_a_troca_ouve_a_ordem_com_outro_no_meio() -> Resultado {
-    const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";
     com_os_fluxos(|| {
         let (_, bia) = pessoa("bia", 338);
         let antes = crate::autorizacao::ultimo_registro();
@@ -2277,15 +2340,13 @@ pub(super) fn fluxo_a_troca_ouve_a_ordem_com_outro_no_meio() -> Resultado {
                 }
                 // A volta do meio decidiu e gravou a execução adiada que cita
                 // a decisão, em nome dela; a seguinte decidiu de novo e
-                // trocou, sem execução.
+                // trocou, sem execução — ou foi adiada também, se o coletor
+                // tomou a ordem no meio dela, e disse isso (a CI 437).
                 let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
-                let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
-                    ([(primeira, d), _], [execucao]) => {
-                        execucao_da_troca(execucao, Codigo::Conflict, c.fio(), ADIADA, *primeira)
-                            && em_nome_da_decisao(d, &execucao.1, ADIADA, *primeira)
-                    }
-                    _ => false,
-                };
+                let dita = matches!(
+                    tirar_as_adiadas(&decisoes, &execucoes, c.fio()),
+                    Some((adiadas, _, [])) if adiadas >= 1
+                );
                 if !dita {
                     crate::log_error!(
                         "teste",
@@ -2410,7 +2471,6 @@ fn trocar_para_o_grande(p: &Ponta, caminho: &str) -> Result<TrocaMedida, &'stati
 /// gravado.
 pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
     const PONTAS: usize = 3;
-    const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";
     com_os_fluxos(|| {
         let (_, bia) = pessoa("bia", 339);
         let mut pontas = Vec::new();
@@ -2520,12 +2580,10 @@ pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
                         "a troca grande nao teve uma decisao por volta no meio, e a da troca",
                     );
                 }
-                let citadas = execucoes.iter().all(|x| {
-                    decisoes.iter().any(|(numero, d)| {
-                        execucao_da_troca(x, Codigo::Conflict, p.fio(), ADIADA, *numero)
-                            && em_nome_da_decisao(d, &x.1, ADIADA, *numero)
-                    })
-                });
+                let citadas = matches!(
+                    tirar_as_adiadas(&decisoes, &execucoes, p.fio()),
+                    Some((_, _, []))
+                );
                 if !citadas {
                     crate::log_error!("teste", "execucoes {:?}", execucoes);
                     return Err(
@@ -2757,7 +2815,9 @@ pub(super) fn fluxo_a_execucao_da_troca_vai_em_nome_da_decisao() -> Resultado {
 /// com o motivo e a citação, gravada em nome de quem o gate decidiu — o
 /// titular e o principal da decisão, e o processo com o programa que pediu,
 /// o `fluxos`: o `ola`, adotado na troca, não rodou uma instrução (o F2 do
-/// adversário do AE-1).
+/// adversário do AE-1). Antes dela pode haver voltas adiadas — o coletor
+/// com a ordem entre a conferência e a tomada —, cada uma dita pela execução
+/// dela (a CI 437).
 pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
     use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
     use protocolo::usuario::erro;
@@ -2819,10 +2879,12 @@ pub(super) fn fluxo_a_troca_que_falha_depois_do_ponto_sem_volta() -> Resultado {
                     return Err("quem ficou nao viu a troca de imagem que falhou");
                 }
                 // A decisão e a execução dela que a cita, as duas em nome do
-                // programa que pediu e do mesmo principal.
+                // programa que pediu e do mesmo principal — depois das voltas
+                // adiadas, se o coletor tomou a ordem antes da tomada sem
+                // esperar, cada uma dita (a CI 437).
                 let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
-                let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
-                    ([(decisao, d)], [execucao]) => {
+                let dita = match tirar_as_adiadas(&decisoes, &execucoes, c.fio()) {
+                    Some((_, (decisao, d), [execucao])) => {
                         crate::log_info!(
                             "teste",
                             "decisao {}: {}; execucao {}: {}",
