@@ -103,7 +103,7 @@ fn digitar(console: Console, linha: &str) {
 
 /// O que a linha do console pede por causa da cerimônia.
 fn linha(console: Console) -> Linha {
-    crate::pareamento::linha_do_console(console)
+    crate::pareamento::linha_e_numero_do_console(console).0
 }
 
 /// O estado da cerimônia, se há uma.
@@ -5001,7 +5001,11 @@ pub(super) fn pareamento_o_aviso_lido_antes_do_fim_nao_muda_a_linha() -> Resulta
             ini.mandar_o_nonce()?;
             let _ = ini.ouvir();
             super::esperar_ate(
-                || crate::pareamento::numero_do_console(CONSOLE).is_none(),
+                || {
+                    crate::pareamento::linha_e_numero_do_console(CONSOLE)
+                        .1
+                        .is_none()
+                },
                 600,
             )
             .map_err(|_| "o prazo vencido no meio do aviso nao acabou a cerimonia")?;

@@ -554,20 +554,48 @@ fn avisar(console: Console, abertura: u64, numero: u64, texto: &str) {
     crate::interpretador::aviso_do_pareamento(console, abertura, numero, texto);
 }
 
-/// O número da cerimônia viva do console `console`, se há uma — a que o
-/// `aceitar` ou o `parear` dele abriu e que ainda não acabou. O console o
-/// guarda, e ignora a mudança de linha do aviso de outra cerimônia (o
-/// achado 6 do adversário do passo 1).
-pub fn numero_do_console(console: Console) -> Option<u64> {
+/// O que a linha do console `console` pede por causa da cerimônia viva
+/// dele — a que o `aceitar` ou o `parear` dele abriu e que ainda não acabou
+/// —, o número dela e em que passo ela está ([`passo_de`]), numa tomada só
+/// da trava; `(Comando, None)` se não há uma, ou se ela acabou. O console
+/// guarda o número e o passo: o aviso de outra cerimônia não muda a linha
+/// (o achado 6 do adversário do passo 1), e quem leu um passo de antes do
+/// que a linha mostra não a volta (o achado 3 do adversário do passo 1b).
+/// Lidos em duas tomadas, a cerimônia podia andar entre as duas — o passo
+/// de uma e o número da seguinte, ou o de uma que acabou.
+pub fn linha_e_numero_do_console(console: Console) -> (Linha, Option<(u64, u8)>) {
     if !HA.load(Ordering::Acquire) {
-        return None;
+        return (Linha::Comando, None);
     }
     com(|g| {
         g.as_ref()
             .filter(|x| x.console == console && !x.c.acabou())
-            .map(|x| x.numero)
+            .map_or((Linha::Comando, None), |x| {
+                (linha_de(x), Some((x.numero, passo_de(x.c.estado()))))
+            })
     })
 }
+
+/// Em que passo a cerimônia está, contado na ordem em que ela anda — a
+/// janela aberta, a ocupada, os códigos, o código certo, a confirmação
+/// daqui, a gravação, a gravada, o fim. Ela só anda para a frente (a senha
+/// errada que ainda tem tentativa fica no código certo): o console não deixa
+/// a linha voltar a um passo de antes do que já mostrou.
+pub fn passo_de(estado: Estado) -> u8 {
+    match estado {
+        Estado::Aberta => 0,
+        Estado::Ocupada => 1,
+        Estado::Apertada => 2,
+        Estado::CodigoCerto => 3,
+        Estado::ConferidaAqui => 4,
+        Estado::Gravando => 5,
+        Estado::Gravada => 6,
+        Estado::Fim(_) => PASSO_DO_FIM,
+    }
+}
+
+/// O passo do fim — ver [`passo_de`].
+pub const PASSO_DO_FIM: u8 = 7;
 
 // ---------------------------------------------------------------------
 // A abertura: `aceitar` e `parear`, no console.
@@ -911,18 +939,6 @@ fn linha_de(x: &Viva) -> Linha {
         Estado::CodigoCerto => Linha::Senha,
         _ => Linha::Esperando,
     }
-}
-
-/// O que a linha do console `console` pede por causa da cerimônia: nada,
-/// se ela não é dele ou acabou.
-pub fn linha_do_console(console: Console) -> Linha {
-    if !HA.load(Ordering::Acquire) {
-        return Linha::Comando;
-    }
-    com(|g| match g.as_ref() {
-        Some(x) if x.console == console => linha_de(x),
-        _ => Linha::Comando,
-    })
 }
 
 /// O Enter numa linha da cerimônia: `linha` é o que o console pedia, e
