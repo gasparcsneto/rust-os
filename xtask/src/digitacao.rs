@@ -792,3 +792,162 @@ pub(crate) fn voltar_ao_comando(m: &mut Ligada, t: &mut Teclado, tela: Tela) -> 
     }
     linha_vazia(m, t, comando)
 }
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// O fator dobra a cada perda, até o teto, e fica nele; as cinco vezes
+    /// de digitar uma linha que sempre perde vão em 1×, 2×, 4×, 8× e 8×.
+    #[test]
+    fn o_fator_dobra_a_cada_perda_ate_o_teto() {
+        let mut r = Ritmo::default();
+        assert_eq!((r.fator(), r.perdas()), (1, 0));
+        let mut fatores = Vec::new();
+        for _ in 0..VEZES_DE_DIGITAR {
+            fatores.push(r.fator());
+            r = r.com_perda();
+        }
+        assert_eq!(fatores, [1, 2, 4, 8, 8]);
+        assert_eq!((r.fator(), r.perdas()), (TETO, 5));
+        for _ in 0..10 {
+            r = r.com_perda();
+        }
+        assert_eq!((r.fator(), r.perdas()), (TETO, 15));
+    }
+
+    /// O respiro estica com o fator: a tecla, a com shift e o Enter.
+    #[test]
+    fn o_respiro_estica_com_o_fator() {
+        let base = Ritmo::default();
+        assert_eq!(base.respiro('a'), Duration::from_millis(20));
+        assert_eq!(base.respiro('"'), Duration::from_millis(40));
+        assert_eq!(base.respiro('\n'), Duration::from_millis(600));
+        let teto = (0..3).fold(base, |r, _| r.com_perda());
+        assert_eq!(teto.fator(), TETO);
+        assert_eq!(teto.respiro('a'), Duration::from_millis(160));
+        assert_eq!(teto.respiro('{'), Duration::from_millis(320));
+        assert_eq!(teto.respiro('\n'), Duration::from_millis(4800));
+        assert_eq!(base.texto(), "nenhuma perda, 1x");
+        assert_eq!(base.com_perda().texto(), "1 perda, o respiro em 2x");
+        assert_eq!(teto.texto(), "3 perdas, o respiro em 8x");
+    }
+
+    /// O ritmo é da máquina: o teclado de um boot e o do seguinte veem a
+    /// mesma perda.
+    #[test]
+    fn o_ritmo_atravessa_os_boots() {
+        let da_maquina = ritmo_novo();
+        let um_boot = da_maquina.clone();
+        um_boot.set(um_boot.get().com_perda());
+        let outro_boot = da_maquina.clone();
+        assert_eq!(outro_boot.get().fator(), 2);
+        assert_eq!(da_maquina.get().perdas(), 1);
+    }
+
+    /// A linha da tela contra a certa: inteira; com uma tecla perdida — a
+    /// da CI 434 —; com o eco atrasado; e as que se desviaram.
+    #[test]
+    fn a_linha_se_confere_com_a_tela() {
+        let certa = r#"duke> user.run {"path":"/programas/aarch64/carteiro"}"#;
+        let vazia = PROMPT;
+        let tela = |ultima: &str| format!("pareado: par (41438b56); o outro gravou\n{ultima}");
+        let conferida = |ultima: &str| conferir(ultima_linha(&tela(ultima)), vazia, certa);
+        assert_eq!(conferida(certa), Conferencia::Inteira);
+        // Os espaços do fim da grade não contam.
+        assert_eq!(conferida(&format!("{certa}   ")), Conferencia::Inteira);
+        // A tecla perdida em rajada, como na CI 434.
+        assert_eq!(
+            conferida(r#"duke> user.run {"path":"/programas/aaarteiro"}"#),
+            Conferencia::Estragada
+        );
+        assert_eq!(
+            conferida(r#"duke> user.run {"path":"/programas/aarch64ro"}"#),
+            Conferencia::Estragada
+        );
+        // O shift perdido: a tecla chegou, outra.
+        assert_eq!(
+            conferida(r#"duke> user.run ["path":"/programas/aarch64/carteiro"}"#),
+            Conferencia::Estragada
+        );
+        // O eco atrasado: um começo da certa, o prompt sozinho também.
+        assert_eq!(
+            conferida(r#"duke> user.run {"path":"/progr"#),
+            Conferencia::AChegar
+        );
+        assert_eq!(conferida("duke> "), Conferencia::AChegar);
+        // A tecla a mais, e o que sobrou de outra linha.
+        assert_eq!(conferida(&format!("{certa}}}")), Conferencia::Estragada);
+        assert_eq!(
+            conferida(r#"duke> user.ruuser.run {"path""#),
+            Conferencia::Estragada
+        );
+        // Outra linha, de outro prompt.
+        assert_eq!(conferida("nome:"), Conferencia::Estragada);
+        // O campo de uma janela: a vazia é nada.
+        assert_eq!(conferir("ola de a", "", "ola de a"), Conferencia::Inteira);
+        assert_eq!(conferir("ola d", "", "ola de a"), Conferencia::AChegar);
+        assert_eq!(conferir("ol de a", "", "ola de a"), Conferencia::Estragada);
+    }
+
+    /// A grade do Terminal e a do console físico saem da árvore, sem os
+    /// escapes; o valor de um campo é só dele.
+    #[test]
+    fn as_telas_e_os_campos_saem_da_arvore() {
+        let arvore = r#"{"revision":3,"root":{"id":1,"role":"screen","label":"tela","children":[{"id":2,"role":"text_area","label":"console","frame":{"x":0,"y":0,"width":9,"height":9},"value":"boot\nduke> login","value_complete":true,"actions":[],"children":[{"id":3,"role":"text_field","label":"linha de comando","value":"login","focused":true,"children":[]}]},{"id":9,"role":"window","label":"Terminal","children":[{"id":10,"role":"text_area","label":"terminal","frame":{"x":1,"y":2,"width":3,"height":4},"value":"duke> a\n\"b\" \\ é","actions":[],"children":[]}]},{"id":11,"role":"window","label":"conversa","children":[{"id":12,"role":"text_field","label":"mensagem","frame":{"x":1,"y":2,"width":3,"height":4},"actions":[],"children":[]},{"id":13,"role":"static_text","label":"linha","value":"> ola","children":[]}]}]}}"#;
+        assert_eq!(
+            texto_da_tela(arvore, Tela::Terminal).as_deref(),
+            Some("duke> a\n\"b\" \\ é")
+        );
+        assert_eq!(
+            texto_da_tela(arvore, Tela::Fisico).as_deref(),
+            Some("boot\nduke> login")
+        );
+        assert_eq!(ultima_linha("x\ncodigo do outro: "), "codigo do outro:");
+        // O campo sem valor não toma o do elemento seguinte: é o campo
+        // vazio. O que a árvore não mostra não é campo nenhum.
+        assert_eq!(valor_do_elemento(arvore, "text_field", "mensagem"), None);
+        assert_eq!(valor_do_campo(arvore, "mensagem").as_deref(), Some(""));
+        assert_eq!(valor_do_campo(arvore, "outro"), None);
+        assert_eq!(
+            valor_do_campo(arvore, "linha de comando").as_deref(),
+            Some("login")
+        );
+    }
+
+    /// Os prompts são os que o interpretador do kernel escreve.
+    #[test]
+    fn os_prompts_sao_os_do_interpretador() {
+        let fonte = include_str!("../../kernel/src/interpretador.rs");
+        for (nome, prompt) in [
+            ("PROMPT_DO_NOME", PROMPT_DO_NOME),
+            ("PROMPT_DA_SENHA", PROMPT_DA_SENHA),
+            ("PROMPT_DA_ATUAL", PROMPT_DA_ATUAL),
+            ("PROMPT_DA_NOVA", PROMPT_DA_NOVA),
+            ("PROMPT_DE_NOVO", PROMPT_DE_NOVO),
+        ] {
+            let linha = format!("pub const {nome}: &str = \"{prompt}\";");
+            assert!(fonte.contains(&linha), "o interpretador nao tem `{linha}`");
+        }
+        assert_eq!(PROMPT, "duke> ");
+    }
+
+    /// As senhas das bancadas não têm tecla com shift: a conta das teclas
+    /// vê toda tecla perdida delas. A da pessoa de desenvolvimento é
+    /// hexadecimal; as outras, as fixas da bancada da senha.
+    #[test]
+    fn as_senhas_das_bancadas_nao_tem_shift() {
+        for senha in [
+            "0123456789abcdef",
+            super::super::senha::SENHA_NOVA,
+            super::super::senha::SENHA_DA_ANA,
+        ] {
+            assert!(
+                senha
+                    .chars()
+                    .all(|c| super::super::tecla_do_monitor(c).is_some() && !com_shift(c)),
+                "`{senha}` tem tecla com shift, ou que o monitor nao digita"
+            );
+        }
+    }
+}

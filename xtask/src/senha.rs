@@ -42,7 +42,7 @@ pub(crate) const SENHA_NOVA: &str = "a senha nova da bancada";
 /// A pessoa da imagem de desenvolvimento, e a do operador na de produção.
 const DEV: &str = chaves::NOME_DA_PESSOA_DEV;
 const ANA: &str = "ana";
-const SENHA_DA_ANA: &str = "uma senha comprida de teste";
+pub(crate) const SENHA_DA_ANA: &str = "uma senha comprida de teste";
 
 /// Quanto esperar o desfecho gravado de um login ou de uma troca: o
 /// Argon2id no emulador, duas vezes na troca, e o journal.
