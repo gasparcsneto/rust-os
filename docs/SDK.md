@@ -876,7 +876,16 @@ conferência do `xtask` só pela chamada com o caminho (N194, o achado 8); o
 (N196, o achado 3); e o aviso de qualquer cerimônia mudando a linha (N197,
 o achado 6). Todas reprovadas, uma de cada vez: a N183, a N194 e a N196
 pelos testes do hospedeiro; as outras pela suíte do x86, filtrada aos
-casos de cada uma — a N188 num núcleo só (`DUKE_NUCLEOS=1`).
+casos de cada uma — a N188 num núcleo só (`DUKE_NUCLEOS=1`). E as dos
+achados do adversário do passo 1b (N198–N203): o consumo da edição da
+árvore sem perguntar à contenção (N198, o achado 2); o Enter que escreve
+na linha o passo que leu, mesmo de antes do que ela mostra (N199), o que
+põe de volta na linha a cerimônia que acabou depois da leitura (N200), e
+o aviso atrasado que volta a linha a um passo de antes (N201), o achado
+3; e o `xtask` que deixa passar o `#[path]` fora da suíte (N202) e a
+conta que devolve o rastro fora dos nomes protegidos (N203), o achado 6.
+Todas reprovadas, uma de cada vez: a N202 e a N203 pelos testes do
+hospedeiro; as outras pela suíte do x86, filtrada aos casos de cada uma.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1075,6 +1084,12 @@ casos de cada uma — a N188 num núcleo só (`DUKE_NUCLEOS=1`).
 | N195 | fora do SDK (AE-5, o item 4): o `definir` do físico sem a regra da linha da pessoa na seção que edita | suíte x86, filtrada (905 de 906): `interface: o definir do fisico confere a linha da pessoa onde edita` |
 | N196 | fora do SDK (AE-5, o achado 3): o grafo do NSF compara a abreviada só pelo resumo | hospedeiro: `grafo::testes::o_mesmo_resumo_com_outro_de_ou_outro_editor_e_uma_troca`; o motor: `a_troca_para_o_codigo_de_fora_do_mesmo_resumo_fica_no_grafo` — a suíte não produz um código de fora com o resumo de um da imagem |
 | N197 | fora do SDK (AE-5, o achado 6): o aviso de qualquer cerimônia muda a linha | suíte x86, filtrada (905 de 906): `pareamento: o aviso lido antes do fim da cerimonia nao muda a linha` |
+| N198 | fora do SDK (AE-5, o achado 2 do adversário do passo 1b): o consumo da edição da árvore sem perguntar à contenção | suíte x86, filtrada (907 de 908): `terminal: a edicao de quem foi contido e descartada` |
+| N199 | fora do SDK (AE-5, o achado 3 do adversário do passo 1b): o Enter escreve na linha o passo que leu, mesmo de antes do que ela mostra | suíte x86, filtrada (907 de 908): `pareamento: o passo lido antes do aviso nao volta a linha` — a volta dos códigos: a linha voltou à espera |
+| N200 | fora do SDK (AE-5, o achado 3 do adversário do passo 1b): o Enter que leu a cerimônia viva a põe de volta na linha depois do fim | suíte x86, filtrada (907 de 908): `pareamento: o passo lido antes do aviso nao volta a linha` — a volta do fim: a cerimônia morta voltou à linha |
+| N201 | fora do SDK (AE-5, o achado 3 do adversário do passo 1b): o aviso atrasado volta a linha a um passo de antes do que ela mostra | suíte x86, filtrada (907 de 908): `pareamento: o passo lido antes do aviso nao volta a linha` — a volta do aviso atrasado: a linha da senha voltou ao código |
+| N202 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `xtask` deixa passar o `#[path]` no kernel fora da suíte | hospedeiro: `testes_dos_nomes_protegidos::o_atributo_de_caminho` (xtask) |
+| N203 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): a conta que devolve o rastro fora dos nomes protegidos | hospedeiro: `testes_dos_nomes_protegidos::o_rastro_so_se_fabrica_nos_donos` (xtask) |
 
 ## Medidas
 

@@ -9943,7 +9943,15 @@ pessoa da seção que edita, no `definir` do físico; a N196 faz o grafo
 comparar a abreviada só pelo resumo; e a N197 deixa o aviso de qualquer
 cerimônia mudar a linha. Todas reprovadas, uma de cada vez: a N183, a
 N194 e a N196 pelos testes do hospedeiro; as outras pela suíte do x86 —
-a N188 num núcleo só.
+a N188 num núcleo só. E as dos achados do adversário do passo 1b
+(N198–N203): a N198 consome a edição da árvore sem perguntar à
+contenção; a N199 deixa o Enter escrever na linha o passo que leu, mesmo
+de antes do que ela mostra, a N200 deixa-o pôr de volta na linha a
+cerimônia que acabou depois da leitura, e a N201 deixa o aviso atrasado
+voltar a linha a um passo de antes; a N202 deixa passar o `#[path]` no
+kernel fora da suíte, e a N203 tira dos nomes protegidos a conta que
+devolve o rastro. Todas reprovadas, uma de cada vez: a N202 e a N203
+pelos testes do hospedeiro do `xtask`; as outras pela suíte do x86.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10040,6 +10048,8 @@ a N188 num núcleo só.
 | fora do SDK (AE-5): a reserva do nome `desconhecido` de volta no registro de chaves de atualização (N183); a conferência do `xtask` só pela chamada com o caminho (N194); o grafo do NSF comparando a abreviada só pelo resumo (N196) | os testes do hospedeiro do `sigilo::registro`, do xtask, do `seguranca::grafo` e do motor |
 | fora do SDK (AE-5, itens 1 a 3): o recolhimento sem limpar os zumbis (N184); a colheita que limpa de novo (N185); o fio da energia sem o gancho da suíte (N186); a execução da decisão que recalcula quem pede (N187); a volta "no meio" sem a execução adiada (N188) | "fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita"; "aviso: o desligamento avisa o fim"; "fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio" e "fluxo: a troca de imagem que falha depois do ponto sem volta"; "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" — num núcleo só |
 | fora do SDK (AE-5, item 4 e os achados 1, 2, 5, 6 e 7 do adversário do passo 1): a entrega sem a conferência antes da conta (N189); a renovação que não passa adiante (N190); o Enter sem recusar as edições a caminho (N191); a soltura como `ui.release` (N192); o consumo sem conferir quem pediu (N193); o `definir` do físico sem a regra na seção (N195); o aviso de qualquer cerimônia (N197) | "terminal: a edicao que nao chega ao programa nao arrenda o campo"; "terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou"; "terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT"; os casos que contam a soltura; "terminal: a edicao de quem saiu da sessao e descartada"; "interface: o definir do fisico confere a linha da pessoa onde edita"; "pareamento: o aviso lido antes do fim da cerimonia nao muda a linha" |
+| fora do SDK (AE-5, os achados 2 e 3 do adversário do passo 1b): o consumo sem perguntar à contenção (N198); o Enter que volta a linha a um passo de antes (N199), ou a uma cerimônia que acabou (N200); o aviso atrasado que volta a linha (N201) | "terminal: a edicao de quem foi contido e descartada"; "pareamento: o passo lido antes do aviso nao volta a linha" |
+| fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `#[path]` fora da suíte (N202); a conta que devolve o rastro fora dos nomes protegidos (N203) | os testes do hospedeiro do xtask |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
