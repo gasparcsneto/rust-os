@@ -2403,7 +2403,10 @@ fn trocar_para_o_grande(p: &Ponta, caminho: &str) -> Result<TrocaMedida, &'stati
 /// escritores e a auditoria perdida — as lacunas do journal —; e confere o
 /// que a ordem garante: a troca acontece, cada volta no meio grava dois
 /// registros — a decisão e a execução adiada que a cita —, e nada da
-/// auditoria se perde.
+/// auditoria se perde. Com o journal drenando, como fora da suíte (ver
+/// `com_o_journal_drenando`): com a gravação periódica pausada, que é o
+/// padrão da suíte, o anel transbordava entre duas gravações pedidas, e a
+/// lacuna contava como perdido o que o coletor teria gravado.
 pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
     const PONTAS: usize = 3;
     const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";
@@ -2434,92 +2437,105 @@ pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
                 pares.push((w.fio(), q.fio(), aberto(w, q)?));
             }
             let caminho = format!("{}/livro", crate::usuario::DIRETORIO_DOS_COMPILADOS);
-            let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
-            // A referência: sozinha.
-            let TrocaMedida {
-                ms,
-                voltas,
-                decisoes,
-                execucoes,
-            } = trocar_para_o_grande(sozinha, &caminho)?;
-            crate::log_info!(
-                "teste",
-                "a troca grande sozinha: {} ms; {} voltas, {} no meio; {} decisoes e {} execucoes da troca",
-                ms,
-                voltas,
-                execucoes.len(),
-                decisoes.len(),
-                execucoes.len()
-            );
-            crate::arch::sem_interrupcoes(|| *ESCRITORES.lock() = pares);
-            crate::fios::criar("teste-escritor", escritor_sem_parar, 0)?;
-            lancados += 1;
-            esperar_cedendo(|| OPERACOES.load(SeqCst) >= 64, TETO_DA_MALHA)
-                .map_err(|_| "os escritores nao escreveram")?;
-            // Só os escritores, por um tempo — a auditoria que eles perdem
-            // sozinhos, sem a troca.
-            let so_escritores = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
-            let operacoes = OPERACOES.load(SeqCst);
-            let comeco = crate::tempo::uptime_ms();
-            let _ = esperar_cedendo(|| false, 300);
-            let _ = crate::persistencia::gravar_auditoria();
-            crate::log_info!(
-                "teste",
-                "so os escritores: {} ms; {} operacoes; {} registros perdidos",
-                crate::tempo::uptime_ms() - comeco,
-                OPERACOES.load(SeqCst) - operacoes,
-                crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - so_escritores
-            );
-            let na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
-            let operacoes = OPERACOES.load(SeqCst);
-            let trocou = trocar_para_o_grande(p, &caminho);
-            let operacoes = OPERACOES.load(SeqCst) - operacoes;
-            let perdidas_na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - na_troca;
-            PARAR_DE_ESCREVER.store(true, SeqCst);
-            esperar_cedendo(|| ESCRITORES_FORA.load(SeqCst) == lancados, TETO_DA_MALHA)
-                .map_err(|_| "os escritores nao pararam")?;
-            // A auditoria da janela vai ao journal, e a que não chegou a ele
-            // é a lacuna.
-            let _ = crate::persistencia::gravar_auditoria();
-            let perdidas = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - perdida;
-            let TrocaMedida {
-                ms,
-                voltas,
-                decisoes,
-                execucoes,
-            } = trocou?;
-            let no_meio = execucoes.len() as u64;
-            crate::log_info!(
-                "teste",
-                "a troca grande com {} pontas escrevendo: {} ms; {} voltas, {} antes do gate e {} no meio; {} decisoes e {} execucoes da troca; {} operacoes dos escritores; {} registros perdidos durante ela, {} no caso todo",
-                PONTAS,
-                ms,
-                voltas,
-                voltas.saturating_sub(no_meio),
-                no_meio,
-                decisoes.len(),
-                execucoes.len(),
-                operacoes,
-                perdidas_na_troca,
-                perdidas
-            );
-            if decisoes.len() as u64 != no_meio + 1 {
-                return Err("a troca grande nao teve uma decisao por volta no meio, e a da troca");
-            }
-            let citadas = execucoes.iter().all(|x| {
-                decisoes.iter().any(|(numero, d)| {
-                    execucao_da_troca(x, Codigo::Conflict, p.fio(), ADIADA, *numero)
-                        && em_nome_da_decisao(d, &x.1, ADIADA, *numero)
-                })
-            });
-            if !citadas {
-                crate::log_error!("teste", "execucoes {:?}", execucoes);
-                return Err("uma volta no meio nao gravou a execucao adiada que cita a decisao");
-            }
-            if perdidas != 0 {
-                return Err("a troca grande sob escritas sem parar perdeu auditoria");
-            }
-            Ok(())
+            // Com o journal drenando a auditoria, como fora da suíte: a
+            // suíte pausa a gravação periódica (ver
+            // `persistencia::pausar_a_auditoria_de_teste`), e sem ela o anel
+            // transborda entre duas gravações pedidas — o que a conta da
+            // lacuna diria perdido, e não é a troca nem a ordem. Drenando, o
+            // coletor grava a auditoria com a ordem, como sempre, e disputa
+            // a vez com a troca e com os escritores.
+            super::com_o_journal_drenando(|_| -> Resultado {
+                let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+                // A referência: sozinha.
+                let TrocaMedida {
+                    ms,
+                    voltas,
+                    decisoes,
+                    execucoes,
+                } = trocar_para_o_grande(sozinha, &caminho)?;
+                crate::log_info!(
+                    "teste",
+                    "a troca grande sozinha: {} ms; {} voltas, {} no meio; {} decisoes e {} execucoes da troca",
+                    ms,
+                    voltas,
+                    execucoes.len(),
+                    decisoes.len(),
+                    execucoes.len()
+                );
+                crate::arch::sem_interrupcoes(|| *ESCRITORES.lock() = pares);
+                crate::fios::criar("teste-escritor", escritor_sem_parar, 0)?;
+                lancados += 1;
+                esperar_cedendo(|| OPERACOES.load(SeqCst) >= 64, TETO_DA_MALHA)
+                    .map_err(|_| "os escritores nao escreveram")?;
+                // Só os escritores, por um tempo — a auditoria que eles perdem
+                // sozinhos, sem a troca.
+                let so_escritores = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+                let operacoes = OPERACOES.load(SeqCst);
+                let comeco = crate::tempo::uptime_ms();
+                let _ = esperar_cedendo(|| false, 300);
+                let _ = crate::persistencia::gravar_auditoria();
+                crate::log_info!(
+                    "teste",
+                    "so os escritores: {} ms; {} operacoes; {} registros perdidos",
+                    crate::tempo::uptime_ms() - comeco,
+                    OPERACOES.load(SeqCst) - operacoes,
+                    crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - so_escritores
+                );
+                let na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
+                let operacoes = OPERACOES.load(SeqCst);
+                let trocou = trocar_para_o_grande(p, &caminho);
+                let operacoes = OPERACOES.load(SeqCst) - operacoes;
+                let perdidas_na_troca = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - na_troca;
+                PARAR_DE_ESCREVER.store(true, SeqCst);
+                esperar_cedendo(|| ESCRITORES_FORA.load(SeqCst) == lancados, TETO_DA_MALHA)
+                    .map_err(|_| "os escritores nao pararam")?;
+                // A auditoria da janela vai ao journal, e a que não chegou a ele
+                // é a lacuna.
+                let _ = crate::persistencia::gravar_auditoria();
+                let perdidas = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - perdida;
+                let TrocaMedida {
+                    ms,
+                    voltas,
+                    decisoes,
+                    execucoes,
+                } = trocou?;
+                let no_meio = execucoes.len() as u64;
+                crate::log_info!(
+                    "teste",
+                    "a troca grande com {} pontas escrevendo: {} ms; {} voltas, {} antes do gate e {} no meio; {} decisoes e {} execucoes da troca; {} operacoes dos escritores; {} registros perdidos durante ela, {} no caso todo",
+                    PONTAS,
+                    ms,
+                    voltas,
+                    voltas.saturating_sub(no_meio),
+                    no_meio,
+                    decisoes.len(),
+                    execucoes.len(),
+                    operacoes,
+                    perdidas_na_troca,
+                    perdidas
+                );
+                if decisoes.len() as u64 != no_meio + 1 {
+                    return Err(
+                        "a troca grande nao teve uma decisao por volta no meio, e a da troca",
+                    );
+                }
+                let citadas = execucoes.iter().all(|x| {
+                    decisoes.iter().any(|(numero, d)| {
+                        execucao_da_troca(x, Codigo::Conflict, p.fio(), ADIADA, *numero)
+                            && em_nome_da_decisao(d, &x.1, ADIADA, *numero)
+                    })
+                });
+                if !citadas {
+                    crate::log_error!("teste", "execucoes {:?}", execucoes);
+                    return Err(
+                        "uma volta no meio nao gravou a execucao adiada que cita a decisao",
+                    );
+                }
+                if perdidas != 0 {
+                    return Err("a troca grande sob escritas sem parar perdeu auditoria");
+                }
+                Ok(())
+            })
         })();
         PARAR_DE_ESCREVER.store(true, SeqCst);
         let _ = esperar_cedendo(|| ESCRITORES_FORA.load(SeqCst) == lancados, TETO_DA_MALHA);
