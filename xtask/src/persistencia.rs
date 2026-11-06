@@ -133,8 +133,7 @@ impl Ligada {
         mut ambiente: Ambiente,
         teto: Duration,
     ) -> Result<Ligada, String> {
-        let (mut filho, socket, firmware) = lancar(arch, artefato, &ambiente)?;
-        let mut olhos = Olhos::da_partida(arch, firmware);
+        let (mut filho, socket, mut olhos) = lancar(arch, artefato, &ambiente)?;
         let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
         let de_pe = canal_de_pe_com(&socket, |lidos| {
             olhos.ouvir_o_canal(lidos);
@@ -154,7 +153,10 @@ impl Ligada {
             Err(e) => {
                 let estado = match filho.try_wait() {
                     Ok(Some(saida)) => format!("o emulador ja tinha saido ({saida})"),
-                    _ => format!("o emulador, pelo QMP: {}", estado_do_emulador(&olhos.qmp)),
+                    _ => format!(
+                        "o emulador, pelo QMP: {}",
+                        estado_do_emulador(&olhos.qmp, olhos.codigo_do_firmware.as_deref())
+                    ),
                 };
                 let tpm = tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref());
                 let _ = filho.kill();
@@ -295,11 +297,21 @@ impl Ligada {
 /// kernel: no x86, o firmware e o iniciador leem o disco de testes pelo
 /// controlador padrão da máquina (`ide0-hd0`), e o kernel, pelo virtio
 /// (`disco0`) — o mesmo arquivo.
-fn estado_do_emulador(qmp: &Path) -> String {
+///
+/// E, em linhas a seguir, o módulo em que cada processador está e os
+/// retornos na pilha dele — ver [`super::firmware`]: na CI 436, o firmware
+/// parou com um processador girando num endereço que, sozinho, não dizia
+/// nada. Para isso a máquina é parada (`stop`) depois de dizer se rodava:
+/// os registradores, a memória em volta de cada um e a pilha são de um
+/// instante só. Quem chama este diagnóstico desliga a máquina em seguida.
+/// O nome de uma imagem sem o CodeView sai de `codigo_do_firmware`, o
+/// arquivo do firmware com que ela subiu.
+fn estado_do_emulador(qmp: &Path, codigo_do_firmware: Option<&Path>) -> String {
     let perguntar = || -> Result<String, String> {
         let (mut escrita, mut leitor) = super::qmp_abrir(qmp)?;
         let mut pedir = |pedido: &str| super::qmp_pedir(&mut escrita, &mut leitor, pedido);
         let status = pedir(r#"{"execute":"query-status"}"#)?;
+        let _ = pedir(r#"{"execute":"stop"}"#);
         let monitor = |comando: &str| {
             format!(
                 r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{comando}"}}}}"#
@@ -329,19 +341,39 @@ fn estado_do_emulador(qmp: &Path) -> String {
                 partes.push(linha.to_string());
             }
         }
-        Ok(partes.join("; "))
+        let mut texto = partes.join("; ");
+        let mut memoria = super::firmware::MemoriaPeloQmp {
+            escrita: &mut escrita,
+            leitor: &mut leitor,
+            arquivo: qmp.with_extension("memoria"),
+        };
+        let mut fonte = || match codigo_do_firmware {
+            Some(codigo) => super::firmware::modulos_do_arquivo(codigo),
+            None => Err("o arquivo do firmware desta maquina nao e conhecido".to_string()),
+        };
+        let linhas = super::firmware::onde_cada_processador(&registros, &mut memoria, &mut fonte);
+        if !linhas.is_empty() {
+            texto.push_str("\n  onde cada processador esta, pela memoria:");
+            for linha in linhas {
+                texto.push_str("\n    ");
+                texto.push_str(&linha);
+            }
+        }
+        Ok(texto)
     };
     perguntar()
         .unwrap_or_else(|e| format!("sem resposta ({e}): o emulador vivo e parado por dentro"))
 }
 
 /// Liga o QEMU, sem esperar nada dele. Devolve o processo, o socket da
-/// serial do agente e, no x86, o arquivo do log de depuração do firmware.
+/// serial do agente e os olhos da máquina — com, no x86, o arquivo do log
+/// de depuração do firmware, e, na máquina que sobe pelo firmware, o
+/// arquivo do código dele.
 fn lancar(
     arch: Arquitetura,
     artefato: &Artefato,
     ambiente: &Ambiente,
-) -> Result<(Child, PathBuf, Option<PathBuf>), String> {
+) -> Result<(Child, PathBuf, Olhos), String> {
     let socket = caminho_socket(arch);
     let mut qemu = comando_qemu(
         arch,
@@ -392,7 +424,12 @@ fn lancar(
     let filho = qemu
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
-    Ok((filho, socket, firmware))
+    // O código do firmware, para o diagnóstico nomear as imagens dele —
+    // ver [`super::firmware`]. A máquina que sobe pelo `-kernel` não tem.
+    let codigo = matches!(artefato, Artefato::Disco(_))
+        .then(|| super::codigo_do_firmware(arch))
+        .flatten();
+    Ok((filho, socket, Olhos::da_partida(arch, firmware, codigo)))
 }
 
 /// O que a bancada vê de uma máquina que sobe, de fora, numa olhada: o
@@ -569,6 +606,10 @@ struct Olhos {
     serial: Option<PathBuf>,
     /// O log de depuração do firmware, no x86 — ver [`lancar`].
     firmware: Option<PathBuf>,
+    /// O arquivo do código do firmware, na máquina que sobe por ele: de
+    /// onde o diagnóstico tira o nome das imagens sem o CodeView — ver
+    /// [`super::firmware`].
+    codigo_do_firmware: Option<PathBuf>,
     /// No ARM a única serial é o canal: o que as esperas leem dele antes de
     /// a máquina atender vai para a serial do cenário, como a COM1 do x86.
     canal_na_serial: bool,
@@ -583,12 +624,13 @@ struct Olhos {
 
 impl Olhos {
     /// Os olhos de uma máquina que `arch` acaba de ligar, com o log de
-    /// depuração do firmware em `firmware`.
-    fn da_partida(arch: Arquitetura, firmware: Option<PathBuf>) -> Olhos {
+    /// depuração do firmware em `firmware` e o código dele em `codigo`.
+    fn da_partida(arch: Arquitetura, firmware: Option<PathBuf>, codigo: Option<PathBuf>) -> Olhos {
         Olhos {
             qmp: super::caminho_qmp(arch),
             serial: serial_do_cenario(),
             firmware,
+            codigo_do_firmware: codigo,
             canal_na_serial: arch == Arquitetura::Aarch64,
             discos: 0,
             canal: 0,
@@ -1266,7 +1308,8 @@ impl Ligada {
             let agora = Instant::now();
             let sinais = reiniciando.then(|| self.olhos.sinais(agora));
             if let Err(d) = andamento.olhar(agora, sinais) {
-                let estado = estado_do_emulador(&self.olhos.qmp);
+                let estado =
+                    estado_do_emulador(&self.olhos.qmp, self.olhos.codigo_do_firmware.as_deref());
                 let tpm = tpm_e_firmware(&mut self._ambiente, self.olhos.firmware.as_deref());
                 return Err(format!(
                     "o boot seguinte nao respondeu: {d}; a ultima resposta: {ultimo}\n  o emulador, pelo QMP: {estado}{tpm}"
@@ -4487,8 +4530,7 @@ pub(crate) fn subir_ate_cair_com(
     mut ambiente: Ambiente,
     teto: Duration,
 ) -> Result<u8, String> {
-    let (mut filho, socket, firmware) = lancar(arch, artefato, &ambiente)?;
-    let mut olhos = Olhos::da_partida(arch, firmware);
+    let (mut filho, socket, mut olhos) = lancar(arch, artefato, &ambiente)?;
     let mut andamento = AndamentoDoBoot::novo(Instant::now(), JANELA_SEM_ANDAR, teto);
     let mut seguir = |lidos: &[u8]| -> Result<(), String> {
         olhos.ouvir_o_canal(lidos);
@@ -4517,7 +4559,7 @@ pub(crate) fn subir_ate_cair_com(
     let caiu = caiu.map_err(|e| {
         format!(
             "a maquina nao avisou a queda: {e}\n  o emulador, pelo QMP: {}{}",
-            estado_do_emulador(&olhos.qmp),
+            estado_do_emulador(&olhos.qmp, olhos.codigo_do_firmware.as_deref()),
             tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref())
         )
     });
@@ -6658,6 +6700,7 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
             qmp: temporario("sem-qmp.sock"),
             serial: Some(serial.to_path_buf()),
             firmware: None,
+            codigo_do_firmware: None,
             canal_na_serial,
             discos: 0,
             canal: 0,

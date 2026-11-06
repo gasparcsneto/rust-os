@@ -23,6 +23,7 @@ mod copia;
 mod digitacao;
 mod disco_hostil;
 mod enlace;
+mod firmware;
 mod fluxo;
 mod icp;
 mod identidade;
@@ -1257,8 +1258,30 @@ fn kernel_para_a_esp(kernel: &Path) -> Result<PathBuf, String> {
 /// escreve nele durante o boot, e apontar o QEMU para o do sistema ou falha
 /// por permissão ou suja a instalação da máquina.
 fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
+    let (codigo, variaveis) = achar_o_firmware(arch)?;
+    let nossas = raiz_do_estado().join(format!("uefi-vars-{}.fd", arch.nome()));
+    std::fs::copy(&variaveis, &nossas).map_err(|e| {
+        format!(
+            "não foi possível copiar {} para {}: {e}",
+            variaveis.display(),
+            nossas.display()
+        )
+    })?;
+    Ok((codigo, nossas))
+}
+
+/// O código do firmware UEFI com que a máquina de `arch` sobe — o mesmo que
+/// [`firmware_uefi`] lhe dá —, para o diagnóstico de um boot que não atende
+/// nomear as imagens dele: ver [`firmware`].
+pub(crate) fn codigo_do_firmware(arch: Arquitetura) -> Option<PathBuf> {
+    achar_o_firmware(arch).ok().map(|(codigo, _)| codigo)
+}
+
+/// O primeiro dos [`firmwares`] de `arch` que está no disco: o código e o
+/// modelo das variáveis.
+fn achar_o_firmware(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
     let candidatos = firmwares(arch);
-    let (codigo, variaveis) = candidatos
+    candidatos
         .iter()
         .map(|(c, v)| (PathBuf::from(c), PathBuf::from(v)))
         .find(|(c, v)| c.is_file() && v.is_file())
@@ -1274,17 +1297,7 @@ fn firmware_uefi(arch: Arquitetura) -> Result<(PathBuf, PathBuf), String> {
                 arch.nome(),
                 procurados.join(", ")
             )
-        })?;
-
-    let nossas = raiz_do_estado().join(format!("uefi-vars-{}.fd", arch.nome()));
-    std::fs::copy(&variaveis, &nossas).map_err(|e| {
-        format!(
-            "não foi possível copiar {} para {}: {e}",
-            variaveis.display(),
-            nossas.display()
-        )
-    })?;
-    Ok((codigo, nossas))
+        })
 }
 
 /// Quanto o iniciador tem para relatar e chegar à primeira linha do kernel.
