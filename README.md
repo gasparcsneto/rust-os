@@ -8662,16 +8662,16 @@ firmware boota leva `bootindex=0`, e só ele (`argumentos_dos_discos`, em
 virtio, o NVMe no x86 com o disco nele, o `disco0` no ARM. Com a ordem de
 boot, o OVMF e o AAVMF ligam só o caminho do boot, os consoles e o gerador
 de números, e não a placa de rede, com a pilha de rede por cima dela, que
-chamava o gerador. A linha inteira do emulador é conferida antes de ele
-existir (`conferir_o_disco_do_boot`), e uma ordem a mais ou a menos é
-recusada com o que se achou. A prova — o que cada firmware liga, com e sem
+chamava o gerador. A linha que o `comando_qemu` monta é conferida
+inteira antes de o emulador existir (`conferir_o_disco_do_boot`), e uma
+ordem a mais ou a menos é recusada com o que se achou. A prova — o que cada firmware liga, com e sem
 a ordem, e o estresse com o firmware da CI e a CPU disputada — está em
 [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#a-ordem-de-boot).
 
 E a máquina que recusa por revogação diz o porquê: uma resposta que diz
 `DENY_REVOCATION` faz o fim da máquina — o corte de energia do cenário, ou
 o `Drop` da `Ligada` — perguntar pela serial, que não é credenciada, o
-estado e o motivo da persistência, e imprimi-los (`[persistencia] uma
+estado e o motivo da persistência, e imprimi-los (`[persistencia]   uma
 resposta disse DENY_REVOCATION; a persistencia da maquina: refused (...)`).
 Na CI 439, o journal recusado no primeiro boot de um cenário não disse o
 motivo — ver [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-disco-hostil).
@@ -10064,8 +10064,8 @@ da pilha repetidos, o `\r` dos registradores, a seção GUID lida sem o
 `DataOffset`, a procura da pilha que marca vazia só uma página e o ponteiro
 para os dados de uma imagem tomado por retorno, a pilha no fim da memória
 que não se lê nada e o arquivo de enchimento do volume tomado pelo espaço
-livre — todas reprovadas pelos
-testes do hospedeiro do `xtask`, a N212 depois do reforço do teste. E as
+livre — todas reprovadas pelos testes do hospedeiro do `xtask`, a N212
+depois do reforço do teste. E as
 da ordem de boot (#313, N221–N228): o IDE do boot sem `bootindex`, o
 `disco0` do NVMe e do ARM sem ele, o x86 com o disco no virtio bootando
 pelo `disco0`, a máquina sem firmware com ordem, e a conferência da linha

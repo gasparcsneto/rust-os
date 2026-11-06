@@ -1804,8 +1804,9 @@ consegue preparar o canal dela a mata antes de devolver o erro: solta
 viva, ela seguraria a conexão, e o fim esperaria para sempre. O teste do
 hospedeiro (`o_fim_espera_a_conexao_em_curso`, em
 [`xtask/src/disco_hostil.rs`](../xtask/src/disco_hostil.rs)) faz o papel
-do emulador — uma escrita, uma descarga, e o socket fechado sem ler a
-resposta —, com o servidor segurando a descarga antes de aplicá-la, e
+do emulador — uma escrita, cuja resposta lê, uma descarga, e o socket
+fechado sem ler a resposta dela —, com o servidor segurando a descarga
+antes de aplicá-la, e
 confere que, quando o fim volta, o fio já saiu e a descarga já está no
 arquivo, e que o arquivo zerado depois continua zerado. A mutação N229 —
 o fim sem a espera — está em [`SDK.md`](SDK.md).
@@ -1830,18 +1831,22 @@ máquina — pela serial ou por uma porta de agente — que diz
 cenário (`Ligada::cortar_a_energia`), ou o `Drop` da `Ligada`, em
 [`xtask/src/persistencia.rs`](../xtask/src/persistencia.rs) —, antes de
 matar o emulador, pede o `system.info` pela serial e imprime o estado e o
-motivo da persistência: `[persistencia] uma resposta disse
+motivo da persistência: `[persistencia]   uma resposta disse
 DENY_REVOCATION; a persistencia da maquina: refused (<o motivo>)`. O
 cenário da CI 439 corta a energia antes de soltar a máquina: perguntar só
 no `Drop` seria perguntar a uma máquina morta — a primeira rodada daqui,
-assim, imprimiu "a maquina nao respondeu (... Broken pipe ...)". É pela
-serial porque ela não é credenciada: com o journal recusado, o gate recusa
-toda credencial — também o `system.info` pela porta do agente —, e a serial
-ainda lê. A pergunta tem cinco segundos; a máquina que não responde, ou que
-já tinha acabado, diz isso na mesma linha. O corte que a bancada do enlace
-faz no meio do cenário (`Ligada::cortar`) não pergunta. Nos cenários que
-provocam a recusa de propósito, a linha sai também, e só repete o que eles
-conferem. A marca é uma só para a bancada, e cada cenário começa sem ela. O teste do hospedeiro
+com a pergunta só no `Drop`, num cenário da persistência que também corta
+a energia antes ("o journal recusado..."), imprimiu "a maquina nao
+respondeu (... Broken pipe ...)". É pela serial porque ela não é
+credenciada: com o journal recusado, o gate recusa toda credencial —
+também o `system.info` pela porta do agente —, e a serial ainda lê. A
+pergunta tem cinco segundos; a máquina que não responde, ou que já tinha
+acabado, diz isso na mesma linha. O corte que a bancada do enlace faz no
+meio do cenário (`Ligada::cortar`) não pergunta. Nos cenários que
+provocam a recusa de propósito, a linha sai quando uma resposta deles diz
+`DENY_REVOCATION` — nem todos recebem uma —, e só repete o que eles
+conferem. A marca é uma só para a bancada, e as bancadas da persistência e
+da atualização a esquecem no começo de cada cenário. O teste do hospedeiro
 (`a_recusa_de_revogacao_pede_o_motivo`) confere que a resposta da CI 439
 marca, que a recusa por permissão não marca, e que o motivo sai inteiro,
 com as vírgulas dele; as mutações N230 e N231 estão em [`SDK.md`](SDK.md).
@@ -2057,8 +2062,14 @@ journal"): o processador 0 em `0x6c7e370`, fora de um `hlt`, com as
 interrupções ligadas; os outros três em `0x6c650d1`, num `hlt`; o `swtpm`
 vivo; o último sinal 22 segundos depois da partida. O commit da CI 438 é
 anterior ao diagnóstico novo, e a linha dos módulos não saiu; os endereços
-bastam: com o mesmo firmware e a mesma máquina, as imagens do DXE ficam nos
-mesmos lugares — o `Stall` do `GetRNG`, e os estacionados.
+dizem o lugar: com o mesmo firmware e a mesma máquina, as imagens do DXE
+ficam nos mesmos lugares — o processador 0 no laço do `Stall`
+(`Metronome+0x370`), e os estacionados no `CpuDxe`; quem chamou o
+`Stall`, só a pilha diria, e o retrato é o da CI 436. O boot parado era o
+seguinte a um reinício, como na CI 413: o kernel tinha subido sobre o
+outro TPM, recusado o journal e reiniciado a máquina para o slot que o
+controle diz — o `ide0-hd0` já tinha lido 16,8 MB, o kernel, pelo
+iniciador —, e o firmware parou no mesmo processo do emulador.
 
 **A máquina.** Desde então, toda máquina que o `xtask` liga pelo firmware
 — as bancadas, a suíte do x86, as fumaças, a sonda do iniciador, a máquina
@@ -2070,14 +2081,18 @@ agora por `-drive if=none` e `-device ide-hd`, no primeiro canal, como
 unidade mestre, onde o `-drive` sem `if=` o punha, e com o mesmo nome,
 `ide0-hd0` —; no x86 com o disco no NVMe, o NVMe; no ARM, o `disco0`, no
 virtio-blk ou no NVMe. Sem firmware — o ARM pelo `-kernel` —, nenhum. E a
-linha inteira é conferida antes de o emulador existir
-(`conferir_o_disco_do_boot`): numa máquina que sobe pelo firmware, um
-dispositivo só leva a ordem, com o valor 0, e é o disco do boot; sem
+linha que o `comando_qemu` monta é conferida inteira antes de o emulador
+existir (`conferir_o_disco_do_boot`): numa máquina que sobe pelo firmware,
+um dispositivo só leva a ordem, com o valor 0, e é o disco do boot; sem
 firmware, nenhum. Uma ordem a mais — numa placa de rede, para o PXE — ou a
 menos não impediria a máquina de subir: o firmware bootaria de outro lugar,
 ou voltaria ao `ConnectAll`, calado. A recusa diz o que achou. O que a
-suíte e a sonda do iniciador acrescentam à linha — o NVMe dos casos e a
-placa Intel — não leva ordem.
+suíte e a sonda do iniciador acrescentam à linha depois dela — o NVMe dos
+casos e a placa Intel — não leva ordem
+(`os_dispositivos_da_suite_nao_levam_ordem_de_boot`). Mudar a máquina de
+todas as bancadas e da suíte foi tratado como [B] (`CLAUDE.md`, 1.6): é
+configuração de teste, que não muda o Gate, a Policy nem o que o Duke
+garante.
 
 Com um `bootindex`, o QEMU entrega ao firmware o arquivo `bootorder` pelo
 `fw_cfg`, e o BDS do OVMF (`PlatformBdsConnectSequence`) e o do AAVMF (no
@@ -2085,32 +2100,32 @@ Com um `bootindex`, o QEMU entrega ao firmware o arquivo `bootorder` pelo
 `ConnectDevicesFromQemu`: ligam só os caminhos da ordem, e os filhos deles
 — medido nos dois firmwares de cada arquitetura, o da CI e o daqui,
 abaixo. O `EfiBootManagerConnectAll` fica para quando a ordem falta, ou
-quando nenhum caminho dela se traduz. O resto continua como
-era: as pontes PCI, que dão endereço a todo dispositivo; os consoles — a
-COM1, a COM2, a tela, o console virtio, o teclado —; e o gerador de
-números, que os dois ligam sempre. A placa de rede fica sem driver do
-firmware, e a pilha de rede não sobe — e no OVMF da CI, fora dela, só o
-`VirtioRngDxe` e o `RngDxe`, que produzem o `EFI_RNG_PROTOCOL`, e o shell,
-que não roda, citam o protocolo. O kernel recebe a placa como o emulador a
-criou — como já a recebia no ARM pelo `-kernel`, sem firmware nenhum —,
-e, no x86, o disco virtio sem o firmware ter lido nada dele. O iniciador
-acha o disco de onde veio pelo caminho da própria imagem
-(`iniciador/src/slots.rs`), que é o que o firmware ligou. E, no x86, o
-CD vazio que o QEMU acrescenta à máquina `pc` (`ide1-cd0`) sai: ele só
-entra quando nenhum disco é declarado por `-device ide-hd`.
+quando nenhum caminho dela se traduz. O resto continua como era: as
+pontes PCI, que dão endereço a todo dispositivo; os consoles — a COM1, a
+COM2, a tela, o console virtio, o teclado —; e o gerador de números, que
+os dois ligam sempre. A placa de rede fica sem driver do firmware, e a
+pilha de rede não sobe — e no OVMF da CI, fora dela, só o `VirtioRngDxe`
+e o `RngDxe`, que produzem o `EFI_RNG_PROTOCOL`, e o shell, que não roda,
+citam o protocolo. O kernel recebe a placa como o emulador a criou — como
+já a recebia no ARM pelo `-kernel`, sem firmware nenhum —, e, no x86, o
+disco virtio sem o firmware ter lido nada dele. O iniciador acha o disco
+de onde veio pelo caminho da própria imagem (`iniciador/src/slots.rs`),
+que é o que o firmware ligou. E, no x86, o CD vazio que o QEMU acrescenta
+à máquina `pc` (`ide1-cd0`) sai: ele só entra quando nenhum disco é
+declarado por `-device ide-hd`.
 
 **A prova.** No firmware sozinho, parando a máquina no `BdsDxe: loading`,
 com um disco virtio a mais, sem ordem, que só o `ConnectAll` lê (a placa
 "intocada" é a de estado zerado no `x-query-virtio-status`: nenhum driver
-a iniciou):
+a iniciou), dois boots em cada linha, com os mesmos números nos dois:
 
 | Firmware | Sem a ordem | Com a ordem |
 |---|---|---|
-| OVMF da CI (2025.11), o disco no virtio | a placa de rede com `DRIVER_OK`; o `disco0` com 79 leituras e o disco a mais com 10; a opção de boot aos 4,2 s | a placa intocada; o `disco0` e o disco a mais sem nenhuma leitura; a opção de boot aos 3,1 s |
-| OVMF daqui (2024.02), o disco no virtio | o mesmo; 4,5 s | o mesmo; 3,5 s |
-| OVMF da CI, o disco no NVMe | — | a placa intocada; o disco a mais sem leitura; 2,3 s |
-| AAVMF da CI (2025.11), o `disco0` no virtio-blk e no NVMe | a placa com `DRIVER_OK`; o disco a mais com 10 leituras | a placa intocada; o disco a mais sem leitura |
-| AAVMF daqui (2024.02) | o mesmo | o mesmo |
+| OVMF da CI (2025.11), o disco no virtio | a placa de rede com `DRIVER_OK`; o `disco0` com 79 leituras e o disco a mais com 10; a opção de boot aos 4,1–4,2 s | a placa intocada; o `disco0` e o disco a mais sem nenhuma leitura; a opção de boot aos 3,2–3,3 s |
+| OVMF daqui (2024.02), o disco no virtio | o mesmo; 4,4–4,6 s | o mesmo; 3,5–3,7 s |
+| OVMF da CI, o disco no NVMe | a placa com `DRIVER_OK`; o disco a mais com 10 leituras; 2,8 s | a placa intocada; o disco a mais sem leitura; 2,3–2,5 s |
+| AAVMF da CI (2025.11), o `disco0` no virtio-blk e no NVMe | a placa com `DRIVER_OK`; o disco a mais com 10 leituras; 6,1–6,3 s | a placa intocada; o disco a mais sem leitura; 5,9–6,1 s |
+| AAVMF daqui (2024.02), o `disco0` no virtio-blk | o mesmo; 6,0 s | o mesmo; 5,8 s |
 
 E o estresse que pegou a parada da CI 436 — o firmware da CI até a opção
 de boot, com a CPU disputada por quatro processos ocupados, os estímulos
@@ -2135,14 +2150,14 @@ dezoito cenários, em duas rodadas — os doze primeiros e os seis de queda;
 a da persistência do x86 em quatorze cenários, escolhidos pelo que mudam
 no boot — o disco do sistema no NVMe; o disco hostil por trás dele, no
 cache que se perde, no erro de mídia e no disco que para de responder; a
-placa Intel como a única; o reinício e o desligamento pelo comando; a máquina
-de 1 GiB; o TPM pela CRB, e sem TPM; a imagem de produção; os dois boots
-sobre o mesmo TPM; a partição de estado; e a queda em cada fronteira de
-uma operação —; e, no ARM, a sonda do iniciador com a suíte inteira pelo
-AAVMF, 908 de 908, e a bancada da atualização em quatro cenários — o
-primeiro boot pelo firmware, a versão nova tentada e confirmada, o
-cenário da CI 438 (sem o TPM, ou com outro) e o disco que falha no slot
-inativo, com o firmware bootando do NVMe sobre o disco hostil. Nada no
-kernel mudou, nem no iniciador.
+placa Intel como a única; o reinício e o desligamento pelo comando; a
+máquina de 1 GiB; o TPM pela CRB, e sem TPM; a imagem de produção; os
+dois boots sobre o mesmo TPM; a partição de estado; e a queda em cada
+fronteira de uma operação —; e, no ARM, a sonda do iniciador com a suíte
+inteira pelo AAVMF, 908 de 908, e a bancada da atualização em quatro
+cenários — o primeiro boot pelo firmware, a versão nova tentada e
+confirmada, o cenário da CI 438 (sem o TPM, ou com outro) e o disco que
+falha no slot inativo, com o firmware bootando do NVMe sobre o disco
+hostil. Nada no kernel mudou, nem no iniciador.
 
 As mutações N221–N228 estão em [`SDK.md`](SDK.md).

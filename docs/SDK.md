@@ -924,7 +924,7 @@ de cada vez, na primeira rodada, pelos testes do hospedeiro do `xtask`.
 E a do fim do disco hostil (#314, N229; ver *O disco hostil* em
 [`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): o `Drop` sem esperar
 o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`, com o
-servidor segurando a descarga antes de aplicá-la, nas três rodadas. E as
+servidor segurando a descarga antes de aplicá-la. E as
 do motivo da recusa (CI 439, N230 e N231; ver *O disco hostil* em
 [`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): toda recusa marcando
 a máquina, e o motivo lido com o leitor de campo simples — reprovadas, uma
