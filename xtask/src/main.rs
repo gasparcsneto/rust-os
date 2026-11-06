@@ -11634,6 +11634,7 @@ impl AgenteNaPorta {
         loop {
             let resposta = self.proxima_linha()?;
             if e_a_resposta(&resposta, id) {
+                persistencia::notar_a_resposta(&resposta);
                 return Ok(resposta);
             }
         }
@@ -12476,6 +12477,7 @@ fn pedir_pela_serial(
     loop {
         let resposta = ler_resposta(leitor)?;
         if e_a_resposta(&resposta, id) {
+            persistencia::notar_a_resposta(&resposta);
             return Ok(resposta);
         }
     }

@@ -344,6 +344,7 @@ pub(crate) fn atualizacao(arch: Arquitetura, release: bool) -> Result<ExitCode, 
     let mut rodar = |cenarios: &[Cenario], b: &Bancada| -> Result<(), String> {
         for cenario in cenarios.iter().filter(|c| escolhido(c)) {
             zerar_o_estado(arch)?;
+            p::esquecer_a_recusa_de_revogacao();
             if let (None, Some(serial)) =
                 (std::env::var_os("DUKE_BANCADA_LOG"), p::serial_do_cenario())
             {

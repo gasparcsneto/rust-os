@@ -22,7 +22,7 @@
 //! dele fica no diretório, como o NV de um chip sem energia.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::disco_hostil::{Corte, DiscoHostil, Faixa, Gatilho, Sentido};
@@ -226,6 +226,7 @@ impl Ligada {
         loop {
             let linha = super::ler_resposta(&mut self.leitor)?;
             if let Some(id) = super::campo_simples(&linha, "id").and_then(|v| v.parse().ok()) {
+                notar_a_resposta(&linha);
                 return Ok((id, linha));
             }
         }
@@ -271,6 +272,9 @@ impl Ligada {
     /// chip sem energia não guarda o volátil; o que sobrevive é só o que ele
     /// já tinha gravado no NV, e é isso que matá-lo reproduz.
     pub(crate) fn cortar_a_energia(mut self) -> Result<(), String> {
+        // Antes do corte: a pergunta da recusa precisa da máquina viva —
+        // ver [`notar_a_resposta`].
+        self.perguntar_o_motivo_se_recusou();
         self.cortar()
     }
 
@@ -811,8 +815,99 @@ pub(crate) fn relatar_a_maior_parada(bancada: &str) {
 
 impl Drop for Ligada {
     fn drop(&mut self) {
+        self.perguntar_o_motivo_se_recusou();
         let _ = self.filho.kill();
         let _ = self.filho.wait();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A recusa que diz o motivo (CI 439)
+// ---------------------------------------------------------------------------
+
+/// Uma resposta da máquina disse `DENY_REVOCATION` desde o último fim de
+/// máquina que perguntou o porquê — ver [`notar_a_resposta`].
+static RECUSA_DE_REVOGACAO: AtomicBool = AtomicBool::new(false);
+
+/// A resposta `r` recusa porque a identidade não vale agora: revogada, ou
+/// o journal recusado e as revogações sem se saber.
+fn diz_revogacao(r: &str) -> bool {
+    r.contains(r#""reason":"DENY_REVOCATION""#)
+}
+
+/// Olha uma resposta da máquina, da serial ou de uma porta de agente: a
+/// que diz `DENY_REVOCATION` faz o fim da máquina perguntar o porquê.
+///
+/// # Por quê
+///
+/// Na CI 439, o primeiro boot de um cenário, sobre o estado zerado, teve
+/// o journal recusado, e o motivo não chegou ao log: a recusa da escrita
+/// do slot diz só `DENY_REVOCATION`, e, no ARM, o log do kernel fica no
+/// anel dele — a serial é o canal. Com o journal recusado, o gate recusa
+/// toda credencial, até a leitura do `system.info` pela porta do agente;
+/// a serial da bancada, que não é credenciada, ainda lê. Então o fim da
+/// máquina ([`Ligada`]) pergunta por ela, antes de matar o emulador, e
+/// imprime o estado e o motivo da persistência — também nos cenários que
+/// provocam a recusa de propósito, onde a linha só confirma o que eles
+/// conferem. O fim é o corte de energia do cenário
+/// ([`Ligada::cortar_a_energia`]), ou o `Drop`; o [`Ligada::cortar`] que a
+/// bancada do enlace usa no meio do cenário não pergunta.
+///
+/// A marca é uma só para a bancada: com duas máquinas de pé ao mesmo
+/// tempo, quem pergunta é a primeira que acabar.
+pub(crate) fn notar_a_resposta(r: &str) {
+    if diz_revogacao(r) {
+        RECUSA_DE_REVOGACAO.store(true, Ordering::Release);
+    }
+}
+
+/// Esquece a recusa que nenhum fim de máquina perguntou: cada cenário
+/// começa sem ela.
+pub(crate) fn esquecer_a_recusa_de_revogacao() {
+    RECUSA_DE_REVOGACAO.store(false, Ordering::Release);
+}
+
+/// O estado da persistência e o motivo, numa resposta do `system.info`: o
+/// motivo inteiro, com as vírgulas dele.
+fn estado_e_motivo(r: &str) -> Option<(String, String)> {
+    let p = protocolo::json::Json(r.as_bytes())
+        .member("result")?
+        .member("persistence")?;
+    let estado = p.member("state")?.as_str()?;
+    let motivo = p.member("reason").and_then(|m| m.as_str()).unwrap_or("");
+    Some((estado.to_string(), motivo.to_string()))
+}
+
+impl Ligada {
+    /// Se uma resposta disse `DENY_REVOCATION` — ver [`notar_a_resposta`]
+    /// —, pergunta à máquina, pela serial, o estado da persistência e o
+    /// motivo, e os imprime. Cinco segundos: a máquina que não responde não
+    /// segura o fim do cenário; a que já acabou — o emulador saiu — não é
+    /// perguntada.
+    fn perguntar_o_motivo_se_recusou(&mut self) {
+        if !RECUSA_DE_REVOGACAO.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let dito = if matches!(self.filho.try_wait(), Ok(Some(_))) {
+            "a maquina ja tinha acabado".to_string()
+        } else {
+            let _ = self.esperar_respostas_por(Duration::from_secs(5));
+            match self.pedir("system.info", "{}") {
+                Ok(r) => match estado_e_motivo(&r) {
+                    Some((estado, motivo)) => format!("{estado} ({motivo})"),
+                    None => "o system.info nao diz a persistencia".to_string(),
+                },
+                Err(e) => format!(
+                    "a maquina nao respondeu ({})",
+                    e.lines().next().unwrap_or("")
+                ),
+            }
+        };
+        // A pergunta não é uma recusa nova: a resposta dela não marca nada.
+        esquecer_a_recusa_de_revogacao();
+        println!(
+            "  [persistencia]   uma resposta disse DENY_REVOCATION; a persistencia da maquina: {dito}"
+        );
     }
 }
 
@@ -1076,6 +1171,7 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     let mut rodar = |cenarios: &[Cenario], artefato: &Artefato| -> Result<(), String> {
         for cenario in cenarios.iter().filter(|c| escolhido(c)) {
             zerar_o_estado(arch)?;
+            esquecer_a_recusa_de_revogacao();
             if let (None, Some(serial)) =
                 (std::env::var_os("DUKE_BANCADA_LOG"), serial_do_cenario())
             {
@@ -6809,5 +6905,43 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
         let morto = tpm_e_firmware(&mut ambiente, None);
         assert!(morto.contains("\n  o swtpm: saiu ("), "{morto}");
         let _ = std::fs::remove_file(log);
+    }
+
+    /// O diagnóstico da CI 439: só a recusa por revogação marca a máquina
+    /// para o fim dela perguntar o porquê — a resposta da CI 439 marca; a
+    /// recusa por permissão e a resposta que deu certo, não —, e o estado e
+    /// o motivo saem do `system.info` inteiros, com as vírgulas do motivo.
+    #[test]
+    fn a_recusa_de_revogacao_pede_o_motivo() {
+        // A resposta da CI 439, como veio.
+        let ci_439 = r#"{"jsonrpc":"2.0","id":400001,"error":{"code":-32010,"message":"operacao negada pela politica","data":"DENY_NOT_AUTHENTICATED","explain":{"outcome":"DENY","reason":"DENY_REVOCATION","code":"DENY_NOT_AUTHENTICATED","permission":"system.update","resource":"","role":"sistema","decision":34,"recoverable":false,"retry":"non_retryable","next_action":"CONTACT_ADMIN","message":"Esta identidade nao vale agora: foi revogada, ou nao se sabe se foi. Fale com um administrador."}}}"#;
+        assert!(diz_revogacao(ci_439));
+        let permissao = r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32010,"message":"operacao negada pela politica","data":"DENY_PERMISSION","explain":{"outcome":"DENY","reason":"DENY_PERMISSION","code":"DENY_PERMISSION"}}}"#;
+        assert!(!diz_revogacao(permissao));
+        assert!(!diz_revogacao(
+            r#"{"jsonrpc":"2.0","id":8,"result":{"written":65536}}"#
+        ));
+
+        let info = r#"{"jsonrpc":"2.0","id":9,"result":{"arch":"aarch64","time":{"state":"ok","reason":"outro"},"persistence":{"state":"refused","reason":"a EK do TPM nao e a fixada, nem a de antes","generation":0,"anchor":null}}}"#;
+        assert_eq!(
+            estado_e_motivo(info),
+            Some((
+                "refused".to_string(),
+                "a EK do TPM nao e a fixada, nem a de antes".to_string()
+            ))
+        );
+        let sem_motivo = r#"{"jsonrpc":"2.0","id":9,"result":{"persistence":{"state":"available","reason":"","generation":3}}}"#;
+        assert_eq!(
+            estado_e_motivo(sem_motivo),
+            Some(("available".to_string(), String::new()))
+        );
+        assert_eq!(
+            estado_e_motivo(r#"{"jsonrpc":"2.0","id":9,"result":{"arch":"x86_64"}}"#),
+            None
+        );
+        assert_eq!(
+            estado_e_motivo(r#"{"jsonrpc":"2.0","id":9,"error":{"code":-32010}}"#),
+            None
+        );
     }
 }
