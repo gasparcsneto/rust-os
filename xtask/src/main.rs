@@ -5023,7 +5023,31 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
         "edicao_nao_entregue",
         &["kernel/src/interpretador.rs", "kernel/src/ui.rs"],
     ),
+    // A conta que devolve o rastro de uma edição: só a coordenação e a
+    // interface, que a faz por uma ação. De outro lugar, uma edição em nome
+    // de quem tem o arrendamento fabricaria o rastro do estado dele, e a
+    // soltura o tiraria (o achado 6 do adversário do passo 1b).
+    (
+        "editar_com_rastro",
+        &["kernel/src/coordenacao.rs", "kernel/src/ui.rs"],
+    ),
+    // A soma de dois rastros: só a coordenação e o console.
+    (
+        "seguida_de",
+        &["kernel/src/coordenacao.rs", "kernel/src/interpretador.rs"],
+    ),
 ];
+
+/// Se `linha` tem um atributo `#[path = …]` fora de um comentário. A
+/// conferência dos nomes e das chamadas protegidas deixa a suíte de fora
+/// pelo caminho do arquivo: um módulo de produção que apontasse, com o
+/// atributo, para um arquivo do caminho da suíte escaparia dela (o achado 6
+/// do adversário do passo 1b). Em `kernel/src`, fora da suíte, ele é
+/// recusado.
+fn tem_atributo_de_caminho(linha: &str) -> bool {
+    let linha = linha.trim_start();
+    !linha.starts_with("//") && linha.replace(char::is_whitespace, "").contains("#[path")
+}
 
 /// Se `linha` tem `nome` como palavra inteira: nem letra, nem dígito, nem
 /// `_` antes ou depois.
@@ -5037,7 +5061,52 @@ fn tem_a_palavra(linha: &str, nome: &str) -> bool {
 
 #[cfg(test)]
 mod testes_dos_nomes_protegidos {
-    use super::tem_a_palavra;
+    use super::{NOMES_PROTEGIDOS, tem_a_palavra, tem_atributo_de_caminho};
+
+    /// O atributo de caminho, em qualquer forma, e o que não é ele.
+    #[test]
+    fn o_atributo_de_caminho() {
+        for linha in [
+            r#"#[path = "testes/x.rs"]"#,
+            r#"    #[path="x.rs"] mod y;"#,
+            r#"#[ path = "a.rs" ]"#,
+            "#[\tpath = \"b.rs\"]",
+        ] {
+            assert!(tem_atributo_de_caminho(linha), "{linha}");
+        }
+        for linha in [
+            r#"// #[path = "testes/x.rs"]"#,
+            r#"/// #[path = "x.rs"]"#,
+            r#"let path = "x";"#,
+            r#"#[cfg(feature = "modo-teste")]"#,
+        ] {
+            assert!(!tem_atributo_de_caminho(linha), "{linha}");
+        }
+    }
+
+    /// A conta que devolve o rastro e a soma de dois rastros são nomes
+    /// protegidos, com os donos deles (o achado 6 do adversário do passo
+    /// 1b).
+    #[test]
+    fn o_rastro_so_se_fabrica_nos_donos() {
+        let donos = |nome: &str| {
+            NOMES_PROTEGIDOS
+                .iter()
+                .find(|(n, _)| *n == nome)
+                .map(|(_, d)| d.to_vec())
+        };
+        assert_eq!(
+            donos("editar_com_rastro"),
+            Some(vec!["kernel/src/coordenacao.rs", "kernel/src/ui.rs"])
+        );
+        assert_eq!(
+            donos("seguida_de"),
+            Some(vec![
+                "kernel/src/coordenacao.rs",
+                "kernel/src/interpretador.rs"
+            ])
+        );
+    }
 
     /// As formas que a conferência por texto da chamada com o caminho não
     /// via (o achado 8 do adversário do passo 1), e as que não são o nome.
@@ -5092,6 +5161,13 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
                 } else {
                     fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
                 }
+            }
+            if tem_atributo_de_caminho(linha) {
+                fora.push(format!(
+                    "{relativo}:{}: `#[path]` fora da suíte: {}",
+                    n + 1,
+                    linha.trim()
+                ));
             }
             // Um comentário não chama nada: a menção na documentação fica.
             let comentario = linha.trim_start().starts_with("//");
