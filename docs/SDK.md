@@ -924,7 +924,11 @@ de cada vez, na primeira rodada, pelos testes do hospedeiro do `xtask`.
 E a do fim do disco hostil (#314, N229; ver *O disco hostil* em
 [`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): o `Drop` sem esperar
 o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`, com o
-servidor segurando a descarga antes de aplicá-la, nas três rodadas.
+servidor segurando a descarga antes de aplicá-la, nas três rodadas. E as
+do motivo da recusa (CI 439, N230 e N231; ver *O disco hostil* em
+[`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): toda recusa marcando
+a máquina, e o motivo lido com o leitor de campo simples — reprovadas, uma
+de cada vez, pelo teste do hospedeiro do `xtask`.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1156,6 +1160,8 @@ servidor segurando a descarga antes de aplicá-la, nas três rodadas.
 | N227 | fora do SDK (#313): a conferência aceita ordem numa máquina sem firmware | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) |
 | N228 | fora do SDK (#313): a conferência aceita a ordem do disco do boot com outro valor | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — `bootindex=1` |
 | N229 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor — o `join` tirado do `Drop` | hospedeiro: `disco_hostil::testes::o_fim_espera_a_conexao_em_curso` (xtask) — o fio ainda segura o estado depois do `Drop`; sem essa conferência, a descarga atendida antes do fim não está no arquivo quando ele volta |
+| N230 | fora do SDK (CI 439): toda recusa — `DENY_` em qualquer lugar da resposta — marcando a máquina para o fim dela perguntar o motivo da persistência | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — a recusa por permissão marca |
+| N231 | fora do SDK (CI 439): o estado e o motivo da persistência lidos com o leitor de campo simples, e não pelo JSON | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — o motivo sai cortado na primeira vírgula |
 
 ## Medidas
 

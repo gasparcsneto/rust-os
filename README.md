@@ -8668,6 +8668,14 @@ recusada com o que se achou. A prova — o que cada firmware liga, com e sem
 a ordem, e o estresse com o firmware da CI e a CPU disputada — está em
 [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#a-ordem-de-boot).
 
+E a máquina que recusa por revogação diz o porquê: uma resposta que diz
+`DENY_REVOCATION` faz o fim da máquina — o corte de energia do cenário, ou
+o `Drop` da `Ligada` — perguntar pela serial, que não é credenciada, o
+estado e o motivo da persistência, e imprimi-los (`[persistencia] uma
+resposta disse DENY_REVOCATION; a persistencia da maquina: refused (...)`).
+Na CI 439, o journal recusado no primeiro boot de um cenário não disse o
+motivo — ver [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-disco-hostil).
+
 `DUKE_CENARIOS` escolhe os cenários por pedaços do nome, e
 `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
 
@@ -10064,7 +10072,10 @@ pelo `disco0`, a máquina sem firmware com ordem, e a conferência da linha
 que aceita duas ordens, a ordem noutro dispositivo, a ordem numa máquina
 sem firmware e outro valor — todas reprovadas pelos testes do hospedeiro
 do `xtask`. E a do fim do disco hostil (#314, N229): o `Drop` sem esperar
-o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`.
+o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`. E as do
+motivo da recusa (CI 439, N230 e N231): toda recusa marcando a máquina, e
+o motivo lido com o leitor de campo simples, que o corta na primeira
+vírgula — reprovadas pelo teste do hospedeiro do `xtask`.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10169,6 +10180,7 @@ o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`.
 | fora do SDK (#310): o cabeçalho comparado com o `ImageBase` da memória (N210); a imagem de baixo sem conferir o tamanho (N211); o caminho do CodeView lido do lugar errado (N212, N213); os valores vizinhos da pilha repetidos (N214); o `\r` dos registradores (N215); a seção GUID lida sem o `DataOffset` (N216); a faixa vazia de uma página só (N217); o ponteiro para os dados de uma imagem tomado por retorno (N218); a pilha no fim da memória que não se lê nada (N219); o arquivo de enchimento do volume tomado pelo espaço livre (N220) | os testes do hospedeiro do xtask (`firmware::testes`) — a N212 depois do reforço |
 | fora do SDK (#313): o IDE do boot sem `bootindex` (N221); o `disco0` do NVMe e do ARM sem ele (N222); o x86 com o disco no virtio bootando pelo `disco0` (N223); a máquina sem firmware com ordem (N224); a conferência da linha que aceita duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa máquina sem firmware (N227) e outro valor (N228) | os testes do hospedeiro do xtask (`so_o_disco_do_boot_leva_a_ordem_de_boot`, `a_ordem_de_boot_errada_e_recusada`) |
 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor (N229) | os testes do hospedeiro do xtask (`disco_hostil::testes::o_fim_espera_a_conexao_em_curso`) |
+| fora do SDK (CI 439): toda recusa marcando a máquina para o fim dela perguntar o motivo (N230); o motivo da persistência lido com o leitor de campo simples, cortado na primeira vírgula (N231) | os testes do hospedeiro do xtask (`persistencia::testes::a_recusa_de_revogacao_pede_o_motivo`) |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |

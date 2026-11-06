@@ -1824,6 +1824,28 @@ sequência no ARM, com o fim novo, passaram nas duas rodadas, e no x86,
 na bancada inteira — ainda com o fim antigo —, também: a recusa da CI 439
 não se reproduziu.
 
+Para a próxima dizer o porquê, a bancada pergunta. Toda resposta da
+máquina — pela serial ou por uma porta de agente — que diz
+`DENY_REVOCATION` marca a máquina, e o fim dela — o corte de energia do
+cenário (`Ligada::cortar_a_energia`), ou o `Drop` da `Ligada`, em
+[`xtask/src/persistencia.rs`](../xtask/src/persistencia.rs) —, antes de
+matar o emulador, pede o `system.info` pela serial e imprime o estado e o
+motivo da persistência: `[persistencia] uma resposta disse
+DENY_REVOCATION; a persistencia da maquina: refused (<o motivo>)`. O
+cenário da CI 439 corta a energia antes de soltar a máquina: perguntar só
+no `Drop` seria perguntar a uma máquina morta — a primeira rodada daqui,
+assim, imprimiu "a maquina nao respondeu (... Broken pipe ...)". É pela
+serial porque ela não é credenciada: com o journal recusado, o gate recusa
+toda credencial — também o `system.info` pela porta do agente —, e a serial
+ainda lê. A pergunta tem cinco segundos; a máquina que não responde, ou que
+já tinha acabado, diz isso na mesma linha. O corte que a bancada do enlace
+faz no meio do cenário (`Ligada::cortar`) não pergunta. Nos cenários que
+provocam a recusa de propósito, a linha sai também, e só repete o que eles
+conferem. A marca é uma só para a bancada, e cada cenário começa sem ela. O teste do hospedeiro
+(`a_recusa_de_revogacao_pede_o_motivo`) confere que a resposta da CI 439
+marca, que a recusa por permissão não marca, e que o motivo sai inteiro,
+com as vírgulas dele; as mutações N230 e N231 estão em [`SDK.md`](SDK.md).
+
 A bancada espera cada boot pelo andamento da máquina, e não por um prazo
 do total: segue enquanto chega algo novo na serial humana, nos contadores
 dos discos pelo QMP — bytes e operações de leitura, de escrita e de
