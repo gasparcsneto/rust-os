@@ -1732,8 +1732,9 @@ fn subir_no_firmware(
         &ambiente,
     )?;
     qemu.stdout(Stdio::piped());
-    // Sem rede: nada aqui precisa dela, e o firmware tentaria PXE antes do
-    // disco se ela existisse.
+    // Sem a placa de rede padrão do emulador: a da máquina é a de
+    // `comando_qemu`, e o firmware não boota por ela — a ordem de boot é o
+    // disco (ver [`argumentos_dos_discos`]).
     qemu.args(["-net", "none"]);
     // Quem espera o desligamento é a suíte inteira, no ARM: a máquina leva
     // o segundo disco dela, o NVMe dos casos `nvme:`, como no `test`. Sem
@@ -7872,23 +7873,31 @@ fn com_o_nvme_de_testes(qemu: &mut Command) -> Result<(), String> {
             ));
         }
     }
-    qemu.args([
-        "-blockdev",
-        &format!(
+    qemu.args(argumentos_do_nvme_de_testes(&nvme, &regras));
+    Ok(())
+}
+
+/// Os argumentos do NVMe dos casos, sobre o arquivo `nvme` e as regras de
+/// falha `regras` — ver [`com_o_nvme_de_testes`]. Sem ordem de boot: o
+/// firmware não o liga, e o disco do boot continua o único com ela (ver
+/// [`conferir_o_disco_do_boot`]).
+fn argumentos_do_nvme_de_testes(nvme: &Path, regras: &Path) -> [String; 8] {
+    [
+        "-blockdev".to_string(),
+        format!(
             "driver=file,node-name=nvme-arquivo,filename={}",
             nvme.display()
         ),
-        "-blockdev",
-        &format!(
+        "-blockdev".to_string(),
+        format!(
             "driver=blkdebug,node-name=nvme-falhas,config={},image=nvme-arquivo",
             regras.display()
         ),
-        "-blockdev",
-        "driver=raw,node-name=nvme0,file=nvme-falhas",
-        "-device",
-        "nvme,serial=duke-nvme-testes,drive=nvme0",
-    ]);
-    Ok(())
+        "-blockdev".to_string(),
+        "driver=raw,node-name=nvme0,file=nvme-falhas".to_string(),
+        "-device".to_string(),
+        "nvme,serial=duke-nvme-testes,drive=nvme0".to_string(),
+    ]
 }
 
 /// A placa Intel da suíte: uma 82574L numa rede em modo usuário só dela, e
@@ -8472,6 +8481,161 @@ fn nucleos_da_bancada(arch: Arquitetura) -> u32 {
     }
 }
 
+/// Por onde o firmware boota a máquina — e, por isso, que dispositivo leva a
+/// ordem de boot. Ver [`argumentos_dos_discos`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoDoBoot<'a> {
+    /// O x86 com o disco no virtio-blk: o firmware boota deste arquivo pelo
+    /// IDE da máquina (`ide0-hd0`), e o kernel lê o mesmo arquivo pelo
+    /// virtio (`disco0`).
+    Ide(&'a Path),
+    /// O firmware boota do próprio `disco0`: o NVMe do x86, e o disco do
+    /// ARM, no virtio-blk ou no NVMe.
+    Disco0,
+    /// Não há firmware: o ARM pela imagem crua, no `-kernel` do emulador.
+    SemFirmware,
+}
+
+impl<'a> DiscoDoBoot<'a> {
+    /// O disco do boot da máquina de `arch` que sobe `artefato`, com o disco
+    /// do sistema no NVMe (`nvme`) ou no virtio-blk.
+    fn de(arch: Arquitetura, artefato: &'a Artefato, nvme: bool) -> DiscoDoBoot<'a> {
+        match (arch, artefato) {
+            (_, Artefato::Binario(_)) => DiscoDoBoot::SemFirmware,
+            (Arquitetura::X86_64, Artefato::Disco(disco)) if !nvme => DiscoDoBoot::Ide(disco),
+            (_, Artefato::Disco(_)) => DiscoDoBoot::Disco0,
+        }
+    }
+
+    /// A unidade — o `drive=` — do dispositivo que leva a ordem de boot; sem
+    /// firmware, nenhuma.
+    fn unidade(self) -> Option<&'static str> {
+        match self {
+            DiscoDoBoot::Ide(_) => Some("ide0-hd0"),
+            DiscoDoBoot::Disco0 => Some("disco0"),
+            DiscoDoBoot::SemFirmware => None,
+        }
+    }
+}
+
+/// Os discos da máquina: o do sistema, `disco0`, sobre a unidade `unidade`,
+/// no NVMe (`nvme`) ou no virtio-blk — e, no x86 com o disco no virtio, o
+/// mesmo arquivo pelo IDE, de onde o firmware boota. O disco do boot leva
+/// `bootindex=0`, e só ele.
+///
+/// # Por que a ordem de boot
+///
+/// Sem ela, o BDS do EDK II não sabe por onde a máquina boota e liga todos
+/// os dispositivos (`EfiBootManagerConnectAll`): a placa de rede também, e a
+/// pilha de rede inteira do firmware por cima dela. No OVMF 2025.11, o da
+/// CI, essa pilha pede números ao `virtio-rng` de dentro de um temporizador,
+/// e um pedido que chega no meio de outro deixa o de fora esperando para
+/// sempre — o firmware parado das CI 436 e 438 (`docs/PERSISTENCIA.md`, "O
+/// firmware parado da CI 436"). Com um `bootindex`, o emulador entrega ao
+/// firmware a ordem de boot pelo `fw_cfg` (`bootorder`), e o BDS liga só os
+/// caminhos que ela cita (`ConnectDevicesFromQemu`, no OVMF do x86 e no do
+/// ARM), além dos consoles e do gerador de números, que ele liga sempre. A
+/// placa de rede fica sem driver do firmware, e o kernel a recebe como o
+/// emulador a criou — como a recebe no ARM pelo `-kernel`, sem firmware
+/// nenhum.
+///
+/// O disco do boot é também o do iniciador, que acha o disco de onde veio
+/// pelo caminho da própria imagem (`iniciador/src/slots.rs`): o que o
+/// firmware ligou. O IDE fica no primeiro canal, como unidade mestre
+/// (`bus=ide.0,unit=0`) — onde o `-drive` sem `if=` o punha antes —, e com o
+/// mesmo nome (`ide0-hd0`), que é o que o diagnóstico de um boot que não
+/// atende mostra. O IDE não é PCI: tirá-lo do começo da linha não muda o
+/// endereço de nenhum dispositivo. Declarado por `-device ide-hd`, ele tira
+/// da máquina o CD vazio que o QEMU punha no segundo canal (`ide1-cd0`), e
+/// que ninguém usava.
+fn argumentos_dos_discos(boot: DiscoDoBoot, unidade: &str, nvme: bool) -> Vec<String> {
+    let mut argumentos = Vec::new();
+    if let DiscoDoBoot::Ide(disco) = boot {
+        argumentos.extend([
+            "-drive".to_string(),
+            format!("if=none,id=ide0-hd0,format=raw,file={}", disco.display()),
+            "-device".to_string(),
+            "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0,bootindex=0".to_string(),
+        ]);
+    }
+    let ordem = if boot == DiscoDoBoot::Disco0 {
+        ",bootindex=0"
+    } else {
+        ""
+    };
+    // O controlador NVMe do QEMU, com o namespace 1 sobre o disco. O número
+    // de série é obrigatório nele.
+    let dispositivo = if nvme {
+        format!("nvme,serial=duke-sistema,drive=disco0{ordem}")
+    } else {
+        format!("virtio-blk-pci,drive=disco0{ordem}")
+    };
+    argumentos.extend([
+        "-drive".to_string(),
+        unidade.to_string(),
+        "-device".to_string(),
+        dispositivo,
+    ]);
+    argumentos
+}
+
+/// Confere, na linha de comando `argumentos` da máquina, a ordem de boot que
+/// [`argumentos_dos_discos`] monta: numa máquina que sobe pelo firmware, um
+/// dispositivo só leva `bootindex`, com o valor 0, e é o disco do boot — o
+/// dispositivo da unidade dele, declarada num `-drive`; sem firmware,
+/// nenhum.
+///
+/// Uma ordem a mais — numa placa de rede, para o PXE — ou a menos não impede
+/// a máquina de subir: o firmware boota de outro lugar, ou volta ao
+/// `ConnectAll`, calado, e a bancada volta a ter o gatilho da CI 436. Por
+/// isso a recusa é aqui, antes de o emulador existir, e diz o que achou.
+fn conferir_o_disco_do_boot(argumentos: &[String], boot: DiscoDoBoot) -> Result<(), String> {
+    let valores = |opcao: &str| -> Vec<&str> {
+        argumentos
+            .windows(2)
+            .filter(|par| par[0] == opcao)
+            .map(|par| par[1].as_str())
+            .collect()
+    };
+    let com_ordem: Vec<&str> = valores("-device")
+        .into_iter()
+        .filter(|d| d.split(',').any(|o| o.starts_with("bootindex=")))
+        .collect();
+    let Some(unidade) = boot.unidade() else {
+        return if com_ordem.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "a máquina sobe sem firmware, e há ordem de boot na linha do emulador: {}",
+                com_ordem.join(" ")
+            ))
+        };
+    };
+    let [dispositivo] = com_ordem[..] else {
+        return Err(format!(
+            "a máquina sobe pelo firmware, e {} dispositivo(s) da linha do emulador levam \
+             ordem de boot ({}): o disco do boot, `{unidade}`, tem de ser o único",
+            com_ordem.len(),
+            com_ordem.join(" ")
+        ));
+    };
+    let opcoes: Vec<&str> = dispositivo.split(',').collect();
+    let id = format!("id={unidade}");
+    let declarada = valores("-drive")
+        .iter()
+        .any(|d| d.split(',').any(|o| o == id));
+    if !opcoes.contains(&"bootindex=0")
+        || !opcoes.contains(&format!("drive={unidade}").as_str())
+        || !declarada
+    {
+        return Err(format!(
+            "a ordem de boot está em `{dispositivo}`, e não no disco do boot: \
+             `drive={unidade},bootindex=0`, com a unidade `{unidade}` num `-drive`"
+        ));
+    }
+    Ok(())
+}
+
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
 fn comando_qemu(
     arch: Arquitetura,
@@ -8484,7 +8648,7 @@ fn comando_qemu(
     let mut qemu = Command::new(arch.qemu());
 
     match (arch, artefato) {
-        (Arquitetura::X86_64, Artefato::Disco(disco)) => {
+        (Arquitetura::X86_64, Artefato::Disco(_)) => {
             // A CPU precisa oferecer SMEP, e a padrão do QEMU não oferece.
             //
             // O kernel liga o bit quando o processador o tem, e sem ele a
@@ -8511,20 +8675,17 @@ fn comando_qemu(
                 "-drive",
                 &format!("if=pflash,format=raw,file={}", variaveis.display()),
             ]);
-            // E o disco de onde o firmware boota, que é o mesmo que o kernel
-            // depois lê. O `-drive` sem `if=` o liga ao controlador padrão da
-            // máquina, que é de onde o firmware procura uma ESP. Com o disco
-            // no NVMe, não: o firmware boota do NVMe, como numa máquina de
-            // verdade — ver mais abaixo.
-            if !ambiente.disco_nvme {
-                qemu.args(["-drive", &format!("format=raw,file={}", disco.display())]);
-            }
+            // O disco de onde o firmware boota entra com os outros discos,
+            // mais abaixo, com a ordem de boot — ver
+            // [`argumentos_dos_discos`].
+            //
             // O dispositivo que permite ao kernel encerrar o QEMU.
             qemu.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
         }
-        (Arquitetura::Aarch64, Artefato::Disco(disco)) => {
+        (Arquitetura::Aarch64, Artefato::Disco(_)) => {
             // O mesmo caminho do x86: o firmware é quem carrega, e o
-            // iniciador está na ESP deste disco. O que difere é a máquina.
+            // iniciador está na ESP deste disco — o `disco0`, mais abaixo. O
+            // que difere é a máquina.
             let (codigo, variaveis) = firmware_uefi(arch)?;
             qemu.args([
                 "-machine",
@@ -8548,7 +8709,6 @@ fn comando_qemu(
             // O encerramento por semihosting vale igual: quem sai do
             // emulador é o kernel, e como ele chegou lá não muda isso.
             qemu.args(["-semihosting-config", "enable=on,target=native"]);
-            let _ = disco;
         }
         (Arquitetura::Aarch64, Artefato::Binario(img)) => {
             qemu.args([
@@ -8597,6 +8757,10 @@ fn comando_qemu(
     // Que seja o mesmo disco não é economia: é o que faz o kernel ler a raiz
     // em Btrfs do disco de onde a máquina ligou, como numa máquina de
     // verdade.
+    //
+    // E o disco de onde o firmware boota leva a ordem de boot, e só ele: o
+    // IDE no x86 com o disco no virtio, o próprio `disco0` no NVMe e no ARM
+    // — ver [`argumentos_dos_discos`], e a conferência no fim desta função.
     let disco = match &ambiente.disco {
         Some(d) => d.clone(),
         None => disco_de_testes()?,
@@ -8618,14 +8782,8 @@ fn comando_qemu(
             disco.display()
         ),
     };
-    qemu.args(["-drive", &unidade]);
-    if ambiente.disco_nvme {
-        // O controlador NVMe do QEMU, com o namespace 1 sobre o disco. O
-        // número de série é obrigatório nele.
-        qemu.args(["-device", "nvme,serial=duke-sistema,drive=disco0"]);
-    } else {
-        qemu.args(["-device", "virtio-blk-pci,drive=disco0"]);
-    }
+    let boot = DiscoDoBoot::de(arch, artefato, ambiente.disco_nvme);
+    qemu.args(argumentos_dos_discos(boot, &unidade, ambiente.disco_nvme));
 
     // E uma placa de rede virtio, tambem nas duas.
     //
@@ -8879,6 +9037,15 @@ fn comando_qemu(
     // Sem janela gráfica: este ambiente é headless, e toda a informação que
     // nos importa já sai pelas seriais.
     qemu.args(["-display", "none"]);
+
+    // A ordem de boot, conferida na linha inteira, e não só nos discos: um
+    // `bootindex` que outro dispositivo ganhe aqui também desfaria a dos
+    // discos.
+    let linha: Vec<String> = qemu
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    conferir_o_disco_do_boot(&linha, boot)?;
 
     Ok(qemu)
 }
@@ -17819,7 +17986,7 @@ mod testes {
             &linha(&[
                 "/usr/bin/qemu-system-x86_64",
                 "-drive",
-                "format=raw,file=/r/target/disco.img"
+                "if=none,id=ide0-hd0,format=raw,file=/r/target/disco.img"
             ]),
             alvo
         ));
@@ -17843,6 +18010,176 @@ mod testes {
             alvo
         ));
         assert!(!emulador_sobre(b"", alvo));
+    }
+
+    /// A ordem de boot de cada máquina que o xtask liga: pelo firmware, o
+    /// disco do boot com `bootindex=0`, e só ele — o IDE, sobre o arquivo do
+    /// disco, no x86 com o disco no virtio; o NVMe do sistema no x86 com o
+    /// disco nele, e com o disco hostil por trás; o `disco0` no ARM —; sem
+    /// firmware, o ARM pelo `-kernel`, nenhuma. E a conferência da linha
+    /// aceita cada uma.
+    #[test]
+    fn so_o_disco_do_boot_leva_a_ordem_de_boot() {
+        use super::*;
+        use Arquitetura::{Aarch64, X86_64};
+        let disco = Artefato::Disco(PathBuf::from("/r/target/disco.img"));
+        let imagem = Artefato::Binario(PathBuf::from("/r/target/duke.img"));
+        let arquivo = "format=raw,file=/r/target/disco.img,if=none,id=disco0,file.locking=off";
+        let hostil = "driver=raw,if=none,id=disco0,file.driver=nbd,file.server.type=unix,\
+                      file.server.path=/r/target/hostil.sock";
+        let ide = "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0,bootindex=0";
+        let nvme = "nvme,serial=duke-sistema,drive=disco0,bootindex=0";
+        let virtio = "virtio-blk-pci,drive=disco0,bootindex=0";
+        let casos = [
+            (X86_64, &disco, false, arquivo, Some(ide)),
+            (X86_64, &disco, true, arquivo, Some(nvme)),
+            (X86_64, &disco, true, hostil, Some(nvme)),
+            (Aarch64, &disco, false, arquivo, Some(virtio)),
+            (Aarch64, &disco, true, arquivo, Some(nvme)),
+            (Aarch64, &disco, true, hostil, Some(nvme)),
+            (Aarch64, &imagem, false, arquivo, None),
+            (Aarch64, &imagem, true, arquivo, None),
+        ];
+        for (arch, artefato, no_nvme, unidade, esperado) in casos {
+            let boot = DiscoDoBoot::de(arch, artefato, no_nvme);
+            let linha = argumentos_dos_discos(boot, unidade, no_nvme);
+            let com_ordem: Vec<&str> = linha
+                .iter()
+                .map(String::as_str)
+                .filter(|a| a.contains("bootindex"))
+                .collect();
+            let caso = format!("{arch:?}, NVMe {no_nvme}, {unidade}: {linha:?}");
+            match esperado {
+                Some(dispositivo) => assert_eq!(com_ordem, [dispositivo], "{caso}"),
+                None => assert!(com_ordem.is_empty(), "{caso}"),
+            }
+            // O disco do sistema está sempre lá, sobre a unidade pedida.
+            assert!(linha.windows(2).any(|p| p == ["-drive", unidade]), "{caso}");
+            assert!(conferir_o_disco_do_boot(&linha, boot).is_ok(), "{caso}");
+        }
+        // A linha inteira do x86 com o disco no virtio: o IDE sobre o arquivo
+        // do artefato, e o virtio do kernel sem ordem.
+        assert_eq!(
+            argumentos_dos_discos(DiscoDoBoot::de(X86_64, &disco, false), arquivo, false),
+            [
+                "-drive",
+                "if=none,id=ide0-hd0,format=raw,file=/r/target/disco.img",
+                "-device",
+                ide,
+                "-drive",
+                arquivo,
+                "-device",
+                "virtio-blk-pci,drive=disco0",
+            ]
+        );
+    }
+
+    /// A conferência da ordem de boot recusa a linha sem ela, com duas, com
+    /// ela noutro dispositivo, noutro valor ou numa unidade que nenhum
+    /// `-drive` declara, e a ordem numa máquina sem firmware.
+    #[test]
+    fn a_ordem_de_boot_errada_e_recusada() {
+        use super::*;
+        let base = [
+            "-drive",
+            "if=pflash,format=raw,readonly=on,file=/r/codigo.fd",
+            "-drive",
+            "if=none,id=ide0-hd0,format=raw,file=/r/disco.img",
+            "-drive",
+            "format=raw,file=/r/disco.img,if=none,id=disco0,file.locking=off",
+            "-netdev",
+            "user,id=rede0",
+        ];
+        let com = |dispositivos: &[&str]| -> Vec<String> {
+            base.iter()
+                .copied()
+                .chain(dispositivos.iter().flat_map(|d| ["-device", *d]))
+                .map(String::from)
+                .collect()
+        };
+        let ide = DiscoDoBoot::Ide(Path::new("/r/disco.img"));
+        let certo = "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0,bootindex=0";
+        let virtio = "virtio-blk-pci,drive=disco0";
+        let rede = "virtio-net-pci,netdev=rede0";
+        assert_eq!(
+            conferir_o_disco_do_boot(&com(&[certo, virtio, rede]), ide),
+            Ok(())
+        );
+        for errada in [
+            // Sem ordem: o firmware voltaria ao `ConnectAll`.
+            com(&["ide-hd,drive=ide0-hd0,bus=ide.0,unit=0", virtio, rede]),
+            // Duas: o PXE na placa de rede.
+            com(&[certo, virtio, "virtio-net-pci,netdev=rede0,bootindex=1"]),
+            // A ordem no disco do kernel, e não no do firmware.
+            com(&[
+                "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0",
+                "virtio-blk-pci,drive=disco0,bootindex=0",
+                rede,
+            ]),
+            // Outro valor.
+            com(&[
+                "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0,bootindex=1",
+                virtio,
+                rede,
+            ]),
+            // A placa de rede como a única.
+            com(&[
+                "ide-hd,drive=ide0-hd0,bus=ide.0,unit=0",
+                virtio,
+                "virtio-net-pci,netdev=rede0,bootindex=0",
+            ]),
+        ] {
+            let resposta = conferir_o_disco_do_boot(&errada, ide);
+            assert!(resposta.is_err(), "{errada:?}");
+        }
+        // A unidade do boot sem `-drive` que a declare.
+        let sem_unidade: Vec<String> = [
+            "-drive",
+            "if=pflash,format=raw,readonly=on,file=/r/codigo.fd",
+            "-device",
+            "nvme,serial=duke-sistema,drive=disco0,bootindex=0",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(conferir_o_disco_do_boot(&sem_unidade, DiscoDoBoot::Disco0).is_err());
+        // O mesmo `disco0` do NVMe, declarado: aceito.
+        let mut declarada = sem_unidade.clone();
+        declarada
+            .extend(["-drive", "format=raw,file=/r/disco.img,if=none,id=disco0"].map(String::from));
+        assert_eq!(
+            conferir_o_disco_do_boot(&declarada, DiscoDoBoot::Disco0),
+            Ok(())
+        );
+        // Sem firmware, nenhuma ordem.
+        assert!(conferir_o_disco_do_boot(&declarada, DiscoDoBoot::SemFirmware).is_err());
+        assert_eq!(
+            conferir_o_disco_do_boot(&com(&[virtio, rede]), DiscoDoBoot::SemFirmware),
+            Ok(())
+        );
+    }
+
+    /// O que a suíte e a sonda do iniciador acrescentam à linha depois de
+    /// [`comando_qemu`] — o NVMe dos casos e a placa Intel — não leva ordem
+    /// de boot: o disco do boot continua o único.
+    #[test]
+    fn os_dispositivos_da_suite_nao_levam_ordem_de_boot() {
+        use super::*;
+        let nvme = argumentos_do_nvme_de_testes(
+            Path::new("/r/nvme-testes.img"),
+            Path::new("/r/nvme.falhas"),
+        );
+        assert!(nvme.contains(&"nvme,serial=duke-nvme-testes,drive=nvme0".to_string()));
+        assert!(!nvme.iter().any(|a| a.contains("bootindex")), "{nvme:?}");
+        for arch in [Arquitetura::X86_64, Arquitetura::Aarch64] {
+            let mut qemu = Command::new("qemu");
+            com_a_placa_intel_de_testes(arch, &mut qemu);
+            let linha: Vec<String> = qemu
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(linha.iter().any(|a| a.starts_with("e1000e,")), "{linha:?}");
+            assert!(!linha.iter().any(|a| a.contains("bootindex")), "{linha:?}");
+        }
     }
 
     /// O andamento conta o que a suíte escreve ao fim de cada caso, e não

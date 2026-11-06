@@ -294,9 +294,10 @@ impl Ligada {
 /// responde ao QMP é essa terceira resposta.
 ///
 /// Os discos são todos os que já leram ou escreveram, e não só o do
-/// kernel: no x86, o firmware e o iniciador leem o disco de testes pelo
-/// controlador padrão da máquina (`ide0-hd0`), e o kernel, pelo virtio
-/// (`disco0`) — o mesmo arquivo.
+/// kernel: no x86 com o disco no virtio, o firmware e o iniciador leem o
+/// disco de testes pelo IDE da máquina (`ide0-hd0`, o disco do boot — ver
+/// [`super::argumentos_dos_discos`]), e o kernel, pelo virtio (`disco0`) —
+/// o mesmo arquivo.
 ///
 /// E, em linhas a seguir, o módulo em que cada processador está e os
 /// retornos na pilha dele — ver [`super::firmware`]: na CI 436, o firmware
