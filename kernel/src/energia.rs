@@ -35,10 +35,10 @@
 //! O caso que pede alguma coisa com a ação a caminho — e espera `CONFLICT`,
 //! `desligando` ou `rebooting` — não pode depender do meio segundo: numa
 //! suíte carregada, o fio parava as gravações e a ação deixava de estar a
-//! caminho antes de o caso pedir. O caso segura o fio ([`Segura`]) antes
-//! da ação: o fio espera o meio segundo, como sempre, e fica parado ali,
-//! antes de parar as gravações, até o caso soltar — com a ação a caminho,
-//! como na janela. Fora da suíte, o gancho não existe.
+//! caminho antes de o caso pedir. O caso segura o fio (`Segura`, só da
+//! suíte) antes da ação: o fio espera o meio segundo, como sempre, e fica
+//! parado ali, antes de parar as gravações, até o caso soltar — com a ação
+//! a caminho, como na janela. Fora da suíte, o gancho não existe.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
