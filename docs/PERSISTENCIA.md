@@ -1789,6 +1789,41 @@ gravação confirmada e três reconexões recusadas, e os dois cenários que
 cortam pelo gatilho — este e o do nascimento da identidade — conferem que
 a máquina cortada não teve o disco de volta.
 
+E o fim do disco hostil espera a conexão em curso. O emulador que a
+bancada mata deixa no socket o que já tinha mandado — uma escrita, uma
+descarga —, e o servidor ainda o atende antes de ver o fim da conexão:
+uma descarga ali grava o cache no arquivo. Até o #314, o fim do disco
+(`DiscoHostil::drop`) só avisava o servidor e voltava, e nada garantia que
+a conexão já tinha acabado: uma descarga atrasada podia cair no arquivo
+depois de o cenário seguinte zerar o estado, e devolver à partição de
+estado um pedaço do journal velho, diante de um TPM novo. Agora o fim
+espera o fio do servidor sair, com a conexão em curso acabada e o arquivo
+fechado. Quem solta o disco mata o emulador antes — a máquina, declarada
+depois do disco, cai antes dele —, e a partida que sobe a máquina mas não
+consegue preparar o canal dela a mata antes de devolver o erro: solta
+viva, ela seguraria a conexão, e o fim esperaria para sempre. O teste do
+hospedeiro (`o_fim_espera_a_conexao_em_curso`, em
+[`xtask/src/disco_hostil.rs`](../xtask/src/disco_hostil.rs)) faz o papel
+do emulador — uma escrita, uma descarga, e o socket fechado sem ler a
+resposta —, com o servidor segurando a descarga antes de aplicá-la, e
+confere que, quando o fim volta, o fio já saiu e a descarga já está no
+arquivo, e que o arquivo zerado depois continua zerado. A mutação N229 —
+o fim sem a espera — está em [`SDK.md`](SDK.md).
+
+A suspeita veio da CI 439: na bancada da atualização do ARM, o cenário
+seguinte ao do disco que falha ("duas instalacoes ao mesmo tempo...")
+teve o journal recusado no primeiro boot, sobre um estado zerado — a
+escrita do slot negada com `DENY_REVOCATION`, a decisão 34. Mas não foi
+isso o que aconteceu ali: as contas que o cenário do disco imprimiu,
+depois de matar o emulador e antes de soltar o disco, já tinham a conexão
+encerrada (`conexoes: 1, encerradas: 1`) — o servidor só conta o fim
+depois de atender tudo o que a conexão trouxe, e não há outra. O motivo
+da recusa daquele boot não chegou ao log da CI: no ARM, a serial é o
+canal, e o log do kernel fica no anel dele. Aqui, os dois cenários em
+sequência no ARM, com o fim novo, passaram nas duas rodadas, e no x86,
+na bancada inteira — ainda com o fim antigo —, também: a recusa da CI 439
+não se reproduziu.
+
 A bancada espera cada boot pelo andamento da máquina, e não por um prazo
 do total: segue enquanto chega algo novo na serial humana, nos contadores
 dos discos pelo QMP — bytes e operações de leitura, de escrita e de

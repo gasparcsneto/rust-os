@@ -921,6 +921,10 @@ firmware com ordem (N224), e a conferência da linha do emulador que aceita
 duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa
 máquina sem firmware (N227) e outro valor (N228). Todas reprovadas, uma
 de cada vez, na primeira rodada, pelos testes do hospedeiro do `xtask`.
+E a do fim do disco hostil (#314, N229; ver *O disco hostil* em
+[`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): o `Drop` sem esperar
+o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`, com o
+servidor segurando a descarga antes de aplicá-la, nas três rodadas.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1151,6 +1155,7 @@ de cada vez, na primeira rodada, pelos testes do hospedeiro do `xtask`.
 | N226 | fora do SDK (#313): a conferência não olha de que unidade é o dispositivo com a ordem | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — a ordem no disco do kernel, e não no do firmware |
 | N227 | fora do SDK (#313): a conferência aceita ordem numa máquina sem firmware | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) |
 | N228 | fora do SDK (#313): a conferência aceita a ordem do disco do boot com outro valor | hospedeiro: `testes::a_ordem_de_boot_errada_e_recusada` (xtask) — `bootindex=1` |
+| N229 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor — o `join` tirado do `Drop` | hospedeiro: `disco_hostil::testes::o_fim_espera_a_conexao_em_curso` (xtask) — o fio ainda segura o estado depois do `Drop`; sem essa conferência, a descarga atendida antes do fim não está no arquivo quando ele volta |
 
 ## Medidas
 

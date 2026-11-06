@@ -831,7 +831,7 @@ xtask/src/
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia
-├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
+├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso
 ├── firmware.rs      onde parou a máquina que não atendeu: o módulo de cada processador — a imagem PE abaixo do endereço, lida pelo QMP, com o nome do CodeView dela ou do módulo de mesmo cabeçalho no arquivo do firmware, aberto pelo `xz` — e os valores da pilha que caem no código de uma imagem
 ├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
@@ -10063,7 +10063,8 @@ da ordem de boot (#313, N221–N228): o IDE do boot sem `bootindex`, o
 pelo `disco0`, a máquina sem firmware com ordem, e a conferência da linha
 que aceita duas ordens, a ordem noutro dispositivo, a ordem numa máquina
 sem firmware e outro valor — todas reprovadas pelos testes do hospedeiro
-do `xtask`.
+do `xtask`. E a do fim do disco hostil (#314, N229): o `Drop` sem esperar
+o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10167,6 +10168,7 @@ do `xtask`.
 | fora do SDK (CI 437): a troca que chega ao fim gravando também uma execução da decisão (N209); a volta adiada sem a execução, de novo contra a conta nova (N111) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida" — a N209; a N111, os três primeiros que adiam (o 327 pelo sinal novo, o 328 e o 338) |
 | fora do SDK (#310): o cabeçalho comparado com o `ImageBase` da memória (N210); a imagem de baixo sem conferir o tamanho (N211); o caminho do CodeView lido do lugar errado (N212, N213); os valores vizinhos da pilha repetidos (N214); o `\r` dos registradores (N215); a seção GUID lida sem o `DataOffset` (N216); a faixa vazia de uma página só (N217); o ponteiro para os dados de uma imagem tomado por retorno (N218); a pilha no fim da memória que não se lê nada (N219); o arquivo de enchimento do volume tomado pelo espaço livre (N220) | os testes do hospedeiro do xtask (`firmware::testes`) — a N212 depois do reforço |
 | fora do SDK (#313): o IDE do boot sem `bootindex` (N221); o `disco0` do NVMe e do ARM sem ele (N222); o x86 com o disco no virtio bootando pelo `disco0` (N223); a máquina sem firmware com ordem (N224); a conferência da linha que aceita duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa máquina sem firmware (N227) e outro valor (N228) | os testes do hospedeiro do xtask (`so_o_disco_do_boot_leva_a_ordem_de_boot`, `a_ordem_de_boot_errada_e_recusada`) |
+| fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor (N229) | os testes do hospedeiro do xtask (`disco_hostil::testes::o_fim_espera_a_conexao_em_curso`) |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
