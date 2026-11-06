@@ -5038,15 +5038,173 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// Se `linha` tem um atributo `#[path = …]` fora de um comentário. A
-/// conferência dos nomes e das chamadas protegidas deixa a suíte de fora
-/// pelo caminho do arquivo: um módulo de produção que apontasse, com o
-/// atributo, para um arquivo do caminho da suíte escaparia dela (o achado 6
-/// do adversário do passo 1b). Em `kernel/src`, fora da suíte, ele é
-/// recusado.
-fn tem_atributo_de_caminho(linha: &str) -> bool {
-    let linha = linha.trim_start();
-    !linha.starts_with("//") && linha.replace(char::is_whitespace, "").contains("#[path")
+/// O texto de uma fonte Rust só com o código: os comentários — de linha e
+/// de bloco, aninhados — e os literais de texto e de caractere — também os
+/// crus, `r#"…"#` — trocados por espaços. As quebras de linha ficam, e cada
+/// caractere fica na posição dele: a linha do que se acha é a da fonte. Um
+/// `r#` que não abre um texto é um identificador cru, e fica.
+fn so_o_codigo(fonte: &str) -> Vec<char> {
+    let c: Vec<char> = fonte.chars().collect();
+    let mut codigo = c.clone();
+    let apagar = |codigo: &mut Vec<char>, de: usize, ate: usize| {
+        for x in &mut codigo[de..ate.min(c.len())] {
+            if *x != '\n' {
+                *x = ' ';
+            }
+        }
+    };
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let mut i = 0;
+    while i < c.len() {
+        let seguinte = c.get(i + 1).copied();
+        if c[i] == '/' && seguinte == Some('/') {
+            let fim = (i..c.len()).find(|&k| c[k] == '\n').unwrap_or(c.len());
+            apagar(&mut codigo, i, fim);
+            i = fim;
+            continue;
+        }
+        if c[i] == '/' && seguinte == Some('*') {
+            let (mut nivel, mut k) = (0usize, i);
+            while k < c.len() {
+                if c[k] == '/' && c.get(k + 1) == Some(&'*') {
+                    nivel += 1;
+                    k += 2;
+                } else if c[k] == '*' && c.get(k + 1) == Some(&'/') {
+                    nivel -= 1;
+                    k += 2;
+                    if nivel == 0 {
+                        break;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            apagar(&mut codigo, i, k);
+            i = k;
+            continue;
+        }
+        let comeco_de_palavra = i == 0 || !de_nome(c[i - 1]);
+        if comeco_de_palavra && (c[i] == 'r' || (c[i] == 'b' && seguinte == Some('r'))) {
+            let mut k = i + if c[i] == 'b' { 2 } else { 1 };
+            let mut cerquilhas = 0;
+            while c.get(k) == Some(&'#') {
+                cerquilhas += 1;
+                k += 1;
+            }
+            if c.get(k) == Some(&'"') {
+                let mut j = k + 1;
+                while j < c.len()
+                    && !(c[j] == '"' && (1..=cerquilhas).all(|n| c.get(j + n) == Some(&'#')))
+                {
+                    j += 1;
+                }
+                let fim = j + 1 + cerquilhas;
+                apagar(&mut codigo, i, fim);
+                i = fim;
+                continue;
+            }
+        }
+        if c[i] == '"' {
+            let mut j = i + 1;
+            while j < c.len() && c[j] != '"' {
+                j += if c[j] == '\\' { 2 } else { 1 };
+            }
+            apagar(&mut codigo, i, j + 1);
+            i = j + 1;
+            continue;
+        }
+        // Um caractere — `'x'`, `'\n'`, `'\''`, `'\u{…}'` —, e não um tempo de
+        // vida (`'a`).
+        if c[i] == '\'' {
+            if seguinte == Some('\\') {
+                let mut j = i + 3;
+                while j < c.len() && c[j] != '\'' {
+                    j += 1;
+                }
+                apagar(&mut codigo, i, j + 1);
+                i = j + 1;
+                continue;
+            }
+            if c.get(i + 2) == Some(&'\'') {
+                apagar(&mut codigo, i, i + 3);
+                i += 3;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    codigo
+}
+
+/// Onde uma fonte Rust traz o código de outro arquivo, se traz: a linha e a
+/// forma. A conferência dos nomes e das chamadas protegidas deixa a suíte de
+/// fora pelo caminho do arquivo, e um módulo de produção que trouxesse um
+/// arquivo do caminho da suíte escaparia dela (o achado 6 do adversário do
+/// passo 1b). As formas, no código — fora dos comentários e dos textos —, em
+/// qualquer espaçamento e partidas em linhas (o achado 2 do adversário do
+/// passo 1c):
+/// - um atributo com a palavra `path` em qualquer lugar dele, do `#[` ao `]`
+///   que o fecha: `#[path = …]`, `#[cfg_attr(…, path = …)]`, `#[r#path = …]`;
+/// - um atributo montado por uma macro, `#[$…]`, que pode ser o `path`;
+/// - o `include!`, que traz o arquivo sem atributo nenhum.
+fn onde_traz_outro_arquivo(fonte: &str) -> Option<(usize, &'static str)> {
+    let c = so_o_codigo(fonte);
+    let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+    let pular_espacos = |mut k: usize| {
+        while c.get(k).is_some_and(|x| x.is_whitespace()) {
+            k += 1;
+        }
+        k
+    };
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    for i in 0..c.len() {
+        if c[i] == '#' {
+            let mut k = pular_espacos(i + 1);
+            if c.get(k) == Some(&'!') {
+                k = pular_espacos(k + 1);
+            }
+            if c.get(k) != Some(&'[') {
+                continue;
+            }
+            let dentro = pular_espacos(k + 1);
+            if c.get(dentro) == Some(&'$') {
+                return Some((linha_de(i), "`#[$…]`, um atributo montado por uma macro"));
+            }
+            let mut nivel = 0usize;
+            let mut fim = k;
+            for (j, &x) in c.iter().enumerate().skip(k) {
+                match x {
+                    '[' => nivel += 1,
+                    ']' => {
+                        nivel -= 1;
+                        if nivel == 0 {
+                            fim = j;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let atributo: String = c[k + 1..fim.max(k + 1)].iter().collect();
+            if tem_a_palavra(&atributo, "path") {
+                return Some((linha_de(i), "`path` num atributo"));
+            }
+        } else if c[i..].starts_with(&['i', 'n', 'c', 'l', 'u', 'd', 'e'])
+            && (i == 0 || !de_nome(c[i - 1]))
+            && c.get(pular_espacos(i + 7)) == Some(&'!')
+            && !c.get(i + 7).is_some_and(|&x| de_nome(x))
+        {
+            return Some((linha_de(i), "`include!`"));
+        }
+    }
+    None
+}
+
+/// Se uma fonte Rust traz o código de outro arquivo — ver
+/// [`onde_traz_outro_arquivo`].
+#[cfg(test)]
+fn fonte_traz_outro_arquivo(fonte: &str) -> bool {
+    onde_traz_outro_arquivo(fonte).is_some()
 }
 
 /// Se `linha` tem `nome` como palavra inteira: nem letra, nem dígito, nem
@@ -5061,7 +5219,9 @@ fn tem_a_palavra(linha: &str, nome: &str) -> bool {
 
 #[cfg(test)]
 mod testes_dos_nomes_protegidos {
-    use super::{NOMES_PROTEGIDOS, tem_a_palavra, tem_atributo_de_caminho};
+    use super::{
+        NOMES_PROTEGIDOS, fonte_traz_outro_arquivo, onde_traz_outro_arquivo, tem_a_palavra,
+    };
 
     /// O atributo de caminho, em qualquer forma, e o que não é ele.
     #[test]
@@ -5071,8 +5231,9 @@ mod testes_dos_nomes_protegidos {
             r#"    #[path="x.rs"] mod y;"#,
             r#"#[ path = "a.rs" ]"#,
             "#[\tpath = \"b.rs\"]",
+            "# [path = \"c.rs\"] mod z;",
         ] {
-            assert!(tem_atributo_de_caminho(linha), "{linha}");
+            assert!(fonte_traz_outro_arquivo(linha), "{linha}");
         }
         for linha in [
             r#"// #[path = "testes/x.rs"]"#,
@@ -5080,8 +5241,49 @@ mod testes_dos_nomes_protegidos {
             r#"let path = "x";"#,
             r#"#[cfg(feature = "modo-teste")]"#,
         ] {
-            assert!(!tem_atributo_de_caminho(linha), "{linha}");
+            assert!(!fonte_traz_outro_arquivo(linha), "{linha}");
         }
+    }
+
+    /// As formas que a conferência por linha não via — o `cfg_attr`, o
+    /// atributo partido em linhas, o `r#path`, o atributo montado por uma
+    /// macro e o `include!` —, e o que não é nenhuma delas: o comentário, o
+    /// texto, o atributo sem `path` e o caminho de um tipo (o caso 2 do
+    /// adversário do passo 1c).
+    #[test]
+    fn o_caminho_de_outro_arquivo_em_qualquer_forma() {
+        for fonte in [
+            "#[cfg_attr(all(), path = \"testes/x.rs\")]\nmod y;\n",
+            "#[\n    path = \"testes/x.rs\"\n]\nmod y;\n",
+            "#[r#path = \"testes/x.rs\"]\nmod y;\n",
+            "macro_rules! m { ($a:ident) => { #[$a = \"testes/x.rs\"] mod y; }; }\nm!(path);\n",
+            "include!(\"testes/x.rs\");\n",
+            "core::include ! (\"testes/x.rs\");\n",
+        ] {
+            assert!(fonte_traz_outro_arquivo(fonte), "{fonte}");
+        }
+        for fonte in [
+            "// #[path = \"testes/x.rs\"]\n",
+            "let path = \"x\";\n",
+            "#[cfg(feature = \"modo-teste\")]\nmod testes;\n",
+            "let caminho = std::path::Path::new(\"x\");\n",
+            "/* #[path = \"x.rs\"] /* aninhado */ include!(\"y\"); */\n",
+            "let s = \"#[path = \\\"x.rs\\\"] include!(y)\";\n",
+            "let s = r#\"#[path = \"x.rs\"]\"#;\n",
+            "#[doc = \"o path de um arquivo\"]\nfn f() {}\n",
+            "let aspas = \'\"\'; #[cfg(test)] mod t;\n",
+            "fn f<\'a>(x: &\'a str) -> &\'a str { x }\n",
+            "let include_str = include_str!(\"x.txt\");\n",
+            "#[cfg_attr(feature = \"modo-teste\", allow(dead_code))]\nfn g() {}\n",
+        ] {
+            assert!(!fonte_traz_outro_arquivo(fonte), "{fonte}");
+        }
+        // A linha que a conferência diz é a da fonte.
+        assert_eq!(
+            onde_traz_outro_arquivo("fn a() {}\n// x\n#[\n path = \"y\"\n]\nmod b;\n")
+                .map(|(l, _)| l),
+            Some(3)
+        );
     }
 
     /// A conta que devolve o rastro e a soma de dois rastros são nomes
@@ -5151,6 +5353,13 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
         }
         let texto = std::fs::read_to_string(caminho)
             .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+        // O arquivo inteiro, e não a linha: o atributo partido em linhas
+        // também traz outro arquivo.
+        if let Some((linha, forma)) = onde_traz_outro_arquivo(&texto) {
+            fora.push(format!(
+                "{relativo}:{linha}: {forma} fora da suíte: o código de outro arquivo escaparia da conferência"
+            ));
+        }
         for (n, linha) in texto.lines().enumerate() {
             for (i, (chamada, donos)) in CHAMADAS_PROTEGIDAS.iter().enumerate() {
                 if !linha.contains(chamada) {
@@ -5161,13 +5370,6 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
                 } else {
                     fora.push(format!("{relativo}:{}: {}", n + 1, linha.trim()));
                 }
-            }
-            if tem_atributo_de_caminho(linha) {
-                fora.push(format!(
-                    "{relativo}:{}: `#[path]` fora da suíte: {}",
-                    n + 1,
-                    linha.trim()
-                ));
             }
             // Um comentário não chama nada: a menção na documentação fica.
             let comentario = linha.trim_start().starts_with("//");
