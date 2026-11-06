@@ -8386,21 +8386,32 @@ fn terminal_a_edicao_de_quem_saiu_da_sessao_e_descartada() -> Resultado {
 /// quando o console a consome, como a de quem saiu da sessão (o achado 2 do
 /// adversário do passo 1b): a suspensão não desconecta o agente, e a
 /// `Amarrada` dele continua valendo — o consumo pergunta à contenção, como
-/// o ponto de commit do pedido em curso. Três voltas: o agente suspenso
+/// o ponto de commit do pedido em curso. Três alvos: o agente suspenso
 /// (`agent.suspend`), a credencial da chave dele (`credential.suspend`) e a
-/// credencial da pessoa que editou. O arrendamento já saiu com a contenção;
-/// o que o caso confere é a linha, que fica vazia, e a recusa no log, com o
+/// credencial da pessoa que editou. E duas ordens para cada um:
+///
+/// - contido depois da conta: o arrendamento sai com a contenção, e a
+///   soltura da edição não acha mais o estado que ela deixou;
+/// - a conta que correu com a contenção — contido entre a reserva e a
+///   conta, como noutro núcleo —: o arrendamento que a conta tomou depois
+///   sai no consumo, pela regra de sempre, com o motivo da contenção
+///   ([`crate::coordenacao::SOLTO_PELA_CONTENCAO`]).
+///
+/// Nas duas, a linha fica vazia, e a recusa vai ao log uma vez, com o
 /// motivo da contenção.
 fn terminal_a_edicao_de_quem_foi_contido_e_descartada() -> Resultado {
     use crate::contencao::Alvo;
+    use crate::coordenacao::SOLTO_PELA_CONTENCAO;
     use crate::interpretador::Modo;
     use crate::ui::{Acao, Origem};
     use politica::arrendamento::Titular;
     let recurso = crate::coordenacao::recurso(CAMPO_DA_MARCA);
     let linha = || crate::interpretador::linha_de_teste(CONSOLE_DA_MARCA);
     let chave = sigilo::publica_de(&chave_de_teste(1));
-    // Reserva, conta e anota, como o `ui.act`; contém; e o console consome.
-    let a_caminho = |origem: Origem, titular: Titular, alvo: &Alvo| -> Resultado {
+    // Reserva, conta e anota, como o `ui.act`, e contém — depois da conta,
+    // ou, se a conta `correu` com a contenção, antes dela —; e o console
+    // consome.
+    let a_caminho = |origem: Origem, titular: Titular, alvo: &Alvo, correu: bool| -> Resultado {
         let numero = crate::interpretador::reservar_edicao_da_arvore(
             CONSOLE_DA_MARCA,
             CAMPO_DA_MARCA,
@@ -8408,13 +8419,33 @@ fn terminal_a_edicao_de_quem_foi_contido_e_descartada() -> Resultado {
             Acao::DefinirValor,
             Some(titular),
         )?;
+        let conter = || -> Resultado {
+            crate::contencao::conter(alvo)
+                .map(|_| ())
+                .map_err(|_| "a contencao do caso foi recusada")
+        };
+        if correu {
+            conter()?;
+        }
         let rastro = crate::coordenacao::editar_com_rastro(&recurso, Some(titular), None, "ui.act")
             .map_err(|_| "a edicao do caso foi recusada pela coordenacao")?;
         crate::interpretador::anotar_a_edicao_da_arvore(CONSOLE_DA_MARCA, numero, rastro);
-        crate::contencao::conter(alvo).map_err(|_| "a contencao do caso foi recusada")?;
-        if crate::coordenacao::estado(&recurso).arrendamento.is_some() {
-            return Err("a contencao nao soltou o arrendamento de quem editou");
+        let arrendado = || {
+            crate::coordenacao::estado(&recurso)
+                .arrendamento
+                .map(|a| a.titular)
+        };
+        if correu {
+            if arrendado() != Some(titular) {
+                return Err("a conta que correu com a contencao nao tomou o arrendamento");
+            }
+        } else {
+            conter()?;
+            if arrendado().is_some() {
+                return Err("a contencao nao soltou o arrendamento de quem editou");
+            }
         }
+        let seq = seq_da_auditoria();
         let marca = crate::log::total_emitidos();
         digitar_marcado("\u{15}agent.ping");
         if linha() != Some((Modo::Comando, 0)) {
@@ -8432,57 +8463,73 @@ fn terminal_a_edicao_de_quem_foi_contido_e_descartada() -> Resultado {
         if recusas != 1 {
             return Err("a edicao de quem foi contido nao foi recusada no log, uma vez");
         }
+        let soltos = registros_depois(seq, |e| {
+            e.metodo == "lease.invalidate"
+                && e.recurso == recurso
+                && e.detalhe == SOLTO_PELA_CONTENCAO
+        })
+        .len();
+        if arrendado().is_some() || soltos != usize::from(correu) {
+            crate::log_error!("teste", "{:?}, correu {}: {} soltos", alvo, correu, soltos);
+            return Err("a soltura de quem foi contido nao saiu pela regra, com o motivo");
+        }
         Ok(())
     };
     for alvo in [Alvo::Agente(chave), Alvo::ChaveDeAgente(chave)] {
-        com_canal_tcp(|| {
-            crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
-            crate::coordenacao::esquecer();
-            let resultado = (|| -> Resultado {
-                let a = AgenteTcpDeTeste::conectar(1)?;
-                let sa = a.sessao();
-                let titular = Titular::Agente {
-                    sessao: sa,
-                    chave: Some(chave),
-                };
-                let r = a_caminho(Origem::Agente(sa), titular, &alvo);
-                // A contenção não derrubou a sessão: o caso mede o que quer.
-                if r.is_ok() && crate::sessoes::identidade(sa).is_none() {
-                    return Err("a suspensao derrubou a sessao: o caso nao mede o que quer");
-                }
-                drop(a);
-                r
-            })();
-            let _ = crate::contencao::soltar(&alvo);
-            crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
-            crate::coordenacao::esquecer();
-            resultado
-        })?;
+        for correu in [false, true] {
+            com_canal_tcp(|| {
+                crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+                crate::coordenacao::esquecer();
+                let resultado = (|| -> Resultado {
+                    let a = AgenteTcpDeTeste::conectar(1)?;
+                    let sa = a.sessao();
+                    let titular = Titular::Agente {
+                        sessao: sa,
+                        chave: Some(chave),
+                    };
+                    let r = a_caminho(Origem::Agente(sa), titular, &alvo, correu);
+                    // A contenção não derrubou a sessão: o caso mede o que
+                    // quer.
+                    if r.is_ok() && crate::sessoes::identidade(sa).is_none() {
+                        return Err("a suspensao derrubou a sessao: o caso nao mede o que quer");
+                    }
+                    drop(a);
+                    r
+                })();
+                let _ = crate::contencao::soltar(&alvo);
+                crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+                crate::coordenacao::esquecer();
+                resultado
+            })?;
+        }
     }
     // A pessoa, pela sessão dela.
-    crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
-    crate::coordenacao::esquecer();
-    let sessao = crate::pessoas::sessao_de_teste(
-        crate::pessoas::Console::Terminal(5),
-        "pessoa-contida",
-        "operador",
-    );
-    let pessoa = crate::pessoas::dona_da_sessao(sessao);
-    let resultado = (|| -> Resultado {
-        let pessoa = pessoa.ok_or("a sessao de teste nao tem pessoa")?;
-        let titular = Titular::Pessoa {
-            sessao: sessao.0,
-            pessoa: pessoa.0,
-        };
-        a_caminho(Origem::Pessoa, titular, &Alvo::Pessoa(pessoa))
-    })();
-    if let Some(pessoa) = pessoa {
-        let _ = crate::contencao::soltar(&Alvo::Pessoa(pessoa));
+    for correu in [false, true] {
+        crate::interpretador::abrir_console(CONSOLE_DA_MARCA);
+        crate::coordenacao::esquecer();
+        let sessao = crate::pessoas::sessao_de_teste(
+            crate::pessoas::Console::Terminal(5),
+            "pessoa-contida",
+            "operador",
+        );
+        let pessoa = crate::pessoas::dona_da_sessao(sessao);
+        let resultado = (|| -> Resultado {
+            let pessoa = pessoa.ok_or("a sessao de teste nao tem pessoa")?;
+            let titular = Titular::Pessoa {
+                sessao: sessao.0,
+                pessoa: pessoa.0,
+            };
+            a_caminho(Origem::Pessoa, titular, &Alvo::Pessoa(pessoa), correu)
+        })();
+        if let Some(pessoa) = pessoa {
+            let _ = crate::contencao::soltar(&Alvo::Pessoa(pessoa));
+        }
+        crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
+        crate::coordenacao::esquecer();
+        crate::pessoas::esquecer_registradas();
+        resultado?;
     }
-    crate::interpretador::fechar_console(CONSOLE_DA_MARCA, "fim do caso");
-    crate::coordenacao::esquecer();
-    crate::pessoas::esquecer_registradas();
-    resultado
+    Ok(())
 }
 
 /// O `definir` do console físico pela árvore confere a regra da linha da
