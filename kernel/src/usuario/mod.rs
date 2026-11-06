@@ -1330,12 +1330,13 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// Nos quatro primeiros o processo segue intacto. A volta adiada não muda
 /// nada — a seguinte decide de novo, com a política de então. No último não
 /// há para onde voltar: os fluxos de quem era ponta já acabaram na troca
-/// (`o programa mudou`), o registro vai em nome do processo como ele está —
-/// com o programa que ele já adotou, que é o que o fio diz —, e o processo
-/// acaba. Dizer cada um é o que impede a cadeia de mostrar um
-/// `process.exec` permitido sem troca nenhuma, ou sem o fim que a troca
-/// teve. A que chega ao fim não grava execução: a imagem nova roda, e é o
-/// que a decisão permitiu.
+/// (`o programa mudou`), o registro vai em nome de quem o gate decidiu — o
+/// programa que pediu, e não o que o processo adotou na troca, que não
+/// rodou uma instrução (o F2 do adversário do AE-1) —, e o processo acaba.
+/// Dizer cada um é o que impede a cadeia de mostrar um `process.exec`
+/// permitido sem troca nenhuma, ou sem o fim que a troca teve. A que chega
+/// ao fim não grava execução: a imagem nova roda, e é o que a decisão
+/// permitiu.
 ///
 /// Quem não é ponta de fluxo nenhum não toma a ordem: não há fim a gravar.
 /// E não vira ponta no meio da chamada — abrir e aceitar um fluxo são

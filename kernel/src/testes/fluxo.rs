@@ -2391,22 +2391,23 @@ fn trocar_para_o_grande(p: &Ponta, caminho: &str) -> Result<TrocaMedida, &'stati
 }
 
 /// A medida do F3 do adversário do AE-1: a troca de imagem de quem é ponta
-/// de fluxo para um programa grande — o `livro`, uns 850 KiB lidos do disco
-/// —, primeiro sozinha, a referência, e depois com três outros processos
-/// escrevendo e lendo sem parar nos fluxos deles — cada operação uma decisão
-/// do gate, com a ordem das gravações, pedidas por um fio do kernel como os
-/// processos, uma de cada vez, como o executor as atenderia. A espera da ordem não
-/// tem fila: a troca que a acha com outro dá a vez e roda de novo, antes do
-/// gate (nada decide nem grava) ou no meio (a decisão e a execução dela,
-/// adiada). O caso diz no log, para as duas: o tempo até a troca, as voltas
-/// antes do gate e no meio, os registros da troca, as operações dos
-/// escritores e a auditoria perdida — as lacunas do journal —; e confere o
-/// que a ordem garante: a troca acontece, cada volta no meio grava dois
-/// registros — a decisão e a execução adiada que a cita —, e nada da
-/// auditoria se perde. Com o journal drenando, como fora da suíte (ver
-/// `com_o_journal_drenando`): com a gravação periódica pausada, que é o
-/// padrão da suíte, o anel transbordava entre duas gravações pedidas, e a
-/// lacuna contava como perdido o que o coletor teria gravado.
+/// de fluxo para um programa grande — o `livro`, uns 850 KiB no x86, lidos
+/// do disco —, primeiro sozinha, a referência, e depois com três outros
+/// processos escrevendo e lendo sem parar nos fluxos deles — cada operação
+/// uma decisão do gate, com a ordem das gravações, pedidas por um fio do
+/// kernel como os processos, uma de cada vez, como o executor as atenderia.
+/// A espera da ordem não tem fila: a troca que a acha com outro dá a vez e
+/// roda de novo, antes do gate (nada decide nem grava) ou no meio (a
+/// decisão e a execução dela, adiada). O caso diz no log, para as duas: o
+/// tempo até a troca, as voltas antes do gate e no meio, os registros da
+/// troca, as operações dos escritores e a auditoria perdida — as lacunas
+/// do journal —; e confere o que a ordem garante: a troca acontece, cada
+/// volta no meio grava dois registros — a decisão e a execução adiada que a
+/// cita —, e nada da auditoria se perde. Com o journal drenando, como fora
+/// da suíte (ver `com_o_journal_drenando`): com a gravação periódica
+/// pausada, que é o padrão da suíte, o anel transbordava entre duas
+/// gravações pedidas, e a lacuna contava como perdido o que o coletor teria
+/// gravado.
 pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
     const PONTAS: usize = 3;
     const ADIADA: &str = "adiada: a ordem das gravacoes com outro fio";

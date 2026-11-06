@@ -582,8 +582,8 @@ fn executar(
         // aviso. Sem isso, a conta arrendava o campo e fazia a versão
         // crescer, e a entrega falhava depois — "uma ação recusada não
         // arrenda o campo" (o achado 1 do adversário do passo 1). O que
-        // ainda falhar depois da conta — a janela que fecha noutro núcleo —
-        // tem o que fez no campo desfeito abaixo.
+        // ainda falhar depois da conta — a fila do dono que enche noutro
+        // núcleo — não deixa o campo arrendado pela edição: ver abaixo.
         conferir_a_entrega(id, acao)?;
         // O Enter que o Terminal vai digitar por este `confirm` de um agente:
         // reservado no console, amarrado à conexão de quem pediu e à chave

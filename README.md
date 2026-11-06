@@ -4947,7 +4947,7 @@ Sem ganho a medir, não há o que pagar com esse risco.
   programa que roda. Fechar os endpoints como no fim do processo, ou mudar
   a identidade deles, muda o ciclo de vida de um objeto da malha: fica
   para uma decisão.
-- **O Terminal, o servidor de janelas e o teclado da Pessoa** (ver
+- **O Terminal, o servidor de janelas e o teclado da Pessoa** (a DT-1; ver
   [Consoles](#consoles)): a barra entrega o `ABRIR` a quem escuta os
   nomes `terminal` e `janelas`, e `escutar` não reserva nome nenhum; e
   qualquer processo dono de uma superfície, até invisível, pede o foco do
@@ -4967,7 +4967,8 @@ Sem ganho a medir, não há o que pagar com esse risco.
   pessoa, quando consome, no que o Terminal digita marcado — o que veio da
   árvore —, e o que o processo dono do pseudo-terminal digitar sem marcar
   chega a ele como as teclas dela (o resto da corrida com o Enter da
-  Pessoa, fechada no passo 1: ver [Consoles](#consoles)). E o `ui.claim` de
+  Pessoa, cuja edição da árvore foi fechada no passo 1: ver
+  [Consoles](#consoles)). E o `ui.claim` de
   um agente não passa pela regra da linha da pessoa: ele
   arrenda a linha do nome, da senha ou da cerimônia por até 300 s,
   renováveis, e as teclas da Pessoa nela são `CONFLICT` enquanto durar —
@@ -5005,16 +5006,20 @@ Sem ganho a medir, não há o que pagar com esse risco.
   o nome e a senha digitados adiantado ecoavam (ver [Consoles](#consoles)).
   E, como [B], pelos achados do adversário do passo 1: a linha que passa a
   pedir a pessoa recusa ali as edições a caminho e solta já o arrendamento
-  delas; a edição contada que não chega ao programa não arrenda o campo; a
-  de quem saiu da sessão é descartada no consumo; a soltura vai à
-  auditoria como `lease.invalidate`; e o aviso de outra cerimônia não muda
-  a linha (ver [Consoles](#consoles)). Continuam com a decisão: a tecla da
-  Pessoa digitada entre a entrada de uma edição da árvore e o consumo do
-  Enter que faz a linha pedir a pessoa — a linha ainda pede um comando, a
-  janela coordena a tecla contra o arrendamento legítimo de quem editou, e
-  ela é `CONFLICT` (o resto do achado 2): coordená-la onde é consumida,
-  como a do físico, é desenho da mesma família; o processo que escreve no
-  pseudo-terminal sem a marca da árvore, que digita como a Pessoa; o
+  delas; a edição que não chegaria ao programa é recusada antes da conta,
+  e a contada que não chega solta o que tomou; a de quem saiu da sessão é
+  descartada no consumo; a soltura vai à auditoria como
+  `lease.invalidate`; e o aviso de outra cerimônia não muda a linha. E,
+  pelos do passo 1b: a edição de quem foi contido com ela a caminho é
+  descartada no consumo; e o Enter que leu a cerimônia antes de um aviso
+  dela não volta a linha (ver [Consoles](#consoles)). Continuam com a
+  decisão: a tecla da Pessoa digitada entre a entrada de uma edição da
+  árvore e o consumo do Enter que faz a linha pedir a pessoa — a linha
+  ainda pede um comando, a janela coordena a tecla contra o arrendamento
+  legítimo de quem editou, e ela é `CONFLICT` (o resto do achado 2):
+  coordená-la onde é consumida, como a do físico, é desenho da mesma
+  família; o processo que escreve no pseudo-terminal sem a marca da
+  árvore, que digita como a Pessoa; o
   foco do teclado tomado — uma janela que pede o foco enquanto a Pessoa
   digita uma senha recebe as teclas dela —; a senha adiantada num
   Terminal; a senha digitada no lugar errado — numa linha que pede um
@@ -5037,6 +5042,24 @@ Sem ganho a medir, não há o que pagar com esse risco.
   de fora do da imagem e um editor de outro (o achado 3), e o resto é o
   tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
   de 96 bytes: fica para uma decisão.
+- **O zumbi e a cota de processos** (o achado 1 do adversário do passo
+  1b, de antes dele): a cota conta os processos **vivos** do titular, e o
+  filho que saiu e que o pai ainda não colheu — o zumbi — guarda até a
+  colheita a vaga na tabela de fios, com a pilha e o espaço de endereços.
+  A tabela é uma só, de 32 vagas de trabalho, para os processos de todos e
+  para os fios do kernel. Um titular com `process.run` e uma cota pequena,
+  com um programa que bifurca e não colhe, passa pela cota a cada
+  `bifurcar` e acaba com as vagas: daí em diante nenhum fio nasce, para
+  ninguém — outro titular não lança programa, o Terminal não abre, a
+  cerimônia de pareamento não começa, e o `system.power` não cria o fio
+  `energia`. Recupera-se encerrando o pai (`process.terminate`): os zumbis
+  de um pai morto são recolhidos. As alternativas: (a) o zumbi conta na
+  cota do titular até a colheita, e um titular ocupa no máximo a cota dele
+  da tabela — a recomendada; (b) um teto de filhos não colhidos por pai,
+  acima do qual o `bifurcar` é recusado; (c) vagas reservadas aos fios do
+  kernel, que salvam o `system.power` e o coletor, mas não o isolamento
+  entre titulares. Mudar o que a cota conta fica para uma decisão; um caso
+  que a confere está pronto, fora da suíte.
 
 ## O tempo
 
@@ -6286,10 +6309,12 @@ reserva o editor dela some — o código dele deixa de rodar até a linha
 ganhar outro nome, falha fechada. O registro de chaves de atualização,
 `/etc/duke/atualizacao`, tem o mesmo formato e não tem a reserva
 (`sigilo::registro::ler_linha_de_atualizacao`): o nome de uma chave de
-atualização não vai à descrição de um programa, e o kernel recusa o
-registro inteiro pela primeira linha que não se lê — com a reserva, a
-máquina de antes dela, com uma chave de atualização assim, ficaria presa
-à versão que roda. Em quem cada papel confia é da política
+atualização não vai à descrição de um programa, e o kernel acha a chave
+que assinou pela primeira linha que a tem e recusa o registro inteiro por
+uma linha que não se lê antes dela
+(`sigilo::registro::chave_de_atualizacao`) — com a reserva, a máquina de
+antes dela, com uma chave de atualização assim, ficaria presa à versão
+que roda. Em quem cada papel confia é da política
 ([`politica::arquivo`](politica/src/arquivo.rs)):
 
 ```text
@@ -7876,18 +7901,21 @@ da Pessoa e o `ui.act` rodam no mesmo executor, um depois do outro.
 console recusa só saía quando ele as consumia, e a tecla da Pessoa nesse
 meio-tempo — o nome, depois do Enter do `login` — era `CONFLICT` na
 janela (o achado 2 do adversário do passo 1). Agora, quando o console
-consome o que faz a linha pedir a pessoa — o Enter do `login`, da
-`senha`, do `aceitar` ou do `parear`; o aviso da cerimônia que leva a
-linha a um passo dela, ou que começa o engolir —, as edições da
-árvore a caminho são recusadas ali, todas, na ordem, com uma linha no log
-por edição, e o arrendamento que a sequência delas tomou sai já, pela
-mesma regra do estado exato; o que chegar marcado delas depois é
-descartado, mesmo que a linha volte a pedir um comando. Fica a tecla
-digitada entre a entrada da edição e o consumo do Enter: a linha ainda
-pede um comando, e o arrendamento de quem editou é legítimo — a janela a
-coordena contra ele, e ela é `CONFLICT`. Coordenar a tecla do Terminal
-onde ela é consumida, como a do físico, é uma mudança de desenho da
-família da DT-1, pendente (ver [Decisões pendentes](#decisões-pendentes)).
+consome o Enter que faz a linha pedir a pessoa — o do `login`, da
+`senha`, do `aceitar` ou do `parear` —, as edições da árvore a caminho são
+recusadas ali, todas, na ordem, com uma linha no log por edição, e o
+arrendamento que a sequência delas tomou sai já, pela mesma regra do
+estado exato; o que chegar marcado delas depois é descartado, mesmo que a
+linha volte a pedir um comando. O aviso da cerimônia confere o mesmo,
+mas hoje nunca leva uma linha que pede um comando a pedir a pessoa: a
+cerimônia começa pelo Enter do `aceitar` ou do `parear`, que já é a
+virada, e o engolir só começa de uma linha que já pedia a senha. Fica a
+tecla digitada entre a entrada da edição e o consumo do Enter: a linha
+ainda pede um comando, e o arrendamento de quem editou é legítimo — a
+janela a coordena contra ele, e ela é `CONFLICT`. Coordenar a tecla do
+Terminal onde ela é consumida, como a do físico, é uma mudança de desenho
+da mesma família da decisão sobre o Terminal e o teclado da Pessoa (a
+DT-1), pendente (ver [Decisões pendentes](#decisões-pendentes)).
 
 **A edição que não chega.** A interface confere a entrega antes da conta
 da coordenação, como as reservas: a janela de pé, a fila de valores dela
@@ -7896,12 +7924,20 @@ quem escute e com lugar para o aviso. Antes, a conta arrendava o campo e
 fazia a versão crescer, a entrega falhava depois, e o agente ficava com o
 campo por 60 s com a ação recusada — e a sequência das recusadas se
 quebrava na edição que não chegou, que o console nunca consumiria (o
-achado 1). O que ainda falhar depois da conta — a janela que fecha noutro
-núcleo — desfaz o que a edição fez no campo: o arrendamento que ela tomou
-sai, pela mesma regra ("arrendamento implicito solto: a edicao pela
-arvore nao chegou a linha"); a que só o renovou não quebra a sequência —
-a renovação passa à edição a caminho que ela continuou, e sai com a
-recusa dela. No físico, a regra da linha da pessoa é conferida de novo na
+achado 1). O que ainda falhar depois da conta — a fila do dono que enche
+noutro núcleo — não deixa o campo arrendado pela edição: o arrendamento
+que ela tomou sai, pela mesma regra ("arrendamento implicito solto: a
+edicao pela arvore nao chegou a linha"); a que só o renovou não quebra a
+sequência — a renovação passa à edição a caminho que ela continuou, e sai
+com a recusa dela. A versão que a conta fez crescer fica. E a janela do
+Terminal que fecha nesse meio-tempo — ele morreu — fecha o console, e as
+reservas saem com ele: o arrendamento fica até vencer, num elemento que
+não volta. O ramo em que a edição que não chegou continuou uma sequência
+já recusada não se alcança: a reserva, a conta e a entrega da interface
+rodam num passo só do executor, e a recusa no consumo e no Enter, no
+mesmo executor; o aviso da cerimônia, de outro fio, nunca leva uma linha
+de comando a pedir a pessoa. Se se alcançasse, o arrendamento ficaria
+até vencer. No físico, a regra da linha da pessoa é conferida de novo na
 seção que edita a linha, e o arrendamento que a edição tomou sai se ela
 não chegou — uma corrida que o caminho de verdade não alcança, porque o
 `ui.act` do físico roda no executor que consome as teclas.
@@ -7913,16 +7949,30 @@ saiu depois — a conexão acabou, ou outra ocupou a sessão — é descartada
 quando o console a consome, numa linha de comando também, com a recusa no
 log; o arrendamento dela, se ainda é o que ela deixou, sai pela mesma
 regra ("arrendamento implicito solto: quem pediu a edicao pela arvore
-saiu da sessao"; o achado 7).
+saiu da sessao"; o achado 7). E o consumo pergunta à contenção, como o
+ponto de commit do pedido em curso: a edição de um agente suspenso, ou
+com a credencial suspensa — o agente continua conectado, e a amarração
+continua valendo —, e a de uma pessoa com a credencial suspensa, cuja
+sessão a reserva guarda, são descartadas do mesmo jeito, com o motivo da
+contenção no log ("agente suspenso", "credencial suspensa"). O
+arrendamento dela já saiu com a contenção; se a conta correu com a
+contenção, noutro núcleo, e o tomou depois, ele sai pela mesma regra
+("arrendamento implicito solto: quem pediu a edicao pela arvore foi
+contido"; o achado 2 do adversário do passo 1b).
 
 **Quem solta.** O estado que a soltura confere é o rastro que a conta da
 coordenação devolveu — de que recurso, o antes e o depois —, com os
-campos privados: só `coordenacao::editar_com_rastro` o constrói, quem
-solta não escolhe o estado a soltar, e o de agora, lido por fora, não
-solta nada (o achado 8). E o `cargo xtask invariantes` confere quem chama
-a soltura, a reserva, a anotação, a desistência e a entrega que falhou
-pelo nome sozinho, em qualquer forma — com o caminho ou sem ele, num
-`use`, renomeado —, e não só pela chamada com o caminho.
+campos privados: só `coordenacao::editar_com_rastro` o constrói — e
+`Rastro::seguida_de`, que soma dois que ela devolveu, para a edição que
+só renovou e não chegou —; quem solta não escolhe o estado a soltar, e o
+de agora, lido por fora, não solta nada (o achado 8). E o `cargo xtask
+invariantes` confere quem chama a soltura, a reserva, a anotação, a
+desistência, a entrega que falhou, a conta que devolve o rastro e a soma
+de dois rastros pelo nome sozinho, em qualquer forma — com o caminho ou
+sem ele, num `use`, renomeado —, e não só pela chamada com o caminho; e
+recusa o atributo `#[path]` no kernel fora da suíte, que a conferência
+deixa de fora pelo caminho do arquivo (o achado 6 do adversário do passo
+1b).
 
 Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
 pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
@@ -7957,32 +8007,36 @@ enquanto ele engole —, não passa pela coordenação, e não vira comando; o
 console diz isso, sem prompt, e o Enter devolve o prompt sem executar
 nada, com a linha vazia. A árvore não edita a linha nem a confirma por um
 agente nesse meio-tempo: é a linha da pessoa, que ainda não deixou de ser
-a da senha. O fim chega de outro núcleo, e pode correr com a tecla e com
-o Enter: a tecla que já não tinha sido engolida, e que chega à linha
-depois do fim, é engolida ali — o console confere o engolir de novo na
-mesma seção que edita a linha —; e o Enter que leu a linha da senha antes
-do fim, e a toma depois, é o Enter que acaba o engolir — a linha seguinte
-da Pessoa não é engolida. Num Terminal, a coordenação é da janela, que
-recebe a tecla antes do console: até o Enter, as teclas do Terminal que
-engole vão ao programa sem passar por ela, e as de depois dele passam,
-mesmo que o console ainda não o tenha tratado; e a que o Terminal não
-recebe — ele morreu — some, em vez de cair no console físico. Só a borda
-fica de fora: a tecla que passou pela coordenação antes de o fim chegar
-já fez a versão crescer. E o aviso do fim sai de outro fio e pode chegar
-atrasado — depois de a Pessoa desistir da linha que esperava, sair e
-começar o `login`: ele só muda a linha que é da cerimônia ou que pede um
-comando, e só começa a engolir a partir da senha da cerimônia. E só a da
-cerimônia do console: o aviso leva o número da cerimônia, e o console
-guarda o da dele — o aviso lido antes de ela acabar e entregue depois,
-com a linha já de volta a um comando, não a põe numa cerimônia morta, e
-o comando seguinte da Pessoa não se perde nela (o achado 6 do adversário
-do passo 1; "pareamento: o aviso lido antes do fim da cerimonia nao muda
-a linha"). A do nome,
-a da senha do login e as da troca da senha ficam como estão, e o bit do
-histórico segue a linha que ficou — antes, a do nome virava uma linha de
-comando, e o nome e a senha digitados adiantado ecoavam, iam à árvore e
-ao histórico; a da senha era engolida ("pareamento: o aviso atrasado do
-fim nao muda a linha do nome nem a da senha do login").
+a da senha. O fim chega de outro núcleo, e pode correr com a tecla e com o
+Enter: a tecla que já não tinha sido engolida, e que chega à linha depois
+do fim, é engolida ali — o console confere o engolir de novo na mesma
+seção que edita a linha —; e o Enter que leu a linha da senha antes do
+fim, e a toma depois, é o Enter que acaba o engolir — a linha seguinte da
+Pessoa não é engolida. Num Terminal, a coordenação é da janela, que recebe
+a tecla antes do console: até o Enter, as teclas do Terminal que engole
+vão ao programa sem passar por ela, e as de depois dele passam, mesmo que
+o console ainda não o tenha tratado; e a que o Terminal não recebe — ele
+morreu — some, em vez de cair no console físico. Só a borda fica de fora:
+a tecla que passou pela coordenação antes de o fim chegar já fez a versão
+crescer. E o aviso do fim sai de outro fio e pode chegar atrasado — depois
+de a Pessoa desistir da linha que esperava, sair e começar o `login`: ele
+só muda a linha que é da cerimônia ou que pede um comando, e só começa a
+engolir a partir da senha da cerimônia. A do nome, a da senha do login e
+as da troca da senha ficam como estão, e o bit do histórico segue a linha
+que ficou — antes, a do nome virava uma linha de comando, e o nome e a
+senha digitados adiantado ecoavam, iam à árvore e ao histórico; a da senha
+era engolida ("pareamento: o aviso atrasado do fim nao muda a linha do
+nome nem a da senha do login"). E só a da cerimônia do console: o aviso
+leva o número da cerimônia, e o console guarda o da dele — o aviso lido
+antes de ela acabar e entregue depois, com a linha já de volta a um
+comando, não a põe numa cerimônia morta, e o comando seguinte da Pessoa
+não se perde nela (o achado 6 do adversário do passo 1; "pareamento: o
+aviso lido antes do fim da cerimonia nao muda a linha"). E só para a
+frente: o console guarda também o passo da cerimônia que a linha mostra, e
+o Enter numa linha dela, que lê o passo antes de escrever, não volta a
+linha que um aviso levou adiante nesse meio-tempo — nem o aviso atrasado a
+que o Enter levou adiante (o achado 3 do adversário do passo 1b;
+"pareamento: o passo lido antes do aviso nao volta a linha").
 
 **Depois do login**, cada comando decide pelo papel da pessoa **agora**. A
 sessão que acaba por fora — `session.revoke`, a pessoa revogada — acaba no
@@ -8055,6 +8109,9 @@ quebrar a sequência das quatro recusadas ("terminal: a recusada solta o
 arrendamento mesmo com uma edicao que nao chegou"); a edição de quem saiu
 da sessão, descartada no consumo, e a reserva com a chave de outro
 agente, recusada ("terminal: a edicao de quem saiu da sessao e
+descartada"); a de quem foi contido com ela a caminho — o agente
+suspenso, a credencial dele, a da pessoa —, descartada no consumo, com o
+motivo da contenção no log ("terminal: a edicao de quem foi contido e
 descartada"); e o `definir` do físico, que confere a linha da pessoa onde
 edita ("interface: o definir do fisico confere a linha da pessoa onde
 edita"). A fumaça
@@ -8128,7 +8185,9 @@ linha `processos <papel> <n>`, de 1 a 64, 4 sem ela; na imagem, 32 para o
 `sistema`, 8 para o operador e o administrador, 2 para o observador —,
 contado por titular: uma sessão de agente, uma de pessoa, o sistema. O
 processo além da cota — lançado ou bifurcado — não nasce, e a recusa vai
-para a auditoria.
+para a auditoria. O zumbi não conta — ele não está vivo —, e guarda a vaga
+dele na tabela de fios até a colheita: o que isso permite, e as
+alternativas, estão em [Decisões pendentes](#decisões-pendentes).
 
 O `cargo xtask invariantes` confere que só o canal chama
 `ui::agir_com_versao`, que só a administração revoga um arrendamento, que
@@ -9292,7 +9351,7 @@ distribuída.
 **Testes.** No hospedeiro, as contas da cerimônia — as derivações, o
 compromisso, a janela, a confirmação, a tabela de transições e passos
 sorteados — e o prólogo, os quadros e um vetor fixo do `sigilo`. Na suíte,
-nas duas arquiteturas, 42 casos `pareamento:` — o outro Duke é a suíte,
+nas duas arquiteturas, 44 casos `pareamento:` — o outro Duke é a suíte,
 com uma chave de teste, e a pessoa digita no console: os dois lados, o
 código errado, os prazos, o replay, o homem no meio, o compromisso, a
 chave que não é de Duke, a lápide, a suspensão, o papel, a concorrência
@@ -9308,9 +9367,13 @@ dentro da chamada `fechar` dele, com a pilha de rede sondada ali; a
 edição da árvore que corre com o Enter do `aceitar` no Terminal de
 verdade, descartada na linha da cerimônia com o arrendamento solto, e a
 que continua recusada quando o fim, no meio dela, devolve a linha a um
-comando; e o aviso do fim que chega atrasado, depois do `logout` e do
+comando; o aviso do fim que chega atrasado, depois do `logout` e do
 `login` ou do `senha`, sem mudar a linha do nome, a da senha nem a da
-senha atual da troca. E a
+senha atual da troca; o aviso dos códigos lido antes de o prazo vencer e
+entregue depois do aviso do fim, que não muda a linha; e o Enter que leu
+a cerimônia antes de um aviso dela, que não volta a linha — nem à espera
+depois dos códigos, nem a uma cerimônia que acabou —, e o aviso dos
+códigos lido antes do Enter que leva a linha à senha, que não a volta. E a
 **bancada de duas máquinas**, `cargo xtask pareamento`: dois Dukes de pé e
 a pessoa no teclado dos dois — a bancada lê o código de cada tela pela
 árvore semântica e o digita no outro —, com uma ponte do meio que passa os bytes ou faz o homem no meio:
@@ -9345,9 +9408,12 @@ suíte e é reprovada no hospedeiro: os dois lados da suíte usam a mesma
 conta pura, e só os testes do hospedeiro e o vetor fixo do `sigilo` têm um
 oráculo de fora. **As trinta e nove reprovam.** A campanha também achou uma
 corrida na suíte — "o desligamento" abria a cerimônia depois de o fio da
-energia, meio segundo depois do pedido, ter entregue a máquina —, e a
-concorrência pedida ganhou o caso que faltava: o `device.forget` de outra
-pessoa no meio da cerimônia e dentro do commit.
+energia, meio segundo depois do pedido, ter entregue a máquina; desde o
+NS22, o caso segura o fio da energia antes de ele parar as gravações
+(`energia::Segura`, só na suíte), e o que pede com a ação a caminho não
+depende do meio segundo —, e a concorrência pedida ganhou o caso que
+faltava: o `device.forget` de outra pessoa no meio da cerimônia e dentro
+do commit.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -9398,9 +9464,10 @@ contrapressão segura quem escreve; o `finish` termina um sentido, e o
 `close` fecha para quem fecha, com o que ele escreveu legível até o fim
 pela outra ponta, como o FIN do TCP. A ponta é do processo: não se herda
 no `fork`, acaba no `exec` e na morte — a saída, e não a colheita: o
-filho que saiu e que o pai ainda não colheu, o zumbi, guarda só o código
-de saída, e o coletor solta a malha, os fluxos, o enlace e as mensagens
-dele na primeira passada, uma vez só (o AE-5). Tudo é volátil: o reboot
+filho que saiu e que o pai ainda não colheu, o zumbi, guarda o código de
+saída — e, até a colheita, a vaga, com a pilha e o espaço de endereços —,
+e o coletor solta a malha, os fluxos, o enlace e as mensagens dele na
+primeira passada, uma vez só (o AE-5). Tudo é volátil: o reboot
 acaba os fluxos. Ver [`kernel/src/fluxo.rs`](kernel/src/fluxo.rs) e a conta pura em
 [`politica/src/fluxo.rs`](politica/src/fluxo.rs).
 
@@ -9971,7 +10038,7 @@ a N188 num núcleo só.
 | fora do SDK (resíduo do F1): o texto cortado no meio da palavra (N176), ou sem a marca do corte (N180) | "auditoria: a citacao da decisao fica inteira acima do teto", "chaves: a declaracao se ancora so na decisao de quem declara"; e os testes do hospedeiro do `politica::auditoria` |
 | fora do SDK (resíduo do F1): o nascimento que sobrescreve (N174); o `filho N` até o fio do pai aceito (N175); a falta sem tirar a marca do corte (N177); o grafo que ignora a abreviada de outro resumo (N178); o firewall casado pelo programa (N179); o editor `desconhecido` aceito (N181) | os testes do hospedeiro do `seguranca::grafo`, do `seguranca::evento`, do `politica::procedencia`, do `politica::auditoria`, do motor, do `sigilo::registro` e do xtask — a suíte não produz um registro cortado ou repetido, um motivo de procedência cortado, uma troca abreviada, uma execução barrada de descrição longa nem um editor com o nome reservado |
 | fora do SDK (AE-5): a reserva do nome `desconhecido` de volta no registro de chaves de atualização (N183); a conferência do `xtask` só pela chamada com o caminho (N194); o grafo do NSF comparando a abreviada só pelo resumo (N196) | os testes do hospedeiro do `sigilo::registro`, do xtask, do `seguranca::grafo` e do motor |
-| fora do SDK (AE-5, itens 1 a 3): o recolhimento sem limpar os zumbis (N184); a colheita que limpa de novo (N185); o fio da energia sem o gancho da suíte (N186); a execução da decisão que recalcula quem pede (N187); a volta "no meio" sem a execução adiada (N188) | "fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita"; "aviso: o desligamento avisa o fim"; "fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio"; "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" — num núcleo só |
+| fora do SDK (AE-5, itens 1 a 3): o recolhimento sem limpar os zumbis (N184); a colheita que limpa de novo (N185); o fio da energia sem o gancho da suíte (N186); a execução da decisão que recalcula quem pede (N187); a volta "no meio" sem a execução adiada (N188) | "fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita"; "aviso: o desligamento avisa o fim"; "fluxo: a execucao da troca vai em nome da decisao, com a sessao acabada no meio" e "fluxo: a troca de imagem que falha depois do ponto sem volta"; "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" — num núcleo só |
 | fora do SDK (AE-5, item 4 e os achados 1, 2, 5, 6 e 7 do adversário do passo 1): a entrega sem a conferência antes da conta (N189); a renovação que não passa adiante (N190); o Enter sem recusar as edições a caminho (N191); a soltura como `ui.release` (N192); o consumo sem conferir quem pediu (N193); o `definir` do físico sem a regra na seção (N195); o aviso de qualquer cerimônia (N197) | "terminal: a edicao que nao chega ao programa nao arrenda o campo"; "terminal: a recusada solta o arrendamento mesmo com uma edicao que nao chegou"; "terminal: a tecla da pessoa depois do Enter, com a edicao a caminho, nao e CONFLICT"; os casos que contam a soltura; "terminal: a edicao de quem saiu da sessao e descartada"; "interface: o definir do fisico confere a linha da pessoa onde edita"; "pareamento: o aviso lido antes do fim da cerimonia nao muda a linha" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |

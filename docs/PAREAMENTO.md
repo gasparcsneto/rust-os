@@ -172,12 +172,22 @@ Antes, o aviso dos códigos lido assim punha a linha de comando no código
 do par de uma cerimônia morta, e o comando seguinte da Pessoa se perdia
 nela (o achado 6 do adversário do passo 1).
 
-A linha que passa a pedir a Pessoa — o Enter do `aceitar` ou do `parear`,
-o aviso que a leva a um passo da cerimônia ou que começa o engolir —
-recusa ali as edições da
-árvore a caminho, e o arrendamento delas sai já: a tecla da Pessoa que
-chega à linha da cerimônia depois disso não é `CONFLICT` (o achado 2; ver
-"A corrida com o Enter da Pessoa", nos Consoles do README).
+A linha que passa a pedir a Pessoa — o Enter do `aceitar` ou do `parear`
+— recusa ali as edições da árvore a caminho, e o arrendamento delas sai
+já: a tecla da Pessoa que chega à linha da cerimônia depois disso não é
+`CONFLICT` (o achado 2; ver "A corrida com o Enter da Pessoa", nos
+Consoles do README). O aviso confere o mesmo, mas hoje nunca leva uma
+linha que pede um comando a pedir a Pessoa: a cerimônia começa pelo
+Enter, e o engolir só começa de uma linha que já pedia a senha.
+
+E o Enter numa linha da cerimônia, que lê o que ela pede antes de
+escrever na linha, não volta a linha que um aviso mudou nesse
+meio-tempo: a cerimônia só anda para a frente, o console guarda o passo
+que a linha mostra, e quem leu um passo de antes não o desfaz — nem o
+aviso atrasado, nem o Enter. Antes, o Enter com texto na linha da espera
+voltava a linha dos códigos à da espera, e o código digitado em seguida
+ouvia "ja respondido"; e o Enter que leu a cerimônia viva antes do fim a
+punha de volta na linha (o achado 3 do adversário do passo 1b).
 
 Os fins: `Concluida` (os dois gravaram); `Desfeita(motivo)` (nada
 gravado); `GravadaSemAviso` (este lado gravou e o outro não confirmou —
@@ -267,7 +277,7 @@ compartilhada, a nuvem e a conta central.
   a coerência sob passos sorteados; e o `sigilo`: o prólogo e os quadros
   da cerimônia, que não abrem como enlace nem como agente, e um vetor fixo
   das efêmeras aos códigos e ao `R`.
-- **Suíte** (x86 e ARM): 42 casos `pareamento:` — o outro Duke é a suíte,
+- **Suíte** (x86 e ARM): 44 casos `pareamento:` — o outro Duke é a suíte,
   com uma chave de teste, iniciando pela vaga do enlace ou aceitando pela
   via do fio da cerimônia, e a Pessoa digita no console. Os dois lados; o
   código errado, expirado, reutilizado; o replay; o par no meio; outro Duke
@@ -293,12 +303,16 @@ compartilhada, a nuvem e a conta central.
   que acaba dentro da chamada `fechar` dele; a edição da árvore que corre
   com o Enter do `aceitar` no Terminal de verdade, descartada na linha da
   cerimônia com o arrendamento solto, e a que continua recusada quando o
-  fim, no meio dela, devolve a linha a um comando; e o aviso do fim que
+  fim, no meio dela, devolve a linha a um comando; o aviso do fim que
   chega atrasado, depois do `logout` e do `login` ou do `senha`, sem mudar
-  a linha do nome, a da senha nem a da senha atual da troca; e o aviso
-  dos códigos lido antes de o prazo vencer e entregue depois do aviso do
-  fim, que não muda a linha — o comando seguinte da Pessoa roda
-  ("pareamento: o aviso lido antes do fim da cerimonia nao muda a linha").
+  a linha do nome, a da senha nem a da senha atual da troca; o aviso dos
+  códigos lido antes de o prazo vencer e entregue depois do aviso do fim,
+  que não muda a linha — o comando seguinte da Pessoa roda
+  ("pareamento: o aviso lido antes do fim da cerimonia nao muda a linha");
+  e o Enter que leu a cerimônia antes de um aviso dela, que não volta a
+  linha — a dos códigos à espera, nem a de um comando a uma cerimônia que
+  acabou —, nem o aviso dos códigos lido antes do Enter que leva a linha
+  à senha ("pareamento: o passo lido antes do aviso nao volta a linha").
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
   cada tela pela árvore semântica e o digita no outro, conferido na tela
@@ -342,7 +356,9 @@ bancada x86_64→x86_64 para as quatro que só o boot de duas máquinas mostra.
 A campanha também achou uma corrida na suíte: "o desligamento" abria a
 cerimônia depois de o fio da energia — meio segundo depois do pedido —
 ter entregue a máquina, e a abertura passava. A abertura recusada vai
-agora logo depois de um pedido só dela.
+agora logo depois de um pedido só dela. E, desde o NS22, o caso segura o
+fio da energia antes de ele parar as gravações (`energia::Segura`, só na
+suíte): o que pede com a ação a caminho não depende do meio segundo.
 
 ## Medidas
 
@@ -358,5 +374,5 @@ agora logo depois de um pedido só dela.
   das bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)), o par
   aarch64→aarch64 levou 230 s no hospedeiro de desenvolvimento, e o
   x86_64→aarch64, 299 s; o B01, 20 s nos dois.
-- Os casos `pareamento:` da suíte — 39 quando medidos, 42 hoje — levavam
+- Os casos `pareamento:` da suíte — 39 quando medidos, 44 hoje — levavam
   uns 4 minutos no x86 e uns 3 no ARM.

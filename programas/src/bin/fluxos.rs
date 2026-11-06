@@ -19,8 +19,8 @@
 //! - [`TROCAR`]: troca de imagem (`executar`, decidido sobre
 //!   `process.run`) para o `ola` do disco — [`OLA`] —, que sai com o mesmo
 //!   [`CODIGO`]: os fluxos dele acabam. Com `b` 1, para um programa grande
-//!   do disco — [`GRANDE`], uns 850 KiB —, que a suíte encerra: a medida da
-//!   troca sob escritas sem parar.
+//!   do disco — [`GRANDE`], uns 850 KiB no x86 —, que a suíte encerra: a
+//!   medida da troca sob escritas sem parar.
 //! - [`BIFURCAR`]: duplica o processo; o pai diz `fluxos: filho <id>`, e o
 //!   filho escuta o canal dele.
 //! - [`COLHER`] o filho `b`: espera ele (`esperar`) e diz `fluxos: colhi

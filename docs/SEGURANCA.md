@@ -187,7 +187,12 @@ troca, e a inteira que chega depois, do mesmo programa, não é outra
 troca. O resumo tem 32 bits — os 8 dígitos hexadecimais do começo do
 BLAKE2s —: só ele não separa o código de fora de um da imagem com o
 mesmo começo do resumo (o achado 3 do adversário do passo 1), e o `de` e
-o editor separam. Com o mesmo nome, o mesmo editor e o mesmo começo do
+o editor separam. O editor omitido (`?`) casa com qualquer um — a troca
+para o código de outro editor com o mesmo começo do resumo não aparece
+enquanto os registros do programa novo vierem sem o editor —, e a
+primeira decisão que permite os separa: ela tem o texto vazio, e acima
+do teto abrevia só o nome, nunca o editor (o achado 4 do adversário do
+passo 1b). Com o mesmo nome, o mesmo editor e o mesmo começo do
 resumo, dois executáveis têm a mesma descrição; aumentar o resumo muda o
 formato do detalhe e a conta do teto, e é uma decisão pendente, [C] (o
 achado 9). Um processo nasce uma vez só

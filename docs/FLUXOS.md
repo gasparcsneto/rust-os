@@ -131,11 +131,13 @@ próxima operação de cada ponta ouve o motivo. Depois do fim fica uma
 A ponta é **do processo**: não se herda no `fork`, não sobrevive ao `exec`
 (`o programa mudou`) e a morte dele aborta os fluxos de que ele ainda é
 ponta (`o processo acabou`). A morte é a saída, e não a colheita: o filho
-de `fork` que saiu e que o pai ainda não colheu — o zumbi, que guarda só
-o código de saída — tem a morte solta pelo coletor na primeira passada,
-como a de um processo sem pai: os fluxos dele acabam, a outra ponta ouve
-o `FIM`, e o endpoint dele fecha, uma vez só (o AE-5; antes, tudo isso
-esperava o pai colher). A ponta de que ele já **saiu** — fechou — não é
+de `fork` que saiu e que o pai ainda não colheu — o zumbi, que guarda o
+código de saída e, até a colheita, a vaga, com a pilha e o espaço de
+endereços — tem a morte solta pelo coletor na primeira passada, como a de
+um processo sem pai: os fluxos dele acabam — a outra ponta ouve o motivo
+na operação seguinte, e o `FIM` no canal de eventos, se designou o fluxo
+—, e o endpoint dele fecha, uma vez só (o AE-5; antes, tudo isso esperava
+o pai colher). A ponta de que ele já **saiu** — fechou — não é
 mais dele: o que escreveu segue legível pela outra até o fim.
 
 O `exec` de quem é ponta encerra os fluxos dentro da ordem das gravações,
@@ -149,38 +151,38 @@ adiada — a execução dela, `CONFLICT`, que a cita —, e a volta seguinte
 decide de novo. A espera da ordem não tem fila nem justiça (o A3, e o F3
 do adversário do AE-1): medida pelo caso `fluxo: a troca grande com
 escritas sem parar, medida` — a troca de quem é ponta para o `livro`, uns
-850 KiB lidos do disco, sozinha e com três processos escrevendo e lendo
-sem parar, um pedido de cada vez, como o executor os atende, e com o
-journal drenando a auditoria, como fora da suíte —: no x86, a troca
-sozinha levou 370 ms, e com os escritores, 570 ms; no aarch64, 440 ms e
-500 ms; sem volta nenhuma, e nada da auditoria se perdeu — os escritores
-sozinhos fizeram umas 400 operações em pouco mais de 3 s, também sem
-perda. Na suíte completa do aarch64, depois de todos os casos de antes,
-460 ms e 970 ms, com duas voltas no meio — a ordem com outro fio, um
-escritor ou o coletor —, cada uma com a decisão e a execução adiada que a
-cita, e nada perdido. Com os três escritores em fios paralelos, um aperto
-além do que o executor produz (medido no x86, com a gravação periódica da
-auditoria pausada, o padrão da suíte), três rodadas deram de 1,4 s a 4,6 s
-e de 1 a 8 voltas no meio (dois registros cada: a decisão e a execução
-adiada que a cita). A lacuna de 119 registros que uma delas mostrou não era da troca
-nem da ordem: com a gravação pausada, o anel transbordou entre duas
-gravações pedidas — a explicação de antes, o coletor sem a vez, estava
-errada, e o caso passou a medir com o journal drenando. Sem inanição nem
-ruído da troca no ritmo do executor, nada mudou. Quem não é ponta não
-toma a ordem. O `exec` cujo arquivo não se lê, ou que falha antes do
-ponto sem volta, não encerra fluxo nenhum: o processo ouve o erro e segue
-o que era — da leitura,
-`PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para ler o
-arquivo —, e a execução da decisão diz a falha (`ERROR`, com o motivo). O que falha **depois** dele — a imagem nova
-que não se mapeia — não tem para onde voltar: os fluxos já acabaram na
-troca, com `o programa mudou`, gravado dentro da ordem como na troca que dá
-certo; a execução da decisão diz `ERROR`, com o motivo, e o processo acaba
-(`SEM_MEMORIA`). Toda execução da decisão do `exec` vai em nome de quem o
-gate decidiu — o titular, a sessão, o papel e o processo com o programa
-que pediu —, como a de um comando: o programa adotado na troca, que não
-rodou uma instrução, não aparece no lugar de quem pediu, e a pessoa que
-sai entre a decisão e a gravação não a faz anônima (o F2 do adversário do
-AE-1).
+850 KiB lidos do disco no x86 e uns 750 KiB no aarch64, sozinha e com três
+processos escrevendo e lendo sem parar, um pedido de cada vez, como o
+executor os atende, e com o journal drenando a auditoria, como fora da
+suíte —: no x86, a troca sozinha levou 370 ms, e com os escritores, 570
+ms; no aarch64, 440 ms e 500 ms; sem volta nenhuma, e nada da auditoria se
+perdeu — os escritores sozinhos fizeram umas 400 operações em pouco mais
+de 3 s, também sem perda. Na suíte completa, depois de todos os casos de
+antes: no x86, 490 ms e 590 ms, sem volta; no aarch64, 460 ms e 970 ms,
+com duas voltas no meio — a ordem com outro fio, um escritor ou o coletor
+—, cada uma com a decisão e a execução adiada que a cita; e nada perdido.
+Com os três escritores em fios paralelos, um aperto além do que o executor
+produz (medido no x86, com a gravação periódica da auditoria pausada, o
+padrão da suíte), três rodadas deram de 1,4 s a 4,6 s e de 1 a 8 voltas no
+meio (dois registros cada: a decisão e a execução adiada que a cita). A
+lacuna de 119 registros que uma delas mostrou não era da troca nem da
+ordem: com a gravação pausada, o anel transbordou entre duas gravações
+pedidas — a explicação de antes, o coletor sem a vez, estava errada, e o
+caso passou a medir com o journal drenando. Sem inanição nem ruído da
+troca no ritmo do executor, nada mudou. Quem não é ponta não toma a ordem.
+O `exec` cujo arquivo não se lê, ou que falha antes do ponto sem volta,
+não encerra fluxo nenhum: o processo ouve o erro e segue o que era — da
+leitura, `PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para
+ler o arquivo —, e a execução da decisão diz a falha (`ERROR`, com o
+motivo). O que falha **depois** dele — a imagem nova que não se mapeia —
+não tem para onde voltar: os fluxos já acabaram na troca, com `o programa
+mudou`, gravado dentro da ordem como na troca que dá certo; a execução da
+decisão diz `ERROR`, com o motivo, e o processo acaba (`SEM_MEMORIA`).
+Toda execução da decisão do `exec` vai em nome de quem o gate decidiu — o
+titular, a sessão, o papel e o processo com o programa que pediu —, como a
+de um comando: o programa adotado na troca, que não rodou uma instrução,
+não aparece no lugar de quem pediu, e a pessoa que sai entre a decisão e a
+gravação não a faz anônima (o F2 do adversário do AE-1).
 
 ## A autoridade
 

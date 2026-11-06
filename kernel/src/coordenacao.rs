@@ -472,7 +472,8 @@ pub const SOLTO_PELA_RECUSA: &str =
     "arrendamento implicito solto: a edicao pela arvore foi recusada na linha da pessoa";
 
 /// O detalhe, quando a edição contada não chegou à linha — o programa não a
-/// recebeu, ou a linha do físico mudou entre a conferência e a edição.
+/// recebeu, ou a linha do físico deixou de atender entre a conferência e a
+/// edição; a que passou a pedir a pessoa solta com [`SOLTO_PELA_RECUSA`].
 pub const SOLTO_SEM_ENTREGA: &str =
     "arrendamento implicito solto: a edicao pela arvore nao chegou a linha";
 

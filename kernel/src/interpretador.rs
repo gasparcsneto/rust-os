@@ -1733,8 +1733,9 @@ pub fn desistir_da_edicao_da_arvore(console: Console, numero: u64) {
 }
 
 /// A edição `numero`, contada pela coordenação, não chegou ao programa — o
-/// aviso não foi entregue —: a reserva sai, e o que ela fez no campo não
-/// fica (o achado 1 do adversário do passo 1).
+/// aviso não foi entregue —: a reserva sai, e o arrendamento que ela tomou
+/// não fica com quem a pediu (o achado 1 do adversário do passo 1). A
+/// versão que a conta fez crescer fica.
 ///
 /// - Se ela tomou o arrendamento, ele sai já, se o campo ainda está
 ///   exatamente como ela o deixou (`PorQueSolta::NaoChegou`).
@@ -1743,9 +1744,20 @@ pub fn desistir_da_edicao_da_arvore(console: Console, numero: u64) {
 ///   nunca vai consumi-la, e a edição seguinte não começaria onde a
 ///   anterior deixou o campo. Então a renovação vai para a edição que ela
 ///   continuou — a reserva a caminho que deixou o campo onde ela começou
-///   ([`crate::coordenacao::Rastro::seguida_de`]) —, ou para a sequência
-///   das já recusadas, se é dela que ela começou. Recusada a anterior, o
-///   arrendamento que a sequência tomou sai com o estado que esta deixou.
+///   ([`crate::coordenacao::Rastro::seguida_de`]) —, e, recusada essa, o
+///   arrendamento que a sequência tomou sai com o estado que esta deixou;
+///   aceita no consumo, numa linha de comando, a renovação fica com ela.
+/// - Ou para a sequência das já recusadas, se é dela que ela começou: aí
+///   nada sai agora, e o arrendamento fica até vencer, ou até a recusa de
+///   uma edição seguinte da sequência. Esse ramo não se alcança: a anterior
+///   teria de ser recusada entre a conta desta e a entrega dela, e a
+///   reserva, a conta e a entrega rodam num passo só do executor; a recusa
+///   no consumo e no Enter, no mesmo executor; e a do aviso da cerimônia, de
+///   outro fio, nunca leva uma linha de comando a pedir a pessoa.
+///
+/// Se a janela do Terminal fechou no meio — ele morreu —, o console fechou
+/// com ela, as reservas saíram, e não há o que achar aqui: o arrendamento
+/// fica até vencer, num elemento que não volta.
 pub fn edicao_nao_entregue(console: Console, numero: u64) {
     let soltar = com_estado(console, |e| {
         let i = e
@@ -1807,21 +1819,24 @@ fn soltar_o_que_ela_deixou(
 }
 
 /// A linha de `console` passou a pedir a pessoa — o Enter do `login`, da
-/// `senha`, do `aceitar` ou do `parear`, o aviso da cerimônia, o começo do
-/// engolir. As edições da árvore a caminho — reservadas e ainda não
-/// consumidas — seriam recusadas quando chegassem, pela regra da linha da
-/// pessoa, e o arrendamento delas só sairia ali: a tecla da Pessoa, nesse
-/// meio-tempo, seria `CONFLICT`. São recusadas aqui, todas, na ordem (o
-/// achado 2 do adversário do passo 1): o arrendamento que a sequência delas
-/// tomou sai já, pela regra de sempre — o estado exato, e cada uma
-/// começando onde a anterior deixou o campo —, e o que chegar marcado delas
-/// depois é descartado, mesmo que a linha volte a pedir um comando. Uma
-/// linha no log por edição, como a recusa no consumo.
+/// `senha`, do `aceitar` ou do `parear`; o aviso da cerimônia confere o
+/// mesmo, mas hoje nunca leva uma linha que pede um comando a pedir a
+/// pessoa: a cerimônia começa pelo Enter, e o engolir só começa de uma
+/// linha que já pedia a senha. As edições da árvore a caminho — reservadas
+/// e ainda não consumidas — seriam recusadas quando chegassem, pela regra
+/// da linha da pessoa, e o arrendamento delas só sairia ali: a tecla da
+/// Pessoa, nesse meio-tempo, seria `CONFLICT`. São recusadas aqui, todas,
+/// na ordem (o achado 2 do adversário do passo 1): o arrendamento que a
+/// sequência delas tomou sai já, pela regra de sempre — o estado exato, e
+/// cada uma começando onde a anterior deixou o campo —, e o que chegar
+/// marcado delas depois é descartado, mesmo que a linha volte a pedir um
+/// comando. Uma linha no log por edição, como a recusa no consumo.
 ///
 /// O que fica: a tecla da Pessoa entre a entrada da edição e o consumo do
 /// Enter, com a linha ainda pedindo um comando, coordenada na janela contra
 /// o arrendamento de quem editou — a coordenação no consumo, como a do
-/// físico, é uma mudança de desenho da família DT-1, pendente.
+/// físico, é uma mudança de desenho da família da DT-1 (a decisão sobre o
+/// Terminal e o teclado da Pessoa, no README), pendente.
 fn recusar_as_edicoes_a_caminho(console: Console) {
     let Some((recusadas, soltar)) = com_estado(console, |e| {
         let mut ordem: alloc::vec::Vec<usize> = (0..EDICOES_PEDIDAS)
@@ -3087,8 +3102,10 @@ pub fn aviso_do_pareamento(console: Console, abertura: u64, cerimonia: u64, text
     let Some((comecou, engolindo, modo, virou)) = feito else {
         return;
     };
-    // A linha passou a pedir a pessoa — a cerimônia, o começo do engolir:
-    // as edições da árvore a caminho são recusadas agora.
+    // A linha passou a pedir a pessoa: as edições da árvore a caminho são
+    // recusadas agora. Hoje não acontece — a cerimônia começa pelo Enter,
+    // que já é a virada, e o engolir só começa de uma linha que já pedia a
+    // senha —, e a conferência fica, pela mesma regra.
     if virou {
         recusar_as_edicoes_a_caminho(console);
     }

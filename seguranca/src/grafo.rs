@@ -392,6 +392,15 @@ impl Grafo {
 /// — ou as duas sem — o da imagem —; e, quando as duas dizem o editor (não
 /// o [`politica::auditoria::OMITIDO`]), o mesmo editor. Sem resumo, nenhuma
 /// é a outra.
+///
+/// O editor omitido casa com qualquer um: a troca para o código de outro
+/// editor com o mesmo começo do resumo — a segunda pré-imagem de 32 bits —
+/// não aparece enquanto os registros do programa novo vierem sem o editor.
+/// A primeira decisão que permite os separa: ela tem o texto vazio, e acima
+/// do teto abrevia só o nome, nunca o editor (com o nome e o editor de 32
+/// bytes e o fio de 20 dígitos, 83 bytes); o editor só sai com um texto
+/// maior ou com a citação — a recusa e a execução (o achado 4 do adversário
+/// do passo 1b). O resto é o tamanho do resumo, pendente.
 pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
     use politica::auditoria::{OMITIDO, editor_da_descricao, resumo_da_descricao};
     let (Some(ra), Some(rb)) = (resumo_da_descricao(a), resumo_da_descricao(b)) else {
@@ -537,10 +546,12 @@ mod testes {
     }
 
     /// O achado 5 do adversário do F1: a abreviada de **outro** resumo é
-    /// uma troca de verdade — a troca que falhou depois do ponto sem volta
-    /// grava a execução em nome do programa novo, e acima do teto ela sai
-    /// abreviada. A inteira que chega depois, com o mesmo resumo, não é
-    /// outra troca; e a abreviada do mesmo resumo continua sem mudar nada.
+    /// uma troca de verdade — a do primeiro pedido, abreviado, do programa
+    /// que a troca trouxe; o kernel gravava assim a execução da troca que
+    /// falha depois do ponto sem volta, que desde o F2 do adversário do AE-1
+    /// vai em nome do programa que pediu. A inteira que chega depois, do
+    /// mesmo programa, não é outra troca; e a mesma abreviada continua sem
+    /// mudar nada.
     #[test]
     fn a_abreviada_de_outro_resumo_e_uma_troca() {
         let mut g = Grafo::novo();

@@ -183,7 +183,7 @@ pub type EntradaDeEditor<'a> = ([u8; TAM_CHAVE], &'a str);
 /// nome de uma chave de atualização não vai à descrição de um programa, e
 /// uma máquina de antes da reserva, com uma chave de atualização com esse
 /// nome, ficaria presa à versão que roda — o kernel recusa o registro
-/// inteiro pela primeira linha que não se lê (ver
+/// inteiro por uma linha que não se lê antes da chave que assinou (ver
 /// [`chave_de_atualizacao`]).
 ///
 /// A migração: no registro de editores, a linha antiga com esse nome é

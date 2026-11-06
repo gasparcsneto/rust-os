@@ -140,7 +140,8 @@ todo comando.
   fecham e o que esperava neles é anulado; o que ele mandou continua. Na
   morte, e não na colheita: o filho de `fork` que acabou e que o pai ainda
   não colheu (o zumbi) tem tudo isso solto pelo coletor na primeira
-  passada, uma vez só, e guarda só o código de saída até o pai perguntar.
+  passada, uma vez só, e guarda o código de saída — com a vaga, a pilha e
+  o espaço de endereços — até o pai perguntar.
 - **A sessão que acaba:** a janela de nonces dela sai; os programas da
   pessoa que saiu não pedem mais nada, e o dono que não receberia some da
   descoberta.
