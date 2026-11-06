@@ -5189,6 +5189,14 @@ fn digitar_o_codigo_no_meio() {
     digitar(CONSOLE, &texto(codigo));
 }
 
+/// O gancho do caso do bit do histórico, logo depois da seção do aviso dos
+/// códigos — a linha já no código —: a Pessoa digita o código, que pede a
+/// senha.
+fn digitar_so_o_codigo_no_meio() {
+    let codigo = CODIGO_DO_GANCHO.load(core::sync::atomic::Ordering::SeqCst);
+    digitar(CONSOLE, &texto(codigo));
+}
+
 /// O gancho do caso: o nonce do iniciante, no meio do Enter da Pessoa — o
 /// aperto fecha, e o aviso dos códigos chega à linha.
 fn mandar_o_nonce_no_meio() {
@@ -5329,6 +5337,68 @@ pub(super) fn pareamento_o_passo_lido_antes_do_aviso_nao_volta_a_linha() -> Resu
         })();
         interp::no_meio_de_teste(None);
         crate::arch::sem_interrupcoes(|| *INICIANTE_DO_PASSO.lock() = None);
+        r
+    })
+}
+
+/// O bit do histórico do teclado segue o último que mudou o modo da linha
+/// (o achado 3 do adversário do passo 1c). O aviso dos códigos, de outro
+/// fio, muda a linha e escreve o bit na mesma seção da trava do console; se
+/// o escrevesse depois de soltá-la, o Enter da Pessoa que levou a linha à
+/// senha nesse meio-tempo teria o bit apagado pelo aviso atrasado, e a
+/// senha dela iria ao histórico (`keyboard.read`).
+///
+/// O aviso dos códigos põe a linha no código e, logo depois da seção dele
+/// (`NoMeio::DoAvisoEscrito`), a Pessoa digita o código certo: a linha vai à
+/// senha. Depois de o aviso acabar, a tecla consumida não entra no
+/// histórico.
+pub(super) fn pareamento_o_aviso_nao_apaga_o_bit_que_o_enter_ligou() -> Resultado {
+    use crate::interpretador::{self as interp, Modo, NoMeio};
+    com_a_cerimonia(|| {
+        let r = (|| -> Resultado {
+            entrar(CONSOLE, "bia")?;
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_002_200, 1);
+            let (pk, w) = ini.pedir_a_chave()?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "o pedido da chave foi recusado com a janela aberta"
+            })?;
+            ini.apertar(&pk, &w)?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "a 1a mensagem foi recusada com a janela aberta"
+            })?;
+            let k = ini.contas()?;
+            CODIGO_DO_GANCHO.store(k.k_a, core::sync::atomic::Ordering::SeqCst);
+            interp::no_meio_de_teste(Some((NoMeio::DoAvisoEscrito, digitar_so_o_codigo_no_meio)));
+            ini.mandar_o_nonce()?;
+            interp::no_meio_de_teste(None);
+            let _ = ini.ouvir();
+            no_estado(
+                (Lado::Aceita, Estado::CodigoCerto),
+                "o codigo digitado depois da secao do aviso nao conferiu",
+            )?;
+            if linha(CONSOLE) != Linha::Senha
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::SenhaDoPareamento, 0))
+            {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o codigo digitado depois da secao do aviso nao pediu a senha");
+            }
+            // A linha pede a senha: o que se consome agora não vai ao
+            // histórico.
+            while crate::teclado::observar().is_some() {}
+            crate::teclado::consumida('x');
+            if crate::teclado::observar().is_some() {
+                return Err(
+                    "o aviso dos codigos apagou o bit que o Enter ligou: a tecla da senha foi ao historico",
+                );
+            }
+            Ok(())
+        })();
+        interp::no_meio_de_teste(None);
         r
     })
 }

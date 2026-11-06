@@ -40889,6 +40889,10 @@ static CASOS: &[Caso] = &[
         f: pareamento::pareamento_o_passo_lido_antes_do_aviso_nao_volta_a_linha,
     },
     Caso {
+        nome: "pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou",
+        f: pareamento::pareamento_o_aviso_nao_apaga_o_bit_que_o_enter_ligou,
+    },
+    Caso {
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",
         f: pareamento::smp_o_fim_com_a_senha_ja_confirmada_nao_engole,
     },
