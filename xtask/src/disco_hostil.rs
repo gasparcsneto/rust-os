@@ -37,6 +37,18 @@
 //! depois de matar o emulador, o servidor fecha toda conexão nova sem
 //! negociar: sem energia, o disco não volta para a máquina cortada.
 //!
+//! # O fim espera a conexão em curso
+//!
+//! O emulador morto deixa no socket o que já tinha mandado — uma escrita,
+//! uma descarga —, e o servidor ainda o atende antes de ver o fim da
+//! conexão: uma descarga ali grava o cache no arquivo. O `Drop` do
+//! [`DiscoHostil`] só volta depois de o fio do servidor sair, com a conexão
+//! em curso acabada: nada do disco hostil escreve no arquivo depois dele —
+//! nem por cima do estado que o cenário seguinte zera. Quem o solta mata o
+//! emulador antes — a máquina (`persistencia::Ligada`), declarada depois do
+//! disco, cai antes dele —; com o emulador vivo, a espera seria a do fim
+//! da máquina.
+//!
 //! # O protocolo
 //!
 //! O NBD *newstyle* fixo, só o que o QEMU usa: a negociação por
@@ -171,6 +183,10 @@ struct Estado {
     /// da máquina cortada, e não leva o disco.
     sem_energia: bool,
     contas: Contas,
+    /// Só nos testes: o servidor espera isto antes de aplicar cada
+    /// descarga — a descarga atrasada que o fim tem de esperar.
+    #[cfg(test)]
+    pausa_antes_da_descarga: Duration,
 }
 
 impl Estado {
@@ -270,6 +286,9 @@ pub(crate) struct DiscoHostil {
     socket: PathBuf,
     /// Para o servidor no `Drop`: ele confere a cada conexão aceita.
     parar: Arc<AtomicBool>,
+    /// O fio do servidor, que o `Drop` espera sair — ver "O fim espera a
+    /// conexão em curso", no começo deste módulo.
+    servidor: Option<std::thread::JoinHandle<()>>,
 }
 
 impl DiscoHostil {
@@ -297,11 +316,13 @@ impl DiscoHostil {
             gatilho: None,
             sem_energia: false,
             contas: Contas::default(),
+            #[cfg(test)]
+            pausa_antes_da_descarga: Duration::ZERO,
         }));
         let do_servidor = Arc::clone(&estado);
         let parar = Arc::new(AtomicBool::new(false));
         let parar_do_servidor = Arc::clone(&parar);
-        std::thread::spawn(move || {
+        let servidor = std::thread::spawn(move || {
             for conexao in escuta.incoming() {
                 if parar_do_servidor.load(Ordering::Acquire) {
                     return;
@@ -334,6 +355,7 @@ impl DiscoHostil {
             estado,
             socket: socket.to_path_buf(),
             parar,
+            servidor: Some(servidor),
         })
     }
 
@@ -390,6 +412,22 @@ impl DiscoHostil {
     /// O que o servidor viu até agora.
     pub(crate) fn contas(&self) -> Contas {
         self.estado.lock().expect("estado do disco").contas
+    }
+
+    /// Só nos testes: cada descarga espera `pausa` antes de ir ao arquivo.
+    #[cfg(test)]
+    fn pausar_antes_da_descarga(&self, pausa: Duration) {
+        self.estado
+            .lock()
+            .expect("estado do disco")
+            .pausa_antes_da_descarga = pausa;
+    }
+
+    /// Só nos testes: o estado, sem segurá-lo — ele só some, e o arquivo
+    /// fecha, quando o disco e o fio do servidor o soltam.
+    #[cfg(test)]
+    fn estado_fraco(&self) -> std::sync::Weak<Mutex<Estado>> {
+        Arc::downgrade(&self.estado)
     }
 }
 
@@ -514,6 +552,14 @@ fn atender(mut c: UnixStream, estado: &Mutex<Estado>) -> std::io::Result<bool> {
                 responder(&mut c, erro, cookie)?;
             }
             CMD_FLUSH => {
+                // Nos testes, a descarga que chega atrasada ao arquivo.
+                #[cfg(test)]
+                let mut e = {
+                    let pausa = e.pausa_antes_da_descarga;
+                    drop(e);
+                    std::thread::sleep(pausa);
+                    estado.lock().expect("estado do disco")
+                };
                 // Uma descarga com o que perder: se é a do gatilho, a
                 // energia acaba antes de ela gravar.
                 if !e.volatil.is_empty() && e.disparar(|g| matches!(g, Gatilho::Descarga(_))) {
@@ -570,10 +616,104 @@ fn ler_u64(c: &mut UnixStream) -> std::io::Result<u64> {
 
 impl Drop for DiscoHostil {
     /// O servidor para: a próxima conexão aceita o encerra — e a do próprio
-    /// `Drop` é essa. O arquivo fecha com ele.
+    /// `Drop` é essa. E o `Drop` espera o fio sair: a conexão em curso, a
+    /// do emulador já morto, termina antes — o que ele deixou no socket é
+    /// atendido, e uma descarga ali vai ao arquivo agora, e não depois de o
+    /// cenário seguinte zerar o estado. O arquivo fecha com o fio.
     fn drop(&mut self) {
         self.parar.store(true, Ordering::Release);
         let _ = UnixStream::connect(&self.socket);
+        if let Some(servidor) = self.servidor.take() {
+            let _ = servidor.join();
+        }
         let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    /// A negociação de um cliente NBD, como a do emulador: o newstyle fixo,
+    /// sem os zeros, e o `NBD_OPT_EXPORT_NAME` direto para a transmissão.
+    fn negociar(c: &mut UnixStream) {
+        let mut saudacao = [0u8; 18];
+        c.read_exact(&mut saudacao).unwrap();
+        assert_eq!(&saudacao[..8], NBDMAGIC);
+        assert_eq!(saudacao[8..16], IHAVEOPT.to_be_bytes());
+        c.write_all(&(1 | FLAG_C_NO_ZEROES).to_be_bytes()).unwrap();
+        c.write_all(&IHAVEOPT.to_be_bytes()).unwrap();
+        c.write_all(&OPT_EXPORT_NAME.to_be_bytes()).unwrap();
+        c.write_all(&0u32.to_be_bytes()).unwrap();
+        // O tamanho do disco e as bandeiras da transmissão.
+        let mut exportado = [0u8; 10];
+        c.read_exact(&mut exportado).unwrap();
+    }
+
+    /// Um pedido da transmissão, com a carga de uma escrita.
+    fn pedir(c: &mut UnixStream, tipo: u16, cookie: u64, de: u64, carga: &[u8]) {
+        let mut p = Vec::new();
+        p.extend_from_slice(&REQUEST_MAGIC.to_be_bytes());
+        p.extend_from_slice(&0u16.to_be_bytes());
+        p.extend_from_slice(&tipo.to_be_bytes());
+        p.extend_from_slice(&cookie.to_be_bytes());
+        p.extend_from_slice(&de.to_be_bytes());
+        p.extend_from_slice(&(carga.len() as u32).to_be_bytes());
+        p.extend_from_slice(carga);
+        c.write_all(&p).unwrap();
+    }
+
+    /// O fim do disco hostil espera a conexão em curso. O emulador manda
+    /// uma escrita e uma descarga e morre sem ler a resposta; o disco sai
+    /// do escopo logo depois, com a descarga ainda a caminho do arquivo —
+    /// o servidor a segura antes de aplicar. Quando o `Drop` volta, o fio
+    /// já saiu (o estado, com o arquivo, foi solto) e a descarga já está no
+    /// arquivo; zerada a região, como o cenário seguinte zera o estado, ela
+    /// continua zerada.
+    #[test]
+    fn o_fim_espera_a_conexao_em_curso() {
+        let dir = std::env::temp_dir().join(format!("xtask-disco-hostil-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let arquivo = dir.join("disco.img");
+        std::fs::write(&arquivo, vec![0u8; 64 * 1024]).unwrap();
+        let socket = dir.join("nbd.sock");
+        let disco = DiscoHostil::servir(&arquivo, &socket, Corte::PerdeTudo).unwrap();
+        disco.pausar_antes_da_descarga(Duration::from_millis(400));
+        let fraco = disco.estado_fraco();
+
+        let mut emulador = UnixStream::connect(&socket).unwrap();
+        negociar(&mut emulador);
+        let dados = [0xa5u8; 1024];
+        pedir(&mut emulador, CMD_WRITE, 1, 4096, &dados);
+        let mut resposta = [0u8; 16];
+        emulador.read_exact(&mut resposta).unwrap();
+        assert_eq!(resposta[..4], SIMPLE_REPLY_MAGIC.to_be_bytes());
+        assert_eq!(
+            resposta[4..8],
+            0u32.to_be_bytes(),
+            "a escrita voltou com erro"
+        );
+        pedir(&mut emulador, CMD_FLUSH, 2, 0, &[]);
+        drop(emulador);
+        drop(disco);
+
+        assert!(
+            fraco.upgrade().is_none(),
+            "depois do Drop, o fio do servidor ainda segura o estado e o arquivo"
+        );
+        let lido = std::fs::read(&arquivo).unwrap();
+        assert_eq!(
+            lido[4096..4096 + dados.len()],
+            dados,
+            "a descarga atendida antes do fim nao esta no arquivo"
+        );
+        std::fs::write(&arquivo, vec![0u8; 64 * 1024]).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(
+            std::fs::read(&arquivo).unwrap().iter().all(|&b| b == 0),
+            "o disco hostil escreveu no arquivo depois do Drop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

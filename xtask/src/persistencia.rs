@@ -164,12 +164,20 @@ impl Ligada {
                 return Err(format!("{e}\n  {estado}{tpm}"));
             }
         };
-        fluxo
+        // Daqui em diante um erro não larga a máquina viva: solta, ela
+        // seguraria o disco — e o fim do disco hostil espera a conexão dela
+        // acabar (ver `disco_hostil`).
+        let escrita = match fluxo
             .set_read_timeout(Some(Duration::from_secs(15)))
-            .map_err(|e| format!("não foi possível configurar o timeout: {e}"))?;
-        let escrita = fluxo
-            .try_clone()
-            .map_err(|e| format!("não foi possível duplicar o fluxo: {e}"))?;
+            .and_then(|()| fluxo.try_clone())
+        {
+            Ok(escrita) => escrita,
+            Err(e) => {
+                let _ = filho.kill();
+                let _ = filho.wait();
+                return Err(format!("não foi possível preparar o canal da máquina: {e}"));
+            }
+        };
         Ok(Ligada {
             filho,
             escrita,
