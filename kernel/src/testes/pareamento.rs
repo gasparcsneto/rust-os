@@ -5172,3 +5172,163 @@ pub(super) fn pareamento_o_aviso_atrasado_nao_muda_a_linha_do_login() -> Resulta
         r
     })
 }
+
+/// O iniciante do caso de [`pareamento_o_passo_lido_antes_do_aviso_nao_volta_a_linha`],
+/// para o gancho, que não recebe argumento.
+static INICIANTE_DO_PASSO: crate::trava::Mutex<Option<Iniciante>> = crate::trava::Mutex::new(None);
+
+/// O código que o gancho [`digitar_o_codigo_no_meio`] digita.
+static CODIGO_DO_GANCHO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// O gancho do caso, no meio do aviso dos códigos: a Pessoa dá o Enter na
+/// linha da espera — o passo já respondido põe a linha no código — e
+/// digita o código, que pede a senha.
+fn digitar_o_codigo_no_meio() {
+    digitar(CONSOLE, "");
+    let codigo = CODIGO_DO_GANCHO.load(core::sync::atomic::Ordering::SeqCst);
+    digitar(CONSOLE, &texto(codigo));
+}
+
+/// O gancho do caso: o nonce do iniciante, no meio do Enter da Pessoa — o
+/// aperto fecha, e o aviso dos códigos chega à linha.
+fn mandar_o_nonce_no_meio() {
+    let ini = crate::arch::sem_interrupcoes(|| INICIANTE_DO_PASSO.lock().take());
+    if let Some(mut ini) = ini {
+        let _ = ini.mandar_o_nonce();
+        crate::arch::sem_interrupcoes(|| *INICIANTE_DO_PASSO.lock() = Some(ini));
+    }
+}
+
+/// O Enter numa linha da cerimônia lê o que ela pede antes de escrever na
+/// linha, e um aviso dela, de outro fio, pode chegar no meio
+/// (`interpretador::NoMeio::DoPassoLido`): o que o Enter leu não volta a
+/// linha a um passo de antes do que o aviso mostrou (o achado 3 do
+/// adversário do passo 1b).
+///
+/// - Os códigos: a Pessoa dá um Enter com texto na linha da espera; o
+///   Enter lê a espera, e o aviso dos códigos põe a linha no código do
+///   outro. A linha fica no código — antes, voltava à espera, e o código
+///   digitado em seguida ouvia "ja respondido" —, e o código certo pede a
+///   senha.
+/// - O fim: o Enter lê a cerimônia viva, e o prazo vence antes de ele
+///   escrever; o aviso do fim devolve a linha a um comando. A linha fica
+///   num comando — antes, voltava à espera de uma cerimônia morta —, e o
+///   comando seguinte da Pessoa executa.
+/// - E o contrário: o aviso dos códigos lê o código do outro, e antes de
+///   ele chegar à linha (`NoMeio::DoAvisoLido`) a Pessoa dá o Enter na
+///   espera — que a põe no código — e digita o código certo, que pede a
+///   senha. O aviso atrasado não volta a linha da senha à do código, que
+///   ecoaria o que ela digitasse.
+pub(super) fn pareamento_o_passo_lido_antes_do_aviso_nao_volta_a_linha() -> Resultado {
+    use crate::interpretador::{self as interp, Modo, NoMeio};
+    com_a_cerimonia(|| {
+        let r = (|| -> Resultado {
+            entrar(CONSOLE, "bia")?;
+
+            // Os códigos, no meio do Enter.
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_002_000, 1);
+            let (pk, w) = ini.pedir_a_chave()?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "o pedido da chave foi recusado com a janela aberta"
+            })?;
+            ini.apertar(&pk, &w)?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "a 1a mensagem foi recusada com a janela aberta"
+            })?;
+            no_estado(
+                (Lado::Aceita, Estado::Ocupada),
+                "a 1a mensagem nao ocupou a janela",
+            )?;
+            crate::arch::sem_interrupcoes(|| *INICIANTE_DO_PASSO.lock() = Some(ini));
+            interp::no_meio_de_teste(Some((NoMeio::DoPassoLido, mandar_o_nonce_no_meio)));
+            digitar(CONSOLE, "ainda nao");
+            interp::no_meio_de_teste(None);
+            let mut ini = crate::arch::sem_interrupcoes(|| INICIANTE_DO_PASSO.lock().take())
+                .ok_or("o iniciante do caso sumiu")?;
+            no_estado(
+                (Lado::Aceita, Estado::Apertada),
+                "o gancho do Enter nao fechou o aperto",
+            )?;
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::CodigoDoPar, 0)) {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o Enter que leu a espera voltou a linha dos codigos");
+            }
+            let _ = ini.ouvir();
+            let k = ini.contas()?;
+            digitar(CONSOLE, &texto(k.k_a));
+            if linha(CONSOLE) != Linha::Senha
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::SenhaDoPareamento, 0))
+            {
+                return Err("o codigo certo, digitado depois, nao pediu a senha");
+            }
+
+            // O fim, no meio do Enter.
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            interp::no_meio_de_teste(Some((NoMeio::DoPassoLido, vencer_no_meio)));
+            digitar(CONSOLE, "ainda nao");
+            interp::no_meio_de_teste(None);
+            acabou_com(
+                Lado::Aceita,
+                Desfecho::Desfeita(conta::Motivo::Prazo),
+                "o gancho do Enter nao venceu o prazo",
+            )?;
+            if interp::linha_de_teste(CONSOLE) != Some((Modo::Comando, 0)) {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o Enter que leu a cerimonia viva a pos de volta na linha");
+            }
+            let _ = saida_de(CONSOLE);
+            super::digitar_no_console(CONSOLE, "agent.ping\n");
+            if !saida_de(CONSOLE).contains("pong") {
+                return Err("o comando da pessoa depois do fim no meio do Enter nao executou");
+            }
+
+            // O aviso dos códigos atrasado, depois de o Enter levar a linha
+            // adiante.
+            recomecar();
+            aceitar(CONSOLE, NOME)?;
+            let mut ini = Iniciante::novo(VAGA, 2_002_100, 1);
+            let (pk, w) = ini.pedir_a_chave()?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "o pedido da chave foi recusado com a janela aberta"
+            })?;
+            ini.apertar(&pk, &w)?.map_err(|m| {
+                crate::log_error!("teste", "{}", m);
+                "a 1a mensagem foi recusada com a janela aberta"
+            })?;
+            let k = ini.contas()?;
+            CODIGO_DO_GANCHO.store(k.k_a, core::sync::atomic::Ordering::SeqCst);
+            interp::no_meio_de_teste(Some((NoMeio::DoAvisoLido, digitar_o_codigo_no_meio)));
+            ini.mandar_o_nonce()?;
+            interp::no_meio_de_teste(None);
+            let _ = ini.ouvir();
+            no_estado(
+                (Lado::Aceita, Estado::CodigoCerto),
+                "o codigo digitado no meio do aviso nao conferiu",
+            )?;
+            if linha(CONSOLE) != Linha::Senha
+                || interp::linha_de_teste(CONSOLE) != Some((Modo::SenhaDoPareamento, 0))
+            {
+                crate::log_error!(
+                    "teste",
+                    "a linha ficou {:?}",
+                    interp::linha_de_teste(CONSOLE)
+                );
+                return Err("o aviso dos codigos atrasado voltou a linha da senha ao codigo");
+            }
+            Ok(())
+        })();
+        interp::no_meio_de_teste(None);
+        crate::arch::sem_interrupcoes(|| *INICIANTE_DO_PASSO.lock() = None);
+        r
+    })
+}

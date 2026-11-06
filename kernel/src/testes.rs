@@ -40712,6 +40712,10 @@ static CASOS: &[Caso] = &[
         f: pareamento::pareamento_o_aviso_lido_antes_do_fim_nao_muda_a_linha,
     },
     Caso {
+        nome: "pareamento: o passo lido antes do aviso nao volta a linha",
+        f: pareamento::pareamento_o_passo_lido_antes_do_aviso_nao_volta_a_linha,
+    },
+    Caso {
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",
         f: pareamento::smp_o_fim_com_a_senha_ja_confirmada_nao_engole,
     },
