@@ -895,7 +895,11 @@ vê o `path` logo depois do `#[` (N207), o achado 2; e o aviso da
 cerimônia que escreve o bit do histórico de novo depois de soltar a trava
 (N208), o achado 3. Todas reprovadas, uma de cada vez: a N207 pelos
 testes do hospedeiro; as outras pela suíte do x86, filtrada aos casos de
-cada uma.
+cada uma. E as da CI 437 — a conta dos casos da ordem presa, que passou a
+aceitar as voltas que o coletor adia depois da soltura, cada uma dita —:
+a troca que chega ao fim gravando também uma execução da decisão (N209),
+e de novo a N111, a volta adiada sem a execução, contra a conta nova. As
+duas reprovadas pela suíte do x86, filtrada aos casos da troca.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1105,6 +1109,8 @@ cada uma.
 | N206 | fora do SDK (AE-5, o achado 1 do adversário do passo 1c): a reserva de uma edição de pessoa sem a sessão dela passa | suíte x86, filtrada (909 de 910): `terminal: a edicao da pessoa que saiu da sessao e descartada` — a reserva sem sessão |
 | N207 | fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `xtask` só vê o `path` logo depois do `#[` | hospedeiro: `testes_dos_nomes_protegidos::o_caminho_de_outro_arquivo_em_qualquer_forma` (xtask) — o `cfg_attr` e o `r#path` |
 | N208 | fora do SDK (AE-5, o achado 3 do adversário do passo 1c): o aviso da cerimônia escreve o bit do histórico de novo depois de soltar a trava | suíte x86, filtrada (909 de 910): `pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou` — a tecla da senha foi ao histórico |
+| N209 | fora do SDK (CI 437): a troca que chega ao fim grava também uma execução da decisão | suíte x86, filtrada (904 de 910): os quatro modos da ordem presa — `fluxo: a troca de imagem com fluxo e a ordem com outro fio`, `fluxo: a troca de imagem com a ordem tomada no meio`, `fluxo: a troca de imagem adiada abre a janela das interrupcoes`, `fluxo: a troca de imagem adiada da a vez a quem tem a ordem` —, `fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so` e `fluxo: a troca grande com escritas sem parar, medida` |
+| N111, de novo | fora do SDK (CI 437): a volta adiada sem a execução da decisão, contra a conta nova | suíte x86, filtrada (907 de 910): `fluxo: a troca de imagem com fluxo e a ordem com outro fio`, pelo sinal novo, `fluxo: a troca de imagem com a ordem tomada no meio` e `fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so` |
 
 ## Medidas
 

@@ -9984,7 +9984,20 @@ edição de pessoa sem a sessão dela; a N207 faz o `xtask` ver o `path` só
 logo depois do `#[`; e a N208 faz o aviso da cerimônia escrever o bit do
 histórico de novo depois de soltar a trava. Todas reprovadas, uma de cada
 vez: a N207 pelos testes do hospedeiro do `xtask`; as outras pela suíte
-do x86.
+do x86. E as da CI 437 — os casos da ordem presa aceitam as voltas que o
+coletor adia depois da soltura, cada uma dita, e o da ordem com outro fio
+desde antes da chamada provoca uma —: a N209 faz a troca que chega ao fim
+gravar também uma execução da decisão — reprovada por "fluxo: a troca de
+imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a
+ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das
+interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a
+ordem", "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem
+num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida"
+(904 de 910) —; e a N111, de novo contra a conta nova, tira a execução da
+volta adiada — reprovada por "fluxo: a troca de imagem com fluxo e a ordem
+com outro fio", pelo sinal novo, "fluxo: a troca de imagem com a ordem
+tomada no meio" e "fluxo: a troca de imagem ouve a ordem com outro no
+meio, tambem num nucleo so" (907 de 910).
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10085,6 +10098,7 @@ do x86.
 | fora do SDK (AE-5, o achado 6 do adversário do passo 1b): o `#[path]` fora da suíte (N202); a conta que devolve o rastro fora dos nomes protegidos (N203) | os testes do hospedeiro do xtask |
 | fora do SDK (AE-5, os achados 1 e 3 do adversário do passo 1c): a sessão da pessoa que acabou aceita no consumo (N205); a reserva de pessoa sem a sessão (N206); o bit do histórico escrito de novo fora da trava (N208) | "terminal: a edicao da pessoa que saiu da sessao e descartada"; "pareamento: o aviso dos codigos nao apaga o bit que o Enter ligou" |
 | fora do SDK (AE-5, o achado 2 do adversário do passo 1c): o `path` visto só logo depois do `#[` (N207) | os testes do hospedeiro do xtask |
+| fora do SDK (CI 437): a troca que chega ao fim gravando também uma execução da decisão (N209); a volta adiada sem a execução, de novo contra a conta nova (N111) | "fluxo: a troca de imagem com fluxo e a ordem com outro fio", "fluxo: a troca de imagem com a ordem tomada no meio", "fluxo: a troca de imagem adiada abre a janela das interrupcoes", "fluxo: a troca de imagem adiada da a vez a quem tem a ordem", "fluxo: a troca de imagem ouve a ordem com outro no meio, tambem num nucleo so" e "fluxo: a troca grande com escritas sem parar, medida" — a N209; a N111, os três primeiros que adiam (o 327 pelo sinal novo, o 328 e o 338) |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
