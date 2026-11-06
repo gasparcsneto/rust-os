@@ -830,6 +830,7 @@ xtask/src/
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
+├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas
 ├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
@@ -8860,8 +8861,11 @@ que os delega; o `sistema`, não. Ver "A própria senha" em
 
 Cinco casos `senha:` e um `smp: senha:` na suíte, e a bancada
 `cargo xtask senha`, com a pessoa no teclado da máquina — o `sendkey` do
-monitor do emulador, no Terminal —, nas duas arquiteturas: a nova
-sobrevive ao corte de energia; a queda em
+monitor do emulador, no Terminal, o comando conferido na tela antes do
+Enter e cada senha pela conta das teclas do kernel, para que uma recusa
+seja da senha e não de uma tecla perdida (ver [A pessoa no teclado das
+bancadas](docs/ENLACE.md#a-pessoa-no-teclado-das-bancadas)) —, nas duas
+arquiteturas: a nova sobrevive ao corte de energia; a queda em
 cada fronteira da troca — as senhas digitadas e nada conferido, a atual
 conferida, a decisão feita, cada passo da gravação, tudo gravado sem a
 resposta, e a resposta dada — deixa, no boot seguinte, exatamente uma
@@ -9183,11 +9187,14 @@ tempo. E a
 **bancada de duas máquinas**, `cargo xtask enlace`: dois Dukes de pé ao
 mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
 rede do emulador; o administrador registra a relação nos dois, a pessoa
-entra no Terminal das duas pelo teclado, o `carteiro` de uma manda ao
-`correio` da outra, e a auditoria dos dois lados é conferida — depois, a
-suspensão nos dois lados, o corte de energia do destino, a revogação nos
-dois. Nos quatro pares: x86_64→aarch64, aarch64→x86_64, x86_64→x86_64 e
-aarch64→aarch64.
+entra no Terminal das duas pelo teclado — cada linha conferida na tela
+antes do Enter, num ritmo que se adapta à perda de teclas do emulador
+(ver [A pessoa no teclado das
+bancadas](docs/ENLACE.md#a-pessoa-no-teclado-das-bancadas)) —, o
+`carteiro` de uma manda ao `correio` da outra, e a auditoria dos dois
+lados é conferida — depois, a suspensão nos dois lados, o corte de energia
+do destino, a revogação nos dois. Nos quatro pares: x86_64→aarch64,
+aarch64→x86_64, x86_64→x86_64 e aarch64→aarch64.
 
 ### As mutações do enlace
 

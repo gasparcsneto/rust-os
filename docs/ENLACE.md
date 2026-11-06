@@ -218,14 +218,10 @@ próprio deles nas mesmas vagas, em [FLUXOS.md](FLUXOS.md).
 - **Bancada de duas máquinas** (`cargo xtask enlace`): dois Dukes de pé ao
   mesmo tempo, cada um com o disco, o TPM e a chave dele, ligados só pela
   rede do emulador e pela ponte da bancada. O administrador registra a
-  relação nos dois; a pessoa entra no Terminal das duas pelo teclado — o
-  teclado do emulador perde tecla com as duas máquinas de pé no mesmo
-  hospedeiro, e a bancada digita de novo o `login` e o `user.run` que não
-  chegaram ao gate: o `login` depois de uma linha vazia, e o do console
-  físico, o da bancada do SDK, depois de clicar de novo fora das janelas;
-  o `user.run` depois de apagar a linha, e só passado um minuto — com uma
-  linha vazia, o `user.run` que perdeu só o Enter rodaria, e a cópia
-  digitada depois rodaria o programa outra vez —; o
+  relação nos dois; a pessoa entra no Terminal das duas pelo teclado — a
+  linha conferida antes do Enter, e o ritmo que se adapta à perda de
+  teclas: ver [A pessoa no teclado das
+  bancadas](#a-pessoa-no-teclado-das-bancadas) —; o
   `carteiro` (um programa da pessoa em A) procura, manda, reenvia e
   pergunta o estado ao `correio` (um programa da pessoa em B); a auditoria
   dos dois lados é conferida. Depois: a suspensão em B e em A, o corte de
@@ -243,6 +239,82 @@ próprio deles nas mesmas vagas, em [FLUXOS.md](FLUXOS.md).
   pela pessoa e pelo teto, a revogação no meio do aperto e a reconfirmação
   da origem — e acharam dois motivos de recusa remota que passavam do teto
   do detalhe da auditoria. A tabela está no README.
+
+## A pessoa no teclado das bancadas
+
+As bancadas de duas máquinas — a do enlace, a do pareamento
+([PAREAMENTO.md](PAREAMENTO.md)), a dos fluxos ([FLUXOS.md](FLUXOS.md)) e a
+do SDK ([SDK.md](SDK.md)) — fazem o papel da pessoa pelo teclado da
+máquina: o `sendkey` do monitor do emulador, uma tecla de cada vez, no
+Terminal que tem o foco desde o boot, no console físico depois de um
+clique fora das janelas, ou no campo de uma janela. A da senha e a da
+atualização digitam do mesmo jeito. O código é um só,
+`xtask/src/digitacao.rs`; a fumaça e a imagem de produção da persistência,
+uma máquina só, digitam no ritmo base, sem conferir.
+
+O teclado do emulador perde tecla com o hospedeiro ocupado — duas máquinas
+emuladas nele, num runner da CI —, e em rajada: na CI 434, no par
+aarch64→aarch64, `/programas/aarch64/carteiro` chegou como
+`/programas/aarch64ro` e como `/programas/aaarteiro`, e as três
+tentativas, no mesmo ritmo, perderam do mesmo jeito; na CI 433, o mesmo
+par passou sem nenhuma. A tecla se perde quando o convidado atende tarde:
+ele a tira da fila do dispositivo — no ARM, a cada tique do relógio, de
+trinta e dois buffers do `virtio-input`, oito teclas
+(`kernel/src/virtio/teclado.rs`); no x86, na interrupção do PS/2 —, e a que
+chega com a fila cheia se perde. Mais devagar, cabe mais atraso. O ritmo
+base é de 20 ms por tecla, 40 ms com o shift e 600 ms depois do Enter. A
+bancada, então:
+
+- **confere a linha antes do Enter.** A linha de comando, a do nome no
+  `login` e a do código do pareamento vão sem o Enter; a bancada lê a tela
+  pela árvore semântica (`ui.tree`: a grade do Terminal, ou a do console
+  físico) e só dá o Enter com a linha inteira. A estragada se apaga — um
+  apagar por caractere, e dois a mais — e se digita de novo. O campo de uma
+  janela — o da `conversa`, na bancada do SDK —, pelo valor dele na árvore.
+  A senha, que não ecoa, pela conta das teclas do kernel: o `pressed` de
+  `keyboard.read` tem de subir exatamente o tamanho dela, e o `dropped`,
+  nada; a que chega com tecla a menos se apaga pela mesma conta, e nada
+  dela vai à saída da bancada — só quantas teclas chegaram. A conta não vê
+  um shift perdido, e as senhas das bancadas não têm tecla com shift. O
+  Enter também vai contado: o que não chega ao kernel vai de novo, e a
+  linha, que ainda espera por ele, não roda duas vezes. A serial das
+  bancadas lê o teclado — é `sistema`, também na imagem de produção que
+  elas montam —; numa política em que ela não leia, a senha e o Enter só se
+  confeririam pelo resultado;
+- **adapta o ritmo.** Cada máquina guarda um fator de respiro, que começa
+  em 1× e dobra a cada perda vista — a linha estragada, a senha que a conta
+  não fecha, o Enter que ela não viu, o comando que o gate não decidiu, o
+  login recusado ou não decidido — até 8×, e não volta: vale até o fim do
+  par, também depois dos cortes de energia da máquina. A tentativa seguinte
+  digita no ritmo novo. Cada perda sai na saída da bancada, com o número
+  dela e o fator novo — `[teclado] origem: perda 2 (...); o respiro agora
+  em 4x` —, e no fim de cada par, o que ficou nas duas máquinas;
+- **tenta cinco vezes**: cada linha, e cada comando ou login que não
+  chegou a um desfecho — as três de antes, em 1×, 2× e 4× numa máquina que
+  ainda não perdeu tecla, e mais duas no teto; na que já perdeu, todas
+  mais devagar. O comando que o gate não decidiu em um minuto só se digita
+  de novo depois de a linha voltar ao prompt e de a auditoria, olhada outra
+  vez, não ter a decisão — o comando que só demorou responde antes —, e
+  depois de apagar o que ficou na linha: com uma linha vazia, o `user.run`
+  que perdeu só o Enter rodaria, e a cópia digitada depois rodaria o
+  programa outra vez, como na CI 426. O `login` que não entrou volta ao
+  comando antes de se digitar de novo — o nome vazio volta, a senha vazia é
+  recusada —, e o do console físico, o da bancada do SDK, depois de clicar
+  de novo fora das janelas. Nenhum programa se lança duas vezes, e a senha
+  não aparece na saída da bancada.
+
+Medido no hospedeiro de desenvolvimento, menos ocupado que um runner da
+CI, no par aarch64→aarch64 do pareamento, com o `user.run` da origem num
+ritmo de experimento, fora de todo commit: mandado pelo `sendkey` a um
+quarto do respiro base, chegou inteiro em todas as vezes; entregue direto
+ao dispositivo, pelo `input-send-event` do QMP, tecla a tecla, chegou
+inteiro a 1 ms por tecla, e perdeu em rajada a 0,25 ms
+(`/programas/aarch6/carteiro`, `/programas/ch64/carteiro`). Nesse ritmo, o
+código de antes reprovou como na CI 434 — `origem: o user.run de
+/programas/aarch64/carteiro nao chegou ao gate em 3 vezes`, um minuto por
+tentativa —, e o de agora viu a perda na tela antes do Enter — a linha
+entrou como `{"pth":"/programas/aach64/carteiro"}` —, foi a 2× e passou o
+par inteiro, em 248 s, sem outra perda e sem lançar nada duas vezes.
 
 ## Medidas
 

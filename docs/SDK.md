@@ -598,8 +598,11 @@ NS28 o instala e roda.
   nas duas máquinas; o `eco-malha` com um cliente de cada máquina e o
   segundo cliente remoto recusado pelo teto da relação; os dois sentidos ao
   mesmo tempo; as medidas e a vazão do laço contra o estilo bloqueante; a
-  `conversa` com a pessoa digitando nas duas; a revogação no meio de um
-  fluxo.
+  `conversa` com a pessoa digitando nas duas — cada linha conferida no
+  campo dela, na árvore semântica, antes do Enter, como as outras linhas
+  das bancadas de duas máquinas (ver [A pessoa no teclado das
+  bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)); a revogação no
+  meio de um fluxo.
 
 ## Mutações
 

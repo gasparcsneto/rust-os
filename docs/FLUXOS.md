@@ -418,7 +418,10 @@ identidade e exportação de chaves; multiplexação de fluxos numa sessão.
   fluxo; FB05, a suspensão e o `device.forget`; FB07, o corte de energia
   do destino, e depois do boot nada do fluxo; FB08, as vagas da 7071 com
   outro dispositivo que a bancada faz; FB04, a revogação dos dois lados.
-  Nos quatro pares.
+  Nos quatro pares. A pessoa digita os `user.run` e o `device.forget` como
+  nas outras bancadas de duas máquinas: a linha conferida na tela antes do
+  Enter, e o ritmo que se adapta à perda de teclas (ver [A pessoa no
+  teclado das bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)).
 
 ## Mutações
 

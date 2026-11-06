@@ -301,7 +301,11 @@ compartilhada, a nuvem e a conta central.
   ("pareamento: o aviso lido antes do fim da cerimonia nao muda a linha").
 - **Bancada de duas máquinas** (`cargo xtask pareamento`): dois Dukes de pé
   ao mesmo tempo, e a Pessoa no teclado dos dois — a bancada lê o código de
-  cada tela pela árvore semântica e o digita no outro, com a senha. Uma
+  cada tela pela árvore semântica e o digita no outro, conferido na tela
+  antes do Enter, com a senha, conferida pela conta das teclas do kernel; o
+  ritmo da digitação se adapta à perda de teclas, como nas outras bancadas
+  de duas máquinas (ver [A pessoa no teclado das
+  bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)). Uma
   ponte do meio no hospedeiro passa os bytes, faz o homem no meio com uma
   chave dela, ou segura o que o destino manda depois do aperto. Os passos:
   B02 o código errado, B03 o homem no meio, B01 a cerimônia e a entrega do
@@ -349,6 +353,10 @@ agora logo depois de um pedido só dela.
   240 s no aarch64→aarch64 da CI; os dois pares cruzados, juntos, 12
   minutos na CI. A cerimônia completa (B01, com a entrega do estágio 1 pela
   relação nova), uns 20 s — quase tudo é o teclado do emulador, uma tecla
-  de cada vez, conferida na tela antes do Enter.
+  de cada vez, conferida na tela antes do Enter. Com a senha conferida pela
+  conta das teclas do kernel e o Enter contado (ver [A pessoa no teclado
+  das bancadas](ENLACE.md#a-pessoa-no-teclado-das-bancadas)), o par
+  aarch64→aarch64 levou 230 s no hospedeiro de desenvolvimento, e o
+  x86_64→aarch64, 299 s; o B01, 20 s nos dois.
 - Os casos `pareamento:` da suíte — 39 quando medidos, 42 hoje — levavam
   uns 4 minutos no x86 e uns 3 no ARM.
