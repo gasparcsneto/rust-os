@@ -882,8 +882,8 @@ impl alloc::task::Wake for Sinal {
 /// zumbi por morto.
 ///
 /// A parte que **não** é opcional é o pai morto liberar o filho. Sem ela, um
-/// processo que bifurca e sai sem esperar deixa o filho ocupando uma das
-/// dezesseis vagas para sempre, com o espaço de endereços dele junto. É o
+/// processo que bifurca e sai sem esperar deixa o filho ocupando uma vaga
+/// da tabela para sempre, com o espaço de endereços dele junto. É o
 /// vazamento que o coletor existe para impedir, de volta por outra porta.
 ///
 /// # A vaga do fio atual nunca entra
@@ -1348,8 +1348,9 @@ pub unsafe fn bifurcar(
 }
 
 /// Faz nascer um fio. Com `cota`, ele é um processo, e nasce só se o
-/// titular da autoridade dele tiver menos que isso vivos — ver
-/// [`criar_processo`], também para `nasceu`.
+/// titular da autoridade dele ocupar menos que isso da tabela — os vivos,
+/// os que estão nascendo e os zumbis; ver [`criar_processo`], também para
+/// `nasceu`.
 fn nascer(
     nome: &'static str,
     nascimento: Nascimento,
@@ -1366,7 +1367,7 @@ fn nascer(
     // morto pedia para rodar um programa, ouvia que sim, e esperava por uma
     // saída que não podia existir.
     //
-    // Cada chamada ainda custava uma das dezesseis vagas de fio e um espaço de
+    // Cada chamada ainda custava uma vaga da tabela de fios e um espaço de
     // endereços que ninguém iria liberar.
     if CONGELADO.load(Ordering::SeqCst) {
         return Err("o escalonador esta congelado apos uma falha fatal");

@@ -1,5 +1,5 @@
 //! Bifurca, e só colhe o filho quando a suíte manda: o outro lado do caso
-//! `fios: o zumbi guarda a vaga ate a colheita`.
+//! `fios: o zumbi guarda a vaga ate a colheita` e dos casos `zumbis:`.
 //!
 //! A cada evento ACAO do canal [`CANAL`], o `a` diz o passo:
 //!

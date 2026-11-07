@@ -2196,7 +2196,7 @@ evidência de que ele está errado viria de uma máquina em uso.
 ```
 $ cargo xtask agent threads.stats        # depois de alguns user.run
 {"alive":2,"context_switches":168,"quantum_expirations":166,
- "quantum_ticks":5,"max_threads":16,"reaped":2}
+ "quantum_ticks":5,"max_threads":95,"reaped":2}
 ```
 
 Os dois vivos são o fio em que o kernel já estava e o próprio coletor.
@@ -5045,20 +5045,27 @@ Sem ganho a medir, não há o que pagar com esse risco.
   tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
   de 96 bytes: fica para uma decisão.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
-  14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e um
-  titular ocupa da tabela de fios no máximo a cota dele (ver a cota de
-  processos, em [Coordenação](#coordenação)). Mas vários titulares, cada
-  um dentro da cota, ainda enchem a tabela com processos vivos — doze
-  titulares de cota 8 ocupam as 89 vagas livres de uma máquina de 4
-  núcleos —, e a cota é por sessão, e não por identidade: a mesma chave de
-  agente nas 8 vagas do transporte soma 8 cotas, e uma pessoa ganha uma
-  cota nova a cada login, com os processos do login anterior ainda vivos.
-  Com a tabela cheia, não nasce fio nenhum, de ninguém — outro titular não
-  lança programa, o Terminal não abre, a cerimônia de pareamento não
-  começa, e o `system.reboot` não cria o fio `energia`. Pela leitura, sem
-  reprodução. Fechariam contar a cota pela identidade, encerrar os
-  processos com a sessão, ou reservar vagas aos fios do kernel; cada uma
-  muda a semântica da cota ou da alocação, e fica para uma decisão. E três
+  14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
+  processos de um titular ocupam da tabela de fios no máximo a cota dele
+  (ver a cota de processos, em [Coordenação](#coordenação)). Mas vários
+  titulares, cada um dentro da cota, ainda enchem a tabela com processos
+  vivos — doze titulares de cota 8 ocupam as 89 vagas que a suíte acha
+  livres com 4 núcleos, e numa máquina em uso, com os serviços e os
+  programas do boot no ar, bastam menos —, e a cota é por sessão, e não
+  por identidade: a mesma chave de agente nas 8 sessões cifradas — as
+  quatro portas do `virtio-console` e as quatro vagas do TCP — soma 8
+  cotas, e uma pessoa ganha uma cota nova a cada login, com os processos
+  do login anterior ainda vivos. Com a tabela cheia, não nasce fio
+  nenhum, de ninguém — outro titular não lança programa, o Terminal não
+  abre, a cerimônia de pareamento não começa, e o `system.reboot` não
+  cria o fio `energia`. Pela leitura, sem reprodução. Contar a cota pela
+  identidade fecharia a soma das sessões da mesma chave e dos logins da
+  mesma pessoa; encerrar os processos com a sessão, a dos logins; e
+  reservar vagas aos fios do kernel salvaria o `energia`, a cerimônia e o
+  coletor, mas não o programa de outro titular nem o Terminal, que é um
+  processo. A soma das cotas de titulares diferentes nenhuma das três
+  fecha sozinha. Cada uma muda a semântica da cota ou da alocação, e fica
+  para uma decisão. E três
   correções [B], achadas na análise da 14.1 e de fora dela, ficam para
   incrementos à parte, cada uma com os seus testes: (1) o fio `energia`
   nasce sob demanda, e com a tabela cheia o `system.reboot` falha depois
@@ -5070,7 +5077,23 @@ Sem ganho a medir, não há o que pagar com esse risco.
   segurado; a vaga não deve ser entregue até o coletor passar; (3) o gate
   confere a contenção antes de copiar o espaço e de nascer, e um
   `process.isolate` no meio deixa nascer um filho livre — conferir de novo
-  no nascimento, antes de o filho poder rodar (pela leitura).
+  no nascimento, antes de o filho poder rodar (pela leitura). O adversário
+  da implementação achou mais três, também de fora da 14.1 — ela não os
+  piora —, que ficam do mesmo jeito: (4) o `process.terminate` de um
+  processo que ainda está nascendo se perde. O pedido marca a vaga
+  reservada e responde `terminating`; o nascimento troca a vaga pelo fio
+  definitivo, sem a marca, e o processo segue — isolado, ou nem isso com o
+  teto de isolados cheio — até sair sozinho. O contador dos términos
+  pendentes não volta mais a zero, e a entrada e a volta de toda chamada
+  de sistema, e toda interrupção vinda do anel do usuário, passam a tomar
+  a trava do escalonador até o próximo boot (pela leitura). Levar a marca
+  ao fio definitivo, sob a mesma trava, e descontá-la quando a vaga volta
+  por falta de pilha; (5) a recusa da cota num `fork` vai à auditoria só
+  com o titular, sem o processo que bifurcou, que o registro da
+  bifurcação permitida tem; (6) a escolha da vaga, na mesma seção crítica
+  do nascimento, ainda pergunta a `e_zumbi` por cada terminado antes da
+  primeira vaga livre — quadrática no tamanho da tabela, como antes da
+  14.1, e limitada às 95 vagas.
 
 ## O tempo
 
@@ -8221,37 +8244,52 @@ cota conta os processos do titular que ocupam vaga na tabela de fios: os
 vivos, os que estão nascendo e os zumbis — o filho que saiu e que o pai,
 vivo, ainda não colheu —, até a colheita ou a morte do pai. O processo
 além da cota — lançado ou bifurcado — não nasce, e a recusa vai para a
-auditoria como `DENY_POLICY`, com a contagem (`cota de processos do
-papel: N de M`).
+auditoria como `DENY_POLICY`, com a contagem do gate (`cota de processos
+do papel: N de M`); a do nascimento, que só recusa quando outro processo
+do titular nasceu no meio, grava `M de M`.
 
-**O zumbi na cota** (a decisão 14.1, alternativa A). O zumbi guarda a vaga
-dele na tabela de fios até a colheita, com a pilha de kernel e o espaço
-de endereços. Contando só os vivos, um titular com uma cota pequena e um
-programa que bifurca e não colhe passava pela cota a cada filho e ocupava
-a tabela inteira — medido: com a cota em 2, 88 zumbis, e daí em diante
-não nascia fio nenhum, de ninguém, nem o `energia` do `system.reboot`. A
-tabela é uma só, para os fios do kernel e os processos de todos: 95 vagas
-(`MAX_FIOS`: as 32 de trabalho, mais uma para o ocioso de cada núcleo que
-pode existir além do primeiro). O ocioso de cada núcleo ligado além do
-primeiro toma uma; com 4 núcleos, como na suíte e nas bancadas, sobram
-92 — as 32 de trabalho são só o mínimo garantido, com os 64 núcleos
-ligados. Desde a 14.1, um titular ocupa da tabela no máximo a cota dele.
-O zumbi conta para o titular dele — a autoridade herdada do pai, que não
-muda — e para nenhum outro. O resto não mudou: a mesma linha da política,
-com a mesma gramática e os mesmos valores; as mesmas duas conferências,
-com a mesma conta — a do gate, a resposta rápida, e a do nascimento, sob
+**O zumbi na cota** (a decisão 14.1, aprovada pelo dono do projeto em 7
+de novembro de 2026 na alternativa A: o zumbi conta na cota do titular —
+e não um teto de filhos não colhidos por pai, nem vagas reservadas aos
+fios do kernel, as outras duas). O zumbi guarda a vaga dele na tabela de
+fios até a colheita, com a pilha de kernel e o espaço de endereços.
+Contando só os vivos, um titular com uma cota pequena e um programa que
+bifurca e não colhe passava pela cota a cada filho e ocupava a tabela
+inteira — medido na suíte, com 4 núcleos: com a cota em 2, o colhedor e
+88 zumbis tomaram as 89 vagas livres, e daí em diante não nascia fio
+nenhum, de ninguém, nem o `energia` do `system.reboot`. A tabela é uma
+só, para os fios do kernel e os processos de todos: 95 vagas
+(`MAX_FIOS`: as 32 de trabalho, mais uma para o ocioso de cada núcleo
+que pode existir além do primeiro). O ocioso de cada núcleo ligado além
+do primeiro toma uma; com 4 núcleos, como na suíte e nas bancadas,
+sobram 92, e na suíte o boot, o coletor e a rede tomam três delas — as
+32 de trabalho são só o mínimo garantido, com os 64 núcleos ligados.
+Desde a 14.1, os processos de um titular ocupam da tabela no máximo a
+cota dele — os fios do kernel não contam em cota nenhuma —, e a cota
+rebaixada não tira o que ele já ocupa: ele só não cria outro até ficar
+abaixo dela. O zumbi conta para o titular dele — a autoridade herdada do
+pai, que não muda — e para nenhum outro. O resto não mudou: a mesma
+linha da política, com a mesma gramática e os mesmos valores; as mesmas
+duas conferências — a do gate, a resposta rápida, e a do nascimento, sob
 a trava do escalonador, na mesma seção crítica que reserva a vaga, a que
-vale —; a mesma recusa na auditoria. Quem colhe tarde ouve a recusa mais
+vale —, as duas com a conta nova; a mesma recusa na auditoria. Quem
+colhe tarde ouve a recusa mais
 cedo, e segue depois de colher. A conta não pergunta a `e_zumbi` por cada
 terminado — seria quadrática no tamanho da tabela, sob a trava, no
 caminho de todo `bifurcar` e de todo lançamento —: junta uma vez os ids de
 quem não terminou, ordena, e procura o pai de cada terminado por
-bisseção; a suíte confere essa conta contra a definição do zumbi. Um pai
+bisseção; a suíte confere essa conta contra a definição do zumbi, também
+com o pai numa vaga antes de um fio vivo mais velho — a ordem em que uma
+bisseção sem ordenar o perderia. A escolha da vaga, logo depois, na mesma
+seção crítica, ainda pergunta a `e_zumbi` por cada terminado antes da
+primeira vaga livre, como antes da 14.1 (ver [Decisões
+pendentes](#decisões-pendentes)). Um pai
 travado segura os zumbis dele na cota até o sistema ou o administrador o
 encerrar (`process.terminate`), e o de um administrador — que o
 `process.terminate` da política padrão não alcança — até sair: é o efeito
-pretendido, a cota protege os outros. Cada titular segura até q − 1
-zumbis (o pai conta), cada um com a pilha e o espaço de endereços. Na
+pretendido, a cota protege os outros. Com a cota em q, cada titular
+segura até q − 1 zumbis (o pai conta), cada um com a pilha e o espaço
+de endereços. Na
 imagem de produção, nenhum programa bifurca sem colher — o servidor de
 janelas usa a bifurcação dupla. O que a cota não fecha — a soma das cotas
 de vários titulares, e a cota por sessão — e as correções que ficam para
@@ -8271,9 +8309,38 @@ até soltar, revogado, vencido, confirmação com a versão velha —; pessoa
 contra agente, agente contra pessoa, duas pessoas, o `logout` e o
 `lease.revoke` com e sem a prova; os campos de uma janela, com o foco
 declarado; dois leitores do teclado; e a cota de processos, lançada e
-bifurcada, e com zumbis (os casos `zumbis:`). A tabela do pacote `politica` confere, no hospedeiro, que nunca
+bifurcada, e com zumbis (os casos `zumbis:`). A tabela do pacote
+`politica` confere, no hospedeiro, que nunca
 há dois arrendamentos num recurso, que nenhum sobrevive à revogação, e que
 a versão só sobe com uma mudança que valeu.
+
+### As mutações do zumbi na cota
+
+Dez mutações contra a decisão 14.1, uma de cada vez, no repositório, no
+x86_64 em debug, contra o código integrado: as sete da análise da decisão
+(MZ1 a MZ7), de novo, e três contra a conta sem custo quadrático (MZ8 a
+MZ10). Cada uma rodou contra os casos `zumbis:`; as duas que mexem na
+definição do zumbi e na colheita, também contra os casos `fios:` e
+`usuario:`. Na primeira rodada, a MZ10 sobreviveu: a bisseção sem ordenar
+só erra quando a ordem das vagas esconde o pai, e em todos os casos — e
+nas 2 260 olhadas do vigia da concorrência — os ids estavam numa ordem em
+que ela ainda o achava. O caso `zumbis: a conta da cota acha o pai fora da
+ordem das vagas` monta essa ordem de propósito, e confere que ela esconde
+o pai antes de comparar as contas. Na última rodada de cada uma, as dez
+reprovaram — as nove primeiras contra os oito casos de antes desse.
+
+| Mutação | Reprovada por |
+|---|---|
+| o zumbi fora da conta — a conta de antes da 14.1, só dos vivos (MZ1) | os oito casos `zumbis:` da rodada |
+| o zumbi de qualquer titular contando na cota de todos (MZ2) | `zumbis: os de um titular nao tomam a cota de outro` |
+| a cota que passa por um, no gate e no nascimento (MZ3) | cinco casos `zumbis:` — o titular que não esgota a tabela, o isolamento entre titulares, a colheita e o fim do pai, quem colhe tarde, e a concorrência |
+| a morte do pai que não devolve nada — nem a vaga, em `e_zumbi`, nem a cota (MZ4) | os oito casos `zumbis:` e os dois casos `fios:` do zumbi, já na conferência do começo de cada um: a tabela tinha zumbis, filhos de pais que morreram antes |
+| a colheita que não marca o filho (MZ5) | `usuario: espera o filho e colhe o codigo dele`, e três casos `zumbis:` — a colheita e o fim do pai, quem colhe tarde, e a conta contra a definição |
+| a conta nova só no nascimento — o gate contando só os vivos (MZ6) | `zumbis: a recusa grava os zumbis acima da cota`: a recusa passa a sair do nascimento, com `2 de 2`, e não do gate, com `3 de 2` |
+| a conta nova só no gate — o nascimento contando só os vivos (MZ7) | `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que esquece a colheita: o filho colhido conta até o coletor o desmontar (MZ8) | `zumbis: a conta da cota segue a definicao do zumbi`, e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que toma por vivo o pai que terminou: os ids juntados são os de todos os fios, e não só os de quem não terminou (MZ9) | `zumbis: a conta da cota segue a definicao do zumbi` |
+| a bisseção sem ordenar os ids (MZ10) | `zumbis: a conta da cota acha o pai fora da ordem das vagas` — depois do reforço; antes dele, sobreviveu aos oito casos `zumbis:` |
 
 ### Mensagens
 
