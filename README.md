@@ -5077,10 +5077,12 @@ Sem ganho a medir, não há o que pagar com esse risco.
   reproduzido com o coletor segurado, e visto sem ele na CI 445, no x86_64
   em release: no caso `sdk: o programa de fora do repositorio`, o
   instalador colheu o cliente do modelo e bifurcou a variante seguinte
-  antes da passada do coletor, a variante ficou com a vaga do cliente, e
-  a designação do endpoint dele sobrou — o caso reprovou. A mesma corrida,
-  com o coletor segurado e um registro temporário, reprova o caso do
-  mesmo jeito; com a vaga do morto entregue só pelo coletor, ele passa. A
+  antes da passada do coletor, o coletor não recolheu o cliente — a
+  variante ficou com a vaga dele —, e uma designação sobrou: o caso
+  reprovou. A mesma corrida, com o coletor segurado e um registro
+  temporário, reprova o caso do mesmo jeito, e o registro mostra a vaga
+  do cliente devolvida sem a morte solta e a designação do endpoint dele
+  sobrando; com a vaga do morto entregue só pelo coletor, o caso passa. A
   vaga não deve ser entregue até o coletor passar; até lá, qualquer caso
   que colhe um processo e bifurca logo em seguida pode reprovar assim;
   (3) o gate confere a contenção antes de copiar o espaço e de nascer, e um
