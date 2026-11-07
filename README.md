@@ -5073,9 +5073,17 @@ Sem ganho a medir, não há o que pagar com esse risco.
   (2) a vaga de um morto que não é zumbi — o filho colhido, o órfão, o
   processo do `user.run` — volta a um fio novo antes da passada do
   coletor, e a morte dele não é solta (a malha, os fluxos, os pedidos ao
-  enlace e a janela de nonces dele ficam) — reproduzido com o coletor
-  segurado; a vaga não deve ser entregue até o coletor passar; (3) o gate
-  confere a contenção antes de copiar o espaço e de nascer, e um
+  enlace, as designações dos avisos e a janela de nonces dele ficam) —
+  reproduzido com o coletor segurado, e visto sem ele na CI 445, no x86_64
+  em release: no caso `sdk: o programa de fora do repositorio`, o
+  instalador colheu o cliente do modelo e bifurcou a variante seguinte
+  antes da passada do coletor, a variante ficou com a vaga do cliente, e
+  a designação do endpoint dele sobrou — o caso reprovou. A mesma corrida,
+  com o coletor segurado e um registro temporário, reprova o caso do
+  mesmo jeito; com a vaga do morto entregue só pelo coletor, ele passa. A
+  vaga não deve ser entregue até o coletor passar; até lá, qualquer caso
+  que colhe um processo e bifurca logo em seguida pode reprovar assim;
+  (3) o gate confere a contenção antes de copiar o espaço e de nascer, e um
   `process.isolate` no meio deixa nascer um filho livre — conferir de novo
   no nascimento, antes de o filho poder rodar (pela leitura). O adversário
   da implementação achou mais três, também de fora da 14.1 — ela não os
