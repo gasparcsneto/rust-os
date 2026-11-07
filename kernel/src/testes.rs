@@ -38651,6 +38651,10 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_a_conta_da_cota_segue_a_definicao,
     },
     Caso {
+        nome: "zumbis: a conta da cota acha o pai fora da ordem das vagas",
+        f: zumbis::zumbis_a_conta_da_cota_acha_o_pai_fora_da_ordem_das_vagas,
+    },
+    Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
         f: arch_dormir_parado_acorda_mascarado,
     },

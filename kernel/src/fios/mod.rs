@@ -1143,6 +1143,31 @@ pub fn contas_da_cota_de_teste(autoridade: crate::autorizacao::Autoridade) -> (u
     })
 }
 
+/// As duas contas de [`contas_da_cota_de_teste`] e, na mesma tomada da
+/// trava, os ids de quem não terminou na ordem das vagas — a ordem em que a
+/// conta da cota os junta, e que ela ordena antes da bisseção —, escritos em
+/// `destino`. Devolve as duas contas e quantos ids.
+#[cfg(feature = "modo-teste")]
+pub fn contas_e_vivos_de_teste(
+    autoridade: crate::autorizacao::Autoridade,
+    destino: &mut [u64; MAX_FIOS],
+) -> (usize, usize, usize) {
+    com_escalonador(|e| {
+        let mut quantos = 0;
+        for fio in e.fios.iter().flatten() {
+            if fio.estado != Estado::Terminado {
+                destino[quantos] = fio.id.numero();
+                quantos += 1;
+            }
+        }
+        (
+            e.processos_de(autoridade),
+            e.ocupadas_pela_definicao(autoridade),
+            quantos,
+        )
+    })
+}
+
 /// Quantas vagas um fio novo ainda acharia — as que `vaga_livre` daria. Só
 /// a suíte pergunta.
 #[cfg(feature = "modo-teste")]
