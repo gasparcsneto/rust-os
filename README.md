@@ -5207,28 +5207,36 @@ Sem ganho a medir, não há o que pagar com esse risco.
   na cópia, e o monte de um programa não devolve páginas —: os três pedem
   quase toda a memória que sobra numa máquina de 128 MiB com o kernel de
   teste de debug. Medido com linhas temporárias, sem commit, que imprimem
-  os frames livres antes e depois de cada caso: o caso passou começando com
-  12 916 frames livres e reprovou começando com 12 882 — o limite, no
-  local, fica entre os dois —; numa suíte completa, os casos dos
-  dispositivos guardam uns 80 frames de propósito, os anéis de DMA, e ele
-  começa abaixo do limite. Cada incremento que cresce o kernel de debug
-  come a margem: os frames livres no boot foram 17 774 em 4 de novembro,
-  17 238 na última suíte completa local que passou o caso, 17 214 com a
-  14.1 e 17 167 com a correção da vaga do morto — 47 a menos, os do kernel
-  de teste maior; os casos `vagas:` começam e acabam com os mesmos frames
-  livres, e não seguram memória. No local, a suíte completa do x86_64 em
-  debug reprova o caso desde a 14.1 — um dos três programas não consegue os
-  8 MiB (`memory allocation of 8388608 bytes failed`, saída 101); na CI,
-  desde a correção da vaga do morto: nas CIs 448 e 449, as suítes do
-  x86_64 em debug que chegaram ao fim — a do job "Testes" e as da tela
-  virtio-gpu — reprovaram nele, com "as descompressoes ao mesmo tempo nao
-  conferiram", e as do aarch64 passaram. Fechar pede uma escolha, que fica
-  com o dono: a máquina da suíte com mais memória — 192 MiB no lugar de
-  128, só no `cargo xtask test`; muda o ambiente de todos os casos, e o
-  que conta com 128 MiB tem de ser conferido —; o caso com dois programas,
-  ou um teto menor no passo do `compressao` — muda o que o caso cobre —;
-  ou a compressão antes dos casos dos dispositivos na ordem da suíte — só
-  adia, devolvendo os uns 80 frames.
+  os frames livres antes e depois de cada caso: numa rodada filtrada com o
+  código da correção da vaga do morto, o caso começou com 12 916 frames
+  livres e passou; na suíte completa da 14.1, começou com 12 882 e
+  reprovou — o limite, no local, fica entre os dois. Numa suíte completa,
+  os casos `e1000:` e `nvme:` guardam 72 frames que não voltam — os anéis
+  e as filas da placa e do disco de mentira —, outros casos guardam mais
+  12, e o caso começa abaixo do limite. Cada incremento que cresce o
+  kernel de debug come a margem: os frames livres no boot foram 17 774 em
+  4 de novembro, 17 238 na última suíte completa local que passou o caso,
+  17 214 com a 14.1 e 17 167 com a correção da vaga do morto — 47 a
+  menos, os do kernel de teste maior; os casos `vagas:` começam e acabam
+  com os mesmos frames livres, e não seguram memória. No local, a suíte
+  completa do x86_64 em debug reprova o caso desde a 14.1 — um dos três
+  programas não consegue os 8 MiB (`memory allocation of 8388608 bytes
+  failed`, saída 101); na CI, desde a correção da vaga do morto: nas CIs
+  448 a 451, as oito suítes do x86_64 em debug — quatro do job "Testes" e
+  quatro da tela virtio-gpu — reprovaram nele, com "as descompressoes ao
+  mesmo tempo nao conferiram", e em sete delas foi o único caso reprovado
+  — a do virtio-gpu da CI 448 reprovou também a espera pelo `colhedor`,
+  já corrigida —; as do aarch64 que chegaram ao fim passaram. O log
+  inteiro do virtio-gpu do x86_64 da CI 449 mostra o mesmo pânico e as
+  mesmas saídas (101, 98 e 98), e 17 209 frames livres no boot — 42 a
+  mais que no local, coerente com a CI ter passado o caso até a correção
+  da vaga do morto e reprovado depois dela. Fechar pede uma escolha, que
+  fica com o dono: a máquina da suíte com mais memória — 192 MiB no lugar
+  de 128, só no `cargo xtask test`; muda o ambiente de todos os casos, e
+  o que conta com 128 MiB tem de ser conferido —; o caso com dois
+  programas, ou um teto menor no passo do `compressao` — muda o que o
+  caso cobre —; ou a compressão antes dos casos dos dispositivos na ordem
+  da suíte — só adia, devolvendo os 72 frames deles.
 
 ## O tempo
 
@@ -8492,16 +8500,23 @@ tela do virtio-gpu leva dezenas de milissegundos: na CI 448, no
 virtio-gpu do x86_64, os 600 tiques do pedido do fim à saída não bastaram,
 e o caso reprovou com "o colhedor nao saiu"; na CI 449, com o mesmo
 código, passou. O prazo de `Colhedor::publicar` e de `Colhedor::encerrar`
-recomeça a cada passo que o colhedor tira da fila (a conta `entregues` do
-canal, que só o ouvinte faz andar): o caso reprova só se ele ficar o
-prazo inteiro sem tirar nenhum. Nenhuma conferência mudou, e as cinco
-mutações acima não dependiam dessa espera: o caso as reprovava pela
-tabela com zumbi antes de começar, pela ocupação acima da cota ou pelas
-contas divergindo — nunca pelo prazo do colhedor. No local, com a tela
-virtio-gpu, o caso leva de 7,0 a 7,9 s desde a correção da vaga do morto,
-contra 4,8 a 5,4 s antes dela, com o mesmo trabalho e o mesmo volume de
-saída; com a tela linear, sem diferença. A causa dessa diferença não foi
-achada.
+recomeça a cada leitura em que o colhedor tira passos da fila — até oito
+de uma vez — (a conta `entregues` do canal, que só o ouvinte faz andar):
+o caso reprova só se ele ficar o prazo inteiro sem tirar nenhum. Nenhuma
+conferência mudou, e as cinco mutações acima não dependiam dessa espera:
+o caso as reprovava pela tabela com zumbi antes de começar, pela ocupação
+acima da cota ou pelas contas divergindo — nunca pelo prazo do colhedor.
+O ritmo do colhedor nessa tela muda com o arranjo do código no kernel de
+debug: medido no local depois da CI 448, sem linhas temporárias, três
+rodadas de cada, o caso levou de 4,86 a 5,10 s com o código de antes da
+correção da vaga do morto, de 6,25 a 6,93 s com o da correção e a espera
+antiga, e de 4,10 a 4,60 s com o de agora; de 6,07 a 7,80 s com o de agora
+e uma função a mais que nunca é chamada; e de 4,13 a 4,76 s com o
+`publicar` antigo no kernel de agora. O intervalo entre as linhas do
+colhedor vai de 32 a 61 ms, por igual em todo o caso. Nem a lógica da
+correção nem a da espera explicam a diferença; que código se desloca, e
+por que pesa no emulador, não foi isolado. É por isso que a espera anda
+com a fila, e não mede um prazo.
 
 Na última rodada de cada uma, as dez reprovaram: a MZ1, a MZ3, a MZ4, a
 MZ7 e a MZ8 contra os nove casos, com a concorrência em rajadas; a MZ10

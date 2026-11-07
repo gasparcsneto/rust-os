@@ -65,16 +65,22 @@ impl Colhedor {
     /// Publica um evento no canal do colhedor, insistindo enquanto a fila
     /// dele estiver cheia — e enquanto ele a andar.
     ///
-    /// # Pelo progresso, e não por um prazo só
+    /// # Pelo progresso, e não por um prazo fixo
     ///
     /// A fila guarda [`crate::eventos::CAPACIDADE`] passos, e o colhedor os
-    /// tira no ritmo da tela: cada resposta dele é uma linha no log, e na
-    /// tela do virtio-gpu, na CI, uma linha leva dezenas de milissegundos.
-    /// Um prazo só, do primeiro passo recusado ao último, mediria a tela, e
-    /// não o colhedor: na CI 448, o caso da concorrência reprovou assim, no
-    /// fim. Aqui o prazo recomeça a cada passo que o colhedor tira da fila
-    /// ([`passos_tirados`]); o caso reprova só se ele passar o prazo
-    /// inteiro sem tirar nenhum — parado, e não devagar.
+    /// tira no ritmo da tela: cada passo é uma linha dele no log, e na tela
+    /// do virtio-gpu uma linha leva dezenas de milissegundos — de 32 a 61 ms
+    /// no local, conforme o arranjo do código no kernel de debug, sem
+    /// mudança na lógica (o README, nas mutações do zumbi na cota). Um prazo
+    /// fixo para ele andar a fila mediria a tela, e não o colhedor: na CI
+    /// 448, o caso da concorrência reprovou assim, no fim — os 600 tiques de
+    /// [`Colhedor::encerrar`], do pedido do fim à saída, não bastaram para
+    /// as linhas dos passos que ainda estavam na fila. Aqui o prazo
+    /// recomeça a cada leitura em que o colhedor tira passos da fila — até
+    /// oito de uma vez ([`passos_tirados`]) —; o caso reprova só se ele
+    /// passar o prazo inteiro sem tirar nenhum — parado, e não devagar. A
+    /// espera não tem teto próprio: o que a limita é a janela do `xtask`,
+    /// de dez minutos sem caso terminado.
     fn publicar(tipo: u32, a: i64) -> Resultado {
         loop {
             let tirados = passos_tirados();
@@ -191,8 +197,9 @@ impl Colhedor {
     /// zumbis — o pai morreu — e o coletor os recolhe.
     ///
     /// O fim é lido depois dos passos que já estão na fila: a espera anda
-    /// com ela, como a de [`Colhedor::publicar`]. Reprova só se o colhedor
-    /// passar o prazo inteiro vivo e sem tirar passo nenhum.
+    /// com ela, como a de [`Colhedor::publicar`] — o prazo recomeça a cada
+    /// leitura em que o colhedor tira passos. Reprova só se ele passar o
+    /// prazo inteiro vivo e sem tirar passo nenhum.
     fn encerrar(&self) -> Resultado {
         let _ = Self::publicar(tipo::ENCERRAR, 0);
         loop {
@@ -212,8 +219,9 @@ impl Colhedor {
 /// Quantos passos o colhedor já tirou da fila do canal dele — `None` sem
 /// ninguém escutando. É o progresso pelo qual as esperas de
 /// [`Colhedor::publicar`] e [`Colhedor::encerrar`] recomeçam o prazo: só o
-/// ouvinte tira passos da fila, e a conta só cresce — um canal que fechou
-/// (`None`) não é progresso.
+/// ouvinte tira passos da fila — até oito numa leitura —, e a conta só
+/// cresce; um canal que fechou (`None`) não é progresso. A primeira espera
+/// já acha a conta: [`Colhedor::lancar`] espera o colhedor escutar.
 fn passos_tirados() -> Option<u64> {
     crate::eventos::estado(CANAL).map(|e| e.entregues)
 }
