@@ -667,8 +667,9 @@ static RECOLHIDOS: AtomicU64 = AtomicU64::new(0);
 /// a máquina de ficar ociosa custa mais do que a memória que ele recupera.
 ///
 /// Esperar a interrupção põe o processador para dormir até o próximo tique
-/// do timer, que já ia acontecer de qualquer forma. A latência máxima entre
-/// um fio morrer e o espaço dele voltar ao alocador passa a ser um tique.
+/// do timer, que já ia acontecer de qualquer forma. A latência entre um fio
+/// morrer e o espaço dele voltar ao alocador passa a ser um tique, com o
+/// núcleo livre — mais, com os núcleos ocupados.
 ///
 /// Mas dormir **só** quando não há mais ninguém — ver
 /// [`descansar_ate_a_interrupcao`]. Um coletor que dormia de vez com outros
@@ -917,8 +918,8 @@ impl alloc::task::Wake for Sinal {
 /// podia ficar com a vaga de um morto ainda não limpo — o filho que o pai
 /// acabou de colher, antes da passada —, largava o morto sem a limpeza, e
 /// o que a morte dele devia soltar ficava para sempre: a designação do
-/// endpoint sobrou assim no caso `sdk: o programa de fora do repositorio`
-/// (CI 445 e 447).
+/// endpoint sobrou assim no caso `sdk: o programa de fora do repositorio,
+/// selado, instalado e rodado` (CI 445 e 447).
 ///
 /// E a limpeza em curso numa passada dos zumbis segura a vaga mesmo que o
 /// fio deixe de ser zumbi no meio — o pai colheu, ou morreu: o recolhimento
@@ -979,8 +980,10 @@ impl alloc::task::Wake for Sinal {
 /// kernel criando fios que saem na hora, uma passada só durou os 300 tiques
 /// da medida e recolheu 1324 mortos, e nesse tempo o resto da passada do
 /// coletor — a auditoria ao journal, a compactação, os prazos — esperou. O
-/// teto é a tabela inteira: uma passada ainda recolhe tudo o que havia
-/// quando ela começou.
+/// teto é a tabela inteira, mais do que os mortos que cabem nela; mas a
+/// busca vai pela ordem das vagas, e com outro núcleo fazendo morrer ao
+/// mesmo tempo os mortos novos das vagas de baixo podem gastar o teto antes
+/// de um mais velho, que sai numa passada seguinte.
 pub fn recolher_terminados() -> usize {
     #[cfg(feature = "modo-teste")]
     let _recolhendo = Recolhendo::entrar();
@@ -1173,8 +1176,9 @@ fn limpar_os_zumbis() -> usize {
 ///
 /// Existe só para a suíte, pelo motivo de [`CEDER_AO_ESCOLHER_VAGA`]: a
 /// janela entre a morte de um processo — ou a colheita dele — e a passada
-/// seguinte do coletor dura no máximo um tique, e um nascimento só cai nela
-/// por acaso. Na CI 445, caiu.
+/// seguinte do coletor dura um tique quando ele ganha a vez — mais, com os
+/// núcleos ocupados —, e um nascimento só cai nela por acaso. Na CI 445,
+/// caiu.
 #[cfg(feature = "modo-teste")]
 static SEGURAR_O_COLETOR: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -1980,10 +1984,11 @@ pub unsafe fn desistir_do_ocioso(vaga: usize) {
 }
 
 impl Escalonador {
-    /// Os processos com a `autoridade` que ocupam uma vaga da tabela — a
-    /// conta da cota de processos do papel: os vivos, reservados também (um
-    /// fio que está nascendo já conta), e os zumbis, até o pai colher ou
-    /// morrer. Ver [`processos_de`].
+    /// Os processos com a `autoridade` que contam na cota de processos do
+    /// papel: os vivos, reservados também (um fio que está nascendo já
+    /// conta), e os zumbis, até o pai colher ou morrer. O morto que não é
+    /// zumbi também ocupa uma vaga, até o coletor passar, e não conta. Ver
+    /// [`processos_de`].
     ///
     /// # Por que o zumbi conta
     ///
@@ -2059,8 +2064,9 @@ impl Escalonador {
     /// morto sem essa limpeza, e o que ela solta ficaria para sempre — e
     /// numa corrida comum: o pai colhe o filho e bifurca o seguinte antes da
     /// passada do coletor. Medido assim na CI 445 e na 447, no caso `sdk: o
-    /// programa de fora do repositorio`: a variante seguinte ficou com a vaga
-    /// do cliente do modelo colhido, e a designação do endpoint dele sobrou.
+    /// programa de fora do repositorio, selado, instalado e rodado`: a
+    /// variante seguinte ficou com a vaga do cliente do modelo colhido, e a
+    /// designação do endpoint dele sobrou.
     ///
     /// Esta regra já cobre as duas que a conta tinha antes, quando a vaga
     /// de um morto servia: a do fio que um núcleo ainda usa — um fio que
@@ -2075,11 +2081,11 @@ impl Escalonador {
     /// passada seguinte dele: uma por tique em que ele ganha a vez — mais
     /// tarde, com os núcleos ocupados. Uma tabela cheia de mortos ainda não
     /// recolhidos recusa um fio novo, com o motivo de sempre, até o coletor
-    /// passar. Um morto que não é zumbi — o colhido, o órfão — não conta na
-    /// cota do titular, que conta os vivos, os que nascem e os zumbis, mas
-    /// segura a vaga até a passada: um programa que bifurca, sai e colhe em
-    /// laço ocupa, entre duas passadas, mais vagas que a cota (as decisões
-    /// pendentes do README). E a conta perde a pergunta a `e_zumbi` por
+    /// passar. Um morto que não é zumbi — o colhido, o órfão, o do
+    /// `user.run` — não conta na cota do titular, que conta os vivos, os que
+    /// nascem e os zumbis, mas segura a vaga até a passada: um programa que
+    /// bifurca, sai e colhe em laço pode ocupar, entre duas passadas, mais
+    /// vagas que a cota (as decisões pendentes do README). E a conta perde a pergunta a `e_zumbi` por
     /// vaga, que era quadrática no tamanho da tabela.
     fn vaga_livre(&self) -> Result<usize, &'static str> {
         self.fios
@@ -2942,10 +2948,11 @@ pub fn nucleo_de(id: u64) -> Option<usize> {
     })
 }
 
-/// Quantas vagas da tabela os processos com esta autoridade ocupam: os fios
-/// que hospedam um programa — lançados por `user.run` ou pelo sistema, ou
+/// Quantos processos com esta autoridade contam na cota: os fios que
+/// hospedam um programa — lançados por `user.run` ou pelo sistema, ou
 /// bifurcados — que não terminaram, e os zumbis, até o pai colher ou
-/// morrer. É a conta da cota de processos do papel — ver
+/// morrer. O morto que não é zumbi ocupa a vaga até o coletor passar, sem
+/// contar. É a conta da cota de processos do papel — ver
 /// [`crate::autorizacao::permitir_processo`] e, aqui, o porquê do zumbi e da
 /// conta sem custo quadrático, em `Escalonador::processos_de`.
 pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {

@@ -365,7 +365,7 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
     o_programa_de_fora(false)
 }
 
-/// O mesmo caso, com a corrida das CIs 445 e 447 aberta de propósito: o
+/// NS55 — o mesmo caso, com a corrida das CIs 445 e 447 aberta de propósito: o
 /// coletor segurado do cliente do modelo até a última variante. O
 /// instalador colhe o cliente e bifurca a variante seguinte antes da
 /// passada do coletor — com as vagas vazias abaixo da do cliente tampadas,

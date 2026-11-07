@@ -523,8 +523,9 @@ NS28 o instala e roda.
   sem pânico (NH16); e a prontidão que o kernel pergunta, da ponta
   (`politica::fluxo`, NH12) e do endpoint (`politica::malha`, NH13).
 - **Na suíte**, nas duas arquiteturas: 46 casos `aviso:` (NS01–NS25, o
-  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48–NS54) e 9 casos `sdk:`
-  (NS26–NS31, NS37, NS44 e NS47). Os NS32–NS49 vieram da validação final —
+  NS01b, NS32–NS36, NS38–NS43, NS45, NS46, NS48–NS54) e 10 casos `sdk:`
+  (NS26–NS31, NS37, NS44, NS47 e NS55 — o programa de fora do repositório
+  com o coletor segurado, da correção da vaga do morto). Os NS32–NS49 vieram da validação final —
   os achados do agente adversário, nas cinco rodadas: o fim com o aviso não consumido, junto ao
   da fila ou na espera do dono, e o teto das designações acabadas; a
   recusa do gate que consome o aviso; quem retira ou fecha; o nome do

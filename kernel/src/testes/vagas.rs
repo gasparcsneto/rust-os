@@ -6,11 +6,13 @@
 //! limpo — o filho que o pai acabou de colher, antes da passada do coletor
 //! — e largava o morto sem a limpeza: o que ela soltaria ficava para
 //! sempre. Foi o que a CI 445 e a 447 viram no caso `sdk: o programa de
-//! fora do repositorio`: a variante seguinte ficou com a vaga do cliente do
-//! modelo, e a designação do endpoint dele sobrou.
+//! fora do repositorio, selado, instalado e rodado`: a variante seguinte
+//! ficou com a vaga do cliente do modelo, e a designação do endpoint dele
+//! sobrou.
 //!
-//! A janela entre a morte, ou a colheita, e a passada do coletor dura no
-//! máximo um tique; os casos a abrem de propósito, segurando o coletor
+//! A janela entre a morte, ou a colheita, e a passada do coletor dura um
+//! tique quando ele ganha a vez — mais, com os núcleos ocupados —; os casos
+//! a abrem de propósito, segurando o coletor
 //! ([`ColetorSegurado`]), ou pausando-o no começo da limpeza de um processo
 //! vigiado ([`PausaNaLimpeza`]). E tampam as vagas vazias de baixo
 //! ([`Tampas`]): o próximo fio que nasce cai na vaga que o caso olha, se

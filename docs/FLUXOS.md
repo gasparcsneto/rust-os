@@ -132,8 +132,8 @@ A ponta é **do processo**: não se herda no `fork`, não sobrevive ao `exec`
 (`o programa mudou`) e a morte dele aborta os fluxos de que ele ainda é
 ponta (`o processo acabou`). A morte é a saída, e não a colheita: o filho
 de `fork` que saiu e que o pai ainda não colheu — o zumbi, que guarda o
-código de saída e, até a colheita, a vaga, com a pilha e o espaço de
-endereços — tem a morte solta pelo coletor na primeira passada, como a de
+código de saída e, até a colheita e a passada seguinte do coletor, a
+vaga, com a pilha e o espaço de endereços — tem a morte solta pelo coletor na primeira passada, como a de
 um processo sem pai: os fluxos dele acabam — a outra ponta ouve o motivo
 na operação seguinte, e o `FIM` no canal de eventos, se designou o fluxo
 —, e o endpoint dele fecha, uma vez só (o AE-5; antes, tudo isso esperava
