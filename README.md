@@ -5127,7 +5127,15 @@ Sem ganho a medir, não há o que pagar com esse risco.
   que a 14.1 não escolheu; salva o `energia`, o enlace e a cerimônia, não
   os outros titulares —; ou só mitigar, como [B]: o nascimento que não acha vaga,
   havendo morto por recolher, acorda o coletor — não ajuda com o coletor
-  sem a vez —; ou aceitar, como está.
+  sem a vez —; ou o nascimento que não acha vaga recolher ele mesmo um
+  morto — soltar a morte dele e só então ocupar a vaga: a cota da 14.1
+  não muda, os mortos de um titular deixam de barrar o nascimento dos
+  outros, e a falta do coletor, se ele não subir no boot, deixa de
+  esgotar a tabela; mas quem recolhe deixa de ser só o coletor, o
+  nascimento que acharia a tabela cheia paga uma limpeza, e é preciso
+  conferir antes que nenhum nascimento — o `fork`, o `user.run`, o
+  enlace, o pareamento, o `energia` — acontece com uma trava que a
+  limpeza toma —; ou aceitar, como está.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
   14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
   vivos, os que nascem e os zumbis de um titular ocupam da tabela de fios
