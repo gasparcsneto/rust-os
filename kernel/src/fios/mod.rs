@@ -1122,6 +1122,41 @@ pub fn na_tabela_de_teste(id: u64) -> bool {
     com_escalonador(|e| e.fios.iter().flatten().any(|f| f.id.numero() == id))
 }
 
+/// Quantas vagas os processos com a `autoridade` ocupam agora — os vivos e
+/// os zumbis —, contadas pela definição: cada zumbi pela pergunta a
+/// `e_zumbi`, e não pela conta da cota. É a régua dos casos `zumbis:`.
+#[cfg(feature = "modo-teste")]
+pub fn ocupadas_de_teste(autoridade: crate::autorizacao::Autoridade) -> usize {
+    com_escalonador(|e| e.ocupadas_pela_definicao(autoridade))
+}
+
+/// As duas contas sob a mesma trava: a da cota — a que o gate e o
+/// nascimento fazem — e a da definição. Têm de ser sempre iguais; os casos
+/// `zumbis:` as comparam.
+#[cfg(feature = "modo-teste")]
+pub fn contas_da_cota_de_teste(autoridade: crate::autorizacao::Autoridade) -> (usize, usize) {
+    com_escalonador(|e| {
+        (
+            e.processos_de(autoridade),
+            e.ocupadas_pela_definicao(autoridade),
+        )
+    })
+}
+
+/// Quantas vagas um fio novo ainda acharia — as que `vaga_livre` daria. Só
+/// a suíte pergunta.
+#[cfg(feature = "modo-teste")]
+pub fn vagas_livres_de_teste() -> usize {
+    com_escalonador(|e| {
+        (0..MAX_FIOS)
+            .filter(|&i| match &e.fios[i] {
+                None => true,
+                Some(f) => f.estado == Estado::Terminado && f.na_cpu.is_none() && !e.e_zumbi(i),
+            })
+            .count()
+    })
+}
+
 /// Quantos fios o coletor já desmontou.
 pub fn recolhidos() -> u64 {
     RECOLHIDOS.load(Ordering::Relaxed)
@@ -1676,6 +1711,21 @@ impl Escalonador {
                     && (f.estado != Estado::Terminado
                         || (!f.colhido
                             && f.pai.is_some_and(|pai| vivos.binary_search(&pai).is_ok())))
+            })
+            .count()
+    }
+
+    /// A mesma conta de [`Self::processos_de`], pela definição: os vivos, e
+    /// os zumbis perguntando a [`Self::e_zumbi`] por cada um. Quadrática, e
+    /// só da suíte — é a régua com que ela confere a conta da cota.
+    #[cfg(feature = "modo-teste")]
+    fn ocupadas_pela_definicao(&self, autoridade: crate::autorizacao::Autoridade) -> usize {
+        (0..MAX_FIOS)
+            .filter(|&i| {
+                matches!(&self.fios[i], Some(f)
+                    if f.nome == NOME_DO_PROCESSO
+                        && f.autoridade == autoridade
+                        && (f.estado != Estado::Terminado || self.e_zumbi(i)))
             })
             .count()
     }

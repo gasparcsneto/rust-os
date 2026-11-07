@@ -33,6 +33,7 @@ mod enlace;
 mod fluxo;
 mod pareamento;
 mod sdk;
+mod zumbis;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
 /// para montar uma dinâmica; detalhes vão para o log antes do retorno.
@@ -38616,6 +38617,38 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fios: o zumbi guarda a vaga ate a colheita",
         f: fios_o_zumbi_guarda_a_vaga_ate_a_colheita,
+    },
+    Caso {
+        nome: "zumbis: um titular nao esgota a tabela de fios",
+        f: zumbis::zumbis_um_titular_nao_esgota_a_tabela,
+    },
+    Caso {
+        nome: "zumbis: com um titular no teto, o sistema segue",
+        f: zumbis::zumbis_com_um_titular_no_teto_o_sistema_segue,
+    },
+    Caso {
+        nome: "zumbis: os de um titular nao tomam a cota de outro",
+        f: zumbis::zumbis_os_de_um_titular_nao_tomam_a_cota_de_outro,
+    },
+    Caso {
+        nome: "zumbis: a colheita e o fim do pai devolvem a cota",
+        f: zumbis::zumbis_a_colheita_e_o_fim_do_pai_devolvem_a_cota,
+    },
+    Caso {
+        nome: "zumbis: quem colhe tarde ouve a cota e segue",
+        f: zumbis::zumbis_quem_colhe_tarde_ouve_a_cota_e_segue,
+    },
+    Caso {
+        nome: "zumbis: a recusa grava os zumbis acima da cota",
+        f: zumbis::zumbis_a_recusa_grava_os_zumbis_acima_da_cota,
+    },
+    Caso {
+        nome: "zumbis: a cota vale com tudo ao mesmo tempo",
+        f: zumbis::zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "zumbis: a conta da cota segue a definicao do zumbi",
+        f: zumbis::zumbis_a_conta_da_cota_segue_a_definicao,
     },
     Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",

@@ -402,7 +402,8 @@ kernel/src/
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
-│   └── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
+│   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
+│   └── zumbis.rs    os casos da decisão 14.1: o zumbi na cota de processos do titular — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota, quem colhe tarde, a recusa que grava a contagem, a concorrência, e a conta da cota contra a definição do zumbi
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
