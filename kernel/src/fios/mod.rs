@@ -968,6 +968,19 @@ impl alloc::task::Wake for Sinal {
 /// qualquer coisa nesse caminho precisar perguntar algo ao escalonador — um
 /// contador por fio, uma notificação de morte — a versão aninhada trava, e
 /// trava num ponto arbitrário do programa.
+///
+/// # O teto de cada passada
+///
+/// Uma chamada recolhe no máximo [`MAX_FIOS`] mortos, e limpa no máximo
+/// outros tantos zumbis; o resto fica para a passada seguinte. Todo morto
+/// passa por aqui — só este recolhimento devolve a vaga de um morto —, e um
+/// fio que faz nascer e morrer outros sem parar, em outro núcleo, mantinha
+/// o laço com um morto novo a cada volta: medido na suíte, com um fio do
+/// kernel criando fios que saem na hora, uma passada só durou os 300 tiques
+/// da medida e recolheu 1324 mortos, e nesse tempo o resto da passada do
+/// coletor — a auditoria ao journal, a compactação, os prazos — esperou. O
+/// teto é a tabela inteira: uma passada ainda recolhe tudo o que havia
+/// quando ela começou.
 pub fn recolher_terminados() -> usize {
     #[cfg(feature = "modo-teste")]
     let _recolhendo = Recolhendo::entrar();
@@ -982,7 +995,7 @@ pub fn recolher_terminados() -> usize {
     // o código de saída fica até a colheita.
     limpar_os_zumbis();
 
-    loop {
+    while quantos < MAX_FIOS {
         let morto = com_escalonador(|e| {
             // `na_cpu`, e não "diferente do atual": com vários núcleos há
             // vários atuais, e há também o fio que um núcleo acabou de largar
@@ -1011,7 +1024,7 @@ pub fn recolher_terminados() -> usize {
             // pai de um zumbi — durante a desmontagem.
             e.fios[vaga] = Some(Fio {
                 id: IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed)),
-                nome: "recolhendo",
+                nome: NOME_DO_MARCADOR,
                 estado: Estado::Reservado,
                 contexto: Contexto::vazio(),
                 _pilha: None,
@@ -1084,6 +1097,10 @@ pub fn recolher_terminados() -> usize {
     quantos
 }
 
+/// O nome do marcador que guarda a vaga de um morto enquanto o
+/// recolhimento o desmonta e solta a morte dele ([`recolher_terminados`]).
+const NOME_DO_MARCADOR: &str = "recolhendo";
+
 /// O que a morte de um processo solta fora do fio, fora da trava do
 /// escalonador: a janela de nonces dele, se mandou mensagens pela interface
 /// nativa — o id não se repete, e a janela não serviria a mais ninguém —; e
@@ -1122,7 +1139,8 @@ fn limpar_a_morte(canal: politica::mensagens::Canal) {
 /// recolhimento de outro coletor passa por ele (ver [`Limpeza`]).
 fn limpar_os_zumbis() -> usize {
     let mut quantos = 0;
-    loop {
+    // O teto: ver o de `recolher_terminados`.
+    while quantos < MAX_FIOS {
         let achado = com_escalonador(|e| {
             let vaga = (0..MAX_FIOS).find(|&i| {
                 matches!(&e.fios[i], Some(fio)
@@ -1322,14 +1340,14 @@ pub fn limpezas_de(id: u64) -> Option<u64> {
 }
 
 /// Quantos marcadores do recolhimento há na tabela: a vaga de um morto que
-/// o coletor tirou e ainda desmonta, ou cuja morte ainda solta. Um
-/// nascimento reservado nunca tem a limpeza feita.
+/// o coletor tirou e ainda desmonta, ou cuja morte ainda solta. Achados
+/// pelo nome ([`NOME_DO_MARCADOR`]), que nenhum outro fio tem.
 #[cfg(feature = "modo-teste")]
 pub fn marcadores_de_teste() -> usize {
     com_escalonador(|e| {
         let mut n = 0;
         for fio in e.fios.iter().flatten() {
-            if fio.estado == Estado::Reservado && fio.limpeza == Limpeza::Feita {
+            if fio.estado == Estado::Reservado && fio.nome == NOME_DO_MARCADOR {
                 n += 1;
             }
         }
@@ -2053,11 +2071,16 @@ impl Escalonador {
     ///
     /// # O custo
     ///
-    /// A vaga de um morto fica fora da conta até a passada seguinte do
-    /// coletor — um tique, no máximo, enquanto ele roda. Uma tabela cheia
-    /// de mortos ainda não recolhidos recusa um fio novo, com o motivo de
-    /// sempre, até o coletor passar. E a conta perde a pergunta a
-    /// `e_zumbi` por vaga, que era quadrática no tamanho da tabela.
+    /// A vaga de um morto fica fora da conta até o coletor recolhê-lo, na
+    /// passada seguinte dele: uma por tique em que ele ganha a vez — mais
+    /// tarde, com os núcleos ocupados. Uma tabela cheia de mortos ainda não
+    /// recolhidos recusa um fio novo, com o motivo de sempre, até o coletor
+    /// passar. Um morto que não é zumbi — o colhido, o órfão — não conta na
+    /// cota do titular, que conta os vivos, os que nascem e os zumbis, mas
+    /// segura a vaga até a passada: um programa que bifurca, sai e colhe em
+    /// laço ocupa, entre duas passadas, mais vagas que a cota (as decisões
+    /// pendentes do README). E a conta perde a pergunta a `e_zumbi` por
+    /// vaga, que era quadrática no tamanho da tabela.
     fn vaga_livre(&self) -> Result<usize, &'static str> {
         self.fios
             .iter()
