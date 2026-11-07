@@ -38672,6 +38672,10 @@ static CASOS: &[Caso] = &[
         f: vagas::vagas_a_tabela_cheia_de_mortos_espera_o_coletor,
     },
     Caso {
+        nome: "vagas: o coletor nao fica preso numa passada",
+        f: vagas::vagas_o_coletor_nao_fica_preso,
+    },
+    Caso {
         nome: "vagas: o pai que morre sem colher e os zumbis seguem como antes",
         f: vagas::vagas_o_pai_que_morre_sem_colher,
     },

@@ -75,11 +75,6 @@ fn fora_da_tabela(id: u64) -> bool {
     retrato_de_teste(id).is_none() && crate::fios::marcadores_de_teste() == 0
 }
 
-/// A morte do primeiro vigiado foi solta uma vez.
-fn limpo_uma_vez(_: u64) -> bool {
-    crate::fios::limpezas_vigiadas() == 1
-}
-
 /// A morte do vigiado `id` foi solta uma vez.
 fn limpo_uma_vez_o(id: u64) -> bool {
     crate::fios::limpezas_de(id) == Some(1)
@@ -513,9 +508,10 @@ extern "C" fn espera_e_sai(_argumento: u64) -> ! {
 /// tampadas, vai para cima dela. Solta a pausa, a vaga volta.
 ///
 /// Na passada dos zumbis: o filho é zumbi e o coletor está soltando a
-/// morte dele; o pai o colhe no meio — ele deixa de ser zumbi — e outro
-/// coletor (a suíte) passa. Esse não o recolhe: a limpeza está em curso. A
-/// vaga continua com ele, e a morte é solta uma vez só.
+/// morte dele. Outra passada ao mesmo tempo (a da suíte) não toma a
+/// limpeza em curso; o pai o colhe no meio — ele deixa de ser zumbi — e
+/// outro coletor (a suíte) passa. Esse não o recolhe: a limpeza está em
+/// curso. A vaga continua com ele, e a morte é solta uma vez só.
 pub(super) fn vagas_a_vaga_so_volta_depois_da_limpeza() -> Resultado {
     SOLTAR_O_QUE_ESPERA.store(false, SeqCst);
     let x = crate::fios::criar("teste-vagas-espera", espera_e_sai, 0)?.numero();
@@ -532,7 +528,9 @@ pub(super) fn vagas_a_vaga_so_volta_depois_da_limpeza() -> Resultado {
         )?;
         limpezas(0, "a limpeza pausada contou")?;
         drop(pausa);
-        ate(limpo_uma_vez, 0, "a limpeza solta nao terminou")?;
+        // Recolhido: a limpeza acabou e o marcador saiu da vaga.
+        recolhido(x)?;
+        limpezas(1, "a morte do fio nao foi solta uma vez")?;
         tampas.nascer_em(vaga).map(drop)
     })();
     SOLTAR_O_QUE_ESPERA.store(true, SeqCst);
@@ -555,6 +553,9 @@ fn a_limpeza_em_curso_na_passada_dos_zumbis() -> Resultado {
             !crate::fios::zumbi_de_teste(filho) || !retrato(filho)?.limpeza_em_curso,
             "a passada dos zumbis nao estava limpando o filho",
         )?;
+        // Outra passada dos zumbis ao mesmo tempo, com o filho ainda zumbi.
+        crate::fios::recolher_terminados();
+        limpezas(0, "outra passada dos zumbis tomou a limpeza em curso")?;
         colher(&pai, filho)?;
         // O outro coletor: a suíte.
         crate::fios::recolher_terminados();
@@ -675,10 +676,43 @@ pub(super) fn vagas_a_tabela_cheia_de_mortos_espera_o_coletor() -> Resultado {
     )
 }
 
-/// O coletor recolheu os mortos, e as vagas livres voltaram a `livres`.
+/// O coletor recolheu os mortos, e as vagas livres voltaram — pelo menos as
+/// `livres` de antes: um fio de um caso anterior pode ter saído no meio.
 fn vagas_de_volta(livres: u64) -> bool {
     sem_mortos_por_recolher();
-    crate::fios::vagas_livres_de_teste() as u64 == livres
+    crate::fios::vagas_livres_de_teste() as u64 >= livres
+}
+
+// ---------------------------------------------------------------------------
+// vagas: o coletor nao fica preso numa passada
+// ---------------------------------------------------------------------------
+
+/// O fio da suíte faz nascer fios que saem na hora, sem parar e sem ceder,
+/// e o coletor recolhe ao mesmo tempo: as passadas dele continuam acabando,
+/// e o resto de cada uma — a auditoria ao journal, a compactação, os prazos
+/// — segue. Sem o teto de cada passada, uma passada só durava enquanto
+/// houvesse quem fizesse nascer: medido, os 300 tiques inteiros.
+pub(super) fn vagas_o_coletor_nao_fica_preso() -> Resultado {
+    if nucleos_secundarios().next().is_none() {
+        crate::log_info!("teste", "um nucleo so: o coletor nao corre ao mesmo tempo");
+        return Ok(());
+    }
+    sem_mortos_por_recolher();
+    let (mut antes, mut acabadas) = (crate::fios::recolhidos(), 0);
+    let fim = crate::tempo::ticks() + 300;
+    while acabadas < 3 && crate::tempo::ticks() < fim {
+        let _ = crate::fios::criar("teste-vagas-morto", morre_na_hora, 0);
+        let agora = crate::fios::recolhidos();
+        if agora != antes {
+            acabadas += 1;
+            antes = agora;
+        }
+    }
+    sem_mortos_por_recolher();
+    conferir(
+        acabadas < 3,
+        "o coletor ficou preso numa passada, recolhendo",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +816,10 @@ const COLHEDOR_COLHE: i64 = 2;
 
 /// Quantas vítimas cada lançador faz nascer, no máximo.
 const VITIMAS_POR_LANCADOR: u64 = 120;
+
+/// Quantos lançadores, no máximo — um por núcleo secundário: as vítimas de
+/// todos cabem nos vigias do kernel com qualquer número de núcleos.
+const LANCADORES: usize = 3;
 
 static PARAR: AtomicBool = AtomicBool::new(false);
 static VIVOS: AtomicUsize = AtomicUsize::new(0);
@@ -906,7 +944,7 @@ pub(super) fn vagas_tudo_ao_mesmo_tempo() -> Resultado {
     let colhedor = crate::usuario::lancar(Some(&programa))?;
     let mut r = ate(colhedor_pronto, desde, "o colhedor nao ficou pronto");
     if r.is_ok() {
-        for &nucleo in &secundarios {
+        for &nucleo in secundarios.iter().take(LANCADORES) {
             VIVOS.fetch_add(1, SeqCst);
             if crate::fios::criar_no_nucleo("teste-vagas-lancador", lancador, 0, nucleo).is_err() {
                 VIVOS.fetch_sub(1, SeqCst);
