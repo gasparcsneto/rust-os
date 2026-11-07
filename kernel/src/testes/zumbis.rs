@@ -63,28 +63,43 @@ impl Colhedor {
     }
 
     /// Publica um evento no canal do colhedor, insistindo enquanto a fila
-    /// dele estiver cheia.
+    /// dele estiver cheia — e enquanto ele a andar.
+    ///
+    /// # Pelo progresso, e não por um prazo só
+    ///
+    /// A fila guarda [`crate::eventos::CAPACIDADE`] passos, e o colhedor os
+    /// tira no ritmo da tela: cada resposta dele é uma linha no log, e na
+    /// tela do virtio-gpu, na CI, uma linha leva dezenas de milissegundos.
+    /// Um prazo só, do primeiro passo recusado ao último, mediria a tela, e
+    /// não o colhedor: na CI 448, o caso da concorrência reprovou assim, no
+    /// fim. Aqui o prazo recomeça a cada passo que o colhedor tira da fila
+    /// ([`passos_tirados`]); o caso reprova só se ele passar o prazo
+    /// inteiro sem tirar nenhum — parado, e não devagar.
     fn publicar(tipo: u32, a: i64) -> Resultado {
-        let mut publicado = false;
-        let _ = esperar_cedendo(
-            || {
-                publicado = crate::eventos::publicar(
-                    CANAL,
-                    Evento {
-                        tipo,
-                        a,
-                        ..Default::default()
-                    },
-                )
-                .is_ok();
-                publicado
-            },
-            600,
-        );
-        if publicado {
-            Ok(())
-        } else {
-            Err("o canal do colhedor nao recebeu o passo")
+        loop {
+            let tirados = passos_tirados();
+            let mut publicado = false;
+            let _ = esperar_cedendo(
+                || {
+                    publicado = crate::eventos::publicar(
+                        CANAL,
+                        Evento {
+                            tipo,
+                            a,
+                            ..Default::default()
+                        },
+                    )
+                    .is_ok();
+                    publicado || passos_tirados() > tirados
+                },
+                600,
+            );
+            if publicado {
+                return Ok(());
+            }
+            if passos_tirados() <= tirados {
+                return Err("o canal do colhedor nao recebeu o passo");
+            }
         }
     }
 
@@ -174,10 +189,33 @@ impl Colhedor {
 
     /// Pede o fim e espera o colhedor sair. Os zumbis dele deixam de ser
     /// zumbis — o pai morreu — e o coletor os recolhe.
+    ///
+    /// O fim é lido depois dos passos que já estão na fila: a espera anda
+    /// com ela, como a de [`Colhedor::publicar`]. Reprova só se o colhedor
+    /// passar o prazo inteiro vivo e sem tirar passo nenhum.
     fn encerrar(&self) -> Resultado {
         let _ = Self::publicar(tipo::ENCERRAR, 0);
-        esperar_ate(|| !crate::fios::vivo(self.fio), 600).map_err(|_| "o colhedor nao saiu")
+        loop {
+            let tirados = passos_tirados();
+            esperar_ate(
+                || !crate::fios::vivo(self.fio) || passos_tirados() > tirados,
+                600,
+            )
+            .map_err(|_| "o colhedor nao saiu")?;
+            if !crate::fios::vivo(self.fio) {
+                return Ok(());
+            }
+        }
     }
+}
+
+/// Quantos passos o colhedor já tirou da fila do canal dele — `None` sem
+/// ninguém escutando. É o progresso pelo qual as esperas de
+/// [`Colhedor::publicar`] e [`Colhedor::encerrar`] recomeçam o prazo: só o
+/// ouvinte tira passos da fila, e a conta só cresce — um canal que fechou
+/// (`None`) não é progresso.
+fn passos_tirados() -> Option<u64> {
+    crate::eventos::estado(CANAL).map(|e| e.entregues)
 }
 
 /// A política padrão com a cota do operador em `cota`.
