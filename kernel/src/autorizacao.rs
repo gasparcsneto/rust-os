@@ -3755,9 +3755,16 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 }
 
 /// Pode nascer mais um processo com a autoridade `autoridade`? A cota de
-/// processos vivos do papel de quem é a autoridade — a linha `processos` da
+/// processos do papel de quem é a autoridade — a linha `processos` da
 /// política —, contada por titular: uma sessão de agente, uma de pessoa, o
-/// sistema. Sem papel, nada nasce. Uma recusa vai para a auditoria.
+/// sistema. Sem papel, nada nasce. Uma recusa vai para a auditoria, com a
+/// contagem.
+///
+/// A cota conta os processos do titular que ocupam uma vaga da tabela de
+/// fios: os vivos, os que estão nascendo e os zumbis — o filho que saiu e
+/// que o pai, vivo, ainda não colheu —, até a colheita ou a morte do pai
+/// (a decisão 14.1; ver [`crate::fios::processos_de`]). O zumbi conta para
+/// a autoridade dele, que é a herdada do pai, e para nenhuma outra.
 ///
 /// Devolve a cota, que quem lança passa ao escalonador: a contagem daqui é
 /// a resposta rápida, e a que vale é a do nascimento, feita junto com a
@@ -3804,9 +3811,9 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, 
         return Err(Codigo::DenyRole);
     };
     let cota = cota as usize;
-    let vivos = crate::fios::processos_de(autoridade);
-    if vivos >= cota {
-        return Err(recusar_pela_cota_com(&quem, metodo, vivos, cota));
+    let ocupados = crate::fios::processos_de(autoridade);
+    if ocupados >= cota {
+        return Err(recusar_pela_cota_com(&quem, metodo, ocupados, cota));
     }
     Ok(cota)
 }
@@ -3820,14 +3827,14 @@ pub fn recusar_pela_cota(autoridade: Autoridade, metodo: &str, cota: usize) -> C
     recusar_pela_cota_com(&quem, metodo, cota, cota)
 }
 
-fn recusar_pela_cota_com(quem: &Quem, metodo: &str, vivos: usize, cota: usize) -> Codigo {
+fn recusar_pela_cota_com(quem: &Quem, metodo: &str, ocupados: usize, cota: usize) -> Codigo {
     auditar(
         quem,
         metodo,
         "",
         Codigo::DenyPolicy,
         &[],
-        &alloc::format!("cota de processos do papel: {vivos} de {cota}"),
+        &alloc::format!("cota de processos do papel: {ocupados} de {cota}"),
     );
     Codigo::DenyPolicy
 }

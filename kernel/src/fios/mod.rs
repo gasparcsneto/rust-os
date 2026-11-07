@@ -1172,12 +1172,14 @@ pub fn criar_como(
 pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta esgotada";
 
 /// [`criar_como`] um processo, contado na cota do titular da `autoridade`:
-/// nasce só se o titular tiver menos de `cota` processos vivos.
+/// nasce só se o titular ocupar menos de `cota` vagas da tabela — com os
+/// processos vivos, os que estão nascendo e os zumbis (ver
+/// [`processos_de`]).
 ///
 /// # Por que a cota é conferida aqui, e não só no gate
 ///
 /// O gate ([`crate::autorizacao::permitir_processo`]) decide pela política
-/// e conta os vivos; a vaga do fio novo é reservada depois, aqui. Com um
+/// e faz a mesma conta; a vaga do fio novo é reservada depois, aqui. Com um
 /// núcleo só, uma chamada de sistema rodava inteira com as interrupções
 /// mascaradas, e nada acontecia entre contar e reservar. Com vários, dois
 /// processos do mesmo titular bifurcam juntos, em núcleos diferentes, os
@@ -1625,16 +1627,55 @@ pub unsafe fn desistir_do_ocioso(vaga: usize) {
 }
 
 impl Escalonador {
-    /// Os processos vivos com a `autoridade` — reservados também: um fio
-    /// que está nascendo já conta. Ver [`processos_de`].
+    /// Os processos com a `autoridade` que ocupam uma vaga da tabela — a
+    /// conta da cota de processos do papel: os vivos, reservados também (um
+    /// fio que está nascendo já conta), e os zumbis, até o pai colher ou
+    /// morrer. Ver [`processos_de`].
+    ///
+    /// # Por que o zumbi conta
+    ///
+    /// O zumbi guarda a vaga até a colheita — ver [`Self::vaga_livre`].
+    /// Contando só os vivos, um titular com uma cota pequena e um programa
+    /// que bifurca e não colhe passava pela cota a cada filho e ocupava a
+    /// tabela inteira: daí em diante não nascia fio nenhum, de ninguém —
+    /// nem o do `system.reboot`. É a decisão 14.1: a cota limita o que o
+    /// titular ocupa da tabela, e não só o que ainda roda.
+    ///
+    /// # Por que não perguntar a `e_zumbi`
+    ///
+    /// Zumbi é o que [`Self::e_zumbi`] diz: terminou, não foi colhido, e o
+    /// pai existe na tabela, com aquele id, e não terminou. Mas `e_zumbi`
+    /// procura o pai na tabela inteira, e perguntada a cada terminado faria
+    /// esta conta quadrática no tamanho da tabela — sob a trava do
+    /// escalonador, no caminho de todo `bifurcar` e de todo lançamento. Os
+    /// ids de quem não terminou são juntados uma vez, numa pilha de
+    /// [`MAX_FIOS`] ids, sem pedir memória; ordenados, o pai de cada
+    /// terminado é procurado entre eles por bisseção. A pergunta é a mesma,
+    /// e a suíte confere as duas contas uma contra a outra.
     fn processos_de(&self, autoridade: crate::autorizacao::Autoridade) -> usize {
+        let mut vivos = [IdFio(0); MAX_FIOS];
+        let mut quantos = 0;
+        let ids = self
+            .fios
+            .iter()
+            .flatten()
+            .filter(|f| f.estado != Estado::Terminado)
+            .map(|f| f.id);
+        for (vaga, id) in vivos.iter_mut().zip(ids) {
+            *vaga = id;
+            quantos += 1;
+        }
+        let vivos = &mut vivos[..quantos];
+        vivos.sort_unstable();
         self.fios
             .iter()
             .flatten()
             .filter(|f| {
                 f.nome == NOME_DO_PROCESSO
-                    && f.estado != Estado::Terminado
                     && f.autoridade == autoridade
+                    && (f.estado != Estado::Terminado
+                        || (!f.colhido
+                            && f.pai.is_some_and(|pai| vivos.binary_search(&pai).is_ok())))
             })
             .count()
     }
@@ -2523,10 +2564,12 @@ pub fn nucleo_de(id: u64) -> Option<usize> {
     })
 }
 
-/// Quantos processos vivos têm esta autoridade: os fios que hospedam um
-/// programa — lançados por `user.run` ou pelo sistema, ou bifurcados — e não
-/// terminaram. É a conta da cota de processos do papel — ver
-/// [`crate::autorizacao::permitir_processo`].
+/// Quantas vagas da tabela os processos com esta autoridade ocupam: os fios
+/// que hospedam um programa — lançados por `user.run` ou pelo sistema, ou
+/// bifurcados — que não terminaram, e os zumbis, até o pai colher ou
+/// morrer. É a conta da cota de processos do papel — ver
+/// [`crate::autorizacao::permitir_processo`] e, aqui, o porquê do zumbi e da
+/// conta sem custo quadrático, em `Escalonador::processos_de`.
 pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.processos_de(autoridade))
 }
