@@ -879,6 +879,9 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
     MAIOR.store(0, SeqCst);
     RAJADA.store(0, SeqCst);
     PARAR.store(false, SeqCst);
+    // As vagas livres são as vazias: os mortos que os casos anteriores
+    // deixaram saem antes da medida, ou a conta do fim os acharia a mais.
+    super::sem_mortos_por_recolher();
     let livres_antes = crate::fios::vagas_livres_de_teste();
     let (bifurcacoes_antes, _, _) = crate::usuario::estatisticas_de_processo();
     let mut fio = None;

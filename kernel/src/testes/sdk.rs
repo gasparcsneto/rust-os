@@ -362,6 +362,23 @@ fn apagar_o_instalado(pessoa: Chamador) -> Resultado {
 ///   `vindo`;
 /// - os pedidos dele dizem de onde ele veio: o editor `bancada`.
 pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
+    o_programa_de_fora(false)
+}
+
+/// O mesmo caso, com a corrida das CIs 445 e 447 aberta de propósito: o
+/// coletor segurado do cliente do modelo até a última variante. O
+/// instalador colhe o cliente e bifurca a variante seguinte antes da
+/// passada do coletor — com as vagas vazias abaixo da do cliente tampadas,
+/// para a variante cair nela se ela pudesse ser escolhida. Ela não pode: o
+/// cliente colhido guarda a vaga, e a morte dele, até o coletor passar;
+/// solto, a morte é solta uma vez, e nenhuma designação sobra.
+pub(super) fn sdk_o_programa_de_fora_do_repositorio_com_o_coletor_segurado() -> Resultado {
+    o_programa_de_fora(true)
+}
+
+/// O caso do programa de fora do repositório, com ou sem o coletor
+/// segurado durante o cliente e as variantes.
+fn o_programa_de_fora(segurar: bool) -> Resultado {
     use protocolo::usuario::erro;
     com_a_bancada_http(|| {
         com_os_avisos(|| {
@@ -391,6 +408,7 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
 
                 // O cliente: a mesma imagem, com o pedido no armazém.
                 gravar_o_par(pessoa)?;
+                let segurado = segurar.then(super::vagas::ColetorSegurado::segurar);
                 let desde = crate::log::total_emitidos();
                 instalador.rodar(do_modelo(0), SAIDA_DO_ECO_DO_MODELO)?;
                 let eco = dito_na_malha(desde, "modelo: eco ")?;
@@ -405,6 +423,22 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
                     return Err("o servidor do modelo nao ecoou tudo");
                 }
 
+                // Com o coletor segurado, o cliente — colhido pelo instalador
+                // — está na tabela, com a morte devida; as vagas vazias de
+                // baixo ficam tampadas.
+                let mut tampas = super::vagas::Tampas::novas();
+                let mut cliente = None;
+                if segurado.is_some() {
+                    let c = crate::fios::filho_parado_de_teste(instalador.fio)
+                        .ok_or("o cliente do modelo nao ficou na tabela")?;
+                    let vaga = crate::fios::retrato_de_teste(c)
+                        .ok_or("o cliente do modelo sem vaga")?
+                        .vaga;
+                    crate::fios::vigiar_a_limpeza(c);
+                    tampas.tapar_abaixo(vaga)?;
+                    cliente = Some((c, vaga));
+                }
+
                 // As variantes: recusadas na troca de imagem, como sempre.
                 for (i, codigo) in [
                     (1, erro::SEM_SELO),
@@ -413,6 +447,21 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
                     (4, erro::EDITOR_NAO_CONFIADO),
                 ] {
                     instalador.rodar(do_modelo(i), codigo)?;
+                }
+
+                if let Some((c, vaga)) = cliente {
+                    if crate::fios::retrato_de_teste(c).map(|r| r.vaga) != Some(vaga) {
+                        return Err("uma variante ficou com a vaga do cliente antes da limpeza");
+                    }
+                    if crate::fios::limpezas_vigiadas() != 0 {
+                        return Err("a morte do cliente foi solta com o coletor segurado");
+                    }
+                    drop(segurado);
+                    tampas.soltar();
+                    super::vagas::recolhido(c)?;
+                    if crate::fios::limpezas_vigiadas() != 1 {
+                        return Err("a morte do cliente do modelo nao foi solta uma vez");
+                    }
                 }
 
                 // O que rodou pediu, e cada pedido diz de onde veio.
@@ -427,6 +476,7 @@ pub(super) fn sdk_o_programa_de_fora_do_repositorio() -> Resultado {
                 }
                 Ok(())
             })();
+            crate::fios::vigiar_a_limpeza(u64::MAX);
             apagar_o_par(pessoa);
             let fim_do_servidor = match &canal_do_servidor {
                 Some(c) => encerrar_na_malha(c, SAIDA_DO_MODELO),

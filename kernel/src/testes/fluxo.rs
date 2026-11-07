@@ -27,17 +27,17 @@ use politica::Codigo;
 pub(in crate::testes) mod par;
 
 /// A intenção que o `fluxos` oferece.
-const INTENCAO: &str = "imagem.compartilhar";
+pub(in crate::testes) const INTENCAO: &str = "imagem.compartilhar";
 
 /// O código com que o `fluxos` sai no fim pedido.
-const SAIDA: i64 = 61;
+pub(in crate::testes) const SAIDA: i64 = 61;
 
 /// Os passos do `fluxos`.
 const MANDAR: i64 = 1;
 const RECEBER: i64 = 2;
 const TROCAR: i64 = 3;
-const BIFURCAR: i64 = 4;
-const COLHER: i64 = 5;
+pub(in crate::testes) const BIFURCAR: i64 = 4;
+pub(in crate::testes) const COLHER: i64 = 5;
 
 /// O byte `i` do padrão determinístico — o mesmo do programa.
 fn padrao(i: usize) -> u8 {
@@ -56,26 +56,26 @@ pub(in crate::testes) fn resumo(bytes: impl Iterator<Item = u8>) -> u64 {
 
 /// Uma ponta de fluxo em execução: o programa `fluxos`, o endpoint que ele
 /// abriu e o canal por onde a suíte dita os passos.
-struct Ponta {
+pub(in crate::testes) struct Ponta {
     p: NaMalha,
-    endpoint: String,
-    canal: String,
+    pub(in crate::testes) endpoint: String,
+    pub(in crate::testes) canal: String,
 }
 
 impl Ponta {
     /// Lança o `fluxos` com `autoridade` e espera ele dizer o endpoint.
-    fn lancar(autoridade: Autoridade) -> Result<Ponta, &'static str> {
+    pub(in crate::testes) fn lancar(autoridade: Autoridade) -> Result<Ponta, &'static str> {
         let (p, endpoint) = NaMalha::lancar("fluxos", autoridade, "fluxos: pronto ")?;
         let canal = format!("teste-fluxos-{}", p.fio);
         Ok(Ponta { p, endpoint, canal })
     }
 
     /// O chamador que pede como este processo.
-    fn quem(&self) -> Chamador {
+    pub(in crate::testes) fn quem(&self) -> Chamador {
         self.p.chamador()
     }
 
-    fn fio(&self) -> u64 {
+    pub(in crate::testes) fn fio(&self) -> u64 {
         self.p.fio
     }
 
@@ -98,7 +98,7 @@ impl Ponta {
     }
 
     /// Pede o fim do programa e espera ele sair.
-    fn encerrar(&self) -> Resultado {
+    pub(in crate::testes) fn encerrar(&self) -> Resultado {
         encerrar_na_malha(&self.canal, SAIDA)
     }
 }

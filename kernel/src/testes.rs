@@ -33,6 +33,7 @@ mod enlace;
 mod fluxo;
 mod pareamento;
 mod sdk;
+mod vagas;
 mod zumbis;
 
 /// O que um teste devolve. A mensagem de erro é estática porque não há heap
@@ -38655,6 +38656,34 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_a_conta_da_cota_acha_o_pai_fora_da_ordem_das_vagas,
     },
     Caso {
+        nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",
+        f: vagas::vagas_o_morto_sem_a_limpeza_guarda_a_vaga,
+    },
+    Caso {
+        nome: "vagas: a colheita e a bifurcacao seguinte nao perdem a limpeza",
+        f: vagas::vagas_a_colheita_e_a_bifurcacao_seguinte,
+    },
+    Caso {
+        nome: "vagas: a vaga so volta depois de a limpeza terminar",
+        f: vagas::vagas_a_vaga_so_volta_depois_da_limpeza,
+    },
+    Caso {
+        nome: "vagas: a tabela cheia de mortos espera o coletor",
+        f: vagas::vagas_a_tabela_cheia_de_mortos_espera_o_coletor,
+    },
+    Caso {
+        nome: "vagas: o pai que morre sem colher e os zumbis seguem como antes",
+        f: vagas::vagas_o_pai_que_morre_sem_colher,
+    },
+    Caso {
+        nome: "vagas: a janela de nonces do morto sai com a limpeza",
+        f: vagas::vagas_a_janela_de_nonces_do_morto,
+    },
+    Caso {
+        nome: "vagas: termino, colheita, coleta e nascimento ao mesmo tempo",
+        f: vagas::vagas_tudo_ao_mesmo_tempo,
+    },
+    Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
         f: arch_dormir_parado_acorda_mascarado,
     },
@@ -40646,6 +40675,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "sdk: o programa de fora do repositorio, selado, instalado e rodado",
         f: sdk::sdk_o_programa_de_fora_do_repositorio,
+    },
+    Caso {
+        nome: "sdk: o programa de fora do repositorio com o coletor segurado",
+        f: sdk::sdk_o_programa_de_fora_do_repositorio_com_o_coletor_segurado,
     },
     Caso {
         nome: "sdk: o agent.describe confere com o contrato",

@@ -1761,6 +1761,45 @@ pub fn levar_pela_via_de_teste(t: &Tomado, via: &mut impl Via) {
     concluir(t.id, r);
 }
 
+/// Só para a suíte: um pedido do canal `canal` a um dispositivo, na fila —
+/// como o de um processo que pediu `fabric.remote` e espera o par. Na suíte
+/// o serviço não roda: o pedido fica na fila até sair. Devolve o número.
+#[cfg(feature = "modo-teste")]
+pub fn pedir_de_teste(canal: Canal) -> Option<u64> {
+    let agora = crate::tempo::uptime_ms();
+    let mut resumo = [0u8; 32];
+    resumo[..8].copy_from_slice(&agora.to_le_bytes());
+    match com_origem(|o| {
+        o.tabela.pedir(
+            canal,
+            resumo,
+            [0x5a; 32],
+            [0x5a; 16],
+            None,
+            [0; 32],
+            |_| String::from("{}"),
+            agora,
+        )
+    }) {
+        Ok(Andamento::Novo(id)) | Ok(Andamento::Esperando(id)) => Some(id),
+        _ => None,
+    }
+}
+
+/// Só para a suíte: quantos pedidos do canal `canal` a tabela tem — na
+/// fila, a caminho ou terminados à espera de quem pediu.
+#[cfg(feature = "modo-teste")]
+pub fn pedidos_de_teste(canal: Canal) -> usize {
+    se_ha_origem(|o| {
+        o.tabela
+            .pedidos()
+            .iter()
+            .filter(|p| p.canal == canal)
+            .count()
+    })
+    .unwrap_or(0)
+}
+
 /// Para o invariante da suíte: a tabela nunca quebra as regras dela.
 #[cfg(feature = "modo-teste")]
 pub fn coerente() -> bool {
