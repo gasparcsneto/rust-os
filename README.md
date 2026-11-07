@@ -403,7 +403,7 @@ kernel/src/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
-│   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o pai que morre sem colher, a janela de nonces e a concorrência
+│   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
 │   └── zumbis.rs    os casos da decisão 14.1: o zumbi na cota de processos do titular — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota, quem colhe tarde, a recusa que grava a contagem, a concorrência, e a conta da cota contra a definição do zumbi, também com o pai numa vaga antes de um fio vivo mais velho
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
@@ -2210,6 +2210,49 @@ fio que chamou `sair` segue executando sobre a própria pilha de kernel até
 ceder a vez, e desmapeá-la ali seria tirar o chão de quem está de pé nele.
 Um fio encerrado que já não é o atual nunca mais roda — o rodízio só escolhe
 quem está pronto —, e é isso que torna a pilha dele segura de desmontar.
+
+**A vaga de um morto só volta depois da limpeza da morte.** Morrer solta
+coisas que moram fora do fio: os endpoints da malha que o processo abriu,
+os fluxos de que ele é ponta, os pedidos dele ao enlace, as designações
+dos avisos e a janela de nonces da interface nativa
+(`fios::limpar_a_morte`). Quem as solta é a passada dos zumbis — para o
+filho que o pai ainda vai colher — ou o recolhimento, e a limpeza de cada
+morto está `Devida`, `EmCurso` ou `Feita`. A escolha da vaga para um fio
+novo (`vaga_livre`) só aceita posição vazia: um morto — zumbi ou não,
+colhido, órfão, ou o processo do `user.run` — guarda a vaga até o coletor
+tirá-lo. O coletor tira o morto, deixa na vaga um marcador reservado
+enquanto o desmonta e solta a morte dele, e só então a esvazia. Antes, a
+escolha aceitava também a vaga de um morto que não é zumbi, fora de todo
+núcleo, e o nascimento largava o morto sem soltar a morte: as designações,
+os fluxos, os endpoints, os pedidos e a janela dele ficavam. Foi o que a
+CI 445 viu, no x86_64 em release: o instalador do caso `sdk: o programa
+de fora do repositorio` colheu o cliente do modelo e bifurcou a variante
+seguinte antes da passada do coletor; a variante ficou com a vaga do
+cliente, e uma designação sobrou. A passada dos zumbis põe a limpeza em
+curso sob a trava e a solta fora dela; um recolhimento ao mesmo tempo — a
+suíte chama `recolher_terminados` de outros núcleos, junto com o coletor —
+pula o morto em curso, e a morte é solta uma vez só. O custo: com a
+tabela cheia de mortos ainda não recolhidos, o nascimento é recusado, com
+o motivo de sempre — não há vaga —, até a passada seguinte do coletor, que
+faz uma por tique quando ganha a vez — mais tarde, com os núcleos
+ocupados. E um morto que não é zumbi — o colhido, o órfão — não conta na
+cota do titular, que conta os vivos, os que nascem e os zumbis, mas guarda
+a vaga até essa passada: um programa que bifurca, sai e colhe em laço
+ocupa, entre duas passadas, mais vagas que a cota (ver [Decisões
+pendentes](#decisões-pendentes)). Os casos `vagas:` seguram o coletor
+e pausam a limpeza no meio para conferir cada um desses pontos, e `sdk: o
+programa de fora do repositorio com o coletor segurado` refaz a corrida da
+CI 445 de propósito.
+
+Como todo morto passa pelo recolhimento, cada passada tem um teto: recolhe
+no máximo a tabela inteira (`MAX_FIOS` mortos) e limpa no máximo outros
+tantos zumbis, e o resto fica para a passada seguinte. Sem ele, um fio que
+faz nascer e morrer outros sem parar, em outro núcleo, punha um morto novo
+na tabela a cada volta do laço: medido na suíte, uma passada só durou os
+300 tiques da medida e recolheu 1324 mortos, e nesse tempo o resto da
+passada do coletor — a auditoria ao journal, a compactação, os prazos —
+esperou. `vagas: o coletor nao fica preso numa passada` confere que as
+passadas continuam acabando com um fio fazendo nascer sem parar.
 
 **Cada processo tem o seu espaço de endereços.** Uma tabela de tradução por
 processo, montada copiando as entradas de topo do kernel — o que mantém o
@@ -5045,6 +5088,34 @@ Sem ganho a medir, não há o que pagar com esse risco.
   de fora do da imagem e um editor de outro (o achado 3), e o resto é o
   tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
   de 96 bytes: fica para uma decisão.
+- **Os mortos ainda não recolhidos, fora da cota** (o achado A1 do
+  adversário da correção da vaga do morto): desde que a vaga de um morto
+  só volta pelo coletor, o processo que morreu e não é zumbi — o filho
+  colhido, o órfão, o do `user.run` — guarda a vaga até a passada do
+  coletor, e não conta na cota do titular, que conta os vivos, os que
+  nascem e os zumbis (a 14.1, alternativa A). Um programa que bifurca, sai
+  e colhe em laço ocupa, entre duas passadas, mais vagas do que a cota; se
+  fizer morrer mais depressa do que o coletor recolhe, a tabela enche, e
+  não nasce fio nenhum, de ninguém, até a passada seguinte — nem o
+  `energia` do `system.reboot`. Antes, o nascimento ficava com a vaga do
+  morto, sem a limpeza. Medido na suíte, no x86_64 em debug com 4 núcleos,
+  com um caso temporário que não ficou no repositório: fios do kernel
+  criados sem parar, por um fio ou por três, encheram a tabela — nenhuma
+  vaga livre, 737 e 162 274 nascimentos recusados em 300 tiques —, com o
+  coletor recolhendo uns 440 por segundo; o `colhedor`, mandado bifurcar e
+  colher o mais depressa que a suíte manda, ocupou no máximo 3 vagas a
+  mais que antes — cada passo dele leva dezenas de milissegundos, com a
+  impressão no log. Um programa que bifurque e colha em laço, sem
+  imprimir, não foi medido: não há um na imagem, e criar fios do kernel é
+  coisa do próprio kernel. Fechar pede uma decisão: contar na cota do
+  titular também os mortos dele que ainda guardam vaga, até o
+  recolhimento — devolve a garantia da 14.1, mas muda a definição da
+  alternativa A, e um programa que bifurca e colhe depressa passa a ouvir
+  a recusa da cota até a passada seguinte —; ou reservar vagas aos fios do
+  kernel — salva o `energia`, o enlace e a cerimônia, não os outros
+  titulares —; ou só mitigar, como [B]: o nascimento que não acha vaga,
+  havendo morto por recolher, acorda o coletor — não ajuda com o coletor
+  sem a vez —; ou aceitar, como está.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
   14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
   processos de um titular ocupam da tabela de fios no máximo a cota dele
@@ -5067,25 +5138,24 @@ Sem ganho a medir, não há o que pagar com esse risco.
   processo. A soma das cotas de titulares diferentes nenhuma das três
   fecha sozinha. Cada uma muda a semântica da cota ou da alocação, e fica
   para uma decisão. E três
-  correções [B], achadas na análise da 14.1 e de fora dela, ficam para
-  incrementos à parte, cada uma com os seus testes: (1) o fio `energia`
+  correções [B], achadas na análise da 14.1 e de fora dela, ficaram para
+  incrementos à parte, cada uma com os seus testes — a (2) já foi feita:
+  (1) o fio `energia`
   nasce sob demanda, e com a tabela cheia o `system.reboot` falha depois
   de o pedido ir ao journal — criá-lo no boot, parado, como o do botão;
-  (2) a vaga de um morto que não é zumbi — o filho colhido, o órfão, o
-  processo do `user.run` — volta a um fio novo antes da passada do
-  coletor, e a morte dele não é solta (a malha, os fluxos, os pedidos ao
-  enlace, as designações dos avisos e a janela de nonces dele ficam) —
-  reproduzido com o coletor segurado, e visto sem ele na CI 445, no x86_64
-  em release: no caso `sdk: o programa de fora do repositorio`, o
-  instalador colheu o cliente do modelo e bifurcou a variante seguinte
-  antes da passada do coletor, o coletor não recolheu o cliente — a
-  variante ficou com a vaga dele —, e uma designação sobrou: o caso
-  reprovou. A mesma corrida, com o coletor segurado e um registro
-  temporário, reprova o caso do mesmo jeito, e o registro mostra a vaga
-  do cliente devolvida sem a morte solta e a designação do endpoint dele
-  sobrando; com a vaga do morto entregue só pelo coletor, o caso passa. A
-  vaga não deve ser entregue até o coletor passar; até lá, qualquer caso
-  que colhe um processo e bifurca logo em seguida pode reprovar assim;
+  (2) **feita**: a vaga de um morto que não é zumbi — o filho colhido, o
+  órfão, o processo do `user.run` — voltava a um fio novo antes da
+  passada do coletor, e a morte dele não era solta (a malha, os fluxos,
+  os pedidos ao enlace, as designações dos avisos e a janela de nonces
+  dele ficavam). Visto na CI 445, no x86_64 em release, e na 447: no caso
+  `sdk: o programa de fora do repositorio`, o instalador colheu o cliente
+  do modelo e bifurcou a variante seguinte antes da passada do coletor; a
+  variante ficou com a vaga do cliente, e uma designação sobrou. Agora só
+  o coletor devolve a vaga de um morto, e depois de soltar a morte dele
+  (ver *A vaga de um morto só volta depois da limpeza da morte*, em
+  [Userspace](#userspace), e as mutações da vaga do morto, em
+  [Coordenação](#coordenação)); o caso `sdk: o programa de fora do
+  repositorio com o coletor segurado` refaz a corrida de propósito;
   (3) o gate confere a contenção antes de copiar o espaço e de nascer, e um
   `process.isolate` no meio deixa nascer um filho livre — conferir de novo
   no nascimento, antes de o filho poder rodar (pela leitura). O adversário
@@ -5102,9 +5172,10 @@ Sem ganho a medir, não há o que pagar com esse risco.
   por falta de pilha; (5) a recusa da cota num `fork` vai à auditoria só
   com o titular, sem o processo que bifurcou, que o registro da
   bifurcação permitida tem; (6) a escolha da vaga, na mesma seção crítica
-  do nascimento, ainda pergunta a `e_zumbi` por cada terminado antes da
+  do nascimento, perguntava a `e_zumbi` por cada terminado antes da
   primeira vaga livre — quadrática no tamanho da tabela, como antes da
-  14.1, e limitada às 95 vagas.
+  14.1, e limitada às 95 vagas. Deixou de existir com a (2): a escolha só
+  procura a primeira posição vazia, e não pergunta nada aos mortos.
 
 ## O tempo
 
@@ -8276,7 +8347,10 @@ do primeiro toma uma; com 4 núcleos, como na suíte e nas bancadas,
 sobram 92, e na suíte o boot, o coletor e a rede tomam três delas — as
 32 de trabalho são só o mínimo garantido, com os 64 núcleos ligados.
 Desde a 14.1, os processos de um titular ocupam da tabela no máximo a
-cota dele — os fios do kernel não contam em cota nenhuma —, e a cota
+cota dele — os fios do kernel não contam em cota nenhuma; e os mortos que
+não são zumbis, o colhido e o órfão, também não contam, mas guardam a vaga
+até a passada do coletor: ver o item da vaga do morto em [Decisões
+pendentes](#decisões-pendentes) —, e a cota
 rebaixada não tira o que ele já ocupa: ele só não cria outro até ficar
 abaixo dela. O zumbi conta para o titular dele — a autoridade herdada do
 pai, que não muda — e para nenhum outro. O resto não mudou: a mesma
@@ -8292,9 +8366,8 @@ quem não terminou, ordena, e procura o pai de cada terminado por
 bisseção; a suíte confere essa conta contra a definição do zumbi, também
 com o pai numa vaga antes de um fio vivo mais velho — a ordem em que uma
 bisseção sem ordenar o perderia. A escolha da vaga, logo depois, na mesma
-seção crítica, ainda pergunta a `e_zumbi` por cada terminado antes da
-primeira vaga livre, como antes da 14.1 (ver [Decisões
-pendentes](#decisões-pendentes)). Um pai
+seção crítica, só procura a primeira posição vazia: desde a correção da
+vaga do morto, ela não pergunta nada aos mortos. Um pai
 travado segura os zumbis dele na cota até o sistema ou o administrador o
 encerrar (`process.terminate`), e o de um administrador — que o
 `process.terminate` da política padrão não alcança — até sair: é o efeito
@@ -8373,6 +8446,68 @@ casos de antes do nono.
 | a conta que esquece a colheita: o filho colhido conta até o coletor o desmontar (MZ8) | `zumbis: a conta da cota segue a definicao do zumbi`, e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
 | a conta que toma por vivo o pai que terminou: os ids juntados são os de todos os fios, e não só os de quem não terminou (MZ9) | `zumbis: a conta da cota segue a definicao do zumbi` |
 | a bisseção sem ordenar os ids (MZ10) | `zumbis: a conta da cota acha o pai fora da ordem das vagas` — depois do reforço; antes dele, sobreviveu aos oito casos `zumbis:` |
+
+### As mutações da vaga do morto
+
+Catorze mutações contra a correção da vaga do morto — a vaga de um morto
+só volta pelo coletor, depois de soltar a morte dele —, uma de cada vez,
+no repositório, no x86_64 em debug, contra o código integrado. Cada uma
+rodou contra os oito casos `vagas:` e, conforme o que mexe, também contra
+os dois casos `sdk: o programa de fora do repositorio`, os casos `fios:`
+do coletor, os `zumbis:`, o `fluxo:` do zumbi e o `nativo:` das
+mensagens. Elas cobrem as sete formas pedidas para este incremento:
+
+- a vaga reaproveitada antes da limpeza (MV1, MV6);
+- a limpeza pulada (MV2, MV2b);
+- a limpeza dobrada (MV3);
+- a vaga devolvida antes de a limpeza terminar (MV4);
+- os recursos da malha e a janela de nonces que ficam (MV5, MV5b);
+- a limpeza perdida ou dobrada na concorrência entre a passada dos zumbis
+  e o recolhimento (MV6b, MV6c, MV6d);
+- o fio novo que herda o morto (MV7).
+
+E mais duas, contra o teto de cada passada do coletor (MV8, MV8b).
+
+Houve duas campanhas. Na primeira, com as onze de então, as onze
+reprovaram. O adversário mostrou que nenhum caso pegava duas passadas dos
+zumbis ao mesmo tempo (a MV6d) e que o laço do recolhimento não tinha teto.
+Vieram o caso reforçado, o teto e o caso dele, e a segunda campanha rodou
+as catorze contra o código final. Na última rodada de cada uma, treze
+reprovaram e uma sobreviveu, a MV8b, explicada abaixo.
+
+| Mutação | Reprovada por |
+|---|---|
+| a vaga do morto que não é zumbi serve antes da limpeza — a escolha de antes (MV1) | cinco casos `vagas:` — o morto sem a limpeza, a colheita e a bifurcação, a vaga que só volta depois da limpeza, a tabela cheia e a concorrência —, e `sdk: o programa de fora do repositorio com o coletor segurado`: "uma variante ficou com a vaga do cliente antes da limpeza" |
+| o recolhimento que não solta a morte (MV2) | os sete casos `vagas:` da limpeza e os dois casos `sdk:` — no sem o coletor segurado, "uma designacao sobrou depois de o processo acabar", como na CI 445 |
+| a passada dos zumbis que não solta a morte, e a dá por feita (MV2b) | `vagas: a vaga so volta depois de a limpeza terminar`, `vagas: o pai que morre sem colher e os zumbis seguem como antes` e `fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita` |
+| a limpeza duas vezes: o recolhimento solta também a morte que a passada dos zumbis já soltou (MV3) | `vagas: a vaga so volta depois de a limpeza terminar` e `vagas: o pai que morre sem colher e os zumbis seguem como antes` |
+| a vaga que volta antes de a limpeza terminar: o marcador sai antes (MV4) | quatro casos `vagas:` — o morto sem a limpeza, a colheita e a bifurcação, a vaga que só volta ("a vaga voltou com a limpeza do morto pausada no recolhimento") e a janela de nonces |
+| a malha que fica: os endpoints, os fluxos, as designações e os pedidos ao enlace (MV5) | cinco casos `vagas:`, `fluxo: o zumbi solta o fluxo e o endpoint na morte, antes da colheita` e os dois casos `sdk:` |
+| a janela de nonces que fica (MV5b) | `vagas: a janela de nonces do morto sai com a limpeza` e `nativo: o programa pede pelo mesmo gate` |
+| a corrida da CI 445: a vaga do filho colhido serve antes da passada do coletor (MV6) | `vagas: a colheita e a bifurcacao seguinte nao perdem a limpeza`, `vagas: a vaga so volta depois de a limpeza terminar` e `sdk: o programa de fora do repositorio com o coletor segurado` |
+| o recolhimento que não respeita a limpeza em curso da passada dos zumbis (MV6b) | `vagas: a vaga so volta depois de a limpeza terminar`: "outro coletor recolheu o filho com a limpeza dele em curso" |
+| a passada dos zumbis que dá a limpeza por feita antes de soltar a morte (MV6c) | `vagas: a vaga so volta depois de a limpeza terminar` |
+| a segunda passada dos zumbis que toma a limpeza em curso da primeira (MV6d) | `vagas: a vaga so volta depois de a limpeza terminar` — depois do reforço: "outra passada dos zumbis tomou a limpeza em curso" |
+| o recolhimento sem teto por passada (MV8) | `vagas: o coletor nao fica preso numa passada`: "o coletor ficou preso numa passada, recolhendo" |
+| a passada dos zumbis sem teto (MV8b) | sobreviveu — ver abaixo |
+| o fio novo que herda o morto: a vaga e o id (MV7) | cinco casos `vagas:`; na concorrência, "a morte de uma vitima foi solta mais de uma vez" — a do morto e a do fio novo, com o mesmo id |
+
+A MV8b sobrevive porque nenhum caso faz zumbis mais depressa do que a
+passada os limpa:
+- um zumbi é um processo que bifurcou e morreu, e a bifurcação passa pelo
+  gate e pela auditoria;
+- os fios do kernel não têm pai, e nunca são zumbis;
+- o programa mais rápido da imagem para isso, o `colhedor`, leva dezenas de
+  milissegundos por passo.
+
+O teto da passada dos zumbis fica pela simetria com o do recolhimento, que
+é exercitado: um fio do kernel que faz nascer sem parar, de outro núcleo,
+prendia o coletor numa passada só.
+
+A MV7 mostra por que o id não se reaproveita: com o id do morto, o fio
+novo passa nos casos do `sdk:`. A limpeza dele solta, com o mesmo canal,
+o que sobrou do morto — e o novo processo teria, até lá, os endpoints e as
+designações do outro.
 
 ### Mensagens
 
