@@ -8326,15 +8326,36 @@ só erra quando a ordem das vagas esconde o pai, e em todos os casos — e
 nas 2 260 olhadas do vigia da concorrência — os ids estavam numa ordem em
 que ela ainda o achava. O caso `zumbis: a conta da cota acha o pai fora da
 ordem das vagas` monta essa ordem de propósito, e confere que ela esconde
-o pai antes de comparar as contas. Na última rodada de cada uma, as dez
-reprovaram — as nove primeiras contra os oito casos de antes desse.
+o pai antes de comparar as contas.
+
+Depois da CI 444, a concorrência — `zumbis: a cota vale com tudo ao mesmo
+tempo` — passou a lançar em rajadas: cada lançador tenta quatro vezes
+quando a rajada abre, junto com as bifurcações, e espera a seguinte.
+Soltos, os lançadores lançavam enquanto o fio da suíte, fixo no primeiro
+núcleo e atrás dos processos lançados, não acabasse as rajadas; cada
+`ola` põe cinco linhas na serial e na tela, com as interrupções
+mascaradas, e foram de 1 107 a 1 574 por rodada no x86. Na CI 444, com a
+serial do runner escoando umas vinte linhas por segundo, o caso passou
+dos dez minutos sem terminar, e o emulador foi encerrado. Em rajadas, o
+trabalho do caso tem teto: na rodada filtrada, 276 tentativas, 777
+linhas do log e 19 s do relógio do kernel; soltos, foram de 6 267 a
+8 936 linhas, e de 51 a 69 s, em três rodadas. As cinco mutações que o
+caso reprovava — MZ1, MZ3, MZ4, MZ7 e MZ8 — rodaram de novo contra ele,
+e as cinco reprovaram; com a MZ7, a ocupação chegou a 6, contra 5 com os
+lançadores soltos: as tentativas de uma rajada saem juntas, e a corrida
+entre o gate e o nascimento fica mais larga.
+
+Na última rodada de cada uma, as dez reprovaram: a MZ1, a MZ3, a MZ4, a
+MZ7 e a MZ8 contra os nove casos, com a concorrência em rajadas; a MZ10
+contra os nove, antes das rajadas; e as outras quatro contra os oito
+casos de antes do nono.
 
 | Mutação | Reprovada por |
 |---|---|
-| o zumbi fora da conta — a conta de antes da 14.1, só dos vivos (MZ1) | os oito casos `zumbis:` da rodada |
+| o zumbi fora da conta — a conta de antes da 14.1, só dos vivos (MZ1) | os nove casos `zumbis:` |
 | o zumbi de qualquer titular contando na cota de todos (MZ2) | `zumbis: os de um titular nao tomam a cota de outro` |
 | a cota que passa por um, no gate e no nascimento (MZ3) | cinco casos `zumbis:` — o titular que não esgota a tabela, o isolamento entre titulares, a colheita e o fim do pai, quem colhe tarde, e a concorrência |
-| a morte do pai que não devolve nada — nem a vaga, em `e_zumbi`, nem a cota (MZ4) | os oito casos `zumbis:` e os dois casos `fios:` do zumbi, já na conferência do começo de cada um: a tabela tinha zumbis, filhos de pais que morreram antes |
+| a morte do pai que não devolve nada — nem a vaga, em `e_zumbi`, nem a cota (MZ4) | os nove casos `zumbis:` e os dois casos `fios:` do zumbi, já na conferência do começo de cada um: a tabela tinha zumbis, filhos de pais que morreram antes |
 | a colheita que não marca o filho (MZ5) | `usuario: espera o filho e colhe o codigo dele`, e três casos `zumbis:` — a colheita e o fim do pai, quem colhe tarde, e a conta contra a definição |
 | a conta nova só no nascimento — o gate contando só os vivos (MZ6) | `zumbis: a recusa grava os zumbis acima da cota`: a recusa passa a sair do nascimento, com `2 de 2`, e não do gate, com `3 de 2` |
 | a conta nova só no gate — o nascimento contando só os vivos (MZ7) | `zumbis: a cota vale com tudo ao mesmo tempo` |
