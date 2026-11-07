@@ -769,17 +769,38 @@ pub(super) fn zumbis_a_conta_da_cota_acha_o_pai_fora_da_ordem_das_vagas() -> Res
 
 /// A cota com zumbis vale com tudo ao mesmo tempo: o colhedor bifurca e
 /// colhe em rajadas — os filhos saem noutros núcleos, o coletor passa —,
-/// e um lançador em cada núcleo secundário lança o `ola` como o mesmo
-/// titular, sem parar. Um vigia, noutro núcleo, confere a cada volta, sob
-/// a trava do escalonador, quantas vagas o titular ocupa — vivos e zumbis
-/// —, e a suíte confere também entre as rajadas: nunca mais que a cota. Em
-/// cada olhada, a conta da cota tem de ser a da definição do zumbi. No
-/// fim, o colhedor encerrado, nenhum zumbi fica e nenhuma vaga sobra.
+/// e um lançador em cada núcleo secundário tenta lançar o `ola` como o
+/// mesmo titular, `TENTATIVAS_POR_RAJADA` vezes a cada rajada, no
+/// instante em que ela abre, junto com as bifurcações. Um vigia, noutro
+/// núcleo, confere a cada volta, sob a trava do escalonador, quantas vagas
+/// o titular ocupa — vivos e zumbis —, e a suíte confere também entre as
+/// rajadas: nunca mais que a cota. Em cada olhada, a conta da cota tem de
+/// ser a da definição do zumbi. No fim, o colhedor encerrado, nenhum zumbi
+/// fica e nenhuma vaga sobra.
+///
+/// # Por que os lançadores andam com as rajadas
+///
+/// Soltos, eles lançavam enquanto a suíte não acabasse as rajadas — e cada
+/// `ola` escreve três linhas, e o kernel mais duas, cada uma na serial e
+/// na tela, com as interrupções mascaradas. O fio da suíte, fixo no
+/// primeiro núcleo, esperava atrás dos processos lançados; quanto mais ele
+/// esperava, mais `ola` nasciam: de 1 107 a 1 574 por rodada no x86, e de
+/// 6 334 a 10 874 recusas, de cinquenta a setenta segundos do relógio do
+/// kernel. Na CI 444, com a serial do runner escoando umas vinte linhas por
+/// segundo, o caso passou dos dez minutos sem terminar, e o emulador foi
+/// encerrado. Em rajadas, o trabalho tem teto — as rajadas, vezes um
+/// lançador por núcleo secundário, vezes as tentativas de cada um —, e as
+/// tentativas de uma rajada saem juntas: a corrida entre o gate e o
+/// nascimento que a cota tem de fechar (a MZ7 a abre).
 pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
     const COTA: u32 = 4;
     const RAJADAS: usize = 24;
+    /// Quantas vezes cada lançador tenta lançar o `ola` em cada rajada.
+    const TENTATIVAS_POR_RAJADA: usize = 4;
     static AUTORIDADE: crate::trava::Mutex<Option<Autoridade>> = crate::trava::Mutex::new(None);
     static PARAR: AtomicBool = AtomicBool::new(false);
+    /// A rajada aberta: os lançadores tentam quando ela muda.
+    static RAJADA: AtomicUsize = AtomicUsize::new(0);
     static VIVOS: AtomicUsize = AtomicUsize::new(0);
     static LANCADOS: AtomicU64 = AtomicU64::new(0);
     static PELA_COTA: AtomicU64 = AtomicU64::new(0);
@@ -803,13 +824,27 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
     extern "C" fn lancador(_argumento: u64) -> ! {
         let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
         if let Some(a) = autoridade() {
+            let mut vista = 0;
             while !PARAR.load(SeqCst) {
-                match crate::usuario::lancar_como(Some(&ola), a) {
-                    Ok(_) => LANCADOS.fetch_add(1, SeqCst),
-                    Err(crate::fios::COTA_ESGOTADA) => PELA_COTA.fetch_add(1, SeqCst),
-                    Err(_) => OUTRAS.fetch_add(1, SeqCst),
-                };
-                crate::fios::ceder();
+                // Cedendo, e não dormindo até o tique: as tentativas da
+                // rajada saem juntas dos núcleos secundários.
+                let rajada = RAJADA.load(SeqCst);
+                if rajada == vista {
+                    crate::fios::ceder();
+                    continue;
+                }
+                vista = rajada;
+                for _ in 0..TENTATIVAS_POR_RAJADA {
+                    if PARAR.load(SeqCst) {
+                        break;
+                    }
+                    match crate::usuario::lancar_como(Some(&ola), a) {
+                        Ok(_) => LANCADOS.fetch_add(1, SeqCst),
+                        Err(crate::fios::COTA_ESGOTADA) => PELA_COTA.fetch_add(1, SeqCst),
+                        Err(_) => OUTRAS.fetch_add(1, SeqCst),
+                    };
+                    crate::fios::ceder();
+                }
             }
         }
         VIVOS.fetch_sub(1, SeqCst);
@@ -842,6 +877,7 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
         c.store(0, SeqCst);
     }
     MAIOR.store(0, SeqCst);
+    RAJADA.store(0, SeqCst);
     PARAR.store(false, SeqCst);
     let livres_antes = crate::fios::vagas_livres_de_teste();
     let (bifurcacoes_antes, _, _) = crate::usuario::estatisticas_de_processo();
@@ -857,6 +893,8 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
         VIVOS.fetch_add(1, SeqCst);
         crate::fios::criar_no_nucleo("teste-vigia", vigia, 0, secundarios[0])?;
         for _ in 0..RAJADAS {
+            // A rajada abre para os lançadores, e as bifurcações saem junto.
+            RAJADA.fetch_add(1, SeqCst);
             // Três bifurcações e duas colheitas por rajada, sem esperar a
             // resposta de cada uma: sem a cota, sobra um zumbi a cada uma.
             for _ in 0..3 {
