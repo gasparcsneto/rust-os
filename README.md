@@ -5200,6 +5200,35 @@ Sem ganho a medir, não há o que pagar com esse risco.
   primeira vaga livre — quadrática no tamanho da tabela, como antes da
   14.1, e limitada às 95 vagas. Deixou de existir com a (2): a escolha só
   procura a primeira posição vazia, e não pergunta nada aos mortos.
+- **A margem de memória da compressão concorrente** (de fora da 14.1 e da
+  correção da vaga do morto): no x86_64 em debug, o caso `compressao:
+  varias ao mesmo tempo` lança três programas `compressao`, e cada um
+  termina com uns 16 MiB de monte — o passo do teto de 8 MiB custa 12 MiB
+  na cópia, e o monte de um programa não devolve páginas —: os três pedem
+  quase toda a memória que sobra numa máquina de 128 MiB com o kernel de
+  teste de debug. Medido com linhas temporárias, sem commit, que imprimem
+  os frames livres antes e depois de cada caso: o caso passou começando com
+  12 916 frames livres e reprovou começando com 12 882 — o limite, no
+  local, fica entre os dois —; numa suíte completa, os casos dos
+  dispositivos guardam uns 80 frames de propósito, os anéis de DMA, e ele
+  começa abaixo do limite. Cada incremento que cresce o kernel de debug
+  come a margem: os frames livres no boot foram 17 774 em 4 de novembro,
+  17 238 na última suíte completa local que passou o caso, 17 214 com a
+  14.1 e 17 167 com a correção da vaga do morto — 47 a menos, os do kernel
+  de teste maior; os casos `vagas:` começam e acabam com os mesmos frames
+  livres, e não seguram memória. No local, a suíte completa do x86_64 em
+  debug reprova o caso desde a 14.1 — um dos três programas não consegue os
+  8 MiB (`memory allocation of 8388608 bytes failed`, saída 101); na CI,
+  desde a correção da vaga do morto: nas CIs 448 e 449, as suítes do
+  x86_64 em debug que chegaram ao fim — a do job "Testes" e as da tela
+  virtio-gpu — reprovaram nele, com "as descompressoes ao mesmo tempo nao
+  conferiram", e as do aarch64 passaram. Fechar pede uma escolha, que fica
+  com o dono: a máquina da suíte com mais memória — 192 MiB no lugar de
+  128, só no `cargo xtask test`; muda o ambiente de todos os casos, e o
+  que conta com 128 MiB tem de ser conferido —; o caso com dois programas,
+  ou um teto menor no passo do `compressao` — muda o que o caso cobre —;
+  ou a compressão antes dos casos dos dispositivos na ordem da suíte — só
+  adia, devolvendo os uns 80 frames.
 
 ## O tempo
 
@@ -8455,6 +8484,24 @@ caso reprovava — MZ1, MZ3, MZ4, MZ7 e MZ8 — rodaram de novo contra ele,
 e as cinco reprovaram; com a MZ7, a ocupação chegou a 6, contra 5 com os
 lançadores soltos: as tentativas de uma rajada saem juntas, e a corrida
 entre o gate e o nascimento fica mais larga.
+
+Depois da CI 448, a espera pelo `colhedor` anda com a fila dele. O caso
+publica 120 passos — a fila do canal guarda 64 —, o fim é lido depois dos
+que ainda estão nela, e cada passo é uma linha do colhedor no log, que na
+tela do virtio-gpu leva dezenas de milissegundos: na CI 448, no
+virtio-gpu do x86_64, os 600 tiques do pedido do fim à saída não bastaram,
+e o caso reprovou com "o colhedor nao saiu"; na CI 449, com o mesmo
+código, passou. O prazo de `Colhedor::publicar` e de `Colhedor::encerrar`
+recomeça a cada passo que o colhedor tira da fila (a conta `entregues` do
+canal, que só o ouvinte faz andar): o caso reprova só se ele ficar o
+prazo inteiro sem tirar nenhum. Nenhuma conferência mudou, e as cinco
+mutações acima não dependiam dessa espera: o caso as reprovava pela
+tabela com zumbi antes de começar, pela ocupação acima da cota ou pelas
+contas divergindo — nunca pelo prazo do colhedor. No local, com a tela
+virtio-gpu, o caso leva de 7,0 a 7,9 s desde a correção da vaga do morto,
+contra 4,8 a 5,4 s antes dela, com o mesmo trabalho e o mesmo volume de
+saída; com a tela linear, sem diferença. A causa dessa diferença não foi
+achada.
 
 Na última rodada de cada uma, as dez reprovaram: a MZ1, a MZ3, a MZ4, a
 MZ7 e a MZ8 contra os nove casos, com a concorrência em rajadas; a MZ10
