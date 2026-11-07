@@ -391,7 +391,7 @@ extern "x86-interrupt" fn falha_de_pagina(quadro: InterruptStackFrame, codigo: P
         // Cedemos de vez, em vez de retornar. O `iretq` do fim deste handler
         // devolveria o controle a um processo que já não existe — e o
         // abandono deste quadro de interrupção é inofensivo: a pilha de
-        // kernel dele volta quando a vaga do fio for reaproveitada.
+        // kernel dele volta quando o coletor recolher o fio.
         crate::fios::descansar();
     }
 

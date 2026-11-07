@@ -232,10 +232,11 @@ pub fn desfazer_espelho(origem: u64, destino: u64, paginas: u64) {
 /// # Por que RAII, e não um par criar/destruir
 ///
 /// Porque o dono de um espaço é um fio, e um fio pode morrer de várias
-/// maneiras: saindo, tomando uma falha de proteção, ou sendo arrancado quando
-/// a vaga dele é reaproveitada. Um `destruir` explícito teria de ser chamado
-/// em todos esses caminhos, e o que se esquece de fazer em um deles vaza
-/// tabelas até a memória física acabar.
+/// maneiras: saindo, tomando uma falha de proteção, ou encerrado pelo
+/// `process.terminate` — e o fio morto é largado depois, pelo coletor
+/// ([`crate::fios::recolher_terminados`]). Um `destruir` explícito teria de
+/// ser chamado em todos esses caminhos, e o que se esquece de fazer em um
+/// deles vaza tabelas até a memória física acabar.
 ///
 /// Com o `Drop`, quem esquece é o compilador — e ele não esquece. É o mesmo
 /// arranjo que [`crate::fios::pilha::Pilha`] usa pelo mesmo motivo.
