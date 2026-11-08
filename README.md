@@ -5252,9 +5252,28 @@ Sem ganho a medir, não há o que pagar com esse risco.
   noutro núcleo o segurou 569 tiques numa chamada só (medido sob uma
   mutação, com uma medida temporária); em produção, quem a chama é a
   tarefa `programas` (`nativo::servir`), que divide o executor com o canal
-  do agente, o enlace, o pulso, o console e a barra. Se processos que
-  pedem sem parar seguram o executor do mesmo jeito — e se cabe um limite
-  de pedidos por chamada, uma escolha [B] —, fica a conferir.
+  do agente, o enlace, o pulso, o console e a barra. **Medido em
+  8/11/2026**, sem mudar o comportamento, com a bancada `cargo xtask
+  disponibilidade` e uma medida temporária, nunca commitada: com um
+  processo pedindo sem parar, o executor alterna — cada chamada atende um
+  pedido —; com dois, de um titular só, e um núcleo do hospedeiro livre
+  (`DUKE_NUCLEOS=3`), a tarefa `programas` atende cadeias de até 1 326
+  pedidos numa vez do executor, segura-o até 338 ms e passa de 80 a 94% do
+  tempo em `atender_pendentes` — no x86_64 e no aarch64, em `release` —, e
+  o canal do agente dos outros titulares vai de um p99 de 9–35 ms a
+  164–281 ms, com silêncios de até 0,4 s, contra 49–58 ms do controle, os
+  mesmos processos só girando. É degradação, e não monopólio: nenhuma vez
+  passou de 0,34 s, e o agente novo sempre entrou. Com 4 vCPUs em 4 CPUs
+  do hospedeiro (o padrão da bancada e da CI), as cadeias não passam de 8
+  pedidos: o efeito depende da folga de CPU, e numa máquina com núcleos
+  dedicados pode ser maior — nada no código o limita. Em depuração, a
+  causa maior é outra: a cada 2 s o coletor codifica a auditoria pendente
+  para o journal com a trava da auditoria na mão e as interrupções
+  mascaradas — de 22 a 57 ms por lote de ~100 registros, em `release`
+  ~20 ms sob carga —, e todo pedido auditado espera, o do canal do agente
+  inclusive. Um limite de pedidos por vez em `servir` e a codificação da
+  auditoria fora da trava são escolhas [B]; nenhuma foi feita, e ficam
+  para a decisão do dono.
   **O A1-4 segue pendente**: a recusa não diz quantos dos contados
   são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
   que espera o coletor, e quem ouve "cota de processos do papel: N de M"
