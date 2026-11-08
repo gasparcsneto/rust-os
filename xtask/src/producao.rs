@@ -808,6 +808,12 @@ pub(crate) fn montar_o_disco(
 ///
 /// A imagem não tem segredo: o manifesto diz o que ela é, e a assinatura,
 /// quem a publicou. Quem a instala é o quórum da máquina.
+///
+/// O kernel vai para a imagem sem a tabela de símbolos — ver
+/// `kernel_do_slot` —, e o ELF inteiro dele fica ao lado dela
+/// ([`elf_da_versao`]): o do `target/producao-kernel` é sobrescrito no
+/// `publicar` seguinte, e é deste que o `cargo xtask simbolo --elf` traduz
+/// os endereços de uma máquina nesta versão.
 pub(crate) fn publicar(
     arch: Arquitetura,
     release: bool,
@@ -865,18 +871,31 @@ pub(crate) fn publicar(
     }
     std::fs::write(&saida, &imagem.bytes)
         .map_err(|e| format!("não foi possível gravar {}: {e}", saida.display()))?;
+    let simbolos = elf_da_versao(&saida);
+    std::fs::copy(&elf, &simbolos)
+        .map_err(|e| format!("não foi possível gravar {}: {e}", simbolos.display()))?;
     println!(
         "[xtask] a versão {versao} (geração {geracao}) para {} em {}: {} KiB — kernel de {} KiB, pacote de {} KiB\n\
+         [xtask] o ELF inteiro deste kernel, para o `cargo xtask simbolo --elf`: {}\n\
          [xtask] o manifesto, que o quórum assina para instalar: {}\n{}",
         arch.nome(),
         saida.display(),
         imagem.bytes.len() / 1024,
         kernel.len() / 1024,
         pacote.len() / 1024,
+        simbolos.display(),
         sigilo::hex(&imagem.resumo),
         String::from_utf8_lossy(&imagem.manifesto).trim_end()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Onde o `publicar` deixa o ELF inteiro do kernel da imagem `saida`: ao
+/// lado dela, com a extensão trocada por `slot.elf` — `v2-x86_64.slot`
+/// tem o seu em `v2-x86_64.slot.elf`. Nunca é a própria imagem, qualquer
+/// que seja o nome dela.
+fn elf_da_versao(saida: &Path) -> PathBuf {
+    saida.with_extension("slot.elf")
 }
 
 /// A privada de uma chave de atualização: o arquivo de
@@ -1203,6 +1222,25 @@ pub(crate) fn copia_restaurada(
     )
 }
 
+/// A imagem do `operar --imagem`, lida e conferida antes de o canal abrir:
+/// o método tem de ser o `update.stage`, e o kernel que o manifesto diz não
+/// pode passar do teto do iniciador. A máquina confere a assinatura, e o
+/// quórum arma a versão, mas nenhum dos dois olha o teto: um kernel acima
+/// dele seria escrito e armado, e o boot o recusaria — ver
+/// `slots::conferir_o_teto_da_imagem`. Perto do teto, um aviso.
+fn imagem_para_encenar(metodo: &str, imagem: &Path) -> Result<Vec<u8>, String> {
+    if metodo != "update.stage" {
+        return Err("--imagem é do update.stage: a imagem vai para o slot inativo".into());
+    }
+    let bytes = std::fs::read(imagem).map_err(|e| format!("{}: {e}", imagem.display()))?;
+    if let Some(aviso) = super::slots::conferir_o_teto_da_imagem(&bytes)
+        .map_err(|e| format!("{}: {e}", imagem.display()))?
+    {
+        println!("[xtask] {aviso}");
+    }
+    Ok(bytes)
+}
+
 /// O arquivo que um `operar` leva ou traz.
 pub(crate) enum Arquivo<'a> {
     /// A imagem de uma versão, para o slot inativo (`update.stage`).
@@ -1232,7 +1270,8 @@ fn publica_do_duke(texto: &str) -> Result<[u8; 32], String> {
 /// operação administrativa: o desafio, a prova da credencial, e o
 /// `admin.execute`. Com `assinaturas`, uma operação de quórum —
 /// `admin.revoke` ou `system.update`. Com `arquivo`: a imagem inteira para
-/// o `update.stage`, em pedaços — ver [`encenar`] —; a cópia de segurança
+/// o `update.stage`, em pedaços — ver [`encenar`] —, conferida antes contra
+/// o teto do iniciador pelo manifesto; a cópia de segurança
 /// do `fs.backup`, baixada para o arquivo — ver [`copia_baixada`]; ou a do
 /// arquivo, de volta pelo `fs.restore` — ver [`copia_restaurada`]. O
 /// cliente não decide nada: quem pode é o gate, pelo papel da chave.
@@ -1249,12 +1288,13 @@ pub(crate) fn operar(
 ) -> Result<ExitCode, String> {
     let chave = chave_de_agente(chave)?;
     let duke = publica_do_duke(duke)?;
+    // A imagem é lida e conferida antes de o canal abrir.
+    let imagem = match arquivo {
+        Some(Arquivo::Imagem(caminho)) => Some(imagem_para_encenar(metodo, caminho)?),
+        _ => None,
+    };
     let mut agente = super::AgenteNaPorta::conectar_endereco(endereco, &chave, &duke)?;
-    let resposta = if let Some(Arquivo::Imagem(imagem)) = arquivo {
-        if metodo != "update.stage" {
-            return Err("--imagem é do update.stage: a imagem vai para o slot inativo".into());
-        }
-        let bytes = std::fs::read(imagem).map_err(|e| format!("{}: {e}", imagem.display()))?;
+    let resposta = if let Some(bytes) = imagem {
         encenar(&mut agente, &bytes)?
     } else if let Some(Arquivo::Copia(destino)) = arquivo {
         if metodo != "fs.backup" {
@@ -1301,6 +1341,121 @@ pub(crate) fn operar(
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// O `operar --imagem` lê e confere a imagem antes de abrir o canal: o
+    /// método tem de ser o `update.stage`, e o kernel do manifesto não pode
+    /// passar do teto do iniciador — um byte acima é recusado, com o nome do
+    /// arquivo; no teto exato passa; a imagem de uma bancada volta inteira.
+    #[test]
+    fn a_imagem_acima_do_teto_nao_vai_para_a_maquina() {
+        use atualizacao::cabecalho;
+        use atualizacao::manifesto::{self, Manifesto, Parte};
+        let dir = std::env::temp_dir().join(format!("xtask-producao-teto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let privada = [11u8; 32];
+        let pacote = crate::slots::pacote_vazio();
+        let de_fora = |kernel: u64| {
+            let m = Manifesto {
+                arquitetura: atualizacao::Arquitetura::X86_64,
+                versao: "b1.2",
+                geracao: 2,
+                estado_minimo: 1,
+                estado_maximo: 1,
+                kernel: Parte {
+                    tamanho: kernel,
+                    resumo: [0; 32],
+                },
+                pacote: Parte {
+                    tamanho: pacote.len() as u64,
+                    resumo: atualizacao::resumo(&pacote),
+                },
+            }
+            .escrever();
+            let assinatura = manifesto::assinar(&m, &privada);
+            cabecalho::montar(&m, &assinatura, &manifesto::publica_de(&privada)).unwrap()
+        };
+        let teto = cabecalho::MAIOR_KERNEL;
+        let grande = dir.join("grande.slot");
+        std::fs::write(&grande, de_fora(teto + 1)).unwrap();
+        let r = imagem_para_encenar("update.stage", &grande);
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("grande.slot") && e.contains("teto do iniciador")),
+            "{:?}",
+            r.as_ref().err()
+        );
+        let no_teto = dir.join("no-teto.slot");
+        std::fs::write(&no_teto, de_fora(teto)).unwrap();
+        assert!(imagem_para_encenar("update.stage", &no_teto).is_ok());
+
+        let kernel = vec![0x90u8; 4096];
+        let i = crate::slots::imagem(
+            &crate::slots::Pedido {
+                arch: crate::Arquitetura::X86_64,
+                kernel: &kernel,
+                pacote: &pacote,
+                versao: "b1.2",
+                geracao: 2,
+                estado: (1, 1),
+            },
+            &privada,
+        )
+        .unwrap();
+        let boa = dir.join("boa.slot");
+        std::fs::write(&boa, &i.bytes).unwrap();
+        assert_eq!(
+            imagem_para_encenar("update.stage", &boa),
+            Ok(i.bytes.clone())
+        );
+        let r = imagem_para_encenar("fs.backup", &boa);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("é do update.stage")),
+            "{:?}",
+            r.as_ref().err()
+        );
+
+        // E pelo `operar` inteiro: a recusa vem antes do canal — o endereço
+        // nem é um endereço, e o erro é o do teto, e não o da conexão.
+        let chave = dir.join("agente");
+        std::fs::write(&chave, "11".repeat(32)).unwrap();
+        let r = operar(
+            "sem-porta",
+            "update.stage",
+            "{}",
+            &chave,
+            &"22".repeat(32),
+            None,
+            &[],
+            Some(Arquivo::Imagem(&grande)),
+        );
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("teto do iniciador")),
+            "{:?}",
+            r.as_ref().err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// O ELF inteiro de uma versão publicada fica ao lado da imagem, e
+    /// nunca no lugar dela — nem quando a imagem já se chama `.elf` ou
+    /// `.slot.elf`, nem quando não tem extensão.
+    #[test]
+    fn o_elf_da_versao_ao_lado_da_imagem() {
+        for (imagem, elf) in [
+            (
+                "target/atualizacao/v2-x86_64.slot",
+                "target/atualizacao/v2-x86_64.slot.elf",
+            ),
+            ("/srv/v2", "/srv/v2.slot.elf"),
+            ("v2.elf", "v2.slot.elf"),
+            ("v2.slot.elf", "v2.slot.slot.elf"),
+        ] {
+            let imagem = Path::new(imagem);
+            assert_eq!(elf_da_versao(imagem), Path::new(elf));
+            assert_ne!(elf_da_versao(imagem), imagem);
+        }
+    }
 
     #[test]
     fn a_rede_pelas_regras_do_kernel() {

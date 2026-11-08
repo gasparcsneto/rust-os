@@ -19,17 +19,23 @@
 //! O que lê símbolos lê o ELF inteiro, em `target/`, que a cópia não toca:
 //! o `cargo xtask simbolo`, o depurador (`cargo xtask debug`), o
 //! `cargo xtask asm`, o `cargo xtask elf`, a conferência do estouro da pilha
-//! e a do SIMD.
+//! e a do SIMD. O de uma versão publicada, o `publicar` deixa ao lado da
+//! imagem do slot, para o `cargo xtask simbolo --elf`.
 //!
 //! # O que a conferência garante
 //!
-//! Que o iniciador carrega da cópia exatamente o que carregaria do ELF de
-//! origem: o mesmo cabeçalho, menos os três campos que descrevem a tabela de
-//! seções; os mesmos cabeçalhos de programa; e os mesmos bytes em cada
-//! `PT_LOAD` — e, neles, a mesma seção dinâmica e a mesma tabela de
-//! relocações, que o iniciador acha pelo `PT_DYNAMIC`. E que a cópia não tem
-//! a tabela de símbolos, nem seção que nada carregue além da dos nomes, e
-//! que as seções carregáveis continuam descritas como na origem.
+//! Que o iniciador carrega da cópia o que carregaria do ELF de origem: o
+//! mesmo cabeçalho, menos os três campos que descrevem a tabela de seções;
+//! os mesmos cabeçalhos de programa; e os mesmos bytes em cada `PT_LOAD` —
+//! e, neles, a mesma seção dinâmica e a mesma tabela de relocações, que o
+//! iniciador acha pelo `PT_DYNAMIC`. A única diferença na memória são
+//! aqueles três campos, onde o cabeçalho cai dentro de um `PT_LOAD`: no
+//! x86_64 o primeiro começa no byte 0 do arquivo e leva o cabeçalho junto,
+//! e os bytes 0x28–0x2f e 0x3c–0x3f mudam lá também; nada no kernel os lê.
+//! No aarch64 o cabeçalho fica fora dos segmentos. E a conferência garante
+//! que a cópia não tem a tabela de símbolos, nem seção que nada carregue
+//! além da dos nomes, e que as seções carregáveis continuam descritas como
+//! na origem.
 //!
 //! Ela roda a cada cópia, e não só nos testes: o `llvm-objcopy` vem do
 //! nightly do `rust-toolchain.toml`, e um que mudasse o que o `--strip-all`
@@ -772,6 +778,77 @@ mod testes {
                 "{motivo}: {r:?}"
             );
         }
+    }
+
+    /// A tabela de relocações e os cabeçalhos de programa como o iniciador os
+    /// lê (`iniciador/src/elf.rs`): a seção dinâmica acaba no primeiro
+    /// `DT_NULL`, e o que vem depois dele não conta; a tabela é um número
+    /// inteiro de entradas; ela pode começar no começo exato de um segmento e
+    /// acabar no fim exato dos bytes dele no arquivo, e não um byte antes nem
+    /// um depois. E cabeçalhos de programa de 64 bytes são recusados: o
+    /// iniciador anda pela tabela com o `e_phentsize` do arquivo, e a
+    /// conferência compara a tabela com o passo do ELF64 — com outro passo,
+    /// ela não compararia o que o iniciador lê.
+    #[test]
+    fn a_tabela_de_relocacoes_e_os_programas_como_o_iniciador_os_le() {
+        let origem = elf_de_mentira();
+        // Os pares da seção dinâmica, a partir de 0x1000: o `DT_RELA` é o
+        // primeiro, e o `DT_RELASZ`, o segundo.
+        let com = |pares: &[(usize, u64, u64)]| {
+            let mut b = origem.clone();
+            for &(i, etiqueta, valor) in pares {
+                let par = [etiqueta.to_le_bytes(), valor.to_le_bytes()].concat();
+                por(&mut b, 0x1000 + 16 * i, &par);
+            }
+            b
+        };
+        let contadas = |b: &[u8]| {
+            let elf = Elf::ler(b, "o ELF").unwrap();
+            elf.relocacoes(&elf.programas().unwrap())
+        };
+        assert_eq!(contadas(&origem), Ok(2));
+        // Um `DT_NULL` no quarto par, e depois dele um `DT_RELA` fora dos
+        // segmentos: o iniciador para no `DT_NULL`, e a conferência também.
+        assert_eq!(
+            contadas(&com(&[(3, DT_NULL, 0), (4, DT_RELA, 0x5000)])),
+            Ok(2)
+        );
+        // 50 bytes em entradas de 24: duas e um pedaço.
+        let r = contadas(&com(&[(1, DT_RELASZ, 50)]));
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("50 bytes em entradas de 24")),
+            "{r:?}"
+        );
+        // Os limites, com as 48 bytes da tabela: o segmento de código tem
+        // 0x210 bytes no arquivo a partir de 0, e o de dados, 0x90 a partir
+        // de 0x1000.
+        for (onde, inteira) in [
+            (0x1000u64, true),
+            (0xFFF, false),
+            (0x210 - 48, true),
+            (0x210 - 47, false),
+        ] {
+            let r = contadas(&com(&[(0, DT_RELA, onde)]));
+            let esperado = if inteira {
+                Ok(2)
+            } else {
+                Err(format!(
+                    "a tabela de relocações, em {onde:#x}, não está inteira num segmento carregável"
+                ))
+            };
+            assert_eq!(r, esperado, "{onde:#x}");
+        }
+        // Os cabeçalhos de programa de 64 bytes, nos dois arquivos.
+        let mut largos = origem.clone();
+        por(&mut largos, 54, &64u16.to_le_bytes());
+        let r = conferir_a_copia(&largos, &largos);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains(
+                "o ELF de origem tem cabeçalhos de programa de 64 bytes, e os do ELF64 têm 56"
+            )),
+            "{r:?}"
+        );
     }
 
     /// No cabeçalho, só os três campos da tabela de seções podem mudar: com

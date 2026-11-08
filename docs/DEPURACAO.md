@@ -117,8 +117,18 @@ mesmo que o depurador, o `cargo xtask asm` e o `cargo xtask elf` leem. O
 kernel que vai para o slot A, o `duke.esp.elf` ao lado dele, não tem a tabela
 de símbolos nem o DWARF: nada no boot os lê, e o iniciador lê o arquivo
 inteiro para a memória (ver `xtask/src/kernel_do_slot.rs`). Os bytes que vão
-para a memória são os mesmos nos dois, e é por isso que os endereços do
-kernel que roda caem nos símbolos do ELF de `target/`.
+para a memória são os mesmos nos dois — menos os três campos do cabeçalho que
+descrevem a tabela de seções, que no x86_64 vão para a memória com o primeiro
+`PT_LOAD` e que nada lê lá —, e é por isso que os endereços do kernel que
+roda caem nos símbolos do ELF de `target/`.
+
+O de uma máquina numa versão publicada não é o de `kernel/target`: o
+`cargo xtask publicar` deixa o ELF inteiro do kernel daquela versão ao lado
+da imagem do slot, com a extensão `.slot.elf`, e é ele que se passa:
+
+```bash
+cargo xtask simbolo --elf target/atualizacao/v2-x86_64.slot.elf 18446603336221253026
+```
 
 ---
 

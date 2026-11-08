@@ -89,6 +89,21 @@ pub(crate) fn conferir_o_teto(bytes: u64) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// O teto do iniciador ([`conferir_o_teto`]) para uma imagem de slot que
+/// vem pronta, pelo tamanho do kernel que o manifesto dela diz — o número
+/// que o iniciador compara com o teto antes de ler o kernel. É a
+/// conferência do `operar --imagem`, que manda a imagem a uma máquina que
+/// já roda e não tem o registro dela para a conferência inteira
+/// ([`conferir_imagem`]): a máquina confere a assinatura, e o quórum arma a
+/// versão, mas nenhum dos dois olha o teto — um kernel acima dele passaria
+/// pelos dois e seria recusado só no boot.
+pub(crate) fn conferir_o_teto_da_imagem(bytes: &[u8]) -> Result<Option<String>, String> {
+    let c = cabecalho::ler(bytes).map_err(|m| format!("o cabecalho do slot: {m}"))?;
+    let m = Manifesto::ler(c.manifesto)
+        .map_err(|(linha, motivo)| format!("o manifesto, linha {linha}: {motivo}"))?;
+    conferir_o_teto(m.kernel.tamanho)
+}
+
 /// O manifesto de um pedido, em texto canônico — conferido pelo leitor.
 pub(crate) fn manifesto_de(p: &Pedido) -> Result<Vec<u8>, String> {
     let m = Manifesto {
@@ -530,8 +545,8 @@ mod testes {
 
     /// O teto do iniciador: o kernel do tamanho dele passa, com o aviso de
     /// quase cheio; um byte a mais é recusado — na conta, na imagem que se
-    /// monta e na imagem de fora que se confere —; nove décimos, exatos,
-    /// passam calados.
+    /// monta, na imagem de fora que se confere e na que o `operar --imagem`
+    /// manda —; nove décimos, exatos, passam calados.
     #[test]
     fn o_kernel_maior_que_o_teto_do_iniciador_e_recusado() {
         let teto = cabecalho::MAIOR_KERNEL;
@@ -569,30 +584,57 @@ mod testes {
         // assinado diz um kernel um byte acima: recusada pelo teto, pelo
         // tamanho que o manifesto diz, antes de qualquer resumo e sem que o
         // arquivo precise ter o kernel.
-        let m = Manifesto {
-            arquitetura: ArqDoSlot::X86_64,
-            versao: "b1.2",
-            geracao: 2,
-            estado_minimo: 1,
-            estado_maximo: 1,
-            kernel: Parte {
-                tamanho: teto + 1,
-                resumo: [0; 32],
-            },
-            pacote: Parte {
-                tamanho: pacote.len() as u64,
-                resumo: atualizacao::resumo(&pacote),
-            },
-        }
-        .escrever();
         let publica = manifesto::publica_de(&privada);
-        let cab = cabecalho::montar(&m, &manifesto::assinar(&m, &privada), &publica).unwrap();
+        let de_fora = |kernel: u64| {
+            let m = Manifesto {
+                arquitetura: ArqDoSlot::X86_64,
+                versao: "b1.2",
+                geracao: 2,
+                estado_minimo: 1,
+                estado_maximo: 1,
+                kernel: Parte {
+                    tamanho: kernel,
+                    resumo: [0; 32],
+                },
+                pacote: Parte {
+                    tamanho: pacote.len() as u64,
+                    resumo: atualizacao::resumo(&pacote),
+                },
+            }
+            .escrever();
+            cabecalho::montar(&m, &manifesto::assinar(&m, &privada), &publica).unwrap()
+        };
+        let cab = de_fora(teto + 1);
         let registro = sigilo::registro::linha_de_editor(&publica, "publicador-1");
         let r = conferir_imagem(&cab, &registro, Arquitetura::X86_64);
         assert!(
             r.as_ref().is_err_and(|e| e.contains("teto do iniciador")),
             "{:?}",
             r.err()
+        );
+
+        // A que o `operar --imagem` manda a uma máquina que já roda, sem o
+        // registro dela: o mesmo teto, pelo manifesto — recusada um byte
+        // acima, com o aviso no teto exato, calada bem abaixo; e um arquivo
+        // que não é imagem de slot é recusado pelo cabeçalho.
+        let r = conferir_o_teto_da_imagem(&cab);
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.contains("1 acima") && e.contains("teto do iniciador")),
+            "{:?}",
+            r.err()
+        );
+        let r = conferir_o_teto_da_imagem(&de_fora(teto));
+        assert!(
+            r.as_ref()
+                .is_ok_and(|a| a.as_ref().is_some_and(|a| a.contains("100%"))),
+            "{r:?}"
+        );
+        assert_eq!(conferir_o_teto_da_imagem(&de_fora(4096)), Ok(None));
+        let r = conferir_o_teto_da_imagem(b"isto nao e uma imagem de slot");
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("o cabecalho do slot")),
+            "{r:?}"
         );
     }
 }

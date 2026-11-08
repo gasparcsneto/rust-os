@@ -248,6 +248,7 @@ fn main() -> ExitCode {
             "--imagem",
             "--copia",
             "--restaurar",
+            "--elf",
         ]
         .contains(&a.as_str())
         {
@@ -284,7 +285,12 @@ fn main() -> ExitCode {
             }
         }
         "debug" => depurar(arch, release),
-        "simbolo" => simbolizar(arch, release, &posicionais[1..]),
+        "simbolo" => simbolizar(
+            arch,
+            release,
+            extrair_valor(&args, "--elf").map(Path::new),
+            &posicionais[1..],
+        ),
         "asm" => match posicionais.get(1) {
             Some(simbolo) => desmontar(arch, release, simbolo),
             None => Err("uso: cargo xtask asm <simbolo>".into()),
@@ -493,6 +499,8 @@ COMANDOS:
                               --canal N, 1 por padrão)
     debug                     sobe o kernel parado, esperando um depurador
     simbolo <endereco>...     traduz endereços de execução em arquivo e linha
+                              (--elf <arquivo>: o ELF inteiro de uma versão
+                              publicada, ao lado da imagem do slot)
     asm <simbolo>             desmonta uma função do binário compilado
     elf                       confere os programas de usuário embutidos
     invariantes               confere as regras de fonte dos dois lados
@@ -1249,7 +1257,8 @@ pub(crate) fn instalar_so_o_iniciador(
 /// o iniciador carrega da cópia o mesmo que carregaria do ELF inteiro.
 ///
 /// A simbolização é feita aqui no hospedeiro (`cargo xtask simbolo`, o gdb),
-/// com o ELF inteiro em `target/`, que não muda.
+/// com o ELF inteiro em `target/`, que não muda — e, o de uma versão
+/// publicada, com o que o `publicar` deixa ao lado da imagem do slot.
 ///
 /// É separado de [`instalar_iniciador`] porque nem todo arquivo que vai para
 /// a ESP é um ELF que o `objcopy` aceite: os kernels estragados de propósito
@@ -6291,12 +6300,27 @@ fn primeiros_passos(arch: Arquitetura) -> Vec<&'static str> {
 /// cargo xtask agent traps.stats        -> "pc": 18446603336221365869
 /// cargo xtask simbolo 18446603336221365869
 /// ```
-fn simbolizar(arch: Arquitetura, release: bool, enderecos: &[&str]) -> Result<ExitCode, String> {
+///
+/// O ELF é o de `kernel/target` desta arquitetura e perfil; com `elf`, outro
+/// — o de uma versão publicada, que o `publicar` deixa ao lado da imagem do
+/// slot, porque o kernel do slot não leva a tabela de símbolos.
+fn simbolizar(
+    arch: Arquitetura,
+    release: bool,
+    elf: Option<&Path>,
+    enderecos: &[&str],
+) -> Result<ExitCode, String> {
     if enderecos.is_empty() {
-        return Err("uso: cargo xtask simbolo <endereco>... (decimal ou 0x...)".into());
+        return Err(
+            "uso: cargo xtask simbolo [--elf <ELF inteiro>] <endereco>... (decimal ou 0x...)"
+                .into(),
+        );
     }
 
-    let elf = caminho_elf(arch, release);
+    if let Some(dado) = elf.filter(|e| !e.exists()) {
+        return Err(format!("o ELF {} não existe", dado.display()));
+    }
+    let elf = elf.map_or_else(|| caminho_elf(arch, release), Path::to_path_buf);
     if !elf.exists() {
         return Err(format!(
             "binário não encontrado em {}\ncompile antes com: cargo xtask build --arch {}{}",

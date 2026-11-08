@@ -107,6 +107,7 @@ cargo xtask test --arch aarch64 --video virtio
 # Depuração
 cargo xtask debug                    # sobe congelado, esperando gdb/lldb
 cargo xtask simbolo 0xffff8000...    # endereço -> arquivo, linha e função
+cargo xtask simbolo --elf v2-x86_64.slot.elf 0xffff8000...  # o de uma versão publicada
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
@@ -5401,9 +5402,13 @@ Sem ganho a medir, não há o que pagar com esse risco.
   `xtask/src/kernel_do_slot.rs`, que confere a cada cópia, contra o ELF
   inteiro de `target/` (o que a simbolização e o depurador leem), que o
   iniciador carrega dela o mesmo que carregaria dele: o cabeçalho, menos
-  os campos da tabela de seções; os cabeçalhos de programa; os bytes de
-  cada `PT_LOAD`; e a tabela de relocações, inteira num segmento
-  carregável. Nada no boot lia a tabela de símbolos do arquivo do slot:
+  os três campos da tabela de seções (no x86_64 o primeiro `PT_LOAD`
+  começa no byte 0 e leva o cabeçalho para a memória, e esses campos mudam
+  lá também — nada no kernel os lê); os cabeçalhos de programa, com o
+  passo do ELF64; os bytes de cada `PT_LOAD`; e a tabela de relocações
+  como o iniciador a lê — até o primeiro `DT_NULL`, inteira num segmento
+  carregável, em entradas de 24 bytes. Nada no boot lia a tabela de
+  símbolos do arquivo do slot:
   o iniciador lê o cabeçalho, os `PT_LOAD` e as relocações pelo
   `PT_DYNAMIC`. Compilados como a CI os compila, o de teste de debug do
   x86_64 foi a 19 997 920 bytes — 13 556 512 abaixo do teto — e o do
@@ -5417,7 +5422,18 @@ Sem ganho a medir, não há o que pagar com esse risco.
   (`slots::conferir_o_teto`, contra `atualizacao::cabecalho::MAIOR_KERNEL`,
   a mesma constante que o iniciador usa), com um aviso acima de nove
   décimos, como já fazia com os programas: a próxima passagem do teto vira
-  uma mensagem no build, e não uma máquina que desliga no boot. Continua
+  uma mensagem no build, e não uma máquina que desliga no boot. Pelos
+  achados do adversário: o `operar --imagem` confere o mesmo teto, pelo
+  manifesto, antes de mandar a imagem a uma máquina que já roda
+  (`slots::conferir_o_teto_da_imagem`) — a máquina e o quórum não olham o
+  teto, e o boot recusaria a versão armada —; o `publicar` deixa o ELF
+  inteiro de cada versão ao lado da imagem, em `<versão>-<arch>.slot.elf`,
+  para o `cargo xtask simbolo --elf`, porque o kernel do slot já não leva
+  os símbolos e o de `target/producao-kernel` muda no `publicar` seguinte;
+  e cinco mutações da conferência que sobreviviam — o passo dos cabeçalhos
+  de programa, o múltiplo de 24, o `DT_NULL` e os dois limites do
+  segmento — reprovam no teste
+  `a_tabela_de_relocacoes_e_os_programas_como_o_iniciador_os_le`. Continua
   pendente, para um incremento depois desta validação, o iniciador
   devolver o arquivo ao firmware depois da carga: mexe no caminho de boot,
   e vale também para o ARM pela UEFI e para máquinas de verdade. As outras

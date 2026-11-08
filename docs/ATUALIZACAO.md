@@ -175,7 +175,10 @@ recusa, regrava o controle pelo journal e reinicia para a ativa.
 
 1. **Publicar** (fora da máquina): `cargo xtask publicar <chave> <versão>
    <geração>` monta a imagem — o kernel de produção, o pacote do produto, o
-   manifesto — e a assina. A saída diz o resumo do manifesto.
+   manifesto — e a assina. A saída diz o resumo do manifesto. O kernel vai
+   para a imagem sem a tabela de símbolos; o ELF inteiro dele fica ao lado
+   dela, em `<versão>-<arch>.slot.elf`, para traduzir os endereços de uma
+   máquina nessa versão (`cargo xtask simbolo --elf`).
 2. **Escrever** (`update.stage`, pelo gate, papel com `system.update`): os
    bytes vão para o **slot inativo**, em pedaços, a partir de um
    deslocamento. Nada no journal: escrever não é instalar. Antes de o slot
@@ -311,6 +314,8 @@ cargo xtask provisionar op --imagem target/atualizacao/2026.11.0-x86_64.slot
 
 # Uma máquina que já roda: escrever, instalar pelo quórum, reiniciar. O
 # duke.publica é a pública que a máquina mostrou no console no primeiro boot.
+# O --imagem confere antes o teto do iniciador pelo manifesto: a máquina e o
+# quórum não olham o tamanho do kernel, e o boot recusaria a versão armada.
 cargo xtask operar maquina:7070 update.stage --imagem target/atualizacao/2026.12.0-x86_64.slot \
     --chave sistema-1 --duke duke.publica
 cargo xtask operar maquina:7070 system.update '{"action":"install","manifest":"<resumo>"}' \
