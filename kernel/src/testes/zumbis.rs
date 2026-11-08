@@ -9,14 +9,15 @@
 //! Com a conta de antes da 14.1, só dos vivos, os sete primeiros casos
 //! reprovam: um titular de cota 2 enchia a tabela inteira com zumbis, e daí
 //! em diante não nascia fio nenhum, de ninguém. Com a da 14.1 antes da
-//! alternativa 1 — os vivos, os que nascem e os zumbis —, os três que
-//! seguram o coletor reprovam: `zumbis: o morto conta na cota ate o
-//! recolhimento`, `zumbis: o laco que bifurca e colhe nao passa da cota` e
-//! `zumbis: o processo do user.run conta ate o recolhimento`. Com o coletor
-//! segurado, os estados que ele desfaria num tique duram o caso inteiro. E
-//! dois conferem as pontas da conta: `zumbis: a recusa grava os mortos acima
-//! da cota`, o gate que conta os mortos, e `zumbis: os fios do kernel nao
-//! contam na cota`, o filtro de quem é processo.
+//! alternativa 1 — os vivos, os que nascem e os zumbis —, três dos que
+//! seguram o coletor reprovam (a MC1 do README): `zumbis: o morto conta na
+//! cota ate o recolhimento`, `zumbis: o laco que bifurca e colhe nao passa
+//! da cota` e `zumbis: o processo do user.run conta ate o recolhimento`. Com
+//! o coletor segurado, os estados que ele desfaria num tique duram o caso
+//! inteiro. E dois conferem as pontas da conta: `zumbis: a recusa grava os
+//! mortos acima da cota`, o gate que conta os mortos — também com o coletor
+//! segurado —, e `zumbis: os fios do kernel nao contam na cota`, o filtro de
+//! quem é processo.
 //!
 //! O pai dos zumbis é o `colhedor` (`programas/src/bin/colhedor.rs`):
 //! bifurca quando a suíte manda — o filho sai na hora, com 71, e fica
@@ -255,9 +256,9 @@ fn operador(console: u16, nome: &str) -> Autoridade {
     Autoridade::Pessoa { sessao }
 }
 
-/// O fim de todo caso `zumbis:`: o colhedor sai — se não sai, é encerrado
-/// sem o gate —, os `encerravel` também, a tabela fica sem zumbi, e a
-/// política e as pessoas voltam ao que eram.
+/// O fim dos casos `zumbis:` do colhedor: o colhedor sai — se não sai, é
+/// encerrado sem o gate —, os `encerravel` também, a tabela fica sem
+/// zumbi, e a política e as pessoas voltam ao que eram.
 fn limpar(colhedor: Option<u64>) {
     let _ = crate::eventos::publicar(
         CANAL,
