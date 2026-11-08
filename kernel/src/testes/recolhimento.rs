@@ -13,9 +13,12 @@
 //! cada um com um passo do laço: é a ordem pior para o outro titular — o
 //! laço repõe um morto embaixo entre dois recolhimentos —, e o caso a
 //! escolhe, em vez de esperar que o tique a dê. Com a busca voltando a
-//! começar na vaga 0, eles reprovam sempre, e não por acaso. O quarto solta
-//! tudo ao mesmo tempo — o coletor do kernel, um segundo coletor e o laço
-//! de um titular — e encerra no meio dele os processos de outro: confere
+//! começar na vaga 0, eles reprovam sempre, e não por acaso. O quarto
+//! confere a mesma ordem na passada de produção inteira
+//! (`fios::recolher_terminados_de_teste`), e não só no passo: os mortos que
+//! podem sair quando ela começa saem nela, a partir do cursor. O quinto
+//! solta tudo ao mesmo tempo — o coletor do kernel, um segundo coletor e o
+//! laço de um titular — e encerra no meio dele os processos de outro: confere
 //! que os mortos do outro saem com o laço andando, que nada se perde, nada
 //! sai duas vezes e nenhuma vaga sobra; e não a ordem, que o tique decide.
 //!
@@ -60,9 +63,17 @@ const PASSOS: usize = 12;
 // ---------------------------------------------------------------------------
 
 /// Espera `cond(x)` até 600 tiques; falha com `erro`. A única instância de
-/// `esperar_ate` do módulo.
+/// `esperar_ate` do módulo. A condição é conferida mais uma vez depois do
+/// prazo: `esperar_ate` desiste sem conferi-la quando o prazo vence com o
+/// fio da suíte dentro de `nativo::atender_pendentes`, servindo os pedidos
+/// dos processos — medido em [`dois_coletores`], com o laço de A rápido:
+/// uma chamada durou 569 tiques —, e a espera reprovava com a condição já
+/// cumprida.
 fn ate(cond: fn(u64) -> bool, x: u64, erro: &'static str) -> Resultado {
-    esperar_ate(|| cond(x), 600).map_err(|_| erro)
+    match esperar_ate(|| cond(x), 600) {
+        Err(_) if !cond(x) => Err(erro),
+        _ => Ok(()),
+    }
 }
 
 /// O fio `id` terminou e largou o núcleo.
@@ -112,6 +123,16 @@ fn uma_vez(ids: &[u64]) -> Resultado {
 /// esvaziar.
 fn cursor_depois_de(vaga: usize) -> bool {
     crate::fios::cursor_do_recolhimento_de_teste() == (vaga + 1) % MAX_FIOS
+}
+
+/// A primeira vaga vazia — a que o laço vai tomar — está na vaga `ate` ou
+/// abaixo dela. Senão, um nascimento de fora do caso tomou a que o
+/// recolhimento acabou de esvaziar, e o caso diz isso, e não o cursor.
+fn vaga_do_laco(ate: usize) -> Resultado {
+    match crate::fios::primeira_vaga_vazia_de_teste() {
+        Some(v) if v <= ate => Ok(()),
+        _ => Err("um nascimento de fora do caso tomou a vaga recolhida"),
+    }
 }
 
 /// Um recolhimento, o mesmo passo do coletor: a vaga e o id do morto.
@@ -202,6 +223,7 @@ fn ate_sairem(
         let (vaga, id) = recolher()?;
         cursor_parado |= !cursor_depois_de(vaga);
         if id == do_laco {
+            vaga_do_laco(de_baixo)?;
             do_laco = laco()?;
             if vaga_de(do_laco)? > de_baixo {
                 return Err("o morto novo do laco nao caiu na vaga de baixo");
@@ -327,6 +349,7 @@ pub(super) fn tabela_cheia() -> Resultado {
                 return Err("a vaga voltou sem a morte do recolhido solta uma vez");
             }
             if do_laco.len() + 1 < COTA as usize {
+                vaga_do_laco(vaga)?;
                 let novo = filho(&c)?;
                 if vaga_de(novo)? != vaga {
                     return Err("o filho de A nao caiu na vaga que o recolhimento esvaziou");
@@ -357,6 +380,78 @@ pub(super) fn tabela_cheia() -> Resultado {
         uma_vez(&do_laco)
     })();
     terminar(fio);
+    r
+}
+
+// ---------------------------------------------------------------------------
+// recolhimento: a passada recolhe a partir do cursor
+// ---------------------------------------------------------------------------
+
+/// Segura de pé o fio do meio do caso da passada ([`de_pe`]).
+static DE_PE: AtomicBool = AtomicBool::new(false);
+
+/// Um fio do kernel que fica de pé até o caso o soltar: guarda a vaga do
+/// meio, entre os dois mortos da passada.
+extern "C" fn de_pe(_argumento: u64) -> ! {
+    while DE_PE.load(SeqCst) {
+        crate::fios::descansar_ate_a_interrupcao();
+    }
+    crate::fios::terminar()
+}
+
+/// Um fio do kernel do caso da passada, que roda `entrada`: o id dele.
+fn fio_do_caso(entrada: extern "C" fn(u64) -> !) -> Result<u64, &'static str> {
+    match crate::fios::criar("teste-recolhimento-passada", entrada, 0) {
+        Ok(id) => Ok(id.numero()),
+        Err(_) => Err("um fio do caso nao nasceu"),
+    }
+}
+
+/// A passada do coletor, a de produção — o corpo de `recolher_terminados`
+/// (`fios::recolher_terminados_de_teste`), com o coletor do kernel
+/// segurado: dois fios do kernel que saem na hora e, entre as vagas deles,
+/// um que fica de pé ([`de_pe`]); o cursor na vaga do morto de cima. Uma
+/// passada recolhe os dois mortos — o que pode sair quando ela começa sai
+/// nela —, a partir do cursor e dando a volta: o de cima, depois o de
+/// baixo; e o cursor fica logo depois da vaga de baixo. O fio de pé separa
+/// essa vaga da de cima: o cursor parado, ou devolvido onde estava, também
+/// reprova. Com o cursor zerado a cada recolhimento da passada, ou com a
+/// busca de antes, a ordem era a das vagas, e o cursor ficava depois da de
+/// cima, em zero ou parado; com uma passada que recolhe um só, o de baixo
+/// ficava. Os casos do laço conferem a ordem no passo; este, na passada.
+pub(super) fn a_passada() -> Resultado {
+    comecar()?;
+    DE_PE.store(true, SeqCst);
+    let mut meio = 0;
+    let r = (|| -> Resultado {
+        let _segurado = ColetorSegurado::segurar();
+        let baixo = fio_do_caso(morre_na_hora)?;
+        meio = fio_do_caso(de_pe)?;
+        let alto = fio_do_caso(morre_na_hora)?;
+        let mortos = [baixo, alto];
+        for &m in &mortos {
+            crate::fios::vigiar_tambem(m);
+            parado(m)?;
+        }
+        let (a, m, b) = (vaga_de(baixo)?, vaga_de(meio)?, vaga_de(alto)?);
+        if !(a < m && m < b) {
+            return Err("as vagas do caso nao ficaram em ordem");
+        }
+        crate::fios::por_o_cursor_de_teste(b);
+        crate::fios::recolher_terminados_de_teste();
+        if algum_na_tabela(&mortos) {
+            return Err("a passada nao recolheu os mortos que podiam sair");
+        }
+        if !cursor_depois_de(a) {
+            return Err("a passada nao recolheu a partir do cursor");
+        }
+        uma_vez(&mortos)
+    })();
+    DE_PE.store(false, SeqCst);
+    if meio != 0 {
+        let _ = parado(meio);
+    }
+    terminar(None);
     r
 }
 
@@ -407,12 +502,16 @@ static VIVOS: AtomicUsize = AtomicUsize::new(0);
 static PASSADAS: AtomicU64 = AtomicU64::new(0);
 
 /// Quantos tiques o laço de A anda, no máximo — um passo de bifurcar e um
-/// de colher por tique. É o teto do trabalho do caso: cada passo do
-/// colhedor é uma linha na serial e na tela, com as interrupções
+/// de colher por tique. É só o teto de segurança do trabalho do caso: cada
+/// passo do colhedor é uma linha na serial e na tela, com as interrupções
 /// mascaradas, e um laço sem teto prendeu a suíte na CI 444 (ver `zumbis: a
-/// cota vale com tudo ao mesmo tempo`). Sem tropeço, o caso para o laço bem
-/// antes.
-const TIQUES_DO_LACO: u64 = 150;
+/// cota vale com tudo ao mesmo tempo`). Quem para o laço é o caso, com
+/// [`PARAR`], logo depois de os mortos de B saírem e de A bifurcar mais uma
+/// vez; o teto fica longe disso. Com 150 tiques, o laço acabava antes do
+/// encerramento de B quando o fio da suíte demorava a chegar a ele — medido
+/// nas campanhas das mutações, até 25 segundos —, e o caso reprovava sem
+/// defeito nenhum no recolhimento.
+const TIQUES_DO_LACO: u64 = 3000;
 
 /// O corpo dos fios do caso: `passo` uma vez por tique, até [`PARAR`] ou
 /// `teto` tiques, descansando entre um tique e outro — sem o ritmo do
@@ -508,9 +607,9 @@ fn vagas_de_volta(livres: u64) -> bool {
 /// da tabela, a cota dele volta a zero, e o laço de A segue andando depois.
 /// No fim, a morte de cada um de B foi solta uma vez — nenhuma perdida,
 /// nenhuma em dobro, com dois coletores —, e não sobra morto, zumbi nem
-/// vaga. A ordem do recolhimento, quem a confere são os casos passo a passo:
-/// solto, o tique decide quem anda primeiro, e os coletores são mais
-/// rápidos que o laço.
+/// vaga. A ordem do recolhimento, quem a confere são os casos passo a passo
+/// e o da passada: solto, o tique decide quem anda primeiro, e os coletores
+/// são mais rápidos que o laço.
 pub(super) fn dois_coletores() -> Resultado {
     let Some(nucleo) = nucleos_secundarios().next() else {
         crate::log_info!("teste", "um nucleo so: nada corre ao mesmo tempo");
@@ -540,6 +639,7 @@ pub(super) fn dois_coletores() -> Resultado {
             return Err("B passou da cota antes do laco");
         }
         let antes = bifurcacoes();
+        let comeco = crate::tempo::ticks();
         no_nucleo("teste-recolhimento-coletor", outro_coletor, nucleo)?;
         no_nucleo("teste-recolhimento-laco", alimentar_o_laco, nucleo)?;
         ate(bifurcacoes_ate, antes + 4, "o laco de A nao andou")?;
@@ -549,10 +649,12 @@ pub(super) fn dois_coletores() -> Resultado {
             }
         }
         let no_encerramento = bifurcacoes();
+        let encerrado = crate::tempo::ticks();
         for &id in &de_b {
             ate(fora_da_tabela, id, "um morto de B esperou o laco de A")?;
         }
         let na_saida = bifurcacoes();
+        let sairam = crate::tempo::ticks();
         if crate::fios::contas_da_cota_de_teste(b) != (0, 0) {
             return Err("a cota de B nao voltou com os mortos dele recolhidos");
         }
@@ -566,9 +668,12 @@ pub(super) fn dois_coletores() -> Resultado {
         c.encerrar()?;
         crate::log_info!(
             "teste",
-            "recolhimento: A bifurcou {} vezes antes do encerramento de B e {} enquanto os \
-             mortos de B saiam; {} passadas do segundo coletor",
+            "recolhimento: o laco de A andou {} tiques e {} bifurcacoes ate o encerramento de B; \
+             os mortos de B sairam em {} tiques, com {} bifurcacoes de A no meio; {} passadas do \
+             segundo coletor",
+            encerrado - comeco,
             no_encerramento - antes,
+            sairam - encerrado,
             na_saida - no_encerramento,
             PASSADAS.load(SeqCst)
         );

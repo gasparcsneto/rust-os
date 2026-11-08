@@ -38716,6 +38716,10 @@ static CASOS: &[Caso] = &[
         f: recolhimento::encerramento,
     },
     Caso {
+        nome: "recolhimento: a passada recolhe a partir do cursor",
+        f: recolhimento::a_passada,
+    },
+    Caso {
         nome: "recolhimento: dois coletores e o laco ao mesmo tempo",
         f: recolhimento::dois_coletores,
     },
