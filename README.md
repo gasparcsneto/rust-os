@@ -5241,7 +5241,17 @@ Sem ganho a medir, não há o que pagar com esse risco.
   prioridade no rodízio; quanto isso pesa depende de tempos, e não foi
   medido. A conferir, sem ter entrado neste incremento:
   `fluxo::canal_acabou` só tomar a ordem quando o morto foi ponta de um
-  fluxo. **O A1-4 segue pendente**: a recusa não diz quantos dos contados
+  fluxo. E uma observação do caso concorrente, fora do recolhimento e sem
+  medida em produção: `nativo::atender_pendentes` atende a fila dos
+  pedidos dos processos até esvaziá-la, sem limite por chamada. Na suíte,
+  quem a chama é o fio da suíte, enquanto espera, e o laço de um titular
+  noutro núcleo o segurou 569 tiques numa chamada só (medido sob uma
+  mutação, com uma medida temporária); em produção, quem a chama é a
+  tarefa `programas` (`nativo::servir`), que divide o executor com o canal
+  do agente, o enlace, o pulso, o console e a barra. Se processos que
+  pedem sem parar seguram o executor do mesmo jeito — e se cabe um limite
+  de pedidos por chamada, uma escolha [B] —, fica a conferir.
+  **O A1-4 segue pendente**: a recusa não diz quantos dos contados
   são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
   que espera o coletor, e quem ouve "cota de processos do papel: N de M"
   pode ver menos processos do titular na lista. Dizer na recusa quantos
@@ -5355,12 +5365,13 @@ Sem ganho a medir, não há o que pagar com esse risco.
 
   **O teto do iniciador**, da mesma causa: o iniciador recusa um kernel
   acima de 32 MiB (`MAIOR_KERNEL`), e o kernel de teste de debug do x86_64
-  tem 33 549 864 bytes — 4 568 abaixo. Oito linhas temporárias de medida o
-  levaram acima, e o iniciador desligou a máquina ("o kernel do slot passa
-  do teto do iniciador", "nenhum slot carregou"): o próximo incremento de
-  tamanho parecido deixa a suíte do x86_64 em debug inteira sem subir. O
-  xtask não confere esse teto ao gravar o slot, como confere o dos
-  programas.
+  tem 33 549 608 bytes — 4 824 abaixo; o do aarch64, que a sonda do
+  iniciador sobe pelo firmware na CI, tem 31 202 816, 2,2 MiB abaixo. Oito
+  linhas temporárias de medida levaram o do x86_64 acima, e o iniciador
+  desligou a máquina ("o kernel do slot passa do teto do iniciador",
+  "nenhum slot carregou"): o próximo incremento de tamanho parecido deixa
+  a suíte do x86_64 em debug inteira sem subir. O xtask não confere esse
+  teto ao gravar o slot, como confere o dos programas.
 
   Fechar pede uma escolha, que fica com o dono — as três primeiras são
   [B] e não mudam o caso, o programa nem a máquina da bancada: o kernel da
