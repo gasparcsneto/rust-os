@@ -19657,7 +19657,10 @@ fn cota_apertada(
     if !recusa("process.fork") {
         return Err("o fork alem da cota nao foi gravado");
     }
-    let _ = esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 600);
+    // O `entrada` saiu, e conta na cota até o coletor o recolher (a
+    // alternativa 1 da 14.1): sem esperar, o `formulario` ouviria a cota.
+    esperar_ate(|| crate::fios::processos_de(autoridade) == 0, 600)
+        .map_err(|_| "o entrada recusado nao saiu da tabela")?;
 
     // Um processo vivo; o segundo, recusado, gravado, e não nasce.
     let formulario = format!("{DIRETORIO_DOS_COMPILADOS}/formulario");
@@ -38658,6 +38661,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "zumbis: o processo do user.run conta ate o recolhimento",
         f: zumbis::zumbis_o_processo_do_user_run_conta_ate_o_recolhimento,
+    },
+    Caso {
+        nome: "zumbis: a recusa grava os mortos acima da cota",
+        f: zumbis::zumbis_a_recusa_grava_os_mortos_acima_da_cota,
+    },
+    Caso {
+        nome: "zumbis: os fios do kernel nao contam na cota",
+        f: zumbis::zumbis_os_fios_do_kernel_nao_contam_na_cota,
     },
     Caso {
         nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",

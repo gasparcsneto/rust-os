@@ -13,7 +13,10 @@
 //! seguram o coletor reprovam: `zumbis: o morto conta na cota ate o
 //! recolhimento`, `zumbis: o laco que bifurca e colhe nao passa da cota` e
 //! `zumbis: o processo do user.run conta ate o recolhimento`. Com o coletor
-//! segurado, os estados que ele desfaria num tique duram o caso inteiro.
+//! segurado, os estados que ele desfaria num tique duram o caso inteiro. E
+//! dois conferem as pontas da conta: `zumbis: a recusa grava os mortos acima
+//! da cota`, o gate que conta os mortos, e `zumbis: os fios do kernel nao
+//! contam na cota`, o filtro de quem é processo.
 //!
 //! O pai dos zumbis é o `colhedor` (`programas/src/bin/colhedor.rs`):
 //! bifurca quando a suíte manda — o filho sai na hora, com 71, e fica
@@ -946,6 +949,115 @@ pub(super) fn zumbis_o_processo_do_user_run_conta_ate_o_recolhimento() -> Result
     resultado
 }
 
+/// A recusa grava o que o titular ocupa, mortos inclusive: com o coletor
+/// segurado e a cota em 4, o colhedor bifurca dois filhos e os colhe — os
+/// dois colhidos guardam a vaga até o recolhimento —; com a cota rebaixada
+/// a 2, o bifurcar ouve `NEGADO`, e a recusa diz "3 de 2": o gate contou o
+/// colhedor e os dois mortos. Se o gate contasse como a 14.1 antes da
+/// alternativa 1 — os vivos, os que nascem e os zumbis —, deixaria o pedido
+/// passar, o espaço do colhedor seria copiado à toa, e a recusa, do
+/// nascimento, diria "2 de 2".
+pub(super) fn zumbis_a_recusa_grava_os_mortos_acima_da_cota() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(4)?;
+    let titular = operador(0, "pessoa-dos-mortos");
+    let mut fio = None;
+    let mut segurado = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        for _ in 0..2 {
+            if !matches!(c.bifurcar()?, Bifurcou::Filho(_)) {
+                return Err("um filho dentro da cota nao nasceu");
+            }
+        }
+        for _ in 0..2 {
+            if !matches!(c.colher()?, Ok((_, DO_FILHO))) {
+                return Err("o colhedor nao colheu o filho com o codigo dele");
+            }
+        }
+        politica_com_a_cota(2)?;
+        let rebaixada = c.bifurcar()?;
+        let gravada = ultimo_com_metodo("process.fork").map(|e| e.detalhe);
+        crate::log_info!(
+            "teste",
+            "zumbis: a cota rebaixada a 2, com o colhedor e dois colhidos; o bifurcar deu {:?}; \
+             a recusa gravou {:?}",
+            rebaixada,
+            gravada
+        );
+        if rebaixada != Bifurcou::Erro(erro::NEGADO) {
+            return Err("o titular acima da cota rebaixada bifurcou");
+        }
+        if gravada.as_deref() != Some("cota de processos do papel: 3 de 2") {
+            return Err("a recusa da cota nao gravou os mortos acima dela");
+        }
+        Ok(())
+    })();
+    drop(segurado);
+    limpar(fio);
+    resultado
+}
+
+/// Só um processo conta na cota, e não um fio do kernel com a autoridade do
+/// titular — os do kernel nascem com a do sistema ou a de um serviço, e a
+/// suíte cria alguns com a de uma pessoa, como a sonda da autoridade. Com a
+/// cota em 2 e três fios do kernel da pessoa vivos, as duas contas
+/// (`fios::contas_da_cota_de_teste`) dizem zero, e a pessoa ainda lança os
+/// dois `ola` da cota. Sem o filtro do nome na conta, os três fios
+/// encheriam a cota, e o primeiro `ola` ouviria a recusa.
+pub(super) fn zumbis_os_fios_do_kernel_nao_contam_na_cota() -> Resultado {
+    static SOLTAR: AtomicBool = AtomicBool::new(false);
+    extern "C" fn espera(_argumento: u64) -> ! {
+        while !SOLTAR.load(SeqCst) {
+            crate::fios::ceder();
+        }
+        crate::fios::terminar()
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(2)?;
+    let titular = operador(0, "pessoa-dos-fios");
+    SOLTAR.store(false, SeqCst);
+    let mut fios = Vec::new();
+    let resultado = (|| -> Resultado {
+        for _ in 0..3 {
+            let id = crate::fios::criar_como("teste-fio-da-pessoa", espera, 0, titular)?;
+            fios.push(id.numero());
+        }
+        let contas = crate::fios::contas_da_cota_de_teste(titular);
+        crate::log_info!(
+            "teste",
+            "zumbis: tres fios do kernel da pessoa; as contas da cota e da definicao: {:?}",
+            contas
+        );
+        if contas != (0, 0) {
+            return Err("os fios do kernel contaram na cota do titular");
+        }
+        let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let mut lancados = Vec::new();
+        for _ in 0..2 {
+            let id = crate::usuario::lancar_como(Some(&ola), titular)
+                .map_err(|_| "os fios do kernel tomaram a cota do titular")?;
+            lancados.push(id);
+        }
+        for id in lancados {
+            esperar_ate(|| !crate::fios::vivo(id), 600).map_err(|_| "um ola nao saiu")?;
+        }
+        Ok(())
+    })();
+    SOLTAR.store(true, SeqCst);
+    for id in fios {
+        let _ = esperar_ate(|| !crate::fios::vivo(id), 600);
+    }
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// A cota com zumbis vale com tudo ao mesmo tempo: o colhedor bifurca e
 /// colhe em rajadas — os filhos saem noutros núcleos, o coletor passa —,
 /// e um lançador em cada núcleo secundário tenta lançar o `ola` como o
@@ -991,8 +1103,9 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
     fn autoridade() -> Option<Autoridade> {
         crate::arch::sem_interrupcoes(|| *AUTORIDADE.lock())
     }
-    /// Uma olhada, sob a trava do escalonador: a ocupação pela definição do
-    /// zumbi, e a conta da cota conferida contra ela.
+    /// Uma olhada, sob a trava do escalonador: a ocupação pela definição —
+    /// os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos
+    /// —, e a conta da cota conferida contra ela.
     fn olhar(a: Autoridade) {
         let (da_cota, da_definicao) = crate::fios::contas_da_cota_de_teste(a);
         MAIOR.fetch_max(da_definicao, SeqCst);
@@ -1120,7 +1233,7 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
             return Err("o titular ocupou mais vagas que a cota com tudo ao mesmo tempo");
         }
         if DIVERGENCIAS.load(SeqCst) != 0 {
-            return Err("a conta da cota divergiu da definicao do zumbi com tudo ao mesmo tempo");
+            return Err("a conta da cota divergiu da definicao com tudo ao mesmo tempo");
         }
         if OLHADAS.load(SeqCst) == 0 || bifurcacoes == bifurcacoes_antes {
             return Err("nada correu ao mesmo tempo: o caso nao conferiu nada");
