@@ -1,26 +1,27 @@
 //! Os casos `recolhimento:` — a ordem do recolhimento. A busca do próximo
 //! morto começa no cursor e dá a volta pela tabela (ver "A ordem do
-//! recolhimento" em `fios::recolher_terminados`): um titular que cria e
-//! recolhe processos sem parar não segura os mortos de outro — o achado
+//! recolhimento" em `fios::recolher_terminados`): um titular que faz nascer
+//! e morrer processos sem parar não segura os mortos de outro — o achado
 //! A1-1. Antes do cursor, a busca começava sempre na vaga 0, e o nascimento
 //! toma a primeira vaga vazia: o laço de um titular repunha os mortos dele
 //! nas vagas de baixo que o recolhimento acabava de esvaziar, e os mortos
 //! de outro, em vagas mais altas, esperavam enquanto o laço durasse.
 //!
-//! Os três primeiros casos seguram o coletor do kernel
-//! ([`ColetorSegurado`]) e dão um recolhimento por vez
-//! (`fios::recolher_um_de_teste`, o mesmo passo do coletor), alternando
-//! cada um com um passo do laço: é a ordem pior para o outro titular — o
-//! laço repõe um morto embaixo entre dois recolhimentos —, e o caso a
-//! escolhe, em vez de esperar que o tique a dê. Com a busca voltando a
-//! começar na vaga 0, eles reprovam sempre, e não por acaso. O quarto
-//! confere a mesma ordem na passada de produção inteira
-//! (`fios::recolher_terminados_de_teste`), e não só no passo: os mortos que
-//! podem sair quando ela começa saem nela, a partir do cursor. O quinto
-//! solta tudo ao mesmo tempo — o coletor do kernel, um segundo coletor e o
-//! laço de um titular — e encerra no meio dele os processos de outro: confere
-//! que os mortos do outro saem com o laço andando, que nada se perde, nada
-//! sai duas vezes e nenhuma vaga sobra; e não a ordem, que o tique decide.
+//! Três casos — o do laço de outro titular, o da tabela cheia e o do
+//! encerramento — seguram o coletor do kernel ([`ColetorSegurado`]) e dão
+//! um recolhimento por vez (`fios::recolher_um_de_teste`, o mesmo passo do
+//! coletor) e, logo depois do que tira o morto do laço, um passo do laço: é
+//! a ordem pior para os outros mortos — o laço repõe um morto embaixo entre
+//! dois recolhimentos —, e o caso a escolhe, em vez de esperar que o tique
+//! a dê. Com a busca voltando a começar na vaga 0, eles reprovam sempre, e
+//! não por acaso. O da passada confere a mesma ordem na passada de produção
+//! inteira (`fios::recolher_terminados_de_teste`), e não só no passo: os
+//! mortos que podem sair quando ela começa saem nela, a partir do cursor. O
+//! dos dois coletores solta tudo ao mesmo tempo — o coletor do kernel, um
+//! segundo coletor e o laço de um titular — e encerra no meio dele os
+//! processos de outro: confere que os mortos do outro saem com o laço
+//! andando, que nada se perde, nada sai duas vezes e nenhuma vaga sobra; e
+//! não a ordem, que o tique decide.
 //!
 //! Os titulares são pessoas de papel operador, com a cota em [`COTA`]: os
 //! mortos de cada um contam na cota dele até o recolhimento (a 14.1,
@@ -66,9 +67,9 @@ const PASSOS: usize = 12;
 /// `esperar_ate` do módulo. A condição é conferida mais uma vez depois do
 /// prazo: `esperar_ate` desiste sem conferi-la quando o prazo vence com o
 /// fio da suíte dentro de `nativo::atender_pendentes`, servindo os pedidos
-/// dos processos — medido em [`dois_coletores`], com o laço de A rápido:
-/// uma chamada durou 569 tiques —, e a espera reprovava com a condição já
-/// cumprida.
+/// dos processos — medido em [`dois_coletores`], com a busca de antes do
+/// cursor: uma chamada durou 569 tiques —, e a espera reprovava com a
+/// condição já cumprida.
 fn ate(cond: fn(u64) -> bool, x: u64, erro: &'static str) -> Resultado {
     match esperar_ate(|| cond(x), 600) {
         Err(_) if !cond(x) => Err(erro),
@@ -501,22 +502,27 @@ static PARAR: AtomicBool = AtomicBool::new(false);
 static VIVOS: AtomicUsize = AtomicUsize::new(0);
 static PASSADAS: AtomicU64 = AtomicU64::new(0);
 
-/// Quantos tiques o laço de A anda, no máximo — um passo de bifurcar e um
-/// de colher por tique. É só o teto de segurança do trabalho do caso: cada
-/// passo do colhedor é uma linha na serial e na tela, com as interrupções
+/// Quantos passos o laço de A dá, no máximo — um de bifurcar e um de
+/// colher por tique em que o fio dele roda: ele divide o núcleo com o
+/// segundo coletor e não roda em todo tique, e o laço dura mais tiques que
+/// isso. É só o teto de segurança do trabalho do caso: cada passo do
+/// colhedor é uma linha na serial e na tela, com as interrupções
 /// mascaradas, e um laço sem teto prendeu a suíte na CI 444 (ver `zumbis: a
 /// cota vale com tudo ao mesmo tempo`). Quem para o laço é o caso, com
 /// [`PARAR`], logo depois de os mortos de B saírem e de A bifurcar mais uma
-/// vez; o teto fica longe disso. Com 150 tiques, o laço acabava antes do
-/// encerramento de B quando o fio da suíte demorava a chegar a ele — medido
-/// nas campanhas das mutações, até 25 segundos —, e o caso reprovava sem
-/// defeito nenhum no recolhimento.
-const TIQUES_DO_LACO: u64 = 3000;
+/// vez; o teto fica longe disso. Com 150, o laço acabava antes do
+/// encerramento de B quando o fio da suíte demorava a chegar a ele, e o
+/// caso reprovava sem defeito nenhum no recolhimento — na CI 456, com o
+/// código certo. Com 3000, a folga era pouca: numa rodada das campanhas
+/// das mutações, o caso só parou o laço mais de 3010 tiques depois de
+/// lançá-lo — o fio da suíte levou 2498 tiques, 25 segundos, até o
+/// encerramento de B, e os mortos dele, mais 512 para sair.
+const TIQUES_DO_LACO: u64 = 10_000;
 
-/// O corpo dos fios do caso: `passo` uma vez por tique, até [`PARAR`] ou
-/// `teto` tiques, descansando entre um tique e outro — sem o ritmo do
-/// tique, o fio que descansa cede a vez ao outro fio do caso no mesmo
-/// núcleo, e os dois giram sem parar.
+/// O corpo dos fios do caso: `passo` no máximo uma vez por tique, até
+/// [`PARAR`] ou `teto` passos, descansando entre um tique e outro — sem o
+/// ritmo do tique, o fio que descansa cede a vez ao outro fio do caso no
+/// mesmo núcleo, e os dois giram sem parar.
 fn a_cada_tique(teto: u64, passo: fn()) {
     let mut ultimo = crate::tempo::ticks();
     let mut dados = 0;
