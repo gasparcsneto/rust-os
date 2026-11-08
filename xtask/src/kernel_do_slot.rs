@@ -706,8 +706,9 @@ mod testes {
 
     /// A conferência sozinha, sobre bytes trocados à mão: o motivo é o do
     /// que mudou — a tabela de símbolos que ficou, um byte num segmento, um
-    /// cabeçalho de programa, a entrada, a tabela de relocações fora dos
-    /// segmentos ou de outro formato, um arquivo cortado.
+    /// cabeçalho de programa, a entrada, a tabela de seções que falta, a
+    /// tabela de relocações fora dos segmentos ou de outro formato, um
+    /// arquivo cortado.
     #[test]
     fn a_conferencia_aponta_o_que_mudou() {
         let origem = elf_de_mentira();
@@ -742,6 +743,13 @@ mod testes {
         );
         // A entrada.
         recusa(&trocado(24, 1), "o cabeçalho ELF mudou");
+        // Sem a tabela de seções, com o `e_shentsize` de pé — o que o
+        // `--strip-sections` não faz: ele zera o tamanho também, e cai no
+        // cabeçalho. A recusa diz o motivo, e não só que as seções mudaram.
+        let mut sem_secoes = origem.clone();
+        por(&mut sem_secoes, 40, &0u64.to_le_bytes());
+        por(&mut sem_secoes, 60, &0u16.to_le_bytes());
+        recusa(&sem_secoes, "a cópia não tem a tabela de seções");
         // Cortada no meio do segmento de dados.
         recusa(&origem[..0x1040], "passam do fim do arquivo");
 
