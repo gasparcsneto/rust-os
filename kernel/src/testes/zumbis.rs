@@ -6,9 +6,14 @@
 //! filho colhido, o órfão, o do `user.run`) —, até o coletor recolher o
 //! morto. A cota limita o que o titular ocupa da tabela.
 //!
-//! Com a conta de antes da 14.1, só dos vivos, os sete casos reprovam: um
-//! titular de cota 2 enchia a tabela inteira com zumbis, e daí em diante
-//! não nascia fio nenhum, de ninguém.
+//! Com a conta de antes da 14.1, só dos vivos, os sete primeiros casos
+//! reprovam: um titular de cota 2 enchia a tabela inteira com zumbis, e daí
+//! em diante não nascia fio nenhum, de ninguém. Com a da 14.1 antes da
+//! alternativa 1 — os vivos, os que nascem e os zumbis —, os três que
+//! seguram o coletor reprovam: `zumbis: o morto conta na cota ate o
+//! recolhimento`, `zumbis: o laco que bifurca e colhe nao passa da cota` e
+//! `zumbis: o processo do user.run conta ate o recolhimento`. Com o coletor
+//! segurado, os estados que ele desfaria num tique duram o caso inteiro.
 //!
 //! O pai dos zumbis é o `colhedor` (`programas/src/bin/colhedor.rs`):
 //! bifurca quando a suíte manda — o filho sai na hora, com 71, e fica
@@ -23,6 +28,7 @@ use super::{
     fs_pedir, fs_texto, linhas_do_programa, nucleos_secundarios, sistema_aqui, ultimo_com_metodo,
 };
 use crate::autorizacao::Autoridade;
+use crate::fios::Categorias;
 use protocolo::usuario::erro;
 use protocolo::usuario::evento::{Evento, tipo};
 
@@ -631,6 +637,312 @@ pub(super) fn zumbis_a_recusa_grava_os_zumbis_acima_da_cota() -> Resultado {
         Ok(())
     })();
     limpar(fio);
+    resultado
+}
+
+/// O morto conta na cota do titular até o coletor recolhê-lo — o zumbi, e
+/// também o que não é zumbi: o filho colhido e o órfão. Com o coletor
+/// segurado, em cada passo as duas contas (`fios::contas_da_cota_de_teste`)
+/// têm de ser iguais, e as categorias da definição
+/// (`fios::ocupadas_por_categoria_de_teste`), as esperadas:
+///
+/// - o colhedor e dois zumbis: um vivo e dois zumbis;
+/// - um filho colhido, ainda na tabela: um vivo, um zumbi e um morto;
+/// - o colhedor encerrado: três mortos — o pai, o órfão e o colhido;
+/// - um colhedor novo nasce, o quarto de quatro, e o bifurcar dele ouve a
+///   recusa da cota, com os três mortos contando;
+/// - solto o coletor, os três saem da tabela, e o bifurcar passa.
+///
+/// Com a conta da 14.1 antes da alternativa 1, o colhido e o órfão não
+/// contavam: a conta da cota divergia da definição, e o colhedor novo
+/// bifurcava.
+pub(super) fn zumbis_o_morto_conta_ate_o_recolhimento() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(4)?;
+    let titular = operador(0, "pessoa-dos-mortos");
+    let conferir = |passo: &str, esperado: Categorias| -> Resultado {
+        let (da_cota, da_definicao) = crate::fios::contas_da_cota_de_teste(titular);
+        let categorias = crate::fios::ocupadas_por_categoria_de_teste(titular);
+        crate::log_info!(
+            "teste",
+            "zumbis: {}: a conta da cota diz {}, a definicao {} ({:?}), o esperado {:?}",
+            passo,
+            da_cota,
+            da_definicao,
+            categorias,
+            esperado
+        );
+        if categorias != esperado {
+            return Err("as categorias da definicao nao foram as esperadas");
+        }
+        if da_cota != da_definicao {
+            return Err("a conta da cota divergiu da definicao");
+        }
+        Ok(())
+    };
+    let mut fio = None;
+    let mut segurado = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        let mut filhos = Vec::new();
+        for _ in 0..2 {
+            match c.bifurcar()? {
+                Bifurcou::Filho(f) => filhos.push(f),
+                Bifurcou::Erro(_) => return Err("um filho dentro da cota nao nasceu"),
+            }
+        }
+        conferir(
+            "o colhedor e dois zumbis",
+            Categorias {
+                vivos: 1,
+                zumbis: 2,
+                mortos: 0,
+            },
+        )?;
+        let colhido = match c.colher()? {
+            Ok((f, DO_FILHO)) => f,
+            _ => return Err("o colhedor nao colheu o filho com o codigo dele"),
+        };
+        if !crate::fios::na_tabela_de_teste(colhido) {
+            return Err("o colhido saiu da tabela com o coletor segurado");
+        }
+        conferir(
+            "um filho colhido e ainda na tabela",
+            Categorias {
+                vivos: 1,
+                zumbis: 1,
+                mortos: 1,
+            },
+        )?;
+        let sobrou = filhos
+            .iter()
+            .copied()
+            .find(|&f| f != colhido)
+            .ok_or("o colhedor colheu um filho que nao era dele")?;
+        c.encerrar()?;
+        if !crate::fios::na_tabela_de_teste(c.fio) || !crate::fios::na_tabela_de_teste(sobrou) {
+            return Err("o pai morto ou o filho dele saiu da tabela com o coletor segurado");
+        }
+        conferir(
+            "o pai morto, o orfao e o colhido, ainda na tabela",
+            Categorias {
+                vivos: 0,
+                zumbis: 0,
+                mortos: 3,
+            },
+        )?;
+        let novo = Colhedor::lancar(titular)?;
+        fio = Some(novo.fio);
+        conferir(
+            "um colhedor novo com os tres mortos",
+            Categorias {
+                vivos: 1,
+                zumbis: 0,
+                mortos: 3,
+            },
+        )?;
+        if novo.bifurcar()? != Bifurcou::Erro(erro::NEGADO) {
+            return Err("o titular bifurcou com os mortos dele enchendo a cota");
+        }
+        if !recusa_da_cota_gravada() {
+            return Err("a recusa pela cota nao foi gravada");
+        }
+        drop(segurado.take());
+        for morto in [colhido, sobrou, c.fio] {
+            esperar_ate(|| !crate::fios::na_tabela_de_teste(morto), 600)
+                .map_err(|_| "o coletor solto nao recolheu um morto do titular")?;
+        }
+        conferir(
+            "o colhedor novo, recolhidos os mortos",
+            Categorias {
+                vivos: 1,
+                zumbis: 0,
+                mortos: 0,
+            },
+        )?;
+        if !matches!(novo.bifurcar()?, Bifurcou::Filho(_)) {
+            return Err("a cota nao voltou depois do recolhimento");
+        }
+        Ok(())
+    })();
+    drop(segurado);
+    limpar(fio);
+    resultado
+}
+
+/// O laço do achado A1, com o coletor segurado: o colhedor bifurca e colhe
+/// em seguida, um filho por vez. Cada filho colhido deixa de ser zumbi e
+/// guarda a vaga até a passada do coletor, que não vem. Com a cota em 3, o
+/// colhedor e dois colhidos enchem a cota: o terceiro bifurcar ouve a
+/// recusa da cota, que vai para a auditoria, e o titular nunca ocupa mais
+/// que três vagas. Outro titular ainda lança o dele. Solto o coletor, os
+/// colhidos saem, e o laço segue.
+///
+/// Com a conta da 14.1 antes da alternativa 1, o colhido não contava: o laço
+/// seguia até a tabela acabar (`SEM_VAGA_DE_FIO`), e daí em diante não
+/// nascia fio de ninguém enquanto o coletor não passasse.
+pub(super) fn zumbis_o_laco_que_bifurca_e_colhe_nao_passa_da_cota() -> Resultado {
+    const COTA: usize = 3;
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(COTA as u32)?;
+    let titular = operador(0, "pessoa-do-laco");
+    let outro = operador(1, "outra-pessoa");
+    let encerravel = alloc::format!("{}/encerravel", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let mut fio = None;
+    let mut segurado = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        let mut voltas = 0usize;
+        let mut maior = 0usize;
+        let parou = loop {
+            if voltas > crate::fios::MAX_FIOS {
+                break None;
+            }
+            match c.bifurcar()? {
+                Bifurcou::Filho(filho) => {
+                    match c.colher()? {
+                        Ok((f, DO_FILHO)) if f == filho => {}
+                        _ => return Err("o colhedor nao colheu o filho com o codigo dele"),
+                    }
+                    voltas += 1;
+                    maior = maior.max(crate::fios::ocupadas_de_teste(titular));
+                }
+                Bifurcou::Erro(e) => break Some(e),
+            }
+        };
+        let categorias = crate::fios::ocupadas_por_categoria_de_teste(titular);
+        let (da_cota, da_definicao) = crate::fios::contas_da_cota_de_teste(titular);
+        let gravada = recusa_da_cota_gravada();
+        let do_outro = crate::usuario::lancar_como(Some(&encerravel), outro);
+        crate::log_info!(
+            "teste",
+            "zumbis: cota {}; {} voltas de bifurcar e colher; o bifurcar parou com {:?}; \
+             maior ocupacao {}; {:?}; a conta da cota diz {}, a definicao {}; \
+             o outro titular lancou: {:?}",
+            COTA,
+            voltas,
+            parou,
+            maior,
+            categorias,
+            da_cota,
+            da_definicao,
+            do_outro
+        );
+        if parou == Some(erro::SEM_VAGA_DE_FIO) {
+            return Err("o laco de bifurcar e colher esgotou a tabela de fios");
+        }
+        if parou != Some(erro::NEGADO) || voltas != COTA - 1 || maior > COTA {
+            return Err("o laco de bifurcar e colher passou da cota");
+        }
+        let esperado = Categorias {
+            vivos: 1,
+            zumbis: 0,
+            mortos: COTA - 1,
+        };
+        if categorias != esperado || da_cota != da_definicao {
+            return Err("a conta da cota nao contou os filhos colhidos");
+        }
+        if !gravada {
+            return Err("a recusa pela cota nao foi gravada");
+        }
+        if do_outro.is_err() {
+            return Err("os mortos de um titular barraram o lancamento de outro");
+        }
+        drop(segurado.take());
+        esperar_ate(|| crate::fios::ocupadas_de_teste(titular) == 1, 600)
+            .map_err(|_| "o coletor solto nao recolheu os filhos colhidos")?;
+        match c.bifurcar()? {
+            Bifurcou::Filho(filho) => match c.colher()? {
+                Ok((f, DO_FILHO)) if f == filho => Ok(()),
+                _ => Err("o colhedor nao colheu o filho depois do recolhimento"),
+            },
+            Bifurcou::Erro(_) => Err("o laco nao seguiu depois do recolhimento"),
+        }
+    })();
+    drop(segurado);
+    limpar(fio);
+    resultado
+}
+
+/// A recusa da cota de `process.run` na auditoria: a última, pela política,
+/// com o motivo da cota.
+fn recusa_do_lancamento_gravada() -> bool {
+    ultimo_com_metodo("process.run").is_some_and(|e| {
+        e.codigo == politica::Codigo::DenyPolicy
+            && e.detalhe.starts_with("cota de processos do papel")
+    })
+}
+
+/// O processo do `user.run` nasce sem pai e, quando sai, não é zumbi de
+/// ninguém: guarda a vaga até a passada do coletor, e conta na cota do
+/// titular até lá. Com o coletor segurado e a cota em 2, dois `ola` nascem
+/// e saem; o terceiro lançamento ouve a recusa da cota (`COTA_ESGOTADA`),
+/// que vai para a auditoria. Solto o coletor, os dois saem da tabela, e o
+/// lançamento passa.
+///
+/// Com a conta da 14.1 antes da alternativa 1, o `ola` que saiu não contava,
+/// e o terceiro nascia.
+pub(super) fn zumbis_o_processo_do_user_run_conta_ate_o_recolhimento() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(2)?;
+    let titular = operador(0, "pessoa-do-ola");
+    let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let mut segurado = Some(super::vagas::ColetorSegurado::segurar());
+    let resultado = (|| -> Resultado {
+        let mut mortos = Vec::new();
+        for _ in 0..2 {
+            let id = crate::usuario::lancar_como(Some(&ola), titular)
+                .map_err(|_| "um ola dentro da cota nao nasceu")?;
+            esperar_ate(|| !crate::fios::vivo(id), 600).map_err(|_| "o ola nao saiu")?;
+            mortos.push(id);
+        }
+        let categorias = crate::fios::ocupadas_por_categoria_de_teste(titular);
+        let terceiro = crate::usuario::lancar_como(Some(&ola), titular);
+        crate::log_info!(
+            "teste",
+            "zumbis: cota 2; dois ola sairam: {:?}; o terceiro lancamento deu {:?}",
+            categorias,
+            terceiro
+        );
+        let esperado = Categorias {
+            vivos: 0,
+            zumbis: 0,
+            mortos: 2,
+        };
+        if categorias != esperado {
+            return Err("os ola que sairam nao contaram como mortos do titular");
+        }
+        if terceiro != Err(crate::fios::COTA_ESGOTADA) {
+            return Err("o titular lancou com os mortos dele enchendo a cota");
+        }
+        if !recusa_do_lancamento_gravada() {
+            return Err("a recusa pela cota do lancamento nao foi gravada");
+        }
+        drop(segurado.take());
+        for id in &mortos {
+            esperar_ate(|| !crate::fios::na_tabela_de_teste(*id), 600)
+                .map_err(|_| "o coletor solto nao recolheu um ola")?;
+        }
+        let id = crate::usuario::lancar_como(Some(&ola), titular)
+            .map_err(|_| "a cota nao voltou depois do recolhimento")?;
+        esperar_ate(|| !crate::fios::vivo(id), 600).map_err(|_| "o ultimo ola nao saiu")
+    })();
+    drop(segurado);
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
     resultado
 }
 

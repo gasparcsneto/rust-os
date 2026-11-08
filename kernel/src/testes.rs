@@ -38648,6 +38648,18 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo,
     },
     Caso {
+        nome: "zumbis: o morto conta na cota ate o recolhimento",
+        f: zumbis::zumbis_o_morto_conta_ate_o_recolhimento,
+    },
+    Caso {
+        nome: "zumbis: o laco que bifurca e colhe nao passa da cota",
+        f: zumbis::zumbis_o_laco_que_bifurca_e_colhe_nao_passa_da_cota,
+    },
+    Caso {
+        nome: "zumbis: o processo do user.run conta ate o recolhimento",
+        f: zumbis::zumbis_o_processo_do_user_run_conta_ate_o_recolhimento,
+    },
+    Caso {
         nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",
         f: vagas::vagas_o_morto_sem_a_limpeza_guarda_a_vaga,
     },

@@ -1399,6 +1399,12 @@ pub fn ocupadas_de_teste(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.ocupadas_pela_definicao(autoridade))
 }
 
+/// As vagas do titular por categoria, sob a trava do escalonador.
+#[cfg(feature = "modo-teste")]
+pub fn ocupadas_por_categoria_de_teste(autoridade: crate::autorizacao::Autoridade) -> Categorias {
+    com_escalonador(|e| e.ocupadas_por_categoria(autoridade))
+}
+
 /// As duas contas sob a mesma trava: a da cota — a que o gate e o
 /// nascimento fazem — e a da definição. Têm de ser sempre iguais; os casos
 /// `zumbis:` as comparam.
