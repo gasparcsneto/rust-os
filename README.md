@@ -119,6 +119,7 @@ cargo xtask enlace                   # duas máquinas pela rede do emulador: o e
 cargo xtask pareamento               # duas máquinas e a Pessoa no teclado das duas: o pareamento sem administrador, o homem no meio, a meia relação, a lápide
 cargo xtask fluxo                    # duas máquinas e os fluxos da malha entre elas: 4 MiB em cada sentido, a contrapressão, a adulteração e o homem no meio, a política, a suspensão, o corte, a revogação, as vagas
 cargo xtask sdk                      # duas máquinas e o SDK da malha: o modelo de fora do repositório nas duas, o eco-malha com clientes daqui e de lá, os dois sentidos, a conversa pelo teclado, as medidas, a revogação
+cargo xtask disponibilidade          # o canal do agente com os processos de outro titular pedindo sem parar: só mede
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -776,6 +777,7 @@ programas/           os programas de usuário, compilados à parte do kernel
         ├── contido.rs    declara só `system.read`, e confere que o manifesto limita o resto
         ├── isolavel.rs   pede pelo gate a cada passo da suíte: isolado, ouve `DENY_CONTAINED` e não bifurca; solto, pede de novo
         ├── encerravel.rs gira sem chamada de sistema, espera um evento, espera um filho ou escreve no armazém, no passo da suíte: o término o pega em cada um
+        ├── incansavel.rs a carga da bancada da disponibilidade: filhos de um titular que pedem `system.uptime` sem parar — quase tudo recusado pela taxa, sem um registro por pedido —, ou só giram, como controle
         ├── anonimo.rs    o único sem manifesto: não exerce nada, nem lançado pelo sistema
         ├── guardar.rs    guarda no armazém pelo `pedir`: a versão, o conflito, a leitura pelo descritor e o `MUDOU`
         ├── discador.rs   conversa com o eco da bancada pelo `pedir`: os 256 bytes de ida e volta, e as recusas
@@ -835,6 +837,7 @@ xtask/src/
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso
+├── disponibilidade.rs a bancada da disponibilidade: a máquina de produção, a serial e o TCP sondados de 50 em 50 ms enquanto o `incansavel` de outro titular pede sem parar, ou só gira — a ida e volta, o maior silêncio, o agente novo que tenta entrar e os contadores do kernel; só mede
 ├── firmware.rs      onde parou a máquina que não atendeu: o módulo de cada processador — a imagem PE abaixo do endereço, lida pelo QMP, com o nome do CodeView dela ou do módulo de mesmo cabeçalho no arquivo do firmware, aberto pelo `xz` — e os valores da pilha que caem no código de uma imagem
 ├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela

@@ -22,6 +22,7 @@ mod codigo;
 mod copia;
 mod digitacao;
 mod disco_hostil;
+mod disponibilidade;
 mod enlace;
 mod firmware;
 mod fluxo;
@@ -300,6 +301,9 @@ fn main() -> ExitCode {
         "enlace" => enlace::enlace(release),
         "pareamento" => pareamento::pareamento(release),
         "fluxo" => fluxo::fluxo(release),
+        // A disponibilidade do executor sob os pedidos dos processos de um
+        // titular: só mede — ver [`disponibilidade`].
+        "disponibilidade" => disponibilidade::disponibilidade(arch, release),
         // O SDK: selar um programa de fora com a chave de um editor,
         // conferir um executável, e o modelo compilado fora do workspace.
         "selar" => match (posicionais.get(1), posicionais.get(2)) {
@@ -495,6 +499,10 @@ COMANDOS:
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     persistencia              a mesma máquina em vários boots: corte de energia,
                               disco restaurado, relógio para trás
+    disponibilidade           o canal do agente com os processos de outro titular
+                              pedindo sem parar: a ida e volta e o silêncio da
+                              serial e do TCP, de 0 a 3 processos, e o controle
+                              que só gira — só mede
     tempo                     o Roughtime de ponta a ponta, contra as fontes de
                               hora do hospedeiro: atraso, perda, divergência,
                               quórum, saltos e recuperação, uma máquina por cenário
