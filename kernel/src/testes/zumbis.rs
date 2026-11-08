@@ -37,20 +37,20 @@ use protocolo::usuario::erro;
 use protocolo::usuario::evento::{Evento, tipo};
 
 /// O canal do `colhedor`, e os passos dele.
-const CANAL: &str = "teste-colhedor";
-const BIFURCAR: i64 = 1;
-const COLHER: i64 = 2;
+pub(super) const CANAL: &str = "teste-colhedor";
+pub(super) const BIFURCAR: i64 = 1;
+pub(super) const COLHER: i64 = 2;
 /// O código com que o filho do colhedor sai.
-const DO_FILHO: i64 = 71;
+pub(super) const DO_FILHO: i64 = 71;
 
 /// O `colhedor`, lançado por um titular: o pai dos zumbis destes casos.
-struct Colhedor {
-    fio: u64,
+pub(super) struct Colhedor {
+    pub(super) fio: u64,
 }
 
 /// O que um passo de bifurcar deu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Bifurcou {
+pub(super) enum Bifurcou {
     /// O filho nasceu, saiu, e é zumbi.
     Filho(u64),
     /// O colhedor ouviu este erro do `bifurcar`.
@@ -59,7 +59,7 @@ enum Bifurcou {
 
 impl Colhedor {
     /// Lança o colhedor como `autoridade` e espera ele escutar o canal.
-    fn lancar(autoridade: Autoridade) -> Result<Self, &'static str> {
+    pub(super) fn lancar(autoridade: Autoridade) -> Result<Self, &'static str> {
         let desde = crate::log::total_emitidos();
         let programa = alloc::format!("{}/colhedor", crate::usuario::DIRETORIO_DOS_COMPILADOS);
         let fio = crate::usuario::lancar_como(Some(&programa), autoridade)?;
@@ -132,7 +132,7 @@ impl Colhedor {
     }
 
     /// Um passo de bifurcar: o filho — já zumbi quando volta —, ou o erro.
-    fn bifurcar(&self) -> Result<Bifurcou, &'static str> {
+    pub(super) fn bifurcar(&self) -> Result<Bifurcou, &'static str> {
         let desde = crate::log::total_emitidos();
         Self::publicar(tipo::ACAO, BIFURCAR)?;
         let mut visto = None;
@@ -165,7 +165,7 @@ impl Colhedor {
 
     /// Um passo de colher: o filho colhido e o código dele, ou o erro do
     /// `esperar`.
-    fn colher(&self) -> Result<Result<(u64, i64), i64>, &'static str> {
+    pub(super) fn colher(&self) -> Result<Result<(u64, i64), i64>, &'static str> {
         let desde = crate::log::total_emitidos();
         Self::publicar(tipo::ACAO, COLHER)?;
         let mut visto: Option<(bool, String)> = None;
@@ -206,7 +206,7 @@ impl Colhedor {
     /// com ela, como a de [`Colhedor::publicar`] — o prazo recomeça a cada
     /// leitura em que o colhedor tira passos. Reprova só se ele passar o
     /// prazo inteiro vivo e sem tirar passo nenhum.
-    fn encerrar(&self) -> Resultado {
+    pub(super) fn encerrar(&self) -> Resultado {
         let _ = Self::publicar(tipo::ENCERRAR, 0);
         loop {
             let tirados = passos_tirados();
@@ -233,7 +233,7 @@ fn passos_tirados() -> Option<u64> {
 }
 
 /// A política padrão com a cota do operador em `cota`.
-fn politica_com_a_cota(cota: u32) -> Resultado {
+pub(super) fn politica_com_a_cota(cota: u32) -> Resultado {
     let texto = politica::PADRAO.replace(
         "processos operador 8",
         &alloc::format!("processos operador {cota}"),
@@ -247,7 +247,7 @@ fn politica_com_a_cota(cota: u32) -> Resultado {
 }
 
 /// Uma pessoa de papel operador, entrada no console `console`.
-fn operador(console: u16, nome: &str) -> Autoridade {
+pub(super) fn operador(console: u16, nome: &str) -> Autoridade {
     let sessao = crate::pessoas::sessao_de_teste(
         crate::pessoas::Console::Terminal(console),
         nome,
@@ -259,7 +259,7 @@ fn operador(console: u16, nome: &str) -> Autoridade {
 /// O fim dos casos `zumbis:` do colhedor: o colhedor sai — se não sai, é
 /// encerrado sem o gate —, os `encerravel` também, a tabela fica sem
 /// zumbi, e a política e as pessoas voltam ao que eram.
-fn limpar(colhedor: Option<u64>) {
+pub(super) fn limpar(colhedor: Option<u64>) {
     let _ = crate::eventos::publicar(
         CANAL,
         Evento {

@@ -32,6 +32,7 @@ mod aviso;
 mod enlace;
 mod fluxo;
 mod pareamento;
+mod recolhimento;
 mod sdk;
 mod vagas;
 mod zumbis;
@@ -38701,6 +38702,22 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "vagas: termino, colheita, coleta e nascimento ao mesmo tempo",
         f: vagas::vagas_tudo_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "recolhimento: os mortos de um titular saem com o laco de outro",
+        f: recolhimento::laco_de_outro,
+    },
+    Caso {
+        nome: "recolhimento: a tabela cheia da a volta",
+        f: recolhimento::tabela_cheia,
+    },
+    Caso {
+        nome: "recolhimento: o encerramento no meio do laco",
+        f: recolhimento::encerramento,
+    },
+    Caso {
+        nome: "recolhimento: dois coletores e o laco ao mesmo tempo",
+        f: recolhimento::dois_coletores,
     },
     Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
