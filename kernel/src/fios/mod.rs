@@ -394,6 +394,10 @@ struct Escalonador {
     /// O fio ocioso de cada núcleo, quando ele tem um.
     ociosos: [Option<usize>; MAX_NUCLEOS],
     ligado: bool,
+    /// Onde começa a busca do próximo morto a recolher: a vaga seguinte à
+    /// do último que o recolhimento tirou da tabela. Ver "A ordem do
+    /// recolhimento" em [`recolher_terminados`].
+    cursor_do_recolhimento: usize,
 }
 
 static ESCALONADOR: Mutex<Escalonador> = Mutex::new(Escalonador {
@@ -402,6 +406,7 @@ static ESCALONADOR: Mutex<Escalonador> = Mutex::new(Escalonador {
     anterior: [None; MAX_NUCLEOS],
     ociosos: [None; MAX_NUCLEOS],
     ligado: false,
+    cursor_do_recolhimento: 0,
 });
 
 static PROXIMO_ID: AtomicU64 = AtomicU64::new(1);
@@ -980,10 +985,48 @@ impl alloc::task::Wake for Sinal {
 /// kernel criando fios que saem na hora, uma passada só durou os 300 tiques
 /// da medida e recolheu 1324 mortos, e nesse tempo o resto da passada do
 /// coletor — a auditoria ao journal, a compactação, os prazos — esperou. O
-/// teto é a tabela inteira, mais do que os mortos que cabem nela; mas a
-/// busca vai pela ordem das vagas, e com outro núcleo fazendo morrer ao
-/// mesmo tempo os mortos novos das vagas de baixo podem gastar o teto antes
-/// de um mais velho, que sai numa passada seguinte.
+/// teto é a tabela inteira, mais do que os mortos que cabem nela.
+///
+/// # A ordem do recolhimento
+///
+/// A busca do próximo morto começa num cursor — a vaga seguinte à do último
+/// recolhido — e dá a volta pela tabela ([`Escalonador::proximo_a_recolher`]).
+/// Começava sempre na vaga 0, e o nascimento toma a primeira vaga vazia
+/// ([`Escalonador::vaga_livre`]): um titular que bifurca, sai e colhe em
+/// laço repunha os mortos dele nas vagas de baixo que o recolhimento acabava
+/// de esvaziar, e, se os repusesse tão depressa quanto o coletor os
+/// recolhia, os mortos de outro titular, em vagas mais altas, esperavam
+/// enquanto o laço durasse — e, com a cota contando os mortos até o
+/// recolhimento (a 14.1, alternativa 1), a cota desse outro ficava cheia. Era
+/// o achado A1-1.
+///
+/// Com o cursor, um morto que pode sair espera no máximo uma volta da
+/// tabela — menos de [`MAX_FIOS`] recolhimentos —, faça o laço o que fizer:
+/// o cursor só anda para a frente, e passa por uma vaga sem recolher só se o
+/// morto dela ainda não pode sair (no núcleo, zumbi, ou com a limpeza em
+/// curso noutro coletor). Antes de chegar à vaga dele, cada recolhimento
+/// tira um morto de uma vaga entre o cursor e a dele, e cada vaga uma vez
+/// só: a vaga recolhida fica atrás do cursor, e a busca só volta a ela
+/// depois de passar pela dele — o fio que nascer ali, como o do laço que
+/// repõe o morto na vaga que o recolhimento acabou de esvaziar, espera a
+/// volta. Na passada do coletor, que recolhe até a tabela inteira,
+/// isso quer dizer: o morto que já pode sair quando o recolhimento da
+/// passada começa sai nela; o que fica pronto no meio dela, com o cursor já
+/// depois da vaga dele, sai na seguinte. Quando a passada roda depende do
+/// rodízio, em que o coletor não tem prioridade — como antes.
+///
+/// O cursor mora na tabela, sob a mesma trava: é lido e avançado na mesma
+/// seção crítica que tira o morto, e dois coletores ao mesmo tempo — a suíte
+/// e o do kernel — o dividem sem trava nova. Qualquer valor dele é seguro:
+/// ele só escolhe por onde a busca começa, e a regra de quem pode sair é a de
+/// sempre.
+///
+/// A passada dos zumbis ([`limpar_os_zumbis`]) segue pela ordem das vagas,
+/// sem cursor: ela não esvazia vaga nenhuma — o zumbi fica na dele, com o
+/// código de saída —, então os zumbis que nascem durante ela só tomam vagas
+/// que já estavam vazias, e cada um é limpo uma vez só; com um coletor só,
+/// como em produção, ela limpa todos os zumbis da tabela antes de acabar, os
+/// de todo titular.
 pub fn recolher_terminados() -> usize {
     #[cfg(feature = "modo-teste")]
     let _recolhendo = Recolhendo::entrar();
@@ -992,99 +1035,12 @@ pub fn recolher_terminados() -> usize {
         return 0;
     }
 
-    let mut quantos = 0;
-
     // A morte dos zumbis primeiro: o que eles soltam fora do fio sai já, e
     // o código de saída fica até a colheita.
     limpar_os_zumbis();
 
-    while quantos < MAX_FIOS {
-        let morto = com_escalonador(|e| {
-            // `na_cpu`, e não "diferente do atual": com vários núcleos há
-            // vários atuais, e há também o fio que um núcleo acabou de largar
-            // e ainda não terminou de sair de cima da pilha dele. E não o
-            // que outro coletor está limpando: ver `Limpeza`.
-            let vaga = (0..MAX_FIOS).find(|&i| {
-                matches!(&e.fios[i], Some(fio)
-                        if fio.estado == Estado::Terminado
-                            && fio.na_cpu.is_none()
-                            && fio.limpeza != Limpeza::EmCurso
-                            && !e.e_zumbi(i))
-            })?;
-            let morto = e.fios[vaga].take()?;
-            // A vaga fica reservada enquanto o morto é desmontado lá fora.
-            // A pilha de kernel de uma vaga mora num endereço fixo dela, e
-            // largar o morto é o que a desmapeia: com a vaga vazia nesse
-            // intervalo, uma criação em outro núcleo a escolhia e ia mapear a
-            // pilha nova por cima da velha — "endereço virtual já mapeado".
-            // Medido: uma criação recusada assim no caso da criação
-            // concorrente, e o mesmo erro no da cópia na escrita em dois
-            // núcleos, que bifurca. Com um núcleo só, a janela existia só se
-            // o timer caísse dentro dela.
-            //
-            // O marcador tem um id próprio, que nenhum fio teve: com o do
-            // morto, ele pareceria vivo a quem procura por id — `vivo`, e o
-            // pai de um zumbi — durante a desmontagem.
-            e.fios[vaga] = Some(Fio {
-                id: IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed)),
-                nome: NOME_DO_MARCADOR,
-                estado: Estado::Reservado,
-                contexto: Contexto::vazio(),
-                _pilha: None,
-                espaco: None,
-                descritores: crate::usuario::descritores::Tabela::nova(),
-                escalonamentos: 0,
-                pai: None,
-                saida: None,
-                colhido: true,
-                limpeza: Limpeza::Feita,
-                autoridade: crate::autorizacao::Autoridade::NENHUMA,
-                na_cpu: None,
-                fixo: None,
-                ocioso: false,
-                reexecutar: false,
-                ceder_ao_voltar: false,
-                pedido: EstadoDoPedido::Livre,
-                programa: crate::autorizacao::Programa::Kernel,
-                terminar: false,
-            });
-            let id = e.fios[vaga].as_ref().map(|f| f.id)?;
-            Some((vaga, id, morto))
-        });
-
-        let Some((vaga, id, morto)) = morto else {
-            break;
-        };
-        #[cfg(feature = "modo-teste")]
-        if PAUSAR_NA_DESMONTAGEM
-            .compare_exchange(
-                PAUSA_ARMADA,
-                PAUSA_SEGURANDO,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_ok()
-        {
-            while PAUSAR_NA_DESMONTAGEM.load(Ordering::SeqCst) == PAUSA_SEGURANDO {
-                core::hint::spin_loop();
-            }
-        }
-        let canal = politica::mensagens::Canal::Processo(morto.id.numero());
-        // O zumbi que o pai colheu já soltou a morte dele: uma vez só. A em
-        // curso não chega aqui — o laço passa por ela.
-        let devida = morto.limpeza == Limpeza::Devida;
-        drop(morto);
-        if devida {
-            limpar_a_morte(canal);
-        }
-        // Só agora a vaga volta a ser escolhível: com a morte solta. O
-        // marcador sai sob a trava e é largado fora dela, como todo fio
-        // deste módulo.
-        let marcador = com_escalonador(|e| match &e.fios[vaga] {
-            Some(f) if f.id == id && f.estado == Estado::Reservado => e.fios[vaga].take(),
-            _ => None,
-        });
-        drop(marcador);
+    let mut quantos = 0;
+    while quantos < MAX_FIOS && recolher_um().is_some() {
         quantos += 1;
     }
 
@@ -1098,6 +1054,91 @@ pub fn recolher_terminados() -> usize {
         RECOLHIDOS.fetch_add(quantos as u64, Ordering::Relaxed);
     }
     quantos
+}
+
+/// Um recolhimento: tira da tabela o próximo morto — a partir do cursor, ver
+/// "A ordem do recolhimento" em [`recolher_terminados`] —, o desmonta fora
+/// da trava, solta a morte dele se ainda é devida, e só então devolve a
+/// vaga. A vaga e o id do morto, ou `None` se nenhum podia sair.
+fn recolher_um() -> Option<(usize, u64)> {
+    let (vaga, id, morto) = com_escalonador(|e| {
+        let vaga = e.proximo_a_recolher()?;
+        let morto = e.fios[vaga].take()?;
+        // O cursor passa para depois da vaga recolhida, na mesma seção
+        // crítica: o próximo recolhimento — deste coletor ou de outro —
+        // começa ali.
+        e.cursor_do_recolhimento = (vaga + 1) % MAX_FIOS;
+        // A vaga fica reservada enquanto o morto é desmontado lá fora.
+        // A pilha de kernel de uma vaga mora num endereço fixo dela, e
+        // largar o morto é o que a desmapeia: com a vaga vazia nesse
+        // intervalo, uma criação em outro núcleo a escolhia e ia mapear a
+        // pilha nova por cima da velha — "endereço virtual já mapeado".
+        // Medido: uma criação recusada assim no caso da criação
+        // concorrente, e o mesmo erro no da cópia na escrita em dois
+        // núcleos, que bifurca. Com um núcleo só, a janela existia só se
+        // o timer caísse dentro dela.
+        //
+        // O marcador tem um id próprio, que nenhum fio teve: com o do
+        // morto, ele pareceria vivo a quem procura por id — `vivo`, e o
+        // pai de um zumbi — durante a desmontagem.
+        e.fios[vaga] = Some(Fio {
+            id: IdFio(PROXIMO_ID.fetch_add(1, Ordering::Relaxed)),
+            nome: NOME_DO_MARCADOR,
+            estado: Estado::Reservado,
+            contexto: Contexto::vazio(),
+            _pilha: None,
+            espaco: None,
+            descritores: crate::usuario::descritores::Tabela::nova(),
+            escalonamentos: 0,
+            pai: None,
+            saida: None,
+            colhido: true,
+            limpeza: Limpeza::Feita,
+            autoridade: crate::autorizacao::Autoridade::NENHUMA,
+            na_cpu: None,
+            fixo: None,
+            ocioso: false,
+            reexecutar: false,
+            ceder_ao_voltar: false,
+            pedido: EstadoDoPedido::Livre,
+            programa: crate::autorizacao::Programa::Kernel,
+            terminar: false,
+        });
+        let id = e.fios[vaga].as_ref().map(|f| f.id)?;
+        Some((vaga, id, morto))
+    })?;
+
+    #[cfg(feature = "modo-teste")]
+    if PAUSAR_NA_DESMONTAGEM
+        .compare_exchange(
+            PAUSA_ARMADA,
+            PAUSA_SEGURANDO,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        while PAUSAR_NA_DESMONTAGEM.load(Ordering::SeqCst) == PAUSA_SEGURANDO {
+            core::hint::spin_loop();
+        }
+    }
+    let do_morto = morto.id.numero();
+    // O zumbi que o pai colheu já soltou a morte dele: uma vez só. A em
+    // curso não chega aqui — a busca passa por ela.
+    let devida = morto.limpeza == Limpeza::Devida;
+    drop(morto);
+    if devida {
+        limpar_a_morte(politica::mensagens::Canal::Processo(do_morto));
+    }
+    // Só agora a vaga volta a ser escolhível: com a morte solta. O
+    // marcador sai sob a trava e é largado fora dela, como todo fio
+    // deste módulo.
+    let marcador = com_escalonador(|e| match &e.fios[vaga] {
+        Some(f) if f.id == id && f.estado == Estado::Reservado => e.fios[vaga].take(),
+        _ => None,
+    });
+    drop(marcador);
+    Some((vaga, do_morto))
 }
 
 /// O nome do marcador que guarda a vaga de um morto enquanto o
@@ -1224,6 +1265,29 @@ pub fn segurar_o_coletor_de_teste() {
 #[cfg(feature = "modo-teste")]
 pub fn soltar_o_coletor_de_teste() {
     SEGURAR_O_COLETOR.store(false, Ordering::SeqCst);
+}
+
+/// Um recolhimento só, mesmo com o coletor segurado: a vaga e o id do morto
+/// que saiu, ou `None`. É o passo com que os casos `recolhimento:` alternam
+/// o coletor e o laço de outro titular, um de cada vez — sem o tique, que
+/// decide sozinho quem anda primeiro.
+#[cfg(feature = "modo-teste")]
+pub fn recolher_um_de_teste() -> Option<(usize, u64)> {
+    recolher_um()
+}
+
+/// O cursor do recolhimento: a vaga em que a próxima busca começa.
+#[cfg(feature = "modo-teste")]
+pub fn cursor_do_recolhimento_de_teste() -> usize {
+    com_escalonador(|e| e.cursor_do_recolhimento)
+}
+
+/// Põe o cursor do recolhimento em `vaga`: o caso começa a busca de onde
+/// quer. Qualquer valor é seguro — o cursor só escolhe por onde a busca
+/// começa.
+#[cfg(feature = "modo-teste")]
+pub fn por_o_cursor_de_teste(vaga: usize) {
+    com_escalonador(|e| e.cursor_do_recolhimento = vaga % MAX_FIOS);
 }
 
 /// Segura a limpeza da morte do primeiro vigiado ([`vigiar_a_limpeza`]) no
@@ -2127,6 +2191,39 @@ impl Escalonador {
             .iter()
             .flatten()
             .any(|candidato| candidato.id == pai && candidato.estado != Estado::Terminado)
+    }
+
+    /// A vaga `i` tem um morto que o recolhimento pode tirar da tabela: um
+    /// fio terminado, fora de todo núcleo, que não é zumbi e cuja limpeza não
+    /// está em curso noutro coletor (ver [`Limpeza`]).
+    ///
+    /// `na_cpu`, e não "diferente do atual": com vários núcleos há vários
+    /// atuais, e há também o fio que um núcleo acabou de largar e ainda não
+    /// terminou de sair de cima da pilha dele.
+    fn recolhivel(&self, i: usize) -> bool {
+        matches!(&self.fios[i], Some(fio)
+                if fio.estado == Estado::Terminado
+                    && fio.na_cpu.is_none()
+                    && fio.limpeza != Limpeza::EmCurso
+                    && !self.e_zumbi(i))
+    }
+
+    /// O próximo morto que o recolhimento tira da tabela: o primeiro que
+    /// pode sair a partir do cursor, dando a volta. Ver "A ordem do
+    /// recolhimento" em [`recolher_terminados`].
+    ///
+    /// Um laço, e não um iterador encadeado: no kernel de teste de
+    /// depuração do x86_64, que mora perto do teto do iniciador, cada
+    /// adaptador genérico vira código e um nome comprido na tabela de
+    /// símbolos.
+    fn proximo_a_recolher(&self) -> Option<usize> {
+        for passo in 0..MAX_FIOS {
+            let i = (self.cursor_do_recolhimento + passo) % MAX_FIOS;
+            if self.recolhivel(i) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     /// O próximo fio que o núcleo `cpu` pode rodar, em rodízio a partir do
