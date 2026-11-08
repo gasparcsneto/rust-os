@@ -1012,14 +1012,14 @@ impl alloc::task::Wake for Sinal {
 /// volta. Na passada do coletor, que recolhe até a tabela inteira,
 /// isso quer dizer: o morto que já pode sair quando o recolhimento da
 /// passada começa sai nela; o que fica pronto no meio dela, com o cursor já
-/// depois da vaga dele, sai na seguinte. Quando a passada roda depende do
-/// rodízio, em que o coletor não tem prioridade — como antes.
+/// depois da vaga dele, sai no máximo na seguinte. Quando a passada roda
+/// depende do rodízio, em que o coletor não tem prioridade — como antes.
 ///
 /// O cursor mora na tabela, sob a mesma trava: é lido e avançado na mesma
 /// seção crítica que tira o morto, e dois coletores ao mesmo tempo — a suíte
-/// e o do kernel — o dividem sem trava nova. Qualquer valor dele é seguro:
-/// ele só escolhe por onde a busca começa, e a regra de quem pode sair é a de
-/// sempre.
+/// e o do kernel — o dividem sem trava nova. Qualquer vaga em que ele pare é
+/// segura — ele é guardado sempre módulo [`MAX_FIOS`] —: ele só escolhe por
+/// onde a busca começa, e a regra de quem pode sair é a de sempre.
 ///
 /// A passada dos zumbis ([`limpar_os_zumbis`]) segue pela ordem das vagas,
 /// sem cursor: ela não esvazia vaga nenhuma — o zumbi fica na dele, com o
@@ -1034,7 +1034,13 @@ pub fn recolher_terminados() -> usize {
     if SEGURAR_O_COLETOR.load(Ordering::SeqCst) {
         return 0;
     }
+    passada_do_recolhimento()
+}
 
+/// O corpo de [`recolher_terminados`], sem a guarda da suíte: a morte dos
+/// zumbis, os mortos a partir do cursor — até a tabela inteira — e as
+/// camadas órfãs. Devolve quantos mortos saíram.
+fn passada_do_recolhimento() -> usize {
     // A morte dos zumbis primeiro: o que eles soltam fora do fio sai já, e
     // o código de saída fica até a colheita.
     limpar_os_zumbis();
@@ -1270,10 +1276,25 @@ pub fn soltar_o_coletor_de_teste() {
 /// Um recolhimento só, mesmo com o coletor segurado: a vaga e o id do morto
 /// que saiu, ou `None`. É o passo com que os casos `recolhimento:` alternam
 /// o coletor e o laço de outro titular, um de cada vez — sem o tique, que
-/// decide sozinho quem anda primeiro.
+/// decide sozinho quem anda primeiro. Contado em `RECOLHENDO`, como o do
+/// coletor: quem segura o coletor espera também por ele. Não se chama com
+/// uma pausa armada ([`PAUSAR_NA_DESMONTAGEM`], [`PAUSAR_NA_LIMPEZA`]): quem
+/// chama a tomaria e giraria nela.
 #[cfg(feature = "modo-teste")]
 pub fn recolher_um_de_teste() -> Option<(usize, u64)> {
+    let _recolhendo = Recolhendo::entrar();
     recolher_um()
+}
+
+/// Uma passada inteira do recolhimento, a de produção, mesmo com o coletor
+/// segurado: o caso `recolhimento: a passada recolhe a partir do cursor`
+/// confere nela, e não só no passo, a ordem do cursor e que ela recolhe
+/// todos os mortos que podem sair. Contada em `RECOLHENDO`, e sem pausa
+/// armada, como [`recolher_um_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn recolher_terminados_de_teste() -> usize {
+    let _recolhendo = Recolhendo::entrar();
+    passada_do_recolhimento()
 }
 
 /// O cursor do recolhimento: a vaga em que a próxima busca começa.
