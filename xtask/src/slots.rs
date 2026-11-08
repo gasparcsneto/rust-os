@@ -60,6 +60,35 @@ pub(crate) struct Imagem {
     pub resumo: [u8; 32],
 }
 
+/// Confere um kernel de `bytes` bytes contra o teto do iniciador
+/// ([`cabecalho::MAIOR_KERNEL`]): acima dele é erro — a imagem seria
+/// assinada e gravada no slot, e o boot pararia nela —, e acima de nove
+/// décimos é um aviso, com quanto falta. O teto exato passa: o iniciador
+/// recusa só o que passa dele.
+///
+/// É a conferência que o `xtask` já faz com os programas contra o maior
+/// executável que o kernel lança; a deste teto faltava, e o kernel de teste
+/// de depuração do x86_64 chegou a 4 824 bytes dele sem que nada avisasse.
+pub(crate) fn conferir_o_teto(bytes: u64) -> Result<Option<String>, String> {
+    let teto = cabecalho::MAIOR_KERNEL;
+    if bytes > teto {
+        return Err(format!(
+            "o kernel tem {bytes} bytes, {} acima dos {teto} que o iniciador lê: a imagem seria \
+             assinada e gravada no slot, e o boot pararia nela (\"o kernel do slot passa do teto \
+             do iniciador\")",
+            bytes - teto
+        ));
+    }
+    if bytes * 10 > teto * 9 {
+        return Ok(Some(format!(
+            "o kernel tem {bytes} bytes, {}% do maior que o iniciador lê: faltam {} KiB",
+            bytes * 100 / teto,
+            (teto - bytes) / 1024
+        )));
+    }
+    Ok(None)
+}
+
 /// O manifesto de um pedido, em texto canônico — conferido pelo leitor.
 pub(crate) fn manifesto_de(p: &Pedido) -> Result<Vec<u8>, String> {
     let m = Manifesto {
@@ -108,8 +137,11 @@ pub(crate) fn imagem_com(
     })
 }
 
-/// A imagem de um pedido, assinada por `privada`.
+/// A imagem de um pedido, assinada por `privada` — com o kernel conferido
+/// antes contra o teto do iniciador ([`conferir_o_teto`]): um maior não é
+/// resumido, nem assinado, nem montado.
 pub(crate) fn imagem(p: &Pedido, privada: &[u8; 32]) -> Result<Imagem, String> {
+    conferir_o_teto(p.kernel.len() as u64)?;
     let manifesto = manifesto_de(p)?;
     let i = imagem_com(&manifesto, privada, p.kernel, p.pacote)?;
     if i.bytes.len() as u64 > disco::SLOT_SETORES * 512 {
@@ -242,10 +274,11 @@ fn guardada(arch: Arquitetura, disco: &Path) -> PathBuf {
     disco.with_extension(format!("slot-a-{}", arch.nome()))
 }
 
-/// Põe `kernel` — o ELF sem depuração — no slot A do disco, num manifesto
-/// assinado pela chave de atualização da bancada, com o pacote vazio; o
-/// controle aponta para ele, e o slot B fica vazio. Devolve o resumo do
-/// manifesto.
+/// Põe `kernel` — o ELF sem a tabela de símbolos e sem o DWARF — no slot A
+/// do disco, num manifesto assinado pela chave de atualização da bancada,
+/// com o pacote vazio; o controle aponta para ele, e o slot B fica vazio.
+/// Um kernel acima do teto do iniciador não chega ao disco — ver
+/// [`conferir_o_teto`]. Devolve o resumo do manifesto.
 pub(crate) fn instalar_no_slot_a(
     arch: Arquitetura,
     disco_img: &Path,
@@ -253,6 +286,9 @@ pub(crate) fn instalar_no_slot_a(
 ) -> Result<[u8; 32], String> {
     let bytes = std::fs::read(kernel)
         .map_err(|e| format!("não foi possível ler {}: {e}", kernel.display()))?;
+    if let Some(aviso) = conferir_o_teto(bytes.len() as u64)? {
+        println!("[xtask] {aviso}");
+    }
     let chaves = super::chaves::Chaves::garantir()?;
     let pacote = pacote_vazio();
     let i = imagem(
@@ -314,7 +350,10 @@ pub(crate) struct Conferida {
 /// do slot antes de instalá-la: o cabeçalho, o manifesto, a assinatura com
 /// uma chave de `registro` (o texto de `/etc/duke/atualizacao`), a
 /// arquitetura, o formato do estado, o tamanho no slot, o kernel e o
-/// pacote pelos resumos, e o índice do pacote.
+/// pacote pelos resumos, e o índice do pacote. E, além do que o kernel
+/// confere, o tamanho do kernel contra o teto do iniciador
+/// ([`conferir_o_teto`]): o `provisionar` não grava a imagem de um
+/// `publicar` de antes deste teto que o iniciador não leria.
 pub(crate) fn conferir_imagem(
     bytes: &[u8],
     registro: &str,
@@ -349,6 +388,9 @@ pub(crate) fn conferir_imagem(
             m.estado_minimo, m.estado_maximo
         ));
     }
+    // Pelo tamanho que o manifesto diz, antes de qualquer resumo: é ele que
+    // o iniciador compara com o teto, antes de ler o kernel.
+    conferir_o_teto(m.kernel.tamanho)?;
     let tamanho = cabecalho::tamanho_da_imagem(&m).ok_or("o manifesto diz tamanhos impossiveis")?;
     if tamanho > disco::SLOT_SETORES * 512 || tamanho > bytes.len() as u64 {
         return Err(format!(
@@ -481,6 +523,74 @@ mod testes {
         let r = conferir_imagem(&i.bytes, &errada, Arquitetura::X86_64);
         assert!(
             r.as_ref().is_err_and(|e| e.contains("linha 1")),
+            "{:?}",
+            r.err()
+        );
+    }
+
+    /// O teto do iniciador: o kernel do tamanho dele passa, com o aviso de
+    /// quase cheio; um byte a mais é recusado — na conta, na imagem que se
+    /// monta e na imagem de fora que se confere —; nove décimos, exatos,
+    /// passam calados.
+    #[test]
+    fn o_kernel_maior_que_o_teto_do_iniciador_e_recusado() {
+        let teto = cabecalho::MAIOR_KERNEL;
+        let aviso = conferir_o_teto(teto).unwrap();
+        assert!(aviso.is_some_and(|a| a.contains("100%") && a.contains("faltam 0 KiB")));
+        let recusa = conferir_o_teto(teto + 1).unwrap_err();
+        assert!(
+            recusa.contains("1 acima") && recusa.contains("teto do iniciador"),
+            "{recusa}"
+        );
+        assert_eq!(conferir_o_teto(teto / 10 * 9), Ok(None));
+        assert!(conferir_o_teto(teto / 10 * 9 + 8).unwrap().is_some());
+
+        // A imagem de um kernel um byte acima não é montada: nem resumida,
+        // nem assinada.
+        let privada = [11u8; 32];
+        let grande = vec![0u8; teto as usize + 1];
+        let pacote = pacote_vazio();
+        let p = Pedido {
+            arch: Arquitetura::X86_64,
+            kernel: &grande,
+            pacote: &pacote,
+            versao: "b1.2",
+            geracao: 2,
+            estado: (1, 1),
+        };
+        let r = imagem(&p, &privada);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("teto do iniciador")),
+            "{:?}",
+            r.err()
+        );
+
+        // E a imagem de fora — a que o `provisionar` lê —, cujo manifesto
+        // assinado diz um kernel um byte acima: recusada pelo teto, pelo
+        // tamanho que o manifesto diz, antes de qualquer resumo e sem que o
+        // arquivo precise ter o kernel.
+        let m = Manifesto {
+            arquitetura: ArqDoSlot::X86_64,
+            versao: "b1.2",
+            geracao: 2,
+            estado_minimo: 1,
+            estado_maximo: 1,
+            kernel: Parte {
+                tamanho: teto + 1,
+                resumo: [0; 32],
+            },
+            pacote: Parte {
+                tamanho: pacote.len() as u64,
+                resumo: atualizacao::resumo(&pacote),
+            },
+        }
+        .escrever();
+        let publica = manifesto::publica_de(&privada);
+        let cab = cabecalho::montar(&m, &manifesto::assinar(&m, &privada), &publica).unwrap();
+        let registro = sigilo::registro::linha_de_editor(&publica, "publicador-1");
+        let r = conferir_imagem(&cab, &registro, Arquitetura::X86_64);
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("teto do iniciador")),
             "{:?}",
             r.err()
         );

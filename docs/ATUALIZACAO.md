@@ -80,7 +80,8 @@ e a que entra em pânico na tentativa volta para a velha com ela.
       0  cabeçalho, 4 KiB: "DUKESLT1", versão, tamanho do manifesto,
          a assinatura Ed25519 (64), a chave pública que assinou (32), o
          manifesto
-   4096  o kernel ELF, sem as seções de depuração
+   4096  o kernel ELF, sem a tabela de símbolos e sem o DWARF — até
+         32 MiB, o teto do iniciador
       …  o pacote, alinhado a 4 KiB
 ```
 
@@ -415,7 +416,8 @@ suíte, que pausa o coletor, a reprovou: é ele o detector dela.
 
 O kernel de produção (release) cresceu 84 904 bytes no x86 (+2,11%) e
 88 832 no ARM (+2,61%), pela soma dos segmentos carregáveis — 95 784 e
-107 176 bytes no ELF sem as seções de depuração, que é o que vai no slot.
+107 176 bytes no ELF sem as seções de depuração, que era o que ia no slot —
+hoje vai sem a tabela de símbolos também, com os mesmos segmentos.
 O iniciador foi de 42 496 para 81 920 bytes no x86 e de 34 304 para 67 072
 no ARM: o controle, a GPT, o cabeçalho e o manifesto, o BLAKE2s e a forma
 do ELF — sem o Ed25519, que ele não usa. Os programas não mudaram, e o teto

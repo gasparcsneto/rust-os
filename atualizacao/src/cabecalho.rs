@@ -8,7 +8,8 @@
 //!
 //! ```text
 //!       0  cabeçalho (4 KiB)
-//!    4096  kernel ELF, sem as seções de depuração
+//!    4096  kernel ELF, sem a tabela de símbolos e sem o DWARF, de até
+//!          MAIOR_KERNEL bytes
 //!       …  pacote, alinhado a 4 KiB
 //! ```
 //!
@@ -45,6 +46,20 @@ const EM_MANIFESTO: usize = 128;
 
 /// Onde o kernel começa, em bytes desde o começo do slot.
 pub const KERNEL_EM: u64 = TAM_CABECALHO as u64;
+
+/// O maior kernel que um slot leva: trinta e dois mebibytes.
+///
+/// O iniciador lê o kernel inteiro para a memória antes de conferi-lo e de
+/// carregar os segmentos, e recusa um maior que isto — o de um slot ("o
+/// kernel do slot passa do teto do iniciador") e o da ESP de um disco sem
+/// slots. O teto existe porque o tamanho vem do disco: um número absurdo
+/// viraria um pedido de alocação absurdo ao firmware.
+///
+/// Mora aqui, e não só no iniciador, porque tem dois lados: o iniciador
+/// recusa a leitura, e o `xtask` confere o kernel contra o mesmo número
+/// antes de montar a imagem de um slot — um kernel maior seria assinado e
+/// gravado, e só falharia no boot.
+pub const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
 
 /// O alinhamento do pacote.
 const ALINHAMENTO: u64 = 4096;

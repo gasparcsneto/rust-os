@@ -685,7 +685,7 @@ armazem/src/         o armazém como conta pura: caminhos, diretórios, versões
 atualizacao/src/     a atualização A/B como conta pura: os formatos que o iniciador e o kernel leem, e as regras que o journal guarda
 ├── lib.rs           os slots, as arquiteturas, o resumo BLAKE2s e quem decide: o journal, e não o controle
 ├── manifesto.rs     o manifesto canônico de uma imagem e a assinatura Ed25519 estrita sobre ele
-├── cabecalho.rs     os primeiros 4 KiB de um slot: o manifesto, a assinatura, a chave; onde o kernel e o pacote moram
+├── cabecalho.rs     os primeiros 4 KiB de um slot: o manifesto, a assinatura, a chave; onde o kernel e o pacote moram, e o maior kernel que o iniciador lê
 ├── pacote.rs        os programas e os dados públicos da imagem, num índice só de leitura, sem nada em `etc/`
 ├── controle.rs      o controle de boot em duas cópias, o plano do iniciador, a tentativa contada e o controle sintetizado
 ├── disco.rs         as partições da atualização pelos tipos na GPT, e o leitor de GPT do iniciador
@@ -847,7 +847,8 @@ xtask/src/
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
 ├── senha.rs         a bancada da troca da própria senha: a pessoa no teclado da máquina, pelo Terminal — a nova sobrevive ao corte, a queda em cada fronteira da troca deixa exatamente uma senha valendo, a troca com o botão de energia, e a imagem de produção
 ├── servidor_de_hora.rs as fontes de Roughtime da bancada de tempo, no hospedeiro: escritas à parte do pacote `hora`, com um modo por fonte
-├── slots.rs         a atualização do lado do hospedeiro: a imagem de um slot montada e assinada, conferida como o kernel a confere, o slot A e o controle do disco de testes
+├── kernel_do_slot.rs o kernel que vai para o slot: a cópia do ELF sem a tabela de símbolos e sem o DWARF, conferida a cada cópia contra o ELF inteiro — o cabeçalho, os cabeçalhos de programa, os bytes de cada `PT_LOAD` e a tabela de relocações que o iniciador aplica
+├── slots.rs         a atualização do lado do hospedeiro: a imagem de um slot montada e assinada, conferida como o kernel a confere, com o kernel contra o teto do iniciador; o slot A e o controle do disco de testes
 ├── tempo.rs         a bancada de tempo: o Roughtime pela rede de verdade, do gate ao servidor e de volta, uma máquina por cenário
 └── tls.rs           a bancada TLS: a PKI gerada a cada máquina — as raízes P-256, RSA e P-384 e as cadeias com a forma das públicas —, o eco TLS — o OpenSSL, por `xtask/bancada/tls.py` —, e o servidor HTTP claro e cifrado, HTTP/1.1 e HTTP/2 — `xtask/bancada/http.py` e `http2.py` —, a cada conexão
 ```
@@ -5340,8 +5341,8 @@ Sem ganho a medir, não há o que pagar com esse risco.
   que guarda até o fim o arquivo do kernel lido do slot e a imagem carregada
   — 54 MiB retidos com o kernel de teste de debug, 30 com o de release —, e
   a suíte do aarch64 sobe pelo `-kernel`, sem iniciador; e 13,5 MB do
-  arquivo de debug são a tabela de símbolos, que o `--strip-debug` do xtask
-  mantém e que ninguém lê no boot. Cada incremento que cresce o kernel de
+  arquivo de debug eram a tabela de símbolos, que o `--strip-debug` do
+  xtask mantinha e que ninguém lê no boot. Cada incremento que cresce o kernel de
   debug come a margem duas vezes — no arquivo guardado e na imagem —: os
   frames livres no boot foram 17 774 em 4 de novembro, 17 238 na última
   suíte completa local que passou o caso, 17 214 com a 14.1, 17 167 com a
@@ -5365,26 +5366,42 @@ Sem ganho a medir, não há o que pagar com esse risco.
 
   **O teto do iniciador**, da mesma causa: o iniciador recusa um kernel
   acima de 32 MiB (`MAIOR_KERNEL`), e o kernel de teste de debug do x86_64
-  tem 33 549 608 bytes — 4 824 abaixo; o do aarch64, que a sonda do
-  iniciador sobe pelo firmware na CI, tem 31 202 816, 2,2 MiB abaixo. Oito
-  linhas temporárias de medida levaram o do x86_64 acima, e o iniciador
-  desligou a máquina ("o kernel do slot passa do teto do iniciador",
-  "nenhum slot carregou"): o próximo incremento de tamanho parecido deixa
-  a suíte do x86_64 em debug inteira sem subir. O xtask não confere esse
-  teto ao gravar o slot, como confere o dos programas.
+  chegou a 33 549 608 bytes no arquivo do slot — 4 824 abaixo; o do
+  aarch64, que a sonda do iniciador sobe pelo firmware na CI, a 31 202 816.
+  Oito linhas temporárias de medida levaram o do x86_64 acima, e o
+  iniciador desligou a máquina ("o kernel do slot passa do teto do
+  iniciador", "nenhum slot carregou"). E o xtask não conferia esse teto ao
+  gravar o slot, como confere o dos programas.
 
-  Fechar pede uma escolha, que fica com o dono — as três primeiras são
-  [B] e não mudam o caso, o programa nem a máquina da bancada: o kernel da
-  ESP sem a tabela de símbolos (resolve também o teto, com uns 13 MB de
-  folga); o xtask conferindo o teto ao gravar o slot; e o iniciador
-  devolvendo o arquivo depois da carga (mexe no caminho de boot, e vale
-  também para o ARM pela UEFI e para máquinas de verdade). As outras: a
-  máquina da suíte com 192 MiB só no x86_64 (esconde a retenção e não
-  resolve o teto; nas duas arquiteturas, o programa `memoria` do aarch64
-  em release pode passar do limite dele); o caso com dois programas, ou um
-  teto menor no passo do `compressao` (mudam o que o caso cobre); ou a
-  compressão antes dos casos dos dispositivos na ordem da suíte (só adia,
-  devolvendo os 72 frames deles).
+  **Fechado em parte em 8 de novembro de 2026**, com as duas escolhas [B]
+  que o dono aprovou. O kernel vai para o slot sem a tabela de símbolos —
+  o `--strip-all` no lugar do `--strip-debug`, em
+  `xtask/src/kernel_do_slot.rs`, que confere a cada cópia, contra o ELF
+  inteiro de `target/` (o que a simbolização e o depurador leem), que o
+  iniciador carrega dela o mesmo que carregaria dele: o cabeçalho, menos
+  os campos da tabela de seções; os cabeçalhos de programa; os bytes de
+  cada `PT_LOAD`; e a tabela de relocações, inteira num segmento
+  carregável. Nada no boot lia a tabela de símbolos do arquivo do slot:
+  o iniciador lê o cabeçalho, os `PT_LOAD` e as relocações pelo
+  `PT_DYNAMIC`. Compilados como a CI os compila, o de teste de debug do
+  x86_64 foi a 19 997 920 bytes — 13 556 512 abaixo do teto — e o do
+  aarch64 a 15 652 816. Na rodada filtrada (`nvme:`, `e1000:` e
+  `compressao:`), o iniciador leu 19 998 176 bytes, aplicou as mesmas 44 163
+  relocações, ficou com 41 MiB retidos em vez de 54, os livres no boot
+  foram a 20 465 (+3 308), e o caso passou; na sonda do iniciador, o kernel
+  de produção de debug do x86_64 carregou com as 29 579 relocações que o
+  `readelf` conta no ELF inteiro. E o xtask confere o teto antes de montar
+  a imagem de um slot e antes de aceitar a de um `publicar` de antes
+  (`slots::conferir_o_teto`, contra `atualizacao::cabecalho::MAIOR_KERNEL`,
+  a mesma constante que o iniciador usa), com um aviso acima de nove
+  décimos, como já fazia com os programas: a próxima passagem do teto vira
+  uma mensagem no build, e não uma máquina que desliga no boot. Continua
+  pendente, para um incremento depois desta validação, o iniciador
+  devolver o arquivo ao firmware depois da carga: mexe no caminho de boot,
+  e vale também para o ARM pela UEFI e para máquinas de verdade. As outras
+  alternativas — a máquina da suíte com 192 MiB, o caso com dois programas,
+  um teto menor no passo do `compressao`, a compressão antes dos casos dos
+  dispositivos — ficaram sem uso.
 
 ## O tempo
 

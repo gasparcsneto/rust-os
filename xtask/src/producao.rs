@@ -833,6 +833,11 @@ pub(crate) fn publicar(
     let elf = super::compilar_o_kernel(arch, release, &[], Some(&alvo_do_kernel))?;
     let kernel = std::fs::read(super::kernel_para_a_esp(&elf)?)
         .map_err(|e| format!("não foi possível ler o kernel: {e}"))?;
+    // O teto do iniciador: acima dele a imagem não é montada — ver
+    // `slots::imagem` —, e perto dele, um aviso.
+    if let Some(aviso) = super::slots::conferir_o_teto(kernel.len() as u64)? {
+        println!("[xtask] {aviso}");
+    }
     let pacote = pacote_do_produto(arch)?;
     let imagem = super::slots::imagem(
         &super::slots::Pedido {

@@ -27,6 +27,7 @@ mod firmware;
 mod fluxo;
 mod icp;
 mod identidade;
+mod kernel_do_slot;
 mod pareamento;
 mod persistencia;
 mod producao;
@@ -1225,31 +1226,29 @@ pub(crate) fn instalar_so_o_iniciador(
     Ok(())
 }
 
-/// O kernel como ele vai para a ESP: sem as seções de depuração.
+/// O kernel como ele vai para o slot A — antes, para a ESP, de onde o nome:
+/// sem a tabela de símbolos e sem o DWARF, conferido contra o ELF inteiro.
 ///
 /// O iniciador lê o arquivo inteiro para a memória antes de carregar os
-/// segmentos, e o DWARF — mais da metade do arquivo, e nunca lido no boot —
-/// chegou a passar dos 32 MiB que ele aceita: o kernel de release com a
-/// suíte ficou com 33 MiB quando o Ed25519 entrou, e o boot parava antes do
-/// kernel. A simbolização é feita aqui no hospedeiro (`cargo xtask simbolo`,
-/// o gdb), com o ELF inteiro em `target/`, que não muda; a tabela de
-/// símbolos e tudo o que o iniciador usa ficam no da ESP.
+/// segmentos, e guarda o que leu até o salto. Primeiro foi o DWARF — mais da
+/// metade do arquivo, e nunca lido no boot — que passou dos 32 MiB que ele
+/// aceita: o kernel de release com a suíte ficou com 33 MiB quando o Ed25519
+/// entrou, e o boot parava antes do kernel. Depois, a tabela de símbolos, que
+/// o `--strip-debug` mantinha: 13,5 MB dos 33,5 do kernel de teste de
+/// depuração do x86_64, que ficou a 4 824 bytes do teto, e a memória que o
+/// iniciador retém com ela faltava a um caso da suíte. Nada no boot a lê, e
+/// o `--strip-all` a tira — ver [`kernel_do_slot`], com a conferência de que
+/// o iniciador carrega da cópia o mesmo que carregaria do ELF inteiro.
+///
+/// A simbolização é feita aqui no hospedeiro (`cargo xtask simbolo`, o gdb),
+/// com o ELF inteiro em `target/`, que não muda.
 ///
 /// É separado de [`instalar_iniciador`] porque nem todo arquivo que vai para
 /// a ESP é um ELF que o `objcopy` aceite: os kernels estragados de propósito
 /// da etapa `iniciador` são justamente os que ele recusaria, e precisam
 /// chegar ao iniciador byte a byte como foram adulterados.
 fn kernel_para_a_esp(kernel: &Path) -> Result<PathBuf, String> {
-    let sem_depuracao = kernel.with_extension("esp.elf");
-    ferramenta(
-        &localizar_objcopy()?.display().to_string(),
-        &[
-            "--strip-debug",
-            &kernel.display().to_string(),
-            &sem_depuracao.display().to_string(),
-        ],
-    )?;
-    Ok(sem_depuracao)
+    kernel_do_slot::copiar(kernel, kernel_do_slot::OPCOES_DO_OBJCOPY)
 }
 
 /// Acha o firmware UEFI e prepara uma cópia gravável das variáveis.
@@ -6999,13 +6998,22 @@ mod disco {
     pub const CONTROLE_SETORES: u64 = 1024 * 1024 / 512;
 
     /// Cada slot leva uma imagem inteira: o cabeçalho, o kernel e o pacote.
-    /// Quarenta e oito mebibytes: o kernel de depuração da suíte, sem as
-    /// seções de depuração, tem uns vinte e três no x86; o de produção,
-    /// menos de cinco, e o pacote de produção — os programas e os dados
-    /// públicos —, uns poucos.
+    /// Quarenta e oito mebibytes: o kernel de depuração da suíte, sem a
+    /// tabela de símbolos e sem o DWARF, tem uns vinte no x86; o de
+    /// produção, menos de cinco, e o pacote de produção — os programas e os
+    /// dados públicos —, uns poucos. Um kernel do tamanho do teto do
+    /// iniciador cabe, com o cabeçalho — ver a conferência logo abaixo.
     pub const SLOT_A_EM: u64 = CONTROLE_EM + CONTROLE_SETORES;
     pub const SLOT_SETORES: u64 = 48 * 1024 * 1024 / 512;
     pub const SLOT_B_EM: u64 = SLOT_A_EM + SLOT_SETORES;
+
+    // O maior kernel que o iniciador lê cabe num slot, depois do cabeçalho:
+    // senão o teto que o `xtask` confere antes de montar a imagem não seria
+    // o que recusa primeiro — ver `slots::conferir_o_teto`.
+    const _: () = assert!(
+        atualizacao::cabecalho::KERNEL_EM + atualizacao::cabecalho::MAIOR_KERNEL
+            <= SLOT_SETORES * 512
+    );
 
     /// O começo de um slot.
     pub const fn slot_em(s: atualizacao::Slot) -> u64 {

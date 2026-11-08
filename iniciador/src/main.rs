@@ -489,12 +489,17 @@ const PEDACO_DA_LEITURA: usize = 64 * 1024;
 
 /// Maior kernel que o iniciador aceita ler.
 ///
-/// Trinta e dois mebibytes. O `xtask` põe o kernel na ESP sem as seções de
-/// depuração — com elas, o de release com a suíte de testes passou dos 33 —,
-/// e sem elas ele tem poucos mebibytes. O teto existe porque o tamanho vem
-/// do disco: um número absurdo viraria um pedido de alocação absurdo, e o
-/// firmware o recusaria com uma mensagem que não diz o que aconteceu.
-pub(crate) const MAIOR_KERNEL: u64 = 32 * 1024 * 1024;
+/// Trinta e dois mebibytes: o `atualizacao::cabecalho::MAIOR_KERNEL`, o
+/// mesmo número que o `xtask` confere antes de montar a imagem de um slot. O
+/// teto existe porque o tamanho vem do disco: um número absurdo viraria um
+/// pedido de alocação absurdo, e o firmware o recusaria com uma mensagem que
+/// não diz o que aconteceu.
+///
+/// O `xtask` põe no slot o kernel sem a tabela de símbolos e sem o DWARF,
+/// que nada lê no boot: com o DWARF, o de release com a suíte de testes
+/// passou dos 33 mebibytes; sem o DWARF e com a tabela de símbolos, o de
+/// teste de depuração do x86_64 chegou a 4 824 bytes do teto.
+pub(crate) const MAIOR_KERNEL: u64 = atualizacao::cabecalho::MAIOR_KERNEL;
 
 /// Segue a corrente até o arquivo do kernel, lê, e descreve o que leu.
 ///

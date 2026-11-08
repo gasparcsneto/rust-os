@@ -112,6 +112,14 @@ caindo em `ptr::write_volatile` só vira informação quando se vê quem a chamo
 Aceita decimal (que é o que sai do JSON) e hexadecimal (que é o que sai de um
 depurador).
 
+O símbolo vem do ELF inteiro, em `kernel/target/<alvo>/<perfil>/duke` — o
+mesmo que o depurador, o `cargo xtask asm` e o `cargo xtask elf` leem. O
+kernel que vai para o slot A, o `duke.esp.elf` ao lado dele, não tem a tabela
+de símbolos nem o DWARF: nada no boot os lê, e o iniciador lê o arquivo
+inteiro para a memória (ver `xtask/src/kernel_do_slot.rs`). Os bytes que vão
+para a memória são os mesmos nos dois, e é por isso que os endereços do
+kernel que roda caem nos símbolos do ELF de `target/`.
+
 ---
 
 ## Desmontagem: `cargo xtask asm`
