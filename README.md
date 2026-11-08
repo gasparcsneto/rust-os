@@ -402,7 +402,7 @@ kernel/src/
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
-│   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que cria e recolhe processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
+│   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 │   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
 │   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, e o processo do `user.run` que conta até o recolhimento
@@ -5211,24 +5211,28 @@ Sem ganho a medir, não há o que pagar com esse risco.
   recolhimento começa sai nela, e o que fica pronto no meio dela sai no
   máximo na seguinte (ver "A ordem do recolhimento" em
   `fios::recolher_terminados`). A passada dos zumbis segue pela ordem das
-  vagas: ela não esvazia vaga nenhuma, e limpa todos os zumbis da tabela
-  antes de acabar. Continua sendo o coletor quem recolhe, e só ele; não há
-  trava nova, e qualquer vaga em que o cursor pare é segura — ele só escolhe
-  por onde a busca começa. A contagem da alternativa 1, o texto da auditoria
-  e a saída do `process.list` não mudaram. Três casos `recolhimento:`
-  seguram o coletor do kernel e dão um recolhimento por vez, alternando cada
-  um com um passo do laço de outro titular — a ordem pior, escolhida pelo
-  caso, e não deixada ao tique —: os mortos de um titular saem com o laço de
+  vagas: ela não esvazia vaga nenhuma e, com um coletor só, como em
+  produção, limpa antes de acabar todos os zumbis da tabela que já largaram
+  o núcleo. Continua sendo o coletor quem recolhe, e só ele; não há trava
+  nova, e qualquer vaga em que o cursor pare é segura — ele só escolhe por
+  onde a busca começa. A contagem da alternativa 1, o texto da auditoria e a
+  saída do `process.list` não mudaram. Três casos `recolhimento:` seguram o
+  coletor do kernel e dão um recolhimento por vez e, logo depois do que tira
+  o morto do laço de um titular — na tabela cheia, depois de cada um dos
+  três primeiros —, um passo do laço, que repõe um morto na vaga que acabou
+  de esvaziar: a ordem pior para os outros mortos, escolhida pelo caso, e
+  não deixada ao tique. Neles, os mortos de um titular saem com o laço de
   outro (o colhedor que bifurca e colhe), a tabela cheia dá a volta em
-  ordem, e o encerramento pelo caminho do `process.terminate` no meio do
-  laço do `user.run`; um quarto confere a mesma ordem na passada de produção
-  inteira (o corpo de `recolher_terminados`, por um gancho de teste): os
-  mortos que podem sair quando ela começa saem nela, a partir do cursor e
-  dando a volta; e um quinto solta tudo ao mesmo tempo — o coletor do
-  kernel, um segundo coletor e o laço de um titular — e encerra no meio dele
-  os processos de outro, que ocupam a cota inteira: os mortos do outro saem
-  com o laço andando, a cota dele volta a zero, nenhuma morte se perde ou
-  sai duas vezes, e nenhuma vaga sobra (ver [As mutações do cursor do
+  ordem, e os mortos de um titular encerrado pelo caminho do
+  `process.terminate` saem no meio do laço do `user.run`; um quarto confere
+  a mesma ordem na passada de produção inteira (o corpo de
+  `recolher_terminados`, por um gancho de teste): os mortos que podem sair
+  quando ela começa saem nela, a partir do cursor e dando a volta; e um
+  quinto solta tudo ao mesmo tempo — o coletor do kernel, um segundo coletor
+  e o laço de um titular — e encerra no meio dele os processos de outro, que
+  ocupam a cota inteira: os mortos do outro saem com o laço andando, a cota
+  dele volta a zero, nenhuma morte se perde ou sai duas vezes, e nenhuma
+  vaga sobra (ver [As mutações do cursor do
   recolhimento](#as-mutações-do-cursor-do-recolhimento)).
 
   O que o cursor não muda: dois fatores ainda alongam a espera de um
@@ -5312,42 +5316,64 @@ Sem ganho a medir, não há o que pagar com esse risco.
   14.1, e limitada às 95 vagas. Deixou de existir com a (2): a escolha só
   procura a primeira posição vazia, e não pergunta nada aos mortos.
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
-  correção da vaga do morto): no x86_64 em debug, o caso `compressao:
-  varias ao mesmo tempo` lança três programas `compressao`, e cada um
-  termina com uns 16 MiB de monte — o passo do teto de 8 MiB custa 12 MiB
-  na cópia, e o monte de um programa não devolve páginas —: os três pedem
-  quase toda a memória que sobra numa máquina de 128 MiB com o kernel de
-  teste de debug. Medido com linhas temporárias, sem commit, que imprimem
-  os frames livres antes e depois de cada caso: numa rodada filtrada com o
-  código da correção da vaga do morto, o caso começou com 12 916 frames
-  livres e passou; na suíte completa da 14.1, começou com 12 882 e
-  reprovou — o limite, no local, fica entre os dois. Numa suíte completa,
-  os casos `e1000:` e `nvme:` guardam 72 frames que não voltam — os anéis
-  e as filas da placa e do disco de mentira —, outros casos guardam mais
-  12, e o caso começa abaixo do limite. Cada incremento que cresce o
-  kernel de debug come a margem: os frames livres no boot foram 17 774 em
-  4 de novembro, 17 238 na última suíte completa local que passou o caso,
-  17 214 com a 14.1 e 17 167 com a correção da vaga do morto — 47 a
-  menos, os do kernel de teste maior; os casos `vagas:` começam e acabam
-  com os mesmos frames livres, e não seguram memória. No local, a suíte
-  completa do x86_64 em debug reprova o caso desde a 14.1 — um dos três
-  programas não consegue os 8 MiB (`memory allocation of 8388608 bytes
-  failed`, saída 101); na CI, desde a correção da vaga do morto: nas CIs
-  448 a 451, as oito suítes do x86_64 em debug — quatro do job "Testes" e
-  quatro da tela virtio-gpu — reprovaram nele, com "as descompressoes ao
-  mesmo tempo nao conferiram", e em sete delas foi o único caso reprovado
-  — a do virtio-gpu da CI 448 reprovou também a espera pelo `colhedor`,
-  já corrigida —; as do aarch64 que chegaram ao fim passaram. O log
-  inteiro do virtio-gpu do x86_64 da CI 449 mostra o mesmo pânico e as
-  mesmas saídas (101, 98 e 98), e 17 209 frames livres no boot — 42 a
-  mais que no local, coerente com a CI ter passado o caso até a correção
-  da vaga do morto e reprovado depois dela. Fechar pede uma escolha, que
-  fica com o dono: a máquina da suíte com mais memória — 192 MiB no lugar
-  de 128, só no `cargo xtask test`; muda o ambiente de todos os casos, e
-  o que conta com 128 MiB tem de ser conferido —; o caso com dois
-  programas, ou um teto menor no passo do `compressao` — muda o que o
-  caso cobre —; ou a compressão antes dos casos dos dispositivos na ordem
-  da suíte — só adia, devolvendo os 72 frames deles.
+  correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
+  o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
+  tempo` lança três programas `compressao`, e cada um termina com uns 16 MiB
+  de monte — o passo do teto de 8 MiB custa 12 MiB na cópia, e o monte de um
+  programa não devolve páginas. No passo do teto, o monte pede ao kernel 8
+  MiB e 64 KiB de uma vez; o alocador de frames, que não guarda reserva,
+  seca no meio; o `mapear` desfaz o que mapeou e devolve `SEM_MEMORIA`; e o
+  último dos três a chegar ali entra em pânico (`memory allocation of
+  8388608 bytes failed`, saída 101): "as descompressoes ao mesmo tempo nao
+  conferiram". O pedido dos três é o mesmo nas quatro suítes — uns 12 900
+  frames —; o que muda é a oferta. O x86_64 sobe pela UEFI e pelo iniciador,
+  que guarda até o fim o arquivo do kernel lido do slot e a imagem carregada
+  — 54 MiB retidos com o kernel de teste de debug, 30 com o de release —, e
+  a suíte do aarch64 sobe pelo `-kernel`, sem iniciador; e 13,5 MB do
+  arquivo de debug são a tabela de símbolos, que o `--strip-debug` do xtask
+  mantém e que ninguém lê no boot. Cada incremento que cresce o kernel de
+  debug come a margem duas vezes — no arquivo guardado e na imagem —: os
+  frames livres no boot foram 17 774 em 4 de novembro, 17 238 na última
+  suíte completa local que passou o caso, 17 214 com a 14.1, 17 167 com a
+  correção da vaga do morto e 17 157 com o cursor do recolhimento. Numa
+  suíte completa, os casos `e1000:` e `nvme:` guardam 72 frames que não
+  voltam — os anéis e as filas da placa e do disco de mentira —, outros
+  casos guardam mais 12, e o caso começa abaixo do limite. A CI sobe com 42
+  frames a mais que o local (17 209 na CI 449), e reprova o caso desde a CI
+  448, a primeira com a correção da vaga do morto: as suítes do x86_64 em
+  debug — a do job "Testes" e a da tela virtio-gpu — reprovam nele, com o
+  mesmo pânico e as saídas 101, 98 e 98, e desde a CI 449 só nele (na 448, a
+  do virtio-gpu reprovou também uma espera pelo `colhedor`, já corrigida);
+  as do aarch64 passam. Medido numa rodada filtrada (`nvme:`, `e1000:` e
+  `compressao:`), com patches temporários, sem commit: sem nada, o caso
+  reprova como na CI, com 17 157 frames livres no boot; com o kernel da ESP
+  sem a tabela de símbolos (`--strip-all` no lugar de `--strip-debug`), o
+  arquivo vai de 33,5 MB a 20,0 MB, os livres no boot a 20 463 (+3 306), e o
+  caso passa, com 3 240 frames livres no pior momento; com o iniciador
+  devolvendo o arquivo ao firmware antes do salto, os livres no boot vão a
+  25 346 (+8 189), e o caso passa.
+
+  **O teto do iniciador**, da mesma causa: o iniciador recusa um kernel
+  acima de 32 MiB (`MAIOR_KERNEL`), e o kernel de teste de debug do x86_64
+  tem 33 549 864 bytes — 4 568 abaixo. Oito linhas temporárias de medida o
+  levaram acima, e o iniciador desligou a máquina ("o kernel do slot passa
+  do teto do iniciador", "nenhum slot carregou"): o próximo incremento de
+  tamanho parecido deixa a suíte do x86_64 em debug inteira sem subir. O
+  xtask não confere esse teto ao gravar o slot, como confere o dos
+  programas.
+
+  Fechar pede uma escolha, que fica com o dono — as três primeiras são
+  [B] e não mudam o caso, o programa nem a máquina da bancada: o kernel da
+  ESP sem a tabela de símbolos (resolve também o teto, com uns 13 MB de
+  folga); o xtask conferindo o teto ao gravar o slot; e o iniciador
+  devolvendo o arquivo depois da carga (mexe no caminho de boot, e vale
+  também para o ARM pela UEFI e para máquinas de verdade). As outras: a
+  máquina da suíte com 192 MiB só no x86_64 (esconde a retenção e não
+  resolve o teto; nas duas arquiteturas, o programa `memoria` do aarch64
+  em release pode passar do limite dele); o caso com dois programas, ou um
+  teto menor no passo do `compressao` (mudam o que o caso cobre); ou a
+  compressão antes dos casos dos dispositivos na ordem da suíte (só adia,
+  devolvendo os 72 frames deles).
 
 ## O tempo
 
@@ -8772,14 +8798,14 @@ x86_64 em debug, contra o código integrado:
   caso conferia: a passada que zera o cursor a cada recolhimento, a que
   recolhe um morto só e a que volta à busca de antes, da vaga 0, deixando
   o cursor como estava (MR13 a MR15);
-- seis contra o passo do recolhimento que o cursor reorganizou
-  (`recolher_um` e o predicado `recolhivel`): as garantias da vaga do morto
-  de novo, contra o código novo (MR7 a MR12).
+- seis contra as garantias da vaga do morto, de novo, no código que o
+  cursor reorganizou: cinco no passo do recolhimento (`recolher_um` e o
+  predicado `recolhivel`, MR7 a MR11) e uma no teto da passada (MR12).
 
 As de busca, cursor e passada rodaram contra os cinco casos
 `recolhimento:`, menos a MR14, que rodou também contra os grupos de baixo;
-as do passo, também contra os casos `vagas:`, `zumbis:` e os `fios:` do
-coletor e do zumbi.
+as da vaga do morto, também contra os casos `vagas:`, `zumbis:` e os
+`fios:` do coletor e do zumbi.
 
 Foram quatro campanhas, e vale a última, contra o código final: as quinze
 reprovaram nela. As três primeiras acharam defeitos dos casos, e não do
@@ -8787,9 +8813,9 @@ cursor:
 
 - na primeira, o laço de A do caso concorrente tinha um teto de 150
   tiques e acabava antes do encerramento de B quando o fio da suíte
-  demorava a chegar a ele: o caso reprovou sob a MR1 e a MR2 sem defeito
-  nenhum no recolhimento. A campanha parou na MR3, e o teto passou a 3000
-  tiques;
+  demorava a chegar a ele: o caso reprovou sob a MR1 e a MR2 pelo teto do
+  laço ("o laco de A parou com os mortos de B"), e não pelo defeito de cada
+  uma. A campanha parou na MR3, e o teto passou a 3000 tiques;
 - na segunda, as doze de então reprovaram, mas o caso concorrente
   reprovou também sob seis delas (MR1, MR4, MR7, MR8, MR10 e MR11) por uma
   espera que vencia sem reconferir a condição: `esperar_ate` desiste
@@ -8806,6 +8832,12 @@ cursor:
   cursor esperado depois da de baixo. A campanha parou na MR7, e o caso
   ganhou um fio de pé entre os dois mortos e a conferência de que as três
   vagas ficaram em ordem.
+
+Depois da última, o teto do laço do caso concorrente passou a 10 000
+passos: sob a MR2, o caso só parou o laço mais de 3010 tiques depois de
+lançá-lo, e passou porque o fio do laço não roda em todo tique. A troca não
+muda o resultado da campanha: o teto só pesa quando o laço acaba antes de o
+caso o parar, e nenhuma reprovação dela veio dele.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -8871,8 +8903,13 @@ reprovaram e uma sobreviveu, a MV8b, explicada abaixo.
 | a passada dos zumbis sem teto (MV8b) | sobreviveu — ver abaixo |
 | o fio novo que herda o morto: a vaga e o id (MV7) | cinco casos `vagas:`; na concorrência, "a morte de uma vitima foi solta mais de uma vez" — a do morto e a do fio novo, com o mesmo id |
 
-A MV8b sobrevive, e não é equivalente: nenhum caso faz zumbis mais
-depressa do que a passada os limpa, e a suíte não tem como fazer:
+A MV8b sobrevive. Em produção, com um coletor só, ela é equivalente: cada
+vaga tem no máximo um zumbi a limpar por passada — o zumbi limpo fica na
+vaga até a colheita, e o colhido, até o recolhimento, que só vem depois da
+passada dos zumbis —, e a passada acaba sozinha antes do teto. Com dois
+coletores, como na suíte, o recolhimento do outro esvazia vagas durante
+ela, e deixa de ser; mas nenhum caso faz zumbis mais depressa do que a
+passada os limpa, e a suíte não tem como fazer:
 - um zumbi é o filho de uma bifurcação que saiu antes de o pai o colher, e
   cada bifurcação passa pelo gate e pela auditoria;
 - os fios do kernel não têm pai, e nunca são zumbis;

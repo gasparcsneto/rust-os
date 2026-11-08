@@ -1023,10 +1023,11 @@ impl alloc::task::Wake for Sinal {
 ///
 /// A passada dos zumbis ([`limpar_os_zumbis`]) segue pela ordem das vagas,
 /// sem cursor: ela não esvazia vaga nenhuma — o zumbi fica na dele, com o
-/// código de saída —, então os zumbis que nascem durante ela só tomam vagas
-/// que já estavam vazias, e cada um é limpo uma vez só; com um coletor só,
-/// como em produção, ela limpa todos os zumbis da tabela antes de acabar, os
-/// de todo titular.
+/// código de saída —, e cada zumbi é limpo uma vez só. Com um coletor só,
+/// como em produção, nenhuma vaga se esvazia enquanto ela corre: os zumbis
+/// que nascem durante ela só tomam vagas que já estavam vazias, e ela
+/// limpa, antes de acabar, todos os zumbis da tabela que já largaram o
+/// núcleo, os de todo titular.
 pub fn recolher_terminados() -> usize {
     #[cfg(feature = "modo-teste")]
     let _recolhendo = Recolhendo::entrar();
