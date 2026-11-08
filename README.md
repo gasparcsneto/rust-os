@@ -402,7 +402,7 @@ kernel/src/
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
-│   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que cria e recolhe processos sem parar não segura os mortos de outro —, com o coletor segurado e um recolhimento por vez: os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
+│   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que cria e recolhe processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 │   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
 │   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, e o processo do `user.run` que conta até o recolhimento
@@ -2256,9 +2256,15 @@ propósito.
 
 Como todo morto passa pelo recolhimento, cada passada tem um teto: recolhe
 no máximo a tabela inteira (`MAX_FIOS` mortos) e limpa no máximo outros
-tantos zumbis, e o resto fica para a passada seguinte — a busca vai pela
-ordem das vagas, e com outro núcleo fazendo morrer ao mesmo tempo um morto
-numa vaga alta pode esperar mais de uma passada. Sem o teto, um fio que
+tantos zumbis, e o resto fica para a passada seguinte. A busca do próximo
+morto começa num cursor — a vaga seguinte à do último recolhido — e dá a
+volta pela tabela: o morto que já pode sair quando o recolhimento da
+passada começa sai nela, e o que fica pronto no meio dela, no máximo na
+seguinte, mesmo com outro núcleo fazendo nascer e morrer sem parar. Antes
+do cursor, a busca ia pela ordem das vagas, e um morto numa vaga alta
+esperava enquanto outro núcleo repusesse mortos nas vagas baixas (o achado
+A1-1; ver *A ordem do recolhimento e o que a recusa mostra*, em
+[Segurança sem fricção](#segurança-sem-fricção)). Sem o teto, um fio que
 faz nascer e morrer outros sem parar, em outro núcleo, punha um morto novo
 na tabela a cada volta do laço: medido na suíte, uma passada só durou os
 300 tiques da medida e recolheu 1324 mortos, e nesse tempo o resto da
@@ -5182,33 +5188,62 @@ Sem ganho a medir, não há o que pagar com esse risco.
   cota por sessão*.
 - **A ordem do recolhimento e o que a recusa mostra** (os achados A1-1 e
   A1-4 do adversário da alternativa 1, de 8 de novembro de 2026; pela
-  leitura do código, sem reprodução): com a alternativa 1, a cota de um
-  titular volta quando o coletor recolhe os mortos dele, e o coletor
-  recolhe sempre o primeiro morto da tabela — cada busca de
-  `recolher_terminados` e de `limpar_os_zumbis` recomeça na vaga 0 —,
-  enquanto o nascimento toma a primeira vaga vazia. Um titular que bifurca
-  e colhe em laço repõe os mortos dele nas vagas mais baixas, que o
-  coletor acabou de esvaziar; se os repõe tão depressa quanto o coletor os
-  recolhe, os mortos de outro titular, em vagas mais altas, esperam
-  enquanto o laço durar, e a cota desse outro fica cheia — ele ouve a
-  recusa. Antes da alternativa 1, o mesmo laço atrasava só a vaga, e não
-  a cota. Dois fatores alongam a espera mesmo sem o laço: a limpeza de
-  cada morto toma a ordem das gravações (`fluxo::canal_acabou`), que não
-  tem fila, e o coletor não tem prioridade no rodízio. Quanto um laço
-  consegue sustentar depende de tempos, e não foi medido. A correção
-  proposta é [B] e não muda a semântica: a busca do recolhimento recomeçar
-  depois do último recolhido, com o cursor guardado entre as passadas —
-  todo morto sairia em no máximo `MAX_FIOS` recolhimentos —, com um caso
-  que mantém o laço de um titular e confere que os mortos de outro saem
-  em tempo limitado; e, a conferir, `fluxo::canal_acabou` só tomar a ordem
-  quando o morto foi ponta de um fluxo. E a recusa não diz quantos dos
-  contados são mortos: o `process.list` mostra os vivos e os zumbis, e não
-  o morto que espera o coletor, e quem ouve "cota de processos do papel: N
-  de M" pode ver menos processos do titular na lista. Dizer na recusa
-  quantos mortos esperam o coletor muda o texto da auditoria — como a
-  correção (5) do item seguinte —, e mostrá-los no `process.list` muda uma
-  saída documentada. Nada disso entrou neste incremento: a aprovação da
-  alternativa 1 não o inclui, e fica registrado para uma decisão à parte.
+  leitura do código): com a alternativa 1, a cota de um titular volta
+  quando o coletor recolhe os mortos dele. O recolhimento recomeçava
+  sempre na vaga 0 a busca do próximo morto, e o nascimento toma a
+  primeira vaga vazia: um titular que bifurca e colhe em laço repunha os
+  mortos dele nas vagas mais baixas, que o coletor acabava de esvaziar; se
+  os repusesse tão depressa quanto o coletor os recolhia, os mortos de
+  outro titular, em vagas mais altas, esperavam enquanto o laço durasse, e
+  a cota desse outro ficava cheia — ele ouvia a recusa. Antes da
+  alternativa 1, o mesmo laço atrasava só a vaga, e não a cota.
+
+  **O A1-1 está corrigido** — um incremento [B], aprovado em 8 de novembro
+  de 2026, sem mudança de semântica: a busca do próximo morto começa num
+  **cursor** — a vaga seguinte à do último recolhido —, guardado na tabela
+  de fios, lido e avançado sob a trava do escalonador, na mesma seção
+  crítica que tira o morto, e dá a volta pela tabela. Um morto que pode sair
+  espera menos de `MAX_FIOS` recolhimentos, faça o laço o que fizer: antes
+  de chegar à vaga dele, cada recolhimento tira um morto de uma vaga
+  diferente, entre o cursor e a dele, e a vaga recolhida — onde o laço repõe
+  o morto seguinte — fica atrás do cursor. Na passada do coletor, que
+  recolhe até a tabela inteira, o morto que já pode sair quando o
+  recolhimento começa sai nela, e o que fica pronto no meio dela sai no
+  máximo na seguinte (ver "A ordem do recolhimento" em
+  `fios::recolher_terminados`). A passada dos zumbis segue pela ordem das
+  vagas: ela não esvazia vaga nenhuma, e limpa todos os zumbis da tabela
+  antes de acabar. Continua sendo o coletor quem recolhe, e só ele; não há
+  trava nova, e qualquer vaga em que o cursor pare é segura — ele só escolhe
+  por onde a busca começa. A contagem da alternativa 1, o texto da auditoria
+  e a saída do `process.list` não mudaram. Três casos `recolhimento:`
+  seguram o coletor do kernel e dão um recolhimento por vez, alternando cada
+  um com um passo do laço de outro titular — a ordem pior, escolhida pelo
+  caso, e não deixada ao tique —: os mortos de um titular saem com o laço de
+  outro (o colhedor que bifurca e colhe), a tabela cheia dá a volta em
+  ordem, e o encerramento pelo caminho do `process.terminate` no meio do
+  laço do `user.run`; um quarto confere a mesma ordem na passada de produção
+  inteira (o corpo de `recolher_terminados`, por um gancho de teste): os
+  mortos que podem sair quando ela começa saem nela, a partir do cursor e
+  dando a volta; e um quinto solta tudo ao mesmo tempo — o coletor do
+  kernel, um segundo coletor e o laço de um titular — e encerra no meio dele
+  os processos de outro, que ocupam a cota inteira: os mortos do outro saem
+  com o laço andando, a cota dele volta a zero, nenhuma morte se perde ou
+  sai duas vezes, e nenhuma vaga sobra (ver [As mutações do cursor do
+  recolhimento](#as-mutações-do-cursor-do-recolhimento)).
+
+  O que o cursor não muda: dois fatores ainda alongam a espera de um
+  morto, mesmo sem o laço — a limpeza de cada morto toma a ordem das
+  gravações (`fluxo::canal_acabou`), que não tem fila, e o coletor não tem
+  prioridade no rodízio; quanto isso pesa depende de tempos, e não foi
+  medido. A conferir, sem ter entrado neste incremento:
+  `fluxo::canal_acabou` só tomar a ordem quando o morto foi ponta de um
+  fluxo. **O A1-4 segue pendente**: a recusa não diz quantos dos contados
+  são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
+  que espera o coletor, e quem ouve "cota de processos do papel: N de M"
+  pode ver menos processos do titular na lista. Dizer na recusa quantos
+  mortos esperam o coletor muda o texto da auditoria — como a correção (5)
+  do item seguinte —, e mostrá-los no `process.list` muda uma saída
+  documentada: fica registrado para uma decisão à parte.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
   14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
   mortos dele que não são zumbis, até o coletor recolhê-los, desde a
@@ -8723,6 +8758,72 @@ com os dois casos que as pegam.
 | a conta nova só no gate — o nascimento contando só os vivos (MZ7) | `zumbis: a cota vale com tudo ao mesmo tempo` |
 | a conta sem o filtro do nome: os fios do kernel com a autoridade do titular entram na cota dele (MC8) | `zumbis: os fios do kernel nao contam na cota` — antes do reforço, passou pelos casos `zumbis:` |
 | o gate com a conta da 14.1 de antes da alternativa — os vivos, os que nascem e os zumbis —, e o nascimento com a conta de vagas (MC9) | `zumbis: a recusa grava os mortos acima da cota`: a recusa sai do nascimento, com `2 de 2`, e não do gate, com `3 de 2` — antes do reforço, passou pelos casos `zumbis:` |
+
+### As mutações do cursor do recolhimento
+
+Quinze mutações contra o cursor do recolhimento (o achado A1-1; ver *A
+ordem do recolhimento e o que a recusa mostra*, em [Segurança sem
+fricção](#segurança-sem-fricção)), uma de cada vez, no repositório, no
+x86_64 em debug, contra o código integrado:
+
+- seis contra a busca e o cursor — a regressão que o incremento corrige e
+  as formas vizinhas dela (MR1 a MR6);
+- três contra a passada de produção, que o adversário mostrou que nenhum
+  caso conferia: a passada que zera o cursor a cada recolhimento, a que
+  recolhe um morto só e a que volta à busca de antes, da vaga 0, deixando
+  o cursor como estava (MR13 a MR15);
+- seis contra o passo do recolhimento que o cursor reorganizou
+  (`recolher_um` e o predicado `recolhivel`): as garantias da vaga do morto
+  de novo, contra o código novo (MR7 a MR12).
+
+As de busca, cursor e passada rodaram contra os cinco casos
+`recolhimento:`, menos a MR14, que rodou também contra os grupos de baixo;
+as do passo, também contra os casos `vagas:`, `zumbis:` e os `fios:` do
+coletor e do zumbi.
+
+Foram quatro campanhas, e vale a última, contra o código final: as quinze
+reprovaram nela. As três primeiras acharam defeitos dos casos, e não do
+cursor:
+
+- na primeira, o laço de A do caso concorrente tinha um teto de 150
+  tiques e acabava antes do encerramento de B quando o fio da suíte
+  demorava a chegar a ele: o caso reprovou sob a MR1 e a MR2 sem defeito
+  nenhum no recolhimento. A campanha parou na MR3, e o teto passou a 3000
+  tiques;
+- na segunda, as doze de então reprovaram, mas o caso concorrente
+  reprovou também sob seis delas (MR1, MR4, MR7, MR8, MR10 e MR11) por uma
+  espera que vencia sem reconferir a condição: `esperar_ate` desiste
+  quando o prazo vence com o fio da suíte dentro de
+  `nativo::atender_pendentes`, servindo os pedidos dos processos —
+  medido sob a MR1, uma chamada durou 569 tiques. As esperas do módulo
+  passaram a reconferir a condição depois do prazo, e na última campanha
+  o caso passa sob a MR1, a MR7, a MR8 e a MR10, e sob a MR4 e a MR11
+  reprova mais adiante, pelo defeito de cada uma. Ao mesmo tempo, o
+  adversário mostrou que nenhum caso conferia a ordem da passada de
+  produção: vieram o caso da passada e as MR13 a MR15;
+- na terceira, a MR2 passou pelo caso da passada: os dois mortos do caso
+  nasciam em vagas vizinhas, e o cursor parado na de cima era o mesmo
+  cursor esperado depois da de baixo. A campanha parou na MR7, e o caso
+  ganhou um fio de pé entre os dois mortos e a conferência de que as três
+  vagas ficaram em ordem.
+
+| Mutação | Reprovada por |
+|---|---|
+| a busca recomeça na vaga 0 — a busca de antes do cursor (MR1) | os três casos passo a passo — "os mortos de B esperaram o laco de A" no laço de outro titular e no encerramento, "o recolhimento nao deu a volta pela tabela em ordem" na tabela cheia — e o da passada: "a passada nao recolheu a partir do cursor" |
+| o cursor não anda (MR2) | os mesmos quatro, com as mesmas mensagens |
+| o cursor fica na vaga recolhida, e não depois dela (MR3) | os mesmos quatro, com as mesmas mensagens |
+| a busca não dá a volta: para no fim da tabela (MR4) | o laço de outro titular e o encerramento ("o recolhimento nao achou morto nenhum"), a passada ("a passada nao recolheu os mortos que podiam sair") e os dois coletores ("um morto de B esperou o laco de A"). A tabela cheia passa: o cursor chega ao fim, volta a 0 pelo resto da divisão, e a busca sem a volta, a partir de 0, varre a tabela inteira |
+| o cursor guardado sem o resto: 95 depois da vaga 94 (MR5) | `recolhimento: a tabela cheia da a volta`: "o cursor nao passou para depois da vaga recolhida". Só a conferência do valor do cursor a vê: com 95 no cursor, a busca é a mesma que com 0 (`(95 + passo) % 95`) |
+| a busca começa uma vaga depois do cursor — a vaga do cursor por último (MR6) | os três casos passo a passo e o da passada, com as mensagens da MR1 |
+| a passada zera o cursor antes de cada recolhimento — o A1-1 de volta só na passada de produção (MR13) | `recolhimento: a passada recolhe a partir do cursor`: "a passada nao recolheu a partir do cursor". Os três casos passo a passo dão o passo sem a passada, e o caso concorrente não confere a ordem |
+| a passada que recolhe um morto só (MR14) | `recolhimento: a passada recolhe a partir do cursor` ("a passada nao recolheu os mortos que podiam sair") e `fios: o zumbi guarda a vaga ate a colheita` ("o colhedor nao saiu quando pedido") |
+| a passada com a busca de antes — da vaga 0 —, devolvendo o cursor como estava; o passo dos casos passo a passo segue com o cursor (MR15) | `recolhimento: a passada recolhe a partir do cursor`: "a passada nao recolheu a partir do cursor" |
+| o recolhimento sem a limpeza em curso da passada dos zumbis (MR7, a MV6b de novo) | `vagas: a vaga so volta depois de a limpeza terminar`: "outro coletor recolheu o filho com a limpeza dele em curso" |
+| o recolhimento que tira o zumbi — o filho que o pai ainda pode colher (MR8) | onze casos: `fios: o zumbi guarda a vaga ate a colheita` e oito `zumbis:` ("o filho do colhedor nao virou zumbi"; em `um titular nao esgota a tabela de fios`, "o colhedor nao ficou pronto"), e dois `vagas:` — a colheita e a bifurcação seguinte, e o pai que morre sem colher ("o processo nao largou o nucleo") |
+| a vaga que volta antes da limpeza: o marcador sai antes (MR9, a MV4 de novo) | quatro casos `vagas:` — o morto sem a limpeza, a colheita e a bifurcação, a janela de nonces ("a morte … nao foi solta uma vez") e a vaga que só volta depois da limpeza ("a vaga voltou com a limpeza do morto pausada no recolhimento") |
+| a limpeza duas vezes: o recolhimento solta também a morte que a passada dos zumbis já soltou (MR10, a MV3 de novo) | `vagas: a vaga so volta depois de a limpeza terminar` ("a morte do zumbi nao foi solta uma vez") e `vagas: o pai que morre sem colher e os zumbis seguem como antes` ("a morte do pai ou a do filho nao foi solta uma vez") |
+| o recolhimento que não solta a morte (MR11, a MV2 de novo) | doze casos: sete `vagas:` e os cinco `recolhimento:` ("a morte de um recolhido nao foi solta uma vez"; na tabela cheia, "a vaga voltou sem a morte do recolhido solta uma vez") |
+| o recolhimento sem teto por passada (MR12, a MV8 de novo) | `vagas: o coletor nao fica preso numa passada`: "o coletor ficou preso numa passada, recolhendo" |
 
 ### As mutações da vaga do morto
 
