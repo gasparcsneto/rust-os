@@ -2558,9 +2558,12 @@ pub(crate) struct Rastro {
     pub(crate) duravel: bool,
 }
 
-/// A cauda da auditoria: os últimos 128 registros, pela serial.
+/// A cauda da auditoria: os últimos [`MAIOR_CAUDA`] registros, pela
+/// serial. Um registro de antes de um boot, ou de antes de muitas leituras,
+/// se procura em [`auditoria_do_anel`] ou pelo número
+/// ([`registro_de_numero`]).
 pub(crate) fn cauda_da_auditoria(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
-    rastros(&maquina.pedir("audit.tail", r#"{"count":128}"#)?)
+    rastros(&maquina.pedir("audit.tail", &format!(r#"{{"count":{MAIOR_CAUDA}}}"#))?)
 }
 
 /// Os registros de uma resposta do `audit.tail` — pela serial, ou por um
@@ -2587,6 +2590,105 @@ pub(crate) fn rastros(r: &str) -> Result<Vec<Rastro>, String> {
         return Err(format!("o audit.tail nao trouxe registros\n  {r}"));
     }
     Ok(v)
+}
+
+/// Quantos registros o `audit.tail` dá numa leitura, no máximo — o teto do
+/// kernel (`MAIOR_CAUDA_DA_AUDITORIA`, em `kernel/src/agent/commands.rs`).
+pub(crate) const MAIOR_CAUDA: usize = 128;
+
+/// Quantas leituras de [`MAIOR_CAUDA`] a [`auditoria_do_anel_por`] faz, no
+/// máximo: o anel do kernel guarda 1024 registros (`CAPACIDADE_DA_AUDITORIA`),
+/// oito lotes, e cada leitura põe mais um nele.
+const MAIS_LOTES_DO_ANEL: usize = 16;
+
+/// Os registros depois de `depois`, do mais velho para o mais novo, até
+/// `quantos`: o `audit.tail` com `after`, que lê o anel inteiro da
+/// auditoria — e não só os últimos [`MAIOR_CAUDA`]. Vazio, se nenhum.
+///
+/// `pedir` faz o `audit.tail` com os parâmetros que recebe, por qualquer
+/// canal: a serial de uma [`Ligada`], a porta de um agente.
+fn depois_de(
+    pedir: &mut impl FnMut(&str) -> Result<String, String>,
+    depois: u64,
+    quantos: usize,
+) -> Result<Vec<Rastro>, String> {
+    let r = pedir(&format!(r#"{{"after":{depois},"count":{quantos}}}"#))?;
+    if !r.contains(r#"{"seq":"#) {
+        return Ok(Vec::new());
+    }
+    rastros(&r)
+}
+
+/// A auditoria inteira que o anel guarda, do mais velho ao mais novo: o
+/// `audit.tail` com `after`, em lotes de [`MAIOR_CAUDA`], até um lote
+/// menor. Cada leitura entra na própria auditoria, e a última traz a si
+/// mesma: o laço acaba — e, se não acabar em [`MAIS_LOTES_DO_ANEL`], é
+/// erro.
+///
+/// É onde se procura um registro de antes de um boot. Os últimos
+/// [`MAIOR_CAUDA`] — [`cauda_da_auditoria`] — não bastam quando o cenário
+/// leu a auditoria muitas vezes depois dele: a cadeia que voltou do journal
+/// traz essas leituras, e o boot seguinte põe as dele depois. Foi o que
+/// reprovou a troca da senha nas CIs 452, 458 e 459: a decisão tinha
+/// voltado do journal, mais de 128 registros antes da cabeça.
+///
+/// Quem conclui que um registro **não** está precisa conferir também onde
+/// o anel começa: um anel que já perdeu os primeiros não diz nada deles.
+pub(crate) fn auditoria_do_anel_por(
+    pedir: &mut impl FnMut(&str) -> Result<String, String>,
+) -> Result<Vec<Rastro>, String> {
+    let mut todos: Vec<Rastro> = Vec::new();
+    let mut depois = 0;
+    for _ in 0..MAIS_LOTES_DO_ANEL {
+        let lote = depois_de(pedir, depois, MAIOR_CAUDA)?;
+        let cheio = lote.len() >= MAIOR_CAUDA;
+        if let Some(r) = lote.last() {
+            depois = r.seq;
+        }
+        todos.extend(lote);
+        if !cheio {
+            return Ok(todos);
+        }
+    }
+    Err(format!(
+        "a auditoria do anel nao acabou em {MAIS_LOTES_DO_ANEL} leituras de {MAIOR_CAUDA}: ia em {depois}"
+    ))
+}
+
+/// [`auditoria_do_anel_por`], pela serial da máquina.
+pub(crate) fn auditoria_do_anel(maquina: &mut Ligada) -> Result<Vec<Rastro>, String> {
+    auditoria_do_anel_por(&mut |q| maquina.pedir("audit.tail", q))
+}
+
+/// O registro de número `seq`, procurado no anel inteiro da auditoria — ver
+/// [`auditoria_do_anel_por`]. `Err`, dizendo qual, se o anel já não o tem
+/// ou ainda não chegou a ele: nos dois casos, nada se conclui dele.
+///
+/// O número sozinho não identifica um registro entre boots: o que não ficou
+/// no journal tem o número reusado pelo boot seguinte — e a própria leitura
+/// grava a si mesma antes de responder, com o número seguinte à cabeça.
+/// Quem procura um registro de antes do corte compara o que veio com o que
+/// viu antes dele, o elo da cadeia inclusive.
+pub(crate) fn registro_de_numero_por(
+    pedir: &mut impl FnMut(&str) -> Result<String, String>,
+    seq: u64,
+) -> Result<Rastro, String> {
+    match depois_de(pedir, seq.saturating_sub(1), 1)?
+        .into_iter()
+        .next()
+    {
+        Some(r) if r.seq == seq => Ok(r),
+        Some(r) => Err(format!(
+            "o registro {seq} ja saiu do anel da auditoria: o mais velho e o {}",
+            r.seq
+        )),
+        None => Err(format!("a auditoria ainda nao chegou ao registro {seq}")),
+    }
+}
+
+/// [`registro_de_numero_por`], pela serial da máquina.
+pub(crate) fn registro_de_numero(maquina: &mut Ligada, seq: u64) -> Result<Rastro, String> {
+    registro_de_numero_por(&mut |q| maquina.pedir("audit.tail", q), seq)
 }
 
 /// A cadeia da auditoria se verifica, do começo da janela à cabeça.
@@ -6943,5 +7045,119 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
             estado_e_motivo(r#"{"jsonrpc":"2.0","id":9,"error":{"code":-32010}}"#),
             None
         );
+    }
+
+    /// Um anel de auditoria de mentira, como o do kernel: cada leitura grava
+    /// a si mesma antes de responder, o anel guarda os últimos
+    /// `capacidade`, e o `after` dá os seguintes a um número, do mais velho
+    /// ao mais novo.
+    struct AnelDeMentira {
+        proximo: u64,
+        capacidade: u64,
+        leituras: usize,
+    }
+
+    impl AnelDeMentira {
+        fn com(registros: u64, capacidade: u64) -> AnelDeMentira {
+            AnelDeMentira {
+                proximo: registros + 1,
+                capacidade,
+                leituras: 0,
+            }
+        }
+
+        fn pedir(&mut self, q: &str) -> Result<String, String> {
+            self.leituras += 1;
+            self.proximo += 1;
+            let numero = |n: &str| -> Result<u64, String> {
+                crate::campo_simples(q, n)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| format!("sem `{n}` em {q}"))
+            };
+            let depois = numero("after")?;
+            let quantos = numero("count")? as usize;
+            let primeiro = self.proximo.saturating_sub(self.capacidade).max(1);
+            let registros: Vec<String> = (primeiro.max(depois + 1)..self.proximo)
+                .take(quantos)
+                .map(|s| {
+                    format!(
+                        r#"{{"seq":{s},"holder":"kernel","method":"m{s}","resource":"","code":"ALLOW","detail":"","link":"e{s}","durable":true}}"#
+                    )
+                })
+                .collect();
+            Ok(format!(
+                r#"{{"durable_seq":0,"records":[{}]}}"#,
+                registros.join(",")
+            ))
+        }
+    }
+
+    /// O anel inteiro vem em lotes de 128, do primeiro registro à leitura
+    /// que acaba o laço — a que traz menos de um lote —, sem buraco.
+    #[test]
+    fn o_anel_inteiro_vem_em_lotes_e_acaba() {
+        let mut anel = AnelDeMentira::com(300, 1024);
+        let todos = auditoria_do_anel_por(&mut |q| anel.pedir(q)).unwrap();
+        let numeros: Vec<u64> = todos.iter().map(|r| r.seq).collect();
+        // As 300, e as três leituras que as trouxeram.
+        assert_eq!(numeros, (1..=303).collect::<Vec<u64>>());
+        assert_eq!(anel.leituras, 3);
+    }
+
+    /// Um anel que já perdeu os primeiros registros começa depois do 1, e
+    /// o laço acaba mesmo assim — quem conclui que algo não está confere
+    /// onde ele começa.
+    #[test]
+    fn o_anel_que_perdeu_os_primeiros_comeca_depois_do_um() {
+        let mut anel = AnelDeMentira::com(2000, 1024);
+        let todos = auditoria_do_anel_por(&mut |q| anel.pedir(q)).unwrap();
+        assert_eq!(todos.first().map(|r| r.seq), Some(2002 - 1024));
+        assert!(anel.leituras <= MAIS_LOTES_DO_ANEL);
+        assert!(todos.windows(2).all(|w| w[1].seq == w[0].seq + 1));
+    }
+
+    /// Uma auditoria que nunca para de dar lotes cheios não prende a
+    /// bancada: depois de [`MAIS_LOTES_DO_ANEL`] leituras, é erro.
+    #[test]
+    fn o_lote_cheio_sem_fim_e_erro() {
+        let mut proximo = 1u64;
+        let mut sem_fim = |_: &str| -> Result<String, String> {
+            let registros: Vec<String> = (proximo..proximo + MAIOR_CAUDA as u64)
+                .map(|s| format!(r#"{{"seq":{s},"method":"m","durable":true}}"#))
+                .collect();
+            proximo += MAIOR_CAUDA as u64;
+            Ok(format!(r#"{{"records":[{}]}}"#, registros.join(",")))
+        };
+        let e = auditoria_do_anel_por(&mut sem_fim).unwrap_err();
+        assert!(e.contains("nao acabou"), "{e}");
+    }
+
+    /// Pelo número: o registro, se o anel o tem; erro, dizendo qual, se o
+    /// anel já o perdeu ou ainda não chegou a ele. E o número seguinte à
+    /// cabeça é o da própria leitura — por isso quem procura um registro de
+    /// antes do corte compara o que veio, o elo inclusive.
+    #[test]
+    fn um_registro_pelo_numero() {
+        let mut anel = AnelDeMentira::com(300, 1024);
+        let r = registro_de_numero_por(&mut |q| anel.pedir(q), 150).unwrap();
+        assert_eq!(
+            (r.seq, r.metodo.as_str(), r.elo.as_str()),
+            (150, "m150", "e150")
+        );
+
+        let mut perdido = AnelDeMentira::com(2000, 1024);
+        let e = registro_de_numero_por(&mut |q| perdido.pedir(q), 5).unwrap_err();
+        assert!(
+            e.contains("ja saiu do anel") && e.contains("o mais velho e o 978"),
+            "{e}"
+        );
+
+        let mut cabeca = AnelDeMentira::com(300, 1024);
+        let propria = registro_de_numero_por(&mut |q| cabeca.pedir(q), 301).unwrap();
+        assert_eq!((propria.seq, propria.metodo.as_str()), (301, "m301"));
+
+        let mut adiante = AnelDeMentira::com(300, 1024);
+        let e = registro_de_numero_por(&mut |q| adiante.pedir(q), 400).unwrap_err();
+        assert!(e.contains("ainda nao chegou ao registro 400"), "{e}");
     }
 }

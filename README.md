@@ -9720,6 +9720,32 @@ com o botão de energia apertado logo depois do Enter; e a imagem de
 produção, com a pessoa do operador. A bancada da atualização A/B troca a
 senha antes da versão nova, e confere que só a nova entra depois dela.
 
+**A decisão que volta do journal se procura pelo número dela.** A
+bancada a procurava nos últimos 128 registros do `audit.tail` — o teto do
+comando —, e as leituras com que ela mesma espera cada desfecho, um
+`audit.tail` a cada 250 ms, também vão à auditoria e, pelo coletor, ao
+journal: depois do corte, a cadeia reposta e o boot seguinte punham às
+vezes mais de 128 registros depois da troca. Foi o que reprovou o cenário
+do corte nas CIs 452, 458 e 459 ("a decisao da troca nao voltou do
+journal"). Reproduzido no local com 60 e com 130 leituras auditadas entre
+a troca e o corte — o journal com 19 e 20 registros, como nas CIs —, o
+registro da troca estava lá, achado pelo número: `credential.change_self`,
+`ALLOW`, da pessoa, gravado. Nenhuma decisão confirmada se perdeu; o
+defeito era da conferência. Agora o cenário põe mais de uma cauda inteira
+de registros gravados entre a troca e o corte, confere que ela já não
+está entre os últimos 128, e exige que o registro do número dela seja o
+mesmo que a resposta confirmou antes do corte — o elo da cadeia, quem, o
+quê, o código, o detalhe, gravado —; os outros três cenários procuram a
+decisão no anel inteiro da auditoria, pelo `after` do `audit.tail` — e
+a bancada da cópia procura assim a revogação que tem de continuar no
+journal depois do corte, que tinha a mesma exposição. Quatro mutações, uma de cada vez, reprovam o cenário corrigido: a busca
+pelo número de volta aos últimos 128 (a mensagem das CIs, de novo), o
+número procurado com um a mais, a bancada sem as leituras entre a troca e
+o corte ("a conferencia nao passou pela distancia") e, no kernel, a
+reposição da auditoria com o detalhe apagado — uma cadeia que se verifica
+sozinha, com o método, o código e a gravação de antes, e que só o elo e o
+detalhe denunciam.
+
 ### As mutações da troca da própria senha
 
 Trinta e quatro mutações contra o que a troca promete — uma de cada vez,

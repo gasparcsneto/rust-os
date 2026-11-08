@@ -7,7 +7,9 @@
 //! confere depois: com qual senha ela entra. E a auditoria, pela serial.
 //!
 //! - a troca sobrevive ao corte de energia: no boot seguinte, a antiga não
-//!   entra, a nova entra, e a decisão voltou do journal;
+//!   entra, a nova entra, e a decisão voltou do journal — o mesmo registro,
+//!   achado pelo número, com mais de uma cauda do `audit.tail` gravada
+//!   depois dele;
 //! - a queda em cada fronteira da troca — as senhas digitadas e nada
 //!   conferido; a atual conferida e a nova calculada; a decisão feita; cada
 //!   passo da gravação; tudo gravado e a resposta não dada; a resposta
@@ -281,11 +283,120 @@ fn de_pe(m: &mut Ligada) -> Result<p::Persistencia, String> {
 }
 
 /// A decisão da troca na auditoria, gravada no journal: a que voltou com
-/// ele, depois de um boot.
+/// ele, depois de um boot — procurada no anel inteiro da auditoria, e não
+/// só nos últimos registros (ver [`p::auditoria_do_anel`] e
+/// [`decisao_no_anel`]).
 fn troca_no_journal(m: &mut Ligada) -> Result<bool, String> {
-    Ok(p::cauda_da_auditoria(m)?
+    decisao_no_anel(&p::auditoria_do_anel(m)?)
+}
+
+/// Se a decisão de uma troca está no `anel` da auditoria — gravada, e do
+/// código que a concede. Que **não** está só se diz de um anel que começa no
+/// primeiro registro da cadeia: o que já perdeu os primeiros não diz nada
+/// deles, e é erro.
+fn decisao_no_anel(anel: &[Rastro]) -> Result<bool, String> {
+    if anel
         .iter()
-        .any(|r| r.metodo == "credential.change_self" && r.codigo == "ALLOW" && r.duravel))
+        .any(|r| r.metodo == "credential.change_self" && r.codigo == "ALLOW" && r.duravel)
+    {
+        return Ok(true);
+    }
+    match anel.first() {
+        Some(r) if r.seq == 1 => Ok(false),
+        Some(r) => Err(format!(
+            "o anel da auditoria comeca no registro {}, e nao no 1: nao da para dizer que a decisao da troca nao esta nele",
+            r.seq
+        )),
+        None => Err("o anel da auditoria veio vazio".into()),
+    }
+}
+
+/// Quantas leituras da auditoria a bancada faz entre a troca e o corte —
+/// ver [`empurrar_a_auditoria`]: mais que uma cauda inteira do
+/// `audit.tail`.
+const LEITURAS_DEPOIS_DA_TROCA: usize = p::MAIOR_CAUDA + 2;
+
+/// Quanto esperar o coletor gravar no journal as leituras de
+/// [`empurrar_a_auditoria`]. Ele grava a cada dois segundos
+/// (`INTERVALO_DA_AUDITORIA_MS`, em `kernel/src/persistencia.rs`).
+const ESPERA_PELO_COLETOR: Duration = Duration::from_secs(30);
+
+/// O número do registro até onde a auditoria está no journal, segundo a
+/// resposta `r` de um `audit.tail`.
+fn duravel_ate(r: &str) -> Result<u64, String> {
+    super::campo_simples(r, "durable_seq")
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| {
+            format!("o audit.tail nao disse ate onde a auditoria esta no journal\n  {r}")
+        })
+}
+
+/// Põe mais de uma cauda inteira do `audit.tail` de registros entre a troca
+/// e o corte, e espera o coletor gravá-los no journal: no boot seguinte, a
+/// troca fica mais de [`p::MAIOR_CAUDA`] registros antes da cabeça, e só se
+/// acha pelo número.
+///
+/// Sem isso, a distância dependia de quantas vezes a bancada leu a
+/// auditoria esperando os logins, e de quanto delas o coletor gravou antes
+/// do corte. Nas CIs 452, 458 e 459 ela passou de 128, e a conferência de
+/// então, que olhava só os últimos 128, disse que a decisão não tinha
+/// voltado do journal — e ela tinha. Assim, toda rodada passa pela
+/// distância que reprovou aquelas.
+fn empurrar_a_auditoria(m: &mut Ligada) -> Result<(), String> {
+    let mut ultima = 0;
+    for _ in 0..LEITURAS_DEPOIS_DA_TROCA {
+        let r = m.pedir("audit.tail", r#"{"count":1}"#)?;
+        ultima = p::rastros(&r)?.iter().map(|x| x.seq).max().unwrap_or(0);
+    }
+    let limite = Instant::now() + ESPERA_PELO_COLETOR;
+    loop {
+        let duravel = duravel_ate(&m.pedir("audit.tail", r#"{"count":1}"#)?)?;
+        if duravel >= ultima {
+            return Ok(());
+        }
+        if Instant::now() >= limite {
+            return Err(format!(
+                "o coletor nao gravou a auditoria ate o registro {ultima} em {}s: o journal parou no {duravel}",
+                ESPERA_PELO_COLETOR.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// A decisão da troca, no boot depois do corte: o registro de número
+/// `troca.seq` voltou do journal, e é o mesmo que a resposta da troca
+/// confirmou antes do corte — o elo da cadeia, quem, o quê, o código, o
+/// detalhe, e gravado. E está fora dos últimos [`p::MAIOR_CAUDA`]: sem
+/// isso, a conferência não passou pela distância que
+/// [`empurrar_a_auditoria`] garante.
+fn a_troca_voltou_do_journal(m: &mut Ligada, troca: &Rastro) -> Result<(), String> {
+    let cauda = p::cauda_da_auditoria(m)?;
+    if let Some(r) = cauda.iter().find(|r| r.seq == troca.seq) {
+        return Err(format!(
+            "a conferencia nao passou pela distancia: a troca {} ainda esta nos ultimos {} registros\n  {r:?}",
+            troca.seq,
+            p::MAIOR_CAUDA
+        ));
+    }
+    let voltou = p::registro_de_numero(m, troca.seq)
+        .map_err(|e| format!("nao deu para conferir a troca {}: {e}", troca.seq))?;
+    conferir_a_troca(troca, &voltou)
+}
+
+/// O registro de número `antes.seq` que o boot depois do corte tem
+/// (`depois`) é a troca que a resposta confirmou antes dele (`antes`): o
+/// mesmo elo da cadeia — que encadeia o evento inteiro —, o mesmo titular,
+/// método, recurso, código e detalhe, e gravado. Outro registro com o
+/// número dela é a decisão que não voltou: o boot reusou o número.
+fn conferir_a_troca(antes: &Rastro, depois: &Rastro) -> Result<(), String> {
+    if depois == antes && depois.duravel {
+        return Ok(());
+    }
+    Err(format!(
+        "o registro {} do boot depois do corte nao e a troca confirmada antes dele: a decisao nao voltou do journal, ou voltou outra\n  antes: {antes:?}\n  depois: {depois:?}",
+        antes.seq
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -294,13 +405,15 @@ fn troca_no_journal(m: &mut Ligada) -> Result<bool, String> {
 
 /// A troca de verdade: a pessoa de desenvolvimento entra, troca a senha, e
 /// na mesma máquina a antiga já não entra e a nova entra; a decisão está
-/// no journal antes da resposta. Depois do corte de energia, a decisão
-/// voltou do journal, a cadeia da auditoria se verifica, a antiga não
-/// entra, e a nova entra.
+/// no journal antes da resposta. Mais de uma cauda do `audit.tail` de
+/// registros vai ao journal depois dela ([`empurrar_a_auditoria`]). Depois
+/// do corte de energia, a decisão voltou do journal — o mesmo registro, pelo
+/// número —, a cadeia da auditoria se verifica, a antiga não entra, e a
+/// nova entra.
 fn a_troca_sobrevive_ao_corte(b: &Bancada) -> Result<String, String> {
     let (_, _, atual) = chaves::Chaves::garantir()?.pessoa_dev();
     let mut m = Ligada::subir(b.arch, &b.dev, None)?;
-    let antes = (|| -> Result<(u64, u64), String> {
+    let antes = (|| -> Result<(Rastro, u64), String> {
         let estado = de_pe(&mut m)?;
         let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
@@ -317,10 +430,12 @@ fn a_troca_sobrevive_ao_corte(b: &Bancada) -> Result<String, String> {
         if entra_com(&mut m, &mut t, DEV, &atual, SENHA_NOVA)? {
             return Err("na mesma maquina, a senha antiga ainda entra".into());
         }
-        Ok((troca.seq, estado.boots))
+        empurrar_a_auditoria(&mut m)?;
+        Ok((troca, estado.boots))
     })();
     m.cortar_a_energia()?;
-    let (seq, boots) = antes?;
+    let (troca, boots) = antes?;
+    let seq = troca.seq;
 
     let mut m = Ligada::subir(b.arch, &b.dev, None)?;
     let depois = (|| -> Result<String, String> {
@@ -331,9 +446,7 @@ fn a_troca_sobrevive_ao_corte(b: &Bancada) -> Result<String, String> {
                 estado.boots
             ));
         }
-        if !troca_no_journal(&mut m)? {
-            return Err("a decisao da troca nao voltou do journal".into());
-        }
+        a_troca_voltou_do_journal(&mut m, &troca)?;
         p::auditoria_verifica(&mut m)?;
         let mut t = teclado(b.arch, &b.ritmo, "senha")?;
         terminal_atendendo(&mut m, &mut t)?;
@@ -712,4 +825,83 @@ pub(crate) fn senha(arch: Arquitetura, release: bool) -> Result<ExitCode, String
     }
     println!("\n[xtask] senha: todos os cenarios passaram");
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    fn rastro(seq: u64, metodo: &str, codigo: &str, duravel: bool) -> Rastro {
+        Rastro {
+            seq,
+            elo: format!("elo-{seq}"),
+            titular: "person".into(),
+            metodo: metodo.into(),
+            recurso: "pessoa:1".into(),
+            codigo: codigo.into(),
+            detalhe: "senha atual conferida; trocada".into(),
+            duravel,
+        }
+    }
+
+    fn anel(de: u64, ate: u64, troca: Option<Rastro>) -> Vec<Rastro> {
+        (de..=ate)
+            .map(|s| match &troca {
+                Some(t) if t.seq == s => t.clone(),
+                _ => rastro(s, "audit.tail", "ALLOW", true),
+            })
+            .collect()
+    }
+
+    /// A decisão está no anel só gravada e concedida; que não está, só se
+    /// diz de um anel que começa no primeiro registro.
+    #[test]
+    fn a_decisao_no_anel() {
+        let troca = rastro(140, "credential.change_self", "ALLOW", true);
+        assert_eq!(decisao_no_anel(&anel(1, 400, Some(troca))), Ok(true));
+        assert_eq!(decisao_no_anel(&anel(1, 400, None)), Ok(false));
+        let so_na_memoria = rastro(140, "credential.change_self", "ALLOW", false);
+        assert_eq!(
+            decisao_no_anel(&anel(1, 400, Some(so_na_memoria))),
+            Ok(false)
+        );
+        let recusada = rastro(
+            140,
+            "credential.change_self",
+            "DENY_NOT_AUTHENTICATED",
+            true,
+        );
+        assert_eq!(decisao_no_anel(&anel(1, 400, Some(recusada))), Ok(false));
+        let e = decisao_no_anel(&anel(50, 400, None)).unwrap_err();
+        assert!(e.contains("comeca no registro 50"), "{e}");
+        assert!(decisao_no_anel(&[]).is_err());
+    }
+
+    /// O registro do número da troca, depois do corte, só confere se é o
+    /// mesmo: outro elo, outro detalhe, outro método — o número reusado —
+    /// ou a decisão não gravada, não.
+    #[test]
+    fn a_troca_que_voltou_e_a_mesma() {
+        let antes = rastro(138, "credential.change_self", "ALLOW", true);
+        assert_eq!(conferir_a_troca(&antes, &antes.clone()), Ok(()));
+        let outro_elo = Rastro {
+            elo: "outro".into(),
+            ..antes.clone()
+        };
+        let sem_detalhe = Rastro {
+            detalhe: String::new(),
+            ..antes.clone()
+        };
+        let reusado = rastro(138, "audit.tail", "ALLOW", true);
+        let nao_gravada = Rastro {
+            duravel: false,
+            ..antes.clone()
+        };
+        for depois in [outro_elo, sem_detalhe, reusado] {
+            let e = conferir_a_troca(&antes, &depois).unwrap_err();
+            assert!(e.contains("nao e a troca confirmada"), "{e}");
+        }
+        let antes_nao_gravada = nao_gravada.clone();
+        assert!(conferir_a_troca(&antes_nao_gravada, &nao_gravada).is_err());
+    }
 }

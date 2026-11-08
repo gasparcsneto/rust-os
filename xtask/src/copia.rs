@@ -435,7 +435,9 @@ fn a_autoridade_nao_volta(b: &Bancada) -> Result<String, String> {
         {
             return Err("depois da restauracao e do corte, a chave revogada entrou".into());
         }
-        if !p::cauda_da_auditoria(&mut m)?
+        // No anel inteiro, e não só nos últimos 128: depois da revogação vêm
+        // a restauração, os retratos e o boot — ver `p::auditoria_do_anel`.
+        if !p::auditoria_do_anel(&mut m)?
             .iter()
             .any(|r| r.metodo == "agent.revoke" && r.codigo == "ALLOW" && r.duravel)
         {
