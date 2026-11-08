@@ -365,11 +365,11 @@ fn empurrar_a_auditoria(m: &mut Ligada) -> Result<(), String> {
 }
 
 /// A decisão da troca, no boot depois do corte: o registro de número
-/// `troca.seq` voltou do journal, e é o mesmo que a resposta da troca
-/// confirmou antes do corte — o elo da cadeia, quem, o quê, o código, o
-/// detalhe, e gravado. E está fora dos últimos [`p::MAIOR_CAUDA`]: sem
-/// isso, a conferência não passou pela distância que
-/// [`empurrar_a_auditoria`] garante.
+/// `troca.seq` voltou do journal, e é o mesmo que a bancada leu na
+/// auditoria antes do corte, já gravado — o elo da cadeia, quem, o quê, o
+/// código, o detalhe e a marca de gravado. E está fora dos últimos
+/// [`p::MAIOR_CAUDA`]: sem isso, a conferência não passou pela distância
+/// que [`empurrar_a_auditoria`] garante.
 fn a_troca_voltou_do_journal(m: &mut Ligada, troca: &Rastro) -> Result<(), String> {
     let cauda = p::cauda_da_auditoria(m)?;
     if let Some(r) = cauda.iter().find(|r| r.seq == troca.seq) {
@@ -385,10 +385,11 @@ fn a_troca_voltou_do_journal(m: &mut Ligada, troca: &Rastro) -> Result<(), Strin
 }
 
 /// O registro de número `antes.seq` que o boot depois do corte tem
-/// (`depois`) é a troca que a resposta confirmou antes dele (`antes`): o
-/// mesmo elo da cadeia — que encadeia o evento inteiro —, o mesmo titular,
-/// método, recurso, código e detalhe, e gravado. Outro registro com o
-/// número dela é a decisão que não voltou: o boot reusou o número.
+/// (`depois`) é a troca que a bancada leu na auditoria antes dele, já
+/// gravada (`antes`): o mesmo elo da cadeia — que encadeia o evento
+/// inteiro —, o mesmo titular, método, recurso, código e detalhe, e
+/// gravado. Outro registro com o número dela é a decisão que não voltou:
+/// o boot reusou o número.
 fn conferir_a_troca(antes: &Rastro, depois: &Rastro) -> Result<(), String> {
     if depois == antes && depois.duravel {
         return Ok(());

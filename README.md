@@ -5258,21 +5258,27 @@ Sem ganho a medir, não há o que pagar com esse risco.
   disponibilidade` e uma medida temporária, nunca commitada: com um
   processo pedindo sem parar, o executor alterna — cada chamada atende um
   pedido —; com dois, de um titular só, e um núcleo do hospedeiro livre
-  (`DUKE_NUCLEOS=3`), a tarefa `programas` atende cadeias de até 1 326
-  pedidos numa vez do executor, segura-o até 338 ms e passa de 80 a 94% do
+  (`DUKE_NUCLEOS=3`), a tarefa `programas` atende cadeias de até 1 366
+  pedidos numa vez do executor, segura-o até 338 ms e passa de 80 a 92% do
   tempo em `atender_pendentes` — no x86_64 e no aarch64, em `release` —, e
-  o canal do agente dos outros titulares vai de um p99 de 9–35 ms a
-  164–281 ms, com silêncios de até 0,4 s, contra 49–58 ms do controle, os
-  mesmos processos só girando. É degradação, e não monopólio: nenhuma vez
-  passou de 0,34 s, e o agente novo sempre entrou. Com 4 vCPUs em 4 CPUs
-  do hospedeiro (o padrão da bancada e da CI), as cadeias não passam de 8
-  pedidos: o efeito depende da folga de CPU, e numa máquina com núcleos
-  dedicados pode ser maior — nada no código o limita. Em depuração, a
-  causa maior é outra: a cada 2 s o coletor codifica a auditoria pendente
-  para o journal com a trava da auditoria na mão e as interrupções
-  mascaradas — de 22 a 57 ms por lote de ~100 registros, em `release`
-  ~20 ms sob carga —, e todo pedido auditado espera, o do canal do agente
-  inclusive. Um limite de pedidos por vez em `servir` e a codificação da
+  o canal do agente dos outros titulares vai de um p99 de 9–56 ms sem
+  carga a 164–280 ms, com silêncios de até 0,4 s, contra 49–58 ms do
+  controle, os mesmos processos só girando. Neste ambiente — o QEMU com
+  TCG, sem KVM —, é degradação, e não monopólio: em `release`, nenhuma vez
+  do `programas` passou de 0,34 s, e o agente novo sempre entrou; em
+  depuração, uma chegou a 0,83 s, e o silêncio do canal a 3,1 s. Com 4
+  vCPUs em 4 CPUs do hospedeiro (o padrão da bancada e da CI), nenhuma vez
+  do `programas` de 100 ms ou mais passou de 8 pedidos (a medida não
+  registrava as mais curtas), e o canal ficou num p99 de 32–60 ms, o do
+  controle em 60–66: o efeito depende da folga de CPU, e numa máquina com
+  núcleos dedicados pode ser maior — nada no código o limita. Em
+  depuração, a causa maior é outra: a cada 2 s o coletor codifica a
+  auditoria pendente para o journal com a trava da auditoria na mão e as
+  interrupções mascaradas — de 20 a 64 ms por lote, de 43 a 102 registros
+  (a medida não registrava lotes abaixo de 20 ms); em `release`, sob
+  carga, só três chegaram a 20 ms, o maior com 21,5 —, e todo pedido
+  auditado espera, o do canal do agente inclusive. Um limite de pedidos
+  por vez em `servir` e a codificação da
   auditoria fora da trava são escolhas [B]; nenhuma foi feita, e ficam
   para a decisão do dono.
   **O A1-4 segue pendente**: a recusa não diz quantos dos contados
@@ -5362,7 +5368,8 @@ Sem ganho a medir, não há o que pagar com esse risco.
   conferiram". O pedido dos três é o mesmo nas quatro suítes — uns 12 900
   frames —; o que muda é a oferta. O x86_64 sobe pela UEFI e pelo iniciador,
   que guarda até o fim o arquivo do kernel lido do slot e a imagem carregada
-  — 54 MiB retidos com o kernel de teste de debug, 30 com o de release —, e
+  — 54 MiB retidos com o kernel de teste de debug, 30 com o de release,
+  antes do `--strip-all` —, e
   a suíte do aarch64 sobe pelo `-kernel`, sem iniciador; e 13,5 MB do
   arquivo de debug eram a tabela de símbolos, que o `--strip-debug` do
   xtask mantinha e que ninguém lê no boot. Cada incremento que cresce o kernel de
@@ -5417,7 +5424,8 @@ Sem ganho a medir, não há o que pagar com esse risco.
   relocações, ficou com 41 MiB retidos em vez de 54, os livres no boot
   foram a 20 465 (+3 308), e o caso passou; na sonda do iniciador, o kernel
   de produção de debug do x86_64 carregou com as 29 579 relocações que o
-  `readelf` conta no ELF inteiro. E o xtask confere o teto antes de montar
+  `llvm-readobj` conta na cópia do slot — as do ELF inteiro, cujos
+  `PT_LOAD` a conferência comparou. E o xtask confere o teto antes de montar
   a imagem de um slot e antes de aceitar a de um `publicar` de antes
   (`slots::conferir_o_teto`, contra `atualizacao::cabecalho::MAIOR_KERNEL`,
   a mesma constante que o iniciador usa), com um aviso acima de nove
@@ -9783,23 +9791,27 @@ journal: depois do corte, a cadeia reposta e o boot seguinte punham às
 vezes mais de 128 registros depois da troca. Foi o que reprovou o cenário
 do corte nas CIs 452, 458 e 459 ("a decisao da troca nao voltou do
 journal"). Reproduzido no local com 60 e com 130 leituras auditadas entre
-a troca e o corte — o journal com 19 e 20 registros, como nas CIs —, o
-registro da troca estava lá, achado pelo número: `credential.change_self`,
+a troca e o corte — o das 130 com 19 registros na região e 20 abertos,
+como nas CIs 452 e 458 —, o registro da troca estava lá, achado pelo
+número: `credential.change_self`,
 `ALLOW`, da pessoa, gravado. Nenhuma decisão confirmada se perdeu; o
 defeito era da conferência. Agora o cenário põe mais de uma cauda inteira
 de registros gravados entre a troca e o corte, confere que ela já não
 está entre os últimos 128, e exige que o registro do número dela seja o
-mesmo que a resposta confirmou antes do corte — o elo da cadeia, quem, o
-quê, o código, o detalhe, gravado —; os outros três cenários procuram a
+mesmo que a bancada leu na auditoria antes do corte, já gravado — o elo
+da cadeia, quem, o quê, o código, o detalhe, gravado —; os outros três
+cenários procuram a
 decisão no anel inteiro da auditoria, pelo `after` do `audit.tail` — e
 a bancada da cópia procura assim a revogação que tem de continuar no
-journal depois do corte, que tinha a mesma exposição. Quatro mutações, uma de cada vez, reprovam o cenário corrigido: a busca
-pelo número de volta aos últimos 128 (a mensagem das CIs, de novo), o
-número procurado com um a mais, a bancada sem as leituras entre a troca e
-o corte ("a conferencia nao passou pela distancia") e, no kernel, a
-reposição da auditoria com o detalhe apagado — uma cadeia que se verifica
-sozinha, com o método, o código e a gravação de antes, e que só o elo e o
-detalhe denunciam.
+journal depois do corte, que tinha a mesma exposição. Quatro mutações,
+uma de cada vez, rodadas sobre o código commitado, reprovam o cenário
+corrigido: a busca pelo número de volta aos últimos 128 — a troca, fora
+deles, não é achada —, o número procurado com um a mais ("o registro N ja
+saiu do anel da auditoria", e também no teste do hospedeiro), a bancada
+sem as leituras entre a troca e o corte ("a conferencia nao passou pela
+distancia") e, no kernel, a reposição da auditoria com o detalhe apagado
+— uma cadeia que se verifica sozinha, com o método, o código e a gravação
+de antes, e que só o elo e o detalhe denunciam.
 
 ### As mutações da troca da própria senha
 
