@@ -3335,8 +3335,10 @@ pub fn com_processos<F: FnMut(Processo)>(mut f: F) {
             let Some(fio) = e.fios[i].as_ref() else {
                 continue;
             };
-            // Só quem hospeda um programa, e só o que ainda conta: o
-            // terminado que ninguém espera some na próxima volta do coletor.
+            // Só quem hospeda um programa, e só o vivo e o zumbi: o
+            // terminado que ninguém espera some na passada do coletor. Até
+            // lá ele conta na cota do titular (a alternativa 1 da 14.1), sem
+            // aparecer aqui.
             if fio.nome != NOME_DO_PROCESSO || (fio.estado == Estado::Terminado && !zumbi) {
                 continue;
             }

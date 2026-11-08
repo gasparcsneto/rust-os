@@ -404,7 +404,7 @@ kernel/src/
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 │   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
-│   └── zumbis.rs    os casos da decisão 14.1: o zumbi na cota de processos do titular — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota, quem colhe tarde, a recusa que grava a contagem, a concorrência, e a conta da cota contra a definição do zumbi, também com o pai numa vaga antes de um fio vivo mais velho
+│   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, a concorrência e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, e o processo do `user.run` que conta até o recolhimento
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
@@ -2237,16 +2237,20 @@ pula o morto em curso, e a morte é solta uma vez só. O custo: com a
 tabela cheia de mortos ainda não recolhidos, o nascimento é recusado, com
 o motivo de sempre — não há vaga —, até a passada seguinte do coletor, que
 faz uma por tique quando ganha a vez — mais tarde, com os núcleos
-ocupados. E um morto que não é zumbi — o colhido, o órfão, o do
-`user.run` — não conta na cota do titular, que conta os vivos, os que
-nascem e os zumbis, mas guarda a vaga até essa passada: um programa que
-bifurca, sai e colhe em laço pode ocupar, entre duas passadas, mais vagas
-que a cota (ver [Decisões pendentes](#decisões-pendentes)). Enquanto o
-coletor desmonta um morto, o marcador aparece em `threads.list` com o nome
-`recolhendo`, no estado `spawning`. Os casos `vagas:` seguram o coletor,
-ou o pausam no começo da limpeza de um processo, para conferir a vaga e a
-limpeza em cada um desses caminhos, e `sdk: o programa de fora do
-repositorio com o coletor segurado` refaz a corrida da CI 445 de
+ocupados. E o processo morto que guarda a vaga conta na cota do titular
+dele até o coletor recolhê-lo — o zumbi, e também o que não é zumbi: o
+colhido, o órfão, o do `user.run` (a alternativa 1 da decisão sobre o
+achado A1 do adversário desta correção, de 8 de novembro de 2026; ver a
+cota de processos, em [Coordenação](#coordenação)): um programa que
+bifurca, sai e colhe em laço ouve a recusa da cota até o coletor recolher
+os mortos dele, em vez de passar dela. Antes da decisão, o morto que não
+é zumbi não contava, e esse laço podia ocupar, entre duas passadas, mais
+vagas que a cota. Enquanto o coletor desmonta um morto, o marcador
+aparece em `threads.list` com o nome `recolhendo`, no estado `spawning`;
+ele é de ninguém, e não conta em cota nenhuma. Os casos `vagas:` seguram
+o coletor, ou o pausam no começo da limpeza de um processo, para conferir
+a vaga e a limpeza em cada um desses caminhos, e `sdk: o programa de fora
+do repositorio com o coletor segurado` refaz a corrida da CI 445 de
 propósito.
 
 Como todo morto passa pelo recolhimento, cada passada tem um teto: recolhe
@@ -5097,51 +5101,114 @@ Sem ganho a medir, não há o que pagar com esse risco.
   tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
   de 96 bytes: fica para uma decisão.
 - **Os mortos ainda não recolhidos, fora da cota** (o achado A1 do
-  adversário da correção da vaga do morto): desde que a vaga de um morto
-  só volta pelo coletor, o processo que morreu e não é zumbi — o filho
-  colhido, o órfão, o do `user.run` — guarda a vaga até a passada do
-  coletor, e não conta na cota do titular, que conta os vivos, os que
-  nascem e os zumbis (a 14.1, alternativa A). Um programa que bifurca, sai
-  e colhe em laço pode ocupar, entre duas passadas, mais vagas do que a
-  cota; se fizer morrer mais depressa do que o coletor recolhe, a tabela
-  enche, e enquanto ele durar um fio novo de qualquer titular — nem o
-  `energia` do `system.reboot` escapa — só nasce se tomar antes dele a
-  vaga que o coletor acabou de esvaziar. Antes, o nascimento ficava com a
-  vaga do morto, sem a limpeza. Medido na suíte, no x86_64 em debug com 4
-  núcleos, com um caso temporário que não ficou no repositório e com o
-  código de antes do teto de cada passada do coletor: fios do kernel
-  criados sem parar, por um fio ou por três, encheram a tabela — nenhuma
-  vaga livre, 737 e 162 274 nascimentos recusados em 300 tiques —, com o
-  coletor recolhendo uns 440 por segundo; o `colhedor`, mandado bifurcar e
-  colher o mais depressa que a suíte manda, ocupou no máximo 3 vagas a
-  mais que antes — cada passo dele leva dezenas de milissegundos, com a
-  impressão no log. Um programa que bifurque e colha em laço, sem
-  imprimir, não foi medido: não há um na imagem, e criar fios do kernel é
-  coisa do próprio kernel. Fechar pede uma decisão: contar na cota do
-  titular também os mortos dele que ainda guardam vaga, até o
-  recolhimento — devolve a garantia da 14.1, mas muda a definição da
-  alternativa A: é o que a mutação MZ8 faz, e o caso `zumbis: a conta da
-  cota segue a definicao do zumbi` mudaria com ela; e um programa que
-  bifurca e colhe depressa passa a ouvir a recusa da cota até a passada
-  seguinte —; ou reservar vagas aos fios do kernel — uma das alternativas
-  que a 14.1 não escolheu; salva o `energia`, o enlace e a cerimônia, não
-  os outros titulares —; ou só mitigar, como [B]: o nascimento que não acha vaga,
-  havendo morto por recolher, acorda o coletor — não ajuda com o coletor
-  sem a vez —; ou o nascimento que não acha vaga recolher ele mesmo um
-  morto — soltar a morte dele e só então ocupar a vaga: a cota da 14.1
-  não muda, os mortos de um titular deixam de barrar o nascimento dos
-  outros, e a falta do coletor, se ele não subir no boot, deixa de
-  esgotar a tabela; mas quem recolhe deixa de ser só o coletor, o
-  nascimento que acharia a tabela cheia paga uma limpeza, e é preciso
-  conferir antes que nenhum nascimento — o `fork`, o `user.run`, o
-  enlace, o pareamento, o `energia` — acontece com uma trava que a
-  limpeza toma —; ou aceitar, como está.
+  adversário da correção da vaga do morto) — **decidido** pelo dono do
+  projeto em 8 de novembro de 2026, na alternativa (1) abaixo: a cota de
+  processos do titular conta toda vaga que um processo dele ocupa na
+  tabela de fios — os vivos, os que nascem, os zumbis e também os mortos
+  que não são zumbis: o filho colhido, o órfão (o filho de um pai que
+  morreu, como o neto da bifurcação dupla do servidor de janelas quando
+  sai) e o do `user.run`, que nasce sem pai —, até o coletor recolher o
+  morto (ver *Os mortos na cota*, em [Coordenação](#coordenação)). O
+  achado: desde que a vaga de um morto só volta pelo coletor, o processo
+  que morreu e não é zumbi guarda a vaga até a passada do coletor, e não
+  contava na cota do titular, que contava os vivos, os que nascem e os
+  zumbis (a 14.1, alternativa A). Um programa que bifurca, sai e colhe em laço
+  podia ocupar, entre duas passadas, mais vagas do que a cota; se fizesse
+  morrer mais depressa do que o coletor recolhe, a tabela enchia, e
+  enquanto ele durasse um fio novo de qualquer titular — nem o `energia`
+  do `system.reboot` escapava — só nascia se tomasse antes dele a vaga
+  que o coletor acabou de esvaziar. Antes da correção da vaga do morto, o
+  nascimento ficava com a vaga do morto, sem a limpeza. Medido na suíte,
+  no x86_64 em debug com 4 núcleos, com um caso temporário que não ficou
+  no repositório e com o código de antes do teto de cada passada do
+  coletor: fios do kernel criados sem parar, por um fio ou por três,
+  encheram a tabela — nenhuma vaga livre, 737 e 162 274 nascimentos
+  recusados em 300 tiques —, com o coletor recolhendo uns 440 por
+  segundo; o `colhedor`, mandado bifurcar e colher o mais depressa que a
+  suíte manda, ocupou no máximo 3 vagas a mais que antes — cada passo
+  dele leva dezenas de milissegundos, com a impressão no log. Um programa
+  que bifurque e colha em laço, sem imprimir, não foi medido: não há um
+  na imagem, e criar fios do kernel é coisa do próprio kernel. As
+  alternativas eram cinco: (1) contar na cota do titular também os
+  mortos dele que ainda guardam vaga, até o recolhimento — devolve a
+  garantia da 14.1, mas muda a definição da alternativa A; e um programa
+  que bifurca e colhe depressa passa a ouvir a recusa da cota até a
+  passada seguinte —; (2) reservar vagas aos fios do kernel — uma das
+  alternativas que a 14.1 não escolheu; salva o `energia`, o enlace e a
+  cerimônia, não os outros titulares —; (3) só mitigar, como [B]: o
+  nascimento que não acha vaga, havendo morto por recolher, acorda o
+  coletor — não ajuda com o coletor sem a vez —; (4) o nascimento que
+  não acha vaga recolher ele mesmo um morto — soltar a morte dele e só
+  então ocupar a vaga: a cota da 14.1 não muda, os mortos de um titular
+  deixam de barrar o nascimento dos outros, e a falta do coletor, se ele
+  não subir no boot, deixa de esgotar a tabela; mas quem recolhe deixa de
+  ser só o coletor, o nascimento que acharia a tabela cheia paga uma
+  limpeza, e é preciso conferir antes que nenhum nascimento — o `fork`, o
+  `user.run`, o enlace, o pareamento, o `energia` — acontece com uma
+  trava que a limpeza toma —; ou (5) aceitar, como estava. A escolhida, a
+  (1), é mais larga que a mutação MZ8 da 14.1, que fazia contar só o
+  filho colhido de pai vivo: conta também o órfão e o do `user.run`. A
+  conta da cota (`Escalonador::processos_de`) passou a ser uma volta pela
+  tabela, sem perguntar pelo pai, e a bisseção pelos ids dos vivos saiu
+  do código. O marcador que o coletor deixa na vaga enquanto desmonta um
+  morto (`recolhendo`, de ninguém) não conta em cota nenhuma: durante uma
+  limpeza, o titular pode ocupar uma vaga a mais que a cota — uma por
+  recolhedor; em produção, só o coletor recolhe —, o resíduo aceito no
+  texto da alternativa. O preço é de quem bifurca e colhe depressa, e de
+  quem lança pelo `user.run` processos que saem depressa: ouve a recusa
+  da cota até o coletor recolher os mortos dele. Os casos `zumbis: a conta
+  da cota segue a definicao do zumbi` e `zumbis: a conta da cota acha o
+  pai fora da ordem das vagas` saíram; entraram `zumbis: o morto conta na
+  cota ate o recolhimento`, `zumbis: o laco que bifurca e colhe nao passa
+  da cota` e `zumbis: o processo do user.run conta ate o recolhimento`
+  (ver [As mutações da conta de vagas (alternativa
+  1)](#as-mutações-da-conta-de-vagas-alternativa-1)). As outras quatro
+  alternativas não foram adotadas, e ficam registradas acima. A (4) foi
+  investigada antes da decisão: a limpeza da morte toma a ordem das
+  gravações — `fluxo::canal_acabou` encerra os fluxos do morto dentro
+  dela, tenha ele fluxo ou não —, e o `fork` nasce dentro do handler da
+  chamada de sistema, onde a ordem não se espera: recolher ali traria de
+  volta, pelo `fork`, o defeito do AE-1; e as formas que contornam isso
+  põem a limpeza do morto de um titular no nascimento de outro. O que a
+  cota não fecha — a soma das cotas de vários titulares, e a cota por
+  sessão — segue no item seguinte.
+- **A ordem do recolhimento e o que a recusa mostra** (os achados A1-1 e
+  A1-4 do adversário da alternativa 1, de 8 de novembro de 2026; pela
+  leitura do código, sem reprodução): com a alternativa 1, a cota de um
+  titular volta quando o coletor recolhe os mortos dele, e o coletor
+  recolhe sempre o primeiro morto da tabela — cada busca de
+  `recolher_terminados` e de `limpar_os_zumbis` recomeça na vaga 0 —,
+  enquanto o nascimento toma a primeira vaga vazia. Um titular que bifurca
+  e colhe em laço repõe os mortos dele nas vagas mais baixas, que o
+  coletor acabou de esvaziar; se os repõe tão depressa quanto o coletor os
+  recolhe, os mortos de outro titular, em vagas mais altas, esperam
+  enquanto o laço durar, e a cota desse outro fica cheia — ele ouve a
+  recusa. Antes da alternativa 1, o mesmo laço atrasava só a vaga, e não
+  a cota. Dois fatores alongam a espera mesmo sem o laço: a limpeza de
+  cada morto toma a ordem das gravações (`fluxo::canal_acabou`), que não
+  tem fila, e o coletor não tem prioridade no rodízio. Quanto um laço
+  consegue sustentar depende de tempos, e não foi medido. A correção
+  proposta é [B] e não muda a semântica: a busca do recolhimento recomeçar
+  depois do último recolhido, com o cursor guardado entre as passadas —
+  todo morto sairia em no máximo `MAX_FIOS` recolhimentos —, com um caso
+  que mantém o laço de um titular e confere que os mortos de outro saem
+  em tempo limitado; e, a conferir, `fluxo::canal_acabou` só tomar a ordem
+  quando o morto foi ponta de um fluxo. E a recusa não diz quantos dos
+  contados são mortos: o `process.list` mostra os vivos e os zumbis, e não
+  o morto que espera o coletor, e quem ouve "cota de processos do papel: N
+  de M" pode ver menos processos do titular na lista. Dizer na recusa
+  quantos mortos esperam o coletor muda o texto da auditoria — como a
+  correção (5) do item seguinte —, e mostrá-los no `process.list` muda uma
+  saída documentada. Nada disso entrou neste incremento: a aprovação da
+  alternativa 1 não o inclui, e fica registrado para uma decisão à parte.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
   14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
-  vivos, os que nascem e os zumbis de um titular ocupam da tabela de fios
-  no máximo a cota dele — os mortos dele que não são zumbis ficam de fora
-  até a passada do coletor (o item anterior) — (ver a cota de processos,
-  em [Coordenação](#coordenação)). Mas vários
+  mortos dele que não são zumbis, até o coletor recolhê-los, desde a
+  alternativa 1 da decisão sobre o achado A1 (o item anterior): os vivos,
+  os que nascem, os zumbis e os mortos ainda não recolhidos de um titular
+  ocupam da tabela de fios no máximo a cota dele — e uma vaga a mais,
+  a do marcador, enquanto o coletor desmonta um morto dele — (ver a cota
+  de processos, em [Coordenação](#coordenação)). Mas vários
   titulares, cada um dentro da cota, ainda enchem a tabela com processos
   vivos — doze titulares de cota 8 ocupam as 89 vagas que a suíte acha
   livres com 4 núcleos, e numa máquina em uso, com os serviços e os
@@ -8383,14 +8450,15 @@ entra no histórico quando o console a consome, e não quando ela chega (ver
 `processos <papel> <n>`, de 1 a 64, 4 sem ela; na imagem, 32 para o
 `sistema`, 8 para o operador e o administrador, 2 para o observador —,
 contado por titular: uma sessão de agente, uma de pessoa, o sistema. A
-cota conta, dos processos do titular que ocupam vaga na tabela de fios, os
-vivos, os que estão nascendo e os zumbis — o filho que saiu e que o pai,
-vivo, ainda não colheu —, até a colheita ou a morte do pai; o morto que não
-é zumbi guarda a vaga até a passada do coletor sem contar. O processo
-além da cota — lançado ou bifurcado — não nasce, e a recusa vai para a
-auditoria como `DENY_POLICY`, com a contagem do gate (`cota de processos
-do papel: N de M`); a do nascimento, que só recusa quando outro processo
-do titular nasceu no meio, grava `M de M`.
+cota conta toda vaga que um processo do titular ocupa na tabela de fios:
+os vivos, os que estão nascendo, os zumbis — o filho que saiu e que o
+pai, vivo, ainda não colheu — e os mortos que não são zumbis — o filho
+colhido, o órfão, o do `user.run` —, até o coletor recolher o morto (a
+decisão 14.1 e a alternativa 1 da decisão sobre o achado A1, abaixo). O
+processo além da cota — lançado ou bifurcado — não nasce, e a recusa vai
+para a auditoria como `DENY_POLICY`, com a contagem do gate (`cota de
+processos do papel: N de M`); a do nascimento, que só recusa quando
+outro processo do titular nasceu no meio, grava `M de M`.
 
 **O zumbi na cota** (a decisão 14.1, aprovada pelo dono do projeto em 7
 de novembro de 2026 na alternativa A: o zumbi conta na cota do titular —
@@ -8409,12 +8477,13 @@ que pode existir além do primeiro). O ocioso de cada núcleo ligado além
 do primeiro toma uma; com 4 núcleos, como na suíte e nas bancadas,
 sobram 92, e na suíte o boot, o coletor e a rede tomam três delas — as
 32 de trabalho são só o mínimo garantido, com os 64 núcleos ligados.
-Desde a 14.1, os vivos, os que nascem e os zumbis de um titular ocupam da
-tabela no máximo a cota dele — os fios do kernel não contam em cota
-nenhuma —; os mortos dele que não são zumbis — o colhido, o órfão, o do
-`user.run` — não contam, mas guardam a vaga até a passada do coletor, e
-entre duas passadas podem levá-lo além da cota (ver *Os mortos ainda não
-recolhidos, fora da cota*, em [Decisões pendentes](#decisões-pendentes)).
+Com a 14.1, os vivos, os que nascem e os zumbis de um titular passaram a
+ocupar da tabela no máximo a cota dele — os fios do kernel não contam em
+cota nenhuma —; os mortos dele que não são zumbis — o colhido, o órfão, o
+do `user.run` — não contavam, mas guardavam a vaga até a passada do
+coletor, e entre duas passadas podiam levá-lo além da cota: o achado A1,
+que a alternativa 1 fechou em 8 de novembro de 2026 (abaixo, *Os mortos
+na cota*).
 E a cota rebaixada não tira o que ele já ocupa: ele só não cria outro até
 ficar abaixo dela. O zumbi conta para o titular dele — a autoridade herdada do
 pai, que não muda — e para nenhum outro. O resto não mudou: a mesma
@@ -8423,16 +8492,18 @@ duas conferências — a do gate, a resposta rápida, e a do nascimento, sob
 a trava do escalonador, na mesma seção crítica que reserva a vaga, a que
 vale —, as duas com a conta nova; a mesma recusa na auditoria. Quem
 colhe tarde ouve a recusa mais
-cedo, e segue depois de colher. A conta não pergunta a `e_zumbi` por cada
+cedo, e segue depois de colher — com a alternativa 1, depois de o coletor
+recolher os colhidos. A conta da 14.1 não perguntava a `e_zumbi` por cada
 terminado — seria quadrática no tamanho da tabela, sob a trava, no
-caminho de todo `bifurcar` e de todo lançamento —: junta uma vez os ids de
-quem não terminou, ordena, e procura o pai de cada terminado por
-bisseção; a suíte confere essa conta contra a definição do zumbi, também
+caminho de todo `bifurcar` e de todo lançamento —: juntava uma vez os ids
+de quem não terminou, ordenava, e procurava o pai de cada terminado por
+bisseção; a suíte conferia essa conta contra a definição do zumbi, também
 com o pai numa vaga antes de um fio vivo mais velho — a ordem em que uma
-bisseção sem ordenar o perderia. A escolha da vaga, logo depois, na mesma
-seção crítica, só procura a primeira posição vazia: desde a correção da
-vaga do morto, ela não pergunta nada aos mortos. Um pai
-travado segura os zumbis dele na cota até o sistema ou o administrador o
+bisseção sem ordenar o perderia. Com a alternativa 1, a conta deixou de
+procurar o pai, e a bisseção saiu (abaixo). A escolha da vaga, logo
+depois, na mesma seção crítica, só procura a primeira posição vazia:
+desde a correção da vaga do morto, ela não pergunta nada aos mortos. Um
+pai travado segura os zumbis dele na cota até o sistema ou o administrador o
 encerrar (`process.terminate`), e o de um administrador — que o
 `process.terminate` da política padrão não alcança — até sair: é o efeito
 pretendido, a cota protege os outros. Com a cota em q, cada titular
@@ -8442,6 +8513,62 @@ imagem de produção, nenhum programa bifurca sem colher — o servidor de
 janelas usa a bifurcação dupla. O que a cota não fecha — a soma das cotas
 de vários titulares, e a cota por sessão — e as correções que ficam para
 incrementos à parte estão em [Decisões pendentes](#decisões-pendentes).
+
+**Os mortos na cota** (a alternativa 1 da decisão sobre o achado A1 do
+adversário da correção da vaga do morto, aprovada pelo dono do projeto em
+8 de novembro de 2026; o achado e as alternativas que não foram adotadas
+estão em [Decisões pendentes](#decisões-pendentes)). A cota passou a
+contar toda vaga que um processo do titular ocupa na tabela de fios: os
+vivos, os que nascem, os zumbis e também os mortos que não são zumbis —
+o filho colhido; o órfão, filho de um pai que morreu, como o neto da
+bifurcação dupla do servidor de janelas quando sai; e o do `user.run`,
+que nasce sem pai —, até o coletor recolher o morto. É uma mudança na
+definição da alternativa A da 14.1, que contava os vivos, os que nascem
+e os zumbis, e mais larga que a mutação MZ8 dela, que fazia contar só o
+filho colhido de pai vivo. Um titular ocupa da tabela, assim, no máximo
+a cota dele também entre duas passadas do coletor, com um resíduo aceito
+no texto da alternativa: enquanto o coletor desmonta um morto e solta a
+morte dele, a vaga guarda um marcador (`recolhendo`, de ninguém), que
+não conta em cota nenhuma, e o titular pode ocupar uma vaga a mais que a
+cota — uma por recolhedor; em produção, só o coletor recolhe. O morto
+conta para o titular dele — a autoridade do processo que morreu, herdada
+do pai numa bifurcação — e para nenhum outro. A conta
+(`Escalonador::processos_de`) é uma volta pela
+tabela: os fios que hospedam um programa com a autoridade do titular, em
+qualquer estado, sem perguntar a `e_zumbi` nem procurar o pai; a
+bisseção pelos ids dos vivos saiu do código. A suíte a confere contra a
+definição, categoria por categoria (`fios::Categorias`): os vivos e os
+que nascem, os zumbis, e os mortos que não são zumbis. O resto não
+mudou: a mesma linha da política, com a mesma gramática e os mesmos
+valores; as mesmas duas conferências — a do gate e a do nascimento, as
+duas com a conta de vagas —; a mesma recusa na auditoria. O preço é de
+quem bifurca e colhe depressa, e de quem lança pelo `user.run` processos
+que saem depressa: ouve a recusa da cota — `NEGADO` no `fork`,
+`COTA_ESGOTADA` no lançamento, `DENY_POLICY` na auditoria, um registro
+por recusa — até o coletor recolher os mortos dele, numa passada por
+tique quando ele ganha a vez — mais tarde, com os núcleos ocupados —; e
+a limpeza da morte, na passada, espera a ordem das gravações, uma espera
+sem teto. Na imagem de produção, o servidor de janelas bifurca e colhe a
+cada Terminal que abre: o filho do meio, colhido, conta na cota do
+sistema até a passada do coletor. Os casos `zumbis: o morto conta
+na cota ate o recolhimento`, `zumbis: o laco que bifurca e colhe nao
+passa da cota` e `zumbis: o processo do user.run conta ate o
+recolhimento` seguram o coletor, para os estados que ele desfaria num
+tique durarem o caso inteiro: o colhido e o órfão contando, conferidos
+categoria por categoria; o laço do achado, que para na recusa da cota, e
+não no fim da tabela; e o `ola` que saiu, contando até o recolhimento.
+`zumbis: a colheita e o fim do pai devolvem a cota` e `zumbis: quem
+colhe tarde ouve a cota e segue` esperam o coletor recolher os colhidos
+antes de bifurcar de novo. `zumbis: a recusa grava os mortos acima da
+cota` confere que o gate conta os mortos — a recusa diz "3 de 2" —, e
+`zumbis: os fios do kernel nao contam na cota`, que só um processo conta:
+um fio do kernel com a autoridade de uma pessoa não toma a cota dela. O
+`process.list` mostra os vivos e os zumbis, e não o morto que espera o
+coletor: quem ouve a recusa da cota pode ver menos processos do titular
+na lista (ver *A ordem do recolhimento e o que a recusa mostra*, em
+[Decisões pendentes](#decisões-pendentes)). As mutações estão em [As
+mutações da conta de vagas (alternativa
+1)](#as-mutações-da-conta-de-vagas-alternativa-1).
 
 O `cargo xtask invariantes` confere que só o canal chama
 `ui::agir_com_versao`, que só a administração revoga um arrendamento, que
@@ -8457,12 +8584,30 @@ até soltar, revogado, vencido, confirmação com a versão velha —; pessoa
 contra agente, agente contra pessoa, duas pessoas, o `logout` e o
 `lease.revoke` com e sem a prova; os campos de uma janela, com o foco
 declarado; dois leitores do teclado; e a cota de processos, lançada e
-bifurcada, e com zumbis (os casos `zumbis:`). A tabela do pacote
+bifurcada, com zumbis e com mortos ainda não recolhidos (os casos
+`zumbis:`). A tabela do pacote
 `politica` confere, no hospedeiro, que nunca
 há dois arrendamentos num recurso, que nenhum sobrevive à revogação, e que
 a versão só sobe com uma mudança que valeu.
 
 ### As mutações do zumbi na cota
+
+A campanha desta seção é a da 14.1, contra o código de antes da
+alternativa 1 da decisão sobre o achado A1. Com a alternativa 1 (8 de
+novembro de 2026; ver *Os mortos na cota*, em
+[Coordenação](#coordenação)), a MZ8 passou a ser o comportamento — o
+filho colhido conta até o coletor o recolher —, e a alternativa vai além
+dela: conta também o órfão e o do `user.run`. A MZ9 e a MZ10 mutavam a
+bisseção pelos ids dos vivos, que saiu do código, e deixaram de se
+aplicar. Dos casos que reprovavam as três, dois saíram: `zumbis: a conta
+da cota segue a definicao do zumbi`, cujo lugar ficou com `zumbis: o
+morto conta na cota ate o recolhimento`, e `zumbis: a conta da cota acha
+o pai fora da ordem das vagas`, que conferia a bisseção; o vigia de
+`zumbis: a cota vale com tudo ao mesmo tempo` segue, e confere agora a
+conta de vagas contra a definição. A MZ1 e a MZ2 mexiam na conta da
+14.1, que mudou; a campanha da conta de vagas tem as dela, e repete a MZ3
+a MZ7 (ver [As mutações da conta de vagas (alternativa
+1)](#as-mutações-da-conta-de-vagas-alternativa-1)).
 
 Dez mutações contra a decisão 14.1, uma de cada vez, no repositório, no
 x86_64 em debug, contra o código integrado: as sete da análise da decisão
@@ -8532,9 +8677,41 @@ casos de antes do nono.
 | a colheita que não marca o filho (MZ5) | `usuario: espera o filho e colhe o codigo dele`, e três casos `zumbis:` — a colheita e o fim do pai, quem colhe tarde, e a conta contra a definição |
 | a conta nova só no nascimento — o gate contando só os vivos (MZ6) | `zumbis: a recusa grava os zumbis acima da cota`: a recusa passa a sair do nascimento, com `2 de 2`, e não do gate, com `3 de 2` |
 | a conta nova só no gate — o nascimento contando só os vivos (MZ7) | `zumbis: a cota vale com tudo ao mesmo tempo` |
-| a conta que esquece a colheita: o filho colhido conta até o coletor o desmontar (MZ8) | `zumbis: a conta da cota segue a definicao do zumbi`, e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
-| a conta que toma por vivo o pai que terminou: os ids juntados são os de todos os fios, e não só os de quem não terminou (MZ9) | `zumbis: a conta da cota segue a definicao do zumbi` |
-| a bisseção sem ordenar os ids (MZ10) | `zumbis: a conta da cota acha o pai fora da ordem das vagas` — depois do reforço; antes dele, sobreviveu aos oito casos `zumbis:` |
+| a conta que esquece a colheita: o filho colhido conta até o coletor o desmontar (MZ8; com a alternativa 1, é o comportamento) | `zumbis: a conta da cota segue a definicao do zumbi`, e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que toma por vivo o pai que terminou: os ids juntados são os de todos os fios, e não só os de quem não terminou (MZ9; deixou de se aplicar com a alternativa 1) | `zumbis: a conta da cota segue a definicao do zumbi` |
+| a bisseção sem ordenar os ids (MZ10; deixou de se aplicar com a alternativa 1) | `zumbis: a conta da cota acha o pai fora da ordem das vagas` — depois do reforço; antes dele, sobreviveu aos oito casos `zumbis:` |
+
+### As mutações da conta de vagas (alternativa 1)
+
+As mutações contra a conta de vagas da alternativa 1 da decisão sobre o
+achado A1 (ver *Os mortos na cota*, em [Coordenação](#coordenação)), uma
+de cada vez, no repositório, contra o código integrado: a conta de antes
+(MC1); cada um dos estados contados, esquecido — o colhido, o órfão, o do
+`user.run`, o zumbi e o que nasce (MC2 a MC6); a conta de todos os
+titulares (MC7); e cinco da 14.1, rodadas de novo contra a conta nova
+(MZ3 a MZ7); e duas que o adversário da alternativa 1 achou (MC8 e MC9).
+No x86_64 em debug, com a suíte filtrada aos casos `zumbis:` — e também
+aos `vagas:` na MC6, na MZ4 e na MZ5, que mexem no que o coletor vê —,
+uma rodada de cada: todas reprovaram na última. A MC8 e a MC9 passaram
+pelos casos `zumbis:` de então — uma rodada cada, 13 casos aprovados —, e
+reprovaram depois do reforço com os dois casos que as pegam.
+
+| Mutação | Reprovada por |
+|---|---|
+| a conta da 14.1 antes da alternativa 1: os vivos, os que nascem e os zumbis, com o pai procurado por bisseção (MC1) | `zumbis: o morto conta na cota ate o recolhimento`, `zumbis: o laco que bifurca e colhe nao passa da cota`, `zumbis: o processo do user.run conta ate o recolhimento` e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que esquece o filho colhido (MC2) | `zumbis: o morto conta na cota ate o recolhimento`, `zumbis: o laco que bifurca e colhe nao passa da cota` e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que esquece o órfão — o filho de um pai que morreu (MC3) | `zumbis: o morto conta na cota ate o recolhimento` — a conta da cota diverge da definição com o órfão na tabela |
+| a conta que esquece o morto do `user.run`, que nasce sem pai (MC4) | `zumbis: o processo do user.run conta ate o recolhimento`, `zumbis: o morto conta na cota ate o recolhimento` — o colhedor, lançado pelo `user.run`, também nasce sem pai — e o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta que esquece o zumbi (MC5) | os sete casos `zumbis:` da 14.1 e `zumbis: o morto conta na cota ate o recolhimento` |
+| a conta que esquece os que nascem — a vaga reservada (MC6) | o vigia de `zumbis: a cota vale com tudo ao mesmo tempo` — a conta da cota diverge da definição enquanto um lançamento nasce |
+| a conta dos processos de todos os titulares na cota de cada um (MC7) | `zumbis: com um titular no teto, o sistema segue`, `zumbis: os de um titular nao tomam a cota de outro` e `zumbis: o laco que bifurca e colhe nao passa da cota` — outro titular não lança |
+| a cota que passa por um, no gate e no nascimento (MZ3) | oito casos `zumbis:` — o titular passa da cota por um |
+| o pai que terminou segue vivo para o zumbi, em `e_zumbi` (MZ4) | `zumbis: o morto conta na cota ate o recolhimento` — o órfão aparece como zumbi nas categorias; a conta da cota não pergunta pelo pai, e não muda |
+| a colheita que não marca o filho (MZ5) | cinco casos `zumbis:` — a colheita e o fim do pai, quem colhe tarde, a concorrência, o morto e o laço — e dois `vagas:`: a colheita e a bifurcação seguinte, e a vaga que só volta depois da limpeza (o colhido segue zumbi, e o coletor não o recolhe) |
+| a conta nova só no nascimento — o gate contando só os vivos (MZ6) | `zumbis: a recusa grava os zumbis acima da cota`: a recusa sai do nascimento, com `2 de 2`, e não do gate, com `3 de 2` |
+| a conta nova só no gate — o nascimento contando só os vivos (MZ7) | `zumbis: a cota vale com tudo ao mesmo tempo` |
+| a conta sem o filtro do nome: os fios do kernel com a autoridade do titular entram na cota dele (MC8) | `zumbis: os fios do kernel nao contam na cota` — antes do reforço, passou pelos casos `zumbis:` |
+| o gate com a conta da 14.1 de antes da alternativa — os vivos, os que nascem e os zumbis —, e o nascimento com a conta de vagas (MC9) | `zumbis: a recusa grava os mortos acima da cota`: a recusa sai do nascimento, com `2 de 2`, e não do gate, com `3 de 2` — antes do reforço, passou pelos casos `zumbis:` |
 
 ### As mutações da vaga do morto
 
