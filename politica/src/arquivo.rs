@@ -40,9 +40,10 @@
 //! - `processos <papel> <quantos>`: a cota de processos de cada titular do
 //!   papel — uma sessão de agente, uma de pessoa, o sistema —, de 1 a 64;
 //!   sem a linha, 4. Contam os processos que ocupam vaga na tabela de fios
-//!   do kernel: os vivos, os que estão nascendo e os zumbis — o filho que
-//!   saiu e que o pai, vivo, ainda não colheu —, até a colheita ou a morte
-//!   do pai.
+//!   do kernel: os vivos, os que estão nascendo, os zumbis — o filho que
+//!   saiu e que o pai, vivo, ainda não colheu — e os mortos que não são
+//!   zumbis — o filho colhido, o órfão, o do `user.run` —, até o coletor
+//!   do kernel recolher o morto.
 //! - `mensagens <papel> <por remetente> <por caixa>`: as cotas de mensagens
 //!   do papel — quantas vivas cada titular dele tem como remetente, somando
 //!   todas as caixas, e quantas a caixa dele guarda. De 1 até os tetos da
@@ -131,8 +132,8 @@ pub const TAXA_PADRAO: Taxa = Taxa {
     rajada: 20,
 };
 
-/// Quantos processos — vivos, nascendo e zumbis — um titular de um papel
-/// que não declara a sua cota pode ter.
+/// Quantos processos — vivos, nascendo, zumbis e mortos ainda não
+/// recolhidos — um titular de um papel que não declara a sua cota pode ter.
 pub const PROCESSOS_PADRAO: u32 = 4;
 
 /// A maior cota de processos que a política aceita.
@@ -265,8 +266,8 @@ pub struct Papel {
     pub taxa: Taxa,
     /// Quantos processos cada titular do papel — uma sessão de agente, uma
     /// de pessoa, o sistema — pode ter ao mesmo tempo, contando os que ocupam
-    /// vaga na tabela de fios: os vivos, os que estão nascendo e os zumbis,
-    /// até a colheita ou a morte do pai.
+    /// vaga na tabela de fios: os vivos, os que estão nascendo, os zumbis e
+    /// os mortos que o coletor do kernel ainda não recolheu.
     pub processos: u32,
     /// As cotas de mensagens de cada titular do papel.
     pub mensagens: crate::mensagens::Cotas,

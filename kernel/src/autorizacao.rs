@@ -3760,12 +3760,14 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 /// sistema. Sem papel, nada nasce. Uma recusa vai para a auditoria, com a
 /// contagem.
 ///
-/// A cota conta, dos processos do titular que ocupam uma vaga da tabela de
-/// fios, os vivos, os que estão nascendo e os zumbis — o filho que saiu e
-/// que o pai, vivo, ainda não colheu —, até a colheita ou a morte do pai
-/// (a decisão 14.1; ver [`crate::fios::processos_de`]). O morto que não é
-/// zumbi guarda a vaga até o coletor passar, sem contar. O zumbi conta para
-/// a autoridade dele, que é a herdada do pai, e para nenhuma outra.
+/// A cota conta toda vaga que um processo do titular ocupa na tabela de
+/// fios: os vivos, os que estão nascendo, os zumbis — o filho que saiu e
+/// que o pai, vivo, ainda não colheu — e os mortos que não são zumbis — o
+/// filho colhido, o órfão, o do `user.run` —, até o coletor recolher o
+/// morto (a decisão 14.1, com a alternativa 1 da decisão sobre o achado
+/// A1; ver [`crate::fios::processos_de`]). O morto conta para a autoridade
+/// dele — a do processo que morreu, herdada do pai numa bifurcação — e
+/// para nenhuma outra.
 ///
 /// Devolve a cota, que quem lança passa ao escalonador: a contagem daqui é
 /// a resposta rápida, e a que vale é a do nascimento, feita junto com a

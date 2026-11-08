@@ -1,18 +1,14 @@
-//! Os casos `zumbis:` — a decisão 14.1, alternativa A: o filho que saiu e
-//! que o pai, vivo, ainda não colheu — o zumbi — conta na cota de processos
-//! do titular dele até ser colhido ou até o pai morrer. A cota limita o que
-//! o titular ocupa da tabela de fios: os processos vivos, os que estão
-//! nascendo e os zumbis.
+//! Os casos `zumbis:` — a cota de processos do titular, pela decisão 14.1
+//! com a alternativa 1 da decisão sobre o achado A1 (8 de novembro de
+//! 2026): a cota conta toda vaga que um processo do titular ocupa na tabela
+//! de fios — os vivos, os que estão nascendo, os zumbis (o filho que saiu e
+//! que o pai, vivo, ainda não colheu) e os mortos que não são zumbis (o
+//! filho colhido, o órfão, o do `user.run`) —, até o coletor recolher o
+//! morto. A cota limita o que o titular ocupa da tabela.
 //!
-//! Com a conta de antes, só dos vivos, os sete casos que a decisão pediu
-//! reprovam: um titular de cota 2 enchia a tabela inteira com zumbis, e daí
-//! em diante não nascia fio nenhum, de ninguém. E dois conferem a conta da
-//! cota — que não pergunta a `e_zumbi` por cada terminado, e procura o pai
-//! por bisseção nos ids ordenados — contra a definição do zumbi:
-//! `zumbis: a conta da cota segue a definicao do zumbi`, nos estados que só
-//! duram até a passada do coletor, e `zumbis: a conta da cota acha o pai
-//! fora da ordem das vagas`, com o pai numa vaga antes de um fio vivo mais
-//! velho.
+//! Com a conta de antes da 14.1, só dos vivos, os sete casos reprovam: um
+//! titular de cota 2 enchia a tabela inteira com zumbis, e daí em diante
+//! não nascia fio nenhum, de ninguém.
 //!
 //! O pai dos zumbis é o `colhedor` (`programas/src/bin/colhedor.rs`):
 //! bifurca quando a suíte manda — o filho sai na hora, com 71, e fica
@@ -447,9 +443,10 @@ pub(super) fn zumbis_os_de_um_titular_nao_tomam_a_cota_de_outro() -> Resultado {
 
 /// A cota volta na colheita, na saída do pai e no término do pai: com a
 /// cota em 2, o colhedor e um zumbi enchem a cota, e o segundo bifurcar
-/// ouve `NEGADO`; colhido o zumbi — com o código dele —, o bifurcar
-/// seguinte nasce, sem esperar o coletor; o pai sai com um zumbi, e a cota
-/// e a vaga do zumbi voltam; e o `process.terminate` no pai faz o mesmo.
+/// ouve `NEGADO`; colhido o zumbi — com o código dele —, ele deixa de ser
+/// zumbi e conta até o coletor o recolher, e o bifurcar seguinte nasce
+/// depois disso; o pai sai com um zumbi, e a cota e a vaga do zumbi voltam;
+/// e o `process.terminate` no pai faz o mesmo.
 pub(super) fn zumbis_a_colheita_e_o_fim_do_pai_devolvem_a_cota() -> Resultado {
     if crate::fios::colheita().1 != 0 {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
@@ -474,6 +471,9 @@ pub(super) fn zumbis_a_colheita_e_o_fim_do_pai_devolvem_a_cota() -> Resultado {
                 return Err("o pai nao colheu o filho com o codigo dele");
             }
         }
+        // O colhido conta até o coletor recolhê-lo (a alternativa 1).
+        esperar_ate(|| !crate::fios::na_tabela_de_teste(primeiro), 600)
+            .map_err(|_| "o coletor nao recolheu o filho colhido")?;
         let Bifurcou::Filho(segundo) = c.bifurcar()? else {
             return Err("a colheita nao devolveu a cota");
         };
@@ -528,8 +528,8 @@ pub(super) fn zumbis_a_colheita_e_o_fim_do_pai_devolvem_a_cota() -> Resultado {
 /// Quem colhe tarde ouve a cota e segue: com a cota em 3, o colhedor
 /// bifurca dois filhos e não colhe — os dois zumbis e ele enchem a cota —,
 /// e o terceiro bifurcar ouve `NEGADO`; o programa não cai: colhe os dois,
-/// cada um com o código dele, e a cota volta inteira — dois filhos nascem
-/// de novo.
+/// cada um com o código dele, e a cota volta inteira quando o coletor os
+/// recolhe — dois filhos nascem de novo.
 pub(super) fn zumbis_quem_colhe_tarde_ouve_a_cota_e_segue() -> Resultado {
     if crate::fios::colheita().1 != 0 {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
@@ -570,6 +570,16 @@ pub(super) fn zumbis_quem_colhe_tarde_ouve_a_cota_e_segue() -> Resultado {
         if colhidos != filhos {
             return Err("a colheita tardia colheu outros filhos");
         }
+        // Os colhidos contam até o coletor recolhê-los (a alternativa 1).
+        esperar_ate(
+            || {
+                colhidos
+                    .iter()
+                    .all(|f| !crate::fios::na_tabela_de_teste(*f))
+            },
+            600,
+        )
+        .map_err(|_| "o coletor nao recolheu os filhos colhidos")?;
         for _ in 0..2 {
             if !matches!(c.bifurcar()?, Bifurcou::Filho(_)) {
                 return Err("a cota nao voltou inteira depois da colheita tardia");
@@ -624,205 +634,16 @@ pub(super) fn zumbis_a_recusa_grava_os_zumbis_acima_da_cota() -> Resultado {
     resultado
 }
 
-/// A conta da cota é a da definição do zumbi também nos estados que só
-/// duram até a passada do coletor: o filho colhido e ainda não desmontado,
-/// e o filho de um pai que morreu e ainda não saiu da tabela.
-///
-/// A conta da cota não pergunta a `e_zumbi` por cada terminado — junta os
-/// ids de quem não terminou e procura o pai por bisseção —, e uma conta que
-/// esquecesse a colheita, ou que tomasse por vivo o pai que terminou, só se
-/// mostraria nesses estados, que o coletor desfaz num tique. Aqui ele é
-/// segurado na desmontagem de um morto-isca (`fios::PAUSAR_NA_DESMONTAGEM`)
-/// para eles durarem o caso inteiro, e em cada passo as duas contas
-/// (`fios::contas_da_cota_de_teste`) têm de ser iguais, e iguais ao
-/// esperado. O colhedor nasce antes de o coletor ser segurado.
-pub(super) fn zumbis_a_conta_da_cota_segue_a_definicao() -> Resultado {
-    use crate::fios::{PAUSA_ARMADA, PAUSA_SEGURANDO, PAUSAR_NA_DESMONTAGEM};
-    extern "C" fn morto(_argumento: u64) -> ! {
-        crate::fios::terminar()
-    }
-    if crate::fios::colheita().1 != 0 {
-        return Err("a tabela ja tinha zumbi antes do caso comecar");
-    }
-    politica_com_a_cota(4)?;
-    let titular = operador(0, "pessoa-dos-zumbis");
-    let conferir = |passo: &str, esperado: usize| -> Resultado {
-        let (da_cota, da_definicao) = crate::fios::contas_da_cota_de_teste(titular);
-        crate::log_info!(
-            "teste",
-            "zumbis: {}: a conta da cota diz {}, a definicao {}, o esperado {}",
-            passo,
-            da_cota,
-            da_definicao,
-            esperado
-        );
-        if da_definicao != esperado {
-            return Err("a definicao do zumbi nao contou o esperado");
-        }
-        if da_cota != da_definicao {
-            return Err("a conta da cota divergiu da definicao do zumbi");
-        }
-        Ok(())
-    };
-    let mut fio = None;
-    let resultado = (|| -> Resultado {
-        let c = Colhedor::lancar(titular)?;
-        fio = Some(c.fio);
-        conferir("o colhedor", 1)?;
-        PAUSAR_NA_DESMONTAGEM.store(PAUSA_ARMADA, SeqCst);
-        crate::fios::criar("teste-segura-o-coletor", morto, 0)
-            .map_err(|_| "o fio que segura o coletor nao nasceu")?;
-        esperar_ate(
-            || PAUSAR_NA_DESMONTAGEM.load(SeqCst) == PAUSA_SEGURANDO,
-            300,
-        )
-        .map_err(|_| "o coletor nao chegou a desmontar o morto-isca")?;
-        let mut filhos = Vec::new();
-        for _ in 0..2 {
-            match c.bifurcar()? {
-                Bifurcou::Filho(f) => filhos.push(f),
-                Bifurcou::Erro(_) => return Err("um filho dentro da cota nao nasceu"),
-            }
-        }
-        conferir("o colhedor e dois zumbis", 3)?;
-        let colhido = match c.colher()? {
-            Ok((f, DO_FILHO)) => f,
-            _ => return Err("o colhedor nao colheu o filho com o codigo dele"),
-        };
-        if !crate::fios::na_tabela_de_teste(colhido) {
-            return Err("o colhido saiu da tabela com o coletor segurado");
-        }
-        // Colhido e ainda na tabela: não é mais zumbi, a vaga volta à cota.
-        conferir("um filho colhido e ainda na tabela", 2)?;
-        let sobrou = filhos
-            .iter()
-            .copied()
-            .find(|&f| f != colhido)
-            .ok_or("o colhedor colheu um filho que nao era dele")?;
-        c.encerrar()?;
-        if !crate::fios::na_tabela_de_teste(c.fio) || !crate::fios::na_tabela_de_teste(sobrou) {
-            return Err("o pai morto ou o filho dele saiu da tabela com o coletor segurado");
-        }
-        // O pai terminou e continua na tabela; o filho que sobrou não é mais
-        // zumbi — o pai nunca vai colher —, e nada mais conta.
-        conferir("o pai morto e o filho dele, ainda na tabela", 0)?;
-        Ok(())
-    })();
-    PAUSAR_NA_DESMONTAGEM.store(0, SeqCst);
-    limpar(fio);
-    resultado
-}
-
-/// A conta da cota acha o pai que nasceu numa vaga antes de um fio vivo
-/// mais velho. Ela junta os ids de quem não terminou na ordem das vagas, e
-/// essa ordem não é a dos ids: quem nasce fica com a vaga livre mais baixa,
-/// e um fio novo cai antes de um mais velho quando a vaga de um terceiro
-/// vagou. A bisseção só acha o pai porque a conta ordena os ids antes.
-///
-/// O caso monta a tabela assim: dois fios do kernel nascem e esperam; o da
-/// vaga mais baixa sai, e o coletor o desmonta; o colhedor nasce na vaga
-/// livre mais baixa — a do que saiu, ou outra abaixo dela —, antes do fio
-/// que segue vivo, e bifurca um filho, que fica zumbi. O colhedor é então o
-/// de id maior entre os que não terminaram, e não o último na ordem das
-/// vagas: uma bisseção sem ordenar não o acharia, e a conta esqueceria o
-/// zumbi. O caso confere essa ordem na mesma tomada da trava que faz as
-/// duas contas, antes de compará-las.
-pub(super) fn zumbis_a_conta_da_cota_acha_o_pai_fora_da_ordem_das_vagas() -> Resultado {
-    static SOLTAR: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-    extern "C" fn espera(qual: u64) -> ! {
-        while !SOLTAR[qual as usize].load(SeqCst) {
-            crate::fios::ceder();
-        }
-        crate::fios::terminar()
-    }
-    fn posicao(ids: &[u64], id: u64) -> Option<usize> {
-        ids.iter().position(|&x| x == id)
-    }
-    if crate::fios::colheita().1 != 0 {
-        return Err("a tabela ja tinha zumbi antes do caso comecar");
-    }
-    politica_com_a_cota(4)?;
-    let titular = operador(0, "pessoa-da-ordem");
-    for s in &SOLTAR {
-        s.store(false, SeqCst);
-    }
-    let mut fio = None;
-    let resultado = (|| -> Resultado {
-        let a = crate::fios::criar("teste-espera-a", espera, 0)
-            .map_err(|_| "o primeiro fio que espera nao nasceu")?
-            .numero();
-        let b = crate::fios::criar("teste-espera-b", espera, 1)
-            .map_err(|_| "o segundo fio que espera nao nasceu")?
-            .numero();
-        let mut ids = [0u64; crate::fios::MAX_FIOS];
-        let n = crate::fios::ids_vivos(&mut ids);
-        let (Some(pa), Some(pb)) = (posicao(&ids[..n], a), posicao(&ids[..n], b)) else {
-            return Err("um fio que espera nao estava entre os vivos");
-        };
-        // O da vaga mais baixa sai; o outro fica, vivo, depois dela.
-        let (sai, fica, qual) = if pa < pb { (a, b, 0) } else { (b, a, 1) };
-        SOLTAR[qual].store(true, SeqCst);
-        esperar_ate(|| !crate::fios::na_tabela_de_teste(sai), 600)
-            .map_err(|_| "o coletor nao desmontou o fio que saiu")?;
-        let c = Colhedor::lancar(titular)?;
-        fio = Some(c.fio);
-        match c.bifurcar()? {
-            Bifurcou::Filho(_) => {}
-            Bifurcou::Erro(_) => return Err("o filho dentro da cota nao nasceu"),
-        }
-        // Um marcador do coletor nasce com um id novo e desfaria a ordem por
-        // um instante: a fotografia espera a ordem que o caso montou.
-        for _ in 0..50 {
-            let (da_cota, da_definicao, n) =
-                crate::fios::contas_e_vivos_de_teste(titular, &mut ids);
-            let vivos = &ids[..n];
-            let (Some(pc), Some(pf)) = (posicao(vivos, c.fio), posicao(vivos, fica)) else {
-                return Err("o colhedor ou o fio que fica nao estava entre os vivos");
-            };
-            if pc > pf {
-                return Err("o colhedor nao nasceu numa vaga antes do fio mais velho");
-            }
-            if vivos.binary_search(&c.fio).is_ok() {
-                let _ = esperar_ate(|| false, 1);
-                continue;
-            }
-            crate::log_info!(
-                "teste",
-                "zumbis: o colhedor na posicao {} de {} vivos, o fio mais velho na {}; \
-                 a conta da cota diz {}, a definicao {}",
-                pc,
-                n,
-                pf,
-                da_cota,
-                da_definicao
-            );
-            if da_definicao != 2 {
-                return Err("a definicao do zumbi nao contou o colhedor e o zumbi");
-            }
-            if da_cota != da_definicao {
-                return Err("a conta da cota perdeu o pai fora da ordem das vagas");
-            }
-            return Ok(());
-        }
-        Err("a ordem das vagas nao escondeu o colhedor de uma bissecao sem ordenar")
-    })();
-    for s in &SOLTAR {
-        s.store(true, SeqCst);
-    }
-    limpar(fio);
-    resultado
-}
-
 /// A cota com zumbis vale com tudo ao mesmo tempo: o colhedor bifurca e
 /// colhe em rajadas — os filhos saem noutros núcleos, o coletor passa —,
 /// e um lançador em cada núcleo secundário tenta lançar o `ola` como o
 /// mesmo titular, `TENTATIVAS_POR_RAJADA` vezes a cada rajada, no
 /// instante em que ela abre, junto com as bifurcações. Um vigia, noutro
 /// núcleo, confere a cada volta, sob a trava do escalonador, quantas vagas
-/// o titular ocupa — vivos e zumbis —, e a suíte confere também entre as
-/// rajadas: nunca mais que a cota. Em cada olhada, a conta da cota tem de
-/// ser a da definição do zumbi. No fim, o colhedor encerrado, nenhum zumbi
-/// fica e nenhuma vaga sobra.
+/// o titular ocupa — vivos, zumbis e mortos ainda não recolhidos —, e a
+/// suíte confere também entre as rajadas: nunca mais que a cota. Em cada
+/// olhada, a conta da cota tem de ser a da definição. No fim, o colhedor
+/// encerrado, nenhum zumbi fica e nenhuma vaga sobra.
 ///
 /// # Por que os lançadores andam com as rajadas
 ///

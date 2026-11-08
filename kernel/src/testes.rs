@@ -38648,14 +38648,6 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo,
     },
     Caso {
-        nome: "zumbis: a conta da cota segue a definicao do zumbi",
-        f: zumbis::zumbis_a_conta_da_cota_segue_a_definicao,
-    },
-    Caso {
-        nome: "zumbis: a conta da cota acha o pai fora da ordem das vagas",
-        f: zumbis::zumbis_a_conta_da_cota_acha_o_pai_fora_da_ordem_das_vagas,
-    },
-    Caso {
         nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",
         f: vagas::vagas_o_morto_sem_a_limpeza_guarda_a_vaga,
     },

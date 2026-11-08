@@ -1376,9 +1376,24 @@ pub fn na_tabela_de_teste(id: u64) -> bool {
     com_escalonador(|e| e.fios.iter().flatten().any(|f| f.id.numero() == id))
 }
 
-/// Quantas vagas os processos com a `autoridade` ocupam agora — os vivos e
-/// os zumbis —, contadas pela definição: cada zumbi pela pergunta a
-/// `e_zumbi`, e não pela conta da cota. É a régua dos casos `zumbis:`.
+/// As vagas que os processos de um titular ocupam, por categoria — a régua
+/// dos casos `zumbis:`. Ver `Escalonador::ocupadas_por_categoria`.
+#[cfg(feature = "modo-teste")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Categorias {
+    /// Os que não terminaram: os vivos e os que estão nascendo.
+    pub vivos: usize,
+    /// Os terminados que o pai, vivo, ainda pode colher.
+    pub zumbis: usize,
+    /// Os terminados que não são zumbis — o filho colhido, o órfão, o do
+    /// `user.run` —, à espera do coletor.
+    pub mortos: usize,
+}
+
+/// Quantas vagas os processos com a `autoridade` ocupam agora — os vivos, os
+/// que nascem, os zumbis e os mortos ainda não recolhidos —, contadas pela
+/// definição, categoria por categoria, e não pela conta da cota. É a régua
+/// dos casos `zumbis:`.
 #[cfg(feature = "modo-teste")]
 pub fn ocupadas_de_teste(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.ocupadas_pela_definicao(autoridade))
@@ -1393,31 +1408,6 @@ pub fn contas_da_cota_de_teste(autoridade: crate::autorizacao::Autoridade) -> (u
         (
             e.processos_de(autoridade),
             e.ocupadas_pela_definicao(autoridade),
-        )
-    })
-}
-
-/// As duas contas de [`contas_da_cota_de_teste`] e, na mesma tomada da
-/// trava, os ids de quem não terminou na ordem das vagas — a ordem em que a
-/// conta da cota os junta, e que ela ordena antes da bisseção —, escritos em
-/// `destino`. Devolve as duas contas e quantos ids.
-#[cfg(feature = "modo-teste")]
-pub fn contas_e_vivos_de_teste(
-    autoridade: crate::autorizacao::Autoridade,
-    destino: &mut [u64; MAX_FIOS],
-) -> (usize, usize, usize) {
-    com_escalonador(|e| {
-        let mut quantos = 0;
-        for fio in e.fios.iter().flatten() {
-            if fio.estado != Estado::Terminado {
-                destino[quantos] = fio.id.numero();
-                quantos += 1;
-            }
-        }
-        (
-            e.processos_de(autoridade),
-            e.ocupadas_pela_definicao(autoridade),
-            quantos,
         )
     })
 }
@@ -1538,8 +1528,8 @@ pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta
 
 /// [`criar_como`] um processo, contado na cota do titular da `autoridade`:
 /// nasce só se o titular ocupar menos de `cota` vagas da tabela — com os
-/// processos vivos, os que estão nascendo e os zumbis (ver
-/// [`processos_de`]).
+/// processos vivos, os que estão nascendo, os zumbis e os mortos que o
+/// coletor ainda não recolheu (ver [`processos_de`]).
 ///
 /// # Por que a cota é conferida aqui, e não só no gate
 ///
@@ -1654,8 +1644,8 @@ pub unsafe fn bifurcar(
 
 /// Faz nascer um fio. Com `cota`, ele é um processo, e nasce só se o
 /// titular da autoridade dele ocupar menos que isso da tabela — os vivos,
-/// os que estão nascendo e os zumbis; ver [`criar_processo`], também para
-/// `nasceu`.
+/// os que estão nascendo, os zumbis e os mortos ainda não recolhidos; ver
+/// [`criar_processo`], também para `nasceu`.
 fn nascer(
     nome: &'static str,
     nascimento: Nascimento,
@@ -1985,72 +1975,82 @@ pub unsafe fn desistir_do_ocioso(vaga: usize) {
 
 impl Escalonador {
     /// Os processos com a `autoridade` que contam na cota de processos do
-    /// papel: os vivos, reservados também (um fio que está nascendo já
-    /// conta), e os zumbis, até o pai colher ou morrer. O morto que não é
-    /// zumbi também ocupa uma vaga, até o coletor passar, e não conta. Ver
-    /// [`processos_de`].
+    /// papel: toda vaga que um processo do titular ocupa na tabela — o vivo,
+    /// o que está nascendo (um fio reservado já conta), o zumbi e o morto
+    /// que não é zumbi: o filho colhido, o órfão, o do `user.run` —, até o
+    /// coletor recolher o morto. Ver [`processos_de`].
     ///
-    /// # Por que o zumbi conta
+    /// # Por que todo morto conta
     ///
-    /// O zumbi guarda a vaga até a colheita — ver [`Self::e_zumbi`].
-    /// Contando só os vivos, um titular com uma cota pequena e um programa
-    /// que bifurca e não colhe passava pela cota a cada filho e ocupava a
-    /// tabela inteira: daí em diante não nascia fio nenhum, de ninguém —
-    /// nem o do `system.reboot`. É a decisão 14.1: a cota limita o que o
-    /// titular ocupa da tabela, e não só o que ainda roda.
+    /// A cota limita o que o titular ocupa da tabela, e não só o que ainda
+    /// roda — a decisão 14.1. O zumbi guarda a vaga até a colheita (ver
+    /// [`Self::e_zumbi`]), e contar só os vivos deixava um programa que
+    /// bifurca e não colhe ocupar a tabela inteira. Mas a vaga de um morto só
+    /// volta pelo coletor, depois de soltar a morte dele
+    /// ([`Self::vaga_livre`]), e o morto que não é zumbi também a guarda até
+    /// a passada. Contando só os vivos, os que nascem e os zumbis, um
+    /// programa que bifurca, sai e colhe em laço passava pela cota a cada
+    /// filho colhido e, fazendo morrer mais depressa do que o coletor
+    /// recolhe, enchia a tabela: daí em diante não nascia fio de ninguém,
+    /// nem o do `system.reboot` (o achado A1 do adversário da correção da
+    /// vaga do morto). Por isso a conta é de vagas — a alternativa 1 da
+    /// decisão sobre o A1, de 8 de novembro de 2026. O preço é de quem
+    /// bifurca e colhe depressa: o filho colhido conta até o coletor o
+    /// recolher, e a cota recusa até lá.
     ///
-    /// # Por que não perguntar a `e_zumbi`
+    /// # Sem perguntar pelo pai
     ///
-    /// Zumbi é o que [`Self::e_zumbi`] diz: terminou, não foi colhido, e o
-    /// pai existe na tabela, com aquele id, e não terminou. Mas `e_zumbi`
-    /// procura o pai na tabela inteira, e perguntada a cada terminado faria
-    /// esta conta quadrática no tamanho da tabela — sob a trava do
-    /// escalonador, no caminho de todo `bifurcar` e de todo lançamento. Os
-    /// ids de quem não terminou são juntados uma vez, numa pilha de
-    /// [`MAX_FIOS`] ids, sem pedir memória; ordenados, o pai de cada
-    /// terminado é procurado entre eles por bisseção. A pergunta é a mesma,
-    /// e a suíte confere as duas contas uma contra a outra.
+    /// O zumbi e o morto que não é zumbi contam do mesmo jeito, e a conta
+    /// não pergunta a [`Self::e_zumbi`]: uma volta pela tabela, sem pedir
+    /// memória, no caminho de todo `bifurcar` e de todo lançamento. A suíte
+    /// confere a conta contra a definição, categoria por categoria (a régua
+    /// `ocupadas_por_categoria`, que só existe no modo de teste).
+    ///
+    /// # O marcador do coletor
+    ///
+    /// Enquanto o coletor solta a morte de um morto, o morto já saiu da
+    /// tabela, e a vaga dele guarda um marcador de ninguém
+    /// ([`recolher_terminados`]), que não conta: durante uma limpeza, o
+    /// titular pode ocupar uma vaga a mais que a cota — uma por recolhedor.
     fn processos_de(&self, autoridade: crate::autorizacao::Autoridade) -> usize {
-        let mut vivos = [IdFio(0); MAX_FIOS];
-        let mut quantos = 0;
-        let ids = self
-            .fios
-            .iter()
-            .flatten()
-            .filter(|f| f.estado != Estado::Terminado)
-            .map(|f| f.id);
-        for (vaga, id) in vivos.iter_mut().zip(ids) {
-            *vaga = id;
-            quantos += 1;
-        }
-        let vivos = &mut vivos[..quantos];
-        vivos.sort_unstable();
         self.fios
             .iter()
             .flatten()
-            .filter(|f| {
-                f.nome == NOME_DO_PROCESSO
-                    && f.autoridade == autoridade
-                    && (f.estado != Estado::Terminado
-                        || (!f.colhido
-                            && f.pai.is_some_and(|pai| vivos.binary_search(&pai).is_ok())))
-            })
+            .filter(|f| f.nome == NOME_DO_PROCESSO && f.autoridade == autoridade)
             .count()
     }
 
-    /// A mesma conta de [`Self::processos_de`], pela definição: os vivos, e
-    /// os zumbis perguntando a [`Self::e_zumbi`] por cada um. Quadrática, e
-    /// só da suíte — é a régua com que ela confere a conta da cota.
+    /// A conta de [`Self::processos_de`] pela definição, categoria por
+    /// categoria: os vivos e os que nascem; os zumbis, perguntando a
+    /// [`Self::e_zumbi`] por cada terminado; e os mortos que não são zumbis,
+    /// até o coletor recolhê-los. Quadrática, e só da suíte — é a régua com
+    /// que ela confere a conta da cota.
+    #[cfg(feature = "modo-teste")]
+    fn ocupadas_por_categoria(&self, autoridade: crate::autorizacao::Autoridade) -> Categorias {
+        let mut c = Categorias::default();
+        for i in 0..MAX_FIOS {
+            let Some(f) = &self.fios[i] else {
+                continue;
+            };
+            if f.nome != NOME_DO_PROCESSO || f.autoridade != autoridade {
+                continue;
+            }
+            if f.estado != Estado::Terminado {
+                c.vivos += 1;
+            } else if self.e_zumbi(i) {
+                c.zumbis += 1;
+            } else {
+                c.mortos += 1;
+            }
+        }
+        c
+    }
+
+    /// A soma de [`Self::ocupadas_por_categoria`].
     #[cfg(feature = "modo-teste")]
     fn ocupadas_pela_definicao(&self, autoridade: crate::autorizacao::Autoridade) -> usize {
-        (0..MAX_FIOS)
-            .filter(|&i| {
-                matches!(&self.fios[i], Some(f)
-                    if f.nome == NOME_DO_PROCESSO
-                        && f.autoridade == autoridade
-                        && (f.estado != Estado::Terminado || self.e_zumbi(i)))
-            })
-            .count()
+        let c = self.ocupadas_por_categoria(autoridade);
+        c.vivos + c.zumbis + c.mortos
     }
 
     /// Uma vaga vazia — a primeira.
@@ -2081,12 +2081,12 @@ impl Escalonador {
     /// passada seguinte dele: uma por tique em que ele ganha a vez — mais
     /// tarde, com os núcleos ocupados. Uma tabela cheia de mortos ainda não
     /// recolhidos recusa um fio novo, com o motivo de sempre, até o coletor
-    /// passar. Um morto que não é zumbi — o colhido, o órfão, o do
-    /// `user.run` — não conta na cota do titular, que conta os vivos, os que
-    /// nascem e os zumbis, mas segura a vaga até a passada: um programa que
-    /// bifurca, sai e colhe em laço pode ocupar, entre duas passadas, mais
-    /// vagas que a cota (as decisões pendentes do README). E a conta perde a pergunta a `e_zumbi` por
-    /// vaga, que era quadrática no tamanho da tabela.
+    /// passar. O morto que segura a vaga conta na cota do titular dele até
+    /// a passada — o zumbi, e também o que não é zumbi: o colhido, o órfão,
+    /// o do `user.run` (ver [`Self::processos_de`]) —, e um programa que
+    /// bifurca, sai e colhe em laço ouve a recusa da cota antes de passar
+    /// dela. E a conta perde a pergunta a `e_zumbi` por vaga, que era
+    /// quadrática no tamanho da tabela.
     fn vaga_livre(&self) -> Result<usize, &'static str> {
         self.fios
             .iter()
@@ -2948,13 +2948,12 @@ pub fn nucleo_de(id: u64) -> Option<usize> {
     })
 }
 
-/// Quantos processos com esta autoridade contam na cota: os fios que
-/// hospedam um programa — lançados por `user.run` ou pelo sistema, ou
-/// bifurcados — que não terminaram, e os zumbis, até o pai colher ou
-/// morrer. O morto que não é zumbi ocupa a vaga até o coletor passar, sem
-/// contar. É a conta da cota de processos do papel — ver
-/// [`crate::autorizacao::permitir_processo`] e, aqui, o porquê do zumbi e da
-/// conta sem custo quadrático, em `Escalonador::processos_de`.
+/// Quantos processos com esta autoridade contam na cota: toda vaga que um
+/// fio que hospeda um programa — lançado por `user.run` ou pelo sistema, ou
+/// bifurcado — ocupa na tabela, termine ele ou não, até o coletor recolher
+/// o morto. É a conta da cota de processos do papel — ver
+/// [`crate::autorizacao::permitir_processo`] e, aqui, o porquê de todo morto
+/// contar, em `Escalonador::processos_de`.
 pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.processos_de(autoridade))
 }
