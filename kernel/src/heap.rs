@@ -331,6 +331,10 @@ pub struct Alocador {
 // `Mutex` com interrupções mascaradas.
 unsafe impl GlobalAlloc for Alocador {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Na suíte: quem pede memória com a trava da auditoria na mão é
+        // contado — ver `autorizacao::alocacoes_sob_a_auditoria_de_teste`.
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::alocacoes_sob_a_auditoria_de_teste::ao_alocar();
         let Some((tamanho, alinhamento)) = ajustar(layout) else {
             return ptr::null_mut();
         };

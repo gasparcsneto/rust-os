@@ -1930,7 +1930,11 @@ recriou o diretório do TPM.
 
 **O que a queda deixa, e o que o firmware lê.** Numa queda planejada, o
 kernel com a feature `quedas` lê o plano no último setor da partição de
-estado, avisa `{"queda":N}` no canal no ponto, e congela — ou, no ponto
+estado, avisa `{"queda":N}` no canal no ponto — numa linha só, depois de
+esperar, até meio segundo, que outro núcleo termine a resposta que estiver
+escrevendo na serial: os outros núcleos continuam, e um aviso escrito por
+cima de uma resposta não se lê (a queda no meio da coleta da auditoria sob
+carga, com a serial pedindo sem parar, o mostrou) —, e congela — ou, no ponto
 antes da confirmação e com a bandeira 5 do plano, entra em pânico —; a
 bancada lê o aviso e corta a energia — o `SIGKILL` no QEMU e no `swtpm` —,
 apaga o plano e liga outra máquina: outro processo do QEMU, outro `swtpm`
@@ -2161,3 +2165,79 @@ falha no slot inativo, com o firmware bootando do NVMe sobre o disco
 hostil. Nada no kernel mudou, nem no iniciador.
 
 As mutações N221–N228 estão em [`SDK.md`](SDK.md).
+
+## A cópia da auditoria para o journal: a trava do gate
+
+A trava da auditoria é a do gate: todo pedido auditado a toma, com as
+interrupções mascaradas, para anexar o registro dele ao anel. O coletor
+— e toda gravação que leva a auditoria pendente — montava as entradas do
+journal com ela na mão: para cada registro, a codificação, a entrada e o
+campo do conteúdo — quatro ou cinco alocações, e outras tantas
+devoluções —, mais o vetor do conteúdo crescendo e o dos pendentes,
+juntado do anel inteiro. O alocador do kernel tem uma trava só, disputada
+pelos núcleos — o executor aloca a cada pedido —, e percorre a lista
+livre a cada chamada. Medido em 8/11/2026, na investigação de
+`nativo::atender_pendentes`: um lote de 16 KiB segurava a trava de 20 a
+64 ms em depuração, e o gate esperava por ela de 21 a 51 ms; em
+`release`, sob carga, de 16,7 a 28,4 ms, com o gate esperando até
+12,8 ms. O tique e os dispositivos do núcleo do coletor ficavam parados
+o mesmo tempo.
+
+### A cópia
+
+Com a trava na mão, agora, só se **copia**
+(`persistencia::auditoria_que_cabe`): a lacuna, se o anel perdeu
+registros depois da gravada, e os registros seguintes que cabem no
+registro do journal — cada um codificado
+(`politica::auditoria::codificar_em`) para dentro de um lugar reservado
+antes de a trava ser tomada, com a sequência e o elo dele. Nenhum pedido
+ao alocador lá dentro. Com a trava solta, as entradas são montadas pelas
+mesmas funções de sempre, e o registro é gravado como antes.
+
+- **O formato não muda.** A codificação é uma só: `codificar` é
+  `codificar_em` num vetor do tamanho certo, e as entradas são as de
+  sempre. O tamanho que a cópia reserva (`tamanho_codificado`) é
+  conferido contra a codificação no hospedeiro.
+- **A fotografia.** A lacuna, os registros e os elos saem da mesma tomada
+  da trava, e os registros são os seguidos à gravada — ou à lacuna. O que
+  é anexado depois da cópia tem sequência maior que a do último copiado e
+  vai na gravação seguinte; o que o anel descarta depois dela já está
+  copiado, e vai assim mesmo; e, se ele descartar também o que vinha
+  depois dos copiados, a gravação seguinte o diz numa lacuna, a partir do
+  último gravado — como sempre disse.
+- **Um escritor só.** Só quem tem a ordem das gravações copia e grava, e
+  só ela anda a gravada, depois de o registro estar escrito e
+  descarregado: entre a cópia e a gravação, ninguém copia a mesma faixa,
+  e a gravada não anda. Na suíte, a cópia sem a ordem é um pânico.
+- **A queda.** A gravada não vai ao disco: o boot a refaz do journal. Uma
+  queda em qualquer ponto da coleta — com a cópia feita, no meio da
+  escrita, depois da descarga e antes de a gravada andar — deixa o
+  journal com o registro inteiro ou sem ele, e o boot continua a cadeia
+  do último que está lá. Entre a cópia e a montagem nada vai ao disco: a
+  queda ali é a de antes da escrita.
+- **A compactação** copia o anel do mesmo jeito: a primeira tomada só
+  mede quantos registros são e quantos pedaços de 16 KiB a cópia ocupa;
+  os pedaços são reservados fora; a segunda copia. Entre as duas, o anel
+  só perde registros desses, pela ponta — os que entram têm sequência
+  maior que a gravada, e a gravada não anda —, e a cópia cabe no que se
+  mediu. Nenhum pedido ao heap passa de 16 KiB por isso.
+
+### O que continua com a trava
+
+- O próprio anexar: o elo, um BLAKE2s, e, com o anel cheio, a devolução
+  do registro que sai pela ponta — cinco devoluções ao alocador, com a
+  trava na mão. É de cada pedido auditado, e não do coletor.
+- O `audit.tail`, que copia até 128 registros para responder — até cinco
+  alocações por registro, com a trava na mão —, e o `audit.verify`, que
+  refaz os elos do anel inteiro com ela.
+
+Nenhum dos três é a codificação pendente para o journal; ficam
+registrados, para uma medida e uma decisão à parte.
+
+### Os testes
+
+| Onde | O que confere |
+|---|---|
+| hospedeiro (`politica`): *o tamanho codificado é o da codificação*, *codificar_em acrescenta o mesmo sem alocar*, *antes e depois pela posição são os do filtro* | a conta do tamanho igual à da codificação, com o corte do texto acima do teto; a codificação acrescentada igual byte a byte, sem trocar de memória com o lugar reservado; os guardados antes e depois de uma sequência, achados pela posição, iguais aos do filtro — e a lacuna, a de sempre |
+| suíte: os casos `coleta:` | a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; e a compactação |
+| bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava; mais um boot confere de novo |

@@ -333,21 +333,55 @@ pub fn antes_da_confirmacao() {
     cair(Ponto::AntesDaConfirmacao)
 }
 
-/// A energia cai aqui: o aviso sai pelo canal do agente, e a máquina
-/// congela com as interrupções desligadas.
+/// Quanto [`cair`] espera, no máximo, o dono da trava da serial terminar a
+/// resposta que escreve — ver lá.
+const ESPERA_PELA_SERIAL_NS: u64 = 500_000_000;
+
+/// O teto de voltas da mesma espera, para quando a régua do tempo ainda
+/// não foi calibrada — uma queda planejada no começo do boot.
+const VOLTAS_PELA_SERIAL: u32 = 50_000_000;
+
+/// A energia cai aqui: o aviso sai pelo canal do agente, e este
+/// processador congela com as interrupções desligadas.
 fn cair(p: Ponto) -> ! {
     crate::arch::sem_interrupcoes(|| {
-        // A trava da serial pode estar na mão deste mesmo processador — no
-        // modo post-mortem a resposta se escreve enquanto o handler
-        // executa —, e ele não volta daqui: soltá-la à força não corre o
-        // risco de ninguém. O `\n` do começo separa o aviso de uma resposta
-        // escrita pela metade.
-        //
-        // SAFETY: a máquina congela logo abaixo, com as interrupções
-        // desligadas e num processador só; nenhum dono da trava volta a
-        // usá-la.
-        unsafe { crate::serial::AGENT_LINK.force_unlock() };
-        if let Some(mut guarda) = crate::serial::AGENT_LINK.try_lock()
+        // Os outros processadores continuam: o canal do agente, noutro
+        // núcleo, pode estar no meio de uma resposta, com a trava da serial
+        // na mão. Escrever o aviso por cima dela misturaria os bytes dos
+        // dois — e nem o aviso nem a resposta se leriam (a bancada da
+        // queda no meio da coleta da auditoria sob carga, com a serial
+        // pedindo sem parar, o pegou). Por isso, primeiro, a vez: o dono
+        // solta a trava no fim da linha dele, e o aviso sai inteiro, numa
+        // linha só.
+        // A régua do tempo só existe depois da calibração: antes dela, a
+        // conta das voltas é o teto.
+        let inicio = crate::arch::ciclos();
+        let mut voltas = 0u32;
+        let mut guarda = loop {
+            if let Some(g) = crate::serial::AGENT_LINK.try_lock() {
+                break Some(g);
+            }
+            voltas += 1;
+            if voltas >= VOLTAS_PELA_SERIAL
+                || crate::metricas::nanos(crate::metricas::desde(inicio)) >= ESPERA_PELA_SERIAL_NS
+            {
+                break None;
+            }
+            core::hint::spin_loop();
+        };
+        // Sem a vez no prazo, a trava está na mão deste mesmo processador —
+        // no modo post-mortem a resposta se escreve enquanto o handler
+        // executa —, ou na de quem parou com ela: soltá-la à força não corre
+        // o risco de ninguém. O `\n` do começo separa o aviso de uma
+        // resposta escrita pela metade.
+        if guarda.is_none() {
+            // SAFETY: este processador congela logo abaixo, com as
+            // interrupções desligadas; o dono da trava, se é ele, não volta
+            // a usá-la, e, se é outro, não a soltou em meio segundo.
+            unsafe { crate::serial::AGENT_LINK.force_unlock() };
+            guarda = crate::serial::AGENT_LINK.try_lock();
+        }
+        if let Some(mut guarda) = guarda
             && let Some(porta) = guarda.as_mut()
         {
             let mut aviso = *b"\n{\"queda\":000}\n";

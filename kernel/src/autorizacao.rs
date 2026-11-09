@@ -3146,6 +3146,51 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
     );
 }
 
+/// Só para a suíte: este núcleo tem a trava da auditoria na mão agora —
+/// pela conferência da ordem das travas, sem tomá-la.
+#[cfg(feature = "modo-teste")]
+pub fn auditoria_na_mao_de_teste() -> bool {
+    AUDITORIA.na_mao_deste_nucleo()
+}
+
+/// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador com
+/// a trava da auditoria na mão — o que a cópia da auditoria para o journal
+/// não faz (ver "A cópia", em `persistencia`). O alocador pergunta a cada
+/// pedido, antes de tomar a trava dele, e a pergunta não aloca nem toma
+/// trava nenhuma. As devoluções não contam: quem anexa ao anel cheio devolve
+/// o registro que sai pela ponta com a trava na mão, desde sempre.
+#[cfg(feature = "modo-teste")]
+pub mod alocacoes_sob_a_auditoria_de_teste {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// O fio vigiado, como `id + 1`; zero, nenhum.
+    static VIGIADO: AtomicU64 = AtomicU64::new(0);
+    static PEDIDOS: AtomicU64 = AtomicU64::new(0);
+
+    /// Vigia o fio `fio`, com a conta zerada.
+    pub fn vigiar(fio: u64) {
+        PEDIDOS.store(0, Ordering::Release);
+        VIGIADO.store(fio + 1, Ordering::Release);
+    }
+
+    /// Para de vigiar; devolve a conta.
+    pub fn esquecer() -> u64 {
+        VIGIADO.store(0, Ordering::Release);
+        PEDIDOS.load(Ordering::Acquire)
+    }
+
+    /// Chamada pelo alocador a cada pedido de memória.
+    pub fn ao_alocar() {
+        let vigiado = VIGIADO.load(Ordering::Relaxed);
+        if vigiado != 0
+            && vigiado == crate::fios::id_atual_sem_trava() + 1
+            && super::AUDITORIA.na_mao_deste_nucleo()
+        {
+            PEDIDOS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Só para a suíte: os baldes dos serviços saem, e o pedido seguinte de
 /// cada um começa um cheio. Os casos do tecido fazem as voltas do NSF uma
 /// atrás da outra, sem a cadência do fio, e o balde é um só para todos

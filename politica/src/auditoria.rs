@@ -417,18 +417,31 @@ pub fn resumo_dos_parametros(parametros: &[u8]) -> [u8; 32] {
 /// campo, os variáveis com dois bytes de tamanho. O elo não vai: quem lê
 /// refaz a conta, e um elo gravado seria só mais um campo a conferir.
 pub fn codificar(seq: u64, e: &Evento) -> Vec<u8> {
+    let mut v = Vec::with_capacity(tamanho_codificado(e));
+    codificar_em(&mut v, seq, e);
+    v
+}
+
+/// [`codificar`], acrescentando ao fim de `v` em vez de num vetor novo — a
+/// mesma codificação, byte a byte: [`codificar`] é esta, num vetor do
+/// tamanho certo, e não há outra.
+///
+/// # Para quem copia com uma trava na mão
+///
+/// Com o lugar reservado antes — ao menos [`tamanho_codificado`] bytes
+/// livres em `v` —, nada aqui pede memória: são só cópias de campos para
+/// dentro do que já existe. É assim que o journal copia os registros do
+/// anel da auditoria com a trava dele na mão, sem chamar o alocador lá
+/// dentro — ver "A cópia", em `kernel/src/persistencia.rs`.
+pub fn codificar_em(v: &mut Vec<u8>, seq: u64, e: &Evento) {
     // Os textos do kernel têm teto bem abaixo disso; o corte, se um dia
     // acontecer, fica numa fronteira de caractere, para o registro
-    // continuar se lendo.
+    // continuar se lendo — ver [`corte_do_texto`].
     fn texto(v: &mut Vec<u8>, t: &str) {
-        let mut n = t.len().min(u16::MAX as usize);
-        while !t.is_char_boundary(n) {
-            n -= 1;
-        }
+        let n = corte_do_texto(t);
         v.extend_from_slice(&(n as u16).to_le_bytes());
         v.extend_from_slice(&t.as_bytes()[..n]);
     }
-    let mut v = Vec::with_capacity(128);
     v.extend_from_slice(&seq.to_le_bytes());
     v.extend_from_slice(&e.ts_ms.to_le_bytes());
     v.push(e.titular as u8);
@@ -449,12 +462,42 @@ pub fn codificar(seq: u64, e: &Evento) -> Vec<u8> {
     }
     v.push(e.codigo as u8);
     v.extend_from_slice(&e.parametros);
-    texto(&mut v, &e.agente);
-    texto(&mut v, &e.papel);
-    texto(&mut v, &e.metodo);
-    texto(&mut v, &e.recurso);
-    texto(&mut v, &e.detalhe);
-    v
+    texto(v, &e.agente);
+    texto(v, &e.papel);
+    texto(v, &e.metodo);
+    texto(v, &e.recurso);
+    texto(v, &e.detalhe);
+}
+
+/// Quantos bytes de um texto vão ao journal: ele inteiro, ou cortado no
+/// teto de um campo de dois bytes de tamanho, numa fronteira de caractere.
+fn corte_do_texto(t: &str) -> usize {
+    let mut n = t.len().min(u16::MAX as usize);
+    while !t.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// O menor registro codificado: os campos fixos — a sequência, o tempo, o
+/// titular, a sessão, as duas marcas de presença, o código e o resumo dos
+/// parâmetros — e os cinco textos vazios, só com o tamanho.
+pub const MENOR_CODIFICADO: usize = 8 + 8 + 1 + 1 + 1 + 1 + 1 + 32 + 5 * 2;
+
+/// Quantos bytes [`codificar`] dá para `e`, sem codificar: a conta dos
+/// mesmos campos, com o mesmo corte dos textos. É o que deixa quem copia
+/// registros reservar o lugar antes, e saber, registro a registro, se o
+/// próximo ainda cabe.
+pub fn tamanho_codificado(e: &Evento) -> usize {
+    let texto = |t: &str| 2 + corte_do_texto(t);
+    MENOR_CODIFICADO - 5 * 2
+        + e.sessao_de_pessoa.map_or(0, |s| s.len())
+        + e.chave.map_or(0, |k| k.len())
+        + texto(&e.agente)
+        + texto(&e.papel)
+        + texto(&e.metodo)
+        + texto(&e.recurso)
+        + texto(&e.detalhe)
 }
 
 /// O caminho de volta de [`codificar`]. Recusa o que não termina
@@ -695,16 +738,47 @@ impl Cadeia {
     /// O que falta gravar depois da sequência `gravada`: uma lacuna, se o
     /// anel já perdeu registros posteriores a ela, e os que ele ainda tem.
     pub fn a_gravar(&self, gravada: u64) -> AGravar<'_> {
+        AGravar {
+            lacuna: self.lacuna_depois_de(gravada),
+            registros: self.guardados_depois_de(gravada).collect(),
+        }
+    }
+
+    /// A lacuna depois da sequência `gravada`: os registros posteriores a
+    /// ela que o anel já perdeu — do seguinte a ela até o de antes do
+    /// primeiro guardado, com o elo deste último, que é a âncora —, ou
+    /// `None`, se o anel não perdeu nenhum.
+    pub fn lacuna_depois_de(&self, gravada: u64) -> Option<Lacuna> {
         let primeira_no_anel = self.registros.front().map_or(self.proximo_seq, |r| r.seq);
-        let lacuna = (gravada + 1 < primeira_no_anel).then_some(Lacuna {
+        (gravada + 1 < primeira_no_anel).then_some(Lacuna {
             primeira: gravada + 1,
             ultima: primeira_no_anel - 1,
             elo: self.ancora,
-        });
-        AGravar {
-            lacuna,
-            registros: self.registros.iter().filter(|r| r.seq > gravada).collect(),
-        }
+        })
+    }
+
+    /// Os registros guardados de sequência maior que `gravada`, do mais
+    /// antigo ao mais novo — os mesmos que o filtro pela sequência daria,
+    /// sem passar pelos de antes: as sequências da janela são seguidas, e o
+    /// primeiro deles fica à distância de `gravada + 1` ao primeiro
+    /// guardado. Nada aqui pede memória.
+    pub fn guardados_depois_de(&self, gravada: u64) -> impl Iterator<Item = &Registro> {
+        self.registros.range(self.posicao_depois_de(gravada)..)
+    }
+
+    /// Os registros guardados de sequência até `gravada`, inclusive, do
+    /// mais antigo ao mais novo: o começo da janela. Nada aqui pede memória.
+    pub fn guardados_ate(&self, gravada: u64) -> impl Iterator<Item = &Registro> {
+        self.registros.range(..self.posicao_depois_de(gravada))
+    }
+
+    /// Quantos dos guardados têm sequência até `gravada`: o lugar, na
+    /// janela, do seguinte a ela.
+    fn posicao_depois_de(&self, gravada: u64) -> usize {
+        let primeira = self.registros.front().map_or(self.proximo_seq, |r| r.seq);
+        usize::try_from(gravada.saturating_add(1).saturating_sub(primeira))
+            .unwrap_or(usize::MAX)
+            .min(self.registros.len())
     }
 
     /// Acrescenta, nesta cadeia, os eventos que a `outra` tem no anel, na
@@ -1601,5 +1675,128 @@ mod testes {
         c.anexar(e);
         let d = &c.ultimos(1).next().unwrap().evento.detalhe;
         assert!(d.len() <= MAIOR_DETALHE);
+    }
+
+    /// Eventos de todos os tamanhos: cada campo opcional presente e
+    /// ausente, texto que não é ASCII, os cinco textos vazios — o menor — e
+    /// um texto acima do teto de um campo, com um caractere de dois bytes
+    /// em cima do corte.
+    fn de_todos_os_tamanhos() -> Vec<Evento> {
+        let mut v: Vec<Evento> = (0..12).map(variado).collect();
+        let mut menor = evento(0);
+        menor.sessao_de_pessoa = None;
+        menor.chave = None;
+        menor.agente = String::new();
+        menor.papel = String::new();
+        menor.metodo = String::new();
+        menor.recurso = String::new();
+        menor.detalhe = String::new();
+        v.push(menor);
+        let mut enorme = evento(1);
+        enorme.recurso = "x".repeat(u16::MAX as usize - 1) + "é" + "fim";
+        v.push(enorme);
+        v
+    }
+
+    /// O tamanho dito é o da codificação, para todo evento — com o corte
+    /// do texto acima do teto inclusive —, e nunca menos que o menor; o
+    /// evento de textos vazios e sem os opcionais é o menor.
+    #[test]
+    fn o_tamanho_codificado_e_o_da_codificacao() {
+        let eventos = de_todos_os_tamanhos();
+        for (i, e) in eventos.iter().enumerate() {
+            let n = codificar(i as u64 + 1, e).len();
+            assert_eq!(tamanho_codificado(e), n, "evento {i}");
+            assert!(n >= MENOR_CODIFICADO, "evento {i}");
+        }
+        assert_eq!(tamanho_codificado(&eventos[12]), MENOR_CODIFICADO);
+        // O texto acima do teto vai cortado antes do caractere que o
+        // atravessaria: os 65 534 `x`, e nada do `é`.
+        let enorme = &eventos[13];
+        assert_eq!(
+            tamanho_codificado(enorme) - tamanho_codificado(&evento(1)),
+            u16::MAX as usize - 1 - evento(1).recurso.len()
+        );
+    }
+
+    /// `codificar_em` acrescenta exatamente o que `codificar` dá, um
+    /// depois do outro, sem mexer no que já estava; e, com o lugar
+    /// reservado antes pelo tamanho dito, não troca de memória: nenhum
+    /// pedido ao alocador no meio.
+    #[test]
+    fn codificar_em_acrescenta_o_mesmo_sem_alocar() {
+        let eventos = de_todos_os_tamanhos();
+        let total: usize = 3 + eventos.iter().map(tamanho_codificado).sum::<usize>();
+        let mut v = Vec::with_capacity(total);
+        v.extend_from_slice(b"abc");
+        let antes = v.as_ptr();
+        let mut esperado = b"abc".to_vec();
+        for (i, e) in eventos.iter().enumerate() {
+            codificar_em(&mut v, i as u64 + 7, e);
+            esperado.extend_from_slice(&codificar(i as u64 + 7, e));
+        }
+        assert_eq!(v, esperado);
+        assert_eq!(v.len(), total);
+        assert_eq!(v.as_ptr(), antes, "a codificacao trocou de memoria");
+        // E volta: cada um, lido do lugar dele, é o evento de antes — o
+        // de texto acima do teto, cortado.
+        let mut inicio = 3;
+        for (i, e) in eventos.iter().enumerate().take(13) {
+            let fim = inicio + tamanho_codificado(e);
+            assert_eq!(decodificar(&v[inicio..fim]), Ok((i as u64 + 7, e.clone())));
+            inicio = fim;
+        }
+    }
+
+    /// Os guardados depois de uma sequência e até ela, achados pela
+    /// posição — sem passar pela janela —, são os mesmos que o filtro pela
+    /// sequência dá: sem nenhum guardado, com a janela pela metade, depois
+    /// de o anel dar a volta e depois de uma lacuna reposta. E a lacuna
+    /// depois de uma sequência é a de [`Cadeia::a_gravar`].
+    #[test]
+    fn antes_e_depois_pela_posicao_sao_os_do_filtro() {
+        fn confere(c: &Cadeia, ate: u64) {
+            let todos: Vec<u64> = c.ultimos(usize::MAX).map(|r| r.seq).collect();
+            for g in 0..=ate + 2 {
+                let depois: Vec<u64> = c.guardados_depois_de(g).map(|r| r.seq).collect();
+                let antes: Vec<u64> = c.guardados_ate(g).map(|r| r.seq).collect();
+                let filtro = |f: &dyn Fn(u64) -> bool| -> Vec<u64> {
+                    todos.iter().copied().filter(|s| f(*s)).collect()
+                };
+                assert_eq!(depois, filtro(&|s: u64| s > g), "depois de {g}");
+                assert_eq!(antes, filtro(&|s: u64| s <= g), "ate {g}");
+                let falta = c.a_gravar(g);
+                let seqs: Vec<u64> = falta.registros.iter().map(|r| r.seq).collect();
+                assert_eq!(seqs, depois, "a gravar depois de {g}");
+                assert_eq!(falta.lacuna, c.lacuna_depois_de(g), "lacuna depois de {g}");
+            }
+            // A sequência mais alta que há não passa do fim.
+            assert_eq!(c.guardados_depois_de(u64::MAX).count(), 0);
+            assert_eq!(c.guardados_ate(u64::MAX).count(), todos.len());
+        }
+        let mut c = Cadeia::nova(4);
+        confere(&c, 0);
+        for i in 0..3 {
+            c.anexar(variado(i));
+        }
+        confere(&c, 3);
+        for i in 3..10 {
+            c.anexar(variado(i));
+        }
+        confere(&c, 10);
+        assert_eq!(
+            c.lacuna_depois_de(2).map(|l| (l.primeira, l.ultima)),
+            Some((3, 6))
+        );
+        let mut b = Cadeia::nova(4);
+        b.pular(Lacuna {
+            primeira: 1,
+            ultima: 5,
+            elo: [3; 32],
+        })
+        .unwrap();
+        confere(&b, 6);
+        b.anexar(variado(1));
+        confere(&b, 7);
     }
 }

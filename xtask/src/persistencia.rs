@@ -1096,6 +1096,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: as_quedas_na_auditoria,
     },
     Cenario {
+        nome: "a queda no meio da coleta da auditoria sob carga: o gravado volta igual, sem buraco nem repeticao, e a cadeia continua",
+        rodar: as_quedas_na_coleta_sob_carga,
+    },
+    Cenario {
         nome: "a queda entre o lote no volume e a confirmacao: o lote nao vale, e o volume segue",
         rodar: a_queda_entre_o_volume_e_a_confirmacao,
     },
@@ -5683,6 +5687,219 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     ))
 }
 
+/// Em que registro só de auditoria do boot a energia cai, sob carga: o
+/// décimo — com a carga da serial, o coletor grava mais de um por passada,
+/// e a queda cai depois de pelo menos uma passada inteira, com a carga
+/// tendo visto registros gravados, e no meio de outra.
+const REGISTRO_DA_QUEDA_SOB_CARGA: u32 = 10;
+
+/// Quantos `agent.ping` a carga manda de uma vez, antes de cada leitura do
+/// que ficou gravado.
+const RAJADA_DA_CARGA: usize = 40;
+
+/// O que veio da serial durante a carga.
+#[derive(Debug, PartialEq, Eq)]
+enum Lido {
+    /// A resposta do pedido esperado.
+    Resposta(String),
+    /// O aviso da queda, com o ponto.
+    Queda(u8),
+}
+
+/// Lê a serial até a resposta do pedido `id` — as dos outros passam — ou
+/// até o aviso da queda, o que vier primeiro, e até `limite`. Um tempo sem
+/// nada não perde o que veio pela metade — ver [`esperar_o_aviso_com`].
+fn ate_a_resposta_ou_a_queda(
+    leitor: &mut impl std::io::BufRead,
+    id: u32,
+    limite: Instant,
+) -> Result<Lido, String> {
+    let mut linha = String::new();
+    loop {
+        match leitor.read_line(&mut linha) {
+            Ok(0) => return Err("o canal fechou no meio da carga".into()),
+            Ok(_) => {
+                if let Some(p) = aviso_de_queda(&linha) {
+                    return Ok(Lido::Queda(p));
+                }
+                if super::campo_simples(&linha, "id").and_then(|v| v.parse::<u32>().ok())
+                    == Some(id)
+                {
+                    return Ok(Lido::Resposta(linha));
+                }
+                linha.clear();
+            }
+            Err(_) => {}
+        }
+        if Instant::now() >= limite {
+            return Err("a carga ficou sem a resposta e sem o aviso da queda".into());
+        }
+    }
+}
+
+/// A carga da serial até a energia cair: rajadas de `agent.ping`, cada uma
+/// seguida de um `audit.tail` do que veio depois do último registro visto
+/// gravado — o que ele diz gravado fica anotado, pelo número. Corta a
+/// energia; devolve o ponto em que caiu e os anotados.
+fn carga_ate_cair(mut m: Ligada) -> Result<(u8, std::collections::BTreeMap<u64, Rastro>), String> {
+    let mut vistos = std::collections::BTreeMap::new();
+    let limite = Instant::now() + ESPERA_PELA_QUEDA;
+    let caiu = (|| -> Result<u8, String> {
+        m.esperar_respostas_por(Duration::from_secs(2))?;
+        let mut depois = 0u64;
+        loop {
+            for _ in 0..RAJADA_DA_CARGA {
+                m.mandar("agent.ping", "{}")?;
+            }
+            let id = m.mandar(
+                "audit.tail",
+                &format!(r#"{{"after":{depois},"count":{MAIOR_CAUDA}}}"#),
+            )?;
+            match ate_a_resposta_ou_a_queda(&mut m.leitor, id, limite)? {
+                Lido::Queda(p) => return Ok(p),
+                Lido::Resposta(r) if r.contains(r#"{"seq":"#) => {
+                    for rastro in rastros(&r)?.into_iter().filter(|r| r.duravel) {
+                        depois = depois.max(rastro.seq);
+                        vistos.insert(rastro.seq, rastro);
+                    }
+                }
+                Lido::Resposta(_) => {}
+            }
+        }
+    })();
+    m.cortar_a_energia()?;
+    Ok((caiu?, vistos))
+}
+
+/// O anel da auditoria de depois de um corte — `anel`, do mais velho ao
+/// mais novo —, contra os registros vistos gravados antes dele: sem buraco
+/// nem repetição; cada visto que o anel ainda alcança, de volta igual — o
+/// mesmo elo, o mesmo método, gravado — e antes de `comeco`, o primeiro
+/// registro do boot de agora; e, se o registro do corte `vale`, a cadeia
+/// do boot cortado passa do último visto gravado. Devolve quantos vistos
+/// conferiu.
+fn conferir_o_anel_do_corte(
+    anel: &[Rastro],
+    vistos: &std::collections::BTreeMap<u64, Rastro>,
+    comeco: u64,
+    vale: bool,
+) -> Result<usize, String> {
+    if let Some(w) = anel.windows(2).find(|w| w[1].seq != w[0].seq + 1) {
+        return Err(format!(
+            "o anel da auditoria pula ou repete: o {} depois do {}",
+            w[1].seq, w[0].seq
+        ));
+    }
+    let alcance = anel.first().map_or(u64::MAX, |r| r.seq);
+    let mut conferidos = 0;
+    for (&seq, visto) in vistos.range(alcance..) {
+        match anel.get((seq - alcance) as usize) {
+            Some(r)
+                if r.seq == seq
+                    && r.elo == visto.elo
+                    && r.metodo == visto.metodo
+                    && r.duravel
+                    && seq < comeco =>
+            {
+                conferidos += 1;
+            }
+            outro => {
+                return Err(format!(
+                    "o registro {seq}, visto gravado antes do corte, nao voltou igual antes do boot novo ({comeco}): {visto:?} / {outro:?}"
+                ));
+            }
+        }
+    }
+    let ultimo_visto = vistos.keys().next_back().copied().unwrap_or(0);
+    if vale && !anel.iter().any(|r| r.seq > ultimo_visto && r.seq < comeco) {
+        return Err(format!(
+            "o registro do corte estava no disco, e nada do boot cortado depois do {ultimo_visto} voltou"
+        ));
+    }
+    Ok(conferidos)
+}
+
+/// No boot de agora: a persistência de pé — um registro da auditoria
+/// repetido ou fora de ordem no journal a deixaria recusada —, a cadeia
+/// que se verifica, e o anel conferido contra os `vistos` gravados antes do
+/// corte ([`conferir_o_anel_do_corte`]).
+fn conferir_a_coleta_depois_do_corte(
+    m: &mut Ligada,
+    vistos: &std::collections::BTreeMap<u64, Rastro>,
+    vale: bool,
+) -> Result<usize, String> {
+    let p = persistencia_de(m)?;
+    if p.estado != "available" {
+        return Err(format!(
+            "o boot seguinte deixou a persistencia {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    auditoria_verifica(m)?;
+    let anel = auditoria_do_anel(m)?;
+    conferir_o_anel_do_corte(&anel, vistos, comeco_do_boot(&anel)?, vale)
+}
+
+/// A queda no meio da coleta da auditoria sob carga — a serial pedindo sem
+/// parar, e o coletor gravando várias vezes por passada: a energia cai em
+/// cada fronteira do décimo registro só de auditoria do boot
+/// ([`REGISTRO_DA_QUEDA_SOB_CARGA`]) — antes da escrita, depois dela (a que
+/// chegou ao disco, e a que se perdeu sem a descarga), depois da descarga e
+/// antes da confirmação —, com o anel crescendo, e a carga anotando o que o
+/// `audit.tail` diz gravado. No boot seguinte, nada do que se viu gravado
+/// sumiu ou mudou, o journal não tem buraco nem repetição — um registro
+/// repetido ou fora de ordem o faria recusado —, e, se o registro do corte
+/// está no disco, o que ele levava voltou. Esse boot grava a auditoria dele
+/// em cima, e mais um confere de novo: a cadeia continua.
+fn as_quedas_na_coleta_sob_carga(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let disco = disco_de_testes()?;
+    let mut relato = Vec::new();
+    for (ponto, perder, vale, caso) in QUEDAS_NA_AUDITORIA {
+        zerar_o_estado(arch)?;
+        plano_de_queda(&disco, ponto, tipo::AUDITORIA, REGISTRO_DA_QUEDA_SOB_CARGA)?;
+        let m = Ligada::subir(arch, artefato, None)?;
+        let (caiu, vistos) = carga_ate_cair(m).map_err(|e| format!("{caso}: {e}"))?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        if vistos.is_empty() {
+            return Err(format!(
+                "{caso}: a carga nao viu nada gravado antes da queda"
+            ));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let conferidos = conferir_a_coleta_depois_do_corte(&mut m, &vistos, vale);
+        let gravada = conferidos
+            .is_ok()
+            .then(|| esperar_a_auditoria_gravada(&mut m));
+        m.cortar_a_energia()?;
+        let conferidos = conferidos.map_err(|e| format!("{caso}: {e}"))?;
+        let gravada = gravada
+            .unwrap_or_else(|| Err("nao conferido".into()))
+            .map_err(|e| format!("{caso}: o boot depois da queda: {e}"))?;
+        let vistos_depois: std::collections::BTreeMap<u64, Rastro> = gravada
+            .into_iter()
+            .filter(|r| r.duravel)
+            .map(|r| (r.seq, r))
+            .collect();
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let de_novo = conferir_a_coleta_depois_do_corte(&mut m, &vistos_depois, false);
+        m.cortar_a_energia()?;
+        let de_novo = de_novo.map_err(|e| format!("{caso}: o boot seguinte ao seguinte: {e}"))?;
+        relato.push(format!(
+            "{caso}: {} vistos gravados, {conferidos} de volta iguais; depois, {de_novo}",
+            vistos.len()
+        ));
+    }
+    Ok(relato.join("; "))
+}
+
 /// Os blocos livres do volume, pelo `fs.stat`.
 fn livres_no_volume(m: &mut Ligada) -> Result<u64, String> {
     let r = m.pedir("fs.stat", r#"{"path":"/armazem"}"#)?;
@@ -7159,5 +7376,132 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
         let mut adiante = AnelDeMentira::com(300, 1024);
         let e = registro_de_numero_por(&mut |q| adiante.pedir(q), 400).unwrap_err();
         assert!(e.contains("ainda nao chegou ao registro 400"), "{e}");
+    }
+
+    /// Um registro do anel como o `audit.tail` o mostra, de mentira: o elo
+    /// diz a sequência, e o método é sempre o mesmo.
+    fn rastro(seq: u64, elo: &str) -> Rastro {
+        Rastro {
+            seq,
+            elo: elo.to_string(),
+            titular: "kernel".to_string(),
+            metodo: "agent.ping".to_string(),
+            recurso: String::new(),
+            codigo: "ALLOW".to_string(),
+            detalhe: String::new(),
+            duravel: true,
+        }
+    }
+
+    /// O anel de 100 a 300, com o boot novo a partir do 251.
+    fn anel_do_corte() -> Vec<Rastro> {
+        (100..=300).map(|s| rastro(s, &format!("e{s}"))).collect()
+    }
+
+    /// Os vistos gravados antes do corte, de `de` a `ate`.
+    fn vistos(de: u64, ate: u64) -> std::collections::BTreeMap<u64, Rastro> {
+        (de..=ate)
+            .map(|s| (s, rastro(s, &format!("e{s}"))))
+            .collect()
+    }
+
+    /// O anel inteiro, com cada visto de volta igual antes do boot novo e
+    /// a cadeia do boot cortado passando deles: confere — e os vistos que o
+    /// anel já não alcança não contam.
+    #[test]
+    fn o_anel_do_corte_que_confere() {
+        assert_eq!(
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(150, 200), 251, true),
+            Ok(51)
+        );
+        assert_eq!(
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(20, 120), 251, false),
+            Ok(21)
+        );
+    }
+
+    /// Um buraco ou uma repetição no anel, um visto que volta com outro elo
+    /// ou outro método, ou que não volta, ou que volta depois do começo do
+    /// boot novo: cada um reprova, e diz o quê.
+    #[test]
+    fn o_anel_do_corte_que_nao_confere() {
+        let mut buraco = anel_do_corte();
+        buraco.remove(60);
+        let e = conferir_o_anel_do_corte(&buraco, &vistos(150, 200), 251, false).unwrap_err();
+        assert!(e.contains("pula ou repete"), "{e}");
+
+        let mut repetido = anel_do_corte();
+        repetido.insert(60, rastro(160, "e160"));
+        let e = conferir_o_anel_do_corte(&repetido, &vistos(150, 200), 251, false).unwrap_err();
+        assert!(e.contains("pula ou repete"), "{e}");
+
+        let mut outro_elo = vistos(150, 200);
+        outro_elo.insert(170, rastro(170, "outro"));
+        let e = conferir_o_anel_do_corte(&anel_do_corte(), &outro_elo, 251, false).unwrap_err();
+        assert!(
+            e.contains("o registro 170") && e.contains("nao voltou igual"),
+            "{e}"
+        );
+
+        let mut outro_metodo = anel_do_corte();
+        outro_metodo[80].metodo = "audit.tail".to_string();
+        let e = conferir_o_anel_do_corte(&outro_metodo, &vistos(150, 200), 251, false).unwrap_err();
+        assert!(e.contains("o registro 180"), "{e}");
+
+        let mut nao_gravado = anel_do_corte();
+        nao_gravado[90].duravel = false;
+        let e = conferir_o_anel_do_corte(&nao_gravado, &vistos(150, 200), 251, false).unwrap_err();
+        assert!(e.contains("o registro 190"), "{e}");
+
+        let e =
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(150, 320), 251, false).unwrap_err();
+        assert!(e.contains("o registro 251"), "{e}");
+
+        // O boot novo começando antes de um visto: a cadeia recomeçou por
+        // cima do que estava gravado.
+        let e =
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(150, 200), 190, false).unwrap_err();
+        assert!(e.contains("o registro 190"), "{e}");
+    }
+
+    /// Com o registro do corte no disco, a cadeia do boot cortado passa do
+    /// último visto gravado; sem nada depois dele antes do boot novo,
+    /// reprova — e, com o registro do corte fora do disco, confere.
+    #[test]
+    fn o_registro_do_corte_que_vale_traz_o_que_levava() {
+        let e =
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(150, 250), 251, true).unwrap_err();
+        assert!(e.contains("nada do boot cortado depois do 250"), "{e}");
+        assert_eq!(
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(150, 250), 251, false),
+            Ok(101)
+        );
+    }
+
+    /// A carga lê até a resposta do pedido dela, passando pelas outras; o
+    /// aviso da queda, mesmo cortando uma linha pela metade, encerra a
+    /// leitura; e o canal que fecha é erro.
+    #[test]
+    fn a_carga_le_ate_a_resposta_ou_a_queda() {
+        let limite = Instant::now() + Duration::from_secs(5);
+        let texto = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"records\":[]}}\n",
+        );
+        let lido = ate_a_resposta_ou_a_queda(&mut texto.as_bytes(), 8, limite).unwrap();
+        assert!(
+            matches!(&lido, Lido::Resposta(r) if r.contains("\"id\":8")),
+            "{lido:?}"
+        );
+
+        let cortado = "{\"jsonrpc\":\"2.0\",\"id\":9,\"res\n{\"queda\":012}\n";
+        assert_eq!(
+            ate_a_resposta_ou_a_queda(&mut cortado.as_bytes(), 10, limite),
+            Ok(Lido::Queda(12))
+        );
+
+        let fechado = "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}\n";
+        let e = ate_a_resposta_ou_a_queda(&mut fechado.as_bytes(), 10, limite).unwrap_err();
+        assert!(e.contains("fechou"), "{e}");
     }
 }

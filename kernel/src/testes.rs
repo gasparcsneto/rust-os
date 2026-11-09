@@ -29,6 +29,7 @@ use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
 mod aviso;
+mod coleta;
 mod enlace;
 mod fluxo;
 mod pareamento;
@@ -37953,6 +37954,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "auditoria: a citacao da decisao fica inteira acima do teto",
         f: auditoria_a_citacao_fica_inteira,
+    },
+    Caso {
+        nome: "coleta: a copia da auditoria nao aloca com a trava na mao, e o anexado no meio fica para a gravacao seguinte",
+        f: coleta::a_trava_fica_solta_na_montagem,
+    },
+    Caso {
+        nome: "coleta: o anel que transborda no meio da coleta: o copiado vai inteiro, e o que saiu sem copia e uma lacuna",
+        f: coleta::o_anel_que_transborda_no_meio_da_coleta,
+    },
+    Caso {
+        nome: "coleta: a gravacao que falha nao anda a gravada, e a seguinte grava a mesma faixa uma vez",
+        f: coleta::a_gravacao_que_falha,
+    },
+    Caso {
+        nome: "coleta: produtores em varios nucleos e tres coletores: nada se perde, nada se repete, a ordem fica, e o boot refaz a cadeia",
+        f: coleta::produtores_e_coletores_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "coleta: a compactacao copia o anel sem alocar com a trava na mao, e a cadeia continua",
+        f: coleta::a_compactacao_copia_fora_da_trava,
     },
     Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
