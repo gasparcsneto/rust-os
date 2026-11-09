@@ -39881,6 +39881,10 @@ static CASOS: &[Caso] = &[
         f: icp_o_gestor_do_saldo_ao_apagado,
     },
     Caso {
+        nome: "icp: as conferencias do IC nao veem o Principal do registro",
+        f: icp_as_conferencias_nao_veem_o_principal_do_registro,
+    },
+    Caso {
         nome: "icp: o gestor nas bordas do tamanho",
         f: icp_o_gestor_nas_bordas_do_tamanho,
     },
@@ -62565,57 +62569,150 @@ fn declaracao_de_consulta(
 
 /// Os registros do processo `fio` fora das alegações dele — todos menos o
 /// `audit.declare` com a alegação no recurso — em que aparece um dos
-/// `termos`, na janela da auditoria. Copiados com a trava; cada um dito no
-/// log fora dela — o termo, o número e o evento inteiro —, para a falha
-/// dizer o registro, e não só o número dele. Devolve os números.
+/// `termos`, na janela da auditoria — ver [`termo_no_evento`]. Com a trava
+/// da auditoria, só a cópia dos registros do processo; fora dela, a busca
+/// dos termos e, de cada um que tem algum, o log — o termo, o número e o
+/// evento inteiro —, para a falha dizer o registro, e não só o número
+/// dele. Devolve os números.
 fn fora_da_alegacao(fio: u64, termos: &[&str], o_que: &str) -> alloc::vec::Vec<u64> {
     let do_processo = do_processo(fio);
-    let fora = crate::autorizacao::com_auditoria(|c| {
+    let copiados = crate::autorizacao::com_auditoria(|c| {
         c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
             .filter(|r| r.evento.detalhe.starts_with(&do_processo))
             .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
-            .filter_map(|r| {
-                let e = alloc::format!("{:?}", r.evento);
-                let termo = *termos.iter().find(|t| e.contains(**t))?;
-                Some((r.seq, termo, e))
-            })
+            .map(|r| (r.seq, r.evento.clone()))
             .collect::<alloc::vec::Vec<_>>()
     })
     .unwrap_or_default();
-    for (seq, termo, e) in &fora {
-        crate::log_error!(
-            "teste",
-            "{} fora da alegacao: {:?} no registro {}: {}",
-            o_que,
-            termo,
-            seq,
-            e
-        );
-    }
-    fora.into_iter().map(|(seq, _, _)| seq).collect()
+    fora_nos(&copiados, termos, o_que)
 }
+
+/// Dos registros `copiados` — o número e o evento de cada um —, os números
+/// dos que têm um dos `termos`, no texto que o `Debug` escreve do evento
+/// — ver [`termo_no_evento`]; de cada um, o log diz o termo, o número e o
+/// evento inteiro.
+fn fora_nos(
+    copiados: &[(u64, politica::auditoria::Evento)],
+    termos: &[&str],
+    o_que: &str,
+) -> alloc::vec::Vec<u64> {
+    let mut fora = alloc::vec::Vec::new();
+    for (seq, evento) in copiados {
+        let e = alloc::format!("{:?}", evento);
+        if let Some(termo) = termo_no_evento(&e, termos) {
+            crate::log_error!(
+                "teste",
+                "{} fora da alegacao: {:?} no registro {}: {}",
+                o_que,
+                termo,
+                seq,
+                e
+            );
+            fora.push(*seq);
+        }
+    }
+    fora
+}
+
+/// O primeiro dos `termos` que aparece em `evento` — o texto do evento
+/// inteiro, como o `Debug` o escreve —, fora dos caminhos dos registros de
+/// chave do gestor: ver [`sem_os_registros_de_chave`].
+fn termo_no_evento<'t>(evento: &str, termos: &[&'t str]) -> Option<&'t str> {
+    let conferido = sem_os_registros_de_chave(evento);
+    termos.iter().copied().find(|t| conferido.contains(*t))
+}
+
+/// `texto` com cada caminho do registro de uma chave do gestor —
+/// `<REGISTROS_DO_GESTOR>/<rede>/<Principal da chave>`, como o gestor o
+/// nomeia — trocado por `<registro>`; o resto fica como está.
+///
+/// O Principal da chave sai de uma chave sorteada, no texto do IC: a base
+/// 32 em grupos de cinco, separados por hífen. Um começo qualquer casaria
+/// com um termo das conferências — `ola…` depois da barra é `/ola`, como
+/// `call…` é `/call`, e um grupo pode ser o começo de um canister —, sem
+/// nada do IC no registro: um em cada 32 768 Principais começa com `ola`
+/// (a CI 469 reprovou assim, no registro da segunda chave). O caminho é
+/// o arquivo que o gate decidiu, e não o que se alegou. Só sai o que tem a
+/// forma do registro de uma chave — uma rede de letras minúsculas e um
+/// Principal de chave inteiro, ver [`registro_de_chave`] —: um canister
+/// no lugar do Principal, ou o que vem depois dele no caminho, continua no
+/// texto conferido.
+fn sem_os_registros_de_chave(texto: &str) -> alloc::string::String {
+    let mut conferido = alloc::string::String::with_capacity(texto.len());
+    let mut resto = texto;
+    while let Some(i) = resto.find(REGISTROS_DO_GESTOR) {
+        let depois = &resto[i + REGISTROS_DO_GESTOR.len()..];
+        match registro_de_chave(depois) {
+            Some(tamanho) => {
+                conferido.push_str(&resto[..i]);
+                conferido.push_str("<registro>");
+                resto = &depois[tamanho..];
+            }
+            None => {
+                let ate = i + REGISTROS_DO_GESTOR.len();
+                conferido.push_str(&resto[..ate]);
+                resto = &resto[ate..];
+            }
+        }
+    }
+    conferido.push_str(resto);
+    conferido
+}
+
+/// O tamanho de `/<rede>/<Principal>` no começo de `texto`, se é o resto
+/// do caminho do registro de uma chave: a rede, um nome de letras
+/// minúsculas, e o Principal de uma chave inteiro — os 29 bytes dele com
+/// os 4 da soma, na base 32 do IC: onze grupos, dez de cinco e o último de
+/// três, separados por hífen — e nada que o continue. `None` para o resto.
+fn registro_de_chave(texto: &str) -> Option<usize> {
+    const PRINCIPAL_DE_CHAVE: usize = 10 * 5 + 3 + 10;
+    let resto = texto.strip_prefix('/')?;
+    let fim_da_rede = resto.find('/')?;
+    let rede = &resto[..fim_da_rede];
+    if rede.is_empty() || !rede.bytes().all(|b| b.is_ascii_lowercase()) {
+        return None;
+    }
+    let depois_da_rede = &resto[fim_da_rede + 1..];
+    let principal = depois_da_rede.get(..PRINCIPAL_DE_CHAVE)?;
+    let grupos: alloc::vec::Vec<&str> = principal.split('-').collect();
+    let base32 = |b: u8| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b);
+    let forma = grupos.len() == 11
+        && grupos[..10].iter().all(|g| g.len() == 5)
+        && grupos[10].len() == 3
+        && grupos.iter().all(|g| g.bytes().all(base32));
+    let continua = depois_da_rede
+        .as_bytes()
+        .get(PRINCIPAL_DE_CHAVE)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-');
+    (forma && !continua).then_some(1 + rede.len() + 1 + PRINCIPAL_DE_CHAVE)
+}
+
+/// O que o IC diz e o kernel não lê: os canisters da bancada — o dela, o da
+/// raiz, o que não existe — e o ledger de ICP, os métodos, os eventos das
+/// declarações, o nome do gateway e os caminhos do HTTP do IC. Ver
+/// [`o_ic_so_na_alegacao`].
+const DO_IC: [&str; 14] = [
+    "pi33i",
+    "xp3jw",
+    "pp254",
+    "ryjl3",
+    "icrc1_symbol",
+    "icp-api.io",
+    "icp.query",
+    "icp.update",
+    "icp.duke",
+    "read_state",
+    "request_status",
+    "/call",
+    "/ola",
+    "quem_consulta",
+];
 
 /// O IC só na alegação: fora das execuções do `audit.declare` do processo
 /// `fio`, nenhum registro dele diz o canister, o método, o evento ou o
 /// nome do gateway — as decisões do gate são sobre destinos, arquivos, a
 /// semente e o relógio, e o kernel não leu o que se declarou.
 fn o_ic_so_na_alegacao(fio: u64) -> Resultado {
-    const DO_IC: [&str; 14] = [
-        "pi33i",
-        "xp3jw",
-        "pp254",
-        "ryjl3",
-        "icrc1_symbol",
-        "icp-api.io",
-        "icp.query",
-        "icp.update",
-        "icp.duke",
-        "read_state",
-        "request_status",
-        "/call",
-        "/ola",
-        "quem_consulta",
-    ];
     let fora = fora_da_alegacao(fio, &DO_IC, "o IC");
     if !fora.is_empty() {
         crate::log_error!("teste", "registros com o IC fora da alegacao: {:?}", fora);
@@ -69206,12 +69303,173 @@ fn icp_o_gestor_do_saldo_ao_apagado() -> Resultado {
             for fio in &fios {
                 o_gestor_so_na_alegacao(*fio, &[&canister])?;
             }
+            // O controle das conferências de cima: a cópia dos registros do
+            // último gestor tem o `fs.claim` do pedido — todo gestor o pede
+            // primeiro —, e a conferência o vê. Uma cópia vazia passaria em
+            // todas.
+            let ultimo = *fios.last().ok_or("sem gestor")?;
+            if fora_da_alegacao(ultimo, &["\"fs.claim\""], "o controle (esperado)").is_empty() {
+                return Err("a conferencia nao viu o fs.claim do gestor: a copia veio vazia");
+            }
             Ok(())
         })();
         let fim = carteira.encerrar();
         crate::chaves::esquecer_de_teste();
         r.and(fim)
     })
+}
+
+/// As conferências do IC só na alegação não veem o Principal do registro
+/// de uma chave do gestor, e veem o resto — ver
+/// [`sem_os_registros_de_chave`]. Sobre eventos montados aqui, no texto
+/// que a conferência lê, o `Debug` do evento:
+///
+/// - o registro de uma chave cujo Principal começa com `ola` ou com
+///   `call`, ou tem um grupo igual ao começo de um canister — no recurso,
+///   como a decisão do `fs.stat` e do `fs.write`, e no detalhe —: nenhum
+///   termo, e o texto cru tem o termo — a CI 469 reprovou assim, no
+///   registro da segunda chave de `icp: o gestor do saldo ao apagado`;
+/// - o IC de verdade no mesmo evento — o assunto da bancada, o nome do
+///   gateway —, e os caminhos que não são o registro de uma chave — o que
+///   continua depois do Principal, um canister no lugar dele, um Principal
+///   com um grupo a menos ou um caractere a mais, a rede que não é de
+///   letras minúsculas, o mesmo nome fora do diretório do gestor —: o
+///   termo aparece;
+/// - a conferência dos registros copiados ([`fora_nos`]), a de cada caso
+///   `icp:`, sobre todos esses eventos: os números dos que têm o IC, e só
+///   eles.
+fn icp_as_conferencias_nao_veem_o_principal_do_registro() -> Resultado {
+    use politica::auditoria::{Evento, Titular};
+    let evento = |recurso: &str, detalhe: &str| Evento {
+        ts_ms: 1,
+        titular: Titular::Pessoa,
+        sessao: 0,
+        sessao_de_pessoa: Some([7; 8]),
+        agente: "pessoa:0123456789abcdef".into(),
+        chave: None,
+        papel: "operador".into(),
+        metodo: "fs.write".into(),
+        recurso: recurso.into(),
+        codigo: politica::Codigo::Allow,
+        parametros: [0; 32],
+        detalhe: detalhe.into(),
+    };
+    let pelo = "pelo processo 4242 (gestor 0123abcd)";
+    // Principais com a forma dos de uma chave: onze grupos da base 32, dez
+    // de cinco e o último de três.
+    const OLA: &str = "olaxy-2abcd-efghi-jklmn-opqrs-tuvwx-yz234-567ab-cdefg-hijkl-mae";
+    const CALL: &str = "callx-2abcd-efghi-jklmn-opqrs-tuvwx-yz234-567ab-cdefg-hijkl-mae";
+    const GRUPO: &str = "abcde-pi33i-efghi-jklmn-opqrs-um5iw-yz234-567ab-cdefg-hijkl-mae";
+    let registro =
+        |rede: &str, principal: &str| alloc::format!("{REGISTROS_DO_GESTOR}/{rede}/{principal}");
+    let gravado = |caminho: &str| {
+        evento(
+            caminho,
+            &alloc::format!("{pelo}: lote a gravar: 1 operacoes, versoes 0..1; decisao 9"),
+        )
+    };
+    // O que não vê: (o evento, o termo que o texto cru tem, os termos).
+    let do_valor: [&str; 2] = ["rkp4c", "um5iw"];
+    let sem_ic = [
+        (gravado(&registro("bancada", OLA)), "/ola", &DO_IC[..]),
+        (gravado(&registro("bancada", CALL)), "/call", &DO_IC[..]),
+        (gravado(&registro("bancada", GRUPO)), "pi33i", &DO_IC[..]),
+        (gravado(&registro("lenta", GRUPO)), "um5iw", &do_valor[..]),
+        (
+            evento(
+                &registro("assincrona", OLA),
+                &alloc::format!("{pelo}: o arquivo {}; decisao 9", registro("bancada", CALL)),
+            ),
+            "/call",
+            &DO_IC[..],
+        ),
+    ];
+    for (e, cru, termos) in &sem_ic {
+        let texto = alloc::format!("{:?}", e);
+        if !texto.contains(cru) {
+            crate::log_error!("teste", "{} sem {:?}", texto, cru);
+            return Err("o evento montado nao tem o termo que o registro da chave casaria");
+        }
+        if let Some(t) = termo_no_evento(&texto, termos) {
+            crate::log_error!("teste", "{:?} em {}", t, texto);
+            return Err("a conferencia viu o IC no Principal do registro de uma chave");
+        }
+    }
+    // O que vê: (o evento, o termo).
+    let com_ic = [
+        (
+            evento(
+                &registro("bancada", OLA),
+                &alloc::format!("{pelo}: pi33i-pt777-77776-aaaaa-cai/ola; decisao 9"),
+            ),
+            "pi33i",
+        ),
+        (
+            evento(
+                &registro("bancada", OLA),
+                &alloc::format!("{pelo}: conexao 3 icp.duke; decisao 9"),
+            ),
+            "icp.duke",
+        ),
+        (
+            gravado(&alloc::format!("{}/ola", registro("bancada", OLA))),
+            "/ola",
+        ),
+        (gravado(&registro("bancada", CANISTER_DA_BANCADA)), "pi33i"),
+        (gravado(&registro("bancada", &OLA[..OLA.len() - 4])), "/ola"),
+        (
+            gravado(&alloc::format!("{}x", registro("bancada", OLA))),
+            "/ola",
+        ),
+        (gravado(&registro("Bancada", OLA)), "/ola"),
+        (gravado(&registro("bancada2", OLA)), "/ola"),
+        (
+            gravado(&alloc::format!(
+                "/armazem/compartilhado/outro/registro/bancada/{OLA}"
+            )),
+            "/ola",
+        ),
+    ];
+    for (e, termo) in &com_ic {
+        let texto = alloc::format!("{:?}", e);
+        if termo_no_evento(&texto, &DO_IC) != Some(*termo) {
+            crate::log_error!(
+                "teste",
+                "{:?} e nao {:?} em {}",
+                termo_no_evento(&texto, &DO_IC),
+                termo,
+                texto
+            );
+            return Err("a conferencia nao viu o IC fora do Principal do registro de uma chave");
+        }
+    }
+    // A conferência dos registros copiados — a de cada caso `icp:` — conta
+    // os que têm o IC, e só eles: os números 100 em diante. Cada um vai ao
+    // log, como numa falha.
+    let copiados: alloc::vec::Vec<(u64, Evento)> = sem_ic
+        .iter()
+        .map(|(e, _, _)| e.clone())
+        .enumerate()
+        .map(|(i, e)| (i as u64, e))
+        .chain(
+            com_ic
+                .iter()
+                .enumerate()
+                .map(|(i, (e, _))| (100 + i as u64, e.clone())),
+        )
+        .collect();
+    let esperados: alloc::vec::Vec<u64> = (0..com_ic.len() as u64).map(|i| 100 + i).collect();
+    if fora_nos(&copiados, &DO_IC, "o IC do caso (esperado)") != esperados {
+        return Err("a conferencia dos registros copiados nao contou so os que tem o IC");
+    }
+    // O registro sai inteiro, e só ele: o que vem antes e depois fica.
+    let antes_e_depois = alloc::format!("a {} b", registro("bancada", OLA));
+    if sem_os_registros_de_chave(&antes_e_depois) != "a <registro> b"
+        || sem_os_registros_de_chave(REGISTROS_DO_GESTOR) != REGISTROS_DO_GESTOR
+    {
+        return Err("o registro de uma chave nao saiu inteiro, e so ele");
+    }
+    Ok(())
 }
 
 /// Uma pessoa operadora com as chaves dela, a `carteira` com cycles na

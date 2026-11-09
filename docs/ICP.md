@@ -2295,11 +2295,11 @@ que vai e volta, e o que não se entende recusado — o texto pendente
 conferido pelo SHA-256 —; o teto dos canisters; e o plano de cada pedido:
 feito, retomado com a hora de antes, bloqueado, executado.
 
-Na suíte, nove casos, nas duas arquiteturas:
+Na suíte, dez casos, nas duas arquiteturas:
 
 | caso | o que confere |
 |---|---|
-| o gestor do saldo ao apagado | o saldo pelas duas consultas assinadas; criar, instalar, o estado, o congelamento, os controladores, apagar rodando recusado, parar, iniciar, desinstalar, apagar; o mesmo pedido de novo sem assinatura; cada declaração ancorada na assinatura dela; e nenhuma recusa na auditoria de uma execução que anda — a fumaça real achou as duas dos `fs.mkdir` de diretórios que já existiam |
+| o gestor do saldo ao apagado | o saldo pelas duas consultas assinadas; criar, instalar, o estado, o congelamento, os controladores, apagar rodando recusado, parar, iniciar, desinstalar, apagar; o mesmo pedido de novo sem assinatura; cada declaração ancorada na assinatura dela; e nenhuma recusa na auditoria de uma execução que anda — a fumaça real achou as duas dos `fs.mkdir` de diretórios que já existiam —; e o controle das conferências do IC só na alegação: a cópia dos registros do último gestor tem o `fs.claim` do pedido, e a conferência o vê — uma cópia vazia passaria em todas |
 | o gestor nas bordas do tamanho | 1 MiB inteiro; 1 MiB + 1 em dois pedaços; 8 MiB em oito, em `reinstall`; 8 MiB + 1 no armazém recusado antes de qualquer assinatura, e a cota de volta ao apagá-lo; o SHA-256 de outro módulo, inteiro e em pedaços, recusado na primeira leitura |
 | o gestor retoma o que ficou em andamento | a criação contida no meio do acompanhamento fica em andamento; outro pedido por cima bloqueado, com o texto do pendente; o pendente regravado retoma com a mesma hora e o ledger diz a criação de antes; o firewall no meio de outra; o pedido que nada assinou não fica em andamento. A retomada que chega antes de a primeira criação acabar no CMC ouve do ledger a duplicada sem o canister — `pending_duplicate`, o pedido ainda em andamento —, e o caso repete como a pessoa repetiria (a CI do ARM em release retomou depressa assim) |
 | o gestor só faz o pedido de quem o lançou | o pedido e o registro gravados por outra pessoa recusados sem assinatura e sem sobrescrever; o pedido arrendado por outra pessoa; o pedido fora da forma, a chave que não existe e os controladores sem a própria chave; e o pedido da dona, que anda |
@@ -2307,6 +2307,7 @@ Na suíte, nove casos, nas duas arquiteturas:
 | o gestor para quando outro grava a resposta | a resposta regravada com o primeiro pedaço esperando a leitura: o pedido assinado não sai, nada mais se assina, o arrendamento fica, o registro volta ao de antes — o da bancada e o da rede lenta, por onde o pedido foi, sem ele em andamento; solto o arrendamento, o mesmo pedido instala |
 | a chave anulada no meio do gestor | o pedaço que já ia assinado chega; o segundo não se assina; nada se instala; o pedido não fica em andamento no registro da rede lenta — o pedaço só encheu o depósito —; o canister continua no módulo de antes pela segunda chave |
 | o gestor carrega e recarrega | a carga pelo ledger de cycles e a recarga pelo CMC, cada uma uma vez |
+| as conferências do IC não veem o Principal do registro | o caminho do registro de uma chave — `<rede>/<Principal da chave>` — é um arquivo que o gate decidiu, e não o que se alegou: o Principal de uma chave sorteada que começa com `ola` ou `call`, ou tem um grupo igual ao começo de um canister, não casa com os termos das conferências do IC só na alegação — um em cada 32 768 Principais começa com `ola`, e a CI 469 reprovou assim, no registro da segunda chave de *o gestor do saldo ao apagado* —; o IC de verdade no mesmo evento, e o que não tem a forma do registro de uma chave — um canister no lugar do Principal, o caminho que continua depois dele, o mesmo nome fora do diretório do gestor —, sim |
 | btrfs: lê arquivo de várias extensões | os módulos do gestor lidos inteiros, com bytes conferidos em cada borda de extensão |
 
 ### As mutações
