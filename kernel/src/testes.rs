@@ -62574,6 +62574,16 @@ fn declaracao_de_consulta(
 /// dos termos e, de cada um que tem algum, o log — o termo, o número e o
 /// evento inteiro —, para a falha dizer o registro, e não só o número
 /// dele. Devolve os números.
+///
+/// A janela guarda os últimos
+/// [`CAPACIDADE_DA_AUDITORIA`](crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+/// registros: o processo conferido muito depois de sair pode já não estar
+/// inteiro nela, e o que saiu dela fica fora da conferência, calado. Os
+/// casos do gestor que conferem as execuções todas no fim do caso perdem
+/// assim o começo das primeiras — no de `icp: o gestor do saldo ao
+/// apagado`, a janela do fim começa dentro do primeiro saldo. Conferir
+/// cada execução logo que ela sai, contra o último registro de antes do
+/// lançamento, fica para depois.
 fn fora_da_alegacao(fio: u64, termos: &[&str], o_que: &str) -> alloc::vec::Vec<u64> {
     let do_processo = do_processo(fio);
     let copiados = crate::autorizacao::com_auditoria(|c| {
@@ -62630,13 +62640,16 @@ fn termo_no_evento<'t>(evento: &str, termos: &[&'t str]) -> Option<&'t str> {
 /// 32 em grupos de cinco, separados por hífen. Um começo qualquer casaria
 /// com um termo das conferências — `ola…` depois da barra é `/ola`, como
 /// `call…` é `/call`, e um grupo pode ser o começo de um canister —, sem
-/// nada do IC no registro: um em cada 32 768 Principais começa com `ola`
-/// (a CI 469 reprovou assim, no registro da segunda chave). O caminho é
-/// o arquivo que o gate decidiu, e não o que se alegou. Só sai o que tem a
-/// forma do registro de uma chave — uma rede de letras minúsculas e um
-/// Principal de chave inteiro, ver [`registro_de_chave`] —: um canister
-/// no lugar do Principal, ou o que vem depois dele no caminho, continua no
-/// texto conferido.
+/// nada do IC no registro: um em cada 32 768 Principais começa com `ola`.
+/// A CI 469 reprovou por um desses casamentos, no registro da segunda
+/// chave; o log dela só disse os números dos registros, e o `ola` é de
+/// longe o mais provável — o `/call` é um em 1 048 576, e um grupo igual
+/// ao começo de um dos quatro canisters de [`DO_IC`], uns um em 840 000.
+/// O caminho é o arquivo que o gate decidiu, e não o que se alegou. Só
+/// sai o que tem a forma do registro de uma chave — o nome de uma rede,
+/// pela regra do arquivo de redes, e um Principal de chave inteiro, ver
+/// [`registro_de_chave`] —: um canister no lugar do Principal, ou o que
+/// vem depois dele no caminho, continua no texto conferido.
 fn sem_os_registros_de_chave(texto: &str) -> alloc::string::String {
     let mut conferido = alloc::string::String::with_capacity(texto.len());
     let mut resto = texto;
@@ -62660,16 +62673,18 @@ fn sem_os_registros_de_chave(texto: &str) -> alloc::string::String {
 }
 
 /// O tamanho de `/<rede>/<Principal>` no começo de `texto`, se é o resto
-/// do caminho do registro de uma chave: a rede, um nome de letras
-/// minúsculas, e o Principal de uma chave inteiro — os 29 bytes dele com
-/// os 4 da soma, na base 32 do IC: onze grupos, dez de cinco e o último de
-/// três, separados por hífen — e nada que o continue. `None` para o resto.
+/// do caminho do registro de uma chave: a rede, um nome pela regra do
+/// arquivo de redes — minúsculas, dígitos e `-`, de 1 a 32 —, e o
+/// Principal de uma chave inteiro — os 29 bytes dele com os 4 da soma, na
+/// base 32 do IC: onze grupos, dez de cinco e o último de três, separados
+/// por hífen — e nada que o continue. `None` para o resto.
 fn registro_de_chave(texto: &str) -> Option<usize> {
     const PRINCIPAL_DE_CHAVE: usize = 10 * 5 + 3 + 10;
     let resto = texto.strip_prefix('/')?;
     let fim_da_rede = resto.find('/')?;
     let rede = &resto[..fim_da_rede];
-    if rede.is_empty() || !rede.bytes().all(|b| b.is_ascii_lowercase()) {
+    let da_rede = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
+    if !(1..=32).contains(&rede.len()) || !rede.bytes().all(da_rede) {
         return None;
     }
     let depois_da_rede = &resto[fim_da_rede + 1..];
@@ -68979,7 +68994,9 @@ fn o_gestor_so_na_alegacao(fio: u64, canisters: &[&str]) -> Resultado {
 ///   `delete_canister`;
 /// - parar, iniciar, desinstalar, parar e apagar: o registro acompanha, e o
 ///   estado do apagado é a recusa provada do IC;
-/// - nada da gestão em registro nenhum do kernel fora das alegações.
+/// - nada da gestão em registro nenhum do kernel fora das alegações — nos
+///   que a janela da auditoria ainda tem no fim do caso: ver
+///   [`fora_da_alegacao`].
 fn icp_o_gestor_do_saldo_ao_apagado() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::pessoas::Console;
@@ -69326,15 +69343,18 @@ fn icp_o_gestor_do_saldo_ao_apagado() -> Resultado {
 ///
 /// - o registro de uma chave cujo Principal começa com `ola` ou com
 ///   `call`, ou tem um grupo igual ao começo de um canister — no recurso,
-///   como a decisão do `fs.stat` e do `fs.write`, e no detalhe —: nenhum
-///   termo, e o texto cru tem o termo — a CI 469 reprovou assim, no
-///   registro da segunda chave de `icp: o gestor do saldo ao apagado`;
+///   como nas decisões do `fs.stat` e do `fs.write` e na execução do
+///   `fs.write`, e no detalhe —, numa rede de minúsculas, ou com dígitos e
+///   `-`, de até 32 caracteres — a regra do arquivo de redes —: nenhum
+///   termo, e o texto cru tem o termo — a CI 469 reprovou por um desses
+///   casamentos, no registro da segunda chave de `icp: o gestor do saldo
+///   ao apagado`;
 /// - o IC de verdade no mesmo evento — o assunto da bancada, o nome do
 ///   gateway —, e os caminhos que não são o registro de uma chave — o que
 ///   continua depois do Principal, um canister no lugar dele, um Principal
-///   com um grupo a menos ou um caractere a mais, a rede que não é de
-///   letras minúsculas, o mesmo nome fora do diretório do gestor —: o
-///   termo aparece;
+///   com um grupo a menos ou um caractere a mais, a rede fora da regra do
+///   arquivo de redes (uma maiúscula, um `_`, 33 caracteres), o mesmo nome
+///   fora do diretório do gestor —: o termo aparece;
 /// - a conferência dos registros copiados ([`fora_nos`]), a de cada caso
 ///   `icp:`, sobre todos esses eventos: os números dos que têm o IC, e só
 ///   eles.
@@ -69362,6 +69382,9 @@ fn icp_as_conferencias_nao_veem_o_principal_do_registro() -> Resultado {
     const GRUPO: &str = "abcde-pi33i-efghi-jklmn-opqrs-um5iw-yz234-567ab-cdefg-hijkl-mae";
     let registro =
         |rede: &str, principal: &str| alloc::format!("{REGISTROS_DO_GESTOR}/{rede}/{principal}");
+    // As bordas do tamanho do nome de uma rede: 32 caracteres, e 33.
+    let rede_32 = alloc::format!("rede-2-{}", "a".repeat(25));
+    let rede_33 = alloc::format!("{rede_32}b");
     let gravado = |caminho: &str| {
         evento(
             caminho,
@@ -69375,6 +69398,9 @@ fn icp_as_conferencias_nao_veem_o_principal_do_registro() -> Resultado {
         (gravado(&registro("bancada", CALL)), "/call", &DO_IC[..]),
         (gravado(&registro("bancada", GRUPO)), "pi33i", &DO_IC[..]),
         (gravado(&registro("lenta", GRUPO)), "um5iw", &do_valor[..]),
+        (gravado(&registro("raiz-errada", OLA)), "/ola", &DO_IC[..]),
+        (gravado(&registro("bancada2", CALL)), "/call", &DO_IC[..]),
+        (gravado(&registro(&rede_32, OLA)), "/ola", &DO_IC[..]),
         (
             evento(
                 &registro("assincrona", OLA),
@@ -69422,7 +69448,8 @@ fn icp_as_conferencias_nao_veem_o_principal_do_registro() -> Resultado {
             "/ola",
         ),
         (gravado(&registro("Bancada", OLA)), "/ola"),
-        (gravado(&registro("bancada2", OLA)), "/ola"),
+        (gravado(&registro("banca_da", OLA)), "/ola"),
+        (gravado(&registro(&rede_33, OLA)), "/ola"),
         (
             gravado(&alloc::format!(
                 "/armazem/compartilhado/outro/registro/bancada/{OLA}"
