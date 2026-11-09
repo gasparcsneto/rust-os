@@ -407,9 +407,10 @@ seguinte, contra o código do `d63823b`: 37 — 22 no `nativo.rs` e 2 no
 `incansavel`, pela suíte filtrada aos casos `orcamento:` no x86_64 em
 depuração; 8 na bancada e 2 nas constantes e no laço de produção do
 `nativo.rs`, pelos testes do hospedeiro; e 3 no `main.rs` e nos fios, pelo
-`cargo xtask invariantes`. Reprovaram 34: o orçamento ignorado; o id
-tirado antes de conferir o orçamento, e perdido; dois ids por volta; a
-ordem invertida; o tempo conferido antes do primeiro, ou nunca; o tempo
+`cargo xtask invariantes`. Reprovaram 34: a conta do orçamento
+ignorada, só o tempo cortando a vez; o id tirado antes de conferir o
+orçamento, e perdido; dois ids por volta; a ordem invertida; o tempo
+conferido antes do primeiro, ou nunca; o tempo
 contado em ciclos, ou o de produção em microssegundos lidos como
 nanossegundos; o tempo recontado a cada pedido; o zero que não vale um;
 o ceder apagado, ou só com a fila ainda cheia; a tarefa que não

@@ -284,8 +284,8 @@ impl Teclado {
     }
 
     /// Manda `texto`, uma tecla por vez, no ritmo de agora — depois do shift
-    /// sozinho, se o texto tem tecla que o shift muda: ver *O shift preso*,
-    /// no doc do módulo. O apagar e o Enter vão sem ele.
+    /// sozinho, se o texto tem alguma tecla além do apagar e do Enter: ver
+    /// *O shift preso*, no doc do módulo. O apagar e o Enter vão sem ele.
     pub(crate) fn mandar(&mut self, texto: &str) -> Result<(), String> {
         let ritmo = self.ritmo.get();
         if texto.chars().any(|c| !matches!(c, '\n' | '\u{8}')) {
@@ -936,9 +936,9 @@ mod testes {
         assert_eq!(conferir("OI DE B", "", "oi de b"), Conferencia::Estragada);
     }
 
-    /// Todo texto com tecla que o shift muda começa com o shift sozinho,
-    /// apertado e solto — ver *O shift preso* —, cada vez que vai; o apagar
-    /// e o Enter vão sem ele. O que o monitor recebe, na ordem.
+    /// Todo texto com alguma tecla além do apagar e do Enter começa com o
+    /// shift sozinho, apertado e solto — ver *O shift preso* —, cada vez que
+    /// vai; o apagar e o Enter vão sem ele. O que o monitor recebe, na ordem.
     #[test]
     fn todo_texto_comeca_com_o_shift_solto() {
         use std::io::Read;

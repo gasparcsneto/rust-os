@@ -2259,7 +2259,7 @@ registrados, para uma medida e uma decisão à parte.
 | Onde | O que confere |
 |---|---|
 | hospedeiro (`politica`): *o tamanho codificado é o da codificação*, *codificar_em acrescenta o mesmo sem alocar*, *antes e depois pela posição são os do filtro* | a conta do tamanho igual à da codificação, com o corte do texto acima do teto; a codificação acrescentada igual byte a byte, sem trocar de memória com o lugar reservado; os guardados antes e depois de uma sequência, achados pela posição, iguais aos do filtro — e a lacuna, a de sempre, e nenhuma depois de `u64::MAX`, sem dar a volta |
-| suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota; e o registro que chega ao teto: com eventos de um tamanho, medido, em que o seguinte ao último que cabe caberia sem os dois bytes do tamanho do campo, e não com eles, cada registro cheio fica com um evento a menos, e nenhum passa do teto |
+| suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota; e o registro que chega ao teto: com eventos de um tamanho, medido, em que o seguinte ao último que cabe caberia sem os dois bytes do tamanho do campo, e não com eles, nenhum registro passa do teto, e ao menos um fica cheio, com um evento a menos que o teto mais um byte comporta |
 | hospedeiro (`xtask`): *o anel do corte que confere*, *o visto antes do anel que não deu a volta* | os vistos de antes do começo do anel do boot novo só deixam de contar se ele deu a volta — tem o que o anel guarda, 1024; com um a menos, reprovam |
 | bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou — e nenhum ficou de fora do anel sem ele ter dado a volta —, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava (uma conferência de sanidade: a exata é a do cenário *a queda em cada fronteira de um registro só de auditoria*); mais um boot confere de novo |
 
@@ -2337,12 +2337,15 @@ Duas observações da medida:
 ### As mutações
 
 Em 9/11/2026, uma de cada vez, cada uma desfeita antes da seguinte,
-contra o código do `1a17547`: 42 — 26 no `persistencia.rs` (a cópia, a
-montagem, as duas contas, a compactação e a ordem das gravações), pela
-suíte filtrada a `coleta:`, `auditoria`, `persistencia:` e `compactacao`
-no x86_64 em depuração; 7 na `politica` e 9 na bancada, pelos testes do
-hospedeiro — e uma delas, o visto de uma queda que não vale, também pela
-bancada de persistência no QEMU. Reprovaram 37 na primeira rodada, sete
+contra o código do `1a17547`: 42 — 26 no kernel, pela suíte filtrada a
+`coleta:`, `auditoria`, `persistencia:` e `compactacao` no x86_64 em
+depuração: 25 no `persistencia.rs` (a cópia, a montagem, as duas contas,
+a compactação e a ordem das gravações) e uma no `autorizacao.rs` (a conta
+da suíte dos pedidos ao alocador com a trava na mão); 7 na `politica` e 8
+na bancada, pelos testes do hospedeiro; e uma na carga da bancada — o
+visto que o `audit.tail` diz não durável, anotado como gravado —, pela
+própria bancada de persistência no QEMU (*a queda no meio da coleta da
+auditoria sob carga*). Reprovaram 37 na primeira rodada, sete
 delas num pânico da própria suíte: a cópia sem a ordem das gravações, a
 compactação sem ela, e a montagem que não ocupa o que a tomada contou
 (`coleta_de_teste::montada`). As cinco que passaram:
@@ -2352,9 +2355,14 @@ compactação sem ela, e a montagem que não ocupa o que a tomada contou
   um caminho novo que não a tenha.
 - **a montagem sem a sua conta do que cabe**: equivalente enquanto a
   tomada decidir pela mesma conta — a montagem nunca recebe o que não
-  cabe. A exceção é a entrada da lacuna que não cabe junto: o registro
+  cabe. A exceção é a entrada da lacuna que não cabe junto — menos de 60
+  bytes livres no registro —: com a decisão ainda por gravar, o registro
   montado é descartado (`a.ate < exigir`), ou as duas versões dão o mesmo
-  erro.
+  erro; com a decisão já gravada antes, a mutação poria a lacuna além do
+  maior conteúdo, e a gravação falharia, onde o código grava o registro e
+  deixa a lacuna para o seguinte. Nenhum caso monta um registro de
+  operação tão perto do teto; na suíte, `coleta_de_teste::montada` o
+  reprovaria.
 - **`codificar` sem a capacidade reservada**: equivalente; a capacidade
   não aparece nos bytes.
 - **a bancada que confere o `id` antes do aviso da queda**: equivalente

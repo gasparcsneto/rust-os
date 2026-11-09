@@ -768,10 +768,11 @@ const _: () = {
 /// conteúdo como um campo, com o tamanho na frente, em dois bytes; com
 /// eventos que ocupam, cada um, um divisor do teto mais um byte, o último
 /// que cabe deixa sobrando um byte a menos que o seguinte precisa — ele
-/// caberia sem os dois bytes do tamanho, e não cabe com eles. Cada registro
-/// cheio fica com um evento a menos que isso, no teto menos o que um evento
-/// ocupa mais um byte, e nenhum passa do teto; a auditoria do journal segue
-/// inteira, e a cadeia refeita dele é a da memória.
+/// caberia sem os dois bytes do tamanho, e não cabe com eles. O caso
+/// confere que nenhum registro passa do teto e que ao menos um fica cheio,
+/// com um evento a menos que isso, no teto menos o que um evento ocupa mais
+/// um byte; a auditoria do journal segue inteira, e a cadeia refeita dele é
+/// a da memória.
 ///
 /// O tamanho de um evento no conteúdo é medido, e não contado aqui: um
 /// registro com um evento só, de um caractere de detalhe; o detalhe dos do
