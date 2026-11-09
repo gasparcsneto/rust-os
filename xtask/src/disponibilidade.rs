@@ -1234,21 +1234,26 @@ mod testes {
         );
         // Menos recusas pela taxa que as que os filhos ouviram.
         assert!(integridade(c, &contas, 102, 85).is_err());
-        // Um filho que não disse a conta: o que parou numa resposta trocada.
+        // Um filho que não disse a conta: morreu antes de dizê-la (com o log
+        // que deu a volta, a bancada nem chama a conferência).
         assert!(
             integridade(c, &contas[..3], 102, 86)
                 .unwrap_err()
                 .contains("3 filhos")
         );
-        // Um pedido sem resposta.
+        // Um pedido sem resposta: as que vieram, uma a menos que os pedidos,
+        // todas ALLOW ou RATE_LIMIT — só a conta das respostas contra a dos
+        // pedidos o pega.
         let mut sem = contas;
         sem[1].1.respostas = 19;
+        sem[1].1.pela_taxa = 14;
         assert!(
             integridade(c, &sem, 102, 86)
                 .unwrap_err()
                 .contains("o filho 2")
         );
-        // Uma resposta que não foi ALLOW nem RATE_LIMIT.
+        // Uma resposta que não foi ALLOW nem RATE_LIMIT — a de outro pedido,
+        // que o filho conta e com que para.
         let mut outra = contas;
         outra[2].1.permitidos = 2;
         assert!(
