@@ -308,7 +308,8 @@ fn main() -> ExitCode {
         "pareamento" => pareamento::pareamento(release),
         "fluxo" => fluxo::fluxo(release),
         // A disponibilidade do executor sob os pedidos dos processos de um
-        // titular: só mede — ver [`disponibilidade`].
+        // titular, ou de dois: mede, e só reprova a carga que não confere —
+        // ver [`disponibilidade`].
         "disponibilidade" => disponibilidade::disponibilidade(arch, release),
         // O SDK: selar um programa de fora com a chave de um editor,
         // conferir um executável, e o modelo compilado fora do workspace.
@@ -507,10 +508,11 @@ COMANDOS:
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     persistencia              a mesma máquina em vários boots: corte de energia,
                               disco restaurado, relógio para trás
-    disponibilidade           o canal do agente com os processos de outro titular
-                              pedindo sem parar: a ida e volta e o silêncio da
-                              serial e do TCP, de 0 a 3 processos, e o controle
-                              que só gira — só mede
+    disponibilidade           o canal do agente com os processos de outro titular,
+                              ou de dois, pedindo sem parar: a ida e volta e o
+                              silêncio da serial e do TCP, de 0 a 3 processos, e
+                              o controle que só gira — mede, e só reprova a carga
+                              que não confere
     tempo                     o Roughtime de ponta a ponta, contra as fontes de
                               hora do hospedeiro: atraso, perda, divergência,
                               quórum, saltos e recuperação, uma máquina por cenário
@@ -3028,8 +3030,8 @@ const MAIOR_CONTA_DA_VEZ: u64 = 64;
 const MAIOR_TEMPO_DA_VEZ_US: u64 = 10_000;
 
 /// A marca que a medida temporária do orçamento põe na linha da variante
-/// que ela troca — montada aqui, para a própria fonte do `xtask` não a
-/// trazer (o pré-voo a procura nas fontes).
+/// que ela troca — montada aqui, para a própria fonte do `xtask` não trazer
+/// a marca inteira, que se procura nas fontes antes de cada commit.
 const MARCA_DA_VARIANTE: &str = concat!("VARIANTE", "-DA-MEDIDA");
 
 /// O orçamento de produção, em `nativo`, é finito: as duas constantes são

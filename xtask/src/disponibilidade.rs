@@ -50,12 +50,13 @@
 //! aqui: o console só acorda com o teclado, e as vagas do enlace, com um par
 //! relacionado.
 //!
-//! # Só mede
+//! # Não reprova pelo número
 //!
 //! Nada aqui reprova pelo número: o número é o resultado. É erro só a
 //! máquina que não sobe, a carga que não é lançada, a que não acaba, e a que
 //! não confere — um filho sem a resposta de um pedido, ou com a de outro, ou
-//! o kernel com menos pedidos atendidos do que os processos fizeram.
+//! o kernel com outra conta de pedidos atendidos que a dos processos —
+//! menos, um perdido; mais, um atendido duas vezes.
 //!
 //! `DUKE_CARGA` escolhe os cenários, separados por vírgula: `0` é nenhuma
 //! carga, `N` são N filhos pedindo, `gN` são N filhos girando, e `N:2` ou
@@ -560,7 +561,7 @@ struct Integridade {
     pela_taxa: u64,
     /// As recusas pela taxa além das que os filhos ouviram: a de outro
     /// principal — o agente novo, que num cenário de dois titulares é um
-    /// deles, ou o relógio de um pai que esperou a ficha.
+    /// deles.
     taxa_a_mais: u64,
 }
 
@@ -579,14 +580,17 @@ impl std::fmt::Display for Integridade {
 /// (`user.stats`), e `pela_taxa`, as recusas pela taxa (`security.metrics`).
 ///
 /// Todo filho disse a conta e recebeu uma resposta por pedido, ALLOW ou
-/// RATE_LIMIT — e cada uma era a do pedido dele: o filho confere o `id` e
-/// para na primeira de outro, sem dizer a conta. O kernel atendeu
-/// exatamente os pedidos dos filhos e o relógio de cada pai — menos é
-/// pedido perdido; mais, um pedido atendido duas vezes, ou o de um processo
-/// de fora da carga, que a máquina da bancada não tem —, e recusou pela
-/// taxa ao menos o que os filhos ouviram: o agente novo divide o balde com
-/// o titular da chave dele, e o relógio de um pai pode esperar a ficha. As
-/// recusas a mais ficam ditas.
+/// RATE_LIMIT — e cada uma era a do pedido dele: o filho confere o `id`, e
+/// na primeira de outro para e sai com outro código; a conta que ele diz
+/// então tem uma resposta que não foi ALLOW nem RATE_LIMIT, e não confere.
+/// O kernel atendeu exatamente os pedidos dos filhos e um relógio de cada
+/// pai — menos é pedido perdido; mais, um pedido atendido duas vezes, ou o
+/// de um processo de fora da carga, que a máquina da bancada não tem —, e
+/// recusou pela taxa ao menos o que os filhos ouviram: o agente novo divide
+/// o balde com o titular da chave dele. As recusas a mais ficam ditas. O
+/// relógio do pai é um pedido só: um pai que esperasse a ficha pediria
+/// mais, e a conta exata reprovaria — hoje não acontece, que entre duas
+/// cargas o balde enche.
 fn integridade(
     c: Cenario,
     contas: &[(u64, ContaDoFilho)],

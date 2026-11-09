@@ -57,13 +57,14 @@
 //! mesmo com a fila dos pedidos sempre cheia. O pedido que não coube fica
 //! na fila, no lugar dele: nada se perde, nada se repete, e a ordem é a da
 //! chegada. Os suspensos cuja espera acabou são executados de novo a cada
-//! vez, com a fila cheia ou vazia.
+//! vez, com a fila cheia ou vazia, fora do orçamento.
 //!
 //! Antes do orçamento, a tarefa atendia a fila até esvaziá-la, e só cedia
 //! quando a encontrava vazia: medido em produção, dois processos de um
 //! titular pedindo sem parar faziam-na atender cadeias de até 1 366 pedidos
 //! numa vez só, segurando o executor até 338 ms, e o canal do agente dos
-//! outros titulares ia de um p99 de 20–35 ms a 231–280 ms. O canal do
+//! outros titulares ia de um p99 de 9–56 ms sem carga a 164–280 ms (a
+//! investigação de 8/11/2026; ver o README, *Decisões pendentes*). O canal do
 //! agente já cedia depois de cada pedido; a tarefa `programas` passou a
 //! ceder depois de cada vez. Nada muda no que um pedido decide — o mesmo
 //! gate, a mesma taxa, a mesma auditoria —, só quando ele é atendido.
@@ -284,9 +285,10 @@ impl OrcamentoDaVez {
 /// 1, 4, 16 e 64 pedidos sem tempo, e 0,5, 2 e 8 ms sem conta —, de 1 a 16
 /// pedidos o canal do agente sob carga voltou abaixo do controle sem fila,
 /// sem a vazão cair; com 64, a vez foi a 25–33 ms no p99. Dezesseis é a
-/// maior conta com a vez perto de 10 ms no p99, e a de maior vazão; o
-/// tempo limita a vez quando os pedidos custam mais. Os números estão em
-/// `docs/INTERFACE.md`, em *A fila e a vez da tarefa `programas`*.
+/// maior conta com a vez perto de 10 ms no p99, e a de maior vazão com dois
+/// processos e com dois titulares; o tempo limita a vez quando os pedidos
+/// custam mais. Os números estão em `docs/INTERFACE.md`, em *A fila e a
+/// vez da tarefa `programas`*.
 pub const PEDIDOS_POR_VEZ: usize = 16;
 
 /// Por quanto tempo, em microssegundos, uma vez da tarefa `programas` segue
@@ -295,10 +297,12 @@ pub const PEDIDOS_POR_VEZ: usize = 16;
 /// Dois milissegundos, pela mesma varredura de [`PEDIDOS_POR_VEZ`]: a conta
 /// sozinha não vê o pedido caro — a depuração, a espera pela trava da
 /// auditoria, o disco —, e com dezesseis pedidos a vez chegou a 12 ms no
-/// p99 em `release`; com o tempo, ela fica em 4 ms no p99, nas duas
-/// arquiteturas, com a mesma vazão. O tempo corta a vez depois do pedido
-/// que passou dele — um pedido nunca é cortado no meio. `u64::MAX`: sem
-/// tempo, só a conta.
+/// p99 em `release`; com o tempo, ela fica em 4 ms no p99 em `release`, nas
+/// duas arquiteturas, sem a vazão cair em relação ao código de antes. Em
+/// depuração, com o pedido de uns 2 ms, a vez fica em 12–66 ms no p99. O
+/// tempo corta a vez depois do pedido que passou dele — um pedido nunca é
+/// cortado no meio. `u64::MAX` seria sem tempo, só a conta — o `cargo
+/// xtask invariantes` não o aceita aqui.
 pub const TEMPO_POR_VEZ_US: u64 = 2_000;
 
 /// O orçamento da tarefa `programas`: [`PEDIDOS_POR_VEZ`] e
@@ -373,7 +377,8 @@ pub fn atender_com(orcamento: OrcamentoDaVez) -> usize {
 /// conferir a espera dele depois de cada vez — a chamada acaba, mesmo com
 /// processos pedindo sem parar noutro núcleo. Fora da suíte ela não
 /// existe: a fila só é atendida pela tarefa, no executor (e o `xtask`
-/// confere que os nomes que a atendem não saem deste arquivo).
+/// confere que os nomes que a atendem não aparecem fora deste arquivo e da
+/// suíte).
 #[cfg(feature = "modo-teste")]
 pub fn atender_pendentes() -> usize {
     atender_com(ORCAMENTO_DA_VEZ)

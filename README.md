@@ -120,7 +120,7 @@ cargo xtask enlace                   # duas máquinas pela rede do emulador: o e
 cargo xtask pareamento               # duas máquinas e a Pessoa no teclado das duas: o pareamento sem administrador, o homem no meio, a meia relação, a lápide
 cargo xtask fluxo                    # duas máquinas e os fluxos da malha entre elas: 4 MiB em cada sentido, a contrapressão, a adulteração e o homem no meio, a política, a suspensão, o corte, a revogação, as vagas
 cargo xtask sdk                      # duas máquinas e o SDK da malha: o modelo de fora do repositório nas duas, o eco-malha com clientes daqui e de lá, os dois sentidos, a conversa pelo teclado, as medidas, a revogação
-cargo xtask disponibilidade          # o canal do agente com os processos de outro titular pedindo sem parar: só mede
+cargo xtask disponibilidade          # o canal do agente com os processos de outro titular, ou de dois, pedindo sem parar: mede, e só reprova a carga que não confere
 cargo xtask tempo                    # a hora pela rede: fontes de Roughtime no hospedeiro
 cargo xtask mainnet --release        # a rede principal do IC, de verdade: à mão, fora da CI
 
@@ -397,14 +397,14 @@ kernel/src/
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
 │   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
-│   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia — nenhum pedido ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das duas contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito; e o anel que perde registros entre as duas tomadas dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota
+│   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia — nenhum pedido ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das duas contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito; o anel que perde registros entre as duas tomadas dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
-│   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, e o fio que morre com o pedido na fila entre duas; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
+│   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
@@ -840,7 +840,7 @@ xtask/src/
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia; cada texto começa com o shift sozinho, apertado e solto, contra o shift preso de um soltar perdido
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso
-├── disponibilidade.rs a bancada da disponibilidade: a máquina de produção, a serial e o TCP sondados de 50 em 50 ms enquanto o `incansavel` de outro titular — ou de dois — pede sem parar, ou só gira — a ida e volta, o maior silêncio, o agente novo que tenta entrar, os contadores do kernel, a conta dos filhos contra a do kernel, o atraso do pulso e o do relógio da barra; só mede, e reprova só a carga que não confere
+├── disponibilidade.rs a bancada da disponibilidade: a máquina de produção, a serial e o TCP sondados de 50 em 50 ms enquanto o `incansavel` de outro titular — ou de dois — pede sem parar, ou só gira — a ida e volta, o maior silêncio, o agente novo que tenta entrar, os contadores do kernel, a conta dos filhos contra a do kernel, o atraso do pulso e o do relógio da barra; não reprova pelo número: só a máquina que não sobe e a carga que não é lançada, não acaba ou não confere
 ├── firmware.rs      onde parou a máquina que não atendeu: o módulo de cada processador — a imagem PE abaixo do endereço, lida pelo QMP, com o nome do CodeView dela ou do módulo de mesmo cabeçalho no arquivo do firmware, aberto pelo `xz` — e os valores da pilha que caem no código de uma imagem
 ├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
@@ -2387,28 +2387,29 @@ o executor cooperativo com o canal do agente, o enlace, o pulso, o console
 e a barra. Cada vez dela atende no máximo o orçamento da vez
 (`nativo::ORCAMENTO_DA_VEZ`): 16 pedidos ou 2 ms, o que acabar antes, e
 nunca menos de um — o tempo, o da vez inteira, conferido antes de tirar o
-próximo; executa de novo os pedidos suspensos cuja espera acabou, com a
-fila cheia ou vazia; e cede (`tarefas::ceder`), sempre: as tarefas
-acordadas enquanto ela atendia rodam antes da vez seguinte. Conta no
-orçamento todo pedido tirado da fila — o atendido, o que suspendeu, o
-recusado pela taxa ou pelo gate, e o largado, de um fio que morreu com o
-pedido na fila —; o que não coube fica na fila, no lugar dele. O
-orçamento não muda o que um pedido decide — o mesmo gate, a mesma taxa, a
-mesma auditoria —, só quando ele é atendido. Escolhido pela bancada
-(`cargo xtask disponibilidade`, 9/11/2026): com dois processos de um
-titular pedindo sem parar, ou dois em cada um de dois titulares, o p99 da
-serial do canal do agente foi de 116–196 a 31–50 ms no x86_64 e de 102–170 a 7–8 ms
-no aarch64, em `release`, e de 261–948 a 73–119 ms em depuração; a vez da
-tarefa, de centenas de milissegundos, ficou em 4 ms no p99 em `release`; e a vazão
-dos pedidos não caiu em `release` — em depuração, sob carga, caiu 10 a
-21%, o executor devolvido ao canal do agente. Nenhum pedido perdido,
-repetido ou trocado: cada filho da carga confere a resposta de cada
-pedido, e a bancada compara a conta dele com a do kernel. Na suíte, que
-não tem a tarefa, quem espera um processo atende uma vez do mesmo
-orçamento por volta; os casos `orcamento:` rodam o laço da tarefa
-(`nativo::servir_com`) num executor de teste. Os números, a varredura e
-as regras estão em [`docs/INTERFACE.md`](docs/INTERFACE.md), em *A fila e
-a vez da tarefa `programas`*.
+próximo; executa de novo, fora do orçamento, os pedidos suspensos cuja
+espera acabou, com a fila cheia ou vazia; e cede (`tarefas::ceder`),
+sempre: as tarefas acordadas enquanto ela atendia rodam antes da vez
+seguinte. Conta no orçamento todo pedido tirado da fila — o atendido, o
+que suspendeu, o recusado pela taxa ou pelo gate, e o largado, de um fio
+que morreu com o pedido na fila —; o que não coube fica na fila, no lugar
+dele. O orçamento não muda o que um pedido decide — o mesmo gate, a mesma
+taxa, a mesma auditoria —, só quando ele é atendido; e não reparte a fila
+entre titulares. Escolhido pela bancada (`cargo xtask disponibilidade`,
+9/11/2026): com dois ou três processos de um titular pedindo sem parar,
+ou dois em cada um de dois titulares, o p99 da serial do canal do agente
+foi de 116–196 a 31–50 ms no x86_64 e de 102–170 a 7–8 ms no aarch64, em
+`release`, e de 261–948 a 73–119 ms em depuração; a vez da tarefa, de
+98–197 ms no p99, ficou em 4 ms em `release`; e a vazão dos pedidos não
+caiu em `release` — em depuração, sob carga, caiu 10 a 21%, o executor
+devolvido ao canal do agente. Nenhum pedido perdido, repetido ou trocado:
+cada filho da carga confere a resposta de cada pedido, e a bancada
+compara a conta dele com a do kernel. Na suíte, que não tem a tarefa,
+quem espera um processo atende uma vez do mesmo orçamento por volta;
+cinco dos casos `orcamento:` rodam o laço da tarefa (`nativo::servir_com`)
+num executor de teste. Os números, a varredura e as regras estão em
+[`docs/INTERFACE.md`](docs/INTERFACE.md), em *A fila e a vez da tarefa
+`programas`*.
 
 ## Armazenamento nativo
 
@@ -5277,44 +5278,49 @@ Sem ganho a medir, não há o que pagar com esse risco.
   prioridade no rodízio; quanto isso pesa depende de tempos, e não foi
   medido. A conferir, sem ter entrado neste incremento:
   `fluxo::canal_acabou` só tomar a ordem quando o morto foi ponta de um
-  fluxo. E uma observação do caso concorrente, fora do recolhimento e sem
-  medida em produção: `nativo::atender_pendentes` atende a fila dos
-  pedidos dos processos até esvaziá-la, sem limite por chamada. Na suíte,
-  quem a chama é o fio da suíte, enquanto espera, e o laço de um titular
-  noutro núcleo o segurou 569 tiques numa chamada só (medido sob uma
-  mutação, com uma medida temporária); em produção, quem a chama é a
-  tarefa `programas` (`nativo::servir`), que divide o executor com o canal
-  do agente, o enlace, o pulso, o console e a barra. **Medido em
+  fluxo. E uma observação do caso concorrente, fora do recolhimento: até o
+  orçamento da vez (9/11/2026), `nativo::atender_pendentes` atendia a fila
+  dos pedidos dos processos até esvaziá-la, sem limite por chamada. Na
+  suíte, quem a chamava era o fio da suíte, enquanto esperava, e o laço de
+  um titular noutro núcleo o segurou 569 tiques numa chamada só (medido
+  sob uma mutação, com uma medida temporária); em produção, quem a chamava
+  era a tarefa `programas` (`nativo::servir`), que divide o executor com o
+  canal do agente, o enlace, o pulso, o console e a barra. **Medido em
   8/11/2026**, sem mudar o comportamento, com a bancada `cargo xtask
   disponibilidade` e uma medida temporária, nunca commitada: com um
-  processo pedindo sem parar, o executor alterna — cada chamada atende um
-  pedido —; com dois, de um titular só, e um núcleo do hospedeiro livre
-  (`DUKE_NUCLEOS=3`), a tarefa `programas` atende cadeias de até 1 366
-  pedidos numa vez do executor, segura-o até 338 ms e passa de 80 a 92% do
-  tempo em `atender_pendentes` — no x86_64 e no aarch64, em `release` —, e
-  o canal do agente dos outros titulares vai de um p99 de 9–56 ms sem
-  carga a 164–280 ms, com silêncios de até 0,4 s, contra 49–58 ms do
-  controle, os mesmos processos só girando. Neste ambiente — o QEMU com
-  TCG, sem KVM —, é degradação, e não monopólio: em `release`, nenhuma vez
-  do `programas` passou de 0,34 s, e o agente novo sempre entrou; em
-  depuração, uma chegou a 0,83 s, e o silêncio do canal a 3,1 s. Com 4
-  vCPUs em 4 CPUs do hospedeiro (o padrão da bancada e da CI), nenhuma vez
-  do `programas` de 100 ms ou mais passou de 8 pedidos (a medida não
-  registrava as mais curtas), e o canal ficou num p99 de 32–60 ms, o do
-  controle em 60–66: o efeito depende da folga de CPU, e numa máquina com
-  núcleos dedicados pode ser maior — nada no código o limita. Em
-  depuração, a causa maior é outra: a cada 2 s o coletor codifica a
-  auditoria pendente para o journal com a trava da auditoria na mão e as
-  interrupções mascaradas — de 20 a 64 ms por lote, de 43 a 102 registros
-  (a medida não registrava lotes abaixo de 20 ms); em `release`, sob
-  carga, só três chegaram a 20 ms, o maior com 21,5 —, e todo pedido
-  auditado espera, o do canal do agente inclusive. As duas escolhas [B]
-  foram feitas, com a medida de antes e de depois: a cópia da auditoria
-  para o journal fora da trava (`docs/PERSISTENCIA.md`, *A cópia da
-  auditoria para o journal: a trava do gate*), e o orçamento da vez da
-  tarefa `programas` — 16 pedidos ou 2 ms (ver *A fila e a vez da tarefa
-  `programas`*, em [Interface nativa](#interface-nativa), e
-  `docs/INTERFACE.md`).
+  processo pedindo sem parar, o executor alternava — cada chamada atendia
+  um pedido —; com dois, de um titular só, e um núcleo do hospedeiro livre
+  (`DUKE_NUCLEOS=3`), a tarefa `programas` atendia cadeias de até 1 366
+  pedidos numa vez do executor, segurava-o até 338 ms e passava de 80 a
+  92% do tempo em `atender_pendentes` — no x86_64 e no aarch64, em
+  `release` —, e o canal do agente dos outros titulares ia de um p99 de
+  9–56 ms sem carga a 164–280 ms, com silêncios de até 0,4 s, contra
+  49–58 ms do controle, os mesmos processos só girando. Naquele ambiente —
+  o QEMU com TCG, sem KVM —, era degradação, e não monopólio: em
+  `release`, nenhuma vez do `programas` passou de 0,34 s, e o agente novo
+  sempre entrou; em depuração, uma chegou a 0,83 s, e o silêncio do canal
+  a 3,1 s. Com 4 vCPUs em 4 CPUs do hospedeiro (o padrão da bancada e da
+  CI), nenhuma vez do `programas` de 100 ms ou mais passou de 8 pedidos (a
+  medida não registrava as mais curtas), e o canal ficou num p99 de
+  32–60 ms, o do controle em 60–66: o efeito dependia da folga de CPU, e
+  numa máquina com núcleos dedicados podia ser maior — nada no código o
+  limitava. Em depuração, a causa maior era outra: a cada 2 s o coletor
+  codificava a auditoria pendente para o journal com a trava da auditoria
+  na mão e as interrupções mascaradas — de 20 a 64 ms por lote, de 43 a
+  102 registros (a medida não registrava lotes abaixo de 20 ms); em
+  `release`, sob carga, só três chegaram a 20 ms, o maior com 21,5 —, e
+  todo pedido auditado esperava, o do canal do agente inclusive. As duas
+  escolhas [B] foram feitas, com a medida de antes e de depois: a
+  auditoria copiada para o journal sem alocar com a trava na mão — com
+  ela, só a cópia; as entradas, montadas fora (`docs/PERSISTENCIA.md`, *A
+  cópia da auditoria para o journal: a trava do gate*, e a medida em *A
+  medida, antes e depois*) —, e o orçamento da vez da tarefa `programas` —
+  16 pedidos ou 2 ms, os suspensos prontos fora dele (ver *A fila e a vez
+  da tarefa `programas`*, em [Interface nativa](#interface-nativa), e
+  `docs/INTERFACE.md`). As mutações das duas estão nos mesmos documentos:
+  na última rodada de cada uma, 36 de 39 do orçamento e 38 de 42 da cópia
+  reprovaram; as que passam são equivalentes, ou a conferência do `id`
+  nos filhos da carga, que só uma troca de respostas faria aparecer.
   **O A1-4 segue pendente**: a recusa não diz quantos dos contados
   são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
   que espera o coletor, e quem ouve "cota de processos do papel: N de M"

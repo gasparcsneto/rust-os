@@ -2259,7 +2259,7 @@ registrados, para uma medida e uma decisão à parte.
 | Onde | O que confere |
 |---|---|
 | hospedeiro (`politica`): *o tamanho codificado é o da codificação*, *codificar_em acrescenta o mesmo sem alocar*, *antes e depois pela posição são os do filtro* | a conta do tamanho igual à da codificação, com o corte do texto acima do teto; a codificação acrescentada igual byte a byte, sem trocar de memória com o lugar reservado; os guardados antes e depois de uma sequência, achados pela posição, iguais aos do filtro — e a lacuna, a de sempre, e nenhuma depois de `u64::MAX`, sem dar a volta |
-| suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; e o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota |
+| suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota; e o registro que chega ao teto: com eventos de um tamanho, medido, em que o seguinte ao último que cabe caberia sem os dois bytes do tamanho do campo, e não com eles, cada registro cheio fica com um evento a menos, e nenhum passa do teto |
 | hospedeiro (`xtask`): *o anel do corte que confere*, *o visto antes do anel que não deu a volta* | os vistos de antes do começo do anel do boot novo só deixam de contar se ele deu a volta — tem o que o anel guarda, 1024; com um a menos, reprovam |
 | bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou — e nenhum ficou de fora do anel sem ele ter dado a volta —, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava (uma conferência de sanidade: a exata é a do cenário *a queda em cada fronteira de um registro só de auditoria*); mais um boot confere de novo |
 
@@ -2268,12 +2268,16 @@ registrados, para uma medida e uma decisão à parte.
 A bancada `cargo xtask disponibilidade`, com a carga
 `DUKE_CARGA=0,g2,1,2,3,2:2,0` e 3 vCPUs (um núcleo do hospedeiro livre), e
 uma medida temporária, nunca commitada: o tempo de cada tomada da trava da
-auditoria, contado **dentro** de `sem_interrupcoes` — do primeiro ao último
-passo com as interrupções mascaradas, a espera pela trava e a retenção. O
-código de antes é o `774522e` nos arquivos deste trabalho; o de depois, o
-`5b44552` — as correções do adversário que vieram depois dele mudam só a
-suíte, os comentários e um `saturating_add` da `politica` que dá o mesmo
-valor em toda sequência alcançável. Em 9/11/2026, o maior valor de cada
+auditoria — a do coletor contada em volta da tomada inteira, com a espera
+pela trava e a retenção; o tempo mascarado e a espera do gate, **dentro**
+de `sem_interrupcoes`, do primeiro ao último passo com as interrupções
+mascaradas. Os maiores da trava do coletor batem com os do tempo
+mascarado, contados por dentro: não são a preempção de um tique em volta
+da tomada. O código de antes é o `774522e` nos arquivos deste trabalho; o
+de depois, o `5b44552` — as correções do adversário que vieram depois
+dele mudam, no kernel e na `politica`, só a suíte, os comentários e um
+`saturating_add` que dá o mesmo valor em toda sequência alcançável. Em
+9/11/2026, o maior valor de cada
 cenário da carga — sem carga, girando, um, dois e três processos pedindo, e
 dois titulares —, em microssegundos:
 
@@ -2294,14 +2298,14 @@ carga, antes e depois, e nenhum se perdeu.
 
 O canal do agente sob carga melhora onde a trava era o que o segurava: em
 depuração, no x86_64, o p99 da serial com três processos pedindo foi de
-1 773 a 948 ms, e com dois titulares, de 2 045 a 844 ms; no aarch64, de
+1 773 a 948 ms, e com dois titulares, de 2 046 a 844 ms; no aarch64, de
 808 a 417 ms com dois titulares. Em `release`, a vez longa da tarefa
 `programas` — o Trabalho A — é o que domina o canal sob carga, e a
 diferença do B some no meio dela.
 
 Os pedidos atendidos por segundo não mudaram num sentido que se repita:
 +2% a +9% no aarch64 em `release`; −4% a +22% no aarch64 em depuração;
-no x86_64 em `release`, −6% a −15% num par de rodadas e −4% a +8% noutro,
+no x86_64 em `release`, −6% a −13% num par de rodadas e −4% a +8% noutro,
 com o mesmo código de antes e de depois; e −2% a −14% no x86_64 em
 depuração, onde a tarefa `programas` passou a ocupar menos do executor — o
 canal do agente, sem a trava na frente, anda duas vezes mais: 3,9 → 7,9
@@ -2310,17 +2314,60 @@ avanços por segundo da serial com três processos pedindo.
 Duas observações da medida:
 
 - **Uma rodada de antes descartada.** Uma rodada do x86_64 em `release`
-  com o código de antes deu a trava do coletor em 110 a 200 ms — mas tudo
-  nela andou 2,5 vezes mais devagar, os pedidos por segundo também (1 233
-  contra 3 475 com um processo pedindo), em todos os cenários: o hospedeiro
-  tirou CPU da máquina virtual. Repetida em seguida, com a lista livre do
-  heap na medida — de 347 a 1 026 blocos, e o maior livre sempre acima de
-  6 MiB, sem fragmentação —, deu 5 a 17 ms, perto da primeira medida de
-  antes (2,6 a 28 ms) e da investigação (16,7 a 28,4 ms). A tabela usa a
-  repetição.
+  com o código de antes deu a trava do coletor em 110 a 200 ms do segundo
+  cenário em diante — também no último, sem carga (144 ms) —, e nos
+  cenários com pedidos os pedidos por segundo caíram de 2,4 a 4,4 vezes
+  (1 233 contra 3 475 com um processo pedindo), e o canal também; o
+  primeiro cenário, sem carga, foi normal, e os dois filhos que só giravam
+  fizeram as mesmas voltas (32 contra 33 olhadas no relógio por segundo).
+  A causa não ficou provada: o hospedeiro tirando CPU de parte da máquina
+  virtual, ou o heap daquele boot fragmentado, que só o código de antes
+  sentiria tanto, com o alocador chamado dentro da trava. Repetida em
+  seguida, com a lista livre do heap na medida — de 347 a 1 026 blocos, e
+  o maior livre sempre acima de 6 MiB, sem fragmentação —, deu 5 a 17 ms,
+  perto da primeira medida de antes (2,6 a 28 ms) e da investigação (16,7
+  a 28,4 ms). A tabela usa a repetição.
 - **O número da mensagem do `5b44552`.** "O tempo com as interrupções
   mascaradas chegou a 268 ms" saiu da medida de antes, que contava o tempo
   por fora de `sem_interrupcoes`: a preempção de um tique logo antes de
   mascarar, ou logo depois de desmascarar, entrava na conta. Contado por
   dentro, o maior tempo mascarado de antes foi de 101 ms (aarch64, depuração)
   e de 64 ms no x86_64 em depuração.
+
+### As mutações
+
+Em 9/11/2026, uma de cada vez, cada uma desfeita antes da seguinte,
+contra o código do `1a17547`: 42 — 26 no `persistencia.rs` (a cópia, a
+montagem, as duas contas, a compactação e a ordem das gravações), pela
+suíte filtrada a `coleta:`, `auditoria`, `persistencia:` e `compactacao`
+no x86_64 em depuração; 7 na `politica` e 9 na bancada, pelos testes do
+hospedeiro — e uma delas, o visto de uma queda que não vale, também pela
+bancada de persistência no QEMU. Reprovaram 37 na primeira rodada, sete
+delas num pânico da própria suíte: a cópia sem a ordem das gravações, a
+compactação sem ela, e a montagem que não ocupa o que a tomada contou
+(`coleta_de_teste::montada`). As cinco que passaram:
+
+- **a cópia sem o `assert!` da ordem**: equivalente. Todo caminho que
+  copia já tem a ordem das gravações; o `assert!` é a rede da suíte para
+  um caminho novo que não a tenha.
+- **a montagem sem a sua conta do que cabe**: equivalente enquanto a
+  tomada decidir pela mesma conta — a montagem nunca recebe o que não
+  cabe. A exceção é a entrada da lacuna que não cabe junto: o registro
+  montado é descartado (`a.ate < exigir`), ou as duas versões dão o mesmo
+  erro.
+- **`codificar` sem a capacidade reservada**: equivalente; a capacidade
+  não aparece nos bytes.
+- **a bancada que confere o `id` antes do aviso da queda**: equivalente
+  nos casos do teste. Só uma linha misturada teria as duas coisas — o
+  aviso escrito por cima de uma resposta, depois do meio segundo de
+  espera (ver *O que a queda deixa, e o que o firmware lê*).
+- **a conta do que cabe sem os dois bytes do tamanho de cada campo**: um
+  teste que faltava — nenhum caso chegava ao teto pela fronteira desses
+  dois bytes. O caso *o registro que chega ao teto da auditoria*
+  (`0d4e965`) mede o tamanho de um evento e escolhe o detalhe com que o
+  evento seguinte ao último que cabe caberia sem os dois bytes, e não com
+  eles; contra ele, a mutação reprovou ("um registro levou mais auditoria
+  que o teto").
+
+Na última rodada de cada uma, 38 das 42 reprovaram; as quatro que passam
+são as equivalentes, explicadas acima.
