@@ -275,12 +275,25 @@ bancada, então:
   `keyboard.read` tem de subir exatamente o tamanho dela, e o `dropped`,
   nada; a que chega com tecla a menos se apaga pela mesma conta, e nada
   dela vai à saída da bancada — só quantas teclas chegaram. A conta não vê
-  um shift perdido, e as senhas das bancadas não têm tecla com shift. O
-  Enter também vai contado: o que não chega ao kernel vai de novo, e a
-  linha, que ainda espera por ele, não roda duas vezes. A serial das
-  bancadas lê o teclado — é `sistema`, também na imagem de produção que
-  elas montam —; numa política em que ela não leia, a senha e o Enter só se
-  confeririam pelo resultado;
+  um shift perdido: as senhas das bancadas não têm tecla com shift, e
+  começam com ele solto (abaixo). O Enter também vai contado: o que não
+  chega ao kernel vai de novo, e a linha, que ainda espera por ele, não
+  roda duas vezes. A serial das bancadas lê o teclado — é `sistema`, também
+  na imagem de produção que elas montam —; numa política em que ela não
+  leia, a senha e o Enter só se confeririam pelo resultado;
+- **solta o shift antes de cada texto.** O soltar do shift também se
+  perde, e não estraga a linha em que se perde: o kernel guarda um estado
+  só para os dois shifts, e a linha que termina em `"}` aparece inteira
+  com o shift ainda apertado. A tecla seguinte que vai com o shift o solta;
+  até ela, tudo sai com ele, e a linha que não tem nenhuma sai inteira
+  assim. Na CI 469, no par x86_64→x86_64 da bancada do SDK, o último texto
+  digitado no destino antes do NB03 foi o `user.run` da `conversa`, no
+  console físico, que termina em `"}` e conferiu inteiro; o `oi de b`
+  entrou como `OI DE B` nas cinco vezes, e o ritmo mais lento não mudou
+  nada. Por isso todo texto que a bancada digita — cada tentativa de uma
+  linha, a senha — começa com o shift sozinho, apertado e solto, que no
+  kernel não produz caractere nem entra na conta das teclas; o apagar e o
+  Enter, iguais com o shift apertado, vão sem ele;
 - **adapta o ritmo.** Cada máquina guarda um fator de respiro, que começa
   em 1× e dobra a cada perda vista — a linha estragada, a senha que a conta
   não fecha, o Enter que ela não viu, o comando que o gate não decidiu, o

@@ -49,13 +49,32 @@
 //! - a senha, que não ecoa: pela conta das teclas do kernel — o `pressed` e o
 //!   `dropped` de `keyboard.read` —, que tem de subir exatamente o tamanho
 //!   dela, sem descarte; a que chega com tecla a menos se apaga pela mesma
-//!   conta, sem nada na tela nem no log. A conta não vê um shift perdido, e
-//!   as senhas das bancadas não têm tecla com shift. A serial das bancadas
-//!   lê o teclado — é `sistema`, também na imagem de produção que elas
-//!   montam —; numa política em que ela não leia, a senha e o Enter só se
-//!   confeririam pelo resultado;
+//!   conta, sem nada na tela nem no log. A conta não vê um shift perdido:
+//!   as senhas das bancadas não têm tecla com shift, e começam com ele
+//!   solto — ver *O shift preso*. A serial das bancadas lê o teclado — é
+//!   `sistema`, também na imagem de produção que elas montam —; numa
+//!   política em que ela não leia, a senha e o Enter só se confeririam pelo
+//!   resultado;
 //! - o Enter: contado do mesmo jeito. O que não chega ao kernel vai de novo:
 //!   a linha ainda espera por ele, e nada roda duas vezes.
+//!
+//! # O shift preso
+//!
+//! O soltar do shift se perde como qualquer tecla, e não estraga a linha em
+//! que se perde: o kernel guarda um estado só para os dois shifts — o do
+//! último apertar ou soltar que chegou (`kernel/src/teclado.rs`) —, e a
+//! linha que termina em `"}` aparece inteira na tela com o shift ainda
+//! apertado. A tecla seguinte que vai com o shift o solta de novo; até ela,
+//! tudo sai com ele, e a linha que não tem nenhuma sai inteira assim. Na CI
+//! 469, no par x86_64>x86_64 da bancada do SDK, o último texto digitado no
+//! destino antes do NB03 foi o `user.run` da `conversa`, no console físico,
+//! que termina em `"}` e conferiu inteiro; o `oi de b` entrou como
+//! `OI DE B` nas cinco vezes, e o ritmo mais lento não mudou nada. Por isso
+//! todo texto que o teclado digita — uma linha, cada tentativa dela, uma
+//! senha — começa com o shift sozinho, apertado e solto
+//! ([`Teclado::mandar`]): no kernel, ele não produz caractere, não entra na
+//! conta das teclas nem no histórico, e deixa o estado solto. O apagar e o
+//! Enter são os mesmos com o shift apertado, e vão sem ele.
 //!
 //! Quantas vezes: [`VEZES_DE_DIGITAR`], cinco — cada linha, e cada comando
 //! ou login que não chegou a um desfecho —: as três de antes, em 1×, 2× e 4×
@@ -215,6 +234,20 @@ pub(crate) fn mandar(
     Ok(())
 }
 
+/// O respiro depois do shift sozinho: dois eventos na fila do emulador, o
+/// apertar e o soltar, como uma tecla sem shift.
+const RESPIRO_DO_SHIFT: Duration = Duration::from_millis(20);
+
+/// O shift sozinho, apertado e solto, pelo monitor: o estado do shift no
+/// kernel fica solto — ver *O shift preso*, no doc do módulo.
+fn soltar_o_shift(mon: &mut UnixStream, quem: &str, ritmo: Ritmo) -> Result<(), String> {
+    mon.write_all(b"sendkey shift\n")
+        .and_then(|()| mon.flush())
+        .map_err(|e| format!("{quem}: falha ao mandar `shift`: {e}"))?;
+    std::thread::sleep(RESPIRO_DO_SHIFT * ritmo.fator());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // O teclado
 // ---------------------------------------------------------------------------
@@ -250,9 +283,15 @@ impl Teclado {
         self.quem
     }
 
-    /// Manda `texto`, uma tecla por vez, no ritmo de agora.
+    /// Manda `texto`, uma tecla por vez, no ritmo de agora — depois do shift
+    /// sozinho, se o texto tem tecla que o shift muda: ver *O shift preso*,
+    /// no doc do módulo. O apagar e o Enter vão sem ele.
     pub(crate) fn mandar(&mut self, texto: &str) -> Result<(), String> {
-        mandar(&mut self.monitor, texto, self.quem, self.ritmo.get())
+        let ritmo = self.ritmo.get();
+        if texto.chars().any(|c| !matches!(c, '\n' | '\u{8}')) {
+            soltar_o_shift(&mut self.monitor, self.quem, ritmo)?;
+        }
+        mandar(&mut self.monitor, texto, self.quem, ritmo)
     }
 
     /// Uma perda de tecla, vista: o fator dobra, e a bancada diz qual foi, com
@@ -888,6 +927,52 @@ mod testes {
         assert_eq!(conferir("ola de a", "", "ola de a"), Conferencia::Inteira);
         assert_eq!(conferir("ola d", "", "ola de a"), Conferencia::AChegar);
         assert_eq!(conferir("ol de a", "", "ola de a"), Conferencia::Estragada);
+        // O shift preso da linha de antes, como na CI 469: até a primeira
+        // tecla com shift, que o solta; sem nenhuma, a linha inteira.
+        assert_eq!(
+            conferida(r#"duke> USER>RUN {"path":"/programas/aarch64/carteiro"}"#),
+            Conferencia::Estragada
+        );
+        assert_eq!(conferir("OI DE B", "", "oi de b"), Conferencia::Estragada);
+    }
+
+    /// Todo texto com tecla que o shift muda começa com o shift sozinho,
+    /// apertado e solto — ver *O shift preso* —, cada vez que vai; o apagar
+    /// e o Enter vão sem ele. O que o monitor recebe, na ordem.
+    #[test]
+    fn todo_texto_comeca_com_o_shift_solto() {
+        use std::io::Read;
+
+        let (monitor, mut do_outro_lado) = UnixStream::pair().unwrap();
+        let mut t = Teclado::novo(monitor, ritmo_novo(), "teste");
+        t.mandar("oi de b").unwrap();
+        t.mandar("\u{8}\u{8}").unwrap();
+        t.mandar("oi de b").unwrap();
+        t.mandar("\n").unwrap();
+        t.mandar(r#"{"a":1}"#).unwrap();
+        drop(t);
+        let mut recebido = String::new();
+        do_outro_lado.read_to_string(&mut recebido).unwrap();
+        let teclas: Vec<&str> = recebido
+            .lines()
+            .map(|l| l.strip_prefix("sendkey ").unwrap())
+            .collect();
+        let oi_de_b = ["o", "i", "spc", "d", "e", "spc", "b"];
+        let mut esperado = vec!["shift"];
+        esperado.extend(oi_de_b);
+        esperado.extend(["backspace", "backspace", "shift"]);
+        esperado.extend(oi_de_b);
+        esperado.extend(["ret", "shift"]);
+        esperado.extend([
+            "shift-bracket_left",
+            "shift-apostrophe",
+            "a",
+            "shift-apostrophe",
+            "shift-semicolon",
+            "1",
+            "shift-bracket_right",
+        ]);
+        assert_eq!(teclas, esperado);
     }
 
     /// A grade do Terminal e a do console físico saem da árvore, sem os
