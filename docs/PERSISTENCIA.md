@@ -2364,7 +2364,7 @@ compactação sem ela, e a montagem que não ocupa o que a tomada contou
 - **a conta do que cabe sem os dois bytes do tamanho de cada campo**: um
   teste que faltava — nenhum caso chegava ao teto pela fronteira desses
   dois bytes. O caso *o registro que chega ao teto da auditoria*
-  (`0d4e965`) mede o tamanho de um evento e escolhe o detalhe com que o
+  (`d443d1d`) mede o tamanho de um evento e escolhe o detalhe com que o
   evento seguinte ao último que cabe caberia sem os dois bytes, e não com
   eles; contra ele, a mutação reprovou ("um registro levou mais auditoria
   que o teto").
