@@ -13,7 +13,12 @@
 //! - que a cópia não pede memória nenhuma ao alocador com a trava na mão —
 //!   pela conta do próprio alocador, só da suíte
 //!   (`autorizacao::alocacoes_sob_a_auditoria_de_teste`) —, e que nenhuma
-//!   entrada é montada com ela (`persistencia::coleta_de_teste`);
+//!   entrada é montada com ela (`persistencia::coleta_de_teste`); antes, o
+//!   controle positivo das duas contas: um pedido e uma montagem feitos de
+//!   propósito com a trava na mão são contados;
+//! - que cada registro copiado com a trava vira entrada — a conta feita com
+//!   ela é a da montagem; em bytes, a suíte o confere em toda gravação
+//!   (`coleta_de_teste::montada`);
 //! - que o auditado logo depois da cópia — no ponto exato, por um gancho da
 //!   suíte, e não onde o tique deixar — fica para a gravação seguinte, e
 //!   vai nela, uma vez;
@@ -25,7 +30,11 @@
 //! - que produtores em vários núcleos e três coletores ao mesmo tempo — o
 //!   do kernel, um segundo e a suíte — não perdem, não repetem e não
 //!   desordenam nada, e que o boot seguinte refaz a mesma cadeia;
-//! - que a compactação copia o anel do mesmo jeito, e a cadeia continua.
+//! - que a compactação copia o anel do mesmo jeito — inteiro o que ele tem
+//!   até a gravada na tomada da cópia, medido nela —, e a cadeia continua;
+//! - e que o anel que perde registros entre as duas tomadas da compactação,
+//!   a que mede e a que copia, deixa a base com a marca até o de antes do
+//!   primeiro copiado, e o boot seguinte a adota.
 //!
 //! Em todos, a auditoria do journal é conferida inteira depois do começo
 //! do caso — cada sequência uma vez, na ordem, as lacunas onde devem estar
@@ -76,6 +85,53 @@ fn primeiro_no_anel() -> u64 {
     crate::autorizacao::com_auditoria(|c| c.ultimos(usize::MAX).next().map(|r| r.seq))
         .flatten()
         .unwrap_or(0)
+}
+
+/// O controle positivo das contas da suíte. Com a trava da auditoria na
+/// mão, um pedido ao alocador feito de propósito entra na conta do
+/// alocador, e uma entrada dada por montada, na das montadas com a trava.
+/// Sem isto, o "nenhum pedido" e o "nenhuma montada com a trava" dos casos
+/// passariam também com as contas cegas — a conferência da ordem das travas
+/// sem ver a trava da auditoria na mão, por exemplo.
+fn as_contas_veem_a_trava() -> Resultado {
+    let bloco = core::alloc::Layout::new::<[u64; 2]>();
+    coleta_de_teste::zerar();
+    alocacoes::vigiar(crate::fios::id_atual());
+    let alocou = crate::autorizacao::com_auditoria(|_| {
+        // Direto ao alocador: por `alloc::alloc`, o LLVM poderia eliminar o
+        // par alocar e devolver.
+        let p = crate::heap::tentar_alocar(bloco);
+        if !p.is_null() {
+            // SAFETY: devolvemos o mesmo ponteiro, com o mesmo layout.
+            unsafe { crate::heap::devolver(p, bloco) };
+        }
+        coleta_de_teste::montou();
+        !p.is_null()
+    });
+    let pedidos = alocacoes::esquecer();
+    let c = coleta_de_teste::contas();
+    coleta_de_teste::zerar();
+    if alocou != Some(true) || pedidos != 1 || c.montados != 1 || c.sob_a_trava != 1 {
+        crate::log_error!(
+            "teste",
+            "{} pedidos ao alocador e {} montados com a trava na mao, de um",
+            pedidos,
+            c.sob_a_trava
+        );
+        return Err("as contas da suite nao veem a trava da auditoria na mao");
+    }
+    Ok(())
+}
+
+/// Cada registro copiado com a trava virou entrada: a conta feita com ela
+/// é a da montagem, e nada do que se copiou ficou de fora. Em bytes, a
+/// suíte confere o mesmo em toda gravação (`coleta_de_teste::montada`).
+fn nada_copiado_de_fora(c: &coleta_de_teste::Contas) -> Resultado {
+    if c.montados != c.copiados {
+        crate::log_error!("teste", "{} copiados, {} montados", c.copiados, c.montados);
+        return Err("a montagem descartou registros que a copia levou com a trava na mao");
+    }
+    Ok(())
 }
 
 /// Um item da auditoria do journal: um registro — a sequência e, se é de
@@ -148,6 +204,7 @@ fn seguidos(itens: &[Item], desde: u64, ate: u64) -> Result<Vec<(u64, u64)>, &'s
 /// no meio, e fica para a gravação seguinte: a gravada para no último
 /// copiado, e a seguinte leva os de depois, uma vez cada.
 pub(super) fn a_trava_fica_solta_na_montagem() -> Resultado {
+    as_contas_veem_a_trava()?;
     anel_cheio_e_gravado()?;
     let desde = persistencia::auditoria_gravada();
     let mut copiado = desde;
@@ -159,7 +216,7 @@ pub(super) fn a_trava_fica_solta_na_montagem() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::gravar_auditoria();
     let pedidos = alocacoes::esquecer();
-    let (copias, montados, sob_a_trava) = coleta_de_teste::contas();
+    let c = coleta_de_teste::contas();
     let (anexado, ultimo_anexado) = coleta_de_teste::anexados();
     coleta_de_teste::zerar();
     r?;
@@ -167,16 +224,17 @@ pub(super) fn a_trava_fica_solta_na_montagem() -> Resultado {
         crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
         return Err("a copia da auditoria pediu memoria com a trava da auditoria na mao");
     }
-    if copias == 0 || montados < 40 || sob_a_trava != 0 {
+    if c.copias == 0 || c.montados < 40 || c.sob_a_trava != 0 {
         crate::log_error!(
             "teste",
             "{} copias, {} montados, {} com a trava na mao",
-            copias,
-            montados,
-            sob_a_trava
+            c.copias,
+            c.montados,
+            c.sob_a_trava
         );
         return Err("uma entrada da auditoria foi montada com a trava na mao");
     }
+    nada_copiado_de_fora(&c)?;
     let gravada = persistencia::auditoria_gravada();
     if anexado == 0 || gravada < copiado || gravada >= anexado {
         crate::log_error!(
@@ -206,6 +264,7 @@ pub(super) fn a_trava_fica_solta_na_montagem() -> Resultado {
 /// gravação seguinte, uma lacuna logo depois dele, contada na auditoria
 /// perdida; e a cadeia refeita do journal é a da memória.
 pub(super) fn o_anel_que_transborda_no_meio_da_coleta() -> Resultado {
+    as_contas_veem_a_trava()?;
     anel_cheio_e_gravado()?;
     let desde = persistencia::auditoria_gravada();
     let mut copiado = desde;
@@ -217,8 +276,11 @@ pub(super) fn o_anel_que_transborda_no_meio_da_coleta() -> Resultado {
     let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);
     let r = persistencia::gravar_auditoria();
     let (anexado, ultimo_anexado) = coleta_de_teste::anexados();
+    let c = coleta_de_teste::contas();
     coleta_de_teste::zerar();
     r?;
+    // O copiado saiu do anel antes de ser montado, e foi montado inteiro.
+    nada_copiado_de_fora(&c)?;
     let gravada = persistencia::auditoria_gravada();
     let frente = primeiro_no_anel();
     if anexado == 0 || gravada < copiado || gravada >= anexado || frente <= gravada + 1 {
@@ -235,15 +297,30 @@ pub(super) fn o_anel_que_transborda_no_meio_da_coleta() -> Resultado {
     }
     // A gravação seguinte, com a lacuna e um anel inteiro pendente — mais
     // que um registro do journal: nenhuma cópia dela pede memória com a
-    // trava na mão, nem a que não cabe toda num registro.
+    // trava na mão, nem a que não cabe toda num registro. E os lotes cheios
+    // — onde a conta com a trava e a da montagem divergiriam, se
+    // divergissem — levam tudo o que copiaram.
+    coleta_de_teste::zerar();
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::gravar_auditoria();
     let pedidos = alocacoes::esquecer();
+    let c = coleta_de_teste::contas();
+    coleta_de_teste::zerar();
     r?;
     if pedidos != 0 {
         crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
         return Err("a copia da lacuna e do anel pediu memoria com a trava na mao");
     }
+    if c.copias < 2 || c.sob_a_trava != 0 {
+        crate::log_error!(
+            "teste",
+            "{} copias, {} montados com a trava na mao",
+            c.copias,
+            c.sob_a_trava
+        );
+        return Err("o anel inteiro pendente nao foi em lotes, ou foi montado com a trava");
+    }
+    nada_copiado_de_fora(&c)?;
     let perdidos = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst) - perdida;
     let depois = persistencia::auditoria_gravada();
     let lacunas = seguidos(&do_journal_depois_de(desde)?, desde, depois)?;
@@ -491,10 +568,13 @@ pub(super) fn produtores_e_coletores_ao_mesmo_tempo() -> Resultado {
 }
 
 /// A compactação copia o anel como o coletor: sem pedir memória com a
-/// trava da auditoria na mão, e montando as entradas da base fora dela. E
-/// o anel que transborda logo depois da cópia não tira da base os
-/// registros copiados: a cadeia refeita do journal continua a da memória.
+/// trava da auditoria na mão, e montando as entradas da base fora dela. A
+/// base leva, inteiro, o que o anel tem até a gravada na tomada da cópia —
+/// medido nela, pela suíte. E o anel que transborda logo depois da cópia
+/// não tira da base os registros copiados: a cadeia refeita do journal
+/// continua a da memória.
 pub(super) fn a_compactacao_copia_fora_da_trava() -> Resultado {
+    as_contas_veem_a_trava()?;
     for i in 0..CAPACIDADE + 100 {
         auditar("teste.coleta.compactada");
         if i % 100 == 99 {
@@ -514,23 +594,38 @@ pub(super) fn a_compactacao_copia_fora_da_trava() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::compactar_de_teste();
     let pedidos = alocacoes::esquecer();
-    let (copias, montados, sob_a_trava) = coleta_de_teste::contas();
+    let c = coleta_de_teste::contas();
+    let (_, _, na_copia) = coleta_de_teste::compactada();
     coleta_de_teste::zerar();
     r?;
     if pedidos != 0 {
         crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
         return Err("a compactacao pediu memoria com a trava da auditoria na mao");
     }
-    if copias != 1 || montados == 0 || montados > no_anel || sob_a_trava != 0 {
+    if c.copias != 1 || c.montados == 0 || c.sob_a_trava != 0 {
         crate::log_error!(
             "teste",
             "{} copias, {} montados de {} no anel, {} com a trava na mao",
-            copias,
-            montados,
+            c.copias,
+            c.montados,
             no_anel,
-            sob_a_trava
+            c.sob_a_trava
         );
         return Err("a compactacao montou a auditoria da base com a trava na mao");
+    }
+    nada_copiado_de_fora(&c)?;
+    // Inteiro: tantos quantos o anel tinha até a gravada na tomada da
+    // cópia. A medida do caso, de antes, é a mesma com a suíte quieta — e o
+    // anel, até lá, só perde registros pela frente.
+    if c.copiados != na_copia || na_copia > no_anel {
+        crate::log_error!(
+            "teste",
+            "{} copiados; {} no anel na copia, {} antes",
+            c.copiados,
+            na_copia,
+            no_anel
+        );
+        return Err("a base nao levou inteiro o que o anel tinha ate a gravada na copia");
     }
     // A base vai até a gravada, e nem um além: a cadeia do journal termina
     // nela.
@@ -540,13 +635,109 @@ pub(super) fn a_compactacao_copia_fora_da_trava() -> Resultado {
     let gravada = persistencia::auditoria_gravada();
     // Um anel inteiro auditado logo depois da cópia: os copiados saem do
     // anel antes de a base ser escrita, e vão nela assim mesmo.
+    coleta_de_teste::zerar();
     coleta_de_teste::anexar_depois_da_proxima_copia(CAPACIDADE);
     let r = persistencia::compactar_de_teste();
+    let c = coleta_de_teste::contas();
     coleta_de_teste::zerar();
     r?;
+    nada_copiado_de_fora(&c)?;
     if primeiro_no_anel() <= gravada {
         return Err("o anel nao transbordou no meio da compactacao");
     }
     persistencia::gravar_auditoria()?;
     a_cadeia_do_journal_confere()
+}
+
+/// Quantos registros a suíte audita entre as duas tomadas da compactação,
+/// no caso do anel que perde registros ali.
+const ENTRE_AS_TOMADAS: u64 = 5;
+
+/// O anel perde registros entre as duas tomadas da compactação — a que
+/// mede e a que copia —: com ele cheio, os auditados ali, pelo gancho da
+/// suíte, tiram da frente os mais antigos, que a medida contou. A cópia
+/// leva, inteiro, o que o anel ainda tem até a gravada na tomada dela —
+/// medido nela —, e a marca da base parte do primeiro copiado: a base é a
+/// marca de 1 ao de antes dele, e os copiados, dele à gravada, um a um. A
+/// cadeia refeita dela é a da memória, e o boot seguinte a adota — um
+/// registro fora de sequência a deixaria recusada.
+pub(super) fn o_anel_que_perde_registros_entre_as_tomadas() -> Resultado {
+    as_contas_veem_a_trava()?;
+    anel_cheio_e_gravado()?;
+    coleta_de_teste::zerar();
+    coleta_de_teste::anexar_entre_as_tomadas_da_proxima_compactacao(ENTRE_AS_TOMADAS);
+    alocacoes::vigiar(crate::fios::id_atual());
+    let r = persistencia::compactar_de_teste();
+    let pedidos = alocacoes::esquecer();
+    let c = coleta_de_teste::contas();
+    let (gravada, medidos, no_anel) = coleta_de_teste::compactada();
+    let (anexado, _) = coleta_de_teste::anexados();
+    coleta_de_teste::zerar();
+    r?;
+    if pedidos != 0 {
+        crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
+        return Err("a compactacao pediu memoria com a trava da auditoria na mao");
+    }
+    // Os auditados entre as tomadas tiraram da frente registros que a
+    // medida contou: na tomada da cópia, o anel tem menos até a gravada.
+    if anexado <= gravada || no_anel == 0 || no_anel + ENTRE_AS_TOMADAS > medidos {
+        crate::log_error!(
+            "teste",
+            "gravada {}; {} medidos, {} no anel na copia; anexados desde {}",
+            gravada,
+            medidos,
+            no_anel,
+            anexado
+        );
+        return Err("o anel nao perdeu registros entre as duas tomadas da compactacao");
+    }
+    if c.copias != 1 || c.sob_a_trava != 0 {
+        crate::log_error!(
+            "teste",
+            "{} copias, {} montados com a trava na mao",
+            c.copias,
+            c.sob_a_trava
+        );
+        return Err("a compactacao montou a auditoria da base com a trava na mao");
+    }
+    nada_copiado_de_fora(&c)?;
+    if c.copiados != no_anel {
+        crate::log_error!("teste", "{} copiados de {} no anel", c.copiados, no_anel);
+        return Err("a base nao levou inteiro o que o anel tinha ate a gravada na copia");
+    }
+    a_base_e(gravada + 1 - no_anel, gravada)?;
+    a_cadeia_do_journal_confere()?;
+    // O boot seguinte adota a base.
+    reposto_da_imagem(persistencia::abrir);
+    if persistencia::estado() != persistencia::Estado::Disponivel {
+        return Err("o boot seguinte nao abriu o journal da base");
+    }
+    a_cadeia_do_journal_confere()
+}
+
+/// A auditoria da base que a compactação acabou de escrever — a região
+/// nova só tem ela —, lida do disco: a marca de 1 a `primeiro - 1`, e os
+/// registros de `primeiro` em diante, um a um, até `ate` pelo menos.
+fn a_base_e(primeiro: u64, ate: u64) -> Resultado {
+    // Zero: a marca ainda não veio.
+    let mut proximo: u64 = 0;
+    let mut certa = true;
+    persistencia::percorrer_a_auditoria_de_teste(|a| match a {
+        AuditoriaNoJournal::Compactada(1, ultima) if proximo == 0 && ultima == primeiro - 1 => {
+            proximo = primeiro;
+        }
+        AuditoriaNoJournal::Registro(seq, _) if proximo != 0 && seq == proximo => proximo += 1,
+        _ => certa = false,
+    })?;
+    if !certa || proximo <= ate {
+        crate::log_error!(
+            "teste",
+            "a base de {} a {} vai ate {}",
+            primeiro,
+            ate,
+            proximo.saturating_sub(1)
+        );
+        return Err("a base nao e a marca ate o primeiro copiado, e os copiados ate a gravada");
+    }
+    Ok(())
 }

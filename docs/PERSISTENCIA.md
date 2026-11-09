@@ -2215,12 +2215,32 @@ mesmas funções de sempre, e o registro é gravado como antes.
   journal com o registro inteiro ou sem ele, e o boot continua a cadeia
   do último que está lá. Entre a cópia e a montagem nada vai ao disco: a
   queda ali é a de antes da escrita.
+- **As duas contas.** A tomada decide o que cabe pelo tamanho que cada
+  entrada vai ter (`ENVELOPE_DO_EVENTO` e o tamanho codificado, e
+  `ENTRADA_DA_LACUNA`); a montagem, pelo tamanho que ela tem. Iguais, a
+  montagem leva tudo o que se copiou e nada mais coube; divergindo, o
+  journal sairia certo assim mesmo — a gravada segue o último montado —,
+  só com registros copiados à toa com a trava do gate na mão, ou lotes
+  menores, e nenhum caso o veria. Na suíte, toda gravação confere que a
+  montagem ocupou exatamente o que a tomada contou
+  (`coleta_de_teste::montada`), e a diferença é um pânico.
 - **A compactação** copia o anel do mesmo jeito: a primeira tomada só
   mede quantos registros são e quantos pedaços de 16 KiB a cópia ocupa;
   os pedaços são reservados fora; a segunda copia. Entre as duas, o anel
   só perde registros desses, pela ponta — os que entram têm sequência
-  maior que a gravada, e a gravada não anda —, e a cópia cabe no que se
-  mediu. Nenhum pedido ao heap passa de 16 KiB por isso.
+  maior que a gravada, e a gravada não anda, que a ordem das gravações é
+  da compactação (na suíte, a compactação sem ela é um pânico) —, e a
+  cópia cabe no que se mediu. A marca da base sai da tomada que copia: do
+  primeiro copiado, e não do primeiro que a medida contou.
+- **Os pedidos ao heap.** Na cópia do coletor, o pedaço é do tamanho do
+  orçamento — até 16 KiB —, e as anotações dos copiados — a sequência, o
+  elo e onde cada um acaba, 56 bytes por registro — são reservadas para
+  231 registros, mais do que um lote de 16 KiB leva: uns 13 KiB. Na
+  compactação, cada pedaço da cópia tem 16 KiB, mas as anotações são um
+  pedido só, do tamanho do anel: até 56 KiB, com ele cheio de 1024. É
+  menos que os 64 KiB que uma parte da base já pede ao montar, e perto dos
+  48 KiB que o vetor das entradas da auditoria da base pedia antes, de uma
+  vez, ao dobrar.
 
 ### O que continua com a trava
 
@@ -2238,6 +2258,7 @@ registrados, para uma medida e uma decisão à parte.
 
 | Onde | O que confere |
 |---|---|
-| hospedeiro (`politica`): *o tamanho codificado é o da codificação*, *codificar_em acrescenta o mesmo sem alocar*, *antes e depois pela posição são os do filtro* | a conta do tamanho igual à da codificação, com o corte do texto acima do teto; a codificação acrescentada igual byte a byte, sem trocar de memória com o lugar reservado; os guardados antes e depois de uma sequência, achados pela posição, iguais aos do filtro — e a lacuna, a de sempre |
-| suíte: os casos `coleta:` | a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; e a compactação |
-| bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava; mais um boot confere de novo |
+| hospedeiro (`politica`): *o tamanho codificado é o da codificação*, *codificar_em acrescenta o mesmo sem alocar*, *antes e depois pela posição são os do filtro* | a conta do tamanho igual à da codificação, com o corte do texto acima do teto; a codificação acrescentada igual byte a byte, sem trocar de memória com o lugar reservado; os guardados antes e depois de uma sequência, achados pela posição, iguais aos do filtro — e a lacuna, a de sempre, e nenhuma depois de `u64::MAX`, sem dar a volta |
+| suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; e o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota |
+| hospedeiro (`xtask`): *o anel do corte que confere*, *o visto antes do anel que não deu a volta* | os vistos de antes do começo do anel do boot novo só deixam de contar se ele deu a volta — tem o que o anel guarda, 1024; com um a menos, reprovam |
+| bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou — e nenhum ficou de fora do anel sem ele ter dado a volta —, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava (uma conferência de sanidade: a exata é a do cenário *a queda em cada fronteira de um registro só de auditoria*); mais um boot confere de novo |

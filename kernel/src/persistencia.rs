@@ -1409,7 +1409,10 @@ struct DaAuditoria {
 
 /// O que a entrada de um registro da auditoria ocupa além da codificação
 /// dele: o tipo, com o tamanho na frente, e o tamanho da codificação — ver
-/// [`entrada`].
+/// [`entrada`]. Com esta conta, e a de [`ENTRADA_DA_LACUNA`], a cópia decide
+/// com a trava o que cabe; a montagem, depois, mede as entradas de verdade.
+/// Na suíte, toda gravação confere que as duas dão o mesmo
+/// (`coleta_de_teste::montada`).
 const ENVELOPE_DO_EVENTO: usize = (2 + 2) + 2;
 
 /// O que a entrada de uma lacuna ocupa: o tipo, a primeira, a última e o
@@ -1615,7 +1618,7 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
     // Sem a trava: quem audita daqui em diante entra no anel, e fica para a
     // gravação seguinte.
     #[cfg(feature = "modo-teste")]
-    coleta_de_teste::depois_da_copia();
+    coleta_de_teste::depois_da_copia(copia.copiados.len());
     let campo = |campos: &mut Vec<u8>, e: Vec<u8>| -> Result<bool, &'static str> {
         if !cabe(campos.len(), e.len(), orcamento) {
             return Ok(false);
@@ -1635,6 +1638,10 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
             &[&l.primeira.to_le_bytes(), &l.ultima.to_le_bytes(), &l.elo],
         )?;
         if !campo(&mut d.campos, e)? {
+            // Com a trava, a conta parou na lacuna também, e nada foi
+            // copiado.
+            #[cfg(feature = "modo-teste")]
+            coleta_de_teste::montada(usado, d.campos.len());
             return Ok(d);
         }
         d.ate = l.ultima;
@@ -1651,29 +1658,52 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
         d.ate = copiado.seq;
         d.elo = copiado.elo;
     }
+    // Na suíte: a montagem ocupou o que a conta com a trava disse — com as
+    // duas iguais, todo copiado coube, e o `break` acima não acontece.
+    #[cfg(feature = "modo-teste")]
+    coleta_de_teste::montada(usado, d.campos.len());
     Ok(d)
 }
 
-/// Só na suíte: o que a cópia da auditoria para o journal fez, e o ponto
-/// logo depois dela — a trava solta, e nada montado ainda. Ver "A cópia",
-/// em `auditoria_que_cabe`. Fora da suíte não existe.
+/// Só na suíte: o que a cópia da auditoria para o journal fez, e os pontos
+/// em volta dela — logo depois, com a trava solta e nada montado ainda; e,
+/// na compactação, entre a tomada que mede e a que copia. Ver "A cópia", em
+/// `auditoria_que_cabe`. Fora da suíte não existe.
 #[cfg(feature = "modo-teste")]
 pub mod coleta_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     /// Quantos registros a suíte acrescenta à auditoria logo depois da
-    /// próxima cópia.
+    /// próxima cópia, e entre as duas tomadas da próxima compactação.
     static ANEXAR: AtomicU64 = AtomicU64::new(0);
+    static ANEXAR_ENTRE_AS_TOMADAS: AtomicU64 = AtomicU64::new(0);
     /// O primeiro e o último registro que a suíte acrescentou ali; zero,
     /// nenhum.
     static PRIMEIRO_ANEXADO: AtomicU64 = AtomicU64::new(0);
     static ULTIMO_ANEXADO: AtomicU64 = AtomicU64::new(0);
-    /// Quantas cópias houve; quantos registros copiados viraram entrada do
-    /// journal; e, desses, quantos com a trava da auditoria na mão de quem
-    /// montava.
+    /// Quantas cópias houve, e quantos registros elas copiaram; quantos
+    /// registros copiados viraram entrada do journal; e, desses, quantos com
+    /// a trava da auditoria na mão de quem montava.
     static COPIAS: AtomicU64 = AtomicU64::new(0);
+    static COPIADOS: AtomicU64 = AtomicU64::new(0);
     static MONTADOS: AtomicU64 = AtomicU64::new(0);
     static SOB_A_TRAVA: AtomicU64 = AtomicU64::new(0);
+    /// Da última compactação: a gravada; quantos registros até ela a tomada
+    /// que mede contou; e quantos o anel tinha até ela na tomada que copia.
+    static GRAVADA: AtomicU64 = AtomicU64::new(0);
+    static MEDIDOS: AtomicU64 = AtomicU64::new(0);
+    static NO_ANEL_NA_COPIA: AtomicU64 = AtomicU64::new(0);
+
+    /// As contas das cópias, desde [`zerar`] — ver [`contas`].
+    pub struct Contas {
+        pub copias: u64,
+        /// Os registros copiados com a trava na mão, somados.
+        pub copiados: u64,
+        /// Os registros copiados que viraram entrada, somados.
+        pub montados: u64,
+        /// Desses, os montados com a trava da auditoria na mão.
+        pub sob_a_trava: u64,
+    }
 
     /// A próxima cópia é seguida de `n` registros novos na auditoria, com
     /// a trava solta e nada montado: quem audita no meio da coleta, no
@@ -1682,32 +1712,56 @@ pub mod coleta_de_teste {
         ANEXAR.store(n, Ordering::Release);
     }
 
+    /// A próxima compactação tem `n` registros novos na auditoria entre a
+    /// tomada que mede o anel e a que o copia: com o anel cheio, eles tiram
+    /// da frente `n` dos que a medida contou.
+    pub fn anexar_entre_as_tomadas_da_proxima_compactacao(n: u64) {
+        ANEXAR_ENTRE_AS_TOMADAS.store(n, Ordering::Release);
+    }
+
     /// Zera as contas e desarma o que estava armado.
     pub fn zerar() {
         for c in [
             &ANEXAR,
+            &ANEXAR_ENTRE_AS_TOMADAS,
             &PRIMEIRO_ANEXADO,
             &ULTIMO_ANEXADO,
             &COPIAS,
+            &COPIADOS,
             &MONTADOS,
             &SOB_A_TRAVA,
+            &GRAVADA,
+            &MEDIDOS,
+            &NO_ANEL_NA_COPIA,
         ] {
             c.store(0, Ordering::Release);
         }
     }
 
-    /// As cópias, os montados e os montados com a trava na mão, desde
-    /// [`zerar`].
-    pub fn contas() -> (u64, u64, u64) {
+    /// As cópias, os copiados, os montados e os montados com a trava na
+    /// mão, desde [`zerar`].
+    pub fn contas() -> Contas {
+        Contas {
+            copias: COPIAS.load(Ordering::Acquire),
+            copiados: COPIADOS.load(Ordering::Acquire),
+            montados: MONTADOS.load(Ordering::Acquire),
+            sob_a_trava: SOB_A_TRAVA.load(Ordering::Acquire),
+        }
+    }
+
+    /// Da última compactação desde [`zerar`]: a gravada; quantos registros
+    /// até ela a tomada que mede contou; e quantos o anel tinha até ela na
+    /// tomada que copia — o que a cópia tem de levar, inteiro.
+    pub fn compactada() -> (u64, u64, u64) {
         (
-            COPIAS.load(Ordering::Acquire),
-            MONTADOS.load(Ordering::Acquire),
-            SOB_A_TRAVA.load(Ordering::Acquire),
+            GRAVADA.load(Ordering::Acquire),
+            MEDIDOS.load(Ordering::Acquire),
+            NO_ANEL_NA_COPIA.load(Ordering::Acquire),
         )
     }
 
     /// O primeiro e o último registro que a suíte acrescentou depois de uma
-    /// cópia, desde [`zerar`]; zeros, nenhum.
+    /// cópia ou entre as tomadas, desde [`zerar`]; zeros, nenhum.
     pub fn anexados() -> (u64, u64) {
         (
             PRIMEIRO_ANEXADO.load(Ordering::Acquire),
@@ -1715,27 +1769,71 @@ pub mod coleta_de_teste {
         )
     }
 
-    /// Logo depois de uma cópia, com a trava da auditoria solta.
-    pub(super) fn depois_da_copia() {
-        COPIAS.fetch_add(1, Ordering::AcqRel);
-        for _ in 0..ANEXAR.swap(0, Ordering::AcqRel) {
+    /// Audita `n` registros, com a trava da auditoria solta, anotando o
+    /// primeiro e o último.
+    fn anexar(n: u64, detalhe: &str) {
+        for _ in 0..n {
             let seq = crate::autorizacao::auditar_do_kernel(
                 "teste.coleta",
                 "",
                 politica::Codigo::InvalidArgument,
-                "no meio da coleta",
+                detalhe,
             );
             let _ = PRIMEIRO_ANEXADO.compare_exchange(0, seq, Ordering::AcqRel, Ordering::Acquire);
             ULTIMO_ANEXADO.store(seq, Ordering::Release);
         }
     }
 
-    /// Ao montar a entrada de um registro copiado.
-    pub(super) fn montou() {
+    /// Logo depois de uma cópia de `copiados` registros, com a trava da
+    /// auditoria solta.
+    pub(super) fn depois_da_copia(copiados: usize) {
+        COPIAS.fetch_add(1, Ordering::AcqRel);
+        COPIADOS.fetch_add(copiados as u64, Ordering::AcqRel);
+        anexar(ANEXAR.swap(0, Ordering::AcqRel), "no meio da coleta");
+    }
+
+    /// Na compactação, entre a tomada que mede — `medidos` registros até a
+    /// `gravada` — e a que copia, com a trava da auditoria solta.
+    pub(super) fn entre_as_tomadas(gravada: u64, medidos: usize) {
+        GRAVADA.store(gravada, Ordering::Release);
+        MEDIDOS.store(medidos as u64, Ordering::Release);
+        anexar(
+            ANEXAR_ENTRE_AS_TOMADAS.swap(0, Ordering::AcqRel),
+            "entre as tomadas",
+        );
+    }
+
+    /// Na tomada que copia da compactação, com a trava da auditoria na mão:
+    /// quantos o anel tem até a gravada. Só uma escrita atômica — nada aqui
+    /// pede memória.
+    pub(super) fn no_anel_na_copia(n: usize) {
+        NO_ANEL_NA_COPIA.store(n as u64, Ordering::Release);
+    }
+
+    /// Ao montar a entrada de um registro copiado. Pública para o controle
+    /// positivo da suíte: chamada com a trava na mão, de propósito, ela
+    /// tem de contar.
+    pub fn montou() {
         MONTADOS.fetch_add(1, Ordering::AcqRel);
         if crate::autorizacao::auditoria_na_mao_de_teste() {
             SOB_A_TRAVA.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    /// Ao fim da montagem de uma cópia do coletor: os campos montados
+    /// ocupam exatamente o que a conta feita com a trava disse — a lacuna e
+    /// cada registro, pelo tamanho das entradas deles. Com as duas contas
+    /// iguais, a montagem não descarta nada do que se copiou, e a tomada não
+    /// deixa de copiar o que cabia. Divergindo, o journal sairia certo assim
+    /// mesmo — a gravada segue o último montado —, e nenhum caso o veria:
+    /// registros copiados à toa com a trava do gate na mão, ou lotes menores
+    /// que o orçamento. Por isso a conferência fica aqui, em toda gravação da
+    /// suíte, e é um pânico.
+    pub(super) fn montada(usado: usize, montado: usize) {
+        assert!(
+            usado == montado,
+            "a conta da copia da auditoria com a trava ({usado}) nao e a da montagem ({montado})"
+        );
     }
 }
 
@@ -2391,6 +2489,13 @@ fn nao_cabe(m: &'static str) -> FalhaDaCompactacao {
 /// uma mudança sem a decisão dela.
 fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     use FalhaDaCompactacao::*;
+    // A ordem das gravações é o que faz desta o único escritor, e o que
+    // segura a gravada entre as duas tomadas da cópia da auditoria, abaixo.
+    #[cfg(feature = "modo-teste")]
+    assert!(
+        ordem_na_mao_sem_trava(),
+        "a compactacao sem a ordem das gravacoes"
+    );
     if crate::arch::sem_interrupcoes(|| !PENDENTES.lock().is_empty()) {
         return Err(Adiada("ha mudancas de mensagem por gravar"));
     }
@@ -2553,19 +2658,29 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     // anel só perde registros destes, pela ponta — os que entram têm
     // sequência maior que a gravada, e a gravada não anda, que a ordem das
     // gravações é desta compactação —, e a cópia cabe no que a medida
-    // reservou.
+    // reservou. A marca sai da segunda: do primeiro copiado. O lugar são
+    // pedaços de 16 KiB e as anotações dos copiados, um pedido só de 56
+    // bytes por registro — até 56 KiB, com o anel cheio.
     let gravada = auditoria_gravada();
     let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
     let medida = crate::autorizacao::com_auditoria(|c| pedacos_da_copia(c.guardados_ate(gravada)));
+    // Na suíte: o anel que perde registros entre as duas tomadas — os
+    // auditados ali, com ele cheio, tiram da frente os que a medida contou.
+    #[cfg(feature = "modo-teste")]
+    coleta_de_teste::entre_as_tomadas(gravada, medida.map_or(0, |(quantos, _)| quantos));
     if let Some((quantos, pedacos)) = medida {
         let mut copia = CopiaDaAuditoria::reservar(quantos, pedacos, PEDACO_DA_COPIA);
         let copiou = crate::autorizacao::com_auditoria(|c| {
+            // Na suíte: quantos o anel tem até a gravada nesta tomada — o que
+            // a cópia tem de levar, inteiro.
+            #[cfg(feature = "modo-teste")]
+            coleta_de_teste::no_anel_na_copia(c.guardados_ate(gravada).count());
             for r in c.guardados_ate(gravada) {
                 copia.copiar(r);
             }
         });
         #[cfg(feature = "modo-teste")]
-        coleta_de_teste::depois_da_copia();
+        coleta_de_teste::depois_da_copia(copia.copiados.len());
         if copiou.is_some() {
             let (antes, elo) = match copia.copiados.first() {
                 Some(primeiro) => (primeiro.seq - 1, copia.anterior),
@@ -4232,11 +4347,13 @@ fn repor_de_teste(c: &mut Cadeia, r: &diario::Registro) -> Result<(), &'static s
 
 /// Só para a suíte: o que o journal tem da auditoria — um registro, com o
 /// número e o evento, ou uma lacuna, com o primeiro e o último que ela
-/// pula.
+/// pula, ou a marca da base de uma compactação, com o primeiro e o último
+/// que ela deixa de fora.
 #[cfg(feature = "modo-teste")]
 pub enum AuditoriaNoJournal {
     Registro(u64, politica::auditoria::Evento),
     Lacuna(u64, u64),
+    Compactada(u64, u64),
 }
 
 /// Só para a suíte: a auditoria do journal, na ordem em que está no disco,
@@ -4258,6 +4375,12 @@ pub fn percorrer_a_auditoria_de_teste(
                 }
                 [t, primeira, ultima, _] if *t == tipo::AUDITORIA_LACUNA.to_le_bytes() => {
                     f(AuditoriaNoJournal::Lacuna(
+                        u64_de(primeira)?,
+                        u64_de(ultima)?,
+                    ));
+                }
+                [t, primeira, ultima, _] if *t == tipo::AUDITORIA_COMPACTADA.to_le_bytes() => {
+                    f(AuditoriaNoJournal::Compactada(
                         u64_de(primeira)?,
                         u64_de(ultima)?,
                     ));

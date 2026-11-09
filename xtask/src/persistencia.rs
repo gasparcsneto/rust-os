@@ -5771,13 +5771,36 @@ fn carga_ate_cair(mut m: Ligada) -> Result<(u8, std::collections::BTreeMap<u64, 
     Ok((caiu?, vistos))
 }
 
+/// Quantos registros o anel da auditoria do kernel guarda —
+/// `CAPACIDADE_DA_AUDITORIA`, em `kernel/src/autorizacao.rs`.
+const CAPACIDADE_DO_ANEL: usize = 1024;
+
 /// O anel da auditoria de depois de um corte — `anel`, do mais velho ao
-/// mais novo —, contra os registros vistos gravados antes dele: sem buraco
-/// nem repetição; cada visto que o anel ainda alcança, de volta igual — o
-/// mesmo elo, o mesmo método, gravado — e antes de `comeco`, o primeiro
-/// registro do boot de agora; e, se o registro do corte `vale`, a cadeia
-/// do boot cortado passa do último visto gravado. Devolve quantos vistos
-/// conferiu.
+/// mais novo, lido inteiro ([`auditoria_do_anel`]) —, contra os registros
+/// vistos gravados antes dele: sem buraco nem repetição; cada visto de
+/// volta igual — o mesmo elo, o mesmo método, gravado — e antes de
+/// `comeco`, o primeiro registro do boot de agora; e, se o registro do
+/// corte `vale`, a cadeia do boot cortado passa do último visto gravado.
+/// Devolve quantos vistos conferiu.
+///
+/// # Os vistos de antes do começo do anel
+///
+/// Só deixam de contar se o anel deu a volta. Um registro sai dele pela
+/// ponta só com ele cheio, e então o anel lido inteiro tem pelo menos o que
+/// ele guarda, [`CAPACIDADE_DO_ANEL`] — as leituras somadas. Com menos,
+/// ninguém saiu pela ponta neste boot, nem da cadeia que o journal refez: o
+/// anel começa no primeiro registro do journal, ou no seguinte à última
+/// lacuna ou à marca de uma compactação, e um visto de antes disso não se
+/// confere mais. Este cenário não pede nem uma nem outra; reprova, e diz
+/// qual visto, e o anel com quantos.
+///
+/// # O `vale`
+///
+/// É uma conferência de sanidade: a carga não sabe até onde a gravada ia
+/// antes do registro do corte — o último que ela viu gravado pode estar
+/// atrás —, e o que passa do último visto pode ter vindo no registro de
+/// antes. A exata, a de que o registro vale exatamente quando está no
+/// disco, é a de [`as_quedas_na_auditoria`].
 fn conferir_o_anel_do_corte(
     anel: &[Rastro],
     vistos: &std::collections::BTreeMap<u64, Rastro>,
@@ -5791,6 +5814,14 @@ fn conferir_o_anel_do_corte(
         ));
     }
     let alcance = anel.first().map_or(u64::MAX, |r| r.seq);
+    if anel.len() < CAPACIDADE_DO_ANEL
+        && let Some((&seq, _)) = vistos.range(..alcance).next()
+    {
+        return Err(format!(
+            "o registro {seq}, visto gravado antes do corte, ficou antes do comeco do anel do boot novo ({alcance}), e o anel nao deu a volta: {} registros, de {CAPACIDADE_DO_ANEL}",
+            anel.len()
+        ));
+    }
     let mut conferidos = 0;
     for (&seq, visto) in vistos.range(alcance..) {
         match anel.get((seq - alcance) as usize) {
@@ -7393,9 +7424,22 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
         }
     }
 
+    /// O anel de `n` registros, do 100 em diante.
+    fn anel_de(n: u64) -> Vec<Rastro> {
+        (100..100 + n)
+            .map(|s| rastro(s, &format!("e{s}")))
+            .collect()
+    }
+
     /// O anel de 100 a 300, com o boot novo a partir do 251.
     fn anel_do_corte() -> Vec<Rastro> {
-        (100..=300).map(|s| rastro(s, &format!("e{s}"))).collect()
+        anel_de(201)
+    }
+
+    /// O anel que deu a volta: cheio, de 100 a 1123 — o boot novo a partir
+    /// do 1100.
+    fn anel_cheio() -> Vec<Rastro> {
+        anel_de(CAPACIDADE_DO_ANEL as u64)
     }
 
     /// Os vistos gravados antes do corte, de `de` a `ate`.
@@ -7406,8 +7450,8 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
     }
 
     /// O anel inteiro, com cada visto de volta igual antes do boot novo e
-    /// a cadeia do boot cortado passando deles: confere — e os vistos que o
-    /// anel já não alcança não contam.
+    /// a cadeia do boot cortado passando deles: confere — e, com o anel
+    /// dado a volta, os vistos que ele já não alcança não contam.
     #[test]
     fn o_anel_do_corte_que_confere() {
         assert_eq!(
@@ -7415,7 +7459,28 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
             Ok(51)
         );
         assert_eq!(
-            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(20, 120), 251, false),
+            conferir_o_anel_do_corte(&anel_cheio(), &vistos(20, 120), 1100, false),
+            Ok(21)
+        );
+    }
+
+    /// Sem o anel do boot novo ter dado a volta — menos registros que ele
+    /// guarda, até um a menos —, um visto antes do começo dele não saiu pela
+    /// ponta: sumiu do que se confere. Reprova, e diz qual; com o anel
+    /// cheio, o mesmo visto não conta.
+    #[test]
+    fn o_visto_antes_do_anel_que_nao_deu_a_volta() {
+        let e =
+            conferir_o_anel_do_corte(&anel_do_corte(), &vistos(20, 120), 251, false).unwrap_err();
+        assert!(
+            e.contains("o registro 20,") && e.contains("nao deu a volta"),
+            "{e}"
+        );
+        let quase = anel_de(CAPACIDADE_DO_ANEL as u64 - 1);
+        let e = conferir_o_anel_do_corte(&quase, &vistos(99, 120), 1100, false).unwrap_err();
+        assert!(e.contains("o registro 99,"), "{e}");
+        assert_eq!(
+            conferir_o_anel_do_corte(&anel_cheio(), &vistos(99, 120), 1100, false),
             Ok(21)
         );
     }

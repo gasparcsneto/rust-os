@@ -37976,6 +37976,10 @@ static CASOS: &[Caso] = &[
         f: coleta::a_compactacao_copia_fora_da_trava,
     },
     Caso {
+        nome: "coleta: o anel que perde registros entre as tomadas da compactacao: a base leva inteiro o que ele tinha na copia, a marca parte do primeiro copiado, e o boot a adota",
+        f: coleta::o_anel_que_perde_registros_entre_as_tomadas,
+    },
+    Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
         f: mensagens_cada_transicao_e_um_registro,
     },

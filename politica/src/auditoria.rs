@@ -750,8 +750,12 @@ impl Cadeia {
     /// `None`, se o anel não perdeu nenhum.
     pub fn lacuna_depois_de(&self, gravada: u64) -> Option<Lacuna> {
         let primeira_no_anel = self.registros.front().map_or(self.proximo_seq, |r| r.seq);
-        (gravada + 1 < primeira_no_anel).then_some(Lacuna {
-            primeira: gravada + 1,
+        // A seguinte à gravada, sem dar a volta: quem grava nunca passa da
+        // última, mas a função é pública, e `u64::MAX` não tem seguinte —
+        // nem lacuna depois dele.
+        let seguinte = gravada.saturating_add(1);
+        (seguinte < primeira_no_anel).then_some(Lacuna {
+            primeira: seguinte,
             ultima: primeira_no_anel - 1,
             elo: self.ancora,
         })
@@ -1770,9 +1774,11 @@ mod testes {
                 assert_eq!(seqs, depois, "a gravar depois de {g}");
                 assert_eq!(falta.lacuna, c.lacuna_depois_de(g), "lacuna depois de {g}");
             }
-            // A sequência mais alta que há não passa do fim.
+            // A sequência mais alta que há não passa do fim, nem dá a volta.
             assert_eq!(c.guardados_depois_de(u64::MAX).count(), 0);
             assert_eq!(c.guardados_ate(u64::MAX).count(), todos.len());
+            assert_eq!(c.lacuna_depois_de(u64::MAX), None);
+            assert!(c.a_gravar(u64::MAX).lacuna.is_none());
         }
         let mut c = Cadeia::nova(4);
         confere(&c, 0);
