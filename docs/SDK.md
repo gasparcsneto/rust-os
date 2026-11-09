@@ -436,7 +436,10 @@ continua sendo entrada não confiável.
   não dá escrita nenhuma. Os dois fecham o fluxo quando a cópia acaba.
   NS47.
 - **O modelo** — [`sdk/modelo`](../sdk/modelo/src/main.rs): o eco com o
-  laço, e o cliente de outro modelo quando o armazém tem o pedido. NS28.
+  laço, e o cliente de outro modelo quando o armazém tem o pedido — lido
+  antes de o modelo se dizer pronto: o `pronto` diz o papel já decidido,
+  e o pedido gravado depois dele é para o próximo modelo (CIs 464 e 465).
+  NS28.
 
 ## As falhas e os motivos
 
@@ -929,7 +932,12 @@ servidor segurando a descarga antes de aplicá-la. E as
 do motivo da recusa (CI 439, N230 e N231; ver *O disco hostil* em
 [`PERSISTENCIA.md`](PERSISTENCIA.md#o-disco-hostil)): toda recusa marcando
 a máquina, e o motivo lido com o leitor de campo simples — reprovadas, uma
-de cada vez, pelo teste do hospedeiro do `xtask`.
+de cada vez, pelo teste do hospedeiro do `xtask`. E as da corrida do modelo
+(CIs 464 e 465, N232 e N233): o pedido lido depois do `pronto`, como era, e
+o pedido lido antes e, sem ele, de novo depois — reprovadas, uma de cada
+vez, pelos dois casos `sdk: o programa de fora do repositorio`: a primeira
+pela ordem da auditoria, logo depois do `pronto`; a segunda pela abertura
+repetida, depois do eco.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1163,6 +1171,8 @@ de cada vez, pelo teste do hospedeiro do `xtask`.
 | N229 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor — o `join` tirado do `Drop` | hospedeiro: `disco_hostil::testes::o_fim_espera_a_conexao_em_curso` (xtask) — o fio ainda segura o estado depois do `Drop`; sem essa conferência, a descarga atendida antes do fim não está no arquivo quando ele volta |
 | N230 | fora do SDK (CI 439): toda recusa — `DENY_` em qualquer lugar da resposta — marcando a máquina para o fim dela perguntar o motivo da persistência | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — a recusa por permissão marca |
 | N231 | fora do SDK (CI 439): o estado e o motivo da persistência lidos com o leitor de campo simples, e não pelo JSON | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — o motivo sai cortado na primeira vírgula |
+| N232 | o modelo que lê o pedido depois do `pronto`, como era (CIs 464 e 465) | suíte x86 em depuração, filtrada (934 de 936 na conta do harness, que dá os pulados como passados): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo nao leu o pedido antes de dizer pronto" |
+| N233 | o modelo que lê o pedido antes do `pronto` e, sem ele, de novo depois | suíte x86 em depuração, filtrada (934 de 936): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo abriu o pedido de novo depois de dizer pronto", a segunda abertura seis registros depois da primeira; a segunda leitura não achou o pedido e o cliente saiu com 58: sem a conferência depois do eco, ela passaria |
 
 ## Medidas
 

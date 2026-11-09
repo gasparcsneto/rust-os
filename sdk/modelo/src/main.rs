@@ -4,11 +4,14 @@
 //! O programa é o padrão do servidor de vários clientes, com o laço, e um
 //! cliente opcional:
 //!
+//! - lê [`PAR`] antes de tudo: o papel — só servir, ou perguntar também —
+//!   fica decidido antes de o programa se dizer pronto, e o pedido gravado
+//!   depois do `pronto` é para o próximo `modelo`, não para este;
 //! - escuta um canal só dele ([`Laco::novo`]), oferece [`INTENCAO`] com o
 //!   aviso nesse canal e diz `modelo: pronto <endpoint> <canal>`;
 //! - cada fluxo que chega é aceito, também com o aviso, e **ecoado**: o
 //!   que chega volta, e o fim também; diz `modelo: ecoei <fluxo> <bytes>`;
-//! - se o armazém tem [`PAR`], é também cliente: abre um fluxo, com o
+//! - se o armazém tinha [`PAR`], é também cliente: abre um fluxo, com o
 //!   aviso, ao primeiro outro programa que oferece a intenção e que a
 //!   descoberta acha — no dispositivo da primeira linha do arquivo, se ela
 //!   não está vazia, ou neste Duke; o programa é o da terceira linha, ou
@@ -268,6 +271,13 @@ fn aceitar_todos(endpoint: &str, laco: &Laco, ecos: &mut BTreeMap<u64, Eco>) {
 
 #[unsafe(no_mangle)]
 fn principal() -> i64 {
+    // O pedido antes de tudo: o `pronto` diz que o papel já está decidido.
+    // Lido depois dele, o pedido que alguém grava para um cliente assim
+    // que este modelo diz `pronto` — na mesma máquina, como a suíte faz —
+    // às vezes fazia deste também um cliente — quando a gravação chegava
+    // antes da leitura —, que não achava outro modelo e saía com 3, e o
+    // cliente, sem servidor, também (as CIs 464 e 465).
+    let pedido = pedido();
     let mut laco = match Laco::novo() {
         Ok(l) => l,
         Err(e) => {
@@ -284,7 +294,7 @@ fn principal() -> i64 {
     };
     escreverln!("modelo: pronto {} {}", endpoint, laco.nome());
 
-    let mut pergunta = match pedido() {
+    let mut pergunta = match pedido {
         None => None,
         Some(pedido) => match perguntar(&pedido, &endpoint, &laco) {
             Ok(p) => {

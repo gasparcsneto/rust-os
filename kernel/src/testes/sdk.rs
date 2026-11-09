@@ -309,6 +309,99 @@ fn gravar_o_par(pessoa: Chamador) -> Resultado {
     Ok(())
 }
 
+/// O servidor do modelo lançado depois do registro `antes` decidiu o papel
+/// antes de dizer `pronto`: o gate decidiu a abertura do pedido por ele —
+/// ausente: ele só serve — antes da oferta dele. Um modelo que só lesse o
+/// pedido depois do `pronto` pegaria o que o caso grava logo em seguida
+/// para o cliente, e perguntaria também, sem outro modelo a quem — as CIs
+/// 464 e 465, só quando a leitura perdia a corrida. A ordem dos dois
+/// registros não depende da corrida: um modelo assim reprova sempre aqui.
+/// O que lesse antes e também depois passa por aqui, e reprova em
+/// [`o_pedido_lido_uma_vez`], com o que esta devolve: o começo do detalhe
+/// dos pedidos do servidor — `pelo processo N` — e o número do registro
+/// da leitura.
+fn o_papel_decidido_antes_do_pronto(antes: u64) -> Result<(String, u64), &'static str> {
+    let registros: Vec<(u64, politica::auditoria::Evento)> =
+        crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .filter(|r| r.seq > antes)
+                .map(|r| (r.seq, r.evento.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // O processo do servidor, pela oferta: `pelo processo N (modelo ...`.
+    let (oferta, pelo) = registros
+        .iter()
+        .find_map(|(seq, e)| {
+            let (pelo, _) = e.detalhe.split_once(" (modelo ")?;
+            (e.metodo == "fabric.offer" && e.codigo == Codigo::Allow).then_some((*seq, pelo))
+        })
+        .ok_or("o servidor do modelo nao ofereceu")?;
+    let do_servidor = format!("{pelo} (");
+    let leitura = registros
+        .iter()
+        .find(|(_, e)| {
+            e.metodo == "fs.open"
+                && e.recurso == PAR_DO_MODELO
+                && e.detalhe.starts_with(&do_servidor)
+        })
+        .map(|(seq, _)| *seq);
+    match leitura {
+        Some(seq) if seq < oferta => Ok((String::from(pelo), seq)),
+        Some(seq) => {
+            crate::log_error!(
+                "teste",
+                "{pelo}: o pedido aberto no registro {seq}, a oferta no {oferta}"
+            );
+            Err("o servidor do modelo leu o pedido depois de oferecer")
+        }
+        None => Err("o servidor do modelo nao leu o pedido antes de dizer pronto"),
+    }
+}
+
+/// O servidor do modelo, que já ecoou — já está no laço, depois do
+/// `pronto` —, não abriu o pedido de novo depois da `leitura` conferida
+/// em [`o_papel_decidido_antes_do_pronto`]: um modelo que o lesse antes e
+/// também depois do `pronto` passaria por aquela ordem, e a segunda
+/// leitura teria a mesma corrida. A leitura tem de estar ainda no anel da
+/// auditoria: com ela, estão todos os registros que vieram depois.
+fn o_pedido_lido_uma_vez(servidor: &str, leitura: u64) -> Resultado {
+    let do_servidor = format!("{servidor} (");
+    let registros: Vec<(u64, bool)> = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.seq >= leitura)
+            .map(|r| {
+                let e = &r.evento;
+                let abriu = e.metodo == "fs.open"
+                    && e.recurso == PAR_DO_MODELO
+                    && e.detalhe.starts_with(&do_servidor);
+                (r.seq, abriu)
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    if registros.first().map(|(seq, _)| *seq) != Some(leitura) {
+        return Err("a auditoria nao guarda mais a leitura do pedido pelo servidor do modelo");
+    }
+    match registros.iter().skip(1).find(|(_, abriu)| *abriu) {
+        None => {
+            crate::log_info!(
+                "teste",
+                "{servidor}: o pedido lido uma vez, nos {} registros desde a leitura",
+                registros.len()
+            );
+            Ok(())
+        }
+        Some((seq, _)) => {
+            crate::log_error!(
+                "teste",
+                "{servidor}: o pedido aberto de novo no registro {seq}, depois do {leitura}"
+            );
+            Err("o servidor do modelo abriu o pedido de novo depois de dizer pronto")
+        }
+    }
+}
+
 /// Apaga o pedido do cliente do modelo.
 fn apagar_o_par(pessoa: Chamador) {
     let (versao, _) = fs_no_armazem(PAR_DO_MODELO);
@@ -353,7 +446,9 @@ fn apagar_o_instalado(pessoa: Chamador) -> Resultado {
 /// mesma conferência de sempre:
 ///
 /// - o selado roda, pelo `user.run` da pessoa: oferece a intenção com o
-///   aviso e serve pelo laço;
+///   aviso e serve pelo laço — e leu o pedido, ausente, antes de oferecer
+///   e só essa vez: a ordem da auditoria o confere antes de o caso gravar
+///   o pedido do cliente, e, depois do eco, que ele não o abriu de novo;
 /// - uma segunda cópia, com o pedido do cliente no armazém, roda pelo
 ///   instalador: acha a primeira, abre um fluxo com o aviso, manda 40 KiB,
 ///   lê o eco até o fim e o confere — os dois andando só pelos avisos;
@@ -393,6 +488,7 @@ fn o_programa_de_fora(segurar: bool) -> Resultado {
                 }
                 // O servidor: o selado, pelo `user.run` da pessoa.
                 let desde = crate::log::total_emitidos();
+                let antes = registro_que(|_| true).map_or(0, |(seq, _)| seq);
                 let r = fs_pedir(
                     pessoa,
                     "user.run",
@@ -405,6 +501,7 @@ fn o_programa_de_fora(segurar: bool) -> Resultado {
                 let pronto = dito_na_malha(desde, "modelo: pronto ")?;
                 let (_, canal) = pronto.split_once(' ').ok_or("o modelo nao disse o canal")?;
                 canal_do_servidor = Some(String::from(canal));
+                let (servidor, leitura) = o_papel_decidido_antes_do_pronto(antes)?;
 
                 // O cliente: a mesma imagem, com o pedido no armazém.
                 gravar_o_par(pessoa)?;
@@ -422,6 +519,9 @@ fn o_programa_de_fora(segurar: bool) -> Resultado {
                     crate::log_error!("teste", "ecoei {}", ecoado);
                     return Err("o servidor do modelo nao ecoou tudo");
                 }
+                // O eco é do laço: o servidor já passou de onde uma segunda
+                // leitura do pedido estaria, logo depois do `pronto`.
+                o_pedido_lido_uma_vez(&servidor, leitura)?;
 
                 // Com o coletor segurado, o cliente — colhido pelo instalador
                 // — está na tabela, com a morte devida; as vagas vazias de

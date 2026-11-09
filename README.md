@@ -10520,7 +10520,17 @@ compilado fora do workspace contra o `programas`, com as opções, o
 `usuario.ld` e o toolchain que o `cargo xtask invariantes` confere —, e
 `cargo xtask selar`, `sdk-conferir` e `sdk-fora` o selam, conferem e
 compilam; o `instalador` o grava no armazém em pedaços, e o kernel só o
-roda com o selo de um editor em quem o papel confia.
+roda com o selo de um editor em quem o papel confia. O modelo lê o pedido
+do cliente antes de se dizer pronto: no `pronto`, o papel — só servir, ou
+perguntar também — já está decidido, e o pedido gravado depois dele, para
+o próximo modelo da mesma máquina, não faz do servidor um cliente. Lido
+depois do `pronto`, como era, o pedido que a suíte grava logo em seguida
+às vezes chegava ao servidor, que perguntava sem achar outro modelo e
+saía com 3 — e o cliente, sem servidor, também: as CIs 464 e 465, no
+aarch64 em release, nos dois casos `sdk: o programa de fora do
+repositorio`. Os dois casos conferem a ordem pela auditoria — o gate
+decidiu a abertura do pedido pelo servidor antes da oferta dele, e,
+depois do eco, nenhuma outra —, e a ordem não depende da corrida.
 
 **Testes.** No hospedeiro, a conta do aviso — a borda, o rearme, o espaço
 só para quem o quer, o fim uma vez, o canal cheio, o canal sem ouvinte, a
@@ -10560,7 +10570,8 @@ registro e a fila na troca de imagem —; e o `eco-malha` com três clientes num
 largado pelo cliente, uma cópia inteira entre dois `copiador`, que fecham
 o fluxo dos dois lados, a `conversa`, o programa de fora do repositório
 selado, instalado e rodado — também com o coletor segurado, a corrida das
-CIs 445 e 447 —,
+CIs 445 e 447, e com o pedido lido antes do `pronto` e uma vez só,
+conferido pela auditoria, a corrida das CIs 464 e 465 —,
 o `agent.describe` contra o contrato, o `system.info`, as medidas do laço
 e o laço que sobe com o nome tomado.
 As invariantes de fonte conferem que só `kernel::aviso` publica o aviso,
@@ -10876,7 +10887,11 @@ do `xtask`. E a do fim do disco hostil (#314, N229): o `Drop` sem esperar
 o fio do servidor — reprovada pelo teste do hospedeiro do `xtask`. E as do
 motivo da recusa (CI 439, N230 e N231): toda recusa marcando a máquina, e
 o motivo lido com o leitor de campo simples, que o corta na primeira
-vírgula — reprovadas pelo teste do hospedeiro do `xtask`.
+vírgula — reprovadas pelo teste do hospedeiro do `xtask`. E as da corrida
+do modelo (CIs 464 e 465, N232 e N233): o pedido lido depois do `pronto`,
+como era, e o pedido lido antes e, sem ele, de novo depois — reprovadas
+pelos dois casos `sdk: o programa de fora do repositorio`, a primeira pela
+ordem da auditoria, a segunda pela abertura repetida.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -10982,6 +10997,7 @@ vírgula — reprovadas pelo teste do hospedeiro do `xtask`.
 | fora do SDK (#313): o IDE do boot sem `bootindex` (N221); o `disco0` do NVMe e do ARM sem ele (N222); o x86 com o disco no virtio bootando pelo `disco0` (N223); a máquina sem firmware com ordem (N224); a conferência da linha que aceita duas ordens (N225), a ordem noutro dispositivo (N226), a ordem numa máquina sem firmware (N227) e outro valor (N228) | os testes do hospedeiro do xtask (`so_o_disco_do_boot_leva_a_ordem_de_boot`, `a_ordem_de_boot_errada_e_recusada`) |
 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor (N229) | os testes do hospedeiro do xtask (`disco_hostil::testes::o_fim_espera_a_conexao_em_curso`) |
 | fora do SDK (CI 439): toda recusa marcando a máquina para o fim dela perguntar o motivo (N230); o motivo da persistência lido com o leitor de campo simples, cortado na primeira vírgula (N231) | os testes do hospedeiro do xtask (`persistencia::testes::a_recusa_de_revogacao_pede_o_motivo`) |
+| o modelo que lê o pedido depois do `pronto`, como era (N232), ou antes e, sem ele, de novo depois (N233) — a corrida das CIs 464 e 465 | "sdk: o programa de fora do repositorio, selado, instalado e rodado", "sdk: o programa de fora do repositorio com o coletor segurado" |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
