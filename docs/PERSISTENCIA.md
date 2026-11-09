@@ -2262,3 +2262,65 @@ registrados, para uma medida e uma decisão à parte.
 | suíte: os casos `coleta:` | antes, o controle positivo das contas: um pedido ao alocador e uma montagem feitos de propósito com a trava na mão são contados; a cópia sem nenhum pedido ao alocador com a trava na mão — pela conta do próprio alocador — e nenhuma entrada montada com ela; cada registro copiado com a trava montado, e, em toda gravação da suíte, a montagem com o tamanho que a tomada contou; o auditado logo depois da cópia, no ponto exato, que vai na gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores, sem perder, repetir ou desordenar, e o boot seguinte com a mesma cadeia; a compactação, com inteiro o que o anel tinha até a gravada na tomada da cópia, medido nela; e o anel que perde registros entre as duas tomadas da compactação, por um gancho da suíte — a base é a marca até o de antes do primeiro copiado e os copiados até a gravada, lida do disco, e o boot seguinte a adota |
 | hospedeiro (`xtask`): *o anel do corte que confere*, *o visto antes do anel que não deu a volta* | os vistos de antes do começo do anel do boot novo só deixam de contar se ele deu a volta — tem o que o anel guarda, 1024; com um a menos, reprovam |
 | bancada de persistência: *a queda no meio da coleta da auditoria sob carga* | a serial pedindo sem parar, e a energia cai em cada fronteira do décimo registro só de auditoria do boot; no boot seguinte, nada do que se viu gravado sumiu ou mudou — e nenhum ficou de fora do anel sem ele ter dado a volta —, o anel sem buraco nem repetição, a cadeia se verifica, e o registro do corte, se estava no disco, trouxe o que levava (uma conferência de sanidade: a exata é a do cenário *a queda em cada fronteira de um registro só de auditoria*); mais um boot confere de novo |
+
+### A medida, antes e depois
+
+A bancada `cargo xtask disponibilidade`, com a carga
+`DUKE_CARGA=0,g2,1,2,3,2:2,0` e 3 vCPUs (um núcleo do hospedeiro livre), e
+uma medida temporária, nunca commitada: o tempo de cada tomada da trava da
+auditoria, contado **dentro** de `sem_interrupcoes` — do primeiro ao último
+passo com as interrupções mascaradas, a espera pela trava e a retenção. O
+código de antes é o `774522e` nos arquivos deste trabalho; o de depois, o
+`5b44552` — as correções do adversário que vieram depois dele mudam só a
+suíte, os comentários e um `saturating_add` da `politica` que dá o mesmo
+valor em toda sequência alcançável. Em 9/11/2026, o maior valor de cada
+cenário da carga — sem carga, girando, um, dois e três processos pedindo, e
+dois titulares —, em microssegundos:
+
+| | a trava do coletor | as interrupções mascaradas, de quem for | o gate esperando a trava | perdidos |
+|---|---|---|---|---|
+| x86_64, `release` | 4 990–16 745 → 155–998 | 4 971–16 732 → 1 606–7 906 | 42–12 419 → 86–2 853 | 0 |
+| aarch64, `release` | 2 749–17 249 → 194–955 | 2 731–17 170 → 1 688–8 484 | 699–14 318 → 403–1 551 | 0 |
+| x86_64, depuração | 42 371–63 739 → 1 536–9 443 | 41 528–63 656 → 5 710–14 183 | 38 545–59 122 → 2 865–9 821 | 0 |
+| aarch64, depuração | 38 876–103 319 → 1 382–8 515 | 38 770–101 425 → 5 588–13 857 | 9 386–84 057 → 2 843–12 710 | 0 |
+
+Depois, quem mais segura a trava é o `audit.tail` (ver *O que continua com
+a trava*) — na bancada, o do NSF, que lê a auditoria nova de 64 em 64
+registros a cada volta (`seguranca::passo`): até 7,9 ms no x86_64 e 8,5 ms
+no aarch64 em `release`, e até 14,2 ms em depuração. Em 25 dos 28
+cenários das quatro configurações, o maior tempo mascarado é o de uma
+chamada dele. Os registros anexados e gravados por segundo acompanham a
+carga, antes e depois, e nenhum se perdeu.
+
+O canal do agente sob carga melhora onde a trava era o que o segurava: em
+depuração, no x86_64, o p99 da serial com três processos pedindo foi de
+1 773 a 948 ms, e com dois titulares, de 2 045 a 844 ms; no aarch64, de
+808 a 417 ms com dois titulares. Em `release`, a vez longa da tarefa
+`programas` — o Trabalho A — é o que domina o canal sob carga, e a
+diferença do B some no meio dela.
+
+Os pedidos atendidos por segundo não mudaram num sentido que se repita:
++2% a +9% no aarch64 em `release`; −4% a +22% no aarch64 em depuração;
+no x86_64 em `release`, −6% a −15% num par de rodadas e −4% a +8% noutro,
+com o mesmo código de antes e de depois; e −2% a −14% no x86_64 em
+depuração, onde a tarefa `programas` passou a ocupar menos do executor — o
+canal do agente, sem a trava na frente, anda duas vezes mais: 3,9 → 7,9
+avanços por segundo da serial com três processos pedindo.
+
+Duas observações da medida:
+
+- **Uma rodada de antes descartada.** Uma rodada do x86_64 em `release`
+  com o código de antes deu a trava do coletor em 110 a 200 ms — mas tudo
+  nela andou 2,5 vezes mais devagar, os pedidos por segundo também (1 233
+  contra 3 475 com um processo pedindo), em todos os cenários: o hospedeiro
+  tirou CPU da máquina virtual. Repetida em seguida, com a lista livre do
+  heap na medida — de 347 a 1 026 blocos, e o maior livre sempre acima de
+  6 MiB, sem fragmentação —, deu 5 a 17 ms, perto da primeira medida de
+  antes (2,6 a 28 ms) e da investigação (16,7 a 28,4 ms). A tabela usa a
+  repetição.
+- **O número da mensagem do `5b44552`.** "O tempo com as interrupções
+  mascaradas chegou a 268 ms" saiu da medida de antes, que contava o tempo
+  por fora de `sem_interrupcoes`: a preempção de um tique logo antes de
+  mascarar, ou logo depois de desmascarar, entrava na conta. Contado por
+  dentro, o maior tempo mascarado de antes foi de 101 ms (aarch64, depuração)
+  e de 64 ms no x86_64 em depuração.
