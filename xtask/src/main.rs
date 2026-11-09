@@ -2690,6 +2690,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_os_trechos_da_politica()?,
         conferir_a_chave_da_copia()?,
         conferir_os_fluxos()?,
+        conferir_a_vez_dos_programas()?,
         sdk::conferir_o_contrato()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
@@ -2940,6 +2941,141 @@ fn conferir_os_fluxos() -> Result<ExitCode, String> {
         );
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// A tarefa `programas` de produção atende os pedidos dos processos em
+/// vezes do orçamento: `servir()`, em `kernel/src/nativo.rs`, é só o laço
+/// de `servir_com` com o `ORCAMENTO_DA_VEZ` — o mesmo laço que a suíte roda
+/// num executor de teste, e o mesmo orçamento da chamada da suíte,
+/// `atender_pendentes` —, e `kernel/src/main.rs` lança `nativo::servir()`
+/// no executor, uma vez.
+///
+/// A suíte não compila `servir()` — ela é do kernel sem `modo-teste`, e o
+/// laço dela não acaba —: sem esta conferência, um `servir()` com outro
+/// orçamento (sem limite, e a vez volta a não ter fim) ou com o laço
+/// antigo, sem ceder, passaria pela suíte inteira.
+fn conferir_a_vez_dos_programas() -> Result<ExitCode, String> {
+    let raiz = raiz_do_projeto();
+    let ler = |arquivo: &str| {
+        std::fs::read_to_string(raiz.join(arquivo))
+            .map_err(|e| format!("não foi possível ler {arquivo}: {e}"))
+    };
+    let nativo = ler("kernel/src/nativo.rs")?;
+    let main = ler("kernel/src/main.rs")?;
+    let mut fora = Vec::new();
+    if !servir_no_orcamento(&nativo) {
+        fora.push(
+            "kernel/src/nativo.rs: `servir()` não é só `servir_com(ORCAMENTO_DA_VEZ, || true).await`"
+                .to_string(),
+        );
+    }
+    let lancada = fora_de_comentario(&main, "Tarefa::nova(\"programas\", nativo::servir())");
+    if lancada != 1 {
+        fora.push(format!(
+            "kernel/src/main.rs: a tarefa `programas` com `nativo::servir()` lançada {lancada} vezes, e não uma"
+        ));
+    }
+    // Com qualquer nome: uma segunda tarefa com o mesmo laço também dobra
+    // as vezes de atender.
+    let servir = fora_de_comentario(&main, "nativo::servir()");
+    if servir != 1 {
+        fora.push(format!(
+            "kernel/src/main.rs: `nativo::servir()` aparece {servir} vezes, e não uma"
+        ));
+    }
+    if let Err(e) = orcamento_finito(&nativo) {
+        fora.push(format!("kernel/src/nativo.rs: {e}"));
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] a tarefa programas: servir() é o laço de servir_com com o ORCAMENTO_DA_VEZ, lançado uma vez pelo main.rs"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("[xtask] a tarefa programas fora do orçamento da vez:");
+        for f in &fora {
+            eprintln!("  {f}");
+        }
+        eprintln!(
+            "\nA tarefa atende em vezes do orçamento e cede depois de cada uma: o canal do agente, o \
+             enlace, o pulso, o console e a barra rodam entre duas vezes — ver `docs/INTERFACE.md`."
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// O corpo de `servir()` em `nativo` — sem comentários, linhas vazias e a
+/// chave que o fecha — é exatamente o laço de `servir_com` com o
+/// `ORCAMENTO_DA_VEZ`.
+fn servir_no_orcamento(nativo: &str) -> bool {
+    corpo_pelo_recuo(nativo, "pub async fn servir()").is_some_and(|corpo| {
+        let linhas: Vec<&str> = corpo
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//") && *l != "}")
+            .collect();
+        linhas == ["servir_com(ORCAMENTO_DA_VEZ, || true).await"]
+    })
+}
+
+/// O maior `PEDIDOS_POR_VEZ` que a conferência aceita: o maior que a
+/// varredura do orçamento mediu.
+const MAIOR_CONTA_DA_VEZ: u64 = 64;
+
+/// O maior `TEMPO_POR_VEZ_US` que a conferência aceita: a maior vez da
+/// tarefa `programas` que a escolha do orçamento admite em `release`.
+const MAIOR_TEMPO_DA_VEZ_US: u64 = 10_000;
+
+/// A marca que a medida temporária do orçamento põe na linha da variante
+/// que ela troca — montada aqui, para a própria fonte do `xtask` não a
+/// trazer (o pré-voo a procura nas fontes).
+const MARCA_DA_VARIANTE: &str = concat!("VARIANTE", "-DA-MEDIDA");
+
+/// O orçamento de produção, em `nativo`, é finito: as duas constantes são
+/// números escritos — `PEDIDOS_POR_VEZ` de 1 a [`MAIOR_CONTA_DA_VEZ`], e
+/// `TEMPO_POR_VEZ_US` de 1 a [`MAIOR_TEMPO_DA_VEZ_US`] —, e nenhuma linha
+/// traz a marca de uma variante da medida. Sem esta conferência, um
+/// orçamento sem limite — `usize::MAX` e `u64::MAX`, a variante que só cede
+/// — passaria pela suíte, que confere o orçamento contra as próprias
+/// constantes (o achado N2 do segundo adversário do orçamento da vez).
+fn orcamento_finito(nativo: &str) -> Result<(), String> {
+    if nativo.contains(MARCA_DA_VARIANTE) {
+        return Err("uma variante da medida do orçamento ficou no código".to_string());
+    }
+    let valor = |declaracao: &str| -> Result<u64, String> {
+        let linhas: Vec<&str> = nativo
+            .lines()
+            .filter(|l| l.starts_with(declaracao))
+            .collect();
+        let &[linha] = linhas.as_slice() else {
+            return Err(format!(
+                "`{declaracao}` aparece {} vezes, e não uma",
+                linhas.len()
+            ));
+        };
+        let numero = linha[declaracao.len()..]
+            .trim()
+            .strip_suffix(';')
+            .unwrap_or_default()
+            .replace('_', "");
+        numero
+            .parse::<u64>()
+            .map_err(|_| format!("`{}` não é um número escrito", linha.trim()))
+    };
+    let pedidos = valor("pub const PEDIDOS_POR_VEZ: usize =")?;
+    if !(1..=MAIOR_CONTA_DA_VEZ).contains(&pedidos) {
+        return Err(format!(
+            "PEDIDOS_POR_VEZ = {pedidos}: a conta da vez vai de 1 a {MAIOR_CONTA_DA_VEZ}"
+        ));
+    }
+    let tempo = valor("pub const TEMPO_POR_VEZ_US: u64 =")?;
+    if !(1..=MAIOR_TEMPO_DA_VEZ_US).contains(&tempo) {
+        return Err(format!(
+            "TEMPO_POR_VEZ_US = {tempo}: o tempo da vez vai de 1 a {MAIOR_TEMPO_DA_VEZ_US} µs"
+        ));
+    }
+    Ok(())
 }
 
 /// O trecho de `assinatura` — uma função, em qualquer recuo — até a chave
@@ -3569,6 +3705,9 @@ fn conferir_janelas_pelo_toolkit() -> Result<ExitCode, String> {
 /// As chamadas que executam uma operação protegida, e os únicos arquivos
 /// onde cada uma pode aparecer.
 const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
+    // A tarefa `programas`: só o `main.rs` a lança — e uma vez, que
+    // `conferir_a_vez_dos_programas` conta.
+    ("nativo::servir(", &["kernel/src/main.rs"]),
     // O handler de um comando: só a licença de `autorizacao::autorizar`.
     (".handler)(", &["kernel/src/autorizacao.rs"]),
     // O código que vira processo: lido e conferido por uma função só — a
@@ -5025,6 +5164,16 @@ fn conferir_a_ordem_do_boot(raiz: &Path) -> Result<Vec<String>, String> {
 /// em qualquer forma. Só nomes que não se repetem noutro módulo: o dono
 /// inclui o que os define.
 const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
+    // Quem atende a fila dos pedidos dos processos: só a tarefa `programas`,
+    // no executor, pelo `nativo::servir()` — o laço de `servir_com` com o
+    // orçamento da vez — e, na suíte, quem espera um processo. Fora do
+    // `nativo.rs`, uma segunda tarefa com outro orçamento, ou um fio que
+    // atendesse a fila fora do executor, passaria pela suíte, que não
+    // compila a tarefa de produção (o achado N1 do segundo adversário do
+    // orçamento da vez).
+    ("atender_com", &["kernel/src/nativo.rs"]),
+    ("servir_com", &["kernel/src/nativo.rs"]),
+    ("atender_pendentes", &["kernel/src/nativo.rs"]),
     // A soltura do arrendamento pela recusa de uma edição da árvore: só o
     // console, que a recusa, e a interface, que a entrega — e o rastro que
     // ela recebe só a coordenação constrói.
@@ -17962,6 +18111,74 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    /// A vez da tarefa `programas`: o `servir()` de verdade passa; com
+    /// outro orçamento, com o laço antigo sem ceder, ou com mais um passo,
+    /// não; e sem `servir()`, também não.
+    #[test]
+    fn a_vez_dos_programas_e_a_do_orcamento() {
+        use super::*;
+        let real = std::fs::read_to_string(raiz_do_projeto().join("kernel/src/nativo.rs")).unwrap();
+        assert!(servir_no_orcamento(&real));
+        let certo = "#[cfg(not(feature = \"modo-teste\"))]\npub async fn servir() {\n    \
+                     // o laço\n    servir_com(ORCAMENTO_DA_VEZ, || true).await\n}\n";
+        assert!(servir_no_orcamento(certo));
+        let sem_limite = certo.replace(
+            "ORCAMENTO_DA_VEZ",
+            "OrcamentoDaVez { pedidos: usize::MAX, tempo_ns: u64::MAX }",
+        );
+        assert!(!servir_no_orcamento(&sem_limite));
+        let antigo = "pub async fn servir() {\n    loop {\n        \
+                      ProximoPedido { relogio: None }.await;\n        \
+                      atender_pendentes();\n    }\n}\n";
+        assert!(!servir_no_orcamento(antigo));
+        let mais_um = certo.replace("    servir_com", "    atender_pendentes();\n    servir_com");
+        assert!(!servir_no_orcamento(&mais_um));
+        assert!(!servir_no_orcamento("pub async fn servir_com() {\n}\n"));
+    }
+
+    /// O orçamento de produção é finito: o `nativo.rs` de verdade passa; a
+    /// variante que só cede, uma conta acima da medida, um tempo acima de
+    /// 10 ms, uma conta de zero, um valor que não é número escrito e a marca
+    /// de uma variante da medida, não.
+    #[test]
+    fn o_orcamento_de_producao_e_finito() {
+        use super::*;
+        let real = std::fs::read_to_string(raiz_do_projeto().join("kernel/src/nativo.rs")).unwrap();
+        assert_eq!(orcamento_finito(&real), Ok(()));
+        let certo = "pub const PEDIDOS_POR_VEZ: usize = 16;\n\
+                     pub const TEMPO_POR_VEZ_US: u64 = 2_000;\n";
+        assert_eq!(orcamento_finito(certo), Ok(()));
+        let sem_limite = certo
+            .replace("= 16;", "= usize::MAX;")
+            .replace("= 2_000;", "= u64::MAX;");
+        assert!(orcamento_finito(&sem_limite).is_err());
+        let so_a_conta = certo.replace("= 2_000;", "= u64::MAX;");
+        assert!(
+            orcamento_finito(&so_a_conta)
+                .unwrap_err()
+                .contains("TEMPO_POR_VEZ_US")
+        );
+        let muitos = certo.replace("= 16;", "= 65;");
+        assert!(orcamento_finito(&muitos).unwrap_err().contains("de 1 a 64"));
+        let zero = certo.replace("= 16;", "= 0;");
+        assert!(orcamento_finito(&zero).is_err());
+        let longo = certo.replace("= 2_000;", "= 10_001;");
+        assert!(orcamento_finito(&longo).unwrap_err().contains("10000 µs"));
+        assert_eq!(
+            orcamento_finito(&certo.replace("= 2_000;", "= 10_000;")),
+            Ok(())
+        );
+        let variante = certo.replace("= 16;", &format!("= 4; // {MARCA_DA_VARIANTE}"));
+        assert!(
+            orcamento_finito(&variante)
+                .unwrap_err()
+                .contains("variante")
+        );
+        let duas = format!("{certo}pub const PEDIDOS_POR_VEZ: usize = 4;\n");
+        assert!(orcamento_finito(&duas).unwrap_err().contains("2 vezes"));
+        assert!(orcamento_finito("pub const TEMPO_POR_VEZ_US: u64 = 2_000;\n").is_err());
+    }
+
     /// O teto do executável: o programa do tamanho dele passa, com o aviso
     /// de quase cheio; um byte a mais é recusado; nove décimos, exatos,
     /// passam calados.

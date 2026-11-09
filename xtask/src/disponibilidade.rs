@@ -1,8 +1,9 @@
 //! A bancada da disponibilidade: quanto os pedidos dos processos de um
-//! titular seguram o executor do kernel — e, com ele, o canal do agente de
-//! todos os outros. É a medida da observação sobre
-//! `nativo::atender_pendentes`, que atende a fila dos pedidos dos processos
-//! até esvaziá-la, numa tarefa que divide o executor com o canal.
+//! titular — ou de dois — seguram o executor do kernel — e, com ele, o canal
+//! do agente de todos os outros, o pulso e a barra. É a medida da observação
+//! sobre a fila dos pedidos dos processos, que a tarefa `programas`
+//! (`nativo::servir_com`) atende no executor, ao lado do canal; é por ela
+//! que se escolhe o orçamento da vez da tarefa (`nativo::ORCAMENTO_DA_VEZ`).
 //!
 //! # O que faz
 //!
@@ -10,21 +11,34 @@
 //! verdade, com a tarefa `programas` ao lado das do canal — e, em cada
 //! cenário:
 //!
-//! - sonda o canal de dois titulares que não são o da carga, um pedido de
+//! - sonda o canal de dois titulares que não são os da carga, um pedido de
 //!   cada vez, de [`PERIODO`] em [`PERIODO`]: a serial (o `sistema`) e o TCP
 //!   (a chave do agente 2); e, logo depois de a carga começar, um agente
 //!   novo tenta entrar pelo TCP (a chave do agente 3) e fazer o primeiro
 //!   pedido — o aperto também é atendido no executor, o da conexão que
 //!   não o completa em dez segundos cai, e é o primeiro pedido que confirma
 //!   a chave do aperto ao kernel;
-//! - lança pela porta 1 — o agente 1, `operador`, o titular da carga —,
-//!   pelo `user.run` de sempre, o programa `incansavel`, com o pedido
-//!   gravado no armazém: quantos filhos, por quanto tempo, que modo
-//!   (`pedir`, a carga; `girar`, o controle sem fila);
+//! - lança pela porta 1 — o agente 1, `operador`, o titular da carga —, e,
+//!   num cenário de dois titulares, também pela porta 3 — o agente 3, outro
+//!   `operador`, com a cota e a taxa dele —, pelo `user.run` de sempre, o
+//!   programa `incansavel`, com o pedido gravado no armazém: quantos filhos
+//!   por titular, por quanto tempo, que modo (`pedir`, a carga; `girar`, o
+//!   controle sem fila);
 //! - lê, antes e depois, os contadores que o kernel já publica:
 //!   `user.stats` (os pedidos dos processos atendidos), `security.metrics`
 //!   (as decisões por código) e `tasks.stats` (os avanços do executor e os
 //!   bytes perdidos na entrada);
+//! - confere a carga: cada filho do `incansavel` conta os pedidos e as
+//!   respostas, e confere que cada resposta é a do pedido dele — o `id`; a
+//!   bancada soma as contas dos filhos e as compara com as do kernel (ver
+//!   [`integridade`]);
+//! - acompanha duas tarefas do executor pelo que o kernel já diz: o pulso,
+//!   pelo registro que ele deixa no log a cada minuto — o intervalo entre
+//!   dois é o minuto mais o atraso com que o executor o rodou —; e a barra,
+//!   pelo relógio dela na árvore semântica (`ui.tree`, "tempo ligado"),
+//!   lido pela porta 4 (o agente 4) de [`PERIODO_DA_BARRA`] em
+//!   [`PERIODO_DA_BARRA`], junto com o `system.uptime` — o atraso é o quanto
+//!   o relógio desenhado fica atrás do tempo ligado;
 //! - e mostra o que a carga — e a medida temporária, se o kernel a tiver —
 //!   disse no log.
 //!
@@ -32,18 +46,26 @@
 //! depois da carga — mediana, p99 e maior — e o maior silêncio do canal: o
 //! maior intervalo sem resposta nenhuma.
 //!
+//! O console e o enlace não têm, sem uma superfície nova, o que mostrar
+//! aqui: o console só acorda com o teclado, e as vagas do enlace, com um par
+//! relacionado.
+//!
 //! # Só mede
 //!
 //! Nada aqui reprova pelo número: o número é o resultado. É erro só a
-//! máquina que não sobe, a carga que não é lançada, ou a que não acaba.
+//! máquina que não sobe, a carga que não é lançada, a que não acaba, e a que
+//! não confere — um filho sem a resposta de um pedido, ou com a de outro, ou
+//! o kernel com menos pedidos atendidos do que os processos fizeram.
 //!
 //! `DUKE_CARGA` escolhe os cenários, separados por vírgula: `0` é nenhuma
-//! carga, `N` são N filhos pedindo, `gN` são N filhos girando. O padrão é
+//! carga, `N` são N filhos pedindo, `gN` são N filhos girando, e `N:2` ou
+//! `gN:2`, os mesmos N filhos em cada um de dois titulares. O padrão é
 //! [`CENARIOS`]. `DUKE_REPETICOES` repete a lista inteira. `DUKE_AMOSTRAS`,
 //! um caminho, acrescenta a ele cada sonda de cada cenário — o cenário, o
 //! canal, quando saiu e a ida e volta, em ms desde a origem da bancada — e
 //! o instante do lançamento, para ver quando o canal parou.
 
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -74,21 +96,43 @@ const CARGA_NO_LOG: &str = "incansavel";
 /// E tudo o que uma medida temporária do kernel diz, se ele a tiver: o
 /// subsistema dela, que nenhum kernel publicado usa.
 const MEDIDA_NO_LOG: &str = "medida";
+/// Quantos titulares uma carga pode ter: o agente 1 e o agente 3.
+const TITULARES: u64 = 2;
+/// A porta do segundo titular da carga: o agente 3, `operador` como o 1.
+const PORTA_DO_SEGUNDO: u8 = 3;
+/// A porta de quem lê o relógio da barra: o agente 4, que não é titular da
+/// carga nem sonda o canal.
+const PORTA_DA_BARRA: u8 = 4;
+/// De quanto em quanto a barra é lida: o relógio dela anda de segundo em
+/// segundo.
+const PERIODO_DA_BARRA: Duration = Duration::from_millis(500);
+/// O intervalo do pulso, em ms — o `INTERVALO_MS` da tarefa `pulso`, em
+/// `kernel/src/main.rs`.
+const PULSO_MS: u64 = 60_000;
+/// Quantos registros o `log.tail` devolve, no máximo: o anel inteiro.
+const ANEL_DO_LOG: u64 = 128;
 
-/// Um cenário: quantos filhos, e se pedem ou giram. Zero filhos é a
+/// Um cenário: quantos filhos por titular, se pedem ou giram, e quantos
+/// titulares — o agente 1 e, com dois, também o agente 3. Zero filhos é a
 /// referência, sem carga.
 #[derive(Clone, Copy, Debug)]
 struct Cenario {
     filhos: u64,
     girar: bool,
+    titulares: u64,
 }
 
 impl Cenario {
     fn nome(self) -> String {
-        match (self.filhos, self.girar) {
-            (0, _) => "sem carga".to_string(),
+        let nome = match (self.filhos, self.girar) {
+            (0, _) => return "sem carga".to_string(),
             (n, false) => format!("pedir x{n}"),
             (n, true) => format!("girar x{n}"),
+        };
+        if self.titulares > 1 {
+            format!("{nome} em {} titulares", self.titulares)
+        } else {
+            nome
         }
     }
 }
@@ -104,9 +148,18 @@ fn cenarios_de(texto: &str) -> Result<Vec<Cenario>, String> {
         .split(',')
         .map(|c| {
             let c = c.trim();
-            let (girar, n) = match c.strip_prefix('g') {
+            let (carga, titulares) = match c.split_once(':') {
+                Some((carga, t)) => (carga, t.parse::<u64>().unwrap_or(0)),
+                None => (c, 1),
+            };
+            if !(1..=TITULARES).contains(&titulares) {
+                return Err(format!(
+                    "DUKE_CARGA: `{c}`: de 1 a {TITULARES} titulares, depois do `:`"
+                ));
+            }
+            let (girar, n) = match carga.strip_prefix('g') {
                 Some(n) => (true, n),
-                None => (false, c),
+                None => (false, carga),
             };
             let filhos: u64 = n
                 .parse()
@@ -116,7 +169,11 @@ fn cenarios_de(texto: &str) -> Result<Vec<Cenario>, String> {
                     "DUKE_CARGA: `{c}` passa de 7 filhos, a cota do operador com o pai"
                 ));
             }
-            Ok(Cenario { filhos, girar })
+            Ok(Cenario {
+                filhos,
+                girar,
+                titulares,
+            })
         })
         .collect()
 }
@@ -301,6 +358,130 @@ impl SondaTcp {
     }
 }
 
+/// Uma leitura da barra: quando saiu, desde a origem da bancada; o tempo
+/// ligado que o kernel disse logo antes; e o segundo que o relógio da barra
+/// mostrava — o que a tarefa `barra` desenhou por último —, se há barra.
+#[derive(Clone, Copy, Debug)]
+struct AmostraDaBarra {
+    saiu: Duration,
+    uptime_ms: u64,
+    mostrado: Option<u64>,
+}
+
+/// O segundo que o relógio da barra mostra numa resposta do `ui.tree`:
+/// `ligado h:mm:ss`. `None` sem barra.
+fn segundos_da_barra(r: &str) -> Option<u64> {
+    let texto = super::apos(r, "\"ligado ")?.split('"').next()?;
+    let mut partes = texto.split(':');
+    let h: u64 = partes.next()?.parse().ok()?;
+    let m: u64 = partes.next()?.parse().ok()?;
+    let s: u64 = partes.next()?.parse().ok()?;
+    if partes.next().is_some() {
+        return None;
+    }
+    Some(h * 3600 + m * 60 + s)
+}
+
+/// O maior atraso do relógio da barra nas leituras que saíram em `[de,
+/// ate)`: quantos segundos o relógio desenhado ficou atrás do tempo ligado.
+/// Zero ou um é a barra andando — ela redesenha a cada segundo, e a leitura
+/// cai em qualquer ponto dele —; mais que isso é a tarefa esperando a vez.
+/// `None` sem leitura com a barra.
+fn atraso_da_barra(amostras: &[AmostraDaBarra], de: Duration, ate: Duration) -> Option<u64> {
+    amostras
+        .iter()
+        .filter(|a| a.saiu >= de && a.saiu < ate)
+        .filter_map(|a| Some((a.uptime_ms / 1000).saturating_sub(a.mostrado?)))
+        .max()
+}
+
+/// A leitura da barra: um fio do hospedeiro com o agente 4, do começo ao
+/// fim da bancada. Só lê — `system.uptime` e `ui.tree` —, nada que a carga
+/// ou as sondas usem.
+struct SondaDaBarra {
+    amostras: Arc<Mutex<Vec<AmostraDaBarra>>>,
+    parar: Arc<AtomicBool>,
+    fio: std::thread::JoinHandle<Result<(), String>>,
+}
+
+impl SondaDaBarra {
+    /// Conecta pela porta 4 e começa a ler.
+    fn ligar(arch: Arquitetura, origem: Instant) -> Result<SondaDaBarra, String> {
+        let amostras = Arc::new(Mutex::new(Vec::new()));
+        let parar = Arc::new(AtomicBool::new(false));
+        let (pronta, esperar) = mpsc::channel::<Result<(), String>>();
+        let (a, p) = (amostras.clone(), parar.clone());
+        let fio = std::thread::spawn(move || -> Result<(), String> {
+            let conectado = AgenteNaPorta::conectar(arch, PORTA_DA_BARRA).and_then(|agente| {
+                agente
+                    .fluxo
+                    .set_read_timeout(Some(PRAZO))
+                    .map_err(|e| format!("disponibilidade: o prazo da porta da barra: {e}"))?;
+                Ok(agente)
+            });
+            let mut agente = match conectado {
+                Ok(agente) => {
+                    let _ = pronta.send(Ok(()));
+                    agente
+                }
+                Err(e) => {
+                    let _ = pronta.send(Err(e.clone()));
+                    return Err(e);
+                }
+            };
+            let mut proxima = Instant::now();
+            while !p.load(Ordering::Relaxed) {
+                let saiu = Instant::now();
+                let uptime_ms = numero(&agente.pedir("system.uptime", "{}")?, "uptime_ms");
+                let mostrado = segundos_da_barra(&agente.pedir("ui.tree", "{}")?);
+                a.lock()
+                    .map_err(|_| "disponibilidade: as amostras da barra".to_string())?
+                    .push(AmostraDaBarra {
+                        saiu: saiu - origem,
+                        uptime_ms,
+                        mostrado,
+                    });
+                proxima += PERIODO_DA_BARRA;
+                let agora = Instant::now();
+                if proxima > agora {
+                    std::thread::sleep(proxima - agora);
+                } else {
+                    proxima = agora;
+                }
+            }
+            Ok(())
+        });
+        esperar.recv().map_err(|_| {
+            "disponibilidade: a leitura da barra morreu antes do aperto".to_string()
+        })??;
+        Ok(SondaDaBarra {
+            amostras,
+            parar,
+            fio,
+        })
+    }
+
+    fn amostras(&self) -> Vec<AmostraDaBarra> {
+        self.amostras.lock().map(|a| a.to_vec()).unwrap_or_default()
+    }
+
+    fn desligar(self) -> Result<(), String> {
+        self.parar.store(true, Ordering::Relaxed);
+        self.fio
+            .join()
+            .map_err(|_| "disponibilidade: o fio da leitura da barra morreu".to_string())?
+    }
+}
+
+/// O que a bancada acompanha do começo ao fim: a sonda do TCP, a leitura da
+/// barra — se a porta 4 atendeu — e os pulsos que o log já mostrou, pelo
+/// número do registro.
+struct Sondas {
+    tcp: SondaTcp,
+    barra: Option<SondaDaBarra>,
+    pulsos: BTreeMap<u64, u64>,
+}
+
 /// Um número de uma resposta, pelo primeiro campo com o nome.
 fn numero(r: &str, campo: &str) -> u64 {
     campo_simples(r, campo)
@@ -331,6 +512,165 @@ fn contadores(m: &mut Ligada) -> Result<Contadores, String> {
     })
 }
 
+/// O que um filho do `incansavel` disse no fim: `incansavel <fio>: <p>
+/// pedidos, <q> respostas, <a> ALLOW, <r> RATE_LIMIT, de <x> a <y> ms`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ContaDoFilho {
+    pedidos: u64,
+    respostas: u64,
+    permitidos: u64,
+    pela_taxa: u64,
+}
+
+/// O fio e a conta de uma mensagem do log, se ela é a do fim de um filho.
+/// As do pai, as de uma falha e a de um filho que não diz as respostas não
+/// são.
+fn conta_do_filho(mensagem: &str) -> Option<(u64, ContaDoFilho)> {
+    let (fio, contas) = mensagem.strip_prefix("incansavel ")?.split_once(": ")?;
+    let fio = fio.parse().ok()?;
+    let mut c = ContaDoFilho::default();
+    let mut vistos = 0;
+    for parte in contas.split(", ") {
+        let Some((n, nome)) = parte.split_once(' ') else {
+            continue;
+        };
+        let Ok(n) = n.parse::<u64>() else {
+            continue;
+        };
+        let campo = match nome {
+            "pedidos" => &mut c.pedidos,
+            "respostas" => &mut c.respostas,
+            "ALLOW" => &mut c.permitidos,
+            "RATE_LIMIT" => &mut c.pela_taxa,
+            _ => continue,
+        };
+        *campo = n;
+        vistos += 1;
+    }
+    (vistos == 4).then_some((fio, c))
+}
+
+/// A carga conferida: o que os filhos disseram, e o que o kernel contou
+/// além deles.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Integridade {
+    filhos: usize,
+    pedidos: u64,
+    permitidos: u64,
+    pela_taxa: u64,
+    /// As recusas pela taxa além das que os filhos ouviram: a de outro
+    /// principal — o agente novo, que num cenário de dois titulares é um
+    /// deles, ou o relógio de um pai que esperou a ficha.
+    taxa_a_mais: u64,
+}
+
+impl std::fmt::Display for Integridade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} filhos, {} pedidos, cada um com a resposta dele ({} ALLOW, {} RATE_LIMIT); o kernel atendeu exatamente esses e o relogio de cada pai, e recusou pela taxa {} a mais",
+            self.filhos, self.pedidos, self.permitidos, self.pela_taxa, self.taxa_a_mais
+        )
+    }
+}
+
+/// Confere a carga de `c` pelas contas dos filhos e pelo que o kernel
+/// contou no cenário — `nativos`, os pedidos dos processos atendidos
+/// (`user.stats`), e `pela_taxa`, as recusas pela taxa (`security.metrics`).
+///
+/// Todo filho disse a conta e recebeu uma resposta por pedido, ALLOW ou
+/// RATE_LIMIT — e cada uma era a do pedido dele: o filho confere o `id` e
+/// para na primeira de outro, sem dizer a conta. O kernel atendeu
+/// exatamente os pedidos dos filhos e o relógio de cada pai — menos é
+/// pedido perdido; mais, um pedido atendido duas vezes, ou o de um processo
+/// de fora da carga, que a máquina da bancada não tem —, e recusou pela
+/// taxa ao menos o que os filhos ouviram: o agente novo divide o balde com
+/// o titular da chave dele, e o relógio de um pai pode esperar a ficha. As
+/// recusas a mais ficam ditas.
+fn integridade(
+    c: Cenario,
+    contas: &[(u64, ContaDoFilho)],
+    nativos: u64,
+    pela_taxa: u64,
+) -> Result<Integridade, String> {
+    let esperados = (c.filhos * c.titulares) as usize;
+    if contas.len() != esperados {
+        return Err(format!(
+            "disponibilidade: {} filhos disseram a conta, de {esperados}",
+            contas.len()
+        ));
+    }
+    let mut i = Integridade {
+        filhos: contas.len(),
+        ..Integridade::default()
+    };
+    for (fio, f) in contas {
+        if f.respostas != f.pedidos || f.permitidos + f.pela_taxa != f.respostas {
+            return Err(format!(
+                "disponibilidade: o filho {fio} fez {} pedidos e recebeu {} respostas, {} ALLOW e {} RATE_LIMIT",
+                f.pedidos, f.respostas, f.permitidos, f.pela_taxa
+            ));
+        }
+        i.pedidos += f.pedidos;
+        i.permitidos += f.permitidos;
+        i.pela_taxa += f.pela_taxa;
+    }
+    let feitos = i.pedidos + c.titulares;
+    if nativos != feitos {
+        let o_que = if nativos < feitos {
+            "pedido perdido"
+        } else {
+            "pedido atendido duas vezes, ou o de um processo de fora da carga"
+        };
+        return Err(format!(
+            "disponibilidade: o kernel atendeu {nativos} pedidos dos processos, e os filhos e os pais fizeram {feitos}: {o_que}"
+        ));
+    }
+    if pela_taxa < i.pela_taxa {
+        return Err(format!(
+            "disponibilidade: o kernel recusou {pela_taxa} pela taxa, e os filhos ouviram {} recusas",
+            i.pela_taxa
+        ));
+    }
+    i.taxa_a_mais = pela_taxa - i.pela_taxa;
+    Ok(i)
+}
+
+/// Os registros do pulso numa resposta do `log.tail`: o número e o
+/// `uptime_ms` de cada um.
+fn pulsos_de(r: &str) -> Vec<(u64, u64)> {
+    r.split(r#"{"seq":"#)
+        .skip(1)
+        .filter(|l| campo_simples(l, "subsystem").as_deref() == Some("pulso"))
+        .filter_map(|l| {
+            let seq = l
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()?;
+            Some((seq, numero(l, "uptime_ms")))
+        })
+        .collect()
+}
+
+/// O atraso de cada pulso de `pulsos` (o número do registro → o
+/// `uptime_ms`) que caiu em `[de, ate)` ms: o intervalo desde o pulso
+/// anterior, menos o minuto. O pulso dorme um minuto contado do registro
+/// anterior; o resto é o tique, até 10 ms, e a espera pela vez no executor.
+/// Dois registros seguidos com mais de um minuto e meio entre eles não são
+/// um intervalo: o log deu a volta entre as leituras, e um pulso do meio
+/// não foi visto.
+fn atrasos_do_pulso(pulsos: &BTreeMap<u64, u64>, de: u64, ate: u64) -> Vec<(u64, u64)> {
+    pulsos
+        .values()
+        .zip(pulsos.values().skip(1))
+        .filter(|&(&antes, &agora)| {
+            (de..ate).contains(&agora) && agora.saturating_sub(antes) < PULSO_MS * 3 / 2
+        })
+        .map(|(&antes, &agora)| (agora, agora.saturating_sub(antes).saturating_sub(PULSO_MS)))
+        .collect()
+}
+
 /// O armazém compartilhado, onde fica o pedido da carga: o disco zerado
 /// ainda não o tem. Criado pelo agente 1, o titular da carga.
 fn armazem_compartilhado(lancador: &mut AgenteNaPorta) -> Result<(), String> {
@@ -347,12 +687,21 @@ fn armazem_compartilhado(lancador: &mut AgenteNaPorta) -> Result<(), String> {
     Ok(())
 }
 
-/// Grava o pedido da carga e a lança pela porta 1, como o agente 1.
-fn lancar(lancador: &mut AgenteNaPorta, arch: Arquitetura, c: Cenario) -> Result<(), String> {
-    let estado = lancador.pedir("fs.stat", &format!(r#"{{"path":"{PEDIDO}"}}"#))?;
+/// Grava o pedido da carga, como o agente 1, e a lança pela porta de cada
+/// titular — a 1 e, com dois, a 3: o mesmo pedido, que cada pai lê.
+fn lancar(lancadores: &mut [AgenteNaPorta], arch: Arquitetura, c: Cenario) -> Result<(), String> {
+    let titulares = c.titulares as usize;
+    if lancadores.len() < titulares {
+        return Err(format!(
+            "disponibilidade: {titulares} titulares, e {} portas para lancar",
+            lancadores.len()
+        ));
+    }
+    let primeiro = &mut lancadores[0];
+    let estado = primeiro.pedir("fs.stat", &format!(r#"{{"path":"{PEDIDO}"}}"#))?;
     let versao = numero(&estado, "version");
     let modo = if c.girar { "girar" } else { "pedir" };
-    let gravado = lancador.pedir(
+    let gravado = primeiro.pedir(
         "fs.write",
         &format!(
             r#"{{"path":"{PEDIDO}","content":"processos {}\nduracao_ms {}\nmodo {modo}\n","expect_version":{versao}}}"#,
@@ -365,14 +714,16 @@ fn lancar(lancador: &mut AgenteNaPorta, arch: Arquitetura, c: Cenario) -> Result
             "disponibilidade: o pedido da carga nao gravou\n  {gravado}"
         ));
     }
-    let lancado = lancador.pedir(
-        "user.run",
-        &format!(r#"{{"path":"/programas/{}/incansavel"}}"#, arch.nome()),
-    )?;
-    if !lancado.contains(r#""launched":true"#) {
-        return Err(format!(
-            "disponibilidade: o user.run nao lancou a carga\n  {lancado}"
-        ));
+    for lancador in lancadores.iter_mut().take(titulares) {
+        let lancado = lancador.pedir(
+            "user.run",
+            &format!(r#"{{"path":"/programas/{}/incansavel"}}"#, arch.nome()),
+        )?;
+        if !lancado.contains(r#""launched":true"#) {
+            return Err(format!(
+                "disponibilidade: o user.run nao lancou a carga\n  {lancado}"
+            ));
+        }
     }
     Ok(())
 }
@@ -425,8 +776,8 @@ fn linhas_de(r: &str, desde: u64) -> Vec<String> {
         .collect()
 }
 
-/// Espera a carga acabar: o pai diz que os filhos acabaram, ou que algo
-/// deu errado.
+/// Espera a carga acabar: o pai de cada titular diz que os filhos
+/// acabaram, ou um diz que algo deu errado.
 fn esperar_o_fim(m: &mut Ligada, desde: u64, c: Cenario) -> Result<Vec<String>, String> {
     let limite = Instant::now() + Duration::from_secs(60);
     let fim = format!("incansavel: os {} filhos acabaram", c.filhos);
@@ -436,7 +787,7 @@ fn esperar_o_fim(m: &mut Ligada, desde: u64, c: Cenario) -> Result<Vec<String>, 
         |l: &str| l.contains(" filhos, modo ") || l.contains(" pedidos, ") || l.contains(&fim);
     loop {
         let linhas = linhas_do_log(m, desde)?;
-        if linhas.iter().any(|l| l.contains(&fim)) {
+        if linhas.iter().filter(|l| l.contains(&fim)).count() as u64 >= c.titulares {
             return Ok(linhas);
         }
         if linhas
@@ -496,8 +847,8 @@ fn gravar_amostras(
 /// Um cenário inteiro: a referência, a carga, o depois, e o que se viu.
 fn cenario(
     m: &mut Ligada,
-    lancador: &mut AgenteNaPorta,
-    tcp: &SondaTcp,
+    lancadores: &mut [AgenteNaPorta],
+    sondas: &mut Sondas,
     arch: Arquitetura,
     origem: Instant,
     c: Cenario,
@@ -510,9 +861,11 @@ fn cenario(
     sondar(origem, inicio + ANTES, &mut serial, || {
         m.pedir("agent.ping", "{}")
     });
+    // O tempo ligado no lançamento: a régua do pulso, que o log mede nele.
+    let ligado_ms = numero(&m.pedir("system.uptime", "{}")?, "uptime_ms");
     let lancamento = Instant::now();
     if c.filhos > 0 {
-        lancar(lancador, arch, c)?;
+        lancar(lancadores, arch, c)?;
     }
     let entrada = std::thread::spawn(move || {
         std::thread::sleep(ENTRADA_DEPOIS);
@@ -534,10 +887,17 @@ fn cenario(
         linhas_do_log(m, desde)?
     };
     let depois = contadores(m)?;
+    // Os pulsos que o log ainda mostra, e se ele deu a volta desde o
+    // começo do cenário: então uma linha da carga pode ter saído dele.
+    let cauda = m.pedir("log.tail", &format!(r#"{{"count":{ANEL_DO_LOG}}}"#))?;
+    for (seq, uptime_ms) in pulsos_de(&cauda) {
+        sondas.pulsos.insert(seq, uptime_ms);
+    }
+    let deu_a_volta = numero(&cauda, "total_emitted").saturating_sub(desde) > ANEL_DO_LOG;
 
     let (i, l) = (inicio - origem, lancamento - origem);
     let (fim_da_carga, fim) = (l + CARGA, l + CARGA + DEPOIS);
-    let tcp = tcp.amostras();
+    let tcp = sondas.tcp.amostras();
     for (canal, amostras) in [("serial", &serial), ("tcp", &tcp)] {
         println!("  [{canal}] antes:   {}", resumir(amostras, i, l, l));
         println!(
@@ -556,14 +916,73 @@ fn cenario(
     }
     gravar_amostras(c, i, l, fim, &[("serial", &serial), ("tcp", &tcp)])?;
     println!(
-        "  [entrada] o agente 3 pelo TCP, {:.1} s depois do lancamento: {} em {:.1} s",
+        "  [entrada] o agente 3 pelo TCP, {:.1} s depois do lancamento: {} em {:.1} s{}",
         ENTRADA_DEPOIS.as_secs_f64(),
         match &entrou {
             Ok(()) => "entrou".to_string(),
             Err(e) => format!("nao entrou ({e})"),
         },
-        entrou_em.as_secs_f64()
+        entrou_em.as_secs_f64(),
+        if c.titulares > 1 && c.filhos > 0 {
+            " (titular da carga tambem: o primeiro pedido pode ouvir RATE_LIMIT)"
+        } else {
+            ""
+        }
     );
+    // As outras tarefas do executor: o pulso, pelo log, e a barra, pelo
+    // relógio dela.
+    let carga_ms = CARGA.as_millis() as u64;
+    let atrasos = atrasos_do_pulso(
+        &sondas.pulsos,
+        ligado_ms.saturating_sub(ANTES.as_millis() as u64),
+        ligado_ms + carga_ms + DEPOIS.as_millis() as u64,
+    );
+    if atrasos.is_empty() {
+        println!("  [pulso] nenhum pulso visto no cenario (um por minuto)");
+    }
+    for (em, atraso) in atrasos {
+        let na_carga = (ligado_ms..ligado_ms + carga_ms).contains(&em);
+        println!(
+            "  [pulso] em {em} ms, {atraso} ms depois do minuto{}",
+            if na_carga { " (na carga)" } else { "" }
+        );
+    }
+    match &sondas.barra {
+        Some(barra) => {
+            let amostras = barra.amostras();
+            let atraso = |de, ate| match atraso_da_barra(&amostras, de, ate) {
+                Some(s) => format!("{s} s"),
+                None => "sem leitura".to_string(),
+            };
+            println!(
+                "  [barra] o relogio desenhado atras do tempo ligado, no maximo: antes {}, durante {}, depois {}",
+                atraso(i, l),
+                atraso(l, fim_da_carga),
+                atraso(fim_da_carga, fim)
+            );
+        }
+        None => println!("  [barra] sem a leitura da barra"),
+    }
+    if c.filhos > 0 {
+        let contas: Vec<(u64, ContaDoFilho)> = linhas
+            .iter()
+            .filter_map(|l| conta_do_filho(l.split_once(" ms: ")?.1))
+            .collect();
+        if deu_a_volta && contas.len() as u64 != c.filhos * c.titulares {
+            println!(
+                "  [integridade] nao conferida: o log deu a volta no cenario, e so {} filhos ainda dizem a conta",
+                contas.len()
+            );
+        } else {
+            let conferida = integridade(
+                c,
+                &contas,
+                depois.pedidos_nativos.saturating_sub(antes.pedidos_nativos),
+                depois.pela_taxa.saturating_sub(antes.pela_taxa),
+            )?;
+            println!("  [integridade] {conferida}");
+        }
+    }
     let segundos = CARGA.as_secs_f64();
     println!(
         "  [kernel] {:.0} pedidos dos processos/s; {:.0} ALLOW/s e {:.0} RATE_LIMIT/s no gate (todos os titulares); {} avancos do executor; {} bytes perdidos na entrada",
@@ -611,13 +1030,36 @@ pub(crate) fn disponibilidade(arch: Arquitetura, release: bool) -> Result<ExitCo
             std::thread::sleep(Duration::from_millis(200));
         }
         let origem = Instant::now();
-        let mut lancador = AgenteNaPorta::conectar(arch, 1)?;
-        lancador
-            .fluxo
-            .set_read_timeout(Some(PRAZO))
-            .map_err(|e| format!("disponibilidade: o prazo da porta 1: {e}"))?;
-        armazem_compartilhado(&mut lancador)?;
+        // A porta de cada titular da carga: a 1 e, se um cenário tem dois,
+        // a 3.
+        let mut portas = vec![1];
+        if lista.iter().any(|c| c.titulares > 1) {
+            portas.push(PORTA_DO_SEGUNDO);
+        }
+        let mut lancadores = Vec::new();
+        for porta in portas {
+            let lancador = AgenteNaPorta::conectar(arch, porta)?;
+            lancador
+                .fluxo
+                .set_read_timeout(Some(PRAZO))
+                .map_err(|e| format!("disponibilidade: o prazo da porta {porta}: {e}"))?;
+            lancadores.push(lancador);
+        }
+        armazem_compartilhado(&mut lancadores[0])?;
         let tcp = SondaTcp::ligar(arch, origem)?;
+        // A barra é lida se a porta 4 atende; sem ela, o resto mede igual.
+        let barra = match SondaDaBarra::ligar(arch, origem) {
+            Ok(barra) => Some(barra),
+            Err(e) => {
+                println!("[xtask] disponibilidade: sem a leitura da barra ({e})");
+                None
+            }
+        };
+        let mut sondas = Sondas {
+            tcp,
+            barra,
+            pulsos: BTreeMap::new(),
+        };
         let mut feitos = Ok(());
         'repeticoes: for r in 0..repeticoes {
             println!(
@@ -626,13 +1068,18 @@ pub(crate) fn disponibilidade(arch: Arquitetura, release: bool) -> Result<ExitCo
                 arch.nome()
             );
             for c in &lista {
-                if let Err(e) = cenario(&mut m, &mut lancador, &tcp, arch, origem, *c) {
+                if let Err(e) = cenario(&mut m, &mut lancadores, &mut sondas, arch, origem, *c) {
                     feitos = Err(e);
                     break 'repeticoes;
                 }
             }
         }
-        tcp.desligar()?;
+        sondas.tcp.desligar()?;
+        if let Some(barra) = sondas.barra
+            && let Err(e) = barra.desligar()
+        {
+            println!("[xtask] disponibilidade: a leitura da barra parou ({e})");
+        }
         feitos
     })();
     let corte = m.cortar_a_energia();
@@ -684,11 +1131,180 @@ mod testes {
         );
         assert_eq!(c[1].nome(), "girar x3");
         assert_eq!(c[0].nome(), "sem carga");
+        assert!(c.iter().all(|c| c.titulares == 1));
         assert!(cenarios_de("7").is_ok());
         assert!(cenarios_de("8").unwrap_err().contains("passa de 7 filhos"));
         assert!(cenarios_de("g8").unwrap_err().contains("passa de 7 filhos"));
         assert!(cenarios_de("x").unwrap_err().contains("nao e N nem gN"));
         assert!(cenarios_de("1,,2").is_err());
+    }
+
+    /// `N:2` e `gN:2`: os mesmos filhos em cada um de dois titulares — e
+    /// só um ou dois, os agentes 1 e 3; o teto de filhos é o de cada um.
+    #[test]
+    fn os_cenarios_de_dois_titulares() {
+        let c = cenarios_de("2:2, g1:2,3:1").unwrap();
+        let resumo: Vec<(u64, bool, u64)> =
+            c.iter().map(|c| (c.filhos, c.girar, c.titulares)).collect();
+        assert_eq!(resumo, [(2, false, 2), (1, true, 2), (3, false, 1)]);
+        assert_eq!(c[0].nome(), "pedir x2 em 2 titulares");
+        assert_eq!(c[1].nome(), "girar x1 em 2 titulares");
+        assert_eq!(c[2].nome(), "pedir x3");
+        for errado in ["2:3", "2:0", "2:x", "2:"] {
+            assert!(
+                cenarios_de(errado).unwrap_err().contains("titulares"),
+                "{errado}"
+            );
+        }
+        assert!(
+            cenarios_de("8:2")
+                .unwrap_err()
+                .contains("passa de 7 filhos")
+        );
+        assert!(cenarios_de("x:2").unwrap_err().contains("nao e N nem gN"));
+    }
+
+    /// A linha do fim de um filho do `incansavel`; as do pai, a da falha e a
+    /// de um filho que não diz as respostas não são a conta de um filho.
+    #[test]
+    fn a_conta_de_um_filho() {
+        assert_eq!(
+            conta_do_filho(
+                "incansavel 57: 120 pedidos, 120 respostas, 20 ALLOW, 100 RATE_LIMIT, de 10 a 20 ms"
+            ),
+            Some((
+                57,
+                ContaDoFilho {
+                    pedidos: 120,
+                    respostas: 120,
+                    permitidos: 20,
+                    pela_taxa: 100
+                }
+            ))
+        );
+        for outra in [
+            "incansavel: 2 filhos, modo pedir, de 1 a 2 ms",
+            "incansavel: os 2 filhos acabaram",
+            "incansavel 57: a resposta do pedido 9 veio com o id Some(8)",
+            "incansavel 57: ouviu DENY_CONTAINED (-32003)",
+            "incansavel 57: 120 pedidos, 20 ALLOW, 100 RATE_LIMIT, de 10 a 20 ms",
+        ] {
+            assert_eq!(conta_do_filho(outra), None, "{outra}");
+        }
+    }
+
+    /// A conferência da carga: as contas dos filhos contra as do kernel.
+    #[test]
+    fn a_integridade_da_carga() {
+        let c = Cenario {
+            filhos: 2,
+            girar: false,
+            titulares: 2,
+        };
+        let f = |pedidos: u64, permitidos: u64| ContaDoFilho {
+            pedidos,
+            respostas: pedidos,
+            permitidos,
+            pela_taxa: pedidos - permitidos,
+        };
+        let contas = [(1, f(10, 2)), (2, f(20, 5)), (3, f(30, 3)), (4, f(40, 4))];
+        // Cem pedidos dos filhos e o relógio de cada pai: 102.
+        let i = integridade(c, &contas, 102, 86).unwrap();
+        assert_eq!(
+            (i.filhos, i.pedidos, i.permitidos, i.pela_taxa),
+            (4, 100, 14, 86)
+        );
+        assert_eq!(i.taxa_a_mais, 0);
+        // As recusas pela taxa além das que os filhos ouviram ficam ditas, e
+        // não reprovam: o agente novo divide o balde.
+        let i = integridade(c, &contas, 102, 87).unwrap();
+        assert_eq!(i.taxa_a_mais, 1);
+        // Mais pedidos atendidos que os processos fizeram: um atendido duas
+        // vezes.
+        assert!(
+            integridade(c, &contas, 103, 86)
+                .unwrap_err()
+                .contains("duas vezes")
+        );
+        // Menos pedidos atendidos que os processos fizeram: perdido.
+        assert!(
+            integridade(c, &contas, 101, 86)
+                .unwrap_err()
+                .contains("perdido")
+        );
+        // Menos recusas pela taxa que as que os filhos ouviram.
+        assert!(integridade(c, &contas, 102, 85).is_err());
+        // Um filho que não disse a conta: o que parou numa resposta trocada.
+        assert!(
+            integridade(c, &contas[..3], 102, 86)
+                .unwrap_err()
+                .contains("3 filhos")
+        );
+        // Um pedido sem resposta.
+        let mut sem = contas;
+        sem[1].1.respostas = 19;
+        assert!(
+            integridade(c, &sem, 102, 86)
+                .unwrap_err()
+                .contains("o filho 2")
+        );
+        // Uma resposta que não foi ALLOW nem RATE_LIMIT.
+        let mut outra = contas;
+        outra[2].1.permitidos = 2;
+        assert!(
+            integridade(c, &outra, 102, 86)
+                .unwrap_err()
+                .contains("o filho 3")
+        );
+    }
+
+    /// Os pulsos do log, e o atraso de cada um sobre o minuto.
+    #[test]
+    fn os_pulsos_do_log() {
+        let r = concat!(
+            r#"{"records":["#,
+            r#"{"seq":3,"uptime_ms":60010,"level":"debug","subsystem":"pulso","message":"vivo ha 60010 ms"},"#,
+            r#"{"seq":4,"uptime_ms":61000,"level":"info","subsystem":"agent","message":"o pulso de outro"},"#,
+            r#"{"seq":9,"uptime_ms":120350,"level":"debug","subsystem":"pulso","message":"vivo ha 120350 ms"},"#,
+            r#"{"seq":15,"uptime_ms":240400,"level":"debug","subsystem":"pulso","message":"vivo ha 240400 ms"}"#,
+            r#"],"total_emitted":15}"#
+        );
+        let pulsos: BTreeMap<u64, u64> = pulsos_de(r).into_iter().collect();
+        assert_eq!(pulsos.len(), 3);
+        // De 60,01 s a 120,35 s: 340 ms além do minuto. De 120,35 s a
+        // 240,4 s há um pulso que o log não mostrou: não é intervalo.
+        assert_eq!(atrasos_do_pulso(&pulsos, 0, u64::MAX), [(120_350, 340)]);
+        // Só os que caíram na janela.
+        assert!(atrasos_do_pulso(&pulsos, 0, 120_350).is_empty());
+    }
+
+    /// O relógio da barra no `ui.tree`, e o atraso dele sobre o tempo
+    /// ligado.
+    #[test]
+    fn o_relogio_da_barra() {
+        let r = r#"{"result":{"children":[{"id":5,"role":"text","label":"tempo ligado","value":"ligado 1:02:03","children":[]}]}}"#;
+        assert_eq!(segundos_da_barra(r), Some(3723));
+        assert_eq!(segundos_da_barra(r#"{"result":{"children":[]}}"#), None);
+        assert_eq!(segundos_da_barra(r#""value":"ligado 1:02""#), None);
+        let a = |saiu: u64, uptime_ms: u64, mostrado: Option<u64>| AmostraDaBarra {
+            saiu: ms_(saiu),
+            uptime_ms,
+            mostrado,
+        };
+        let amostras = [
+            a(0, 10_500, Some(10)),
+            a(500, 11_000, Some(10)),
+            a(1_000, 13_900, Some(11)),
+            a(1_500, 14_200, None),
+            a(1_600, 15_000, Some(16)),
+        ];
+        // Treze segundos ligados com o relógio em onze: dois atrás. O
+        // relógio redesenhado entre as duas leituras não fica à frente.
+        assert_eq!(atraso_da_barra(&amostras, ms_(0), ms_(2_000)), Some(2));
+        assert_eq!(atraso_da_barra(&amostras, ms_(0), ms_(1_000)), Some(1));
+        assert_eq!(atraso_da_barra(&amostras, ms_(1_600), ms_(2_000)), Some(0));
+        // Sem barra, nada.
+        assert_eq!(atraso_da_barra(&amostras, ms_(1_500), ms_(1_600)), None);
     }
 
     /// Sem carga: a mediana, o p99 e o maior são os da janela, e o silêncio

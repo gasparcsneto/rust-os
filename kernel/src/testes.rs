@@ -32,6 +32,7 @@ mod aviso;
 mod coleta;
 mod enlace;
 mod fluxo;
+mod orcamento;
 mod pareamento;
 mod recolhimento;
 mod sdk;
@@ -32426,7 +32427,9 @@ fn esperar_ate(mut condicao: impl FnMut() -> bool, teto_em_ticks: u64) -> Result
             return Ok(());
         }
         // Na suíte não há executor: quem espera um processo atende os
-        // pedidos dele ao registro, como a tarefa `programas` atenderia.
+        // pedidos dele ao registro, como a tarefa `programas` atenderia —
+        // uma vez do orçamento de produção por volta, e a condição e o
+        // prazo conferidos entre uma vez e a outra.
         crate::nativo::atender_pendentes();
         core::hint::spin_loop();
     }
@@ -38749,6 +38752,50 @@ static CASOS: &[Caso] = &[
         f: recolhimento::dois_coletores,
     },
     Caso {
+        nome: "orcamento: a fila anda em ordem, cada pedido uma vez, atraves das vezes",
+        f: orcamento::em_ordem,
+    },
+    Caso {
+        nome: "orcamento: o fio que morre com o pedido na fila entre duas vezes",
+        f: orcamento::o_que_morre_na_fila,
+    },
+    Caso {
+        nome: "orcamento: o suspenso de um processo vivo sai na vez, com a fila cheia, uma vez",
+        f: orcamento::o_suspenso_vivo,
+    },
+    Caso {
+        nome: "orcamento: com a fila sempre cheia, a tarefa cede a cada vez",
+        f: orcamento::sempre_cheia,
+    },
+    Caso {
+        nome: "orcamento: o pedido que chega logo depois da vez fica para a seguinte",
+        f: orcamento::logo_depois,
+    },
+    Caso {
+        nome: "orcamento: o suspenso pronto sai na vez seguinte, com a fila cheia",
+        f: orcamento::o_suspenso,
+    },
+    Caso {
+        nome: "orcamento: com a fila vazia, a tarefa estaciona, e o pedido a acorda",
+        f: orcamento::estaciona_com_a_fila_vazia,
+    },
+    Caso {
+        nome: "orcamento: o tempo e a conta da vez",
+        f: orcamento::o_tempo,
+    },
+    Caso {
+        nome: "orcamento: o laco da tarefa com os processos de um titular pedindo",
+        f: orcamento::o_laco_com_carga,
+    },
+    Caso {
+        nome: "orcamento: os processos de dois titulares pedem ao mesmo tempo",
+        f: orcamento::dois_titulares,
+    },
+    Caso {
+        nome: "orcamento: as recusas pela taxa, sob o orcamento",
+        f: orcamento::pela_taxa,
+    },
+    Caso {
         nome: "arch: dormir parado acorda com as interrupcoes mascaradas",
         f: arch_dormir_parado_acorda_mascarado,
     },
@@ -42921,8 +42968,9 @@ fn rede_as_tarefas_acordam_pelo_evento() -> Resultado {
 
         // A tarefa dos programas, com um pedido suspenso de um fio que não
         // existe — que ela larga, sem executar, quando a espera acaba.
-        // A fila de pedidos vazia, para a tarefa só ter o suspenso.
-        crate::nativo::atender_pendentes();
+        // A fila de pedidos vazia, para a tarefa só ter o suspenso: as vezes
+        // do orçamento que precisar.
+        crate::nativo::esvaziar_de_teste();
         let espera = leitura_suspensa(quem, conexao, 10_000)
             .map_err(|_| "a leitura do processo nao suspendeu")?;
         crate::nativo::suspender_de_teste(7_299_999, "{}", espera);

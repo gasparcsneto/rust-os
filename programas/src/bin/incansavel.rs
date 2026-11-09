@@ -34,19 +34,36 @@
 //! Nada aqui concede nada: cada pedido é decidido pelo gate, com o papel de
 //! quem lançou, a cada vez, e limitado pelo manifesto.
 //!
+//! # A resposta é a do pedido
+//!
+//! Cada filho confere cada resposta: o `id` de cada pedido é dele só — o
+//! fio nos bits de cima, a conta dos pedidos nos de baixo ([`id_do_pedido`])
+//! —, e o kernel o ecoa no envelope. Uma resposta com outro `id` — a de um
+//! irmão, a de outro titular, a de um pedido anterior — é a falha que a
+//! carga procura: o filho diz qual e para, com [`TROCADA`]. E conta os
+//! pedidos e as respostas, à parte: a bancada e a suíte comparam a conta de
+//! cada filho com a do kernel — nenhum pedido sem resposta, nenhum atendido
+//! duas vezes.
+//!
 //! # O que diz
 //!
 //! O pai, depois de bifurcar: `incansavel: <n> filhos, modo <modo>, de
 //! <inicio> a <fim> ms`. Cada filho, no fim: `incansavel <fio>: <pedidos>
-//! pedidos, <a> ALLOW, <r> RATE_LIMIT, de <primeiro> a <ultimo> ms`. O pai
-//! espera todos e sai com [`CODIGO`]. Um filho que ouve outra coisa que
-//! `ALLOW` ou `RATE_LIMIT` — o processo contido, a sessão que acabou — diz
-//! o que ouviu e para na hora: a carga nunca gira para sempre sem relógio.
+//! pedidos, <respostas> respostas, <a> ALLOW, <r> RATE_LIMIT, de <primeiro>
+//! a <ultimo> ms`. O pai espera todos e sai com [`CODIGO`]. Um filho que
+//! ouve outra coisa que `ALLOW` ou `RATE_LIMIT` — o processo contido, a
+//! sessão que acabou —, ou a resposta de outro pedido, diz o que ouviu e
+//! para na hora: a carga nunca gira para sempre sem relógio.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 programas::manifesto!("incansavel", "system.read", "fs.read");
+
+use alloc::string::String;
+use core::fmt::Write;
 
 use programas::escreverln;
 use programas::nativo;
@@ -67,6 +84,9 @@ const SEM_FILHO: i64 = 27;
 const FILHO_FALHOU: i64 = 28;
 /// Um filho ouviu outra coisa que `ALLOW` ou `RATE_LIMIT`, e parou.
 const OUVIU_OUTRA: i64 = 29;
+/// Um filho recebeu a resposta de outro pedido — o `id` não era o do
+/// pedido que ele mandou —, e parou.
+const TROCADA: i64 = 30;
 
 /// O pedido da bancada, no armazém compartilhado: o `operador` o grava e o
 /// lê.
@@ -174,6 +194,8 @@ fn ler_o_pedido() -> Result<Pedido, &'static str> {
 #[derive(Default)]
 struct Conta {
     pedidos: u64,
+    /// As respostas que chegaram — uma por pedido, se nada se perdeu.
+    respostas: u64,
     permitidos: u64,
     pela_taxa: u64,
     /// O `uptime_ms` da primeira e da última resposta que o trouxe.
@@ -181,21 +203,51 @@ struct Conta {
     ultimo_ms: u64,
     /// Ouviu outra coisa que `ALLOW` ou `RATE_LIMIT`: o código.
     outra: Option<i64>,
+    /// Recebeu a resposta de outro pedido.
+    trocada: bool,
 }
 
-/// Um `system.uptime`, contado em `c`: `Some(true)` quando a hora passou de
-/// `fim_ms`, `Some(false)` para seguir, `None` para parar — ouviu outra
-/// coisa que `ALLOW` ou `RATE_LIMIT`, e disse o quê.
-fn um_pedido(c: &mut Conta, fim_ms: u64) -> Option<bool> {
+/// O `id` do pedido `n` do fio `fio`: o fio nos bits de cima, a conta nos
+/// de baixo — único entre todos os processos da carga. O do
+/// `nativo::pedir` não serve aqui: o contador dele é da memória do
+/// processo, e o `bifurcar` o copia igual para cada filho.
+fn id_do_pedido(fio: u64, n: u64) -> u64 {
+    (fio << 32) | (n & 0xffff_ffff)
+}
+
+/// Um `system.uptime` do fio `fio`, contado em `c`: `Some(true)` quando a
+/// hora passou de `fim_ms`, `Some(false)` para seguir, `None` para parar —
+/// ouviu outra coisa que `ALLOW` ou `RATE_LIMIT`, ou a resposta de outro
+/// pedido, e disse o quê.
+fn um_pedido(c: &mut Conta, fio: u64, fim_ms: u64) -> Option<bool> {
     c.pedidos += 1;
-    let r = match nativo::pedir("system.uptime", |_| Ok(())) {
+    let id = id_do_pedido(fio, c.pedidos);
+    let mut linha = String::new();
+    let _ = write!(
+        linha,
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"system.uptime","params":{{}}}}"#
+    );
+    let r = match nativo::pedir_cru(linha.as_bytes()) {
         Ok(r) => r,
         Err(e) => {
-            escreverln!("incansavel {}: o pedido devolveu {}", sistema::id(), e);
+            escreverln!("incansavel {}: o pedido devolveu {}", fio, e);
             c.outra = Some(e);
             return None;
         }
     };
+    c.respostas += 1;
+    // O kernel ecoa o `id` do pedido: outro é a resposta de outro pedido.
+    let ecoado = r.envelope().member("id").and_then(|v| v.as_u64());
+    if ecoado != Some(id) {
+        escreverln!(
+            "incansavel {}: a resposta do pedido {} veio com o id {:?}",
+            fio,
+            id,
+            ecoado
+        );
+        c.trocada = true;
+        return None;
+    }
     match r.resultado() {
         Ok(resultado) => {
             c.permitidos += 1;
@@ -216,7 +268,7 @@ fn um_pedido(c: &mut Conta, fim_ms: u64) -> Option<bool> {
         Err(recusa) => {
             escreverln!(
                 "incansavel {}: ouviu {} ({})",
-                sistema::id(),
+                fio,
                 recusa.motivo.unwrap_or("?"),
                 recusa.codigo
             );
@@ -227,8 +279,9 @@ fn um_pedido(c: &mut Conta, fim_ms: u64) -> Option<bool> {
 }
 
 /// A vida de um filho: pede — ou gira, e olha o relógio de tempos em
-/// tempos — até `fim_ms`, e diz quanto pediu.
+/// tempos — até `fim_ms`, e diz quanto pediu e quanto recebeu.
 fn filho(modo: Modo, fim_ms: u64) -> i64 {
+    let fio = sistema::id() as u64;
     let mut c = Conta::default();
     let mut x = 0u64;
     loop {
@@ -237,21 +290,24 @@ fn filho(modo: Modo, fim_ms: u64) -> i64 {
                 x = core::hint::black_box(x.wrapping_add(1));
             }
         }
-        // Passou da hora, ou ouviu outra coisa: para.
-        if um_pedido(&mut c, fim_ms) != Some(false) {
+        // Passou da hora, ouviu outra coisa ou recebeu outra resposta: para.
+        if um_pedido(&mut c, fio, fim_ms) != Some(false) {
             break;
         }
     }
     escreverln!(
-        "incansavel {}: {} pedidos, {} ALLOW, {} RATE_LIMIT, de {} a {} ms",
-        sistema::id(),
+        "incansavel {}: {} pedidos, {} respostas, {} ALLOW, {} RATE_LIMIT, de {} a {} ms",
+        fio,
         c.pedidos,
+        c.respostas,
         c.permitidos,
         c.pela_taxa,
         c.primeiro_ms,
         c.ultimo_ms
     );
-    if c.outra.is_some() {
+    if c.trocada {
+        TROCADA
+    } else if c.outra.is_some() {
         OUVIU_OUTRA
     } else {
         DO_FILHO

@@ -260,6 +260,107 @@ do código da política — a mesma tabela que o agente lê. `pedir` só
 devolve erro de mecanismo quando o pedido nem chegou a ser pedido: ponteiro
 inválido, pedido grande demais.
 
+### A fila e a vez da tarefa `programas`
+
+`pedir` deixa o pedido no fio e o id do fio numa fila; a tarefa
+`programas` do executor a atende. O executor é cooperativo — a tarefa o
+divide com o canal do agente, o enlace, o pulso, o console e a barra —, e
+por isso ela atende em vezes: cada vez tira da fila no máximo o orçamento
+da vez (`nativo::ORCAMENTO_DA_VEZ`: 16 pedidos ou 2 ms, o que acabar
+antes, e nunca menos de um), executa de novo os suspensos cuja espera
+acabou, e cede.
+
+- **A ordem**: a da chegada. O orçamento é conferido antes de tirar o
+  próximo id, e o tempo é o da vez inteira, desde o primeiro: o que não
+  coube fica na fila, no lugar, para a vez seguinte. Um pedido nunca é
+  cortado no meio — o tempo corta a vez depois do pedido que passou dele.
+- **Uma vez cada**: o pedido mora no fio, e só sai de "enfileirado" para
+  "em curso" uma vez, sob a trava do escalonador; um id repetido na fila,
+  ou o de um fio que morreu com o pedido nela, é largado sem chegar ao
+  gate — e conta no orçamento, como o atendido e o recusado pela taxa,
+  que custa quase o mesmo.
+- **Os suspensos**: executados de novo em toda vez, com a fila cheia ou
+  vazia — no máximo um por fio, cada um uma vez, sem suspender de novo.
+- **O ceder**: sempre, depois de cada vez, e não só quando o orçamento
+  acaba: a vez que esvaziou a fila emendaria noutra no pedido que
+  chegasse logo depois. As tarefas acordadas durante a vez rodam antes da
+  seguinte. Com a fila vazia, a tarefa estaciona até um pedido a acordar.
+- **Quem atende**: só a tarefa, no executor — `nativo::servir()`, lançado
+  uma vez pelo `main.rs` — e, na suíte, que não tem a tarefa, quem espera
+  um processo (`atender_pendentes`, que só existe nela), uma vez do mesmo
+  orçamento por volta. O `cargo xtask invariantes` confere que os nomes
+  que atendem a fila não saem do `nativo.rs`, que o `servir()` é o laço
+  de `servir_com` com o orçamento de produção, lançado uma vez, e que o
+  orçamento é finito.
+- **O que não muda**: o gate, a taxa, a autoridade, a auditoria. O
+  orçamento escolhe quando um pedido é atendido, nunca o que ele decide.
+
+**A escolha, pela medida** (9/11/2026). A bancada `cargo xtask
+disponibilidade`, com a carga `0,g2,1,2,3,2:2,0` — sem carga, dois
+processos só girando (o controle), um, dois e três processos de um titular
+pedindo sem parar, e dois em cada um de dois titulares —, 3 vCPUs (um
+núcleo do hospedeiro livre) e uma medida temporária, nunca commitada, da
+vez da tarefa e da fila de prontas do executor. A varredura, no x86_64 em
+`release`, contra o código de antes (`5b44552`), com dois processos
+pedindo e com dois titulares:
+
+| Orçamento | p99 da serial / do TCP (ms) | a vez, p99 (pedidos, no máximo) | pedidos/s |
+|---|---|---|---|
+| antes: a vez até esvaziar a fila | 112 / 118 · 501 / 502 | 98 ms (863) · 498 ms (2 679) | 4 821 · 4 853 |
+| só ceder | 114 / 107 · 301 / 301 | 98 ms (914) · 524 ms (3 112) | 4 981 · 5 689 |
+| 1 pedido | 24 / 22 · 34 / 34 | 0,8 ms (1) · 1,5 ms (1) | 4 977 · 4 795 |
+| 4 pedidos | 42 / 23 · 51 / 60 | 3,1 ms (4) · 4,1 ms (4) | 4 890 · 4 856 |
+| 16 pedidos | 30 / 28 · 22 / 24 | 8,2 ms (16) · 12,3 ms (16) | 5 198 · 5 798 |
+| 64 pedidos | 47 / 40 · 54 / 52 | 24,6 ms (64) · 32,8 ms (64) | 5 047 · 5 167 |
+| 0,5 ms | 17 / 23 · 27 / 40 | 2,0 ms (6) · 2,0 ms (6) | 4 891 · 5 216 |
+| 2 ms | 26 / 22 · 32 / 32 | 4,1 ms (22) · 4,1 ms (26) | 5 184 · 5 232 |
+| 8 ms | 58 / 60 · 26 / 29 | 12,3 ms (84) · 12,3 ms (91) | 4 962 · 5 266 |
+| **16 pedidos ou 2 ms** | 34 / 32 · 31 / 30 | 4,1 ms (16) · 4,1 ms (16) | 5 124 · 5 298 |
+
+O controle, só girando, ficou num p99 de 50–74 ms em todas as rodadas.
+Só ceder não muda nada — as vezes ainda esvaziam a fila. Com o
+orçamento, o canal volta abaixo do controle, e a vazão não cai. A conta
+sozinha deixa a vez crescer com o custo de cada pedido (64 pedidos: a vez
+a 25–33 ms no p99), e o tempo sozinho deixa a vez juntar pedidos baratos
+demais (8 ms: até 91 numa vez, e o canal no dobro com dois processos). Dezesseis pedidos ou
+2 ms: a vez em 4 ms no p99 qualquer que seja o custo do pedido, e a conta
+segura os baratos.
+
+**Antes e depois**, o código de antes (`5b44552`, a mesma bancada) contra
+o orçamento, nas duas arquiteturas, em `release` e em depuração — com
+dois e três processos pedindo, e com dois titulares:
+
+| | p99 da serial (ms) | a vez, p99 | pedidos/s, depois/antes | a maior espera da serial na fila de prontas (ms) |
+|---|---|---|---|---|
+| x86_64, `release` | 116 → 34 · 165 → 50 · 196 → 31 | 98–197 ms → 4,1 ms | 108% · 102% · 102% | 164 → 43 · 312 → 55 · 258 → 50 |
+| aarch64, `release` | 102 → 8 · 166 → 7 · 170 → 8 | 98–197 ms → 4,1 ms | 102% · 104% · 102% | 180 → 9 · 193 → 5 · 320 → 27 |
+| x86_64, depuração | 521 → 119 · 948 → 95 · 844 → 105 | 735–1 057 ms → 12–66 ms | 82% · 79% · 90% | 760 → 165 · 1 056 → 180 · 841 → 292 |
+| aarch64, depuração | 261 → 103 · 293 → 73 · 417 → 86 | 195–531 ms → 12–33 ms | 88% · 88% · 81% | 281 → 116 · 529 → 127 · 537 → 254 |
+
+O pulso, na carga, saiu de 10 a 140 ms depois do minuto (antes, de 70 a
+580 ms); o relógio da barra, no segundo, antes e depois. Em todas as
+rodadas, nas quatro configurações, cada filho do `incansavel` recebeu a
+resposta de cada pedido dele, e o kernel contou exatamente esses e o
+relógio de cada pai — nenhum pedido perdido, atendido duas vezes ou
+trocado.
+
+Em depuração, a vazão sob carga caiu 10 a 21%. Um pedido custa ali uns
+2 ms, e a vez de 2 ms leva de um a três; cada vez custa por volta de 1 ms
+a mais — a cessão, o laço do executor e o `ProximoPedido`, e a própria
+medida, que conta cada avanço —, e o executor que a tarefa devolve vai ao
+canal do agente, ao pulso e à barra (a tarefa passou de 76–83% do
+executor a 70–73%). Com 8 ms, a vazão na depuração do x86_64 ficou em 84
+a 95%, mas a vez foi a 66 ms no p99, com o canal parecido: o orçamento é o
+de `release`, que é o de produção. E um pedido caro não se corta: em
+depuração, a vez de um pedido só chegou a dezenas de milissegundos.
+
+O laço é `nativo::servir_com`, o mesmo na produção e nos casos
+`orcamento:` da suíte, que o rodam num executor de teste. O maior
+silêncio do canal — o maior intervalo sem resposta na bancada — ficou
+em 72–292 ms em `release`, e em 0,3–0,9 s em depuração: a espera da
+serial na fila de prontas do executor é a parte dele que o orçamento
+controla; o resto é o hospedeiro, com os três núcleos do QEMU ocupados.
+
 ### Versão da interface
 
 `system.info` passa a dizer a versão da interface nativa. As chamadas de

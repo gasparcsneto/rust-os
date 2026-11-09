@@ -43,6 +43,30 @@
 //! no evento da conexão, o relógio no prazo, e o pedido é executado de
 //! novo, inteiro, pelo gate — com a autoridade e o programa do fio de
 //! agora —, e a resposta vai ao fio. Ver [`crate::rede::espera`].
+//!
+//! # A vez da tarefa, e o orçamento dela
+//!
+//! O executor é cooperativo: a tarefa `programas` o divide com o canal do
+//! agente, o enlace, o pulso, o console e a barra, e nenhuma delas roda
+//! enquanto ela não devolve o controle. Cada vez dela — cada vez que o
+//! executor a avança — atende no máximo um [`OrcamentoDaVez`] (os
+//! [`PEDIDOS_POR_VEZ`] primeiros da fila, ou os que couberem em
+//! [`TEMPO_POR_VEZ_US`] microssegundos, o que acabar antes) e cede
+//! ([`crate::tarefas::ceder`]): ela vai para o fim da fila de prontas, e as
+//! tarefas acordadas enquanto ela atendia rodam antes da vez seguinte dela,
+//! mesmo com a fila dos pedidos sempre cheia. O pedido que não coube fica
+//! na fila, no lugar dele: nada se perde, nada se repete, e a ordem é a da
+//! chegada. Os suspensos cuja espera acabou são executados de novo a cada
+//! vez, com a fila cheia ou vazia.
+//!
+//! Antes do orçamento, a tarefa atendia a fila até esvaziá-la, e só cedia
+//! quando a encontrava vazia: medido em produção, dois processos de um
+//! titular pedindo sem parar faziam-na atender cadeias de até 1 366 pedidos
+//! numa vez só, segurando o executor até 338 ms, e o canal do agente dos
+//! outros titulares ia de um p99 de 20–35 ms a 231–280 ms. O canal do
+//! agente já cedia depois de cada pedido; a tarefa `programas` passou a
+//! ceder depois de cada vez. Nada muda no que um pedido decide — o mesmo
+//! gate, a mesma taxa, a mesma auditoria —, só quando ele é atendido.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::Waker;
@@ -209,13 +233,111 @@ fn acordar_o_executor() {
     }
 }
 
-/// Atende os pedidos que estão na fila, um de cada vez, e devolve quantos.
+/// Quanto uma vez da tarefa `programas` atende antes de ceder o executor —
+/// ver "A vez da tarefa, e o orçamento dela", no começo do módulo.
 ///
-/// O executor chama quando é acordado; a suíte, que roda no lugar do
-/// executor, chama enquanto espera um processo.
-pub fn atender_pendentes() -> usize {
+/// Conta cada id tirado da fila: o pedido atendido, o que suspendeu, o
+/// recusado — pela taxa, pelo gate, pelo JSON — e o largado, de um fio que
+/// morreu com o pedido na fila. Todo id passa pela tabela de fios, e todo
+/// pedido que chega a um comando, pelo gate inteiro: a recusa pela taxa
+/// custa quase o mesmo que um pedido atendido, e não protege o executor —
+/// ela é servida no mesmo orçamento que os outros.
+///
+/// Os suspensos cuja espera acabou não contam: são executados de novo a
+/// cada vez, todos — no máximo um por fio, e cada um uma vez só, sem
+/// suspender de novo (ver [`retomar_suspensos`]) —, e por isso não passam
+/// fome atrás de uma fila que não esvazia.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrcamentoDaVez {
+    /// Quantos ids, no máximo, uma vez tira da fila. Zero vale um: toda vez
+    /// anda.
+    pub pedidos: usize,
+    /// Por quanto tempo, em nanossegundos pela régua de [`crate::metricas`],
+    /// uma vez segue tirando pedidos. Conferido antes de tirar o próximo, e
+    /// nunca antes do primeiro: toda vez atende ao menos um, e o pedido
+    /// tirado é tratado nesta vez. `u64::MAX`: sem tempo.
+    pub tempo_ns: u64,
+}
+
+impl OrcamentoDaVez {
+    /// O tempo da vez que começou em `inicio` — o contador de
+    /// [`crate::arch::ciclos`] — acabou. A régua só se calibra depois do
+    /// primeiro tique: antes dele, o tempo não acaba, e quem limita a vez é
+    /// a conta dos pedidos.
+    fn venceu(self, inicio: u64) -> bool {
+        self.tempo_ns != u64::MAX
+            && crate::metricas::nanos(crate::metricas::desde(inicio)) >= self.tempo_ns
+    }
+
+    /// Só para a suíte: [`Self::venceu`], para um caso conferir a unidade
+    /// do tempo contra a régua de [`crate::metricas`].
+    #[cfg(feature = "modo-teste")]
+    pub fn venceu_de_teste(self, inicio: u64) -> bool {
+        self.venceu(inicio)
+    }
+}
+
+/// Quantos pedidos uma vez da tarefa `programas` tira da fila, no máximo.
+///
+/// Escolhido pela bancada (`cargo xtask disponibilidade`, 9/11/2026), com
+/// [`TEMPO_POR_VEZ_US`]: na varredura do x86_64 em `release` com 3 vCPUs —
+/// 1, 4, 16 e 64 pedidos sem tempo, e 0,5, 2 e 8 ms sem conta —, de 1 a 16
+/// pedidos o canal do agente sob carga voltou abaixo do controle sem fila,
+/// sem a vazão cair; com 64, a vez foi a 25–33 ms no p99. Dezesseis é a
+/// maior conta com a vez perto de 10 ms no p99, e a de maior vazão; o
+/// tempo limita a vez quando os pedidos custam mais. Os números estão em
+/// `docs/INTERFACE.md`, em *A fila e a vez da tarefa `programas`*.
+pub const PEDIDOS_POR_VEZ: usize = 16;
+
+/// Por quanto tempo, em microssegundos, uma vez da tarefa `programas` segue
+/// tirando pedidos.
+///
+/// Dois milissegundos, pela mesma varredura de [`PEDIDOS_POR_VEZ`]: a conta
+/// sozinha não vê o pedido caro — a depuração, a espera pela trava da
+/// auditoria, o disco —, e com dezesseis pedidos a vez chegou a 12 ms no
+/// p99 em `release`; com o tempo, ela fica em 4 ms no p99, nas duas
+/// arquiteturas, com a mesma vazão. O tempo corta a vez depois do pedido
+/// que passou dele — um pedido nunca é cortado no meio. `u64::MAX`: sem
+/// tempo, só a conta.
+pub const TEMPO_POR_VEZ_US: u64 = 2_000;
+
+/// O orçamento da tarefa `programas`: [`PEDIDOS_POR_VEZ`] e
+/// [`TEMPO_POR_VEZ_US`].
+pub const ORCAMENTO_DA_VEZ: OrcamentoDaVez = OrcamentoDaVez {
+    pedidos: PEDIDOS_POR_VEZ,
+    tempo_ns: TEMPO_POR_VEZ_US.saturating_mul(1_000),
+};
+
+// Toda vez anda: com zero, a tarefa cederia sem atender, e os processos
+// esperariam para sempre.
+const _: () = assert!(PEDIDOS_POR_VEZ >= 1);
+
+/// Uma vez do `orcamento`: atende os pedidos da fila na ordem em que
+/// chegaram, um de cada vez, até o orçamento acabar ou a fila esvaziar; e
+/// executa de novo os suspensos cuja espera acabou. Devolve quantos pedidos
+/// chegaram a um comando — atendidos ou suspensos — mais os suspensos
+/// atendidos; o id largado (o fio que morreu com o pedido na fila) conta no
+/// orçamento, e não aqui.
+///
+/// O orçamento é conferido **antes** de tirar o id seguinte: o que não
+/// coube fica na fila, no lugar dele, para a próxima vez — nenhum id sai da
+/// fila sem ser tratado nesta vez. E [`crate::fios::tomar_pedido`] toma o
+/// pedido de um fio uma vez só: um id repetido na fila, ou o de um fio que
+/// já não espera aquele pedido, é largado sem chegar ao gate.
+pub fn atender_com(orcamento: OrcamentoDaVez) -> usize {
+    let teto = orcamento.pedidos.max(1);
+    let inicio = crate::arch::ciclos();
+    let mut tirados = 0;
     let mut atendidos = 0;
-    while let Some(id) = FILA.desenfileirar() {
+    while tirados < teto {
+        // O tempo, antes de tirar o próximo — e nunca antes do primeiro.
+        if tirados > 0 && orcamento.venceu(inicio) {
+            break;
+        }
+        let Some(id) = FILA.desenfileirar() else {
+            break;
+        };
+        tirados += 1;
         // O fio morreu com o pedido na fila, ou já foi atendido: nada a fazer.
         let Some((pedido, autoridade, programa)) = crate::fios::tomar_pedido(id) else {
             continue;
@@ -242,6 +364,19 @@ pub fn atender_pendentes() -> usize {
         atendidos += 1;
     }
     atendidos + retomar_suspensos()
+}
+
+/// Só para a suíte: uma vez do [`ORCAMENTO_DA_VEZ`] — a mesma da tarefa
+/// `programas`.
+///
+/// Na suíte não há a tarefa: quem espera um processo chama, e volta a
+/// conferir a espera dele depois de cada vez — a chamada acaba, mesmo com
+/// processos pedindo sem parar noutro núcleo. Fora da suíte ela não
+/// existe: a fila só é atendida pela tarefa, no executor (e o `xtask`
+/// confere que os nomes que a atendem não saem deste arquivo).
+#[cfg(feature = "modo-teste")]
+pub fn atender_pendentes() -> usize {
+    atender_com(ORCAMENTO_DA_VEZ)
 }
 
 /// A resposta de um pedido vai ao fio `id`.
@@ -399,13 +534,35 @@ fn responder(
     r
 }
 
-/// A tarefa do executor que atende os pedidos dos processos. Na suíte não
-/// há executor: quem espera um processo atende — ver [`atender_pendentes`].
+/// A tarefa do executor que atende os pedidos dos processos: o laço de
+/// [`servir_com`], com o [`ORCAMENTO_DA_VEZ`]. Na suíte não há executor:
+/// quem espera um processo atende — ver `atender_pendentes`, que só existe
+/// nela —, e um caso roda o mesmo laço num executor de teste.
 #[cfg(not(feature = "modo-teste"))]
 pub async fn servir() {
-    loop {
+    servir_com(ORCAMENTO_DA_VEZ, || true).await
+}
+
+/// O laço da tarefa `programas`, o mesmo na produção e num executor da
+/// suíte: espera um pedido na fila, ou o fim da espera de um suspenso
+/// ([`ProximoPedido`]); atende uma vez do `orcamento` ([`atender_com`]); e
+/// cede ([`crate::tarefas::ceder`]).
+///
+/// Cede **sempre**, e não só quando o orçamento acaba: a vez que esvaziou a
+/// fila e cedesse só então emendaria noutra no pedido que chegasse logo
+/// depois — o `ProximoPedido` o encontraria pronto —, e a cadeia de vezes
+/// voltaria a não ter fim. Cedendo, a tarefa vai para o fim da fila de
+/// prontas do executor: o canal do agente, o enlace, o pulso, o console e a
+/// barra que foram acordados enquanto ela atendia rodam antes da vez
+/// seguinte dela.
+///
+/// Sai quando `seguir`, conferido no começo de cada volta — e por isso logo
+/// depois de cada cessão —, diz que não: na produção, nunca.
+pub async fn servir_com(orcamento: OrcamentoDaVez, seguir: fn() -> bool) {
+    while seguir() {
         ProximoPedido { relogio: None }.await;
-        atender_pendentes();
+        atender_com(orcamento);
+        crate::tarefas::ceder().await;
     }
 }
 
@@ -413,7 +570,8 @@ pub async fn servir() {
 /// suspenso acabou: a pilha acorda a tarefa no evento da conexão, e o
 /// relógio no prazo mais próximo. Na suíte, que não tem a tarefa, um caso
 /// o consulta com o waker dele — ver `consultar_de_teste`, que só existe
-/// no `modo-teste`.
+/// no `modo-teste` —, ou roda o laço de [`servir_com`] num executor de
+/// teste.
 struct ProximoPedido {
     relogio: Option<crate::tarefas::relogio::Dormir>,
 }
@@ -571,7 +729,7 @@ pub fn responder_suspensivel_com_anexo_de_teste(
 }
 
 /// Só para a suíte: guarda como suspenso o pedido `linha` do fio `fio`,
-/// com a espera dele — o que [`atender_pendentes`] faz quando um comando
+/// com a espera dele — o que [`atender_com`] faz quando um comando
 /// suspende.
 #[cfg(feature = "modo-teste")]
 pub fn suspender_de_teste(fio: u64, linha: &str, espera: crate::rede::espera::Espera) {
@@ -625,6 +783,34 @@ pub fn responder_com_anexo_de_teste(
 #[cfg(feature = "modo-teste")]
 pub fn enfileirar_de_teste(id: u64) -> bool {
     FILA.enfileirar(id).is_ok()
+}
+
+/// Só para a suíte: põe na fila o fio `id`, como `pedir` põe, e acorda
+/// quem a espera — para dar à tarefa uma fila que não esvazia sem um
+/// processo de verdade. O id de um fio que não existe é largado sem chegar
+/// ao gate, e conta no orçamento da vez como qualquer outro. Falso se a
+/// fila estava cheia.
+#[cfg(feature = "modo-teste")]
+pub fn enfileirar_e_acordar_de_teste(id: u64) -> bool {
+    let entrou = FILA.enfileirar(id).is_ok();
+    acordar_o_executor();
+    entrou
+}
+
+/// Só para a suíte: vezes do [`ORCAMENTO_DA_VEZ`] até a fila esvaziar — ao
+/// menos uma, com os suspensos dela —, para o caso que precisa da fila
+/// vazia. Devolve quantos foram atendidos. Com teto: um processo que pede
+/// sem parar noutro núcleo não a deixaria esvaziar.
+#[cfg(feature = "modo-teste")]
+pub fn esvaziar_de_teste() -> usize {
+    let mut atendidos = 0;
+    for _ in 0..FILA.capacidade() {
+        atendidos += atender_pendentes();
+        if FILA.vazia() {
+            break;
+        }
+    }
+    atendidos
 }
 
 /// Quantos fios estão na fila — para a suíte conferir que um pedido não

@@ -69,7 +69,9 @@ const PASSOS: usize = 12;
 /// fio da suíte dentro de `nativo::atender_pendentes`, servindo os pedidos
 /// dos processos — medido em [`dois_coletores`], com a busca de antes do
 /// cursor: uma chamada durou 569 tiques —, e a espera reprovava com a
-/// condição já cumprida.
+/// condição já cumprida. Desde o orçamento da vez da tarefa `programas`,
+/// cada chamada atende no máximo `nativo::ORCAMENTO_DA_VEZ`, e a espera
+/// confere o prazo entre uma e outra; a segunda conferência fica, como rede.
 fn ate(cond: fn(u64) -> bool, x: u64, erro: &'static str) -> Resultado {
     match esperar_ate(|| cond(x), 600) {
         Err(_) if !cond(x) => Err(erro),
