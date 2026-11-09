@@ -62563,6 +62563,38 @@ fn declaracao_de_consulta(
     Ok(())
 }
 
+/// Os registros do processo `fio` fora das alegações dele — todos menos o
+/// `audit.declare` com a alegação no recurso — em que aparece um dos
+/// `termos`, na janela da auditoria. Copiados com a trava; cada um dito no
+/// log fora dela — o termo, o número e o evento inteiro —, para a falha
+/// dizer o registro, e não só o número dele. Devolve os números.
+fn fora_da_alegacao(fio: u64, termos: &[&str], o_que: &str) -> alloc::vec::Vec<u64> {
+    let do_processo = do_processo(fio);
+    let fora = crate::autorizacao::com_auditoria(|c| {
+        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
+            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
+            .filter_map(|r| {
+                let e = alloc::format!("{:?}", r.evento);
+                let termo = *termos.iter().find(|t| e.contains(**t))?;
+                Some((r.seq, termo, e))
+            })
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .unwrap_or_default();
+    for (seq, termo, e) in &fora {
+        crate::log_error!(
+            "teste",
+            "{} fora da alegacao: {:?} no registro {}: {}",
+            o_que,
+            termo,
+            seq,
+            e
+        );
+    }
+    fora.into_iter().map(|(seq, _, _)| seq).collect()
+}
+
 /// O IC só na alegação: fora das execuções do `audit.declare` do processo
 /// `fio`, nenhum registro dele diz o canister, o método, o evento ou o
 /// nome do gateway — as decisões do gate são sobre destinos, arquivos, a
@@ -62584,19 +62616,7 @@ fn o_ic_so_na_alegacao(fio: u64) -> Resultado {
         "/ola",
         "quem_consulta",
     ];
-    let do_processo = alloc::format!("pelo processo {fio} (");
-    let fora = crate::autorizacao::com_auditoria(|c| {
-        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
-            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
-            .filter(|r| {
-                let e = alloc::format!("{:?}", r.evento);
-                DO_IC.iter().any(|t| e.contains(t))
-            })
-            .map(|r| r.seq)
-            .collect::<alloc::vec::Vec<_>>()
-    })
-    .unwrap_or_default();
+    let fora = fora_da_alegacao(fio, &DO_IC, "o IC");
     if !fora.is_empty() {
         crate::log_error!("teste", "registros com o IC fora da alegacao: {:?}", fora);
         return Err("o IC apareceu num registro do processo fora da alegacao");
@@ -65857,19 +65877,7 @@ fn o_valor_so_na_alegacao(fio: u64) -> Resultado {
         "icrc1_balance_of",
         "notify_mint_cycles",
     ];
-    let do_processo = alloc::format!("pelo processo {fio} (");
-    let fora = crate::autorizacao::com_auditoria(|c| {
-        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
-            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
-            .filter(|r| {
-                let e = alloc::format!("{:?}", r.evento);
-                DO_VALOR.iter().any(|t| e.contains(t))
-            })
-            .map(|r| r.seq)
-            .collect::<alloc::vec::Vec<_>>()
-    })
-    .unwrap_or_default();
+    let fora = fora_da_alegacao(fio, &DO_VALOR, "o valor");
     if !fora.is_empty() {
         crate::log_error!(
             "teste",
@@ -67341,19 +67349,7 @@ fn a_gestao_so_na_alegacao(fio: u64, canisters: &[&str]) -> Resultado {
         MODULO_IMPLANTAVEL_B,
     ];
     da_gestao.extend_from_slice(canisters);
-    let do_processo = alloc::format!("pelo processo {fio} (");
-    let fora = crate::autorizacao::com_auditoria(|c| {
-        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
-            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
-            .filter(|r| {
-                let e = alloc::format!("{:?}", r.evento);
-                da_gestao.iter().any(|t| e.contains(t))
-            })
-            .map(|r| r.seq)
-            .collect::<alloc::vec::Vec<_>>()
-    })
-    .unwrap_or_default();
+    let fora = fora_da_alegacao(fio, &da_gestao, "a gestao");
     if !fora.is_empty() {
         crate::log_error!(
             "teste",
@@ -68856,19 +68852,7 @@ fn o_gestor_so_na_alegacao(fio: u64, canisters: &[&str]) -> Resultado {
         MODULO_DO_GESTOR_DOIS,
         MODULO_DO_GESTOR_TETO,
     ];
-    let do_processo = do_processo(fio);
-    let fora = crate::autorizacao::com_auditoria(|c| {
-        c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .filter(|r| r.evento.detalhe.starts_with(&do_processo))
-            .filter(|r| !(r.evento.metodo == "audit.declare" && !r.evento.recurso.is_empty()))
-            .filter(|r| {
-                let e = alloc::format!("{:?}", r.evento);
-                DO_GESTOR.iter().any(|t| e.contains(t))
-            })
-            .map(|r| r.seq)
-            .collect::<alloc::vec::Vec<_>>()
-    })
-    .unwrap_or_default();
+    let fora = fora_da_alegacao(fio, &DO_GESTOR, "o gestor");
     if !fora.is_empty() {
         crate::log_error!(
             "teste",
