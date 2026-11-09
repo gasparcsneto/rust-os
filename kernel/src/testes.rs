@@ -37983,6 +37983,10 @@ static CASOS: &[Caso] = &[
         f: coleta::o_anel_que_perde_registros_entre_as_tomadas,
     },
     Caso {
+        nome: "coleta: o registro que chega ao teto da auditoria conta os dois bytes do tamanho de cada campo, e nao passa dele",
+        f: coleta::o_registro_que_chega_ao_teto,
+    },
+    Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",
         f: mensagens_cada_transicao_e_um_registro,
     },

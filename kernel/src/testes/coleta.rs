@@ -32,9 +32,13 @@
 //!   desordenam nada, e que o boot seguinte refaz a mesma cadeia;
 //! - que a compactação copia o anel do mesmo jeito — inteiro o que ele tem
 //!   até a gravada na tomada da cópia, medido nela —, e a cadeia continua;
-//! - e que o anel que perde registros entre as duas tomadas da compactação,
+//! - que o anel que perde registros entre as duas tomadas da compactação,
 //!   a que mede e a que copia, deixa a base com a marca até o de antes do
-//!   primeiro copiado, e o boot seguinte a adota.
+//!   primeiro copiado, e o boot seguinte a adota;
+//! - e que o registro que chega ao teto da auditoria não passa dele: com
+//!   eventos de um tamanho escolhido para que o seguinte caiba sem os dois
+//!   bytes do tamanho do campo, e não com eles, a conta do que cabe leva os
+//!   dois bytes.
 //!
 //! Em todos, a auditoria do journal é conferida inteira depois do começo
 //! do caso — cada sequência uma vez, na ordem, as lacunas onde devem estar
@@ -740,4 +744,119 @@ fn a_base_e(primeiro: u64, ate: u64) -> Resultado {
         return Err("a base nao e a marca ate o primeiro copiado, e os copiados ate a gravada");
     }
     Ok(())
+}
+
+/// O método dos registros do caso do teto.
+const NO_TETO: &str = "teste.coleta.teto";
+
+/// O que um evento pode ocupar no conteúdo de um registro, com o tamanho do
+/// campo, para o caso do teto: o teto mais um byte é um número inteiro
+/// deles — 16 385 = 5 × 29 × 113, e 145 = 5 × 29. O caso usa o menor que
+/// cabe o evento de um caractere de detalhe.
+const POR_EVENTO_NO_TETO: [usize; 2] = [113, 145];
+const _: () = {
+    let mut i = 0;
+    while i < POR_EVENTO_NO_TETO.len() {
+        assert!(
+            (persistencia::MAIOR_AUDITORIA_POR_REGISTRO + 1).is_multiple_of(POR_EVENTO_NO_TETO[i])
+        );
+        i += 1;
+    }
+};
+
+/// O registro só de auditoria que chega ao teto. Cada entrada vai no
+/// conteúdo como um campo, com o tamanho na frente, em dois bytes; com
+/// eventos que ocupam, cada um, um divisor do teto mais um byte, o último
+/// que cabe deixa sobrando um byte a menos que o seguinte precisa — ele
+/// caberia sem os dois bytes do tamanho, e não cabe com eles. Cada registro
+/// cheio fica com um evento a menos que isso, no teto menos o que um evento
+/// ocupa mais um byte, e nenhum passa do teto; a auditoria do journal segue
+/// inteira, e a cadeia refeita dele é a da memória.
+///
+/// O tamanho de um evento no conteúdo é medido, e não contado aqui: um
+/// registro com um evento só, de um caractere de detalhe; o detalhe dos do
+/// caso completa o que falta até o tamanho escolhido, um byte por
+/// caractere.
+pub(super) fn o_registro_que_chega_ao_teto() -> Resultado {
+    const TETO: usize = persistencia::MAIOR_AUDITORIA_POR_REGISTRO;
+    persistencia::gravar_auditoria()?;
+    let antes = todos_do_journal()?.len();
+    crate::autorizacao::auditar_do_kernel(NO_TETO, "", politica::Codigo::Allow, "t");
+    persistencia::gravar_auditoria()?;
+    let novos = todos_do_journal()?.split_off(antes);
+    let um_so = match novos.as_slice() {
+        [r] if r.tipo == diario::estado::tipo::AUDITORIA => Some(r),
+        _ => None,
+    };
+    let Some(r) = um_so.filter(|r| persistencia::entradas_de_teste(r).is_ok_and(|e| e.len() == 1))
+    else {
+        crate::log_error!("teste", "{} registros novos", novos.len());
+        return Err("o registro de um evento so nao foi o unico gravado");
+    };
+    let com_um = r.conteudo.len();
+    let Some(por_evento) = POR_EVENTO_NO_TETO.into_iter().find(|&n| n >= com_um) else {
+        crate::log_error!("teste", "o evento de um caractere ocupa {} bytes", com_um);
+        return Err("o evento do caso do teto nao cabe nos tamanhos escolhidos");
+    };
+    let detalhe = "t".repeat(1 + por_evento - com_um);
+    let por_registro = (TETO + 1) / por_evento - 1;
+
+    let desde = persistencia::auditoria_gravada();
+    let antes = todos_do_journal()?.len();
+    let mut ultimo = desde;
+    // Três registros cheios, pelo menos, e menos que um anel: nada sai dele
+    // antes de chegar ao disco.
+    for _ in 0..3 * (por_registro + 1) {
+        ultimo =
+            crate::autorizacao::auditar_do_kernel(NO_TETO, "", politica::Codigo::Allow, &detalhe);
+    }
+    persistencia::gravar_auditoria()?;
+    let novos = todos_do_journal()?.split_off(antes);
+    if novos
+        .iter()
+        .any(|r| r.tipo != diario::estado::tipo::AUDITORIA)
+    {
+        return Err("um registro que nao e so de auditoria no meio do caso do teto");
+    }
+    if let Some(r) = novos.iter().find(|r| r.conteudo.len() > TETO) {
+        crate::log_error!(
+            "teste",
+            "{} bytes de auditoria num registro, com {} por evento",
+            r.conteudo.len(),
+            por_evento
+        );
+        return Err(
+            "um registro levou mais auditoria que o teto: a conta do que cabe sem os dois bytes do tamanho do campo",
+        );
+    }
+    let cheios = novos
+        .iter()
+        .filter(|r| r.conteudo.len() == por_registro * por_evento)
+        .count();
+    if cheios == 0 {
+        crate::log_error!(
+            "teste",
+            "{} registros novos; {} bytes por evento",
+            novos.len(),
+            por_evento
+        );
+        return Err("nenhum registro chegou ao teto: o caso nao passou pela fronteira");
+    }
+    crate::log_info!(
+        "teste",
+        "coleta: {} bytes por evento; {} de {} registros com {} eventos, {} bytes",
+        por_evento,
+        cheios,
+        novos.len(),
+        por_registro,
+        por_registro * por_evento
+    );
+    let gravada = persistencia::auditoria_gravada();
+    if gravada < ultimo {
+        return Err("a auditoria do caso do teto nao foi toda ao journal");
+    }
+    if !seguidos(&do_journal_depois_de(desde)?, desde, gravada)?.is_empty() {
+        return Err("uma lacuna no journal sem o anel ter transbordado");
+    }
+    a_cadeia_do_journal_confere()
 }
