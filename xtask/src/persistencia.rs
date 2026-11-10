@@ -985,6 +985,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: a_auditoria_sobrevive,
     },
     Cenario {
+        nome: "a auditoria sob carga e leitura sobrevive ao corte: o audit.tail segue a cadeia sem pular nem repetir, o audit.verify sempre confere, e o gravado volta igual",
+        rodar: a_auditoria_sob_carga_e_leitura,
+    },
+    Cenario {
         nome: "as mensagens sobrevivem ao corte, nos mesmos ids, estados e versoes, e a epoca continua",
         rodar: as_mensagens_sobrevivem,
     },
@@ -6270,6 +6274,630 @@ fn as_quedas_na_coleta_sob_carga(arch: Arquitetura, artefato: &Artefato) -> Resu
     Ok(relato.join("; "))
 }
 
+// ---------------------------------------------------------------------------
+// A auditoria sob carga e leitura
+// ---------------------------------------------------------------------------
+
+/// Os produtores da carga sobre a auditoria: a porta, o pedido e o que a
+/// resposta traz quando o gate decide o que se espera. Os dois agentes são
+/// `operador`, cada um com o balde da taxa da chave dele, e cada decisão é
+/// um registro da auditoria: a do `agent.ping`, concedido — o `operador`
+/// tem `agent.read`, pelo `observador` —, e a do `audit.head`, recusado —
+/// ele não tem `audit.read`. Pedem sem parar: passando da taxa do papel, a
+/// recusa por taxa também grava — a primeira de cada sequência, e a conta
+/// das outras junto com o pedido seguinte que passa.
+const PRODUTORES: [(u8, &str, &str); 2] = [
+    (1, "agent.ping", r#""result":"#),
+    (2, "audit.head", r#""data":"DENY_PERMISSION""#),
+];
+
+/// A porta de quem acompanha a cadeia: o agente 4. Das quatro portas, só o
+/// papel dele, `sistema`, tem `audit.read` — os agentes 1 a 3 são
+/// `operador`, que não a tem (ver `politica::PADRAO`) —, e a política não
+/// muda para a bancada. O `audit.verify` e o `security.metrics`, que também
+/// pedem permissão de leitura, vão pela serial, que a política dá ao
+/// `sistema` (a linha `serial sistema`).
+const PORTA_DO_LEITOR: u8 = 4;
+
+/// Quantos pedidos que gravam — dos produtores e da serial — podem estar à
+/// frente dos que o leitor já alcançou: ver [`Carga`].
+const FOLGA_DA_CARGA: u64 = 128;
+
+/// Quanto a carga dura, pelo menos — e daí até a hora do corte: ver
+/// [`verificar_ate_o_corte`].
+const CARGA_MINIMA: Duration = Duration::from_secs(5);
+
+/// Quanto a carga dura, no máximo: sem a hora do corte até aqui, o cenário
+/// reprova, dizendo até onde ela chegou.
+const TETO_DA_CARGA: Duration = Duration::from_secs(90);
+
+/// O prazo de cada resposta nos fios da carga: o kernel de depuração, com
+/// quatro conversas ao mesmo tempo, pode passar dos dez segundos que a
+/// conexão tem depois do aperto.
+const PRAZO_DA_CARGA: Duration = Duration::from_secs(30);
+
+/// Quanto o leitor e o laço do `audit.verify` descansam, pelo menos, entre
+/// dois pedidos: cada um faz no máximo cem por segundo, abaixo da taxa do
+/// `sistema` (400 por segundo, rajada de 800). O leitor descansa só depois
+/// de um lote que não encheu — com ele, já alcançou a cabeça. E a serial,
+/// que numera os pedidos a partir de 70 000, não chega no teto da carga aos
+/// 90 000, que a leitura dela pula como respostas do aperto (ver
+/// `ler_resposta`).
+const DESCANSO_DA_LEITURA: Duration = Duration::from_millis(10);
+
+/// O que os fios da carga dividem.
+///
+/// # A folga: por que o leitor não pode ver um buraco
+///
+/// O leitor segue a cadeia com `after` no último registro que leu, e
+/// confere que cada lote começa no seguinte a ele: um registro que falta é
+/// do `audit.tail`, e não do ritmo da carga, porque a carga não deixa o anel
+/// passar por cima do leitor. Um registro só sai do anel depois de
+/// [`CAPACIDADE_DO_ANEL`] anexados depois dele, e os pedidos que gravam —
+/// dos produtores e da serial — só saem com a vez
+/// ([`Carga::esperar_a_vez`]): no máximo [`FOLGA_DA_CARGA`] à frente dos
+/// `alcancados`, os respondidos antes de o leitor mandar uma leitura que
+/// voltou com menos de um lote — e que então trouxe tudo até a cabeça.
+/// Cada pedido grava dois registros, no máximo — a decisão, e a conta das
+/// recusas por taxa de antes dela —, cada leitura do leitor também, e o
+/// resto é do kernel: o NSF lê a auditoria no máximo oito vezes por
+/// segundo. Com o leitor parado pelo prazo inteiro de uma resposta
+/// ([`PRAZO_DA_CARGA`]), são uns quinhentos registros: longe do anel.
+///
+/// # O corte
+///
+/// Sem aviso: os fios pedem até a energia cair. A marca `cortando` só diz a
+/// eles que o erro de E/S que vem é o corte, e não uma falha.
+#[derive(Default)]
+struct Carga {
+    /// A energia vai cair — ver acima.
+    cortando: AtomicBool,
+    /// Um fio reprovou: os outros param, e o corte vem logo.
+    falhou: AtomicBool,
+    /// Os pedidos que gravam, mandados e respondidos.
+    mandados: AtomicU64,
+    respondidos: AtomicU64,
+    /// Dos respondidos, quantos o leitor já alcançou — ver acima.
+    alcancados: AtomicU64,
+    /// O último registro que o leitor leu, e o maior `durable_seq` que ele
+    /// viu numa resposta.
+    lido: AtomicU64,
+    gravado: AtomicU64,
+}
+
+impl Carga {
+    /// A carga acabou: a energia vai cair, ou um fio reprovou.
+    fn acabou(&self) -> bool {
+        self.cortando.load(Ordering::SeqCst) || self.falhou.load(Ordering::SeqCst)
+    }
+
+    /// Espera a vez de mandar um pedido que grava, e a toma — ver
+    /// [`Carga`]. `false` se a carga acabou, ou passou de `limite`, antes.
+    fn esperar_a_vez(&self, limite: Instant) -> bool {
+        loop {
+            if self.acabou() || Instant::now() >= limite {
+                return false;
+            }
+            let alcancados = self.alcancados.load(Ordering::SeqCst);
+            let vez = self
+                .mandados
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |m| {
+                    (m < alcancados + FOLGA_DA_CARGA).then_some(m + 1)
+                });
+            if vez.is_ok() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Um fio reprova: os outros param.
+    fn reprovar<T>(&self, erro: String) -> Result<T, String> {
+        self.falhou.store(true, Ordering::SeqCst);
+        Err(erro)
+    }
+
+    /// Um erro de E/S num fio: depois da marca do corte, é a energia que
+    /// caiu, e o fio acaba com o que fez; antes, reprova.
+    fn fim<T>(&self, feito: T, erro: String) -> Result<T, String> {
+        if self.cortando.load(Ordering::SeqCst) {
+            Ok(feito)
+        } else {
+            self.reprovar(erro)
+        }
+    }
+}
+
+/// A espera que uma recusa por taxa pede — o `retry_after_ms` dela, entre
+/// um milissegundo e um segundo; dez, se não diz —, se a resposta `r` é uma;
+/// `None`, se não é. Pelo `data` do erro, e não pelo `code`: um lote do
+/// `audit.tail` traz o `code` de cada registro, e as recusas por taxa
+/// gravadas estão entre eles.
+fn espera_da_taxa(r: &str) -> Option<Duration> {
+    if !r.contains(r#""data":"RATE_LIMIT""#) {
+        return None;
+    }
+    let ms = super::campo_simples(r, "retry_after_ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10);
+    Some(Duration::from_millis(ms.clamp(1, 1000)))
+}
+
+/// Um lote do `audit.tail`, como o leitor da carga o confere.
+#[derive(Debug, PartialEq)]
+struct LoteDaCauda {
+    /// Cada registro com o `prev` dele — o elo do registro anterior, como o
+    /// kernel o pôs no elo deste —, na ordem em que vieram.
+    registros: Vec<(Rastro, String)>,
+    /// O `durable_seq` da resposta: até onde a cadeia estava no journal.
+    gravado: u64,
+}
+
+/// O lote de uma resposta do `audit.tail` — `Err`, se ela não é de um.
+fn lote_da_cauda(r: &str) -> Result<LoteDaCauda, String> {
+    let gravado = super::campo_simples(r, "durable_seq")
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or_else(|| format!("a resposta nao e a de um audit.tail\n  {r}"))?;
+    if !r.contains(r#"{"seq":"#) {
+        return Ok(LoteDaCauda {
+            registros: Vec::new(),
+            gravado,
+        });
+    }
+    // Os mesmos pedaços que `rastros` lê, um por registro.
+    let anteriores = r
+        .split(r#"{"seq":"#)
+        .skip(1)
+        .map(|p| super::campo_simples(p, "prev").unwrap_or_default());
+    Ok(LoteDaCauda {
+        registros: rastros(r)?.into_iter().zip(anteriores).collect(),
+        gravado,
+    })
+}
+
+/// Confere um lote do leitor da carga contra o último registro que ele já
+/// tinha lido, `anterior` — nenhum, no primeiro lote —: cada registro é o
+/// seguinte ao de antes dele, sem pular nem repetir — nada do que já foi
+/// lido volta —, e o `prev` de cada um é o `link` do de antes. Diz o
+/// primeiro que não confere, e por quê.
+fn conferir_o_lote(anterior: Option<&Rastro>, lote: &[(Rastro, String)]) -> Result<(), String> {
+    let mut antes = anterior.map(|r| (r.seq, r.elo.as_str()));
+    for (r, prev) in lote {
+        if let Some((seq, elo)) = antes {
+            if r.seq <= seq {
+                return Err(format!(
+                    "o audit.tail trouxe o registro {}, que nao vem depois do {seq}: lido de novo, ou fora de ordem",
+                    r.seq
+                ));
+            }
+            if r.seq != seq + 1 {
+                return Err(format!(
+                    "o audit.tail pulou do registro {seq} para o {}",
+                    r.seq
+                ));
+            }
+            if prev != elo {
+                return Err(format!(
+                    "o prev do registro {} nao e o link do {seq}: {prev} / {elo}",
+                    r.seq
+                ));
+            }
+        }
+        antes = Some((r.seq, r.elo.as_str()));
+    }
+    Ok(())
+}
+
+/// O atraso do journal, no `audit_backlog` do `security.metrics`: quantos
+/// registros saíram do anel antes dele neste boot, e o maior atraso dele em
+/// relação à cabeça da auditoria, em registros.
+fn atraso_da_auditoria(r: &str) -> Result<(u64, u64), String> {
+    let atraso = r
+        .split(r#""audit_backlog":{"#)
+        .nth(1)
+        .and_then(|a| a.split('}').next())
+        .ok_or_else(|| format!("o security.metrics nao diz o atraso da auditoria\n  {r}"))?;
+    let numero = |n: &str| -> Result<u64, String> {
+        super::campo_simples(atraso, n)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("o atraso da auditoria nao diz `{n}`: {atraso}"))
+    };
+    Ok((numero("lost")?, numero("max")?))
+}
+
+/// Os lidos que o journal tinha quando o leitor viu `gravado` como o
+/// `durable_seq` de uma resposta: os de número até ele, pelo número.
+///
+/// O `durable` de cada registro é isto mesmo — o número até o
+/// `durable_seq` da resposta —, e o leitor não relê o que leu: o registro
+/// lido antes de o coletor o gravar fica gravado pelo `durable_seq` de uma
+/// resposta seguinte, como o `durable` dele diria nela.
+fn gravados_vistos(lidos: &[Rastro], gravado: u64) -> std::collections::BTreeMap<u64, Rastro> {
+    lidos
+        .iter()
+        .filter(|r| r.seq <= gravado)
+        .map(|r| {
+            (
+                r.seq,
+                Rastro {
+                    duravel: true,
+                    ..r.clone()
+                },
+            )
+        })
+        .collect()
+}
+
+/// O que um produtor ouviu do gate: o que esperava, e a recusa por taxa.
+#[derive(Default)]
+struct Producao {
+    esperadas: u64,
+    pela_taxa: u64,
+}
+
+/// Um produtor da carga — ver [`PRODUTORES`]: o pedido dele pela conexão
+/// `agente`, um depois do outro, cada um com a vez
+/// ([`Carga::esperar_a_vez`]), até a carga acabar. Cada resposta é a
+/// esperada ou uma recusa por taxa; outra reprova.
+fn produzir(
+    carga: &Carga,
+    mut agente: super::AgenteNaPorta,
+    (porta, metodo, esperada): (u8, &str, &str),
+    limite: Instant,
+) -> Result<Producao, String> {
+    let mut feito = Producao::default();
+    while carga.esperar_a_vez(limite) {
+        let r = match agente.pedir(metodo, "{}") {
+            Ok(r) => r,
+            Err(e) => return carga.fim(feito, format!("o produtor da porta {porta}: {e}")),
+        };
+        carga.respondidos.fetch_add(1, Ordering::SeqCst);
+        if r.contains(esperada) {
+            feito.esperadas += 1;
+        } else if espera_da_taxa(&r).is_some() {
+            feito.pela_taxa += 1;
+        } else {
+            return carga.reprovar(format!(
+                "o produtor da porta {porta} ouviu do {metodo} o que nao esperava\n  {r}"
+            ));
+        }
+    }
+    Ok(feito)
+}
+
+/// O que o leitor fez: os registros que leu, seguidos, na ordem; e as
+/// leituras, e quantas vieram com o lote cheio.
+#[derive(Default)]
+struct Acompanhado {
+    lidos: Vec<Rastro>,
+    leituras: u64,
+    cheias: u64,
+}
+
+/// O leitor da carga: segue a cadeia pela conexão `agente` com o
+/// `audit.tail` — `after` no último registro lido, um lote de
+/// [`MAIOR_CAUDA`] — e confere cada lote contra o que já leu
+/// ([`conferir_o_lote`]), até a carga acabar. Para os outros fios, diz o
+/// último lido, o maior `durable_seq` visto e os pedidos alcançados — ver
+/// [`Carga`].
+fn acompanhar(
+    carga: &Carga,
+    mut agente: super::AgenteNaPorta,
+    limite: Instant,
+) -> Result<Acompanhado, String> {
+    let mut feito = Acompanhado::default();
+    while !carga.acabou() && Instant::now() < limite {
+        // Antes de mandar: o que já foi respondido está na auditoria antes
+        // de esta leitura ser atendida.
+        let respondidos = carga.respondidos.load(Ordering::SeqCst);
+        let depois = feito.lidos.last().map_or(0, |r| r.seq);
+        let r = match agente.pedir(
+            "audit.tail",
+            &format!(r#"{{"after":{depois},"count":{MAIOR_CAUDA}}}"#),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return carga.fim(feito, format!("o leitor da porta {PORTA_DO_LEITOR}: {e}"));
+            }
+        };
+        if let Some(espera) = espera_da_taxa(&r) {
+            std::thread::sleep(espera);
+            continue;
+        }
+        let lote = match lote_da_cauda(&r)
+            .and_then(|l| conferir_o_lote(feito.lidos.last(), &l.registros).map(|()| l))
+        {
+            Ok(l) => l,
+            Err(e) => {
+                return carga.reprovar(format!(
+                    "o leitor, com {} registros lidos: {e}",
+                    feito.lidos.len()
+                ));
+            }
+        };
+        feito.leituras += 1;
+        let cheio = lote.registros.len() >= MAIOR_CAUDA;
+        feito
+            .lidos
+            .extend(lote.registros.into_iter().map(|(r, _)| r));
+        if let Some(r) = feito.lidos.last() {
+            carga.lido.store(r.seq, Ordering::SeqCst);
+        }
+        carga.gravado.fetch_max(lote.gravado, Ordering::SeqCst);
+        if cheio {
+            feito.cheias += 1;
+        } else {
+            // O lote trouxe tudo até a cabeça.
+            carga.alcancados.fetch_max(respondidos, Ordering::SeqCst);
+            std::thread::sleep(DESCANSO_DA_LEITURA);
+        }
+    }
+    Ok(feito)
+}
+
+/// Um pedido que grava, pela serial, com a vez ([`Carga::esperar_a_vez`]):
+/// a resposta, ou `None` se a carga acabou antes. A recusa por taxa espera
+/// o que ela pede, e o pedido vai de novo, com outra vez.
+fn pedir_com_a_vez(
+    m: &mut Ligada,
+    carga: &Carga,
+    limite: Instant,
+    metodo: &str,
+) -> Result<Option<String>, String> {
+    while carga.esperar_a_vez(limite) {
+        let r = m.pedir(metodo, "{}")?;
+        carga.respondidos.fetch_add(1, Ordering::SeqCst);
+        match espera_da_taxa(&r) {
+            Some(espera) => std::thread::sleep(espera),
+            None => return Ok(Some(r)),
+        }
+    }
+    Ok(None)
+}
+
+/// O que a serial fez até a hora do corte.
+#[derive(Default)]
+struct Verificado {
+    /// Os `audit.verify` — todos com `ok:true` —, e quantos conferiram o
+    /// anel cheio.
+    verificacoes: u64,
+    do_anel_cheio: u64,
+    /// O maior `durable_seq` que o leitor tinha visto quando a serial
+    /// conferiu que nada saiu do anel antes do journal — ver
+    /// [`gravados_vistos`].
+    gravado: u64,
+    /// O maior atraso do journal em relação à cabeça da auditoria neste
+    /// boot, em registros.
+    maior_atraso: u64,
+    /// Quanto a carga durou, até a hora do corte.
+    duracao: Duration,
+}
+
+/// O laço da serial: um `audit.verify` depois do outro, cada um com a vez
+/// ([`Carga::esperar_a_vez`]), todos com `ok:true`, até a hora do corte — a
+/// carga com pelo menos [`CARGA_MINIMA`]; o leitor um lote além do anel
+/// inteiro, com o anel cheio empurrando o mais velho para fora a cada
+/// registro novo; o journal com registros desse trecho; e um `audit.verify`
+/// que conferiu o anel cheio. Na hora, o `security.metrics`: nenhum
+/// registro saiu do anel antes do journal neste boot. `Ok` também quando um
+/// fio reprovou: ele diz por quê.
+fn verificar_ate_o_corte(
+    m: &mut Ligada,
+    carga: &Carga,
+    inicio: Instant,
+) -> Result<Verificado, String> {
+    let limite = inicio + TETO_DA_CARGA;
+    let mut feito = Verificado::default();
+    loop {
+        let lido = carga.lido.load(Ordering::SeqCst);
+        let gravado = carga.gravado.load(Ordering::SeqCst);
+        if inicio.elapsed() >= CARGA_MINIMA
+            && lido >= (CAPACIDADE_DO_ANEL + MAIOR_CAUDA) as u64
+            && gravado > CAPACIDADE_DO_ANEL as u64
+            && feito.do_anel_cheio > 0
+        {
+            break;
+        }
+        let antes = Instant::now();
+        let Some(r) = pedir_com_a_vez(m, carga, limite, "audit.verify")? else {
+            if carga.falhou.load(Ordering::SeqCst) {
+                return Ok(feito);
+            }
+            return Err(format!(
+                "a carga nao chegou a hora do corte em {} s: o leitor no registro {lido} (de {}), o journal no {gravado} (de mais de {CAPACIDADE_DO_ANEL}), {} audit.verify do anel cheio",
+                TETO_DA_CARGA.as_secs(),
+                CAPACIDADE_DO_ANEL + MAIOR_CAUDA,
+                feito.do_anel_cheio
+            ));
+        };
+        if !r.contains(r#""ok":true"#) {
+            return Err(format!(
+                "o audit.verify falhou sob a carga, depois de {} que conferiram\n  {r}",
+                feito.verificacoes
+            ));
+        }
+        feito.verificacoes += 1;
+        if super::campo_simples(&r, "checked").and_then(|v| v.parse::<usize>().ok())
+            == Some(CAPACIDADE_DO_ANEL)
+        {
+            feito.do_anel_cheio += 1;
+        }
+        // Pelo menos o que o pedido levou: um `audit.verify` que segurasse
+        // a trava do gate pela conta inteira ficaria com ela no máximo
+        // metade do tempo, e a carga anda.
+        std::thread::sleep(antes.elapsed().max(DESCANSO_DA_LEITURA));
+    }
+    // A hora do corte. Um `durable_seq` que passasse por cima de registros
+    // que saíram do anel antes do journal diria gravados os que o journal
+    // marcou como perdidos, numa lacuna. A conta deles anda antes da
+    // gravada (`contar_a_lacuna`, no kernel): o que o leitor viu antes desta
+    // pergunta, ela cobre.
+    feito.gravado = carga.gravado.load(Ordering::SeqCst);
+    let r = pedir_com_a_vez(m, carga, limite, "security.metrics")?
+        .ok_or("a carga acabou antes do security.metrics")?;
+    let (perdidos, maior) = atraso_da_auditoria(&r)?;
+    if perdidos > 0 {
+        return Err(format!(
+            "a auditoria perdeu {perdidos} registros sob a carga: sairam do anel antes do journal (o maior atraso dele foi de {maior})"
+        ));
+    }
+    feito.maior_atraso = maior;
+    feito.duracao = inicio.elapsed();
+    Ok(feito)
+}
+
+/// As conexões da carga, antes dela — o aperto do kernel de depuração leva
+/// centenas de milissegundos, e as portas o fazem uma de cada vez —: os
+/// produtores, na ordem de [`PRODUTORES`], e o leitor, cada uma com o
+/// [`PRAZO_DA_CARGA`].
+fn conectar_a_carga(
+    arch: Arquitetura,
+) -> Result<(Vec<super::AgenteNaPorta>, super::AgenteNaPorta), String> {
+    let conectar = |porta: u8| -> Result<super::AgenteNaPorta, String> {
+        let agente = super::AgenteNaPorta::conectar(arch, porta)?;
+        agente
+            .fluxo
+            .set_read_timeout(Some(PRAZO_DA_CARGA))
+            .map_err(|e| format!("o prazo da porta {porta}: {e}"))?;
+        Ok(agente)
+    };
+    let produtores = PRODUTORES
+        .iter()
+        .map(|&(porta, _, _)| conectar(porta))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((produtores, conectar(PORTA_DO_LEITOR)?))
+}
+
+/// A auditoria sob carga e leitura sobrevive ao corte.
+///
+/// Por alguns segundos, ao mesmo tempo: dois produtores pedem sem parar,
+/// cada pedido uma decisão gravada ([`PRODUTORES`]); um leitor segue a
+/// cadeia pelo `audit.tail`, conferindo cada lote — os números seguidos,
+/// sem pular nem repetir, e o `prev` de cada registro no `link` do anterior
+/// ([`conferir_o_lote`]); e a serial roda o `audit.verify` em laço, todos
+/// com `ok:true`. Com o anel cheio — cada registro novo empurra o mais velho
+/// para fora, com o leitor e o `audit.verify` lendo — e o journal com
+/// registros desse trecho, a energia cai no meio da carga, sem aviso. No
+/// boot seguinte, a persistência de pé, a cadeia se verifica, o anel lido
+/// inteiro não pula nem repete, e cada registro que o leitor viu gravado e
+/// que o anel de agora alcança voltou igual — o mesmo número, o mesmo elo,
+/// o mesmo método —, antes do primeiro registro do boot novo: a cadeia
+/// continua depois do último gravado
+/// ([`conferir_a_coleta_depois_do_corte`]).
+///
+/// # Por que a conferência não depende do ritmo
+///
+/// O que se exige vale em qualquer intercalação dos fios: a folga da carga
+/// ([`Carga`]) não deixa o anel passar por cima do leitor, e então um
+/// buraco no que ele lê é do `audit.tail`; o que ele viu gravado é o que o
+/// `durable_seq` cobria quando a serial conferiu que nada saiu do anel
+/// antes do journal ([`gravados_vistos`]); e a hora do corte é dada pelo
+/// que a carga alcançou — o anel cheio, o journal nele, um `audit.verify`
+/// dele —, e não pelo relógio ([`verificar_ate_o_corte`]).
+fn a_auditoria_sob_carga_e_leitura(
+    arch: Arquitetura,
+    artefato: &Artefato,
+) -> Result<String, String> {
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    // Sem o journal de pé, nada fica gravado, e a carga só acabaria no teto.
+    let conectados = persistencia_de(&mut m).and_then(|p| {
+        if p.estado != "available" {
+            return Err(format!(
+                "a persistencia nao esta de pe antes da carga: {} ({})",
+                p.estado, p.motivo
+            ));
+        }
+        conectar_a_carga(arch)
+    });
+    let (produtores, agente_do_leitor) = match conectados {
+        Ok(c) => c,
+        Err(e) => {
+            m.cortar_a_energia()?;
+            return Err(e);
+        }
+    };
+    let carga = Carga::default();
+    let inicio = Instant::now();
+    let limite = inicio + TETO_DA_CARGA;
+    let (verificado, producoes, leitura, corte) = std::thread::scope(|s| {
+        let carga = &carga;
+        let mut fios = Vec::new();
+        for (agente, p) in produtores.into_iter().zip(PRODUTORES) {
+            fios.push(s.spawn(move || produzir(carga, agente, p, limite)));
+        }
+        let leitor = s.spawn(move || acompanhar(carga, agente_do_leitor, limite));
+        let verificado = verificar_ate_o_corte(&mut m, carga, inicio);
+        if verificado.is_err() {
+            carga.falhou.store(true, Ordering::SeqCst);
+        }
+        carga.cortando.store(true, Ordering::SeqCst);
+        let corte = m.cortar_a_energia();
+        // Cada fio, até o último: um que entrasse em pânico e ficasse para
+        // o fim do escopo derrubaria a bancada inteira.
+        let mut producoes = Vec::new();
+        for fio in fios {
+            producoes.push(
+                fio.join()
+                    .unwrap_or_else(|_| Err("o fio de um produtor entrou em panico".to_string())),
+            );
+        }
+        let leitura = leitor
+            .join()
+            .unwrap_or_else(|_| Err("o fio do leitor entrou em panico".to_string()));
+        (verificado, producoes, leitura, corte)
+    });
+    // O que um fio reprovou vem antes do que a serial diz depois dele: ela
+    // só para quando a carga acaba.
+    let leitura = leitura?;
+    let producoes = producoes.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let verificado = verificado?;
+    corte?;
+    if let Some((_, metodo, _)) = producoes
+        .iter()
+        .zip(PRODUTORES)
+        .find_map(|(p, d)| (p.esperadas == 0).then_some(d))
+    {
+        return Err(format!(
+            "o produtor do {metodo} nao ouviu nenhuma vez o que esperava"
+        ));
+    }
+    let vistos = gravados_vistos(&leitura.lidos, verificado.gravado);
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let conferidos = conferir_a_coleta_depois_do_corte(&mut m, &vistos, false);
+    m.cortar_a_energia()?;
+    let conferidos = conferidos?;
+    if conferidos == 0 {
+        return Err(format!(
+            "nenhum dos {} vistos gravados, ate o {}, ficou ao alcance do anel do boot seguinte",
+            vistos.len(),
+            verificado.gravado
+        ));
+    }
+    let produzido: Vec<String> = producoes
+        .iter()
+        .zip(PRODUTORES)
+        .map(|(p, (porta, metodo, _))| {
+            format!(
+                "{metodo} pela porta {porta}: {} como esperado, {} pela taxa",
+                p.esperadas, p.pela_taxa
+            )
+        })
+        .collect();
+    Ok(format!(
+        "{:.1} s de carga, cortada no meio: o leitor seguiu {} registros em {} leituras ({} com o lote cheio), sem pular nem repetir, cada prev no link do anterior; {} audit.verify com ok:true, {} do anel cheio; {}; nada saiu do anel antes do journal (o maior atraso: {}); dos {} vistos gravados, {conferidos} ao alcance do boot seguinte, de volta iguais, e a cadeia continua e se verifica",
+        verificado.duracao.as_secs_f64(),
+        leitura.lidos.len(),
+        leitura.leituras,
+        leitura.cheias,
+        verificado.verificacoes,
+        verificado.do_anel_cheio,
+        produzido.join("; "),
+        verificado.maior_atraso,
+        vistos.len(),
+    ))
+}
+
 /// Os blocos livres do volume, pelo `fs.stat`.
 fn livres_no_volume(m: &mut Ligada) -> Result<u64, String> {
     let r = m.pedir("fs.stat", r#"{"path":"/armazem"}"#)?;
@@ -7907,5 +8535,263 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
         let fechado = "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{}}\n";
         let e = ate_a_resposta_ou_a_queda(&mut fechado.as_bytes(), 10, limite).unwrap_err();
         assert!(e.contains("fechou"), "{e}");
+    }
+
+    /// Um lote do leitor da carga, de `de` a `ate`: o elo de cada registro
+    /// diz a sequência, como em [`rastro`], e o `prev`, a do anterior.
+    fn lote(de: u64, ate: u64) -> Vec<(Rastro, String)> {
+        (de..=ate)
+            .map(|s| (rastro(s, &format!("e{s}")), format!("e{}", s - 1)))
+            .collect()
+    }
+
+    /// Os lotes seguidos conferem: o primeiro sozinho, de onde o anel
+    /// começar, e cada um depois do último lido — o vazio também.
+    #[test]
+    fn os_lotes_seguidos_conferem() {
+        assert_eq!(conferir_o_lote(None, &lote(1, 128)), Ok(()));
+        assert_eq!(conferir_o_lote(None, &lote(977, 1100)), Ok(()));
+        let ultimo = rastro(128, "e128");
+        assert_eq!(conferir_o_lote(Some(&ultimo), &lote(129, 256)), Ok(()));
+        assert_eq!(conferir_o_lote(Some(&ultimo), &[]), Ok(()));
+    }
+
+    /// O lote que pula, que traz de novo o que já foi lido, que vem fora de
+    /// ordem, ou em que um `prev` não é o `link` do anterior — dentro dele,
+    /// ou entre ele e o último lido —: cada um reprova, e diz o quê. Sem o
+    /// último lido, só o primeiro registro do lote fica sem conferir.
+    #[test]
+    fn o_lote_que_pula_repete_ou_quebra_o_elo() {
+        let ultimo = rastro(128, "e128");
+        let e = conferir_o_lote(Some(&ultimo), &lote(130, 140)).unwrap_err();
+        assert!(e.contains("pulou do registro 128 para o 130"), "{e}");
+        let e = conferir_o_lote(Some(&ultimo), &lote(128, 140)).unwrap_err();
+        assert!(
+            e.contains("o registro 128, que nao vem depois do 128"),
+            "{e}"
+        );
+        let e = conferir_o_lote(Some(&ultimo), &lote(1, 140)).unwrap_err();
+        assert!(e.contains("lido de novo"), "{e}");
+
+        let mut buraco = lote(129, 140);
+        buraco.remove(5);
+        let e = conferir_o_lote(Some(&ultimo), &buraco).unwrap_err();
+        assert!(e.contains("pulou do registro 133 para o 135"), "{e}");
+        let mut repetido = lote(129, 140);
+        repetido.insert(3, repetido[2].clone());
+        let e = conferir_o_lote(Some(&ultimo), &repetido).unwrap_err();
+        assert!(
+            e.contains("o registro 131, que nao vem depois do 131"),
+            "{e}"
+        );
+        let mut trocado = lote(129, 140);
+        trocado.swap(4, 5);
+        let e = conferir_o_lote(Some(&ultimo), &trocado).unwrap_err();
+        assert!(e.contains("pulou do registro 132 para o 134"), "{e}");
+
+        let mut outro_prev = lote(129, 140);
+        outro_prev[6].1 = "outro".to_string();
+        let e = conferir_o_lote(Some(&ultimo), &outro_prev).unwrap_err();
+        assert!(
+            e.contains("o prev do registro 135 nao e o link do 134"),
+            "{e}"
+        );
+        let e = conferir_o_lote(Some(&rastro(128, "outro")), &lote(129, 140)).unwrap_err();
+        assert!(
+            e.contains("o prev do registro 129 nao e o link do 128"),
+            "{e}"
+        );
+
+        let mut primeiro = lote(129, 140);
+        primeiro[0].1 = "qualquer".to_string();
+        assert_eq!(conferir_o_lote(None, &primeiro), Ok(()));
+        let e = conferir_o_lote(None, &outro_prev).unwrap_err();
+        assert!(e.contains("o prev do registro 135"), "{e}");
+    }
+
+    /// Um lote do `audit.tail`, com os campos que o kernel escreve: cada
+    /// registro com o `prev` dele, na ordem, e o `durable_seq`; uma recusa
+    /// por taxa gravada no lote não faz dele uma recusa; o lote vazio; e a
+    /// resposta que não é de um `audit.tail`, que é erro.
+    #[test]
+    fn o_lote_da_cauda_traz_o_prev_e_o_gravado() {
+        let registro = |seq: u64, metodo: &str, duravel: bool| {
+            format!(
+                r#"{{"seq":{seq},"ts_ms":5,"holder":"agent","session":3,"person_session":null,"agent":"agente-1","key":"ab","role":"operador","method":"{metodo}","resource":"","result":"DENY","code":"RATE_LIMIT","params":"00","detail":"taxa do papel esgotada","prev":"e{}","link":"e{seq}","durable":{duravel}}}"#,
+                seq - 1
+            )
+        };
+        let r = format!(
+            r#"{{"jsonrpc":"2.0","id":400002,"result":{{"durable_seq":41,"records":[{},{}]}}}}"#,
+            registro(41, "audit.head", true),
+            registro(42, "agent.ping", false)
+        );
+        let lote = lote_da_cauda(&r).unwrap();
+        assert_eq!(lote.gravado, 41);
+        let lidos: Vec<(u64, &str, &str, &str, bool)> = lote
+            .registros
+            .iter()
+            .map(|(r, prev)| {
+                (
+                    r.seq,
+                    r.metodo.as_str(),
+                    prev.as_str(),
+                    r.elo.as_str(),
+                    r.duravel,
+                )
+            })
+            .collect();
+        assert_eq!(
+            lidos,
+            [
+                (41, "audit.head", "e40", "e41", true),
+                (42, "agent.ping", "e41", "e42", false)
+            ]
+        );
+        assert_eq!(espera_da_taxa(&r), None);
+
+        let vazio = r#"{"jsonrpc":"2.0","id":400003,"result":{"durable_seq":42,"records":[]}}"#;
+        assert_eq!(
+            lote_da_cauda(vazio),
+            Ok(LoteDaCauda {
+                registros: Vec::new(),
+                gravado: 42
+            })
+        );
+        let recusa = r#"{"jsonrpc":"2.0","id":200004,"error":{"code":-32010,"message":"operacao negada pela politica","data":"DENY_PERMISSION"}}"#;
+        let e = lote_da_cauda(recusa).unwrap_err();
+        assert!(e.contains("nao e a de um audit.tail"), "{e}");
+    }
+
+    /// A recusa por taxa diz quanto esperar, entre um milissegundo e um
+    /// segundo — dez, se não diz —; a recusa por permissão e a resposta que
+    /// deu certo não são recusa por taxa.
+    #[test]
+    fn a_recusa_por_taxa_diz_quanto_esperar() {
+        let taxa = |espera: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":400007,"error":{{"code":-32011,"message":"taxa de pedidos do papel esgotada","data":"RATE_LIMIT","explain":{{"outcome":"DENY","reason":"RATE_LIMIT","code":"RATE_LIMIT","resource":"","role":"sistema","decision":null,"recoverable":true,"retry":"retryable"{espera},"next_action":"WAIT_AND_RETRY","message":""}}}}}}"#
+            )
+        };
+        assert_eq!(
+            espera_da_taxa(&taxa(r#","retry_after_ms":20"#)),
+            Some(Duration::from_millis(20))
+        );
+        assert_eq!(espera_da_taxa(&taxa("")), Some(Duration::from_millis(10)));
+        assert_eq!(
+            espera_da_taxa(&taxa(r#","retry_after_ms":90000"#)),
+            Some(Duration::from_secs(1))
+        );
+        let permissao = r#"{"jsonrpc":"2.0","id":200009,"error":{"code":-32010,"message":"operacao negada pela politica","data":"DENY_PERMISSION","explain":{"outcome":"DENY","code":"DENY_PERMISSION"}}}"#;
+        assert_eq!(espera_da_taxa(permissao), None);
+        assert_eq!(
+            espera_da_taxa(r#"{"jsonrpc":"2.0","id":100003,"result":{"pong":true}}"#),
+            None
+        );
+    }
+
+    /// O atraso do journal sai do `audit_backlog` de um `security.metrics`
+    /// — o `max` de outro objeto não conta —, e a resposta sem ele, ou sem
+    /// o que saiu do anel, é erro.
+    #[test]
+    fn o_atraso_da_auditoria_no_security_metrics() {
+        let r = r#"{"jsonrpc":"2.0","id":70012,"result":{"budget":{"control_decisions":9,"audit_waits":{"deferred":0,"ended":0,"waiting_tasks":0,"wait_ms":{"samples":3,"max":77}},"audit_backlog":{"head":3001,"now":120,"max":640,"journal":2881,"lost":0,"share_from":640,"all_wait_from":768,"capacity":1024},"throughput":{}}}}"#;
+        assert_eq!(atraso_da_auditoria(r), Ok((0, 640)));
+        let perdeu = r.replace(r#""lost":0"#, r#""lost":12"#);
+        assert_eq!(atraso_da_auditoria(&perdeu), Ok((12, 640)));
+        let e = atraso_da_auditoria(r#"{"jsonrpc":"2.0","id":70013,"result":{}}"#).unwrap_err();
+        assert!(e.contains("nao diz o atraso"), "{e}");
+        let sem_perdidos = r.replace(r#""lost":0,"#, "");
+        let e = atraso_da_auditoria(&sem_perdidos).unwrap_err();
+        assert!(e.contains("nao diz `lost`"), "{e}");
+    }
+
+    /// O que o leitor viu gravado: os lidos até o `durable_seq` da
+    /// conferência — nenhum, se ele vem antes do primeiro lido —, com o
+    /// `durable` que uma resposta seguinte daria a cada um.
+    #[test]
+    fn os_vistos_gravados_vao_ate_o_durable_seq() {
+        let lidos: Vec<Rastro> = (100..=120)
+            .map(|s| Rastro {
+                duravel: false,
+                ..rastro(s, &format!("e{s}"))
+            })
+            .collect();
+        let vistos = gravados_vistos(&lidos, 110);
+        assert_eq!(
+            vistos.keys().copied().collect::<Vec<u64>>(),
+            (100..=110).collect::<Vec<u64>>()
+        );
+        assert!(
+            vistos
+                .values()
+                .all(|r| r.duravel && r.elo == format!("e{}", r.seq))
+        );
+        assert!(gravados_vistos(&lidos, 99).is_empty());
+        assert_eq!(gravados_vistos(&lidos, 500).len(), 21);
+    }
+
+    /// O erro de E/S de um fio reprova antes da marca do corte — e a carga
+    /// acaba para os outros —; depois dela, é o corte, e o fio acaba com o
+    /// que fez.
+    #[test]
+    fn o_erro_de_um_fio_antes_e_depois_do_corte() {
+        let carga = Carga::default();
+        assert!(!carga.acabou());
+        assert_eq!(carga.fim(7u64, "caiu".into()), Err("caiu".to_string()));
+        assert!(carga.acabou());
+        let cortada = Carga::default();
+        cortada.cortando.store(true, Ordering::SeqCst);
+        assert_eq!(cortada.fim(7u64, "caiu".into()), Ok(7));
+        assert!(!cortada.falhou.load(Ordering::SeqCst));
+    }
+
+    /// A vez da carga, com vários fios pedindo ao mesmo tempo: nunca passa
+    /// da folga sobre os alcançados — nem por um —, anda quando o leitor
+    /// alcança, e acaba com a marca do corte, com um fio reprovado e com o
+    /// limite.
+    #[test]
+    fn a_vez_da_carga_nao_passa_da_folga() {
+        let carga = Carga::default();
+        let limite = Instant::now() + Duration::from_secs(60);
+        // Os mandados, quando chegam a `n` — e mais um pouco, para um fio a
+        // mais aparecer, se passasse.
+        let mandados_ate = |n: u64| {
+            let ate = Instant::now() + Duration::from_secs(10);
+            while carga.mandados.load(Ordering::SeqCst) < n && Instant::now() < ate {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            carga.mandados.load(Ordering::SeqCst)
+        };
+        let (na_folga, alcancada, vezes) = std::thread::scope(|s| {
+            let mut fios = Vec::new();
+            for _ in 0..4 {
+                fios.push(s.spawn(|| {
+                    let mut vezes = 0u64;
+                    while carga.esperar_a_vez(limite) {
+                        vezes += 1;
+                    }
+                    vezes
+                }));
+            }
+            let na_folga = mandados_ate(FOLGA_DA_CARGA);
+            carga.alcancados.store(10, Ordering::SeqCst);
+            let alcancada = mandados_ate(FOLGA_DA_CARGA + 10);
+            carga.cortando.store(true, Ordering::SeqCst);
+            let mut vezes = 0;
+            for fio in fios {
+                vezes += fio.join().unwrap_or(0);
+            }
+            (na_folga, alcancada, vezes)
+        });
+        assert_eq!(na_folga, FOLGA_DA_CARGA);
+        assert_eq!(alcancada, FOLGA_DA_CARGA + 10);
+        assert_eq!(vezes, FOLGA_DA_CARGA + 10);
+
+        let reprovada = Carga::default();
+        assert_eq!(reprovada.reprovar::<()>("x".into()), Err("x".to_string()));
+        assert!(!reprovada.esperar_a_vez(limite));
+        assert!(!Carga::default().esperar_a_vez(Instant::now()));
     }
 }
