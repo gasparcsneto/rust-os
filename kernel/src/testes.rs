@@ -13677,19 +13677,37 @@ fn heap_relatorio_fecha() -> Resultado {
 /// sobe com a alocação que passa dele, e não desce quando ela sai. É a
 /// medida da folga — um retrato de agora não diz quanto o heap já chegou
 /// perto do teto.
+///
+/// Duas coisas deixam o pico abaixo da conta sem defeito nenhum no
+/// alocador, e o caso antigo — um `vec!` do tamanho, de que só se lia o
+/// comprimento — reprovou na CI 476 só em `release`, no x86_64 e no
+/// aarch64: o otimizador pode tirar um pedido cuja memória ninguém lê (ver
+/// [`crate::heap::tentar_alocar`]), e os outros núcleos alocam e devolvem
+/// enquanto o caso roda — uma devolução de outro fio entre o retrato de
+/// antes e o pedido deixa o alocado do pedido abaixo do de antes mais ele.
+/// O pedido vai direto ao alocador, que o otimizador não tira; e a conta
+/// exata vale só na tentativa em que ninguém mais mexeu no heap entre os
+/// dois retratos, o que as contas de alocações e de devoluções do alocador
+/// dizem — o caso tenta de novo até ter uma. Se nenhuma tiver, a última
+/// vale pela folga do pedido: o pico subiu acima do de antes e cobre o
+/// alocado do retrato de depois.
 fn heap_o_pico_e_o_pior_momento() -> Resultado {
-    let antes = crate::heap::estatisticas();
-    if antes.pico < antes.alocado || antes.pico > antes.total {
-        return Err("o pico do heap nao cobre o alocado de agora");
-    }
-    let passa = antes.pico - antes.alocado + 64 * 1024;
-    let pico_durante = {
-        // O pedido pode falhar: um caso de antes que levou o pico perto do
-        // heap inteiro deixa um bloco que passe dele sem lugar. Aí o caso
-        // reprova, com os números — em vez de um pânico que derruba a suíte
-        // (a CI 475).
-        let mut grande = alloc::vec::Vec::new();
-        if grande.try_reserve_exact(passa).is_err() {
+    const TENTATIVAS: u32 = 64;
+    let mut com_outro = 0u32;
+    for tentativa in 1..=TENTATIVAS {
+        let antes = crate::heap::estatisticas();
+        if antes.pico < antes.alocado || antes.pico > antes.total {
+            return Err("o pico do heap nao cobre o alocado de agora");
+        }
+        let passa = antes.pico - antes.alocado + 64 * 1024;
+        let layout =
+            core::alloc::Layout::from_size_align(passa, 16).map_err(|_| "layout invalido")?;
+        // Direto ao alocador, como os outros casos do heap: o pedido pode
+        // falhar — um caso de antes que levou o pico perto do heap inteiro
+        // deixa um bloco que passe dele sem lugar —, e o caso reprova com os
+        // números, em vez de um pânico que derruba a suíte (a CI 475).
+        let bloco = crate::heap::tentar_alocar(layout);
+        if bloco.is_null() {
             crate::log_error!(
                 "teste",
                 "pico {}, alocado {}, total {}, maior bloco livre {}: {} bytes de uma vez",
@@ -13703,27 +13721,69 @@ fn heap_o_pico_e_o_pior_momento() -> Resultado {
                 "o heap nao tem um bloco que passe do pico: um caso de antes levou o pico perto do heap inteiro",
             );
         }
-        grande.resize(passa, 0u8);
         let durante = crate::heap::estatisticas();
-        if durante.pico < antes.alocado + grande.len() {
+        // SAFETY: veio de `tentar_alocar` com este mesmo layout.
+        unsafe { crate::heap::devolver(bloco, layout) };
+        // O caso decide pelas contas do alocador: o pedido dele e a
+        // devolução têm de entrar nelas, com quem mais mexer no heap.
+        if durante.alocacoes <= antes.alocacoes
+            || crate::heap::estatisticas().liberacoes <= durante.liberacoes
+        {
+            return Err("o pedido ou a devolucao do caso nao entrou nas contas do alocador");
+        }
+        let sozinho =
+            durante.alocacoes == antes.alocacoes + 1 && durante.liberacoes == antes.liberacoes;
+        if !sozinho {
+            com_outro += 1;
+            if tentativa < TENTATIVAS {
+                crate::fios::ceder();
+                continue;
+            }
+        }
+        let subiu = if sozinho {
+            // Só o pedido entre os dois retratos: o alocado de depois é o de
+            // antes mais ele, e o pico é esse alocado.
+            durante.alocado >= antes.alocado + passa && durante.pico == durante.alocado
+        } else {
+            // Nenhuma tentativa sem outro núcleo: a folga do pedido.
+            durante.pico > antes.pico && durante.pico >= durante.alocado
+        };
+        if !subiu {
             crate::log_error!(
                 "teste",
-                "pico {} com {} alocados antes e {} a mais",
+                "pico {} -> {}, alocado {} -> {} com {} bytes a mais; {} alocacoes e {} devolucoes entre os retratos",
+                antes.pico,
                 durante.pico,
                 antes.alocado,
-                grande.len()
+                durante.alocado,
+                passa,
+                durante.alocacoes - antes.alocacoes,
+                durante.liberacoes - antes.liberacoes
             );
             return Err("o pico nao subiu com a alocacao que passou dele");
         }
-        durante.pico
-    };
-    // Uma alocação pequena depois que a grande saiu: o pico é o pior
-    // momento, e não o de agora.
-    let _pequena = alloc::boxed::Box::new([0u8; 64]);
-    if crate::heap::estatisticas().pico < pico_durante {
-        return Err("o pico desceu quando a alocacao saiu");
+        // Uma alocação pequena depois que a grande saiu, também direto ao
+        // alocador: o pico é o pior momento, e não o de agora.
+        let pequeno =
+            core::alloc::Layout::from_size_align(64, 16).map_err(|_| "layout invalido")?;
+        let pequena = crate::heap::tentar_alocar(pequeno);
+        let pico_depois = crate::heap::estatisticas().pico;
+        if !pequena.is_null() {
+            // SAFETY: veio de `tentar_alocar` com este mesmo layout.
+            unsafe { crate::heap::devolver(pequena, pequeno) };
+        }
+        if pico_depois < durante.pico {
+            return Err("o pico desceu quando a alocacao saiu");
+        }
+        crate::log_info!(
+            "teste",
+            "o pico do heap conferido na tentativa {}, {} delas com outro nucleo mexendo no heap",
+            tentativa,
+            com_outro
+        );
+        return Ok(());
     }
-    Ok(())
+    Err("o caso do pico nao chegou a conferir")
 }
 
 fn heap_box_aloca_e_libera() -> Resultado {

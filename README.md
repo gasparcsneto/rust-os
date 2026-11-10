@@ -5332,7 +5332,7 @@ Sem ganho a medir, não há o que pagar com esse risco.
   lugar para a fotografia e no post-mortem; a espera do gate pela trava
   foi de 3,6–123 ms para 21 µs–1,8 ms (`docs/PERSISTENCIA.md`, *Os
   leitores e o anexar: a trava do gate sem o alocador*, com a medida e as
-  mutações: 78 de 81 reprovaram; das três que passam, duas são
+  mutações: 84 de 87 reprovaram; das três que passam, duas são
   equivalentes nos estados que a suíte alcança, e a outra é o post-mortem
   de verdade, em que a suíte não entra). O elo do anexar continua com a
   trava: tirá-lo dela seria uma decisão [C], não tomada. E a conferência
