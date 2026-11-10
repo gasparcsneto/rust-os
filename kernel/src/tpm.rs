@@ -41,11 +41,14 @@
 //!
 //! # Por que espera em laço
 //!
-//! Pela mesma razão do disco: os chamadores são síncronos, e o tempo de um
-//! comando do TPM — milissegundos, no pior caso — é uma vez por gravação
-//! do journal. O laço tem teto em voltas, e não em milissegundos, porque o
-//! relógio do kernel conta interrupções, e quem fala com o TPM o faz com
-//! elas mascaradas.
+//! Pela mesma razão do disco: os chamadores são síncronos, e o avanço do
+//! contador — dois comandos, o incremento e a leitura de volta, de
+//! milissegundos quase sempre — é uma vez por gravação do journal que
+//! avança a âncora. O relógio do kernel conta interrupções, e quem fala com
+//! o TPM o faz com elas mascaradas; o prazo de cada espera é medido como o
+//! do disco ([`crate::bloco::Prazo`]): o contador de ciclos, que anda com
+//! elas mascaradas, contra a frequência que a régua do civil sabe — medida
+//! contra o PIT no x86, declarada pelo firmware no ARM. Ver [`ESPERA_MS`].
 
 use crate::trava::Mutex;
 
@@ -123,12 +126,59 @@ mod crb {
     pub const CONCEDIDA: u32 = 1 << 0;
 }
 
-/// Quantas voltas esperar por uma mudança de estado do TPM.
+/// Quanto o driver espera por uma mudança de estado do TPM antes de dá-lo
+/// por morto: trinta segundos, o mesmo valor do prazo dos discos
+/// ([`crate::bloco::ESPERA_MS`]).
 ///
-/// Cada volta é uma leitura de registrador, que no emulador custa uma saída
-/// para o hospedeiro — da ordem de um microssegundo. Cinco milhões são uns
-/// segundos, o que separa "lento" de "morto" com folga.
-const VOLTAS_DE_ESPERA: u32 = 5_000_000;
+/// # Por que em tempo, e não em voltas
+///
+/// Eram cinco milhões de voltas, "uns segundos" pela conta de um
+/// microssegundo por leitura de registrador. Mas uma volta não tem
+/// duração: no x86 emulado sem aceleração, no kernel de depuração, as
+/// cinco milhões foram de 2,5 a 2,7 s no boot, com um núcleo só, medidas
+/// com o contador de ciclos — e passaram de dez segundos depois do boot,
+/// com os quatro núcleos ligados, em que a volta custa mais (a causa não
+/// foi medida). Na CI 471, no primeiro boot de um cenário da bancada de
+/// persistência, o `swtpm` passou do teto do boot sem responder, e o
+/// kernel deu o TPM por morto: a persistência abriu recusada (`o TPM nao
+/// respondeu`), com as operações que mudam autoridade bloqueadas até o
+/// boot seguinte. Parar o `swtpm` por quatro segundos naquele ponto
+/// reproduziu a falha.
+///
+/// Um TPM demora de verdade, e o hospedeiro de um emulador também: o
+/// próprio `swtpm` — o 0.10.1 é o da CI — tem o `fsync` do estado
+/// desligado, porque ele disparava timeouts dos comandos do TPM. Trinta
+/// segundos separam "lento" de "morto" com folga para o que o Duke pede
+/// ao TPM — as chaves que ele cria lá são de ECC P-256, e os outros
+/// objetos, selados; os comandos do boot levaram de 0,2 a 2,1 ms no
+/// emulador —, e só o TPM que não responde mais os paga, com as
+/// interrupções mascaradas, como um disco que não responde.
+const ESPERA_MS: u64 = 30_000;
+
+/// O teto de uma espera em voltas, quando a régua do civil não sabe a
+/// frequência do contador: antes dela — só o [`init`] fala com o TPM tão
+/// cedo — e, no boot inteiro, numa máquina em que ela ficou nos tiques (o
+/// x86 cuja medida contra o PIT não valeu; o ARM cujo firmware não declara
+/// a frequência). É o número de antes do [`ESPERA_MS`]: nessas máquinas, o
+/// teto é o de antes.
+const VOLTAS_DE_ESPERA: u64 = 5_000_000;
+
+/// Espera até `pronto` dar um valor, ou até vencer o prazo de
+/// [`ESPERA_MS`] — o erro, então, diz `o_que` não aconteceu.
+fn esperar_ate<T>(o_que: &'static str, mut pronto: impl FnMut() -> Option<T>) -> Result<T, Erro> {
+    let prazo = crate::bloco::Prazo::em(ESPERA_MS, VOLTAS_DE_ESPERA);
+    let mut volta = 0u64;
+    loop {
+        if let Some(v) = pronto() {
+            return Ok(v);
+        }
+        if prazo.vencido(volta) {
+            return Err(Erro::Transporte(o_que));
+        }
+        volta += 1;
+        core::hint::spin_loop();
+    }
+}
 
 /// Um TPM falando TIS.
 pub struct Tis {
@@ -171,14 +221,19 @@ impl Tis {
 
     /// Espera até `condicao` valer sobre o estado.
     fn esperar(&self, condicao: impl Fn(u32) -> bool, o_que: &'static str) -> Result<u32, Erro> {
-        for _ in 0..VOLTAS_DE_ESPERA {
+        esperar_ate(o_que, || {
             let e = self.ler32(reg::ESTADO);
-            if condicao(e) {
-                return Ok(e);
-            }
-            core::hint::spin_loop();
-        }
-        Err(Erro::Transporte(o_que))
+            condicao(e).then_some(e)
+        })
+    }
+
+    /// Espera o TPM aceitar ou entregar bytes pela FIFO: a rajada, que ele
+    /// pode dizer zero por um tempo enquanto move os dados por dentro.
+    fn esperar_a_rajada(&self, o_que: &'static str) -> Result<usize, Erro> {
+        esperar_ate(o_que, || {
+            let r = self.rajada();
+            (r != 0).then_some(r)
+        })
     }
 
     /// Pede a localidade 0, e espera recebê-la.
@@ -189,14 +244,10 @@ impl Tis {
             return Ok(());
         }
         self.escrever8(reg::ACESSO, acesso::PEDIR);
-        for _ in 0..VOLTAS_DE_ESPERA {
+        esperar_ate("o TPM nao concedeu a localidade 0", || {
             let a = self.ler8(reg::ACESSO);
-            if a & (acesso::ATIVA | acesso::VALIDO) == acesso::ATIVA | acesso::VALIDO {
-                return Ok(());
-            }
-            core::hint::spin_loop();
-        }
-        Err(Erro::Transporte("o TPM nao concedeu a localidade 0"))
+            (a & (acesso::ATIVA | acesso::VALIDO) == acesso::ATIVA | acesso::VALIDO).then_some(())
+        })
     }
 
     /// Põe o TPM no estado de pronto, que descarta o que estiver pela
@@ -217,11 +268,7 @@ impl Tpm for Tis {
         // aceita agora, e escrever mais do que isso é perder os do fim.
         let mut enviados = 0;
         while enviados < comando.len() {
-            let rajada = self.rajada();
-            if rajada == 0 {
-                core::hint::spin_loop();
-                continue;
-            }
+            let rajada = self.esperar_a_rajada("o TPM parou de aceitar o comando")?;
             let ate = (enviados + rajada).min(comando.len());
             for &b in &comando[enviados..ate] {
                 self.escrever8(reg::FIFO, b);
@@ -247,11 +294,7 @@ impl Tpm for Tis {
         let mut lidos = 0;
         let mut total = 10;
         while lidos < total {
-            let rajada = self.rajada();
-            if rajada == 0 {
-                core::hint::spin_loop();
-                continue;
-            }
+            let rajada = self.esperar_a_rajada("o TPM parou de entregar a resposta")?;
             let ate = (lidos + rajada).min(total);
             for b in &mut resposta[lidos..ate] {
                 *b = self.ler8(reg::FIFO);
@@ -316,14 +359,10 @@ impl Crb {
         condicao: impl Fn(u32) -> bool,
         o_que: &'static str,
     ) -> Result<u32, Erro> {
-        for _ in 0..VOLTAS_DE_ESPERA {
+        esperar_ate(o_que, || {
             let v = self.ler32(reg);
-            if condicao(v) {
-                return Ok(v);
-            }
-            core::hint::spin_loop();
-        }
-        Err(Erro::Transporte(o_que))
+            condicao(v).then_some(v)
+        })
     }
 
     /// Liga a CRB em `base`: pede a localidade e acha os buffers.

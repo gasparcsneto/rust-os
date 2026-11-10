@@ -292,6 +292,31 @@ impl Ligada {
             None => Ok(()),
         }
     }
+
+    /// Para o TPM sem desligá-lo — `SIGSTOP` no `swtpm` — ou o solta
+    /// (`SIGCONT`): o chip que demora a responder. O comando que o emulador
+    /// já entregou fica no socket, e o `swtpm` o executa quando volta.
+    pub(crate) fn segurar_o_tpm(&self, segurar: bool) -> Result<(), String> {
+        let Some((tpm, _)) = self._ambiente.tpm.as_ref() else {
+            return Err("esta maquina nao tem TPM para segurar".into());
+        };
+        segurar_o_swtpm(tpm.id(), segurar)
+    }
+}
+
+/// `SIGSTOP` (`segurar`) ou `SIGCONT` no `swtpm` de número `pid` — ver
+/// [`Ligada::segurar_o_tpm`].
+fn segurar_o_swtpm(pid: u32, segurar: bool) -> Result<(), String> {
+    let sinal = if segurar { "-STOP" } else { "-CONT" };
+    let pid = pid.to_string();
+    let saida = Command::new("kill")
+        .args([sinal, &pid])
+        .status()
+        .map_err(|e| format!("não foi possível rodar o kill {sinal} {pid}: {e}"))?;
+    if !saida.success() {
+        return Err(format!("kill {sinal} {pid}: {saida}"));
+    }
+    Ok(())
 }
 
 /// O que o emulador vivo diz de si pelo QMP `qmp`, para o boot que não
@@ -1018,6 +1043,10 @@ const CENARIOS: &[Cenario] = &[
     Cenario {
         nome: "sem TPM, nada de autoridade muda, e o que nao e autoridade continua",
         rodar: sem_tpm_nada_de_autoridade,
+    },
+    Cenario {
+        nome: "o TPM que demora a responder: a gravacao espera por ele, e a persistencia nao o da por morto",
+        rodar: o_tpm_que_demora_a_responder,
     },
     Cenario {
         nome: "o relogio logico nao volta quando o RTC volta, e anda quando o RTC passa dele",
@@ -3488,6 +3517,316 @@ fn as_chaves_seladas_diante_de_outro_tpm(
     Ok(format!(
         "recusado diante de outro TPM ({recusa}), e de volta ao dele a chave assina igual"
     ))
+}
+
+/// Quanto o cenário do TPM que demora segura o `swtpm` parado, no boot e
+/// numa gravação.
+///
+/// # Por que no boot também
+///
+/// O teto antigo, em voltas, não tinha duração: era o custo de cinco
+/// milhões de leituras de registrador no emulador, e esse custo muda depois
+/// do boot. No boot, com um núcleo só, as cinco milhões foram de 2,5 a
+/// 2,7 s no x86 emulado, no kernel de depuração — e foi no boot que a CI
+/// 471 reprovou. Depois do boot, com os quatro núcleos ligados, a volta
+/// custa mais — a causa não foi medida —, e o teto antigo passou dos dez
+/// segundos: uma parada de dez segundos antes de uma gravação não o
+/// estourava, e só a do boot pega o código de antes. Doze segundos: a
+/// espera do teto antigo começa uns 1,4 s depois da parada, pelo relógio
+/// do log, e os até 10,6 s que sobram são perto de quatro vezes ele; e os
+/// doze são menos da metade do prazo do kernel (`ESPERA_MS`, em
+/// `kernel/src/tpm.rs`).
+const SEGURADO_NO_TPM: Duration = Duration::from_secs(12);
+
+/// O TPM que demora a responder: o `swtpm` parado — o `SIGSTOP` — por
+/// [`SEGURADO_NO_TPM`], no boot e numa gravação. O kernel espera o prazo
+/// dele, em tempo, e não dá o TPM por morto:
+/// - no boot, parado desde a primeira linha do kernel — antes de a
+///   persistência abrir, que é quando o kernel manda o primeiro comando a
+///   ele, na imagem da bancada, cuja identidade é a chave da imagem —, a
+///   máquina só atende depois que o TPM volta, e a persistência abre;
+/// - parado antes de uma gravação, que o encontra parado quando o journal
+///   avança o contador da âncora — o primeiro comando dela ao TPM —, nada
+///   responde com o TPM parado, e a gravação confirma depois;
+/// - nos dois, a persistência segue disponível, o log não tem erro do TPM —
+///   nem o aviso do avanço que falhou e foi conferido pela leitura —, e a
+///   gravação seguinte confirma.
+///
+/// Pelo TIS e, no x86, pela CRB, cada uma num boot; o boot seguinte abre
+/// com a última gravação de cada interface, o journal e a âncora de
+/// acordo, e a auditoria verifica. A parada do boot é só no x86: ela espera
+/// a primeira linha do kernel na serial do cenário, que no x86 é a COM1
+/// inteira, escrita pelo emulador, e no ARM só o que as esperas leem do
+/// canal — ver [`Olhos::ouvir_o_canal`].
+///
+/// A parada do boot é a falha da CI 471 num ponto exato: lá, o `swtpm`
+/// ficou mais que o teto antigo em voltas sem responder no primeiro boot de
+/// um cenário, e a persistência abriu recusada (`o TPM nao respondeu`). A
+/// parada antes da gravação não é: depois do boot, o teto antigo passava
+/// dos dez segundos.
+fn o_tpm_que_demora_a_responder(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    const DIR: &str = "/armazem/lento";
+    let interfaces: &[&str] = if arch == Arquitetura::X86_64 {
+        &["TIS", "CRB"]
+    } else {
+        &["TIS"]
+    };
+    let mut relato = Vec::new();
+    let mut primeiro = None;
+    for &interface in interfaces {
+        let por = pela_interface(interface);
+        let mut ambiente = Ambiente::ligar(arch, None)?;
+        ambiente.crb = interface == "CRB";
+        let (mut m, no_boot) = if arch == Arquitetura::X86_64 {
+            subir_com_o_tpm_parado(arch, artefato, ambiente)?
+        } else {
+            (
+                Ligada::subir_com(arch, artefato, ambiente)?,
+                "o boot sem parar o TPM".into(),
+            )
+        };
+        let p = persistencia_de(&mut m)?;
+        if p.estado != "available" || p.interface != interface {
+            return Err(format!(
+                "{por}, {no_boot}: a persistencia ficou {} ({}), interface {}",
+                p.estado, p.motivo, p.interface
+            ));
+        }
+        nenhum_erro_do_tpm_no_log(&mut m, &por)?;
+        primeiro.get_or_insert(p.boots);
+        if primeiro == Some(p.boots) {
+            no_armazem(&mut m, "fs.mkdir", &format!(r#"{{"path":"{DIR}"}}"#))?;
+        }
+        let na_gravacao = gravar_com_o_tpm_parado(&mut m, interface, DIR)?;
+        relato.push(format!("{por}, {no_boot}; {na_gravacao}"));
+        m.cortar_a_energia()?;
+    }
+
+    let mut m = Ligada::subir(arch, artefato, None)?;
+    let depois = persistencia_de(&mut m)?;
+    let antes = primeiro.unwrap_or_default();
+    if depois.estado != "available" || depois.boots <= antes {
+        return Err(format!(
+            "o boot depois do TPM que demorou: {} ({}), boot {} depois de {}",
+            depois.estado, depois.motivo, depois.boots, antes
+        ));
+    }
+    // A última gravação de cada interface: a segunda, confirmada antes do
+    // corte, por cima da que esperou o TPM.
+    for &interface in interfaces {
+        let caminho = format!("{DIR}/{interface}.txt");
+        let por = pela_interface(interface);
+        let lido = m.pedir("fs.read", &format!(r#"{{"path":"{caminho}"}}"#))?;
+        if !lido.contains(&format!("depois do TPM, {por}, de novo")) {
+            return Err(format!(
+                "a ultima gravacao confirmada {por} nao voltou\n  {lido}"
+            ));
+        }
+    }
+    auditoria_verifica(&mut m)?;
+    m.cortar_a_energia()?;
+    Ok(format!(
+        "o TPM parado por {} s: {}; o boot {} abriu com a ultima gravacao de cada interface",
+        SEGURADO_NO_TPM.as_secs(),
+        relato.join("; "),
+        depois.boots
+    ))
+}
+
+/// Liga a máquina no `ambiente` com o `swtpm` dela parado por
+/// [`SEGURADO_NO_TPM`] desde a primeira linha do kernel na serial do
+/// cenário — o firmware e o iniciador já não falam com o TPM, e o kernel
+/// ainda não falou. Só no x86: ver [`o_tpm_que_demora_a_responder`].
+///
+/// A máquina tem de atender só depois que o TPM volta: o canal do agente
+/// sobe depois de a persistência abrir, e ela não abre sem ele. Uma
+/// máquina que atende antes não passou pelo TPM — ou o deu por morto.
+fn subir_com_o_tpm_parado(
+    arch: Arquitetura,
+    artefato: &Artefato,
+    ambiente: Ambiente,
+) -> Result<(Ligada, String), String> {
+    let pid = ambiente
+        .tpm
+        .as_ref()
+        .map(|(tpm, _)| tpm.id())
+        .ok_or("a maquina do cenario nao tem TPM")?;
+    let serial = serial_do_cenario().ok_or("o cenario nao tem a serial onde esperar o kernel")?;
+    let desde = std::fs::metadata(&serial).map_or(0, |m| m.len());
+    let acabou = std::sync::Arc::new(AtomicBool::new(false));
+    let vigia = {
+        let acabou = acabou.clone();
+        std::thread::spawn(move || parar_o_tpm_no_kernel(&serial, desde, pid, &acabou))
+    };
+    let ligada = Ligada::subir_com(arch, artefato, ambiente);
+    let atendeu = Instant::now();
+    acabou.store(true, Ordering::Release);
+    let parada = vigia
+        .join()
+        .map_err(|_| String::from("o vigia do TPM entrou em panico"))?;
+    let m = ligada?;
+    let (parou, soltou) = parada?;
+    if atendeu < soltou {
+        return Err(format!(
+            "a maquina atendeu {:.1} s depois de o TPM parar, e ele ficou parado {} s: o boot nao passou por ele",
+            atendeu.duration_since(parou).as_secs_f64(),
+            SEGURADO_NO_TPM.as_secs()
+        ));
+    }
+    Ok((
+        m,
+        format!(
+            "o boot atendeu {:.1} s depois de o TPM parar",
+            atendeu.duration_since(parou).as_secs_f64()
+        ),
+    ))
+}
+
+/// O vigia de [`subir_com_o_tpm_parado`]: espera a primeira linha do kernel
+/// na serial, depois de `desde`, e para o `swtpm` `pid` por
+/// [`SEGURADO_NO_TPM`]; devolve quando parou e quando soltou. Desiste —
+/// sem parar nada — quando `acabou`: a máquina subiu ou caiu antes.
+fn parar_o_tpm_no_kernel(
+    serial: &Path,
+    desde: u64,
+    pid: u32,
+    acabou: &AtomicBool,
+) -> Result<(Instant, Instant), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const PRIMEIRA_LINHA: &[u8] = b"Duke iniciado em";
+    let mut lido = Vec::new();
+    let mut pos = desde;
+    loop {
+        if acabou.load(Ordering::Acquire) {
+            return Err(
+                "a maquina atendeu, ou caiu, antes da primeira linha do kernel na serial".into(),
+            );
+        }
+        if let Ok(mut arquivo) = std::fs::File::open(serial)
+            && arquivo.seek(SeekFrom::Start(pos)).is_ok()
+        {
+            let mut novo = Vec::new();
+            if arquivo.read_to_end(&mut novo).is_ok() {
+                pos += novo.len() as u64;
+                lido.extend_from_slice(&novo);
+            }
+        }
+        if lido
+            .windows(PRIMEIRA_LINHA.len())
+            .any(|w| w == PRIMEIRA_LINHA)
+        {
+            break;
+        }
+        // Só o fim pode emendar com a leitura seguinte.
+        if lido.len() > PRIMEIRA_LINHA.len() {
+            lido.drain(..lido.len() - PRIMEIRA_LINHA.len());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    segurar_o_swtpm(pid, true)?;
+    let parou = Instant::now();
+    std::thread::sleep(SEGURADO_NO_TPM);
+    let solto = segurar_o_swtpm(pid, false);
+    let soltou = Instant::now();
+    solto.map(|()| (parou, soltou))
+}
+
+/// Os erros do TPM no log da máquina: os de transporte
+/// (`kernel/src/tpm.rs`), a persistência recusada por eles, e o aviso do
+/// avanço do contador que falhou e foi conferido pela leitura
+/// (`avancar_a_ancora`, em `kernel/src/persistencia.rs`).
+fn nenhum_erro_do_tpm_no_log(m: &mut Ligada, por: &str) -> Result<(), String> {
+    let avisos = m.pedir("log.tail", r#"{"count":256,"min_level":"warn"}"#)?;
+    for sinal in [
+        "o TPM nao",
+        "o TPM parou",
+        "a CRB nao",
+        "o avanco do contador falhou",
+    ] {
+        if avisos.contains(sinal) {
+            return Err(format!(
+                "{por}, o log tem um erro do TPM que demorou (`{sinal}`)\n  {avisos}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Uma gravação em `dir` com o `swtpm` da máquina parado por
+/// [`SEGURADO_NO_TPM`] — ver [`o_tpm_que_demora_a_responder`] —, e o que se
+/// confere depois dela; o relato, com quanto ela esperou.
+fn gravar_com_o_tpm_parado(m: &mut Ligada, interface: &str, dir: &str) -> Result<String, String> {
+    let caminho = format!("{dir}/{interface}.txt");
+    let por = pela_interface(interface);
+    m.segurar_o_tpm(true)?;
+    let comeco = Instant::now();
+    let id = m.mandar(
+        "fs.write",
+        &format!(r#"{{"path":"{caminho}","content":"depois do TPM, {por}","expect_version":0}}"#),
+    );
+    // Com o TPM parado, nada responde: a gravação espera o contador da
+    // âncora. Uma resposta antes de soltar é uma gravação que não passou
+    // pelo TPM. Um kernel que desiste do avanço também pode não responder
+    // antes — a leitura que confere espera de novo, e a gravação confirma
+    // depois —: quem o pega é o log, abaixo.
+    let parado = match m.esperar_respostas_por(SEGURADO_NO_TPM) {
+        Ok(()) => m.proxima_resposta().ok(),
+        Err(e) => Some((0, e)),
+    };
+    // Solto antes de conferir: um TPM parado para sempre deixaria a máquina
+    // presa, e o cenário seguinte herdaria o `swtpm` dela.
+    m.segurar_o_tpm(false)?;
+    let id = id?;
+    if let Some((de, r)) = parado {
+        return Err(format!(
+            "{por}, a resposta {de} veio em {:?}, com o TPM parado\n  {r}",
+            comeco.elapsed()
+        ));
+    }
+    m.esperar_respostas_por(Duration::from_secs(120))?;
+    let r = loop {
+        let (de, r) = m.proxima_resposta()?;
+        if de == id {
+            break r;
+        }
+    };
+    let esperou = comeco.elapsed();
+    m.esperar_respostas_por(Duration::from_secs(15))?;
+    if !confirmada(&r) {
+        return Err(format!(
+            "{por}, com o TPM parado por {} s, a gravacao nao foi confirmada\n  {r}",
+            SEGURADO_NO_TPM.as_secs()
+        ));
+    }
+    let p = persistencia_de(m)?;
+    if p.estado != "available" {
+        return Err(format!(
+            "{por}, depois do TPM que demorou, a persistencia ficou {} ({})",
+            p.estado, p.motivo
+        ));
+    }
+    nenhum_erro_do_tpm_no_log(m, &por)?;
+    // O TPM de volta atende a gravação seguinte como sempre.
+    let versao = versao_no_armazem(m, &caminho)?;
+    no_armazem(
+        m,
+        "fs.write",
+        &format!(
+            r#"{{"path":"{caminho}","content":"depois do TPM, {por}, de novo","expect_version":{versao}}}"#
+        ),
+    )?;
+    Ok(format!(
+        "a gravacao confirmou em {:.1} s",
+        esperou.as_secs_f64()
+    ))
+}
+
+/// "pelo TIS", "pela CRB": a interface do TPM no texto do cenário.
+fn pela_interface(interface: &str) -> String {
+    match interface {
+        "CRB" => "pela CRB".into(),
+        outra => format!("pelo {outra}"),
+    }
 }
 
 /// Uma máquina sem TPM: sem âncora, a persistência é indisponível, e as

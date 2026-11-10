@@ -6315,7 +6315,10 @@ com ação, a não ser a recomendação do pendente a uma pessoa.
   Num hospedeiro muito carregado, as cinco tentativas podem passar de
   200 ppm, e a régua cai para os tiques, com 5% de deriva: o civil vence o
   teto da incerteza minutos depois de cada acordo, e o `system.info` diz
-  `ticks`. Não há segunda medida depois do boot. A frequência também não é
+  `ticks`. As esperas dos discos e do TPM, sem a frequência do contador,
+  voltam aos tetos em voltas de antes do prazo em tempo — o do TPM, de 2,5
+  a 2,7 s no boot do x86 emulado, no kernel de depuração. Não há segunda
+  medida depois do boot. A frequência também não é
   aprendida das amostras: com raios de segundos, separar 100 ppm pediria
   dias entre rodadas.
 - **Bloquear uma fonte não tira a confiança nela.** O firewall corta o

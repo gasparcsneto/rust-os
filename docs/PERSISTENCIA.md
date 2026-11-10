@@ -842,6 +842,31 @@ Da segunda em diante, a fixação vale.
   a máquina `virt` só oferece o TIS.
 - **`system.info`** diz a interface (`tpm_interface`) e o começo da EK
   (`tpm_ek`).
+- **O prazo de cada espera.** Toda espera do driver — a localidade, a
+  rajada da FIFO, o estado, a execução do comando, no TIS e na CRB — vence
+  em trinta segundos de tempo, o mesmo valor do prazo dos discos, medidos
+  pelo mesmo `bloco::Prazo`: o contador de ciclos, que anda com as
+  interrupções mascaradas, contra a frequência que a régua do civil sabe —
+  medida contra o PIT no x86, declarada pelo firmware no ARM. Antes da
+  régua — só o `init`, cedo no boot — e, no boot inteiro, numa máquina
+  cuja régua ficou nos tiques, em cinco milhões de voltas, como antes.
+  Eram cinco milhões de voltas sempre, e a rajada da FIFO não tinha teto
+  nenhum; no x86 emulado, no kernel de depuração, as cinco milhões foram
+  de 2,5 a 2,7 s no boot, com um núcleo só. Na CI 471, o `swtpm` passou do
+  teto do boot sem responder, no primeiro boot de um cenário da bancada, e
+  a persistência abriu recusada (`o TPM nao respondeu`); parar o `swtpm`
+  por quatro segundos no mesmo ponto reproduziu a falha. O cenário *o TPM
+  que demora a responder* para o `swtpm` por doze segundos antes de uma
+  gravação, que o encontra parado quando o journal avança o contador da
+  âncora, pelo TIS e, no x86, pela CRB — e, só no x86, também no boot,
+  desde a primeira linha do kernel. No boot, a máquina só atende depois
+  que o TPM volta, e a persistência abre; na gravação, nada responde até
+  ele voltar, e ela confirma; nos dois, a persistência segue disponível e
+  o log não tem erro do TPM; e o boot depois de um corte abre com a última
+  gravação de cada interface. É a parada do boot que pega o teto antigo:
+  depois do boot, com os quatro núcleos ligados, a volta custa mais — a
+  causa não foi medida —, e as cinco milhões passavam de dez segundos; a
+  parada antes da gravação, sozinha, não o estourava.
 - **O que foi testado:** o `swtpm` (a `libtpms`, a implementação de
   referência da IBM) pelo `tpm-tis` e pelo `tpm-crb` do QEMU, nas duas
   arquiteturas; o mesmo journal criado por uma interface e aberto pela
