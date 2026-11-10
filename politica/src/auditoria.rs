@@ -61,8 +61,8 @@
 //! o segura; o anel, a âncora e a lacuna não sabem disso. No kernel, assim
 //! leem os relatórios da auditoria e a declaração que cita uma decisão; a
 //! cópia para o journal e a compactação ainda leem e codificam com a trava,
-//! e o relatório que confere a cadeia, sem memória para a fotografia ou no
-//! post-mortem, refaz os elos com ela.
+//! e o relatório que confere a cadeia — sem memória para a fotografia, com
+//! um anel maior que o lugar dela ou no post-mortem — refaz os elos com ela.
 //!
 //! Do outro lado, quem anexa pode montar o registro e pedir a memória dele
 //! antes da trava ([`Preparado`]); com ela, [`Cadeia::anexar_preparado`] só
@@ -759,7 +759,7 @@ impl Cadeia {
     /// reservado em [`Cadeia::nova`], e o que sai é devolvido a quem chamou.
     /// A conta é a de sempre: o tempo que não volta, a sequência seguinte, o
     /// anterior — a cabeça —, e o elo.
-    #[must_use = "o registro que saiu pela ponta e solto por quem anexa, depois de soltar a trava"]
+    #[must_use = "o registro que saiu pela ponta é solto por quem anexa, depois de soltar a trava"]
     pub fn anexar_preparado(&mut self, preparado: Preparado) -> (u64, Option<Arc<Registro>>) {
         let Preparado(mut novo) = preparado;
         let anterior = self.cabeca();

@@ -13684,7 +13684,26 @@ fn heap_o_pico_e_o_pior_momento() -> Resultado {
     }
     let passa = antes.pico - antes.alocado + 64 * 1024;
     let pico_durante = {
-        let grande = alloc::vec![0u8; passa];
+        // O pedido pode falhar: um caso de antes que levou o pico perto do
+        // heap inteiro deixa um bloco que passe dele sem lugar. Aí o caso
+        // reprova, com os números — em vez de um pânico que derruba a suíte
+        // (a CI 475).
+        let mut grande = alloc::vec::Vec::new();
+        if grande.try_reserve_exact(passa).is_err() {
+            crate::log_error!(
+                "teste",
+                "pico {}, alocado {}, total {}, maior bloco livre {}: {} bytes de uma vez",
+                antes.pico,
+                antes.alocado,
+                antes.total,
+                crate::heap::estatisticas().maior_bloco,
+                passa
+            );
+            return Err(
+                "o heap nao tem um bloco que passe do pico: um caso de antes levou o pico perto do heap inteiro",
+            );
+        }
+        grande.resize(passa, 0u8);
         let durante = crate::heap::estatisticas();
         if durante.pico < antes.alocado + grande.len() {
             crate::log_error!(
@@ -37996,7 +38015,7 @@ static CASOS: &[Caso] = &[
         f: trava_da_auditoria::a_verificacao_e_a_cabeca_no_limite,
     },
     Caso {
-        nome: "trava: a resposta do audit.verify em cada ramo, e a mesma pela conta com a trava: sem memoria para a fotografia, com um lugar menor que o anel e no post-mortem",
+        nome: "trava: a resposta do audit.verify em cada ramo, e a mesma pela conta com a trava: sem memoria para a fotografia, com um lugar menor que o anel e no post-mortem; e a ancora trocada para no primeiro guardado em cada caminho",
         f: trava_da_auditoria::a_resposta_do_verify_em_cada_ramo_e_pela_conta_com_a_trava,
     },
     Caso {

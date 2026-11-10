@@ -113,13 +113,20 @@ fn as_contas_veem_a_trava() -> Resultado {
         !p.is_null()
     });
     let pedidos = alocacoes::esquecer();
+    let devolucoes = alocacoes::devolucoes();
     let c = coleta_de_teste::contas();
     coleta_de_teste::zerar();
-    if alocou != Some(true) || pedidos != 1 || c.montados != 1 || c.sob_a_trava != 1 {
+    if alocou != Some(true)
+        || pedidos != 1
+        || devolucoes != 1
+        || c.montados != 1
+        || c.sob_a_trava != 1
+    {
         crate::log_error!(
             "teste",
-            "{} pedidos ao alocador e {} montados com a trava na mao, de um",
+            "{} pedidos e {} devolucoes ao alocador e {} montados com a trava na mao, de um",
             pedidos,
+            devolucoes,
             c.sob_a_trava
         );
         return Err("as contas da suite nao veem a trava da auditoria na mao");
@@ -220,13 +227,21 @@ pub(super) fn a_trava_fica_solta_na_montagem() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::gravar_auditoria();
     let pedidos = alocacoes::esquecer();
+    let devolucoes = alocacoes::devolucoes();
     let c = coleta_de_teste::contas();
     let (anexado, ultimo_anexado) = coleta_de_teste::anexados();
     coleta_de_teste::zerar();
     r?;
-    if pedidos != 0 {
-        crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
-        return Err("a copia da auditoria pediu memoria com a trava da auditoria na mao");
+    if pedidos != 0 || devolucoes != 0 {
+        crate::log_error!(
+            "teste",
+            "{} pedidos e {} devolucoes ao alocador",
+            pedidos,
+            devolucoes
+        );
+        return Err(
+            "a copia da auditoria pediu ou devolveu memoria com a trava da auditoria na mao",
+        );
     }
     if c.copias == 0 || c.montados < 40 || c.sob_a_trava != 0 {
         crate::log_error!(
@@ -308,12 +323,18 @@ pub(super) fn o_anel_que_transborda_no_meio_da_coleta() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::gravar_auditoria();
     let pedidos = alocacoes::esquecer();
+    let devolucoes = alocacoes::devolucoes();
     let c = coleta_de_teste::contas();
     coleta_de_teste::zerar();
     r?;
-    if pedidos != 0 {
-        crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
-        return Err("a copia da lacuna e do anel pediu memoria com a trava na mao");
+    if pedidos != 0 || devolucoes != 0 {
+        crate::log_error!(
+            "teste",
+            "{} pedidos e {} devolucoes ao alocador",
+            pedidos,
+            devolucoes
+        );
+        return Err("a copia da lacuna e do anel pediu ou devolveu memoria com a trava na mao");
     }
     if c.copias < 2 || c.sob_a_trava != 0 {
         crate::log_error!(
@@ -598,13 +619,19 @@ pub(super) fn a_compactacao_copia_fora_da_trava() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::compactar_de_teste();
     let pedidos = alocacoes::esquecer();
+    let devolucoes = alocacoes::devolucoes();
     let c = coleta_de_teste::contas();
     let (_, _, na_copia) = coleta_de_teste::compactada();
     coleta_de_teste::zerar();
     r?;
-    if pedidos != 0 {
-        crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
-        return Err("a compactacao pediu memoria com a trava da auditoria na mao");
+    if pedidos != 0 || devolucoes != 0 {
+        crate::log_error!(
+            "teste",
+            "{} pedidos e {} devolucoes ao alocador",
+            pedidos,
+            devolucoes
+        );
+        return Err("a compactacao pediu ou devolveu memoria com a trava da auditoria na mao");
     }
     if c.copias != 1 || c.montados == 0 || c.sob_a_trava != 0 {
         crate::log_error!(
@@ -673,14 +700,20 @@ pub(super) fn o_anel_que_perde_registros_entre_as_tomadas() -> Resultado {
     alocacoes::vigiar(crate::fios::id_atual());
     let r = persistencia::compactar_de_teste();
     let pedidos = alocacoes::esquecer();
+    let devolucoes = alocacoes::devolucoes();
     let c = coleta_de_teste::contas();
     let (gravada, medidos, no_anel) = coleta_de_teste::compactada();
     let (anexado, _) = coleta_de_teste::anexados();
     coleta_de_teste::zerar();
     r?;
-    if pedidos != 0 {
-        crate::log_error!("teste", "{} pedidos ao alocador", pedidos);
-        return Err("a compactacao pediu memoria com a trava da auditoria na mao");
+    if pedidos != 0 || devolucoes != 0 {
+        crate::log_error!(
+            "teste",
+            "{} pedidos e {} devolucoes ao alocador",
+            pedidos,
+            devolucoes
+        );
+        return Err("a compactacao pediu ou devolveu memoria com a trava da auditoria na mao");
     }
     // Os auditados entre as tomadas tiraram da frente registros que a
     // medida contou: na tomada da cópia, o anel tem menos até a gravada.

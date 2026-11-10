@@ -3110,8 +3110,9 @@ fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
 /// a trava na mão, como antes: a resposta é a mesma, e a pergunta não
 /// depende de memória.
 ///
-/// As duas tomadas ficam aqui, no relatório: a cadeia só é lida pela
-/// persistência e pelos relatórios (`cargo xtask invariantes`).
+/// As duas tomadas ficam aqui, no relatório: a cadeia só é lida por quem a
+/// guarda, pela persistência e pelos relatórios (`cargo xtask
+/// invariantes`).
 fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let lugar = crate::autorizacao::CAPACIDADE_DA_AUDITORIA;
     let no_post_mortem = crate::traps::em_post_mortem();
@@ -3125,13 +3126,13 @@ fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     let tomada = if com_fotografia {
         crate::autorizacao::com_auditoria(|c| {
             if c.guardados() > fotografia.capacity() {
-                return Err((c.verificar(), c.guardados()));
+                return Err(conta_com_a_trava(c));
             }
             fotografia.extend(c.ultimos_compartilhados(usize::MAX).cloned());
-            Ok(c.ancora())
+            Ok(ancora_da_verificacao(c))
         })
     } else {
-        crate::autorizacao::com_auditoria(|c| Err((c.verificar(), c.guardados())))
+        crate::autorizacao::com_auditoria(|c| Err(conta_com_a_trava(c)))
     };
     let verificada = tomada.map(|t| {
         #[cfg(feature = "modo-teste")]
@@ -3145,6 +3146,29 @@ fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
         }
     });
     escrever_verificacao(w, verificada)
+}
+
+/// A âncora de onde `audit.verify` refaz a cadeia: a do anel. Na suíte, um
+/// caso pode pôr outra no lugar dela, nos dois caminhos — e a conta para no
+/// primeiro guardado, sem que o anel mude.
+fn ancora_da_verificacao(c: &politica::auditoria::Cadeia) -> [u8; 32] {
+    #[cfg(feature = "modo-teste")]
+    if verificacao_de_teste::ancora_trocada() {
+        return verificacao_de_teste::ANCORA_TROCADA;
+    }
+    c.ancora()
+}
+
+/// A conta de `audit.verify` com a trava na mão — sem lugar para a
+/// fotografia, com um anel maior que o lugar e no post-mortem: a de
+/// `Cadeia::verificar`, a mesma da fotografia, da âncora de
+/// [`ancora_da_verificacao`] sobre os guardados; e quantos são. Nada aqui
+/// pede memória.
+fn conta_com_a_trava(c: &politica::auditoria::Cadeia) -> (Result<[u8; 32], u64>, usize) {
+    (
+        politica::auditoria::verificar(ancora_da_verificacao(c), c.ultimos(usize::MAX)),
+        c.guardados(),
+    )
 }
 
 /// A resposta de `audit.verify` para a cadeia refeita da âncora — ver
@@ -3174,7 +3198,13 @@ pub(crate) fn escrever_verificacao(
 /// interruptores que levam os casos ao segundo sem estilhaçar o heap do
 /// kernel nem entrar no post-mortem: o lugar da fotografia trocado — grande
 /// demais para o alocador, ou menor que o anel — e o post-mortem visto só
-/// por esta pergunta.
+/// por esta pergunta. E um terceiro, a âncora trocada, que leva a conta, em
+/// qualquer caminho, a parar no primeiro guardado: a resposta da cadeia que
+/// não confere, de ponta a ponta, sem mexer no anel.
+///
+/// As contas e os interruptores são de todo `audit.verify` do kernel, de
+/// qualquer fio: hoje, só a suíte o pede — o NSF lê com `audit.tail`. Um
+/// verificador em segundo plano pediria contá-los e trocá-los por fio.
 #[cfg(feature = "modo-teste")]
 pub(crate) mod verificacao_de_teste {
     use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -3184,6 +3214,12 @@ pub(crate) mod verificacao_de_teste {
     /// O lugar da fotografia, em vez do do anel cheio; zero, o de sempre.
     static LUGAR: AtomicUsize = AtomicUsize::new(0);
     static NO_POST_MORTEM: AtomicBool = AtomicBool::new(false);
+    static ANCORA: AtomicBool = AtomicBool::new(false);
+
+    /// A âncora que `audit.verify` usa no lugar da do anel com o interruptor
+    /// ligado: nenhum anel do kernel a tem — a gênese é de zeros, e as
+    /// outras são elos —, e a conta para no primeiro guardado.
+    pub const ANCORA_TROCADA: [u8; 32] = [0x5a; 32];
 
     /// Quantos `audit.verify` passaram pela fotografia, e quantos fizeram a
     /// conta com a trava, desde o boot.
@@ -3204,6 +3240,17 @@ pub(crate) mod verificacao_de_teste {
     /// resto do kernel não muda.
     pub fn como_no_post_mortem(sim: bool) {
         NO_POST_MORTEM.store(sim, Ordering::Release);
+    }
+
+    /// `audit.verify` refaz a cadeia de [`ANCORA_TROCADA`], ou volta à do
+    /// anel — só ele: o anel e a âncora dele não mudam.
+    pub fn trocar_a_ancora(sim: bool) {
+        ANCORA.store(sim, Ordering::Release);
+    }
+
+    /// Se `audit.verify` refaz a cadeia de [`ANCORA_TROCADA`].
+    pub(super) fn ancora_trocada() -> bool {
+        ANCORA.load(Ordering::Acquire)
     }
 
     /// O lugar e o post-mortem que `audit.verify` vê.

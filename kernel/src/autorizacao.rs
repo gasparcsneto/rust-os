@@ -1085,15 +1085,20 @@ fn auditar(
         Err(preparado) => (0, (None, Some(preparado))),
     };
     // O custo do registro, e quando ele foi gravado — de onde sai a
-    // latência da resposta do NSF. Antes de ele ser anunciado: o NSF não
-    // lê um registro cujo momento ainda não está guardado.
+    // latência da resposta do NSF —, antes de ele ser anunciado. Com dois
+    // pedidos auditando ao mesmo tempo, o que anuncia um número maior pode
+    // fazê-lo antes de o outro guardar o momento do seu: o NSF lê esse
+    // registro sem o momento, e só a medida da latência perde a amostra.
     crate::metricas::registro_gravado(seq, crate::metricas::desde(inicio));
     ULTIMO_REGISTRO.fetch_max(seq, Ordering::AcqRel);
     // Com a trava solta — e as interrupções como quem chamou as tinha —, o
     // registro que saiu pela ponta do anel cheio, ou o preparado antes de a
-    // cadeia existir, é devolvido ao alocador, depois do anúncio: devolver
-    // memória é tomar a trava do alocador e percorrer a lista livre, e isso
-    // não se faz com o gate parado, nem antes de o registro novo ser dito.
+    // cadeia existir, é solto depois do anúncio: devolver memória é tomar a
+    // trava do alocador e percorrer a lista livre, e isso não se faz com o
+    // gate parado, nem antes de o registro novo ser dito. Se um leitor ainda
+    // segura o registro que saiu — a fotografia de um `audit.verify`, a
+    // cauda de um `audit.tail` —, é ele quem o devolve ao alocador, quando
+    // acabar, também fora da trava.
     drop(soltar);
     seq
 }

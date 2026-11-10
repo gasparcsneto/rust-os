@@ -8,10 +8,12 @@
 //! e o anexar, que devolvia ao alocador, com ela, o registro que saía pela
 //! ponta do anel cheio. O anel guarda agora cada registro num `Arc` que não
 //! muda depois de entrar (ver "O anel e a trava de quem o guarda", em
-//! `politica::auditoria`): quem lê copia só os ponteiros, para um vetor
-//! reservado antes, e lê, escreve e refaz elos com a trava solta; quem anexa
-//! pede a memória do registro antes dela (`Preparado`) e solta o que saiu
-//! pela ponta depois.
+//! `politica::auditoria`): os relatórios e a declaração copiam só os
+//! ponteiros, para um vetor reservado antes, e leem, escrevem e refazem elos
+//! com a trava solta — fora o `audit.verify` sem lugar para a fotografia,
+//! com um anel maior que o lugar e no post-mortem, que faz a conta com ela
+//! —; o gate pede a memória do registro antes dela (`Preparado`) e solta o
+//! que saiu pela ponta depois.
 //!
 //! Os casos conferem, sem depender de tempo nem de sorte:
 //!
@@ -38,9 +40,13 @@
 //!   para a fotografia, a conta é a dela, fora da trava; e que, pela conta
 //!   com a trava — sem memória para a fotografia, com um lugar menor que o
 //!   anel e no post-mortem —, ele dá a mesma resposta, sem pedir nem
-//!   devolver memória com ela. O caminho de cada `audit.verify` é contado só
-//!   na suíte (`agent::commands::verificacao_de_teste`), e os casos levam à
-//!   conta com a trava sem estilhaçar o heap nem entrar no post-mortem;
+//!   devolver memória com ela. E a cadeia que não confere, de ponta a ponta,
+//!   em cada caminho — a fotografia e os três da conta com a trava: com a
+//!   âncora trocada só para `audit.verify`, a conta para no primeiro
+//!   guardado, e a resposta diz isso e nada mais, sem que o anel mude. O
+//!   caminho de cada `audit.verify` é contado só na suíte
+//!   (`agent::commands::verificacao_de_teste`), e os casos levam à conta com
+//!   a trava sem estilhaçar o heap nem entrar no post-mortem;
 //! - que, com a trava na mão, nada pede nem devolve memória ao alocador: o
 //!   registro anexado pelo gate ao anel cheio, um pedido inteiro pelo gate —
 //!   `audit.head`, `audit.tail` de 128 com e sem `after`, `audit.verify`, a
@@ -81,7 +87,9 @@
 //! `after` achada pelo filtro em vez de pela distância ao primeiro guardado.
 //! Só a medida do tempo com a trava a separa. A conta do `audit.verify`
 //! feita com a trava em vez de fora dela, que também dá a mesma resposta, a
-//! conta de cada caminho separa.
+//! conta de cada caminho separa. E o post-mortem de verdade: a suíte não
+//! entra nele — o caso o liga só para `audit.verify`, por um interruptor —,
+//! e um `audit.verify` que deixasse de consultá-lo daria a mesma resposta.
 
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -1322,12 +1330,105 @@ fn a_verificacao_pela_conta_com_a_trava() -> Resultado {
     verificar_com_a_trava("no post-mortem", None, true, false)
 }
 
-/// A resposta de `audit.verify` nos três ramos, e a mesma resposta pela
-/// conta com a trava, nos três caminhos que levam a ela.
+/// Roda `f` com a âncora de `audit.verify` trocada pela que nenhum anel do
+/// kernel tem, e a destroca depois, sempre.
+fn com_a_ancora_trocada<R>(f: impl FnOnce() -> R) -> R {
+    verificacao::trocar_a_ancora(true);
+    let r = f();
+    verificacao::trocar_a_ancora(false);
+    r
+}
+
+/// `audit.verify`, pelo handler, num caminho, com a âncora trocada: a cadeia
+/// não confere, e a resposta diz o primeiro guardado — o anterior dele não é
+/// a âncora da conta — e nada mais; a conta foi a do caminho; e, destrocada
+/// a âncora, o anel confere inteiro de novo. Se alguém auditou no meio, de
+/// novo.
+fn a_ancora_trocada_no_caminho(
+    caminho: &str,
+    lugar: Option<usize>,
+    post_mortem: bool,
+    pela_fotografia: bool,
+) -> Resultado {
+    for _ in 0..TENTATIVAS {
+        let antes = anel();
+        let contas = verificacao::contas();
+        let verificada = com_o_caminho_trocado(lugar, post_mortem, || {
+            com_a_ancora_trocada(|| chamar("audit.verify", "{}"))
+        })?;
+        let depois = verificacao::contas();
+        if anel() != antes {
+            continue;
+        }
+        let j = Json(verificada.as_bytes());
+        if j.member("ok").and_then(|v| v.as_bool()) != Some(false)
+            || numero(j, "failed_at") != Some(antes.primeiro)
+            || j.member("head").is_some()
+            || j.member("checked").is_some()
+        {
+            crate::log_error!(
+                "teste",
+                "{}: audit.verify com a ancora trocada, o anel a partir do {}: {}",
+                caminho,
+                antes.primeiro,
+                verificada
+            );
+            return Err("com a ancora trocada, o audit.verify nao parou no primeiro guardado");
+        }
+        let do_caminho = if pela_fotografia {
+            depois.0 > contas.0 && depois.1 == contas.1
+        } else {
+            depois.0 == contas.0 && depois.1 > contas.1
+        };
+        if !do_caminho {
+            crate::log_error!(
+                "teste",
+                "{}: (pela fotografia, com a trava) de {:?} para {:?}",
+                caminho,
+                contas,
+                depois
+            );
+            return Err("com a ancora trocada, o audit.verify nao fez a conta do caminho");
+        }
+        let de_novo = chamar("audit.verify", "{}")?;
+        if !confere_o_anel_inteiro(Json(de_novo.as_bytes())) {
+            crate::log_error!("teste", "{}: audit.verify destrocado: {}", caminho, de_novo);
+            return Err("destrocada a ancora, o audit.verify nao conferiu o anel inteiro");
+        }
+        return Ok(());
+    }
+    Err("a auditoria nao ficou quieta em nenhuma tentativa do audit.verify com a ancora trocada")
+}
+
+/// A cadeia que não confere, de ponta a ponta, em cada caminho de
+/// `audit.verify` — a fotografia, sem memória para ela, um lugar menor que
+/// o anel e o post-mortem: a conta das duas formas para no mesmo registro,
+/// e a resposta o diz.
+fn a_ancora_trocada_em_cada_caminho() -> Resultado {
+    a_ancora_trocada_no_caminho("pela fotografia", None, false, true)?;
+    a_ancora_trocada_no_caminho(
+        "sem memoria para a fotografia",
+        Some(LUGAR_QUE_NAO_HA),
+        false,
+        false,
+    )?;
+    a_ancora_trocada_no_caminho(
+        "um lugar menor que o anel",
+        Some(LUGAR_MENOR_QUE_O_ANEL),
+        false,
+        false,
+    )?;
+    a_ancora_trocada_no_caminho("no post-mortem", None, true, false)
+}
+
+/// A resposta de `audit.verify` nos três ramos, a mesma resposta pela conta
+/// com a trava nos três caminhos que levam a ela, e a cadeia que não
+/// confere, de ponta a ponta, em cada caminho.
 pub(super) fn a_resposta_do_verify_em_cada_ramo_e_pela_conta_com_a_trava() -> Resultado {
     os_ramos_da_resposta()?;
     anel_cheio_com_saidos()?;
     a_verificacao_pela_conta_com_a_trava()?;
+    a_ancora_trocada_em_cada_caminho()?;
     persistencia::gravar_auditoria()
 }
 
