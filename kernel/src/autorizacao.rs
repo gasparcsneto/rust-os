@@ -843,12 +843,19 @@ pub fn politica_do_disco() -> bool {
 
 /// Lê a política do disco. No boot, depois do registro de identidades.
 pub fn carregar() {
-    crate::arch::sem_interrupcoes(|| {
+    // A cadeia nasce fora da trava: ela reserva o lugar do anel cheio. Se
+    // já havia uma, a nova é solta fora também.
+    let nova = Cadeia::nova(CAPACIDADE_DA_AUDITORIA);
+    let sobrou = crate::arch::sem_interrupcoes(|| {
         let mut a = AUDITORIA.lock();
         if a.is_none() {
-            *a = Some(Cadeia::nova(CAPACIDADE_DA_AUDITORIA));
+            *a = Some(nova);
+            None
+        } else {
+            Some(nova)
         }
     });
+    drop(sobrou);
     let sistema = Quem {
         titular: Titular::Kernel,
         sessao: SESSAO_DA_PESSOA,
@@ -1065,8 +1072,28 @@ fn auditar(
         // isso.
         detalhe: politica::auditoria::detalhe_composto(quem.processo.as_deref(), detalhe, ""),
     };
-    let seq =
-        crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_mut().map_or(0, |c| c.anexar(evento)));
+    // A memória do registro é pedida aqui, antes da trava; com ela, só a
+    // conta do elo — ver "O anel e a trava de quem o guarda", em
+    // `politica::auditoria`.
+    let preparado = politica::auditoria::Preparado::novo(evento);
+    let anexado = crate::arch::sem_interrupcoes(|| match AUDITORIA.lock().as_mut() {
+        Some(c) => Ok(c.anexar_preparado(preparado)),
+        None => Err(preparado),
+    });
+    // Com a trava solta e as interrupções de volta, o registro que saiu pela
+    // ponta do anel cheio — ou o preparado, antes de a cadeia existir — é
+    // devolvido ao alocador: devolver memória é tomar a trava do alocador e
+    // percorrer a lista livre, e isso não se faz com o gate parado.
+    let seq = match anexado {
+        Ok((seq, saiu)) => {
+            drop(saiu);
+            seq
+        }
+        Err(preparado) => {
+            drop(preparado);
+            0
+        }
+    };
     // O custo do registro, e quando ele foi gravado — de onde sai a
     // latência da resposta do NSF. Antes de ele ser anunciado: o NSF não
     // lê um registro cujo momento ainda não está guardado.
@@ -1102,14 +1129,16 @@ pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &
 /// depois dela, com as sequências e os elos de lá. Ver
 /// [`politica::auditoria::Cadeia::continuar_com`].
 pub fn adotar_auditoria(mut do_journal: Cadeia) {
-    crate::arch::sem_interrupcoes(|| {
+    let a_do_boot = crate::arch::sem_interrupcoes(|| {
         let mut a = AUDITORIA.lock();
         if let Some(boot) = a.as_ref() {
             do_journal.continuar_com(boot);
         }
         ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
-        *a = Some(do_journal);
+        a.replace(do_journal)
     });
+    // A cadeia do boot, já continuada na do journal, é solta fora da trava.
+    drop(a_do_boot);
 }
 
 /// Quem está na sessão `sessao`. `Err` com o que se sabe, se a sessão não é
@@ -2261,10 +2290,19 @@ pub fn decisao_de_quem_pede(seq: u64) -> Result<String, &'static str> {
     else {
         return Err("fora de um comando autorizado");
     };
-    let registro = com_auditoria(|c| c.registro(seq).map(|r| r.evento.clone())).flatten();
-    let Some(e) = registro else {
+    // Com a trava, só o ponteiro do registro — ver "O anel e a trava de
+    // quem o guarda", em `politica::auditoria`; a conferência, fora dela.
+    let registro = com_auditoria(|c| {
+        c.compartilhados_depois_de(seq.saturating_sub(1))
+            .next()
+            .filter(|r| r.seq == seq)
+            .cloned()
+    })
+    .flatten();
+    let Some(registro) = registro else {
         return Err("a decisao nao esta na janela da auditoria");
     };
+    let e = &registro.evento;
     let mesmo_principal = e.titular == quem.titular
         && e.agente == quem.agente
         && e.chave == quem.chave
@@ -2284,7 +2322,7 @@ pub fn decisao_de_quem_pede(seq: u64) -> Result<String, &'static str> {
     if !mesmo_principal || !mesmo_processo || e.codigo != Codigo::Allow {
         return Err("a decisao nao e um ALLOW de quem declara");
     }
-    Ok(e.metodo)
+    Ok(e.metodo.clone())
 }
 
 /// A cota de armazém de quem o comando em execução neste fio age por: a
@@ -3157,8 +3195,7 @@ pub fn auditoria_na_mao_de_teste() -> bool {
 /// a trava da auditoria na mão — o que a cópia da auditoria para o journal
 /// não faz (ver "A cópia", em `persistencia`). O alocador pergunta a cada
 /// pedido, antes de tomar a trava dele, e a pergunta não aloca nem toma
-/// trava nenhuma. As devoluções não contam: quem anexa ao anel cheio devolve
-/// o registro que sai pela ponta com a trava na mão, desde sempre.
+/// trava nenhuma.
 #[cfg(feature = "modo-teste")]
 pub mod alocacoes_sob_a_auditoria_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};

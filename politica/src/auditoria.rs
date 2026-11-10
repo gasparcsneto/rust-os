@@ -48,6 +48,26 @@
 //! A cadeia continua verificável depois dela, como depois da âncora do
 //! anel, e a lacuna diz exatamente o que falta.
 //!
+//! # O anel e a trava de quem o guarda
+//!
+//! Quem guarda a cadeia a guarda atrás de uma trava, e todo registro novo a
+//! toma: no kernel, é a trava do gate, tomada com as interrupções
+//! mascaradas. Por isso o anel guarda cada registro num [`Arc`], e um
+//! registro nunca muda depois de entrar: quem lê com a trava na mão copia só
+//! os ponteiros ([`Cadeia::compartilhados_depois_de`],
+//! [`Cadeia::ultimos_compartilhados`]) — sem pedir memória, num vetor
+//! reservado antes — e lê os registros, escreve, refaz elos, depois de
+//! soltá-la. O registro que sai pela ponta continua inteiro para quem ainda
+//! o segura; o anel, a âncora e a lacuna não sabem disso.
+//!
+//! Do outro lado, quem anexa monta o registro e pede a memória dele antes
+//! da trava ([`Preparado`]); com ela, [`Cadeia::anexar_preparado`] só dá a
+//! sequência, o tempo, o anterior e o elo — o elo é a conta que não sai
+//! dali: ele é o do anterior, e o anterior só existe quando o registro de
+//! antes entrou —, e devolve o registro que saiu pela ponta, para quem
+//! anexa soltá-lo depois de soltar a trava. A ordem, os elos e o formato
+//! são os de sempre: o que muda é só onde a memória é pedida e devolvida.
+//!
 //! # O tempo não volta
 //!
 //! O tempo de um registro nunca é menor que o do anterior: o anel o sobe
@@ -59,6 +79,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use blake2::{Blake2s256, Digest};
 
@@ -633,9 +654,42 @@ pub struct AGravar<'a> {
     pub registros: alloc::vec::Vec<&'a Registro>,
 }
 
+/// Um registro montado antes de a trava de quem guarda a cadeia ser
+/// tomada: o evento com o detalhe já no teto, e a memória do registro já
+/// pedida ao alocador. [`Cadeia::anexar_preparado`] o completa sem pedir
+/// memória nenhuma — ver "O anel e a trava de quem o guarda", no começo do
+/// módulo.
+///
+/// O `Arc` dele não tem outra referência: o campo é privado, e nada aqui o
+/// clona antes de ele entrar no anel.
+pub struct Preparado(Arc<Registro>);
+
+impl Preparado {
+    /// O registro de `evento`, ainda sem sequência, anterior e elo — que só
+    /// a cadeia dá —, com o detalhe cortado no teto ([`MAIOR_DETALHE`]),
+    /// numa fronteira de caractere.
+    pub fn novo(mut evento: Evento) -> Preparado {
+        if evento.detalhe.len() > MAIOR_DETALHE {
+            let mut fim = MAIOR_DETALHE;
+            while !evento.detalhe.is_char_boundary(fim) {
+                fim -= 1;
+            }
+            evento.detalhe.truncate(fim);
+        }
+        Preparado(Arc::new(Registro {
+            seq: 0,
+            evento,
+            anterior: GENESE,
+            elo: GENESE,
+        }))
+    }
+}
+
 /// A cadeia, num anel.
 pub struct Cadeia {
-    registros: VecDeque<Registro>,
+    /// Cada registro num [`Arc`], que nunca muda depois de entrar: quem lê
+    /// copia o ponteiro — ver "O anel e a trava de quem o guarda".
+    registros: VecDeque<Arc<Registro>>,
     capacidade: usize,
     /// O elo do último que saiu pela ponta; [`GENESE`] enquanto nenhum saiu.
     ancora: [u8; 32],
@@ -645,11 +699,17 @@ pub struct Cadeia {
 }
 
 impl Cadeia {
-    /// Uma cadeia vazia que guarda até `capacidade` registros.
+    /// Uma cadeia vazia que guarda até `capacidade` registros. O lugar dos
+    /// ponteiros do anel cheio — um ponteiro por registro — é reservado
+    /// aqui, inteiro: anexar nunca faz o anel crescer — e pedir memória —
+    /// com a trava na mão. Por isso `nova` pede memória, e uma capacidade
+    /// que não cabe no endereçamento é um pânico, como a de todo vetor; quem
+    /// tem uma trava cria a cadeia antes de tomá-la.
     pub fn nova(capacidade: usize) -> Cadeia {
+        let capacidade = capacidade.max(1);
         Cadeia {
-            registros: VecDeque::new(),
-            capacidade: capacidade.max(1),
+            registros: VecDeque::with_capacity(capacidade),
+            capacidade,
             ancora: GENESE,
             proximo_seq: 1,
             ultimo_ts: 0,
@@ -671,36 +731,49 @@ impl Cadeia {
         self.ancora
     }
 
-    /// Acrescenta um registro e devolve o número dele.
-    pub fn anexar(&mut self, mut evento: Evento) -> u64 {
-        // O detalhe tem teto, cortado numa fronteira de caractere.
-        if evento.detalhe.len() > MAIOR_DETALHE {
-            let mut fim = MAIOR_DETALHE;
-            while !evento.detalhe.is_char_boundary(fim) {
-                fim -= 1;
-            }
-            evento.detalhe.truncate(fim);
-        }
-        // O tempo não volta: um registro feito antes de o piso do relógio
-        // ser conhecido sobe até o do anterior.
-        evento.ts_ms = evento.ts_ms.max(self.ultimo_ts);
-        self.ultimo_ts = evento.ts_ms;
+    /// Acrescenta um registro e devolve o número dele. O que sai pela ponta,
+    /// com o anel cheio, é solto aqui — quem tem uma trava na mão e não quer
+    /// devolver memória com ela usa [`Cadeia::anexar_preparado`].
+    pub fn anexar(&mut self, evento: Evento) -> u64 {
+        let (seq, saiu) = self.anexar_preparado(Preparado::novo(evento));
+        drop(saiu);
+        seq
+    }
+
+    /// Acrescenta o registro preparado e devolve o número dele e o registro
+    /// que saiu pela ponta — com o anel cheio —, para quem anexa soltá-lo
+    /// depois de soltar a trava.
+    ///
+    /// Nada aqui pede ou devolve memória: o lugar do registro veio com o
+    /// [`Preparado`] — o `Arc` dele é único, e [`Arc::make_mut`] num `Arc`
+    /// único só dá a referência, sem copiar —, o do ponteiro no anel foi
+    /// reservado em [`Cadeia::nova`], e o que sai é devolvido a quem chamou.
+    /// A conta é a de sempre: o tempo que não volta, a sequência seguinte, o
+    /// anterior — a cabeça —, e o elo.
+    #[must_use = "o registro que saiu pela ponta e solto por quem anexa, depois de soltar a trava"]
+    pub fn anexar_preparado(&mut self, preparado: Preparado) -> (u64, Option<Arc<Registro>>) {
+        let Preparado(mut novo) = preparado;
         let anterior = self.cabeca();
         let seq = self.proximo_seq;
-        let elo = elo(&anterior, seq, &evento);
-        if self.registros.len() == self.capacidade
-            && let Some(saiu) = self.registros.pop_front()
-        {
-            self.ancora = saiu.elo;
+        let r = Arc::make_mut(&mut novo);
+        // O tempo não volta: um registro feito antes de o piso do relógio
+        // ser conhecido sobe até o do anterior.
+        r.evento.ts_ms = r.evento.ts_ms.max(self.ultimo_ts);
+        self.ultimo_ts = r.evento.ts_ms;
+        r.seq = seq;
+        r.anterior = anterior;
+        r.elo = elo(&anterior, seq, &r.evento);
+        let saiu = if self.registros.len() == self.capacidade {
+            self.registros.pop_front()
+        } else {
+            None
+        };
+        if let Some(s) = &saiu {
+            self.ancora = s.elo;
         }
-        self.registros.push_back(Registro {
-            seq,
-            evento,
-            anterior,
-            elo,
-        });
+        self.registros.push_back(novo);
         self.proximo_seq += 1;
-        seq
+        (seq, saiu)
     }
 
     /// Repõe um registro lido do journal, no boot: a sequência tem de ser a
@@ -767,13 +840,22 @@ impl Cadeia {
     /// primeiro deles fica à distância de `gravada + 1` ao primeiro
     /// guardado. Nada aqui pede memória.
     pub fn guardados_depois_de(&self, gravada: u64) -> impl Iterator<Item = &Registro> {
+        self.compartilhados_depois_de(gravada).map(|r| &**r)
+    }
+
+    /// Os mesmos de [`Cadeia::guardados_depois_de`], como os `Arc` do anel:
+    /// para quem copia os ponteiros com a trava na mão e lê os registros
+    /// depois de soltá-la. Nada aqui pede memória.
+    pub fn compartilhados_depois_de(&self, gravada: u64) -> impl Iterator<Item = &Arc<Registro>> {
         self.registros.range(self.posicao_depois_de(gravada)..)
     }
 
     /// Os registros guardados de sequência até `gravada`, inclusive, do
     /// mais antigo ao mais novo: o começo da janela. Nada aqui pede memória.
     pub fn guardados_ate(&self, gravada: u64) -> impl Iterator<Item = &Registro> {
-        self.registros.range(..self.posicao_depois_de(gravada))
+        self.registros
+            .range(..self.posicao_depois_de(gravada))
+            .map(|r| &**r)
     }
 
     /// Quantos dos guardados têm sequência até `gravada`: o lugar, na
@@ -797,8 +879,15 @@ impl Cadeia {
 
     /// Os últimos `n` registros, do mais antigo ao mais novo.
     pub fn ultimos(&self, n: usize) -> impl Iterator<Item = &Registro> {
+        self.ultimos_compartilhados(n).map(|r| &**r)
+    }
+
+    /// Os mesmos de [`Cadeia::ultimos`], como os `Arc` do anel: para quem
+    /// copia os ponteiros com a trava na mão e lê os registros depois de
+    /// soltá-la. Nada aqui pede memória.
+    pub fn ultimos_compartilhados(&self, n: usize) -> impl Iterator<Item = &Arc<Registro>> {
         let pular = self.registros.len().saturating_sub(n);
-        self.registros.iter().skip(pular)
+        self.registros.range(pular..)
     }
 
     /// Quantos registros a janela guarda.
@@ -811,13 +900,13 @@ impl Cadeia {
     pub fn registro(&self, seq: u64) -> Option<&Registro> {
         let primeiro = self.registros.front()?.seq;
         let i = usize::try_from(seq.checked_sub(primeiro)?).ok()?;
-        self.registros.get(i).filter(|r| r.seq == seq)
+        self.registros.get(i).map(|r| &**r).filter(|r| r.seq == seq)
     }
 
     /// Refaz a cadeia guardada a partir da âncora. Devolve a cabeça, ou o
     /// número do primeiro registro que não confere.
     pub fn verificar(&self) -> Result<[u8; 32], u64> {
-        verificar(self.ancora, self.registros.iter())
+        verificar(self.ancora, self.ultimos(usize::MAX))
     }
 }
 
@@ -1804,5 +1893,251 @@ mod testes {
         confere(&b, 6);
         b.anexar(variado(1));
         confere(&b, 7);
+    }
+
+    /// O registro preparado e anexado é o que `anexar` daria — a mesma
+    /// sequência, o mesmo tempo (o que voltava sobe ao do anterior), o
+    /// mesmo anterior, o mesmo elo —; o `Arc` dele é o que entra no anel,
+    /// sem cópia; e o que sai pela ponta volta a quem anexou: o mais velho,
+    /// só com a referência de quem o recebeu, e a âncora no elo dele.
+    #[test]
+    fn o_preparado_e_o_anexado() {
+        let mut a = Cadeia::nova(4);
+        let mut b = Cadeia::nova(4);
+        for i in 0..10 {
+            let mut e = variado(i);
+            if i % 3 == 0 {
+                e.ts_ms = 0;
+            }
+            assert_eq!(a.anexar(e.clone()), i + 1);
+            let p = Preparado::novo(e);
+            let ponteiro = Arc::as_ptr(&p.0);
+            let mais_velho = b.ultimos(usize::MAX).next().map(|r| (r.seq, r.elo));
+            let (seq, saiu) = b.anexar_preparado(p);
+            assert_eq!(seq, i + 1);
+            let entrou = b.ultimos_compartilhados(1).next().unwrap();
+            assert_eq!(Arc::as_ptr(entrou), ponteiro, "o registro foi copiado");
+            match saiu {
+                Some(s) => {
+                    assert!(i >= 4, "saiu um registro do anel que nao estava cheio");
+                    assert_eq!(Some((s.seq, s.elo)), mais_velho);
+                    assert_eq!(b.ancora(), s.elo);
+                    assert_eq!(Arc::strong_count(&s), 1, "o anel ainda segura o que saiu");
+                }
+                None => assert!(i < 4, "o anel cheio nao devolveu o que saiu"),
+            }
+        }
+        assert_eq!(copiar(a.ultimos(usize::MAX)), copiar(b.ultimos(usize::MAX)));
+        assert_eq!(
+            (a.cabeca(), a.ancora(), a.ultima_seq(), a.guardados()),
+            (b.cabeca(), b.ancora(), b.ultima_seq(), b.guardados())
+        );
+        assert_eq!(b.verificar(), Ok(b.cabeca()));
+        assert!(
+            b.ultimos_compartilhados(usize::MAX)
+                .all(|r| Arc::strong_count(r) == 1),
+            "um registro do anel com outra referencia"
+        );
+    }
+
+    /// Os compartilhados são os registros do anel — os mesmos objetos, na
+    /// mesma ordem — que os guardados depois de uma sequência e os últimos
+    /// `n` dão, e os que o filtro pela sequência e o fim da janela dão: em
+    /// toda posição, antes do primeiro guardado, no meio, no último, depois
+    /// dele e no fim dos números; sem nenhum guardado, com a janela pela
+    /// metade, depois de o anel dar a volta e depois de uma lacuna reposta.
+    #[test]
+    fn os_compartilhados_sao_os_do_anel() {
+        fn confere(c: &Cadeia, ate: u64) {
+            let todos: Vec<u64> = c.ultimos(usize::MAX).map(|r| r.seq).collect();
+            for g in (0..=ate + 2).chain([u64::MAX - 1, u64::MAX]) {
+                let pela_posicao: Vec<*const Registro> = c
+                    .guardados_depois_de(g)
+                    .map(|r| r as *const Registro)
+                    .collect();
+                let compartilhados: Vec<*const Registro> =
+                    c.compartilhados_depois_de(g).map(Arc::as_ptr).collect();
+                assert_eq!(compartilhados, pela_posicao, "depois de {g}");
+                let seqs: Vec<u64> = c.compartilhados_depois_de(g).map(|r| r.seq).collect();
+                let filtro: Vec<u64> = todos.iter().copied().filter(|s| *s > g).collect();
+                assert_eq!(seqs, filtro, "depois de {g}");
+            }
+            for n in [0, 1, 2, 3, 4, 5, usize::MAX] {
+                let ultimos: Vec<*const Registro> =
+                    c.ultimos(n).map(|r| r as *const Registro).collect();
+                let compartilhados: Vec<*const Registro> =
+                    c.ultimos_compartilhados(n).map(Arc::as_ptr).collect();
+                assert_eq!(compartilhados, ultimos, "ultimos {n}");
+                let seqs: Vec<u64> = c.ultimos_compartilhados(n).map(|r| r.seq).collect();
+                assert_eq!(
+                    seqs,
+                    todos[todos.len() - n.min(todos.len())..],
+                    "ultimos {n}"
+                );
+            }
+        }
+        let mut c = Cadeia::nova(4);
+        confere(&c, 0);
+        for i in 0..3 {
+            c.anexar(variado(i));
+        }
+        confere(&c, 3);
+        for i in 3..10 {
+            c.anexar(variado(i));
+        }
+        confere(&c, 10);
+        let mut b = Cadeia::nova(4);
+        b.pular(Lacuna {
+            primeira: 1,
+            ultima: 5,
+            elo: [3; 32],
+        })
+        .unwrap();
+        confere(&b, 6);
+        b.anexar(variado(1));
+        confere(&b, 7);
+    }
+
+    /// A conta refeita da fotografia — a âncora e os `Arc` de todos os
+    /// guardados, tirados juntos — é a de [`Cadeia::verificar`]: com a
+    /// cadeia inteira, e com cada parte de um registro do meio estragada na
+    /// memória do anel — o evento, o anterior, o elo, o número —, que as
+    /// duas acusam no mesmo registro. E a fotografia não muda depois de o
+    /// anel andar: confere como conferia, com a cabeça de quando foi tirada.
+    #[test]
+    fn a_fotografia_confere_como_o_anel() {
+        type Fotografia = ([u8; 32], Vec<Arc<Registro>>);
+        let fotografia = |c: &Cadeia| -> Fotografia {
+            (
+                c.ancora(),
+                c.ultimos_compartilhados(usize::MAX).cloned().collect(),
+            )
+        };
+        let refeita = |f: &Fotografia| verificar(f.0, f.1.iter().map(|r| &**r));
+        let mut c = Cadeia::nova(8);
+        assert_eq!(refeita(&fotografia(&c)), Ok(GENESE));
+        for i in 0..20 {
+            c.anexar(variado(i));
+        }
+        let f = fotografia(&c);
+        assert_eq!(refeita(&f), c.verificar());
+        assert_eq!(refeita(&f), Ok(c.cabeca()));
+        let cabeca = c.cabeca();
+        for i in 20..40 {
+            c.anexar(variado(i));
+        }
+        assert_eq!(refeita(&f), Ok(cabeca));
+        assert_eq!(c.verificar(), Ok(c.cabeca()));
+        let estragos: [fn(&mut Registro); 6] = [
+            |r| r.evento.detalhe.push('x'),
+            |r| r.evento.ts_ms += 1,
+            |r| r.anterior[0] ^= 1,
+            |r| r.elo[31] ^= 1,
+            |r| r.seq += 1,
+            |r| {
+                r.evento.titular = if r.evento.titular == Titular::Kernel {
+                    Titular::Agente
+                } else {
+                    Titular::Kernel
+                }
+            },
+        ];
+        for (i, estragar) in estragos.iter().enumerate() {
+            let mut d = Cadeia::nova(8);
+            for j in 0..20 {
+                d.anexar(variado(j));
+            }
+            let antes = fotografia(&d);
+            let cabeca_antes = d.cabeca();
+            let alvo = d.registros.len() / 2;
+            estragar(Arc::make_mut(&mut d.registros[alvo]));
+            let esperado = d.verificar();
+            assert!(esperado.is_err(), "estrago {i}");
+            assert_eq!(refeita(&fotografia(&d)), esperado, "estrago {i}");
+            // A fotografia de antes do estrago não o vê: o estrago, com ela
+            // segurando o registro, foi feito numa cópia.
+            assert_eq!(refeita(&antes), Ok(cabeca_antes), "estrago {i}");
+        }
+    }
+
+    /// Segurar o `Arc` de um registro não muda o anel: ele sai pela ponta
+    /// na hora dele, a âncora é o elo dele, a lacuna e a janela são as de
+    /// sempre, a cadeia confere, e quem o segura continua lendo o mesmo
+    /// registro.
+    #[test]
+    fn segurar_um_registro_nao_muda_o_anel() {
+        let mut c = Cadeia::nova(4);
+        for i in 0..4 {
+            c.anexar(variado(i));
+        }
+        let velho = c
+            .ultimos_compartilhados(usize::MAX)
+            .next()
+            .cloned()
+            .unwrap();
+        let (seq, elo_dele) = (velho.seq, velho.elo);
+        let (_, saiu) = c.anexar_preparado(Preparado::novo(variado(4)));
+        let saiu = saiu.expect("o anel cheio devolve o que saiu");
+        assert!(Arc::ptr_eq(&saiu, &velho));
+        drop(saiu);
+        assert_eq!(Arc::strong_count(&velho), 1);
+        assert_eq!(c.ancora(), elo_dele);
+        assert_eq!(c.ultimos(usize::MAX).next().map(|r| r.seq), Some(seq + 1));
+        assert!(c.registro(seq).is_none());
+        assert_eq!(
+            c.lacuna_depois_de(0),
+            Some(Lacuna {
+                primeira: 1,
+                ultima: seq,
+                elo: elo_dele
+            })
+        );
+        assert_eq!(c.verificar(), Ok(c.cabeca()));
+        assert_eq!((velho.seq, velho.elo), (seq, elo_dele));
+    }
+
+    /// O lugar dos ponteiros do anel cheio é reservado na criação: anexar
+    /// — até encher, e depois, com o anel dando a volta — nunca faz o anel
+    /// crescer, nem pedir memória, com a trava de quem o guarda na mão.
+    #[test]
+    fn o_anel_nao_cresce_ao_anexar() {
+        for capacidade in [1, 4, 100] {
+            let mut c = Cadeia::nova(capacidade);
+            let reservado = c.registros.capacity();
+            assert!(reservado >= capacidade, "capacidade {capacidade}");
+            for i in 0..(capacidade as u64 * 2 + 3) {
+                let (_, saiu) = c.anexar_preparado(Preparado::novo(variado(i)));
+                drop(saiu);
+                assert_eq!(
+                    c.registros.capacity(),
+                    reservado,
+                    "capacidade {capacidade}, registro {i}"
+                );
+            }
+        }
+    }
+
+    /// O anel de um registro só: a cabeça do novo é o elo do que sai, a
+    /// âncora passa a ser esse elo, e a janela — de um — confere a partir
+    /// dela, a cada registro.
+    #[test]
+    fn o_anel_de_um_registro_confere() {
+        let mut c = Cadeia::nova(1);
+        for i in 0..4 {
+            let cabeca = c.cabeca();
+            let (seq, saiu) = c.anexar_preparado(Preparado::novo(variado(i)));
+            assert_eq!(seq, i + 1);
+            let entrou = c.ultimos(1).next().unwrap();
+            assert_eq!(entrou.anterior, cabeca);
+            match saiu {
+                Some(s) => {
+                    assert_eq!(s.elo, cabeca);
+                    assert_eq!(c.ancora(), cabeca);
+                }
+                None => assert_eq!(i, 0),
+            }
+            assert_eq!(c.guardados(), 1);
+            assert_eq!(c.verificar(), Ok(c.cabeca()));
+        }
     }
 }

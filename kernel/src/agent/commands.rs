@@ -2614,18 +2614,20 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
         .unwrap_or(32)
         .min(MAIOR_CAUDA_DA_AUDITORIA) as usize;
     let depois = params.member("after").and_then(|v| v.as_u64());
-    // Copiados, e a trava solta antes de escrever: a escrita vai ao canal,
-    // e o canal não é lugar de segurar a trava da auditoria. Com `after`,
-    // os primeiros `n` depois dele; sem, os últimos `n`.
-    let registros = crate::autorizacao::com_auditoria(|c| match depois {
-        Some(depois) => politica::auditoria::copiar(
-            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-                .filter(|r| r.seq > depois)
-                .take(n),
-        ),
-        None => politica::auditoria::copiar(c.ultimos(n)),
-    })
-    .unwrap_or_default();
+    // Com a trava, só os ponteiros: os `Arc` dos registros do anel, para um
+    // vetor reservado antes — nada ali pede memória —, e achados pela
+    // posição, sem passar pela janela: as sequências do anel são seguidas.
+    // Com `after`, os primeiros `n` depois dele; sem, os últimos `n`. Com a
+    // trava solta, o JSON: a escrita vai ao canal, e o canal não é lugar de
+    // segurar a trava da auditoria. Um registro que sai do anel no meio
+    // continua inteiro para quem o segura — ver "O anel e a trava de quem o
+    // guarda", em `politica::auditoria`.
+    let mut registros: alloc::vec::Vec<alloc::sync::Arc<politica::auditoria::Registro>> =
+        alloc::vec::Vec::with_capacity(n);
+    crate::autorizacao::com_auditoria(|c| match depois {
+        Some(depois) => registros.extend(c.compartilhados_depois_de(depois).take(n).cloned()),
+        None => registros.extend(c.ultimos_compartilhados(n).cloned()),
+    });
     // Até onde a cadeia está no journal: o que vem depois ainda é só da
     // memória, e uma queda de energia o leva.
     let gravada = crate::persistencia::auditoria_gravada();
@@ -3089,7 +3091,50 @@ fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    let r = crate::autorizacao::com_auditoria(|c| (c.verificar(), c.guardados()));
+    escrever_verificacao(w, verificar_a_auditoria())
+}
+
+/// A cadeia guardada refeita da âncora: a cabeça, ou o número do primeiro
+/// registro que não confere, e quantos foram conferidos; `None` sem a
+/// cadeia.
+///
+/// Com a trava, só a fotografia: a âncora e os `Arc` de todos os guardados,
+/// na mesma tomada, para um vetor reservado antes — nada ali pede memória.
+/// A conta — o BLAKE2s de cada registro — fica para depois de soltá-la: é a
+/// de `Cadeia::verificar`, sobre os mesmos registros, que não mudam depois
+/// de entrar no anel; e os que saírem dele no meio da conta continuam
+/// inteiros para a fotografia — ver "O anel e a trava de quem o guarda", em
+/// `politica::auditoria`.
+///
+/// Sem o lugar da fotografia — o heap sem um bloco do tamanho dela — e no
+/// post-mortem, onde não há gate a esperar e a memória pode ter acabado, a
+/// conta é feita com a trava na mão, como antes: a resposta é a mesma, e a
+/// pergunta não depende de memória.
+fn verificar_a_auditoria() -> Option<(Result<[u8; 32], u64>, usize)> {
+    let mut fotografia: alloc::vec::Vec<alloc::sync::Arc<politica::auditoria::Registro>> =
+        alloc::vec::Vec::new();
+    let com_fotografia = !crate::traps::em_post_mortem()
+        && fotografia
+            .try_reserve_exact(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+            .is_ok();
+    if !com_fotografia {
+        return crate::autorizacao::com_auditoria(|c| (c.verificar(), c.guardados()));
+    }
+    let ancora = crate::autorizacao::com_auditoria(|c| {
+        fotografia.extend(c.ultimos_compartilhados(usize::MAX).cloned());
+        c.ancora()
+    })?;
+    Some((
+        politica::auditoria::verificar(ancora, fotografia.iter().map(|r| &**r)),
+        fotografia.len(),
+    ))
+}
+
+/// A resposta de `audit.verify` para o que [`verificar_a_auditoria`] deu.
+pub(crate) fn escrever_verificacao(
+    w: &mut JsonWriter,
+    r: Option<(Result<[u8; 32], u64>, usize)>,
+) -> fmt::Result {
     w.begin_object()?;
     match r {
         Some((Ok(cabeca), guardados)) => {
