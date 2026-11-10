@@ -4391,12 +4391,14 @@ const FUNCOES_DE_MENSAGEM: &[&str] = &[
 ///
 /// # A regra
 ///
-/// `com_auditoria(` só aparece em `autorizacao.rs`, que a guarda, em
-/// `persistencia.rs`, que a grava e a compacta, e — em `agent/commands.rs` —
-/// só dentro de `audit_tail`, `audit_head` e `audit_verify`, os relatórios.
-/// A suíte, que confere a cadeia, fica de fora.
+/// `com_auditoria` só aparece no código de `autorizacao.rs`, que a guarda,
+/// de `persistencia.rs`, que a grava e a compacta, e — em
+/// `agent/commands.rs` — só no corpo de `audit_tail`, `audit_head` e
+/// `audit_verify`, os relatórios. A suíte, que confere a cadeia, fica de
+/// fora. O nome conta em qualquer forma — a chamada, o turbofish, um `use`
+/// com outro nome, um ponteiro para a função —, e o corpo de cada relatório
+/// é o dele, e não o que vem depois (ver [`leituras_da_auditoria`]).
 fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
-    const RELATORIOS: [&str; 3] = ["audit_tail", "audit_head", "audit_verify"];
     let raiz = raiz_do_projeto();
     let fontes = raiz.join("kernel/src");
     let mut fora = Vec::new();
@@ -4413,28 +4415,14 @@ fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
         }
         let texto = std::fs::read_to_string(caminho)
             .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
-        let mut funcao = "";
-        for (n, linha) in texto.lines().enumerate() {
-            if let Some(resto) = linha
-                .trim_start()
-                .strip_prefix("fn ")
-                .or(linha.trim_start().strip_prefix("pub fn "))
-                .or(linha.trim_start().strip_prefix("pub(crate) fn "))
-            {
-                funcao = resto.split(['(', '<']).next().unwrap_or("");
-            }
-            if !linha.contains("com_auditoria(") {
-                continue;
-            }
+        for (n, relatorio) in leituras_da_auditoria(&relativo, &texto) {
             achadas += 1;
-            if relativo == "agent/commands.rs" && RELATORIOS.contains(&funcao) {
-                continue;
+            if relatorio.is_none() {
+                fora.push(format!(
+                    "kernel/src/{relativo}:{n}: {}",
+                    texto.lines().nth(n - 1).unwrap_or("").trim()
+                ));
             }
-            fora.push(format!(
-                "kernel/src/{relativo}:{}: {funcao}: {}",
-                n + 1,
-                linha.trim()
-            ));
         }
         Ok(())
     })?;
@@ -4459,6 +4447,152 @@ fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
              depender dele."
         );
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Os relatórios que leem a cadeia da auditoria, em `agent/commands.rs`.
+const RELATORIOS_DA_AUDITORIA: [&str; 3] = ["audit_tail", "audit_head", "audit_verify"];
+
+/// Cada linha de `texto` — a fonte `kernel/src/<relativo>` — que nomeia
+/// `com_auditoria` no código, fora dos comentários e dos textos, como
+/// palavra inteira — a chamada, o turbofish, um `use` com outro nome, um
+/// ponteiro para a função —, contada do 1, com o relatório em cujo corpo ela
+/// está, se está.
+///
+/// Os relatórios só valem em `agent/commands.rs`, e o corpo de cada um vai
+/// do cabeçalho na coluna zero — `fn audit_tail(`, sem nada antes — à
+/// primeira chave sozinha na coluna zero depois dele, como o `rustfmt`
+/// fecha uma função do módulo. Fica de fora o que vem depois de um
+/// relatório — outra função, de qualquer jeito declarada, um `static`, uma
+/// macro — e uma função do mesmo nome dentro de outro módulo, que não está
+/// na coluna zero. Um relatório que deixe de estar nela, ou que mude de
+/// declaração, perde o corpo: as leituras dele aparecem, e a conferência
+/// reprova em vez de ficar cega (o achado A1 do adversário do `58f8904`).
+fn leituras_da_auditoria(relativo: &str, texto: &str) -> Vec<(usize, Option<&'static str>)> {
+    let codigo: String = so_o_codigo(texto).into_iter().collect();
+    let linhas: Vec<&str> = codigo.lines().collect();
+    let corpos: Vec<(&'static str, usize, usize)> = if relativo == "agent/commands.rs" {
+        RELATORIOS_DA_AUDITORIA
+            .iter()
+            .filter_map(|&nome| {
+                let cabecalho = format!("fn {nome}(");
+                let de = linhas.iter().position(|l| l.starts_with(&cabecalho))?;
+                let ate = de + linhas[de..].iter().position(|l| l.trim_end() == "}")?;
+                Some((nome, de, ate))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    linhas
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| tem_a_palavra(l, "com_auditoria"))
+        .map(|(n, _)| {
+            let relatorio = corpos
+                .iter()
+                .find(|&&(_, de, ate)| (de..=ate).contains(&n))
+                .map(|&(nome, _, _)| nome);
+            (n + 1, relatorio)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod testes_da_auditoria_so_relatada {
+    use super::leituras_da_auditoria;
+
+    /// Um `agent/commands.rs` com os três relatórios lendo a cadeia, e
+    /// `depois` logo depois do último.
+    fn com_os_relatorios(depois: &str) -> String {
+        let mut t = String::new();
+        t.push_str("fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {\n");
+        t.push_str("    let n = crate::autorizacao::com_auditoria(|c| c.guardados());\n");
+        t.push_str("    escrever(w, n)\n}\n\n");
+        t.push_str(
+            "/// A cabeça.\nfn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {\n",
+        );
+        t.push_str("    let cabeca = crate::autorizacao::com_auditoria(|c| {\n");
+        t.push_str("        c.cabeca()\n    });\n    escrever(w, cabeca)\n}\n\n");
+        t.push_str("fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {\n");
+        t.push_str("    let tomada = if sim {\n");
+        t.push_str("        crate::autorizacao::com_auditoria(|c| Ok(c.ancora()))\n");
+        t.push_str("    } else {\n");
+        t.push_str("        crate::autorizacao::com_auditoria(|c| Err(c.guardados()))\n");
+        t.push_str("    };\n    escrever(w, tomada)\n}\n\n");
+        t.push_str(depois);
+        t.push('\n');
+        t
+    }
+
+    /// As linhas das leituras fora dos relatórios.
+    fn fora(relativo: &str, texto: &str) -> Vec<usize> {
+        leituras_da_auditoria(relativo, texto)
+            .into_iter()
+            .filter(|(_, relatorio)| relatorio.is_none())
+            .map(|(n, _)| n)
+            .collect()
+    }
+
+    /// As quatro leituras dos relatórios são deles; e, num arquivo que não é
+    /// `agent/commands.rs`, os mesmos nomes não valem nada.
+    #[test]
+    fn os_relatorios_leem() {
+        let t = com_os_relatorios("");
+        let leituras = leituras_da_auditoria("agent/commands.rs", &t);
+        assert_eq!(
+            leituras
+                .iter()
+                .map(|(_, r)| r.unwrap_or("fora"))
+                .collect::<Vec<_>>(),
+            ["audit_tail", "audit_head", "audit_verify", "audit_verify"]
+        );
+        assert_eq!(fora("agent/outro.rs", &t).len(), 4);
+    }
+
+    /// Cada forma de ler a cadeia logo depois de um relatório, ou fora
+    /// dele, aparece: as que a conferência pelo texto `com_auditoria(` e
+    /// pela última linha `fn` deixava passar (o achado A1 do adversário do
+    /// `58f8904`), e o controle, uma função comum.
+    #[test]
+    fn a_leitura_em_qualquer_forma_fora_dos_relatorios() {
+        for forma in [
+            "fn decide_w() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+            "use crate::autorizacao::com_auditoria as ler;",
+            "fn decide() -> bool {\n    let f = crate::autorizacao::com_auditoria;\n    f(|c| c.guardados() > 0).unwrap_or(false)\n}",
+            "fn decide() -> bool {\n    crate::autorizacao::com_auditoria::<bool>(|c| c.guardados() > 0)\n        .unwrap_or(false)\n}",
+            "pub(super) fn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+            "unsafe fn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+            "const fn zero() -> u64 {\n    0\n}\nasync fn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+            "pub(in crate::agent) fn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+            "static LEITOR: fn() -> Option<u64> = || crate::autorizacao::com_auditoria(|c| c.ultima_seq());",
+            "macro_rules! ler {\n    ($f:expr) => {\n        crate::autorizacao::com_auditoria($f)\n    };\n}",
+            "mod outro {\n    pub fn audit_tail() -> Option<u64> {\n        crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n    }\n}",
+        ] {
+            let t = com_os_relatorios(forma);
+            assert_eq!(fora("agent/commands.rs", &t).len(), 1, "{forma}");
+        }
+    }
+
+    /// O nome num comentário ou num texto não é leitura.
+    #[test]
+    fn o_nome_nos_comentarios_e_nos_textos_nao_e_leitura() {
+        let t = com_os_relatorios(
+            "// crate::autorizacao::com_auditoria(|c| c.guardados())\n\
+             /// Ver [`crate::autorizacao::com_auditoria`].\n\
+             /* com_auditoria(|c| c.cabeca()) */\n\
+             fn nome() -> &'static str {\n    \"com_auditoria(\"\n}",
+        );
+        assert!(fora("agent/commands.rs", &t).is_empty());
+        assert_eq!(leituras_da_auditoria("agent/commands.rs", &t).len(), 4);
+    }
+
+    /// Um relatório que deixa de começar na coluna zero, ou que muda de
+    /// declaração, perde o corpo: a leitura dele aparece.
+    #[test]
+    fn o_relatorio_fora_do_cabecalho_perde_o_corpo() {
+        let t = com_os_relatorios("").replace("fn audit_tail(", "pub fn audit_tail(");
+        assert_eq!(fora("agent/commands.rs", &t), [2]);
     }
 }
 
