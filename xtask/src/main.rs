@@ -4062,10 +4062,6 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
         "persistencia::gravar_auditoria_ate(",
         &["kernel/src/agent/commands.rs", "kernel/src/energia.rs"],
     ),
-    (
-        "autorizacao::decisao_de_quem_pede(",
-        &["kernel/src/agent/commands.rs"],
-    ),
     // Os tratadores de hora só pelos handlers, depois do gate: o pedido e a
     // entrega pelos de `time.request` e `time.sync`, a confirmação pela
     // operação administrativa, com prova. E o civil só se move por eles: o
@@ -4391,54 +4387,72 @@ const FUNCOES_DE_MENSAGEM: &[&str] = &[
 ///
 /// # A regra
 ///
-/// `com_auditoria` só aparece no código de `autorizacao.rs`, que a guarda,
-/// de `persistencia.rs`, que a grava e a compacta, e — em
-/// `agent/commands.rs` — só no corpo de `audit_tail`, `audit_head` e
-/// `audit_verify`, os relatórios. A suíte, que confere a cadeia, fica de
-/// fora. O nome conta em qualquer forma — a chamada, o turbofish, um `use`
-/// com outro nome, um ponteiro para a função —, e o corpo de cada relatório
-/// é o dele, e não o que vem depois (ver [`leituras_da_auditoria`]).
+/// A cadeia só se toca no corpo dos itens de [`DONOS_DA_AUDITORIA`]: em
+/// `autorizacao.rs`, que a guarda, onde ela é declarada, lida de novo com a
+/// política, anexada pelo gate, emprestada, adotada no boot, destravada na
+/// falha fatal e vigiada pela suíte, e no leitor da declaração ancorada;
+/// em `persistencia.rs`, na cópia para o journal e na compactação; e, em
+/// `agent/commands.rs`, em `audit_tail`, `audit_head` e `audit_verify`, os
+/// relatórios. A suíte, que confere a cadeia, fica de fora. O nome
+/// `com_auditoria` conta em qualquer forma — a chamada, o turbofish, um
+/// `use` com outro nome, um ponteiro para a função —, e, em
+/// `autorizacao.rs`, a trava `AUDITORIA` também; o corpo de cada item é o
+/// dele, e não o que vem depois (ver [`leituras_da_auditoria`]). Antes,
+/// `autorizacao.rs` e `persistencia.rs` ficavam de fora inteiros, e uma
+/// decisão nova ali leria a cadeia sem a conferência ver (o achado B1 do
+/// adversário do `61027e8`). E cada item da lista tem de ler a cadeia: um
+/// que suma, que mude de cabeçalho ou que deixe de lê-la deixa a
+/// conferência cega, e ela reprova.
 fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
     let raiz = raiz_do_projeto();
     let fontes = raiz.join("kernel/src");
     let mut fora = Vec::new();
-    let mut achadas = 0;
+    let mut lidos = std::collections::BTreeSet::new();
     percorrer_fontes(&fontes, &mut |caminho| {
         let relativo = caminho
             .strip_prefix(&fontes)
             .map_err(|_| format!("{} fora de kernel/src", caminho.display()))?
             .to_string_lossy()
             .replace('\\', "/");
-        if matches!(relativo.as_str(), "autorizacao.rs" | "persistencia.rs") || da_suite(&relativo)
-        {
+        if da_suite(&relativo) {
             return Ok(());
         }
         let texto = std::fs::read_to_string(caminho)
             .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
-        for (n, relatorio) in leituras_da_auditoria(&relativo, &texto) {
-            achadas += 1;
-            if relatorio.is_none() {
-                fora.push(format!(
+        for (n, dono) in leituras_da_auditoria(&relativo, &texto) {
+            match dono {
+                Some(item) => {
+                    lidos.insert(format!("{relativo}:{item}"));
+                }
+                None => fora.push(format!(
                     "kernel/src/{relativo}:{n}: {}",
                     texto.lines().nth(n - 1).unwrap_or("").trim()
-                ));
+                )),
             }
         }
         Ok(())
     })?;
-    if achadas == 0 {
-        fora.push(
-            "nenhuma leitura da auditoria fora da persistência: a conferência está cega".into(),
-        );
+    for (arquivo, _, cabecalhos) in DONOS_DA_AUDITORIA {
+        for cabecalho in *cabecalhos {
+            let item = nome_do_cabecalho(cabecalho);
+            if !lidos.contains(&format!("{arquivo}:{item}")) {
+                fora.push(format!(
+                    "kernel/src/{arquivo}: `{item}` não toca a cadeia — sumiu, mudou de \
+                     cabeçalho ou deixou de lê-la: a conferência está cega"
+                ));
+            }
+        }
     }
     if fora.is_empty() {
         println!(
-            "[xtask] a cadeia da auditoria só é lida pela persistência e pelos relatórios: \
-             nenhuma decisão depende de um registro que um rollback pode levar"
+            "[xtask] a cadeia da auditoria só é tocada por quem a guarda, pela persistência e \
+             pelos relatórios: nenhuma decisão depende de um registro que um rollback pode levar"
         );
         Ok(ExitCode::SUCCESS)
     } else {
-        println!("[xtask] a auditoria lida fora da persistência e dos relatórios:");
+        println!(
+            "[xtask] a auditoria tocada fora de quem a guarda, da persistência e dos relatórios:"
+        );
         for f in &fora {
             println!("  {f}");
         }
@@ -4450,57 +4464,199 @@ fn conferir_auditoria_so_relatada() -> Result<ExitCode, String> {
     }
 }
 
-/// Os relatórios que leem a cadeia da auditoria, em `agent/commands.rs`.
-const RELATORIOS_DA_AUDITORIA: [&str; 3] = ["audit_tail", "audit_head", "audit_verify"];
-
-/// Cada linha de `texto` — a fonte `kernel/src/<relativo>` — que nomeia
-/// `com_auditoria` no código, fora dos comentários e dos textos, como
-/// palavra inteira — a chamada, o turbofish, um `use` com outro nome, um
-/// ponteiro para a função —, contada do 1, com o relatório em cujo corpo ela
-/// está, se está.
+/// Os itens que tocam a cadeia da auditoria: o arquivo, debaixo de
+/// `kernel/src`, a palavra e o cabeçalho, na coluna zero e sem nada antes,
+/// de cada item em cujo corpo ela pode aparecer — ver
+/// [`conferir_auditoria_so_relatada`].
 ///
-/// Os relatórios só valem em `agent/commands.rs`, e o corpo de cada um vai
-/// do cabeçalho na coluna zero — `fn audit_tail(`, sem nada antes — à
-/// primeira chave sozinha na coluna zero depois dele, como o `rustfmt`
-/// fecha uma função do módulo. Fica de fora o que vem depois de um
-/// relatório — outra função, de qualquer jeito declarada, um `static`, uma
-/// macro — e uma função do mesmo nome dentro de outro módulo, que não está
-/// na coluna zero. Um relatório que deixe de estar nela, ou que mude de
-/// declaração, perde o corpo: as leituras dele aparecem, e a conferência
-/// reprova em vez de ficar cega (o achado A1 do adversário do `58f8904`).
+/// - Em `agent/commands.rs`, os relatórios.
+/// - Em `autorizacao.rs`, que a guarda: `com_auditoria`, que a empresta, e
+///   o leitor da declaração ancorada, que só o `audit.declare` chama (ver
+///   [`NOMES_PROTEGIDOS`]); e a trava, `AUDITORIA`, na declaração dela —
+///   privada —, na política lida de novo, no gate que anexa, no
+///   empréstimo, no boot que adota a cadeia do journal, na falha fatal que
+///   a destrava e nos ganchos da suíte.
+/// - Em `persistencia.rs`, que a grava e a compacta: a cópia para o journal
+///   e a compactação. O `AUDITORIA` de lá é o tipo do registro, e não a
+///   trava.
+const DONOS_DA_AUDITORIA: &[(&str, &str, &[&str])] = &[
+    (
+        "agent/commands.rs",
+        "com_auditoria",
+        &["fn audit_tail(", "fn audit_head(", "fn audit_verify("],
+    ),
+    (
+        "autorizacao.rs",
+        "com_auditoria",
+        &["pub fn com_auditoria<", "pub fn decisao_de_quem_pede("],
+    ),
+    (
+        "autorizacao.rs",
+        "AUDITORIA",
+        &[
+            "static AUDITORIA:",
+            "pub fn carregar(",
+            "fn auditar(",
+            "pub fn com_auditoria<",
+            "pub fn adotar_auditoria(",
+            "pub unsafe fn destravar(",
+            "pub fn auditoria_na_mao_de_teste(",
+            "pub mod alocacoes_sob_a_auditoria_de_teste ",
+        ],
+    ),
+    (
+        "persistencia.rs",
+        "com_auditoria",
+        &[
+            "fn auditoria_que_cabe(",
+            "fn gravar_sozinho(",
+            "pub fn gravar_auditoria(",
+            "pub fn gravar_auditoria_se_preciso(",
+            "fn compactar_sozinho(",
+        ],
+    ),
+];
+
+/// O corpo de um item de [`DONOS_DA_AUDITORIA`] numa fonte: o nome do
+/// item e a primeira e a última linha dele, contadas do 0.
+type CorpoDeItem = (&'static str, usize, usize);
+
+/// O nome do item de um cabeçalho de [`DONOS_DA_AUDITORIA`]: a última
+/// palavra dele, sem o `(`, o `<` ou o `:` do fim.
+fn nome_do_cabecalho(cabecalho: &'static str) -> &'static str {
+    let ultima = cabecalho.split_whitespace().last().unwrap_or(cabecalho);
+    ultima.trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '_'))
+}
+
+/// Cada linha de `texto` — a fonte `kernel/src/<relativo>` — que toca a
+/// cadeia no código, fora dos comentários e dos textos — o nome
+/// `com_auditoria` como palavra inteira, em qualquer forma: a chamada, o
+/// turbofish, um `use` com outro nome, um ponteiro para a função; e, em
+/// `autorizacao.rs`, onde ela mora, a trava `AUDITORIA` —, contada do 1,
+/// com o item de [`DONOS_DA_AUDITORIA`] em cujo corpo ela está, se está.
+///
+/// O corpo de um item vai do cabeçalho na coluna zero — `fn audit_tail(`,
+/// sem nada antes, como na lista — ao fim dele (ver [`fim_do_item`]). Fica
+/// de fora o que vem depois de um item — outra função, de qualquer jeito
+/// declarada, um `static`, uma macro — e uma função do mesmo nome dentro
+/// de outro módulo, que não está na coluna zero. Um item que deixe de
+/// estar nela, ou que mude de declaração, perde o corpo: as leituras dele
+/// aparecem, e a conferência reprova em vez de ficar cega (o achado A1 do
+/// adversário do `58f8904`). E um corpo que declara alguma coisa que se
+/// chama de fora dele — um `impl`, uma macro exportada — não vale como
+/// corpo do item: o que ele lê, qualquer um chamaria (o achado I1 do
+/// adversário do `61027e8`).
 fn leituras_da_auditoria(relativo: &str, texto: &str) -> Vec<(usize, Option<&'static str>)> {
     let codigo: String = so_o_codigo(texto).into_iter().collect();
     let linhas: Vec<&str> = codigo.lines().collect();
-    let corpos: Vec<(&'static str, usize, usize)> = if relativo == "agent/commands.rs" {
-        RELATORIOS_DA_AUDITORIA
-            .iter()
-            .filter_map(|&nome| {
-                let cabecalho = format!("fn {nome}(");
-                let de = linhas.iter().position(|l| l.starts_with(&cabecalho))?;
-                let ate = de + linhas[de..].iter().position(|l| l.trim_end() == "}")?;
-                Some((nome, de, ate))
-            })
-            .collect()
+    let palavras: &[&str] = if relativo == "autorizacao.rs" {
+        &["com_auditoria", "AUDITORIA"]
     } else {
-        Vec::new()
+        &["com_auditoria"]
     };
+    let corpos: Vec<(&str, Vec<CorpoDeItem>)> = palavras
+        .iter()
+        .map(|&palavra| {
+            let deles = DONOS_DA_AUDITORIA
+                .iter()
+                .filter(|(arquivo, p, _)| *arquivo == relativo && *p == palavra)
+                .flat_map(|(_, _, cabecalhos)| cabecalhos.iter())
+                .filter_map(|&cabecalho| {
+                    let de = linhas.iter().position(|l| l.starts_with(cabecalho))?;
+                    let ate = fim_do_item(&linhas, de);
+                    let so_dele = !linhas[de + 1..=ate].iter().any(|l| declara_para_fora(l));
+                    so_dele.then_some((nome_do_cabecalho(cabecalho), de, ate))
+                })
+                .collect();
+            (palavra, deles)
+        })
+        .collect();
     linhas
         .iter()
         .enumerate()
-        .filter(|(_, l)| tem_a_palavra(l, "com_auditoria"))
-        .map(|(n, _)| {
-            let relatorio = corpos
+        .filter_map(|(n, l)| {
+            let donos: Vec<Option<&'static str>> = corpos
                 .iter()
-                .find(|&&(_, de, ate)| (de..=ate).contains(&n))
-                .map(|&(nome, _, _)| nome);
-            (n + 1, relatorio)
+                .filter(|(palavra, _)| tem_a_palavra(l, palavra))
+                .map(|(_, deles)| {
+                    deles
+                        .iter()
+                        .find(|&&(_, de, ate)| (de..=ate).contains(&n))
+                        .map(|&(nome, _, _)| nome)
+                })
+                .collect();
+            let primeiro = *donos.first()?;
+            let todos = donos.iter().all(Option::is_some);
+            Some((n + 1, primeiro.filter(|_| todos)))
         })
         .collect()
 }
 
+/// Onde acaba o item declarado na coluna zero na linha `de` de `linhas` —
+/// o código, sem os comentários e os textos: na primeira chave sozinha na
+/// coluna zero depois dele, como o `rustfmt` fecha um item do módulo; ou,
+/// antes dela, na linha anterior ao item seguinte — um atributo ou uma
+/// declaração na coluna zero —, quando o item acaba sem ela: um `static`
+/// de uma linha, ou um corpo cuja última chave não está na coluna zero, que
+/// senão levaria o item seguinte junto (o achado I1 do adversário do
+/// `61027e8`).
+fn fim_do_item(linhas: &[&str], de: usize) -> usize {
+    for (k, l) in linhas.iter().enumerate().skip(de + 1) {
+        if l.trim_end() == "}" {
+            return k;
+        }
+        if comeca_um_item(l) {
+            return k - 1;
+        }
+    }
+    linhas.len() - 1
+}
+
+/// Se `linha` abre um item na coluna zero: um atributo, ou uma declaração —
+/// `fn`, `mod`, `static`, `impl`, uma macro, o que for, com a visibilidade e
+/// os qualificadores antes.
+fn comeca_um_item(linha: &str) -> bool {
+    let primeira = linha
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '!'))
+        .next()
+        .unwrap_or("");
+    linha.starts_with('#')
+        || matches!(
+            primeira,
+            "pub"
+                | "fn"
+                | "mod"
+                | "static"
+                | "const"
+                | "impl"
+                | "struct"
+                | "enum"
+                | "union"
+                | "type"
+                | "use"
+                | "trait"
+                | "unsafe"
+                | "extern"
+                | "async"
+                | "macro_rules!"
+        )
+}
+
+/// Se `linha`, no corpo de um item, declara alguma coisa que se chama de
+/// fora dele: um `impl` — os métodos dele valem para o tipo em todo
+/// lugar — ou uma macro exportada.
+fn declara_para_fora(linha: &str) -> bool {
+    let t = linha.trim_start();
+    let t = t.strip_prefix("unsafe ").map_or(t, str::trim_start);
+    let um_impl = t
+        .strip_prefix("impl")
+        .is_some_and(|resto| !resto.starts_with(|c: char| c.is_alphanumeric() || c == '_'));
+    um_impl || tem_a_palavra(linha, "macro_export")
+}
+
 #[cfg(test)]
 mod testes_da_auditoria_so_relatada {
-    use super::leituras_da_auditoria;
+    use super::{leituras_da_auditoria, so_o_codigo};
 
     /// Um `agent/commands.rs` com os três relatórios lendo a cadeia, e
     /// `depois` logo depois do último.
@@ -4593,6 +4749,125 @@ mod testes_da_auditoria_so_relatada {
     fn o_relatorio_fora_do_cabecalho_perde_o_corpo() {
         let t = com_os_relatorios("").replace("fn audit_tail(", "pub fn audit_tail(");
         assert_eq!(fora("agent/commands.rs", &t), [2]);
+    }
+
+    /// Um relatório cuja última chave não está na coluna zero acaba no item
+    /// seguinte, e não leva a função seguinte junto (o achado I1 do
+    /// adversário do `61027e8`).
+    #[test]
+    fn o_corpo_acaba_no_item_seguinte() {
+        let t = com_os_relatorios(
+            "fn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+        )
+        .replace(
+            "    escrever(w, tomada)\n}\n",
+            "    escrever(w, tomada)\n    }\n",
+        );
+        assert_eq!(fora("agent/commands.rs", &t).len(), 1);
+    }
+
+    /// Um `impl` ou uma macro exportada no corpo de um relatório se chamam
+    /// de qualquer lugar: o corpo deixa de ser o do relatório, e as leituras
+    /// nele aparecem (o achado I1 do adversário do `61027e8`).
+    #[test]
+    fn o_que_se_chama_de_fora_tira_o_corpo_do_relatorio() {
+        for dentro in [
+            "    impl Json<'_> {\n        pub fn ultima() -> Option<u64> {\n            crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n        }\n    }\n",
+            "    unsafe impl Send for Ler {}\n",
+            "    #[macro_export]\n    macro_rules! ler {\n        () => {\n            crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n        };\n    }\n",
+        ] {
+            let t = com_os_relatorios("").replace(
+                "fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {\n",
+                &format!(
+                    "fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {{\n{dentro}"
+                ),
+            );
+            assert!(!fora("agent/commands.rs", &t).is_empty(), "{dentro}");
+        }
+        // O controle: um `impl` no argumento, ou uma macro do corpo, sem
+        // exportar, não declaram nada para fora.
+        let t = com_os_relatorios("").replace(
+            "    escrever(w, n)\n",
+            "    let f: &dyn Fn(u64) = &|x| {\n        let _ = x;\n    };\n    macro_rules! dobro {\n        ($x:expr) => {\n            $x * 2\n        };\n    }\n    escrever(w, n)\n",
+        );
+        assert!(fora("agent/commands.rs", &t).is_empty());
+    }
+
+    /// Um texto cru de C — `cr"…"` — não desalinha a leitura do código: a
+    /// função depois dele aparece (o achado I1 do adversário do
+    /// `61027e8`).
+    #[test]
+    fn o_texto_cru_de_c_nao_desalinha() {
+        let t = com_os_relatorios(
+            "fn nome() -> &'static core::ffi::CStr {\n    cr\"\\\"\n}\n\nfn decide() -> Option<u64> {\n    crate::autorizacao::com_auditoria(|c| c.ultima_seq())\n}",
+        );
+        assert_eq!(fora("agent/commands.rs", &t).len(), 1);
+        let codigo: String = so_o_codigo("let a = cr#\"\"\"#; let b = br\"\\\"; com_auditoria")
+            .into_iter()
+            .collect();
+        assert!(codigo.ends_with("; com_auditoria"), "{codigo}");
+    }
+
+    /// Uma `autorizacao.rs` com os donos da cadeia, e `depois` no fim.
+    fn a_autorizacao(depois: &str) -> String {
+        let mut t = String::new();
+        t.push_str("static AUDITORIA: Mutex<Option<Cadeia>> = Mutex::new(None);\n");
+        t.push_str("static TAXAS: Mutex<u8> = Mutex::new(0);\n\n");
+        t.push_str("pub fn carregar() {\n    let mut a = AUDITORIA.lock();\n    *a = None;\n}\n\n");
+        t.push_str("fn auditar(\n    quem: &Quem,\n) -> u64 {\n");
+        t.push_str(
+            "    sem_interrupcoes(|| AUDITORIA.lock().as_mut().map(|c| c.anexar(quem)))\n}\n\n",
+        );
+        t.push_str("pub fn com_auditoria<R>(f: impl FnOnce(&Cadeia) -> R) -> Option<R> {\n");
+        t.push_str("    sem_interrupcoes(|| AUDITORIA.lock().as_ref().map(f))\n}\n\n");
+        t.push_str("pub fn decisao_de_quem_pede(seq: u64) -> Option<u64> {\n");
+        t.push_str("    com_auditoria(|c| c.ultima_seq()).filter(|&s| s == seq)\n}\n\n");
+        t.push_str(depois);
+        t.push('\n');
+        t
+    }
+
+    /// Em `autorizacao.rs`, que guarda a cadeia, ela só se toca nos itens
+    /// dos donos — o empréstimo e a trava —, e uma decisão nova que a lesse,
+    /// por um ou pela outra, aparece (o achado B1 do adversário do
+    /// `61027e8`).
+    #[test]
+    fn quem_guarda_a_cadeia_so_a_toca_nos_donos() {
+        let t = a_autorizacao("");
+        assert!(fora("autorizacao.rs", &t).is_empty());
+        assert_eq!(leituras_da_auditoria("autorizacao.rs", &t).len(), 6);
+        for forma in [
+            "pub fn decide(quem: &Quem) -> bool {\n    com_auditoria(|c| c.guardados() > 8).unwrap_or(false)\n}",
+            "fn recusa_depois_de_n() -> bool {\n    AUDITORIA.lock().is_some()\n}",
+            "pub(crate) fn decide() -> bool {\n    sem_interrupcoes(|| super::AUDITORIA.lock().is_some())\n}",
+        ] {
+            let t = a_autorizacao(forma);
+            assert_eq!(fora("autorizacao.rs", &t).len(), 1, "{forma}");
+        }
+        // A trava que vira pública perde a declaração; e, fora de
+        // `autorizacao.rs`, a palavra é o tipo do registro, e não conta.
+        let t = a_autorizacao("").replace("static AUDITORIA:", "pub static AUDITORIA:");
+        assert_eq!(fora("autorizacao.rs", &t), [1]);
+        assert!(
+            leituras_da_auditoria(
+                "persistencia.rs",
+                "fn f() {\n    gravar(tipo::AUDITORIA, &[])\n}\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// Em `persistencia.rs`, só a cópia para o journal e a compactação leem
+    /// a cadeia (o achado B1 do adversário do `61027e8`).
+    #[test]
+    fn a_persistencia_so_le_na_copia_e_na_compactacao() {
+        let donos = "pub fn gravar_auditoria() -> Result<(), &'static str> {\n    let ultima = crate::autorizacao::com_auditoria(|c| c.ultima_seq()).unwrap_or(0);\n    gravar(tipo::AUDITORIA, &[])\n}\n\nfn compactar_sozinho() -> u64 {\n    crate::autorizacao::com_auditoria(|c| c.guardados()).unwrap_or(0) as u64\n}\n";
+        assert!(fora("persistencia.rs", donos).is_empty());
+        assert_eq!(leituras_da_auditoria("persistencia.rs", donos).len(), 2);
+        let t = format!(
+            "{donos}\npub fn decidir_pela_auditoria() -> bool {{\n    crate::autorizacao::com_auditoria(|c| c.guardados() > 0).unwrap_or(false)\n}}\n"
+        );
+        assert_eq!(fora("persistencia.rs", &t).len(), 1);
     }
 }
 
@@ -5321,6 +5596,15 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
             "kernel/src/ui.rs",
         ],
     ),
+    // O leitor da cadeia da auditoria para a declaração ancorada: só o
+    // `audit.declare` (`agent/commands.rs`) o chama, e `autorizacao.rs` o
+    // define. Pela palavra, e não pela chamada com o caminho: um `use` que o
+    // trouxesse sem o caminho escapava (o achado B1 do adversário do
+    // `61027e8`).
+    (
+        "decisao_de_quem_pede",
+        &["kernel/src/agent/commands.rs", "kernel/src/autorizacao.rs"],
+    ),
     // As reservas das edições da árvore: só a interface e o console.
     (
         "reservar_edicao_da_arvore",
@@ -5355,7 +5639,8 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
 
 /// O texto de uma fonte Rust só com o código: os comentários — de linha e
 /// de bloco, aninhados — e os literais de texto e de caractere — também os
-/// crus, `r#"…"#` — trocados por espaços. As quebras de linha ficam, e cada
+/// crus, `r#"…"#`, e os crus de bytes e de C, `br"…"` e `cr"…"` — trocados
+/// por espaços. As quebras de linha ficam, e cada
 /// caractere fica na posição dele: a linha do que se acha é a da fonte. Um
 /// `r#` que não abre um texto é um identificador cru, e fica.
 fn so_o_codigo(fonte: &str) -> Vec<char> {
@@ -5399,8 +5684,13 @@ fn so_o_codigo(fonte: &str) -> Vec<char> {
             continue;
         }
         let comeco_de_palavra = i == 0 || !de_nome(c[i - 1]);
-        if comeco_de_palavra && (c[i] == 'r' || (c[i] == 'b' && seguinte == Some('r'))) {
-            let mut k = i + if c[i] == 'b' { 2 } else { 1 };
+        // O cru de C, `cr"…"`, como o de bytes: sem ele, a barra do fim de um
+        // `cr"\"` abriria um texto até a aspa seguinte, e o código no meio
+        // sumiria (o achado I1 do adversário do `61027e8`).
+        if comeco_de_palavra
+            && (c[i] == 'r' || (matches!(c[i], 'b' | 'c') && seguinte == Some('r')))
+        {
+            let mut k = i + if c[i] == 'r' { 1 } else { 2 };
             let mut cerquilhas = 0;
             while c.get(k) == Some(&'#') {
                 cerquilhas += 1;
@@ -5623,6 +5913,32 @@ mod testes_dos_nomes_protegidos {
                 "kernel/src/interpretador.rs"
             ])
         );
+    }
+
+    /// O leitor da cadeia para a declaração ancorada é um nome protegido —
+    /// pela palavra, e não pela chamada com o caminho: o `use` que o traz
+    /// sem o caminho também aparece (o achado B1 do adversário do
+    /// `61027e8`).
+    #[test]
+    fn o_leitor_da_declaracao_so_no_audit_declare() {
+        let donos = NOMES_PROTEGIDOS
+            .iter()
+            .find(|(n, _)| *n == "decisao_de_quem_pede")
+            .map(|(_, d)| d.to_vec());
+        assert_eq!(
+            donos,
+            Some(vec![
+                "kernel/src/agent/commands.rs",
+                "kernel/src/autorizacao.rs"
+            ])
+        );
+        for linha in [
+            "use crate::autorizacao::decisao_de_quem_pede;",
+            "use crate::autorizacao::{autorizar, decisao_de_quem_pede as d};",
+            "    match decisao_de_quem_pede(seq) {",
+        ] {
+            assert!(tem_a_palavra(linha, "decisao_de_quem_pede"), "{linha}");
+        }
     }
 
     /// As formas que a conferência por texto da chamada com o caminho não
