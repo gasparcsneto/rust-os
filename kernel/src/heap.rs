@@ -365,6 +365,10 @@ unsafe impl GlobalAlloc for Alocador {
     }
 
     unsafe fn dealloc(&self, ponteiro: *mut u8, layout: Layout) {
+        // Na suíte: quem devolve memória com a trava da auditoria na mão é
+        // contado — ver `autorizacao::alocacoes_sob_a_auditoria_de_teste`.
+        #[cfg(feature = "modo-teste")]
+        crate::autorizacao::alocacoes_sob_a_auditoria_de_teste::ao_devolver();
         let Some((tamanho, _)) = ajustar(layout) else {
             return;
         };

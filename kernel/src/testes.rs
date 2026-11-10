@@ -36,6 +36,7 @@ mod orcamento;
 mod pareamento;
 mod recolhimento;
 mod sdk;
+mod trava_da_auditoria;
 mod vagas;
 mod zumbis;
 
@@ -37985,6 +37986,42 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "coleta: o registro que chega ao teto da auditoria conta os dois bytes do tamanho de cada campo, e nao passa dele",
         f: coleta::o_registro_que_chega_ao_teto,
+    },
+    Caso {
+        nome: "trava: audit.tail pelo gate com o anel cheio: cada after e cada count mostram os registros do contrato, iguais aos do anel, com o elo refeito e o durable da gravada",
+        f: trava_da_auditoria::a_cauda_em_cada_posicao,
+    },
+    Caso {
+        nome: "trava: audit.head e audit.verify da mesma hora e pelo gate, e o anel no limite: 1023, 1024 e 1025 registros, e anexar e anexar_preparado fazem a mesma cadeia",
+        f: trava_da_auditoria::a_verificacao_e_a_cabeca_no_limite,
+    },
+    Caso {
+        nome: "trava: a resposta do audit.verify em cada ramo, e a mesma resposta sem lugar no heap para a fotografia",
+        f: trava_da_auditoria::a_resposta_do_verify_em_cada_ramo_e_sem_memoria,
+    },
+    Caso {
+        nome: "trava: com a trava da auditoria na mao, o anexar, o audit.tail, o audit.verify e a declaracao ancorada nao pedem nem devolvem memoria, e o que sai pela ponta e devolvido depois",
+        f: trava_da_auditoria::nada_se_pede_nem_se_devolve_com_a_trava,
+    },
+    Caso {
+        nome: "trava: a ancora de uma declaracao fora da janela da auditoria nao ancora, e o primeiro guardado ancora",
+        f: trava_da_auditoria::a_ancora_fora_da_janela,
+    },
+    Caso {
+        nome: "trava: o registro que sai pela ponta: a ancora e o elo dele, quem anexou o soltou, e o Arc guardado nao muda o anel",
+        f: trava_da_auditoria::o_registro_que_sai_pela_ponta,
+    },
+    Caso {
+        nome: "trava: produtores em varios nucleos e leitores pelo gate: a cauda segue sem repetir, o salto e o do anel, toda verificacao confere, e o journal tem o que os leitores viram",
+        f: trava_da_auditoria::produtores_e_leitores_ao_mesmo_tempo,
+    },
+    Caso {
+        nome: "trava: o anel dando a volta tres vezes sob audit.verify em varios fios: toda resposta confere, as fotografias seguram no maximo um anel por fio, e a memoria volta ao patamar",
+        f: trava_da_auditoria::o_anel_transbordando_sob_verificacoes,
+    },
+    Caso {
+        nome: "trava: produtores, leitores, tres coletores e uma compactacao no meio: a base, o journal inteiro e a cadeia refeita dele sao os da memoria",
+        f: trava_da_auditoria::leitores_coletores_e_a_compactacao_no_meio,
     },
     Caso {
         nome: "mensagens: cada transicao e um registro antes da resposta, e o corpo nao fica em claro",

@@ -3191,11 +3191,14 @@ pub fn auditoria_na_mao_de_teste() -> bool {
     AUDITORIA.na_mao_deste_nucleo()
 }
 
-/// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador com
-/// a trava da auditoria na mão — o que a cópia da auditoria para o journal
-/// não faz (ver "A cópia", em `persistencia`). O alocador pergunta a cada
-/// pedido, antes de tomar a trava dele, e a pergunta não aloca nem toma
-/// trava nenhuma.
+/// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador, e
+/// quantas devolveu, com a trava da auditoria na mão — o que nem a cópia
+/// da auditoria para o journal (ver "A cópia", em `persistencia`), nem quem
+/// anexa ao anel, nem quem lê o anel fazem: o registro novo vem com a
+/// memória pedida antes, o que sai pela ponta é devolvido depois, e quem lê
+/// copia ponteiros para um lugar reservado antes. O alocador pergunta a
+/// cada pedido e a cada devolução, antes de tomar a trava dele, e a
+/// pergunta não aloca nem toma trava nenhuma.
 #[cfg(feature = "modo-teste")]
 pub mod alocacoes_sob_a_auditoria_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};
@@ -3203,27 +3206,46 @@ pub mod alocacoes_sob_a_auditoria_de_teste {
     /// O fio vigiado, como `id + 1`; zero, nenhum.
     static VIGIADO: AtomicU64 = AtomicU64::new(0);
     static PEDIDOS: AtomicU64 = AtomicU64::new(0);
+    static DEVOLUCOES: AtomicU64 = AtomicU64::new(0);
 
-    /// Vigia o fio `fio`, com a conta zerada.
+    /// Vigia o fio `fio`, com as duas contas zeradas.
     pub fn vigiar(fio: u64) {
         PEDIDOS.store(0, Ordering::Release);
+        DEVOLUCOES.store(0, Ordering::Release);
         VIGIADO.store(fio + 1, Ordering::Release);
     }
 
-    /// Para de vigiar; devolve a conta.
+    /// Para de vigiar; devolve a conta dos pedidos.
     pub fn esquecer() -> u64 {
         VIGIADO.store(0, Ordering::Release);
         PEDIDOS.load(Ordering::Acquire)
     }
 
-    /// Chamada pelo alocador a cada pedido de memória.
-    pub fn ao_alocar() {
+    /// A conta das devoluções da última vigia — lida depois de
+    /// [`esquecer`], que para a conta.
+    pub fn devolucoes() -> u64 {
+        DEVOLUCOES.load(Ordering::Acquire)
+    }
+
+    /// Se quem chama é o fio vigiado, com a trava da auditoria na mão.
+    fn vigiado_com_a_trava() -> bool {
         let vigiado = VIGIADO.load(Ordering::Relaxed);
-        if vigiado != 0
+        vigiado != 0
             && vigiado == crate::fios::id_atual_sem_trava() + 1
             && super::AUDITORIA.na_mao_deste_nucleo()
-        {
+    }
+
+    /// Chamada pelo alocador a cada pedido de memória.
+    pub fn ao_alocar() {
+        if vigiado_com_a_trava() {
             PEDIDOS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Chamada pelo alocador a cada devolução de memória.
+    pub fn ao_devolver() {
+        if vigiado_com_a_trava() {
+            DEVOLUCOES.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
