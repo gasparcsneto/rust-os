@@ -3090,13 +3090,9 @@ fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
     }
 }
 
-fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
-    escrever_verificacao(w, verificar_a_auditoria())
-}
-
 /// A cadeia guardada refeita da âncora: a cabeça, ou o número do primeiro
-/// registro que não confere, e quantos foram conferidos; `None` sem a
-/// cadeia.
+/// registro que não confere, e quantos foram conferidos — ou que a cadeia
+/// não existe.
 ///
 /// Com a trava, só a fotografia: a âncora e os `Arc` de todos os guardados,
 /// na mesma tomada, para um vetor reservado antes — nada ali pede memória.
@@ -3106,31 +3102,53 @@ fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
 /// inteiros para a fotografia — ver "O anel e a trava de quem o guarda", em
 /// `politica::auditoria`.
 ///
-/// Sem o lugar da fotografia — o heap sem um bloco do tamanho dela — e no
-/// post-mortem, onde não há gate a esperar e a memória pode ter acabado, a
-/// conta é feita com a trava na mão, como antes: a resposta é a mesma, e a
-/// pergunta não depende de memória.
-fn verificar_a_auditoria() -> Option<(Result<[u8; 32], u64>, usize)> {
+/// O lugar reservado é o do anel cheio: todo anel do kernel tem a
+/// capacidade [`crate::autorizacao::CAPACIDADE_DA_AUDITORIA`]. Sem ele — o
+/// heap sem um bloco do tamanho da fotografia, ou um anel maior que o
+/// lugar, que faria o vetor crescer com a trava —, e no post-mortem, onde
+/// não há gate a esperar e a memória pode ter acabado, a conta é feita com
+/// a trava na mão, como antes: a resposta é a mesma, e a pergunta não
+/// depende de memória.
+///
+/// As duas tomadas ficam aqui, no relatório: a cadeia só é lida pela
+/// persistência e pelos relatórios (`cargo xtask invariantes`).
+fn audit_verify(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    let lugar = crate::autorizacao::CAPACIDADE_DA_AUDITORIA;
+    let no_post_mortem = crate::traps::em_post_mortem();
+    // Na suíte, os casos passam pela conta com a trava sem estilhaçar o heap
+    // nem entrar no post-mortem.
+    #[cfg(feature = "modo-teste")]
+    let (lugar, no_post_mortem) = verificacao_de_teste::caminho(lugar, no_post_mortem);
     let mut fotografia: alloc::vec::Vec<alloc::sync::Arc<politica::auditoria::Registro>> =
         alloc::vec::Vec::new();
-    let com_fotografia = !crate::traps::em_post_mortem()
-        && fotografia
-            .try_reserve_exact(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
-            .is_ok();
-    if !com_fotografia {
-        return crate::autorizacao::com_auditoria(|c| (c.verificar(), c.guardados()));
-    }
-    let ancora = crate::autorizacao::com_auditoria(|c| {
-        fotografia.extend(c.ultimos_compartilhados(usize::MAX).cloned());
-        c.ancora()
-    })?;
-    Some((
-        politica::auditoria::verificar(ancora, fotografia.iter().map(|r| &**r)),
-        fotografia.len(),
-    ))
+    let com_fotografia = !no_post_mortem && fotografia.try_reserve_exact(lugar).is_ok();
+    let tomada = if com_fotografia {
+        crate::autorizacao::com_auditoria(|c| {
+            if c.guardados() > fotografia.capacity() {
+                return Err((c.verificar(), c.guardados()));
+            }
+            fotografia.extend(c.ultimos_compartilhados(usize::MAX).cloned());
+            Ok(c.ancora())
+        })
+    } else {
+        crate::autorizacao::com_auditoria(|c| Err((c.verificar(), c.guardados())))
+    };
+    let verificada = tomada.map(|t| {
+        #[cfg(feature = "modo-teste")]
+        verificacao_de_teste::contar(t.is_ok());
+        match t {
+            Ok(ancora) => (
+                politica::auditoria::verificar(ancora, fotografia.iter().map(|r| &**r)),
+                fotografia.len(),
+            ),
+            Err(feita) => feita,
+        }
+    });
+    escrever_verificacao(w, verificada)
 }
 
-/// A resposta de `audit.verify` para o que [`verificar_a_auditoria`] deu.
+/// A resposta de `audit.verify` para a cadeia refeita da âncora — ver
+/// [`audit_verify`].
 pub(crate) fn escrever_verificacao(
     w: &mut JsonWriter,
     r: Option<(Result<[u8; 32], u64>, usize)>,
@@ -3149,6 +3167,63 @@ pub(crate) fn escrever_verificacao(
         None => w.field_str("error", "a auditoria nao foi iniciada")?,
     }
     w.end_object()
+}
+
+/// Só na suíte: por qual caminho cada `audit.verify` passou — a fotografia,
+/// com a conta fora da trava, ou a conta com a trava na mão —, e os
+/// interruptores que levam os casos ao segundo sem estilhaçar o heap do
+/// kernel nem entrar no post-mortem: o lugar da fotografia trocado — grande
+/// demais para o alocador, ou menor que o anel — e o post-mortem visto só
+/// por esta pergunta.
+#[cfg(feature = "modo-teste")]
+pub(crate) mod verificacao_de_teste {
+    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    static PELA_FOTOGRAFIA: AtomicU64 = AtomicU64::new(0);
+    static COM_A_TRAVA: AtomicU64 = AtomicU64::new(0);
+    /// O lugar da fotografia, em vez do do anel cheio; zero, o de sempre.
+    static LUGAR: AtomicUsize = AtomicUsize::new(0);
+    static NO_POST_MORTEM: AtomicBool = AtomicBool::new(false);
+
+    /// Quantos `audit.verify` passaram pela fotografia, e quantos fizeram a
+    /// conta com a trava, desde o boot.
+    pub fn contas() -> (u64, u64) {
+        (
+            PELA_FOTOGRAFIA.load(Ordering::Acquire),
+            COM_A_TRAVA.load(Ordering::Acquire),
+        )
+    }
+
+    /// O lugar que `audit.verify` reserva para a fotografia, em ponteiros,
+    /// em vez do do anel cheio; `None`, o de sempre.
+    pub fn trocar_o_lugar(lugar: Option<usize>) {
+        LUGAR.store(lugar.unwrap_or(0), Ordering::Release);
+    }
+
+    /// `audit.verify` se vê no post-mortem, ou deixa de se ver — só ele: o
+    /// resto do kernel não muda.
+    pub fn como_no_post_mortem(sim: bool) {
+        NO_POST_MORTEM.store(sim, Ordering::Release);
+    }
+
+    /// O lugar e o post-mortem que `audit.verify` vê.
+    pub(super) fn caminho(lugar: usize, no_post_mortem: bool) -> (usize, bool) {
+        let trocado = LUGAR.load(Ordering::Acquire);
+        (
+            if trocado == 0 { lugar } else { trocado },
+            no_post_mortem || NO_POST_MORTEM.load(Ordering::Acquire),
+        )
+    }
+
+    /// Conta o caminho de um `audit.verify` que achou a cadeia.
+    pub(super) fn contar(pela_fotografia: bool) {
+        let conta = if pela_fotografia {
+            &PELA_FOTOGRAFIA
+        } else {
+            &COM_A_TRAVA
+        };
+        conta.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 fn policy_show(_params: Json, w: &mut JsonWriter) -> fmt::Result {

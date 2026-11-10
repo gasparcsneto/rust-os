@@ -1080,25 +1080,21 @@ fn auditar(
         Some(c) => Ok(c.anexar_preparado(preparado)),
         None => Err(preparado),
     });
-    // Com a trava solta e as interrupções de volta, o registro que saiu pela
-    // ponta do anel cheio — ou o preparado, antes de a cadeia existir — é
-    // devolvido ao alocador: devolver memória é tomar a trava do alocador e
-    // percorrer a lista livre, e isso não se faz com o gate parado.
-    let seq = match anexado {
-        Ok((seq, saiu)) => {
-            drop(saiu);
-            seq
-        }
-        Err(preparado) => {
-            drop(preparado);
-            0
-        }
+    let (seq, soltar) = match anexado {
+        Ok((seq, saiu)) => (seq, (saiu, None)),
+        Err(preparado) => (0, (None, Some(preparado))),
     };
     // O custo do registro, e quando ele foi gravado — de onde sai a
     // latência da resposta do NSF. Antes de ele ser anunciado: o NSF não
     // lê um registro cujo momento ainda não está guardado.
     crate::metricas::registro_gravado(seq, crate::metricas::desde(inicio));
     ULTIMO_REGISTRO.fetch_max(seq, Ordering::AcqRel);
+    // Com a trava solta — e as interrupções como quem chamou as tinha —, o
+    // registro que saiu pela ponta do anel cheio, ou o preparado antes de a
+    // cadeia existir, é devolvido ao alocador, depois do anúncio: devolver
+    // memória é tomar a trava do alocador e percorrer a lista livre, e isso
+    // não se faz com o gate parado, nem antes de o registro novo ser dito.
+    drop(soltar);
     seq
 }
 
@@ -3194,11 +3190,14 @@ pub fn auditoria_na_mao_de_teste() -> bool {
 /// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador, e
 /// quantas devolveu, com a trava da auditoria na mão — o que nem a cópia
 /// da auditoria para o journal (ver "A cópia", em `persistencia`), nem quem
-/// anexa ao anel, nem quem lê o anel fazem: o registro novo vem com a
-/// memória pedida antes, o que sai pela ponta é devolvido depois, e quem lê
-/// copia ponteiros para um lugar reservado antes. O alocador pergunta a
-/// cada pedido e a cada devolução, antes de tomar a trava dele, e a
-/// pergunta não aloca nem toma trava nenhuma.
+/// anexa ao anel pelo gate, nem os relatórios que leem o anel fazem: o
+/// registro novo vem com a memória pedida antes, o que sai pela ponta é
+/// devolvido depois, e quem lê copia ponteiros para um lugar reservado
+/// antes. A exceção é o boot: [`adotar_auditoria`] continua com a trava, uma
+/// vez, a cadeia do journal com o que o boot registrou antes dela, antes de
+/// o gate atender. O alocador pergunta a cada pedido e a cada devolução,
+/// antes de tomar a trava dele, e a pergunta não aloca nem toma trava
+/// nenhuma.
 #[cfg(feature = "modo-teste")]
 pub mod alocacoes_sob_a_auditoria_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};

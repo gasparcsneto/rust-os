@@ -53,19 +53,26 @@
 //! Quem guarda a cadeia a guarda atrás de uma trava, e todo registro novo a
 //! toma: no kernel, é a trava do gate, tomada com as interrupções
 //! mascaradas. Por isso o anel guarda cada registro num [`Arc`], e um
-//! registro nunca muda depois de entrar: quem lê com a trava na mão copia só
-//! os ponteiros ([`Cadeia::compartilhados_depois_de`],
+//! registro nunca muda depois de entrar: quem lê pode copiar, com a trava
+//! na mão, só os ponteiros ([`Cadeia::compartilhados_depois_de`],
 //! [`Cadeia::ultimos_compartilhados`]) — sem pedir memória, num vetor
-//! reservado antes — e lê os registros, escreve, refaz elos, depois de
+//! reservado antes — e ler os registros, escrever, refazer elos, depois de
 //! soltá-la. O registro que sai pela ponta continua inteiro para quem ainda
-//! o segura; o anel, a âncora e a lacuna não sabem disso.
+//! o segura; o anel, a âncora e a lacuna não sabem disso. No kernel, assim
+//! leem os relatórios da auditoria e a declaração que cita uma decisão; a
+//! cópia para o journal e a compactação ainda leem e codificam com a trava,
+//! e o relatório que confere a cadeia, sem memória para a fotografia ou no
+//! post-mortem, refaz os elos com ela.
 //!
-//! Do outro lado, quem anexa monta o registro e pede a memória dele antes
-//! da trava ([`Preparado`]); com ela, [`Cadeia::anexar_preparado`] só dá a
-//! sequência, o tempo, o anterior e o elo — o elo é a conta que não sai
-//! dali: ele é o do anterior, e o anterior só existe quando o registro de
-//! antes entrou —, e devolve o registro que saiu pela ponta, para quem
-//! anexa soltá-lo depois de soltar a trava. A ordem, os elos e o formato
+//! Do outro lado, quem anexa pode montar o registro e pedir a memória dele
+//! antes da trava ([`Preparado`]); com ela, [`Cadeia::anexar_preparado`] só
+//! dá a sequência, o tempo, o anterior e o elo — o elo é a conta que não
+//! sai dali: ele é o do anterior, e o anterior só existe quando o registro
+//! de antes entrou —, e devolve o registro que saiu pela ponta, para quem
+//! anexa soltá-lo depois de soltar a trava. Assim anexa o gate.
+//! [`Cadeia::anexar`] e [`Cadeia::continuar_com`] pedem e devolvem a
+//! memória ali mesmo — no kernel, só o boot continua assim a cadeia do
+//! journal, uma vez, antes de o gate atender. A ordem, os elos e o formato
 //! são os de sempre: o que muda é só onde a memória é pedida e devolvida.
 //!
 //! # O tempo não volta
@@ -731,9 +738,11 @@ impl Cadeia {
         self.ancora
     }
 
-    /// Acrescenta um registro e devolve o número dele. O que sai pela ponta,
-    /// com o anel cheio, é solto aqui — quem tem uma trava na mão e não quer
-    /// devolver memória com ela usa [`Cadeia::anexar_preparado`].
+    /// Acrescenta um registro e devolve o número dele. A memória do registro
+    /// é pedida aqui, e o que sai pela ponta, com o anel cheio, é solto aqui
+    /// — quem tem uma trava na mão e não quer pedir nem devolver memória com
+    /// ela prepara o registro antes ([`Preparado`]) e usa
+    /// [`Cadeia::anexar_preparado`].
     pub fn anexar(&mut self, evento: Evento) -> u64 {
         let (seq, saiu) = self.anexar_preparado(Preparado::novo(evento));
         drop(saiu);

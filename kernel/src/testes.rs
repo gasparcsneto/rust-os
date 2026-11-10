@@ -37996,11 +37996,11 @@ static CASOS: &[Caso] = &[
         f: trava_da_auditoria::a_verificacao_e_a_cabeca_no_limite,
     },
     Caso {
-        nome: "trava: a resposta do audit.verify em cada ramo, e a mesma resposta sem lugar no heap para a fotografia",
-        f: trava_da_auditoria::a_resposta_do_verify_em_cada_ramo_e_sem_memoria,
+        nome: "trava: a resposta do audit.verify em cada ramo, e a mesma pela conta com a trava: sem memoria para a fotografia, com um lugar menor que o anel e no post-mortem",
+        f: trava_da_auditoria::a_resposta_do_verify_em_cada_ramo_e_pela_conta_com_a_trava,
     },
     Caso {
-        nome: "trava: com a trava da auditoria na mao, o anexar, o audit.tail, o audit.verify e a declaracao ancorada nao pedem nem devolvem memoria, e o que sai pela ponta e devolvido depois",
+        nome: "trava: com a trava da auditoria na mao, o anexar, o audit.tail, o audit.verify, a declaracao ancorada e a politica lida de novo nao pedem nem devolvem memoria, e o que sai pela ponta e devolvido depois",
         f: trava_da_auditoria::nada_se_pede_nem_se_devolve_com_a_trava,
     },
     Caso {

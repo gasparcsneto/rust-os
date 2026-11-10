@@ -34,14 +34,19 @@
 //!   fotografia dos `Arc` confere como `audit.verify` a confere — e acusa o
 //!   registro adulterado;
 //! - que a resposta de `audit.verify` é a de sempre nos três ramos — a cadeia
-//!   que confere, a que não confere e a que não existe —, e que, sem um bloco
-//!   do heap do tamanho da fotografia, ele dá a mesma resposta, com a conta
-//!   feita com a trava, como antes;
+//!   que confere, a que não confere e a que não existe —; que, com memória
+//!   para a fotografia, a conta é a dela, fora da trava; e que, pela conta
+//!   com a trava — sem memória para a fotografia, com um lugar menor que o
+//!   anel e no post-mortem —, ele dá a mesma resposta, sem pedir nem
+//!   devolver memória com ela. O caminho de cada `audit.verify` é contado só
+//!   na suíte (`agent::commands::verificacao_de_teste`), e os casos levam à
+//!   conta com a trava sem estilhaçar o heap nem entrar no post-mortem;
 //! - que, com a trava na mão, nada pede nem devolve memória ao alocador: o
 //!   registro anexado pelo gate ao anel cheio, um pedido inteiro pelo gate —
 //!   `audit.head`, `audit.tail` de 128 com e sem `after`, `audit.verify`, a
-//!   declaração ancorada numa decisão —, e o anel que cresce do zero ao
-//!   cheio. Pela conta do próprio alocador, só da suíte
+//!   declaração ancorada numa decisão —, o anel que cresce do zero ao cheio,
+//!   e a política lida de novo com a cadeia de pé. Pela conta do próprio
+//!   alocador, só da suíte
 //!   (`autorizacao::alocacoes_sob_a_auditoria_de_teste`), com os controles:
 //!   o pedido e a devolução feitos de propósito com a trava na mão são
 //!   contados; os de fora dela, os de outro fio e os de depois da vigia,
@@ -72,10 +77,11 @@
 //!   gravada, o journal segue dela sem lacuna, e a cadeia refeita dele é a da
 //!   memória.
 //!
-//! O que nenhum caso distingue, por dar a mesma resposta: a conta do
-//! `audit.verify` feita com a trava em vez de fora dela, e a posição do
+//! O que nenhum caso distingue, por dar a mesma resposta: a posição do
 //! `after` achada pelo filtro em vez de pela distância ao primeiro guardado.
-//! Só a medida do tempo com a trava as separa.
+//! Só a medida do tempo com a trava a separa. A conta do `audit.verify`
+//! feita com a trava em vez de fora dela, que também dá a mesma resposta, a
+//! conta de cada caminho separa.
 
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -92,6 +98,7 @@ use super::{
     Buffer, Resultado, a_cadeia_do_journal_confere, chamar, conferir, declaracoes_desde, escrita,
     fs_pedir, nucleos_secundarios, sistema_aqui,
 };
+use crate::agent::commands::verificacao_de_teste as verificacao;
 use crate::agent::json::{Json, JsonWriter};
 use crate::autorizacao::alocacoes_sob_a_auditoria_de_teste as alocacoes;
 use crate::persistencia::{self, AuditoriaNoJournal};
@@ -266,6 +273,23 @@ fn numero(j: Json<'_>, campo: &str) -> Option<u64> {
 /// hexadecimais e palavras, sem escape.
 fn texto<'a>(j: Json<'a>, campo: &str) -> Option<&'a str> {
     j.member(campo).and_then(|v| v.as_str())
+}
+
+/// Os `audit.verify` desde as contas `antes` passaram pela fotografia, com
+/// a conta fora da trava — o heap tem lugar para ela —, e nenhum pela conta
+/// com a trava.
+fn pela_fotografia(antes: (u64, u64)) -> Resultado {
+    let depois = verificacao::contas();
+    if depois.0 <= antes.0 || depois.1 != antes.1 {
+        crate::log_error!(
+            "teste",
+            "audit.verify (pela fotografia, com a trava) de {:?} para {:?}",
+            antes,
+            depois
+        );
+        return Err("com memoria para a fotografia, o audit.verify fez a conta com a trava");
+    }
+    Ok(())
 }
 
 /// A resposta de `audit.verify` diz o anel inteiro conferido, sem falha.
@@ -878,13 +902,15 @@ pub(super) fn a_cauda_em_cada_posicao() -> Resultado {
 /// `audit.head` e `audit.verify`, pelo handler — sem a decisão do gate no
 /// meio —, numa hora em que ninguém audita: a mesma cabeça, que é o elo do
 /// último do anel; o anel inteiro conferido a partir da âncora, que é a do
-/// anel; e o `stored` e o `checked`, o anel cheio. Se alguém auditou no
-/// meio, de novo.
+/// anel; e o `stored` e o `checked`, o anel cheio. A conta foi a da
+/// fotografia, fora da trava. Se alguém auditou no meio, de novo.
 fn cabeca_e_verificacao_na_mesma_hora() -> Resultado {
     for _ in 0..TENTATIVAS {
         let antes = anel();
+        let contas = verificacao::contas();
         let cabeca = chamar("audit.head", "{}")?;
         let verificada = chamar("audit.verify", "{}")?;
+        pela_fotografia(contas)?;
         let (f, ancora) = fotografia();
         if anel_da(&f) != antes {
             continue;
@@ -1193,52 +1219,55 @@ fn os_ramos_da_resposta() -> Resultado {
     Ok(())
 }
 
-/// Quantos pedaços o caso sem memória pode tomar do heap, e quantas
-/// reservas pequenas ele deixa livres para o pedido dele.
-const MAIS_PEDACOS: usize = 1024;
-const RESERVAS: usize = 16;
+/// O lugar da fotografia que nenhum heap do kernel tem: o dobro do maior.
+const LUGAR_QUE_NAO_HA: usize =
+    2 * crate::heap::HEAP_MAXIMO / core::mem::size_of::<Arc<Registro>>();
 
-/// Toma do heap, direto do alocador, pedaços dos maiores blocos livres até
-/// nenhum caber a fotografia: de cada um, quase tudo — o que sobra fica
-/// abaixo de meia fotografia. Os tomados vão para `tomados`, que tem o
-/// lugar reservado antes.
-fn estilhacar(tomados: &mut Vec<(*mut u8, Layout)>) -> Resultado {
-    loop {
-        let maior = crate::heap::estatisticas().maior_bloco;
-        if maior < FOTOGRAFIA {
-            return Ok(());
-        }
-        if tomados.len() == tomados.capacity() {
-            return Err("o heap nao se estilhacou abaixo da fotografia do audit.verify");
-        }
-        let tamanho = (maior - FOTOGRAFIA / 2 + 1) & !15;
-        let pedaco = Layout::from_size_align(tamanho, 16).map_err(|_| "layout invalido")?;
-        let p = crate::heap::tentar_alocar(pedaco);
-        if p.is_null() {
-            return Err("o alocador nao deu o pedaco do maior bloco livre");
-        }
-        tomados.push((p, pedaco));
-    }
+/// O lugar da fotografia menor que o anel cheio: a reserva é dada, mas não
+/// cabe o anel.
+const LUGAR_MENOR_QUE_O_ANEL: usize = 4;
+
+/// Roda `f` com o caminho de `audit.verify` trocado — o lugar da
+/// fotografia, e o post-mortem visto só por ele —, e o destroca depois,
+/// sempre.
+fn com_o_caminho_trocado<R>(lugar: Option<usize>, post_mortem: bool, f: impl FnOnce() -> R) -> R {
+    verificacao::trocar_o_lugar(lugar);
+    verificacao::como_no_post_mortem(post_mortem);
+    let r = f();
+    verificacao::trocar_o_lugar(None);
+    verificacao::como_no_post_mortem(false);
+    r
 }
 
-/// `audit.verify` pelo gate, com o heap sem um bloco do tamanho da
-/// fotografia: a mesma resposta — o anel inteiro conferido, com a cabeça
-/// que inclui a decisão do próprio pedido —, e o alocador recusou a reserva
-/// da fotografia: a conta foi feita com a trava, como antes. Nada aqui pede
-/// um bloco grande.
-fn verificar_sem_lugar_para_a_fotografia() -> Resultado {
+/// `audit.verify` pelo gate com o caminho trocado: a mesma resposta — o
+/// anel inteiro conferido, com a cabeça que inclui a decisão do próprio
+/// pedido —, pela conta com a trava na mão, como antes: a conta desse
+/// caminho subiu, e a da fotografia não; e, com a trava na mão, nada pediu
+/// nem devolveu memória. Com `recusada`, o alocador recusou a reserva da
+/// fotografia.
+fn verificar_com_a_trava(
+    caminho: &str,
+    lugar: Option<usize>,
+    post_mortem: bool,
+    recusada: bool,
+) -> Resultado {
     for _ in 0..TENTATIVAS {
         let antes = anel();
         let falhas = crate::heap::estatisticas().falhas;
-        let verificada = match pedir_ao_gate("audit.verify", "{}") {
+        let (fotografias, com_a_trava) = verificacao::contas();
+        let (pedido, pedidos, devolucoes) = com_o_caminho_trocado(lugar, post_mortem, || {
+            vigiado(|| pedir_ao_gate("audit.verify", "{}"))
+        });
+        let verificada = match pedido {
             PeloGate::Resultado(r) => r,
             PeloGate::Taxa => {
                 esperar_ms(5);
                 continue;
             }
-            PeloGate::Recusa => return Err("o gate recusou o audit.verify sem memoria"),
+            PeloGate::Recusa => return Err("o gate recusou o audit.verify do caminho trocado"),
         };
-        let recusadas = crate::heap::estatisticas().falhas - falhas;
+        let recusas = crate::heap::estatisticas().falhas - falhas;
+        let contas = verificacao::contas();
         let (ultimo, cabeca) = crate::autorizacao::com_auditoria(|c| (c.ultima_seq(), c.cabeca()))
             .ok_or("a auditoria nao existe")?;
         if ultimo != antes.ultimo + 1 {
@@ -1246,79 +1275,59 @@ fn verificar_sem_lugar_para_a_fotografia() -> Resultado {
         }
         let j = Json(verificada.as_bytes());
         if !confere_o_anel_inteiro(j) || texto(j, "head") != Some(sigilo::hex(&cabeca).as_str()) {
-            crate::log_error!("teste", "audit.verify: {}", verificada);
-            return Err("sem lugar para a fotografia, o audit.verify nao deu a mesma resposta");
+            crate::log_error!("teste", "{}: audit.verify: {}", caminho, verificada);
+            return Err("pela conta com a trava, o audit.verify nao deu a mesma resposta");
         }
-        if recusadas == 0 {
-            return Err(
-                "o heap tinha lugar para a fotografia: o caso nao passou pelo caminho sem memoria",
+        if contas.0 != fotografias || contas.1 <= com_a_trava {
+            crate::log_error!(
+                "teste",
+                "{}: (pela fotografia, com a trava) de {:?} para {:?}",
+                caminho,
+                (fotografias, com_a_trava),
+                contas
             );
+            return Err("o audit.verify do caminho trocado nao fez a conta com a trava");
         }
-        return Ok(());
-    }
-    Err("a auditoria nao ficou quieta em nenhuma tentativa do audit.verify sem memoria")
-}
-
-/// O heap sem um bloco do tamanho da fotografia — como os casos do heap o
-/// estilhaçam, falando com o alocador direto —, com reservas pequenas
-/// soltas para o pedido do caso, e `audit.verify` pelo gate. Tudo o que o
-/// caso tomou volta ao heap no fim, mesmo na falha.
-fn a_verificacao_sem_memoria() -> Resultado {
-    let reserva = Layout::from_size_align(FOTOGRAFIA * 3 / 8, 16).map_err(|_| "layout invalido")?;
-    // Os registros do que se toma, com o lugar pedido antes de o heap ficar
-    // sem blocos grandes.
-    let mut tomados: Vec<(*mut u8, Layout)> = Vec::with_capacity(MAIS_PEDACOS);
-    let mut reservas: Vec<*mut u8> = Vec::with_capacity(RESERVAS);
-    let veredito = (|| -> Resultado {
-        // As reservas, intercaladas com guardas do mesmo tamanho: soltas
-        // depois, ficam buracos que não se juntam num bloco grande, e o
-        // pedido do caso tem onde pedir o que é pequeno.
-        for _ in 0..RESERVAS {
-            for guarda in [false, true] {
-                let p = crate::heap::tentar_alocar(reserva);
-                if p.is_null() {
-                    return Err("o alocador nao deu as reservas do caso sem memoria");
-                }
-                if guarda {
-                    tomados.push((p, reserva));
-                } else {
-                    reservas.push(p);
-                }
-            }
+        if recusada && recusas == 0 {
+            return Err("o alocador nao recusou a reserva de uma fotografia maior que o heap");
         }
-        estilhacar(&mut tomados)?;
-        for r in reservas.drain(..) {
-            // SAFETY: veio de `tentar_alocar` com este mesmo layout.
-            unsafe { crate::heap::devolver(r, reserva) };
-        }
-        // Uma reserva solta ao lado de um resto livre pode ter formado um
-        // bloco grande: de novo.
-        estilhacar(&mut tomados)?;
-        verificar_sem_lugar_para_a_fotografia()
-    })();
-    for (p, l) in tomados.drain(..) {
-        // SAFETY: veio de `tentar_alocar` com este mesmo layout.
-        unsafe { crate::heap::devolver(p, l) };
-    }
-    for r in reservas.drain(..) {
-        // SAFETY: veio de `tentar_alocar` com este mesmo layout.
-        unsafe { crate::heap::devolver(r, reserva) };
-    }
-    veredito?;
-    if crate::heap::estatisticas().maior_bloco < FOTOGRAFIA {
-        return Err(
-            "devolvido o que o caso tomou, o heap nao voltou a ter lugar para a fotografia",
+        return sem_memoria_com_a_trava(
+            caminho,
+            pedidos,
+            devolucoes,
+            "o audit.verify pela conta com a trava pediu ou devolveu memoria com ela na mao",
         );
     }
-    Ok(())
+    Err("a auditoria nao ficou quieta em nenhuma tentativa do audit.verify do caminho trocado")
 }
 
-/// A resposta de `audit.verify` nos três ramos, e a mesma resposta com o
-/// heap sem lugar para a fotografia.
-pub(super) fn a_resposta_do_verify_em_cada_ramo_e_sem_memoria() -> Resultado {
+/// A conta com a trava nos três caminhos que levam a ela, sem estilhaçar o
+/// heap do kernel nem entrar no post-mortem: sem memória para a fotografia —
+/// o alocador recusa a reserva de verdade, de um lugar maior que o heap —;
+/// com um lugar menor que o anel, que faria o vetor crescer com a trava; e
+/// no post-mortem, visto só por `audit.verify`, sem reserva nenhuma.
+fn a_verificacao_pela_conta_com_a_trava() -> Resultado {
+    verificar_com_a_trava(
+        "sem memoria para a fotografia",
+        Some(LUGAR_QUE_NAO_HA),
+        false,
+        true,
+    )?;
+    verificar_com_a_trava(
+        "um lugar menor que o anel",
+        Some(LUGAR_MENOR_QUE_O_ANEL),
+        false,
+        false,
+    )?;
+    verificar_com_a_trava("no post-mortem", None, true, false)
+}
+
+/// A resposta de `audit.verify` nos três ramos, e a mesma resposta pela
+/// conta com a trava, nos três caminhos que levam a ela.
+pub(super) fn a_resposta_do_verify_em_cada_ramo_e_pela_conta_com_a_trava() -> Resultado {
     os_ramos_da_resposta()?;
     anel_cheio_com_saidos()?;
-    a_verificacao_sem_memoria()?;
+    a_verificacao_pela_conta_com_a_trava()?;
     persistencia::gravar_auditoria()
 }
 
@@ -1503,9 +1512,10 @@ fn vigiado_pelo_gate(metodo: &str, params: &str) -> Result<(String, u64, u64), &
 /// Com a trava da auditoria na mão, nada pede nem devolve memória ao
 /// alocador: o anel que cresce do zero ao cheio; o registro anexado pelo
 /// gate ao anel cheio — e o que saiu dele é devolvido de fato, depois —;
-/// e os pedidos inteiros pelo gate, a decisão e o handler: `audit.head`,
-/// `audit.tail` de 128 com e sem `after`, `audit.verify`, e a declaração
-/// ancorada numa decisão, que lê o registro dela.
+/// os pedidos inteiros pelo gate, a decisão e o handler: `audit.head`,
+/// `audit.tail` de 128 com e sem `after`, `audit.verify` — pela fotografia
+/// —, e a declaração ancorada numa decisão, que lê o registro dela; e a
+/// política lida de novo, com a cadeia de pé.
 pub(super) fn nada_se_pede_nem_se_devolve_com_a_trava() -> Resultado {
     as_contas_veem_a_trava()?;
     o_anel_que_cresce_nao_pede_memoria()?;
@@ -1581,7 +1591,9 @@ pub(super) fn nada_se_pede_nem_se_devolve_com_a_trava() -> Resultado {
             return Err("o audit.tail de 128 do caso nao trouxe 128 registros");
         }
     }
+    let contas = verificacao::contas();
     let (verificada, pedidos, devolucoes) = vigiado_pelo_gate("audit.verify", "{}")?;
+    pela_fotografia(contas)?;
     sem_memoria_com_a_trava(
         "audit.verify pelo gate",
         pedidos,
@@ -1618,6 +1630,21 @@ pub(super) fn nada_se_pede_nem_se_devolve_com_a_trava() -> Resultado {
     if j.member("declared").and_then(|x| x.as_bool()) != Some(true) || gravada != Some(true) {
         crate::log_error!("teste", "audit.declare: {}", declarada);
         return Err("a declaracao ancorada na decisao do caso nao foi gravada com a ancora");
+    }
+
+    // A política lida de novo com a cadeia de pé: a cadeia nova que
+    // `carregar` faz sobra, e é solta fora da trava; e o registro da carga
+    // entra no anel cheio como os do gate.
+    let antes = anel();
+    let ((), pedidos, devolucoes) = vigiado(crate::autorizacao::carregar);
+    sem_memoria_com_a_trava(
+        "carregar com a cadeia de pe",
+        pedidos,
+        devolucoes,
+        "carregar a politica com a cadeia de pe pediu ou devolveu memoria com a trava da auditoria na mao",
+    )?;
+    if anel().ultimo <= antes.ultimo {
+        return Err("carregar a politica nao gravou o registro da carga");
     }
     persistencia::gravar_auditoria()
 }
