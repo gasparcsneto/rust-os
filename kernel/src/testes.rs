@@ -13679,18 +13679,23 @@ fn heap_relatorio_fecha() -> Resultado {
 /// perto do teto.
 ///
 /// Duas coisas deixam o pico abaixo da conta sem defeito nenhum no
-/// alocador, e o caso antigo — um `vec!` do tamanho, de que só se lia o
+/// alocador: o otimizador pode tirar um pedido cuja memória ninguém lê (ver
+/// [`crate::heap::tentar_alocar`]), e os outros fios — deste núcleo ou de
+/// outro — alocam e devolvem enquanto o caso roda: uma devolução entre o
+/// retrato de antes e o pedido deixa o alocado do pedido abaixo do de antes
+/// mais ele. O caso antigo — um `vec!` do tamanho, de que só se lia o
 /// comprimento — reprovou na CI 476 só em `release`, no x86_64 e no
-/// aarch64: o otimizador pode tirar um pedido cuja memória ninguém lê (ver
-/// [`crate::heap::tentar_alocar`]), e os outros núcleos alocam e devolvem
-/// enquanto o caso roda — uma devolução de outro fio entre o retrato de
-/// antes e o pedido deixa o alocado do pedido abaixo do de antes mais ele.
-/// O pedido vai direto ao alocador, que o otimizador não tira; e a conta
-/// exata vale só na tentativa em que ninguém mais mexeu no heap entre os
-/// dois retratos, o que as contas de alocações e de devoluções do alocador
-/// dizem — o caso tenta de novo até ter uma. Se nenhuma tiver, a última
-/// vale pela folga do pedido: o pico subiu acima do de antes e cobre o
-/// alocado do retrato de depois.
+/// aarch64, com o pico de depois igual ao de antes: compilado com o nightly
+/// da CI, ele não chamava o alocador — o otimizador tirava o `vec!` e o
+/// `Box` — desde que o gancho da suíte entrou no `dealloc`, o que mudou o
+/// que o otimizador faz com a devolução; sem o gancho, o mesmo código
+/// chamava, no x86_64. O pedido vai direto ao alocador, que o otimizador
+/// não tira; e a conta exata vale só na tentativa em que ninguém mais mexeu
+/// no heap entre os dois retratos, o que as contas de alocações e de
+/// devoluções do alocador dizem — o caso tenta de novo, em até 64
+/// tentativas ao todo. Se nenhuma for limpa, a última vale pela folga do
+/// pedido: o pico subiu acima do de antes e cobre o alocado do retrato de
+/// depois.
 fn heap_o_pico_e_o_pior_momento() -> Resultado {
     const TENTATIVAS: u32 = 64;
     let mut com_outro = 0u32;
@@ -13745,7 +13750,7 @@ fn heap_o_pico_e_o_pior_momento() -> Resultado {
             // antes mais ele, e o pico é esse alocado.
             durante.alocado >= antes.alocado + passa && durante.pico == durante.alocado
         } else {
-            // Nenhuma tentativa sem outro núcleo: a folga do pedido.
+            // Nenhuma tentativa sem mais ninguém no heap: a folga do pedido.
             durante.pico > antes.pico && durante.pico >= durante.alocado
         };
         if !subiu {
@@ -13777,7 +13782,7 @@ fn heap_o_pico_e_o_pior_momento() -> Resultado {
         }
         crate::log_info!(
             "teste",
-            "o pico do heap conferido na tentativa {}, {} delas com outro nucleo mexendo no heap",
+            "o pico do heap conferido na tentativa {}, {} delas com outro fio mexendo no heap",
             tentativa,
             com_outro
         );
