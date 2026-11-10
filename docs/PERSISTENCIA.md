@@ -2277,7 +2277,12 @@ mesmas funções de sempre, e o registro é gravado como antes.
   refaz os elos do anel inteiro com ela.
 
 Nenhum dos três é a codificação pendente para o journal; ficam
-registrados, para uma medida e uma decisão à parte.
+registrados, para uma medida e uma decisão à parte. A medida e a decisão
+estão em *Os leitores e o anexar: a trava do gate sem o alocador*,
+abaixo: a devolução do que sai pela ponta, a cópia dos registros do
+`audit.tail` — com a trava, só os ponteiros — e a conta do
+`audit.verify`, fora a sem lugar para a fotografia e a do post-mortem,
+saíram da trava; o elo continua nela.
 
 ### Os testes
 
@@ -2313,13 +2318,14 @@ dois titulares —, em microssegundos:
 | x86_64, depuração | 42 371–63 739 → 1 536–9 443 | 41 528–63 656 → 5 710–14 183 | 38 545–59 122 → 2 865–9 821 | 0 |
 | aarch64, depuração | 38 876–103 319 → 1 382–8 515 | 38 770–101 425 → 5 588–13 857 | 9 386–84 057 → 2 843–12 710 | 0 |
 
-Depois, quem mais segura a trava é o `audit.tail` (ver *O que continua com
-a trava*) — na bancada, o do NSF, que lê a auditoria nova de 64 em 64
-registros a cada volta (`seguranca::passo`): até 7,9 ms no x86_64 e 8,5 ms
-no aarch64 em `release`, e até 14,2 ms em depuração. Em 25 dos 28
-cenários das quatro configurações, o maior tempo mascarado é o de uma
-chamada dele. Os registros anexados e gravados por segundo acompanham a
-carga, antes e depois, e nenhum se perdeu.
+Depois, quem mais segurava a trava era o `audit.tail` (ver *O que
+continua com a trava*; o que mudou está em *Os leitores e o anexar: a
+trava do gate sem o alocador*, abaixo) — na bancada, o do NSF, que lê a
+auditoria nova de 64 em 64 registros a cada volta (`seguranca::passo`):
+até 7,9 ms no x86_64 e 8,5 ms no aarch64 em `release`, e até 14,2 ms em
+depuração. Em 25 dos 28 cenários das quatro configurações, o maior tempo
+mascarado era o de uma chamada dele. Os registros anexados e gravados por
+segundo acompanham a carga, antes e depois, e nenhum se perdeu.
 
 O canal do agente sob carga melhora onde a trava era o que o segurava: em
 depuração, no x86_64, o p99 da serial com três processos pedindo foi de
@@ -2404,3 +2410,386 @@ compactação sem ela, e a montagem que não ocupa o que a tomada contou
 
 Na última rodada de cada uma, 38 das 42 reprovaram; as quatro que passam
 são as equivalentes, explicadas acima.
+
+## Os leitores e o anexar: a trava do gate sem o alocador
+
+Depois da cópia para o journal, três caminhos ainda seguravam a trava da
+auditoria — a do gate, tomada com as interrupções mascaradas — além da
+conta do elo (ver *O que continua com a trava*, na seção da cópia para o
+journal, acima):
+
+- o `audit.tail`: com `after`, passava pela janela inteira — até 1024
+  registros — atrás do primeiro depois dele, e **clonava** até 128
+  registros, cinco textos cada, com a trava na mão: até 640 pedidos ao
+  alocador só nos textos, fora os do vetor que crescia — e o alocador tem
+  uma trava só e percorre a lista livre a cada pedido. O NSF faz até oito
+  destas leituras por volta, de 64 registros cada (`seguranca::passo`);
+- o `audit.verify`: refazia o elo — um BLAKE2s — de cada registro do anel,
+  até 1024, com a trava na mão;
+- o anexar, com o anel cheio: devolvia ao alocador, com a trava na mão, o
+  registro que saía pela ponta — os textos dele.
+
+E um quarto, achado no inventário dos que tomam a trava: o `audit.declare`
+(`autorizacao::decisao_de_quem_pede`) clonava com ela o evento da decisão
+que a declaração cita.
+
+Medido em 10/11/2026 com o código de antes (`33dabef`), na bancada de
+disponibilidade — com e sem carga, e com o fio de leitores da medida, que
+pede `audit.tail` de 128 a partir de antes da janela, mais pesado que o de
+64 do NSF medido na cópia —, em `release`: o `audit.tail` segurou a trava
+até 22 ms no x86_64 e 42 ms no aarch64; o `audit.verify`, até 160 ms no
+x86_64; e o gate esperou por ela até 15 ms no x86_64 e 35 ms no aarch64 —
+em depuração, até 123 ms no x86_64 (ver *A medida, antes e depois*,
+abaixo).
+
+### O anel compartilha os registros
+
+O anel guarda cada registro num `Arc`, e um registro nunca muda depois de
+entrar (ver *O anel e a trava de quem o guarda*, em
+`politica/src/auditoria.rs`). O formato do registro, a codificação, o
+elo, a ordem, a âncora, a lacuna, a capacidade e o journal são os de
+antes: o que muda é só onde a memória é pedida e devolvida.
+
+- **Os relatórios e a declaração** copiam, com a trava, só ponteiros — o
+  `audit.tail` e o `audit.verify`, para um vetor reservado antes, sem
+  pedir memória; a declaração, o do registro que cita; o `audit.head` só
+  lê a cabeça, a âncora e as contas — e leem os registros depois de
+  soltá-la. Um registro que sai do anel no meio continua inteiro
+  para quem o segura; o anel não sabe disso: ele sai na hora dele, a
+  âncora é o elo dele, a lacuna é a de sempre.
+- **O gate**, ao anexar, monta o registro e pede a memória dele antes da
+  trava (`Preparado`); com ela, `anexar_preparado` só dá a sequência, o
+  tempo que não volta, o anterior e o elo, e devolve o registro que saiu
+  pela ponta, que o gate solta depois de soltar a trava — e depois de
+  guardar o momento do registro novo e anunciá-lo. O lugar dos ponteiros
+  do anel cheio é reservado na criação da cadeia: o anel não cresce — nem
+  pede memória — com a trava na mão, nem no primeiro anel do boot.
+
+### Cada caminho
+
+- **`audit.tail`**: os ponteiros dos registros depois de `after` —
+  achados pela posição, sem passar pela janela, como a cópia do journal
+  já fazia (as sequências do anel são seguidas) — ou dos últimos `count`;
+  o JSON, fora. A resposta é a mesma, campo a campo: os mesmos registros,
+  na mesma ordem, o mesmo teto de 128, o mesmo `durable_seq`.
+- **`audit.verify`**: a fotografia — a âncora e os ponteiros de todos os
+  guardados, na mesma tomada; a conta, fora. É a conta de
+  `Cadeia::verificar` — a função `verificar`, da mesma âncora, que a conta
+  com a trava também usa —, sobre os mesmos registros: o mesmo `ok`, a
+  mesma cabeça, o mesmo `checked`, o mesmo `failed_at` — um registro
+  adulterado na memória do anel é acusado no mesmo lugar. Os anexados
+  durante a conta ficam para o próximo `audit.verify`, como antes ficavam
+  os anexados depois de soltar a trava. O lugar da fotografia é o do anel
+  cheio — um ponteiro por registro, 8 KiB —, reservado antes da trava. Sem
+  ele — o heap sem um bloco desse tamanho, ou um anel maior que o lugar,
+  que faria o vetor crescer com a trava —, e no post-mortem, a conta é
+  feita com a trava na mão, como antes: a resposta é a mesma, e a pergunta
+  não depende de memória. As duas tomadas ficam no próprio handler: a
+  cadeia só é lida por quem a guarda — em `autorizacao`, só nos itens que
+  a declaram, a leem de novo com a política, a anexam, a emprestam, a
+  adotam no boot e a destravam na falha fatal, e no leitor da declaração
+  ancorada, que só o `audit.declare` chama —, pela persistência — na cópia
+  para o journal e na compactação —, pela suíte e pelos relatórios —
+  `audit_tail`, `audit_head` e `audit_verify`. Confere-o `cargo xtask
+  invariantes`, que vê o nome `com_auditoria` — e, em `autorizacao`, a
+  trava — em qualquer forma (a chamada, o turbofish, um `use` com outro
+  nome, um ponteiro), fora dos comentários e dos textos, e o corpo de cada
+  item do cabeçalho ao fim dele, sem nada que se chame de fora dele.
+- **O anexar**: o registro preparado fora; o que sai pela ponta, solto
+  fora, depois do anúncio — e devolvido ao alocador por quem o segura por
+  último: o gate, ou um leitor que ainda tem o `Arc` dele.
+- **`audit.declare`**: o ponteiro do registro da decisão, com a trava; a
+  conferência, fora. A âncora fora da janela é recusada como antes.
+- **O boot e a política**: `carregar` monta a cadeia nova fora da trava
+  — e, se já havia uma, solta a nova fora dela também —, e
+  `adotar_auditoria` solta fora dela a cadeia que o boot fez antes de ler
+  o journal.
+
+### O que continua com a trava
+
+- **O elo do anexar.** O elo de um registro é o BLAKE2s do elo do
+  anterior com ele: o anterior só existe quando o registro de antes
+  entrou, e a conta é sequencial por construção. Tirá-la da trava pediria
+  um protocolo otimista — calcular com a cabeça lida, conferir com a
+  trava e repetir se outro anexou antes —, que sob disputa não tem teto
+  de tentativas (a latência do gate deixaria de ter limite) e mudaria o
+  protocolo de anexação; ou outra construção da cadeia, que muda o
+  formato. Nenhuma das duas é uma escolha interna — seriam uma decisão
+  [C], que não foi tomada —: o elo é o piso da retenção do anexar — de 64
+  a 128 µs no p99, em `release`, na medida abaixo —, e fica como está.
+- **A cópia para o journal e a compactação** (*A cópia*, acima)
+  continuam a codificar com a trava: com os ponteiros, elas também
+  poderiam copiar só ponteiros e codificar fora — uma escolha interna,
+  fora do escopo destes caminhos; anotada, para uma medida à parte.
+- **O `audit.verify` sem lugar para a fotografia**, com um anel maior que
+  o lugar, e no post-mortem: a conta inteira com a trava, como antes.
+- **O boot**: `adotar_auditoria` continua com a trava, uma vez, a cadeia
+  do journal com o que o boot registrou antes dela (`continuar_com`, que
+  pede e devolve memória ali mesmo), antes de o gate atender.
+
+### O que custa
+
+- **Um pedido e uma devolução a mais por registro**: o bloco do `Arc`,
+  fora da trava. Antes, o registro morava dentro do vetor do anel.
+- **A disputa pela trava do alocador**: os pedidos e as devoluções que a
+  trava da auditoria punha em fila passam a disputar a do alocador direto.
+  Ver a medida, abaixo.
+- **A memória que um leitor segura**: o registro que sai do anel enquanto
+  uma fotografia ou uma cauda o segura só é devolvido quando o leitor o
+  solta — no máximo um anel por `audit.verify` em curso, limitado pelos
+  fios que o atendem.
+- **O tempo de quem lê não cai como a retenção**: o trabalho é o mesmo,
+  fora da trava, e quem lê pode ser preemptado no meio dele sem segurar
+  ninguém — no x86_64 em depuração e, em parte das leituras, no aarch64
+  em `release`, o `audit.tail` ficou mais lento (ver a medida, abaixo).
+
+### Os testes
+
+| Onde | O que confere |
+|---|---|
+| hospedeiro (`politica`): *o preparado e o anexado*, *os compartilhados são os do anel*, *a fotografia confere como o anel*, *segurar um registro não muda o anel*, *o anel não cresce ao anexar*, *o anel de um registro confere* | o registro preparado e anexado é o que `anexar` daria — a mesma sequência, o mesmo tempo, o mesmo anterior, o mesmo elo —, e o `Arc` dele é o que entra no anel, sem cópia; o que sai pela ponta volta a quem anexou, o mais velho, só com a referência de quem o recebeu, e a âncora é o elo dele; os ponteiros são os registros do anel, os mesmos objetos, em toda posição de `after` — antes do primeiro guardado, no meio, no último, depois dele, no fim dos números, sem nenhum guardado, depois de o anel dar a volta e de uma lacuna reposta —; a fotografia refeita fora acusa o mesmo registro que `Cadeia::verificar`, com cada parte de um registro do meio estragada na memória do anel, e a tirada antes do estrago continua conferindo; segurar um registro não muda o anel; o anel não cresce ao anexar, com as capacidades 1, 4 e 100; e o anel de um registro confere a cada anexar |
+| suíte: os nove casos `trava:` da auditoria (`kernel/src/testes/trava_da_auditoria.rs`) | o `audit.tail` pelo gate com o anel cheio, em cada `after` — zero, antes do primeiro guardado, o que a própria leitura empurrou para fora, a fronteira, o meio, o fim, depois dele, `u64::MAX` — e cada `count` — 0, 1, 128, 129, `u64::MAX`, ausente —: os registros do contrato, iguais aos do anel, com o elo refeito, o anterior encadeado e o `durable` da gravada; `audit.head` e `audit.verify` da mesma hora, e o anel no limite — 1023, 1024 e 1025 registros —, em que `anexar` e `anexar_preparado` fazem a mesma cadeia, e a fotografia que acusa o adulterado; a resposta do `audit.verify` em cada ramo, e a mesma pela conta com a trava — sem memória para a fotografia (o alocador recusa de verdade uma reserva maior que o heap), com um lugar menor que o anel e no post-mortem visto só por ele —, sem pedir nem devolver memória com ela; com memória, a conta é a da fotografia — pela conta de cada caminho, só da suíte (`agent::commands::verificacao_de_teste`); a cadeia que não confere, de ponta a ponta, nos quatro caminhos: com a âncora trocada só para `audit.verify`, a conta para no primeiro guardado, e a resposta diz `ok:false` e o número dele, e nada mais, sem que o anel mude; com a trava na mão, nada pedido nem devolvido ao alocador — o anexar ao anel cheio, `audit.head`, `audit.tail` com e sem `after`, `audit.verify`, a declaração ancorada e a política lida de novo com a cadeia de pé —, pela conta do próprio alocador, com os controles: um pedido e uma devolução feitos de propósito com a trava são contados; os de fora dela, os de outro fio e os de depois da vigia, não; a âncora de uma declaração fora da janela; o registro que sai pela ponta — a âncora no elo dele, quem anexou o soltou, e o `Arc` guardado não muda o anel —; produtores em vários núcleos com um leitor que acompanha a cadeia como o NSF — sem repetir, o salto só onde o anel descartou — e outro que verifica, conferidos contra o journal: cada registro uma vez, na ordem, os de cada produtor na ordem dele; o anel dando a volta três vezes sob `audit.verify` em quatro fios, com a memória de volta ao patamar; e três coletores e uma compactação no meio |
+| suíte: os casos `coleta:` e `heap:` | a cópia para o journal e a compactação, com a trava na mão, não pedem nem devolvem memória — as devoluções passaram a ser conferidas também, com o controle positivo —; e o caso do pico do heap pede de uma vez, falível, o que passa do pico: um caso de antes que deixasse o pico perto do heap inteiro o reprova, com os números, em vez de derrubar a suíte num pânico (a CI 475) |
+| hospedeiro (`xtask`): *os lotes seguidos conferem*, *o lote que pula, repete ou quebra o elo*, *o lote da cauda traz o prev e o gravado*, *a recusa por taxa diz quanto esperar*, *o atraso da auditoria no security.metrics*, *os vistos gravados vão até o durable_seq*, *o erro de um fio antes e depois do corte*, *a vez da carga não passa da folga* | as conferências da bancada: o lote que pula, repete, sai de ordem ou tem um `prev` que não é o `link` do anterior reprova, e diz o quê; o lote do `audit.tail` lido com o `prev` e o `durable_seq`, e a recusa por taxa gravada dentro dele não faz dele uma recusa; a espera da taxa entre 1 ms e 1 s; o atraso do journal pelo `audit_backlog`; os vistos gravados até o `durable_seq`; o erro de E/S que reprova antes da marca do corte, e não depois; e a vez da carga, com quatro fios, que nunca passa da folga de 128 sobre os alcançados |
+| hospedeiro (`xtask`): *os relatórios leem*, *a leitura em qualquer forma fora dos relatórios*, *o nome nos comentários e nos textos não é leitura*, *o relatório fora do cabeçalho perde o corpo*, *o corpo acaba no item seguinte*, *o que se chama de fora tira o corpo do relatório*, *o texto cru de C não desalinha*, *quem guarda a cadeia só a toca nos donos*, *a persistência só lê na cópia e na compactação*, *o leitor da declaração só no audit.declare* | a conferência "a auditoria só é relatada": as leituras dos três relatórios são deles, e noutro arquivo os mesmos nomes não valem; um `use` com outro nome, um ponteiro, o turbofish, uma função de qualquer declaração logo depois de um relatório, um `static`, uma `macro_rules!` e um `mod` com uma função do nome de um relatório aparecem — e o controle, uma função comum —; o nome num comentário ou num texto não conta; um relatório que mude de declaração — `pub fn` — perde o corpo, e a conferência reprova em vez de ficar cega; o corpo cuja última chave não está na coluna zero acaba no item seguinte, e não o leva junto; um `impl`, um `unsafe impl` ou uma macro exportada no corpo de um relatório tiram dele o corpo — e o controle, um fecho e uma macro do corpo —; um texto cru de C não esconde o código depois dele; em `autorizacao.rs`, a cadeia só se toca nos donos, e uma decisão nova que a lesse pelo empréstimo ou pela trava aparece, como a trava que vira pública; na persistência, só a cópia e a compactação a leem, e o `AUDITORIA` de lá — o tipo do registro — não conta; e o leitor da declaração ancorada é um nome protegido, visto num `use` sem o caminho (o achado B1 do adversário do `61027e8`) |
+| bancada de persistência: *a auditoria sob carga e leitura sobrevive ao corte* | dois produtores pelo canal do agente — um concedido, um recusado —, um leitor que acompanha a cadeia com `audit.tail` depois do último lido, pedindo até 128 de cada vez, e `audit.verify` em laço pela serial, com o anel cheio e dando a volta: cada lote seguido, sem repetir, com o `prev` de cada registro igual ao `link` do anterior; todo `audit.verify` confere; nenhum registro sai do anel antes do journal; a energia cai com todos pedindo, e o boot seguinte confere a cadeia e cada registro visto gravado que o anel dele ainda alcança — o mesmo número, o mesmo elo e o mesmo método. Uma folga atômica entre o que se pede e o que o leitor alcançou faz a conferência valer em qualquer intercalação. Passa também no código de antes (no x86_64, em depuração): as propriedades são as mesmas |
+
+### A medida, antes e depois
+
+A bancada `cargo xtask disponibilidade`, com 3 vCPUs (`DUKE_NUCLEOS=3`) e
+a carga `DUKE_CARGA=0,3,2:2,0` — sem carga, três processos pedindo, dois
+titulares com dois cada, e sem carga de novo —, e uma medida temporária,
+nunca commitada: a espera e a retenção de cada tomada da trava da
+auditoria — no anexar do gate e em cada leitura, pelo lugar de quem a
+tomou —; o tempo com as interrupções mascaradas, contado por dentro de
+`sem_interrupcoes`; o registro no gate, de `auditar` montar o evento até
+ele estar no anel e o que saiu, solto; cada pedido e cada devolução ao
+alocador, com a espera pela trava dele; os anexados, os gravados e os
+perdidos; e um fio que chama os handlers de verdade a cada 250 ms: quatro
+`audit.tail` de 128 — com `after` antes do primeiro guardado, no meio e
+perto do fim, e um sem `after` — e, a cada quatro voltas, um
+`audit.verify`. O anel enche no primeiro cenário e fica cheio: dali em
+diante, cada registro anexado tira o mais velho pela ponta. O código de
+antes é o `33dabef`; o de depois, o do `b78fee3` nos arquivos deste
+trabalho — as correções que vieram depois movem as duas tomadas do
+`audit.verify` para dentro do handler, acrescentam a guarda do lugar da
+fotografia, as contas e os interruptores da suíte e a conta com a trava
+pela função `verificar`, e soltam o que saiu pela ponta depois do anúncio:
+a trava segura o mesmo. Em 10/11/2026, de cada cenário, o maior valor —
+nas colunas de p99, o maior p99 das janelas de 10 s, que é o teto de um
+balde de meia oitava, ou o maior da janela, quando é menor —, e a faixa
+entre os cenários, em microssegundos:
+
+| | o `audit.tail` com a trava | o `audit.verify` com a trava | o anexar com a trava, p99 | o anexar com a trava, o maior |
+|---|---|---|---|---|
+| x86_64, `release` | 14 697–22 068 → 66–127 | 6 453–159 906 → 135–259 | 128–256 → 64–128 | 454–7 509 → 91–469 |
+| aarch64, `release` | 6 909–41 760 → 193–2 254 | 3 906–7 104 → 171–228 | 128–384 → 64 | 433–9 361 → 113–1 984 |
+| x86_64, depuração | 34 978–61 732 → 204–1 159 | 104 350–122 564 → 336–588 | 512–768 → 384 | 3 322–4 159 → 1 367–6 834 |
+| aarch64, depuração | 34 567–192 038 → 203–702 | 41 617–51 617 → 441–809 | 512–1 024 → 256–384 | 842–4 691 → 508–2 335 |
+
+| | o gate esperando a trava | as interrupções mascaradas, nas tomadas da trava | o registro no gate, p99 | o registro no gate, o maior | perdidos |
+|---|---|---|---|---|---|
+| x86_64, `release` | 6 872–15 404 → 21–96 | 14 699–159 907 → 183–867 | 3 072–6 144 → 384–1 024 | 7 000–32 574 → 2 023–4 457 | 0 |
+| aarch64, `release` | 3 640–35 171 → 34–1 754 | 6 910–41 791 → 1 292–3 820 | 1 536–6 144 → 384–2 048 | 3 741–35 340 → 663–8 882 | 0 |
+| x86_64, depuração | 100 959–122 508 → 82–1 829 | 104 358–122 946 → 3 571–6 861 | 32 768–65 536 → 8 192–65 536 | 101 634–323 354 → 45 448–120 663 | 0 |
+| aarch64, depuração | 28 205–58 640 → 123–917 | 46 294–192 074 → 1 358–3 393 | 16 384–49 152 → 3 072–16 384 | 33 696–166 585 → 20 404–392 696 | 0 |
+
+- **A retenção** cai de 18 a mais de 600 vezes no `audit.tail` e no
+  `audit.verify` — de uma a quase três ordens de grandeza, conforme a
+  configuração —: o que fica com a trava é a cópia dos ponteiros. A do
+  anexar cai no p99 — o que sai pela ponta não é mais devolvido com ela
+  —, e o piso dela é o elo (ver *O que continua com a trava*, nesta
+  seção).
+- **A espera do gate** pela trava, de 3,6–123 ms para 21 µs–1,8 ms.
+- **As interrupções mascaradas** nas tomadas da trava, de 6,9–192 ms para
+  0,2–6,9 ms.
+- **O maior de cada coluna** traz picos isolados, antes e depois, sem
+  relação com o caminho — o anexar de 6,8 ms num cenário do x86_64 em
+  depuração, com o p99 em 384 µs —: aparecem em cenários diferentes a
+  cada rodada. Uma vCPU parada pelo hospedeiro com a trava na mão, no QEMU
+  sem KVM, dá isso; não ficou provado. O registro no gate é outra conta:
+  vai de `auditar` montar o evento até soltar o que saiu, quase todo fora
+  da trava e com as interrupções ligadas, e o fio pode ser preemptado no
+  meio — em depuração, o maior dele fica entre dezenas e centenas de
+  milissegundos em todo cenário, antes e depois; os 393 ms de um cenário
+  do aarch64 vieram com a trava na mão por 2,3 ms no máximo.
+- **O tempo de quem lê** — a chamada inteira, com a resposta escrita —
+  não cai como a retenção: o trabalho é o mesmo, agora fora da trava. No
+  x86_64 em `release`, o `audit.verify` do fio de leitores levou 6,6–160
+  ms antes — o de 160 ms, no cenário em que a conta segurou a trava 160
+  ms — e 7,2–11 ms depois, e o `audit.tail` de 128 do meio, 36–79 ms
+  antes e 17–50 ms depois; no x86_64 em depuração, o `audit.tail` passou
+  de 116–278 para 211–391 ms, e no aarch64 em `release` o maior de três
+  das quatro leituras subiu (até 346 ms), com o p50 caindo: o leitor, sem
+  a trava, pode ser preemptado no meio sem segurar ninguém.
+- **A latência do canal do agente** — o p99 da serial e do TCP, de ponta
+  a ponta — fica na mesma faixa em `release` e cai em depuração: no
+  x86_64 em `release`, 48–54 → 34–51 ms pela serial e 55–61 → 44–74 pelo
+  TCP; no aarch64 em `release`, 43–55 → 19–51 e 56–76 → 26–70; em
+  depuração, 118–360 → 96–174 e 107–372 → 98–253 no x86_64, e 108–226 →
+  101–174 e 109–237 → 102–202 no aarch64.
+- **A vazão** acompanha a carga, antes e depois — os registros anexados
+  a cada 10 s, 477–3 489 → 475–3 484 no x86_64 em `release`, 489–3 406 →
+  482–3 435 no aarch64 —, e nenhum registro se perdeu; todo
+  `audit.verify` do fio de leitores conferiu, e nenhuma leitura dele
+  voltou com erro. A ordem das caudas — sem repetir nem pular — não é da
+  medida: conferem-na os casos `trava:` e a bancada de persistência (ver
+  *Os testes*, acima).
+
+O alocador — cada pedido e cada devolução, com a espera pela trava dele:
+
+| | um pedido, p99 | um pedido, o maior | uma devolução, p99 | uma devolução, o maior |
+|---|---|---|---|---|
+| x86_64, `release` | 48–96 → 32–96 | 3 740–14 653 → 716–8 276 | 24–96 → 8–96 | 3 095–20 091 → 2 192–8 286 |
+| aarch64, `release` | 32–96 → 32–96 | 4 205–29 593 → 3 764–30 574 | 24–96 → 24–96 | 7 661–29 575 → 7 016–10 978 |
+| x86_64, depuração | 192–384 → 384–1 536 | 4 821–12 239 → 5 677–26 369 | 96–256 → 256–768 | 4 244–14 212 → 4 095–17 997 |
+| aarch64, depuração | 192–384 → 128–384 | 6 983–15 244 → 5 496–24 185 | 96–256 → 96–384 | 6 408–19 725 → 6 146–16 896 |
+
+Em `release`, o p99 não muda. No x86_64 em depuração, sobe: os pedidos
+que a trava da auditoria punha em fila disputam a do alocador direto, e
+cada registro custa um pedido e uma devolução a mais — o bloco do `Arc`.
+Os maiores de cada cenário, de 0,7 a 31 ms, aparecem antes e depois.
+
+**Durante a compactação.** A mesma medida, com uma compactação forçada a
+cada 15 s no meio da carga — de uma a três por cenário —, mais tarde no
+mesmo dia:
+
+| | a compactação com a trava | o gate esperando a trava | as interrupções mascaradas | o `audit.tail` com a trava | o `audit.verify` com a trava | perdidos |
+|---|---|---|---|---|---|---|
+| x86_64, `release` | 83–269 → 162–325 | 9 848–16 929 → 18–102 | 14 765–23 607 → 826–3 087 | 6 073–22 187 → 89–1 169 | 11 405–23 606 → 160–247 | 0 |
+| aarch64, `release` | 74–284 → 131–281 | 2 245–10 930 → 38–276 | 13 283–55 168 → 2 676–4 320 | 13 281–55 126 → 92–345 | 3 710–9 176 → 139–352 | 0 |
+| x86_64, depuração | 1 031–1 220 → 1 203–8 094 | 117 188–147 232 → 88–4 741 | 122 009–148 649 → 8 495–11 293 | 36 330–147 434 → 210–8 488 | 121 998–148 635 → 429–613 | 0 |
+| aarch64, depuração | 761–1 607 → 871–1 404 | 48 225–58 458 → 105–4 249 | 50 478–73 225 → 5 982–39 338 | 34 951–73 219 → 262–39 298 | 50 465–60 219 → 460–1 424 | 0 |
+
+A compactação copia o anel como antes (*A cópia*, acima), e a trava dela
+fica na mesma ordem — fora um 8,1 ms no primeiro cenário do x86_64 em
+depuração, o mesmo do pico do `audit.tail`. Os picos de 8 a 39 ms do
+`audit.tail` em depuração são isolados — um cenário no x86_64, dois no
+aarch64 —, e o p99 dele ficou em 192–384 µs em todos os cenários menos
+um: no aarch64, um pico levou o p99 do cenário a 9,5 ms, e o mesmo
+cenário teve a cópia para o journal em 7,9 ms; nos outros cenários do
+aarch64 em depuração, a cópia ficou na retenção de antes. Nenhum registro
+se perdeu, e todo `audit.verify` do fio de leitores conferiu.
+
+**Cada caminho sozinho.** Uma primeira medida, no mesmo dia, com uma
+versão anterior da instrumentação (sem a trava do alocador), mediu cada
+trabalho sobre o alicerce — o anel de `Arc` —, sozinho, em `release` (de
+cada cenário o maior, ou o p99, e a faixa entre os cenários, em
+microssegundos):
+
+| x86_64 | o `audit.tail` | o `audit.verify` | o anexar, p99 | o gate esperando a trava |
+|---|---|---|---|---|
+| antes | 7 768–51 732 | 10 705–27 458 | 128–2 048 | 3 170–19 540 |
+| só o alicerce | 11 621–43 668 | 11 587–144 202 | 192–384 | 5 352–17 055 |
+| o alicerce e o anexar | 8 781–25 882 | 11 687–18 294 | 96–128 | 7 766–13 996 |
+| o alicerce e o `audit.tail` | 61–213 | 10 387–40 785 | 192–256 | 3 053–37 882 |
+| o alicerce e o `audit.verify` | 6 317–29 455 | 195–276 | 96–357 | 2 593–18 504 |
+| os três | 77–614 | 201–250 | 96–128 | 61–479 |
+
+| aarch64 | o `audit.tail` | o `audit.verify` | o anexar, p99 | o gate esperando a trava |
+|---|---|---|---|---|
+| antes | 5 713–21 569 | 4 709–8 190 | 128–256 | 3 603–12 908 |
+| só o alicerce | 4 214–19 901 | 3 988–9 294 | 128–192 | 2 166–9 313 |
+| o alicerce e o anexar | 6 581–15 829 | 4 491–9 365 | 64–96 | 1 134–8 752 |
+| o alicerce e o `audit.tail` | 199–565 | 4 147–9 260 | 96–192 | 780–4 096 |
+| o alicerce e o `audit.verify` | 4 615–34 695 | 207–426 | 96–384 | 2 467–21 195 |
+| os três | 153–1 746 | 174–455 | 96 | 84–1 641 |
+
+Cada trabalho tira da trava só o caminho dele, e a espera do gate só cai
+às centenas de microssegundos com os três — 61–479 µs no x86_64 e 84–1 641
+no aarch64 —, porque cada um dos outros dois continua a segurá-la por
+milissegundos; no aarch64, o do `audit.tail` sozinho já a reduz, de
+3 603–12 908 para 780–4 096 µs.
+
+### As mutações
+
+Em 10/11/2026, uma de cada vez, cada uma desfeita antes da seguinte,
+contra o código do `61027e8` — e as da conferência endurecida, contra o
+`81d0bfc` —: 81 rodadas — 13 na `politica`, pelos testes do hospedeiro;
+48 pela suíte do kernel, filtrada aos casos `trava:` no x86_64 em
+depuração — entre elas 12 das 13 da `politica`, a R7 e as R10 numa
+variante: a âncora no `anterior` do que saiu, e o erro de um em
+`posicao_depois_de`, a R10a um depois e a R10b um antes —; 15 na
+conferência "a auditoria só é relatada", 10 pelos testes do hospedeiro do
+`xtask` e 5 por `cargo xtask invariantes` no código de verdade; e 5 na
+bancada:
+
+- **na `politica`** (R, 13): o anel sem a reserva na criação, ou com um
+  lugar a menos (R1, R2); o anexar que copia o preparado para um `Arc`
+  novo, com a trava (R3); o detalhe sem o corte no teto (R4); o tempo que
+  não volta acertado depois do elo, ou sem o piso (R5, R6); a âncora
+  errada quando um registro sai pela ponta (R7); o mais velho tirado
+  antes de ler a cabeça (R8, só no hospedeiro: o anel do kernel tem 1024
+  lugares, e com mais de um o mais velho nunca é a cabeça); o que sai pela
+  ponta solto dentro do anexar, com a trava (R9); a posição do primeiro
+  depois de `after` um antes ou um depois (R10a, R10b); os últimos `n`
+  com um a mais ou um a menos (R11a, R11b);
+- **no anexar do gate e nos ganchos da suíte** (`autorizacao.rs` e
+  `heap.rs`, 13): o que saiu solto ou descartado dentro do fecho, com a
+  trava (N1, N2); o registro preparado dentro do fecho (N3); a devolução
+  sem o gancho da suíte, a vigia que não zera as devoluções e toda
+  devolução contada, com a trava ou não (N4–N6); o que saiu esquecido
+  (`mem::forget`, L1), ou solto antes do anúncio, a ordem antiga (L2); a
+  política lida de novo que solta com a trava a cadeia que sobra, ou que a
+  cria com ela (C1, C2); e, na declaração ancorada, a âncora sem o filtro
+  `r.seq == seq`, procurada depois dela, ou o registro citado copiado com
+  a trava (D1–D3);
+- **no `audit.tail`** (8): a posição de `after` um antes ou um depois
+  (T1a, T1b); o teto de 129, ou sem o `take(n)` com `after` (T2a, T2b); o
+  vetor sem a reserva (T3); a cauda ao contrário, sem e com `after` (T4a,
+  T4b); um texto montado com a trava — um `format!` na cauda sem `after`
+  — (T5);
+- **no `audit.verify`** (15): a âncora ou o `checked` lidos noutra tomada
+  da trava (V1, V2); a fotografia sem o primeiro guardado (V3); a falha
+  respondida com `ok: true` (V4); o erro sem a cadeia com outro texto
+  (V5); a conta da gênese, e não da âncora (V6); a fotografia sem a
+  reserva, e sem a guarda do lugar (V7a, V7b); sem memória, sem resposta
+  (V8); a conta sempre com a trava (V9); o post-mortem esquecido — o do
+  interruptor da suíte (V10) e o de verdade (V15); a guarda que manda o
+  anel cheio para a conta com a trava (`>=`, V11); a conta que devolve a
+  cabeça sem refazer elo nenhum, com a trava (V12) e pela fotografia
+  (V13);
+- **na conferência "a auditoria só é relatada"** (15): pelos testes do
+  hospedeiro, a busca pelo texto `com_auditoria(`, como antes (X1); o
+  corpo de um relatório até o fim do arquivo (X2); sem tirar os
+  comentários e os textos (X3); a trava não vista em `autorizacao.rs`
+  (X4); o corpo que acaba só na chave da coluna zero (X5); o corpo que
+  vale com um `impl` ou uma macro exportada dentro (X6), ou com um
+  `unsafe impl` (X7); o texto cru de C, como antes (X8); o leitor da
+  declaração fora dos nomes protegidos (X9); os donos de um arquivo
+  valendo em qualquer outro (X10); e, por `cargo xtask invariantes` no
+  código de verdade, um item da lista dos donos que não existe (X11), uma
+  função nova de `autorizacao.rs` que lê a cadeia pelo empréstimo ou pela
+  trava (X12, X13), a persistência que a lê fora da cópia e da
+  compactação (X14) e o leitor da declaração trazido por um `use` noutro
+  módulo (X15);
+- **na bancada** (5): o lote sem a conta do pulo, sem o elo ou sem a
+  repetição (B1–B3), pelos testes do hospedeiro do `xtask`; e o kernel
+  com a cauda que pula um registro (B4) ou com o `audit.verify` da gênese
+  (B5), pela própria bancada de persistência no QEMU (*a auditoria sob
+  carga e leitura sobrevive ao corte*).
+
+Reprovaram 78: as 13 da `politica` pelos testes do hospedeiro, 45 das 48
+da suíte, as 15 da conferência e as 5 da bancada. As três que passam:
+
+- **L2, o que saiu solto antes do anúncio**: equivalente no que o anel,
+  as respostas e o journal dizem — muda só quando a memória do registro
+  que saiu volta ao alocador, e o anúncio do novo fica para depois dela.
+  A ordem do código encurta a janela em que o NSF pode ler um registro já
+  no anel sem o momento dele guardado; a janela existe também com dois
+  pedidos auditando ao mesmo tempo, e só a medida da latência perde a
+  amostra (ver o comentário de `autorizacao::auditar`). Nenhum caso mede
+  essa janela.
+- **V2, o `checked` lido noutra tomada da trava**: equivalente com o anel
+  cheio, em que os guardados são sempre 1024. Só os casos `trava:`
+  conferem o `checked`, e todos depois de encher o anel, que não esvazia
+  mais. Com o anel por encher e um registro anexado entre as duas
+  tomadas, o `checked` contaria um registro que a fotografia não
+  conferiu; nenhum caso confere o `checked` com o anel por encher.
+- **V15, o post-mortem de verdade esquecido**: a suíte não entra no
+  post-mortem — um caso que entrasse pararia a máquina —; o ramo dele é
+  conferido pelo interruptor da suíte (`como_no_post_mortem`), e a V10, que
+  o esquece, reprova. Com a V15, o `audit.verify` do post-mortem tentaria
+  a fotografia, pedindo 8 KiB a um alocador que pode ter ficado sem
+  memória; sem eles, a conta voltaria para a trava, e a resposta seria a
+  mesma.
