@@ -10464,7 +10464,8 @@ fn conversar(
     // Por último, porque não há volta: depois dela o kernel só responde o
     // relatório da falha.
     sob_falha(monitor, tela_no_monitor, &mut escrita, &mut leitor)?;
-    sob_falha_para_os_nucleos(arch, travado, &mut escrita, &mut leitor)
+    sob_falha_para_os_nucleos(arch, travado, &mut escrita, &mut leitor)?;
+    sob_falha_a_auditoria(&mut escrita, &mut leitor)
 }
 
 /// Os núcleos de um `system.info`: índice, estado e pulso de cada um.
@@ -10836,6 +10837,162 @@ fn sob_falha_o_post_mortem_nao_desenha(
     println!(
         "  [falha] ok  o press do post-mortem foi recusado, e a tela de falha ficou ({:.1}%)",
         fracao * 100.0
+    );
+    Ok(())
+}
+
+/// Quantos pedidos ao alocador o `audit.verify` faz a mais que o
+/// `audit.head`, pelas contas do `heap.stats` — o `allocations` de três
+/// retratos em volta dos dois pedidos:
+///
+/// ```text
+/// heap.stats (r1), audit.head, heap.stats (r2), audit.verify, heap.stats (r3)
+/// ```
+///
+/// `r2 − r1` é o que o `audit.head` pede mais o que um `heap.stats` inteiro
+/// pede — o resto do primeiro, depois do retrato, e o começo do segundo,
+/// antes dele —; `r3 − r2`, o mesmo com o `audit.verify`. A diferença das
+/// duas é a dos dois pedidos da auditoria, que passam pelo mesmo canal e
+/// pelo mesmo gate, com um registro cada. Devolve a diferença e as
+/// respostas do `audit.head` e do `audit.verify`.
+///
+/// A conta é exata no post-mortem: só o laço do canal anda — os fios estão
+/// congelados, e os outros núcleos, parados ou girando sem o heap —, e a
+/// resposta vai direto ao fio. Com o kernel vivo, os outros fios pedem
+/// memória entre os retratos, e a resposta é montada num texto que pede
+/// mais ou menos blocos conforme o tamanho dela.
+fn auditoria_pelo_alocador(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+    id: &mut u32,
+) -> Result<(i64, String, String), String> {
+    let alocacoes = |r: &str| -> Result<i64, String> {
+        campo_simples(r, "allocations")
+            .and_then(|v| v.parse::<i64>().ok())
+            .ok_or_else(|| format!("o heap.stats nao disse allocations\n  {r}"))
+    };
+    let r1 = alocacoes(&pedir_pela_serial(escrita, leitor, id, "heap.stats", "{}")?)?;
+    let cabeca = pedir_pela_serial(escrita, leitor, id, "audit.head", "{}")?;
+    let r2 = alocacoes(&pedir_pela_serial(escrita, leitor, id, "heap.stats", "{}")?)?;
+    let verificada = pedir_pela_serial(escrita, leitor, id, "audit.verify", "{}")?;
+    let r3 = alocacoes(&pedir_pela_serial(escrita, leitor, id, "heap.stats", "{}")?)?;
+    Ok(((r3 - r2) - (r2 - r1), cabeca, verificada))
+}
+
+/// Quantos textos hexadecimais de 64 dígitos — os 32 bytes de um elo, de
+/// uma cabeça ou de uma âncora — uma resposta traz: no `audit.head` e no
+/// `audit.verify`, cada um é um pedido ao alocador do handler que a escreveu
+/// (`sigilo::hex`).
+fn textos_hexadecimais(resposta: &str) -> i64 {
+    resposta
+        .split('"')
+        .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()))
+        .count() as i64
+}
+
+/// O `audit.verify` no post-mortem de verdade: a resposta certa, sem a
+/// fotografia.
+///
+/// # Por que esta sonda existe
+///
+/// No post-mortem, `audit.verify` faz a conta com a trava na mão, sem
+/// reservar o vetor da fotografia — não há gate a esperar, e o heap pode
+/// ter acabado. A suíte não chega a esse post-mortem — ela morreria junto —
+/// e passa pela mesma conta por um interruptor dela; o que só esta sonda
+/// exercita é o desvio de verdade: o kernel de produção, a falha fatal, as
+/// travas abertas à força, os fios congelados, e o `audit.verify` lendo o
+/// post-mortem de onde o resto do kernel o lê. Só com comandos de produção:
+/// nada no binário existe para ela.
+///
+/// # O que conta como passar
+///
+/// - a resposta: `ok`, a cabeça igual ao elo do registro do próprio
+///   `audit.verify` — lido de volta pelo `audit.tail` —, e `checked` igual
+///   aos guardados do `audit.head` de logo antes mais os dois registros que
+///   entraram depois dele;
+/// - o caminho: pelas contas do alocador ([`auditoria_pelo_alocador`]), o
+///   `audit.verify` pede, em relação ao `audit.head`, só a diferença dos
+///   textos hexadecimais das respostas — um a menos: o `audit.head` escreve
+///   dois, a cabeça e a âncora; o `audit.verify`, um, a cabeça. Com a
+///   fotografia, pediria também o vetor dela: um pedido a mais. A conta tem
+///   de se repetir — nada mais anda ali.
+///
+/// # O que ela não prova
+///
+/// - que o post-mortem responde com o heap esgotado: não responde. O
+///   registro que o gate anexa a cada pedido e o texto da cabeça na resposta
+///   pedem memória, e uma falha de alocação para a máquina; o que o desvio
+///   poupa é a fotografia, oito KiB de uma vez;
+/// - que a conta do post-mortem acusa uma cadeia adulterada: a suíte confere
+///   a conta comum aos dois desvios (`conta_com_a_trava`) com a âncora
+///   trocada, pelo interruptor dela.
+fn sob_falha_a_auditoria(
+    escrita: &mut UnixStream,
+    leitor: &mut BufReader<UnixStream>,
+) -> Result<(), String> {
+    let mut id = 30_000;
+    let (primeira, _, _) = auditoria_pelo_alocador(escrita, leitor, &mut id)?;
+    let (segunda, cabeca, verificada) = auditoria_pelo_alocador(escrita, leitor, &mut id)?;
+    if primeira != segunda {
+        return Err(format!(
+            "falha: no post-mortem, a diferenca entre o audit.verify e o audit.head mudou de uma vez para a outra ({primeira} e {segunda}): outra coisa pediu memoria entre os retratos"
+        ));
+    }
+    if !verificada.contains(r#""ok":true"#) {
+        return Err(format!(
+            "falha: no post-mortem, a cadeia guardada nao confere\n  {verificada}"
+        ));
+    }
+    let numero = |r: &str, campo: &str| -> Result<u64, String> {
+        campo_simples(r, campo)
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| format!("falha: a resposta nao disse {campo}\n  {r}"))
+    };
+    let seq = numero(&cabeca, "seq")?;
+    let guardados = numero(&cabeca, "stored")?;
+    let capacidade = numero(&cabeca, "capacity")?;
+    let conferidos = numero(&verificada, "checked")?;
+    // Depois do registro do `audit.head`, o do `heap.stats` do meio e o do
+    // próprio `audit.verify`: nada mais anda no post-mortem.
+    if conferidos != (guardados + 2).min(capacidade) {
+        return Err(format!(
+            "falha: no post-mortem, o audit.verify conferiu {conferidos} registros; o audit.head de antes guardava {guardados}, de {capacidade}\n  {verificada}"
+        ));
+    }
+    let elo = campo_simples(&verificada, "head").ok_or("falha: o audit.verify sem head")?;
+    let registro = pedir_pela_serial(
+        escrita,
+        leitor,
+        &mut id,
+        "audit.tail",
+        &format!(r#"{{"count":1,"after":{}}}"#, seq + 1),
+    )?;
+    let lido = (
+        campo_simples(&registro, "seq"),
+        campo_simples(&registro, "method"),
+        campo_simples(&registro, "link"),
+    );
+    if lido
+        != (
+            Some((seq + 2).to_string()),
+            Some("audit.verify".to_string()),
+            Some(elo.clone()),
+        )
+    {
+        return Err(format!(
+            "falha: no post-mortem, a cabeca do audit.verify ({}…) nao e o elo do registro dele, o {}\n  {registro}",
+            &elo[..elo.len().min(16)],
+            seq + 2
+        ));
+    }
+    let textos = textos_hexadecimais(&verificada) - textos_hexadecimais(&cabeca);
+    if segunda != textos {
+        return Err(format!(
+            "falha: no post-mortem, o audit.verify pede {segunda:+} ao alocador em relacao ao audit.head, e a diferenca dos textos hexadecimais das respostas e {textos:+}: o que passa disso e a fotografia, que o post-mortem nao faz"
+        ));
+    }
+    println!(
+        "  [falha] ok  o audit.verify no post-mortem: {conferidos} registros conferidos ate o dele, sem a fotografia (pedidos ao alocador em relacao ao audit.head: {segunda:+}, so a diferenca dos textos hexadecimais das respostas, nas duas vezes)"
     );
     Ok(())
 }
@@ -18563,6 +18720,30 @@ const ESPERA_PELO_CANAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod testes {
+    /// Os textos hexadecimais de uma resposta da auditoria, que a sonda do
+    /// `audit.verify` no post-mortem conta: os de 64 dígitos entre aspas — a
+    /// cabeça e a âncora do `audit.head`, a cabeça do `audit.verify` —, e
+    /// nenhum outro texto nem número; um a menos, um a mais ou um dígito que
+    /// não é hexadecimal não contam.
+    #[test]
+    fn os_textos_hexadecimais_de_uma_resposta() {
+        use super::*;
+        let elo = "0123456789abcdef".repeat(4);
+        let cabeca = format!(
+            r#"{{"seq":7,"head":"{elo}","anchor":"{elo}","stored":8,"capacity":1024,"durable_seq":7}}"#
+        );
+        assert_eq!(textos_hexadecimais(&cabeca), 2);
+        let verificada = format!(r#"{{"ok":true,"head":"{elo}","checked":10}}"#);
+        assert_eq!(textos_hexadecimais(&verificada), 1);
+        assert_eq!(textos_hexadecimais(r#"{"ok":false,"failed_at":3}"#), 0);
+        let curto = format!(r#"{{"head":"{}"}}"#, &elo[1..]);
+        let longo = format!(r#"{{"head":"{elo}0"}}"#);
+        let errado = format!(r#"{{"head":"{}g"}}"#, &elo[1..]);
+        for r in [curto, longo, errado] {
+            assert_eq!(textos_hexadecimais(&r), 0, "{r}");
+        }
+    }
+
     /// A vez da tarefa `programas`: o `servir()` de verdade passa; com
     /// outro orçamento, com o laço antigo sem ceder, ou com mais um passo,
     /// não; e sem `servir()`, também não.
