@@ -1956,10 +1956,11 @@ recriou o diretório do TPM.
 **O que a queda deixa, e o que o firmware lê.** Numa queda planejada, o
 kernel com a feature `quedas` lê o plano no último setor da partição de
 estado, avisa `{"queda":N}` no canal no ponto — numa linha só, depois de
-esperar, até meio segundo, que outro núcleo termine a resposta que estiver
+esperar, até dez segundos, que outro núcleo termine a resposta que estiver
 escrevendo na serial: os outros núcleos continuam, e um aviso escrito por
 cima de uma resposta não se lê (a queda no meio da coleta da auditoria sob
-carga, com a serial pedindo sem parar, o mostrou) —, e congela — ou, no ponto
+carga, com a serial pedindo sem parar, o mostrou; ver *O aviso que esperava
+meio segundo*, abaixo) —, e congela — ou, no ponto
 antes da confirmação e com a bandeira 5 do plano, entra em pânico —; a
 bancada lê o aviso e corta a energia — o `SIGKILL` no QEMU e no `swtpm` —,
 apaga o plano e liga outra máquina: outro processo do QEMU, outro `swtpm`
@@ -1991,6 +1992,28 @@ O que um corte pode deixar num estado incomum para o firmware é só o disco
 — o journal e o controle como o kernel os deixou — e o NV do TPM; as
 variáveis, nunca. No boot que parou na CI 436, nem isso: o estado tinha
 sido zerado e o TPM recriado antes dele.
+
+**O aviso que esperava meio segundo.** Até 11/11/2026, a espera do aviso
+pela serial era de meio segundo (desde o `5b44552`), e depois dele a trava
+era solta à força. No aarch64, o canal é a PL011 emulada, e cada byte custa
+dezenas de microssegundos: um `audit.tail` de 128 registros — o que a carga
+da queda no meio da coleta pede depois de cada 40 `agent.ping` — leva de
+0,31 a 0,34 s para sair, na mediana; e o núcleo que cai, girando na espera
+com as interrupções desligadas, deixa mais lento o que escreve: das 25
+respostas que as quedas pegaram no meio nas rodadas abaixo, 8 passaram de
+meio segundo, e a maior levou 1,09 s. Com o meio segundo esgotado no meio
+de uma delas, o aviso saía embaralhado com ela — `{"quedf1a":011}`,
+`lt":"al{"quedlow",a""cod:011e":"ALLO}` —, a bancada não o reconhecia, e a
+carga esperava os 60 s em vão ("a carga ficou sem a resposta e sem o aviso
+da queda"). Medido com o cenário sozinho, em rodadas locais seguidas, com
+cada linha da carga registrada com o horário por um registro temporário da
+bancada, nunca commitado: com o meio segundo, o cenário reprovou em 5 de 7
+rodadas com o kernel do B3 e em 1 de 3 com o de antes dele — a espera, e
+não a cópia da auditoria, era a causa —; com dez segundos, passou nas 5 de
+5, com os 25 avisos inteiros. A espera só fica longa quando outro núcleo
+escreve uma resposta; os dez segundos são o teto para quando a trava está
+na mão do próprio processador que cai — no modo post-mortem — ou na de um
+que parou com ela, e cabem nos 60 s com que a bancada espera o aviso.
 
 **Onde estavam os processadores.** Com o firmware da CI — o `ovmf-generic`
 2025.11-3ubuntu7.3, baixado do arquivo do Ubuntu — e a máquina da bancada,
@@ -2398,7 +2421,7 @@ compactação sem ela, e a montagem que não ocupa o que a tomada contou
   não aparece nos bytes.
 - **a bancada que confere o `id` antes do aviso da queda**: equivalente
   nos casos do teste. Só uma linha misturada teria as duas coisas — o
-  aviso escrito por cima de uma resposta, depois do meio segundo de
+  aviso escrito por cima de uma resposta, depois dos dez segundos de
   espera (ver *O que a queda deixa, e o que o firmware lê*).
 - **a conta do que cabe sem os dois bytes do tamanho de cada campo**: um
   teste que faltava — nenhum caso chegava ao teto pela fronteira desses

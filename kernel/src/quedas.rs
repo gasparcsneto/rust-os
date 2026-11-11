@@ -334,12 +334,20 @@ pub fn antes_da_confirmacao() {
 }
 
 /// Quanto [`cair`] espera, no máximo, o dono da trava da serial terminar a
-/// resposta que escreve — ver lá.
-const ESPERA_PELA_SERIAL_NS: u64 = 500_000_000;
+/// resposta que escreve — ver lá. É o teto de uma linha inteira, com folga
+/// grande: no aarch64, onde o canal é a PL011 emulada, cada byte custa
+/// dezenas de microssegundos, e um `audit.tail` de 128 registros leva de
+/// 0,31 a 0,34 s para sair, na mediana — e até 1,09 s com este processador
+/// girando aqui ao lado, medido na queda no meio da coleta da auditoria sob
+/// carga, em 11/11/2026. O teto de antes, meio segundo, era menos que essa
+/// resposta: o aviso saía no meio dela, e nem um nem outro se lia.
+const ESPERA_PELA_SERIAL_NS: u64 = 10_000_000_000;
 
-/// O teto de voltas da mesma espera, para quando a régua do tempo ainda
-/// não foi calibrada — uma queda planejada no começo do boot.
-const VOLTAS_PELA_SERIAL: u32 = 50_000_000;
+/// O teto de voltas da mesma espera, só enquanto a régua do tempo ainda não
+/// anda — uma queda planejada no começo do boot, antes de o canal atender.
+/// Com a régua andando, vale só o tempo: as voltas de um processador rápido
+/// acabariam antes dele.
+const VOLTAS_PELA_SERIAL: u64 = 50_000_000;
 
 /// A energia cai aqui: o aviso sai pelo canal do agente, e este
 /// processador congela com as interrupções desligadas.
@@ -353,31 +361,37 @@ fn cair(p: Ponto) -> ! {
         // pedindo sem parar, o pegou). Por isso, primeiro, a vez: o dono
         // solta a trava no fim da linha dele, e o aviso sai inteiro, numa
         // linha só.
-        // A régua do tempo só existe depois da calibração: antes dela, a
-        // conta das voltas é o teto.
+        // A régua do tempo só existe com o relógio andando — a conta de
+        // `metricas::nanos` precisa da janela das contas acima de zero
+        // milissegundo: antes disso, a conta das voltas é o teto; depois, o
+        // tempo.
         let inicio = crate::arch::ciclos();
-        let mut voltas = 0u32;
+        let mut voltas = 0u64;
         let mut guarda = loop {
             if let Some(g) = crate::serial::AGENT_LINK.try_lock() {
                 break Some(g);
             }
             voltas += 1;
-            if voltas >= VOLTAS_PELA_SERIAL
-                || crate::metricas::nanos(crate::metricas::desde(inicio)) >= ESPERA_PELA_SERIAL_NS
-            {
+            let esgotou = if crate::metricas::janela_ms() > 0 {
+                crate::metricas::nanos(crate::metricas::desde(inicio)) >= ESPERA_PELA_SERIAL_NS
+            } else {
+                voltas >= VOLTAS_PELA_SERIAL
+            };
+            if esgotou {
                 break None;
             }
             core::hint::spin_loop();
         };
-        // Sem a vez no prazo, a trava está na mão deste mesmo processador —
-        // no modo post-mortem a resposta se escreve enquanto o handler
-        // executa —, ou na de quem parou com ela: soltá-la à força não corre
-        // o risco de ninguém. O `\n` do começo separa o aviso de uma
-        // resposta escrita pela metade.
+        // Sem a vez no prazo — dez segundos, muitas vezes o de uma
+        // resposta —, a trava está na mão deste mesmo processador — no modo
+        // post-mortem a resposta se escreve enquanto o handler executa —, ou
+        // na de quem parou com ela: soltá-la à força não corre o risco de
+        // ninguém. O `\n` do começo separa o aviso de uma resposta escrita
+        // pela metade.
         if guarda.is_none() {
             // SAFETY: este processador congela logo abaixo, com as
             // interrupções desligadas; o dono da trava, se é ele, não volta
-            // a usá-la, e, se é outro, não a soltou em meio segundo.
+            // a usá-la, e, se é outro, não a soltou em dez segundos.
             unsafe { crate::serial::AGENT_LINK.force_unlock() };
             guarda = crate::serial::AGENT_LINK.try_lock();
         }
