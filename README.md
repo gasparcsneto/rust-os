@@ -5335,7 +5335,9 @@ Sem ganho a medir, não há o que pagar com esse risco.
   mutações: 84 de 87 reprovaram; das três que passam, duas são
   equivalentes nos estados que a suíte alcança, e a outra é o post-mortem
   de verdade, em que a suíte não entra). O elo do anexar continua com a
-  trava: tirá-lo dela seria uma decisão [C], não tomada. E a conferência
+  trava: tirá-lo dela é a decisão [C] C1, que o dono do projeto fechou em
+  11/11/2026 por mantê-lo com a trava — só volta a ser considerada se uma
+  medida mostrar o elo como gargalo relevante. E a conferência
   "a auditoria só é relatada" passou a valer também dentro de
   `autorizacao.rs` e da persistência, item a item.
   **O A1-4 segue pendente**: a recusa não diz quantos dos contados

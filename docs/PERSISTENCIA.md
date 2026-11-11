@@ -2514,9 +2514,13 @@ antes: o que muda é só onde a memória é pedida e devolvida.
   trava e repetir se outro anexou antes —, que sob disputa não tem teto
   de tentativas (a latência do gate deixaria de ter limite) e mudaria o
   protocolo de anexação; ou outra construção da cadeia, que muda o
-  formato. Nenhuma das duas é uma escolha interna — seriam uma decisão
-  [C], que não foi tomada —: o elo é o piso da retenção do anexar — de 64
-  a 128 µs no p99, em `release`, na medida abaixo —, e fica como está.
+  formato. Nenhuma das duas é uma escolha interna: é a decisão [C] C1,
+  que o dono do projeto fechou em 11/11/2026 — o elo fica com a trava,
+  sem protocolo otimista, sem cálculo em lotes, sem árvore de Merkle e
+  sem nada equivalente. A C1 só volta a ser considerada se uma medida
+  futura mostrar o cálculo do elo como gargalo relevante. O elo é o piso
+  da retenção do anexar — de 64 a 128 µs no p99, em `release`, na medida
+  abaixo.
 - **A cópia para o journal e a compactação** (*A cópia*, acima)
   continuam a codificar com a trava: com os ponteiros, elas também
   poderiam copiar só ponteiros e codificar fora — uma escolha interna,
@@ -2525,7 +2529,9 @@ antes: o que muda é só onde a memória é pedida e devolvida.
   o lugar, e no post-mortem: a conta inteira com a trava, como antes.
 - **O boot**: `adotar_auditoria` continua com a trava, uma vez, a cadeia
   do journal com o que o boot registrou antes dela (`continuar_com`, que
-  pede e devolve memória ali mesmo), antes de o gate atender.
+  pede e devolve memória ali mesmo), antes de o gate atender. É a
+  pendência B4, registrada à parte: não muda sem uma medida que mostre
+  benefício relevante.
 
 ### O que custa
 
