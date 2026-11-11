@@ -73,6 +73,7 @@
 //! sequência interrompida.
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -1426,117 +1427,23 @@ fn cabe(usado: usize, ocupa: usize, orcamento: usize) -> bool {
     usado + 2 + ocupa <= orcamento
 }
 
-/// O tamanho de cada pedaço da cópia que a compactação faz do anel — ver
-/// [`CopiaDaAuditoria`]: o teto da auditoria num registro, bem abaixo do
-/// maior pedido que uma base já faz ao heap.
-const PEDACO_DA_COPIA: usize = MAIOR_AUDITORIA_POR_REGISTRO;
+/// Um registro da auditoria como o anel o guarda: o ponteiro que a cópia
+/// para o journal e a compactação tiram dele com a trava na mão — ver "A
+/// cópia", em [`auditoria_que_cabe`].
+type DoAnel = Arc<politica::auditoria::Registro>;
 
-/// Registros da auditoria copiados do anel para o journal — ver "A cópia",
-/// em [`auditoria_que_cabe`].
-///
-/// O lugar inteiro é reservado antes de a trava da auditoria ser tomada: lá
-/// dentro, copiar um registro é codificá-lo para dentro de um pedaço que já
-/// existe e anotar a sequência, o elo e onde ele acaba — sem nenhum pedido
-/// ao alocador.
-struct CopiaDaAuditoria {
-    /// As codificações, uma depois da outra, em pedaços de capacidade fixa;
-    /// nenhuma atravessa dois.
-    pedacos: Vec<Vec<u8>>,
-    /// O pedaço em que a próxima entra.
-    atual: usize,
-    copiados: Vec<Copiado>,
-    /// O elo de antes do primeiro copiado: de onde a cadeia deles parte.
-    anterior: [u8; 32],
-}
-
-/// Um registro copiado: a sequência, o elo, e onde a codificação acaba.
-struct Copiado {
-    seq: u64,
-    elo: [u8; 32],
-    /// O pedaço, e o fim da codificação nele. O começo é o fim da anterior
-    /// no mesmo pedaço, ou o começo dele.
-    pedaco: usize,
-    fim: usize,
-}
-
-impl CopiaDaAuditoria {
-    /// O lugar de até `quantos` registros, em `pedacos` pedaços de
-    /// `capacidade` bytes — fora da trava.
-    fn reservar(quantos: usize, pedacos: usize, capacidade: usize) -> CopiaDaAuditoria {
-        CopiaDaAuditoria {
-            pedacos: (0..pedacos)
-                .map(|_| Vec::with_capacity(capacidade))
-                .collect(),
-            atual: 0,
-            copiados: Vec::with_capacity(quantos),
-            anterior: [0; 32],
-        }
-    }
-
-    /// Copia `r`, com a trava da auditoria na mão: no pedaço atual, se a
-    /// codificação ainda cabe nele, ou no seguinte — a regra de
-    /// [`pedacos_da_copia`]. No lugar reservado, nada aqui pede memória; se
-    /// faltasse lugar — o que a medida não deixa —, ele cresceria aqui
-    /// mesmo, e a cópia só ficaria mais lenta.
-    fn copiar(&mut self, r: &politica::auditoria::Registro) {
-        let n = politica::auditoria::tamanho_codificado(&r.evento);
-        if self
-            .pedacos
-            .get(self.atual)
-            .is_some_and(|p| !p.is_empty() && p.len() + n > p.capacity())
-        {
-            self.atual += 1;
-        }
-        if self.atual == self.pedacos.len() {
-            self.pedacos
-                .push(Vec::with_capacity(n.max(PEDACO_DA_COPIA)));
-        }
-        let pedaco = &mut self.pedacos[self.atual];
-        politica::auditoria::codificar_em(pedaco, r.seq, &r.evento);
-        if self.copiados.is_empty() {
-            self.anterior = r.anterior;
-        }
-        self.copiados.push(Copiado {
-            seq: r.seq,
-            elo: r.elo,
-            pedaco: self.atual,
-            fim: pedaco.len(),
-        });
-    }
-
-    /// Cada registro copiado, com a codificação dele, na ordem da cópia.
-    fn codificados(&self) -> impl Iterator<Item = (&Copiado, &[u8])> {
-        let mut pedaco = 0;
-        let mut comeco = 0;
-        self.copiados.iter().map(move |c| {
-            if c.pedaco != pedaco {
-                pedaco = c.pedaco;
-                comeco = 0;
-            }
-            let codificado = &self.pedacos[c.pedaco][comeco..c.fim];
-            comeco = c.fim;
-            (c, codificado)
-        })
-    }
-}
-
-/// Quantos são os `registros`, e quantos pedaços de [`PEDACO_DA_COPIA`]
-/// bytes a cópia deles ocupa pela regra de [`CopiaDaAuditoria::copiar`] —
-/// com a trava da auditoria na mão: só a conta, sem pedir memória.
-fn pedacos_da_copia<'a>(
-    registros: impl Iterator<Item = &'a politica::auditoria::Registro>,
-) -> (usize, usize) {
-    let (mut quantos, mut pedacos, mut no_atual) = (0, 0, 0);
-    for r in registros {
-        let n = politica::auditoria::tamanho_codificado(&r.evento);
-        if pedacos == 0 || (no_atual > 0 && no_atual + n > PEDACO_DA_COPIA) {
-            pedacos += 1;
-            no_atual = 0;
-        }
-        no_atual += n;
-        quantos += 1;
-    }
-    (quantos, pedacos)
+/// A entrada do journal de um registro copiado do anel: o tipo e a
+/// codificação dele — a de [`politica::auditoria::codificar`] —, feita em
+/// `lugar`, que serve de um registro ao seguinte sem um vetor novo para cada
+/// codificação. Com a trava da auditoria solta: o registro é o do ponteiro
+/// copiado, e um registro nunca muda depois de entrar no anel.
+fn entrada_do_registro(
+    lugar: &mut Vec<u8>,
+    r: &politica::auditoria::Registro,
+) -> Result<Vec<u8>, &'static str> {
+    lugar.clear();
+    politica::auditoria::codificar_em(lugar, r.seq, &r.evento);
+    entrada(tipo::AUDITORIA_EVENTO, &[lugar.as_slice()])
 }
 
 /// A auditoria que falta gravar — da seguinte à gravada em diante —, como
@@ -1549,23 +1456,34 @@ fn pedacos_da_copia<'a>(
 /// A trava da auditoria é a do gate: todo pedido auditado a toma, com as
 /// interrupções mascaradas, para anexar o registro dele. Com ela na mão,
 /// aqui só se **copia**: a lacuna, se o anel perdeu registros depois da
-/// gravada, e os registros seguintes que cabem no orçamento, cada um
-/// codificado ([`politica::auditoria::codificar_em`]) para dentro do lugar
-/// reservado antes de a trava ser tomada, com a sequência e o elo dele.
-/// Nada lá dentro chama o alocador — que tem uma trava só, disputada por
-/// todos os núcleos, e percorre a lista livre a cada chamada. Montar as
-/// entradas do journal com a trava na mão, como era, custava quatro ou
-/// cinco alocações por registro, e outras tantas devoluções, e um lote de
-/// 16 KiB segurava o gate por dezenas de milissegundos. As entradas são
-/// montadas depois, com a trava solta, pelas mesmas funções de sempre.
+/// gravada, e os ponteiros — os `Arc` do anel — dos registros seguintes que
+/// cabem no orçamento, para um lugar reservado antes de a trava ser tomada.
+/// Copiar um ponteiro é somar um à conta dele: nada lá dentro chama o
+/// alocador — que tem uma trava só, disputada por todos os núcleos, e
+/// percorre a lista livre a cada chamada —, nem lê o texto de registro
+/// nenhum. Montar as entradas do journal com a trava na mão, como era no
+/// começo, custava quatro ou cinco alocações por registro, e outras tantas
+/// devoluções, e um lote de 16 KiB segurava o gate por dezenas de
+/// milissegundos; codificar os registros com ela, como foi depois, ainda
+/// copiava o texto de cada um. A codificação e as entradas são feitas
+/// depois, com a trava solta, pelas mesmas funções de sempre, a partir dos
+/// mesmos registros: um registro nunca muda depois de entrar no anel — ver
+/// "O anel e a trava de quem o guarda", em [`politica::auditoria`].
 ///
-/// A cópia é uma fotografia: a lacuna, os registros e os elos saem da
-/// mesma tomada da trava, e os registros são os seguidos à gravada — ou à
-/// lacuna. O que for anexado depois dela tem sequência maior que a do
-/// último copiado, e fica para a gravação seguinte. O que o anel descartar
-/// depois dela já está copiado, e vai assim mesmo; e, se o anel descartar
-/// também o que vinha depois dos copiados, a gravação seguinte o diz numa
-/// lacuna, a partir do último gravado.
+/// O que cabe continua decidido com a trava, pela conta das entradas que
+/// vão ser montadas: o tamanho codificado de cada registro, que só soma os
+/// tamanhos dos campos. Só se copia o ponteiro do que cabe; a montagem,
+/// depois, mede as entradas de verdade — ver [`ENVELOPE_DO_EVENTO`].
+///
+/// A cópia é uma fotografia: a lacuna e os ponteiros saem da mesma tomada
+/// da trava, e os registros são os seguidos à gravada — ou à lacuna. O que
+/// for anexado depois dela tem sequência maior que a do último copiado, e
+/// fica para a gravação seguinte. O que o anel descartar depois dela
+/// continua inteiro para quem segura o ponteiro, e vai assim mesmo — e quem
+/// o solta por último, aqui, devolve a memória dele ao alocador, fora de
+/// toda trava —; e, se o anel descartar também o que vinha depois dos
+/// copiados, a gravação seguinte o diz numa lacuna, a partir do último
+/// gravado.
 ///
 /// Só quem tem a ordem das gravações chega aqui — [`gravar_sozinho`], por
 /// [`gravar_com_a_decisao`] —, e só ela anda a gravada
@@ -1584,17 +1502,14 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
     );
     let gravada = auditoria_gravada();
     let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
-    // O lugar, fora da trava: um pedaço do tamanho do orçamento — a
-    // codificação de um registro é menor que a entrada dele, e as entradas
-    // cabem no orçamento — e a anotação de quantos registros cabem nele,
-    // no máximo.
-    let mut copia = CopiaDaAuditoria::reservar(
+    // O lugar, fora da trava: um ponteiro para cada registro que pode caber
+    // no orçamento — cada um ocupa nele, com o envelope e o tamanho do
+    // campo, ao menos o menor codificado.
+    let mut copiados: Vec<DoAnel> = Vec::with_capacity(
         orcamento / (2 + ENVELOPE_DO_EVENTO + politica::auditoria::MENOR_CODIFICADO) + 1,
-        1,
-        orcamento,
     );
-    // Com a trava: a lacuna, e os registros que cabem — a conta das
-    // entradas que vão ser montadas, e nada mais.
+    // Com a trava: a lacuna, e os ponteiros dos registros que cabem — a
+    // conta das entradas que vão ser montadas, e nada mais.
     let (lacuna, usado) = crate::autorizacao::com_auditoria(|c| {
         let lacuna = c.lacuna_depois_de(gravada);
         let mut usado = 0;
@@ -1604,13 +1519,13 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
             }
             usado += 2 + ENTRADA_DA_LACUNA;
         }
-        for r in c.guardados_depois_de(gravada) {
+        for r in c.compartilhados_depois_de(gravada) {
             let ocupa = ENVELOPE_DO_EVENTO + politica::auditoria::tamanho_codificado(&r.evento);
             if r.seq >= antes_de || !cabe(usado, ocupa, orcamento) {
                 break;
             }
             usado += 2 + ocupa;
-            copia.copiar(r);
+            copiados.push(Arc::clone(r));
         }
         (lacuna, usado)
     })
@@ -1618,7 +1533,7 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
     // Sem a trava: quem audita daqui em diante entra no anel, e fica para a
     // gravação seguinte.
     #[cfg(feature = "modo-teste")]
-    coleta_de_teste::depois_da_copia(copia.copiados.len());
+    coleta_de_teste::depois_da_copia(copiados.len());
     let campo = |campos: &mut Vec<u8>, e: Vec<u8>| -> Result<bool, &'static str> {
         if !cabe(campos.len(), e.len(), orcamento) {
             return Ok(false);
@@ -1648,15 +1563,21 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
         d.elo = l.elo;
         d.perdidas = Some((l.primeira, l.ultima));
     }
-    for (copiado, codificado) in copia.codificados() {
-        let e = entrada(tipo::AUDITORIA_EVENTO, &[codificado])?;
-        #[cfg(feature = "modo-teste")]
-        coleta_de_teste::montou();
+    // Cada copiado, na ordem da cópia: codificado, montado e solto logo
+    // depois — se o anel já o deixou, é aqui que a memória dele volta ao
+    // alocador, com a trava da auditoria solta.
+    let mut lugar = Vec::new();
+    for r in copiados {
+        let e = entrada_do_registro(&mut lugar, &r)?;
         if !campo(&mut d.campos, e)? {
             break;
         }
-        d.ate = copiado.seq;
-        d.elo = copiado.elo;
+        #[cfg(feature = "modo-teste")]
+        coleta_de_teste::montou();
+        d.ate = r.seq;
+        d.elo = r.elo;
+        #[cfg(feature = "modo-teste")]
+        coleta_de_teste::soltando(&r);
     }
     // Na suíte: a montagem ocupou o que a conta com a trava disse — com as
     // duas iguais, todo copiado coube, e o `break` acima não acontece.
@@ -1667,42 +1588,54 @@ fn auditoria_que_cabe(orcamento: usize, antes_de: u64) -> Result<DaAuditoria, &'
 
 /// Só na suíte: o que a cópia da auditoria para o journal fez, e os pontos
 /// em volta dela — logo depois, com a trava solta e nada montado ainda; e,
-/// na compactação, entre a tomada que mede e a que copia. Ver "A cópia", em
-/// `auditoria_que_cabe`. Fora da suíte não existe.
+/// na compactação, logo antes da tomada, com a gravada já lida. Ver "A
+/// cópia", em `auditoria_que_cabe`. Fora da suíte não existe.
 #[cfg(feature = "modo-teste")]
 pub mod coleta_de_teste {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     /// Quantos registros a suíte acrescenta à auditoria logo depois da
-    /// próxima cópia, e entre as duas tomadas da próxima compactação.
+    /// próxima cópia, e logo antes da tomada da próxima compactação.
     static ANEXAR: AtomicU64 = AtomicU64::new(0);
-    static ANEXAR_ENTRE_AS_TOMADAS: AtomicU64 = AtomicU64::new(0);
+    static ANEXAR_ANTES_DA_TOMADA: AtomicU64 = AtomicU64::new(0);
     /// O primeiro e o último registro que a suíte acrescentou ali; zero,
     /// nenhum.
     static PRIMEIRO_ANEXADO: AtomicU64 = AtomicU64::new(0);
     static ULTIMO_ANEXADO: AtomicU64 = AtomicU64::new(0);
-    /// Quantas cópias houve, e quantos registros elas copiaram; quantos
-    /// registros copiados viraram entrada do journal; e, desses, quantos com
-    /// a trava da auditoria na mão de quem montava.
+    /// Quantas cópias houve, e quantos registros elas copiaram — os
+    /// ponteiros, com a trava na mão —; quantos registros copiados viraram
+    /// entrada do registro do journal, ou da base; e, desses, quantos com a
+    /// trava da auditoria na mão de quem montava.
     static COPIAS: AtomicU64 = AtomicU64::new(0);
     static COPIADOS: AtomicU64 = AtomicU64::new(0);
     static MONTADOS: AtomicU64 = AtomicU64::new(0);
     static SOB_A_TRAVA: AtomicU64 = AtomicU64::new(0);
-    /// Da última compactação: a gravada; quantos registros até ela a tomada
-    /// que mede contou; e quantos o anel tinha até ela na tomada que copia.
+    /// Da última compactação: a gravada, e quantos registros o anel tinha
+    /// até ela na tomada.
     static GRAVADA: AtomicU64 = AtomicU64::new(0);
-    static MEDIDOS: AtomicU64 = AtomicU64::new(0);
     static NO_ANEL_NA_COPIA: AtomicU64 = AtomicU64::new(0);
+    /// Dos montados, quantos a cópia soltou por último: o anel já os tinha
+    /// deixado, e o ponteiro dela era o único que sobrava — a memória deles
+    /// voltou ao alocador ali, com a trava solta.
+    static SOLTOS_POR_ULTIMO: AtomicU64 = AtomicU64::new(0);
+    /// A maior cópia, em registros: o lote com mais ponteiros.
+    static MAIOR_COPIA: AtomicU64 = AtomicU64::new(0);
 
     /// As contas das cópias, desde [`zerar`] — ver [`contas`].
     pub struct Contas {
         pub copias: u64,
         /// Os registros copiados com a trava na mão, somados.
         pub copiados: u64,
-        /// Os registros copiados que viraram entrada, somados.
+        /// Os da maior cópia.
+        pub maior_copia: u64,
+        /// Os registros copiados que viraram entrada — e entraram no
+        /// registro, ou na base —, somados.
         pub montados: u64,
         /// Desses, os montados com a trava da auditoria na mão.
         pub sob_a_trava: u64,
+        /// Dos montados, os que a cópia soltou por último — o anel já os
+        /// tinha deixado.
+        pub soltos_por_ultimo: u64,
     }
 
     /// A próxima cópia é seguida de `n` registros novos na auditoria, com
@@ -1712,18 +1645,18 @@ pub mod coleta_de_teste {
         ANEXAR.store(n, Ordering::Release);
     }
 
-    /// A próxima compactação tem `n` registros novos na auditoria entre a
-    /// tomada que mede o anel e a que o copia: com o anel cheio, eles tiram
-    /// da frente `n` dos que a medida contou.
-    pub fn anexar_entre_as_tomadas_da_proxima_compactacao(n: u64) {
-        ANEXAR_ENTRE_AS_TOMADAS.store(n, Ordering::Release);
+    /// A próxima compactação tem `n` registros novos na auditoria logo
+    /// antes da tomada, com a gravada já lida: com o anel cheio, eles tiram
+    /// da frente `n` dos de até a gravada.
+    pub fn anexar_antes_da_tomada_da_proxima_compactacao(n: u64) {
+        ANEXAR_ANTES_DA_TOMADA.store(n, Ordering::Release);
     }
 
     /// Zera as contas e desarma o que estava armado.
     pub fn zerar() {
         for c in [
             &ANEXAR,
-            &ANEXAR_ENTRE_AS_TOMADAS,
+            &ANEXAR_ANTES_DA_TOMADA,
             &PRIMEIRO_ANEXADO,
             &ULTIMO_ANEXADO,
             &COPIAS,
@@ -1731,37 +1664,40 @@ pub mod coleta_de_teste {
             &MONTADOS,
             &SOB_A_TRAVA,
             &GRAVADA,
-            &MEDIDOS,
             &NO_ANEL_NA_COPIA,
+            &SOLTOS_POR_ULTIMO,
+            &MAIOR_COPIA,
         ] {
             c.store(0, Ordering::Release);
         }
     }
 
-    /// As cópias, os copiados, os montados e os montados com a trava na
-    /// mão, desde [`zerar`].
+    /// As cópias, os copiados e a maior cópia, os montados, os montados com
+    /// a trava na mão e os soltos por último, desde [`zerar`].
     pub fn contas() -> Contas {
         Contas {
             copias: COPIAS.load(Ordering::Acquire),
             copiados: COPIADOS.load(Ordering::Acquire),
+            maior_copia: MAIOR_COPIA.load(Ordering::Acquire),
             montados: MONTADOS.load(Ordering::Acquire),
             sob_a_trava: SOB_A_TRAVA.load(Ordering::Acquire),
+            soltos_por_ultimo: SOLTOS_POR_ULTIMO.load(Ordering::Acquire),
         }
     }
 
-    /// Da última compactação desde [`zerar`]: a gravada; quantos registros
-    /// até ela a tomada que mede contou; e quantos o anel tinha até ela na
-    /// tomada que copia — o que a cópia tem de levar, inteiro.
-    pub fn compactada() -> (u64, u64, u64) {
+    /// Da última compactação desde [`zerar`]: a gravada, e quantos
+    /// registros o anel tinha até ela na tomada — o que a cópia tem de
+    /// levar, inteiro.
+    pub fn compactada() -> (u64, u64) {
         (
             GRAVADA.load(Ordering::Acquire),
-            MEDIDOS.load(Ordering::Acquire),
             NO_ANEL_NA_COPIA.load(Ordering::Acquire),
         )
     }
 
     /// O primeiro e o último registro que a suíte acrescentou depois de uma
-    /// cópia ou entre as tomadas, desde [`zerar`]; zeros, nenhum.
+    /// cópia ou antes da tomada da compactação, desde [`zerar`]; zeros,
+    /// nenhum.
     pub fn anexados() -> (u64, u64) {
         (
             PRIMEIRO_ANEXADO.load(Ordering::Acquire),
@@ -1789,34 +1725,45 @@ pub mod coleta_de_teste {
     pub(super) fn depois_da_copia(copiados: usize) {
         COPIAS.fetch_add(1, Ordering::AcqRel);
         COPIADOS.fetch_add(copiados as u64, Ordering::AcqRel);
+        MAIOR_COPIA.fetch_max(copiados as u64, Ordering::AcqRel);
         anexar(ANEXAR.swap(0, Ordering::AcqRel), "no meio da coleta");
     }
 
-    /// Na compactação, entre a tomada que mede — `medidos` registros até a
-    /// `gravada` — e a que copia, com a trava da auditoria solta.
-    pub(super) fn entre_as_tomadas(gravada: u64, medidos: usize) {
+    /// Na compactação, com a `gravada` lida e a trava da auditoria solta,
+    /// logo antes da tomada.
+    pub(super) fn antes_da_tomada(gravada: u64) {
         GRAVADA.store(gravada, Ordering::Release);
-        MEDIDOS.store(medidos as u64, Ordering::Release);
         anexar(
-            ANEXAR_ENTRE_AS_TOMADAS.swap(0, Ordering::AcqRel),
-            "entre as tomadas",
+            ANEXAR_ANTES_DA_TOMADA.swap(0, Ordering::AcqRel),
+            "antes da tomada",
         );
     }
 
-    /// Na tomada que copia da compactação, com a trava da auditoria na mão:
-    /// quantos o anel tem até a gravada. Só uma escrita atômica — nada aqui
-    /// pede memória.
+    /// Na tomada da compactação, com a trava da auditoria na mão: quantos o
+    /// anel tem até a gravada. Só uma escrita atômica — nada aqui pede
+    /// memória.
     pub(super) fn no_anel_na_copia(n: usize) {
         NO_ANEL_NA_COPIA.store(n as u64, Ordering::Release);
     }
 
-    /// Ao montar a entrada de um registro copiado. Pública para o controle
-    /// positivo da suíte: chamada com a trava na mão, de propósito, ela
-    /// tem de contar.
+    /// Quando a entrada de um registro copiado entra no registro do journal,
+    /// ou na base: a que não coube não conta, e a conta dos montados fica
+    /// abaixo da dos copiados — um ponteiro copiado à toa com a trava do
+    /// gate na mão. Pública para o controle positivo da suíte: chamada com a
+    /// trava na mão, de propósito, ela tem de contar.
     pub fn montou() {
         MONTADOS.fetch_add(1, Ordering::AcqRel);
         if crate::autorizacao::auditoria_na_mao_de_teste() {
             SOB_A_TRAVA.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Logo antes de a cópia soltar o ponteiro de um registro montado: se é
+    /// o único que sobrou — o anel já o deixou —, é ela quem devolve a
+    /// memória dele ao alocador, ali, com a trava solta.
+    pub(super) fn soltando(r: &super::DoAnel) {
+        if alloc::sync::Arc::strong_count(r) == 1 {
+            SOLTOS_POR_ULTIMO.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -2490,7 +2437,8 @@ fn nao_cabe(m: &'static str) -> FalhaDaCompactacao {
 fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     use FalhaDaCompactacao::*;
     // A ordem das gravações é o que faz desta o único escritor, e o que
-    // segura a gravada entre as duas tomadas da cópia da auditoria, abaixo.
+    // segura a gravada da leitura dela à tomada da cópia da auditoria,
+    // abaixo, e até a base estar escrita.
     #[cfg(feature = "modo-teste")]
     assert!(
         ordem_na_mao_sem_trava(),
@@ -2651,53 +2599,60 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     // cadeia continua do elo de antes do primeiro deles — ou do último
     // gravado, se o anel já não tem nenhum.
     //
-    // Copiada do anel com a trava da auditoria na mão, sem pedir memória lá
-    // dentro, e montada fora dela, como a do coletor — ver "A cópia", em
-    // [`auditoria_que_cabe`]. São até um anel inteiro: a primeira tomada só
-    // mede, o lugar é reservado fora, e a segunda copia. Entre as duas, o
-    // anel só perde registros destes, pela ponta — os que entram têm
+    // Copiada do anel como a do coletor — ver "A cópia", em
+    // [`auditoria_que_cabe`]: com a trava da auditoria na mão, só os
+    // ponteiros, para um lugar reservado antes; a codificação e as entradas,
+    // com ela solta. Numa tomada só: o lugar é o do anel cheio — um ponteiro
+    // por registro, [`crate::autorizacao::CAPACIDADE_DA_AUDITORIA`] deles,
+    // 8 KiB, a capacidade de todo anel do kernel —, e não depende do tamanho
+    // dos registros, que era o que uma primeira tomada media quando a cópia
+    // os codificava. Um anel maior que o lugar faria o vetor crescer com a
+    // trava na mão: a cópia sairia a mesma, só mais lenta — e a suíte, que
+    // conta os pedidos ao alocador com ela, o veria. Os copiados são os que
+    // o anel tem até a gravada na tomada: entre a leitura da gravada e ela,
+    // o anel só perde registros destes, pela ponta — os que entram têm
     // sequência maior que a gravada, e a gravada não anda, que a ordem das
-    // gravações é desta compactação —, e a cópia cabe no que a medida
-    // reservou. A marca sai da segunda: do primeiro copiado. O lugar são
-    // pedaços de 16 KiB e as anotações dos copiados, um pedido só de 56
-    // bytes por registro — até 56 KiB, com o anel cheio.
+    // gravações é desta compactação. A marca sai da tomada: do primeiro
+    // copiado.
     let gravada = auditoria_gravada();
     let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
-    let medida = crate::autorizacao::com_auditoria(|c| pedacos_da_copia(c.guardados_ate(gravada)));
-    // Na suíte: o anel que perde registros entre as duas tomadas — os
-    // auditados ali, com ele cheio, tiram da frente os que a medida contou.
+    let mut copiados: Vec<DoAnel> = Vec::with_capacity(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
+    // Na suíte: o anel que perde registros antes da tomada — os auditados
+    // ali, com ele cheio, tiram da frente os de até a gravada.
     #[cfg(feature = "modo-teste")]
-    coleta_de_teste::entre_as_tomadas(gravada, medida.map_or(0, |(quantos, _)| quantos));
-    if let Some((quantos, pedacos)) = medida {
-        let mut copia = CopiaDaAuditoria::reservar(quantos, pedacos, PEDACO_DA_COPIA);
-        let copiou = crate::autorizacao::com_auditoria(|c| {
-            // Na suíte: quantos o anel tem até a gravada nesta tomada — o que
-            // a cópia tem de levar, inteiro.
-            #[cfg(feature = "modo-teste")]
-            coleta_de_teste::no_anel_na_copia(c.guardados_ate(gravada).count());
-            for r in c.guardados_ate(gravada) {
-                copia.copiar(r);
-            }
-        });
+    coleta_de_teste::antes_da_tomada(gravada);
+    let copiou = crate::autorizacao::com_auditoria(|c| {
+        // Na suíte: quantos o anel tem até a gravada nesta tomada — o que a
+        // cópia tem de levar, inteiro.
         #[cfg(feature = "modo-teste")]
-        coleta_de_teste::depois_da_copia(copia.copiados.len());
-        if copiou.is_some() {
-            let (antes, elo) = match copia.copiados.first() {
-                Some(primeiro) => (primeiro.seq - 1, copia.anterior),
-                None => (gravada, elo_gravado),
-            };
-            if antes >= 1 {
-                escrita.grupo(&[entrada(
-                    tipo::AUDITORIA_COMPACTADA,
-                    &[&1u64.to_le_bytes(), &antes.to_le_bytes(), &elo],
-                )?])?;
-            }
-            for (_, codificado) in copia.codificados() {
-                let e = entrada(tipo::AUDITORIA_EVENTO, &[codificado])?;
-                #[cfg(feature = "modo-teste")]
-                coleta_de_teste::montou();
-                escrita.grupo(&[e])?;
-            }
+        coleta_de_teste::no_anel_na_copia(c.guardados_ate(gravada).count());
+        copiados.extend(c.compartilhados_ate(gravada).cloned());
+    });
+    #[cfg(feature = "modo-teste")]
+    coleta_de_teste::depois_da_copia(copiados.len());
+    if copiou.is_some() {
+        let (antes, elo) = match copiados.first() {
+            Some(primeiro) => (primeiro.seq - 1, primeiro.anterior),
+            None => (gravada, elo_gravado),
+        };
+        if antes >= 1 {
+            escrita.grupo(&[entrada(
+                tipo::AUDITORIA_COMPACTADA,
+                &[&1u64.to_le_bytes(), &antes.to_le_bytes(), &elo],
+            )?])?;
+        }
+        // Cada copiado, na ordem da cópia: codificado, posto na base e solto
+        // logo depois, como na cópia do coletor — o que o anel deixou no
+        // meio volta ao alocador aqui, com a trava da auditoria solta, e a
+        // memória que a compactação segura diminui a cada um.
+        let mut lugar = Vec::new();
+        for r in copiados {
+            let e = entrada_do_registro(&mut lugar, &r)?;
+            escrita.grupo(&[e])?;
+            #[cfg(feature = "modo-teste")]
+            coleta_de_teste::montou();
+            #[cfg(feature = "modo-teste")]
+            coleta_de_teste::soltando(&r);
         }
     }
     escrita.selar()?;
@@ -4394,6 +4349,37 @@ pub fn percorrer_a_auditoria_de_teste(
     .map_err(|e| match e {
         diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
     })
+}
+
+/// Só para a suíte: a marca da base de uma compactação — a primeira e a
+/// última sequência que ela deixa de fora, e o elo de onde a cadeia
+/// continua.
+#[cfg(feature = "modo-teste")]
+pub type MarcaDaBase = (u64, u64, [u8; 32]);
+
+/// Só para a suíte: a marca da base de uma compactação na região atual do
+/// journal, se a região tem uma.
+#[cfg(feature = "modo-teste")]
+pub fn marca_da_base_de_teste() -> Result<Option<MarcaDaBase>, &'static str> {
+    let (segredo, _) = segredos().ok_or("sem a chave do Duke")?;
+    let mut meio = regiao_atual()?;
+    let mut marca = None;
+    diario::percorrer(&mut meio, &segredo, |r| {
+        for e in entradas(&r)? {
+            let campos = estado::ler_campos(e)?;
+            if let [t, primeira, ultima, elo] = campos.as_slice()
+                && *t == tipo::AUDITORIA_COMPACTADA.to_le_bytes()
+                && marca.is_none()
+            {
+                marca = Some((u64_de(primeira)?, u64_de(ultima)?, chave(elo)?));
+            }
+        }
+        Ok::<(), &'static str>(())
+    })
+    .map_err(|e| match e {
+        diario::Interrompido::Meio(m) | diario::Interrompido::Recusado { motivo: m, .. } => m,
+    })?;
+    Ok(marca)
 }
 
 /// A região em que o journal mora, para ler.

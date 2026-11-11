@@ -55,14 +55,17 @@
 //! mascaradas. Por isso o anel guarda cada registro num [`Arc`], e um
 //! registro nunca muda depois de entrar: quem lê pode copiar, com a trava
 //! na mão, só os ponteiros ([`Cadeia::compartilhados_depois_de`],
-//! [`Cadeia::ultimos_compartilhados`]) — sem pedir memória, num vetor
-//! reservado antes — e ler os registros, escrever, refazer elos, depois de
-//! soltá-la. O registro que sai pela ponta continua inteiro para quem ainda
-//! o segura; o anel, a âncora e a lacuna não sabem disso. No kernel, assim
-//! leem os relatórios da auditoria e a declaração que cita uma decisão; a
-//! cópia para o journal e a compactação ainda leem e codificam com a trava,
-//! e o relatório que confere a cadeia — sem memória para a fotografia, com
-//! um anel maior que o lugar dela ou no post-mortem — refaz os elos com ela.
+//! [`Cadeia::compartilhados_ate`], [`Cadeia::ultimos_compartilhados`]) —
+//! sem pedir memória, num vetor reservado antes — e ler os registros,
+//! codificar, escrever, refazer elos, depois de soltá-la. O registro que
+//! sai pela ponta continua inteiro para quem ainda o segura; o anel, a
+//! âncora e a lacuna não sabem disso. No kernel, assim leem os relatórios
+//! da auditoria, a declaração que cita uma decisão, a cópia para o journal
+//! e a compactação — a cópia decide com a trava o que cabe no registro do
+//! journal pelo [`tamanho_codificado`], que só soma tamanhos, e codifica
+//! depois —; só o relatório que confere a cadeia — sem memória para a
+//! fotografia, com um anel maior que o lugar dela ou no post-mortem —
+//! refaz os elos com ela.
 //!
 //! Do outro lado, quem anexa pode montar o registro e pedir a memória dele
 //! antes da trava ([`Preparado`]); com ela, [`Cadeia::anexar_preparado`] só
@@ -454,13 +457,14 @@ pub fn codificar(seq: u64, e: &Evento) -> Vec<u8> {
 /// mesma codificação, byte a byte: [`codificar`] é esta, num vetor do
 /// tamanho certo, e não há outra.
 ///
-/// # Para quem copia com uma trava na mão
+/// # O lugar reservado
 ///
 /// Com o lugar reservado antes — ao menos [`tamanho_codificado`] bytes
 /// livres em `v` —, nada aqui pede memória: são só cópias de campos para
-/// dentro do que já existe. É assim que o journal copia os registros do
-/// anel da auditoria com a trava dele na mão, sem chamar o alocador lá
-/// dentro — ver "A cópia", em `kernel/src/persistencia.rs`.
+/// dentro do que já existe. O journal codifica assim cada registro que
+/// copiou do anel da auditoria — o ponteiro dele, com a trava na mão —,
+/// num lugar só, esvaziado de um registro para o seguinte, já com a trava
+/// solta: ver "A cópia", em `kernel/src/persistencia.rs`.
 pub fn codificar_em(v: &mut Vec<u8>, seq: u64, e: &Evento) {
     // Os textos do kernel têm teto bem abaixo disso; o corte, se um dia
     // acontecer, fica numa fronteira de caractere, para o registro
@@ -514,8 +518,9 @@ pub const MENOR_CODIFICADO: usize = 8 + 8 + 1 + 1 + 1 + 1 + 1 + 32 + 5 * 2;
 
 /// Quantos bytes [`codificar`] dá para `e`, sem codificar: a conta dos
 /// mesmos campos, com o mesmo corte dos textos. É o que deixa quem copia
-/// registros reservar o lugar antes, e saber, registro a registro, se o
-/// próximo ainda cabe.
+/// registros saber, registro a registro, se o próximo ainda cabe — no
+/// kernel, com a trava da auditoria na mão: a conta só soma os tamanhos dos
+/// campos —, e reservar o lugar antes.
 pub fn tamanho_codificado(e: &Evento) -> usize {
     let texto = |t: &str| 2 + corte_do_texto(t);
     MENOR_CODIFICADO - 5 * 2
@@ -862,9 +867,14 @@ impl Cadeia {
     /// Os registros guardados de sequência até `gravada`, inclusive, do
     /// mais antigo ao mais novo: o começo da janela. Nada aqui pede memória.
     pub fn guardados_ate(&self, gravada: u64) -> impl Iterator<Item = &Registro> {
-        self.registros
-            .range(..self.posicao_depois_de(gravada))
-            .map(|r| &**r)
+        self.compartilhados_ate(gravada).map(|r| &**r)
+    }
+
+    /// Os mesmos de [`Cadeia::guardados_ate`], como os `Arc` do anel: para
+    /// quem copia os ponteiros com a trava na mão e lê os registros depois
+    /// de soltá-la. Nada aqui pede memória.
+    pub fn compartilhados_ate(&self, gravada: u64) -> impl Iterator<Item = &Arc<Registro>> {
+        self.registros.range(..self.posicao_depois_de(gravada))
     }
 
     /// Quantos dos guardados têm sequência até `gravada`: o lugar, na
@@ -1950,11 +1960,14 @@ mod testes {
     }
 
     /// Os compartilhados são os registros do anel — os mesmos objetos, na
-    /// mesma ordem — que os guardados depois de uma sequência e os últimos
-    /// `n` dão, e os que o filtro pela sequência e o fim da janela dão: em
-    /// toda posição, antes do primeiro guardado, no meio, no último, depois
-    /// dele e no fim dos números; sem nenhum guardado, com a janela pela
-    /// metade, depois de o anel dar a volta e depois de uma lacuna reposta.
+    /// mesma ordem — que os guardados depois de uma sequência e até ela e
+    /// os últimos `n` dão, e os que o filtro pela sequência e o fim da
+    /// janela dão: em toda posição, antes do primeiro guardado, no meio, no
+    /// último, depois dele e no fim dos números; sem nenhum guardado, com a
+    /// janela pela metade, depois de o anel dar a volta e depois de uma
+    /// lacuna reposta. Os de até uma sequência são, um a um, os objetos que
+    /// o anel guarda até ela — conferidos contra os ponteiros dos últimos,
+    /// e não contra `guardados_ate`, que é feito deles.
     #[test]
     fn os_compartilhados_sao_os_do_anel() {
         fn confere(c: &Cadeia, ate: u64) {
@@ -1970,6 +1983,17 @@ mod testes {
                 let seqs: Vec<u64> = c.compartilhados_depois_de(g).map(|r| r.seq).collect();
                 let filtro: Vec<u64> = todos.iter().copied().filter(|s| *s > g).collect();
                 assert_eq!(seqs, filtro, "depois de {g}");
+                let ate_g: Vec<*const Registro> =
+                    c.compartilhados_ate(g).map(Arc::as_ptr).collect();
+                let do_anel: Vec<*const Registro> = c
+                    .ultimos(usize::MAX)
+                    .filter(|r| r.seq <= g)
+                    .map(|r| r as *const Registro)
+                    .collect();
+                assert_eq!(ate_g, do_anel, "ate {g}");
+                let seqs: Vec<u64> = c.compartilhados_ate(g).map(|r| r.seq).collect();
+                let filtro: Vec<u64> = todos.iter().copied().filter(|s| *s <= g).collect();
+                assert_eq!(seqs, filtro, "ate {g}");
             }
             for n in [0, 1, 2, 3, 4, 5, usize::MAX] {
                 let ultimos: Vec<*const Registro> =

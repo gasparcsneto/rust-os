@@ -38216,8 +38216,12 @@ static CASOS: &[Caso] = &[
         f: coleta::a_trava_fica_solta_na_montagem,
     },
     Caso {
-        nome: "coleta: o anel que transborda no meio da coleta: o copiado vai inteiro, e o que saiu sem copia e uma lacuna",
+        nome: "coleta: o anel que transborda no meio da coleta: o copiado vai inteiro e e devolvido depois, fora da trava, e o que saiu sem copia e uma lacuna",
         f: coleta::o_anel_que_transborda_no_meio_da_coleta,
+    },
+    Caso {
+        nome: "coleta: um registro do journal cheio de registros minimos: o lote com mais ponteiros cabe no lugar reservado, sem alocar com a trava na mao",
+        f: coleta::um_registro_cheio_de_registros_minimos,
     },
     Caso {
         nome: "coleta: a gravacao que falha nao anda a gravada, e a seguinte grava a mesma faixa uma vez",
@@ -38228,12 +38232,20 @@ static CASOS: &[Caso] = &[
         f: coleta::produtores_e_coletores_ao_mesmo_tempo,
     },
     Caso {
-        nome: "coleta: a compactacao copia o anel sem alocar com a trava na mao, e a cadeia continua",
+        nome: "coleta: a compactacao copia o anel numa tomada, sem alocar nem devolver com a trava na mao, e o que sai do anel no meio vai na base e e devolvido depois",
         f: coleta::a_compactacao_copia_fora_da_trava,
     },
     Caso {
-        nome: "coleta: o anel que perde registros entre as tomadas da compactacao: a base leva inteiro o que ele tinha na copia, a marca parte do primeiro copiado, e o boot a adota",
-        f: coleta::o_anel_que_perde_registros_entre_as_tomadas,
+        nome: "coleta: o anel que perde registros antes da tomada da compactacao: a base leva inteiro o que ele tinha na tomada, a marca parte do primeiro copiado, e o boot a adota",
+        f: coleta::o_anel_que_perde_registros_antes_da_tomada,
+    },
+    Caso {
+        nome: "coleta: a compactacao com o anel sem nenhum gravado: a base e so a marca ate a gravada, com o elo guardado, e o journal continua dela pela lacuna",
+        f: coleta::a_compactacao_sem_nenhum_gravado_no_anel,
+    },
+    Caso {
+        nome: "coleta: produtores sem folga, tres coletores e compactacoes seguidas: cada base inteira, o journal seguido com as lacunas do anel, e o boot refaz a cadeia",
+        f: coleta::compactacoes_com_produtores_e_coletores,
     },
     Caso {
         nome: "coleta: o registro que chega ao teto da auditoria conta os dois bytes do tamanho de cada campo, e nao passa dele",
