@@ -27,8 +27,9 @@
 //!   copiado — inteiro para quem segura o ponteiro dele, e devolvido pela
 //!   cópia, que solta o último ponteiro dele com a trava solta —, e que o
 //!   que saiu sem ser copiado vira uma lacuna do tamanho dele;
-//! - que um registro do journal cheio de registros mínimos — o lote com
-//!   mais ponteiros — cabe no lugar reservado antes da trava;
+//! - que um registro do journal cheio de registros mínimos — os cinco
+//!   textos vazios: o maior lote de ponteiros que a cópia pode copiar —
+//!   cabe no lugar reservado antes da trava;
 //! - que a gravação que falha não anda a gravada, e a seguinte leva a mesma
 //!   faixa uma vez só;
 //! - que produtores em vários núcleos e três coletores ao mesmo tempo — o
@@ -836,58 +837,92 @@ pub(super) fn a_compactacao_copia_fora_da_trava() -> Resultado {
 /// que cabem num registro do journal.
 const MINIMOS: u64 = 300;
 
-/// Um registro do journal cheio de registros mínimos — sem método, recurso
-/// nem detalhe —, o lote com mais ponteiros que uma cópia do coletor copia:
-/// o lugar reservado antes da trava, pela conta do menor codificado, cabe
-/// todos, e nada é pedido nem devolvido ao alocador com ela. Um lugar
-/// menor que essa conta faria o vetor crescer com a trava na mão, e os
-/// lotes dos outros casos, de registros maiores, não chegam lá. A cópia
-/// leva os mínimos em lotes — o primeiro, de mais de 200 —, cada um
-/// montado inteiro, e o journal segue sem pular nem repetir.
+/// O maior lote de ponteiros de uma cópia do coletor: quantos registros
+/// mínimos cabem num registro do journal
+/// ([`persistencia::MAIOR_AUDITORIA_POR_REGISTRO`], 16 KiB) — cada um com o
+/// menor codificado ([`politica::auditoria::MENOR_CODIFICADO`]), o envelope
+/// da entrada (o tipo, com o tamanho na frente, e o tamanho da codificação:
+/// seis bytes) e os dois bytes do tamanho do campo: 71 bytes, 230 num
+/// registro. A conta é a da suíte, e não a da cópia: uma cópia que contasse
+/// errado levaria outro lote.
+const MAIOR_LOTE: u64 = (persistencia::MAIOR_AUDITORIA_POR_REGISTRO
+    / (2 + 6 + politica::auditoria::MENOR_CODIFICADO)) as u64;
+
+/// Quantas vezes o caso do registro cheio de registros mínimos tenta um
+/// lote inteiro: um registro de outro fio no meio dos mínimos o deixa
+/// menor.
+const TENTATIVAS_DOS_MINIMOS: u32 = 4;
+
+/// Um registro do journal cheio de registros mínimos — os cinco textos
+/// vazios, o menor codificado —, o maior lote de ponteiros que uma cópia do
+/// coletor pode copiar ([`MAIOR_LOTE`]): o lugar reservado antes da trava,
+/// pela conta do menor codificado, cabe todos, e nada é pedido nem
+/// devolvido ao alocador com ela. Um lugar menor que o lote faria o vetor
+/// crescer com a trava na mão — os lotes dos outros casos, de registros
+/// maiores, não chegam lá. A cópia leva os mínimos em lotes — o maior, de
+/// [`MAIOR_LOTE`] —, cada um montado inteiro, e o journal segue sem pular
+/// nem repetir. Um registro de outro fio no meio dos mínimos deixa o lote
+/// menor: o caso tenta de novo, e reprova sem nenhuma tentativa com o lote
+/// inteiro; e um lote maior que a conta reprova logo.
 pub(super) fn um_registro_cheio_de_registros_minimos() -> Resultado {
     as_contas_veem_a_trava()?;
-    anel_cheio_e_gravado()?;
-    let desde = persistencia::auditoria_gravada();
-    let mut ultimo = desde;
-    for _ in 0..MINIMOS {
-        ultimo = crate::autorizacao::auditar_do_kernel("", "", politica::Codigo::Allow, "");
-    }
-    coleta_de_teste::zerar();
-    alocacoes::vigiar(crate::fios::id_atual());
-    let r = persistencia::gravar_auditoria();
-    let pedidos = alocacoes::esquecer();
-    let devolucoes = alocacoes::devolucoes();
-    let c = coleta_de_teste::contas();
-    coleta_de_teste::zerar();
-    r?;
-    sem_memoria_com_a_trava(
-        pedidos,
-        devolucoes,
-        "a copia de registros minimos pediu ou devolveu memoria com a trava na mao",
-    )?;
-    nada_copiado_de_fora(&c)?;
-    // O lote maior passa de 200 ponteiros: mais que o lugar de uma conta
-    // de 100 bytes por registro (164), e que a metade da conta certa (116).
-    if c.maior_copia <= 200 || c.copias < 2 || c.sob_a_trava != 0 {
-        crate::log_error!(
+    for tentativa in 1..=TENTATIVAS_DOS_MINIMOS {
+        anel_cheio_e_gravado()?;
+        let desde = persistencia::auditoria_gravada();
+        let mut ultimo = desde;
+        for _ in 0..MINIMOS {
+            ultimo = crate::autorizacao::auditar_minimo_de_teste();
+        }
+        coleta_de_teste::zerar();
+        alocacoes::vigiar(crate::fios::id_atual());
+        let r = persistencia::gravar_auditoria();
+        let pedidos = alocacoes::esquecer();
+        let devolucoes = alocacoes::devolucoes();
+        let c = coleta_de_teste::contas();
+        coleta_de_teste::zerar();
+        r?;
+        sem_memoria_com_a_trava(
+            pedidos,
+            devolucoes,
+            "a copia de registros minimos pediu ou devolveu memoria com a trava na mao",
+        )?;
+        nada_copiado_de_fora(&c)?;
+        if c.maior_copia > MAIOR_LOTE || c.copias < 2 || c.sob_a_trava != 0 {
+            crate::log_error!(
+                "teste",
+                "{} copias, a maior de {} registros (o lote inteiro e de {}); {} montados com a trava na mao",
+                c.copias,
+                c.maior_copia,
+                MAIOR_LOTE,
+                c.sob_a_trava
+            );
+            return Err(if c.maior_copia > MAIOR_LOTE {
+                "a copia dos registros minimos passou do lote que cabe num registro do journal"
+            } else {
+                "os registros minimos nao encheram um registro do journal"
+            });
+        }
+        let gravada = persistencia::auditoria_gravada();
+        if gravada < ultimo {
+            crate::log_error!("teste", "gravada {} de {}", gravada, ultimo);
+            return Err("os registros minimos nao foram todos gravados");
+        }
+        let lacunas = seguidos(&do_journal_depois_de(desde)?, desde, ultimo)?;
+        if !lacunas.is_empty() {
+            return Err("o journal dos registros minimos tem uma lacuna");
+        }
+        if c.maior_copia == MAIOR_LOTE {
+            return a_cadeia_do_journal_confere();
+        }
+        crate::log_info!(
             "teste",
-            "{} copias, a maior de {} registros; {} montados com a trava na mao",
-            c.copias,
+            "tentativa {}: o maior lote foi de {} registros, e nao {} -- outro fio auditou no meio",
+            tentativa,
             c.maior_copia,
-            c.sob_a_trava
+            MAIOR_LOTE
         );
-        return Err("os registros minimos nao encheram um registro do journal");
     }
-    let gravada = persistencia::auditoria_gravada();
-    if gravada < ultimo {
-        crate::log_error!("teste", "gravada {} de {}", gravada, ultimo);
-        return Err("os registros minimos nao foram todos gravados");
-    }
-    let lacunas = seguidos(&do_journal_depois_de(desde)?, desde, ultimo)?;
-    if !lacunas.is_empty() {
-        return Err("o journal dos registros minimos tem uma lacuna");
-    }
-    a_cadeia_do_journal_confere()
+    Err("os registros minimos nao encheram um registro do journal em nenhuma tentativa")
 }
 
 /// Quantos registros a suíte audita logo antes da tomada da compactação,
@@ -1139,15 +1174,16 @@ fn compactar_sob_carga(k: u64) -> Resultado {
     })
 }
 
-/// Produtores em vários núcleos auditando sem esperar ninguém — três
-/// anéis, juntos —, três coletores — o do kernel, solto; um segundo, noutro
-/// núcleo; e a suíte — e compactações seguidas no meio: o anel dá a volta
-/// debaixo dos coletores e das compactações, e uma compactação segura os
-/// ponteiros dos copiados enquanto escreve a base. Cada base é inteira
-/// ([`compactar_sob_carga`]); o journal segue da marca da última sem
-/// pular, repetir nem voltar — com as lacunas do que o anel perdeu, e os
-/// registros de cada produtor na ordem dele —; e a cadeia refeita do
-/// journal é a da memória, e é ela que o boot seguinte refaz.
+/// Produtores em vários núcleos auditando sem folga — três anéis, juntos,
+/// parados só no fim de cada parte, até a compactação dela começar —, três
+/// coletores — o do kernel, solto; um segundo, noutro núcleo; e a suíte — e
+/// compactações seguidas no meio: o anel dá a volta debaixo dos coletores e
+/// das compactações, e uma compactação segura os ponteiros dos copiados
+/// enquanto escreve a base. Cada base é inteira ([`compactar_sob_carga`]);
+/// o journal segue da marca da última sem pular, repetir nem voltar — com
+/// as lacunas do que o anel perdeu, e os registros de cada produtor na
+/// ordem dele —; e a cadeia refeita do journal é a da memória, e é ela que
+/// o boot seguinte refaz.
 pub(super) fn compactacoes_com_produtores_e_coletores() -> Resultado {
     anel_cheio_e_gravado()?;
     let perdida = crate::metricas::AUDITORIA_PERDIDA.load(SeqCst);

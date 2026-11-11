@@ -3185,6 +3185,28 @@ pub fn auditar_enchimento_de_teste(metodo: &str, parametros: &[u8], detalhe: &st
     );
 }
 
+/// Só para a suíte: um registro do kernel com os cinco textos vazios —
+/// agente, papel, método, recurso e detalhe —, sem sessão de pessoa nem
+/// chave: o menor que a codificação dá
+/// ([`politica::auditoria::MENOR_CODIFICADO`]). Para o caso que enche um
+/// registro do journal com o maior lote de ponteiros que a cópia do coletor
+/// pode copiar.
+#[cfg(feature = "modo-teste")]
+pub fn auditar_minimo_de_teste() -> u64 {
+    let quem = Quem {
+        titular: Titular::Kernel,
+        sessao: SESSAO_DA_PESSOA,
+        sessao_de_pessoa: None,
+        agente: String::new(),
+        chave: None,
+        papel: None,
+        processo: None,
+        servico: None,
+        remoto: None,
+    };
+    auditar(&quem, "", "", Codigo::Allow, &[], "")
+}
+
 /// Só para a suíte: este núcleo tem a trava da auditoria na mão agora —
 /// pela conferência da ordem das travas, sem tomá-la.
 #[cfg(feature = "modo-teste")]
