@@ -397,7 +397,7 @@ kernel/src/
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
 │   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
-│   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro e a lacuna do resto; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito; o anel que perde registros entre as duas tomadas dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
+│   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
@@ -5328,15 +5328,21 @@ Sem ganho a medir, não há o que pagar com esse risco.
   incremento [B] seguinte, de 10/11/2026: o anel guarda cada registro num
   `Arc`, os relatórios copiam só os ponteiros com a trava, e o gate pede e
   devolve a memória do registro fora dela — a cópia para o journal e a
-  compactação ainda codificam com ela, e o `audit.verify` volta a ela sem
-  lugar para a fotografia e no post-mortem; a espera do gate pela trava
+  compactação ainda codificavam com ela, até o incremento [B] que as fez
+  copiar só os ponteiros e codificar fora — a compactação com a trava foi
+  de 0,41–17 ms para 0,08–1,04 ms, e a cópia para o journal, de 0,18–3,8
+  ms para 0,04–1,8 ms, nas quatro configurações, em duas rodadas de cada
+  lado, com o mesmo formato gravado (`docs/PERSISTENCIA.md`, *A cópia e a
+  compactação por ponteiros: a codificação fora da trava*, com a medida e
+  as mutações) —, e o `audit.verify` volta a ela sem lugar para a
+  fotografia e no post-mortem; a espera do gate pela trava
   foi de 3,6–123 ms para 21 µs–1,8 ms (`docs/PERSISTENCIA.md`, *Os
   leitores e o anexar: a trava do gate sem o alocador*, com a medida e as
-  mutações: 84 de 87 reprovaram; das três que passaram, duas são
-  equivalentes nos estados que a suíte alcança, e a outra, o post-mortem
-  de verdade, em que a suíte não entra, reprova desde 11/11/2026 pela
-  fumaça, no kernel de produção — *O `audit.verify` no post-mortem de
-  verdade*). O elo do anexar continua com a
+  mutações: na última rodada de cada uma, 85 de 87 reprovaram — a V15, o
+  post-mortem de verdade, em que a suíte não entra, pela fumaça, no kernel
+  de produção, desde 11/11/2026 (*O `audit.verify` no post-mortem de
+  verdade*) —, e as duas que passam são equivalentes nos estados que a
+  suíte alcança). O elo do anexar continua com a
   trava: tirá-lo dela é a decisão [C] C1, que o dono do projeto fechou em
   11/11/2026 por mantê-lo com a trava — só volta a ser considerada se uma
   medida mostrar o elo como gargalo relevante. E a conferência

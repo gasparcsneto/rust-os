@@ -335,11 +335,11 @@ pub fn antes_da_confirmacao() {
 
 /// Quanto [`cair`] espera, no máximo, o dono da trava da serial terminar a
 /// resposta que escreve — ver lá. É o teto de uma linha inteira, com folga
-/// grande: no aarch64, onde o canal é a PL011 emulada, cada byte custa
-/// dezenas de microssegundos, e um `audit.tail` de 128 registros leva de
-/// 0,31 a 0,34 s para sair, na mediana — e até 1,09 s com este processador
-/// girando aqui ao lado, medido na queda no meio da coleta da auditoria sob
-/// carga, em 11/11/2026. O teto de antes, meio segundo, era menos que essa
+/// grande: no aarch64, onde o canal é a PL011 emulada, um `audit.tail` de
+/// 128 registros — perto de quinhentos bytes cada, uns 60 KB — leva de 0,31
+/// a 0,34 s para sair, na mediana, com o atendimento — e até 1,09 s com
+/// este processador girando aqui ao lado, medido na queda no meio da coleta
+/// da auditoria sob carga, em 11/11/2026. O teto de antes, meio segundo, era menos que essa
 /// resposta: o aviso saía no meio dela, e nem um nem outro se lia.
 const ESPERA_PELA_SERIAL_NS: u64 = 10_000_000_000;
 

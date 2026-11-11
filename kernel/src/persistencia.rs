@@ -1480,9 +1480,10 @@ fn entrada_do_registro(
 /// for anexado depois dela tem sequência maior que a do último copiado, e
 /// fica para a gravação seguinte. O que o anel descartar depois dela
 /// continua inteiro para quem segura o ponteiro, e vai assim mesmo — e quem
-/// o solta por último, aqui, devolve a memória dele ao alocador, fora de
-/// toda trava —; e, se o anel descartar também o que vinha depois dos
-/// copiados, a gravação seguinte o diz numa lacuna, a partir do último
+/// o solta por último, aqui, devolve a memória dele ao alocador com a trava
+/// da auditoria solta, e nenhuma que mascare as interrupções na mão: só a
+/// ordem das gravações —; e, se o anel descartar também o que vinha depois
+/// dos copiados, a gravação seguinte o diz numa lacuna, a partir do último
 /// gravado.
 ///
 /// Só quem tem a ordem das gravações chega aqui — [`gravar_sozinho`], por
@@ -2610,10 +2611,12 @@ fn compactar_sozinho() -> Result<(usize, u64, u64, u64), FalhaDaCompactacao> {
     // trava na mão: a cópia sairia a mesma, só mais lenta — e a suíte, que
     // conta os pedidos ao alocador com ela, o veria. Os copiados são os que
     // o anel tem até a gravada na tomada: entre a leitura da gravada e ela,
-    // o anel só perde registros destes, pela ponta — os que entram têm
-    // sequência maior que a gravada, e a gravada não anda, que a ordem das
-    // gravações é desta compactação. A marca sai da tomada: do primeiro
-    // copiado.
+    // o anel só perde registros pela ponta — primeiro os de até a gravada;
+    // com mais de um anel auditado no meio, também os de depois dela, e a
+    // cópia sai vazia —; os que entram têm sequência maior que a gravada, e
+    // a gravada não anda, que a ordem das gravações é desta compactação. A
+    // marca sai da tomada: do primeiro copiado, ou, sem nenhum, da gravada e
+    // do elo guardado.
     let gravada = auditoria_gravada();
     let elo_gravado = crate::arch::sem_interrupcoes(|| *ELO_GRAVADO.lock());
     let mut copiados: Vec<DoAnel> = Vec::with_capacity(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);

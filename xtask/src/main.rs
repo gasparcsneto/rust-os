@@ -10925,7 +10925,11 @@ fn textos_hexadecimais(resposta: &str) -> i64 {
 ///   poupa é a fotografia, oito KiB de uma vez;
 /// - que a conta do post-mortem acusa uma cadeia adulterada: a suíte confere
 ///   a conta comum aos dois desvios (`conta_com_a_trava`) com a âncora
-///   trocada, pelo interruptor dela.
+///   trocada, pelo interruptor dela;
+/// - um anel no meio de uma mudança: a falha fatal abre as travas à força e
+///   para os outros núcleos onde estiverem; um núcleo parado no meio de um
+///   anexar deixaria o anel no meio da mudança, e a conta o leria como
+///   ficou. A sonda não provoca esse caso.
 fn sob_falha_a_auditoria(
     escrita: &mut UnixStream,
     leitor: &mut BufReader<UnixStream>,
