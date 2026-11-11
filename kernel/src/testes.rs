@@ -13799,50 +13799,51 @@ fn heap_o_pico_e_o_pior_momento() -> Resultado {
 /// pode ser tirado inteiro pelo otimizador: compilado com o nightly da CI
 /// de 9/11/2026, o `Box` deste caso saía, e o caso passava sem tocar o heap
 /// — o mesmo efeito que reprovou o caso do pico na CI 476. Por isso o `Box`
-/// passa por [`core::hint::black_box`], que o otimizador não atravessa, e o
-/// caso confere pelas contas do próprio alocador que o pedido e a devolução
-/// entraram nelas: se não entraram, reprova, em vez de passar sem conferir
-/// nada.
+/// passa por [`core::hint::black_box`], para o otimizador não o tirar; e o
+/// caso não depende dele para concluir: o endereço do `Box` tem de estar na
+/// faixa do heap, e as contas do próprio alocador têm de ter, entre os dois
+/// retratos, exatamente o pedido e a devolução do caso — com o livre de
+/// volta ao de antes.
 ///
-/// O livre de volta ao de antes só vale na tentativa em que ninguém mais
-/// mexeu no heap entre os dois retratos — as contas dizem: uma alocação e
-/// uma devolução, as do caso. Com outro fio no meio, o caso cede e tenta de
-/// novo; sem nenhuma tentativa limpa, valem só as contas.
+/// Outro fio pode mexer no heap entre os dois retratos; nessa tentativa as
+/// contas não dizem de quem é cada pedido, e o caso cede e tenta de novo,
+/// em até 64 tentativas. Sem nenhuma tentativa só dele, reprova: o caso não
+/// passa sem ter conferido.
 fn heap_box_aloca_e_libera() -> Resultado {
     const TENTATIVAS: u32 = 64;
-    for tentativa in 1..=TENTATIVAS {
+    let total = crate::heap::estatisticas().total;
+    let heap = crate::heap::HEAP_INICIO..crate::heap::HEAP_INICIO + total;
+    let mut ultima = (0, 0);
+    for _ in 0..TENTATIVAS {
         let antes = crate::heap::estatisticas();
         {
             let valor = core::hint::black_box(alloc::boxed::Box::new(0xC0FFEEu64));
+            let endereco = &*valor as *const u64 as usize;
+            if !heap.contains(&endereco) {
+                crate::log_error!(
+                    "teste",
+                    "o box em {:#x}, fora do heap {:#x}..{:#x}",
+                    endereco,
+                    heap.start,
+                    heap.end
+                );
+                return Err("o box nao veio do heap");
+            }
             if *valor != 0xC0FFEE {
                 return Err("valor lido do heap esta corrompido");
             }
         }
         let depois = crate::heap::estatisticas();
-        if depois.alocacoes <= antes.alocacoes || depois.liberacoes <= antes.liberacoes {
-            crate::log_error!(
-                "teste",
-                "alocacoes {} -> {}, devolucoes {} -> {}",
-                antes.alocacoes,
-                depois.alocacoes,
-                antes.liberacoes,
-                depois.liberacoes
-            );
-            return Err("o box nao chegou ao alocador: nada foi pedido ou devolvido");
-        }
-        let sozinho =
-            depois.alocacoes == antes.alocacoes + 1 && depois.liberacoes == antes.liberacoes + 1;
-        if !sozinho {
-            if tentativa < TENTATIVAS {
-                crate::fios::ceder();
-                continue;
-            }
-            crate::log_info!(
-                "teste",
-                "box: nenhuma das {} tentativas sem outro fio no heap; o livre nao foi conferido",
-                TENTATIVAS
-            );
-            return Ok(());
+        let contas = (
+            depois.alocacoes - antes.alocacoes,
+            depois.liberacoes - antes.liberacoes,
+        );
+        if contas != (1, 1) {
+            // Outro fio no heap entre os dois retratos — ou o pedido e a
+            // devolução do caso fora das contas.
+            ultima = contas;
+            crate::fios::ceder();
+            continue;
         }
         if depois.livre != antes.livre {
             crate::log_error!("teste", "livre {} -> {}", antes.livre, depois.livre);
@@ -13850,7 +13851,16 @@ fn heap_box_aloca_e_libera() -> Resultado {
         }
         return Ok(());
     }
-    Err("o caso do box nao chegou a conferir")
+    crate::log_error!(
+        "teste",
+        "box: nenhuma das {} tentativas com so o pedido e a devolucao do caso nas contas; a ultima teve {} alocacoes e {} devolucoes",
+        TENTATIVAS,
+        ultima.0,
+        ultima.1
+    );
+    Err(
+        "o pedido e a devolucao do box nao entraram sozinhos nas contas do alocador em nenhuma tentativa",
+    )
 }
 
 fn heap_vec_cresce() -> Resultado {
@@ -13878,28 +13888,39 @@ fn heap_string_formata() -> Resultado {
     Ok(())
 }
 
-/// O caso que separa um alocador de verdade de um *bump allocator*.
+/// O caso que separa um alocador de verdade de um que não reaproveita o que
+/// é devolvido: o *bump allocator*, que só avança um ponteiro, e o alocador
+/// em pilha, que só recua quando sai o bloco do topo.
 ///
-/// Um alocador que só avança um ponteiro atende pedidos enquanto houver
-/// heap à frente dele, e acaba quando o ponteiro chega ao fim, por mais que
-/// se tenha devolvido. O caso pede e devolve, um de cada vez, blocos de
-/// 64 KiB que somados passam de quatro vezes o heap inteiro, com um bloco
-/// de vida longa preso desde antes do primeiro — que impede o ponteiro de
-/// voltar ao começo quando tudo o mais sai. Só reaproveitando a memória
-/// devolvida o alocador atende todos; e o bloco de vida longa sai intacto.
+/// O caso pede e devolve, um de cada vez, blocos de 64 KiB que somam quatro
+/// vezes o heap inteiro, em blocos inteiros — 512 voltas no heap de 8 MiB
+/// da suíte. A cada volta, um pino de 16 bytes, pedido com o bloco ainda na
+/// mão e preso até o fim, deixa o bloco devolvido abaixo do topo; e um bloco
+/// de vida longa, preso desde antes da primeira volta, impede o ponteiro de
+/// voltar ao começo quando o resto sai. Só reaproveitando o que foi
+/// devolvido no meio do que continua preso o alocador atende todas as
+/// voltas. Cada bloco é escrito inteiro e lido de volta, não pode cruzar o
+/// de vida longa, e este sai intacto.
 ///
 /// Os pedidos vão direto ao alocador, por [`crate::heap::tentar_alocar`],
 /// que o otimizador não tira: com `Box`, compilado em `release` com o
 /// nightly da CI de 9/11/2026, o ciclo saía inteiro, e o caso passava sem
-/// tocar o heap. E as contas do alocador conferem que cada pedido e cada
-/// devolução do ciclo entraram nelas.
+/// tocar o heap. E as contas do alocador conferem, no mínimo, os pedidos e
+/// as devoluções das voltas.
 fn heap_reaproveita_memoria_liberada() -> Resultado {
     const BLOCO: usize = 64 * 1024;
     const LONGO: usize = 64;
+    const PINO: usize = 16;
     let total = crate::heap::estatisticas().total;
     let voltas = (4 * total / BLOCO).max(64);
     let longo = core::alloc::Layout::from_size_align(LONGO, 16).map_err(|_| "layout invalido")?;
     let efemero = core::alloc::Layout::from_size_align(BLOCO, 16).map_err(|_| "layout invalido")?;
+    let pino = core::alloc::Layout::from_size_align(PINO, 16).map_err(|_| "layout invalido")?;
+    // O lugar dos pinos, antes do ciclo: guardar um não pede memória.
+    let mut pinos: alloc::vec::Vec<*mut u8> = alloc::vec::Vec::new();
+    if pinos.try_reserve_exact(voltas).is_err() {
+        return Err("o heap nao tem lugar para a lista dos pinos");
+    }
 
     let longevo = crate::heap::tentar_alocar(longo);
     if longevo.is_null() {
@@ -13907,6 +13928,7 @@ fn heap_reaproveita_memoria_liberada() -> Resultado {
     }
     // SAFETY: `LONGO` bytes que acabaram de vir do alocador, só deste caso.
     unsafe { core::ptr::write_bytes(longevo, 0xAB, LONGO) };
+    let vida_longa = longevo as usize..longevo as usize + LONGO;
 
     let antes = crate::heap::estatisticas();
     let mut ciclo = Ok(());
@@ -13924,21 +13946,50 @@ fn heap_reaproveita_memoria_liberada() -> Resultado {
                 agora.livre,
                 agora.maior_bloco
             );
-            ciclo = Err("o alocador nao reaproveitou a memoria devolvida");
+            ciclo = Err(if volta == 0 {
+                "o heap nao tinha um bloco de 64 KiB livre antes do ciclo"
+            } else {
+                "o alocador nao reaproveitou a memoria devolvida"
+            });
             break;
         }
+        let comeco = bloco as usize;
+        let cruza = comeco < vida_longa.end && vida_longa.start < comeco + BLOCO;
         let marca = volta as u8;
         // SAFETY: `BLOCO` bytes que acabaram de vir do alocador, só deste
-        // caso; o primeiro e o último são escritos e lidos de volta, e o
-        // bloco volta com o mesmo layout com que foi pedido.
-        let lido = unsafe {
-            bloco.write_volatile(marca);
-            bloco.add(BLOCO - 1).write_volatile(!marca);
-            let lido = (bloco.read_volatile(), bloco.add(BLOCO - 1).read_volatile());
-            crate::heap::devolver(bloco, efemero);
-            lido
-        };
-        if lido != (marca, !marca) {
+        // caso — escritos só se não cruzam o de vida longa, que é do caso
+        // também —, e lidos de volta.
+        let lido = (!cruza).then(|| unsafe {
+            core::ptr::write_bytes(bloco, marca, BLOCO);
+            (
+                bloco.read_volatile(),
+                bloco.add(BLOCO / 2).read_volatile(),
+                bloco.add(BLOCO - 1).read_volatile(),
+            )
+        });
+        // O pino, com o bloco ainda na mão: o bloco fica abaixo dele.
+        let preso = crate::heap::tentar_alocar(pino);
+        if !preso.is_null() {
+            pinos.push(preso);
+        }
+        // SAFETY: veio de `tentar_alocar` com este mesmo layout.
+        unsafe { crate::heap::devolver(bloco, efemero) };
+        if cruza {
+            crate::log_error!(
+                "teste",
+                "volta {}: o bloco em {:#x}, o de vida longa em {:#x}",
+                volta,
+                comeco,
+                vida_longa.start
+            );
+            ciclo = Err("o alocador entregou um bloco por cima do de vida longa");
+            break;
+        }
+        if preso.is_null() {
+            ciclo = Err("o heap nao tem lugar para o pino da volta");
+            break;
+        }
+        if lido != Some((marca, marca, marca)) {
             ciclo = Err("valor corrompido durante o ciclo");
             break;
         }
@@ -13947,6 +13998,10 @@ fn heap_reaproveita_memoria_liberada() -> Resultado {
 
     // SAFETY: os `LONGO` bytes do bloco de vida longa, ainda deste caso.
     let intacto = (0..LONGO).all(|i| unsafe { longevo.add(i).read_volatile() } == 0xAB);
+    for p in pinos {
+        // SAFETY: cada pino veio de `tentar_alocar` com este layout.
+        unsafe { crate::heap::devolver(p, pino) };
+    }
     // SAFETY: veio de `tentar_alocar` com este mesmo layout.
     unsafe { crate::heap::devolver(longevo, longo) };
 
@@ -13956,7 +14011,7 @@ fn heap_reaproveita_memoria_liberada() -> Resultado {
     }
     let pedidos = depois.alocacoes - antes.alocacoes;
     let devolvidos = depois.liberacoes - antes.liberacoes;
-    if pedidos < voltas as u64 || devolvidos < voltas as u64 {
+    if pedidos < 2 * voltas as u64 || devolvidos < voltas as u64 {
         crate::log_error!(
             "teste",
             "{} voltas, {} alocacoes e {} devolucoes nas contas do alocador",
