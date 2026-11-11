@@ -2919,16 +2919,18 @@ do x86_64 de depuração reprovou. No aarch64, as rodadas locais foram de
 versões anteriores da sonda — a de depuração conferia o -1 contra o
 kernel vivo, e não contra os textos hexadecimais —, com a mesma diferença
 e os mesmos 1024 conferidos. A versão final rodou nas duas arquiteturas
-na CI 484 (`78e37c3`), nas seis fumaças — em depuração, em `release` e
-com o teclado USB —, sempre com -1 nas duas vezes e 1024 conferidos.
+na CI 484 (`78e37c3`), nas oito fumaças — em depuração, em `release`,
+com o teclado USB e na tela virtio-gpu —, sempre com -1 nas duas vezes e
+1024 conferidos.
 
 ### Os casos do heap que passavam vazios em `release`
 
-O mesmo binário da CI 476 — o kernel de teste em `release`, com o
-nightly da CI de 9/11/2026 — mostrou dois casos antigos que não tocavam o
-alocador: `heap: box aloca e libera` e `heap: reaproveita memoria
-liberada`. O otimizador tirava os `Box` deles, e os dois passavam sem
-conferir o heap; em depuração, chamavam o alocador. Desde 11/11/2026
+Na investigação da CI 476 (`ddd1cb8`), o kernel de teste em `release` do
+`0605e25` — compilado com o nightly da CI de 9/11/2026 e desmontado no
+aarch64 — mostrou dois casos antigos que não tocavam o alocador: `heap:
+box aloca e libera` e `heap: reaproveita memoria liberada`. O otimizador
+tirava os `Box` deles, e os dois passavam sem conferir o heap; em
+depuração, chamavam o alocador. Desde 11/11/2026
 (`8ecfc91` e `c9139f3`, este depois do duke-adversario), os dois provam,
 também em `release`, que o pedido e a devolução aconteceram:
 
@@ -3091,7 +3093,7 @@ leu, e nada nele muda.
 | Onde | O que confere |
 |---|---|
 | hospedeiro (`politica`): *os compartilhados são os do anel* | os compartilhados até uma sequência são, um a um, os objetos que o anel guarda até ela — conferidos contra os ponteiros dos últimos, e não contra `guardados_ate`, que passou a ser feito deles —, em toda posição, sem nenhum guardado, com a janela pela metade, depois de o anel dar a volta e depois de uma lacuna reposta |
-| suíte: os casos `coleta:` | os de antes, e: no anel que transborda no meio da coleta, nada pedido nem devolvido com a trava; o primeiro copiado — que o anel deixou — devolvido depois por quem o segurava por último, a coleta: uma referência fraca não o alcança mais; e a coleta soltou o último ponteiro de cada montado. *Um registro do journal cheio de registros mínimos* (novo): 300 registros com os cinco textos vazios — o menor codificado —; o maior lote que uma cópia do coletor pode copiar, 230 num registro de 16 KiB — contado pela suíte, e não pela cópia —, cabe no lugar reservado, de 231 ponteiros, sem nada pedido nem devolvido com a trava, e o journal fica seguido, com a cadeia conferida; um registro de outro fio no meio dos mínimos deixa o lote menor, e o caso tenta de novo — até quatro vezes —, e reprova sem nenhuma tentativa com o lote inteiro. *A compactação copia o anel numa tomada*: com o anel inteiro, nenhum ponteiro solto por último pela compactação — o controle —; com o anel transbordando logo depois da tomada, os copiados vão na base, lida do disco — a marca e os copiados até a gravada —, e a compactação soltou o último ponteiro de cada um. *O anel que perde registros antes da tomada* (o caso que, antes, os perdia entre as duas tomadas): a cópia começa no primeiro que o anel tinha na tomada — contado pelos anexados, sem a conta da cópia —, a base é a marca até o de antes dele e os copiados até a gravada, e o boot seguinte a adota. *A compactação sem nenhum gravado no anel* (novo): a base é só a marca, de 1 à gravada, com o elo guardado do último gravado, lida do disco com a ordem das gravações na mão, e a gravação seguinte continua dela pela lacuna, contada na auditoria perdida. *Produtores sem folga, três coletores e compactações seguidas* (novo): o anel dá a volta entre a tomada e a base — pelo gancho, com certeza —, o mais velho copiado é devolvido depois por quem o segurava, cada base inteira, sem nada pedido nem devolvido com a trava, o journal seguido da marca da última, com as lacunas do anel e os registros de cada produtor na ordem dele, e o boot seguinte com a mesma cadeia. A conta dos montados conta só o que entrou no registro ou na base: um ponteiro copiado à toa com a trava deixa os montados abaixo dos copiados, e o caso reprova |
+| suíte: os casos `coleta:` | os de antes, e: no anel que transborda no meio da coleta, nada pedido nem devolvido com a trava; o primeiro copiado — que o anel deixou — devolvido depois por quem o segurava por último, a coleta: uma referência fraca não o alcança mais; e a coleta soltou o último ponteiro de cada montado. *Um registro do journal cheio de registros mínimos* (novo): 300 registros com os cinco textos vazios — o menor codificado —; o maior lote que uma cópia do coletor pode copiar, 230 num registro de 16 KiB — contado pela suíte, e não pela cópia —, cabe no lugar reservado, de 231 ponteiros, sem nada pedido nem devolvido com a trava, e o journal fica seguido, com a cadeia conferida; o que outro fio audita junto com os mínimos só deixa o lote menor se passar do mínimo, somado, em mais de 54 bytes — o que sobra num registro de 230 mínimos —, e então o caso tenta de novo — são até quatro tentativas ao todo —, e reprova sem nenhuma com o lote inteiro. *A compactação copia o anel numa tomada*: com o anel inteiro, nenhum ponteiro solto por último pela compactação — o controle —; com o anel transbordando logo depois da tomada, os copiados vão na base, lida do disco — a marca e os copiados até a gravada —, e a compactação soltou o último ponteiro de cada um. *O anel que perde registros antes da tomada* (o caso que, antes, os perdia entre as duas tomadas): a cópia começa no primeiro que o anel tinha na tomada — contado pelos anexados, sem a conta da cópia —, a base é a marca até o de antes dele e os copiados até a gravada, e o boot seguinte a adota. *A compactação sem nenhum gravado no anel* (novo): a base é só a marca, de 1 à gravada, com o elo guardado do último gravado, lida do disco com a ordem das gravações na mão, e a gravação seguinte continua dela pela lacuna, contada na auditoria perdida. *Produtores sem folga, três coletores e compactações seguidas* (novo): o anel dá a volta entre a tomada e a base — pelo gancho, com certeza —, o mais velho copiado é devolvido depois por quem o segurava, cada base inteira, sem nada pedido nem devolvido com a trava, o journal seguido da marca da última, com as lacunas do anel e os registros de cada produtor na ordem dele, e o boot seguinte com a mesma cadeia. A conta dos montados conta só o que entrou no registro ou na base: um ponteiro copiado à toa com a trava deixa os montados abaixo dos copiados, e o caso reprova |
 
 ### As rodadas
 
@@ -3132,11 +3134,11 @@ leitores e o anexar* (*A medida, antes e depois*, acima): `cargo xtask
 disponibilidade`, 3 vCPUs, a carga `DUKE_CARGA=0,3,2:2,0` e uma
 compactação forçada a cada 15 s — de uma a três por cenário. O código de
 antes é o `persistencia.rs` e o `auditoria.rs` do `b19a18d`; o de depois, o
-do `78e37c3`. Em 11/11/2026, duas rodadas de cada lado — antes e depois à
-tarde; depois e antes de novo, em seguida, à noite —, para separar o
-efeito do ruído. De cada cenário, o maior valor; a faixa entre os
-cenários, em microssegundos; cada célula dá a primeira rodada e, depois do
-ponto e vírgula, a segunda:
+do `78e37c3`. Em 11/11/2026, duas rodadas de cada lado — antes e depois,
+com quatro horas entre elas; depois e antes de novo, em seguida, duas
+horas mais tarde —, para separar o efeito do ruído. De cada cenário, o
+maior valor; a faixa entre os cenários, em microssegundos; cada célula dá
+a primeira rodada e, depois do ponto e vírgula, a segunda:
 
 | | a cópia para o journal com a trava | a compactação com a trava |
 |---|---|---|
@@ -3164,20 +3166,39 @@ ponto e vírgula, a segunda:
   nesta seção).
 - **A espera do gate e o tempo mascarado** caem em depuração, nas duas
   rodadas, onde a cópia e a compactação eram as tomadas mais longas: o
-  maior tempo mascarado vai de 5,7–17 ms para 0,8–4,9 ms. Em `release`, o
-  maior de cada um vem de picos isolados, antes e depois — até 3,9 ms no
-  x86_64 e 4,5 ms no aarch64, num anexar, que o B3 não toca, numa rodada e
-  não na outra —, e não muda num sentido que se repita.
-- **A vazão** acompanha a carga — os registros anexados a cada 10 s e os
-  pedidos atendidos por segundo ficam nas mesmas faixas, antes e depois
-  —; **nenhum registro se perdeu**, e **todo `audit.verify`** do fio de
-  leitores conferiu a cadeia, em todas as rodadas.
+  maior tempo mascarado vai de 5,7–17 ms para 0,8–4,9 ms. Em `release`, a
+  espera do gate não muda num sentido que se repita. O maior tempo
+  mascarado de cada cenário era, antes, em 9 dos 16 cenários, a tomada da
+  compactação ou a da cópia — a menos de 30 µs da retenção dela —, e
+  passa a ser, em 13 dos 16, a de um anexar, que o B3 não toca: o piso da
+  faixa cai nas quatro células — de 748 para 300, de 716 para 466, de
+  1 000 para 897 e de 847 para 481 µs —, mas o topo vem de picos isolados,
+  antes e depois — depois, até 3,9 ms no x86_64 e 4,5 ms no aarch64, num
+  anexar, numa rodada e não na outra —, e não cai num sentido que se
+  repita.
+- **A vazão** acompanha a carga: os registros anexados a cada 10 s ficam
+  nas mesmas faixas, antes e depois — menos na segunda rodada do x86_64
+  em depuração, em que a de depois anexou menos em todos os cenários
+  (422–1 265 contra 491–1 680), o que a primeira não repete (467–1 586
+  contra 478–1 680) —; os pedidos dos processos por segundo, nos cenários
+  com carga, variam de −27% a +44% entre antes e depois — e o mesmo
+  código, até 37% de uma rodada à outra —, e só no x86_64 em `release`
+  sobem nas duas rodadas (+20% e +44%; +4% e +23%). **Nenhum registro se
+  perdeu**, e **todo `audit.verify`** do fio de leitores conferiu a
+  cadeia, em todas as rodadas.
 - **A coleta e a compactação inteiras** — com a escrita e a descarga do
-  disco — e **a latência do canal do agente** não mudam num sentido que
-  se repita: no x86_64 em `release`, a coleta mais longa foi de 238–418 ms
-  para 29–186 ms na primeira rodada, e de 36–200 ms para 20–193 ms na
-  segunda. O disco e o executor dominam as duas, e o trabalho da
-  codificação é o mesmo, agora fora da trava.
+  disco — não mudam num sentido que se repita: no x86_64 em `release`, a
+  coleta mais longa foi de 238–418 ms para 29–186 ms na primeira rodada,
+  e de 36–200 ms para 20–193 ms na segunda. O disco e o executor dominam
+  as duas, e o trabalho da codificação é o mesmo, agora fora da trava.
+- **A latência do canal do agente** — o maior p99 entre os cenários —
+  muda num sentido que se repete em duas configurações, sem causa
+  provada: no x86_64 em `release`, subiu nas duas rodadas, sempre no
+  último cenário, o sem carga depois da carga — de 73 para 91 ms e de 53
+  para 93 ms pela serial, de 82 para 92 ms e de 64 para 110 ms pelo TCP
+  —; no x86_64 em depuração, caiu nas duas — de 197 para 163 ms e de 299
+  para 297 ms pela serial, de 254 para 213 ms e de 362 para 331 ms pelo
+  TCP. No aarch64, subiu numa rodada e caiu na outra.
 
 ### As mutações
 
@@ -3190,14 +3211,14 @@ conferência das invariantes:
 
 | Grupo | Mutações | O que fazem |
 |---|---|---|
-| a cópia do coletor | P1–P10 | sem copiar o ponteiro; copiar também o primeiro que não cabe; pular o primeiro depois da gravada; repetir o gravado; o vetor sem reserva, que cresce com a trava; a reserva pela metade; a reserva por uma conta de 100 bytes por registro; copiar o registro, e não o ponteiro — um pedido ao alocador por registro, com a trava —; montar os copiados de trás para a frente; o elo do registro do journal pelo anterior do último copiado |
+| a cópia do coletor | P1–P10 | sem copiar o ponteiro; copiar também o primeiro que não cabe; pular o primeiro depois da gravada; repetir o gravado; o vetor sem reserva, que cresce com a trava; a reserva pela metade; a reserva por uma conta de 100 bytes por registro; copiar o registro, e não o ponteiro — pedidos ao alocador a cada registro, o do `Arc` e o de cada texto não vazio, com a trava —; montar os copiados de trás para a frente; o elo do registro do journal pelo anterior do último copiado |
 | a codificação fora da trava | E1–E3 | o lugar da codificação sem esvaziar de um registro para o seguinte; a sequência de cada registro mais um; o tipo da entrada trocado pelo da auditoria histórica |
 | a lacuna | L1–L4 | a entrada da lacuna fora da conta do orçamento; a lacuna lida noutra tomada, depois da cópia; a lacuna com o elo do último gravado no lugar do dela; o registro sem as perdidas |
 | o orçamento, com a trava | O1–O4 | a conta do que cabe sem os dois bytes do tamanho do campo; sem o envelope do evento; sem o limite do que entrou depois da decisão (`antes_de`); o vetor sem a folga de um ponteiro |
 | a compactação | C1–C12 | o vetor sem reserva; a reserva um ponteiro abaixo do anel cheio; copiar os registros, e não os ponteiros; os ponteiros até o de antes da gravada; até o de depois dela; a marca até o primeiro copiado, e não até o de antes dele; a marca com o elo do primeiro, e não com o anterior dele; sem nenhum copiado, a marca com o elo zero; ou até o de antes da gravada; a marca escrita sempre, também sem nada antes; a base de trás para a frente; a base sem o primeiro copiado |
 | a devolução fora da trava | D1–D4 | o coletor e a compactação soltando os copiados com a trava na mão; e sem soltá-los nunca |
 | os ganchos e a conferência da ordem | G1–G3, W1 | o gancho do tamanho da cópia com zero; a conta dos montados antes de o campo entrar no registro; o gancho de antes da tomada movido para depois dela; a cópia sem a conferência da ordem das gravações |
-| a `politica` | Q1–Q4 | os compartilhados até a gravada com um a menos; com um a mais; `guardados_ate` de volta ao filtro, com os compartilhados errados; e sem o primeiro — esta pela suíte e pelo hospedeiro |
+| a `politica` | Q1–Q4 | os compartilhados até a gravada com um a menos; com um a mais; `guardados_ate` de volta à faixa pela posição, como era antes, sem passar pelos compartilhados — e estes com um a menos —; e sem o primeiro — esta pela suíte e pelo hospedeiro |
 | as invariantes | X1 | uma tomada da trava da auditoria fora dos donos, numa função nova da persistência |
 
 Reprovaram as 5 do hospedeiro e 39 das 42 da suíte — 33 num caso que
@@ -3209,9 +3230,10 @@ outra tomada. As três que passaram são equivalentes:
 
 - **a reserva do coletor sem a folga de um ponteiro (O4)**: cada registro
   ocupa no registro do journal ao menos 71 bytes — o menor codificado, o
-  envelope e os dois bytes do tamanho do campo —, e a lacuna mais que
-  isso: num orçamento de 16 KiB cabem no máximo 230 registros, exatamente
-  o lugar sem o "+ 1". A folga não muda nada que se veja;
+  envelope e os dois bytes do tamanho do campo —, e a lacuna, que não
+  leva ponteiro, ocupa 60 do orçamento: num orçamento de 16 KiB cabem no
+  máximo 230 registros — 229 com a lacuna —, exatamente o lugar sem o
+  "+ 1". A folga não muda nada que se veja;
 - **a conta dos montados antes de o campo entrar no registro (G2)**: com a
   conta da tomada e a da montagem de acordo — o que a suíte confere em
   toda gravação —, todo copiado entra no registro, e contar antes ou depois

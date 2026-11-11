@@ -848,9 +848,10 @@ const MINIMOS: u64 = 300;
 const MAIOR_LOTE: u64 = (persistencia::MAIOR_AUDITORIA_POR_REGISTRO
     / (2 + 6 + politica::auditoria::MENOR_CODIFICADO)) as u64;
 
-/// Quantas vezes o caso do registro cheio de registros mínimos tenta um
-/// lote inteiro: um registro de outro fio no meio dos mínimos o deixa
-/// menor.
+/// Quantas vezes, ao todo, o caso do registro cheio de registros mínimos
+/// tenta um lote inteiro: o que outro fio audita junto com os mínimos o
+/// deixa menor se passar do mínimo, somado, em mais de 54 bytes — o que
+/// sobra num registro de 230 mínimos.
 const TENTATIVAS_DOS_MINIMOS: u32 = 4;
 
 /// Um registro do journal cheio de registros mínimos — os cinco textos
@@ -861,8 +862,9 @@ const TENTATIVAS_DOS_MINIMOS: u32 = 4;
 /// crescer com a trava na mão — os lotes dos outros casos, de registros
 /// maiores, não chegam lá. A cópia leva os mínimos em lotes — o maior, de
 /// [`MAIOR_LOTE`] —, cada um montado inteiro, e o journal segue sem pular
-/// nem repetir. Um registro de outro fio no meio dos mínimos deixa o lote
-/// menor: o caso tenta de novo, e reprova sem nenhuma tentativa com o lote
+/// nem repetir. O que outro fio audita junto com os mínimos, se passar do
+/// mínimo, somado, em mais de 54 bytes, deixa o lote menor: o caso tenta de
+/// novo — até quatro tentativas ao todo —, e reprova sem nenhuma com o lote
 /// inteiro; e um lote maior que a conta reprova logo.
 pub(super) fn um_registro_cheio_de_registros_minimos() -> Resultado {
     as_contas_veem_a_trava()?;
