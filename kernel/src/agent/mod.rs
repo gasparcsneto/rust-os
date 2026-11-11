@@ -549,7 +549,12 @@ fn reexecutar(
     true
 }
 
-/// Atende o canal sem tarefas, sem heap e sem escalonador. Nunca retorna.
+/// Atende o canal sem tarefas e sem escalonador, com a resposta escrita
+/// direto no fio, sem um texto montado no heap. Nunca retorna.
+///
+/// Os comandos ainda pedem memória ao heap que sobrou: o registro que o
+/// gate anexa a cada pedido e os textos que a resposta formata. Um pedido
+/// que não a encontre entra em pânico, e o laço acaba com ele.
 ///
 /// Este é o laço do modo post-mortem. Ele existe porque, depois de uma
 /// exceção fatal, não dá para confiar em nada que o kernel construiu por

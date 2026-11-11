@@ -2483,9 +2483,13 @@ antes: o que muda é só onde a memória é pedida e devolvida.
   cheio — um ponteiro por registro, 8 KiB —, reservado antes da trava. Sem
   ele — o heap sem um bloco desse tamanho, ou um anel maior que o lugar,
   que faria o vetor crescer com a trava —, e no post-mortem, a conta é
-  feita com a trava na mão, como antes: a resposta é a mesma, e a pergunta
-  não depende de memória. As duas tomadas ficam no próprio handler: a
-  cadeia só é lida por quem a guarda — em `autorizacao`, só nos itens que
+  feita com a trava na mão, como antes: a resposta é a mesma, e a conta
+  não pede memória. O pedido ainda pede, também no post-mortem: o
+  registro que o gate anexa e o texto da cabeça na resposta — sem memória
+  para eles, o pedido entra em pânico, e o post-mortem acaba. A fumaça
+  confere o desvio do post-mortem no kernel de produção (ver *O
+  `audit.verify` no post-mortem de verdade*, abaixo). As duas tomadas
+  ficam no próprio handler: a cadeia só é lida por quem a guarda — em `autorizacao`, só nos itens que
   a declaram, a leem de novo com a política, a anexam, a emprestam, a
   adotam no boot e a destravam na falha fatal, e no leitor da declaração
   ancorada, que só o `audit.declare` chama —, pela persistência — na cópia
@@ -2558,6 +2562,7 @@ antes: o que muda é só onde a memória é pedida e devolvida.
 | suíte: os casos `coleta:` e `heap:` | a cópia para o journal e a compactação, com a trava na mão, não pedem nem devolvem memória — as devoluções passaram a ser conferidas também, com o controle positivo —; e o caso do pico do heap pede de uma vez, falível, o que passa do pico: um caso de antes que deixasse o pico perto do heap inteiro o reprova, com os números, em vez de derrubar a suíte num pânico (a CI 475); e o pedido vai direto ao alocador, que o otimizador não tira, e a conta exata vale só numa tentativa em que ninguém mais — outro fio, deste núcleo ou de outro — mexeu no heap entre os dois retratos, pelas contas de alocações e de devoluções do próprio alocador — o caso antigo, um `vec!` de que só se lia o comprimento, reprovou só em `release`, nas suítes completas do x86_64 e do aarch64 da CI 476, com o pico do retrato de depois igual ao de antes (1 971 856 bytes no x86_64, 1 971 840 no aarch64): compilado com o nightly da CI (1.102.0, de 9/11), o caso não chamava o alocador nas duas arquiteturas — o otimizador tirava o `vec!` e o `Box` — desde que o gancho da suíte que conta as devoluções com a trava da auditoria entrou no `dealloc`; sem o gancho, e no código da CI 474, que passou, o mesmo caso chamava (conferido no x86_64) |
 | hospedeiro (`xtask`): *os lotes seguidos conferem*, *o lote que pula, repete ou quebra o elo*, *o lote da cauda traz o prev e o gravado*, *a recusa por taxa diz quanto esperar*, *o atraso da auditoria no security.metrics*, *os vistos gravados vão até o durable_seq*, *o erro de um fio antes e depois do corte*, *a vez da carga não passa da folga* | as conferências da bancada: o lote que pula, repete, sai de ordem ou tem um `prev` que não é o `link` do anterior reprova, e diz o quê; o lote do `audit.tail` lido com o `prev` e o `durable_seq`, e a recusa por taxa gravada dentro dele não faz dele uma recusa; a espera da taxa entre 1 ms e 1 s; o atraso do journal pelo `audit_backlog`; os vistos gravados até o `durable_seq`; o erro de E/S que reprova antes da marca do corte, e não depois; e a vez da carga, com quatro fios, que nunca passa da folga de 128 sobre os alcançados |
 | hospedeiro (`xtask`): *os relatórios leem*, *a leitura em qualquer forma fora dos relatórios*, *o nome nos comentários e nos textos não é leitura*, *o relatório fora do cabeçalho perde o corpo*, *o corpo acaba no item seguinte*, *o que se chama de fora tira o corpo do relatório*, *o texto cru de C não desalinha*, *quem guarda a cadeia só a toca nos donos*, *a persistência só lê na cópia e na compactação*, *o leitor da declaração só no audit.declare* | a conferência "a auditoria só é relatada": as leituras dos três relatórios são deles, e noutro arquivo os mesmos nomes não valem; um `use` com outro nome, um ponteiro, o turbofish, uma função de qualquer declaração logo depois de um relatório, um `static`, uma `macro_rules!` e um `mod` com uma função do nome de um relatório aparecem — e o controle, uma função comum —; o nome num comentário ou num texto não conta; um relatório que mude de declaração — `pub fn` — perde o corpo, e a conferência reprova em vez de ficar cega; o corpo cuja última chave não está na coluna zero acaba no item seguinte, e não o leva junto; um `impl`, um `unsafe impl` ou uma macro exportada no corpo de um relatório tiram dele o corpo — e o controle, um fecho e uma macro do corpo —; um texto cru de C não esconde o código depois dele; em `autorizacao.rs`, a cadeia só se toca nos donos, e uma decisão nova que a lesse pelo empréstimo ou pela trava aparece, como a trava que vira pública; na persistência, só a cópia e a compactação a leem, e o `AUDITORIA` de lá — o tipo do registro — não conta; e o leitor da declaração ancorada é um nome protegido, visto num `use` sem o caminho (o achado B1 do adversário do `61027e8`) |
+| fumaça (`cargo xtask fumaca`), no post-mortem de verdade: *o `audit.verify` no post-mortem* | no kernel de produção, depois da falha fatal, só com comandos de produção: a resposta certa — `ok`, a cabeça igual ao elo do registro do próprio `audit.verify`, os conferidos até ele — e, pelas contas do alocador, o caminho sem a fotografia (ver *O `audit.verify` no post-mortem de verdade*, abaixo) |
 | bancada de persistência: *a auditoria sob carga e leitura sobrevive ao corte* | dois produtores pelo canal do agente — um concedido, um recusado —, um leitor que acompanha a cadeia com `audit.tail` depois do último lido, pedindo até 128 de cada vez, e `audit.verify` em laço pela serial, com o anel cheio e dando a volta: cada lote seguido, sem repetir, com o `prev` de cada registro igual ao `link` do anterior; todo `audit.verify` confere; nenhum registro sai do anel antes do journal; a energia cai com todos pedindo, e o boot seguinte confere a cadeia e cada registro visto gravado que o anel dele ainda alcança — o mesmo número, o mesmo elo e o mesmo método. Uma folga atômica entre o que se pede e o que o leitor alcançou faz a conferência valer em qualquer intercalação. Passa também no código de antes (no x86_64, em depuração): as propriedades são as mesmas |
 
 ### A medida, antes e depois
@@ -2784,7 +2789,7 @@ depuração:
 
 Reprovaram 84: as 13 da `politica` pelos testes do hospedeiro, 45 das 48
 da suíte, as 15 da conferência, as 5 da bancada e as 6 do caso do pico.
-As três que passam:
+As três que passaram — a V15 reprova desde 11/11/2026, pela fumaça:
 
 - **L2, o que saiu solto antes do anúncio**: equivalente no que o anel,
   as respostas e o journal dizem — muda só quando a memória do registro
@@ -2806,4 +2811,61 @@ As três que passam:
   o esquece, reprova. Com a V15, o `audit.verify` do post-mortem tentaria
   a fotografia, pedindo 8 KiB a um alocador que pode ter ficado sem
   memória; sem eles, a conta voltaria para a trava, e a resposta seria a
-  mesma.
+  mesma. Desde 11/11/2026 a fumaça a mata, no kernel de produção: "o
+  audit.verify pede +0 ao alocador em relacao ao audit.head, e a
+  diferenca dos textos hexadecimais das respostas e -1" — ver *O
+  `audit.verify` no post-mortem de verdade*, abaixo.
+
+### O `audit.verify` no post-mortem de verdade
+
+A suíte não entra no post-mortem: um caso que entrasse pararia a
+máquina. Ela passa pela conta com a trava por um interruptor dela
+(`agent::commands::verificacao_de_teste`), e a V10, que o esquece,
+reprova; mas o desvio de verdade — `traps::em_post_mortem()` — só existe
+no kernel que caiu. A fumaça (`cargo xtask fumaca`) o confere no kernel
+de produção, sem nada no binário que exista para ela: depois da falha
+fatal de verdade — as travas abertas à força, os fios congelados, os
+outros núcleos parados ou girando sem o heap —, ela pede pela serial, só
+com comandos de produção,
+
+```text
+heap.stats, audit.head, heap.stats, audit.verify, heap.stats
+```
+
+e confere (`sob_falha_a_auditoria`, em `xtask/src/main.rs`):
+
+- **a resposta**: `ok`, a cabeça igual ao elo do registro do próprio
+  `audit.verify` — lido de volta pelo `audit.tail` —, e `checked` igual
+  aos guardados do `audit.head` mais os dois registros que entraram
+  depois dele — o do `heap.stats` do meio e o do `audit.verify` —, até a
+  capacidade do anel;
+- **o caminho**, pelas contas do alocador (`allocations`, nos três
+  retratos): a diferença entre o que o `audit.verify` e o `audit.head`
+  pedem tem de ser só a dos textos hexadecimais das respostas — o
+  `audit.head` escreve dois, a cabeça e a âncora; o `audit.verify`, um, a
+  cabeça —: -1. Com a fotografia, o `audit.verify` pediria também o vetor
+  dela, e a diferença seria 0. No post-mortem nada mais anda entre os
+  retratos — os fios estão congelados, e a resposta vai direto ao fio, sem
+  um texto montado no heap —, e a sequência inteira é feita duas vezes,
+  com a mesma diferença.
+
+O que ela não prova:
+
+- **que o post-mortem responde com o heap esgotado** — não responde. A
+  conta não pede memória, mas o pedido ainda pede: o registro que o gate
+  anexa e o texto da cabeça na resposta. Sem memória para eles, o pedido
+  entra em pânico, e o post-mortem acaba. O que o desvio poupa é a
+  fotografia, 8 KiB de uma vez;
+- **que a conta do post-mortem acusa uma cadeia adulterada**: a conta é a
+  mesma dos dois desvios, e a suíte a confere com a âncora trocada, pelo
+  interruptor dela;
+- **um anel no meio de uma mudança**: a falha fatal abre as travas à
+  força e para os outros núcleos onde estiverem; um núcleo parado no
+  meio de um anexar deixaria o anel no meio da mudança, e a conta o leria
+  como ficou. Vale para tudo o que o post-mortem lê; a fumaça não provoca
+  esse caso.
+
+A fumaça passou com a sonda no x86_64 e no aarch64, em depuração e em
+`release` — a diferença foi -1, a mesma nas duas vezes, e 1024
+registros conferidos até o do `audit.verify`; e, com a V15 aplicada, a
+fumaça do x86_64 de depuração reprovou.

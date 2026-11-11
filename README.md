@@ -5332,9 +5332,11 @@ Sem ganho a medir, não há o que pagar com esse risco.
   lugar para a fotografia e no post-mortem; a espera do gate pela trava
   foi de 3,6–123 ms para 21 µs–1,8 ms (`docs/PERSISTENCIA.md`, *Os
   leitores e o anexar: a trava do gate sem o alocador*, com a medida e as
-  mutações: 84 de 87 reprovaram; das três que passam, duas são
-  equivalentes nos estados que a suíte alcança, e a outra é o post-mortem
-  de verdade, em que a suíte não entra). O elo do anexar continua com a
+  mutações: 84 de 87 reprovaram; das três que passaram, duas são
+  equivalentes nos estados que a suíte alcança, e a outra, o post-mortem
+  de verdade, em que a suíte não entra, reprova desde 11/11/2026 pela
+  fumaça, no kernel de produção — *O `audit.verify` no post-mortem de
+  verdade*). O elo do anexar continua com a
   trava: tirá-lo dela é a decisão [C] C1, que o dono do projeto fechou em
   11/11/2026 por mantê-lo com a trava — só volta a ser considerada se uma
   medida mostrar o elo como gargalo relevante. E a conferência

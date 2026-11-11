@@ -3107,8 +3107,12 @@ fn key_destroy(params: Json, w: &mut JsonWriter) -> fmt::Result {
 /// heap sem um bloco do tamanho da fotografia, ou um anel maior que o
 /// lugar, que faria o vetor crescer com a trava —, e no post-mortem, onde
 /// não há gate a esperar e a memória pode ter acabado, a conta é feita com
-/// a trava na mão, como antes: a resposta é a mesma, e a pergunta não
-/// depende de memória.
+/// a trava na mão, como antes: a resposta é a mesma, e a conta não pede
+/// memória. O pedido, este, ainda pede — como todo pedido do canal, também
+/// no post-mortem: o registro que o gate anexa e o texto da cabeça na
+/// resposta; sem memória para eles, o pedido entra em pânico, e o
+/// post-mortem acaba. A fumaça confere este caminho no kernel de produção,
+/// pelas contas do alocador (`sob_falha_a_auditoria`, no `xtask`).
 ///
 /// As duas tomadas ficam aqui, no relatório: a cadeia só é lida por quem a
 /// guarda, pela persistência e pelos relatórios (`cargo xtask
