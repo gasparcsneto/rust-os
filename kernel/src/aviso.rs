@@ -488,6 +488,13 @@ pub fn processar() {
         GUARDADAS.store(false, Ordering::Release);
         core::mem::take(&mut *m)
     });
+    processar_marcas(marcas);
+}
+
+/// A passada sobre as `marcas` já levadas, fora da trava delas: cada
+/// designação tocada — ou todas, no transbordo — avaliada, e a vaga de cada
+/// processo marcada nos endpoints dele.
+fn processar_marcas(marcas: Marcas) {
     // Nenhuma designação: as marcas não servem a ninguém — a designação que
     // nascer depois é avaliada ao nascer, e nenhuma recusa dela veio antes
     // destas vagas.
@@ -627,8 +634,7 @@ pub fn recusada(obj: Objeto, fio: u64) {
     {
         let fio_da_vaga = VAGA_NA_RECUSA.swap(0, Ordering::AcqRel);
         if fio_da_vaga != 0 {
-            vaga(fio_da_vaga);
-            processar();
+            vaga_passada_aqui_de_teste(fio_da_vaga);
             if REARME_NA_RECUSA.swap(false, Ordering::AcqRel) {
                 vencer_o_rearme_de_teste(obj);
                 passada_do_coletor();
@@ -1051,6 +1057,22 @@ static REARME_NA_RECUSA: AtomicBool = AtomicBool::new(false);
 pub fn vaga_e_rearme_na_proxima_recusa_de_teste(fio: u64) {
     REARME_NA_RECUSA.store(fio != 0, Ordering::Release);
     VAGA_NA_RECUSA.store(fio, Ordering::Release);
+}
+
+/// Só para a suíte: a vaga na cota de `fio` marcada e passada aqui mesmo,
+/// numa marca só desta passada, sem passar pelas [`TOCADOS`] — como a de
+/// [`vaga`] seguida de [`processar`], com o mesmo transbordo armado. Pelas
+/// marcas de todos, seria uma corrida com o coletor, que as leva a cada
+/// tique: levada por ele entre a marca e a passada daqui, a conta da vaga
+/// chegava à designação depois da trava da recusa, ou antes dela com o
+/// aviso ainda por sair, e a recusa via outra ordem que não a que o caso
+/// arma (a CI 482, num runner lento).
+#[cfg(feature = "modo-teste")]
+fn vaga_passada_aqui_de_teste(fio: u64) {
+    let mut m = Marcas::default();
+    transbordar_se_armado_de_teste(&mut m, fio);
+    m.marcar_vaga(fio);
+    processar_marcas(m);
 }
 
 /// Só para a suíte: o rearme de `obj` vence agora — o coletor que passar
