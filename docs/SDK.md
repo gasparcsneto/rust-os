@@ -939,6 +939,27 @@ vez, pelos dois casos `sdk: o programa de fora do repositorio`: a primeira
 pela ordem da auditoria, logo depois do `pronto`; a segunda pela abertura
 repetida, depois do eco.
 
+E a N55, a N70 e a N79 de novo, contra o gancho da vaga no meio da
+recusa (CI 482). Rodada outra vez, a CI 482 deu o NS51 vermelho no
+`Iniciador UEFI` do aarch64 — "a recusa que consumiu o aviso da vaga nao
+espacou", com o pedido avisado de novo logo depois da recusa —, e o
+kernel tinha feito o certo. O gancho da suíte marcava a vaga nas marcas
+de todos e logo passava por elas; o coletor, que as leva a cada tique,
+podia levá-la entre uma coisa e outra, e o aviso da vaga saía então
+depois da trava da recusa: o pedido avisava de novo — o certo nessa
+ordem, a do NS43 —, e não na ordem que o NS51 arma, com o aviso da vaga
+saindo antes da trava. Uma espera temporária no gancho, entre a marca e
+a passada, com o coletor segurado depois de marcar a vaga, deu o mesmo
+vermelho no x86, com a mesma mensagem. O gancho passou a marcar e passar
+a vaga numa marca só dele, fora das marcas de todos — a passada de
+produção é a mesma, com a parte que avalia as marcas levadas separada da
+que as leva —, e o NS43, o NS51 e o NS53, os três casos que o usam, veem
+só a ordem que armam: com a mesma espera e o coletor segurado, os três
+passaram. A N55 (a vaga que chega no meio da recusa, ignorada: a recusa
+espaça mesmo com a marca da vaga), a N70 e a N79, rodadas de novo contra
+o gancho novo, uma de cada vez: as três reprovadas — a N55 pelo NS43 e
+pelo NS53, a N70 pelo NS50 e pelo NS51, a N79 pelo NS53.
+
 | | Mutação | Reprovada por |
 |---|---|---|
 | N01 | a designação sem conferir que o processo escuta o canal | NS08 |
@@ -1173,6 +1194,7 @@ repetida, depois do eco.
 | N231 | fora do SDK (CI 439): o estado e o motivo da persistência lidos com o leitor de campo simples, e não pelo JSON | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — o motivo sai cortado na primeira vírgula |
 | N232 | o modelo que lê o pedido depois do `pronto`, como era (CIs 464 e 465) | suíte x86 em depuração, filtrada (934 de 936 na conta do harness, que dá os pulados como passados): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo nao leu o pedido antes de dizer pronto" |
 | N233 | o modelo que lê o pedido antes do `pronto` e, sem ele, de novo depois | suíte x86 em depuração, filtrada (934 de 936): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo abriu o pedido de novo depois de dizer pronto", a segunda abertura seis registros depois da primeira; a segunda leitura não achou o pedido e o cliente saiu com 58: sem a conferência depois do eco, ela passaria |
+| N55, N70 e N79, de novo | (CI 482) contra o gancho da vaga no meio da recusa numa marca só dele: a vaga que chega no meio da recusa, ignorada — a recusa espaça mesmo com a marca da vaga (N55); a marca da vaga que não sai com o aviso publicado (N70); o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela (N79) | suíte x86 em depuração, filtrada aos casos `aviso: a vaga` e `aviso: o rearme no meio da recusa`: a N55 pelo NS43 ("a vaga no meio da recusa nao avisou o pedido na hora") e pelo NS53 ("o rearme no meio da recusa apagou a vaga"); a N70 pelo NS50 e pelo NS51 ("a recusa que consumiu o aviso da vaga nao espacou"); a N79 pelo NS53 |
 
 ## Medidas
 

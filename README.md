@@ -10961,7 +10961,14 @@ vírgula — reprovadas pelo teste do hospedeiro do `xtask`. E as da corrida
 do modelo (CIs 464 e 465, N232 e N233): o pedido lido depois do `pronto`,
 como era, e o pedido lido antes e, sem ele, de novo depois — reprovadas
 pelos dois casos `sdk: o programa de fora do repositorio`, a primeira pela
-ordem da auditoria, a segunda pela abertura repetida.
+ordem da auditoria, a segunda pela abertura repetida. E a N55, a N70 e a
+N79 de novo, contra o gancho da vaga no meio da recusa (CI 482): o gancho
+marcava a vaga nas marcas de todos, e o coletor podia levá-la antes da
+passada do próprio gancho — o aviso da vaga saía depois da trava da
+recusa, e o caso da vaga sem aviso pendente via a ordem do caso da vaga
+no meio da recusa, e não a sua. O gancho passou a marcar e passar a vaga
+numa marca só dele, e as três, rodadas de novo contra ele, continuam
+reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|
@@ -11068,6 +11075,7 @@ ordem da auditoria, a segunda pela abertura repetida.
 | fora do SDK (#314): o fim do disco hostil sem esperar o fio do servidor (N229) | os testes do hospedeiro do xtask (`disco_hostil::testes::o_fim_espera_a_conexao_em_curso`) |
 | fora do SDK (CI 439): toda recusa marcando a máquina para o fim dela perguntar o motivo (N230); o motivo da persistência lido com o leitor de campo simples, cortado na primeira vírgula (N231) | os testes do hospedeiro do xtask (`persistencia::testes::a_recusa_de_revogacao_pede_o_motivo`) |
 | o modelo que lê o pedido depois do `pronto`, como era (N232), ou antes e, sem ele, de novo depois (N233) — a corrida das CIs 464 e 465 | "sdk: o programa de fora do repositorio, selado, instalado e rodado", "sdk: o programa de fora do repositorio com o coletor segurado" |
+| a vaga no meio da recusa, ignorada (N55); a marca da vaga que não sai com o aviso publicado (N70); o rearme que apaga a marca da vaga sem publicar o aviso dela (N79) — de novo, contra o gancho da vaga numa marca só dele (CI 482) | "a vaga no meio da recusa avisa o pedido" e "o rearme no meio da recusa nao apaga a vaga" (N55); "a vaga avisa uma vez, e a recusa que responde a ela espaca" e "a vaga no meio da recusa, sem aviso pendente, avisa uma vez" (N70); "o rearme no meio da recusa nao apaga a vaga" (N79) |
 | fora do SDK: o agente que confirma a troca da senha, e o texto que se escreve nela, na conta do console (N90, N91 — as do B4, de novo); a regra de fora só no login (N92), ou sem as linhas da troca (N93) | "senha: a pessoa troca a propria, e a antiga nao entra mais"; "pareamento: so pelo teclado"; a N93, esse caso e "terminal: o agente nao edita nem confirma a linha da senha" — depois do reforço |
 | o `eco-malha` que larga o cliente sem fechar o fluxo; o `copiador` que manda e não fecha o fluxo, ou que não reconhece o diretório que já existe | "sdk: o eco-malha fecha o fluxo que o cliente largou", "sdk: o copiador fecha o fluxo de cada copia" |
 | o laço parando no tipo de evento que não conhece | "um canal so, o endpoint, tres fluxos e os outros eventos" |
