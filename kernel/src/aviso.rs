@@ -491,9 +491,10 @@ pub fn processar() {
     processar_marcas(marcas);
 }
 
-/// A passada sobre as `marcas` já levadas, fora da trava delas: cada
-/// designação tocada — ou todas, no transbordo — avaliada, e a vaga de cada
-/// processo marcada nos endpoints dele.
+/// A passada sobre as `marcas` — levadas das [`TOCADOS`], ou montadas só
+/// para uma passada da suíte —, fora da trava delas: cada designação
+/// tocada — ou todas, no transbordo — avaliada, e a vaga de cada processo
+/// marcada nos endpoints dele.
 fn processar_marcas(marcas: Marcas) {
     // Nenhuma designação: as marcas não servem a ninguém — a designação que
     // nascer depois é avaliada ao nascer, e nenhuma recusa dela veio antes
@@ -632,7 +633,11 @@ pub fn recusada(obj: Objeto, fio: u64) {
     }
     #[cfg(feature = "modo-teste")]
     {
-        let fio_da_vaga = VAGA_NA_RECUSA.swap(0, Ordering::AcqRel);
+        // Só na recusa do próprio processo armado: a de outro, no meio, não
+        // leva a vaga dele.
+        let fio_da_vaga = VAGA_NA_RECUSA
+            .compare_exchange(fio, 0, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or(0);
         if fio_da_vaga != 0 {
             vaga_passada_aqui_de_teste(fio_da_vaga);
             if REARME_NA_RECUSA.swap(false, Ordering::AcqRel) {
@@ -1031,8 +1036,9 @@ pub fn antes_de_largar_no_fecho_de_teste(obj: Objeto) {
 }
 
 /// Só para a suíte: o processo cuja cota de fluxos ganha uma vaga no meio
-/// da próxima operação recusada — entre a recusa e a conta dela, como um
-/// fluxo dele que acabasse nessa janela —; zero, nenhum.
+/// da próxima operação dele recusada — entre a recusa e a conta dela, como
+/// um fluxo dele que acabasse nessa janela; a recusa de outro processo não
+/// o dispara —; zero, nenhum.
 #[cfg(feature = "modo-teste")]
 static VAGA_NA_RECUSA: AtomicU64 = AtomicU64::new(0);
 
@@ -1061,12 +1067,13 @@ pub fn vaga_e_rearme_na_proxima_recusa_de_teste(fio: u64) {
 
 /// Só para a suíte: a vaga na cota de `fio` marcada e passada aqui mesmo,
 /// numa marca só desta passada, sem passar pelas [`TOCADOS`] — como a de
-/// [`vaga`] seguida de [`processar`], com o mesmo transbordo armado. Pelas
-/// marcas de todos, seria uma corrida com o coletor, que as leva a cada
-/// tique: levada por ele entre a marca e a passada daqui, a conta da vaga
-/// chegava à designação depois da trava da recusa, ou antes dela com o
-/// aviso ainda por sair, e a recusa via outra ordem que não a que o caso
-/// arma (a CI 482, num runner lento).
+/// [`vaga`] seguida de [`processar`], com o mesmo transbordo armado, mas só
+/// a vaga: as marcas de todos ficam para a passada seguinte. Pelas marcas
+/// de todos, seria uma corrida com quem as leva — o coletor, a cada tique,
+/// ou o acordar de outro núcleo —: levada entre a marca e a passada daqui,
+/// a conta da vaga chegava à designação depois da trava da recusa, ou antes
+/// dela com o aviso ainda por sair, e a recusa via outra ordem que não a
+/// que o caso arma (a CI 482, num runner lento).
 #[cfg(feature = "modo-teste")]
 fn vaga_passada_aqui_de_teste(fio: u64) {
     let mut m = Marcas::default();
@@ -1135,8 +1142,9 @@ pub fn transbordos_de_teste() -> u64 {
     TRANSBORDOS.load(Ordering::Acquire)
 }
 
-/// Só para a suíte, com a trava das marcas na mão, antes da marca de
-/// `gatilho` — o processo da vaga, ou [`TRANSBORDO_NA_MUDANCA`]: se é o
+/// Só para a suíte, com a trava das marcas na mão — ou sobre a marca só de
+/// uma passada da suíte ([`vaga_passada_aqui_de_teste`]) —, antes da marca
+/// de `gatilho` — o processo da vaga, ou [`TRANSBORDO_NA_MUDANCA`]: se é o
 /// armado, as marcas dos objetos transbordam pelo caminho de sempre —
 /// [`MARCAS`] objetos que não existem, e mais um, que não cabe. A marca de
 /// quem disparou vem depois, e acha as dos objetos cheias.
@@ -1199,6 +1207,7 @@ fn conta_velha_de_teste(obj: Objeto) -> Option<(u8, u32)> {
 pub fn desarmar_de_teste() {
     VAGA_NA_RECUSA.store(0, Ordering::Release);
     REARME_NA_RECUSA.store(false, Ordering::Release);
+    CONTA_NO_FECHO.store(false, Ordering::Release);
     TRANSBORDO_ARMADO.store(0, Ordering::Release);
     FIM_NA_RECUSA.store(false, Ordering::Release);
     NIVEL_VELHO.store(0, Ordering::Release);
