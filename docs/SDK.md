@@ -944,11 +944,13 @@ recusa (CI 482). Rodada outra vez, a CI 482 deu o NS51 vermelho no
 `Iniciador UEFI` do aarch64 — "a recusa que consumiu o aviso da vaga nao
 espacou", com o pedido avisado de novo logo depois da recusa —, e o
 kernel tinha feito o certo. O gancho da suíte marcava a vaga nas marcas
-de todos e logo passava por elas; o coletor, que as leva a cada tique,
-podia levá-la entre uma coisa e outra, e o aviso da vaga saía então
-depois da trava da recusa: o pedido avisava de novo — o certo nessa
-ordem, a do NS43 —, e não na ordem que o NS51 arma, com o aviso da vaga
-saindo antes da trava. Uma espera temporária no gancho, entre a marca e
+de todos e logo passava por elas; quem as leva — o coletor, a cada
+tique, ou o acordar de outro núcleo — podia levá-la entre uma coisa e
+outra, e o aviso da vaga saía então depois da trava da recusa: o pedido
+avisava de novo — o certo nessas ordens, a do NS43, com a marca da vaga
+antes da trava e o aviso dela depois, ou a do NS50, com a vaga inteira
+depois da recusa —, e não na que o NS51 arma, com o aviso da vaga saindo
+antes da trava. Uma espera temporária no gancho, entre a marca e
 a passada, com o coletor segurado depois de marcar a vaga, deu o mesmo
 vermelho no x86, com a mesma mensagem. O gancho passou a marcar e passar
 a vaga numa marca só dele, fora das marcas de todos — a passada de
@@ -959,6 +961,27 @@ passaram. A N55 (a vaga que chega no meio da recusa, ignorada: a recusa
 espaça mesmo com a marca da vaga), a N70 e a N79, rodadas de novo contra
 o gancho novo, uma de cada vez: as três reprovadas — a N55 pelo NS43 e
 pelo NS53, a N70 pelo NS50 e pelo NS51, a N79 pelo NS53.
+
+A revisão adversária do gancho novo não achou defeito nele; achou três
+esperas que vinham de antes, nos mesmos casos, e um gancho largo demais.
+Um runner parado por um segundo — o do rearme da primeira recusa que
+espaça — entre duas leituras de um caso dava vermelho culpando o kernel:
+o NS51 lia o estado antes da conta do canal, e o aviso do rearme, entre
+as duas, contava como um segundo evento; o NS43 lia o estado da segunda
+recusa sem a janela do rearme dela; e o NS53 não sabia se o aviso que
+via era o da entrega ou o do rearme, só com o pedido — em que a entrega,
+chegando com ele ainda por consumir, se coalesce e não avisa. O NS51
+passou a ler a conta antes do estado, o NS43 a ler o estado pela janela
+do rearme, e o NS53 a conferir que viu o aviso antes do rearme: nessa
+demora, os três dizem "a maquina demorou demais para ver a janela do
+rearme", como o NS50 e o NS51 já diziam nas outras leituras deles. Uma
+espera temporária de 1,1 s, nunca commitada, em cada um dos três pontos
+deu os três vermelhos falsos antes da correção, e as três demoras
+depois. E o gancho passou a disparar só na recusa do próprio processo
+armado: a de outro processo, no meio, levaria a vaga dele — na suíte,
+ninguém mais opera nessa janela, e nenhum caso o vê. A N55, a N70 e a
+N79, rodadas de novo contra os casos reforçados, continuam reprovadas
+pelos mesmos casos.
 
 | | Mutação | Reprovada por |
 |---|---|---|
@@ -1194,7 +1217,7 @@ pelo NS53, a N70 pelo NS50 e pelo NS51, a N79 pelo NS53.
 | N231 | fora do SDK (CI 439): o estado e o motivo da persistência lidos com o leitor de campo simples, e não pelo JSON | hospedeiro: `persistencia::testes::a_recusa_de_revogacao_pede_o_motivo` (xtask) — o motivo sai cortado na primeira vírgula |
 | N232 | o modelo que lê o pedido depois do `pronto`, como era (CIs 464 e 465) | suíte x86 em depuração, filtrada (934 de 936 na conta do harness, que dá os pulados como passados): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo nao leu o pedido antes de dizer pronto" |
 | N233 | o modelo que lê o pedido antes do `pronto` e, sem ele, de novo depois | suíte x86 em depuração, filtrada (934 de 936): os dois casos `sdk: o programa de fora do repositorio` — "o servidor do modelo abriu o pedido de novo depois de dizer pronto", a segunda abertura seis registros depois da primeira; a segunda leitura não achou o pedido e o cliente saiu com 58: sem a conferência depois do eco, ela passaria |
-| N55, N70 e N79, de novo | (CI 482) contra o gancho da vaga no meio da recusa numa marca só dele: a vaga que chega no meio da recusa, ignorada — a recusa espaça mesmo com a marca da vaga (N55); a marca da vaga que não sai com o aviso publicado (N70); o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela (N79) | suíte x86 em depuração, filtrada aos casos `aviso: a vaga` e `aviso: o rearme no meio da recusa`: a N55 pelo NS43 ("a vaga no meio da recusa nao avisou o pedido na hora") e pelo NS53 ("o rearme no meio da recusa apagou a vaga"); a N70 pelo NS50 e pelo NS51 ("a recusa que consumiu o aviso da vaga nao espacou"); a N79 pelo NS53 |
+| N55, N70 e N79, de novo | (CI 482) contra o gancho da vaga no meio da recusa numa marca só dele: a vaga que chega no meio da recusa, ignorada — a recusa espaça mesmo com a marca da vaga (N55); a marca da vaga que não sai com o aviso publicado (N70); o rearme do coletor que apaga a marca da vaga sem publicar o aviso dela (N79) | suíte x86 em depuração, filtrada aos casos `aviso: a vaga` e `aviso: o rearme no meio da recusa`: a N55 pelo NS43 ("a vaga no meio da recusa nao avisou o pedido na hora") e pelo NS53 ("o rearme no meio da recusa apagou a vaga"); a N70 pelo NS50 e pelo NS51 ("a recusa que consumiu o aviso da vaga nao espacou"); a N79 pelo NS53 — contra o gancho novo e, de novo, contra os casos reforçados, com os mesmos resultados |
 
 ## Medidas
 

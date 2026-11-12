@@ -10965,10 +10965,13 @@ ordem da auditoria, a segunda pela abertura repetida. E a N55, a N70 e a
 N79 de novo, contra o gancho da vaga no meio da recusa (CI 482): o gancho
 marcava a vaga nas marcas de todos, e o coletor podia levá-la antes da
 passada do próprio gancho — o aviso da vaga saía depois da trava da
-recusa, e o caso da vaga sem aviso pendente via a ordem do caso da vaga
-no meio da recusa, e não a sua. O gancho passou a marcar e passar a vaga
-numa marca só dele, e as três, rodadas de novo contra ele, continuam
-reprovadas.
+recusa, e o caso da vaga sem aviso pendente via a ordem de outro caso, e
+não a sua. O gancho passou a marcar e passar a vaga numa marca só dele, e
+só na recusa do próprio processo armado; a revisão adversária achou, nos
+mesmos casos, três leituras que um runner parado por um segundo — o do
+rearme — fazia reprovar culpando o kernel, e os três casos passaram a
+dizer que a máquina demorou. As três mutações, rodadas de novo contra o
+gancho e os casos reforçados, continuam reprovadas.
 
 | Mutação | Reprovada por |
 |---|---|
