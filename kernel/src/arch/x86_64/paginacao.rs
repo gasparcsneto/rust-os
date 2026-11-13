@@ -948,3 +948,11 @@ pub unsafe fn percorrer_paginas_do_usuario(
 pub unsafe fn destravar_paginacao() {
     unsafe { TRAVA.force_unlock() };
 }
+
+/// Só na compilação da bancada — ver `quedas::armar_o_segurador`: segura a
+/// trava das tabelas de páginas até a parada pegar este núcleo com ela —
+/// ver [`crate::trava::Mutex::segurar_ate_o_fim`].
+#[cfg(feature = "quedas")]
+pub fn segurar_ate_o_fim(segurando: &core::sync::atomic::AtomicBool) -> ! {
+    TRAVA.segurar_ate_o_fim(segurando)
+}

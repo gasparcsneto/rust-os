@@ -230,6 +230,14 @@ pub fn tique() {
     });
 }
 
+/// Só na compilação da bancada — ver `quedas::armar_o_segurador`: segura a
+/// trava dos dormentes até a parada pegar este núcleo com ela — ver
+/// [`crate::trava::Mutex::segurar_ate_o_fim`].
+#[cfg(feature = "quedas")]
+pub fn segurar_ate_o_fim(segurando: &core::sync::atomic::AtomicBool) -> ! {
+    DORMENTES.segurar_ate_o_fim(segurando)
+}
+
 /// Destrava a tabela de adormecidos à força, para uso exclusivo do caminho de falha fatal.
 ///
 /// # Safety

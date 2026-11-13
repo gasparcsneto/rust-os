@@ -58,6 +58,12 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// Quantas voltas [`Mutex::segurar_ate_o_fim`] segura a trava antes de
+/// soltá-la por um instante: algumas centenas de microssegundos no
+/// emulador, menos que um tique.
+#[cfg(feature = "quedas")]
+const VOLTAS_SEGURANDO: u32 = 1_000;
+
 /// Uma trava justa, por senha. A mesma forma de uso do `spin::Mutex`.
 pub struct Mutex<T: ?Sized> {
     /// A próxima senha a ser tirada.
@@ -118,6 +124,34 @@ impl<T: ?Sized> Mutex<T> {
         #[cfg(feature = "modo-teste")]
         crate::ordem_das_travas::ao_tomar(self.endereco(), &self.classe);
         Guarda { trava: self }
+    }
+
+    /// Só na compilação da bancada — ver `quedas::armar_o_segurador`:
+    /// segura esta trava, com as interrupções mascaradas, quase o tempo
+    /// todo — soltando-a por um instante a cada [`VOLTAS_SEGURANDO`]
+    /// voltas, para quem a pede passar —, até alguém reivindicar o fim do
+    /// sistema; daí em diante, segura-a para sempre: no x86, a NMI de parada
+    /// pega este núcleo com ela na mão; no ARM, mascarado, ele não ouve a SGI
+    /// e fica com ela. `segurando` liga na primeira vez que ela está na mão.
+    #[cfg(feature = "quedas")]
+    pub fn segurar_ate_o_fim(&self, segurando: &core::sync::atomic::AtomicBool) -> ! {
+        crate::arch::sem_interrupcoes(|| {
+            loop {
+                let guarda = self.lock();
+                segurando.store(true, Ordering::Release);
+                for _ in 0..VOLTAS_SEGURANDO {
+                    if crate::nucleos::fim_reivindicado() {
+                        // Com a guarda viva: a trava fica presa.
+                        loop {
+                            core::hint::spin_loop();
+                        }
+                    }
+                    core::hint::spin_loop();
+                }
+                drop(guarda);
+                core::hint::spin_loop();
+            }
+        })
     }
 
     /// Pega a vez só se não houver ninguém com ela nem na fila.

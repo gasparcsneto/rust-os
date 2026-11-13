@@ -271,6 +271,14 @@ pub fn reivindicar_o_fim() {
     }
 }
 
+/// Se algum núcleo já reivindicou o fim — ver [`reivindicar_o_fim`]. Só a
+/// compilação da bancada pergunta: o segurador de `quedas`, que segura uma
+/// trava até a parada — ver `trava::Mutex::segurar_ate_o_fim`.
+#[cfg(feature = "quedas")]
+pub fn fim_reivindicado() -> bool {
+    DONO_DO_FIM.load(Ordering::Acquire) != usize::MAX
+}
+
 /// Quais núcleos pararam a pedido do caminho de falha.
 static FIM_PARADOS: AtomicU64 = AtomicU64::new(0);
 /// Quais não confirmaram a parada no prazo.

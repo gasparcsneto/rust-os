@@ -72,6 +72,16 @@ mod ponto {
 /// congelar.
 const PANICO_NA_CONFIRMACAO: u8 = 32;
 
+/// A bandeira 6 do plano: com a 5, um núcleo secundário com a trava dos
+/// dormentes na mão quando a parada o pega — a NMI no x86; no ARM,
+/// mascarado, ele não ouve a SGI —, ver `kernel/src/quedas.rs`,
+/// `armar_o_segurador`.
+const SEGURAR_OS_DORMENTES: u8 = 64;
+
+/// A bandeira 7 do plano: com a 6, a trava das tabelas de páginas no lugar
+/// da dos dormentes — a que o reinício do x86 toma, pela ACPI.
+const A_TRAVA_DA_PAGINACAO: u8 = 128;
+
 /// Os tipos de registro do journal que as quedas contam.
 const OPERACAO: u16 = diario::estado::tipo::OPERACAO;
 const ATUALIZACAO: u16 = diario::estado::tipo::ATUALIZACAO;
@@ -312,6 +322,14 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: o_panico_na_tentativa,
     },
     Cenario {
+        nome: "o panico na tentativa com um nucleo parado segurando a trava do relogio: o relato sai inteiro, a maquina reinicia, e a velha volta",
+        rodar: o_panico_com_a_trava_presa,
+    },
+    Cenario {
+        nome: "o panico na tentativa com um nucleo parado segurando a trava da paginacao: o reinicio nao para nela, e a velha volta",
+        rodar: o_panico_com_a_paginacao_presa,
+    },
+    Cenario {
         nome: "a imagem de producao cuja versao nova entra em panico na tentativa volta para a velha com a identidade nascida no primeiro boot",
         rodar: a_producao_desfeita_com_a_identidade,
     },
@@ -350,6 +368,7 @@ pub(crate) fn atualizacao(arch: Arquitetura, release: bool) -> Result<ExitCode, 
             {
                 let _ = std::fs::write(serial, b"");
             }
+            super::incidente::no_cenario("atualizacao", cenario.nome);
             let inicio = Instant::now();
             match (cenario.rodar)(b) {
                 Ok(detalhe) => println!(
@@ -2231,6 +2250,85 @@ fn as_quedas_no_desfazimento(b: &Bancada) -> Result<String, String> {
 /// o pânico numa tentativa reinicia a máquina, o iniciador conta, e depois
 /// da terceira boota a velha, desfeita, que tira a candidata do journal.
 fn o_panico_na_tentativa(b: &Bancada) -> Result<String, String> {
+    panico_nas_tentativas(b, PANICO_NA_CONFIRMACAO)
+}
+
+/// O pânico de [`o_panico_na_tentativa`], com um núcleo secundário com a
+/// trava dos dormentes na mão — a que o tique do núcleo dos dispositivos
+/// toma — quando a parada o pega: no x86, a NMI o para no meio da seção
+/// crítica dela — o travamento da CI 492, sem depender de a NMI cair ali
+/// por acaso —; no ARM, mascarado, ele não ouve a SGI de parada e fica com
+/// ela (a bandeira 6 do plano, ver [`SEGURAR_OS_DORMENTES`]). O pânico
+/// relata inteiro e reinicia em cada tentativa — no x86, a serial tem, de
+/// cada uma, o segurador armado, o cartaz e o reinício —, e a velha volta
+/// como no outro cenário. Um pânico que toma a trava presa não reinicia: a
+/// máquina para depois da primeira linha do relato, e a bancada desiste
+/// dela na janela sem andar.
+fn o_panico_com_a_trava_presa(b: &Bancada) -> Result<String, String> {
+    panico_com_o_segurador(b, SEGURAR_OS_DORMENTES, "dos dormentes")
+}
+
+/// O pânico de [`o_panico_com_a_trava_presa`], com o núcleo parado
+/// segurando a trava das tabelas de páginas (a bandeira 7, ver
+/// [`A_TRAVA_DA_PAGINACAO`]): o relato não a toma, mas o reinício do x86
+/// toma — a ACPI acha o registrador de reinício traduzindo endereços pela
+/// tabela de páginas. Um reinício que a toma para depois do "reiniciando",
+/// e a bancada desiste da máquina na janela sem andar. No ARM o reinício é
+/// pela PSCI, sem a tabela de páginas: não se aplica.
+fn o_panico_com_a_paginacao_presa(b: &Bancada) -> Result<String, String> {
+    if b.arch == Arquitetura::Aarch64 {
+        return Ok(
+            "nao se aplica ao ARM: o reinicio, pela PSCI, nao passa pela tabela de paginas"
+                .to_string(),
+        );
+    }
+    panico_com_o_segurador(
+        b,
+        SEGURAR_OS_DORMENTES | A_TRAVA_DA_PAGINACAO,
+        "da paginacao",
+    )
+}
+
+/// O pânico em toda tentativa com o segurador da `trava`, pelas
+/// `bandeiras` dele — ver [`o_panico_com_a_trava_presa`].
+fn panico_com_o_segurador(b: &Bancada, bandeiras: u8, trava: &str) -> Result<String, String> {
+    let detalhe = panico_nas_tentativas(b, PANICO_NA_CONFIRMACAO | bandeiras)?;
+    // No ARM, a serial do cenário são amostras do canal — o que a máquina
+    // escreve quando a bancada não está conectada se perde —, e o que vale
+    // são os boots: as três tentativas, cada uma reiniciada pelo próprio
+    // pânico, e a volta. No x86, a COM1 vai inteira para o arquivo.
+    if b.arch == Arquitetura::Aarch64 {
+        return Ok(format!(
+            "{detalhe}; cada tentativa reiniciada pelo proprio panico (no ARM, a serial do cenario sao amostras do canal)"
+        ));
+    }
+    let serial = p::serial_do_cenario()
+        .and_then(|c| std::fs::read(c).ok())
+        .map(|b| p::sem_controles(&b))
+        .ok_or("o cenario nao tem a serial")?;
+    // Linhas inteiras: a falha fatal registra o mesmo "reiniciando", mas
+    // pelo log, com o número e o módulo na frente.
+    let contar = |texto: &str| serial.lines().filter(|l| l.trim() == texto).count();
+    let armados = serial
+        .matches(&format!("segura a trava {trava}: o panico vem agora"))
+        .count();
+    let (cartazes, reinicios) = (
+        contar("!!! PANICO NO KERNEL !!!"),
+        contar("tentativa da versao nova: reiniciando"),
+    );
+    let tentativas = usize::from(TENTATIVAS);
+    if armados < tentativas || cartazes < tentativas || reinicios < tentativas {
+        return Err(format!(
+            "em {tentativas} tentativas, a serial tem {armados} segurador(es) armado(s), {cartazes} cartaz(es) do panico e {reinicios} reinicio(s)"
+        ));
+    }
+    Ok(format!(
+        "{detalhe}; em cada tentativa, o nucleo 1 parado com a trava {trava}, o relato inteiro e o reinicio"
+    ))
+}
+
+/// A versão nova em pânico em toda tentativa, com as `bandeiras` do plano.
+fn panico_nas_tentativas(b: &Bancada, bandeiras: u8) -> Result<String, String> {
     let arch = b.arch;
     let disco = b.disco()?;
     let mut m = b.subir()?;
@@ -2245,7 +2343,7 @@ fn o_panico_na_tentativa(b: &Bancada) -> Result<String, String> {
         &disco,
         p::Plano {
             ponto: ponto::ANTES_DA_CONFIRMACAO,
-            bandeiras: PANICO_NA_CONFIRMACAO,
+            bandeiras,
             ..p::Plano::default()
         },
     )?;

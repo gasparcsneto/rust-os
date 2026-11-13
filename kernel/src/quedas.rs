@@ -37,7 +37,11 @@
 //!                        formato de antes do cofre — ver
 //!                        [`chaves_antigas`]; bit 5: no ponto
 //!                        [`Ponto::AntesDaConfirmacao`], o pânico em vez de
-//!                        congelar
+//!                        congelar; bit 6: com o 5, um núcleo secundário
+//!                        com a trava dos dormentes na mão quando a parada
+//!                        o pega — ver [`armar_o_segurador`]; bit 7: com o
+//!                        6, a trava das tabelas de páginas no lugar da dos
+//!                        dormentes (só no x86)
 //! ```
 //!
 //! O limite e as bandeiras servem à compactação: a bancada enche uma
@@ -49,7 +53,7 @@
 //! auditoria quando quer, e a n-ésima gravação de qualquer tipo deixaria
 //! de ser a mesma de uma corrida para outra. A n-ésima operação continua.
 
-use core::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
 
 /// A magia do setor do plano.
 const MAGIA: [u8; 8] = *b"DUKEQUED";
@@ -328,9 +332,92 @@ pub fn antes_da_confirmacao() {
         return;
     }
     if BANDEIRAS.load(Ordering::Relaxed) & 32 != 0 {
+        if BANDEIRAS.load(Ordering::Relaxed) & 64 != 0 {
+            armar_o_segurador();
+        }
         panic!("queda: a versao nova cai antes de se confirmar");
     }
     cair(Ponto::AntesDaConfirmacao)
+}
+
+/// O núcleo em que o segurador da bandeira 6 roda: o primeiro secundário.
+const NUCLEO_DO_SEGURADOR: usize = 1;
+
+/// Quanto o pânico espera o segurador estar com a trava na mão, em tiques:
+/// cinco segundos.
+const ESPERA_PELO_SEGURADOR: u64 = 500;
+
+/// O segurador já teve a trava dele na mão.
+static SEGURANDO: AtomicBool = AtomicBool::new(false);
+
+/// As travas que o segurador pode segurar: o argumento do fio dele.
+const DOS_DORMENTES: u64 = 0;
+const DA_PAGINACAO: u64 = 1;
+
+/// A bandeira 6: antes do pânico do ponto da confirmação, um fio fixo no
+/// núcleo 1 passa a segurar a trava dos dormentes — a que o tique do
+/// núcleo dos dispositivos toma a cada tique —, com as interrupções
+/// mascaradas, e a segura de vez quando o pânico reivindica o fim: no x86,
+/// a parada por NMI o pega com ela na mão; no ARM, mascarado, ele não ouve
+/// a SGI de parada e fica com ela, sem parar. É a sequência que se
+/// atribuía à CI 492 — um núcleo secundário parado no meio de uma seção
+/// crítica —, sem depender de a NMI cair nela por acaso. O que a bancada
+/// confere é o que o pânico faz depois disso: relata e reinicia, sem
+/// esperar por uma trava presa — a da serial e a da paginação, ele as
+/// destrava antes de tomar —, ver o handler, em `main.rs`.
+///
+/// Com a bandeira 7, a trava é a das tabelas de páginas, que o reinício do
+/// x86 toma — a ACPI acha o registrador de reinício pela tabela de
+/// páginas —: a parada pega o segurador com ela, e o pânico chega ao
+/// reinício. No ARM, o reinício é pela PSCI, sem a tabela de páginas, e a
+/// bandeira 7 não arma nada.
+///
+/// Sem o núcleo 1 ligado, o fio fica esperando ele ligar: o pânico espera
+/// [`ESPERA_PELO_SEGURADOR`] e vem sem ele, dizendo isso.
+fn armar_o_segurador() {
+    let (qual, nome) = if BANDEIRAS.load(Ordering::Relaxed) & 128 != 0 {
+        (DA_PAGINACAO, "da paginacao")
+    } else {
+        (DOS_DORMENTES, "dos dormentes")
+    };
+    if qual == DA_PAGINACAO && cfg!(not(target_arch = "x86_64")) {
+        crate::log_warn!("quedas", "a trava da paginacao so se segura no x86");
+        return;
+    }
+    if let Err(motivo) =
+        crate::fios::criar_no_nucleo("segurador", segurador, qual, NUCLEO_DO_SEGURADOR)
+    {
+        crate::log_warn!("quedas", "o segurador nao nasceu: {}", motivo);
+        return;
+    }
+    let ate = crate::tempo::ticks() + ESPERA_PELO_SEGURADOR;
+    while !SEGURANDO.load(Ordering::Acquire) && crate::tempo::ticks() < ate {
+        core::hint::spin_loop();
+    }
+    if SEGURANDO.load(Ordering::Acquire) {
+        crate::log_warn!(
+            "quedas",
+            "o nucleo {} segura a trava {}: o panico vem agora",
+            NUCLEO_DO_SEGURADOR,
+            nome
+        );
+    } else {
+        crate::log_warn!(
+            "quedas",
+            "o segurador nao pegou a trava {}: o panico vem sem ele",
+            nome
+        );
+    }
+}
+
+/// O fio do segurador, com a trava `qual` — ver [`armar_o_segurador`].
+extern "C" fn segurador(qual: u64) -> ! {
+    #[cfg(target_arch = "x86_64")]
+    if qual == DA_PAGINACAO {
+        crate::arch::x86_64::paginacao::segurar_ate_o_fim(&SEGURANDO)
+    }
+    let _ = qual;
+    crate::tarefas::relogio::segurar_ate_o_fim(&SEGURANDO)
 }
 
 /// Quanto [`cair`] espera, no máximo, o dono da trava da serial terminar a
