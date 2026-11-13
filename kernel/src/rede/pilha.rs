@@ -507,16 +507,19 @@ struct Adaptador<'a> {
     /// ([`Pilha::sondar`]), e não nos da colheita: com os bytes dentro do
     /// [`Recebido`], o quadro era copiado a cada passo — a colheita, o `?`,
     /// o `receive`, o `Some` —, e na compilação de depuração cada cópia tem
-    /// lugar próprio na pilha. A colheita mais funda é a da espera de uma
-    /// resposta (`net.recv`, ao armar a espera), e um quadro que chegava
-    /// bem nela passava do quarto de folga da pilha de um fio — ver o caso
-    /// `hora: a rodada cabe na pilha de um fio`.
+    /// lugar próprio na pilha. A colheita mais funda da rodada do serviço
+    /// de hora é a da espera de uma resposta (`net.recv`, ao armar a
+    /// espera), e um quadro da placa que chegava bem nela — a cópia do anel
+    /// dela, dentro da trava do driver — a levava 672 bytes mais fundo, além
+    /// do quarto de folga da pilha de um fio: a CI 490. Ver o caso `hora: a
+    /// rodada cabe na pilha de um fio`.
     ///
     /// O buffer não é zerado entre um quadro e outro da mesma volta: o que
     /// separa o quadro de agora do resto do anterior é a fatia do tamanho
     /// colhido, a única que o firewall e o `smoltcp` veem — e a placa
     /// escreve exatamente o tamanho que diz. Ver o caso `rede: o quadro
-    /// colhido nao leva o resto do anterior`.
+    /// colhido nao leva o resto do anterior: o firewall e a pilha veem so o
+    /// quadro de agora`.
     quadro: &'a mut [u8; MAIOR_QUADRO],
 }
 
