@@ -2687,6 +2687,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_ponto_unico_de_decisao()?,
         conferir_remetente_da_sessao()?,
         conferir_auditoria_so_relatada()?,
+        conferir_a_adocao_numa_tomada()?,
         conferir_a_porta_do_canal_tcp(),
         conferir_o_tempo(),
         conferir_os_trechos_da_politica()?,
@@ -4501,6 +4502,7 @@ const DONOS_DA_AUDITORIA: &[(&str, &str, &[&str])] = &[
             "pub fn adotar_auditoria(",
             "pub unsafe fn destravar(",
             "pub fn auditoria_na_mao_de_teste(",
+            "pub fn ultima_seq_de_teste(",
             "pub fn recomecar_a_auditoria_de_teste(",
             "pub mod alocacoes_sob_a_auditoria_de_teste ",
         ],
@@ -4869,6 +4871,210 @@ mod testes_da_auditoria_so_relatada {
             "{donos}\npub fn decidir_pela_auditoria() -> bool {{\n    crate::autorizacao::com_auditoria(|c| c.guardados() > 0).unwrap_or(false)\n}}\n"
         );
         assert_eq!(fora("persistencia.rs", &t).len(), 1);
+    }
+}
+
+/// A adoção da auditoria no boot numa tomada só da trava (o B4): em
+/// `autorizacao.rs`, o corpo de `adotar_auditoria` tem uma tomada só — um
+/// `sem_interrupcoes(` e um `AUDITORIA.lock()` —, e a continuação da cadeia
+/// do journal com a do boot (`continuar_tirando_de(`), o último número
+/// (`ULTIMO_REGISTRO.store(`), a gravada (`gravada_na_adocao(`) e a troca
+/// (`.replace(`) ficam dentro dela, uma vez cada, e em nenhum outro lugar
+/// do corpo.
+///
+/// Duas tomadas — publicar a cadeia do journal e continuá-la depois, ou
+/// continuá-la e publicá-la depois — deixariam o gate ver a cadeia pela
+/// metade entre elas; a continuação fora da trava deixaria a cadeia sem
+/// dono no meio; e a gravada fora da tomada mostraria a do journal ao lado
+/// da cadeia do boot. A suíte só pega isso quando um registro cai na
+/// janela (os achados 1 e 2 do adversário do B4); a regra do texto, sempre.
+fn conferir_a_adocao_numa_tomada() -> Result<ExitCode, String> {
+    let texto = std::fs::read_to_string(raiz_do_projeto().join("kernel/src/autorizacao.rs"))
+        .map_err(|e| format!("não foi possível ler kernel/src/autorizacao.rs: {e}"))?;
+    let erros = erros_da_adocao(&texto);
+    if erros.is_empty() {
+        println!(
+            "[xtask] a adoção da auditoria no boot numa tomada só da trava: a continuação, o \
+             último número, a gravada e a troca dentro dela"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!("[xtask] a adoção da auditoria no boot fora de uma tomada só da trava:");
+        for e in &erros {
+            println!("  kernel/src/autorizacao.rs: {e}");
+        }
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Os passos da adoção que ficam dentro da tomada da trava, uma vez cada —
+/// ver [`conferir_a_adocao_numa_tomada`].
+const PASSOS_DA_ADOCAO: [&str; 4] = [
+    "continuar_tirando_de(",
+    "ULTIMO_REGISTRO.store(",
+    "gravada_na_adocao(",
+    ".replace(",
+];
+
+/// O que está errado na adoção de `texto` — a fonte de `autorizacao.rs` —,
+/// pelo código, sem os comentários e os textos; vazio, se nada.
+fn erros_da_adocao(texto: &str) -> Vec<String> {
+    let codigo: String = so_o_codigo(texto).into_iter().collect();
+    let linhas: Vec<&str> = codigo.lines().collect();
+    let Some(de) = linhas
+        .iter()
+        .position(|l| l.starts_with("pub fn adotar_auditoria("))
+    else {
+        return vec![
+            "`adotar_auditoria` sumiu, ou mudou de cabeçalho: a conferência está cega".into(),
+        ];
+    };
+    let ate = fim_do_item(&linhas, de);
+    let corpo = linhas[de..=ate].join("\n");
+    let tomadas = corpo.matches("sem_interrupcoes(").count();
+    let travas = corpo.matches("AUDITORIA.lock()").count();
+    if tomadas != 1 || travas != 1 {
+        return vec![format!(
+            "`adotar_auditoria` com {tomadas} tomadas (`sem_interrupcoes(`) e {travas} da trava \
+             (`AUDITORIA.lock()`), e não uma"
+        )];
+    }
+    // O fecho da tomada: do parêntese do `sem_interrupcoes(` ao que o fecha.
+    let inicio = corpo.find("sem_interrupcoes(").unwrap_or(0) + "sem_interrupcoes".len();
+    let mut nivel = 0usize;
+    let mut fim = None;
+    for (i, c) in corpo[inicio..].char_indices() {
+        match c {
+            '(' => nivel += 1,
+            ')' => {
+                nivel = nivel.saturating_sub(1);
+                if nivel == 0 {
+                    fim = Some(inicio + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(fim) = fim else {
+        return vec!["a tomada de `adotar_auditoria` não fecha".into()];
+    };
+    let dentro = &corpo[inicio..=fim];
+    let fora = format!("{}{}", &corpo[..inicio], &corpo[fim + 1..]);
+    PASSOS_DA_ADOCAO
+        .iter()
+        .filter_map(|passo| {
+            let (d, f) = (dentro.matches(passo).count(), fora.matches(passo).count());
+            (d != 1 || f != 0).then(|| {
+                format!(
+                    "`adotar_auditoria`: `{passo}` {d} vez(es) dentro da tomada e {f} fora, e não \
+                     uma dentro"
+                )
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod testes_da_adocao_numa_tomada {
+    use super::erros_da_adocao;
+
+    /// A adoção como ela é: uma tomada, com os quatro passos dentro.
+    const CERTA: &str = "pub fn adotar_auditoria(mut do_journal: Cadeia) {
+    let gravada = do_journal.ultima_seq();
+    // `continuar_tirando_de(` num comentário não conta.
+    let mut soltar = Vec::with_capacity(2 * CAPACIDADE_DA_AUDITORIA);
+    let a_do_boot = crate::arch::sem_interrupcoes(|| {
+        let mut a = AUDITORIA.lock();
+        let _copiados = match a.as_mut() {
+            Some(boot) => do_journal.continuar_tirando_de(boot, &mut soltar),
+            None => 0,
+        };
+        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
+        crate::persistencia::gravada_na_adocao(gravada);
+        a.replace(do_journal)
+    });
+    drop(a_do_boot);
+    drop(soltar);
+}
+
+pub fn outra() {
+    let x = sem_interrupcoes(|| AUDITORIA.lock().replace(Cadeia::nova(1)));
+}
+";
+
+    /// A adoção como ela é passa; e o que vem depois dela não conta.
+    #[test]
+    fn a_adocao_numa_tomada_passa() {
+        assert_eq!(erros_da_adocao(CERTA), Vec::<String>::new());
+    }
+
+    /// As duas tomadas, nas duas ordens (a KM1 do B4, e a do achado 2 do
+    /// adversário), a continuação fora da trava (a KM2), a gravada e o
+    /// último número fora da tomada (o achado 1), um passo que some, e a
+    /// adoção que some.
+    #[test]
+    fn a_adocao_fora_de_uma_tomada_reprova() {
+        let publicar_e_continuar = CERTA.replace(
+            "        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
+        crate::persistencia::gravada_na_adocao(gravada);
+        a.replace(do_journal)
+    });",
+            "        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
+        crate::persistencia::gravada_na_adocao(gravada);
+        0
+    });
+    let velha = crate::arch::sem_interrupcoes(|| AUDITORIA.lock().replace(do_journal));",
+        );
+        let continuar_fora = CERTA
+            .replace(
+                "        let _copiados = match a.as_mut() {
+            Some(boot) => do_journal.continuar_tirando_de(boot, &mut soltar),
+            None => 0,
+        };",
+                "        let _copiados = 0;",
+            )
+            .replace(
+                "    let a_do_boot = crate::arch::sem_interrupcoes(|| {",
+                "    if let Some(boot) = fora.as_mut() {
+        do_journal.continuar_tirando_de(boot, &mut soltar);
+    }
+    let a_do_boot = crate::arch::sem_interrupcoes(|| {",
+            );
+        let gravada_fora = CERTA
+            .replace(
+                "        crate::persistencia::gravada_na_adocao(gravada);\n",
+                "",
+            )
+            .replace(
+                "    let mut soltar",
+                "    crate::persistencia::gravada_na_adocao(gravada);\n    let mut soltar",
+            );
+        let ultimo_depois = CERTA
+            .replace(
+                "        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);\n",
+                "",
+            )
+            .replace(
+                "    drop(a_do_boot);",
+                "    ULTIMO_REGISTRO.store(seq, Ordering::Release);\n    drop(a_do_boot);",
+            );
+        let sem_a_gravada = CERTA.replace(
+            "        crate::persistencia::gravada_na_adocao(gravada);\n",
+            "",
+        );
+        let sumiu = CERTA.replace("pub fn adotar_auditoria(", "pub fn adotar(");
+        for (caso, texto) in [
+            ("publicar e continuar em duas tomadas", publicar_e_continuar),
+            ("continuar fora da trava", continuar_fora),
+            ("a gravada fora da tomada", gravada_fora),
+            ("o ultimo numero depois da tomada", ultimo_depois),
+            ("sem a gravada", sem_a_gravada),
+            ("a adocao que some", sumiu),
+        ] {
+            assert_ne!(texto, CERTA, "{caso}: a troca do teste nao pegou");
+            assert!(!erros_da_adocao(&texto).is_empty(), "{caso}");
+        }
     }
 }
 

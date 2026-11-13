@@ -193,6 +193,15 @@ static ELO_GRAVADO: Mutex<[u8; 32]> = Mutex::new([0; 32]);
 
 /// A auditoria está no journal até `ate`, cujo elo é `elo`.
 fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
+    // A rede da suíte: só se diz gravado o que a cadeia tem. Dita antes da
+    // adoção, a gravada do journal ficava ao lado da cadeia do boot (o
+    // achado 1 do adversário do B4). Quem chama tem a ordem das gravações,
+    // e nenhuma trava de giro.
+    #[cfg(feature = "modo-teste")]
+    assert!(
+        ate <= crate::autorizacao::ultima_seq_de_teste(),
+        "a gravada passou da cadeia da auditoria"
+    );
     crate::arch::sem_interrupcoes(|| {
         *ELO_GRAVADO.lock() = elo;
         AUDITORIA_GRAVADA.store(ate, Ordering::Release);
@@ -213,6 +222,14 @@ fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
 /// caminho da auditoria vêm depois, em [`auditoria_foi_gravada`]: o elo só
 /// a compactação o lê, com a ordem das gravações, que o boot tem.
 pub(crate) fn gravada_na_adocao(ate: u64) {
+    // A rede da suíte: com a trava da auditoria e a ordem das gravações na
+    // mão, ou a gravada troca fora da tomada da cadeia (o achado 1 do
+    // adversário do B4).
+    #[cfg(feature = "modo-teste")]
+    assert!(
+        ordem_na_mao_sem_trava() && crate::autorizacao::auditoria_na_mao_de_teste(),
+        "a gravada da adocao fora da tomada da cadeia, ou sem a ordem das gravacoes"
+    );
     AUDITORIA_GRAVADA.store(ate, Ordering::Release);
 }
 
@@ -250,6 +267,19 @@ static ANTES_DA_ADOCAO: Mutex<Option<fn()>> = Mutex::new(None);
 #[cfg(feature = "modo-teste")]
 pub fn antes_da_adocao_de_teste(f: Option<fn()>) {
     crate::arch::sem_interrupcoes(|| *ANTES_DA_ADOCAO.lock() = f);
+}
+
+/// Só na suíte: o que o boot chama logo depois de adotar a cadeia — antes
+/// do elo do último gravado, do aviso ao caminho da auditoria e do registro
+/// de boot. É onde a suíte confere que o gate já mostra a adotada com a
+/// gravada do journal, e nunca com a de antes.
+#[cfg(feature = "modo-teste")]
+static DEPOIS_DA_ADOCAO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: ver [`DEPOIS_DA_ADOCAO`].
+#[cfg(feature = "modo-teste")]
+pub fn depois_da_adocao_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *DEPOIS_DA_ADOCAO.lock() = f);
 }
 
 /// O que o journal disse da selagem, juntado enquanto ele é lido no boot.
@@ -1345,6 +1375,10 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
             f();
         }
         crate::autorizacao::adotar_auditoria(reposta);
+        #[cfg(feature = "modo-teste")]
+        if let Some(f) = crate::arch::sem_interrupcoes(|| *DEPOIS_DA_ADOCAO.lock()) {
+            f();
+        }
         auditoria_foi_gravada(ate, elo);
     }
     com(|p| {

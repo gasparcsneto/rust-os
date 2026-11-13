@@ -3276,6 +3276,14 @@ pub fn auditoria_na_mao_de_teste() -> bool {
     AUDITORIA.na_mao_deste_nucleo()
 }
 
+/// Só para a suíte: a última sequência da cadeia, lida com a trava — a
+/// rede da suíte que confere que só se diz gravado o que a cadeia tem (ver
+/// `persistencia::auditoria_foi_gravada`).
+#[cfg(feature = "modo-teste")]
+pub fn ultima_seq_de_teste() -> u64 {
+    crate::arch::sem_interrupcoes(|| AUDITORIA.lock().as_ref().map_or(0, |c| c.ultima_seq()))
+}
+
 /// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador, e
 /// quantas devolveu, com a trava da auditoria na mão — o que nem a cópia
 /// da auditoria para o journal (ver "A cópia", em `persistencia`), nem quem
