@@ -9753,12 +9753,18 @@ desenho, o fluxo, os estados de queda e o que o operador faz estão em
 
 A bancada (`cargo xtask atualizacao`) liga a máquina pelo firmware nas duas
 arquiteturas — OVMF e AAVMF — e corta a energia em cada fronteira da
-instalação, da confirmação, da escrita e do desfazimento. **Dezoito
-mutações, as dezoito reprovadas** — pelos testes do hospedeiro, pelos
-casos `atualizacao:` da suíte ou pela bancada —, e quatro delas de novo no
-ARM, as quatro reprovadas; a tabela está no documento. Uma delas é o
-defeito que a bancada achou: o boot recusado reiniciava sem gravar o
-porquê no journal.
+instalação, da confirmação, da escrita e do desfazimento. **Vinte e uma
+mutações, as vinte e uma reprovadas** — pelos testes do hospedeiro, pelos
+casos `atualizacao:` da suíte, pela bancada ou pelo `cargo xtask
+invariantes` —, e cinco delas também no ARM — quatro de novo, e a M19, que
+rodou nas duas desde o começo —, as cinco reprovadas; a tabela está no
+documento. Três delas são defeitos de verdade: o boot recusado reiniciava
+sem gravar o porquê no journal, o que a bancada achou; o pânico de uma
+tentativa, com um núcleo parado segurando uma trava que o tique toma — a
+do relógio, na reprodução —, parava na primeira linha do relato em vez
+de reiniciar (a CI 492); e, com um núcleo parado segurando a trava da
+paginação, parava no reinício, o que o adversário da correção achou e a
+bancada mostrou.
 
 O kernel de produção cresceu 84 904 bytes no x86 (+2,11%) e 88 832 no ARM
 (+2,61%), pela soma dos segmentos carregáveis; o iniciador, que passou a

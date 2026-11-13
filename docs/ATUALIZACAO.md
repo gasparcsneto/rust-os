@@ -367,8 +367,14 @@ não a autoridade que o boot recusado acabou de perder.
   carga); a concorrência; o caminho do operador numa imagem de produção; o
   kernel fora de um slot (ARM); e, com os pontos de queda, cada fronteira
   da instalação, da confirmação, da escrita e do desfazimento, e o pânico
-  em toda tentativa. Na CI, um job por arquitetura: a bancada inteira levou
-  65 minutos no x86 e 53 no ARM.
+  em toda tentativa — também com um núcleo secundário com a trava do
+  relógio na mão quando a parada o pega, a assinatura do travamento da CI
+  492, reproduzida por injeção, e, no x86, com a trava da paginação, que o
+  reinício toma (ver
+  [`PERSISTENCIA.md`](PERSISTENCIA.md#o-pânico-que-parava-na-primeira-linha-ci-492)).
+  Na CI, um job por arquitetura: a bancada inteira levou 65 minutos no x86
+  e 53 no ARM, antes dos dois cenários do segurador, que somam uns seis
+  minutos e meio no x86 e dois e meio no ARM.
 - `cargo test -p xtask`: a chave de atualização, o registro do operador, a
   imagem conferida pelo registro.
 
@@ -378,8 +384,8 @@ Cada proteção da atualização foi tirada ou enfraquecida, uma de cada vez, e
 o detector mais barato que a deve pegar rodou contra ela: os testes do
 hospedeiro do crate, os casos `atualizacao:` da suíte, ou cenários da
 bancada (x86). A rodada de controle, sem mutação, passou em todos — o
-hospedeiro, a suíte (678 de 678) e os quatro cenários dela. As dezoito
-foram reprovadas:
+hospedeiro, a suíte (678 de 678) e os quatro cenários dela. As vinte e
+uma foram reprovadas:
 
 | | a mutação | quem reprovou |
 |---|---|---|
@@ -401,6 +407,27 @@ foram reprovadas:
 | M16 | o iniciador não desce a conta antes da tentativa | 5 testes do hospedeiro; o pânico na tentativa |
 | M17 | a imagem de uma chave fora do registro boota e instala | as recusas |
 | M18 | a recusa do boot reinicia sem gravar o porquê | a suíte: o boot recusado; a versão cancelada |
+| M19 | o pânico com as interrupções como o fio as deixou | o pânico na tentativa com um núcleo parado segurando a trava do relógio (x86 e ARM) |
+| M20 | o reinício do pânico sem destravar a paginação | o pânico na tentativa com um núcleo parado segurando a trava da paginação (x86) |
+| M21 | a máscara do pânico depois da parada dos outros núcleos | o `cargo xtask invariantes` (a bancada não a pega) |
+
+A M19 é a da CI 492 — a causa demonstrada pela injeção do segurador, sem
+que o travamento natural se repetisse —: o handler de pânico de antes, que
+deixava as interrupções ligadas — a tentativa que entra em pânico com um
+núcleo parado segurando a trava do relógio não reiniciava, e a máquina
+ficava parada até alguém desligá-la (ver
+[`PERSISTENCIA.md`](PERSISTENCIA.md#o-pânico-que-parava-na-primeira-linha-ci-492)).
+O controle, com as duas correções, passou nos cenários do pânico — os
+quatro no x86 e os três que se aplicam no ARM. A M21 é a máscara no lugar
+errado: depois da parada dos outros núcleos, a janela dela é a espera da
+parada, de microssegundos, e o tique que a bancada provoca vem centenas de
+milissegundos depois — ela sobreviveu à bancada, e o `cargo xtask
+invariantes` confere que a máscara é a primeira instrução do handler. A
+M20 veio do adversário da correção: o reinício do
+x86 acha o registrador de reinício pela ACPI, que traduz endereços pela
+tabela de páginas, com a trava dela, e um núcleo parado segurando-a
+deixava a tentativa parada depois do relato inteiro; só no x86 — o
+reinício do ARM, pela PSCI, não passa pela tabela de páginas.
 
 A M18 é o defeito que a bancada achou de verdade: o B1 tinha posto a
 autoridade do boot na `persistencia::exigir`, e a gravação da auditoria
@@ -415,7 +442,10 @@ passou nos três cenários e no caso do boot recusado da suíte; a M02, a M15
 e a M17 foram reprovadas pelos mesmos cenários do x86. A M18 passou pela
 versão cancelada no ARM — o coletor chegou ao journal antes do reinício e
 levou o porquê, a corrida que o parágrafo acima descreve —, e o caso da
-suíte, que pausa o coletor, a reprovou: é ele o detector dela.
+suíte, que pausa o coletor, a reprovou: é ele o detector dela. E a M19,
+depois, nas duas arquiteturas desde o começo: no ARM o segurador,
+mascarado, não ouve a SGI de parada e fica com a trava sem parar, e o
+tique do núcleo que relata a tomava do mesmo jeito.
 
 ### O tamanho
 

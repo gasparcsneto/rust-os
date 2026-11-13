@@ -3730,3 +3730,354 @@ achados 3 e 4 do adversário. O travamento da CI 492, na bancada da
 atualização do x86, também não é do B4: ele está no caminho do pânico, e
 não toca a auditoria — ver *O pânico que parava na primeira linha (CI
 492)*, abaixo.
+
+## O pânico que parava na primeira linha (CI 492)
+
+Na CI 492 (`fad75aa`, o job da atualização do x86), o cenário `a versao
+nova que entra em panico na tentativa` reprovou num boot de tentativa que
+não andou: a serial com o último passo do kernel — `[   65]     4460ms
+info  smp      4 de 4 nucleo(s) ligado(s)` —, uma linha em branco, e nada
+mais por 120 segundos. O QMP disse `running`: a CPU#0 em
+`ffff8000002a7c9f`, com as interrupções desligadas, fora de um `hlt`,
+RFL=0x97 (CF, PF, AF e SF); as outras três num `hlt` em
+`ffff8000003d869d`, com as interrupções desligadas, RFL=0x86. A linha em
+branco é a primeira do handler de pânico (`kernel/src/main.rs`, `fn
+panic`); a segunda — `!!! PANICO NO KERNEL !!!` — não saiu, e a tentativa
+não reiniciou. A CI 493 e a 494 passaram nesse cenário, e oito rodadas
+locais dele — 24 pânicos — também.
+
+**O que não se sabia.** O ELF daquela execução não existia mais fora do
+runner, e o diagnóstico só tinha os endereços. Uma compilação local põe as
+funções noutros lugares — o mesmo `0x3d869d`, aqui, caía num `int3` de
+enchimento —, e o `nightly` sem data do `rust-toolchain.toml`, os caminhos
+do runner nas localizações de pânico do `.rodata` (que vem antes do
+`.text`) e a falta de um build-id tiravam a esperança de reconstruí-lo.
+
+### O incidente: o estado das CPUs com o ELF da execução
+
+Daqui em diante, a bancada guarda o incidente de toda máquina que deixa de
+andar — ver `xtask/src/incidente.rs`, e o resumo dele no README. Num
+diretório de `target/incidentes/`, com o cenário e o motivo: cada CPU —
+os registradores inteiros, o endereço, a base de carga do kernel e o
+endereço no ELF, a função e a linha, as interrupções, o `hlt`, os retornos
+na pilha e, no x86, os quadros de interrupção, com o lugar interrompido e
+a pilha dele —; o ELF do kernel, achado entre os que este processo
+compilou pela conferência na memória da máquina parada — o código igual
+ao do arquivo, com as relocações aplicadas, e, no x86, o cabeçalho e os
+cabeçalhos de programa na base —, o SHA-256 dele, uma cópia, e o `rustc
+-Vv`; os estáticos das travas, das marcas e dos contadores do caminho que
+imprime e que para; pelo monitor, no x86, o APIC de cada CPU, o PIC e as
+UARTs — no ARM, as interrupções e o registrador de marcas da PL011 —; e a
+etapa do boot e os últimos bytes da serial. A CI sobe `target/incidentes/`
+como artefato do job que reprova ou é cancelado, e o cenário `o incidente
+de uma maquina parada`, da bancada de persistência, confere a captura de
+ponta a ponta nas duas arquiteturas, com as ferramentas do runner, numa
+máquina de pé que ela para e solta.
+
+**A procura das imagens do firmware matava o emulador do ARM.** A procura
+que a CI 436 trouxe (ver *O firmware parado da CI 436*) segue os endereços
+da pilha, e as tabelas de páginas mapeiam os dispositivos também: no
+primeiro ensaio do cenário no ARM, um valor da pilha da CPU#0 levou a
+procura a `0x7ff1000..0x8001000` — o fim da flash e o começo do
+distribuidor do GIC, no `virt` —, e o emulador morreu nesse pedido, sem uma
+linha no erro, levando o resto do diagnóstico junto. A procura agora só lê
+a RAM e a flash da máquina — nenhum dispositivo (`firmware::SoNaRam`) —, e
+o incidente do kernel é guardado antes dela.
+
+### As hipóteses
+
+Três especialistas leram o caminho, cada um por um lado — o pânico, os
+núcleos e a parada, a serial e a bancada —, sem rodar nada:
+
+- **A UART, descartada.** A COM1 da bancada vai para um arquivo regular, e
+  o 16550 do QEMU (lido no fonte do 8.2.2 e do 10.2.0) só deixa o THRE
+  apagado se a escrita no chardev devolver `EAGAIN`, o que um arquivo
+  regular nunca faz; a espera do kernel pela FIFO tem orçamento — de 5 a
+  10 s por chamada, estimados —, e depois dele o relato seguiria e a
+  tentativa reiniciaria; e as flags do laço da UART são outras (0x93 no
+  `inb`, CF=0 no `pause`).
+- **A trava da serial tomada por um núcleo que não parou, descartada.** Os
+  três estavam no `hlt` com as interrupções desligadas, e um núcleo que não
+  parasse estaria girando, ou num `hlt` com elas ligadas.
+- **Um pânico aninhado, uma falha, um laço sem fim no desenho,
+  descartados.** Os três escreveriam alguma coisa, ou reiniciariam; os laços
+  do desenho têm teto, e o compositor toma a trava dele só por `try_lock` —
+  o tamanho da tela do virtio-gpu, que ia pela trava do dispositivo, o
+  adversário achou depois (ver *O que o adversário achou*, abaixo), e a
+  máquina da bancada desenha pelo adaptador linear, sem ele.
+- **A que sobrou: um tique no meio do relato.** O handler de pânico rodava
+  com as interrupções como o fio as deixou — ligadas, num pânico de fio —,
+  e cada `serial_println!` só as mascara por dentro. A primeira linha do
+  relato custa centenas de milissegundos em depuração — ela rola o console
+  e reapresenta a tela —, e o tique do APIC (o vetor 48) fica pendente; no
+  `sti` do fim dela, ele entra. Na CPU#0, o núcleo dos dispositivos, o
+  tique toma a trava dos dormentes (`tarefas::relogio::tique`), e, para
+  acordar um fio vencido, a do escalonador (`fios::acordar`, que não olha
+  se o escalonador foi congelado). Se a NMI de parada pegou um dos outros
+  núcleos no meio da seção crítica de uma delas, ele não a solta nunca: a
+  CPU#0 gira no `lock` dela para sempre, com as interrupções desligadas — o
+  tique entra por um portão de interrupção —, sem escrever nada. As flags
+  do giro, num `lock` em depuração, são as do `cmp` do painel com a senha:
+  com o painel uma senha atrás, exatamente 0x97; e o `pause` do TCG deixa o
+  RIP no `jmp` de `lock+0x4f` — um endereço que termina em `f`, como o da
+  CI 492 (`0x2a7c9f − 0x4f` é múltiplo de 16, como o começo de toda
+  `lock`). E o RFL dos outros três é o do laço de parada de `atender_nmi`:
+  estavam dentro do handler da NMI.
+
+O `traps::fatal` não tinha o problema: ele entra por um portão de
+exceção, que já mascara as interrupções.
+
+### A causa, demonstrada
+
+Uma bandeira nova do plano das quedas (a 6, com a 5 — ver
+`kernel/src/quedas.rs`) põe, antes do pânico do ponto da confirmação, um
+fio fixo no núcleo 1 segurando a trava dos dormentes, com as interrupções
+mascaradas — soltando-a por um instante a cada poucas centenas de
+microssegundos, para o tique da CPU#0 passar —, e a segura de vez quando o
+pânico reivindica o fim: a NMI o para com ela na mão. É a sequência da
+hipótese, sem depender de a NMI cair ali por acaso. E o cenário novo da
+bancada da atualização, `o panico na tentativa com um nucleo parado
+segurando a trava do relogio`, a exige em toda tentativa.
+
+Sem correção nenhuma, no x86, a primeira tentativa parou como a CI 492, e o
+incidente — o primeiro de verdade da captura — disse o resto:
+
+| O que se viu | A CI 492 | A reprodução |
+|---|---|---|
+| a serial | o último passo, uma linha em branco, nada mais | o mesmo (o último passo é o aviso do segurador) |
+| a CPU#0 | `…2a7c9f`, interrupções desligadas, fora de `hlt`, RFL=0x97 | `<trava::Mutex<[Option<relogio::Espera>; 16]>>::lock+0x4f` (`trava.rs:116`, no kernel da reprodução), interrupções desligadas, fora de `hlt`, RFL=0x97 |
+| a pilha da CPU#0 | — | `relogio::tique` (`relogio.rs:220`), num quadro de interrupção que interrompeu `interrupts::enable` — o `sti` do fim de `serial::_print` —, com as interrupções ligadas, dentro do handler de pânico, chamado por `quedas::antes_da_confirmacao` |
+| o APIC da CPU#0 | — | o vetor 48 no ISR: dentro do tique, antes do EOI |
+| a trava dos dormentes | — | a próxima senha 0x27c, o painel 0x27a: a CPU#0 espera a senha seguinte à do dono |
+| as outras CPUs | `…3d869d`, num `hlt`, interrupções desligadas, RFL=0x86 | `x86_64::instructions::hlt`, chamada por `atender_nmi` (`smp.rs:614`), RFL=0x82; o quadro da NMI da CPU#1 interrompeu `segurar_ate_o_fim`, com a trava na mão |
+| a COM1 | — | LSR=0x60: o transmissor vazio |
+| a parada | — | `PARADOS` e `FIM_PARADOS` = 0b1110, `FIM_SEM_RESPOSTA` = 0, `CONGELADO` = 1 |
+
+O RFL dos parados difere só no PF: a última conta antes do `hlt` é o
+epílogo de um `fetch_or`, que soma ao ponteiro da pilha, e a paridade do
+byte baixo muda com o endereço dela.
+
+**O que a CI 492 não diz.** Qual trava: a dos dormentes ou a do
+escalonador — o ELF daquela execução não existe, e as duas dão a mesma
+assinatura. A correção vale para as duas.
+
+**Por que raro, e por que só no x86.** Precisa de um núcleo dentro de uma
+dessas seções críticas no instante da NMI, numa janela que depende do
+tempo do hospedeiro — e a subida dos núcleos, logo antes do pânico desta
+bancada, é quando eles mais as tomam. No ARM a parada é uma SGI, que um
+núcleo com as interrupções mascaradas não ouve: como toda trava é tomada
+mascarada, nenhum núcleo para no meio de uma.
+
+### A correção
+
+O handler de pânico mascara as interrupções do núcleo antes de tudo, e
+para sempre (`arch::mascarar_as_interrupcoes`), como a falha fatal roda.
+Nada no relato depende delas: a serial é por varredura, e a tela, num
+pânico do núcleo dos dispositivos, se desenha ali mesmo — o de outro
+núcleo fica na serial, ver *O que fica*. Depois do relato, numa
+tentativa, ele destrava a paginação — que o reinício do x86 toma, ver *O
+que o adversário achou*, abaixo — e a máquina reinicia; fora dela, o
+`halt_forever` fica parado — antes, com as interrupções ligadas, o kernel
+morto ainda atendia tiques.
+
+No ARM, onde a NMI não existe, a correção vale do mesmo jeito: o segurador
+da bandeira 6, mascarado, não ouve a SGI de parada, e fica com a trava na
+mão sem parar — o núcleo que não responde, de `nucleos::parada_do_fim` —;
+sem a correção, o tique do núcleo que relata a tomaria. Mascarado, o núcleo
+que entra em pânico também não ouve a SGI de outro que entre junto: ele
+para no `reivindicar_o_fim`, e o dono o conta como sem resposta depois de
+um quarto de segundo — como na falha fatal, que a exceção mascara.
+
+### Os testes e as mutações
+
+- **A bancada da atualização**, nas duas arquiteturas: os cenários novos,
+  `o panico na tentativa com um nucleo parado segurando a trava do
+  relogio` e, no x86, `... segurando a trava da paginacao` — as três
+  tentativas, cada uma reiniciada pelo próprio pânico, e a volta; no x86,
+  a serial com o segurador armado, o cartaz e o reinício de cada uma (no
+  ARM, a serial do cenário são amostras do canal: o que a máquina escreve
+  sem a bancada conectada se perde, e o que vale são os boots) —, e os de
+  antes, `a versao nova que entra em panico na tentativa` e o da imagem de
+  produção que entra em pânico na tentativa. Com as duas correções, os
+  quatro passaram no x86 — em 179, 198, 200 e 230 s —, e os três que se
+  aplicam no ARM, em 149, 148 e 173 s.
+- **A suíte**: o caso `video: o tamanho da tela nao espera pela trava do
+  video`, com o virtio-gpu — o job `video` da CI, nas duas arquiteturas.
+- **A bancada de persistência**: `o incidente de uma maquina parada`, nas
+  duas arquiteturas — a captura na máquina de pé, o kernel desta execução
+  achado na memória, cada CPU simbolizada, e a máquina solta respondendo.
+- **Os testes do hospedeiro** do `xtask`: a leitura do ELF e das
+  relocações, a conferência na memória (o mesmo kernel relocado aceito; um
+  byte, a relocação sem aplicar, a base vazia e outro cabeçalho recusados),
+  os registradores do x86 e do ARM, a tabela do `llvm-nm`, a listagem do
+  `llvm-objdump`, as chamadas antes de um retorno, os quadros de
+  interrupção, a etapa do boot, os últimos bytes, a UART, os caminhos do
+  DWARF, o incidente sem kernel desta execução, a pilha lida só nas
+  páginas da RAM, pela tradução da CPU, e a procura das imagens só na RAM e
+  na flash.
+
+As mutações, uma de cada vez, restauradas:
+
+| | a mutação | o resultado |
+|---|---|---|
+| M-a | o pânico sem a máscara — o handler de antes (a M19 de `ATUALIZACAO.md`) | reprovada nas duas: no x86, a CPU#0 no `lock` da trava dos dormentes (`trava.rs:122`), com RFL=0x97, dentro do tique que entrou no `sti` do fim da primeira linha, e o segurador na CPU#1 parado pela NMI dentro de `segurar_ate_o_fim`, com ela na mão; no ARM, a CPU#0 no `lock` dela, dentro do tique (`relogio.rs:220`, pelo `gic::tratar`), o segurador na CPU#1 ainda com ela — mascarado, não ouviu a SGI —, e as outras duas paradas pela SGI |
+| M-b | a máscara depois de `reivindicar_o_fim` (a M21) | sobreviveu à bancada — o cenário passou, em 194 s —, e o `cargo xtask invariantes` a reprova (abaixo) |
+| M-c | o reinício do pânico sem destravar a paginação (a M20) | reprovada no x86: o relato inteiro, o "reiniciando", e a CPU#0 no `lock` da trava das tabelas de páginas, chamada por `paginacao::traduzir` — ver *O que o adversário achou*, abaixo |
+| M-d | o tamanho da tela do virtio-gpu pela trava do dispositivo — o código de antes | reprovada pela suíte, no x86 com o virtio-gpu: o caso novo esperou por si mesmo, e a suíte encerrou a máquina depois de 600 s sem um caso terminar |
+
+As quatro valem pela última rodada, todas com o segurador em
+`trava::Mutex::segurar_ate_o_fim` e o código do pânico deste commit; a
+M-a também reprovou antes, no x86, no kernel da reprodução (a tabela
+acima).
+
+A M-b não é equivalente: a janela dela é a espera da parada — de
+microssegundos a um milissegundo, contra um tique de 10 ms —, e um tique
+ali, com um núcleo ainda não parado segurando uma das travas, travaria do
+mesmo jeito; mas o tique que a bancada provoca é o do fim da primeira
+linha, centenas de milissegundos depois. O teste ganhou o reforço que a
+bancada não dá: o `cargo xtask invariantes` confere que a primeira
+instrução de todo handler de pânico é a máscara
+(`conferir_o_panico_mascarado`, com os testes dela — a máscara que some,
+que vai para depois da parada ou para um comentário, o handler que some
+ou muda de nome, e um segundo handler sem ela).
+
+### O que o adversário achou
+
+O adversário leu a captura, a injeção e a correção, sem rodar nada:
+nenhum segundo Gate, Policy, identidade ou cadeia de autoridade; nada da
+captura no kernel nem numa imagem; a injeção só com `quedas`; nenhuma
+decisão fechada reaberta. E achou:
+
+- **O reinício do pânico tomava a trava da paginação (alto).** No x86, o
+  reinício acha o registrador de reinício pela ACPI, e a ACPI traduz
+  endereços pela tabela de páginas, com a trava dela
+  (`paginacao::traduzir`); o pânico não a destravava, e a falha fatal,
+  sim. Um núcleo parado com ela na mão — ou o próprio, se o pânico vier de
+  dentro dela, como o `descartar_nos_outros` que entra em pânico com ela
+  tomada — deixava a tentativa parada depois do "reiniciando": a mesma
+  classe da CI 492, uma linha adiante. **Demonstrado** com a bandeira 7 do
+  plano (o segurador com a trava das tabelas de páginas, só no x86 — o
+  reinício do ARM, pela PSCI, não passa por ela) e o cenário `o panico na
+  tentativa com um nucleo parado segurando a trava da paginacao`: o relato
+  inteiro, o "reiniciando", e a CPU#0 no `lock` da trava das tabelas de
+  páginas, chamada por `paginacao::traduzir`, com RFL=0x97. **Corrigido**
+  como a falha fatal faz: o pânico destrava a paginação antes de
+  reiniciar. O cenário passou nas três tentativas.
+- **O tamanho da tela do virtio-gpu esperava pela trava do dispositivo
+  (médio).** A apresentação da tela vai por `try_lock`, de propósito — o
+  compositor apresenta de dentro de qualquer escrita no console, inclusive
+  da que um comando do driver faz com a trava na mão —, mas o tamanho da
+  tela, perguntado antes, ia pela trava, e esperava por si mesmo, ou pelo
+  núcleo parado que a segurasse no relato de um pânico. O modo da tela só
+  é lido no `init`: o tamanho passou a ser guardado ali, num atômico, e
+  lido sem trava nenhuma. O caso da suíte `video: o tamanho da tela nao
+  espera pela trava do video` pergunta o tamanho com a trava na mão (a
+  M-d, acima).
+- **Baixos, corrigidos:** a pilha da captura, que podia ler um dispositivo
+  por um ponteiro estragado, só se lê nas páginas que caem na RAM, pela
+  tradução da própria CPU (o `gva2gpa` do monitor); o QMP que estoura o
+  prazo não é mais perguntado — as respostas não têm número, e a atrasada
+  seria lida como a do pedido seguinte; o kernel achado na memória sem CPU
+  nenhuma nele é dito como o de um boot que pode ser anterior, e os
+  estáticos dele não se leem; a contagem do cenário no x86 é por linhas
+  inteiras — a falha fatal registra o mesmo "reiniciando", pelo log; a CI
+  sobe os incidentes também do job que estoura o teto, e limpa
+  `target/incidentes` em vez de mudar o caminho do cache (o que trocaria a
+  versão de todos os caches); a bancada da identidade,
+  que sobe uma máquina de disco cortado que pode não atender, não gera
+  incidente dela; a procura das imagens do firmware volta a ler a flash,
+  que não tem efeito na leitura; e a máscara do ARM é também uma barreira
+  para o compilador.
+- **Informativos, que ficam:** o `registradores.txt` é o `info registers
+  -a` inteiro, e a `serial.txt`, a serial inteira — de máquinas efêmeras
+  da bancada, com as chaves da bancada, e não de um Duke de verdade; e, no
+  ARM, um segundo núcleo que entre em pânico junto, já mascarado, não ouve
+  a SGI e é contado sem resposta depois de um quarto de segundo, como na
+  falha fatal.
+
+Uma segunda leitura, das correções e da captura já corrigidas, não achou
+nada crítico, alto ou médio. Três informativos dela viraram correção: o
+`cargo xtask invariantes` confere todo `#[panic_handler]`, e não só o
+primeiro — dois, cada um sob o `cfg` de uma arquitetura, passariam com a
+máscara num só —; o diagnóstico abre uma conexão nova com o QMP quando o
+`stop` estoura o prazo, porque a resposta atrasada seria lida como a do
+pedido seguinte; e a CI limpa `target/incidentes` num passo próprio, logo
+depois do cache, para que um passo que reprove antes da bancada não suba
+os incidentes de outra rodada. Os baixos dela, sem uma falha demonstrada,
+ficam — ver *O que fica*.
+
+### A reprodução natural
+
+O cenário de antes, `a versao nova que entra em panico na tentativa`, no
+kernel sem a correção, repetido em condições que deveriam favorecer a
+coincidência — cada rodada são três pânicos:
+
+| as condições | rodadas | pânicos | travamentos |
+|---|---|---|---|
+| a bancada como na CI, antes da captura | 8 | 24 | 0 |
+| as vCPUs num fio só do hospedeiro, em rodízio (`-accel tcg,thread=single`, por um invólucro do QEMU no `PATH`) | 2 | 6 | 0 |
+| oito núcleos (`DUKE_NUCLEOS=8`) | 1 | 3 | 0 |
+| o emulador, a bancada e o TPM num núcleo só do hospedeiro (`taskset -c 0`) | 1 | 3 | 0 |
+| quatro laços girando no hospedeiro, um por CPU | 1 | 3 | 0 |
+
+E a CI 493 e a 494 passaram na bancada inteira. As oito primeiras rodadas
+são de antes da captura; as outras cinco, com ela — e ela só age depois de
+a bancada desistir da máquina, sem mudar nada antes. As condições da serial
+não variaram: com a COM1 num arquivo regular, como na CI, o hospedeiro não
+tem como segurá-la (ver *As hipóteses*), e no incidente reproduzido o LSR
+dela dizia o transmissor vazio.
+
+O incidente fica **não reproduzido** naturalmente: a injeção mostrou que
+basta um núcleo dentro de uma das duas seções críticas no instante da NMI,
+e o que não se repetiu foi esse instante. A correção vem da causa
+demonstrada, e não de o travamento não ter voltado.
+
+### O que fica
+
+- **A trava da CI 492.** A dos dormentes ou a do escalonador: sem o ELF
+  daquela execução, não se sabe. As duas dão a mesma assinatura, e a
+  correção vale para as duas.
+- **O gatilho natural** — um núcleo dentro de uma dessas seções no instante
+  da NMI — não se repetiu em nenhuma rodada local, nem nas condições que o
+  favorecem (ver *A reprodução natural*). A causa está demonstrada pela
+  injeção, com a assinatura inteira da CI 492; a coincidência que a
+  disparou lá, não.
+- **O que os especialistas acharam no caminho e não é a causa** — nenhum
+  com uma falha demonstrada, e por isso nenhum mudado agora:
+  - no x86, `serial::SAIDA_TRAVADA` e `BYTES_DE_SAIDA_PERDIDOS` são das
+    duas UARTs juntas: com a COM2 parada (um cliente do canal que não lê),
+    cada byte da COM1 religa o orçamento dela, e cada escrita no canal gira
+    de novo o orçamento inteiro com as interrupções mascaradas;
+  - o `init` do `uart_16550` espera o TEMT sem teto, e o kernel o chama de
+    novo na COM2 no boot, com a trava do canal na mão: com um cliente que
+    não lê, o boot pararia ali;
+  - se o pânico vier de um núcleo secundário, a tela fica com o núcleo dos
+    dispositivos, parado — só ele apresenta a tela —, e o relato só chega
+    à serial, que no ARM não é o console de uma pessoa;
+  - no x86, `parar_os_outros` manda a NMI uma vez e não confere o envio; um
+    núcleo ainda em `Partindo` não é parado; e a espera dele, de cem
+    milhões de voltas, dura dezenas de segundos em depuração no TCG;
+  - o comentário da serial fala em 115 200 baud, e a porta está em 9 600.
+- **O que a segunda leitura do adversário achou e fica** — baixos, sem uma
+  falha demonstrada, e por isso nada mudado no handler de pânico:
+  - um comando do virtio-gpu que estoura a espera no meio do relato —
+    numa máquina cuja tela é dele, o que a bancada não usa — registra o
+    erro no log, e o registro toma a trava do anel do log e a do eco do
+    interpretador, que o pânico não destrava (a falha fatal destrava): um
+    núcleo parado no meio de um eco com elas pararia o relato;
+  - no x86, um registrador de reinício na memória — a FADT do QEMU o põe
+    numa porta, a `0xCF9` — faz o reinício mapear uma página, com a trava
+    dos frames, que o pânico não destrava;
+  - no ARM, `sem_interrupcoes` mascara com `nomem` — de antes deste
+    trabalho —, e o contrato do `asm!` deixa o compilador passar a tomada
+    de uma trava para fora da máscara; o código gerado de hoje não o faz
+    (a máscara do pânico, sem o `nomem`, é uma barreira — ver *O que o
+    adversário achou*, acima).
+- **O alcance da injeção.** No x86, a NMI pode pegar o segurador no
+  instante entre soltar a trava e tomá-la de novo — poucas instruções,
+  contra mil voltas com ela na mão —, e aquela tentativa passaria sem a
+  trava presa; as três de um cenário, não. No ARM, o cenário não confere
+  que o segurador se armou — a serial dele são amostras do canal —: um
+  segurador que não subisse passaria sem a injeção. A M-a do ARM foi
+  reprovada (o incidente mostrou o segurador na CPU#1 com a trava), e é ela
+  que mostra que ele sobe.
