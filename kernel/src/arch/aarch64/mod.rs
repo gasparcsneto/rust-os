@@ -981,6 +981,20 @@ pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
     resultado
 }
 
+/// Mascara as IRQs deste núcleo, sem devolver o estado de antes: para quem
+/// não volta mais — o handler de pânico, que roda assim até reiniciar ou
+/// parar, como o caminho da falha fatal, que a exceção já mascara.
+///
+/// Sem o `nomem` de [`mascarar_irqs`]: aqui a máscara também é uma barreira
+/// para o compilador, que não passa um acesso à memória do relato para antes
+/// dela — como o `cli` do crate `x86_64`.
+pub fn mascarar_as_interrupcoes() {
+    // SAFETY: mascarar IRQs não tem pré-condição; sem `nomem`, a instrução
+    // conta como um acesso à memória, e o compilador não reordena outros
+    // através dela.
+    unsafe { asm!("msr daifset, #2", options(nostack)) };
+}
+
 /// Para a CPU até o próximo evento, para sempre.
 ///
 /// `wfe` (*wait for event*) é o análogo do `hlt` do x86: coloca o núcleo em

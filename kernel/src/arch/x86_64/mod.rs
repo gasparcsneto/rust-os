@@ -860,6 +860,14 @@ pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
     x86_64::instructions::interrupts::without_interrupts(f)
 }
 
+/// Mascara as interrupções deste núcleo, sem devolver o estado de antes:
+/// para quem não volta mais — o handler de pânico, que roda assim até
+/// reiniciar ou parar, como o caminho da falha fatal, que entra por um
+/// portão de exceção, já mascarado.
+pub fn mascarar_as_interrupcoes() {
+    x86_64::instructions::interrupts::disable();
+}
+
 /// Para a CPU até a próxima interrupção, para sempre.
 ///
 /// Prefira isto a `loop {}`. Um loop vazio mantém o núcleo em 100% de uso

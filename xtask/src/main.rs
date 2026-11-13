@@ -2692,6 +2692,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_remetente_da_sessao()?,
         conferir_auditoria_so_relatada()?,
         conferir_a_adocao_numa_tomada()?,
+        conferir_o_panico_mascarado()?,
         conferir_a_porta_do_canal_tcp(),
         conferir_o_tempo(),
         conferir_os_trechos_da_politica()?,
@@ -5081,6 +5082,135 @@ pub fn outra() {
         ] {
             assert_ne!(texto, CERTA, "{caso}: a troca do teste nao pegou");
             assert!(!erros_da_adocao(&texto).is_empty(), "{caso}");
+        }
+    }
+}
+
+/// O pânico mascara as interrupções antes de tudo (a CI 492): em
+/// `kernel/src/main.rs`, a primeira instrução de todo handler de pânico — o
+/// `fn panic` de cada `#[panic_handler]` — é
+/// `arch::mascarar_as_interrupcoes();`.
+///
+/// Sem ela, um tique no meio do relato tomava uma trava — a dos dormentes,
+/// ou a do escalonador — que um núcleo parado pela NMI segurava, e o
+/// pânico de uma tentativa da
+/// atualização não reiniciava — ver `docs/PERSISTENCIA.md`, *O pânico que
+/// parava na primeira linha (CI 492)*. A bancada da atualização pega o
+/// handler sem a máscara (a M19 de `docs/ATUALIZACAO.md`); a máscara
+/// depois da parada dos outros núcleos, não — a janela dela é a espera da
+/// parada, de microssegundos, e o tique que a bancada provoca vem centenas
+/// de milissegundos depois. Esta regra pega as duas.
+fn conferir_o_panico_mascarado() -> Result<ExitCode, String> {
+    let texto = std::fs::read_to_string(raiz_do_projeto().join("kernel/src/main.rs"))
+        .map_err(|e| format!("não foi possível ler kernel/src/main.rs: {e}"))?;
+    match erro_do_panico(&texto) {
+        None => {
+            println!("[xtask] o pânico mascara as interrupções antes de tudo, como a falha fatal");
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(e) => {
+            println!("[xtask] o pânico não mascara as interrupções antes de tudo:");
+            println!("  kernel/src/main.rs: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// O que está errado no começo dos handlers de pânico de `texto` — a fonte
+/// de `main.rs` —, pelo código, sem os comentários e os textos — ver
+/// [`conferir_o_panico_mascarado`]; `None`, se nada.
+///
+/// Todos os `#[panic_handler]`, e não só o primeiro: dois, cada um sob o
+/// `cfg` de uma arquitetura, passariam com a máscara num só.
+fn erro_do_panico(texto: &str) -> Option<String> {
+    let codigo: String = so_o_codigo(texto).into_iter().collect();
+    let linhas: Vec<&str> = codigo.lines().map(str::trim).collect();
+    let atributos: Vec<usize> = (0..linhas.len())
+        .filter(|&i| linhas[i] == "#[panic_handler]")
+        .collect();
+    if atributos.is_empty() {
+        return Some("o `#[panic_handler]` sumiu: a conferência está cega".into());
+    }
+    atributos.into_iter().find_map(|atributo| {
+        let mut depois = linhas[atributo + 1..].iter().filter(|l| !l.is_empty());
+        match depois.next() {
+            Some(l) if l.starts_with("fn panic(") => {}
+            outra => {
+                return Some(format!(
+                    "depois do `#[panic_handler]` vem `{}`, e não o `fn panic(`: a conferência \
+                     está cega",
+                    outra.unwrap_or(&"")
+                ));
+            }
+        }
+        let primeira = depois.next().copied().unwrap_or("");
+        (primeira != "arch::mascarar_as_interrupcoes();").then(|| {
+            format!(
+                "a primeira instrução de `fn panic` é `{primeira}`, e não \
+                 `arch::mascarar_as_interrupcoes();`"
+            )
+        })
+    })
+}
+
+#[cfg(test)]
+mod testes_do_panico_mascarado {
+    use super::erro_do_panico;
+
+    /// O handler como ele é: a máscara primeiro, com comentários antes.
+    const CERTO: &str = "#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    // As interrupções deste núcleo, antes de tudo — `nucleos::reivindicar_o_fim();`
+    // num comentário não conta.
+    arch::mascarar_as_interrupcoes();
+
+    nucleos::reivindicar_o_fim();
+    unsafe { serial::destravar() };
+    serial_println!();
+}
+";
+
+    #[test]
+    fn o_panico_mascarado_passa() {
+        assert_eq!(erro_do_panico(CERTO), None);
+    }
+
+    /// Sem a máscara (a M19), com ela depois da parada dos outros, num
+    /// comentário só, o handler que some ou muda de nome, e um segundo
+    /// handler sem ela.
+    #[test]
+    fn o_panico_sem_a_mascara_primeiro_reprova() {
+        let sem = CERTO.replace("    arch::mascarar_as_interrupcoes();\n", "");
+        let depois = sem.replace(
+            "    nucleos::reivindicar_o_fim();\n",
+            "    nucleos::reivindicar_o_fim();\n    arch::mascarar_as_interrupcoes();\n",
+        );
+        let comentada = CERTO.replace(
+            "    arch::mascarar_as_interrupcoes();",
+            "    // arch::mascarar_as_interrupcoes();",
+        );
+        let sumiu = CERTO.replace("#[panic_handler]\n", "");
+        let outro = CERTO.replace("fn panic(", "fn panico(");
+        // Dois handlers, cada um sob o `cfg` de uma arquitetura: o segundo,
+        // sem a máscara, reprova mesmo com o primeiro certo.
+        let dois = format!(
+            "#[cfg(target_arch = \"x86_64\")]\n{CERTO}\n#[cfg(target_arch = \"aarch64\")]\n{}",
+            CERTO.replace("    arch::mascarar_as_interrupcoes();\n", "")
+        );
+        let dois_certos = format!(
+            "#[cfg(target_arch = \"x86_64\")]\n{CERTO}\n#[cfg(target_arch = \"aarch64\")]\n{CERTO}"
+        );
+        assert_eq!(erro_do_panico(&dois_certos), None, "dois handlers certos");
+        for (caso, texto) in [
+            ("sem a mascara", sem),
+            ("a mascara depois da parada", depois),
+            ("a mascara num comentario", comentada),
+            ("o handler que some", sumiu),
+            ("o handler com outro nome", outro),
+            ("o segundo handler sem a mascara", dois),
+        ] {
+            assert_ne!(texto, CERTO, "{caso}: a troca do teste nao pegou");
+            assert!(erro_do_panico(&texto).is_some(), "{caso}");
         }
     }
 }

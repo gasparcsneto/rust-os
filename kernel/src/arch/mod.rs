@@ -77,9 +77,9 @@ pub use atual::{
     gravavel_pelo_usuario, halt_forever, identificar_cpu, iniciar_mouse, init_excecoes,
     init_interrupcao_serial, init_interrupcoes, init_paginacao, init_pci, init_seriais,
     init_timer_definitivo, init_usuario, interrupcoes_habilitadas, mapear_frame,
-    marcar_compartilhada, marcar_copia_na_escrita, nome, percorrer_paginas_do_usuario,
-    preparar_contexto, preparar_contexto_de_fork, redirecionar_para, reservar_faixas,
-    sem_interrupcoes, traduzir, trocar_espaco,
+    marcar_compartilhada, marcar_copia_na_escrita, mascarar_as_interrupcoes, nome,
+    percorrer_paginas_do_usuario, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
+    reservar_faixas, sem_interrupcoes, traduzir, trocar_espaco,
 };
 
 /// Vários núcleos — ver [`crate::nucleos`]. Cada backend responde do seu

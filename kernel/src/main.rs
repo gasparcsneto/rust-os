@@ -708,6 +708,29 @@ fn banner() {
 /// ser a única evidência disponível de por que a máquina morreu.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // As interrupções deste núcleo, antes de tudo, e para sempre: o pânico
+    // roda mascarado até reiniciar ou parar, como a falha fatal, que entra
+    // por um portão de exceção, já mascarada.
+    //
+    // Um pânico de fio chegava aqui com elas ligadas, e cada
+    // `serial_println!` só as mascara por dentro. Entre uma linha do relato
+    // e a seguinte, o tique entrava — no núcleo dos dispositivos, ele toma a
+    // trava dos dormentes, e, para acordar um fio vencido, a do escalonador
+    // —, e um núcleo que a NMI de parada pegou no meio da seção crítica de
+    // uma delas a deixa presa para sempre. O relato parava na primeira
+    // linha, e a tentativa da atualização não reiniciava: o travamento da
+    // CI 492, que a bancada da atualização reproduz de propósito com um
+    // núcleo parado segurando a trava dos dormentes (ver
+    // `docs/PERSISTENCIA.md`, *O pânico que parava na primeira linha*).
+    //
+    // Nada no relato depende de interrupção: a serial é por varredura, e a
+    // tela, num pânico do núcleo dos dispositivos, se desenha ali mesmo — o
+    // de outro núcleo fica na serial, porque só o dos dispositivos apresenta
+    // a tela. No ARM, a parada dos outros é uma SGI, que um núcleo mascarado
+    // não ouve — ele fica sem resposta, em `nucleos::parada_do_fim`, como na
+    // falha fatal.
+    arch::mascarar_as_interrupcoes();
+
     // Destravar antes de escrever, exatamente como [`traps::fatal`] faz — e
     // pela mesma razão, que este handler documentava e não aplicava por
     // inteiro.
@@ -755,6 +778,21 @@ fn panic(info: &PanicInfo) -> ! {
     #[cfg(not(feature = "modo-teste"))]
     if slots::em_tentativa() {
         serial_println!("tentativa da versao nova: reiniciando");
+        // O reinício do x86 acha o registrador de reinício pela ACPI, que
+        // traduz endereços pela tabela de páginas, com a trava dela: um
+        // núcleo parado com ela na mão — ou este, se o pânico veio de
+        // dentro dela — a deixaria presa, e a tentativa pararia aqui, depois
+        // do relato inteiro. A falha fatal a destrava pelo mesmo motivo. A
+        // bancada da atualização o mostra: o pânico na tentativa com um
+        // núcleo parado segurando a trava da paginação.
+        //
+        // SAFETY: como na falha fatal: este núcleo não volta para soltar uma
+        // guarda que tivesse, e os outros estão parados ou sem resposta. No
+        // x86, o reinício só lê a tabela de páginas — um registrador de
+        // reinício na memória, que ele mapearia, a FADT do QEMU não usa: o
+        // dela é uma porta (ver `docs/PERSISTENCIA.md`, *O que fica* da CI
+        // 492) —; no ARM, ele é pela PSCI, e nada mais toma a trava.
+        unsafe { arch::destravar_paginacao() };
         arch::reiniciar_a_maquina()
     }
 
