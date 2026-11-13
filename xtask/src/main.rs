@@ -28,6 +28,7 @@ mod firmware;
 mod fluxo;
 mod icp;
 mod identidade;
+mod incidente;
 mod kernel_do_slot;
 mod pareamento;
 mod persistencia;
@@ -874,6 +875,9 @@ pub(crate) fn compilar_o_kernel(
             elf.display()
         ));
     }
+    // Para o incidente de uma máquina que pare: o ELF exato que ela roda
+    // sai daqui — ver [`incidente`].
+    incidente::registrar_o_kernel(arch, release, features, &elf);
     Ok(elf)
 }
 

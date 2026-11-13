@@ -192,6 +192,7 @@ pub(crate) fn tempo(arch: Arquitetura, release: bool) -> Result<ExitCode, String
     let mut medidas = Medidas::default();
     let mut falhas = 0;
     for cenario in CENARIOS.iter().filter(escolhido) {
+        super::incidente::no_cenario("tempo", cenario.nome);
         zerar_o_estado(arch)?;
         let servidor = ServidorDeHora::subir()?;
         let mut bancada = Bancada {

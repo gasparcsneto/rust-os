@@ -1549,6 +1549,7 @@ pub(crate) fn pareamento(release: bool) -> Result<ExitCode, String> {
     for par in &escolhidos {
         let (origem, destino) = *par;
         println!("[xtask] pareamento: {}", nome(par));
+        super::incidente::no_cenario("pareamento", &nome(par));
         let comeco = Instant::now();
         match um_par(origem, destino, release) {
             Ok(feitos) => {

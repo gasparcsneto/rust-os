@@ -805,6 +805,7 @@ pub(crate) fn senha(arch: Arquitetura, release: bool) -> Result<ExitCode, String
         {
             let _ = std::fs::write(serial, b"");
         }
+        super::incidente::no_cenario("senha", cenario.nome);
         match (cenario.rodar)(&bancada) {
             Ok(detalhe) => println!("  [senha] ok  {}: {detalhe}", cenario.nome),
             Err(motivo) => {

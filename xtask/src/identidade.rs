@@ -592,12 +592,11 @@ fn o_cache_do_disco_no_nascimento(b: &Bancada) -> Result<String, String> {
         )?;
         disco.cortar_em(Gatilho::Descarga(n));
         // O boot segue depois do corte, sem disco: a máquina sobe, ou não,
-        // e a bancada a desliga quando o servidor diz que cortou.
-        let ligada = Ligada::subir_com(
-            b.arch,
-            &b.artefato(),
-            Ambiente::ligar(b.arch, None)?.com_disco_hostil(disco.socket()),
-        );
+        // e a bancada a desliga quando o servidor diz que cortou. Não subir
+        // não é falha, e não deixa incidente.
+        let ambiente = Ambiente::ligar(b.arch, None)?.com_disco_hostil(disco.socket());
+        let ligada =
+            super::incidente::sem_incidente(|| Ligada::subir_com(b.arch, &b.artefato(), ambiente));
         let limite = Instant::now() + ESPERA_PELA_QUEDA;
         while disco.contas().cortes == 0 && Instant::now() < limite {
             std::thread::sleep(Duration::from_millis(50));
@@ -995,6 +994,7 @@ pub(crate) fn identidade(arch: Arquitetura, release: bool) -> Result<ExitCode, S
         {
             let _ = std::fs::write(serial, b"");
         }
+        super::incidente::no_cenario("identidade", cenario.nome);
         let inicio = Instant::now();
         match (cenario.rodar)(&b) {
             Ok(detalhe) => println!(

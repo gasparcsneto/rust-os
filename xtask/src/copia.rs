@@ -886,6 +886,7 @@ pub(crate) fn copia(arch: Arquitetura, release: bool) -> Result<ExitCode, String
         {
             let _ = std::fs::write(serial, b"");
         }
+        super::incidente::no_cenario("copia", cenario.nome);
         match (cenario.rodar)(&bancada) {
             Ok(detalhe) => println!("  [copia] ok  {}: {detalhe}", cenario.nome),
             Err(motivo) => {

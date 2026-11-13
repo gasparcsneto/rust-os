@@ -104,6 +104,11 @@ pub(crate) struct MemoriaPeloQmp<'a> {
     pub(crate) leitor: &'a mut BufReader<UnixStream>,
     /// Onde o emulador escreve o pedaço: ao lado do socket do QMP.
     pub(crate) arquivo: PathBuf,
+    /// O QMP deixou de responder a um pedido no prazo: não se pergunta mais
+    /// nada a ele. As respostas não têm número, e a que chegasse atrasada
+    /// seria lida como a do pedido seguinte — e um `memsave` atrasado ainda
+    /// estaria escrevendo o arquivo.
+    pub(crate) quebrado: bool,
 }
 
 impl Memoria for MemoriaPeloQmp<'_> {
@@ -125,13 +130,91 @@ impl Memoria for MemoriaPeloQmp<'_> {
             j.end_object().ok()?;
             j.end_object().ok()?;
         }
-        let resposta = super::qmp_pedir(self.escrita, self.leitor, &pedido).ok();
+        if self.quebrado {
+            return None;
+        }
+        let resposta = super::qmp_pedir(self.escrita, self.leitor, &pedido);
+        self.quebrado = resposta.is_err();
+        let resposta = resposta.ok();
         let bytes = std::fs::read(&self.arquivo).ok();
         let _ = std::fs::remove_file(&self.arquivo);
         resposta
             .filter(|r| r.contains("\"return\""))
             .and(bytes)
             .filter(|b| b.len() == tamanho)
+    }
+}
+
+/// A memória de uma máquina só nas faixas dadas — a RAM e a flash do
+/// firmware, ver [`faixas_da_ram`] e [`faixas_da_flash`] —: o pedido que
+/// sai delas não se faz.
+///
+/// # Por que
+///
+/// A procura das imagens e a leitura da pilha seguem endereços que a
+/// máquina tem nos registradores e na pilha, pelas tabelas de páginas
+/// dela — que mapeiam os dispositivos também. No ARM, no cenário do
+/// incidente da bancada de persistência, um valor da pilha da CPU#0 levou
+/// a procura de uma imagem a `0x7ff1000..0x8001000`: o fim da flash e o
+/// começo do distribuidor do GIC, no `virt`. O emulador morreu nesse
+/// pedido, sem uma linha no erro, e o resto do diagnóstico foi com ele. E
+/// ler um registrador de dispositivo não é inócuo em geral: a FIFO de dados
+/// do TPM pelo TIS se consome na leitura.
+///
+/// O que vale aqui é o endereço que a CPU usa, e não o físico: o firmware
+/// mapeia a memória na identidade, e é o caso desta procura. Uma imagem só
+/// existe na RAM — as do DXE, carregadas — ou na flash — as que rodam dela
+/// no começo do boot, cuja leitura não tem efeito.
+pub(crate) struct SoNaRam<'a> {
+    pub(crate) memoria: &'a mut dyn Memoria,
+    /// As faixas da RAM, `[de, ate)`.
+    pub(crate) faixas: Vec<(u64, u64)>,
+}
+
+impl Memoria for SoNaRam<'_> {
+    fn ler(&mut self, cpu: u32, endereco: u64, tamanho: usize) -> Option<Vec<u8>> {
+        let fim = endereco.checked_add(tamanho as u64)?;
+        if !self
+            .faixas
+            .iter()
+            .any(|&(de, ate)| endereco >= de && fim <= ate)
+        {
+            return None;
+        }
+        self.memoria.ler(cpu, endereco, tamanho)
+    }
+}
+
+/// A flash do firmware de uma máquina da bancada, onde o firmware a mapeia:
+/// no `virt` do ARM, os dois bancos de 64 MiB a partir do zero; no `pc` do
+/// x86, os 16 MiB abaixo dos 4 GiB — o OVMF fica no topo, e o APIC, o
+/// IOAPIC, o HPET e o TPM, abaixo disso.
+pub(crate) fn faixas_da_flash(arch: super::Arquitetura) -> Vec<(u64, u64)> {
+    match arch {
+        super::Arquitetura::Aarch64 => vec![(0, 0x0800_0000)],
+        super::Arquitetura::X86_64 => vec![(0xFF00_0000, 1 << 32)],
+    }
+}
+
+/// As faixas da RAM de uma máquina da bancada com `mib` MiB, nos endereços
+/// em que o firmware a vê: no `virt` do ARM, a partir de 1 GiB; no `pc` do
+/// x86, a de baixo sem a janela do vídeo e das ROMs (de 640 KiB a 1 MiB),
+/// até 3 GiB, e o resto acima de 4 GiB.
+pub(crate) fn faixas_da_ram(arch: super::Arquitetura, mib: u32) -> Vec<(u64, u64)> {
+    let bytes = u64::from(mib) << 20;
+    match arch {
+        super::Arquitetura::Aarch64 => vec![(0x4000_0000, 0x4000_0000 + bytes)],
+        super::Arquitetura::X86_64 => {
+            let baixa = bytes.min(0xC000_0000);
+            let mut faixas = vec![(0, 0xA_0000.min(baixa))];
+            if baixa > 0x10_0000 {
+                faixas.push((0x10_0000, baixa));
+            }
+            if bytes > baixa {
+                faixas.push((1 << 32, (1 << 32) + bytes - baixa));
+            }
+            faixas
+        }
     }
 }
 
@@ -280,7 +363,12 @@ fn nome_pela_depuracao(memoria: &mut dyn Memoria, cpu: u32, base: u64, pe: &Pe) 
 /// Até `tamanho` bytes a partir de `endereco`: de uma vez, ou, se não se
 /// leem inteiros — a pilha no fim da memória —, página a página, até a
 /// primeira que não se lê.
-fn ler_o_que_der(memoria: &mut dyn Memoria, cpu: u32, endereco: u64, tamanho: usize) -> Vec<u8> {
+pub(crate) fn ler_o_que_der(
+    memoria: &mut dyn Memoria,
+    cpu: u32,
+    endereco: u64,
+    tamanho: usize,
+) -> Vec<u8> {
     if let Some(bytes) = memoria.ler(cpu, endereco, tamanho) {
         return bytes;
     }
@@ -878,6 +966,52 @@ pub(crate) fn onde_cada_processador(
         linhas.push(format!("{quem} em {endereco:#x}: {onde}{pilha}"));
     }
     linhas
+}
+
+#[cfg(test)]
+mod testes_da_ram {
+    use super::*;
+
+    struct Toda;
+
+    impl Memoria for Toda {
+        fn ler(&mut self, _cpu: u32, _endereco: u64, tamanho: usize) -> Option<Vec<u8>> {
+            Some(vec![0; tamanho])
+        }
+    }
+
+    #[test]
+    fn so_a_ram_se_le() {
+        let mut toda = Toda;
+        let mut m = SoNaRam {
+            memoria: &mut toda,
+            faixas: faixas_da_ram(super::super::Arquitetura::Aarch64, 128),
+        };
+        assert!(m.ler(0, 0x4000_0000, 4096).is_some());
+        assert!(m.ler(0, 0x4800_0000 - 4096, 4096).is_some());
+        // O GIC e a flash do `virt`, abaixo da RAM; e o fim dela.
+        assert!(m.ler(0, 0x7ff_1000, 0x1_0000).is_none());
+        assert!(m.ler(0, 0x3fff_f000, 4096).is_none());
+        assert!(m.ler(0, 0x4800_0000 - 4096, 8192).is_none());
+        assert!(m.ler(0, u64::MAX - 10, 4096).is_none());
+        // Com a flash: o começo dela se lê, e o que passa do fim, não.
+        let mut toda = Toda;
+        let mut com_a_flash = SoNaRam {
+            memoria: &mut toda,
+            faixas: faixas_da_flash(super::super::Arquitetura::Aarch64),
+        };
+        assert!(com_a_flash.ler(0, 0x1000, 4096).is_some());
+        assert!(com_a_flash.ler(0, 0x7ff_1000, 0x1_0000).is_none());
+        assert_eq!(
+            faixas_da_flash(super::super::Arquitetura::X86_64),
+            vec![(0xFF00_0000, 1 << 32)]
+        );
+        let x86 = faixas_da_ram(super::super::Arquitetura::X86_64, 128);
+        assert_eq!(x86, vec![(0, 0xA_0000), (0x10_0000, 128 << 20)]);
+        let grande = faixas_da_ram(super::super::Arquitetura::X86_64, 4096);
+        assert_eq!(grande[1], (0x10_0000, 0xC000_0000));
+        assert_eq!(grande[2], (1 << 32, (1 << 32) + (1 << 30)));
+    }
 }
 
 #[cfg(test)]

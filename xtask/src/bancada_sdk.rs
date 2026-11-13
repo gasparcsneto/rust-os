@@ -789,6 +789,7 @@ pub(crate) fn sdk(release: bool) -> Result<ExitCode, String> {
     for par in &escolhidos {
         let (origem, destino) = *par;
         println!("[xtask] sdk: {}", nome(par));
+        super::incidente::no_cenario("sdk", &nome(par));
         let comeco = Instant::now();
         match um_par(origem, destino, release, &nome(par)) {
             Ok(()) => println!(

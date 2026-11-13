@@ -153,10 +153,7 @@ impl Ligada {
             Err(e) => {
                 let estado = match filho.try_wait() {
                     Ok(Some(saida)) => format!("o emulador ja tinha saido ({saida})"),
-                    _ => format!(
-                        "o emulador, pelo QMP: {}",
-                        estado_do_emulador(&olhos.qmp, olhos.codigo_do_firmware.as_deref())
-                    ),
+                    _ => format!("o emulador, pelo QMP: {}", estado_do_emulador(&olhos, &e)),
                 };
                 let tpm = tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref());
                 let _ = filho.kill();
@@ -342,65 +339,118 @@ fn segurar_o_swtpm(pid: u32, segurar: bool) -> Result<(), String> {
 /// nada. Para isso a máquina é parada (`stop`) depois de dizer se rodava:
 /// os registradores, a memória em volta de cada um e a pilha são de um
 /// instante só. Quem chama este diagnóstico desliga a máquina em seguida.
-/// O nome de uma imagem sem o CodeView sai de `codigo_do_firmware`, o
-/// arquivo do firmware com que ela subiu.
-fn estado_do_emulador(qmp: &Path, codigo_do_firmware: Option<&Path>) -> String {
-    let perguntar = || -> Result<String, String> {
-        let (mut escrita, mut leitor) = super::qmp_abrir(qmp)?;
-        let mut pedir = |pedido: &str| super::qmp_pedir(&mut escrita, &mut leitor, pedido);
-        let status = pedir(r#"{"execute":"query-status"}"#)?;
-        let _ = pedir(r#"{"execute":"stop"}"#);
-        let monitor = |comando: &str| {
-            format!(
-                r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{comando}"}}}}"#
-            )
-        };
-        let registros = pedir(&monitor("info registers -a"))?;
-        let disco = pedir(&monitor("info blockstats"))?;
-        let mut partes = vec![
-            status
-                .split("\"status\": \"")
-                .nth(1)
-                .and_then(|s| s.split('"').next())
-                .unwrap_or(status.trim())
-                .to_string(),
-        ];
-        // A saída do monitor humano vem dentro de uma string JSON, com as
-        // quebras de linha escapadas.
-        for linha in registros.split("\\r\\n") {
-            let linha = linha.trim();
-            if linha.starts_with("CPU#") || linha.starts_with("RIP=") || linha.starts_with("PC=") {
-                partes.push(linha.to_string());
-            }
-        }
-        for linha in disco.split("\\r\\n") {
-            let linha = linha.trim().trim_start_matches("{\"return\": \"");
-            if atividade_dos_discos(linha).is_some_and(|a| a > 0) {
-                partes.push(linha.to_string());
-            }
-        }
-        let mut texto = partes.join("; ");
-        let mut memoria = super::firmware::MemoriaPeloQmp {
-            escrita: &mut escrita,
-            leitor: &mut leitor,
-            arquivo: qmp.with_extension("memoria"),
-        };
-        let mut fonte = || match codigo_do_firmware {
-            Some(codigo) => super::firmware::modulos_do_arquivo(codigo),
-            None => Err("o arquivo do firmware desta maquina nao e conhecido".to_string()),
-        };
-        let linhas = super::firmware::onde_cada_processador(&registros, &mut memoria, &mut fonte);
-        if !linhas.is_empty() {
-            texto.push_str("\n  onde cada processador esta, pela memoria:");
-            for linha in linhas {
-                texto.push_str("\n    ");
-                texto.push_str(&linha);
-            }
-        }
-        Ok(texto)
+/// O nome de uma imagem sem o CodeView sai do arquivo do firmware com que
+/// ela subiu.
+///
+/// E o incidente — ver [`super::incidente`], guardado antes da procura das
+/// imagens do firmware, que segue endereços —: na CI 492, o kernel parou no
+/// meio do handler de pânico, e os endereços do kernel não diziam nada sem
+/// o ELF daquela execução. O estado de todas as CPUs fica guardado em
+/// `target/incidentes/`, simbolizado com o ELF que este processo compilou e
+/// que está na memória da máquina, e a saída diz, no fim, onde cada CPU
+/// está e onde o boot estava. `motivo` é por que a bancada desistiu dela.
+fn estado_do_emulador(olhos: &Olhos, motivo: &str) -> String {
+    match diagnosticar(olhos, motivo, &super::incidente::raiz_dos_incidentes()) {
+        Ok((texto, _)) => texto,
+        Err(e) => format!("sem resposta ({e}): o emulador vivo e parado por dentro"),
+    }
+}
+
+/// O diagnóstico de [`estado_do_emulador`], com o incidente guardado em
+/// `raiz`. A máquina fica parada.
+fn diagnosticar(
+    olhos: &Olhos,
+    motivo: &str,
+    raiz: &Path,
+) -> Result<(String, super::incidente::Incidente), String> {
+    let (mut escrita, mut leitor) = super::qmp_abrir(&olhos.qmp)?;
+    let status = super::qmp_pedir(&mut escrita, &mut leitor, r#"{"execute":"query-status"}"#)?;
+    // A resposta de um `stop` que estourou o prazo chegaria depois, e seria
+    // lida como a do pedido seguinte — sem um `id` no pedido, as respostas
+    // do QMP não dizem a qual respondem —, e cada uma daí em diante, como a
+    // do anterior. Uma conexão nova a deixa na velha.
+    if super::qmp_pedir(&mut escrita, &mut leitor, r#"{"execute":"stop"}"#).is_err() {
+        drop((escrita, leitor));
+        (escrita, leitor) = super::qmp_abrir(&olhos.qmp)?;
+    }
+    let mut pedir = |pedido: &str| super::qmp_pedir(&mut escrita, &mut leitor, pedido);
+    let monitor = |comando: &str| {
+        format!(
+            r#"{{"execute":"human-monitor-command","arguments":{{"command-line":"{comando}"}}}}"#
+        )
     };
-    perguntar()
-        .unwrap_or_else(|e| format!("sem resposta ({e}): o emulador vivo e parado por dentro"))
+    let registros = pedir(&monitor("info registers -a"))?;
+    let disco = pedir(&monitor("info blockstats"))?;
+    let rodando = status
+        .split("\"status\": \"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or(status.trim())
+        .to_string();
+    let mut partes = vec![rodando.clone()];
+    // A saída do monitor humano vem dentro de uma string JSON, com as
+    // quebras de linha escapadas.
+    for linha in registros.split("\\r\\n") {
+        let linha = linha.trim();
+        if linha.starts_with("CPU#") || linha.starts_with("RIP=") || linha.starts_with("PC=") {
+            partes.push(linha.to_string());
+        }
+    }
+    for linha in disco.split("\\r\\n") {
+        let linha = linha.trim().trim_start_matches("{\"return\": \"");
+        if atividade_dos_discos(linha).is_some_and(|a| a > 0) {
+            partes.push(linha.to_string());
+        }
+    }
+    let mut texto = partes.join("; ");
+    let mut memoria = super::firmware::MemoriaPeloQmp {
+        escrita: &mut escrita,
+        leitor: &mut leitor,
+        arquivo: olhos.qmp.with_extension("memoria"),
+        quebrado: false,
+    };
+    // O kernel primeiro: o incidente lê só a imagem dele, as pilhas e os
+    // estáticos, e a procura das imagens do firmware segue endereços.
+    let em_texto = super::incidente::texto_do_monitor(&registros).unwrap_or(registros.clone());
+    let ram = super::firmware::faixas_da_ram(olhos.arch, olhos.memoria_mib);
+    let incidente = if super::incidente::guardar_agora() {
+        super::incidente::guardar(
+            &super::incidente::Parada {
+                arch: olhos.arch,
+                motivo,
+                status: &rodando,
+                registros: &em_texto,
+                serial: olhos.serial.as_deref(),
+                ram: &ram,
+            },
+            &mut memoria,
+            raiz,
+        )
+    } else {
+        super::incidente::Incidente::nenhum("um boot que podia nao atender: sem incidente")
+    };
+    let mut na_ram = super::firmware::SoNaRam {
+        memoria: &mut memoria,
+        faixas: [ram, super::firmware::faixas_da_flash(olhos.arch)].concat(),
+    };
+    let mut fonte = || match &olhos.codigo_do_firmware {
+        Some(codigo) => super::firmware::modulos_do_arquivo(codigo),
+        None => Err("o arquivo do firmware desta maquina nao e conhecido".to_string()),
+    };
+    let linhas = super::firmware::onde_cada_processador(&registros, &mut na_ram, &mut fonte);
+    if !linhas.is_empty() {
+        texto.push_str("\n  onde cada processador esta, pela memoria:");
+        for linha in &linhas {
+            texto.push_str("\n    ");
+            texto.push_str(linha);
+        }
+        super::incidente::acrescentar(&incidente, "as imagens do firmware", &linhas);
+    }
+    for linha in &incidente.resumo {
+        texto.push_str("\n  ");
+        texto.push_str(linha);
+    }
+    Ok((texto, incidente))
 }
 
 /// Liga o QEMU, sem esperar nada dele. Devolve o processo, o socket da
@@ -467,7 +517,11 @@ fn lancar(
     let codigo = matches!(artefato, Artefato::Disco(_))
         .then(|| super::codigo_do_firmware(arch))
         .flatten();
-    Ok((filho, socket, Olhos::da_partida(arch, firmware, codigo)))
+    Ok((
+        filho,
+        socket,
+        Olhos::da_partida(arch, ambiente.memoria_mib, firmware, codigo),
+    ))
 }
 
 /// O que a bancada vê de uma máquina que sobe, de fora, numa olhada: o
@@ -638,6 +692,12 @@ fn discos_pelo_qmp(qmp: &Path) -> Option<u64> {
 /// ligou — ver [`super::na_raiz`] —, e quem espera por ela depois, num
 /// reinício, pode estar fora dessa raiz.
 struct Olhos {
+    /// A arquitetura da máquina.
+    arch: Arquitetura,
+    /// A memória dela, em MiB: as pilhas do incidente só se leem na RAM, e
+    /// a procura das imagens só na RAM e na flash — nenhum dispositivo, ver
+    /// [`super::firmware::SoNaRam`].
+    memoria_mib: u32,
     /// O QMP do emulador.
     qmp: PathBuf,
     /// A serial humana do cenário — ver [`serial_do_cenario`].
@@ -663,8 +723,15 @@ struct Olhos {
 impl Olhos {
     /// Os olhos de uma máquina que `arch` acaba de ligar, com o log de
     /// depuração do firmware em `firmware` e o código dele em `codigo`.
-    fn da_partida(arch: Arquitetura, firmware: Option<PathBuf>, codigo: Option<PathBuf>) -> Olhos {
+    fn da_partida(
+        arch: Arquitetura,
+        memoria_mib: u32,
+        firmware: Option<PathBuf>,
+        codigo: Option<PathBuf>,
+    ) -> Olhos {
         Olhos {
+            arch,
+            memoria_mib,
             qmp: super::caminho_qmp(arch),
             serial: serial_do_cenario(),
             firmware,
@@ -961,6 +1028,10 @@ const CENARIOS: &[Cenario] = &[
         rodar: o_rtc_e_o_que_se_mandou,
     },
     Cenario {
+        nome: "o incidente de uma maquina parada: cada CPU no kernel, simbolizada pelo ELF desta execucao conferido na memoria, e a maquina solta continua",
+        rodar: o_incidente_da_maquina_parada,
+    },
+    Cenario {
         nome: "a revogacao por quorum sobrevive ao corte de energia, e a lapide vence a imagem",
         rodar: a_revogacao_sobrevive,
     },
@@ -1218,6 +1289,7 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
             {
                 let _ = std::fs::write(serial, b"");
             }
+            super::incidente::no_cenario("persistencia", cenario.nome);
             match (cenario.rodar)(arch, artefato) {
                 Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
                 Err(motivo) => {
@@ -1454,15 +1526,33 @@ impl Ligada {
             let agora = Instant::now();
             let sinais = reiniciando.then(|| self.olhos.sinais(agora));
             if let Err(d) = andamento.olhar(agora, sinais) {
-                let estado =
-                    estado_do_emulador(&self.olhos.qmp, self.olhos.codigo_do_firmware.as_deref());
+                let motivo =
+                    format!("o boot seguinte nao respondeu: {d}; a ultima resposta: {ultimo}");
+                let estado = estado_do_emulador(&self.olhos, &motivo);
                 let tpm = tpm_e_firmware(&mut self._ambiente, self.olhos.firmware.as_deref());
-                return Err(format!(
-                    "o boot seguinte nao respondeu: {d}; a ultima resposta: {ultimo}\n  o emulador, pelo QMP: {estado}{tpm}"
-                ));
+                return Err(format!("{motivo}\n  o emulador, pelo QMP: {estado}{tpm}"));
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+}
+
+impl Ligada {
+    /// Para a máquina e guarda o incidente dela em `raiz`, como a bancada
+    /// faz com uma que deixou de andar — ver [`estado_do_emulador`] —, e a
+    /// solta de novo.
+    pub(crate) fn guardar_o_incidente(
+        &mut self,
+        raiz: &Path,
+        motivo: &str,
+    ) -> Result<super::incidente::Incidente, String> {
+        let parada = diagnosticar(&self.olhos, motivo, raiz);
+        let (mut escrita, mut leitor) = super::qmp_abrir(&self.olhos.qmp)?;
+        let solta = super::qmp_pedir(&mut escrita, &mut leitor, r#"{"execute":"cont"}"#)?;
+        if !solta.contains("\"return\"") {
+            return Err(format!("a maquina nao voltou a andar: {}", solta.trim()));
+        }
+        parada.map(|(_, incidente)| incidente)
     }
 }
 
@@ -2494,6 +2584,140 @@ fn rtc_do_kernel(maquina: &mut Ligada) -> Result<u64, String> {
     super::campo_simples(&r, "rtc")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| format!("o system.info nao diz o rtc\n  {r}"))
+}
+
+/// O incidente de uma máquina parada — ver [`super::incidente`] —, de
+/// ponta a ponta, na máquina de pé: a bancada a para como pararia uma que
+/// deixou de andar, guarda o incidente, e a solta.
+///
+/// Confere o que a CI 492 não teve: o kernel desta execução achado na
+/// memória, com o código igual ao do ELF; cada CPU num endereço do kernel,
+/// com a função, e alguma com o arquivo e a linha; os arquivos do
+/// incidente, com a cópia do ELF; a etapa do boot pela serial; no x86, o
+/// APIC da CPU 0 e a UART COM1 pelo monitor. E que a captura não estraga a
+/// máquina: solta, ela responde. As ferramentas são as do runner — o
+/// `llvm-nm` e o `llvm-objdump` do toolchain, o monitor do QEMU dele.
+fn o_incidente_da_maquina_parada(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let mut maquina = Ligada::subir(arch, artefato, None)?;
+    let raiz = super::incidente::raiz_dos_incidentes().join("do-cenario");
+    let _ = std::fs::remove_dir_all(&raiz);
+    let incidente = maquina.guardar_o_incidente(
+        &raiz,
+        "o cenario do incidente: a maquina parada de proposito, de pe",
+    )?;
+    let conferido = conferir_o_incidente(arch, &incidente);
+    // Solta, a máquina responde: a captura não a mudou.
+    let depois = persistencia_de(&mut maquina);
+    maquina.cortar_a_energia()?;
+    let (cpus, local) = conferido?;
+    let p =
+        depois.map_err(|e| format!("a maquina solta depois do incidente nao respondeu: {e}"))?;
+    let _ = std::fs::remove_dir_all(&raiz);
+    Ok(format!(
+        "{cpus} CPU(s) no kernel, simbolizadas ({local}); o ELF conferido na memoria; solta, a maquina respondeu (boot {})",
+        p.boots
+    ))
+}
+
+/// O que [`o_incidente_da_maquina_parada`] confere no incidente: quantas
+/// CPUs, e um lugar de exemplo.
+fn conferir_o_incidente(
+    arch: Arquitetura,
+    incidente: &super::incidente::Incidente,
+) -> Result<(usize, String), String> {
+    let dir = incidente
+        .dir
+        .as_ref()
+        .ok_or("o diretorio do incidente nao se criou")?;
+    let resumo = || incidente.resumo.join("\n  ");
+    let kernel = incidente.kernel.as_ref().ok_or_else(|| {
+        format!(
+            "o kernel desta execucao nao foi achado na memoria:\n  {}",
+            resumo()
+        )
+    })?;
+    if kernel.codigo == 0 || kernel.sha256.len() != 64 {
+        return Err(format!("o kernel achado sem codigo conferido: {kernel:?}"));
+    }
+    let copia = kernel
+        .copia
+        .as_ref()
+        .ok_or("a copia do ELF nao se guardou")?;
+    let tamanho = |c: &Path| std::fs::metadata(c).map(|m| m.len()).ok();
+    if tamanho(copia) != tamanho(&kernel.elf) {
+        return Err(format!(
+            "a copia {} nao tem o tamanho do ELF",
+            copia.display()
+        ));
+    }
+    if incidente.cpus.is_empty() {
+        return Err(format!("nenhuma CPU no incidente:\n  {}", resumo()));
+    }
+    for cpu in &incidente.cpus {
+        if cpu.no_elf.is_none() || cpu.funcao.as_deref().unwrap_or("").is_empty() {
+            return Err(format!(
+                "a CPU#{} em {:#x} nao foi simbolizada no kernel:\n  {}",
+                cpu.numero,
+                cpu.instrucao,
+                resumo()
+            ));
+        }
+    }
+    // A CPU ociosa pode estar numa função de um pacote — o `hlt` do pacote
+    // `x86_64` —, chamada pelo kernel: o que se confere é a cadeia.
+    let no_kernel = |c: &super::incidente::OndeEsta| {
+        c.funcao
+            .iter()
+            .chain(&c.retornos)
+            .any(|f| f.contains("duke::"))
+    };
+    if !incidente.cpus.iter().any(no_kernel) {
+        return Err(format!(
+            "nenhuma CPU numa funcao do kernel nem chamada por uma:\n  {}",
+            resumo()
+        ));
+    }
+    let local = incidente
+        .cpus
+        .iter()
+        .find_map(|c| c.local.clone().filter(|l| l.contains(".rs:")))
+        .ok_or_else(|| format!("nenhuma CPU com o arquivo e a linha:\n  {}", resumo()))?;
+    for arquivo in [
+        "resumo.txt",
+        "registradores.txt",
+        "monitor.txt",
+        "desmontagem.txt",
+    ] {
+        if !dir.join(arquivo).is_file() {
+            return Err(format!(
+                "o incidente nao tem {arquivo} em {}",
+                dir.display()
+            ));
+        }
+    }
+    if incidente.etapa.is_none() || !dir.join("serial.txt").is_file() {
+        return Err(format!("o incidente nao tem a serial:\n  {}", resumo()));
+    }
+    if arch == Arquitetura::X86_64 {
+        let etapa = incidente.etapa.as_ref().map_or("", |e| e.etapa);
+        if etapa != "kernel" {
+            return Err(format!(
+                "a etapa do boot pela serial e `{etapa}`, e a maquina esta no kernel"
+            ));
+        }
+        let monitor = std::fs::read_to_string(dir.join("monitor.txt")).unwrap_or_default();
+        if !monitor.contains("(qemu) info lapic 0") || !monitor.contains("LVT") {
+            return Err(format!("o monitor nao disse o APIC da CPU 0:\n{monitor}"));
+        }
+        if !incidente
+            .resumo
+            .iter()
+            .any(|l| l.starts_with("a UART COM1: LSR="))
+        {
+            return Err(format!("o resumo nao tem a UART:\n  {}", resumo()));
+        }
+    }
+    Ok((incidente.cpus.len(), local))
 }
 
 /// A máquina sobe com o RTC numa data, e o kernel lê essa data — numa data
@@ -5115,9 +5339,10 @@ pub(crate) fn subir_ate_cair_com(
         esperar_o_aviso_com(&mut BufReader::new(f), &mut seguir)
     });
     let caiu = caiu.map_err(|e| {
+        let motivo = format!("a maquina nao avisou a queda: {e}");
         format!(
-            "a maquina nao avisou a queda: {e}\n  o emulador, pelo QMP: {}{}",
-            estado_do_emulador(&olhos.qmp, olhos.codigo_do_firmware.as_deref()),
+            "{motivo}\n  o emulador, pelo QMP: {}{}",
+            estado_do_emulador(&olhos, &motivo),
             tpm_e_firmware(&mut ambiente, olhos.firmware.as_deref())
         )
     });
@@ -8258,6 +8483,8 @@ BdsDxe: loading Boot0001 \"UEFI Misc Device\"\r\n";
     /// Os olhos de uma máquina sem QMP: os discos ficam onde estavam.
     fn olhos(serial: &Path, canal_na_serial: bool) -> Olhos {
         Olhos {
+            arch: Arquitetura::X86_64,
+            memoria_mib: 128,
             qmp: temporario("sem-qmp.sock"),
             serial: Some(serial.to_path_buf()),
             firmware: None,

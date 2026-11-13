@@ -847,6 +847,7 @@ xtask/src/
 ├── enlace.rs       a bancada do enlace entre dispositivos: duas máquinas de pé ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela, ligadas pela ponte da bancada — o registro com prova nos dois, a pessoa no Terminal, o `carteiro` de uma manda ao `correio` da outra, a auditoria dos dois lados, a suspensão, o corte e a revogação com lápide, nas quatro combinações de x86_64 e aarch64
 ├── producao.rs      a máquina de verdade: a imagem de produção montada do material do operador, sem chave do Duke — ela nasce no primeiro boot —, as chaves de quem a opera, e o cliente com que se fala com ela
 ├── identidade.rs    a bancada da identidade do Duke: a imagem de produção pelo firmware, num disco e num TPM novos por cenário — o nascimento, as quedas, o cache do disco que se perde no corte, as cópias do selo, sem TPM, o clone, a reinstalação
+├── incidente.rs     o incidente de uma máquina que parou de andar: o estado de cada CPU guardado em `target/incidentes/` e simbolizado com o ELF desta execução — o que está na memória, conferido nela —, pelo `llvm-nm` e o `llvm-objdump` do toolchain: a função e a linha, as interrupções, o `hlt`, os retornos na pilha, alguns estáticos, o APIC e a UART pelo monitor, e onde o boot estava pela serial
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── fluxo.rs         a bancada dos fluxos da malha: duas máquinas de pé e uma ponte do meio no hospedeiro — 4 MiB em cada sentido, local e entre os Dukes, com a auditoria dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento, com o pico dos buffers; a adulteração e o homem no meio na ponte; a política, a suspensão, o esquecimento, o corte e a revogação no meio do fluxo; e as vagas da porta do enlace com outro dispositivo que a bancada faz, nos quatro pares
 ├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
@@ -9550,6 +9551,39 @@ inteira antes de o emulador existir (`conferir_o_disco_do_boot`), e uma
 ordem a mais ou a menos é recusada com o que se achou. A prova — o que cada firmware liga, com e sem
 a ordem, e o estresse com o firmware da CI e a CPU disputada — está em
 [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#a-ordem-de-boot).
+
+E o incidente ([`xtask/src/incidente.rs`](xtask/src/incidente.rs)): o
+boot que não atende guarda em `target/incidentes/` o estado de todas as
+CPUs, simbolizado com o ELF que a própria execução compilou — o que está na
+memória da máquina parada, conferido nela: o código igual ao do arquivo,
+com as relocações aplicadas —, pelo `llvm-nm` e pelo `llvm-objdump` do
+toolchain. De cada CPU, a função e a linha, as interrupções, o `hlt`, os
+retornos na pilha e, no x86, os quadros de interrupção, com o lugar
+interrompido; as travas, as marcas e os contadores do caminho que imprime
+e que para; pelo monitor, no x86, o APIC e as UARTs — no ARM, as
+interrupções e a PL011 —; a etapa do boot e os últimos bytes da serial;
+uma cópia do ELF, o SHA-256 dele e o `rustc -Vv`. Nada disso existe no
+kernel nem numa imagem: é o hospedeiro lendo a máquina já parada, e a
+memória dela não vai para o artefato — só os endereços simbolizados e as
+palavras dos estáticos. A procura das imagens do
+firmware passou a ler só a RAM e a flash da máquina — nenhum dispositivo
+(`firmware::SoNaRam`): no ARM, um valor da pilha a levava ao GIC, e o
+emulador morria no meio do diagnóstico. A CI sobe `target/incidentes/`
+quando um job de bancada reprova ou é cancelado, e o cenário `o incidente
+de uma maquina parada`, da bancada de persistência, confere a captura de
+ponta a ponta nas duas arquiteturas. Ela nasceu da CI 492, o pânico de
+uma tentativa da atualização que parava na primeira linha do relato: com
+ela, uma reprodução por injeção — um núcleo segurando de propósito a
+trava dos dormentes quando a NMI o para — mostrou a causa, com a
+assinatura inteira da CI 492: o tique do núcleo dos dispositivos
+tomando, no meio do relato, uma trava que um núcleo parado pela NMI
+segurava — a dos dormentes ou a do escalonador; sem o ELF daquela
+execução, não se sabe qual. O travamento natural não se repetiu em
+nenhuma rodada local, e fica não reproduzido; a correção vem da causa
+demonstrada: o pânico passou a rodar com as interrupções mascaradas, como
+a falha fatal, e a destravar a paginação antes do reinício de uma
+tentativa (ver
+[`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-pânico-que-parava-na-primeira-linha-ci-492)).
 
 E a máquina que recusa por revogação diz o porquê: uma resposta que diz
 `DENY_REVOCATION` faz o fim da máquina — o corte de energia do cenário, ou

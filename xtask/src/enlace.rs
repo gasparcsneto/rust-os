@@ -1467,6 +1467,7 @@ pub(crate) fn enlace(release: bool) -> Result<ExitCode, String> {
     for par in &escolhidos {
         let (origem, destino) = *par;
         println!("[xtask] enlace: {}", nome(par));
+        super::incidente::no_cenario("enlace", &nome(par));
         let comeco = Instant::now();
         match um_par(origem, destino, release) {
             Ok(feitos) => {

@@ -799,6 +799,7 @@ pub(crate) fn botao(arch: Arquitetura, release: bool) -> Result<ExitCode, String
         {
             let _ = std::fs::write(serial, b"");
         }
+        super::incidente::no_cenario("botao", cenario.nome);
         match (cenario.rodar)(&bancada) {
             Ok(detalhe) => println!("  [botao] ok  {}: {detalhe}", cenario.nome),
             Err(motivo) => {
