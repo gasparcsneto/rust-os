@@ -5943,8 +5943,28 @@ o que é grande anda em caixa — a rodada mora numa do começo ao fim, o
 fechamento a leva consigo, a entrega devolve só a fonte —, e o fio do
 serviço orquestra em passos pequenos, um quadro de cada vez. Um caso da
 suíte mede a marca d'água da pilha de um fio novo que faz a rodada inteira,
-e exige folga de um quarto: no perfil de depuração, 42 048 bytes dos
-61 440 no x86 e 42 896 no ARM — 68% e 70%.
+e exige folga de um quarto: no perfil de depuração, 42 016 bytes dos
+61 440 no x86 e 43 872 no ARM — 68% e 71% —; no de produção, 19 856 e
+20 304, um terço.
+
+**O quadro colhido não anda por valor.** A espera de uma resposta
+(`net.recv`) faz a pilha da rede andar ao se armar, e a colheita do
+quadro que chegou roda ali, no fundo da rodada. O quadro, de até 1514
+bytes, morava dentro do que a colheita devolvia e era copiado a cada
+passo — a colheita, o `?`, o `receive` do `smoltcp`, o `Some` —; no
+perfil de depuração, a colheita e o `receive` passavam de 7 KiB de pilha
+cada um. A rodada chegou a 45 584 bytes no ARM, a 496 do limite, e uma
+resposta da bancada que chegasse bem na colheita funda — o ramo do quadro
+injetado, que devolve o `Vec` da fila ao alocador — ia mais fundo: a
+CI 490 mediu 46 256, e o caso falhou. Depende só de quando a
+resposta chega; forçada na colheita funda em todas as voltas, a rodada
+passava do limite em todas. Agora o quadro mora num buffer só, no quadro
+de pilha da volta da pilha da rede (`Pilha::sondar`), e o que o `smoltcp`
+consome é a fatia dele: o firewall confere os mesmos bytes, e a colheita
+funda ficou uns 12 KiB mais rasa. O mais fundo da rodada passou a ser a
+conferência Ed25519 no despacho do gate, que não depende de quando uma
+resposta chega; com a resposta forçada na colheita funda, a rodada passa
+em todas as voltas.
 
 ### O que a suíte, a fumaça e a bancada conferem
 
@@ -6353,10 +6373,12 @@ com ação, a não ser a recomendação do pendente a uma pessoa.
   administrador não leu. Quem confirma lê o `pending_round` no boot em que
   confirma — o desafio de `admin.execute` também é do boot e da sessão.
 - **A folga da pilha.** No perfil de depuração, a rodada inteira usa
-  68% (x86) a 70% (ARM) da pilha de um fio; no de produção, bem menos. O
+  68% (x86) a 71% (ARM) da pilha de um fio; no de produção, um terço. O
   caso da suíte exige folga de um quarto. O que a pilha de um fio tem de
-  mais fundo hoje é a da rede, sob `net.recv`; um caminho mais fundo que
-  passe a rodar no fio do serviço pede a conta de novo.
+  mais fundo hoje é a conferência Ed25519 de uma resposta, no fundo do
+  despacho do gate; a rede, sob `net.recv`, ficou uns 11 KiB acima dela
+  depois que o quadro colhido deixou de andar por valor. Um caminho mais
+  fundo que passe a rodar no fio do serviço pede a conta de novo.
 - **A régua do x86 nos tiques.** A calibração do TSC é uma medida no boot.
   Num hospedeiro muito carregado, as cinco tentativas podem passar de
   200 ppm, e a régua cai para os tiques, com 5% de deriva: o civil vence o
