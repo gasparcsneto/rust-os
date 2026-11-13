@@ -2622,15 +2622,22 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
     // segurar a trava da auditoria. Um registro que sai do anel no meio
     // continua inteiro para quem o segura — ver "O anel e a trava de quem o
     // guarda", em `politica::auditoria`.
+    //
+    // Até onde a cadeia está no journal — o que vem depois ainda é só da
+    // memória, e uma queda de energia o leva —, lido na mesma tomada: a
+    // gravada nunca passa da cadeia que se leu, e no boot, que troca a
+    // cadeia pela do journal, as duas trocam juntas — ver
+    // `persistencia::gravada_na_adocao`.
     let mut registros: alloc::vec::Vec<alloc::sync::Arc<politica::auditoria::Registro>> =
         alloc::vec::Vec::with_capacity(n);
-    crate::autorizacao::com_auditoria(|c| match depois {
-        Some(depois) => registros.extend(c.compartilhados_depois_de(depois).take(n).cloned()),
-        None => registros.extend(c.ultimos_compartilhados(n).cloned()),
-    });
-    // Até onde a cadeia está no journal: o que vem depois ainda é só da
-    // memória, e uma queda de energia o leva.
-    let gravada = crate::persistencia::auditoria_gravada();
+    let gravada = crate::autorizacao::com_auditoria(|c| {
+        match depois {
+            Some(depois) => registros.extend(c.compartilhados_depois_de(depois).take(n).cloned()),
+            None => registros.extend(c.ultimos_compartilhados(n).cloned()),
+        }
+        crate::persistencia::auditoria_gravada()
+    })
+    .unwrap_or_else(crate::persistencia::auditoria_gravada);
     w.begin_object()?;
     w.field_u64("durable_seq", gravada)?;
     w.key("records")?;
@@ -2670,12 +2677,19 @@ fn audit_tail(params: Json, w: &mut JsonWriter) -> fmt::Result {
 }
 
 fn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {
+    // A gravada na mesma tomada da cabeça — ver `audit_tail`.
     let estado = crate::autorizacao::com_auditoria(|c| {
-        (c.ultima_seq(), c.cabeca(), c.ancora(), c.guardados())
+        (
+            c.ultima_seq(),
+            c.cabeca(),
+            c.ancora(),
+            c.guardados(),
+            crate::persistencia::auditoria_gravada(),
+        )
     });
     w.begin_object()?;
     match estado {
-        Some((seq, cabeca, ancora, guardados)) => {
+        Some((seq, cabeca, ancora, guardados, gravada)) => {
             w.field_u64("seq", seq)?;
             w.field_str("head", &sigilo::hex(&cabeca))?;
             w.field_str("anchor", &sigilo::hex(&ancora))?;
@@ -2684,7 +2698,7 @@ fn audit_head(_params: Json, w: &mut JsonWriter) -> fmt::Result {
                 "capacity",
                 crate::autorizacao::CAPACIDADE_DA_AUDITORIA as u64,
             )?;
-            w.field_u64("durable_seq", crate::persistencia::auditoria_gravada())?;
+            w.field_u64("durable_seq", gravada)?;
         }
         None => w.field_str("error", "a auditoria nao foi iniciada")?,
     }

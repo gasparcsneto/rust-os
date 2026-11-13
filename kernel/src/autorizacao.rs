@@ -1128,18 +1128,80 @@ pub fn auditar_do_kernel(metodo: &str, recurso: &str, codigo: Codigo, detalhe: &
 /// Adota a cadeia que o journal refez, no boot: ela passa a ser a
 /// auditoria, e o que o boot registrou antes de ler o journal continua
 /// depois dela, com as sequências e os elos de lá. Ver
-/// [`politica::auditoria::Cadeia::continuar_com`].
+/// [`politica::auditoria::Cadeia::continuar_tirando_de`].
+///
+/// # Com a trava
+///
+/// O gate anexa à cadeia que está aí, e quem lê a lê inteira, com a trava:
+/// a do boot até a troca, a adotada depois — nenhum dos dois vê a adotada
+/// pela metade, nem um registro do boot que ela ainda não continuou. Por
+/// isso a continuação e a troca são uma tomada só. Com a trava, só o que
+/// precisa dela: tirar cada registro do anel do boot, dar a ele a sequência,
+/// o tempo, o anterior e o elo da adotada — o elo, o BLAKE2s, é a conta que
+/// fica com a trava, pela decisão C1 —, e pô-lo no anel dela. Nada se pede
+/// nem se devolve ao alocador: o registro do boot entra como está — o mesmo
+/// `Arc` —, o lugar do que sai pela ponta da adotada foi reservado aqui
+/// antes, e o que sai é solto depois de soltar a trava, com a cadeia do
+/// boot. A exceção é o registro do boot que um leitor ainda segura: ele não
+/// muda, e o da adotada é uma cópia, a única memória pedida com a trava — no
+/// boot, ninguém lê a auditoria ainda.
+///
+/// A gravada — a última sequência do journal: a adotada inteira, até ali,
+/// veio dele — troca junto, com a trava: quem lê a cadeia e a gravada na
+/// mesma tomada nunca vê a do boot com a gravada do journal, nem a adotada
+/// com a gravada de antes — ver `crate::persistencia::gravada_na_adocao`.
 pub fn adotar_auditoria(mut do_journal: Cadeia) {
+    let gravada = do_journal.ultima_seq();
+    // Fora da trava: o lugar do que a continuação solta — o que sai pela
+    // ponta do anel da adotada, cheio, e o registro do boot que alguém
+    // ainda segura —, no máximo dois por registro do boot, que tem no
+    // máximo um anel.
+    let mut soltar = Vec::with_capacity(2 * CAPACIDADE_DA_AUDITORIA);
     let a_do_boot = crate::arch::sem_interrupcoes(|| {
         let mut a = AUDITORIA.lock();
-        if let Some(boot) = a.as_ref() {
-            do_journal.continuar_com(boot);
-        }
+        let _copiados = match a.as_mut() {
+            Some(boot) => do_journal.continuar_tirando_de(boot, &mut soltar),
+            None => 0,
+        };
+        #[cfg(feature = "modo-teste")]
+        COPIADOS_NA_ADOCAO.store(_copiados as u64, Ordering::Release);
         ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
+        crate::persistencia::gravada_na_adocao(gravada);
         a.replace(do_journal)
     });
-    // A cadeia do boot, já continuada na do journal, é solta fora da trava.
+    // A cadeia do boot — com o anel já vazio — e o que a continuação soltou
+    // são soltos fora da trava.
     drop(a_do_boot);
+    drop(soltar);
+}
+
+/// Só na suíte: quantos registros do boot a última adoção copiou, em vez de
+/// tirá-los do anel — os que alguém ainda segurava.
+#[cfg(feature = "modo-teste")]
+static COPIADOS_NA_ADOCAO: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte: ver [`COPIADOS_NA_ADOCAO`].
+#[cfg(feature = "modo-teste")]
+pub fn copiados_na_adocao_de_teste() -> u64 {
+    COPIADOS_NA_ADOCAO.load(Ordering::Acquire)
+}
+
+/// Só para a suíte: a auditoria recomeça vazia — sem registro nenhum, e sem
+/// nada gravado —, como no boot antes do primeiro registro. É o boot de
+/// verdade que a reabertura da suíte imita: a cadeia que a adoção continua
+/// é a do boot, e não a de tudo o que a suíte auditou antes. A troca e a
+/// gravada vão juntas, com a trava, como na adoção; a cadeia velha é solta
+/// fora dela.
+#[cfg(feature = "modo-teste")]
+pub fn recomecar_a_auditoria_de_teste() {
+    let nova = Cadeia::nova(CAPACIDADE_DA_AUDITORIA);
+    let velha = crate::arch::sem_interrupcoes(|| {
+        let mut a = AUDITORIA.lock();
+        ULTIMO_REGISTRO.store(0, Ordering::Release);
+        crate::persistencia::gravada_na_adocao(0);
+        a.replace(nova)
+    });
+    drop(velha);
 }
 
 /// Quem está na sessão `sessao`. `Err` com o que se sabe, se a sessão não é
@@ -3217,27 +3279,43 @@ pub fn auditoria_na_mao_de_teste() -> bool {
 /// Só na suíte: quantas vezes um fio vigiado pediu memória ao alocador, e
 /// quantas devolveu, com a trava da auditoria na mão — o que nem a cópia
 /// da auditoria para o journal (ver "A cópia", em `persistencia`), nem quem
-/// anexa ao anel pelo gate, nem os relatórios que leem o anel fazem: o
-/// registro novo vem com a memória pedida antes, o que sai pela ponta é
-/// devolvido depois, e quem lê copia ponteiros para um lugar reservado
-/// antes. A exceção é o boot: [`adotar_auditoria`] continua com a trava, uma
-/// vez, a cadeia do journal com o que o boot registrou antes dela, antes de
-/// o gate atender. O alocador pergunta a cada pedido e a cada devolução,
-/// antes de tomar a trava dele, e a pergunta não aloca nem toma trava
-/// nenhuma.
+/// anexa ao anel pelo gate, nem os relatórios que leem o anel, nem o boot
+/// que adota a cadeia do journal fazem: o registro novo vem com a memória
+/// pedida antes, o que sai pela ponta é devolvido depois, quem lê copia
+/// ponteiros para um lugar reservado antes, e a adoção tira os registros do
+/// boot do anel dele em vez de copiá-los (ver [`adotar_auditoria`]). Ou,
+/// com [`vigiar_a_reposta`](alocacoes_sob_a_auditoria_de_teste::vigiar_a_reposta),
+/// com a trava da cadeia que o journal refaz no boot na mão — ver
+/// `persistencia::repor_lido_na_auditoria`. O alocador pergunta a cada
+/// pedido e a cada devolução, antes de tomar a trava dele, e a pergunta não
+/// aloca nem toma trava nenhuma.
 #[cfg(feature = "modo-teste")]
 pub mod alocacoes_sob_a_auditoria_de_teste {
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// O fio vigiado, como `id + 1`; zero, nenhum.
     static VIGIADO: AtomicU64 = AtomicU64::new(0);
     static PEDIDOS: AtomicU64 = AtomicU64::new(0);
     static DEVOLUCOES: AtomicU64 = AtomicU64::new(0);
+    /// A trava vigiada é a da cadeia que o journal refaz, e não a da
+    /// auditoria.
+    static A_REPOSTA: AtomicBool = AtomicBool::new(false);
 
-    /// Vigia o fio `fio`, com as duas contas zeradas.
+    /// Vigia o fio `fio`, com as duas contas zeradas, com a trava da
+    /// auditoria.
     pub fn vigiar(fio: u64) {
         PEDIDOS.store(0, Ordering::Release);
         DEVOLUCOES.store(0, Ordering::Release);
+        A_REPOSTA.store(false, Ordering::Release);
+        VIGIADO.store(fio + 1, Ordering::Release);
+    }
+
+    /// Vigia o fio `fio`, com as duas contas zeradas, com a trava da cadeia
+    /// que o journal refaz.
+    pub fn vigiar_a_reposta(fio: u64) {
+        PEDIDOS.store(0, Ordering::Release);
+        DEVOLUCOES.store(0, Ordering::Release);
+        A_REPOSTA.store(true, Ordering::Release);
         VIGIADO.store(fio + 1, Ordering::Release);
     }
 
@@ -3253,12 +3331,16 @@ pub mod alocacoes_sob_a_auditoria_de_teste {
         DEVOLUCOES.load(Ordering::Acquire)
     }
 
-    /// Se quem chama é o fio vigiado, com a trava da auditoria na mão.
+    /// Se quem chama é o fio vigiado, com a trava vigiada na mão.
     fn vigiado_com_a_trava() -> bool {
         let vigiado = VIGIADO.load(Ordering::Relaxed);
         vigiado != 0
             && vigiado == crate::fios::id_atual_sem_trava() + 1
-            && super::AUDITORIA.na_mao_deste_nucleo()
+            && if A_REPOSTA.load(Ordering::Relaxed) {
+                crate::persistencia::reposta_na_mao_de_teste()
+            } else {
+                super::AUDITORIA.na_mao_deste_nucleo()
+            }
     }
 
     /// Chamada pelo alocador a cada pedido de memória.

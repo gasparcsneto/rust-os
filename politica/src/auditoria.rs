@@ -73,10 +73,19 @@
 //! sai dali: ele é o do anterior, e o anterior só existe quando o registro
 //! de antes entrou —, e devolve o registro que saiu pela ponta, para quem
 //! anexa soltá-lo depois de soltar a trava. Assim anexa o gate.
-//! [`Cadeia::anexar`] e [`Cadeia::continuar_com`] pedem e devolvem a
-//! memória ali mesmo — no kernel, só o boot continua assim a cadeia do
-//! journal, uma vez, antes de o gate atender. A ordem, os elos e o formato
-//! são os de sempre: o que muda é só onde a memória é pedida e devolvida.
+//!
+//! O boot também: a cadeia que o journal refaz recebe cada registro já
+//! montado ([`Lido`], pelo [`Cadeia::repor_lido`]) e cada lacuna trocando o
+//! anel por um vazio reservado antes ([`Anel`], pelo
+//! [`Cadeia::pular_trocando`]); e a adoção continua a cadeia do journal com
+//! a do boot tirando dela os registros em vez de copiá-los
+//! ([`Cadeia::continuar_tirando_de`]) — o que sai pela ponta, ou o que
+//! alguém ainda segura, vai para um vetor reservado antes, e é solto
+//! depois da trava. [`Cadeia::anexar`], [`Cadeia::repor`],
+//! [`Cadeia::pular`] e [`Cadeia::continuar_com`] pedem e devolvem a memória
+//! ali mesmo: o kernel não os usa mais com a trava, e eles ficam como a
+//! referência que os testes comparam. A ordem, os elos e o formato são os
+//! de sempre: o que muda é só onde a memória é pedida e devolvida.
 //!
 //! # O tempo não volta
 //!
@@ -697,6 +706,54 @@ impl Preparado {
     }
 }
 
+/// Um registro da auditoria lido do journal, com a memória dele já pedida —
+/// fora da trava de quem refaz a cadeia —, ainda sem o anterior e o elo,
+/// que só a cadeia dá. O par de [`Cadeia::repor_lido`].
+///
+/// O detalhe vem como estava no journal, sem corte: a reposição recusa o
+/// que passa do teto, e não o conserta — consertar daria outro elo.
+#[derive(Debug)]
+pub struct Lido {
+    seq: u64,
+    /// Único: o campo é privado, e nada aqui o clona antes de ele entrar no
+    /// anel.
+    registro: Arc<Registro>,
+}
+
+impl Lido {
+    /// O registro `seq` do journal, com o `evento` dele.
+    pub fn novo(seq: u64, evento: Evento) -> Lido {
+        Lido {
+            seq,
+            registro: Arc::new(Registro {
+                seq: 0,
+                evento,
+                anterior: GENESE,
+                elo: GENESE,
+            }),
+        }
+    }
+}
+
+/// Um anel vazio, com o lugar de uma cadeia reservado: o que
+/// [`Cadeia::pular_trocando`] põe no lugar do anel que uma lacuna esvazia,
+/// e o anel esvaziado que volta dela.
+#[derive(Debug)]
+pub struct Anel(VecDeque<Arc<Registro>>);
+
+impl Anel {
+    /// Um anel vazio com o lugar de `capacidade` registros reservado — o
+    /// de [`Cadeia::nova`].
+    pub fn vazio(capacidade: usize) -> Anel {
+        Anel(VecDeque::with_capacity(capacidade.max(1)))
+    }
+
+    /// Quantos registros ele guarda.
+    pub fn guardados(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// A cadeia, num anel.
 pub struct Cadeia {
     /// Cada registro num [`Arc`], que nunca muda depois de entrar: quem lê
@@ -809,6 +866,29 @@ impl Cadeia {
         Ok(())
     }
 
+    /// [`Cadeia::repor`] com o registro montado fora: as mesmas
+    /// conferências, na mesma ordem, e o mesmo anexar. Nada aqui pede
+    /// memória; o registro que sai pela ponta, com o anel cheio, volta a
+    /// quem repôs, para ele o soltar depois de soltar a trava. Recusado, o
+    /// lido volta também, inteiro, e a cadeia não muda.
+    pub fn repor_lido(
+        &mut self,
+        lido: Lido,
+    ) -> Result<Option<Arc<Registro>>, (&'static str, Lido)> {
+        if lido.seq != self.proximo_seq {
+            return Err(("registro da auditoria fora de sequencia", lido));
+        }
+        if lido.registro.evento.ts_ms < self.ultimo_ts {
+            return Err(("registro da auditoria com o tempo voltando", lido));
+        }
+        if lido.registro.evento.detalhe.len() > MAIOR_DETALHE {
+            return Err(("registro da auditoria com detalhe maior que o teto", lido));
+        }
+        // No teto: o `Preparado` só não cortaria nada — e o `Arc` é único.
+        let (_, saiu) = self.anexar_preparado(Preparado(lido.registro));
+        Ok(saiu)
+    }
+
     /// Repõe uma lacuna lida do journal: os registros de `l.primeira` a
     /// `l.ultima` não foram gravados, e a cadeia continua do elo do último
     /// deles. A janela recomeça ali, como depois da âncora do anel.
@@ -820,6 +900,29 @@ impl Cadeia {
         self.ancora = l.elo;
         self.proximo_seq = l.ultima + 1;
         Ok(())
+    }
+
+    /// [`Cadeia::pular`] sem devolver memória: o anel que a lacuna esvazia
+    /// troca de lugar com o `vazio`, e volta a quem pulou, com os registros
+    /// que ainda tinha, para ele os soltar depois de soltar a trava. Um
+    /// `vazio` que não está vazio, ou sem o lugar da cadeia reservado, não
+    /// entra — o anel deixaria de ter o lugar reservado, e anexar o faria
+    /// crescer —: o anel é esvaziado ali mesmo, como em [`Cadeia::pular`],
+    /// e o `vazio` volta como veio. Recusada, a lacuna não muda nada, e o
+    /// `vazio` volta também.
+    pub fn pular_trocando(&mut self, l: Lacuna, vazio: Anel) -> Result<Anel, (&'static str, Anel)> {
+        if l.primeira != self.proximo_seq || l.ultima < l.primeira {
+            return Err(("lacuna da auditoria fora de sequencia", vazio));
+        }
+        let Anel(mut anel) = vazio;
+        if anel.is_empty() && anel.capacity() >= self.capacidade {
+            core::mem::swap(&mut self.registros, &mut anel);
+        } else {
+            self.registros.clear();
+        }
+        self.ancora = l.elo;
+        self.proximo_seq = l.ultima + 1;
+        Ok(Anel(anel))
     }
 
     /// O que falta gravar depois da sequência `gravada`: uma lacuna, se o
@@ -896,6 +999,48 @@ impl Cadeia {
         }
     }
 
+    /// Acrescenta nesta cadeia, na ordem, os registros que a `outra` tem no
+    /// anel — cada um com a sequência, o anterior, o elo e o tempo daqui: a
+    /// mesma conta de [`Cadeia::continuar_com`] —, tirando-os da outra em
+    /// vez de copiá-los. Devolve quantos precisaram de cópia.
+    ///
+    /// # Sem pedir nem devolver memória
+    ///
+    /// Um registro da outra que ninguém mais segura entra aqui como está —
+    /// o mesmo `Arc`, com a sequência, o tempo, o anterior e o elo daqui —,
+    /// e ninguém o vê mudar. O que alguém ainda segura — o ponteiro de um
+    /// leitor, uma referência fraca — não muda: o daqui é uma cópia, e a
+    /// cópia pede memória, o único caso. O que sai pela ponta deste anel
+    /// cheio, e o registro da outra que foi copiado, vão para `soltar`,
+    /// para quem continua os soltar depois de soltar a trava; sem lugar
+    /// reservado em `soltar`, são soltos ali mesmo — `soltar` nunca cresce
+    /// aqui.
+    ///
+    /// A outra fica com o anel vazio, e o resto como estava: a âncora, a
+    /// próxima sequência e o tempo dela não dizem mais nada.
+    pub fn continuar_tirando_de(
+        &mut self,
+        outra: &mut Cadeia,
+        soltar: &mut Vec<Arc<Registro>>,
+    ) -> usize {
+        let mut copiados = 0;
+        while let Some(mut r) = outra.registros.pop_front() {
+            if Arc::get_mut(&mut r).is_none() {
+                let copia = Arc::new(Registro::clone(&r));
+                guardar_para_soltar(soltar, r);
+                r = copia;
+                copiados += 1;
+            }
+            // O detalhe já está no teto — o registro entrou na outra por um
+            // `Preparado` —, e o `Arc` é único.
+            let (_, saiu) = self.anexar_preparado(Preparado(r));
+            if let Some(s) = saiu {
+                guardar_para_soltar(soltar, s);
+            }
+        }
+        copiados
+    }
+
     /// Os últimos `n` registros, do mais antigo ao mais novo.
     pub fn ultimos(&self, n: usize) -> impl Iterator<Item = &Registro> {
         self.ultimos_compartilhados(n).map(|r| &**r)
@@ -926,6 +1071,15 @@ impl Cadeia {
     /// número do primeiro registro que não confere.
     pub fn verificar(&self) -> Result<[u8; 32], u64> {
         verificar(self.ancora, self.ultimos(usize::MAX))
+    }
+}
+
+/// Guarda `r` em `soltar` se há lugar reservado; senão, o solta ali.
+fn guardar_para_soltar(soltar: &mut Vec<Arc<Registro>>, r: Arc<Registro>) {
+    if soltar.len() < soltar.capacity() {
+        soltar.push(r);
+    } else {
+        drop(r);
     }
 }
 
@@ -2171,6 +2325,332 @@ mod testes {
             }
             assert_eq!(c.guardados(), 1);
             assert_eq!(c.verificar(), Ok(c.cabeca()));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // A reconstrução do boot sem memória pedida nem devolvida com a trava:
+    // `continuar_tirando_de`, `repor_lido` e `pular_trocando`, cada uma
+    // contra a conta de antes — `continuar_com`, `repor` e `pular` —, que
+    // fica como oráculo.
+    // -----------------------------------------------------------------
+
+    /// Os registros da janela, copiados: o que se compara de duas cadeias.
+    fn janela(c: &Cadeia) -> Vec<Registro> {
+        c.ultimos(usize::MAX).cloned().collect()
+    }
+
+    /// As duas cadeias são a mesma: a janela registro a registro — a
+    /// sequência, o evento, o anterior e o elo —, a âncora, a cabeça, a
+    /// próxima sequência e o tempo do último.
+    fn mesma(a: &Cadeia, b: &Cadeia, caso: &str) {
+        assert_eq!(janela(a), janela(b), "{caso}: a janela");
+        assert_eq!(a.ancora(), b.ancora(), "{caso}: a ancora");
+        assert_eq!(a.cabeca(), b.cabeca(), "{caso}: a cabeca");
+        assert_eq!(a.ultima_seq(), b.ultima_seq(), "{caso}: a ultima");
+        assert_eq!(a.ultimo_ts, b.ultimo_ts, "{caso}: o tempo");
+        assert_eq!(a.verificar(), Ok(a.cabeca()), "{caso}: a de antes confere");
+        assert_eq!(b.verificar(), Ok(b.cabeca()), "{caso}: a nova confere");
+    }
+
+    /// Uma cadeia de `capacidade`, com `n` registros a partir do tempo
+    /// `base`, e uma lacuna depois dos `antes_da_lacuna` primeiros, se
+    /// houver.
+    fn montada(capacidade: usize, n: u64, base: u64, lacuna: Option<u64>) -> Cadeia {
+        let mut c = Cadeia::nova(capacidade);
+        for i in 0..n {
+            if lacuna == Some(i) {
+                let primeira = c.ultima_seq() + 1;
+                c.pular(Lacuna {
+                    primeira,
+                    ultima: primeira + 6,
+                    elo: [0xA5; 32],
+                })
+                .unwrap();
+            }
+            let mut e = variado(i);
+            e.ts_ms = base + i;
+            c.anexar(e);
+        }
+        c
+    }
+
+    /// `continuar_tirando_de` faz a cadeia de `continuar_com`, em toda
+    /// combinação de anel do journal — vazio, com um, pela metade, cheio,
+    /// que já deu a volta, depois de uma lacuna — e da cadeia do boot —
+    /// vazia, com um, pela metade, cheia, que deu a volta —, com o tempo do
+    /// boot abaixo do do journal (o anel o sobe) e acima. O que sai pela
+    /// ponta vai para `soltar`, na ordem, e com o resto da janela se
+    /// encadeia na âncora de antes; a cadeia do boot fica com o anel vazio;
+    /// e cada registro que ninguém segurava entrou como estava — o mesmo
+    /// `Arc` —, sem cópia.
+    #[test]
+    fn continuar_tirando_e_a_conta_de_continuar_com() {
+        for capacidade in [1usize, 3, 8] {
+            let c = capacidade as u64;
+            for n_journal in [0, 1, c / 2 + 1, c, 2 * c + 1] {
+                for lacuna in [None, Some(n_journal / 2)] {
+                    if lacuna.is_some() && n_journal == 0 {
+                        continue;
+                    }
+                    for n_boot in [0, 1, c / 2 + 1, c, 3 * c] {
+                        for base_boot in [0u64, 1_000_000] {
+                            let caso = alloc::format!(
+                                "capacidade {capacidade}, journal {n_journal}, lacuna {lacuna:?}, boot {n_boot}, tempo {base_boot}"
+                            );
+                            let mut oraculo = montada(capacidade, n_journal, 500, lacuna);
+                            let mut nova = montada(capacidade, n_journal, 500, lacuna);
+                            let boot_oraculo = montada(capacidade, n_boot, base_boot, None);
+                            let mut boot = montada(capacidade, n_boot, base_boot, None);
+                            let ancora_antes = nova.ancora();
+                            let antes: Vec<Registro> = janela(&nova);
+                            let ponteiros: Vec<*const Registro> =
+                                boot.registros.iter().map(Arc::as_ptr).collect();
+                            let mut soltar = Vec::with_capacity(2 * capacidade);
+                            oraculo.continuar_com(&boot_oraculo);
+                            let copiados = nova.continuar_tirando_de(&mut boot, &mut soltar);
+                            assert_eq!(copiados, 0, "{caso}: ninguem segurava nada");
+                            mesma(&oraculo, &nova, &caso);
+                            assert_eq!(boot.guardados(), 0, "{caso}: a do boot ficou com o anel");
+                            // Os que saíram pela ponta: os primeiros da janela
+                            // de antes e da continuada, na ordem — com o resto
+                            // da janela, a cadeia inteira desde a âncora.
+                            let saidos =
+                                (antes.len() + boot_oraculo.guardados()).saturating_sub(capacidade);
+                            assert_eq!(soltar.len(), saidos, "{caso}: os que sairam");
+                            assert_eq!(
+                                verificar(
+                                    ancora_antes,
+                                    soltar.iter().map(|r| &**r).chain(nova.ultimos(usize::MAX))
+                                ),
+                                Ok(nova.cabeca()),
+                                "{caso}: os que sairam e a janela se encadeiam"
+                            );
+                            // Cada registro do boot que ficou na janela, ou que
+                            // saiu pela ponta, é o mesmo `Arc` de antes.
+                            let depois: Vec<*const Registro> = soltar
+                                .iter()
+                                .map(Arc::as_ptr)
+                                .chain(nova.registros.iter().map(Arc::as_ptr))
+                                .collect();
+                            for p in &ponteiros {
+                                assert!(
+                                    depois.contains(p),
+                                    "{caso}: um registro do boot foi copiado"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// O registro da cadeia do boot que alguém segura — um ponteiro forte,
+    /// ou só uma referência fraca — não muda: o da cadeia nova é uma cópia,
+    /// conta como copiado, e o original vai para `soltar`, inteiro. Quem
+    /// segurava continua com o que tinha; a referência fraca o alcança
+    /// enquanto `soltar` o segura, e não mais depois.
+    #[test]
+    fn o_registro_que_alguem_segura_e_copiado_e_nao_muda() {
+        let mut oraculo = montada(8, 5, 500, None);
+        let mut nova = montada(8, 5, 500, None);
+        let boot_oraculo = montada(8, 4, 0, None);
+        let mut boot = montada(8, 4, 0, None);
+        let segurado: Arc<Registro> = boot.registros[1].clone();
+        let fraco = Arc::downgrade(&boot.registros[2]);
+        let antes_segurado = Registro::clone(&segurado);
+        let antes_fraco = Registro::clone(&fraco.upgrade().unwrap());
+        let mut soltar = Vec::with_capacity(16);
+        oraculo.continuar_com(&boot_oraculo);
+        let copiados = nova.continuar_tirando_de(&mut boot, &mut soltar);
+        assert_eq!(copiados, 2);
+        mesma(&oraculo, &nova, "dois segurados");
+        assert_eq!(*segurado, antes_segurado, "o segurado mudou");
+        assert!(!nova.registros.iter().any(|r| Arc::ptr_eq(r, &segurado)));
+        assert!(soltar.iter().any(|r| Arc::ptr_eq(r, &segurado)));
+        assert_eq!(
+            *fraco.upgrade().unwrap(),
+            antes_fraco,
+            "o da referencia fraca mudou"
+        );
+        drop(soltar);
+        drop(boot);
+        assert!(
+            fraco.upgrade().is_none(),
+            "o original ficou preso em algum lugar"
+        );
+    }
+
+    /// Sem lugar reservado em `soltar`, o que sai pela ponta e o original
+    /// copiado são soltos ali mesmo: `soltar` não cresce, e a cadeia é a
+    /// mesma.
+    #[test]
+    fn soltar_sem_lugar_nao_cresce() {
+        let mut oraculo = montada(3, 3, 500, None);
+        let mut nova = montada(3, 3, 500, None);
+        let boot_oraculo = montada(3, 3, 0, None);
+        let mut boot = montada(3, 3, 0, None);
+        let segurado = boot.registros[0].clone();
+        let mut soltar = Vec::new();
+        oraculo.continuar_com(&boot_oraculo);
+        assert_eq!(nova.continuar_tirando_de(&mut boot, &mut soltar), 1);
+        mesma(&oraculo, &nova, "sem lugar");
+        assert_eq!(soltar.capacity(), 0);
+        drop(segurado);
+    }
+
+    /// Os casos de `repor`, para `repor_lido`: os eventos de todos os
+    /// tamanhos, um a um, com o anel dando a volta; e cada recusa — fora de
+    /// sequência, o tempo voltando, o detalhe acima do teto, e duas e três
+    /// delas juntas —, com a mesma palavra, na mesma ordem de conferência,
+    /// sem mudar a cadeia, e o lido de volta, inteiro.
+    #[test]
+    fn repor_lido_e_a_conta_de_repor() {
+        for capacidade in [1usize, 4, 12] {
+            let mut oraculo = Cadeia::nova(capacidade);
+            let mut nova = Cadeia::nova(capacidade);
+            let ancora_antes = nova.ancora();
+            let mut saidos = Vec::new();
+            for (i, mut e) in de_todos_os_tamanhos().into_iter().enumerate() {
+                e.ts_ms = 100 + i as u64;
+                let seq = i as u64 + 1;
+                let caso = alloc::format!("capacidade {capacidade}, registro {seq}");
+                assert_eq!(oraculo.repor(seq, e.clone()), Ok(()), "{caso}");
+                match nova.repor_lido(Lido::novo(seq, e)) {
+                    Ok(saiu) => saidos.extend(saiu),
+                    Err((m, _)) => panic!("{caso}: {m}"),
+                }
+                mesma(&oraculo, &nova, &caso);
+            }
+            assert_eq!(
+                verificar(
+                    ancora_antes,
+                    saidos.iter().map(|r| &**r).chain(nova.ultimos(usize::MAX))
+                ),
+                Ok(nova.cabeca()),
+                "capacidade {capacidade}: os que sairam e a janela se encadeiam"
+            );
+            // As recusas, cada uma e juntas.
+            let proxima = nova.ultima_seq() + 1;
+            let tempo = nova.ultimo_ts;
+            let mut acima = evento(0);
+            acima.ts_ms = tempo;
+            acima.detalhe = "x".repeat(MAIOR_DETALHE + 1);
+            let mut volta = evento(0);
+            volta.ts_ms = tempo - 1;
+            let mut volta_e_acima = acima.clone();
+            volta_e_acima.ts_ms = tempo - 1;
+            let mut no_teto = evento(0);
+            no_teto.ts_ms = tempo;
+            no_teto.detalhe = "y".repeat(MAIOR_DETALHE);
+            for (seq, e) in [
+                (proxima + 1, no_teto.clone()),
+                (proxima - 1, no_teto.clone()),
+                (proxima, volta.clone()),
+                (proxima, acima.clone()),
+                (proxima, volta_e_acima.clone()),
+                (proxima + 3, volta.clone()),
+                (proxima + 3, acima.clone()),
+                (proxima + 3, volta_e_acima.clone()),
+            ] {
+                let esperado = oraculo.repor(seq, e.clone()).unwrap_err();
+                let antes = janela(&nova);
+                match nova.repor_lido(Lido::novo(seq, e.clone())) {
+                    Ok(_) => panic!("repor_lido aceitou o que repor recusa: {esperado}"),
+                    Err((m, lido)) => {
+                        assert_eq!(m, esperado);
+                        assert_eq!(lido.seq, seq);
+                        assert_eq!(lido.registro.evento, e, "o lido voltou mudado");
+                    }
+                }
+                assert_eq!(janela(&nova), antes, "a recusa mudou a cadeia");
+                mesma(&oraculo, &nova, esperado);
+            }
+            // E no teto, na sequência e no tempo, entra.
+            assert_eq!(oraculo.repor(proxima, no_teto.clone()), Ok(()));
+            assert!(nova.repor_lido(Lido::novo(proxima, no_teto)).is_ok());
+            mesma(&oraculo, &nova, "no teto");
+        }
+    }
+
+    /// `pular_trocando` deixa a cadeia de `pular` — a âncora no elo da
+    /// lacuna, a próxima sequência depois dela, a janela vazia — e o que se
+    /// anexa depois é o mesmo; o anel que volta tem os registros que a
+    /// cadeia tinha, e a cadeia fica com o lugar inteiro reservado. A
+    /// lacuna fora de sequência é recusada pelas duas, sem mudar nada, e o
+    /// vazio volta; um "vazio" com registros, ou com menos lugar, não
+    /// entra — o anel é esvaziado ali, e ele volta como veio.
+    #[test]
+    fn pular_trocando_e_a_conta_de_pular() {
+        for capacidade in [1usize, 5, 16] {
+            for n in [0u64, 1, capacidade as u64, 3 * capacidade as u64] {
+                let caso = alloc::format!("capacidade {capacidade}, {n} registros");
+                let mut oraculo = montada(capacidade, n, 0, None);
+                let mut nova = montada(capacidade, n, 0, None);
+                let tinha = nova.guardados();
+                let l = Lacuna {
+                    primeira: nova.ultima_seq() + 1,
+                    ultima: nova.ultima_seq() + 9,
+                    elo: [0x3C; 32],
+                };
+                oraculo.pular(l).unwrap();
+                let velho = nova.pular_trocando(l, Anel::vazio(capacidade)).unwrap();
+                assert_eq!(velho.guardados(), tinha, "{caso}: o anel que voltou");
+                assert!(nova.registros.capacity() >= capacidade, "{caso}: o lugar");
+                mesma(&oraculo, &nova, &caso);
+                for i in 0..2 * capacidade as u64 {
+                    oraculo.anexar(variado(i + 50));
+                    nova.anexar(variado(i + 50));
+                }
+                mesma(&oraculo, &nova, &caso);
+                // A lacuna fora de sequência, e a que acaba antes de começar.
+                for ruim in [
+                    Lacuna {
+                        primeira: l.ultima + 1,
+                        ..l
+                    },
+                    Lacuna {
+                        primeira: nova.ultima_seq() + 2,
+                        ultima: nova.ultima_seq() + 3,
+                        elo: l.elo,
+                    },
+                    Lacuna {
+                        primeira: nova.ultima_seq() + 1,
+                        ultima: nova.ultima_seq(),
+                        elo: l.elo,
+                    },
+                ] {
+                    let esperado = oraculo.pular(ruim).unwrap_err();
+                    match nova.pular_trocando(ruim, Anel::vazio(capacidade)) {
+                        Ok(_) => panic!("{caso}: pular_trocando aceitou o que pular recusa"),
+                        Err((m, vazio)) => {
+                            assert_eq!(m, esperado);
+                            assert_eq!(vazio.guardados(), 0);
+                        }
+                    }
+                    mesma(&oraculo, &nova, &caso);
+                }
+            }
+        }
+        // Um "vazio" que não serve: com registros, ou com menos lugar.
+        for (ruim, caso) in [
+            (Anel(montada(4, 2, 0, None).registros), "com registros"),
+            (Anel(VecDeque::new()), "sem lugar"),
+        ] {
+            let mut oraculo = montada(4, 6, 0, None);
+            let mut nova = montada(4, 6, 0, None);
+            let l = Lacuna {
+                primeira: 7,
+                ultima: 7,
+                elo: [1; 32],
+            };
+            let veio = ruim.guardados();
+            oraculo.pular(l).unwrap();
+            let voltou = nova.pular_trocando(l, ruim).unwrap();
+            assert_eq!(voltou.guardados(), veio, "{caso}: o vazio voltou mudado");
+            assert!(nova.registros.capacity() >= 4, "{caso}: o lugar");
+            mesma(&oraculo, &nova, caso);
         }
     }
 }

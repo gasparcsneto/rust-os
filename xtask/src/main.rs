@@ -4501,6 +4501,7 @@ const DONOS_DA_AUDITORIA: &[(&str, &str, &[&str])] = &[
             "pub fn adotar_auditoria(",
             "pub unsafe fn destravar(",
             "pub fn auditoria_na_mao_de_teste(",
+            "pub fn recomecar_a_auditoria_de_teste(",
             "pub mod alocacoes_sob_a_auditoria_de_teste ",
         ],
     ),

@@ -202,9 +202,55 @@ fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
     crate::oleoduto::avancou();
 }
 
+/// A gravada da cadeia que o boot adota: a última sequência do journal.
+/// Só [`crate::autorizacao::adotar_auditoria`] a chama — e, na suíte, o
+/// gancho que recomeça a auditoria —, com a trava da auditoria na mão, na
+/// mesma tomada em que troca a cadeia — quem lê a
+/// cadeia e a gravada com a trava vê as duas da mesma cadeia: a do boot,
+/// com a gravada de antes, ou a adotada, com a do journal. Gravada antes da
+/// troca, a do journal ficava ao lado da cadeia do boot, e os registros do
+/// boot — que nenhum journal tem — se diziam no disco. O elo e o aviso ao
+/// caminho da auditoria vêm depois, em [`auditoria_foi_gravada`]: o elo só
+/// a compactação o lê, com a ordem das gravações, que o boot tem.
+pub(crate) fn gravada_na_adocao(ate: u64) {
+    AUDITORIA_GRAVADA.store(ate, Ordering::Release);
+}
+
 /// A cadeia que o journal refaz no boot, enquanto ele é lido. Ela só vira
 /// a auditoria com o journal confirmado pela âncora — ver [`abrir`].
 static REPOSTA: Mutex<Option<Cadeia>> = Mutex::new(None);
+
+/// Só para a suíte: este núcleo tem a trava da cadeia que o journal refaz
+/// na mão agora — pela conferência da ordem das travas, sem tomá-la. É a
+/// pergunta da vigia das alocações — ver
+/// `autorizacao::alocacoes_sob_a_auditoria_de_teste`.
+#[cfg(feature = "modo-teste")]
+pub fn reposta_na_mao_de_teste() -> bool {
+    REPOSTA.na_mao_deste_nucleo()
+}
+
+/// Só para a suíte: roda `f` com a trava da cadeia que o journal refaz na
+/// mão — o controle da vigia das alocações.
+#[cfg(feature = "modo-teste")]
+pub fn com_a_reposta_de_teste<R>(f: impl FnOnce() -> R) -> R {
+    crate::arch::sem_interrupcoes(|| {
+        let _trava = REPOSTA.lock();
+        f()
+    })
+}
+
+/// Só na suíte: o que o boot chama logo antes de adotar a cadeia que o
+/// journal refez — já confirmado pela âncora, com a cadeia tirada de
+/// [`REPOSTA`] e a ordem das gravações na mão. É onde a suíte olha a
+/// auditoria que o gate mostra no meio da abertura.
+#[cfg(feature = "modo-teste")]
+static ANTES_DA_ADOCAO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: ver [`ANTES_DA_ADOCAO`].
+#[cfg(feature = "modo-teste")]
+pub fn antes_da_adocao_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *ANTES_DA_ADOCAO.lock() = f);
+}
 
 /// O que o journal disse da selagem, juntado enquanto ele é lido no boot.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1042,9 +1088,12 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     // Um registro de cada vez: o journal pode ocupar a região inteira, e
     // o heap do kernel é bem menor que ela. Do caminho fica só o que o
     // boot precisa — a instalação, o último boot, quantos de auditoria.
-    crate::arch::sem_interrupcoes(|| {
-        *REPOSTA.lock() = Some(Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA));
-    });
+    //
+    // A cadeia nasce fora da trava: ela reserva o lugar do anel cheio. Se
+    // já havia uma — na suíte, que reabre —, a velha é solta fora também.
+    let nova = Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
+    let velha = crate::arch::sem_interrupcoes(|| REPOSTA.lock().replace(nova));
+    drop(velha);
     let mut instalacao = None;
     let mut boots = 0u64;
     let mut compactacoes = 0u64;
@@ -1286,10 +1335,17 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     let novo = escritor.ancora() == valor && lido.quantos == 0;
     // O journal está confirmado pela âncora: a cadeia que ele refez vira a
     // auditoria, e o que este boot registrou até aqui continua depois
-    // dela — e vai no registro de boot, logo abaixo.
+    // dela — e vai no registro de boot, logo abaixo. A gravada troca junto
+    // com a cadeia, com a trava da auditoria — ver [`gravada_na_adocao`] —;
+    // o elo do último gravado e o aviso ao caminho da auditoria, depois.
     if let Some(reposta) = crate::arch::sem_interrupcoes(|| REPOSTA.lock().take()) {
-        auditoria_foi_gravada(reposta.ultima_seq(), reposta.cabeca());
+        let (ate, elo) = (reposta.ultima_seq(), reposta.cabeca());
+        #[cfg(feature = "modo-teste")]
+        if let Some(f) = crate::arch::sem_interrupcoes(|| *ANTES_DA_ADOCAO.lock()) {
+            f();
+        }
         crate::autorizacao::adotar_auditoria(reposta);
+        auditoria_foi_gravada(ate, elo);
     }
     com(|p| {
         p.aberta = Some(Aberta {
@@ -3916,15 +3972,50 @@ fn primeiro_campo(conteudo: &[u8]) -> Option<&[u8]> {
     estado::ler_campos(conteudo).ok()?.first().copied()
 }
 
-/// Repõe uma entrada da auditoria na cadeia que o journal refaz. Fora do
+/// Repõe um registro da auditoria na cadeia que o journal refaz. Fora do
 /// boot não há cadeia sendo refeita, e a entrada só é conferida.
-fn repor_na_auditoria(
-    f: impl FnOnce(&mut Cadeia) -> Result<(), &'static str>,
-) -> Result<(), &'static str> {
-    crate::arch::sem_interrupcoes(|| match REPOSTA.lock().as_mut() {
-        Some(c) => f(c),
-        None => Ok(()),
-    })
+///
+/// # Com a trava, só a conta
+///
+/// A trava da cadeia refeita é tomada com as interrupções mascaradas, como
+/// toda trava, uma vez por registro do journal — milhares num journal
+/// cheio. Com ela, só o que precisa da cadeia: as conferências da
+/// reposição, o elo e o lugar no anel. A memória do registro — o `Arc` dele
+/// e os textos, que a decodificação já trouxe — é pedida antes
+/// ([`politica::auditoria::Lido`]); o que sai pela ponta do anel cheio, ou
+/// o lido que a reposição recusa, volta daqui e é solto depois. Era a
+/// devolução do que saía pela ponta, com a trava, que fazia a reposição de
+/// um journal cheio mascarar as interrupções por mais tempo.
+fn repor_lido_na_auditoria(lido: politica::auditoria::Lido) -> Result<(), &'static str> {
+    let (r, saiu, recusado) = crate::arch::sem_interrupcoes(|| match REPOSTA.lock().as_mut() {
+        Some(c) => match c.repor_lido(lido) {
+            Ok(saiu) => (Ok(()), saiu, None),
+            Err((motivo, lido)) => (Err(motivo), None, Some(lido)),
+        },
+        None => (Ok(()), None, Some(lido)),
+    });
+    drop((saiu, recusado));
+    r
+}
+
+/// Repõe uma lacuna — ou a marca de uma base — na cadeia que o journal
+/// refaz. Fora do boot, a entrada só é conferida.
+///
+/// A lacuna esvazia o anel, e o anel podia ter um anel inteiro de
+/// registros: com a trava, ele só troca de lugar com um vazio, pedido aqui
+/// antes, e os registros dele são soltos depois — ver
+/// [`politica::auditoria::Cadeia::pular_trocando`].
+fn pular_na_auditoria(l: politica::auditoria::Lacuna) -> Result<(), &'static str> {
+    let vazio = politica::auditoria::Anel::vazio(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
+    let (r, solto) = crate::arch::sem_interrupcoes(|| match REPOSTA.lock().as_mut() {
+        Some(c) => match c.pular_trocando(l, vazio) {
+            Ok(velho) => (Ok(()), velho),
+            Err((motivo, vazio)) => (Err(motivo), vazio),
+        },
+        None => (Ok(()), vazio),
+    });
+    drop(solto);
+    r
 }
 
 fn texto(b: &[u8]) -> Result<&str, &'static str> {
@@ -4031,7 +4122,7 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
         }
         (tipo::AUDITORIA_EVENTO, [r]) => {
             let (seq, evento) = politica::auditoria::decodificar(r)?;
-            repor_na_auditoria(|c| c.repor(seq, evento))
+            repor_lido_na_auditoria(politica::auditoria::Lido::novo(seq, evento))
         }
         (tipo::AUDITORIA_COMPACTADA, [primeira, ultima, elo]) => {
             let l = politica::auditoria::Lacuna {
@@ -4039,7 +4130,7 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
                 ultima: u64_de(ultima)?,
                 elo: chave(elo)?,
             };
-            repor_na_auditoria(|c| c.pular(l))
+            pular_na_auditoria(l)
         }
         (tipo::AUDITORIA_HISTORICA, [r]) => politica::auditoria::decodificar(r).map(|_| ()),
         (tipo::MENSAGEM_LAPIDE, [id, de, para, estado, versao]) => {
@@ -4170,7 +4261,7 @@ pub(crate) fn reaplicar_entrada(e: &[u8]) -> Result<(), &'static str> {
                 l.primeira,
                 l.ultima
             );
-            repor_na_auditoria(|c| c.pular(l))
+            pular_na_auditoria(l)
         }
         _ => Err("entrada de registro desconhecida, ou com campos errados"),
     }
