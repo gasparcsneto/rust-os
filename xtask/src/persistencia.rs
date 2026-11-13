@@ -1129,6 +1129,10 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
         rodar: as_quedas_na_auditoria,
     },
     Cenario {
+        nome: "a queda em cada fronteira do registro de boot: a cadeia que o boot continuou vale exatamente quando ele esta no disco, o gravado antes volta igual, e a cadeia continua",
+        rodar: as_quedas_no_registro_de_boot,
+    },
+    Cenario {
         nome: "a queda no meio da coleta da auditoria sob carga: o gravado volta igual, sem buraco nem repeticao, e a cadeia continua",
         rodar: as_quedas_na_coleta_sob_carga,
     },
@@ -4831,7 +4835,7 @@ fn escrever_setor_do_estado(disco: &Path, setor: u64, bytes: &[u8; 512]) -> Resu
 /// gravação de um tipo. Ver `diario::estado::tipo`.
 pub(crate) mod tipo {
     pub use diario::estado::tipo::{
-        ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, MENSAGENS, OPERACAO, SELAGEM,
+        ABERTURA, ARMAZEM, AUDITORIA, BASE_FIM, BOOT, MENSAGENS, OPERACAO, SELAGEM,
     };
 }
 
@@ -6027,6 +6031,131 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
     Ok(format!(
         "{} quedas: o registro de auditoria vale exatamente quando esta no disco, e a cadeia continua",
         QUEDAS_NA_AUDITORIA.len()
+    ))
+}
+
+/// A queda em cada fronteira do registro de boot — o primeiro que um boot
+/// grava, logo depois de adotar a cadeia que o journal refez: ele leva a
+/// auditoria que o boot continuou nela, do `policy.load` dele em diante. É
+/// a ponta da reconstrução que vai ao disco. O boot seguinte sobe com a
+/// persistência de pé; a cadeia do boot que caiu está nela exatamente
+/// quando o registro está no disco — o `policy.load` dele entre o do boot
+/// de antes e o de agora, gravado, ou nenhum —; o que estava gravado antes
+/// da queda volta com o mesmo número e o mesmo elo; a cadeia segue sem
+/// buraco nem repetição, e se verifica; e a próxima operação grava a
+/// decisão dela, que volta no boot seguinte.
+///
+/// O boot que cai é o segundo da máquina: o primeiro, sem plano, grava a
+/// criação e a auditoria dele, e o que cai é um boot comum, que refaz a
+/// cadeia de um journal que existe.
+fn as_quedas_no_registro_de_boot(arch: Arquitetura, artefato: &Artefato) -> Result<String, String> {
+    let chaves = super::chaves::Chaves::garantir()?;
+    let disco = disco_de_testes()?;
+    for (i, (ponto, perder, vale, caso)) in QUEDAS_NA_GRAVACAO.into_iter().enumerate() {
+        zerar_o_estado(arch)?;
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let gravada = esperar_a_auditoria_gravada(&mut m);
+        m.cortar_a_energia()?;
+        let antes = gravada.map_err(|e| format!("{caso}: o boot antes da queda: {e}"))?;
+        let primeiro_boot =
+            comeco_do_boot(&antes).map_err(|e| format!("{caso}: o boot antes da queda: {e}"))?;
+        plano_de_queda(&disco, ponto, tipo::BOOT, 1)?;
+        let caiu = subir_ate_cair(arch, artefato)?;
+        if caiu != ponto {
+            return Err(format!("{caso}: caiu no ponto {caiu}, e nao no {ponto}"));
+        }
+        sem_plano(&disco)?;
+        if perder {
+            perder_o_ultimo_registro(&disco, None)?;
+        }
+
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let p = persistencia_de(&mut m)?;
+        if p.estado != "available" {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: o boot seguinte deixou a persistencia {} ({})",
+                p.estado, p.motivo
+            ));
+        }
+        let cauda = cauda_da_auditoria(&mut m)?;
+        let comeco = comeco_do_boot(&cauda)?;
+        // A cadeia do boot que caiu, entre o `policy.load` do primeiro e o
+        // de agora: inteira e gravada se o registro de boot vale, e nada
+        // dela se não vale.
+        let do_que_caiu: Vec<&Rastro> = cauda
+            .iter()
+            .filter(|r| r.metodo == "policy.load" && r.titular == "kernel")
+            .filter(|r| r.seq > primeiro_boot && r.seq < comeco)
+            .collect();
+        if do_que_caiu.len() > 1
+            || (do_que_caiu.len() == 1) != vale
+            || do_que_caiu.iter().any(|r| !r.duravel)
+        {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: o boot que caiu tem {} policy.load na cadeia, e o registro de boot {}",
+                do_que_caiu.len(),
+                if vale { "vale" } else { "nao vale" }
+            ));
+        }
+        // O que estava gravado antes da queda volta igual: o mesmo número e
+        // o mesmo elo.
+        let mut iguais = 0;
+        for r in antes.iter().filter(|r| r.duravel) {
+            if let Some(d) = cauda.iter().find(|d| d.seq == r.seq) {
+                if d.elo != r.elo || d.metodo != r.metodo {
+                    m.cortar_a_energia()?;
+                    return Err(format!(
+                        "{caso}: o registro {} gravado antes da queda voltou outro",
+                        r.seq
+                    ));
+                }
+                iguais += 1;
+            }
+        }
+        if iguais == 0 {
+            m.cortar_a_energia()?;
+            return Err(format!(
+                "{caso}: a cauda nao alcanca nada do que estava gravado antes da queda"
+            ));
+        }
+        // Sem buraco nem repetição: a cauda segue de um em um.
+        if cauda.windows(2).any(|par| par[1].seq != par[0].seq + 1) {
+            m.cortar_a_energia()?;
+            return Err(format!("{caso}: a cadeia pula ou repete depois da queda"));
+        }
+        auditoria_verifica(&mut m)?;
+        let nome = format!("boot-{i}");
+        let r = administrar(
+            &mut m,
+            &chaves.administrador,
+            "agent.register",
+            &registro_de_agente(&[0xB0 + i as u8; 32], &nome, "observador"),
+        )?;
+        m.cortar_a_energia()?;
+        if !executou(&r) {
+            return Err(format!(
+                "{caso}: a operacao seguinte nao foi executada\n  {r}"
+            ));
+        }
+        let mut m = Ligada::subir(arch, artefato, None)?;
+        let cauda = cauda_da_auditoria(&mut m);
+        let verifica = auditoria_verifica(&mut m);
+        m.cortar_a_energia()?;
+        verifica?;
+        if !cauda?
+            .iter()
+            .any(|r| r.metodo == "agent.register" && r.recurso == nome && r.duravel)
+        {
+            return Err(format!(
+                "{caso}: a decisao da operacao seguinte nao voltou do journal"
+            ));
+        }
+    }
+    Ok(format!(
+        "{} quedas: a cadeia que o boot continuou vale exatamente quando o registro de boot esta no disco, o gravado antes volta igual, e a cadeia continua",
+        QUEDAS_NA_GRAVACAO.len()
     ))
 }
 

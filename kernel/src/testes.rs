@@ -28,6 +28,7 @@ use crate::agent::registry;
 use crate::log::Level;
 use crate::rede::placa::PlacaDeRede;
 
+mod adocao;
 mod aviso;
 mod coleta;
 mod enlace;
@@ -37539,6 +37540,13 @@ static CASOS: &[Caso] = &[
         nome: "compositor: o console e a camada de baixo",
         f: compositor_o_console_e_a_camada_de_baixo,
     },
+    // Logo depois, e não junto dos outros da adoção: é aqui que o journal
+    // ainda tem poucos registros de auditoria — o anel que ele refaz fica
+    // pela metade.
+    Caso {
+        nome: "adocao: o journal com poucos registros: o anel que ele refaz fica pela metade, e a cadeia adotada e a do journal continuada com a do boot",
+        f: adocao::o_journal_com_poucos_registros,
+    },
     Caso {
         nome: "json: desescapa os substitutos",
         f: json_desescapa_substitutos,
@@ -38214,6 +38222,26 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "coleta: a copia da auditoria nao aloca com a trava na mao, e o anexado no meio fica para a gravacao seguinte",
         f: coleta::a_trava_fica_solta_na_montagem,
+    },
+    Caso {
+        nome: "adocao: a cadeia adotada e a do journal continuada com a do boot, registro a registro, e o journal de antes fica no disco byte a byte: o anel cheio, o boot cheio, a compactacao, a lacuna, e o boot seguinte",
+        f: adocao::a_cadeia_adotada_e_a_do_journal_continuada,
+    },
+    Caso {
+        nome: "adocao: nada pedido nem devolvido ao alocador com a trava da auditoria na adocao, nem com a da cadeia refeita na reposicao: o anel cheio, a lacuna e o boot cheio",
+        f: adocao::sem_memoria_com_as_travas_na_mao,
+    },
+    Caso {
+        nome: "adocao: o registro do boot que alguem segura nao muda, e o da cadeia adotada e uma copia",
+        f: adocao::o_registro_que_alguem_segura,
+    },
+    Caso {
+        nome: "adocao: a gravada troca com a cadeia, e o gate nunca mostra a do journal com a cadeia do boot",
+        f: adocao::a_gravada_troca_com_a_cadeia,
+    },
+    Caso {
+        nome: "adocao: produtores em rajada na hora da adocao e um leitor em outros nucleos durante a reabertura: nada se perde, nada se repete, a ordem fica, e a cadeia e a gravada nunca aparecem pela metade",
+        f: adocao::produtores_e_um_leitor_durante_a_reabertura,
     },
     Caso {
         nome: "coleta: o anel que transborda no meio da coleta: o copiado vai inteiro e e devolvido depois, fora da trava, e o que saiu sem copia e uma lacuna",
