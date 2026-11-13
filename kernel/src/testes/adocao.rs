@@ -25,11 +25,13 @@
 //!   referência fraca — não muda, e o da cadeia adotada é uma cópia;
 //! - que a gravada troca com a cadeia: o `audit.head` e o `audit.tail`
 //!   logo antes da adoção mostram a cadeia do boot com a gravada de antes,
-//!   e nunca com a do journal;
+//!   e nunca com a do journal; e logo depois, a adotada com a do journal,
+//!   e nunca com a de antes;
 //! - e que produtores em outros núcleos durante a reabertura — em rajada,
 //!   disputando a trava, na hora da adoção — não perdem, não repetem e não
 //!   desordenam nada — conferido pelo journal —, e um leitor noutro núcleo
-//!   nunca vê a cadeia pela metade, nem a gravada adiante dela.
+//!   nunca vê a cadeia que não se verifica, a esvaziada, a que muda sem
+//!   andar, nem a gravada adiante dela.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -564,18 +566,52 @@ fn perguntar_no_meio() {
     }
 }
 
+/// O que o `audit.head` e o `audit.tail` disseram logo depois da adoção,
+/// antes de o boot seguir: a sequência e a gravada do `audit.head`, e a
+/// gravada do `audit.tail`.
+static LOGO_DEPOIS: [AtomicU64; 3] = [const { AtomicU64::new(u64::MAX) }; 3];
+
+/// O gancho de logo depois da adoção: pergunta de novo ao `audit.head` e ao
+/// `audit.tail`.
+fn perguntar_logo_depois() {
+    for a in &LOGO_DEPOIS {
+        a.store(u64::MAX, SeqCst);
+    }
+    if let Ok(cabeca) = chamar("audit.head", "{}") {
+        let j = Json(cabeca.as_bytes());
+        if let (Some(seq), Some(gravada)) = (
+            j.member("seq").and_then(|v| v.as_u64()),
+            j.member("durable_seq").and_then(|v| v.as_u64()),
+        ) {
+            LOGO_DEPOIS[0].store(seq, SeqCst);
+            LOGO_DEPOIS[1].store(gravada, SeqCst);
+        }
+    }
+    if let Ok(cauda) = chamar("audit.tail", r#"{"count":1}"#)
+        && let Some(gravada) = Json(cauda.as_bytes())
+            .member("durable_seq")
+            .and_then(|v| v.as_u64())
+    {
+        LOGO_DEPOIS[2].store(gravada, SeqCst);
+    }
+}
+
 /// A gravada troca com a cadeia, na mesma tomada da trava: logo antes da
 /// adoção — o journal já refeito e confirmado —, o gate mostra a cadeia do
 /// boot com a gravada de antes, e nenhum registro dela dito no disco; logo
-/// depois, a adotada com a gravada do journal. Gravada antes da troca, a do
-/// journal ficava ao lado da cadeia do boot, e o `audit.tail` dizia no
-/// disco registros que nenhum journal tem.
+/// depois — antes de o boot seguir —, a adotada com a gravada do journal, e
+/// nunca com a de antes. Gravada antes da troca, a do journal ficava ao
+/// lado da cadeia do boot, e o `audit.tail` dizia no disco registros que
+/// nenhum journal tem; gravada depois, a adotada aparecia com a gravada de
+/// antes.
 pub(super) fn a_gravada_troca_com_a_cadeia() -> Resultado {
     anel_cheio_e_gravado()?;
     let journal = persistencia::auditoria_gravada();
     persistencia::antes_da_adocao_de_teste(Some(perguntar_no_meio));
+    persistencia::depois_da_adocao_de_teste(Some(perguntar_logo_depois));
     com_a_persistencia_fechada(crate::autorizacao::recomecar_a_auditoria_de_teste);
     persistencia::antes_da_adocao_de_teste(None);
+    persistencia::depois_da_adocao_de_teste(None);
     let [seq, gravada, gravada_da_cauda, maior_gravado] =
         NO_MEIO.each_ref().map(|a| a.load(SeqCst));
     if seq == u64::MAX || gravada_da_cauda == u64::MAX {
@@ -597,6 +633,28 @@ pub(super) fn a_gravada_troca_com_a_cadeia() -> Resultado {
     }
     if seq >= journal {
         return Err("no meio da abertura, o gate ja mostrava a cadeia adotada");
+    }
+    // Logo depois da adoção: a adotada, com a gravada do journal — e nunca
+    // com a de antes, que a cadeia do boot tinha.
+    let [seq, gravada, gravada_da_cauda] = LOGO_DEPOIS.each_ref().map(|a| a.load(SeqCst));
+    if seq == u64::MAX || gravada_da_cauda == u64::MAX {
+        return Err("o audit.head ou o audit.tail nao responderam logo depois da adocao");
+    }
+    if seq < journal
+        || gravada < journal
+        || gravada > seq
+        || gravada_da_cauda < journal
+        || gravada_da_cauda > seq
+    {
+        crate::log_error!(
+            "teste",
+            "logo depois da adocao: seq {}, gravada {} (cauda {}), journal ate {}",
+            seq,
+            gravada,
+            gravada_da_cauda,
+            journal
+        );
+        return Err("logo depois da adocao, o gate mostrou a adotada com a gravada de antes");
     }
     // Depois da adoção: a adotada, com a gravada do journal — ou adiante,
     // com o registro de boot.
@@ -646,10 +704,12 @@ static RAJADA_NA_ADOCAO: AtomicBool = AtomicBool::new(false);
 static PRODUZINDO: AtomicU64 = AtomicU64::new(0);
 static LENDO: AtomicU64 = AtomicU64::new(0);
 static PARAR: AtomicBool = AtomicBool::new(false);
-/// O que o leitor viu de errado: a cadeia que não se verifica, e a gravada
-/// adiante da cadeia.
+/// O que o leitor viu de errado: a cadeia que não se verifica, a gravada
+/// adiante da cadeia, e a cadeia pela metade — um anel vazio com números e
+/// sem a âncora de uma lacuna, ou a mesma sequência com outra cabeça.
 static NAO_VERIFICOU: AtomicU64 = AtomicU64::new(0);
 static GRAVADA_ADIANTE: AtomicU64 = AtomicU64::new(0);
+static PELA_METADE: AtomicU64 = AtomicU64::new(0);
 static LEITURAS: AtomicU64 = AtomicU64::new(0);
 
 /// Um produtor: audita os registros dele, com o número dele e o de cada um
@@ -694,24 +754,40 @@ fn soltar_a_rajada() {
 /// Um leitor: até o caso mandar parar, lê a cadeia e a gravada na mesma
 /// tomada da trava — como os relatórios —, e de tantas em tantas confere a
 /// cadeia inteira.
+///
+/// E a cadeia pela metade (o achado 2 do adversário do B4): um anel vazio
+/// com números e a âncora da gênese é a cadeia do boot esvaziada pela
+/// continuação — a de uma lacuna tem a âncora no elo dela, e a recomeçada
+/// não tem número —; e a mesma sequência com outra cabeça, a cadeia que
+/// mudou sem andar. A sequência que desce é o recomeço da suíte.
 extern "C" fn leitor(_: u64) -> ! {
     let mut n = 0u64;
+    let mut ultimo: Option<(u64, [u8; 32])> = None;
     while !PARAR.load(SeqCst) {
         let conferir = n.is_multiple_of(16);
         let visto = crate::autorizacao::com_auditoria(|c| {
             (
                 c.ultima_seq(),
+                c.cabeca(),
+                c.guardados() == 0
+                    && c.ultima_seq() > 0
+                    && c.ancora() == politica::auditoria::GENESE,
                 persistencia::auditoria_gravada(),
                 !conferir || c.verificar().is_ok(),
             )
         });
-        if let Some((seq, gravada, verifica)) = visto {
+        if let Some((seq, cabeca, esvaziada, gravada, verifica)) = visto {
             if gravada > seq {
                 GRAVADA_ADIANTE.fetch_add(1, SeqCst);
             }
             if !verifica {
                 NAO_VERIFICOU.fetch_add(1, SeqCst);
             }
+            let mudou_sem_andar = matches!(ultimo, Some((s, c)) if s == seq && c != cabeca);
+            if esvaziada || mudou_sem_andar {
+                PELA_METADE.fetch_add(1, SeqCst);
+            }
+            ultimo = Some((seq, cabeca));
         }
         LEITURAS.fetch_add(1, SeqCst);
         n += 1;
@@ -750,6 +826,7 @@ pub(super) fn produtores_e_um_leitor_durante_a_reabertura() -> Resultado {
     let desde = persistencia::auditoria_gravada();
     NAO_VERIFICOU.store(0, SeqCst);
     GRAVADA_ADIANTE.store(0, SeqCst);
+    PELA_METADE.store(0, SeqCst);
     LEITURAS.store(0, SeqCst);
     PARAR.store(false, SeqCst);
     let no = |i: usize| nucleos.get(i % nucleos.len().max(1)).copied();
@@ -818,6 +895,9 @@ pub(super) fn produtores_e_um_leitor_durante_a_reabertura() -> Resultado {
     }
     if GRAVADA_ADIANTE.load(SeqCst) != 0 {
         return Err("o leitor viu a gravada adiante da cadeia no meio da reabertura");
+    }
+    if PELA_METADE.load(SeqCst) != 0 {
+        return Err("o leitor viu a cadeia pela metade no meio da reabertura");
     }
     gravar_tudo()?;
     // O journal, depois do que tinha antes do boot.

@@ -6120,10 +6120,19 @@ fn as_quedas_no_registro_de_boot(arch: Arquitetura, artefato: &Artefato) -> Resu
                 "{caso}: a cauda nao alcanca nada do que estava gravado antes da queda"
             ));
         }
-        // Sem buraco nem repetição: a cauda segue de um em um.
-        if cauda.windows(2).any(|par| par[1].seq != par[0].seq + 1) {
+        // Tudo o que vem antes deste boot veio do journal — o do primeiro
+        // boot, e o do que caiu, se o registro de boot vale —: o que a cauda
+        // alcança disso se diz gravado. A adoção troca a gravada com a
+        // cadeia; um registro do boot que caiu dito no disco sem estar, ou
+        // um do journal dito fora dele, aparece aqui. (A cauda seguir de um
+        // em um não diz nada: o anel é seguido por construção — o achado 5
+        // do adversário do B4.)
+        if let Some(r) = cauda.iter().find(|r| r.seq < comeco && !r.duravel) {
             m.cortar_a_energia()?;
-            return Err(format!("{caso}: a cadeia pula ou repete depois da queda"));
+            return Err(format!(
+                "{caso}: o registro {} veio do journal e nao se diz gravado",
+                r.seq
+            ));
         }
         auditoria_verifica(&mut m)?;
         let nome = format!("boot-{i}");
