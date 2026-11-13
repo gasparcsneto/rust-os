@@ -15081,6 +15081,29 @@ fn video_escrever_descarrega_so_o_que_sujou() -> Resultado {
     Ok(())
 }
 
+/// O tamanho da tela perguntado com a trava do video na mão — o que o
+/// compositor faz ao apresentar a tela de dentro de um registro que um
+/// comando do driver escreve com ela, ou do relato de um pânico com um
+/// núcleo parado segurando-a — responde, e é o mesmo de fora dela. Com a
+/// pergunta pela trava, este caso esperava por si mesmo, para sempre.
+fn video_o_tamanho_da_tela_nao_espera_pela_trava() -> Resultado {
+    if !crate::virtio::gpu::tem_a_tela() {
+        return sem_virtio_gpu("video: o tamanho da tela nao espera pela trava do video");
+    }
+    let fora = crate::virtio::gpu::tamanho_da_tela();
+    let dentro = crate::virtio::gpu::tamanho_com_a_trava_na_mao();
+    if fora.is_none() || dentro != Some(fora) {
+        crate::log_error!(
+            "teste",
+            "o tamanho da tela: {:?} fora da trava, {:?} dentro dela",
+            fora,
+            dentro
+        );
+        return Err("o tamanho da tela com a trava do video na mao nao e o de fora");
+    }
+    Ok(())
+}
+
 /// Uma superfície apresenta só o dano, e a tela volta ao kernel depois dela.
 ///
 /// É o trait pelo qual o compositor entrega a tela: criar, desenhar,
@@ -39253,6 +39276,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "video: superficie apresenta so o dano",
         f: video_superficie_apresenta_so_o_dano,
+    },
+    Caso {
+        nome: "video: o tamanho da tela nao espera pela trava do video",
+        f: video_o_tamanho_da_tela_nao_espera_pela_trava,
     },
     Caso {
         nome: "video: anexar memoria fragmentada",

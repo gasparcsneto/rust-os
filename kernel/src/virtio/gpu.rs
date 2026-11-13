@@ -47,7 +47,7 @@
 //! mesmo assim, porque ela existe: sem alguém para reconhecê-la, uma linha
 //! compartilhada ficaria acesa para sempre.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::trava::Mutex;
 
@@ -801,6 +801,7 @@ pub fn init() {
                 RECURSO_DA_TELA,
                 entradas_do_ultimo_anexo()
             );
+            guardar_o_tamanho(&gpu);
             crate::arch::sem_interrupcoes(|| *GPU.lock() = Some(gpu));
             // SAFETY: a memória é da tela guardada em `GPU`, que vive até o
             // fim do kernel; ela tem exatamente `largura * altura * 4` bytes
@@ -825,6 +826,7 @@ pub fn init() {
             );
             // O dispositivo fica ligado e sem tela: a pilha gráfica ainda pode
             // usá-lo, e o relatório diz por que ninguém vê nada.
+            guardar_o_tamanho(&gpu);
             crate::arch::sem_interrupcoes(|| *GPU.lock() = Some(gpu));
         }
     }
@@ -882,9 +884,49 @@ pub fn descarregar_tela(r: Retangulo) -> bool {
 // O que a pilha gráfica usa
 // ---------------------------------------------------------------------------
 
+/// O tamanho da tela que o dispositivo descreve — a largura nos 32 bits de
+/// cima, a altura nos de baixo —, guardado logo antes de ele ir para
+/// [`GPU`]: o modo só é lido ali, no `init`, e não muda depois.
+static TAMANHO: AtomicU64 = AtomicU64::new(0);
+
+/// [`TAMANHO`] vale: guardado logo antes de o dispositivo ir para [`GPU`].
+static COM_TAMANHO: AtomicBool = AtomicBool::new(false);
+
+/// Guarda o tamanho da tela de `gpu`, que vai para [`GPU`] em seguida.
+fn guardar_o_tamanho(gpu: &Gpu) {
+    TAMANHO.store(
+        (u64::from(gpu.modo.largura) << 32) | u64::from(gpu.modo.altura),
+        Ordering::Relaxed,
+    );
+    COM_TAMANHO.store(true, Ordering::Release);
+}
+
 /// A tela que o dispositivo descreve, se ele está ligado.
+///
+/// # Sem a trava do dispositivo
+///
+/// Quem pergunta é o compositor, ao apresentar a tela
+/// (`grafico::virtio::AdaptadorVirtio::atualizar`), e a apresentação
+/// acontece de dentro de qualquer escrita no console: inclusive da que um
+/// comando do driver faz ao registrar um erro com a trava dele na mão, e da
+/// do relato de um pânico com um núcleo parado segurando-a. O caminho da
+/// tela já leva por `try_lock` — ver [`descarregar_tela`] —, e o tamanho,
+/// perguntado antes dele pela trava, esperava por si mesmo, ou por quem
+/// nunca a solta (o achado do adversário da CI 492, em
+/// `docs/PERSISTENCIA.md`).
 pub fn tamanho_da_tela() -> Option<(u32, u32)> {
-    com_gpu(|g| (g.modo.largura, g.modo.altura))
+    COM_TAMANHO.load(Ordering::Acquire).then(|| {
+        let t = TAMANHO.load(Ordering::Relaxed);
+        ((t >> 32) as u32, t as u32)
+    })
+}
+
+/// Só para a suíte: o tamanho da tela perguntado com a trava do
+/// dispositivo na mão — o que a apresentação faz quando um comando do
+/// driver registra um erro com ela.
+#[cfg(feature = "modo-teste")]
+pub fn tamanho_com_a_trava_na_mao() -> Option<Option<(u32, u32)>> {
+    com_gpu(|_| tamanho_da_tela())
 }
 
 /// Este dispositivo carrega a tela do kernel?
