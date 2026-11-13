@@ -3709,3 +3709,24 @@ rodadas de cada, alternadas:
   boot cheia e com a lacuna (384,5 e 42,2 KiB, a menos de 1 KiB); no boot
   de um registro, sobe 16 KiB (de 6,2 para 21,9 KiB) — o vetor do que a
   adoção solta, reservado para um anel inteiro.
+
+### O estado: concluído
+
+O B4 está concluído desde 13/11/2026, sem nada dele em aberto. Os commits
+são os de 13/11: `7405810` (a reconstrução), `d6602b4` e `5a0fcd6` (os
+testes), `fc00aab` (a adoção numa tomada só, conferida também pelo `cargo
+xtask invariantes`) e `42ea951` (esta seção). A validação final é a CI 494,
+verde inteira — os 28 jobs — no `5999520`, que leva também a correção da
+pilha da rodada da hora (`c872aa0`, `fad75aa`, `fc79567` e `5999520`; ver o
+README, *A pilha*): a CI 490 a achou enquanto validava o B4, e ela não era
+dele. O B4 não reabriu a C1 — o elo continua com a trava —, o formato do
+journal, a cadeia em BLAKE2s, o Gate, a Policy, a identidade nem a
+semântica da persistência.
+
+O que fica não é pendência do B4: o que *O que fica de fora* lista, acima
+— o elo com a trava, pela C1; a cópia do registro segurado, com a trava; a
+gravada lida na mesma tomada sem uma mutação que a suíte pegue sempre; e os
+achados 3 e 4 do adversário. O travamento da CI 492, na bancada da
+atualização do x86, também não é do B4: ele está no caminho do pânico, e
+não toca a auditoria — ver *O pânico que parava na primeira linha (CI
+492)*, abaixo.
