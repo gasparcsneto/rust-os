@@ -381,6 +381,12 @@ jobs:
           key: persistencia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: persistencia-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       # As mesmas da máquina do job de testes: o disco, o TPM e a rede.
       - name: Instalar o emulador e as ferramentas de disco
         run: |
@@ -392,6 +398,18 @@ jobs:
 
       - name: Persistência
         run: cargo xtask persistencia --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A atualização A/B (B1, `docs/ATUALIZACAO.md`): a máquina de produção
   # sempre pelo firmware — o OVMF no x86, o AAVMF no ARM —, o iniciador, o
@@ -428,6 +446,12 @@ jobs:
           key: atualizacao-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: atualizacao-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -438,6 +462,18 @@ jobs:
 
       - name: Atualização A/B
         run: cargo xtask atualizacao --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A bancada da identidade do Duke (B2): a imagem de produção do
   # `provisionar`, sem chave do Duke nenhuma, pelo firmware, num disco e
@@ -471,6 +507,12 @@ jobs:
           key: identidade-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: identidade-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -481,6 +523,18 @@ jobs:
 
       - name: Identidade do Duke
         run: cargo xtask identidade --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A bancada do botão de energia (B3, `docs/OPERACAO.md`): o
   # `system_powerdown` do emulador — o aperto de verdade, pelo hardware que
@@ -514,6 +568,12 @@ jobs:
           key: botao-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: botao-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -524,6 +584,18 @@ jobs:
 
       - name: Botão de energia
         run: cargo xtask botao --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A troca da própria senha pelo teclado da máquina (o `sendkey` do
   # monitor, no Terminal): a nova sobrevive ao corte de energia; a queda em
@@ -556,6 +628,12 @@ jobs:
           key: senha-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: senha-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -566,6 +644,18 @@ jobs:
 
       - name: Troca da própria senha
         run: cargo xtask senha --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A cópia de segurança e a restauração do armazém, por um agente na porta
   # (o mesmo caminho do `operar --copia` e `--restaurar`): a cópia sai
@@ -597,6 +687,12 @@ jobs:
           key: copia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: copia-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -607,6 +703,18 @@ jobs:
 
       - name: Cópia de segurança e restauração
         run: cargo xtask copia --arch ${{ matrix.arch }}
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # O enlace entre dispositivos (B-E1/B-E2, estágio 1): duas máquinas de pé
   # ao mesmo tempo, cada uma com o disco, o TPM e a chave do Duke dela,
@@ -648,6 +756,12 @@ jobs:
           key: enlace-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: enlace-${{ matrix.chave }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -658,6 +772,18 @@ jobs:
 
       - name: Enlace entre dispositivos
         run: cargo xtask enlace
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # O pareamento da Pessoa (D8): duas máquinas de pé, e a Pessoa no teclado
   # das duas, sem administrador — ela lê o código de cada tela pela árvore
@@ -699,6 +825,12 @@ jobs:
           key: pareamento-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: pareamento-${{ matrix.chave }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -709,6 +841,18 @@ jobs:
 
       - name: Pareamento entre dispositivos
         run: cargo xtask pareamento
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Os fluxos da malha (DN-2): duas máquinas de pé e uma ponte do meio no
   # runner. 4 MiB em cada sentido, local e entre os Dukes, com a auditoria
@@ -748,6 +892,12 @@ jobs:
           key: fluxo-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: fluxo-${{ matrix.chave }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -758,6 +908,18 @@ jobs:
 
       - name: Fluxos entre dispositivos
         run: cargo xtask fluxo
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # O SDK da malha (DN-3), do lado de quem escreve um programa: o
   # `sdk/modelo` copiado para fora do workspace — como faria quem começa um
@@ -839,6 +1001,12 @@ jobs:
           key: sdk-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: sdk-${{ matrix.chave }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       - name: Instalar o emulador e as ferramentas de disco
         run: |
           sudo apt-get update
@@ -849,6 +1017,18 @@ jobs:
 
       - name: SDK da malha entre dispositivos
         run: cargo xtask sdk
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # A bancada de tempo (desenho do incremento 7, §15.2): o Roughtime de ponta
   # a ponta, uma máquina por cenário. O fio `hora` do kernel pede cada passo
@@ -885,6 +1065,12 @@ jobs:
           key: tempo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: tempo-${{ matrix.arch }}-
 
+      # Os incidentes de outra rodada, que o cache de `target` traz, não
+      # vão para o artefato desta — nem quando um passo antes da bancada
+      # reprova.
+      - name: Limpar os incidentes
+        run: rm -rf target/incidentes
+
       # As mesmas da máquina do job de testes: a bancada sobe o kernel de
       # produção com o disco, o TPM e a rede da fumaça.
       - name: Instalar o emulador e as ferramentas de disco
@@ -897,3 +1083,15 @@ jobs:
 
       - name: Bancada de tempo
         run: cargo xtask tempo --arch ${{ matrix.arch }} --release
+
+      # O incidente de uma máquina que parou de andar — o estado de cada
+      # CPU simbolizado com o ELF desta execução, e o ELF — sobe quando o
+      # job reprova, ou estoura o teto: ver `xtask/src/incidente.rs`.
+      - name: Incidentes
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incidentes-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: target/incidentes/
+          if-no-files-found: ignore
+          retention-days: 14
