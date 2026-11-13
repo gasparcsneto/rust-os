@@ -41,8 +41,9 @@
 //!
 //! Com a persistência, cada registro vai também para o journal — ver
 //! [`codificar`] e [`Cadeia::a_gravar`] —, e o boot refaz a cadeia a partir
-//! dele com [`Cadeia::repor`]: a mesma sequência, os mesmos elos, e a
-//! cadeia continua de onde parou. O que saiu do anel antes de chegar ao
+//! dele com a conta de [`Cadeia::repor`] — no kernel, pelo
+//! [`Cadeia::repor_lido`] —: a mesma sequência, os mesmos elos, e a cadeia
+//! continua de onde parou. O que saiu do anel antes de chegar ao
 //! journal não some em silêncio: vira uma **lacuna**, com a primeira e a
 //! última sequência perdidas e o elo da última — ver [`Cadeia::pular`].
 //! A cadeia continua verificável depois dela, como depois da âncora do
@@ -737,7 +738,7 @@ impl Lido {
 
 /// Um anel vazio, com o lugar de uma cadeia reservado: o que
 /// [`Cadeia::pular_trocando`] põe no lugar do anel que uma lacuna esvazia,
-/// e o anel esvaziado que volta dela.
+/// e o anel que volta dela, com os registros que a lacuna tirou da cadeia.
 #[derive(Debug)]
 pub struct Anel(VecDeque<Arc<Registro>>);
 
@@ -852,6 +853,10 @@ impl Cadeia {
     /// journal autêntico nunca traz outra coisa — a cadeia foi gravada por
     /// [`Cadeia::anexar`] —, e o que não confere é recusado, e não
     /// consertado: consertar daria outro elo.
+    ///
+    /// No kernel, o boot repõe pelo [`Cadeia::repor_lido`] — a mesma conta,
+    /// com o registro montado fora da trava —; esta fica como a referência
+    /// dos testes.
     pub fn repor(&mut self, seq: u64, evento: Evento) -> Result<(), &'static str> {
         if seq != self.proximo_seq {
             return Err("registro da auditoria fora de sequencia");
@@ -990,9 +995,11 @@ impl Cadeia {
     }
 
     /// Acrescenta, nesta cadeia, os eventos que a `outra` tem no anel, na
-    /// ordem: cada um ganha a sequência, o elo e o tempo daqui. É o boot
-    /// que continua a cadeia do journal com o que ele mesmo registrou antes
-    /// de ler o journal.
+    /// ordem: cada um ganha a sequência, o elo e o tempo daqui. É a conta
+    /// com que o boot continua a cadeia do journal com o que ele mesmo
+    /// registrou antes de lê-lo — no kernel, pelo
+    /// [`Cadeia::continuar_tirando_de`], que move os registros em vez de
+    /// copiá-los; esta fica como a referência dos testes.
     pub fn continuar_com(&mut self, outra: &Cadeia) {
         for r in &outra.registros {
             self.anexar(r.evento.clone());

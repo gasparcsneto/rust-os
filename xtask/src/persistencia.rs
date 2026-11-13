@@ -6041,9 +6041,10 @@ fn as_quedas_na_auditoria(arch: Arquitetura, artefato: &Artefato) -> Result<Stri
 /// persistência de pé; a cadeia do boot que caiu está nela exatamente
 /// quando o registro está no disco — o `policy.load` dele entre o do boot
 /// de antes e o de agora, gravado, ou nenhum —; o que estava gravado antes
-/// da queda volta com o mesmo número e o mesmo elo; a cadeia segue sem
-/// buraco nem repetição, e se verifica; e a próxima operação grava a
-/// decisão dela, que volta no boot seguinte.
+/// da queda volta com o mesmo número, o mesmo elo e o mesmo método; tudo o
+/// que a cauda tem de antes deste boot veio do journal e se diz gravado; a
+/// cadeia se verifica; e a próxima operação grava a decisão dela, que volta
+/// no boot seguinte.
 ///
 /// O boot que cai é o segundo da máquina: o primeiro, sem plano, grava a
 /// criação e a auditoria dele, e o que cai é um boot comum, que refaz a

@@ -2540,7 +2540,8 @@ antes: o que muda é só onde a memória é pedida e devolvida.
 - **O boot e a política**: `carregar` monta a cadeia nova fora da trava
   — e, se já havia uma, solta a nova fora dela também —, e
   `adotar_auditoria` solta fora dela a cadeia que o boot fez antes de ler
-  o journal.
+  o journal — e, desde o B4, também o que a continuação solta (ver *A
+  reconstrução da auditoria no boot (B4)*, abaixo).
 
 ### O que continua com a trava
 
@@ -2566,10 +2567,11 @@ antes: o que muda é só onde a memória é pedida e devolvida.
 - **O `audit.verify` sem lugar para a fotografia**, com um anel maior que
   o lugar, e no post-mortem: a conta inteira com a trava, como antes.
 - **O boot**: `adotar_auditoria` continua com a trava, uma vez, a cadeia
-  do journal com o que o boot registrou antes dela (`continuar_com`, que
-  pede e devolve memória ali mesmo), antes de o gate atender. É a
-  pendência B4, registrada à parte: não muda sem uma medida que mostre
-  benefício relevante.
+  do journal com o que o boot registrou antes dela. Até o B4, pela
+  `continuar_com`, que pedia e devolvia memória ali mesmo; desde ele, só
+  a conta de cada registro — a sequência, o tempo, o anterior e o elo —,
+  sem pedir nem devolver memória (ver *A reconstrução da auditoria no
+  boot (B4)*, abaixo).
 
 ### O que custa
 
@@ -3065,9 +3067,9 @@ leu, e nada nele muda.
 - O `audit.verify` sem lugar para a fotografia, com um anel maior que o
   lugar, e no post-mortem: a conta inteira.
 - O elo do anexar, pela decisão C1, e o boot, que continua a cadeia do
-  journal com o que ele mesmo registrou antes dela, com a trava, uma vez,
-  antes de o gate atender — a pendência B4 (ver *O que continua com a
-  trava*, na seção dos leitores, acima).
+  journal com o que ele mesmo registrou antes dela, com a trava, uma vez
+  — só a conta de cada registro, desde o B4 (ver *A reconstrução da
+  auditoria no boot (B4)*, abaixo).
 
 ### O que custa
 
@@ -3257,3 +3259,453 @@ equivalente — o lote inteiro cabe, exato, no lugar sem a folga.
 
 Na última rodada de cada uma, 45 das 48 reprovaram; as três que passam são
 as equivalentes, explicadas acima.
+
+## A reconstrução da auditoria no boot (B4)
+
+Depois do anexar, dos leitores, da cópia para o journal e da
+compactação, o boot era o último caminho que pedia e devolvia memória
+com uma trava da auditoria na mão — a pendência B4 do encerramento da
+contenção da auditoria, registrada em 11/11/2026 (ver *O que continua
+com a trava*, nas duas seções acima); não é o B4 da troca da própria
+senha (`c153c15`), nem nenhuma das decisões fechadas. É uma escolha
+interna [B]: o
+formato do journal, a cadeia, a âncora, as lacunas, o anel, a gravada e
+os contratos de `audit.head`, `audit.tail`, `audit.verify` e
+`audit.declare` não mudam, e o elo continua com a trava (a C1).
+
+### O caminho, passo a passo
+
+1. **A cadeia refeita nasce** (`abrir_de_fato`): `Cadeia::nova` com o
+   anel inteiro reservado — 1024 ponteiros —, posta em `REPOSTA`, a trava
+   da cadeia que o journal refaz. Só o boot a usa, e o gate não a vê.
+2. **O journal é lido**, um registro de cada vez, e cada entrada é
+   reaplicada. A cadeia vem de três entradas: `AUDITORIA_EVENTO` (um registro),
+   `AUDITORIA_LACUNA` (registros perdidos antes de gravados) e
+   `AUDITORIA_COMPACTADA` (a marca da base). O registro é decodificado
+   fora de qualquer trava; com a da cadeia refeita, a reposição confere a
+   sequência, o tempo e o teto do detalhe, dá o anterior e o elo, e o põe
+   no anel. A lacuna confere a sequência, esvazia o anel, e põe a âncora
+   no elo dela e a próxima sequência depois dela.
+3. **A âncora é julgada** contra o último registro (ver *O boot*, acima).
+   Só um journal confirmado — *confere*, *completar* ou *novo*, ou a
+   criação interrompida retomada (ver *A criação interrompida, com as
+   regiões*) — chega à adoção; o recusado e o indisponível voltam antes
+   dela, e a cadeia que refizeram nunca vira a auditoria.
+4. **A adoção** (`autorizacao::adotar_auditoria`): a cadeia refeita sai
+   da `REPOSTA` e, com a trava da auditoria — a do gate —, é continuada
+   com o que o boot registrou antes de ler o journal (a cadeia do boot:
+   cada registro ganha a sequência, o tempo, o anterior e o elo da
+   adotada), publicada no lugar da do boot, com o último número e a
+   gravada.
+5. **Disponível, o registro de boot é gravado** — com a auditoria do boot
+   já continuada; num journal novo, o registro de abertura vai antes e já
+   a leva, e uma compactação no boot a leva na base.
+6. **O gate não para pela adoção.** Até ela, o que o gate anexa vai à
+   cadeia do boot — num boot de verdade, só os registros do próprio
+   kernel, como o `policy.load`: as portas, o NSF, os processos e os
+   outros núcleos sobem depois do registro de boot (ver *O boot*, acima);
+   na reabertura da suíte, também o que outros núcleos auditam. A adoção
+   não abre nem fecha nada: ela troca, numa tomada da trava, a cadeia em
+   que o gate anexa e que os relatórios leem. Quem pede a trava nessa
+   hora espera a tomada acabar.
+
+### O que estava com as travas
+
+- **Com a da cadeia refeita**, a cada registro do journal — milhares num
+  journal cheio, com as interrupções mascaradas em cada tomada —: o
+  pedido do registro (`Cadeia::repor`, que montava o `Arc` ali), e, com o
+  anel cheio, a devolução do que saía pela ponta — o `Arc` e os textos
+  do evento, umas 4 devoluções por registro que saía (9 991 para os
+  2 496 que saíram no s3 da medida). E, na lacuna, a devolução do anel
+  inteiro (`Cadeia::pular`): até 1024 registros, umas 4 100 devoluções
+  numa tomada só — a maior seção mascarada de um boot com poucos
+  registros antes do journal: de 4,5 a 40,8 ms sem disputa, e de 85 a
+  351 ms com três núcleos usando o alocador ao mesmo tempo (a medida,
+  abaixo).
+- **Com a da auditoria**, na adoção (`Cadeia::continuar_com`): cada
+  registro da cadeia do boot **copiado** — um `Arc` novo e o evento
+  clonado, os textos de novo: uns 4 pedidos por registro — e, com o anel
+  da adotada cheio, cada um que saía pela ponta devolvido ali — umas 4
+  devoluções por registro. Com a cadeia do boot cheia (1024 registros, o
+  caso que a medida força), 4 098 pedidos e 4 098 devoluções numa tomada:
+  de 12,9 a 16,7 ms em `release` e de 192 a 199 ms em depuração; com três
+  núcleos auditando, de 31 a 46 ms e de 286 a 331 ms — o tempo que o gate
+  esperava.
+- **A gravada publicada antes da adoção.** `auditoria_foi_gravada` era
+  chamada antes de `adotar_auditoria`: entre as duas, o `audit.head` e o
+  `audit.tail` mostravam a cadeia do boot com a gravada do journal — o
+  `durable_seq` adiante da cadeia, e registros do boot ditos no disco
+  sem estar. Um estado intermediário visível ao gate, achado no
+  mapeamento do caminho; corrigido aqui, sem mudar o contrato.
+
+### O que muda
+
+- **A reposição recebe o registro montado.** O `Arc` do registro é pedido
+  fora da trava, com o evento que a decodificação trouxe
+  (`politica::auditoria::Lido`); com ela, `Cadeia::repor_lido` faz as
+  mesmas conferências, na mesma ordem e com as mesmas palavras de
+  `repor`, e o mesmo anexar (`anexar_preparado`): o que sai pela ponta do
+  anel cheio volta a quem repôs, e é solto depois de soltar a trava; o
+  lido que a reposição recusa volta também, inteiro.
+- **A lacuna troca o anel.** Um anel vazio, com o lugar da cadeia
+  reservado, é pedido fora (`politica::auditoria::Anel`); com a trava,
+  `Cadeia::pular_trocando` só o troca de lugar com o anel da cadeia e
+  põe a âncora e a próxima sequência — o anel velho, com os registros que
+  tinha, é solto depois. Um "vazio" com registros, ou sem o lugar, não
+  entra: o anel é esvaziado ali, como em `pular`.
+- **A cadeia refeita nasce fora da seção mascarada.** Ela já nascia antes
+  de a trava ser tomada — numa atribuição, `*REPOSTA.lock() = Some(..)`, o
+  Rust avalia o valor antes do lugar —, mas com as interrupções
+  mascaradas; e a de antes seria solta com a trava, se houvesse uma — o
+  que não acontece: toda abertura tira a cadeia refeita, na adoção ou no
+  fim de `abrir_em_ordem`. Agora a criação acontece fora, e a troca
+  também.
+- **A adoção tira os registros da cadeia do boot em vez de copiá-los**
+  (`Cadeia::continuar_tirando_de`). Um registro que ninguém mais segura
+  entra na adotada como está — o mesmo `Arc`, com a sequência, o tempo,
+  o anterior e o elo dela: ninguém o vê mudar (`Arc::get_mut`). O que
+  alguém ainda segura — um leitor com o ponteiro dele, uma referência
+  fraca — não muda: o da adotada é uma cópia, o único pedido que sobra
+  com a trava, e que um boot de verdade não faz (a suíte confere zero
+  copiados nas reaberturas que comparam a cadeia adotada e na que vigia
+  a trava da auditoria, e exatamente os quatro no caso que segura de
+  propósito). O que sai
+  pela ponta da adotada, e o original copiado, vão para um vetor
+  reservado antes — dois ponteiros por registro do boot, 16 KiB — e são
+  soltos depois, com a cadeia do boot já vazia.
+- **A gravada troca com a cadeia.** `persistencia::gravada_na_adocao`
+  põe a gravada do journal na mesma tomada da trava da auditoria em que a
+  cadeia troca; o elo do último gravado e o aviso ao caminho da
+  auditoria, depois, como antes. O `audit.head` e o `audit.tail` leem a
+  gravada na mesma tomada em que leem a cadeia: os dois mostram a cadeia
+  do boot com a gravada de antes, ou a adotada com a do journal, nunca
+  uma com a outra.
+- `Cadeia::continuar_com`, `repor` e `pular` ficam como estavam: o kernel
+  não os usa mais com a trava, e eles são a referência — o oráculo — dos
+  testes do hospedeiro e da suíte.
+
+### O que continua com a trava
+
+- **O elo.** Cada registro reposto e cada registro continuado ganha o elo
+  — o BLAKE2s do anterior com ele — com a trava, um depois do outro: a C1
+  (ver *O que continua com a trava*, na seção dos leitores). Com a cadeia
+  do boot cheia, a adoção calcula 1024 elos numa tomada: é o piso dela, e
+  em depuração é quase toda ela. Tirar o elo dali — calcular a
+  continuação numa cópia isolada e só publicá-la com a trava — mudaria
+  quando o elo é calculado em relação à trava, o que a C1 fechou; fica
+  como limitação.
+- As conferências da reposição e da lacuna; a troca do anel; a troca da
+  cadeia, o último número e a gravada, juntos.
+- A cópia do registro do boot que alguém segura (acima).
+
+### Por que não perde, não repete, não desordena, e o gate não vê pela metade
+
+- **Uma tomada só.** A continuação, a troca da cadeia, o último número e
+  a gravada acontecem na mesma tomada da trava da auditoria: quem a toma
+  antes vê a cadeia do boot inteira, com a gravada de antes; quem a toma
+  depois vê a adotada inteira, com a gravada do journal. Um registro que
+  o gate anexa antes da tomada entra na cadeia do boot e é continuado;
+  um que anexa depois entra na adotada, depois dos continuados.
+- **A cadeia refeita é privada.** Até a adoção, ela só existe na
+  `REPOSTA`, que o gate não lê; o journal recusado nunca a publica.
+- **Um escritor só.** A abertura tem a ordem das gravações na mão do
+  começo ao fim: o coletor e as gravações esperam a adoção e o registro
+  de boot; a gravada só anda depois.
+- **Mover não é mudar.** O registro só entra sem cópia quando ninguém
+  mais o segura; a sequência, o tempo, o anterior e o elo que ele ganha
+  são os da conta de antes (`continuar_com`), registro a registro, nos
+  testes.
+
+### O que custa
+
+- **A memória.** O vetor do que a adoção solta — 16 KiB — e o anel vazio
+  da lacuna — 8 KiB — são pedidos antes e soltos depois: o pico
+  passageiro do boot de um registro sobe 16 KiB (de 6,2 para 21,9 KiB), e
+  o dos cenários com a cadeia do boot cheia e com uma lacuna fica o mesmo,
+  a menos de 1 KiB — o que sai pela ponta espera a trava solta, em vez das
+  cópias que a continuação de antes pedia.
+- **O tempo do boot não cai como a retenção.** As mesmas devoluções
+  acontecem — fora da trava —, e o mesmo elo é calculado: o total da
+  abertura ficou no ruído da medida (ver *A medida, antes e depois*,
+  abaixo).
+
+### O que o adversário achou
+
+Nenhuma falha de segurança nem de correção no código do B4 — a C1 de pé,
+o formato, a âncora, as lacunas e os contratos iguais, nenhuma segunda
+autoridade, nenhum gancho da suíte na compilação de produção. Seis
+achados de força de teste e de robustez, dois baixos e quatro
+informativos:
+
+1. **A gravada fora do lugar só aparecia por acaso** (baixo). Dita logo
+   antes da adoção — depois do gancho da suíte —, ou trocada antes da
+   tomada da trava, a gravada do journal voltava a ficar ao lado da
+   cadeia do boot, e só o leitor concorrente o via, se uma leitura caísse
+   na janela. Agora a suíte tem duas redes, só dela: a gravada só se diz
+   gravada até onde a cadeia vai (`auditoria_foi_gravada`), e a da adoção
+   só troca com a trava da auditoria e a ordem das gravações na mão
+   (`gravada_na_adocao`). As duas mutações reprovam sempre (KM10, KM11).
+2. **"Pela metade" mais forte no nome que na conferência** (baixo). Uma
+   adoção em duas tomadas, ou em lotes, deixaria o gate ver a cadeia do
+   boot esvaziada, ou sem o começo — e a conferência do leitor não via
+   isso. Agora: a adoção numa tomada só é uma regra do texto, conferida
+   pelo `cargo xtask invariantes` (a continuação, o último número, a
+   gravada e a troca dentro de uma tomada só da trava, uma vez cada); e o
+   leitor acusa o anel vazio com números e a âncora da gênese, e a mesma
+   sequência com outra cabeça.
+3. **O post-mortem de uma cópia sem memória** (informativo). Se a cópia
+   do registro que alguém segura esgotasse a memória no meio da adoção, a
+   falha fatal destravaria a cadeia do boot sem o começo do anel. No boot
+   de produção ninguém segura ponteiros antes da abertura — o canal, o
+   NSF e os processos sobem depois —: fica como limitação, abaixo.
+4. **Os registros do boot que já saíram do anel** (informativo, de antes
+   do B4). A continuação só leva o anel da cadeia do boot: mais de 1024
+   decisões antes de o journal ser lido perderiam as primeiras, sem
+   lacuna. Hoje o boot faz uns poucos registros antes; marcar a perda
+   seria uma lacuna com o elo de outra numeração — semântica nova, uma
+   decisão [C] —, e fica como limitação.
+5. **A conferência de contiguidade da bancada não reprovava nunca**
+   (informativo): a cauda do anel é seguida por construção. Trocada por
+   uma de conteúdo: tudo o que o boot seguinte tem de antes dele veio do
+   journal, e se diz gravado.
+6. **Duas regras da adoção que nada prendia** (informativo). Sem trocar a
+   gravada, a adotada aparecia com a gravada de antes — o lado seguro, mas
+   não o que esta seção promete —; agora a suíte olha o gate logo depois
+   da adoção também (KM12). E o último número guardado depois da tomada
+   ficaria atrás de um registro anexado no meio — a regra do texto o pega
+   (KM13).
+
+### O que fica de fora
+
+- **O elo com a trava** (a C1). Com a cadeia do boot cheia, a adoção
+  calcula 1024 elos numa tomada; em depuração, é quase toda ela. Calcular
+  a continuação numa cópia isolada, fora da trava, e só publicá-la com
+  ela mudaria quando o elo é calculado em relação à trava — o que a C1
+  fechou.
+- **A cópia do registro segurado**, com a trava: rara — só a suíte a faz —
+  e uma por registro segurado.
+- **A gravada lida na mesma tomada pelo `audit.head` e pelo `audit.tail`**
+  não tem uma mutação que a suíte pegue sempre: lida fora dela, a janela
+  seria a de duas leituras seguidas, e só um relatório que caísse entre
+  elas na hora da adoção a veria. Fica conferida pelo código e pela
+  revisão adversarial.
+- Os achados 3 e 4 do adversário, acima.
+
+### Os testes
+
+| Onde | O que confere |
+|---|---|
+| hospedeiro (`politica`): *continuar tirando é a conta de continuar com*, *o registro que alguém segura é copiado e não muda*, *soltar sem lugar não cresce*, *repor lido é a conta de repor*, *pular trocando é a conta de pular* | contra a conta de antes — `continuar_com`, `repor` e `pular` —, registro a registro (a sequência, o evento, o anterior, o elo), a âncora, a cabeça, a próxima sequência e o tempo: em toda combinação do anel da adotada — vazio, com um, pela metade, cheio, que já deu a volta, depois de uma lacuna — com a cadeia do boot — vazia, com um, pela metade, cheia, que deu a volta —, com o tempo do boot abaixo e acima do do journal; o que sai pela ponta vai para `soltar`, na ordem, e se encadeia com a janela desde a âncora de antes; cada registro do boot que ninguém segurava é o mesmo `Arc`; o segurado — forte ou fraco — não muda, é copiado e solto depois; `soltar` sem lugar não cresce; a reposição com eventos de todos os tamanhos, o anel dando a volta, e cada recusa — fora de sequência, o tempo voltando, o detalhe acima do teto, e juntas — com a mesma palavra, sem mudar a cadeia, o lido de volta inteiro; a lacuna, com o anel em cada estado, a fora de sequência recusada, e o "vazio" que não serve |
+| suíte: os seis casos `adocao:` (`kernel/src/testes/adocao.rs`) | a cadeia adotada é a da conta de antes — a do journal refeita direto do disco, continuada com o que a cadeia do boot tinha logo antes da adoção —, registro a registro: com o anel do journal pela metade e cheio, depois de uma compactação, com uma lacuna, com o boot de um registro e com o boot cheio, e no boot seguinte, depois de gravar e de novo; a adotada do journal vazio do primeiro boot começa na gênese, no registro 1, se verifica e é a que o journal tem; os setores que o journal tinha antes do boot continuam os mesmos, byte a byte, e o que o boot gravou é a cadeia continuada; nada pedido nem devolvido ao alocador com a trava da auditoria na adoção, nem com a da cadeia refeita na reposição — com o anel cheio, a lacuna que o esvazia e o boot cheio —, pela conta do próprio alocador, com os controles das duas travas; o registro do boot que alguém segura não muda, e o da adotada é uma cópia; o `audit.head` e o `audit.tail` logo antes da adoção mostram a cadeia do boot com a gravada de antes, e logo depois — antes de o boot seguir — a adotada com a do journal, nunca com a de antes; produtores nos três núcleos secundários, em rajada na hora da adoção, e um leitor num deles (com 4 vCPUs, o do primeiro produtor), nessa reabertura e na seguinte: nada se perde, nada se repete, a ordem de cada produtor fica — os da cadeia do boot antes dos da rajada —, o journal não tem lacuna, e o leitor — que refaz a cadeia a cada 16 leituras — nunca vê a cadeia que não se verifica, a esvaziada, a que muda sem andar, nem a gravada adiante dela. E duas redes da suíte, em toda gravação dela: só se diz gravado o que a cadeia tem, e a gravada da adoção só troca com a trava da auditoria e a ordem das gravações na mão |
+| hospedeiro (`xtask`): *a adoção numa tomada só passa*, *a adoção fora de uma tomada só reprova*; e `cargo xtask invariantes` | a continuação, o último número, a gravada e a troca, em `adotar_auditoria`, dentro de uma tomada só da trava, uma vez cada; e reprova duas tomadas — a continuação numa e a troca noutra; a ordem inversa, pela mesma contagem das tomadas (a KM1, nas mutações) —, a continuação fora da trava, a gravada e o último número fora da tomada, a gravada que some e a adoção que some |
+| bancada de persistência: *a queda em cada fronteira do registro de boot* | a energia cai seis vezes, nas cinco fronteiras do registro de boot — antes da escrita; depois da escrita, que chegou ao disco, e que se perdeu sem a descarga; depois da descarga, antes do contador; depois do incremento, antes da leitura de volta; e depois do contador, antes da resposta —: a cadeia que o boot continuou vale exatamente quando o registro de boot está no disco — o `policy.load` dele está na cadeia do boot seguinte, gravado, ou não está —; o gravado antes volta igual — o mesmo número, o mesmo elo, o mesmo método —; tudo o que o boot seguinte tem de antes dele se diz gravado; a cadeia se verifica; e continua, com uma operação nova gravada e conferida no boot depois |
+
+### As mutações
+
+Uma de cada vez, sempre restauradas — pela cópia guardada antes de cada
+uma; os resumos dos arquivos e o `git status` conferidos a cada lote. As
+do hospedeiro (HM), contra os testes de `politica`; as do kernel (KM),
+contra os seis casos `adocao:` da suíte, no x86_64, em depuração — as
+KM1 a KM4, a KM6 e a KM7 contra o `d6602b4`, e as outras — a KM5, que
+não compilou na primeira rodada, a KM7b e as KM9 a KM13 — contra o
+`5a0fcd6`, com as redes da suíte; o reforço só acrescentou conferências,
+e o código que as da primeira rodada mudam é o mesmo —; e as cinco que
+mexem na tomada da adoção (KM1, KM2, KM11, KM12, KM13), também contra o
+`cargo xtask invariantes`.
+
+| Mutação | O comportamento que ela quebra | Reprovada por |
+|---|---|---|
+| HM1 — a lacuna não põe a âncora no elo dela | a âncora: depois de uma lacuna, o primeiro registro se encadeia no elo dela | *pular trocando é a conta de pular* ("a âncora") |
+| HM2 — a reposição aceita a sequência errada | a numeração: cada registro reposto é o seguinte | *repor lido é a conta de repor* ("fora de sequência") |
+| HM3 — a reposição aceita o tempo que volta | o tempo que não volta, numa cadeia que atravessa boots | o mesmo caso ("o tempo voltando") |
+| HM4 — a reposição aceita o detalhe acima do teto | o teto do detalhe: um registro autêntico nunca passa dele, e consertá-lo daria outro elo | o mesmo caso ("detalhe maior que o teto") |
+| HM5 — a continuação sem o vínculo: o registro do boot entra com a sequência, o anterior e o elo que tinha | o vínculo: cada registro continuado se encadeia no anterior da adotada | *continuar tirando é a conta de continuar com*, *o registro que alguém segura…*, *soltar sem lugar…* ("a janela") |
+| HM6 — a lacuna pula um a menos | a sequência depois de uma lacuna | *pular trocando…* ("a última") |
+| HM7 — a lacuna não esvazia o anel | a janela depois de uma lacuna: só o que vem depois dela | *pular trocando…* ("o anel que voltou") |
+| HM8 — a continuação perde o último registro do boot | nada se perde na publicação | os três da continuação ("a janela") |
+| HM9 — a continuação pula o registro que alguém segura | nada se perde, mesmo o que um leitor segura | *o registro que alguém segura…*, *soltar sem lugar…* |
+| HM10 — a continuação põe duas vezes o registro copiado | nada se repete | os mesmos dois |
+| HM11 — `soltar` cresce sem o lugar reservado | nada pedido com a trava | *soltar sem lugar não cresce* |
+| HM12 — a lacuna aceita um anel vazio sem o lugar da cadeia | o anel da cadeia refeita não cresce depois de uma lacuna | *pular trocando…* ("sem lugar: o vazio voltou mudado") |
+| KM1 — a adoção em duas tomadas: publica a cadeia do journal e continua a do boot depois | só o estado inteiro é publicado | *produtores em rajada…* ("um produtor perdeu, repetiu ou desordenou um registro"); e o `xtask invariantes` (*o registro do boot que alguém segura…* também falha, mas só porque a mutação deixa de contar os copiados) |
+| KM2 — a adoção solta a trava antes de a cadeia estar pronta: tira a do boot e a continua fora | a trava só se solta com o estado pronto | o mesmo, e pelo mesmo motivo o do segurado; e o `xtask invariantes` |
+| KM3 — a gravada do journal publicada antes da adoção, como antes do B4 | nenhum estado intermediário visível ao gate | *a gravada troca com a cadeia…* ("no meio da abertura, o gate mostrou a gravada do journal com a cadeia do boot") e o leitor de *produtores em rajada…* ("a gravada adiante") |
+| KM4 — a adoção sem o lugar reservado para o que solta | nada devolvido com a trava da auditoria | *nada pedido nem devolvido…* ("a adoção pediu ou devolveu memória") |
+| KM5 — o que sai pela ponta do anel cheio, solto com a trava da cadeia refeita | nada devolvido com a trava da cadeia refeita | *nada pedido nem devolvido…* ("a reposição pediu ou devolveu memória") |
+| KM6 — a lacuna esvazia o anel com a trava da cadeia refeita (`pular`) | o mesmo | *nada pedido nem devolvido…* ("a reposição pediu ou devolveu memória") |
+| KM7 — a cadeia refeita criada como antes do B4, `*REPOSTA.lock() = Some(Cadeia::nova(..))` | — | **passa: equivalente quanto à trava** — o Rust avalia o valor de uma atribuição antes do lugar, e a cadeia já nascia antes de a trava ser tomada, só com as interrupções mascaradas; e a velha, que seria solta com a trava, não existe nas reaberturas em que a suíte vigia a trava: a adoção de antes a tirou. A forma que de fato cria a cadeia com a trava na mão é a KM7b |
+| KM7b — a cadeia refeita criada com a trava já tomada, e a velha solta com ela | nada pedido com a trava da cadeia refeita | *nada pedido nem devolvido…* ("a reposição pediu ou devolveu memória") |
+| KM9 — o registro de boot gravado antes da adoção | nenhuma gravação antes de a reconstrução acabar | os seis casos `adocao:` — o registro de boot leva a cadeia do boot com a numeração dela, e o boot seguinte acha o journal fora de sequência ("registro da auditoria fora de sequência", "a reabertura deixou a persistência indisponível") |
+| KM10 — a gravada do journal dita logo antes da adoção, depois do gancho da suíte (o achado 1 do adversário) | a gravada nunca passa da cadeia | a rede da suíte em `auditoria_foi_gravada`: o kernel para ("a gravada passou da cadeia da auditoria") na primeira reabertura |
+| KM11 — a gravada da adoção trocada antes da tomada da trava (o achado 1) | a gravada troca com a cadeia | a rede da suíte em `gravada_na_adocao`: o kernel para ("a gravada da adoção fora da tomada da cadeia") já no boot da suíte; e o `xtask invariantes` |
+| KM12 — a adoção sem trocar a gravada (o achado 6) | a adotada nunca aparece com a gravada de antes | *a gravada troca com a cadeia…* ("logo depois da adoção, o gate mostrou a adotada com a gravada de antes"); e o `xtask invariantes` |
+| KM13 — o último número guardado depois da tomada (o achado 6) | o número do último registro não volta | o `xtask invariantes` — **só ele**: os casos `adocao:` e `travas:` passam (a rodada filtrada imprime 973 de 973, e os de fora do filtro contam como passados); o número só ficaria atrás de um registro que o gate anexasse entre a tomada e a escrita dele, e só até o registro seguinte — e quem o lê (o despertador do tecido de segurança, o atraso do caminho da auditoria, o pedido de parar a máquina, a captura da rede) o veria atrás nesse intervalo |
+
+Na última rodada de cada uma: as 12 do hospedeiro e 12 das 13 do kernel
+reprovaram — a KM13 só pela regra do texto, como devia —; a que passa,
+a KM7, é equivalente, explicada na tabela. A KM8 do roteiro — o
+`audit.head` lendo a gravada fora da tomada — foi tirada antes de rodar:
+nenhum teste a pegaria sempre (ver *O que fica de fora*, acima).
+
+### A medida, antes e depois
+
+A mesma instrumentação temporária dos dois lados — nunca commitada —, no
+código de antes (o `bcfa014`) e no do B4, só com os pontos de medida no
+lugar novo de cada coisa: um caso da suíte reabre a persistência em sete
+cenários — logo depois do boot (s0), depois de uma compactação (s1), com
+500 e com 3 000 registros a mais no journal (s2, s3), com uma lacuna (s4),
+com a cadeia do boot cheia, de 1024 registros (s5), e com ela cheia e três
+núcleos auditando sem parar durante a reabertura (s6) —, e mede a mesma
+carga sem reabertura (s7), para comparar a espera do gate. O boot da própria
+suíte entra também: um journal vazio, com a cadeia do boot de um registro.
+Cada seção conta o tempo com a trava na mão, com as interrupções
+mascaradas e esperando a trava, e os pedidos e as devoluções ao alocador
+do núcleo, dentro e fora dela. No QEMU com TCG, 4 vCPUs num hospedeiro de
+4 CPUs: o tempo de uma seção inclui o que o hospedeiro tirou da vCPU, e
+os maiores valores oscilam de uma rodada para outra; as contas de pedidos
+e devoluções são exatas.
+
+**A trava da auditoria na adoção** — a do gate:
+
+| | x86_64, depuração | x86_64, `release` | aarch64, depuração | aarch64, `release` |
+|---|---|---|---|---|
+| retida, boot de 5 registros, maior (s0–s4) | 1,22 ms → 764 µs | 167 µs → 139 µs | 1,13 ms → 516 µs | 184 µs → 106 µs |
+| retida, boot cheio (s5) | 199,3 ms → 59,4 ms | 16,7 ms → 9,89 ms | 192,2 ms → 42,6 ms | 12,9 ms → 3,50 ms |
+| retida, boot cheio com 3 núcleos auditando (s6) | 331,2 ms → 83,2 ms | 45,8 ms → 10,9 ms | 285,9 ms → 42,1 ms | 31,4 ms → 5,12 ms |
+| mascarada, boot cheio (s5) | 199,8 ms → 59,7 ms | 16,7 ms → 9,92 ms | 192,4 ms → 42,9 ms | 12,9 ms → 3,51 ms |
+| mascarada, boot cheio com 3 núcleos (s6) | 331,6 ms → 83,6 ms | 45,9 ms → 11,0 ms | 286,3 ms → 42,5 ms | 31,5 ms → 5,12 ms |
+| pedidos/devoluções com ela, boot cheio (s5) | 4098/4098 → 0/0 | 4098/4098 → 0/0 | 4098/4098 → 0/0 | 4098/4098 → 0/0 |
+| espera da adoção pela trava (s6) | 7 µs → 58 µs | 1 µs → 1 µs | 5 µs → 5 µs | 1 µs → 1 µs |
+| o resto, fora da trava (s5) | 69,9 ms → 42,0 ms | 3,74 ms → 3,66 ms | 40,0 ms → 38,6 ms | 3,68 ms → 9,87 ms |
+| pedidos/devoluções fora (s5) | 0/4099 → 1/4100 | 0/4099 → 1/4100 | 0/4099 → 1/4100 | 0/4099 → 1/4100 |
+
+**A espera do gate pela trava**, com três núcleos auditando sem parar:
+
+| | x86_64, depuração | x86_64, `release` | aarch64, depuração | aarch64, `release` |
+|---|---|---|---|---|
+| maior, durante a reabertura (s6) | 333,9 ms → 83,0 ms | 45,9 ms → 10,9 ms | 286,1 ms → 41,9 ms | 31,4 ms → 9,31 ms |
+| acima de 1 ms, durante a reabertura (s6) | 326 de 83328 → 290 de 83578 | 55 de 67032 → 63 de 83336 | 156 de 54572 → 135 de 58850 | 20 de 32012 → 36 de 33733 |
+| maior, sem reabertura (s7) | 6,36 ms → 2,03 ms | 1,91 ms → 1,66 ms | 2,45 ms → 4,13 ms | 1,30 ms → 421 µs |
+
+**A trava da cadeia refeita**, na reposição:
+
+| | x86_64, depuração | x86_64, `release` | aarch64, depuração | aarch64, `release` |
+|---|---|---|---|---|
+| registro reposto, mascarada, maior (s0–s5) | 2,46 ms → 2,40 ms | 226 µs → 324 µs | 4,33 ms → 1,88 ms | 220 µs → 235 µs |
+| registro reposto, mascarada, maior (s6) | 4,37 ms → 2,80 ms | 4,42 ms → 1,01 ms | 5,21 ms → 6,66 ms | 19,5 ms → 2,04 ms |
+| registros repostos acima de 50 µs (s0–s6) | 18726/18726 → 18726/18726 | 3234/18726 → 46/18726 | 18712/18712 → 18712/18712 | 2304/18712 → 34/18712 |
+| a lacuna, mascarada (s4) | 40,8 ms → 648 µs | 4,51 ms → 275 µs | 40,1 ms → 497 µs | 16,1 ms → 313 µs |
+| a lacuna, mascarada (s6) | 338,4 ms → 31 µs | 169,0 ms → 7 µs | 351,0 ms → 32 µs | 85,5 ms → 9 µs |
+| pedidos/devoluções com ela, reposição (s4) | 4549/10011 → 0/0 | 4549/10011 → 0/0 | 4547/10002 → 0/0 | 4547/10002 → 0/0 |
+| pedidos/devoluções com ela, lacuna (s4) | 0/4098 → 0/0 | 0/4098 → 0/0 | 0/4098 → 0/0 | 0/4098 → 0/0 |
+| a cadeia refeita nasce, mascarada (s5) | 85 µs → 21 µs | 20 µs → 5 µs | 111 µs → 19 µs | 15 µs → 15 µs |
+
+**O tempo e a memória da abertura** — a primeira rodada; a segunda, das configurações `release`, logo abaixo:
+
+| | x86_64, depuração | x86_64, `release` | aarch64, depuração | aarch64, `release` |
+|---|---|---|---|---|
+| o journal lido e reposto (s5) | 3075,0 ms → 3025,3 ms | 184,8 ms → 209,8 ms | 2502,1 ms → 2354,7 ms | 139,1 ms → 301,0 ms |
+| a adoção inteira, dentro e fora (s5) | 269,8 ms → 102,1 ms | 20,6 ms → 13,7 ms | 232,6 ms → 81,7 ms | 16,7 ms → 13,6 ms |
+| a abertura inteira (s5) | 6775,1 ms → 6054,2 ms | 478,9 ms → 508,5 ms | 5124,3 ms → 4574,0 ms | 275,4 ms → 488,2 ms |
+| a abertura inteira (s6) | 10248,8 ms → 9514,0 ms | 2057,7 ms → 1728,2 ms | 8172,4 ms → 7485,3 ms | 1230,6 ms → 1116,3 ms |
+| o pico passageiro do heap, acima do começo e do fim (s4) | 42,2 KiB → 42,2 KiB | 42,2 KiB → 42,2 KiB | 42,2 KiB → 42,2 KiB | 42,2 KiB → 42,2 KiB |
+| o pico passageiro do heap, acima do começo e do fim (s5) | 384,5 KiB → 384,5 KiB | 384,5 KiB → 384,5 KiB | 384,5 KiB → 384,5 KiB | 384,5 KiB → 384,5 KiB |
+| o pico passageiro do heap, acima do começo e do fim (s6) | 384,9 KiB → 384,6 KiB | 384,9 KiB → 384,9 KiB | 385,2 KiB → 385,0 KiB | 384,6 KiB → 384,9 KiB |
+
+**A segunda rodada**, nas configurações `release` — a mesma
+instrumentação, de novo, dos dois lados (a primeira e a segunda, em cada
+célula):
+
+| | x86_64: antes, 1ª e 2ª | x86_64: depois, 1ª e 2ª | aarch64: antes, 1ª e 2ª | aarch64: depois, 1ª e 2ª |
+|---|---|---|---|---|
+| adoção, retida (s5) | 16,7 ms; 18,7 ms | 9,89 ms; 6,34 ms | 12,9 ms; 15,4 ms | 3,50 ms; 3,34 ms |
+| adoção, retida (s6) | 45,8 ms; 47,1 ms | 10,9 ms; 8,86 ms | 31,4 ms; 31,1 ms | 5,12 ms; 3,71 ms |
+| espera do gate, maior (s6) | 45,9 ms; 44,3 ms | 10,9 ms; 9,35 ms | 31,4 ms; 31,2 ms | 9,31 ms; 3,69 ms |
+| a lacuna, mascarada (s4) | 4,51 ms; 3,52 ms | 275 µs; 260 µs | 16,1 ms; 4,81 ms | 313 µs; 246 µs |
+| a lacuna, mascarada (s6) | 169,0 ms; 131,1 ms | 7 µs; 8 µs | 85,5 ms; 89,4 ms | 9 µs; 7 µs |
+| registro reposto, mascarada, maior (s6) | 4,42 ms; 3,23 ms | 1,01 ms; 113 µs | 19,5 ms; 3,26 ms | 2,04 ms; 1,63 ms |
+| a abertura inteira (s5) | 478,9 ms; 287,8 ms | 508,5 ms; 498,3 ms | 275,4 ms; 293,2 ms | 488,2 ms; 327,0 ms |
+| a abertura inteira (s6) | 2057,7 ms; 1663,7 ms | 1728,2 ms; 1808,8 ms | 1230,6 ms; 1212,4 ms | 1116,3 ms; 1011,3 ms |
+
+**O tempo da abertura só com as marcas.** A instrumentação de cima mede
+cada seção, e no "depois" ela mede três por registro reposto — a
+preparação, a trava e o que se solta depois — em vez de duas: no TCG,
+isso pesa na reposição de um journal grande. Para comparar o tempo total
+sem esse peso, a mesma medida só com as marcas de tempo — nenhum
+contador por seção, nenhum gancho no alocador —, dos dois lados, duas
+rodadas de cada, alternadas:
+
+*x86_64, `release`* — em ms; antes (1ª; 2ª) → depois (1ª; 2ª):
+
+| | a reposição do journal | a adoção, dentro e fora | a abertura inteira |
+|---|---|---|---|
+| s3 | 92; 103 → 95; 93 | 0; 0 → 0; 0 | 347; 386 → 341; 339 |
+| s4 | 186; 177 → 176; 180 | 0; 0 → 0; 0 | 438; 427 → 454; 431 |
+| s5 | 169; 175 → 171; 172 | 17; 17 → 10; 9 | 452; 507 → 455; 446 |
+| s6 | 1220; 1199 → 1002; 1097 | 103; 176 → 149; 148 | 1732; 1874 → 1589; 1730 |
+
+*aarch64, `release`* — em ms; antes (1ª; 2ª) → depois (1ª; 2ª):
+
+| | a reposição do journal | a adoção, dentro e fora | a abertura inteira |
+|---|---|---|---|
+| s3 | 83; 98 → 76; 95 | 0; 0 → 0; 0 | 153; 169 → 143; 161 |
+| s4 | 121; 132 → 114; 118 | 0; 0 → 0; 0 | 197; 215 → 188; 192 |
+| s5 | 114; 109 → 109; 114 | 15; 15 → 7; 7 | 233; 222 → 212; 234 |
+| s6 | 795; 726 → 705; 835 | 118; 139 → 125; 187 | 1166; 1105 → 1077; 1286 |
+
+**O que a medida mostra.**
+
+- **Nada pedido nem devolvido com as travas**, nas quatro configurações:
+  na adoção com a cadeia do boot cheia, 4 098 pedidos e 4 098 devoluções
+  viraram nenhum; na reposição de um journal com uma lacuna, 4 549
+  pedidos e 10 011 devoluções no x86_64 (4 547 e 10 002 no aarch64)
+  viraram nenhum, e a lacuna, que devolvia o anel inteiro, também.
+- **A retenção da adoção caiu ao elo.** Com a cadeia do boot cheia, a
+  trava da auditoria foi de 199 para 59 ms (x86_64, depuração), de 16,7
+  para 9,9 ms (x86_64, `release`), de 192 para 43 ms (aarch64,
+  depuração) e de 12,9 para 3,5 ms (aarch64, `release`); com três núcleos
+  auditando, de 331 para 83, de 45,8 para 10,9, de 286 para 42 e de 31,4
+  para 5,1 ms — e, na segunda rodada de `release`, de 18,7 para 6,3 e de
+  15,4 para 3,3 ms, e de 47,1 para 8,9 e de 31,1 para 3,7 ms. O que sobra
+  é o BLAKE2s de 1024 registros, um depois do outro — a C1 —, e é o
+  piso: em depuração, ele é quase toda a tomada.
+- **A espera do gate durante a reabertura** acompanhou: a maior foi de
+  334 para 83 ms, de 45,9 para 10,9, de 286 para 42 e de 31,4 para 9,3
+  ms (na segunda rodada de `release`, de 44,3 para 9,4 e de 31,2 para 3,7
+  ms). Sem reabertura, a maior espera da mesma carga fica entre 0,4 e
+  6,4 ms nos dois lados: o ruído do TCG.
+- **A seção mascarada da lacuna** foi de 4,5 a 40,8 ms para 0,28 a 0,65 ms
+  (s4) — e, com três núcleos usando o alocador, de 85 a 351 ms para 7 a
+  32 µs (s6): ela só troca o anel. Cada registro reposto, em `release`,
+  passou de 3 234 (x86_64) e 2 304 (aarch64) seções acima de 50 µs, em
+  cerca de 18 700, para 46 e 34; em depuração, todas continuam acima de
+  50 µs — o elo em depuração custa de 50 a 100 µs.
+- **A cadeia que um boot de verdade adota** — a do boot da suíte, com um
+  registro — segura a trava menos tempo também (1,47 → 1,05 ms em
+  depuração e 0,44 → 0,29 ms em `release` no x86_64; 1,52 → 1,05 ms e
+  0,48 → 0,25 ms no aarch64),
+  mas aí a conta é pequena dos dois lados: o que domina é a primeira vez
+  que o TCG traduz o código.
+
+**O que ela não mostra.**
+
+- **O tempo total não cai como a retenção.** As mesmas devoluções
+  acontecem, fora da trava, e o mesmo elo é calculado: a reposição do
+  journal custa o mesmo trabalho, e, só com as marcas, ela mede o mesmo
+  dos dois lados (s5: 169 e 175 → 171 e 172 ms no x86_64; 114 e 109 →
+  109 e 114 ms no aarch64). A adoção inteira, dentro e fora da trava,
+  ficou mais curta — sem as cópias: de 17 para 9–10 ms e de 15 para 7 ms
+  no s5 —, e a abertura inteira ficou no ruído (s5: 452 e 507 → 455 e
+  446 ms; 233 e 222 → 212 e 234 ms). Com a instrumentação inteira, as
+  rodadas pareciam dizer outra coisa — a abertura do s5 no aarch64 em
+  `release` de 275 para 488 ms numa rodada, com a do s4, que tem
+  praticamente o mesmo journal, de 353 para 233 —: era o peso da medida
+  por seção, somado ao ruído das fases que o B4 não toca — o TPM e o
+  disco, antes da leitura e depois da adoção, que no x86_64 em `release`
+  levaram 149 ms numa rodada e 26 ms na outra, com o mesmo código. Em
+  depuração, a abertura inteira foi de −18 % a +4 % (s0 a s6), com a
+  instrumentação inteira.
+- **A memória.** O pico passageiro é o mesmo nos cenários com a cadeia do
+  boot cheia e com a lacuna (384,5 e 42,2 KiB, a menos de 1 KiB); no boot
+  de um registro, sobe 16 KiB (de 6,2 para 21,9 KiB) — o vetor do que a
+  adoção solta, reservado para um anel inteiro.

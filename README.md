@@ -396,7 +396,7 @@ kernel/src/
 ├── quedas.rs        quedas de energia em pontos exatos, só na compilação da bancada
 ├── testes.rs        suíte de testes que roda dentro do emulador
 ├── testes/
-│   ├── adocao.rs    os casos da reconstrução da auditoria no boot: a cadeia adotada igual, registro a registro, à da conta de antes — a do journal, refeita do disco, continuada com os eventos que a cadeia do boot tinha logo antes da adoção —, com o journal de poucos registros e o anel pela metade, o anel cheio, o boot de um registro e o boot cheio, depois da compactação, com uma lacuna e no boot seguinte, e o journal de antes no disco byte a byte; nada pedido nem devolvido ao alocador com a trava da auditoria na adoção, nem com a da cadeia refeita na reposição, com os controles das duas travas; o registro do boot que alguém segura, que não muda, com o da adotada copiado; a gravada que troca com a cadeia, que o `audit.head` e o `audit.tail` no meio da abertura nunca mostram adiante da do boot; e produtores e um leitor noutros núcleos durante a reabertura, sem perder, repetir nem desordenar nada no journal, e sem a cadeia nem a gravada pela metade
+│   ├── adocao.rs    os casos da reconstrução da auditoria no boot: a cadeia adotada igual, registro a registro, à da conta de antes — a do journal, refeita do disco, continuada com os eventos que a cadeia do boot tinha logo antes da adoção —, com o journal de poucos registros e o anel pela metade, o anel cheio, o boot de um registro e o boot cheio, depois da compactação, com uma lacuna e no boot seguinte, e o journal de antes no disco byte a byte; nada pedido nem devolvido ao alocador com a trava da auditoria na adoção, nem com a da cadeia refeita na reposição, com os controles das duas travas; o registro do boot que alguém segura, que não muda, com o da adotada copiado; a gravada que troca com a cadeia, que o `audit.head` e o `audit.tail` logo antes da adoção nunca mostram adiante da do boot, e logo depois mostram a da adotada, nunca a de antes; a adotada do journal vazio do primeiro boot, desde a gênese; e produtores em rajada na hora da adoção e um leitor noutros núcleos, sem perder, repetir nem desordenar nada no journal, e sem a cadeia nem a gravada pela metade
 │   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
@@ -5348,7 +5348,25 @@ Sem ganho a medir, não há o que pagar com esse risco.
   11/11/2026 por mantê-lo com a trava — só volta a ser considerada se uma
   medida mostrar o elo como gargalo relevante. E a conferência
   "a auditoria só é relatada" passou a valer também dentro de
-  `autorizacao.rs` e da persistência, item a item.
+  `autorizacao.rs` e da persistência, item a item. O boot, a última seção
+  que ainda pedia e devolvia memória com uma trava da auditoria, deixou
+  de fazê-lo num incremento [B] de 13/11/2026 — o B4 da trava da
+  auditoria (a pendência de 11/11/2026; não o B4 da troca da própria
+  senha, `c153c15`): a cadeia que o
+  journal refaz recebe cada registro montado fora da trava dela, a lacuna
+  troca o anel por um vazio reservado antes, e a adoção tira os
+  registros da cadeia do boot em vez de copiá-los, com a gravada trocada
+  na mesma tomada — antes, ela era publicada antes da adoção, e o
+  `audit.head` e o `audit.tail` podiam mostrar a gravada do journal ao
+  lado da cadeia do boot. Com a cadeia do boot cheia, a adoção com a
+  trava foi de 12,9–16,7 ms para 3,5–9,9 ms em `release` e de 192–199 ms
+  para 43–59 ms em depuração — o que sobra é o elo, pela C1 —, e a maior
+  espera do gate durante a reabertura, com três núcleos auditando, de
+  31–46 ms para 9–11 ms e de 286–334 ms para 42–83 ms; o tempo total da
+  abertura ficou no ruído (`docs/PERSISTENCIA.md`, *A reconstrução da
+  auditoria no boot (B4)*, com a medida, os testes e as mutações — a
+  adoção numa tomada só passou a ser também uma regra do `xtask
+  invariantes`).
   **O A1-4 segue pendente**: a recusa não diz quantos dos contados
   são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
   que espera o coletor, e quem ouve "cota de processos do papel: N de M"

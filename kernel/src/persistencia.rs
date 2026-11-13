@@ -220,7 +220,8 @@ fn auditoria_foi_gravada(ate: u64, elo: [u8; 32]) {
 /// troca, a do journal ficava ao lado da cadeia do boot, e os registros do
 /// boot — que nenhum journal tem — se diziam no disco. O elo e o aviso ao
 /// caminho da auditoria vêm depois, em [`auditoria_foi_gravada`]: o elo só
-/// a compactação o lê, com a ordem das gravações, que o boot tem.
+/// o leem a cópia para o journal e a compactação, com a ordem das
+/// gravações, que o boot tem.
 pub(crate) fn gravada_na_adocao(ate: u64) {
     // A rede da suíte: com a trava da auditoria e a ordem das gravações na
     // mão, ou a gravada troca fora da tomada da cadeia (o achado 1 do
@@ -1119,8 +1120,10 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     // o heap do kernel é bem menor que ela. Do caminho fica só o que o
     // boot precisa — a instalação, o último boot, quantos de auditoria.
     //
-    // A cadeia nasce fora da trava: ela reserva o lugar do anel cheio. Se
-    // já havia uma — na suíte, que reabre —, a velha é solta fora também.
+    // A cadeia nasce fora da trava, e fora da seção mascarada: ela reserva
+    // o lugar do anel cheio. A troca devolve a de antes, se houvesse uma, e
+    // ela seria solta fora também — o que não acontece: toda abertura tira
+    // a cadeia refeita, na adoção ou no fim de [`abrir_em_ordem`].
     let nova = Cadeia::nova(crate::autorizacao::CAPACIDADE_DA_AUDITORIA);
     let velha = crate::arch::sem_interrupcoes(|| REPOSTA.lock().replace(nova));
     drop(velha);
@@ -1365,7 +1368,9 @@ fn abrir_de_fato() -> Result<Estado, &'static str> {
     let novo = escritor.ancora() == valor && lido.quantos == 0;
     // O journal está confirmado pela âncora: a cadeia que ele refez vira a
     // auditoria, e o que este boot registrou até aqui continua depois
-    // dela — e vai no registro de boot, logo abaixo. A gravada troca junto
+    // dela — e vai no primeiro registro gravado depois: o de boot, logo
+    // abaixo, ou, num journal novo, o de abertura, que vem antes dele, ou a
+    // base de uma compactação no boot. A gravada troca junto
     // com a cadeia, com a trava da auditoria — ver [`gravada_na_adocao`] —;
     // o elo do último gravado e o aviso ao caminho da auditoria, depois.
     if let Some(reposta) = crate::arch::sem_interrupcoes(|| REPOSTA.lock().take()) {

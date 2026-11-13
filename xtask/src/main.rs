@@ -4886,8 +4886,10 @@ mod testes_da_auditoria_so_relatada {
 /// continuá-la e publicá-la depois — deixariam o gate ver a cadeia pela
 /// metade entre elas; a continuação fora da trava deixaria a cadeia sem
 /// dono no meio; e a gravada fora da tomada mostraria a do journal ao lado
-/// da cadeia do boot. A suíte só pega isso quando um registro cai na
-/// janela (os achados 1 e 2 do adversário do B4); a regra do texto, sempre.
+/// da cadeia do boot. A suíte pega as duas tomadas e a continuação fora da
+/// trava só quando um registro cai na janela (o achado 2 do adversário do
+/// B4); a gravada fora da tomada, sempre, pela rede em
+/// `gravada_na_adocao` (o achado 1); a regra do texto, as três, sempre.
 fn conferir_a_adocao_numa_tomada() -> Result<ExitCode, String> {
     let texto = std::fs::read_to_string(raiz_do_projeto().join("kernel/src/autorizacao.rs"))
         .map_err(|e| format!("não foi possível ler kernel/src/autorizacao.rs: {e}"))?;
@@ -5009,13 +5011,14 @@ pub fn outra() {
         assert_eq!(erros_da_adocao(CERTA), Vec::<String>::new());
     }
 
-    /// As duas tomadas, nas duas ordens (a KM1 do B4, e a do achado 2 do
-    /// adversário), a continuação fora da trava (a KM2), a gravada e o
-    /// último número fora da tomada (o achado 1), um passo que some, e a
-    /// adoção que some.
+    /// Duas tomadas — a continuação numa e a troca noutra (o achado 2 do
+    /// adversário do B4; a ordem inversa, a da KM1, a mesma contagem das
+    /// tomadas reprova) —, a continuação fora da trava (a KM2), a gravada
+    /// fora da tomada (o achado 1), o último número depois dela (o achado
+    /// 6), um passo que some, e a adoção que some.
     #[test]
     fn a_adocao_fora_de_uma_tomada_reprova() {
-        let publicar_e_continuar = CERTA.replace(
+        let continuar_e_publicar = CERTA.replace(
             "        ULTIMO_REGISTRO.store(do_journal.ultima_seq(), Ordering::Release);
         crate::persistencia::gravada_na_adocao(gravada);
         a.replace(do_journal)
@@ -5065,7 +5068,7 @@ pub fn outra() {
         );
         let sumiu = CERTA.replace("pub fn adotar_auditoria(", "pub fn adotar(");
         for (caso, texto) in [
-            ("publicar e continuar em duas tomadas", publicar_e_continuar),
+            ("continuar e publicar em duas tomadas", continuar_e_publicar),
             ("continuar fora da trava", continuar_fora),
             ("a gravada fora da tomada", gravada_fora),
             ("o ultimo numero depois da tomada", ultimo_depois),

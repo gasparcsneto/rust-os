@@ -1,19 +1,21 @@
 //! Os casos `adocao:` — a reconstrução da auditoria no boot: a cadeia que o
 //! journal refaz, e a do boot continuada nela, com a trava da auditoria
-//! (ver `autorizacao::adotar_auditoria` e "O boot", em
-//! `docs/PERSISTENCIA.md`).
+//! (ver `autorizacao::adotar_auditoria` e "A reconstrução da auditoria no
+//! boot (B4)", em `docs/PERSISTENCIA.md`).
 //!
 //! A reabertura da suíte (`com_a_persistencia_fechada`) é o caminho do boot
 //! inteiro: o journal lido e reposto, a âncora conferida, a adoção, o
-//! registro de boot. Os casos conferem, sem depender de tempo:
+//! registro de boot. Os casos conferem, sem medir tempo — os limites só
+//! livram um fio preso, e a rajada que não chega à adoção reprova —:
 //!
 //! - que a cadeia adotada é a que a conta de antes daria — a do journal,
 //!   refeita por `repor` e `pular` direto do disco, continuada por
 //!   `continuar_com` com os eventos que a cadeia do boot tinha logo antes
-//!   da adoção —, registro a registro, com o journal vazio do primeiro boot
-//!   da suíte, com o anel do journal pela metade, com o anel do journal
-//!   cheio, depois de uma compactação, com uma lacuna, com o boot de um
-//!   registro e o boot com o anel cheio, e no boot seguinte;
+//!   da adoção —, registro a registro, com o anel do journal pela metade,
+//!   com o anel do journal cheio, depois de uma compactação, com uma
+//!   lacuna, com o boot de um registro e o boot com o anel cheio, e no boot
+//!   seguinte; e que a adotada do journal vazio do primeiro boot da suíte
+//!   começa na gênese, no registro 1, se verifica e é a que o journal tem;
 //!   que os setores que o journal tinha antes do boot continuam os mesmos,
 //!   byte a byte, e o que o boot gravou é a cadeia continuada;
 //! - que nada se pede nem se devolve ao alocador com a trava da auditoria
@@ -262,7 +264,8 @@ fn confere_com_a_esperada(esperada: &Cadeia, caso: &str) -> Resultado {
 }
 
 /// O journal com poucos registros de auditoria — o do boot da suíte, no
-/// primeiro caso dela —: o anel que ele refaz fica pela metade, e a cadeia
+/// segundo caso dela, logo depois do do compositor —: o anel que ele refaz
+/// fica pela metade, e a cadeia
 /// adotada é a da conta de antes.
 ///
 /// Antes, o journal vazio: o boot da suíte abriu um disco sem journal e sem
@@ -809,9 +812,10 @@ fn ate_zerar(vivos: &AtomicU64, ms: u64) -> Resultado {
     Ok(())
 }
 
-/// Produtores em outros núcleos auditam enquanto a persistência reabre —
-/// duas vezes —, em rajada na hora da adoção, e um leitor noutro núcleo lê
-/// a cadeia e a gravada na mesma tomada: o leitor nunca vê a cadeia que não
+/// Produtores em outros núcleos auditam enquanto a persistência reabre, em
+/// rajada na hora da adoção, e um leitor noutro núcleo lê a cadeia e a
+/// gravada na mesma tomada, nessa reabertura e na seguinte, que só ele
+/// acompanha: o leitor nunca vê a cadeia que não
 /// se verifica, nem a gravada adiante dela; e, gravado tudo, o journal tem,
 /// depois do que tinha antes do boot, cada sequência uma vez, na ordem, sem
 /// lacuna, e os registros de cada produtor todos, uma vez cada, na ordem em
