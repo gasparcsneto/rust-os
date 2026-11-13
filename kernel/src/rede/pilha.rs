@@ -511,6 +511,12 @@ struct Adaptador<'a> {
     /// resposta (`net.recv`, ao armar a espera), e um quadro que chegava
     /// bem nela passava do quarto de folga da pilha de um fio — ver o caso
     /// `hora: a rodada cabe na pilha de um fio`.
+    ///
+    /// O buffer não é zerado entre um quadro e outro da mesma volta: o que
+    /// separa o quadro de agora do resto do anterior é a fatia do tamanho
+    /// colhido, a única que o firewall e o `smoltcp` veem — e a placa
+    /// escreve exatamente o tamanho que diz. Ver o caso `rede: o quadro
+    /// colhido nao leva o resto do anterior`.
     quadro: &'a mut [u8; MAIOR_QUADRO],
 }
 
@@ -1538,6 +1544,16 @@ pub fn estado_de_teste(id: u64) -> Option<Estado> {
 #[cfg(feature = "modo-teste")]
 pub fn injetar_de_teste(quadro: &[u8]) {
     enfileirar_de_teste(quadro);
+    sondar();
+}
+
+/// Só para a suíte: como [`injetar_de_teste`], com vários quadros postos na
+/// fila de uma vez — a mesma volta os colhe, um atrás do outro, no mesmo
+/// [`Adaptador::quadro`].
+#[cfg(feature = "modo-teste")]
+pub fn injetar_juntos_de_teste(quadros: &[&[u8]]) {
+    let copias: Vec<Vec<u8>> = quadros.iter().map(|q| q.to_vec()).collect();
+    crate::arch::sem_interrupcoes(|| INJETADOS.lock().extend(copias));
     sondar();
 }
 

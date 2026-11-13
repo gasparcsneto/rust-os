@@ -10788,7 +10788,9 @@ fn e1000_sem_enlace_nada_sai() -> Resultado {
 /// dele: o quadro com erro de CRC e o partido — sem o fim do quadro — não
 /// sobem e são contados, e um tamanho de 65535 é cortado no maior quadro,
 /// sem um byte além no destino. Cada descritor colhido volta para a placa
-/// pela cauda. Numa placa de mentira, onde o caso escreve os descritores.
+/// pela cauda. E o quadro bom é escrito no destino com o tamanho que o
+/// driver diz, nem um byte a mais. Numa placa de mentira, onde o caso
+/// escreve os descritores.
 fn e1000_quadros_hostis() -> Resultado {
     use crate::e1000::registros_de_teste as r;
     let mut p = crate::e1000::de_mentira().ok_or("sem frames para a placa de mentira")?;
@@ -10826,6 +10828,18 @@ fn e1000_quadros_hostis() -> Resultado {
     }
     if p.receber(&mut destino).is_some() {
         return Err("o driver colheu um descritor que a placa nao marcou");
+    }
+    // E o quadro bom: o driver escreve no destino exatamente o tamanho que
+    // diz, e nem um byte além — a pilha colhe a volta inteira num buffer
+    // só, e o que passa do tamanho é o resto do quadro anterior (ver
+    // `rede::pilha::Adaptador::quadro`).
+    p.depositar(3, 0x44, 64, inteiro, 0);
+    let mut destino = [0xAAu8; 1600];
+    if p.receber(&mut destino) != Some(64)
+        || destino[..64].iter().any(|&b| b != 0x44)
+        || destino[64..].iter().any(|&b| b != 0xAA)
+    {
+        return Err("o driver nao escreveu no destino exatamente o tamanho que disse");
     }
     Ok(())
 }
@@ -39662,6 +39676,10 @@ static CASOS: &[Caso] = &[
         f: rede_o_datagrama_de_outra_origem_nao_chega,
     },
     Caso {
+        nome: "rede: o quadro colhido nao leva o resto do anterior: o firewall e a pilha veem so o quadro de agora",
+        f: rede_o_quadro_colhido_nao_leva_o_resto_do_anterior,
+    },
+    Caso {
         nome: "rede: a associacao tem a sua porta",
         f: rede_a_associacao_tem_a_sua_porta,
     },
@@ -44402,6 +44420,116 @@ fn rede_o_datagrama_de_outra_origem_nao_chega() -> Resultado {
     })();
     fechar_conexao(quem, conexao);
     resultado
+}
+
+/// O quadro colhido mora num buffer só por volta da pilha — ver
+/// `rede::pilha::Adaptador::quadro` —, e o que vem atrás de um quadro
+/// maior, na mesma volta, não leva o resto dele: o firewall confere, e a
+/// pilha consome, só os bytes do quadro de agora. Antes, cada quadro tinha
+/// um buffer novo e zerado; agora a fatia do tamanho colhido é o que separa
+/// um quadro do resto do anterior.
+///
+/// Um quadro do maior tamanho, para uma porta sem fluxo, é descartado, e
+/// logo atrás, na mesma volta, chega um datagrama curto do destino da
+/// associação cujo IPv4 diz 1500 bytes, com o UDP sem soma: a pilha recusa
+/// o curto, e nada chega à associação. Com a fatia do buffer inteiro, o
+/// resto do quadro descartado completaria o curto, e o corpo de um quadro
+/// que o firewall barrou chegaria por um fluxo permitido. E um datagrama do
+/// destino, e logo atrás um quadro IPv4 de 16 bytes: o firewall descarta o
+/// pequeno como protocolo, pelo que ele é — lendo o buffer inteiro, veria
+/// o cabeçalho do anterior e o deixaria passar.
+fn rede_o_quadro_colhido_nao_leva_o_resto_do_anterior() -> Resultado {
+    use crate::rede::pilha;
+    let quem = sistema_aqui();
+    let conexao = conexao_aberta(&fs_pedir(
+        quem,
+        "net.connect",
+        &alloc::format!(r#"{{"to":"{TFTP}"}}"#),
+    ))?;
+    let resultado = (|| -> Resultado {
+        let porta =
+            pilha::porta_local_de_teste(conexao).ok_or("a associacao nao tem porta local")?;
+        let nada_chegou = || {
+            let r = fs_pedir(
+                quem,
+                "net.recv",
+                &alloc::format!(r#"{{"connection":{conexao}}}"#),
+            );
+            fs_numero(&r, "datagram").is_none() && fs_numero(&r, "returned") == Some(0)
+        };
+        if !nada_chegou() {
+            return Err("a associacao nova ja tinha um datagrama");
+        }
+        // O grande: o maior quadro, para uma porta sem fluxo.
+        let grande = quadro_udp(
+            IP_DO_ROTEADOR,
+            69,
+            40_999,
+            &[0x5A; crate::rede::pilha::MAIOR_DATAGRAMA],
+        );
+        // O curto: 60 bytes do destino da associação, com o IPv4 dizendo
+        // 1500 bytes e o UDP 1480, sem soma — a soma do cabeçalho IPv4
+        // refeita, para a pilha só o recusar pelo tamanho.
+        let mut curto = quadro_udp(IP_DO_ROTEADOR, 69, porta, &[0x11; 18]);
+        if grande.len() != crate::rede::placa::MAIOR_QUADRO || curto.len() != 60 {
+            return Err("os quadros do caso nao tem os tamanhos que ele precisa");
+        }
+        curto[38..40].copy_from_slice(&1480u16.to_be_bytes());
+        curto[40..42].copy_from_slice(&[0, 0]);
+        curto[16..18].copy_from_slice(&1500u16.to_be_bytes());
+        curto[24..26].copy_from_slice(&[0, 0]);
+        let soma = soma_do_cabecalho_ipv4(&curto[14..34]);
+        curto[24..26].copy_from_slice(&soma.to_be_bytes());
+        let antes = pilha::descartes();
+        pilha::injetar_juntos_de_teste(&[&grande[..], &curto[..]]);
+        if pilha::descartes().entrada_sem_fluxo <= antes.entrada_sem_fluxo {
+            return Err("o quadro grande nao foi colhido e descartado na volta");
+        }
+        if !nada_chegou() {
+            return Err("o resto do quadro descartado chegou a associacao pelo quadro curto");
+        }
+        // O pequeno: os endereços de placa e o tipo IPv4, e só o começo de
+        // um cabeçalho — o mesmo começo do datagrama da frente.
+        let do_destino = quadro_udp(IP_DO_ROTEADOR, 69, porta, b"de agora");
+        let mut pequeno = [0u8; 16];
+        pequeno.copy_from_slice(&do_destino[..16]);
+        // A medida é a de um quadro só, e a rede de outro caso pode estar
+        // acabando na mesma volta: mais de um descarte de protocolo não diz
+        // nada, e a injeção se repete — ver o caso do firewall.
+        for _ in 0..5 {
+            let antes = pilha::descartes();
+            pilha::injetar_juntos_de_teste(&[&do_destino[..], &pequeno[..]]);
+            let agora = pilha::descartes();
+            if datagrama_de(quem, conexao)? != b"de agora" {
+                return Err("o datagrama do destino na frente do pequeno nao chegou inteiro");
+            }
+            match agora.entrada_protocolo - antes.entrada_protocolo {
+                0 => {
+                    crate::log_error!("teste", "{:?} -> {:?}", antes, agora);
+                    return Err(
+                        "o quadro de 16 bytes passou pelo firewall com o resto do anterior",
+                    );
+                }
+                1 => return Ok(()),
+                _ => esperar_ms(200),
+            }
+        }
+        Err("outros descartes de protocolo cairam junto com cada injecao")
+    })();
+    fechar_conexao(quem, conexao);
+    resultado
+}
+
+/// A soma do cabeçalho IPv4 `cabecalho`, com o campo dela zerado.
+fn soma_do_cabecalho_ipv4(cabecalho: &[u8]) -> u16 {
+    let mut soma = cabecalho
+        .chunks(2)
+        .map(|p| u32::from(u16::from_be_bytes([p[0], *p.get(1).unwrap_or(&0)])))
+        .sum::<u32>();
+    while soma > 0xFFFF {
+        soma = (soma & 0xFFFF) + (soma >> 16);
+    }
+    !(soma as u16)
 }
 
 /// Duas associações UDP vivas não dividem a porta local: o socket UDP
