@@ -498,15 +498,26 @@ fn agora() -> Instant {
 }
 
 /// A placa, vista pelo `smoltcp`, com a fotografia dos fluxos que o
-/// firewall confere.
+/// firewall confere e o lugar do quadro colhido.
 struct Adaptador<'a> {
     fluxos: &'a [Fluxo],
+    /// Onde a placa — ou, na suíte, a fila dos injetados — deixa o quadro
+    /// colhido: um de cada vez, porque a pilha consome cada um antes de
+    /// colher o seguinte. Mora no quadro de pilha de quem faz a volta
+    /// ([`Pilha::sondar`]), e não nos da colheita: com os bytes dentro do
+    /// [`Recebido`], o quadro era copiado a cada passo — a colheita, o `?`,
+    /// o `receive`, o `Some` —, e na compilação de depuração cada cópia tem
+    /// lugar próprio na pilha. A colheita mais funda é a da espera de uma
+    /// resposta (`net.recv`, ao armar a espera), e um quadro que chegava
+    /// bem nela passava do quarto de folga da pilha de um fio — ver o caso
+    /// `hora: a rodada cabe na pilha de um fio`.
+    quadro: &'a mut [u8; MAIOR_QUADRO],
 }
 
-/// Um quadro colhido, à espera de a pilha consumi-lo.
-struct Recebido {
-    quadro: [u8; MAIOR_QUADRO],
-    tamanho: usize,
+/// Um quadro colhido, à espera de a pilha consumi-lo: a fatia dele em
+/// [`Adaptador::quadro`].
+struct Recebido<'a> {
+    quadro: &'a [u8],
 }
 
 /// A licença de transmitir um quadro — se o firewall deixar.
@@ -514,12 +525,12 @@ struct Envio<'a> {
     fluxos: &'a [Fluxo],
 }
 
-impl RxToken for Recebido {
+impl RxToken for Recebido<'_> {
     fn consume<R, F>(self, f: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        f(&self.quadro[..self.tamanho])
+        f(self.quadro)
     }
 }
 
@@ -570,10 +581,9 @@ impl TxToken for Envio<'_> {
 }
 
 impl Adaptador<'_> {
-    /// O próximo quadro colhido — o injetado pela suíte primeiro —, sem
-    /// olhar o firewall.
-    fn colher(&mut self) -> Option<Recebido> {
-        let mut quadro = [0u8; MAIOR_QUADRO];
+    /// Colhe o próximo quadro — o injetado pela suíte primeiro — em
+    /// [`Adaptador::quadro`], sem olhar o firewall, e diz o tamanho dele.
+    fn colher(&mut self) -> Option<usize> {
         #[cfg(feature = "modo-teste")]
         {
             let injetado = {
@@ -582,23 +592,24 @@ impl Adaptador<'_> {
             };
             if let Some(injetado) = injetado {
                 let tamanho = injetado.len().min(MAIOR_QUADRO);
-                quadro[..tamanho].copy_from_slice(&injetado[..tamanho]);
-                return Some(Recebido { quadro, tamanho });
+                self.quadro[..tamanho].copy_from_slice(&injetado[..tamanho]);
+                return Some(tamanho);
             }
         }
-        let tamanho = super::placa::com_a_placa(|placa| placa.receber(&mut quadro))??;
+        let quadro = &mut *self.quadro;
+        let tamanho = super::placa::com_a_placa(|placa| placa.receber(quadro))??;
         if tamanho == 0 {
             return None;
         }
         // O ARP do diagnóstico olha antes — ver `super`.
-        super::observar(&quadro[..tamanho]);
-        Some(Recebido { quadro, tamanho })
+        super::observar(&self.quadro[..tamanho]);
+        Some(tamanho)
     }
 }
 
 impl Device for Adaptador<'_> {
     type RxToken<'a>
-        = Recebido
+        = Recebido<'a>
     where
         Self: 'a;
     type TxToken<'a>
@@ -606,16 +617,18 @@ impl Device for Adaptador<'_> {
     where
         Self: 'a;
 
-    fn receive(&mut self, _agora: Instant) -> Option<(Recebido, Envio<'_>)> {
+    fn receive(&mut self, _agora: Instant) -> Option<(Recebido<'_>, Envio<'_>)> {
         // O firewall: o quadro que não vai a fluxo nenhum — ou vem do
         // destino de um fluxo barrado — sai antes de a pilha o ver, e o
         // próximo vem no lugar dele.
         loop {
-            let recebido = self.colher()?;
-            match firewall::entrada(&recebido.quadro[..recebido.tamanho], self.fluxos) {
+            let tamanho = self.colher()?;
+            match firewall::entrada(&self.quadro[..tamanho], self.fluxos) {
                 Veredito::Passa => {
                     return Some((
-                        recebido,
+                        Recebido {
+                            quadro: &self.quadro[..tamanho],
+                        },
                         Envio {
                             fluxos: self.fluxos,
                         },
@@ -687,7 +700,14 @@ pub fn iniciar() {
     }
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = u64::from_le_bytes(semente);
-    let iface = Interface::new(config, &mut Adaptador { fluxos: &[] }, agora());
+    let iface = Interface::new(
+        config,
+        &mut Adaptador {
+            fluxos: &[],
+            quadro: &mut [0u8; MAIOR_QUADRO],
+        },
+        agora(),
+    );
     let mut sockets = SocketSet::new(Vec::new());
     let dhcp = sockets.add(dhcpv4::Socket::new());
     // As vagas do canal do agente, escutando desde já: sem endereço ainda
@@ -801,9 +821,15 @@ impl Pilha {
                 ));
             }
         }
+        // O quadro colhido nesta volta, um de cada vez — ver
+        // [`Adaptador::quadro`].
+        let mut quadro = [0u8; MAIOR_QUADRO];
         let _ = self.iface.poll(
             agora(),
-            &mut Adaptador { fluxos: &fluxos },
+            &mut Adaptador {
+                fluxos: &fluxos,
+                quadro: &mut quadro,
+            },
             &mut self.sockets,
         );
         // Na suíte, a bancada de DNS responde ao que saiu nesta volta — o
@@ -817,7 +843,10 @@ impl Pilha {
             }
             let _ = self.iface.poll(
                 agora(),
-                &mut Adaptador { fluxos: &fluxos },
+                &mut Adaptador {
+                    fluxos: &fluxos,
+                    quadro: &mut quadro,
+                },
                 &mut self.sockets,
             );
         }
