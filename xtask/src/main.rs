@@ -19408,7 +19408,10 @@ mod testes {
             Path::new("/r/nvme-testes.img"),
             Path::new("/r/nvme.falhas"),
         );
-        assert!(nvme.contains(&"nvme,serial=duke-nvme-testes,drive=nvme0".to_string()));
+        assert!(
+            nvme.iter()
+                .any(|a| a == "nvme,serial=duke-nvme-testes,drive=nvme0")
+        );
         assert!(!nvme.iter().any(|a| a.contains("bootindex")), "{nvme:?}");
         for arch in [Arquitetura::X86_64, Arquitetura::Aarch64] {
             let mut qemu = Command::new("qemu");

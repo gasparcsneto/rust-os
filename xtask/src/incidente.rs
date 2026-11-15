@@ -2538,7 +2538,7 @@ mod testes {
             ler_na_ram(&mut e, 2, virtual_(0x1000_0000), 0x4000, &ram).len(),
             0x4000
         );
-        assert!(e.perguntas.contains(&"cpu 2".to_string()));
+        assert!(e.perguntas.iter().any(|p| p == "cpu 2"));
         // Do meio da última página da RAM, 8 KiB: só até o fim dela.
         assert_eq!(
             ler_na_ram(&mut e, 0, virtual_(0x1000_3800), 0x2000, &ram).len(),
