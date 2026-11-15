@@ -9575,7 +9575,7 @@ ponta a ponta nas duas arquiteturas. Ela nasceu da CI 492, o pânico de
 uma tentativa da atualização que parava na primeira linha do relato: com
 ela, uma reprodução por injeção — um núcleo segurando de propósito a
 trava dos dormentes quando a NMI o para — mostrou a causa, com a
-assinatura inteira da CI 492: o tique do núcleo dos dispositivos
+assinatura técnica da CI 492: o tique do núcleo dos dispositivos
 tomando, no meio do relato, uma trava que um núcleo parado pela NMI
 segurava — a dos dormentes ou a do escalonador; sem o ELF daquela
 execução, não se sabe qual. O travamento natural não se repetiu em

@@ -368,13 +368,15 @@ não a autoridade que o boot recusado acabou de perder.
   kernel fora de um slot (ARM); e, com os pontos de queda, cada fronteira
   da instalação, da confirmação, da escrita e do desfazimento, e o pânico
   em toda tentativa — também com um núcleo secundário com a trava do
-  relógio na mão quando a parada o pega, a assinatura do travamento da CI
-  492, reproduzida por injeção, e, no x86, com a trava da paginação, que o
+  relógio na mão quando o pânico reivindica o fim — no x86, parado pela
+  NMI; no ARM, mascarado, sem ouvir a SGI —, a condição do travamento da
+  CI 492, recriada por injeção, e, no x86, com a trava da paginação, que o
   reinício toma (ver
   [`PERSISTENCIA.md`](PERSISTENCIA.md#o-pânico-que-parava-na-primeira-linha-ci-492)).
   Na CI, um job por arquitetura: a bancada inteira levou 65 minutos no x86
-  e 53 no ARM, antes dos dois cenários do segurador, que somam uns seis
-  minutos e meio no x86 e dois e meio no ARM.
+  e 53 no ARM, antes dos dois cenários do segurador, que na CI 495
+  levaram uns quatro minutos no x86 (125 e 124 s) e dois no ARM (127 s; o
+  da paginação não se aplica lá).
 - `cargo test -p xtask`: a chave de atualização, o registro do operador, a
   imagem conferida pelo registro.
 
@@ -409,7 +411,7 @@ uma foram reprovadas:
 | M18 | a recusa do boot reinicia sem gravar o porquê | a suíte: o boot recusado; a versão cancelada |
 | M19 | o pânico com as interrupções como o fio as deixou | o pânico na tentativa com um núcleo parado segurando a trava do relógio (x86 e ARM) |
 | M20 | o reinício do pânico sem destravar a paginação | o pânico na tentativa com um núcleo parado segurando a trava da paginação (x86) |
-| M21 | a máscara do pânico depois da parada dos outros núcleos | o `cargo xtask invariantes` (a bancada não a pega) |
+| M21 | a máscara do pânico depois da parada dos outros núcleos | o `cargo xtask invariantes` (a bancada do x86 não a pega) |
 
 A M19 é a da CI 492 — a causa demonstrada pela injeção do segurador, sem
 que o travamento natural se repetisse —: o handler de pânico de antes, que
@@ -419,10 +421,12 @@ ficava parada até alguém desligá-la (ver
 [`PERSISTENCIA.md`](PERSISTENCIA.md#o-pânico-que-parava-na-primeira-linha-ci-492)).
 O controle, com as duas correções, passou nos cenários do pânico — os
 quatro no x86 e os três que se aplicam no ARM. A M21 é a máscara no lugar
-errado: depois da parada dos outros núcleos, a janela dela é a espera da
-parada, de microssegundos, e o tique que a bancada provoca vem centenas de
-milissegundos depois — ela sobreviveu à bancada, e o `cargo xtask
-invariantes` confere que a máscara é a primeira instrução do handler. A
+errado: depois da parada dos outros núcleos, a janela dela, no x86, é a
+espera da parada, de microssegundos, e o tique que a bancada provoca vem
+centenas de milissegundos depois — ela sobreviveu à bancada do x86 (no
+ARM, onde a parada espera um quarto de segundo pelo segurador, não
+rodou), e o `cargo xtask invariantes` confere que a máscara é a primeira
+instrução do handler. A
 M20 veio do adversário da correção: o reinício do
 x86 acha o registrador de reinício pela ACPI, que traduz endereços pela
 tabela de páginas, com a trava dela, e um núcleo parado segurando-a
