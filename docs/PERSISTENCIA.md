@@ -4135,6 +4135,12 @@ peso que tem:
   no x86, o destravamento da paginação vem antes da chamada do reinício; e
   nada da injeção nem do auxiliar da suíte está neles.
 - **A CI 495: 28 de 28 jobs verdes**, no `6fc5312`.
+- **A CI 497: 28 de 28 jobs verdes**, no `9e85e0f`, a ponta depois do
+  encerramento: desde o `6fc5312` mudaram só a documentação e dois testes
+  do `xtask`, e o kernel é o mesmo. A 496, no `260420c`, reprovou nos
+  lints com o código igual — o nightly sem data trouxe um lint novo do
+  Clippy —, e foi isso que levou o compilador a ter data: ver "O
+  compilador", no `CLAUDE.md`.
 
 Na conferência do encerramento, as quatro mutações rodaram de novo no
 `6fc5312`, uma de cada vez e restauradas: a M-a reprovada no x86 e no

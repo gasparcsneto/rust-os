@@ -483,8 +483,10 @@ de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
    `cargo build --release --target x86_64-unknown-none` (ou
    `aarch64-unknown-none-softfloat`). As opções e o `usuario.ld` do modelo
    são as dos programas da imagem; o `rust-toolchain.toml` dele pede o
-   canal do repositório e os dois alvos, que o rustup instala na primeira
-   compilação; e o `cargo xtask invariantes` confere que nada divergiu.
+   canal do repositório — o nightly com data, o compilador oficial (ver "O
+   compilador", no `CLAUDE.md`) — e os dois alvos, que o rustup instala na
+   primeira compilação; e o `cargo xtask invariantes` confere que nada
+   divergiu.
 3. **Confira**: `cargo xtask sdk-conferir <elf>` diz o nome e as
    permissões do manifesto, o tamanho contra o teto de leitura do kernel,
    o selo, se há, e o resumo BLAKE2s que a auditoria vai citar.
