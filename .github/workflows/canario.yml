@@ -16,7 +16,8 @@
 # como está —; não escreve no repositório; e não produz artefato oficial:
 # só os registros sobem, num artefato `canario-*`, e nada de `target/` —
 # nem a proveniência que o `xtask` grava lá. Uma falha deixa vermelho só
-# este workflow, com o relatório da causa no resumo da execução.
+# este workflow, com o relatório da causa provável — tirada dos logs por
+# padrões — no resumo da execução.
 
 name: Canário do compilador
 run-name: Canário do compilador (${{ inputs.canal || 'nightly' }})
@@ -28,13 +29,6 @@ on:
   # workflow do ramo padrão).
   schedule:
     - cron: '17 4 * * 1'
-  # TEMPORÁRIO: o primeiro disparo, para o GitHub registrar o workflow. Um
-  # workflow que não está no ramo padrão só existe para a API depois de
-  # rodar uma vez — foi assim com o `rede-principal.yml`, em 23/10/2026.
-  # Só neste ramo e só quando este arquivo muda; o commit seguinte o tira.
-  push:
-    branches: [claude/modest-pascal-vy8p8k]
-    paths: [.github/workflows/canario.yml]
   workflow_dispatch:
     inputs:
       canal:
@@ -91,14 +85,15 @@ jobs:
       # faria o canário relatar o oficial como se fosse o candidato.
       RUSTUP_AUTO_INSTALL: "0"
     steps:
-      # Agendado, a linha oficial; disparado, o ramo escolhido no disparo.
-      # Sem credencial guardada no `.git`: nada aqui empurra, e nenhum
-      # script de compilação precisa do token.
+      # Agendado, a linha oficial; disparado, o commit que o ramo escolhido
+      # tinha no instante do disparo — o mesmo do arquivo deste workflow, e
+      # não um que chegue depois. Sem credencial guardada no `.git`: nada
+      # aqui empurra, e nenhum script de compilação precisa do token.
       - name: Checkout
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'schedule' && env.LINHA_OFICIAL || github.ref }}
+          ref: ${{ github.event_name == 'schedule' && env.LINHA_OFICIAL || github.sha }}
           persist-credentials: false
 
       # Os registros moram no diretório temporário do runner, fora da árvore
@@ -117,8 +112,9 @@ jobs:
           cat "$registros/linha.txt"
           df -h "$GITHUB_WORKSPACE"
 
-      # O compilador candidato, instalado ao lado do oficial e posto por cima
-      # dele sem tocar no arquivo.
+      # O compilador candidato, instalado pelo rustup e posto por cima do
+      # canal do `rust-toolchain.toml` sem tocar no arquivo — o oficial nem é
+      # instalado aqui (ver o `RUSTUP_AUTO_INSTALL` acima).
       #
       # O canal pedido é conferido antes de qualquer uso: `nightly` ou
       # `nightly-AAAA-MM-DD`, e nada mais. Os componentes e os alvos vêm do
@@ -333,6 +329,36 @@ jobs:
             exit "$falhou"
           } 2>&1 | tee "$REGISTROS/documentacao.log"
 
+      # O SDK de fora do repositório, como o job `sdk-fora` da CI oficial: o
+      # modelo copiado para fora do workspace, compilado, conferido e selado
+      # nas duas arquiteturas, e o clippy da cópia, com `-D warnings`. Ele
+      # usa o `target/` da raiz, e por isso vem antes de ele sair.
+      - name: SDK fora do repositório
+        id: sdk_fora
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for arch in x86_64 aarch64; do
+              if ! cargo xtask sdk-fora --arch "$arch"; then
+                echo "falhou: o modelo do SDK $arch"; falhou=1; continue
+              fi
+              cargo xtask sdk-conferir "target/sdk-fora/$arch/modelo.elf" \
+                || { echo "falhou: sdk-conferir do modelo $arch"; falhou=1; }
+              cargo xtask sdk-conferir "target/sdk-fora/$arch/modelo" \
+                || { echo "falhou: sdk-conferir do modelo selado $arch"; falhou=1; }
+            done
+            if [[ -d target/sdk-fora/projeto ]]; then
+              for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+                (cd target/sdk-fora/projeto && CARGO_TARGET_DIR=../target cargo clippy --release --target "$alvo" -- -D warnings) \
+                  || { echo "falhou: clippy da cópia de fora $alvo"; falhou=1; }
+              done
+            fi
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/sdk_fora.log"
+
       # O `target/` da raiz — os testes, o clippy, a documentação e o `xtask`
       # do hospedeiro — não serve a mais nada daqui em diante: o kernel, o
       # iniciador e os programas são workspaces à parte, cada um com o
@@ -524,6 +550,13 @@ jobs:
           falhas, avisos = [], []
 
 
+          # Um teto que não se lê — a constante mudou de forma no fonte — é
+          # uma falha, e não um passo verde sem conferência.
+          for nome, valor in (("MAIOR_KERNEL", TETO_DO_KERNEL), ("MAIOR_EXECUTAVEL", TETO_DO_PROGRAMA)):
+              if not valor:
+                  falhas.append(f"teto ilegível: `{nome}` não se lê do fonte, e nada foi conferido contra ele")
+
+
           def conferir(descricao, bytes_, teto_):
               """As regras do xtask: acima do teto, recusa; acima de 9/10, aviso."""
               if not teto_:
@@ -678,6 +711,7 @@ jobs:
               ("clippy_kernel", "Clippy do kernel, nas duas arquiteturas, com e sem modo-teste"),
               ("invariantes", "Invariantes de fonte"),
               ("documentacao", "Documentação"),
+              ("sdk_fora", "SDK fora do repositório: o modelo e o clippy da cópia"),
               ("kernel_x86_64", "Kernel x86_64, nas cinco configurações, sem SIMD"),
               ("kernel_aarch64", "Kernel aarch64, nas cinco configurações"),
               ("iniciador", "Iniciador UEFI, nos dois alvos, depuração e release"),
@@ -701,6 +735,7 @@ jobs:
               r"^\[xtask\]",                    # o xtask
               r"^canal recusado",               # o próprio canário
               r"^acima do teto",
+              r"^teto ilegível",
               r"registradores de SIMD",
               r"No space left on device",
           )]
@@ -853,6 +888,9 @@ jobs:
                         "recusaria pôr esse kernel na ESP (`conferir_sem_simd`)")
               if re.search(r"^acima do teto", texto, re.M):
                   achou("um artefato passou do teto de tamanho que o `xtask` confere (ver Os tamanhos)")
+              if re.search(r"^teto ilegível", texto, re.M):
+                  achou("um teto de tamanho não se lê do fonte (a constante mudou de forma): o canário não "
+                        "conferiu os tamanhos contra ele — ajuste a leitura no passo dos tamanhos")
               if re.search(r"failed to download|spurious network error|Couldn't resolve host|failed to fetch", texto):
                   achou("falha de rede ao baixar dependências — da infraestrutura")
 
