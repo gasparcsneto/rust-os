@@ -65,11 +65,12 @@ jobs:
             swtpm python3 openssl
 
       # O cache traz o `target/` de uma execução anterior, e com ele o
-      # `target/mainnet/` dela: o disco, o estado da máquina e o relatório.
-      # Só esse diretório sai, antes da fumaça; o relatório do artefato é só
-      # o desta execução.
-      - name: Esvaziar o target/mainnet
-        run: rm -rf target/mainnet
+      # `target/mainnet/` dela — o disco, o estado da máquina e o relatório
+      # — e a `target/proveniencia/`. Só esses diretórios saem, antes da
+      # fumaça; o relatório e a proveniência dos artefatos são só os desta
+      # execução.
+      - name: Esvaziar o target/mainnet e a proveniência
+        run: rm -rf target/mainnet target/proveniencia
 
       - name: A fumaça real
         run: cargo xtask mainnet --arch ${{ inputs.arch }} --release
@@ -85,3 +86,14 @@ jobs:
           name: relatorio-mainnet-${{ inputs.arch }}
           path: target/mainnet/relatorio-*.md
           if-no-files-found: ignore
+
+      # A proveniência do kernel e dos programas que a fumaça compilou — ver
+      # `xtask/src/proveniencia.rs`.
+      - name: Proveniência
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proveniencia-mainnet-${{ inputs.arch }}-${{ github.run_attempt }}
+          path: target/proveniencia/
+          if-no-files-found: warn
+          retention-days: 90
