@@ -536,7 +536,13 @@ fn chaves_que_trocam(build: &str) -> Vec<&'static str> {
 /// A conferência do começo de todo `cargo xtask` — menos o `compilador`,
 /// que a relata, e o `help`.
 pub(crate) fn conferir_ao_iniciar() -> Result<(), String> {
-    let c = estado();
+    conferir_o_observado(estado())
+}
+
+/// O veredito da conferência do começo para o compilador observado `c`: sem
+/// desvio, segue; com desvio, recusa, com a lista e o caminho de volta —
+/// menos com o opt-in, que segue com o aviso, como execução não oficial.
+fn conferir_o_observado(c: &Compilador) -> Result<(), String> {
     if c.desvios.is_empty() {
         if c.declarada_nao_oficial {
             eprintln!(
@@ -1340,6 +1346,17 @@ mod testes {
     }
 
     #[test]
+    fn o_config_que_o_cargo_nao_le_e_um_desvio() {
+        // A consulta falha fechada: um config que o cargo não lê — ou uma
+        // resposta que mudasse num nightly novo — não passa calado.
+        let dir = com_config("quebrado", "[build\nrustc-wrapper = \"sccache\"\n");
+        let desvios = desvios_do_config(&dir, "quebrado");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(desvios.len(), 1, "{desvios:?}");
+        assert!(desvios[0].contains("não respondeu"), "{desvios:?}");
+    }
+
+    #[test]
     fn os_config_do_cargo_do_repositorio_nao_trocam_o_compilador() {
         let raiz = super::super::raiz_do_projeto();
         for dir in ["", "kernel", "programas", "sdk/modelo"] {
@@ -1398,19 +1415,40 @@ mod testes {
 
     #[test]
     fn com_o_opt_in_a_execucao_nunca_e_oficial() {
-        let c = |desvios: Vec<String>, declarada| Compilador {
+        assert!(observado(&[], false).oficial());
+        assert!(!observado(&[], true).oficial());
+        assert!(!observado(&["um desvio"], false).oficial());
+        assert!(!observado(&["um desvio"], true).oficial());
+    }
+
+    /// Um compilador observado de teste, com os desvios e o opt-in dados.
+    fn observado(desvios: &[&str], declarada_nao_oficial: bool) -> Compilador {
+        Compilador {
             canal: Ok(String::from("nightly-2026-11-15")),
             toolchain: None,
             sysroot: None,
             rustc: None,
             cargo: None,
-            desvios,
-            declarada_nao_oficial: declarada,
-        };
-        assert!(c(Vec::new(), false).oficial());
-        assert!(!c(Vec::new(), true).oficial());
-        assert!(!c(vec![String::from("um desvio")], false).oficial());
-        assert!(!c(vec![String::from("um desvio")], true).oficial());
+            desvios: desvios.iter().map(|d| (*d).to_string()).collect(),
+            declarada_nao_oficial,
+        }
+    }
+
+    #[test]
+    fn a_conferencia_do_comeco_recusa_o_desvio_sem_o_opt_in() {
+        assert_eq!(conferir_o_observado(&observado(&[], false)), Ok(()));
+        // O opt-in sem desvio segue, como execução não oficial.
+        assert_eq!(conferir_o_observado(&observado(&[], true)), Ok(()));
+        // O desvio sem o opt-in para, com o desvio e o caminho de volta.
+        let erro = conferir_o_observado(&observado(&["o desvio de teste"], false))
+            .expect_err("o desvio sem o opt-in");
+        assert!(erro.contains("  - o desvio de teste"), "{erro}");
+        assert!(erro.contains(OUTRO_COMPILADOR), "{erro}");
+        // O desvio com o opt-in segue, com o aviso.
+        assert_eq!(
+            conferir_o_observado(&observado(&["o desvio de teste"], true)),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1500,6 +1538,26 @@ jobs:
             "      - uses: actions/checkout@v4\n      - name: Testes\n",
         );
         assert!(!um(".github/workflows/ci.yml", &dois_checkouts).is_empty());
+
+        // Todo checkout leva a conferência depois, mesmo sem cargo adiante:
+        // o último do workflow, e o primeiro de dois seguidos.
+        let sem_conferencia = |fora: &[String]| {
+            fora.iter()
+                .any(|f| f.contains("um checkout sem a conferência do compilador depois"))
+        };
+        let no_fim = format!(
+            "{OFICIAL}  outro:\n    steps:\n      - uses: actions/checkout@v4\n      - run: python3 -I conferir.py\n"
+        );
+        let fora = um(".github/workflows/ci.yml", &no_fim);
+        assert!(sem_conferencia(&fora), "{fora:?}");
+        let seguidos = OFICIAL.replacen(
+            "      - uses: actions/checkout@v4\n",
+            "      - uses: actions/checkout@v4\n      - uses: actions/checkout@v4\n",
+            1,
+        );
+        assert_ne!(seguidos, OFICIAL);
+        let fora = um(".github/workflows/ci.yml", &seguidos);
+        assert!(sem_conferencia(&fora), "{fora:?}");
     }
 
     #[test]
@@ -1626,7 +1684,11 @@ jobs:
             );
         }
         let em_linhas = format!("{OFICIAL}      - uses: >-\n          actions/checkout@v4\n");
-        assert!(!um(".github/workflows/ci.yml", &em_linhas).is_empty());
+        let fora = um(".github/workflows/ci.yml", &em_linhas);
+        assert!(
+            fora.iter().any(|f| f.contains("em várias linhas")),
+            "{fora:?}"
+        );
         // Uma ação parecida com a do compilador não é ela.
         let parecida = OFICIAL.replace(
             "uses: ./.github/actions/compilador",
@@ -1760,6 +1822,20 @@ jobs:
         );
         assert_ne!(neutralizado, canario);
         assert_eq!(o_canario_repete_os_lints(ci, &neutralizado).len(), 1);
+        // Um comando da raiz que o canário só roda noutro diretório não vale.
+        let noutro_diretorio = canario.replace(
+            "cargo xtask invariantes 2>&1",
+            "cd kernel && cargo xtask invariantes 2>&1",
+        );
+        assert_ne!(noutro_diretorio, canario);
+        assert_eq!(o_canario_repete_os_lints(ci, &noutro_diretorio).len(), 1);
+        // Sem os pacotes dos testes do hospedeiro.
+        let sem_pacotes = canario.replace(
+            "sudo apt-get install -y --no-install-recommends swtpm nghttp2-server",
+            "true",
+        );
+        assert_ne!(sem_pacotes, canario);
+        assert_eq!(o_canario_repete_os_lints(ci, &sem_pacotes).len(), 1);
         // Sem o aarch64 nos laços.
         let sem_arm = canario.replace(
             "for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do",

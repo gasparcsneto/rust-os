@@ -50,6 +50,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use protocolo::json::JsonWriter;
 use sha2::{Digest, Sha256};
 
+use super::compilador::Compilador;
+
 /// A versão do formato do registro.
 const FORMATO: &str = "duke-proveniencia-1";
 
@@ -92,8 +94,15 @@ fn registrar_em(dir: &Path, c: &Compilado) -> Result<PathBuf, String> {
     let agora = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let texto = registro(c, &resumo, bytes.len() as u64, lock.as_deref(), agora)
-        .map_err(|_| String::from("a proveniência: o registro não se escreve"))?;
+    let texto = registro(
+        c,
+        super::compilador::estado(),
+        &resumo,
+        bytes.len() as u64,
+        lock.as_deref(),
+        agora,
+    )
+    .map_err(|_| String::from("a proveniência: o registro não se escreve"))?;
 
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("a proveniência: não se cria {}: {e}", dir.display()))?;
@@ -188,15 +197,16 @@ fn nome_do_registro(c: &Compilado, resumo: &str) -> String {
     format!("{nome}-{}.json", &resumo[..16])
 }
 
-/// O JSON do registro, numa linha.
+/// O JSON do registro, numa linha: o artefato `c`, compilado pelo
+/// compilador observado `compilador` — o desta execução, fora dos testes.
 fn registro(
     c: &Compilado,
+    compilador: &Compilador,
     resumo: &str,
     tamanho: u64,
     lock: Option<&str>,
     agora: u64,
 ) -> Result<String, std::fmt::Error> {
-    let compilador = super::compilador::estado();
     let fonte = fonte();
     let raiz = super::raiz_do_projeto();
     let relativo = |p: &Path| {
@@ -420,6 +430,7 @@ mod testes {
         let resumo = sha256(b"duke");
         let texto = registro(
             &compilado(&arquivo, &lock, &["modo-teste"]),
+            super::super::compilador::estado(),
             &resumo,
             4,
             Some("ab"),
@@ -522,6 +533,75 @@ mod testes {
                 .count(),
             1
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn o_registro_de_uma_execucao_nao_oficial_diz_por_que() {
+        let raiz = super::super::raiz_do_projeto();
+        let arquivo = raiz.join("kernel/target/x86_64-unknown-none/release/duke");
+        let lock = raiz.join("kernel/Cargo.lock");
+        let c = compilado(&arquivo, &lock, &[]);
+        let observado = |desvios: &[&str], declarada| Compilador {
+            canal: Ok(String::from("nightly-2026-11-15")),
+            toolchain: Some(String::from("nightly-2026-11-15-x86_64-unknown-linux-gnu")),
+            sysroot: None,
+            rustc: None,
+            cargo: None,
+            desvios: desvios.iter().map(|d| (*d).to_string()).collect(),
+            declarada_nao_oficial: declarada,
+        };
+        for (desvios, declarada) in [
+            (&["o desvio de teste"][..], true),
+            (&[][..], true),
+            (&["o desvio de teste"][..], false),
+        ] {
+            let texto =
+                registro(&c, &observado(desvios, declarada), "ab", 2, None, 0).expect("o registro");
+            let json = Json(texto.trim_end().as_bytes());
+            let campo = |nome: &str| {
+                json.member("compilador")
+                    .and_then(|j| j.member(nome))
+                    .unwrap_or_else(|| panic!("{nome} em {texto}"))
+            };
+            assert_eq!(campo("oficial").as_bool(), Some(false), "{texto}");
+            assert_eq!(campo("declarada_nao_oficial").as_bool(), Some(declarada));
+            assert_eq!(
+                campo("desvios").item(0).and_then(|d| d.as_str()),
+                desvios.first().copied()
+            );
+        }
+    }
+
+    #[test]
+    fn com_dois_registros_dos_mesmos_bytes_vale_o_mais_recente() {
+        let dir =
+            std::env::temp_dir().join(format!("xtask-proveniencia-recente-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("o diretório");
+        let arquivo = dir.join("duke");
+        let lock = dir.join("Cargo.lock");
+        std::fs::write(&arquivo, b"os mesmos bytes").expect("o artefato");
+        std::fs::write(&lock, b"version = 4\n").expect("o lock");
+        let registros = dir.join("proveniencia");
+        // Os mesmos bytes, compilados em duas configurações: dois registros.
+        let um = registrar_em(&registros, &compilado(&arquivo, &lock, &[])).expect("um");
+        let outro =
+            registrar_em(&registros, &compilado(&arquivo, &lock, &["outra"])).expect("outro");
+        assert_ne!(um, outro);
+        let resumo = sha256(b"os mesmos bytes");
+        let envelhecer = |registro: &Path, segundos: u64| {
+            let hora = SystemTime::now() - std::time::Duration::from_secs(segundos);
+            std::fs::File::options()
+                .write(true)
+                .open(registro)
+                .and_then(|f| f.set_modified(hora))
+                .expect("a hora do registro");
+        };
+        envelhecer(&um, 3600);
+        assert_eq!(do_artefato_em(&registros, &resumo), Some(outro.clone()));
+        envelhecer(&outro, 7200);
+        assert_eq!(do_artefato_em(&registros, &resumo), Some(um));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
