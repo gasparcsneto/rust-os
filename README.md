@@ -88,6 +88,13 @@ os pacotes do emulador para as arquiteturas desejadas e o `swtpm`, que é o TPM
 operá-la — o hardware de referência, a imagem, a rede, a recuperação —, ver
 [`docs/OPERACAO.md`](docs/OPERACAO.md).
 
+O compilador é um só, o do `rust-toolchain.toml`. O `cargo xtask` recusa
+outro sem aviso (`cargo xtask compilador` mostra o estado), e cada artefato
+compilado deixa o registro de proveniência em `target/proveniencia/`. Toda
+semana, à parte da CI, o canário (`.github/workflows/canario.yml`) confere
+o projeto com o nightly mais recente, sem bloquear nada — ver "O
+compilador", no [`CLAUDE.md`](CLAUDE.md).
+
 ```bash
 # x86_64 (padrão): compila e põe o iniciador e o kernel na ESP do disco
 cargo xtask build

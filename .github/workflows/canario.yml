@@ -1,0 +1,1064 @@
+# O canário do compilador: o projeto conferido com um nightly candidato —
+# o mais recente, ou o de uma data —, uma vez por semana, à parte da CI
+# oficial.
+#
+# O compilador oficial é o nightly com data do `rust-toolchain.toml`, e ele
+# só muda por uma promoção (o procedimento está no CLAUDE.md). O canário é
+# a primeira peneira dela: diz, antes de alguém trocar a data, o que o
+# candidato quebra — a formatação, um lint novo, um recurso do nightly que
+# mudou, um teste, a documentação, o tamanho do kernel e dos programas — e
+# por quê. Não substitui a CI completa com o candidato: a suíte no emulador
+# e as bancadas não rodam aqui.
+#
+# O resultado não é oficial e não bloqueia nada. O canário não roda nos
+# pushes nem é requisito de coisa alguma; não troca a toolchain oficial — o
+# candidato entra pelo `RUSTUP_TOOLCHAIN` do ambiente, e o arquivo fica
+# como está —; não escreve no repositório; e não produz artefato oficial:
+# só os registros sobem, num artefato `canario-*`, e nada de `target/` —
+# nem a proveniência que o `xtask` grava lá. Uma falha deixa vermelho só
+# este workflow, com o relatório da causa no resumo da execução.
+
+name: Canário do compilador
+run-name: Canário do compilador (${{ inputs.canal || 'nightly' }})
+
+on:
+  # Segunda, 04:17 UTC. O GitHub só agenda a partir do ramo padrão do
+  # repositório: enquanto este arquivo não estiver lá, o canário roda só
+  # por disparo pela API (o botão da aba Actions também só aparece para um
+  # workflow do ramo padrão).
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      canal:
+        description: O canal candidato, `nightly` (o mais recente) ou `nightly-AAAA-MM-DD`
+        type: string
+        default: nightly
+        required: false
+
+# Só leitura: o canário não empurra, não comenta e não usa segredo nenhum.
+permissions:
+  contents: read
+
+# Um canário por canal de cada vez, e o que está rodando não é cancelado: o
+# segundo pedido do mesmo canal espera o primeiro (o GitHub guarda um só na
+# espera; um terceiro toma o lugar dele).
+concurrency:
+  group: canario-${{ inputs.canal || 'nightly' }}
+  cancel-in-progress: false
+
+env:
+  # A linha oficial de desenvolvimento — CLAUDE.md, seção 1.8. O canário
+  # agendado confere esta linha, e não o ramo de onde o GitHub leu este
+  # arquivo, que no agendamento é sempre o padrão.
+  LINHA_OFICIAL: claude/modest-pascal-vy8p8k
+  # Sem cor: os logs são lidos pelo relatório, e não só por gente.
+  CARGO_TERM_COLOR: never
+  # Sem compilação incremental: o canário parte limpo e compila tudo uma
+  # vez só, e os diretórios incrementais só gastariam disco.
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+defaults:
+  run:
+    # `bash -eo pipefail`: um comando que falha antes do `tee` reprova o
+    # passo, e não some atrás do código de saída do `tee`.
+    shell: bash
+
+jobs:
+  canario:
+    name: Canário (${{ inputs.canal || 'nightly' }})
+    runs-on: ubuntu-latest
+    # A CI oficial divide estas conferências entre jobs com cache; aqui é
+    # tudo num job só, compilado do zero.
+    timeout-minutes: 150
+    env:
+      # O texto do input só chega aos scripts por aqui, e é conferido
+      # antes de qualquer uso — no passo da instalação.
+      CANAL_PEDIDO: ${{ inputs.canal || 'nightly' }}
+      # O opt-in explícito de uma execução não oficial: sem ele, o `xtask`
+      # recusa rodar com um compilador que não é o do `rust-toolchain.toml`.
+      DUKE_OUTRO_COMPILADOR: "1"
+      # Sem o `RUSTUP_TOOLCHAIN` do candidato, um `cargo` falha em vez de
+      # instalar o compilador oficial do arquivo e rodar com ele — o que
+      # faria o canário relatar o oficial como se fosse o candidato.
+      RUSTUP_AUTO_INSTALL: "0"
+    steps:
+      # Agendado, a linha oficial; disparado, o ramo escolhido no disparo.
+      # Sem credencial guardada no `.git`: nada aqui empurra, e nenhum
+      # script de compilação precisa do token.
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && env.LINHA_OFICIAL || github.ref }}
+          persist-credentials: false
+
+      # Os registros moram no diretório temporário do runner, fora da árvore
+      # do projeto: o canário não escreve no checkout além do que o próprio
+      # cargo escreve em `target/`, e nenhuma conferência que percorra a
+      # árvore tropeça neles. Cada passo grava ali o log dele, com o nome do
+      # `id` do passo — é por esse nome que o relatório o acha.
+      - name: Preparar os registros
+        id: preparo
+        run: |
+          registros="$RUNNER_TEMP/registros"
+          mkdir -p "$registros"
+          echo "REGISTROS=$registros" >> "$GITHUB_ENV"
+          git log -1 --format='%H%n%s' > "$registros/linha.txt"
+          df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 > "$registros/disco-antes.txt"
+          cat "$registros/linha.txt"
+          df -h "$GITHUB_WORKSPACE"
+
+      # O compilador candidato, instalado ao lado do oficial e posto por cima
+      # dele sem tocar no arquivo.
+      #
+      # O canal pedido é conferido antes de qualquer uso: `nightly` ou
+      # `nightly-AAAA-MM-DD`, e nada mais. Os componentes e os alvos vêm do
+      # `rust-toolchain.toml` da raiz, o arquivo que instala o oficial, para
+      # a lista não divergir quando ele mudar. Depois, o `RUSTUP_TOOLCHAIN`
+      # no ambiente dos passos seguintes: a sobreposição explícita do
+      # rustup, que vence o `rust-toolchain.toml` sem editá-lo.
+      #
+      # Um nightly com data a que falte um componente — acontece com o
+      # clippy e o rustfmt — não se instala, e o relatório diz qual faltou;
+      # sem data, o rustup recua até o último que tem todos, e o relatório
+      # diz a data que veio, lida do manifesto do canal.
+      #
+      # Sem `RUST_BACKTRACE` neste passo: com ele, cada erro do rustup traz
+      # a pilha do próprio rustup, e o motivo se perde no meio dela.
+      - name: Instalar o compilador candidato
+        id: instalacao
+        continue-on-error: true
+        env:
+          RUST_BACKTRACE: 0
+        run: |
+          {
+            padrao='^nightly(-[0-9]{4}-[0-9]{2}-[0-9]{2})?$'
+            if [[ ! $CANAL_PEDIDO =~ $padrao ]]; then
+              printf 'canal recusado: %q (o canário aceita "nightly" ou "nightly-AAAA-MM-DD")\n' "$CANAL_PEDIDO"
+              exit 1
+            fi
+            # Uma lista do `[toolchain]` do arquivo oficial, separada por vírgulas.
+            lista() {
+              python3 -I -c 'import sys, tomllib; t = tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]; print(",".join(t[sys.argv[1]]))' "$1"
+            }
+            componentes=$(lista components)
+            alvos=$(lista targets)
+            echo "componentes: $componentes"
+            echo "alvos: $alvos"
+            rustup toolchain install "$CANAL_PEDIDO" --profile minimal --no-self-update \
+              --component "$componentes" --target "$alvos"
+
+            nome=$(RUSTUP_TOOLCHAIN="$CANAL_PEDIDO" rustup show active-toolchain | cut -d ' ' -f 1)
+            export RUSTUP_TOOLCHAIN="$nome"
+            compilador="$REGISTROS/compilador"
+            mkdir -p "$compilador"
+            echo "$nome" > "$compilador/toolchain.txt"
+            manifesto="$(rustc --print sysroot)/lib/rustlib/multirust-channel-manifest.toml"
+            data=$(grep -m 1 '^date = ' "$manifesto" | cut -d '"' -f 2) || data=desconhecida
+            echo "$data" > "$compilador/data.txt"
+            rustc -Vv > "$compilador/rustc.txt"
+            cargo -Vv > "$compilador/cargo.txt"
+            rustfmt --version > "$compilador/rustfmt.txt"
+            cargo clippy --version > "$compilador/clippy.txt"
+            rustup --version > "$compilador/rustup.txt" 2> /dev/null
+            echo "RUSTUP_TOOLCHAIN=$nome" >> "$GITHUB_ENV"
+
+            echo "== o candidato: $nome, o nightly de $data"
+            rustup show active-toolchain
+            cat "$compilador/rustc.txt" "$compilador/cargo.txt" \
+              "$compilador/rustfmt.txt" "$compilador/clippy.txt"
+            echo "== o oficial (rust-toolchain.toml): $(python3 -I -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          } 2>&1 | tee "$REGISTROS/instalacao.log"
+
+      # Daqui em diante, as conferências do job `qualidade` da CI oficial
+      # ("Formatação e lints"), com os mesmos comandos: quando ele mudar,
+      # estes passos mudam junto. Duas diferenças, de propósito. Cada passo
+      # roda todos os seus comandos mesmo depois de um falhar, e escreve
+      # `falhou: ...` para cada um que falhou: o canário quer o retrato
+      # inteiro do que o candidato quebra numa rodada só, e não o primeiro
+      # defeito. E o `continue-on-error` deixa as outras conferências
+      # rodarem — quem reprova a execução é o último passo.
+      - name: Formatação
+        id: formatacao
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            cargo fmt --all -- --check \
+              || { echo "falhou: rustfmt da raiz"; falhou=1; }
+            (cd iniciador && cargo fmt --all -- --check) \
+              || { echo "falhou: rustfmt do iniciador"; falhou=1; }
+            (cd programas && cargo fmt --all -- --check) \
+              || { echo "falhou: rustfmt dos programas"; falhou=1; }
+            rustfmt --edition 2024 --check sdk/modelo/src/main.rs \
+              || { echo "falhou: rustfmt do modelo do SDK"; falhou=1; }
+            (cd kernel && cargo fmt --all -- --check) \
+              || { echo "falhou: rustfmt do kernel"; falhou=1; }
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/formatacao.log"
+
+      # Os de fora com que os testes do hospedeiro conversam: o `swtpm` (a
+      # âncora da persistência) e o `nghttpd` (o HTTP/2 dos programas) — ver
+      # o job `qualidade` da CI oficial.
+      - name: O TPM e o servidor HTTP/2 dos testes do hospedeiro
+        id: ferramentas
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends swtpm nghttp2-server
+          } 2>&1 | tee "$REGISTROS/ferramentas.log"
+
+      # Com `--no-fail-fast`, pelo mesmo motivo dos `falhou:`: um pacote que
+      # reprova não esconde os outros.
+      - name: Testes no hospedeiro
+        id: testes
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo test --no-fail-fast -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p hora -p tls -p http -p web3 -p atualizacao -p protocolo --features protocolo/alloc,atualizacao/assinar 2>&1 \
+            | tee "$REGISTROS/testes.log"
+
+      # O clippy em quatro passos, um por workspace: o relatório diz qual
+      # deles o lint novo alcança.
+      - name: Clippy do hospedeiro e do protocolo
+        id: clippy_hospedeiro
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            cargo clippy -p xtask -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p hora -p tls -p http -p web3 -p atualizacao --all-targets -- -D warnings \
+              || { echo "falhou: clippy do hospedeiro"; falhou=1; }
+            cargo clippy -p protocolo --features alloc --all-targets -- -D warnings \
+              || { echo "falhou: clippy do protocolo"; falhou=1; }
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/clippy_hospedeiro.log"
+
+      - name: Clippy do iniciador, nos dois alvos UEFI
+        id: clippy_iniciador
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
+              (cd iniciador && cargo clippy --target "$alvo" -- -D warnings) \
+                || { echo "falhou: clippy do iniciador $alvo"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/clippy_iniciador.log"
+
+      - name: Clippy dos programas, nas duas arquiteturas
+        id: clippy_programas
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+              (cd programas && cargo clippy --release --target "$alvo" -- -D warnings) \
+                || { echo "falhou: clippy dos programas $alvo"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/clippy_programas.log"
+
+      - name: Clippy do kernel, nas duas arquiteturas, com e sem modo-teste
+        id: clippy_kernel
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+              (cd kernel && cargo clippy --target "$alvo" -- -D warnings) \
+                || { echo "falhou: clippy do kernel $alvo"; falhou=1; }
+              (cd kernel && cargo clippy --target "$alvo" --features modo-teste -- -D warnings) \
+                || { echo "falhou: clippy do kernel $alvo com modo-teste"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/clippy_kernel.log"
+
+      # O `xtask` roda com o candidato graças ao `DUKE_OUTRO_COMPILADOR` do
+      # ambiente do job, e avisa que a execução não é oficial.
+      - name: Invariantes de fonte
+        id: invariantes
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo xtask invariantes 2>&1 | tee "$REGISTROS/invariantes.log"
+
+      - name: Documentação
+        id: documentacao
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: |
+          {
+            set -x
+            falhou=0
+            cargo doc --no-deps -p protocolo -p tipografia -p aparencia -p toolkit -p sigilo -p politica -p ancora -p diario -p armazem -p seguranca -p hora -p tls -p http -p web3 -p atualizacao -p xtask --features protocolo/alloc \
+              || { echo "falhou: documentação do hospedeiro"; falhou=1; }
+            for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
+              (cd iniciador && cargo doc --no-deps --target "$alvo") \
+                || { echo "falhou: documentação do iniciador $alvo"; falhou=1; }
+            done
+            for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+              (cd programas && cargo doc --no-deps --release --target "$alvo") \
+                || { echo "falhou: documentação dos programas $alvo"; falhou=1; }
+            done
+            for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+              (cd kernel && cargo doc --no-deps --target "$alvo") \
+                || { echo "falhou: documentação do kernel $alvo"; falhou=1; }
+              (cd kernel && cargo doc --no-deps --target "$alvo" --features modo-teste) \
+                || { echo "falhou: documentação do kernel $alvo com modo-teste"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/documentacao.log"
+
+      # O `target/` da raiz — os testes, o clippy, a documentação e o `xtask`
+      # do hospedeiro — não serve a mais nada daqui em diante: o kernel, o
+      # iniciador e os programas são workspaces à parte, cada um com o
+      # `target/` dele. Ele sai antes das compilações porque o canário faz
+      # num job só, sem cache, o que a CI oficial divide entre vários, e o
+      # disco do runner é curto.
+      - name: Liberar o target do hospedeiro
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+          rm -rf target
+          df -h "$GITHUB_WORKSPACE"
+
+      # O kernel nas configurações que a CI oficial compila, pelo mesmo
+      # `cargo build` do `xtask` (`compilar_o_kernel`): a suíte (`modo-teste`)
+      # e a produção (sem features), na depuração e no release; e a bancada
+      # das quedas de energia (`quedas`), que só existe na depuração.
+      #
+      # Logo depois de cada compilação, porque a seguinte troca o ELF no
+      # mesmo lugar: o tamanho do ELF e o da cópia sem símbolos — o
+      # `--strip-all` com que o `kernel_do_slot` grava o kernel no slot, e
+      # que é o que o teto do iniciador mede (ver o passo dos tamanhos). E,
+      # no x86, a conferência sem SIMD que o `xtask` faz antes de pôr o
+      # kernel na ESP (`conferir_sem_simd`): um registrador `xmm`, `ymm` ou
+      # `zmm` no kernel é o de um processo interrompido, e um compilador
+      # novo pode passar a gerá-lo.
+      - name: Kernel x86_64, nas cinco configurações
+        id: kernel_x86_64
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        env:
+          ARQ: x86_64
+          ALVO: x86_64-unknown-none
+        run: |
+          {
+            falhou=0
+            llvm="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+            copia="$RUNNER_TEMP/kernel-sem-simbolos"
+            for perfil in debug release; do
+              for features in '' modo-teste quedas; do
+                if [[ $perfil == release && $features == quedas ]]; then continue; fi
+                opcoes=(--target "$ALVO")
+                if [[ $perfil == release ]]; then opcoes+=(--release); fi
+                if [[ -n $features ]]; then opcoes+=(--features "$features"); fi
+                config="$ARQ $perfil ${features:-sem features}"
+                echo "== o kernel $config"
+                if ! (cd kernel && cargo build "${opcoes[@]}"); then
+                  echo "falhou: kernel $config"; falhou=1; continue
+                fi
+                elf="kernel/target/$ALVO/$perfil/duke"
+                if ! "$llvm/llvm-objcopy" --strip-all "$elf" "$copia"; then
+                  echo "falhou: llvm-objcopy no kernel $config"; falhou=1; continue
+                fi
+                simd=$("$llvm/llvm-objdump" -d --no-show-raw-insn "$elf" | awk '
+                  />:$/ { funcao = $0; next }
+                  /%[xyz]mm/ { n++; if (n <= 5) print "  " funcao "\n      " $0 > "/dev/stderr" }
+                  END { print n + 0 }') || { echo "falhou: llvm-objdump no kernel $config"; falhou=1; continue; }
+                if (( simd > 0 )); then
+                  echo "o kernel $config usa registradores de SIMD em $simd instrução(ões) — os de um processo interrompido, que o kernel não salva"
+                  echo "falhou: kernel $config com SIMD"; falhou=1
+                fi
+                printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ARQ" "$perfil" "${features:-sem features}" \
+                  "$(stat -c %s "$elf")" "$(stat -c %s "$copia")" "$simd" >> "$REGISTROS/kernels.tsv"
+                rm -f "$copia"
+              done
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/kernel_x86_64.log"
+
+      # O mesmo do x86_64, menos a conferência de SIMD: no ARM o alvo
+      # `-softfloat` não deixa o NEON existir nem em código que o peça.
+      - name: Kernel aarch64, nas cinco configurações
+        id: kernel_aarch64
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        env:
+          ARQ: aarch64
+          ALVO: aarch64-unknown-none-softfloat
+        run: |
+          {
+            falhou=0
+            llvm="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+            copia="$RUNNER_TEMP/kernel-sem-simbolos"
+            for perfil in debug release; do
+              for features in '' modo-teste quedas; do
+                if [[ $perfil == release && $features == quedas ]]; then continue; fi
+                opcoes=(--target "$ALVO")
+                if [[ $perfil == release ]]; then opcoes+=(--release); fi
+                if [[ -n $features ]]; then opcoes+=(--features "$features"); fi
+                config="$ARQ $perfil ${features:-sem features}"
+                echo "== o kernel $config"
+                if ! (cd kernel && cargo build "${opcoes[@]}"); then
+                  echo "falhou: kernel $config"; falhou=1; continue
+                fi
+                elf="kernel/target/$ALVO/$perfil/duke"
+                if ! "$llvm/llvm-objcopy" --strip-all "$elf" "$copia"; then
+                  echo "falhou: llvm-objcopy no kernel $config"; falhou=1; continue
+                fi
+                printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ARQ" "$perfil" "${features:-sem features}" \
+                  "$(stat -c %s "$elf")" "$(stat -c %s "$copia")" "-" >> "$REGISTROS/kernels.tsv"
+                rm -f "$copia"
+              done
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/kernel_aarch64.log"
+
+      # O iniciador acompanha o perfil do kernel no `xtask`
+      # (`build_do_iniciador`): depuração e release, nos dois alvos.
+      - name: Iniciador UEFI, nos dois alvos
+        id: iniciador
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for alvo in x86_64-unknown-uefi aarch64-unknown-uefi; do
+              (cd iniciador && cargo build --target "$alvo") \
+                || { echo "falhou: iniciador $alvo debug"; falhou=1; }
+              (cd iniciador && cargo build --release --target "$alvo") \
+                || { echo "falhou: iniciador $alvo release"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/iniciador.log"
+
+      # Os programas, sempre em release e nas duas arquiteturas, como o
+      # `xtask` os compila para o disco (`programas_do_disco`).
+      - name: Programas, nas duas arquiteturas
+        id: programas
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        run: |
+          {
+            set -x
+            falhou=0
+            for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do
+              (cd programas && cargo build --release --target "$alvo") \
+                || { echo "falhou: programas $alvo"; falhou=1; }
+            done
+            exit "$falhou"
+          } 2>&1 | tee "$REGISTROS/programas.log"
+
+      # Os tamanhos do que o candidato compilou, contra os tetos que o
+      # `xtask` confere ao montar o disco: o do kernel que vai para o slot —
+      # a cópia sem símbolos, contra o `MAIOR_KERNEL` de
+      # `atualizacao/src/cabecalho.rs` (`slots::conferir_o_teto`) — e o de
+      # cada programa, contra o `MAIOR_EXECUTAVEL` de
+      # `protocolo/src/usuario.rs` (`conferir_o_tamanho`). Acima de um teto
+      # é falha, porque o `xtask` recusaria; acima de nove décimos, aviso,
+      # como lá. A tabela vai para o relatório: a promoção compara estes
+      # números com os do compilador oficial, que a proveniência da CI
+      # oficial registra.
+      - name: Os tamanhos e os tetos
+        id: tamanhos
+        if: steps.instalacao.outcome == 'success'
+        continue-on-error: true
+        shell: python3 -I {0}
+        run: |
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          REGISTROS = Path(os.environ["REGISTROS"])
+          ALVOS = {"x86_64": "x86_64-unknown-none", "aarch64": "aarch64-unknown-none-softfloat"}
+
+
+          def teto(arquivo, nome):
+              """O valor de `pub const NOME: u64 = A * B ...;` no fonte, ou None."""
+              try:
+                  fonte = Path(arquivo).read_text(encoding="utf-8")
+                  achado = re.search(rf"pub const {nome}: u64 = ([0-9_ *]+);", fonte)
+                  valor = 1
+                  for fator in achado.group(1).split("*"):
+                      valor *= int(fator.strip().replace("_", ""))
+                  return valor
+              except (OSError, AttributeError, ValueError):
+                  return None
+
+
+          def porcento(bytes_, teto_):
+              return f"{100 * bytes_ / teto_:.1f}%".replace(".", ",") if teto_ else "—"
+
+
+          TETO_DO_KERNEL = teto("atualizacao/src/cabecalho.rs", "MAIOR_KERNEL")
+          TETO_DO_PROGRAMA = teto("protocolo/src/usuario.rs", "MAIOR_EXECUTAVEL")
+          falhas, avisos = [], []
+
+
+          def conferir(descricao, bytes_, teto_):
+              """As regras do xtask: acima do teto, recusa; acima de 9/10, aviso."""
+              if not teto_:
+                  return
+              if bytes_ > teto_:
+                  falhas.append(f"acima do teto: {descricao} tem {bytes_} bytes, {bytes_ - teto_} acima dos {teto_}")
+              elif bytes_ * 10 > teto_ * 9:
+                  avisos.append(f"aviso: {descricao} tem {bytes_} bytes, {porcento(bytes_, teto_)} do teto: faltam {(teto_ - bytes_) // 1024} KiB")
+
+
+          # O kernel: uma linha por configuração, gravada logo depois de cada
+          # compilação.
+          kernels = []
+          tsv = REGISTROS / "kernels.tsv"
+          if tsv.is_file():
+              for linha in tsv.read_text(encoding="utf-8").splitlines():
+                  arq, perfil, features, elf, sem_simbolos, _ = linha.split("\t")
+                  kernels.append((arq, perfil, features, int(elf), int(sem_simbolos)))
+                  conferir(f"o kernel {arq} {perfil} {features}, sem símbolos,", int(sem_simbolos), TETO_DO_KERNEL)
+
+          # Os programas: um por arquivo em `programas/src/bin`, como o xtask os
+          # conta (`nomes_dos_programas`).
+          nomes = sorted(p.stem for p in Path("programas/src/bin").glob("*.rs"))
+          programas = {}
+          for nome in nomes:
+              for arq, alvo in ALVOS.items():
+                  caminho = Path("programas/target") / alvo / "release" / nome
+                  bytes_ = caminho.stat().st_size if caminho.is_file() else None
+                  programas.setdefault(nome, {})[arq] = bytes_
+                  if bytes_ is not None:
+                      conferir(f"o programa `{nome}` ({arq})", bytes_, TETO_DO_PROGRAMA)
+
+          md = ["## Os tamanhos", ""]
+          md.append(
+              "Medidos com o candidato, para comparar com os do compilador oficial "
+              "(a proveniência da CI oficial registra os bytes dos artefatos oficiais) antes de promover."
+          )
+          md.append("")
+          for linha in falhas + avisos:
+              md.append(f"- {linha}")
+          if falhas or avisos:
+              md.append("")
+
+          teto_txt = f"{TETO_DO_KERNEL} bytes" if TETO_DO_KERNEL else "não encontrado"
+          md.append("### O kernel de produção (release, sem features)")
+          md.append("")
+          md.append(f"O teto do slot (`MAIOR_KERNEL`): {teto_txt}, sobre a cópia sem símbolos. "
+                    "A proveniência registra o ELF.")
+          md.append("")
+          md.append("| Arquitetura | ELF (bytes) | Sem símbolos (bytes) | Do teto |")
+          md.append("|---|---:|---:|---:|")
+          for arq in ALVOS:
+              achado = [k for k in kernels if k[0] == arq and k[1] == "release" and k[2] == "sem features"]
+              if achado:
+                  _, _, _, elf, sem = achado[0]
+                  md.append(f"| {arq} | {elf} | {sem} | {porcento(sem, TETO_DO_KERNEL)} |")
+              else:
+                  md.append(f"| {arq} | não compilado | | |")
+          md.append("")
+          md.append("<details><summary>O kernel nas cinco configurações, por arquitetura</summary>")
+          md.append("")
+          md.append("| Arquitetura | Perfil | Features | ELF (bytes) | Sem símbolos (bytes) | Do teto |")
+          md.append("|---|---|---|---:|---:|---:|")
+          for arq, perfil, features, elf, sem in kernels:
+              md.append(f"| {arq} | {perfil} | {features} | {elf} | {sem} | {porcento(sem, TETO_DO_KERNEL)} |")
+          if not kernels:
+              md.append("| nenhuma configuração compilou | | | | | |")
+          md.append("")
+          md.append("</details>")
+          md.append("")
+
+          md.append("### Os programas (release)")
+          md.append("")
+          medidos = [(b, nome, arq) for nome, por in programas.items() for arq, b in por.items() if b is not None]
+          teto_txt = f"{TETO_DO_PROGRAMA} bytes" if TETO_DO_PROGRAMA else "não encontrado"
+          md.append(f"O teto de um executável (`MAIOR_EXECUTAVEL`): {teto_txt}.")
+          if medidos:
+              b, nome, arq = max(medidos)
+              md.append(f"O maior: `{nome}` ({arq}), {b} bytes, {porcento(b, TETO_DO_PROGRAMA)} do teto.")
+          md.append("")
+          md.append(f"<details><summary>Os {len(nomes)} programas, nas duas arquiteturas</summary>")
+          md.append("")
+          md.append("| Programa | x86_64 (bytes) | Do teto | aarch64 (bytes) | Do teto |")
+          md.append("|---|---:|---:|---:|---:|")
+          for nome, por in programas.items():
+              celulas = []
+              for arq in ALVOS:
+                  b = por[arq]
+                  celulas += [str(b), porcento(b, TETO_DO_PROGRAMA)] if b is not None else ["não compilado", ""]
+              md.append(f"| `{nome}` | " + " | ".join(celulas) + " |")
+          md.append("")
+          md.append("</details>")
+          md.append("")
+
+          (REGISTROS / "tamanhos.md").write_text("\n".join(md), encoding="utf-8")
+          with open(REGISTROS / "tamanhos.log", "w", encoding="utf-8") as log:
+              for linha in falhas + avisos:
+                  print(linha)
+                  print(linha, file=log)
+              if kernels or medidos:
+                  resumo = f"{len(kernels)} kernel(s) e {len(medidos)} programa(s) medidos; {len(falhas)} acima do teto"
+              else:
+                  # O relatório lê esta linha: sem nada compilado, não houve teto a conferir.
+                  resumo = "nada medido: nenhuma compilação deu certo"
+              print(resumo)
+              print(resumo, file=log)
+          sys.exit(1 if falhas else 0)
+
+      # O relatório: o resumo da execução e `registros/relatorio.md`, com o
+      # mesmo texto. Lê só arquivos e o ambiente — não chama o cargo nem o
+      # rustc, que, sem o `RUSTUP_TOOLCHAIN` de uma instalação que deu
+      # certo, seriam os do compilador oficial, e o relatório falaria do
+      # compilador errado.
+      - name: O relatório
+        id: relatorio
+        if: always()
+        continue-on-error: true
+        env:
+          PASSOS: ${{ toJSON(steps) }}
+          EVENTO: ${{ github.event_name }}
+          REF_TESTADO: ${{ github.event_name == 'schedule' && env.LINHA_OFICIAL || github.ref_name }}
+          URL_DA_EXECUCAO: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTEFATO: canario-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: python3 -I {0}
+        run: |
+          import json
+          import os
+          import re
+          import shutil
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          REGISTROS = Path(os.environ.get("REGISTROS") or Path(os.environ.get("RUNNER_TEMP", ".")) / "registros")
+          REGISTROS.mkdir(parents=True, exist_ok=True)
+          AREA = os.environ.get("GITHUB_WORKSPACE", os.getcwd()).rstrip("/") + "/"
+          PASSOS = json.loads(os.environ.get("PASSOS") or "{}")
+          ARTEFATO = os.environ.get("ARTEFATO", "canario-*")
+
+          # As conferências, na ordem do workflow: o `id` do passo — que é
+          # também o nome do log — e o nome no relatório. Um passo com `id`
+          # que não esteja aqui aparece na tabela pelo `id`.
+          CONFERENCIAS = [
+              ("instalacao", "Instalação do compilador candidato"),
+              ("formatacao", "Formatação"),
+              ("ferramentas", "O TPM e o servidor HTTP/2 dos testes (apt)"),
+              ("testes", "Testes no hospedeiro"),
+              ("clippy_hospedeiro", "Clippy do hospedeiro e do protocolo"),
+              ("clippy_iniciador", "Clippy do iniciador, nos dois alvos UEFI"),
+              ("clippy_programas", "Clippy dos programas, nas duas arquiteturas"),
+              ("clippy_kernel", "Clippy do kernel, nas duas arquiteturas, com e sem modo-teste"),
+              ("invariantes", "Invariantes de fonte"),
+              ("documentacao", "Documentação"),
+              ("kernel_x86_64", "Kernel x86_64, nas cinco configurações, sem SIMD"),
+              ("kernel_aarch64", "Kernel aarch64, nas cinco configurações"),
+              ("iniciador", "Iniciador UEFI, nos dois alvos, depuração e release"),
+              ("programas", "Programas, nas duas arquiteturas"),
+              ("tamanhos", "Os tetos de tamanho do kernel e dos programas"),
+          ]
+          FORA_DA_TABELA = {"checkout", "preparo", "relatorio"}
+          RESULTADO = {"success": "sucesso", "failure": "**falha**", "cancelled": "cancelado", "skipped": "não rodou"}
+          FORMATO_DO_CANAL = re.compile(r"nightly(-[0-9]{4}-[0-9]{2}-[0-9]{2})?")
+
+          # As linhas que dizem o que deu errado, de cada ferramenta.
+          RELEVANTES = [re.compile(p) for p in (
+              r"^error(\[E\d{4}\])?:",          # o rustc, o cargo, o rustup
+              r"^erro: ",                       # o xtask
+              r"^Diff in ",                     # o rustfmt --check
+              r"^test .+ \.\.\. FAILED$",       # um teste
+              r"^test result: FAILED",
+              r"panicked at",
+              r"implied by `-D ",               # o nome de um lint
+              r"^E: ",                          # o apt
+              r"^\[xtask\]",                    # o xtask
+              r"^canal recusado",               # o próprio canário
+              r"^acima do teto",
+              r"registradores de SIMD",
+              r"No space left on device",
+          )]
+          # O aviso de toda execução do xtask com o candidato não é um erro.
+          RUIDO = re.compile(r"^error: aborting due to|^\[xtask\] (AVISO: execução NÃO OFICIAL|nada desta execução vale)")
+          ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+          def ler(nome):
+              try:
+                  return (REGISTROS / nome).read_text(encoding="utf-8", errors="replace").strip()
+              except OSError:
+                  return ""
+
+
+          def linhas_do_log(passo):
+              texto = ANSI.sub("", ler(f"{passo}.log"))
+              # Uma barra de progresso reescreve a linha com `\r`: vale a última.
+              return [linha.split("\r")[-1].rstrip().replace(AREA, "") for linha in texto.splitlines()]
+
+
+          def trecho(linhas, teto=15):
+              """As primeiras linhas relevantes, sem repetição, com o lugar de
+              cada erro e o motivo que o cargo dá depois de `Caused by:`."""
+              saida = []
+
+              def pegar(linha):
+                  linha = linha[:240]
+                  if linha not in saida and len(saida) < teto:
+                      saida.append(linha)
+
+              for i, linha in enumerate(linhas):
+                  if len(saida) >= teto:
+                      break
+                  if RUIDO.search(linha) or not any(p.search(linha) for p in RELEVANTES):
+                      continue
+                  pegar("  " + linha.strip() if linha[:1].isspace() else linha)
+                  # Uma mensagem do xtask que termina em `:` continua nas
+                  # linhas recuadas de baixo — os detalhes dela.
+                  if linha.startswith(("[xtask]", "erro: ")) and linha.endswith(":"):
+                      for seguinte in linhas[i + 1:i + 4]:
+                          if not seguinte[:1].isspace() or not seguinte.strip():
+                              break
+                          pegar("  " + seguinte.strip())
+                  if not linha.startswith("error"):
+                      continue
+                  seguintes = linhas[i + 1:i + 8]
+                  for j, seguinte in enumerate(seguintes):
+                      if seguinte.startswith(("error", "warning")):
+                          break
+                      if seguinte.lstrip().startswith("-->"):
+                          pegar("  " + seguinte.strip())
+                      if seguinte.strip() == "Caused by:":
+                          motivo = next((s.strip() for s in seguintes[j + 1:] if s.strip()), "")
+                          if motivo:
+                              pegar("  Caused by: " + motivo)
+                          break
+              return saida
+
+
+          def nomes(lista):
+              return ", ".join(f"`{n}`" for n in lista)
+
+
+          def causas(passo, linhas):
+              """As causas prováveis, da mais específica para a mais geral."""
+              texto = "\n".join(linhas)
+              achadas = []
+
+              def achou(causa):
+                  if causa not in achadas:
+                      achadas.append(causa)
+
+              if "No space left on device" in texto:
+                  achou("falta de espaço em disco no runner — da infraestrutura, não do compilador")
+              if re.search(r"internal compiler error|the compiler unexpectedly panicked|thread 'rustc' panicked", texto):
+                  achou("erro interno do compilador (ICE): um defeito do candidato, e não do projeto")
+
+              if passo == "instalacao":
+                  if re.search(r"^canal recusado", texto, re.M):
+                      achou("canal recusado pelo canário: o formato aceito é `nightly` ou `nightly-AAAA-MM-DD`")
+                  if "no release found for" in texto:
+                      achou("canal inexistente: não há nightly publicado com esse nome")
+                  for componente, alvo in re.findall(r"component '([^']+)' for target '([^']+)' is unavailable", texto):
+                      if componente == "rust-std":
+                          achou(f"alvo indisponível no canal: `{alvo}`")
+                      else:
+                          achou(f"componente indisponível no canal: `{componente}` — acontece com o clippy e o rustfmt "
+                                "em alguns nightlies; um `nightly-AAAA-MM-DD` anterior costuma tê-lo")
+                  if not achadas and re.search(r"could not (download|connect)|timed out|connection (reset|refused)",
+                                               texto, re.I):
+                      achou("falha de rede ao baixar o compilador — da infraestrutura")
+
+              if passo == "ferramentas" and re.search(r"^E: ", texto, re.M):
+                  achou("a instalação dos pacotes do runner (apt) falhou — da infraestrutura, não do compilador")
+              if re.search(r"^erro: o compilador não é o oficial", texto, re.M):
+                  achou("o `xtask` recusou o compilador candidato: o `DUKE_OUTRO_COMPILADOR=1` não chegou a este passo")
+
+              if re.search(r"failed to parse manifest|feature `[\w-]+` is required|is not valid, valid options are"
+                           r"|requires rustc [\d.]+", texto):
+                  achou("o cargo do candidato não aceita um manifesto (a edição 2024, o resolver 3, um `rust-version` "
+                        "ou um recurso do cargo): compilador antigo demais, ou o cargo mudou")
+
+              recursos, recurso_geral = set(), False
+              for linha in linhas:
+                  erro = linha.startswith("error")
+                  if (erro and "feature" in linha and "is required" not in linha) or "has been stable since" in linha:
+                      recurso_geral = True
+                      recursos.update(re.findall(r"feature `([\w-]+)`", linha))
+                  if erro and "x86-interrupt" in linha:
+                      recurso_geral = True
+                      recursos.add("abi_x86_interrupt")
+              if recurso_geral:
+                  achou("recurso do nightly removido, mudado ou estabilizado"
+                        + (f": {nomes(sorted(recursos))}" if recursos else ""))
+
+              clippy = {n.replace("-", "_") for n in re.findall(r"`-D clippy::([\w-]+)` implied by", texto)}
+              clippy |= set(re.findall(r"#\[(?:allow|expect)\(clippy::(\w+)\)\]", texto))
+              clippy |= set(re.findall(r"(?:rust-clippy/[\w-]+|clippy\.rust-lang\.org/[\w-]+)/index\.html#(\w+)", texto))
+              if clippy:
+                  achou(f"lint novo ou mudado do clippy: {nomes(sorted('clippy::' + n for n in clippy))}")
+              rustc = {n.replace("-", "_") for n in re.findall(r"`-D ([\w-]+)` implied by", texto)}
+              rustc |= set(re.findall(r"#\[deny\((\w+)\)\]` on by default", texto))
+              if rustc:
+                  achou(f"lint novo ou mudado do rustc: {nomes(sorted(rustc))}")
+              rustdoc = {n.replace("-", "_") for n in re.findall(r"rustdoc::([\w-]+)", texto)}
+              if "unresolved link to" in texto or (rustdoc and passo == "documentacao"):
+                  achou("documentação: um link que não resolve, ou outro lint do rustdoc"
+                        + (f" ({nomes(sorted('rustdoc::' + n for n in rustdoc))})" if rustdoc else ""))
+
+              codigos = sorted(set(re.findall(r"^error\[(E\d{4})\]", texto, re.M)))
+              if codigos:
+                  achou(f"erro de compilação: {nomes(codigos)} (`rustc --explain <código>`)")
+              if re.search(r"linking with `[^`]+` failed|rust-lld: error|undefined symbol", texto):
+                  achou("erro de ligação")
+
+              arquivos = sorted(set(re.findall(r"^Diff in (\S+?)(?::\d+:| at line \d+:?)", texto, re.M)))
+              if arquivos:
+                  achou(f"a formatação mudou: o rustfmt do candidato formata de outro jeito {len(arquivos)} "
+                        f"arquivo(s) — {nomes(arquivos[:8])}" + (" e outros" if len(arquivos) > 8 else ""))
+
+              testes = sorted(set(re.findall(r"^test (\S+) \.\.\. FAILED$", texto, re.M)))
+              if testes:
+                  achou(f"teste reprovado: {nomes(testes[:8])}" + (" e outros" if len(testes) > 8 else ""))
+              elif "test result: FAILED" in texto or (passo == "testes" and "panicked at" in texto):
+                  achou("teste reprovado")
+
+              if "registradores de SIMD" in texto:
+                  achou("o kernel do x86 passou a usar registradores de SIMD (`xmm`/`ymm`/`zmm`): o `xtask` "
+                        "recusaria pôr esse kernel na ESP (`conferir_sem_simd`)")
+              if re.search(r"^acima do teto", texto, re.M):
+                  achou("um artefato passou do teto de tamanho que o `xtask` confere (ver Os tamanhos)")
+              if re.search(r"failed to download|spurious network error|Couldn't resolve host|failed to fetch", texto):
+                  achou("falha de rede ao baixar dependências — da infraestrutura")
+
+              if passo == "invariantes" and not achadas:
+                  achou("uma invariante de fonte reprovou: as linhas do `[xtask]` dizem qual")
+              if not achadas:
+                  achou(f"desconhecida: ver o log inteiro (`{passo}.log`) no artefato `{ARTEFATO}`")
+              return achadas
+
+
+          def canal_oficial():
+              try:
+                  with open("rust-toolchain.toml", "rb") as arquivo:
+                      return tomllib.load(arquivo)["toolchain"]["channel"]
+              except (OSError, KeyError, tomllib.TOMLDecodeError) as erro:
+                  return f"(não lido: {erro})"
+
+
+          def cerca(linhas):
+              """Um bloco de código que nenhuma crase do conteúdo fecha."""
+              crases = max((len(m) for linha in linhas for m in re.findall(r"`+", linha)), default=0)
+              marca = "`" * max(3, crases + 1)
+              return [marca] + linhas + [marca]
+
+
+          def celula(texto):
+              return texto.replace("|", "\\|").replace("\n", " ")
+
+
+          # O que se pediu, e o que se conferiu.
+          pedido = os.environ.get("CANAL_PEDIDO", "")
+          if FORMATO_DO_CANAL.fullmatch(pedido):
+              pedido_md = f"`{pedido}`"
+          else:
+              # Num trecho de código, o texto do input não vira formatação.
+              pedido_md = "`" + celula(repr(pedido)[:80].replace("`", "'")) + "` (recusado)"
+          oficial = canal_oficial()
+          toolchain = ler("compilador/toolchain.txt")
+          data = ler("compilador/data.txt")
+          linha_testada = ler("linha.txt").splitlines() or ["?", ""]
+          commit, assunto = linha_testada[0], (linha_testada[1] if len(linha_testada) > 1 else "")
+
+          def resultado(passo):
+              return PASSOS.get(passo, {}).get("outcome")
+
+          linhas_da_tabela = list(CONFERENCIAS)
+          conhecidos = {passo for passo, _ in CONFERENCIAS} | FORA_DA_TABELA
+          linhas_da_tabela += [(passo, f"`{passo}`") for passo in PASSOS if passo not in conhecidos]
+          instalado = resultado("instalacao") == "success"
+          falharam = [(passo, nome) for passo, nome in linhas_da_tabela if resultado(passo) == "failure"]
+          conferencias = [p for p in linhas_da_tabela if p[0] != "instalacao"]
+          # Aprovado é cada conferência em sucesso: uma cancelada, ou que não
+          # rodou porque o job acabou antes (o teto de tempo), não aprova.
+          incompletas = [nome for passo, nome in conferencias if resultado(passo) != "success"]
+
+          md = ["# Canário do compilador: resultado não oficial", ""]
+          md.append(
+              "> **NÃO OFICIAL.** Este é o resultado de um compilador *candidato*, e não do compilador oficial "
+              "do projeto (o `rust-toolchain.toml`). Não bloqueia nada: o canário não é requisito da CI oficial, "
+              "não roda nos pushes, não muda a toolchain nem arquivo nenhum do projeto e não produz artefato "
+              "oficial. É a primeira peneira de uma promoção, e não a substitui: a CI completa com o candidato "
+              "continua necessária — a suíte no emulador e as bancadas não rodam aqui."
+          )
+          md.append("")
+          if resultado("checkout") not in (None, "success"):
+              md.append("**REPROVADO antes de começar:** o checkout da linha pedida falhou.")
+          elif not instalado:
+              md.append("**REPROVADO na instalação:** o compilador candidato não foi instalado, e nenhuma "
+                        "conferência rodou.")
+          elif falharam:
+              md.append(f"**REPROVADO:** {len(falharam)} de {len(conferencias)} conferências falharam com o candidato.")
+          elif incompletas:
+              md.append(f"**INCOMPLETO:** {len(incompletas)} de {len(conferencias)} conferências não terminaram — "
+                        "canceladas, ou o job acabou antes delas (o teto de tempo?).")
+          else:
+              md.append(f"**APROVADO nas conferências do canário:** as {len(conferencias)} passaram com o candidato. "
+                        "Para promover, falta a CI completa com ele.")
+          md.append("")
+          md.append("| | |")
+          md.append("|---|---|")
+          md.append(f"| Canal pedido | {pedido_md} |")
+          if toolchain:
+              md.append(f"| Compilador instalado | `{toolchain}`, o nightly de {data or '?'} (a data do manifesto) |")
+          else:
+              md.append("| Compilador instalado | nenhum |")
+          md.append(f"| Canal oficial (`rust-toolchain.toml`) | `{oficial}` |")
+          md.append(f"| Linha conferida | `{os.environ.get('REF_TESTADO', '?')}` em `{commit[:12]}` — {celula(assunto)} |")
+          md.append(f"| Evento | `{os.environ.get('EVENTO', '?')}` |")
+          md.append(f"| Runner | `{os.environ.get('ImageOS', '?')}`, imagem `{os.environ.get('ImageVersion', '?')}` |")
+          md.append(f"| Execução | {os.environ.get('URL_DA_EXECUCAO', '?')} (os registros no artefato `{ARTEFATO}`) |")
+          md.append("")
+          recuos = sorted(set(re.findall(r"skipping nightly which is missing installed component '([^']+)'",
+                                         ler("instalacao.log"))))
+          if recuos and instalado:
+              md.append(f"O nightly mais recente não tinha {nomes(recuos)}: o rustup recuou até o último que tem todos "
+                        f"os componentes, o de {data or '?'}.")
+              md.append("")
+          if data and data != "desconhecida" and f"nightly-{data}" == oficial:
+              md.append(f"O candidato é o próprio compilador oficial (`{oficial}`).")
+              md.append("")
+          elif data and data != "desconhecida":
+              md.append(f"Para repetir com o mesmo compilador, dispare este workflow com `canal: nightly-{data}`.")
+              md.append("")
+
+          md.append("## O compilador")
+          md.append("")
+          versoes = [ler(f"compilador/{n}.txt") for n in ("rustc", "cargo", "rustfmt", "clippy", "rustup")]
+          versoes = [v for v in versoes if v]
+          if versoes:
+              md += cerca("\n\n".join(versoes).splitlines())
+          else:
+              md.append("Não instalado: ver a falha da instalação abaixo.")
+          md.append("")
+
+          md.append("## As conferências")
+          md.append("")
+          md.append("| Conferência | Resultado |")
+          md.append("|---|---|")
+          for passo, nome in linhas_da_tabela:
+              celula_do_resultado = RESULTADO.get(resultado(passo), "não rodou")
+              if passo == "tamanhos" and ler("tamanhos.log").startswith("nada medido"):
+                  celula_do_resultado = "nada medido: nenhuma compilação deu certo"
+              md.append(f"| {nome} | {celula_do_resultado} |")
+          md.append("")
+
+          if falharam:
+              md.append("## As falhas")
+              md.append("")
+          for passo, nome in falharam:
+              linhas = linhas_do_log(passo)
+              md.append(f"### {nome}")
+              md.append("")
+              for causa in causas(passo, linhas):
+                  md.append(f"- **Causa provável:** {causa}")
+              comandos = [linha for linha in linhas if linha.startswith("falhou: ")]
+              if comandos:
+                  md.append(f"- **O que falhou:** {nomes(c.removeprefix('falhou: ') for c in comandos)}")
+              md.append("")
+              primeiras = trecho(linhas)
+              if primeiras:
+                  md.append("As primeiras linhas de erro:")
+                  md.append("")
+                  md += cerca(primeiras)
+              else:
+                  md.append("O log não tem linha de erro reconhecível: as últimas linhas dele.")
+                  md.append("")
+                  md += cerca([linha[:240] for linha in linhas[-10:]] or ["(log vazio)"])
+              md.append("")
+              md.append(f"O log inteiro: `{passo}.log`, no artefato `{ARTEFATO}`.")
+              md.append("")
+
+          tamanhos = ler("tamanhos.md")
+          md.append(tamanhos if tamanhos else "## Os tamanhos\n\nNão medidos: as compilações não rodaram.")
+          md.append("")
+
+          md.append("## O disco do runner")
+          md.append("")
+          antes = ler("disco-antes.txt")
+          try:
+              depois = shutil.disk_usage(AREA).free
+          except OSError:
+              depois = None
+
+          def gib(b):
+              return f"{int(b) / 2**30:.1f}".replace(".", ",") + " GiB"
+
+          md.append(f"Livre no começo: {gib(antes) if antes.isdigit() else '?'}; "
+                    f"no fim: {gib(depois) if depois is not None else '?'}.")
+          md.append("")
+
+          texto = "\n".join(md) + "\n"
+          (REGISTROS / "relatorio.md").write_text(texto, encoding="utf-8")
+          resumo = os.environ.get("GITHUB_STEP_SUMMARY")
+          if resumo:
+              with open(resumo, "a", encoding="utf-8") as arquivo:
+                  arquivo.write(texto)
+          print(texto)
+
+      - name: Os registros, como artefato
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canario-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registros/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # O veredito: verde só com todo passo em sucesso — a instalação, cada
+      # conferência e o relatório, que, quebrado, é um defeito do canário.
+      # Um passo cancelado, ou que não rodou porque o job acabou antes, também
+      # reprova. Vermelho aqui é só neste workflow: ele não é requisito de
+      # nada.
+      - name: O veredito
+        id: veredito
+        if: always()
+        env:
+          PASSOS: ${{ toJSON(steps) }}
+        shell: python3 -I {0}
+        run: |
+          import json
+          import os
+          import sys
+
+          passos = json.loads(os.environ.get("PASSOS") or "{}")
+          por_resultado = {}
+          for passo, estado in passos.items():
+              por_resultado.setdefault(estado.get("outcome"), []).append(passo)
+          falharam = por_resultado.get("failure", []) + por_resultado.get("cancelled", [])
+          nao_rodaram = por_resultado.get("skipped", []) + ([] if "instalacao" in passos else ["instalacao"])
+          if falharam or nao_rodaram:
+              partes = [f"falharam: {', '.join(falharam)}"] if falharam else []
+              partes += [f"não rodaram: {', '.join(nao_rodaram)}"] if nao_rodaram else []
+              print("::error title=Canário reprovado::" + "; ".join(partes)
+                    + ". A causa está no resumo desta execução e nos registros (canario-*).")
+              sys.exit(1)
+          print("O canário passou em todas as conferências. A promoção ainda pede a CI completa com o candidato.")
