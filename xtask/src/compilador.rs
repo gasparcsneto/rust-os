@@ -90,6 +90,10 @@ const CANARIO: &str = ".github/workflows/canario.yml";
 /// Onde a política está escrita, com a versão em vigor.
 const POLITICA: &str = "CLAUDE.md";
 
+/// A CI oficial, e o job dela cujos comandos o canário repete.
+const CI: &str = ".github/workflows/ci.yml";
+const JOB_DE_LINTS: &str = "qualidade";
+
 /// O compilador desta execução, como [`observar`] o viu.
 pub(crate) struct Compilador {
     /// O canal oficial, do `rust-toolchain.toml` da raiz — ou por que não
@@ -495,6 +499,15 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
         }
     }
     fora.extend(conferir_os_workflows(&workflows));
+    let texto_de = |nome: &str| {
+        workflows
+            .iter()
+            .find(|(n, _)| n == nome)
+            .map(|(_, t)| t.as_str())
+    };
+    if let (Some(ci), Some(canario)) = (texto_de(CI), texto_de(CANARIO)) {
+        fora.extend(o_canario_repete_os_lints(ci, canario));
+    }
 
     if fora.is_empty() {
         println!(
@@ -667,6 +680,78 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
         }
     }
     fora
+}
+
+/// O canário repete os comandos do job de lints da CI oficial: um comando
+/// de lá que faltasse aqui seria uma conferência que o candidato não passa,
+/// e o canário diria "aprovado" sem ela. Os comandos são as linhas dos
+/// `run:` do job que chamam o cargo ou o rustfmt, a instalação dos pacotes
+/// e as variáveis dos passos; o canário pode ter mais, e roda os dele com
+/// `--no-fail-fast`.
+fn o_canario_repete_os_lints(ci: &str, canario: &str) -> Vec<String> {
+    let normal = |texto: &str| texto.split_whitespace().collect::<Vec<_>>().join(" ");
+    let canario = normal(
+        &canario
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .replace(" --no-fail-fast", "");
+    let comandos = comandos_do_job(ci, JOB_DE_LINTS);
+    if comandos.is_empty() {
+        return vec![format!(
+            "{CI}: o job `{JOB_DE_LINTS}` não foi achado, ou não tem comando — o canário repete os dele"
+        )];
+    }
+    comandos
+        .into_iter()
+        .map(|c| normal(&c))
+        .filter(|c| !canario.contains(c.as_str()))
+        .map(|c| {
+            format!(
+                "{CANARIO}: não repete `{c}`, do job `{JOB_DE_LINTS}` da CI oficial — quando a CI muda, o canário muda junto"
+            )
+        })
+        .collect()
+}
+
+/// Os comandos de um job de um workflow: as linhas dos `run:` que chamam o
+/// cargo ou o rustfmt, a instalação dos pacotes, e as variáveis dos passos.
+fn comandos_do_job(workflow: &str, job: &str) -> Vec<String> {
+    let cabecalho = format!("  {job}:");
+    let mut dentro = false;
+    let mut comandos = Vec::new();
+    for linha in workflow.lines() {
+        if !dentro {
+            dentro = linha == cabecalho;
+            continue;
+        }
+        // O próximo job: uma chave no recuo dos jobs.
+        if linha.starts_with("  ")
+            && !linha.starts_with("   ")
+            && linha.trim_end().ends_with(':')
+            && !linha.trim_start().starts_with('#')
+        {
+            break;
+        }
+        let t = linha.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        let t = t.strip_prefix("run: ").unwrap_or(t);
+        let variavel = t.split_once(": ").is_some_and(|(nome, _)| {
+            !nome.is_empty() && nome.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+        });
+        if t.contains("cargo ")
+            || t.starts_with("rustfmt ")
+            || t.starts_with("sudo apt-get install")
+            || variavel
+        {
+            comandos.push(t.to_string());
+        }
+    }
+    comandos
 }
 
 #[cfg(test)]
@@ -961,6 +1046,52 @@ jobs:
         assert_eq!(
             um(".github/workflows/ci.yml", &comentado),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn o_canario_do_repositorio_repete_os_comandos_dos_lints() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let comandos = comandos_do_job(ci, JOB_DE_LINTS);
+        // A formatação (5), o apt, os testes, o clippy (6), as invariantes,
+        // o RUSTDOCFLAGS e a documentação (5).
+        assert!(comandos.len() >= 15, "{comandos:#?}");
+        assert!(comandos.iter().any(|c| c == "cargo xtask invariantes"));
+        assert!(comandos.iter().any(|c| c.starts_with("RUSTDOCFLAGS: ")));
+        assert_eq!(o_canario_repete_os_lints(ci, canario), Vec::<String>::new());
+    }
+
+    #[test]
+    fn o_canario_que_nao_repete_um_comando_dos_lints_e_recusado() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        // Um pacote novo no clippy da CI, que o canário não conhece.
+        let mais_um = ci.replacen(
+            "cargo clippy -p protocolo --features alloc --all-targets -- -D warnings",
+            "cargo clippy -p protocolo --features alloc --all-targets -- -D warnings\n          cargo clippy -p novo -- -D warnings",
+            1,
+        );
+        assert_ne!(mais_um, ci);
+        let fora = o_canario_repete_os_lints(&mais_um, canario);
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(
+            fora[0].contains("cargo clippy -p novo -- -D warnings"),
+            "{fora:?}"
+        );
+        // Um comando que o canário perdeu.
+        let sem_invariantes = canario.replace("cargo xtask invariantes", "true");
+        assert_eq!(o_canario_repete_os_lints(ci, &sem_invariantes).len(), 1);
+        // Num comentário do canário, não vale.
+        let comentado = canario.replace(
+            "cargo xtask invariantes 2>&1",
+            "true 2>&1\n          # cargo xtask invariantes",
+        );
+        assert_eq!(o_canario_repete_os_lints(ci, &comentado).len(), 1);
+        // Sem o job, a regra não passa calada.
+        assert_eq!(
+            o_canario_repete_os_lints("jobs:\n  outro:\n", canario).len(),
+            1
         );
     }
 

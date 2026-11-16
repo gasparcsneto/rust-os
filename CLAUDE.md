@@ -308,6 +308,8 @@ bloquear nada.
   - que os workflows oficiais não o sobrepõem e o conferem
     (`.github/actions/compilador`) depois de cada checkout, com o canal na
     chave de todo cache.
+  - que o canário não usa o cache da CI nem publica a proveniência, e
+    repete os comandos do job de lints: quando a CI muda, ele muda junto.
 - `cargo xtask compilador` mostra o canal, o toolchain ativo, o
   `rustc -Vv`, o `cargo -V` e os desvios.
 - **Todo relatório de validação registra o compilador**: o canal e o
