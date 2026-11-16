@@ -1033,12 +1033,16 @@ fn localizar_objcopy() -> Result<PathBuf, String> {
 /// contém. Uma `llvm-symbolizer` mais velha que o compilador pode silenciar
 /// informação de linha em vez de falhar, que é o pior desfecho possível numa
 /// ferramenta de diagnóstico.
+///
+/// O sysroot é o do compilador que a conferência do começo observou (ver
+/// [`compilador`]): o mesmo que compila, e não o do `rustc` do diretório em
+/// que o processo calhou de estar.
 fn ferramenta_llvm(nome: &str) -> Result<PathBuf, String> {
-    let saida = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .output()
-        .map_err(|e| format!("não foi possível consultar o sysroot do rustc: {e}"))?;
-    let sysroot = PathBuf::from(String::from_utf8_lossy(&saida.stdout).trim().to_string());
+    let sysroot = compilador::estado()
+        .sysroot
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or("o sysroot do rustc não se leu (ver `cargo xtask compilador`)")?;
 
     let rustlib = sysroot.join("lib").join("rustlib");
     let entradas = std::fs::read_dir(&rustlib)

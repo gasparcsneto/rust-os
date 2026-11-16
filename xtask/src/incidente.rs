@@ -1476,22 +1476,17 @@ pub(crate) fn acrescentar(incidente: &Incidente, titulo: &str, linhas: &[String]
     let _ = arquivo.write_all(texto.as_bytes());
 }
 
-/// O `rustc -Vv` do toolchain que compilou o kernel — o mesmo deste
-/// processo, o canal com data do `rust-toolchain.toml` (ver
-/// [`super::compilador`]) —: reconstruir um binário igual depois começa por
-/// ele. O registro de proveniência do kernel, guardado ao lado da cópia, diz
-/// o resto.
+/// O `rustc -Vv` do compilador que compilou o kernel — o desta execução,
+/// que a conferência do começo observou (ver [`super::compilador`]); numa
+/// execução oficial, o canal com data do `rust-toolchain.toml` —:
+/// reconstruir um binário igual depois começa por ele. O registro de
+/// proveniência do kernel, guardado ao lado da cópia quando achado, diz o
+/// resto.
 fn versao_do_rustc() -> String {
-    Command::new("rustc")
-        .arg("-Vv")
-        .current_dir(super::raiz_do_projeto().join("kernel"))
-        .output()
-        .ok()
-        .filter(|s| s.status.success())
-        .map_or_else(
-            || "o rustc -Vv nao respondeu".to_string(),
-            |s| String::from_utf8_lossy(&s.stdout).trim().to_string(),
-        )
+    super::compilador::estado()
+        .rustc
+        .clone()
+        .unwrap_or_else(|| "o rustc -Vv nao respondeu".to_string())
 }
 
 impl Incidente {

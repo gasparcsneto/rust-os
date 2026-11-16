@@ -6,31 +6,44 @@
 //! promoção. Daqui saem três conferências:
 //!
 //! - **no começo de todo `cargo xtask`** ([`conferir_ao_iniciar`]): o
-//!   compilador que vai compilar é o do canal oficial. O toolchain ativo é o
-//!   do sysroot do `rustc` que o cargo chamaria — o mesmo que compilou este
-//!   `xtask`, e que compila por ele o kernel, os programas, o iniciador e o
-//!   modelo do SDK —, e o nome dele tem de ser o canal com o host. E nada
-//!   troca ou embrulha o compilador por fora do `rust-toolchain.toml`: as
-//!   variáveis de [`VARIAVEIS_QUE_TROCAM`], e as chaves `build.rustc`,
-//!   `build.rustc-wrapper` e `build.rustc-workspace-wrapper` de um
-//!   `config.toml` do cargo de fora do repositório (os dele são conferidos
-//!   nas fontes). Um desvio recusa o comando, a menos que
-//!   `DUKE_OUTRO_COMPILADOR=1` declare a execução **não oficial**: aí ele
-//!   avisa alto, e a proveniência dos artefatos (`xtask/src/proveniencia.rs`)
-//!   registra `"oficial": false`. Não é uma barreira contra quem quer
-//!   contornar — o código está aqui —; é o fim do desvio silencioso: o
+//!   compilador que vai compilar é o do canal oficial, o mesmo em todo lugar
+//!   de onde o `xtask` compila. São desvios:
+//!   - o `rust-toolchain.toml` diferente do do commit: uma promoção em
+//!     preparo é uma execução não oficial até o commit;
+//!   - o toolchain ativo — o do sysroot do `rustc` que o cargo chamaria —
+//!     que não é o canal com o host, na raiz ou num diretório de build
+//!     ([`DIRETORIOS_DOS_BUILDS`]): o rustup resolve por diretório, e um
+//!     `rustup override` num deles trocaria o compilador só ali;
+//!   - o cargo com que o `xtask` compila, ou o rustc que compilou o próprio
+//!     `xtask` (o `xtask/build.rs` grava o commit dele), que não são os do
+//!     toolchain ativo;
+//!   - as variáveis com que o cargo troca ou embrulha o compilador
+//!     ([`VARIAVEIS_QUE_TROCAM`]), e as chaves `build.rustc`,
+//!     `build.rustc-wrapper` e `build.rustc-workspace-wrapper` do config do
+//!     cargo — lido pelo próprio cargo em cada diretório de build, com todo
+//!     arquivo que vale ali, toda forma de escrever a chave e as variáveis
+//!     `CARGO_BUILD_*`.
+//!
+//!   Um desvio recusa o comando, a menos que `DUKE_OUTRO_COMPILADOR=1`
+//!   declare a execução **não oficial**: aí ela roda com um aviso, e a
+//!   proveniência dos artefatos (`xtask/src/proveniencia.rs`) registra
+//!   `"oficial": false` — também quando o compilador é o oficial, porque foi
+//!   a execução que se declarou não oficial. Não é uma barreira contra quem
+//!   quer contornar — o código está aqui —; é o fim do desvio silencioso: o
 //!   `+nightly` de costume, um `rustup override` esquecido, o
 //!   `RUSTUP_TOOLCHAIN` de outra sessão, um `sccache` configurado para a
 //!   máquina inteira;
 //! - **no `cargo xtask invariantes`** ([`conferir_o_canal`]): o canal tem
-//!   data e é o mesmo nos dois arquivos; não há outro `rust-toolchain` no
-//!   repositório; nenhum `.cargo/config.toml` dele troca o compilador; os
-//!   workflows oficiais não sobrepõem o toolchain e conferem o compilador —
-//!   a ação `.github/actions/compilador` — depois de cada checkout, antes do
-//!   cache e de qualquer `cargo`, com o canal na chave de todo cache; o
-//!   canário, o único que sobrepõe — ele testa o candidato —, não usa o
-//!   cache da CI nem publica proveniência; e o `xtask` não chama o cargo nem
-//!   o rustc com outro toolchain;
+//!   data, é o mesmo nos dois arquivos e o `CLAUDE.md` o cita; não há outro
+//!   `rust-toolchain` no repositório; o config do cargo dos diretórios com
+//!   `.cargo/` não troca o compilador; o `xtask` não chama o cargo nem o
+//!   rustc com outro toolchain; os workflows oficiais só usam as ações de
+//!   [`ACOES_OFICIAIS`], não sobrepõem o toolchain e conferem o compilador
+//!   — a ação `.github/actions/compilador` — depois de cada checkout, antes
+//!   do cache e de qualquer `cargo`, com o canal em toda chave de cache; e o
+//!   canário, o único que sobrepõe — ele testa o candidato —, não roda nos
+//!   pushes, não usa o cache da CI, não publica proveniência e repete os
+//!   comandos do job de lints;
 //! - **no `cargo xtask compilador`** ([`relatar`]): o canal, o toolchain
 //!   ativo, o `rustc -Vv` completo, o `cargo -V` e os desvios — o que todo
 //!   relatório de validação cita.
@@ -39,8 +52,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::OnceLock;
 
-/// O opt-in de uma execução não oficial, com outro compilador: só o valor
-/// `1` vale.
+use protocolo::json::Json;
+
+/// O opt-in de uma execução não oficial: só o valor `1` vale.
 pub(crate) const OUTRO_COMPILADOR: &str = "DUKE_OUTRO_COMPILADOR";
 
 /// O arquivo que manda no canal.
@@ -49,43 +63,75 @@ const TOOLCHAIN_DA_RAIZ: &str = "rust-toolchain.toml";
 /// O do modelo do SDK, que segue o da raiz.
 const TOOLCHAIN_DO_MODELO: &str = "sdk/modelo/rust-toolchain.toml";
 
-/// As variáveis com que o cargo troca, ou embrulha, o compilador por fora
-/// do `rust-toolchain.toml`.
-const VARIAVEIS_QUE_TROCAM: [&str; 6] = [
-    "RUSTC",
+/// Os diretórios de onde o `xtask` chama o cargo, relativos à raiz: ela
+/// mesma (o próprio `xtask`, os testes, as ferramentas), o kernel, os
+/// programas, o iniciador, o modelo do SDK e a cópia dele que o `sdk-fora`
+/// compila. Os que não existem ficam de fora.
+const DIRETORIOS_DOS_BUILDS: [&str; 6] = [
+    "",
+    "kernel",
+    "programas",
+    "iniciador",
+    "sdk/modelo",
+    "target/sdk-fora/projeto",
+];
+
+/// As variáveis com que o cargo troca, ou embrulha, o compilador, lidas por
+/// ele fora do config. As `CARGO_BUILD_RUSTC*` são do config, e a consulta
+/// ao cargo as vê.
+const VARIAVEIS_QUE_TROCAM: [&str; 3] = ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"];
+
+/// As chaves da tabela `[build]` do config do cargo que trocam, ou
+/// embrulham, o compilador.
+const CHAVES_QUE_TROCAM: [&str; 3] = ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"];
+
+/// O commit do rustc que compilou este `xtask`, gravado pelo `build.rs`.
+const COMPILADO_COM: &str = env!("XTASK_RUSTC_COMMIT");
+
+/// O que, num workflow oficial, sobrepõe ou troca o compilador do
+/// `rust-toolchain.toml`: as variáveis, os `+toolchain`, o `--config` do
+/// cargo, os comandos do rustup que mudam o toolchain, o `PATH` dos passos
+/// seguintes e o config do cargo da máquina.
+const SOBREPOSICOES: [&str; 18] = [
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "DUKE_OUTRO_COMPILADOR",
+    "RUSTC:",
+    "RUSTC=",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "CARGO_BUILD_RUSTC",
-    "CARGO_BUILD_RUSTC_WRAPPER",
-    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
-];
-
-/// As chaves de um `config.toml` do cargo que fazem o mesmo.
-const CHAVES_QUE_TROCAM: [&str; 3] = [
-    "build.rustc",
-    "build.rustc-wrapper",
-    "build.rustc-workspace-wrapper",
-];
-
-/// O que, num workflow oficial, sobrepõe ou troca o compilador do
-/// `rust-toolchain.toml`. `RUSTC` cobre também `RUSTC_WRAPPER`,
-/// `RUSTC_WORKSPACE_WRAPPER` e as `CARGO_BUILD_RUSTC*`.
-const SOBREPOSICOES: [&str; 11] = [
-    "RUSTUP_TOOLCHAIN",
-    "DUKE_OUTRO_COMPILADOR",
-    "RUSTC",
     "cargo +",
     "rustc +",
+    "--config",
     "rustup default",
     "rustup override",
     "rustup run",
-    "rustup toolchain install",
-    "dtolnay/rust-toolchain",
-    "actions-rs/toolchain",
+    "rustup toolchain",
+    "GITHUB_PATH",
+    ".cargo/config",
 ];
+
+/// As ações que um workflow oficial pode usar: o checkout, o cache, a
+/// publicação de artefatos e a conferência do compilador. Outra — uma que
+/// instale um toolchain, por exemplo — só entra pondo-a aqui, de propósito.
+const ACOES_OFICIAIS: [&str; 4] = [
+    "actions/checkout",
+    "actions/cache",
+    "actions/upload-artifact",
+    "./.github/actions/compilador",
+];
+
+/// As do canário: sem o cache da CI nem a conferência do oficial.
+const ACOES_DO_CANARIO: [&str; 2] = ["actions/checkout", "actions/upload-artifact"];
 
 /// O workflow do canário: o único que sobrepõe o compilador.
 const CANARIO: &str = ".github/workflows/canario.yml";
+
+/// A ação que confere o compilador: ela cita as variáveis que recusa, e por
+/// isso não passa pela regra das sobreposições.
+const ACAO_DO_COMPILADOR: &str = ".github/actions/compilador/action.yml";
 
 /// Onde a política está escrita, com a versão em vigor.
 const POLITICA: &str = "CLAUDE.md";
@@ -107,17 +153,17 @@ pub(crate) struct Compilador {
     pub(crate) rustc: Option<String>,
     /// O `cargo -V` do cargo com que o `xtask` compila.
     pub(crate) cargo: Option<String>,
-    /// O que afasta esta execução do compilador oficial. Vazio, ela é
-    /// oficial.
+    /// O que afasta o compilador desta execução do oficial.
     pub(crate) desvios: Vec<String>,
     /// A execução se declarou não oficial: `DUKE_OUTRO_COMPILADOR=1`.
     pub(crate) declarada_nao_oficial: bool,
 }
 
 impl Compilador {
-    /// O compilador é o oficial, sem desvio nenhum.
+    /// A execução é oficial: o compilador é o oficial, sem desvio nenhum, e
+    /// ela não se declarou não oficial.
     pub(crate) fn oficial(&self) -> bool {
-        self.desvios.is_empty()
+        self.desvios.is_empty() && !self.declarada_nao_oficial
     }
 }
 
@@ -146,29 +192,26 @@ fn observar() -> Compilador {
     if let Err(e) = &canal {
         desvios.push(e.clone());
     }
+    desvios.extend(desvios_do_commit(&raiz));
 
     // O rustc que o cargo chamaria: o da variável, se houver, ou o do PATH
-    // — o proxy do rustup, que resolve o toolchain como resolveu o deste
-    // processo (o rustup passa o que resolveu adiante, no
-    // `RUSTUP_TOOLCHAIN`).
+    // — o proxy do rustup, que resolve o toolchain pelo `RUSTUP_TOOLCHAIN`
+    // que ele mesmo passou a este processo, ou, sem ele, pelo diretório.
     let rustc = std::env::var_os("RUSTC")
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "rustc".into());
-    let saida = |args: &[&str]| {
+    let consultar = |dir: &Path, args: &[&str]| {
         Command::new(&rustc)
             .args(args)
-            .current_dir(&raiz)
+            .current_dir(dir)
             .output()
             .ok()
             .filter(|s| s.status.success())
             .map(|s| String::from_utf8_lossy(&s.stdout).trim().to_string())
     };
-    let sysroot = saida(&["--print", "sysroot"]);
-    let vv = saida(&["-Vv"]);
-    let toolchain = sysroot
-        .as_deref()
-        .and_then(|s| Path::new(s).file_name())
-        .map(|n| n.to_string_lossy().into_owned());
+    let sysroot = consultar(&raiz, &["--print", "sysroot"]);
+    let vv = consultar(&raiz, &["-Vv"]);
+    let toolchain = sysroot.as_deref().map(nome_do_toolchain);
     match (toolchain.as_deref(), vv.as_deref().and_then(host_do_rustc)) {
         (Some(toolchain), Some(host)) => {
             if let Some(d) = canal
@@ -185,16 +228,43 @@ fn observar() -> Compilador {
         )),
     }
 
-    desvios.extend(desvios_das_variaveis(|nome| std::env::var(nome).ok()));
-    for arquivo in configuracoes_de_fora(&raiz) {
-        if let Ok(texto) = std::fs::read_to_string(&arquivo) {
-            for chave in chaves_que_trocam_o_compilador(&texto) {
-                desvios.push(format!(
-                    "{}: `{chave}` troca o compilador do cargo",
-                    arquivo.display()
-                ));
+    let diretorios = diretorios_dos_builds(&raiz);
+    // O mesmo rustc em todo diretório de build. Com o `RUSTUP_TOOLCHAIN` —
+    // o caminho do `cargo xtask` — ou o `RUSTC`, o diretório não muda nada.
+    let sem_sobreposicao = std::env::var_os("RUSTUP_TOOLCHAIN").is_none()
+        && std::env::var_os("RUSTC").is_none_or(|v| v.is_empty());
+    if let (Some(sysroot), true) = (&sysroot, sem_sobreposicao) {
+        for (rotulo, dir) in diretorios.iter().skip(1) {
+            match consultar(dir, &["--print", "sysroot"]) {
+                Some(outro) if outro == *sysroot => {}
+                Some(outro) => desvios.push(format!(
+                    "em `{rotulo}`, o toolchain é `{}`, e não o da raiz, `{}` — um `rustup override` ali?",
+                    nome_do_toolchain(&outro),
+                    nome_do_toolchain(sysroot)
+                )),
+                None => desvios.push(format!("em `{rotulo}`, o rustc não respondeu")),
             }
         }
+    }
+
+    // O cargo com que o `xtask` compila, e o rustc que compilou o próprio
+    // `xtask`, são os do toolchain ativo.
+    if let Some(sysroot) = &sysroot {
+        desvios.extend(desvio_do_cargo(
+            Path::new(env!("CARGO")),
+            Path::new(sysroot),
+        ));
+    }
+    if let Some(d) = vv
+        .as_deref()
+        .and_then(|vv| desvio_do_xtask(COMPILADO_COM, vv))
+    {
+        desvios.push(d);
+    }
+
+    desvios.extend(desvios_das_variaveis(|nome| std::env::var(nome).ok()));
+    for (rotulo, dir) in &diretorios {
+        desvios.extend(desvios_do_config(dir, rotulo));
     }
 
     let cargo = Command::new(env!("CARGO"))
@@ -213,6 +283,29 @@ fn observar() -> Compilador {
         desvios,
         declarada_nao_oficial: std::env::var(OUTRO_COMPILADOR).is_ok_and(|v| v == "1"),
     }
+}
+
+/// Os diretórios de build que existem, com o rótulo de cada um.
+fn diretorios_dos_builds(raiz: &Path) -> Vec<(String, PathBuf)> {
+    DIRETORIOS_DOS_BUILDS
+        .iter()
+        .map(|d| {
+            let rotulo = if d.is_empty() {
+                String::from("./")
+            } else {
+                format!("{d}/")
+            };
+            (rotulo, raiz.join(d))
+        })
+        .filter(|(_, dir)| dir.is_dir())
+        .collect()
+}
+
+/// O nome do toolchain de um sysroot: o do diretório dele.
+fn nome_do_toolchain(sysroot: &str) -> String {
+    Path::new(sysroot)
+        .file_name()
+        .map_or_else(|| sysroot.to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// O valor de `channel` num `rust-toolchain.toml`, sem as aspas.
@@ -270,12 +363,71 @@ pub(crate) fn conferir_a_data(canal: &str) -> Result<(), String> {
     }
 }
 
+/// As linhas de um arquivo de configuração que valem: sem as vazias e sem os
+/// comentários de linha inteira.
+fn linhas_que_valem(texto: &str) -> Vec<&str> {
+    texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// Os dois `rust-toolchain.toml` da árvore são os do commit — o que vale é
+/// o do commit; os comentários não contam.
+fn desvios_do_commit(raiz: &Path) -> Vec<String> {
+    let mut desvios = Vec::new();
+    for arquivo in [TOOLCHAIN_DA_RAIZ, TOOLCHAIN_DO_MODELO] {
+        let no_commit = Command::new("git")
+            .current_dir(raiz)
+            .args(["show", &format!("HEAD:{arquivo}")])
+            .output()
+            .ok()
+            .filter(|s| s.status.success())
+            .map(|s| String::from_utf8_lossy(&s.stdout).into_owned());
+        let na_arvore = std::fs::read_to_string(raiz.join(arquivo)).ok();
+        if let Some(d) = desvio_do_arquivo(arquivo, no_commit.as_deref(), na_arvore.as_deref()) {
+            desvios.push(d);
+        }
+    }
+    desvios
+}
+
+/// O desvio de um `rust-toolchain.toml` da árvore contra o do commit.
+fn desvio_do_arquivo(
+    arquivo: &str,
+    no_commit: Option<&str>,
+    na_arvore: Option<&str>,
+) -> Option<String> {
+    match (no_commit, na_arvore) {
+        (Some(a), Some(b)) if linhas_que_valem(a) == linhas_que_valem(b) => None,
+        (Some(_), Some(_)) => Some(format!(
+            "o {arquivo} da árvore difere do do commit: vale o do commit — uma promoção em \
+             preparo é uma execução não oficial até o commit"
+        )),
+        (None, _) => Some(format!(
+            "o {arquivo} do commit não se lê (o git não respondeu): o canal não se confere contra o commit"
+        )),
+        (_, None) => Some(format!("o {arquivo} da árvore não se lê")),
+    }
+}
+
 /// O host do `rustc -Vv`: a linha `host: ...`.
 fn host_do_rustc(vv: &str) -> Option<&str> {
+    linha_do_rustc(vv, "host:")
+}
+
+/// O commit do `rustc -Vv`: a linha `commit-hash: ...`.
+fn commit_do_rustc(vv: &str) -> Option<&str> {
+    linha_do_rustc(vv, "commit-hash:")
+}
+
+/// O valor de uma linha `chave: valor` do `rustc -Vv`.
+fn linha_do_rustc<'a>(vv: &'a str, chave: &str) -> Option<&'a str> {
     vv.lines()
-        .find_map(|l| l.trim().strip_prefix("host:"))
+        .find_map(|l| l.trim().strip_prefix(chave))
         .map(str::trim)
-        .filter(|h| !h.is_empty())
+        .filter(|v| !v.is_empty())
 }
 
 /// O desvio do toolchain ativo, se ele não é o do canal com o host — o nome
@@ -285,6 +437,32 @@ fn desvio_do_toolchain(canal: &str, toolchain: &str, host: &str) -> Option<Strin
     (toolchain != oficial).then(|| {
         format!(
             "o toolchain ativo é `{toolchain}`, e o oficial é `{oficial}` ({TOOLCHAIN_DA_RAIZ})"
+        )
+    })
+}
+
+/// O desvio do cargo com que o `xtask` compila, se ele não é o do sysroot
+/// do toolchain ativo — o `xtask` foi compilado por outro toolchain e é
+/// rodado direto, sem o `cargo xtask`.
+fn desvio_do_cargo(cargo: &Path, sysroot: &Path) -> Option<String> {
+    let esperado = sysroot.join("bin").join("cargo");
+    (cargo != esperado).then(|| {
+        format!(
+            "o cargo com que o xtask compila é `{}`, e não o do toolchain ativo, `{}`",
+            cargo.display(),
+            esperado.display()
+        )
+    })
+}
+
+/// O desvio do rustc que compilou o próprio `xtask`, se ele não é o ativo:
+/// o `xtask` foi compilado com outro compilador — um `--config build.rustc`,
+/// um binário de outro toolchain rodado direto.
+fn desvio_do_xtask(compilado_com: &str, vv: &str) -> Option<String> {
+    let ativo = commit_do_rustc(vv)?;
+    (compilado_com != ativo).then(|| {
+        format!(
+            "o xtask foi compilado pelo rustc de commit `{compilado_com}`, e o ativo é o de `{ativo}`"
         )
     })
 }
@@ -301,50 +479,57 @@ fn desvios_das_variaveis(ler: impl Fn(&str) -> Option<String>) -> Vec<String> {
         .collect()
 }
 
-/// As chaves de [`CHAVES_QUE_TROCAM`] num `config.toml` do cargo, pelo nome
-/// completo — a da tabela `[build]` e a pontuada, `build.rustc = ...`.
-fn chaves_que_trocam_o_compilador(texto: &str) -> Vec<String> {
-    let mut tabela = String::new();
-    let mut achadas = Vec::new();
-    for linha in texto.lines().map(str::trim) {
-        if linha.is_empty() || linha.starts_with('#') {
-            continue;
-        }
-        if let Some(nome) = linha.strip_prefix('[') {
-            tabela = nome.trim_end_matches(']').trim().to_string();
-            continue;
-        }
-        let Some((chave, _)) = linha.split_once('=') else {
-            continue;
-        };
-        let chave = chave.trim().trim_matches('"');
-        let completa = if tabela.is_empty() {
-            chave.to_string()
-        } else {
-            format!("{tabela}.{chave}")
-        };
-        if CHAVES_QUE_TROCAM.contains(&completa.as_str()) {
-            achadas.push(completa);
-        }
+/// As chaves de [`CHAVES_QUE_TROCAM`] no config do cargo de `dir`, como o
+/// próprio cargo o lê ali: todos os arquivos que valem para o diretório —
+/// os de cima, o do `CARGO_HOME` —, as variáveis `CARGO_BUILD_*`, e toda
+/// forma de escrever a chave. A consulta é a do cargo nightly
+/// (`-Zunstable-options config get`); o canário diz se ela mudar.
+fn desvios_do_config(dir: &Path, rotulo: &str) -> Vec<String> {
+    let saida = Command::new(env!("CARGO"))
+        .args([
+            "-Zunstable-options",
+            "config",
+            "get",
+            "--format",
+            "json-value",
+            "build",
+        ])
+        .current_dir(dir)
+        .output();
+    match saida {
+        Ok(s) if s.status.success() => chaves_que_trocam(&String::from_utf8_lossy(&s.stdout))
+            .into_iter()
+            .map(|chave| {
+                format!(
+                    "em `{rotulo}`, o config do cargo define `build.{chave}`: troca o compilador"
+                )
+            })
+            .collect(),
+        // Sem a tabela `[build]` em lugar nenhum.
+        Ok(s) if String::from_utf8_lossy(&s.stderr).contains("is not set") => Vec::new(),
+        Ok(s) => vec![format!(
+            "em `{rotulo}`, o cargo não respondeu à consulta do config: {}",
+            String::from_utf8_lossy(&s.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+        )],
+        Err(e) => vec![format!("em `{rotulo}`, o cargo não rodou: {e}")],
     }
-    achadas
 }
 
-/// Os `config.toml` do cargo de fora do repositório que valem para os
-/// builds dele: os dos diretórios acima da raiz, e o do `CARGO_HOME`.
-fn configuracoes_de_fora(raiz: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = raiz.ancestors().skip(1).map(|d| d.join(".cargo")).collect();
-    let cargo_home = std::env::var_os("CARGO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
-    if let Some(home) = cargo_home
-        && !dirs.contains(&home)
-    {
-        dirs.push(home);
-    }
-    dirs.iter()
-        .flat_map(|d| [d.join("config.toml"), d.join("config")])
-        .filter(|a| a.is_file())
+/// As chaves de [`CHAVES_QUE_TROCAM`] definidas na tabela `[build]` que o
+/// cargo devolve em JSON.
+fn chaves_que_trocam(build: &str) -> Vec<&'static str> {
+    let tabela = Json(build.trim().as_bytes());
+    CHAVES_QUE_TROCAM
+        .into_iter()
+        .filter(|chave| {
+            tabela
+                .member(chave)
+                .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
+        })
         .collect()
 }
 
@@ -352,10 +537,11 @@ fn configuracoes_de_fora(raiz: &Path) -> Vec<PathBuf> {
 /// que a relata, e o `help`.
 pub(crate) fn conferir_ao_iniciar() -> Result<(), String> {
     let c = estado();
-    if c.oficial() {
+    if c.desvios.is_empty() {
         if c.declarada_nao_oficial {
             eprintln!(
-                "[xtask] {OUTRO_COMPILADOR}=1, mas o compilador é o oficial: a execução segue oficial"
+                "[xtask] {OUTRO_COMPILADOR}=1: a execução é NÃO OFICIAL, como declarada — o \
+                 compilador é o oficial, mas a proveniência dos artefatos registra \"oficial\": false"
             );
         }
         return Ok(());
@@ -377,17 +563,17 @@ pub(crate) fn conferir_ao_iniciar() -> Result<(), String> {
     } else {
         Err(format!(
             "o compilador não é o oficial:\n{lista}\n\n\
-             O compilador oficial é o canal do {TOOLCHAIN_DA_RAIZ} (ver \"O compilador\" no \
-             CLAUDE.md). Rode sem `+toolchain`, sem `RUSTUP_TOOLCHAIN`, sem `rustup override` neste \
-             diretório e sem as variáveis e chaves acima: o rustup instala o canal sozinho. \
-             `cargo xtask compilador` mostra o estado. Uma execução não oficial, de propósito: \
-             {OUTRO_COMPILADOR}=1 cargo xtask ..."
+             O compilador oficial é o canal do {TOOLCHAIN_DA_RAIZ} do commit (ver \"O compilador\" \
+             no CLAUDE.md). Rode por `cargo xtask`, sem `+toolchain`, sem `RUSTUP_TOOLCHAIN`, sem \
+             `rustup override` e sem as variáveis e as chaves acima: o rustup instala o canal \
+             sozinho. `cargo xtask compilador` mostra o estado. Uma execução não oficial, de \
+             propósito: {OUTRO_COMPILADOR}=1 cargo xtask ..."
         ))
     }
 }
 
 /// `cargo xtask compilador`: o canal oficial, o toolchain ativo, as versões
-/// completas e os desvios. Sai com sucesso só com o compilador oficial.
+/// completas e os desvios. Sai com sucesso só numa execução oficial.
 pub(crate) fn relatar() -> Result<ExitCode, String> {
     let c = estado();
     let raiz = super::raiz_do_projeto();
@@ -413,13 +599,17 @@ pub(crate) fn relatar() -> Result<ExitCode, String> {
         println!("    {linha}");
     }
     println!("o cargo -V: {}", c.cargo.as_deref().unwrap_or(nao));
-    if c.oficial() {
+    println!("o xtask, compilado pelo rustc de commit: {COMPILADO_COM}");
+    if c.desvios.is_empty() {
         println!("os desvios: nenhum — o compilador é o oficial");
-        return Ok(ExitCode::SUCCESS);
+    } else {
+        println!("os desvios:");
+        for d in &c.desvios {
+            println!("  - {d}");
+        }
     }
-    println!("os desvios:");
-    for d in &c.desvios {
-        println!("  - {d}");
+    if c.oficial() {
+        return Ok(ExitCode::SUCCESS);
     }
     if c.declarada_nao_oficial {
         println!("a execução: NÃO oficial ({OUTRO_COMPILADOR}=1)");
@@ -468,6 +658,7 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
 
     let arquivos = arquivos_do_repositorio(&raiz)?;
     let mut workflows = Vec::new();
+    let mut com_config: Vec<String> = Vec::new();
     for arquivo in &arquivos {
         let nome = Path::new(arquivo)
             .file_name()
@@ -481,12 +672,16 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
                 "{arquivo}: outro rust-toolchain no repositório — o canal é um só, o da raiz"
             ));
         }
-        if arquivo.ends_with(".cargo/config.toml") || arquivo.ends_with(".cargo/config") {
-            for chave in chaves_que_trocam_o_compilador(&ler(arquivo)?) {
-                fora.push(format!("{arquivo}: `{chave}` troca o compilador do cargo"));
-            }
+        // O diretório de um `.cargo/config*`: o config dele é lido pelo
+        // próprio cargo, abaixo.
+        if let Some((dir, _)) = arquivo
+            .rsplit_once(".cargo/config")
+            .filter(|(_, resto)| resto.is_empty() || *resto == ".toml")
+            && !com_config.iter().any(|d| d == dir)
+        {
+            com_config.push(dir.to_string());
         }
-        if arquivo.starts_with(".github/workflows/")
+        if (arquivo.starts_with(".github/workflows/") || arquivo.starts_with(".github/actions/"))
             && (arquivo.ends_with(".yml") || arquivo.ends_with(".yaml"))
         {
             workflows.push((arquivo.clone(), ler(arquivo)?));
@@ -497,6 +692,10 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
         {
             fora.extend(chamadas_com_outro_toolchain(arquivo, &ler(arquivo)?));
         }
+    }
+    for dir in &com_config {
+        let rotulo = if dir.is_empty() { "./" } else { dir.as_str() };
+        fora.extend(desvios_do_config(&raiz.join(dir), rotulo));
     }
     fora.extend(conferir_os_workflows(&workflows));
     let texto_de = |nome: &str| {
@@ -511,10 +710,11 @@ pub(crate) fn conferir_o_canal() -> Result<ExitCode, String> {
 
     if fora.is_empty() {
         println!(
-            "[xtask] o compilador: o canal {}, com data, nos dois rust-toolchain.toml e no CLAUDE.md; nenhum \
-             outro, nenhuma troca nos config.toml do cargo nem no xtask; os workflows oficiais \
-             conferem o compilador depois de cada checkout, com o canal na chave de todo cache, \
-             e só o canário sobrepõe, sem o cache da CI",
+            "[xtask] o compilador: o canal {}, com data, nos dois rust-toolchain.toml e no \
+             CLAUDE.md; nenhum outro, nenhuma troca no config do cargo nem no xtask; os workflows \
+             oficiais só com as ações permitidas, conferindo o compilador depois de cada checkout, \
+             com o canal na chave de todo cache; e o canário, o único que sobrepõe, fora dos \
+             pushes, sem o cache da CI e com os comandos do job de lints",
             canal.as_deref().unwrap_or("")
         );
         Ok(ExitCode::SUCCESS)
@@ -555,8 +755,8 @@ fn arquivos_do_repositorio(raiz: &Path) -> Result<Vec<String>, String> {
 }
 
 /// As linhas de uma fonte do `xtask` que chamariam o cargo ou o rustc com
-/// outro toolchain: um `+toolchain` ou uma variável que troca o compilador
-/// posta no processo filho.
+/// outro toolchain: um `+toolchain`, ou uma variável que troca o compilador
+/// ou o toolchain posta no processo filho.
 fn chamadas_com_outro_toolchain(arquivo: &str, fonte: &str) -> Vec<String> {
     let mut proibidos: Vec<String> = ["\"+nightly", "\"+stable", "\"+beta"]
         .iter()
@@ -565,7 +765,14 @@ fn chamadas_com_outro_toolchain(arquivo: &str, fonte: &str) -> Vec<String> {
     proibidos.extend(
         VARIAVEIS_QUE_TROCAM
             .iter()
-            .chain(&["RUSTUP_TOOLCHAIN"])
+            .chain(&[
+                "CARGO_BUILD_RUSTC",
+                "CARGO_BUILD_RUSTC_WRAPPER",
+                "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+                "RUSTUP_TOOLCHAIN",
+                "RUSTUP_HOME",
+                "CARGO_HOME",
+            ])
             .map(|v| format!(".env(\"{v}\"")),
     );
     fonte
@@ -583,55 +790,158 @@ fn chamadas_com_outro_toolchain(arquivo: &str, fonte: &str) -> Vec<String> {
         .collect()
 }
 
-/// Os workflows: os oficiais não sobrepõem o compilador e o conferem —
-/// `./.github/actions/compilador`, com `id: compilador` — depois de cada
-/// checkout, antes do cache e de qualquer `cargo`; e toda chave de cache,
-/// a principal e as de restauração, leva o canal. O canário sobrepõe, mas
-/// não usa o cache nem publica a proveniência.
+/// Uma linha de YAML que não é comentário: o recuo e o texto sem as
+/// bordas. As vazias ficam, com o recuo zero: um bloco `|` pode tê-las.
+struct Linha<'a> {
+    recuo: usize,
+    texto: &'a str,
+}
+
+/// As linhas de código de um YAML, sem os comentários de linha inteira.
+fn linhas_de_codigo(texto: &str) -> Vec<Linha<'_>> {
+    texto
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(|l| Linha {
+            recuo: l.len() - l.trim_start().len(),
+            texto: l.trim(),
+        })
+        .collect()
+}
+
+/// A chave e o valor de uma linha `chave: valor` de YAML, com o `- ` de um
+/// item de lista e as aspas da chave tirados.
+fn chave_e_valor(texto: &str) -> Option<(&str, &str)> {
+    let texto = texto.strip_prefix("- ").unwrap_or(texto);
+    let (chave, valor) = texto.split_once(':')?;
+    let chave = chave.trim().trim_matches(|c| c == '"' || c == '\'');
+    // Uma chave de workflow: letras, dígitos, `-` e `_` — e não um pedaço
+    // de código de dentro de um `run:`, como `avisos.append(f"aviso`.
+    let de_yaml = !chave.is_empty()
+        && chave
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    de_yaml.then_some((chave, valor.trim()))
+}
+
+/// O nome da ação de um `uses:` — sem as aspas e sem a versão.
+fn nome_da_acao(valor: &str) -> &str {
+    let valor = valor.trim_matches(|c| c == '"' || c == '\'');
+    valor.split('@').next().unwrap_or(valor)
+}
+
+/// Os workflows: os oficiais só usam as ações de [`ACOES_OFICIAIS`], não
+/// sobrepõem o compilador e o conferem — `./.github/actions/compilador`,
+/// com `id: compilador` — depois de cada checkout, antes do cache e de
+/// qualquer `cargo`; e toda chave de cache, a principal e as de
+/// restauração, leva o canal. Nada em estilo de fluxo (`{ ... }`), que
+/// esconderia as chaves desta leitura, e nenhum `uses:` em várias linhas. O
+/// canário sobrepõe, mas não roda nos pushes, não usa o cache nem publica a
+/// proveniência. As ações locais seguem as regras dos workflows oficiais,
+/// menos a que confere o compilador, que cita o que recusa.
 fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     let mut fora = Vec::new();
     for (nome, texto) in workflows {
-        let linhas: Vec<&str> = texto
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .collect();
-        if nome == CANARIO {
-            if linhas.iter().any(|l| l.contains("actions/cache")) {
+        if nome == ACAO_DO_COMPILADOR {
+            continue;
+        }
+        let linhas = linhas_de_codigo(texto);
+        let canario = nome == CANARIO;
+        let permitidas: &[&str] = if canario {
+            &ACOES_DO_CANARIO
+        } else {
+            &ACOES_OFICIAIS
+        };
+
+        for l in &linhas {
+            let Some((chave, valor)) = chave_e_valor(l.texto) else {
+                continue;
+            };
+            if valor.starts_with('{') {
                 fora.push(format!(
-                    "{nome}: o canário usa o actions/cache — ele não toca no cache da CI oficial"
+                    "{nome}: `{}` — o estilo de fluxo esconde as chaves da conferência",
+                    l.texto
                 ));
             }
-            if linhas.iter().any(|l| l.contains("target/proveniencia")) {
+            if chave == "uses" {
+                if valor.is_empty() || valor.starts_with(['>', '|']) {
+                    fora.push(format!(
+                        "{nome}: um `uses:` em várias linhas — numa linha só"
+                    ));
+                } else if !permitidas.contains(&nome_da_acao(valor)) {
+                    fora.push(format!(
+                        "{nome}: `{}` não é uma ação permitida ({})",
+                        nome_da_acao(valor),
+                        permitidas.join(", ")
+                    ));
+                }
+            }
+        }
+
+        if canario {
+            if linhas
+                .iter()
+                .any(|l| l.texto.contains("target/proveniencia"))
+            {
                 fora.push(format!(
                     "{nome}: o canário publica a proveniência — ele não produz artefato oficial"
                 ));
             }
+            fora.extend(gatilhos_de_push(nome, &linhas));
             continue;
         }
+
         for l in &linhas {
-            if let Some(p) = SOBREPOSICOES.iter().find(|p| l.contains(*p)) {
+            if let Some(p) = SOBREPOSICOES.iter().find(|p| l.texto.contains(*p)) {
                 fora.push(format!(
-                    "{nome}: `{l}` — `{p}` sobrepõe o compilador do {TOOLCHAIN_DA_RAIZ}"
+                    "{nome}: `{}` — `{p}` sobrepõe o compilador do {TOOLCHAIN_DA_RAIZ}",
+                    l.texto
+                ));
+            }
+            if l.texto.contains("rust-toolchain")
+                && [">", "tee ", "sed -i", "cp ", "mv ", "ln "]
+                    .iter()
+                    .any(|e| l.texto.contains(e))
+            {
+                fora.push(format!(
+                    "{nome}: `{}` escreve num rust-toolchain — o canal é o do commit",
+                    l.texto
                 ));
             }
         }
+        if nome.starts_with(".github/actions/") {
+            continue;
+        }
+
         let mut pendente = false;
         for l in &linhas {
-            if l.contains("uses: actions/checkout") {
-                if pendente {
-                    fora.push(format!(
-                        "{nome}: um checkout sem a conferência do compilador depois"
-                    ));
+            let acao = chave_e_valor(l.texto)
+                .filter(|(chave, _)| *chave == "uses")
+                .map(|(_, valor)| nome_da_acao(valor));
+            match acao {
+                Some("actions/checkout") => {
+                    if pendente {
+                        fora.push(format!(
+                            "{nome}: um checkout sem a conferência do compilador depois"
+                        ));
+                    }
+                    pendente = true;
                 }
-                pendente = true;
-            } else if l.contains("uses: ./.github/actions/compilador") {
-                pendente = false;
-            } else if pendente && (l.contains("actions/cache") || l.contains("cargo ")) {
-                fora.push(format!(
-                    "{nome}: `{l}` vem antes da conferência do compilador"
-                ));
-                pendente = false;
+                Some("./.github/actions/compilador") => pendente = false,
+                Some("actions/cache") if pendente => {
+                    fora.push(format!(
+                        "{nome}: o cache vem antes da conferência do compilador"
+                    ));
+                    pendente = false;
+                }
+                _ if pendente && l.texto.contains("cargo ") => {
+                    fora.push(format!(
+                        "{nome}: `{}` vem antes da conferência do compilador",
+                        l.texto
+                    ));
+                    pendente = false;
+                }
+                _ => {}
             }
         }
         if pendente {
@@ -641,37 +951,23 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
         }
         let usos = linhas
             .iter()
-            .filter(|l| l.contains("uses: ./.github/actions/compilador"))
+            .filter(|l| {
+                chave_e_valor(l.texto).is_some_and(|(chave, valor)| {
+                    chave == "uses" && nome_da_acao(valor) == "./.github/actions/compilador"
+                })
+            })
             .count();
-        let ids = linhas.iter().filter(|l| **l == "id: compilador").count();
+        let ids = linhas
+            .iter()
+            .filter(|l| chave_e_valor(l.texto) == Some(("id", "compilador")))
+            .count();
         if usos != ids {
             fora.push(format!(
                 "{nome}: {usos} conferência(s) do compilador e {ids} `id: compilador` — a chave do \
                  cache lê o canal de `steps.compilador`"
             ));
         }
-        let mut chaves: Vec<&str> = Vec::new();
-        let mut em_bloco = false;
-        for l in &linhas {
-            if em_bloco {
-                if l.is_empty() || l.contains(": ") || l.ends_with(':') || l.starts_with("- ") {
-                    em_bloco = false;
-                } else {
-                    chaves.push(l);
-                    continue;
-                }
-            }
-            if let Some(valor) = l
-                .strip_prefix("key:")
-                .or_else(|| l.strip_prefix("restore-keys:"))
-            {
-                match valor.trim() {
-                    "|" => em_bloco = true,
-                    valor => chaves.push(valor),
-                }
-            }
-        }
-        for chave in chaves {
+        for chave in chaves_de_cache(&linhas) {
             if !chave.contains("steps.compilador.outputs.canal") {
                 fora.push(format!(
                     "{nome}: a chave de cache `{chave}` não leva o canal do compilador"
@@ -682,22 +978,84 @@ fn conferir_os_workflows(workflows: &[(String, String)]) -> Vec<String> {
     fora
 }
 
+/// As chaves de cache de um workflow: as de `key:` e as de `restore-keys:`,
+/// numa linha ou num bloco `|` — as linhas mais recuadas que a chave,
+/// mesmo depois de uma vazia.
+fn chaves_de_cache<'a>(linhas: &[Linha<'a>]) -> Vec<&'a str> {
+    let mut chaves = Vec::new();
+    let mut bloco: Option<usize> = None;
+    for l in linhas {
+        if let Some(recuo) = bloco {
+            if l.texto.is_empty() {
+                continue;
+            }
+            if l.recuo > recuo {
+                chaves.push(l.texto);
+                continue;
+            }
+            bloco = None;
+        }
+        if let Some((chave, valor)) = chave_e_valor(l.texto)
+            && (chave == "key" || chave == "restore-keys")
+        {
+            if valor.starts_with(['|', '>']) {
+                bloco = Some(l.recuo);
+            } else {
+                chaves.push(valor);
+            }
+        }
+    }
+    chaves
+}
+
+/// Os gatilhos de push do canário — ele roda no agendamento e no disparo
+/// manual, nunca num push.
+fn gatilhos_de_push(nome: &str, linhas: &[Linha<'_>]) -> Vec<String> {
+    let mut fora = Vec::new();
+    let mut no_on = false;
+    for l in linhas {
+        if l.recuo == 0 && !l.texto.is_empty() {
+            no_on = chave_e_valor(l.texto).is_some_and(|(chave, valor)| {
+                if chave == "on" && ["push", "pull_request"].iter().any(|g| valor.contains(g)) {
+                    fora.push(format!("{nome}: o canário roda num push (`{}`)", l.texto));
+                }
+                chave == "on"
+            });
+            continue;
+        }
+        if no_on
+            && l.recuo == 2
+            && let Some((chave, _)) = chave_e_valor(l.texto)
+            && ["push", "pull_request", "pull_request_target"].contains(&chave)
+        {
+            fora.push(format!(
+                "{nome}: o canário roda em `{chave}` — só no agendamento e no disparo manual"
+            ));
+        }
+    }
+    fora
+}
+
 /// O canário repete os comandos do job de lints da CI oficial: um comando
 /// de lá que faltasse aqui seria uma conferência que o candidato não passa,
-/// e o canário diria "aprovado" sem ela. Os comandos são as linhas dos
-/// `run:` do job que chamam o cargo ou o rustfmt, a instalação dos pacotes
-/// e as variáveis dos passos; o canário pode ter mais, e roda os dele com
-/// `--no-fail-fast`.
+/// e o canário diria "aprovado" sem ela. Os comandos são os de
+/// [`comandos_do_job`], no diretório deles, e os laços das arquiteturas; o
+/// canário pode ter mais, e roda os testes com `--no-fail-fast`. Não
+/// contam os passos em Python do canário — o relatório cita comandos no
+/// texto —, nem a linha que neutraliza o comando (`|| true`).
 fn o_canario_repete_os_lints(ci: &str, canario: &str) -> Vec<String> {
-    let normal = |texto: &str| texto.split_whitespace().collect::<Vec<_>>().join(" ");
-    let canario = normal(
-        &canario
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
+    let normal = |texto: &str| {
+        texto
+            .split_whitespace()
             .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .replace(" --no-fail-fast", "");
+            .join(" ")
+            .replace(" --no-fail-fast", "")
+    };
+    let linhas: Vec<String> = linhas_fora_do_python(canario)
+        .into_iter()
+        .map(normal)
+        .filter(|l| !l.contains("|| true") && !l.contains("|| :"))
+        .collect();
     let comandos = comandos_do_job(ci, JOB_DE_LINTS);
     if comandos.is_empty() {
         return vec![format!(
@@ -707,7 +1065,7 @@ fn o_canario_repete_os_lints(ci: &str, canario: &str) -> Vec<String> {
     comandos
         .into_iter()
         .map(|c| normal(&c))
-        .filter(|c| !canario.contains(c.as_str()))
+        .filter(|c| !linhas.iter().any(|l| contem_no_lugar(l, c)))
         .map(|c| {
             format!(
                 "{CANARIO}: não repete `{c}`, do job `{JOB_DE_LINTS}` da CI oficial — quando a CI muda, o canário muda junto"
@@ -716,11 +1074,48 @@ fn o_canario_repete_os_lints(ci: &str, canario: &str) -> Vec<String> {
         .collect()
 }
 
+/// `linha` tem o `comando` no lugar dele: um comando da raiz não vale por
+/// um igual dentro de um `cd outro && ...`.
+fn contem_no_lugar(linha: &str, comando: &str) -> bool {
+    let da_raiz = !comando.starts_with("cd ") && !comando.starts_with("(cd ");
+    linha
+        .match_indices(comando)
+        .any(|(i, _)| !da_raiz || !linha[..i].trim_end().ends_with("&&"))
+}
+
+/// As linhas do canário fora dos passos em Python e dos comentários.
+fn linhas_fora_do_python(canario: &str) -> Vec<&str> {
+    /// Fecha um passo: as linhas dele ficam, se ele não é em Python.
+    fn fechar<'a>(passo: &mut Vec<&'a str>, linhas: &mut Vec<&'a str>) {
+        if !passo.iter().any(|l| l.trim().starts_with("shell: python")) {
+            linhas.append(passo);
+        }
+        passo.clear();
+    }
+    let mut linhas = Vec::new();
+    let mut passo = Vec::new();
+    for l in canario.lines() {
+        if l.trim_start().starts_with('#') {
+            continue;
+        }
+        // Um passo novo: um item de lista no recuo dos passos.
+        if l.starts_with("      - ") {
+            fechar(&mut passo, &mut linhas);
+        }
+        passo.push(l);
+    }
+    fechar(&mut passo, &mut linhas);
+    linhas
+}
+
 /// Os comandos de um job de um workflow: as linhas dos `run:` que chamam o
-/// cargo ou o rustfmt, a instalação dos pacotes, e as variáveis dos passos.
+/// cargo ou o rustfmt — no diretório do `cd` de antes, no mesmo passo —,
+/// os laços (`for ... do`), a instalação dos pacotes e as variáveis dos
+/// passos.
 fn comandos_do_job(workflow: &str, job: &str) -> Vec<String> {
     let cabecalho = format!("  {job}:");
     let mut dentro = false;
+    let mut dir: Option<String> = None;
     let mut comandos = Vec::new();
     for linha in workflow.lines() {
         if !dentro {
@@ -735,19 +1130,30 @@ fn comandos_do_job(workflow: &str, job: &str) -> Vec<String> {
         {
             break;
         }
+        if linha.starts_with("      - ") {
+            dir = None;
+        }
         let t = linha.trim();
         if t.starts_with('#') {
             continue;
         }
         let t = t.strip_prefix("run: ").unwrap_or(t);
+        if let Some(d) = t.strip_prefix("cd ").filter(|d| !d.contains(' ')) {
+            dir = Some(d.to_string());
+            continue;
+        }
         let variavel = t.split_once(": ").is_some_and(|(nome, _)| {
             !nome.is_empty() && nome.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
         });
-        if t.contains("cargo ")
-            || t.starts_with("rustfmt ")
-            || t.starts_with("sudo apt-get install")
-            || variavel
-        {
+        let laco = t.starts_with("for ") && t.ends_with("; do");
+        if t.contains("cargo ") || t.starts_with("rustfmt ") {
+            comandos.push(match &dir {
+                Some(d) if !t.starts_with("cd ") && !t.starts_with("(cd ") => {
+                    format!("cd {d} && {t}")
+                }
+                _ => t.to_string(),
+            });
+        } else if t.starts_with("sudo apt-get install") || variavel || laco {
             comandos.push(t.to_string());
         }
     }
@@ -880,40 +1286,131 @@ mod testes {
     }
 
     #[test]
-    fn as_chaves_do_config_do_cargo_que_trocam_o_compilador() {
+    fn as_chaves_da_tabela_build_que_trocam_o_compilador() {
         assert_eq!(
-            chaves_que_trocam_o_compilador("[build]\nrustc-wrapper = \"sccache\"\n"),
-            ["build.rustc-wrapper"]
+            chaves_que_trocam("{\"rustc-wrapper\":\"sccache\",\"target-dir\":\"/x\"}"),
+            ["rustc-wrapper"]
         );
         assert_eq!(
-            chaves_que_trocam_o_compilador("build.rustc = \"/opt/rustc\"\n"),
-            ["build.rustc"]
+            chaves_que_trocam("{\"rustc\":\"/opt/rustc\",\"rustc-workspace-wrapper\":\"w\"}"),
+            ["rustc", "rustc-workspace-wrapper"]
         );
-        assert_eq!(
-            chaves_que_trocam_o_compilador(
-                "[build]\n# rustc = \"x\"\ntarget = \"x86_64-unknown-none\"\nrustc-workspace-wrapper = \"w\"\n"
+        assert!(chaves_que_trocam("{\"target\":\"x86_64-unknown-none\"}").is_empty());
+        assert!(chaves_que_trocam("{\"rustc-wrapper\":\"\"}").is_empty());
+    }
+
+    /// Um diretório temporário com um `.cargo/config.toml` de `texto`.
+    fn com_config(nome: &str, texto: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("xtask-compilador-{}-{nome}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".cargo")).expect("o diretório");
+        std::fs::write(dir.join(".cargo").join("config.toml"), texto).expect("o config");
+        dir
+    }
+
+    #[test]
+    fn o_config_do_cargo_lido_pelo_cargo_pega_toda_forma_de_escrever_a_chave() {
+        // As formas que um leitor de texto deixava passar — o comentário
+        // depois do cabeçalho, a tabela em linha, o cabeçalho e a chave entre
+        // aspas, o ponto com espaços — e a comum, de controle.
+        for (nome, texto) in [
+            ("comum", "[build]\nrustc-wrapper = \"sccache\"\n"),
+            (
+                "comentario",
+                "[build] # o cache da máquina\nrustc-wrapper = \"sccache\"\n",
             ),
-            ["build.rustc-workspace-wrapper"]
-        );
-        for sem in [
-            "[target.x86_64-unknown-none]\nrustc = \"x\"\n",
-            "[alias]\nxtask = \"run --quiet --package xtask --\"\n",
-            "[build]\nrustflags = [\"-C\", \"relocation-model=static\"]\n",
+            ("em-linha", "build = { rustc-wrapper = \"sccache\" }\n"),
+            ("aspas", "[\"build\"]\n'rustc-wrapper' = \"sccache\"\n"),
+            ("pontuada", "build . rustc = \"/opt/rustc\"\n"),
         ] {
-            assert!(chaves_que_trocam_o_compilador(sem).is_empty(), "{sem}");
+            let dir = com_config(nome, texto);
+            let desvios = desvios_do_config(&dir, nome);
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(desvios.len(), 1, "{nome}: {desvios:?}");
+            assert!(
+                desvios[0].contains("troca o compilador"),
+                "{nome}: {desvios:?}"
+            );
         }
+        let dir = com_config("sem", "[build]\ntarget = \"x86_64-unknown-none\"\n");
+        let desvios = desvios_do_config(&dir, "sem");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(desvios, Vec::<String>::new());
     }
 
     #[test]
     fn os_config_do_cargo_do_repositorio_nao_trocam_o_compilador() {
-        for texto in [
-            include_str!("../../.cargo/config.toml"),
-            include_str!("../../kernel/.cargo/config.toml"),
-            include_str!("../../programas/.cargo/config.toml"),
-            include_str!("../../sdk/modelo/.cargo/config.toml"),
-        ] {
-            assert!(chaves_que_trocam_o_compilador(texto).is_empty());
+        let raiz = super::super::raiz_do_projeto();
+        for dir in ["", "kernel", "programas", "sdk/modelo"] {
+            assert_eq!(
+                desvios_do_config(&raiz.join(dir), dir),
+                Vec::<String>::new(),
+                "{dir}"
+            );
         }
+    }
+
+    #[test]
+    fn o_rust_toolchain_da_arvore_e_o_do_commit() {
+        let arquivo = "rust-toolchain.toml";
+        let commit = "# o oficial\n[toolchain]\nchannel = \"nightly-2026-11-15\"\n";
+        // Os comentários não contam.
+        let comentado = "[toolchain]\n# outro comentário\nchannel = \"nightly-2026-11-15\"\n\n";
+        assert_eq!(
+            desvio_do_arquivo(arquivo, Some(commit), Some(comentado)),
+            None
+        );
+        let trocado = "[toolchain]\nchannel = \"nightly-2026-11-01\"\n";
+        assert!(desvio_do_arquivo(arquivo, Some(commit), Some(trocado)).is_some());
+        assert!(desvio_do_arquivo(arquivo, None, Some(commit)).is_some());
+        assert!(desvio_do_arquivo(arquivo, Some(commit), None).is_some());
+    }
+
+    #[test]
+    fn o_cargo_e_o_xtask_sao_os_do_toolchain_ativo() {
+        let sysroot = Path::new("/r/toolchains/nightly-2026-11-15-x86_64-unknown-linux-gnu");
+        assert_eq!(
+            desvio_do_cargo(&sysroot.join("bin").join("cargo"), sysroot),
+            None
+        );
+        assert!(
+            desvio_do_cargo(
+                Path::new("/r/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo"),
+                sysroot
+            )
+            .is_some()
+        );
+        let vv = "rustc 1.102.0-nightly (5f4effd57 2026-11-13)\ncommit-hash: 5f4effd579500175af844241eb179e756190f1e7\nhost: x86_64-unknown-linux-gnu\n";
+        assert_eq!(
+            commit_do_rustc(vv),
+            Some("5f4effd579500175af844241eb179e756190f1e7")
+        );
+        assert_eq!(
+            desvio_do_xtask("5f4effd579500175af844241eb179e756190f1e7", vv),
+            None
+        );
+        assert!(desvio_do_xtask("2d8144b78f00000000000000000000000000000", vv).is_some());
+        assert!(desvio_do_xtask("desconhecido", vv).is_some());
+        // O xtask desta execução de teste foi compilado pelo rustc do PATH.
+        assert_ne!(COMPILADO_COM, "desconhecido");
+    }
+
+    #[test]
+    fn com_o_opt_in_a_execucao_nunca_e_oficial() {
+        let c = |desvios: Vec<String>, declarada| Compilador {
+            canal: Ok(String::from("nightly-2026-11-15")),
+            toolchain: None,
+            sysroot: None,
+            rustc: None,
+            cargo: None,
+            desvios,
+            declarada_nao_oficial: declarada,
+        };
+        assert!(c(Vec::new(), false).oficial());
+        assert!(!c(Vec::new(), true).oficial());
+        assert!(!c(vec![String::from("um desvio")], false).oficial());
+        assert!(!c(vec![String::from("um desvio")], true).oficial());
     }
 
     #[test]
@@ -1113,5 +1610,169 @@ jobs:
         let com_proveniencia =
             format!("{canario}        with:\n          path: target/proveniencia/\n");
         assert_eq!(um(CANARIO, &com_proveniencia).len(), 1);
+    }
+    #[test]
+    fn o_checkout_e_a_conferencia_escritos_de_outro_jeito_nao_escapam() {
+        // O checkout entre aspas, com espaço a mais, em várias linhas.
+        for checkout in [
+            "      - uses: 'actions/checkout@v4'\n",
+            "      - uses:  actions/checkout@v4\n",
+        ] {
+            let texto = format!("{OFICIAL}{checkout}      - run: cargo build\n");
+            let fora = um(".github/workflows/ci.yml", &texto);
+            assert!(
+                fora.iter().any(|f| f.contains("antes da conferência")),
+                "{checkout}: {fora:?}"
+            );
+        }
+        let em_linhas = format!("{OFICIAL}      - uses: >-\n          actions/checkout@v4\n");
+        assert!(!um(".github/workflows/ci.yml", &em_linhas).is_empty());
+        // Uma ação parecida com a do compilador não é ela.
+        let parecida = OFICIAL.replace(
+            "uses: ./.github/actions/compilador",
+            "uses: ./.github/actions/compilador-canario",
+        );
+        assert!(!um(".github/workflows/ci.yml", &parecida).is_empty());
+        // Outra ação de toolchain, fora da lista.
+        let outra = format!(
+            "{OFICIAL}      - uses: actions-rust-lang/setup-rust-toolchain@v1\n        with:\n          toolchain: nightly\n"
+        );
+        assert!(!um(".github/workflows/ci.yml", &outra).is_empty());
+    }
+
+    #[test]
+    fn a_chave_de_cache_escrita_de_outro_jeito_nao_escapa() {
+        for (velho, novo) in [
+            (
+                "          key: testes-${{ steps.compilador.outputs.canal }}-",
+                "          key : testes-",
+            ),
+            (
+                "          key: testes-${{ steps.compilador.outputs.canal }}-",
+                "          \"key\": testes-",
+            ),
+            (
+                "            testes-${{ steps.compilador.outputs.canal }}-\n",
+                "            testes-${{ steps.compilador.outputs.canal }}-\n\n            furtivo-\n",
+            ),
+        ] {
+            let texto = OFICIAL.replace(velho, novo);
+            assert_ne!(texto, OFICIAL, "{novo}");
+            let fora = um(".github/workflows/ci.yml", &texto);
+            assert!(
+                fora.iter().any(|f| f.contains("não leva o canal")),
+                "{novo}: {fora:?}"
+            );
+        }
+        // O estilo de fluxo esconde as chaves: recusado.
+        let fluxo = OFICIAL.replace(
+            "        with:\n",
+            "        with: { path: target, key: furtivo-, restore-keys: furtivo- }\n        x:\n",
+        );
+        assert!(
+            um(".github/workflows/ci.yml", &fluxo)
+                .iter()
+                .any(|f| f.contains("estilo de fluxo"))
+        );
+    }
+
+    #[test]
+    fn as_sobreposicoes_de_fora_da_lista_antiga_sao_recusadas() {
+        for linha in [
+            "        run: cargo --config 'build.rustc-wrapper=\"sccache\"' clippy\n",
+            "        run: printf '[build]' >> ~/.cargo/config.toml\n",
+            "        run: echo nightly > kernel/rust-toolchain\n",
+            "        run: echo /opt/rust/bin >> \"$GITHUB_PATH\"\n",
+            "        env:\n          CARGO_HOME: /opt/outro\n",
+            "        run: rustup toolchain install nightly\n",
+        ] {
+            let texto = format!("{OFICIAL}{linha}");
+            assert!(
+                !um(".github/workflows/ci.yml", &texto).is_empty(),
+                "{linha}"
+            );
+        }
+        // Código de dentro de um `run:` não é YAML.
+        let codigo = format!(
+            "{OFICIAL}        run: |\n          avisos.append(f\"aviso: {{descricao}} tem\")\n"
+        );
+        assert_eq!(
+            um(".github/workflows/ci.yml", &codigo),
+            Vec::<String>::new()
+        );
+        // Uma variável que só começa por RUSTC não troca o compilador.
+        let log = format!("{OFICIAL}        env:\n          RUSTC_LOG: rustc_codegen_ssa=info\n");
+        assert_eq!(um(".github/workflows/ci.yml", &log), Vec::<String>::new());
+    }
+
+    #[test]
+    fn uma_acao_local_segue_as_regras_dos_workflows_oficiais() {
+        let acao = "runs:\n  using: composite\n  steps:\n    - run: echo \"RUSTUP_TOOLCHAIN=nightly\" >> \"$GITHUB_ENV\"\n      shell: bash\n";
+        assert!(!um(".github/actions/outra/action.yml", acao).is_empty());
+        let com_cache = "runs:\n  using: composite\n  steps:\n    - uses: actions/cache@v4\n";
+        assert_eq!(
+            um(".github/actions/outra/action.yml", com_cache),
+            Vec::<String>::new()
+        );
+        // A do compilador cita o que recusa, e fica de fora da regra.
+        assert_eq!(um(ACAO_DO_COMPILADOR, acao), Vec::<String>::new());
+    }
+
+    #[test]
+    fn o_canario_nao_roda_nos_pushes() {
+        let base = "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\njobs:\n  canario:\n    steps:\n      - uses: actions/checkout@v4\n";
+        assert_eq!(um(CANARIO, base), Vec::<String>::new());
+        let com_push = base.replace(
+            "  workflow_dispatch:\n",
+            "  push:\n    branches: [x]\n  workflow_dispatch:\n",
+        );
+        assert_eq!(um(CANARIO, &com_push).len(), 1);
+        let em_linha = base.replace(
+            "on:\n  schedule:\n    - cron: '17 4 * * 1'\n  workflow_dispatch:\n",
+            "on: [push, workflow_dispatch]\n",
+        );
+        assert_eq!(um(CANARIO, &em_linha).len(), 1);
+    }
+
+    #[test]
+    fn a_paridade_com_os_lints_olha_o_diretorio_os_lacos_e_o_efeito() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let canario = include_str!("../../.github/workflows/canario.yml");
+        let comandos = comandos_do_job(ci, JOB_DE_LINTS);
+        assert!(
+            comandos
+                .iter()
+                .any(|c| c == "cd kernel && cargo clippy --target \"$alvo\" -- -D warnings"),
+            "{comandos:#?}"
+        );
+        assert!(comandos.iter().any(|c| c.starts_with("for alvo in ")));
+        // O clippy do kernel some: a linha do iniciador não o substitui.
+        let sem_kernel = canario.replace(
+            "(cd kernel && cargo clippy --target \"$alvo\" -- -D warnings) \\",
+            "true \\",
+        );
+        assert_ne!(sem_kernel, canario);
+        assert_eq!(o_canario_repete_os_lints(ci, &sem_kernel).len(), 1);
+        // O comando neutralizado não conta.
+        let neutralizado = canario.replace(
+            "cargo xtask invariantes 2>&1",
+            "cargo xtask invariantes || true; true 2>&1",
+        );
+        assert_ne!(neutralizado, canario);
+        assert_eq!(o_canario_repete_os_lints(ci, &neutralizado).len(), 1);
+        // Sem o aarch64 nos laços.
+        let sem_arm = canario.replace(
+            "for alvo in x86_64-unknown-none aarch64-unknown-none-softfloat; do",
+            "for alvo in x86_64-unknown-none; do",
+        );
+        assert!(!o_canario_repete_os_lints(ci, &sem_arm).is_empty());
+        // Só no texto de um passo em Python, não vale.
+        let so_no_python = canario
+            .replace("cargo xtask invariantes 2>&1", "true 2>&1")
+            .replace(
+                "      - name: O veredito\n",
+                "      - name: Um texto\n        shell: python3 -I {0}\n        run: |\n          print(\"cargo xtask invariantes\")\n\n      - name: O veredito\n",
+            );
+        assert_eq!(o_canario_repete_os_lints(ci, &so_no_python).len(), 1);
     }
 }
