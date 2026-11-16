@@ -212,9 +212,10 @@ Antes de dar qualquer trabalho por concluído:
 
 Estado inicial; tarefas distribuídas; agentes envolvidos; dependências;
 implementação; correções; testes; mutações; problemas encontrados;
-soluções; conflitos de integração; validação de segurança; CI; commit
-final; decisões utilizadas; novas decisões, se houver; decisões que
-continuam CLOSED; próximos trabalhos.
+soluções; conflitos de integração; validação de segurança; CI; o
+compilador da validação (ver 4.1); commit final; decisões utilizadas;
+novas decisões, se houver; decisões que continuam CLOSED; próximos
+trabalhos.
 
 ## 2. Os papéis prontos
 
@@ -272,3 +273,116 @@ mutação aplicada.
 Uma de cada vez, sempre restauradas; o resultado que vale é o da última
 rodada de cada uma. A mutação que sobrevive é investigada: um teste fraco
 ganha reforço; um código equivalente é explicado e documentado.
+
+## 4. O compilador
+
+A política híbrida, adotada pelo dono do projeto em 16 de novembro de
+2026 e permanente como o resto deste arquivo: um compilador fixado para
+todo trabalho oficial, e um canário que acompanha o nightly à parte, sem
+bloquear nada.
+
+### 4.1 O compilador oficial
+
+- O canal oficial é o do `rust-toolchain.toml` da raiz — hoje
+  **`nightly-2026-11-15`**: `rustc 1.102.0-nightly (5f4effd57 2026-11-13)`
+  e `cargo 1.102.0-nightly (ede6cefea 2026-11-11)`. O
+  `sdk/modelo/rust-toolchain.toml` tem o mesmo canal.
+- Toda sessão, worktree, agente e job da CI usa esse compilador. O rustup
+  o instala sozinho, pelo arquivo, na primeira chamada do cargo; as
+  worktrees e os agentes paralelos o compartilham — o toolchain mora em
+  `~/.rustup`, um só por máquina. Nenhum agente instala, fixa ou sobrepõe
+  outro.
+- **Nenhuma validação oficial usa outro compilador em silêncio.** Não se
+  usa `cargo +<toolchain>`, `RUSTUP_TOOLCHAIN`, `rustup override` ou
+  `rustup default` no projeto, nem `RUSTC`, `RUSTC_WRAPPER` e afins, nem
+  as chaves `build.rustc*` de um `config.toml` do cargo. O `cargo xtask`
+  confere o compilador no começo de todo comando e recusa rodar com um
+  desvio. `DUKE_OUTRO_COMPILADOR=1` declara uma execução **não oficial**:
+  ela roda com um aviso, a proveniência a registra assim, e o resultado
+  dela não vale como validação. A CI oficial nunca usa essa variável.
+- O `cargo xtask invariantes` confere:
+  - que o canal tem data e é o mesmo nos dois arquivos, e que esta seção o
+    cita;
+  - que não há outro `rust-toolchain` no repositório;
+  - que nenhum `config.toml` do repositório troca o compilador;
+  - que os workflows oficiais não o sobrepõem e o conferem
+    (`.github/actions/compilador`) depois de cada checkout, com o canal na
+    chave de todo cache.
+- `cargo xtask compilador` mostra o canal, o toolchain ativo, o
+  `rustc -Vv`, o `cargo -V` e os desvios.
+- **Todo relatório de validação registra o compilador**: o canal e o
+  `rustc -V` — de `cargo xtask compilador` ou do log da CI.
+- Depois de uma promoção, o toolchain antigo sai da máquina
+  (`rustup toolchain uninstall <canal antigo>`). Cada um ocupa uns 1,3 GB,
+  e o disco da sessão é curto (ver 3.3).
+
+### 4.2 A CI oficial e o canário
+
+- **A CI oficial** (`.github/workflows/ci.yml`) roda só com o compilador
+  oficial. Cada job confere o compilador e imprime a versão completa no
+  log, e o canal entra na chave de todo cache: um cache é do compilador
+  que o encheu, e uma promoção começa caches novos, sem restaurar os do
+  anterior.
+- **O canário** (`.github/workflows/canario.yml`) é independente, semanal
+  e não bloqueante.
+  - Instala o nightly mais recente, ou o canal pedido no disparo manual.
+  - Roda o que o job de lints roda, nas duas arquiteturas: a formatação, o
+    Clippy do hospedeiro, do kernel, do iniciador e dos programas, as
+    invariantes, os testes do hospedeiro e a documentação.
+  - Compila os kernels nas configurações da CI, o iniciador e os
+    programas.
+  - O relatório traz a versão completa do compilador e os tamanhos.
+  - Não muda o toolchain oficial nem arquivo nenhum do projeto, não usa o
+    cache da CI e não produz artefato oficial.
+  - Uma falha dele é um relatório com a causa, não um bloqueio. O
+    resultado dele é informação para a próxima promoção.
+- O GitHub só agenda um workflow que está no ramo padrão do repositório.
+  Enquanto o ramo padrão não tiver o `canario.yml`, o agendamento não
+  dispara, e o canário roda pelo disparo manual (`workflow_dispatch`) —
+  no mínimo, pela sessão que prepara uma promoção.
+
+### 4.3 A promoção
+
+- **Ordinária**, a cada 4 semanas. **Extraordinária** quando:
+  - o compilador novo traz uma correção de segurança relevante;
+  - uma dependência ou o próprio Rust exige;
+  - o kernel precisa de algo dele.
+- **O candidato passa no canário.**
+- **Antes de promover, mede-se o candidato contra o oficial:**
+  - o uso de pilha da rodada da hora, nas duas arquiteturas;
+  - o tamanho do kernel;
+  - o tamanho dos programas — o `gestor` está perto do teto;
+  - a duração da suíte;
+  - o desempenho que importar.
+
+  Uma regressão é investigada antes da promoção: a causa entendida, e
+  corrigida ou aceita por escrito.
+- **A promoção é um commit próprio, revisável.** Ele troca os dois
+  `rust-toolchain.toml` juntos e a versão escrita em 4.1. Os ajustes que
+  o compilador novo pedir — lints novos do Clippy, a formatação — vão,
+  quando possível, em commits separados, antes dela.
+- **A CI completa passa verde no commit da promoção.**
+- Trocar o compilador é engenharia [B] dentro desta política. Uma mudança
+  de arquitetura ou de segurança que o compilador novo force é [C].
+
+### 4.4 A proveniência
+
+- Todo artefato que o `xtask` compila deixa um registro em
+  `target/proveniencia/`, um JSON por artefato. Vale para o kernel, o
+  iniciador, cada programa e o modelo do SDK. O registro guarda:
+  - o SHA-256 e o tamanho do artefato;
+  - o `rustc -Vv` completo, o `cargo -V`, o toolchain e se a execução foi
+    oficial;
+  - o alvo, a arquitetura, o perfil e as features;
+  - o commit, se a árvore estava limpa, e o SHA-256 do `Cargo.lock`;
+  - a execução da CI: o run, a tentativa, o job e o endereço.
+- Cada job da CI publica os registros como artefato (`proveniencia-*`),
+  pelo mesmo mecanismo dos incidentes. O incidente de uma máquina parada
+  guarda o registro do kernel que capturou.
+- **Proveniência não é reprodução byte a byte.** O registro diz com que
+  compilador, de que fonte e em que execução o artefato saiu. Compilar de
+  novo, noutra máquina, não dá garantidamente os mesmos bytes: os caminhos
+  absolutos do checkout e do registro do cargo entram nas localizações de
+  pânico.
+- É um registro de build, fora do Duke: não é autoridade, nem
+  persistência, nem auditoria do sistema.
