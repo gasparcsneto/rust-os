@@ -906,7 +906,10 @@ pub(crate) fn compilar_o_kernel(
         features,
         lock: &dir_kernel.join("Cargo.lock"),
     })?;
-    println!("[xtask] a proveniência: {}", registro.display());
+    println!(
+        "[xtask] a proveniência: {}",
+        proveniencia::para_o_log(&registro)
+    );
     Ok(elf)
 }
 
@@ -1209,7 +1212,10 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
         features: &[],
         lock: &dir.join("Cargo.lock"),
     })?;
-    println!("[xtask] a proveniência: {}", registro.display());
+    println!(
+        "[xtask] a proveniência: {}",
+        proveniencia::para_o_log(&registro)
+    );
     Ok(efi)
 }
 

@@ -100,6 +100,46 @@ fn registrar_em(dir: &Path, c: &Compilado) -> Result<PathBuf, String> {
     Ok(destino)
 }
 
+/// A linha do log de quem compilou: o registro — o nome leva o começo do
+/// resumo —, se o compilador foi o oficial e em que execução da CI. É o que
+/// se confere no log de um job, sem baixar o artefato.
+pub(crate) fn para_o_log(registro: &Path) -> String {
+    linha_do_log(
+        registro
+            .strip_prefix(super::raiz_do_projeto())
+            .unwrap_or(registro),
+        super::compilador::estado().oficial(),
+        fonte().ci.as_deref(),
+    )
+}
+
+/// [`para_o_log`], com o estado dado.
+fn linha_do_log(registro: &Path, oficial: bool, ci: Option<&[(&str, String)]>) -> String {
+    let compilador = if oficial {
+        "o compilador oficial"
+    } else {
+        "um compilador NÃO oficial"
+    };
+    let execucao = match ci {
+        Some(campos) => {
+            let campo = |nome: &str| {
+                campos
+                    .iter()
+                    .find(|(c, _)| *c == nome)
+                    .map_or("?", |(_, v)| v.as_str())
+            };
+            format!(
+                "o run {} (tentativa {}), job {}",
+                campo("run_id"),
+                campo("tentativa"),
+                campo("job")
+            )
+        }
+        None => String::from("fora da CI"),
+    };
+    format!("{} — {compilador}, {execucao}", registro.display())
+}
+
 /// O registro de um artefato com o SHA-256 `sha256` — o mais novo, se há
 /// mais de um.
 pub(crate) fn do_artefato(sha256: &str) -> Option<PathBuf> {
@@ -470,6 +510,25 @@ mod testes {
         let sumido = dir.join("sumido");
         assert!(registrar_em(&registros, &compilado(&sumido, &lock, &[])).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_linha_do_log_diz_o_registro_o_compilador_e_a_execucao() {
+        let registro =
+            Path::new("target/proveniencia/kernel-duke-x86_64-release-0123456789abcdef.json");
+        assert_eq!(
+            linha_do_log(registro, true, None),
+            "target/proveniencia/kernel-duke-x86_64-release-0123456789abcdef.json — o compilador oficial, fora da CI"
+        );
+        let ci = [
+            ("run_id", String::from("42")),
+            ("tentativa", String::from("2")),
+            ("job", String::from("testes")),
+        ];
+        assert_eq!(
+            linha_do_log(registro, false, Some(&ci)),
+            "target/proveniencia/kernel-duke-x86_64-release-0123456789abcdef.json — um compilador NÃO oficial, o run 42 (tentativa 2), job testes"
+        );
     }
 
     #[test]
