@@ -28,6 +28,13 @@ on:
   # workflow do ramo padrão).
   schedule:
     - cron: '17 4 * * 1'
+  # TEMPORÁRIO: o primeiro disparo, para o GitHub registrar o workflow. Um
+  # workflow que não está no ramo padrão só existe para a API depois de
+  # rodar uma vez — foi assim com o `rede-principal.yml`, em 23/10/2026.
+  # Só neste ramo e só quando este arquivo muda; o commit seguinte o tira.
+  push:
+    branches: [claude/modest-pascal-vy8p8k]
+    paths: [.github/workflows/canario.yml]
   workflow_dispatch:
     inputs:
       canal:
