@@ -79,7 +79,9 @@ próprio canal, lendo `log.tail`.
 
 ## Começando
 
-Requisitos: Rust nightly (instalado automaticamente pelo `rust-toolchain.toml`),
+Requisitos: o Rust nightly com data do `rust-toolchain.toml` — o compilador
+oficial, que o rustup instala sozinho; ver "O compilador" no
+[`CLAUDE.md`](CLAUDE.md) —,
 os pacotes do emulador para as arquiteturas desejadas e o `swtpm`, que é o TPM
 2.0 das máquinas de teste — a âncora da persistência, ver
 [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md). Para pôr uma máquina de pé e
@@ -111,6 +113,7 @@ cargo xtask simbolo --elf v2-x86_64.slot.elf 0xffff8000...  # o de uma versão p
 cargo xtask asm consumir_pilha       # o que o otimizador realmente gerou
 cargo xtask elf                      # confere os ELFs de usuário por fora
 cargo xtask invariantes              # regras de fonte: SAFETY, parâmetros do agente, README
+cargo xtask compilador               # o compilador oficial e o desta execução, com os desvios
 cargo xtask persistencia             # vários boots sobre o mesmo disco e o mesmo TPM
 cargo xtask atualizacao              # a atualização A/B pelo firmware: instalar, tentar, confirmar, voltar, cair
 cargo xtask identidade               # a identidade nascida no primeiro boot: quedas, o cache do disco, cópias, sem TPM, clone, reinstalar
@@ -839,6 +842,7 @@ xtask/src/
 ├── bancada_sdk.rs   a bancada do SDK: duas máquinas, o modelo de fora do repositório instalado pelo gate no armazém das duas e falando entre elas, o eco-malha com clientes daqui e de lá e o teto da relação, os dois sentidos, a conversa pelo teclado, as medidas do aviso e da vazão, e a revogação no meio — nos quatro pares
 ├── canal_tcp.rs     o canal do agente por TCP do lado de fora: a porta encaminhada, e a ponte da suíte — `xtask/bancada/ponte.py`
 ├── codigo.rs        o código publicado: fora da imagem, selado pelos editores da bancada, servido pelo HTTP dela em `/codigo`
+├── compilador.rs    o compilador oficial: o canal com data dos dois `rust-toolchain.toml`, a conferência do começo de todo comando — outro compilador só com `DUKE_OUTRO_COMPILADOR=1`, numa execução não oficial —, o `cargo xtask compilador` e a parte do `invariantes` que confere o canal, os `config.toml` do cargo e os workflows
 ├── copia.rs         a bancada da cópia de segurança: a cópia e a restauração por um agente, como no `operar` — o corte, a autoridade que não volta, a reinstalação, a queda em cada fronteira, a produção e a outra máquina
 ├── digitacao.rs     a pessoa no teclado da máquina, pelo monitor do emulador, nas bancadas que digitam: a linha conferida antes do Enter — na tela, pela árvore semântica; a senha, pela conta das teclas do kernel; o Enter, contado — e o ritmo que se adapta à perda de teclas, um fator de respiro por máquina que dobra a cada perda, até 8×, e vale até o fim da rodada, também depois dos cortes de energia; cada texto, menos o apagar e o Enter, começa com o shift sozinho, apertado e solto, contra o shift preso de um soltar perdido
 ├── disco_hostil.rs  o disco hostil da bancada: um servidor NBD com cache volátil que o corte perde, inteiro ou em parte, sem devolver o disco à máquina cortada, erros de mídia por faixa e respostas retidas; o fim espera a conexão em curso

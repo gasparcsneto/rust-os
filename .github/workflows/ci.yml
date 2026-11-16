@@ -28,8 +28,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # O `rust-toolchain.toml` cuida de instalar o nightly com os
-      # componentes e alvos certos; basta invocar o cargo.
+      # O compilador oficial, o canal com data do `rust-toolchain.toml`: o
+      # rustup o instala com os componentes e os alvos na primeira chamada,
+      # e a ação o confere — nada no runner o sobrepõe —, imprime o
+      # `rustc -Vv` e o `cargo -V` no log e devolve o canal para a chave do
+      # cache. Um cache é do compilador que o encheu: uma promoção começa
+      # caches novos, e nenhum se restaura de outro compilador. Todo job
+      # começa assim; ver "O compilador" no CLAUDE.md e
+      # `.github/actions/compilador`.
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -39,8 +49,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: lints-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: lints-
+          key: lints-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: lints-${{ steps.compilador.outputs.canal }}-
 
       # Dois workspaces separados exigem duas invocações: o da raiz não
       # alcança o kernel, que é deliberadamente excluído dele.
@@ -184,6 +194,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -193,8 +207,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: testes-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: testes-${{ matrix.arch }}-
+          key: testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # O emulador e as ferramentas que montam o disco de testes.
       #
@@ -316,6 +330,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -325,11 +343,11 @@ jobs:
             target
             kernel/target
             programas/target
-          key: video-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: video-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           # Sem um cache seu ainda, o do job de testes: a mesma compilação.
           restore-keys: |
-            video-${{ matrix.arch }}-
-            testes-${{ matrix.arch }}-
+            video-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
+            testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # As mesmas da máquina do job de testes: o disco, o TPM e a rede.
       - name: Instalar o emulador e as ferramentas de disco
@@ -369,6 +387,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -378,8 +400,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: persistencia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: persistencia-${{ matrix.arch }}-
+          key: persistencia-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: persistencia-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -434,6 +456,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -443,8 +469,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: atualizacao-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: atualizacao-${{ matrix.arch }}-
+          key: atualizacao-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: atualizacao-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -495,6 +521,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -504,8 +534,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: identidade-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: identidade-${{ matrix.arch }}-
+          key: identidade-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: identidade-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -556,6 +586,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -565,8 +599,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: botao-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: botao-${{ matrix.arch }}-
+          key: botao-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: botao-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -616,6 +650,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -625,8 +663,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: senha-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: senha-${{ matrix.arch }}-
+          key: senha-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: senha-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -675,6 +713,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -684,8 +726,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: copia-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: copia-${{ matrix.arch }}-
+          key: copia-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: copia-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -744,6 +786,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -753,8 +799,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: enlace-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: enlace-${{ matrix.chave }}-
+          key: enlace-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: enlace-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -813,6 +859,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -822,8 +872,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: pareamento-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: pareamento-${{ matrix.chave }}-
+          key: pareamento-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: pareamento-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -880,6 +930,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -889,8 +943,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: fluxo-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: fluxo-${{ matrix.chave }}-
+          key: fluxo-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: fluxo-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -938,6 +992,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -945,8 +1003,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: sdk-fora-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: sdk-fora-
+          key: sdk-fora-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: sdk-fora-${{ steps.compilador.outputs.canal }}-
 
       - name: O modelo, compilado, conferido e selado nas duas arquiteturas
         run: |
@@ -989,6 +1047,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -998,8 +1060,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: sdk-${{ matrix.chave }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: sdk-${{ matrix.chave }}-
+          key: sdk-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: sdk-${{ matrix.chave }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada
@@ -1053,6 +1115,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -1062,8 +1128,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: tempo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: tempo-${{ matrix.arch }}-
+          key: tempo-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: tempo-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # Os incidentes de outra rodada, que o cache de `target` traz, não
       # vão para o artefato desta — nem quando um passo antes da bancada

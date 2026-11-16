@@ -19,6 +19,7 @@ mod bancada_sdk;
 mod botao;
 mod canal_tcp;
 mod codigo;
+mod compilador;
 mod copia;
 mod digitacao;
 mod disco_hostil;
@@ -261,6 +262,16 @@ fn main() -> ExitCode {
 
     let comando = posicionais.first().copied().unwrap_or("help");
 
+    // O compilador oficial antes de tudo — menos no `compilador`, que o
+    // relata, e na ajuda. Um desvio recusa o comando, a menos que a execução
+    // se declare não oficial: ver [`compilador`].
+    if !matches!(comando, "compilador" | "help" | "-h")
+        && let Err(erro) = compilador::conferir_ao_iniciar()
+    {
+        eprintln!("\nerro: {erro}");
+        return ExitCode::FAILURE;
+    }
+
     let resultado = match comando {
         "build" => build(arch, release, false).map(|_| ExitCode::SUCCESS),
         "run" => run(arch, release, video),
@@ -298,6 +309,7 @@ fn main() -> ExitCode {
         },
         "elf" => conferir_elfs(arch, release),
         "invariantes" => conferir_invariantes(),
+        "compilador" => compilador::relatar(),
         "iniciador" => iniciador(arch, release),
         "persistencia" => persistencia::persistencia(arch, release),
         "atualizacao" => atualizar::atualizacao(arch, release),
@@ -506,6 +518,9 @@ COMANDOS:
     asm <simbolo>             desmonta uma função do binário compilado
     elf                       confere os programas de usuário embutidos
     invariantes               confere as regras de fonte dos dois lados
+    compilador                o compilador oficial e o desta execução: o canal,
+                              o toolchain ativo, o rustc -Vv, o cargo -V e os
+                              desvios (sai com falha se não for o oficial)
     iniciador                 sobe o iniciador UEFI no OVMF e confere o relatório
     persistencia              a mesma máquina em vários boots: corte de energia,
                               disco restaurado, relógio para trás
@@ -2700,6 +2715,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_os_fluxos()?,
         conferir_a_vez_dos_programas()?,
         sdk::conferir_o_contrato()?,
+        compilador::conferir_o_canal()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)

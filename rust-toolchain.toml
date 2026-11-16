@@ -1,8 +1,19 @@
-# O kernel depende de recursos que só existem no Rust nightly, principalmente:
-#   - `abi_x86_interrupt`: a ABI de chamada que o processador usa ao invocar
-#     um handler de interrupção (difere da ABI normal: o retorno é `iretq`).
-#   - `custom_test_frameworks`: nossa suíte de testes roda *dentro* do kernel,
-#     no QEMU, então não podemos usar o `libtest` padrão (que depende de `std`).
+# O compilador oficial do Duke OS: um nightly com data, o mesmo em toda
+# sessão, worktree, agente e job da CI — ver "O compilador" no CLAUDE.md.
+#
+# **Nightly**, porque o kernel usa a `abi_x86_interrupt`: a ABI de chamada
+# que o processador usa ao invocar um handler de interrupção (o retorno é
+# `iretq`, não `ret`). O `modo-teste` usa também o `cfg_overflow_checks`.
+#
+# **Com data**, porque um `nightly` sem data é outro compilador a cada
+# instalação: a CI 496 reprovou com o código da 495 só porque o clippy do
+# nightly do dia seguinte acusava um lint novo, e o ELF da CI 492 não se
+# reconstruía. A data muda só por uma promoção — um commit próprio, que
+# troca este arquivo e o `sdk/modelo/rust-toolchain.toml` juntos, depois do
+# canário e da CI completa com o candidato (o procedimento está no
+# CLAUDE.md). O `cargo xtask invariantes` confere que o canal tem data e é o
+# mesmo nos dois arquivos; o `cargo xtask` recusa rodar com outro
+# compilador sem o opt-in explícito de uma execução não oficial.
 #
 # `targets` garante que os alvos bare-metal sejam instalados automaticamente
 # por quem clonar o repositório — sem passo manual de `rustup target add`.
@@ -16,7 +27,7 @@
 # É a espécie de defeito que sobrevive justamente por não incomodar quem
 # poderia corrigi-lo.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-11-15"
 components = ["rust-src", "llvm-tools", "rustfmt", "clippy"]
 targets = [
     "x86_64-unknown-none",

@@ -36,6 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # O compilador oficial, conferido e impresso; o canal vai para a chave
+      # do cache — como em todo job da CI: ver `.github/actions/compilador`.
+      - name: O compilador
+        id: compilador
+        uses: ./.github/actions/compilador
+
       - name: Cache do cargo
         uses: actions/cache@v4
         with:
@@ -45,8 +51,8 @@ jobs:
             target
             kernel/target
             programas/target
-          key: mainnet-${{ inputs.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: mainnet-${{ inputs.arch }}-
+          key: mainnet-${{ inputs.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: mainnet-${{ inputs.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # As mesmas da fumaça: o kernel de produção com o disco, o TPM e a
       # rede do emulador. O `openssl` é do pré-voo, que lê a cadeia real.
