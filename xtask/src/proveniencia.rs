@@ -509,6 +509,12 @@ mod testes {
         // O artefato que não se lê não deixa registro, e reprova.
         let sumido = dir.join("sumido");
         assert!(registrar_em(&registros, &compilado(&sumido, &lock, &[])).is_err());
+        assert_eq!(
+            std::fs::read_dir(&registros)
+                .expect("o diretório dos registros")
+                .count(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

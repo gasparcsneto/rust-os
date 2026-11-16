@@ -852,13 +852,17 @@ pub(crate) fn compilar_o_kernel(
     let perfil = if release { "release" } else { "debug" };
     println!("[xtask] compilando o kernel ({}, {perfil})...", arch.nome());
 
+    // O diretório de saída sempre explícito: o padrão (`kernel/target`) ou
+    // o de quem compila à parte. Um `build.target-dir` de fora — um config
+    // do cargo, um `CARGO_BUILD_TARGET_DIR` — levaria o ELF novo a outro
+    // lugar, e o de baixo seria o de antes, registrado como se fosse este.
+    let alvo = saida.map_or_else(|| dir_kernel.join("target"), Path::to_path_buf);
     let mut cargo = Command::new(env!("CARGO"));
     cargo
         .current_dir(&dir_kernel)
-        .args(["build", "--target", arch.alvo()]);
-    if let Some(dir) = saida {
-        cargo.arg("--target-dir").arg(dir);
-    }
+        .args(["build", "--target", arch.alvo()])
+        .arg("--target-dir")
+        .arg(&alvo);
     if release {
         cargo.arg("--release");
     }
@@ -880,11 +884,7 @@ pub(crate) fn compilar_o_kernel(
         return Err("a compilação do kernel falhou".into());
     }
 
-    let elf = saida
-        .map_or_else(|| dir_kernel.join("target"), Path::to_path_buf)
-        .join(arch.alvo())
-        .join(perfil)
-        .join(NOME_DO_BINARIO);
+    let elf = alvo.join(arch.alvo()).join(perfil).join(NOME_DO_BINARIO);
     if !elf.exists() {
         return Err(format!(
             "o cargo reportou sucesso mas o binário não apareceu em {}",
@@ -1177,7 +1177,12 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
     println!("[xtask] compilando o iniciador UEFI ({alvo}, {perfil})...");
 
     let mut cargo = Command::new(env!("CARGO"));
-    cargo.current_dir(&dir).args(["build", "--target", alvo]);
+    // O diretório de saída explícito, pela razão do build do kernel.
+    cargo
+        .current_dir(&dir)
+        .args(["build", "--target", alvo])
+        .arg("--target-dir")
+        .arg(dir.join("target"));
     if release {
         cargo.arg("--release");
     }
@@ -8242,9 +8247,12 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut programas = Vec::new();
     for arch in [Arquitetura::X86_64, Arquitetura::Aarch64] {
         let mut cargo = Command::new(env!("CARGO"));
+        // O diretório de saída explícito, pela razão do build do kernel.
         cargo
             .current_dir(&dir)
-            .args(["build", "--release", "--target", arch.alvo()]);
+            .args(["build", "--release", "--target", arch.alvo()])
+            .arg("--target-dir")
+            .arg(dir.join("target"));
         // Pelo mesmo motivo do build do kernel: o que o cargo exporta para o
         // xtask descreve o build do xtask.
         for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR"] {
