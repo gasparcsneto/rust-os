@@ -6,12 +6,14 @@
 # `iretq`, não `ret`). O `modo-teste` usa também o `cfg_overflow_checks`.
 #
 # **Com data**, porque um `nightly` sem data é outro compilador a cada
-# instalação: a CI 496 reprovou com o código da 495 só porque o clippy do
-# nightly do dia seguinte acusava um lint novo, e o ELF da CI 492 não se
-# reconstruía. A data muda só por uma promoção — um commit próprio, que
-# troca este arquivo e o `sdk/modelo/rust-toolchain.toml` juntos, depois do
-# canário e da CI completa com o candidato (o procedimento está no
-# CLAUDE.md). O `cargo xtask invariantes` confere que o canal tem data e é o
+# instalação: a CI 496 reprovou com o código da 495 só porque o clippy de um
+# nightly mais novo — o `5f4effd57`, no lugar do `8eb778d04` da 495 — passou
+# a acusar o `unnecessary_to_owned` num trecho que o anterior aceitava; e o
+# ELF da CI 492 não se reconstruía, com o compilador daquela execução entre
+# os motivos. A data muda só por uma promoção — um commit próprio, que troca
+# este arquivo e o `sdk/modelo/rust-toolchain.toml` juntos, depois do
+# canário com o candidato, e com a CI completa verde nele (o procedimento
+# está no CLAUDE.md). O `cargo xtask invariantes` confere que o canal tem data e é o
 # mesmo nos dois arquivos; o `cargo xtask` recusa rodar com outro
 # compilador sem o opt-in explícito de uma execução não oficial.
 #

@@ -87,8 +87,8 @@ jobs:
           path: target/mainnet/relatorio-*.md
           if-no-files-found: ignore
 
-      # A proveniência do kernel e dos programas que a fumaça compilou — ver
-      # `xtask/src/proveniencia.rs`.
+      # A proveniência do kernel, do iniciador (no x86) e dos programas que a
+      # fumaça compilou — ver `xtask/src/proveniencia.rs`.
       - name: Proveniência
         if: always()
         uses: actions/upload-artifact@v4

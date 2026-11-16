@@ -12,14 +12,16 @@
 //!   ao cargo (nenhum dos pacotes compilados tem features padrão);
 //! - **a fonte**: o commit, se a árvore estava limpa, e o SHA-256 do
 //!   `Cargo.lock` que resolveu as dependências do artefato;
-//! - **a execução da CI** que o produziu — o repositório, o workflow, o run,
-//!   a tentativa, o job, o endereço e a imagem do runner —, ou `null`, numa
-//!   máquina de desenvolvimento.
+//! - **a execução da CI** que o produziu — o repositório, o workflow, o
+//!   evento, o ref, o commit, o run (o id e o número), a tentativa, o job, o
+//!   endereço e a imagem do runner —, ou `null`, numa máquina de
+//!   desenvolvimento.
 //!
 //! O nome do arquivo termina no começo do SHA-256 do artefato: de um ELF —
 //! achado num incidente, ao lado de uma imagem publicada —, o registro sai
 //! pelo resumo ([`do_artefato`]); o incidente guarda o do kernel que
-//! capturou. A CI publica o diretório como artefato de cada job
+//! capturou. A CI publica o diretório como artefato de cada job que compila
+//! — todos menos o de lints — e da fumaça da rede principal
 //! (`proveniencia-*`), pelo mesmo mecanismo dos incidentes, e o apaga depois
 //! de restaurar o cache: o registro de uma rodada não aparece no artefato de
 //! outra. Registrar não é opcional: um registro que não se grava reprova o
@@ -29,11 +31,13 @@
 //! que fonte e em que execução o artefato saiu; não garante que compilar de
 //! novo dê os mesmos bytes. Os caminhos absolutos da máquina — o do checkout
 //! e o do registro do cargo — entram nas localizações de pânico do
-//! `.rodata`, e nada aqui foi feito para tirá-los.
+//! `.rodata` e nas informações de depuração, e nada aqui foi feito para
+//! tirá-los.
 //!
-//! Os derivados — a cópia sem símbolos do kernel que vai para a ESP e o
-//! slot, a imagem crua do arm64, as imagens de disco — não têm registro
-//! próprio: saem do artefato registrado por cópia e montagem do `xtask`.
+//! Os derivados não têm registro próprio: a cópia sem símbolos do kernel
+//! que vai para a ESP e o slot e a imagem crua do arm64 saem do artefato
+//! registrado pelo `llvm-objcopy` do mesmo toolchain, e as imagens de
+//! disco, pela montagem do `xtask`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

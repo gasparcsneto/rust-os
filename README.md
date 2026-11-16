@@ -89,11 +89,14 @@ operá-la — o hardware de referência, a imagem, a rede, a recuperação —, 
 [`docs/OPERACAO.md`](docs/OPERACAO.md).
 
 O compilador é um só, o do `rust-toolchain.toml`. O `cargo xtask` recusa
-outro sem aviso (`cargo xtask compilador` mostra o estado), e cada artefato
-compilado deixa o registro de proveniência em `target/proveniencia/`. Toda
-semana, à parte da CI, o canário (`.github/workflows/canario.yml`) confere
-o projeto com o nightly mais recente, sem bloquear nada — ver "O
-compilador", no [`CLAUDE.md`](CLAUDE.md).
+rodar com outro, a menos que a execução se declare não oficial
+(`DUKE_OUTRO_COMPILADOR=1`), e `cargo xtask compilador` mostra o estado.
+Cada artefato que o `xtask` compila deixa o registro de proveniência em
+`target/proveniencia/`. À parte da CI, o canário
+(`.github/workflows/canario.yml`) confere o projeto com o nightly mais
+recente que tem todos os componentes, sem bloquear nada: toda semana
+quando o arquivo estiver no ramo padrão do repositório, e até lá pelo
+disparo manual — ver "O compilador", no [`CLAUDE.md`](CLAUDE.md).
 
 ```bash
 # x86_64 (padrão): compila e põe o iniciador e o kernel na ESP do disco
@@ -9574,7 +9577,8 @@ retornos na pilha e, no x86, os quadros de interrupção, com o lugar
 interrompido; as travas, as marcas e os contadores do caminho que imprime
 e que para; pelo monitor, no x86, o APIC e as UARTs — no ARM, as
 interrupções e a PL011 —; a etapa do boot e os últimos bytes da serial;
-uma cópia do ELF, o SHA-256 dele e o `rustc -Vv`. Nada disso existe no
+uma cópia do ELF, o SHA-256 dele, o `rustc -Vv` e o registro de
+proveniência dele, quando há. Nada disso existe no
 kernel nem numa imagem: é o hospedeiro lendo a máquina já parada, e a
 memória dela não vai para o artefato — só os endereços simbolizados e as
 palavras dos estáticos. A procura das imagens do
