@@ -1,18 +1,27 @@
 # A conferência do compilador de todo job da CI oficial — ver "O
-# compilador" no CLAUDE.md e `xtask/src/compilador.rs`.
+# compilador" no CLAUDE.md e `xtask/src/compilador.rs`, que confere o mesmo
+# no começo de todo `cargo xtask`.
 #
 # Roda logo depois do checkout, antes do cache e de qualquer `cargo` (o
 # `cargo xtask invariantes` confere a ordem):
 #
-# - instala o canal do `rust-toolchain.toml` — o proxy do rustup instala o
-#   toolchain do arquivo, com os componentes e os alvos, na primeira
-#   chamada — e imprime a versão completa, o `rustc -Vv` e o `cargo -V`, no
-#   log do job;
-# - confere que o canal é um nightly com data e que o toolchain ativo é ele,
-#   com o host: nada no ambiente do runner o sobrepõe;
+# - lê o canal do `rust-toolchain.toml` como o rustup o lê (é TOML) e
+#   confere que é um nightly com data, e que o arquivo — e o do modelo do
+#   SDK — é o do commit;
+# - recusa as variáveis com que o rustup e o cargo trocam ou embrulham o
+#   compilador;
+# - instala o canal — o proxy do rustup instala o toolchain do arquivo, com
+#   os componentes e os alvos, na primeira chamada — e imprime a versão
+#   completa, o `rustc -Vv` e o `cargo -V`, no log do job;
+# - confere que o `rustc` do PATH é o do canal com o host, pelo sysroot
+#   dele, e que o `cargo` do PATH é o do mesmo sysroot;
 # - devolve o canal, que entra na chave de todo cache: um cache é do
 #   compilador que o encheu, uma promoção começa caches novos, e nenhum se
 #   restaura do compilador anterior.
+#
+# Ela confere o ambiente do job uma vez; um passo seguinte que o mudasse é
+# o que a regra dos workflows do `cargo xtask invariantes` recusa, e todo
+# `cargo xtask` confere de novo.
 name: O compilador oficial
 description: Instala e confere o compilador do rust-toolchain.toml, imprime a versão e devolve o canal para a chave do cache.
 outputs:
@@ -26,17 +35,33 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        canal=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+        canal=$(python3 -I -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
         if ! [[ "$canal" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
           echo "::error file=rust-toolchain.toml::o canal '$canal' não é um nightly com data"
           exit 1
         fi
+        if ! git diff --quiet HEAD -- rust-toolchain.toml sdk/modelo/rust-toolchain.toml; then
+          echo "::error file=rust-toolchain.toml::o rust-toolchain.toml difere do commit: vale o do commit"
+          exit 1
+        fi
+        for variavel in RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+          CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER; do
+          if [ -n "${!variavel:-}" ]; then
+            echo "::error::a variável $variavel está definida: ela troca o compilador"
+            exit 1
+          fi
+        done
         rustc -Vv
         cargo -V
         host=$(rustc -Vv | sed -n 's/^host: //p')
-        ativo=$(rustup show active-toolchain | cut -d' ' -f1)
+        sysroot=$(rustc --print sysroot)
+        ativo=$(basename "$sysroot")
         if [ "$ativo" != "$canal-$host" ]; then
-          echo "::error::o toolchain ativo é '$ativo', e o oficial é '$canal-$host'"
+          echo "::error::o rustc do PATH é o do toolchain '$ativo', e o oficial é '$canal-$host'"
+          exit 1
+        fi
+        if [ "$(cargo -V)" != "$("$sysroot/bin/cargo" -V)" ]; then
+          echo "::error::o cargo do PATH não é o do toolchain '$ativo'"
           exit 1
         fi
         echo "o compilador oficial: $ativo"
