@@ -990,6 +990,16 @@ pub(crate) fn compilar_o_modelo(arch: Arquitetura) -> Result<Vec<u8>, String> {
         return Err(format!("o modelo não compilou para {}", arch.nome()));
     }
     let elf = alvo.join(arch.alvo()).join("release").join(NOME_DO_MODELO);
+    super::proveniencia::registrar(&super::proveniencia::Compilado {
+        tipo: "modelo-do-sdk",
+        nome: NOME_DO_MODELO,
+        arquivo: &elf,
+        alvo: arch.alvo(),
+        arquitetura: arch.nome(),
+        perfil: "release",
+        features: &[],
+        lock: &copia.join("Cargo.lock"),
+    })?;
     std::fs::read(&elf).map_err(|e| format!("não foi possível ler {}: {e}", elf.display()))
 }
 

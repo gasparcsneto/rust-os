@@ -34,6 +34,7 @@ mod kernel_do_slot;
 mod pareamento;
 mod persistencia;
 mod producao;
+mod proveniencia;
 mod rede_principal;
 mod sdk;
 mod senha;
@@ -893,6 +894,19 @@ pub(crate) fn compilar_o_kernel(
     // Para o incidente de uma máquina que pare: o ELF exato que ela roda
     // sai daqui — ver [`incidente`].
     incidente::registrar_o_kernel(arch, release, features, &elf);
+    // E a proveniência dele: o compilador, a fonte e a execução — ver
+    // [`proveniencia`].
+    let registro = proveniencia::registrar(&proveniencia::Compilado {
+        tipo: "kernel",
+        nome: NOME_DO_BINARIO,
+        arquivo: &elf,
+        alvo: arch.alvo(),
+        arquitetura: arch.nome(),
+        perfil,
+        features,
+        lock: &dir_kernel.join("Cargo.lock"),
+    })?;
+    println!("[xtask] a proveniência: {}", registro.display());
     Ok(elf)
 }
 
@@ -1185,6 +1199,17 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
             efi.display()
         ));
     }
+    let registro = proveniencia::registrar(&proveniencia::Compilado {
+        tipo: "iniciador",
+        nome: "iniciador",
+        arquivo: &efi,
+        alvo,
+        arquitetura: arch.nome(),
+        perfil,
+        features: &[],
+        lock: &dir.join("Cargo.lock"),
+    })?;
+    println!("[xtask] a proveniência: {}", registro.display());
     Ok(efi)
 }
 
@@ -8229,6 +8254,16 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
                 .join(nome);
             let bytes = std::fs::read(&caminho)
                 .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            proveniencia::registrar(&proveniencia::Compilado {
+                tipo: "programa",
+                nome,
+                arquivo: &caminho,
+                alvo: arch.alvo(),
+                arquitetura: arch.nome(),
+                perfil: "release",
+                features: &[],
+                lock: &dir.join("Cargo.lock"),
+            })?;
             // Todos contra o teto, os publicados também: chegam pela rede, e
             // o kernel os lança pelo mesmo caminho.
             if let Some(aviso) = conferir_o_tamanho(nome, arch, bytes.len() as u64)? {

@@ -1477,8 +1477,10 @@ pub(crate) fn acrescentar(incidente: &Incidente, titulo: &str, linhas: &[String]
 }
 
 /// O `rustc -Vv` do toolchain que compilou o kernel — o mesmo deste
-/// processo, pelo `rust-toolchain.toml` —: o nightly não tem data fixa, e
-/// reconstruir um binário igual depois começa por ele.
+/// processo, o canal com data do `rust-toolchain.toml` (ver
+/// [`super::compilador`]) —: reconstruir um binário igual depois começa por
+/// ele. O registro de proveniência do kernel, guardado ao lado da cópia, diz
+/// o resto.
 fn versao_do_rustc() -> String {
     Command::new("rustc")
         .arg("-Vv")
@@ -1772,6 +1774,26 @@ pub(crate) fn guardar(parada: &Parada, emulador: &mut dyn Emulador, raiz: &Path)
             k.copia
                 .as_ref()
                 .map_or("nao se escreveu".to_string(), |c| c.display().to_string())
+        );
+        // O registro de proveniência do kernel — o compilador, o commit, o
+        // `Cargo.lock`, a execução da CI —, ao lado da cópia: ver
+        // [`super::proveniencia`].
+        let proveniencia = super::proveniencia::do_artefato(&k.sha256).and_then(|registro| {
+            let destino = kernels.join(format!(
+                "duke-{}-{}.proveniencia.json",
+                arch.nome(),
+                &k.sha256[..16]
+            ));
+            std::fs::copy(&registro, &destino).ok().map(|_| destino)
+        });
+        let _ = writeln!(
+            texto,
+            "a proveniencia: {}",
+            proveniencia
+                .as_ref()
+                .map_or("nenhuma registrada".to_string(), |p| p
+                    .display()
+                    .to_string())
         );
         let _ = writeln!(texto, "a base do kernel: {base:#x}");
         let _ = writeln!(texto, "o compilador:\n{}", versao_do_rustc());
