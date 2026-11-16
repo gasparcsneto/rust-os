@@ -427,6 +427,11 @@ bloquear nada.
   compilador, de que fonte e em que execução o artefato saiu. Compilar de
   novo, noutra máquina, não dá garantidamente os mesmos bytes: os caminhos
   absolutos do checkout e do registro do cargo entram nas localizações de
-  pânico do `.rodata` e nas informações de depuração.
+  pânico do `.rodata` e nas informações de depuração. E o iniciador não se
+  repete nem na mesma máquina: o ligador grava no PE da UEFI a hora da
+  ligação — no cabeçalho e no diretório de depuração — e um identificador
+  novo do PDB, e cada ligação dá outro SHA-256. O kernel, um ELF, não leva
+  hora: o mesmo commit, no mesmo caminho e com o mesmo compilador, saiu
+  com o mesmo resumo em execuções diferentes da CI.
 - É um registro de build, fora do Duke: não é autoridade, nem
   persistência, nem auditoria do sistema.

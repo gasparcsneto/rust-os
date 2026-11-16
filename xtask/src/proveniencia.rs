@@ -32,7 +32,10 @@
 //! novo dê os mesmos bytes. Os caminhos absolutos da máquina — o do checkout
 //! e o do registro do cargo — entram nas localizações de pânico do
 //! `.rodata` e nas informações de depuração, e nada aqui foi feito para
-//! tirá-los.
+//! tirá-los. O iniciador muda a cada ligação, mesmo na mesma máquina e com
+//! o mesmo código: o ligador grava no PE da UEFI a hora da ligação — no
+//! cabeçalho COFF e no diretório de depuração — e um identificador novo do
+//! PDB. O kernel, um ELF, não leva hora.
 //!
 //! Os derivados não têm registro próprio: a cópia sem símbolos do kernel
 //! que vai para a ESP e o slot e a imagem crua do arm64 saem do artefato
