@@ -1579,7 +1579,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | no incremento seguinte |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`; o editor da imagem nova, a seguir |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | no incremento seguinte |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | no incremento seguinte |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -1628,7 +1628,32 @@ pendência #298.
   um fluxo já troca com a ordem na mão; para as outras, decidir de novo
   sem ela estreita a janela à troca e não a fecha — a revogação se ordena
   pela ordem das gravações.
-- **O estado.** No incremento seguinte.
+- **O estado.** Feito, no `869dc08`, com o resto das últimas palavras do
+  gate:
+  - o `executar` decide de novo imediatamente antes de `trocar_a_imagem`,
+    com a mesma conta do gate (`conta_da_chamada`), sobre a mesma
+    permissão e o mesmo caminho. A ponta de fluxo decide de novo dentro
+    da tomada sem esperar da troca, com a ordem na mão; quem não é ponta,
+    sem a ordem e sem esperá-la, e a janela fica estreitada à troca, como
+    acima. Recusada, a preparada sai, a execução da decisão vai à
+    auditoria com o código e o motivo, e o processo ouve `NEGADO`;
+  - o `reconfirmar` pergunta também se quem pede acabou ou tem o fim
+    pedido, e refaz a confiança no editor; as perguntas sobre quem pede um
+    processo recusam o programa que não se sabe, em vez de supor, e
+    perguntam pelas revogações que um journal recusado perdeu;
+  - a recusa do `user.run` no passo do gate responde o código e o motivo
+    de verdade;
+  - 13 casos (`kernel/src/testes/nascimento.rs` e
+    `kernel/src/testes/fluxo/troca.rs`, cada um da troca com a ponta de
+    fluxo e sem) e 12 mutações, todas reprovadas.
+
+  O adversário do lote achou um resto, médio: a decisão de novo pergunta
+  pela confiança no editor do programa de quem chama — a imagem antiga —,
+  e não pelo da imagem nova, conferido antes da preparação; o nascimento
+  do `user.run`, o mesmo. E, baixos, o `exec` de quem tem o fim pedido sem
+  o isolamento, o detalhe "processo isolado" de quem está só encerrado, e
+  o `explain` errado das recusas da cota. São a correção seguinte, [B]:
+  as mesmas perguntas, onde a janela acaba.
 
 ### I7
 
