@@ -2527,9 +2527,12 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
 ///
 /// # O que ele não cobre
 ///
-/// O que rodar **depois** dele. O caso mora perto do fim da tabela por isso,
-/// e mesmo assim a garantia é "até aqui" — o preço de perguntar de dentro da
-/// própria suíte.
+/// O que rodar **depois** dele — o preço de perguntar de dentro da própria
+/// suíte. Por isso ele mora na [`CAUDA`]: roda em toda parte, depois da
+/// fatia dela, da cópia do armazém e da reconstrução, e depois dele só vêm
+/// os outros contadores. Quando morava no meio da tabela, "perto do fim" de
+/// uma tabela que cresceu depois dele, a garantia era "até aqui": os mais
+/// de quinhentos casos seguintes não eram conferidos.
 #[cfg(target_arch = "x86_64")]
 fn x86_ninguem_gira_mascarado_esperando_interrupcao() -> Resultado {
     let giros = crate::arch::atual::giros_mascarados();
@@ -20508,7 +20511,8 @@ fn admin_revogacao_no_meio_da_operacao() -> Resultado {
 }
 
 /// O mais fundo que a pilha de exceção de algum núcleo já foi, e o caso
-/// em que ficou assim — o índice dele em [`CASOS`].
+/// em que ficou assim — o índice dele na suíte inteira, os de [`CASOS`] e
+/// depois os da [`CAUDA`] (ver [`todos_os_casos`]).
 #[cfg(target_arch = "aarch64")]
 static MAIS_FUNDO: (
     core::sync::atomic::AtomicU64,
@@ -20540,8 +20544,7 @@ fn anotar_o_fundo_das_excecoes(caso: &'static str) {
         .unwrap_or(0);
     if fundo > MAIS_FUNDO.0.load(Ordering::Relaxed) {
         MAIS_FUNDO.0.store(fundo, Ordering::Relaxed);
-        let indice = CASOS
-            .iter()
+        let indice = todos_os_casos()
             .position(|c| c.nome == caso)
             .unwrap_or(usize::MAX);
         MAIS_FUNDO.1.store(indice, Ordering::Relaxed);
@@ -20554,7 +20557,9 @@ fn anotar_o_fundo_das_excecoes(caso: &'static str) {
 /// bloco que vale. O armazém confere cada operação na suíte, e diz no log
 /// qual soltou o bloco e de quem ele era; este caso é o que não deixa uma
 /// leitura que não abriu passar só para o log — um auxiliar que lê o
-/// arquivo e segue, como o que grava o pedido do gestor, não a veria.
+/// arquivo e segue, como o que grava o pedido do gestor, não a veria. Mora
+/// na [`CAUDA`]: numa parte da suíte, as divergências são as da parte, e a
+/// união das partes é a suíte inteira.
 fn armazem_nenhum_bloco_que_vale_se_perdeu() -> Resultado {
     let n = crate::armazem::divergencias_de_teste();
     if n != 0 {
@@ -20564,7 +20569,8 @@ fn armazem_nenhum_bloco_que_vale_se_perdeu() -> Resultado {
     Ok(())
 }
 
-/// A pilha de exceção de cada núcleo tem folga depois da suíte inteira.
+/// A pilha de exceção de cada núcleo tem folga depois da suíte inteira — ou
+/// da parte dela: o caso mora na [`CAUDA`], e a marca d'água é a da rodada.
 ///
 /// No ARM toda exceção roda nela — a interrupção, a falha e a chamada de
 /// sistema, com tudo o que um comando pedido por um processo faz —, e ela
@@ -20589,8 +20595,8 @@ fn pilhas_a_de_excecao_tem_folga() -> Resultado {
                 teto
             );
         }
-        let caso = CASOS
-            .get(MAIS_FUNDO.1.load(Ordering::Relaxed))
+        let caso = todos_os_casos()
+            .nth(MAIS_FUNDO.1.load(Ordering::Relaxed))
             .map_or("o boot", |c| c.nome);
         crate::log_info!(
             "teste",
@@ -23795,7 +23801,8 @@ fn estado_em_memoria() -> EstadoDoJournal {
 /// A reconstrução é uma propriedade do sistema, e não um caminho de teste:
 /// uma imagem limpa, o journal inteiro da região reaplicado por cima, e o
 /// estado que sai é o mesmo — o que a suíte inteira gravou até aqui, sem
-/// compactar antes.
+/// compactar antes (numa parte da suíte, o que a parte gravou: o caso mora
+/// na [`CAUDA`]).
 ///
 /// - reaplicar duas vezes sobre a imagem dá o mesmo estado: nada se
 ///   duplica, nada depende de quantas vezes se repôs;
@@ -31652,6 +31659,9 @@ fn x86_anel_zero_nao_executa_pagina_de_usuario() -> Resultado {
 /// `fios::com_inscricoes` mostra a saída melhor, e é a razão de ela não
 /// entrar nesta lista: ela monta um retrato sob a trava e chama o callback
 /// **fora** dela. Onde isso cabe, dispensa a regra.
+///
+/// O contador é desde o boot, e o caso mora na [`CAUDA`]: roda em toda
+/// parte da suíte, depois da fatia dela, e confere a rodada inteira.
 fn log_ninguem_registra_sob_trava_alheia() -> Resultado {
     // Uma volta por cada uma das quatro, para que o caso exercite os escopos
     // em vez de só ler um contador que ninguém mexeu.
@@ -36824,8 +36834,9 @@ fn copia_a_gravacao_que_falha() -> Resultado {
 /// O armazém inteiro, pelo sistema — o único com `fs.read` e `fs.restore`
 /// na raiz: a cópia leva cada nó do armazém e nada mais, volta pela raiz,
 /// e o armazém fica com o mesmo conteúdo, versões novas, tudo do sistema;
-/// o volume reaberto repõe o mesmo. Perto do fim da suíte: a reconstrução e
-/// a conta dos blocos, depois dele, cobrem o que ele fez.
+/// o volume reaberto repõe o mesmo. Na [`CAUDA`], o primeiro dela: roda em
+/// toda parte da suíte, com o armazém que a parte deixou, e a reconstrução
+/// e a conta dos blocos, depois dele, cobrem o que ele fez.
 fn copia_o_armazem_inteiro() -> Resultado {
     let sistema = sistema_no_armazem(7_400_701);
     crate::coordenacao::esquecer();
@@ -37109,7 +37120,8 @@ fn travas_a_conferencia_ve_a_inversao() -> Resultado {
 /// O último caso: em toda a suíte, nenhuma trava foi tomada nas duas
 /// ordens — ver `crate::ordem_das_travas`. Os casos antes deste exercitam
 /// os caminhos do kernel, em um ou vários núcleos; a conferência acompanhou
-/// cada `lock` deles.
+/// cada `lock` deles. O último da [`CAUDA`]: numa parte da suíte, confere
+/// a parte inteira, e a união das partes, a suíte inteira.
 fn travas_nenhuma_inversao_de_ordem() -> Resultado {
     let (classes, arestas) = crate::ordem_das_travas::tamanho();
     let (fora_da_tabela, fora_da_pilha, soltas_de_fora) = crate::ordem_das_travas::pontos_cegos();
@@ -39344,11 +39356,6 @@ static CASOS: &[Caso] = &[
         nome: "tela: desenhar nao regrediu em ordem de grandeza",
         f: tela_desenhar_nao_regrediu_em_ordem_de_grandeza,
     },
-    #[cfg(target_arch = "x86_64")]
-    Caso {
-        nome: "x86: ninguem gira mascarado esperando interrupcao",
-        f: x86_ninguem_gira_mascarado_esperando_interrupcao,
-    },
     Caso {
         nome: "usuario: o pai sabe que o filho foi morto",
         f: usuario_pai_sabe_que_o_filho_foi_morto,
@@ -39356,10 +39363,6 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "kernel: a checagem de estouro aritmetico esta ligada",
         f: kernel_checagem_de_estouro_ligada,
-    },
-    Caso {
-        nome: "log: ninguem registra com a trava de outro na mao",
-        f: log_ninguem_registra_sob_trava_alheia,
     },
     Caso {
         nome: "x86: o anel zero nao executa pagina de usuario",
@@ -41523,21 +41526,55 @@ static CASOS: &[Caso] = &[
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",
         f: pareamento::smp_o_fim_com_a_senha_ja_confirmada_nao_engole,
     },
+];
+
+/// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
+/// dela — e, na suíte inteira, depois de todos os de [`CASOS`], como sempre
+/// rodaram, no fim.
+///
+/// Cada um confere o que a rodada inteira fez antes dele: a cópia do
+/// armazém inteiro, a reposição do journal inteiro, e os contadores desde o
+/// boot — o giro mascarado, o registro com a trava de outro na mão, a marca
+/// d'água das pilhas de exceção, as divergências do armazém, a ordem das
+/// travas. No meio da tabela, um deles só cobriria a parte em que caísse, e
+/// só o que rodou antes dele nela; aqui cada parte se confere inteira, e a
+/// união das partes cobre a suíte inteira. Os dois contadores que moravam
+/// no meio — o giro e o registro sob trava, "perto do fim" quando a tabela
+/// acabava neles — vieram para cá pela mesma razão, e agora cobrem a suíte
+/// inteira, e não "até aqui".
+///
+/// A ordem dela é a de antes: a cópia e a reconstrução primeiro, porque a
+/// conta dos blocos e a das travas cobrem o que elas fazem; e as travas
+/// sempre por último.
+static CAUDA: &[Caso] = &[
+    // A cópia do armazém inteiro: a reconstrução e a conta dos blocos,
+    // depois dela, cobrem o que ela fez.
     Caso {
         nome: "copia: o armazem inteiro, pelo sistema",
         f: copia_o_armazem_inteiro,
     },
-    // Perto do fim: a reposição cobre o que a suíte inteira gravou.
+    // A reposição cobre o que a rodada inteira gravou.
     Caso {
         nome: "reconstrucao: imagem limpa e journal inteiro",
         f: reconstrucao_imagem_limpa_e_journal_inteiro,
     },
-    // Depois de todos os outros: a marca d'água é a da suíte inteira.
+    // Os contadores desde o boot: ninguém girou mascarado, ninguém
+    // registrou com a trava de outro na mão, em toda a rodada.
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "x86: ninguem gira mascarado esperando interrupcao",
+        f: x86_ninguem_gira_mascarado_esperando_interrupcao,
+    },
+    Caso {
+        nome: "log: ninguem registra com a trava de outro na mao",
+        f: log_ninguem_registra_sob_trava_alheia,
+    },
+    // Depois de todos os outros: a marca d'água é a da rodada inteira.
     Caso {
         nome: "pilhas: a de excecao de cada nucleo tem folga",
         f: pilhas_a_de_excecao_tem_folga,
     },
-    // Depois de todos os outros: as divergências são as da suíte inteira.
+    // Depois de todos os outros: as divergências são as da rodada inteira.
     Caso {
         nome: "armazem: nenhum bloco que vale se perdeu na suite",
         f: armazem_nenhum_bloco_que_vale_se_perdeu,
@@ -41548,6 +41585,13 @@ static CASOS: &[Caso] = &[
         f: travas_nenhuma_inversao_de_ordem,
     },
 ];
+
+/// Todos os casos, na ordem da suíte inteira: os de [`CASOS`] e os da
+/// [`CAUDA`]. O índice de um caso aqui é o que [`MAIS_FUNDO`] guarda.
+#[cfg(target_arch = "aarch64")]
+fn todos_os_casos() -> impl Iterator<Item = &'static Caso> {
+    CASOS.iter().chain(CAUDA)
+}
 
 // ---------------------------------------------------------------------------
 // O disco
@@ -59575,15 +59619,80 @@ fn uma_janela_da_linha_compartilhada() -> Result<bool, &'static str> {
     Err("a interrupcao do disco foi creditada tambem a rede")
 }
 
-/// Roda todos os casos e encerra o emulador com o veredito.
+/// A parte da suíte que esta compilação roda — `k/n` —, ou a suíte inteira,
+/// sem ela.
+///
+/// Vem da **compilação**, e não da máquina: o `cargo xtask test` (e o
+/// `iniciador` do ARM) a põe em `DUKE_PARTE_DA_SUITE` só no build da suíte,
+/// a partir do `DUKE_PARTE` dele, já conferido, e a tira do ambiente de todo
+/// outro build — ver `xtask/src/partes.rs`. Ler `DUKE_PARTE` direto aqui
+/// deixaria um valor esquecido num shell dividir a suíte em silêncio. A
+/// regra é a de [`protocolo::partes`], a mesma conta do `xtask`.
+const PARTE_DA_SUITE: Option<&str> = option_env!("DUKE_PARTE_DA_SUITE");
+
+/// Roda os casos e encerra o emulador com o veredito: a suíte inteira, ou a
+/// parte dela que a compilação pediu — a fatia de [`CASOS`], os de índice
+/// `i` com `i % n == k - 1`, na ordem da tabela —, e depois a [`CAUDA`]
+/// inteira, que roda em toda parte.
+///
+/// A ordem que importa sobrevive à fatia: o primeiro caso de cada parte é o
+/// de menor índice dela, então o do compositor — o índice 0 — é o primeiro
+/// da parte 1, e o da adoção — o 1 — o primeiro da parte 2, com a cadeia da
+/// auditoria ainda no começo; e os casos de uma parte rodam na ordem
+/// relativa da tabela — os do NVMe, com o aviso de desligamento depois dos
+/// outros do disco de verdade. Todo caso de [`CASOS`] cai em exatamente uma
+/// parte.
+///
+/// O anúncio do começo diz a parte e quantos casos ela roda, e o placar do
+/// fim conta os que rodaram: o `xtask` confere os dois contra a parte que
+/// pediu, e um ELF de outra compilação não passa por ali.
 pub fn executar_todos() -> ! {
+    let parte = match PARTE_DA_SUITE.map(protocolo::partes::Parte::ler) {
+        None => None,
+        Some(Ok(parte)) => Some(parte),
+        // Um valor que não se lê não vira "nenhum caso" nem "todos": a
+        // suíte reprova antes do primeiro.
+        Some(Err(erro)) => {
+            crate::serial_println!();
+            crate::serial_println!(
+                "  a parte da suite `{}` nao se le: {}",
+                PARTE_DA_SUITE.unwrap_or(""),
+                erro.motivo()
+            );
+            crate::qemu::encerrar(crate::qemu::Resultado::Falha);
+        }
+    };
+    let total = CASOS.len() + CAUDA.len();
+    let da_fatia = parte.map_or(CASOS.len(), |p| p.quantos(CASOS.len()));
+    let rodados = da_fatia + CAUDA.len();
+
     crate::serial_println!();
     crate::serial_println!("=====================================================");
-    crate::serial_println!(
-        "  suite de testes :: {} :: {} casos",
-        crate::arch::nome(),
-        CASOS.len()
-    );
+    match parte {
+        None => crate::serial_println!(
+            "  suite de testes :: {} :: {} casos",
+            crate::arch::nome(),
+            total
+        ),
+        Some(p) => {
+            crate::serial_println!(
+                "  suite de testes :: {} :: parte {} de {}: {} de {} casos",
+                crate::arch::nome(),
+                p.k(),
+                p.n(),
+                rodados,
+                total
+            );
+            crate::serial_println!(
+                "  a fatia: os {} casos de indice i com i % {} == {}, de {}; e os {} da cauda",
+                da_fatia,
+                p.n(),
+                p.k() - 1,
+                CASOS.len(),
+                CAUDA.len()
+            );
+        }
+    }
     crate::serial_println!("=====================================================");
 
     // A máquina como a suíte a usa: alguém entrado no console físico — ver
@@ -59596,7 +59705,16 @@ pub fn executar_todos() -> ! {
     // acha a linha `FALHOU` no meio dele.
     let mut falharam = alloc::vec::Vec::new();
 
-    for caso in CASOS {
+    let fatia = CASOS
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| protocolo::partes::na_parte(i, parte))
+        .map(|(_, caso)| caso);
+    // Os que rodaram de fato, contados um a um, e não pela conta do anúncio:
+    // o placar que os diz é o que o `xtask` confere contra o anúncio.
+    let mut rodou = 0usize;
+    for caso in fatia.chain(CAUDA) {
+        rodou += 1;
         // Cada caso começa sem arrendamento nenhum: um que outro caso deixou
         // seria um conflito que este não pediu. E sem contenção: um processo
         // isolado, ou uma chave de teste suspensa, por outro caso seria uma
@@ -59623,8 +59741,10 @@ pub fn executar_todos() -> ! {
         }
     }
 
+    // O placar conta os casos que rodaram — a fatia e a cauda, numa parte —,
+    // e não a tabela inteira: um caso que não rodou não passou.
     crate::serial_println!("-----------------------------------------------------");
-    crate::serial_println!("  {} de {} passaram", CASOS.len() - falhas, CASOS.len());
+    crate::serial_println!("  {} de {} passaram", rodou - falhas, rodou);
 
     if falhas > 0 {
         for (nome, motivo) in &falharam {
@@ -59636,7 +59756,8 @@ pub fn executar_todos() -> ! {
     }
 
     // O caso final fica fora da tabela porque não devolve o controle: ele
-    // encerra o emulador de dentro do handler de falha.
+    // encerra o emulador de dentro do handler de falha. Roda em toda parte,
+    // como a cauda: é ele que dá o código de saída do sucesso.
     estouro_de_pilha_e_detectado()
 }
 

@@ -998,6 +998,7 @@ pub(crate) fn compilar_o_modelo(arch: Arquitetura) -> Result<Vec<u8>, String> {
         arquitetura: arch.nome(),
         perfil: "release",
         features: &[],
+        parte_da_suite: None,
         lock: &copia.join("Cargo.lock"),
     })?;
     std::fs::read(&elf).map_err(|e| format!("não foi possível ler {}: {e}", elf.display()))

@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::disco_hostil::{Corte, DiscoHostil, Faixa, Gatilho, Sentido};
+use super::partes;
 use super::{
     Ambiente, Arquitetura, Artefato, BufReader, Child, Command, Duration, ExitCode, Path, Teclado,
     UnixStream, Video, build, caminho_socket, canal_de_pe_com, comando_qemu, diretorio_do_tpm,
@@ -1264,68 +1265,56 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
 pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // A parte desta rodada, lida antes de compilar: uma parte mal escrita
     // para aqui, e não vira "nenhum cenário" nem "todos" em silêncio.
-    let parte = parte_da_rodada(std::env::var("DUKE_PARTE").ok().as_deref())?;
+    let parte = partes::pedida()?;
     let artefato = build(arch, release, false)?;
     let _ = SERIAL_DA_BANCADA
         .set(super::raiz_do_estado().join(format!("persistencia-{}.serial", arch.nome())));
     let total = CENARIOS.len() + CENARIOS_DE_QUEDA.len();
-    match parte {
-        None => println!(
-            "[xtask] persistencia: {total} cenarios, cada um sobre um estado zerado ({})",
-            arch.nome()
-        ),
-        Some((k, n)) => println!(
-            "[xtask] persistencia: a parte {k} de {n} — {} dos {total} cenarios, cada um sobre um estado zerado ({})",
-            (0..total).filter(|&i| na_parte(i, parte)).count(),
-            arch.nome()
-        ),
-    }
+    println!(
+        "[xtask] persistencia: {}, cada um sobre um estado zerado ({})",
+        partes::descrever(parte, total),
+        arch.nome()
+    );
     let mut falhas = 0;
     // Um filtro opcional pelo nome, para rodar só alguns — o que uma
     // mutação dirigida precisa: pedaços do nome separados por `|`, e vale
-    // o cenário que tiver qualquer um deles. Sem ele, todos.
+    // o cenário que tiver qualquer um deles. Sem ele, todos. O índice de um
+    // cenário, para a parte, é a posição dele em todos: os de `CENARIOS`,
+    // depois os de `CENARIOS_DE_QUEDA` — ver [`partes::da_rodada`].
     let filtro = std::env::var("DUKE_CENARIOS").ok();
-    let escolhido = |c: &Cenario| {
-        filtro
-            .as_deref()
-            .is_none_or(|f| f.split('|').any(|p| c.nome.contains(p)))
-    };
-    // O índice de um cenário é a posição dele em todos: os de `CENARIOS`,
-    // depois os de `CENARIOS_DE_QUEDA` a partir de `primeiro`.
-    let mut rodar =
-        |cenarios: &[Cenario], primeiro: usize, artefato: &Artefato| -> Result<(), String> {
-            for (_, cenario) in cenarios
-                .iter()
-                .enumerate()
-                .filter(|&(i, c)| escolhido(c) && na_parte(primeiro + i, parte))
+    let (normais, de_queda) = partes::da_rodada(
+        CENARIOS,
+        CENARIOS_DE_QUEDA,
+        |c| c.nome,
+        parte,
+        filtro.as_deref(),
+    );
+    let mut rodar = |cenarios: &[&Cenario], artefato: &Artefato| -> Result<(), String> {
+        for cenario in cenarios {
+            zerar_o_estado(arch)?;
+            esquecer_a_recusa_de_revogacao();
+            if let (None, Some(serial)) =
+                (std::env::var_os("DUKE_BANCADA_LOG"), serial_do_cenario())
             {
-                zerar_o_estado(arch)?;
-                esquecer_a_recusa_de_revogacao();
-                if let (None, Some(serial)) =
-                    (std::env::var_os("DUKE_BANCADA_LOG"), serial_do_cenario())
-                {
-                    let _ = std::fs::write(serial, b"");
-                }
-                super::incidente::no_cenario("persistencia", cenario.nome);
-                match (cenario.rodar)(arch, artefato) {
-                    Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
-                    Err(motivo) => {
-                        falhas += 1;
-                        println!("  [persistencia] FALHOU  {}: {motivo}", cenario.nome);
-                        mostrar_o_fim_da_serial();
-                    }
+                let _ = std::fs::write(serial, b"");
+            }
+            super::incidente::no_cenario("persistencia", cenario.nome);
+            match (cenario.rodar)(arch, artefato) {
+                Ok(detalhe) => println!("  [persistencia] ok  {}: {detalhe}", cenario.nome),
+                Err(motivo) => {
+                    falhas += 1;
+                    println!("  [persistencia] FALHOU  {}: {motivo}", cenario.nome);
+                    mostrar_o_fim_da_serial();
                 }
             }
-            Ok(())
-        };
-    rodar(CENARIOS, 0, &artefato)?;
-    if CENARIOS_DE_QUEDA
-        .iter()
-        .enumerate()
-        .any(|(i, c)| escolhido(c) && na_parte(CENARIOS.len() + i, parte))
-    {
+        }
+        Ok(())
+    };
+    rodar(&normais, &artefato)?;
+    // A compilação com os pontos de queda só quando a rodada tem algum.
+    if !de_queda.is_empty() {
         let da_bancada = super::build_com(arch, release, &[FEATURE_DE_QUEDAS])?;
-        rodar(CENARIOS_DE_QUEDA, CENARIOS.len(), &da_bancada)?;
+        rodar(&de_queda, &da_bancada)?;
     }
     // O disco fica zerado para quem vier depois, como todo comando o deixa.
     zerar_o_estado(arch)?;
@@ -1336,41 +1325,6 @@ pub(crate) fn persistencia(arch: Arquitetura, release: bool) -> Result<ExitCode,
     }
     println!("\n[xtask] persistencia: todos os cenarios passaram");
     Ok(ExitCode::SUCCESS)
-}
-
-/// A parte da rodada pedida em `DUKE_PARTE`: `k/n`, com `1 <= k <= n` — ou
-/// nenhuma, sem a variável. A CI divide a bancada entre máquinas por ela
-/// (`.github/workflows/ci.yml`, o job da persistência). Um valor que não se
-/// lê é um erro: uma parte mal escrita não pode virar "nenhum cenário" nem
-/// "todos" em silêncio.
-pub(crate) fn parte_da_rodada(valor: Option<&str>) -> Result<Option<(usize, usize)>, String> {
-    let Some(valor) = valor else {
-        return Ok(None);
-    };
-    let (k, n) = valor
-        .split_once('/')
-        .and_then(|(k, n)| {
-            Some((
-                k.trim().parse::<usize>().ok()?,
-                n.trim().parse::<usize>().ok()?,
-            ))
-        })
-        .ok_or_else(|| format!("DUKE_PARTE={valor}: esperava a parte e o total, como 1/2"))?;
-    if !(1..=n).contains(&k) {
-        return Err(format!(
-            "DUKE_PARTE={valor}: a parte vai de 1 ao total, e o total não é zero"
-        ));
-    }
-    Ok(Some((k, n)))
-}
-
-/// O cenário de índice `i` — a posição dele em todos os cenários da
-/// bancada — é da `parte`: `i % n == k - 1`. Todo cenário cai em exatamente
-/// uma parte, e um cenário novo entra numa delas sem mexer na CI. Pela
-/// ordem dos cenários, as partes saem equilibradas: na CI 503, as duas do
-/// x86_64 somaram 84,9 e 84,3 minutos.
-pub(crate) fn na_parte(i: usize, parte: Option<(usize, usize)>) -> bool {
-    parte.is_none_or(|(k, n)| i % n == k - 1)
 }
 
 /// A serial da bancada de persistência, posta pelo [`persistencia`]: a
@@ -8298,33 +8252,22 @@ fn a_fotografia_da_fronteira_e_recusada(
 mod testes {
     use super::*;
 
+    /// As duas metades de todos os cenários da bancada — os de queda
+    /// incluídos — somam a bancada inteira e têm o mesmo tamanho, a menos
+    /// de um; a regra em si é conferida em `partes` e no `protocolo`.
     #[test]
-    fn cada_cenario_cai_em_exatamente_uma_parte() {
-        for n in 1..=5 {
-            for i in 0..100 {
-                let partes = (1..=n).filter(|&k| na_parte(i, Some((k, n)))).count();
-                assert_eq!(partes, 1, "o cenario {i} em {n} partes");
-            }
-        }
-        // Sem a parte, todos.
-        assert!((0..100).all(|i| na_parte(i, None)));
-        // As duas metades de todos os cenários da bancada.
+    fn as_metades_da_bancada_somam_a_bancada() {
+        use protocolo::partes::Parte;
         let total = CENARIOS.len() + CENARIOS_DE_QUEDA.len();
-        let um = (0..total).filter(|&i| na_parte(i, Some((1, 2)))).count();
-        let dois = (0..total).filter(|&i| na_parte(i, Some((2, 2)))).count();
+        let metade = |k| {
+            (0..total)
+                .filter(|&i| partes::na_parte(i, Parte::nova(k, 2)))
+                .count()
+        };
+        let (um, dois) = (metade(1), metade(2));
         assert_eq!(um + dois, total);
         assert!(um.abs_diff(dois) <= 1);
-    }
-
-    #[test]
-    fn a_parte_mal_escrita_e_recusada() {
-        assert_eq!(parte_da_rodada(None), Ok(None));
-        assert_eq!(parte_da_rodada(Some("1/2")), Ok(Some((1, 2))));
-        assert_eq!(parte_da_rodada(Some("2/2")), Ok(Some((2, 2))));
-        assert_eq!(parte_da_rodada(Some(" 1 / 1 ")), Ok(Some((1, 1))));
-        for ruim in ["", "1", "0/2", "3/2", "1/0", "a/b", "1/2/3", "-1/2"] {
-            assert!(parte_da_rodada(Some(ruim)).is_err(), "{ruim}");
-        }
+        assert!((0..total).all(|i| partes::na_parte(i, None)));
     }
 
     fn s(segundos: u64) -> Duration {

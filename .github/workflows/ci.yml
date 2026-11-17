@@ -9,6 +9,35 @@
 # emulador e o encerra com um código de saída — por `isa-debug-exit` no x86 e
 # por semihosting no ARM. O `cargo xtask test` traduz esse código no sucesso
 # ou falha do job.
+#
+# A CI em partes, e a ordem da fila. O GitHub dá a este repositório vinte
+# jobs ao mesmo tempo, e começa os que esperam numa ordem que não se
+# escolhe: na CI 505, a suíte de depuração do ARM, de 75 minutos, esperou
+# dezoito por uma vaga enquanto jobs de dez começavam, e a CI levou 94. O
+# piso é o trabalho todo dividido pelas vinte vagas — uns 58 minutos na
+# 505 —, e duas coisas a trazem para perto dele:
+#
+# - os jobs longos se dividem em partes, `DUKE_PARTE=k/n` (ver
+#   `xtask/src/partes.rs`): a suíte do kernel — a de depuração, a da
+#   virtio-gpu e a do boot pela UEFI do ARM — e as bancadas de
+#   persistência, de tempo e da atualização. A parte k de n leva os itens
+#   de índice i com i % n == k - 1: todo caso e todo cenário cai em
+#   exatamente uma, e um novo entra numa delas sem mexer aqui. A suíte tem
+#   ainda a cauda, que roda em toda parte (ver `kernel/src/testes.rs`);
+# - três camadas na fila, pelo `needs:` — que aqui é ordem, e não
+#   dependência: com `if: ${{ !cancelled() }}`, o job roda ainda que o de
+#   que ele precisa reprove. A primeira camada, sem `needs:`, são as
+#   bancadas longas, os lints e o SDK de fora: vinte jobs, que pegam as
+#   vinte vagas no começo. A segunda, o job de testes, entra na fila quando
+#   o SDK de fora acaba, em um minuto; a terceira, as bancadas curtas,
+#   quando os lints acabam, em seis. Quem entra antes na fila sai antes —
+#   é o que se espera da fila do GitHub entre camadas; dentro de uma, a
+#   ordem é a dele —: as vagas que vagam vão para as partes da suíte, e as
+#   curtas preenchem o fim.
+#
+# A conta, com os tempos da CI 505 e o preparo de cada job novo, está no
+# README ("Testes"): o caminho crítico de uns 94 minutos para uns 72, e o
+# trabalho de máquina de 1152 para uns 1224 minutos.
 
 name: CI
 
@@ -169,6 +198,10 @@ jobs:
   testes:
     name: Testes (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
+    # A segunda camada da fila (ver o começo deste arquivo): entra quando o
+    # SDK de fora acaba, e roda ainda que ele reprove.
+    needs: sdk-fora
+    if: ${{ !cancelled() }}
     # O dobro do pior medido, de novo. Com as quedas nas fronteiras da
     # persistência, o job do x86 levava 34 minutos; com a compactação, o TPM
     # e o armazém, a bancada sozinha leva de 39 a 48 — o mesmo código, em
@@ -185,30 +218,68 @@ jobs:
     # deles na suíte em virtio-gpu, que foi para o job `video`.
     #
     # E o job se divide em partes que correm juntas, cada uma numa máquina:
-    # a suíte de depuração, o caminho crítico da CI; o resto — a suíte de
-    # release, as fumaças, os ELFs e o teclado USB —; e, no ARM, o boot
-    # pela UEFI, que leva mais de uma hora no emulador (no x86, minutos, e
-    # fica com o resto). Cada passo é um `cargo xtask` que compila o que
-    # usa: nenhum depende do anterior. Na CI 503, num job só, o ARM levou
-    # 221 minutos — 98 da suíte e 83 do iniciador, um depois do outro.
-    timeout-minutes: 290
+    # a suíte de depuração, em três partes por arquitetura (DUKE_PARTE); a
+    # suíte de release; o resto — as fumaças, os ELFs, o teclado USB e, no
+    # x86, o boot pela UEFI —; e, no ARM, o boot pela UEFI, que roda a
+    # suíte inteira pelo firmware, em duas partes. Cada passo é um `cargo
+    # xtask` que compila o que usa: nenhum depende do anterior. Na CI 503,
+    # num job só, o ARM levou 221 minutos — 98 da suíte e 83 do iniciador,
+    # um depois do outro; na 505, com a suíte e o iniciador em jobs à parte,
+    # 75 e 58. Em partes, nenhuma passa de uns 35 minutos.
+    timeout-minutes: 150
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
       # rodada se a outra também quebrou. Saber se o bug é específico de uma
       # plataforma costuma ser metade do diagnóstico.
       fail-fast: false
+      # `tipo` escolhe os passos e o cache; `duke_parte` é a parte da suíte,
+      # quando o tipo a divide.
       matrix:
         include:
           - arch: x86_64
-            parte: suite
+            parte: suite 1/3
+            tipo: suite
+            duke_parte: 1/3
+          - arch: x86_64
+            parte: suite 2/3
+            tipo: suite
+            duke_parte: 2/3
+          - arch: x86_64
+            parte: suite 3/3
+            tipo: suite
+            duke_parte: 3/3
+          - arch: aarch64
+            parte: suite 1/3
+            tipo: suite
+            duke_parte: 1/3
+          - arch: aarch64
+            parte: suite 2/3
+            tipo: suite
+            duke_parte: 2/3
+          - arch: aarch64
+            parte: suite 3/3
+            tipo: suite
+            duke_parte: 3/3
+          - arch: x86_64
+            parte: release
+            tipo: release
+          - arch: aarch64
+            parte: release
+            tipo: release
           - arch: x86_64
             parte: resto
-          - arch: aarch64
-            parte: suite
+            tipo: resto
           - arch: aarch64
             parte: resto
+            tipo: resto
           - arch: aarch64
-            parte: iniciador
+            parte: iniciador 1/2
+            tipo: iniciador
+            duke_parte: 1/2
+          - arch: aarch64
+            parte: iniciador 2/2
+            tipo: iniciador
+            duke_parte: 2/2
     steps:
       - uses: actions/checkout@v4
 
@@ -225,12 +296,14 @@ jobs:
             target
             kernel/target
             programas/target
-          # Um cache por parte: cada uma compila outra coisa. A segunda
-          # restore-key é a do job de antes da divisão.
-          key: testes-${{ matrix.arch }}-${{ matrix.parte }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # Um cache por tipo: cada um compila outra coisa. As partes de um
+          # tipo compilam o mesmo — a parte entra no kernel, mas não nas
+          # dependências — e dividem o cache dele. Sem um cache seu ainda,
+          # o do resto, que compila a mesma suíte de release e o resto.
+          key: testes-${{ matrix.arch }}-${{ matrix.tipo }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
-            testes-${{ matrix.arch }}-${{ matrix.parte }}-${{ steps.compilador.outputs.canal }}-
-            testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
+            testes-${{ matrix.arch }}-${{ matrix.tipo }}-${{ steps.compilador.outputs.canal }}-
+            testes-${{ matrix.arch }}-resto-${{ steps.compilador.outputs.canal }}-
 
       # A proveniência de outra rodada, que o cache de `target` traz, não vai
       # para o artefato desta.
@@ -257,15 +330,20 @@ jobs:
             gdisk dosfstools mtools btrfs-progs ovmf qemu-efi-aarch64 \
             swtpm python3
 
+      # A parte da suíte: os casos de índice i com i % n == k - 1, e a
+      # cauda, que roda em toda parte. O kernel anuncia a parte que roda, e
+      # o `xtask` a confere contra a pedida — ver `xtask/src/partes.rs`.
       - name: Suíte de testes
-        if: matrix.parte == 'suite'
+        if: matrix.tipo == 'suite'
+        env:
+          DUKE_PARTE: ${{ matrix.duke_parte }}
         run: cargo xtask test --arch ${{ matrix.arch }}
 
       # O perfil de release exercita caminhos que o de debug não: as
       # otimizações podem expor comportamento indefinido que passa despercebido
       # sem elas, e num kernel isso costuma virar corrupção silenciosa.
       - name: Suíte de testes (release)
-        if: matrix.parte == 'resto'
+        if: matrix.tipo == 'release'
         run: cargo xtask test --arch ${{ matrix.arch }} --release
 
       # A suíte roda com a feature `modo-teste`, que **troca** o laço do agente
@@ -278,14 +356,14 @@ jobs:
       # kernel compilado como se entrega e conversa com ele pelo socket, que é
       # o que um agente de verdade faz.
       - name: Fumaça (canal do agente, kernel de produção)
-        if: matrix.parte == 'resto'
+        if: matrix.tipo == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }}
 
       # E em release, que é a configuração que se entrega. A suíte já roda nas
       # duas otimizações; o laço de produção só rodava numa — o mesmo formato
       # de ponto cego que a fumaça existe para fechar.
       - name: Fumaça (release)
-        if: matrix.parte == 'resto'
+        if: matrix.tipo == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
 
       # As imagens ELF dos programas de usuário, conferidas por fora.
@@ -303,7 +381,7 @@ jobs:
       # Fica aqui, e não no job de qualidade, porque precisa do kernel
       # compilado para o alvo — e este job já o compila.
       - name: Imagens ELF dos programas
-        if: matrix.parte == 'resto'
+        if: matrix.tipo == 'resto'
         run: cargo xtask elf --arch ${{ matrix.arch }}
 
       # O iniciador UEFI, nas duas arquiteturas e nos dois firmwares.
@@ -319,9 +397,15 @@ jobs:
       # adoção. No ARM ela deixa a **suíte inteira** rodar sobre o mapa de
       # memória do firmware, que tem dezenas de regiões contra a única que o
       # device tree descreve: passar pelo `-kernel` não diz nada sobre passar
-      # por aqui.
+      # por aqui. No ARM, em duas partes, cada uma com os kerneis estragados.
       - name: Iniciador UEFI
-        if: matrix.parte == 'iniciador' || (matrix.parte == 'resto' && matrix.arch == 'x86_64')
+        if: matrix.tipo == 'resto' && matrix.arch == 'x86_64'
+        run: cargo xtask iniciador --arch ${{ matrix.arch }}
+
+      - name: Iniciador UEFI (a suíte pelo firmware, em partes)
+        if: matrix.tipo == 'iniciador'
+        env:
+          DUKE_PARTE: ${{ matrix.duke_parte }}
         run: cargo xtask iniciador --arch ${{ matrix.arch }}
 
       # E uma terceira, com teclado USB no lugar do nativo.
@@ -333,7 +417,7 @@ jobs:
       # caminho. Uma máquina por teclado é o que torna cada rodada uma
       # afirmação sobre qual driver funciona.
       - name: Fumaça (teclado USB)
-        if: matrix.parte == 'resto'
+        if: matrix.tipo == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --teclado usb
 
       # A proveniência de cada artefato que este job compilou: o compilador,
@@ -365,14 +449,28 @@ jobs:
   # placa, levava de 26 a 39 minutos dentro do job de testes (CI 330 e
   # 335). A cobertura é a mesma, ao lado dele. O teto é o dobro do pior
   # medido com a compilação.
+  #
+  # Em duas partes por arquitetura (DUKE_PARTE), como a suíte de
+  # depuração: na CI 505 o job levou 68 minutos no x86 e 48 no ARM, e na
+  # 506 o do ARM, noutro runner, 78. A fumaça roda uma vez, na segunda.
   video:
-    name: Tela virtio-gpu (${{ matrix.arch }})
+    name: Tela virtio-gpu (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            parte: 1/2
+          - arch: x86_64
+            parte: 2/2
+            fumaca: true
+          - arch: aarch64
+            parte: 1/2
+          - arch: aarch64
+            parte: 2/2
+            fumaca: true
     steps:
       - uses: actions/checkout@v4
 
@@ -389,11 +487,12 @@ jobs:
             target
             kernel/target
             programas/target
+          # Um por arquitetura: as partes dividem o cache. Sem um seu ainda,
+          # o da suíte do job de testes: a mesma compilação.
           key: video-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          # Sem um cache seu ainda, o do job de testes: a mesma compilação.
           restore-keys: |
             video-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
-            testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
+            testes-${{ matrix.arch }}-suite-${{ steps.compilador.outputs.canal }}-
 
       # A proveniência de outra rodada, que o cache de `target` traz, não vai
       # para o artefato desta.
@@ -410,9 +509,12 @@ jobs:
             swtpm python3
 
       - name: Suíte de testes (virtio-gpu)
+        env:
+          DUKE_PARTE: ${{ matrix.parte }}
         run: cargo xtask test --arch ${{ matrix.arch }} --video virtio
 
       - name: Fumaça (virtio-gpu)
+        if: matrix.fumaca
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --video virtio
 
       # A proveniência de cada artefato que este job compilou: o compilador,
@@ -444,20 +546,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 270
     # A bancada do x86_64 é a mais longa da CI — 170 minutos na CI 503,
-    # contra 72 no ARM —, e roda em duas metades, uma por máquina: a parte
-    # k de n leva os cenários de índice i com i % n == k - 1 (DUKE_PARTE,
-    # `xtask/src/persistencia.rs`). Todo cenário cai em exatamente uma
-    # parte, e um cenário novo entra numa delas sem mexer aqui.
+    # contra 72 no ARM —, e roda em partes, uma por máquina: a parte k de n
+    # leva os cenários de índice i com i % n == k - 1 (DUKE_PARTE,
+    # `xtask/src/partes.rs`). Todo cenário cai em exatamente uma parte, e um
+    # cenário novo entra numa delas sem mexer aqui. Em duas metades, na CI
+    # 505, o x86 levou 60 minutos em cada, e o ARM inteiro, 88; na 506, as
+    # metades do x86 levaram 77. Em três partes no x86 e duas no ARM,
+    # nenhuma passa de uns 47 minutos.
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
-            parte: 1/2
+            parte: 1/3
           - arch: x86_64
-            parte: 2/2
+            parte: 2/3
+          - arch: x86_64
+            parte: 3/3
           - arch: aarch64
-            parte: 1/1
+            parte: 1/2
+          - arch: aarch64
+            parte: 2/2
     steps:
       - uses: actions/checkout@v4
 
@@ -533,14 +642,23 @@ jobs:
   # do desfazimento, e o pânico em toda tentativa — numa imagem de produção
   # também, que volta com a identidade dela.
   # Um job à parte, como a persistência: cada cenário é uma série de boots.
+  # E em partes, como ela (DUKE_PARTE): o x86 em duas — 72 minutos inteiro
+  # na CI 505 —, o ARM inteiro, uns 50. Cada parte compila o kernel com os
+  # pontos de queda só se tem algum cenário de queda.
   atualizacao:
-    name: Atualização (${{ matrix.arch }})
+    name: Atualização (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            parte: 1/2
+          - arch: x86_64
+            parte: 2/2
+          - arch: aarch64
+            parte: 1/1
     steps:
       - uses: actions/checkout@v4
 
@@ -575,6 +693,8 @@ jobs:
             swtpm python3
 
       - name: Atualização A/B
+        env:
+          DUKE_PARTE: ${{ matrix.parte }}
         run: cargo xtask atualizacao --arch ${{ matrix.arch }}
 
       # O incidente de uma máquina que parou de andar — o estado de cada
@@ -613,6 +733,10 @@ jobs:
   identidade:
     name: Identidade (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -690,6 +814,10 @@ jobs:
   botao:
     name: Botão de energia (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -766,6 +894,10 @@ jobs:
   senha:
     name: Troca da própria senha (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -841,6 +973,10 @@ jobs:
   copia:
     name: Cópia de segurança (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -917,6 +1053,10 @@ jobs:
   enlace:
     name: Enlace entre dispositivos (${{ matrix.nome }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -1002,6 +1142,10 @@ jobs:
   pareamento:
     name: Pareamento entre dispositivos (${{ matrix.nome }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -1085,6 +1229,10 @@ jobs:
   fluxo:
     name: Fluxos entre dispositivos (${{ matrix.nome }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -1231,6 +1379,10 @@ jobs:
   sdk:
     name: SDK da malha entre dispositivos (${{ matrix.nome }})
     runs-on: ubuntu-latest
+    # A terceira camada da fila (ver o começo deste arquivo): entra quando
+    # os lints acabam, e roda ainda que eles reprovem.
+    needs: qualidade
+    if: ${{ !cancelled() }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -1317,14 +1469,20 @@ jobs:
   # o holdover. Um job à parte porque a bancada leva mais de uma hora — o
   # holdover sozinho espera a janela de 34 minutos — e corre ao lado do de
   # testes, sem esticá-lo.
+  #
+  # Em três partes por arquitetura (DUKE_PARTE), como a persistência. O
+  # holdover, o último cenário, leva a parte dele a uns 46 minutos — perto
+  # dos 40 dele sozinho, com o preparo —; as outras duas, a uns 18. Em
+  # duas, a dele levava uns 52.
   tempo:
-    name: Bancada de tempo (${{ matrix.arch }})
+    name: Bancada de tempo (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
+        parte: [1/3, 2/3, 3/3]
     steps:
       - uses: actions/checkout@v4
 
@@ -1361,6 +1519,8 @@ jobs:
             swtpm python3
 
       - name: Bancada de tempo
+        env:
+          DUKE_PARTE: ${{ matrix.parte }}
         run: cargo xtask tempo --arch ${{ matrix.arch }} --release
 
       # O incidente de uma máquina que parou de andar — o estado de cada

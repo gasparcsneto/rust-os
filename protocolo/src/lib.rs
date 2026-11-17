@@ -38,6 +38,7 @@ extern crate alloc;
 pub mod dns;
 pub mod json;
 pub mod mapa;
+pub mod partes;
 #[cfg(feature = "alloc")]
 pub mod quadro;
 pub mod usuario;

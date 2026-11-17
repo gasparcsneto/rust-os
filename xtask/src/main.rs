@@ -32,6 +32,7 @@ mod identidade;
 mod incidente;
 mod kernel_do_slot;
 mod pareamento;
+mod partes;
 mod persistencia;
 mod producao;
 mod proveniencia;
@@ -785,6 +786,17 @@ fn build(arch: Arquitetura, release: bool, modo_teste: bool) -> Result<Artefato,
     build_com(arch, release, features)
 }
 
+/// A compilação da suíte — a `modo-teste` — com a `parte` dela, se há: o
+/// kernel roda só a fatia da parte e a cauda (ver `kernel/src/testes.rs` e
+/// [`partes`]). Sem parte, a suíte inteira.
+fn build_da_suite(
+    arch: Arquitetura,
+    release: bool,
+    parte: Option<protocolo::partes::Parte>,
+) -> Result<Artefato, String> {
+    build_com_parte(arch, release, &["modo-teste"], parte)
+}
+
 /// [`build`] com estas features do kernel. A única além de `modo-teste` é a
 /// `quedas`, da bancada de persistência — e o `cargo xtask invariantes`
 /// confere que só ela a pede.
@@ -793,8 +805,19 @@ pub(crate) fn build_com(
     release: bool,
     features: &[&str],
 ) -> Result<Artefato, String> {
+    build_com_parte(arch, release, features, None)
+}
+
+/// [`build_com`], com a parte da suíte — só a compilação dela tem uma, ver
+/// [`build_da_suite`].
+fn build_com_parte(
+    arch: Arquitetura,
+    release: bool,
+    features: &[&str],
+    parte: Option<protocolo::partes::Parte>,
+) -> Result<Artefato, String> {
     reservar_a_bancada()?;
-    let elf = compilar_o_kernel(arch, release, features, None)?;
+    let elf = compilar_o_kernel_com(arch, release, features, None, parte)?;
     match arch {
         Arquitetura::Aarch64 => {
             let saida = raiz_do_projeto().join("target").join("imagens");
@@ -847,10 +870,33 @@ pub(crate) fn compilar_o_kernel(
     features: &[&str],
     saida: Option<&Path>,
 ) -> Result<PathBuf, String> {
+    compilar_o_kernel_com(arch, release, features, saida, None)
+}
+
+/// [`compilar_o_kernel`], com a parte da suíte que a compilação leva — só a
+/// da suíte, com `modo-teste`, tem uma (ver [`build_da_suite`]).
+fn compilar_o_kernel_com(
+    arch: Arquitetura,
+    release: bool,
+    features: &[&str],
+    saida: Option<&Path>,
+    parte: Option<protocolo::partes::Parte>,
+) -> Result<PathBuf, String> {
+    if parte.is_some() && !features.contains(&"modo-teste") {
+        return Err(
+            "uma parte da suíte só vai para a compilação da suíte, com `modo-teste`".into(),
+        );
+    }
     let dir_kernel = raiz_do_projeto().join("kernel");
 
     let perfil = if release { "release" } else { "debug" };
-    println!("[xtask] compilando o kernel ({}, {perfil})...", arch.nome());
+    match parte {
+        None => println!("[xtask] compilando o kernel ({}, {perfil})...", arch.nome()),
+        Some(p) => println!(
+            "[xtask] compilando o kernel ({}, {perfil}, a parte {p} da suíte)...",
+            arch.nome()
+        ),
+    }
 
     // O diretório de saída sempre explícito: o padrão (`kernel/target`) ou
     // o de quem compila à parte. Um `build.target-dir` de fora — um config
@@ -870,12 +916,7 @@ pub(crate) fn compilar_o_kernel(
         cargo.args(["--features", &features.join(",")]);
     }
 
-    // O cargo exporta variáveis que descrevem o build *do xtask*. Se elas
-    // vazarem para o processo filho, o build do kernel herda o target e o
-    // diretório de saída errados. Limpar é obrigatório.
-    for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR"] {
-        cargo.env_remove(var);
-    }
+    ambiente_do_kernel(&mut cargo, parte);
 
     let status = cargo
         .status()
@@ -904,6 +945,7 @@ pub(crate) fn compilar_o_kernel(
         arquitetura: arch.nome(),
         perfil,
         features,
+        parte_da_suite: parte,
         lock: &dir_kernel.join("Cargo.lock"),
     })?;
     println!(
@@ -911,6 +953,28 @@ pub(crate) fn compilar_o_kernel(
         proveniencia::para_o_log(&registro)
     );
     Ok(elf)
+}
+
+/// O ambiente da compilação do kernel.
+///
+/// O cargo exporta variáveis que descrevem o build *do xtask*. Se elas
+/// vazarem para o processo filho, o build do kernel herda o target e o
+/// diretório de saída errados. Limpar é obrigatório.
+///
+/// E a parte da suíte vai para a compilação dela, e só para ela: o kernel a
+/// lê com `option_env!` (ver `kernel/src/testes.rs`), e um valor herdado do
+/// ambiente — esquecido num shell, ou posto por outro comando — dividiria
+/// em silêncio a suíte de quem não pediu parte nenhuma. O cargo recompila o
+/// kernel quando ela muda, aparece ou some: o rustc registra a variável
+/// lida entre as dependências da compilação.
+fn ambiente_do_kernel(cargo: &mut Command, parte: Option<protocolo::partes::Parte>) {
+    for var in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR"] {
+        cargo.env_remove(var);
+    }
+    cargo.env_remove(partes::DA_SUITE);
+    if let Some(p) = parte {
+        cargo.env(partes::DA_SUITE, p.to_string());
+    }
 }
 
 /// A imagem crua do arm64, em `img`, tirada do ELF.
@@ -1219,6 +1283,7 @@ fn build_do_iniciador(arch: Arquitetura, release: bool) -> Result<PathBuf, Strin
         arquitetura: arch.nome(),
         perfil,
         features: &[],
+        parte_da_suite: None,
         lock: &dir.join("Cargo.lock"),
     })?;
     println!(
@@ -1471,6 +1536,16 @@ const fn esperado_do_iniciador(arch: Arquitetura) -> &'static [&'static str] {
 
 /// Sobe o iniciador no firmware de verdade e confere o que ele relatou.
 fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    // A parte da suíte, no ARM, que a roda pelo firmware — `DUKE_PARTE`, ver
+    // [`partes`] —, lida antes de compilar. No x86 a sonda sobe o kernel de
+    // produção, sem suíte: a parte não divide nada ali, e se diz.
+    let parte = partes::pedida()?;
+    if let (Some(p), Arquitetura::X86_64) = (parte, arch) {
+        println!(
+            "[xtask] iniciador: {}={p} não divide nada no x86 — a sonda sobe o kernel de produção, sem a suíte",
+            partes::VARIAVEL
+        );
+    }
     let efi = build_do_iniciador(arch, release)?;
 
     // O kernel também vai para a ESP: é o que o iniciador vai abrir. Compilar
@@ -1490,8 +1565,10 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     // No modo de teste a porta vira console, e a primeira linha do kernel
     // aparece. É o mesmo kernel, com a mesma imagem e o mesmo caminho de
     // boot; o que muda é ter para onde falar.
-    let modo_teste = arch == Arquitetura::Aarch64;
-    build(arch, release, modo_teste)?;
+    match arch {
+        Arquitetura::Aarch64 => build_da_suite(arch, release, parte)?,
+        Arquitetura::X86_64 => build(arch, release, false)?,
+    };
     // Daqui em diante, `kernel` é o arquivo da ESP, e não o de `target/`: é
     // ele que o iniciador lê, e é contra ele que o CRC, os segmentos e as
     // relocações do relatório têm de bater. Os estragados também partem
@@ -1521,12 +1598,14 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
     //
     // No ARM ela sobe a compilação de teste, que é a única com console (ver
     // o `build` acima). E já que é ela que está lá, a sonda deixa a suíte
-    // **inteira** rodar em vez de parar na primeira linha. A diferença não é
-    // cosmética: o mapa de memória que o firmware entrega tem trinta e três
-    // regiões, e o do device tree tem uma. Todo o resto do kernel — o
-    // alocador de frames, a cópia na escrita, o coletor, o Btrfs — roda
-    // sobre esse mapa pela primeira vez aqui. Passar no `-kernel` não diz
-    // nada sobre passar por este caminho.
+    // **inteira** rodar em vez de parar na primeira linha — ou a parte dela
+    // que `DUKE_PARTE` pede: a CI a divide entre máquinas, e a união das
+    // partes é a suíte inteira. A diferença não é cosmética: o mapa de
+    // memória que o firmware entrega tem trinta e três regiões, e o do
+    // device tree tem uma. Todo o resto do kernel — o alocador de frames, a
+    // cópia na escrita, o coletor, o Btrfs — roda sobre esse mapa pela
+    // primeira vez aqui. Passar no `-kernel` não diz nada sobre passar por
+    // este caminho.
     let marca = marca_do_kernel(arch);
     let espera = match arch {
         Arquitetura::X86_64 => Desenlace::Marca(MARCA_DA_TELA),
@@ -1591,12 +1670,19 @@ fn iniciador(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
         }
     }
 
-    // E, no ARM, a suíte inteira rodou sobre o mapa de memória do firmware.
+    // E, no ARM, a suíte inteira rodou sobre o mapa de memória do firmware
+    // — ou a parte pedida dela, anunciada pelo kernel e contada no placar.
     if arch == Arquitetura::Aarch64 {
-        match conferir_a_suite(&bruto) {
-            Ok(quantos) => {
-                println!("  [conferido] {quantos} casos da suite passaram sobre o mapa da UEFI")
-            }
+        match conferir_a_suite(&bruto).and_then(|quantos| {
+            partes::conferir_a_suite(parte, bruto.lines()).map(|a| (quantos, a))
+        }) {
+            Ok((quantos, a)) => println!(
+                "  [conferido] {quantos} casos da suite passaram sobre o mapa da UEFI — {}",
+                a.parte.map_or_else(
+                    || String::from("a suíte inteira"),
+                    |p| format!("a parte {p}, {} de {} casos", a.rodados, a.total)
+                )
+            ),
             Err(motivo) => {
                 eprintln!("[xtask] iniciador: {motivo}");
                 falhou = true;
@@ -8281,6 +8367,7 @@ fn programas_do_disco() -> Result<Vec<(String, Vec<u8>)>, String> {
                 arquitetura: arch.nome(),
                 perfil: "release",
                 features: &[],
+                parte_da_suite: None,
                 lock: &dir.join("Cargo.lock"),
             })?;
             // Todos contra o teto, os publicados também: chegam pela rede, e
@@ -18800,14 +18887,19 @@ fn quadro_fechado(linha: &str) -> bool {
 }
 
 fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, String> {
-    let artefato = build(arch, release, true)?;
+    // A parte da suíte, lida antes de compilar — `DUKE_PARTE`, ver
+    // [`partes`]: uma parte que não se lê para aqui, e não vira "nenhum
+    // caso" nem "todos". Sem ela, a suíte inteira.
+    let parte = partes::pedida()?;
+    let artefato = build_da_suite(arch, release, parte)?;
     println!(
-        "[xtask] executando a suíte de testes no QEMU ({}, video {})\n",
+        "[xtask] executando a suíte de testes no QEMU ({}, video {}{})\n",
         arch.nome(),
         match video {
             Video::Linear => "linear",
             Video::Virtio => "virtio",
-        }
+        },
+        parte.map_or_else(String::new, |p| format!(", a parte {p}"))
     );
 
     zerar_o_estado(arch)?;
@@ -18823,10 +18915,29 @@ fn test(arch: Arquitetura, release: bool, video: Video) -> Result<ExitCode, Stri
         .spawn()
         .map_err(|e| format!("não foi possível iniciar o {}: {e}", arch.qemu()))?;
     let andamento = acompanhar(&mut filho, std::io::stdout())?;
+    let notaveis = Arc::clone(&andamento.notaveis);
 
     match aguardar_com_andamento(filho, andamento, JANELA_SEM_PROGRESSO)? {
         Desfecho::Codigo(code) if code == arch.codigo_de_sucesso() => {
-            println!("\n[xtask] todos os testes passaram");
+            // O verde é da parte pedida: o kernel a anunciou no começo, e o
+            // placar do fim conta os casos dela — um ELF de outra
+            // compilação, de outra parte ou da suíte inteira, não passa.
+            let linhas = notaveis.lock().map(|l| l.clone()).unwrap_or_default();
+            match partes::conferir_a_suite(parte, linhas.iter().map(String::as_str)) {
+                Ok(a) => println!(
+                    "\n[xtask] todos os testes passaram — {}, {} de {} casos",
+                    a.parte.map_or_else(
+                        || String::from("a suíte inteira"),
+                        |p| format!("a parte {p}")
+                    ),
+                    a.rodados,
+                    a.total
+                ),
+                Err(motivo) => {
+                    eprintln!("\n[xtask] a suíte saiu com sucesso, mas {motivo}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
             Ok(ExitCode::SUCCESS)
         }
         Desfecho::Codigo(code) => {
@@ -18851,9 +18962,11 @@ enum Desfecho {
 }
 
 /// O andamento da suíte, lido da saída do emulador a caminho do destino
-/// dela: quantos casos terminaram até agora.
+/// dela: quantos casos terminaram até agora, e as linhas que se conferem
+/// no fim — o anúncio da parte e o placar (ver [`partes::conferir_a_suite`]).
 struct Andamento {
     casos: Arc<AtomicU64>,
+    notaveis: Arc<std::sync::Mutex<Vec<String>>>,
     leitor: std::thread::JoinHandle<()>,
 }
 
@@ -18873,6 +18986,8 @@ fn acompanhar(
         .ok_or("a saida do emulador nao veio em cano")?;
     let casos = Arc::new(AtomicU64::new(0));
     let contados = Arc::clone(&casos);
+    let notaveis = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let guardadas = Arc::clone(&notaveis);
     let leitor = std::thread::spawn(move || {
         let mut bloco = [0u8; 4096];
         let mut linha = Vec::new();
@@ -18887,6 +19002,14 @@ fn acompanhar(
                 if b == b'\n' {
                     if termina_um_caso(&linha) {
                         contados.fetch_add(1, Ordering::Release);
+                    } else {
+                        let texto = String::from_utf8_lossy(&linha);
+                        if (partes::ler_o_anuncio(&texto).is_some()
+                            || partes::ler_o_placar(&texto).is_some())
+                            && let Ok(mut l) = guardadas.lock()
+                        {
+                            l.push(texto.into_owned());
+                        }
                     }
                     linha.clear();
                 } else if linha.len() < 1024 {
@@ -18895,7 +19018,11 @@ fn acompanhar(
             }
         }
     });
-    Ok(Andamento { casos, leitor })
+    Ok(Andamento {
+        casos,
+        notaveis,
+        leitor,
+    })
 }
 
 /// Se a linha é a de um caso terminado: `  <nome>  ok`, ou

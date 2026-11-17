@@ -111,6 +111,7 @@ cargo xtask run   --arch aarch64
 # Suíte de testes, dentro do emulador
 cargo xtask test
 cargo xtask test --arch aarch64
+DUKE_PARTE=2/3 cargo xtask test      # só a parte 2 de 3: a fatia dela e a cauda — ver "Testes"
 
 # A máquina que só tem virtio-gpu, sem tela linear nenhuma
 cargo xtask run  --video virtio
@@ -537,6 +538,7 @@ protocolo/src/       as ABIs: do iniciador com o kernel, e do kernel com os prog
 ├── json.rs          JSON sem alocação (streaming + varredura), do kernel e dos programas
 ├── dns.rs           a pergunta e a resposta do DNS, sem alocar: do programa que resolve, do NSF e da bancada
 ├── mapa.rs          onde cada coisa mora no espaço virtual
+├── partes.rs        a parte `k/n` de uma rodada — o item de índice `i` na parte `k` sse `i % n == k - 1` —: a regra que o `xtask` e o kernel da suíte dividida usam, numa declaração só
 ├── quadro.rs        as mensagens sobre os bytes de um fluxo: o tamanho em quatro bytes antes do corpo, e o leitor que junta os pedaços com o teto de quem lê
 └── usuario.rs       as chamadas de sistema, os erros, os eventos — o aviso da malha entre eles — e o mapa do espaço do usuário: a interface nativa v2
 
@@ -867,6 +869,7 @@ xtask/src/
 ├── icp.rs           a bancada do IC: a PocketIC fixada e conferida pelo SHA-256, o canister da bancada, e o proxy TLS que mente de um jeito por nome — `xtask/bancada/icp.py` —, a cada conexão; e os módulos que o `implantacao` e o `gestor` instalam, os do gestor nas bordas do tamanho
 ├── fluxo.rs         a bancada dos fluxos da malha: duas máquinas de pé e uma ponte do meio no hospedeiro — 4 MiB em cada sentido, local e entre os Dukes, com a auditoria dos dois lados e nada do conteúdo nela; a contrapressão do leitor lento, com o pico dos buffers; a adulteração e o homem no meio na ponte; a política, a suspensão, o esquecimento, o corte e a revogação no meio do fluxo; e as vagas da porta do enlace com outro dispositivo que a bancada faz, nos quatro pares
 ├── pareamento.rs    a bancada do pareamento: duas máquinas de pé e a Pessoa no teclado das duas, sem administrador — ela lê o código de cada tela pela árvore semântica e o digita no outro, com a senha dela —, e uma ponte do meio no hospedeiro que passa os bytes, faz o homem no meio com uma chave dela, ou segura o que o destino manda depois do aperto: o código errado, o homem no meio, a mesma relação nos dois e a entrega por ela, o corte, o `device.forget` de um lado, a meia relação e a lápide
+├── partes.rs        as partes de uma rodada no hospedeiro: o `DUKE_PARTE` das bancadas que se dividem entre máquinas — a de persistência, a de tempo e a da atualização — e da suíte do kernel, que o recebe na compilação (`DUKE_PARTE_DA_SUITE`), e a conferência do anúncio da parte e do placar na saída da suíte
 ├── persistencia.rs  a bancada de persistência: a mesma máquina em vários boots, com corte de energia; e a espera de um boot pelo andamento da máquina, a de todas as bancadas
 ├── sdk.rs           o SDK da malha: o contrato público v2 conferido contra o protocolo, o registro e a política; o aviso só em `kernel::aviso`; `selar` e `sdk-conferir`; e o modelo compilado e selado fora do workspace
 ├── rede_principal.rs a fumaça real da rede principal do IC, à mão e fora da CI: o pré-voo do TLS, os destinos pelo `policy.write`, a consulta, o saldo do `gestor` pelas consultas assinadas, a auditoria e a revogação
@@ -6274,9 +6277,11 @@ fim, a bancada imprime o que mediu: a primeira sincronização depois do
 endereço do DHCP, a conferência das respostas, o RTT de cada uma, o tempo
 do servidor, e a rodada pelo relógio do kernel e pelo do hospedeiro. O
 trabalho `tempo` da CI roda os dezoito cenários nas duas arquiteturas,
-em release. Os cenários que conferem a validade rodam o programa
-`validade` pela serial, como a fumaça roda o `cifrado`, e leem do log o
-que ele disse.
+em release, em três partes por arquitetura (`DUKE_PARTE`, como a
+persistência): o holdover, o último, leva a parte dele a uns 46 minutos,
+e as outras duas ficam em uns 18. Os cenários que conferem a validade
+rodam o programa `validade` pela serial, como a fumaça roda o `cifrado`,
+e leem do log o que ele disse.
 
 **O que ela achou: o intervalo depois de uma falha.** Dentro da janela, a
 hora continua `sincronizado` sem acordo nenhum, e o serviço tomava a
@@ -9806,9 +9811,14 @@ motivo — ver [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-disco-hostil).
 `DUKE_CENARIOS` escolhe os cenários por pedaços do nome, e
 `DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só. E
 `DUKE_PARTE=k/n` roda só a parte `k` de `n` — os cenários de índice `i`
-com `i % n == k - 1`, na ordem da bancada —, para a CI dividi-la entre
-máquinas: todo cenário cai em exatamente uma parte, e um valor que não se
-lê para a bancada antes de compilar.
+com `i % n == k - 1`, na ordem da bancada, os de queda depois dos outros —,
+para a CI dividi-la entre máquinas: todo cenário cai em exatamente uma
+parte, a compilação com os pontos de queda só acontece se a parte tem algum
+deles, e um valor que não se lê — vazio, fora da faixa, que não é texto —
+para a bancada antes de compilar. A regra é a de `protocolo::partes`, uma
+declaração só, e a mesma variável divide a bancada de tempo, a da
+atualização e a suíte do kernel (ver "Testes"); com `DUKE_CENARIOS`, o
+filtro vale dentro da parte.
 
 ## Operação
 
@@ -12559,19 +12569,90 @@ que o `xtask` grava a cada execução, para os casos `nvme:`. O NVMe como
 disco do sistema, com o firmware bootando dele, é da bancada de
 persistência.
 
+**A suíte em partes.** `DUKE_PARTE=k/n cargo xtask test` roda só a parte
+`k` de `n`: os casos da tabela do meio de índice `i` com `i % n == k - 1`,
+na ordem dela — a regra de `protocolo::partes`, a mesma das bancadas —, e
+depois a cauda, que roda em toda parte. Todo caso cai em exatamente uma
+parte, e um caso novo entra numa delas sem mexer na CI. A parte chega ao
+kernel pela compilação, em `DUKE_PARTE_DA_SUITE`, lida com `option_env!`:
+o `xtask` a põe só no build da suíte e a tira de todo outro, e o kernel não
+lê `DUKE_PARTE` — um valor esquecido no shell não divide nada em silêncio.
+Um valor que não se lê para o `xtask` antes de compilar, e o kernel que
+recebesse um reprova antes do primeiro caso. A proveniência do kernel
+registra a parte, que muda o ELF. O mesmo vale para `--video virtio` e para
+o `cargo xtask iniciador` do ARM, que roda a suíte pelo firmware; no x86 o
+iniciador sobe o kernel de produção, e a parte não divide nada.
+
+A cauda são os casos que conferem a rodada inteira: a cópia do armazém
+inteiro, a reconstrução do journal inteiro, e os contadores desde o boot —
+o giro mascarado do x86, o registro com a trava de outro na mão, a marca
+d'água das pilhas de exceção do ARM, as divergências do armazém e a ordem
+das travas, sempre a última. No meio da tabela, cada um só cobriria a parte
+em que caísse; na cauda, cada parte se confere inteira, e a união das
+partes cobre a suíte inteira. O giro mascarado e o registro sob trava
+moravam no meio — "perto do fim" de uma tabela que cresceu depois deles —,
+e agora conferem também os mais de quinhentos que vinham depois. A ordem que
+importa sobrevive à fatia: o primeiro caso de uma parte é o de menor índice
+dela — o do compositor abre a parte 1, e o da adoção, com a cadeia da
+auditoria ainda no começo, a parte 2 —, e os de uma parte rodam na ordem
+relativa da tabela, os do NVMe com o aviso de desligamento depois dos
+outros do disco de verdade. E um caso não depende de quem rodou antes: os
+três de dados que enchem o caminho da auditoria contavam com uma cabeça da
+cadeia acima do teto dele, que a suíte inteira já tinha levado lá; numa
+parte, a 1 de 40, o envio passou com o caminho "cheio". Eles a levam lá
+sozinhos agora, como o dos fluxos já levava.
+
+O kernel anuncia a parte no começo — `suite de testes :: x86_64 :: parte 2
+de 3: 334 de 989 casos`, e a fatia na linha seguinte — e o placar do fim
+conta os casos que rodaram; o `xtask` confere os dois contra a parte que
+pediu, e um ELF de outra compilação, de outra parte ou da suíte inteira,
+não passa. Sem `DUKE_PARTE`, a suíte inteira, como sempre.
+
 O CI roda formatação, lints, as conferências de fonte de `cargo xtask
 invariantes`, os testes do `xtask`, a conferência dos ELFs, o boot pela UEFI,
 as sondas de fumaça contra o kernel de produção, e a suíte nas duas
 arquiteturas em debug e release — e, nas duas, a suíte e a fumaça também na
-máquina que só tem `virtio-gpu`. Essa máquina e as duas bancadas longas —
-a de persistência, com os cortes de energia, e a de tempo — rodam cada uma
-num job à parte, ao lado do de testes, nas duas arquiteturas. O de testes
-se divide em partes que correm juntas, cada uma numa máquina — a suíte de
-depuração; o resto, com a suíte de release, as fumaças, os ELFs e o
-teclado USB; e, no ARM, o boot pela UEFI —, e a persistência do x86, a
-bancada mais longa, em duas metades (`DUKE_PARTE`): o caminho crítico da
-CI passa a ser a suíte de depuração, uns 100 minutos, e não mais os 221
-do job de testes do ARM inteiro.
+máquina que só tem `virtio-gpu`. Essa máquina e as bancadas — a de
+persistência, com os cortes de energia, a de tempo, a da atualização e as
+outras — rodam cada uma num job à parte, nas duas arquiteturas. Os jobs
+longos se dividem em partes (`DUKE_PARTE`), cada uma numa máquina: a suíte
+de depuração, em três por arquitetura; a da `virtio-gpu`, em duas; o boot
+pela UEFI do ARM, que roda a suíte pelo firmware, em duas; a persistência,
+em três no x86 e duas no ARM; a de tempo, em três; e a da atualização, em
+duas no x86. A suíte de release e o resto — as fumaças, os ELFs, o teclado
+USB e o boot pela UEFI do x86 — são jobs à parte.
+
+E a fila tem três camadas. O GitHub dá a este repositório vinte jobs ao
+mesmo tempo e começa os que esperam numa ordem que não se escolhe: na CI
+505, a suíte de depuração do ARM, de 75 minutos, esperou dezoito por uma
+vaga enquanto jobs de dez começavam, e a CI levou 94. O `needs:` põe ordem
+— ali ele é ordem, e não dependência: com `if: ${{ !cancelled() }}`, o job
+roda ainda que o de que precisa reprove. Sem `needs:`, as bancadas longas,
+os lints e o SDK de fora: vinte jobs, que pegam as vinte vagas no começo.
+Quando o SDK de fora acaba, em um minuto, o job de testes entra na fila;
+quando os lints acabam, em seis, as bancadas curtas. Quem entra antes na
+fila sai antes — é o que se espera da fila do GitHub entre camadas; dentro
+de uma, a ordem é a dele —: as vagas que vagam vão para as partes da suíte,
+e as curtas preenchem o fim.
+
+A conta, com os tempos da CI 505, uns quatro minutos de preparo por job
+novo (o checkout, o compilador, o cache, o emulador e a compilação) e a
+ordem da fila sorteada dentro de cada camada:
+
+| | antes (CI 505) | depois (a conta) |
+|---|---|---|
+| jobs | 32 | 48 |
+| trabalho de máquina | 1152 min | 1224 min |
+| o piso, o trabalho nas vinte vagas | 58 min | 61 min |
+| o maior job | 88 min, a persistência do ARM | 50 min, a atualização do ARM |
+| o caminho crítico | 94 min medidos; 95 na mediana da conta | 72 na mediana, 76 em nove de dez |
+
+Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
+505 e 506, um desvio de uns 14% por job —, e com essa variação a mediana
+da conta fica em uns 75 minutos. Sem as camadas, as mesmas partes dariam
+uns 86: o que sobra até o piso é a ordem da fila, que não se escolhe
+dentro de uma camada, e o tamanho dos pedaços — o holdover da bancada de
+tempo, 36 minutos de um cenário só, e o preparo de cada job.
 
 **Por que o QEMU.** É a bancada do Duke, e continua sendo — decisão tomada
 depois de comparar as alternativas. É a mesma do Redox, cujo caminho de todo

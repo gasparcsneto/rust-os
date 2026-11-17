@@ -9,7 +9,9 @@
 //!   ativo e o canal oficial; e se a execução foi oficial — sem desvio
 //!   nenhum, ver [`super::compilador`] — ou não, com os desvios e o opt-in;
 //! - **a compilação**: o alvo, a arquitetura, o perfil e as features pedidas
-//!   ao cargo (nenhum dos pacotes compilados tem features padrão);
+//!   ao cargo (nenhum dos pacotes compilados tem features padrão); e, no
+//!   kernel da suíte dividida, a parte dela — `k/n`, ou `null` —, que muda o
+//!   ELF: o kernel roda só a fatia da parte (ver [`super::partes`]);
 //! - **a fonte**: o commit, se a árvore estava limpa, e o SHA-256 do
 //!   `Cargo.lock` que resolveu as dependências do artefato;
 //! - **a execução da CI** que o produziu — o repositório, o workflow, o
@@ -71,6 +73,8 @@ pub(crate) struct Compilado<'a> {
     pub(crate) perfil: &'a str,
     /// As features pedidas ao cargo.
     pub(crate) features: &'a [&'a str],
+    /// A parte da suíte que o kernel roda — só o da suíte dividida tem uma.
+    pub(crate) parte_da_suite: Option<protocolo::partes::Parte>,
     /// O `Cargo.lock` que resolveu as dependências.
     pub(crate) lock: &'a Path,
 }
@@ -179,7 +183,7 @@ fn do_artefato_em(dir: &Path, sha256: &str) -> Option<PathBuf> {
 }
 
 /// O nome do registro: o tipo, o nome, a arquitetura, o perfil, as
-/// features e o começo do resumo.
+/// features, a parte da suíte e o começo do resumo.
 fn nome_do_registro(c: &Compilado, resumo: &str) -> String {
     let mut nome = c.tipo.to_string();
     if c.nome != c.tipo {
@@ -193,6 +197,9 @@ fn nome_do_registro(c: &Compilado, resumo: &str) -> String {
     if !c.features.is_empty() {
         nome.push('-');
         nome.push_str(&c.features.join("+"));
+    }
+    if let Some(p) = c.parte_da_suite {
+        nome.push_str(&format!("-parte-{}-de-{}", p.k(), p.n()));
     }
     format!("{nome}-{}.json", &resumo[..16])
 }
@@ -248,6 +255,11 @@ fn registro(
         j.str_value(f)?;
     }
     j.end_array()?;
+    opcional(
+        &mut j,
+        "parte_da_suite",
+        c.parte_da_suite.map(|p| p.to_string()).as_deref(),
+    )?;
     j.end_object()?;
 
     j.key("compilador")?;
@@ -394,6 +406,7 @@ mod testes {
             arquitetura: "x86_64",
             perfil: "release",
             features,
+            parte_da_suite: None,
             lock,
         }
     }
@@ -419,6 +432,43 @@ mod testes {
         assert_eq!(
             nome_do_registro(&iniciador, resumo),
             "iniciador-x86_64-release-0123456789abcdef.json"
+        );
+        // A parte da suíte muda o ELF, e o nome a diz.
+        let da_parte = Compilado {
+            parte_da_suite: protocolo::partes::Parte::nova(2, 3),
+            ..compilado(arquivo, lock, &["modo-teste"])
+        };
+        assert_eq!(
+            nome_do_registro(&da_parte, resumo),
+            "kernel-duke-x86_64-release-modo-teste-parte-2-de-3-0123456789abcdef.json"
+        );
+    }
+
+    #[test]
+    fn o_registro_do_kernel_de_uma_parte_diz_a_parte() {
+        let raiz = super::super::raiz_do_projeto();
+        let arquivo = raiz.join("kernel/target/x86_64-unknown-none/debug/duke");
+        let lock = raiz.join("kernel/Cargo.lock");
+        let c = Compilado {
+            parte_da_suite: protocolo::partes::Parte::nova(1, 40),
+            ..compilado(&arquivo, &lock, &["modo-teste"])
+        };
+        let texto = registro(
+            &c,
+            super::super::compilador::estado(),
+            &sha256(b"duke"),
+            4,
+            None,
+            0,
+        )
+        .expect("o registro");
+        let json = Json(texto.trim_end().as_bytes());
+        assert_eq!(
+            json.member("compilacao")
+                .and_then(|c| c.member("parte_da_suite"))
+                .and_then(|p| p.as_str()),
+            Some("1/40"),
+            "{texto}"
         );
     }
 
@@ -465,6 +515,8 @@ mod testes {
             campo(&["compilacao", "alvo"]).as_str(),
             Some("x86_64-unknown-none")
         );
+        // Sem parte, a suíte inteira: `null`.
+        assert!(campo(&["compilacao", "parte_da_suite"]).is_null());
         assert_eq!(
             campo(&["fonte", "cargo_lock"]).as_str(),
             Some("kernel/Cargo.lock")

@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use protocolo::json::Json;
 
+use super::partes;
 use super::persistencia::Ligada;
 use super::servidor_de_hora::{self, Desfecho, Modo, ServidorDeHora};
 use super::{
@@ -174,24 +175,28 @@ struct Medidas {
 }
 
 /// `cargo xtask tempo`: roda os cenários e diz quais passaram.
+///
+/// `DUKE_PARTE=k/n` roda só a parte `k` de `n` — os cenários de índice `i`
+/// com `i % n == k - 1`, na ordem da tabela, como na bancada de
+/// persistência (ver [`super::partes`]) —, e `DUKE_CENARIOS` filtra pelo
+/// nome.
 pub(crate) fn tempo(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    // A parte desta rodada, lida antes de compilar: uma parte mal escrita
+    // para aqui, e não vira "nenhum cenário" nem "todos" em silêncio.
+    let parte = partes::pedida()?;
     let artefato = build(arch, release, false)?;
     println!(
-        "[xtask] tempo: {} cenarios, cada um com o estado zerado e as fontes de hora do hospedeiro ({})",
-        CENARIOS.len(),
+        "[xtask] tempo: {}, cada um com o estado zerado e as fontes de hora do hospedeiro ({})",
+        partes::descrever(parte, CENARIOS.len()),
         arch.nome()
     );
     // O mesmo filtro da bancada de persistência: pedaços do nome separados
-    // por `|`; vale o cenário que tiver qualquer um deles.
+    // por `|`; vale o cenário que tiver qualquer um deles — dentro da parte.
     let filtro = std::env::var("DUKE_CENARIOS").ok();
-    let escolhido = |c: &&Cenario| {
-        filtro
-            .as_deref()
-            .is_none_or(|f| f.split('|').any(|p| c.nome.contains(p)))
-    };
+    let (desta_rodada, _) = partes::da_rodada(CENARIOS, &[], |c| c.nome, parte, filtro.as_deref());
     let mut medidas = Medidas::default();
     let mut falhas = 0;
-    for cenario in CENARIOS.iter().filter(escolhido) {
+    for cenario in desta_rodada {
         super::incidente::no_cenario("tempo", cenario.nome);
         zerar_o_estado(arch)?;
         let servidor = ServidorDeHora::subir()?;
@@ -4060,6 +4065,49 @@ fn o_holdover(b: &mut Bancada) -> Result<String, String> {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// A bancada em partes, como a CI a roda — `DUKE_PARTE=k/3` nas duas
+    /// arquiteturas, ver `.github/workflows/ci.yml` —: cada cenário em
+    /// exatamente uma parte. E a conta que fez a CI escolher três: o
+    /// holdover, meia hora de máquina, é o último da tabela, e a parte dele
+    /// não leva os outros mais longos — a perda e a volta, e a hora que
+    /// vence —, que sozinhos passam de dez minutos. Um cenário novo que
+    /// mude isso muda a conta, e a CI tem de ser refeita junto.
+    #[test]
+    fn as_partes_da_ci_levam_cada_cenario_uma_vez() {
+        use protocolo::partes::Parte;
+        let parte = |k| -> Vec<&str> {
+            partes::da_rodada(CENARIOS, &[], |c| c.nome, Parte::nova(k, 3), None)
+                .0
+                .iter()
+                .map(|c| c.nome)
+                .collect()
+        };
+        let todas: Vec<&str> = (1..=3).flat_map(parte).collect();
+        assert_eq!(todas.len(), CENARIOS.len());
+        for c in CENARIOS {
+            assert_eq!(
+                todas.iter().filter(|n| **n == c.nome).count(),
+                1,
+                "{}",
+                c.nome
+            );
+        }
+        assert!(CENARIOS.last().is_some_and(|c| c.nome.contains("holdover")));
+        let do_holdover = (1..=3)
+            .map(parte)
+            .find(|p| p.iter().any(|n| n.contains("holdover")))
+            .expect("a parte do holdover");
+        for longo in [
+            "a perda de uma, duas e tres fontes",
+            "com o teto do registro baixado",
+        ] {
+            assert!(
+                !do_holdover.iter().any(|n| n.contains(longo)),
+                "`{longo}` caiu na parte do holdover"
+            );
+        }
+    }
 
     #[test]
     fn a_data_do_rtc_sai_dos_segundos() {

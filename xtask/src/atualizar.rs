@@ -36,6 +36,7 @@ use atualizacao::controle::{Controle, Falha, TENTATIVAS};
 use protocolo::json::Json;
 
 use super::disco_hostil::{Corte, DiscoHostil, Faixa, Sentido};
+use super::partes;
 use super::persistencia::{self as p, Ligada};
 use super::{
     AgenteNaPorta, Ambiente, Arquitetura, Artefato, Duration, ExitCode, Path, build_com, chaves,
@@ -339,28 +340,45 @@ const CENARIOS_DE_QUEDA: &[Cenario] = &[
 ///
 /// Os de queda vêm por último, sobre outra compilação do kernel — a de
 /// produção mais os pontos de queda —, que substitui a primeira no slot A.
-/// `DUKE_CENARIOS` filtra pelo nome, como na bancada de persistência.
+/// `DUKE_CENARIOS` filtra pelo nome, e `DUKE_PARTE=k/n` roda só a parte `k`
+/// de `n` — os cenários de índice `i` em todos (os de [`CENARIOS`], depois
+/// os de queda) com `i % n == k - 1` —, como na bancada de persistência; a
+/// compilação com os pontos de queda só acontece se a parte tem algum
+/// deles.
 pub(crate) fn atualizacao(arch: Arquitetura, release: bool) -> Result<ExitCode, String> {
+    // A parte desta rodada, lida antes de compilar: uma parte mal escrita
+    // para aqui, e não vira "nenhum cenário" nem "todos" em silêncio.
+    let parte = partes::pedida()?;
     let _ = p::SERIAL_DA_BANCADA
         .set(super::raiz_do_estado().join(format!("atualizacao-{}.serial", arch.nome())));
+    // O filtro pelo nome e a parte: o índice de um cenário é a posição dele
+    // em todos, os de `CENARIOS`, depois os de `CENARIOS_DE_QUEDA` — ver
+    // [`partes::da_rodada`].
     let filtro = std::env::var("DUKE_CENARIOS").ok();
-    let escolhido = |c: &Cenario| {
-        filtro
-            .as_deref()
-            .is_none_or(|f| f.split('|').any(|p| c.nome.contains(p)))
-    };
-    let total = CENARIOS
-        .iter()
-        .chain(CENARIOS_DE_QUEDA)
-        .filter(|c| escolhido(c))
-        .count();
-    println!(
-        "[xtask] atualizacao: {total} cenarios, cada um sobre um estado zerado, pelo firmware ({})",
-        arch.nome()
+    let (normais, de_queda) = partes::da_rodada(
+        CENARIOS,
+        CENARIOS_DE_QUEDA,
+        |c| c.nome,
+        parte,
+        filtro.as_deref(),
     );
+    let total = normais.len() + de_queda.len();
+    match parte {
+        None => println!(
+            "[xtask] atualizacao: {total} cenarios, cada um sobre um estado zerado, pelo firmware ({})",
+            arch.nome()
+        ),
+        Some(pt) => println!(
+            "[xtask] atualizacao: a parte {} de {} — {total} dos {} cenarios, cada um sobre um estado zerado, pelo firmware ({})",
+            pt.k(),
+            pt.n(),
+            CENARIOS.len() + CENARIOS_DE_QUEDA.len(),
+            arch.nome()
+        ),
+    }
     let mut falhas = 0;
-    let mut rodar = |cenarios: &[Cenario], b: &Bancada| -> Result<(), String> {
-        for cenario in cenarios.iter().filter(|c| escolhido(c)) {
+    let mut rodar = |cenarios: &[&Cenario], b: &Bancada| -> Result<(), String> {
+        for cenario in cenarios {
             zerar_o_estado(arch)?;
             p::esquecer_a_recusa_de_revogacao();
             if let (None, Some(serial)) =
@@ -385,14 +403,12 @@ pub(crate) fn atualizacao(arch: Arquitetura, release: bool) -> Result<ExitCode, 
         }
         Ok(())
     };
-    if CENARIOS.iter().any(escolhido) {
-        rodar(CENARIOS, &bancada(arch, release, &[])?)?;
+    // Cada compilação só quando a rodada tem algum cenário dela.
+    if !normais.is_empty() {
+        rodar(&normais, &bancada(arch, release, &[])?)?;
     }
-    if CENARIOS_DE_QUEDA.iter().any(escolhido) {
-        rodar(
-            CENARIOS_DE_QUEDA,
-            &bancada(arch, release, &[p::FEATURE_DE_QUEDAS])?,
-        )?;
+    if !de_queda.is_empty() {
+        rodar(&de_queda, &bancada(arch, release, &[p::FEATURE_DE_QUEDAS])?)?;
     }
     // O disco fica zerado para quem vier depois, como todo comando o deixa.
     zerar_o_estado(arch)?;
@@ -2377,4 +2393,59 @@ fn panico_nas_tentativas(b: &Bancada, bandeiras: u8) -> Result<String, String> {
     Ok(format!(
         "{boots} boots depois da instalacao: {TENTATIVAS} tentativas em panico e a volta, desfeita"
     ))
+}
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+    use protocolo::partes::Parte;
+
+    /// A bancada em partes: cada cenário — os de queda incluídos — em
+    /// exatamente uma parte, com o índice dos de queda depois dos outros; e,
+    /// nas duas metades que a CI roda no x86 (`DUKE_PARTE=k/2`, ver
+    /// `.github/workflows/ci.yml`), cenários das duas compilações — as duas
+    /// compilam o kernel com os pontos de queda.
+    #[test]
+    fn as_partes_levam_cada_cenario_uma_vez() {
+        let mut todos: Vec<&str> = CENARIOS
+            .iter()
+            .chain(CENARIOS_DE_QUEDA)
+            .map(|c| c.nome)
+            .collect();
+        todos.sort_unstable();
+        for n in 1..=5 {
+            let mut vistos: Vec<&str> = Vec::new();
+            for k in 1..=n {
+                let (normais, de_queda) = partes::da_rodada(
+                    CENARIOS,
+                    CENARIOS_DE_QUEDA,
+                    |c| c.nome,
+                    Parte::nova(k, n),
+                    None,
+                );
+                assert!(
+                    de_queda
+                        .iter()
+                        .all(|c| CENARIOS_DE_QUEDA.iter().any(|q| q.nome == c.nome)),
+                    "um cenário normal na lista dos de queda"
+                );
+                vistos.extend(normais.iter().chain(&de_queda).map(|c| c.nome));
+            }
+            vistos.sort_unstable();
+            assert_eq!(vistos, todos, "{n} partes");
+        }
+        for k in 1..=2 {
+            let (normais, de_queda) = partes::da_rodada(
+                CENARIOS,
+                CENARIOS_DE_QUEDA,
+                |c| c.nome,
+                Parte::nova(k, 2),
+                None,
+            );
+            assert!(
+                !normais.is_empty() && !de_queda.is_empty(),
+                "a parte {k} de 2"
+            );
+        }
+    }
 }
