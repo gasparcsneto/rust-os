@@ -13029,24 +13029,36 @@ fila sai antes — é o que se espera da fila do GitHub entre camadas; dentro
 de uma, a ordem é a dele —: as vagas que vagam vão para as partes da suíte,
 e as curtas preenchem o fim.
 
-A conta, com os tempos da CI 505, uns quatro minutos de preparo por job
-novo (o checkout, o compilador, o cache, o emulador e a compilação) e a
-ordem da fila sorteada dentro de cada camada:
+A conta, feita com os tempos da CI 505, uns quatro minutos de preparo por
+job novo (o checkout, o compilador, o cache, o emulador e a compilação) e a
+ordem da fila sorteada dentro de cada camada, e o que a CI 509 mediu — nela,
+os 48 jobs rodaram até o fim, os dois que reprovaram também, porque a suíte
+só para no placar:
 
-| | antes (CI 505) | depois (a conta) |
-|---|---|---|
-| jobs | 32 | 48 |
-| trabalho de máquina | 1152 min | 1224 min |
-| o piso, o trabalho nas vinte vagas | 58 min | 61 min |
-| o maior job | 88 min, a persistência do ARM | 50 min, a atualização do ARM |
-| o caminho crítico | 94 min medidos; 95 na mediana da conta | 72 na mediana, 76 em nove de dez |
+| | antes (CI 505) | a conta | medido (CI 509) |
+|---|---|---|---|
+| jobs | 32 | 48 | 48 |
+| trabalho de máquina | 1152 min | 1224 min | 1226 min |
+| o piso, o trabalho nas vinte vagas | 58 min | 61 min | 61 min |
+| o maior job | 88 min, a persistência do ARM | 50 min, a atualização do ARM | 58 min, a parte 2/3 da persistência do x86 |
+| o caminho crítico | 94 min medidos; 95 na mediana da conta | 72 na mediana, 76 em nove de dez | 78 min |
+
+O trabalho bateu com a conta, e as camadas fizeram o que se esperava: a
+primeira começou inteira no primeiro minuto; a segunda, do minuto 1 ao 34; a
+terceira, do 34 ao 51. O caminho crítico ficou seis minutos acima da
+mediana, e quem o fez foram os maiores pedaços das duas últimas camadas, que
+esperam uma vaga como os outros: a parte 2/2 do boot pela UEFI do ARM
+esperou 34 minutos e rodou 45 — a 1/2 rodou 29 —, e os fluxos entre o x86 e
+o ARM, da terceira camada, começaram aos 42 e rodaram 35. A CI 508 mediu o
+mesmo caminho, 78 minutos, pelos mesmos dois jobs. Encolher um sem o outro
+não muda o fim.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
-505 e 506, um desvio de uns 14% por job —, e com essa variação a mediana
-da conta fica em uns 75 minutos. Sem as camadas, as mesmas partes dariam
-uns 86: o que sobra até o piso é a ordem da fila, que não se escolhe
-dentro de uma camada, e o tamanho dos pedaços — o holdover da bancada de
-tempo, 36 minutos de um cenário só, e o preparo de cada job.
+505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
+508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se
+escolhe dentro de uma camada, e o tamanho dos pedaços: o holdover da
+bancada de tempo, 36 minutos de um cenário só, as duas metades desiguais do
+boot pela UEFI do ARM, e o preparo de cada job.
 
 **Por que o QEMU.** É a bancada do Duke, e continua sendo — decisão tomada
 depois de comparar as alternativas. É a mesma do Redox, cujo caminho de todo

@@ -71,6 +71,7 @@ continuidade.
 | [R13-BOOT](#r13-boot) | A cadeia de boot confiável | custódia (a política dos selos, na (b)); confiança (uma raiz nova, na (a) e na (c)) | a fase 13; a base de R12-IC-TPM e R12-IC-VALOR; e o caminho do Secure Boot que a fase 14 deixou de fora — a recomendação o deixa para depois, como opção do operador | **real, com a máquina na mão**: o disco e a máquina juntos abrem o selo da identidade, e o disco e o mesmo TPM satisfazem a política das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
+| [AUD-JUNTO](#aud-junto) | A decisão de uma mudança no mesmo registro do journal que ela, ou antes | persistência e auditoria (a garantia escrita) | — | baixa: uma queda entre os dois registros deixa no disco a decisão sem a mudança; nenhuma mudança fica no disco sem a decisão dela antes | [PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal) |
 | [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
 | [ALC-TEMP](#alc-temp) (DX-1) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
 | [R13-DESFAZER](#r13-desfazer) | O desfazer | persistência e auditoria | fecha a fase 13 | nenhuma nova | [Roteiro](../README.md#roteiro), fase 13 |
@@ -125,9 +126,11 @@ executa](#as-que-o-coordenador-executa)).
    R12-IC-VALOR pedem. Abre o caminho do Secure Boot que a fase 14 deixou
    de fora, mas a recomendação o deixa para depois, como opção do
    operador.
-6. **AUD-ANEL e P-HISTORIA** — o lote rápido: exposição baixa, duas
-   alternativas cada, e a recomendação de esperar medindo; com os riscos,
-   o impacto e o plano já escritos, decididas de uma vez.
+6. **AUD-ANEL, P-HISTORIA e AUD-JUNTO** — o lote rápido: exposição baixa,
+   poucas alternativas cada, e a recomendação que não mexe no código — as
+   duas primeiras, esperar medindo; a AUD-JUNTO, escrever a garantia que o
+   código dá —; com os riscos, o impacto e o plano já escritos, decididas
+   de uma vez.
 7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
    depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
 8. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
@@ -1077,9 +1080,9 @@ inspecionável: nada de reinício automático quando a medição recusa.
 ## As outras
 
 Na ordem recomendada. Cada uma: o problema, as alternativas, a
-recomendação provisória e o que destrava; as do lote rápido — a AUD-ANEL
-e a P-HISTORIA — também os riscos, o impacto e o plano de validação, para
-se decidirem sem outra rodada.
+recomendação provisória e o que destrava; as do lote rápido — a AUD-ANEL,
+a P-HISTORIA e a AUD-JUNTO — também os riscos, o impacto e o plano de
+validação, para se decidirem sem outra rodada.
 
 ### AUD-ANEL
 
@@ -1159,6 +1162,77 @@ do adversário do B4 da auditoria.
 - **A recomendação provisória.** (b), medindo quanto a base cresce por
   operação, para saber quando a (a) vira necessária.
 - **Destrava.** A vida longa de uma máquina.
+
+### AUD-JUNTO
+
+**A decisão de uma mudança no mesmo registro do journal que ela, ou
+antes** — o que a CI 509 mostrou, no pareamento.
+
+- **O problema.** A documentação promete que a decisão que autorizou uma
+  mudança de autoridade vai no mesmo registro do journal que a mudança —
+  "a mudança e a decisão entram juntas, ou nenhuma entra" —, e nunca num
+  anterior ([PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal), "A
+  decisão vai no registro da operação"; o README, "A auditoria também";
+  e a documentação de `gravar_sozinho` e do módulo, em
+  `kernel/src/persistencia.rs`). O código garante menos. O gate registra
+  a decisão antes de o handler tomar a ordem das gravações, e nessa janela
+  o coletor — que grava a auditoria pendente a cada dois segundos, ou na
+  hora, com meio anel esperando — ou a gravação de outro fio pode levá-la
+  num registro anterior: um só de auditoria, ou o da operação do outro
+  fio. Depois, `gravar_sozinho` acha a decisão já gravada e grava a
+  mudança sem ela, sem erro. A documentação
+  de `gravar_com_a_decisao` já diz o que o código faz: "junto — ou antes,
+  num registro só de auditoria".
+- **A evidência.** A CI 509: "pareamento: esquecer e parear de novo"
+  reprovou no boot pela UEFI do ARM, na parte 2 de 2, porque um caso
+  anterior deixou o coletor solto, e ele levou a decisão de um
+  `device.forget` num registro só de auditoria, antes do da desfeita
+  (`kernel/src/pareamento.rs`, `esquecer_pelo_comando`: a decisão é do
+  gate, e a ordem é tomada depois). A suíte pausa o coletor, e agora o
+  confere depois de cada caso; fora dela, a janela é a de todo dia.
+- **O que vale e o que não vale.** Vale: uma mudança no disco tem a
+  decisão dela antes, na cadeia; a decisão nunca vai depois da mudança; a
+  reposição refaz a cadeia de qualquer registro. Não vale a atomicidade:
+  depois de uma queda entre os dois registros, o disco tem a decisão sem a
+  mudança — como uma decisão cuja execução falhou, mas sem o registro da
+  falha.
+- **A área de 5.3.** A semântica da persistência e da auditoria: a
+  garantia escrita do que o journal guarda junto.
+- **As alternativas.** (a) Escrever a garantia real — junto ou antes,
+  nunca depois —, e o que uma decisão sem a mudança quer dizer depois de
+  uma queda, no PERSISTENCIA, no README e na documentação de
+  `gravar_sozinho`. Só documentação. (b1) O kernel cumprir o escrito: o
+  gate registra a decisão de uma mudança com a ordem das gravações na mão
+  — espera o journal em toda decisão de mudança. (b2) O coletor e as
+  gravações de outros fios não levam a decisão de um comando ainda em
+  execução. (c) Deixar como está.
+- **Os riscos.** (a): nenhum no código; a garantia escrita fica mais
+  fraca, e quem lê a auditoria depois de uma queda tem de saber que uma
+  decisão sem a mudança pode ser a de uma mudança que não chegou ao disco.
+  (b1): latência e contenção no gate, serializado com o disco. (b2): um
+  comando longo ou suspenso segura a drenagem, e o anel pode perder
+  registros; mais estado no caminho da auditoria. (c): a documentação
+  continua prometendo o que o código não faz.
+- **O impacto.** (a): o PERSISTENCIA, o README e a documentação de
+  `kernel/src/persistencia.rs`. (b1): o gate e a ordem das gravações, em
+  `kernel/src/autorizacao.rs` e `kernel/src/persistencia.rs`, para toda
+  decisão de mudança. (b2): o coletor, a drenagem e o anel da auditoria.
+- **O plano de validação.** (a): o revisor confere os textos contra o
+  código; um caso da suíte solta o coletor na janela — por um gancho antes
+  da tomada da ordem num handler — e confere que a decisão foi num
+  registro anterior, e que a mudança está no disco com a decisão antes
+  dela. (b1) e (b2): o mesmo caso, conferindo o mesmo registro; a bancada
+  de persistência com os cortes de energia; a medida da latência do gate
+  (b1) e da perda do anel sob carga (b2).
+- **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
+  não muda nenhuma das duas; a (b1) e a (b2) mudam o caminho da
+  auditoria, não o que ela registra.
+- **A recomendação provisória.** (a). Nada de segurança muda — nenhuma
+  mudança fica sem a decisão antes dela —, e a (b) custaria no caminho
+  quente do gate ou da auditoria uma atomicidade de que a cadeia não
+  precisa para ser verificável.
+- **Destrava.** Nada do roteiro; a documentação passa a dizer o que o
+  código faz.
 
 ### R13-CONSENT
 
@@ -1579,7 +1653,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`; o editor da imagem nova, a seguir |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728` |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | no incremento seguinte |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | no incremento seguinte |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -1652,8 +1726,16 @@ pendência #298.
   e não pelo da imagem nova, conferido antes da preparação; o nascimento
   do `user.run`, o mesmo. E, baixos, o `exec` de quem tem o fim pedido sem
   o isolamento, o detalhe "processo isolado" de quem está só encerrado, e
-  o `explain` errado das recusas da cota. São a correção seguinte, [B]:
-  as mesmas perguntas, onde a janela acaba.
+  o `explain` errado das recusas da cota. Foram a correção seguinte, [B],
+  no `97ea728` (o lote A2 do #448): as mesmas perguntas, onde a janela
+  acaba — a decisão de novo do `exec` pergunta a confiança no editor da
+  imagem nova e se quem chama ainda pede, só no fio que o gate decidiu e
+  sobre um `ALLOW`; a última palavra do nascimento pergunta a do código
+  que vai rodar, e só lança o comando decidido para `process.run`; o
+  encerrado ouve "processo encerrado"; e as recusas sobre quem pede no
+  `user.run` respondem sem a explicação do comando. Seis casos e as
+  mutações de cada pergunta, todas reprovadas ([README](../README.md#decisões-pendentes),
+  "A soma das cotas de processos e a cota por sessão", (f) a (l)).
 
 ### I7
 

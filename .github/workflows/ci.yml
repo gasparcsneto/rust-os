@@ -35,9 +35,9 @@
 #   ordem é a dele —: as vagas que vagam vão para as partes da suíte, e as
 #   curtas preenchem o fim.
 #
-# A conta, com os tempos da CI 505 e o preparo de cada job novo, está no
-# README ("Testes"): o caminho crítico de uns 94 minutos para uns 72, e o
-# trabalho de máquina de 1152 para uns 1224 minutos.
+# A conta e o que a CI 509 mediu estão no README ("Testes"): o caminho
+# crítico de 94 minutos para 78, e o trabalho de máquina de 1152 para 1226
+# minutos.
 
 name: CI
 
