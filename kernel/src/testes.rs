@@ -28048,8 +28048,9 @@ fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
         // O mesmo caminho do `fork`: o gate, e o nascimento com a cota dele.
         match crate::autorizacao::permitir_processo(autoridade, "process.fork") {
             Ok(cota) => {
-                match crate::fios::criar_processo("usuario", processo, 0, autoridade, cota, &|_| {})
-                {
+                match crate::fios::criar_processo("usuario", processo, 0, autoridade, cota, &|_| {
+                    Ok(())
+                }) {
                     Ok(_) => {
                         NASCIDOS.fetch_add(1, SeqCst);
                     }
@@ -32610,7 +32611,7 @@ fn manifesto_o_processo_nasce_sem_imagem() -> Resultado {
                 0,
                 Autoridade::Sistema,
                 cota,
-                &|_| {},
+                &|_| Ok(()),
             )?;
         } else {
             crate::fios::criar("sonda", programa_do_fio, 0)?;
@@ -39084,6 +39085,14 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_a_recusa_diz_os_mortos_por_recolher,
     },
     Caso {
+        nome: "zumbis: a recusa do user.run nativo diz o processo que pediu",
+        f: zumbis::zumbis_a_recusa_do_user_run_nativo_diz_o_processo_que_pediu,
+    },
+    Caso {
+        nome: "zumbis: o orfao nao e zumbi de quem toma a vaga do pai",
+        f: zumbis::zumbis_o_orfao_nao_e_zumbi_de_quem_toma_a_vaga_do_pai,
+    },
+    Caso {
         nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",
         f: vagas::vagas_o_morto_sem_a_limpeza_guarda_a_vaga,
     },
@@ -40453,6 +40462,26 @@ static CASOS: &[Caso] = &[
         f: nascimento::contencao_o_isolado_no_meio_do_fork_nao_ganha_filho,
     },
     Caso {
+        nome: "contencao: o isolado no meio do user.run nao lanca",
+        f: nascimento::contencao_o_isolado_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: a credencial suspensa no meio do fork nao ganha filho",
+        f: nascimento::contencao_a_credencial_suspensa_no_meio_do_fork_nao_ganha_filho,
+    },
+    Caso {
+        nome: "contencao: a recusa do user.run no nascimento diz o codigo",
+        f: nascimento::contencao_a_recusa_do_user_run_no_nascimento_diz_o_codigo,
+    },
+    Caso {
+        nome: "contencao: quem sai no meio do user.run nao lanca",
+        f: nascimento::contencao_quem_sai_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: quem sai no meio do fork nao ganha filho",
+        f: nascimento::contencao_quem_sai_no_meio_do_fork_nao_ganha_filho,
+    },
+    Caso {
         nome: "processos: a lista diz o programa, o papel e o estado",
         f: processos_a_lista_diz_o_programa_o_papel_e_o_estado,
     },
@@ -40523,6 +40552,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "energia: o reinicio com a tabela de fios cheia",
         f: nascimento::energia_o_reinicio_com_a_tabela_de_fios_cheia,
+    },
+    Caso {
+        nome: "energia: o despertar sem pedido nao age",
+        f: nascimento::energia_o_despertar_sem_pedido_nao_age,
     },
     Caso {
         nome: "energia: a maquina diz como reinicia e desliga",
@@ -55899,6 +55932,26 @@ fn contencao_o_processo_isolado_e_solto() -> Resultado {
         passo()?;
         esperar_linha("isolavel: DENY_CONTAINED", 1)?;
         esperar_linha("isolavel: sem filho", 1)?;
+        // A recusa do gate ao `fork` do isolado diz o processo que
+        // bifurcou, como o registro da bifurcação permitida — o achado 2
+        // do adversário da soma das cotas.
+        let (_, programa) = crate::fios::processo(fio).ok_or("o isolavel nao esta vivo")?;
+        let esperada = politica::auditoria::detalhe_composto(
+            Some(&alloc::format!(
+                "pelo processo {fio} ({})",
+                programa.descricao()
+            )),
+            "processo isolado",
+            "",
+        );
+        let recusa = ultimo_com_metodo("process.fork");
+        if !recusa
+            .as_ref()
+            .is_some_and(|e| e.codigo == politica::Codigo::DenyContained && e.detalhe == esperada)
+        {
+            crate::log_error!("teste", "{:?}", recusa.map(|e| e.detalhe));
+            return Err("a recusa do fork do isolado nao diz o processo que bifurcou");
+        }
         let alvo = alloc::format!("process:{fio}");
         // Uma execução que isolou, e uma que só reconheceu: a contenção não
         // executou duas vezes.

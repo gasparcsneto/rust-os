@@ -255,6 +255,13 @@ struct Fio {
     /// É o que transforma a tabela plana num parentesco, e é o que `esperar`
     /// consulta para não deixar um processo colher o filho de outro.
     pai: Option<IdFio>,
+    /// A vaga do [`Self::pai`] na tabela, guardada quando ele bifurcou.
+    ///
+    /// Um fio não muda de vaga enquanto vive, e a vaga dele só volta a
+    /// outro fio depois do recolhimento — o marcador do coletor, e depois o
+    /// fio novo, com outro `id`. Então, com o pai vivo, ele está nela, e
+    /// [`Escalonador::e_zumbi`] olha uma vaga só, e não a tabela inteira.
+    vaga_do_pai: Option<usize>,
     /// Com que código este fio saiu, quando ele saiu por `sair`.
     ///
     /// `None` cobre dois casos que não precisam ser distinguidos: o fio ainda
@@ -508,7 +515,7 @@ pub static CEDER_AO_ESCOLHER_VAGA: core::sync::atomic::AtomicBool =
 ///
 /// Existe só para a suíte, pelo mesmo motivo de [`CEDER_AO_ESCOLHER_VAGA`]:
 /// o nascimento vai para a auditoria antes de o filho poder rodar — ver
-/// `nasceu` em [`criar_processo`] —, e um nascimento gravado depois seria
+/// `nasce` em [`criar_processo`] —, e um nascimento gravado depois seria
 /// passado pelo primeiro pedido do filho só se o filho corresse antes de
 /// quem o criou terminar a chamada, o que quase nunca acontece sozinho.
 /// Com a espera, o filho corre noutro núcleo — e a ordem certa tem quem a
@@ -612,6 +619,7 @@ pub fn init() {
             descritores: crate::usuario::descritores::Tabela::nova(),
             escalonamentos: 1,
             pai: None,
+            vaga_do_pai: None,
             saida: None,
             colhido: false,
             limpeza: Limpeza::Devida,
@@ -1106,6 +1114,7 @@ fn recolher_um() -> Option<(usize, u64)> {
             descritores: crate::usuario::descritores::Tabela::nova(),
             escalonamentos: 0,
             pai: None,
+            vaga_do_pai: None,
             saida: None,
             colhido: true,
             limpeza: Limpeza::Feita,
@@ -1659,7 +1668,8 @@ pub enum NaoNasceu {
     /// ele ocupava nela.
     Cota(Ocupacao),
     /// Quem cria recusou no nascimento — a última palavra dele, antes de o
-    /// fio poder rodar (ver [`bifurcar`]) —, e já gravou o porquê.
+    /// fio poder rodar (ver [`bifurcar`] e [`criar_processo`]) —, e já
+    /// gravou o porquê.
     Recusado(&'static str),
     /// Não houve vaga, nem memória para a pilha, ou o escalonador está
     /// congelado depois de uma falha fatal.
@@ -1701,17 +1711,20 @@ impl From<NaoNasceu> for &'static str {
 /// já é contado, e quem conta depois o vê. A recusa devolve o que o titular
 /// ocupava nessa conta ([`NaoNasceu::Cota`]), para quem lança gravá-la.
 ///
-/// `nasceu` é chamada com o fio já certo de nascer e antes de ele poder
-/// rodar, fora de qualquer trava — o lugar de gravar o nascimento na
+/// `nasce` é a última palavra de quem lança, como a de [`bifurcar`]: é
+/// chamada com a vaga, a pilha e o resto prontos e antes de o fio poder
+/// rodar, fora de qualquer trava — o lugar de conferir de novo o que o
+/// gate decidiu e pode ter mudado no meio, e de gravar o nascimento na
 /// auditoria: o primeiro pedido do processo nunca chega antes do registro
-/// que diz quem o lançou.
+/// que diz quem o lançou. Recusado, o processo não nasce, e a vaga e a
+/// pilha voltam ([`NaoNasceu::Recusado`]).
 pub fn criar_processo(
     nome: &'static str,
     entrada: extern "C" fn(u64) -> !,
     argumento: u64,
     autoridade: crate::autorizacao::Autoridade,
     cota: usize,
-    nasceu: &dyn Fn(IdFio),
+    nasce: &dyn Fn(IdFio) -> Result<(), &'static str>,
 ) -> Result<IdFio, NaoNasceu> {
     nascer(
         nome,
@@ -1722,10 +1735,7 @@ pub fn criar_processo(
             fixo: None,
         },
         Some(cota),
-        &|id| {
-            nasceu(id);
-            Ok(())
-        },
+        nasce,
     )
 }
 
@@ -1785,13 +1795,13 @@ enum Nascimento {
 /// contado na cota do titular da autoridade que ele herda — ver
 /// [`criar_processo`].
 ///
-/// `nasce` é a última palavra de quem bifurca, como o `nasceu` de
+/// `nasce` é a última palavra de quem bifurca, como o `nasce` de
 /// [`criar_processo`] — com o fio pronto, antes de ele poder rodar, fora de
 /// qualquer trava —, e pode recusar: é onde a chamada confere de novo o
 /// que o gate decidiu antes de copiar o espaço e que pode ter mudado no
-/// meio — a contenção de quem bifurca —, e grava o nascimento, ou a
-/// recusa. Recusado, o filho não nasce: a vaga volta, e a pilha e o espaço
-/// são largados ([`NaoNasceu::Recusado`]).
+/// meio — a contenção, o editor e o papel de quem bifurca —, e grava o
+/// nascimento, ou a recusa. Recusado, o filho não nasce: a vaga volta, e a
+/// pilha e o espaço são largados ([`NaoNasceu::Recusado`]).
 ///
 /// # Safety
 ///
@@ -1816,7 +1826,7 @@ pub unsafe fn bifurcar(
 /// titular da autoridade dele ocupar menos que isso da tabela — os vivos,
 /// os que estão nascendo, os zumbis e os mortos ainda não recolhidos; ver
 /// [`criar_processo`]. `nasce` é a última palavra de quem cria, e pode
-/// recusar — ver [`bifurcar`].
+/// recusar — ver [`criar_processo`] e [`bifurcar`].
 fn nascer(
     nome: &'static str,
     nascimento: Nascimento,
@@ -1862,7 +1872,7 @@ fn nascer(
     //
     // Um fio do kernel não herda de ninguém — ele começa com a tabela
     // padrão, que é o que `criar` quer dizer.
-    let (vaga, herdada, pai, autoridade, fixo, programa) = com_escalonador(|e| {
+    let (vaga, herdada, pai, vaga_do_pai, autoridade, fixo, programa) = com_escalonador(|e| {
         // O parentesco sai da mesma seção crítica que a tabela de
         // descritores, e pelo mesmo motivo: as duas descrevem a relação com
         // quem está chamando, e lê-las em momentos diferentes seria lê-las
@@ -1875,17 +1885,24 @@ fn nascer(
         // criação. Um filho sem pai legível fica com a de sistema só se
         // nasceu de `criar`; de uma bifurcação, sem pai não há o que herdar,
         // e a de sessão nenhuma — a serial sem chave — é a menor que há.
-        let (herdada, pai, autoridade) = match nascimento {
+        let (herdada, pai, vaga_do_pai, autoridade) = match nascimento {
             Nascimento::Bifurcacao { .. } => match e.fio_atual() {
-                Some(pai) => (pai.descritores.clone(), Some(pai.id), pai.autoridade),
+                Some(pai) => (
+                    pai.descritores.clone(),
+                    Some(pai.id),
+                    e.atual_aqui(),
+                    pai.autoridade,
+                ),
                 None => (
                     Default::default(),
+                    None,
                     None,
                     crate::autorizacao::Autoridade::NENHUMA,
                 ),
             },
             Nascimento::Funcao { autoridade, .. } => (
                 crate::usuario::descritores::Tabela::nova(),
+                None,
                 None,
                 autoridade,
             ),
@@ -1923,6 +1940,7 @@ fn nascer(
             descritores: herdada.clone(),
             escalonamentos: 0,
             pai,
+            vaga_do_pai,
             saida: None,
             colhido: false,
             limpeza: Limpeza::Devida,
@@ -1936,7 +1954,7 @@ fn nascer(
             programa,
             terminar: false,
         });
-        Ok::<_, NaoNasceu>((vaga, herdada, pai, autoridade, fixo, programa))
+        Ok::<_, NaoNasceu>((vaga, herdada, pai, vaga_do_pai, autoridade, fixo, programa))
     })?;
 
     // Ponto de cessão só para testes: é exatamente aqui que a janela entre
@@ -2022,6 +2040,7 @@ fn nascer(
             descritores: herdada,
             escalonamentos: 0,
             pai,
+            vaga_do_pai,
             saida: None,
             colhido: false,
             limpeza: Limpeza::Devida,
@@ -2139,6 +2158,7 @@ pub fn preparar_ocioso(cpu: usize) -> Result<(usize, u64), &'static str> {
             descritores: crate::usuario::descritores::Tabela::nova(),
             escalonamentos: 0,
             pai: None,
+            vaga_do_pai: None,
             saida: None,
             colhido: false,
             limpeza: Limpeza::Devida,
@@ -2268,11 +2288,10 @@ impl Escalonador {
     /// # A pergunta pelo pai, só na recusa
     ///
     /// Separar os mortos dos zumbis pergunta a [`Self::e_zumbi`] por cada
-    /// terminado do titular — uma volta pela tabela por terminado —, e a
-    /// conta de todo `bifurcar` e de todo lançamento não paga isso: quem
-    /// cabe na cota faz a volta de sempre ("Sem perguntar pelo pai", acima).
-    /// Só a recusa, que não faz nascer nada, pergunta: no pior caso uma
-    /// volta por vaga da tabela.
+    /// terminado do titular — uma vaga por terminado, a do pai —, e a conta
+    /// de todo `bifurcar` e de todo lançamento não paga nem isso: quem cabe
+    /// na cota faz a volta de sempre ("Sem perguntar pelo pai", acima). A
+    /// recusa, que não faz nascer nada, faz uma volta só pela tabela.
     fn cota_cheia(
         &self,
         autoridade: crate::autorizacao::Autoridade,
@@ -2302,8 +2321,8 @@ impl Escalonador {
     /// A conta de [`Self::processos_de`] pela definição, categoria por
     /// categoria: os vivos e os que nascem; os zumbis, perguntando a
     /// [`Self::e_zumbi`] por cada terminado; e os mortos que não são zumbis,
-    /// até o coletor recolhê-los. Quadrática, e só da suíte — é a régua com
-    /// que ela confere a conta da cota.
+    /// até o coletor recolhê-los. Só da suíte — é a régua com que ela
+    /// confere a conta da cota.
     #[cfg(feature = "modo-teste")]
     fn ocupadas_por_categoria(&self, autoridade: crate::autorizacao::Autoridade) -> Categorias {
         let mut c = Categorias::default();
@@ -2386,6 +2405,16 @@ impl Escalonador {
     /// "Pai vivo" é: existe na tabela, com aquele id, e não terminou. O id
     /// entra na comparação porque a vaga é reaproveitada — sem ele, um fio
     /// novo que caísse na vaga do pai morto herdaria os zumbis dele.
+    ///
+    /// # Uma vaga só
+    ///
+    /// O pai vivo está na vaga em que bifurcou ([`Fio::vaga_do_pai`]): a
+    /// pergunta olha só ela. Procurava o pai pela tabela inteira, e quem
+    /// pergunta por cada terminado — a recusa da cota
+    /// ([`Self::cota_cheia`]), o recolhimento, a passada dos zumbis — fazia
+    /// uma volta pela tabela por terminado, com a trava do escalonador na
+    /// mão e as interrupções mascaradas: até 95 × 95 comparações, que um
+    /// processo no teto da cota provocava a cada `fork` recusado.
     fn e_zumbi(&self, i: usize) -> bool {
         let Some(fio) = self.fios[i].as_ref() else {
             return false;
@@ -2393,13 +2422,11 @@ impl Escalonador {
         if fio.estado != Estado::Terminado || fio.colhido {
             return false;
         }
-        let Some(pai) = fio.pai else {
+        let (Some(pai), Some(vaga)) = (fio.pai, fio.vaga_do_pai) else {
             return false;
         };
-        self.fios
-            .iter()
-            .flatten()
-            .any(|candidato| candidato.id == pai && candidato.estado != Estado::Terminado)
+        matches!(&self.fios[vaga], Some(candidato)
+            if candidato.id == pai && candidato.estado != Estado::Terminado)
     }
 
     /// A vaga `i` tem um morto que o recolhimento pode tirar da tabela: um

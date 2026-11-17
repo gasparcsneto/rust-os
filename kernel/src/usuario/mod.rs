@@ -1242,16 +1242,17 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
         }
     };
 
-    // A última palavra antes de o filho poder rodar: a contenção de quem
-    // bifurca, de novo — o gate a conferiu antes de copiar o espaço, e um
-    // `process.isolate` no meio deixaria nascer um filho livre de um
-    // processo isolado; contido, a recusa vai para a auditoria como a do
-    // gate, e o filho não nasce. Solto, o filho, na auditoria, em nome do
-    // pai — antes de ele poder rodar: o primeiro pedido do filho vem depois
-    // do registro que diz quem o criou.
+    // A última palavra antes de o filho poder rodar: as perguntas do gate
+    // sobre quem bifurca, de novo, menos a conta — o gate as fez antes de
+    // copiar o espaço, e um `process.isolate`, uma credencial suspensa ou
+    // a sessão que acaba no meio deixariam nascer um filho que o gate
+    // recusaria; recusado, a recusa vai para a auditoria como a do gate, e
+    // o filho não nasce. Passando, o filho, na auditoria, em nome do pai —
+    // antes de ele poder rodar: o primeiro pedido do filho vem depois do
+    // registro que diz quem o criou.
     let nasce = |id: crate::fios::IdFio| {
         crate::autorizacao::reconfirmar_bifurcacao(autoridade)
-            .map_err(|_| "quem bifurca foi contido antes de o filho nascer")?;
+            .map_err(|_| "o gate recusou quem bifurca antes de o filho nascer")?;
         crate::autorizacao::auditar_bifurcacao(id.numero());
         Ok(())
     };
@@ -1839,6 +1840,11 @@ pub enum NaoLancou {
     /// O fio não nasceu: a cota de processos do papel, ou as vagas do
     /// escalonador.
     Fio(&'static str),
+    /// O comando que pediu o lançamento, decidido de novo no nascimento,
+    /// foi recusado — quem pediu foi contido, saiu ou foi revogado no meio,
+    /// ou a política mudou: o código e o motivo, já gravados como a execução
+    /// do comando. Ver [`lancar_conferido`].
+    Recusado(politica::Codigo, &'static str),
 }
 
 impl NaoLancou {
@@ -1846,7 +1852,7 @@ impl NaoLancou {
     pub fn motivo(&self) -> &str {
         match self {
             NaoLancou::Codigo(r) => r.motivo(),
-            NaoLancou::Fio(m) => m,
+            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) => m,
         }
     }
 
@@ -1856,7 +1862,7 @@ impl NaoLancou {
         match self {
             NaoLancou::Codigo(codigo::Recusa::Leitura(e)) => e.motivo(),
             NaoLancou::Codigo(codigo::Recusa::Procedencia(f, _)) => f.motivo(),
-            NaoLancou::Fio(m) => m,
+            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) => m,
         }
     }
 }
@@ -1967,15 +1973,40 @@ pub fn lancar_conferido(
         },
     };
 
-    // Quem lançou o fio novo, na auditoria — é a proveniência dele —, antes
-    // de ele poder rodar; com quem selou, se o código veio de fora da
-    // imagem.
-    let nasceu = |id: crate::fios::IdFio| {
+    // A última palavra antes de o processo poder rodar: o comando que o
+    // pediu, decidido de novo — quem pediu, a sessão, a revogação, o papel,
+    // a política e a contenção de agora (`autorizacao::reconfirmar`). O gate
+    // decidiu antes de o código ser lido e de a pilha ser mapeada, e quem
+    // pediu pode ter sido contido no meio: o processo que pede pela
+    // interface nativa, isolado ou encerrado, lançaria um processo livre,
+    // com a autoridade dele. Recusado, nada nasce, e a recusa vai para a
+    // auditoria como a execução do comando. Fora de um comando — o
+    // servidor de janelas e o Terminal, no boot —, não há decisão a
+    // conferir de novo.
+    //
+    // Sem a ordem das gravações, que os commits tomam para decidir de novo:
+    // o nascimento não grava nada no journal, e a revogação ou a contenção
+    // que chega depois desta pergunta acha o processo já nascendo, como um
+    // de um instante antes — cada pedido dele passa pelo gate, com o que
+    // valer então.
+    //
+    // Passando, quem lançou o fio novo, na auditoria — é a proveniência
+    // dele —, antes de ele poder rodar; com quem selou, se o código veio de
+    // fora da imagem.
+    let recurso = caminho.unwrap_or("<exemplo embutido>");
+    let recusa = core::cell::Cell::new(None);
+    let nasce = |id: crate::fios::IdFio| {
+        if let Err((codigo, motivo)) = crate::autorizacao::reconfirmar_se_decidido() {
+            crate::autorizacao::auditar_execucao(recurso, codigo, motivo);
+            recusa.set(Some((codigo, motivo)));
+            return Err(motivo);
+        }
         crate::autorizacao::auditar_nascimento(
-            caminho.unwrap_or("<exemplo embutido>"),
+            recurso,
             id.numero(),
             selo.as_ref().map(|s| (s.nome.as_str(), &s.resumo)),
-        )
+        );
+        Ok(())
     };
     match crate::fios::criar_processo(
         crate::fios::NOME_DO_PROCESSO,
@@ -1983,7 +2014,7 @@ pub fn lancar_conferido(
         argumento,
         autoridade,
         cota,
-        &nasceu,
+        &nasce,
     ) {
         Ok(id) => Ok(id.numero()),
         Err(nao) => {
@@ -2000,7 +2031,14 @@ pub fn lancar_conferido(
                 // entregue a ninguém, porque `criar` falhou.
                 drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             }
-            Err(NaoLancou::Fio(nao.motivo()))
+            // A recusa da última palavra, já gravada: quem pediu ouve o
+            // código dela.
+            match (nao, recusa.get()) {
+                (crate::fios::NaoNasceu::Recusado(_), Some((codigo, motivo))) => {
+                    Err(NaoLancou::Recusado(codigo, motivo))
+                }
+                _ => Err(NaoLancou::Fio(nao.motivo())),
+            }
         }
     }
 }

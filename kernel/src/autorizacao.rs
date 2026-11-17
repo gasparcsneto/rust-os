@@ -3993,36 +3993,16 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 /// a resposta rápida, e a que vale é a do nascimento, feita junto com a
 /// reserva da vaga — ver [`crate::fios::criar_processo`]. Quando aquela
 /// recusa, quem lança chama [`recusar_pela_cota`], e a recusa vai para a
-/// auditoria do mesmo jeito. E a contenção de quem bifurca é conferida de
-/// novo no nascimento do filho — ver [`reconfirmar_bifurcacao`].
+/// auditoria do mesmo jeito. E o que pode mudar até o nascimento é
+/// conferido de novo nele, antes de o processo poder rodar: no `fork`, as
+/// perguntas daqui menos a conta ([`reconfirmar_bifurcacao`]); no
+/// `user.run`, o comando inteiro ([`reconfirmar_se_decidido`]).
+///
+/// Quem pede é o de [`quem_pede_um_processo`]: num `user.run` que um
+/// processo pede pela interface nativa, o processo do pedido, e não o
+/// executor que roda o comando.
 pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, Codigo> {
-    let quem = quem_do_processo(autoridade);
-    // Quem está contido não lança nem bifurca: o filho de um processo
-    // isolado nasceria livre.
-    let programa = recusar_se_contido(&quem, autoridade, metodo)?;
-    // O código de fora da imagem em cujo editor o papel não confia mais
-    // também não lança nem bifurca: o filho levaria o mesmo programa, e
-    // nasceria só para ser recusado em cada pedido.
-    if let Some(motivo) = editor_sem_confianca(&programa, quem.papel.as_deref()) {
-        auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &motivo);
-        return Err(Codigo::DenyPolicy);
-    }
-    let cota = quem
-        .papel
-        .as_deref()
-        .and_then(|papel| com_politica(|p| p.papel(papel).map(|r| r.processos)));
-    let Some(cota) = cota else {
-        auditar(
-            &quem,
-            metodo,
-            "",
-            Codigo::DenyRole,
-            &[],
-            "sem papel, nenhum processo",
-        );
-        return Err(Codigo::DenyRole);
-    };
-    let cota = cota as usize;
+    let (quem, cota) = perguntar_por_quem_pede(autoridade, metodo)?;
     if let Some(ocupacao) = crate::fios::cota_cheia(autoridade, cota) {
         let crate::fios::Ocupacao {
             ocupados,
@@ -4042,18 +4022,61 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, 
 /// O método de uma bifurcação, na decisão e na auditoria.
 const BIFURCACAO: &str = "process.fork";
 
-/// A contenção de quem pede um processo: a primeira pergunta de
-/// [`permitir_processo`], e a de [`reconfirmar_bifurcacao`], no nascimento.
-/// Quem pede é o fio de agora — o processo que bifurca, ou o comando que
-/// lança em nome de alguém —, com a autoridade dele. Contido, a recusa vai
-/// para a auditoria e volta o código; solto, volta o programa do fio, para
-/// a pergunta seguinte do gate.
-fn recusar_se_contido(
-    quem: &Quem,
-    autoridade: Autoridade,
-    metodo: &str,
-) -> Result<Programa, Codigo> {
-    let (fio, programa) = crate::fios::programa_atual();
+/// Quem pede um processo — o fio e o programa que fazem o pedido — e como
+/// a auditoria o grava: o titular da autoridade e, se quem pede é um
+/// processo, `pelo processo N (<programa>)`, como em todo pedido de um
+/// processo ([`pelo_processo`]).
+struct QuemPede {
+    quem: Quem,
+    fio: u64,
+    programa: Programa,
+}
+
+/// [`QuemPede`] um processo com `autoridade`, agora.
+///
+/// # Quem pede
+///
+/// Num `fork`, o fio de agora: o processo, dentro da chamada. Num
+/// `user.run` que um processo pede pela interface nativa, o comando roda
+/// no executor, e não no fio do processo (ver [`crate::nativo`]): quem
+/// pede é o processo do pedido ([`Pedinte::Processo`]), com o programa que
+/// o gate decidiu ([`programa_decidido`]) — o fio de agora é o do
+/// executor, que ninguém isola, e perguntar por ele deixava o processo
+/// isolado lançar. Pelo canal, pelo console, ou fora de um comando — o
+/// boot —, o fio de agora é um fio do kernel: o titular, sem processo.
+fn quem_pede_um_processo(autoridade: Autoridade) -> QuemPede {
+    let mut quem = quem_do_processo(autoridade);
+    let (fio, programa) = match pedinte() {
+        Some(Pedinte::Processo(fio)) => (
+            fio,
+            programa_decidido()
+                .or_else(|| crate::fios::processo(fio).map(|(_, p)| p))
+                .unwrap_or(Programa::SemImagem),
+        ),
+        _ => crate::fios::programa_atual(),
+    };
+    if programa != Programa::Kernel {
+        quem.processo = Some(pelo_processo(fio, &programa));
+    }
+    QuemPede {
+        quem,
+        fio,
+        programa,
+    }
+}
+
+/// As perguntas do gate sobre quem pede um processo, menos a conta da
+/// cota: a contenção, a confiança no editor e o papel, que diz a cota.
+/// Cada recusa vai para a auditoria com quem pede (ver [`QuemPede`]) e
+/// volta o código; passando, voltam quem pede e a cota.
+fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem, usize), Codigo> {
+    let QuemPede {
+        quem,
+        fio,
+        programa,
+    } = quem_pede_um_processo(autoridade);
+    // Quem está contido não lança nem bifurca: o filho de um processo
+    // isolado nasceria livre.
     if let Some((codigo, motivo)) = crate::contencao::recusa(
         Chamador::Processo {
             fio,
@@ -4062,32 +4085,83 @@ fn recusar_se_contido(
         },
         autoridade,
     ) {
-        auditar(quem, metodo, "", codigo, &[], motivo);
+        auditar(&quem, metodo, "", codigo, &[], motivo);
         return Err(codigo);
     }
-    Ok(programa)
+    // O código de fora da imagem em cujo editor o papel não confia mais
+    // também não lança nem bifurca: o filho levaria o mesmo programa, e
+    // nasceria só para ser recusado em cada pedido.
+    if let Some(motivo) = editor_sem_confianca(&programa, quem.papel.as_deref()) {
+        auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &motivo);
+        return Err(Codigo::DenyPolicy);
+    }
+    // Sem papel — a sessão de pessoa que acabou, a chave revogada —, nada
+    // nasce.
+    let cota = quem
+        .papel
+        .as_deref()
+        .and_then(|papel| com_politica(|p| p.papel(papel).map(|r| r.processos)));
+    let Some(cota) = cota else {
+        auditar(
+            &quem,
+            metodo,
+            "",
+            Codigo::DenyRole,
+            &[],
+            "sem papel, nenhum processo",
+        );
+        return Err(Codigo::DenyRole);
+    };
+    Ok((quem, cota as usize))
 }
 
-/// A contenção de quem bifurca, de novo, no nascimento do filho: a última
+/// As perguntas do gate sobre quem bifurca, de novo, no nascimento do
+/// filho — a contenção, a confiança no editor e o papel —: a última
 /// palavra da chamada antes de o filho poder rodar — ver
 /// [`crate::fios::bifurcar`].
 ///
 /// # Por que de novo
 ///
 /// O gate pergunta em [`permitir_processo`], antes de o espaço ser copiado
-/// e de a vaga ser reservada; um `process.isolate` — ou um
-/// `process.terminate`, que isola antes — no meio deixava nascer um filho
-/// livre de um processo que já estava isolado: o isolamento é do fio, e o
-/// filho nasce com outro. Aqui a mesma pergunta, sobre o mesmo fio e a
-/// mesma autoridade, com a mesma recusa — `DENY_CONTAINED` ou
-/// `DENY_CREDENTIAL`, gravada como a do gate —: quem está contido não
-/// bifurca. Nenhuma regra nova; a de sempre, conferida onde a janela acaba.
+/// e de a vaga ser reservada, e o que ele perguntou pode mudar no meio. Um
+/// `process.isolate` — ou um `process.terminate`, que isola antes —
+/// deixava nascer um filho livre de um processo que já estava isolado: o
+/// isolamento é do fio, e o filho nasce com outro. A credencial suspensa,
+/// a sessão de pessoa que acabou, a chave revogada, a confiança no editor
+/// retirada deixavam nascer um filho que o gate recusaria — sem papel, só
+/// ocupando a vaga, recusado em cada pedido. Aqui as mesmas perguntas,
+/// sobre o mesmo fio e a mesma autoridade, com as mesmas recusas, gravadas
+/// como as do gate: nenhuma regra nova; as de sempre, conferidas onde a
+/// janela acaba.
 ///
-/// Um isolamento depois desta pergunta acha o filho já na tabela,
-/// nascendo, como um filho nascido um instante antes dele: o isolamento é
+/// # Menos a conta
+///
+/// A cota não é contada aqui: a conta que vale é a do escalonador, na
+/// seção crítica que reservou a vaga do filho — com ele já contado —, e
+/// pela cota que o gate leu. Uma cota rebaixada no meio vale para o
+/// próximo pedido, como a de um processo que já existe.
+///
+/// Uma mudança depois destas perguntas acha o filho já na tabela,
+/// nascendo, como um filho nascido um instante antes dela: o isolamento é
 /// de um processo, e não da árvore.
 pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), Codigo> {
-    recusar_se_contido(&quem_do_processo(autoridade), autoridade, BIFURCACAO).map(|_| ())
+    perguntar_por_quem_pede(autoridade, BIFURCACAO).map(|_| ())
+}
+
+/// [`reconfirmar`] o comando que este fio executa, se o gate o decidiu: a
+/// última palavra de quem faz o que o comando pediu depois do handler —
+/// o nascimento do processo de um `user.run` (ver
+/// [`crate::usuario::lancar_conferido`]). Fora de um comando decidido — o
+/// boot, que lança o servidor de janelas e o Terminal; a suíte, que chama
+/// o handler direto —, não há decisão a conferir de novo, e passa.
+///
+/// Não grava nada, como [`reconfirmar`]: quem chama grava a recusa como a
+/// execução do comando.
+pub fn reconfirmar_se_decidido() -> Result<(), (Codigo, &'static str)> {
+    if do_comando_deste_fio(|c| c.decidido.is_some()) != Some(true) {
+        return Ok(());
+    }
+    reconfirmar()
 }
 
 /// O escalonador recusou o nascimento porque a cota encheu entre a
@@ -4105,7 +4179,7 @@ pub fn recusar_pela_cota(
     cota: usize,
 ) -> Codigo {
     recusar_pela_cota_com(
-        quem_do_processo(autoridade),
+        quem_pede_um_processo(autoridade).quem,
         metodo,
         cota,
         ocupacao.mortos_por_recolher.min(cota),
@@ -4114,22 +4188,18 @@ pub fn recusar_pela_cota(
 }
 
 /// A recusa da cota na auditoria, pela política, com a contagem (ver
-/// [`detalhe_da_cota`]). A de uma bifurcação diz também o processo que
-/// bifurcou — o fio e o programa, como o registro da bifurcação permitida
-/// ([`auditar_bifurcacao`]): quem pede é o fio de agora, o do processo,
-/// dentro da chamada. O titular é o mesmo de antes; o processo vai no
-/// detalhe, como em todo pedido de um processo.
+/// [`detalhe_da_cota`]). `quem` é o de [`quem_pede_um_processo`]: a de um
+/// processo — o que bifurca, ou o que pede o `user.run` pela interface
+/// nativa — diz também o processo, o fio e o programa, como o registro da
+/// bifurcação permitida ([`auditar_bifurcacao`]). O titular é o mesmo de
+/// antes; o processo vai no detalhe, como em todo pedido de um processo.
 fn recusar_pela_cota_com(
-    mut quem: Quem,
+    quem: Quem,
     metodo: &str,
     ocupados: usize,
     mortos_por_recolher: usize,
     cota: usize,
 ) -> Codigo {
-    if metodo == BIFURCACAO {
-        let (id, programa) = crate::fios::programa_atual();
-        quem.processo = Some(pelo_processo(id, &programa));
-    }
     auditar(
         &quem,
         metodo,

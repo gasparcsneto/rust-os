@@ -1287,9 +1287,11 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
 /// a cota: a recusa leva a mesma descrição de quem pediu, antes do texto da
 /// cota, abreviada só se o detalhe passar do teto, pela regra de todo
 /// registro (`politica::auditoria::detalhe_composto`). A recusa do
-/// `process.run` do mesmo titular, que não é pedida por processo nenhum,
-/// segue sem ela. Antes, a recusa do `fork` ia só com o titular: o NSF não a
-/// ligava ao processo que bifurcou.
+/// `process.run` do mesmo titular pedido pelo kernel — como pelo canal ou
+/// pelo console, sem processo que peça — segue sem ela; a do `user.run`
+/// que um processo pede pela interface nativa a leva (`zumbis: a recusa do
+/// user.run nativo diz o processo que pediu`). Antes, a recusa do `fork`
+/// ia só com o titular: o NSF não a ligava ao processo que bifurcou.
 pub(super) fn zumbis_a_recusa_do_fork_diz_o_processo_que_bifurcou() -> Resultado {
     if crate::fios::colheita().1 != 0 {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
@@ -1356,6 +1358,181 @@ pub(super) fn zumbis_a_recusa_do_fork_diz_o_processo_que_bifurcou() -> Resultado
     })();
     limpar(fio);
     resultado
+}
+
+/// O achado 3 do adversário da soma das cotas: a recusa da cota de um
+/// `user.run` que um processo pede pela interface nativa diz o processo,
+/// como a do `fork`. O comando roda no executor, e não no fio do processo:
+/// quem pede é o processo do pedido, com o programa que o gate decidiu
+/// (`autorizacao::quem_pede_um_processo`), e não o fio de agora. Com a
+/// cota em 1, o colhedor a ocupa sozinho, e o `user.run` que ele pede pela
+/// interface nativa — com um programa que declara `process.run` — ouve a
+/// cota: nada é lançado, e o `process.run` recusado leva `pelo processo
+/// <colhedor> (<programa>)` antes da conta. O mesmo pedido pelo kernel
+/// segue sem processo.
+pub(super) fn zumbis_a_recusa_do_user_run_nativo_diz_o_processo_que_pediu() -> Resultado {
+    use crate::autorizacao::{Chamador, Programa};
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    politica_com_a_cota(1)?;
+    let titular = operador(0, "pessoa-do-run-nativo");
+    let mut fio = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        let programa = Programa::Imagem {
+            manifesto: Some(super::manifesto_de_teste(
+                "pedinte",
+                "process.run system.read",
+            )),
+            resumo: [0xab; 32],
+            editor: None,
+        };
+        let pelo = alloc::format!("pelo processo {} ({})", c.fio, programa.descricao());
+        let pede = Chamador::Processo {
+            fio: c.fio,
+            autoridade: titular,
+            programa,
+        };
+        let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        let r = fs_pedir(pede, "user.run", &alloc::format!(r#"{{"path":"{ola}"}}"#));
+        if fs_numero(&r, "thread_id").is_some() || !r.contains(r#""launched":false"#) {
+            crate::log_error!("teste", "{}", r);
+            return Err("o user.run nativo alem da cota lancou");
+        }
+        let texto = "cota de processos do papel: 1 de 1";
+        let esperada = politica::auditoria::detalhe_composto(Some(&pelo), texto, "");
+        let recusa = ultimo_com_metodo("process.run").ok_or("a recusa nao foi gravada")?;
+        crate::log_info!(
+            "teste",
+            "zumbis: a recusa do user.run nativo gravou {:?}",
+            recusa.detalhe
+        );
+        if recusa.codigo != politica::Codigo::DenyPolicy || recusa.detalhe != esperada {
+            crate::log_error!("teste", "esperada {:?}", esperada);
+            return Err("a recusa da cota do user.run nativo nao diz o processo que pediu");
+        }
+        if crate::usuario::lancar_como(Some(&ola), titular) != Err(crate::fios::COTA_ESGOTADA) {
+            return Err("o lancamento pelo kernel no teto da cota nao ouviu a cota");
+        }
+        let pelo_kernel =
+            ultimo_com_metodo("process.run").ok_or("a recusa pelo kernel nao foi gravada")?;
+        if pelo_kernel.detalhe != texto {
+            crate::log_error!("teste", "{:?}", pelo_kernel.detalhe);
+            return Err("a recusa do process.run pelo kernel ganhou um processo que nao pediu");
+        }
+        Ok(())
+    })();
+    limpar(fio);
+    resultado
+}
+
+/// Os fios do kernel que enchem a tabela em
+/// [`zumbis_o_orfao_nao_e_zumbi_de_quem_toma_a_vaga_do_pai`]: cedem até o
+/// caso soltá-los.
+static SOLTAR_AS_VAGAS: AtomicBool = AtomicBool::new(false);
+/// Quantos deles ainda não saíram.
+static NAS_VAGAS: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn na_vaga(_argumento: u64) -> ! {
+    while !SOLTAR_AS_VAGAS.load(SeqCst) {
+        crate::fios::ceder();
+    }
+    NAS_VAGAS.fetch_sub(1, SeqCst);
+    crate::fios::terminar()
+}
+
+/// O achado 8 do adversário da soma das cotas, e a pergunta pelo id que ele
+/// manteve: o zumbi é do pai vivo na vaga em que ele bifurcou
+/// (`Fio::vaga_do_pai`), e a vaga passa a outro fio depois do recolhimento
+/// do pai. Com o coletor segurado, o colhedor bifurca um filho — zumbi — e
+/// é encerrado: o filho fica órfão, e deixa de ser zumbi. Um recolhimento
+/// só, a partir da vaga do pai, tira o pai; o órfão fica. Os fios do kernel
+/// que enchem a tabela tomam todas as vagas — a do pai inclusive. O órfão
+/// segue não sendo zumbi — o fio na vaga do pai tem outro id —, e o
+/// recolhimento seguinte, a partir da vaga dele, o tira. Sem a pergunta
+/// pelo id, ele virava zumbi do fio novo: guardava a vaga enquanto aquele
+/// vivesse, e nenhum pai o colheria.
+pub(super) fn zumbis_o_orfao_nao_e_zumbi_de_quem_toma_a_vaga_do_pai() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    let titular = operador(0, "pessoa-do-orfao");
+    SOLTAR_AS_VAGAS.store(false, SeqCst);
+    NAS_VAGAS.store(0, SeqCst);
+    let mut fio = None;
+    let mut segurado = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        let Bifurcou::Filho(orfao) = c.bifurcar()? else {
+            return Err("o filho do colhedor nao nasceu");
+        };
+        if !crate::fios::zumbi_de_teste(orfao) {
+            return Err("o filho que saiu nao ficou zumbi");
+        }
+        let vaga_do_pai = crate::fios::retrato_de_teste(c.fio)
+            .ok_or("o colhedor nao esta na tabela")?
+            .vaga;
+        c.encerrar()?;
+        esperar_ate(
+            || crate::fios::retrato_de_teste(c.fio).is_some_and(|r| r.parado),
+            600,
+        )
+        .map_err(|_| "o colhedor encerrado nao largou o nucleo")?;
+        if crate::fios::zumbi_de_teste(orfao) {
+            return Err("o filho do pai morto seguiu zumbi");
+        }
+        // Só o pai sai: um recolhimento, a partir da vaga dele.
+        crate::fios::por_o_cursor_de_teste(vaga_do_pai);
+        if crate::fios::recolher_um_de_teste() != Some((vaga_do_pai, c.fio)) {
+            return Err("o recolhimento nao tirou o pai da vaga dele");
+        }
+        if !crate::fios::na_tabela_de_teste(orfao) {
+            return Err("o orfao saiu da tabela junto com o pai");
+        }
+        // A tabela cheia de fios do kernel: a vaga do pai, com outro fio.
+        for _ in 0..crate::fios::MAX_FIOS {
+            if crate::fios::criar("teste-vaga-do-pai", na_vaga, 0).is_err() {
+                break;
+            }
+            NAS_VAGAS.fetch_add(1, SeqCst);
+        }
+        if crate::fios::vagas_livres_de_teste() != 0 {
+            return Err("a tabela nao encheu");
+        }
+        let zumbi = crate::fios::zumbi_de_teste(orfao);
+        crate::log_info!(
+            "teste",
+            "zumbis: a vaga {} do pai {} tomada por um de {} fios; o orfao {} e zumbi? {}",
+            vaga_do_pai,
+            c.fio,
+            NAS_VAGAS.load(SeqCst),
+            orfao,
+            zumbi
+        );
+        if zumbi {
+            return Err("o orfao virou zumbi de quem tomou a vaga do pai");
+        }
+        let vaga_do_orfao = crate::fios::retrato_de_teste(orfao)
+            .ok_or("o orfao sumiu da tabela")?
+            .vaga;
+        crate::fios::por_o_cursor_de_teste(vaga_do_orfao);
+        if crate::fios::recolher_um_de_teste().map(|(_, id)| id) != Some(orfao) {
+            return Err("o orfao nao foi recolhido com a vaga do pai tomada");
+        }
+        Ok(())
+    })();
+    SOLTAR_AS_VAGAS.store(true, SeqCst);
+    let sairam = esperar_ate(|| NAS_VAGAS.load(SeqCst) == 0, 600)
+        .map_err(|_| "os fios que enchiam a tabela nao sairam");
+    drop(segurado);
+    limpar(fio);
+    resultado?;
+    sairam
 }
 
 /// O achado A1-4: a recusa da cota diz quantos dos que ela conta são mortos
@@ -1449,7 +1626,7 @@ pub(super) fn zumbis_a_recusa_diz_os_mortos_por_recolher() -> Resultado {
         {
             return Err("a conta do gate nao disse os mortos por recolher");
         }
-        match crate::fios::criar_processo("usuario", fio_curto, 0, titular, 3, &|_| {}) {
+        match crate::fios::criar_processo("usuario", fio_curto, 0, titular, 3, &|_| Ok(())) {
             Err(crate::fios::NaoNasceu::Cota(o)) if o == esperada => {
                 // E a recusa que quem lança grava com ela: `M de M`, como
                 // sempre na do nascimento, e os mortos dela.
