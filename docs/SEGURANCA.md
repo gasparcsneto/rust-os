@@ -349,7 +349,7 @@ dois deixam, ou não passa.
   gravado.
 
 Na tabela da pilha, ao lado dos fluxos que controlam; as regras não vão ao
-journal (ver [limitações](#limitacoes-deliberadas)).
+journal (ver [limitações](#limitações-deliberadas)).
 
 ## O DNS (9.4)
 
@@ -445,7 +445,7 @@ mentiria.
 
 O NSF vê do TLS o que vê de qualquer conexão: as decisões do gate — a
 conexão, cada envio e cada leitura, com o destino —, e nada de dentro
-(ver [limitações](#limitacoes-deliberadas)).
+(ver [limitações](#limitações-deliberadas)).
 
 A bancada é o **OpenSSL**, pelo módulo `ssl` do Python do hospedeiro —
 outra implementação inteira do protocolo —, que o emulador roda a cada
@@ -763,9 +763,14 @@ contido pelo despertador.
 - **As regras do firewall não vão ao journal.** Uma contenção é medida de
   incidente; depois de um boot, o gate continua decidindo tudo, e o NSF
   vê o incidente de novo, sem repetir a contenção sozinho.
-- **Contenção só de rede.** Isolar um processo inteiro, encerrar um agente
-  e revogar uma credencial são recomendações: comandos para isso dariam ao
-  NSF uma autoridade que hoje só a prova de um administrador tem.
+- **Contenção só de rede e de processo.** O NSF bloqueia um destino e, com
+  a confiança alta, isola o processo dono do fluxo (`process.isolate`, que
+  o papel `seguranca` tem sobre `observador` e `operador` na política
+  padrão — ver [`USABILIDADE.md`](USABILIDADE.md#a-contenção-reversível)).
+  Suspender um agente ou uma credencial, encerrar um agente e revogar uma
+  credencial são recomendações: o papel não tem `agent.suspend` nem
+  `credential.suspend`, e comandos definitivos dariam ao NSF uma
+  autoridade que hoje só a prova de um administrador tem.
 - **Captura só de UDP**, e só de destinos que um papel tem em
   `net.observe`.
 - **Lê a cada segundo, no máximo.** A latência entre o evento e a

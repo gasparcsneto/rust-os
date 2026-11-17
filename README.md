@@ -5050,6 +5050,12 @@ Sem ganho a medir, não há o que pagar com esse risco.
 
 #### Decisões pendentes
 
+O dossiê de todas as decisões abertas — o id de cada uma, o que ela
+destrava, a exposição de hoje, a ordem recomendada e as propostas no
+formato da seção 5.3 do [`CLAUDE.md`](CLAUDE.md) — está em
+[`docs/DECISOES.md`](docs/DECISOES.md). A lista abaixo fica como o
+registro de cada uma no ponto em que nasceu.
+
 - **A expansão temporária de alcance** (seção 12): hoje o alcance é do
   papel, e o que muda o papel é `policy.write` e `policy.assign`, com
   prova, até a próxima mudança. Uma expansão **temporária, por
@@ -12465,6 +12471,9 @@ padronizado.
 
 ## Roteiro
 
+Os incrementos que pedem uma decisão estão reunidos, com a ordem
+recomendada, em [`docs/DECISOES.md`](docs/DECISOES.md).
+
 - [x] **Fase 0 — Base.** Boot bare-metal em x86_64 e aarch64, serial,
       logging estruturado, canal do agente, abstração de arquitetura.
 - [x] **Fase 0 — Exceções e interrupções.** GDT/TSS/IDT e vetores EL1,
@@ -12797,6 +12806,9 @@ padronizado.
       restauração](#a-cópia-de-segurança-e-a-restauração). O Secure Boot
       ficou de fora; o watchdog, de propósito: o pânico deixa a máquina
       parada e inspecionável (ver [`docs/OPERACAO.md`](docs/OPERACAO.md)).
+      Do que a fase lista, falta o instalador: hoje a máquina recebe, gravada
+      no disco por fora, a imagem que `cargo xtask provisionar` monta (ver
+      [A imagem](docs/OPERACAO.md#a-imagem)).
 - [ ] **Fase 15 — O ecossistema Duke.** Aplicativos, computadores,
       telefones, relógios, periféricos e serviços cooperando como partes de
       um ambiente só, pela malha — descoberta, mensagens, capacidades,
