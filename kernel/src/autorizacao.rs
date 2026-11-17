@@ -48,6 +48,7 @@
 //! `operador` ou `observador` é recusado; um de papel `sistema` continua o
 //! que era — ninguém ganha nem perde papel na emergência.
 
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -295,6 +296,17 @@ pub fn confianca_no_editor(
 /// dele. `None` para o código da imagem: a imagem não tem editor a
 /// perguntar.
 fn editor_sem_confianca(programa: &Programa, papel: Option<&str>) -> Option<String> {
+    sem_confianca_no_editor(programa, papel).map(|(_, motivo)| motivo)
+}
+
+/// [`editor_sem_confianca`], com a falta: a mesma pergunta, para quem só
+/// guarda o motivo sem o nome do editor — o [`politica::procedencia::Falta::motivo`]
+/// —, como a reconfirmação ([`reconfirmar`]) e a resposta a quem pede outro
+/// processo ([`permitir_processo`]).
+fn sem_confianca_no_editor(
+    programa: &Programa,
+    papel: Option<&str>,
+) -> Option<(politica::procedencia::Falta, String)> {
     let Programa::Imagem {
         editor: Some(chave),
         ..
@@ -302,9 +314,7 @@ fn editor_sem_confianca(programa: &Programa, papel: Option<&str>) -> Option<Stri
     else {
         return None;
     };
-    confianca_no_editor(papel, chave)
-        .err()
-        .map(|(_, motivo)| motivo)
+    confianca_no_editor(papel, chave).err()
 }
 
 /// Com que autoridade algo roda.
@@ -708,6 +718,15 @@ pub fn como_comando_de_teste<R>(autoridade: Autoridade, f: impl FnOnce() -> R) -
 #[cfg(feature = "modo-teste")]
 pub fn como_canal_de_teste<R>(canal: u8, autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
     como_comando(autoridade, Pedinte::Canal(canal), None, None, f)
+}
+
+/// Só para a suíte: roda `f` como o comando de `autoridade` pedido pelo
+/// processo `fio` pela interface nativa, sem a decisão do gate — o pedido
+/// de um processo cujo programa não se sabe, que quem pergunta por quem
+/// pede outro processo recusa (ver [`quem_pede_um_processo`]).
+#[cfg(feature = "modo-teste")]
+pub fn como_processo_de_teste<R>(fio: u64, autoridade: Autoridade, f: impl FnOnce() -> R) -> R {
+    como_comando(autoridade, Pedinte::Processo(fio), None, None, f)
 }
 
 /// Quem está numa decisão, como a auditoria o grava.
@@ -2112,7 +2131,19 @@ pub fn alvo_decidido(texto: &str) -> bool {
 ///
 /// A contenção também: quem foi contido entre a decisão e o commit — o
 /// processo isolado, o agente suspenso, a credencial suspensa — não
-/// conclui. É a mesma pergunta do gate, sobre quem pediu.
+/// conclui. É a mesma pergunta do gate, sobre quem pediu. E o processo que
+/// pediu, se foi um, ainda pede: o que acabou, ou tem o fim pedido, é
+/// recusado como o isolado (`DENY_CONTAINED`, "processo isolado" — ver
+/// `contencao::PROCESSO_ISOLADO`). O `process.terminate` isola antes de
+/// pedir o fim, mas o isolamento de quem morreu sai na poda, e o teto de
+/// isolados pode nem tê-lo deixado entrar: sem esta pergunta, o pedido em
+/// curso de quem já foi encerrado concluía (ver `fios::encerrado`).
+///
+/// E a confiança no editor do código de fora da imagem, que o gate
+/// pergunta por último, depois de o papel permitir: o papel de agora ainda
+/// confia em quem selou o programa de quem pede? A recusa leva o motivo da
+/// falta (`politica::procedencia::Falta::motivo`) — sem o nome do editor,
+/// que a descrição do programa já diz no registro da execução.
 ///
 /// Não grava nada: a recusa é o resultado da execução do comando que o
 /// gate autorizou, e quem chama a grava assim.
@@ -2132,7 +2163,7 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         })
         .flatten()
     else {
-        return Err((Codigo::Error, "fora de um comando autorizado"));
+        return Err(FORA_DE_UM_COMANDO);
     };
     let Some(permissao) = permissao else {
         return Ok(());
@@ -2162,10 +2193,7 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         },
     };
     if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
-        return Err((
-            Codigo::DenyNotAuthenticated,
-            "journal recusado: as revogacoes nao se sabem",
-        ));
+        return Err(REVOGACOES_DESCONHECIDAS);
     }
     if programa.is_some_and(|p| !p.permite(permissao)) {
         return Err((
@@ -2177,6 +2205,11 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         Pedinte::Processo(fio) => Some(fio),
         _ => None,
     };
+    // Quem pediu, se é um processo, ainda pede: vivo, e sem o fim pedido —
+    // o encerrado é o isolado que vai acabar.
+    if processo.is_some_and(crate::fios::encerrado) {
+        return Err(crate::contencao::PROCESSO_ISOLADO);
+    }
     if let Some(recusa) = crate::contencao::recusa_de(processo, autoridade) {
         return Err(recusa);
     }
@@ -2201,6 +2234,13 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         if !c.permite() {
             return Err((c, d));
         }
+    }
+    // O código de fora da imagem: o papel de agora ainda confia no editor
+    // que o selou — a última condição do gate, depois de o papel permitir.
+    if let Some((falta, _)) =
+        programa.and_then(|p| sem_confianca_no_editor(&p, quem.papel.as_deref()))
+    {
+        return Err((Codigo::DenyPolicy, falta.motivo()));
     }
     // O dispositivo de um pedido a outro dispositivo: `fabric.remote` de
     // novo, e o mesmo dispositivo e a mesma relação no espaço da pessoa —
@@ -2257,6 +2297,33 @@ pub fn antes_da_reconfirmacao_de_teste(f: Option<fn()>) {
 #[cfg(feature = "modo-teste")]
 pub fn gancho_da_reconfirmacao() {
     if let Some(f) = crate::arch::sem_interrupcoes(|| *ANTES_DA_RECONFIRMACAO.lock()) {
+        f();
+    }
+}
+
+/// Só para a suíte: o que roda no lançamento de um processo pelo
+/// `user.run`, antes das perguntas do gate sobre quem pede
+/// ([`permitir_processo`]) — entre o gate do comando e elas. É a janela em
+/// que a contenção, a saída da pessoa, a confiança no editor tirada, o
+/// journal recusado ou o fim pedido de quem pede chegam depois de o gate
+/// decidir o comando; o caso `contencao: a recusa do user.run no gate diz o
+/// codigo` a abre, uma de cada vez. Uma vez: quem passa a toma.
+#[cfg(feature = "modo-teste")]
+static ANTES_DO_GATE_DO_LANCAMENTO: Mutex<Option<fn()>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda antes das perguntas do gate
+/// sobre quem pede, no próximo lançamento pelo `user.run`.
+#[cfg(feature = "modo-teste")]
+pub fn antes_do_gate_do_lancamento_de_teste(f: Option<fn()>) {
+    crate::arch::sem_interrupcoes(|| *ANTES_DO_GATE_DO_LANCAMENTO.lock() = f);
+}
+
+/// Só para a suíte: roda, uma vez, o que
+/// [`antes_do_gate_do_lancamento_de_teste`] pôs — chamada pelo lançamento,
+/// logo antes de [`permitir_processo`].
+#[cfg(feature = "modo-teste")]
+pub fn gancho_do_gate_do_lancamento() {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| ANTES_DO_GATE_DO_LANCAMENTO.lock().take()) {
         f();
     }
 }
@@ -3392,7 +3459,12 @@ pub fn encher_a_taxa_do_servico_de_teste() {
 /// enumera, e não um passe livre. O de um agente decide pelo papel do
 /// agente, procurado agora.
 pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> Codigo {
-    autorizar_processo_com_decisao(permissao, recurso, metodo).codigo()
+    // A mesma conta e o mesmo registro de [`autorizar_processo_com_decisao`],
+    // sem guardar a decisão: quem só quer o código não paga a cópia do
+    // recurso que a decisão de novo pede.
+    let (quem, codigo, detalhe) = conta_da_chamada(permissao, recurso);
+    auditar(&quem, metodo, recurso, codigo, &[], &detalhe);
+    codigo
 }
 
 /// A decisão do gate sobre uma chamada de sistema de um processo, guardada
@@ -3402,10 +3474,15 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
 /// vai em nome dele, como a de um comando ([`auditar_execucao`]): a sessão
 /// que acaba entre a decisão e a gravação, ou o programa que o processo
 /// adotou depois do ponto sem volta do `executar`, não mudam quem agiu.
+///
+/// E a permissão e o recurso decididos, para a decisão ser feita de novo
+/// sobre eles, e não sobre outros — ver [`DecisaoDoProcesso::reconfirmar`].
 pub struct DecisaoDoProcesso {
     codigo: Codigo,
     numero: u64,
     quem: Quem,
+    permissao: Permissao,
+    recurso: String,
 }
 
 impl DecisaoDoProcesso {
@@ -3419,6 +3496,31 @@ impl DecisaoDoProcesso {
     #[cfg(feature = "modo-teste")]
     pub fn numero(&self) -> u64 {
         self.numero
+    }
+
+    /// Decide de novo, agora, a chamada que o gate decidiu: a mesma conta
+    /// ([`conta_da_chamada`]), sobre a mesma permissão e o mesmo recurso,
+    /// com a autoridade e o programa do fio, o registro, a política, a
+    /// contenção e a confiança no editor **de agora**. É o [`reconfirmar`]
+    /// de uma chamada de sistema: ela não é um comando, e a decisão dela não
+    /// mora na vaga do fio, mas aqui — o `reconfirmar` não a vê.
+    ///
+    /// É a última palavra do `executar` no ponto sem volta: o gate decide
+    /// antes de o arquivo ser lido, e a leitura, a conferência do código e a
+    /// preparação da imagem levam o tempo do arquivo — uma revogação, uma
+    /// política nova ou uma contenção que chegue no meio não trocava a
+    /// imagem por isso (o F4 do adversário do AE-1). As recusas são as do
+    /// gate, com os mesmos códigos e motivos.
+    ///
+    /// Não grava nada: a recusa é o resultado da execução da decisão, e
+    /// quem chama a grava assim ([`auditar_execucao_do_processo`]).
+    pub fn reconfirmar(&self) -> Result<(), (Codigo, Cow<'static, str>)> {
+        let (_, codigo, detalhe) = conta_da_chamada(self.permissao, &self.recurso);
+        if codigo.permite() {
+            Ok(())
+        } else {
+            Err((codigo, detalhe))
+        }
     }
 }
 
@@ -3440,14 +3542,31 @@ fn quem_da_chamada() -> (Quem, u64, Programa) {
 
 /// [`autorizar_processo`], com a decisão inteira — o número do registro e
 /// quem o gate decidiu —, para quem grava depois o que a execução fez dela,
-/// como `executar` com o código que não confere.
+/// como `executar` com o código que não confere, e para quem a decide de
+/// novo antes de concluir ([`DecisaoDoProcesso::reconfirmar`]).
 pub fn autorizar_processo_com_decisao(
     permissao: Permissao,
     recurso: &str,
     metodo: &str,
 ) -> DecisaoDoProcesso {
+    let (quem, codigo, detalhe) = conta_da_chamada(permissao, recurso);
+    let numero = auditar(&quem, metodo, recurso, codigo, &[], &detalhe);
+    DecisaoDoProcesso {
+        codigo,
+        numero,
+        quem,
+        permissao,
+        recurso: recurso.to_string(),
+    }
+}
+
+/// A conta do gate sobre uma chamada de sistema do fio atual: quem pede —
+/// ver [`quem_da_chamada`] —, o código e o detalhe, sem gravar nada. Uma
+/// só, para a decisão ([`autorizar_processo_com_decisao`]) e para a decisão
+/// de novo ([`DecisaoDoProcesso::reconfirmar`]): as mesmas perguntas, na
+/// mesma ordem, com as mesmas recusas.
+fn conta_da_chamada(permissao: Permissao, recurso: &str) -> (Quem, Codigo, Cow<'static, str>) {
     let (quem, id, programa) = quem_da_chamada();
-    let nao_declarada;
     let autoridade = crate::fios::autoridade_atual();
     // O processo isolado, o agente suspenso, a credencial suspensa: as
     // chamadas de sistema também — abrir, executar, o terminal.
@@ -3459,35 +3578,35 @@ pub fn autorizar_processo_com_decisao(
         },
         autoridade,
     );
-    let (codigo, detalhe) = match crate::persistencia::revogacoes_desconhecidas() {
-        Some(_) if credenciada(autoridade) => (
-            Codigo::DenyNotAuthenticated,
-            "journal recusado: as revogacoes nao se sabem",
-        ),
-        _ if contida.is_some() => contida.unwrap_or((Codigo::DenyContained, "")),
-        _ if !programa.permite(permissao) => {
-            nao_declarada = alloc::format!("o manifesto nao declara {}", permissao.nome());
-            (Codigo::DenyPermission, nao_declarada.as_str())
-        }
-        _ if papel_de_teto(&quem) => TETO_NAO_SE_EXERCE,
-        _ => decidir(quem.papel.as_deref(), permissao, recurso),
-    };
+    let (codigo, detalhe): (Codigo, Cow<'static, str>) =
+        match crate::persistencia::revogacoes_desconhecidas() {
+            Some(_) if credenciada(autoridade) => (
+                REVOGACOES_DESCONHECIDAS.0,
+                Cow::Borrowed(REVOGACOES_DESCONHECIDAS.1),
+            ),
+            _ if let Some((codigo, motivo)) = contida => (codigo, Cow::Borrowed(motivo)),
+            _ if !programa.permite(permissao) => (
+                Codigo::DenyPermission,
+                Cow::Owned(alloc::format!(
+                    "o manifesto nao declara {}",
+                    permissao.nome()
+                )),
+            ),
+            _ if papel_de_teto(&quem) => {
+                (TETO_NAO_SE_EXERCE.0, Cow::Borrowed(TETO_NAO_SE_EXERCE.1))
+            }
+            _ => {
+                let (codigo, detalhe) = decidir(quem.papel.as_deref(), permissao, recurso);
+                (codigo, Cow::Borrowed(detalhe))
+            }
+        };
     // A confiança no editor do código de fora da imagem: a última
     // condição, como no pedido de um comando.
-    let sem_confianca;
     let (codigo, detalhe) = match editor_sem_confianca(&programa, quem.papel.as_deref()) {
-        Some(motivo) if codigo.permite() => {
-            sem_confianca = motivo;
-            (Codigo::DenyPolicy, sem_confianca.as_str())
-        }
+        Some(motivo) if codigo.permite() => (Codigo::DenyPolicy, Cow::Owned(motivo)),
         _ => (codigo, detalhe),
     };
-    let numero = auditar(&quem, metodo, recurso, codigo, &[], detalhe);
-    DecisaoDoProcesso {
-        codigo,
-        numero,
-        quem,
-    }
+    (quem, codigo, detalhe)
 }
 
 /// Só na suíte: uma decisão de número `numero` sobre uma chamada do fio
@@ -3499,6 +3618,8 @@ pub fn decisao_do_processo_de_teste(numero: u64) -> DecisaoDoProcesso {
         codigo: Codigo::Allow,
         numero,
         quem: quem_da_chamada().0,
+        permissao: Permissao::ProcessRun,
+        recurso: String::new(),
     }
 }
 
@@ -3996,31 +4117,47 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 /// auditoria do mesmo jeito. E o que pode mudar até o nascimento é
 /// conferido de novo nele, antes de o processo poder rodar: no `fork`, as
 /// perguntas daqui menos a conta ([`reconfirmar_bifurcacao`]); no
-/// `user.run`, o comando inteiro ([`reconfirmar_se_decidido`]).
+/// `user.run`, o comando inteiro ([`reconfirmar_o_lancamento`]).
 ///
 /// Quem pede é o de [`quem_pede_um_processo`]: num `user.run` que um
 /// processo pede pela interface nativa, o processo do pedido, e não o
 /// executor que roda o comando.
-pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, Codigo> {
+///
+/// A recusa devolve o código e o motivo, como quem pediu os ouve: o da
+/// auditoria, menos o que é só deste caso — o nome do editor, a contagem
+/// da cota ([`crate::fios::COTA_ESGOTADA`]) —, que a auditoria guarda.
+pub fn permitir_processo(
+    autoridade: Autoridade,
+    metodo: &str,
+) -> Result<usize, (Codigo, &'static str)> {
     let (quem, cota) = perguntar_por_quem_pede(autoridade, metodo)?;
     if let Some(ocupacao) = crate::fios::cota_cheia(autoridade, cota) {
         let crate::fios::Ocupacao {
             ocupados,
             mortos_por_recolher,
         } = ocupacao;
-        return Err(recusar_pela_cota_com(
-            quem,
-            metodo,
-            ocupados,
-            mortos_por_recolher,
-            cota,
-        ));
+        let codigo = recusar_pela_cota_com(quem, metodo, ocupados, mortos_por_recolher, cota);
+        return Err((codigo, crate::fios::COTA_ESGOTADA));
     }
     Ok(cota)
 }
 
 /// O método de uma bifurcação, na decisão e na auditoria.
 const BIFURCACAO: &str = "process.fork";
+
+/// A recusa de quem pede sem decisão — o comando que não foi decidido pelo
+/// gate, o pedido nativo sem o programa que o gate decidiu —: a mesma de
+/// [`reconfirmar`] fora de um comando autorizado.
+const FORA_DE_UM_COMANDO: (Codigo, &str) = (Codigo::Error, "fora de um comando autorizado");
+
+/// A recusa de quem tem credencial com o journal recusado: as revogações
+/// que ele perdeu não se sabem, e nenhuma credencial vale — ver
+/// `persistencia::revogacoes_desconhecidas`. A mesma do gate de um comando
+/// e de uma chamada de sistema, e da reconfirmação.
+const REVOGACOES_DESCONHECIDAS: (Codigo, &str) = (
+    Codigo::DenyNotAuthenticated,
+    "journal recusado: as revogacoes nao se sabem",
+);
 
 /// Quem pede um processo — o fio e o programa que fazem o pedido — e como
 /// a auditoria o grava: o titular da autoridade e, se quem pede é um
@@ -4029,7 +4166,10 @@ const BIFURCACAO: &str = "process.fork";
 struct QuemPede {
     quem: Quem,
     fio: u64,
-    programa: Programa,
+    /// O programa de quem pede; `None` se não se sabe — o pedido nativo
+    /// sem o programa que o gate decidiu (ver [`quem_pede_um_processo`]):
+    /// quem pergunta recusa, e não supõe um.
+    programa: Option<Programa>,
 }
 
 /// [`QuemPede`] um processo com `autoridade`, agora.
@@ -4044,19 +4184,26 @@ struct QuemPede {
 /// executor, que ninguém isola, e perguntar por ele deixava o processo
 /// isolado lançar. Pelo canal, pelo console, ou fora de um comando — o
 /// boot —, o fio de agora é um fio do kernel: o titular, sem processo.
+///
+/// # O programa que não se sabe
+///
+/// O pedido nativo sem o programa que o gate decidiu não vem de produção —
+/// o gate decide todo pedido de um processo com o programa dele —, e não se
+/// supõe outro: nem o que o fio tem agora, nem "sem imagem", que passava
+/// pela confiança no editor sem pergunta nenhuma. O programa fica `None`, e
+/// quem pergunta recusa, como fora de um comando autorizado. Na auditoria,
+/// quem pede vai como `pelo processo N (sem imagem)`.
 fn quem_pede_um_processo(autoridade: Autoridade) -> QuemPede {
     let mut quem = quem_do_processo(autoridade);
     let (fio, programa) = match pedinte() {
-        Some(Pedinte::Processo(fio)) => (
-            fio,
-            programa_decidido()
-                .or_else(|| crate::fios::processo(fio).map(|(_, p)| p))
-                .unwrap_or(Programa::SemImagem),
-        ),
-        _ => crate::fios::programa_atual(),
+        Some(Pedinte::Processo(fio)) => (fio, programa_decidido()),
+        _ => {
+            let (fio, programa) = crate::fios::programa_atual();
+            (fio, Some(programa))
+        }
     };
-    if programa != Programa::Kernel {
-        quem.processo = Some(pelo_processo(fio, &programa));
+    if programa != Some(Programa::Kernel) {
+        quem.processo = Some(pelo_processo(fio, &programa.unwrap_or(Programa::SemImagem)));
     }
     QuemPede {
         quem,
@@ -4066,15 +4213,47 @@ fn quem_pede_um_processo(autoridade: Autoridade) -> QuemPede {
 }
 
 /// As perguntas do gate sobre quem pede um processo, menos a conta da
-/// cota: a contenção, a confiança no editor e o papel, que diz a cota.
-/// Cada recusa vai para a auditoria com quem pede (ver [`QuemPede`]) e
-/// volta o código; passando, voltam quem pede e a cota.
-fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem, usize), Codigo> {
+/// cota: quem pede é sabido; as revogações que o journal não perdeu; quem
+/// pede, se é um processo, vivo e sem o fim pedido; a contenção; a
+/// confiança no editor; e o papel, que diz a cota. Cada recusa vai para a
+/// auditoria com quem pede (ver [`QuemPede`]) e volta o código e o motivo,
+/// como quem pediu os ouve (ver [`permitir_processo`]); passando, voltam
+/// quem pede e a cota.
+fn perguntar_por_quem_pede(
+    autoridade: Autoridade,
+    metodo: &str,
+) -> Result<(Quem, usize), (Codigo, &'static str)> {
     let QuemPede {
         quem,
         fio,
         programa,
     } = quem_pede_um_processo(autoridade);
+    // O pedido de um processo sem o programa que o gate decidiu: não se
+    // pergunta mais nada sobre quem não se sabe.
+    let Some(programa) = programa else {
+        let (codigo, motivo) = FORA_DE_UM_COMANDO;
+        auditar(&quem, metodo, "", codigo, &[], motivo);
+        return Err(FORA_DE_UM_COMANDO);
+    };
+    // Um journal recusado: nenhuma credencial vale — a pergunta do gate de
+    // todo comando e de toda chamada de sistema, que a reconfirmação refaz.
+    // Sem ela aqui, o processo de uma chave ou de uma pessoa bifurcava com
+    // o journal recusado: o `fork` não passa por outro gate.
+    if credenciada(autoridade) && crate::persistencia::revogacoes_desconhecidas().is_some() {
+        let (codigo, motivo) = REVOGACOES_DESCONHECIDAS;
+        auditar(&quem, metodo, "", codigo, &[], motivo);
+        return Err(REVOGACOES_DESCONHECIDAS);
+    }
+    // Quem pede, se é um processo, ainda pede: o que acabou, ou tem o fim
+    // pedido, é o isolado que vai acabar — a mesma recusa da contenção,
+    // logo abaixo, também sem o isolamento que a poda tira do morto, ou
+    // que o teto de isolados não deixou entrar (ver `fios::encerrado`). Um
+    // fio do kernel não é processo: o titular pede por ele.
+    if programa != Programa::Kernel && crate::fios::encerrado(fio) {
+        let (codigo, motivo) = crate::contencao::PROCESSO_ISOLADO;
+        auditar(&quem, metodo, "", codigo, &[], motivo);
+        return Err(crate::contencao::PROCESSO_ISOLADO);
+    }
     // Quem está contido não lança nem bifurca: o filho de um processo
     // isolado nasceria livre.
     if let Some((codigo, motivo)) = crate::contencao::recusa(
@@ -4086,14 +4265,15 @@ fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem
         autoridade,
     ) {
         auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(codigo);
+        return Err((codigo, motivo));
     }
     // O código de fora da imagem em cujo editor o papel não confia mais
     // também não lança nem bifurca: o filho levaria o mesmo programa, e
-    // nasceria só para ser recusado em cada pedido.
-    if let Some(motivo) = editor_sem_confianca(&programa, quem.papel.as_deref()) {
+    // nasceria só para ser recusado em cada pedido. A auditoria leva o
+    // editor; quem pediu ouve a falta.
+    if let Some((falta, motivo)) = sem_confianca_no_editor(&programa, quem.papel.as_deref()) {
         auditar(&quem, metodo, "", Codigo::DenyPolicy, &[], &motivo);
-        return Err(Codigo::DenyPolicy);
+        return Err((Codigo::DenyPolicy, falta.motivo()));
     }
     // Sem papel — a sessão de pessoa que acabou, a chave revogada —, nada
     // nasce.
@@ -4102,22 +4282,16 @@ fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem
         .as_deref()
         .and_then(|papel| com_politica(|p| p.papel(papel).map(|r| r.processos)));
     let Some(cota) = cota else {
-        auditar(
-            &quem,
-            metodo,
-            "",
-            Codigo::DenyRole,
-            &[],
-            "sem papel, nenhum processo",
-        );
-        return Err(Codigo::DenyRole);
+        const SEM_PAPEL: (Codigo, &str) = (Codigo::DenyRole, "sem papel, nenhum processo");
+        auditar(&quem, metodo, "", SEM_PAPEL.0, &[], SEM_PAPEL.1);
+        return Err(SEM_PAPEL);
     };
     Ok((quem, cota as usize))
 }
 
 /// As perguntas do gate sobre quem bifurca, de novo, no nascimento do
-/// filho — a contenção, a confiança no editor e o papel —: a última
-/// palavra da chamada antes de o filho poder rodar — ver
+/// filho — as revogações, a vida, a contenção, a confiança no editor e o
+/// papel —: a última palavra da chamada antes de o filho poder rodar — ver
 /// [`crate::fios::bifurcar`].
 ///
 /// # Por que de novo
@@ -4128,11 +4302,12 @@ fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem
 /// deixava nascer um filho livre de um processo que já estava isolado: o
 /// isolamento é do fio, e o filho nasce com outro. A credencial suspensa,
 /// a sessão de pessoa que acabou, a chave revogada, a confiança no editor
-/// retirada deixavam nascer um filho que o gate recusaria — sem papel, só
-/// ocupando a vaga, recusado em cada pedido. Aqui as mesmas perguntas,
-/// sobre o mesmo fio e a mesma autoridade, com as mesmas recusas, gravadas
-/// como as do gate: nenhuma regra nova; as de sempre, conferidas onde a
-/// janela acaba.
+/// retirada, o journal recusado deixavam nascer um filho que o gate
+/// recusaria — sem papel, só ocupando a vaga, recusado em cada pedido. E o
+/// fim pedido de quem bifurca, com o teto de isolados cheio, deixava nascer
+/// o filho de quem já ia acabar. Aqui as mesmas perguntas, sobre o mesmo
+/// fio e a mesma autoridade, com as mesmas recusas, gravadas como as do
+/// gate: nenhuma regra nova; as de sempre, conferidas onde a janela acaba.
 ///
 /// # Menos a conta
 ///
@@ -4144,24 +4319,56 @@ fn perguntar_por_quem_pede(autoridade: Autoridade, metodo: &str) -> Result<(Quem
 /// Uma mudança depois destas perguntas acha o filho já na tabela,
 /// nascendo, como um filho nascido um instante antes dela: o isolamento é
 /// de um processo, e não da árvore.
-pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), Codigo> {
+pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), (Codigo, &'static str)> {
     perguntar_por_quem_pede(autoridade, BIFURCACAO).map(|_| ())
 }
 
-/// [`reconfirmar`] o comando que este fio executa, se o gate o decidiu: a
-/// última palavra de quem faz o que o comando pediu depois do handler —
-/// o nascimento do processo de um `user.run` (ver
-/// [`crate::usuario::lancar_conferido`]). Fora de um comando decidido — o
-/// boot, que lança o servidor de janelas e o Terminal; a suíte, que chama
-/// o handler direto —, não há decisão a conferir de novo, e passa.
+/// Quem lança um processo, para a última palavra do nascimento — ver
+/// [`reconfirmar_o_lancamento`] e `usuario::lancar_conferido`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lancador {
+    /// O comando em execução neste fio — o `user.run`, pedido pelo canal,
+    /// pelo console ou pela interface nativa —, que o gate decidiu.
+    Comando,
+    /// O próprio kernel, por conta própria, e não um comando: o servidor de
+    /// janelas e o Terminal, no boot (`usuario::lancar`); e a suíte, que
+    /// lança direto. Ninguém pediu.
+    Kernel,
+}
+
+/// A última palavra do nascimento de um processo: o comando que o lança —
+/// o `user.run` —, decidido de novo ([`reconfirmar`]), antes de o processo
+/// poder rodar (ver `usuario::lancar_conferido`).
+///
+/// # Sem decisão, recusa
+///
+/// O que não se sabe não passa: fora de um comando decidido, a recusa de
+/// [`reconfirmar`] — `ERROR`, "fora de um comando autorizado". As
+/// exceções não são "qualquer um sem decisão"; cada uma se reconhece pelo
+/// que é:
+///
+/// - o kernel que lança por conta própria — o servidor de janelas e o
+///   Terminal, no boot; a suíte, que lança direto —: quem lança diz que é
+///   ele ([`Lancador::Kernel`]), e só fora de um comando. Dentro de um, o
+///   lançamento é do comando, e o comando é decidido de novo, diga quem
+///   lança o que disser. Fora da suíte, só o boot diz isso
+///   (`usuario::lancar_o_servidor_de_janelas` e `usuario::lancar_o_terminal`,
+///   pelo `usuario::lancar`);
+/// - a suíte que chama o handler do `user.run` direto, sem o gate: o
+///   comando que ela monta não tem decisão (`como_comando_de_teste`,
+///   `como_canal_de_teste`), e só ela o monta. Fora da compilação da
+///   suíte o braço dele não existe, e o comando sem decisão é recusado.
 ///
 /// Não grava nada, como [`reconfirmar`]: quem chama grava a recusa como a
-/// execução do comando.
-pub fn reconfirmar_se_decidido() -> Result<(), (Codigo, &'static str)> {
-    if do_comando_deste_fio(|c| c.decidido.is_some()) != Some(true) {
-        return Ok(());
+/// execução do comando — ou, fora de um, em nome do kernel.
+pub fn reconfirmar_o_lancamento(lancador: Lancador) -> Result<(), (Codigo, &'static str)> {
+    match (do_comando_deste_fio(|c| c.decidido.is_some()), lancador) {
+        (Some(true), _) => reconfirmar(),
+        #[cfg(feature = "modo-teste")]
+        (Some(false), _) => Ok(()),
+        (None, Lancador::Kernel) => Ok(()),
+        _ => Err(FORA_DE_UM_COMANDO),
     }
-    reconfirmar()
 }
 
 /// O escalonador recusou o nascimento porque a cota encheu entre a
@@ -4700,5 +4907,7 @@ pub unsafe fn destravar() {
         EM_EXECUCAO.force_unlock();
         #[cfg(feature = "modo-teste")]
         ANTES_DA_RECONFIRMACAO.force_unlock();
+        #[cfg(feature = "modo-teste")]
+        ANTES_DO_GATE_DO_LANCAMENTO.force_unlock();
     }
 }

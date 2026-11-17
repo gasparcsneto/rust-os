@@ -25,6 +25,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering:
 use politica::Codigo;
 
 pub(in crate::testes) mod par;
+pub(in crate::testes) mod troca;
 
 /// A intenção que o `fluxos` oferece.
 pub(in crate::testes) const INTENCAO: &str = "imagem.compartilhar";

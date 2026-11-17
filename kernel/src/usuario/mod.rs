@@ -1317,8 +1317,9 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 ///
 /// Então quem é ponta toma a ordem **sem esperar**
 /// ([`crate::persistencia::em_ordem_sem_esperar`]), depois de tudo o que
-/// pode falhar e antes do ponto sem volta, e a segura só por ele — a troca,
-/// que não falha — e pelo fim dos fluxos. Largar o espaço anterior e mapear
+/// pode falhar e antes do ponto sem volta, e a segura só por ele — a
+/// decisão de novo (ver abaixo), a troca, que não falha — e pelo fim dos
+/// fluxos. Largar o espaço anterior e mapear
 /// a imagem nova vêm depois, com a ordem já solta: um trabalho do tamanho
 /// do que o processo mapeou e do que a imagem pede, que a ordem — o ponto
 /// de serialização do journal, dos comandos, das revogações e do coletor —
@@ -1329,10 +1330,34 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// E isso já antes do gate: com a ordem com outro, a chamada dá a vez sem
 /// decidir, e a espera não grava uma decisão a cada volta.
 ///
+/// # A decisão de novo, no ponto sem volta
+///
+/// O gate decide `process.run` sobre o caminho antes de o arquivo ser lido;
+/// depois vêm a leitura, a conferência do código e a preparação da imagem —
+/// o tempo do arquivo: a troca para o `livro` levou de 370 a 970 ms na
+/// suíte. Uma revogação, uma política nova ou uma contenção que chegasse
+/// nesse meio não parava a troca, que seguia com o `ALLOW` de antes (o F4
+/// do adversário do AE-1). Agora, imediatamente antes de trocar, a decisão
+/// é feita de novo — a mesma conta do gate, sobre a mesma permissão e o
+/// mesmo caminho, com o registro, a política, a contenção e a confiança no
+/// editor de agora ([`crate::autorizacao::DecisaoDoProcesso::reconfirmar`]).
+/// Recusada, nada se troca: a preparada sai, o processo segue com a imagem
+/// dele, e ouve [`erro::NEGADO`], o mesmo do gate no começo da chamada.
+///
+/// Quem é ponta de fluxo decide de novo com a ordem das gravações na mão,
+/// dentro da mesma tomada da troca: a revogação e a política nova, que
+/// gravam com a mesma ordem, ou são vistas — e recusam — ou vêm depois da
+/// troca inteira. Quem não é ponta decide de novo sem a ordem, e sem
+/// esperá-la — esperá-la aqui seria o defeito do AE-1 de volta —: isso
+/// estreita a janela à troca, e não a fecha. Uma revogação que chega entre
+/// a decisão de novo e a troca acha a imagem nova já no lugar, como uma de
+/// um instante depois; cada pedido dela passa pelo gate, com o que valer
+/// então.
+///
 /// # A execução da decisão, na auditoria
 ///
 /// A decisão que o gate grava aqui ganha na cadeia o registro da execução
-/// dela, que a cita, em cada um dos cinco casos em que a troca permitida
+/// dela, que a cita, em cada um dos seis casos em que a troca permitida
 /// não chega ao fim:
 ///
 /// - o arquivo que não se lê (`ERROR`, com o motivo da leitura);
@@ -1340,10 +1365,12 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// - a imagem que falha antes do ponto sem volta (`ERROR`, com o motivo);
 /// - a ordem que foi para outro fio **depois** de decidida (`CONFLICT`,
 ///   "adiada");
+/// - a decisão feita de novo no ponto sem volta, recusada (o código e o
+///   motivo da recusa, os do gate);
 /// - a imagem nova que não se mapeia **depois** do ponto sem volta
 ///   (`ERROR`, com o motivo).
 ///
-/// Nos quatro primeiros o processo segue intacto. A volta adiada não muda
+/// Nos cinco primeiros o processo segue intacto. A volta adiada não muda
 /// nada — a seguinte decide de novo, com a política de então. No último não
 /// há para onde voltar: os fluxos de quem era ponta já acabaram na troca
 /// (`o programa mudou`), o registro vai em nome de quem o gate decidiu — o
@@ -1515,15 +1542,32 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         }
     };
 
-    // O ponto sem volta. Para quem é ponta de fluxo, com a ordem das
-    // gravações na mão — tomada sem esperar — até os fluxos acabarem.
+    // O ponto sem volta: a decisão do gate, feita de novo agora — ver "A
+    // decisão de novo, no ponto sem volta", no cabeçalho —, e a troca. Para
+    // quem é ponta de fluxo, as duas com a ordem das gravações na mão —
+    // tomada sem esperar — até os fluxos acabarem; para quem não é, sem a
+    // ordem, e sem esperá-la.
     #[cfg(feature = "modo-teste")]
-    if ponta {
-        pausa_da_troca_de_teste::talvez_pausar(fio);
-    }
+    pausa_da_troca_de_teste::talvez_pausar(fio);
     let trocada = if ponta {
-        match crate::persistencia::em_ordem_sem_esperar(|| trocar_a_imagem(preparada, fio, true)) {
-            Some(trocada) => trocada,
+        // Recusada, a preparada sai ali mesmo: é só o espaço novo, ainda
+        // vazio — os segmentos são mapeados depois da troca —, e que nunca
+        // esteve ativo; largá-lo não tem o tamanho de nada que o processo
+        // mapeou nem que a imagem pede.
+        match crate::persistencia::em_ordem_sem_esperar(|| match decisao.reconfirmar() {
+            Ok(()) => Ok(trocar_a_imagem(preparada, fio, true)),
+            Err(recusa) => {
+                drop(preparada);
+                Err(recusa)
+            }
+        }) {
+            Some(Ok(trocada)) => trocada,
+            // A decisão de novo recusou, com a ordem na mão: a revogação, a
+            // política nova ou a contenção chegaram antes. O processo segue
+            // intacto.
+            Some(Err((codigo, motivo))) => {
+                return recusar_a_troca(&decisao, &caminho, codigo, &motivo);
+            }
             // A ordem foi para outro fio depois da conferência lá de cima:
             // a preparada saiu com a closure, o processo segue intacto, e a
             // chamada roda de novo. A decisão desta volta já foi gravada: a
@@ -1541,6 +1585,13 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
             }
         }
     } else {
+        // Sem a ordem: quem não é ponta não grava nada na troca, e a ordem
+        // não se espera aqui. A decisão de novo estreita a janela à troca,
+        // e não a fecha — ver o cabeçalho.
+        if let Err((codigo, motivo)) = decisao.reconfirmar() {
+            drop(preparada);
+            return recusar_a_troca(&decisao, &caminho, codigo, &motivo);
+        }
         let trocada = trocar_a_imagem(preparada, fio, false);
         // A premissa de quem não é ponta: ninguém o fez ponta no meio da
         // chamada — em produção, só pedidos dele o fariam, e ele está aqui.
@@ -1617,6 +1668,35 @@ fn trocar_a_imagem<'a>(
     trocada
 }
 
+/// A troca que a decisão de novo recusou no ponto sem volta (ver
+/// [`executar`]): nada foi trocado — a preparada já saiu, e o processo
+/// segue com a imagem dele, os fluxos e o resto —, a execução da decisão do
+/// gate vai à auditoria com o código e o motivo da recusa, em nome de quem
+/// o gate decidiu, e o processo ouve [`erro::NEGADO`], o mesmo do gate que
+/// recusa no começo da chamada: a recusa é dele, feita de novo.
+fn recusar_a_troca(
+    decisao: &crate::autorizacao::DecisaoDoProcesso,
+    caminho: &str,
+    codigo: politica::Codigo,
+    motivo: &str,
+) -> i64 {
+    crate::autorizacao::auditar_execucao_do_processo(
+        decisao,
+        "process.exec",
+        caminho,
+        codigo,
+        motivo,
+    );
+    crate::log_warn!(
+        "usuario",
+        "executar: `{}` recusado no ponto sem volta: {}",
+        caminho,
+        motivo
+    );
+    RECUSADAS.fetch_add(1, Ordering::Relaxed);
+    erro::NEGADO
+}
+
 /// A troca não segue agora — a ordem das gravações está com outro fio — e
 /// não mudou nada que a volta seguinte refaça: dá a vez e roda de novo, como
 /// a espera de [`crate::persistencia::em_ordem`]. Ver [`executar`].
@@ -1626,12 +1706,15 @@ fn adiar_a_troca() -> i64 {
     0
 }
 
-/// Só para a suíte: uma pausa na troca de imagem de quem é ponta de fluxo,
-/// depois de tudo o que pode falhar e antes de tomar a ordem das gravações —
-/// a janela em que outro fio a toma depois da conferência do começo da
-/// chamada, e a ordem tomada sem esperar ouve que ela está com outro. O caso
-/// "fluxo: a troca de imagem com a ordem tomada no meio" a abre, uma vez,
-/// para um processo só. Fora da suíte não existe.
+/// Só para a suíte: uma pausa na troca de imagem de um processo, depois de
+/// tudo o que pode falhar e antes do ponto sem volta — da decisão de novo
+/// e, para quem é ponta de fluxo, de tomar a ordem das gravações. É a
+/// janela em que outro fio toma a ordem depois da conferência do começo da
+/// chamada, e a ordem tomada sem esperar ouve que ela está com outro — o
+/// caso "fluxo: a troca de imagem com a ordem tomada no meio" —; e a janela
+/// em que a revogação, a política nova ou a contenção chegam entre a decisão
+/// do gate e a troca — os casos `troca:` da decisão de novo. Cada caso a
+/// abre, uma vez, para um processo só. Fora da suíte não existe.
 #[cfg(feature = "modo-teste")]
 pub mod pausa_da_troca_de_teste {
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1641,8 +1724,8 @@ pub mod pausa_da_troca_de_teste {
     static PARADA: AtomicBool = AtomicBool::new(false);
     static SOLTA: AtomicBool = AtomicBool::new(false);
 
-    /// A próxima troca de imagem do processo `fio`, se ele é ponta de fluxo,
-    /// para antes de tomar a ordem.
+    /// A próxima troca de imagem do processo `fio` para antes do ponto sem
+    /// volta — e, se ele é ponta de fluxo, antes de tomar a ordem.
     pub fn armar(fio: u64) {
         SOLTA.store(false, Ordering::Release);
         PARADA.store(false, Ordering::Release);
@@ -1660,11 +1743,12 @@ pub mod pausa_da_troca_de_teste {
         SOLTA.store(true, Ordering::Release);
     }
 
-    /// Chamada pela troca de imagem de quem é ponta. Gira, e não dorme: é o
-    /// handler da chamada de sistema, com as interrupções mascaradas — quem
-    /// arma prende o processo a um núcleo que não é o da suíte. Um teto de
-    /// voltas, para um caso que não soltasse não travar o núcleo para
-    /// sempre; a suíte solta assim que toma a ordem, muito antes dele.
+    /// Chamada pela troca de imagem, antes do ponto sem volta. Gira, e não
+    /// dorme: é o handler da chamada de sistema, com as interrupções
+    /// mascaradas — quem arma prende o processo a um núcleo que não é o da
+    /// suíte. Um teto de voltas, para um caso que não soltasse não travar o
+    /// núcleo para sempre; a suíte solta assim que faz o que tinha de fazer
+    /// no meio, muito antes dele.
     pub(super) fn talvez_pausar(fio: u64) {
         if ARMADA
             .compare_exchange(fio + 1, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -1818,17 +1902,36 @@ pub mod falha_da_troca_de_teste {
 /// Devolve o identificador do fio. Não espera o processo terminar: quem chama
 /// é o canal do agente, e bloquear ali travaria o atendimento — o resultado
 /// aparece depois em `user.stats`.
+///
+/// É o kernel que lança, por conta própria, com a autoridade do sistema:
+/// o servidor de janelas e o Terminal, no boot — ver [`lancar_pelo_kernel`].
 pub fn lancar(caminho: Option<&str>) -> Result<u64, &'static str> {
     lancar_como(caminho, crate::autorizacao::Autoridade::Sistema)
 }
 
-/// Como [`lancar`], com a autoridade de quem pediu: um processo que um
-/// agente lança age como o agente — ver [`crate::fios::criar_como`].
+/// Como [`lancar`], com a autoridade dada: um processo que um agente lança
+/// age como o agente — ver [`crate::fios::criar_como`]. Também o kernel por
+/// conta própria ([`lancar_pelo_kernel`]): fora da suíte, só o boot, pelo
+/// [`lancar`].
 pub fn lancar_como(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
 ) -> Result<u64, &'static str> {
-    lancar_conferido(caminho, autoridade).map_err(|n| n.motivo_fixo())
+    lancar_pelo_kernel(caminho, autoridade).map_err(|n| n.motivo_fixo())
+}
+
+/// [`lancar_conferido`] pelo próprio kernel, e não por um comando: o
+/// servidor de janelas e o Terminal, no boot ([`lancar`]); e a suíte, que
+/// lança direto. Ninguém pediu, e fora de um comando a última palavra do
+/// nascimento não tem decisão a conferir de novo — ver
+/// [`crate::autorizacao::reconfirmar_o_lancamento`] e
+/// [`crate::autorizacao::Lancador::Kernel`]. Dentro de um comando, o
+/// lançamento é dele, e ele é decidido de novo.
+pub fn lancar_pelo_kernel(
+    caminho: Option<&str>,
+    autoridade: crate::autorizacao::Autoridade,
+) -> Result<u64, NaoLancou> {
+    lancar_por(caminho, autoridade, crate::autorizacao::Lancador::Kernel)
 }
 
 /// Por que um lançamento não aconteceu.
@@ -1837,13 +1940,19 @@ pub enum NaoLancou {
     /// O código não se leu, ou é de fora da imagem e não prova de onde veio
     /// — ver [`codigo`].
     Codigo(codigo::Recusa),
-    /// O fio não nasceu: a cota de processos do papel, ou as vagas do
-    /// escalonador.
+    /// O fio não nasceu: as vagas do escalonador, a memória da pilha, ou o
+    /// escalonamento congelado depois de uma falha fatal. Não é recusa de
+    /// ninguém.
     Fio(&'static str),
-    /// O comando que pediu o lançamento, decidido de novo no nascimento,
-    /// foi recusado — quem pediu foi contido, saiu ou foi revogado no meio,
-    /// ou a política mudou: o código e o motivo, já gravados como a execução
-    /// do comando. Ver [`lancar_conferido`].
+    /// O gate recusou: o código e o motivo, já gravados. Nas perguntas
+    /// sobre quem pede o processo, antes de o código ser lido — o journal
+    /// recusado, quem pede encerrado ou contido, o editor em quem o papel
+    /// não confia, o papel que falta, a cota esgotada
+    /// ([`crate::autorizacao::permitir_processo`]) —; na cota, contada de
+    /// novo ao reservar a vaga ([`crate::fios::COTA_ESGOTADA`]); ou na
+    /// última palavra do nascimento, o comando decidido de novo — quem pediu
+    /// foi contido, saiu ou foi revogado no meio, ou a política mudou —,
+    /// gravada como a execução do comando. Ver [`lancar_conferido`].
     Recusado(politica::Codigo, &'static str),
 }
 
@@ -1873,9 +1982,25 @@ struct Carga {
     editor: Option<[u8; 32]>,
 }
 
-/// Como [`lancar_como`], com o motivo inteiro da recusa — o código de fora
-/// da imagem sem selo, com o selo que não confere, de um editor em que o
-/// papel não confia —, para quem responde a um agente.
+/// O lançamento do `user.run`: o comando em execução neste fio, que o gate
+/// decidiu, lança o programa com a autoridade de quem pediu — e é decidido
+/// de novo no nascimento ([`crate::autorizacao::Lancador::Comando`]). Com o
+/// motivo inteiro da recusa — o código de fora da imagem sem selo, com o
+/// selo que não confere, de um editor em que o papel não confia —, e o
+/// código e o motivo de cada recusa do gate ([`NaoLancou::Recusado`]), para
+/// quem responde a um agente.
+///
+/// Fora de um comando decidido, a última palavra recusa: o kernel que lança
+/// por conta própria usa [`lancar_pelo_kernel`].
+pub fn lancar_conferido(
+    caminho: Option<&str>,
+    autoridade: crate::autorizacao::Autoridade,
+) -> Result<u64, NaoLancou> {
+    lancar_por(caminho, autoridade, crate::autorizacao::Lancador::Comando)
+}
+
+/// [`lancar_conferido`] e [`lancar_pelo_kernel`]: o lançamento, com quem
+/// lança dito pela última palavra do nascimento.
 ///
 /// # O código é lido aqui, e não no fio novo
 ///
@@ -1890,9 +2015,10 @@ struct Carga {
 /// nasceu, longe de quem pediu e da resposta a ele. Lendo aqui, quem pediu
 /// ouve a recusa, e o que roda é exatamente o que foi conferido: ninguém
 /// relê o arquivo.
-pub fn lancar_conferido(
+fn lancar_por(
     caminho: Option<&str>,
     autoridade: crate::autorizacao::Autoridade,
+    lancador: crate::autorizacao::Lancador,
 ) -> Result<u64, NaoLancou> {
     extern "C" fn hospedar(argumento: u64) -> ! {
         let (imagem, editor) = if argumento == 0 {
@@ -1924,10 +2050,16 @@ pub fn lancar_conferido(
 
     limpar_ultima_saida();
 
-    // A cota de processos do papel de quem lança: contada antes de nascer,
-    // e de novo ao nascer — ver `fios::criar_processo`.
-    let Ok(cota) = crate::autorizacao::permitir_processo(autoridade, "process.run") else {
-        return Err(NaoLancou::Fio(crate::fios::COTA_ESGOTADA));
+    // As perguntas do gate sobre quem pede o processo, e a cota de
+    // processos do papel de quem lança: contada antes de nascer, e de novo
+    // ao nascer — ver `fios::criar_processo`. A recusa já está na
+    // auditoria, e quem pediu ouve o código e o motivo dela — a cota, a
+    // contenção, o editor, o papel —, e não um texto só para todas.
+    #[cfg(feature = "modo-teste")]
+    crate::autorizacao::gancho_do_gate_do_lancamento();
+    let cota = match crate::autorizacao::permitir_processo(autoridade, "process.run") {
+        Ok(cota) => cota,
+        Err((codigo, motivo)) => return Err(NaoLancou::Recusado(codigo, motivo)),
     };
 
     // O código, lido e conferido antes de o fio nascer.
@@ -1975,14 +2107,16 @@ pub fn lancar_conferido(
 
     // A última palavra antes de o processo poder rodar: o comando que o
     // pediu, decidido de novo — quem pediu, a sessão, a revogação, o papel,
-    // a política e a contenção de agora (`autorizacao::reconfirmar`). O gate
-    // decidiu antes de o código ser lido e de a pilha ser mapeada, e quem
-    // pediu pode ter sido contido no meio: o processo que pede pela
-    // interface nativa, isolado ou encerrado, lançaria um processo livre,
-    // com a autoridade dele. Recusado, nada nasce, e a recusa vai para a
-    // auditoria como a execução do comando. Fora de um comando — o
-    // servidor de janelas e o Terminal, no boot —, não há decisão a
-    // conferir de novo.
+    // a política, a contenção e a confiança no editor de agora
+    // (`autorizacao::reconfirmar`). O gate decidiu antes de o código ser
+    // lido e de a pilha ser mapeada, e quem pediu pode ter sido contido no
+    // meio: o processo que pede pela interface nativa, isolado ou
+    // encerrado, lançaria um processo livre, com a autoridade dele.
+    // Recusado, nada nasce, e a recusa vai para a auditoria como a execução
+    // do comando. Sem um comando decidido, recusa também — gravada em nome
+    // do kernel —, menos quando o kernel lança por conta própria, fora de
+    // um comando: o servidor de janelas e o Terminal, no boot; a suíte, que
+    // lança direto (ver `autorizacao::reconfirmar_o_lancamento`).
     //
     // Sem a ordem das gravações, que os commits tomam para decidir de novo:
     // o nascimento não grava nada no journal, e a revogação ou a contenção
@@ -1996,8 +2130,10 @@ pub fn lancar_conferido(
     let recurso = caminho.unwrap_or("<exemplo embutido>");
     let recusa = core::cell::Cell::new(None);
     let nasce = |id: crate::fios::IdFio| {
-        if let Err((codigo, motivo)) = crate::autorizacao::reconfirmar_se_decidido() {
-            crate::autorizacao::auditar_execucao(recurso, codigo, motivo);
+        if let Err((codigo, motivo)) = crate::autorizacao::reconfirmar_o_lancamento(lancador) {
+            if crate::autorizacao::auditar_execucao(recurso, codigo, motivo) == 0 {
+                crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, motivo);
+            }
             recusa.set(Some((codigo, motivo)));
             return Err(motivo);
         }
@@ -2018,9 +2154,17 @@ pub fn lancar_conferido(
     ) {
         Ok(id) => Ok(id.numero()),
         Err(nao) => {
-            if let crate::fios::NaoNasceu::Cota(ocupacao) = nao {
-                crate::autorizacao::recusar_pela_cota(autoridade, "process.run", ocupacao, cota);
-            }
+            let pela_cota = match nao {
+                crate::fios::NaoNasceu::Cota(ocupacao) => {
+                    Some(crate::autorizacao::recusar_pela_cota(
+                        autoridade,
+                        "process.run",
+                        ocupacao,
+                        cota,
+                    ))
+                }
+                _ => None,
+            };
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
             // acontecem: a tabela do escalonador tem um teto, `MAX_FIOS`, e
@@ -2031,10 +2175,13 @@ pub fn lancar_conferido(
                 // entregue a ninguém, porque `criar` falhou.
                 drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             }
-            // A recusa da última palavra, já gravada: quem pediu ouve o
-            // código dela.
-            match (nao, recusa.get()) {
-                (crate::fios::NaoNasceu::Recusado(_), Some((codigo, motivo))) => {
+            // A recusa da cota no nascimento e a da última palavra, já
+            // gravadas: quem pediu ouve o código delas.
+            match (nao, recusa.get(), pela_cota) {
+                (crate::fios::NaoNasceu::Cota(_), _, Some(codigo)) => {
+                    Err(NaoLancou::Recusado(codigo, crate::fios::COTA_ESGOTADA))
+                }
+                (crate::fios::NaoNasceu::Recusado(_), Some((codigo, motivo)), _) => {
                     Err(NaoLancou::Recusado(codigo, motivo))
                 }
                 _ => Err(NaoLancou::Fio(nao.motivo())),

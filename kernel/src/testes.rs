@@ -20359,6 +20359,37 @@ fn politica_sem(permissao: &str) {
     }
 }
 
+/// A política de agora sem `process.run` em papel nenhum — nas linhas dos
+/// papéis e nas do alcance dela —, e sem as linhas `editores`: a confiança
+/// num editor é de quem executa o código dele, e a política não a aceita
+/// num papel sem `process.run`. Não a põe em vigor; `Err` se o texto não se
+/// lê — o caso não segue com a política de antes achando que mudou.
+fn politica_sem_o_process_run() -> Result<politica::Politica, &'static str> {
+    let texto = crate::autorizacao::com_politica(|p| p.texto());
+    let sem: alloc::string::String = texto
+        .lines()
+        .filter(|l| {
+            !(l.starts_with("editores ")
+                || l.starts_with("recurso ") && l.contains(" process.run "))
+        })
+        .map(|l| {
+            if l.starts_with("papel ") {
+                alloc::format!("{l} ")
+                    .replace(" process.run ", " ")
+                    .trim_end()
+                    .into()
+            } else {
+                alloc::string::String::from(l)
+            }
+        })
+        .collect::<alloc::vec::Vec<_>>()
+        .join("\n");
+    politica::Politica::ler(&sem).map_err(|e| {
+        crate::log_error!("teste", "a politica sem process.run nao se le: {:?}", e);
+        "a politica sem process.run nao se le"
+    })
+}
+
 /// A decisão em curso, nas mensagens: o gate decide, e entre a decisão e a
 /// mudança na tabela — com a ordem das gravações na mão — a política tira
 /// a permissão do papel, ou a chave de quem pede é revogada. A operação é
@@ -40484,6 +40515,44 @@ static CASOS: &[Caso] = &[
         nome: "contencao: quem sai no meio do fork nao ganha filho",
         f: nascimento::contencao_quem_sai_no_meio_do_fork_nao_ganha_filho,
     },
+    // Os latentes do adversário só de leitura das correções da soma das
+    // cotas, e as lacunas de cobertura do nascimento.
+    Caso {
+        nome: "contencao: o encerrado sem o isolamento no meio do user.run nao lanca",
+        f: nascimento::contencao_o_encerrado_sem_o_isolamento_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: o encerrado sem o isolamento no meio do fork nao ganha filho",
+        f: nascimento::contencao_o_encerrado_sem_o_isolamento_no_meio_do_fork_nao_ganha_filho,
+    },
+    Caso {
+        nome: "contencao: o fork com o journal recusado nao ganha filho",
+        f: nascimento::contencao_o_fork_com_o_journal_recusado_nao_ganha_filho,
+    },
+    Caso {
+        nome: "contencao: o editor recusado no meio do fork nao ganha filho",
+        f: nascimento::contencao_o_editor_recusado_no_meio_do_fork_nao_ganha_filho,
+    },
+    Caso {
+        nome: "contencao: o editor recusado no meio do user.run nao lanca",
+        f: nascimento::contencao_o_editor_recusado_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: a chave revogada no meio do user.run nao lanca",
+        f: nascimento::contencao_a_chave_revogada_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: a politica nova no meio do user.run nao lanca",
+        f: nascimento::contencao_a_politica_nova_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: a recusa do user.run no gate diz o codigo",
+        f: nascimento::contencao_a_recusa_do_user_run_no_gate_diz_o_codigo,
+    },
+    Caso {
+        nome: "contencao: o desconhecido na ultima palavra e recusado",
+        f: nascimento::contencao_o_desconhecido_na_ultima_palavra_e_recusado,
+    },
     Caso {
         nome: "processos: a lista diz o programa, o papel e o estado",
         f: processos_a_lista_diz_o_programa_o_papel_e_o_estado,
@@ -40955,6 +41024,24 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "fluxo: a troca de imagem que falha depois do ponto sem volta",
         f: fluxo::fluxo_a_troca_que_falha_depois_do_ponto_sem_volta,
+    },
+    // A decisão de novo no ponto sem volta do `exec` (o F4): cada caso com
+    // quem é ponta de fluxo e com quem não é.
+    Caso {
+        nome: "troca: sem mudanca no meio, a troca acontece",
+        f: fluxo::troca::troca_sem_mudanca_no_meio_a_troca_acontece,
+    },
+    Caso {
+        nome: "troca: a chave revogada no meio nao troca a imagem",
+        f: fluxo::troca::troca_a_chave_revogada_no_meio_nao_troca_a_imagem,
+    },
+    Caso {
+        nome: "troca: a politica nova no meio nao troca a imagem",
+        f: fluxo::troca::troca_a_politica_nova_no_meio_nao_troca_a_imagem,
+    },
+    Caso {
+        nome: "troca: o processo isolado no meio nao troca a imagem",
+        f: fluxo::troca::troca_o_processo_isolado_no_meio_nao_troca_a_imagem,
     },
     Caso {
         nome: "fluxo: a revogacao e a politica nova encerram",
@@ -61892,7 +61979,7 @@ fn codigo_a_confianca_e_decidida_a_cada_pedido() -> Resultado {
         if abriu != politica::Codigo::DenyPolicy {
             return Err("a chamada de sistema do codigo selado passou sem a confianca");
         }
-        if bifurcou != Err(politica::Codigo::DenyPolicy) {
+        if bifurcou != Err((politica::Codigo::DenyPolicy, "o papel nao confia no editor")) {
             return Err("o codigo selado bifurcou sem a confianca no editor");
         }
         // O editor que sai do registro leva a confiança junto.
@@ -62880,7 +62967,7 @@ fn codigo_o_conferido_e_o_que_roda() -> Resultado {
         let mut fios = alloc::vec::Vec::new();
         let r = (|| -> Resultado {
             for _ in 0..12 {
-                match crate::usuario::lancar_conferido(Some(CAMINHO), Autoridade::Sistema) {
+                match crate::usuario::lancar_pelo_kernel(Some(CAMINHO), Autoridade::Sistema) {
                     Ok(fio) => {
                         rodaram += 1;
                         let nasceu =

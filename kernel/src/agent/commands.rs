@@ -7159,9 +7159,13 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("error", &motivo)?;
             explicar_falha(w, politica::Codigo::DenyPolicy, &motivo)?;
         }
-        // O pedido, decidido de novo no nascimento do processo, foi
-        // recusado — quem pediu foi contido, saiu ou foi revogado no meio:
-        // o código da recusa, já gravada como a execução da decisão.
+        // O gate recusou, depois de decidir o comando: nas perguntas sobre
+        // quem pede um processo — o journal recusado, quem pede encerrado ou
+        // contido, o editor em quem o papel não confia, o papel que falta,
+        // a cota esgotada —, na cota contada de novo ao nascer, ou no
+        // pedido decidido de novo no nascimento — quem pediu foi contido,
+        // saiu ou foi revogado no meio, ou a política mudou. O código e o
+        // motivo da recusa de verdade, já gravada, e a explicação.
         Err(crate::usuario::NaoLancou::Recusado(codigo, motivo)) => {
             w.field_bool("launched", false)?;
             w.field_str("code", codigo.nome())?;

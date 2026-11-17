@@ -63,6 +63,14 @@ use crate::trava::Mutex;
 /// seguinte é recusada — e um processo que acabou sai antes de contar.
 pub const MAIS_CONTIDOS: usize = 64;
 
+/// A recusa do processo isolado, como o gate a grava e quem pediu a ouve:
+/// `DENY_CONTAINED`, "processo isolado" — ver [`recusa_de`]. É também a do
+/// processo encerrado que pede (`fios::encerrado`): o `process.terminate`
+/// isola antes de pedir o fim ([`encerrar_processo`]), e o isolamento que a
+/// poda tira do morto, ou que o teto de isolados não deixou entrar, não
+/// muda o que ele é.
+pub const PROCESSO_ISOLADO: (Codigo, &str) = (Codigo::DenyContained, "processo isolado");
+
 /// Quem uma contenção alcança.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alvo {
@@ -227,7 +235,7 @@ pub fn recusa_de(processo: Option<u64>, autoridade: Autoridade) -> Option<(Codig
         if let Some(fio) = processo
             && c.isolados.contains(&fio)
         {
-            return Some((Codigo::DenyContained, "processo isolado"));
+            return Some(PROCESSO_ISOLADO);
         }
         match autoridade {
             Autoridade::Sessao { chave: Some(k), .. } => {
@@ -370,8 +378,12 @@ pub struct Encerrado {
 /// caíram. O isolamento de um morto sai sozinho, na próxima poda.
 ///
 /// Com o teto de isolados cheio, o fim é pedido mesmo assim: as conexões
-/// caem quando o coletor recolhe o morto, e o pedido em curso não tem mais
-/// a quem responder.
+/// caem quando o coletor recolhe o morto. E o pedido em curso não conclui
+/// sem o isolamento: quem o decide de novo — a reconfirmação no ponto de
+/// commit, a última palavra do `fork` e do `user.run` — pergunta também se
+/// quem pede acabou ou tem o fim pedido (`fios::encerrado`), e recusa como
+/// recusaria o isolado ([`PROCESSO_ISOLADO`]). A mesma pergunta vale depois
+/// da poda, que tira o isolamento do morto.
 ///
 /// Só os handlers dos comandos e as operações administrativas chamam.
 pub fn encerrar_processo(fio: u64) -> Result<Encerrado, &'static str> {

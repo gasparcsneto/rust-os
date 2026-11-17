@@ -3350,6 +3350,46 @@ pub fn vivo(id: u64) -> bool {
     })
 }
 
+/// O fio `id` acabou, ou vai acabar: saiu, morreu ou já foi recolhido —
+/// não está [`vivo`] —, ou tem o fim pedido e ainda não chegou a um ponto
+/// seguro (ver [`pedir_termino`]).
+///
+/// É a pergunta de quem decide de novo o pedido de um processo — a
+/// reconfirmação de um comando que um processo pediu, e as perguntas sobre
+/// quem pede outro processo, no gate e na última palavra do `fork` e do
+/// `user.run` (ver `autorizacao::reconfirmar` e
+/// `autorizacao::permitir_processo`): o pedido de quem foi encerrado não
+/// conclui. O `process.terminate` isola antes de pedir o fim, e o gate
+/// recusa o isolado; mas o isolamento de quem morreu sai na poda, e o teto
+/// de isolados pode nem tê-lo deixado entrar (ver
+/// `contencao::encerrar_processo`) — esta pergunta não depende dele. Um fio
+/// que não hospeda processo — o executor, a suíte — responde pela vida
+/// dele: quem pergunta só pergunta por quem pede.
+///
+/// # Um número que o escalonador nunca deu
+///
+/// Fora da suíte, quem pergunta tem o número de um fio que existiu: o
+/// pedido de um processo vem do fio dele (`tomar_pedido`,
+/// [`pedido_em_curso`]), e quem bifurca é o fio de agora. Um número que
+/// nunca foi dado não é de ninguém vivo, e a resposta é a de quem acabou:
+/// a recusa. Na suíte, é o processo de mentira — ela pede como um processo
+/// pelo número de um fio que não existe, acima de todos os que o
+/// escalonador deu, para conferir uma decisão sem lançar um programa —, e
+/// só ali a resposta é a de um processo vivo: o resto da decisão é o de
+/// sempre. Os números só crescem, e um dado nunca volta a outro fio.
+pub fn encerrado(id: u64) -> bool {
+    #[cfg(feature = "modo-teste")]
+    if id >= PROXIMO_ID.load(Ordering::Relaxed) {
+        return false;
+    }
+    com_escalonador(|e| {
+        !e.fios
+            .iter()
+            .flatten()
+            .any(|f| f.id.numero() == id && f.estado != Estado::Terminado && !f.terminar)
+    })
+}
+
 /// Os ids dos fios que existem e não terminaram — os que [`vivo`] diria
 /// vivos —, escritos em `destino`; devolve quantos. Uma tomada da trava do
 /// escalonador para todos: é a fotografia com que [`crate::eventos`]

@@ -237,7 +237,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED` |
+| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando — quem pede encerrado ou contido, o editor, o papel, a cota, o comando decidido de novo no nascimento —, `launched: false` com o `code` e o `error` da recusa, e a explicação |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -417,9 +417,10 @@ kernel/src/
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
-│   │   └── par/
-│   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa ou que sai no meio do `fork`, que não ganha filho; o processo isolado ou encerrado no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer — e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
+│   │   ├── par/
+│   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
+│   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova ou o processo isolado de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, com quem é ponta de fluxo e com quem não é; e, sem mudança no meio, a troca de sempre
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -1408,7 +1409,12 @@ não compila.
   da operacao`). Uma ação sem estado a confirmar — um clique na interface,
   a leitura de uma tecla — vale como decidida no gate: ela acontece numa
   chamada, e uma revogação que chega durante ela vale como chegada logo
-  depois.
+  depois. A troca de imagem (`executar`) é decidida de novo no ponto sem
+  volta: quem é ponta de fluxo, com a ordem na mão, tomada sem esperar —
+  vê a revogação ou vem antes dela inteira —; quem não é, sem a ordem, que
+  dentro de uma chamada de sistema não se espera: a janela fica estreitada
+  à troca, e não fechada (ver *Onde se confere*, em [O código de fora da
+  imagem](#o-código-de-fora-da-imagem)).
 - Sessenta e quatro núcleos no máximo — um por bit da máscara —; oito no
   ARM, pelo GICv2; e no x86 só os de identificador de APIC até 254, sem
   x2APIC.
@@ -5503,7 +5509,9 @@ registro de cada uma no ponto em que nasceu.
   recusa vai à auditoria como a execução da decisão do `user.run`, e quem
   pediu ouve o código (`launched: false`, com `code` e `error`). Fora de
   um comando — o servidor de janelas e o Terminal, no boot — não há
-  decisão a conferir de novo. O `permitir_processo` também pergunta por
+  decisão a conferir de novo; e só o kernel que lança por conta própria
+  passa assim (a (c) do adversário só de leitura, abaixo). O
+  `permitir_processo` também pergunta por
   quem pede — o processo do pedido nativo, com o programa que o gate
   decidiu (`autorizacao::quem_pede_um_processo`). E a última palavra do
   `fork` deixou de ser só a contenção (o achado 4): refaz as perguntas do
@@ -5581,6 +5589,68 @@ registro de cada uma no ponto em que nasceu.
   já isolado; ele foi decidido um instante antes —, e a recusa do
   nascimento grava `M de M` com a cota que o gate leu, que é a de antes de
   uma cota rebaixada no meio.
+  E o adversário só de leitura das correções (sobre o `6cea470`) achou
+  cinco latentes, feitos num incremento [B] de 17 de novembro de 2026 — as
+  mesmas perguntas do gate, com as mesmas recusas, feitas onde a janela
+  acaba; nenhuma regra nova, e nada novo na auditoria além do texto do
+  detalhe e da recusa que antes não existia:
+  (a) o `reconfirmar` não perguntava se o processo que pede ainda pede. O
+  `process.terminate` isola antes de pedir o fim, mas a poda tira o
+  isolamento do morto, e com o teto de isolados cheio (`MAIS_CONTIDOS`, 64)
+  ele nem entra: o pedido em curso de quem já tinha sido encerrado
+  concluía, e o `user.run` dele lançava. Agora a reconfirmação e as
+  perguntas sobre quem pede um processo — no gate e na última palavra do
+  `fork` e do `user.run` — perguntam também se ele acabou ou tem o fim
+  pedido (`fios::encerrado`), e recusam como o isolado: `DENY_CONTAINED`,
+  "processo isolado" (`contencao::PROCESSO_ISOLADO`) — o encerrado é o
+  isolado que vai acabar, e o par é o que o gate já usa. Na suíte, o
+  número de um fio que o escalonador nunca deu — o processo de mentira dos
+  casos que pedem como um processo sem lançar um programa — não é de um
+  processo que acabou; fora dela, um número assim não chega à pergunta, e
+  se chegasse seria recusado;
+  (b) o `reconfirmar` não refazia a confiança no editor do programa de
+  quem pede, que o gate e a última palavra do `fork` perguntam: refaz, por
+  último, como o gate — `DENY_POLICY`, com o motivo da falta, "o papel nao
+  confia no editor", e o editor na descrição do programa de quem pede;
+  (c) os dois "desconhecido, passa" da última palavra recusam: o pedido
+  nativo sem o programa que o gate decidiu já não supõe "sem imagem", que
+  passava pela confiança no editor sem pergunta — recusa como fora de um
+  comando autorizado, `ERROR` —; e o nascimento do `user.run` fora de um
+  comando decidido recusa também, gravado em nome do kernel. As exceções
+  se reconhecem pelo que são, e não por não terem decisão: o kernel que
+  lança por conta própria, fora de um comando — o servidor de janelas e o
+  Terminal no boot, pelo `usuario::lancar`; a suíte, que lança direto
+  (`usuario::lancar_pelo_kernel`, `autorizacao::Lancador::Kernel`) —, e
+  o handler do `user.run` que a suíte chama direto, cujo comando sem
+  decisão só existe na compilação dela (`autorizacao::reconfirmar_o_lancamento`);
+  (d) o gate do `fork` não perguntava pelas revogações que o journal
+  recusado perdeu, que o `reconfirmar`, o gate de todo comando e o de toda
+  chamada de sistema perguntam: com o journal recusado, nenhuma credencial
+  vale, e o processo de uma chave ou de uma pessoa bifurcava. Agora as
+  perguntas sobre quem pede um processo o fazem, no gate e na última
+  palavra do `fork`, com o mesmo código e o mesmo motivo
+  (`DENY_NOT_AUTHENTICATED`, "journal recusado: as revogacoes nao se
+  sabem");
+  (e) o `user.run` recusado nas perguntas do gate sobre quem pede — a
+  contenção, o editor, o papel, a cota — respondia "a cota de processos do
+  papel de quem lanca esta esgotada", sem o código, qualquer que fosse a
+  recusa. Agora responde o código e o motivo da recusa de verdade, com a
+  explicação, como a última palavra (`usuario::NaoLancou::Recusado`); a
+  cota — também a contada de novo no nascimento — responde `DENY_POLICY`
+  com o texto de sempre, e a contagem fica na auditoria.
+  E as lacunas de cobertura — o editor recusado no nascimento do `fork`, e
+  a chave revogada e a política nova no do `user.run` — ganharam casos. Os
+  casos: `contencao: o encerrado sem o isolamento no meio do user.run nao
+  lanca` (o fim pedido sem o isolamento, e o morto podado), `contencao: o
+  encerrado sem o isolamento no meio do fork nao ganha filho`, `contencao:
+  o fork com o journal recusado nao ganha filho` (no gate e na última
+  palavra), `contencao: o editor recusado no meio do fork nao ganha
+  filho`, `contencao: a chave revogada no meio do user.run nao lanca`,
+  `contencao: a politica nova no meio do user.run nao lanca`, `contencao:
+  a recusa do user.run no gate diz o codigo` (uma recusa de cada, pelo
+  gancho de antes das perguntas, e a cota) e `contencao: o desconhecido na
+  ultima palavra e recusado` (ver [As mutações do ponto sem volta e de
+  quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -7013,7 +7083,27 @@ falha fechado:
    anônima, e o programa que o processo adotou depois do ponto sem volta,
    que não rodou uma instrução, não aparece no lugar de quem pediu (o F2
    do adversário do AE-1);
-4. o processo nasce com o editor no programa do fio, e a auditoria diz de
+4. a decisão do gate é feita de novo onde a janela acaba, antes de o
+   código poder rodar — o gate decidiu antes de o arquivo ser lido, e a
+   leitura, a conferência e a preparação levam o tempo do arquivo: no
+   `user.run`, na última palavra do nascimento (`autorizacao::reconfirmar`);
+   no `executar`, imediatamente antes do ponto sem volta
+   (`autorizacao::DecisaoDoProcesso::reconfirmar` — o F4 do adversário do
+   AE-1) —, pela mesma conta do gate, sobre a mesma permissão e o mesmo
+   caminho, com o registro, a política, a contenção e a confiança no
+   editor de agora. Recusada no `executar`, nada se troca: a imagem
+   preparada sai, o processo segue com a dele e ouve `NEGADO` (−16), o
+   mesmo do gate no começo da chamada, e a execução da decisão vai à
+   auditoria com o código e o motivo da recusa. Quem é ponta de fluxo
+   decide de novo com a ordem das gravações na mão — tomada sem esperar,
+   na mesma tomada da troca —: a revogação e a política nova, que gravam
+   com a mesma ordem, ou são vistas ou vêm depois da troca inteira. Quem
+   não é decide de novo sem a ordem, e sem esperá-la — esperá-la dentro da
+   chamada seria o defeito do AE-1 de volta —: a janela fica estreitada à
+   troca, e não fechada; uma revogação que chega entre a decisão de novo e
+   a troca acha a imagem nova no lugar, como uma de um instante depois, e
+   cada pedido dela passa pelo gate;
+5. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
    de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`. Acima
    do teto do detalhe, abreviados: o pedido sai `(? <resumo> de bancada)`
@@ -8958,8 +9048,8 @@ valores; as mesmas duas conferências — a do gate e a do nascimento, as
 duas com a conta de vagas —; a mesma recusa na auditoria. O preço é de
 quem bifurca e colhe depressa, e de quem lança pelo `user.run` processos
 que saem depressa: ouve a recusa da cota — `NEGADO` no `fork`,
-`COTA_ESGOTADA` no lançamento, `DENY_POLICY` na auditoria, um registro
-por recusa — até o coletor recolher os mortos dele, numa passada por
+`DENY_POLICY` com o texto de `COTA_ESGOTADA` no lançamento, `DENY_POLICY`
+na auditoria, com a contagem, um registro por recusa — até o coletor recolher os mortos dele, numa passada por
 tique quando ele ganha a vez — mais tarde, com os núcleos ocupados —; e
 a limpeza da morte, na passada, espera a ordem das gravações, uma espera
 sem teto. Na imagem de produção, o servidor de janelas bifurca e colhe a
@@ -9327,6 +9417,58 @@ coletor solto recolhe os dois na mesma passada. Ela não é equivalente: com
 a vaga tomada antes do recolhimento do órfão, ele viraria zumbi do fio
 novo, guardaria a vaga enquanto aquele vivesse, e nenhum pai o colheria. O
 caso do órfão foi escrito para ela, e a reprova.
+
+### As mutações do ponto sem volta e de quem pede
+
+Doze mutações contra a decisão de novo no ponto sem volta do `exec` — o
+F4 do adversário do AE-1, em *Onde se confere* ([O código de fora da
+imagem](#o-código-de-fora-da-imagem)) — e contra as correções dos
+latentes do adversário só de leitura — as (a) a (e) do item *A soma das
+cotas de processos e a cota por sessão*, em [Decisões
+pendentes](#decisões-pendentes) —, uma de cada vez, no repositório, no
+x86_64 em debug, cada uma contra as partes da suíte que têm os casos que
+a devem reprovar (`DUKE_PARTE=k/126`: os treze casos novos ficam entre a
+93 e a 101). Na última rodada de cada uma, as doze reprovaram. As do
+caminho da chamada de sistema — as duas do ponto sem volta (MP1 e MP2),
+a das perguntas da última palavra do `fork` (MI) e a do morto que conta
+como vivo (MC2) — rodaram também no aarch64 em debug, e reprovaram pelos
+mesmos casos.
+
+| Mutação | Reprovada por |
+|---|---|
+| a troca de quem é ponta de fluxo sem a decisão de novo (MP1) | `troca: a chave revogada no meio nao troca a imagem`, `troca: a politica nova no meio nao troca a imagem` e `troca: o processo isolado no meio nao troca a imagem`, na rodada de quem é ponta: a imagem nova rodou, e o `fluxos` não disse que a troca devolveu `NEGADO` |
+| a troca de quem não é ponta sem a decisão de novo (MP2) | os mesmos três, na rodada de quem não é ponta — a de quem é passou |
+| o fim pedido que não conta — `fios::encerrado` só com a vida (MC1) | `contencao: o encerrado sem o isolamento no meio do fork nao ganha filho` ("o filho de quem teve o fim pedido no meio do fork nasceu"), `contencao: o encerrado sem o isolamento no meio do user.run nao lanca` (o lançado nasceu do pedido de quem tinha o fim pedido) e `contencao: a recusa do user.run no gate diz o codigo` (a recusa do fim pedido veio só na última palavra) — estes dois, depois do reforço abaixo |
+| o morto que conta como vivo — `fios::encerrado` só com o fim pedido (MC2) | `contencao: o encerrado sem o isolamento no meio do user.run nao lanca`, no morto podado: o lançado nasceu |
+| o fim pedido invertido — o vivo sem o fim pedido conta como acabado (MC3) | `contencao: o encerrado sem o isolamento no meio do user.run nao lanca`, `fluxo: a troca de imagem que falha depois do ponto sem volta` e `pareamento: esquecer a propria relacao`: todo pedido de um processo vivo recusado |
+| a reconfirmação sem perguntar se quem pede acabou (MH) | `contencao: o encerrado sem o isolamento no meio do user.run nao lanca`: o lançado nasceu |
+| as perguntas sobre quem pede um processo sem perguntar se ele acabou (MI) | `contencao: o encerrado sem o isolamento no meio do fork nao ganha filho` e `contencao: a recusa do user.run no gate diz o codigo` ("a recusa das perguntas do gate nao foi gravada uma vez": ela veio só na última palavra) |
+| a reconfirmação sem a confiança no editor (MD) | `contencao: o editor recusado no meio do user.run nao lanca`: o lançado nasceu |
+| a última palavra do `user.run` que passa fora de um comando decidido (ME1) | `contencao: o desconhecido na ultima palavra e recusado`: "o lancamento do user.run fora de um comando decidido nao foi recusado" |
+| o programa que não se sabe, que passa como "sem imagem" (ME2) | o mesmo caso: "o pedido de um processo sem o programa decidido nao foi recusado" |
+| as perguntas sobre quem pede um processo sem as revogações (MF) | `contencao: o fork com o journal recusado nao ganha filho` e `contencao: a recusa do user.run no gate diz o codigo` (a recusa do journal veio só na última palavra) |
+| a resposta do `user.run` recusado nas perguntas do gate de volta ao texto da cota, sem o código (MG) | `contencao: a recusa do user.run no gate diz o codigo`: "o user.run recusado no gate nao respondeu o codigo e o motivo da recusa" |
+
+Na primeira rodada, a MC1 só reprovou pelo `fork`, e sobreviveu aos dois
+casos do `user.run`: quem pede, acordado pelo fim pedido, morria no núcleo
+dele em microssegundos, antes da pergunta, que achava o morto — a outra
+metade. No `fork`, quem pede é quem está na chamada, e não morre antes
+dela. A MC1 não é equivalente: com o teto de isolados cheio, o processo
+com o fim pedido que ainda não chegou a um ponto seguro lançava. Os dois
+casos foram reforçados: o gancho prende quem pede ao núcleo da suíte antes
+de pedir o fim, e a suíte não cede até a pergunta — ele chega a ela vivo,
+com o fim pedido. Na rodada seguinte, a MC1 reprovou pelos três casos, e a
+MC2 e a MH, rodadas de novo, reprovaram pelo mesmo caso do `user.run` — a
+MC2 pelo morto podado, no x86_64 e no aarch64; a MH pelo fim pedido. O
+morto podado roda com o coletor segurado: recolhido, o fio sairia da
+tabela antes da pergunta, que o acharia fora dela — o mesmo "acabou" —, e
+a MC2 dependia da hora.
+
+As do ponto sem volta reprovam pela recusa da decisão de novo: nas rodadas
+sem mutação, ela veio sempre dali, sem volta adiada. Os casos aceitam
+também a volta seguinte a uma adiada, em que o gate recusa ele mesmo — a
+mesma recusa, feita onde a janela acaba —: uma rodada em que as três
+trocas de quem é ponta fossem adiadas não reprovaria a MP1.
 
 ### Mensagens
 
