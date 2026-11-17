@@ -118,7 +118,8 @@ segurança paralelo.
   Nunca inventada em silêncio. Pare só naquele ponto e: explique o
   problema; apresente as alternativas; as vantagens; os riscos; o
   impacto; recomende uma solução; aguarde a decisão. O trabalho que não
-  depende dela continua.
+  depende dela continua. O que é [C], e o que a proposta traz, está em
+  5.3; tudo o mais é [B] e não espera ninguém (seção 5).
 
 Nenhum agente reabre uma decisão fechada (CLOSED) só porque achou uma
 alternativa tecnicamente interessante.
@@ -435,3 +436,103 @@ bloquear nada.
   com o mesmo resumo em execuções diferentes da CI.
 - É um registro de build, fora do Duke: não é autoridade, nem
   persistência, nem auditoria do sistema.
+
+## 5. A autonomia e o desenvolvimento contínuo
+
+A política adotada pelo dono do projeto em 17 de novembro de 2026,
+permanente como o resto deste arquivo: **autonomia por padrão, aprovação
+humana por exceção**. O objetivo é a maior velocidade de desenvolvimento,
+sem afrouxar as invariantes (1.7) nem os critérios de qualidade (5.5).
+
+### 5.1 O que o coordenador decide sozinho
+
+Toda decisão [B] (1.6), sem pedir aprovação:
+
+- os módulos, as estruturas de dados, os algoritmos e a organização
+  interna;
+- refatorar, otimizar e substituir implementações internas;
+- as ferramentas e as estratégias de teste;
+- criar, distribuir e coordenar as tarefas dos agentes, e integrar o que
+  volta das worktrees temporárias;
+- corrigir as falhas que uma auditoria acha;
+- melhorar as bancadas, a CI, a documentação e a infraestrutura;
+- escolher a próxima tarefa dentro do roteiro autorizado, e executar as
+  etapas seguidas sem uma autorização para cada uma.
+
+### 5.2 A continuidade
+
+Ao fim de cada tarefa:
+
+1. conferir os critérios de aceitação;
+2. rodar os testes que se aplicam;
+3. integrar na linha oficial;
+4. atualizar a documentação e o roteiro (a seção "Roteiro" do README);
+5. identificar o próximo gargalo ou a próxima dependência;
+6. começar a próxima tarefa autorizada.
+
+Não se para para perguntar qual é a próxima tarefa quando o roteiro e as
+dependências já a determinam.
+
+### 5.3 As decisões [C]
+
+Pedem aprovação prévia só as mudanças genuinamente novas em:
+
+- identidade, autoridade e confiança;
+- o Gate, a Policy e a autorização;
+- primitivas criptográficas ou modelos de custódia novos;
+- a semântica da persistência e da auditoria;
+- migração, clonagem ou delegação de identidade;
+- as invariantes de segurança;
+- semânticas de segurança ou modelos de operação novos.
+
+Toda proposta [C] traz o problema concreto, as evidências, as
+alternativas, os riscos, o impacto, a recomendação e o plano de
+validação. Nenhuma mudança [C] é implementada sem a aprovação explícita
+(1.6).
+
+### 5.4 O trabalho que não espera
+
+Uma decisão [C] identificada não para o trabalho independente. O
+coordenador:
+
+- isola a parte que depende dela;
+- continua tudo o que não depende;
+- prepara os dados da decisão;
+- não constrói nada sobre uma hipótese de arquitetura que não foi
+  aprovada.
+
+### 5.5 A qualidade não muda
+
+A autonomia não reduz os critérios: os testes de unidade e de
+integração, os adversariais e as mutações, a concorrência, as duas
+arquiteturas, depuração e release, a CI completa e a revisão
+independente de segurança e de documentação (1.4, 1.5, 1.10 e 1.11).
+Nenhuma etapa é dada por concluída sem evidência suficiente e
+reproduzível.
+
+### 5.6 O que a autonomia não autoriza
+
+- mudar uma invariante ou uma decisão fechada (1.7);
+- promover sozinho uma mudança de arquitetura;
+- publicar um release ou implantar em produção sem a autorização que se
+  aplica;
+- uma operação destrutiva ou irreversível sem autorização;
+- ignorar uma falha de teste para cumprir prazo.
+
+### 5.7 A comunicação
+
+Executiva: atualizações curtas no trabalho de rotina, o relatório
+completo (1.12) no encerramento de uma fase e a proposta detalhada (5.3)
+numa decisão [C]. Nenhuma aprovação redundante. Cada atualização diz:
+
+- o que foi concluído;
+- o que foi validado;
+- o que está em andamento;
+- qual é o próximo objetivo;
+- se há um bloqueio que realmente exige uma pessoa.
+
+### 5.8 A responsabilidade do coordenador
+
+Manter o projeto andando, preservar a linha oficial, integrar os
+especialistas e impedir que uma decisão interna de implementação vire,
+sem razão, uma dependência de aprovação humana.

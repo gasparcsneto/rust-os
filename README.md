@@ -12440,7 +12440,11 @@ arquitetura, o Gate, a Policy, a cadeia de identidade e a auditoria
 continuam sendo um só cada. A política permanente — a análise antes de
 distribuir, as decisões [A], [B] e [C], as invariantes, a validação e o
 relatório — está em [`CLAUDE.md`](CLAUDE.md), e os papéis prontos dos
-agentes em `.claude/agents/`.
+agentes em `.claude/agents/`. Com autonomia por padrão e aprovação humana
+por exceção: o coordenador toma as decisões internas e segue de tarefa em
+tarefa pelo roteiro, e só uma decisão nova de identidade, autoridade,
+confiança, criptografia, persistência, auditoria ou segurança espera o
+dono do projeto.
 
 ## Idioma
 
