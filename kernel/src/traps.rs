@@ -341,6 +341,7 @@ pub fn fatal(nome: &'static str, pc: u64, endereco: Option<u64>, codigo: u64) ->
         crate::rede::bancada_hora::destravar();
         crate::seguranca::destravar();
         crate::botao::destravar();
+        crate::energia::destravar();
         crate::hora::destravar();
         crate::hora::civil::destravar();
         crate::virtio::teclado::destravar();

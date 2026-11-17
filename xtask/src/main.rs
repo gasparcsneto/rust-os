@@ -4117,9 +4117,10 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     (".selar_identidade(", &["kernel/src/persistencia.rs"]),
     (".abrir_identidade(", &["kernel/src/persistencia.rs"]),
     // O registro antes do efeito: a assinatura (`key.sign`) e o pedido de
-    // reiniciar ou desligar, que a energia leva ao journal antes de lançar
-    // o fio que para a máquina — e a energia só é chamada pelos handlers e
-    // pelas operações administrativas (ver `energia::preparar`, abaixo).
+    // reiniciar ou desligar, que a energia leva ao journal antes de acordar
+    // o fio que para a máquina, nascido no boot — e a energia só é chamada
+    // pelos handlers e pelas operações administrativas (ver
+    // `energia::preparar`, abaixo).
     (
         "persistencia::gravar_auditoria_ate(",
         &["kernel/src/agent/commands.rs", "kernel/src/energia.rs"],

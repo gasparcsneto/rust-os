@@ -469,6 +469,14 @@ pub fn congelar() {
     CONGELADO.store(true, Ordering::SeqCst);
 }
 
+/// O escalonamento está congelado — ver [`congelar`]: depois de uma falha
+/// fatal, nenhum fio roda mais. É a pergunta de quem só tem a fazer o que
+/// um fio já nascido faria, e recusa em vez de prometer — a energia
+/// ([`crate::energia::preparar`]).
+pub fn congelado() -> bool {
+    CONGELADO.load(Ordering::SeqCst)
+}
+
 /// Segura em [`recolher_terminados`] o primeiro fio morto tirado da tabela,
 /// antes de largá-lo — com a pilha dele ainda mapeada.
 ///
@@ -1608,15 +1616,72 @@ pub fn criar_como(
             fixo: None,
         },
         None,
-        &|_| {},
+        &|_| Ok(()),
     )
+    .map_err(NaoNasceu::motivo)
 }
 
-/// O que [`nascer`] devolve quando a cota de processos do titular já está
-/// cheia. Uma constante, e não um texto qualquer, porque quem lança precisa
-/// distinguir esta recusa — que é da política, e vai para a auditoria — de
-/// uma falta de vaga ou de memória.
+/// O motivo de um processo que não nasceu pela cota de processos do
+/// titular — ver [`NaoNasceu::Cota`]. Uma constante, e não um texto
+/// qualquer, porque quem lança precisa distinguir esta recusa — que é da
+/// política, e vai para a auditoria — de uma falta de vaga ou de memória.
 pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta esgotada";
+
+/// O que um titular ocupa da tabela de fios quando a cota dele recusa um
+/// processo: as vagas que contam na cota — ver [`processos_de`] — e
+/// quantas delas são de mortos que esperam o coletor, numa fotografia só,
+/// tirada sob a trava do escalonador.
+///
+/// # Por que os mortos à parte
+///
+/// Porque a recusa os conta e o `process.list` não os mostra: ele mostra os
+/// vivos, os que nascem e os zumbis, e o morto que não é zumbi — o filho
+/// colhido, o órfão, o do `user.run` — sai da lista quando morre, e da
+/// tabela só quando o coletor o recolhe. Quem ouvia "N de M" podia ver na
+/// lista menos processos do titular que N — o achado A1-4. A recusa diz
+/// quantos dos N são esses mortos: `ocupados − mortos_por_recolher` é o que
+/// a lista mostra do titular no mesmo instante.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ocupacao {
+    /// As vagas que contam na cota: os vivos, os que nascem, os zumbis e os
+    /// mortos ainda não recolhidos.
+    pub ocupados: usize,
+    /// Quantas delas são de mortos que não são zumbis: os que esperam o
+    /// coletor, e não a colheita.
+    pub mortos_por_recolher: usize,
+}
+
+/// Por que um fio não nasceu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NaoNasceu {
+    /// A cota de processos do titular, contada de novo na mesma seção
+    /// crítica que reservaria a vaga — ver [`criar_processo`] —, com o que
+    /// ele ocupava nela.
+    Cota(Ocupacao),
+    /// Quem cria recusou no nascimento — a última palavra dele, antes de o
+    /// fio poder rodar (ver [`bifurcar`]) —, e já gravou o porquê.
+    Recusado(&'static str),
+    /// Não houve vaga, nem memória para a pilha, ou o escalonador está
+    /// congelado depois de uma falha fatal.
+    Falha(&'static str),
+}
+
+impl NaoNasceu {
+    /// O motivo em texto, para o log e para quem só guarda texto estático:
+    /// [`COTA_ESGOTADA`] na recusa da cota.
+    pub fn motivo(self) -> &'static str {
+        match self {
+            NaoNasceu::Cota(_) => COTA_ESGOTADA,
+            NaoNasceu::Recusado(motivo) | NaoNasceu::Falha(motivo) => motivo,
+        }
+    }
+}
+
+impl From<NaoNasceu> for &'static str {
+    fn from(n: NaoNasceu) -> &'static str {
+        n.motivo()
+    }
+}
 
 /// [`criar_como`] um processo, contado na cota do titular da `autoridade`:
 /// nasce só se o titular ocupar menos de `cota` vagas da tabela — com os
@@ -1633,7 +1698,8 @@ pub const COTA_ESGOTADA: &str = "a cota de processos do papel de quem lanca esta
 /// dois contam um a menos que a cota, e os dois nascem: a cota passa a ser
 /// um teto que se ultrapassa por um a cada núcleo. Contar de novo **na
 /// mesma seção crítica que reserva a vaga** fecha a janela: o fio reservado
-/// já é contado, e quem conta depois o vê.
+/// já é contado, e quem conta depois o vê. A recusa devolve o que o titular
+/// ocupava nessa conta ([`NaoNasceu::Cota`]), para quem lança gravá-la.
 ///
 /// `nasceu` é chamada com o fio já certo de nascer e antes de ele poder
 /// rodar, fora de qualquer trava — o lugar de gravar o nascimento na
@@ -1646,7 +1712,7 @@ pub fn criar_processo(
     autoridade: crate::autorizacao::Autoridade,
     cota: usize,
     nasceu: &dyn Fn(IdFio),
-) -> Result<IdFio, &'static str> {
+) -> Result<IdFio, NaoNasceu> {
     nascer(
         nome,
         Nascimento::Funcao {
@@ -1656,7 +1722,10 @@ pub fn criar_processo(
             fixo: None,
         },
         Some(cota),
-        nasceu,
+        &|id| {
+            nasceu(id);
+            Ok(())
+        },
     )
 }
 
@@ -1684,8 +1753,9 @@ pub fn criar_no_nucleo(
             fixo: Some(cpu),
         },
         None,
-        &|_| {},
+        &|_| Ok(()),
     )
+    .map_err(NaoNasceu::motivo)
 }
 
 /// Como um fio novo recebe o primeiro contexto.
@@ -1713,7 +1783,15 @@ enum Nascimento {
 
 /// Cria um fio a partir de um quadro de usuário: o filho de um `fork`,
 /// contado na cota do titular da autoridade que ele herda — ver
-/// [`criar_processo`], também para `nasceu`.
+/// [`criar_processo`].
+///
+/// `nasce` é a última palavra de quem bifurca, como o `nasceu` de
+/// [`criar_processo`] — com o fio pronto, antes de ele poder rodar, fora de
+/// qualquer trava —, e pode recusar: é onde a chamada confere de novo o
+/// que o gate decidiu antes de copiar o espaço e que pode ter mudado no
+/// meio — a contenção de quem bifurca —, e grava o nascimento, ou a
+/// recusa. Recusado, o filho não nasce: a vaga volta, e a pilha e o espaço
+/// são largados ([`NaoNasceu::Recusado`]).
 ///
 /// # Safety
 ///
@@ -1724,26 +1802,27 @@ pub unsafe fn bifurcar(
     quadro: *const core::ffi::c_void,
     espaco: crate::paginacao::Espaco,
     cota: usize,
-    nasceu: &dyn Fn(IdFio),
-) -> Result<IdFio, &'static str> {
+    nasce: &dyn Fn(IdFio) -> Result<(), &'static str>,
+) -> Result<IdFio, NaoNasceu> {
     nascer(
         nome,
         Nascimento::Bifurcacao { quadro, espaco },
         Some(cota),
-        nasceu,
+        nasce,
     )
 }
 
 /// Faz nascer um fio. Com `cota`, ele é um processo, e nasce só se o
 /// titular da autoridade dele ocupar menos que isso da tabela — os vivos,
 /// os que estão nascendo, os zumbis e os mortos ainda não recolhidos; ver
-/// [`criar_processo`], também para `nasceu`.
+/// [`criar_processo`]. `nasce` é a última palavra de quem cria, e pode
+/// recusar — ver [`bifurcar`].
 fn nascer(
     nome: &'static str,
     nascimento: Nascimento,
     cota: Option<usize>,
-    nasceu: &dyn Fn(IdFio),
-) -> Result<IdFio, &'static str> {
+    nasce: &dyn Fn(IdFio) -> Result<(), &'static str>,
+) -> Result<IdFio, NaoNasceu> {
     // Depois de uma falha fatal o escalonador está congelado, e um fio criado
     // aqui **nunca** roda: [`selecionar`] desiste antes de olhar a tabela.
     //
@@ -1757,7 +1836,9 @@ fn nascer(
     // Cada chamada ainda custava uma vaga da tabela de fios e um espaço de
     // endereços que ninguém iria liberar.
     if CONGELADO.load(Ordering::SeqCst) {
-        return Err("o escalonador esta congelado apos uma falha fatal");
+        return Err(NaoNasceu::Falha(
+            "o escalonador esta congelado apos uma falha fatal",
+        ));
     }
 
     // Mapear a pilha nova acontece **fora** da trava do escalonador, por
@@ -1824,13 +1905,14 @@ fn nascer(
             Nascimento::Bifurcacao { .. } => None,
         };
         // A cota, com a vaga ainda por reservar e a trava na mão: quem
-        // conferir depois de nós já nos conta — ver `criar_processo`.
+        // conferir depois de nós já nos conta — ver `criar_processo`. A
+        // recusa leva o que o titular ocupa nesta mesma conta.
         if let Some(cota) = cota
-            && e.processos_de(autoridade) >= cota
+            && let Some(ocupacao) = e.cota_cheia(autoridade, cota)
         {
-            return Err(COTA_ESGOTADA);
+            return Err(NaoNasceu::Cota(ocupacao));
         }
-        let vaga = e.vaga_livre()?;
+        let vaga = e.vaga_livre().map_err(NaoNasceu::Falha)?;
         e.fios[vaga] = Some(Fio {
             id,
             nome,
@@ -1854,7 +1936,7 @@ fn nascer(
             programa,
             terminar: false,
         });
-        Ok::<_, &'static str>((vaga, herdada, pai, autoridade, fixo, programa))
+        Ok::<_, NaoNasceu>((vaga, herdada, pai, autoridade, fixo, programa))
     })?;
 
     // Ponto de cessão só para testes: é exatamente aqui que a janela entre
@@ -1871,16 +1953,8 @@ fn nascer(
         Err(motivo) => {
             // Devolver a vaga é obrigatório: deixá-la reservada a perderia
             // para sempre, e um erro de mapeamento não deve custar uma vaga.
-            //
-            // `take` e não `= None` pelo mesmo motivo que o resto do módulo
-            // evita: atribuir larga o valor antigo ali mesmo, com a trava na
-            // mão. O marcador que está na vaga não tem recursos hoje, então
-            // dá na mesma — mas isso é um invariante que ninguém enuncia, e
-            // no dia em que o `Fio` ganhar mais um campo com `Drop` a
-            // diferença entre as duas formas vira um deadlock.
-            let marcador = com_escalonador(|e| e.fios[vaga].take());
-            drop(marcador);
-            return Err(motivo);
+            devolver_a_reserva(vaga);
+            return Err(NaoNasceu::Falha(motivo));
         }
     };
 
@@ -1905,14 +1979,39 @@ fn nascer(
         }
     };
 
-    // Daqui em diante o fio nasce — nada mais falha —, e ainda não pode
-    // rodar: a vaga está reservada. É o momento de quem lançou dizer que
-    // ele nasceu, fora de qualquer trava.
-    nasceu(id);
+    // Só para a suíte: o que muda no meio do nascimento — a contenção de
+    // quem bifurca, o término do processo que ainda nasce —, no ponto exato,
+    // em vez de por acaso. Ver `no_meio_do_nascimento_de_teste`.
+    #[cfg(feature = "modo-teste")]
+    if cota.is_some() {
+        no_meio_do_nascimento(id.numero());
+    }
+
+    // Daqui em diante nada mais falha, e o fio ainda não pode rodar: a vaga
+    // está reservada. É o momento da última palavra de quem o cria, fora de
+    // qualquer trava: conferir de novo o que mudou desde o gate e dizer que
+    // ele nasceu — ou recusar, e o fio não nasce.
+    if let Err(motivo) = nasce(id) {
+        // A pilha mora no endereço da vaga: ela é desmapeada antes de a vaga
+        // voltar, para uma criação em outro núcleo não mapear a dela por
+        // cima — a regra do recolhimento. E o espaço da bifurcação sai junto,
+        // também fora da trava.
+        drop(pilha);
+        drop(espaco);
+        devolver_a_reserva(vaga);
+        return Err(NaoNasceu::Recusado(motivo));
+    }
 
     // Mesma regra da devolução acima: o marcador sai sob a trava e é largado
     // fora dela.
     let (marcador, ociosos) = com_escalonador(|e| {
+        // O término pedido enquanto o fio nascia — o `process.terminate` de
+        // um processo `spawning` marcou a vaga reservada e respondeu
+        // `terminating` — vem para o fio definitivo, sob a mesma trava em
+        // que o pedido marcou: sem isso, o processo seguia até sair sozinho,
+        // e o pedido ficava contado como pendente para sempre. Ele morre no
+        // primeiro ponto seguro, como qualquer outro.
+        let terminar = e.fios[vaga].as_ref().is_some_and(|f| f.terminar);
         let marcador = e.fios[vaga].replace(Fio {
             id,
             nome,
@@ -1934,7 +2033,7 @@ fn nascer(
             ceder_ao_voltar: false,
             pedido: EstadoDoPedido::Livre,
             programa,
-            terminar: false,
+            terminar,
         });
         (marcador, e.nucleos_ociosos())
     });
@@ -1960,6 +2059,55 @@ fn nascer(
     }
 
     Ok(id)
+}
+
+/// Devolve a vaga reservada de um fio que não chegou a nascer — a pilha não
+/// se mapeou, ou quem o criava recusou no nascimento. A pilha, se havia,
+/// já foi largada: ela mora no endereço da vaga.
+///
+/// O término pedido enquanto ele nascia sai com a vaga: o contador dos
+/// pendentes volta a dizer só o que falta, como na morte de quem tinha o
+/// pedido ([`marcar_terminado`]).
+///
+/// `take` e não `= None` pelo mesmo motivo que o resto do módulo evita:
+/// atribuir larga o valor antigo ali mesmo, com a trava na mão. O marcador
+/// que está na vaga não tem recursos hoje, então dá na mesma — mas isso é
+/// um invariante que ninguém enuncia, e no dia em que o `Fio` ganhar mais
+/// um campo com `Drop` a diferença entre as duas formas vira um deadlock.
+fn devolver_a_reserva(vaga: usize) {
+    let marcador = com_escalonador(|e| {
+        let marcador = e.fios[vaga].take();
+        if marcador.as_ref().is_some_and(|f| f.terminar) {
+            TERMINOS_PENDENTES.fetch_sub(1, Ordering::Relaxed);
+        }
+        marcador
+    });
+    drop(marcador);
+}
+
+/// Só para a suíte: o que roda no meio do nascimento de um processo — com
+/// a vaga reservada, a pilha e o contexto prontos, antes da última palavra
+/// de quem o cria —, com o id do fio que nasce. Uma vez: quem passa a toma.
+#[cfg(feature = "modo-teste")]
+static NO_MEIO_DO_NASCIMENTO: Mutex<Option<fn(u64)>> = Mutex::new(None);
+
+/// Só para a suíte: põe (ou tira) o que roda no meio do próximo nascimento
+/// de um processo — ver [`NO_MEIO_DO_NASCIMENTO`]. É onde um caso isola
+/// quem bifurca, ou encerra o processo que ainda nasce, no ponto exato da
+/// janela: a janela de verdade é a de copiar o espaço e mapear uma pilha,
+/// e um pedido de outro fio só cai nela por acaso.
+#[cfg(feature = "modo-teste")]
+pub fn no_meio_do_nascimento_de_teste(f: Option<fn(u64)>) {
+    crate::arch::sem_interrupcoes(|| *NO_MEIO_DO_NASCIMENTO.lock() = f);
+}
+
+/// Só para a suíte: roda, uma vez, o que [`no_meio_do_nascimento_de_teste`]
+/// pôs.
+#[cfg(feature = "modo-teste")]
+fn no_meio_do_nascimento(id: u64) {
+    if let Some(f) = crate::arch::sem_interrupcoes(|| NO_MEIO_DO_NASCIMENTO.lock().take()) {
+        f(id);
+    }
 }
 
 /// Prepara o fio ocioso do núcleo `cpu`: a vaga, a pilha, e o fio marcado
@@ -2110,6 +2258,45 @@ impl Escalonador {
             .flatten()
             .filter(|f| f.nome == NOME_DO_PROCESSO && f.autoridade == autoridade)
             .count()
+    }
+
+    /// [`Self::processos_de`] contra a `cota`: `None` se o titular cabe
+    /// nela; se não cabe, o que ele ocupa e, na mesma seção crítica,
+    /// quantas dessas vagas são de mortos que esperam o coletor — os que a
+    /// recusa conta e o `process.list` não mostra (ver [`Ocupacao`]).
+    ///
+    /// # A pergunta pelo pai, só na recusa
+    ///
+    /// Separar os mortos dos zumbis pergunta a [`Self::e_zumbi`] por cada
+    /// terminado do titular — uma volta pela tabela por terminado —, e a
+    /// conta de todo `bifurcar` e de todo lançamento não paga isso: quem
+    /// cabe na cota faz a volta de sempre ("Sem perguntar pelo pai", acima).
+    /// Só a recusa, que não faz nascer nada, pergunta: no pior caso uma
+    /// volta por vaga da tabela.
+    fn cota_cheia(
+        &self,
+        autoridade: crate::autorizacao::Autoridade,
+        cota: usize,
+    ) -> Option<Ocupacao> {
+        let ocupados = self.processos_de(autoridade);
+        if ocupados < cota {
+            return None;
+        }
+        // Um laço, e não um iterador encadeado — ver `proximo_a_recolher`.
+        let mut mortos_por_recolher = 0;
+        for i in 0..MAX_FIOS {
+            let do_titular_e_morto = matches!(&self.fios[i], Some(f)
+                if f.nome == NOME_DO_PROCESSO
+                    && f.autoridade == autoridade
+                    && f.estado == Estado::Terminado);
+            if do_titular_e_morto && !self.e_zumbi(i) {
+                mortos_por_recolher += 1;
+            }
+        }
+        Some(Ocupacao {
+            ocupados,
+            mortos_por_recolher,
+        })
     }
 
     /// A conta de [`Self::processos_de`] pela definição, categoria por
@@ -3079,8 +3266,21 @@ pub fn nucleo_de(id: u64) -> Option<usize> {
 /// o morto. É a conta da cota de processos do papel — ver
 /// [`crate::autorizacao::permitir_processo`] e, aqui, o porquê de todo morto
 /// contar, em `Escalonador::processos_de`.
+///
+/// O gate a faz por [`cota_cheia`], que a confronta com a cota na mesma
+/// tomada da trava; esta, sozinha, é a pergunta da suíte.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
     com_escalonador(|e| e.processos_de(autoridade))
+}
+
+/// A conta de [`processos_de`] contra a `cota`, numa tomada só da trava:
+/// `None` se o titular cabe nela; se não cabe, o que ele ocupa e quantas
+/// dessas vagas são de mortos que esperam o coletor ([`Ocupacao`]). É a
+/// conta do gate em [`crate::autorizacao::permitir_processo`]; a do
+/// nascimento, a que vale, é a mesma, na seção crítica que reserva a vaga.
+pub fn cota_cheia(autoridade: crate::autorizacao::Autoridade, cota: usize) -> Option<Ocupacao> {
+    com_escalonador(|e| e.cota_cheia(autoridade, cota))
 }
 
 /// A autoridade de um processo vivo — um fio que hospeda um programa,
@@ -3222,8 +3422,10 @@ static TERMINADOS: AtomicU64 = AtomicU64::new(0);
 ///
 /// Um processo que espera — um filho, um evento, a resposta de um pedido —
 /// volta a circular agora: é na volta da chamada que ele encontra o pedido.
-/// Pedir de novo não muda nada. Os filhos dele seguem: o término é de um
-/// processo, e não da árvore.
+/// Um que ainda nasce (`spawning`) tem a marca na vaga reservada, e o
+/// nascimento a leva ao fio definitivo, sob a mesma trava — ou a desconta,
+/// se a vaga volta sem ele nascer (ver [`nascer`]). Pedir de novo não muda
+/// nada. Os filhos dele seguem: o término é de um processo, e não da árvore.
 ///
 /// Só pela contenção, que isola antes — o `xtask` confere.
 pub fn pedir_termino(id: u64) -> Result<&'static str, &'static str> {

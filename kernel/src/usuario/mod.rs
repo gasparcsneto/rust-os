@@ -1242,30 +1242,45 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
         }
     };
 
+    // A última palavra antes de o filho poder rodar: a contenção de quem
+    // bifurca, de novo — o gate a conferiu antes de copiar o espaço, e um
+    // `process.isolate` no meio deixaria nascer um filho livre de um
+    // processo isolado; contido, a recusa vai para a auditoria como a do
+    // gate, e o filho não nasce. Solto, o filho, na auditoria, em nome do
+    // pai — antes de ele poder rodar: o primeiro pedido do filho vem depois
+    // do registro que diz quem o criou.
+    let nasce = |id: crate::fios::IdFio| {
+        crate::autorizacao::reconfirmar_bifurcacao(autoridade)
+            .map_err(|_| "quem bifurca foi contido antes de o filho nascer")?;
+        crate::autorizacao::auditar_bifurcacao(id.numero());
+        Ok(())
+    };
     // SAFETY: o quadro é o desta chamada e o espaço é cópia do ativo, que é o
     // do fio que chamou — exatamente o que `bifurcar` exige.
-    // O filho, na auditoria, em nome do pai — antes de ele poder rodar: o
-    // primeiro pedido do filho vem depois do registro que diz quem o criou.
-    let nasceu = |id: crate::fios::IdFio| crate::autorizacao::auditar_bifurcacao(id.numero());
     match unsafe {
         crate::fios::bifurcar(
             crate::fios::NOME_DO_PROCESSO,
             quadro as *const _,
             espaco,
             cota,
-            &nasceu,
+            &nasce,
         )
     } {
         Ok(id) => {
             BIFURCACOES.fetch_add(1, Ordering::Relaxed);
             id.numero() as i64
         }
-        Err(crate::fios::COTA_ESGOTADA) => {
-            crate::autorizacao::recusar_pela_cota(autoridade, "process.fork", cota);
+        Err(crate::fios::NaoNasceu::Cota(ocupacao)) => {
+            crate::autorizacao::recusar_pela_cota(autoridade, "process.fork", ocupacao, cota);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::NEGADO
         }
-        Err(motivo) => {
+        // A recusa já está na auditoria, pela reconfirmação.
+        Err(crate::fios::NaoNasceu::Recusado(_)) => {
+            RECUSADAS.fetch_add(1, Ordering::Relaxed);
+            erro::NEGADO
+        }
+        Err(crate::fios::NaoNasceu::Falha(motivo)) => {
             crate::log_warn!("usuario", "bifurcar falhou: {}", motivo);
             RECUSADAS.fetch_add(1, Ordering::Relaxed);
             erro::SEM_VAGA_DE_FIO
@@ -1971,9 +1986,9 @@ pub fn lancar_conferido(
         &nasceu,
     ) {
         Ok(id) => Ok(id.numero()),
-        Err(motivo) => {
-            if motivo == crate::fios::COTA_ESGOTADA {
-                crate::autorizacao::recusar_pela_cota(autoridade, "process.run", cota);
+        Err(nao) => {
+            if let crate::fios::NaoNasceu::Cota(ocupacao) = nao {
+                crate::autorizacao::recusar_pela_cota(autoridade, "process.run", ocupacao, cota);
             }
             // O fio não nasceu, então ninguém vai reconstruir a caixa. Largá-la
             // aqui é obrigatório: sem isto, cada lançamento recusado — e eles
@@ -1985,7 +2000,7 @@ pub fn lancar_conferido(
                 // entregue a ninguém, porque `criar` falhou.
                 drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             }
-            Err(NaoLancou::Fio(motivo))
+            Err(NaoLancou::Fio(nao.motivo()))
         }
     }
 }

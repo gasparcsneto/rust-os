@@ -33,6 +33,7 @@ mod aviso;
 mod coleta;
 mod enlace;
 mod fluxo;
+mod nascimento;
 mod orcamento;
 mod pareamento;
 mod recolhimento;
@@ -28052,8 +28053,13 @@ fn smp_a_cota_de_processos_vale_entre_nucleos() -> Resultado {
                     Ok(_) => {
                         NASCIDOS.fetch_add(1, SeqCst);
                     }
-                    Err(crate::fios::COTA_ESGOTADA) => {
-                        crate::autorizacao::recusar_pela_cota(autoridade, "process.fork", cota);
+                    Err(crate::fios::NaoNasceu::Cota(ocupacao)) => {
+                        crate::autorizacao::recusar_pela_cota(
+                            autoridade,
+                            "process.fork",
+                            ocupacao,
+                            cota,
+                        );
                         RECUSADOS.fetch_add(1, SeqCst);
                     }
                     Err(_) => {}
@@ -39070,6 +39076,14 @@ static CASOS: &[Caso] = &[
         f: zumbis::zumbis_os_fios_do_kernel_nao_contam_na_cota,
     },
     Caso {
+        nome: "zumbis: a recusa do fork diz o processo que bifurcou",
+        f: zumbis::zumbis_a_recusa_do_fork_diz_o_processo_que_bifurcou,
+    },
+    Caso {
+        nome: "zumbis: a recusa diz os mortos por recolher",
+        f: zumbis::zumbis_a_recusa_diz_os_mortos_por_recolher,
+    },
+    Caso {
         nome: "vagas: o morto sem a limpeza guarda a vaga ate o coletor",
         f: vagas::vagas_o_morto_sem_a_limpeza_guarda_a_vaga,
     },
@@ -40435,6 +40449,10 @@ static CASOS: &[Caso] = &[
         f: contencao_o_processo_isolado_e_solto,
     },
     Caso {
+        nome: "contencao: o isolado no meio do fork nao ganha filho",
+        f: nascimento::contencao_o_isolado_no_meio_do_fork_nao_ganha_filho,
+    },
+    Caso {
         nome: "processos: a lista diz o programa, o papel e o estado",
         f: processos_a_lista_diz_o_programa_o_papel_e_o_estado,
     },
@@ -40467,6 +40485,14 @@ static CASOS: &[Caso] = &[
         f: processos_o_administrador_encerra_pela_prova,
     },
     Caso {
+        nome: "processos: o encerrado que ainda nasce morre",
+        f: nascimento::processos_o_encerrado_que_ainda_nasce_morre,
+    },
+    Caso {
+        nome: "processos: o termino do filho que nao nasce sai com a vaga",
+        f: nascimento::processos_o_termino_do_filho_que_nao_nasce_sai_com_a_vaga,
+    },
+    Caso {
         nome: "rede: o net.info diz os DNS do DHCP",
         f: rede_o_net_info_diz_os_dns_do_dhcp,
     },
@@ -40493,6 +40519,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "energia: sem o meio no firmware, a maquina segue",
         f: energia_sem_o_meio_no_firmware_a_maquina_segue,
+    },
+    Caso {
+        nome: "energia: o reinicio com a tabela de fios cheia",
+        f: nascimento::energia_o_reinicio_com_a_tabela_de_fios_cheia,
     },
     Caso {
         nome: "energia: a maquina diz como reinicia e desliga",

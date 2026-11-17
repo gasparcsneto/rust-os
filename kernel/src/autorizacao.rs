@@ -3993,24 +3993,13 @@ pub fn auditar_aperto_do_pareamento(chave: Option<[u8; 32]>, codigo: Codigo, det
 /// a resposta rápida, e a que vale é a do nascimento, feita junto com a
 /// reserva da vaga — ver [`crate::fios::criar_processo`]. Quando aquela
 /// recusa, quem lança chama [`recusar_pela_cota`], e a recusa vai para a
-/// auditoria do mesmo jeito.
+/// auditoria do mesmo jeito. E a contenção de quem bifurca é conferida de
+/// novo no nascimento do filho — ver [`reconfirmar_bifurcacao`].
 pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, Codigo> {
     let quem = quem_do_processo(autoridade);
     // Quem está contido não lança nem bifurca: o filho de um processo
-    // isolado nasceria livre. Quem pede é o fio de agora — o processo que
-    // bifurca, ou o comando que lança em nome de alguém.
-    let (fio, programa) = crate::fios::programa_atual();
-    if let Some((codigo, motivo)) = crate::contencao::recusa(
-        Chamador::Processo {
-            fio,
-            autoridade,
-            programa,
-        },
-        autoridade,
-    ) {
-        auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(codigo);
-    }
+    // isolado nasceria livre.
+    let programa = recusar_se_contido(&quem, autoridade, metodo)?;
     // O código de fora da imagem em cujo editor o papel não confia mais
     // também não lança nem bifurca: o filho levaria o mesmo programa, e
     // nasceria só para ser recusado em cada pedido.
@@ -4034,32 +4023,162 @@ pub fn permitir_processo(autoridade: Autoridade, metodo: &str) -> Result<usize, 
         return Err(Codigo::DenyRole);
     };
     let cota = cota as usize;
-    let ocupados = crate::fios::processos_de(autoridade);
-    if ocupados >= cota {
-        return Err(recusar_pela_cota_com(&quem, metodo, ocupados, cota));
+    if let Some(ocupacao) = crate::fios::cota_cheia(autoridade, cota) {
+        let crate::fios::Ocupacao {
+            ocupados,
+            mortos_por_recolher,
+        } = ocupacao;
+        return Err(recusar_pela_cota_com(
+            quem,
+            metodo,
+            ocupados,
+            mortos_por_recolher,
+            cota,
+        ));
     }
     Ok(cota)
+}
+
+/// O método de uma bifurcação, na decisão e na auditoria.
+const BIFURCACAO: &str = "process.fork";
+
+/// A contenção de quem pede um processo: a primeira pergunta de
+/// [`permitir_processo`], e a de [`reconfirmar_bifurcacao`], no nascimento.
+/// Quem pede é o fio de agora — o processo que bifurca, ou o comando que
+/// lança em nome de alguém —, com a autoridade dele. Contido, a recusa vai
+/// para a auditoria e volta o código; solto, volta o programa do fio, para
+/// a pergunta seguinte do gate.
+fn recusar_se_contido(
+    quem: &Quem,
+    autoridade: Autoridade,
+    metodo: &str,
+) -> Result<Programa, Codigo> {
+    let (fio, programa) = crate::fios::programa_atual();
+    if let Some((codigo, motivo)) = crate::contencao::recusa(
+        Chamador::Processo {
+            fio,
+            autoridade,
+            programa,
+        },
+        autoridade,
+    ) {
+        auditar(quem, metodo, "", codigo, &[], motivo);
+        return Err(codigo);
+    }
+    Ok(programa)
+}
+
+/// A contenção de quem bifurca, de novo, no nascimento do filho: a última
+/// palavra da chamada antes de o filho poder rodar — ver
+/// [`crate::fios::bifurcar`].
+///
+/// # Por que de novo
+///
+/// O gate pergunta em [`permitir_processo`], antes de o espaço ser copiado
+/// e de a vaga ser reservada; um `process.isolate` — ou um
+/// `process.terminate`, que isola antes — no meio deixava nascer um filho
+/// livre de um processo que já estava isolado: o isolamento é do fio, e o
+/// filho nasce com outro. Aqui a mesma pergunta, sobre o mesmo fio e a
+/// mesma autoridade, com a mesma recusa — `DENY_CONTAINED` ou
+/// `DENY_CREDENTIAL`, gravada como a do gate —: quem está contido não
+/// bifurca. Nenhuma regra nova; a de sempre, conferida onde a janela acaba.
+///
+/// Um isolamento depois desta pergunta acha o filho já na tabela,
+/// nascendo, como um filho nascido um instante antes dele: o isolamento é
+/// de um processo, e não da árvore.
+pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), Codigo> {
+    recusar_se_contido(&quem_do_processo(autoridade), autoridade, BIFURCACAO).map(|_| ())
 }
 
 /// O escalonador recusou o nascimento porque a cota encheu entre a
 /// decisão e a reserva da vaga — outro processo do mesmo titular nasceu,
 /// em outro núcleo. Vai para a auditoria como a recusa de
-/// [`permitir_processo`].
-pub fn recusar_pela_cota(autoridade: Autoridade, metodo: &str, cota: usize) -> Codigo {
-    let quem = quem_do_processo(autoridade);
-    recusar_pela_cota_com(&quem, metodo, cota, cota)
+/// [`permitir_processo`], com `M de M`: a recusa do nascimento é a que só
+/// sabe que a cota encheu no meio, e é por esse texto que a auditoria a
+/// distingue da do gate. Os mortos por recolher são os da conta do
+/// nascimento — `ocupacao`, tirada na mesma seção crítica que recusou —,
+/// no máximo M.
+pub fn recusar_pela_cota(
+    autoridade: Autoridade,
+    metodo: &str,
+    ocupacao: crate::fios::Ocupacao,
+    cota: usize,
+) -> Codigo {
+    recusar_pela_cota_com(
+        quem_do_processo(autoridade),
+        metodo,
+        cota,
+        ocupacao.mortos_por_recolher.min(cota),
+        cota,
+    )
 }
 
-fn recusar_pela_cota_com(quem: &Quem, metodo: &str, ocupados: usize, cota: usize) -> Codigo {
+/// A recusa da cota na auditoria, pela política, com a contagem (ver
+/// [`detalhe_da_cota`]). A de uma bifurcação diz também o processo que
+/// bifurcou — o fio e o programa, como o registro da bifurcação permitida
+/// ([`auditar_bifurcacao`]): quem pede é o fio de agora, o do processo,
+/// dentro da chamada. O titular é o mesmo de antes; o processo vai no
+/// detalhe, como em todo pedido de um processo.
+fn recusar_pela_cota_com(
+    mut quem: Quem,
+    metodo: &str,
+    ocupados: usize,
+    mortos_por_recolher: usize,
+    cota: usize,
+) -> Codigo {
+    if metodo == BIFURCACAO {
+        let (id, programa) = crate::fios::programa_atual();
+        quem.processo = Some(pelo_processo(id, &programa));
+    }
     auditar(
-        quem,
+        &quem,
         metodo,
         "",
         Codigo::DenyPolicy,
         &[],
-        &alloc::format!("cota de processos do papel: {ocupados} de {cota}"),
+        &detalhe_da_cota(ocupados, mortos_por_recolher, cota),
     );
     Codigo::DenyPolicy
+}
+
+/// O texto da recusa da cota: `cota de processos do papel: N de M` — N, o
+/// que o titular ocupa na conta do gate (a do nascimento grava M, ver
+/// [`recusar_pela_cota`]); M, a cota — e, quando há entre os N mortos que
+/// esperam o coletor, `, K mortos por recolher` (ou `1 morto`).
+///
+/// # Os mortos por recolher
+///
+/// A conta vê os mortos que não são zumbis até o coletor os recolher, e o
+/// `process.list` não os mostra: quem ouvia "N de M" podia ver na lista
+/// menos de N processos do titular — o achado A1-4. Com os K dito, N − K é
+/// o que a lista mostrava do titular no instante da conta (ver
+/// [`crate::fios::Ocupacao`]). Sem mortos por recolher, o texto é o de
+/// sempre: a contagem, a decisão e o registro não mudam, só o texto diz
+/// mais.
+///
+/// # O teto do detalhe
+///
+/// Curto de propósito: com o `pelo processo N (…)` de uma bifurcação, o
+/// detalhe passa do teto da auditoria
+/// ([`politica::auditoria::MAIOR_DETALHE`]), e o que encolhe primeiro é a
+/// descrição do programa — o nome, depois o editor —, e não este texto
+/// ([`politica::auditoria::detalhe_composto`]). Os números têm no máximo
+/// dois dígitos — a cota tem teto de 64, e a tabela, 95 vagas —, e o texto,
+/// no máximo 60 bytes. Ao lado de quem pediu abreviado — 27 bytes mais os
+/// dígitos do fio, no código da imagem; 32 mais os dígitos, com o editor —,
+/// ele cabe inteiro com um fio de até 7 dígitos no código da imagem; no de
+/// fora dela, acima do teto, perde o fim numa fronteira de palavra
+/// (`…, 12 mortos por ?`), e a conta fica.
+fn detalhe_da_cota(ocupados: usize, mortos_por_recolher: usize, cota: usize) -> String {
+    match mortos_por_recolher {
+        0 => alloc::format!("cota de processos do papel: {ocupados} de {cota}"),
+        1 => {
+            alloc::format!("cota de processos do papel: {ocupados} de {cota}, 1 morto por recolher")
+        }
+        k => alloc::format!(
+            "cota de processos do papel: {ocupados} de {cota}, {k} mortos por recolher"
+        ),
+    }
 }
 
 /// O papel com que o gate decide os pedidos de quem age com `autoridade`:
@@ -4122,7 +4241,7 @@ pub fn auditar_bifurcacao(filho: u64) {
     quem.processo = Some(pelo_processo(id, &programa));
     auditar(
         &quem,
-        "process.fork",
+        BIFURCACAO,
         "",
         Codigo::Allow,
         &[],

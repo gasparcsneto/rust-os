@@ -543,6 +543,12 @@ pub fn inicio_comum(canal_agente: bool) -> ! {
     // Antes de qualquer serviço: um boot recusado não decide nada, e um que
     // precisa voltar para o slot bom reinicia aqui.
     slots::reconciliar();
+    // O fio que para a máquina, parado até um `system.reboot` ou um
+    // `system.poweroff` o acordar: nasce aqui, com a tabela de fios vazia,
+    // e não a cada pedido — com a tabela cheia, o pedido já no journal não
+    // teria quem o fizesse. Antes do botão, que pede o desligamento. Ver
+    // `energia`.
+    energia::iniciar();
     // O botão de energia, com o journal aberto e a reconciliação feita: o
     // evento do hardware ligado — o aperto de antes, o que ligou a máquina
     // inclusive, é limpo e não pede nada — e o fio que pede o desligamento

@@ -293,16 +293,33 @@ fn bifurcar_ate_parar(c: &Colhedor) -> Result<(usize, Option<i64>), &'static str
 }
 
 /// A recusa da cota de `process.fork` na auditoria: a última, pela política,
-/// com o motivo da cota.
+/// com o motivo da cota, depois do processo que bifurcou (a correção (5) da
+/// soma das cotas — ver [`zumbis_a_recusa_do_fork_diz_o_processo_que_bifurcou`]).
 fn recusa_da_cota_gravada() -> bool {
     ultimo_com_metodo("process.fork").is_some_and(|e| {
         e.codigo == politica::Codigo::DenyPolicy
-            && e.detalhe.starts_with("cota de processos do papel")
+            && e.detalhe.starts_with("pelo processo ")
+            && e.detalhe.contains("): cota de processos do papel: ")
     })
 }
 
-/// Um fio do kernel que nasce e sai: o que `energia`, `pareamento` e os
-/// fluxos fazem quando a máquina precisa deles.
+/// O detalhe que a recusa da cota de um `fork` do processo `fio` grava com
+/// `texto`: o processo que bifurcou — o fio e a descrição do programa, como
+/// o registro da bifurcação permitida —, abreviado só se passar do teto,
+/// pela regra de todo registro. `None` se `fio` não é um processo vivo.
+fn recusa_do_fork_esperada(fio: u64, texto: &str) -> Option<String> {
+    let (_, programa) = crate::fios::processo(fio)?;
+    let pelo = alloc::format!("pelo processo {fio} ({})", programa.descricao());
+    Some(politica::auditoria::detalhe_composto(
+        Some(&pelo),
+        texto,
+        "",
+    ))
+}
+
+/// Um fio do kernel que nasce e sai: o que o `pareamento` e os fluxos fazem
+/// quando a máquina precisa deles — o `energia`, desde a correção (1) da
+/// soma das cotas, nasce no boot e não sai.
 extern "C" fn fio_curto(_argumento: u64) -> ! {
     crate::fios::terminar()
 }
@@ -603,10 +620,11 @@ pub(super) fn zumbis_quem_colhe_tarde_ouve_a_cota_e_segue() -> Resultado {
 
 /// A recusa grava o que o titular ocupa, zumbis inclusive: com a cota em
 /// 3, o colhedor bifurca dois filhos e não colhe; com a cota rebaixada a 2,
-/// o bifurcar ouve `NEGADO`, e a recusa diz "3 de 2" — o gate contou o
-/// colhedor e os dois zumbis. Se só a recontagem do nascimento contasse os
-/// zumbis, o gate deixaria o pedido passar, o espaço seria copiado à toa, e
-/// a recusa diria "2 de 2".
+/// o bifurcar ouve `NEGADO`, e a recusa diz "3 de 2", depois do processo
+/// que bifurcou — o gate contou o colhedor e os dois zumbis, que a lista
+/// mostra: nenhum morto por recolher. Se só a recontagem do nascimento
+/// contasse os zumbis, o gate deixaria o pedido passar, o espaço seria
+/// copiado à toa, e a recusa diria "2 de 2".
 pub(super) fn zumbis_a_recusa_grava_os_zumbis_acima_da_cota() -> Resultado {
     if crate::fios::colheita().1 != 0 {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
@@ -635,7 +653,10 @@ pub(super) fn zumbis_a_recusa_grava_os_zumbis_acima_da_cota() -> Resultado {
         if rebaixada != Bifurcou::Erro(erro::NEGADO) {
             return Err("o titular acima da cota rebaixada bifurcou");
         }
-        if gravada.as_deref() != Some("cota de processos do papel: 3 de 2") {
+        // Os zumbis aparecem na lista: nenhum morto por recolher no texto.
+        let esperada = recusa_do_fork_esperada(c.fio, "cota de processos do papel: 3 de 2");
+        if esperada.is_none() || gravada != esperada {
+            crate::log_error!("teste", "esperada {:?}", esperada);
             return Err("a recusa da cota nao gravou os zumbis acima dela");
         }
         Ok(())
@@ -953,11 +974,12 @@ pub(super) fn zumbis_o_processo_do_user_run_conta_ate_o_recolhimento() -> Result
 /// A recusa grava o que o titular ocupa, mortos inclusive: com o coletor
 /// segurado e a cota em 4, o colhedor bifurca dois filhos e os colhe — os
 /// dois colhidos guardam a vaga até o recolhimento —; com a cota rebaixada
-/// a 2, o bifurcar ouve `NEGADO`, e a recusa diz "3 de 2": o gate contou o
-/// colhedor e os dois mortos. Se o gate contasse como a 14.1 antes da
-/// alternativa 1 — os vivos, os que nascem e os zumbis —, deixaria o pedido
-/// passar, o espaço do colhedor seria copiado à toa, e a recusa, do
-/// nascimento, diria "2 de 2".
+/// a 2, o bifurcar ouve `NEGADO`, e a recusa diz "3 de 2, 2 mortos por
+/// recolher", depois do processo que bifurcou: o gate contou o colhedor e
+/// os dois mortos, que o `process.list` não mostra (o A1-4). Se o gate
+/// contasse como a 14.1 antes da alternativa 1 — os vivos, os que nascem e
+/// os zumbis —, deixaria o pedido passar, o espaço do colhedor seria
+/// copiado à toa, e a recusa, do nascimento, diria "2 de 2, …".
 pub(super) fn zumbis_a_recusa_grava_os_mortos_acima_da_cota() -> Resultado {
     if crate::fios::colheita().1 != 0 {
         return Err("a tabela ja tinha zumbi antes do caso comecar");
@@ -994,7 +1016,14 @@ pub(super) fn zumbis_a_recusa_grava_os_mortos_acima_da_cota() -> Resultado {
         if rebaixada != Bifurcou::Erro(erro::NEGADO) {
             return Err("o titular acima da cota rebaixada bifurcou");
         }
-        if gravada.as_deref() != Some("cota de processos do papel: 3 de 2") {
+        // Os dois colhidos esperam o coletor, segurado: a recusa os conta e
+        // diz quantos são (o A1-4).
+        let esperada = recusa_do_fork_esperada(
+            c.fio,
+            "cota de processos do papel: 3 de 2, 2 mortos por recolher",
+        );
+        if esperada.is_none() || gravada != esperada {
+            crate::log_error!("teste", "esperada {:?}", esperada);
             return Err("a recusa da cota nao gravou os mortos acima dela");
         }
         Ok(())
@@ -1247,6 +1276,208 @@ pub(super) fn zumbis_a_cota_vale_com_tudo_ao_mesmo_tempo() -> Resultado {
     PARAR.store(true, SeqCst);
     let _ = esperar_cedendo(|| VIVOS.load(SeqCst) == 0, 600);
     crate::arch::sem_interrupcoes(|| *AUTORIDADE.lock() = None);
+    limpar(fio);
+    resultado
+}
+
+/// A correção (5) da soma das cotas: a recusa da cota num `fork` diz o
+/// processo que bifurcou, como o registro da bifurcação permitida. Com a
+/// cota em 2, o colhedor bifurca um filho — o registro `filho N`, em nome
+/// dele: `pelo processo <colhedor> (<programa>)` — e o segundo `fork` ouve
+/// a cota: a recusa leva a mesma descrição de quem pediu, antes do texto da
+/// cota, abreviada só se o detalhe passar do teto, pela regra de todo
+/// registro (`politica::auditoria::detalhe_composto`). A recusa do
+/// `process.run` do mesmo titular, que não é pedida por processo nenhum,
+/// segue sem ela. Antes, a recusa do `fork` ia só com o titular: o NSF não a
+/// ligava ao processo que bifurcou.
+pub(super) fn zumbis_a_recusa_do_fork_diz_o_processo_que_bifurcou() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    politica_com_a_cota(2)?;
+    let titular = operador(0, "pessoa-da-recusa-do-fork");
+    let mut fio = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        let Bifurcou::Filho(filho) = c.bifurcar()? else {
+            return Err("um filho dentro da cota nao nasceu");
+        };
+        let do_filho = alloc::format!(": filho {filho}");
+        let permitida = super::ultimo_que(|e| {
+            e.metodo == "process.fork"
+                && e.codigo == politica::Codigo::Allow
+                && e.detalhe.ends_with(&do_filho)
+        })
+        .ok_or("a bifurcacao permitida nao foi gravada")?;
+        let pelo = String::from(
+            permitida
+                .detalhe
+                .strip_suffix(&do_filho)
+                .unwrap_or_default(),
+        );
+        if !pelo.starts_with(&alloc::format!("pelo processo {} (", c.fio)) {
+            crate::log_error!("teste", "{}", permitida.detalhe);
+            return Err("a bifurcacao permitida nao diz o processo que bifurcou");
+        }
+        if c.bifurcar()? != Bifurcou::Erro(erro::NEGADO) {
+            return Err("o colhedor no teto da cota bifurcou");
+        }
+        let recusa = ultimo_com_metodo("process.fork").ok_or("a recusa nao foi gravada")?;
+        let texto = "cota de processos do papel: 2 de 2";
+        let esperada = politica::auditoria::detalhe_composto(Some(&pelo), texto, "");
+        crate::log_info!(
+            "teste",
+            "zumbis: a permitida gravou {:?}; a recusa, {:?}",
+            permitida.detalhe,
+            recusa.detalhe
+        );
+        if recusa.codigo != politica::Codigo::DenyPolicy || recusa.detalhe != esperada {
+            crate::log_error!("teste", "esperada {:?}", esperada);
+            return Err("a recusa da cota no fork nao diz o processo que bifurcou");
+        }
+        if recusa.titular != permitida.titular
+            || recusa.sessao_de_pessoa != permitida.sessao_de_pessoa
+        {
+            return Err("a recusa da cota no fork mudou de titular");
+        }
+        // O `process.run` do titular, recusado pela mesma cota: sem processo.
+        let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        if crate::usuario::lancar_como(Some(&ola), titular) != Err(crate::fios::COTA_ESGOTADA) {
+            return Err("o lancamento no teto da cota nao ouviu a cota");
+        }
+        let lancamento =
+            ultimo_com_metodo("process.run").ok_or("a recusa do lancamento nao foi gravada")?;
+        if lancamento.detalhe != texto {
+            crate::log_error!("teste", "{:?}", lancamento.detalhe);
+            return Err("a recusa do process.run ganhou um processo que nao pediu");
+        }
+        Ok(())
+    })();
+    limpar(fio);
+    resultado
+}
+
+/// O achado A1-4: a recusa da cota diz quantos dos que ela conta são mortos
+/// que esperam o coletor — os que o `process.list` não mostra. Com o
+/// coletor segurado e a cota em 4, o colhedor bifurca dois filhos (zumbis,
+/// na lista) e colhe um (morto por recolher, fora dela); com a cota em 3, o
+/// `fork` ouve "3 de 3, 1 morto por recolher", e a lista mostra dois
+/// processos do titular — 3 − 1. Colhido o outro, "3 de 3, 2 mortos por
+/// recolher", e a lista mostra um. A conta do nascimento, a que vale, diz o
+/// mesmo da mesma fotografia (`fios::NaoNasceu::Cota`), e a recusa que quem
+/// lança grava com ela também (`autorizacao::recusar_pela_cota`, com o `M de
+/// M` de sempre); a do gate (`fios::cota_cheia`), o mesmo, e abaixo da
+/// cota, nada. Solto o coletor, os mortos saem, e o `fork` passa. Sem os
+/// mortos no texto, a recusa dizia "3 de 3", e a lista, um processo.
+pub(super) fn zumbis_a_recusa_diz_os_mortos_por_recolher() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(4)?;
+    let titular = operador(0, "pessoa-dos-mortos-por-recolher");
+    let na_lista = || {
+        let mut n = 0;
+        crate::fios::com_processos(|p| n += (p.autoridade == titular) as usize);
+        n
+    };
+    let recusa = |c: &Colhedor, texto: &str, listados: usize| -> Resultado {
+        if c.bifurcar()? != Bifurcou::Erro(erro::NEGADO) {
+            return Err("o colhedor no teto da cota bifurcou");
+        }
+        let gravada = ultimo_com_metodo("process.fork").map(|e| e.detalhe);
+        let esperada = recusa_do_fork_esperada(c.fio, texto);
+        let vistos = na_lista();
+        crate::log_info!(
+            "teste",
+            "zumbis: a recusa gravou {:?}; a lista mostra {} processo(s) do titular",
+            gravada,
+            vistos
+        );
+        if esperada.is_none() || gravada != esperada {
+            crate::log_error!("teste", "esperada {:?}", esperada);
+            return Err("a recusa da cota nao disse os mortos por recolher");
+        }
+        if vistos != listados {
+            return Err("a lista nao mostrou os contados menos os mortos por recolher");
+        }
+        Ok(())
+    };
+    let mut fio = None;
+    let mut segurado = None;
+    let resultado = (|| -> Resultado {
+        let c = Colhedor::lancar(titular)?;
+        fio = Some(c.fio);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        for _ in 0..2 {
+            if !matches!(c.bifurcar()?, Bifurcou::Filho(_)) {
+                return Err("um filho dentro da cota nao nasceu");
+            }
+        }
+        let mut colhidos = Vec::new();
+        let mut colher = || -> Resultado {
+            match c.colher()? {
+                Ok((f, DO_FILHO)) => {
+                    colhidos.push(f);
+                    Ok(())
+                }
+                _ => Err("o colhedor nao colheu o filho com o codigo dele"),
+            }
+        };
+        colher()?;
+        politica_com_a_cota(3)?;
+        recusa(
+            &c,
+            "cota de processos do papel: 3 de 3, 1 morto por recolher",
+            2,
+        )?;
+        colher()?;
+        recusa(
+            &c,
+            "cota de processos do papel: 3 de 3, 2 mortos por recolher",
+            1,
+        )?;
+        // A fotografia da conta: a do gate, e a do nascimento, que recusa
+        // sem nascer nada.
+        let esperada = crate::fios::Ocupacao {
+            ocupados: 3,
+            mortos_por_recolher: 2,
+        };
+        if crate::fios::cota_cheia(titular, 3) != Some(esperada)
+            || crate::fios::cota_cheia(titular, 4).is_some()
+        {
+            return Err("a conta do gate nao disse os mortos por recolher");
+        }
+        match crate::fios::criar_processo("usuario", fio_curto, 0, titular, 3, &|_| {}) {
+            Err(crate::fios::NaoNasceu::Cota(o)) if o == esperada => {
+                // E a recusa que quem lança grava com ela: `M de M`, como
+                // sempre na do nascimento, e os mortos dela.
+                crate::autorizacao::recusar_pela_cota(titular, "process.run", o, 3);
+                let gravada = ultimo_com_metodo("process.run").map(|e| e.detalhe);
+                if gravada.as_deref()
+                    != Some("cota de processos do papel: 3 de 3, 2 mortos por recolher")
+                {
+                    crate::log_error!("teste", "{:?}", gravada);
+                    return Err("a recusa do nascimento nao disse os mortos por recolher");
+                }
+            }
+            outro => {
+                crate::log_error!("teste", "{:?}", outro);
+                return Err("a conta do nascimento nao disse os mortos por recolher");
+            }
+        }
+        drop(segurado.take());
+        for morto in &colhidos {
+            esperar_ate(|| !crate::fios::na_tabela_de_teste(*morto), 600)
+                .map_err(|_| "o coletor solto nao recolheu um colhido")?;
+        }
+        if !matches!(c.bifurcar()?, Bifurcou::Filho(_)) {
+            return Err("a cota nao voltou depois do recolhimento");
+        }
+        Ok(())
+    })();
+    drop(segurado);
     limpar(fio);
     resultado
 }
