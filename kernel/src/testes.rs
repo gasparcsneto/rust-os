@@ -51562,6 +51562,33 @@ fn dados_a_contencao_no_meio_da_transferencia() -> Resultado {
     r.and(fim)
 }
 
+/// Leva a cabeça da cadeia da auditoria acima do teto do caminho dela
+/// ([`crate::oleoduto::TETO`]), com folga, para o caso que enche o caminho
+/// parando o consumidor simulado em `cabeça - TETO`: com a cabeça abaixo do
+/// teto, o atraso simulado é a cabeça inteira, menor que ele, e o caminho
+/// nunca enche.
+///
+/// Na suíte inteira, os casos de antes já tinham levado a cabeça lá; numa
+/// parte da suíte, ou numa rodada filtrada, não — e um caso não depende de
+/// quem rodou antes dele: na parte 1 de 40, com quinze casos antes do da
+/// contrapressão, o envio passou com o caminho "cheio". Os registros vão em
+/// lotes menores que o anel, e cada lote é gravado no journal antes do
+/// seguinte: nenhum se perde antes de chegar lá, o que uma medida do
+/// orçamento confere.
+fn cabeca_acima_do_teto_do_caminho() -> Resultado {
+    let alvo = crate::oleoduto::TETO + 16;
+    while crate::autorizacao::ultimo_registro() < alvo {
+        for _ in 0..crate::oleoduto::CAPACIDADE / 4 {
+            if crate::autorizacao::ultimo_registro() >= alvo {
+                break;
+            }
+            crate::autorizacao::auditar_do_kernel("teste.caminho", "", politica::Codigo::Allow, "");
+        }
+        crate::persistencia::gravar_auditoria()?;
+    }
+    Ok(())
+}
+
 /// A espera não leva decisão nenhuma: o pedido de um processo de verdade,
 /// adiado pelo caminho da auditoria — o despachante dos processos o guarda
 /// como guarda o que espera a conexão —, é executado de novo, inteiro, pelo
@@ -51577,6 +51604,7 @@ fn dados_a_contencao_no_meio_da_transferencia() -> Resultado {
 fn dados_a_reautorizacao_depois_da_espera() -> Resultado {
     use crate::autorizacao::Autoridade;
     use crate::oleoduto::TETO;
+    cabeca_acima_do_teto_do_caminho()?;
     crate::pessoas::esquecer_registradas();
     let sistema = sistema_aqui();
     // Segura o envio seguinte do processo no caminho da auditoria — o
@@ -52089,6 +52117,9 @@ fn dados_a_inundacao_de_um_byte() -> Resultado {
 fn dados_as_medidas_do_orcamento() -> Resultado {
     use crate::autorizacao::Principal;
     use crate::oleoduto::{CAPACIDADE, PARTILHA, TETO};
+    // Antes de zerar as medidas: o que leva a cabeça acima do teto não entra
+    // nelas.
+    cabeca_acima_do_teto_do_caminho()?;
     crate::pessoas::esquecer_registradas();
     let (sessao, quem) = processo_de_operadora(101, "dados-medidas");
     let sistema = sistema_no_armazem(7_199_997);
@@ -52179,6 +52210,7 @@ fn dados_as_medidas_do_orcamento() -> Resultado {
 fn dados_a_contrapressao_adia_sem_gravar_nem_executar() -> Resultado {
     use crate::oleoduto::TETO;
     use crate::rede::espera::Desfecho;
+    cabeca_acima_do_teto_do_caminho()?;
     crate::pessoas::esquecer_registradas();
     let (_, quem) = processo_de_operadora(102, "dados-pressao");
     let prefixo = do_processo(crate::fios::id_atual());
