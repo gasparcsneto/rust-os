@@ -33,29 +33,38 @@ que não espera.
   roteiro (`R12-`, `R13-`, `R15-`) ou o assunto. Uma alternativa que não
   sai das fontes, nem decorre direto das invariantes, leva **(minha)**: é
   deste dossiê, e vale como sugestão, não como desenho.
-- As fontes são as do commit `7141f66`, de 17/11/2026. Se uma fonte mudar,
-  ela vale. Quando o dono decidir, a entrada passa às fechadas, com a data
+- Os ids que o dono já viu no relatório da entrega da continuidade da fase
+  15 — a DE-1, o DN-4, a DH-1, a DH-2, a DH-3, a DC-1′ e a DX-1 — vêm ao
+  lado dos deste dossiê, com as recomendações dadas lá; e os da pendência
+  #298 — o A3, o A5, o F4, o F6 e o I7 —, nas entradas em que cabem.
+- As fontes são as do commit `7141f66`, de 17/11/2026, mais o relatório da
+  continuidade e a pendência #298, do coordenador. Se uma fonte mudar, ela
+  vale. Quando o dono decidir, a entrada passa às fechadas, com a data
   e a alternativa, e o README — as [Decisões
   pendentes](../README.md#decisões-pendentes) e o
   [Roteiro](../README.md#roteiro) — se acerta.
 
 ## O índice
 
-Na ordem recomendada.
+Na ordem recomendada. Entre parênteses, o id que o dono já viu no
+relatório da continuidade.
 
 | Id | Decisão | Área de 5.3 | Destrava | Exposição de hoje | Fonte |
 |---|---|---|---|---|---|
-| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa | identidade e confiança; chamadas fora do gate | o consentimento (fase 13); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, e recebe o que a Pessoa digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
+| [M-EXEC](#m-exec) (DE-1) | O `exec` e a malha do processo, com a F6 | identidade de programa e proveniência | o handoff (fraco); um limite do SDK | baixa: num endpoint, a descoberta e a auditoria mostram o programa que não roda mais; a imagem nova vê os fluxos da anterior | [README](../README.md#decisões-pendentes) |
+| [F4](#f4) | O ponto sem volta do `exec`, sem reconfirmar | o Gate e a autorização (o momento da decisão) | — | baixa: uma revogação durante a leitura da imagem não para a troca | a pendência #298; [`executar`](../kernel/src/usuario/mod.rs) |
+| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; chamadas fora do gate | o consentimento (fase 13); o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, e recebe o que a Pessoa digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
 | [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: várias sessões da mesma chave, ou vários titulares, enchem a tabela de fios, e nada nasce — nem o Terminal, nem o `energia` do `system.reboot` | [README](../README.md#decisões-pendentes) |
+| [R15-HANDOFF](#r15-handoff) (DN-4; DH-1 a DH-3) | O próximo marco da fase 15: o handoff — o que é, quem recebe, para onde | identidade e autoridade entre dispositivos | a linha em curso, a fase 15; a continuidade | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R13-BOOT](#r13-boot) | A cadeia de boot confiável | identidade e confiança; custódia (a política dos selos) | a fase 13; o Secure Boot que a fase 14 deixou de fora; a base de R12-IC-TPM e R12-IC-VALOR | **real, com a máquina na mão**: o disco e o TPM juntos abrem os selos da identidade e das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
-| [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
-| [ALC-TEMP](#alc-temp) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
-| [M-EXEC](#m-exec) | O `exec` e a malha do processo | identidade de programa e proveniência | um limite do SDK; o handoff e a continuidade (fase 15) | baixa: num endpoint, a descoberta e a auditoria mostram o programa que não roda mais | [README](../README.md#decisões-pendentes) |
 | [A9-RESUMO](#a9-resumo) | O tamanho do resumo na descrição de um programa | auditoria e proveniência | — | baixa: com a chave de um editor e uns 2^32 resumos, dois executáveis com a mesma descrição | [README](../README.md#decisões-pendentes) |
-| [A1-4](#a1-4) | O que a recusa da cota mostra | o texto da auditoria — talvez [B] | — | nenhuma: diagnóstico | [README](../README.md#decisões-pendentes) |
-| [SDK-CANAL](#sdk-canal) | O canal sem nome | o contrato v2 (DS-2) — talvez [B] | um limite do SDK | baixa: quem toma os nomes do laço de um processo o impede de esperar | [SDK](SDK.md#limites-conhecidos) |
+| [I7](#i7) | O resumo sem chave dos parâmetros, no console sem ninguém | auditoria (o que se grava) | — | baixa: o que se digita depois do nome de um comando, sem ninguém entrado, vai à auditoria num resumo que se adivinha | a pendência #298; [Consoles](../README.md#consoles) |
+| [A1-4](#a1-4) | O que a recusa da cota mostra | nenhuma — **[B] pela 5.3 — o coordenador executa** | — | nenhuma: diagnóstico | [README](../README.md#decisões-pendentes) |
+| [SDK-CANAL](#sdk-canal) (DC-1′) | O canal sem nome | nenhuma — **[B] pela 5.3 — o coordenador executa** | um limite do SDK | baixa: quem toma os nomes do laço de um processo o impede de esperar | [SDK](SDK.md#limites-conhecidos) |
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
+| [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
+| [ALC-TEMP](#alc-temp) (DX-1) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
 | [R13-DESFAZER](#r13-desfazer) | O desfazer | persistência e auditoria | fecha a fase 13 | nenhuma nova | [Roteiro](../README.md#roteiro), fase 13 |
 | [R12-SIMD](#r12-simd) | O SIMD nos processos | semântica de operação (o contrato dos registradores) | as otimizações de cifra (fase 12) | nenhuma: o custo da cifra em software | [Roteiro](../README.md#roteiro), fase 12 |
 | [R12-mTLS](#r12-mtls) | O certificado do cliente no TLS | criptografia e custódia (um domínio de assinatura novo) | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12 |
@@ -65,7 +74,6 @@ Na ordem recomendada.
 | [R12-IC-VALOR](#r12-ic-valor) | A rede principal com valor e com canister | custódia; operação irreversível (5.6) | a fase 12 (Web3) | nenhuma: a política padrão não alcança a rede principal | [ICP](ICP.md#na-rede-principal) |
 | [R12-IC-NOS](#r12-ic-nos) | Os nós da rede principal pela árvore de estado | Policy (de onde vem um destino) | a fumaça real que fecha sempre | disponibilidade: os nós giram, e a fumaça falha fechada | [ICP](ICP.md#o-que-fica-de-fora) |
 | [R12-IC-OUTROS](#r12-ic-outros) | O resto do IC | conforme o item | — | nenhuma | [ICP](ICP.md#o-que-não-existe-ainda) |
-| [R15-HANDOFF](#r15-handoff) | O handoff | identidade e autoridade entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R15-REMOTOS](#r15-remotos) | Os recursos remotos | identidade e autoridade entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R15-PRESENCA](#r15-presenca) | A presença | identidade e confiança entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R15-CONTINUIDADE](#r15-continuidade) | A continuidade | semântica de operação entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
@@ -77,54 +85,154 @@ Na ordem recomendada.
 
 ## A ordem recomendada
 
-Dois critérios, nesta ordem: reduzir primeiro uma exposição real, e
-depois destravar o que mais trava o roteiro. E uma regra: o que depende de
-outra decisão vem depois dela.
+A DE-1 vem antes de tudo: é pequena, o dono já a viu apresentada assim —
+"decidir primeiro" —, e decidi-la não atrasa nenhuma outra. Depois, três
+critérios, nesta ordem: a exposição que se alcança sem a máquina na mão;
+o que destrava a linha em curso, a fase 15; e então a exposição com a
+máquina na mão e o resto do roteiro. E uma regra: o que depende de outra
+decisão vem depois dela.
 
-1. **DT-1** — a maior exposição que espera uma decisão: a credencial da
+1. **M-EXEC (DE-1)**, com a **F6** dentro e a **F4** ao lado — pequenas, e
+   sobre o mesmo `exec`. A DE-1 destrava, fraco, o handoff.
+2. **DT-1** — a maior exposição que espera uma decisão: a credencial da
    Pessoa capturada por outro principal, sem registro. E é a base do
-   consentimento: nada se pergunta à Pessoa por um caminho que outro
-   processo imita.
-2. **COTA-SOMA** — a outra exposição real: um principal com várias
+   consentimento e do aceite do handoff (a DH-2, "aceite só pela entrada
+   dela"): nada se pergunta à Pessoa por um caminho que outro processo
+   imita.
+3. **COTA-SOMA** — a outra exposição real: um principal com várias
    sessões, ou alguns titulares juntos, param a criação de fios da
    máquina. A decisão é estreita, e as correções [B] em volta não esperam.
-3. **R13-BOOT** — fecha a exposição de quem tem a máquina na mão; é o
+4. **R15-HANDOFF — o DN-4, com a DH-1, a DH-2 e a DH-3** — o próximo marco
+   da linha em curso, com as recomendações que o dono já viu. Depende da
+   DE-1 (fraco) e da DT-1, e bloqueia a continuidade.
+5. **R13-BOOT** — fecha a exposição de quem tem a máquina na mão; é o
    incremento seguinte da fase 13; traz o Secure Boot que a fase 14 deixou
    de fora; e é a base de custódia que R12-IC-TPM e R12-IC-VALOR pedem.
-4. **R13-CONSENT**, com a **ALC-TEMP** — o título da fase 13. Depende da
-   DT-1: perguntar à Pessoa pede o caminho dela. A expansão temporária de
-   alcance é a forma mais direta do consentimento — "esta pessoa deixa
-   este agente, neste recurso, por uma hora" —, e se decide junto.
-5. **M-EXEC** — pequena e com precedente: a ponta de um fluxo já não
-   sobrevive ao `exec`. Tira um limite do SDK e fixa o ciclo de vida do
-   endpoint antes do handoff e da continuidade.
-6. **O lote rápido** — A9-RESUMO, A1-4, SDK-CANAL, AUD-ANEL e P-HISTORIA:
-   exposição baixa, alternativas curtas, decididas de uma vez. Duas delas
-   (A1-4 e SDK-CANAL) talvez nem sejam [C] pela 5.3 de 17/11/2026: o dono
-   pode devolvê-las ao [B].
-7. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
-8. **R12-SIMD, R12-mTLS e R12-PROXY** — fecham os incrementos de
+6. **O lote rápido** — A9-RESUMO, I7, AUD-ANEL e P-HISTORIA: exposição
+   baixa, alternativas curtas, decididas de uma vez. A A1-4 e a SDK-CANAL
+   (DC-1′) não tocam área nenhuma de 5.3: estão marcadas [B], e a
+   classificação é do coordenador (5.8).
+7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
+   depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
+8. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
+9. **R12-SIMD, R12-mTLS e R12-PROXY** — fecham os incrementos de
    infraestrutura da fase 12. **R12-QUIC** depois da avaliação, que é [B]
    e começa já.
-9. **R12-IC-TPM e R12-IC-VALOR**, depois da R13-BOOT; **R12-IC-NOS** e
-   **R12-IC-OUTROS** quando houver a necessidade.
-10. **Os marcos da fase 15**, na ordem do roteiro — R15-HANDOFF,
-    R15-REMOTOS, R15-PRESENCA, R15-CONTINUIDADE e R15-PACOTES —, o handoff
-    e a continuidade depois da M-EXEC. Cada um pede antes um desenho com as
-    decisões dele, como o DN-1, o DN-2 e o DN-3 pediram.
-11. **B5-1 a B5-4** — o B5-1 é o único que não esbarra numa fechada; os
+10. **R12-IC-TPM e R12-IC-VALOR**, depois da R13-BOOT; **R12-IC-NOS** e
+    **R12-IC-OUTROS** quando houver a necessidade.
+11. **Os outros marcos da fase 15**, na ordem do roteiro — R15-REMOTOS,
+    R15-PRESENCA, R15-CONTINUIDADE e R15-PACOTES —, a continuidade depois
+    do handoff. Cada um pede antes um desenho com as decisões dele, como o
+    DN-1, o DN-2, o DN-3 e o DN-4 pediram.
+12. **B5-1 a B5-4** — o B5-1 é o único que não esbarra numa fechada; os
     outros três esbarram no B2, na invariante da identidade, ou na R1 e na
     R6.
 
 ## As propostas completas
 
+### M-EXEC
+
+**O `exec` e a malha do processo** — a **DE-1** do relatório da
+continuidade da fase 15, com a **F6** dentro e a [F4](#f4) ao lado
+(achados do adversário do AE-1, na pendência #298).
+
+**O problema.** Na troca de imagem, os endpoints do processo continuam
+abertos com a identidade do programa que os ofereceu — o nome, o resumo e
+o editor da imagem anterior, que a descoberta mostra —; o que esperava
+neles passa à imagem nova, que também continua com a janela de nonces do
+processo. Cada operação da imagem nova passa pelo gate com o manifesto
+dela, no mesmo titular: nenhuma autoridade a mais. Mas a identidade do
+endpoint deixa de ser a do programa que roda — e a malha existe para que
+quem procura escolha pelo que o programa **é**.
+
+E a F6: a imagem nova ainda vê, pelo `stream.status`, o fluxo que a
+anterior fechou — o estado, o motivo do fim, os bytes de cada sentido e a
+outra ponta. A ponta acaba no `exec` (`o programa mudou`), mas o fluxo
+continua "um fluxo seu" para o processo, e o programa novo lê o que era do
+outro.
+
+**A exposição de hoje.** Baixa: no mesmo titular, a descoberta e a
+auditoria atribuem a um programa o que outro faz — quem escolhe pelo
+resumo escolhe errado —, e o programa novo lê o estado dos fluxos do
+anterior.
+
+**As evidências.** [MALHA, A identidade de um
+programa](MALHA.md#a-identidade-de-um-programa) e [Revogação e
+fim](MALHA.md#revogação-e-fim); [SDK, Limites
+conhecidos](SDK.md#limites-conhecidos) — as designações e os avisos na
+fila saem no `exec` (NS17, NS36), e os endpoints ficam; o precedente do
+[FLUXOS, Os estados](FLUXOS.md#os-estados): a ponta de um fluxo é do
+processo e não sobrevive ao `exec` (`o programa mudou`), encerrada dentro
+da ordem das gravações, logo depois do ponto sem volta — o trabalho do
+AE-1; o caso `malha: o impostor nao alcanca o que e do outro`; e o
+`stream.status`, que diz "o estado, o motivo do fim, os bytes de cada
+sentido e a outra ponta" ([FLUXOS, Os comandos](FLUXOS.md#os-comandos)).
+
+**As alternativas.** As duas primeiras são as do README.
+
+- (a) Fechar os endpoints no `exec`, como no fim do processo: o que
+  esperava neles é anulado (`voided`), e o fecho vai à auditoria com o
+  motivo. Com ela, a F6: o fluxo da imagem anterior deixa de ser da nova.
+- (b) Mudar a identidade deles para a da imagem nova: a descoberta passa a
+  mostrar o programa que roda.
+- (c) Como hoje, documentado.
+
+**Os riscos.**
+
+- (a): o programa que se troca por outro — ou por si mesmo — perde os
+  endpoints e oferece de novo; quem mandou vê `voided`, e manda de novo.
+  Com a janela de nonces zerada, a imagem nova pode mandar o que a
+  anterior mandou, com o mesmo nonce, e cria outra entrega — em nome dela,
+  que é o certo.
+- (b): quem escolheu pelo resumo antes da troca fala com outro programa
+  sem saber; o registro da oferta diz um programa, e o endpoint outro — a
+  cadeia de ids da auditoria precisa de um elo novo.
+- (c): a atribuição errada continua, e cresce na fase 15, com um endpoint
+  visto de outro Duke.
+
+**O impacto.** `kernel/src/malha.rs` e o caminho do `exec` em
+`kernel/src/usuario`, que já encerra ali os fluxos da ponta; a janela de
+nonces do processo; o fluxo resolvido pelo programa, e não só pelo
+processo, no `stream.status` (a F6); o registro `fabric.withdraw` com o
+motivo; o SDK e a MALHA na documentação.
+
+**A recomendação.** A dada no relatório da continuidade: **o `exec` fecha
+os endpoints do processo e o que espera neles, e zera as janelas de
+nonces — como o fim do processo —, dentro da v2**; e, com ela, a F6. É
+pequena, e bloqueia — fraco — o handoff: **decidir primeiro**. É a (a): o
+mesmo ciclo de vida da ponta de um fluxo — um objeto da malha é do
+processo **e** do programa que o criou —, e a identidade de um endpoint
+volta a ser sempre a do programa que roda. A janela zerada é o que separa
+as entregas dos dois programas: com a de antes, um nonce da imagem nova,
+com o conteúdo de uma entrega da anterior, devolveria o id dela — "o
+mesmo nonce com o mesmo conteúdo é o reenvio" —, a mesma confusão de
+proveniência. "Dentro da v2": muda o comportamento, e nenhum nome do
+contrato.
+
+**O plano de validação.** Um caso: o programa oferece, recebe uma entrega
+pendente e troca de imagem; o endpoint some da descoberta, a entrega fica
+`voided`, o fecho vai à auditoria com o motivo, e a imagem nova oferece de
+novo e recebe; o nonce que a anterior usou não devolve o id da entrega
+dela; e o `stream.status` de um fluxo da anterior responde à nova como
+para um fluxo que não existe. As mutações — o endpoint que sobrevive ao
+`exec`, a janela que não zera, o fluxo da anterior visível —, uma de cada
+vez, reprovam. As duas arquiteturas; a bancada `cargo xtask sdk`, que não
+deve mudar.
+
+**O que não espera.** Conferir quais programas da imagem oferecem um
+endpoint e trocam de imagem: os dados da decisão.
+
+**As fechadas que ela toca.** A DF-1 — o fluxo é um objeto da malha,
+entre dois processos do titular. O DS-1 — o aviso só sinaliza: a troca
+larga as designações antes do resto, como hoje.
+
 ### DT-1
 
 **O Terminal, o servidor de janelas e o teclado da Pessoa.** Inclui o A3
-("o ritmo da senha nos contadores") e o A5 ("o registro por tecla com o
-foco tomado") da pendência antiga do coordenador, e o A4 (a senha no lugar
-errado). Os rótulos DT-1a a DT-1e são os das mensagens de commit; o README
-usa só "DT-1a".
+(o ritmo da senha nos contadores) e o A5 (o registro por tecla com o foco
+tomado) da pendência #298 — achados do adversário do passo 1 da
+continuidade —, e o A4 (a senha no lugar errado). Os rótulos DT-1a a
+DT-1e são os das mensagens de commit; o README usa só "DT-1a".
 
 **O problema.** O caminho da tecla da Pessoa até o console não tem, para o
 kernel, um dono definido. O README pergunta três coisas que nenhuma regra
@@ -144,10 +252,13 @@ quem move o teclado da Pessoa, por onde uma credencial entra".
 - **Quem move o teclado.** Qualquer processo dono de uma superfície, até
   invisível, pede o foco do teclado quando quer (`controlar` com `FOCO`,
   sem gate), e a janela com o foco recebe as teclas — a senha também
-  (DT-1b; o N2a; o A5: a linha por tecla saiu do log do servidor, no N2, e
-  o foco tomado ficou). E o `press` de um agente na caixa de fechar do
-  Terminal fecha o console e encerra a sessão da Pessoa que está nele —
-  gravado, e não recusado (DT-1e; o X2 do adversário ξ).
+  (DT-1b; o N2a). Sem ninguém entrado no console físico, a tecla de uma
+  janela que não é de Terminal não chega a ela: é recusada, e cada uma
+  vira um registro `keyboard` `DENY_NOT_AUTHENTICATED` na auditoria — com
+  o foco tomado no login, a conta e o ritmo da senha (o A5). E o `press` de
+  um agente na caixa de fechar do Terminal fecha o console e encerra a
+  sessão da Pessoa que está nele — gravado, e não recusado (DT-1e; o X2 do
+  adversário ξ).
 - **Por onde a credencial entra, e o que ela deixa.** A senha digitada
   adiantado num Terminal entra no histórico do teclado, que só o `sistema`
   lê (DT-1c; o X3 do ξ); a digitada no lugar errado — numa linha que pede
@@ -196,7 +307,9 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   confere o dono da superfície; `kernel/src/usuario/mod.rs` — o `terminal`
   decide `terminal.attach`, e o `escutar`, o `superficie` e o `controlar`
   não passam pelo gate; `kernel/src/barra.rs` — `pressionar_terminal`
-  publica no canal `terminal`, ou no `janelas`.
+  publica no canal `terminal`, ou no `janelas`; `kernel/src/interpretador.rs`
+  — `tratar_tecla_de_janela`, que grava o `keyboard` recusado, tecla a
+  tecla (o A5).
 - Os casos da suíte que já cercam o caminho: `terminal: o agente nao edita
   nem confirma a linha da senha`, `consoles: a senha digitada adiantado nao
   entra no historico`, `terminal: a edicao da arvore que corre com o Enter
@@ -210,11 +323,9 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
 - As mutações dos consoles e do Terminal: N88 a N105, N126 a N156, N162 a
   N172, e as do AE-5 sobre os consoles, N189 a N208 menos a N196 (no
   README e em [SDK, Mutações](SDK.md#mutações)).
-- Da pendência antiga — "o ritmo da senha nos contadores (A3), o registro
-  por tecla com o foco tomado (A5), F4, F6" —, o A3 e o A5 estão acima. O
-  F4 e o F6 não aparecem no README, em `docs/`, no código nem nas
-  mensagens de commit: do adversário do AE-1, há registro do F1, do F2,
-  do F3 e do F5.
+- Da pendência #298, o A3 e o A5 estão acima, com as opções que ela dá —
+  abaixo, na 3(c) e na 2(e). O F4 e o F6, do adversário do AE-1, ficam com
+  o `exec`: a [F4](#f4) e a [M-EXEC](#m-exec).
 
 **As alternativas**, por pergunta:
 
@@ -245,6 +356,10 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
    - (d) **(minha)** Uma sequência de atenção segura: uma tecla que só o
      kernel trata e que leva a Pessoa ao console de verdade — a prática do
      Ctrl+Alt+Del.
+   - (e) O A5, pelas opções da pendência: dobrado na DT-1b — com o foco
+     que não sai da linha do login (2b), a tecla vai ao console, e não
+     vira registro —; ou, parcial, um limitador de ritmo dos registros
+     `keyboard` recusados.
 3. **As linhas da Pessoa, e o que a tecla deixa.**
    - (a) As linhas de credencial são da Pessoa: o `ui.claim` de um agente
      nelas, e o `press` dele na caixa de fechar de um Terminal com alguém
@@ -255,10 +370,12 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
      linhas.
    - (b) Como hoje: o arrendamento do agente vale contra a Pessoa, o
      `press` fica gravado, e a coordenação fica na janela.
-   - (c) Os contadores sem o grão da tecla — os dos fios do Terminal e do
-     servidor e a linha do teclado somados por janela de tempo —, ou só
-     para quem tem `audit.read`. O README: "muda o que esses relatórios
-     prometem, ou a quem".
+   - (c) Os contadores — o A3 —, pelas opções da pendência: manter, e
+     documentado; agregar ou omitir — os `scheduled` dos fios do Terminal
+     e do servidor e a linha do teclado em `irq.stats` somados por janela
+     de tempo, ou fora dos relatórios —; restringi-los ao `sistema`; ou
+     dobrá-los na DT-1c, com a versão do campo e o `revision`. O README:
+     "muda o que esses relatórios prometem, ou a quem".
    - (d) **(minha)** Numa linha de credencial, a versão e o prazo do campo
      e o `revision` da árvore só andam no Enter.
 
@@ -280,10 +397,13 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
 - 2(d) é uma tecla que os três caminhos de hardware — o PS/2, o
   `virtio-input` e o USB — precisam entregar ao kernel, e uma tela que o
   kernel desenha.
+- 2(e): o limitador de ritmo só espaça os registros — a conta, e parte do
+  ritmo, continuam na auditoria.
 - 3(a) muda a coordenação: a Pessoa passa a ter prioridade sobre o agente
   nas linhas de credencial. No resto, a regra fica.
-- 3(c) muda o que o `observador` lê: os casos e as bancadas que contam o
-  `scheduled` e o `irq.stats` mudam junto.
+- 3(c): agregar ou omitir muda o que o `observador` lê, e os casos e as
+  bancadas que contam o `scheduled` e o `irq.stats` mudam junto;
+  restringir ao `sistema` tira dele o relatório inteiro.
 
 **O impacto.** O kernel: `eventos.rs` (os nomes), `superficies.rs` (o
 foco), `barra.rs`, `teclado.rs` (o histórico), `interpretador.rs` e
@@ -304,15 +424,16 @@ que os itens da DT-1 saem como [B]:
 1. o kernel conhece o Terminal e o servidor de janelas pelo programa que
    roda: os nomes `terminal` e `janelas` são deles (1a);
 2. o foco muda pelo clique da Pessoa e para a janela que acaba de abrir, e
-   não sai de uma linha que pede credencial (2a e 2b);
+   não sai de uma linha que pede credencial (2a e 2b) — o que dobra o A5:
+   a tecla do login não vai a janela nenhuma, e não vira registro (2e);
 3. as linhas de credencial são da Pessoa: o `ui.claim` e o `press` de um
    agente nelas — e na caixa de fechar de um Terminal com alguém entrado —
    são recusados e gravados, e a tecla do Terminal é coordenada, e entra
    no histórico, onde o console a consome (3a);
 4. a tecla de uma credencial não deixa rastro fora do console — nem na
    versão e no prazo do campo, nem no `revision` da árvore (3d) —, e os
-   contadores do `system.read` deixam de andar tecla a tecla: somados por
-   janela de tempo (3c).
+   contadores do `system.read` deixam de andar tecla a tecla: agregados,
+   somados por janela de tempo (3c).
 
 A 2(d) fica para quando o caminho da Pessoa precisar dela. Fica, como
 resíduo aceito, a senha digitada no lugar errado (o A4): numa linha de
@@ -455,6 +576,122 @@ recolhimento, e quem recolhe é só o coletor — a alternativa (4) do A1 foi
 investigada e não adotada: traria de volta, pelo `fork`, o defeito do
 AE-1.
 
+### R15-HANDOFF
+
+**O próximo marco da fase 15: o handoff** — o **DN-4** do relatório da
+continuidade, com as três decisões dele: a **DH-1** (o que é o handoff),
+a **DH-2** (quem recebe no destino) e a **DH-3** (para onde continuar).
+
+**O problema.** O roteiro: "O handoff, os recursos remotos, a presença, a
+continuidade e os pacotes são os marcos seguintes, e cada um pede uma
+decisão própria antes". O DN-4 escolhe o próximo. E o handoff — passar uma
+atividade de um Duke a outro da mesma Pessoa — pede três respostas antes
+da primeira linha: o que viaja, e quem solta (DH-1); quem recebe do outro
+lado (DH-2); e como a Pessoa diz para onde (DH-3). Hoje, entre dois Dukes
+da Pessoa, há a entrega pelo enlace e o fluxo, cada passo pelo gate de
+cada lado, e nada que leve uma atividade. As fontes não definem o handoff
+além do nome.
+
+**A exposição de hoje.** Nenhuma: não há handoff.
+
+**As evidências.** O [Roteiro](../README.md#roteiro), fase 15; o que fica
+de fora na [MALHA](MALHA.md#o-que-fica-de-fora) — "os próximos marcos,
+cada um com uma decisão própria antes" —, nos
+[FLUXOS](FLUXOS.md#o-que-fica-de-fora) — o handoff e a continuidade; a
+retomada, a migração e a recuperação —, no
+[ENLACE](ENLACE.md#o-que-fica-de-fora) e no
+[PAREAMENTO](PAREAMENTO.md#o-que-fica-de-fora); e o [SDK, O que não
+existe](SDK.md#o-que-não-existe). O que existe, e o handoff usaria: o
+fluxo entre dois Dukes da Pessoa ([FLUXOS, Entre dois
+Dukes](FLUXOS.md#entre-dois-dukes)); a relação que a Pessoa cria no
+pareamento, com o nome que ela dá ([PAREAMENTO](PAREAMENTO.md#a-decisão-dn-1-opção-a));
+o laço do SDK, que espera a malha, os fluxos e a janela num lugar só; e o
+canal de eventos, que já separa a tecla e o ponteiro da máquina (`TECLA`,
+`PONTEIRO`) da ação da árvore (`ACAO`, com quem pediu). E as dependências:
+a [M-EXEC](#m-exec) (DE-1), o endpoint que muda de programa no `exec` —
+fraca —; e a [DT-1](#dt-1), o caminho da Pessoa.
+
+**As alternativas.**
+
+- **DN-4 — o próximo marco.** (a) O handoff, o primeiro na ordem do
+  roteiro; ele bloqueia a continuidade. (b) Outro antes — os recursos
+  remotos, a presença.
+- **DH-1 — o que é o handoff.** (a) Um protocolo de programas sobre a
+  malha: o programa da origem manda o estado ao do destino, por um fluxo;
+  só o estado viaja — nenhuma sessão, chave, arrendamento ou decisão —; e,
+  na dúvida, a origem não solta. (b) **(minha)** Um objeto do kernel que
+  leva um endpoint ou uma sessão de um Duke ao outro — esbarra em "nenhuma
+  identidade migrada" se levar a sessão. (c) Nada.
+- **DH-2 — quem recebe no destino.** (a) O acolhedor da Pessoa: um
+  programa dela no destino, que oferece a intenção do handoff; o aceite só
+  pela entrada dela; o kernel não lança nada por pedido remoto. (b)
+  **(minha)** O kernel do destino lança o programa que a origem pede — um
+  pedido remoto que lança código: uma autoridade que a malha não tem. (c)
+  **(minha)** O programa que estiver no ar aceita sozinho — o fluxo viraria
+  autoridade.
+- **DH-3 — para onde continuar.** (a) O nome que a Pessoa deu no
+  pareamento — o `dispositivo:<nome>` do espaço dela —; nenhuma lista
+  neste marco. (b) **(minha)** Uma lista dos Dukes dela ao alcance — pede
+  a presença ([R15-PRESENCA](#r15-presenca)), e esbarra na D7 se descobrir.
+
+**Os riscos.**
+
+- DH-1(a): "na dúvida, a origem não solta" deixa a atividade nos dois
+  lados até a confirmação: o protocolo tem de aguentar a duplicata, e o
+  destino lê o estado como entrada não confiável — "os bytes são entrada
+  não confiável para quem os lê". O que o estado carrega é do programa:
+  nada nele é autoridade do Duke, e nenhuma chave do kernel sai.
+- DH-2(a): o handoff só termina com a Pessoa diante do destino, e o
+  acolhedor tem de estar no ar — lançado por ela. O aceite "só pela entrada
+  dela" vale o que vale o caminho da Pessoa: sem a DT-1, outra janela
+  imita o pedido de aceite, ou toma o foco dele.
+- DH-3(a): a Pessoa escolhe pelo nome, sem lista; quem tem muitos
+  dispositivos lembra os nomes. É o que a D7 permite.
+- DN-4(a): os recursos remotos e a presença esperam o marco seguinte.
+
+**O impacto.** Os programas: o protocolo, o acolhedor e um exemplo, no
+SDK. A política: a intenção do handoff enumerada nos papéis, e o
+`fabric.remote` sobre os dispositivos. O kernel: nada de novo nas três (a)
+— é o ponto delas. A documentação: um `docs/` do marco, como o FLUXOS e o
+SDK. As bancadas de dois Dukes, nas duas arquiteturas e cruzadas.
+
+**A recomendação.** As dadas no relatório da continuidade:
+
+- **DN-4: o handoff** — ele bloqueia a continuidade;
+- **DH-1: um protocolo de programas sobre a malha; só o estado viaja; na
+  dúvida, a origem não solta**;
+- **DH-2: o acolhedor da Pessoa; o aceite só pela entrada dela; o kernel
+  não lança nada por pedido remoto**;
+- **DH-3: o nome que a Pessoa deu no pareamento; nenhuma lista neste
+  marco**.
+
+Depois da DE-1, e da DT-1: o aceite pela entrada da Pessoa pede o caminho
+dela.
+
+**O plano de validação.** Dois Dukes pareados — as bancadas do enlace, do
+pareamento e do SDK —, nas duas arquiteturas e nos pares cruzados: a
+atividade passa de A a B, a Pessoa aceita em B pelo teclado de B, e A só
+solta depois da confirmação. E as recusas: a Pessoa não aceita, e A fica
+com a atividade; a ligação cai no meio, e A fica com ela; a relação
+esquecida ou revogada no meio; o papel dela sem `fabric.remote`; o
+programa de outro titular que tenta receber; o pedido remoto de lançar,
+recusado. A auditoria dos dois lados, cada passo pelo gate. As mutações —
+a origem que solta antes da confirmação, o aceite por uma `ACAO` da árvore
+em vez da entrada da Pessoa, o kernel que lança por pedido remoto —, uma
+de cada vez. O adversário: tomar a atividade, aceitar no lugar da Pessoa,
+repetir um handoff. A CI completa.
+
+**O que não espera.** Nada de código: o desenho depende das três. A
+bancada `cargo xtask sdk` já mede o caminho por onde o estado iria, com os
+fluxos entre dois Dukes.
+
+**As fechadas que ela toca.** Nenhuma identidade migrada: a sessão não
+viaja, e cada Duke continua ele mesmo (D1, D2). A autoridade remota é a
+composição Pessoa ∩ relação ∩ `remoto`, no destino (D4, DF-5). Sem
+armazenamento-e-envio (D5): os dois de pé. Sem descoberta (D7): o nome do
+pareamento (D8). O fluxo é o transporte, e não autoridade (DF-1 a DF-6); o
+aviso só sinaliza (DS-1).
+
 ### R13-BOOT
 
 **A cadeia de boot confiável** — o incremento seguinte da fase 13.
@@ -565,201 +802,45 @@ nasce no primeiro boot, selada neste TPM, e nunca se clona. O ICP-5 — a
 custódia continua do kernel. O grupo C — o pânico deixa a máquina parada e
 inspecionável: nada de reinício automático quando a medição recusa.
 
-### R13-CONSENT
-
-**O consentimento — a Pessoa perguntada, e o registro que ela lê.**
-Decidido junto com a [ALC-TEMP](#alc-temp).
-
-**O problema.** A fase 13 promete três coisas: quem pediu — a Pessoa na
-frente da máquina ou o agente pelo canal —, o que foi feito, e um registro
-que a Pessoa possa ler depois e desfazer. As duas primeiras existem: a
-auditoria grava o titular, a sessão, o processo e o programa de cada
-decisão, e o console diz `executado: … (agente N)` ou `(pessoa)`. Falta
-perguntar: "um `set_value` do agente troca o que a pessoa estava
-digitando, e nada pergunta a ela antes" (README, "O que ainda não há") —
-hoje, o que separa os dois é o arrendamento, e "pessoa e agente estão no
-mesmo nível". E falta o registro que a Pessoa lê: o `audit.tail` exige
-`audit.read`, que o `sistema`, a segurança e o administrador têm — o
-`observador` e o `operador`, não.
-
-**A exposição de hoje.** Baixa: um agente com `ui.act` edita o campo que a
-Pessoa largou — passado o arrendamento dela — sem perguntar, e a edição
-fica gravada; a Pessoa não lê o que fizeram em nome dela.
-
-**As evidências.** O [Roteiro](../README.md#roteiro), fase 13; [Operar por
-uma pessoa](../README.md#operar-por-uma-pessoa) — "O que ainda não há";
-[Coordenação](../README.md#coordenação); [OPERACAO, Os comandos de todo
-dia](OPERACAO.md#os-comandos-de-todo-dia) — quem tem `audit.read`;
-[USABILIDADE, Decisões novas](USABILIDADE.md#decisões-novas--para-quem-decide)
-— a seção 12 do pedido de usabilidade, "delegação autorizada, lease
-temporário, expansão autorizada"; e o precedente do
-[D8](PAREAMENTO.md#a-decisão-dn-1-opção-a): a Pessoa cria, sem o
-administrador, uma relação cujo papel cabe no dela.
-
-**As alternativas.**
-
-- (a) **(minha, pelo precedente do quórum)** O consentimento como condição
-  da política: a política marca as permissões que, pedidas por um agente
-  sobre o que é da Pessoa, pedem a confirmação dela no caminho dela
-  (DT-1); o gate decide de novo com a confirmação, como decide com um
-  quórum. Uma decisão que espera alguém é um desfecho novo no gate.
-- (b) **A expansão temporária, por titular** — a [ALC-TEMP](#alc-temp), da
-  USABILIDADE: uma entrada da política com prazo — esta identidade, esta
-  permissão, este recurso, até tal tempo lógico —, que vence pelo tempo
-  lógico e sobrevive a um boot. Dada pelo administrador, com prova; e
-  **(minha, pelo precedente do D8)** pela Pessoa, para o que é dela,
-  contida no papel dela. Consentir é dar a entrada; o gate decide como
-  sempre, com ela.
-- (c) **(minha)** Só o registro: a Pessoa lê a auditoria do que foi feito
-  em nome dela, ou no que é dela — um alcance novo de leitura —, e nada se
-  pergunta antes.
-- (d) Nada: como hoje.
-
-**Os riscos.**
-
-- (a) põe no gate uma decisão que espera uma pessoa — a automação de um
-  agente para no humano —, e, sem a DT-1, a confirmação pode ser imitada
-  por outra janela.
-- (b) é autoridade dada por quem não é administrador. O teto (o papel da
-  Pessoa), a enumeração (sem curinga) e o fim (o prazo, a revogação da
-  Pessoa ou do agente, a política seguinte) têm de ser da própria
-  política, e não de uma tabela ao lado — senão é uma segunda autorização.
-  O tempo lógico pode parar, depois de um salto do civil para trás: a
-  entrada dura mais que o prazo no relógio. A entrada e o vencimento vão
-  ao journal.
-- (c) mostra à Pessoa registros que nomeiam outros: o alcance tem de ser
-  só o dela, e o que uma resposta cala — o mesmo `DENY_RESOURCE` para o
-  que não existe e o que é de outro — não pode vazar pelo registro.
-
-**O impacto.** A política (uma linha com prazo, de uma identidade, e a
-conta do teto); o gate (lê as entradas, e o prazo pelo tempo lógico); a
-persistência (a entrada e o vencimento no journal, com a decisão que os
-autorizou); o console (a Pessoa dá e tira a entrada, depois da DT-1); os
-comandos da auditoria (a leitura da Pessoa); a documentação de
-USABILIDADE, OPERACAO e do README.
-
-**A recomendação.** (b) + (c), depois da DT-1: consentir é a Pessoa dar,
-pelo caminho dela, uma entrada com prazo da política — enumerada, contida
-no papel dela, gravada e vencida pelo tempo lógico —, e ela lê o registro
-do que foi feito com ela. A (a) não, por ora: uma decisão que espera é um
-mecanismo novo no gate, e a (b) dá o mesmo controle sem ele. Não se
-delega identidade: o agente continua ele mesmo, com mais um recurso por um
-tempo.
-
-**O plano de validação.** No hospedeiro, a política: o prazo, o teto, a
-falta de curinga, o vencimento pelo tempo lógico, o lógico parado. Na
-suíte: dar, usar e vencer; a revogação da Pessoa e a do agente, que apagam
-a entrada; a entrada além do papel, recusada; a leitura da Pessoa, sem o
-registro dos outros. Na bancada de persistência: a entrada e o vencimento
-através do corte de energia e do boot. As mutações — o prazo ignorado, o
-teto ignorado, a entrada que sobrevive à revogação, a leitura sem o filtro
-do titular. O adversário: passar do teto, usar uma entrada vencida,
-mantê-la depois da revogação. As duas arquiteturas; a CI completa.
-
-**O que não espera.** Nada de código: a gramática e a conta da (b)
-dependem da decisão. O desenho da leitura da Pessoa (c) pode ser escrito
-como proposta.
-
-**As fechadas que ela toca.** Nenhum `ALLOW(*)`: a entrada é enumerada. A
-Policy como fonte da decisão: a entrada é da política. Nenhuma autorização
-paralela. [O teto não é posse](../README.md#o-teto-não-é-posse): o papel de
-teto do administrador não se exerce. E a R1: a revogação de quem deu a
-entrada, ou de quem a recebeu, não tem volta.
-
-### M-EXEC
-
-**O `exec` e a malha do processo.**
-
-**O problema.** Na troca de imagem, os endpoints do processo continuam
-abertos com a identidade do programa que os ofereceu — o nome, o resumo e
-o editor da imagem anterior, que a descoberta mostra —; o que esperava
-neles passa à imagem nova, que também continua com a janela de nonces do
-processo. Cada operação da imagem nova passa pelo gate com o manifesto
-dela, no mesmo titular: nenhuma autoridade a mais. Mas a identidade do
-endpoint deixa de ser a do programa que roda — e a malha existe para que
-quem procura escolha pelo que o programa **é**.
-
-**A exposição de hoje.** Baixa: no mesmo titular, a descoberta e a
-auditoria atribuem a um programa o que outro faz; quem escolhe pelo resumo
-escolhe errado.
-
-**As evidências.** [MALHA, A identidade de um
-programa](MALHA.md#a-identidade-de-um-programa) e [Revogação e
-fim](MALHA.md#revogação-e-fim); [SDK, Limites
-conhecidos](SDK.md#limites-conhecidos) — as designações e os avisos na
-fila saem no `exec` (NS17, NS36), e os endpoints ficam; o precedente do
-[FLUXOS, Os estados](FLUXOS.md#os-estados): a ponta de um fluxo é do
-processo e não sobrevive ao `exec` (`o programa mudou`), encerrada dentro
-da ordem das gravações, logo depois do ponto sem volta — o trabalho do
-AE-1; o caso `malha: o impostor nao alcanca o que e do outro`.
-
-**As alternativas.** As duas primeiras são as do README.
-
-- (a) Fechar os endpoints no `exec`, como no fim do processo: o que
-  esperava neles é anulado (`voided`), e o fecho vai à auditoria com o
-  motivo.
-- (b) Mudar a identidade deles para a da imagem nova: a descoberta passa a
-  mostrar o programa que roda.
-- (c) Como hoje, documentado.
-
-**Os riscos.**
-
-- (a): o programa que se troca por outro — ou por si mesmo — perde os
-  endpoints e oferece de novo; quem mandou vê `voided`, e manda de novo.
-- (b): quem escolheu pelo resumo antes da troca fala com outro programa
-  sem saber; o registro da oferta diz um programa, e o endpoint outro — a
-  cadeia de ids da auditoria precisa de um elo novo.
-- (c): a atribuição errada continua, e cresce na fase 15, com um endpoint
-  visto de outro Duke.
-
-**O impacto.** `kernel/src/malha.rs` e o caminho do `exec` em
-`kernel/src/usuario`, que já encerra ali os fluxos da ponta; o registro
-`fabric.withdraw` com o motivo; o SDK e a MALHA na documentação.
-
-**A recomendação.** (a): o mesmo ciclo de vida da ponta de um fluxo — um
-objeto da malha é do processo **e** do programa que o criou —, e a
-identidade de um endpoint volta a ser sempre a do programa que roda. A
-janela de nonces fica: é do canal de quem manda, o processo, e não do
-programa — uma janela nova deixaria a imagem nova repetir os nonces da
-anterior.
-
-**O plano de validação.** Um caso: o programa oferece, recebe uma entrega
-pendente e troca de imagem; o endpoint some da descoberta, a entrega fica
-`voided`, o fecho vai à auditoria com o motivo, e a imagem nova oferece de
-novo e recebe. A mutação — o endpoint que sobrevive ao `exec` — reprova.
-As duas arquiteturas; a bancada `cargo xtask sdk`, que não deve mudar.
-
-**O que não espera.** Conferir quais programas da imagem oferecem um
-endpoint e trocam de imagem: os dados da decisão.
-
-**As fechadas que ela toca.** A DF-1 — o fluxo é um objeto da malha,
-entre dois processos do titular. O DS-1 — o aviso só sinaliza: a troca
-larga as designações antes do resto, como hoje.
-
 ## As outras
 
 Na ordem recomendada. Cada uma: o problema, as alternativas, a
 recomendação provisória e o que destrava.
 
-### ALC-TEMP
+### F4
 
-**A expansão temporária de alcance, por titular.** Proposta com o
-[R13-CONSENT](#r13-consent), alternativa (b).
+**O ponto sem volta do `exec`, sem reconfirmar** — o F4 do adversário do
+AE-1, na pendência #298. Decidido junto com a [M-EXEC](#m-exec) (DE-1).
 
-- **O problema.** Hoje o alcance é do papel, e o que muda o papel é
-  `policy.write` e `policy.assign`, com prova, até a próxima mudança. Uma
-  expansão temporária, por titular — "esta pessoa, este recurso, por uma
-  hora" — é um conceito que a política não tem: uma entrada com prazo, de
-  uma identidade e não de um papel, que vence pelo tempo lógico e
-  sobrevive a um boot. "Isso não se infere das invariantes" ([README,
-  Decisões pendentes](../README.md#decisões-pendentes);
-  [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide)).
-- **As alternativas.** (a) A entrada com prazo, por identidade, na
-  política — a da USABILIDADE. (b) **(minha)** A atribuição de um papel
-  com prazo — o `policy.assign` que vence —, sem entrada por recurso. (c)
-  Nada: o administrador muda o papel e o desfaz à mão.
-- **A recomendação provisória.** (a), como parte do consentimento.
-- **Destrava.** O consentimento da fase 13.
+- **O problema.** O `executar` decide o `process.exec` sobre o caminho
+  antes de ler o arquivo; depois lê e confere o código — o selo, pela
+  confiança de agora —, prepara a imagem, e troca no ponto sem volta com o
+  ALLOW de antes, sem decidir de novo
+  ([`kernel/src/usuario/mod.rs`](../kernel/src/usuario/mod.rs)). Uma
+  revogação, uma política nova ou uma contenção que chegue durante a
+  leitura — centenas de milissegundos num programa grande: a troca para o
+  `livro` levou de 370 a 970 ms na suíte ([FLUXOS, Os
+  estados](FLUXOS.md#os-estados)) — não para a troca. Depois dela, cada
+  pedido da imagem nova passa pelo gate com a política de então; o que
+  fica na janela é a troca em si: a imagem nova roda, com os descritores
+  herdados e o que não passa pelo gate — as superfícies, o foco.
+- **A área de 5.3.** O Gate e a autorização: o momento da decisão. Decidir
+  de novo no ponto de mudar é o padrão de outros caminhos — a operação da
+  malha (`reconfirmar`), a abertura efetiva de um fluxo, a troca da própria
+  senha, decidida "de novo no ponto de gravar".
+- **As alternativas** (as da pendência). (a) Manter: a decisão de antes da
+  leitura vale para a troca. (b) Reconfirmar quando a ordem das gravações
+  estiver na mão — quem é ponta de fluxo já troca com ela. (c) Reconfirmar
+  sempre.
+- **Os riscos.** (b) só cobre quem é ponta de fluxo. (c), para quem não é
+  ponta, sem a ordem, estreita a janela à troca e não a fecha — a
+  revogação se ordena pela ordem das gravações —; e tomar a ordem em todo
+  `exec` traz de volta o defeito do AE-1, a espera dentro da chamada de
+  sistema, a menos que siga o caminho que dá a vez e roda de novo.
+- **A recomendação provisória.** **(minha)** (c), nas duas formas: com a
+  ordem na mão para quem é ponta, que é a (b), e sem ela para quem não é —
+  uma conta da política por troca, a medir.
+- **Destrava.** Fecha um resíduo do AE-1.
 
 ### A9-RESUMO
 
@@ -783,6 +864,39 @@ adversário do passo 1.
   do motivo.
 - **Destrava.** Nada do roteiro; fecha um resíduo do passo 1.
 
+### I7
+
+**O resumo sem chave dos parâmetros, no console sem ninguém** — o I7 da
+pendência #298: o resto do N6.
+
+- **O problema.** Num console sem ninguém entrado, todo comando é recusado
+  (`DENY_NOT_AUTHENTICATED`) e gravado. O N6 (`75444ef`) separou os dois
+  casos: a linha que não é comando vai com o marcador `(comando
+  desconhecido)` e sem resumo — antes, ia com a primeira palavra em claro e
+  o resto num "BLAKE2s sem chave, que se adivinha fora da máquina", e uma
+  senha digitada no lugar errado ia assim para a auditoria —; e o comando
+  que existe continua com o nome e o resumo dos parâmetros, o BLAKE2s sem
+  chave de `politica::auditoria::resumo_dos_parametros`. O que se digita
+  depois do nome de um comando que existe — uma senha no lugar errado
+  também — vai à auditoria, e ao journal, num resumo que quem lê a
+  auditoria adivinha por dicionário ([Consoles](../README.md#consoles);
+  `kernel/src/interpretador.rs`, `despachar`). O mesmo resumo vai em todo
+  registro de pedido — "a auditoria grava o resumo dos parâmetros do
+  pedido, nunca o texto", diz o módulo das mensagens —; o I7 é o caso em
+  que o parâmetro pode ser uma senha.
+- **A área de 5.3.** A auditoria — o que se grava —; e, na (c), uma chave
+  nova.
+- **As alternativas.** (a) Manter. (b) O comando que existe, sem ninguém
+  entrado, gravado sem o resumo, como a linha que não é comando: a regra
+  de que a senha não vai à auditoria, que o N6 aplicou como [B]. (c)
+  **(minha)** Um resumo com chave — um MAC com uma chave derivada da do
+  Duke por um rótulo próprio, como a da cópia de segurança —: uma chave
+  nova, e a custódia dela.
+- **A recomendação provisória.** (b): antes do login, a decisão é a mesma
+  qualquer que seja o parâmetro, e o resumo serve mais a quem adivinha que
+  a quem investiga.
+- **Destrava.** Fecha um resíduo do passo 1.
+
 ### A1-4
 
 **O que a recusa da cota mostra** — o achado A1-4 do adversário da
@@ -797,17 +911,19 @@ alternativa 1.
   correção (5) da [COTA-SOMA](#cota-soma), que o README trata como [B].
   (b) Mostrar os mortos no `process.list` — muda uma saída documentada.
   (c) Nada.
-- **A classificação.** Pela 5.3 de 17/11/2026, nenhuma das duas parece
-  [C]: o texto do detalhe não é contrato ([SDK, O contrato
-  v2](SDK.md#o-contrato-v2-ds-2)), e uma saída do `process.list` não é
-  semântica de segurança. O README a deixou "para uma decisão à parte";
-  cabe ao dono dizer se ela volta ao [B].
+- **A classificação** (5.8: é do coordenador). Não toca área nenhuma de
+  5.3: o que se grava de cada decisão não muda — o texto do detalhe não é
+  contrato ([SDK, O contrato v2](SDK.md#o-contrato-v2-ds-2)), e a correção
+  (5) da COTA-SOMA, do mesmo tipo, o README já trata como [B] —, e o
+  `process.list` é um relatório, sem identidade, autoridade, custódia nem
+  persistência. **[B] pela 5.3 — o coordenador executa.**
 - **A recomendação provisória.** (a).
 - **Destrava.** O diagnóstico da cota.
 
 ### SDK-CANAL
 
-**O canal sem nome** — os nomes previsíveis do laço.
+**O canal sem nome** — a **DC-1′** do relatório da continuidade: o resto
+do R6 do DN-3, a tomada dos nomes do laço.
 
 - **O problema.** O `Laco::novo` tenta 16 nomes previsíveis
   (`laco-<id>`, `laco-<id>-1`…); quem os tomar todos — 8 processos de uma
@@ -817,11 +933,15 @@ alternativa 1.
   conhecidos](SDK.md#limites-conhecidos)).
 - **As alternativas.** (a) O canal sem nome — o kernel dá a chave, sem um
   nome que outro tome —, crescimento do contrato v2: "decisão revisada",
-  pela regra do DS-2. (b) Aceitar.
-- **A classificação.** A regra é a do DS-2 — crescer o contrato é decisão
-  revisada —; pela 5.3, talvez não seja [C]: não toca identidade,
-  autoridade nem auditoria. Cabe ao dono.
-- **A recomendação provisória.** (a), junto com a regra dos nomes da DT-1.
+  pela regra do DS-2. (b) Aceitar, documentado, até um consumidor pedir.
+- **A classificação** (5.8: é do coordenador). Não toca área nenhuma de
+  5.3: o canal sem nome não muda quem decide nem o que se autoriza — o
+  `escutar` não passa pelo gate hoje, e o canal sem nome também não —; é
+  crescimento do contrato v2, que o DS-2 faz pela lista conferida, de
+  propósito. **[B] pela 5.3 — o coordenador executa.**
+- **A recomendação.** A dada no relatório: **opcional; deixar
+  documentado até um consumidor pedir.** A reserva dos nomes `terminal` e
+  `janelas` da [DT-1](#dt-1), 1(a), é outro mecanismo, e não depende dela.
 - **Destrava.** Um limite do SDK.
 
 ### AUD-ANEL
@@ -864,6 +984,82 @@ do adversário do B4 da auditoria.
 - **A recomendação provisória.** (b), medindo quanto a base cresce por
   operação, para saber quando a (a) vira necessária.
 - **Destrava.** A vida longa de uma máquina.
+
+### R13-CONSENT
+
+**O consentimento — a Pessoa perguntada, e o registro que ela lê.**
+Decidido com a [ALC-TEMP](#alc-temp) (DX-1).
+
+- **O problema.** A fase 13 promete quem pediu, o que foi feito, e "um
+  registro que a pessoa possa ler depois e desfazer". As duas primeiras
+  existem: a auditoria grava o titular, a sessão, o processo e o programa
+  de cada decisão, e o console diz `executado: … (agente N)` ou
+  `(pessoa)`. Falta perguntar: "um `set_value` do agente troca o que a
+  pessoa estava digitando, e nada pergunta a ela antes" ([Operar por uma
+  pessoa](../README.md#operar-por-uma-pessoa), "O que ainda não há") —
+  hoje, o que separa os dois é o arrendamento, e "pessoa e agente estão no
+  mesmo nível" ([Coordenação](../README.md#coordenação)). E falta o
+  registro que a Pessoa lê: o `audit.tail` exige `audit.read`, que o
+  `observador` e o `operador` não têm ([OPERACAO, Os comandos de todo
+  dia](OPERACAO.md#os-comandos-de-todo-dia)).
+- **A exposição de hoje.** Baixa: um agente com `ui.act` edita o campo que
+  a Pessoa largou — passado o arrendamento dela — sem perguntar, e a
+  edição fica gravada; a Pessoa não lê o que fizeram em nome dela.
+- **As alternativas.** (a) **(minha, pelo precedente do quórum)** A
+  política marca as permissões que, pedidas por um agente sobre o que é da
+  Pessoa, pedem a confirmação dela, no caminho dela (DT-1); o gate decide
+  de novo com a confirmação — uma decisão que espera alguém, um desfecho
+  novo no gate. (b) A expansão temporária — a [ALC-TEMP](#alc-temp) (DX-1),
+  na forma que o relatório da continuidade recomendou, o papel com prazo
+  —: consentir é dar o papel, e o gate decide como sempre. Quem o dá — só
+  o administrador, com prova, ou também a Pessoa, contido no papel dela
+  (**(minha)**, pelo precedente do [D8](PAREAMENTO.md#a-decisão-dn-1-opção-a),
+  em que ela cria sem o administrador uma relação cujo papel cabe no dela)
+  — é a pergunta que o consentimento traz à DX-1. (c) **(minha)** Só o
+  registro: a Pessoa lê a auditoria do que foi feito em nome dela, ou no
+  que é dela — um alcance novo de leitura —, e nada se pergunta antes. (d)
+  Nada.
+- **Os riscos.** (a) para a automação de um agente no humano, e sem a DT-1
+  a confirmação se imita. (b) é autoridade dada por um tempo: o teto, a
+  enumeração e o fim — o prazo pelo tempo lógico, que pode parar depois de
+  um salto do civil para trás; a revogação de quem deu e de quem recebeu —
+  têm de ser da própria política, e não de uma tabela ao lado, senão é uma
+  segunda autorização. (c) não pode mostrar à Pessoa o que é de outros,
+  nem o que uma resposta cala — o mesmo `DENY_RESOURCE` para o que não
+  existe e o que é de outro.
+- **A recomendação provisória.** (b) + (c), depois da DT-1; a (a) não, por
+  ora: uma decisão que espera é um mecanismo novo no gate, e a (b) dá o
+  mesmo controle sem ele. Não se delega identidade: o agente continua ele
+  mesmo, com mais alcance por um tempo.
+- **As fechadas.** Nenhum `ALLOW(*)`: o papel é enumerado. A Policy como
+  fonte da decisão. Nenhuma autorização paralela. [O teto não é
+  posse](../README.md#o-teto-não-é-posse). E a R1: a revogação não tem
+  volta.
+- **Destrava.** O título da fase 13; o [R13-DESFAZER](#r13-desfazer).
+
+### ALC-TEMP
+
+**A expansão temporária de alcance, por titular** — a **DX-1** do
+relatório da continuidade. Decidida com o [R13-CONSENT](#r13-consent),
+alternativa (b).
+
+- **O problema.** Hoje o alcance é do papel, e o que muda o papel é
+  `policy.write` e `policy.assign`, com prova, até a próxima mudança. Uma
+  expansão temporária, por titular — "esta pessoa, este recurso, por uma
+  hora" — é um conceito que a política não tem: uma entrada com prazo, de
+  uma identidade e não de um papel, que vence pelo tempo lógico e
+  sobrevive a um boot. "Isso não se infere das invariantes" ([README,
+  Decisões pendentes](../README.md#decisões-pendentes);
+  [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide)).
+- **As alternativas.** (a) A entrada com prazo, por identidade e por
+  recurso, na política — a forma da USABILIDADE. (b) O papel com prazo — a
+  atribuição que vence, o `policy.assign` com fim —, sem entrada por
+  recurso: o alcance continua do papel. (c) Nada: o administrador muda o
+  papel e o desfaz à mão.
+- **A recomendação.** A dada no relatório: **esperar um consumidor;
+  depois, o papel com prazo** — a (b). O consumidor à vista é o
+  consentimento.
+- **Destrava.** O consentimento da fase 13.
 
 ### R13-DESFAZER
 
@@ -1063,30 +1259,11 @@ chaves de sessão, a EVM e o HTTP/3 do IC são do grupo C (ver [as
 fechadas](#as-fechadas-que-não-se-reabrem)). Recomendação provisória:
 nenhum, até uma necessidade.
 
-### R15-HANDOFF
-
-**O handoff.** O roteiro: "O handoff, os recursos remotos, a presença, a
-continuidade e os pacotes são os marcos seguintes, e cada um pede uma
-decisão própria antes" ([Roteiro](../README.md#roteiro), fase 15;
-[MALHA, O que fica de fora](MALHA.md#o-que-fica-de-fora)). As fontes não
-os definem além do nome; o sentido abaixo é o comum.
-
-- **O problema.** Passar uma atividade de um Duke a outro da mesma Pessoa.
-- **As fechadas que ele esbarra.** Nenhuma identidade migrada; cada Duke é
-  um principal próprio (D1, D2); a autoridade remota é a composição Pessoa
-  ∩ relação ∩ `remoto` (D4, DF-5); nada de um fluxo persiste, e a retomada
-  está fora ([FLUXOS](FLUXOS.md#o-que-fica-de-fora)); sem
-  armazenamento-e-envio (D5).
-- **As alternativas.** (a) **(minha)** O handoff como protocolo de
-  programa, sobre os fluxos: o programa de um Duke manda o estado ao do
-  outro, que continua — nada novo no kernel. (b) **(minha)** Um objeto de
-  handoff no kernel, que leva um endpoint ou uma sessão de um Duke a outro
-  — esbarra em "nenhuma identidade migrada" se levar a sessão. (c) Nada.
-- **A recomendação provisória.** (a), depois da [M-EXEC](#m-exec).
-
 ### R15-REMOTOS
 
-**Os recursos remotos.**
+**Os recursos remotos.** Como os outros marcos da fase 15, "cada um pede
+uma decisão própria antes" ([Roteiro](../README.md#roteiro), fase 15); as
+fontes não os definem além do nome, e o sentido abaixo é o comum.
 
 - **O problema.** Usar, deste Duke, um recurso de outro da mesma Pessoa.
 - **As fechadas que ele esbarra.** O conjunto fechado de mensagens do
@@ -1111,7 +1288,8 @@ os definem além do nome; o sentido abaixo é o comum.
   relacionados, pelo endereço da relação — uma mensagem a mais no conjunto
   fechado do enlace. (b) A descoberta local — esbarra na D7, e não se
   propõe aqui. (c) Nada.
-- **A recomendação provisória.** (a).
+- **A recomendação provisória.** (a). O handoff não espera por ela: a
+  DH-3 escolhe pelo nome do pareamento, sem lista.
 
 ### R15-CONTINUIDADE
 
@@ -1127,7 +1305,9 @@ os definem além do nome; o sentido abaixo é o comum.
   programa: um fluxo novo, e o programa retoma de onde parou. (b)
   **(minha)** Fluxos que se retomam no kernel — mudam o que o DN-2 entregou
   como volátil. (c) Nada.
-- **A recomendação provisória.** (a), depois da [M-EXEC](#m-exec).
+- **A recomendação provisória.** (a), depois do
+  [handoff](#r15-handoff): o DN-4 o põe antes, porque ele bloqueia a
+  continuidade.
 
 ### R15-PACOTES
 
