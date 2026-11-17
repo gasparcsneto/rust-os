@@ -66,7 +66,7 @@ continuidade.
 |---|---|---|---|---|---|
 | [M-EXEC](#m-exec) (DE-1) | O `exec` e a malha do processo, com a F6 | identidade de programa e proveniência | o handoff (fraco); um limite do SDK | baixa: enquanto a imagem nova exerceria `fabric.offer` sobre a intenção, a descoberta mostra o endpoint com o programa que não roda mais; e a imagem nova lê e cancela as entregas da anterior, e vê os fluxos dela | [README](../README.md#decisões-pendentes) |
 | [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; o Gate e a Policy (quem escuta os nomes do sistema) | em parte, o consentimento (fase 13) e o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, ou abre uma janela logo antes de a Pessoa digitar, e recebe o que ela digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
-| [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: a pessoa que entra muitas vezes, em qualquer máquina; a mesma chave nas 8 sessões, com muitos núcleos ou com a máquina em uso; ou alguns titulares juntos — enchem a tabela de fios, e nada nasce, nem o Terminal, nem o `energia` do `system.reboot` | [README](../README.md#decisões-pendentes) |
+| [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: a pessoa que entra muitas vezes, em qualquer máquina; a mesma chave nas 8 sessões, com muitos núcleos ou com a máquina em uso; ou alguns titulares juntos — enchem a tabela de fios, e nada nasce, nem o Terminal — o `system.reboot` já não depende dela: o fio `energia` nasce no boot (a correção (1)) | [README](../README.md#decisões-pendentes) |
 | [R15-HANDOFF](#r15-handoff) (DH-1 a DH-3) | O handoff, o próximo marco da fase 15: o que é, quem recebe, para onde | identidade e autoridade entre dispositivos | a linha em curso, a fase 15; a continuidade | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R13-BOOT](#r13-boot) | A cadeia de boot confiável | custódia (a política dos selos, na (b)); confiança (uma raiz nova, na (a) e na (c)) | a fase 13; a base de R12-IC-TPM e R12-IC-VALOR; e o caminho do Secure Boot que a fase 14 deixou de fora — a recomendação o deixa para depois, como opção do operador | **real, com a máquina na mão**: o disco e a máquina juntos abrem o selo da identidade, e o disco e o mesmo TPM satisfazem a política das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
@@ -685,14 +685,15 @@ e não uma autorização.
 14.1 não fecha.
 
 **O problema.** A tabela de fios é uma só, para os fios do kernel e os
-processos de todos: 95 vagas (`MAX_FIOS`), 89 livres na suíte com 4
-núcleos. A cota de processos protege um titular dos outros — desde a 14.1
+processos de todos: 95 vagas (`MAX_FIOS`), 88 livres na suíte com 4
+núcleos — o fio `energia`, que nasce no boot desde a correção (1), toma
+uma. A cota de processos protege um titular dos outros — desde a 14.1
 e a alternativa 1 do A1, os vivos, os que nascem, os zumbis e os mortos
 ainda não recolhidos de um titular ocupam no máximo a cota dele —, mas não
 protege a tabela:
 
-- vários titulares, cada um dentro da cota, a enchem: doze de cota 8
-  ocupam as 89 vagas, e numa máquina em uso, com os serviços e os
+- vários titulares, cada um dentro da cota, a enchem: onze de cota 8
+  ocupam as 88 vagas, e numa máquina em uso, com os serviços e os
   programas do boot no ar, bastam menos;
 - a cota é por sessão, e não por identidade: a mesma chave de agente nas 8
   sessões cifradas — as quatro portas do `virtio-console` e as quatro
@@ -704,7 +705,7 @@ Quanto disso uma identidade sozinha alcança depende dos núcleos. A cota
 do `operador`, na imagem, é 8 (`politica/src/lib.rs:399`); a do
 `administrador` não entra na conta: ele é um teto, que não se exerce
 (`kernel/src/autorizacao.rs:1012-1020`). 8 sessões da mesma chave de
-operador dão 64 vagas, e com 4 núcleos sobram 89 — a chave sozinha não
+operador dão 64 vagas, e com 4 núcleos sobram 88 — a chave sozinha não
 enche a tabela.
 Cada núcleo ligado além do primeiro toma uma vaga para o ocioso dele, e
 as 95 vagas descem até as 32 de trabalho com os 64 núcleos ligados
@@ -713,9 +714,10 @@ mesma chave enche sozinha. E quem enche sozinho em qualquer máquina é a
 pessoa que entra muitas vezes — uma cota nova a cada login.
 
 Com a tabela cheia, não nasce fio nenhum, de ninguém: outro titular não
-lança programa, o Terminal não abre, a cerimônia de pareamento não começa,
-e o `system.reboot` não cria o fio `energia` — e falha depois de o pedido
-ir ao journal.
+lança programa, o Terminal não abre, a cerimônia de pareamento não
+começa. O `system.reboot` não depende mais dela: o fio `energia` nasce no
+boot, parado, e o pedido só o acorda — a correção (1), no `ee4ea45`;
+antes, ele falhava depois de o pedido ir ao journal.
 
 **A exposição de hoje.** Real, pela leitura, sem reprodução:
 disponibilidade. Uma pessoa que entra muitas vezes, em qualquer máquina;
@@ -729,7 +731,7 @@ pendentes](../README.md#decisões-pendentes) — o item e os dois antes dele;
 [Coordenação](../README.md#coordenação) — "A cota de processos", "O zumbi
 na cota" e "Os mortos na cota"; a medida da 14.1: com a cota em 2, o
 `colhedor` e 88 zumbis tomaram as 89 vagas livres, e daí em diante não
-nascia fio nenhum, nem o `energia`; os casos `zumbis: o morto conta na cota
+nascia fio nenhum, nem o `energia` (antes da correção (1)); os casos `zumbis: o morto conta na cota
 ate o recolhimento`, `zumbis: os fios do kernel nao contam na cota` e
 `zumbis: a recusa grava os mortos acima da cota`; e [as mutações MC1 a
 MC9](../README.md#as-mutações-da-conta-de-vagas-alternativa-1).
@@ -750,8 +752,9 @@ cotas de titulares diferentes nenhuma das três fecha sozinha":
   `kernel/src/testes.rs:40318`) —, e o gate procura o papel pela chave
   (`kernel/src/autorizacao.rs:1480-1490` e `:3429-3473`);
 - (c) reservar vagas aos fios do kernel — a alternativa (2) da decisão do
-  A1, que segue aberta aqui: salva o `energia`, a cerimônia e o coletor, e
-  não o programa de outro titular nem o Terminal, que é um processo;
+  A1, que segue aberta aqui: salva a cerimônia e o coletor — o `energia`
+  já nasce no boot —, e não o programa de outro titular nem o Terminal,
+  que é um processo;
 - (d) **(minha)** uma reserva também para o titular `sistema` — o servidor
   de janelas e o Terminal —, além da dos fios do kernel;
 - (e) aceitar, como está.
@@ -793,9 +796,8 @@ por sessão de volta, a reserva ignorada, a reserva contada na cota. A CI
 completa.
 
 **O que não espera** — as correções [B] que o README já separou, com a
-numeração dele, cada uma com os seus testes — a (1), a (3), a (4) e a
-(5) em andamento, no incremento das correções da cota, com o
-[A1-4](#a1-4):
+numeração dele, cada uma com os seus testes. A (1), a (3), a (4) e a (5)
+estão **feitas**, no `ee4ea45`, com o [A1-4](#a1-4):
 
 - a (1): o fio `energia` criado no boot, parado, como o do botão;
 - a (3): a contenção conferida de novo no nascimento, antes de o filho
@@ -804,9 +806,9 @@ numeração dele, cada uma com os seus testes — a (1), a (3), a (4) e a
   ao fio definitivo, sob a mesma trava, e a desconta quando a vaga volta
   por falta de pilha;
 - a (5): a recusa da cota num `fork` grava o processo que bifurcou;
-- e a mitigação (3) da decisão do A1 — o nascimento que não acha vaga,
-  havendo morto por recolher, acorda o coletor —, que não exclui a
-  alternativa adotada.
+- e falta a mitigação (3) da decisão do A1 — o nascimento que não acha
+  vaga, havendo morto por recolher, acorda o coletor —, que não exclui a
+  alternativa adotada: no incremento seguinte do kernel.
 
 **As fechadas que ela toca.** A 14.1 (alternativa A, 7/11/2026) e a
 alternativa 1 do A1 (8/11/2026): a cota conta os zumbis e os mortos até o
@@ -1571,7 +1573,7 @@ como [C].
 
 | Id | O que se faz | O estado |
 |---|---|---|
-| [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | em andamento, no incremento das correções da cota |
+| [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
 | [F4](#f4) | o `exec` decide de novo no ponto sem volta | no incremento seguinte |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | no incremento seguinte |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | no incremento seguinte |
@@ -1592,7 +1594,9 @@ alternativa 1.
   esperam o coletor. Muda o texto do detalhe da auditoria, que não é
   contrato (SDK.md:88-93), como a correção (5) da
   [COTA-SOMA](#cota-soma); o `process.list` fica como está.
-- **O estado.** Em andamento, no incremento das correções da cota.
+- **O estado.** Feito, no `ee4ea45`: `cota de processos do papel: N de M,
+  K mortos por recolher` (ou `1 morto por recolher`), da mesma conta, na
+  mesma seção crítica que recusou.
 
 ### F4
 

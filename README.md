@@ -3934,7 +3934,7 @@ cabeçalhos reservados.
   rajada de 100, recusou o relógio a partir da troca 116, e 243 das 400
   foram sem o cookie (`retidos`), o que o servidor vê. E, enquanto a taxa
   não voltava, os outros pedidos de controle dos programas daquela sessão
-  ouviram `DENY_RATE` também: o `system.uptime` do próprio programa, no
+  ouviram `RATE_LIMIT` também: o `system.uptime` do próprio programa, no
   experimento, e uma conexão TLS nova, que lê o mesmo relógio, não se
   abriria. Três processos — de duas pessoas e de um agente —, com 400
   trocas cada um ao mesmo tempo, não chegaram à taxa: cada um gasta a
@@ -4131,7 +4131,8 @@ antes.
 **O que fica de fora.**
 
 - **O HTTP/3.** É outro incremento do roteiro, e depende do QUIC sobre o
-  UDP, que começa por uma avaliação.
+  UDP. A avaliação está feita ([`docs/QUIC.md`](docs/QUIC.md)) e
+  recomenda adiar: nenhum consumidor do Duke ganha com ele.
 - **O *push*, a prioridade, o `CONNECT` estendido e o `Upgrade`.** O
   *push* vai desligado no prefácio, e um `PUSH_PROMISE` acaba com a
   conexão; a prioridade é lida e ignorada, como a RFC 9113 deixa; o
@@ -4160,8 +4161,11 @@ antes.
   `programas::http` leva o cliente HTTP/2, mesmo o que só fala HTTP/1.1:
   o protocolo se escolhe ao conectar. No x86, de 40 a 50 KiB a mais — o
   `buscador`, que ganhou as rotas do HTTP/2, 50 KiB —, e no ARM, de 33 a
-  46 KiB; os que não falam HTTP mudaram menos de 1 KiB. O `correntes` tem
-  761 KiB no x86 e 771 KiB no ARM. Deixar o HTTP/2 só em quem o pede
+  46 KiB; os que não falam HTTP mudaram menos de 1 KiB. O `correntes`
+  tinha, então, 761 KiB no x86 e 771 KiB no ARM; com a tabela de símbolos
+  fora dos programas, os pacotes de protocolo em `opt-level = "z"` e o
+  compilador de agora, tem 682 KiB no x86 e 600 KiB no ARM (a
+  proveniência do `f19df2d`, em release). Deixar o HTTP/2 só em quem o pede
   seria uma escolha de compilação no `programas`, e não entrou.
 
 ### As mutações da rede
@@ -5390,13 +5394,25 @@ registro de cada uma no ponto em que nasceu.
   auditoria no boot (B4)*, com a medida, os testes e as mutações — a
   adoção numa tomada só passou a ser também uma regra do `xtask
   invariantes`).
-  **O A1-4 segue pendente**: a recusa não diz quantos dos contados
-  são mortos — o `process.list` mostra os vivos e os zumbis, e não o morto
-  que espera o coletor, e quem ouve "cota de processos do papel: N de M"
-  pode ver menos processos do titular na lista. Dizer na recusa quantos
-  mortos esperam o coletor muda o texto da auditoria — como a correção (5)
-  do item seguinte —, e mostrá-los no `process.list` muda uma saída
-  documentada: fica registrado para uma decisão à parte.
+  **O A1-4 está feito** — a alternativa (a), um incremento [B] de 17 de
+  novembro de 2026 (`docs/DECISOES.md`, *A1-4*): a recusa não dizia
+  quantos dos contados são mortos — o `process.list` mostra os vivos e os
+  zumbis, e não o morto que espera o coletor, e quem ouvia "cota de
+  processos do papel: N de M" podia ver menos processos do titular na
+  lista. Agora ela diz: `cota de processos do papel: N de M, K mortos por
+  recolher` (ou `1 morto`), e N − K é o que a lista mostrava do titular no
+  instante da conta. Só o texto do detalhe mudou — a contagem, a decisão,
+  o evento e o que se grava são os mesmos —, e sem morto por recolher ele
+  é o de sempre. A conta do gate (`fios::cota_cheia`) e a do nascimento
+  separam os mortos dos zumbis só quando recusam, na mesma fotografia da
+  trava que contou — quem cabe na cota faz a volta de sempre —, e a do
+  nascimento segue gravando `M de M`, com os mortos dela. O texto é curto
+  de propósito: com o processo que bifurcou (a correção (5) do item
+  seguinte), o detalhe passa do teto mais cedo, e o que encolhe primeiro é
+  a descrição do programa, e não a conta. O `process.list` não mudou. O
+  caso `zumbis: a recusa diz os mortos por recolher` segura o coletor, com
+  um e depois dois colhidos, e confere o texto, a lista, a conta do gate e
+  a do nascimento.
 - **A soma das cotas de processos e a cota por sessão** (o que a decisão
   14.1 não fecha): o zumbi conta na cota do titular desde a 14.1, e os
   mortos dele que não são zumbis, até o coletor recolhê-los, desde a
@@ -5407,7 +5423,7 @@ registro de cada uma no ponto em que nasceu.
   a do marcador, enquanto o coletor desmonta um morto dele — (ver a cota
   de processos, em [Coordenação](#coordenação)). Mas vários
   titulares, cada um dentro da cota, ainda enchem a tabela com processos
-  vivos — doze titulares de cota 8 ocupam as 89 vagas que a suíte acha
+  vivos — doze titulares de cota 8 ocupam as 88 vagas que a suíte acha
   livres com 4 núcleos, e numa máquina em uso, com os serviços e os
   programas do boot no ar, bastam menos —, e a cota é por sessão, e não
   por identidade: a mesma chave de agente nas 8 sessões cifradas — as
@@ -5415,20 +5431,33 @@ registro de cada uma no ponto em que nasceu.
   cotas, e uma pessoa ganha uma cota nova a cada login, com os processos
   do login anterior ainda vivos. Com a tabela cheia, não nasce fio
   nenhum, de ninguém — outro titular não lança programa, o Terminal não
-  abre, a cerimônia de pareamento não começa, e o `system.reboot` não
-  cria o fio `energia`. Pela leitura, sem reprodução. Contar a cota pela
+  abre, a cerimônia de pareamento não começa; o `system.reboot` não
+  criava o fio `energia`, que desde a correção (1), abaixo, nasce no boot.
+  Pela leitura, sem reprodução. Contar a cota pela
   identidade fecharia a soma das sessões da mesma chave e dos logins da
   mesma pessoa; encerrar os processos com a sessão, a dos logins; e
-  reservar vagas aos fios do kernel salvaria o `energia`, a cerimônia e o
-  coletor, mas não o programa de outro titular nem o Terminal, que é um
+  reservar vagas aos fios do kernel salvaria a cerimônia e o coletor, mas
+  não o programa de outro titular nem o Terminal, que é um
   processo. A soma das cotas de titulares diferentes nenhuma das três
   fecha sozinha. Cada uma muda a semântica da cota ou da alocação, e fica
   para uma decisão. E três
   correções [B], achadas na análise da 14.1 e de fora dela, ficaram para
-  incrementos à parte, cada uma com os seus testes — a (2) já foi feita:
-  (1) o fio `energia`
-  nasce sob demanda, e com a tabela cheia o `system.reboot` falha depois
-  de o pedido ir ao journal — criá-lo no boot, parado, como o do botão;
+  incrementos à parte, cada uma com os seus testes — as três feitas, a (2)
+  antes, e a (1) e a (3) em 17 de novembro de 2026, junto com a (4) e a
+  (5) (ver [As mutações das correções da soma das
+  cotas](#as-mutações-das-correções-da-soma-das-cotas)):
+  (1) **feita**: o fio `energia` nascia sob demanda, e com a tabela cheia
+  o `system.reboot` falhava depois de o pedido ir ao journal. Agora ele
+  nasce no boot (`energia::iniciar`, antes do botão), parado — espera
+  num futuro, como o do botão —, e o pedido só o acorda, depois do
+  registro no journal; sem o fio, ou com o escalonamento congelado por uma
+  falha fatal — no post-mortem o fio não roda, e a criação dele recusava
+  ali —, o pedido é recusado antes do journal, sem efeito nenhum. O
+  pedido segue o mesmo: o registro na auditoria e no journal antes da
+  resposta, o meio segundo, as gravações paradas. O caso
+  `energia: o reinicio com a tabela de fios cheia` enche a tabela de fios
+  do kernel, e o `system.reboot` é aceito e chega ao fim, pelo fio do
+  boot;
   (2) **feita**: a vaga de um morto que não é zumbi — o filho colhido, o
   órfão, o processo do `user.run` — voltava a um fio novo antes da
   passada do coletor, e a morte dele não era solta (a malha, os fluxos,
@@ -5443,23 +5472,43 @@ registro de cada uma no ponto em que nasceu.
   [Userspace](#userspace), e [As mutações da vaga do
   morto](#as-mutações-da-vaga-do-morto)); o caso `sdk: o programa de fora do
   repositorio com o coletor segurado` refaz a corrida de propósito;
-  (3) o gate confere a contenção antes de copiar o espaço e de nascer, e um
-  `process.isolate` no meio deixa nascer um filho livre — conferir de novo
-  no nascimento, antes de o filho poder rodar (pela leitura). O adversário
+  (3) **feita**: o gate confere a contenção antes de copiar o espaço e de
+  nascer, e um `process.isolate` no meio deixava nascer um filho livre de
+  um processo isolado — o isolamento é do fio, e o filho nasce com outro.
+  Agora a chamada confere de novo no nascimento, antes de o filho poder
+  rodar — a última palavra de quem bifurca, com a vaga, a pilha e o espaço
+  prontos (`fios::bifurcar`) —, com a mesma pergunta e a mesma recusa do
+  gate (`autorizacao::reconfirmar_bifurcacao`: `DENY_CONTAINED` na
+  auditoria, `NEGADO` ao processo): quem está contido não bifurca, regra
+  nenhuma nova. Recusado, o filho não nasce, e a vaga, a pilha e o espaço
+  voltam; um isolamento depois dessa pergunta acha o filho já na tabela,
+  como um filho de um instante antes. O caso `contencao: o isolado no meio
+  do fork nao ganha filho` isola o pai no meio do nascimento, pelo gancho
+  da suíte. O adversário
   da implementação achou mais três, também de fora da 14.1 — ela não os
-  piora —; a (4) e a (5) ficam do mesmo jeito, e a (6) deixou de existir:
-  (4) o `process.terminate` de um
-  processo que ainda está nascendo se perde. O pedido marca a vaga
-  reservada e responde `terminating`; o nascimento troca a vaga pelo fio
-  definitivo, sem a marca, e o processo segue — isolado, ou nem isso com o
+  piora —; a (4) e a (5) estão feitas, e a (6) deixou de existir:
+  (4) **feita**: o `process.terminate` de um
+  processo que ainda está nascendo se perdia. O pedido marca a vaga
+  reservada e responde `terminating`; o nascimento trocava a vaga pelo fio
+  definitivo, sem a marca, e o processo seguia — isolado, ou nem isso com o
   teto de isolados cheio — até sair sozinho. O contador dos términos
-  pendentes não volta mais a zero, e a entrada e a volta de toda chamada
-  de sistema, e toda interrupção vinda do anel do usuário, passam a tomar
-  a trava do escalonador até o próximo boot (pela leitura). Levar a marca
-  ao fio definitivo, sob a mesma trava, e descontá-la quando a vaga volta
-  por falta de pilha; (5) a recusa da cota num `fork` vai à auditoria só
-  com o titular, sem o processo que bifurcou, que o registro da
-  bifurcação permitida tem; (6) a escolha da vaga, na mesma seção crítica
+  pendentes não voltava mais a zero, e a entrada e a volta de toda chamada
+  de sistema, e toda interrupção vinda do anel do usuário, passavam a tomar
+  a trava do escalonador até o próximo boot (pela leitura). Agora o
+  nascimento leva a marca ao fio definitivo, sob a mesma trava, e a
+  desconta quando a vaga volta sem ele nascer — sem pilha, ou recusado pela
+  (3) —; o processo morre no primeiro ponto seguro, sem rodar o programa.
+  Os casos `processos: o encerrado que ainda nasce morre` — um do
+  `user.run` e um filho de `fork`, encerrados no meio do nascimento — e
+  `processos: o termino do filho que nao nasce sai com a vaga`; (5)
+  **feita**: a recusa da cota num `fork` ia à auditoria só com o titular,
+  sem o processo que bifurcou, que o registro da bifurcação permitida tem.
+  Agora ela leva o processo — `pelo processo N (<programa>)`, a mesma
+  descrição do registro da bifurcação, abreviada só acima do teto do
+  detalhe —, na recusa do gate e na do nascimento; o titular, o código e o
+  resto do registro não mudam, e a do `process.run`, que não é pedida por
+  processo nenhum, segue sem ela. O caso `zumbis: a recusa do fork diz o
+  processo que bifurcou`; (6) a escolha da vaga, na mesma seção crítica
   do nascimento, perguntava a `e_zumbi` por cada terminado antes da
   primeira vaga livre — quadrática no tamanho da tabela, como antes da
   14.1, e limitada às 95 vagas. Deixou de existir com a (2): a escolha só
@@ -8739,7 +8788,14 @@ decisão 14.1 e a alternativa 1 da decisão sobre o achado A1, abaixo). O
 processo além da cota — lançado ou bifurcado — não nasce, e a recusa vai
 para a auditoria como `DENY_POLICY`, com a contagem do gate (`cota de
 processos do papel: N de M`); a do nascimento, que só recusa quando
-outro processo do titular nasceu no meio, grava `M de M`.
+outro processo do titular nasceu no meio, grava `M de M`. Quando há entre
+os contados mortos que esperam o coletor — os que o `process.list` não
+mostra —, a recusa diz quantos: `…: N de M, K mortos por recolher` (o
+achado A1-4). A recusa de um `fork` diz também o processo que bifurcou,
+como o registro da bifurcação permitida: `pelo processo P (<programa>):
+cota de processos do papel: …`. E a contenção de quem bifurca é
+conferida de novo no nascimento do filho, antes de ele poder rodar: um
+processo isolado no meio do `fork` não ganha filho.
 
 **O zumbi na cota** (a decisão 14.1, aprovada pelo dono do projeto em 7
 de novembro de 2026 na alternativa A: o zumbi conta na cota do titular —
@@ -8751,13 +8807,14 @@ Contando só os vivos, um titular com uma cota pequena e um programa que
 bifurca e não colhe passava pela cota a cada filho e ocupava a tabela
 inteira — medido na suíte, com 4 núcleos: com a cota em 2, o colhedor e
 88 zumbis tomaram as 89 vagas livres, e daí em diante não nascia fio
-nenhum, de ninguém, nem o `energia` do `system.reboot`. A tabela é uma
-só, para os fios do kernel e os processos de todos: 95 vagas
-(`MAX_FIOS`: as 32 de trabalho, mais uma para o ocioso de cada núcleo
-que pode existir além do primeiro). O ocioso de cada núcleo ligado além
-do primeiro toma uma; com 4 núcleos, como na suíte e nas bancadas,
-sobram 92, e na suíte o boot, o coletor e a rede tomam três delas — as
-32 de trabalho são só o mínimo garantido, com os 64 núcleos ligados.
+nenhum, de ninguém, nem o `energia` do `system.reboot`, que então nascia
+a cada pedido. A tabela é uma só, para os fios do kernel e os processos
+de todos: 95 vagas (`MAX_FIOS`: as 32 de trabalho, mais uma para o ocioso
+de cada núcleo que pode existir além do primeiro). O ocioso de cada
+núcleo ligado além do primeiro toma uma; com 4 núcleos, como na suíte e
+nas bancadas, sobram 92, e na suíte o boot, o coletor, a rede e a
+energia — o fio que nasce no boot, parado — tomam quatro delas — as 32
+de trabalho são só o mínimo garantido, com os 64 núcleos ligados.
 Com a 14.1, os vivos, os que nascem e os zumbis de um titular passaram a
 ocupar da tabela no máximo a cota dele — os fios do kernel não contam em
 cota nenhuma —; os mortos dele que não são zumbis — o colhido, o órfão, o
@@ -9135,6 +9192,35 @@ A MV7 mostra por que o id não se reaproveita: com o id do morto, o fio
 novo passa nos casos do `sdk:`. A limpeza dele solta, com o mesmo canal,
 o que sobrou do morto — e o novo processo teria, até lá, os endpoints e as
 designações do outro.
+
+### As mutações das correções da soma das cotas
+
+Nove mutações contra as correções (1), (3), (4) e (5) de *A soma das
+cotas de processos e a cota por sessão* e o A1-4 (em [Decisões
+pendentes](#decisões-pendentes)), uma de cada vez, no repositório, no
+x86_64 em debug, contra os oito casos novos ou mudados — os quatro de
+`kernel/src/testes/nascimento.rs` e os quatro `zumbis:` da recusa. Na
+última rodada de cada uma, as nove reprovaram. As quatro do nascimento e
+da energia (M1 a M4), cujo caminho passa pela chamada de sistema, que no
+ARM roda na pilha de exceção, rodaram também no aarch64 em debug, e
+reprovaram pelos mesmos casos.
+
+| Mutação | Reprovada por |
+|---|---|
+| o fio `energia` de volta a nascer a cada pedido — o `energia.rs` de antes, sem o `energia::iniciar` no boot (M1) | `energia: o reinicio com a tabela de fios cheia`: com 89 fios na tabela, a resposta "nao ha vaga livre para outro fio", com o pedido já no journal |
+| o nascimento sem a contenção conferida de novo (M2) | `contencao: o isolado no meio do fork nao ganha filho` ("o filho de quem foi isolado no meio do fork nasceu") e `processos: o termino do filho que nao nasce sai com a vaga` |
+| a marca do término que não vai ao fio definitivo (M3) | `processos: o encerrado que ainda nasce morre`: "o processo encerrado nao morreu" |
+| a marca que não é descontada quando a vaga volta sem o fio nascer (M4) | `processos: o termino do filho que nao nasce sai com a vaga`: "o termino do filho que nao nasceu ficou pendente" |
+| a recusa da cota no `fork` sem o processo que bifurcou (M5) | os quatro casos `zumbis:` da recusa |
+| o texto da recusa sem os mortos por recolher (M6) | `zumbis: a recusa diz os mortos por recolher` e `zumbis: a recusa grava os mortos acima da cota` |
+| a conta que não separa os mortos — sempre zero (M7) | os mesmos dois |
+| a conta que junta os zumbis aos mortos por recolher (M8) | `zumbis: a recusa diz os mortos por recolher`, `zumbis: a recusa grava os zumbis acima da cota` e `zumbis: a recusa do fork diz o processo que bifurcou` |
+| a recusa do nascimento sem os mortos da conta dela (M9) | `zumbis: a recusa diz os mortos por recolher`: "a recusa do nascimento nao disse os mortos por recolher" |
+
+A recusa da energia com o escalonamento congelado — o post-mortem, em que
+o fio do boot não roda — não tem caso na suíte: congelar o escalonamento
+para a suíte junto. Ela devolve o que a criação do fio devolvia ali quando
+ele nascia a cada pedido, e foi conferida pela leitura.
 
 ### Mensagens
 
@@ -9645,7 +9731,9 @@ recuperação e o que o Duke ainda não faz — está em
   sem ele no disco, a máquina segue —; meio segundo depois as gravações
   param, o disco descarrega, o NVMe recebe o aviso de desligamento, e a
   máquina vai ao firmware: a FADT, 0xCF9, o 8042 e o `\_S5` da DSDT no x86;
-  a PSCI no ARM.
+  a PSCI no ARM. O fio que faz isso nasce no boot, parado, e o pedido só o
+  acorda: com a tabela de fios cheia, a máquina ainda reinicia (a correção
+  (1) da soma das cotas, em [Decisões pendentes](#decisões-pendentes)).
 - **Disco.** A camada de bloco ([`kernel/src/bloco.rs`](kernel/src/bloco.rs))
   guarda as janelas de escrita, a descarga e a faixa para qualquer
   driver; o NVMe ([`kernel/src/nvme.rs`](kernel/src/nvme.rs)) é o disco de
@@ -12732,7 +12820,10 @@ recomendada, em [`docs/DECISOES.md`](docs/DECISOES.md).
       negocia (ver [O TLS de um programa](#o-tls-de-um-programa)). O SIMD
       nos processos, o mTLS e o *proxy* pedem, cada um, uma decisão — o
       contrato dos registradores, um domínio de assinatura novo e um
-      destino que o gate não vê —, e o HTTP/3 espera a avaliação do QUIC.
+      destino que o gate não vê. O HTTP/3 teve a avaliação do QUIC (ver
+      [`docs/QUIC.md`](docs/QUIC.md)): adiado, sem consumidor — a conexão
+      caberia no gate de hoje, e o caminho pediria o relógio do programa no
+      ritmo dos pacotes, uma decisão.
 - [ ] **Fase 12 — Web3: o Internet Computer.** Um protocolo de programa,
       como o TLS e o HTTP, sem nada no kernel nem na política: o Duke
       consulta o IC de dentro de um processo, pela conexão que o gate
