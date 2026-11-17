@@ -250,6 +250,336 @@ pub(crate) fn conferir_a_suite<'a>(
     }
 }
 
+/// As matrizes de [`VARIAVEL`] nos workflows: em cada job que a tira da
+/// matriz (`DUKE_PARTE: ${{ matrix.<chave> }}`), as entradas de um mesmo
+/// grupo — as mesmas [`CHAVES_DO_GRUPO`] — têm as partes `1/n` a `n/n`,
+/// cada uma uma vez, com o mesmo `n`.
+///
+/// Uma parte que falta deixaria casos sem rodar na CI, em silêncio — a
+/// divisão é do `xtask` e do kernel, e cada máquina só vê a sua —; uma
+/// repetida rodaria a mesma fatia duas vezes; um `n` misturado partiria a
+/// mesma tabela de duas maneiras, com casos de fora. E a parte vem sempre
+/// da matriz: um `DUKE_PARTE` fixo rodaria uma parte só.
+pub(crate) fn conferir_as_matrizes() -> Result<std::process::ExitCode, String> {
+    let dir = crate::raiz_do_projeto().join(".github/workflows");
+    let mut nomes: Vec<String> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("não foi possível ler {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+        .collect();
+    nomes.sort();
+    let mut grupos = Vec::new();
+    let mut fora = Vec::new();
+    for nome in &nomes {
+        let texto = std::fs::read_to_string(dir.join(nome))
+            .map_err(|e| format!("não foi possível ler .github/workflows/{nome}: {e}"))?;
+        let (g, f) = matrizes_com_partes(nome, &texto);
+        grupos.extend(g);
+        fora.extend(f);
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] as partes da CI: {} grupos, cada um com as partes 1/n a n/n, uma vez cada",
+            grupos.len()
+        );
+        Ok(std::process::ExitCode::SUCCESS)
+    } else {
+        for f in &fora {
+            println!("[xtask] {f}");
+        }
+        Ok(std::process::ExitCode::FAILURE)
+    }
+}
+
+/// As chaves de uma entrada da matriz que dizem o que se divide em partes:
+/// a arquitetura e o tipo de rodada. As outras são da parte — o rótulo, a
+/// fumaça que só a segunda roda —, e não separam um grupo. Uma chave nova
+/// que separe grupos e não esteja aqui junta dois deles, e a conferência
+/// acusa as partes repetidas: o lado seguro.
+const CHAVES_DO_GRUPO: [&str; 2] = ["arch", "tipo"];
+
+/// Uma linha de YAML que não é vazia nem comentário: o recuo e o texto.
+fn linhas_do_yaml(texto: &str) -> Vec<(usize, &str)> {
+    texto
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| (l.len() - l.trim_start().len(), l.trim()))
+        .collect()
+}
+
+/// A chave e o valor de uma linha `chave: valor` — o `- ` de um item tirado,
+/// e o valor sem o comentário do fim nem as aspas.
+fn chave_e_valor(texto: &str) -> Option<(&str, &str)> {
+    let texto = texto.strip_prefix("- ").unwrap_or(texto);
+    let (chave, valor) = texto.split_once(':')?;
+    let chave = chave.trim();
+    let de_yaml = !chave.is_empty()
+        && chave
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    let valor = valor.split(" #").next().unwrap_or("").trim();
+    de_yaml.then_some((chave, valor.trim_matches(|c| c == '"' || c == '\'')))
+}
+
+/// Uma entrada da matriz: as chaves e os valores, na ordem em que vêm.
+type Entrada = Vec<(String, String)>;
+
+/// As partes de um grupo: o valor escrito na matriz e a parte lida dele.
+type PartesDoGrupo = Vec<(String, Option<Parte>)>;
+
+/// Os grupos de partes de um workflow, descritos, e o que não confere.
+fn matrizes_com_partes(nome: &str, texto: &str) -> (Vec<String>, Vec<String>) {
+    let linhas = linhas_do_yaml(texto);
+    let mut grupos = Vec::new();
+    let mut fora = Vec::new();
+    let Some(inicio) = linhas.iter().position(|&(r, t)| r == 0 && t == "jobs:") else {
+        return (grupos, fora);
+    };
+    // Cada job: uma chave sem valor no recuo dos jobs, até a próxima — e
+    // os jobs, até a próxima chave do topo.
+    let corpo = &linhas[inicio + 1..];
+    let fim = corpo
+        .iter()
+        .position(|&(r, _)| r == 0)
+        .unwrap_or(corpo.len());
+    let corpo = &corpo[..fim];
+    let Some(recuo) = corpo.first().map(|&(r, _)| r) else {
+        return (grupos, fora);
+    };
+    let mut comecos: Vec<usize> = corpo
+        .iter()
+        .enumerate()
+        .filter(|(_, (r, _))| *r == recuo)
+        .map(|(i, _)| i)
+        .collect();
+    comecos.push(corpo.len());
+    for par in comecos.windows(2) {
+        let job = &corpo[par[0]..par[1]];
+        let nome_do_job = job[0].1.trim_end_matches(':');
+        let onde = format!("{nome}/{nome_do_job}");
+        let (grupos_do_job, fora_do_job) = partes_do_job(&onde, job);
+        grupos.extend(grupos_do_job);
+        fora.extend(fora_do_job);
+    }
+    (grupos, fora)
+}
+
+/// Os grupos de partes de um job, e o que não confere.
+fn partes_do_job(onde: &str, job: &[(usize, &str)]) -> (Vec<String>, Vec<String>) {
+    let mut grupos = Vec::new();
+    let mut fora = Vec::new();
+    // A chave da matriz que vai em DUKE_PARTE.
+    let mut chaves: Vec<&str> = Vec::new();
+    for &(_, t) in job {
+        let Some((VARIAVEL, valor)) = chave_e_valor(t) else {
+            continue;
+        };
+        let chave = valor
+            .strip_prefix("${{")
+            .and_then(|v| v.strip_suffix("}}"))
+            .map(str::trim)
+            .and_then(|v| v.strip_prefix("matrix."))
+            .filter(|c| !c.is_empty() && !c.contains(char::is_whitespace));
+        match chave {
+            Some(c) if !chaves.contains(&c) => chaves.push(c),
+            Some(_) => {}
+            None => fora.push(format!(
+                "{onde}: `{VARIAVEL}: {valor}` — a parte vem da matriz, `${{{{ matrix.<chave> }}}}`; \
+                 fixa, o job rodaria uma parte só"
+            )),
+        }
+    }
+    let chave = match chaves.as_slice() {
+        [] => return (grupos, fora),
+        [c] => *c,
+        _ => {
+            fora.push(format!(
+                "{onde}: `{VARIAVEL}` tirado de mais de uma chave da matriz: {}",
+                chaves.join(", ")
+            ));
+            return (grupos, fora);
+        }
+    };
+    let entradas = match entradas_da_matriz(job) {
+        Ok(e) => e,
+        Err(e) => {
+            fora.push(format!("{onde}: {e}"));
+            return (grupos, fora);
+        }
+    };
+    // O grupo de cada entrada com a parte: as chaves do grupo, na ordem.
+    let mut por_grupo: Vec<(Entrada, PartesDoGrupo)> = Vec::new();
+    for entrada in &entradas {
+        let Some((_, valor)) = entrada.iter().find(|(k, _)| k == chave) else {
+            continue;
+        };
+        let grupo: Entrada = entrada
+            .iter()
+            .filter(|(k, _)| k != chave && CHAVES_DO_GRUPO.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        let parte = Parte::ler(valor).ok();
+        if parte.is_none() {
+            fora.push(format!(
+                "{onde}: `{chave}: {valor}` não é uma parte `k/n` que se leia"
+            ));
+        }
+        match por_grupo.iter_mut().find(|(g, _)| *g == grupo) {
+            Some((_, partes)) => partes.push((valor.clone(), parte)),
+            None => por_grupo.push((grupo, vec![(valor.clone(), parte)])),
+        }
+    }
+    if por_grupo.is_empty() {
+        fora.push(format!(
+            "{onde}: `{VARIAVEL}` vem de `matrix.{chave}`, e nenhuma entrada da matriz a tem"
+        ));
+    }
+    for (grupo, partes) in &por_grupo {
+        let rotulo = grupo
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let lidas: Vec<Parte> = partes.iter().filter_map(|(_, p)| *p).collect();
+        if lidas.len() != partes.len() {
+            continue;
+        }
+        let n = lidas[0].n();
+        let escritas = || {
+            partes
+                .iter()
+                .map(|(v, _)| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if lidas.iter().any(|p| p.n() != n) {
+            fora.push(format!(
+                "{onde} ({rotulo}): as partes {} não têm o mesmo total",
+                escritas()
+            ));
+            continue;
+        }
+        let mut ks: Vec<usize> = lidas.iter().map(|p| p.k()).collect();
+        ks.sort_unstable();
+        if ks != (1..=n).collect::<Vec<_>>() {
+            fora.push(format!(
+                "{onde} ({rotulo}): as partes {} não são de 1/{n} a {n}/{n}, uma vez cada — \
+                 uma que falta deixa casos sem rodar, uma repetida roda a mesma fatia de novo",
+                escritas()
+            ));
+            continue;
+        }
+        grupos.push(format!("{onde} ({rotulo}): {n}"));
+    }
+    (grupos, fora)
+}
+
+/// As entradas da matriz de um job: a lista do `include`, ou o produto dos
+/// eixos `chave: [a, b]`. Um `exclude`, ou os dois juntos, a conferência não
+/// lê, e diz.
+fn entradas_da_matriz(job: &[(usize, &str)]) -> Result<Vec<Entrada>, String> {
+    let Some(m) = job.iter().position(|&(_, t)| t == "matrix:") else {
+        return Err("tem a parte da matriz, e não tem `matrix:`".into());
+    };
+    let recuo = job[m].0;
+    let bloco: Vec<(usize, &str)> = job[m + 1..]
+        .iter()
+        .take_while(|&&(r, _)| r > recuo)
+        .copied()
+        .collect();
+    let Some(passo) = bloco.first().map(|&(r, _)| r) else {
+        return Err("`matrix:` vazia".into());
+    };
+    let mut eixos: Vec<(String, Vec<String>)> = Vec::new();
+    let mut incluidas: Vec<Entrada> = Vec::new();
+    let mut i = 0;
+    while i < bloco.len() {
+        let (r, t) = bloco[i];
+        i += 1;
+        if r != passo {
+            continue;
+        }
+        let Some((chave, valor)) = chave_e_valor(t) else {
+            return Err(format!("`{t}` na matriz não se lê"));
+        };
+        match chave {
+            "exclude" => return Err("um `exclude` na matriz — a conferência não o lê".into()),
+            "include" => {
+                let itens: Vec<(usize, &str)> = bloco[i..]
+                    .iter()
+                    .take_while(|&&(ri, _)| ri > passo)
+                    .copied()
+                    .collect();
+                i += itens.len();
+                let mut atual: Option<(usize, Entrada)> = None;
+                for (ri, ti) in itens {
+                    let Some((k, v)) = chave_e_valor(ti) else {
+                        return Err(format!("`{ti}` no `include` não se lê"));
+                    };
+                    let par = (k.to_string(), v.to_string());
+                    match &mut atual {
+                        Some((r0, e)) if !ti.starts_with("- ") && ri > *r0 => e.push(par),
+                        _ if ti.starts_with("- ") => {
+                            if let Some((_, e)) = atual.take() {
+                                incluidas.push(e);
+                            }
+                            atual = Some((ri, vec![par]));
+                        }
+                        _ => return Err(format!("`{ti}` no `include` fora de um item")),
+                    }
+                }
+                if let Some((_, e)) = atual {
+                    incluidas.push(e);
+                }
+            }
+            _ => {
+                let valores: Vec<String> = match valor
+                    .strip_prefix('[')
+                    .and_then(|v| v.strip_suffix(']'))
+                {
+                    Some(lista) => lista
+                        .split(',')
+                        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect(),
+                    None if valor.is_empty() => {
+                        let itens: Vec<String> = bloco[i..]
+                            .iter()
+                            .take_while(|&&(ri, _)| ri > passo)
+                            .map(|&(_, ti)| ti.strip_prefix("- ").unwrap_or(ti).trim().to_string())
+                            .collect();
+                        i += itens.len();
+                        itens
+                    }
+                    None => vec![valor.to_string()],
+                };
+                eixos.push((chave.to_string(), valores));
+            }
+        }
+    }
+    if !eixos.is_empty() && !incluidas.is_empty() {
+        return Err("a matriz tem eixos e `include` juntos — a conferência não a lê".into());
+    }
+    if incluidas.is_empty() {
+        let mut produto: Vec<Entrada> = vec![Vec::new()];
+        for (chave, valores) in &eixos {
+            produto = produto
+                .iter()
+                .flat_map(|e| {
+                    valores.iter().map(move |v| {
+                        let mut nova = e.clone();
+                        nova.push((chave.clone(), v.clone()));
+                        nova
+                    })
+                })
+                .collect();
+        }
+        return Ok(produto);
+    }
+    Ok(incluidas)
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -563,5 +893,151 @@ mod testes {
                 && !testes.contains("env!(\"DUKE_PARTE\")"),
             "o kernel lê DUKE_PARTE direto"
         );
+    }
+
+    /// As partes que a CI tem hoje: cada grupo com a conta das partes. Uma
+    /// mudança na matriz muda esta lista — de propósito: a conferência
+    /// tem de ler cada grupo, e não achar nenhum e passar.
+    #[test]
+    fn a_ci_tem_as_partes_completas() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let (grupos, fora) = matrizes_com_partes("ci.yml", ci);
+        assert_eq!(fora, Vec::<String>::new());
+        assert_eq!(
+            grupos,
+            [
+                "ci.yml/testes (arch=x86_64, tipo=suite): 3",
+                "ci.yml/testes (arch=aarch64, tipo=suite): 3",
+                "ci.yml/testes (arch=aarch64, tipo=iniciador): 2",
+                "ci.yml/video (arch=x86_64): 2",
+                "ci.yml/video (arch=aarch64): 2",
+                "ci.yml/persistencia (arch=x86_64): 3",
+                "ci.yml/persistencia (arch=aarch64): 2",
+                "ci.yml/atualizacao (arch=x86_64): 2",
+                "ci.yml/atualizacao (arch=aarch64): 1",
+                "ci.yml/tempo (arch=x86_64): 3",
+                "ci.yml/tempo (arch=aarch64): 3",
+            ]
+        );
+    }
+
+    /// Um job de mentira com as partes de `partes`, pela lista do `include`.
+    fn com_include(partes: &[(&str, &str)]) -> String {
+        let mut texto = String::from(
+            "on:\n  push:\njobs:\n  lints:\n    runs-on: x\n  suite:\n    strategy:\n      matrix:\n        include:\n",
+        );
+        for (arch, parte) in partes {
+            texto.push_str(&format!(
+                "          - arch: {arch}\n            parte: suite {parte}\n            duke_parte: {parte}\n"
+            ));
+        }
+        texto.push_str("          - arch: x86_64\n            parte: release\n");
+        texto.push_str(
+            "    steps:\n      - run: cargo xtask test\n        env:\n          DUKE_PARTE: ${{ matrix.duke_parte }}\n",
+        );
+        texto
+    }
+
+    #[test]
+    fn as_partes_completas_passam() {
+        let texto = com_include(&[
+            ("x86_64", "1/2"),
+            ("aarch64", "2/3"),
+            ("x86_64", "2/2"),
+            ("aarch64", "1/3"),
+            ("aarch64", "3/3"),
+        ]);
+        let (grupos, fora) = matrizes_com_partes("w.yml", &texto);
+        assert_eq!(fora, Vec::<String>::new());
+        assert_eq!(
+            grupos,
+            [
+                "w.yml/suite (arch=x86_64): 2",
+                "w.yml/suite (arch=aarch64): 3"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chave_da_parte_nao_separa_o_grupo() {
+        let texto = com_include(&[("x86_64", "1/2"), ("x86_64", "2/2")]).replace(
+            "duke_parte: 2/2\n",
+            "duke_parte: 2/2\n            fumaca: true\n",
+        );
+        assert!(texto.contains("fumaca: true"));
+        let (grupos, fora) = matrizes_com_partes("w.yml", &texto);
+        assert_eq!(fora, Vec::<String>::new());
+        assert_eq!(grupos, ["w.yml/suite (arch=x86_64): 2"]);
+    }
+
+    #[test]
+    fn a_parte_que_falta_ou_se_repete_e_recusada() {
+        for partes in [
+            &[("x86_64", "1/3"), ("x86_64", "3/3")][..],
+            &[("x86_64", "1/2"), ("x86_64", "1/2"), ("x86_64", "2/2")][..],
+            &[("x86_64", "2/2")][..],
+        ] {
+            let (grupos, fora) = matrizes_com_partes("w.yml", &com_include(partes));
+            assert!(grupos.is_empty(), "{partes:?}: {grupos:?}");
+            assert_eq!(fora.len(), 1, "{partes:?}: {fora:?}");
+            assert!(fora[0].contains("uma vez cada"), "{}", fora[0]);
+        }
+    }
+
+    #[test]
+    fn o_total_misturado_e_a_parte_ilegivel_sao_recusados() {
+        let (_, fora) = matrizes_com_partes(
+            "w.yml",
+            &com_include(&[("x86_64", "1/2"), ("x86_64", "2/3")]),
+        );
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(fora[0].contains("não têm o mesmo total"), "{}", fora[0]);
+
+        let (_, fora) = matrizes_com_partes(
+            "w.yml",
+            &com_include(&[("x86_64", "1/2"), ("x86_64", "x/2")]),
+        );
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(fora[0].contains("não é uma parte"), "{}", fora[0]);
+    }
+
+    #[test]
+    fn a_parte_fixa_e_recusada() {
+        let texto = com_include(&[("x86_64", "1/1")]).replace("${{ matrix.duke_parte }}", "1/2");
+        let (_, fora) = matrizes_com_partes("w.yml", &texto);
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(fora[0].contains("fixa"), "{}", fora[0]);
+    }
+
+    #[test]
+    fn os_eixos_dao_o_produto() {
+        let texto = "jobs:\n  tempo:\n    strategy:\n      matrix:\n        arch: [x86_64, aarch64]\n        parte: [1/3, 2/3, 3/3]\n    steps:\n      - env:\n          DUKE_PARTE: ${{ matrix.parte }}\n";
+        let (grupos, fora) = matrizes_com_partes("w.yml", texto);
+        assert_eq!(fora, Vec::<String>::new());
+        assert_eq!(
+            grupos,
+            [
+                "w.yml/tempo (arch=x86_64): 3",
+                "w.yml/tempo (arch=aarch64): 3"
+            ]
+        );
+
+        let sem = texto.replace("[1/3, 2/3, 3/3]", "[1/3, 3/3]");
+        let (grupos, fora) = matrizes_com_partes("w.yml", &sem);
+        assert!(grupos.is_empty());
+        assert_eq!(fora.len(), 2, "{fora:?}");
+    }
+
+    #[test]
+    fn a_matriz_que_nao_se_le_e_dita() {
+        let texto = "jobs:\n  tempo:\n    strategy:\n      matrix:\n        parte: [1/2, 2/2]\n        exclude:\n          - parte: 2/2\n    steps:\n      - env:\n          DUKE_PARTE: ${{ matrix.parte }}\n";
+        let (_, fora) = matrizes_com_partes("w.yml", texto);
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(fora[0].contains("exclude"), "{}", fora[0]);
+
+        let sem_matriz = "jobs:\n  tempo:\n    steps:\n      - env:\n          DUKE_PARTE: ${{ matrix.parte }}\n";
+        let (_, fora) = matrizes_com_partes("w.yml", sem_matriz);
+        assert_eq!(fora.len(), 1, "{fora:?}");
+        assert!(fora[0].contains("matrix:"), "{}", fora[0]);
     }
 }

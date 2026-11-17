@@ -12791,7 +12791,12 @@ de depuração, em três por arquitetura; a da `virtio-gpu`, em duas; o boot
 pela UEFI do ARM, que roda a suíte pelo firmware, em duas; a persistência,
 em três no x86 e duas no ARM; a de tempo, em três; e a da atualização, em
 duas no x86. A suíte de release e o resto — as fumaças, os ELFs, o teclado
-USB e o boot pela UEFI do x86 — são jobs à parte.
+USB e o boot pela UEFI do x86 — são jobs à parte. O `cargo xtask
+invariantes` confere as matrizes: em cada job que tira o `DUKE_PARTE` da
+matriz, cada grupo — a arquitetura e o tipo de rodada — tem as partes
+`1/n` a `n/n`, uma vez cada, com o mesmo `n`, e nenhum job o fixa. Uma
+parte esquecida deixaria casos sem rodar na CI, em silêncio, porque cada
+máquina só vê a sua.
 
 E a fila tem três camadas. O GitHub dá a este repositório vinte jobs ao
 mesmo tempo e começa os que esperam numa ordem que não se escolhe: na CI

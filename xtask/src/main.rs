@@ -2842,6 +2842,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         conferir_a_vez_dos_programas()?,
         sdk::conferir_o_contrato()?,
         compilador::conferir_o_canal()?,
+        partes::conferir_as_matrizes()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
