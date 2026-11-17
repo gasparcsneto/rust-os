@@ -77,7 +77,7 @@ continuidade.
 | [R12-SIMD](#r12-simd) | O SIMD nos processos | semântica de operação (o contrato dos registradores) | as otimizações de cifra (fase 12) | nenhuma: o custo da cifra em software | [Roteiro](../README.md#roteiro), fase 12 |
 | [R12-mTLS](#r12-mtls) | O certificado do cliente no TLS | criptografia e custódia (um domínio de assinatura novo) | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12 |
 | [R12-PROXY](#r12-proxy) | O *proxy* | o Gate (um destino que ele não vê) | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12 |
-| [R12-QUIC](#r12-quic) | O HTTP/3 e o QUIC | depois da avaliação, que é [B] | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12 |
+| [R12-QUIC](#r12-quic) | O HTTP/3 e o QUIC — a avaliação recomenda adiar; o caminho pede o relógio | o Gate e a autorização (o relógio); semântica de segurança nova (o 0-RTT) | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12; [QUIC](QUIC.md) |
 | [R12-IC-TPM](#r12-ic-tpm) | A chave de assinatura dentro do TPM | custódia | a fase 12 (Web3) | a privada vive na memória do kernel; só a semente está selada | [ICP](ICP.md#o-que-não-existe-ainda) |
 | [R12-IC-VALOR](#r12-ic-valor) | A rede principal com valor e com canister | custódia; operação irreversível (5.6) | a fase 12 (Web3) | nenhuma: a política padrão não alcança a rede principal | [ICP](ICP.md#na-rede-principal) |
 | [R12-IC-OUTROS](#r12-ic-outros) | O resto do IC | conforme o item | — | nenhuma | [ICP](ICP.md#o-que-não-existe-ainda) |
@@ -137,7 +137,8 @@ executa](#as-que-o-coordenador-executa)).
    (README.md:12706-12707) —, que não está nem entre os feitos nem entre
    os que pedem uma decisão (README.md:12732-12734): conferir o estado
    dela antes da R12-mTLS; se pedir uma decisão, ela entra no índice.
-   **R12-QUIC** depois da avaliação, que é [B] e começa já.
+   **R12-QUIC**: a avaliação está feita ([QUIC](QUIC.md)) e recomenda
+   adiar — sem consumidor, não há o que decidir agora.
 10. **R12-IC-TPM e R12-IC-VALOR**, depois da R13-BOOT; **R12-IC-OUTROS**
     quando houver a necessidade.
 11. **Os outros marcos da fase 15**, na ordem do roteiro — R15-REMOTOS,
@@ -1349,14 +1350,32 @@ fase 12).
 **O HTTP/3 e o QUIC** — "o HTTP/3, que depende do QUIC e começa por uma
 avaliação" ([Roteiro](../README.md#roteiro), fase 12).
 
-- **O problema.** A avaliação não é [C]: é trabalho [B], e começa já
-  (5.4). O que ela precisa responder para virar uma decisão — **(minhas)**:
-  a migração da conexão e o endereço preferido do servidor, em que a
-  conversa muda de destino sem o gate, o mesmo ponto do *proxy*; o 0-RTT,
-  dados que se repetem; e a associação UDP de hoje, "que só conversa com o
-  destino decidido", diante de uma conexão que não é do endereço.
-- **A recomendação provisória.** A avaliação primeiro; depois, o QUIC sem
-  migração e sem 0-RTT, se ele couber no destino decidido.
+- **A avaliação**, [B], está feita: o [QUIC](QUIC.md). Ela responde às
+  três perguntas desta entrada. A associação UDP de hoje filtra o par como
+  a RFC 9000 §9 pede do cliente, e a conexão — só o cliente, um caminho,
+  sem migração, sem endereço preferido, sem 0-RTT — cabe no gate de hoje,
+  numa associação `udp:` decidida pelo destino. Seguir uma mudança de
+  caminho pelo próprio programa, por um `net.connect` novo, é [B]. O que o
+  caminho pede além disso: o relógio ([C]); o buffer da associação, o lote
+  de datagramas por decisão e o modo QUIC do `rustls` sem `std` ([B]).
+- **O problema.** Nenhum consumidor do Duke ganha com o HTTP/3: o IC está
+  fora pelo grupo C, o HTTP/2 já multiplexa, e o que o HTTP/3 traz — a
+  perda sem segurar as outras correntes, uma volta a menos — não aparece
+  numa bancada sem perda e com a volta abaixo de um milissegundo. O custo,
+  de três a cinco incrementos do tamanho do HTTP/2 **(minha)**, é certo.
+- **As decisões do caminho**, no formato curto, no
+  [QUIC](QUIC.md#as-decisões-c):
+  - **R12-QUIC-RELOGIO** — o relógio do programa no ritmo dos pacotes. A
+    única no caminho. Recomendação provisória: nenhuma enquanto o HTTP/3
+    estiver adiado; com a necessidade, o instante no resultado do
+    `net.recv` e do `net.send` da associação.
+  - **R12-QUIC-0RTT** — os dados antecipados e a retomada. Recomendação:
+    não.
+  - **R12-QUIC-CAMINHO** — a mudança de caminho seguida pelo kernel.
+    Recomendação: nunca.
+- **A recomendação provisória.** Adiar o HTTP/3 e o QUIC até haver um
+  consumidor; esta entrada fica no índice como o lembrete da R12-QUIC-RELOGIO,
+  que se decide só quando ele vier.
 - **As fechadas.** O grupo C: nada de HTTP/3 nem de QUIC para o IC.
 - **Destrava.** A infraestrutura da fase 12.
 
