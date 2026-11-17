@@ -62,7 +62,7 @@ pub struct Recusa<'a> {
     /// A mensagem do código.
     pub mensagem: &'a str,
     /// O motivo, quando há: o nome do código da política
-    /// (`DENY_PERMISSION`, `DENY_RATE`…), ou o campo que não valeu.
+    /// (`DENY_PERMISSION`, `RATE_LIMIT`…), ou o campo que não valeu.
     pub motivo: Option<&'a str>,
 }
 

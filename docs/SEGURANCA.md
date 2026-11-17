@@ -550,7 +550,7 @@ Não há uma segunda política para o protocolo, nem autorização paralela:
   sessão da pessoa, ou a chave do agente: uma rajada de trocas com
   cookies de validade a esgota, e até ela voltar os de validade ficam no
   pote, e os outros pedidos de controle dos programas dele — o relógio de
-  uma conexão TLS nova inclusive — ouvem `DENY_RATE`. A segurança não
+  uma conexão TLS nova inclusive — ouvem `RATE_LIMIT`. A segurança não
   cede; cede a conversa. O kernel e a política não falam de cookie, e o
   `xtask` confere.
 - **O HTTP/2 é do programa, e multiplexa pedidos, e não autoridade.** O
