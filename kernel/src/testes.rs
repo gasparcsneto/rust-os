@@ -40522,6 +40522,14 @@ static CASOS: &[Caso] = &[
         f: nsf_ve_a_lacuna_da_auditoria,
     },
     Caso {
+        nome: "nsf: le o quorum do maior grupo e o que vem depois",
+        f: nsf_le_o_quorum_do_maior_grupo,
+    },
+    Caso {
+        nome: "nsf: o registro que nao se le vira lacuna e nao para a leitura",
+        f: nsf_o_registro_que_nao_se_le_vira_lacuna,
+    },
+    Caso {
         nome: "nsf: ve o codigo adulterado de quem tem descricao longa",
         f: nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa,
     },
@@ -55923,6 +55931,126 @@ fn nsf_ve_a_lacuna_da_auditoria() -> Resultado {
             return Err("o NSF nao viu a lacuna, ou pediu algo por ela");
         }
         crate::persistencia::gravar_auditoria()?;
+        Ok(())
+    })
+}
+
+/// O desfecho de um quórum vai à auditoria em nome de todas as credenciais
+/// que assinaram, `adm-1+adm-2`: o do maior grupo, cada uma com o maior
+/// nome do registro, passa dos 256 bytes de um campo. O NSF lê pelo gate o
+/// registro dele, como o `audit.tail` o escreve, e o que vem depois. Com o
+/// teto de um campo no identificador, o lote voltava vazio a cada volta, e
+/// o NSF parava no registro do quórum, cego para o resto.
+fn nsf_le_o_quorum_do_maior_grupo() -> Resultado {
+    use politica::Codigo;
+    com_o_nsf(|| {
+        let nomes: alloc::vec::Vec<alloc::string::String> = (0..politica::arquivo::MAIOR_GRUPO)
+            .map(|i| {
+                let mut nome = alloc::format!("adm-{i:02}-");
+                while nome.len() < sigilo::registro::MAIOR_NOME {
+                    nome.push('x');
+                }
+                nome
+            })
+            .collect();
+        if !nomes.iter().all(|n| sigilo::registro::nome_valido(n)) {
+            return Err("o nome do caso nao e um nome do registro");
+        }
+        let nomes: alloc::vec::Vec<&str> = nomes.iter().map(|n| n.as_str()).collect();
+        let assinantes = nomes.join("+");
+        let quorum = crate::autorizacao::auditar_quorum(
+            0,
+            &nomes,
+            Some("administrador"),
+            "admin.revoke",
+            "",
+            Codigo::DenyPermission,
+            b"{}",
+            "o papel de `adm-15` nao tem a permissao",
+        );
+        let _ = fs_pedir(sistema_aqui(), "system.info", "{}");
+        let (depois, _) = registro_que(|e| e.metodo == "system.info")
+            .ok_or("o pedido depois do quorum nao foi gravado")?;
+        let v = crate::seguranca::passo();
+        let (lido, identificador) = crate::seguranca::com_motor_de_teste(|m| {
+            (m.lido(), m.evento(quorum).map(|e| e.identificador.clone()))
+        })
+        .ok_or("o NSF nao esta no ar")?;
+        if quorum == 0 || depois <= quorum {
+            return Err("o registro do quorum nao entrou na cadeia");
+        }
+        if lido < depois || identificador.as_deref() != Some(assinantes.as_str()) {
+            crate::log_error!(
+                "teste",
+                "{:?}: lido {}, quorum {}, depois {}, {} bytes",
+                v,
+                lido,
+                quorum,
+                depois,
+                assinantes.len()
+            );
+            return Err("o NSF parou no registro do quorum do maior grupo");
+        }
+        Ok(())
+    })
+}
+
+/// Um registro que o NSF não lê não para a leitura: os outros do lote
+/// entram, o kernel diz no log qual não se leu, o buraco é a lacuna de
+/// sempre — vista no registro seguinte — e o NSF segue lendo o que vem
+/// depois. O caso grava um quórum com um nome que o registro nunca aceitaria
+/// — acima do teto do identificador —, só para ter um registro que não se
+/// lê.
+fn nsf_o_registro_que_nao_se_le_vira_lacuna() -> Resultado {
+    use politica::Codigo;
+    use seguranca::regras::Regra;
+    com_o_nsf(|| {
+        // O monitor do NSF recomeçado não tem anterior: um registro lido
+        // antes, para o buraco ter de onde se ver.
+        let _ = fs_pedir(sistema_aqui(), "system.info", "{}");
+        let _ = crate::seguranca::passo();
+        let longo = "x".repeat(politica::auditoria::MAIOR_AGENTE + 1);
+        let ilegivel = crate::autorizacao::auditar_quorum(
+            0,
+            &[longo.as_str()],
+            Some("administrador"),
+            "admin.revoke",
+            "",
+            Codigo::DenyPolicy,
+            b"{}",
+            "um registro que o NSF nao le",
+        );
+        let _ = fs_pedir(sistema_aqui(), "system.info", "{}");
+        let (depois, _) = registro_que(|e| e.metodo == "system.info")
+            .ok_or("o pedido depois do registro nao foi gravado")?;
+        if ilegivel == 0 || depois <= ilegivel {
+            return Err("o registro que nao se le nao entrou na cadeia");
+        }
+        let v = crate::seguranca::passo();
+        let (lido, perdidos, lacuna) = crate::seguranca::com_motor_de_teste(|m| {
+            (
+                m.lido(),
+                m.contadores.perdidos,
+                m.deteccoes().any(|d| {
+                    d.regra == Regra::LacunaNaLeitura
+                        && d.registros.first() == Some(&(ilegivel + 1))
+                }),
+            )
+        })
+        .ok_or("o NSF nao esta no ar")?;
+        if v.ilegiveis == 0 || lido < depois || perdidos != 1 || !lacuna {
+            crate::log_error!(
+                "teste",
+                "{:?}: lido {}, ilegivel {}, depois {}, {} perdidos, lacuna {}",
+                v,
+                lido,
+                ilegivel,
+                depois,
+                perdidos,
+                lacuna
+            );
+            return Err("o registro que nao se le parou a leitura do NSF, ou nao virou lacuna");
+        }
         Ok(())
     })
 }

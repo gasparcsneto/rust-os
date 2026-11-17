@@ -62,8 +62,17 @@ impl Severidade {
 }
 
 /// O maior texto de um campo lido: o recurso e o método da auditoria têm
-/// 128 bytes, o detalhe 96; uma chave em hexadecimal, 64.
+/// 128 bytes, o detalhe 96, o papel 32; uma chave em hexadecimal, 64. O
+/// identificador de quem agiu tem o teto dele, maior —
+/// [`politica::auditoria::MAIOR_AGENTE`]: o de um quórum leva o nome de cada
+/// credencial que assinou.
 const MAIOR_CAMPO: usize = 256;
+
+// O detalhe e o papel que o kernel grava cabem no teto de um campo.
+const _: () = assert!(
+    politica::auditoria::MAIOR_DETALHE <= MAIOR_CAMPO
+        && politica::arquivo::MAIOR_NOME <= MAIOR_CAMPO
+);
 
 /// Um registro da auditoria, como `audit.tail` o mostra.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,7 +118,10 @@ impl Registro {
                         .ok_or("sessao de pessoa invalida")?,
                 ),
             },
-            agente: texto("agent").ok_or("registro sem agent")?,
+            // O identificador, com o teto dele: o de um quórum leva o nome
+            // de cada credencial que assinou, e passa do teto de um campo.
+            agente: util::texto(o.member("agent"), politica::auditoria::MAIOR_AGENTE)
+                .ok_or("registro sem agent")?,
             chave: match opcional("key") {
                 None => None,
                 Some(v) => Some(
@@ -155,18 +167,58 @@ impl Registro {
     }
 }
 
-/// Os registros do resultado de um `audit.tail`, na ordem em que vieram.
+/// Os registros do resultado de um `audit.tail`, na ordem em que vieram:
+/// todos, ou o porquê do primeiro que não se lê — ver [`lote`], que não
+/// perde o lote por um registro.
 pub fn registros(resultado: &[u8]) -> Result<Vec<Registro>, &'static str> {
+    let (lidos, ilegiveis) = lote(resultado)?;
+    match ilegiveis.first() {
+        Some(i) => Err(i.motivo),
+        None => Ok(lidos),
+    }
+}
+
+/// Um registro de `audit.tail` que não se leu: o número dele, se ao menos
+/// ele se lê, e o porquê.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ilegivel {
+    pub seq: Option<u64>,
+    pub motivo: &'static str,
+}
+
+/// Os registros do resultado de um `audit.tail` que se leem, na ordem em
+/// que vieram, e os que não se leem. `Err` só para o resultado sem
+/// `records`.
+///
+/// # Por que um registro não leva o lote junto
+///
+/// O fio do NSF lê a cauda depois do último registro que leu: um lote
+/// inteiro recusado por um registro voltava igual na volta seguinte, e a
+/// leitura parava nele — o NSF cego para tudo o que viesse depois, até o
+/// registro sair do anel. Com o lote assim, os outros entram, e o que não
+/// se leu fica de fora: o monitor de invariantes vê o buraco no registro
+/// seguinte que se lê, como a lacuna de um registro que saiu do anel antes
+/// da leitura ([`crate::invariantes::Violacao::Lacuna`]), e o NSF fica
+/// degradado (`audit-gap`). O kernel diz no log qual não se leu, e por
+/// quê.
+pub fn lote(resultado: &[u8]) -> Result<(Vec<Registro>, Vec<Ilegivel>), &'static str> {
     let lista = Json(resultado)
         .member("records")
         .ok_or("o resultado nao tem records")?;
-    let mut v = Vec::new();
+    let mut lidos = Vec::new();
+    let mut ilegiveis = Vec::new();
     let mut i = 0;
     while let Some(o) = lista.item(i) {
-        v.push(Registro::do_json(o)?);
+        match Registro::do_json(o) {
+            Ok(r) => lidos.push(r),
+            Err(motivo) => ilegiveis.push(Ilegivel {
+                seq: util::numero(o.member("seq")),
+                motivo,
+            }),
+        }
         i += 1;
     }
-    Ok(v)
+    Ok((lidos, ilegiveis))
 }
 
 /// O que o detalhe diz além do texto.
@@ -690,6 +742,97 @@ pub(crate) mod testes {
         }
         assert!(registros(b"{}").is_err());
         assert_eq!(registros(br#"{"records":[]}"#), Ok(Vec::new()));
+    }
+
+    /// O identificador de um quórum, `adm-1+adm-2`: o nome de cada
+    /// credencial que assinou.
+    fn assinantes(quantos: u8, tamanho: usize) -> String {
+        let nomes: Vec<String> = (0..quantos)
+            .map(|i| {
+                let mut nome = alloc::format!("adm-{i:02}-");
+                while nome.len() < tamanho {
+                    nome.push('x');
+                }
+                nome
+            })
+            .collect();
+        nomes.join("+")
+    }
+
+    /// O registro do desfecho do maior quórum — o maior grupo, cada
+    /// credencial com o maior nome: o teto do identificador —, com cada
+    /// outro texto no maior que o kernel grava, se lê inteiro, e o elo
+    /// confere. Os 256 bytes de um campo não bastavam: de 8 credenciais
+    /// com o maior nome para cima, o registro não se lia, e o lote inteiro
+    /// da cauda voltava com erro. Um byte acima do teto, ele não se lê.
+    #[test]
+    fn o_registro_do_maior_quorum_se_le() {
+        let agente = assinantes(
+            politica::arquivo::MAIOR_GRUPO,
+            politica::arquivo::MAIOR_NOME,
+        );
+        assert_eq!(agente.len(), politica::auditoria::MAIOR_AGENTE);
+        assert!(assinantes(8, politica::arquivo::MAIOR_NOME).len() > MAIOR_CAMPO);
+        let r = registro(9, [5; 32], |r| {
+            r.titular = Titular::Administrador;
+            r.chave = None;
+            r.agente = agente.clone();
+            r.papel = "p".repeat(politica::arquivo::MAIOR_NOME);
+            r.metodo = "admin.revoke".to_string();
+            r.recurso = "r".repeat(128);
+            r.codigo = Codigo::DenyPolicy;
+            r.detalhe = "d".repeat(politica::auditoria::MAIOR_DETALHE);
+        });
+        let lidos = registros(cauda(core::slice::from_ref(&r)).as_bytes()).unwrap();
+        assert_eq!(lidos, core::slice::from_ref(&r));
+        assert!(lidos[0].elo_confere());
+
+        let acima = registro(9, [5; 32], |r| r.agente = alloc::format!("{agente}x"));
+        assert_eq!(
+            registros(cauda(&[acima]).as_bytes()),
+            Err("registro sem agent")
+        );
+    }
+
+    /// Um registro que não se lê não leva o lote junto: os outros se leem,
+    /// na ordem, e o lote diz qual não se leu — pelo número, quando ele se
+    /// lê — e por quê. [`registros`] continua recusando o lote inteiro, com
+    /// o porquê do primeiro.
+    #[test]
+    fn o_lote_nao_se_perde_por_um_registro() {
+        let um = registro(1, [0; 32], |_| {});
+        let dois = registro(2, um.elo, |_| {});
+        let tres = registro(3, dois.elo, |_| {});
+        let quatro = registro(4, tres.elo, |_| {});
+        let estragado = json(&dois).replace(r#""holder":"agent""#, r#""holder":"marciano""#);
+        let sem_numero = json(&tres).replace(r#""seq":3,"#, r#""seq":"tres","#);
+        assert!(estragado != json(&dois) && sem_numero != json(&tres));
+        let texto = alloc::format!(
+            r#"{{"durable_seq":0,"records":[{},{estragado},{sem_numero},{}]}}"#,
+            json(&um),
+            json(&quatro)
+        );
+        let (lidos, ilegiveis) = lote(texto.as_bytes()).unwrap();
+        assert_eq!(lidos, [um, quatro]);
+        assert_eq!(
+            ilegiveis,
+            [
+                Ilegivel {
+                    seq: Some(2),
+                    motivo: "registro com titular desconhecido",
+                },
+                Ilegivel {
+                    seq: None,
+                    motivo: "registro sem seq",
+                },
+            ]
+        );
+        assert_eq!(
+            registros(texto.as_bytes()),
+            Err("registro com titular desconhecido")
+        );
+        assert_eq!(lote(b"{}"), Err("o resultado nao tem records"));
+        assert_eq!(lote(br#"{"records":[]}"#), Ok((Vec::new(), Vec::new())));
     }
 
     #[test]

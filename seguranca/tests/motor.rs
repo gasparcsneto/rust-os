@@ -6,9 +6,10 @@ use politica::Codigo;
 use politica::auditoria::{Evento as DaCadeia, Titular, elo};
 use protocolo::json::{Json, JsonWriter};
 use seguranca::Motor;
-use seguranca::evento::{Ancora, Severidade, Tipo};
+use seguranca::evento::{Ancora, Ilegivel, Severidade, Tipo};
 use seguranca::grafo::{Aresta, No};
 use seguranca::incidente::Estado as EstadoDoIncidente;
+use seguranca::motor::Degradacao;
 use seguranca::regras::{Confianca, Regra};
 use seguranca::resposta::{Estado as EstadoDaAcao, Nivel};
 
@@ -2704,4 +2705,130 @@ fn a_declaracao_no_incidente_vivo() {
     assert_eq!(inc.acoes.len(), antes.acoes.len());
     assert!(m.pedidos().is_empty(), "a alegacao levou a um pedido");
     assert_eq!(m.incidentes.todos().count(), 1);
+}
+
+/// O identificador de um quórum, `adm-1+adm-2`, com `quantos` nomes de
+/// `tamanho` bytes.
+fn assinantes(quantos: u8, tamanho: usize) -> String {
+    let nomes: Vec<String> = (0..quantos)
+        .map(|i| {
+            let mut nome = format!("adm-{i:02}-");
+            while nome.len() < tamanho {
+                nome.push('x');
+            }
+            nome
+        })
+        .collect();
+    nomes.join("+")
+}
+
+/// O desfecho de um quórum vai à auditoria em nome de todas as credenciais
+/// que assinaram: o do maior grupo, cada uma com o maior nome, passa dos 256
+/// bytes de um campo. O motor o lê, com o principal do quórum, e lê o que
+/// vem antes e depois dele no mesmo lote: a sondagem logo em seguida abre o
+/// incidente de sempre. Com o teto de um campo no identificador, o lote
+/// inteiro voltava com erro, e o NSF parava ali — cego para o que viesse
+/// depois, até o registro sair do anel.
+#[test]
+fn o_quorum_do_maior_grupo_nao_cega_o_motor() {
+    let quorum = assinantes(
+        politica::arquivo::MAIOR_GRUPO,
+        politica::arquivo::MAIOR_NOME,
+    );
+    assert_eq!(quorum.len(), politica::auditoria::MAIOR_AGENTE);
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    let antes = a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    let revogacao = a.gravar(R {
+        titular: Titular::Administrador,
+        agente: &quorum,
+        chave: None,
+        papel: "administrador",
+        metodo: "admin.revoke",
+        recurso: &hex(&[0x5E; 32]),
+        codigo: Codigo::Allow,
+        detalhe: "quorum 16 de 16; desafio 7; politica v1; descartados 0",
+    });
+    sondar(&mut a);
+    ler(&mut m, &a);
+    assert_eq!(m.lido(), a.seq, "o motor parou no registro do quorum");
+    assert!(m.evento(antes).is_some(), "o registro de antes se perdeu");
+    let e = m
+        .evento(revogacao)
+        .expect("o registro do quorum nao se leu");
+    assert_eq!(e.identificador, quorum);
+    assert_eq!(e.principal, format!("admin:{quorum}"));
+    let sondagem = m.incidentes.todos().any(|i| {
+        i.deteccoes
+            .iter()
+            .any(|d| d.regra == Regra::SondagemDePrivilegio)
+    });
+    assert!(sondagem, "a sondagem depois do quorum nao abriu incidente");
+    assert!(m.saude().saudavel(), "{:?}", m.saude());
+}
+
+/// O que o fio do NSF faz com o resultado de um `audit.tail`: os registros
+/// que se leem vão ao motor, e os que não se leem ficam de fora — ver
+/// `seguranca::evento::lote`.
+fn ler_o_lote(m: &mut Motor, a: &Auditoria) -> Vec<Ilegivel> {
+    let (lidos, ilegiveis) = seguranca::evento::lote(a.depois_de(m.lido()).as_bytes()).unwrap();
+    m.ler_registros(lidos);
+    ilegiveis
+}
+
+/// Um registro que o NSF não lê — aqui, um identificador acima do teto, que
+/// o kernel não grava — não para a leitura. Ele é o último do lote: a
+/// leitura fica antes dele, e ele volta na seguinte, com o que veio depois;
+/// os outros entram, e o buraco é a lacuna de sempre — o monitor a vê no
+/// registro seguinte que se lê, e o NSF fica degradado. A sondagem depois
+/// do buraco abre o incidente de sempre. Antes, o lote inteiro voltava com
+/// erro a cada volta, e a leitura parava nele.
+#[test]
+fn o_registro_que_nao_se_le_vira_lacuna() {
+    let mut a = Auditoria::nova();
+    let mut m = Motor::novo();
+    a.gravar(do_agente("agent.ping", "", Codigo::Allow, ""));
+    let acima = "x".repeat(politica::auditoria::MAIOR_AGENTE + 1);
+    let ilegivel = a.gravar(R {
+        titular: Titular::Administrador,
+        agente: &acima,
+        chave: None,
+        papel: "administrador",
+        metodo: "admin.revoke",
+        recurso: "",
+        codigo: Codigo::DenyPolicy,
+        detalhe: "",
+    });
+    let fora = ler_o_lote(&mut m, &a);
+    assert_eq!(
+        fora,
+        [Ilegivel {
+            seq: Some(ilegivel),
+            motivo: "registro sem agent",
+        }]
+    );
+    assert_eq!(m.lido(), ilegivel - 1);
+    assert!(m.saude().saudavel(), "{:?}", m.saude());
+
+    sondar(&mut a);
+    let fora = ler_o_lote(&mut m, &a);
+    assert_eq!(fora.len(), 1);
+    assert_eq!(m.lido(), a.seq, "a leitura parou no registro que nao se le");
+    assert_eq!(m.contadores.perdidos, 1);
+    assert!(
+        m.saude().motivos.contains(&Degradacao::Lacuna),
+        "{:?}",
+        m.saude()
+    );
+    assert!(
+        m.deteccoes()
+            .any(|d| d.regra == Regra::LacunaNaLeitura && d.registros == [ilegivel + 1]),
+        "o buraco nao virou lacuna"
+    );
+    let sondagem = m.incidentes.todos().any(|i| {
+        i.deteccoes
+            .iter()
+            .any(|d| d.regra == Regra::SondagemDePrivilegio)
+    });
+    assert!(sondagem, "a sondagem depois do buraco nao abriu incidente");
 }

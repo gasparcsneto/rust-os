@@ -172,6 +172,26 @@ nenhuma para o que é história.
 As entidades de um boot não se confundem com as de outro: o `policy.load`
 do kernel abre uma época, e um processo é `(época, fio)`.
 
+Cada texto do registro se lê com um teto. O de um campo é de 256 bytes —
+o kernel grava no máximo 32 no papel, 128 no método e no recurso e 96 no
+detalhe —; o do identificador de quem agiu (`agent`) é o da auditoria,
+`politica::auditoria::MAIOR_AGENTE`, 527 bytes: o desfecho de um quórum
+vai à auditoria em nome de todas as credenciais que assinaram
+(`adm-1+adm-2`), e o maior grupo, de 16, com nomes de 32 bytes, chega a
+ele. O kernel confere, ao compilar, que o identificador do maior quórum
+cabe nesse teto (`agent::administracao`). Com o teto de um campo no
+identificador, o registro de um quórum de 8 credenciais com o maior nome
+já não se lia: o lote inteiro da cauda voltava com erro, e o NSF parava
+nele, cego para o que viesse depois até o registro sair do anel. Um
+registro que o NSF não lê — um texto acima do teto, um titular ou um
+código que ele não conhece — não leva mais o lote junto
+(`seguranca::evento::lote`): os outros entram, o kernel diz no log qual
+não se leu e por quê, e o buraco é a lacuna de sempre (`audit-gap`), que
+o monitor de invariantes vê no registro seguinte que se lê. O ilegível
+que é o primeiro que o motor lê — no boot, o mais velho da janela que o
+journal repôs — não tem anterior, e não vira lacuna: dele fica só o aviso
+do log.
+
 Acima do teto do detalhe (96 bytes), a auditoria abrevia a descrição do
 programa — `pelo processo N (? <resumo>)` no da imagem; no código de
 fora, `(? <resumo> de <editor>)`, depois `(? <resumo> de ?)` — antes de
@@ -832,7 +852,9 @@ contido pelo despertador.
   o firewall puro; e o motor de ponta a ponta sobre uma auditoria escrita
   com os elos de verdade — da sondagem à contenção, a recusa que encerra o
   objetivo, a história que não pede, a ação sem plano, a adulteração e a
-  lacuna, a proveniência, o DNS nas duas ordens, pessoa e agente pela
+  lacuna, o desfecho do maior quórum — o identificador acima do teto de
+  um campo —, o registro que não se lê, que vira a lacuna sem parar a
+  leitura, a proveniência, o DNS nas duas ordens, pessoa e agente pela
   mesma conta, e só o incidente alto levando à contenção; a descrição
   acima do teto do detalhe — o código adulterado, a recusa do manifesto, a
   bifurcação e o teto de nome longo, a decisão do `pelo` acima do teto, a
@@ -850,7 +872,9 @@ contido pelo despertador.
   recusa que encerra o objetivo; a proveniência pelo `user.run` e pelo
   `fork`, com o nascimento antes do primeiro pedido do filho; a credencial
   revogada; o NSF num fio dele lendo junto com quatro fios que pedem — até
-  ele dar três voltas com eles; a lacuna do anel; o firewall só
+  ele dar três voltas com eles; a lacuna do anel; o desfecho do maior
+  quórum, lido pelo gate com o que vem depois; o registro que não se
+  lê, que vira a lacuna e não para a leitura; o firewall só
   restringindo, depois do gate; os quadros sem fluxo, o ICMP e o aviso da
   conexão derrubada; o `resolvedor` contra a bancada; e a resposta que não
   dá acesso — religada, forjada, muda, malformada, de um servidor fora do

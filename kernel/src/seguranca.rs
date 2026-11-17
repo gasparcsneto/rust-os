@@ -95,6 +95,9 @@ pub struct Volta {
     /// Registros e datagramas novos.
     pub registros: usize,
     pub datagramas: usize,
+    /// Registros da auditoria que vieram e não se leram — ver
+    /// `seguranca::evento::lote`.
+    pub ilegiveis: usize,
     /// Pedidos de resposta feitos ao gate.
     pub pedidos: usize,
 }
@@ -208,7 +211,30 @@ pub fn passo() -> Volta {
         volta.leituras += 1;
         match pedir("audit.tail", &params) {
             Ok(r) => {
-                let registros = seguranca::evento::registros(&r).unwrap_or_default();
+                // Um registro que não se lê não leva o lote junto: os outros
+                // entram, e o buraco o monitor de invariantes vê no seguinte
+                // que se ler — a lacuna. Antes, o lote inteiro voltava vazio
+                // a cada volta, e o NSF parava ali, cego para o que viesse
+                // depois.
+                let (registros, ilegiveis) = seguranca::evento::lote(&r).unwrap_or_default();
+                for i in &ilegiveis {
+                    match i.seq {
+                        Some(seq) => crate::log_warn!(
+                            "nsf",
+                            "o registro {} da auditoria nao se le: {}",
+                            seq,
+                            i.motivo
+                        ),
+                        None => {
+                            crate::log_warn!(
+                                "nsf",
+                                "um registro da auditoria nao se le: {}",
+                                i.motivo
+                            )
+                        }
+                    }
+                }
+                volta.ilegiveis += ilegiveis.len();
                 let (novos, ate) =
                     com_motor(|m| (m.ler_registros(registros), m.lido())).unwrap_or((0, lido));
                 LIDO.fetch_max(ate, Ordering::AcqRel);

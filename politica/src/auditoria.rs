@@ -117,6 +117,23 @@ pub const GENESE: [u8; 32] = [0; 32];
 /// O maior detalhe, em bytes.
 pub const MAIOR_DETALHE: usize = 96;
 
+/// O maior identificador de quem agiu — o `agente` de um registro —, em
+/// bytes: o de uma operação de quórum, que grava em nome de todas as
+/// credenciais que assinaram, pelo nome, com `+` entre eles
+/// (`adm-1+adm-2`). O maior grupo ([`crate::arquivo::MAIOR_GRUPO`]
+/// credenciais), cada uma com o maior nome ([`crate::arquivo::MAIOR_NOME`]
+/// bytes), chega a ele: 527 bytes. Todo outro identificador é um nome só —
+/// de agente, de administrador, de dispositivo, de serviço — ou
+/// `pessoa:<16 hex>`, e cabe com folga.
+///
+/// Não corta nada, e o registro não muda por ele: é o teto que quem lê a
+/// auditoria reserva para o identificador — o tecido de segurança, que lê
+/// cada registro de `audit.tail` (ver `seguranca::evento`). O kernel
+/// confere, ao compilar, que o identificador do maior quórum cabe aqui: um
+/// leitor com um teto menor não leria o registro de um quórum grande.
+pub const MAIOR_AGENTE: usize =
+    crate::arquivo::MAIOR_GRUPO as usize * (crate::arquivo::MAIOR_NOME + 1) - 1;
+
 /// O que fica, na descrição do programa que pediu, no lugar do nome — e do
 /// editor — que [`detalhe_composto`] tirou acima do teto; e, no fim de um
 /// texto que perdeu o fim, no lugar das palavras que saíram (ver
@@ -1250,6 +1267,30 @@ mod testes {
             let b = codificar(i + 40, &e);
             assert_eq!(decodificar(&b), Ok((i + 40, e)), "registro {i}");
         }
+    }
+
+    /// O identificador do maior quórum — o maior grupo, cada credencial
+    /// com o maior nome, `+` entre elas — tem exatamente o teto do
+    /// identificador, e vai ao journal e volta igual.
+    #[test]
+    fn o_maior_quorum_cabe_no_teto_do_agente() {
+        let nomes: Vec<String> = (0..crate::arquivo::MAIOR_GRUPO)
+            .map(|i| {
+                let mut nome = alloc::format!("adm-{i:02}-");
+                while nome.len() < crate::arquivo::MAIOR_NOME {
+                    nome.push('x');
+                }
+                nome
+            })
+            .collect();
+        assert!(nomes.iter().all(|n| crate::arquivo::nome_valido(n)));
+        let mut e = evento(3);
+        e.titular = Titular::Administrador;
+        e.chave = None;
+        e.agente = nomes.join("+");
+        assert_eq!(e.agente.len(), MAIOR_AGENTE);
+        let b = codificar(5, &e);
+        assert_eq!(decodificar(&b), Ok((5, e)));
     }
 
     /// Cortado em qualquer ponto, ou com um byte a mais, não se lê. Um

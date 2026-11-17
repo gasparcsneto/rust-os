@@ -875,6 +875,16 @@ static OPERACOES_DE_QUORUM: &[OperacaoDeQuorum] = &[
 /// Quantas assinaturas um pedido de quórum pode trazer: o maior grupo.
 const MAIS_ASSINATURAS: usize = politica::arquivo::MAIOR_GRUPO as usize;
 
+// O desfecho de um quórum vai à auditoria em nome de todas as credenciais
+// que assinaram, pelo nome, com `+` entre eles — ver
+// `autorizacao::auditar_quorum`. Com o maior número de assinaturas, cada uma
+// com o maior nome do registro, o identificador cabe no teto que quem lê a
+// auditoria reserva para ele: o tecido de segurança lê o registro de um
+// quórum grande, e o que vem depois dele.
+const _: () = assert!(
+    MAIS_ASSINATURAS * (sigilo::registro::MAIOR_NOME + 1) - 1 <= politica::auditoria::MAIOR_AGENTE
+);
+
 /// As assinaturas como vieram, `credencial:assinatura,...`, em hex: a chave
 /// da credencial — a que a identifica no registro — e a assinatura Ed25519,
 /// 64 bytes. A chave que confere a assinatura **não** vem do pedido: vem do
