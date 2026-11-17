@@ -1326,8 +1326,11 @@ nó alterados com ela também, porque já recusava o certificado inteiro.
   então, nem sempre fecha; quando não fecha, falha fechada, sem um byte
   para fora, e a auditoria do relatório diz o destino recusado. Escrever o
   nó novo é do administrador, pelo `policy.write`, dentro do teto da
-  imagem; descobrir os nós pela árvore de estado (`api_boundary_nodes`)
-  seria uma decisão nova.
+  imagem. Descobrir os nós pela árvore de estado (`api_boundary_nodes`),
+  com a ferramenta achando e o administrador escrevendo na política, é
+  [B] e entra no roteiro quando houver um consumidor; só pôr na política
+  uma fonte nova de destino seria uma decisão nova (ver a R12-IC-NOS em
+  [`DECISOES.md`](DECISOES.md#r12-ic-nos)).
 - **As âncoras são duas.** Só as raízes da Let's Encrypt; a cadeia real de
   `icp-api.io` sobe à X2 (YE2 ← Root YE, cruzada pela X2). Se `icp-api.io`
   mudar de autoridade, o TLS recusa (`TLS_UNTRUSTED`) e o pré-voo diz

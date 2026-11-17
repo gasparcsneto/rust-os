@@ -194,8 +194,10 @@ primeira decisão que permite os separa: ela tem o texto vazio, e acima
 do teto abrevia só o nome, nunca o editor (o achado 4 do adversário do
 passo 1b). Com o mesmo nome, o mesmo editor e o mesmo começo do
 resumo, dois executáveis têm a mesma descrição; aumentar o resumo muda o
-formato do detalhe e a conta do teto, e é uma decisão pendente, [C] (o
-achado 9). Um processo nasce uma vez só
+formato do detalhe e a conta do teto (o achado 9). Era uma decisão
+pendente; o coordenador a classificou como [B] — um reforço, com a mesma
+semântica — e ela vem no próximo incremento do kernel (ver a A9-RESUMO
+em [`DECISOES.md`](DECISOES.md#a9-resumo)). Um processo nasce uma vez só
 na época — um segundo nascimento do mesmo fio não muda o criador nem a
 autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
 pedaço do número de outro processo, num registro cortado. Na

@@ -16,9 +16,9 @@ que não espera.
 
 **Como ler.**
 
-- [O índice](#o-índice) tem uma linha por decisão aberta: o id, a decisão,
-  a área de 5.3 que a faz [C], o que ela destrava no roteiro, a exposição
-  de hoje — o risco real enquanto ela espera, se há — e a fonte.
+- [O índice](#o-índice) tem uma linha por decisão aberta do dono: o id, a
+  decisão, a área de 5.3 que a faz [C], o que ela destrava no roteiro, a
+  exposição de hoje — o risco real enquanto ela espera, se há — e a fonte.
 - [A ordem recomendada](#a-ordem-recomendada) diz por onde começar, e por
   quê.
 - [As propostas completas](#as-propostas-completas) — as cinco primeiras
@@ -26,7 +26,12 @@ que não espera.
   alternativas, os riscos, o impacto, a recomendação e o plano de
   validação; e mais o que não espera e as fechadas que cada uma toca.
   [As outras](#as-outras) têm uma entrada curta: o problema, as
-  alternativas, a recomendação provisória e o que destrava.
+  alternativas, a recomendação provisória e o que destrava — e as do lote
+  rápido, também os riscos, o impacto e o plano.
+- [As que o coordenador executa](#as-que-o-coordenador-executa) são as
+  [B]: o coordenador as classificou assim (5.8), e elas não esperam o
+  dono. Cada uma diz o que se faz e o estado; não contam no índice nem na
+  ordem.
 - [As fechadas](#as-fechadas-que-não-se-reabrem) são o que não se propõe
   de novo.
 - Os ids do projeto ficam (DT-1, B5-1, A1-4); os novos dizem a fase do
@@ -37,30 +42,29 @@ que não espera.
   15 — a DE-1, o DN-4, a DH-1, a DH-2, a DH-3, a DC-1′ e a DX-1 — vêm ao
   lado dos deste dossiê, com as recomendações dadas lá; e os da pendência
   #298 — o A3, o A5, o F4, o F6 e o I7 —, nas entradas em que cabem.
-- As fontes são as do commit `7141f66`, de 17/11/2026, mais o relatório da
-  continuidade e a pendência #298, do coordenador. Se uma fonte mudar, ela
-  vale. Quando o dono decidir, a entrada passa às fechadas, com a data
-  e a alternativa, e o README — as [Decisões
+- As fontes são as do commit `7564758`, de 17/11/2026 — as linhas citadas
+  do código e do README, na forma `arquivo:linha`, são as dele —, mais o
+  relatório da continuidade e a pendência #298, do coordenador. Se uma
+  fonte mudar, ela vale. Quando o dono decidir, a entrada passa às
+  fechadas, com a data e a alternativa, e o README — as [Decisões
   pendentes](../README.md#decisões-pendentes) e o
   [Roteiro](../README.md#roteiro) — se acerta.
 
 ## O índice
 
-Na ordem recomendada. Entre parênteses, o id que o dono já viu no
-relatório da continuidade.
+Só as decisões do dono, na ordem recomendada. As [B] — a A1-4, a F4, a
+I7, a A9-RESUMO, o DN-4, a SDK-CANAL (DC-1′) e a R12-IC-NOS — estão em
+[As que o coordenador executa](#as-que-o-coordenador-executa), e não
+contam aqui. Entre parênteses, o id que o dono já viu no relatório da
+continuidade.
 
 | Id | Decisão | Área de 5.3 | Destrava | Exposição de hoje | Fonte |
 |---|---|---|---|---|---|
-| [M-EXEC](#m-exec) (DE-1) | O `exec` e a malha do processo, com a F6 | identidade de programa e proveniência | o handoff (fraco); um limite do SDK | baixa: num endpoint, a descoberta e a auditoria mostram o programa que não roda mais; a imagem nova vê os fluxos da anterior | [README](../README.md#decisões-pendentes) |
-| [F4](#f4) | O ponto sem volta do `exec`, sem reconfirmar | o Gate e a autorização (o momento da decisão) | — | baixa: uma revogação durante a leitura da imagem não para a troca | a pendência #298; [`executar`](../kernel/src/usuario/mod.rs) |
-| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; chamadas fora do gate | o consentimento (fase 13); o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, e recebe o que a Pessoa digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
-| [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: várias sessões da mesma chave, ou vários titulares, enchem a tabela de fios, e nada nasce — nem o Terminal, nem o `energia` do `system.reboot` | [README](../README.md#decisões-pendentes) |
-| [R15-HANDOFF](#r15-handoff) (DN-4; DH-1 a DH-3) | O próximo marco da fase 15: o handoff — o que é, quem recebe, para onde | identidade e autoridade entre dispositivos | a linha em curso, a fase 15; a continuidade | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
-| [R13-BOOT](#r13-boot) | A cadeia de boot confiável | identidade e confiança; custódia (a política dos selos) | a fase 13; o Secure Boot que a fase 14 deixou de fora; a base de R12-IC-TPM e R12-IC-VALOR | **real, com a máquina na mão**: o disco e o TPM juntos abrem os selos da identidade e das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
-| [A9-RESUMO](#a9-resumo) | O tamanho do resumo na descrição de um programa | auditoria e proveniência | — | baixa: com a chave de um editor e uns 2^32 resumos, dois executáveis com a mesma descrição | [README](../README.md#decisões-pendentes) |
-| [I7](#i7) | O resumo sem chave dos parâmetros, no console sem ninguém | auditoria (o que se grava) | — | baixa: o que se digita depois do nome de um comando, sem ninguém entrado, vai à auditoria num resumo que se adivinha | a pendência #298; [Consoles](../README.md#consoles) |
-| [A1-4](#a1-4) | O que a recusa da cota mostra | nenhuma — **[B] pela 5.3 — o coordenador executa** | — | nenhuma: diagnóstico | [README](../README.md#decisões-pendentes) |
-| [SDK-CANAL](#sdk-canal) (DC-1′) | O canal sem nome | nenhuma — **[B] pela 5.3 — o coordenador executa** | um limite do SDK | baixa: quem toma os nomes do laço de um processo o impede de esperar | [SDK](SDK.md#limites-conhecidos) |
+| [M-EXEC](#m-exec) (DE-1) | O `exec` e a malha do processo, com a F6 | identidade de programa e proveniência | o handoff (fraco); um limite do SDK | baixa: enquanto a imagem nova exerceria `fabric.offer` sobre a intenção, a descoberta mostra o endpoint com o programa que não roda mais; e a imagem nova lê e cancela as entregas da anterior, e vê os fluxos dela | [README](../README.md#decisões-pendentes) |
+| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; o Gate e a Policy (quem escuta os nomes do sistema) | o consentimento (fase 13); o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, e recebe o que a Pessoa digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
+| [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: a pessoa que entra muitas vezes, em qualquer máquina; a mesma chave nas 8 sessões, com muitos núcleos ou com a máquina em uso; ou alguns titulares juntos — enchem a tabela de fios, e nada nasce, nem o Terminal, nem o `energia` do `system.reboot` | [README](../README.md#decisões-pendentes) |
+| [R15-HANDOFF](#r15-handoff) (DH-1 a DH-3) | O handoff, o próximo marco da fase 15: o que é, quem recebe, para onde | identidade e autoridade entre dispositivos | a linha em curso, a fase 15; a continuidade | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
+| [R13-BOOT](#r13-boot) | A cadeia de boot confiável | custódia (a política dos selos, na (b)); confiança (uma raiz nova, na (a) e na (c)) | a fase 13; a base de R12-IC-TPM e R12-IC-VALOR; e o caminho do Secure Boot que a fase 14 deixou de fora — a recomendação o deixa para depois, como opção do operador | **real, com a máquina na mão**: o disco e a máquina juntos abrem o selo da identidade, e o disco e o mesmo TPM satisfazem a política das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
 | [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
@@ -72,7 +76,6 @@ relatório da continuidade.
 | [R12-QUIC](#r12-quic) | O HTTP/3 e o QUIC | depois da avaliação, que é [B] | a infraestrutura da fase 12 | nenhuma | [Roteiro](../README.md#roteiro), fase 12 |
 | [R12-IC-TPM](#r12-ic-tpm) | A chave de assinatura dentro do TPM | custódia | a fase 12 (Web3) | a privada vive na memória do kernel; só a semente está selada | [ICP](ICP.md#o-que-não-existe-ainda) |
 | [R12-IC-VALOR](#r12-ic-valor) | A rede principal com valor e com canister | custódia; operação irreversível (5.6) | a fase 12 (Web3) | nenhuma: a política padrão não alcança a rede principal | [ICP](ICP.md#na-rede-principal) |
-| [R12-IC-NOS](#r12-ic-nos) | Os nós da rede principal pela árvore de estado | Policy (de onde vem um destino) | a fumaça real que fecha sempre | disponibilidade: os nós giram, e a fumaça falha fechada | [ICP](ICP.md#o-que-fica-de-fora) |
 | [R12-IC-OUTROS](#r12-ic-outros) | O resto do IC | conforme o item | — | nenhuma | [ICP](ICP.md#o-que-não-existe-ainda) |
 | [R15-REMOTOS](#r15-remotos) | Os recursos remotos | identidade e autoridade entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R15-PRESENCA](#r15-presenca) | A presença | identidade e confiança entre dispositivos | a fase 15 | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
@@ -87,43 +90,52 @@ relatório da continuidade.
 
 A DE-1 vem antes de tudo: é pequena, o dono já a viu apresentada assim —
 "decidir primeiro" —, e decidi-la não atrasa nenhuma outra. Depois, três
-critérios, nesta ordem: a exposição que se alcança sem a máquina na mão;
-o que destrava a linha em curso, a fase 15; e então a exposição com a
-máquina na mão e o resto do roteiro. E uma regra: o que depende de outra
-decisão vem depois dela.
+critérios, nesta ordem: a exposição real que se alcança sem a máquina na
+mão; o que destrava a linha em curso, a fase 15; e então a exposição com
+a máquina na mão e o resto do roteiro. E uma regra: o que depende de
+outra decisão vem depois dela. As [B] não entram na ordem: o coordenador
+as executa pelo roteiro ([As que o coordenador
+executa](#as-que-o-coordenador-executa)).
 
-1. **M-EXEC (DE-1)**, com a **F6** dentro e a **F4** ao lado — pequenas, e
-   sobre o mesmo `exec`. A DE-1 destrava, fraco, o handoff.
-2. **DT-1** — a maior exposição que espera uma decisão: a credencial da
-   Pessoa capturada por outro principal, sem registro. E é a base do
+1. **M-EXEC (DE-1)**, com a **F6** dentro — pequena, e sobre o `exec`; a
+   F4, do mesmo `exec`, é [B]. A DE-1 destrava, fraco, o handoff.
+2. **DT-1** — a maior exposição real que espera uma decisão: a credencial
+   da Pessoa capturada por outro principal, sem registro. E é a base do
    consentimento e do aceite do handoff (a DH-2, "aceite só pela entrada
    dela"): nada se pergunta à Pessoa por um caminho que outro processo
    imita.
-3. **COTA-SOMA** — a outra exposição real: um principal com várias
-   sessões, ou alguns titulares juntos, param a criação de fios da
-   máquina. A decisão é estreita, e as correções [B] em volta não esperam.
-4. **R15-HANDOFF — o DN-4, com a DH-1, a DH-2 e a DH-3** — o próximo marco
-   da linha em curso, com as recomendações que o dono já viu. Depende da
-   DE-1 (fraco) e da DT-1, e bloqueia a continuidade.
+3. **COTA-SOMA** — a outra exposição real: a pessoa que entra muitas
+   vezes, a mesma chave em várias sessões, ou alguns titulares juntos
+   param a criação de fios da máquina. A decisão é estreita, e as
+   correções [B] em volta não esperam.
+4. **R15-HANDOFF — a DH-1, a DH-2 e a DH-3** — o próximo marco da linha em
+   curso — o roteiro já o põe primeiro, e por isso o DN-4 é [B] —, com as
+   recomendações que o dono já viu. Depende da DE-1 (fraco) e da DT-1, e
+   bloqueia a continuidade.
 5. **R13-BOOT** — fecha a exposição de quem tem a máquina na mão; é o
-   incremento seguinte da fase 13; traz o Secure Boot que a fase 14 deixou
-   de fora; e é a base de custódia que R12-IC-TPM e R12-IC-VALOR pedem.
-6. **O lote rápido** — A9-RESUMO, I7, AUD-ANEL e P-HISTORIA: exposição
-   baixa, alternativas curtas, decididas de uma vez. A A1-4 e a SDK-CANAL
-   (DC-1′) não tocam área nenhuma de 5.3: estão marcadas [B], e a
-   classificação é do coordenador (5.8).
+   incremento seguinte da fase 13; e é a base de custódia que R12-IC-TPM e
+   R12-IC-VALOR pedem. Abre o caminho do Secure Boot que a fase 14 deixou
+   de fora, mas a recomendação o deixa para depois, como opção do
+   operador.
+6. **AUD-ANEL e P-HISTORIA** — o lote rápido: exposição baixa, duas
+   alternativas cada, e a recomendação de esperar medindo; com os riscos,
+   o impacto e o plano já escritos, decididas de uma vez.
 7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
    depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
 8. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
 9. **R12-SIMD, R12-mTLS e R12-PROXY** — fecham os incrementos de
-   infraestrutura da fase 12. **R12-QUIC** depois da avaliação, que é [B]
-   e começa já.
-10. **R12-IC-TPM e R12-IC-VALOR**, depois da R13-BOOT; **R12-IC-NOS** e
-    **R12-IC-OUTROS** quando houver a necessidade.
+   infraestrutura da fase 12. Antes do mTLS, o roteiro põe a gestão de
+   certificados — "o NTP, a gestão de certificados e o mTLS, nessa ordem"
+   (README.md:12706-12707) —, que não está nem entre os feitos nem entre
+   os que pedem uma decisão (README.md:12732-12734): conferir o estado
+   dela antes da R12-mTLS; se pedir uma decisão, ela entra no índice.
+   **R12-QUIC** depois da avaliação, que é [B] e começa já.
+10. **R12-IC-TPM e R12-IC-VALOR**, depois da R13-BOOT; **R12-IC-OUTROS**
+    quando houver a necessidade.
 11. **Os outros marcos da fase 15**, na ordem do roteiro — R15-REMOTOS,
     R15-PRESENCA, R15-CONTINUIDADE e R15-PACOTES —, a continuidade depois
     do handoff. Cada um pede antes um desenho com as decisões dele, como o
-    DN-1, o DN-2, o DN-3 e o DN-4 pediram.
+    DN-1, o DN-2, o DN-3 e o handoff pediram.
 12. **B5-1 a B5-4** — o B5-1 é o único que não esbarra numa fechada; os
     outros três esbarram no B2, na invariante da identidade, ou na R1 e na
     R6.
@@ -133,8 +145,10 @@ decisão vem depois dela.
 ### M-EXEC
 
 **O `exec` e a malha do processo** — a **DE-1** do relatório da
-continuidade da fase 15, com a **F6** dentro e a [F4](#f4) ao lado
-(achados do adversário do AE-1, na pendência #298).
+continuidade da fase 15, com a **F6** dentro (um achado do adversário do
+AE-1, na pendência #298). A [F4](#f4), do mesmo adversário e sobre o mesmo
+`exec`, é [B]: está em [As que o coordenador
+executa](#as-que-o-coordenador-executa).
 
 **O problema.** Na troca de imagem, os endpoints do processo continuam
 abertos com a identidade do programa que os ofereceu — o nome, o resumo e
@@ -145,22 +159,38 @@ dela, no mesmo titular: nenhuma autoridade a mais. Mas a identidade do
 endpoint deixa de ser a do programa que roda — e a malha existe para que
 quem procura escolha pelo que o programa **é**.
 
-E a F6: a imagem nova ainda vê, pelo `stream.status`, o fluxo que a
-anterior fechou — o estado, o motivo do fim, os bytes de cada sentido e a
-outra ponta. A ponta acaba no `exec` (`o programa mudou`), mas o fluxo
-continua "um fluxo seu" para o processo, e o programa novo lê o que era do
-outro.
+E o que a imagem anterior **mandou** também passa à nova. O
+`fabric.status` e o `fabric.cancel` acham a entrega pelo canal de quem
+manda — o processo (`kernel/src/malha.rs:892-899` e `:936-957`;
+`politica/src/malha.rs:678-754`) —, e o `exec` não muda o canal
+(`kernel/src/usuario/mod.rs:1591-1602`): a imagem nova lê o estado e a
+resposta — até 512 bytes — das entregas da anterior, e cancela as que
+ainda esperam. Zerar a janela de nonces não muda isso: a entrega se acha
+pelo canal, e não pelo nonce. As conexões de rede também são do processo
+(`kernel/src/rede/conexoes.rs:56-66`) e passam à imagem nova — mas cada
+uso delas passa pelo gate com o manifesto novo, e isso fica como está.
 
-**A exposição de hoje.** Baixa: no mesmo titular, a descoberta e a
-auditoria atribuem a um programa o que outro faz — quem escolhe pelo
-resumo escolhe errado —, e o programa novo lê o estado dos fluxos do
-anterior.
+E a F6: pelo `stream.status`, a imagem nova vê os fluxos da anterior. Dos
+que o `exec` acabou (`o programa mudou`), a lápide — o estado, o motivo do
+fim e os bytes de cada sentido —; e, dos que a anterior tinha fechado e a
+outra ponta ainda lê, também a outra ponta
+(`politica/src/fluxo.rs:549-556` e `:1253-1301`).
+
+**A exposição de hoje.** Baixa. A descoberta só mostra o endpoint — com o
+nome, o resumo e o editor da imagem anterior — enquanto a imagem nova
+exerceria `fabric.offer` sobre a intenção, pelo manifesto e pelo editor
+dela ([MALHA](MALHA.md#o-caminho-de-um-pedido), "O destino ainda
+recebe?", MALHA.md:103-107; `kernel/src/autorizacao.rs:3505-3541`;
+`kernel/src/fios/mod.rs:3104-3113`): o que se atribui errado é qual de
+dois programas, os dois com a intenção, atende. E o programa novo, no
+mesmo titular, lê e cancela as entregas do anterior e vê os fluxos dele.
 
 **As evidências.** [MALHA, A identidade de um
 programa](MALHA.md#a-identidade-de-um-programa) e [Revogação e
-fim](MALHA.md#revogação-e-fim); [SDK, Limites
-conhecidos](SDK.md#limites-conhecidos) — as designações e os avisos na
-fila saem no `exec` (NS17, NS36), e os endpoints ficam; o precedente do
+fim](MALHA.md#revogação-e-fim); [SDK, O canal cheio, a morte, a troca de
+imagem](SDK.md#o-canal-cheio-a-morte-a-troca-de-imagem) — as designações e
+os avisos na fila saem no `exec` (NS17, NS36), e os endpoints ficam —, e
+[SDK, Limites conhecidos](SDK.md#limites-conhecidos); o precedente do
 [FLUXOS, Os estados](FLUXOS.md#os-estados): a ponta de um fluxo é do
 processo e não sobrevive ao `exec` (`o programa mudou`), encerrada dentro
 da ordem das gravações, logo depois do ponto sem volta — o trabalho do
@@ -173,6 +203,10 @@ sentido e a outra ponta" ([FLUXOS, Os comandos](FLUXOS.md#os-comandos)).
 - (a) Fechar os endpoints no `exec`, como no fim do processo: o que
   esperava neles é anulado (`voided`), e o fecho vai à auditoria com o
   motivo. Com ela, a F6: o fluxo da imagem anterior deixa de ser da nova.
+  E, **(minha)**, para ser de fato "como o fim do processo": o que a
+  anterior mandou continua — como continua o que manda um processo que
+  acaba —, mas a imagem nova não o alcança; o `fabric.status` e o
+  `fabric.cancel` dela não acham as entregas da anterior.
 - (b) Mudar a identidade deles para a da imagem nova: a descoberta passa a
   mostrar o programa que roda.
 - (c) Como hoje, documentado.
@@ -183,7 +217,8 @@ sentido e a outra ponta" ([FLUXOS, Os comandos](FLUXOS.md#os-comandos)).
   endpoints e oferece de novo; quem mandou vê `voided`, e manda de novo.
   Com a janela de nonces zerada, a imagem nova pode mandar o que a
   anterior mandou, com o mesmo nonce, e cria outra entrega — em nome dela,
-  que é o certo.
+  que é o certo. As entregas da anterior ficam sem quem as consulte ou
+  cancele, como as de um processo que acabou.
 - (b): quem escolheu pelo resumo antes da troca fala com outro programa
   sem saber; o registro da oferta diz um programa, e o endpoint outro — a
   cadeia de ids da auditoria precisa de um elo novo.
@@ -192,9 +227,10 @@ sentido e a outra ponta" ([FLUXOS, Os comandos](FLUXOS.md#os-comandos)).
 
 **O impacto.** `kernel/src/malha.rs` e o caminho do `exec` em
 `kernel/src/usuario`, que já encerra ali os fluxos da ponta; a janela de
-nonces do processo; o fluxo resolvido pelo programa, e não só pelo
-processo, no `stream.status` (a F6); o registro `fabric.withdraw` com o
-motivo; o SDK e a MALHA na documentação.
+nonces do processo; a entrega resolvida pelo programa, e não só pelo
+canal, no `fabric.status` e no `fabric.cancel`; o fluxo resolvido do
+mesmo jeito no `stream.status` (a F6); o registro `fabric.withdraw` com o
+motivo; o SDK e a MALHA na documentação. As conexões de rede não mudam.
 
 **A recomendação.** A dada no relatório da continuidade: **o `exec` fecha
 os endpoints do processo e o que espera neles, e zera as janelas de
@@ -206,25 +242,38 @@ volta a ser sempre a do programa que roda. A janela zerada é o que separa
 as entregas dos dois programas: com a de antes, um nonce da imagem nova,
 com o conteúdo de uma entrega da anterior, devolveria o id dela — "o
 mesmo nonce com o mesmo conteúdo é o reenvio" —, a mesma confusão de
-proveniência. "Dentro da v2": muda o comportamento, e nenhum nome do
-contrato.
+proveniência. Mas a janela não cobre o que a anterior mandou — a entrega
+se acha pelo canal —: a recomendação do relatório não o diz, e este
+dossiê acrescenta a parte da (a) que o diz. "Dentro da v2": muda o
+comportamento, e nenhum nome do contrato — ver o DS-2, abaixo.
 
 **O plano de validação.** Um caso: o programa oferece, recebe uma entrega
 pendente e troca de imagem; o endpoint some da descoberta, a entrega fica
 `voided`, o fecho vai à auditoria com o motivo, e a imagem nova oferece de
 novo e recebe; o nonce que a anterior usou não devolve o id da entrega
-dela; e o `stream.status` de um fluxo da anterior responde à nova como
-para um fluxo que não existe. As mutações — o endpoint que sobrevive ao
-`exec`, a janela que não zera, o fluxo da anterior visível —, uma de cada
-vez, reprovam. As duas arquiteturas; a bancada `cargo xtask sdk`, que não
-deve mudar.
+dela; o `fabric.status` e o `fabric.cancel` de uma entrega da anterior
+respondem à nova como para uma entrega que não existe, e a entrega segue
+para o destino; e o `stream.status` de um fluxo da anterior — a lápide, e
+o fechado que a outra ponta ainda lê — responde do mesmo jeito. As
+mutações — o endpoint que sobrevive ao `exec`, a janela que não zera, a
+entrega da anterior alcançável pela nova, o fluxo da anterior visível —,
+uma de cada vez, reprovam. As duas arquiteturas; a bancada `cargo xtask
+sdk`, que não deve mudar.
 
 **O que não espera.** Conferir quais programas da imagem oferecem um
 endpoint e trocam de imagem: os dados da decisão.
 
 **As fechadas que ela toca.** A DF-1 — o fluxo é um objeto da malha,
 entre dois processos do titular. O DS-1 — o aviso só sinaliza: a troca
-larga as designações antes do resto, como hoje.
+larga as designações antes do resto, como hoje. O DS-2: o SDK diz que "os
+endpoints persistem, como sempre persistiram" na troca de imagem
+(SDK.md:320-326), e o contrato manda que "um nome nunca muda de sentido"
+(SDK.md:74-76); fechar os endpoints no `exec` muda o que o contrato
+descreve, e a decisão é também dizer que isso cabe "dentro da v2". E "o
+processo como endpoint" (1.7): os objetos da malha continuam do
+processo — "É do processo: só ele o abre, lê o que chega por ele, confirma
+e o fecha, e ele some com o processo" (MALHA.md:32-34) —; a (a)
+acrescenta que acabam também quando o programa dele muda.
 
 ### DT-1
 
@@ -232,7 +281,12 @@ larga as designações antes do resto, como hoje.
 (o ritmo da senha nos contadores) e o A5 (o registro por tecla com o foco
 tomado) da pendência #298 — achados do adversário do passo 1 da
 continuidade —, e o A4 (a senha no lugar errado). Os rótulos DT-1a a
-DT-1e são os das mensagens de commit; o README usa só "DT-1a".
+DT-1e são os das mensagens de commit; o README usa só "DT-1a". Para
+conferir cada id antigo: `008faef` (DT-1b, N2a); `dc6a96b` e `d5b4755`
+(DT-1c); `4f192e6` (DT-1a, DT-1d); `d0025b0` (DT-1e); `5a9bf69` (o O6 do
+ο); `31af5b3` (o X2 e o X3 do ξ); `2b83752` (o A3 e o A4). O "A3" de
+`docs/FLUXOS.md` — a espera da ordem das gravações sem fila — é outro
+achado, de outra rodada.
 
 **O problema.** O caminho da tecla da Pessoa até o console não tem, para o
 kernel, um dono definido. O README pergunta três coisas que nenhuma regra
@@ -325,7 +379,7 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   README e em [SDK, Mutações](SDK.md#mutações)).
 - Da pendência #298, o A3 e o A5 estão acima, com as opções que ela dá —
   abaixo, na 3(c) e na 2(e). O F4 e o F6, do adversário do AE-1, ficam com
-  o `exec`: a [F4](#f4) e a [M-EXEC](#m-exec).
+  o `exec`: o F4 é [B] ([F4](#f4)), e o F6 vai na [M-EXEC](#m-exec).
 
 **As alternativas**, por pergunta:
 
@@ -337,10 +391,17 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
      programa](MALHA.md#a-identidade-de-um-programa)) — e pelo titular
      `sistema`. O `escutar` de outro nesses nomes é recusado, e gravado;
      quem escreve no pseudo-terminal sem a marca passa a ser só o Terminal
-     reconhecido.
+     reconhecido. É um mecanismo: uma regra do kernel sobre quem escuta um
+     nome, fora do gate e da política — como a regra da linha da pessoa,
+     em que "a decisão do `ui.act` continua a do gate, gravada; a recusa é
+     da linha" (README.md:8369-8370) —, e por isso toca duas invariantes
+     de 1.7: "toda operação passa pelo Gate" e "a Policy como fonte da
+     decisão".
    - (b) **(minha)** Uma permissão nova do vocabulário fechado para
      escutar um nome do sistema, decidida pelo gate — como o
-     `terminal.attach` já é para o pseudo-terminal.
+     `terminal.attach` já é para o pseudo-terminal
+     (`kernel/src/usuario/mod.rs:895-907`). É autorização: a reserva passa
+     pelo gate e pela política, que a enumera papel a papel.
    - (c) **(minha)** Como hoje, com a captura gravada: o `escutar` num
      nome do sistema e o foco tomado vão à auditoria. Só detecção.
 2. **O foco.**
@@ -404,6 +465,10 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
 - 3(c): agregar ou omitir muda o que o `observador` lê, e os casos e as
   bancadas que contam o `scheduled` e o `irq.stats` mudam junto;
   restringir ao `sistema` tira dele o relatório inteiro.
+- 3(d) abre uma exceção na regra da coordenação — a versão "só sobe com
+  uma mudança que valeu" (README.md:8672-8673) —: numa linha de
+  credencial, a tecla muda o campo e a versão só sobe no Enter. Os
+  agentes já não editam essas linhas, e a exceção vale só nelas.
 
 **O impacto.** O kernel: `eventos.rs` (os nomes), `superficies.rs` (o
 foco), `barra.rs`, `teclado.rs` (o histórico), `interpretador.rs` e
@@ -421,8 +486,13 @@ contra a regra do DS-2 ([SDK, O contrato v2](SDK.md#o-contrato-v2-ds-2)).
 **A recomendação.** Aprovar um princípio — **o caminho da Pessoa** —, de
 que os itens da DT-1 saem como [B]:
 
-1. o kernel conhece o Terminal e o servidor de janelas pelo programa que
-   roda: os nomes `terminal` e `janelas` são deles (1a);
+1. o Terminal e o servidor de janelas são os únicos que escutam os nomes
+   `terminal` e `janelas`. O dono decide se a reserva é mecanismo — a
+   1(a), uma regra do kernel fora do gate — ou autorização — a 1(b), uma
+   permissão que a política enumera. Este dossiê recomenda a **1(b)**:
+   ela não abre exceção em "toda operação passa pelo Gate" nem em "a
+   Policy como fonte da decisão", e segue o precedente do
+   `terminal.attach`; o preço é uma permissão a mais no vocabulário;
 2. o foco muda pelo clique da Pessoa e para a janela que acaba de abrir, e
    não sai de uma linha que pede credencial (2a e 2b) — o que dobra o A5:
    a tecla do login não vai a janela nenhuma, e não vira registro (2e);
@@ -453,7 +523,8 @@ comando, nada distingue uma senha de um comando.
   pareamento —, nas duas arquiteturas, em depuração e em release.
 - Uma mutação por regra, uma de cada vez e restaurada: o nome reservado
   aceito; o foco dado no meio da credencial; o histórico escrito na
-  chegada; o `ui.claim` aceito; o `press` aceito; o contador por tecla.
+  chegada; o `ui.claim` aceito; o `press` aceito; o contador por tecla; a
+  versão que anda por tecla na linha de credencial.
 - Um agente adversário com uma tarefa só: capturar a senha da Pessoa por
   qualquer caminho ([1.5](../CLAUDE.md#15-segurança-o-agente-adversário)).
 - A CI completa, verde no último commit.
@@ -463,9 +534,13 @@ mudar o comportamento: são os dados da decisão.
 
 **As fechadas que ela toca.** O B3: um evento de hardware não é
 autoridade — a tecla é evento; quem age é a sessão. O B4: a troca da
-própria senha é do console. Nada aqui muda o gate, a política ou quem
-decide: o caminho da Pessoa diz para onde a tecla vai, e não o que ela
-autoriza.
+própria senha é do console. E duas invariantes de 1.7, pela pergunta 1:
+"toda operação passa pelo Gate" e "a Policy como fonte da decisão". A
+1(a) é uma regra do kernel sobre quem escuta um nome, fora do gate e da
+política; a 1(b) põe a mesma reserva no gate. O foco (2) e as linhas da
+Pessoa (3) seguem regras que já existem fora do gate — "foco ≠
+autoridade", a regra da linha da pessoa — e não decidem o que se
+autoriza: dizem para onde a tecla vai.
 
 ### COTA-SOMA
 
@@ -485,7 +560,18 @@ protege a tabela:
 - a cota é por sessão, e não por identidade: a mesma chave de agente nas 8
   sessões cifradas — as quatro portas do `virtio-console` e as quatro
   vagas do TCP — soma 8 cotas; e uma pessoa ganha uma cota nova a cada
-  login, com os processos do login anterior ainda vivos.
+  login, com os processos do login anterior ainda vivos
+  (README.md:5414-5415).
+
+Quanto disso uma identidade sozinha alcança depende dos núcleos. A cota
+do `operador` e a do `administrador`, na imagem, são 8
+(`politica/src/lib.rs:399` e `:231`): 8 sessões da mesma chave dão 64
+vagas, e com 4 núcleos sobram 89 — a chave sozinha não enche a tabela.
+Cada núcleo ligado além do primeiro toma uma vaga para o ocioso dele, e
+as 95 vagas descem até as 32 de trabalho com os 64 núcleos ligados
+(README.md:8754-8759): numa máquina com muitos núcleos, ou em uso, a
+mesma chave enche sozinha. E quem enche sozinho em qualquer máquina é a
+pessoa que entra muitas vezes — uma cota nova a cada login.
 
 Com a tabela cheia, não nasce fio nenhum, de ninguém: outro titular não
 lança programa, o Terminal não abre, a cerimônia de pareamento não começa,
@@ -493,10 +579,11 @@ e o `system.reboot` não cria o fio `energia` — e falha depois de o pedido
 ir ao journal.
 
 **A exposição de hoje.** Real, pela leitura, sem reprodução:
-disponibilidade. Um agente com a chave em várias sessões, ou alguns
-titulares juntos, param a criação de fios da máquina. Volta pelo
-`process.terminate` — do `sistema`, ou do administrador com a prova —, ou
-pelo corte de energia.
+disponibilidade. Uma pessoa que entra muitas vezes, em qualquer máquina;
+uma chave de agente nas 8 sessões, numa máquina com muitos núcleos ou em
+uso; ou alguns titulares juntos — param a criação de fios da máquina.
+Volta pelo `process.terminate` — do `sistema`, ou do administrador com a
+prova —, ou pelo corte de energia.
 
 **As evidências.** [README, Decisões
 pendentes](../README.md#decisões-pendentes) — o item e os dois antes dele;
@@ -514,10 +601,15 @@ cotas de titulares diferentes nenhuma das três fecha sozinha":
 - (a) contar a cota pela identidade — a chave do agente, a pessoa —, e não
   pela sessão: fecha a soma das sessões da mesma chave e a dos logins da
   mesma pessoa;
-- (b) encerrar os processos com a sessão: fecha a dos logins. Os processos
-  de uma sessão que acabou já não pedem nada — "os programas da pessoa que
-  saiu não pedem mais nada" ([MALHA](MALHA.md#revogação-e-fim)) —, e hoje
-  só ocupam a vaga;
+- (b) encerrar os processos com a sessão: fecha a dos logins. Vale para a
+  pessoa: os programas de uma sessão de pessoa que acabou já não pedem
+  nada — "os programas da pessoa que saiu não pedem mais nada"
+  ([MALHA](MALHA.md#revogação-e-fim)) —, e hoje só ocupam a vaga. Para um
+  agente, não: o processo que ele lançou continua o agente depois que a
+  conexão cai — "a autoridade é da chave" (README.md:4472-4477; o caso
+  `canal tcp: o processo sem a conexao e a revogacao`,
+  `kernel/src/testes.rs:40318`) —, e o gate procura o papel pela chave
+  (`kernel/src/autorizacao.rs:1480-1490` e `:3429-3473`);
 - (c) reservar vagas aos fios do kernel — a alternativa (2) da decisão do
   A1, que segue aberta aqui: salva o `energia`, a cerimônia e o coletor, e
   não o programa de outro titular nem o Terminal, que é um processo;
@@ -532,7 +624,11 @@ cotas de titulares diferentes nenhuma das três fecha sozinha":
   continua sob a trava do escalonador, no lugar da de hoje
   (`Escalonador::processos_de`).
 - (b): muda o ciclo de vida do processo — o programa que a pessoa lançou
-  morre no `logout`.
+  morre no `logout`. Para um agente, mudaria o que a autoridade é: hoje o
+  processo dele continua o agente sem a conexão; encerrá-lo com a sessão o
+  prenderia à conexão viva — a mutação que o caso `canal tcp: o processo
+  sem a conexao e a revogacao` reprova. Para um agente, a (b) não se aplica
+  sem outra decisão.
 - (c) e (d): menos vagas para os processos; o tamanho da reserva é uma
   escolha a medir.
 - Nenhuma fecha a soma de titulares diferentes. Com (a) e (c), o resíduo é
@@ -544,12 +640,13 @@ cotas de titulares diferentes nenhuma das três fecha sozinha":
 documentação da Coordenação e das Decisões pendentes; os casos `zumbis:` e
 `recolhimento:`; uma campanha de mutações.
 
-**A recomendação.** (a) + (c). A (b), só se a medida, depois delas, mostrar
-processos de sessões acabadas segurando a cota de quem entra de novo; a
-(d), se mostrar o Terminal sem vaga com (a) e (c).
+**A recomendação.** (a) + (c). A (b), só para a pessoa, e só se a medida,
+depois delas, mostrar processos de sessões acabadas segurando a cota de
+quem entra de novo; a (d), se mostrar o Terminal sem vaga com (a) e (c).
 
 **O plano de validação.** Primeiro, um caso que reproduz o esgotamento de
-hoje — a mesma chave em várias sessões, e vários titulares —, para medir.
+hoje — a pessoa que entra muitas vezes; a mesma chave nas 8 sessões, com
+mais núcleos; vários titulares —, para medir.
 Depois, o mesmo caso com a decisão: a reserva intacta, o `system.reboot`,
 o Terminal e a cerimônia de pé. As rajadas de `fork` de várias sessões ao
 mesmo tempo, nas duas arquiteturas. As mutações, uma de cada vez: a conta
@@ -557,7 +654,9 @@ por sessão de volta, a reserva ignorada, a reserva contada na cota. A CI
 completa.
 
 **O que não espera** — as correções [B] que o README já separou, com a
-numeração dele, cada uma com os seus testes:
+numeração dele, cada uma com os seus testes — a (1), a (3), a (4) e a
+(5) em andamento, no incremento das correções da cota, com o
+[A1-4](#a1-4):
 
 - a (1): o fio `energia` criado no boot, parado, como o do botão;
 - a (3): a contenção conferida de novo no nascimento, antes de o filho
@@ -572,19 +671,25 @@ numeração dele, cada uma com os seus testes:
 
 **As fechadas que ela toca.** A 14.1 (alternativa A, 7/11/2026) e a
 alternativa 1 do A1 (8/11/2026): a cota conta os zumbis e os mortos até o
-recolhimento, e quem recolhe é só o coletor — a alternativa (4) do A1 foi
-investigada e não adotada: traria de volta, pelo `fork`, o defeito do
-AE-1.
+recolhimento. Que só o coletor recolhe é o que está feito, e não uma
+decisão fechada: as outras alternativas do A1 ficaram registradas,
+"nenhuma descartada" (README.md:5236-5246) — a (4), investigada, não
+entrou: traria de volta, pelo `fork`, o defeito do AE-1 —; e a reserva de
+vagas aos fios do kernel, uma das três da 14.1 e a (2) do A1, segue aberta
+(README.md:8743-8746): recomendá-la, a (c) daqui, não reabre a 14.1. A
+autoridade de um processo de agente é da chave (a (b), acima).
 
 ### R15-HANDOFF
 
-**O próximo marco da fase 15: o handoff** — o **DN-4** do relatório da
-continuidade, com as três decisões dele: a **DH-1** (o que é o handoff),
-a **DH-2** (quem recebe no destino) e a **DH-3** (para onde continuar).
+**O próximo marco da fase 15: o handoff** — as três decisões do marco,
+do relatório da continuidade: a **DH-1** (o que é o handoff), a **DH-2**
+(quem recebe no destino) e a **DH-3** (para onde continuar). O **DN-4** —
+o handoff como o próximo marco — é [B], pela 5.1 e pela 5.2: o roteiro já
+o põe primeiro (ver o [DN-4](#dn-4), em As que o coordenador executa).
 
 **O problema.** O roteiro: "O handoff, os recursos remotos, a presença, a
 continuidade e os pacotes são os marcos seguintes, e cada um pede uma
-decisão própria antes". O DN-4 escolhe o próximo. E o handoff — passar uma
+decisão própria antes" (README.md:12840-12842). O handoff — passar uma
 atividade de um Duke a outro da mesma Pessoa — pede três respostas antes
 da primeira linha: o que viaja, e quem solta (DH-1); quem recebe do outro
 lado (DH-2); e como a Pessoa diz para onde (DH-3). Hoje, entre dois Dukes
@@ -613,9 +718,6 @@ fraca —; e a [DT-1](#dt-1), o caminho da Pessoa.
 
 **As alternativas.**
 
-- **DN-4 — o próximo marco.** (a) O handoff, o primeiro na ordem do
-  roteiro; ele bloqueia a continuidade. (b) Outro antes — os recursos
-  remotos, a presença.
 - **DH-1 — o que é o handoff.** (a) Um protocolo de programas sobre a
   malha: o programa da origem manda o estado ao do destino, por um fluxo;
   só o estado viaja — nenhuma sessão, chave, arrendamento ou decisão —; e,
@@ -647,7 +749,6 @@ fraca —; e a [DT-1](#dt-1), o caminho da Pessoa.
   imita o pedido de aceite, ou toma o foco dele.
 - DH-3(a): a Pessoa escolhe pelo nome, sem lista; quem tem muitos
   dispositivos lembra os nomes. É o que a D7 permite.
-- DN-4(a): os recursos remotos e a presença esperam o marco seguinte.
 
 **O impacto.** Os programas: o protocolo, o acolhedor e um exemplo, no
 SDK. A política: a intenção do handoff enumerada nos papéis, e o
@@ -657,7 +758,6 @@ SDK. As bancadas de dois Dukes, nas duas arquiteturas e cruzadas.
 
 **A recomendação.** As dadas no relatório da continuidade:
 
-- **DN-4: o handoff** — ele bloqueia a continuidade;
 - **DH-1: um protocolo de programas sobre a malha; só o estado viaja; na
   dúvida, a origem não solta**;
 - **DH-2: o acolhedor da Pessoa; o aceite só pela entrada dela; o kernel
@@ -761,15 +861,28 @@ imagem](../README.md#o-código-de-fora-da-imagem) — "a imagem conferida".
   de eventos da medição tem de ser conferido. O OVMF, o AAVMF e o `swtpm`
   precisam entregar o que o iniciador mede: a conferir nas duas
   arquiteturas.
+- (b), **pela análise deste dossiê, e não das fontes**: fecha o outro
+  sistema bootado — a medição dele não é a do Duke —, e não o barramento.
+  Com os PCRs certos, quem fala com o TPM depois do boot do Duke ainda
+  abre o selo: falta estender um PCR de fecho logo depois de abrir, para
+  que nada mais o abra até o boot seguinte. E, num TPM discreto, quem está
+  no barramento forja as extensões. Com o PTT — o TPM do firmware da
+  Intel, uma das duas peças da máquina de referência (OPERACAO.md:68) —
+  não há barramento de fora, e fecha.
 - (b2) concentra numa chave o que hoje pede o quórum.
 - (c) a lista de fabricantes muda, e o `swtpm` da bancada não tem cadeia
   de fabricante.
-- Todas mudam a política dos selos que o B2 e o ICP-5 fecharam sem
-  medição. O B2 deixou isso de fora de propósito — "prendê-lo à medição do
-  boot é o boot seguro, que fica fora daqui" —, e o ICP.md chama o boot
-  medido de decisão nova. Não é reabrir a escolha do B2 — a chave nasce no
-  primeiro boot e fica no TPM —, mas é mudar o que abre o selo: por isso é
-  [C].
+- Só a (b) muda a política dos selos que o B2 e o ICP-5 fecharam sem
+  medição: o da identidade não tem política, só a senha vazia e o
+  primário deste TPM (`ancora/src/cofre.rs:54-64`); o das chaves, o
+  `TPM2_PolicyNV` da geração (PERSISTENCIA.md:1384-1387). O B2 deixou a
+  medição de fora de propósito — "prendê-lo à medição do boot é o boot
+  seguro, que fica fora daqui" —, e o ICP.md chama o boot medido de
+  decisão nova. Não é reabrir a escolha do B2 — a chave nasce no primeiro
+  boot e fica no TPM —, mas é mudar o que abre o selo: por isso a (b) é
+  [C]. A (a) e a (c) são [C] por outra razão, sem tocar nos selos: uma
+  raiz de confiança nova — a chave do projeto no firmware, ou os
+  fabricantes.
 
 **O impacto.** O iniciador (medir; na (a), conferir a assinatura); o kernel
 — `tpm.rs`, `identidade.rs`, a persistência e o cofre: as políticas dos
@@ -778,14 +891,18 @@ na (b1)); o `xtask` — as bancadas com o `swtpm` medindo, a imagem de
 produção —; as máquinas de referência; a documentação de OPERACAO,
 ATUALIZACAO e PERSISTENCIA.
 
-**A recomendação.** (b) com (b1): é o que fecha a exposição — os segredos
-presos ao código conferido — sem mudar quem confia em quê na atualização.
-A (a) depois, como opção do operador, nas máquinas cujo firmware a aceite;
-a (c) depois das duas; a (b2) não, sem uma decisão à parte.
+**A recomendação.** (b) com (b1): é o que fecha a exposição do outro
+sistema bootado — os segredos presos ao código conferido — sem mudar quem
+confia em quê na atualização; e, **(minha)**, o PCR de fecho depois de
+abrir. O barramento de um TPM discreto continua de fora; a máquina de
+referência com o PTT o fecha. A (a) depois, como opção do operador, nas
+máquinas cujo firmware a aceite; a (c) depois das duas; a (b2) não, sem
+uma decisão à parte.
 
 **O plano de validação.** A bancada com o `swtpm` medindo, nas duas
 arquiteturas: um kernel mudado no slot não abre a identidade nem as
-chaves; a atualização A/B arma, sela de novo e boota a versão nova com os
+chaves; depois do PCR de fecho, um pedido ao TPM no mesmo boot também não;
+a atualização A/B arma, sela de novo e boota a versão nova com os
 segredos, e a volta sozinha do iniciador também; uma medição do firmware
 mudada, simulada, recusa, e o caminho de recuperação é o testado; a queda
 de energia em cada fronteira do selar de novo; as mutações — o kernel não
@@ -805,144 +922,9 @@ inspecionável: nada de reinício automático quando a medição recusa.
 ## As outras
 
 Na ordem recomendada. Cada uma: o problema, as alternativas, a
-recomendação provisória e o que destrava.
-
-### F4
-
-**O ponto sem volta do `exec`, sem reconfirmar** — o F4 do adversário do
-AE-1, na pendência #298. Decidido junto com a [M-EXEC](#m-exec) (DE-1).
-
-- **O problema.** O `executar` decide o `process.exec` sobre o caminho
-  antes de ler o arquivo; depois lê e confere o código — o selo, pela
-  confiança de agora —, prepara a imagem, e troca no ponto sem volta com o
-  ALLOW de antes, sem decidir de novo
-  ([`kernel/src/usuario/mod.rs`](../kernel/src/usuario/mod.rs)). Uma
-  revogação, uma política nova ou uma contenção que chegue durante a
-  leitura — centenas de milissegundos num programa grande: a troca para o
-  `livro` levou de 370 a 970 ms na suíte ([FLUXOS, Os
-  estados](FLUXOS.md#os-estados)) — não para a troca. Depois dela, cada
-  pedido da imagem nova passa pelo gate com a política de então; o que
-  fica na janela é a troca em si: a imagem nova roda, com os descritores
-  herdados e o que não passa pelo gate — as superfícies, o foco.
-- **A área de 5.3.** O Gate e a autorização: o momento da decisão. Decidir
-  de novo no ponto de mudar é o padrão de outros caminhos — a operação da
-  malha (`reconfirmar`), a abertura efetiva de um fluxo, a troca da própria
-  senha, decidida "de novo no ponto de gravar".
-- **As alternativas** (as da pendência). (a) Manter: a decisão de antes da
-  leitura vale para a troca. (b) Reconfirmar quando a ordem das gravações
-  estiver na mão — quem é ponta de fluxo já troca com ela. (c) Reconfirmar
-  sempre.
-- **Os riscos.** (b) só cobre quem é ponta de fluxo. (c), para quem não é
-  ponta, sem a ordem, estreita a janela à troca e não a fecha — a
-  revogação se ordena pela ordem das gravações —; e tomar a ordem em todo
-  `exec` traz de volta o defeito do AE-1, a espera dentro da chamada de
-  sistema, a menos que siga o caminho que dá a vez e roda de novo.
-- **A recomendação provisória.** **(minha)** (c), nas duas formas: com a
-  ordem na mão para quem é ponta, que é a (b), e sem ela para quem não é —
-  uma conta da política por troca, a medir.
-- **Destrava.** Fecha um resíduo do AE-1.
-
-### A9-RESUMO
-
-**O tamanho do resumo na descrição de um programa** — o achado 9 do
-adversário do passo 1.
-
-- **O problema.** A auditoria e o NSF nomeiam um programa pelo nome, pelos
-  8 dígitos hexadecimais do começo do BLAKE2s do executável — 32 bits — e
-  pelo editor. Com o mesmo nome e o mesmo editor, dois executáveis com os
-  mesmos quatro primeiros bytes do resumo têm a mesma descrição: uma
-  segunda pré-imagem de 32 bits, uns 2^32 resumos. O grafo do NSF já
-  separa o código de fora do da imagem, e um editor de outro ([README,
-  Decisões pendentes](../README.md#decisões-pendentes); [SEGURANCA, O
-  modelo de evento](SEGURANCA.md#o-modelo-de-evento)).
-- **As alternativas.** (a) Aumentar o resumo — 16 dígitos, 64 bits —, que
-  muda o formato do detalhe e a conta do teto de 96 bytes. (b) **(minha)**
-  O resumo inteiro num registro só, o do nascimento do processo. (c)
-  Aceitar.
-- **A recomendação provisória.** (a), medindo quantos registros chegam ao
-  teto com o resumo maior — a descrição já encolhe o nome e o editor antes
-  do motivo.
-- **Destrava.** Nada do roteiro; fecha um resíduo do passo 1.
-
-### I7
-
-**O resumo sem chave dos parâmetros, no console sem ninguém** — o I7 da
-pendência #298: o resto do N6.
-
-- **O problema.** Num console sem ninguém entrado, todo comando é recusado
-  (`DENY_NOT_AUTHENTICATED`) e gravado. O N6 (`75444ef`) separou os dois
-  casos: a linha que não é comando vai com o marcador `(comando
-  desconhecido)` e sem resumo — antes, ia com a primeira palavra em claro e
-  o resto num "BLAKE2s sem chave, que se adivinha fora da máquina", e uma
-  senha digitada no lugar errado ia assim para a auditoria —; e o comando
-  que existe continua com o nome e o resumo dos parâmetros, o BLAKE2s sem
-  chave de `politica::auditoria::resumo_dos_parametros`. O que se digita
-  depois do nome de um comando que existe — uma senha no lugar errado
-  também — vai à auditoria, e ao journal, num resumo que quem lê a
-  auditoria adivinha por dicionário ([Consoles](../README.md#consoles);
-  `kernel/src/interpretador.rs`, `despachar`). O mesmo resumo vai em todo
-  registro de pedido — "a auditoria grava o resumo dos parâmetros do
-  pedido, nunca o texto", diz o módulo das mensagens —; o I7 é o caso em
-  que o parâmetro pode ser uma senha.
-- **A área de 5.3.** A auditoria — o que se grava —; e, na (c), uma chave
-  nova.
-- **As alternativas.** (a) Manter. (b) O comando que existe, sem ninguém
-  entrado, gravado sem o resumo, como a linha que não é comando: a regra
-  de que a senha não vai à auditoria, que o N6 aplicou como [B]. (c)
-  **(minha)** Um resumo com chave — um MAC com uma chave derivada da do
-  Duke por um rótulo próprio, como a da cópia de segurança —: uma chave
-  nova, e a custódia dela.
-- **A recomendação provisória.** (b): antes do login, a decisão é a mesma
-  qualquer que seja o parâmetro, e o resumo serve mais a quem adivinha que
-  a quem investiga.
-- **Destrava.** Fecha um resíduo do passo 1.
-
-### A1-4
-
-**O que a recusa da cota mostra** — o achado A1-4 do adversário da
-alternativa 1.
-
-- **O problema.** A recusa — "cota de processos do papel: N de M" — conta
-  os mortos que esperam o coletor, e o `process.list` não os mostra: quem
-  a ouve vê menos processos do titular na lista ([README, Decisões
-  pendentes](../README.md#decisões-pendentes)).
-- **As alternativas.** (a) Dizer na recusa quantos dos contados são
-  mortos que esperam o coletor — muda o texto da auditoria, como a
-  correção (5) da [COTA-SOMA](#cota-soma), que o README trata como [B].
-  (b) Mostrar os mortos no `process.list` — muda uma saída documentada.
-  (c) Nada.
-- **A classificação** (5.8: é do coordenador). Não toca área nenhuma de
-  5.3: o que se grava de cada decisão não muda — o texto do detalhe não é
-  contrato ([SDK, O contrato v2](SDK.md#o-contrato-v2-ds-2)), e a correção
-  (5) da COTA-SOMA, do mesmo tipo, o README já trata como [B] —, e o
-  `process.list` é um relatório, sem identidade, autoridade, custódia nem
-  persistência. **[B] pela 5.3 — o coordenador executa.**
-- **A recomendação provisória.** (a).
-- **Destrava.** O diagnóstico da cota.
-
-### SDK-CANAL
-
-**O canal sem nome** — a **DC-1′** do relatório da continuidade: o resto
-do R6 do DN-3, a tomada dos nomes do laço.
-
-- **O problema.** O `Laco::novo` tenta 16 nomes previsíveis
-  (`laco-<id>`, `laco-<id>-1`…); quem os tomar todos — 8 processos de uma
-  sessão de operador, com 2 canais cada — impede o laço daquele processo.
-  `escutar` não reserva nome nem passa pelo gate: a mesma raiz dos nomes
-  `terminal` e `janelas` da [DT-1](#dt-1) ([SDK, Limites
-  conhecidos](SDK.md#limites-conhecidos)).
-- **As alternativas.** (a) O canal sem nome — o kernel dá a chave, sem um
-  nome que outro tome —, crescimento do contrato v2: "decisão revisada",
-  pela regra do DS-2. (b) Aceitar, documentado, até um consumidor pedir.
-- **A classificação** (5.8: é do coordenador). Não toca área nenhuma de
-  5.3: o canal sem nome não muda quem decide nem o que se autoriza — o
-  `escutar` não passa pelo gate hoje, e o canal sem nome também não —; é
-  crescimento do contrato v2, que o DS-2 faz pela lista conferida, de
-  propósito. **[B] pela 5.3 — o coordenador executa.**
-- **A recomendação.** A dada no relatório: **opcional; deixar
-  documentado até um consumidor pedir.** A reserva dos nomes `terminal` e
-  `janelas` da [DT-1](#dt-1), 1(a), é outro mecanismo, e não depende dela.
-- **Destrava.** Um limite do SDK.
+recomendação provisória e o que destrava; as do lote rápido — a AUD-ANEL
+e a P-HISTORIA — também os riscos, o impacto e o plano de validação, para
+se decidirem sem outra rodada.
 
 ### AUD-ANEL
 
@@ -954,9 +936,28 @@ do adversário do B4 da auditoria.
   lacuna. Hoje o boot faz uns poucos registros antes
   ([PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4),
   "O que o adversário achou").
+- **A área de 5.3.** A semântica da auditoria: uma lacuna nova na cadeia.
 - **As alternativas.** (a) Marcar a perda — "uma lacuna com o elo de
   outra numeração — semântica nova, uma decisão [C]". (b) Aceitar, como
   limitação escrita: o de hoje.
+- **Os riscos.** (a) muda a cadeia: um registro de lacuna, com o elo de
+  outra numeração, que o `audit.verify`, a reconstrução do boot, o NSF —
+  que já lê a lacuna do anel como degradação — e a bancada de persistência
+  precisam reconhecer; uma lacuna marcada errado esconde uma perda de
+  verdade. (b): a perda continua possível, e calada, se um incremento
+  puser mais de 1024 decisões no boot antes de o journal ser lido.
+- **O impacto.** (a): `politica::auditoria` — a cadeia e o registro de
+  lacuna —; a reconstrução da auditoria no boot, na persistência — a
+  continuação e a adoção do B4, numa tomada só, que o `cargo xtask
+  invariantes` confere —; o `audit.verify`; o NSF; o PERSISTENCIA. (b):
+  nada.
+- **O plano de validação.** (a): um caso que põe mais de 1024 decisões
+  antes de o journal ser lido — por um gancho da suíte — e confere a lacuna
+  marcada, a cadeia que se verifica de ponta a ponta e o NSF que a vê; a
+  bancada de persistência com o corte de energia no meio da reconstrução;
+  a mutação, a perda sem a marca; as duas arquiteturas. (b): **(minha)** um
+  caso que conta as decisões do boot antes do journal e reprova perto do
+  anel — o aviso, [B], de que a (a) ficou necessária.
 - **A recomendação provisória.** (b), enquanto o boot fizer poucos
   registros antes do journal; (a) se um incremento puser decisões no boot
   antes dele.
@@ -981,6 +982,22 @@ do adversário do B4 da auditoria.
   credencial, com a decisão que o fixou —, "uma mudança de formato"; as
   lápides ficam inteiras (R1). (b) Aceitar, até uma instalação chegar
   perto do teto.
+- **Os riscos.** (a): a base resumida não pode perder uma lápide (R1) nem
+  deixar a âncora ver um estado anterior (R6); as decisões que levaram a
+  um estado, e não o fixaram por último, saem da base; e uma base no
+  formato de hoje precisa migrar. (b): uma máquina com muitas operações
+  para — fechada, mas parada —, e a saída é reinstalar, que perde tudo.
+- **O impacto.** (a): o formato da base do journal de estado — uma versão
+  nova —, a compactação, a reposição no boot e a migração, na persistência
+  e no `diario`; o PERSISTENCIA. (b): nada — a medida é [B] e não espera.
+- **O plano de validação.** (a): a bancada de persistência com uma
+  história longa sintética — dezenas de milhares de operações —,
+  compactada e resumida, e o boot que repõe o mesmo estado; as lápides
+  inteiras; o corte de energia em cada fronteira da compactação; a
+  migração de uma base no formato de antes; as mutações — a lápide que sai
+  do resumo, a credencial que volta a um estado anterior —; as duas
+  arquiteturas. (b): a medida de quanto a base cresce por operação, na
+  bancada.
 - **A recomendação provisória.** (b), medindo quanto a base cresce por
   operação, para saber quando a (a) vira necessária.
 - **Destrava.** A vida longa de uma máquina.
@@ -1115,6 +1132,10 @@ alternativa (b).
   da troca —, e só depois a mudança dos alvos dos programas, numa versão
   da interface nativa: um programa compilado com SIMD num kernel que não o
   salva corrompe sem erro.
+- **As fechadas.** O DS-2: a forma binária do programa — o ELF dos dois
+  alvos — é contrato (SDK.md:69-72), e o que não é crescer é só numa
+  versão maior, por decisão própria (SDK.md:84-86): mudar os alvos é uma
+  versão nova da interface nativa.
 - **Destrava.** As otimizações de cifra da fase 12; o TLS e o IC mais
   depressa.
 
@@ -1145,8 +1166,9 @@ alternativa (b).
   servidor prova um nome ao programa e não autoriza nada. Nenhuma chave
   exportada.
 - **Destrava.** A infraestrutura da fase 12. A gestão de certificados, que
-  o roteiro põe antes do mTLS, não está nem entre os feitos nem entre os
-  que pedem decisão: conferir o estado dela.
+  o roteiro põe antes do mTLS (README.md:12706-12707), não está nem entre
+  os feitos nem entre os que pedem decisão (README.md:12732-12734):
+  conferir o estado dela.
 
 ### R12-PROXY
 
@@ -1227,25 +1249,6 @@ principal](ICP.md#na-rede-principal)).
 - **Destrava.** A fase 12 (Web3); a consulta replicada na rede principal,
   que espera um canister do projeto lá.
 
-### R12-IC-NOS
-
-**Os nós da rede principal pela árvore de estado** ([ICP, O que fica de
-fora](ICP.md#o-que-fica-de-fora)).
-
-- **O problema.** `icp-api.io` é servido por nós que giram — quatro
-  endereços em pouco mais de uma hora. A política enumera os IPv4 que o
-  pré-voo viu; quando a máquina recebe outro, o gate recusa, e a fumaça
-  real falha fechada. Descobrir os nós pela árvore de estado
-  (`api_boundary_nodes`) "seria uma decisão nova".
-- **As alternativas.** (a) Como está: o administrador escreve o nó novo
-  pelo `policy.write`. (b) **(minha)** O programa descobre os nós pela
-  árvore de estado, e o administrador os escreve na política: a ferramenta
-  muda, a política não. (c) **(minha)** A política aceita os destinos que a
-  raiz do IC certifica — uma fonte nova de destino, que esbarra na Policy
-  como fonte da decisão.
-- **A recomendação provisória.** (b).
-- **Destrava.** A fumaça real da rede principal, que fecha sempre.
-
 ### R12-IC-OUTROS
 
 **O resto do IC.** O [ICP](ICP.md#o-que-não-existe-ainda) lista o que não
@@ -1283,7 +1286,8 @@ fontes não os definem além do nome, e o sentido abaixo é o comum.
 - **As fechadas que ele esbarra.** A D7: o endereço é configuração, e não
   há descoberta; a descoberta local e o broadcast estão fora
   ([ENLACE](ENLACE.md#o-que-fica-de-fora),
-  [PAREAMENTO](PAREAMENTO.md#o-que-fica-de-fora)).
+  [PAREAMENTO](PAREAMENTO.md#o-que-fica-de-fora)). E a D3: o enlace tem
+  "um conjunto fechado de mensagens" (ENLACE.md:35-38) — a (a) o cresce.
 - **As alternativas.** (a) **(minha)** A presença só entre os já
   relacionados, pelo endereço da relação — uma mensagem a mais no conjunto
   fechado do enlace. (b) A descoberta local — esbarra na D7, e não se
@@ -1306,8 +1310,8 @@ fontes não os definem além do nome, e o sentido abaixo é o comum.
   **(minha)** Fluxos que se retomam no kernel — mudam o que o DN-2 entregou
   como volátil. (c) Nada.
 - **A recomendação provisória.** (a), depois do
-  [handoff](#r15-handoff): o DN-4 o põe antes, porque ele bloqueia a
-  continuidade.
+  [handoff](#r15-handoff): o roteiro o põe antes — o [DN-4](#dn-4) —,
+  porque ele bloqueia a continuidade.
 
 ### R15-PACOTES
 
@@ -1316,10 +1320,11 @@ fontes não os definem além do nome, e o sentido abaixo é o comum.
 - **O problema.** "Não há gerenciador de pacotes, repositório,
   dependências entre programas nem atualização de programas: o programa é
   um arquivo selado" ([SDK, O que não existe](SDK.md#o-que-não-existe)).
-- **As fechadas que ele esbarra.** O selo de código da fase 13 não tem
+- **As limitações de hoje.** O selo de código da fase 13 não tem
   revogação de um selo nem de uma versão, nem cadeia de editores; a
   confiança é do papel no editor ([O código de fora da
-  imagem](../README.md#o-código-de-fora-da-imagem)); o contrato v2.
+  imagem](../README.md#o-código-de-fora-da-imagem)).
+- **As fechadas.** O DS-2: o contrato v2.
 - **As alternativas.** (a) **(minha)** O `instalador` de hoje, com a versão
   no manifesto e uma lista de revogados assinada pelo editor — uma
   confiança nova. (b) Os programas só pela atualização da imagem (B1). (c)
@@ -1382,6 +1387,171 @@ B](OPERACAO.md#o-que-o-duke-ainda-não-faz-grupo-b)).
 - **A recomendação provisória.** Não. O estado de autoridade se refaz por
   operações administrativas, para a frente.
 
+## As que o coordenador executa
+
+Estas o coordenador classificou como [B] pela 5.3 — a classificação é dele
+([5.8](../CLAUDE.md#58-a-responsabilidade-do-coordenador)) —, e elas não
+esperam a palavra do dono: não são decisões dele, e não entram no índice
+nem na ordem. Ficam aqui porque o dono viu algumas no relatório da
+continuidade ou na pendência #298, e porque as decisões abertas as citam.
+A alternativa de uma delas que tocaria uma área de 5.3 — a (c) da I7, a
+(c) da R12-IC-NOS — não se propõe: se um dia se propuser, entra no índice
+como [C].
+
+| Id | O que se faz | O estado |
+|---|---|---|
+| [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | em andamento, no incremento das correções da cota |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | no incremento seguinte |
+| [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | no incremento seguinte |
+| [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | no incremento seguinte |
+| [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
+| [SDK-CANAL](#sdk-canal) (DC-1′) | o canal sem nome | documentado, até um consumidor pedir |
+| [R12-IC-NOS](#r12-ic-nos) | os nós da rede principal achados pela árvore de estado, e escritos na política pelo administrador | no roteiro da fase 12, quando houver um consumidor |
+
+### A1-4
+
+**O que a recusa da cota mostra** — o achado A1-4 do adversário da
+alternativa 1.
+
+- **O problema.** A recusa — "cota de processos do papel: N de M" — conta
+  os mortos que esperam o coletor, e o `process.list` não os mostra: quem
+  a ouve vê menos processos do titular na lista ([README, Decisões
+  pendentes](../README.md#decisões-pendentes)).
+- **O que se faz.** A recusa diz quantos dos contados são mortos que
+  esperam o coletor. Muda o texto do detalhe da auditoria, que não é
+  contrato (SDK.md:88-93), como a correção (5) da
+  [COTA-SOMA](#cota-soma); o `process.list` fica como está.
+- **O estado.** Em andamento, no incremento das correções da cota.
+
+### F4
+
+**O ponto sem volta do `exec`** — o F4 do adversário do AE-1, na
+pendência #298.
+
+- **O problema.** O `executar` decide `process.run` sobre o caminho —
+  gravado com o método `process.exec`, em nome do processo
+  (`kernel/src/usuario/mod.rs:1397-1401`; README.md:6874-6876) — antes de
+  ler o arquivo; depois lê e confere o código — o selo, pela confiança de
+  agora —, prepara a imagem e troca no ponto sem volta com o ALLOW de
+  antes, sem decidir de novo. Uma revogação, uma política nova ou uma
+  contenção que chegue durante a leitura — a troca para o `livro` levou de
+  370 a 970 ms na suíte ([FLUXOS, Os estados](FLUXOS.md#os-estados)) — não
+  para a troca. Depois dela, cada pedido da imagem nova passa pelo gate
+  com a política de então.
+- **O que se faz.** Decidir de novo no ponto sem volta, pelo padrão do
+  `reconfirmar` — a mesma conta do gate, com o registro, a política e a
+  contenção de agora (`kernel/src/autorizacao.rs:2098-2118`) —, como a
+  correção (3) da [COTA-SOMA](#cota-soma) confere de novo a contenção no
+  nascimento. **[B] pela 5.3 — o coordenador executa; fazê-lo sem trazer
+  de volta o defeito do AE-1 é escolha de implementação.** O defeito é a
+  espera da ordem das gravações dentro da chamada de sistema. A ponta de
+  um fluxo já troca com a ordem na mão; para as outras, decidir de novo
+  sem ela estreita a janela à troca e não a fecha — a revogação se ordena
+  pela ordem das gravações.
+- **O estado.** No incremento seguinte.
+
+### I7
+
+**O resumo sem chave dos parâmetros, no console sem ninguém** — o I7 da
+pendência #298: o resto do N6.
+
+- **O problema.** Num console sem ninguém entrado, todo comando é recusado
+  (`DENY_NOT_AUTHENTICATED`) e gravado. O N6 (`75444ef`) tirou o texto da
+  linha que não é comando — ela vai à auditoria com o marcador `(comando
+  desconhecido)`, sem resumo —; o comando que existe continua com o nome e
+  o resumo dos parâmetros, o BLAKE2s sem chave de
+  `politica::auditoria::resumo_dos_parametros`, que quem lê a auditoria
+  adivinha por dicionário. O que se digita depois do nome de um comando —
+  uma senha no lugar errado também — vai assim à auditoria e ao journal
+  ([Consoles](../README.md#consoles); `kernel/src/interpretador.rs`,
+  `despachar`).
+- **O que se faz.** A (b) da pendência: o comando que existe, sem ninguém
+  entrado, gravado sem o resumo, como a linha que não é comando — a regra
+  de que a senha não vai à auditoria, que o N6 aplicou como [B]
+  (README.md:5115-5120). Antes do login, a decisão é a mesma qualquer que
+  seja o parâmetro.
+- **O que não se propõe.** A (c), **(minha)**, um resumo com chave — um
+  MAC com uma chave derivada da do Duke —: uma chave nova, e a custódia
+  dela, seria [C].
+- **O estado.** No incremento seguinte.
+
+### A9-RESUMO
+
+**O tamanho do resumo na descrição de um programa** — o achado 9 do
+adversário do passo 1.
+
+- **O problema.** A auditoria e o NSF nomeiam um programa pelo nome, pelos
+  8 dígitos hexadecimais do começo do BLAKE2s do executável — 32 bits — e
+  pelo editor: com o mesmo nome e o mesmo editor, dois executáveis com os
+  mesmos quatro primeiros bytes do resumo têm a mesma descrição — uma
+  segunda pré-imagem de uns 2^32 resumos ([README, Decisões
+  pendentes](../README.md#decisões-pendentes); [SEGURANCA, O modelo de
+  evento](SEGURANCA.md#o-modelo-de-evento)).
+- **O que se faz.** O resumo de 16 dígitos, 64 bits. O texto do detalhe
+  da auditoria não é contrato (SDK.md:88-93). Mudam junto: o
+  `resumo_e_editor` (`politica/src/auditoria.rs:309`), que só reconhece
+  um resumo de 8 dígitos, e é por onde o NSF lê o resumo e o editor de uma
+  descrição (`seguranca/src/grafo.rs:405-409`); e a conta do teto de 96
+  bytes, medida — a descrição já
+  encolhe o nome e o editor antes do motivo. As descrições já gravadas, de
+  8 dígitos, ficam no journal da auditoria: o leitor continua a
+  reconhecê-las. Este dossiê concorda com a classificação: a descrição diz
+  a mesma coisa, com mais bits.
+- **O estado.** No incremento seguinte.
+
+### DN-4
+
+**O handoff como o próximo marco da fase 15** — o DN-4 do relatório da
+continuidade.
+
+- **O que se faz.** O roteiro já põe o handoff primeiro entre os marcos
+  que faltam — "O handoff, os recursos remotos, a presença, a continuidade
+  e os pacotes são os marcos seguintes" ([Roteiro](../README.md#roteiro),
+  fase 15; README.md:12840-12842) —, e escolher a próxima tarefa dentro
+  do roteiro é do coordenador
+  ([5.1](../CLAUDE.md#51-o-que-o-coordenador-decide-sozinho),
+  [5.2](../CLAUDE.md#52-a-continuidade)). As decisões do marco — a DH-1, a
+  DH-2 e a DH-3 — continuam do dono: a [R15-HANDOFF](#r15-handoff).
+- **O estado.** Decidido pelo roteiro.
+
+### SDK-CANAL
+
+**O canal sem nome** — a **DC-1′** do relatório da continuidade: o resto
+do R6 do DN-3, a tomada dos nomes do laço.
+
+- **O problema.** O `Laco::novo` tenta 16 nomes previsíveis
+  (`laco-<id>`, `laco-<id>-1`…); quem os tomar todos — 8 processos de uma
+  sessão de operador, com 2 canais cada — impede o laço daquele processo.
+  `escutar` não reserva nome nem passa pelo gate: a mesma raiz dos nomes
+  `terminal` e `janelas` da [DT-1](#dt-1) ([SDK, Limites
+  conhecidos](SDK.md#limites-conhecidos)).
+- **O que se faz.** A recomendação do relatório: **opcional; deixar
+  documentado até um consumidor pedir.** Quando vier, o canal sem nome — o
+  kernel dá a chave, sem um nome que outro tome — é crescimento do
+  contrato v2, que o DS-2 faz pela lista conferida, e não muda quem decide
+  nem o que se autoriza. A reserva dos nomes da DT-1 é outra coisa, e não
+  depende dele.
+- **O estado.** Documentado, até um consumidor pedir.
+
+### R12-IC-NOS
+
+**Os nós da rede principal pela árvore de estado** ([ICP, O que fica de
+fora](ICP.md#o-que-fica-de-fora)).
+
+- **O problema.** `icp-api.io` é servido por nós que giram — quatro
+  endereços em pouco mais de uma hora. A política enumera os IPv4 que o
+  pré-voo viu; quando a máquina recebe outro, o gate recusa, e a fumaça
+  real falha fechada. O ICP diz que descobrir os nós pela árvore de estado
+  (`api_boundary_nodes`) "seria uma decisão nova".
+- **O que se faz.** A (b), **(minha)**: o programa descobre os nós pela
+  árvore de estado, e o administrador os escreve na política pelo
+  `policy.write`, com prova — a ferramenta muda; a política, o gate e a
+  fonte da decisão, não.
+- **O que não se propõe.** A (c), **(minha)**: a política aceitar os
+  destinos que a raiz do IC certifica — uma fonte nova de destino, que
+  esbarra na Policy como fonte da decisão: [C].
+- **O estado.** No roteiro da fase 12, quando houver um consumidor.
+
 ## As fechadas que não se reabrem
 
 O que é CLOSED e toca nestes assuntos. Nenhuma entrada deste dossiê as
@@ -1389,9 +1559,10 @@ propõe de novo; quando uma esbarra numa delas, a fechada é restrição.
 
 - **As invariantes** ([1.7](../CLAUDE.md#17-as-invariantes-permanentes)):
   nenhuma ABI do Linux; a Pessoa como identidade durável; a autoridade
-  carregada pelo processo; system/root como autoridade máxima, sem
-  curinga; as permissões enumeradas, sem `ALLOW(*)`; um Gate, uma cadeia
-  de autorização, nenhuma autorização paralela; a Policy como fonte da
+  carregada pelo processo; o processo como endpoint; system/root como
+  autoridade máxima, sem curinga; as permissões enumeradas, sem
+  `ALLOW(*)`; um Gate, uma cadeia de autorização, nenhuma autorização
+  paralela, e toda operação passa pelo Gate; a Policy como fonte da
   decisão; a auditoria e a proveniência; a Fabric, os fluxos e os avisos
   nunca como autoridade; o Noise nunca no lugar da autorização; a
   identidade própria de cada dispositivo, nunca clonada nem migrada; a
@@ -1413,7 +1584,9 @@ propõe de novo; quando uma esbarra numa delas, a fechada é restrição.
 - **DN-2, com DF-1 a DF-6** ([FLUXOS](FLUXOS.md#as-decisões-df-1-a-df-6)).
 - **DN-3, com DS-1 e DS-2** ([SDK](SDK.md#o-contrato-v2-ds-2)): o aviso só
   sinaliza; o contrato só cresce dentro da versão, crescer é decisão
-  revisada, e remover é só numa versão maior.
+  revisada, um nome nunca muda de sentido, e remover é só numa versão
+  maior; a forma binária do programa — o ELF dos dois alvos — também é
+  contrato.
 - **A C1** (11/11/2026,
   [PERSISTENCIA](PERSISTENCIA.md#os-leitores-e-o-anexar-a-trava-do-gate-sem-o-alocador)):
   o elo BLAKE2s da auditoria fica com a trava — sem protocolo otimista, sem
@@ -1421,9 +1594,12 @@ propõe de novo; quando uma esbarra numa delas, a fechada é restrição.
   mostrar o elo como gargalo relevante.
 - **A 14.1** (alternativa A, 7/11/2026) **e a alternativa 1 do A1**
   (8/11/2026) ([Coordenação](../README.md#coordenação)): a cota conta os
-  zumbis e os mortos até o recolhimento, e só o coletor recolhe. As
-  alternativas não adotadas do A1 ficaram registradas: a (2) segue aberta
-  na [COTA-SOMA](#cota-soma), e a (3) é uma mitigação [B].
+  zumbis e os mortos até o recolhimento. Que só o coletor recolhe é o que
+  está feito, e não uma decisão: as alternativas não adotadas do A1
+  ficaram registradas, "nenhuma descartada" (README.md:5236-5246) — a (2),
+  as vagas reservadas aos fios do kernel, também uma das três da 14.1
+  (README.md:8743-8746), segue aberta na [COTA-SOMA](#cota-soma); a (3) é
+  uma mitigação [B]; a (4), investigada, não entrou.
 - **O grupo C** ([OPERACAO](OPERACAO.md#o-que-fica-de-fora-de-propósito-grupo-c)):
   o watchdog e o reinício automático depois de um pânico — o post-mortem é
   decisão fechada —; a ACPI no ARM, as placas ARM físicas, o AHCI e o
