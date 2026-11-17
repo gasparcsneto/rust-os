@@ -31,6 +31,16 @@
 //! gancho de antes delas (`autorizacao::antes_do_gate_do_lancamento_de_teste`);
 //! e as lacunas de cobertura: o editor recusado no nascimento do `fork`, e a
 //! chave revogada e a política nova no nascimento do `user.run`.
+//!
+//! E os achados do adversário do lote A do #448, no fim do arquivo: a
+//! confiança no editor do código que vai rodar, perguntada de novo na
+//! última palavra do nascimento — pelo `user.run` e pelo kernel fora de um
+//! comando —; e o lançamento só pelo comando decidido para `process.run`,
+//! pelo gancho da verificação do armazém (`armazem::no_meio_da_verificacao_de_teste`),
+//! dentro de um `fs.verify` decidido. O detalhe de quem acabou — "processo
+//! encerrado", e não "processo isolado" — e a resposta sem a explicação do
+//! comando às recusas sobre quem pede ficam nos casos acima que as
+//! conferem.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
@@ -766,34 +776,91 @@ fn nao_lancou_com(r: &str, codigo: &str, motivo: &str) -> Resultado {
     Ok(())
 }
 
+/// A resposta de um `user.run` recusado nas perguntas sobre quem pede um
+/// processo — a cota, quem acabou, a contencao, o editor e o papel de quem
+/// pede —, no gate ou na ultima palavra, nao traz a explicacao do comando:
+/// ela le o papel e a permissao com que o gate decidiu o comando, e estas
+/// recusas nao sao ela — a cota sairia "o seu papel nao permite
+/// process.run", a sessao que acabou com o papel de antes, e o encerrado
+/// com "um administrador pode libera-la" (o achado 5 do adversario do lote
+/// A; ver `usuario::NaoLancou::PorQuemPede`).
+fn sem_a_explicacao(r: &str) -> Resultado {
+    if r.contains(r#""explain""#) {
+        crate::log_error!("teste", "{}", r);
+        return Err("a recusa de quem pede no user.run veio com a explicacao do comando");
+    }
+    Ok(())
+}
+
+/// A resposta de um `user.run` recusado na ultima palavra, pelo comando
+/// decidido de novo, traz a explicacao dele, com a razao `razao`: e a
+/// decisao do comando, feita de novo.
+fn com_a_explicacao(r: &str, razao: &str) -> Resultado {
+    if !r.contains(&alloc::format!(r#""reason":"{razao}""#)) {
+        crate::log_error!("teste", "esperava a explicacao {}: {}", razao, r);
+        return Err("a recusa do comando decidido de novo no user.run nao veio explicada");
+    }
+    Ok(())
+}
+
+/// Se `ev` grava a recusa de `pelo` com `motivo` como a execucao de uma
+/// decisao a grava (`autorizacao::citando`): o detalhe composto pela regra
+/// de todo registro, com a citacao da decisao que ele mesmo cita.
+fn e_a_execucao_de(ev: &politica::auditoria::Evento, pelo: Option<&str>, motivo: &str) -> bool {
+    let Some(decisao) = super::decisao_executada(&ev.detalhe) else {
+        return false;
+    };
+    let citacao = alloc::format!("; decisao {decisao}");
+    ev.detalhe == politica::auditoria::detalhe_composto(pelo, motivo, &citacao)
+}
+
 /// A recusa do nascimento na auditoria: uma so, depois de `cabeca`, como a
 /// execucao da decisao do `user.run` — o metodo, o caminho, o codigo, e o
-/// detalhe `<quem pede: >motivo; decisao N` —, e nenhum `processo N
-/// lancado`.
+/// detalhe `<quem pede: >motivo; decisao N`, com `pelo` na frente quando
+/// quem pede e um processo —, e nenhum `processo N lancado`.
+///
+/// # O detalhe esperado, composto com a citacao
+///
+/// O kernel compoe o detalhe da execucao inteiro, com a citacao, e acima
+/// do teto (`politica::auditoria::MAIOR_DETALHE`) a descricao do programa
+/// de quem pede encolhe: `(pedinte abababab)` vira `(? abababab)`. Se cabe
+/// ou nao depende dos digitos do fio de quem pede e do numero da decisao,
+/// que crescem com os casos que rodaram antes na mesma maquina. O esperado
+/// sai da mesma regra, com a citacao do proprio registro
+/// ([`e_a_execucao_de`]). Composto sem ela, e conferido pelo comeco, so
+/// casava enquanto o detalhe inteiro cabia: na suite inteira do x86 (a CI
+/// 509, em release), o fio 10283 e a decisao 95053 levavam a recusa da
+/// chave revogada — o motivo mais longo — a 97 bytes, e nenhum registro
+/// casava; nas partes, com o fio de 4 digitos, eram 96, e cabia.
 fn so_a_recusa_do_user_run(
     cabeca: u64,
     caminho: &str,
     codigo: politica::Codigo,
-    detalhe: &str,
+    pelo: Option<&str>,
+    motivo: &str,
 ) -> Resultado {
-    let prefixo = alloc::format!("{detalhe}; decisao ");
-    let recusas = registros_depois(cabeca, |ev| {
-        ev.metodo == "user.run"
-            && ev.recurso == caminho
-            && ev.codigo == codigo
-            && ev.detalhe.starts_with(&prefixo)
+    let candidatas = registros_depois(cabeca, |ev| {
+        ev.metodo == "user.run" && ev.recurso == caminho && ev.codigo == codigo
     });
+    let recusas = candidatas
+        .iter()
+        .filter(|(_, ev)| e_a_execucao_de(ev, pelo, motivo))
+        .count();
     let lancados = registros_depois(cabeca, |ev| {
         ev.metodo == "user.run"
             && ev.codigo == politica::Codigo::Allow
             && ev.detalhe.contains(" lancado")
     });
-    if recusas.len() != 1 || !lancados.is_empty() {
+    if recusas != 1 || !lancados.is_empty() {
+        for (seq, ev) in &candidatas {
+            crate::log_error!("teste", "registro {} do user.run: {}", seq, ev.detalhe);
+        }
         crate::log_error!(
             "teste",
-            "{} recusa(s) `{}`, {} lancamento(s) gravados",
-            recusas.len(),
-            detalhe,
+            "{} recusa(s) de `{}` com `{}`, {} lancamento(s) gravados",
+            recusas,
+            pelo.unwrap_or(""),
+            motivo,
             lancados.len()
         );
         return Err("a auditoria nao diz so a recusa do user.run no nascimento");
@@ -845,11 +912,19 @@ pub(super) fn contencao_a_recusa_do_user_run_no_nascimento_diz_o_codigo() -> Res
             return Err("o gancho nao isolou quem pedia no meio do nascimento");
         }
         nao_lancou_com(&r, "DENY_CONTAINED", "processo isolado")?;
+        // O comando decidido de novo: a explicacao dele — o isolado, que um
+        // administrador pode soltar.
+        com_a_explicacao(&r, "DENY_CONTAINED")?;
         if crate::fios::na_tabela_de_teste(nascendo) {
             return Err("a vaga do lancado que nao nasceu nao voltou");
         }
-        let detalhe = detalhe_por(&pelo, "processo isolado");
-        so_a_recusa_do_user_run(cabeca, &caminho, politica::Codigo::DenyContained, &detalhe)
+        so_a_recusa_do_user_run(
+            cabeca,
+            &caminho,
+            politica::Codigo::DenyContained,
+            Some(pelo.as_str()),
+            "processo isolado",
+        )
     })();
     crate::fios::no_meio_do_nascimento_de_teste(None);
     encerrar_os_encerraveis();
@@ -889,6 +964,8 @@ pub(super) fn contencao_quem_sai_no_meio_do_user_run_nao_lanca() -> Resultado {
             return Err("o gancho nao encerrou a sessao no meio do nascimento");
         }
         nao_lancou_com(&r, "DENY_NOT_AUTHENTICATED", "sessao de pessoa que acabou")?;
+        // O comando decidido de novo: a explicacao dele — entrar de novo.
+        com_a_explicacao(&r, "DENY_NOT_AUTHENTICATED")?;
         if crate::fios::na_tabela_de_teste(nascendo) {
             return Err("a vaga do lancado que nao nasceu nao voltou");
         }
@@ -896,6 +973,7 @@ pub(super) fn contencao_quem_sai_no_meio_do_user_run_nao_lanca() -> Resultado {
             cabeca,
             &caminho,
             politica::Codigo::DenyNotAuthenticated,
+            None,
             "sessao de pessoa que acabou",
         )
     })();
@@ -1014,6 +1092,12 @@ fn como(
 
 /// Um gancho do meio do nascimento: recebe o fio que nasce.
 type Gancho = fn(u64);
+
+/// A recusa de quem pede e acabou, ou tem o fim pedido: o codigo do isolado
+/// e o detalhe do que aconteceu (`contencao::PROCESSO_ENCERRADO`). Escrita
+/// aqui, e nao lida da constante do kernel: os casos conferem o que o
+/// registro diz, e nao a constante por ela mesma.
+const ENCERRADO: (politica::Codigo, &str) = (politica::Codigo::DenyContained, "processo encerrado");
 
 /// O processo cujo fim o gancho pede, ou zero.
 static ENCERRAR: AtomicU64 = AtomicU64::new(0);
@@ -1143,11 +1227,14 @@ fn encerrar_e_podar_quem_pede(nascendo: u64) {
 /// encerrado que morreu e foi podado antes da ultima palavra, ainda na
 /// tabela — o coletor segurado. Cada um exercita uma metade da pergunta
 /// (`fios::encerrado`): o fim pedido, e a vida. Nos dois, a
-/// ultima palavra recusa como o isolado (`DENY_CONTAINED`, "processo
-/// isolado"), quem pediu ouve o codigo, a recusa vai uma vez a auditoria
-/// como a execucao da decisao do `user.run`, nada nasce, a vaga volta, e o
-/// encerrado morre. Sem a pergunta, o lancado nascia do pedido de quem ja
-/// tinha sido encerrado.
+/// ultima palavra recusa com o codigo do isolado e o detalhe de quem acabou
+/// (`DENY_CONTAINED`, "processo encerrado" — o achado 3 do adversario do
+/// lote A: o registro dizia "processo isolado" de quem nao foi isolado),
+/// quem pediu ouve o codigo, sem a explicacao do comando — "um
+/// administrador pode libera-la" nao vale para quem acabou (o achado 5) —,
+/// a recusa vai uma vez a auditoria como a execucao da decisao do
+/// `user.run`, nada nasce, a vaga volta, e o encerrado morre. Sem a
+/// pergunta, o lancado nascia do pedido de quem ja tinha sido encerrado.
 pub(super) fn contencao_o_encerrado_sem_o_isolamento_no_meio_do_user_run_nao_lanca() -> Resultado {
     crate::pessoas::esquecer_registradas();
     let resultado = (|| -> Resultado {
@@ -1196,16 +1283,13 @@ pub(super) fn contencao_o_encerrado_sem_o_isolamento_no_meio_do_user_run_nao_lan
             if !ISOLOU.load(SeqCst) || nascendo == 0 {
                 return Err("o gancho nao encerrou quem pedia, sem o isolamento, no meio");
             }
-            nao_lancou_com(&r, "DENY_CONTAINED", "processo isolado")?;
+            let (codigo, motivo) = ENCERRADO;
+            nao_lancou_com(&r, codigo.nome(), motivo)?;
+            sem_a_explicacao(&r)?;
             if crate::fios::na_tabela_de_teste(nascendo) {
                 return Err("a vaga do lancado que nao nasceu nao voltou");
             }
-            so_a_recusa_do_user_run(
-                cabeca,
-                &caminho,
-                politica::Codigo::DenyContained,
-                &detalhe_por(&pelo, "processo isolado"),
-            )?;
+            so_a_recusa_do_user_run(cabeca, &caminho, codigo, Some(pelo.as_str()), motivo)?;
             Encerravel::morreu(e.fio, e.desde)?;
         }
         Ok(())
@@ -1231,7 +1315,7 @@ fn pedir_o_fim_de_quem_bifurca(filho: u64) {
 /// no meio do nascimento do filho, sem o isolamento — o teto de isolados
 /// cheio. A ultima palavra pergunta, alem da contencao, se quem bifurca
 /// ainda pede: o filho nao nasce, a recusa vai uma vez a auditoria como a
-/// do gate (`process.fork`, `DENY_CONTAINED`, "processo isolado", com o
+/// do gate (`process.fork`, `DENY_CONTAINED`, "processo encerrado", com o
 /// processo que bifurcou), a vaga volta, e o pai morre no ponto seguro da
 /// volta da chamada. Sem a pergunta, nascia o filho de quem ja ia acabar.
 pub(super) fn contencao_o_encerrado_sem_o_isolamento_no_meio_do_fork_nao_ganha_filho() -> Resultado
@@ -1239,7 +1323,7 @@ pub(super) fn contencao_o_encerrado_sem_o_isolamento_no_meio_do_fork_nao_ganha_f
     crate::pessoas::esquecer_registradas();
     let resultado = (|| -> Resultado {
         let e = Encerravel::lancar(operador_que_lanca(156, "encerrado-no-fork"))?;
-        let esperado = detalhe_por(&pelo_processo(e.fio)?, "processo isolado");
+        let esperado = detalhe_por(&pelo_processo(e.fio)?, ENCERRADO.1);
         let cabeca = crate::autorizacao::ultimo_registro();
         armar(pedir_o_fim_de_quem_bifurca, 0);
         ENCERRAR.store(e.fio, SeqCst);
@@ -1379,7 +1463,7 @@ pub(super) fn contencao_o_editor_recusado_no_meio_do_fork_nao_ganha_filho() -> R
             &pelo,
             &politica::procedencia::nao_confiado(super::EDITOR_DO_CASO.1),
         );
-        let sem = politica_sem_a_confianca_do_operador()?;
+        let sem = super::politica_sem_a_confianca_do_operador()?;
         crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = Some(sem));
         let cabeca = crate::autorizacao::ultimo_registro();
         armar(tirar_a_confianca_de_quem_bifurca, 0);
@@ -1421,18 +1505,6 @@ fn programa_selado_que_pede() -> crate::autorizacao::Programa {
     }
 }
 
-/// A politica do caso sem a confianca do operador no editor do caso: a do
-/// sistema e a do administrador ficam.
-fn politica_sem_a_confianca_do_operador() -> Result<politica::Politica, &'static str> {
-    super::politica_trocada(&[
-        ("editores sistema bancada", "editores sistema bancada caso"),
-        (
-            "editores administrador bancada",
-            "editores administrador bancada caso",
-        ),
-    ])
-}
-
 /// No meio do nascimento do lancado: a politica do caso sem a confianca do
 /// operador no editor do programa de quem pede.
 fn tirar_a_confianca_de_quem_pede(nascendo: u64) {
@@ -1464,7 +1536,7 @@ pub(super) fn contencao_o_editor_recusado_no_meio_do_user_run_nao_lanca() -> Res
             return Err("o programa que pede nao e o selado pelo editor do caso");
         }
         let pede = como(&e, programa)?;
-        let sem = politica_sem_a_confianca_do_operador()?;
+        let sem = super::politica_sem_a_confianca_do_operador()?;
         crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = Some(sem));
         let caminho = caminho_do_encerravel();
         let cabeca = crate::autorizacao::ultimo_registro();
@@ -1493,7 +1565,8 @@ pub(super) fn contencao_o_editor_recusado_no_meio_do_user_run_nao_lanca() -> Res
             cabeca,
             &caminho,
             politica::Codigo::DenyPolicy,
-            &detalhe_por(&pelo, MOTIVO),
+            Some(pelo.as_str()),
+            MOTIVO,
         )
     });
     crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = None);
@@ -1520,7 +1593,11 @@ fn revogar_a_chave_de_quem_pede(nascendo: u64) {
 /// lancado, depois do gate. A ultima palavra decide o comando de novo, nao
 /// acha o agente nem o papel dele, e recusa: `DENY_ROLE`, "sem papel, ou
 /// papel que a politica nao tem", na resposta e uma vez na auditoria, como a
-/// execucao da decisao; nada nasce, e a vaga volta.
+/// execucao da decisao; nada nasce, e a vaga volta. Com o motivo mais longo
+/// dos casos do nascimento, o detalhe da execucao passa do teto quando o fio
+/// de quem pede e a decisao somam dez digitos — na suite inteira do x86 —,
+/// e a descricao do programa de quem pede encolhe: a conferencia compoe o
+/// esperado como o kernel ([`so_a_recusa_do_user_run`]).
 pub(super) fn contencao_a_chave_revogada_no_meio_do_user_run_nao_lanca() -> Resultado {
     const MOTIVO: &str = "sem papel, ou papel que a politica nao tem";
     let chave = sigilo::publica_de(&SEMENTE_DA_CHAVE_REVOGADA);
@@ -1565,7 +1642,8 @@ pub(super) fn contencao_a_chave_revogada_no_meio_do_user_run_nao_lanca() -> Resu
             cabeca,
             &caminho,
             politica::Codigo::DenyRole,
-            &detalhe_por(&pelo, MOTIVO),
+            Some(pelo.as_str()),
+            MOTIVO,
         )
     })();
     crate::fios::no_meio_do_nascimento_de_teste(None);
@@ -1622,7 +1700,13 @@ pub(super) fn contencao_a_politica_nova_no_meio_do_user_run_nao_lanca() -> Resul
         if crate::fios::na_tabela_de_teste(nascendo) {
             return Err("a vaga do lancado que nao nasceu nao voltou");
         }
-        so_a_recusa_do_user_run(cabeca, &caminho, politica::Codigo::DenyPermission, MOTIVO)
+        so_a_recusa_do_user_run(
+            cabeca,
+            &caminho,
+            politica::Codigo::DenyPermission,
+            None,
+            MOTIVO,
+        )
     })();
     crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = None);
     crate::fios::no_meio_do_nascimento_de_teste(None);
@@ -1635,9 +1719,10 @@ pub(super) fn contencao_a_politica_nova_no_meio_do_user_run_nao_lanca() -> Resul
 /// O `user.run` de `quem`, com `gancho` antes das perguntas do gate sobre
 /// quem pede um processo (`autorizacao::antes_do_gate_do_lancamento_de_teste`):
 /// recusado ali, depois do gate do comando. A resposta diz que nada foi
-/// lancado, com o `code` e o `error` da recusa de verdade e a explicacao;
-/// e a recusa vai uma vez a auditoria como as perguntas a gravam —
-/// `process.run`, com quem pede e o detalhe que termina em `auditado`.
+/// lancado, com o `code` e o `error` da recusa de verdade, e sem a
+/// explicacao do comando ([`sem_a_explicacao`]); e a recusa vai uma vez a
+/// auditoria como as perguntas a gravam — `process.run`, com quem pede e o
+/// detalhe que termina em `auditado`.
 fn recusado_nas_perguntas_do_gate(
     quem: crate::autorizacao::Chamador,
     gancho: Option<fn()>,
@@ -1660,11 +1745,11 @@ fn recusado_nas_perguntas_do_gate(
         || !r.contains(r#""launched":false"#)
         || fs_texto(&r, "code").as_deref() != Some(codigo.nome())
         || fs_texto(&r, "error").as_deref() != Some(motivo)
-        || !r.contains(r#""explain""#)
     {
         crate::log_error!("teste", "esperava {} `{}`: {}", codigo.nome(), motivo, r);
         return Err("o user.run recusado no gate nao respondeu o codigo e o motivo da recusa");
     }
+    sem_a_explicacao(&r)?;
     let gravadas = registros_depois(cabeca, |ev| {
         ev.metodo == "process.run" && ev.codigo == codigo && ev.detalhe.ends_with(auditado)
     });
@@ -1685,16 +1770,19 @@ fn recusado_nas_perguntas_do_gate(
 /// quem pede um processo (`autorizacao::permitir_processo`) respondia "a
 /// cota de processos do papel de quem lanca esta esgotada", sem o codigo,
 /// qualquer que fosse a recusa. Agora a resposta traz o codigo e o motivo
-/// de verdade, como a da ultima palavra, com a explicacao. Uma recusa de
-/// cada, depois do gate do comando — pelo gancho de antes das perguntas, a
-/// mudanca que chega de outro nucleo entre o gate e o handler; a cota, sem
-/// gancho:
+/// de verdade, como a da ultima palavra — e sem a explicacao do comando,
+/// que nao e ela (o achado 5 do adversario do lote A): a da cota dizia "o
+/// seu papel nao permite process.run", a da pessoa que saiu, o papel de
+/// antes, e a do encerrado, "um administrador pode libera-la". Uma recusa
+/// de cada, depois do gate do comando — pelo gancho de antes das perguntas,
+/// a mudanca que chega de outro nucleo entre o gate e o handler; a cota,
+/// sem gancho:
 ///
 /// - a pessoa que sai: `DENY_ROLE`, "sem papel, nenhum processo";
 /// - a credencial suspensa: `DENY_CREDENTIAL`, "credencial suspensa";
 /// - o journal recusado: `DENY_NOT_AUTHENTICATED`;
 /// - o processo que pede, com o fim pedido: `DENY_CONTAINED`, "processo
-///   isolado";
+///   encerrado" — o codigo do isolado, com o detalhe de quem acabou;
 /// - a confianca no editor do programa que pede, tirada: `DENY_POLICY`, "o
 ///   papel nao confia no editor" — a auditoria leva o nome dele;
 /// - a cota esgotada: `DENY_POLICY`, a cota esgotada — a auditoria leva a
@@ -1775,12 +1863,13 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
         let pelo = alloc::format!("pelo processo {} ({})", e.fio, programa.descricao());
         let pede = como(&e, programa)?;
         ENCERRAR.store(e.fio, SeqCst);
+        let (encerrado, motivo) = ENCERRADO;
         recusado_nas_perguntas_do_gate(
             pede,
             Some(pedir_o_fim),
-            Codigo::DenyContained,
-            "processo isolado",
-            &detalhe_por(&pelo, "processo isolado"),
+            encerrado,
+            motivo,
+            &detalhe_por(&pelo, motivo),
         )?;
         crate::log_info!(
             "teste",
@@ -1795,7 +1884,7 @@ pub(super) fn contencao_a_recusa_do_user_run_no_gate_diz_o_codigo() -> Resultado
             let programa = programa_selado_que_pede();
             let pelo = alloc::format!("pelo processo {} ({})", e.fio, programa.descricao());
             let pede = como(&e, programa)?;
-            let sem = politica_sem_a_confianca_do_operador()?;
+            let sem = super::politica_sem_a_confianca_do_operador()?;
             crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = Some(sem));
             recusado_nas_perguntas_do_gate(
                 pede,
@@ -1922,5 +2011,307 @@ pub(super) fn contencao_o_desconhecido_na_ultima_palavra_e_recusado() -> Resulta
     })();
     encerrar_os_encerraveis();
     crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+// ---------------------------------------------------------------------------
+// Os achados do adversario do lote A do #448: a confianca no editor do
+// codigo que vai rodar, perguntada de novo no nascimento, e o lancamento so
+// pelo comando decidido para `process.run`
+// ---------------------------------------------------------------------------
+
+/// O `encerravel` da imagem, selado pelo editor do caso e gravado no
+/// armazem em `caminho`, onde mora o codigo instalado.
+fn gravar_o_encerravel_selado(caminho: &str) -> Resultado {
+    let encerravel = crate::vfs::ler_tudo(&caminho_do_encerravel())
+        .map_err(|_| "o encerravel da imagem nao se leu")?;
+    super::gravar_codigo(
+        caminho,
+        &sigilo::codigo::selar(&encerravel, &super::EDITOR_DO_CASO.0),
+    )
+}
+
+/// O achado 1 do adversario do lote A, no nascimento do `user.run`: a
+/// conferencia do codigo pergunta a confianca no editor do selo antes de
+/// ler o resto e de mapear a pilha, e a ultima palavra do nascimento so
+/// decidia o comando de novo — um `policy.apply` que tirasse o editor do
+/// papel no meio nao parava o nascimento. O `encerravel` selado pelo editor
+/// do caso, gravado no armazem; uma pessoa operadora, cujo papel confia
+/// nele, pede o `user.run` dele pelo console, e o gancho do meio do
+/// nascimento tira a confianca do operador no editor, depois da
+/// conferencia. A ultima palavra pergunta a confianca de novo, pela regra
+/// da conferencia, e recusa: `DENY_POLICY`, "o papel nao confia no editor",
+/// na resposta, com a explicacao da procedencia — e o codigo que o comando
+/// decidido manda rodar —; e uma vez na auditoria, como a execucao da
+/// decisao do `user.run`, com o editor no motivo, como a conferencia o
+/// grava. Nada nasce, e a vaga volta.
+pub(super) fn contencao_a_confianca_no_editor_do_codigo_tirada_no_meio_do_user_run_nao_lanca()
+-> Resultado {
+    use politica::procedencia::{Falta, nao_confiado};
+    crate::pessoas::esquecer_registradas();
+    let resultado = super::com_editores_do_caso(|| {
+        let caminho = alloc::format!("{}/encerravel-run", super::CODIGO_INSTALADO);
+        gravar_o_encerravel_selado(&caminho)?;
+        let quem = operador_que_lanca(168, "editor-do-codigo");
+        let sem = super::politica_sem_a_confianca_do_operador()?;
+        crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = Some(sem));
+        let cabeca = crate::autorizacao::ultimo_registro();
+        armar(tirar_a_confianca_de_quem_pede, 0);
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{caminho}"}}"#),
+        );
+        crate::fios::no_meio_do_nascimento_de_teste(None);
+        let nascendo = NASCENDO.load(SeqCst);
+        crate::log_info!(
+            "teste",
+            "contencao: a confianca no editor do codigo tirada no meio do nascimento de {}: {}",
+            nascendo,
+            r
+        );
+        if !ISOLOU.load(SeqCst) || nascendo == 0 {
+            return Err("o gancho nao tirou a confianca no editor no meio do nascimento");
+        }
+        nao_lancou_com(&r, "DENY_POLICY", Falta::NaoConfiado.motivo())?;
+        com_a_explicacao(&r, "DENY_PROVENANCE")?;
+        if crate::fios::na_tabela_de_teste(nascendo) {
+            return Err("a vaga do lancado que nao nasceu nao voltou");
+        }
+        so_a_recusa_do_user_run(
+            cabeca,
+            &caminho,
+            politica::Codigo::DenyPolicy,
+            None,
+            &nao_confiado(super::EDITOR_DO_CASO.1),
+        )
+    });
+    crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = None);
+    crate::fios::no_meio_do_nascimento_de_teste(None);
+    encerrar_os_encerraveis();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
+/// O achado 1 do adversario do lote A, no lancamento do kernel por conta
+/// propria, fora de um comando: a mesma pergunta, com a recusa gravada em
+/// nome do kernel. O sistema lanca o `encerravel` selado pelo editor do caso
+/// (`usuario::lancar_pelo_kernel`) — o papel `sistema` confia nele, e a
+/// conferencia passa —, e o gancho do meio do nascimento tira a confianca do
+/// sistema no editor. Recusado: quem lancou ouve `DENY_POLICY`, "o papel nao
+/// confia no editor"; a auditoria grava a recusa uma vez, em nome do
+/// kernel — `process.run`, o caminho e o motivo com o editor —, sem nenhum
+/// `processo N lancado`. Nada nasce, e a vaga volta.
+pub(super) fn contencao_a_confianca_no_editor_do_codigo_tirada_no_meio_do_lancamento_do_kernel_nao_lanca()
+-> Resultado {
+    use politica::Codigo;
+    use politica::procedencia::{Falta, nao_confiado};
+    let resultado = super::com_editores_do_caso(|| {
+        let caminho = alloc::format!("{}/encerravel-kernel", super::CODIGO_INSTALADO);
+        gravar_o_encerravel_selado(&caminho)?;
+        // O sistema sem a confianca no editor do caso; o operador e o
+        // administrador com ela.
+        let sem = super::politica_trocada(&[
+            (
+                "editores operador bancada",
+                "editores operador bancada caso",
+            ),
+            (
+                "editores administrador bancada",
+                "editores administrador bancada caso",
+            ),
+        ])?;
+        crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = Some(sem));
+        let cabeca = crate::autorizacao::ultimo_registro();
+        armar(tirar_a_confianca_de_quem_pede, 0);
+        let lancado = crate::usuario::lancar_pelo_kernel(
+            Some(&caminho),
+            crate::autorizacao::Autoridade::Sistema,
+        );
+        crate::fios::no_meio_do_nascimento_de_teste(None);
+        let nascendo = NASCENDO.load(SeqCst);
+        crate::log_info!(
+            "teste",
+            "contencao: o lancamento do kernel, com a confianca tirada no meio do nascimento de {}: {:?}",
+            nascendo,
+            lancado
+        );
+        if !ISOLOU.load(SeqCst) || nascendo == 0 {
+            return Err("o gancho nao tirou a confianca no editor no meio do nascimento");
+        }
+        if !matches!(
+            lancado,
+            Err(crate::usuario::NaoLancou::Recusado(Codigo::DenyPolicy, m))
+                if m == Falta::NaoConfiado.motivo()
+        ) {
+            return Err(
+                "o lancamento do kernel do codigo sem a confianca no editor nao foi recusado",
+            );
+        }
+        if crate::fios::na_tabela_de_teste(nascendo) {
+            return Err("a vaga do lancado que nao nasceu nao voltou");
+        }
+        let gravado = nao_confiado(super::EDITOR_DO_CASO.1);
+        let do_kernel = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run"
+                && ev.recurso == caminho
+                && ev.agente == "kernel"
+                && ev.codigo == Codigo::DenyPolicy
+                && ev.detalhe == gravado
+        });
+        let nascidos = registros_depois(cabeca, |ev| {
+            ev.metodo == "process.run" && ev.detalhe.contains(" lancado")
+        });
+        if do_kernel.len() != 1 || !nascidos.is_empty() {
+            crate::log_error!(
+                "teste",
+                "{} recusa(s) em nome do kernel, {} lancamento(s)",
+                do_kernel.len(),
+                nascidos.len()
+            );
+            return Err("a recusa do lancamento do kernel nao foi gravada em nome dele, so ela");
+        }
+        Ok(())
+    });
+    crate::arch::sem_interrupcoes(|| *POLITICA_DO_MEIO.lock() = None);
+    crate::fios::no_meio_do_nascimento_de_teste(None);
+    encerrar_os_encerraveis();
+    resultado
+}
+
+/// O arquivo que a verificacao do caso abaixo confere — e o caminho dele no
+/// armazem, como a verificacao o diz.
+const VERIFICADO: &str = "/armazem/compartilhado/lanca-na-verificacao.txt";
+const VERIFICADO_NO_ARMAZEM: &str = "compartilhado/lanca-na-verificacao.txt";
+
+/// O que os dois lancamentos de dentro do `fs.verify` ouviram — o do
+/// `user.run` e o do kernel —: `None`, nao tentado; `Ok`, o fio lancado;
+/// `Err`, o codigo e o motivo da recusa.
+type Ouvido = Option<Result<u64, (politica::Codigo, &'static str)>>;
+static NO_COMANDO_ERRADO: crate::trava::Mutex<[Ouvido; 2]> = crate::trava::Mutex::new([None, None]);
+
+/// Na verificacao do `fs.verify` — um comando que o gate decidiu para
+/// `fs.read`, e nao para `process.run` —, sem trava nenhuma na mao: lanca o
+/// `encerravel` pelo lancamento do `user.run` e pelo do kernel, uma vez, e
+/// guarda o que cada um ouviu.
+fn lancar_no_comando_errado(caminho: &str) {
+    use crate::usuario::NaoLancou;
+    if caminho != VERIFICADO_NO_ARMAZEM
+        || crate::arch::sem_interrupcoes(|| NO_COMANDO_ERRADO.lock()[0].is_some())
+    {
+        return;
+    }
+    let ouvido = |r: Result<u64, NaoLancou>| -> Ouvido {
+        Some(match r {
+            Ok(fio) => Ok(fio),
+            Err(NaoLancou::Recusado(c, m) | NaoLancou::PorQuemPede(c, m)) => Err((c, m)),
+            Err(NaoLancou::Fio(m)) => Err((politica::Codigo::Error, m)),
+            Err(NaoLancou::Codigo(_)) => Err((politica::Codigo::Error, "o codigo nao se leu")),
+        })
+    };
+    let programa = caminho_do_encerravel();
+    let do_comando = ouvido(crate::usuario::lancar_conferido(
+        Some(&programa),
+        crate::autorizacao::autoridade_atual(),
+    ));
+    let do_kernel = ouvido(crate::usuario::lancar_pelo_kernel(
+        Some(&programa),
+        crate::autorizacao::Autoridade::Sistema,
+    ));
+    crate::arch::sem_interrupcoes(|| *NO_COMANDO_ERRADO.lock() = [do_comando, do_kernel]);
+}
+
+/// O achado 6 do adversario do lote A: a ultima palavra do nascimento, num
+/// comando decidido, decidia o comando de novo pela permissao **dele** — e
+/// um comando que nao e o `user.run`, cujo handler chamasse o lancamento,
+/// passaria: o processo nasceria sem decisao nenhuma de `process.run`. O
+/// `fs.verify` do sistema e decidido pelo gate para `fs.read`, e a
+/// verificacao chama, sem trava na mao, o gancho da suite — o lugar de um
+/// handler que lancasse. Ali dentro, o lancamento do `user.run`
+/// (`usuario::lancar_conferido`) e o do kernel (`usuario::lancar_pelo_kernel`)
+/// sao recusados como fora de um comando autorizado (`ERROR`) — dentro de
+/// um comando o lancamento e dele, diga quem lanca o que disser —, cada
+/// recusa vai a auditoria como a execucao da decisao do `fs.verify`, e nada
+/// nasce. Sem a pergunta pela permissao, os dois lancavam com a autoridade
+/// do sistema.
+pub(super) fn contencao_o_lancamento_num_comando_que_nao_e_o_user_run_e_recusado() -> Resultado {
+    use politica::Codigo;
+    const FORA: (Codigo, &str) = (Codigo::Error, "fora de um comando autorizado");
+    let sistema = sistema_aqui();
+    let resultado = (|| -> Resultado {
+        super::diretorios_acima(VERIFICADO)?;
+        let r = super::fs_gravar(
+            sistema,
+            VERIFICADO,
+            super::versao_no_armazem(VERIFICADO),
+            "o arquivo que a verificacao confere",
+        );
+        if fs_numero(&r, "version").is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o arquivo do caso nao foi gravado");
+        }
+        crate::arch::sem_interrupcoes(|| *NO_COMANDO_ERRADO.lock() = [None, None]);
+        let livres = crate::fios::vagas_livres_de_teste();
+        let cabeca = crate::autorizacao::ultimo_registro();
+        crate::armazem::no_meio_da_verificacao_de_teste(Some(lancar_no_comando_errado));
+        let r = fs_pedir(
+            sistema,
+            "fs.verify",
+            &alloc::format!(r#"{{"path":"{VERIFICADO}"}}"#),
+        );
+        crate::armazem::no_meio_da_verificacao_de_teste(None);
+        let ouvidos = crate::arch::sem_interrupcoes(|| *NO_COMANDO_ERRADO.lock());
+        crate::log_info!(
+            "teste",
+            "contencao: os lancamentos dentro do fs.verify ouviram {:?}: {}",
+            ouvidos,
+            r
+        );
+        if super::decisao_do_envelope(&r) != "ALLOW" {
+            return Err("o fs.verify do caso nao foi decidido pelo gate");
+        }
+        for ouvido in ouvidos {
+            match ouvido {
+                Some(Err(recusa)) if recusa == FORA => {}
+                None => return Err("a verificacao nao chegou ao arquivo do caso"),
+                Some(Ok(_)) => {
+                    return Err("o lancamento num comando que nao e o user.run lancou um processo");
+                }
+                Some(Err(_)) => {
+                    return Err(
+                        "o lancamento num comando que nao e o user.run foi recusado por outro motivo",
+                    );
+                }
+            }
+        }
+        let programa = caminho_do_encerravel();
+        let recusas = registros_depois(cabeca, |ev| {
+            ev.metodo == "fs.verify"
+                && ev.recurso == programa
+                && ev.codigo == Codigo::Error
+                && ev
+                    .detalhe
+                    .contains("fora de um comando autorizado; decisao ")
+        });
+        let nascidos = registros_depois(cabeca, |ev| ev.detalhe.contains(" lancado"));
+        if recusas.len() != 2 || !nascidos.is_empty() {
+            crate::log_error!(
+                "teste",
+                "{} recusa(s) na execucao do fs.verify, {} lancamento(s)",
+                recusas.len(),
+                nascidos.len()
+            );
+            return Err(
+                "as recusas dos lancamentos nao foram gravadas como a execucao do fs.verify, so elas",
+            );
+        }
+        if esperar_cedendo(|| crate::fios::vagas_livres_de_teste() >= livres, 300).is_err() {
+            return Err("as vagas dos lancamentos recusados nao voltaram");
+        }
+        Ok(())
+    })();
+    crate::armazem::no_meio_da_verificacao_de_teste(None);
+    crate::arch::sem_interrupcoes(|| *NO_COMANDO_ERRADO.lock() = [None, None]);
+    encerrar_os_encerraveis();
     resultado
 }

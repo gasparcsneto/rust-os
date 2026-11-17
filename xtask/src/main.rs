@@ -3866,6 +3866,13 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
     // portas, o lançamento e o `executar`, que a usam.
     ("codigo::obter(", &["kernel/src/usuario/mod.rs"]),
     ("programa::carregar(", &["kernel/src/usuario/mod.rs"]),
+    // O lançamento do kernel por conta própria, com a autoridade do
+    // sistema: o boot o pede pelos dois lançamentos dele — o servidor de
+    // janelas e o Terminal, nomes protegidos abaixo —, que o chamam de
+    // dentro de `usuario/mod.rs`, sem o caminho. Com o caminho, só a suíte.
+    // Fora de um comando, a última palavra do nascimento o deixa sem
+    // decisão nenhuma (`autorizacao::reconfirmar_o_lancamento`).
+    ("usuario::lancar(", &[]),
     // Escrever no disco: só o journal de estado, o volume do armazém e a
     // atualização A/B, cada um pela sua janela — o journal na de estado, o
     // volume na dele, a atualização na do controle de boot e na do slot
@@ -6123,6 +6130,33 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
         "seguida_de",
         &["kernel/src/coordenacao.rs", "kernel/src/interpretador.rs"],
     ),
+    // O lançamento de um processo (ver
+    // `autorizacao::reconfirmar_o_lancamento`): o do `user.run`, que o
+    // nascimento decide de novo, só pelo handler dele; o do kernel por
+    // conta própria — que passa, fora de um comando, sem decisão nenhuma de
+    // `process.run` e com a autoridade que quem chama der —, só de dentro de
+    // `usuario/mod.rs`, e o boot o pede só pelos dois lançamentos dele, o
+    // servidor de janelas e o Terminal; e quem lança só se diz onde se
+    // define e onde se lança. Fora daqui, só a suíte (o achado 6 do
+    // adversário do lote A do #448).
+    (
+        "lancar_conferido",
+        &["kernel/src/agent/commands.rs", "kernel/src/usuario/mod.rs"],
+    ),
+    ("lancar_como", &["kernel/src/usuario/mod.rs"]),
+    ("lancar_pelo_kernel", &["kernel/src/usuario/mod.rs"]),
+    (
+        "lancar_o_servidor_de_janelas",
+        &["kernel/src/main.rs", "kernel/src/usuario/mod.rs"],
+    ),
+    (
+        "lancar_o_terminal",
+        &["kernel/src/main.rs", "kernel/src/usuario/mod.rs"],
+    ),
+    (
+        "Lancador",
+        &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
+    ),
 ];
 
 /// O texto de uma fonte Rust só com o código: os comentários — de linha e
@@ -6427,6 +6461,55 @@ mod testes_dos_nomes_protegidos {
         ] {
             assert!(tem_a_palavra(linha, "decisao_de_quem_pede"), "{linha}");
         }
+    }
+
+    /// Quem lança um processo: o `user.run` só pelo handler dele, o kernel
+    /// por conta própria só de dentro de `usuario/mod.rs`, o boot pelos dois
+    /// lançamentos dele, e o lançador só onde se define e onde se lança —
+    /// pela palavra, também num `use` que a traz sem o caminho; e o
+    /// lançamento do sistema com o caminho, só na suíte (o achado 6 do
+    /// adversário do lote A do #448).
+    #[test]
+    fn o_lancamento_so_nos_donos() {
+        let donos = |nome: &str| {
+            NOMES_PROTEGIDOS
+                .iter()
+                .find(|(n, _)| *n == nome)
+                .map(|(_, d)| d.to_vec())
+        };
+        let usuario = "kernel/src/usuario/mod.rs";
+        assert_eq!(
+            donos("lancar_conferido"),
+            Some(vec!["kernel/src/agent/commands.rs", usuario])
+        );
+        assert_eq!(donos("lancar_como"), Some(vec![usuario]));
+        assert_eq!(donos("lancar_pelo_kernel"), Some(vec![usuario]));
+        for boot in ["lancar_o_servidor_de_janelas", "lancar_o_terminal"] {
+            assert_eq!(donos(boot), Some(vec!["kernel/src/main.rs", usuario]));
+        }
+        assert_eq!(
+            donos("Lancador"),
+            Some(vec!["kernel/src/autorizacao.rs", usuario])
+        );
+        assert!(
+            super::CHAMADAS_PROTEGIDAS
+                .iter()
+                .any(|(c, d)| *c == "usuario::lancar(" && d.is_empty())
+        );
+        for linha in [
+            "use crate::autorizacao::Lancador::Kernel as K;",
+            "    lancar_por(caminho, autoridade, crate::autorizacao::Lancador::Kernel)",
+            "use crate::usuario::{lancar_pelo_kernel as l, NaoLancou};",
+        ] {
+            assert!(
+                tem_a_palavra(linha, "Lancador") || tem_a_palavra(linha, "lancar_pelo_kernel"),
+                "{linha}"
+            );
+        }
+        assert!(!tem_a_palavra(
+            "fn lancar_como_de_teste() {}",
+            "lancar_como"
+        ));
     }
 
     /// As formas que a conferência por texto da chamada com o caminho não

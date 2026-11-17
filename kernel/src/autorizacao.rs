@@ -2133,9 +2133,11 @@ pub fn alvo_decidido(texto: &str) -> bool {
 /// processo isolado, o agente suspenso, a credencial suspensa — não
 /// conclui. É a mesma pergunta do gate, sobre quem pediu. E o processo que
 /// pediu, se foi um, ainda pede: o que acabou, ou tem o fim pedido, é
-/// recusado como o isolado (`DENY_CONTAINED`, "processo isolado" — ver
-/// `contencao::PROCESSO_ISOLADO`). O `process.terminate` isola antes de
-/// pedir o fim, mas o isolamento de quem morreu sai na poda, e o teto de
+/// recusado com o código do isolado e o detalhe do que aconteceu
+/// (`DENY_CONTAINED`, "processo encerrado" — ver
+/// `contencao::PROCESSO_ENCERRADO`), antes da contenção: o encerrado
+/// isolado também ouve que foi encerrado. O `process.terminate` isola antes
+/// de pedir o fim, mas o isolamento de quem morreu sai na poda, e o teto de
 /// isolados pode nem tê-lo deixado entrar: sem esta pergunta, o pedido em
 /// curso de quem já foi encerrado concluía (ver `fios::encerrado`).
 ///
@@ -2206,9 +2208,9 @@ pub fn reconfirmar() -> Result<(), (Codigo, &'static str)> {
         _ => None,
     };
     // Quem pediu, se é um processo, ainda pede: vivo, e sem o fim pedido —
-    // o encerrado é o isolado que vai acabar.
+    // o encerrado é o isolado que vai acabar, e o detalhe diz que acabou.
     if processo.is_some_and(crate::fios::encerrado) {
-        return Err(crate::contencao::PROCESSO_ISOLADO);
+        return Err(crate::contencao::PROCESSO_ENCERRADO);
     }
     if let Some(recusa) = crate::contencao::recusa_de(processo, autoridade) {
         return Err(recusa);
@@ -3476,13 +3478,16 @@ pub fn autorizar_processo(permissao: Permissao, recurso: &str, metodo: &str) -> 
 /// adotou depois do ponto sem volta do `executar`, não mudam quem agiu.
 ///
 /// E a permissão e o recurso decididos, para a decisão ser feita de novo
-/// sobre eles, e não sobre outros — ver [`DecisaoDoProcesso::reconfirmar`].
+/// sobre eles, e não sobre outros; e o fio que pediu, para ela ser feita de
+/// novo só nele — ver [`DecisaoDoProcesso::reconfirmar_com_o_codigo`].
 pub struct DecisaoDoProcesso {
     codigo: Codigo,
     numero: u64,
     quem: Quem,
     permissao: Permissao,
     recurso: String,
+    /// O fio da chamada que o gate decidiu: o processo, dentro dela.
+    fio: u64,
 }
 
 impl DecisaoDoProcesso {
@@ -3498,29 +3503,72 @@ impl DecisaoDoProcesso {
         self.numero
     }
 
-    /// Decide de novo, agora, a chamada que o gate decidiu: a mesma conta
-    /// ([`conta_da_chamada`]), sobre a mesma permissão e o mesmo recurso,
-    /// com a autoridade e o programa do fio, o registro, a política, a
-    /// contenção e a confiança no editor **de agora**. É o [`reconfirmar`]
-    /// de uma chamada de sistema: ela não é um comando, e a decisão dela não
-    /// mora na vaga do fio, mas aqui — o `reconfirmar` não a vê.
+    /// Decide de novo, agora, a chamada que o gate decidiu, com o código que
+    /// ela vai rodar: a mesma conta ([`conta_da_chamada`]), sobre a mesma
+    /// permissão e o mesmo recurso, com a autoridade e o programa do fio, o
+    /// registro, a política, a contenção e a confiança no editor **de
+    /// agora**; e a confiança no editor do código novo, se ele é de fora da
+    /// imagem (`editor`), pela regra da conferência dele
+    /// (`usuario::codigo::obter`): [`confianca_no_editor`], com o papel de
+    /// quem chama. É o [`reconfirmar`] de uma chamada de sistema: ela não é
+    /// um comando, e a decisão dela não mora na vaga do fio, mas aqui — o
+    /// `reconfirmar` não a vê.
     ///
     /// É a última palavra do `executar` no ponto sem volta: o gate decide
     /// antes de o arquivo ser lido, e a leitura, a conferência do código e a
     /// preparação da imagem levam o tempo do arquivo — uma revogação, uma
     /// política nova ou uma contenção que chegue no meio não trocava a
-    /// imagem por isso (o F4 do adversário do AE-1). As recusas são as do
-    /// gate, com os mesmos códigos e motivos.
+    /// imagem por isso (o F4 do adversário do AE-1). A confiança no editor
+    /// da imagem nova também: a conferência a pergunta antes de preparar, e
+    /// um `policy.apply` que tira o editor do papel, ou o editor que sai do
+    /// registro, no meio, não parava a troca — o código de quem já não é
+    /// confiado entrava no processo, com os descritores dele.
+    ///
+    /// As perguntas, na ordem:
+    ///
+    /// - a decisão é desta chamada: o fio que pergunta é o que o gate
+    ///   decidiu, e o gate permitiu — senão, fora de uma decisão autorizada
+    ///   (`ERROR`, "fora de um comando autorizado"). Ela não se faz de novo
+    ///   por outro fio, nem uma recusa vira permissão por ter sido feita de
+    ///   novo depois;
+    /// - quem chama ainda pede: vivo, e sem o fim pedido — a pergunta do
+    ///   [`reconfirmar`] dos comandos (`DENY_CONTAINED`, "processo
+    ///   encerrado", ver `contencao::PROCESSO_ENCERRADO`). Com o teto de
+    ///   isolados cheio, o `process.terminate` só pede o fim, e o gate não
+    ///   recusa quem não foi isolado: sem ela, a troca acontecia, os fluxos
+    ///   da ponta acabavam com "o programa mudou", e o processo morria na
+    ///   volta sem rodar a imagem nova;
+    /// - a conta do gate, com as recusas dele;
+    /// - a confiança no editor do código novo: `DENY_POLICY`, com o motivo
+    ///   da falta e o editor (`politica::procedencia::Falta::motivo`, e
+    ///   `politica::procedencia::nao_confiado`) — como o gate grava o editor
+    ///   do programa de quem pede, e como a conferência grava o do código
+    ///   novo no começo da mesma chamada. O processo ouve o `NEGADO` da
+    ///   decisão de novo, como para as outras recusas dela.
     ///
     /// Não grava nada: a recusa é o resultado da execução da decisão, e
     /// quem chama a grava assim ([`auditar_execucao_do_processo`]).
-    pub fn reconfirmar(&self) -> Result<(), (Codigo, Cow<'static, str>)> {
-        let (_, codigo, detalhe) = conta_da_chamada(self.permissao, &self.recurso);
-        if codigo.permite() {
-            Ok(())
-        } else {
-            Err((codigo, detalhe))
+    pub fn reconfirmar_com_o_codigo(
+        &self,
+        editor: Option<&[u8; 32]>,
+    ) -> Result<(), (Codigo, Cow<'static, str>)> {
+        if crate::fios::id_atual() != self.fio || !self.codigo.permite() {
+            return Err((FORA_DE_UM_COMANDO.0, Cow::Borrowed(FORA_DE_UM_COMANDO.1)));
         }
+        if crate::fios::encerrado(self.fio) {
+            let (codigo, motivo) = crate::contencao::PROCESSO_ENCERRADO;
+            return Err((codigo, Cow::Borrowed(motivo)));
+        }
+        let (quem, codigo, detalhe) = conta_da_chamada(self.permissao, &self.recurso);
+        if !codigo.permite() {
+            return Err((codigo, detalhe));
+        }
+        if let Some(chave) = editor
+            && let Err((_, motivo)) = confianca_no_editor(quem.papel.as_deref(), chave)
+        {
+            return Err((Codigo::DenyPolicy, Cow::Owned(motivo)));
+        }
+        Ok(())
     }
 }
 
@@ -3543,7 +3591,7 @@ fn quem_da_chamada() -> (Quem, u64, Programa) {
 /// [`autorizar_processo`], com a decisão inteira — o número do registro e
 /// quem o gate decidiu —, para quem grava depois o que a execução fez dela,
 /// como `executar` com o código que não confere, e para quem a decide de
-/// novo antes de concluir ([`DecisaoDoProcesso::reconfirmar`]).
+/// novo antes de concluir ([`DecisaoDoProcesso::reconfirmar_com_o_codigo`]).
 pub fn autorizar_processo_com_decisao(
     permissao: Permissao,
     recurso: &str,
@@ -3557,14 +3605,15 @@ pub fn autorizar_processo_com_decisao(
         quem,
         permissao,
         recurso: recurso.to_string(),
+        fio: crate::fios::id_atual(),
     }
 }
 
 /// A conta do gate sobre uma chamada de sistema do fio atual: quem pede —
 /// ver [`quem_da_chamada`] —, o código e o detalhe, sem gravar nada. Uma
 /// só, para a decisão ([`autorizar_processo_com_decisao`]) e para a decisão
-/// de novo ([`DecisaoDoProcesso::reconfirmar`]): as mesmas perguntas, na
-/// mesma ordem, com as mesmas recusas.
+/// de novo ([`DecisaoDoProcesso::reconfirmar_com_o_codigo`]): as mesmas
+/// perguntas, na mesma ordem, com as mesmas recusas.
 fn conta_da_chamada(permissao: Permissao, recurso: &str) -> (Quem, Codigo, Cow<'static, str>) {
     let (quem, id, programa) = quem_da_chamada();
     let autoridade = crate::fios::autoridade_atual();
@@ -3620,6 +3669,7 @@ pub fn decisao_do_processo_de_teste(numero: u64) -> DecisaoDoProcesso {
         quem: quem_da_chamada().0,
         permissao: Permissao::ProcessRun,
         recurso: String::new(),
+        fio: crate::fios::id_atual(),
     }
 }
 
@@ -4245,14 +4295,15 @@ fn perguntar_por_quem_pede(
         return Err(REVOGACOES_DESCONHECIDAS);
     }
     // Quem pede, se é um processo, ainda pede: o que acabou, ou tem o fim
-    // pedido, é o isolado que vai acabar — a mesma recusa da contenção,
-    // logo abaixo, também sem o isolamento que a poda tira do morto, ou
-    // que o teto de isolados não deixou entrar (ver `fios::encerrado`). Um
-    // fio do kernel não é processo: o titular pede por ele.
+    // pedido, é o isolado que vai acabar — o código da contenção, logo
+    // abaixo, com o detalhe do que aconteceu, também sem o isolamento que a
+    // poda tira do morto, ou que o teto de isolados não deixou entrar (ver
+    // `fios::encerrado` e `contencao::PROCESSO_ENCERRADO`). Um fio do kernel
+    // não é processo: o titular pede por ele.
     if programa != Programa::Kernel && crate::fios::encerrado(fio) {
-        let (codigo, motivo) = crate::contencao::PROCESSO_ISOLADO;
+        let (codigo, motivo) = crate::contencao::PROCESSO_ENCERRADO;
         auditar(&quem, metodo, "", codigo, &[], motivo);
-        return Err(crate::contencao::PROCESSO_ISOLADO);
+        return Err(crate::contencao::PROCESSO_ENCERRADO);
     }
     // Quem está contido não lança nem bifurca: o filho de um processo
     // isolado nasceria livre.
@@ -4325,6 +4376,10 @@ pub fn reconfirmar_bifurcacao(autoridade: Autoridade) -> Result<(), (Codigo, &'s
 
 /// Quem lança um processo, para a última palavra do nascimento — ver
 /// [`reconfirmar_o_lancamento`] e `usuario::lancar_conferido`.
+///
+/// Só dois arquivos o nomeiam — este e `usuario/mod.rs`, que lança —, e o
+/// `xtask` confere: [`Lancador::Kernel`], que passa fora de um comando sem
+/// decisão nenhuma, não se diz de outro lugar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lancador {
     /// O comando em execução neste fio — o `user.run`, pedido pelo canal,
@@ -4340,6 +4395,17 @@ pub enum Lancador {
 /// o `user.run` —, decidido de novo ([`reconfirmar`]), antes de o processo
 /// poder rodar (ver `usuario::lancar_conferido`).
 ///
+/// # Só o comando decidido para `process.run`
+///
+/// O comando em volta lança só se o gate o decidiu para `process.run` — a
+/// permissão do `user.run`, e de nenhum outro comando. Outro comando
+/// decidido — um `fs.read`, uma operação por prova —, cujo handler
+/// chamasse o lançamento, seria decidido de novo pela permissão **dele**, e
+/// passaria: o processo nasceria sem decisão nenhuma de `process.run`.
+/// Recusado como fora de um comando autorizado. Vale para os dois
+/// lançadores: dentro de um comando, o lançamento é dele, diga quem lança o
+/// que disser.
+///
 /// # Sem decisão, recusa
 ///
 /// O que não se sabe não passa: fora de um comando decidido, a recusa de
@@ -4353,7 +4419,7 @@ pub enum Lancador {
 ///   lançamento é do comando, e o comando é decidido de novo, diga quem
 ///   lança o que disser. Fora da suíte, só o boot diz isso
 ///   (`usuario::lancar_o_servidor_de_janelas` e `usuario::lancar_o_terminal`,
-///   pelo `usuario::lancar`);
+///   pelo `usuario::lancar`) — o `xtask` confere quem chama cada um;
 /// - a suíte que chama o handler do `user.run` direto, sem o gate: o
 ///   comando que ela monta não tem decisão (`como_comando_de_teste`,
 ///   `como_canal_de_teste`), e só ela o monta. Fora da compilação da
@@ -4362,10 +4428,11 @@ pub enum Lancador {
 /// Não grava nada, como [`reconfirmar`]: quem chama grava a recusa como a
 /// execução do comando — ou, fora de um, em nome do kernel.
 pub fn reconfirmar_o_lancamento(lancador: Lancador) -> Result<(), (Codigo, &'static str)> {
-    match (do_comando_deste_fio(|c| c.decidido.is_some()), lancador) {
-        (Some(true), _) => reconfirmar(),
+    let decidido = do_comando_deste_fio(|c| c.decidido.as_ref().map(|d| d.permissao));
+    match (decidido, lancador) {
+        (Some(Some(Some(Permissao::ProcessRun))), _) => reconfirmar(),
         #[cfg(feature = "modo-teste")]
-        (Some(false), _) => Ok(()),
+        (Some(None), _) => Ok(()),
         (None, Lancador::Kernel) => Ok(()),
         _ => Err(FORA_DE_UM_COMANDO),
     }

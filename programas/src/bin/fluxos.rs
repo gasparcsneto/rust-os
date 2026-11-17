@@ -20,7 +20,9 @@
 //!   `process.run`) para o `ola` do disco — [`OLA`] —, que sai com o mesmo
 //!   [`CODIGO`]: os fluxos dele acabam. Com `b` 1, para um programa grande
 //!   do disco — [`GRANDE`], uns 850 KiB no x86 —, que a suíte encerra: a
-//!   medida da troca sob escritas sem parar.
+//!   medida da troca sob escritas sem parar. Com `b` 2, para o código de
+//!   fora da imagem que a suíte gravou no armazém — [`SELADO`], o `ola`
+//!   selado por um editor —: a confiança no editor tirada no meio da troca.
 //! - [`BIFURCAR`]: duplica o processo; o pai diz `fluxos: filho <id>`, e o
 //!   filho escuta o canal dele.
 //! - [`COLHER`] o filho `b`: espera ele (`esperar`) e diz `fluxos: colhi
@@ -82,6 +84,11 @@ const OLA: &str = "/programas/aarch64/ola";
 const GRANDE: &str = "/programas/x86_64/livro";
 #[cfg(target_arch = "aarch64")]
 const GRANDE: &str = "/programas/aarch64/livro";
+
+/// O código selado da troca: o `ola` que a suíte sela com o editor do caso
+/// e grava no armazém, onde mora o código instalado — fora da imagem, ele
+/// só roda com o selo de um editor em que o papel de quem troca confia.
+const SELADO: &str = "/armazem/compartilhado/codigo/ola-selado";
 
 /// Quanto cada pedido espera, no máximo: o teto do `wait`.
 const ESPERA_MS: u64 = 10_000;
@@ -253,7 +260,11 @@ fn escutar(meu: &str) -> i64 {
                 RECEBER => receber(meu, e.b),
                 TROCAR => {
                     escreverln!("fluxos: trocando");
-                    let r = sistema::executar(if e.b == 1 { GRANDE } else { OLA });
+                    let r = sistema::executar(match e.b {
+                        1 => GRANDE,
+                        2 => SELADO,
+                        _ => OLA,
+                    });
                     escreverln!("fluxos: trocar devolveu {}", r);
                 }
                 BIFURCAR => match sistema::bifurcar() {

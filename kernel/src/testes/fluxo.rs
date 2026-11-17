@@ -1734,10 +1734,19 @@ type Registro = (u64, politica::auditoria::Evento);
 /// gravados depois de `antes`: as decisões do gate, e as execuções delas —
 /// as que citam a decisão no fim do detalhe.
 fn registros_de_troca(antes: u64) -> (Vec<Registro>, Vec<Registro>) {
-    let ola = format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
-    registros_depois(antes, |e| e.metodo == "process.exec" && e.recurso == ola)
-        .into_iter()
-        .partition(|(_, e)| !e.detalhe.contains("; decisao "))
+    registros_de_troca_para(
+        antes,
+        &format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS),
+    )
+}
+
+/// [`registros_de_troca`] para outra imagem, de `caminho`.
+fn registros_de_troca_para(antes: u64, caminho: &str) -> (Vec<Registro>, Vec<Registro>) {
+    registros_depois(antes, |e| {
+        e.metodo == "process.exec" && e.recurso == caminho
+    })
+    .into_iter()
+    .partition(|(_, e)| !e.detalhe.contains("; decisao "))
 }
 
 /// As decisões do gate sobre o `process.exec` do `ola` gravadas depois de

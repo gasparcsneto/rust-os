@@ -31,6 +31,18 @@
 //! depois lê: conferir um selo não é motivo para ler o que o papel não
 //! alcança. A recusa daqui é a execução recusando o que o gate deixou, e
 //! vai para a auditoria como tal, com a decisão — ver quem chama.
+//!
+//! # E de novo, onde a janela acaba
+//!
+//! O selo e os bytes não mudam depois de conferidos: são os que se
+//! carregam. A confiança no editor muda — a política, o registro de
+//! editores, o papel de quem lança —, e entre esta conferência e o código
+//! poder rodar vão a preparação da imagem e a pilha. Por isso quem chama a
+//! pergunta de novo, pela mesma regra — [`crate::autorizacao::confianca_no_editor`],
+//! com o papel de agora —, no último instante: no ponto sem volta do
+//! `executar` (`autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo`)
+//! e na última palavra do nascimento de um lançamento (`super::lancar_conferido`
+//! e `super::lancar_pelo_kernel`).
 
 use alloc::string::String;
 use alloc::vec::Vec;

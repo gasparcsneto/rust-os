@@ -1340,9 +1340,16 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// do adversário do AE-1). Agora, imediatamente antes de trocar, a decisão
 /// é feita de novo — a mesma conta do gate, sobre a mesma permissão e o
 /// mesmo caminho, com o registro, a política, a contenção e a confiança no
-/// editor de agora ([`crate::autorizacao::DecisaoDoProcesso::reconfirmar`]).
-/// Recusada, nada se troca: a preparada sai, o processo segue com a imagem
-/// dele, e ouve [`erro::NEGADO`], o mesmo do gate no começo da chamada.
+/// editor de agora
+/// ([`crate::autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo`]) —,
+/// com o que mais mudou no meio: se o processo ainda pede — o fim pedido
+/// sem o isolamento, com o teto de isolados cheio, que o gate não vê —, e
+/// a confiança no editor da imagem nova, que a conferência do código
+/// perguntou antes de preparar, pela mesma regra dela. Recusada, nada se
+/// troca: a preparada sai, o processo segue com a imagem dele — ou, com o
+/// fim pedido, morre na volta da chamada, sem a troca e sem o fim dos
+/// fluxos por ela —, e ouve [`erro::NEGADO`], o mesmo do gate no começo da
+/// chamada.
 ///
 /// Quem é ponta de fluxo decide de novo com a ordem das gravações na mão,
 /// dentro da mesma tomada da troca: a revogação e a política nova, que
@@ -1366,11 +1373,14 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 /// - a ordem que foi para outro fio **depois** de decidida (`CONFLICT`,
 ///   "adiada");
 /// - a decisão feita de novo no ponto sem volta, recusada (o código e o
-///   motivo da recusa, os do gate);
+///   motivo da recusa: os do gate; `DENY_CONTAINED`, "processo encerrado",
+///   do fim pedido no meio; ou `DENY_POLICY`, com o motivo da falta e o
+///   editor, da confiança na imagem nova tirada no meio);
 /// - a imagem nova que não se mapeia **depois** do ponto sem volta
 ///   (`ERROR`, com o motivo).
 ///
-/// Nos cinco primeiros o processo segue intacto. A volta adiada não muda
+/// Nos cinco primeiros o processo segue intacto — o que tem o fim pedido
+/// morre na volta da chamada, com a imagem dele. A volta adiada não muda
 /// nada — a seguinte decide de novo, com a política de então. No último não
 /// há para onde voltar: os fluxos de quem era ponta já acabaram na troca
 /// (`o programa mudou`), o registro vai em nome de quem o gate decidiu — o
@@ -1554,16 +1564,19 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // vazio — os segmentos são mapeados depois da troca —, e que nunca
         // esteve ativo; largá-lo não tem o tamanho de nada que o processo
         // mapeou nem que a imagem pede.
-        match crate::persistencia::em_ordem_sem_esperar(|| match decisao.reconfirmar() {
-            Ok(()) => Ok(trocar_a_imagem(preparada, fio, true)),
-            Err(recusa) => {
-                drop(preparada);
-                Err(recusa)
+        match crate::persistencia::em_ordem_sem_esperar(|| {
+            match decisao.reconfirmar_com_o_codigo(editor.as_ref()) {
+                Ok(()) => Ok(trocar_a_imagem(preparada, fio, true)),
+                Err(recusa) => {
+                    drop(preparada);
+                    Err(recusa)
+                }
             }
         }) {
             Some(Ok(trocada)) => trocada,
             // A decisão de novo recusou, com a ordem na mão: a revogação, a
-            // política nova ou a contenção chegaram antes. O processo segue
+            // política nova, a contenção, o fim pedido ou a confiança no
+            // editor da imagem nova tirada chegaram antes. O processo segue
             // intacto.
             Some(Err((codigo, motivo))) => {
                 return recusar_a_troca(&decisao, &caminho, codigo, &motivo);
@@ -1588,7 +1601,7 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // Sem a ordem: quem não é ponta não grava nada na troca, e a ordem
         // não se espera aqui. A decisão de novo estreita a janela à troca,
         // e não a fecha — ver o cabeçalho.
-        if let Err((codigo, motivo)) = decisao.reconfirmar() {
+        if let Err((codigo, motivo)) = decisao.reconfirmar_com_o_codigo(editor.as_ref()) {
             drop(preparada);
             return recusar_a_troca(&decisao, &caminho, codigo, &motivo);
         }
@@ -1944,16 +1957,31 @@ pub enum NaoLancou {
     /// escalonamento congelado depois de uma falha fatal. Não é recusa de
     /// ninguém.
     Fio(&'static str),
-    /// O gate recusou: o código e o motivo, já gravados. Nas perguntas
-    /// sobre quem pede o processo, antes de o código ser lido — o journal
-    /// recusado, quem pede encerrado ou contido, o editor em quem o papel
-    /// não confia, o papel que falta, a cota esgotada
+    /// O gate recusou, na última palavra do nascimento: o código e o
+    /// motivo, já gravados como a execução do comando — ou, fora de um, em
+    /// nome do kernel. O comando decidido de novo — quem pediu foi contido,
+    /// saiu ou foi revogado no meio, ou a política mudou —, ou a confiança
+    /// no editor do código que vai rodar, perguntada de novo e tirada no
+    /// meio. Ver [`lancar_conferido`].
+    Recusado(politica::Codigo, &'static str),
+    /// O gate recusou nas perguntas sobre quem pede o processo, e não sobre
+    /// o comando: o código e o motivo, já gravados. Antes de o código ser
+    /// lido — o journal recusado, quem pede encerrado ou contido, o editor
+    /// em quem o papel não confia, o papel que falta, a cota esgotada
     /// ([`crate::autorizacao::permitir_processo`]) —; na cota, contada de
     /// novo ao reservar a vaga ([`crate::fios::COTA_ESGOTADA`]); ou na
-    /// última palavra do nascimento, o comando decidido de novo — quem pediu
-    /// foi contido, saiu ou foi revogado no meio, ou a política mudou —,
-    /// gravada como a execução do comando. Ver [`lancar_conferido`].
-    Recusado(politica::Codigo, &'static str),
+    /// última palavra, quem pediu acabou ou tem o fim pedido
+    /// ([`crate::contencao::PROCESSO_ENCERRADO`]).
+    ///
+    /// À parte de [`NaoLancou::Recusado`] porque quem responde não as
+    /// explica: a explicação de uma recusa depois do gate lê a decisão do
+    /// comando — a permissão e o papel com que o gate o decidiu
+    /// (`autorizacao::recusa_da_execucao`) —, e estas não são ela. A cota
+    /// esgotada sairia como "o seu papel não permite `process.run`", que é
+    /// falso; a sessão que acabou, com o papel de quando o gate decidiu; o
+    /// encerrado, com "um administrador pode liberá-la". O código e o motivo
+    /// são os de verdade, e bastam.
+    PorQuemPede(politica::Codigo, &'static str),
 }
 
 impl NaoLancou {
@@ -1961,7 +1989,7 @@ impl NaoLancou {
     pub fn motivo(&self) -> &str {
         match self {
             NaoLancou::Codigo(r) => r.motivo(),
-            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) => m,
+            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) => m,
         }
     }
 
@@ -1971,7 +1999,7 @@ impl NaoLancou {
         match self {
             NaoLancou::Codigo(codigo::Recusa::Leitura(e)) => e.motivo(),
             NaoLancou::Codigo(codigo::Recusa::Procedencia(f, _)) => f.motivo(),
-            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) => m,
+            NaoLancou::Fio(m) | NaoLancou::Recusado(_, m) | NaoLancou::PorQuemPede(_, m) => m,
         }
     }
 }
@@ -1987,8 +2015,8 @@ struct Carga {
 /// de novo no nascimento ([`crate::autorizacao::Lancador::Comando`]). Com o
 /// motivo inteiro da recusa — o código de fora da imagem sem selo, com o
 /// selo que não confere, de um editor em que o papel não confia —, e o
-/// código e o motivo de cada recusa do gate ([`NaoLancou::Recusado`]), para
-/// quem responde a um agente.
+/// código e o motivo de cada recusa do gate ([`NaoLancou::Recusado`] e
+/// [`NaoLancou::PorQuemPede`]), para quem responde a um agente.
 ///
 /// Fora de um comando decidido, a última palavra recusa: o kernel que lança
 /// por conta própria usa [`lancar_pelo_kernel`].
@@ -2054,12 +2082,13 @@ fn lancar_por(
     // processos do papel de quem lança: contada antes de nascer, e de novo
     // ao nascer — ver `fios::criar_processo`. A recusa já está na
     // auditoria, e quem pediu ouve o código e o motivo dela — a cota, a
-    // contenção, o editor, o papel —, e não um texto só para todas.
+    // contenção, o editor, o papel —, e não um texto só para todas; sem a
+    // explicação do comando, que não é ela (ver `NaoLancou::PorQuemPede`).
     #[cfg(feature = "modo-teste")]
     crate::autorizacao::gancho_do_gate_do_lancamento();
     let cota = match crate::autorizacao::permitir_processo(autoridade, "process.run") {
         Ok(cota) => cota,
-        Err((codigo, motivo)) => return Err(NaoLancou::Recusado(codigo, motivo)),
+        Err((codigo, motivo)) => return Err(NaoLancou::PorQuemPede(codigo, motivo)),
     };
 
     // O código, lido e conferido antes de o fio nascer.
@@ -2118,6 +2147,15 @@ fn lancar_por(
     // um comando: o servidor de janelas e o Terminal, no boot; a suíte, que
     // lança direto (ver `autorizacao::reconfirmar_o_lancamento`).
     //
+    // E a confiança no editor do código que vai rodar, se ele é de fora da
+    // imagem: a conferência a perguntou antes de ler a pilha, e um
+    // `policy.apply` que tira o editor do papel, ou o editor que sai do
+    // registro, no meio, não parava o nascimento. A mesma regra da
+    // conferência (`codigo::obter`): `autorizacao::confianca_no_editor`,
+    // com o papel de quem lança, agora. Recusada, `DENY_POLICY`: a
+    // auditoria leva o motivo com o editor, como a conferência o grava; quem
+    // pediu ouve o motivo da falta, como nas perguntas sobre quem pede.
+    //
     // Sem a ordem das gravações, que os commits tomam para decidir de novo:
     // o nascimento não grava nada no journal, e a revogação ou a contenção
     // que chega depois desta pergunta acha o processo já nascendo, como um
@@ -2129,13 +2167,27 @@ fn lancar_por(
     // fora da imagem.
     let recurso = caminho.unwrap_or("<exemplo embutido>");
     let recusa = core::cell::Cell::new(None);
+    let recusar = |codigo: politica::Codigo,
+                   gravado: &str,
+                   ouvido: &'static str|
+     -> Result<(), &'static str> {
+        if crate::autorizacao::auditar_execucao(recurso, codigo, gravado) == 0 {
+            crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, gravado);
+        }
+        recusa.set(Some((codigo, ouvido)));
+        Err(ouvido)
+    };
     let nasce = |id: crate::fios::IdFio| {
         if let Err((codigo, motivo)) = crate::autorizacao::reconfirmar_o_lancamento(lancador) {
-            if crate::autorizacao::auditar_execucao(recurso, codigo, motivo) == 0 {
-                crate::autorizacao::auditar_do_kernel("process.run", recurso, codigo, motivo);
+            return recusar(codigo, motivo, motivo);
+        }
+        if let Some(s) = &selo {
+            let papel = crate::autorizacao::papel_da_autoridade(autoridade);
+            if let Err((falta, motivo)) =
+                crate::autorizacao::confianca_no_editor(papel.as_deref(), &s.editor)
+            {
+                return recusar(politica::Codigo::DenyPolicy, &motivo, falta.motivo());
             }
-            recusa.set(Some((codigo, motivo)));
-            return Err(motivo);
         }
         crate::autorizacao::auditar_nascimento(
             recurso,
@@ -2176,13 +2228,19 @@ fn lancar_por(
                 drop(unsafe { alloc::boxed::Box::from_raw(argumento as *mut Carga) });
             }
             // A recusa da cota no nascimento e a da última palavra, já
-            // gravadas: quem pediu ouve o código delas.
+            // gravadas: quem pediu ouve o código delas. A cota e quem pediu
+            // que acabou são perguntas sobre quem pede, e não sobre o
+            // comando: sem a explicação dele (ver `NaoLancou::PorQuemPede`).
             match (nao, recusa.get(), pela_cota) {
                 (crate::fios::NaoNasceu::Cota(_), _, Some(codigo)) => {
-                    Err(NaoLancou::Recusado(codigo, crate::fios::COTA_ESGOTADA))
+                    Err(NaoLancou::PorQuemPede(codigo, crate::fios::COTA_ESGOTADA))
                 }
                 (crate::fios::NaoNasceu::Recusado(_), Some((codigo, motivo)), _) => {
-                    Err(NaoLancou::Recusado(codigo, motivo))
+                    if (codigo, motivo) == crate::contencao::PROCESSO_ENCERRADO {
+                        Err(NaoLancou::PorQuemPede(codigo, motivo))
+                    } else {
+                        Err(NaoLancou::Recusado(codigo, motivo))
+                    }
                 }
                 _ => Err(NaoLancou::Fio(nao.motivo())),
             }

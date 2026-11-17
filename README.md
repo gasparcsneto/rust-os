@@ -237,7 +237,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando — quem pede encerrado ou contido, o editor, o papel, a cota, o comando decidido de novo no nascimento —, `launched: false` com o `code` e o `error` da recusa, e a explicação |
+| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — encerrado ou contido, o editor, o papel, a cota —, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -419,8 +419,8 @@ kernel/src/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
-│   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova ou o processo isolado de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, com quem é ponta de fluxo e com quem não é; e, sem mudança no meio, a troca de sempre
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
+│   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -1410,7 +1410,8 @@ não compila.
   a leitura de uma tecla — vale como decidida no gate: ela acontece numa
   chamada, e uma revogação que chega durante ela vale como chegada logo
   depois. A troca de imagem (`executar`) é decidida de novo no ponto sem
-  volta: quem é ponta de fluxo, com a ordem na mão, tomada sem esperar —
+  volta — com a confiança no editor da imagem nova e o fim pedido de quem
+  chama —: quem é ponta de fluxo, com a ordem na mão, tomada sem esperar —
   vê a revogação ou vem antes dela inteira —; quem não é, sem a ordem, que
   dentro de uma chamada de sistema não se espera: a janela fica estreitada
   à troca, e não fechada (ver *Onde se confere*, em [O código de fora da
@@ -5601,9 +5602,11 @@ registro de cada uma no ponto em que nasceu.
   concluía, e o `user.run` dele lançava. Agora a reconfirmação e as
   perguntas sobre quem pede um processo — no gate e na última palavra do
   `fork` e do `user.run` — perguntam também se ele acabou ou tem o fim
-  pedido (`fios::encerrado`), e recusam como o isolado: `DENY_CONTAINED`,
-  "processo isolado" (`contencao::PROCESSO_ISOLADO`) — o encerrado é o
-  isolado que vai acabar, e o par é o que o gate já usa. Na suíte, o
+  pedido (`fios::encerrado`), e recusam com o código do isolado —
+  `DENY_CONTAINED`: o encerrado é o isolado que vai acabar, e o código é o
+  que o gate já usa — e o detalhe do que aconteceu, "processo encerrado"
+  (`contencao::PROCESSO_ENCERRADO`; até o lote A2, "processo isolado"
+  também para quem não tinha sido isolado — ver abaixo). Na suíte, o
   número de um fio que o escalonador nunca deu — o processo de mentira dos
   casos que pedem como um processo sem lançar um programa — não é de um
   processo que acabou; fora dela, um número assim não chega à pergunta, e
@@ -5634,10 +5637,11 @@ registro de cada uma no ponto em que nasceu.
   (e) o `user.run` recusado nas perguntas do gate sobre quem pede — a
   contenção, o editor, o papel, a cota — respondia "a cota de processos do
   papel de quem lanca esta esgotada", sem o código, qualquer que fosse a
-  recusa. Agora responde o código e o motivo da recusa de verdade, com a
-  explicação, como a última palavra (`usuario::NaoLancou::Recusado`); a
-  cota — também a contada de novo no nascimento — responde `DENY_POLICY`
-  com o texto de sempre, e a contagem fica na auditoria.
+  recusa. Agora responde o código e o motivo da recusa de verdade
+  (`usuario::NaoLancou::PorQuemPede`) — sem a explicação do comando desde
+  o lote A2, ver abaixo —; a cota — também a contada de novo no
+  nascimento — responde `DENY_POLICY` com o texto de sempre, e a contagem
+  fica na auditoria.
   E as lacunas de cobertura — o editor recusado no nascimento do `fork`, e
   a chave revogada e a política nova no do `user.run` — ganharam casos. Os
   casos: `contencao: o encerrado sem o isolamento no meio do user.run nao
@@ -5651,6 +5655,103 @@ registro de cada uma no ponto em que nasceu.
   gancho de antes das perguntas, e a cota) e `contencao: o desconhecido na
   ultima palavra e recusado` (ver [As mutações do ponto sem volta e de
   quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+  E o adversário só de leitura do lote A do #448 (o F4 e as correções
+  acima, no `869dc08`) achou sete pontos, feitos no lote A2, um
+  incremento [B] de 17 de novembro de 2026 — as mesmas perguntas do gate,
+  refeitas onde a janela acaba, e o texto do detalhe de uma recusa;
+  nenhuma regra nova, nenhuma autoridade, e nada novo na auditoria além do
+  detalhe:
+  (f) a confiança no editor da imagem nova, no ponto sem volta do `exec`:
+  a conferência do código a pergunta antes de preparar a imagem — o
+  BLAKE2s, o ELF, o espaço novo: milissegundos numa imagem grande —, e a
+  decisão de novo só perguntava pelo editor do programa de quem chama, a
+  imagem antiga. Um `policy.apply` que tirasse o editor do papel, ou o
+  editor que saísse do registro, nesse meio, não parava a troca: o código
+  de quem já não era confiado entrava no processo, com os descritores
+  dele. A decisão de novo pergunta também a confiança no editor da imagem
+  nova, pela regra da conferência
+  (`autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo`), nos dois
+  ramos, com e sem a ponta; e o nascimento do `user.run` — e o do kernel
+  fora de um comando — também, na última palavra. Recusado, `DENY_POLICY`
+  com o motivo da falta e o editor na auditoria, como a execução da
+  decisão (ou em nome do kernel); o `executar` ouve `NEGADO`, e quem pediu
+  o `user.run`, o motivo da falta, com a explicação da procedência;
+  (g) o `exec` de quem tem o fim pedido sem o isolamento — o teto de
+  isolados cheio — trocava a imagem: a decisão de novo não perguntava
+  `fios::encerrado`, os fluxos da ponta acabavam com "o programa mudou", e
+  o processo morria na volta sem rodar a imagem nova. Ela pergunta, como a
+  reconfirmação dos comandos: nada trocado, `DENY_CONTAINED`, "processo
+  encerrado", e o processo morre na volta da chamada;
+  (h) o detalhe da recusa de quem está encerrado: o lote A gravava
+  `DENY_CONTAINED`, "processo isolado", também para o processo morto ou
+  com o fim pedido que não estava isolado — o registro dizia o que não
+  aconteceu. Agora, onde a recusa vem de `fios::encerrado` — a
+  reconfirmação, as perguntas sobre quem pede um processo, a decisão de
+  novo do `exec` —, o detalhe é "processo encerrado"
+  (`contencao::PROCESSO_ENCERRADO`), com o mesmo código; e a pergunta vem
+  antes da contenção, e o encerrado isolado também ouve que foi
+  encerrado. O código é o contrato; o detalhe é texto (o `detail` do
+  `docs/SDK.md`);
+  (i) a rodada da ponta que passava vazia, nos casos `troca:`: quando a
+  volta pausada era adiada — `CONFLICT`, o coletor com a ordem —, a
+  decisão de novo não rodava, e o caso aceitava a recusa do gate na volta
+  seguinte; a mutação que tira a decisão de novo do ramo da ponta
+  sobrevivia em toda rodada que caía nesse braço. O braço adiado não conta
+  mais: a rodada se repete, com processos novos, até quatro vezes, e o
+  caso reprova se nenhuma passou pela decisão de novo;
+  (j) o `explain` das recusas sobre quem pede no `user.run`: a explicação
+  de uma recusa depois do gate lê a decisão do comando — o papel e a
+  permissão com que o gate o decidiu —, e as perguntas sobre quem pede não
+  são ela: a cota esgotada (`DENY_POLICY`, sem `Falta`) saía "Seu papel
+  (operador) nao permite process.run", o que é falso; a sessão que acabou,
+  com o papel de quando o gate decidiu; o encerrado, com "um
+  administrador pode libera-la". Das duas correções possíveis — sem
+  explicação, como antes do lote A, ou uma explicação do estado de agora
+  —, a escolhida é a primeira, a mais simples que é certa: a segunda pedia
+  razões novas na taxonomia da explicação (a cota de processos que diz
+  esperar e repetir, o encerrado sem remédio), que é a de
+  `docs/USABILIDADE.md`. Essas recusas respondem o código e o motivo de
+  verdade, sem `explain` (`usuario::NaoLancou::PorQuemPede`) — as do gate
+  sobre quem pede, a cota contada de novo no nascimento, e o encerrado na
+  última palavra —; as da última palavra que são o comando decidido de
+  novo, e a da confiança no editor do código, continuam explicadas
+  (`usuario::NaoLancou::Recusado`);
+  (k) quem chama o lançamento pelo kernel: o `xtask` confere que o
+  `usuario::lancar_conferido` só aparece no handler do `user.run` (e onde
+  se define); o `usuario::lancar`, com o caminho, em lugar nenhum fora da
+  suíte; o `lancar_como` e o `lancar_pelo_kernel`, só em `usuario/mod.rs`;
+  o boot os pede só pelos dois lançamentos dele, o servidor de janelas e o
+  Terminal, só no `main.rs`; e o `autorizacao::Lancador`, só em
+  `autorizacao.rs` e `usuario/mod.rs` — pela palavra, também num `use` que
+  a traga sem o caminho. E a última palavra do nascimento, num comando
+  decidido, só deixa lançar o decidido para `process.run`, o `user.run`:
+  outro comando decidido seria decidido de novo pela permissão dele, e
+  passaria — recusado como fora de um comando autorizado, para os dois
+  lançadores;
+  (l) a decisão de novo do `exec` presa à decisão: ela guarda o fio que
+  pediu, e recusa como fora de uma decisão autorizada (`ERROR`) se quem a
+  faz de novo é outro fio, ou se o gate não permitiu.
+  Os casos: `troca: a confianca no editor da imagem nova tirada no meio
+  nao troca a imagem` (o `ola` selado pelo editor do caso, gravado no
+  armazém, para onde o `fluxos` troca com o passo `TROCAR` e `b` 2),
+  `troca: o fim pedido sem o isolamento no meio nao troca a imagem`,
+  `troca: a decisao de novo so vale no fio que decidiu e sobre um allow`,
+  `contencao: a confianca no editor do codigo tirada no meio do user.run
+  nao lanca`, `contencao: a confianca no editor do codigo tirada no meio do
+  lancamento do kernel nao lanca` e `contencao: o lancamento num comando
+  que nao e o user.run e recusado` (pelo gancho da verificação do
+  armazém, dentro de um `fs.verify` decidido); e os de antes que conferem
+  o detalhe novo, a resposta sem a explicação e a explicação que fica.
+  E a conferência da recusa do nascimento na auditoria, nos casos do
+  `user.run` (`so_a_recusa_do_user_run`, em `kernel/src/testes/nascimento.rs`),
+  passou a compor o detalhe esperado como o kernel o compõe — com a
+  citação da decisão que o próprio registro cita, pela regra de
+  `politica::auditoria::detalhe_composto` —, e não pelo começo, sem ela: a
+  CI 509 reprovou `contencao: a chave revogada no meio do user.run nao
+  lanca` na suíte inteira do x86 em release, onde o fio de quem pede e o
+  número da decisão levaram o detalhe a 97 bytes, um acima do teto, e a
+  descrição do programa encolheu (`(pedinte abababab)` virou `(?
+  abababab)`); nas partes, com menos dígitos, ele cabia. Só o teste mudou.
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -7086,12 +7187,36 @@ falha fechado:
 4. a decisão do gate é feita de novo onde a janela acaba, antes de o
    código poder rodar — o gate decidiu antes de o arquivo ser lido, e a
    leitura, a conferência e a preparação levam o tempo do arquivo: no
-   `user.run`, na última palavra do nascimento (`autorizacao::reconfirmar`);
-   no `executar`, imediatamente antes do ponto sem volta
-   (`autorizacao::DecisaoDoProcesso::reconfirmar` — o F4 do adversário do
-   AE-1) —, pela mesma conta do gate, sobre a mesma permissão e o mesmo
-   caminho, com o registro, a política, a contenção e a confiança no
-   editor de agora. Recusada no `executar`, nada se troca: a imagem
+   `user.run`, na última palavra do nascimento (`autorizacao::reconfirmar`,
+   por `autorizacao::reconfirmar_o_lancamento`); no `executar`,
+   imediatamente antes do ponto sem volta
+   (`autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo` — o F4 do
+   adversário do AE-1) —, pela mesma conta do gate, sobre a mesma
+   permissão e o mesmo caminho, com o registro, a política, a contenção e
+   a confiança no editor de agora. E com o que mais muda no meio (os
+   achados do adversário do lote A do #448): a confiança no editor do
+   código que vai rodar, que a conferência perguntou antes de preparar —
+   um `policy.apply` que tira o editor do papel, ou o editor que sai do
+   registro, não parava a troca nem o nascimento —, pela mesma regra dela
+   (`autorizacao::confianca_no_editor`, com o papel de quem lança, agora):
+   recusada, `DENY_POLICY`, com o motivo da falta e o editor na auditoria,
+   como a conferência o grava; e, no `executar`, se quem chama ainda pede
+   — o fim pedido sem o isolamento, com o teto de isolados cheio, que o
+   gate não vê: `DENY_CONTAINED`, "processo encerrado", e ele morre na
+   volta da chamada, sem a troca nem o fim dos fluxos por ela. A decisão
+   de novo do `executar` só vale no fio que o gate decidiu e sobre um
+   `ALLOW` — de outro fio, ou de uma recusa, é fora de uma decisão
+   autorizada (`ERROR`) —; e a última palavra do nascimento só deixa
+   lançar o comando decidido para `process.run` — o `user.run` —: outro
+   comando decidido seria decidido de novo pela permissão dele, e passaria
+   (`ERROR`, "fora de um comando autorizado", diga quem lança o que
+   disser). Quem chama cada lançamento o `xtask` confere: o do `user.run`
+   (`usuario::lancar_conferido`) só pelo handler dele; o do kernel por
+   conta própria (`usuario::lancar`, `lancar_como`, `lancar_pelo_kernel`)
+   só de dentro de `usuario/mod.rs`, que o boot pede pelos dois
+   lançamentos dele, o servidor de janelas e o Terminal; e o lançador
+   (`autorizacao::Lancador`) só onde se define e onde se lança. Recusada
+   no `executar`, nada se troca: a imagem
    preparada sai, o processo segue com a dele e ouve `NEGADO` (−16), o
    mesmo do gate no começo da chamada, e a execução da decisão vai à
    auditoria com o código e o motivo da recusa. Quem é ponta de fluxo
@@ -7118,7 +7243,9 @@ registro, cada chamada de sistema que o gate decide e cada `fork` ou
 lançamento feito por um processo de código selado perguntam de novo se o
 papel ainda confia no editor. Tirada a confiança pela política, ou o
 editor do registro, o pedido seguinte do processo que já está rodando é
-`DENY_POLICY`, e ele não bifurca — o filho levaria o mesmo programa.
+`DENY_POLICY`, e ele não bifurca — o filho levaria o mesmo programa. E o
+código que ainda vai rodar a ouve de novo no último instante: no ponto sem
+volta do `executar` e na última palavra do nascimento (o item 4 acima).
 
 **O NSF vê o adulterado.** A regra `code-tampered` lê a mesma auditoria:
 um selo que não confere é um código que mudou depois de selado, ou um selo
@@ -9465,10 +9592,63 @@ tabela antes da pergunta, que o acharia fora dela — o mesmo "acabou" —, e
 a MC2 dependia da hora.
 
 As do ponto sem volta reprovam pela recusa da decisão de novo: nas rodadas
-sem mutação, ela veio sempre dali, sem volta adiada. Os casos aceitam
+sem mutação, ela veio sempre dali, sem volta adiada. Os casos aceitavam
 também a volta seguinte a uma adiada, em que o gate recusa ele mesmo — a
 mesma recusa, feita onde a janela acaba —: uma rodada em que as três
-trocas de quem é ponta fossem adiadas não reprovaria a MP1.
+trocas de quem é ponta fossem adiadas não reprovaria a MP1. Desde o lote
+A2, a rodada com a volta pausada adiada não conta: ela se repete, com
+processos novos, até quatro vezes, e o caso reprova se nenhuma passou
+pela decisão de novo (a (i) em [Decisões pendentes](#decisões-pendentes));
+e o caso da política nova roda uma rodada da ponta com a volta adiada à
+força, que confere que ela não conta (a MADI, abaixo).
+
+#### As do lote A2
+
+Dez mutações contra os achados do adversário do lote A — as (f) a (l) do
+item *A soma das cotas de processos e a cota por sessão*, em [Decisões
+pendentes](#decisões-pendentes) —, e a MP1 de novo, três vezes, uma de
+cada vez, no repositório, no x86_64 em debug, cada uma contra as partes
+da suíte que têm os casos que a devem reprovar (`DUKE_PARTE=k/1001`: um
+caso por parte, e a cauda), e restauradas byte a byte, com a hora do
+arquivo renovada para o cargo recompilar. Na última rodada de cada uma,
+todas reprovaram.
+
+| Mutação | Reprovada por |
+|---|---|
+| a decisão de novo de quem é ponta sem a confiança no editor da imagem nova (ME1) | `troca: a confianca no editor da imagem nova tirada no meio nao troca a imagem`, na rodada de quem é ponta: o `ola` selado por um editor em quem o papel já não confiava rodou e saiu com 61, e o `fluxos` não disse que a troca devolveu |
+| a de quem não é ponta, sem ela (ME2) | o mesmo caso, na rodada sem fluxo — a da ponta passou |
+| o nascimento sem a confiança no editor do código (MN) | `contencao: a confianca no editor do codigo tirada no meio do user.run nao lanca` ("o user.run recusado no nascimento nao respondeu o codigo da recusa": lançou) e `contencao: a confianca no editor do codigo tirada no meio do lancamento do kernel nao lanca` |
+| a decisão de novo do `exec` sem perguntar se quem chama acabou (MENC) | `troca: o fim pedido sem o isolamento no meio nao troca a imagem`: "a troca de quem teve o fim pedido no meio trocou a imagem" |
+| o detalhe velho no encerrado, "processo isolado" (MDET) | o mesmo caso, pela execução da decisão, e `contencao: o encerrado sem o isolamento no meio do user.run nao lanca`, pela resposta |
+| a rodada com a volta pausada adiada contada como exercitada (MADI) | `troca: a politica nova no meio nao troca a imagem`, na rodada adiada à força: "a rodada com a volta pausada adiada contou como a decisao de novo" |
+| a explicação de volta nas recusas sobre quem pede (MEXP) | `contencao: a recusa do user.run no gate diz o codigo` e `contencao: o encerrado sem o isolamento no meio do user.run nao lanca`: "a recusa de quem pede no user.run veio com a explicacao do comando" |
+| a última palavra que decide de novo qualquer comando decidido, sem perguntar se é `process.run` (MPERM) | `contencao: o lancamento num comando que nao e o user.run e recusado`: "o lancamento num comando que nao e o user.run lancou um processo" |
+| a decisão de novo de outro fio aceita (MFIO) | `troca: a decisao de novo so vale no fio que decidiu e sobre um allow`: "a decisao de outro fio foi feita de novo, e permitiu" |
+| a decisão recusada feita de novo como se fosse um `ALLOW` (MALLOW) | o mesmo caso: "a decisao recusada, feita de novo, nao continuou recusada" |
+| a MP1 de novo, três vezes, com a rodada adiada que não conta | os cinco casos de recusa, nas três: `troca: a chave revogada no meio nao troca a imagem`, `troca: a politica nova no meio nao troca a imagem`, `troca: o processo isolado no meio nao troca a imagem` e `troca: a confianca no editor da imagem nova tirada no meio nao troca a imagem`, na rodada de quem é ponta — a imagem nova rodou —, e `troca: o fim pedido sem o isolamento no meio nao troca a imagem` ("a troca de quem teve o fim pedido no meio trocou a imagem"); nenhuma volta pausada foi adiada nelas |
+
+A citação da decisão adiantada de um, na execução de toda decisão
+(`autorizacao::citando` citando `decisao + 1`), passa pela conferência
+dos casos do nascimento do `user.run` — antes e depois da correção da CI
+509, que compõe o detalhe com a citação do próprio registro —, e é
+reprovada por `codigo: so o da imagem roda sem selo` ("a recusa do codigo
+nao e a execucao da decisao do gate") e por `troca: a chave revogada no
+meio nao troca a imagem`, que conferem qual decisão é citada. E a
+conferência corrigida não é cega: duas mutações que só a auditoria do
+nascimento vê — a recusa da confiança no editor gravada só com o motivo
+da falta, sem o nome do editor, e a recusa da última palavra gravada em
+nome do kernel dentro do `user.run` — reprovam pela auditoria ("a
+auditoria nao diz so a recusa do user.run no nascimento"): a primeira em
+`contencao: a confianca no editor do codigo tirada no meio do user.run
+nao lanca`, a segunda nele e em `contencao: a chave revogada no meio do
+user.run nao lanca`, o caso da CI 509. E as regras
+novas do `xtask` sobre quem lança, cada uma com uma linha a mais num
+arquivo que não é dono — o `lancar_como` num `use` em `barra.rs`, o
+`usuario::lancar(` em `main.rs`, o `Lancador::Kernel` em
+`agent/commands.rs`, o `lancar_conferido` num `use` renomeado em
+`interpretador.rs`, o `lancar_o_terminal` em `agent/administracao.rs` —,
+foram acusadas pelo `cargo xtask invariantes`, que saiu com falha.
+
 
 ### Mensagens
 

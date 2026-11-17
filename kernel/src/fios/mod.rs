@@ -3355,11 +3355,14 @@ pub fn vivo(id: u64) -> bool {
 /// seguro (ver [`pedir_termino`]).
 ///
 /// É a pergunta de quem decide de novo o pedido de um processo — a
-/// reconfirmação de um comando que um processo pediu, e as perguntas sobre
+/// reconfirmação de um comando que um processo pediu, as perguntas sobre
 /// quem pede outro processo, no gate e na última palavra do `fork` e do
-/// `user.run` (ver `autorizacao::reconfirmar` e
-/// `autorizacao::permitir_processo`): o pedido de quem foi encerrado não
-/// conclui. O `process.terminate` isola antes de pedir o fim, e o gate
+/// `user.run`, e a decisão de novo do `exec` no ponto sem volta (ver
+/// `autorizacao::reconfirmar`, `autorizacao::permitir_processo` e
+/// `autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo`): o pedido de
+/// quem foi encerrado não conclui, e a recusa diz que ele foi encerrado
+/// (`contencao::PROCESSO_ENCERRADO`). O `process.terminate` isola antes de
+/// pedir o fim, e o gate
 /// recusa o isolado; mas o isolamento de quem morreu sai na poda, e o teto
 /// de isolados pode nem tê-lo deixado entrar (ver
 /// `contencao::encerrar_processo`) — esta pergunta não depende dele. Um fio

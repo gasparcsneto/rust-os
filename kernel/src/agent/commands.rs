@@ -7159,18 +7159,32 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
             w.field_str("error", &motivo)?;
             explicar_falha(w, politica::Codigo::DenyPolicy, &motivo)?;
         }
-        // O gate recusou, depois de decidir o comando: nas perguntas sobre
-        // quem pede um processo — o journal recusado, quem pede encerrado ou
-        // contido, o editor em quem o papel não confia, o papel que falta,
-        // a cota esgotada —, na cota contada de novo ao nascer, ou no
-        // pedido decidido de novo no nascimento — quem pediu foi contido,
-        // saiu ou foi revogado no meio, ou a política mudou. O código e o
-        // motivo da recusa de verdade, já gravada, e a explicação.
+        // O gate recusou, depois de decidir o comando, no pedido decidido de
+        // novo no nascimento — quem pediu foi contido, saiu ou foi revogado
+        // no meio, ou a política mudou —, ou na confiança no editor do
+        // código, perguntada de novo ali. O código e o motivo da recusa de
+        // verdade, já gravada, e a explicação: é a decisão do comando, feita
+        // de novo.
         Err(crate::usuario::NaoLancou::Recusado(codigo, motivo)) => {
             w.field_bool("launched", false)?;
             w.field_str("code", codigo.nome())?;
             w.field_str("error", motivo)?;
             explicar_falha(w, codigo, motivo)?;
+        }
+        // O gate recusou nas perguntas sobre quem pede um processo — o
+        // journal recusado, quem pede encerrado ou contido, o editor em quem
+        // o papel não confia, o papel que falta, a cota esgotada, também a
+        // contada de novo ao nascer —: o código e o motivo de verdade, já
+        // gravados, e nenhuma explicação. A explicação lê a decisão do
+        // comando — o papel e a permissão com que o gate o decidiu —, e estas
+        // recusas não são ela: a cota sairia "o seu papel não permite
+        // process.run", a sessão que acabou com o papel de antes, o
+        // encerrado com "um administrador pode liberá-la". Ver
+        // `usuario::NaoLancou::PorQuemPede`.
+        Err(crate::usuario::NaoLancou::PorQuemPede(codigo, motivo)) => {
+            w.field_bool("launched", false)?;
+            w.field_str("code", codigo.nome())?;
+            w.field_str("error", motivo)?;
         }
         Err(outro) => {
             w.field_bool("launched", false)?;

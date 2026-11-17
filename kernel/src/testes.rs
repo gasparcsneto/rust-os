@@ -40639,6 +40639,21 @@ static CASOS: &[Caso] = &[
         nome: "contencao: o desconhecido na ultima palavra e recusado",
         f: nascimento::contencao_o_desconhecido_na_ultima_palavra_e_recusado,
     },
+    // Os achados do adversário do lote A do #448, no nascimento: a
+    // confiança no editor do código que vai rodar, perguntada de novo, e o
+    // lançamento só pelo comando decidido para `process.run`.
+    Caso {
+        nome: "contencao: a confianca no editor do codigo tirada no meio do user.run nao lanca",
+        f: nascimento::contencao_a_confianca_no_editor_do_codigo_tirada_no_meio_do_user_run_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: a confianca no editor do codigo tirada no meio do lancamento do kernel nao lanca",
+        f: nascimento::contencao_a_confianca_no_editor_do_codigo_tirada_no_meio_do_lancamento_do_kernel_nao_lanca,
+    },
+    Caso {
+        nome: "contencao: o lancamento num comando que nao e o user.run e recusado",
+        f: nascimento::contencao_o_lancamento_num_comando_que_nao_e_o_user_run_e_recusado,
+    },
     Caso {
         nome: "processos: a lista diz o programa, o papel e o estado",
         f: processos_a_lista_diz_o_programa_o_papel_e_o_estado,
@@ -41128,6 +41143,21 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "troca: o processo isolado no meio nao troca a imagem",
         f: fluxo::troca::troca_o_processo_isolado_no_meio_nao_troca_a_imagem,
+    },
+    // Os achados do adversário do lote A do #448, no ponto sem volta: a
+    // confiança no editor da imagem nova, o fim pedido sem o isolamento, e a
+    // decisão de novo presa ao fio e ao `ALLOW` da decisão.
+    Caso {
+        nome: "troca: a confianca no editor da imagem nova tirada no meio nao troca a imagem",
+        f: fluxo::troca::troca_a_confianca_no_editor_da_imagem_nova_tirada_no_meio_nao_troca_a_imagem,
+    },
+    Caso {
+        nome: "troca: o fim pedido sem o isolamento no meio nao troca a imagem",
+        f: fluxo::troca::troca_o_fim_pedido_sem_o_isolamento_no_meio_nao_troca_a_imagem,
+    },
+    Caso {
+        nome: "troca: a decisao de novo so vale no fio que decidiu e sobre um allow",
+        f: fluxo::troca::troca_a_decisao_de_novo_so_vale_no_fio_que_decidiu_e_sobre_um_allow,
     },
     Caso {
         nome: "fluxo: a revogacao e a politica nova encerram",
@@ -56748,9 +56778,10 @@ fn encerrar_no_commit() {
 
 /// O término no meio de um pedido: o processo pede uma escrita no
 /// armazém, e é encerrado entre a decisão do gate e o commit. A escrita
-/// não acontece — a reconfirmação no commit ouve o isolamento,
-/// `DENY_CONTAINED` —, o arquivo não existe, e o processo morre sem ver a
-/// resposta.
+/// não acontece — a reconfirmação no commit ouve que ele foi encerrado,
+/// `DENY_CONTAINED` ("processo encerrado", antes do isolamento que o
+/// `process.terminate` também pôs) —, o arquivo não existe, e o processo
+/// morre sem ver a resposta.
 fn processos_o_pedido_em_curso_do_encerrado_nao_chega_ao_commit() -> Resultado {
     use core::sync::atomic::Ordering;
     const ARQUIVO: &str = "/armazem/compartilhado/encerravel.txt";
@@ -61712,6 +61743,20 @@ fn com_editores_do_caso(f: impl FnOnce() -> Resultado) -> Resultado {
     .and_then(|p| com_a_politica(p, f));
     crate::identidade::trocar_editores_de_teste(da_imagem);
     r
+}
+
+/// A política dos editores do caso ([`com_editores_do_caso`]) sem a
+/// confiança do operador no editor do caso: a do sistema e a do
+/// administrador ficam. É a que os casos põem no meio de um lançamento ou
+/// de uma troca de imagem, para tirar a confiança de quem lança.
+fn politica_sem_a_confianca_do_operador() -> Result<politica::Politica, &'static str> {
+    politica_trocada(&[
+        ("editores sistema bancada", "editores sistema bancada caso"),
+        (
+            "editores administrador bancada",
+            "editores administrador bancada caso",
+        ),
+    ])
 }
 
 /// Grava `bytes` em `caminho`, no armazém, como o sistema — pelo gate, no

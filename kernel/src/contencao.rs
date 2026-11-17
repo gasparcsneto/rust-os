@@ -64,12 +64,23 @@ use crate::trava::Mutex;
 pub const MAIS_CONTIDOS: usize = 64;
 
 /// A recusa do processo isolado, como o gate a grava e quem pediu a ouve:
-/// `DENY_CONTAINED`, "processo isolado" — ver [`recusa_de`]. É também a do
-/// processo encerrado que pede (`fios::encerrado`): o `process.terminate`
-/// isola antes de pedir o fim ([`encerrar_processo`]), e o isolamento que a
-/// poda tira do morto, ou que o teto de isolados não deixou entrar, não
-/// muda o que ele é.
+/// `DENY_CONTAINED`, "processo isolado" — ver [`recusa_de`].
 pub const PROCESSO_ISOLADO: (Codigo, &str) = (Codigo::DenyContained, "processo isolado");
+
+/// A recusa do processo que pede e acabou, ou tem o fim pedido
+/// (`fios::encerrado`): o mesmo código do isolado — o encerrado é o isolado
+/// que vai acabar: o `process.terminate` isola antes de pedir o fim
+/// ([`encerrar_processo`]) —, com o detalhe do que aconteceu. O isolamento
+/// que a poda tira do morto, ou que o teto de isolados não deixou entrar,
+/// não muda o que ele é; e o registro não diz "isolado" de quem não foi.
+///
+/// Quem pergunta: a reconfirmação de um comando que um processo pediu
+/// (`autorizacao::reconfirmar`), as perguntas sobre quem pede outro
+/// processo, no gate e na última palavra do `fork` e do `user.run`
+/// (`autorizacao::permitir_processo`), e a decisão de novo do `exec` no
+/// ponto sem volta (`autorizacao::DecisaoDoProcesso::reconfirmar_com_o_codigo`).
+/// O detalhe é texto, e não contrato: quem lê a recusa lê o código.
+pub const PROCESSO_ENCERRADO: (Codigo, &str) = (Codigo::DenyContained, "processo encerrado");
 
 /// Quem uma contenção alcança.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,10 +391,11 @@ pub struct Encerrado {
 /// Com o teto de isolados cheio, o fim é pedido mesmo assim: as conexões
 /// caem quando o coletor recolhe o morto. E o pedido em curso não conclui
 /// sem o isolamento: quem o decide de novo — a reconfirmação no ponto de
-/// commit, a última palavra do `fork` e do `user.run` — pergunta também se
-/// quem pede acabou ou tem o fim pedido (`fios::encerrado`), e recusa como
-/// recusaria o isolado ([`PROCESSO_ISOLADO`]). A mesma pergunta vale depois
-/// da poda, que tira o isolamento do morto.
+/// commit, a última palavra do `fork` e do `user.run`, a decisão de novo do
+/// `exec` no ponto sem volta — pergunta também se quem pede acabou ou tem o
+/// fim pedido (`fios::encerrado`), e recusa com o código do isolado e o
+/// detalhe dele ([`PROCESSO_ENCERRADO`]). A mesma pergunta vale depois da
+/// poda, que tira o isolamento do morto.
 ///
 /// Só os handlers dos comandos e as operações administrativas chamam.
 pub fn encerrar_processo(fio: u64) -> Result<Encerrado, &'static str> {
