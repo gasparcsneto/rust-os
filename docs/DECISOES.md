@@ -420,9 +420,14 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
      nome do sistema e o foco tomado vão à auditoria. Só detecção.
 2. **O foco.**
    - (a) **(minha, pelo uso de hoje)** O foco muda só pelo clique da
-     Pessoa e para a superfície que acaba de abrir, uma vez — os dois usos
-     que existem: "o kernel passou a dar o foco no aperto do botão", e "o
-     servidor agora só pede o foco para a janela que acabou de abrir".
+     Pessoa e para a superfície que acaba de abrir, uma vez — dois dos três
+     usos que existem: "o kernel passou a dar o foco no aperto do botão", e
+     "o servidor agora só pede o foco para a janela que acabou de abrir". O
+     terceiro é o Terminal que vem para a frente, com o foco, quando a barra
+     o chama — o `ABRIR`, que o leva a `vir_para_a_frente`
+     (`programas/src/bin/terminal.rs:390` e `:273-279`), pelo botão da
+     barra, pela F3 ou pelo `press` de um agente —; a 2(a) o tira (ver o
+     risco dela, e a 2(f)).
    - (b) **(minha)** O foco não sai de um console enquanto a linha dele
      pede uma credencial — o nome, as senhas, a cerimônia.
    - (c) O servidor reconhecido decide o foco de todas as janelas — o
@@ -430,7 +435,8 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
      foco e roteamento" —; o pedido de outro dono vira pedido a ele.
    - (d) **(minha)** Uma sequência de atenção segura: uma tecla que só o
      kernel trata e que leva a Pessoa ao console de verdade — a prática do
-     Ctrl+Alt+Del.
+     Ctrl+Alt+Del —; e, enquanto o console está por cima depois dela,
+     nenhuma janela ganha o foco ao abrir.
    - (e) O A5, pelas opções da pendência: dobrado na DT-1b — com o foco
      que não sai da linha do login (2b), a tecla vai ao console, e não
      vira registro, quando o foco está no console ao começar o login —;
@@ -439,7 +445,10 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
    - (f) **(sugestão do revisor, para o dono considerar)** O foco na
      abertura — a segunda metade da 2(a) — só para quem tem a permissão da
      1(b): a janela de outro principal só ganha o foco pelo clique da
-     Pessoa.
+     Pessoa. E, **(minha)**, o pedido de quem tem a permissão da 1(b) fora
+     da abertura vale quando a barra o chamou pela Pessoa — o botão ou a
+     F3 —, uma vez: o Terminal que a barra chama vem para a frente com o
+     foco, e o `press` de um agente o traz sem ele.
 3. **As linhas da Pessoa, e o que a tecla deixa.**
    - (a) As linhas de credencial são da Pessoa: o `ui.claim` de um agente
      nelas, e o `press` dele na caixa de fechar de um Terminal com alguém
@@ -469,21 +478,35 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   todo papel que serve janelas.
 - 1(c) não fecha nada: a senha continua capturada, agora com registro.
 - 2(a) muda o caminho do foco de uma janela que não acaba de abrir; um
-  programa que hoje o pede a qualquer hora deixa de recebê-lo.
+  programa que hoje o pede a qualquer hora deixa de recebê-lo. E tira o
+  terceiro uso: o Terminal que a barra chama vem para a frente sem o
+  foco, e a Pessoa clica justamente na janela em que digita credenciais —
+  e o clique é o caminho da janela que imita —, a menos que a 2(f) valha
+  também para ele, como a parte minha dela propõe.
 - 2(b) é uma regra nova no roteamento da tecla, e só segura o foco
   depois que a linha pede a credencial: uma janela falsa aberta antes da
   linha da senha ainda engana a Pessoa — mesmo com a 1(a) ou a 1(b): a
   reserva dos nomes não impede uma janela que se passa pelo Terminal, e a
-  2(a) dá o foco à que acaba de abrir. Só a 2(d) fecha as duas.
+  2(a) dá o foco à que acaba de abrir. Só a 2(d) fecha as duas, para quem
+  a aperta, segurando o foco no console (ou com a 2(f)).
 - 2(c) põe um protocolo novo entre cada programa e o servidor: o foco de
   uma superfície que não é dele.
 - 2(d): a tecla já chega ao kernel pelos três caminhos — o PS/2, o
   `virtio-input` e o USB entregam a `teclado::evento`
   (`kernel/src/teclado.rs:310`) —, e as teclas de função já vão ao
-  console com o foco numa janela (`:322-328`, antes da conferência do
-  foco, em `:342-348`). O custo é o console de verdade mostrado por cima
-  de qualquer janela, uma tela que o kernel desenha. E ela só protege
-  quem a aperta antes de digitar: é um hábito. **(minha)** Exigi-la antes
+  console com o foco numa janela (o roteamento: `:322-328`, antes da
+  conferência do foco, em `:342-348`), onde passam pelo gate como
+  `ui.act`, com a sessão do console, e são recusadas sem ninguém entrado
+  (`kernel/src/interpretador.rs:936-946` e `:1180-1194`). A sequência age
+  antes do login e fora do gate, como o clique fora das janelas, que já
+  devolve o foco ao kernel (`kernel/src/ponteiro.rs:173-184`): é esse o
+  precedente dela. O custo é o console de verdade mostrado por cima de
+  qualquer janela, uma tela que o kernel desenha, e o foco seguro nele
+  enquanto ele está por cima — senão, sem a 2(f), quem perdeu o foco é
+  avisado (`FOCO_PERDIDO`, `kernel/src/superficies.rs:601-627`) e abre
+  outra janela na hora, que o toma antes do "senha⏎", com a linha que
+  ainda não pede credencial. E ela só protege quem a aperta antes de
+  digitar: é um hábito. **(minha)** Exigi-la antes
   de cada credencial, como o "Ctrl+Alt+Del para entrar", tira o hábito do
   caminho, mas muda o login de todo console e as bancadas com a pessoa no
   teclado.
@@ -493,9 +516,14 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   `formulario` (`programas/src/bin/conversa.rs:318`,
   `programas/src/bin/formulario.rs:111`) — deixam de recebê-lo, e a
   Pessoa clica; e a permissão da 1(b) passa a valer duas coisas: escutar
-  um nome do sistema e ganhar o foco ao abrir. Fecha a janela de outro
-  principal que abre logo antes de uma pergunta, e não a que imita: nesta,
-  a Pessoa ainda clica.
+  um nome do sistema e ganhar o foco ao abrir. O foco na abertura passa a
+  ser decidido pelo gate, e cada janela que abre com o foco vira uma
+  decisão gravada — "toda decisão é gravada" (README.md:5040). Fecha a
+  janela de outro principal que abre logo antes de uma pergunta, e não a
+  que imita: nesta, a Pessoa ainda clica. A parte minha — o Terminal que a
+  barra chama pela Pessoa — pede que o kernel saiba quem apertou a barra,
+  e tira do `press` de um agente o poder, que ele tem hoje, de levar o
+  teclado da Pessoa ao Terminal dela.
 - 3(a) muda a coordenação: a Pessoa passa a ter prioridade sobre o agente
   nas linhas de credencial. No resto, a regra fica.
 - 3(c): agregar ou omitir muda o que o `observador` lê, e os casos e as
@@ -507,12 +535,13 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   agentes já não editam essas linhas, e a exceção vale só nelas.
 
 **O impacto.** O kernel: `eventos.rs` (os nomes), `superficies.rs` (o
-foco; na 2(f), o foco na abertura decidido pelo gate), `barra.rs`,
-`teclado.rs` (o histórico; na 2(d), a sequência, ao lado das teclas de
-função), `interpretador.rs` e `coordenacao.rs` (as linhas e o
-arrendamento), `ui.rs` e, na 2(d), o console por cima das janelas, e os
-relatórios em `agent/commands.rs`; os programas `terminal` e `janelas`, e,
-na 2(f), os que pedem o foco ao abrir; a política, na 1(b) e na 2(f); o
+foco; na 2(f), o foco na abertura decidido pelo gate; na 2(d), o foco
+seguro no console), `barra.rs` (na parte minha da 2(f), quem apertou),
+`teclado.rs` (o histórico; na 2(d), a sequência, tratada antes do foco),
+`interpretador.rs` e `coordenacao.rs` (as linhas e o arrendamento),
+`ui.rs` e, na 2(d), o console por cima das janelas, e os relatórios em
+`agent/commands.rs`; os programas `terminal` e `janelas`, e, na 2(f), os
+que pedem o foco ao abrir; a política, na 1(b) e na 2(f); o
 `cargo xtask invariantes`, os nomes reservados; e a
 documentação dos [Consoles](../README.md#consoles), da
 [Coordenação](../README.md#coordenação), de [Operar por uma
@@ -530,9 +559,10 @@ fecha o que a tabela diz, e só isso:
 |---|---|
 | o nome `terminal` ou `janelas` tomado por outro principal, que recebe o `ABRIR` da barra | a 1(a) ou a 1(b) |
 | o foco pedido a qualquer hora — `controlar` com `FOCO` —, também no meio de uma credencial (a DT-1b, o N2a) | a 2(a) com a 2(b) |
-| a janela que abre logo antes de uma pergunta à Pessoa e ganha o foco na abertura. Com alguém entrado no console físico, a tecla vai a ela (`kernel/src/interpretador.rs:1069-1080`): o "senha⏎" que a Pessoa digita para o console, e a senha atual depois. Sem ninguém entrado, com o foco nela ao começar o login, as teclas do login, um registro cada uma (o A5) | a 2(f), para a janela de outro principal; a 2(d), para quem a aperta |
-| a janela que se passa pelo Terminal, pela linha do login ou por uma pergunta, sem escutar nome nenhum: a Pessoa clica nela, e ela ganha o foco pelo clique | só a 2(d), para quem a aperta |
+| a janela que abre logo antes de uma pergunta à Pessoa e ganha o foco na abertura. Com alguém entrado no console físico, a tecla vai a ela (`kernel/src/interpretador.rs:1069-1080`): o "senha⏎" que a Pessoa digita para o console, e a senha atual depois. Sem ninguém entrado, com o foco nela ao começar o login, as teclas do login, um registro cada uma (o A5) | a 2(f), para a janela de outro principal; a 2(d), para quem a aperta, segurando o foco no console (ou com a 2(f)) |
+| a janela que se passa pelo Terminal, pela linha do login ou por uma pergunta, sem escutar nome nenhum: a Pessoa clica nela, e ela ganha o foco pelo clique | só a 2(d), para quem a aperta, segurando o foco no console (ou com a 2(f)) |
 | o agente nas linhas de credencial — o `ui.claim`, o `press` na caixa de fechar (a DT-1d, a DT-1e) | a 3(a) |
+| o histórico do teclado com a senha digitada adiantado num Terminal (a DT-1c, o X3) | a 3(a) |
 | o rastro da tecla — a versão, o prazo e o `revision` (a DT-1c); os contadores (o A3) | a 3(d) e a 3(c) |
 
 Nenhuma delas faz do aceite do handoff (a DH-2) ou da confirmação do
@@ -560,14 +590,19 @@ Este dossiê recomenda:
    (`programas/src/bin/terminal.rs:70`) e o `pseudo` da suíte
    (`programas/src/bin/pseudo.rs:24`);
 2. **o foco**: muda pelo clique da Pessoa e para a janela que acaba de
-   abrir (2a) — na abertura, só a de quem tem a permissão da 1(b) (2f) —,
-   e não sai de uma linha que pede credencial (2b): o que dobra o A5
-   quando o foco está no console ao começar o login (2e);
-3. **a sequência de atenção, já** (2d): é a única que fecha a janela que
-   imita, e a que leva a Pessoa ao console de verdade antes de uma
-   credencial, qualquer que seja a janela com o foco. O custo é o console
-   mostrado por cima das janelas: a tecla já chega ao kernel, e as teclas
-   de função já são do console com o foco numa janela (ver os riscos);
+   abrir (2a) — na abertura, só a de quem tem a permissão da 1(b), e,
+   fora dela, o Terminal que a barra chama pela Pessoa (2f, com a parte
+   minha: senão o Terminal vem sem o foco, e a Pessoa o escolhe pelo
+   clique, que é o caminho da janela que imita) —, e não sai de uma linha
+   que pede credencial (2b): o que dobra o A5 quando o foco está no
+   console ao começar o login (2e);
+3. **a sequência de atenção, já** (2d), com o foco seguro no console
+   enquanto ele está por cima: é a única que fecha a janela que imita, e a
+   que leva a Pessoa ao console de verdade antes de uma credencial,
+   qualquer que seja a janela com o foco. O custo é o console mostrado por
+   cima das janelas: a tecla já chega ao kernel, e o clique fora das
+   janelas já devolve o foco ao kernel, fora do gate — o precedente dela
+   (ver os riscos);
 4. **as linhas de credencial são da Pessoa** (3a): o `ui.claim` e o
    `press` de um agente nelas — e na caixa de fechar de um Terminal com
    alguém entrado — são recusados e gravados, e a tecla do Terminal é
@@ -589,7 +624,10 @@ fecha com a 2(d). Com a 2(f), a que abre logo antes só pode ser do
 próprio `sistema`, e a que imita continua. **Sem a 2(f)**, a janela de
 outro principal que abre logo antes de uma pergunta ganha o foco, e
 recebe o que a Pessoa digita sem apertar antes a sequência — o caso mais
-à mão: uma superfície invisível, aberta na hora certa.
+à mão: uma superfície invisível, aberta na hora certa —; e, se a 2(d) não
+segurar o foco no console, também o que ela digita depois da sequência:
+quem perdeu o foco é avisado (`FOCO_PERDIDO`) e abre outra na hora. E,
+com a 2(a), o Terminal que a barra chama vem para a frente sem o foco.
 
 **O plano de validação.**
 
@@ -601,16 +639,20 @@ recebe o que a Pessoa digita sem apertar antes a sequência — o caso mais
   do `senha⏎`, com a Pessoa entrada no console físico, e a que tem o foco
   quando o login começa, sem ninguém entrado; a janela que imita o
   Terminal, clicada, e a sequência que leva a Pessoa ao console de
-  verdade, também com uma janela por cima; a senha adiantada num
-  Terminal; o `ui.claim` de um agente na linha do nome; o `press` dele na
-  caixa de fechar com a Pessoa entrada; os contadores que o `observador`
-  lê, com uma senha digitada.
+  verdade, também com uma janela por cima, e com a que perdeu o foco
+  abrindo outra na hora, ou em laço; o Terminal que a barra chama — pela
+  Pessoa, com o foco; pelo `press` de um agente, sem ele —; a senha
+  adiantada num Terminal; o `ui.claim` de um agente na linha do nome; o
+  `press` dele na caixa de fechar com a Pessoa entrada; os contadores que
+  o `observador` lê, com uma senha digitada.
 - As bancadas com a pessoa no teclado — `cargo xtask senha` e a do
   pareamento —, nas duas arquiteturas, em depuração e em release.
 - Uma mutação por regra, uma de cada vez e restaurada: o nome reservado
   aceito; o foco dado no meio da credencial; o foco na abertura dado a
-  quem não tem a permissão; a sequência que não devolve o foco ao
-  console, ou que chega à janela; o histórico escrito na chegada; o
+  quem não tem a permissão; o foco dado ao Terminal pelo `press` de um
+  agente na barra; a sequência que não devolve o foco ao console, ou que
+  chega à janela; a sequência que deixa uma janela aberta depois dela
+  tomar o foco; o histórico escrito na chegada; o
   `ui.claim` aceito; o `press` aceito; o contador por tecla; a versão que
   anda por tecla na linha de credencial.
 - Um agente adversário com uma tarefa só: capturar a senha da Pessoa por
@@ -624,13 +666,14 @@ comportamento: são os dados da decisão.
 
 **As fechadas que ela toca.** O B3: um evento de hardware não é
 autoridade — a tecla é evento; quem age é a sessão. A sequência da 2(d)
-também: leva a Pessoa ao console, e não autoriza nada. O B4: a troca da
-própria senha é do console. E duas invariantes de 1.7, pela pergunta 1:
-"toda operação passa pelo Gate" e "a Policy como fonte da decisão". A
-1(a) é uma regra do kernel sobre quem escuta um nome, fora do gate e da
-política; a 1(b) põe a mesma reserva no gate — e, com a 2(f), também o
-foco na abertura. O foco (2) segue regras que já existem fora do gate —
-"foco ≠ autoridade" — e diz para onde a tecla vai; e a 3(a) recusa, fora
+também: leva a Pessoa ao console, fora do gate, como o clique fora das
+janelas, e não autoriza nada. O B4: a troca da própria senha é do
+console. E duas invariantes de 1.7, pela pergunta 1: "toda operação passa
+pelo Gate" e "a Policy como fonte da decisão". A 1(a) é uma regra do
+kernel sobre quem escuta um nome, fora do gate e da política; a 1(b) põe
+a mesma reserva no gate — e, com a 2(f), também o foco na abertura. O
+foco (2), menos a 2(f), segue regras que já existem fora do gate — "foco
+≠ autoridade" — e diz para onde a tecla vai; e a 3(a) recusa, fora
 do gate, o `ui.claim` e o `press` de um agente nessas linhas, como a
 regra da linha da pessoa recusa a edição — uma restrição depois do gate,
 e não uma autorização.
