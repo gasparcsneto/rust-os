@@ -65,11 +65,24 @@ const MAIS_VOLTAS: usize = 64;
 // ---------------------------------------------------------------------
 
 /// Roda `f` com a cerimônia vazia — e o enlace, a malha e o registro de
-/// dispositivos também —, os dois consoles dos casos abertos e o que a
-/// cerimônia faria nas vagas guardado para o caso ler. No fim, confere que
-/// a cerimônia nunca quebrou as regras dela, e a tira.
+/// dispositivos também —, os dois consoles dos casos abertos, o que a
+/// cerimônia faria nas vagas guardado para o caso ler e o coletor sem
+/// gravar a auditoria sozinho. No fim, confere que a cerimônia nunca
+/// quebrou as regras dela, e a tira.
+///
+/// # O coletor pausado
+///
+/// É o estado da suíte, e os casos daqui dependem dele: o gate registra a
+/// decisão de um `device.forget` antes de o handler tomar a ordem das
+/// gravações, e ela só vai no registro da desfeita — o que
+/// `desfeita_no_journal` confere — se ninguém grava o journal entre os
+/// dois. Solto por um caso de antes, na mesma parte, o coletor a levava num
+/// registro só de auditoria, antes do da desfeita, quando passava nessa
+/// janela (CI 509, o boot pela UEFI do ARM na parte 2 de 2). O caso o pausa
+/// ele mesmo, e não depende de quem rodou antes.
 fn com_a_cerimonia(f: impl FnOnce() -> Resultado) -> Resultado {
     com_o_enlace(|| {
+        crate::persistencia::pausar_a_auditoria_de_teste(true);
         crate::pareamento::esquecer_de_teste();
         crate::pareamento::saida_de_teste(true);
         crate::interpretador::abrir_console(CONSOLE);

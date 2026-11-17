@@ -48483,7 +48483,13 @@ fn persistencia_a_migracao_das_chaves_antigas() -> Resultado {
         }
         // Fora do journal, a partição é só zeros — tirada a reserva do fim,
         // que é da bancada. A auditoria do coletor espera: um registro dela
-        // agora cairia depois da extensão medida.
+        // agora cairia depois da extensão medida. Na suíte ele já está
+        // pausado — é o estado dela —, e continua pausado depois da medida:
+        // soltá-lo aqui o deixava gravando a auditoria sozinho em todo caso
+        // seguinte da mesma parte, até um que o pausasse de novo. Na parte 2
+        // de 2 nenhum o pausava, e a decisão do gate de um `device.forget`
+        // foi num registro só de auditoria, antes do da desfeita (CI 509,
+        // "pareamento: esquecer e parear de novo").
         crate::persistencia::pausar_a_auditoria_de_teste(true);
         let zerada = (|| -> Result<bool, &'static str> {
             let (inicio, usados) = crate::persistencia::extensao_do_journal_de_teste()?;
@@ -48504,7 +48510,6 @@ fn persistencia_a_migracao_das_chaves_antigas() -> Resultado {
             }
             Ok(true)
         })();
-        crate::persistencia::pausar_a_auditoria_de_teste(false);
         if !zerada? {
             return Err("fora do journal, a particao nao e so zeros");
         }
@@ -59933,6 +59938,10 @@ pub fn executar_todos() -> ! {
         // relatório pela metade. Assim cada linha do relatório fica íntegra e
         // os logs do teste aparecem logo acima dela, que é onde ajudam.
         let resultado = (caso.f)();
+        // E o caso devolve o estado em que a suíte o deixou: o que não o
+        // devolve reprova, e o seguinte começa com ele de volta.
+        let devolvido = estado_da_suite_devolvido();
+        let resultado = resultado.and(devolvido);
         #[cfg(target_arch = "aarch64")]
         anotar_o_fundo_das_excecoes(caso.nome);
         match resultado {
@@ -59963,6 +59972,36 @@ pub fn executar_todos() -> ! {
     // encerra o emulador de dentro do handler de falha. Roda em toda parte,
     // como a cauda: é ele que dá o código de saída do sucesso.
     estouro_de_pilha_e_detectado()
+}
+
+/// O estado que a suíte dá a cada caso, conferido e devolvido depois dele:
+/// o coletor sem gravar a auditoria sozinho
+/// (`persistencia::pausar_a_auditoria_de_teste`) e o journal solto
+/// (`persistencia::segurar_a_auditoria_de_teste`). Os casos que mudam um
+/// deles o devolvem no fim; o que não devolve reprova aqui, e o executor o
+/// devolve antes do caso seguinte.
+///
+/// Um caso não depende de quem rodou antes. O coletor solto grava a
+/// auditoria pendente a cada tique, e no meio de um caso leva para um
+/// registro só de auditoria o que o caso confere junto da mudança, ou muda
+/// a conta dos registros. A CI 509 achou um assim: a migração das chaves do
+/// formato antigo soltava o coletor depois de medir a partição, e ele
+/// ficava solto em todo caso seguinte da mesma parte, até um que o pausasse
+/// de novo. Na parte 2 de 2 do boot pela UEFI do ARM nenhum o pausava, e a
+/// decisão de um `device.forget` foi num registro só de auditoria, antes do
+/// da desfeita ("pareamento: esquecer e parear de novo").
+fn estado_da_suite_devolvido() -> Resultado {
+    let solto = !crate::persistencia::auditoria_pausada_de_teste();
+    let segurado = crate::persistencia::auditoria_segurada_de_teste();
+    crate::persistencia::pausar_a_auditoria_de_teste(true);
+    crate::persistencia::segurar_a_auditoria_de_teste(false);
+    if solto {
+        return Err("o caso deixou o coletor da auditoria solto");
+    }
+    if segurado {
+        return Err("o caso deixou o journal segurado");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

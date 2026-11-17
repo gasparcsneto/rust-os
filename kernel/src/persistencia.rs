@@ -2095,6 +2095,21 @@ pub fn segurar_a_auditoria_de_teste(segurada: bool) {
     AUDITORIA_SEGURADA.store(segurada, Ordering::Release);
 }
 
+/// Só para a suíte: se o coletor está pausado — ver [`AUDITORIA_PAUSADA`].
+/// É o estado da suíte, que o executor confere depois de cada caso.
+#[cfg(feature = "modo-teste")]
+pub fn auditoria_pausada_de_teste() -> bool {
+    AUDITORIA_PAUSADA.load(Ordering::Acquire)
+}
+
+/// Só para a suíte: se o journal está segurado — ver
+/// [`AUDITORIA_SEGURADA`]. Solto é o estado da suíte, que o executor
+/// confere depois de cada caso.
+#[cfg(feature = "modo-teste")]
+pub fn auditoria_segurada_de_teste() -> bool {
+    AUDITORIA_SEGURADA.load(Ordering::Acquire)
+}
+
 /// Chamada pelo coletor: grava a auditoria pendente a cada
 /// [`INTERVALO_DA_AUDITORIA_MS`], ou antes, se ela já ocupa meio anel.
 pub fn gravar_auditoria_se_preciso() {

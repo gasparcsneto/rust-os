@@ -12953,6 +12953,44 @@ de teste, nenhum do kernel, e cada caso agora prepara o próprio estado:
   o timer do ARM pelo prazo, sem perder o tique atrasado, é um trabalho
   [B] à parte.
 
+A CI 509 achou mais duas, também de teste, e as duas vinham de antes das
+partes:
+
+- no boot pela UEFI do ARM, na parte 2 de 2, "pareamento: esquecer e
+  parear de novo" reprovou com "a decisao da desfeita nao foi no registro
+  dela". O caso da migração das chaves do formato antigo pausava o coletor
+  da auditoria para medir a partição e, depois da medida, o soltava; na
+  suíte o coletor fica pausado, e soltá-lo o deixava gravando a auditoria
+  sozinho em todo caso seguinte, até um que o pausasse de novo — na suíte
+  inteira, o da transferência grande dos dados, vinte e três casos depois.
+  Nas partes em que a migração cai e nenhum dos que o pausam vem depois
+  dela, ele ficava solto até o fim: na CI 509, a 3 de 3 do x86, a 2 de 3
+  do ARM, a 2 de 2 do boot pela UEFI do ARM, e na máquina da `virtio-gpu`
+  a 1 de 2 do x86 e a 2 de 2 do ARM. O gate registra a decisão de um
+  `device.forget` antes de o handler tomar a ordem das gravações, e ela só
+  vai no registro da desfeita se ninguém grava o journal entre os dois; o
+  coletor, que passa a cada tique, às vezes passava ali e a levava num
+  registro só de auditoria, antes. Por isso a falha era intermitente — o
+  "esquecer e parear de novo" passou nas duas partes da `virtio-gpu` com o
+  coletor solto, e o "esquecer a própria relação", que confere o mesmo,
+  nas cinco —, e só onde a decisão é registrada fora da ordem: a da
+  gravação do pareamento, registrada com a ordem na mão, nunca saía do
+  registro da relação. A migração deixa o coletor pausado, os casos do
+  pareamento o pausam eles mesmos, no começo, e o executor confere, depois
+  de cada caso, que ele ficou pausado e o journal solto, como a suíte os
+  deixa: o caso que os deixa de outro jeito reprova, e o executor os
+  devolve antes do seguinte. A documentação prometia mais do que o código
+  faz — a decisão no mesmo registro da mudança; o código garante junto ou
+  antes —, e a escolha entre escrever o que vale e o kernel cumprir o
+  escrito é uma decisão do dono (AUD-JUNTO, em `docs/DECISOES.md`);
+- na suíte inteira do x86 em release, `contencao: a chave revogada no meio
+  do user.run nao lanca` reprovou: a conferência da recusa na auditoria
+  compunha o detalhe esperado sem a citação da decisão, e o detalhe de
+  verdade, com ela, passou do teto e encolheu a descrição do programa.
+  Ela compõe o detalhe como o kernel o compõe, com a citação do próprio
+  registro (ver "A soma das cotas de processos e a cota por sessão", em
+  "Decisões pendentes", depois dos casos do lote A2 do #448).
+
 O kernel anuncia a parte no começo — `suite de testes :: x86_64 :: parte 2
 de 3: 334 de 989 casos`, e a fatia na linha seguinte — e o placar do fim
 conta os casos que rodaram; o `xtask` confere os dois contra a parte que
