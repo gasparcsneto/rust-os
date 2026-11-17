@@ -12744,6 +12744,35 @@ cadeia acima do teto dele, que a suíte inteira já tinha levado lá; numa
 parte, a 1 de 40, o envio passou com o caminho "cheio". Eles a levam lá
 sozinhos agora, como o dos fluxos já levava.
 
+A CI 508, a primeira com a suíte em partes, achou mais cinco. Todos eram
+de teste, nenhum do kernel, e cada caso agora prepara o próprio estado:
+
+- a parte 2 de 3 parava no caso da adoção sem memória. O da compactação
+  terminava com a tabela de mensagens recomeçada e a região do journal
+  guardando um próximo maior, e a mensagem seguinte gravava um id que a
+  reposição recusa ("id de mensagem fora de ordem"); na suíte inteira, o
+  caso seguinte compactava e o journal esquecia junto. A tabela de
+  mensagens só volta à da imagem logo antes de o journal ser reposto por
+  cima, e o caso da compactação purga as mensagens dele, gravando;
+- a aparência amostrava a margem do console depois de o desenho medido a
+  deixar preta, e quem a limpava era o clique do ponteiro. Ela limpa pelo
+  caminho do botão Limpar, e o desenho medido também, ao terminar;
+- na parte 2 de 2, a cadeia da auditoria refazia os elos da cauda com os
+  textos crus do JSON, e o recurso com escapes do caso da matriz não
+  refazia o elo — na suíte inteira, os casos do meio o empurravam para
+  fora da janela. Ela desescapa os textos e põe na janela um registro
+  escapado dela mesma;
+- o de produtores e leitores com a compactação no meio contava como seus
+  os produtores do caso anterior, que deixa o anel cheio deles. Ele enche
+  o anel do começo sozinho;
+- o relógio do SMP, no ARM, media logo depois de um caso que deixa
+  trabalho para o primeiro núcleo, sem a folga de dez tiques que o `smp:
+  todos os nucleos ligam` lhe dava. Ele espera os dez tiques antes de
+  medir. No ARM o timer é rearmado no fim do handler, e o atraso sob carga
+  sai do pulso do primeiro núcleo; o x86 tem o APIC periódico. Rearmar
+  o timer do ARM pelo prazo, sem perder o tique atrasado, é um trabalho
+  [B] à parte.
+
 O kernel anuncia a parte no começo — `suite de testes :: x86_64 :: parte 2
 de 3: 334 de 989 casos`, e a fatia na linha seguinte — e o placar do fim
 conta os casos que rodaram; o `xtask` confere os dois contra a parte que

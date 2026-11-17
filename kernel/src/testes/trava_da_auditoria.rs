@@ -2754,11 +2754,18 @@ fn compactar_no_meio(conferidor: &mut Conferidor) -> Result<u64, &'static str> {
 /// tempo, com a suíte gravando a auditoria — e, com `compactar`, um segundo
 /// coletor, o do kernel solto, e a compactação no meio. Ao fim, o journal
 /// confere inteiro e confere o que os leitores viram.
+///
+/// O anel do começo é todo do caso — um anel inteiro de enchimento —, e
+/// não o que o caso de antes deixou: o conferidor conta como deste caso
+/// todo registro de produtor do journal do primeiro guardado em diante.
 fn produtores_e_leitores(compactar: bool) -> Resultado {
     if persistencia::estado() != persistencia::Estado::Disponivel {
         return Err("a persistencia nao esta disponivel: o caso confere o journal");
     }
     anel_cheio_com_saidos()?;
+    // `anel_cheio_com_saidos` não mexe num anel que já está cheio — e o
+    // caso de produtores e leitores deixa o anel cheio dos produtores dele.
+    auditar_enchendo(CAPACIDADE, "enche o anel")?;
     zerar_os_fios();
     POR_PRODUTOR_DO_CASO.store(POR_PRODUTOR, SeqCst);
     NO_MEIO.store(!compactar, SeqCst);
@@ -2767,6 +2774,9 @@ fn produtores_e_leitores(compactar: bool) -> Resultado {
         .first()
         .map(|r| r.seq)
         .ok_or("o anel da auditoria esta vazio")?;
+    if no_comeco.iter().any(|r| do_produtor(&r.evento).is_some()) {
+        return Err("o anel do comeco do caso tem registros de produtor de outro caso");
+    }
     drop(no_comeco);
     let base = inicio - ANTES_DO_ANEL - 1;
     BASE.store(base, SeqCst);

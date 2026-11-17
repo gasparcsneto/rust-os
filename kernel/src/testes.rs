@@ -2575,7 +2575,20 @@ fn tela_desenhar_nao_regrediu_em_ordem_de_grandeza() -> Resultado {
         // legitimamente não ter uma.
         return Ok(());
     };
+    let resultado = medir_o_desenho(&tela);
+    // A medida deixa a camada do console preta — o último preenchimento, a
+    // última volta da referência e o quadrado do meio são pretos —, com a
+    // grade ainda descrevendo o texto que estava ali. Limpar pelo caminho do
+    // botão a devolve ao que o kernel desenha: o fundo, a faixa, o cursor no
+    // topo e a grade vazia. Sem isto, todo caso seguinte da mesma parte via a
+    // tela preta, até o próximo Limpar (CI 508: a `aparencia`).
+    crate::interpretador::limpar();
+    resultado
+}
 
+/// A medida de [`tela_desenhar_nao_regrediu_em_ordem_de_grandeza`]: pinta a
+/// camada do console inteira, de branco e de preto, e não a devolve.
+fn medir_o_desenho(tela: &crate::tela::Tela) -> Resultado {
     // Em blocos alternados — dez preenchimentos, dez voltas da referência —,
     // para que o que muda na máquina durante a medida pese nos dois lados.
     // Em release, blocos bastantes para que o tique de 10 ms não pese na
@@ -22543,6 +22556,7 @@ fn com_a_persistencia_fechada<R>(f: impl FnOnce() -> R) -> R {
         crate::persistencia::fechar_de_teste();
         let r = f();
         de_volta_a_imagem();
+        crate::mensagens::como_na_imagem_de_teste();
         crate::persistencia::abrir();
         r
     })
@@ -23752,13 +23766,24 @@ fn retrato_do_armazem() -> RetratoDoArmazem {
     (nos, proxima)
 }
 
-/// O registro, a política, as pessoas, as mensagens, o armazém e as
-/// chaves voltam ao que a imagem diz — sem nada do journal.
+/// O registro, a política, as pessoas, o armazém e as chaves voltam ao que
+/// a imagem diz — sem nada do journal.
+///
+/// As mensagens não: a tabela delas só volta à da imagem logo antes de o
+/// journal ser reposto por cima — em [`reposto_da_imagem`] e em
+/// [`com_a_persistencia_fechada`] —, como pede
+/// `mensagens::como_na_imagem_de_teste`. Recomeçada aqui, no fim de um
+/// caso e com a persistência disponível, ela voltaria ao id 1 com a região
+/// do journal guardando um próximo maior: a mensagem seguinte gravaria um
+/// id que a reposição recusa ("id de mensagem fora de ordem"), e o journal
+/// inteiro deixaria de se repor, num caso que não tem nada com isso. Na
+/// suíte inteira, quem esquecia junto era a compactação do caso seguinte
+/// ao da compactação; com a suíte em partes ele cai em outra (CI 508: a
+/// parte 2 de 3, nas duas arquiteturas).
 fn de_volta_a_imagem() {
     crate::identidade::esquecer_registrados();
     crate::identidade::esquecer_lapides_de_teste();
     crate::pessoas::esquecer_registradas();
-    crate::mensagens::como_na_imagem_de_teste();
     crate::armazem::trocar_de_teste(::armazem::Armazem::novo());
     crate::chaves::limpar_a_memoria_de_teste();
     crate::autorizacao::carregar();
@@ -23780,6 +23805,7 @@ fn de_volta_a_imagem() {
 fn reposto_da_imagem<R>(repor: impl FnOnce() -> R) -> R {
     crate::persistencia::em_ordem(|| {
         de_volta_a_imagem();
+        crate::mensagens::como_na_imagem_de_teste();
         repor()
     })
 }
@@ -24092,6 +24118,11 @@ fn compactacao_preserva_o_estado() -> Resultado {
         }
         Ok(())
     });
+    // As vivas que o caso criou saem purgadas, por operação de verdade e
+    // gravada: a tabela e o journal continuam dizendo o mesmo, os ids
+    // continuam de onde estavam, e nada vivo do caso vence no meio de um
+    // caso seguinte, gravando um registro que ele não pediu.
+    crate::mensagens::esvaziar_de_teste();
     de_volta_a_imagem();
     resultado
 }
@@ -26174,9 +26205,29 @@ fn politica_nao_autoprivilegia() -> Resultado {
 /// A auditoria é uma cadeia: cada registro refeito pelos campos que
 /// `audit.tail` mostra dá o elo dele, e o anterior do seguinte; a cabeça é
 /// o último elo. E os parâmetros entram só como resumo.
+///
+/// Os textos refeitos são os desescapados: `audit.tail` escreve cada um
+/// como string JSON, e o elo é do texto, e não da grafia dele no JSON. O
+/// caso põe na janela, ele mesmo, um registro cujo texto o JSON escapa — o
+/// recurso cru de um pedido, com a barra e a aspa —, e não depende do que
+/// os casos de antes deixaram nela: o da matriz deixa o recurso cru com
+/// `\u002e`, que a suíte inteira empurrava para fora da janela.
 fn politica_auditoria_encadeada() -> Resultado {
     com_agentes_de_teste(|| {
         let (mut agente, mut sessao) = conectado(1)?;
+        // O recurso de um pedido vai à auditoria cru, como o gate o decide
+        // — ver `autorizacao::recurso_do_pedido` —, e `audit.tail` o
+        // escreve com a barra e a aspa escapadas.
+        let escapado = r#"/bin/\u002e\"x"#;
+        pela_porta(
+            &mut agente,
+            &mut sessao,
+            "fs.list",
+            &alloc::format!(r#"{{"path":"{escapado}"}}"#),
+        )?;
+        if ultimo_com_metodo("fs.list").map(|e| e.recurso).as_deref() != Some(escapado) {
+            return Err("o pedido do caso com o recurso escapado nao foi gravado cru");
+        }
         let params = r#"{"path":"/bin"}"#;
         let r = pela_porta(&mut agente, &mut sessao, "fs.list", params)?;
         if !r.contains(r#""result":"#) {
@@ -26191,11 +26242,14 @@ fn politica_auditoria_encadeada() -> Resultado {
         let mut ultimo = None;
         while let Some(j) = registros.item(i) {
             i += 1;
-            let texto = |k: &str| {
-                j.member(k)
-                    .and_then(|v| v.as_str())
+            // Desescapado: `as_str` daria a grafia do JSON, e o recurso cru
+            // do caso — ou o de outro, na janela — não refaria o elo.
+            let texto = |k: &str| -> Result<alloc::string::String, &'static str> {
+                let v = j.member(k).ok_or("um campo do registro faltou")?;
+                let mut buffer = alloc::vec![0u8; v.as_str().map_or(0, str::len)];
+                v.desescapar_em(&mut buffer)
                     .map(alloc::string::String::from)
-                    .ok_or("um campo do registro faltou")
+                    .ok_or("um campo do registro nao e um texto JSON")
             };
             let hex32 = |k: &str| -> Result<[u8; 32], &'static str> {
                 sigilo::de_hex(&texto(k)?).ok_or("um campo do registro nao e hex")
@@ -27309,7 +27363,22 @@ fn smp_todos_os_nucleos_ligam() -> Resultado {
 /// um núcleo anda o relógio por período, e todos têm o mesmo período: os
 /// dois precisam andar juntos. E cada núcleo precisa andar mais ou
 /// menos no mesmo passo — todos têm timer na mesma frequência.
+///
+/// # A janela começa quieta
+///
+/// O primeiro núcleo é o dos dispositivos e o da suíte. O que o caso
+/// anterior deixa para trás — a passada e o registro do coletor, a linha do
+/// resultado, a tela que ficou para compor e apresentar — roda nas
+/// interrupções dele (o tique e o cutucão), e no ARM o timer é rearmado no
+/// fim do handler, a partir de agora (`gic::armar`): cada milissegundo ali
+/// sai do pulso dele, e não do relógio, que outro núcleo anda no lugar. No
+/// x86 o APIC é periódico, e o atraso menor que um período não custa tique.
+/// Medido na CI 508, com a suíte em partes, logo depois da criação
+/// concorrente: "relogio andou 51, o primeiro nucleo contou 40". Na suíte
+/// inteira quem dava esta folga era o caso anterior, `smp: todos os nucleos
+/// ligam`, com os dez tiques dele; agora ela é deste.
 fn smp_o_relogio_anda_uma_vez_por_tique() -> Resultado {
+    esperar_ticks(10);
     let relogio_antes = crate::tempo::ticks();
     let antes: [u64; crate::nucleos::MAX_NUCLEOS] = core::array::from_fn(tiques_do_nucleo);
     esperar_ticks(50);
@@ -32878,7 +32947,25 @@ fn aparencia_a_tela_tem_a_linguagem_visual() -> Resultado {
         Ok(())
     };
 
-    // O console: a margem de baixo, que nenhum texto alcança.
+    // O cursor primeiro, onde o caso o confere no fim — no meio da tela,
+    // longe de todo ponto amostrado antes dele. O ponteiro fica onde o
+    // último caso de ponteiro da parte o deixou, e esse caso muda de uma
+    // parte para outra.
+    let (cx, cy) = (w / 2, h / 2);
+    crate::ponteiro::absoluto(cx, cy, w - 1, h - 1);
+    crate::ponteiro::sincronizar();
+
+    // O console: a margem de baixo, que nenhum texto alcança e só o banner
+    // pinta. Pintada aqui pelo caminho do botão Limpar, o mesmo da F1 e do
+    // clique: a camada do console é de todo caso, e o que um caso anterior
+    // pôs nela não é a linguagem visual — o `tela: desenhar nao regrediu em
+    // ordem de grandeza` a deixa preta. Na suíte inteira quem a limpava
+    // antes daqui era o clique do `ponteiro: clique no botao`; com a suíte
+    // em partes ele cai em outra, e a margem ficou preta (CI 508: o x86 na
+    // parte 2/3, o ARM na 1/3). A cor conferida continua a que o kernel
+    // pinta: trocar o fundo do console no uso ainda reprova aqui.
+    crate::interpretador::limpar();
+    ate_mostrar_o_console(&[(w - 3, h - 3)], 100)?;
     e(
         (w - 3, h - 3),
         paleta::NOITE,
@@ -32915,7 +33002,6 @@ fn aparencia_a_tela_tem_a_linguagem_visual() -> Resultado {
     }
 
     // O cursor: o canto de cima da seta é o contorno, o carvão.
-    let (cx, cy) = (w / 2, h / 2);
     crate::ponteiro::absoluto(cx, cy, w - 1, h - 1);
     crate::ponteiro::sincronizar();
     let contorno = e(
