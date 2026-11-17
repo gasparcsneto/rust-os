@@ -41737,6 +41737,12 @@ static CASOS: &[Caso] = &[
         nome: "smp: o fim da cerimonia com a senha ja confirmada nao engole",
         f: pareamento::smp_o_fim_com_a_senha_ja_confirmada_nao_engole,
     },
+    // O próprio executor: o estado que ele confere depois de cada caso. No
+    // fim da tabela, para nenhum caso de antes mudar de parte.
+    Caso {
+        nome: "suite: o executor ve e devolve o coletor solto e o journal segurado",
+        f: suite_o_executor_ve_e_devolve_o_coletor_e_o_journal,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
@@ -60100,6 +60106,35 @@ pub fn executar_todos() -> ! {
     // encerra o emulador de dentro do handler de falha. Roda em toda parte,
     // como a cauda: é ele que dá o código de saída do sucesso.
     estouro_de_pilha_e_detectado()
+}
+
+/// O executor confere o estado que cada caso devolve
+/// ([`estado_da_suite_devolvido`]): o coletor solto e o journal segurado
+/// reprovam, cada um com o motivo dele, e voltam ao estado da suíte — os
+/// dois juntos também —; o estado da suíte passa.
+fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
+    use crate::persistencia as p;
+    p::pausar_a_auditoria_de_teste(false);
+    let solto = estado_da_suite_devolvido();
+    let pausado = p::auditoria_pausada_de_teste();
+    p::segurar_a_auditoria_de_teste(true);
+    let segurado = estado_da_suite_devolvido();
+    let solto_de_novo = !p::auditoria_segurada_de_teste();
+    p::pausar_a_auditoria_de_teste(false);
+    p::segurar_a_auditoria_de_teste(true);
+    let os_dois = estado_da_suite_devolvido();
+    let devolvidos = p::auditoria_pausada_de_teste() && !p::auditoria_segurada_de_teste();
+    let o_da_suite = estado_da_suite_devolvido();
+    if solto != Err("o caso deixou o coletor da auditoria solto") || !pausado {
+        return Err("o executor nao viu, ou nao pausou de novo, o coletor solto");
+    }
+    if segurado != Err("o caso deixou o journal segurado") || !solto_de_novo {
+        return Err("o executor nao viu, ou nao soltou, o journal segurado");
+    }
+    if os_dois.is_ok() || !devolvidos {
+        return Err("o executor nao devolveu o coletor e o journal juntos");
+    }
+    o_da_suite.map_err(|_| "o executor reprovou o estado da suite")
 }
 
 /// O estado que a suíte dá a cada caso, conferido e devolvido depois dele:
