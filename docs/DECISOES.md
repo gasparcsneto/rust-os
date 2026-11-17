@@ -797,7 +797,12 @@ completa.
 
 **O que não espera** — as correções [B] que o README já separou, com a
 numeração dele, cada uma com os seus testes. A (1), a (3), a (4) e a (5)
-estão **feitas**, no `ee4ea45`, com o [A1-4](#a1-4):
+estão **feitas**, no `ee4ea45`, com o [A1-4](#a1-4); e o adversário
+delas achou a mesma janela da (3) no `user.run` que um processo pede pela
+interface nativa — o processo isolado ou encerrado entre o gate e o
+nascimento ganhava um processo livre —, fechada no `6cea470`, com o
+nascimento do `fork` refazendo as perguntas do gate dele e as recusas de
+quem pede um processo dizendo o processo:
 
 - a (1): o fio `energia` criado no boot, parado, como o do botão;
 - a (3): a contenção conferida de novo no nascimento, antes de o filho

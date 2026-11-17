@@ -418,14 +418,14 @@ kernel/src/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
 │   │   └── par/
 │   │       └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado no meio do `fork`, que não ganha filho, e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer — e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa ou que sai no meio do `fork`, que não ganha filho; o processo isolado ou encerrado no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer — e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 │   ├── trava_da_auditoria.rs os casos do tempo com a trava da auditoria — a do gate — em `audit.tail`, `audit.verify` e no anexar: a cauda pelo gate em cada `after` e cada `count`, igual ao anel e com o elo refeito; `audit.head` e `audit.verify` da mesma hora, e o anel no limite de 1023, 1024 e 1025 registros, em que `anexar` e `anexar_preparado` fazem a mesma cadeia; a resposta do `audit.verify` em cada ramo, e a mesma pela conta com a trava — sem memória para a fotografia, com um lugar menor que o anel e no post-mortem —, com o caminho de cada um contado, e a cadeia que não confere, de ponta a ponta, em cada caminho; nada pedido nem devolvido ao alocador com a trava na mão — nem ao ler a política de novo —, pela conta do próprio alocador, com os controles; a âncora de uma declaração fora da janela; o registro que sai pela ponta com o `Arc` seguro; produtores em vários núcleos com um leitor que acompanha a cadeia como o NSF e outro que verifica, conferidos contra o journal; o anel dando a volta sob verificações em vários fios, com a memória de volta ao patamar; e três coletores e uma compactação no meio
 │   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
-│   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos — e, no `fork`, o processo que bifurcou e quantos dos contados são mortos por recolher —, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, e o processo do `user.run` que conta até o recolhimento
+│   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos — e, no `fork` e no `user.run` que um processo pede pela interface nativa, o processo que pede, e quantos dos contados são mortos por recolher —, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, o processo do `user.run` que conta até o recolhimento, e o órfão que não vira zumbi do fio que toma a vaga do pai
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
@@ -5477,14 +5477,45 @@ registro de cada uma no ponto em que nasceu.
   um processo isolado — o isolamento é do fio, e o filho nasce com outro.
   Agora a chamada confere de novo no nascimento, antes de o filho poder
   rodar — a última palavra de quem bifurca, com a vaga, a pilha e o espaço
-  prontos (`fios::bifurcar`) —, com a mesma pergunta e a mesma recusa do
-  gate (`autorizacao::reconfirmar_bifurcacao`: `DENY_CONTAINED` na
-  auditoria, `NEGADO` ao processo): quem está contido não bifurca, regra
-  nenhuma nova. Recusado, o filho não nasce, e a vaga, a pilha e o espaço
-  voltam; um isolamento depois dessa pergunta acha o filho já na tabela,
-  como um filho de um instante antes. O caso `contencao: o isolado no meio
-  do fork nao ganha filho` isola o pai no meio do nascimento, pelo gancho
-  da suíte. O adversário
+  prontos (`fios::bifurcar`) —, com as mesmas perguntas e as mesmas
+  recusas do gate (`autorizacao::reconfirmar_bifurcacao`: `DENY_CONTAINED`
+  na auditoria, `NEGADO` ao processo): quem está contido não bifurca,
+  regra nenhuma nova. Recusado, o filho não nasce, e a vaga, a pilha e o
+  espaço voltam; uma mudança depois dessas perguntas acha o filho já na
+  tabela, como um filho de um instante antes. O caso `contencao: o isolado
+  no meio do fork nao ganha filho` isola o pai no meio do nascimento, pelo
+  gancho da suíte. O adversário das correções achou a mesma janela no
+  `user.run` (o achado 1, reproduzido nas duas arquiteturas): o comando que
+  um processo pede pela interface nativa roda no executor, e não no fio
+  dele; o `permitir_processo` perguntava pela contenção do fio de agora —
+  o executor, que ninguém isola —, e o nascimento do lançado não tinha
+  última palavra. O processo isolado ou encerrado entre o gate e o
+  nascimento lançava um processo livre, com a autoridade dele, que o gate
+  deixava pedir o que recusava a quem o pediu. Agora o
+  `fios::criar_processo` tem a mesma última palavra recusável do `fork`, e
+  o `user.run` a usa para decidir o comando de novo — quem pediu, a
+  sessão, a revogação, o papel, a política e a contenção de agora
+  (`autorizacao::reconfirmar`, pelo processo guardado no pedido, e não
+  pelo executor) —: recusado, nada nasce, a vaga e a pilha voltam, a
+  recusa vai à auditoria como a execução da decisão do `user.run`, e quem
+  pediu ouve o código (`launched: false`, com `code` e `error`). Fora de
+  um comando — o servidor de janelas e o Terminal, no boot — não há
+  decisão a conferir de novo. O `permitir_processo` também pergunta por
+  quem pede — o processo do pedido nativo, com o programa que o gate
+  decidiu (`autorizacao::quem_pede_um_processo`). E a última palavra do
+  `fork` deixou de ser só a contenção (o achado 4): refaz as perguntas do
+  gate menos a conta — a contenção, a confiança no editor e o papel —, e o
+  filho de quem saiu ou teve a chave revogada no meio não nasce mais sem
+  papel, só ocupando a vaga. O `fork` não chama o `reconfirmar`, que é de
+  um comando em execução: a chamada de sistema não é um comando, e o gate
+  dela é o `permitir_processo`. A conta não é refeita em nenhum dos dois:
+  a que vale é a do escalonador, na seção crítica que reserva a vaga, pela
+  cota que o gate leu. Os casos `contencao: o isolado no meio do user.run
+  nao lanca` (do adversário: isolado, e encerrado), `contencao: a recusa do
+  user.run no nascimento diz o codigo`, `contencao: quem sai no meio do
+  user.run nao lanca`, `contencao: a credencial suspensa no meio do fork
+  nao ganha filho` (do adversário) e `contencao: quem sai no meio do fork
+  nao ganha filho`. O adversário
   da implementação achou mais três, também de fora da 14.1 — ela não os
   piora —; a (4) e a (5) estão feitas, e a (6) deixou de existir:
   (4) **feita**: o `process.terminate` de um
@@ -5506,13 +5537,47 @@ registro de cada uma no ponto em que nasceu.
   Agora ela leva o processo — `pelo processo N (<programa>)`, a mesma
   descrição do registro da bifurcação, abreviada só acima do teto do
   detalhe —, na recusa do gate e na do nascimento; o titular, o código e o
-  resto do registro não mudam, e a do `process.run`, que não é pedida por
-  processo nenhum, segue sem ela. O caso `zumbis: a recusa do fork diz o
-  processo que bifurcou`; (6) a escolha da vaga, na mesma seção crítica
-  do nascimento, perguntava a `e_zumbi` por cada terminado antes da
-  primeira vaga livre — quadrática no tamanho da tabela, como antes da
-  14.1, e limitada às 95 vagas. Deixou de existir com a (2): a escolha só
-  procura a primeira posição vazia, e não pergunta nada aos mortos.
+  resto do registro não mudam. O caso `zumbis: a recusa do fork diz o
+  processo que bifurcou`. O adversário achou que só a da cota no `fork` o
+  levava (os achados 2 e 3): agora toda recusa do gate a um processo que
+  pede outro — a contenção, a confiança no editor, o papel e a cota, no
+  gate e no nascimento — leva quem pede, no `fork` e no `user.run` que um
+  processo pede pela interface nativa, em que quem pede é o processo do
+  pedido (`autorizacao::quem_pede_um_processo`); a do `process.run` pedido
+  pelo canal, pelo console ou pelo kernel, sem processo que peça, segue
+  sem ela. Os casos `zumbis: a recusa do user.run nativo diz o processo
+  que pediu` e `contencao: o processo isolado e solto`, que confere a
+  recusa do gate ao `fork` do isolado; (6) a escolha da vaga, na mesma
+  seção crítica do nascimento, perguntava a `e_zumbi` por cada terminado
+  antes da primeira vaga livre — quadrática no tamanho da tabela, como
+  antes da 14.1, e limitada às 95 vagas. Deixou de existir com a (2): a
+  escolha só procura a primeira posição vazia, e não pergunta nada aos
+  mortos.
+  Os outros achados do adversário das correções (os achados 1 a 4 estão
+  acima, na (3) e na (5)): o **achado 8, feito** — a recusa da cota
+  separa os mortos dos zumbis perguntando a `e_zumbi` por cada terminado
+  do titular, e `e_zumbi` procurava o pai pela tabela inteira: até 95 × 95
+  comparações sob a trava do escalonador, com as interrupções mascaradas,
+  que um processo no teto da cota provocava a cada `fork` recusado. Agora
+  o filho guarda, ao nascer, a vaga do pai (`Fio::vaga_do_pai`) — um fio
+  não muda de vaga enquanto vive, e a vaga só passa a outro, com outro id,
+  depois do recolhimento —, e `e_zumbi` olha só ela, com a mesma pergunta
+  pelo id: a recusa faz uma volta só pela tabela, e o recolhimento e a
+  passada dos zumbis, que também perguntam por cada terminado, ganham o
+  mesmo. O caso `zumbis: o orfao nao e zumbi de quem toma a vaga do pai`
+  segura o coletor, recolhe só o pai e enche a tabela: o fio na vaga do
+  pai tem outro id, e o órfão segue recolhível; o **achado 6, não feito**: se o fio `energia` não sobe no boot —
+  sem memória para uma pilha, com a tabela vazia —, o reiniciar e o
+  desligar, o do botão inclusive, ficam recusados antes do journal até o
+  próximo boot. Tentar criá-lo de novo no pedido é simples, mas a suíte
+  não tem como tirar o fio do boot para exercitar a tentativa sem um
+  caminho de saída só de teste no laço dele, e a recusa é o lado seguro;
+  os **achados 5 e 7, informativos**, ficam como estão: o isolamento que
+  chega entre a última palavra do `fork` e o registro do nascimento é
+  gravado antes do `filho N` — na cadeia, o filho parece nascer de um pai
+  já isolado; ele foi decidido um instante antes —, e a recusa do
+  nascimento grava `M de M` com a cota que o gate leu, que é a de antes de
+  uma cota rebaixada no meio.
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -8791,11 +8856,16 @@ processos do papel: N de M`); a do nascimento, que só recusa quando
 outro processo do titular nasceu no meio, grava `M de M`. Quando há entre
 os contados mortos que esperam o coletor — os que o `process.list` não
 mostra —, a recusa diz quantos: `…: N de M, K mortos por recolher` (o
-achado A1-4). A recusa de um `fork` diz também o processo que bifurcou,
+achado A1-4). A recusa de um processo que pede outro — o que bifurca, ou
+o que pede o `user.run` pela interface nativa — diz também quem pede,
 como o registro da bifurcação permitida: `pelo processo P (<programa>):
-cota de processos do papel: …`. E a contenção de quem bifurca é
-conferida de novo no nascimento do filho, antes de ele poder rodar: um
-processo isolado no meio do `fork` não ganha filho.
+cota de processos do papel: …`; a do `user.run` pedido pelo canal ou pelo
+console, só o titular. E o que o gate perguntou é conferido de novo no
+nascimento, antes de o processo poder rodar: no `fork`, a contenção, a
+confiança no editor e o papel de quem bifurca; no `user.run`, o comando
+inteiro, decidido de novo (`autorizacao::reconfirmar`). O processo
+isolado no meio do `fork` não ganha filho, e o isolado no meio do
+`user.run` que ele pediu não lança.
 
 **O zumbi na cota** (a decisão 14.1, aprovada pelo dono do projeto em 7
 de novembro de 2026 na alternativa A: o zumbi conta na cota do titular —
@@ -9221,6 +9291,37 @@ A recusa da energia com o escalonamento congelado — o post-mortem, em que
 o fio do boot não roda — não tem caso na suíte: congelar o escalonamento
 para a suíte junto. Ela devolve o que a criação do fio devolvia ali quando
 ele nascia a cada pedido, e foi conferida pela leitura.
+
+### As mutações dos achados do adversário da soma das cotas
+
+Sete mutações contra as correções dos achados 1 a 4 e 8 do adversário
+das correções da soma das cotas (em [Decisões
+pendentes](#decisões-pendentes), na (3) e na (5) do item *A soma das
+cotas de processos e a cota por sessão*), uma de cada vez, no
+repositório, no x86_64 em debug — as cinco primeiras contra os casos
+`contencao:`, os `zumbis:` da recusa e os dois `processos:` do
+nascimento; as duas do achado 8 contra os `zumbis:`, `vagas:`,
+`recolhimento:`, `processos:` e `coleta:`, e de novo contra o caso do
+órfão. Na última rodada de cada uma, as sete reprovaram. A do achado 1
+(MA) rodou também no aarch64 em debug, e reprovou pelos mesmos três
+casos.
+
+| Mutação | Reprovada por |
+|---|---|
+| o nascimento do `user.run` sem a última palavra que decide o comando de novo (MA) | `contencao: o isolado no meio do user.run nao lanca` ("o processo isolado no meio do user.run lancou um processo livre"), `contencao: a recusa do user.run no nascimento diz o codigo` e `contencao: quem sai no meio do user.run nao lanca` |
+| a última palavra do `fork` só com a contenção, como antes (MB) | `contencao: quem sai no meio do fork nao ganha filho`: "o filho de quem saiu no meio do fork nasceu" |
+| as recusas a quem bifurca sem o processo — só o pedido nativo o leva (MC) | os quatro `zumbis:` da recusa do `fork`, `contencao: o processo isolado e solto` ("a recusa do fork do isolado nao diz o processo que bifurcou"), `contencao: o isolado no meio do fork nao ganha filho`, `contencao: a credencial suspensa no meio do fork nao ganha filho` e `contencao: quem sai no meio do fork nao ganha filho` |
+| quem pede sempre o fio de agora — o executor, no pedido nativo (MD) | `zumbis: a recusa do user.run nativo diz o processo que pediu` |
+| a resposta do `user.run` recusado no nascimento sem o código (ME) | `contencao: a recusa do user.run no nascimento diz o codigo` e `contencao: quem sai no meio do user.run nao lanca` |
+| o filho que não guarda a vaga do pai — nenhum terminado é zumbi (MF) | dezessete casos `zumbis:`, `vagas:` e `recolhimento:` ("o filho do colhedor nao virou zumbi") |
+| a vaga do pai sem a pergunta pelo id (MG) | `zumbis: o orfao nao e zumbi de quem toma a vaga do pai`: "o orfao virou zumbi de quem tomou a vaga do pai" |
+
+A MG sobreviveu à primeira rodada, contra os grupos inteiros: nenhum caso
+deixava a vaga do pai passar a outro fio com o órfão ainda na tabela — o
+coletor solto recolhe os dois na mesma passada. Ela não é equivalente: com
+a vaga tomada antes do recolhimento do órfão, ele viraria zumbi do fio
+novo, guardaria a vaga enquanto aquele vivesse, e nenhum pai o colheria. O
+caso do órfão foi escrito para ela, e a reprova.
 
 ### Mensagens
 
