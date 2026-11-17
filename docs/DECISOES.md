@@ -5,7 +5,11 @@ pedem a aprovação explícita do dono do projeto antes da primeira linha
 (`CLAUDE.md`, [1.6](../CLAUDE.md#16-as-decisões-a-b-c) e
 [5.3](../CLAUDE.md#53-as-decisões-c)). Elas estão espalhadas pelo README e
 por `docs/`; aqui ficam juntas, cada uma com os dados para decidir, para
-que o dono decida de uma vez e o desenvolvimento siga.
+que o dono decida de uma vez e o desenvolvimento siga. O bloco a decidir
+agora são os itens 1 a 6 da [ordem](#a-ordem-recomendada): as entradas
+curtas dos itens 7 a 12 não são para decidir neste bloco — a recomendação
+delas é provisória, e cada uma ganha a proposta completa quando chegar a
+vez.
 
 **Nada aqui está decidido.** Recomendar não é aprovar (1.6): cada entrada
 diz o que este dossiê recomenda, e nenhuma muda de estado sem a palavra do
@@ -61,7 +65,7 @@ continuidade.
 | Id | Decisão | Área de 5.3 | Destrava | Exposição de hoje | Fonte |
 |---|---|---|---|---|---|
 | [M-EXEC](#m-exec) (DE-1) | O `exec` e a malha do processo, com a F6 | identidade de programa e proveniência | o handoff (fraco); um limite do SDK | baixa: enquanto a imagem nova exerceria `fabric.offer` sobre a intenção, a descoberta mostra o endpoint com o programa que não roda mais; e a imagem nova lê e cancela as entregas da anterior, e vê os fluxos dela | [README](../README.md#decisões-pendentes) |
-| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; o Gate e a Policy (quem escuta os nomes do sistema) | o consentimento (fase 13); o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, e recebe o que a Pessoa digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
+| [DT-1](#dt-1) | O Terminal, o servidor de janelas e o teclado da Pessoa, com o A3 e o A5 | identidade e confiança; o Gate e a Policy (quem escuta os nomes do sistema) | em parte, o consentimento (fase 13) e o aceite do handoff (DH-2); os resíduos do passo 1, do ξ e do ο | **real**: outro principal toma o foco, ou o nome `terminal` ou `janelas`, ou abre uma janela logo antes de a Pessoa digitar, e recebe o que ela digita — a senha também —, sem registro | [README](../README.md#decisões-pendentes) |
 | [COTA-SOMA](#cota-soma) | A soma das cotas de processos e a cota por sessão | semântica de operação (a cota e a alocação) | a operação sob carga (fase 14); mais sessões e dispositivos (fase 15) | **real**, pela leitura: a pessoa que entra muitas vezes, em qualquer máquina; a mesma chave nas 8 sessões, com muitos núcleos ou com a máquina em uso; ou alguns titulares juntos — enchem a tabela de fios, e nada nasce, nem o Terminal, nem o `energia` do `system.reboot` | [README](../README.md#decisões-pendentes) |
 | [R15-HANDOFF](#r15-handoff) (DH-1 a DH-3) | O handoff, o próximo marco da fase 15: o que é, quem recebe, para onde | identidade e autoridade entre dispositivos | a linha em curso, a fase 15; a continuidade | nenhuma | [Roteiro](../README.md#roteiro), fase 15 |
 | [R13-BOOT](#r13-boot) | A cadeia de boot confiável | custódia (a política dos selos, na (b)); confiança (uma raiz nova, na (a) e na (c)) | a fase 13; a base de R12-IC-TPM e R12-IC-VALOR; e o caminho do Secure Boot que a fase 14 deixou de fora — a recomendação o deixa para depois, como opção do operador | **real, com a máquina na mão**: o disco e a máquina juntos abrem o selo da identidade, e o disco e o mesmo TPM satisfazem a política das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
@@ -102,8 +106,11 @@ executa](#as-que-o-coordenador-executa)).
 2. **DT-1** — a maior exposição real que espera uma decisão: a credencial
    da Pessoa capturada por outro principal, sem registro. E é a base do
    consentimento e do aceite do handoff (a DH-2, "aceite só pela entrada
-   dela"): nada se pergunta à Pessoa por um caminho que outro processo
-   imita.
+   dela") — em parte: a recomendação fecha o nome e o foco tomados, a
+   janela de outro principal que abre logo antes de uma pergunta e, para
+   quem aperta a sequência de atenção, a que imita o console; mas o aceite
+   e a confirmação não são linhas de credencial, e uma janela que os imita
+   a DT-1 não impede — a DH-2 e o R13-CONSENT decidem isso.
 3. **COTA-SOMA** — a outra exposição real: a pessoa que entra muitas
    vezes, a mesma chave em várias sessões, ou alguns titulares juntos
    param a criação de fios da máquina. A decisão é estreita, e as
@@ -112,8 +119,9 @@ executa](#as-que-o-coordenador-executa)).
    curso — o roteiro já o põe primeiro, e por isso o DN-4 é [B] —, com as
    recomendações que o dono já viu. Depende da DE-1 (fraco) e da DT-1, e
    bloqueia a continuidade.
-5. **R13-BOOT** — fecha a exposição de quem tem a máquina na mão; é o
-   incremento seguinte da fase 13; e é a base de custódia que R12-IC-TPM e
+5. **R13-BOOT** — fecha, na máquina de referência com o PTT, a exposição
+   de quem tem a máquina na mão; com um TPM discreto, fica o barramento. É
+   o incremento seguinte da fase 13, e a base de custódia que R12-IC-TPM e
    R12-IC-VALOR pedem. Abre o caminho do Secure Boot que a fase 14 deixou
    de fora, mas a recomendação o deixa para depois, como opção do
    operador.
@@ -227,9 +235,11 @@ sentido e a outra ponta" ([FLUXOS, Os comandos](FLUXOS.md#os-comandos)).
 
 **O impacto.** `kernel/src/malha.rs` e o caminho do `exec` em
 `kernel/src/usuario`, que já encerra ali os fluxos da ponta; a janela de
-nonces do processo; a entrega resolvida pelo programa, e não só pelo
-canal, no `fabric.status` e no `fabric.cancel`; o fluxo resolvido do
-mesmo jeito no `stream.status` (a F6); o registro `fabric.withdraw` com o
+nonces do processo; a entrega resolvida por uma marca da troca, e não
+pelo programa — que, numa troca para si mesmo, é o mesmo: o mesmo nome,
+resumo e editor (`politica/src/malha.rs:134-139`) —, nem só pelo canal,
+no `fabric.status` e no `fabric.cancel`; o fluxo resolvido do mesmo jeito
+no `stream.status` (a F6); o registro `fabric.withdraw` com o
 motivo; o SDK e a MALHA na documentação. As conexões de rede não mudam.
 
 **A recomendação.** A dada no relatório da continuidade: **o `exec` fecha
@@ -237,9 +247,10 @@ os endpoints do processo e o que espera neles, e zera as janelas de
 nonces — como o fim do processo —, dentro da v2**; e, com ela, a F6. É
 pequena, e bloqueia — fraco — o handoff: **decidir primeiro**. É a (a): o
 mesmo ciclo de vida da ponta de um fluxo — um objeto da malha é do
-processo **e** do programa que o criou —, e a identidade de um endpoint
-volta a ser sempre a do programa que roda. A janela zerada é o que separa
-as entregas dos dois programas: com a de antes, um nonce da imagem nova,
+processo **e** da imagem que o criou, e uma troca para o mesmo programa
+também é outra imagem —, e a identidade de um endpoint volta a ser sempre
+a do programa que roda. A janela zerada é o que separa as entregas das
+duas imagens: com a de antes, um nonce da imagem nova,
 com o conteúdo de uma entrega da anterior, devolveria o id dela — "o
 mesmo nonce com o mesmo conteúdo é o reenvio" —, a mesma confusão de
 proveniência. Mas a janela não cobre o que a anterior mandou — a entrega
@@ -254,11 +265,13 @@ novo e recebe; o nonce que a anterior usou não devolve o id da entrega
 dela; o `fabric.status` e o `fabric.cancel` de uma entrega da anterior
 respondem à nova como para uma entrega que não existe, e a entrega segue
 para o destino; e o `stream.status` de um fluxo da anterior — a lápide, e
-o fechado que a outra ponta ainda lê — responde do mesmo jeito. As
-mutações — o endpoint que sobrevive ao `exec`, a janela que não zera, a
-entrega da anterior alcançável pela nova, o fluxo da anterior visível —,
-uma de cada vez, reprovam. As duas arquiteturas; a bancada `cargo xtask
-sdk`, que não deve mudar.
+o fechado que a outra ponta ainda lê — responde do mesmo jeito. E o mesmo
+caso com a troca para o mesmo programa — o mesmo nome, resumo e editor —,
+que só a marca da troca separa. As mutações — o endpoint que sobrevive ao
+`exec`, a janela que não zera, a entrega da anterior alcançável pela nova,
+o fluxo da anterior visível, a entrega resolvida pelo programa e não pela
+marca da troca —, uma de cada vez, reprovam. As duas arquiteturas; a
+bancada `cargo xtask sdk`, que não deve mudar.
 
 **O que não espera.** Conferir quais programas da imagem oferecem um
 endpoint e trocam de imagem: os dados da decisão.
@@ -268,12 +281,13 @@ entre dois processos do titular. O DS-1 — o aviso só sinaliza: a troca
 larga as designações antes do resto, como hoje. O DS-2: o SDK diz que "os
 endpoints persistem, como sempre persistiram" na troca de imagem
 (SDK.md:320-326), e o contrato manda que "um nome nunca muda de sentido"
-(SDK.md:74-76); fechar os endpoints no `exec` muda o que o contrato
-descreve, e a decisão é também dizer que isso cabe "dentro da v2". E "o
-processo como endpoint" (1.7): os objetos da malha continuam do
-processo — "É do processo: só ele o abre, lê o que chega por ele, confirma
-e o fecha, e ele some com o processo" (MALHA.md:32-34) —; a (a)
-acrescenta que acabam também quando o programa dele muda.
+(SDK.md:74-76); fechar os endpoints e tirar da imagem nova o que a
+anterior mandou e os fluxos dela muda o que o contrato descreve, e a
+decisão é também dizer que isso cabe "dentro da v2". E "o processo como
+endpoint" (1.7): os objetos da malha continuam do processo — "É do
+processo: só ele o abre, lê o que chega por ele, confirma e o fecha, e ele
+some com o processo" (MALHA.md:33-35) —; a (a) acrescenta que acabam
+também quando a imagem dele muda.
 
 ### DT-1
 
@@ -419,8 +433,13 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
      Ctrl+Alt+Del.
    - (e) O A5, pelas opções da pendência: dobrado na DT-1b — com o foco
      que não sai da linha do login (2b), a tecla vai ao console, e não
-     vira registro —; ou, parcial, um limitador de ritmo dos registros
-     `keyboard` recusados.
+     vira registro, quando o foco está no console ao começar o login —;
+     ou, parcial, um limitador de ritmo dos registros `keyboard`
+     recusados.
+   - (f) **(sugestão do revisor, para o dono considerar)** O foco na
+     abertura — a segunda metade da 2(a) — só para quem tem a permissão da
+     1(b): a janela de outro principal só ganha o foco pelo clique da
+     Pessoa.
 3. **As linhas da Pessoa, e o que a tecla deixa.**
    - (a) As linhas de credencial são da Pessoa: o `ui.claim` de um agente
      nelas, e o `press` dele na caixa de fechar de um Terminal com alguém
@@ -451,15 +470,32 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
 - 1(c) não fecha nada: a senha continua capturada, agora com registro.
 - 2(a) muda o caminho do foco de uma janela que não acaba de abrir; um
   programa que hoje o pede a qualquer hora deixa de recebê-lo.
-- 2(b) é uma regra nova no roteamento da tecla; sem a 1(a), uma janela
-  falsa aberta antes da linha da senha ainda engana a Pessoa.
+- 2(b) é uma regra nova no roteamento da tecla, e só segura o foco
+  depois que a linha pede a credencial: uma janela falsa aberta antes da
+  linha da senha ainda engana a Pessoa — mesmo com a 1(a) ou a 1(b): a
+  reserva dos nomes não impede uma janela que se passa pelo Terminal, e a
+  2(a) dá o foco à que acaba de abrir. Só a 2(d) fecha as duas.
 - 2(c) põe um protocolo novo entre cada programa e o servidor: o foco de
   uma superfície que não é dele.
-- 2(d) é uma tecla que os três caminhos de hardware — o PS/2, o
-  `virtio-input` e o USB — precisam entregar ao kernel, e uma tela que o
-  kernel desenha.
+- 2(d): a tecla já chega ao kernel pelos três caminhos — o PS/2, o
+  `virtio-input` e o USB entregam a `teclado::evento`
+  (`kernel/src/teclado.rs:310`) —, e as teclas de função já vão ao
+  console com o foco numa janela (`:322-328`, antes da conferência do
+  foco, em `:342-348`). O custo é o console de verdade mostrado por cima
+  de qualquer janela, uma tela que o kernel desenha. E ela só protege
+  quem a aperta antes de digitar: é um hábito. **(minha)** Exigi-la antes
+  de cada credencial, como o "Ctrl+Alt+Del para entrar", tira o hábito do
+  caminho, mas muda o login de todo console e as bancadas com a pessoa no
+  teclado.
 - 2(e): o limitador de ritmo só espaça os registros — a conta, e parte do
   ritmo, continuam na auditoria.
+- 2(f): os programas que pedem o foco ao abrir a janela — o `conversa` e o
+  `formulario` (`programas/src/bin/conversa.rs:318`,
+  `programas/src/bin/formulario.rs:111`) — deixam de recebê-lo, e a
+  Pessoa clica; e a permissão da 1(b) passa a valer duas coisas: escutar
+  um nome do sistema e ganhar o foco ao abrir. Fecha a janela de outro
+  principal que abre logo antes de uma pergunta, e não a que imita: nesta,
+  a Pessoa ainda clica.
 - 3(a) muda a coordenação: a Pessoa passa a ter prioridade sobre o agente
   nas linhas de credencial. No resto, a regra fica.
 - 3(c): agregar ou omitir muda o que o `observador` lê, e os casos e as
@@ -471,10 +507,13 @@ digita; e o Enter de agente só quando pedido, amarrado à conexão.
   agentes já não editam essas linhas, e a exceção vale só nelas.
 
 **O impacto.** O kernel: `eventos.rs` (os nomes), `superficies.rs` (o
-foco), `barra.rs`, `teclado.rs` (o histórico), `interpretador.rs` e
-`coordenacao.rs` (as linhas e o arrendamento), `ui.rs`, e os relatórios em
-`agent/commands.rs`; os programas `terminal` e `janelas`; a política, só
-na 1(b); o `cargo xtask invariantes`, os nomes reservados; e a
+foco; na 2(f), o foco na abertura decidido pelo gate), `barra.rs`,
+`teclado.rs` (o histórico; na 2(d), a sequência, ao lado das teclas de
+função), `interpretador.rs` e `coordenacao.rs` (as linhas e o
+arrendamento), `ui.rs` e, na 2(d), o console por cima das janelas, e os
+relatórios em `agent/commands.rs`; os programas `terminal` e `janelas`, e,
+na 2(f), os que pedem o foco ao abrir; a política, na 1(b) e na 2(f); o
+`cargo xtask invariantes`, os nomes reservados; e a
 documentação dos [Consoles](../README.md#consoles), da
 [Coordenação](../README.md#coordenação), de [Operar por uma
 pessoa](../README.md#operar-por-uma-pessoa), do
@@ -484,30 +523,73 @@ nome reservado é comportamento, e não um nome do contrato v2: conferir
 contra a regra do DS-2 ([SDK, O contrato v2](SDK.md#o-contrato-v2-ds-2)).
 
 **A recomendação.** Aprovar um princípio — **o caminho da Pessoa** —, de
-que os itens da DT-1 saem como [B]:
+que os itens da DT-1 saem como [B]. O dono decide parte a parte; cada uma
+fecha o que a tabela diz, e só isso:
 
-1. o Terminal e o servidor de janelas são os únicos que escutam os nomes
-   `terminal` e `janelas`. O dono decide se a reserva é mecanismo — a
-   1(a), uma regra do kernel fora do gate — ou autorização — a 1(b), uma
-   permissão que a política enumera. Este dossiê recomenda a **1(b)**:
-   ela não abre exceção em "toda operação passa pelo Gate" nem em "a
-   Policy como fonte da decisão", e segue o precedente do
-   `terminal.attach`; o preço é uma permissão a mais no vocabulário;
-2. o foco muda pelo clique da Pessoa e para a janela que acaba de abrir, e
-   não sai de uma linha que pede credencial (2a e 2b) — o que dobra o A5:
-   a tecla do login não vai a janela nenhuma, e não vira registro (2e);
-3. as linhas de credencial são da Pessoa: o `ui.claim` e o `press` de um
-   agente nelas — e na caixa de fechar de um Terminal com alguém entrado —
-   são recusados e gravados, e a tecla do Terminal é coordenada, e entra
-   no histórico, onde o console a consome (3a);
-4. a tecla de uma credencial não deixa rastro fora do console — nem na
-   versão e no prazo do campo, nem no `revision` da árvore (3d) —, e os
-   contadores do `system.read` deixam de andar tecla a tecla: agregados,
-   somados por janela de tempo (3c).
+| O caminho de captura | O que o fecha |
+|---|---|
+| o nome `terminal` ou `janelas` tomado por outro principal, que recebe o `ABRIR` da barra | a 1(a) ou a 1(b) |
+| o foco pedido a qualquer hora — `controlar` com `FOCO` —, também no meio de uma credencial (a DT-1b, o N2a) | a 2(a) com a 2(b) |
+| a janela que abre logo antes de uma pergunta à Pessoa e ganha o foco na abertura. Com alguém entrado no console físico, a tecla vai a ela (`kernel/src/interpretador.rs:1069-1080`): o "senha⏎" que a Pessoa digita para o console, e a senha atual depois. Sem ninguém entrado, com o foco nela ao começar o login, as teclas do login, um registro cada uma (o A5) | a 2(f), para a janela de outro principal; a 2(d), para quem a aperta |
+| a janela que se passa pelo Terminal, pela linha do login ou por uma pergunta, sem escutar nome nenhum: a Pessoa clica nela, e ela ganha o foco pelo clique | só a 2(d), para quem a aperta |
+| o agente nas linhas de credencial — o `ui.claim`, o `press` na caixa de fechar (a DT-1d, a DT-1e) | a 3(a) |
+| o rastro da tecla — a versão, o prazo e o `revision` (a DT-1c); os contadores (o A3) | a 3(d) e a 3(c) |
 
-A 2(d) fica para quando o caminho da Pessoa precisar dela. Fica, como
-resíduo aceito, a senha digitada no lugar errado (o A4): numa linha de
-comando, nada distingue uma senha de um comando.
+Nenhuma delas faz do aceite do handoff (a DH-2) ou da confirmação do
+consentimento (o R13-CONSENT) uma pergunta que nenhum processo imita: eles
+não são linhas de credencial — a 2(b) e a 3(a) não os cobrem —, e o
+aceite da DH-2(a) é pedido por um programa, numa janela. A 2(f) tira
+deles a janela de outro principal que toma o foco ao abrir — e tira do
+próprio pedido o foco na abertura, para que ele não o tome enquanto a
+Pessoa digita noutra janela —; a imitação continua. Só uma pergunta feita
+no console de verdade, depois da sequência da 2(d), não se imita, e ela
+pede ao kernel o que a DH-2(a) não pede: isso é da DH-2 e do R13-CONSENT
+decidir.
+
+Este dossiê recomenda:
+
+1. **os nomes**: o Terminal e o servidor de janelas são os únicos que
+   escutam `terminal` e `janelas`. O dono decide se a reserva é mecanismo
+   — a 1(a), uma regra do kernel fora do gate — ou autorização — a 1(b),
+   uma permissão que a política enumera. Este dossiê recomenda a
+   **1(b)**: ela não abre exceção em "toda operação passa pelo Gate" nem
+   em "a Policy como fonte da decisão", e segue o precedente do
+   `terminal.attach`; o preço é uma permissão a mais no vocabulário. Pela
+   1(b), a DT-1a e o O6 ficam com o `terminal.attach`: só quem a política e
+   o manifesto deixam tem o pseudo-terminal — em 7564758, o `terminal`
+   (`programas/src/bin/terminal.rs:70`) e o `pseudo` da suíte
+   (`programas/src/bin/pseudo.rs:24`);
+2. **o foco**: muda pelo clique da Pessoa e para a janela que acaba de
+   abrir (2a) — na abertura, só a de quem tem a permissão da 1(b) (2f) —,
+   e não sai de uma linha que pede credencial (2b): o que dobra o A5
+   quando o foco está no console ao começar o login (2e);
+3. **a sequência de atenção, já** (2d): é a única que fecha a janela que
+   imita, e a que leva a Pessoa ao console de verdade antes de uma
+   credencial, qualquer que seja a janela com o foco. O custo é o console
+   mostrado por cima das janelas: a tecla já chega ao kernel, e as teclas
+   de função já são do console com o foco numa janela (ver os riscos);
+4. **as linhas de credencial são da Pessoa** (3a): o `ui.claim` e o
+   `press` de um agente nelas — e na caixa de fechar de um Terminal com
+   alguém entrado — são recusados e gravados, e a tecla do Terminal é
+   coordenada, e entra no histórico, onde o console a consome;
+5. **o rastro**: a tecla de uma credencial não deixa rastro fora do
+   console — nem na versão e no prazo do campo, nem no `revision` da
+   árvore (3d) —, e os contadores do `system.read` deixam de andar tecla a
+   tecla: agregados, somados por janela de tempo (3c).
+
+**O que fica aberto, com a recomendação inteira:** quem digita uma
+credencial numa janela que imita o console, sem apertar antes a
+sequência — a 2(d) protege quem a aperta —; o aceite e a confirmação,
+como acima; e, como resíduo aceito, a senha digitada no lugar errado (o
+A4): numa linha de comando, nada distingue uma senha de um comando.
+
+**Sem a 2(d) agora** — se o dono a deixar para depois —, fica também a
+janela que abre logo antes de uma pergunta à Pessoa, ou que a imita;
+fecha com a 2(d). Com a 2(f), a que abre logo antes só pode ser do
+próprio `sistema`, e a que imita continua. **Sem a 2(f)**, a janela de
+outro principal que abre logo antes de uma pergunta ganha o foco, e
+recebe o que a Pessoa digita sem apertar antes a sequência — o caso mais
+à mão: uma superfície invisível, aberta na hora certa.
 
 **O plano de validação.**
 
@@ -515,32 +597,43 @@ comando, nada distingue uma senha de um comando.
   com a decisão: o processo de um agente que escuta `terminal` com o
   Terminal fechado; o que escuta `janelas` com o servidor fora; o dono de
   uma superfície invisível que pede o foco no meio da senha do login, da
-  `senha` e da cerimônia; a senha adiantada num Terminal; o `ui.claim` de
-  um agente na linha do nome; o `press` dele na caixa de fechar com a
-  Pessoa entrada; os contadores que o `observador` lê, com uma senha
-  digitada.
+  `senha` e da cerimônia; a janela de outro principal que abre logo antes
+  do `senha⏎`, com a Pessoa entrada no console físico, e a que tem o foco
+  quando o login começa, sem ninguém entrado; a janela que imita o
+  Terminal, clicada, e a sequência que leva a Pessoa ao console de
+  verdade, também com uma janela por cima; a senha adiantada num
+  Terminal; o `ui.claim` de um agente na linha do nome; o `press` dele na
+  caixa de fechar com a Pessoa entrada; os contadores que o `observador`
+  lê, com uma senha digitada.
 - As bancadas com a pessoa no teclado — `cargo xtask senha` e a do
   pareamento —, nas duas arquiteturas, em depuração e em release.
 - Uma mutação por regra, uma de cada vez e restaurada: o nome reservado
-  aceito; o foco dado no meio da credencial; o histórico escrito na
-  chegada; o `ui.claim` aceito; o `press` aceito; o contador por tecla; a
-  versão que anda por tecla na linha de credencial.
+  aceito; o foco dado no meio da credencial; o foco na abertura dado a
+  quem não tem a permissão; a sequência que não devolve o foco ao
+  console, ou que chega à janela; o histórico escrito na chegada; o
+  `ui.claim` aceito; o `press` aceito; o contador por tecla; a versão que
+  anda por tecla na linha de credencial.
 - Um agente adversário com uma tarefa só: capturar a senha da Pessoa por
-  qualquer caminho ([1.5](../CLAUDE.md#15-segurança-o-agente-adversário)).
+  qualquer caminho, também pela janela que abre antes e pela que imita
+  ([1.5](../CLAUDE.md#15-segurança-o-agente-adversário)).
 - A CI completa, verde no último commit.
 
-**O que não espera.** Os casos que reproduzem cada caminho de captura, sem
-mudar o comportamento: são os dados da decisão.
+**O que não espera.** Os casos que reproduzem cada caminho de captura —
+também a janela que abre logo antes e a que imita —, sem mudar o
+comportamento: são os dados da decisão.
 
 **As fechadas que ela toca.** O B3: um evento de hardware não é
-autoridade — a tecla é evento; quem age é a sessão. O B4: a troca da
+autoridade — a tecla é evento; quem age é a sessão. A sequência da 2(d)
+também: leva a Pessoa ao console, e não autoriza nada. O B4: a troca da
 própria senha é do console. E duas invariantes de 1.7, pela pergunta 1:
 "toda operação passa pelo Gate" e "a Policy como fonte da decisão". A
 1(a) é uma regra do kernel sobre quem escuta um nome, fora do gate e da
-política; a 1(b) põe a mesma reserva no gate. O foco (2) e as linhas da
-Pessoa (3) seguem regras que já existem fora do gate — "foco ≠
-autoridade", a regra da linha da pessoa — e não decidem o que se
-autoriza: dizem para onde a tecla vai.
+política; a 1(b) põe a mesma reserva no gate — e, com a 2(f), também o
+foco na abertura. O foco (2) segue regras que já existem fora do gate —
+"foco ≠ autoridade" — e diz para onde a tecla vai; e a 3(a) recusa, fora
+do gate, o `ui.claim` e o `press` de um agente nessas linhas, como a
+regra da linha da pessoa recusa a edição — uma restrição depois do gate,
+e não uma autorização.
 
 ### COTA-SOMA
 
@@ -564,9 +657,11 @@ protege a tabela:
   (README.md:5414-5415).
 
 Quanto disso uma identidade sozinha alcança depende dos núcleos. A cota
-do `operador` e a do `administrador`, na imagem, são 8
-(`politica/src/lib.rs:399` e `:231`): 8 sessões da mesma chave dão 64
-vagas, e com 4 núcleos sobram 89 — a chave sozinha não enche a tabela.
+do `operador`, na imagem, é 8 (`politica/src/lib.rs:399`); a do
+`administrador` não entra na conta: ele é um teto, que não se exerce
+(`kernel/src/autorizacao.rs:1012-1020`). 8 sessões da mesma chave de
+operador dão 64 vagas, e com 4 núcleos sobram 89 — a chave sozinha não
+enche a tabela.
 Cada núcleo ligado além do primeiro toma uma vaga para o ocioso dele, e
 as 95 vagas descem até as 32 de trabalho com os 64 núcleos ligados
 (README.md:8754-8759): numa máquina com muitos núcleos, ou em uso, a
@@ -746,7 +841,15 @@ fraca —; e a [DT-1](#dt-1), o caminho da Pessoa.
 - DH-2(a): o handoff só termina com a Pessoa diante do destino, e o
   acolhedor tem de estar no ar — lançado por ela. O aceite "só pela entrada
   dela" vale o que vale o caminho da Pessoa: sem a DT-1, outra janela
-  imita o pedido de aceite, ou toma o foco dele.
+  imita o pedido de aceite, ou toma o foco dele. Com a recomendação da
+  DT-1, o foco não se pede a qualquer hora, e a janela de outro principal
+  não o ganha ao abrir — nem o próprio acolhedor, que não toma o foco
+  enquanto a Pessoa digita noutra janela (a 2(f)) —; mas o aceite não é
+  uma linha de credencial — a 2(b) e a 3(a) não o cobrem —, e uma janela
+  que imita o pedido continua possível. Só um aceite pedido no console de
+  verdade, depois da sequência da 2(d), não se imita, e ele pede ao kernel
+  o que a DH-2(a) não pede: a DH-2 decide se pede o aceite assim, ou se
+  fica com a imitação como resíduo escrito.
 - DH-3(a): a Pessoa escolhe pelo nome, sem lista; quem tem muitos
   dispositivos lembra os nomes. É o que a D7 permite.
 
@@ -766,7 +869,8 @@ SDK. As bancadas de dois Dukes, nas duas arquiteturas e cruzadas.
   marco**.
 
 Depois da DE-1, e da DT-1: o aceite pela entrada da Pessoa pede o caminho
-dela.
+dela — e o que a DT-1 não fecha no aceite, a imitação, a DH-2 decide (ver
+os riscos).
 
 **O plano de validação.** Dois Dukes pareados — as bancadas do enlace, do
 pareamento e do SDK —, nas duas arquiteturas e nos pares cruzados: a
@@ -998,6 +1102,9 @@ do adversário do B4 da auditoria.
   do resumo, a credencial que volta a um estado anterior —; as duas
   arquiteturas. (b): a medida de quanto a base cresce por operação, na
   bancada.
+- **As fechadas.** A R1 e a R6, e a 1.7 — a auditoria e a proveniência
+  existentes: a (a) tira da base as decisões que não fixaram o estado
+  final.
 - **A recomendação provisória.** (b), medindo quanto a base cresce por
   operação, para saber quando a (a) vira necessária.
 - **Destrava.** A vida longa de uma máquina.
@@ -1036,14 +1143,16 @@ Decidido com a [ALC-TEMP](#alc-temp) (DX-1).
   registro: a Pessoa lê a auditoria do que foi feito em nome dela, ou no
   que é dela — um alcance novo de leitura —, e nada se pergunta antes. (d)
   Nada.
-- **Os riscos.** (a) para a automação de um agente no humano, e sem a DT-1
-  a confirmação se imita. (b) é autoridade dada por um tempo: o teto, a
-  enumeração e o fim — o prazo pelo tempo lógico, que pode parar depois de
-  um salto do civil para trás; a revogação de quem deu e de quem recebeu —
-  têm de ser da própria política, e não de uma tabela ao lado, senão é uma
-  segunda autorização. (c) não pode mostrar à Pessoa o que é de outros,
-  nem o que uma resposta cala — o mesmo `DENY_RESOURCE` para o que não
-  existe e o que é de outro.
+- **Os riscos.** (a) para a automação de um agente no humano; e a
+  confirmação não é uma linha de credencial: sem a DT-1, ela se imita, e
+  com a DT-1 recomendada também, a menos que seja pedida no console de
+  verdade, depois da sequência da 2(d) — uma pergunta nova no kernel. (b)
+  é autoridade dada por um tempo: o teto, a enumeração e o fim — o prazo
+  pelo tempo lógico, que pode parar depois de um salto do civil para trás;
+  a revogação de quem deu e de quem recebeu — têm de ser da própria
+  política, e não de uma tabela ao lado, senão é uma segunda autorização.
+  (c) não pode mostrar à Pessoa o que é de outros, nem o que uma resposta
+  cala — o mesmo `DENY_RESOURCE` para o que não existe e o que é de outro.
 - **A recomendação provisória.** (b) + (c), depois da DT-1; a (a) não, por
   ora: uma decisão que espera é um mecanismo novo no gate, e a (b) dá o
   mesmo controle sem ele. Não se delega identidade: o agente continua ele
