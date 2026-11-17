@@ -9610,7 +9610,11 @@ Na CI 439, o journal recusado no primeiro boot de um cenário não disse o
 motivo — ver [`docs/PERSISTENCIA.md`](docs/PERSISTENCIA.md#o-disco-hostil).
 
 `DUKE_CENARIOS` escolhe os cenários por pedaços do nome, e
-`DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só.
+`DUKE_BANCADA_LOG` manda a saída de todos para um arquivo só. E
+`DUKE_PARTE=k/n` roda só a parte `k` de `n` — os cenários de índice `i`
+com `i % n == k - 1`, na ordem da bancada —, para a CI dividi-la entre
+máquinas: todo cenário cai em exatamente uma parte, e um valor que não se
+lê para a bancada antes de compilar.
 
 ## Operação
 
@@ -12365,7 +12369,13 @@ as sondas de fumaça contra o kernel de produção, e a suíte nas duas
 arquiteturas em debug e release — e, nas duas, a suíte e a fumaça também na
 máquina que só tem `virtio-gpu`. Essa máquina e as duas bancadas longas —
 a de persistência, com os cortes de energia, e a de tempo — rodam cada uma
-num job à parte, ao lado do de testes, nas duas arquiteturas.
+num job à parte, ao lado do de testes, nas duas arquiteturas. O de testes
+se divide em partes que correm juntas, cada uma numa máquina — a suíte de
+depuração; o resto, com a suíte de release, as fumaças, os ELFs e o
+teclado USB; e, no ARM, o boot pela UEFI —, e a persistência do x86, a
+bancada mais longa, em duas metades (`DUKE_PARTE`): o caminho crítico da
+CI passa a ser a suíte de depuração, uns 100 minutos, e não mais os 221
+do job de testes do ARM inteiro.
 
 **Por que o QEMU.** É a bancada do Duke, e continua sendo — decisão tomada
 depois de comparar as alternativas. É a mesma do Redox, cujo caminho de todo

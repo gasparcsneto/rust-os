@@ -167,7 +167,7 @@ jobs:
           done
 
   testes:
-    name: Testes (${{ matrix.arch }})
+    name: Testes (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
     # O dobro do pior medido, de novo. Com as quedas nas fronteiras da
     # persistência, o job do x86 levava 34 minutos; com a compactação, o TPM
@@ -183,6 +183,14 @@ jobs:
     # parte, `persistencia`, ao lado deste, e este voltou a uns 100. Os
     # casos do gestor de canisters o levaram a 144 no x86 (CI 335), 39
     # deles na suíte em virtio-gpu, que foi para o job `video`.
+    #
+    # E o job se divide em partes que correm juntas, cada uma numa máquina:
+    # a suíte de depuração, o caminho crítico da CI; o resto — a suíte de
+    # release, as fumaças, os ELFs e o teclado USB —; e, no ARM, o boot
+    # pela UEFI, que leva mais de uma hora no emulador (no x86, minutos, e
+    # fica com o resto). Cada passo é um `cargo xtask` que compila o que
+    # usa: nenhum depende do anterior. Na CI 503, num job só, o ARM levou
+    # 221 minutos — 98 da suíte e 83 do iniciador, um depois do outro.
     timeout-minutes: 290
     strategy:
       # Sem fail-fast: quando uma arquitetura quebra, queremos saber na mesma
@@ -190,7 +198,17 @@ jobs:
       # plataforma costuma ser metade do diagnóstico.
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            parte: suite
+          - arch: x86_64
+            parte: resto
+          - arch: aarch64
+            parte: suite
+          - arch: aarch64
+            parte: resto
+          - arch: aarch64
+            parte: iniciador
     steps:
       - uses: actions/checkout@v4
 
@@ -207,8 +225,12 @@ jobs:
             target
             kernel/target
             programas/target
-          key: testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
+          # Um cache por parte: cada uma compila outra coisa. A segunda
+          # restore-key é a do job de antes da divisão.
+          key: testes-${{ matrix.arch }}-${{ matrix.parte }}-${{ steps.compilador.outputs.canal }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            testes-${{ matrix.arch }}-${{ matrix.parte }}-${{ steps.compilador.outputs.canal }}-
+            testes-${{ matrix.arch }}-${{ steps.compilador.outputs.canal }}-
 
       # A proveniência de outra rodada, que o cache de `target` traz, não vai
       # para o artefato desta.
@@ -236,12 +258,14 @@ jobs:
             swtpm python3
 
       - name: Suíte de testes
+        if: matrix.parte == 'suite'
         run: cargo xtask test --arch ${{ matrix.arch }}
 
       # O perfil de release exercita caminhos que o de debug não: as
       # otimizações podem expor comportamento indefinido que passa despercebido
       # sem elas, e num kernel isso costuma virar corrupção silenciosa.
       - name: Suíte de testes (release)
+        if: matrix.parte == 'resto'
         run: cargo xtask test --arch ${{ matrix.arch }} --release
 
       # A suíte roda com a feature `modo-teste`, que **troca** o laço do agente
@@ -254,12 +278,14 @@ jobs:
       # kernel compilado como se entrega e conversa com ele pelo socket, que é
       # o que um agente de verdade faz.
       - name: Fumaça (canal do agente, kernel de produção)
+        if: matrix.parte == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }}
 
       # E em release, que é a configuração que se entrega. A suíte já roda nas
       # duas otimizações; o laço de produção só rodava numa — o mesmo formato
       # de ponto cego que a fumaça existe para fechar.
       - name: Fumaça (release)
+        if: matrix.parte == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --release
 
       # As imagens ELF dos programas de usuário, conferidas por fora.
@@ -277,6 +303,7 @@ jobs:
       # Fica aqui, e não no job de qualidade, porque precisa do kernel
       # compilado para o alvo — e este job já o compila.
       - name: Imagens ELF dos programas
+        if: matrix.parte == 'resto'
         run: cargo xtask elf --arch ${{ matrix.arch }}
 
       # O iniciador UEFI, nas duas arquiteturas e nos dois firmwares.
@@ -294,6 +321,7 @@ jobs:
       # device tree descreve: passar pelo `-kernel` não diz nada sobre passar
       # por aqui.
       - name: Iniciador UEFI
+        if: matrix.parte == 'iniciador' || (matrix.parte == 'resto' && matrix.arch == 'x86_64')
         run: cargo xtask iniciador --arch ${{ matrix.arch }}
 
       # E uma terceira, com teclado USB no lugar do nativo.
@@ -305,6 +333,7 @@ jobs:
       # caminho. Uma máquina por teclado é o que torna cada rodada uma
       # afirmação sobre qual driver funciona.
       - name: Fumaça (teclado USB)
+        if: matrix.parte == 'resto'
         run: cargo xtask fumaca --arch ${{ matrix.arch }} --teclado usb
 
       # A proveniência de cada artefato que este job compilou: o compilador,
@@ -411,13 +440,24 @@ jobs:
   # corre ao lado dos testes, sem esticá-los. O teto é o dobro do pior
   # medido com a compilação.
   persistencia:
-    name: Persistência (${{ matrix.arch }})
+    name: Persistência (${{ matrix.arch }}, ${{ matrix.parte }})
     runs-on: ubuntu-latest
     timeout-minutes: 270
+    # A bancada do x86_64 é a mais longa da CI — 170 minutos na CI 503,
+    # contra 72 no ARM —, e roda em duas metades, uma por máquina: a parte
+    # k de n leva os cenários de índice i com i % n == k - 1 (DUKE_PARTE,
+    # `xtask/src/persistencia.rs`). Todo cenário cai em exatamente uma
+    # parte, e um cenário novo entra numa delas sem mexer aqui.
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            parte: 1/2
+          - arch: x86_64
+            parte: 2/2
+          - arch: aarch64
+            parte: 1/1
     steps:
       - uses: actions/checkout@v4
 
@@ -453,6 +493,8 @@ jobs:
             swtpm python3
 
       - name: Persistência
+        env:
+          DUKE_PARTE: ${{ matrix.parte }}
         run: cargo xtask persistencia --arch ${{ matrix.arch }}
 
       # O incidente de uma máquina que parou de andar — o estado de cada
