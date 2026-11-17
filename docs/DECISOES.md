@@ -71,7 +71,7 @@ continuidade.
 | [R13-BOOT](#r13-boot) | A cadeia de boot confiável | custódia (a política dos selos, na (b)); confiança (uma raiz nova, na (a) e na (c)) | a fase 13; a base de R12-IC-TPM e R12-IC-VALOR; e o caminho do Secure Boot que a fase 14 deixou de fora — a recomendação o deixa para depois, como opção do operador | **real, com a máquina na mão**: o disco e a máquina juntos abrem o selo da identidade, e o disco e o mesmo TPM satisfazem a política das chaves; o firmware não confere o iniciador | [Roteiro](../README.md#roteiro), fase 13 |
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
-| [AUD-JUNTO](#aud-junto) | A decisão de uma mudança no mesmo registro do journal que ela, ou antes | persistência e auditoria (a garantia escrita) | — | baixa: uma queda entre os dois registros deixa no disco a decisão sem a mudança; nenhuma mudança fica no disco sem a decisão dela antes | [PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal) |
+| [AUD-JUNTO](#aud-junto) | A decisão de uma mudança no mesmo registro do journal que ela, ou antes | persistência e auditoria (a garantia escrita) | — | baixa: uma queda entre os dois registros deixa no disco a decisão sem a mudança; e a decisão que sai do anel na janela, com a lacuna gravada antes por outro, deixa a mudança no disco só com a lacuna antes dela | [PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal), [README](../README.md#testes) |
 | [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
 | [ALC-TEMP](#alc-temp) (DX-1) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
 | [R13-DESFAZER](#r13-desfazer) | O desfazer | persistência e auditoria | fecha a fase 13 | nenhuma nova | [Roteiro](../README.md#roteiro), fase 13 |
@@ -127,10 +127,9 @@ executa](#as-que-o-coordenador-executa)).
    de fora, mas a recomendação o deixa para depois, como opção do
    operador.
 6. **AUD-ANEL, P-HISTORIA e AUD-JUNTO** — o lote rápido: exposição baixa,
-   poucas alternativas cada, e a recomendação que não mexe no código — as
-   duas primeiras, esperar medindo; a AUD-JUNTO, escrever a garantia que o
-   código dá —; com os riscos, o impacto e o plano já escritos, decididas
-   de uma vez.
+   poucas alternativas cada, e recomendações pequenas — as duas primeiras,
+   esperar medindo; a AUD-JUNTO, o padrão que o armazém já usa —; com os
+   riscos, o impacto e o plano já escritos, decididas de uma vez.
 7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
    depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
 8. **R13-DESFAZER** — fecha a fase 13; depende do R13-CONSENT.
@@ -1172,65 +1171,114 @@ antes** — o que a CI 509 mostrou, no pareamento.
   mudança de autoridade vai no mesmo registro do journal que a mudança —
   "a mudança e a decisão entram juntas, ou nenhuma entra" —, e nunca num
   anterior ([PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal), "A
-  decisão vai no registro da operação"; o README, "A auditoria também";
-  e a documentação de `gravar_sozinho` e do módulo, em
-  `kernel/src/persistencia.rs`). O código garante menos. O gate registra
-  a decisão antes de o handler tomar a ordem das gravações, e nessa janela
-  o coletor — que grava a auditoria pendente a cada dois segundos, ou na
-  hora, com meio anel esperando — ou a gravação de outro fio pode levá-la
-  num registro anterior: um só de auditoria, ou o da operação do outro
-  fio. Depois, `gravar_sozinho` acha a decisão já gravada e grava a
-  mudança sem ela, sem erro. A documentação
-  de `gravar_com_a_decisao` já diz o que o código faz: "junto — ou antes,
-  num registro só de auditoria".
+  decisão vai no registro da operação"; o README, "A auditoria também"; e
+  a documentação do módulo, de `gravar_sozinho` e de `concluir`, em
+  `kernel/src/persistencia.rs`). O código garante menos onde a decisão é
+  registrada antes de a ordem das gravações ser tomada. O gate registra a
+  decisão antes de o handler tomar a ordem, e nessa janela o coletor — que
+  grava a auditoria pendente a cada dois segundos, ou na hora, com meio
+  anel esperando ou com um pedido de dados esperando lugar no caminho da
+  auditoria — ou a gravação de outro fio pode levá-la num registro
+  anterior: um só de auditoria, ou o da operação do outro fio. Depois,
+  `gravar_sozinho` acha a decisão já gravada e grava a mudança sem ela,
+  sem erro. A documentação de `gravar_com_a_decisao` chega perto — "junto
+  — ou antes, num registro só de auditoria" —, sem o registro da operação
+  de outro fio. Só o
+  [ARMAZENAMENTO](ARMAZENAMENTO.md#a-ordem-de-uma-mutação) diz o que o
+  código faz — a decisão pode ir antes, levada pelo coletor —, e o armazém
+  o contorna: o registro da execução, que cita a decisão, é feito com a
+  ordem na mão e vai no registro do commit (`kernel/src/armazem.rs`,
+  `mudar_em_ordem`). As operações administrativas, a troca da própria
+  senha e a gravação do pareamento registram a decisão com a ordem na mão,
+  e o que se diz delas vale.
 - **A evidência.** A CI 509: "pareamento: esquecer e parear de novo"
   reprovou no boot pela UEFI do ARM, na parte 2 de 2, porque um caso
   anterior deixou o coletor solto, e ele levou a decisão de um
   `device.forget` num registro só de auditoria, antes do da desfeita
   (`kernel/src/pareamento.rs`, `esquecer_pelo_comando`: a decisão é do
-  gate, e a ordem é tomada depois). A suíte pausa o coletor, e agora o
-  confere depois de cada caso; fora dela, a janela é a de todo dia.
-- **O que vale e o que não vale.** Vale: uma mudança no disco tem a
-  decisão dela antes, na cadeia; a decisão nunca vai depois da mudança; a
-  reposição refaz a cadeia de qualquer registro. Não vale a atomicidade:
-  depois de uma queda entre os dois registros, o disco tem a decisão sem a
-  mudança — como uma decisão cuja execução falhou, mas sem o registro da
-  falha.
+  gate, e a ordem é tomada depois). Com uma espera de 2,5 segundos posta
+  antes da tomada da ordem, só numa rodada de experimento, e o coletor
+  solto, o caso reprova sempre; com o coletor pausado, passa. A suíte
+  pausa o coletor, e agora o confere depois de cada caso; fora dela, a
+  janela é a de todo dia.
+- **O que vale e o que não vale.** Vale: a decisão nunca vai depois da
+  mudança; uma mudança no disco tem antes dela, na cadeia, a decisão — ou,
+  se a decisão saiu do anel na janela, com mais de 1024 registros entre
+  ela e a gravação, e outro escritor gravou primeiro a lacuna que a cobre,
+  essa lacuna: a recusa de `gravar_sozinho` à decisão perdida só vê a
+  lacuna que a própria gravação leva —; e a reposição refaz a cadeia de
+  qualquer registro. Não vale a atomicidade: depois de uma queda entre os
+  dois registros, o disco tem a decisão sem a mudança — como uma decisão
+  cuja execução falhou, mas sem o registro da falha.
 - **A área de 5.3.** A semântica da persistência e da auditoria: a
   garantia escrita do que o journal guarda junto.
-- **As alternativas.** (a) Escrever a garantia real — junto ou antes,
-  nunca depois —, e o que uma decisão sem a mudança quer dizer depois de
-  uma queda, no PERSISTENCIA, no README e na documentação de
-  `gravar_sozinho`. Só documentação. (b1) O kernel cumprir o escrito: o
-  gate registra a decisão de uma mudança com a ordem das gravações na mão
-  — espera o journal em toda decisão de mudança. (b2) O coletor e as
-  gravações de outros fios não levam a decisão de um comando ainda em
-  execução. (c) Deixar como está.
+- **As alternativas.**
+  - (a) Escrever a garantia real — a decisão junto ou antes, nunca depois;
+    perdida na janela, a lacuna antes —, e o que uma decisão sem a mudança
+    quer dizer depois de uma queda, em todo lugar que promete o mesmo
+    registro (ver o impacto). Só documentação.
+  - (b1) O kernel cumprir o escrito: o gate registra a decisão de uma
+    mudança com a ordem das gravações na mão — espera o journal em toda
+    decisão de mudança —, como já fazem as operações administrativas, a
+    troca da própria senha e a gravação do pareamento.
+  - (b2) O coletor e as gravações de outros fios não levam a decisão de um
+    comando ainda em execução.
+  - (b3) O padrão do armazém: cada mudança decidida pelo gate grava, com a
+    ordem na mão, a execução que cita a decisão, no mesmo registro da
+    mudança — a decisão pode ir antes; a execução, nunca. A gravação exige
+    a execução, e não a decisão, neste registro, e a documentação diz isso
+    no lugar da promessa de hoje.
+  - (c) Deixar como está.
 - **Os riscos.** (a): nenhum no código; a garantia escrita fica mais
   fraca, e quem lê a auditoria depois de uma queda tem de saber que uma
-  decisão sem a mudança pode ser a de uma mudança que não chegou ao disco.
-  (b1): latência e contenção no gate, serializado com o disco. (b2): um
-  comando longo ou suspenso segura a drenagem, e o anel pode perder
-  registros; mais estado no caminho da auditoria. (c): a documentação
-  continua prometendo o que o código não faz.
-- **O impacto.** (a): o PERSISTENCIA, o README e a documentação de
-  `kernel/src/persistencia.rs`. (b1): o gate e a ordem das gravações, em
-  `kernel/src/autorizacao.rs` e `kernel/src/persistencia.rs`, para toda
-  decisão de mudança. (b2): o coletor, a drenagem e o anel da auditoria.
+  decisão sem a mudança pode ser a de uma mudança que não chegou ao disco,
+  e que uma mudança com a lacuna antes pode ter perdido a decisão. (b1):
+  latência e contenção no gate, serializado com o disco, em toda decisão
+  de mudança. (b2): um comando longo ou suspenso segura a drenagem, e o
+  anel pode perder registros; mais estado no caminho da auditoria. (b3):
+  um registro de auditoria a mais por mudança de autoridade, que é rara; e
+  cada caminho de mudança precisa gravar a execução dentro da ordem — um
+  que esqueça volta ao de hoje, e o `xtask` pode conferir quem conclui sem
+  ela. (c): a documentação continua prometendo o que o código não faz.
+- **O impacto.** (a): a documentação dos caminhos em que a decisão é
+  registrada antes de a ordem ser tomada — o PERSISTENCIA ("A decisão vai
+  no registro da operação" e o `key.create`), o PAREAMENTO (o
+  `device.forget`), o README ("A auditoria também", o `key.create` na
+  tabela de comandos, a tabela e o roteiro do armazém), a documentação de
+  `kernel/src/persistencia.rs` (o módulo, `gravar_sozinho`, `concluir`,
+  `gravar_operacao` e `gravar_atualizacao`), de `kernel/src/slots.rs`, de
+  `kernel/src/armazem.rs` e de `kernel/src/agent/commands.rs` — e o resumo
+  do `key.create`, que o `agent.describe` mostra. (b1): o gate e a ordem
+  das gravações, em `kernel/src/autorizacao.rs` e
+  `kernel/src/persistencia.rs`, para toda decisão de mudança. (b2): o
+  coletor, a drenagem e o anel da auditoria. (b3): os caminhos de mudança
+  que concluem fora do padrão do armazém — o `device.forget`, o
+  `key.create`, a atualização (`slots.rs`) e os que usam `concluir`,
+  `gravar_operacao` e `gravar_atualizacao` —; `gravar_sozinho`, cuja
+  exigência passa à execução; e a mesma documentação da (a), com a
+  garantia nova.
 - **O plano de validação.** (a): o revisor confere os textos contra o
-  código; um caso da suíte solta o coletor na janela — por um gancho antes
-  da tomada da ordem num handler — e confere que a decisão foi num
-  registro anterior, e que a mudança está no disco com a decisão antes
-  dela. (b1) e (b2): o mesmo caso, conferindo o mesmo registro; a bancada
-  de persistência com os cortes de energia; a medida da latência do gate
-  (b1) e da perda do anel sob carga (b2).
+  código; um caso da suíte solta o coletor na janela — por um gancho
+  antes da tomada da ordem num handler — e confere que a decisão foi num
+  registro anterior e que a mudança está no disco com a decisão antes
+  dela; outro faz a decisão sair do anel na janela e confere a mudança com
+  a lacuna antes. (b1), (b2) e (b3): os mesmos casos, conferindo o mesmo
+  registro — a decisão na (b1) e na (b2), a execução que a cita na (b3)
+  —; a bancada de persistência com os cortes de energia; a medida da
+  latência do gate (b1) e da perda do anel sob carga (b2); e, na (b3), a
+  mutação de um caminho sem a execução, que o caso e o `xtask` acusam.
 - **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
   não muda nenhuma das duas; a (b1) e a (b2) mudam o caminho da
-  auditoria, não o que ela registra.
-- **A recomendação provisória.** (a). Nada de segurança muda — nenhuma
-  mudança fica sem a decisão antes dela —, e a (b) custaria no caminho
-  quente do gate ou da auditoria uma atomicidade de que a cadeia não
-  precisa para ser verificável.
+  auditoria, não o que ela registra; a (b3) acrescenta, por mudança, o
+  registro de execução que o armazém já grava.
+- **A recomendação provisória.** (b3). Ela usa o mecanismo que o armazém
+  já usa e documenta, sem latência nova no gate nem estado novo no
+  coletor, e dá uma garantia que o código cumpre e confere: a mudança e a
+  execução que cita a decisão entram juntas, ou nenhuma; a decisão, junto
+  ou antes. A (a) é a alternativa mínima — nada de segurança muda, porque
+  a decisão nunca vai depois da mudança, e a que se perde fica marcada
+  antes dela, como lacuna —, mas deixa implícita a ligação entre a mudança
+  e a decisão, e a perde junto com a decisão que sai do anel.
 - **Destrava.** Nada do roteiro; a documentação passa a dizer o que o
   código faz.
 
