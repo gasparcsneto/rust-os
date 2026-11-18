@@ -33,6 +33,7 @@ mod aviso;
 mod coleta;
 mod contador;
 mod enlace;
+mod excecoes;
 mod fluxo;
 mod nascimento;
 mod orcamento;
@@ -41861,6 +41862,63 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "contador: em cada nucleo, o acesso do usuario ao contador esta como o kernel o escreveu",
         f: contador::contador_os_controles_em_cada_nucleo,
+    },
+    // O lote B2 do #448, no fim da tabela pelo mesmo motivo: a exceção que
+    // um processo provoca mata o processo, e não a máquina.
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o ud2 do anel 3 mata o processo, e a maquina segue",
+        f: excecoes::excecoes_o_ud2_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: a divisao por zero do anel 3 mata o processo, e a maquina segue",
+        f: excecoes::excecoes_a_divisao_por_zero_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o int1 do anel 3 mata o processo, e a maquina segue",
+        f: excecoes::excecoes_o_int1_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o TF ligado pelo processo mata o processo no passo seguinte",
+        f: excecoes::excecoes_o_passo_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o TF ligado antes da syscall nao chega ao anel 0, e mata o processo na volta",
+        f: excecoes::excecoes_o_passo_na_chamada_mata_o_processo_no_anel_3,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o NT ligado pelo processo nao chega ao kernel nas chamadas nem na troca de imagem",
+        f: excecoes::excecoes_o_nt_nas_chamadas_nao_chega_ao_kernel,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o int3 do anel 3 mata o processo, e nao registra e segue",
+        f: excecoes::excecoes_o_int3_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o push com o rsp nao canonico mata o processo, e a maquina segue",
+        f: excecoes::excecoes_a_pilha_nao_canonica_mata_o_processo,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o brk do estouro de proposito no EL0 mata o processo, e a pilha nao afunda",
+        f: excecoes::excecoes_o_brk_do_estouro_do_el0_mata_o_processo,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o brk do estouro na borda no EL0 mata o processo, e a guarda nao e pisada",
+        f: excecoes::excecoes_o_brk_da_borda_do_el0_mata_o_processo,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o brk do EL0 mata o processo, e nao registra e segue",
+        f: excecoes::excecoes_o_brk_do_el0_mata_o_processo,
     },
 ];
 

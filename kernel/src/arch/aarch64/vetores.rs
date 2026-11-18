@@ -357,21 +357,36 @@ extern "C" fn tratar_sync(quadro: &mut Quadro) {
         return;
     }
 
+    // Daqui em diante, nenhuma classe que o EL0 provoca é atendida com efeito
+    // do kernel antes de [`super::usuario::veio_de_usuario`]: o `svc` acima é
+    // a chamada de sistema, e a cópia na escrita abaixo, a falha que o
+    // kernel resolve pelo processo — e só. O `brk` era a exceção: os dois
+    // imediatos do estouro de propósito eram atendidos antes da pergunta, e
+    // um `brk #0xe5` de qualquer processo afundava a pilha de exceção até a
+    // guarda — a máquina parava —; com outro imediato, o `brk` do EL0
+    // registrava, pulava a instrução e seguia, e um processo enchia o log e a
+    // contabilidade das falhas sem limite (o achado do adversário do lote B
+    // do #448, corrigido no lote B2). Agora o `brk` do EL1 é o que era, e o
+    // do EL0 mata o processo, lá embaixo, como as outras falhas do EL0 —
+    // inclusive o `brk #1` que o `abort` de um programa vira
+    // (`programas::_start`).
+    let do_kernel = !super::usuario::veio_de_usuario(quadro);
+
     // O `brk` do estouro de propósito — ver
     // [`super::disparar_estouro_em_excecao`]. Afunda daqui, na pilha de
-    // exceção, até a guarda.
-    if ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO as u64 {
+    // exceção, até a guarda. Só do EL1.
+    if do_kernel && ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO as u64 {
         crate::traps::afundar_de_proposito();
     }
     // E o da borda: `sp` a 16 bytes da base da guarda, onde o quadro do
     // próximo aninhamento começaria na vaga de baixo — ver
-    // [`super::disparar_estouro_na_borda`].
-    if ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO_NA_BORDA as u64 {
+    // [`super::disparar_estouro_na_borda`]. Só do EL1.
+    if do_kernel && ec == 0x3C && esr & 0xFFFF == IMEDIATO_DO_ESTOURO_NA_BORDA as u64 {
         pisar_no_fundo_da_guarda();
     }
 
-    // `BRK` é a única outra classe que sabemos retomar hoje.
-    if ec == 0x3C {
+    // `BRK` do EL1 é a única outra classe que sabemos retomar hoje.
+    if do_kernel && ec == 0x3C {
         let seq = crate::traps::registrar(nome, quadro.elr, None, esr);
         crate::log_info!("traps", "breakpoint #{} em pc={:#x}", seq, quadro.elr);
 

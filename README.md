@@ -415,6 +415,7 @@ kernel/src/
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
+│   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
@@ -449,7 +450,7 @@ kernel/src/
 │   ├── programa.rs  mapeia o processo e desce de privilégio
 │   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
-│   └── exemplo.rs   sete programas mínimos, em assembly — o sétimo, o `contador`, só para a suíte
+│   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: oito no x86, três no ARM), também só para a suíte
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -2111,6 +2112,168 @@ $ cargo xtask agent log.tail '{"count":6}'
 ... info  "usuario" "filho por exec"
 ... info  "usuario" "processo encerrou com codigo 24"      <- o filho
 ```
+
+### A exceção do processo é do processo
+
+Toda exceção que o processador oferece tem tratador, e a regra é uma só
+nas duas arquiteturas — a do `#GP` e da falha de página no x86, a de toda
+falha do EL0 no ARM: vinda do anel 3, ou do EL0, a culpa é do processo, e
+ele morre, com a linha `processo morto por <motivo> #N em pc=P` no log e a
+falha contada (`traps.stats`); vinda do anel 0, ou do EL1, é do kernel, e
+é fatal — o post-mortem —, menos a cópia na escrita, que o kernel
+resolve. O `#MC` e o SError são sempre fatais: é o hardware. Fora a
+cópia na escrita e o `svc` do EL1 — a cessão de um fio do kernel —, o
+`int3` do anel 0 e o `brk` do EL1 são os únicos que voltam — o
+`debug.trigger` —, e o estouro de propósito do `debug.trigger` com
+`stack_overflow` — e, no ARM, `stack_overflow_edge` — só vale deles.
+
+Até o lote B2 do #448, no x86 só o `#GP` e a falha de página seguiam a
+regra: a IDT tinha o `#BP`, o `#UD` — fatal sem olhar o anel —, o `#GP`, a
+falha de página, o `#DF`, a NMI e as interrupções. O `ud2` de qualquer
+processo — e o `abort` de um programa compilado, que é o mesmo `ud2` —
+parava a máquina para todos os titulares; a divisão por zero, o `TF`
+ligado pelo `popfq`, o `int1` e o `push` com o `rsp` não canônico iam pela
+entrada ausente ao `#NP`, ausente, e dali ao `#DF`, fatal. No ARM, o `brk`
+do EL0 com um dos dois imediatos do estouro de propósito (0xE5 e 0xE6) era
+atendido antes de se perguntar de onde vinha, e afundava a pilha de
+exceção até a guarda (0xE5) ou pisava no fundo dela (0xE6) — fatal —; com outro imediato, registrava, pulava a
+instrução e seguia, e um processo enchia o log e a contabilidade das
+falhas sem limite. O que estava no anel da auditoria e ainda não tinha
+ido ao journal ficava só no cadáver: um processo agia e apagava o fim da
+própria trilha parando a máquina (o achado do adversário do lote B).
+
+Agora todas as exceções do crate `x86_64` — `#DE`, `#DB`, `#BP`, `#OF`,
+`#BR`, `#UD`, `#NM`, `#TS`, `#NP`, `#SS`, `#GP`, a falha de página, `#MF`,
+`#AC`, `#MC`, `#XM`, `#VE`, `#CP`, `#HV`, `#VC` e `#SX` — têm tratador — o
+`#DF` e a NMI já tinham —, pela mesma regra (`arch::x86_64::idt`), menos
+o `#MC`, sempre fatal, que roda na pilha do `#DF`.
+No ARM (`arch::aarch64::vetores`), os dois imediatos só valem do EL1, e o
+`brk` do EL0 mata o processo como as outras falhas do EL0; nenhuma outra
+classe que o EL0 provoca é atendida, antes da pergunta, com efeito do
+kernel — a chamada de sistema e a cópia na escrita, que o kernel resolve
+pelo processo, são as duas que a precedem.
+
+**O `#DB` e a entrada de `syscall`.** A `syscall` não troca a pilha: por
+três instruções o kernel roda com o `RSP` do processo. O `SFMask` — as
+flags que a entrada apaga — era só `IF` e `DF`. Com o `TF` do processo, o
+`#DB` do passo chegava ao anel 0 logo depois da `syscall` — sem tratador,
+ia pelo `#NP` ao `#DF` —, e um tratador sem pilha própria empilharia o
+quadro da exceção na pilha do processo, numa memória que outro fio dele
+escreve; e o `NT` do processo, que no modo longo só faz o `iretq` dar
+`#GP`, passava pela troca voluntária de fio (`ceder_cpu`, que não guarda
+as flags) ao fio que entrava — e o `iretq` da volta dele, a de um tratador
+que o tique preemptou, dava `#GP` no anel 0: a máquina parava. O `SFMask`
+é agora a máscara do Linux (`syscall_init`), inteira: as aritméticas, o
+`TF`, o `IF`, o `DF`, o `IOPL`, o `NT`, o `RF`, o `AC` e o `ID` — o
+kernel começa cada chamada no mesmo estado, e o processo recebe as dele de
+volta pelo `sysretq`. O `AC` no anel 0 só desliga o SMAP, que o kernel
+ainda não liga: entra antes dele. E o `#DB` tem uma pilha da IST própria
+(`gdt::IST_DEPURACAO`), como o `#DF` e a NMI: um `#DB` no anel 0 nunca
+escreve onde o processo manda — um aviso de depuração adiado por um `mov
+ss` até depois da `syscall` é o outro caminho até ali, além do `TF`. O
+`#DB` vindo do anel 3 não fica nela: a morte do processo continua na
+pilha de kernel do fio, a que o `#GP` usaria, vazia — o fio estava no
+anel 3 —, e a pilha da IST, sem guarda, não guarda o fio morto dormindo
+com as interrupções ligadas.
+
+**O que fica: o passo adiado por um `mov ss`, só no processador.** Com o
+`TF` ligado, o `mov ss` adia o `#DB` do passo dele até depois da
+instrução seguinte (o `pop ss` não existe em 64 bits); se ela leva ao
+anel 0 — a `syscall`, ou uma instrução que vira exceção —, o `#DB` chega
+no anel 0, na primeira instrução da entrada ou do tratador. A pilha da
+IST garante que o quadro não vai para a pilha do processo, e o tratador
+o tem por fatal, como todo `#DB` do anel 0: por esse caminho, num
+processador, um processo ainda para a máquina. O conserto conhecido — o
+do Linux (`exc_debug_kernel`), para o cenário do CVE-2018-8897 — trata o
+`#DB` do anel 0 com o `BS`
+no `DR6` como esse passo adiado, já que o kernel nunca anda em passos:
+apaga o `TF` do quadro e volta, e o processo morre pelo caminho de
+sempre — o `#DB` do anel 3 depois do `sysretq`, com o `TF` dele de
+volta, ou o tratador da exceção. Não entrou no lote B2: nenhum caso leva
+o passo adiado ao anel 0 — o QEMU 8.2 do TCG não adia o passo, e o `#DB`
+sai no anel 3, logo depois do `mov ss` (o adversário do lote B2 o
+conferiu nas fontes dele) —, e seria código sem teste num tratador de
+exceção. Fica para o lote B3, o seguinte, com um caso em que o próprio
+kernel liga o `TF` no anel 0.
+
+**O que fica, também: o LDT do reset e o FP/SIMD.** O adversário do lote
+B2 achou outro caminho do anel 3 até a máquina parada. O processador sai
+do reset — e cada secundário, do INIT da partida — com o LDTR válido, de
+base 0, e o kernel não o carrega: um seletor com o TI ligado (`mov ds`,
+`lsl`…) faz o processador ler o descritor no endereço 0x8 do processo,
+num acesso de supervisor, e a falha de página sem o `U` é tomada por do
+kernel. E achou o estado de FP/SIMD, que o kernel não salva nem zera,
+passando de um processo ao seguinte no mesmo núcleo — um canal entre
+titulares por fora do gate. Os dois ficam para o lote B3, com o resto do
+que ele achou.
+
+O `int3` do anel 3 não chega ao `#BP`: o portão tem DPL 0, e o `int3` de
+um anel acima dele é um `#GP` com o vetor no código de erro (0x1A) — o
+processo morre pelo `#GP`. Já era assim antes do lote B2 (a rodada antes
+da correção o mostrou); o `#BP` ganhou a regra também, para o dia em que o
+portão mudar. O `sysretq` com o `rcx` não canônico — a falha da Intel, o
+`#GP` no anel 0 com o `RSP` do processo — não tem caminho: o `rcx` é o
+endereço de volta de uma `syscall` do processo, no espaço dele
+(`BASE..TETO`, longe da borda da metade baixa), o de um filho de `fork`,
+que é o do pai, ou a entrada de um ELF numa troca de imagem, que o
+carregador confere dentro de `BASE..TETO`.
+
+A suíte o confere com um programa mínimo por caso (`exemplo::Excecao`, em
+`usuario/exemplo.rs`), em cada núcleo ligado, preso ao núcleo e entrando
+no anel sem privilégio pelo caminho do `contador`; em cada um, a falha
+contada com o nome, o `pc` e o código, a linha do log uma vez, o processo
+fora da tabela e um fio novo rodando no núcleo (os casos `excecoes:`, em
+`testes/excecoes.rs`, no fim da tabela). No x86: o `ud2`; a divisão por
+zero; o `int1`; o `TF` ligado e um `nop` — o `#DB` com o `BS` no `DR6`
+—; o `TF` ligado antes da `syscall` — a chamada roda, e o `#DB` chega no
+anel 3, na volta, como se a `syscall` tivesse acabado de rodar ali —; o
+`int3`; o `push` com o `rsp` não canônico; e o `NT` ligado seguido de
+dezesseis `ceder`, um `id` e a troca de imagem pelo `filho`, com um
+companheiro que só gira preso ao mesmo núcleo — o processo troca de
+imagem e sai com o código do `filho`, e nenhuma falha é contada. No ARM:
+o `brk` com 0xE5, com 0xE6 e com 0. Dois o QEMU 8.2 do TCG não reproduz
+como o processador, e o caso aceita as duas formas, ditas nele: o `int1`
+é um `#UD` no emulador (um `#DB` num processador), e o `push` não
+canônico, uma falha de página no endereço truncado (um `#SS`). As outras
+exceções com código de erro — `#TS`, `#NP`, `#AC`, `#CP`, `#VC`, `#SX` —
+e o `#NM`, o `#OF`, o `#BR`, o `#VE` e o `#HV` não se alcançam do anel 3
+no emulador com o que o kernel liga; os tratadores delas usam a mesma
+regra. O `#MF` e o `#XM` podem se alcançar do anel 3 — o x87 ou o `MXCSR`
+desmascarados —, sem caso: usam o tratador do grupo sem código de erro,
+que o caso do `ud2` confere. Antes da correção, uma rodada por caso mostrou o achado: o `ud2` e
+o `int1` (`FALHA FATAL: invalid_opcode`, no `pc` da entrada), o `TF` e um
+`nop` (`double_fault`, o `#DB` ausente), o `NT` (`general_protection_fault`
+no `iretq` do fim do tratador do timer, o do companheiro, acordado pela
+troca voluntária) e, no ARM, o `brk #0xe5` (`estouro_da_pilha_de_excecao`)
+e o `brk #0` (registrado, e o processo seguiu e saiu com o código de quem
+sobreviveu).
+
+O que muda para os programas: o pânico de um programa não passa por
+nenhum dos dois — o tratador do pacote `programas` escreve o motivo e sai
+com o código 101 (`CODIGO_DE_PANICO`) —; o `abort` que o compilador gera,
+e o `ud2` e o `brk #1` depois da chamada de `comecar` no `_start`,
+inalcançáveis, agora matam o processo, e não param a máquina (x86) nem
+seguem para a instrução seguinte (ARM).
+
+### As mutações das exceções
+
+Mutações contra o lote B2 das exceções, uma de cada vez, no repositório,
+restauradas com a hora do arquivo renovada para o cargo recompilar, em
+debug, cada uma contra a parte da suíte com o caso que a deve reprovar
+(`DUKE_PARTE=k/1022` no x86, `k/1016` no ARM: um caso por parte, e a
+cauda).
+
+| Mutação | Resultado |
+|---|---|
+| o grupo sem código de erro (`sem_codigo!`: `#DE`, `#UD`…) de volta a fatal no anel 3 | reprovou — `excecoes: o ud2 do anel 3 mata o processo, e a maquina segue`: `FALHA FATAL: invalid_opcode` no `pc` da entrada |
+| o `#DB` de volta a fatal no anel 3 | reprovou — `excecoes: o TF ligado pelo processo mata o processo no passo seguinte`: `FALHA FATAL: debug`, com o `BS` no `DR6` |
+| o `SFMask` sem o `TF` | reprovou — `excecoes: o TF ligado antes da syscall nao chega ao anel 0, e mata o processo na volta`: `FALHA FATAL: debug` num `pc` do kernel — o `#DB` do passo no anel 0, na pilha da IST |
+| o `SFMask` sem o `NT` | reprovou — `excecoes: o NT ligado pelo processo nao chega ao kernel nas chamadas nem na troca de imagem`: `FALHA FATAL: general_protection_fault` no anel 0 — o `iretq` do companheiro, acordado pela troca voluntária |
+| o imediato do estouro (0xE5), no ARM, de volta antes de `veio_de_usuario` | reprovou — `excecoes: o brk do estouro de proposito no EL0 mata o processo, e a pilha nao afunda`: `FALHA FATAL: estouro_da_pilha_de_excecao` |
+| o da borda (0xE6), no ARM, de volta antes de `veio_de_usuario` | reprovou — `excecoes: o brk do estouro na borda no EL0 mata o processo, e a guarda nao e pisada`: `FALHA FATAL: estouro_da_pilha_de_excecao` aos 2,8 s, com a guarda pisada (rodada na integração do lote) |
+| o `brk` do EL0 de volta a registrar e seguir | reprovou — `excecoes: o brk do EL0 mata o processo, e nao registra e segue`: "o processo seguiu depois da excecao" |
+| o grupo com código de erro (`com_codigo!`: `#TS`, `#NP`, `#SS`, `#AC`…) de volta a fatal no anel 3 | **sobreviveu**, e não há caso no emulador que a mate: o `push` não canônico, no QEMU 8.2 do TCG, é uma falha de página, e nenhuma outra exceção do grupo se alcança do anel 3 com o que o kernel liga (sem `CR0.AM`, sem descritor ausente, sem CET). O `#GP`, que usa a mesma regra, é exercitado pelo `int3` e pelo `contador`; a falha de página, pelo `invasor` e, no emulador, pelo `push` não canônico |
+| o `#BP` do anel 3 de volta a registrar e seguir | **sobreviveu**, equivalente: o portão do `#BP` tem DPL 0, e o `int3` do anel 3 é um `#GP` (`excecoes: o int3 do anel 3 mata o processo, e nao registra e segue` confere o `#GP` com o código 0x1A); a regra no `#BP` vale no dia em que o portão mudar |
 
 ### O `fork` não copia página nenhuma
 
@@ -5876,9 +6039,12 @@ registro de cada uma no ponto em que nasceu.
 - **A morte de um processo por uma falha, na auditoria** (do #451, no lote
   B do #448): o processo que lê o contador de ciclos — como o que executa
   uma instrução privilegiada ou lê a memória do kernel — morre pela falha
-  de proteção, e a contabilidade das falhas e o log dizem qual e onde; a
-  auditoria não diz nada, porque a morte por uma falha não é uma decisão e
-  nunca teve registro. Gravá-la — um registro do kernel com o processo, a
+  — a de proteção, ou a de página, na leitura da memória do kernel —, e
+  desde o lote B2 também por qualquer outra exceção que provoque no anel 3,
+  e pelo `brk` no EL0 — a única do EL0 que não o matava — (ver *A exceção do processo é do processo*, em
+  [Userspace](#userspace)); a contabilidade das falhas e o log dizem qual e
+  onde, e a auditoria não diz nada, porque a morte por uma falha não é uma
+  decisão e nunca teve registro. Gravá-la — um registro do kernel com o processo, a
   falha e a instrução, que o NSF poderia ler como sinal — muda o que a
   auditoria grava: fica para uma decisão, [C] pela 5.3, sem ter entrado no
   lote ([AUD-FALHA](docs/DECISOES.md#aud-falha), com as alternativas e a

@@ -66,8 +66,27 @@ pub const IST_DOUBLE_FAULT: u16 = 0;
 /// desligadas, e só a NMI alcança.
 pub const IST_NMI: u16 = 1;
 
-/// 20 KiB. Não precisa ser grande: quem roda nela é um handler que só
-/// registra a falha e entra em post-mortem.
+/// Índice, dentro da IST, da pilha reservada ao `#DB`.
+///
+/// # Por que o `#DB` precisa de uma pilha própria
+///
+/// Pelo mesmo motivo da NMI: ele pode chegar ao anel 0 numa das instruções
+/// do ponto de entrada de `syscall` em que o `RSP` ainda é a pilha do
+/// **usuário**. O `TF` do processo é o caminho conhecido — o `SFMask` o apaga
+/// na entrada (ver [`super::usuario::ligar_neste_nucleo`]) —, e um aviso de
+/// depuração adiado por um `mov ss` até depois da `syscall` é o outro. Sem a
+/// pilha da IST, o processador empilharia o quadro onde o processo mandou,
+/// numa memória que outro fio dele escreve enquanto o tratador roda; com
+/// ela, a troca é feita pelo hardware antes de qualquer escrita.
+///
+/// O tratador do `#DB` vindo do anel 3 não fica nela: a morte do processo
+/// continua na pilha de kernel do fio (ver `idt::depuracao`).
+pub const IST_DEPURACAO: u16 = 2;
+
+/// 20 KiB. Não precisa ser grande: quem roda nela é um tratador curto — o
+/// que registra a falha e entra em post-mortem, o aviso da NMI, ou a
+/// anotação da morte de um processo pelo `#DB`, antes de passar à pilha do
+/// fio.
 const TAM_PILHA: usize = 4096 * 5;
 
 /// Uma pilha da IST.
@@ -91,6 +110,10 @@ static PILHAS_DOUBLE_FAULT: [PilhaEmergencia; MAX_NUCLEOS] =
 
 /// As pilhas de NMI, uma por núcleo.
 static PILHAS_NMI: [PilhaEmergencia; MAX_NUCLEOS] =
+    [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
+
+/// As pilhas do `#DB`, uma por núcleo.
+static PILHAS_DEPURACAO: [PilhaEmergencia; MAX_NUCLEOS] =
     [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
 
 /// Um TSS, num `UnsafeCell` porque `privilege_stack_table[0]` precisa mudar.
@@ -232,6 +255,7 @@ pub fn init() {
                 tss.interrupt_stack_table[IST_DOUBLE_FAULT as usize] =
                     topo(&PILHAS_DOUBLE_FAULT[i]);
                 tss.interrupt_stack_table[IST_NMI as usize] = topo(&PILHAS_NMI[i]);
+                tss.interrupt_stack_table[IST_DEPURACAO as usize] = topo(&PILHAS_DEPURACAO[i]);
                 &*TSSS[i].0.get()
             };
             *seletor = gdt.append(Descriptor::tss_segment(referencia));
@@ -323,6 +347,23 @@ fn carregar(
 
         load_tss(*seletor_tss);
     }
+}
+
+/// O `RSP0` do TSS deste núcleo: o topo da pilha de kernel do fio que ele
+/// roda, que [`definir_pilha_de_kernel`] acompanha a cada troca — a pilha
+/// que o processador adota para uma exceção vinda do anel 3. Zero antes de
+/// a GDT existir, ou com o fio inicial.
+///
+/// Lido sem trava: só este núcleo escreve o dele, com as interrupções
+/// mascaradas, e quem lê aqui é um tratador de exceção deste núcleo — ver
+/// `idt::depuracao`.
+pub fn pilha_de_kernel_deste_nucleo() -> u64 {
+    if GDT.get().is_none() {
+        return 0;
+    }
+    // SAFETY: leitura de uma palavra do TSS **deste** núcleo; só ele a
+    // escreve, e não pode estar escrevendo agora — ver acima.
+    unsafe { (*TSSS[nucleo_atual()].0.get()).privilege_stack_table[0].as_u64() }
 }
 
 /// Aponta o `RSP0` do TSS para o topo da pilha de kernel do fio atual.

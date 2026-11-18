@@ -51,6 +51,38 @@ pub const CODIGO_DO_INVASOR: i64 = 99;
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DO_CONTADOR: i64 = 77;
 
+/// Código de saída de um programa das exceções — ver [`bytes_da_excecao`] —
+/// que sobreviveu à exceção que provoca: a culpa era do processo, e ele
+/// tinha de morrer dela.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DA_EXCECAO: i64 = 66;
+
+/// Onde o `#DB` do `int1` deixa o `rip`, a partir da entrada: depois da
+/// instrução — o `#DB` é uma armadilha. O montador confere o mesmo número no
+/// programa.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DEPOIS_DO_INT1: u64 = 1;
+
+/// Onde o `#DB` do passo deixa o `rip`, a partir da entrada: depois da
+/// instrução que segue o `popfq` que liga o `TF`.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DEPOIS_DO_PASSO: u64 = 11;
+
+/// Onde o `#DB` do passo na chamada deixa o `rip`, a partir da entrada: na
+/// instrução seguinte à `syscall`, no anel 3 — o processador confere o `TF`
+/// depois do `sysretq`, como se a `syscall` tivesse acabado de rodar ali.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DEPOIS_DO_PASSO_NA_CHAMADA: u64 = 17;
+
+/// Onde fica o `push` do programa da pilha não canônica, a partir da
+/// entrada: o `#SS` é uma falha, e o `rip` é o da instrução.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const PUSH_DA_PILHA: u64 = 10;
+
 /// Código de saída que o programa de exemplo devolve quando tudo deu certo.
 ///
 /// Um valor arbitrário e improvável: se ele aparecer do outro lado, veio daqui
@@ -188,6 +220,143 @@ unsafe extern "C" {
     static CONTADOR_INICIO: u8;
     #[link_name = "programa_contador_fim"]
     static CONTADOR_FIM: u8;
+}
+
+// Os programas das exceções do anel sem privilégio — ver
+// [`bytes_da_excecao`].
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" {
+    #[link_name = "programa_excecao_ud2_inicio"]
+    static UD2_INICIO: u8;
+    #[link_name = "programa_excecao_ud2_fim"]
+    static UD2_FIM: u8;
+    #[link_name = "programa_excecao_divisao_inicio"]
+    static DIVISAO_INICIO: u8;
+    #[link_name = "programa_excecao_divisao_fim"]
+    static DIVISAO_FIM: u8;
+    #[link_name = "programa_excecao_int1_inicio"]
+    static INT1_INICIO: u8;
+    #[link_name = "programa_excecao_int1_fim"]
+    static INT1_FIM: u8;
+    #[link_name = "programa_excecao_passo_inicio"]
+    static PASSO_INICIO: u8;
+    #[link_name = "programa_excecao_passo_fim"]
+    static PASSO_FIM: u8;
+    #[link_name = "programa_excecao_passo_na_chamada_inicio"]
+    static PASSO_NA_CHAMADA_INICIO: u8;
+    #[link_name = "programa_excecao_passo_na_chamada_fim"]
+    static PASSO_NA_CHAMADA_FIM: u8;
+    #[link_name = "programa_excecao_nt_inicio"]
+    static NT_INICIO: u8;
+    #[link_name = "programa_excecao_nt_fim"]
+    static NT_FIM: u8;
+    #[link_name = "programa_excecao_int3_inicio"]
+    static INT3_INICIO: u8;
+    #[link_name = "programa_excecao_int3_fim"]
+    static INT3_FIM: u8;
+    #[link_name = "programa_excecao_pilha_inicio"]
+    static PILHA_INICIO: u8;
+    #[link_name = "programa_excecao_pilha_fim"]
+    static PILHA_FIM: u8;
+}
+
+// Os programas das exceções do EL0 — ver [`bytes_da_excecao`].
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    #[link_name = "programa_excecao_brk_estouro_inicio"]
+    static BRK_ESTOURO_INICIO: u8;
+    #[link_name = "programa_excecao_brk_estouro_fim"]
+    static BRK_ESTOURO_FIM: u8;
+    #[link_name = "programa_excecao_brk_borda_inicio"]
+    static BRK_BORDA_INICIO: u8;
+    #[link_name = "programa_excecao_brk_borda_fim"]
+    static BRK_BORDA_FIM: u8;
+    #[link_name = "programa_excecao_brk_inicio"]
+    static BRK_INICIO: u8;
+    #[link_name = "programa_excecao_brk_fim"]
+    static BRK_FIM: u8;
+}
+
+/// Os programas das exceções que um processo provoca — o lote B2 do #448.
+/// Cada um provoca a dele na entrada, ou depois do mínimo que ela pede, e
+/// tem de morrer dela: uma exceção vinda do anel sem privilégio é culpa do
+/// processo, e não do kernel. O do `NT` não provoca nenhuma: troca de imagem
+/// e sai pelo `filho`. Se seguir, sai com [`CODIGO_DA_EXCECAO`].
+/// Não estão em `/bin`: só a suíte os roda.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Excecao {
+    /// `ud2`: o `#UD`.
+    #[cfg(target_arch = "x86_64")]
+    Ud2,
+    /// A divisão por zero: o `#DE`.
+    #[cfg(target_arch = "x86_64")]
+    Divisao,
+    /// O `int1` — o `icebp` —: o `#DB`, sem a conferência do DPL.
+    #[cfg(target_arch = "x86_64")]
+    Int1,
+    /// O `TF` ligado pelo `popfq`, e um `nop`: o `#DB` do passo.
+    #[cfg(target_arch = "x86_64")]
+    Passo,
+    /// O `TF` ligado, e a `syscall`: o `#DB` no anel 3, na volta.
+    #[cfg(target_arch = "x86_64")]
+    PassoNaChamada,
+    /// O `NT` ligado, e chamadas — `ceder`, `id` e a troca de imagem pelo
+    /// `filho`, que sai com o código dele.
+    #[cfg(target_arch = "x86_64")]
+    Nt,
+    /// `int3`: o `#GP` do portão de DPL 0.
+    #[cfg(target_arch = "x86_64")]
+    Int3,
+    /// O `push` com o `rsp` não canônico: o `#SS`.
+    #[cfg(target_arch = "x86_64")]
+    Pilha,
+    /// `brk #0xe5`, o imediato do estouro de propósito.
+    #[cfg(target_arch = "aarch64")]
+    BrkDoEstouro,
+    /// `brk #0xe6`, o do estouro na borda.
+    #[cfg(target_arch = "aarch64")]
+    BrkDaBorda,
+    /// `brk #0`.
+    #[cfg(target_arch = "aarch64")]
+    Brk,
+}
+
+/// A imagem ELF do programa da exceção `e` — ver [`Excecao`].
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn bytes_da_excecao(e: Excecao) -> &'static [u8] {
+    // SAFETY: ver `entre`; cada par delimita o seu programa.
+    unsafe {
+        match e {
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Ud2 => entre(&raw const UD2_INICIO, &raw const UD2_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Divisao => entre(&raw const DIVISAO_INICIO, &raw const DIVISAO_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Int1 => entre(&raw const INT1_INICIO, &raw const INT1_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Passo => entre(&raw const PASSO_INICIO, &raw const PASSO_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::PassoNaChamada => entre(
+                &raw const PASSO_NA_CHAMADA_INICIO,
+                &raw const PASSO_NA_CHAMADA_FIM,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Nt => entre(&raw const NT_INICIO, &raw const NT_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Int3 => entre(&raw const INT3_INICIO, &raw const INT3_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Pilha => entre(&raw const PILHA_INICIO, &raw const PILHA_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::BrkDoEstouro => {
+                entre(&raw const BRK_ESTOURO_INICIO, &raw const BRK_ESTOURO_FIM)
+            }
+            #[cfg(target_arch = "aarch64")]
+            Excecao::BrkDaBorda => entre(&raw const BRK_BORDA_INICIO, &raw const BRK_BORDA_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::Brk => entre(&raw const BRK_INICIO, &raw const BRK_FIM),
+        }
+    }
 }
 
 /// A imagem ELF do programa bem-comportado.
@@ -1090,6 +1259,266 @@ programa_orfao_inicio:
 
 .global programa_orfao_fim
 programa_orfao_fim:
+
+// --- as excecoes do anel 3: um programa por excecao ------------------------
+//
+// O lote B2 do #448. Cada programa provoca uma excecao do processador logo na
+// entrada -- ou depois do minimo que ela pede -- e morre dela: a culpa e do
+// processo, e nao do kernel. Se seguir, sai com 66, que a suite reconhece
+// como "a excecao nao matou". Um cabecalho e um segmento so, de leitura e
+// execucao; a pilha e a que o carregador da.
+//
+// Os deslocamentos que a suite confere -- onde a excecao deixa o `rip` --
+// sao conferidos aqui tambem, pelo montador: um programa editado que os mude
+// nao monta (ver `exemplo::DEPOIS_DO_INT1` e os outros).
+.macro ELF_DE_UM_SEGMENTO elf, codigo, fim
+\elf:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   \codigo - \elf           // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   \fim - \codigo           // p_filesz
+    .quad   \fim - \codigo           // p_memsz
+    .quad   4096                     // p_align
+.endm
+
+// A saida de quem sobreviveu a excecao: sair(66), e o laco que nao volta.
+.macro SOBREVIVEU rotulo
+    mov     eax, 0
+    mov     edi, 66
+    syscall
+\rotulo:
+    jmp     \rotulo
+.endm
+
+// `ud2`: a instrucao invalida (#UD).
+.balign 8
+.global programa_excecao_ud2_inicio
+programa_excecao_ud2_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_ud2, .Lcodigo_ud2, .Lfim_codigo_ud2
+.Lcodigo_ud2:
+    ud2
+    SOBREVIVEU .Lprender_ud2
+.Lfim_codigo_ud2:
+.global programa_excecao_ud2_fim
+programa_excecao_ud2_fim:
+
+// A divisao por zero (#DE): o divisor e um zero do proprio codigo, e a
+// primeira instrucao ja divide -- os registradores da entrada nao sao do
+// programa.
+.balign 8
+.global programa_excecao_divisao_inicio
+programa_excecao_divisao_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_div, .Lcodigo_div, .Lfim_codigo_div
+.Lcodigo_div:
+    div     qword ptr [rip + .Lzero_div]
+    SOBREVIVEU .Lprender_div
+    .balign 8
+.Lzero_div:
+    .quad   0
+.Lfim_codigo_div:
+.global programa_excecao_divisao_fim
+programa_excecao_divisao_fim:
+
+// `int1` -- o `icebp`, 0xF1 --, que o processador entrega como #DB sem
+// conferir o DPL do portao: um processo o alcanca de qualquer jeito. O #DB e
+// uma armadilha, e o `rip` fica depois da instrucao.
+.balign 8
+.global programa_excecao_int1_inicio
+programa_excecao_int1_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_int1, .Lcodigo_int1, .Lfim_codigo_int1
+.Lcodigo_int1:
+    .byte   0xF1
+.Ldepois_int1:
+    SOBREVIVEU .Lprender_int1
+.Lfim_codigo_int1:
+.if .Ldepois_int1 - .Lcodigo_int1 - 1
+.error "o #DB do int1 nao deixa o rip onde a suite confere"
+.endif
+.global programa_excecao_int1_fim
+programa_excecao_int1_fim:
+
+// O `TF` ligado pelo proprio processo: o `popfq` o liga, a instrucao seguinte
+// roda, e o #DB chega depois dela.
+.balign 8
+.global programa_excecao_passo_inicio
+programa_excecao_passo_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_passo, .Lcodigo_passo, .Lfim_codigo_passo
+.Lcodigo_passo:
+    pushfq
+    or      qword ptr [rsp], 0x100
+    popfq
+    nop
+.Ldepois_passo:
+    nop
+    SOBREVIVEU .Lprender_passo
+.Lfim_codigo_passo:
+.if .Ldepois_passo - .Lcodigo_passo - 11
+.error "o #DB do passo nao deixa o rip onde a suite confere"
+.endif
+.global programa_excecao_passo_fim
+programa_excecao_passo_fim:
+
+// O `TF` ligado, e a instrucao seguinte e a `syscall`. O `SFMask` o apaga na
+// entrada do anel 0 -- sem isso, o #DB chegaria ao kernel antes da troca de
+// pilha, com o `rsp` do processo --; a chamada `id` roda inteira, o
+// `sysretq` devolve o `TF` com as flags do processo, e o #DB chega no anel
+// 3 na volta, como se a `syscall` tivesse acabado de rodar ali: o `rip` e o
+// da instrucao seguinte a ela.
+.balign 8
+.global programa_excecao_passo_na_chamada_inicio
+programa_excecao_passo_na_chamada_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_pch, .Lcodigo_pch, .Lfim_codigo_pch
+.Lcodigo_pch:
+    mov     eax, 2
+    pushfq
+    or      qword ptr [rsp], 0x100
+    popfq
+    syscall
+.Ldepois_pch:
+    nop
+    SOBREVIVEU .Lprender_pch
+.Lfim_codigo_pch:
+.if .Ldepois_pch - .Lcodigo_pch - 17
+.error "o #DB da volta da chamada nao deixa o rip onde a suite confere"
+.endif
+.global programa_excecao_passo_na_chamada_fim
+programa_excecao_passo_na_chamada_fim:
+
+// O `NT` ligado, e chamadas: `ceder` varias vezes -- cada uma passa o nucleo
+// a outro fio pela troca voluntaria --, `id`, e a troca de imagem pelo
+// `filho`. O `NT` nao faz nada no modo longo alem de dar #GP a um `iretq`:
+// sem ele no `SFMask`, o kernel rodaria a chamada com ele ligado, e o fio que
+// a troca voluntaria acordasse no meio de um tratador -- um que o tique
+// preemptou -- daria #GP no `iretq` da volta, no anel 0. Com ele, o `filho`
+// roda e sai com o codigo dele; sem a troca, sai com 66. O manifesto declara
+// o `process.run`, o que a troca de imagem exerce -- como o do `exemplo`.
+.balign 8
+.global programa_excecao_nt_inicio
+programa_excecao_nt_inicio:
+.Lelf_nt:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   .Lcodigo_nt - .Lelf_nt   // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   .Lfim_codigo_nt - .Lcodigo_nt  // p_filesz
+    .quad   .Lfim_codigo_nt - .Lcodigo_nt  // p_memsz
+    .quad   4096                     // p_align
+
+    // o manifesto: uma nota, que nao se carrega
+    .long   4                        // PT_NOTE
+    .long   4                        // PF_R
+    .quad   .Lnota_nt - .Lelf_nt     // p_offset
+    .quad   0                        // p_vaddr: nao se carrega
+    .quad   0                        // p_paddr
+    .quad   .Lfim_nota_nt - .Lnota_nt  // p_filesz
+    .quad   .Lfim_nota_nt - .Lnota_nt  // p_memsz
+    .quad   4                        // p_align
+.Lcodigo_nt:
+    pushfq
+    or      qword ptr [rsp], 0x4000
+    popfq
+    mov     r12d, 16
+.Lvolta_nt:
+    mov     eax, 3
+    syscall
+    dec     r12d
+    jnz     .Lvolta_nt
+    mov     eax, 2
+    syscall
+    // executar("filho")
+    lea     rdi, [rip + .Lnome_nt]
+    mov     esi, 5
+    mov     eax, 5
+    syscall
+    SOBREVIVEU .Lprender_nt
+.Lnome_nt:
+    .ascii  "filho"
+.Lfim_codigo_nt:
+
+.balign 4
+.Lnota_nt:
+    .long   5                        // tamanho do dono
+    .long   .Lfim_texto_nt - .Ltexto_nt  // tamanho do conteudo
+    .long   1                        // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_nt:
+    .ascii  "duke-manifesto 1\nnome excecao-nt\npermite process.run\n"
+.Lfim_texto_nt:
+    .balign 4
+.Lfim_nota_nt:
+.global programa_excecao_nt_fim
+programa_excecao_nt_fim:
+
+// `int3`: o portao do #BP tem DPL 0, e o `int3` de um anel acima dele e um
+// #GP com o vetor no codigo de erro -- 0x1A, o 3 com o bit da IDT.
+.balign 8
+.global programa_excecao_int3_inicio
+programa_excecao_int3_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_int3, .Lcodigo_int3, .Lfim_codigo_int3
+.Lcodigo_int3:
+    int3
+    SOBREVIVEU .Lprender_int3
+.Lfim_codigo_int3:
+.global programa_excecao_int3_fim
+programa_excecao_int3_fim:
+
+// O `push` com o `rsp` fora da forma canonica: a referencia a pilha num
+// endereco nao canonico e #SS, com codigo zero.
+.balign 8
+.global programa_excecao_pilha_inicio
+programa_excecao_pilha_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_pilha, .Lcodigo_pilha, .Lfim_codigo_pilha
+.Lcodigo_pilha:
+    movabs  rsp, 0x8000000000000008
+.Lpush_pilha:
+    push    rax
+    SOBREVIVEU .Lprender_pilha
+.Lfim_codigo_pilha:
+.if .Lpush_pilha - .Lcodigo_pilha - 10
+.error "o push da pilha nao fica onde a suite confere"
+.endif
+.global programa_excecao_pilha_fim
+programa_excecao_pilha_fim:
 "#
 );
 
@@ -1887,5 +2316,86 @@ programa_orfao_inicio:
 
 .global programa_orfao_fim
 programa_orfao_fim:
+
+// --- as excecoes do EL0: um programa por `brk` -----------------------------
+//
+// O lote B2 do #448. O `brk` do EL0 mata o processo, como as outras falhas do
+// EL0; os dois imediatos do estouro de proposito -- 0xE5 e 0xE6, os do
+// `debug.trigger` -- so valem do EL1. Cada programa tem o `brk` na entrada;
+// se seguir, sai com 66, que a suite reconhece como "a excecao nao matou".
+.macro ELF_DE_UM_SEGMENTO elf, codigo, fim
+\elf:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   \codigo - \elf           // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   \fim - \codigo           // p_filesz
+    .quad   \fim - \codigo           // p_memsz
+    .quad   4096                     // p_align
+.endm
+
+// A saida de quem sobreviveu ao `brk`: sair(66), e o laco que nao volta.
+.macro SOBREVIVEU rotulo
+    mov     x8, #0
+    mov     x0, #66
+    svc     #0
+\rotulo:
+    b       \rotulo
+.endm
+
+// `brk #0xe5`: o imediato do estouro de proposito da pilha de excecao.
+.balign 8
+.global programa_excecao_brk_estouro_inicio
+programa_excecao_brk_estouro_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_brke5, .Lcodigo_brke5, .Lfim_codigo_brke5
+.Lcodigo_brke5:
+    brk     #0xe5
+    SOBREVIVEU .Lprender_brke5
+.Lfim_codigo_brke5:
+.global programa_excecao_brk_estouro_fim
+programa_excecao_brk_estouro_fim:
+
+// `brk #0xe6`: o do estouro na borda da guarda.
+.balign 8
+.global programa_excecao_brk_borda_inicio
+programa_excecao_brk_borda_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_brke6, .Lcodigo_brke6, .Lfim_codigo_brke6
+.Lcodigo_brke6:
+    brk     #0xe6
+    SOBREVIVEU .Lprender_brke6
+.Lfim_codigo_brke6:
+.global programa_excecao_brk_borda_fim
+programa_excecao_brk_borda_fim:
+
+// `brk #0`: um ponto de parada qualquer.
+.balign 8
+.global programa_excecao_brk_inicio
+programa_excecao_brk_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_brk0, .Lcodigo_brk0, .Lfim_codigo_brk0
+.Lcodigo_brk0:
+    brk     #0
+    SOBREVIVEU .Lprender_brk0
+.Lfim_codigo_brk0:
+.global programa_excecao_brk_fim
+programa_excecao_brk_fim:
 "#
 );

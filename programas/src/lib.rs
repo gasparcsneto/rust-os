@@ -134,6 +134,13 @@ extern "C" fn comecar() -> ! {
 //
 // O quadro zerado (`rbp`, `x29` e `x30`) marca o fim da cadeia de quadros:
 // quem percorrer a pilha para aqui, em vez de seguir lixo.
+//
+// Depois da chamada, o `ud2` e o `brk #1` — os mesmos que o compilador gera
+// para um `abort` — são inalcançáveis: `comecar` não volta. Se um deles rodar,
+// ou o `abort` de dentro do programa, o processo morre da exceção, como de
+// qualquer outra que ele provoque: o kernel não para a máquina pelo `ud2` de
+// um processo, nem registra o `brk` e segue (o lote B2 do #448). O pânico não
+// passa por eles: o tratador abaixo sai com [`CODIGO_DE_PANICO`].
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".section .text.inicio, \"ax\"",

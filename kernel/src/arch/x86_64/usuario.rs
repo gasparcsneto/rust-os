@@ -162,12 +162,8 @@ pub unsafe fn ligar_neste_nucleo() {
         // Para onde saltar.
         LStar::write(VirtAddr::new(ponto_de_entrada as *const () as u64));
 
-        // Quais flags apagar na entrada. `INTERRUPT_FLAG` é a que importa: sem
-        // ela, uma interrupção poderia chegar entre o `syscall` e a troca de
-        // pilha, quando o kernel ainda está rodando sobre a pilha do usuário.
-        // `DIRECTION_FLAG` entra porque as rotinas de memória do compilador
-        // assumem contagem crescente, e o usuário pode tê-la invertido.
-        SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG);
+        // Quais flags apagar na entrada — ver [`FLAGS_APAGADAS_NA_ENTRADA`].
+        SFMask::write(FLAGS_APAGADAS_NA_ENTRADA);
 
         // Para onde o `swapgs` da entrada leva o `GS`: a estrutura deste
         // núcleo. A base do `GS` em si fica zero, que é o que o processo vê.
@@ -177,6 +173,62 @@ pub unsafe fn ligar_neste_nucleo() {
         Efer::update(|flags| flags.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
     }
 }
+
+/// As flags que a entrada de `syscall` apaga: o `SFMask`. O processador
+/// guarda as do processo em `R11`, apaga estas, e o `sysretq` devolve as do
+/// processo — ele não vê nada.
+///
+/// # A máscara do Linux, inteira
+///
+/// É a de `syscall_init` no Linux: toda flag que o processo alcança, e o
+/// kernel começa cada chamada com as flags em zero. Uma por uma:
+///
+/// - **`IF`**: sem ela, uma interrupção poderia chegar entre o `syscall` e a
+///   troca de pilha, com o kernel ainda sobre a pilha do processo.
+/// - **`DF`**: as rotinas de memória do compilador contam para cima, e o
+///   processo pode ter invertido a direção.
+/// - **`TF`**: com o passo ligado pelo processo, o `#DB` do passo chegaria ao
+///   anel 0 depois da `syscall`, antes da troca de pilha, com o `RSP` dele —
+///   o quadro da exceção iria para uma memória que outro fio do processo
+///   escreve. O processador confere o `TF` depois da `syscall`, já
+///   mascarado: o passo volta com o `sysretq`, e o `#DB` chega no anel 3,
+///   na volta — como se a `syscall` tivesse acabado de rodar ali.
+///   (O `#DB` tem também uma pilha própria — ver
+///   [`super::gdt::IST_DEPURACAO`].)
+/// - **`NT`**: no modo longo ele só faz uma coisa — o `iretq` com ele ligado
+///   é `#GP`. Ligado na chamada, ele passava pela troca voluntária de fio
+///   (`ceder_cpu`, que não guarda as flags) ao fio que entrava, e o `iretq`
+///   da volta dele — a de um tratador que o tique preemptou, ou a descida de
+///   um processo novo — dava `#GP` no anel 0: a máquina parava. A suíte o
+///   viu (`excecoes: o NT ligado ...`).
+/// - **`AC`**: no anel 0 ele só desliga o SMAP, que o kernel hoje não liga;
+///   ligado, ele valeria a chamada inteira. Fora antes que o SMAP entre.
+/// - **as aritméticas** (`CF`, `PF`, `AF`, `ZF`, `SF`, `OF`), o **`IOPL`**, o
+///   **`RF`** e o **`ID`**: nenhuma muda o que o kernel faz — o compilador
+///   não lê flag que não escreveu, o processo não muda o `IOPL` no anel 3, e
+///   o kernel não arma pontos de parada que o `RF` suprimiria —, mas o
+///   kernel começa cada chamada no mesmo estado, qualquer que seja o
+///   processo, e nenhuma flag dele vaza pela troca voluntária para outro fio.
+///
+/// O `VM`, o `VIF` e o `VIP` ficam de fora, como no Linux: o `VM` não existe
+/// no modo longo, e o `VIF` e o `VIP` só valem com o `CR4.VME` ou o
+/// `CR4.PVI`, que o kernel não liga — e o processo não liga nenhum dos três:
+/// o `popfq` do anel 3 não os muda.
+const FLAGS_APAGADAS_NA_ENTRADA: RFlags = RFlags::CARRY_FLAG
+    .union(RFlags::PARITY_FLAG)
+    .union(RFlags::AUXILIARY_CARRY_FLAG)
+    .union(RFlags::ZERO_FLAG)
+    .union(RFlags::SIGN_FLAG)
+    .union(RFlags::TRAP_FLAG)
+    .union(RFlags::INTERRUPT_FLAG)
+    .union(RFlags::DIRECTION_FLAG)
+    .union(RFlags::OVERFLOW_FLAG)
+    .union(RFlags::IOPL_LOW)
+    .union(RFlags::IOPL_HIGH)
+    .union(RFlags::NESTED_TASK)
+    .union(RFlags::RESUME_FLAG)
+    .union(RFlags::ALIGNMENT_CHECK)
+    .union(RFlags::ID);
 
 unsafe extern "C" {
     fn ponto_de_entrada();

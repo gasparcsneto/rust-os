@@ -15,6 +15,27 @@
 //! Escrever isso à mão seria assembly delicado. A ABI `x86-interrupt` faz o
 //! compilador gerar o prólogo e o epílogo corretos — é por isso que o kernel
 //! exige Rust nightly.
+//!
+//! # As exceções, todas, e de quem é a culpa
+//!
+//! Toda exceção da arquitetura que o crate `x86_64` oferece tem tratador, e
+//! a regra é uma só, a do `#GP` e da falha de página — e a do ARM
+//! (`aarch64::vetores`): vinda do **anel 3**, a culpa é do processo, e o
+//! processo morre — a linha `processo morto por ...` no log e a falha contada
+//! (`traps::registrar`) —; vinda do **anel 0**, é do kernel, e é fatal. O
+//! `#MC` é sempre fatal: é o hardware. O `#BP` do anel 0 é o único que volta
+//! — o `debug.trigger` —, fora a falha de página da cópia na escrita, que o
+//! kernel resolve; e o `#DF`, sempre fatal, tem a pilha dele.
+//!
+//! Antes, a IDT só tinha o `#BP`, o `#UD`, o `#GP`, a falha de página, o
+//! `#DF`, a NMI e as interrupções, e o `#UD` era fatal sem olhar o anel: um
+//! `ud2` de qualquer processo parava a máquina para todos os titulares, e
+//! uma divisão por zero, um `int1`, o `TF` ligado pelo `popfq` ou um `push`
+//! com o `rsp` não canônico iam pela entrada ausente ao `#NP`, ausente, e
+//! dali ao `#DF` — fatal também. O que estava no anel da auditoria e ainda
+//! não tinha ido ao journal ficava só no cadáver: um processo agia e apagava
+//! o fim da própria trilha parando a máquina (o achado do adversário do lote
+//! B do #448, corrigido no lote B2).
 
 use spin::once::Once;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -26,10 +47,64 @@ pub fn init() {
     let idt = IDT.call_once(|| {
         let mut idt = InterruptDescriptorTable::new();
 
+        // As exceções da arquitetura, todas as que o crate oferece — ver o
+        // cabeçalho. Os vetores reservados e o 9, que nenhum processador de
+        // 64 bits gera, o crate não deixa instalar.
+        idt.divide_error.set_handler_fn(erro_de_divisao);
         idt.breakpoint.set_handler_fn(ponto_de_parada);
+        idt.overflow.set_handler_fn(estouro);
+        idt.bound_range_exceeded.set_handler_fn(limite_excedido);
         idt.invalid_opcode.set_handler_fn(opcode_invalido);
+        idt.device_not_available
+            .set_handler_fn(dispositivo_indisponivel);
+        idt.invalid_tss.set_handler_fn(tss_invalido);
+        idt.segment_not_present.set_handler_fn(segmento_ausente);
+        idt.stack_segment_fault
+            .set_handler_fn(falha_de_segmento_de_pilha);
         idt.general_protection_fault.set_handler_fn(protecao_geral);
         idt.page_fault.set_handler_fn(falha_de_pagina);
+        idt.x87_floating_point.set_handler_fn(ponto_flutuante_x87);
+        idt.alignment_check.set_handler_fn(alinhamento);
+        idt.simd_floating_point.set_handler_fn(ponto_flutuante_simd);
+        idt.virtualization.set_handler_fn(virtualizacao);
+        idt.cp_protection_exception
+            .set_handler_fn(protecao_do_fluxo_de_controle);
+        idt.hv_injection_exception
+            .set_handler_fn(injecao_do_hipervisor);
+        idt.vmm_communication_exception
+            .set_handler_fn(comunicacao_com_o_vmm);
+        idt.security_exception.set_handler_fn(excecao_de_seguranca);
+
+        // O `#DB`, com pilha própria: ele pode chegar ao anel 0 numa das
+        // instruções da entrada de `syscall` em que o `RSP` ainda é a pilha
+        // do processo — o `TF` que a entrada não apagasse, um aviso de
+        // depuração adiado por um `mov ss` —, e o processador empilharia o
+        // quadro onde o processo mandou, numa memória que outro fio dele
+        // escreve. O `SFMask` apaga o `TF` na entrada (ver
+        // `usuario::ligar_neste_nucleo`); a pilha é a segunda linha. Ver
+        // `gdt::IST_DEPURACAO`.
+        //
+        // SAFETY: `IST_DEPURACAO` é um índice válido da IST, preparado em
+        // `gdt::init` para todos os núcleos.
+        unsafe {
+            idt.debug
+                .set_handler_fn(depuracao)
+                .set_stack_index(super::gdt::IST_DEPURACAO);
+        }
+
+        // O `#MC`, sempre fatal, na pilha do `#DF`: ele chega em qualquer
+        // instrução, também nas da entrada de `syscall` com o `RSP` do
+        // processo, e o relatório não volta — como o do `#DF`. Antes ele
+        // chegava lá pelo caminho mais longo: a entrada ausente, o `#NP`
+        // ausente, o `#DF`.
+        //
+        // SAFETY: `IST_DOUBLE_FAULT` é um índice válido da IST, preparado em
+        // `gdt::init`; quem roda nela não volta.
+        unsafe {
+            idt.machine_check
+                .set_handler_fn(verificacao_da_maquina)
+                .set_stack_index(super::gdt::IST_DOUBLE_FAULT);
+        }
 
         // Interrupções de hardware, já remapeadas pelo PIC para fora da
         // faixa das exceções.
@@ -268,30 +343,261 @@ fn atender(linha: u8) -> bool {
     preemptar
 }
 
-/// O próximo `int3` afunda a pilha em vez de voltar — ver
+/// O processo do fio atual morre da exceção `nome` — a do anel 3 —, com o
+/// `motivo` no log, e o fio sai de circulação. Não volta.
+///
+/// Sem código de saída: quem morre de falha não chegou a `sair`, e um pai
+/// que estivesse esperando por ele precisa saber a diferença entre "saiu
+/// com zero" e "foi morto".
+///
+/// Cedemos de vez, em vez de retornar: o `iretq` do fim do tratador
+/// devolveria o controle a um processo que já não existe — e o abandono do
+/// quadro da exceção é inofensivo: ele está na pilha de kernel do fio, que
+/// volta quando o coletor recolher o fio. Por isso os tratadores com pilha
+/// própria, da IST, não chamam esta função: ver [`depuracao`].
+fn morre_o_processo(nome: &'static str, motivo: &str, pc: u64, codigo: u64) -> ! {
+    anotar_a_morte(nome, motivo, pc, codigo);
+    crate::fios::descansar()
+}
+
+/// A falha contada e a linha do log de um processo morto por `nome`, e o fio
+/// marcado — o que [`morre_o_processo`] faz antes de sair de circulação.
+fn anotar_a_morte(nome: &'static str, motivo: &str, pc: u64, codigo: u64) {
+    let seq = crate::traps::registrar(nome, pc, None, codigo);
+    crate::log_error!(
+        "usuario",
+        "processo morto por {} #{} em pc={:#x}",
+        motivo,
+        seq,
+        pc
+    );
+    crate::fios::marcar_terminado(None);
+}
+
+/// A exceção veio do anel sem privilégio? O `CS` salvo diz de onde veio —
+/// os dois bits baixos são o nível de privilégio de quem foi interrompido.
+fn do_anel_3(quadro: &InterruptStackFrame) -> bool {
+    quadro.code_segment.rpl() as u8 == x86_64::PrivilegeLevel::Ring3 as u8
+}
+
+/// A regra de toda exceção — ver o cabeçalho: do anel 3, o processo morre;
+/// do anel 0, é fatal.
+fn excecao(quadro: &InterruptStackFrame, nome: &'static str, motivo: &str, codigo: u64) -> ! {
+    let pc = quadro.instruction_pointer.as_u64();
+    if do_anel_3(quadro) {
+        morre_o_processo(nome, motivo, pc, codigo);
+    }
+    crate::traps::fatal(nome, pc, None, codigo)
+}
+
+/// Gera um tratador por exceção sem código de erro, todos pela regra de
+/// [`excecao`]: o nome canônico, o da contabilidade, e o motivo do log.
+///
+/// O atributo que a macro repassa é só o `doc` — o comentário `///` de cada
+/// linha —, escrito por extenso: um atributo inteiro montado pela macro
+/// (`#[$…]`) poderia ser o `path`, e trazer o código de outro arquivo para
+/// fora da conferência das invariantes (`cargo xtask invariantes`).
+macro_rules! sem_codigo {
+    ($($(#[doc = $doc:literal])* $tratador:ident => $nome:literal, $motivo:literal;)*) => {
+        $(
+            $(#[doc = $doc])*
+            extern "x86-interrupt" fn $tratador(quadro: InterruptStackFrame) {
+                excecao(&quadro, $nome, $motivo, 0)
+            }
+        )*
+    };
+}
+
+/// O mesmo, para as exceções com código de erro: o código vai cru para a
+/// contabilidade.
+macro_rules! com_codigo {
+    ($($(#[doc = $doc:literal])* $tratador:ident => $nome:literal, $motivo:literal;)*) => {
+        $(
+            $(#[doc = $doc])*
+            extern "x86-interrupt" fn $tratador(quadro: InterruptStackFrame, codigo: u64) {
+                excecao(&quadro, $nome, $motivo, codigo)
+            }
+        )*
+    };
+}
+
+sem_codigo! {
+    /// `#DE`: a divisão por zero, ou o quociente que não cabe.
+    erro_de_divisao => "divide_error", "erro de divisao";
+    /// `#OF`: o `into` não existe em 64 bits, e o `int 4` do anel 3 é `#GP`
+    /// — o portão tem DPL 0 —, mas a regra é a mesma.
+    estouro => "overflow", "estouro";
+    /// `#BR`: o `bound` não existe em 64 bits; sobra o MPX, que o kernel
+    /// não liga.
+    limite_excedido => "bound_range_exceeded", "limite excedido";
+    /// `#UD`: a instrução inválida — `ud2`, o `abort` de um programa
+    /// (`programas::_start`), um código que não existe neste processador.
+    /// No QEMU do TCG, também o `int1` (ver `testes::excecoes`).
+    opcode_invalido => "invalid_opcode", "instrucao invalida";
+    /// `#NM`: a unidade de ponto flutuante indisponível — o `CR0.TS`, que o
+    /// kernel não liga.
+    dispositivo_indisponivel => "device_not_available", "dispositivo indisponivel";
+    /// `#MF`: o erro do x87 que o processo desmascarou.
+    ponto_flutuante_x87 => "x87_floating_point", "erro de ponto flutuante x87";
+    /// `#XM`: o erro de SIMD que o processo desmascarou no `MXCSR`.
+    ponto_flutuante_simd => "simd_floating_point", "erro de ponto flutuante simd";
+    /// `#VE`: a exceção de virtualização, de um hóspede de VMX.
+    virtualizacao => "virtualization", "excecao de virtualizacao";
+    /// `#HV`: a injeção do hipervisor, num hóspede SEV-SNP.
+    injecao_do_hipervisor => "hv_injection_exception", "injecao do hipervisor";
+}
+
+com_codigo! {
+    /// `#TS`: o TSS inválido — não há troca de tarefa em 64 bits.
+    tss_invalido => "invalid_tss", "tss invalido";
+    /// `#NP`: o segmento ou o portão ausente.
+    segmento_ausente => "segment_not_present", "segmento ausente";
+    /// `#SS`: a referência à pilha num endereço não canônico, ou o `SS`
+    /// ausente.
+    falha_de_segmento_de_pilha => "stack_segment_fault", "falha de segmento de pilha";
+    /// `#AC`: o acesso desalinhado com o `AC` ligado — e o `CR0.AM`.
+    alinhamento => "alignment_check", "falha de alinhamento";
+    /// `#CP`: a proteção do fluxo de controle, que o kernel não liga.
+    protecao_do_fluxo_de_controle => "cp_protection_exception", "protecao do fluxo de controle";
+    /// `#VC`: a comunicação com o VMM, num hóspede SEV-ES.
+    comunicacao_com_o_vmm => "vmm_communication_exception", "comunicacao com o vmm";
+    /// `#SX`: a exceção de segurança da AMD.
+    excecao_de_seguranca => "security_exception", "excecao de seguranca";
+}
+
+/// O próximo `int3` **do anel 0** afunda a pilha em vez de voltar — ver
 /// [`super::disparar_estouro_em_excecao`].
 pub(super) static AFUNDAR_NO_PONTO_DE_PARADA: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// `int3` — o ponto de parada dos depuradores.
 ///
-/// É a única exceção aqui que **retorna**: o processador já avançou o RIP para
-/// depois da instrução, então basta voltar. Serve de prova viva de que os
-/// handlers funcionam, e é o que o comando `debug.trigger` usa.
+/// Do anel 0 é a única exceção aqui que **retorna** sem ter resolvido nada —
+/// a outra é a falha de página da cópia na escrita —: o processador já avançou
+/// o RIP para depois da instrução, então basta voltar. Serve de prova viva de
+/// que os handlers funcionam, e é o que o comando `debug.trigger` usa.
+///
+/// Do anel 3, o processo morre, como de qualquer outra exceção — registrar e
+/// seguir deixaria um processo encher o log e a contabilidade das falhas sem
+/// limite. Hoje o `int3` do processo nem chega aqui: o portão tem DPL 0, e o
+/// `int3` de um anel acima dele é um `#GP` com o vetor no código de erro —
+/// `0x1A` —, que mata o processo pelo [`protecao_geral`]. A regra fica aqui
+/// também, para o dia em que o portão mudar.
+///
+/// O estouro de propósito só vale do anel 0: o `int3` de um processo, no
+/// meio, não consome o pedido.
 extern "x86-interrupt" fn ponto_de_parada(quadro: InterruptStackFrame) {
+    let pc = quadro.instruction_pointer.as_u64();
+    if do_anel_3(&quadro) {
+        morre_o_processo("breakpoint", "ponto de parada", pc, 0);
+    }
     // O estouro de propósito — ver `disparar_estouro_em_excecao`.
     if AFUNDAR_NO_PONTO_DE_PARADA.swap(false, core::sync::atomic::Ordering::SeqCst) {
         crate::traps::afundar_de_proposito();
     }
-    let pc = quadro.instruction_pointer.as_u64();
     let seq = crate::traps::registrar("breakpoint", pc, None, 0);
     crate::log_info!("traps", "breakpoint #{} em pc={:#x}", seq, pc);
 }
 
-/// Instrução inválida: o fluxo de execução saiu dos trilhos.
-extern "x86-interrupt" fn opcode_invalido(quadro: InterruptStackFrame) {
+/// `#DB` — a armadilha do passo (`TF`), o `int1` e os pontos de parada do
+/// hardware, que o kernel não arma. Roda na pilha da IST
+/// ([`super::gdt::IST_DEPURACAO`]).
+///
+/// O código é o `DR6`: o que o processador diz da causa — o `BS`, o bit 14, é
+/// o passo. Lido e devolvido ao valor de repouso, que o processador nunca
+/// limpa sozinho: o `#DB` seguinte diz só a causa dele.
+///
+/// Do anel 3, o processo morre, como de qualquer exceção; mas não nesta
+/// pilha. Ela é do núcleo, e não do fio: sair de circulação aqui deixaria o
+/// fio morto parado nela, com as interrupções ligadas pelo sono do ocioso, e
+/// o tratador de cada uma empilhado em cima, numa pilha sem guarda. A morte
+/// continua na pilha de kernel do fio — a que o `#GP` e a falha de página
+/// usariam, o `RSP0` deste núcleo —, que está vazia: o fio estava no anel 3.
+///
+/// Do anel 0, é fatal: o kernel não usa o passo nem arma os pontos do
+/// hardware, e o `SFMask` apaga o `TF` do processo na entrada de `syscall`.
+///
+/// Fica um caminho, só no processador: o `mov ss` do processo, com o `TF`
+/// ligado, adia o `#DB` do passo até depois da instrução seguinte, e, se
+/// ela é a `syscall` ou vira exceção, ele chega aqui do anel 0 — na pilha
+/// da IST, e não na do processo — e para a máquina. O conserto conhecido (o
+/// do Linux, `exc_debug_kernel`, para o cenário do CVE-2018-8897) é ter o
+/// `#DB` do anel 0 com o `BS` por esse passo adiado: apagar o `TF` do quadro
+/// e voltar, e o processo morre pelo caminho de sempre. Não entrou no lote
+/// B2, por não ter caso que o exercite na suíte — o QEMU do TCG não adia o
+/// passo —, e fica para o lote B3, com um caso que liga o `TF` no anel 0 —
+/// ver *O que fica*, em "Userspace", no README.
+extern "x86-interrupt" fn depuracao(quadro: InterruptStackFrame) {
+    let pc = quadro.instruction_pointer.as_u64();
+    let dr6 = ler_e_repor_o_dr6();
+    if do_anel_3(&quadro) {
+        anotar_a_morte("debug", "depuracao", pc, dr6);
+        let topo = super::gdt::pilha_de_kernel_deste_nucleo();
+        if topo != 0 {
+            // SAFETY: `topo` é o `RSP0` deste núcleo, o topo da pilha de
+            // kernel do fio atual — a troca de contexto o mantém —, e ela
+            // está vazia: a exceção veio do anel 3. Nada desta pilha da IST
+            // é usado depois do salto, e as interrupções seguem mascaradas
+            // pelo portão até `descansar` decidir.
+            unsafe { descansar_na_pilha_do_fio(topo) }
+        }
+        crate::fios::descansar()
+    }
+    crate::traps::fatal("debug", pc, None, dr6)
+}
+
+/// O valor do `DR6` em repouso: os bits reservados ligados, e nenhuma causa.
+const DR6_EM_REPOUSO: u64 = 0xFFFF_0FF0;
+
+/// Lê o `DR6` e o devolve ao repouso.
+fn ler_e_repor_o_dr6() -> u64 {
+    let dr6: u64;
+    // SAFETY: estamos no anel 0, no tratador do `#DB`; ler e escrever o
+    // `DR6` não toca memória nem muda nada além dele.
+    unsafe {
+        core::arch::asm!("mov {}, dr6", out(reg) dr6, options(nomem, nostack, preserves_flags));
+        core::arch::asm!(
+            "mov dr6, {}",
+            in(reg) DR6_EM_REPOUSO,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    dr6
+}
+
+/// Troca a pilha da IST pela de kernel do fio, `topo`, e sai de circulação
+/// dali. Não volta.
+///
+/// # Safety
+///
+/// `topo` precisa ser o topo, alinhado em 16, da pilha de kernel do fio
+/// atual, e nada vivo pode estar nela.
+unsafe fn descansar_na_pilha_do_fio(topo: u64) -> ! {
+    // SAFETY: delegada ao chamador. O `call` empilha o retorno e deixa a
+    // pilha como a convenção espera na entrada de uma função.
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {topo}",
+            "call {descansar}",
+            "ud2",
+            topo = in(reg) topo,
+            descansar = sym descansar_sem_volta,
+            options(noreturn),
+        )
+    }
+}
+
+/// A ponte de [`descansar_na_pilha_do_fio`] para [`crate::fios::descansar`].
+extern "C" fn descansar_sem_volta() -> ! {
+    crate::fios::descansar()
+}
+
+/// `#MC`: o hardware acusou um erro da máquina. Sempre fatal, de qualquer
+/// anel — o processo não tem culpa, e o núcleo não tem como seguir. Roda na
+/// pilha do `#DF`.
+extern "x86-interrupt" fn verificacao_da_maquina(quadro: InterruptStackFrame) -> ! {
     crate::traps::fatal(
-        "invalid_opcode",
+        "machine_check",
         quadro.instruction_pointer.as_u64(),
         None,
         0,
@@ -299,28 +605,17 @@ extern "x86-interrupt" fn opcode_invalido(quadro: InterruptStackFrame) {
 }
 
 /// Violação de proteção: acesso a um segmento ou registrador não permitido.
+///
+/// Mesma regra de toda exceção: instrução privilegiada tentada pelo
+/// processo — ou o `int3`, o `int n` e o contador de ciclos (`CR4.TSD`) —
+/// mata o processo, não o kernel.
 extern "x86-interrupt" fn protecao_geral(quadro: InterruptStackFrame, codigo: u64) {
-    let pc = quadro.instruction_pointer.as_u64();
-
-    // Mesma regra da falha de página: instrução privilegiada tentada pelo
-    // processo mata o processo, não o kernel. O `CS` salvo diz de onde veio —
-    // os dois bits baixos são o nível de privilégio.
-    if quadro.code_segment.rpl() as u8 == x86_64::PrivilegeLevel::Ring3 as u8 {
-        let seq = crate::traps::registrar("general_protection_fault", pc, None, codigo);
-        crate::log_error!(
-            "usuario",
-            "processo morto por falha de protecao #{} em pc={:#x}",
-            seq,
-            pc
-        );
-        // Sem código de saída: quem morre de falha não chegou a `sair`, e um
-        // pai que estivesse esperando por ele precisa saber a diferença
-        // entre "saiu com zero" e "foi morto".
-        crate::fios::marcar_terminado(None);
-        crate::fios::descansar();
-    }
-
-    crate::traps::fatal("general_protection_fault", pc, None, codigo)
+    excecao(
+        &quadro,
+        "general_protection_fault",
+        "falha de protecao",
+        codigo,
+    )
 }
 
 /// Falha de página: o endereço acessado não está mapeado, ou o acesso é
