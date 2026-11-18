@@ -1621,8 +1621,10 @@ pub(super) fn zumbis_a_recusa_diz_os_mortos_por_recolher() -> Resultado {
             ocupados: 3,
             mortos_por_recolher: 2,
         };
-        if crate::fios::cota_cheia(titular, 3) != Some(esperada)
-            || crate::fios::cota_cheia(titular, 4).is_some()
+        // A pergunta, e não a conta do gate: `cota_cheia` chama o coletor
+        // quando há mortos por recolher, e a pergunta não tem efeito.
+        if crate::fios::ocupacao_na_cota(titular, 3) != Some(esperada)
+            || crate::fios::ocupacao_na_cota(titular, 4).is_some()
         {
             return Err("a conta do gate nao disse os mortos por recolher");
         }
@@ -2013,4 +2015,194 @@ pub(super) fn zumbis_os_nascimentos_sem_vaga_de_varios_nucleos_acordam_o_coletor
         600,
     );
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// O cutucão do chamado, e o chamado que chega durante a passada (o lote B2)
+// ---------------------------------------------------------------------------
+
+/// O que a sonda do cutucão faz na rodada: nada, nascer um fio — recusado,
+/// com a tabela cheia de mortos —, perguntar a cota do titular pela conta do
+/// gate, ou sair.
+const SONDA_ESPERA: u64 = 0;
+const SONDA_NASCE: u64 = 1;
+const SONDA_COTA: u64 = 2;
+const SONDA_SAI: u64 = 3;
+
+/// O pedido à sonda; ela o devolve a [`SONDA_ESPERA`] quando acaba.
+static SONDA: AtomicU64 = AtomicU64::new(SONDA_ESPERA);
+/// O titular da cota que a sonda pergunta, como `Autoridade::Pessoa`.
+static SONDA_SESSAO: AtomicU64 = AtomicU64::new(0);
+/// O que a sonda viu na última rodada: o núcleo do coletor antes do pedido,
+/// mais um — zero, nenhum —; os cutucões dele antes e depois; os do sistema
+/// antes e depois; e se o pedido foi recusado como devia.
+static SONDA_NUCLEO: AtomicU64 = AtomicU64::new(0);
+static SONDA_NO_NUCLEO: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static SONDA_NO_TOTAL: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static SONDA_RECUSOU: AtomicBool = AtomicBool::new(false);
+
+/// A sonda do cutucão: presa a um núcleo que não é o do coletor, faz o
+/// pedido da rodada e conta os cutucões em volta dele. O cutucão não vai ao
+/// próprio núcleo de quem o manda (`nucleos::cutucar`): a sonda precisa de
+/// um núcleo seu.
+extern "C" fn sonda_do_cutucao(_argumento: u64) -> ! {
+    loop {
+        match SONDA.load(SeqCst) {
+            SONDA_SAI => break,
+            pedido @ (SONDA_NASCE | SONDA_COTA) => {
+                let nucleo = crate::fios::nucleo_do_coletor_de_teste();
+                let no_nucleo = || nucleo.map_or(0, |c| crate::nucleos::cutucoes_de(c).0);
+                SONDA_NUCLEO.store(nucleo.map_or(0, |c| c as u64 + 1), SeqCst);
+                SONDA_NO_NUCLEO[0].store(no_nucleo(), SeqCst);
+                SONDA_NO_TOTAL[0].store(crate::nucleos::cutucoes(), SeqCst);
+                let recusou = if pedido == SONDA_NASCE {
+                    matches!(
+                        crate::fios::criar("teste-cutucao", fio_curto, 0),
+                        Err(m) if m.contains("vaga")
+                    )
+                } else {
+                    let titular = Autoridade::Pessoa {
+                        sessao: crate::pessoas::IdSessao(SONDA_SESSAO.load(SeqCst).to_le_bytes()),
+                    };
+                    crate::fios::cota_cheia(titular, 2).is_some_and(|o| o.mortos_por_recolher == 2)
+                };
+                SONDA_NO_NUCLEO[1].store(no_nucleo(), SeqCst);
+                SONDA_NO_TOTAL[1].store(crate::nucleos::cutucoes(), SeqCst);
+                SONDA_RECUSOU.store(recusou, SeqCst);
+                SONDA.store(SONDA_ESPERA, SeqCst);
+            }
+            _ => crate::fios::ceder(),
+        }
+    }
+    crate::fios::terminar()
+}
+
+/// Uma rodada da sonda: o chamado esquecido — o coletor segurado não o
+/// atende, e o de antes não cutucaria de novo —, o `pedido`, e o cutucão
+/// conferido: o núcleo em que o coletor estava recebeu um a mais — ou, com
+/// ele esperando a vez, algum núcleo ocioso recebeu.
+fn rodada_da_sonda(pedido: u64, qual: &str) -> Resultado {
+    crate::fios::esquecer_o_chamado_de_teste();
+    SONDA_RECUSOU.store(false, SeqCst);
+    SONDA.store(pedido, SeqCst);
+    esperar_ate(|| SONDA.load(SeqCst) == SONDA_ESPERA, 300)
+        .map_err(|_| "a sonda do cutucao nao fez o pedido")?;
+    let nucleo = SONDA_NUCLEO.load(SeqCst);
+    let no_nucleo = SONDA_NO_NUCLEO[1].load(SeqCst) - SONDA_NO_NUCLEO[0].load(SeqCst);
+    let no_total = SONDA_NO_TOTAL[1].load(SeqCst) - SONDA_NO_TOTAL[0].load(SeqCst);
+    crate::log_info!(
+        "teste",
+        "zumbis: {}: o coletor no nucleo {:?}; cutucoes nele {}, no sistema {}",
+        qual,
+        nucleo.checked_sub(1),
+        no_nucleo,
+        no_total
+    );
+    if !SONDA_RECUSOU.load(SeqCst) {
+        return Err("o pedido da sonda nao foi recusado com os mortos por recolher");
+    }
+    let cutucou = if nucleo != 0 {
+        no_nucleo >= 1
+    } else {
+        no_total >= 1
+    };
+    if !cutucou {
+        return Err("o chamado do coletor nao cutucou o nucleo dele");
+    }
+    Ok(())
+}
+
+/// O cutucão da mitigação (3) da decisão sobre o achado A1: o chamado
+/// marca, e o cutucão tira o coletor do sono antes do tique. Os três casos
+/// do chamado esperam até 600 tiques, e sem o cutucão o coletor acorda no
+/// tique, acha a marca e recolhe: os três passam — a mutação que tira o
+/// cutucão dos dois pontos sobrevivia a eles (o item 5 do adversário do
+/// lote B do #448). Aqui se conta o cutucão: com o coletor segurado — ele
+/// não recolhe, e o chamado de cada rodada é atendido sem tirar os mortos
+/// —, uma sonda presa a outro núcleo pede, três vezes, um nascimento com a
+/// tabela cheia de mortos, e o núcleo em que o coletor dorme recebe um
+/// cutucão a cada recusa; e, com dois `ola` de um titular mortos na cota
+/// 2, três vezes a conta do gate (`fios::cota_cheia`), com o mesmo
+/// cutucão. Sem o cutucão num dos dois pontos, a conta não sobe, e o caso
+/// reprova.
+pub(super) fn zumbis_o_chamado_cutuca_o_nucleo_do_coletor() -> Resultado {
+    let Some(nucleo) = nucleos_secundarios().last() else {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: o cutucao nao vai ao proprio nucleo de quem o manda"
+        );
+        return Ok(());
+    };
+    super::sem_mortos_por_recolher();
+    let livres_antes = crate::fios::vagas_livres_de_teste();
+    SONDA.store(SONDA_ESPERA, SeqCst);
+    let sonda =
+        crate::fios::criar_no_nucleo("teste-sonda-do-cutucao", sonda_do_cutucao, 0, nucleo)?
+            .numero();
+    let mut segurado = Some(super::vagas::ColetorSegurado::segurar());
+    let resultado = (|| -> Resultado {
+        // Pelo nascimento sem vaga.
+        let mortos = encher_de_mortos()?;
+        for _ in 0..3 {
+            rodada_da_sonda(SONDA_NASCE, "o nascimento sem vaga")?;
+        }
+        drop(segurado.take());
+        esperar_ate(|| recolhidos(&mortos), 600)
+            .map_err(|_| "o coletor solto nao recolheu os mortos da tabela cheia")?;
+        // Pela conta do gate, com a cota cheia de mortos do titular.
+        politica_com_a_cota(2)?;
+        let titular = operador(0, "pessoa-do-cutucao");
+        let Autoridade::Pessoa { sessao } = titular else {
+            return Err("o titular do caso nao e uma pessoa");
+        };
+        SONDA_SESSAO.store(u64::from_le_bytes(sessao.0), SeqCst);
+        let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+        segurado = Some(super::vagas::ColetorSegurado::segurar());
+        let mut olas = Vec::new();
+        for _ in 0..2 {
+            let id = crate::usuario::lancar_como(Some(&ola), titular)
+                .map_err(|_| "um ola dentro da cota nao nasceu")?;
+            esperar_ate(|| parado(id), 600).map_err(|_| "o ola nao saiu")?;
+            olas.push(id);
+        }
+        for _ in 0..3 {
+            rodada_da_sonda(SONDA_COTA, "a conta do gate com mortos")?;
+        }
+        drop(segurado.take());
+        esperar_ate(|| recolhidos(&olas), 600)
+            .map_err(|_| "o coletor solto nao recolheu os ola mortos")
+    })();
+    drop(segurado);
+    SONDA.store(SONDA_SAI, SeqCst);
+    let _ = esperar_ate(|| !crate::fios::vivo(sonda), 300);
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    let _ = esperar_ate(
+        || {
+            super::sem_mortos_por_recolher();
+            crate::fios::vagas_livres_de_teste() >= livres_antes
+        },
+        600,
+    );
+    resultado
+}
+
+/// O chamado que chega enquanto o coletor passa — o recolhimento do tique,
+/// os prazos, a auditoria ao journal — não espera o tique seguinte: a marca
+/// é olhada antes de dormir, e a volta seguinte a atende já (o item 10 do
+/// adversário do lote B do #448). A suíte põe a marca no fim de uma
+/// passada, como a de um nascimento recusado que chegasse durante ela, e
+/// confere que o coletor a atendeu sem dormir no meio. Antes, ele dormia, e
+/// o chamado esperava o tique.
+pub(super) fn zumbis_o_chamado_durante_a_passada_nao_espera_o_tique() -> Resultado {
+    crate::fios::marcar_o_chamado_no_fim_da_passada_de_teste();
+    esperar_ate(
+        || crate::fios::o_chamado_da_passada_de_teste().is_some(),
+        300,
+    )
+    .map_err(|_| "o coletor nao atendeu o chamado posto no fim da passada")?;
+    match crate::fios::o_chamado_da_passada_de_teste() {
+        Some(false) => Ok(()),
+        _ => Err("o coletor dormiu antes de atender o chamado que chegou durante a passada"),
+    }
 }

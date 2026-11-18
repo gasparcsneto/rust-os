@@ -724,6 +724,8 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         let chamado = COLETOR_CHAMADO.swap(false, Ordering::AcqRel);
         let do_tique = ultima_passada != Some(agora);
         let quantos = if chamado {
+            #[cfg(feature = "modo-teste")]
+            chamado_de_teste::no_atendimento();
             recolher_pelo_chamado()
         } else if do_tique {
             recolher_terminados()
@@ -736,9 +738,80 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         if do_tique {
             ultima_passada = Some(agora);
             passada_do_coletor();
+            #[cfg(feature = "modo-teste")]
+            chamado_de_teste::no_fim_da_passada();
         }
+        // O chamado que chegou durante a volta — o recolhimento ou a
+        // passada — não espera o tique: a marca é olhada antes de dormir, e
+        // a volta seguinte a atende já. Só um atômico: nenhuma trava nova,
+        // e a ordem das travas não muda. O cutucão do chamado que chega
+        // entre esta pergunta e o sono ainda se perde — e ainda vale o
+        // tique, como antes (ver [`COLETOR_CHAMADO`]).
+        if COLETOR_CHAMADO.load(Ordering::Acquire) {
+            continue;
+        }
+        #[cfg(feature = "modo-teste")]
+        chamado_de_teste::antes_de_dormir();
         descansar_ate_a_interrupcao();
     }
+}
+
+/// Só para a suíte: o chamado que chega no fim da passada do [`coletor`] —
+/// ver [`marcar_o_chamado_no_fim_da_passada_de_teste`].
+#[cfg(feature = "modo-teste")]
+mod chamado_de_teste {
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    /// A próxima passada do coletor termina com o chamado marcado.
+    pub(super) static MARCAR: AtomicBool = AtomicBool::new(false);
+    /// Quantas vezes o coletor foi dormir.
+    pub(super) static SONOS: AtomicU64 = AtomicU64::new(0);
+    /// Os sonos quando a marca foi posta no fim da passada, mais um; zero,
+    /// nenhuma.
+    pub(super) static NA_MARCA: AtomicU64 = AtomicU64::new(0);
+    /// Os sonos quando o coletor atendeu o chamado, mais um; zero, nenhum.
+    pub(super) static NO_ATENDIMENTO: AtomicU64 = AtomicU64::new(0);
+
+    /// No fim da passada: o chamado, se a suíte o pediu — como o de um
+    /// nascimento recusado que chega enquanto o coletor passa.
+    pub(super) fn no_fim_da_passada() {
+        if MARCAR.swap(false, Ordering::SeqCst) {
+            NO_ATENDIMENTO.store(0, Ordering::SeqCst);
+            NA_MARCA.store(SONOS.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+            super::COLETOR_CHAMADO.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// O coletor atende o chamado.
+    pub(super) fn no_atendimento() {
+        if NA_MARCA.load(Ordering::SeqCst) != 0 && NO_ATENDIMENTO.load(Ordering::SeqCst) == 0 {
+            NO_ATENDIMENTO.store(SONOS.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+        }
+    }
+
+    /// O coletor vai dormir.
+    pub(super) fn antes_de_dormir() {
+        SONOS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Só para a suíte: a próxima passada do [`coletor`] termina com o chamado
+/// marcado, como o de um nascimento recusado que chegasse durante ela.
+#[cfg(feature = "modo-teste")]
+pub fn marcar_o_chamado_no_fim_da_passada_de_teste() {
+    chamado_de_teste::NA_MARCA.store(0, Ordering::SeqCst);
+    chamado_de_teste::NO_ATENDIMENTO.store(0, Ordering::SeqCst);
+    chamado_de_teste::MARCAR.store(true, Ordering::SeqCst);
+}
+
+/// Só para a suíte: o chamado de [`marcar_o_chamado_no_fim_da_passada_de_teste`]
+/// foi atendido? `Some(dormiu)` — se o coletor dormiu entre a marca e o
+/// atendimento —, ou `None`, ainda não.
+#[cfg(feature = "modo-teste")]
+pub fn o_chamado_da_passada_de_teste() -> Option<bool> {
+    let marca = chamado_de_teste::NA_MARCA.load(Ordering::SeqCst);
+    let atendimento = chamado_de_teste::NO_ATENDIMENTO.load(Ordering::SeqCst);
+    (marca != 0 && atendimento != 0).then_some(atendimento != marca)
 }
 
 /// O coletor foi chamado: um nascimento não achou vaga, ou a cota do
@@ -765,10 +838,12 @@ extern "C" fn coletor(_argumento: u64) -> ! {
 /// # O cutucão que se perde
 ///
 /// O chamado é a marca, e o cutucão só tira o coletor do sono antes do
-/// tique. Um cutucão que chega entre a pergunta do coletor e o sono dele se
-/// perde, e o coletor dorme até o tique: a latência de antes, e não mais —
-/// a marca fica, e ele a atende na volta seguinte. O mesmo acontece com o
-/// chamado que chega enquanto ele recolhe.
+/// tique. O coletor olha a marca antes de dormir: o chamado que chega
+/// enquanto ele recolhe ou passa é atendido na volta seguinte, sem dormir (o
+/// item 10 do adversário do lote B do #448, no lote B2). Um cutucão que
+/// chega entre essa pergunta e o sono se perde, e o coletor dorme até o
+/// tique: a latência de antes, e não mais — a marca fica, e ele a atende na
+/// volta seguinte.
 static COLETOR_CHAMADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// O id do coletor, que [`init`] criou — zero se ele não nasceu. É por ele
@@ -1405,6 +1480,20 @@ pub fn acordar_o_coletor_de_teste() {
 #[cfg(feature = "modo-teste")]
 pub fn esquecer_o_chamado_de_teste() {
     COLETOR_CHAMADO.store(false, Ordering::SeqCst);
+}
+
+/// Só para a suíte: o núcleo em que o [`coletor`] está — rodando, ou
+/// dormindo à espera do tique —, ou `None`, se ele espera a vez.
+#[cfg(feature = "modo-teste")]
+pub fn nucleo_do_coletor_de_teste() -> Option<usize> {
+    let id = ID_DO_COLETOR.load(Ordering::Acquire);
+    com_escalonador(|e| {
+        e.fios
+            .iter()
+            .flatten()
+            .find(|f| f.id.numero() == id)
+            .and_then(|f| f.na_cpu)
+    })
 }
 
 /// Só para a suíte: quantas vezes um nascimento sem vaga, ou uma recusa da
@@ -3487,15 +3576,27 @@ pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
 
 /// A conta de [`processos_de`] contra a `cota`, numa tomada só da trava:
 /// `None` se o titular cabe nela; se não cabe, o que ele ocupa e quantas
-/// dessas vagas são de mortos que esperam o coletor ([`Ocupacao`]). É a
-/// conta do gate em [`crate::autorizacao::permitir_processo`]; a do
-/// nascimento, a que vale, é a mesma, na seção crítica que reserva a vaga.
+/// dessas vagas são de mortos que esperam o coletor ([`Ocupacao`]). Só a
+/// conta, sem efeito nenhum: a pergunta de quem quer saber — a suíte. A do
+/// gate é [`cota_cheia`], que chama o coletor.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn ocupacao_na_cota(
+    autoridade: crate::autorizacao::Autoridade,
+    cota: usize,
+) -> Option<Ocupacao> {
+    com_escalonador(|e| e.cota_cheia(autoridade, cota))
+}
+
+/// A conta de [`ocupacao_na_cota`], a do gate em
+/// [`crate::autorizacao::permitir_processo`]; a do nascimento, a que vale, é
+/// a mesma, na seção crítica que reserva a vaga.
 ///
 /// A cota cheia com mortos do titular por recolher chama o coletor, como o
 /// nascimento sem vaga ([`COLETOR_CHAMADO`]): é aqui, no gate, que quase
 /// toda recusa da cota acontece, e a vaga desses mortos — e a cota — só
 /// volta com ele. A decisão não muda: a recusa é a mesma, e quem pediu não
-/// espera o coletor.
+/// espera o coletor. Por isso ela não é uma pergunta: quem só quer saber
+/// pergunta a [`ocupacao_na_cota`].
 pub fn cota_cheia(autoridade: crate::autorizacao::Autoridade, cota: usize) -> Option<Ocupacao> {
     let (ocupacao, cutucar) = com_escalonador(|e| {
         let ocupacao = e.cota_cheia(autoridade, cota);

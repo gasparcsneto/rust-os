@@ -41920,6 +41920,14 @@ static CASOS: &[Caso] = &[
         nome: "excecoes: o brk do EL0 mata o processo, e nao registra e segue",
         f: excecoes::excecoes_o_brk_do_el0_mata_o_processo,
     },
+    Caso {
+        nome: "zumbis: o chamado do coletor cutuca o nucleo em que ele dorme, pelo nascimento e pela cota",
+        f: zumbis::zumbis_o_chamado_cutuca_o_nucleo_do_coletor,
+    },
+    Caso {
+        nome: "zumbis: o chamado que chega durante a passada do coletor nao espera o tique",
+        f: zumbis::zumbis_o_chamado_durante_a_passada_nao_espera_o_tique,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia
