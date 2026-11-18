@@ -901,6 +901,19 @@ def aninhar(cert):
     delegacao["certificate"] = cbor(com_etiqueta(interno, tinha))
 
 
+def registrar(log, *partes):
+    """Uma linha do registro do proxy, com a hora UTC, em milissegundos, e o
+    pid: cada conexao do emulador e um processo. A hora diz quando a
+    conexao abriu, quando o TLS fechou, quando o pedido chegou e quando a
+    resposta saiu - ou que nada disso aconteceu -, para comparar com o
+    relogio do convidado e com o resto do hospedeiro. Sem ela, um pedido que
+    o convidado deu por perdido nao se achava aqui."""
+    agora = time.time()
+    hora = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(agora))
+    marca = "%s.%03dZ [%d]" % (hora, int(agora * 1000) % 1000, os.getpid())
+    print(marca, *partes, file=log, flush=True)
+
+
 def chamar_depois(estado, metodo, alvo, corpo, log):
     """A chamada pela via assincrona do gateway (`/api/v2`), depois de
     ATRASO_DA_CHAMADA_MS. O fio nao e `daemon`: o processo do proxy so sai
@@ -911,9 +924,9 @@ def chamar_depois(estado, metodo, alvo, corpo, log):
         v2 = alvo.replace("/api/v4/", "/api/v2/", 1)
         try:
             status, _, _, _ = gateway(estado["gateway"], metodo, v2, corpo)
-            print("icp.py: assincrona %s %s -> %d" % (metodo, v2, status), file=log, flush=True)
+            registrar(log, "icp.py: assincrona %s %s -> %d" % (metodo, v2, status))
         except OSError as erro:
-            print("icp.py: assincrona %s: %s" % (v2, erro), file=log, flush=True)
+            registrar(log, "icp.py: assincrona %s: %s" % (v2, erro))
 
     threading.Thread(target=entregar).start()
 
@@ -993,6 +1006,7 @@ def proxy(diretorio, diretorio_tls):
     # o cliente no meio da conversa.
     os.dup2(log.fileno(), 2)
     sys.stderr = log
+    registrar(log, "icp.py: conexao aberta")
     with open(os.path.join(diretorio, "estado.json")) as f:
         estado = json.load(f)
     nome = {"valor": None}
@@ -1008,13 +1022,14 @@ def proxy(diretorio, diretorio_tls):
         with ctx.wrap_socket(cru, server_side=True) as conexao:
             # O modo e o do nome que o TLS provou, para a conexao inteira.
             modo = MODOS.get(nome["valor"], "honesto")
+            registrar(log, "icp.py: tls com %s, modo %s" % (nome["valor"], modo))
             atender(conexao, lambda _: modo, estado, diretorio, log)
             try:
                 conexao.unwrap()
             except (ssl.SSLError, OSError):
                 pass
     except (ssl.SSLError, OSError, ValueError) as erro:
-        print("icp.py:", type(erro).__name__, erro, file=log, flush=True)
+        registrar(log, "icp.py:", type(erro).__name__, erro)
 
 
 def atender(conexao, modo_de, estado, diretorio, log):
@@ -1026,14 +1041,16 @@ def atender(conexao, modo_de, estado, diretorio, log):
         except Fechou:
             return
         modo = modo_de(cabecalhos)
+        inicio = time.monotonic()
         try:
             status, motivo, tipo, resposta = repassar(
                 estado, diretorio, modo, metodo, alvo, corpo, log
             )
         except (OSError, ValueError, KeyError) as erro:
-            print("icp.py: %s %s: %s" % (modo, alvo, erro), file=log, flush=True)
+            registrar(log, "icp.py: %s %s: %s" % (modo, alvo, erro))
             status, motivo, tipo, resposta = 502, "Bad Gateway", "text/plain", b"bancada\n"
-        print("icp.py: %s %s %s -> %d" % (modo, metodo, alvo, status), file=log, flush=True)
+        ms = int((time.monotonic() - inicio) * 1000)
+        registrar(log, "icp.py: %s %s %s -> %d em %d ms" % (modo, metodo, alvo, status, ms))
         cabeca = "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n" % (
             status,
             motivo,
@@ -1059,7 +1076,7 @@ def proxy_claro(diretorio, porta):
             try:
                 atender(conexao, pelo_host, estado, diretorio, log)
             except OSError as erro:
-                print("icp.py:", type(erro).__name__, erro, file=log, flush=True)
+                registrar(log, "icp.py:", type(erro).__name__, erro)
 
 
 def main():

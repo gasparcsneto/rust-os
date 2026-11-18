@@ -2900,7 +2900,11 @@ causa conferida antes de a rodada valer:
   instalador pela rede`, 13,1 s (5,7 s). A parte rodou de novo, com a
   máquina quieta, e passou: 520 de 520, em 1482 segundos, com o mesmo
   pedido respondido em 0,12 s e os três casos do `codigo` em 2,7, 2,1 e
-  4,6 s.
+  4,6 s. O registro do proxy da bancada (`target/bancada-icp/proxy.log`)
+  não tinha hora, e não deu para saber se o pedido perdido chegou a ele;
+  agora cada linha leva a hora UTC, em milissegundos, e o pid da conexão,
+  a abertura da conexão e o fim do TLS também ganham linha, e cada pedido
+  diz quanto o gateway levou.
 
 ### O `fork` não copia página nenhuma
 
