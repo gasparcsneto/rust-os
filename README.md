@@ -5131,7 +5131,10 @@ registro de cada uma no ponto em que nasceu.
   decisão — só aplica a regra de que a senha não vai à auditoria, ao log,
   às mensagens de diagnóstico nem ao `system.info` — entrou como [B] no
   passo 1 da continuidade: a linha que não é comando, num console sem
-  ninguém, vai à auditoria com um marcador, e não com a primeira palavra; o
+  ninguém, vai à auditoria com um marcador, e não com a primeira palavra —
+  e, pelo I7 do lote B do #448, o comando que existe vai sem o resumo dos
+  parâmetros, também [B]: o que vem depois do nome não chega ao registro,
+  nem num resumo sem chave que se adivinha por dicionário —; o
   servidor de janelas não grava a tecla no log; a tecla do console físico
   entra no histórico quando ele a consome; o console engole o resto da
   senha quando a cerimônia de pareamento acaba no meio dela; as cópias da
@@ -8672,11 +8675,15 @@ quando.
 `login` e `ajuda` — a ajuda diz só como entrar. Todo o resto — um comando,
 conhecido ou não, uma tecla de função, um clique na barra — é
 `DENY_NOT_AUTHENTICATED`, gravado com o console: o comando que existe, com
-o nome e o resumo dos parâmetros; o que não é comando, com o marcador
-`(comando desconhecido)` e sem resumo. Uma linha que não é comando pode ser
-uma senha digitada no lugar errado, e o registro vai ao journal: nem a
-primeira palavra em claro, nem o resto num resumo sem chave, que se
-adivinha fora da máquina. A resposta é a mesma nos dois casos — quem
+o nome; o que não é comando, com o marcador `(comando desconhecido)`; e
+nenhum dos dois com o resumo dos parâmetros — o registro leva o resumo do
+vazio. O que se digita num console sem ninguém pode ser uma senha no
+lugar errado — a linha inteira, ou o que vem depois do nome de um
+comando —, e o registro vai ao journal: nem a primeira palavra em claro,
+nem o resto num resumo sem chave, que se adivinha fora da máquina por
+dicionário (o N6, para a linha que não é comando; o I7, para o comando
+que existe). Antes do login, a decisão é a mesma qualquer que seja o
+parâmetro, e o registro também. A resposta é a mesma nos dois casos — quem
 digitou não fica sabendo se o comando existe. Não há login automático.
 
 **Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
@@ -8928,12 +8935,18 @@ Um agente que confirma uma linha num console continua sendo ele mesmo: age
 como a sessão dele, com o papel dele, entrado alguém no console ou não.
 
 A suíte confere, num console sem ninguém, os comandos e a F2 recusados e
-gravados — o que existe com o nome e o resumo dos parâmetros, o que não é
-comando com o marcador e sem resumo, e uma senha digitada no lugar errado
+gravados — o que existe com o nome, o que não é comando com o marcador,
+nenhum com o resumo dos parâmetros, e uma senha digitada no lugar errado
 fora da auditoria, do log e dos relatórios (o `system.info` e o registro
 de pessoas); o caso a entrega direto ao console, e não pelo teclado: a de
 verdade ainda ecoa e entra no histórico — ver [Decisões
-pendentes](#decisões-pendentes) —, e a ajuda atendida; a senha digitada
+pendentes](#decisões-pendentes) —, e a ajuda atendida; o comando que
+existe, com um parâmetro, com outro e com uma senha depois do nome,
+gravado igual, e nenhum registro com o resumo do que se digitou, e, com
+alguém entrado, o mesmo comando com o resumo, como sempre ("consoles: sem
+ninguem, o comando vai a auditoria sem o resumo dos parametros; com
+alguem, com ele"; a mutação que devolve o resumo ao comando que existe
+reprova ele e "consoles: nada antes do login"); a senha digitada
 adiantado no físico, o `login`, o nome e a
 senha inteiros na fila antes de o console consumir a primeira tecla, fora
 do histórico ("consoles: a senha digitada adiantado nao entra no

@@ -3892,31 +3892,38 @@ pub fn auditar_arrendamento(
 /// `ajuda` passam antes do login, e o resto — um comando, conhecido ou não —
 /// é `DENY_NOT_AUTHENTICATED`, gravado com o console.
 ///
-/// O `metodo` é o nome do comando, e os `parametros` vão como o resumo
-/// deles, **só se o comando existe**. Uma linha que não é comando vai com
-/// [`COMANDO_DESCONHECIDO`] e sem parâmetros: ela pode ser uma senha
-/// digitada no lugar errado — antes de `login`, ou no console que não era
-/// o da senha —, e a primeira palavra iria em claro para a auditoria, que o
-/// journal guarda; o resto, num resumo sem chave, que se adivinha fora da
-/// máquina. É a regra do login, que não grava o nome que não é de ninguém
-/// (ver [`crate::pessoas::autenticar`]). Quem chama confere o registro
-/// antes.
-pub fn recusar_sem_login(console: crate::pessoas::Console, metodo: &str, parametros: &[u8]) {
+/// O `metodo` é o do pedido — o nome do comando que existe, o de uma
+/// palavra do console (a troca da própria senha, o pareamento), a tecla
+/// —, ou [`COMANDO_DESCONHECIDO`] para a linha que não é comando — quem
+/// chama confere o registro antes —, e **nunca** vai o resumo dos
+/// parâmetros: o registro leva o resumo do vazio, o de sempre de quem não
+/// tem parâmetros. O que se digita num
+/// console sem ninguém pode ser uma senha no lugar errado — antes de
+/// `login`, ou no console que não era o da senha —: a primeira palavra
+/// iria em claro para a auditoria, que o journal guarda, e o resto — também
+/// o que vem depois do nome de um comando — num resumo sem chave, que se
+/// adivinha fora da máquina por dicionário. É a regra do login, que não
+/// grava o nome que não é de ninguém (ver [`crate::pessoas::autenticar`]),
+/// e a de que a senha não vai à auditoria: o N6 a aplicou à linha que não é
+/// comando, e o I7, ao comando que existe. Antes do login, a decisão é a
+/// mesma qualquer que seja o parâmetro, e o registro também.
+pub fn recusar_sem_login(console: crate::pessoas::Console, metodo: &str) {
     auditar(
         &quem_sem_login(),
         metodo,
         &console.texto(),
         Codigo::DenyNotAuthenticated,
-        parametros,
+        &[],
         "ninguem entrou no console",
     );
 }
 
 /// O método que vai à auditoria por uma linha que não é comando, digitada
 /// num console sem ninguém entrado — ver [`recusar_sem_login`]. Sempre o
-/// mesmo, e sem o resumo dos parâmetros: o que a pessoa digitou não fica
-/// em lugar nenhum do registro. Os parênteses e o espaço não cabem num
-/// nome do registro de comandos, e o marcador não colide com nenhum.
+/// mesmo, e, como o comando que existe, sem o resumo dos parâmetros: o que
+/// a pessoa digitou não fica em lugar nenhum do registro. Os parênteses e o
+/// espaço não cabem num nome do registro de comandos, e o marcador não
+/// colide com nenhum.
 pub const COMANDO_DESCONHECIDO: &str = "(comando desconhecido)";
 
 /// Decide uma ação da pessoa de um console na interface — uma tecla de

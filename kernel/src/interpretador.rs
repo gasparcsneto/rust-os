@@ -37,12 +37,13 @@
 //!
 //! Um console sem ninguém entrado aceita `login` e `ajuda`. Todo o resto —
 //! um comando, uma tecla de função, um clique — é recusado com
-//! `DENY_NOT_AUTHENTICATED` e vai para a auditoria: o comando com o nome e
-//! o resumo dos parâmetros, se ele existe; senão, com o marcador
-//! [`autorizacao::COMANDO_DESCONHECIDO`], sem resumo — uma linha que não é
-//! comando pode ser uma senha digitada no lugar errado, e não vai ao
-//! registro, nem em claro nem num resumo que se adivinha fora da máquina.
-//! A resposta é a mesma nos dois casos. Depois do login, cada
+//! `DENY_NOT_AUTHENTICATED` e vai para a auditoria sem o resumo dos
+//! parâmetros: o comando com o nome, se ele existe; senão, com o marcador
+//! [`autorizacao::COMANDO_DESCONHECIDO`]. O que se digita ali pode ser uma
+//! senha no lugar errado — a linha inteira, ou o que vem depois do nome de
+//! um comando —, e não vai ao registro, nem em claro nem num resumo que se
+//! adivinha fora da máquina. A resposta é a mesma nos dois casos, e o
+//! registro não muda com o parâmetro. Depois do login, cada
 //! comando passa pela decisão com o papel que o registro dá à pessoa
 //! **agora**: uma revogação vale no comando seguinte, e o console volta a
 //! pedir o login.
@@ -1075,7 +1076,7 @@ pub fn tratar_tecla_de_janela(c: char) {
     let console = terminal.unwrap_or(Console::Fisico);
     let titular = crate::coordenacao::titular(Origem::Pessoa, console);
     if terminal.is_none() && titular.is_none() {
-        crate::autorizacao::recusar_sem_login(Console::Fisico, "keyboard", &[]);
+        crate::autorizacao::recusar_sem_login(Console::Fisico, "keyboard");
         return;
     }
     let engolida = terminal.is_some_and(|console| engolida_na_janela(console, c));
@@ -2726,7 +2727,7 @@ fn comecar_troca(console: Console, params: &str) {
         return;
     }
     let Some(sessao) = sessao_valida(console) else {
-        autorizacao::recusar_sem_login(console, autorizacao::TROCA_DA_PROPRIA_SENHA, &[]);
+        autorizacao::recusar_sem_login(console, autorizacao::TROCA_DA_PROPRIA_SENHA);
         saidaln!(
             console,
             "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
@@ -2851,7 +2852,7 @@ fn comecar_pareamento(console: Console, aceitar: bool, params: &str) {
         return;
     };
     let Some(sessao) = sessao_valida(console) else {
-        autorizacao::recusar_sem_login(console, autorizacao::PAREAMENTO, &[]);
+        autorizacao::recusar_sem_login(console, autorizacao::PAREAMENTO);
         saidaln!(
             console,
             "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
@@ -3313,24 +3314,18 @@ fn despachar(
     // Quem pede: o agente que confirmou, como a sessão dele; ou a pessoa do
     // console, pela sessão dela. Sem ninguém entrado, nada: o pedido é
     // recusado sem dizer se o comando existe — a resposta é a mesma —, e
-    // gravado: o nome e o resumo dos parâmetros só do comando que existe. O
-    // que não é comando vai com o marcador, sem resumo: pode ser uma senha
-    // digitada no lugar errado — ver `autorizacao::recusar_sem_login`.
+    // gravado sem o resumo dos parâmetros: o nome do comando que existe, ou
+    // o marcador do que não é comando. O que se digita ali pode ser uma
+    // senha no lugar errado, também depois do nome de um comando — ver
+    // `autorizacao::recusar_sem_login`.
     let chamador = match origem {
         Origem::Agente(sessao) => Chamador::Sessao(sessao),
         Origem::Pessoa => match sessao_valida(console) {
             Some(id) => Chamador::Pessoa(id),
             None => {
-                match registry::encontrar(nome) {
-                    Some(comando) => {
-                        autorizacao::recusar_sem_login(console, comando.nome, params.as_bytes())
-                    }
-                    None => autorizacao::recusar_sem_login(
-                        console,
-                        autorizacao::COMANDO_DESCONHECIDO,
-                        &[],
-                    ),
-                }
+                let metodo = registry::encontrar(nome)
+                    .map_or(autorizacao::COMANDO_DESCONHECIDO, |comando| comando.nome);
+                autorizacao::recusar_sem_login(console, metodo);
                 saidaln!(
                     console,
                     "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"

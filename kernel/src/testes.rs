@@ -18622,14 +18622,14 @@ fn ultimo_que(
 /// com o console; `ajuda` diz só como entrar. Um agente que confirma a linha
 /// age como ele mesmo, e não entra por ninguém.
 ///
-/// O registro leva o nome e o resumo dos parâmetros só do comando que
-/// existe. O que não é comando vai com o marcador e o resumo do vazio: a
-/// senha digitada no lugar errado não chega à auditoria — nem a primeira
-/// palavra em claro, nem o resto num resumo —, nem ao log, nem aos
-/// relatórios. A linha entra direto no console, e não pelo teclado: o
-/// histórico, aqui, não a vê — a de verdade, digitada no teclado numa
-/// linha que pede um comando, ecoa e entra no histórico, e isso é das
-/// decisões pendentes (README).
+/// O registro leva o nome do comando que existe, e nunca o resumo dos
+/// parâmetros (o I7): o resumo do vazio, como o da linha que não é comando,
+/// que vai com o marcador. A senha digitada no lugar errado não chega à
+/// auditoria — nem a primeira palavra em claro, nem o resto num resumo —,
+/// nem ao log, nem aos relatórios. A linha entra direto no console, e não
+/// pelo teclado: o histórico, aqui, não a vê — a de verdade, digitada no
+/// teclado numa linha que pede um comando, ecoa e entra no histórico, e
+/// isso é das decisões pendentes (README).
 fn consoles_nada_antes_do_login() -> Resultado {
     use crate::autorizacao::COMANDO_DESCONHECIDO;
     use crate::pessoas::Console;
@@ -18661,11 +18661,11 @@ fn consoles_nada_antes_do_login() -> Resultado {
         };
         let senha_no_lugar_errado = alloc::format!("{NO_LUGAR_ERRADO}\n");
         for (linha, metodo, parametros) in [
-            ("system.info\n", "system.info", &b"{}"[..]),
-            ("agent.ping\n", "agent.ping", b"{}"),
-            // Um comando que existe, com parâmetros: o nome, e o resumo
-            // deles.
-            ("log.tail {\"count\":4}\n", "log.tail", br#"{"count":4}"#),
+            // O comando que existe: o nome, e o resumo do vazio — sem
+            // parâmetro, e com eles também (o I7).
+            ("system.info\n", "system.info", &b""[..]),
+            ("agent.ping\n", "agent.ping", b""),
+            ("log.tail {\"count\":4}\n", "log.tail", b""),
             // O que não é comando: o marcador, e o resumo do vazio.
             ("nao-existe\n", COMANDO_DESCONHECIDO, b""),
             (senha_no_lugar_errado.as_str(), COMANDO_DESCONHECIDO, b""),
@@ -18762,6 +18762,98 @@ fn consoles_nada_antes_do_login() -> Resultado {
         Ok(())
     })();
     crate::interpretador::desativar_para_teste();
+    resultado
+}
+
+/// O I7: num console sem ninguém entrado, o comando que existe vai à
+/// auditoria com o nome e sem o resumo dos parâmetros — o resumo do vazio,
+/// o mesmo da linha que não é comando —, e o registro não contém o resumo
+/// do que se digitou depois do nome: um parâmetro de verdade, outro, e uma
+/// senha no lugar dele dão o mesmo registro, e nenhum registro da auditoria
+/// tem o resumo de um deles. Antes, o resumo sem chave ia ao journal, e
+/// quem lê a auditoria o adivinhava por dicionário. Com alguém entrado, o
+/// comando vai com o resumo dos parâmetros, como sempre: é dele que a
+/// decisão é.
+fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::{Titular, resumo_dos_parametros};
+    /// Uma senha digitada depois do nome de um comando.
+    const DEPOIS_DO_NOME: &str = "jabuticaba no quintal";
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::pessoas::registrar_de_teste("bia-do-i7", "operador", SENHA_DE_TESTE);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o console abriu com alguem entrado");
+        }
+        let vazio = resumo_dos_parametros(&[]);
+        let digitados: [&[u8]; 3] = [
+            br#"{"count":4}"#,
+            br#"{"count":5}"#,
+            DEPOIS_DO_NOME.as_bytes(),
+        ];
+        for parametros in digitados {
+            let antes = crate::autorizacao::ultimo_registro();
+            let linha = alloc::format!(
+                "log.tail {}\n",
+                core::str::from_utf8(parametros).unwrap_or_default()
+            );
+            digitar_no_console(Console::Fisico, &linha);
+            let Some(r) = ultimo_registro().filter(|r| r.seq > antes) else {
+                return Err("o comando sem ninguem nao foi gravado");
+            };
+            let e = &r.evento;
+            if e.metodo != "log.tail"
+                || e.titular != Titular::Anonimo
+                || e.codigo != Codigo::DenyNotAuthenticated
+                || e.recurso != Console::Fisico.texto()
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o comando sem ninguem nao foi gravado com o nome e o console");
+            }
+            if e.parametros != vazio {
+                crate::log_error!("teste", "{:?}", e);
+                return Err("o comando sem ninguem foi gravado com o resumo dos parametros");
+            }
+        }
+        // Nenhum registro tem o resumo do que se digitou depois do nome,
+        // e a senha não ficou em lugar nenhum.
+        let resumos: alloc::vec::Vec<[u8; 32]> =
+            digitados.iter().map(|p| resumo_dos_parametros(p)).collect();
+        let com_resumo = crate::autorizacao::com_auditoria(|c| {
+            c.ultimos(crate::autorizacao::CAPACIDADE_DA_AUDITORIA)
+                .any(|r| resumos.contains(&r.evento.parametros))
+        })
+        .unwrap_or(true);
+        if com_resumo {
+            return Err("a auditoria guardou o resumo do que se digitou sem ninguem entrado");
+        }
+        nenhum_segredo_em_lugar_nenhum(&[DEPOIS_DO_NOME], &[])?;
+        // Com alguém entrado: o resumo dos parâmetros, como sempre.
+        let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
+        entrar_no_console(Console::Fisico, "bia-do-i7", senha)?;
+        let antes = crate::autorizacao::ultimo_registro();
+        digitar_no_console(Console::Fisico, "log.tail {\"count\":4}\n");
+        let gravado = registros_depois(antes, |e| {
+            e.metodo == "log.tail" && e.titular == Titular::Pessoa
+        });
+        let resumo = resumo_dos_parametros(br#"{"count":4}"#);
+        if gravado.len() != 1 || gravado[0].1.parametros != resumo {
+            for (seq, e) in &gravado {
+                crate::log_error!("teste", "registro {}: {:?}", seq, e);
+            }
+            return Err("com alguem entrado, o comando nao foi gravado com o resumo");
+        }
+        digitar_no_console(Console::Fisico, "logout\n");
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o logout nao saiu da sessao");
+        }
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
     resultado
 }
 
@@ -41742,6 +41834,12 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "suite: o executor ve e devolve o coletor solto e o journal segurado",
         f: suite_o_executor_ve_e_devolve_o_coletor_e_o_journal,
+    },
+    // O lote B do #448, no fim da tabela pelo mesmo motivo: o I7, a
+    // mitigação (3) da decisão sobre o achado A1 e o #451.
+    Caso {
+        nome: "consoles: sem ninguem, o comando vai a auditoria sem o resumo dos parametros; com alguem, com ele",
+        f: consoles_sem_ninguem_o_comando_vai_sem_o_resumo,
     },
 ];
 
