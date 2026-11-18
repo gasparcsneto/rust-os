@@ -3189,7 +3189,13 @@ pub(super) fn fluxo_a_auditoria_sem_o_conteudo() -> Resultado {
             let fluxo = format!("fluxo:{id}");
             let intencao = format!("intencao:{INTENCAO}");
             let execucao = format!("{fluxo} ; endpoint:{} ; {intencao}", b.endpoint);
-            let pelo = |p: &Ponta| format!("pelo processo {} (fluxos {}", p.fio(), p.p.resumo8());
+            let pelo = |p: &Ponta| {
+                format!(
+                    "pelo processo {} (fluxos {}",
+                    p.fio(),
+                    p.p.comeco_do_resumo()
+                )
+            };
             let decisao = |metodo: &str, p: &Ponta| {
                 gravado_na_malha(antes, metodo, &intencao, Codigo::Allow, &pelo(p))
             };
@@ -3312,8 +3318,12 @@ pub(super) fn fluxo_os_bytes_nao_autorizam() -> Resultado {
             // quem leu, e de mais ninguém. A execução passa do teto do
             // detalhe com a decisão de cinco dígitos: a descrição do programa
             // encolhe — o nome sai, o resumo fica — e o texto vai inteiro.
-            let dele = format!("pelo processo {} (fluxos {})", b.fio(), b.p.resumo8());
-            let abreviado = format!("pelo processo {} (? {})", b.fio(), b.p.resumo8());
+            let dele = format!(
+                "pelo processo {} (fluxos {})",
+                b.fio(),
+                b.p.comeco_do_resumo()
+            );
+            let abreviado = format!("pelo processo {} (? {})", b.fio(), b.p.comeco_do_resumo());
             let certo = match gravado.as_slice() {
                 [(decisao, d), (_, x)] => {
                     d.detalhe.starts_with(&dele)

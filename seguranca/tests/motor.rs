@@ -1064,8 +1064,19 @@ fn o_teto_de_nome_longo_alerta() {
 /// do primeiro pedido, abreviado, do programa que a troca trouxe.)
 #[test]
 fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
+    // Com o resumo de 8 dígitos, o das descrições que o journal guarda, e
+    // com o de 16, o do kernel desde o A9-RESUMO.
+    for (deadbeef, abcd1234) in [
+        ("deadbeef", "abcd1234"),
+        ("deadbeef01234567", "abcd1234ef567890"),
+    ] {
+        a_troca_que_morre_no_mapeamento_com(deadbeef, abcd1234);
+    }
+}
+
+fn a_troca_que_morre_no_mapeamento_com(deadbeef: &str, abcd1234: &str) {
     use politica::auditoria::detalhe_composto;
-    let novo = format!("pelo processo 7000 ({} deadbeef)", "n".repeat(32));
+    let novo = format!("pelo processo 7000 ({} {deadbeef})", "n".repeat(32));
     let executa = |m: &Motor, fio: u64| -> Vec<No> {
         m.grafo
             .vizinhos(&No::Processo { epoca: 0, fio })
@@ -1085,7 +1096,7 @@ fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
         "process.exec",
         "/armazem/novo",
         Codigo::Allow,
-        "pelo processo 7000 (loja abcd1234)",
+        &format!("pelo processo 7000 (loja {abcd1234})"),
     ));
     let morreu = detalhe_composto(
         Some(&novo),
@@ -1094,7 +1105,7 @@ fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
     );
     assert_eq!(
         morreu,
-        format!("pelo processo 7000 (? deadbeef): memoria fisica esgotada; decisao {decisao}")
+        format!("pelo processo 7000 (? {deadbeef}): memoria fisica esgotada; decisao {decisao}")
     );
     a.gravar(do_agente(
         "process.exec",
@@ -1114,48 +1125,46 @@ fn a_troca_que_morre_no_mapeamento_fica_no_grafo() {
         "process.exec",
         "/armazem/adulterado",
         Codigo::Allow,
-        "pelo processo 7001 (loja abcd1234)",
+        &format!("pelo processo 7001 (loja {abcd1234})"),
     ));
     a.gravar(do_agente(
         "process.exec",
         "/armazem/adulterado",
         Codigo::DenyPolicy,
         &format!(
-            "pelo processo 7001 (? abcd1234): o selo nao confere com o codigo; decisao {decisao}"
+            "pelo processo 7001 (? {abcd1234}): o selo nao confere com o codigo; decisao {decisao}"
         ),
     ));
     let mut m = Motor::novo();
     ler(&mut m, &a);
+    let abreviada = format!("? {deadbeef}");
+    let loja = format!("loja {abcd1234}");
     assert_eq!(
         m.grafo
             .processo(0, 7000)
             .and_then(|p| p.programa.as_deref()),
-        Some("? deadbeef")
+        Some(abreviada.as_str())
     );
     assert_eq!(
         executa(&m, 7000),
-        [
-            No::Programa("loja abcd1234".to_string()),
-            No::Programa("? deadbeef".to_string())
-        ]
+        [No::Programa(loja.clone()), No::Programa(abreviada.clone())]
     );
     assert_eq!(
         m.grafo
             .processo(0, 7001)
             .and_then(|p| p.programa.as_deref()),
-        Some("loja abcd1234")
+        Some(loja.as_str())
     );
-    assert_eq!(
-        executa(&m, 7001),
-        [No::Programa("loja abcd1234".to_string())]
-    );
+    assert_eq!(executa(&m, 7001), [No::Programa(loja.clone())]);
 }
 
 /// O achado 3 do adversário do passo 1, virado para provar o certo: um
 /// processo roda um programa da imagem, `loja abcd1234`, e troca de imagem
 /// para um código de fora, selado por um editor confiado de nome longo,
 /// com o nome de 32 bytes e os mesmos quatro primeiros bytes do resumo —
-/// uma segunda pré-imagem de 32 bits, uns 2^32 resumos. Toda decisão dele
+/// uma segunda pré-imagem de 32 bits, uns 2^32 resumos, com a descrição de
+/// 8 dígitos de antes do A9-RESUMO; com a de 16, os mesmos oito bytes, uns
+/// 2^64, e o `de` separa do mesmo jeito. Toda decisão dele
 /// daí em diante tem o `pelo` acima do teto e sai abreviada, `(? abcd1234
 /// de <editor>)`; o `de` diz que é código de fora, e o grafo grava a troca:
 /// o processo passa a executar a abreviada, com a aresta nova. Antes, só o
@@ -1230,8 +1239,15 @@ fn a_troca_para_o_codigo_de_fora_do_mesmo_resumo_fica_no_grafo() {
 #[test]
 fn o_firewall_casa_a_conexao_pelo_fio() {
     use politica::auditoria::detalhe_composto;
-    for nome in ["loja".to_string(), "n".repeat(32)] {
-        let pelo = format!("pelo processo 9 ({nome} 0a0b0c0d)");
+    // O resumo de 8 dígitos, o das descrições que o journal guarda, e o de
+    // 16, o do kernel desde o A9-RESUMO.
+    for (nome, resumo) in [
+        ("loja".to_string(), "0a0b0c0d"),
+        ("n".repeat(32), "0a0b0c0d"),
+        ("loja".to_string(), "0a0b0c0d0e0f1011"),
+        ("n".repeat(32), "0a0b0c0d0e0f1011"),
+    ] {
+        let pelo = format!("pelo processo 9 ({nome} {resumo})");
         let mut a = Auditoria::nova();
         a.gravar(do_agente("net.connect", ECO, Codigo::Allow, &pelo));
         let envio = a.gravar(do_agente("net.send", ECO, Codigo::Allow, &pelo));
@@ -1241,7 +1257,7 @@ fn o_firewall_casa_a_conexao_pelo_fio() {
             &format!("; decisao {envio}"),
         );
         assert_eq!(
-            barrado.starts_with("pelo processo 9 (? 0a0b0c0d): "),
+            barrado.starts_with(&format!("pelo processo 9 (? {resumo}): ")),
             nome.len() == 32,
             "{barrado}"
         );

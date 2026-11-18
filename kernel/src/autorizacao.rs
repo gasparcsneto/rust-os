@@ -235,6 +235,13 @@ impl Programa {
     /// Como a auditoria o nomeia: o nome declarado e o começo do resumo da
     /// imagem — o nome é o que o programa diz ser, e o resumo é o que ele é
     /// —, e, se veio de fora da imagem, quem o selou.
+    ///
+    /// O começo do resumo tem 16 dígitos hexadecimais, 64 bits
+    /// ([`politica::auditoria::DIGITOS_DO_RESUMO`]): com 8, dois executáveis
+    /// com o mesmo nome, o mesmo editor e os mesmos quatro primeiros bytes
+    /// do resumo tinham a mesma descrição — o A9-RESUMO. As de 8 que o
+    /// journal guarda continuam legíveis: quem lê uma descrição reconhece as
+    /// duas larguras.
     pub fn descricao(&self) -> String {
         match self {
             Programa::Kernel => String::from("kernel"),
@@ -245,13 +252,8 @@ impl Programa {
                 editor,
             } => {
                 let nome = manifesto.as_ref().map_or("sem manifesto", |m| m.nome());
-                let mut d = alloc::format!(
-                    "{nome} {:02x}{:02x}{:02x}{:02x}",
-                    resumo[0],
-                    resumo[1],
-                    resumo[2],
-                    resumo[3]
-                );
+                let mut d =
+                    alloc::format!("{nome} {}", politica::auditoria::comeco_do_resumo(resumo));
                 // A chave que o registro não tem: o nome reservado, que
                 // nenhum editor do registro usa — ver
                 // `sigilo::registro::EDITOR_DESCONHECIDO`.
@@ -2408,8 +2410,10 @@ pub fn usa_o_dominio(dominio: &str) -> bool {
 /// [`politica::auditoria::detalhe_composto`] —, com citação ou sem. A
 /// comparação aqui é com o `pelo` inteiro, e um registro abreviado não é
 /// âncora: o mais restrito. Para o processo cuja descrição sozinha passa
-/// do teto — o código de fora da imagem com o nome e o editor longos, e o
-/// fio de três dígitos ou mais — nada muda: as decisões dele vão
+/// do teto — o código de fora da imagem com o nome e o editor longos: os
+/// dígitos do fio, o nome e o editor somando mais de 58 bytes, com o
+/// resumo de 16 dígitos; os dois de 32 bytes passam com qualquer fio —
+/// nada muda: as decisões dele vão
 /// abreviadas, como antes iam cortadas no anel, sem o `)`, e ele não se
 /// ancora em decisão nenhuma; declara ancorado na conexão, ou sem âncora.
 /// Para os outros, a decisão que permite, sem texto, continua inteira e
@@ -4515,11 +4519,12 @@ fn recusar_pela_cota_com(
 /// descrição do programa — o nome, depois o editor —, e não este texto
 /// ([`politica::auditoria::detalhe_composto`]). Os números têm no máximo
 /// dois dígitos — a cota tem teto de 64, e a tabela, 95 vagas —, e o texto,
-/// no máximo 60 bytes. Ao lado de quem pediu abreviado — 27 bytes mais os
-/// dígitos do fio, no código da imagem; 32 mais os dígitos, com o editor —,
-/// ele cabe inteiro com um fio de até 7 dígitos no código da imagem; no de
-/// fora dela, acima do teto, perde o fim numa fronteira de palavra
-/// (`…, 12 mortos por ?`), e a conta fica.
+/// no máximo 36 bytes sem os mortos por recolher e 60 com eles. Ao lado de
+/// quem pediu abreviado — 35 bytes mais os dígitos do fio, no código da
+/// imagem; 40 mais os dígitos, com o editor, desde o resumo de 16 dígitos
+/// da descrição (eram 27 e 32) —, o texto sem os mortos cabe inteiro com
+/// um fio de até 18 dígitos; com eles, acima do teto, perde o fim numa
+/// fronteira de palavra (`…, 12 mortos por ?`), e a conta fica.
 fn detalhe_da_cota(ocupados: usize, mortos_por_recolher: usize, cota: usize) -> String {
     match mortos_por_recolher {
         0 => alloc::format!("cota de processos do papel: {ocupados} de {cota}"),
@@ -4564,16 +4569,18 @@ fn quem_do_processo(autoridade: Autoridade) -> Quem {
 /// `filho`, pela auditoria, e não por um canal à parte.
 ///
 /// `selado` é o código de fora da imagem: o editor que o selou e o resumo
-/// do que ele selou — o mesmo que vai depois em cada pedido do processo.
+/// do que ele selou — o mesmo que vai depois em cada pedido do processo, com
+/// os mesmos 16 dígitos da descrição ([`Programa::descricao`]). Pedido por
+/// um processo, acima do teto, o texto perde o fim numa palavra inteira, e
+/// o resumo pode sair com o editor: a descrição do processo novo o diz
+/// inteiro no primeiro pedido dele (ver "O pior caso, medido", em
+/// [`politica::auditoria::detalhe_composto`]).
 pub fn auditar_nascimento(recurso: &str, filho: u64, selado: Option<(&str, &[u8; 32])>) {
     let detalhe = match selado {
         None => alloc::format!("processo {filho} lancado"),
         Some((editor, r)) => alloc::format!(
-            "processo {filho} lancado: codigo {:02x}{:02x}{:02x}{:02x} de {editor}",
-            r[0],
-            r[1],
-            r[2],
-            r[3]
+            "processo {filho} lancado: codigo {} de {editor}",
+            politica::auditoria::comeco_do_resumo(r)
         ),
     };
     if auditar_execucao(recurso, Codigo::Allow, &detalhe) == 0 {

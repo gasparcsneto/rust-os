@@ -16774,8 +16774,17 @@ fn sob_o_ic(
     ] {
         dita(conferida)?;
     }
-    // O que o kernel gravou desde antes do lançamento, de 128 em 128.
-    let do_processo = format!("pelo processo {processo} (verificado ");
+    // O que o kernel gravou desde antes do lançamento, de 128 em 128. Do
+    // processo do `verificado`: pelo número, com o nome do programa — ou com
+    // o nome omitido (`? `), como a auditoria o abrevia acima do teto do
+    // detalhe: com o resumo de 16 dígitos da descrição (o A9-RESUMO), a
+    // declaração com a conexão e a decisão passa dele conforme os números da
+    // rodada.
+    let do_processo = |detalhe: &str| {
+        ["verificado", "?"]
+            .iter()
+            .any(|n| detalhe.starts_with(&format!("pelo processo {processo} ({n} ")))
+    };
     let mut depois_de = inicio;
     let mut decisoes: std::collections::BTreeMap<(String, String), u64> = Default::default();
     let mut declaradas: Vec<String> = Vec::new();
@@ -16810,7 +16819,7 @@ fn sob_o_ic(
             vistos += 1;
             let (metodo, recurso, detalhe) = (campo("method"), campo("resource"), campo("detail"));
             let declaracao = metodo == "audit.declare" && !recurso.is_empty();
-            if metodo == "key.sign" && detalhe.starts_with(&do_processo) {
+            if metodo == "key.sign" && do_processo(&detalhe) {
                 // A decisão de cada assinatura, sobre a chave; e a execução,
                 // com a chave, o domínio e o resumo, pela decisão dela —
                 // gravada antes.
@@ -16831,7 +16840,7 @@ fn sob_o_ic(
                     assinaturas_feitas += 1;
                 }
             }
-            if declaracao && detalhe.starts_with(&do_processo) {
+            if declaracao && do_processo(&detalhe) {
                 // A alegação no recurso; no detalhe, a âncora do kernel e a
                 // decisão — e nada que o programa escreveu. A âncora é a
                 // conexão, com o destino real dela; ou, de uma chamada
@@ -16863,7 +16872,7 @@ fn sob_o_ic(
                     "ic: um registro fora das declaracoes tem `{t}`\n  {metodo} {recurso} {detalhe}"
                 ));
             }
-            if detalhe.starts_with(&do_processo) {
+            if do_processo(&detalhe) {
                 *decisoes.entry((metodo, campo("code"))).or_default() += 1;
             }
         }

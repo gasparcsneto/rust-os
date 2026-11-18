@@ -5177,15 +5177,22 @@ registro de cada uma no ponto em que nasceu.
   sistema também, misturados ao resto. Tirar deles o ritmo de uma senha
   muda o que esses relatórios prometem, ou a quem.
 - **O tamanho do resumo na descrição de um programa** (o achado 9 do
-  adversário do passo 1): a auditoria e o NSF nomeiam um programa pelo
-  nome, pelos 8 dígitos hexadecimais do começo do BLAKE2s do executável —
-  32 bits — e pelo editor. Com o mesmo nome e o mesmo editor, dois
-  executáveis com os mesmos quatro primeiros bytes do resumo têm a mesma
-  descrição, byte a byte — uma segunda pré-imagem de 32 bits, uns 2^32
-  resumos. Já era assim antes do F1; o grafo do NSF agora separa o código
-  de fora do da imagem e um editor de outro (o achado 3), e o resto é o
-  tamanho. Aumentar o resumo muda o formato do detalhe e a conta do teto
-  de 96 bytes: fica para uma decisão.
+  adversário do passo 1; o A9-RESUMO) — **feito**, como [B], no lote B do
+  #448: a auditoria e o NSF nomeavam um programa pelo nome, pelos 8
+  dígitos hexadecimais do começo do BLAKE2s do executável — 32 bits — e
+  pelo editor. Com o mesmo nome e o mesmo editor, dois executáveis com os
+  mesmos quatro primeiros bytes do resumo tinham a mesma descrição, byte a
+  byte — uma segunda pré-imagem de 32 bits, uns 2^32 resumos. O resumo da
+  descrição tem agora 16 dígitos, 64 bits
+  (`politica::auditoria::DIGITOS_DO_RESUMO`), e o do código lançado no
+  nascimento, também; o texto do detalhe não é contrato. Quem lê uma
+  descrição reconhece as duas larguras — as de 8 dígitos ficam no journal
+  da auditoria —, e o NSF compara um resumo de 8 com um de 16 pelos 8 do
+  começo, o que o de 8 diz (`seguranca::grafo::o_mesmo_programa`); dois de
+  16 se comparam inteiros. A conta do teto de 96 bytes, medida, está em
+  "O pior caso, medido" (`politica::auditoria::detalhe_composto`): o
+  detalhe cabe sempre, e o que encolhe é o texto, 8 bytes antes — ver [O
+  código de fora da imagem](#o-código-de-fora-da-imagem).
 - **Os mortos ainda não recolhidos, fora da cota** (o achado A1 do
   adversário da correção da vaga do morto) — **decidido** pelo dono do
   projeto em 8 de novembro de 2026, na alternativa (1) abaixo: a cota de
@@ -7281,8 +7288,10 @@ marca e não depende do motivo inteiro.
 O registro sem citação encolhe do mesmo jeito (o resíduo do F1). A
 decisão que permite tem o texto vazio, e guarda a descrição inteira
 **quando ela cabe no teto**: o `pelo` sozinho só passa dele no código de
-fora da imagem com o nome e o editor longos e o fio de três dígitos ou
-mais, e então vai abreviado, com o `)` — o anel lhe tirava o `)` e, do
+fora da imagem com o nome e o editor longos — os dígitos do fio, o nome e
+o editor somando mais de 58 bytes: com os dois de 32 bytes, qualquer fio;
+com o resumo de 8 dígitos, eram 66, e o fio de três dígitos ou mais —, e
+então vai abreviado, com o `)` — o anel lhe tirava o `)` e, do
 fio de quatro dígitos em diante, também o fim do editor, e as decisões
 deixavam de ser do processo para o NSF. A recusa
 guarda o motivo antes da descrição: `o manifesto nao declara` chega
@@ -7296,16 +7305,44 @@ programa quando tem o mesmo resumo, a mesma forma do `de` — as duas com
 ele, o código de fora, ou as duas sem, o da imagem — e, quando as duas
 dizem o editor, o mesmo editor (`seguranca::grafo::o_mesmo_programa`);
 senão, é uma troca — o primeiro pedido, abreviado, do programa que o
-`executar` trouxe. O resumo da descrição tem **32 bits** (os 8 dígitos
+`executar` trouxe. O resumo da descrição tinha **32 bits** (os 8 dígitos
 hexadecimais do começo do BLAKE2s): comparada só por ele, a abreviada de
 um código de fora com os mesmos quatro primeiros bytes de um programa da
 imagem — uma segunda pré-imagem de 32 bits — passava por ele, e a troca
 sumia do grafo (o achado 3 do adversário do passo 1); o `de` e o editor
-agora a separam. Com o mesmo nome, o mesmo editor e o mesmo começo do
-resumo, dois executáveis ainda têm a mesma descrição, byte a byte — já
-era assim antes do F1. Aumentar o resumo muda o formato do detalhe e a
-conta do teto: é uma decisão pendente, [C] (o achado 9 do mesmo
-adversário). A âncora de uma declaração numa decisão
+agora a separam. E com o mesmo nome, o mesmo editor e o mesmo começo do
+resumo, dois executáveis tinham a mesma descrição, byte a byte (o achado
+9 do mesmo adversário, o A9-RESUMO). Desde o lote B do #448 ([B]), o
+resumo tem **64 bits**, 16 dígitos
+(`politica::auditoria::comeco_do_resumo`) — na descrição e no
+`codigo <resumo> de <editor>` do nascimento —, e a segunda pré-imagem
+custa uns 2^64. Quem lê uma descrição reconhece as duas larguras: as de 8
+dígitos ficam no journal da auditoria. O NSF compara um resumo de 8 com um
+de 16 pelos 8 do começo — o de 8 é o começo do de 16 do mesmo executável,
+e é tudo o que ele diz, como o editor omitido casa com qualquer um —, e
+dois de 16, inteiros; o par misturado só se forma no mesmo processo com o
+journal de antes lido sem o começo do boot seguinte, e tomá-lo por outro
+programa daria ao processo uma troca que ele não fez. **O teto de 96
+bytes, medido** ("O pior caso, medido", em
+`politica::auditoria::detalhe_composto`): o maior `pelo` — o nome e o
+editor de 32 bytes, o fio de 20 dígitos — tem 122 bytes; sem o nome, 91,
+e a decisão que permite continua guardando o editor; sem os dois, 60. O
+detalhe cabe sempre; o que encolhe é o texto, que perdeu os 8 bytes: ao
+lado da descrição toda encolhida e da citação, ele tem 44 − F − D bytes
+(F e D, os dígitos do fio e da decisão), e o motivo de toda falta da
+procedência fica reconhecido enquanto F + D ≤ 20 — eram 28 —, um fio de 7
+dígitos e uma decisão de 13; no pior de todos, como já era com 8 dígitos,
+ele fica na primeira palavra. O motivo do editor fora do registro, o
+maior, só cabe inteiro ao lado da descrição toda encolhida e da citação
+com o fio e a decisão somando até 5 dígitos — vai cortado, com o começo
+essencial —; o nascimento de um código de fora pedido por um processo
+perde, no texto, o resumo do código lançado com o editor: o processo novo
+o diz inteiro no primeiro pedido dele; e a descrição encolhe em mais
+registros — a declaração da `implantacao` ancorada na conexão, com o fio
+de 4 dígitos e a decisão de 5, já sai sem o nome. Quem reconhece o
+processo de um programa no detalhe — os casos do IC na suíte, a bancada
+do IC — aceita o nome omitido, `(? <resumo>`, ao lado do nome. A âncora
+de uma declaração numa decisão
 compara o `pelo` inteiro: o processo cuja descrição passa do teto não se
 ancora em decisão nenhuma — como já não se ancorava com a decisão cortada:
 a que ele pedir é `INVALID_ARGUMENT` —, e declara ancorado na conexão, ou
@@ -7593,6 +7630,23 @@ tira a conferência só do alvo sem sistema operacional. E cinco mutações
 do caso do instalador, rodadas sozinhas, falhavam no download, antes do
 que elas mexiam: era o `fs.mkdir` de um nível só, que o caso de antes
 escondia — corrigido, as cinco foram reprovadas pelo que mexiam.
+
+#### As do resumo de 16 dígitos (A9-RESUMO)
+
+Cinco mutações contra o resumo de 16 dígitos do lote B do #448 — ver *Onde
+se confere*, acima —, uma de cada vez, no repositório, e restauradas byte
+a byte: três nos leitores, contra os testes do hospedeiro (`cargo test -p
+politica` e `-p seguranca`), e duas no kernel, contra as partes da suíte,
+no x86_64 em debug, que têm os casos que as devem reprovar
+(`DUKE_PARTE=k/1010`). As cinco reprovaram.
+
+| Mutação | Reprovada por |
+|---|---|
+| o leitor que não reconhece 8 dígitos — as descrições do journal de antes | nove testes de `politica::auditoria` — entre eles `o_resumo_da_descricao` e `o_comeco_do_resumo_tem_16_digitos`, que lê também o começo de 8 do mesmo executável — e cinco de `seguranca`: `grafo::testes::o_resumo_de_16_digitos_e_o_de_8_de_antes`, três do grafo com descrições de 8 e `evento::testes::a_falta_de_quem_tem_descricao_longa` |
+| o leitor que não reconhece 16 dígitos | os mesmos nove de `politica::auditoria`; em `seguranca`, `o_resumo_de_16_digitos_e_o_de_8_de_antes` e os dois de `tests/motor.rs` que rodam nas duas larguras: `a_troca_que_morre_no_mapeamento_fica_no_grafo` e `o_firewall_casa_a_conexao_pelo_fio` |
+| o NSF que compara o resumo inteiro, também com um lado de 8 (`o_mesmo_resumo`) | `grafo::testes::o_resumo_de_16_digitos_e_o_de_8_de_antes`: o processo da descrição de 8, do journal de antes, ganha uma troca que não fez com a de 16 do mesmo executável |
+| a descrição de um programa, no kernel, com 8 dígitos (`Programa::descricao`) | `nsf: ve o codigo adulterado de quem tem descricao longa` ("a decisao do processo de descricao longa nao terminou no `)`, com a descricao sem o nome") e `codigo: a confianca e decidida a cada pedido` ("a recusa pela confianca nao diz o programa, o editor e o motivo") |
+| o código lançado, no nascimento, com 8 dígitos (`auditar_nascimento`) | `codigo: so o da imagem roda sem selo` ("o nascimento nao diz quem selou o codigo, nem o resumo") e `codigo: o conferido e o que roda` ("um nascimento nao diz o resumo do codigo selado") |
 
 ## O Internet Computer
 

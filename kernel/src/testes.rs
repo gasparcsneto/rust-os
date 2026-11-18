@@ -32626,7 +32626,7 @@ fn manifesto_a_permissao_e_a_intersecao() -> Resultado {
         let e = ultimo_que(|e| e.metodo == "fs.list").ok_or("a recusa nao foi gravada")?;
         if e.detalhe
             != alloc::format!(
-                "pelo processo {FIO} (caso abababab): o manifesto nao declara fs.read"
+                "pelo processo {FIO} (caso abababababababab): o manifesto nao declara fs.read"
             )
         {
             crate::log_error!("teste", "{:?}", e);
@@ -45647,7 +45647,7 @@ fn declaracao_a_alegacao_e_os_fatos_do_kernel() -> Resultado {
             autoridade: Autoridade::Pessoa { sessao },
             programa,
         };
-        let pelo = alloc::format!("pelo processo {FIO} (caso abababab)");
+        let pelo = alloc::format!("pelo processo {FIO} (caso abababababababab)");
         let (declarada, d, decisao) =
             declaracao_gravada(&declarar(processo(imagem("audit.declare")), DECLARACAO))?;
         if decisao.detalhe != pelo
@@ -45957,8 +45957,18 @@ fn declaracao_ancorada_na_conexao_de_quem_declara() -> Resultado {
         // A do processo, aberta por ele: o programa e o destino, pelo kernel.
         let m = abrir(processo)?;
         let (declarada, d, _) = declaracao_gravada(&declarar(processo, &ancorada(m)))?;
-        let pelo = alloc::format!("pelo processo {} (caso abababab)", crate::fios::id_atual());
-        if declarada.detalhe != alloc::format!("{pelo}: conexao {m} {ECO}; decisao {d}") {
+        // Composto pela regra do teto, que o kernel usa: com o resumo de 16
+        // dígitos, os números da rodada decidem se a descrição encolhe.
+        let pelo = alloc::format!(
+            "pelo processo {} (caso abababababababab)",
+            crate::fios::id_atual()
+        );
+        let esperado = politica::auditoria::detalhe_composto(
+            Some(&pelo),
+            &alloc::format!("conexao {m} {ECO}"),
+            &alloc::format!("; decisao {d}"),
+        );
+        if declarada.detalhe != esperado {
             crate::log_error!("teste", "{:?}", declarada);
             return Err("a ancora do processo nao levou o programa e o destino pelo kernel");
         }
@@ -62091,9 +62101,11 @@ fn ola_da_imagem() -> Result<alloc::vec::Vec<u8>, &'static str> {
     .map_err(|_| "o ola da imagem nao se leu")
 }
 
-/// Os quatro primeiros bytes de um resumo, como a auditoria os escreve.
+/// O começo de um resumo, como a auditoria o escreve: os oito primeiros
+/// bytes, em 16 dígitos hexadecimais (o A9-RESUMO) — a conta da descrição
+/// de um programa, a mesma de `Programa::descricao`.
 fn comeco_do_resumo(r: &[u8; 32]) -> alloc::string::String {
-    alloc::format!("{:02x}{:02x}{:02x}{:02x}", r[0], r[1], r[2], r[3])
+    politica::auditoria::comeco_do_resumo(r)
 }
 
 /// Espera o processo `fio` sair, e devolve o código: pelo log do kernel,
@@ -62349,7 +62361,7 @@ fn codigo_a_confianca_e_decidida_a_cada_pedido() -> Resultado {
             return Err("tirada a confianca, o processo de codigo selado continuou pedindo");
         }
         let gravado = alloc::format!(
-            "pelo processo {FIO} (caso abababab de caso): o papel nao confia no editor caso"
+            "pelo processo {FIO} (caso abababababababab de caso): o papel nao confia no editor caso"
         );
         if !registro_que(|e| e.metodo == "system.info" && e.detalhe == gravado).is_some() {
             return Err("a recusa pela confianca nao diz o programa, o editor e o motivo");
@@ -62651,7 +62663,7 @@ fn codigo_o_instalador_pela_rede() -> Resultado {
                 let resumo = registro_que(|e| e.detalhe.starts_with(&do_instalador))
                     .and_then(|(_, e)| {
                         e.detalhe[do_instalador.len()..]
-                            .get(..8)
+                            .get(..politica::auditoria::DIGITOS_DO_RESUMO)
                             .map(alloc::string::String::from)
                     })
                     .ok_or("o instalador nao pediu nada com o programa dele")?;
@@ -62784,13 +62796,16 @@ const _: () = assert!(EDITOR_LONGO.1.len() == sigilo::registro::MAIOR_NOME);
 
 /// O menor fio de produção dos casos de descrição longa: três dígitos, e o
 /// `pelo` do programa de [`programa_de_descricao_longa`] já passa do teto
-/// do detalhe sozinho — 97 bytes. A suíte filtrada chega aqui com fios de
-/// um ou dois dígitos; a completa, com mais.
+/// do detalhe sozinho — 105 bytes, com o resumo de 16 dígitos. Com ele, o
+/// `pelo` passaria com qualquer fio (103 bytes com um dígito); com o de 8,
+/// só do fio de três dígitos em diante (97 bytes), e é daí que vem este. A
+/// suíte filtrada chega aqui com fios de um ou dois dígitos; a completa,
+/// com mais.
 const FIO_DE_PRODUCAO: u64 = 100;
 
 /// O programa de descrição longa, selado pelo [`EDITOR_LONGO`], com o
 /// manifesto que declara `permite`: `pelo processo N (<NOME_LONGO>
-/// cdcdcdcd de <EDITOR_LONGO>)`.
+/// cdcdcdcdcdcdcdcd de <EDITOR_LONGO>)`.
 fn programa_de_descricao_longa(permite: &str) -> crate::autorizacao::Programa {
     crate::autorizacao::Programa::Imagem {
         manifesto: Some(manifesto_de_teste(NOME_LONGO, permite)),
@@ -62940,7 +62955,8 @@ fn executa_o_adulterado() -> [u64; 3] {
 /// quisesse evitá-lo só precisava de um nome longo.
 ///
 /// O processo tem o fio de produção — três dígitos ou mais —, e então o
-/// `pelo` sozinho passa do teto (o achado 3 do adversário do F1): a decisão
+/// `pelo` sozinho passa do teto (o achado 3 do adversário do F1; com o
+/// resumo de 16 dígitos, passaria com qualquer fio): a decisão
 /// do gate, sem texto, também encolhe — o nome sai, o editor fica — e
 /// termina no `)`, do processo. O anel a cortava no meio do editor.
 ///
@@ -62971,19 +62987,39 @@ fn nsf_ve_o_codigo_adulterado_de_quem_tem_descricao_longa() -> Resultado {
         // citação inteira.
         let decidida = registro_numero(decisao).ok_or("a decisao saiu do anel")?;
         let executada = registro_numero(execucao).ok_or("a execucao saiu do anel")?;
-        let decisao_esperada =
-            alloc::format!("pelo processo {fio} (? cdcdcdcd de {})", EDITOR_LONGO.1);
+        let decisao_esperada = alloc::format!(
+            "pelo processo {fio} (? cdcdcdcdcdcdcdcd de {})",
+            EDITOR_LONGO.1
+        );
         if decidida.detalhe != decisao_esperada {
             crate::log_error!("teste", "{} / {}", decidida.detalhe, decisao_esperada);
             return Err(
                 "a decisao do processo de descricao longa nao terminou no `)`, com a descricao sem o nome",
             );
         }
-        let esperado = alloc::format!(
-            "pelo processo {fio} (? cdcdcdcd de ?): {}; decisao {decisao}",
-            Falta::NaoConfere.motivo()
+        // O motivo vai inteiro enquanto os dígitos do fio e da decisão
+        // somam até 13 — o caso, filtrado ou na suíte inteira —, e
+        // reconhecido até 20, com o começo essencial (ver "O pior caso,
+        // medido", em `politica::auditoria::detalhe_composto`): o caso
+        // confere o que o NSF lê, e não o tamanho dos números da rodada.
+        let citacao = alloc::format!("; decisao {decisao}");
+        let esperado = politica::auditoria::detalhe_composto(
+            Some(&pelo),
+            Falta::NaoConfere.motivo(),
+            &citacao,
         );
-        if executada.detalhe != esperado || executada.codigo != Codigo::DenyPolicy {
+        let encolhida = alloc::format!("pelo processo {fio} (? cdcdcdcdcdcdcdcd de ?): ");
+        let motivo = executada
+            .detalhe
+            .strip_prefix(&encolhida)
+            .and_then(|t| t.strip_suffix(&citacao));
+        let inteiro = encolhida.len() + Falta::NaoConfere.motivo().len() + citacao.len()
+            <= politica::auditoria::MAIOR_DETALHE;
+        if executada.detalhe != esperado
+            || executada.codigo != Codigo::DenyPolicy
+            || motivo.and_then(Falta::do_motivo) != Some(Falta::NaoConfere)
+            || (inteiro && motivo != Some(Falta::NaoConfere.motivo()))
+        {
             crate::log_error!("teste", "{} / {}", executada.detalhe, esperado);
             return Err(
                 "a execucao do processo de descricao longa nao tem a descricao toda encolhida, o motivo e a citacao",
@@ -63081,7 +63117,7 @@ fn nsf_a_recusa_do_manifesto_de_quem_tem_descricao_longa() -> Resultado {
             })
             .ok_or("a recusa do manifesto nao foi gravada")?;
             let esperado = alloc::format!(
-                "pelo processo {FIO} (? cdcdcdcd de ?): o manifesto nao declara {permissao}"
+                "pelo processo {FIO} (? cdcdcdcdcdcdcdcd de ?): o manifesto nao declara {permissao}"
             );
             if seq <= antes || e.detalhe != esperado {
                 crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
@@ -63159,7 +63195,7 @@ fn nsf_a_bifurcacao_de_quem_tem_descricao_longa_liga_o_filho() -> Resultado {
         })
         .ok_or("a bifurcacao de descricao longa nao foi gravada")?;
         let esperado = alloc::format!(
-            "pelo processo {pai} (? cdcdcdcd de {}): filho {filho}",
+            "pelo processo {pai} (? cdcdcdcdcdcdcdcd de {}): filho {filho}",
             EDITOR_LONGO.1
         );
         if e.detalhe != esperado || e.codigo != politica::Codigo::Allow {
@@ -63226,7 +63262,10 @@ fn nsf_a_decisao_de_quem_tem_descricao_acima_do_teto_e_do_processo() -> Resultad
                 && !e.detalhe.contains("; decisao ")
         })
         .ok_or("a decisao do system.info nao foi gravada")?;
-        let esperado = alloc::format!("pelo processo {FIO} (? cdcdcdcd de {})", EDITOR_LONGO.1);
+        let esperado = alloc::format!(
+            "pelo processo {FIO} (? cdcdcdcdcdcdcdcd de {})",
+            EDITOR_LONGO.1
+        );
         if permitida <= antes || e.detalhe != esperado {
             crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
             return Err("a decisao de descricao acima do teto nao terminou no `)`");
@@ -63246,7 +63285,7 @@ fn nsf_a_decisao_de_quem_tem_descricao_acima_do_teto_e_do_processo() -> Resultad
         })
         .ok_or("a recusa da conexao nao foi gravada")?;
         let esperado = alloc::format!(
-            "pelo processo {FIO} (? cdcdcdcd de ?): recurso fora do alcance do papel"
+            "pelo processo {FIO} (? cdcdcdcdcdcdcdcd de ?): recurso fora do alcance do papel"
         );
         if e.detalhe != esperado {
             crate::log_error!("teste", "{} / {}", e.detalhe, esperado);
@@ -63764,6 +63803,18 @@ fn declaracao_do_icp(fio: u64, passo: &PassoDoIcp, metodo: &str, ancorada: bool)
     declaracao_de_consulta(fio, passo, CANISTER_DA_BANCADA, metodo, ancorada)
 }
 
+/// Se o detalhe é do processo `fio`, com o programa `nome` — ou com o nome
+/// omitido (`? `), como a auditoria o abrevia acima do teto do detalhe
+/// (`politica::auditoria::detalhe_composto`): com o resumo de 16 dígitos
+/// da descrição (o A9-RESUMO), a declaração de um programa de nome longo,
+/// com a conexão e a decisão, passa dele conforme os números da rodada. O
+/// resumo vem depois, nos dois.
+fn pelo_processo_do_programa(detalhe: &str, fio: u64, nome: &str) -> bool {
+    [nome, politica::auditoria::OMITIDO]
+        .iter()
+        .any(|n| detalhe.starts_with(&alloc::format!("pelo processo {fio} ({n} ")))
+}
+
 /// [`declaracao_do_icp`], de uma consulta a `canister`.
 fn declaracao_de_consulta(
     fio: u64,
@@ -63777,7 +63828,6 @@ fn declaracao_de_consulta(
     let e = registro_numero(n).ok_or("a declaracao do icp nao esta no anel")?;
     let d = decisao_executada(&e.detalhe).ok_or("a declaracao do icp nao aponta a decisao")?;
     let decisao = registro_numero(d).ok_or("a decisao da declaracao nao esta no anel")?;
-    let pelo = alloc::format!("pelo processo {fio} (icp ");
     let alegacao = alloc::format!("icp.query {canister}/{metodo} {}", passo.desfecho);
     let ancora = if ancorada {
         e.detalhe.contains("): conexao ")
@@ -63790,13 +63840,13 @@ fn declaracao_de_consulta(
     if e.metodo != "audit.declare"
         || e.codigo != Codigo::Allow
         || e.recurso != alegacao
-        || !e.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&e.detalhe, fio, "icp")
         || !ancora
         || d >= n
         || decisao.metodo != "audit.declare"
         || decisao.codigo != Codigo::Allow
         || !decisao.recurso.is_empty()
-        || !decisao.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&decisao.detalhe, fio, "icp")
         || decisao.titular != e.titular
     {
         crate::log_error!("teste", "{:?} / {:?} / {:?}", passo, e, decisao);
@@ -64852,7 +64902,6 @@ fn declaracao_da_chamada(
     let n = p.registro().ok_or("o icp nao declarou a chamada")?;
     let e = registro_numero(n).ok_or("a declaracao da chamada nao esta no anel")?;
     let alegacao = alloc::format!("icp.update {canister}/{metodo} {}", p.desfecho);
-    let pelo = alloc::format!("pelo processo {fio} (icp ");
     let ancorada = match ancora {
         Some(d) => e
             .detalhe
@@ -64862,7 +64911,7 @@ fn declaracao_da_chamada(
     if e.metodo != "audit.declare"
         || e.codigo != politica::Codigo::Allow
         || e.recurso != alegacao
-        || !e.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&e.detalhe, fio, "icp")
         || !ancorada
     {
         crate::log_error!("teste", "{:?} / {:?}", p, e);
@@ -65949,7 +65998,6 @@ fn declaracao_da_consulta_assinada(
     let n = p.registro().ok_or("o icp nao declarou a consulta")?;
     let e = registro_numero(n).ok_or("a declaracao da consulta nao esta no anel")?;
     let alegacao = alloc::format!("icp.query {canister}/{metodo} {}", p.desfecho);
-    let pelo = alloc::format!("pelo processo {fio} (icp ");
     let ancorada = match ancora {
         AncoraDaConsulta::Decisao(d) => e
             .detalhe
@@ -65962,7 +66010,7 @@ fn declaracao_da_consulta_assinada(
     if e.metodo != "audit.declare"
         || e.codigo != politica::Codigo::Allow
         || e.recurso != alegacao
-        || !e.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&e.detalhe, fio, "icp")
         || !ancorada
     {
         crate::log_error!("teste", "{:?} / {:?} / {:?}", ancora, p, e);
@@ -67192,7 +67240,6 @@ fn declaracao_da_carteira(
     let n = p.registro().ok_or("a carteira nao declarou o passo")?;
     let e = registro_numero(n).ok_or("a declaracao da carteira nao esta no anel")?;
     let alegacao = alloc::format!("{evento} {canister}/{metodo} {}", p.desfecho);
-    let pelo = alloc::format!("pelo processo {fio} (carteira ");
     let ancorada = match ancora {
         AncoraDaConsulta::Decisao(d) => e
             .detalhe
@@ -67205,7 +67252,7 @@ fn declaracao_da_carteira(
     if e.metodo != "audit.declare"
         || e.codigo != politica::Codigo::Allow
         || e.recurso != alegacao
-        || !e.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&e.detalhe, fio, "carteira")
         || !ancorada
     {
         crate::log_error!("teste", "{:?} / {:?} / {:?}", ancora, p, e);
@@ -68639,7 +68686,6 @@ fn declaracao_da_implantacao(
     let n = p.registro().ok_or("a implantacao nao declarou o passo")?;
     let e = registro_numero(n).ok_or("a declaracao da implantacao nao esta no anel")?;
     let alegacao = alloc::format!("{evento} {assunto} {}", p.desfecho);
-    let pelo = alloc::format!("pelo processo {fio} (implantacao ");
     let ancorada = match ancora {
         AncoraDaConsulta::Decisao(d) => e
             .detalhe
@@ -68652,7 +68698,7 @@ fn declaracao_da_implantacao(
     if e.metodo != "audit.declare"
         || e.codigo != politica::Codigo::Allow
         || e.recurso != alegacao
-        || !e.detalhe.starts_with(&pelo)
+        || !pelo_processo_do_programa(&e.detalhe, fio, "implantacao")
         || !ancorada
     {
         crate::log_error!("teste", "{:?} / {:?} / {:?}", ancora, p, e);
@@ -75809,9 +75855,17 @@ impl NaMalha {
         }
     }
 
-    /// O começo do resumo, como os programas o dizem.
+    /// O começo do resumo, como os programas o dizem: os 8 primeiros dígitos
+    /// do resumo que o kernel lhes dá.
     fn resumo8(&self) -> alloc::string::String {
         alloc::string::String::from(&sigilo::hex(&self.resumo())[..8])
+    }
+
+    /// O começo do resumo, como a auditoria o escreve na descrição do
+    /// programa: 16 dígitos, desde o A9-RESUMO
+    /// (`politica::auditoria::comeco_do_resumo`).
+    fn comeco_do_resumo(&self) -> alloc::string::String {
+        politica::auditoria::comeco_do_resumo(&self.resumo())
     }
 }
 
@@ -76110,7 +76164,7 @@ fn malha_o_aplicativo_a_entrega_ao_b() -> Resultado {
             // execução de cada um, com os ids.
             let intencao = alloc::format!("intencao:{INTENCAO_DA_MALHA}");
             let pelo = |p: &NaMalha, nome: &str| {
-                alloc::format!("pelo processo {} ({nome} {}", p.fio, p.resumo8())
+                alloc::format!("pelo processo {} ({nome} {}", p.fio, p.comeco_do_resumo())
             };
             let entrega = alloc::format!("entrega:{mandada}");
             use politica::Codigo::Allow;
@@ -76302,7 +76356,7 @@ fn malha_o_impostor_nao_alcanca_o_que_e_do_outro() -> Resultado {
             let pelo_impostor = alloc::format!(
                 "pelo processo {} (correio {}",
                 impostor.fio,
-                impostor.resumo8()
+                impostor.comeco_do_resumo()
             );
             for metodo in [
                 "fabric.recv",

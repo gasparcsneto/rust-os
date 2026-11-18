@@ -823,7 +823,9 @@ fn e_a_execucao_de(ev: &politica::auditoria::Evento, pelo: Option<&str>, motivo:
 ///
 /// O kernel compoe o detalhe da execucao inteiro, com a citacao, e acima
 /// do teto (`politica::auditoria::MAIOR_DETALHE`) a descricao do programa
-/// de quem pede encolhe: `(pedinte abababab)` vira `(? abababab)`. Se cabe
+/// de quem pede encolhe: `(pedinte abababababababab)` vira `(?
+/// abababababababab)` — 16 digitos do resumo desde o A9-RESUMO; eram 8, e
+/// as medidas abaixo sao de entao. Se cabe
 /// ou nao depende dos digitos do fio de quem pede e do numero da decisao,
 /// que crescem com os casos que rodaram antes na mesma maquina. O esperado
 /// sai da mesma regra, com a citacao do proprio registro

@@ -256,10 +256,11 @@ impl Grafo {
     ///   imagem, ou o contrário; outro editor —, é uma troca de verdade — o
     ///   primeiro pedido, abreviado, do programa que o `executar` trouxe —:
     ///   o processo passa a executar o programa da abreviada, como numa
-    ///   troca com a descrição inteira. O resumo tem 32 bits: o código de
-    ///   fora com os quatro primeiros bytes do resumo de um programa da
-    ///   imagem não passa por ele — o `de` o separa —, nem um editor por
-    ///   outro (o achado 3 do adversário do passo 1).
+    ///   troca com a descrição inteira. O resumo tem 64 bits — 32 nas
+    ///   descrições de antes do A9-RESUMO, ver [`o_mesmo_programa`] —: o
+    ///   código de fora com o começo do resumo de um programa da imagem não
+    ///   passa por ele — o `de` o separa —, nem um editor por outro (o
+    ///   achado 3 do adversário do passo 1).
     /// - A descrição **inteira** que chega depois, do mesmo programa que a
     ///   abreviada que o grafo guardou, é ele, agora com o nome: o processo
     ///   fica com ela, e não há outra troca — nem outra aresta.
@@ -388,19 +389,20 @@ impl Grafo {
 
 /// Se as descrições `a` e `b` — inteiras ou abreviadas, ver
 /// `politica::auditoria::detalhe_composto` — dizem o mesmo programa: o
-/// mesmo resumo; a mesma forma do `de`, as duas com ele — o código de fora
-/// — ou as duas sem — o da imagem —; e, quando as duas dizem o editor (não
-/// o [`politica::auditoria::OMITIDO`]), o mesmo editor. Sem resumo, nenhuma
-/// é a outra.
+/// mesmo resumo (ver `o_mesmo_resumo`); a mesma forma do `de`, as duas com
+/// ele — o código de fora — ou as duas sem — o da imagem —; e, quando as
+/// duas dizem o editor (não o [`politica::auditoria::OMITIDO`]), o mesmo
+/// editor. Sem resumo, nenhuma é a outra.
 ///
 /// O editor omitido casa com qualquer um: a troca para o código de outro
-/// editor com o mesmo começo do resumo — a segunda pré-imagem de 32 bits —
-/// não aparece enquanto os registros do programa novo vierem sem o editor.
-/// A primeira decisão que permite os separa: ela tem o texto vazio, e acima
-/// do teto abrevia só o nome, nunca o editor (com o nome e o editor de 32
-/// bytes e o fio de 20 dígitos, 83 bytes); o editor só sai com um texto
-/// maior ou com a citação — a recusa e a execução (o achado 4 do adversário
-/// do passo 1b). O resto é o tamanho do resumo, pendente.
+/// editor com o mesmo começo do resumo — a segunda pré-imagem de 64 bits,
+/// desde o A9-RESUMO; eram 32 — não aparece enquanto os registros do
+/// programa novo vierem sem o editor. A primeira decisão que permite os
+/// separa: ela tem o texto vazio, e acima do teto abrevia só o nome, nunca
+/// o editor (com o nome e o editor de 32 bytes e o fio de 20 dígitos, 91
+/// bytes com o resumo de 16 dígitos; 83 com o de 8); o editor só sai com um
+/// texto maior ou com a citação — a recusa e a execução (o achado 4 do
+/// adversário do passo 1b).
 pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
     use politica::auditoria::{OMITIDO, editor_da_descricao, resumo_da_descricao};
     let (Some(ra), Some(rb)) = (resumo_da_descricao(a), resumo_da_descricao(b)) else {
@@ -409,12 +411,37 @@ pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
     let (Some(ea), Some(eb)) = (editor_da_descricao(a), editor_da_descricao(b)) else {
         return false;
     };
-    ra == rb
+    o_mesmo_resumo(ra, rb)
         && ea.is_some() == eb.is_some()
         && match (ea, eb) {
             (Some(x), Some(y)) if x != OMITIDO && y != OMITIDO => x == y,
             _ => true,
         }
+}
+
+/// Se os começos de resumo `a` e `b` de duas descrições dizem o mesmo
+/// executável. Os dois têm 16 dígitos — o que o kernel escreve desde o
+/// A9-RESUMO — ou 8 — o de uma descrição gravada antes, que o journal da
+/// auditoria guarda (ver `politica::auditoria::DIGITOS_DO_RESUMO_ANTIGO`):
+///
+/// - do **mesmo tamanho**, iguais, inteiros;
+/// - um de **8** e outro de **16**, os 8 do começo: o de 8 é o começo do de
+///   16 do mesmo executável, e é tudo o que ele diz. Como o editor
+///   omitido, que casa com qualquer um, a descrição que diz menos é a do
+///   mesmo programa quando o pouco que ela diz confere.
+///
+/// O par misturado não aparece num processo só: num boot o kernel escreve
+/// uma largura, e cada boot — o `policy.load` dele — abre outra época, e o
+/// grafo guarda o processo pela época e pelo fio. Ele só se forma com o
+/// journal de antes do A9-RESUMO lido sem o começo do boot seguinte — a
+/// lacuna que tira o `policy.load` do anel antes da leitura —, e então o
+/// mesmo fio de dois boots fica na mesma época. Tomá-lo por outro programa
+/// daria ao processo uma troca que ele não fez — uma aresta e um nó a mais
+/// —; pelos 8 do começo, a comparação é a de antes, com os 32 bits que o
+/// registro antigo tem — e só nesse par: dois de 16 se comparam inteiros.
+fn o_mesmo_resumo(a: &str, b: &str) -> bool {
+    let n = a.len().min(b.len());
+    a.get(..n).is_some_and(|x| b.get(..n) == Some(x))
 }
 
 #[cfg(test)]
@@ -491,8 +518,9 @@ mod testes {
         assert_eq!(g.arestas(), arestas + 1);
     }
 
-    /// O achado 3 do adversário do passo 1: o resumo tem 32 bits, e o mesmo
-    /// resumo não basta para ser o mesmo programa. O código da imagem e o
+    /// O achado 3 do adversário do passo 1: o resumo tinha 32 bits — tem 64
+    /// desde o A9-RESUMO —, e o mesmo resumo não basta para ser o mesmo
+    /// programa. O código da imagem e o
     /// de fora — com o `de` e sem ele — são outros programas, e dois
     /// editores também: a abreviada de um deles depois do outro é uma
     /// troca, com a aresta. O editor omitido (`?`) casa com qualquer um, e
@@ -543,6 +571,95 @@ mod testes {
         assert!(o_mesmo_programa("x abcd1234 de e", "? abcd1234 de e"));
         assert!(!o_mesmo_programa("x abcd1234", "? abcd1234 de e"));
         assert!(!o_mesmo_programa("kernel", "kernel"));
+    }
+
+    /// O A9-RESUMO: o resumo de 16 dígitos separa dois executáveis com os
+    /// mesmos 8 primeiros — a segunda pré-imagem de 32 bits não passa mais
+    /// pelo grafo —, e o de 8 de uma descrição gravada antes se compara com
+    /// o de 16 pelos 8 do começo, que é o que ele diz: o mesmo começo, o
+    /// mesmo programa; outro começo, outro. O `de` e o editor, como sempre.
+    #[test]
+    fn o_resumo_de_16_digitos_e_o_de_8_de_antes() {
+        // A comparação dos resumos.
+        assert!(o_mesmo_resumo("abcd1234ef567890", "abcd1234ef567890"));
+        assert!(!o_mesmo_resumo("abcd1234ef567890", "abcd1234ef567891"));
+        assert!(!o_mesmo_resumo("abcd1234ef567890", "abcd1234aaaaaaaa"));
+        assert!(o_mesmo_resumo("abcd1234", "abcd1234"));
+        assert!(!o_mesmo_resumo("abcd1234", "abcd1235"));
+        assert!(o_mesmo_resumo("abcd1234", "abcd1234ef567890"));
+        assert!(o_mesmo_resumo("abcd1234ef567890", "abcd1234"));
+        assert!(!o_mesmo_resumo("abcd1235", "abcd1234ef567890"));
+        assert!(!o_mesmo_resumo("abcd1234ef567890", "abcd1235"));
+        // Com 16 dígitos, os mesmos 8 do começo não bastam: a colisão de 32
+        // bits que passava, hoje não passa.
+        assert!(!o_mesmo_programa(
+            "x abcd1234ef567890 de e",
+            "? abcd1234aaaaaaaa de e"
+        ));
+        assert!(!o_mesmo_programa(
+            "loja abcd1234ef567890",
+            "? abcd1234aaaaaaaa"
+        ));
+        assert!(o_mesmo_programa(
+            "x abcd1234ef567890 de e",
+            "? abcd1234ef567890 de ?"
+        ));
+        // O de 8 e o de 16: pelos 8 do começo, nos dois sentidos — e o `de`
+        // e o editor ainda separam.
+        for (a, b, mesmo) in [
+            ("loja abcd1234", "? abcd1234ef567890", true),
+            ("? abcd1234", "loja abcd1234ef567890", true),
+            ("x abcd1234 de e", "? abcd1234ef567890 de ?", true),
+            ("? abcd1234 de ?", "x abcd1234ef567890 de e", true),
+            ("loja abcd1235", "? abcd1234ef567890", false),
+            ("loja abcd1234", "? abcd1234ef567890 de e", false),
+            ("x abcd1234 de e", "? abcd1234ef567890 de f", false),
+        ] {
+            assert_eq!(o_mesmo_programa(a, b), mesmo, "{a} / {b}");
+            assert_eq!(o_mesmo_programa(b, a), mesmo, "{b} / {a}");
+        }
+        // No grafo: a abreviada de 16 dígitos de outro executável com o
+        // mesmo começo é uma troca, com a aresta.
+        let mut g = Grafo::novo();
+        let novo = |g: &mut Grafo, fio: u64| {
+            assert!(g.nasceu(
+                0,
+                fio,
+                p(Criador::Principal("agent:aa".into()), Aresta::Lancou, fio),
+            ));
+        };
+        let programa = |g: &Grafo, fio: u64| g.processo(0, fio).and_then(|p| p.programa.clone());
+        novo(&mut g, 1);
+        g.executa(0, 1, "loja abcd1234ef567890 de duke");
+        let arestas = g.arestas();
+        g.executa(0, 1, "? abcd1234ef567890 de ?");
+        assert_eq!(g.arestas(), arestas, "a abreviada do mesmo: nada");
+        g.executa(0, 1, "? abcd1234aaaaaaaa de ?");
+        assert_eq!(programa(&g, 1).as_deref(), Some("? abcd1234aaaaaaaa de ?"));
+        assert_eq!(g.arestas(), arestas + 1, "outro executavel: uma aresta");
+        // O processo que o grafo conhece por uma descrição de 8 dígitos: a
+        // abreviada de 16 com o mesmo começo não muda nada; a de outro
+        // começo é uma troca.
+        novo(&mut g, 2);
+        g.executa(0, 2, "loja abcd1234 de duke");
+        let arestas = g.arestas();
+        g.executa(0, 2, "? abcd1234ef567890 de ?");
+        assert_eq!(programa(&g, 2).as_deref(), Some("loja abcd1234 de duke"));
+        assert_eq!(g.arestas(), arestas);
+        g.executa(0, 2, "? 01234567ef567890 de ?");
+        assert_eq!(programa(&g, 2).as_deref(), Some("? 01234567ef567890 de ?"));
+        assert_eq!(g.arestas(), arestas + 1);
+        // E a abreviada de 8 que o grafo guardou, com a inteira de 16 do
+        // mesmo começo depois: o processo fica com a inteira, sem aresta.
+        novo(&mut g, 3);
+        g.executa(0, 3, "? abcd1234 de ?");
+        let arestas = g.arestas();
+        g.executa(0, 3, "loja abcd1234ef567890 de duke");
+        assert_eq!(
+            programa(&g, 3).as_deref(),
+            Some("loja abcd1234ef567890 de duke")
+        );
+        assert_eq!(g.arestas(), arestas);
     }
 
     /// O achado 5 do adversário do F1: a abreviada de **outro** resumo é
