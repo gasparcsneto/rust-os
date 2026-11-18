@@ -340,7 +340,31 @@ pub fn cutucoes_de(i: usize) -> (u64, u64) {
 /// [`crate::grafico::apresentar_pendente`]. Nos outros, nada: acordar já é
 /// tudo.
 pub fn ao_ser_cutucado() {
+    #[cfg(feature = "modo-teste")]
+    if let Some(n) = RECEBIDOS_DE_TESTE.get(atual()) {
+        n.fetch_add(1, Ordering::SeqCst);
+    }
     crate::grafico::apresentar_pendente();
+}
+
+/// Só para a suíte: quantos cutucões cada núcleo **atendeu** — o tratador
+/// rodou —, e não quantos lhe foram mandados ([`cutucoes_de`]).
+#[cfg(feature = "modo-teste")]
+static RECEBIDOS_DE_TESTE: [AtomicU64; MAX_NUCLEOS] = [const { AtomicU64::new(0) }; MAX_NUCLEOS];
+
+/// Só para a suíte: o contador de cutucões atendidos pelo núcleo `i` — ver
+/// [`RECEBIDOS_DE_TESTE`].
+#[cfg(feature = "modo-teste")]
+pub fn cutucoes_atendidos_de_teste(i: usize) -> Option<&'static AtomicU64> {
+    RECEBIDOS_DE_TESTE.get(i)
+}
+
+/// Só para a suíte: quantos tiques do timer o núcleo `i` já contou.
+#[cfg(feature = "modo-teste")]
+pub fn tiques_de_teste(i: usize) -> u64 {
+    NUCLEOS
+        .get(i)
+        .map_or(0, |n| n.tiques.load(Ordering::Relaxed))
 }
 
 /// Quantos cutucões foram mandados.

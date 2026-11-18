@@ -4496,6 +4496,12 @@ const CHAMADAS_PROTEGIDAS: &[(&str, &[&str])] = &[
             "kernel/src/seguranca.rs",
         ],
     ),
+    // E a forma que pergunta dentro da janela mascarada do sono: a do
+    // coletor, desde o lote B3 do #448.
+    (
+        "descansar_ate_a_interrupcao_se(",
+        &["kernel/src/fios/mod.rs"],
+    ),
     ("seguranca::passo(", &[]),
     ("seguranca::iniciar()", &["kernel/src/main.rs"]),
     ("pilha::bloquear(", &["kernel/src/agent/commands.rs"]),

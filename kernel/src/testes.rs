@@ -2516,13 +2516,14 @@ fn fdt_ignora_propriedade_menor_que_uma_celula() -> Resultado {
 ///
 /// # A frase que este caso substitui
 ///
-/// `esperar_interrupcao` tem dois ramos: dorme se as interrupções estiverem
-/// ligadas, gira se não estiverem. O giro é o ramo ruim — ele só termina se
-/// **outro** fio religar as interrupções, e para quem chamou sem ter para
-/// onde voltar ele não termina nunca.
+/// `esperar_interrupcao` e `dormir_se_ocioso` têm dois ramos: dormem se as
+/// interrupções estiverem ligadas, giram se não estiverem. O giro é o ramo
+/// ruim — ele só termina se **outro** fio religar as interrupções, e para
+/// quem chamou sem ter para onde voltar ele não termina nunca.
 ///
-/// O que autorizava os dois chamadores de hoje — o laço do agente e o
-/// descanso do coletor — a usarem essa função em vez de `dormir_parado` era
+/// O que autorizava os dois chamadores de hoje — o laço do agente, com a
+/// primeira, e o descanso do coletor, com a segunda (desde o lote B3) — a
+/// usarem essas funções em vez de `dormir_parado` era
 /// uma medida escrita num comentário: o ramo mascarado foi tomado zero vezes
 /// na suíte inteira. Uma medida escrita vale até o próximo chamador; esta
 /// vale a cada rodada.
@@ -2541,7 +2542,7 @@ fn x86_ninguem_gira_mascarado_esperando_interrupcao() -> Resultado {
     if giros != 0 {
         crate::log_error!(
             "teste",
-            "esperar_interrupcao girou mascarada {} vez(es)",
+            "esperar_interrupcao ou dormir_se_ocioso girou mascarada {} vez(es)",
             giros
         );
         return Err("alguem esperou interrupcao com as interrupcoes mascaradas");
@@ -42089,6 +42090,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "excecoes: o #MC tem pilha da IST propria em cada nucleo, separada da do #DF",
         f: excecoes::excecoes_o_mc_tem_pilha_propria,
+    },
+    Caso {
+        nome: "zumbis: o chamado que chega na janela do sono do coletor acorda o sono, e nao espera o tique",
+        f: zumbis::zumbis_o_chamado_na_janela_do_sono_nao_espera_o_tique,
     },
     #[cfg(target_arch = "aarch64")]
     Caso {

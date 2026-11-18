@@ -2206,3 +2206,45 @@ pub(super) fn zumbis_o_chamado_durante_a_passada_nao_espera_o_tique() -> Resulta
         _ => Err("o coletor dormiu antes de atender o chamado que chegou durante a passada"),
     }
 }
+
+/// O chamado que chega na janela entre a última pergunta do coletor e o
+/// sono — o nascimento recusado que chegasse ali — não espera o tique (o
+/// item 7 do adversário do lote B2 do #448). A pergunta é feita já dentro
+/// da janela mascarada do sono (`fios::descansar_ate_a_interrupcao_se`): o
+/// cutucão do chamado fica pendente, e acorda o sono na hora. Antes, a
+/// pergunta vinha com as interrupções ligadas, e o cutucão que chegasse
+/// depois dela era atendido antes do sono — que então ia até o tique.
+///
+/// A suíte pede que a próxima janela ponha o chamado e cutuque o próprio
+/// núcleo, e espere o cutucão chegar: com a janela mascarada, ele não é
+/// atendido dentro dela, e o chamado é atendido em seguida. Quem espera
+/// não fica pronto no meio (`fios::bloquear_em`): o coletor só dorme sem
+/// outro fio pronto no núcleo dele. O log diz, ainda, quantos tiques o
+/// núcleo contou entre a janela e o atendimento — zero em release; em
+/// depuração, a janela, mais lenta, costuma segurar um tique, que chega
+/// pendente com o cutucão, e o log conta um.
+pub(super) fn zumbis_o_chamado_na_janela_do_sono_nao_espera_o_tique() -> Resultado {
+    crate::fios::chamar_na_janela_do_coletor_de_teste();
+    let limite = crate::tempo::ticks() + 300;
+    while crate::fios::a_janela_do_coletor_de_teste().is_none() && crate::tempo::ticks() < limite {
+        crate::fios::bloquear_em(crate::tarefas::relogio::por_ms(20));
+    }
+    let Some((nucleo, atendidos, tiques)) = crate::fios::a_janela_do_coletor_de_teste() else {
+        return Err("o coletor nao passou pela janela do sono, ou nao atendeu o chamado dela");
+    };
+    crate::log_info!(
+        "teste",
+        "zumbis: a janela do sono do coletor no nucleo {}: {} cutucao(oes) atendido(s) dentro \
+         dela; {} tique(s) do nucleo ate o chamado ser atendido",
+        nucleo,
+        atendidos,
+        tiques
+    );
+    if atendidos != 0 {
+        return Err(
+            "o cutucao do chamado foi atendido dentro da janela, antes do sono: o coletor dormia \
+             ate o tique",
+        );
+    }
+    Ok(())
+}

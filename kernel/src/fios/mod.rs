@@ -696,7 +696,7 @@ static RECOLHIDOS: AtomicU64 = AtomicU64::new(0);
 /// núcleo livre — mais, com os núcleos ocupados.
 ///
 /// Mas dormir **só** quando não há mais ninguém — ver
-/// [`descansar_ate_a_interrupcao`]. Um coletor que dormia de vez com outros
+/// [`descansar_ate_a_interrupcao_se`]. Um coletor que dormia de vez com outros
 /// fios prontos no mesmo núcleo continuava dono dele: cada tique o acordava
 /// sem vencer o quantum, e ele voltava a dormir até o quinto. Com um núcleo
 /// só, eram cinquenta milissegundos parados a cada volta do rodízio.
@@ -744,15 +744,23 @@ extern "C" fn coletor(_argumento: u64) -> ! {
         // O chamado que chegou durante a volta — o recolhimento ou a
         // passada — não espera o tique: a marca é olhada antes de dormir, e
         // a volta seguinte a atende já. Só um atômico: nenhuma trava nova,
-        // e a ordem das travas não muda. O cutucão do chamado que chega
-        // entre esta pergunta e o sono ainda se perde — e ainda vale o
-        // tique, como antes (ver [`COLETOR_CHAMADO`]).
+        // e a ordem das travas não muda.
         if COLETOR_CHAMADO.load(Ordering::Acquire) {
             continue;
         }
         #[cfg(feature = "modo-teste")]
         chamado_de_teste::antes_de_dormir();
-        descansar_ate_a_interrupcao();
+        // E de novo, já dentro da janela mascarada do sono: o chamado que
+        // chega entre esta pergunta e o sono deixa o cutucão pendente, e o
+        // cutucão acorda o sono na hora, em vez de ser atendido antes dele
+        // e deixar o coletor dormir até o tique (o item 7 do adversário do
+        // lote B2 do #448). Ver [`descansar_ate_a_interrupcao_se`].
+        descansar_ate_a_interrupcao_se(|| {
+            let sem_chamado = !COLETOR_CHAMADO.load(Ordering::Acquire);
+            #[cfg(feature = "modo-teste")]
+            chamado_de_teste::na_janela();
+            sem_chamado
+        });
     }
 }
 
@@ -787,6 +795,65 @@ mod chamado_de_teste {
         if NA_MARCA.load(Ordering::SeqCst) != 0 && NO_ATENDIMENTO.load(Ordering::SeqCst) == 0 {
             NO_ATENDIMENTO.store(SONOS.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
         }
+        let nucleo = NUCLEO_DA_JANELA.load(Ordering::SeqCst);
+        if nucleo != 0 && TIQUES_NO_ATENDIMENTO.load(Ordering::SeqCst) == 0 {
+            TIQUES_NO_ATENDIMENTO.store(
+                crate::nucleos::tiques_de_teste(nucleo as usize - 1) + 1,
+                Ordering::SeqCst,
+            );
+        }
+    }
+
+    /// A próxima janela do coletor — entre a última pergunta pelo chamado e
+    /// o sono — põe o chamado e cutuca o próprio núcleo, como o nascimento
+    /// recusado que chegasse ali.
+    pub(super) static NA_JANELA: AtomicBool = AtomicBool::new(false);
+    /// O núcleo da janela, mais um; zero, nenhuma ainda.
+    pub(super) static NUCLEO_DA_JANELA: AtomicU64 = AtomicU64::new(0);
+    /// Quantos cutucões o núcleo atendeu **durante** a janela, mais um.
+    pub(super) static ATENDIDOS_NA_JANELA: AtomicU64 = AtomicU64::new(0);
+    /// Os tiques do núcleo no fim da janela e no atendimento do chamado,
+    /// mais um.
+    pub(super) static TIQUES_NA_JANELA: AtomicU64 = AtomicU64::new(0);
+    pub(super) static TIQUES_NO_ATENDIMENTO: AtomicU64 = AtomicU64::new(0);
+
+    /// Quantas voltas a janela espera o cutucão chegar: se as interrupções
+    /// estivessem ligadas, ele seria atendido aqui dentro — no x86, já na
+    /// volta do `apic::comandar`, que o manda mascarado e devolve a máscara
+    /// de antes. Poucas, para a janela mascarada segurar o menos possível:
+    /// em release, nenhum tique cai nela; em depuração, mais lenta, ela
+    /// costuma segurar um, que chega pendente com o cutucão, e o log o
+    /// conta entre ela e o atendimento.
+    const ESPERA_NA_JANELA: u32 = 2_000;
+
+    /// Na janela do coletor, se a suíte a pediu: o chamado e o cutucão ao
+    /// próprio núcleo, e uma espera pelo cutucão. Com a janela mascarada, ele
+    /// fica pendente e acorda o sono; com as interrupções ligadas, seria
+    /// atendido aqui, e o sono iria até o tique.
+    pub(super) fn na_janela() {
+        if !NA_JANELA.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let eu = crate::arch::nucleo_atual();
+        let Some(atendidos) = crate::nucleos::cutucoes_atendidos_de_teste(eu) else {
+            return;
+        };
+        let antes = atendidos.load(Ordering::SeqCst);
+        super::COLETOR_CHAMADO.store(true, Ordering::SeqCst);
+        crate::arch::cutucar(crate::nucleos::bit(eu));
+        for _ in 0..ESPERA_NA_JANELA {
+            if atendidos.load(Ordering::SeqCst) != antes {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        ATENDIDOS_NA_JANELA.store(
+            atendidos.load(Ordering::SeqCst) - antes + 1,
+            Ordering::SeqCst,
+        );
+        TIQUES_NO_ATENDIMENTO.store(0, Ordering::SeqCst);
+        TIQUES_NA_JANELA.store(crate::nucleos::tiques_de_teste(eu) + 1, Ordering::SeqCst);
+        NUCLEO_DA_JANELA.store(eu as u64 + 1, Ordering::SeqCst);
     }
 
     /// O coletor vai dormir.
@@ -802,6 +869,39 @@ pub fn marcar_o_chamado_no_fim_da_passada_de_teste() {
     chamado_de_teste::NA_MARCA.store(0, Ordering::SeqCst);
     chamado_de_teste::NO_ATENDIMENTO.store(0, Ordering::SeqCst);
     chamado_de_teste::MARCAR.store(true, Ordering::SeqCst);
+}
+
+/// Só para a suíte: a próxima janela do [`coletor`] — entre a última
+/// pergunta pelo chamado, mascarada, e o sono — põe o chamado e cutuca o
+/// próprio núcleo, como um nascimento recusado que chegasse ali. Ver
+/// [`a_janela_do_coletor_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn chamar_na_janela_do_coletor_de_teste() {
+    chamado_de_teste::NUCLEO_DA_JANELA.store(0, Ordering::SeqCst);
+    chamado_de_teste::ATENDIDOS_NA_JANELA.store(0, Ordering::SeqCst);
+    chamado_de_teste::TIQUES_NA_JANELA.store(0, Ordering::SeqCst);
+    chamado_de_teste::TIQUES_NO_ATENDIMENTO.store(0, Ordering::SeqCst);
+    chamado_de_teste::NA_JANELA.store(true, Ordering::SeqCst);
+}
+
+/// Só para a suíte: o que a janela de
+/// [`chamar_na_janela_do_coletor_de_teste`] viu — o núcleo, os cutucões
+/// atendidos dentro dela e os tiques do núcleo entre o fim dela e o
+/// atendimento do chamado —, ou `None`, se a janela, ou o atendimento,
+/// ainda não aconteceu.
+#[cfg(feature = "modo-teste")]
+pub fn a_janela_do_coletor_de_teste() -> Option<(usize, u64, u64)> {
+    let nucleo = chamado_de_teste::NUCLEO_DA_JANELA.load(Ordering::SeqCst);
+    let atendidos = chamado_de_teste::ATENDIDOS_NA_JANELA.load(Ordering::SeqCst);
+    let na_janela = chamado_de_teste::TIQUES_NA_JANELA.load(Ordering::SeqCst);
+    let no_atendimento = chamado_de_teste::TIQUES_NO_ATENDIMENTO.load(Ordering::SeqCst);
+    (nucleo != 0 && no_atendimento != 0).then(|| {
+        (
+            nucleo as usize - 1,
+            atendidos - 1,
+            no_atendimento.saturating_sub(na_janela),
+        )
+    })
 }
 
 /// Só para a suíte: o chamado de [`marcar_o_chamado_no_fim_da_passada_de_teste`]
@@ -835,15 +935,16 @@ pub fn o_chamado_da_passada_de_teste() -> Option<bool> {
 /// das gravações que a limpeza da morte toma. Quem recolhe continua sendo
 /// só o coletor.
 ///
-/// # O cutucão que se perde
+/// # O cutucão que se perdia
 ///
 /// O chamado é a marca, e o cutucão só tira o coletor do sono antes do
 /// tique. O coletor olha a marca antes de dormir: o chamado que chega
 /// enquanto ele recolhe ou passa é atendido na volta seguinte, sem dormir (o
-/// item 10 do adversário do lote B do #448, no lote B2). Um cutucão que
-/// chega entre essa pergunta e o sono se perde, e o coletor dorme até o
-/// tique: a latência de antes, e não mais — a marca fica, e ele a atende na
-/// volta seguinte.
+/// item 10 do adversário do lote B do #448, no lote B2). E a olha de novo
+/// dentro da janela mascarada do sono ([`descansar_ate_a_interrupcao_se`]):
+/// o cutucão que chega entre essa última pergunta e o sono fica pendente, e
+/// acorda o sono na hora. Antes, ele era atendido antes do sono, e o coletor
+/// dormia até o tique (o item 7 do adversário do lote B2, no lote B3).
 static COLETOR_CHAMADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// O id do coletor, que [`init`] criou — zero se ele não nasceu. É por ele
@@ -942,6 +1043,28 @@ pub fn descansar_ate_a_interrupcao() {
         ceder();
     } else {
         crate::arch::esperar_interrupcao();
+    }
+}
+
+/// [`descansar_ate_a_interrupcao`] para quem espera um aviso que vem com um
+/// cutucão — o [`coletor`], o chamado dele: dá a vez a quem estiver pronto
+/// neste núcleo, e senão só dorme se `ocioso` confirmar, perguntado já com
+/// as interrupções mascaradas e com o despertar atômico de
+/// `arch::dormir_se_ocioso` — no x86, o `sti; hlt`; no ARM, o `wfi`, que
+/// acorda com a IRQ pendente mesmo mascarada.
+///
+/// # O cutucão que se perdia
+///
+/// Perguntado antes, com as interrupções ligadas, o aviso que chegasse entre
+/// a pergunta e o sono tinha o cutucão atendido **antes** do sono — que
+/// então ia até o tique seguinte. Perguntado dentro da janela, o cutucão
+/// fica pendente, e acorda o sono na hora. Sem trava nova, e sem mudar a
+/// ordem das travas: `ocioso` é um atômico.
+pub fn descansar_ate_a_interrupcao_se(ocioso: impl FnOnce() -> bool) {
+    if ha_outro_pronto() {
+        ceder();
+    } else {
+        crate::arch::dormir_se_ocioso(ocioso);
     }
 }
 

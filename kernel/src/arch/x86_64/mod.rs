@@ -1093,16 +1093,19 @@ pub fn esperar_interrupcao() {
     }
 }
 
-/// Quantas vezes [`esperar_interrupcao`] girou em vez de dormir.
+/// Quantas vezes [`esperar_interrupcao`] — ou [`dormir_se_ocioso`] — girou
+/// em vez de dormir.
 ///
 /// # Por que contar, em vez de deixar escrito que é zero
 ///
 /// Porque já estava escrito, e uma frase não se remede sozinha. O ramo
-/// mascarado desta função é um giro que só termina se **outro** fio religar
-/// as interrupções; para quem chamou sem ter para onde voltar, ele é o fim.
-/// A medida de que ele nunca é tomado era o que autorizava os dois chamadores
-/// de hoje — o laço do agente e o descanso do coletor — a usarem esta função
-/// em vez de [`dormir_parado`].
+/// mascarado destas funções é um giro que só termina se **outro** fio
+/// religar as interrupções; para quem chamou sem ter para onde voltar, ele
+/// é o fim. A medida de que ele nunca é tomado era o que autorizava os
+/// chamadores de hoje — o laço do agente, e o descanso do coletor, que
+/// desde o lote B3 do #448 pergunta pelo chamado dentro da janela de
+/// [`dormir_se_ocioso`] — a usarem estas funções em vez de
+/// [`dormir_parado`].
 ///
 /// Escrita num comentário, essa medida vale até o próximo chamador. Contada,
 /// vale a cada rodada da suíte.
@@ -1193,7 +1196,10 @@ pub fn dormir_se_ocioso(ocioso: impl FnOnce() -> bool) {
         interrupts::enable_and_hlt();
     } else {
         // Dormir com as interrupções mascaradas pararia o núcleo para sempre:
-        // nada poderia acordá-lo. Girar é desperdício, mas é recuperável.
+        // nada poderia acordá-lo. Girar é desperdício, mas é recuperável — e
+        // contado, como o de `esperar_interrupcao` (ver `giros_mascarados`).
+        #[cfg(feature = "modo-teste")]
+        GIROS_MASCARADOS.fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
     }
 }
