@@ -41841,6 +41841,18 @@ static CASOS: &[Caso] = &[
         nome: "consoles: sem ninguem, o comando vai a auditoria sem o resumo dos parametros; com alguem, com ele",
         f: consoles_sem_ninguem_o_comando_vai_sem_o_resumo,
     },
+    Caso {
+        nome: "zumbis: o nascimento sem vaga acorda o coletor que dorme, e a tentativa seguinte nasce",
+        f: zumbis::zumbis_o_nascimento_sem_vaga_acorda_o_coletor,
+    },
+    Caso {
+        nome: "zumbis: a recusa da cota com mortos por recolher acorda o coletor que dorme, e o lancamento seguinte nasce",
+        f: zumbis::zumbis_a_cota_com_mortos_acorda_o_coletor,
+    },
+    Caso {
+        nome: "zumbis: os nascimentos sem vaga de varios nucleos acordam o coletor, e todos nascem",
+        f: zumbis::zumbis_os_nascimentos_sem_vaga_de_varios_nucleos_acordam_o_coletor,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

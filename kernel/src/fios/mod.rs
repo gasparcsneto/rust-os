@@ -656,7 +656,10 @@ pub fn init() {
     // capaz de ter o primeiro sem o segundo — e o sintoma disso não é uma
     // falha, é memória que some devagar.
     match criar("coletor", coletor, 0) {
-        Ok(id) => crate::log_info!("fios", "coletor de fios mortos no ar, id {}", id.numero()),
+        Ok(id) => {
+            ID_DO_COLETOR.store(id.numero(), Ordering::Release);
+            crate::log_info!("fios", "coletor de fios mortos no ar, id {}", id.numero())
+        }
         // Não é fatal: sem coletor, a vaga de cada morto fica com ele — o
         // espaço, a pilha e a morte que ele não soltou —, porque só o
         // coletor devolve vaga de morto (ver `vaga_livre`). A máquina sobe,
@@ -701,11 +704,36 @@ static RECOLHIDOS: AtomicU64 = AtomicU64::new(0);
 /// E uma passada por tique, no máximo: cedendo, ele volta a cada volta do
 /// rodízio, e com fios que cedem muito isso seria muitas passadas por tique
 /// — mais do que dormindo, que é o ritmo para o qual elas foram escritas.
+///
+/// # O chamado
+///
+/// Fora do tique, ele recolhe quando é chamado ([`COLETOR_CHAMADO`]): um
+/// nascimento não achou vaga, ou a cota de um titular recusou, com um
+/// morto por recolher na tabela — a mitigação (3) da decisão sobre o achado
+/// A1. Só o recolhimento: o resto da passada — os prazos, a auditoria ao
+/// journal, a compactação — continua no ritmo do tique. Um chamado por
+/// volta, no máximo: os que chegam enquanto ele recolhe somam-se num só, e
+/// valem a volta seguinte.
 extern "C" fn coletor(_argumento: u64) -> ! {
     let mut ultima_passada = None;
     loop {
         let agora = crate::tempo::ticks();
-        if ultima_passada != Some(agora) {
+        // O chamado sai antes do recolhimento: o que chegar durante ele —
+        // um morto que o recolhimento ainda não viu — fica para a volta
+        // seguinte, e não se perde.
+        let chamado = COLETOR_CHAMADO.swap(false, Ordering::AcqRel);
+        let do_tique = ultima_passada != Some(agora);
+        let quantos = if chamado {
+            recolher_pelo_chamado()
+        } else if do_tique {
+            recolher_terminados()
+        } else {
+            0
+        };
+        if quantos > 0 {
+            crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
+        }
+        if do_tique {
             ultima_passada = Some(agora);
             passada_do_coletor();
         }
@@ -713,12 +741,63 @@ extern "C" fn coletor(_argumento: u64) -> ! {
     }
 }
 
-/// O que o coletor faz a cada tique.
-fn passada_do_coletor() {
-    let quantos = recolher_terminados();
-    if quantos > 0 {
-        crate::log_debug!("fios", "coletor recolheu {} fio(s)", quantos);
+/// O coletor foi chamado: um nascimento não achou vaga, ou a cota do
+/// titular recusou, com um morto por recolher na tabela — ver
+/// [`Escalonador::chamar_o_coletor`]. O [`coletor`] o tira na volta
+/// seguinte, e recolhe sem esperar o tique.
+///
+/// # A mitigação, e o que ela não é
+///
+/// É a mitigação (3) da decisão sobre o achado A1 (8 de novembro de 2026):
+/// a vaga de um morto só volta pelo coletor, e quem não acha vaga — ou
+/// ouve a cota cheia de mortos dele — esperava a passada seguinte, um tique
+/// quando o coletor ganha a vez. Chamado, ele recolhe agora. Não ajuda com
+/// o coletor sem a vez: quem decide quando ele roda é o rodízio, em que ele
+/// não tem prioridade.
+///
+/// Quem não nasceu **não espera** o coletor: ele só acorda o coletor e
+/// devolve a recusa, como antes. Esperar dentro da chamada de sistema — o
+/// `fork` nasce no handler dela — era o defeito do AE-1; e recolher ali
+/// mesmo, a alternativa (4) da decisão, traria o mesmo defeito, pela ordem
+/// das gravações que a limpeza da morte toma. Quem recolhe continua sendo
+/// só o coletor.
+///
+/// # O cutucão que se perde
+///
+/// O chamado é a marca, e o cutucão só tira o coletor do sono antes do
+/// tique. Um cutucão que chega entre a pergunta do coletor e o sono dele se
+/// perde, e o coletor dorme até o tique: a latência de antes, e não mais —
+/// a marca fica, e ele a atende na volta seguinte. O mesmo acontece com o
+/// chamado que chega enquanto ele recolhe.
+static COLETOR_CHAMADO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// O id do coletor, que [`init`] criou — zero se ele não nasceu. É por ele
+/// que o chamado acha o núcleo em que o coletor dorme.
+static ID_DO_COLETOR: AtomicU64 = AtomicU64::new(0);
+
+/// Quantas vezes um nascimento sem vaga, ou uma recusa da cota, chamou o
+/// coletor com um morto por recolher na tabela — chamado de novo antes de
+/// ele atender também conta.
+static CHAMADAS_DO_COLETOR: AtomicU64 = AtomicU64::new(0);
+
+/// O recolhimento do [`coletor`] chamado ([`COLETOR_CHAMADO`]): o mesmo
+/// corpo de [`recolher_terminados`], que a suíte segura do mesmo jeito
+/// (`segurar_o_coletor_de_teste`) — mas não se cala com o coletor
+/// adormecido (`adormecer_o_coletor_de_teste`), que só cala o do tique.
+/// Contado em `RECOLHENDO` antes de olhar a guarda, como o outro: quem
+/// segura sabe que nenhum começado antes ainda corre.
+fn recolher_pelo_chamado() -> usize {
+    #[cfg(feature = "modo-teste")]
+    let _recolhendo = Recolhendo::entrar();
+    #[cfg(feature = "modo-teste")]
+    if SEGURAR_O_COLETOR.load(Ordering::SeqCst) {
+        return 0;
     }
+    passada_do_recolhimento()
+}
+
+/// O que o coletor faz a cada tique, além de recolher — ver [`coletor`].
+fn passada_do_coletor() {
     // O aviso de saída do pseudo-terminal é dado daqui, sem tranca na
     // mão — ver `pseudoterminal`, sobre por que o `_print` não o dá.
     crate::pseudoterminal::passada_do_coletor();
@@ -1048,7 +1127,7 @@ pub fn recolher_terminados() -> usize {
     #[cfg(feature = "modo-teste")]
     let _recolhendo = Recolhendo::entrar();
     #[cfg(feature = "modo-teste")]
-    if SEGURAR_O_COLETOR.load(Ordering::SeqCst) {
+    if SEGURAR_O_COLETOR.load(Ordering::SeqCst) || ADORMECIDO.load(Ordering::SeqCst) {
         return 0;
     }
     passada_do_recolhimento()
@@ -1235,9 +1314,10 @@ fn limpar_os_zumbis() -> usize {
     quantos
 }
 
-/// Segura o coletor: com ela ligada, [`recolher_terminados`] volta sem
-/// fazer nada — nem a passada dos zumbis, nem o recolhimento; o resto da
-/// passada do coletor segue. Ver [`segurar_o_coletor_de_teste`].
+/// Segura o coletor: com ela ligada, [`recolher_terminados`] — o
+/// recolhimento do tique — e o do chamado ([`recolher_pelo_chamado`]) voltam
+/// sem fazer nada — nem a passada dos zumbis, nem o recolhimento; o resto
+/// da passada do coletor segue. Ver [`segurar_o_coletor_de_teste`].
 ///
 /// Existe só para a suíte, pelo motivo de [`CEDER_AO_ESCOLHER_VAGA`]: a
 /// janela entre a morte de um processo — ou a colheita dele — e a passada
@@ -1289,6 +1369,49 @@ pub fn segurar_o_coletor_de_teste() {
 #[cfg(feature = "modo-teste")]
 pub fn soltar_o_coletor_de_teste() {
     SEGURAR_O_COLETOR.store(false, Ordering::SeqCst);
+}
+
+/// Só para a suíte: o coletor do kernel dorme — o tique não o faz recolher:
+/// [`recolher_terminados`] volta sem fazer nada, como com
+/// [`SEGURAR_O_COLETOR`], e só o chamado de um nascimento sem vaga, ou da
+/// recusa da cota com mortos por recolher ([`COLETOR_CHAMADO`]), recolhe
+/// ([`recolher_pelo_chamado`]). O resto da passada segue no tique. Existe
+/// para o caso que confere o chamado: com o coletor recolhendo a cada
+/// tique, o morto sairia sem ele, e o caso não veria a diferença.
+#[cfg(feature = "modo-teste")]
+static ADORMECIDO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Adormece o coletor do kernel ([`ADORMECIDO`]) e espera o recolhimento em
+/// curso, se há um, acabar: daí em diante, até
+/// [`acordar_o_coletor_de_teste`], ele só recolhe chamado. Não se chama com
+/// a limpeza pausada, pelo motivo de [`segurar_o_coletor_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn adormecer_o_coletor_de_teste() {
+    ADORMECIDO.store(true, Ordering::SeqCst);
+    while RECOLHENDO.load(Ordering::SeqCst) != 0 {
+        ceder();
+    }
+}
+
+/// Acorda o coletor de [`adormecer_o_coletor_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn acordar_o_coletor_de_teste() {
+    ADORMECIDO.store(false, Ordering::SeqCst);
+}
+
+/// Só para a suíte: esquece o chamado que o coletor ainda não atendeu — o
+/// dos nascimentos que um caso recusou enchendo a tabela, para o chamado
+/// que ele confere ser o seguinte.
+#[cfg(feature = "modo-teste")]
+pub fn esquecer_o_chamado_de_teste() {
+    COLETOR_CHAMADO.store(false, Ordering::SeqCst);
+}
+
+/// Só para a suíte: quantas vezes um nascimento sem vaga, ou uma recusa da
+/// cota, chamou o coletor ([`CHAMADAS_DO_COLETOR`]).
+#[cfg(feature = "modo-teste")]
+pub fn chamadas_do_coletor_de_teste() -> u64 {
+    CHAMADAS_DO_COLETOR.load(Ordering::SeqCst)
 }
 
 /// Um recolhimento só, mesmo com o coletor segurado: a vaga e o id do morto
@@ -1923,13 +2046,24 @@ fn nascer(
         };
         // A cota, com a vaga ainda por reservar e a trava na mão: quem
         // conferir depois de nós já nos conta — ver `criar_processo`. A
-        // recusa leva o que o titular ocupa nesta mesma conta.
+        // recusa leva o que o titular ocupa nesta mesma conta. Com mortos
+        // dele por recolher, ou sem vaga com um morto qualquer na tabela, o
+        // coletor é chamado — a mitigação (3) da decisão sobre o achado A1
+        // —, e quem não nasceu não o espera (ver `COLETOR_CHAMADO`).
         if let Some(cota) = cota
             && let Some(ocupacao) = e.cota_cheia(autoridade, cota)
         {
-            return Err(NaoNasceu::Cota(ocupacao));
+            let cutucar = if ocupacao.mortos_por_recolher > 0 {
+                e.chamar_o_coletor()
+            } else {
+                0
+            };
+            return Err((NaoNasceu::Cota(ocupacao), cutucar));
         }
-        let vaga = e.vaga_livre().map_err(NaoNasceu::Falha)?;
+        let vaga = match e.vaga_livre() {
+            Ok(vaga) => vaga,
+            Err(motivo) => return Err((NaoNasceu::Falha(motivo), e.chamar_o_coletor())),
+        };
         e.fios[vaga] = Some(Fio {
             id,
             nome,
@@ -1954,7 +2088,13 @@ fn nascer(
             programa,
             terminar: false,
         });
-        Ok::<_, NaoNasceu>((vaga, herdada, pai, vaga_do_pai, autoridade, fixo, programa))
+        Ok((vaga, herdada, pai, vaga_do_pai, autoridade, fixo, programa))
+    })
+    .map_err(|(nao, cutucar): (NaoNasceu, crate::nucleos::Mascara)| {
+        // Fora da trava, como todo despertar deste módulo: o cutucão não
+        // toma trava nenhuma, e só tira do sono o núcleo do coletor.
+        crate::nucleos::cutucar(cutucar);
+        nao
     })?;
 
     // Ponto de cessão só para testes: é exatamente aqui que a janela entre
@@ -2316,6 +2456,50 @@ impl Escalonador {
             ocupados,
             mortos_por_recolher,
         })
+    }
+
+    /// Há um morto por recolher na tabela: um fio terminado que não é
+    /// zumbi — o que só o coletor devolve, e que conta na cota do titular
+    /// dele até lá. O zumbi espera a colheita, e não o coletor. Um laço, e
+    /// não um iterador encadeado — ver [`Self::proximo_a_recolher`].
+    fn ha_morto_por_recolher(&self) -> bool {
+        for i in 0..MAX_FIOS {
+            let terminado = matches!(&self.fios[i], Some(f) if f.estado == Estado::Terminado);
+            if terminado && !self.e_zumbi(i) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Chama o coletor, se há um morto por recolher na tabela
+    /// ([`Self::ha_morto_por_recolher`]): marca o chamado
+    /// ([`COLETOR_CHAMADO`]) e devolve a quem cutucar — o núcleo em que o
+    /// coletor está, dormindo à espera do tique ou recolhendo; ou, se ele
+    /// espera a vez, os núcleos ociosos, que podem tomá-lo. Quem chama
+    /// cutuca depois de soltar a trava, como em todo despertar deste
+    /// módulo. Só atômicos e a tabela, que a trava já guarda: nenhuma trava
+    /// nova, nenhuma espera. O chamado de novo, antes de o coletor atender
+    /// o anterior, não cutuca de novo: o cutucão já saiu, e o tique o
+    /// substitui se ele se perdeu.
+    fn chamar_o_coletor(&self) -> crate::nucleos::Mascara {
+        if !self.ha_morto_por_recolher() {
+            return 0;
+        }
+        CHAMADAS_DO_COLETOR.fetch_add(1, Ordering::Relaxed);
+        if COLETOR_CHAMADO.swap(true, Ordering::AcqRel) {
+            return 0;
+        }
+        let id = ID_DO_COLETOR.load(Ordering::Acquire);
+        for fio in self.fios.iter().flatten() {
+            if fio.id.numero() == id {
+                return match fio.na_cpu {
+                    Some(cpu) => crate::nucleos::bit(cpu),
+                    None => self.nucleos_ociosos(),
+                };
+            }
+        }
+        0
     }
 
     /// A conta de [`Self::processos_de`] pela definição, categoria por
@@ -3306,8 +3490,23 @@ pub fn processos_de(autoridade: crate::autorizacao::Autoridade) -> usize {
 /// dessas vagas são de mortos que esperam o coletor ([`Ocupacao`]). É a
 /// conta do gate em [`crate::autorizacao::permitir_processo`]; a do
 /// nascimento, a que vale, é a mesma, na seção crítica que reserva a vaga.
+///
+/// A cota cheia com mortos do titular por recolher chama o coletor, como o
+/// nascimento sem vaga ([`COLETOR_CHAMADO`]): é aqui, no gate, que quase
+/// toda recusa da cota acontece, e a vaga desses mortos — e a cota — só
+/// volta com ele. A decisão não muda: a recusa é a mesma, e quem pediu não
+/// espera o coletor.
 pub fn cota_cheia(autoridade: crate::autorizacao::Autoridade, cota: usize) -> Option<Ocupacao> {
-    com_escalonador(|e| e.cota_cheia(autoridade, cota))
+    let (ocupacao, cutucar) = com_escalonador(|e| {
+        let ocupacao = e.cota_cheia(autoridade, cota);
+        let cutucar = match ocupacao {
+            Some(o) if o.mortos_por_recolher > 0 => e.chamar_o_coletor(),
+            _ => 0,
+        };
+        (ocupacao, cutucar)
+    });
+    crate::nucleos::cutucar(cutucar);
+    ocupacao
 }
 
 /// A autoridade de um processo vivo — um fio que hospeda um programa,

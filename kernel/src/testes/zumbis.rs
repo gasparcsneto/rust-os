@@ -1658,3 +1658,359 @@ pub(super) fn zumbis_a_recusa_diz_os_mortos_por_recolher() -> Resultado {
     limpar(fio);
     resultado
 }
+
+// ---------------------------------------------------------------------------
+// A mitigação (3) da decisão sobre o achado A1: o chamado do coletor
+// ---------------------------------------------------------------------------
+
+/// O coletor do kernel adormecido enquanto vive: o tique não o faz recolher,
+/// só o chamado de um nascimento sem vaga ou de uma recusa da cota com
+/// mortos por recolher (`fios::adormecer_o_coletor_de_teste`). Largado, ele
+/// acorda — também no caso que falha no meio.
+struct ColetorAdormecido;
+
+impl ColetorAdormecido {
+    fn adormecer() -> Self {
+        crate::fios::adormecer_o_coletor_de_teste();
+        ColetorAdormecido
+    }
+}
+
+impl Drop for ColetorAdormecido {
+    fn drop(&mut self) {
+        crate::fios::acordar_o_coletor_de_teste();
+    }
+}
+
+/// O fio `id` terminou e largou o núcleo.
+fn parado(id: u64) -> bool {
+    crate::fios::retrato_de_teste(id).is_some_and(|r| r.parado)
+}
+
+/// Com o coletor segurado, fios do kernel que saem na hora enchem a tabela,
+/// até um nascimento ser recusado por falta de vaga, e todos largam o
+/// núcleo: os mortos por recolher. Devolve os ids deles.
+fn encher_de_mortos() -> Result<Vec<u64>, &'static str> {
+    let mut mortos = Vec::new();
+    for _ in 0..2 * crate::fios::MAX_FIOS {
+        match crate::fios::criar("teste-chamado-morto", fio_curto, 0) {
+            Ok(id) => mortos.push(id.numero()),
+            Err(m) if m.contains("vaga") => break,
+            Err(m) => {
+                crate::log_error!("teste", "{}", m);
+                return Err("um morto do caso nao nasceu por outro motivo que a falta de vaga");
+            }
+        }
+    }
+    if mortos.is_empty() || crate::fios::vagas_livres_de_teste() != 0 {
+        return Err("a tabela nao encheu de mortos");
+    }
+    for &m in &mortos {
+        esperar_ate(|| parado(m), 600).map_err(|_| "um morto do caso nao largou o nucleo")?;
+    }
+    Ok(mortos)
+}
+
+/// Os `mortos` saíram todos da tabela.
+fn recolhidos(mortos: &[u64]) -> bool {
+    !mortos.iter().any(|&m| crate::fios::na_tabela_de_teste(m))
+}
+
+/// A mitigação (3) da decisão sobre o achado A1: o nascimento que não acha
+/// vaga, havendo morto por recolher, acorda o coletor. Com o coletor
+/// segurado, fios que saem na hora enchem a tabela; com ele adormecido — o
+/// tique não o faz recolher —, sem o chamado dos nascimentos que a encheram,
+/// e solto, o nascimento seguinte é recusado na hora por falta de vaga, com
+/// o motivo de sempre, e o chamado dele faz o coletor recolher os mortos,
+/// sem o tique; a tentativa seguinte nasce. Quem foi recusado não espera o
+/// coletor: a recusa volta, e o coletor recolhe depois, no fio dele. Sem o
+/// chamado, o coletor adormecido não recolhe nada, e o caso reprova na
+/// espera.
+pub(super) fn zumbis_o_nascimento_sem_vaga_acorda_o_coletor() -> Resultado {
+    super::sem_mortos_por_recolher();
+    let livres_antes = crate::fios::vagas_livres_de_teste();
+    let mut segurado = Some(super::vagas::ColetorSegurado::segurar());
+    let mut adormecido = None;
+    let resultado = (|| -> Resultado {
+        let mortos = encher_de_mortos()?;
+        // Adormecido antes de soltar, e sem o chamado dos nascimentos que
+        // encheram a tabela: o chamado que acorda é o do caso.
+        adormecido = Some(ColetorAdormecido::adormecer());
+        crate::fios::esquecer_o_chamado_de_teste();
+        drop(segurado.take());
+        let chamadas = crate::fios::chamadas_do_coletor_de_teste();
+        let recusa = crate::fios::criar("teste-chamado", fio_curto, 0).map(|id| id.numero());
+        let chamou = crate::fios::chamadas_do_coletor_de_teste() > chamadas;
+        crate::log_info!(
+            "teste",
+            "zumbis: {} mortos encheram a tabela; o nascimento com o coletor adormecido deu {:?}; \
+             chamou o coletor: {}",
+            mortos.len(),
+            recusa,
+            chamou
+        );
+        match recusa {
+            Err(m) if m.contains("vaga") => {}
+            Err(_) => return Err("o nascimento foi recusado por outro motivo que a falta de vaga"),
+            Ok(_) => {
+                return Err("um fio nasceu com a tabela cheia de mortos e o coletor adormecido");
+            }
+        }
+        esperar_ate(|| recolhidos(&mortos), 600)
+            .map_err(|_| "o nascimento sem vaga nao acordou o coletor adormecido")?;
+        if !chamou {
+            return Err("o nascimento sem vaga nao chamou o coletor");
+        }
+        crate::fios::criar("teste-chamado", fio_curto, 0)
+            .map(drop)
+            .map_err(|_| "a tentativa seguinte, depois do recolhimento, nao nasceu")
+    })();
+    drop(segurado);
+    drop(adormecido);
+    let _ = esperar_ate(
+        || {
+            super::sem_mortos_por_recolher();
+            crate::fios::vagas_livres_de_teste() >= livres_antes
+        },
+        600,
+    );
+    resultado
+}
+
+/// A mesma mitigação na recusa da cota, considerada pela mesma razão, nas
+/// duas contas que a recusam: com o coletor segurado e a cota em 2, dois
+/// `ola` do titular nascem e saem — mortos por recolher, que contam na cota
+/// dele (a alternativa 1 da decisão sobre o A1) —; com o coletor adormecido,
+/// sem chamado, e solto, o pedido seguinte ouve a cota, e o chamado dela faz
+/// o coletor recolher os dois, sem o tique; o pedido depois do recolhimento
+/// nasce. Primeiro pelo gate — o terceiro `ola` ouve `COTA_ESGOTADA` pela
+/// conta de `fios::cota_cheia`, e a recusa vai para a auditoria como sempre
+/// —; depois pela conta do nascimento — a que vale, na mesma seção crítica
+/// que reservaria a vaga (`NaoNasceu::Cota`), que o gate só encontra na
+/// corrida entre os dois, e que o caso pede direto, como
+/// `zumbis: a recusa diz os mortos por recolher`. Sem o chamado numa das
+/// duas, o coletor adormecido não recolhe, e o caso reprova na espera.
+pub(super) fn zumbis_a_cota_com_mortos_acorda_o_coletor() -> Resultado {
+    if crate::fios::colheita().1 != 0 {
+        return Err("a tabela ja tinha zumbi antes do caso comecar");
+    }
+    super::sem_mortos_por_recolher();
+    politica_com_a_cota(2)?;
+    let titular = operador(0, "pessoa-do-chamado");
+    let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let resultado = (|| -> Resultado {
+        // Pelo gate: o `user.run` do terceiro `ola`.
+        cota_com_mortos_acorda_o_coletor(titular, "o gate", || match crate::usuario::lancar_como(
+            Some(&ola),
+            titular,
+        ) {
+            Err(crate::fios::COTA_ESGOTADA) if recusa_do_lancamento_gravada() => Ok(false),
+            Err(crate::fios::COTA_ESGOTADA) => {
+                Err("a recusa pela cota do lancamento nao foi gravada")
+            }
+            Err(_) => Err("o lancamento foi recusado por outro motivo que a cota"),
+            Ok(id) => {
+                esperar_ate(|| !crate::fios::vivo(id), 600)
+                    .map_err(|_| "o ola do caso nao saiu")?;
+                Ok(true)
+            }
+        })?;
+        // Pela conta do nascimento: o processo pedido direto ao
+        // escalonador, com a cota.
+        cota_com_mortos_acorda_o_coletor(titular, "o nascimento", || {
+            match crate::fios::criar_processo("usuario", fio_curto, 0, titular, 2, &|_| Ok(())) {
+                Err(crate::fios::NaoNasceu::Cota(o)) if o.mortos_por_recolher == 2 => Ok(false),
+                Err(outro) => {
+                    crate::log_error!("teste", "{:?}", outro);
+                    Err("o nascimento foi recusado sem os dois mortos na cota")
+                }
+                Ok(_) => Ok(true),
+            }
+        })
+    })();
+    crate::autorizacao::carregar();
+    crate::pessoas::esquecer_registradas();
+    super::sem_mortos_por_recolher();
+    resultado
+}
+
+/// Um passo de [`zumbis_a_cota_com_mortos_acorda_o_coletor`], pela conta
+/// `qual`: dois `ola` do titular mortos por recolher, com o coletor
+/// segurado; adormecido e solto o coletor, `pedir` ouve a cota (`false`), e
+/// o chamado dela recolhe os dois; depois, `pedir` nasce (`true`).
+fn cota_com_mortos_acorda_o_coletor(
+    titular: Autoridade,
+    qual: &str,
+    pedir: impl Fn() -> Result<bool, &'static str>,
+) -> Resultado {
+    let ola = alloc::format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    let mut segurado = Some(super::vagas::ColetorSegurado::segurar());
+    let mut adormecido = None;
+    let resultado = (|| -> Resultado {
+        let mut mortos = Vec::new();
+        for _ in 0..2 {
+            let id = crate::usuario::lancar_como(Some(&ola), titular)
+                .map_err(|_| "um ola dentro da cota nao nasceu")?;
+            esperar_ate(|| parado(id), 600).map_err(|_| "o ola nao saiu")?;
+            mortos.push(id);
+        }
+        adormecido = Some(ColetorAdormecido::adormecer());
+        crate::fios::esquecer_o_chamado_de_teste();
+        drop(segurado.take());
+        let chamadas = crate::fios::chamadas_do_coletor_de_teste();
+        let nasceu = pedir()?;
+        let chamou = crate::fios::chamadas_do_coletor_de_teste() > chamadas;
+        crate::log_info!(
+            "teste",
+            "zumbis: cota 2, dois ola mortos por recolher; pela conta d{}, o pedido nasceu: {}; \
+             chamou o coletor: {}",
+            qual,
+            nasceu,
+            chamou
+        );
+        if nasceu {
+            return Err("o titular nasceu com os mortos dele enchendo a cota");
+        }
+        esperar_ate(|| recolhidos(&mortos), 600)
+            .map_err(|_| "a recusa da cota com mortos nao acordou o coletor adormecido")?;
+        if !chamou {
+            return Err("a recusa da cota com mortos nao chamou o coletor");
+        }
+        if !pedir()? {
+            return Err("o pedido seguinte, depois do recolhimento, nao nasceu");
+        }
+        Ok(())
+    })();
+    drop(segurado);
+    drop(adormecido);
+    super::sem_mortos_por_recolher();
+    resultado
+}
+
+/// Os lançadores de [`zumbis_os_nascimentos_sem_vaga_de_varios_nucleos_acordam_o_coletor`]
+/// começam juntos.
+static SINAL_DOS_LANCADORES: AtomicBool = AtomicBool::new(false);
+/// Quantos lançadores fizeram nascer o fio deles.
+static NASCERAM: AtomicUsize = AtomicUsize::new(0);
+/// Quantos nascimentos dos lançadores foram recusados por falta de vaga.
+static RECUSADOS: AtomicU64 = AtomicU64::new(0);
+/// Algum lançador desistiu: outra recusa, ou o prazo.
+static DESISTIU: AtomicBool = AtomicBool::new(false);
+
+/// Um lançador, fixo num núcleo secundário: espera o sinal e tenta fazer
+/// nascer um fio até nascer — cada recusa por falta de vaga volta na hora,
+/// e ele tenta de novo.
+extern "C" fn lancador_do_chamado(_argumento: u64) -> ! {
+    while !SINAL_DOS_LANCADORES.load(SeqCst) {
+        crate::fios::ceder();
+    }
+    let prazo = crate::tempo::ticks().saturating_add(600);
+    loop {
+        match crate::fios::criar("teste-chamado-nucleos", fio_curto, 0) {
+            Ok(_) => {
+                NASCERAM.fetch_add(1, SeqCst);
+                break;
+            }
+            Err(m) if m.contains("vaga") => {
+                RECUSADOS.fetch_add(1, SeqCst);
+            }
+            Err(_) => {
+                DESISTIU.store(true, SeqCst);
+                break;
+            }
+        }
+        if crate::tempo::ticks() > prazo {
+            DESISTIU.store(true, SeqCst);
+            break;
+        }
+        crate::fios::ceder();
+    }
+    crate::fios::terminar()
+}
+
+/// O chamado com nascimentos de vários núcleos ao mesmo tempo: um lançador
+/// fixo em cada núcleo secundário nasce antes, e espera o sinal; com a
+/// tabela cheia de mortos e o coletor adormecido, o sinal os solta juntos.
+/// Os primeiros nascimentos são recusados por falta de vaga, cada um chama
+/// o coletor — os chamados que chegam antes de ele atender se somam num só
+/// —, o coletor recolhe sem o tique, e todos nascem. Nenhum lançador espera
+/// o coletor dentro da criação: cada recusa volta, e ele tenta de novo. A
+/// ordem das travas do caminho — o chamado sob a do escalonador, o cutucão
+/// fora dela — o caso das travas, o último da suíte, confere.
+pub(super) fn zumbis_os_nascimentos_sem_vaga_de_varios_nucleos_acordam_o_coletor() -> Resultado {
+    let secundarios: Vec<usize> = nucleos_secundarios().collect();
+    if secundarios.is_empty() {
+        crate::log_info!(
+            "teste",
+            "um nucleo so: os nascimentos nao correm ao mesmo tempo"
+        );
+        return Ok(());
+    }
+    super::sem_mortos_por_recolher();
+    let livres_antes = crate::fios::vagas_livres_de_teste();
+    SINAL_DOS_LANCADORES.store(false, SeqCst);
+    NASCERAM.store(0, SeqCst);
+    RECUSADOS.store(0, SeqCst);
+    DESISTIU.store(false, SeqCst);
+    // Os lançadores nascem antes de a tabela encher.
+    let mut lancadores = Vec::new();
+    for &cpu in &secundarios {
+        match crate::fios::criar_no_nucleo("teste-lancador-do-chamado", lancador_do_chamado, 0, cpu)
+        {
+            Ok(id) => lancadores.push(id.numero()),
+            Err(m) => {
+                SINAL_DOS_LANCADORES.store(true, SeqCst);
+                return Err(m);
+            }
+        }
+    }
+    let mut segurado = Some(super::vagas::ColetorSegurado::segurar());
+    let mut adormecido = None;
+    let resultado = (|| -> Resultado {
+        let mortos = encher_de_mortos()?;
+        adormecido = Some(ColetorAdormecido::adormecer());
+        crate::fios::esquecer_o_chamado_de_teste();
+        drop(segurado.take());
+        let chamadas = crate::fios::chamadas_do_coletor_de_teste();
+        SINAL_DOS_LANCADORES.store(true, SeqCst);
+        let fim = esperar_ate(
+            || NASCERAM.load(SeqCst) == lancadores.len() || DESISTIU.load(SeqCst),
+            900,
+        );
+        crate::log_info!(
+            "teste",
+            "zumbis: {} mortos encheram a tabela; {} lancadores em nucleos diferentes: \
+             {} nasceram, {} nascimentos recusados por falta de vaga, {} chamados",
+            mortos.len(),
+            lancadores.len(),
+            NASCERAM.load(SeqCst),
+            RECUSADOS.load(SeqCst),
+            crate::fios::chamadas_do_coletor_de_teste() - chamadas
+        );
+        if fim.is_err() || DESISTIU.load(SeqCst) || NASCERAM.load(SeqCst) != lancadores.len() {
+            return Err("um lancador nao nasceu depois do chamado do coletor");
+        }
+        if RECUSADOS.load(SeqCst) == 0 {
+            return Err("nenhum nascimento foi recusado com a tabela cheia de mortos");
+        }
+        if crate::fios::chamadas_do_coletor_de_teste() <= chamadas {
+            return Err("os nascimentos sem vaga nao chamaram o coletor");
+        }
+        esperar_ate(|| recolhidos(&mortos), 600)
+            .map_err(|_| "o coletor nao recolheu os mortos do caso")
+    })();
+    SINAL_DOS_LANCADORES.store(true, SeqCst);
+    drop(segurado);
+    drop(adormecido);
+    for &id in &lancadores {
+        let _ = esperar_ate(|| !crate::fios::vivo(id), 600);
+    }
+    let _ = esperar_ate(
+        || {
+            super::sem_mortos_por_recolher();
+            crate::fios::vagas_livres_de_teste() >= livres_antes
+        },
+        600,
+    );
+    resultado
+}

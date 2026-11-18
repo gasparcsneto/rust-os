@@ -427,7 +427,7 @@ kernel/src/
 │   ├── sdk.rs       os casos do SDK da malha: o `eco-malha` com três clientes e o fluxo que ele fecha quando o cliente o larga, a `conversa` com a janela e o fluxo no mesmo laço, uma cópia entre dois `copiador`, o programa feito fora do repositório instalado e rodado, também com o coletor segurado, o contrato v2 como um agente o lê, as medidas do laço e o laço que sobe com o nome tomado
 │   ├── trava_da_auditoria.rs os casos do tempo com a trava da auditoria — a do gate — em `audit.tail`, `audit.verify` e no anexar: a cauda pelo gate em cada `after` e cada `count`, igual ao anel e com o elo refeito; `audit.head` e `audit.verify` da mesma hora, e o anel no limite de 1023, 1024 e 1025 registros, em que `anexar` e `anexar_preparado` fazem a mesma cadeia; a resposta do `audit.verify` em cada ramo, e a mesma pela conta com a trava — sem memória para a fotografia, com um lugar menor que o anel e no post-mortem —, com o caminho de cada um contado, e a cadeia que não confere, de ponta a ponta, em cada caminho; nada pedido nem devolvido ao alocador com a trava na mão — nem ao ler a política de novo —, pela conta do próprio alocador, com os controles; a âncora de uma declaração fora da janela; o registro que sai pela ponta com o `Arc` seguro; produtores em vários núcleos com um leitor que acompanha a cadeia como o NSF e outro que verifica, conferidos contra o journal; o anel dando a volta sob verificações em vários fios, com a memória de volta ao patamar; e três coletores e uma compactação no meio
 │   ├── vagas.rs     os casos da vaga do morto: ela só volta a um fio novo depois de o coletor soltar a morte dele — o morto sem pai e o filho colhido guardam a vaga com o coletor segurado, a limpeza pausada no recolhimento e na passada dos zumbis com outro coletor ao mesmo tempo, a tabela cheia de mortos, o coletor que não fica preso numa passada, o pai que morre sem colher, a janela de nonces e a concorrência
-│   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos — e, no `fork` e no `user.run` que um processo pede pela interface nativa, o processo que pede, e quantos dos contados são mortos por recolher —, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, o processo do `user.run` que conta até o recolhimento, e o órfão que não vira zumbi do fio que toma a vaga do pai
+│   └── zumbis.rs    os casos da cota de processos do titular — a decisão 14.1 e a alternativa 1 da decisão sobre o achado A1: contam os vivos, os que nascem, os zumbis e os mortos ainda não recolhidos — a tabela que um titular não esgota, o sistema que segue com ele no teto, o isolamento entre titulares, a colheita e o fim do pai que devolvem a cota com o recolhimento, quem colhe tarde, a recusa que grava a contagem, com zumbis e com mortos — e, no `fork` e no `user.run` que um processo pede pela interface nativa, o processo que pede, e quantos dos contados são mortos por recolher —, a concorrência, os fios do kernel com a autoridade de uma pessoa, que não contam na cota dela, e, com o coletor segurado, o morto que conta até o recolhimento — o colhido e o órfão, com a conta da cota conferida contra a definição, categoria por categoria —, o laço que bifurca e colhe sem passar da cota, o processo do `user.run` que conta até o recolhimento, e o órfão que não vira zumbi do fio que toma a vaga do pai; e o chamado do coletor — a mitigação (3) da decisão sobre o A1: o nascimento sem vaga e a recusa da cota com mortos por recolher acordam o coletor adormecido, sem esperá-lo, também com nascimentos de vários núcleos ao mesmo tempo
 ├── tela/
 │   ├── mod.rs       o framebuffer: desenhar na tela
 │   ├── bochs.rs     o adaptador de vídeo do QEMU, programado do zero
@@ -2223,8 +2223,10 @@ núcleos escondiam. Os dois agora passam por
 lado do teste atômico da fila dele): havendo outro fio pronto neste
 núcleo, cedem; só dormem quando não há ninguém — o que mantém o motivo
 acima. O coletor faz uma passada por tique, no máximo, como fazia
-dormindo. `fios: quem nao tem o que fazer da a vez` prende o coletor e um
-fio que cede no mesmo núcleo, em qualquer número de núcleos, e mede.
+dormindo — e, chamado, só o recolhimento, fora do tique (ver *O chamado
+do coletor*, em [Coordenação](#coordenação)). `fios: quem nao tem o que
+fazer da a vez` prende o coletor e um fio que cede no mesmo núcleo, em
+qualquer número de núcleos, e mede.
 
 É um fio, e não uma tarefa do executor cooperativo, por um motivo de teste: o
 executor não existe em modo de teste — lá o kernel roda a suíte e encerra. Um
@@ -2272,11 +2274,13 @@ trava de novo; um recolhimento ao mesmo tempo — a
 suíte chama `recolher_terminados` de outros núcleos, junto com o coletor —
 pula o morto em curso, e a morte é solta uma vez só. O custo: com a
 tabela cheia de mortos ainda não recolhidos, o nascimento é recusado, com
-o motivo de sempre — não há vaga —, até a passada seguinte do coletor, que
-faz uma por tique quando ganha a vez — mais tarde, com os núcleos
-ocupados. E o processo morto que guarda a vaga conta na cota do titular
-dele até o coletor recolhê-lo — o zumbi, e também o que não é zumbi: o
-colhido, o órfão, o do `user.run` (a alternativa 1 da decisão sobre o
+o motivo de sempre — não há vaga —, até o coletor recolher: a recusa o
+chama, e ele recolhe na volta seguinte, sem esperar o tique, quando ganha
+a vez — mais tarde, com os núcleos ocupados (ver *O chamado do coletor*,
+em [Coordenação](#coordenação)). E o processo morto que guarda a vaga
+conta na cota do titular dele até o coletor recolhê-lo — o zumbi, e
+também o que não é zumbi: o colhido, o órfão, o do `user.run` (a
+alternativa 1 da decisão sobre o
 achado A1 do adversário desta correção, de 8 de novembro de 2026; ver a
 cota de processos, em [Coordenação](#coordenação)): um programa que
 bifurca, sai e colhe em laço ouve a recusa da cota até o coletor recolher
@@ -5262,7 +5266,10 @@ registro de cada uma no ponto em que nasceu.
   acima, nenhuma descartada: a (2), reservar vagas aos fios do kernel,
   segue entre as opções de *A soma das cotas de processos e a cota por
   sessão*, dois itens abaixo; a (3), uma mitigação [B] que não exclui a
-  (1), segue pendente, sem ter entrado neste incremento. A (4) foi
+  (1), entrou depois, no lote B do #448: o nascimento que não acha vaga,
+  havendo morto por recolher, acorda o coletor — e, pela mesma razão, a
+  recusa da cota com mortos do titular por recolher —, sem esperar por
+  ele (ver *O chamado do coletor*, em [Coordenação](#coordenação)). A (4) foi
   investigada antes da decisão: a limpeza da morte toma a ordem das
   gravações — `fluxo::canal_acabou` encerra os fluxos do morto dentro
   dela, tenha ele fluxo ou não —, e o `fork` nasce dentro do handler da
@@ -9268,6 +9275,42 @@ na lista (ver *A ordem do recolhimento e o que a recusa mostra*, em
 mutações da conta de vagas (alternativa
 1)](#as-mutações-da-conta-de-vagas-alternativa-1).
 
+**O chamado do coletor** (a mitigação (3) da decisão sobre o achado A1,
+[B], no lote B do #448). A vaga de um morto só volta pelo coletor, numa
+passada por tique quando ele ganha a vez. O nascimento que não acha vaga,
+havendo morto por recolher na tabela, chama o coletor; e, pela mesma
+razão, a recusa da cota com mortos do titular por recolher — na conta do
+gate (`fios::cota_cheia`), onde quase toda recusa da cota acontece, e na
+do nascimento (`NaoNasceu::Cota`). O chamado é uma marca
+(`COLETOR_CHAMADO`), posta sob a trava do escalonador que o nascimento já
+tem, e um cutucão ao núcleo em que o coletor dorme — ou aos ociosos, se ele
+espera a vez —, dado depois de soltar a trava, como todo despertar do
+escalonador: nenhuma trava nova, nenhuma ordem nova entre elas. Na volta
+seguinte, o coletor recolhe sem esperar o tique — só o recolhimento; os
+prazos, a auditoria ao journal e a compactação seguem no ritmo do tique.
+**Quem não nasceu não espera o coletor:** a recusa volta na hora, com o
+motivo de sempre. Esperar dentro da chamada de sistema — o `fork` nasce no
+handler dela — era o defeito do AE-1, e recolher ali, a alternativa (4),
+traria o mesmo, pela ordem das gravações que a limpeza da morte toma.
+Quem recolhe continua sendo só o coletor, e o chamado não ajuda com o
+coletor sem a vez: quando ele roda, o rodízio decide. Um cutucão que chega
+entre a pergunta do coletor e o sono dele se perde, e o coletor dorme até
+o tique — a latência de antes: a marca fica, e ele a atende na volta
+seguinte. A decisão, a recusa, a auditoria e a conta da cota não mudam. A
+suíte adormece o coletor do kernel (`fios::adormecer_o_coletor_de_teste`:
+o tique não o faz recolher, só o chamado) para ver a diferença: `zumbis: o
+nascimento sem vaga acorda o coletor que dorme, e a tentativa seguinte
+nasce` — fios que saem na hora enchem a tabela, o nascimento seguinte é
+recusado por falta de vaga, e os mortos saem sem o tique —; `zumbis: a
+recusa da cota com mortos por recolher acorda o coletor que dorme, e o
+lancamento seguinte nasce` — dois `ola` mortos enchem a cota 2, o terceiro
+ouve a cota pelo gate, e os dois saem —; e `zumbis: os nascimentos sem
+vaga de varios nucleos acordam o coletor, e todos nascem` — um lançador
+em cada núcleo secundário, soltos juntos com a tabela cheia de mortos:
+recusados, chamam o coletor, e todos nascem. O caso das travas, o último
+da suíte, confere a ordem delas no caminho. As mutações estão em [As
+mutações do chamado do coletor](#as-mutações-do-chamado-do-coletor).
+
 O `cargo xtask invariantes` confere que só o canal chama
 `ui::agir_com_versao`, que só a administração revoga um arrendamento, que
 a linha do interpretador só muda pela árvore, que só o interpretador põe no
@@ -9716,6 +9759,22 @@ arquivo que não é dono — o `lancar_como` num `use` em `barra.rs`, o
 `interpretador.rs`, o `lancar_o_terminal` em `agent/administracao.rs` —,
 foram acusadas pelo `cargo xtask invariantes`, que saiu com falha.
 
+### As mutações do chamado do coletor
+
+Quatro mutações contra o chamado do coletor — a mitigação (3) da decisão
+sobre o achado A1, em *O chamado do coletor*, acima —, uma de cada vez, no
+repositório, e restauradas byte a byte, com a hora do arquivo renovada
+para o cargo recompilar; no x86_64 em debug, cada uma contra as partes da
+suíte que têm os casos que a devem reprovar (`DUKE_PARTE=k/1010`: um caso
+por parte, e a cauda, com o caso das travas). As quatro reprovaram na
+primeira rodada.
+
+| Mutação | Reprovada por |
+|---|---|
+| o nascimento sem vaga que não chama o coletor | `zumbis: o nascimento sem vaga acorda o coletor que dorme, e a tentativa seguinte nasce` ("o nascimento sem vaga nao acordou o coletor adormecido": nenhum chamado) e `zumbis: os nascimentos sem vaga de varios nucleos acordam o coletor, e todos nascem` ("um lancador nao nasceu depois do chamado do coletor": os três lançadores, recusados 83 060 vezes, sem nenhum chamado) |
+| a recusa da cota no gate que não chama o coletor (`fios::cota_cheia`) | `zumbis: a recusa da cota com mortos por recolher acorda o coletor que dorme, e o lancamento seguinte nasce`, no passo do gate: "a recusa da cota com mortos nao acordou o coletor adormecido" — o terceiro `ola` ouviu a cota sem chamar o coletor |
+| a recusa da cota no nascimento que não chama o coletor (`NaoNasceu::Cota`) | o mesmo caso, no passo do nascimento — o do gate passou: "a recusa da cota com mortos nao acordou o coletor adormecido" |
+| o chamado que cutuca sem marcar: o coletor acorda, não acha o chamado e volta a dormir | `zumbis: o nascimento sem vaga acorda o coletor que dorme, e a tentativa seguinte nasce`: "o nascimento sem vaga nao acordou o coletor adormecido" — o chamado foi contado e o cutucão saiu, mas o coletor não recolheu sem a marca |
 
 ### Mensagens
 
