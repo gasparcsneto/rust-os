@@ -39,7 +39,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use spin::once::Once;
 use x86_64::VirtAddr;
-use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+use x86_64::instructions::segmentation::{CS, DS, ES, FS, GS, SS, Segment};
 use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
@@ -333,6 +333,20 @@ pub fn init() {
     });
 
     PRIMEIRO_TSS.store(seletores.tss[0].0, Ordering::Relaxed);
+    // Os seletores que o firmware deixou no primeiro núcleo, antes de
+    // [`carregar`] trocá-los — só para o log do boot: os do `FS` e do `GS`,
+    // que nada mais carregava, iam para a primeira troca de contexto.
+    crate::log_info!(
+        "cpu",
+        "os seletores que o firmware deixou: CS {:#x}, SS {:#x}, DS {:#x}, ES {:#x}, FS {:#x}, \
+         GS {:#x}",
+        CS::get_reg().0,
+        SS::get_reg().0,
+        DS::get_reg().0,
+        ES::get_reg().0,
+        FS::get_reg().0,
+        GS::get_reg().0
+    );
     carregar(gdt, seletores, 0);
 }
 
@@ -403,6 +417,22 @@ fn carregar(
         SS::set_reg(*seletor_dados);
         DS::set_reg(*seletor_dados);
         ES::set_reg(*seletor_dados);
+
+        // E o `FS` e o `GS` nulos. O firmware os deixa com um seletor da GDT
+        // dele — o EDK II, o mesmo 0x30 do `SS` e do `DS` —, e desde o lote
+        // B4 do #448 a troca de contexto guarda os quatro seletores de dados
+        // por fio e os recarrega (`contexto::trocar_contexto`): o fio do boot
+        // levaria o 0x30 do `FS` e do `GS` para a primeira troca, e
+        // recarregá-los na volta seria `#GP(0x30)` no anel 0 — o `GS`
+        // primeiro —; o TSS do núcleo 0 não é um segmento de dados. Nulos,
+        // eles são o que um fio novo recebe; o `GS` nulo muda a base ativa
+        // dele, e não o `IA32_KERNEL_GS_BASE` do `swapgs`. As bases, o nulo
+        // as zera num Intel e no TCG, e não num AMD sem o
+        // `NullSelectorClearsBase`: quem as zera em todo processador é o
+        // regime do núcleo (`escrever_o_regime_deste_nucleo`), antes do
+        // primeiro processo dele.
+        FS::set_reg(SegmentSelector(0));
+        GS::set_reg(SegmentSelector(0));
 
         load_tss(*seletor_tss);
     }

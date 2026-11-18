@@ -154,27 +154,36 @@ pub unsafe fn init() {
     if let Some(r) = super::regime_do_firmware() {
         crate::log_info!(
             "usuario",
-            "o regime que o firmware deixou: CR0 {:#x}, CR4 {:#x}, DR7 {:#x}, SYSENTER_CS {:#x}, \
-             SYSENTER_ESP {:#x}, SYSENTER_EIP {:#x}",
+            "o regime que o firmware deixou: CR0 {:#x}, CR4 {:#x}, XCR0 {:#x}, DR7 {:#x}, \
+             SYSENTER_CS {:#x}, SYSENTER_ESP {:#x}, SYSENTER_EIP {:#x}, FS_BASE {:#x}, \
+             GS_BASE {:#x}, TSC_AUX {:#x}",
             r.cr0,
             r.cr4,
+            r.xcr0,
             r.dr7,
             r.sysenter_cs,
             r.sysenter_esp,
-            r.sysenter_eip
+            r.sysenter_eip,
+            r.fs_base,
+            r.gs_base,
+            r.tsc_aux
         );
     }
     let r = super::ler_o_regime_deste_nucleo();
     crate::log_info!(
         "usuario",
-        "o regime do kernel: CR0 {:#x}, CR4 {:#x}, DR7 {:#x}, SYSENTER_CS {:#x}, SYSENTER_ESP \
-         {:#x}, SYSENTER_EIP {:#x}",
+        "o regime do kernel: CR0 {:#x}, CR4 {:#x}, XCR0 {:#x}, DR7 {:#x}, SYSENTER_CS {:#x}, \
+         SYSENTER_ESP {:#x}, SYSENTER_EIP {:#x}, FS_BASE {:#x}, GS_BASE {:#x}, TSC_AUX {:#x}",
         r.cr0,
         r.cr4,
+        r.xcr0,
         r.dr7,
         r.sysenter_cs,
         r.sysenter_esp,
-        r.sysenter_eip
+        r.sysenter_eip,
+        r.fs_base,
+        r.gs_base,
+        r.tsc_aux
     );
 }
 
@@ -193,8 +202,11 @@ pub unsafe fn init() {
 pub unsafe fn ligar_neste_nucleo() {
     // Antes do primeiro processo que este núcleo rodar: o regime dele — o
     // ponto flutuante preso, o `CR4` do kernel, nenhum ponto de parada, o
-    // `sysenter` sem entrada (ver `escrever_o_regime_deste_nucleo`) —, e o
-    // anel 3 nunca vê o contador.
+    // `sysenter` sem entrada, as bases do `FS` e do `GS` e o `IA32_TSC_AUX`
+    // em zero (ver `escrever_o_regime_deste_nucleo`) —, e o anel 3 nunca vê
+    // o contador.
+    // O `IA32_KERNEL_GS_BASE` vem depois, abaixo, e a `syscall` só existe
+    // no fim: nenhuma janela do `swapgs` corre antes.
     super::escrever_o_regime_deste_nucleo();
     super::fechar_os_contadores_ao_usuario();
     let sel = gdt::seletores();
@@ -570,6 +582,15 @@ fn janela_de_interrupcoes() {
     unsafe { core::arch::asm!("sti", "nop", "cli", options(nostack)) };
 }
 
+/// O `RFLAGS` com que um processo começa, pela primeira entrada ([`entrar`])
+/// e pela troca de imagem (`contexto::redirecionar_para`): 0x202 — o bit 1,
+/// reservado e sempre ligado, e o `IF`: sem ele o processo seria
+/// impreemptável, e o primeiro laço infinito dele travaria a máquina. Nada
+/// mais: nem o `DF`, nem o `TF`, nem o `AC`, nem o `NT`, nem as aritméticas
+/// de quem rodou antes (o achado 1 do adversário do lote B4 do #448). Como o
+/// `start_thread` do Linux.
+pub(super) const RFLAGS_DE_UM_PROCESSO_NOVO: u64 = 0x202;
+
 /// Desce para ring 3 e começa a executar em `entrada`. Nunca retorna.
 ///
 /// # Safety
@@ -588,10 +609,8 @@ pub unsafe fn entrar(entrada: u64, pilha: u64) -> ! {
     let ss = sel.dados_usuario.0 as u64;
     let cs = sel.codigo_usuario.0 as u64;
 
-    // `0x202`: bit 1 sempre ligado (reservado, exigido pelo processador) e
-    // `IF` ligado. Entrar com as interrupções desligadas deixaria o processo
-    // impreemptável, e o primeiro laço infinito dele travaria a máquina.
-    const RFLAGS: u64 = 0x202;
+    // As flags de um processo novo — ver [`RFLAGS_DE_UM_PROCESSO_NOVO`].
+    const RFLAGS: u64 = RFLAGS_DE_UM_PROCESSO_NOVO;
 
     // SAFETY: o quadro abaixo descreve um retorno para ring 3 que nunca
     // aconteceu, que é exatamente como se entra em userspace pela primeira
@@ -603,6 +622,33 @@ pub unsafe fn entrar(entrada: u64, pilha: u64) -> ! {
             "push {rflags}",
             "push {cs}",
             "push {rip}",
+            // O processo novo não recebe o que o kernel deixou nos
+            // registradores — endereços do kernel, temporários do caminho do
+            // fio —, como na troca de imagem (`contexto::redirecionar_para`):
+            // os quatro seletores de dados nulos e os gerais em zero (o item
+            // 5 do adversário do lote B3 do #448). Nenhum programa recebe
+            // argumento em registrador na entrada. O quadro do `iretq` já
+            // está na pilha, os operandos já foram consumidos, e as flags vêm
+            // do quadro. Uma troca no meio leva os seletores nulos com o fio.
+            "xor eax, eax",
+            "mov ds, eax",
+            "mov es, eax",
+            "mov fs, eax",
+            "mov gs, eax",
+            "xor ebx, ebx",
+            "xor ecx, ecx",
+            "xor edx, edx",
+            "xor esi, esi",
+            "xor edi, edi",
+            "xor ebp, ebp",
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            "xor r14d, r14d",
+            "xor r15d, r15d",
             "iretq",
             ss = in(reg) ss,
             rsp = in(reg) pilha,

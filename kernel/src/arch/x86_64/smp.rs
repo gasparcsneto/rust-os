@@ -215,24 +215,23 @@ pub fn reservar_paginas_baixas(mut reservar: impl FnMut(u64, u64)) {
 }
 
 /// O que um núcleo novo copia do primeiro, porque não tem como descobrir
-/// sozinho. O `CR4` não: o núcleo novo escreve o do kernel
-/// ([`super::cr4_do_kernel`]), e não o que o firmware deixou no primeiro.
+/// sozinho. O `CR4` e o `XCR0` não: o núcleo novo escreve os do kernel
+/// ([`super::cr4_do_kernel`] e, no regime, [`super::xcr0_do_kernel`]), e
+/// não os que o firmware deixou no primeiro — o `XCR0` copiado levava aos
+/// secundários o que o firmware tivesse ligado (o item 4 do adversário do
+/// lote B3 do #448).
 struct Molde {
     cr0: AtomicU64,
     pat: AtomicU64,
-    xcr0: AtomicU64,
 }
 
 static MOLDE: Molde = Molde {
     cr0: AtomicU64::new(0),
     pat: AtomicU64::new(0),
-    xcr0: AtomicU64::new(0),
 };
 
 /// O MSR da tabela de atributos de página.
 const IA32_PAT: u32 = 0x277;
-/// O bit do `CR4` que liga `xsave`/`xgetbv`.
-const CR4_OSXSAVE: u64 = 1 << 18;
 
 /// Fotografa os registradores de controle do primeiro núcleo.
 ///
@@ -240,28 +239,14 @@ const CR4_OSXSAVE: u64 = 1 << 18;
 /// zero, e o ponto flutuante preso pelo `TS` (ver
 /// `escrever_o_regime_deste_nucleo`, que cada núcleo também roda ao
 /// acordar). Um núcleo que acordasse com os valores de reset seria um
-/// núcleo com proteções a menos. O `XCR0` é o que o firmware escolheu para o
-/// `xsave`, com o `OSXSAVE` do `CR4`. O `CR4` mesmo não se copia: o núcleo
-/// novo escreve o do kernel.
+/// núcleo com proteções a menos. O `CR4` e o `XCR0` não se copiam: o núcleo
+/// novo escreve os do kernel.
 fn fotografar() {
-    use x86_64::registers::control::{Cr0, Cr4};
-    let cr4 = Cr4::read_raw();
+    use x86_64::registers::control::Cr0;
     MOLDE.cr0.store(Cr0::read_raw(), Ordering::Relaxed);
     // SAFETY: o PAT existe em todo x86_64.
     let pat = unsafe { x86_64::registers::model_specific::Msr::new(IA32_PAT).read() };
     MOLDE.pat.store(pat, Ordering::Relaxed);
-    if cr4 & CR4_OSXSAVE != 0 {
-        let (baixo, alto): (u32, u32);
-        // SAFETY: `xgetbv` existe quando OSXSAVE está ligado, que é a
-        // condição deste ramo.
-        unsafe {
-            core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") baixo, out("edx") alto,
-                options(nomem, nostack, preserves_flags));
-        }
-        MOLDE
-            .xcr0
-            .store(((alto as u64) << 32) | baixo as u64, Ordering::Relaxed);
-    }
 }
 
 /// Monta a raiz provisória: a do kernel, mais a identidade dos primeiros
@@ -381,16 +366,13 @@ extern "sysv64" fn entrada_secundaria(indice: u64) -> ! {
     // em toda a metade alta — onde estamos executando, com a pilha do ocioso
     // —, então trocar não muda nenhuma tradução em uso. O `CR4` é o do
     // kernel, e o `CR0` repete o do primeiro núcleo: o regime em que todo o
-    // kernel foi escrito para rodar.
+    // kernel foi escrito para rodar. O `XCR0` que o núcleo trouxe — o do
+    // reset, ou o que o firmware deixou nele — vale com o `OSXSAVE`, porque
+    // o x87 está sempre nele, e o regime escreve o do kernel
+    // (`usuario::ligar_neste_nucleo`) antes do primeiro processo.
     unsafe {
         paginacao::trocar_espaco(paginacao::espaco_do_kernel());
-        let cr4 = super::cr4_do_kernel();
-        Cr4::write_raw(cr4);
-        let xcr0 = MOLDE.xcr0.load(Ordering::Relaxed);
-        if cr4 & CR4_OSXSAVE != 0 && xcr0 != 0 {
-            core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") xcr0 as u32,
-                in("edx") (xcr0 >> 32) as u32, options(nomem, nostack, preserves_flags));
-        }
+        Cr4::write_raw(super::cr4_do_kernel());
         // O x87 num estado conhecido — o INIT não o deixa em estado nenhum
         // que se possa afirmar —, **antes** do `CR0` do primeiro núcleo: com
         // o `TS` dele, o `fninit` seria `#NM` no anel 0, antes de haver IDT

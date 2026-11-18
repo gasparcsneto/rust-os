@@ -14,8 +14,8 @@
 //! tabela de vetores. Não é preciso salvar nada de novo.
 //!
 //! Então a troca aqui é literalmente trocar o quadro: guardamos o do fio que
-//! sai, escrevemos por cima o do fio que entra, ajustamos `SP_EL0`, e deixamos
-//! o `eret` do fim do handler fazer o resto. Ele restaura trinta e um
+//! sai, escrevemos por cima o do fio que entra, ajustamos o `SP_EL0` e o
+//! `TPIDR_EL0`, e deixamos o `eret` do fim do handler fazer o resto. Ele restaura trinta e um
 //! registradores, o `PC` e o estado do processador de uma vez só — trabalho
 //! que no x86 teria de ser escrito à mão.
 //!
@@ -32,7 +32,7 @@
 
 use core::arch::asm;
 
-use aarch64_cpu::registers::SP_EL0;
+use aarch64_cpu::registers::{SP_EL0, TPIDR_EL0};
 use tock_registers::interfaces::{Readable, Writeable};
 
 use super::vetores::Quadro;
@@ -55,6 +55,18 @@ pub struct Contexto {
     /// `SP_EL1` só delas. Existe para manter o contrato igual ao do x86 e para
     /// o dia em que cada fio tiver sua própria pilha de exceção.
     pub pilha_de_kernel: u64,
+    /// O `TPIDR_EL0` do processo deste fio.
+    ///
+    /// O EL0 o escreve e o lê sem armadilha que o EL1 possa ligar — só o EL2
+    /// o prenderia —, e ele é do núcleo, e não do fio: sem guardá-lo aqui, o
+    /// valor que um processo deixava chegava ao seguinte no mesmo núcleo, 64
+    /// bits entre titulares por fora do gate, da auditoria e do NSF (o item
+    /// 1 do adversário do lote B3 do #448). Guardado e devolvido na troca
+    /// ([`trocar_no_quadro`]), como os `x0`–`x30` do quadro e o `SP_EL0`, e
+    /// como o `tls_thread_switch` do Linux: zerá-lo a cada troca fecharia o
+    /// canal, mas o processo perderia o dele numa preempção. Zero num fio
+    /// novo e na troca de imagem; o do pai no `fork`.
+    pub tpidr_el0: u64,
 }
 
 impl Contexto {
@@ -67,6 +79,7 @@ impl Contexto {
                 spsr: 0,
             },
             pilha_de_kernel: 0,
+            tpidr_el0: 0,
         }
     }
 
@@ -111,6 +124,8 @@ pub unsafe fn preparar_contexto(
     };
     contexto.quadro.x[0] = entrada as *const () as u64;
     contexto.quadro.x[1] = argumento;
+    // Um fio novo não herda o `TPIDR_EL0` de ninguém.
+    contexto.tpidr_el0 = 0;
 }
 
 /// Primeira coisa que um fio novo executa.
@@ -134,6 +149,24 @@ extern "C" fn trampolim_de_fio(entrada: u64, argumento: u64) -> ! {
 /// sem que nada reclame.
 fn ler_sp_el0() -> u64 {
     SP_EL0.get()
+}
+
+/// O `TPIDR_EL0` deste núcleo: o do processo do fio que roda — ver
+/// [`Contexto::tpidr_el0`].
+///
+/// Pelo `aarch64-cpu`, como o `SP_EL0`. O `mrs` e o `msr` dele são `nomem`,
+/// e aqui podem ser: o valor sai de um campo do contexto e entra noutro, e
+/// quem publica a troca ([`crate::fios::troca_concluida`]) vem depois, com a
+/// ordem dela; o `eret` do fim do handler sincroniza o contexto antes de o
+/// EL0 lê-lo.
+fn ler_tpidr_el0() -> u64 {
+    TPIDR_EL0.get()
+}
+
+/// Escreve o `TPIDR_EL0` deste núcleo — ver [`ler_tpidr_el0`]. Nada no EL1
+/// o usa: só o processo que roda depois do `eret` o vê.
+fn escrever_tpidr_el0(valor: u64) {
+    TPIDR_EL0.set(valor);
 }
 
 /// # Safety
@@ -174,9 +207,11 @@ pub unsafe fn trocar_no_quadro(quadro: &mut Quadro) {
     unsafe {
         (*troca.de).quadro = *quadro;
         (*troca.de).sp = ler_sp_el0();
+        (*troca.de).tpidr_el0 = ler_tpidr_el0();
 
         *quadro = (*troca.para).quadro;
         escrever_sp_el0((*troca.para).sp);
+        escrever_tpidr_el0((*troca.para).tpidr_el0);
 
         // O espaço de endereços do fio que entra. Trocar de dentro do handler
         // é seguro porque as duas raízes carregam as mesmas entradas de topo
@@ -251,10 +286,11 @@ fn em_handler() -> bool {
 /// # Por que aqui é mais simples que no x86
 ///
 /// Porque a entrada da exceção já materializa o estado completo do usuário num
-/// [`Quadro`], e o [`Contexto`] de um fio **é** um quadro mais o `SP_EL0`.
-/// Duplicar um fio de usuário é, literalmente, copiar a struct e trocar um
-/// campo. No x86 o estado mora espalhado pela pilha de kernel, e o contexto do
-/// filho precisa ser remontado palavra por palavra.
+/// [`Quadro`], e o [`Contexto`] de um fio **é** um quadro mais o `SP_EL0` e
+/// o `TPIDR_EL0`. Duplicar um fio de usuário é, literalmente, copiar o
+/// quadro, trocar um campo e ler do núcleo os dois registradores do pai. No
+/// x86 o estado mora espalhado pela pilha de kernel, e o contexto do filho
+/// precisa ser remontado palavra por palavra.
 ///
 /// # Safety
 ///
@@ -279,14 +315,20 @@ pub unsafe fn preparar_contexto_de_fork(
     // divergir a partir da primeira escrita.
     contexto.sp = ler_sp_el0();
     contexto.pilha_de_kernel = topo & !0xF;
+    // E o `TPIDR_EL0` do pai, que está no núcleo enquanto ele faz a
+    // chamada — como o `SP_EL0`: o filho é uma cópia dele.
+    contexto.tpidr_el0 = ler_tpidr_el0();
 }
 
 /// Reescreve o quadro para que o retorno da chamada caia noutro programa.
 ///
 /// É o que `exec` precisa: o processo não volta para onde chamou, volta para o
 /// começo da imagem nova. Os registradores são zerados — o programa que entra
-/// não tem direito ao estado do que saiu — e o `SPSR` é preservado porque
-/// descreve o modo de execução, não dados.
+/// não tem direito ao estado do que saiu: os `x0`–`x30` e o `TPIDR_EL0` — e o
+/// `SPSR` é o de um processo novo ([`super::usuario::SPSR_USUARIO`]): o modo e
+/// as máscaras são os de todo processo, e o resto do `SPSR` da chamada — o
+/// `NZCV` e, com as extensões, o `SSBS`, o `DIT`, o `TCO` e o `BTYPE` — era da
+/// imagem que saiu.
 ///
 /// # Safety
 ///
@@ -299,10 +341,12 @@ pub unsafe fn redirecionar_para(quadro: *mut core::ffi::c_void, entrada: u64, pi
     // faz parte do quadro: o hardware o troca sozinho no `eret`.
     unsafe {
         let q = &mut *quadro;
-        let spsr = q.spsr;
         q.x = [0; 31];
         q.elr = entrada;
-        q.spsr = spsr;
+        q.spsr = super::usuario::SPSR_USUARIO;
         escrever_sp_el0(pilha);
     }
+    // No núcleo, e não no quadro: ele não faz parte do quadro, e o fio o leva
+    // na troca seguinte.
+    escrever_tpidr_el0(0);
 }

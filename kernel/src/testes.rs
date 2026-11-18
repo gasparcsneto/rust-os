@@ -30270,8 +30270,16 @@ fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
         "processo encerrou com codigo {}",
         crate::usuario::exemplo::CODIGO_DE_BSS_SUJA
     );
+    // O `filho` sai com este antes de escrever se a troca de imagem lhe
+    // deixou o estado da imagem anterior — as flags ou o estado por fio (o
+    // lote B4 do #448).
+    let filho_sujo = format!(
+        "processo encerrou com codigo {}",
+        crate::usuario::exemplo::CODIGO_DO_FILHO_SUJO
+    );
 
     let (mut viu_pai, mut viu_filho, mut viu_sujo) = (false, false, false);
+    let mut viu_filho_sujo = false;
     let (mut viu_mensagem, mut viu_diagnostico, mut viu_filho_escrevendo) = (false, false, false);
     crate::log::ultimos(64, crate::log::Level::Trace, |r| {
         if r.subsistema != "usuario" {
@@ -30281,6 +30289,7 @@ fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
         viu_pai |= m == saida_do_pai;
         viu_filho |= m == saida_do_filho;
         viu_sujo |= m == sujo;
+        viu_filho_sujo |= m == filho_sujo;
         viu_filho_escrevendo |= m == crate::usuario::exemplo::MENSAGEM_DO_FILHO;
         viu_mensagem |= r.level == crate::log::Level::Info && m.starts_with("ola do ");
         viu_diagnostico |=
@@ -30300,6 +30309,9 @@ fn usuario_executa_bifurca_e_troca_de_imagem() -> Resultado {
     }
     if !viu_pai {
         return Err("o pai nao saiu com o codigo dele");
+    }
+    if viu_filho_sujo {
+        return Err("o programa carregado por executar recebeu o estado da imagem anterior");
     }
     if !viu_filho_escrevendo {
         return Err("o programa carregado por executar nao chegou a escrever");
@@ -42192,6 +42204,59 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "excecoes: o wfi do EL0 mata o processo",
         f: excecoes::excecoes_o_wfi_do_el0_mata_o_processo,
+    },
+    // O lote B4 do #448, no fim da tabela pelo mesmo motivo: o que o
+    // adversário do lote B3 achou — o estado por fio que passava de um
+    // processo ao seguinte (o `TPIDR_EL0`, os seletores), os registradores
+    // da primeira entrada, o UMIP, o `fwait` e o canal do depurador.
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o FS e os quatro seletores de dados de um processo nao chegam ao seguinte no mesmo nucleo",
+        f: excecoes::excecoes_os_seletores_de_um_processo_nao_chegam_ao_seguinte,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: os seletores de dados ficam com o processo que os escreveu, entre as trocas",
+        f: excecoes::excecoes_os_seletores_ficam_com_o_processo_que_os_escreveu,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o TPIDR_EL0 de um processo nao chega ao seguinte no mesmo nucleo",
+        f: excecoes::excecoes_o_tpidr_el0_de_um_processo_nao_chega_ao_seguinte,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o TPIDR_EL0 fica com o processo que o escreveu, entre as trocas",
+        f: excecoes::excecoes_o_tpidr_el0_fica_com_o_processo_que_o_escreveu,
+    },
+    Caso {
+        nome: "excecoes: os registradores do processo novo chegam zerados",
+        f: excecoes::excecoes_os_registradores_do_processo_novo_chegam_zerados,
+    },
+    Caso {
+        nome: "excecoes: o filho do fork herda o estado por fio do pai, e a troca de imagem o zera",
+        f: excecoes::excecoes_o_fork_herda_o_estado_por_fio_e_a_troca_de_imagem_o_zera,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o str, o sldt, o smsw, o sgdt e o sidt do anel 3 morrem do #GP do UMIP",
+        f: excecoes::excecoes_as_instrucoes_do_umip_matam_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o fwait do anel 3 cai no #NM",
+        f: excecoes::excecoes_o_fwait_do_anel_3_cai_no_nm,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o EL0 que le o canal do depurador morre",
+        f: excecoes::excecoes_o_canal_do_depurador_do_el0_mata_o_processo,
+    },
+    // E o que o adversário do próprio lote B4 achou: a troca de imagem com as
+    // flags da imagem que saiu.
+    Caso {
+        nome: "excecoes: a troca de imagem nao entrega as flags da imagem anterior",
+        f: excecoes::excecoes_a_troca_de_imagem_nao_entrega_as_flags_da_anterior,
     },
 ];
 

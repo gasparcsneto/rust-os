@@ -55,10 +55,30 @@
 //! duas vezes por núcleo; o `msr daif`, que o `SCTLR_EL1.UMA` desligado
 //! recusa; e o `wfi`, que o `nTWI` desligado prende. E, nas duas, o regime de cada núcleo — o que o kernel escreve em
 //! vez de herdar do firmware —, e, no x86, a pilha da IST do `#MC`.
+//!
+//! O lote B4 do #448 acrescentou, pelo que o adversário do lote B3 achou, o
+//! estado por fio que passava de um processo ao seguinte no mesmo núcleo —
+//! o `TPIDR_EL0` no ARM, os seletores `DS`, `ES`, `FS` e `GS` no x86 —: o
+//! canal, duas rodadas por núcleo; o par, um receptor e um emissor presos ao
+//! mesmo núcleo e entrados juntos, que cedem um ao outro — e reprova o
+//! kernel que só zera o registrador a cada troca —; e a herança, o `fork`
+//! que passa o do pai ao filho e a troca de imagem que o zera, conferida
+//! pelo próprio `filho`. Nas duas, os registradores da primeira entrada,
+//! zerados. No x86, o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do
+//! anel 3, que o UMIP põe no `#GP(0)`, e o `fwait`, que o `CR0.MP` põe no
+//! `#NM`. No ARM, o canal do depurador do EL0, que o `MDSCR_EL1.TDCC`
+//! prende. E o regime de cada núcleo conferido bit a bit — no x86, contra o
+//! CPUID, com o `XCR0` e os `DR0` a `DR3`; no ARM, com o `MDSCR_EL1` e o
+//! `TPIDRRO_EL0`.
+//!
+//! E, pelo que o adversário do próprio lote achou: a troca de imagem com as
+//! flags ligadas — o `DF` e o `CF` no x86, o `NZCV` no ARM —, em que o
+//! `filho` confere que são as de um processo novo; o regime sujo conferido
+//! inteiro, item por item, com o `SEP`, o `xsave`, o `RDTSCP` e o `RDPID` do
+//! x86 pelo CPUID, e as bases do `FS` e do `GS` e o `IA32_TSC_AUX` no x86; e
+//! o par, que confere também que os dois se revezaram.
 
-#[cfg(target_arch = "x86_64")]
-use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
 use super::{Resultado, esperar_ate, nucleos_secundarios};
 use crate::usuario::exemplo::{self, Excecao};
@@ -138,6 +158,37 @@ const PROGRAMAS: &[Excecao] = &[
     Excecao::Daif,
     #[cfg(target_arch = "aarch64")]
     Excecao::Wfi,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::CanalFs,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::CanalSeletores,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::SeletoresReceptor,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::SeletoresEmissor,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Str,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Sldt,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Smsw,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Sgdt,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Sidt,
+    #[cfg(target_arch = "x86_64")]
+    Excecao::Fwait,
+    #[cfg(target_arch = "aarch64")]
+    Excecao::CanalTpidr,
+    #[cfg(target_arch = "aarch64")]
+    Excecao::TpidrReceptor,
+    #[cfg(target_arch = "aarch64")]
+    Excecao::TpidrEmissor,
+    #[cfg(target_arch = "aarch64")]
+    Excecao::Mdccsr,
+    Excecao::Registradores,
+    Excecao::Heranca,
+    Excecao::TrocaComFlags,
 ];
 
 /// O hospedeiro: anota o núcleo e entra no anel sem privilégio com o
@@ -608,7 +659,11 @@ extern "C" fn companheiro(_argumento: u64) -> ! {
 /// `ceder` o passaria ao companheiro — um fio que só gira, preso ao mesmo
 /// núcleo, e que o tique tirou da vez dentro do tratador dele: o `iretq` da
 /// volta daria `#GP` no anel 0, e a máquina acabaria aqui. Nenhuma falha é
-/// contada, o companheiro volta à vez, e o processo sai da tabela.
+/// contada, o companheiro volta à vez, e o processo sai da tabela. E o `NT`
+/// não chega à imagem nova: o `filho` confere as flags de um processo novo,
+/// e sai com [`exemplo::CODIGO_DO_FILHO_SUJO`] se as recebeu da anterior (o
+/// achado 1 do adversário do lote B4 do #448 — antes, ele rodava com o
+/// `RFLAGS` 0x4246: o `NT`, o `IF`, o `ZF` e o `PF`).
 #[cfg(target_arch = "x86_64")]
 pub(super) fn excecoes_o_nt_nas_chamadas_nao_chega_ao_kernel() -> Resultado {
     for cpu in nucleos() {
@@ -634,8 +689,12 @@ pub(super) fn excecoes_o_nt_nas_chamadas_nao_chega_ao_kernel() -> Resultado {
                 crate::usuario::ultima_saida(),
                 voltas
             );
-            if crate::usuario::ultima_saida() != Some(exemplo::CODIGO_DO_FILHO) {
-                return Err("o processo com o NT nao trocou de imagem e saiu pelo filho");
+            match crate::usuario::ultima_saida() {
+                Some(exemplo::CODIGO_DO_FILHO) => {}
+                Some(exemplo::CODIGO_DO_FILHO_SUJO) => {
+                    return Err("a imagem nova recebeu as flags da que saiu, com o NT");
+                }
+                _ => return Err("o processo com o NT nao trocou de imagem e saiu pelo filho"),
             }
             if crate::usuario::estatisticas_de_processo().1 != trocas + 1 {
                 return Err("o processo com o NT nao trocou de imagem exatamente uma vez");
@@ -1124,13 +1183,15 @@ pub(super) fn excecoes_o_wfi_do_el0_mata_o_processo() -> Resultado {
 /// O que o fio de [`conferir_o_regime`] viu no núcleo dele: o núcleo, mais
 /// um — zero é "ainda não viu" —, quantas vezes o núcleo escreveu o regime
 /// ao ligar, e três respostas num número só — o bit 0, o regime estava como
-/// o kernel o escreve; o 1, o sujo não estava; o 2, o reescrito estava.
+/// o kernel o escreve; o 1, o sujo não estava, e estava sujo inteiro; o 2, o
+/// reescrito estava.
 static REGIME_ONDE: AtomicU64 = AtomicU64::new(0);
 static REGIME_ESCRITO: AtomicU64 = AtomicU64::new(0);
 static REGIME_VISTO: AtomicU64 = AtomicU64::new(0);
 
 /// O regime deste núcleo, lido, sujo e reescrito pela função do boot; as
-/// três respostas de [`REGIME_VISTO`].
+/// três respostas de [`REGIME_VISTO`], e o log diz o regime e o que
+/// divergiu, de cada um dos três.
 #[cfg(target_arch = "x86_64")]
 fn sujar_e_reescrever_o_regime(cpu: usize) -> (bool, bool, bool) {
     use crate::arch::atual as a;
@@ -1144,9 +1205,11 @@ fn sujar_e_reescrever_o_regime(cpu: usize) -> (bool, bool, bool) {
         sujo,
         depois
     );
-    (
+    o_que_divergiu(
+        cpu,
         a::regime_como_o_kernel_escreve(&antes),
-        !a::regime_como_o_kernel_escreve(&sujo),
+        a::regime_como_o_kernel_escreve(&sujo),
+        a::regime_sujo_inteiro(&sujo),
         a::regime_como_o_kernel_escreve(&depois),
     )
 }
@@ -1157,20 +1220,50 @@ fn sujar_e_reescrever_o_regime(cpu: usize) -> (bool, bool, bool) {
     let (sujo, depois) = u::sujar_e_reescrever_o_regime_de_teste();
     crate::log_info!(
         "teste",
-        "excecoes: o regime do nucleo {}: SCTLR_EL1 e CPACR_EL1 antes {:#x}/{:#x}; sujos \
-         {:#x}/{:#x}; depois {:#x}/{:#x}",
+        "excecoes: o regime do nucleo {}: antes {:x?}; sujo {:x?}; depois {:x?}",
         cpu,
-        antes.0,
-        antes.1,
-        sujo.0,
-        sujo.1,
-        depois.0,
-        depois.1
+        antes,
+        sujo,
+        depois
+    );
+    o_que_divergiu(
+        cpu,
+        u::regime_como_o_kernel_escreve(antes),
+        u::regime_como_o_kernel_escreve(sujo),
+        u::regime_sujo_inteiro(sujo),
+        u::regime_como_o_kernel_escreve(depois),
+    )
+}
+
+/// O log do que divergiu do regime do kernel — antes, sujo e depois — e do
+/// que não apareceu sujo, e as três respostas de [`REGIME_VISTO`]: o de
+/// antes como o kernel o escreve; o sujo não, e sujo inteiro — cada item que
+/// a suíte suja, sujo na leitura —; o de depois como o kernel o escreve.
+/// Sem o sujo inteiro, bastava um item divergir — o `CR0` no x86, o
+/// `SCTLR_EL1` no ARM, o primeiro que diverge —, e o "depois" provava a
+/// reescrita só dos que apareceram sujos (o achado 2 do adversário do lote
+/// B4 do #448).
+fn o_que_divergiu(
+    cpu: usize,
+    antes: Result<(), &'static str>,
+    sujo: Result<(), &'static str>,
+    sujo_inteiro: Result<(), &'static str>,
+    depois: Result<(), &'static str>,
+) -> (bool, bool, bool) {
+    crate::log_info!(
+        "teste",
+        "excecoes: o regime do nucleo {} contra o do kernel: antes {:?}; sujo {:?} (inteiro: \
+         {:?}); depois {:?}",
+        cpu,
+        antes,
+        sujo,
+        sujo_inteiro,
+        depois
     );
     (
-        u::regime_como_o_kernel_escreve(antes),
-        !u::regime_como_o_kernel_escreve(sujo),
-        u::regime_como_o_kernel_escreve(depois),
+        antes.is_ok(),
+        sujo.is_err() && sujo_inteiro.is_ok(),
+        depois.is_ok(),
     )
 }
 
@@ -1195,16 +1288,30 @@ extern "C" fn conferir_o_regime(_argumento: u64) -> ! {
 /// O regime de cada núcleo — o que vale para todo processo que roda nele, e
 /// que o kernel escreve em vez de herdar do firmware (o item 2 e o item 10
 /// do adversário do lote B2): no x86, o `CR0` com o `TS` e o `MP`, o `CR4`
-/// do kernel, nenhum ponto de parada no `DR7` e o `sysenter` sem entrada;
-/// no ARM, o `CPACR_EL1` em zero e o `SCTLR_EL1` do kernel. Em cada núcleo:
-/// o núcleo o escreveu ao ligar, ele está como o kernel o escreve, e,
-/// sujo como um firmware o deixaria aberto — o `TS` desligado, um ponto
-/// armado, o `sysenter` apontado para o anel 0; o `FPEN` em 11, o `UMA` e o
-/// `UCI` ligados —, a função do boot o escreve de novo. Os processos de
-/// verdade mostram o efeito — o SSE, o x87 e o FP/SIMD presos, o `sysenter`,
-/// o `msr daif` —; este caso mostra que é o kernel quem escreve, e não o
-/// firmware que deixou: o reset e o OVMF já deixam o `sysenter` e o `DR7`
-/// em repouso.
+/// do kernel, o `XCR0` do kernel, nenhum ponto de parada armado nem
+/// endereçado, o `sysenter` sem entrada, e as bases do `FS` e do `GS` e o
+/// `IA32_TSC_AUX` em zero; no ARM, o `CPACR_EL1` em zero, o `SCTLR_EL1` do
+/// kernel, o `MDSCR_EL1` com o `TDCC` e o `TPIDRRO_EL0` em zero. Em cada
+/// núcleo: o núcleo o escreveu ao ligar, ele está como o kernel o escreve,
+/// e, sujo como um firmware o deixaria aberto — o `TS` e o `MP` desligados,
+/// o `PGE`, o `PCE`, o `VME` e o `PVI` ligados, o `XCR0` só com o x87, um
+/// ponto armado e os quatro endereços, o `sysenter` apontado para o anel 0,
+/// as bases do `FS` e do `GS` fora de zero, uma marca no `IA32_TSC_AUX`; o
+/// `FPEN` em 11, o `UMA`, o `DZE`, o `UCT` e o `UCI` ligados, o `MDSCR_EL1`
+/// sem o `TDCC` e com o `MDE` e o `KDE`, uma marca no `TPIDRRO_EL0` —, a
+/// função do boot o escreve de novo. Desde o lote B4, o `CR4` do x86 é
+/// conferido bit a bit contra o CPUID, e não contra a função que o escreve
+/// — a conferência tautológica deixava passar o `MCE` e o `DE` tirados
+/// dela —, o log diz o primeiro que diverge, e o sujo tem de aparecer
+/// inteiro na leitura, item por item, com o `SEP`, o `xsave`, o `RDTSCP` e
+/// o `RDPID` do x86 pelo CPUID lido no próprio conferidor: antes, bastava um
+/// item sujo, e uma pergunta errada pelo
+/// `SEP` não sujava, não lia nem escrevia o `sysenter`, com o caso verde (o
+/// achado 2 do adversário do lote B4). Os processos de verdade mostram o
+/// efeito — o SSE, o x87, o `fwait` e o FP/SIMD presos, o `sysenter`, o
+/// `msr daif`, o UMIP, o canal do depurador —; este caso mostra que é o
+/// kernel quem escreve, e não o firmware que deixou: o reset e o OVMF já
+/// deixam o `sysenter` e o `DR7` em repouso.
 pub(super) fn excecoes_o_regime_de_cada_nucleo() -> Resultado {
     em_cada_nucleo(|cpu| {
         REGIME_ONDE.store(0, SeqCst);
@@ -1224,7 +1331,7 @@ pub(super) fn excecoes_o_regime_de_cada_nucleo() -> Resultado {
             return Err("o regime do nucleo nao esta como o kernel o escreve");
         }
         if visto & 2 == 0 {
-            return Err("o caso nao sujou o regime");
+            return Err("o caso nao sujou o regime inteiro");
         }
         if visto & 4 == 0 {
             return Err("o kernel nao reescreveu o regime que outro deixou aberto");
@@ -1281,4 +1388,435 @@ pub(super) fn excecoes_o_mc_tem_pilha_propria() -> Resultado {
         return Err("dois nucleos dividem a pilha do #MC");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// O lote B4 do #448: o estado por fio, os registradores da entrada, o UMIP,
+// o `fwait` e o canal do depurador
+// ---------------------------------------------------------------------------
+
+/// O programa do canal `e` roda duas vezes seguidas no núcleo, em cada
+/// núcleo ligado, e sai com zero as duas: o registrador que a primeira
+/// rodada deixa não chega à segunda — o processo novo o recebe nulo. Antes,
+/// o kernel não guardava o registrador por fio, e ele ficava no núcleo de
+/// um processo para o seguinte: a segunda rodada lia a marca da primeira e
+/// saía com [`exemplo::CODIGO_DO_CANAL`]. As duas rodam sempre, e o log diz
+/// como cada uma acabou.
+fn o_registrador_nao_passa_ao_seguinte(e: Excecao) -> Resultado {
+    em_cada_nucleo(|cpu| {
+        let mut saidas = [None; 2];
+        for saida in &mut saidas {
+            crate::usuario::limpar_ultima_saida();
+            let falhas = crate::traps::total();
+            let id = rodar(e, cpu)?;
+            if crate::traps::total() != falhas {
+                return Err("uma falha foi contada para o programa do canal");
+            }
+            *saida = crate::usuario::ultima_saida();
+            fora_da_tabela_e_o_nucleo_segue(id, cpu)?;
+        }
+        crate::log_info!(
+            "teste",
+            "excecoes: no nucleo {}, o canal de {:?}: a primeira rodada saiu com {:?}, a segunda \
+             com {:?}",
+            cpu,
+            e,
+            saidas[0],
+            saidas[1]
+        );
+        if saidas[1] == Some(exemplo::CODIGO_DO_CANAL) {
+            return Err(
+                "o canal: a segunda rodada no mesmo nucleo leu o registrador que a primeira deixou",
+            );
+        }
+        if saidas != [Some(0), Some(0)] {
+            return Err("o programa do canal nao saiu com zero");
+        }
+        Ok(())
+    })
+}
+
+/// O `FS` — o seletor que um ambiente de execução usaria para a área local
+/// de cada fio — e, depois, os quatro seletores de dados, o `DS`, o `ES`, o
+/// `FS` e o `GS`, não chegam de um processo ao seguinte no mesmo núcleo (o
+/// item 2 do adversário do lote B3): o kernel os guarda por fio, na troca de
+/// contexto, e o fio novo os recebe nulos. Antes, a troca não os tocava, e o
+/// retorno ao anel 3 só anula um seletor de privilégio maior que o dele: a
+/// marca que um processo deixava, o seguinte lia.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn excecoes_os_seletores_de_um_processo_nao_chegam_ao_seguinte() -> Resultado {
+    let fs = o_registrador_nao_passa_ao_seguinte(Excecao::CanalFs);
+    let todos = o_registrador_nao_passa_ao_seguinte(Excecao::CanalSeletores);
+    fs.and(todos)
+}
+
+/// O `TPIDR_EL0` — o registrador que o EL0 escreve e lê sem armadilha que o
+/// EL1 possa ligar, e que um ambiente de execução usa para a área local de
+/// cada fio — não chega de um processo ao seguinte no mesmo núcleo (o item
+/// 1 do adversário do lote B3): o kernel o guarda por fio, na troca de
+/// contexto, e o fio novo o recebe zerado. Antes, ninguém o tocava: a marca
+/// que um processo deixava, o seguinte lia.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn excecoes_o_tpidr_el0_de_um_processo_nao_chega_ao_seguinte() -> Resultado {
+    o_registrador_nao_passa_ao_seguinte(Excecao::CanalTpidr)
+}
+
+/// Quantos dos dois hospedeiros do par já carregaram o programa.
+static PAR_CARREGADOS: AtomicU64 = AtomicU64::new(0);
+
+/// Um dos dois hospedeiros do par não carregou o programa, ou não entrou
+/// com ele no anel sem privilégio. Ele conta como carregado mesmo assim:
+/// sem isso, o outro cederia para sempre à espera dele, preso ao núcleo,
+/// pelo resto da suíte.
+static PAR_FALHOU: AtomicBool = AtomicBool::new(false);
+
+/// O mínimo de trocas diretas entre o receptor e o emissor, num núcleo, para
+/// o caso do par valer: revezando-se, eles passam a vez um ao outro a cada
+/// `ceder` — umas 128 vezes, ou umas 64 com o executor da suíte no mesmo
+/// núcleo, entre os dois —; sem se revezar, nenhuma.
+const TROCAS_MINIMAS_DO_PAR: u64 = 16;
+
+/// Em que núcleo cada um do par rodou — o receptor, o emissor —, ou
+/// `u64::MAX`.
+static PAR_ONDE: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+
+/// O hospedeiro do par: carrega o programa — `argumento` traz o papel nos 32
+/// bits de cima e o índice em [`PROGRAMAS`] nos de baixo — e só entra no
+/// anel sem privilégio quando o outro também carregou, cedendo até lá. Os
+/// dois estão presos ao mesmo núcleo: dali em diante, cada `ceder` de um
+/// passa a vez ao outro, e o caso não depende de quem carregou primeiro —
+/// sem a barreira, o emissor podia ceder as 64 vezes antes de o receptor
+/// existir, e o caso passaria sem ter provado nada.
+extern "C" fn hospedar_em_par(argumento: u64) -> ! {
+    let (papel, indice) = (
+        (argumento >> 32) as usize,
+        (argumento & 0xFFFF_FFFF) as usize,
+    );
+    PAR_ONDE[papel].store(crate::arch::nucleo_atual() as u64, SeqCst);
+    let imagem = exemplo::bytes_da_excecao(PROGRAMAS[indice]);
+    let programa = match crate::usuario::programa::carregar(imagem, None) {
+        Ok(p) => p,
+        Err(falha) => {
+            crate::log_error!(
+                "teste",
+                "o programa do par nao carregou: {}",
+                falha.motivo()
+            );
+            PAR_FALHOU.store(true, SeqCst);
+            PAR_CARREGADOS.fetch_add(1, SeqCst);
+            crate::fios::terminar()
+        }
+    };
+    PAR_CARREGADOS.fetch_add(1, SeqCst);
+    while PAR_CARREGADOS.load(SeqCst) < 2 {
+        crate::fios::ceder();
+    }
+    match crate::usuario::programa::entrar(programa) {
+        Ok(_) => unreachable!("entrar nao retorna em caso de sucesso"),
+        Err(falha) => {
+            crate::log_error!(
+                "teste",
+                "nao foi possivel entrar em userspace: {}",
+                falha.motivo()
+            );
+            PAR_FALHOU.store(true, SeqCst);
+            crate::fios::terminar()
+        }
+    }
+}
+
+/// O par, em cada núcleo ligado: o `receptor` e o `emissor`, presos ao
+/// núcleo e entrados juntos, cedem um ao outro 64 vezes; o receptor confere,
+/// a cada volta, que o registrador ainda é o dele — se não, morre de uma
+/// falha (o `ud2`, o `brk #1`), que a contabilidade conta, e a ordem das
+/// duas saídas não importa. Reprova o kernel que não guarda o registrador, e
+/// também o que o zera a cada troca: o receptor perderia o dele. O caso
+/// confere que os dois rodaram no núcleo, que cederam as vezes todas e que
+/// se revezaram — o escalonador conta as trocas diretas de um ao outro
+/// (`fios::vigiar_o_par_de_teste`) —: sem isso, passaria sem ter provado
+/// nada. Antes, a vez só se provava pelas mutações, e não pelo caso (um
+/// informativo do adversário do lote B4 do #448).
+fn o_registrador_fica_com_quem_o_escreveu(receptor: Excecao, emissor: Excecao) -> Resultado {
+    let posicao = |e| PROGRAMAS.iter().position(|&p| p == e);
+    let ir = posicao(receptor).ok_or("o receptor nao esta na tabela do caso")? as u64;
+    let ie = posicao(emissor).ok_or("o emissor nao esta na tabela do caso")? as u64;
+    em_cada_nucleo(|cpu| {
+        PAR_CARREGADOS.store(0, SeqCst);
+        PAR_FALHOU.store(false, SeqCst);
+        for onde in &PAR_ONDE {
+            onde.store(u64::MAX, SeqCst);
+        }
+        let falhas = crate::traps::total();
+        let chamadas = crate::usuario::estatisticas().0;
+        let id_r =
+            crate::fios::criar_no_nucleo("teste-par-receptor", hospedar_em_par, ir, cpu)?.numero();
+        let id_e = crate::fios::criar_no_nucleo(
+            "teste-par-emissor",
+            hospedar_em_par,
+            (1 << 32) | ie,
+            cpu,
+        )?
+        .numero();
+        // As trocas contam a partir daqui; as poucas que o par fizer antes,
+        // entre a criação dos dois e esta linha, ficam de fora.
+        crate::fios::vigiar_o_par_de_teste(id_r, id_e);
+        let acabaram = esperar_ate(|| !crate::fios::vivo(id_r) && !crate::fios::vivo(id_e), 600);
+        let trocas = crate::fios::vigiar_o_par_de_teste(0, 0);
+        acabaram.map_err(|_| "o receptor e o emissor nao acabaram")?;
+        let contadas = crate::traps::total() - falhas;
+        let chamadas = crate::usuario::estatisticas().0 - chamadas;
+        crate::log_info!(
+            "teste",
+            "excecoes: no nucleo {}, o par de {:?}: {} falha(s), {} chamada(s), {} troca(s) \
+             direta(s) entre os dois",
+            cpu,
+            receptor,
+            contadas,
+            chamadas,
+            trocas
+        );
+        if PAR_FALHOU.load(SeqCst) {
+            return Err("um programa do par nao carregou ou nao entrou no anel sem privilegio");
+        }
+        if contadas != 0
+            && let Some(falha) = crate::traps::ultima()
+        {
+            crate::log_error!(
+                "teste",
+                "{} em pc={:#x}, codigo {:#x}",
+                falha.nome,
+                falha.pc,
+                falha.codigo
+            );
+        }
+        if PAR_ONDE.iter().any(|o| o.load(SeqCst) != cpu as u64) {
+            return Err("o par nao rodou no nucleo dele");
+        }
+        if contadas != 0 {
+            return Err("o registrador do receptor mudou enquanto ele cedia ao emissor");
+        }
+        // As 64 cessões de cada um e as duas saídas, no mínimo.
+        if chamadas < 2 * 65 {
+            return Err("o receptor e o emissor nao cederam as vezes todas");
+        }
+        if trocas < TROCAS_MINIMAS_DO_PAR {
+            return Err("o receptor e o emissor nao se revezaram no nucleo");
+        }
+        fora_da_tabela_e_o_nucleo_segue(id_r, cpu)?;
+        fora_da_tabela_e_o_nucleo_segue(id_e, cpu)
+    })
+}
+
+/// Os quatro seletores de dados ficam com o processo que os escreveu, entre
+/// as trocas de contexto — ver [`o_registrador_fica_com_quem_o_escreveu`].
+#[cfg(target_arch = "x86_64")]
+pub(super) fn excecoes_os_seletores_ficam_com_o_processo_que_os_escreveu() -> Resultado {
+    o_registrador_fica_com_quem_o_escreveu(Excecao::SeletoresReceptor, Excecao::SeletoresEmissor)
+}
+
+/// O `TPIDR_EL0` fica com o processo que o escreveu, entre as trocas de
+/// contexto — ver [`o_registrador_fica_com_quem_o_escreveu`].
+#[cfg(target_arch = "aarch64")]
+pub(super) fn excecoes_o_tpidr_el0_fica_com_o_processo_que_o_escreveu() -> Resultado {
+    o_registrador_fica_com_quem_o_escreveu(Excecao::TpidrReceptor, Excecao::TpidrEmissor)
+}
+
+/// Os registradores do processo novo chegam zerados, em cada núcleo (o item
+/// 5 do adversário do lote B3): os gerais — menos a pilha que o carregador
+/// dá — e, no x86, os quatro seletores de dados; no ARM, o `TPIDR_EL0` e o
+/// `TPIDRRO_EL0`. Antes, a primeira entrada no anel sem privilégio levava o
+/// que o kernel tinha deixado neles — endereços do kernel, entre outros.
+pub(super) fn excecoes_os_registradores_do_processo_novo_chegam_zerados() -> Resultado {
+    em_cada_nucleo(|cpu| {
+        crate::usuario::limpar_ultima_saida();
+        let falhas = crate::traps::total();
+        let id = rodar(Excecao::Registradores, cpu)?;
+        let saida = crate::usuario::ultima_saida();
+        crate::log_info!(
+            "teste",
+            "excecoes: no nucleo {}, o programa dos registradores saiu com {:?}",
+            cpu,
+            saida
+        );
+        if crate::traps::total() != falhas {
+            return Err("uma falha foi contada para o programa dos registradores");
+        }
+        if saida != Some(0) {
+            return Err("um registrador chegou ao processo novo com o que o kernel deixou");
+        }
+        fora_da_tabela_e_o_nucleo_segue(id, cpu)
+    })
+}
+
+/// O filho do `fork` herda o estado por fio do pai — os seletores de dados
+/// no x86, o `TPIDR_EL0` no ARM —, como herda os registradores gerais; e a
+/// troca de imagem o zera, como zera o resto: a imagem nova não tem direito
+/// ao estado da que saiu. O pai deixa as marcas e bifurca; o filho as
+/// confere e troca de imagem pelo `filho`, que as confere nulas antes de
+/// escrever — e as flags, as de um processo novo. O pai sai com o código do
+/// filho: o 24 de sempre, ou [`exemplo::CODIGO_SEM_HERANCA`] ou
+/// [`exemplo::CODIGO_DO_FILHO_SUJO`].
+pub(super) fn excecoes_o_fork_herda_o_estado_por_fio_e_a_troca_de_imagem_o_zera() -> Resultado {
+    em_cada_nucleo(|cpu| {
+        crate::usuario::limpar_ultima_saida();
+        let falhas = crate::traps::total();
+        let (bifurcacoes, trocas, _) = crate::usuario::estatisticas_de_processo();
+        let id = rodar(Excecao::Heranca, cpu)?;
+        let saida = crate::usuario::ultima_saida();
+        let (b, t, _) = crate::usuario::estatisticas_de_processo();
+        crate::log_info!(
+            "teste",
+            "excecoes: no nucleo {}, a heranca: o pai saiu com {:?}; {} bifurcacao(oes), {} \
+             troca(s) de imagem",
+            cpu,
+            saida,
+            b - bifurcacoes,
+            t - trocas
+        );
+        if crate::traps::total() != falhas {
+            return Err("uma falha foi contada no caso da heranca");
+        }
+        match saida {
+            Some(exemplo::CODIGO_SEM_HERANCA) => {
+                return Err("o filho do fork nao recebeu o estado por fio do pai");
+            }
+            Some(exemplo::CODIGO_DO_FILHO_SUJO) => {
+                return Err("a imagem nova recebeu o estado por fio, ou as flags, da que saiu");
+            }
+            Some(exemplo::CODIGO_DO_FILHO) => {}
+            _ => return Err("o pai nao saiu com o codigo do filho"),
+        }
+        if b != bifurcacoes + 1 || t != trocas + 1 {
+            return Err("o processo nao bifurcou e trocou de imagem uma vez cada");
+        }
+        fora_da_tabela_e_o_nucleo_segue(id, cpu)
+    })
+}
+
+/// A morte pelo `#GP` com o código zero, na instrução da entrada.
+#[cfg(target_arch = "x86_64")]
+const PELO_GP_ZERO: Formas = &[Esperada {
+    nome: "general_protection_fault",
+    motivo: "falha de protecao",
+    deslocamento: 0,
+    codigo: zero,
+    endereco: None,
+}];
+
+/// O `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do anel 3 morrem do
+/// `#GP(0)`, em cada núcleo (o item 6 do adversário do lote B3): o
+/// `CR4.UMIP` ligado, quando o processador o declara. Sem ele, diziam ao
+/// processo o seletor do TSS do núcleo, o do LDT, o `CR0` baixo e onde estão
+/// a GDT e a IDT do kernel — o endereço de estruturas do kernel, que o
+/// processo não tem por que saber. A suíte roda com o `+umip` no `-cpu`
+/// (`xtask`): sem ele, o caso diz que a máquina não o oferece e não afirma
+/// nada, como o do SMEP.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn excecoes_as_instrucoes_do_umip_matam_o_processo() -> Resultado {
+    let (tem, ligado) = crate::arch::atual::umip_de_teste();
+    if !tem {
+        crate::log_warn!("teste", "esta cpu nao oferece UMIP; nada a afirmar");
+        return Ok(());
+    }
+    let mut primeiro = if ligado {
+        Ok(())
+    } else {
+        crate::log_error!("teste", "excecoes: a cpu oferece UMIP e o CR4 nao o tem");
+        Err("a cpu oferece UMIP e o kernel nao o ligou")
+    };
+    for e in [
+        Excecao::Str,
+        Excecao::Sldt,
+        Excecao::Smsw,
+        Excecao::Sgdt,
+        Excecao::Sidt,
+    ] {
+        if let Err(motivo) = morre_pela_excecao(e, PELO_GP_ZERO) {
+            crate::log_error!("teste", "excecoes: o {:?}: {}", e, motivo);
+            if primeiro.is_ok() {
+                primeiro = Err(motivo);
+            }
+        }
+    }
+    primeiro
+}
+
+/// O `fwait` do anel 3 cai no `#NM`, em cada núcleo: o `CR0.MP` ligado, com
+/// o `TS`, o prende como prende o x87. Sem o `MP`, ele só conferiria as
+/// exceções do x87 pendentes, e o processo seguiria — o `MP` é o que o
+/// distingue (o item 7 do adversário do lote B3: tirá-lo não reprovava
+/// nada).
+#[cfg(target_arch = "x86_64")]
+pub(super) fn excecoes_o_fwait_do_anel_3_cai_no_nm() -> Resultado {
+    morre_pela_excecao(Excecao::Fwait, PELO_NM)
+}
+
+/// O `ESR_EL1` do `mrs x0, mdccsr_el0` preso pelo `MDSCR_EL1.TDCC`: a classe
+/// 0x18, com o `MDCCSR_EL0` (`op0` 2, `op1` 3, `CRn` 0, `CRm` 1, `op2` 0),
+/// lido para o `x0`.
+#[cfg(target_arch = "aarch64")]
+fn do_mrs_do_mdccsr(codigo: u64) -> bool {
+    const ISS: u64 = (2 << 20) | (3 << 14) | (1 << 1) | 1;
+    (codigo >> 26) & 0x3F == 0x18 && codigo & 0x3F_FFFF == ISS
+}
+
+/// O EL0 que lê o canal do depurador — o `MDCCSR_EL0` — morre, em cada
+/// núcleo (o item 8 do adversário do lote B3): o `MDSCR_EL1.TDCC` que o
+/// kernel liga prende o canal do depurador no EL0, a classe 0x18. Sem ele,
+/// o `TXfull` que um processo ligasse escrevendo o `DBGDTRTX_EL0`, o
+/// seguinte veria — um canal entre processos, por fora do gate.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn excecoes_o_canal_do_depurador_do_el0_mata_o_processo() -> Resultado {
+    morre_pela_excecao(
+        Excecao::Mdccsr,
+        &[Esperada {
+            nome: "msr_mrs_trap",
+            motivo: "msr_mrs_trap",
+            deslocamento: 0,
+            codigo: do_mrs_do_mdccsr,
+            endereco: None,
+        }],
+    )
+}
+
+/// A troca de imagem entrega à imagem nova as flags de um processo novo — no
+/// x86, o `RFLAGS` 0x202 do `entrar`; no ARM, o `NZCV` em zero do
+/// `SPSR_USUARIO` —, e não as da imagem que saiu (o achado 1 do adversário do
+/// lote B4). O programa liga o `DF` e o `CF` (x86) ou o `N`, o `Z`, o `C` e
+/// o `V` (ARM) e troca de imagem pelo `filho`, que confere as flags antes de
+/// qualquer instrução que as mude e sai com [`exemplo::CODIGO_DO_FILHO_SUJO`]
+/// se vieram da anterior. Antes, a troca de imagem guardava o `R11` — o
+/// `RFLAGS` da `syscall` do `executar` — e o `SPSR` da chamada: com o `DF`
+/// herdado, o `memset` e o `memcpy` de todo programa do contrato andariam
+/// para trás. O `filho` confere as flags em toda troca de imagem da suíte
+/// que passa por ele — a do `exemplo`, a do `NT` e a da herança também.
+pub(super) fn excecoes_a_troca_de_imagem_nao_entrega_as_flags_da_anterior() -> Resultado {
+    em_cada_nucleo(|cpu| {
+        crate::usuario::limpar_ultima_saida();
+        let falhas = crate::traps::total();
+        let (_, trocas, _) = crate::usuario::estatisticas_de_processo();
+        let id = rodar(Excecao::TrocaComFlags, cpu)?;
+        let saida = crate::usuario::ultima_saida();
+        let (_, t, _) = crate::usuario::estatisticas_de_processo();
+        crate::log_info!(
+            "teste",
+            "excecoes: no nucleo {}, a troca de imagem com as flags ligadas: o filho saiu com {:?}",
+            cpu,
+            saida
+        );
+        if crate::traps::total() != falhas {
+            return Err("uma falha foi contada na troca de imagem com as flags ligadas");
+        }
+        if t != trocas + 1 {
+            return Err("o processo nao trocou de imagem");
+        }
+        match saida {
+            Some(exemplo::CODIGO_DO_FILHO) => {}
+            Some(exemplo::CODIGO_DO_FILHO_SUJO) => {
+                return Err("a imagem nova recebeu as flags da que saiu");
+            }
+            _ => return Err("o processo nao saiu com o codigo do filho"),
+        }
+        fora_da_tabela_e_o_nucleo_segue(id, cpu)
+    })
 }

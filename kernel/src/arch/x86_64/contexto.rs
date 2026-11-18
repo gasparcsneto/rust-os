@@ -14,7 +14,9 @@
 //! O `ret` é a parte bonita. Ele consome o endereço de retorno da pilha
 //! *nova*, então quem volta não é quem chamou: é o fio que entrou, no ponto
 //! exato em que ele havia chamado esta mesma função. A troca inteira cabe em
-//! quinze instruções porque o hardware já fez o resto.
+//! trinta e uma instruções — quinze para os registradores preservados e a
+//! pilha, dezesseis para os quatro seletores de dados — porque o hardware já
+//! fez o resto.
 //!
 //! # Por que só os registradores preservados
 //!
@@ -22,13 +24,47 @@
 //! chamada já diz que os registradores voláteis podem ser destruídos por
 //! qualquer chamada. Quem chamou já os salvou, se precisava deles. Salvar os
 //! dezesseis seria pagar por uma garantia que o compilador já deu.
+//!
+//! # E os quatro seletores de dados
+//!
+//! O `DS`, o `ES`, o `FS` e o `GS` são outra coisa: não são da convenção, e
+//! sim do **processo** — o anel 3 os carrega com `mov`, e nada mais os troca:
+//! a entrada da `syscall` e a de uma interrupção não os tocam, o `sysretq`
+//! também não, e o `iretq` só anula os de privilégio maior que o do anel
+//! para onde volta. Sem guardá-los por fio, o seletor que um processo
+//! deixava chegava ao processo seguinte no mesmo núcleo — uns 16 bits por
+//! troca, entre titulares, por fora do gate (o item 2 do adversário do lote
+//! B3 do #448). Então [`trocar_contexto`] os empilha junto com os seis, e o
+//! fio que entra recebe os dele: nulos num fio novo, os do pai num filho de
+//! `fork`, nulos de novo na troca de imagem. Como o `__switch_to` do Linux.
+//! Zerá-los a cada troca também fecharia o canal, mas o processo perderia
+//! os próprios numa preempção.
+//!
+//! Recarregá-los no anel 0 não falha: um seletor que o anel 3 conseguiu
+//! carregar aponta para um descritor de DPL 3 — ou é nulo —, que o anel 0
+//! também carrega, e a GDT não muda depois do boot (menos na suíte, nos
+//! casos do `#NP` e do `#SS`, que marcam ausente o descritor 3, que nenhum
+//! processo da suíte carrega). O seletor que o firmware deixava no `FS` e
+//! no `GS` do fio do boot era outro caso — ver `gdt::carregar`, que os
+//! anula. E carregar o `GS` muda a base **ativa** dele — a de um descritor
+//! de DPL 3, zero; o nulo a zera num Intel e no TCG, e num AMD antigo a
+//! deixa como estava, que é zero desde o regime do núcleo
+//! (`escrever_o_regime_deste_nucleo` zera as duas bases antes do primeiro
+//! processo); o `FSGSBASE` está desligado —, e não o `IA32_KERNEL_GS_BASE`,
+//! que o `swapgs` da entrada da `syscall` usa: nada no anel 0 olha o `GS`
+//! fora daquela janela, que corre com o `IF` limpo e não troca de fio (ver
+//! [`super::usuario`]).
 
 use core::arch::global_asm;
+
+use x86_64::instructions::segmentation::{DS, ES, FS, GS, Segment};
+use x86_64::structures::gdt::SegmentSelector;
 
 /// O estado salvo de um fio que não está executando.
 ///
 /// Um ponteiro de pilha, e nada mais: todo o resto está *na* pilha, empilhado
-/// por [`trocar_contexto`].
+/// por [`trocar_contexto`] — os seis registradores preservados e os quatro
+/// seletores de dados.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Contexto {
@@ -81,8 +117,9 @@ trocar_contexto:
     //
     // Os seis registradores abaixo são os que a convenção manda preservar
     // entre chamadas. A ordem de empilhar tem de ser a inversa da de
-    // desempilhar, e tem de casar com a que `preparar_contexto` monta para um
-    // fio novo — as três estão amarradas.
+    // desempilhar, e tem de casar com a que `preparar_contexto` e
+    // `preparar_contexto_de_fork` montam para um fio novo — as três estão
+    // amarradas.
     push rbp
     push rbx
     push r12
@@ -90,8 +127,30 @@ trocar_contexto:
     push r14
     push r15
 
+    // E os quatro seletores de dados, que são do processo do fio — ver o
+    // cabeçalho do módulo. O `rax` é livre: a convenção o deixa a quem chama.
+    mov eax, ds
+    push rax
+    mov eax, es
+    push rax
+    mov eax, fs
+    push rax
+    mov eax, gs
+    push rax
+
     mov [rdi], rsp      // guarda o ponteiro de pilha do fio que sai
     mov rsp, [rsi]      // adota o do fio que entra
+
+    // Os do fio que entra, na ordem inversa. Carregar o `GS` muda a base
+    // ativa dele, e não o `IA32_KERNEL_GS_BASE` — ver o cabeçalho.
+    pop rax
+    mov gs, eax
+    pop rax
+    mov fs, eax
+    pop rax
+    mov es, eax
+    pop rax
+    mov ds, eax
 
     pop r15
     pop r14
@@ -160,7 +219,7 @@ pub unsafe fn preparar_contexto(
     // trampolim.
     let mut sp = topo & !0xF;
 
-    // SAFETY: a pilha é nossa e tem espaço de sobra para sete palavras.
+    // SAFETY: a pilha é nossa e tem espaço de sobra para onze palavras.
     unsafe {
         let mut empilhar = |valor: u64| {
             sp -= 8;
@@ -176,14 +235,20 @@ pub unsafe fn preparar_contexto(
         let trampolim: unsafe extern "C" fn() = trampolim_de_fio;
         empilhar(trampolim as *const () as u64);
 
-        // Os seis preservados, na ordem em que `trocar_contexto` os desempilha
-        // — ou seja, o inverso da ordem em que ele os empilha.
+        // Os seis preservados, na ordem em que `trocar_contexto` os empilha —
+        // ele os desempilha na inversa.
         empilhar(0); // rbp
         empilhar(0); // rbx
         empilhar(entrada as *const () as u64); // r12
         empilhar(argumento); // r13
         empilhar(0); // r14
         empilhar(0); // r15
+
+        // E os quatro seletores de dados nulos — o `DS`, o `ES`, o `FS` e o
+        // `GS`: um fio novo não herda os de ninguém.
+        for _ in 0..4 {
+            empilhar(0);
+        }
     }
 
     contexto.sp = sp;
@@ -308,8 +373,13 @@ pub unsafe fn preparar_contexto_de_fork(
     let quadro = quadro as *const super::usuario::QuadroDeUsuario;
     let mut sp = topo & !0xF;
 
+    // Os seletores de dados do pai, que roda agora a chamada no anel 0 com
+    // os dele no processador — a entrada da `syscall` não os toca, e uma
+    // troca no meio da chamada os devolve com ele: o filho é uma cópia dele.
+    let seletores = seletores_de_dados();
+
     // SAFETY: `quadro` é o quadro da chamada em curso, e a pilha é nova e tem
-    // espaço de sobra para as vinte e três palavras que empilhamos.
+    // espaço de sobra para as vinte e sete palavras que empilhamos.
     unsafe {
         let mut empilhar = |valor: u64| {
             sp -= 8;
@@ -347,6 +417,9 @@ pub unsafe fn preparar_contexto_de_fork(
         empilhar(0); // r13
         empilhar(0); // r14
         empilhar(0); // r15
+        for seletor in seletores {
+            empilhar(seletor);
+        }
     }
 
     contexto.sp = sp;
@@ -356,8 +429,9 @@ pub unsafe fn preparar_contexto_de_fork(
 /// Reescreve o quadro para que o retorno da chamada caia noutro programa.
 ///
 /// É o que `exec` precisa: o processo não volta para onde chamou, volta para o
-/// começo da imagem nova. Os demais registradores são zerados — o programa que
-/// entra não tem direito ao estado do que saiu.
+/// começo da imagem nova. Os demais registradores são zerados, os seletores
+/// de dados anulados e as flags as de um processo novo — o programa que entra
+/// não tem direito ao estado do que saiu.
 ///
 /// # Safety
 ///
@@ -369,12 +443,44 @@ pub unsafe fn redirecionar_para(quadro: *mut core::ffi::c_void, entrada: u64, pi
     // SAFETY: delegada ao chamador.
     unsafe {
         let q = &mut *quadro;
-        let flags = q.r11;
         *q = super::usuario::QuadroDeUsuario::default();
         q.rcx = entrada; // `sysretq` retoma a execucao aqui
         q.rsp = pilha;
-        // As flags do processo que saiu: elas descrevem o modo de execucao
-        // (interrupcoes ligadas, direcao normal), nao dados dele.
-        q.r11 = flags;
+        // As flags de um processo novo, as do `entrar`, e não as da imagem
+        // que saiu: o `R11` é o `RFLAGS` que a `syscall` do `executar`
+        // guardou — o `DF`, o `TF`, o `AC`, o `NT`, o `ID` e as aritméticas
+        // dela —, e o `sysretq` o devolveria ao começo da imagem nova. Com o
+        // `DF` herdado, o `memset` e o `memcpy` dela andariam para trás (o
+        // achado 1 do adversário do lote B4 do #448).
+        q.r11 = super::usuario::RFLAGS_DE_UM_PROCESSO_NOVO;
+    }
+    // E os seletores de dados nulos. No processador, e não no quadro: eles
+    // não fazem parte dele, e o fio os leva na troca seguinte.
+    anular_os_seletores_de_dados();
+}
+
+/// Os quatro seletores de dados deste núcleo — o `DS`, o `ES`, o `FS` e o
+/// `GS` —, na ordem em que [`trocar_contexto`] os empilha.
+fn seletores_de_dados() -> [u64; 4] {
+    [
+        u64::from(DS::get_reg().0),
+        u64::from(ES::get_reg().0),
+        u64::from(FS::get_reg().0),
+        u64::from(GS::get_reg().0),
+    ]
+}
+
+/// Carrega o seletor nulo nos quatro seletores de dados deste núcleo — os
+/// do fio que roda, que os leva na troca seguinte.
+fn anular_os_seletores_de_dados() {
+    let nulo = SegmentSelector(0);
+    // SAFETY: estamos no anel 0, e o seletor nulo se carrega em qualquer um
+    // dos quatro no modo de 64 bits; muda a base ativa do `GS`, e não o
+    // `IA32_KERNEL_GS_BASE` — ver o cabeçalho do módulo.
+    unsafe {
+        DS::set_reg(nulo);
+        ES::set_reg(nulo);
+        FS::set_reg(nulo);
+        GS::set_reg(nulo);
     }
 }

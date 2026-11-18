@@ -58,8 +58,8 @@ pub const CODIGO_DO_CONTADOR: i64 = 77;
 pub const CODIGO_DA_EXCECAO: i64 = 66;
 
 /// Onde o `#DB` do `int1` deixa o `rip`, a partir da entrada: depois da
-/// instrução — o `#DB` é uma armadilha. O montador confere o mesmo número no
-/// programa.
+/// instrução — o `#DB` é uma armadilha. O caso confere o `pc` da falha com
+/// este número, e um programa editado que o mude reprova ali.
 #[cfg(target_arch = "x86_64")]
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const DEPOIS_DO_INT1: u64 = 1;
@@ -85,8 +85,8 @@ pub const PUSH_DA_PILHA: u64 = 10;
 
 /// Onde fica a carga do seletor — o `mov ds` ou o `mov ss` — nos programas
 /// do LDT, do segmento ausente e da pilha ausente, a partir da entrada: a
-/// falha é do `mov`, e o `rip` é o da instrução. O montador confere o mesmo
-/// número nos programas.
+/// falha é do `mov`, e o `rip` é o da instrução. Os casos conferem o `pc` da
+/// falha com este número.
 #[cfg(target_arch = "x86_64")]
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CARGA_DO_SELETOR: u64 = 5;
@@ -141,6 +141,19 @@ pub const CODIGO_DE_SAIDA: i64 = 42;
 /// aconteceu de verdade, e que quem saiu com ele foi o filho.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DO_FILHO: i64 = 24;
+
+/// Código de saída do `filho` quando a troca de imagem lhe deixou o estado
+/// da imagem anterior — as flags (o `RFLAGS` no x86, o `NZCV` no ARM) ou o
+/// estado por fio (os seletores de dados no x86, o `TPIDR_EL0` no ARM) —, em
+/// vez dos de um processo novo (o lote B4 do #448). Ele confere antes da
+/// escrita, e sai com este no lugar de [`CODIGO_DO_FILHO`].
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_FILHO_SUJO: i64 = 25;
+
+/// Código de saída do filho do `fork` do programa da herança
+/// ([`Excecao::Heranca`]) quando ele não recebeu do pai o estado por fio.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_SEM_HERANCA: i64 = 26;
 
 /// Texto que o programa carregado por `executar` escreve.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
@@ -336,6 +349,46 @@ unsafe extern "C" {
     static SYSENTER_INICIO: u8;
     #[link_name = "programa_excecao_sysenter_fim"]
     static SYSENTER_FIM: u8;
+    #[link_name = "programa_excecao_canal_fs_inicio"]
+    static CANAL_FS_INICIO: u8;
+    #[link_name = "programa_excecao_canal_fs_fim"]
+    static CANAL_FS_FIM: u8;
+    #[link_name = "programa_excecao_canal_seletores_inicio"]
+    static CANAL_SELETORES_INICIO: u8;
+    #[link_name = "programa_excecao_canal_seletores_fim"]
+    static CANAL_SELETORES_FIM: u8;
+    #[link_name = "programa_excecao_seletores_receptor_inicio"]
+    static SELETORES_RECEPTOR_INICIO: u8;
+    #[link_name = "programa_excecao_seletores_receptor_fim"]
+    static SELETORES_RECEPTOR_FIM: u8;
+    #[link_name = "programa_excecao_seletores_emissor_inicio"]
+    static SELETORES_EMISSOR_INICIO: u8;
+    #[link_name = "programa_excecao_seletores_emissor_fim"]
+    static SELETORES_EMISSOR_FIM: u8;
+    #[link_name = "programa_excecao_str_inicio"]
+    static STR_INICIO: u8;
+    #[link_name = "programa_excecao_str_fim"]
+    static STR_FIM: u8;
+    #[link_name = "programa_excecao_sldt_inicio"]
+    static SLDT_INICIO: u8;
+    #[link_name = "programa_excecao_sldt_fim"]
+    static SLDT_FIM: u8;
+    #[link_name = "programa_excecao_smsw_inicio"]
+    static SMSW_INICIO: u8;
+    #[link_name = "programa_excecao_smsw_fim"]
+    static SMSW_FIM: u8;
+    #[link_name = "programa_excecao_sgdt_inicio"]
+    static SGDT_INICIO: u8;
+    #[link_name = "programa_excecao_sgdt_fim"]
+    static SGDT_FIM: u8;
+    #[link_name = "programa_excecao_sidt_inicio"]
+    static SIDT_INICIO: u8;
+    #[link_name = "programa_excecao_sidt_fim"]
+    static SIDT_FIM: u8;
+    #[link_name = "programa_excecao_fwait_inicio"]
+    static FWAIT_INICIO: u8;
+    #[link_name = "programa_excecao_fwait_fim"]
+    static FWAIT_FIM: u8;
 }
 
 // Os programas das exceções do EL0 — ver [`bytes_da_excecao`].
@@ -365,6 +418,39 @@ unsafe extern "C" {
     static WFI_INICIO: u8;
     #[link_name = "programa_excecao_wfi_fim"]
     static WFI_FIM: u8;
+    #[link_name = "programa_excecao_canal_tpidr_inicio"]
+    static CANAL_TPIDR_INICIO: u8;
+    #[link_name = "programa_excecao_canal_tpidr_fim"]
+    static CANAL_TPIDR_FIM: u8;
+    #[link_name = "programa_excecao_tpidr_receptor_inicio"]
+    static TPIDR_RECEPTOR_INICIO: u8;
+    #[link_name = "programa_excecao_tpidr_receptor_fim"]
+    static TPIDR_RECEPTOR_FIM: u8;
+    #[link_name = "programa_excecao_tpidr_emissor_inicio"]
+    static TPIDR_EMISSOR_INICIO: u8;
+    #[link_name = "programa_excecao_tpidr_emissor_fim"]
+    static TPIDR_EMISSOR_FIM: u8;
+    #[link_name = "programa_excecao_mdccsr_inicio"]
+    static MDCCSR_INICIO: u8;
+    #[link_name = "programa_excecao_mdccsr_fim"]
+    static MDCCSR_FIM: u8;
+}
+
+// Os programas das exceções das duas arquiteturas, com o mesmo nome nos dois
+// blocos de assembly — ver [`bytes_da_excecao`].
+unsafe extern "C" {
+    #[link_name = "programa_excecao_registradores_inicio"]
+    static REGISTRADORES_INICIO: u8;
+    #[link_name = "programa_excecao_registradores_fim"]
+    static REGISTRADORES_FIM: u8;
+    #[link_name = "programa_excecao_heranca_inicio"]
+    static HERANCA_INICIO: u8;
+    #[link_name = "programa_excecao_heranca_fim"]
+    static HERANCA_FIM: u8;
+    #[link_name = "programa_excecao_troca_com_flags_inicio"]
+    static TROCA_COM_FLAGS_INICIO: u8;
+    #[link_name = "programa_excecao_troca_com_flags_fim"]
+    static TROCA_COM_FLAGS_FIM: u8;
 }
 
 /// Os programas das exceções que um processo provoca — os lotes B2 e B3 do
@@ -375,6 +461,16 @@ unsafe extern "C" {
 /// com `CODIGO_DO_LSL`. Se seguir, sai com [`CODIGO_DA_EXCECAO`] — menos o do
 /// SIMD, que sai com zero, ou com [`CODIGO_DO_CANAL`] se o registrador já
 /// tinha a marca de quem rodou antes no núcleo.
+///
+/// O lote B4 acrescentou os do estado por fio — o `TPIDR_EL0` no ARM e os
+/// seletores de dados no x86 —, que não provocam exceção nenhuma: os do
+/// canal saem com zero, ou com [`CODIGO_DO_CANAL`]; o receptor do par morre
+/// de uma falha se o registrador dele mudou, e o emissor sai com zero; os
+/// registradores da entrada saem com zero, ou com 1; e a herança sai com o
+/// código do `filho`, [`CODIGO_DO_FILHO_SUJO`] ou [`CODIGO_SEM_HERANCA`]; e a
+/// troca com as flags ligadas, com o do `filho` ou [`CODIGO_DO_FILHO_SUJO`].
+/// E os que morrem: o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do
+/// UMIP, o `fwait` e o canal do depurador do ARM.
 /// Não estão em `/bin`: só a suíte os roda.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -452,6 +548,62 @@ pub enum Excecao {
     /// O `wfi`: a armadilha do `SCTLR_EL1.nTWI` desligado.
     #[cfg(target_arch = "aarch64")]
     Wfi,
+    /// O `FS` que o processo anterior deixou no núcleo, e a marca para o
+    /// seguinte: sai com [`CODIGO_DO_CANAL`] se ela já estava lá.
+    #[cfg(target_arch = "x86_64")]
+    CanalFs,
+    /// O mesmo, com o `DS`, o `ES`, o `FS` e o `GS`.
+    #[cfg(target_arch = "x86_64")]
+    CanalSeletores,
+    /// As quatro marcas, conferidas a cada uma de 64 cessões: o `ud2` se
+    /// alguma mudou.
+    #[cfg(target_arch = "x86_64")]
+    SeletoresReceptor,
+    /// As outras quatro marcas, a cada uma de 64 cessões.
+    #[cfg(target_arch = "x86_64")]
+    SeletoresEmissor,
+    /// O `str` do anel 3: o `#GP(0)` do UMIP.
+    #[cfg(target_arch = "x86_64")]
+    Str,
+    /// O `sldt` do anel 3: o `#GP(0)` do UMIP.
+    #[cfg(target_arch = "x86_64")]
+    Sldt,
+    /// O `smsw` do anel 3: o `#GP(0)` do UMIP.
+    #[cfg(target_arch = "x86_64")]
+    Smsw,
+    /// O `sgdt` do anel 3: o `#GP(0)` do UMIP.
+    #[cfg(target_arch = "x86_64")]
+    Sgdt,
+    /// O `sidt` do anel 3: o `#GP(0)` do UMIP.
+    #[cfg(target_arch = "x86_64")]
+    Sidt,
+    /// O `fwait`: o `#NM` do `CR0.MP` com o `CR0.TS`.
+    #[cfg(target_arch = "x86_64")]
+    Fwait,
+    /// O `TPIDR_EL0` que o processo anterior deixou no núcleo, e a marca
+    /// para o seguinte: sai com [`CODIGO_DO_CANAL`] se ela já estava lá.
+    #[cfg(target_arch = "aarch64")]
+    CanalTpidr,
+    /// A marca no `TPIDR_EL0`, conferida a cada uma de 64 cessões: o `brk
+    /// #1` se ela mudou.
+    #[cfg(target_arch = "aarch64")]
+    TpidrReceptor,
+    /// Outra marca no `TPIDR_EL0`, a cada uma de 64 cessões.
+    #[cfg(target_arch = "aarch64")]
+    TpidrEmissor,
+    /// A leitura do `MDCCSR_EL0`: a armadilha do `MDSCR_EL1.TDCC`.
+    #[cfg(target_arch = "aarch64")]
+    Mdccsr,
+    /// Os registradores na primeira entrada — os gerais, e os seletores de
+    /// dados no x86, o `TPIDR_EL0` e o `TPIDRRO_EL0` no ARM —: sai com 1 se
+    /// algum não veio zerado.
+    Registradores,
+    /// O estado por fio marcado, o `fork`, a conferência no filho e a troca
+    /// de imagem pelo `filho`, que o confere zerado.
+    Heranca,
+    /// As flags ligadas — o `DF` e o `CF` no x86, o `NZCV` no ARM — e a troca
+    /// de imagem pelo `filho`, que as confere as de um processo novo.
+    TrocaComFlags,
 }
 
 /// A imagem ELF do programa da exceção `e` — ver [`Excecao`].
@@ -512,6 +664,58 @@ pub fn bytes_da_excecao(e: Excecao) -> &'static [u8] {
             Excecao::Daif => entre(&raw const DAIF_INICIO, &raw const DAIF_FIM),
             #[cfg(target_arch = "aarch64")]
             Excecao::Wfi => entre(&raw const WFI_INICIO, &raw const WFI_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::CanalFs => entre(&raw const CANAL_FS_INICIO, &raw const CANAL_FS_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::CanalSeletores => entre(
+                &raw const CANAL_SELETORES_INICIO,
+                &raw const CANAL_SELETORES_FIM,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::SeletoresReceptor => entre(
+                &raw const SELETORES_RECEPTOR_INICIO,
+                &raw const SELETORES_RECEPTOR_FIM,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::SeletoresEmissor => entre(
+                &raw const SELETORES_EMISSOR_INICIO,
+                &raw const SELETORES_EMISSOR_FIM,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Str => entre(&raw const STR_INICIO, &raw const STR_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Sldt => entre(&raw const SLDT_INICIO, &raw const SLDT_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Smsw => entre(&raw const SMSW_INICIO, &raw const SMSW_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Sgdt => entre(&raw const SGDT_INICIO, &raw const SGDT_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Sidt => entre(&raw const SIDT_INICIO, &raw const SIDT_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Fwait => entre(&raw const FWAIT_INICIO, &raw const FWAIT_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::CanalTpidr => entre(&raw const CANAL_TPIDR_INICIO, &raw const CANAL_TPIDR_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::TpidrReceptor => entre(
+                &raw const TPIDR_RECEPTOR_INICIO,
+                &raw const TPIDR_RECEPTOR_FIM,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::TpidrEmissor => entre(
+                &raw const TPIDR_EMISSOR_INICIO,
+                &raw const TPIDR_EMISSOR_FIM,
+            ),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::Mdccsr => entre(&raw const MDCCSR_INICIO, &raw const MDCCSR_FIM),
+            Excecao::Registradores => entre(
+                &raw const REGISTRADORES_INICIO,
+                &raw const REGISTRADORES_FIM,
+            ),
+            Excecao::Heranca => entre(&raw const HERANCA_INICIO, &raw const HERANCA_FIM),
+            Excecao::TrocaComFlags => entre(
+                &raw const TROCA_COM_FLAGS_INICIO,
+                &raw const TROCA_COM_FLAGS_FIM,
+            ),
         }
     }
 }
@@ -850,6 +1054,26 @@ programa_filho_inicio:
     .ascii  "filho por exec"
     .space  OFF_CODIGO_FILHO - TAM_MSG_FILHO
     // A execucao comeca aqui: `e_entry` aponta 32 bytes adiante do segmento.
+    //
+    // A troca de imagem entrega as flags de um processo novo -- so o IF e o
+    // bit 1, 0x202, as do `entrar` -- e os seletores de dados nulos: o
+    // programa que entra nao tem direito ao estado do que saiu (o lote B4 do
+    // #448). Se algum veio com o da imagem anterior, sai com 25, antes da
+    // escrita que os casos da troca de imagem procuram. As flags primeiro,
+    // antes de qualquer instrucao que as mude; o `pushfq` usa a pilha que o
+    // carregador deu.
+    pushfq
+    pop     rax
+    cmp     rax, 0x202
+    jne     .Lsujo_fi
+    mov     eax, ds
+    mov     ecx, es
+    or      eax, ecx
+    mov     ecx, fs
+    or      eax, ecx
+    mov     ecx, gs
+    or      eax, ecx
+    jnz     .Lsujo_fi
     mov     edi, 1
     movabs  rsi, offset VADDR_CODIGO
     mov     edx, offset TAM_MSG_FILHO
@@ -860,6 +1084,11 @@ programa_filho_inicio:
     mov     edi, 24
     syscall
 .Lprender_fi:
+    jmp     .Lprender_fi
+.Lsujo_fi:
+    mov     eax, 0
+    mov     edi, 25
+    syscall
     jmp     .Lprender_fi
 .Lfim_codigo_fi:
 
@@ -1426,8 +1655,11 @@ programa_orfao_fim:
 // execucao; a pilha e a que o carregador da.
 //
 // Os deslocamentos que a suite confere -- onde a excecao deixa o `rip` --
-// sao conferidos aqui tambem, pelo montador: um programa editado que os mude
-// nao monta (ver `exemplo::DEPOIS_DO_INT1` e os outros).
+// sao os das constantes de `exemplo` (`DEPOIS_DO_INT1` e as outras): um
+// programa editado que os mude reprova o caso dele, que diz o `pc` que achou.
+// O montador nao os confere mais: o `.if` com a diferenca de dois rotulos nao
+// e absoluto no passo do LTO do release, que le este assembly antes de haver
+// leiaute, e o release dizia erros que nao eram (o lote B4 do #448).
 .macro ELF_DE_UM_SEGMENTO elf, codigo, fim
 \elf:
     .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
@@ -1508,9 +1740,6 @@ programa_excecao_int1_inicio:
 .Ldepois_int1:
     SOBREVIVEU .Lprender_int1
 .Lfim_codigo_int1:
-.if .Ldepois_int1 - .Lcodigo_int1 - 1
-.error "o #DB do int1 nao deixa o rip onde a suite confere"
-.endif
 .global programa_excecao_int1_fim
 programa_excecao_int1_fim:
 
@@ -1529,9 +1758,6 @@ programa_excecao_passo_inicio:
     nop
     SOBREVIVEU .Lprender_passo
 .Lfim_codigo_passo:
-.if .Ldepois_passo - .Lcodigo_passo - 11
-.error "o #DB do passo nao deixa o rip onde a suite confere"
-.endif
 .global programa_excecao_passo_fim
 programa_excecao_passo_fim:
 
@@ -1555,9 +1781,6 @@ programa_excecao_passo_na_chamada_inicio:
     nop
     SOBREVIVEU .Lprender_pch
 .Lfim_codigo_pch:
-.if .Ldepois_pch - .Lcodigo_pch - 17
-.error "o #DB da volta da chamada nao deixa o rip onde a suite confere"
-.endif
 .global programa_excecao_passo_na_chamada_fim
 programa_excecao_passo_na_chamada_fim:
 
@@ -1671,9 +1894,6 @@ programa_excecao_pilha_inicio:
     push    rax
     SOBREVIVEU .Lprender_pilha
 .Lfim_codigo_pilha:
-.if .Lpush_pilha - .Lcodigo_pilha - 10
-.error "o push da pilha nao fica onde a suite confere"
-.endif
 .global programa_excecao_pilha_fim
 programa_excecao_pilha_fim:
 
@@ -1694,9 +1914,6 @@ programa_excecao_ldt_inicio:
     mov     ds, ax
     SOBREVIVEU .Lprender_ldt
 .Lfim_codigo_ldt:
-.if .Lcarga_ldt - .Lcodigo_ldt - 5
-.error "a carga do seletor do LDT nao fica onde a suite confere"
-.endif
 .global programa_excecao_ldt_fim
 programa_excecao_ldt_fim:
 
@@ -1779,12 +1996,6 @@ programa_excecao_movss_inicio:
     nop
     SOBREVIVEU .Lprender_movss
 .Lfim_codigo_movss:
-.if .Lna_syscall_movss - .Lcodigo_movss - 20
-.error "a syscall do programa do mov ss nao fica onde a suite confere"
-.endif
-.if .Ldepois_movss - .Lcodigo_movss - 22
-.error "a volta da syscall do programa do mov ss nao fica onde a suite confere"
-.endif
 .global programa_excecao_movss_fim
 programa_excecao_movss_fim:
 
@@ -1801,9 +2012,6 @@ programa_excecao_ausente_inicio:
     mov     ds, ax
     SOBREVIVEU .Lprender_aus
 .Lfim_codigo_aus:
-.if .Lcarga_aus - .Lcodigo_aus - 5
-.error "a carga do seletor ausente nao fica onde a suite confere"
-.endif
 .global programa_excecao_ausente_fim
 programa_excecao_ausente_fim:
 
@@ -1818,9 +2026,6 @@ programa_excecao_pilha_ausente_inicio:
     mov     ss, ax
     SOBREVIVEU .Lprender_paus
 .Lfim_codigo_paus:
-.if .Lcarga_paus - .Lcodigo_paus - 5
-.error "a carga do seletor da pilha ausente nao fica onde a suite confere"
-.endif
 .global programa_excecao_pilha_ausente_fim
 programa_excecao_pilha_ausente_fim:
 
@@ -1837,6 +2042,466 @@ programa_excecao_sysenter_inicio:
 .Lfim_codigo_sysenter:
 .global programa_excecao_sysenter_fim
 programa_excecao_sysenter_fim:
+
+// --- o lote B4 do #448 ------------------------------------------------------
+//
+// Nenhum programa daqui carrega o seletor do descritor 3 (0x18 a 0x1B): os
+// casos do #NP e do #SS o marcam ausente, e um fio com ele guardado faria #NP
+// no anel 0 na troca de contexto, que recarrega os seletores de cada fio.
+//
+// As marcas dos quatro seletores sao distintas, num programa e entre o
+// receptor e o emissor do par: um seletor que a troca de contexto pusesse no
+// lugar de outro -- o DS no FS, o FS no DS -- nao passa por certo (o achado 3
+// do adversario do lote B4). Sao os descritores 4 (os dados do usuario) e 5
+// (o codigo do usuario, que e legivel), os dois de DPL 3, com o RPL 3 e com o
+// 1: 0x23, 0x2B, 0x21 e 0x29. O anel 3 carrega os quatro -- o RPL 1 nao passa
+// do DPL --, o anel 0 tambem, e o retorno ao anel 3 nao os anula. Nenhum e
+// o nulo, nem o nulo com um RPL (0x01 a 0x03), que o processador trata como
+// o nulo.
+
+// O FS, e o canal que ele seria: le o FS que o processo anterior deixou neste
+// nucleo, deixa nele a marca -- 0x2B, o codigo do usuario, que e legivel -- e
+// sai com 1 se a marca ja estava la; com 0, se nao. O kernel guarda os
+// seletores de dados por fio, e um fio novo os recebe nulos: as duas rodadas
+// no mesmo nucleo saem com zero.
+.balign 8
+.global programa_excecao_canal_fs_inicio
+programa_excecao_canal_fs_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_cfs, .Lcodigo_cfs, .Lfim_codigo_cfs
+.Lcodigo_cfs:
+    mov     eax, fs
+    xor     edi, edi
+    cmp     eax, 0x2B
+    sete    dil
+    mov     ecx, 0x2B
+    mov     fs, ecx
+    mov     eax, 0
+    syscall
+.Lprender_cfs:
+    jmp     .Lprender_cfs
+.Lfim_codigo_cfs:
+.global programa_excecao_canal_fs_fim
+programa_excecao_canal_fs_fim:
+
+// Os quatro, cada um com a sua marca -- 0x2B no DS, 0x23 no ES, 0x29 no FS e
+// 0x21 no GS --: sai com 1 se os quatro ja estavam com ela.
+.balign 8
+.global programa_excecao_canal_seletores_inicio
+programa_excecao_canal_seletores_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_csel, .Lcodigo_csel, .Lfim_codigo_csel
+.Lcodigo_csel:
+    xor     edi, edi
+    mov     eax, ds
+    cmp     eax, 0x2B
+    jne     .Lmarcar_csel
+    mov     eax, es
+    cmp     eax, 0x23
+    jne     .Lmarcar_csel
+    mov     eax, fs
+    cmp     eax, 0x29
+    jne     .Lmarcar_csel
+    mov     eax, gs
+    cmp     eax, 0x21
+    jne     .Lmarcar_csel
+    mov     edi, 1
+.Lmarcar_csel:
+    mov     ecx, 0x2B
+    mov     ds, ecx
+    mov     ecx, 0x23
+    mov     es, ecx
+    mov     ecx, 0x29
+    mov     fs, ecx
+    mov     ecx, 0x21
+    mov     gs, ecx
+    mov     eax, 0
+    syscall
+.Lprender_csel:
+    jmp     .Lprender_csel
+.Lfim_codigo_csel:
+.global programa_excecao_canal_seletores_fim
+programa_excecao_canal_seletores_fim:
+
+// O par: o receptor deixa as quatro marcas e cede 64 vezes, conferindo-as a
+// cada volta; o emissor, preso ao mesmo nucleo e entrado no anel 3 junto com
+// ele, deixa as outras -- 0x21 no DS, 0x29 no ES, 0x23 no FS e 0x2B no GS,
+// cada uma diferente da do receptor no mesmo registrador -- e cede.
+// Se uma marca do receptor mudou, ele morre do `ud2`: a falha contada e a
+// prova, qualquer que seja a ordem das duas saidas. Guardados por fio,
+// nenhuma falha; zerados a cada troca, o receptor morre tambem -- perdeu os
+// dele.
+.balign 8
+.global programa_excecao_seletores_receptor_inicio
+programa_excecao_seletores_receptor_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_srec, .Lcodigo_srec, .Lfim_codigo_srec
+.Lcodigo_srec:
+    mov     ecx, 0x2B
+    mov     ds, ecx
+    mov     ecx, 0x23
+    mov     es, ecx
+    mov     ecx, 0x29
+    mov     fs, ecx
+    mov     ecx, 0x21
+    mov     gs, ecx
+    mov     r12d, 64
+.Lvolta_srec:
+    mov     eax, 3                  // ceder
+    syscall
+    mov     eax, ds
+    cmp     eax, 0x2B
+    jne     .Lmudou_srec
+    mov     eax, fs
+    cmp     eax, 0x29
+    jne     .Lmudou_srec
+    mov     eax, es
+    cmp     eax, 0x23
+    jne     .Lmudou_srec
+    mov     eax, gs
+    cmp     eax, 0x21
+    jne     .Lmudou_srec
+    dec     r12d
+    jnz     .Lvolta_srec
+    xor     edi, edi
+    mov     eax, 0
+    syscall
+.Lmudou_srec:
+    ud2
+.Lfim_codigo_srec:
+.global programa_excecao_seletores_receptor_fim
+programa_excecao_seletores_receptor_fim:
+
+.balign 8
+.global programa_excecao_seletores_emissor_inicio
+programa_excecao_seletores_emissor_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_semi, .Lcodigo_semi, .Lfim_codigo_semi
+.Lcodigo_semi:
+    mov     r12d, 64
+.Lvolta_semi:
+    mov     ecx, 0x21
+    mov     ds, ecx
+    mov     ecx, 0x29
+    mov     es, ecx
+    mov     ecx, 0x23
+    mov     fs, ecx
+    mov     ecx, 0x2B
+    mov     gs, ecx
+    mov     eax, 3                  // ceder
+    syscall
+    dec     r12d
+    jnz     .Lvolta_semi
+    xor     edi, edi
+    mov     eax, 0
+    syscall
+.Lprender_semi:
+    jmp     .Lprender_semi
+.Lfim_codigo_semi:
+.global programa_excecao_seletores_emissor_fim
+programa_excecao_seletores_emissor_fim:
+
+// Os registradores na primeira entrada: os gerais -- menos o `rsp`, a pilha
+// que o carregador deu -- e os quatro seletores de dados, todos em zero, como
+// na troca de imagem: o processo novo nao recebe o que o kernel deixou neles.
+// Sai com 1 se algum veio diferente de zero.
+.balign 8
+.global programa_excecao_registradores_inicio
+programa_excecao_registradores_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_regs, .Lcodigo_regs, .Lfim_codigo_regs
+.Lcodigo_regs:
+    or      rax, rbx
+    or      rax, rcx
+    or      rax, rdx
+    or      rax, rsi
+    or      rax, rdi
+    or      rax, rbp
+    or      rax, r8
+    or      rax, r9
+    or      rax, r10
+    or      rax, r11
+    or      rax, r12
+    or      rax, r13
+    or      rax, r14
+    or      rax, r15
+    mov     ecx, ds
+    or      rax, rcx
+    mov     ecx, es
+    or      rax, rcx
+    mov     ecx, fs
+    or      rax, rcx
+    mov     ecx, gs
+    or      rax, rcx
+    xor     edi, edi
+    test    rax, rax
+    setnz   dil
+    mov     eax, 0
+    syscall
+.Lprender_regs:
+    jmp     .Lprender_regs
+.Lfim_codigo_regs:
+.global programa_excecao_registradores_fim
+programa_excecao_registradores_fim:
+
+// O UMIP: o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do anel 3 sao
+// #GP(0). Sem ele, dizem ao processo o seletor do TSS do nucleo, o do LDT, o
+// CR0 baixo e onde estao a GDT e a IDT do kernel. Um programa por instrucao,
+// ela na entrada; se seguir, sai com 66. O `sgdt` e o `sidt` escreveriam
+// abaixo da pilha, na pagina dela.
+.balign 8
+.global programa_excecao_str_inicio
+programa_excecao_str_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_str, .Lcodigo_str, .Lfim_codigo_str
+.Lcodigo_str:
+    str     ax
+    SOBREVIVEU .Lprender_str
+.Lfim_codigo_str:
+.global programa_excecao_str_fim
+programa_excecao_str_fim:
+
+.balign 8
+.global programa_excecao_sldt_inicio
+programa_excecao_sldt_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_sldt, .Lcodigo_sldt, .Lfim_codigo_sldt
+.Lcodigo_sldt:
+    sldt    ax
+    SOBREVIVEU .Lprender_sldt
+.Lfim_codigo_sldt:
+.global programa_excecao_sldt_fim
+programa_excecao_sldt_fim:
+
+.balign 8
+.global programa_excecao_smsw_inicio
+programa_excecao_smsw_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_smsw, .Lcodigo_smsw, .Lfim_codigo_smsw
+.Lcodigo_smsw:
+    smsw    eax
+    SOBREVIVEU .Lprender_smsw
+.Lfim_codigo_smsw:
+.global programa_excecao_smsw_fim
+programa_excecao_smsw_fim:
+
+.balign 8
+.global programa_excecao_sgdt_inicio
+programa_excecao_sgdt_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_sgdt, .Lcodigo_sgdt, .Lfim_codigo_sgdt
+.Lcodigo_sgdt:
+    sgdt    [rsp - 16]
+    SOBREVIVEU .Lprender_sgdt
+.Lfim_codigo_sgdt:
+.global programa_excecao_sgdt_fim
+programa_excecao_sgdt_fim:
+
+.balign 8
+.global programa_excecao_sidt_inicio
+programa_excecao_sidt_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_sidt, .Lcodigo_sidt, .Lfim_codigo_sidt
+.Lcodigo_sidt:
+    sidt    [rsp - 16]
+    SOBREVIVEU .Lprender_sidt
+.Lfim_codigo_sidt:
+.global programa_excecao_sidt_fim
+programa_excecao_sidt_fim:
+
+// O `fwait` do anel 3: com o CR0.MP e o CR0.TS ligados, e #NM, como o x87.
+// Sem o MP, ele so conferiria as excecoes do x87 pendentes -- nenhuma -- e o
+// processo seguiria. O byte por extenso, como o `fld1`.
+.balign 8
+.global programa_excecao_fwait_inicio
+programa_excecao_fwait_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_fwait, .Lcodigo_fwait, .Lfim_codigo_fwait
+.Lcodigo_fwait:
+    .byte   0x9B                              // fwait
+    SOBREVIVEU .Lprender_fwait
+.Lfim_codigo_fwait:
+.global programa_excecao_fwait_fim
+programa_excecao_fwait_fim:
+
+// A heranca: o processo deixa as quatro marcas e bifurca. O filho confere que
+// as recebeu do pai -- sai com 26 se nao -- e troca de imagem pelo `filho`,
+// que confere que chegam nulas -- sai com 25 se nao, com o 24 de sempre se
+// sim. O pai espera o filho, com o slot na pilha, e sai com o codigo dele. O
+// manifesto declara o `process.run`, o que a troca de imagem exerce -- como o
+// do `NT`.
+.balign 8
+.global programa_excecao_heranca_inicio
+programa_excecao_heranca_inicio:
+.Lelf_her:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   .Lcodigo_her - .Lelf_her // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   .Lfim_codigo_her - .Lcodigo_her  // p_filesz
+    .quad   .Lfim_codigo_her - .Lcodigo_her  // p_memsz
+    .quad   4096                     // p_align
+
+    // o manifesto: uma nota, que nao se carrega
+    .long   4                        // PT_NOTE
+    .long   4                        // PF_R
+    .quad   .Lnota_her - .Lelf_her   // p_offset
+    .quad   0                        // p_vaddr: nao se carrega
+    .quad   0                        // p_paddr
+    .quad   .Lfim_nota_her - .Lnota_her  // p_filesz
+    .quad   .Lfim_nota_her - .Lnota_her  // p_memsz
+    .quad   4                        // p_align
+.Lcodigo_her:
+    mov     ecx, 0x2B
+    mov     ds, ecx
+    mov     ecx, 0x23
+    mov     es, ecx
+    mov     ecx, 0x29
+    mov     fs, ecx
+    mov     ecx, 0x21
+    mov     gs, ecx
+    mov     eax, 4                  // bifurcar
+    syscall
+    test    rax, rax
+    jnz     .Lpai_her
+    // O filho: os do pai, na hora do `fork`.
+    mov     eax, ds
+    cmp     eax, 0x2B
+    jne     .Lsem_heranca
+    mov     eax, fs
+    cmp     eax, 0x29
+    jne     .Lsem_heranca
+    mov     eax, es
+    cmp     eax, 0x23
+    jne     .Lsem_heranca
+    mov     eax, gs
+    cmp     eax, 0x21
+    jne     .Lsem_heranca
+    // executar("filho"): a imagem nova os recebe nulos, e o `filho` confere.
+    lea     rdi, [rip + .Lnome_her]
+    mov     esi, 5
+    mov     eax, 5
+    syscall
+    SOBREVIVEU .Lprender_filho_her
+.Lsem_heranca:
+    mov     edi, 26
+    mov     eax, 0
+    syscall
+    jmp     .Lprender_her
+.Lpai_her:
+    // esperar(0, &slot), o slot na pilha, envenenado; e sair com o codigo do
+    // filho.
+    sub     rsp, 16
+    mov     qword ptr [rsp], 100
+    xor     edi, edi
+    mov     rsi, rsp
+    mov     eax, 9
+    syscall
+    mov     rdi, [rsp]
+    mov     eax, 0
+    syscall
+.Lprender_her:
+    jmp     .Lprender_her
+.Lnome_her:
+    .ascii  "filho"
+.Lfim_codigo_her:
+
+.balign 4
+.Lnota_her:
+    .long   5                        // tamanho do dono
+    .long   .Lfim_texto_her - .Ltexto_her  // tamanho do conteudo
+    .long   1                        // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_her:
+    .ascii  "duke-manifesto 1\nnome excecao-heranca\npermite process.run\n"
+.Lfim_texto_her:
+    .balign 4
+.Lfim_nota_her:
+.global programa_excecao_heranca_fim
+programa_excecao_heranca_fim:
+
+// A troca de imagem com as flags ligadas: o `DF` -- com ele, o `memset` e o
+// `memcpy` de um programa andam para tras -- e o `CF`, e o `executar` pelo
+// `filho`, que confere as flags de um processo novo antes de qualquer
+// instrucao que as mude, e sai com 25 se vieram desta imagem (o achado 1 do
+// adversario do lote B4). Nem o `lea` nem o `mov` mudam as flags. Se a troca
+// nao acontecer, sai com 66. O manifesto declara o `process.run`, como o do
+// `NT`.
+.balign 8
+.global programa_excecao_troca_com_flags_inicio
+programa_excecao_troca_com_flags_inicio:
+.Lelf_tfl:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   .Lcodigo_tfl - .Lelf_tfl // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   .Lfim_codigo_tfl - .Lcodigo_tfl  // p_filesz
+    .quad   .Lfim_codigo_tfl - .Lcodigo_tfl  // p_memsz
+    .quad   4096                     // p_align
+
+    // o manifesto: uma nota, que nao se carrega
+    .long   4                        // PT_NOTE
+    .long   4                        // PF_R
+    .quad   .Lnota_tfl - .Lelf_tfl   // p_offset
+    .quad   0                        // p_vaddr: nao se carrega
+    .quad   0                        // p_paddr
+    .quad   .Lfim_nota_tfl - .Lnota_tfl  // p_filesz
+    .quad   .Lfim_nota_tfl - .Lnota_tfl  // p_memsz
+    .quad   4                        // p_align
+.Lcodigo_tfl:
+    std
+    stc
+    lea     rdi, [rip + .Lnome_tfl]
+    mov     esi, 5
+    mov     eax, 5                  // executar("filho")
+    syscall
+    SOBREVIVEU .Lprender_tfl
+.Lnome_tfl:
+    .ascii  "filho"
+.Lfim_codigo_tfl:
+
+.balign 4
+.Lnota_tfl:
+    .long   5                        // tamanho do dono
+    .long   .Lfim_texto_tfl - .Ltexto_tfl  // tamanho do conteudo
+    .long   1                        // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_tfl:
+    .ascii  "duke-manifesto 1\nnome excecao-troca-com-flags\npermite process.run\n"
+.Lfim_texto_tfl:
+    .balign 4
+.Lfim_nota_tfl:
+.global programa_excecao_troca_com_flags_fim
+programa_excecao_troca_com_flags_fim:
 "#
 );
 
@@ -2052,6 +2717,16 @@ programa_filho_inicio:
     .ascii  "filho por exec"
     .space  OFF_CODIGO_FILHO - TAM_MSG_FILHO
     // A execucao comeca aqui: `e_entry` aponta 32 bytes adiante do segmento.
+    //
+    // A troca de imagem entrega o NZCV em zero, o do `entrar`, e o TPIDR_EL0
+    // zerado: o programa que entra nao tem direito ao estado do que saiu (o
+    // lote B4 do #448). Se algum veio com o da imagem anterior, sai com 25,
+    // antes da escrita que os casos da troca de imagem procuram. O `mrs` nao
+    // muda as flags.
+    mrs     x1, nzcv
+    cbnz    x1, .Lsujo_fi
+    mrs     x1, tpidr_el0
+    cbnz    x1, .Lsujo_fi
     mov     x0, #1
     movz    x1, #(VADDR_CODIGO & 0xFFFF)
     movk    x1, #((VADDR_CODIGO >> 16) & 0xFFFF), lsl #16
@@ -2064,6 +2739,11 @@ programa_filho_inicio:
     mov     x0, #24
     svc     #0
 .Lprender_fi:
+    b       .Lprender_fi
+.Lsujo_fi:
+    mov     x8, #0
+    mov     x0, #25
+    svc     #0
     b       .Lprender_fi
 .Lfim_codigo_fi:
 
@@ -2757,9 +3437,6 @@ programa_excecao_daif_inicio:
     msr     daif, x0
     SOBREVIVEU .Lprender_daif
 .Lfim_codigo_daif:
-.if .Lmsr_daif - .Lcodigo_daif - 4
-.error "o msr do daif nao fica onde a suite confere"
-.endif
 .global programa_excecao_daif_fim
 programa_excecao_daif_fim:
 
@@ -2780,10 +3457,334 @@ programa_excecao_wfi_inicio:
     b.ne    .Lwfi
     SOBREVIVEU .Lprender_wfi
 .Lfim_codigo_wfi:
-.if .Lwfi - .Lcodigo_wfi - 4
-.error "o wfi nao fica onde a suite confere"
-.endif
 .global programa_excecao_wfi_fim
 programa_excecao_wfi_fim:
+
+// --- o lote B4 do #448 ------------------------------------------------------
+
+// O TPIDR_EL0, e o canal que ele seria: o EL0 o escreve e o le sem armadilha
+// que o EL1 possa ligar. Le o que o processo anterior deixou neste nucleo,
+// deixa nele a marca e sai com 1 se a marca ja estava la; com 0, se nao. O
+// kernel o guarda por fio, e um fio novo o recebe zerado: as duas rodadas no
+// mesmo nucleo saem com zero.
+.balign 8
+.global programa_excecao_canal_tpidr_inicio
+programa_excecao_canal_tpidr_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_ctp, .Lcodigo_ctp, .Lfim_codigo_ctp
+.Lcodigo_ctp:
+    mrs     x0, tpidr_el0
+    movz    x1, #0xA1A1
+    movk    x1, #0xD0E5, lsl #16
+    movk    x1, #0xE7D0, lsl #32
+    movk    x1, #0x5EC4, lsl #48
+    msr     tpidr_el0, x1
+    cmp     x0, x1
+    cset    x0, eq
+    mov     x8, #0
+    svc     #0
+.Lprender_ctp:
+    b       .Lprender_ctp
+.Lfim_codigo_ctp:
+.global programa_excecao_canal_tpidr_fim
+programa_excecao_canal_tpidr_fim:
+
+// O par: o receptor deixa a marca e cede 64 vezes, conferindo-a a cada volta;
+// o emissor, preso ao mesmo nucleo e entrado no EL0 junto com ele, escreve
+// outra e cede. Se a marca do receptor mudou, ele morre do `brk #1`: a falha
+// contada e a prova, qualquer que seja a ordem das duas saidas. Guardado por
+// fio, nenhuma falha; zerado a cada troca, o receptor morre tambem -- perdeu
+// o dele.
+.balign 8
+.global programa_excecao_tpidr_receptor_inicio
+programa_excecao_tpidr_receptor_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_trec, .Lcodigo_trec, .Lfim_codigo_trec
+.Lcodigo_trec:
+    movz    x19, #0x1111
+    movk    x19, #0x2222, lsl #16
+    movk    x19, #0x3333, lsl #32
+    movk    x19, #0x4444, lsl #48
+    msr     tpidr_el0, x19
+    mov     x20, #64
+.Lvolta_trec:
+    mov     x8, #3                  // ceder
+    svc     #0
+    mrs     x0, tpidr_el0
+    cmp     x0, x19
+    b.ne    .Lmudou_trec
+    subs    x20, x20, #1
+    b.ne    .Lvolta_trec
+    mov     x0, #0
+    mov     x8, #0
+    svc     #0
+.Lmudou_trec:
+    brk     #1
+.Lfim_codigo_trec:
+.global programa_excecao_tpidr_receptor_fim
+programa_excecao_tpidr_receptor_fim:
+
+.balign 8
+.global programa_excecao_tpidr_emissor_inicio
+programa_excecao_tpidr_emissor_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_temi, .Lcodigo_temi, .Lfim_codigo_temi
+.Lcodigo_temi:
+    movz    x19, #0xDEAD
+    mov     x20, #64
+.Lvolta_temi:
+    msr     tpidr_el0, x19
+    mov     x8, #3                  // ceder
+    svc     #0
+    subs    x20, x20, #1
+    b.ne    .Lvolta_temi
+    mov     x0, #0
+    mov     x8, #0
+    svc     #0
+.Lprender_temi:
+    b       .Lprender_temi
+.Lfim_codigo_temi:
+.global programa_excecao_tpidr_emissor_fim
+programa_excecao_tpidr_emissor_fim:
+
+// Os registradores na primeira entrada: o x0 a o x30, o TPIDR_EL0 e o
+// TPIDRRO_EL0, todos em zero -- o `sp` e a pilha que o carregador deu. Sai
+// com 1 se algum veio diferente de zero.
+.balign 8
+.global programa_excecao_registradores_inicio
+programa_excecao_registradores_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_rega, .Lcodigo_rega, .Lfim_codigo_rega
+.Lcodigo_rega:
+    orr     x0, x0, x1
+    orr     x0, x0, x2
+    orr     x0, x0, x3
+    orr     x0, x0, x4
+    orr     x0, x0, x5
+    orr     x0, x0, x6
+    orr     x0, x0, x7
+    orr     x0, x0, x8
+    orr     x0, x0, x9
+    orr     x0, x0, x10
+    orr     x0, x0, x11
+    orr     x0, x0, x12
+    orr     x0, x0, x13
+    orr     x0, x0, x14
+    orr     x0, x0, x15
+    orr     x0, x0, x16
+    orr     x0, x0, x17
+    orr     x0, x0, x18
+    orr     x0, x0, x19
+    orr     x0, x0, x20
+    orr     x0, x0, x21
+    orr     x0, x0, x22
+    orr     x0, x0, x23
+    orr     x0, x0, x24
+    orr     x0, x0, x25
+    orr     x0, x0, x26
+    orr     x0, x0, x27
+    orr     x0, x0, x28
+    orr     x0, x0, x29
+    orr     x0, x0, x30
+    mrs     x1, tpidr_el0
+    orr     x0, x0, x1
+    mrs     x1, tpidrro_el0
+    orr     x0, x0, x1
+    cmp     x0, #0
+    cset    x0, ne
+    mov     x8, #0
+    svc     #0
+.Lprender_rega:
+    b       .Lprender_rega
+.Lfim_codigo_rega:
+.global programa_excecao_registradores_fim
+programa_excecao_registradores_fim:
+
+// O canal do depurador (o DCC): com o `MDSCR_EL1.TDCC` ligado, o EL0 que le o
+// `MDCCSR_EL0` -- ou escreve o `DBGDTRTX_EL0` -- cai no EL1, a classe 0x18, e
+// o processo morre dela. Desligado, o `TXfull` que um processo ligasse, o
+// seguinte veria. Se seguir, sai com 66.
+.balign 8
+.global programa_excecao_mdccsr_inicio
+programa_excecao_mdccsr_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_dcc, .Lcodigo_dcc, .Lfim_codigo_dcc
+.Lcodigo_dcc:
+    mrs     x0, mdccsr_el0
+    SOBREVIVEU .Lprender_dcc
+.Lfim_codigo_dcc:
+.global programa_excecao_mdccsr_fim
+programa_excecao_mdccsr_fim:
+
+// A heranca: o processo deixa a marca no TPIDR_EL0 e bifurca. O filho confere
+// que a recebeu do pai -- sai com 26 se nao -- e troca de imagem pelo
+// `filho`, que confere que chega zerado -- 25 se nao, o 24 de sempre se sim.
+// O pai espera o filho, com o slot na pilha, e sai com o codigo dele. O
+// manifesto declara o `process.run`.
+.balign 8
+.global programa_excecao_heranca_inicio
+programa_excecao_heranca_inicio:
+.Lelf_her:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   .Lcodigo_her - .Lelf_her // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   .Lfim_codigo_her - .Lcodigo_her  // p_filesz
+    .quad   .Lfim_codigo_her - .Lcodigo_her  // p_memsz
+    .quad   4096                     // p_align
+
+    // o manifesto: uma nota, que nao se carrega
+    .long   4                        // PT_NOTE
+    .long   4                        // PF_R
+    .quad   .Lnota_her - .Lelf_her   // p_offset
+    .quad   0                        // p_vaddr: nao se carrega
+    .quad   0                        // p_paddr
+    .quad   .Lfim_nota_her - .Lnota_her  // p_filesz
+    .quad   .Lfim_nota_her - .Lnota_her  // p_memsz
+    .quad   4                        // p_align
+.Lcodigo_her:
+    movz    x19, #0x1111
+    movk    x19, #0x2222, lsl #16
+    movk    x19, #0x3333, lsl #32
+    movk    x19, #0x4444, lsl #48
+    msr     tpidr_el0, x19
+    mov     x8, #4                  // bifurcar
+    svc     #0
+    cbnz    x0, .Lpai_her
+    // O filho: o do pai, na hora do `fork`.
+    mrs     x0, tpidr_el0
+    cmp     x0, x19
+    b.ne    .Lsem_heranca
+    // executar("filho"): a imagem nova o recebe zerado, e o `filho` confere.
+    adr     x0, .Lnome_her
+    mov     x1, #5
+    mov     x8, #5
+    svc     #0
+    SOBREVIVEU .Lprender_filho_her
+.Lsem_heranca:
+    mov     x0, #26
+    mov     x8, #0
+    svc     #0
+    b       .Lprender_her
+.Lpai_her:
+    // esperar(0, &slot), o slot na pilha, envenenado; e sair com o codigo do
+    // filho.
+    sub     sp, sp, #16
+    mov     x2, #100
+    str     x2, [sp]
+    mov     x0, xzr
+    mov     x1, sp
+    mov     x8, #9
+    svc     #0
+    ldr     x0, [sp]
+    mov     x8, #0
+    svc     #0
+.Lprender_her:
+    b       .Lprender_her
+.Lnome_her:
+    .ascii  "filho"
+.Lfim_codigo_her:
+
+.balign 4
+.Lnota_her:
+    .long   5                        // tamanho do dono
+    .long   .Lfim_texto_her - .Ltexto_her  // tamanho do conteudo
+    .long   1                        // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_her:
+    .ascii  "duke-manifesto 1\nnome excecao-heranca\npermite process.run\n"
+.Lfim_texto_her:
+    .balign 4
+.Lfim_nota_her:
+.global programa_excecao_heranca_fim
+programa_excecao_heranca_fim:
+
+// A troca de imagem com as flags ligadas: o N, o Z, o C e o V, e o
+// `executar` pelo `filho`, que confere o NZCV de um processo novo -- zero --
+// antes de qualquer instrucao que o mude, e sai com 25 se veio desta imagem
+// (o achado 1 do adversario do lote B4). Nem o `adr` nem o `mov` mudam as
+// flags. Se a troca nao acontecer, sai com 66. O manifesto declara o
+// `process.run`.
+.balign 8
+.global programa_excecao_troca_com_flags_inicio
+programa_excecao_troca_com_flags_inicio:
+.Lelf_tfl:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                     // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO             // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  2                        // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                        // PT_LOAD
+    .long   5                        // PF_R | PF_X
+    .quad   .Lcodigo_tfl - .Lelf_tfl // p_offset
+    .quad   VADDR_CODIGO             // p_vaddr
+    .quad   VADDR_CODIGO             // p_paddr
+    .quad   .Lfim_codigo_tfl - .Lcodigo_tfl  // p_filesz
+    .quad   .Lfim_codigo_tfl - .Lcodigo_tfl  // p_memsz
+    .quad   4096                     // p_align
+
+    // o manifesto: uma nota, que nao se carrega
+    .long   4                        // PT_NOTE
+    .long   4                        // PF_R
+    .quad   .Lnota_tfl - .Lelf_tfl   // p_offset
+    .quad   0                        // p_vaddr: nao se carrega
+    .quad   0                        // p_paddr
+    .quad   .Lfim_nota_tfl - .Lnota_tfl  // p_filesz
+    .quad   .Lfim_nota_tfl - .Lnota_tfl  // p_memsz
+    .quad   4                        // p_align
+.Lcodigo_tfl:
+    movz    x0, #0xF000, lsl #16
+    msr     nzcv, x0                 // N, Z, C e V ligados
+    adr     x0, .Lnome_tfl
+    mov     x1, #5
+    mov     x8, #5                  // executar("filho")
+    svc     #0
+    SOBREVIVEU .Lprender_tfl
+.Lnome_tfl:
+    .ascii  "filho"
+.Lfim_codigo_tfl:
+
+.balign 4
+.Lnota_tfl:
+    .long   5                        // tamanho do dono
+    .long   .Lfim_texto_tfl - .Ltexto_tfl  // tamanho do conteudo
+    .long   1                        // o tipo do manifesto
+    .ascii  "Duke\0"
+    .balign 4
+.Ltexto_tfl:
+    .ascii  "duke-manifesto 1\nnome excecao-troca-com-flags\npermite process.run\n"
+.Lfim_texto_tfl:
+    .balign 4
+.Lfim_nota_tfl:
+.global programa_excecao_troca_com_flags_fim
+programa_excecao_troca_com_flags_fim:
 "#
 );

@@ -28,14 +28,18 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::vetores::Quadro;
 
-/// `PSTATE` de um processo em EL0.
+/// `PSTATE` de um processo em EL0, pela primeira entrada ([`entrar`]) e pela
+/// troca de imagem (`contexto::redirecionar_para`).
 ///
 /// - `M[3:0] = 0b0000`: EL0t. Em EL0 só existe `SP_EL0`, então não há sufixo
 ///   `h`/`t` para escolher — o `t` é o único valor legal.
 /// - `I = 0`: IRQs desmascaradas. Um processo impreemptável travaria a máquina
 ///   no primeiro laço infinito, e não há nada que o kernel pudesse fazer.
 /// - `D`, `A`, `F = 1`: como no resto do kernel.
-const SPSR_USUARIO: u64 = (1 << 9) | (1 << 8) | (1 << 6);
+/// - E nada mais: o `NZCV` em zero, e os bits das extensões — o `SSBS`, o
+///   `DIT`, o `TCO`, o `BTYPE` — também. A troca de imagem não entrega os da
+///   imagem que saiu (o achado 1 do adversário do lote B4 do #448).
+pub(super) const SPSR_USUARIO: u64 = (1 << 9) | (1 << 8) | (1 << 6);
 
 /// Máscara do campo de modo dentro do `SPSR`.
 const MASCARA_DE_MODO: u64 = 0b1111;
@@ -128,20 +132,25 @@ pub unsafe fn init() {
         "usuario",
         "o FP/SIMD fora do EL0 e do EL1: CPACR_EL1 em zero, e nunca religado"
     );
-    if let Some((sctlr, cpacr)) = regime_do_firmware() {
+    if let Some(r) = regime_do_firmware() {
         crate::log_info!(
             "usuario",
-            "o regime que o firmware deixou: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}",
-            sctlr,
-            cpacr
+            "o regime que o firmware deixou: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}, MDSCR_EL1 {:#x}, \
+             TPIDRRO_EL0 {:#x}",
+            r.sctlr,
+            r.cpacr,
+            r.mdscr,
+            r.tpidrro
         );
     }
-    let (sctlr, cpacr) = ler_o_regime_deste_nucleo();
+    let r = ler_o_regime_deste_nucleo();
     crate::log_info!(
         "usuario",
-        "o regime do kernel: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}",
-        sctlr,
-        cpacr
+        "o regime do kernel: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}, MDSCR_EL1 {:#x}, TPIDRRO_EL0 {:#x}",
+        r.sctlr,
+        r.cpacr,
+        r.mdscr,
+        r.tpidrro
     );
     crate::log_info!("usuario", "svc de EL0 atendido pela tabela de vetores");
     crate::log_info!(
@@ -308,11 +317,17 @@ pub fn contadores_do_usuario() -> (u64, Option<u64>) {
 /// núcleo sem a interface de sistema do rastro, o bit é RES0.
 pub const CPACR_DO_KERNEL: u64 = 0;
 
+/// O `MDSCR_EL1` do kernel: só o `TDCC` — ver
+/// [`escrever_o_regime_deste_nucleo`]. O `MDE`, o `KDE` e o `SS` desligados:
+/// nenhum ponto de parada nem de observação do hardware, nenhuma exceção de
+/// depuração no EL1, nenhum passo.
+pub const MDSCR_DO_KERNEL: u64 = MDSCR_TDCC;
+
 /// Escreve o regime deste núcleo: o que vale para todo processo que roda
 /// nele, e que o kernel não herda do firmware. Chamada por [`init`], no
 /// primeiro núcleo, e por `smp::entrada_secundaria`, em cada um que acorda
-/// — que já entra com os dois valores pelo bloco de partida —, antes do
-/// primeiro processo.
+/// — que já entra com o `SCTLR_EL1` e o `CPACR_EL1` pelo bloco de partida
+/// —, antes do primeiro processo.
 ///
 /// - **O `CPACR_EL1` em zero** ([`CPACR_DO_KERNEL`]): o FP/SIMD preso no EL0
 ///   e no EL1, e nunca religado. O processo que toca um registrador `v`
@@ -327,18 +342,34 @@ pub const CPACR_DO_KERNEL: u64 = 0;
 /// - **O `SCTLR_EL1` inteiro** ([`super::mmu::SCTLR_DO_KERNEL`]), o mesmo
 ///   que o primeiro núcleo escreveu ao ligar a MMU: o `UMA`, o `UCI`, o
 ///   `DZE` e o `UCT` desligados, entre outros — ver lá.
+/// - **O `MDSCR_EL1` do kernel** ([`MDSCR_DO_KERNEL`]): o `TDCC` ligado
+///   prende no EL1 o canal do depurador do EL0 — o `MDCCSR_EL0`, o
+///   `DBGDTR_EL0`, o `DBGDTRRX_EL0` e o `DBGDTRTX_EL0` —, e o processo que
+///   o toca morre da classe 0x18 (`msr_mrs_trap`). Desligado, sem
+///   depurador do outro lado, o `TXfull` que um processo ligasse escrevendo
+///   o `DBGDTRTX_EL0` o seguinte via — um bit por núcleo, entre titulares,
+///   por fora do gate; é o par do `DR7` do x86 (o item 8 do adversário do
+///   lote B3 do #448). O `MDE`, o `KDE` e o `SS` desligados: um firmware ou
+///   um depurador que os deixasse ligados não arma nada no kernel.
+/// - **O `TPIDRRO_EL0` em zero**, por higiene: o EL0 o lê, e o kernel não o
+///   usa — nenhum valor dele vai a um processo.
 pub fn escrever_o_regime_deste_nucleo() {
-    // SAFETY: os dois valores são os do kernel: o `SCTLR_EL1` mantém a
+    // SAFETY: os quatro valores são os do kernel: o `SCTLR_EL1` mantém a
     // tradução e os caches ligados, como já estão, e só fecha o que o EL0
     // alcança; o `CPACR_EL1` em zero prende o FP/SIMD, que o kernel
-    // *soft-float* não usa. O `isb` faz a instrução seguinte já ver os dois.
+    // *soft-float* não usa; o `MDSCR_EL1` só prende o canal do depurador do
+    // EL0 e desliga o que o kernel não usa; o `TPIDRRO_EL0` o kernel não
+    // lê. O `isb` faz a instrução seguinte já ver os quatro.
     unsafe {
         asm!(
             "msr cpacr_el1, {cpacr}",
             "msr sctlr_el1, {sctlr}",
+            "msr mdscr_el1, {mdscr}",
+            "msr tpidrro_el0, xzr",
             "isb",
             cpacr = in(reg) CPACR_DO_KERNEL,
             sctlr = in(reg) super::mmu::SCTLR_DO_KERNEL,
+            mdscr = in(reg) MDSCR_DO_KERNEL,
             options(nomem, nostack, preserves_flags)
         )
     };
@@ -359,26 +390,83 @@ pub fn regimes_escritos_de_teste(cpu: usize) -> u64 {
     REGIMES.get(cpu).map_or(0, |r| r.load(Ordering::SeqCst))
 }
 
-/// Só para a suíte: o `SCTLR_EL1` e o `CPACR_EL1` são os do kernel? Do
+/// Só para a suíte: o regime deste núcleo está como o kernel o escreve? Do
 /// `SCTLR_EL1`, os bits que ele decide (`mmu::SCTLR_CONFERIDOS`); do
-/// `CPACR_EL1`, o `FPEN`, que prende o FP/SIMD.
+/// `CPACR_EL1`, o `FPEN`, que prende o FP/SIMD; do `MDSCR_EL1`, os quatro
+/// do depurador, pelo nome — o `TDCC` ligado, o `MDE`, o `KDE` e o `SS`
+/// desligados —; e o `TPIDRRO_EL0` em zero. Devolve o primeiro que diverge.
 #[cfg(feature = "modo-teste")]
-pub fn regime_como_o_kernel_escreve((sctlr, cpacr): (u64, u64)) -> bool {
+pub fn regime_como_o_kernel_escreve(r: Regime) -> Result<(), &'static str> {
     const FPEN: u64 = 0b11 << 20;
     let conferidos = super::mmu::SCTLR_CONFERIDOS;
-    sctlr & conferidos == super::mmu::SCTLR_DO_KERNEL & conferidos
-        && cpacr & FPEN == CPACR_DO_KERNEL & FPEN
+    if r.sctlr & conferidos != super::mmu::SCTLR_DO_KERNEL & conferidos {
+        return Err("o SCTLR_EL1");
+    }
+    if r.cpacr & FPEN != CPACR_DO_KERNEL & FPEN {
+        return Err("o FPEN do CPACR_EL1");
+    }
+    for (nome, bit, ligado) in [
+        ("o TDCC do MDSCR_EL1", MDSCR_TDCC, true),
+        ("o MDE do MDSCR_EL1", MDSCR_MDE, false),
+        ("o KDE do MDSCR_EL1", MDSCR_KDE, false),
+        ("o SS do MDSCR_EL1", MDSCR_SS, false),
+    ] {
+        if (r.mdscr & bit != 0) != ligado {
+            return Err(nome);
+        }
+    }
+    if r.tpidrro != 0 {
+        return Err("o TPIDRRO_EL0 fora de zero");
+    }
+    Ok(())
 }
 
-/// Só para a suíte: suja o regime deste núcleo como um firmware que o
-/// deixasse aberto — o `CPACR_EL1` com o `FPEN` em 11, como o EDK2 o deixa,
-/// e o `SCTLR_EL1` com o `UMA`, o `UCI`, o `DZE` e o `UCT` ligados —, e o
-/// escreve de novo por [`escrever_o_regime_deste_nucleo`]; devolve o regime
-/// sujo e o de depois. Tudo mascarado: nenhum processo roda neste núcleo no
-/// meio, e o kernel não usa o FP/SIMD nem os acessos do EL0.
+/// Só para a suíte: o regime sujo de [`sujar_e_reescrever_o_regime_de_teste`]
+/// aparece inteiro na leitura — cada item que ela suja, sujo —, para que o
+/// "depois" do caso prove a reescrita de cada um, e não só a do primeiro que
+/// diverge; um núcleo, ou um emulador, que ignorasse a escrita de um deles
+/// não passa calado. É o par do x86, onde a leitura do `sysenter` passava
+/// pela mesma pergunta que a escrita (o achado 2 do adversário do lote B4
+/// do #448); aqui nada é condicional. Devolve o primeiro item que não
+/// apareceu sujo.
 #[cfg(feature = "modo-teste")]
-pub fn sujar_e_reescrever_o_regime_de_teste() -> ((u64, u64), (u64, u64)) {
-    const ABERTOS: u64 = (1 << 9) | (1 << 14) | (1 << 15) | (1 << 26);
+pub fn regime_sujo_inteiro(r: Regime) -> Result<(), &'static str> {
+    const FPEN: u64 = 0b11 << 20;
+    if r.cpacr & FPEN != FPEN {
+        return Err("o CPACR_EL1 sujo sem o FPEN em 11");
+    }
+    if r.sctlr & SCTLR_ABERTO_DE_TESTE != SCTLR_ABERTO_DE_TESTE {
+        return Err("o SCTLR_EL1 sujo sem o UMA, o DZE, o UCT ou o UCI");
+    }
+    if r.mdscr & (MDSCR_TDCC | MDSCR_MDE | MDSCR_KDE) != MDSCR_MDE | MDSCR_KDE {
+        return Err("o MDSCR_EL1 sujo com o TDCC, ou sem o MDE ou o KDE");
+    }
+    if r.tpidrro != TPIDRRO_SUJO_DE_TESTE {
+        return Err("o TPIDRRO_EL0 sujo sem a marca");
+    }
+    Ok(())
+}
+
+/// Só para a suíte: os bits do `SCTLR_EL1` que o regime sujo liga, e que o
+/// kernel desliga — o `UMA`, o `DZE`, o `UCT` e o `UCI`.
+#[cfg(feature = "modo-teste")]
+const SCTLR_ABERTO_DE_TESTE: u64 = (1 << 9) | (1 << 14) | (1 << 15) | (1 << 26);
+
+/// Só para a suíte: a marca do `TPIDRRO_EL0` sujo.
+#[cfg(feature = "modo-teste")]
+const TPIDRRO_SUJO_DE_TESTE: u64 = 0x5EC4_E7D0_D0E5_A1A1;
+
+/// Só para a suíte: suja o regime deste núcleo como um firmware que o
+/// deixasse aberto — o `CPACR_EL1` com o `FPEN` em 11, como o EDK2 o deixa;
+/// o `SCTLR_EL1` com o `UMA`, o `UCI`, o `DZE` e o `UCT` ligados; o
+/// `MDSCR_EL1` sem o `TDCC` e com o `MDE` e o `KDE`; e o `TPIDRRO_EL0` com
+/// uma marca —, e o escreve de novo por [`escrever_o_regime_deste_nucleo`];
+/// devolve o regime sujo e o de depois. Tudo mascarado: nenhum processo roda
+/// neste núcleo no meio, e o kernel não usa o FP/SIMD, os acessos do EL0
+/// nem o depurador — o `D` do `DAIF` segue mascarado no EL1, e nenhum ponto
+/// de parada do hardware está armado.
+#[cfg(feature = "modo-teste")]
+pub fn sujar_e_reescrever_o_regime_de_teste() -> (Regime, Regime) {
     crate::arch::sem_interrupcoes(|| {
         // SAFETY: só até a linha seguinte, mascarado — ver acima. O
         // `SCTLR_EL1` sujo mantém a tradução e os caches como estão.
@@ -386,9 +474,13 @@ pub fn sujar_e_reescrever_o_regime_de_teste() -> ((u64, u64), (u64, u64)) {
             asm!(
                 "msr cpacr_el1, {cpacr}",
                 "msr sctlr_el1, {sctlr}",
+                "msr mdscr_el1, {mdscr}",
+                "msr tpidrro_el0, {tpidrro}",
                 "isb",
                 cpacr = in(reg) 0b11u64 << 20,
-                sctlr = in(reg) super::mmu::SCTLR_DO_KERNEL | ABERTOS,
+                sctlr = in(reg) super::mmu::SCTLR_DO_KERNEL | SCTLR_ABERTO_DE_TESTE,
+                mdscr = in(reg) MDSCR_MDE | MDSCR_KDE,
+                tpidrro = in(reg) TPIDRRO_SUJO_DE_TESTE,
                 options(nomem, nostack, preserves_flags)
             )
         };
@@ -398,23 +490,55 @@ pub fn sujar_e_reescrever_o_regime_de_teste() -> ((u64, u64), (u64, u64)) {
     })
 }
 
-/// O `SCTLR_EL1` e o `CPACR_EL1` deste núcleo, como estão agora.
-pub fn ler_o_regime_deste_nucleo() -> (u64, u64) {
-    let (sctlr, cpacr): (u64, u64);
-    // SAFETY: leituras de dois registradores do EL1, sem efeito.
+/// O `TDCC` do `MDSCR_EL1`: o acesso do EL0 ao canal do depurador vira uma
+/// exceção para o EL1.
+const MDSCR_TDCC: u64 = 1 << 12;
+/// O `KDE` do `MDSCR_EL1`: as exceções de depuração no próprio EL1.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+const MDSCR_KDE: u64 = 1 << 13;
+/// O `MDE` do `MDSCR_EL1`: os pontos de parada e de observação do hardware.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+const MDSCR_MDE: u64 = 1 << 15;
+/// O `SS` do `MDSCR_EL1`: o passo do hardware.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+const MDSCR_SS: u64 = 1;
+
+/// O regime de um núcleo do ARM: o que vale para todo processo que roda
+/// nele, e que o kernel escreve em vez de herdar — ver
+/// [`escrever_o_regime_deste_nucleo`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Regime {
+    pub sctlr: u64,
+    pub cpacr: u64,
+    pub mdscr: u64,
+    pub tpidrro: u64,
+}
+
+/// O regime deste núcleo, como está agora.
+pub fn ler_o_regime_deste_nucleo() -> Regime {
+    let (sctlr, cpacr, mdscr, tpidrro): (u64, u64, u64, u64);
+    // SAFETY: leituras de três registradores do EL1 e de um do EL0, sem
+    // efeito.
     unsafe {
         asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack, preserves_flags));
         asm!("mrs {}, cpacr_el1", out(reg) cpacr, options(nomem, nostack, preserves_flags));
+        asm!("mrs {}, mdscr_el1", out(reg) mdscr, options(nomem, nostack, preserves_flags));
+        asm!("mrs {}, tpidrro_el0", out(reg) tpidrro, options(nomem, nostack, preserves_flags));
     }
-    (sctlr, cpacr)
+    Regime {
+        sctlr,
+        cpacr,
+        mdscr,
+        tpidrro,
+    }
 }
 
-/// O `SCTLR_EL1` e o `CPACR_EL1` que o primeiro núcleo trouxe do firmware,
-/// lidos na primeira função Rust (`inicio_aarch64`), antes de a MMU do
-/// kernel ligar. Só para o log do boot ([`init`]): no boot cru, é o reset do
-/// processador; pela UEFI, o que o EDK2 deixou, menos o `M` e o `C`, que o
+/// O regime que o primeiro núcleo trouxe do firmware, lido na primeira
+/// função Rust (`inicio_aarch64`), antes de a MMU do kernel ligar. Só para
+/// o log do boot ([`init`]): no boot cru, é o reset do processador; pela
+/// UEFI, o que o EDK2 deixou, menos o `M` e o `C` do `SCTLR_EL1`, que o
 /// iniciador desliga antes do salto.
-static REGIME_DO_FIRMWARE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static REGIME_DO_FIRMWARE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 /// [`REGIME_DO_FIRMWARE`] já foi guardado?
 static REGIME_GUARDADO: AtomicBool = AtomicBool::new(false);
@@ -422,19 +546,27 @@ static REGIME_GUARDADO: AtomicBool = AtomicBool::new(false);
 /// Guarda o regime que o firmware deixou neste núcleo — ver
 /// [`REGIME_DO_FIRMWARE`]. Chamada uma vez, no começo do boot.
 pub fn guardar_o_regime_do_firmware() {
-    let (sctlr, cpacr) = ler_o_regime_deste_nucleo();
-    REGIME_DO_FIRMWARE[0].store(sctlr, Ordering::Relaxed);
-    REGIME_DO_FIRMWARE[1].store(cpacr, Ordering::Relaxed);
+    let r = ler_o_regime_deste_nucleo();
+    for (guardado, valor) in REGIME_DO_FIRMWARE
+        .iter()
+        .zip([r.sctlr, r.cpacr, r.mdscr, r.tpidrro])
+    {
+        guardado.store(valor, Ordering::Relaxed);
+    }
     REGIME_GUARDADO.store(true, Ordering::Release);
 }
 
 /// O regime que o firmware deixou — ver [`REGIME_DO_FIRMWARE`].
-fn regime_do_firmware() -> Option<(u64, u64)> {
+fn regime_do_firmware() -> Option<Regime> {
     REGIME_GUARDADO.load(Ordering::Acquire).then(|| {
-        (
-            REGIME_DO_FIRMWARE[0].load(Ordering::Relaxed),
-            REGIME_DO_FIRMWARE[1].load(Ordering::Relaxed),
-        )
+        let [sctlr, cpacr, mdscr, tpidrro] =
+            core::array::from_fn(|i| REGIME_DO_FIRMWARE[i].load(Ordering::Relaxed));
+        Regime {
+            sctlr,
+            cpacr,
+            mdscr,
+            tpidrro,
+        }
     })
 }
 
@@ -463,12 +595,55 @@ pub unsafe fn entrar(entrada: u64, pilha: u64) -> ! {
             // "unknown", com o `pc` apontando para cá.
             //
             // Passar para `SP_EL1` primeiro resolve, e a pilha de exceção é um
-            // lugar perfeitamente válido para as quatro instruções que faltam.
+            // lugar perfeitamente válido para as instruções que faltam —
+            // nenhuma delas usa a pilha.
             "msr spsel, #1",
 
             "msr sp_el0, {pilha}",
             "msr elr_el1, {entrada}",
             "msr spsr_el1, {spsr}",
+
+            // O processo novo não recebe o que o kernel deixou nos
+            // registradores — endereços do kernel, temporários do caminho
+            // do fio —, como na troca de imagem
+            // (`contexto::redirecionar_para`): o `TPIDR_EL0` e os `x0`–`x30`
+            // em zero (o item 5 do adversário do lote B3 do #448). Nenhum
+            // programa recebe argumento em registrador na entrada. Os três
+            // operandos já foram escritos nos registradores de sistema, e com
+            // as IRQs mascaradas nenhuma troca cai entre o zero do
+            // `TPIDR_EL0` e o `eret`: o fio o leva zerado.
+            "msr tpidr_el0, xzr",
+            "mov x0, xzr",
+            "mov x1, xzr",
+            "mov x2, xzr",
+            "mov x3, xzr",
+            "mov x4, xzr",
+            "mov x5, xzr",
+            "mov x6, xzr",
+            "mov x7, xzr",
+            "mov x8, xzr",
+            "mov x9, xzr",
+            "mov x10, xzr",
+            "mov x11, xzr",
+            "mov x12, xzr",
+            "mov x13, xzr",
+            "mov x14, xzr",
+            "mov x15, xzr",
+            "mov x16, xzr",
+            "mov x17, xzr",
+            "mov x18, xzr",
+            "mov x19, xzr",
+            "mov x20, xzr",
+            "mov x21, xzr",
+            "mov x22, xzr",
+            "mov x23, xzr",
+            "mov x24, xzr",
+            "mov x25, xzr",
+            "mov x26, xzr",
+            "mov x27, xzr",
+            "mov x28, xzr",
+            "mov x29, xzr",
+            "mov x30, xzr",
             "eret",
             pilha = in(reg) pilha,
             entrada = in(reg) entrada,

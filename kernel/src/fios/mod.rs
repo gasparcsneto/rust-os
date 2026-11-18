@@ -2961,12 +2961,16 @@ pub unsafe fn selecionar() -> Option<Troca> {
     if fio_atual.estado == Estado::Rodando {
         fio_atual.estado = Estado::Pronto;
     }
+    #[cfg(feature = "modo-teste")]
+    let sai = fio_atual.id.numero();
     let de: *mut Contexto = &mut fio_atual.contexto;
 
     let (para, espaco): (*const Contexto, u64) = {
         let fio = e.fios[proximo].as_mut().expect("vaga conferida acima");
         fio.estado = Estado::Rodando;
         fio.escalonamentos += 1;
+        #[cfg(feature = "modo-teste")]
+        contar_a_troca_do_par(sai, fio.id.numero());
         // A posse do que entra começa agora, sob a trava: nenhum outro
         // núcleo o escolhe daqui em diante. A do que sai **continua** — ela
         // só cai em `troca_concluida`, quando o contexto dele estiver
@@ -3645,6 +3649,43 @@ pub fn esperando_de_teste(id: u64) -> bool {
 #[cfg(feature = "modo-teste")]
 pub fn escalonamentos_de_teste() -> u64 {
     com_escalonador(|e| e.fio_atual().map_or(0, |f| f.escalonamentos))
+}
+
+/// Só para a suíte: os dois fios do par que [`vigiar_o_par_de_teste`] vigia
+/// — zero, nenhum.
+#[cfg(feature = "modo-teste")]
+static PAR_VIGIADO: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Só para a suíte: quantas vezes um núcleo passou de um fio do par vigiado
+/// direto ao outro, desde a última chamada de [`vigiar_o_par_de_teste`].
+#[cfg(feature = "modo-teste")]
+static TROCAS_DO_PAR: AtomicU64 = AtomicU64::new(0);
+
+/// Só para a suíte, na escolha de [`selecionar`]: conta a troca de um fio do
+/// par vigiado direto ao outro.
+#[cfg(feature = "modo-teste")]
+fn contar_a_troca_do_par(sai: u64, entra: u64) {
+    let (a, b) = (
+        PAR_VIGIADO[0].load(Ordering::Relaxed),
+        PAR_VIGIADO[1].load(Ordering::Relaxed),
+    );
+    if a != 0 && b != 0 && ((sai, entra) == (a, b) || (sai, entra) == (b, a)) {
+        TROCAS_DO_PAR.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Só para a suíte: passa a vigiar o par de fios `a` e `b` — a conta das
+/// trocas em que um núcleo passa de um deles direto ao outro, sem outro fio
+/// no meio —, ou para de vigiar, com zero; devolve a conta desde a chamada
+/// anterior, e a recomeça. É como o caso do par prova que o receptor e o
+/// emissor se revezaram, e não só que fizeram as chamadas todas (um
+/// informativo do adversário do lote B4 do #448). Duas leituras relaxadas
+/// por troca, e só com o `modo-teste`.
+#[cfg(feature = "modo-teste")]
+pub fn vigiar_o_par_de_teste(a: u64, b: u64) -> u64 {
+    PAR_VIGIADO[0].store(a, Ordering::Relaxed);
+    PAR_VIGIADO[1].store(b, Ordering::Relaxed);
+    TROCAS_DO_PAR.swap(0, Ordering::Relaxed)
 }
 
 /// Só para a suíte: prende o fio `id` ao núcleo `cpu`, ou o solta com
