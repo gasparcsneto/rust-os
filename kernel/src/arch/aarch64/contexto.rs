@@ -226,7 +226,10 @@ pub fn ceder_cpu() {
     }
     // SAFETY: `svc` é uma chamada de sistema; o handler de exceções síncronas
     // reconhece o imediato 0 como pedido de cessão e retorna normalmente.
-    unsafe { asm!("svc #0", options(nomem, nostack)) };
+    // Sem o `nomem`: do outro lado do `svc` outro fio rodou — e escreveu —, e
+    // o compilador não pode guardar num registrador, através dele, o que leu
+    // da memória antes, nem adiar para depois dele o que escreveu.
+    unsafe { asm!("svc #0", options(nostack)) };
 }
 
 /// O código corrente está num handler de exceção — usando `SP_EL1`?

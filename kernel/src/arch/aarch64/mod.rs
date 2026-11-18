@@ -601,9 +601,12 @@ pub fn reavisos_remotos() -> u64 {
 }
 
 /// Liga as IRQs deste núcleo.
+///
+/// Sem o `nomem`, como todas as escritas do `DAIF` deste backend: a máscara
+/// é também uma barreira para o compilador — ver [`mascarar_irqs`].
 pub fn ligar_interrupcoes() {
     // SAFETY: há tabela de vetores instalada e um handler para toda classe.
-    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+    unsafe { asm!("msr daifclr, #2", options(nostack)) };
 }
 
 /// Instala a tabela de vetores de exceção em `VBAR_EL1`.
@@ -639,9 +642,9 @@ pub fn init_interrupcoes() {
     crate::irq::nomear(gic::INTID_TIMER as usize, "timer-generico");
 
     // Desmascara IRQs (bit I do DAIF). A partir daqui o timer preempta o
-    // kernel periodicamente.
+    // kernel periodicamente. Sem o `nomem` — ver [`mascarar_irqs`].
     // SAFETY: há tabela de vetores instalada e um handler para toda classe.
-    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+    unsafe { asm!("msr daifclr, #2", options(nostack)) };
 
     crate::log_info!("irq", "GIC ativo, timer a {} Hz", efetiva);
 }
@@ -881,11 +884,26 @@ pub fn interrupcoes_habilitadas() -> bool {
 /// `daifset #2` liga *apenas* o bit I, numa instrução só. Não há aritmética
 /// de bits para errar aqui — o `#2` é o seletor de campo que o assembler
 /// entende —, então o crate não teria o que melhorar.
+///
+/// # Por que sem o `nomem`
+///
+/// Porque a máscara tem de ser também uma barreira para o compilador. Com o
+/// `nomem`, o `asm!` dizia que não toca a memória, e o compilador podia
+/// passar um acesso para o outro lado dele: a pergunta de
+/// [`dormir_se_ocioso`] — o atômico que o chamado do coletor escreve —
+/// podia subir para antes do `msr daifset`, e a janela que ela fecha
+/// voltava; um acesso de uma seção de [`sem_interrupcoes`] podia sair dela.
+/// Sem ele, a instrução conta como um acesso à memória, e nenhum outro a
+/// atravessa — como o `cli` e o `sti` do crate `x86_64` (o item 3 do
+/// adversário do lote B3 do #448). A desmontagem do kernel de produção em
+/// release, antes e depois, tem a mesma ordem — o `msr`, a pergunta, o
+/// `wfi` —: o compilador de hoje não movia, e agora não pode.
 fn mascarar_irqs() -> bool {
     let estavam_habilitadas = interrupcoes_habilitadas();
-    // SAFETY: mascarar IRQs não tem pré-condição; `nomem`/`nostack` informam
-    // ao compilador que não tocamos memória nem pilha.
-    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+    // SAFETY: mascarar IRQs não tem pré-condição; sem o `nomem`, o
+    // compilador não move acesso à memória através da instrução, e o
+    // `nostack` diz que ela não usa a pilha.
+    unsafe { asm!("msr daifset, #2", options(nostack)) };
     estavam_habilitadas
 }
 
@@ -896,8 +914,9 @@ fn mascarar_irqs() -> bool {
 /// seção crítica, e não da dele.
 fn restaurar_irqs(estavam_habilitadas: bool) {
     if estavam_habilitadas {
-        // SAFETY: mesma justificativa de `mascarar_irqs`.
-        unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+        // SAFETY: mesma justificativa de `mascarar_irqs`, e também sem o
+        // `nomem`: nenhum acesso da seção sai dela pelo fim.
+        unsafe { asm!("msr daifclr, #2", options(nostack)) };
     }
 }
 
@@ -989,7 +1008,7 @@ pub fn sem_interrupcoes<R>(f: impl FnOnce() -> R) -> R {
 /// não volta mais — o handler de pânico, que roda assim até reiniciar ou
 /// parar, como o caminho da falha fatal, que a exceção já mascara.
 ///
-/// Sem o `nomem` de [`mascarar_irqs`]: aqui a máscara também é uma barreira
+/// Sem o `nomem`, como [`mascarar_irqs`]: a máscara também é uma barreira
 /// para o compilador, que não passa um acesso à memória do relato para antes
 /// dela — como o `cli` do crate `x86_64`.
 pub fn mascarar_as_interrupcoes() {

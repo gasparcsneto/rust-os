@@ -445,8 +445,11 @@ pub fn atender_parada() {
 
 /// Para este núcleo, para sempre, com as IRQs mascaradas.
 pub fn parar_este_nucleo() -> ! {
-    // SAFETY: mascarar IRQs não tem pré-condição.
-    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+    // SAFETY: mascarar IRQs não tem pré-condição. Sem o `nomem`, como as
+    // outras escritas do `DAIF` (ver `mascarar_irqs`): o que o núcleo
+    // escreveu antes de parar — a marca em `PARADOS` — não passa para o
+    // outro lado da máscara.
+    unsafe { asm!("msr daifset, #2", options(nostack)) };
     loop {
         aarch64_cpu::asm::wfe();
     }
