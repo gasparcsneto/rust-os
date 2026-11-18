@@ -152,6 +152,13 @@ o papel de quem roda o programa:
 Sem curinga: a intenção é enumerada, uma a uma. O `notify` não pede
 permissão nenhuma — ele vai no pedido que a permissão já decide.
 
+O relógio de um programa é o `system.uptime`, uma decisão do gate, com a
+taxa do papel. O contador da CPU não é um relógio dele: desde o #451, o
+`rdtsc`, o `rdtscp` e o `rdpmc` no x86, e a leitura do `CNTVCT_EL0`, do
+`CNTPCT_EL0`, do `CNTFRQ_EL0` e dos contadores da PMU no ARM, são
+privilegiados, e o processo que os executa morre pela falha de proteção,
+como o que executa uma instrução privilegiada.
+
 ## O laço
 
 [`Laco`](../programas/src/laco.rs) é o canal de eventos do processo — a

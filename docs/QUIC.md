@@ -476,7 +476,7 @@ mudar. Para cada coisa que ela faz, a regra de hoje que a cobre:
 | Juntar duas origens numa conexão (RFC 9114 §3.3) | uma conexão por origem, a regra do HTTP/2 (README.md:4139-4143) | Não: a mesma regra |
 | Descobrir o HTTP/3 pelo `Alt-Svc` ou pelo registro HTTPS do DNS | o destino aprendido é decidido pelo gate como o número do DNS | Não **(minha leitura)**; o primeiro passo dispensa os dois |
 | Mandar dados no 0-RTT | o perfil: sem retomada, sem 0-RTT (`tls/src/lib.rs:48-49`; `sessao.rs:213`) | **[C]** — [R12-QUIC-0RTT](#r12-quic-0rtt) |
-| Medir o tempo de cada pacote | o `system.uptime`: plano de controle, uma ficha por leitura (`commands.rs:316-324`; `autorizacao.rs:2551`); no x86, o `rdtsc` no anel 3, fora do gate, até o endurecimento que o fecha (`kernel/src/arch/x86_64/mod.rs:331-332`) | **[C]** — [R12-QUIC-RELOGIO](#r12-quic-relogio) |
+| Medir o tempo de cada pacote | o `system.uptime`: plano de controle, uma ficha por leitura (`commands.rs:316-324`; `autorizacao.rs:2551`); no x86, o `rdtsc` no anel 3, fora do gate, até o endurecimento do #451, que o fechou (`kernel/src/arch/x86_64/mod.rs`, `fechar_os_contadores_ao_usuario`) | **[C]** — [R12-QUIC-RELOGIO](#r12-quic-relogio) |
 | Ler ou mandar vários datagramas numa decisão | não existe: um por `net.recv` e um por `net.send` (README.md:2700-2709) | [B], pelo precedente da janela do TCP (`pilha.rs:119-121`), com três condições: o lote decidido antes de mover qualquer datagrama, cada datagrama inteiro, cada um capturado (`captura.rs:38-41`); uma decisão que valesse para os que chegam depois seria cache — [C] |
 | Aceitar conexões (o Duke servidor) | não há entrada de rede para programas: o `net.connect` é de saída; só o kernel escuta, o canal do agente e o enlace | [C], e fora do assunto |
 
@@ -809,18 +809,24 @@ existem se alguém as quiser, e a recomendação delas é não.
   acaba em segundos, e com ela os outros pedidos de controle dos programas
   da mesma sessão: o experimento dos cookies o mostrou com o relógio civil
   (README.md:3926-3943). E havia um relógio fora do gate que o desenho não
-  previu: o kernel x86 não ligava o `CR4.TSD` — o `CR4` só ganha o SMEP
-  (`kernel/src/arch/x86_64/mod.rs:331-332`, `:375`) —, e o `rdtsc` roda no
-  anel 3: o contador de ciclos, sem decisão nem registro, numa frequência
-  que o programa só sabe calibrando contra o `system.uptime`. Nenhum dos
-  programas o usa, e nenhuma conferência o proibia. No ARM, o kernel não
-  escreve o `CNTKCTL_EL1`, e a leitura do `CNTVCT_EL0` no EL0 depende do
-  firmware **(a conferir)**. Fechar essa porta — o `CR4.TSD` ligado, o
-  acesso do EL0 aos contadores tirado — põe a máquina de acordo com o
-  modelo escrito: é endurecimento [B], no incremento seguinte do kernel,
-  e não espera esta decisão. A resolução do relógio que o programa ganha,
-  essa, é parte dela: um relógio de ciclos é a régua de um ataque de
-  tempo **(minha)**.
+  previu: o kernel x86 não ligava o `CR4.TSD` — o `CR4` só ganhava o SMEP
+  —, e o `rdtsc` rodava no anel 3: o contador de ciclos, sem decisão nem
+  registro, numa frequência que o programa só sabe calibrando contra o
+  `system.uptime`. Nenhum dos programas o usava, e nenhuma conferência o
+  proibia. No ARM, o kernel não escrevia o `CNTKCTL_EL1`, e a leitura do
+  `CNTVCT_EL0` no EL0 dependia do firmware. O endurecimento [B] do #451,
+  no lote B do #448, fechou essa porta, sem esperar esta decisão: o
+  `CR4.TSD` ligado e o `CR4.PCE` desligado em cada núcleo
+  (`kernel/src/arch/x86_64/mod.rs`, `fechar_os_contadores_ao_usuario`,
+  chamada de `usuario::ligar_neste_nucleo`); no ARM, o `CNTKCTL_EL1` e o
+  `PMUSERENR_EL0` em zero em cada núcleo
+  (`kernel/src/arch/aarch64/usuario.rs`, `fechar_os_contadores_neste_nucleo`,
+  no `init` e em `smp::entrada_secundaria`). Conferido no QEMU com o TCG:
+  o processo que lê o contador morre pela falha de proteção — no x86, o
+  #GP; no ARM, a exceção síncrona, com o ESR da leitura do `CNTVCT_EL0` —,
+  em cada núcleo. A resolução do relógio que o programa ganha é parte
+  desta decisão: um relógio de ciclos é a régua de um ataque de tempo
+  **(minha)**.
 - **A área de 5.3.** O Gate e a autorização: o que uma permissão revela,
   na (a); uma chamada fora do gate, na (b); o orçamento do gate, na (c).
 - **As alternativas.** (a) **(minha)** O instante no resultado do plano de

@@ -72,6 +72,7 @@ continuidade.
 | [AUD-ANEL](#aud-anel) | Os registros do boot que saem do anel antes do journal | auditoria (uma lacuna nova) | — | baixa: hoje o boot faz poucos registros antes do journal | [PERSISTENCIA](PERSISTENCIA.md#a-reconstrução-da-auditoria-no-boot-b4) |
 | [P-HISTORIA](#p-historia) | A história da autoridade que cresce sem fim | persistência (o formato da base) | — | baixa: depois de dezenas de milhares de operações, a persistência para, fechada | [PERSISTENCIA](PERSISTENCIA.md#como-ficou-76) |
 | [AUD-JUNTO](#aud-junto) | A decisão de uma mudança no mesmo registro do journal que ela, ou antes | persistência e auditoria (a garantia escrita) | — | baixa: uma queda entre os dois registros deixa no disco a decisão sem a mudança; e a decisão que sai do anel na janela, com a lacuna gravada antes por outro, deixa a mudança no disco só com a lacuna antes dela | [PERSISTENCIA](PERSISTENCIA.md#a-auditoria-no-journal), [README](../README.md#testes) |
+| [AUD-FALHA](#aud-falha) | A morte de um processo por uma falha, na auditoria | auditoria (um registro novo) | um sinal para o NSF | baixa: o NSF não vê um processo que sonda o kernel por falhas — o log e a contabilidade das falhas, sim | [README](../README.md#decisões-pendentes) |
 | [R13-CONSENT](#r13-consent) | O consentimento — a Pessoa perguntada, e o registro que ela lê | Policy e autorização; quem lê a auditoria | o título da fase 13 | baixa: um agente edita o campo que a Pessoa largou, sem perguntar; ela não lê o registro | [Roteiro](../README.md#roteiro), fase 13 |
 | [ALC-TEMP](#alc-temp) (DX-1) | A expansão temporária de alcance, por titular | Policy; autoridade dada por tempo | parte do consentimento | indireta: o acesso de uma hora vira linha da política até alguém tirá-la | [USABILIDADE](USABILIDADE.md#decisões-novas--para-quem-decide) |
 | [R13-DESFAZER](#r13-desfazer) | O desfazer | persistência e auditoria | fecha a fase 13 | nenhuma nova | [Roteiro](../README.md#roteiro), fase 13 |
@@ -126,9 +127,10 @@ executa](#as-que-o-coordenador-executa)).
    R12-IC-VALOR pedem. Abre o caminho do Secure Boot que a fase 14 deixou
    de fora, mas a recomendação o deixa para depois, como opção do
    operador.
-6. **AUD-ANEL, P-HISTORIA e AUD-JUNTO** — o lote rápido: exposição baixa,
-   poucas alternativas cada, e recomendações pequenas — as duas primeiras,
-   esperar medindo; a AUD-JUNTO, o padrão que o armazém já usa —; com os
+6. **AUD-ANEL, P-HISTORIA, AUD-JUNTO e AUD-FALHA** — o lote rápido:
+   exposição baixa, poucas alternativas cada, e recomendações pequenas —
+   as duas primeiras, esperar medindo; a AUD-JUNTO, o padrão que o armazém
+   já usa; a AUD-FALHA, deixar como está até o NSF pedir o sinal —; com os
    riscos, o impacto e o plano já escritos, decididas de uma vez.
 7. **R13-CONSENT**, com a **ALC-TEMP (DX-1)** — o título da fase 13;
    depende da DT-1. A DX-1 espera um consumidor: o consentimento é ele.
@@ -813,9 +815,15 @@ quem pede um processo dizendo o processo:
   ao fio definitivo, sob a mesma trava, e a desconta quando a vaga volta
   por falta de pilha;
 - a (5): a recusa da cota num `fork` grava o processo que bifurcou;
-- e falta a mitigação (3) da decisão do A1 — o nascimento que não acha
-  vaga, havendo morto por recolher, acorda o coletor —, que não exclui a
-  alternativa adotada: no incremento seguinte do kernel.
+- e a mitigação (3) da decisão do A1, que não exclui a alternativa
+  adotada, entrou depois, no lote B do #448: o nascimento que não acha
+  vaga, havendo morto por recolher, chama o coletor — e, pela mesma razão,
+  a recusa da cota com mortos do titular por recolher, na conta do gate e
+  na do nascimento —, e quem não nasceu não o espera: ele recolhe na volta
+  seguinte, sem esperar o tique, quando ganha a vez (*O chamado do
+  coletor*, em [Coordenação](../README.md#coordenação);
+  `kernel/src/fios/mod.rs`, `COLETOR_CHAMADO`). Não ajuda com o coletor
+  sem a vez, que é o que esta decisão pergunta.
 
 **As fechadas que ela toca.** A 14.1 (alternativa A, 7/11/2026) e a
 alternativa 1 do A1 (8/11/2026): a cota conta os zumbis e os mortos até o
@@ -1080,8 +1088,8 @@ inspecionável: nada de reinício automático quando a medição recusa.
 
 Na ordem recomendada. Cada uma: o problema, as alternativas, a
 recomendação provisória e o que destrava; as do lote rápido — a AUD-ANEL,
-a P-HISTORIA e a AUD-JUNTO — também os riscos, o impacto e o plano de
-validação, para se decidirem sem outra rodada.
+a P-HISTORIA, a AUD-JUNTO e a AUD-FALHA — também os riscos, o impacto e o
+plano de validação, para se decidirem sem outra rodada.
 
 ### AUD-ANEL
 
@@ -1281,6 +1289,54 @@ antes** — o que a CI 509 mostrou, no pareamento.
   e a decisão, e a perde junto com a decisão que sai do anel.
 - **Destrava.** Nada do roteiro; a documentação passa a dizer o que o
   código faz.
+
+### AUD-FALHA
+
+**A morte de um processo por uma falha, na auditoria** — do #451, no lote
+B do #448.
+
+- **O problema.** Um processo que lê o contador de ciclos — desde o #451,
+  privilegiado no anel 3 e no EL0 —, que executa uma instrução
+  privilegiada ou que lê a memória do kernel morre pela falha de proteção.
+  O log diz qual e onde (`processo morto por ... em pc=...`), e a
+  contabilidade das falhas a conta (`traps`), mas a auditoria não diz
+  nada: a morte por uma falha não é uma decisão, e nunca teve registro —
+  nem a saída normal de um processo tem (`kernel/src/usuario/mod.rs`, só o
+  log). O NSF, que lê a auditoria, não vê um processo que sonda o kernel
+  por falhas.
+- **A área de 5.3.** A semântica da auditoria: um registro novo, que não é
+  uma decisão.
+- **As alternativas.**
+  - (a) Deixar como está: o log e a contabilidade das falhas, sem
+    registro.
+  - (b) Um registro do kernel para toda morte por falha — um método novo,
+    com o processo, a falha e o pc. O registro não pode ser gravado no
+    tratador da exceção, e vai adiado, pelo coletor.
+  - (c) **(do especialista do lote)** Só as falhas de instrução
+    privilegiada e de contador, adiadas e com teto: menos volume, e uma
+    regra de seleção nova.
+- **Os riscos.** (a): o NSF segue cego às sondagens por falha. (b) e (c):
+  um método novo na auditoria, que o NSF, o `audit.verify` e a
+  reconstrução do boot precisam reconhecer; o volume — um processo que
+  lança filhos que falham em série enche o anel, limitado pela cota de
+  processos do titular —; e o registro adiado, que uma queda entre a morte
+  e a gravação perde.
+- **O impacto.** (b) e (c): `politica::auditoria` (o método), os
+  tratadores das exceções nas duas arquiteturas e a fila até o coletor
+  (`traps`, `fios`), o NSF (`seguranca`, o sinal), os casos `contador:` e
+  os das exceções do usuário que o lote B2 acrescenta. (a): nada.
+- **O plano de validação.** (b) e (c): os casos `contador:` e os das
+  exceções do usuário conferem o registro, com o processo e a falha; as
+  mutações — o registro ausente, e o registro sem o processo —; a cadeia,
+  a adoção no boot e o volume sob uma rajada de mortes; as duas
+  arquiteturas.
+- **A recomendação provisória.** (a) agora; (c) se o NSF precisar do
+  sinal. Antes do lote B2, uma exceção do anel 3 que não fosse #GP nem #PF
+  parava a máquina — e com ela o fim da auditoria que ainda não tinha ido
+  ao journal —; o lote B2 a faz matar o processo, como as outras, e é por
+  ele que a morte por falha fica um evento comum, que esta decisão
+  pergunta se a auditoria grava.
+- **Destrava.** Nada do roteiro; um sinal novo para o NSF.
 
 ### R13-CONSENT
 
@@ -1702,8 +1758,8 @@ como [C].
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
 | [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728` |
-| [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | no incremento seguinte |
-| [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | no incremento seguinte |
+| [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448 |
+| [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
 | [SDK-CANAL](#sdk-canal) (DC-1′) | o canal sem nome | documentado, até um consumidor pedir |
 | [R12-IC-NOS](#r12-ic-nos) | os nós da rede principal achados pela árvore de estado, e escritos na política pelo administrador | no roteiro da fase 12, quando houver um consumidor |
@@ -1808,7 +1864,17 @@ pendência #298: o resto do N6.
 - **O que não se propõe.** A (c), **(minha)**, um resumo com chave — um
   MAC com uma chave derivada da do Duke —: uma chave nova, e a custódia
   dela, seria [C].
-- **O estado.** No incremento seguinte.
+- **O estado.** Feito, no lote B do #448: `autorizacao::recusar_sem_login`
+  não recebe mais os parâmetros, e todo registro de quem não entrou leva o
+  resumo do vazio — o tipo impede um caminho sem login de gravar um
+  resumo. O caso `consoles: sem ninguem, o comando vai a auditoria sem o
+  resumo dos parametros; com alguem, com ele` digita o mesmo comando com
+  parâmetros diferentes, e com uma senha depois do nome, e confere o mesmo
+  registro, sem o resumo do que se digitou. Uma exceção ao "o mesmo
+  registro": a troca da própria senha, `senha` com um parâmetro, sem
+  ninguém entrado, não grava nada, e sem parâmetro grava — o registro muda
+  com a presença do parâmetro, e não com o valor, e não é um oráculo; o
+  texto que diz o contrário se acerta no lote B2.
 
 ### A9-RESUMO
 
@@ -1824,15 +1890,37 @@ adversário do passo 1.
   evento](SEGURANCA.md#o-modelo-de-evento)).
 - **O que se faz.** O resumo de 16 dígitos, 64 bits. O texto do detalhe
   da auditoria não é contrato (SDK.md:88-93). Mudam junto: o
-  `resumo_e_editor` (`politica/src/auditoria.rs:309`), que só reconhece
+  `resumo_e_editor` (`politica/src/auditoria.rs`), que só reconhecia
   um resumo de 8 dígitos, e é por onde o NSF lê o resumo e o editor de uma
-  descrição (`seguranca/src/grafo.rs:405-409`); e a conta do teto de 96
-  bytes, medida — a descrição já
+  descrição (`seguranca/src/grafo.rs`, `o_mesmo_programa`); e a conta do
+  teto de 96 bytes, medida — a descrição já
   encolhe o nome e o editor antes do motivo. As descrições já gravadas, de
   8 dígitos, ficam no journal da auditoria: o leitor continua a
   reconhecê-las. Este dossiê concorda com a classificação: a descrição diz
   a mesma coisa, com mais bits.
-- **O estado.** No incremento seguinte.
+- **O estado.** Feito, no lote B do #448:
+  - a largura mora em `politica::auditoria` (`DIGITOS_DO_RESUMO`,
+    `comeco_do_resumo`), e o kernel a usa na descrição e no nascimento;
+  - o leitor (`forma_do_resumo`, dentro de `resumo_e_editor`) aceita 8 e
+    16 dígitos;
+  - o NSF compara dois resumos do mesmo tamanho inteiros, e um de 8 com um
+    de 16 pelos 8 do começo — o que o de 8 diz (`o_mesmo_resumo`): o par
+    misturado só se forma com o journal de antes lido sem o `policy.load`
+    do boot seguinte;
+  - o teto, medido ("O pior caso, medido", em
+    `politica::auditoria::detalhe_composto`): o detalhe cabe sempre, e o
+    que encolhe é o texto, 8 bytes antes — o motivo de toda falta da
+    procedência fica reconhecido enquanto os dígitos do fio e da decisão
+    somam até 20 (eram 28), e mais registros abreviam o nome do programa
+    (`(? <resumo>`).
+
+  O adversário do lote achou duas consequências, corrigidas no lote B2: o
+  registro do firewall, que o NSF reconhece pelo número da regra no fim do
+  texto, perde o número antes — o NSF deixava de ver o bloqueio com os
+  números grandes —, e a descrição inteira de 8 dígitos seguida da
+  inteira de 16 do mesmo executável ainda vira uma troca no grafo. Fica
+  de fora, para um próximo lote [B] do mesmo tipo, o atestado do enlace
+  (`pela relacao <8>, atestado <8>`), que vai à auditoria com 32 bits.
 
 ### DN-4
 

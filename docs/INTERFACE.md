@@ -247,8 +247,9 @@ texto em `politica::manifesto`, lido e testado no hospedeiro.
   anterior não buscou sai na troca: era dela, com o manifesto dela.
   Encontrado relendo a 7.3 — como estava, a imagem nova a buscava.
 - A auditoria grava o programa em cada decisão de processo: "pelo processo
-  N (nome resumo): …", com os quatro primeiros bytes do resumo — o nome é o
-  que o programa diz ser, o resumo é o que ele é.
+  N (nome resumo): …", com os oito primeiros bytes do resumo, em 16
+  dígitos hexadecimais (eram quatro, até o A9-RESUMO) — o nome é o que o
+  programa diz ser, o resumo é o que ele é.
 - `cargo xtask elf` confere que todo programa do disco declara um
   manifesto, menos `anonimo`, que existe para provar o padrão.
 

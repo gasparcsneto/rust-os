@@ -237,7 +237,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — encerrado ou contido, o editor, o papel, a cota —, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
+| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — o journal recusado, encerrado ou contido, o editor, o papel, a cota, também a contada de novo no nascimento — e em quem pediu encerrado na última palavra, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -5601,7 +5601,15 @@ registro de cada uma no ponto em que nasceu.
   desligar, o do botão inclusive, ficam recusados antes do journal até o
   próximo boot. Tentar criá-lo de novo no pedido é simples, mas a suíte
   não tem como tirar o fio do boot para exercitar a tentativa sem um
-  caminho de saída só de teste no laço dele, e a recusa é o lado seguro;
+  caminho de saída só de teste no laço dele, e a recusa é o lado seguro.
+  Revisto no lote B do #448, com o gancho de teste que faria a criação do
+  boot falhar numa compilação da suíte: a suíte sobe uma vez por parte, e
+  um boot sem o fio mudaria o que os casos da energia conferem — `energia:
+  o reinicio com a tabela de fios cheia` confere que o fio é o do boot,
+  parado, e é por ele que o pedido passa com a tabela cheia —; uma
+  compilação à parte, com uma rodada própria, seria infraestrutura nova
+  para exercitar uma tentativa cujo lado seguro já é a recusa. Fica como
+  está;
   os **achados 5 e 7, informativos**, ficam como estão: o isolamento que
   chega entre a última palavra do `fork` e o registro do nascimento é
   gravado antes do `filho N` — na cadeia, o filho parece nascer de um pai
@@ -5678,7 +5686,7 @@ registro de cada uma no ponto em que nasceu.
   incremento [B] de 17 de novembro de 2026 — as mesmas perguntas do gate,
   refeitas onde a janela acaba, e o texto do detalhe de uma recusa;
   nenhuma regra nova, nenhuma autoridade, e nada novo na auditoria além do
-  detalhe:
+  detalhe e das recusas que antes não existiam:
   (f) a confiança no editor da imagem nova, no ponto sem volta do `exec`:
   a conferência do código a pergunta antes de preparar a imagem — o
   BLAKE2s, o ELF, o espaço novo: milissegundos numa imagem grande —, e a
@@ -5708,8 +5716,8 @@ registro de cada uma no ponto em que nasceu.
   novo do `exec` —, o detalhe é "processo encerrado"
   (`contencao::PROCESSO_ENCERRADO`), com o mesmo código; e a pergunta vem
   antes da contenção, e o encerrado isolado também ouve que foi
-  encerrado. O código é o contrato; o detalhe é texto (o `detail` do
-  `docs/SDK.md`);
+  encerrado. O código é o contrato; o texto do detalhe não é (*O que não
+  é contrato*, em `docs/SDK.md`);
   (i) a rodada da ponta que passava vazia, nos casos `troca:`: quando a
   volta pausada era adiada — `CONFLICT`, o coletor com a ordem —, a
   decisão de novo não rodava, e o caso aceitava a recusa do gate na volta
@@ -5734,10 +5742,12 @@ registro de cada uma no ponto em que nasceu.
   última palavra —; as da última palavra que são o comando decidido de
   novo, e a da confiança no editor do código, continuam explicadas
   (`usuario::NaoLancou::Recusado`);
-  (k) quem chama o lançamento pelo kernel: o `xtask` confere que o
-  `usuario::lancar_conferido` só aparece no handler do `user.run` (e onde
-  se define); o `usuario::lancar`, com o caminho, em lugar nenhum fora da
-  suíte; o `lancar_como` e o `lancar_pelo_kernel`, só em `usuario/mod.rs`;
+  (k) quem chama o lançamento pelo kernel: o `xtask` confere, arquivo por
+  arquivo, que o `usuario::lancar_conferido` só aparece em
+  `agent/commands.rs`, o arquivo do handler do `user.run` (e onde se
+  define); o `usuario::lancar`, pelo texto com o caminho, em lugar nenhum
+  fora da suíte; o `lancar_como` e o `lancar_pelo_kernel`, pela palavra,
+  só em `usuario/mod.rs`;
   o boot os pede só pelos dois lançamentos dele, o servidor de janelas e o
   Terminal, só no `main.rs`; e o `autorizacao::Lancador`, só em
   `autorizacao.rs` e `usuario/mod.rs` — pela palavra, também num `use` que
@@ -5863,6 +5873,16 @@ registro de cada uma no ponto em que nasceu.
   alternativas — a máquina da suíte com 192 MiB, o caso com dois programas,
   um teto menor no passo do `compressao`, a compressão antes dos casos dos
   dispositivos — ficaram sem uso.
+- **A morte de um processo por uma falha, na auditoria** (do #451, no lote
+  B do #448): o processo que lê o contador de ciclos — como o que executa
+  uma instrução privilegiada ou lê a memória do kernel — morre pela falha
+  de proteção, e a contabilidade das falhas e o log dizem qual e onde; a
+  auditoria não diz nada, porque a morte por uma falha não é uma decisão e
+  nunca teve registro. Gravá-la — um registro do kernel com o processo, a
+  falha e a instrução, que o NSF poderia ler como sinal — muda o que a
+  auditoria grava: fica para uma decisão, [C] pela 5.3, sem ter entrado no
+  lote ([AUD-FALHA](docs/DECISOES.md#aud-falha), com as alternativas e a
+  recomendação provisória — deixar como está até o NSF pedir o sinal).
 
 ## O tempo
 
@@ -7276,11 +7296,13 @@ falha fechado:
    lançar o comando decidido para `process.run` — o `user.run` —: outro
    comando decidido seria decidido de novo pela permissão dele, e passaria
    (`ERROR`, "fora de um comando autorizado", diga quem lança o que
-   disser). Quem chama cada lançamento o `xtask` confere: o do `user.run`
-   (`usuario::lancar_conferido`) só pelo handler dele; o do kernel por
-   conta própria (`usuario::lancar`, `lancar_como`, `lancar_pelo_kernel`)
-   só de dentro de `usuario/mod.rs`, que o boot pede pelos dois
-   lançamentos dele, o servidor de janelas e o Terminal; e o lançador
+   disser). Quem chama cada lançamento o `xtask` confere, arquivo por
+   arquivo: o do `user.run` (`usuario::lancar_conferido`) só em
+   `agent/commands.rs`, o arquivo do handler dele; o do kernel por conta
+   própria — o `lancar_como` e o `lancar_pelo_kernel`, pela palavra, só em
+   `usuario/mod.rs`, e o `usuario::lancar`, pelo texto com o caminho, em
+   lugar nenhum fora da suíte —, que o boot pede pelos dois lançamentos
+   dele, o servidor de janelas e o Terminal; e o lançador
    (`autorizacao::Lancador`) só onde se define e onde se lança. Recusada
    no `executar`, nada se troca: a imagem
    preparada sai, o processo segue com a dele e ouve `NEGADO` (−16), o
@@ -13144,7 +13166,8 @@ partes:
   a 1 de 2 do x86 e a 2 de 2 do ARM. O gate registra a decisão de um
   `device.forget` antes de o handler tomar a ordem das gravações, e ela só
   vai no registro da desfeita se ninguém grava o journal entre os dois; o
-  coletor, que passa a cada tique, às vezes passava ali e a levava num
+  coletor, que grava a auditoria pendente a cada dois segundos, às vezes
+  passava ali e a levava num
   registro só de auditoria, antes. Por isso a falha era intermitente — o
   "esquecer e parear de novo" passou nas duas partes da `virtio-gpu` com o
   coletor solto, e o "esquecer a própria relação", que confere o mesmo,
@@ -13154,10 +13177,19 @@ partes:
   pareamento o pausam eles mesmos, no começo, e o executor confere, depois
   de cada caso, que ele ficou pausado e o journal solto, como a suíte os
   deixa: o caso que os deixa de outro jeito reprova, e o executor os
-  devolve antes do seguinte. A documentação prometia mais do que o código
-  faz — a decisão no mesmo registro da mudança; o código garante junto ou
-  antes —, e a escolha entre escrever o que vale e o kernel cumprir o
-  escrito é uma decisão do dono (AUD-JUNTO, em `docs/DECISOES.md`);
+  devolve antes do seguinte. O caso `suite: o executor ve e devolve o
+  coletor solto e o journal segurado`, que entrou no fim da tabela — para
+  nenhum caso de antes mudar de parte —, confere a própria conferência: o
+  coletor solto, o journal segurado e os dois juntos reprovam, cada um com
+  o motivo dele, e voltam ao estado da suíte, e o estado da suíte passa.
+  As quatro mutações dela — sem a recusa do coletor solto, sem a do
+  journal segurado, sem pausar de novo, sem soltar — reprovam nele, e a
+  migração que solta o coletor de novo reprova pelo executor ("o caso
+  deixou o coletor da auditoria solto"). A documentação promete mais do
+  que o código faz — a decisão no mesmo registro da mudança; o código
+  garante junto ou antes, ou, se ela sai do anel no meio, a lacuna antes
+  —, e o que se escreve e o que o kernel cumpre é uma decisão do dono
+  ([AUD-JUNTO](docs/DECISOES.md#aud-junto));
 - na suíte inteira do x86 em release, `contencao: a chave revogada no meio
   do user.run nao lanca` reprovou: a conferência da recusa na auditoria
   compunha o detalhe esperado sem a citação da decisão, e o detalhe de
@@ -13223,10 +13255,21 @@ primeira começou inteira no primeiro minuto; a segunda, do minuto 1 ao 34; a
 terceira, do 34 ao 51. O caminho crítico ficou seis minutos acima da
 mediana, e quem o fez foram os maiores pedaços das duas últimas camadas, que
 esperam uma vaga como os outros: a parte 2/2 do boot pela UEFI do ARM
-esperou 34 minutos e rodou 45 — a 1/2 rodou 29 —, e os fluxos entre o x86 e
+começou aos 34 minutos, depois de 33 na fila, e rodou 45 — a 1/2 rodou 29 —, e os fluxos entre o x86 e
 o ARM, da terceira camada, começaram aos 42 e rodaram 35. A CI 508 mediu o
 mesmo caminho, 78 minutos, pelos mesmos dois jobs. Encolher um sem o outro
-não muda o fim.
+quase não muda o fim: sem a 2/2, o fim da 509 seria 77,2 em vez de 78,4.
+
+A CI 510 (`2c39e80`, verde, 48 de 48) mediu 77,2 minutos de caminho
+crítico, 1281 de máquina e o piso de 64; o maior job, 56,9, foi a
+atualização do ARM, e o fim veio do SDK da malha da mesma arquitetura, que
+começou aos 53,7 e rodou 23,5, e da parte 1/2 do boot pela UEFI do ARM, que
+acabou aos 75,0 — a 2/2, aos 69,5. A CI 511 (`9fe2e8f`, só documentação)
+mediu 72,9, com 1234 de máquina: o mesmo job, com o mesmo código, levou de
+17,8 minutos a menos a 16,4 a mais entre as duas — a parte 3/3 da
+persistência do x86, de 50,9 a 33,1; a parte 1/3 da suíte do x86, de 26,3 a
+42,7. Com essa variação, o fim é o ritmo dos runners mais do que o tamanho
+dos pedaços, e dividir mais rende pouco.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
