@@ -77,6 +77,27 @@ build (`conferir_sem_simd`) cobre só os programas do x86 da imagem; o
 `sdk-conferir` não a faz. Liberá-los é a
 [R12-SIMD](DECISOES.md#r12-simd).
 
+O que o kernel faz com os registradores de um programa está descrito
+aqui, e não prometido (o lote B4 do #448). O processo começa — pela
+primeira entrada e pela troca de imagem — com os registradores gerais em
+zero, menos a pilha, e com as flags de um processo novo. No x86, o
+`RFLAGS` 0x202 — o `IF` e o bit 1, com o `DF` em zero, que o `memset` e o
+`memcpy` do runtime supõem —, os seletores `DS`, `ES`, `FS` e `GS` nulos e
+as bases do `FS` e do `GS` em zero; no ARM, o `NZCV` em zero, e o
+`TPIDR_EL0` e o `TPIDRRO_EL0` em zero. O kernel guarda por fio o
+`TPIDR_EL0` do ARM e os quatro seletores de dados do x86: o valor que um
+processo deixa ali fica com ele numa preempção e não chega ao processo
+seguinte no mesmo núcleo; o filho de um `fork` recebe os do pai, e a
+troca de imagem os zera. Nenhum programa do repositório os usa, nem
+recebe argumento num registrador na entrada — o `_start` do runtime só
+zera o quadro (o `rbp`; o `x29` e o `x30` no ARM) e, no x86, realinha a
+pilha, antes de chamar o `principal` —, e a forma binária não muda. Um programa que dependa
+deles depende desta descrição, e não do contrato: até uma decisão os pôr
+nele, o kernel pode mudar o que faz com eles. No x86, o `str`, o `sldt`,
+o `smsw`, o `sgdt` e o `sidt` matam o processo quando o processador tem o
+UMIP; no ARM, o canal do depurador (o `MDCCSR_EL0` e os `DBGDTR*_EL0`)
+mata sempre.
+
 **As regras.** Dentro da versão o contrato só cresce: um comando novo,
 um parâmetro opcional novo, um campo novo num resultado, um tipo de evento
 novo, um bit novo, um código novo. Um nome nunca muda de sentido. O que o
@@ -96,6 +117,8 @@ viva.
 uma decisão o pôr no contrato; e também não são contrato o texto do
 detalhe da auditoria, os tempos, as cotas e os tetos de
 [As cotas](#as-cotas) — fora os dois do envelope —, os programas da imagem,
+o estado dos registradores na entrada e o que o kernel guarda por fio (ver
+acima),
 a política, e os módulos do runtime que este documento não descreve.
 `fluxo::padrao` e `fluxo::Resumo` são da bancada: o modelo os usa só para
 conferir os bytes da troca que a bancada mede, e um programa não precisa

@@ -828,7 +828,11 @@ quem pede um processo dizendo o processo:
   passada também não espera o tique. O lote B3 pôs a pergunta dentro da
   janela mascarada do sono (`fios::descansar_ate_a_interrupcao_se`): o
   cutucão do chamado que chega entre a pergunta e o sono acorda o sono na
-  hora (o item 7 do adversário do lote B2). A pergunta da cota sem efeito,
+  hora (o item 7 do adversário do lote B2). O lote B4 tirou o `nomem` da
+  máscara do ARM: o compilador também não pode tirar a pergunta de dentro
+  da janela — o de hoje não a tirava, e a desmontagem do kernel em release,
+  antes e depois, é a evidência (o item 3 do adversário do lote B3). A
+  pergunta da cota sem efeito,
   `ocupacao_na_cota`, ficou separada da do gate, que chama o coletor. Não
   ajuda com o coletor
   sem a vez, nem com o que esta decisão pergunta: a tabela cheia de vivos
@@ -1322,7 +1326,11 @@ B do #448.
   causa volta sem o `TF`, e o processo morre do passo na volta da
   chamada —, e o LDT do reset — o LDT nulo em todo núcleo faz do seletor
   do LDT um `#GP` que mata o processo, e a falha de página também culpa o
-  processo pelo `CS` do quadro.
+  processo pelo `CS` do quadro. O lote B4 acrescentou as mortes do que ele
+  prende: o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do anel 3 (o
+  `#GP(0)` do UMIP, num processador que o tem), o `fwait` (o `#NM`, pelo
+  `CR0.MP`) e o canal do depurador do EL0 (a classe 0x18, pelo
+  `MDSCR_EL1.TDCC`).
   O log diz qual e onde (`processo morto por ... em pc=...`), e a
   contabilidade das falhas a conta (`traps`), mas a auditoria não diz
   nada: a morte por uma falha não é uma decisão, e nunca teve registro —
@@ -1490,12 +1498,21 @@ alternativa (b).
   `aarch64-unknown-none-softfloat`) e as opções dos pacotes de cifra
   (`programas/.cargo/config.toml`) o garantem para os programas do
   repositório, e o `xtask` confere o kernel e os programas do x86 da
-  imagem (`conferir_sem_simd`: o SIMD, o x87 e o MMX). O custo: o ChaCha20-Poly1305 em software, 317
+  imagem (`conferir_sem_simd`: o SIMD, o x87, o MMX e, desde o lote B4,
+  as máscaras do AVX-512, o AMX, o Key Locker e o que o `llvm-objdump` não
+  sabe ler). Desde o lote B4, o `XCR0` também é o
+  do kernel em todo núcleo — o x87, o SSE e o AVX que o processador
+  declara, e nada mais (`xcr0_do_kernel`) —: o AVX-512 e o AMX ficam
+  desligados, e o AMX, que não confere o `CR0.TS`, é `#UD`. O `TPIDR_EL0`
+  do ARM e os seletores de dados do x86, que o lote B4 passou a guardar
+  por fio, não são estado de SIMD e não mudam o que esta decisão decide.
+  O custo: o ChaCha20-Poly1305 em software, 317
   MiB/s no hospedeiro, contra 104 do AES-128-GCM — por isso ele vai
   primeiro ([O TLS de um programa](../README.md#o-tls-de-um-programa)) —, e
   o SHA-256 do BLS do IC, em software ([ICP](ICP.md#as-bibliotecas)).
 - **O que a decisão fixa.** Se o kernel salva o estado de SIMD de cada
-  processo, e quando; quanto isso custa em memória por fio e em tempo de
+  processo, e quando; quais componentes do `XCR0` o kernel liga — hoje o
+  x87, o SSE e o AVX —; quanto isso custa em memória por fio e em tempo de
   troca; e a forma binária dos programas — os alvos e as opções —, que o
   contrato v2 inclui.
 - **As alternativas.** O roteiro só nomeia a decisão; as duas primeiras

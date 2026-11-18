@@ -415,7 +415,7 @@ kernel/src/
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu; e o kernel que os fecha em cada núcleo depois de um firmware que os deixasse abertos — os controles sujos e a função do boot chamada de novo (o lote B2 do #448)
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
-│   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer; e os do lote B3: no x86, o seletor do LDT (`mov ds` e `lsl`), a falha de página do supervisor pelo LDT de teste, o SSE e o x87 no `#NM` — o SSE duas vezes por núcleo, pelo canal —, o passo no anel 0 e o do `mov ss`, o `#NP` e o `#SS` do descritor ausente, o `sysenter` e a pilha da IST do `#MC`; no ARM, o FP/SIMD na classe 0x07, duas vezes por núcleo, o `msr daif` e o `wfi`; e, nas duas, o regime de cada núcleo — o `CR0`, o `CR4`, o `DR7` e o `sysenter`; o `SCTLR_EL1` e o `CPACR_EL1` — como o kernel o escreve, também depois de sujo
+│   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer; e os do lote B3: no x86, o seletor do LDT (`mov ds` e `lsl`), a falha de página do supervisor pelo LDT de teste, o SSE e o x87 no `#NM` — o SSE duas vezes por núcleo, pelo canal —, o passo no anel 0 e o do `mov ss`, o `#NP` e o `#SS` do descritor ausente, o `sysenter` e a pilha da IST do `#MC`; no ARM, o FP/SIMD na classe 0x07, duas vezes por núcleo, o `msr daif` e o `wfi`; e, nas duas, o regime de cada núcleo — o `CR0`, o `CR4`, o `DR7` e o `sysenter`; o `SCTLR_EL1` e o `CPACR_EL1` — como o kernel o escreve, também depois de sujo; e os do lote B4: nas duas, o estado por fio — o canal, duas rodadas por núcleo, e o par, um receptor e um emissor presos ao mesmo núcleo, entrados juntos e cedendo um ao outro —, os registradores da primeira entrada, zerados, e o `fork`, que passa o do pai ao filho, e a troca de imagem, que o zera; no x86, o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` no `#GP` do UMIP e o `fwait` no `#NM`; no ARM, o canal do depurador; e o regime conferido bit a bit — no x86, contra o CPUID, com o `XCR0` e os `DR0` a `DR3`; no ARM, com o `MDSCR_EL1` e o `TPIDRRO_EL0`; e, dos achados do adversário do lote B4, a troca de imagem com as flags ligadas — o `filho` confere as de um processo novo —, o regime sujo conferido inteiro, com as bases do `FS` e do `GS`, e o par que confere a vez
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
@@ -450,7 +450,7 @@ kernel/src/
 │   ├── programa.rs  mapeia o processo e desce de privilégio
 │   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
-│   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: dezesseis no x86, seis no ARM), também só para a suíte
+│   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: vinte e nove no x86, treze no ARM), também só para a suíte
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -2252,8 +2252,9 @@ processo`); depois, o núcleo volta ao LDT nulo.
 
 **O FP/SIMD preso no anel 3 e no EL0 (o lote B3).** O kernel não salvava
 nem zerava o estado de ponto flutuante e de SIMD de um processo para o
-outro: no x86, `trocar_contexto` só guarda os registradores preservados, e
-o `CR4` do firmware, com o `OSFXSR`, deixava o SSE funcionar no anel 3; no
+outro: no x86, `trocar_contexto` não guarda registrador de ponto flutuante
+nenhum — só os seis preservados e, desde o lote B4, os quatro seletores de
+dados —, e o `CR4` do firmware, com o `OSFXSR`, deixava o SSE funcionar no anel 3; no
 ARM, o kernel nunca escrevia o `CPACR_EL1` — no boot cru ele sai do reset
 em zero, e o FP do EL0 já caía, mas pela UEFI o EDK2 o deixa com o `FPEN`
 em 11. Um processo deixava um valor no `xmm0` (ou no `d0`), e o seguinte, de
@@ -2280,10 +2281,22 @@ antes do `CR0` do primeiro: com o `TS`, ele seria `#NM` no anel 0 antes da
 IDT. O `cargo xtask` confere, no build, que o kernel e os programas não têm
 instrução de x87, MMX, SSE nem AVX — os registradores `xmm`, `ymm`, `zmm`,
 `st` e `mm`, os mnemônicos do x87, o `wait`, o `emms`, o `ldmxcsr`, o
-`stmxcsr`, o `xsave` e o `xrstor` —, menos aquele `fninit`
-(`conferir_sem_simd`); e o kernel não chama os serviços de execução da
-UEFI, que usariam o SSE — a entrega do iniciador nem leva a tabela deles, e
-o reinício e o desligamento são pela ACPI. No ARM, o `CPACR_EL1` em zero
+`stmxcsr`, o `xsave` e o `xrstor`; e, desde o lote B4, as máscaras `k0` a
+`k7` do AVX-512, o `vzeroupper`, o `vzeroall`, o `vldmxcsr`, o `vstmxcsr` e
+o AMX — os ladrilhos `tmm`, o `ldtilecfg`, o `sttilecfg`, o `tilerelease`, o
+`tilezero` e os `tileload`, que não conferem o `TS` —, e, pelos achados do
+adversário do lote B4, o Key Locker — os mnemônicos que começam com `aes` e
+com `encodekey`, e o `loadiwkey` — e o `<unknown>` do `llvm-objdump`, com o
+mnemônico lido depois dos prefixos que ele escreve à parte, com as mesmas
+regras no awk do canário (`.github/workflows/canario.yml`) —, menos aquele
+`fninit` (`conferir_sem_simd`). Os do Key Locker e os que vinham atrás de um
+prefixo seriam `#UD` ou `#NM` no anel 0, e derrubariam o kernel sem vazar
+nada, mas o build é o lugar de os ver; o `<unknown>` é o que o
+`llvm-objdump` não sabe ler — uma extensão nova, talvez, que ninguém sabe
+se o `CR0.TS` prende —, e o build para para alguém olhar. E o kernel não
+chama os serviços de execução da UEFI, que usariam o SSE — a entrega do
+iniciador nem leva a tabela deles, e o reinício e o desligamento são pela
+ACPI. No ARM, o `CPACR_EL1` em zero
 em todo núcleo — o `FPEN` em 00, que prende o FP/SIMD no EL0 e no EL1 —,
 também no bloco de partida dos secundários, e a classe 0x07 ganhou o nome
 `fp_simd_trap`
@@ -2301,10 +2314,11 @@ inteiro, com os bits que o kernel quer (`cr4_do_kernel`: o `PAE`, o `TSD`,
 o `OSFXSR` — sem ele, o SSE seria `#UD` antes do `#NM` —, o `OSXMMEXCPT`,
 como o OVMF o deixa — ele só escolhe entre o `#XM` e o `#UD` de uma
 exceção de SIMD desmascarada, inalcançável com o `TS` —, e, se o
-processador os tem, o `DE`, o `MCE`, o `OSXSAVE` e o `SMEP`; o `LA57` como
-está) — o `FSGSBASE` e o `PKE` de um firmware seriam outro registrador
-passado de um processo ao seguinte, e cada núcleo que acorda escreve o do
-kernel em vez de copiar o do primeiro; o `DR7` e o `DR6` em repouso (0x400 e
+processador os tem, o `DE`, o `MCE`, o `OSXSAVE`, o `SMEP` e, desde o lote
+B4, o `UMIP`; o `LA57` como está) — o `FSGSBASE` e o `PKE` de um firmware
+seriam outro registrador passado de um processo ao seguinte, e cada núcleo
+que acorda escreve o do kernel em vez de copiar o do primeiro —; desde o
+lote B4, com o `OSXSAVE`, o `XCR0` do kernel (ver abaixo); o `DR7` e o `DR6` em repouso (0x400 e
 0xFFFF0FF0: nenhum ponto armado, nenhuma causa) e os quatro pontos zerados
 — um ponto armado pelo firmware daria um `#DB` fatal no anel 0 —; e os três registradores do `sysenter` em zero — num Intel, ele existe
 em 64 bits e entraria no anel 0 pelo que o firmware deixasse; com o seletor
@@ -2312,8 +2326,9 @@ zero é `#GP(0)`, num AMD e no QEMU do TCG (o modelo `qemu64`) é `#UD`
 (`excecoes: o sysenter do anel 3 mata o processo`, que aceita as duas). O
 OVMF deixa o `CR0` em 0x80010033, o `CR4` em 0x668 (`DE`, `PAE`, `MCE`,
 `OSFXSR` e `OSXMMEXCPT`), o `DR7` em 0x400 e o `sysenter` em zero; o kernel
-escreve o `CR4` 0x10066c (mais o `TSD` e o `SMEP`) e liga o `TS` — o log do
-boot diz os dois. No ARM, o `SCTLR_EL1` escrito inteiro, e não só o `M`, o
+escreve o `CR4` 0x100e6c (mais o `TSD`, o `SMEP` e o `UMIP` — até o lote B4,
+0x10066c, sem o `UMIP`) e liga o `TS` — o log do boot diz os dois, e desde o
+lote B4 também o `XCR0`. No ARM, o `SCTLR_EL1` escrito inteiro, e não só o `M`, o
 `C` e o `I` (`mmu::SCTLR_DO_KERNEL`, 0x30D0191D, com o porquê de cada bit):
 o `UMA` desligado — ligado, o `msr daif` do EL0 mascararia as IRQs e
 prenderia o núcleo (`excecoes: o msr daif do EL0 mata o processo, e o
@@ -2339,7 +2354,8 @@ o `TSCXT`, o `nTLSMD` e o `LSMAOE`, e desligam o `nTWI`, o `nTWE` e o
 regime esta como o kernel o escreve, tambem depois de sujo` confere, em
 cada núcleo, que ele o escreveu ao ligar, que o regime é o do kernel, e
 que, sujo como um firmware o deixaria aberto, a função do boot o escreve de
-novo.
+novo — desde o lote B4, bit a bit e com o `MDSCR_EL1` e o `TPIDRRO_EL0` do
+ARM (ver *O regime conferido bit a bit*).
 
 **O `RSP0` de um fio novo.** A entrada de um processo
 (`usuario::programa::entrar`) informava a pilha de kernel do fio ao núcleo
@@ -2357,33 +2373,310 @@ reprovar a suíte de depuração na primeira entrada de um processo. No ARM
 não há escrita assim: o `SP_EL1` de cada núcleo é escrito no boot,
 mascarado.
 
-**O que fica, depois do lote B3.** A R12-SIMD (`docs/DECISOES.md`), aberta:
+**O estado por fio (o lote B4 do #448).** O estado que o processo escreve
+e lê sem armadilha nenhuma era do núcleo, e não do fio:
+no ARM, o `TPIDR_EL0` — 64 bits, que o EL0 escreve e lê sem armadilha que o
+EL1 possa ligar —; no x86, os seletores `DS`, `ES`, `FS` e `GS` — o anel 3
+os carrega com `mov`, a entrada da `syscall` e a de uma interrupção não os
+tocam, o `sysretq` também não, e o `iretq` só anula os de privilégio maior
+que o do anel para onde volta. O kernel não os guardava nem os zerava: o
+valor que um processo deixava, o seguinte, de outro titular, no mesmo
+núcleo, lia — um canal contínuo, por fora do gate, da auditoria e do NSF, a
+mesma classe do `d0` que o lote B3 fechou (os itens 1 e 2 do adversário do
+lote B3). Antes da correção, os casos mostraram o canal nos quatro núcleos
+das duas arquiteturas: o programa do canal, rodado duas vezes no mesmo
+núcleo, saiu com 0 na primeira rodada e com 1 na segunda — o `FS` e os
+quatro seletores no x86; o `TPIDR_EL0` no ARM, no boot cru e pela UEFI —, e
+o receptor do par morreu do `ud2` (x86) e do `brk #1` (ARM) na primeira
+volta. Agora o kernel os guarda **por fio**, como o Linux
+(`tls_thread_switch`, `__switch_to`): no ARM, um campo `tpidr_el0` no
+`Contexto`, trocado em `trocar_no_quadro` junto com o quadro e o `SP_EL0`;
+no x86, os quatro empilhados e desempilhados por `trocar_contexto` junto
+com os seis preservados. Zerados num fio novo, os do pai no filho do
+`fork`, zerados de novo na troca de imagem — o programa que entra não tem
+direito ao estado do que saiu. Zerá-los a cada troca também fecharia o
+canal, mas o processo perderia os próprios numa preempção, e o par reprova
+as duas coisas: o receptor deixa a marca e cede 64 vezes ao emissor, preso
+ao mesmo núcleo e entrado no anel sem privilégio junto com ele — uma
+barreira no hospedeiro —, e confere a marca a cada volta (`excecoes: o
+TPIDR_EL0 fica com o processo que o escreveu, entre as trocas` e `excecoes:
+os seletores de dados ficam com o processo que os escreveu, entre as
+trocas`; o canal, `excecoes: o TPIDR_EL0 de um processo nao chega ao
+seguinte no mesmo nucleo` e `excecoes: o FS e os quatro seletores de dados
+de um processo nao chegam ao seguinte no mesmo nucleo`). Desde os achados do
+adversário do próprio lote, o par confere também que os dois se revezaram —
+o escalonador da suíte conta as trocas diretas de um ao outro
+(`fios::vigiar_o_par_de_teste`, só com o `modo-teste`), e o caso pede 16 por
+núcleo; antes, a vez só se provava pelas mutações —, e as marcas dos quatro
+seletores são distintas: 0x2B no `DS`, 0x23 no `ES`, 0x29 no `FS` e 0x21 no
+`GS` no receptor, no canal dos quatro e na herança, e outra em cada
+registrador no emissor — os descritores 4 e 5, de DPL 3, com o RPL 3 e com
+o 1. Antes, o `DS` e o `FS` tinham a mesma marca, e o `ES` e o `GS` outra:
+uma troca que pusesse um no lugar do outro passaria nos três casos (o
+achado 3 do adversário do lote B4, pela leitura). Para recarregar os
+seletores no anel 0, `gdt::carregar` passou a carregar o `FS` e o `GS`
+nulos: o OVMF deixa neles o 0x30 da GDT dele — o log do boot diz os seis
+seletores que o firmware deixou —, que na nossa é o TSS do núcleo 0, e
+recarregá-lo na volta do fio do boot seria `#GP(0x30)` no anel 0. Carregar
+o `GS` muda a base ativa dele, e não o `IA32_KERNEL_GS_BASE`, que o
+`swapgs` da entrada da `syscall` usa — e o kernel não olha o `GS` fora
+daquela janela. A base do `FS` e do `GS` não é canal: todo descritor de DPL
+3 tem base zero, o `FSGSBASE` está desligado, o LDT é nulo, e o regime de
+cada núcleo zera as duas bases — o `IA32_FS_BASE` e o `IA32_GS_BASE`, e não
+o `IA32_KERNEL_GS_BASE` — antes do primeiro processo. O seletor nulo as zera
+num Intel e no TCG, mas não num AMD sem o `NullSelectorClearsBase` (o
+`X86_BUG_NULL_SEG` do Linux): ali, sem essa escrita, a base que o firmware
+deixasse chegaria aos processos do núcleo até um deles carregar um seletor
+não nulo — de mão
+única, um valor por núcleo e por boot (um informativo do adversário do lote
+B4, e o item 26 do revisor). O caso do regime as lê, as suja e confere a
+reescrita. Um seletor que
+o anel 3 carregou aponta para um descritor de DPL 3, que o anel 0
+recarrega; a GDT só muda na suíte, nos casos do `#NP` e do `#SS`, que
+marcam ausente o descritor 3 — nenhum processo da suíte o carrega, e os
+casos não precisam de proteção. Nenhum programa do contrato usa o
+`TPIDR_EL0` nem os seletores de dados (a desmontagem dos 57 programas do
+pacote `programas`, os de `/programas/<arquitetura>`, em release, nas duas
+arquiteturas): guardá-los por fio não muda a forma binária deles (o DS-2).
+Dos de `/bin`, só o `filho` os lê, para conferir que a troca de imagem os
+zerou — e, desde os achados do adversário do lote B4, que as flags são as
+de um processo novo.
+
+Os registradores gerais da primeira entrada também chegavam com o que o
+kernel deixou neles — endereços do kernel, temporários do caminho do fio
+—: o programa que os confere saiu com 1 nos quatro núcleos das duas
+arquiteturas (o item 5). Os dois `entrar` agora os zeram, como a troca de
+imagem já fazia: no x86, os gerais (menos a pilha) e os quatro seletores
+nulos, antes do `iretq`; no ARM, os `x0`–`x30` e o `TPIDR_EL0`, antes do
+`eret` (`excecoes: os registradores do processo novo chegam zerados`).
+Nenhum programa recebe argumento em registrador na entrada. A herança tem
+caso próprio (`excecoes: o filho do fork herda o estado por fio do pai, e a
+troca de imagem o zera`): o programa deixa as marcas e bifurca; o filho as
+confere — sai com 26 sem elas — e troca de imagem pelo `filho`, que as
+confere zeradas antes de escrever — sai com 25 se não —; o pai sai com o
+código do filho. Antes, nas duas arquiteturas, o filho saiu sem as marcas
+no núcleo 0 (26) e com elas nos núcleos 1 a 3, onde a imagem nova também as
+recebeu (25): o que um processo via dependia de onde e depois de quem ele
+rodava. O `/bin/filho` confere o estado por
+fio desde então, e as flags desde os achados do adversário do lote B4; os
+casos que o usam — a troca de imagem, o `NT`, os do `user.run` — passam com
+o código 24 e a mensagem de antes (a suíte inteira).
+
+**A troca de imagem com as flags da anterior (o achado 1 do adversário do
+lote B4).** O adversário do próprio lote achou o caminho vizinho ao do
+estado por fio: a troca de imagem entregava à imagem nova as flags da que
+saiu. No x86, `redirecionar_para` guardava o `R11` — o `RFLAGS` que a
+`syscall` do `executar` depositou: o `DF`, o `TF`, o `AC`, o `NT`, o `ID` e
+as aritméticas —, e o `sysretq` o devolvia ao começo da imagem nova; no ARM,
+o `SPSR` da chamada — o `NZCV` e, com as extensões, o `SSBS`, o `DIT`, o
+`TCO` e o `BTYPE`. Com o `DF` herdado, o `memset` e o `memcpy` dos
+programas do contrato — o `rep stos` e o `rep movs` do `compiler_builtins`
+— andariam para trás: eles não fazem `cld`, porque a ABI promete o `DF` em
+zero na entrada de toda função (o único `cld` dos programas é o do fim da
+cópia para trás do `memmove`, depois do `std` dela). A troca de imagem é
+uma fronteira de
+autoridade — a do processo é a do papel restrita ao manifesto da imagem —,
+e o programa que entra não tem direito ao estado do que saiu. Agora as duas
+entregam as flags de um processo novo, as do `entrar`: o `RFLAGS` 0x202 —
+o bit 1 e o `IF` (`arch::x86_64::usuario::RFLAGS_DE_UM_PROCESSO_NOVO`) —
+e o `SPSR_USUARIO` — o EL0t, o `D`, o `A` e o `F`, e o `NZCV` em zero —:
+como o `start_thread` do Linux, valores fixos, e nada da imagem que saiu. O
+`filho` confere as flags antes de qualquer
+instrução que as mude — o `pushfq` no x86, o `mrs` do `NZCV` no ARM — e sai
+com 25 se não são as de um processo novo; um programa novo liga o `DF` e o
+`CF` (o x86) ou o `NZCV` inteiro (o ARM) e troca de imagem por ele
+(`excecoes: a troca de imagem nao entrega as flags da imagem anterior`).
+Antes da correção, com o `filho` novo, o caso novo e o da herança saíram
+com 25 nos quatro núcleos das duas arquiteturas; o do `NT` — só do x86, que
+rodava o `filho` com o `RFLAGS` 0x4246: o `NT`, o `IF`, o `ZF` e o `PF` —,
+com 25 no núcleo 0, onde o caso para na primeira reprovação; e o da troca
+de imagem do `exemplo` (`usuario: executa, bifurca e troca de
+imagem`) reprovou no x86 — o `filho` saiu com 25 antes de escrever —, e
+passou no ARM, onde o `NZCV` do `exemplo` na chamada era zero. Os casos que
+trocam de imagem pelo `filho` dizem agora quando ele sai com 25.
+
+**O regime conferido bit a bit, o UMIP, o `fwait` e o canal do depurador
+(o lote B4).** O caso do regime do x86 comparava o `CR4` com a própria
+`cr4_do_kernel`, que o escreve: tirar dela o `MCE` ou o `DE` passava; o
+regime sujo só ligava o `PGE`, e os `DR0` a `DR3` não eram conferidos (o
+item 7). Agora ele confere bit a bit contra o CPUID, pelo nome — o `PAE`, o
+`TSD`, o `OSFXSR` e o `OSXMMEXCPT` ligados; o `DE`, o `MCE`, o `OSXSAVE`, o
+`SMEP` e o `UMIP` conforme o processador os declara; o `PCE`, o `PGE`, o
+`FSGSBASE`, o `PKE`, o `VME`, o `PVI`, o `SMAP`, o `PCIDE` e o `CET`
+desligados; nenhum outro bit, menos o `LA57`, como está —, o `XCR0`, os
+`DR0` a `DR3` em zero e o
+`sysenter`; suja também o `PCE`, o `VME`, o `PVI`, o `XCR0` e os quatro
+endereços; e diz no log o primeiro que diverge, no regime de antes, no sujo
+e no de depois. E o sujo tem de aparecer inteiro na leitura (o achado 2 do
+adversário do lote B4): antes, bastava um item divergir — o `CR0`, o
+primeiro conferido —, e o "depois" provava a reescrita só dos que apareceram
+sujos; a leitura, a sujeira e a escrita do `sysenter` passam as três por
+`tem_sysenter`, e com ela dizendo "não" nada se sujava, a leitura dava zero
+por construção, nada se escrevia, e o caso passaria — a mutação que a faz
+dizer sempre "não" sobreviveria (a leitura do adversário, e o log de antes,
+com o sujo divergindo só no `CR0`); hoje ela reprova (ver as mutações).
+Agora `regime_sujo_inteiro` confere cada item sujo, com o `SEP` e o `xsave`
+pelo CPUID lido nela, e não pela função que se confere; e, no ARM, o
+`FPEN`, o `UMA`, o `DZE`, o `UCT`, o `UCI`, o `MDSCR_EL1` e a marca do
+`TPIDRRO_EL0`. O regime sujo do x86 suja também as bases do `FS` e do `GS`
+(ver *O estado por fio*).
+
+E o `IA32_TSC_AUX` (um informativo do adversário do delta do lote B4): o
+`CR4.TSD` prende o `rdtscp` no anel 3, mas não o `rdpid`, que entrega o
+`IA32_TSC_AUX` a qualquer processo, e o kernel não o escrevia — a doc de
+`fechar_os_contadores_ao_usuario` dizia isso. O valor que o firmware, ou o
+sistema de antes num reboot quente, deixasse ali chegava aos processos do
+núcleo: de mão única, um por núcleo e por boot, como as bases do `FS` e do
+`GS`, e não um canal entre processos, que nenhum o escreve. Agora o regime
+o zera quando o processador declara o `RDTSCP` (`CPUID.80000001H:EDX[27]`)
+ou o `RDPID` (`CPUID.(7,0):ECX[22]`) — sem nenhum dos dois, a arquitetura
+não promete o registrador, e o `wrmsr` seria `#GP` —, e o caso do regime o
+lê, o suja e confere a reescrita, com os dois bits pelo CPUID lido no
+conferidor. O `qemu64` da suíte não declara nenhum; uma rodada à parte com
+o `+rdtscp` no `-cpu`, não comitada, exercitou a escrita (ver as mutações).
+
+O `UMIP` (o item 6): o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` do
+anel 3 diziam ao processo o seletor do TSS do núcleo, o do LDT, o `CR0`
+baixo e onde estão a GDT e a IDT do kernel. O `cr4_do_kernel` o liga quando
+o processador o declara (`CPUID.(7,0):ECX[2]`), e o `str` do anel 0
+(`gdt::nucleo_atual`) ele não toca. O TCG do QEMU o emula, e a suíte roda
+com o `+umip` no `-cpu`: o `xtask` monta o `-cpu` do x86 num lugar só
+(`comando_qemu`), e a suíte, o iniciador, as bancadas e a fumaça passam por
+ali. Ele é uma constante, `CPU_DO_X86`, que um teste do hospedeiro confere
+(`o_processador_do_x86_tem_o_smep_e_o_umip`): sem o `+umip` ou o `+smep`,
+os dois casos passam calados — o kernel diz que a máquina não os oferece, e
+o caso não tem o que afirmar — (um informativo do adversário do lote B4); e
+com outra forma deles também: o QEMU aplica os `-feat` depois dos `+feat`,
+qualquer que seja a ordem, e um `qemu64,+smep,+umip,-umip` sobe sem o UMIP
+— o teste recusa qualquer forma que não seja o `+smep` e o `+umip`. E o
+`invariantes` confere que o `-cpu` do x86 só sai da constante, uma vez, em
+`comando_qemu`: escrito à mão ali, o teste conferiria uma constante que
+ninguém usa (os dois, do adversário do delta do lote B4).
+Antes do `UMIP`, os cinco seguiram e saíram com 66 nos quatro núcleos; agora
+morrem de `#GP(0)` na entrada (`excecoes: o str, o sldt, o smsw, o sgdt e o
+sidt do anel 3 morrem do #GP do UMIP`). O `fwait` (o byte 0x9B) cai no
+`#NM` pelo `CR0.MP` — sem ele, só conferiria as exceções pendentes do x87
+—, e tem caso (`excecoes: o fwait do anel 3 cai no #NM`).
+
+O `XCR0` (o item 4): o `cr4_do_kernel` liga o `OSXSAVE` quando há o
+`xsave`, mas o `XCR0` era o do firmware no primeiro núcleo, e os
+secundários copiavam o dele (`smp`). O AMX não confere o `CR0.TS` — o `#NM`
+dele é o do `XFD` —: um firmware que deixasse ligado o `XCR0[18:17]`, num
+processador com o AMX, deixava os ladrilhos passarem de um processo a
+outro, e os limites do MPX também. Agora o regime escreve em todo núcleo o
+`XCR0` do kernel (`xcr0_do_kernel`): o x87, o SSE e o AVX que o processador
+declara (`CPUID.(0xD,0).EAX`), e nada mais; a cópia do `MOLDE` saiu. O
+`qemu64` da suíte não tem o `xsave`: ali não há o que escrever — o log do
+boot diz o `XCR0` 0 —, e uma rodada à parte com o `+xsave` e o
+`+xsaveopt`, não comitada, exercitou a escrita: o `XCR0` 0x3, o x87 e o SSE
+que essa CPU declara; e outra, com o `+pku` junto, o filtro: o PKRU que a
+CPU declara fica de fora (ver as mutações). E o `SEP` (o item 9, do revisor do
+lote B3): a leitura dos registradores do `sysenter` dizia que eles existem
+em todo x86_64, e o regime sujo da suíte os escrevia sem perguntar; a
+leitura, a escrita e o regime sujo perguntam agora a `tem_sysenter`. A
+escrita continua sob a pergunta, e não sempre — o Linux os escreve sempre,
+pelo `wrmsrl_safe` —: o kernel não se recupera de um `#GP` no anel 0, e um
+hipervisor que escondesse o `SEP` sem ter os registradores pararia o boot.
+O que a pergunta deixa de fora é o contrário: um hipervisor que esconda o
+`SEP` e ainda honre o `sysenter` — o VT-x o honra, pelo VMCS — com valores
+que o firmware tenha escrito; o reset e o OVMF os deixam em repouso, e com o
+seletor zero o `sysenter` é `#GP(0)`.
+
+No ARM (o item 8), o regime escreve também o `MDSCR_EL1` — só o `TDCC`: o
+canal do depurador do EL0 (o `MDCCSR_EL0`, o `DBGDTR_EL0`, o `DBGDTRRX_EL0`
+e o `DBGDTRTX_EL0`) cai no EL1, a classe 0x18, e o processo morre dela; sem
+ele, sem depurador do outro lado, o `TXfull` que um processo ligasse o
+seguinte via — o par do `DR7` do x86 —; e o `MDE`, o `KDE` e o `SS`
+desligados — e o `TPIDRRO_EL0` em zero, por higiene: o EL0 o lê, e o kernel
+não o usa. Antes, o programa que lê o `MDCCSR_EL0` seguiu e saiu com 66
+nos quatro núcleos, e o caso do regime reprovou no `TDCC`; agora ele morre
+com o `ESR` 0x6220c003 (`excecoes: o EL0 que le o canal do depurador
+morre`). O reset e o EDK2 deixam o `MDSCR_EL1` e o `TPIDRRO_EL0` em zero —
+o log do boot diz os quatro registradores do regime.
+
+**As máscaras do ARM sem o `nomem` (o lote B4).** `mascarar_irqs` e
+`restaurar_irqs` — e, por elas, `sem_interrupcoes` e `dormir_se_ocioso` —
+escreviam o `DAIF` com `options(nomem)`: o `asm!` dizia que não toca a
+memória, e o compilador podia passar um acesso para o outro lado dele — a
+pergunta do coletor (`COLETOR_CHAMADO`) para antes do `msr daifset`, e a
+janela que o lote B3 fechou voltava (o item 3). O `nomem` saiu delas, e
+também de `ligar_interrupcoes`, do fim de `init_interrupcoes`, de
+`smp::parar_este_nucleo` e do `svc` de `ceder_cpu`: toda escrita do `DAIF`
+e a cessão são barreiras para o compilador, como o `cli` e o `sti` do crate
+`x86_64`. O compilador de hoje não movia: a desmontagem do kernel de
+produção do ARM em release — o `dormir_se_ocioso` do coletor —, antes e
+depois, tem a mesma ordem: o `msr DAIFSet`, o `ldarb` da marca, o `wfi`. E
+nenhum caso pega a mutação que devolve o `nomem` (ver *As mutações do
+chamado do coletor*): a evidência é a desmontagem. O `wfi` do crate
+`aarch64-cpu` e o `sti; hlt` do crate `x86_64` seguem com o `nomem`: a
+pergunta, feita sob a máscara, decide se eles rodam, e quem volta a dormir
+pergunta de novo sob a máscara.
+
+**O que fica, depois do lote B4.** A R12-SIMD (`docs/DECISOES.md`), aberta:
 o FP/SIMD preso fecha o canal, e liberá-lo aos programas, salvando o estado
-de cada processo, é o que ela decide. O AMU do ARM, como o lote B2 o
-deixou. O caminho
+de cada processo, é o que ela decide — o `TPIDR_EL0` e os seletores
+guardados por fio não são estado de SIMD, e não a decidem. O AMU do ARM,
+como o lote B2 o deixou. O caminho
 de verdade do passo adiado pelo `mov ss` só roda num processador — a suíte
 leva o passo ao anel 0 pelo `TF` do próprio kernel —, e o `#GP(0)` do
 `sysenter` só num Intel: no emulador, os dois casos aceitam as duas
 formas, e dizem qual viram. O `#MC` não se provoca na suíte: o caso confere
 a pilha dele, e o tratador é o mesmo de antes. A corrida do `RSP0` não tem
 caso direto: a escrita solta saiu, e o `debug_assert!` pega a que voltar,
-só na depuração.
+só na depuração. A escrita do `XCR0` só roda num processador com o `xsave`:
+o `qemu64` da suíte não o tem, e as rodadas com o `+xsave,+xsaveopt` — e
+com o `+pku`, que dá ao filtro do `XCR0` o que tirar — ficam fora da CI.
+Com o `+xsave` sozinho, o QEMU 8.2 para a máquina na escrita do `CR4` com o
+`OSXSAVE`, a escrita do lote B3, e isso é do emulador, e não do kernel: o
+QEMU 8.2.2 marca o `OSXSAVE` como reservado quando o `CPUID.(0xD,1).EAX` é
+zero (`target/i386/cpu.h:2504`) — e o `+xsave` sozinho não liga nada nessa
+subfolha —, e a escrita de um bit reservado do `CR4` vira, no TCG, um
+`cpu_vmexit(SVM_EXIT_ERR)` (`tcg/sysemu/misc_helper.c:110-111`), mesmo fora
+de um hóspede SVM, e não o `#GP(0)` da arquitetura; o QEMU 10.2.0 faz o
+mesmo (o adversário do lote B4 leu os dois). O kernel segue a arquitetura:
+o `OSXSAVE` só com o `CPUID.01H:ECX.XSAVE`. É também a máquina parada das
+mutações do `FSGSBASE` e do `PKE`. A escrita do `IA32_TSC_AUX`, do mesmo
+jeito, só roda num processador com o `RDTSCP` ou o `RDPID`: o `qemu64` não
+os tem, e a rodada com o `+rdtscp` fica fora da CI. O `nomem` das
+máscaras do ARM não tem caso: a desmontagem é a evidência. O zero do
+`TPIDR_EL0` e dos seletores no `entrar` não tem caso: o fio novo já os traz
+zerados do `Contexto`, e nenhum fio chega ao `entrar` com eles sujos — as
+mutações sobrevivem, equivalentes. O `FSGSBASE` e o `PKE` desligados no
+caso do regime não têm mutação que chegue a ele: ligá-los sem o CPUID para
+a máquina no QEMU 8.2, e o `qemu64` não os declara. A escrita das bases do
+`FS` e do `GS` no regime só se vê pelo regime sujo: no TCG, o seletor nulo
+já as zera, e o AMD sem o `NullSelectorClearsBase`, onde ela importa, a
+suíte não tem.
 
-E o que o adversário do lote B3 achou, que vai para o lote B4: o
-`TPIDR_EL0` do ARM, que o kernel não guarda por fio — 64 bits de um
-processo ao seguinte no mesmo núcleo (alta) —; os seletores `DS`, `ES`,
-`FS` e `GS` do x86, pela mesma razão (alta, de banda menor: uns 15 bits por
-troca); o `nomem` das máscaras de interrupção do ARM, que deixa o
-compilador tirar uma leitura de dentro da janela do coletor; o `XCR0` que o
-firmware escolhe e o kernel copia — o AMX não confere o `TS` —; os
-registradores gerais na primeira entrada de um processo, que chegam com o
-que o kernel deixou; o `UMIP` do x86, desligado — com ele, o `sgdt`, o
-`sidt`, o `sldt`, o `smsw` e o `str` do anel 3 seriam `#GP`; o TCG do QEMU
-8.2 o tem (`+umip`), e o lote B4 o liga, com um caso —; o caso do regime
-do x86, que confere o `CR4` contra a mesma função que o escreve, e não
-olha os `DR0` a `DR3`; o `conferir_sem_simd`, que não conhece os `k0` a
-`k7`, o `vzeroupper`, o `vldmxcsr` nem o AMX; e o `MDSCR_EL1` e o
-`TPIDRRO_EL0` do ARM, que o regime não escreve.
+A troca de contexto do x86 recarrega os quatro seletores de dados sempre.
+O Linux pula a carga do `DS` e do `ES` quando o que sai e o que entra são
+nulos (`__switch_to`), e a do `FS` e do `GS` com regras dele, por causa das
+bases; aqui não: é a forma óbvia, as mutações do lote a cobrem como está, e
+num processador quatro cargas de seletor são pouco perto do resto da troca.
+No TCG cada carga é uma chamada ao emulador, e o custo aparece num caso
+denso em trocas. Numa medida A-B-A-B — seis rodadas do x86 em depuração,
+alternando o lote B3 e o B4, com a mesma linha temporária de filtro (os
+casos que mais cresceram nas rodadas finais e os de controle, e a cauda)
+—, `zumbis: a cota vale com tudo ao mesmo tempo` levou 13,6, 13,3 e 14,1 s
+no B3 e 15,2, 15,0 e 16,6 s no B4 (+12%); os dos fios e do `smp`, de 0,1
+a 2 s, ficaram entre 1,03 e 1,10 — menos `smp: o fio novo acorda o
+ocioso`, 1,16 (0,37 contra 0,43 s) —, e `smp: travas excluem entre
+nucleos` foi de 0,06 a 0,20 s (as medianas; uma rodada do B3 deu 0,19); e
+o resto empatou — a inundação
+da auditoria, 39,0 contra 38,2 s, a reconstrução, 17,7 contra 17,7 s. O
+relógio do convidado no fim: 94,3, 95,5 e 93,0 s no B3, 94,3, 92,0 e 95,5 s
+no B4 — a mediana do B4 sobre a do B3, 1,001.
+
+E o `#DB` aninhado na mesma pilha da IST, o item 10 do adversário do lote
+B3, opcional, ficou de fora: um `mov ss` seguido do `int1` levaria o `#DB`
+pendente à primeira instrução de `depuracao`, na mesma pilha, por cima do
+quadro de fora. A defesa — o `#DB` do anel 0 com o `pc` na entrada de
+`depuracao` tratado como a morte do processo do fio — não teria caso: no
+TCG do QEMU o `int1` é `#UD` e o `mov ss` não adia o passo, e um ponto de
+parada do hardware na entrada do tratador, para provocá-lo, recorreria no
+próprio tratador. E o selftest do Linux (`mov_ss_trap.c`) registra que o
+`int1` não entrega o passo pendente: é comportamento de processador, que
+só um processador mostraria.
 
 O `int3` do anel 3 não chega ao `#BP`: o portão tem DPL 0, e o `int3` de
 um anel acima dele é um `#GP` com o vetor no código de erro (0x1A) — o
@@ -2427,7 +2720,23 @@ segmento ausente do anel 3 mata o processo pelo #NP` e `excecoes: a pilha
 ausente do anel 3 mata o processo pelo #SS`). No ARM: o `fmov`, o `msr
 daif` e o `wfi`. E, nas duas, o regime de cada núcleo; no x86, também a
 pilha da IST do `#MC`. Os casos do lote B3 conferem, além do nome, do `pc`
-e do código, o endereço da falha, quando ela tem um (`Esperada.endereco`). As outras exceções com
+e do código, o endereço da falha, quando ela tem um (`Esperada.endereco`).
+O lote B4 acrescentou, nas duas, o canal e o par do estado por fio, os
+registradores da primeira entrada, a herança do `fork` e da troca de
+imagem e, dos achados do adversário dele, a troca de imagem com as flags
+ligadas — programas que não provocam exceção nenhuma num kernel correto:
+saem com um código que diz o que viram, e o receptor do par morre do `ud2`
+ou do `brk #1` se a marca dele mudou —; no x86, o `str`, o `sldt`, o `smsw`, o `sgdt`, o
+`sidt` e o `fwait`; e, no ARM, o `mrs` do `MDCCSR_EL0` (ver *O estado por
+fio* e *O regime conferido bit a bit*). Os deslocamentos que os casos
+conferem — onde a exceção deixa o `pc`, a partir da entrada — eram
+conferidos também pelo montador, com um `.if` por programa; o passo do LTO
+do release lê o assembly antes de haver leiaute, a diferença de dois
+rótulos não é absoluta ali, e o build de release dizia um erro que não
+era por `.if` — nove no x86, dois no ARM (`expected absolute expression`, e
+o `.error` de cada um) —, e terminava assim mesmo. Os `.if`
+saíram no lote B4: o caso confere o `pc`, e um programa editado que mude o
+deslocamento reprova nele (ver as mutações). As outras exceções com
 código de erro — `#TS`, `#AC`, `#CP`, `#VC`, `#SX` — e o `#OF`, o `#BR`, o
 `#VE` e o `#HV` não se alcançam do anel 3 no emulador com o que o kernel
 liga; os tratadores delas usam a mesma regra, a do `#NP` e do `#SS`. O
@@ -2489,12 +2798,109 @@ x86 e `k/1020` no ARM — um caso por parte, e a cauda; a do `nTWI` e do
 | o caso da senha na linha de volta ao atalho (`interpretador::tratar` direto, sem o teclado) | reprovou — `consoles: sem ninguem, a senha com algo na linha e a mesma recusa da senha sozinha`: "a linha de comando nao passou pelo historico do teclado duas vezes" — o histórico guardou a linha 0 vez: o caso sabe que passou pelo teclado |
 | o `SCTLR_EL1` com o `nTWI` e o `nTWE` ligados (o ARM) | reprovou — `excecoes: o wfi do EL0 mata o processo`: "o processo seguiu depois da excecao" — os quatro `wfi` passaram, e o processo chegou ao fim |
 
+E as do lote B4, do mesmo jeito, em debug, contra `DUKE_PARTE=k/1041` no
+x86 e `k/1026` no ARM — um caso por parte, e a cauda —, anotadas uma a uma
+no `mutar.py` do especialista; as do `conferir_sem_simd`, contra os testes
+do hospedeiro do `xtask` (`testes_do_ponto_flutuante`). A do `nomem` está
+em *As mutações do chamado do coletor*.
+
+| Mutação | Resultado |
+|---|---|
+| sem a troca do `TPIDR_EL0` em `trocar_no_quadro` (o ARM) | reprovou — `excecoes: o TPIDR_EL0 fica com o processo que o escreveu, entre as trocas`: "o registrador do receptor mudou enquanto ele cedia ao emissor". O canal passou com ela: o `entrar` zera o `TPIDR_EL0` de quem entra, e a segunda rodada não vê a primeira — é o par que pega a troca |
+| o `TPIDR_EL0` só zerado a cada troca, sem guardar (o ARM) | reprovou — o par: o receptor perdeu a marca na primeira troca |
+| sem os seletores em `trocar_contexto`, em `preparar_contexto` e no `fork` (o x86) | reprovou — `excecoes: os seletores de dados ficam com o processo que os escreveu, entre as trocas`: "o registrador do receptor mudou enquanto ele cedia ao emissor"; o canal passou, pelo mesmo motivo do ARM |
+| os quatro seletores só anulados a cada troca, sem guardar (o x86) | reprovou — o par |
+| sem o `FS` e o `GS` nulos em `gdt::carregar` (o x86, que sobe pelo OVMF e pelo iniciador) | reprovou — a máquina parou no boot: `FALHA FATAL #0: general_protection_fault em pc=0xffff800000af3cb9 codigo=0x30`, aos 850 ms — o 0x30 que o OVMF deixa no `FS` e no `GS`, recarregado na primeira volta do fio do boot (o `GS` primeiro: a troca desempilha o `GS`, o `FS`, o `ES` e o `DS`, nessa ordem) |
+| os registradores do `entrar` sem zerar (o x86; o ARM) | reprovou nas duas — `excecoes: os registradores do processo novo chegam zerados`: "um registrador chegou ao processo novo com o que o kernel deixou" |
+| só o `TPIDR_EL0` do `entrar` sem zerar (o ARM); só os seletores (o x86) | **sobreviveram**, equivalentes: o fio que entra pela primeira vez já os traz zerados do `Contexto` — o `preparar_contexto` os zera, e a troca os carrega. O zero do `entrar` vale para um fio que chegue a ele com os registradores sujos — nenhum, hoje —, e a suíte não tem um |
+| o filho do `fork` sem os do pai (o x86: quatro nulos; o ARM: zero) | reprovou nas duas — `excecoes: o filho do fork herda o estado por fio do pai, e a troca de imagem o zera`: "o filho do fork nao recebeu o estado por fio do pai" |
+| a troca de imagem sem zerá-los (o x86; o ARM) | reprovou nas duas — o mesmo caso: "a imagem nova recebeu o estado por fio da que saiu" (a mensagem de então) — o `filho` saiu com 25 |
+| sem o `UMIP` no `cr4_do_kernel` | reprovou — `excecoes: o str, o sldt, o smsw, o sgdt e o sidt do anel 3 morrem do #GP do UMIP`: "a cpu oferece UMIP e o kernel nao o ligou"; e o caso do regime: "o regime do nucleo nao esta como o kernel o escreve" |
+| sem o `MCE`; sem o `DE` (no `cr4_do_kernel`) | reprovaram — o caso do regime, com o bit no log ("antes" e "depois": `Err("MCE")`, `Err("DE")`) — o que a conferência contra a própria função deixava passar |
+| o `FSGSBASE`; o `PKE` (ligados sem perguntar ao CPUID) | reprovaram — a máquina parou na escrita do `CR4`, depois da linha do vídeo, sem `FALHA FATAL`, e o vigia do `xtask` a encerrou aos 600 s: o QEMU 8.2 do TCG não entrega o `#GP` de um bit reservado do `CR4` — para. Pelo CPUID — como o `cr4_do_kernel` faz com os outros —, seriam equivalentes no `qemu64`, que não os declara |
+| sem zerar os `DR0` a `DR3` | reprovou — o caso do regime: "o kernel nao reescreveu o regime que outro deixou aberto" — os quatro endereços sujos ficaram ("depois": `Err("um dos DR0 a DR3 fora de zero")`) |
+| sem pôr o `MP` no `CR0` | reprovou — o caso do regime ("depois": o `CR0` sem o `MP`). O do `fwait` passou com ela: o OVMF já deixa o `MP` ligado (o `CR0` 0x80010033), e os secundários copiam o `CR0` do primeiro |
+| desligando o `MP` | reprovou — `excecoes: o fwait do anel 3 cai no #NM`: "o processo seguiu depois da excecao"; e o caso do regime |
+| sem a escrita do `MDSCR_EL1` (o ARM) | reprovou — o caso do regime, no `TDCC`, e `excecoes: o EL0 que le o canal do depurador morre`: "o processo seguiu depois da excecao" |
+| sem zerar o `TPIDRRO_EL0` no regime (o ARM) | reprovou — o caso do regime: "o kernel nao reescreveu o regime que outro deixou aberto" ("depois": `Err("o TPIDRRO_EL0 fora de zero")`; o reset já o deixa em zero: só o regime sujo a mostra) |
+| sem a escrita do `XCR0` | **sobreviveu** no `qemu64` da suíte, equivalente: sem o `xsave` não há o que escrever. Na rodada temporária com o `-cpu` `qemu64,+smep,+umip,+xsave,+xsaveopt` — anotada como mutação, não comitada —, reprovou: o `XCR0` ficou no 0x1 do reset, e o caso do regime disse `antes Err("o XCR0")` em cada núcleo; com a escrita, nessa mesma CPU, o kernel escreve o `XCR0` 0x3 — o x87 e o SSE que ela declara — e o caso passa. Com o `+xsave` sozinho, o QEMU 8.2 para a máquina na escrita do `CR4` com o `OSXSAVE` — como com um bit reservado —, com e sem a escrita do `XCR0`, e o caso não roda; com o `+xsaveopt` junto — a subfolha 1 da folha 0xD —, a máquina sobe |
+| um `nop` a mais no começo do programa do passo (o x86) e do do `msr daif` (o ARM) — o deslocamento errado de propósito, que o `.if` pegava no montador | reprovou nas duas — `excecoes: o TF ligado pelo processo mata o processo no passo seguinte` e `excecoes: o msr daif do EL0 mata o processo, e o nucleo nao fica mascarado`: "a falha contada nao foi a da excecao do programa, na instrucao dela" — o `#DB` em `pc=0x10000000c`, e não `0x10000000b`; a classe 0x18 em `pc=0x100000008`, e não `0x100000004` |
+| sem o `%tmm`; sem o `%k0`–`%k7`; sem o `vzeroupper` (no `conferir_sem_simd`) | reprovaram — `testes_do_ponto_flutuante::as_mascaras_do_avx512_o_avx_e_o_amx_sao_pegos` |
+| sem o prefixo `tileload` | **sobreviveu**, equivalente: todo `tileload` tem um ladrilho `%tmm` de destino, que a regra do registrador pega — como o `tilezero`. As duas regras do mnemônico ficam, como as pediu o adversário |
+
+E as dos achados do adversário do próprio lote B4, do mesmo jeito, contra
+`DUKE_PARTE=k/1042` no x86 e `k/1027` no ARM — o caso das flags entrou no
+fim da tabela —; as do `xtask`, contra os testes do hospedeiro
+(`testes_do_processador_do_x86` e `testes_do_ponto_flutuante`). A m19 é uma
+rodada temporária com o `-cpu` do x86 trocado, não comitada, anotada como
+as outras. E as dos dois informativos do adversário do delta — o
+`IA32_TSC_AUX` e a guarda do `-cpu` —, do mesmo jeito: a do `-cpu` escrito à
+mão, contra o `invariantes`; as do `IA32_TSC_AUX`, numa rodada temporária
+com o `+rdtscp` no `-cpu`, como a m19 — o `qemu64` não declara o `RDTSCP`
+nem o `RDPID`.
+
+| Mutação | Resultado |
+|---|---|
+| a troca de imagem com as flags da anterior de volta — o `R11` da `syscall` (o x86); o `SPSR` da chamada (o ARM) | reprovou nas duas — `excecoes: a troca de imagem nao entrega as flags da imagem anterior`: "a imagem nova recebeu as flags da que saiu"; a herança: "a imagem nova recebeu o estado por fio, ou as flags, da que saiu"; e, no x86, o `NT` ("a imagem nova recebeu as flags da que saiu, com o NT") e a troca de imagem do `exemplo` ("o programa carregado por executar recebeu o estado da imagem anterior") — o `filho` saiu com 25 em todos |
+| o `DS` e o `FS` trocados na volta de `trocar_contexto` | reprovou — o par: "o registrador do receptor mudou enquanto ele cedia ao emissor"; e a herança: o filho do `fork` saiu com 26 ("o filho do fork nao recebeu o estado por fio do pai"). Com as marcas de antes — o `DS` e o `FS` iguais, e o `ES` e o `GS` —, ela sobreviveria aos três casos (o achado 3, pela leitura; não rodou antes da correção) |
+| o `fork` com o `DS` no lugar do `FS` (`seletores_de_dados`) | reprovou — a herança: o filho saiu com 26 |
+| `tem_sysenter` que sempre diz não | reprovou — o caso do regime: "o caso nao sujou o regime inteiro" (inteiro: `Err("o sysenter sujo nao foi escrito ou lido, e o processador declara o SEP")`). Antes, ela sobreviveria (o achado 2, pela leitura e pelo log do sujo; não rodou antes da correção): nada se sujava, a leitura dava zero, e o caso passava |
+| o `-cpu` com o `+xsave`, o `+xsaveopt` e o `+pku`, sem mutação no kernel (a m19) | passou — o `CPUID.(0xD,0).EAX` declara o PKRU, e o kernel escreve o `XCR0` 0x3: o filtro tirou o bit 9 |
+| o mesmo `-cpu`, e o `XCR0` sem o filtro (`X87 \| declarados`) | reprovou — o caso do regime: "o regime do nucleo nao esta como o kernel o escreve" (`antes Err("o XCR0")`: o kernel escreveu o 0x203). Sem o `+pku`, o filtro não tinha o que tirar, e ela sobreviveria |
+| o regime sem zerar as bases do `FS` e do `GS`; só a do `GS` | reprovaram — o caso do regime: "o kernel nao reescreveu o regime que outro deixou aberto" ("depois": `Err("a base do FS ou a do GS fora de zero")`) |
+| o `ceder` que não cede (a chamada só devolve zero) | reprovou nas duas — o par: "o receptor e o emissor nao se revezaram no nucleo": uma ou duas trocas diretas por núcleo, contra 65 no núcleo do executor e 130 nos outros. Sem a contagem, o par passava com ela: nenhuma falha, e as 130 chamadas |
+| o emissor do par que não carrega o programa (a falha injetada) | reprovou na hora — o par: "um programa do par nao carregou ou nao entrou no anel sem privilegio" |
+| a mesma falha, sem contar o emissor como carregado | reprovou pelo teto — "o receptor e o emissor nao acabaram", em cada núcleo —, e o receptor ficou cedendo para sempre, preso ao núcleo, pelo resto da rodada: o que a contagem evita |
+| o `-cpu` do x86 sem o `+umip` | reprovou — `testes_do_processador_do_x86::o_processador_do_x86_tem_o_smep_e_o_umip`. O caso do UMIP passou com ela ("esta cpu nao oferece UMIP; nada a afirmar"): o teste do hospedeiro é o que reprova |
+| sem o Key Locker (`aes`, `encodekey`); sem pular os prefixos; sem o `<unknown>` (no `conferir_sem_simd`) | reprovaram — `testes_do_ponto_flutuante::o_key_locker_os_prefixos_e_o_desconhecido_sao_pegos`. No awk do canário, as mesmas três, no mawk, contra as linhas do teste: 22, 22 e 25 das 26 pegas |
+| o `-cpu` com o `+rdtscp`, sem mutação no kernel (uma rodada temporária) | passou — o regime sujo leu a marca no `IA32_TSC_AUX` (0x7e570a11), e o de depois, zero; o OVMF deixa o registrador em zero |
+| o mesmo `-cpu`, e o regime sem zerar o `IA32_TSC_AUX` | reprovou — o caso do regime: "o kernel nao reescreveu o regime que outro deixou aberto" ("depois": `Err("o TSC_AUX fora de zero")`) |
+| o mesmo `-cpu`, e `tem_tsc_aux` que sempre diz não | reprovou — o caso do regime: "o caso nao sujou o regime inteiro" (inteiro: `Err("o TSC_AUX sujo nao foi escrito ou lido, e o processador o declara")`) |
+| o regime sem zerar o `IA32_TSC_AUX`, no `qemu64` de sempre | **sobreviveu**, equivalente: o `qemu64` não declara o `RDTSCP` nem o `RDPID`, e não há o que zerar — daí a rodada com o `+rdtscp` |
+| o `-cpu` do x86 com o `-umip` depois do `+umip` (`qemu64,+smep,+umip,-umip`) | reprovou — `testes_do_processador_do_x86::o_processador_do_x86_tem_o_smep_e_o_umip`: "o -cpu do x86 com o -umip" |
+| o `-cpu` do x86 escrito à mão em `comando_qemu`, sem a constante | reprovou — o `invariantes`: "um `-cpu` que não sai do `CPU_DO_X86` nem é o do ARM" e "o `-cpu` do x86 sai do `CPU_DO_X86` em 0 lugar(es), e não em um" |
+
 A suíte inteira, com o lote B3, passou nas duas arquiteturas, em
 depuração, nas três partes da CI — no x86, 1042 casos, em 1521, 1347 e
 1229 segundos; no ARM, 1027, em 1248, 1039 e 1181 —, e pelo iniciador da
 UEFI: as duas partes do ARM (517 e 516 casos sobre o mapa da UEFI, em 1591
 e 1798 segundos) e a do x86 (110 segundos). Os casos novos passaram também
 em release, um por parte, nas duas.
+
+A suíte inteira, com o lote B4, passou nas duas arquiteturas, em
+depuração, nas três partes da CI — no x86, 1049 casos, em 1443, 1260 e
+1185 segundos; no ARM, 1033, em 1155, 973 e 1163 —, e pelo iniciador da
+UEFI: as duas partes do ARM (520 e 519 casos sobre o mapa da UEFI, em
+1482 e 1767 segundos) e a do x86 (95 segundos). Os casos novos e o do
+regime, que o lote mudou, passaram também em release, um por parte, nas
+duas; o `cargo xtask elf` passou nas duas, e o `cargo xtask compilador`
+não achou desvio: o `nightly-2026-11-15`, o `rustc 1.102.0-nightly
+(5f4effd57 2026-11-13)`.
+
+Duas reprovações dessas rodadas foram do hospedeiro, e cada uma teve a
+causa conferida antes de a rodada valer:
+
+- À tarde, a primeira volta — antes dos achados do adversário entrarem no
+  lote — levou 1951 e 1678 segundos nas duas primeiras partes do x86, e a
+  1/3 perdeu `nvme: a medida de uma ida, no NVMe e no virtio-blk`: a
+  descarga de uma ida de 16 KiB levou 1,59 s, contra o teto de 100 ms,
+  com agentes lendo o disco ao mesmo tempo. A medida A-B-A-B acima tirou
+  o lote da conta, e as partes da noite, com a máquina quieta, ficaram
+  abaixo das do B3.
+- À noite, a primeira volta da parte 1/2 do iniciador do ARM perdeu `icp:
+  cada prova adulterada e recusada`: o primeiro pedido, o `read_state` à
+  `raiz-errada`, ficou 15 s sem resposta — o prazo de silêncio do
+  programa (`Prazo::PADRAO`) —, e nas outras rodadas o mesmo pedido leva
+  de 0,2 a 0,4 s. A falha caiu nos três minutos e meio em que o processo
+  do agente de desenvolvimento reiniciava no hospedeiro, das 19:04:24 às
+  19:07:55 UTC — o histórico que ele relê tem 1,3 GB —, e a mesma janela
+  atrasou casos que não passam pela bancada do IC: `codigo: so o da
+  imagem roda sem selo` levou 39,8 s (3,3 s numa parte de depuração),
+  `codigo: o conferido e o que roda`, 47,2 s (2,9 s), e `codigo: o
+  instalador pela rede`, 13,1 s (5,7 s). A parte rodou de novo, com a
+  máquina quieta, e passou: 520 de 520, em 1482 segundos, com o mesmo
+  pedido respondido em 0,12 s e os três casos do `codigo` em 2,7, 2,1 e
+  4,6 s.
 
 ### O `fork` não copia página nenhuma
 
@@ -10402,6 +10808,13 @@ contra `DUKE_PARTE=1035/1035` no x86 e `1020/1020` no ARM:
 |---|---|
 | a pergunta do coletor fora da janela mascarada — a marca lida antes de `descansar_ate_a_interrupcao_se`, como era | reprovou nas duas — `zumbis: o chamado que chega na janela do sono do coletor acorda o sono, e nao espera o tique`: "o cutucao do chamado foi atendido dentro da janela, antes do sono: o coletor dormia ate o tique" — o cutucão atendido na janela, com as interrupções ligadas, antes do sono, que dali iria até o tique |
 
+E uma do lote B4 — o item 3 do adversário do lote B3 —, no ARM, contra
+`DUKE_PARTE=1020/1026`:
+
+| Mutação | Resultado |
+|---|---|
+| o `nomem` de volta em `mascarar_irqs` e `restaurar_irqs` | **sobreviveu**, como se esperava: o caso da janela passou. O `nomem` não muda o que o processador faz, só o que o compilador pode mover, e o compilador de hoje não move: a desmontagem do kernel de produção em release, com o `nomem` e sem ele, tem a mesma ordem no `dormir_se_ocioso` do coletor — o `msr DAIFSet`, o `ldarb` da marca, o `cbz`, o `wfi`. A evidência é a desmontagem; o que o lote B4 tirou é a permissão de mover |
+
 ### Mensagens
 
 Uma mensagem entre titulares — agente, pessoa, serial, administrador — é um
@@ -13834,6 +14247,12 @@ x86 nas três: a parte 1/3 levou 67,3, 53,0 e 67,1 minutos, e a 2/3, 70,0,
 50,1 e 45,9 — de novo, a variação dos runners, com o mesmo trabalho. O fim
 veio dos fluxos entre dispositivos na 512 e na 514, e da parte 2/2 do
 iniciador do ARM na 513, que começou aos 33,0 e rodou 46,2.
+
+A CI 515 (`a5af566`, o lote B3, verde, 48 de 48) mediu 84,8 minutos de
+ponta a ponta, com 1345 de máquina. O maior job foi de novo a persistência
+do x86 — a parte 2/3 levou 72,0 minutos, e a 1/3, 61,8 —, e depois a
+atualização do ARM, 56,3. O fim veio dos fluxos entre o x86 e o ARM, que
+começaram aos 50,0 e rodaram 34,8.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

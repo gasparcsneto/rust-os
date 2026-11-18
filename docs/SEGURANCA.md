@@ -799,6 +799,15 @@ contido pelo despertador.
 
 ## Limitações deliberadas
 
+- **O NSF não vê um canal pelo estado do processador.** Um valor que um
+  processo deixasse num registrador para o seguinte no mesmo núcleo não
+  passa pelo gate nem pela auditoria, e o NSF, que lê a auditoria, não o
+  veria. Quem fecha esses canais é o kernel, e não o NSF: o ponto
+  flutuante e o SIMD presos (o lote B3 do #448); o `TPIDR_EL0` do ARM e os
+  seletores de dados do x86 guardados por fio, os registradores zerados na
+  entrada, o UMIP e o canal do depurador do EL0 presos, e as flags de um
+  processo novo na troca de imagem, e não as da imagem que saiu (o lote
+  B4).
 - **O estado do NSF é volátil.** Incidentes, perfis e o cofre moram na
   memória; o que sobrevive a um boot é a auditoria, de onde o NSF os
   refaz pela janela que o journal repõe. A captura e as regras do firewall

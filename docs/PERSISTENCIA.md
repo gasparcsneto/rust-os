@@ -3870,9 +3870,9 @@ dessas seções críticas no instante da NMI, numa janela que depende do
 tempo do hospedeiro — e a subida dos núcleos, logo antes do pânico desta
 bancada, é, pelo código, quando se espera que eles mais as tomem. No ARM
 a parada é uma SGI, que um núcleo com as interrupções mascaradas não ouve:
-como as duas travas do tique são tomadas sempre mascaradas — no código
-gerado de hoje; ver o `nomem` em *O que fica* —, nenhum núcleo para no
-meio delas.
+como as duas travas do tique são tomadas sempre mascaradas — e, desde o
+lote B4 do #448, sem o `nomem` na máscara, o compilador também não as tira
+de dentro dela —, nenhum núcleo para no meio delas.
 
 ### A correção
 
@@ -4081,11 +4081,14 @@ não de o travamento não ter voltado.
   - no x86, um registrador de reinício na memória — a FADT do QEMU o põe
     numa porta, a `0xCF9` — faz o reinício mapear uma página, com a trava
     dos frames, que o pânico não destrava;
-  - no ARM, `sem_interrupcoes` mascara com `nomem` — de antes deste
-    trabalho —, e o contrato do `asm!` deixa o compilador passar a tomada
-    de uma trava para fora da máscara; o código gerado de hoje não o faz
-    (a máscara do pânico, sem o `nomem`, é uma barreira — ver *O que o
-    adversário achou*, acima).
+  - no ARM, `sem_interrupcoes` mascarava com `nomem` — de antes deste
+    trabalho —, e o contrato do `asm!` deixava o compilador passar a
+    tomada de uma trava para fora da máscara. O código gerado não o fazia,
+    e o lote B4 do #448 tirou o `nomem` de toda escrita do `DAIF` —
+    `mascarar_irqs`, `restaurar_irqs`, `ligar_interrupcoes`, o fim de
+    `init_interrupcoes` e `smp::parar_este_nucleo` — e do `svc` de
+    `ceder_cpu`: a máscara é uma barreira para o compilador, como a do
+    pânico (ver *O que o adversário achou*, acima).
 - **O alcance da injeção.** No x86, a NMI pode pegar o segurador no
   instante entre soltar a trava e tomá-la de novo — poucas instruções,
   contra mil voltas com ela na mão —, e aquela tentativa passaria sem a
