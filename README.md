@@ -5768,8 +5768,8 @@ registro de cada uma no ponto em que nasceu.
   próximo boot. Tentar criá-lo de novo no pedido é simples, mas a suíte
   não tem como tirar o fio do boot para exercitar a tentativa sem um
   caminho de saída só de teste no laço dele, e a recusa é o lado seguro.
-  Revisto no lote B do #448, com o gancho de teste que faria a criação do
-  boot falhar numa compilação da suíte: a suíte sobe uma vez por parte, e
+  Revisto no lote B do #448, pesado um gancho de teste que faria a criação
+  do boot falhar numa compilação da suíte: a suíte sobe uma vez por parte, e
   um boot sem o fio mudaria o que os casos da energia conferem — `energia:
   o reinicio com a tabela de fios cheia` confere que o fio é o do boot,
   parado, e é por ele que o pedido passa com a tabela cheia —; uma
@@ -13565,8 +13565,9 @@ quase não muda o fim: sem a 2/2, o fim da 509 seria 77,2 em vez de 78,4.
 
 A CI 510 (`2c39e80`, verde, 48 de 48) mediu 77,2 minutos de caminho
 crítico, 1281 de máquina e o piso de 64; o maior job, 56,9, foi a
-atualização do ARM, e o fim veio do SDK da malha da mesma arquitetura, que
-começou aos 53,7 e rodou 23,5, e da parte 1/2 do boot pela UEFI do ARM, que
+atualização do ARM, e o fim veio do SDK da malha entre dispositivos da
+mesma arquitetura — os pares x86–x86 e ARM–ARM —, que começou aos 53,7 e
+rodou 23,5, e da parte 1/2 do boot pela UEFI do ARM, que
 acabou aos 75,0 — a 2/2, aos 69,5. A CI 511 (`9fe2e8f`, só documentação)
 mediu 72,9, com 1234 de máquina: o mesmo job, com o mesmo código, levou de
 17,8 minutos a menos a 16,4 a mais entre as duas — a parte 3/3 da

@@ -345,6 +345,9 @@ Enter da `senha` é descartada ali, e o arrendamento que ela tomou sai (ver
 cerimônia de pareamento não muda essas linhas. Uma linha vazia, em
 qualquer passo, desiste. Nada se digita junto da palavra:
 `senha <algo>` é recusado, porque o que viesse junto já teria ecoado.
+Sem ninguém entrado, `senha`, com algo na linha ou não, é a recusa de
+antes do login — `DENY_NOT_AUTHENTICATED`, gravada como
+`credential.change_self`, sem o que veio junto.
 
 ```text
 duke> senha

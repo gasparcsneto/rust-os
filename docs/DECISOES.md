@@ -822,7 +822,12 @@ quem pede um processo dizendo o processo:
   na do nascimento —, e quem não nasceu não o espera: ele recolhe na volta
   seguinte, sem esperar o tique, quando ganha a vez (*O chamado do
   coletor*, em [Coordenação](../README.md#coordenação);
-  `kernel/src/fios/mod.rs`, `COLETOR_CHAMADO`). Não ajuda com o coletor
+  `kernel/src/fios/mod.rs`, `COLETOR_CHAMADO`). O lote B2 acrescentou o
+  caso que prova o cutucão no núcleo em que o coletor dorme, e o coletor
+  passou a olhar a marca antes de dormir: o chamado que chega durante a
+  passada também não espera o tique. A pergunta da cota sem efeito,
+  `ocupacao_na_cota`, ficou separada da do gate, que chama o coletor. Não
+  ajuda com o coletor
   sem a vez, nem com o que esta decisão pergunta: a tabela cheia de vivos
   — de vários titulares, ou da mesma identidade em várias sessões — não
   tem morto por recolher, e o chamado nem acontece.
@@ -1300,7 +1305,13 @@ B do #448.
 - **O problema.** Um processo que lê o contador de ciclos — desde o #451,
   fora do anel 3 e do EL0 —, que executa uma instrução privilegiada ou
   que lê a memória do kernel morre pela falha — a de proteção, ou a de
-  página, na leitura da memória do kernel.
+  página, na leitura da memória do kernel. Desde o lote B2, toda exceção
+  que o processo provoca no anel 3 e no EL0 o mata do mesmo jeito — a
+  divisão por zero, o `ud2`, o passo do `TF`, o `brk` do ARM —, menos a
+  verificação da máquina (`#MC`) e o SError do ARM, que são do hardware e
+  continuam parando a máquina. O adversário do lote B2 achou mais dois
+  caminhos até a máquina parada — o passo adiado por um `mov ss`, num
+  processador, e o LDT do reset —, que ficam para o lote B3.
   O log diz qual e onde (`processo morto por ... em pc=...`), e a
   contabilidade das falhas a conta (`traps`), mas a auditoria não diz
   nada: a morte por uma falha não é uma decisão, e nunca teve registro —
@@ -1327,7 +1338,8 @@ B do #448.
 - **O impacto.** (b) e (c): `politica::auditoria` (o método), os
   tratadores das exceções nas duas arquiteturas e a fila até o coletor
   (`traps`, `fios`), o NSF (`seguranca`, o sinal), os casos `contador:` e
-  os das exceções do usuário que o lote B2 acrescenta. (a): nada.
+  os das exceções do usuário (`excecoes:`), que o lote B2 acrescentou.
+  (a): nada.
 - **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
   não muda nada; a (b) e a (c) acrescentam um registro, sem mudar os de
   antes, e o `audit.verify` e a adoção no boot têm de reconhecê-lo.
@@ -1337,10 +1349,11 @@ B do #448.
   a adoção no boot e o volume sob uma rajada de mortes; as duas
   arquiteturas.
 - **A recomendação provisória.** (a) agora; (c) se o NSF precisar do
-  sinal. Antes do lote B2, uma exceção do anel 3 que não fosse #GP nem #PF
-  parava a máquina — e com ela o fim da auditoria que ainda não tinha ido
-  ao journal —; o lote B2 a faz matar o processo, como as outras, e é por
-  ele que a morte por falha fica um evento comum, que esta decisão
+  sinal. Antes do lote B2, no x86, uma exceção do anel 3 que não fosse #GP
+  nem #PF — o `int3` já era um #GP — parava a máquina, e no ARM o `brk` do
+  EL0 com os imediatos do estouro de propósito também — e com ela o fim da
+  auditoria que ainda não tinha ido ao journal —; o lote B2 as faz matar o
+  processo, como as outras, e é por ele que a morte por falha fica um evento comum, que esta decisão
   pergunta se a auditoria grava.
 - **Destrava.** Nada do roteiro; um sinal novo para o NSF.
 
@@ -1764,7 +1777,7 @@ como [C].
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
 | [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728` |
-| [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448 |
+| [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
 | [SDK-CANAL](#sdk-canal) (DC-1′) | o canal sem nome | documentado, até um consumidor pedir |
@@ -1865,8 +1878,8 @@ pendência #298: o resto do N6.
 - **O que se faz.** A (b) da pendência: o comando que existe, sem ninguém
   entrado, gravado sem o resumo, como a linha que não é comando — a regra
   de que a senha não vai à auditoria, que o N6 aplicou como [B]
-  (README.md:5115-5120). Antes do login, a decisão não muda com o valor
-  do parâmetro (a exceção da troca da própria senha está em *O estado*).
+  (README.md:5115-5120). Antes do login, a decisão e o registro não mudam
+  com o parâmetro, nem com a presença dele.
 - **O que não se propõe.** A (c), **(minha)**, um resumo com chave — um
   MAC com uma chave derivada da do Duke —: uma chave nova, e a custódia
   dela, seria [C].
@@ -1876,11 +1889,20 @@ pendência #298: o resto do N6.
   resumo. O caso `consoles: sem ninguem, o comando vai a auditoria sem o
   resumo dos parametros; com alguem, com ele` digita o mesmo comando com
   parâmetros diferentes, e com uma senha depois do nome, e confere o mesmo
-  registro, sem o resumo do que se digitou. Uma exceção ao "o mesmo
-  registro": a troca da própria senha, `senha` com um parâmetro, sem
-  ninguém entrado, não grava nada, e sem parâmetro grava — o registro muda
-  com a presença do parâmetro, e não com o valor, e não é um oráculo; o
-  texto que diz o contrário se acerta no lote B2.
+  registro, sem o resumo do que se digitou.
+
+  No lote B2, a troca da própria senha entrou na regra. Antes, `senha` com
+  algo na linha, sem ninguém entrado, era recusado no console, sem
+  registro e com uma resposta própria, e `senha` sozinho gravava: o
+  registro mudava com a presença do parâmetro — não com o valor, e não era
+  um oráculo. Agora a pergunta de quem está entrado vem antes da
+  conferência da linha (`interpretador::comecar_troca`): os dois são a
+  mesma recusa, o mesmo registro e a mesma resposta, e o que veio junto
+  não vai a lugar nenhum (o caso `consoles: sem ninguem, a senha com algo
+  na linha e a mesma recusa da senha sozinha`). Com alguém entrado, a
+  linha é conferida antes de qualquer decisão, como antes. Sobra o
+  `logout` sem ninguém, que só diz que ninguém entrou, sem registro: não
+  há sessão a encerrar, e nada do que veio junto é lido.
 
 ### A9-RESUMO
 
@@ -1920,13 +1942,27 @@ adversário do passo 1.
     somam até 20 (eram 28), e mais registros abreviam o nome do programa
     (`(? <resumo>`).
 
-  O adversário do lote achou duas consequências, corrigidas no lote B2: o
-  registro do firewall, que o NSF reconhece pelo número da regra no fim do
-  texto, perde o número antes — o NSF deixava de ver o bloqueio com os
-  números grandes —, e a descrição inteira de 8 dígitos seguida da
-  inteira de 16 do mesmo executável ainda vira uma troca no grafo. Fica
-  de fora, para um próximo lote [B] do mesmo tipo, o atestado do enlace
-  (`pela relacao <8>, atestado <8>`), que vai à auditoria com 32 bits.
+  O adversário do lote achou duas consequências, corrigidas no lote B2:
+  - o registro do firewall, que o NSF reconhecia pelo número da regra no
+    fim do texto, perde o número antes: o NSF deixava de ver o bloqueio com
+    os números grandes. Agora ele lê também o bloqueio cortado
+    (`seguranca::evento`, `Tipo::Firewall { regra: None }`): a execução de
+    `net.connect`, `net.send` ou `net.recv` com `DENY_POLICY` e a decisão
+    citada, com o texto cortado no começo de `bloqueado pelo firewall,
+    regra `, ou só a marca. Sem o número, o risco e o contorno do firewall
+    não mudam — os dois contam destinos —, e a proveniência diz
+    `firewall_blocked` em todo fluxo barrado, e o `firewall_rule` só quando
+    algum registro do fluxo guardou o número. Pela mesma conta, o
+    nascimento cortado (`processo N ?`) é reconhecido até os dígitos do
+    filho, do fio e da decisão somarem 33, no pior caso — o processo de
+    fora com o nome e o editor longos;
+  - a descrição inteira de 8 dígitos seguida da inteira de 16 do mesmo
+    executável ainda virava uma troca no grafo. Agora o processo fica com
+    a de 16, sem aresta (`seguranca::grafo`).
+
+  Fica de fora, para um próximo lote [B] do mesmo tipo, o atestado do
+  enlace (`pela relacao <8>, atestado <8>`), que vai à auditoria com 32
+  bits.
 
 ### DN-4
 

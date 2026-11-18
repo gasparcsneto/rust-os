@@ -4529,7 +4529,9 @@ fn recusar_pela_cota_com(
 /// imagem; 40 mais os dígitos, com o editor, desde o resumo de 16 dígitos
 /// da descrição (eram 27 e 32) —, o texto sem os mortos cabe inteiro com
 /// um fio de até 18 dígitos; com eles, acima do teto, perde o fim numa
-/// fronteira de palavra (`…, 12 mortos por ?`), e a conta fica.
+/// fronteira de palavra (`…, 12 mortos por ?`), e a conta — `N de M` — fica
+/// com um fio de até 15 dígitos ao lado do editor, e com qualquer fio no
+/// código da imagem.
 fn detalhe_da_cota(ocupados: usize, mortos_por_recolher: usize, cota: usize) -> String {
     match mortos_por_recolher {
         0 => alloc::format!("cota de processos do papel: {ocupados} de {cota}"),
@@ -4577,7 +4579,9 @@ fn quem_do_processo(autoridade: Autoridade) -> Quem {
 /// do que ele selou — o mesmo que vai depois em cada pedido do processo, com
 /// os mesmos 16 dígitos da descrição ([`Programa::descricao`]). Pedido por
 /// um processo, acima do teto, o texto perde o fim numa palavra inteira, e
-/// o resumo pode sair com o editor: a descrição do processo novo o diz
+/// o resumo sai com o editor — pedido por um processo de fora, sempre; por
+/// um da imagem, menos com o filho, o fio e a decisão somando até 5
+/// dígitos —: a descrição do processo novo o diz
 /// inteiro no primeiro pedido dele (ver "O pior caso, medido", em
 /// [`politica::auditoria::detalhe_composto`]).
 pub fn auditar_nascimento(recurso: &str, filho: u64, selado: Option<(&str, &[u8; 32])>) {

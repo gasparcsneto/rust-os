@@ -117,6 +117,19 @@ pontos onde acontece — não num canal paralelo:
 - o pedido de rede recusado pelo firewall, como execução da decisão que o
   gate tinha permitido.
 
+O NSF reconhece o nascimento do `user.run` e o bloqueio do firewall pelo
+texto do detalhe, que o teto de 96 bytes corta pelo fim. Por isso ele os
+lê também cortados (lote B2 do #448, `seguranca::evento`):
+- o nascimento, `processo N ?`, enquanto os dígitos do filho, do fio e da
+  decisão somam até 33, no pior caso — o processo de fora com o nome e o
+  editor longos;
+- o bloqueio do firewall: a execução de `net.connect`, `net.send` ou
+  `net.recv` com `DENY_POLICY` e a decisão citada, com o texto cortado no
+  começo de `bloqueado pelo firewall, regra `, ou só a marca. É o
+  bloqueio sem o número da regra. O firewall é a única recusa da política
+  depois do gate nesses métodos (`agent::commands::barrado`); uma recusa
+  nova ali seria lida como bloqueio quando o texto viesse todo cortado.
+
 O conteúdo de um datagrama nunca vai para a auditoria (ela guarda resumos,
 não corpos): vai para o anel de captura, que só `net.observe` lê, e só
 para destinos que a política diz observáveis — um destino entra no anel se
@@ -221,12 +234,16 @@ com a mesma semântica (ver a A9-RESUMO em
 [`DECISOES.md`](DECISOES.md#a9-resumo)): dois resumos do mesmo tamanho
 se comparam inteiros, e um de 8, de uma descrição gravada antes, com um
 de 16 pelos 8 do começo — é o que o de 8 diz
-(`seguranca::grafo::o_mesmo_resumo`). Um processo nasce uma vez só
+(`seguranca::grafo::o_mesmo_resumo`) —, e duas descrições inteiras de
+larguras diferentes do mesmo programa não são uma troca: o processo fica
+com a de 16, sem aresta (o lote B2). Um processo nasce uma vez só
 na época — um segundo nascimento do mesmo fio não muda o criador nem a
 autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
 pedaço do número de outro processo, num registro cortado. Na
 proveniência, a regra do firewall de uma conexão casa pelo fio, e não
-pelo programa.
+pelo programa; cada fluxo barrado diz `firewall_blocked`, e o
+`firewall_rule` só quando algum registro do fluxo guardou o número — nulo
+quando nenhum guardou.
 
 ### Risco e UEBA
 

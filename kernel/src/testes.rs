@@ -60429,7 +60429,9 @@ fn suite_o_executor_ve_e_devolve_o_coletor_e_o_journal() -> Resultado {
 /// devolve antes do caso seguinte.
 ///
 /// Um caso não depende de quem rodou antes. O coletor solto grava a
-/// auditoria pendente a cada tique, e no meio de um caso leva para um
+/// auditoria pendente a cada dois segundos
+/// (`persistencia::INTERVALO_DA_AUDITORIA_MS`), ou antes, com meio anel
+/// esperando, e no meio de um caso leva para um
 /// registro só de auditoria o que o caso confere junto da mudança, ou muda
 /// a conta dos registros. A CI 509 achou um assim: a migração das chaves do
 /// formato antigo soltava o coletor depois de medir a partição, e ele
