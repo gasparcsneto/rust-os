@@ -284,7 +284,7 @@ mod testes {
     #[test]
     fn deterministico() {
         let a = ev(1, "fs.read", Codigo::DenyPermission, Tipo::Decisao);
-        let b = ev(2, "x", Codigo::Allow, Tipo::Firewall { regra: 1 });
+        let b = ev(2, "x", Codigo::Allow, Tipo::Firewall { regra: Some(1) });
         assert_eq!(
             avaliar(&[&a, &b], &[Severidade::Media], true),
             avaliar(&[&b, &a], &[Severidade::Media], true)

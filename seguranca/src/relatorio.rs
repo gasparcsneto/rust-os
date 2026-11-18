@@ -753,22 +753,32 @@ pub fn proveniencia(m: &Motor, epoca: u32, fio: u64, w: &mut JsonWriter) -> fmt:
                 }
                 None => w.null_value()?,
             }
-            // A regra do firewall que barrou um pedido deste fluxo: a
-            // execução da decisão, ou a de outro pedido do mesmo processo ao
-            // mesmo destino. O processo é o fio, que nunca se repete no
-            // boot — e não o programa: acima do teto do detalhe, a execução
-            // sai com a descrição abreviada, e a decisão, com a inteira.
-            let regra = m.eventos().find_map(|x| match x.tipo {
-                Tipo::Firewall { regra }
-                    if x.decisao == Some(e.seq)
-                        || (x.recurso == e.recurso
-                            && x.epoca == e.epoca
-                            && x.processo.as_ref().map(|(f, _)| f) == Some(&fio)) =>
-                {
-                    Some(regra)
-                }
-                _ => None,
-            });
+            // O firewall que barrou um pedido deste fluxo: a execução da
+            // decisão, ou a de outro pedido do mesmo processo ao mesmo
+            // destino. O processo é o fio, que nunca se repete no boot — e
+            // não o programa: acima do teto do detalhe, a execução sai com a
+            // descrição abreviada, e a decisão, com a inteira. E, mais acima,
+            // o texto do bloqueio perde o número da regra (ver
+            // `evento::bloqueio_do_firewall`): o fluxo continua barrado
+            // (`firewall_blocked`), e a regra é a do primeiro bloqueio que a
+            // guardou — ou nenhuma.
+            let mut barrado = false;
+            let regra = m
+                .eventos()
+                .filter_map(|x| match x.tipo {
+                    Tipo::Firewall { regra }
+                        if x.decisao == Some(e.seq)
+                            || (x.recurso == e.recurso
+                                && x.epoca == e.epoca
+                                && x.processo.as_ref().map(|(f, _)| f) == Some(&fio)) =>
+                    {
+                        barrado = true;
+                        regra
+                    }
+                    _ => None,
+                })
+                .next();
+            w.field_bool("firewall_blocked", barrado || regra.is_some())?;
             w.key("firewall_rule")?;
             match regra {
                 Some(r) => w.u64_value(r)?,

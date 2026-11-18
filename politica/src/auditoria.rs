@@ -262,14 +262,20 @@ fn forma_do_resumo(resumo: &str) -> bool {
 /// nome, 91, e cabe sozinho: a decisão que permite, de texto vazio, nunca
 /// perde o editor; sem o nome e o editor, 60 (55 no código da imagem, sem
 /// o `de`). Ao lado da descrição toda encolhida e da citação `; decisao
-/// D`, o texto tem 44 − F − D bytes, com F e D os dígitos do fio e da
-/// decisão: o motivo de toda falta da procedência — o começo essencial dele
-/// e a marca, 24 bytes no maior — fica reconhecido enquanto F + D ≤ 20, um
-/// fio de 7 dígitos e uma decisão de 13, por exemplo. Com o resumo de 8
-/// dígitos eram 8 bytes a mais — F + D ≤ 28 —, e o maior `pelo` tinha 114,
-/// 83 e 52 bytes. No pior de todos, o fio e a decisão de 20 dígitos, o
-/// motivo fica na primeira palavra, com a marca — e já ficava, com 8: o
-/// detalhe cabe sempre, e o que encolhe é o texto.
+/// D`, o texto tem 44 − F − D bytes no código de fora (49 − F − D no da
+/// imagem), com F e D os dígitos do fio e da decisão: o motivo de toda falta
+/// da procedência — o começo essencial dele e a marca, 24 bytes no maior —
+/// fica reconhecido enquanto F + D ≤ 20, um fio de 7 dígitos e uma decisão
+/// de 13, por exemplo. Com o resumo de 8 dígitos eram 8 bytes a mais — F +
+/// D ≤ 28 —, e o maior `pelo` tinha 114, 83 e 52 bytes. No pior de todos, o
+/// fio e a decisão de 20 dígitos, o motivo fica na primeira palavra, com a
+/// marca; com 8, ficava nas duas ou três primeiras — nas duas larguras, sem
+/// o começo essencial: o detalhe cabe sempre, e o que encolhe é o texto.
+///
+/// Quem reconhece um texto pelo **fim** dele — o número de uma regra, o
+/// fio de um filho — o perde primeiro: o NSF lê o bloqueio do firewall e o
+/// nascimento também nas formas cortadas, e diz até onde cada um vale
+/// (`seguranca::evento::bloqueio_do_firewall`; o lote B2 do #448).
 pub fn detalhe_composto(pelo: Option<&str>, texto: &str, citacao: &str) -> String {
     let inteiro = composto(pelo, texto, citacao);
     if inteiro.len() <= MAIOR_DETALHE || citacao.len() > MAIOR_DETALHE {

@@ -290,8 +290,9 @@ pub enum Tipo {
     Nascimento { filho: u64 },
     /// Uma conexão caiu: o número dela.
     Derrubada { conexao: u64 },
-    /// O firewall recusou o pedido de rede que o gate tinha permitido.
-    Firewall { regra: u64 },
+    /// O firewall recusou o pedido de rede que o gate tinha permitido: a
+    /// regra, se o número dela ficou no detalhe — ver [`bloqueio_do_firewall`].
+    Firewall { regra: Option<u64> },
     /// Uma declaração de quem pediu — `audit.declare`: uma alegação, com a
     /// conexão em que ela se ancorou, se se ancorou. Ver [`Declaracao`].
     Declaracao { conexao: Option<u64> },
@@ -597,7 +598,7 @@ fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
         return Tipo::Leitura;
     }
     if let Some(filho) = numero_apos(&d.resto, "processo ")
-        && d.resto.contains(" lancado")
+        && (d.resto.contains(" lancado") || nascimento_cortado(r, d, filho))
     {
         return Tipo::Nascimento { filho };
     }
@@ -616,15 +617,104 @@ fn classificar(r: &Registro, d: &Detalhe) -> Tipo {
     {
         return Tipo::Derrubada { conexao };
     }
-    if let Some(i) = d.resto.find("bloqueado pelo firewall, regra ")
-        && let Some(regra) = numero_apos(&d.resto[i..], "bloqueado pelo firewall, regra ")
-    {
+    if let Some(regra) = bloqueio_do_firewall(r, d) {
         return Tipo::Firewall { regra };
     }
     if d.decisao.is_some() {
         return Tipo::Execucao;
     }
     Tipo::Decisao
+}
+
+/// O texto com que o kernel grava o bloqueio do firewall depois do gate —
+/// `bloqueado pelo firewall, regra R` —, até o número.
+const BLOQUEIO_DO_FIREWALL: &str = "bloqueado pelo firewall, regra ";
+
+/// Os métodos cuja execução o firewall recusa: os pedidos de rede sobre um
+/// destino que o gate permitiu e o firewall barrou — no kernel,
+/// `agent::commands::barrado`, do `net.connect`, do `net.send` e do
+/// `net.recv`.
+const BARRADOS_PELO_FIREWALL: [&str; 3] = ["net.connect", "net.send", "net.recv"];
+
+/// O bloqueio do firewall que o registro grava, se grava um: `Some(regra)`,
+/// com o número da regra se ele ficou no detalhe.
+///
+/// # O detalhe que perdeu o fim
+///
+/// O texto do bloqueio — `bloqueado pelo firewall, regra R` — vai depois do
+/// processo que pediu e antes da citação da decisão, e acima do teto do
+/// detalhe é ele que perde o fim, numa fronteira de palavra (ver
+/// `politica::auditoria::detalhe_composto`): o número é a última palavra, e
+/// sai primeiro. Com o resumo de 16 dígitos, o maior nome e o maior editor,
+/// o texto tem 44 − F − D bytes, com F e D os dígitos do fio e da decisão: o
+/// número fica enquanto F + D + R ≤ 13; `bloqueado pelo firewall,` enquanto
+/// F + D ≤ 18; e, com o fio e a decisão de 20 dígitos, sobra só a marca
+/// (`?`). O leitor exigia o número, e o NSF deixava de ver o bloqueio —
+/// o contorno do firewall, o fator do risco e a regra da proveniência —
+/// justamente para o processo de descrição longa (o achado do adversário do
+/// lote B do #448, do A9).
+///
+/// Agora o bloqueio se lê em todas as formas:
+///
+/// - **inteiro**, com o número, em qualquer ponto do texto — a forma de
+///   sempre, a dos registros gravados antes também: `Some(regra)`;
+/// - **cortado**: a execução de um pedido de rede recusada pela política
+///   depois do gate — os métodos de `BARRADOS_PELO_FIREWALL`, o
+///   `DENY_POLICY` e a decisão citada — cujo texto é o começo do bloqueio
+///   em palavras inteiras, com a marca do corte, ou só a marca: a regra é
+///   `None`. No kernel, o firewall é a única recusa da política depois do
+///   gate nesses métodos; o texto cortado não diz outra coisa, e a regra se
+///   perdeu com ele.
+///
+/// Sem o número, o contorno do firewall e o fator do risco não mudam — os
+/// dois contam destinos, e não regras —; a proveniência diz que o fluxo foi
+/// barrado (`firewall_blocked`) e dá a regra só quando algum registro dela a
+/// guardou.
+pub fn bloqueio_do_firewall(r: &Registro, d: &Detalhe) -> Option<Option<u64>> {
+    if let Some(i) = d.resto.find(BLOQUEIO_DO_FIREWALL)
+        && let Some(regra) = numero_apos(&d.resto[i..], BLOQUEIO_DO_FIREWALL)
+    {
+        return Some(Some(regra));
+    }
+    let execucao_recusada = d.decisao.is_some()
+        && r.codigo == Codigo::DenyPolicy
+        && BARRADOS_PELO_FIREWALL.contains(&r.metodo.as_str());
+    (execucao_recusada && cortado_de(&d.resto, BLOQUEIO_DO_FIREWALL)).then_some(None)
+}
+
+/// `resto` é `texto` cortado no teto do detalhe: as palavras do começo dele,
+/// inteiras, com a marca do corte depois — ou só a marca
+/// (`politica::auditoria::OMITIDO`), quando nem a primeira coube.
+fn cortado_de(resto: &str, texto: &str) -> bool {
+    use politica::auditoria::{MARCA_DO_CORTE, OMITIDO};
+    if resto == OMITIDO {
+        return true;
+    }
+    resto.strip_suffix(MARCA_DO_CORTE).is_some_and(|comeco| {
+        !comeco.is_empty()
+            && texto
+                .strip_prefix(comeco)
+                .is_some_and(|depois| depois.starts_with(' '))
+    })
+}
+
+/// O nascimento cujo texto perdeu o fim logo depois do fio do filho:
+/// `processo N ?`. É a mesma conta do bloqueio do firewall ([`bloqueio_do_firewall`]):
+/// pedido por um processo de descrição longa, o `processo N lancado` só
+/// ficava inteiro enquanto os dígitos de N, do fio e da decisão somavam até
+/// 24 com o código lançado de fora — 27 com o da imagem; eram 32 e 35 com o
+/// resumo de 8 dígitos —, e acima disso o filho entrava
+/// no grafo sem criador. Lido assim, ele fica até 33: a execução que
+/// permite um `user.run` — o `ALLOW` com a decisão citada — cujo texto é o
+/// fio inteiro do filho e a marca do corte. O fio não se corta pela metade —
+/// o corte cai num espaço —, e o `user.run` não grava outra execução que
+/// comece por `processo N`. Acima de 33, sobra `processo ?` ou só a marca, e
+/// o filho se perde como antes: o número saiu do texto.
+fn nascimento_cortado(r: &Registro, d: &Detalhe, filho: u64) -> bool {
+    d.decisao.is_some()
+        && r.codigo == Codigo::Allow
+        && r.metodo == "user.run"
+        && d.resto == alloc::format!("processo {filho}{}", politica::auditoria::MARCA_DO_CORTE)
 }
 
 #[cfg(test)]
@@ -956,6 +1046,246 @@ pub(crate) mod testes {
         }
     }
 
+    /// Um número de `digitos` dígitos — o menor deles.
+    fn de_digitos(digitos: u32) -> u64 {
+        10u64.pow(digitos - 1)
+    }
+
+    /// Quem pede, em cada forma que o kernel escreve: o processo do código
+    /// de fora com o maior nome e o maior editor — o pior caso —, o do
+    /// código da imagem com o maior nome, e o agente pelo canal, sem
+    /// processo.
+    fn quem_pede(fio: u64) -> [Option<String>; 3] {
+        let (nome, editor) = ("n".repeat(32), "e".repeat(32));
+        [
+            Some(alloc::format!(
+                "pelo processo {fio} ({nome} 0a1b2c3d4e5f6071 de {editor})"
+            )),
+            Some(alloc::format!(
+                "pelo processo {fio} ({nome} 0a1b2c3d4e5f6071)"
+            )),
+            None,
+        ]
+    }
+
+    /// O achado do A9 no firewall: o bloqueio é reconhecido no pior caso.
+    /// Os dígitos do fio, da decisão e da regra, cada um de 1 a 20, com o
+    /// maior nome e o maior editor, pelos três métodos que o firewall barra:
+    /// o detalhe composto como o kernel o compõe é sempre um bloqueio, e a
+    /// regra é a do registro quando ela ficou no texto — nunca outra. O
+    /// número fica, no código de fora, até F + D + R = 13; o resto vai sem
+    /// ele. E com o fio e a decisão de 20 dígitos o texto vira só a marca.
+    #[test]
+    fn o_bloqueio_do_firewall_no_pior_caso() {
+        use politica::auditoria::detalhe_composto;
+        let mut sem_o_numero = 0;
+        let mut so_a_marca = 0;
+        for f in 1..=20 {
+            let fio = de_digitos(f);
+            for pelo in quem_pede(fio) {
+                for d in 1..=20 {
+                    let decisao = de_digitos(d);
+                    for g in 1..=20 {
+                        let regra = de_digitos(g);
+                        let texto = alloc::format!("bloqueado pelo firewall, regra {regra}");
+                        let detalhe = detalhe_composto(
+                            pelo.as_deref(),
+                            &texto,
+                            &alloc::format!("; decisao {decisao}"),
+                        );
+                        for metodo in BARRADOS_PELO_FIREWALL {
+                            let r = registro(9, [0; 32], |r| {
+                                r.metodo = metodo.to_string();
+                                r.recurso = "tcp:10.0.2.100:7".to_string();
+                                r.codigo = Codigo::DenyPolicy;
+                                r.detalhe = detalhe.clone();
+                            });
+                            let e = Evento::de(&r, 0);
+                            let inteiro = ler_detalhe(&detalhe).resto == texto;
+                            let esperada = if inteiro { Some(regra) } else { None };
+                            assert_eq!(e.tipo, Tipo::Firewall { regra: esperada }, "{detalhe}");
+                            assert_eq!(e.decisao, Some(decisao), "{detalhe}");
+                        }
+                        let resto = ler_detalhe(&detalhe).resto;
+                        sem_o_numero += usize::from(resto != texto);
+                        so_a_marca += usize::from(resto == politica::auditoria::OMITIDO);
+                        // A regra fica no código de fora até F + D + R = 13.
+                        if pelo
+                            .as_deref()
+                            .is_some_and(|p| p.ends_with(" de eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)"))
+                        {
+                            assert_eq!(resto == texto, f + d + g <= 13, "{detalhe}");
+                        }
+                    }
+                }
+            }
+        }
+        // O pior caso existe — sem o número, e até sem nada do texto —, e
+        // é ele que o leitor reconhece.
+        assert!(sem_o_numero > 0 && so_a_marca > 0);
+    }
+
+    /// O que não é bloqueio do firewall continua não sendo: o texto cortado
+    /// de outra coisa, a marca sozinha em outro método, com outro código ou
+    /// sem a decisão — a decisão do gate —, e o começo de outra palavra.
+    #[test]
+    fn o_que_nao_e_bloqueio_do_firewall() {
+        let tipo = |metodo: &str, codigo: Codigo, detalhe: &str| {
+            Evento::de(
+                &registro(1, [0; 32], |r| {
+                    r.metodo = metodo.to_string();
+                    r.codigo = codigo;
+                    r.detalhe = detalhe.to_string();
+                }),
+                0,
+            )
+            .tipo
+        };
+        let pelo = "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?)";
+        for detalhe in [
+            "?; decisao 12",
+            "bloqueado ?; decisao 12",
+            "bloqueado pelo ?; decisao 12",
+            "bloqueado pelo firewall, ?; decisao 12",
+            "bloqueado pelo firewall, regra ?; decisao 12",
+        ] {
+            let detalhe = alloc::format!("{pelo}: {detalhe}");
+            assert_eq!(
+                tipo("net.connect", Codigo::DenyPolicy, &detalhe),
+                Tipo::Firewall { regra: None },
+                "{detalhe}"
+            );
+            assert_eq!(
+                tipo("fs.read", Codigo::DenyPolicy, &detalhe),
+                Tipo::Execucao
+            );
+            assert_eq!(
+                tipo("user.run", Codigo::DenyPolicy, &detalhe),
+                Tipo::Execucao
+            );
+            assert_eq!(
+                tipo("net.connect", Codigo::DenyResource, &detalhe),
+                Tipo::Execucao
+            );
+            assert_eq!(tipo("net.connect", Codigo::Error, &detalhe), Tipo::Execucao);
+        }
+        for detalhe in [
+            "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?): bloqueio ?; decisao 12",
+            "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?): bloq ?; decisao 12",
+            "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?): outra recusa ?; decisao 12",
+            "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?): bloqueado pelo firewall; decisao 12",
+            "pelo processo 7 (? 0a1b2c3d4e5f6071 de ?):  ?; decisao 12",
+        ] {
+            assert_eq!(
+                tipo("net.connect", Codigo::DenyPolicy, detalhe),
+                Tipo::Execucao,
+                "{detalhe}"
+            );
+        }
+        // Sem a decisão citada é a decisão do gate, e não a execução.
+        assert_eq!(
+            tipo(
+                "net.connect",
+                Codigo::DenyPolicy,
+                &alloc::format!("{pelo}: ?")
+            ),
+            Tipo::Decisao
+        );
+        // A forma inteira, com o número, como sempre — os registros de antes
+        // também.
+        assert_eq!(
+            tipo(
+                "net.send",
+                Codigo::DenyPolicy,
+                "bloqueado pelo firewall, regra 4; decisao 3"
+            ),
+            Tipo::Firewall { regra: Some(4) }
+        );
+    }
+
+    /// A mesma conta no nascimento: o `processo N lancado` pedido pelo
+    /// código de fora ficava inteiro até N + F + D = 24 com o código lançado
+    /// de fora — 27 com o da imagem —, e acima disso o
+    /// filho entrava no grafo sem criador. Agora, enquanto o texto guarda o
+    /// fio do filho inteiro — até 33 —, o nascimento é reconhecido, com o
+    /// filho certo; sem o fio, não há filho a dizer, e nunca se diz outro.
+    #[test]
+    fn o_nascimento_cortado_no_pior_caso() {
+        use politica::auditoria::detalhe_composto;
+        let mut so_o_fio = 0;
+        for f in 1..=20 {
+            let fio = de_digitos(f);
+            for pelo in quem_pede(fio) {
+                for d in 1..=20 {
+                    let decisao = de_digitos(d);
+                    for n in 1..=20 {
+                        let filho = de_digitos(n);
+                        for texto in [
+                            alloc::format!("processo {filho} lancado"),
+                            alloc::format!(
+                                "processo {filho} lancado: codigo 0a1b2c3d4e5f6071 de {}",
+                                "e".repeat(32)
+                            ),
+                        ] {
+                            let detalhe = detalhe_composto(
+                                pelo.as_deref(),
+                                &texto,
+                                &alloc::format!("; decisao {decisao}"),
+                            );
+                            let r = registro(9, [0; 32], |r| {
+                                r.metodo = "user.run".to_string();
+                                r.recurso = "/armazem/x".to_string();
+                                r.detalhe = detalhe.clone();
+                            });
+                            let resto = ler_detalhe(&detalhe).resto;
+                            let com_o_fio = resto.starts_with(&alloc::format!("processo {filho} "));
+                            so_o_fio += usize::from(!resto.contains(" lancado") && com_o_fio);
+                            let esperado = if com_o_fio {
+                                Tipo::Nascimento { filho }
+                            } else {
+                                Tipo::Execucao
+                            };
+                            assert_eq!(Evento::de(&r, 0).tipo, esperado, "{detalhe}");
+                            // No código de fora, o fio fica até N + F + D = 33.
+                            if pelo.as_deref().is_some_and(|p| {
+                                p.ends_with(" de eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)")
+                            }) {
+                                assert_eq!(com_o_fio, n + f + d <= 33, "{detalhe}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(so_o_fio > 0);
+        // A marca depois do fio, fora do `user.run` que permitiu, não é
+        // nascimento: outro método, outro código, sem a decisão.
+        for (metodo, codigo, detalhe) in [
+            (
+                "process.terminate",
+                Codigo::Allow,
+                "processo 12 ?; decisao 3",
+            ),
+            ("user.run", Codigo::DenyPolicy, "processo 12 ?; decisao 3"),
+            ("user.run", Codigo::Allow, "processo 12 ?"),
+            (
+                "user.run",
+                Codigo::Allow,
+                "processo 12 encerrado ?; decisao 3",
+            ),
+        ] {
+            let r = registro(1, [0; 32], |r| {
+                r.metodo = metodo.to_string();
+                r.codigo = codigo;
+                r.detalhe = detalhe.to_string();
+            });
+            assert!(
+                !matches!(Evento::de(&r, 0).tipo, Tipo::Nascimento { .. }),
+                "{metodo} {detalhe}"
+            );
+        }
+    }
+
     #[test]
     fn os_tipos() {
         fn tipo_de(f: impl FnOnce(&mut Registro)) -> Tipo {
@@ -1011,7 +1341,7 @@ pub(crate) mod testes {
                 r.metodo = "net.connect".to_string();
                 r.detalhe = "bloqueado pelo firewall, regra 2; decisao 8".to_string();
             }),
-            Tipo::Firewall { regra: 2 }
+            Tipo::Firewall { regra: Some(2) }
         );
         assert_eq!(
             tipo(|r| {

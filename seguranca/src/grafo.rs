@@ -264,6 +264,10 @@ impl Grafo {
     /// - A descrição **inteira** que chega depois, do mesmo programa que a
     ///   abreviada que o grafo guardou, é ele, agora com o nome: o processo
     ///   fica com ela, e não há outra troca — nem outra aresta.
+    /// - Duas **inteiras** do mesmo programa com o resumo em larguras
+    ///   diferentes — a de 8 dígitos de um registro de antes do A9-RESUMO e
+    ///   a de 16, ver `o_mesmo_resumo` — também não são troca: o processo
+    ///   fica com a de 16, sem aresta.
     ///
     /// De um processo que o grafo não conhece, a abreviada não diz nada que
     /// se compare: não vira nó.
@@ -290,6 +294,19 @@ impl Grafo {
         }
         if mesmo && atual.is_some_and(descricao_abreviada) {
             p.programa = Some(programa.to_string());
+            return;
+        }
+        // As duas inteiras, do mesmo programa, com o resumo em larguras
+        // diferentes — o par misturado de [`o_mesmo_resumo`]: a de 8 de um
+        // registro de antes do A9-RESUMO e a de 16 do mesmo executável —
+        // não são uma troca: o processo fica com a de 16, que diz mais, e
+        // não há aresta. Antes, eram uma troca, com um nó e uma aresta a
+        // mais (o achado do adversário do lote B do #448).
+        let largura = |d: &str| politica::auditoria::resumo_da_descricao(d).map(str::len);
+        if mesmo && atual.is_some_and(|a| largura(a) != largura(programa)) {
+            if largura(programa) == Some(politica::auditoria::DIGITOS_DO_RESUMO) {
+                p.programa = Some(programa.to_string());
+            }
             return;
         }
         p.programa = Some(programa.to_string());
@@ -439,7 +456,22 @@ pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
 /// daria ao processo uma troca que ele não fez — uma aresta e um nó a mais
 /// —; pelos 8 do começo, a comparação é a de antes, com os 32 bits que o
 /// registro antigo tem — e só nesse par: dois de 16 se comparam inteiros.
+/// E o par de duas descrições **inteiras** do mesmo programa, uma de cada
+/// largura, também não vira troca: o processo fica com a de 16, sem aresta
+/// (ver [`Grafo::executa`]) — antes do lote B2 do #448, as duas inteiras
+/// davam o nó e a aresta a mais, que só as abreviadas evitavam.
+///
+/// Os dois resumos têm 8 ou 16 dígitos — é o que
+/// [`politica::auditoria::resumo_da_descricao`] devolve —, e a compilação de
+/// depuração o confere.
 fn o_mesmo_resumo(a: &str, b: &str) -> bool {
+    use politica::auditoria::{DIGITOS_DO_RESUMO, DIGITOS_DO_RESUMO_ANTIGO};
+    debug_assert!(
+        [a, b]
+            .iter()
+            .all(|r| matches!(r.len(), DIGITOS_DO_RESUMO | DIGITOS_DO_RESUMO_ANTIGO)),
+        "o resumo de uma descricao tem 8 ou 16 digitos: `{a}` e `{b}`"
+    );
     let n = a.len().min(b.len());
     a.get(..n).is_some_and(|x| b.get(..n) == Some(x))
 }
@@ -660,6 +692,74 @@ mod testes {
             Some("loja abcd1234ef567890 de duke")
         );
         assert_eq!(g.arestas(), arestas);
+    }
+
+    /// O par misturado de duas descrições **inteiras** do mesmo programa —
+    /// o achado do adversário do lote B do #448: a de 8 dígitos, de antes do
+    /// A9-RESUMO, e a de 16 do mesmo executável, com o mesmo nome e o mesmo
+    /// editor, eram uma troca, com um nó e uma aresta a mais — a troca que
+    /// [`o_mesmo_resumo`] diz evitar. Agora o processo fica com a de 16,
+    /// sem aresta, nas duas ordens; e o código da imagem também. O de outro
+    /// começo, outro editor ou outro `de` continua sendo uma troca.
+    #[test]
+    fn o_par_misturado_de_duas_inteiras_nao_e_troca() {
+        let mut g = Grafo::novo();
+        let novo = |g: &mut Grafo, fio: u64| {
+            assert!(g.nasceu(
+                0,
+                fio,
+                p(Criador::Principal("agent:aa".into()), Aresta::Lancou, fio),
+            ));
+        };
+        let programa = |g: &Grafo, fio: u64| g.processo(0, fio).and_then(|p| p.programa.clone());
+        for (fio, primeira, segunda) in [
+            (1, "loja abcd1234 de duke", "loja abcd1234ef567890 de duke"),
+            (2, "loja abcd1234ef567890 de duke", "loja abcd1234 de duke"),
+            (3, "loja abcd1234", "loja abcd1234ef567890"),
+            (4, "loja abcd1234ef567890", "loja abcd1234"),
+        ] {
+            novo(&mut g, fio);
+            g.executa(0, fio, primeira);
+            let arestas = g.arestas();
+            g.executa(0, fio, segunda);
+            assert_eq!(g.arestas(), arestas, "{primeira} / {segunda}");
+            let de_16 = if primeira.len() > segunda.len() {
+                primeira
+            } else {
+                segunda
+            };
+            assert_eq!(
+                programa(&g, fio).as_deref(),
+                Some(de_16),
+                "{primeira} / {segunda}"
+            );
+            // E de novo a de 8: nada.
+            let de_8 = if primeira.len() < segunda.len() {
+                primeira
+            } else {
+                segunda
+            };
+            g.executa(0, fio, de_8);
+            assert_eq!(g.arestas(), arestas);
+            assert_eq!(programa(&g, fio).as_deref(), Some(de_16));
+        }
+        // O que não é o mesmo programa continua sendo uma troca: outro
+        // começo do resumo, outro editor, o código da imagem no lugar do de
+        // fora — e o nome diferente com o mesmo resumo e o mesmo editor não
+        // é o caso: o nome está dentro do executável, e o mesmo resumo de 64
+        // bits é o mesmo executável.
+        for (fio, primeira, segunda) in [
+            (5, "loja abcd1234 de duke", "loja abcd1235ef567890 de duke"),
+            (6, "loja abcd1234 de duke", "loja abcd1234ef567890 de outro"),
+            (7, "loja abcd1234", "loja abcd1234ef567890 de duke"),
+        ] {
+            novo(&mut g, fio);
+            g.executa(0, fio, primeira);
+            let arestas = g.arestas();
+            g.executa(0, fio, segunda);
+            assert_eq!(g.arestas(), arestas + 1, "{primeira} / {segunda}");
+            assert_eq!(programa(&g, fio).as_deref(), Some(segunda));
+        }
     }
 
     /// O achado 5 do adversário do F1: a abreviada de **outro** resumo é

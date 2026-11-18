@@ -216,7 +216,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `security.incidents` | Os incidentes; com `id`, um inteiro: atores, detecções, registros, recursos, evidência, risco, estado e ações — cada ação com o pedido, o nível, a decisão do gate e quem a autorizou (`id`) |
 | `security.events` | A linha do tempo de segurança, de uma identidade, de um incidente ou toda (`principal`, `incident`, `max`) |
 | `security.explain` | A interpretação de uma decisão gravada — o que o código quer dizer, a cadeia, o DNS que precedeu uma conexão —, nunca uma segunda decisão (`seq`) |
-| `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e a regra do firewall (`process`, `boot`) |
+| `security.provenance` | A cadeia de um processo até a identidade que a começou, os filhos, e a rede dele: cada conexão, a decisão do gate, o DNS e o bloqueio do firewall, com a regra quando algum registro a guardou (`process`, `boot`) |
 | `security.risk` | O risco de uma identidade, com os fatores; o perfil de comportamento; e o raio do que ela já tocou (`principal`) |
 | `security.verify` | Refaz a cadeia do cofre de evidências |
 | `security.metrics` | O custo e o efeito da segurança, medidos desde o boot: as decisões do gate por código e a latência dele, a da política e a da auditoria, as voltas do NSF e o tempo de máquina delas, a memória e as contas do motor (falsos positivos, contenções desfeitas, recusas repetidas), a latência da resposta, os arrendamentos soltos por causa, a conferência do código de fora da imagem, e o orçamento: as decisões de controle, de dados e de fecho, as recusas por taxa, as esperas pelo caminho da auditoria e o atraso dela, a vazão do plano de dados e a justiça entre os principais; e os fluxos: os vivos, os remotos e o pico dos buffers contra o teto de cada sentido |
@@ -5357,7 +5357,10 @@ registro de cada uma no ponto em que nasceu.
   descrição reconhece as duas larguras — as de 8 dígitos ficam no journal
   da auditoria —, e o NSF compara um resumo de 8 com um de 16 pelos 8 do
   começo, o que o de 8 diz (`seguranca::grafo::o_mesmo_programa`); dois de
-  16 se comparam inteiros. A conta do teto de 96 bytes, medida, está em
+  16 se comparam inteiros. O par misturado do mesmo programa não vira
+  troca, nem com as duas descrições inteiras: o processo fica com a de 16,
+  sem aresta — o lote B2 do #448 fechou o par das duas inteiras, que dava
+  um nó e uma aresta a mais. A conta do teto de 96 bytes, medida, está em
   "O pior caso, medido" (`politica::auditoria::detalhe_composto`): o
   detalhe cabe sempre, e o que encolhe é o texto, 8 bytes antes — ver [O
   código de fora da imagem](#o-código-de-fora-da-imagem).
@@ -7566,24 +7569,66 @@ de 16 pelos 8 do começo — o de 8 é o começo do de 16 do mesmo executável,
 e é tudo o que ele diz, como o editor omitido casa com qualquer um —, e
 dois de 16, inteiros; o par misturado só se forma no mesmo processo com o
 journal de antes lido sem o começo do boot seguinte, e tomá-lo por outro
-programa daria ao processo uma troca que ele não fez. **O teto de 96
+programa daria ao processo uma troca que ele não fez — também com as duas
+descrições inteiras, uma de cada largura, do mesmo programa: o processo
+fica com a de 16, sem aresta (`seguranca::grafo::Grafo::executa`; o
+adversário do lote B do #448 achou o par de duas inteiras virando troca,
+e o lote B2 o fechou). **O teto de 96
 bytes, medido** ("O pior caso, medido", em
 `politica::auditoria::detalhe_composto`): o maior `pelo` — o nome e o
 editor de 32 bytes, o fio de 20 dígitos — tem 122 bytes; sem o nome, 91,
 e a decisão que permite continua guardando o editor; sem os dois, 60. O
 detalhe cabe sempre; o que encolhe é o texto, que perdeu os 8 bytes: ao
 lado da descrição toda encolhida e da citação, ele tem 44 − F − D bytes
-(F e D, os dígitos do fio e da decisão), e o motivo de toda falta da
-procedência fica reconhecido enquanto F + D ≤ 20 — eram 28 —, um fio de 7
-dígitos e uma decisão de 13; no pior de todos, como já era com 8 dígitos,
-ele fica na primeira palavra. O motivo do editor fora do registro, o
-maior, só cabe inteiro ao lado da descrição toda encolhida e da citação
-com o fio e a decisão somando até 5 dígitos — vai cortado, com o começo
-essencial —; o nascimento de um código de fora pedido por um processo
-perde, no texto, o resumo do código lançado com o editor: o processo novo
-o diz inteiro no primeiro pedido dele; e a descrição encolhe em mais
+no código de fora (49 − F − D no da imagem), com F e D os dígitos do fio
+e da decisão, e o motivo de toda falta da procedência fica reconhecido
+enquanto F + D ≤ 20 — eram 28 —, um fio de 7 dígitos e uma decisão de 13;
+no pior de todos — o fio e a decisão de 20 dígitos —, ele fica na
+primeira palavra, com a marca (`o ?`); com 8 dígitos, ficava nas duas ou
+três primeiras (`o selo nao ?`) — nas duas larguras, sem o começo
+essencial. O motivo do editor fora do registro, o maior dos que não levam
+o nome do editor, só cabe inteiro ao lado da descrição toda encolhida e da
+citação com o fio e a decisão somando até 5 dígitos; acima disso vai
+cortado, com o começo essencial até F + D = 20 —; o nascimento de um
+código de fora pedido por um processo perde, no texto, o resumo do código
+lançado com o editor — pedido por um processo de fora, sempre; por um da
+imagem, menos com o filho, o fio e a decisão somando até 5 dígitos —: o
+processo novo o diz inteiro no primeiro pedido dele; e a descrição encolhe em mais
 registros — a declaração da `implantacao` ancorada na conexão, com o fio
-de 4 dígitos e a decisão de 5, já sai sem o nome. Quem reconhece o
+de 4 dígitos, a decisão de 5 e a conexão de 3 ou mais, já sai sem o
+nome. **O que o NSF reconhece pelo fim do texto** perde primeiro: o
+número da regra no bloqueio do firewall — `bloqueado pelo firewall, regra
+R` — só ficava enquanto F + D + R ≤ 13 (eram 21), e o leitor o exigia: o
+NSF deixava de ver o bloqueio — o contorno do firewall, o fator do risco,
+a regra da proveniência — do processo de descrição longa; e o `processo N
+lancado` pedido por ele só ficava enquanto N + F + D ≤ 24 com o código
+lançado de fora — 27 com o da imagem; eram 32 e 35 —, e acima disso o
+filho entrava no grafo sem criador (os achados do
+adversário do lote B do #448, corrigidos no lote B2, [B]: o texto do
+detalhe não é contrato). Agora o NSF lê o bloqueio também cortado — a
+execução de um `net.connect`, `net.send` ou `net.recv` recusada pela
+política depois do gate, com o texto do bloqueio em palavras inteiras e a
+marca do corte, ou só a marca —, sem a regra (`Tipo::Firewall { regra:
+None }`): o contorno e o risco contam destinos, e não mudam; a
+proveniência diz o fluxo barrado (`firewall_blocked`) e a regra só quando
+algum registro a guardou. E lê o nascimento cortado logo depois do fio do
+filho (`processo N ?`, na execução que permite um `user.run`), até N + F
++ D ≤ 33; acima disso o fio do filho sai do texto, e o filho se perde
+como antes. Os outros marcadores do fim do texto, conferidos contra o
+pior caso: a queda de uma conexão (`conexao N derrubada …`) fica até N +
+F + D ≤ 24, e cortada é só uma execução — no NSF, a queda só dá o nome do
+evento na linha do tempo —; a chave morta de um `key.sign` (`a chave foi
+anulada`, `… destruida`) fica até F + D ≤ 23, e acima disso a regra da
+chave morta, que só observa, não a vê; a âncora de uma declaração na
+conexão (`conexao N <destino>`) fica até F + D + N ≤ 15 com um destino de
+20 bytes, e acima disso a declaração não se lê — a alegação fica de fora,
+e ela nunca concede nada —; a âncora numa decisão (`ancorada em D2
+key.sign`) fica inteira até F + D + D2 ≤ 23; cortada, sai com o método
+`?` e o número da decisão inteiro até F + D + D2 ≤ 30, e acima disso a
+declaração não se lê, como a ancorada na conexão; a bifurcação (`filho N`), a recusa do
+manifesto (`o manifesto nao declara`) e as recusas do gate que o NSF lê
+(`teto`, `revogad`) não levam a citação, e o que se procura nelas está nos
+primeiros bytes: cabe sempre. Quem reconhece o
 processo de um programa no detalhe — os casos do IC na suíte, a bancada
 do IC — aceita o nome omitido, `(? <resumo>`, ao lado do nome. A âncora
 de uma declaração numa decisão
@@ -7886,11 +7931,33 @@ no x86_64 em debug, que têm os casos que as devem reprovar
 
 | Mutação | Reprovada por |
 |---|---|
-| o leitor que não reconhece 8 dígitos — as descrições do journal de antes | nove testes de `politica::auditoria` — entre eles `o_resumo_da_descricao` e `o_comeco_do_resumo_tem_16_digitos`, que lê também o começo de 8 do mesmo executável — e cinco de `seguranca`: `grafo::testes::o_resumo_de_16_digitos_e_o_de_8_de_antes`, três do grafo com descrições de 8 e `evento::testes::a_falta_de_quem_tem_descricao_longa` |
+| o leitor que não reconhece 8 dígitos — as descrições do journal de antes | nove testes de `politica::auditoria` — entre eles `o_resumo_da_descricao` e `o_comeco_do_resumo_tem_16_digitos`, que lê também o começo de 8 do mesmo executável — e cinco testes de unidade de `seguranca` — a rodada parou neles, antes de `tests/motor.rs`: `grafo::testes::o_resumo_de_16_digitos_e_o_de_8_de_antes`, três do grafo com descrições de 8 e `evento::testes::a_falta_de_quem_tem_descricao_longa` |
 | o leitor que não reconhece 16 dígitos | os mesmos nove de `politica::auditoria`; em `seguranca`, `o_resumo_de_16_digitos_e_o_de_8_de_antes` e os dois de `tests/motor.rs` que rodam nas duas larguras: `a_troca_que_morre_no_mapeamento_fica_no_grafo` e `o_firewall_casa_a_conexao_pelo_fio` |
 | o NSF que compara o resumo inteiro, também com um lado de 8 (`o_mesmo_resumo`) | `grafo::testes::o_resumo_de_16_digitos_e_o_de_8_de_antes`: o processo da descrição de 8, do journal de antes, ganha uma troca que não fez com a de 16 do mesmo executável |
 | a descrição de um programa, no kernel, com 8 dígitos (`Programa::descricao`) | `nsf: ve o codigo adulterado de quem tem descricao longa` ("a decisao do processo de descricao longa nao terminou no `)`, com a descricao sem o nome") e `codigo: a confianca e decidida a cada pedido` ("a recusa pela confianca nao diz o programa, o editor e o motivo") |
 | o código lançado, no nascimento, com 8 dígitos (`auditar_nascimento`) | `codigo: so o da imagem roda sem selo` ("o nascimento nao diz quem selou o codigo, nem o resumo") e `codigo: o conferido e o que roda` ("um nascimento nao diz o resumo do codigo selado") |
+
+#### As dos leitores do NSF no pior caso (lote B2)
+
+Três mutações contra os leitores do lote B2 do #448 — o bloqueio do
+firewall e o nascimento cortados, e o par misturado de duas inteiras —,
+uma de cada vez, no repositório, restauradas com a hora do arquivo
+renovada, contra os testes do hospedeiro (`cargo test -p seguranca`). As
+três reprovaram — a do grafo com a aresta a mais (3 em vez de 2), a do
+código de `d646516`.
+
+| Mutação | Reprovada por |
+|---|---|
+| o leitor do firewall de volta a exigir o número | `evento::testes::o_bloqueio_do_firewall_no_pior_caso` e `evento::testes::o_que_nao_e_bloqueio_do_firewall` (a rodada de `--lib`, que parou nos dois); e, rodada à parte, `tests/motor.rs`: `o_firewall_sem_o_numero_ainda_barra_o_fluxo` |
+| o nascimento de volta a exigir o `lancado` | `evento::testes::o_nascimento_cortado_no_pior_caso` |
+| as duas inteiras de larguras diferentes, uma troca de novo | `grafo::testes::o_par_misturado_de_duas_inteiras_nao_e_troca` — o teste que reprovava antes da correção |
+
+E a N179 de novo, na forma do código novo da proveniência — o bloqueio
+casado também pelo programa (`x.processo == e.processo`, o fio e a
+descrição), no lugar de só pelo fio —, contra `tests/motor.rs`: reprovada
+por `o_firewall_casa_a_conexao_pelo_fio` e por
+`o_firewall_sem_o_numero_ainda_barra_o_fluxo`, a execução barrada com a
+descrição abreviada e a decisão com a inteira.
 
 ## O Internet Computer
 

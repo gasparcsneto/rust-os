@@ -1266,12 +1266,46 @@ fn o_firewall_casa_a_conexao_pelo_fio() {
         ler(&mut m, &a);
         assert!(matches!(
             m.eventos().last().map(|e| e.tipo),
-            Some(Tipo::Firewall { regra: 3 })
+            Some(Tipo::Firewall { regra: Some(3) })
         ));
         let mut s = String::new();
         seguranca::relatorio::proveniencia(&m, 0, 9, &mut JsonWriter::new(&mut s)).unwrap();
         assert!(s.contains(r#""firewall_rule":3"#), "{s}");
+        assert!(s.contains(r#""firewall_blocked":true"#), "{s}");
     }
+}
+
+/// O firewall no pior caso do A9: com o maior nome, o maior editor e a
+/// decisão de 20 dígitos, o bloqueio perde o número da regra no detalhe — e
+/// a proveniência ainda diz que o fluxo foi barrado, sem a regra. O risco e
+/// o contorno contam destinos, e o veem como antes.
+#[test]
+fn o_firewall_sem_o_numero_ainda_barra_o_fluxo() {
+    use politica::auditoria::detalhe_composto;
+    let pelo = format!(
+        "pelo processo 9 ({} 0a0b0c0d0e0f1011 de {})",
+        "n".repeat(32),
+        "e".repeat(32)
+    );
+    let mut a = Auditoria::nova();
+    a.gravar(do_agente("net.connect", ECO, Codigo::Allow, &pelo));
+    let barrado = detalhe_composto(
+        Some(&pelo),
+        "bloqueado pelo firewall, regra 3",
+        &format!("; decisao {}", u64::MAX),
+    );
+    assert!(!barrado.contains("regra 3"), "{barrado}");
+    a.gravar(do_agente("net.send", ECO, Codigo::DenyPolicy, &barrado));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+    assert!(matches!(
+        m.eventos().last().map(|e| e.tipo),
+        Some(Tipo::Firewall { regra: None })
+    ));
+    let mut s = String::new();
+    seguranca::relatorio::proveniencia(&m, 0, 9, &mut JsonWriter::new(&mut s)).unwrap();
+    assert!(s.contains(r#""firewall_blocked":true"#), "{s}");
+    assert!(s.contains(r#""firewall_rule":null"#), "{s}");
 }
 
 /// Só um incidente alto leva a saída a ser contida. Três pedidos distintos

@@ -1134,7 +1134,7 @@ pub(crate) mod testes {
                 "net.connect",
                 Codigo::DenyPolicy,
             );
-            g.tipo = Tipo::Firewall { regra: 1 };
+            g.tipo = Tipo::Firewall { regra: Some(1) };
             g.recurso = "tcp:10.0.2.100:7".to_string();
             evs.push(g);
         }
@@ -1294,7 +1294,7 @@ pub(crate) mod testes {
                 "net.connect",
                 Codigo::DenyPolicy,
             );
-            e.tipo = Tipo::Firewall { regra: 1 };
+            e.tipo = Tipo::Firewall { regra: Some(1) };
             e.recurso = destino.to_string();
             e
         };
