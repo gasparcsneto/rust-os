@@ -385,12 +385,22 @@ jobs:
       # no x86, a conferência sem SIMD que o `xtask` faz antes de pôr o
       # kernel na ESP (`conferir_sem_simd`), com as mesmas regras
       # (`instrucao_de_ponto_flutuante`): um registrador `xmm`, `ymm`, `zmm`,
-      # `st` ou `mm`, um mnemônico do x87 — todos começam com `f` —, o
-      # `wait`, o `emms`, o `ldmxcsr`, o `stmxcsr` e a família do `xsave` e
-      # do `xrstor`, menos o `fninit` de `smp::entrada_secundaria`. Os
-      # registradores são os de um processo interrompido, e o `CR0.TS` faz
-      # da instrução um `#NM` no anel 0; um compilador novo pode passar a
-      # gerá-la.
+      # `st` ou `mm`, uma máscara `k0` a `k7` do AVX-512 ou um ladrilho
+      # `tmm` do AMX, um mnemônico do x87 — todos começam com `f` —, o
+      # `wait`, o `emms`, o `ldmxcsr` e o `stmxcsr` e as formas do AVX
+      # deles (`vldmxcsr`, `vstmxcsr`), o `vzeroupper`, o `vzeroall`, a
+      # família do `xsave` e do `xrstor`, e o
+      # AMX — o `ldtilecfg`, o `sttilecfg`, o `tilerelease`, o `tilezero` e
+      # os `tileload` —, o Key Locker — todo mnemônico que começa com `aes`
+      # ou com `encodekey`, e o `loadiwkey` — e o `<unknown>`, menos o
+      # `fninit` de `smp::entrada_secundaria`; o mnemônico é o primeiro
+      # depois dos prefixos que o `llvm-objdump` escreve à parte (`rep`,
+      # `lock`...). Os registradores são os de um processo interrompido, e o
+      # `CR0.TS` faz da instrução um `#NM` no anel 0 — o AMX, que não o
+      # confere, é `#UD` com o `XCR0` do kernel —; um compilador novo pode
+      # passar a gerá-la.
+      # Uma regra nova entra nos dois lugares: o `invariantes` não confere
+      # este awk contra o `xtask`.
       - name: Kernel x86_64, nas cinco configurações
         id: kernel_x86_64
         if: steps.instalacao.outcome == 'success'
@@ -423,15 +433,16 @@ jobs:
                   !/^ *[0-9a-f]+:/ { next }
                   {
                     instrucao = $0; sub(/^ *[0-9a-f]+:[ \t]*/, "", instrucao)
-                    split(instrucao, partes, /[ \t]+/); m = partes[1]
+                    k = split(instrucao, partes, /[ \t]+/); m = ""
+                    for (i = 1; i <= k; i++) if (partes[i] !~ /^(lock|rep|repe|repz|repne|repnz|data16|data32|addr16|addr32|rex|rex64|cs|ds|es|fs|gs|ss|notrack|bnd|xacquire|xrelease)$/ && partes[i] !~ /^[{]/) { m = partes[i]; break }
                     if (m == "fninit" && funcao ~ /smp18entrada_secundaria/) next
-                    if (instrucao ~ /%[xyz]mm|%st|%mm[0-9]/ || m ~ /^f/ || m ~ /^(wait|emms|ldmxcsr|stmxcsr)$/ || m ~ /^(xsave|xrstor)/) {
+                    if (instrucao ~ /%[xyz]mm|%st|%tmm|%mm[0-9]|%k[0-7]/ || m ~ /^f/ || m ~ /^(wait|emms|v?ldmxcsr|v?stmxcsr|vzeroupper|vzeroall|ldtilecfg|sttilecfg|tilerelease|tilezero|loadiwkey|<unknown>)$/ || m ~ /^(xsave|xrstor|tileload|aes|encodekey)/) {
                       n++; if (n <= 5) print "  " funcao "\n      " $0 > "/dev/stderr"
                     }
                   }
                   END { print n + 0 }') || { echo "falhou: llvm-objdump no kernel $config"; falhou=1; continue; }
                 if (( simd > 0 )); then
-                  echo "o kernel $config usa ponto flutuante ou SIMD em $simd instrução(ões) — os registradores de um processo interrompido, que o kernel não salva, e o #NM do CR0.TS no anel 0"
+                  echo "o kernel $config usa ponto flutuante ou SIMD em $simd instrução(ões) — os registradores de um processo interrompido, que o kernel não salva, e o #NM do CR0.TS no anel 0. Um <unknown> é o que o llvm-objdump não sabe ler: confira se é uma extensão nova"
                   echo "falhou: kernel $config com SIMD"; falhou=1
                 fi
                 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ARQ" "$perfil" "${features:-sem features}" \
@@ -897,7 +908,8 @@ jobs:
                   achou("teste reprovado")
 
               if "usa ponto flutuante ou SIMD em" in texto:
-                  achou("o kernel do x86 passou a usar ponto flutuante ou SIMD (`xmm`/`ymm`/`zmm`, o x87, o MMX): o `xtask` "
+                  achou("o kernel do x86 passou a usar ponto flutuante ou SIMD (`xmm`/`ymm`/`zmm`, o x87, o MMX) — ou "
+                        "uma instrução que o `llvm-objdump` não sabe ler (`<unknown>`) —: o `xtask` "
                         "recusaria pôr esse kernel na ESP (`conferir_sem_simd`)")
               if re.search(r"^acima do teto", texto, re.M):
                   achou("um artefato passou do teto de tamanho que o `xtask` confere (ver Os tamanhos)")

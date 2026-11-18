@@ -1084,7 +1084,8 @@ fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
         return Err(format!(
             "usa ponto flutuante ou SIMD em {total} instrução(ões) — os registradores de um \
              processo interrompido, que este kernel não salva, e o `#NM` do `CR0.TS` no anel 0. \
-             As primeiras:\n  {}\n\
+             Um `<unknown>` é o que o llvm-objdump não sabe ler: confira se é uma extensão \
+             nova. As primeiras:\n  {}\n\
              Confira as opções de backend em `kernel/.cargo/config.toml` e em \
              `programas/.cargo/config.toml`.",
             achados.join("\n  ")
@@ -1096,13 +1097,34 @@ fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
 /// A linha `linha` da desmontagem do `llvm-objdump` — na sintaxe da AT&T,
 /// dentro da função cujo cabeçalho é `funcao` — é uma instrução de ponto
 /// flutuante ou de SIMD: um registrador `xmm`, `ymm`, `zmm`, `st` ou `mm`
-/// do MMX; um mnemônico do x87 — todos começam com `f`: `fld`, `fninit`,
-/// `fxsave`... —, o `wait`, o `emms`, o `ldmxcsr` e o `stmxcsr`; ou a
-/// família do `xsave` e do `xrstor`. O `xgetbv` e o `xsetbv` não: eles não
-/// tocam o estado de ponto flutuante, e o `CR0.TS` não os prende.
+/// do MMX, uma máscara do AVX-512 (`k0` a `k7`) ou um ladrilho do AMX
+/// (`tmm`); um mnemônico do x87 — todos começam com `f`: `fld`, `fninit`,
+/// `fxsave`... —, o `wait`, o `emms`, o `ldmxcsr` e o `stmxcsr` e as formas
+/// do AVX deles (`vldmxcsr`, `vstmxcsr`), o `vzeroupper` e o `vzeroall`; a
+/// família do `xsave` e do `xrstor`; ou o AMX — o `ldtilecfg`, o
+/// `sttilecfg`, o `tilerelease`, o `tilezero` e os `tileload` (as máscaras,
+/// as formas do AVX e o AMX vieram no lote B4 do #448). O AMX não confere o
+/// `CR0.TS`: com o `XCR0` do kernel ele é `#UD`, e com um `XCR0` que o
+/// tivesse ligado mexeria nos ladrilhos sem `#NM` nenhum. O `xgetbv` e o
+/// `xsetbv` não: eles não tocam o estado de ponto flutuante, e o `CR0.TS`
+/// não os prende.
+///
+/// E o Key Locker, que usa os `xmm` sem um operando que os nomeie — o
+/// `aesencwide128kl` e os outros três largos, o `encodekey128` e o
+/// `encodekey256` —: todo mnemônico que começa com `aes` ou com
+/// `encodekey`, e o `loadiwkey`. O mnemônico é o primeiro depois dos
+/// [`PREFIXOS`] que o `llvm-objdump` escreve à parte — `rep\t\tstosq`,
+/// `lock\t\tcmpxchgq` —, e o `<unknown>`, que ele escreve para o que não
+/// sabe ler, conta também: pode ser uma extensão nova, que esta versão do
+/// LLVM não conhece, e o build para para alguém olhar (os três, de um
+/// informativo do adversário do lote B4).
 ///
 /// A exceção é uma só: o `fninit` do núcleo que acorda, em
 /// `smp::entrada_secundaria`, que roda antes de o `CR0.TS` ligar.
+///
+/// As mesmas regras estão no awk do canário (`.github/workflows/canario.yml`,
+/// o passo do kernel do x86), que o `invariantes` não confere contra estas:
+/// uma regra nova entra nos dois lugares.
 fn instrucao_de_ponto_flutuante(funcao: &str, linha: &str) -> bool {
     // `  d3cd9b:      \tfninit`: o endereço, os dois-pontos, e a instrução.
     // Uma linha que não começa por um endereço não é instrução: o nome do
@@ -1115,22 +1137,56 @@ fn instrucao_de_ponto_flutuante(funcao: &str, linha: &str) -> bool {
         return false;
     }
     let instrucao = instrucao.trim();
-    let mnemonico = instrucao.split_whitespace().next().unwrap_or("");
+    let mnemonico = instrucao
+        .split_whitespace()
+        .find(|t| !PREFIXOS.contains(t) && !t.starts_with('{'))
+        .unwrap_or("");
     if mnemonico == "fninit" && funcao.contains("smp18entrada_secundaria") {
         return false;
     }
-    let registrador_mmx = instrucao
-        .match_indices("%mm")
-        .any(|(i, _)| instrucao[i + 3..].starts_with(|c: char| c.is_ascii_digit()));
-    ["%xmm", "%ymm", "%zmm", "%st"]
+    // Um registrador de nome `prefixo` seguido de um algarismo de 0 a `ate`:
+    // o `%mm0`, mas não o `%tmm0` nem um símbolo; o `%k1`, até o `%k7`.
+    let registrador_numerado = |prefixo: &str, ate: char| {
+        instrucao.match_indices(prefixo).any(|(i, _)| {
+            instrucao[i + prefixo.len()..].starts_with(|c: char| ('0'..=ate).contains(&c))
+        })
+    };
+    ["%xmm", "%ymm", "%zmm", "%st", "%tmm"]
         .iter()
         .any(|r| instrucao.contains(r))
-        || registrador_mmx
+        || registrador_numerado("%mm", '9')
+        || registrador_numerado("%k", '7')
         || mnemonico.starts_with('f')
-        || ["wait", "emms", "ldmxcsr", "stmxcsr"].contains(&mnemonico)
-        || mnemonico.starts_with("xsave")
-        || mnemonico.starts_with("xrstor")
+        || [
+            "wait",
+            "emms",
+            "ldmxcsr",
+            "stmxcsr",
+            "vldmxcsr",
+            "vstmxcsr",
+            "vzeroupper",
+            "vzeroall",
+            "ldtilecfg",
+            "sttilecfg",
+            "tilerelease",
+            "tilezero",
+            "loadiwkey",
+            "<unknown>",
+        ]
+        .contains(&mnemonico)
+        || ["xsave", "xrstor", "tileload", "aes", "encodekey"]
+            .iter()
+            .any(|p| mnemonico.starts_with(p))
 }
+
+/// Os prefixos que o `llvm-objdump` escreve como uma palavra à parte, antes
+/// do mnemônico — ver [`instrucao_de_ponto_flutuante`], que os pula, e os do
+/// montador entre chaves (`{vex}`, `{evex}`) também. Um prefixo sozinho numa
+/// linha — o `lock` que não cabe na instrução seguinte — não é instrução.
+const PREFIXOS: &[&str] = &[
+    "lock", "rep", "repe", "repz", "repne", "repnz", "data16", "data32", "addr16", "addr32", "rex",
+    "rex64", "cs", "ds", "es", "fs", "gs", "ss", "notrack", "bnd", "xacquire", "xrelease",
+];
 
 #[cfg(test)]
 mod testes_do_ponto_flutuante {
@@ -1169,10 +1225,63 @@ mod testes_do_ponto_flutuante {
     }
 
     #[test]
+    fn as_mascaras_do_avx512_o_avx_e_o_amx_sao_pegos() {
+        for linha in [
+            "  456710:      \tkmovw\t%k1, %eax",
+            "  456710:      \tkortestw\t%k0, %k0",
+            "  456710:      \tkmovq\t%rax, %k7",
+            "  456710:      \tvzeroupper",
+            "  456710:      \tvzeroall",
+            "  456710:      \tvldmxcsr\t(%rsp)",
+            "  456710:      \tvstmxcsr\t(%rsp)",
+            "  456710:      \tldtilecfg\t(%rax)",
+            "  456710:      \tsttilecfg\t(%rax)",
+            "  456710:      \ttilerelease",
+            "  456710:      \ttilezero\t%tmm0",
+            "  456710:      \ttileloadd\t(%rax,%rbx), %tmm1",
+            "  456710:      \ttileloaddt1\t(%rax,%rbx), %tmm1",
+            "  456710:      \ttilestored\t%tmm1, (%rax,%rbx)",
+            "  456710:      \ttdpbssd\t%tmm2, %tmm1, %tmm0",
+        ] {
+            assert!(instrucao_de_ponto_flutuante(OUTRA, linha), "{linha}");
+        }
+    }
+
+    // As linhas do Key Locker e do `<unknown>` são as do `llvm-objdump` do
+    // compilador oficial, para os bytes de cada um; as com prefixo, o
+    // formato em que ele os escreve (`rep\t\tstosq`).
+    #[test]
+    fn o_key_locker_os_prefixos_e_o_desconhecido_sao_pegos() {
+        for linha in [
+            "       0:      \taesencwide128kl\t(%rax)",
+            "       5:      \taesdecwide256kl\t(%rax)",
+            "       a:      \taesenc128kl\t(%rax), %xmm0",
+            "       f:      \tencodekey128\t%eax, %eax",
+            "      14:      \tencodekey256\t%eax, %eax",
+            "      19:      \tloadiwkey\t%xmm1, %xmm0",
+            "      2e:      \t<unknown>",
+            "  456710:      \tlock\t\tfxsave\t(%rdi)",
+            "  456710:      \trep\t\tvzeroupper",
+            "  456710:      \tdata16\t\tfld1",
+            "  456710:      \t{vex}\tvzeroall",
+        ] {
+            assert!(instrucao_de_ponto_flutuante(OUTRA, linha), "{linha}");
+        }
+    }
+
+    #[test]
     fn o_resto_nao() {
         for linha in [
             "  456710:      \tmovq\t%rax, %rbx",
+            "  456710:      \tmovq\t%r8, %r9",
+            "  456710:      \trep\t\tstosq\t%rax, %es:(%rdi)",
+            "  456710:      \tlock\t\tcmpxchgq\t%rcx, (%rdx)",
+            "      27:      \tlock",
+            "  456710:      \tcallq\t0xbdd480 <_RNvNtCsbv6XCleSqDx_4duke3aes12encodekey128>",
             "  456710:      \tmovq\t%fs:0x28, %rax",
+            "  456710:      \tcallq\t0xbdd480 <_RNvNtCsbv6XCleSqDx_4duke8tilezero>",
+            "  456710:      \tcallq\t0xbdd480 <_RNvNtCsbv6XCleSqDx_4duke10vzeroupper>",
+            "0000000000456700 <_RNvNtCsbv6XCleSqDx_4duke10vzeroupper>:",
             "  456710:      \txgetbv",
             "  456710:      \txsetbv",
             "  456710:      \tcallq\t0xbdd480 <_RNvNtCsbv6XCleSqDx_4duke2mm5frame>",
@@ -2963,6 +3072,7 @@ fn conferir_invariantes() -> Result<ExitCode, String> {
         sdk::conferir_o_contrato()?,
         compilador::conferir_o_canal()?,
         partes::conferir_as_matrizes()?,
+        conferir_o_processador_do_x86()?,
     ];
     if passos.iter().all(|p| *p == ExitCode::SUCCESS) {
         Ok(ExitCode::SUCCESS)
@@ -9988,6 +10098,133 @@ fn conferir_o_disco_do_boot(argumentos: &[String], boot: DiscoDoBoot) -> Result<
     Ok(())
 }
 
+/// O processador do x86 da suíte, do iniciador, das bancadas e da fumaça —
+/// ver [`comando_qemu`], a única linha que monta o `-cpu` do x86: o modelo
+/// padrão do QEMU, mais o SMEP e o UMIP, que ele não tem. Sem eles, os casos
+/// do SMEP e do UMIP passam calados — o kernel diz que a máquina não os
+/// oferece, e o caso não tem o que afirmar —; o teste abaixo é o que
+/// reprova (um informativo do adversário do lote B4 do #448), e o
+/// `invariantes` confere que o `-cpu` do x86 só sai daqui
+/// ([`conferir_o_processador_do_x86`]).
+const CPU_DO_X86: &str = "qemu64,+smep,+umip";
+
+#[cfg(test)]
+mod testes_do_processador_do_x86 {
+    /// O `-cpu` do x86 é o `qemu64` com o SMEP e o UMIP: tirar um deles não
+    /// reprova caso nenhum da suíte, e reprova aqui. E nenhuma outra forma
+    /// deles: o QEMU aplica os `-umip` depois dos `+umip`, qualquer que seja
+    /// a ordem, e um `qemu64,+smep,+umip,-umip` sobe sem o UMIP; o `umip=off`
+    /// também os toca (um informativo do adversário do delta do lote B4).
+    #[test]
+    fn o_processador_do_x86_tem_o_smep_e_o_umip() {
+        let mut partes = super::CPU_DO_X86.split(',');
+        assert_eq!(partes.next(), Some("qemu64"));
+        let caracteristicas: Vec<&str> = partes.collect();
+        for c in ["+smep", "+umip"] {
+            assert!(caracteristicas.contains(&c), "o -cpu do x86 sem o {c}");
+        }
+        for c in &caracteristicas {
+            if c.contains("smep") || c.contains("umip") {
+                assert!(
+                    ["+smep", "+umip"].contains(c),
+                    "o -cpu do x86 com o {c}, que pode desligar o que o +smep e o +umip ligam"
+                );
+            }
+        }
+    }
+
+    /// A conferência do `invariantes` ([`super::os_cpu_do_xtask`]): o
+    /// `xtask` de hoje passa; um `-cpu` do x86 escrito à mão, ou o da
+    /// constante duas vezes, não; o de um comentário não conta.
+    #[test]
+    fn o_cpu_do_x86_so_sai_da_constante() {
+        let fonte = |texto: &str| vec![("xtask/src/main.rs".to_string(), texto.to_string())];
+        let hoje = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .unwrap();
+        assert_eq!(super::os_cpu_do_xtask(&fonte(&hoje)), (1, Vec::new()));
+        let a_mao = "qemu.args([\"-cpu\", \"qemu64,+smep\"]);\n";
+        let (uma, fora) = super::os_cpu_do_xtask(&fonte(a_mao));
+        assert_eq!((uma, fora.len()), (0, 1), "{fora:?}");
+        let duas = "qemu.args([\"-cpu\", CPU_DO_X86]);\nq.args([\"-cpu\",\n    CPU_DO_X86]);\n";
+        assert_eq!(super::os_cpu_do_xtask(&fonte(duas)).0, 2);
+        let arm = "q.args([\n    \"-cpu\",\n    \"cortex-a72\",\n]);\n";
+        assert_eq!(super::os_cpu_do_xtask(&fonte(arm)), (0, Vec::new()));
+        let comentado = "// qemu.args([\"-cpu\", \"qemu64\"]);\n";
+        assert_eq!(super::os_cpu_do_xtask(&fonte(comentado)), (0, Vec::new()));
+    }
+}
+
+/// O `-cpu` do x86 só sai do [`CPU_DO_X86`], que o teste do hospedeiro
+/// confere: nas fontes do `xtask`, fora de comentário, todo `"-cpu"` é
+/// seguido do `CPU_DO_X86` — uma vez só, em [`comando_qemu`] — ou do
+/// `"cortex-a72"` do ARM. Sem isso, um `comando_qemu` que voltasse a
+/// escrever o `-cpu` à mão deixaria o teste conferindo uma constante que
+/// ninguém usa, e os casos do SMEP e do UMIP passariam calados (um
+/// informativo do adversário do delta do lote B4 do #448). Um `-cpu` novo
+/// do ARM entra na regra.
+fn conferir_o_processador_do_x86() -> Result<ExitCode, String> {
+    let fontes = raiz_do_projeto().join("xtask/src");
+    let mut lidas: Vec<(String, String)> = Vec::new();
+    let entradas = std::fs::read_dir(&fontes)
+        .map_err(|e| format!("não foi possível ler {}: {e}", fontes.display()))?;
+    for entrada in entradas.flatten() {
+        let caminho = entrada.path();
+        if caminho.extension().is_some_and(|e| e == "rs") {
+            let texto = std::fs::read_to_string(&caminho)
+                .map_err(|e| format!("não foi possível ler {}: {e}", caminho.display()))?;
+            lidas.push((
+                format!("xtask/src/{}", entrada.file_name().to_string_lossy()),
+                texto,
+            ));
+        }
+    }
+    let (com_a_constante, mut fora) = os_cpu_do_xtask(&lidas);
+    if com_a_constante != 1 {
+        fora.push(format!(
+            "o `-cpu` do x86 sai do `CPU_DO_X86` em {com_a_constante} lugar(es), e não em um: ver `comando_qemu`"
+        ));
+    }
+    if fora.is_empty() {
+        println!(
+            "[xtask] o -cpu do x86: só o `CPU_DO_X86` ({CPU_DO_X86}), uma vez, em `comando_qemu`; o \
+             do ARM, o cortex-a72"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        for f in &fora {
+            println!("[xtask] {f}");
+        }
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Os `"-cpu"` das `fontes` — o nome e o texto de cada arquivo —, fora de
+/// comentário: quantos são seguidos do [`CPU_DO_X86`], e os que não são
+/// dele nem do `"cortex-a72"` do ARM — ver [`conferir_o_processador_do_x86`].
+fn os_cpu_do_xtask(fontes: &[(String, String)]) -> (usize, Vec<String>) {
+    let mut com_a_constante = 0;
+    let mut fora = Vec::new();
+    for (nome, texto) in fontes {
+        let codigo: Vec<&str> = texto.lines().filter(|l| !comentario(l)).collect();
+        let codigo = codigo.join("\n");
+        for (i, agulha) in codigo.match_indices("\"-cpu\"") {
+            let depois = codigo[i + agulha.len()..]
+                .trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+            if depois.starts_with("CPU_DO_X86") {
+                com_a_constante += 1;
+            } else if !depois.starts_with("\"cortex-a72\"") {
+                let valor = depois.lines().next().unwrap_or("").trim();
+                fora.push(format!(
+                    "{nome}: um `-cpu` que não sai do `CPU_DO_X86` nem é o do ARM: {valor}"
+                ));
+            }
+        }
+    }
+    (com_a_constante, fora)
+}
+
 /// Monta a linha de comando do QEMU para a arquitetura em questão.
 fn comando_qemu(
     arch: Arquitetura,
@@ -10013,7 +10250,15 @@ fn comando_qemu(
             // acrescentar a característica que se quer exercitar mantém o
             // resto da máquina igual ao que era, e diz no próprio argumento
             // por que ela está ali.
-            qemu.args(["-cpu", "qemu64,+smep"]);
+            //
+            // O `+umip` pelo mesmo motivo (o lote B4 do #448): o kernel liga
+            // o `CR4.UMIP` quando o processador o declara, e o caso das
+            // instruções do UMIP — o `str`, o `sldt`, o `smsw`, o `sgdt` e o
+            // `sidt` do anel 3 — só afirma alguma coisa com ele. O TCG o
+            // emula. Esta é a única linha que monta o `-cpu` do x86: a
+            // suíte, o iniciador, as bancadas e a fumaça passam todos por
+            // aqui, com o [`CPU_DO_X86`], que um teste do hospedeiro confere.
+            qemu.args(["-cpu", CPU_DO_X86]);
 
             // O firmware, em duas partes: o código, que é somente leitura, e
             // as variáveis, que ele escreve durante o boot e por isso são uma
