@@ -69,7 +69,13 @@ pode usar sem que mude.
 A forma binária do programa — o ELF dos dois alvos, o `usuario.ld`, a
 entrada `principal` e a nota `Duke` com `duke-manifesto 1` — também é
 contrato, sem mudança de formato; ela é conferida na carga de cada
-programa.
+programa. Os dois alvos são *soft-float*, e o kernel prende o ponto
+flutuante e o SIMD no anel 3 e no EL0 (o lote B3 do #448): o programa que
+executa uma instrução deles morre na primeira — o `#NM` no x86, a classe
+0x07 no ARM —, com a linha no log e a falha contada. A conferência do
+build (`conferir_sem_simd`) cobre só os programas do x86 da imagem; o
+`sdk-conferir` não a faz. Liberá-los é a
+[R12-SIMD](DECISOES.md#r12-simd).
 
 **As regras.** Dentro da versão o contrato só cresce: um comando novo,
 um parâmetro opcional novo, um campo novo num resultado, um tipo de evento

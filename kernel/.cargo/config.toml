@@ -13,10 +13,11 @@ target = "x86_64-unknown-none"
 # O ChaCha20, o Poly1305 e o curve25519 do RustCrypto, no x86_64, conferem em
 # tempo de execução se o processador tem AVX2 ou SSE2 e, tendo, usam. Num
 # programa comum é o certo. Num kernel não: os registradores de SIMD são do
-# processo que estava rodando, este kernel não os salva ao entrar, e uma
-# função de cifra que os usasse corromperia o estado de quem foi
-# interrompido — sem erro nenhum, só números errados num programa que nem
-# sabia que tinha sido interrompido.
+# processo que estava rodando, este kernel não os salva ao entrar, e desde
+# o lote B3 do #448 os prende em todo núcleo — o `CR0.TS` no x86, o
+# `CPACR_EL1` em zero no ARM —: uma função de cifra que os usasse pararia a
+# máquina na primeira instrução. Antes, corromperia em silêncio o estado de
+# quem foi interrompido.
 #
 # O alvo `x86_64-unknown-none` já proíbe o compilador de gerar SIMD por
 # conta própria, mas não alcança o código que pede SIMD explicitamente,
@@ -73,9 +74,10 @@ rustflags = [
 # independente de posição.
 #
 # Escolhemos o alvo `-softfloat` de propósito: ele proíbe o compilador de usar
-# registradores de ponto flutuante e NEON. Num kernel isso é desejável, porque
-# usar FP/SIMD em EL1 sem antes habilitar o acesso (CPACR_EL1) gera uma
-# exceção — um bug sutil e difícil de rastrear.
+# registradores de ponto flutuante e NEON. Num kernel isso é desejável:
+# desde o lote B3 do #448 o kernel escreve o `CPACR_EL1` em zero em todo
+# núcleo, e o FP/SIMD no EL1 é a classe 0x07, fatal — também pela UEFI, onde
+# o EDK2 o deixava aberto.
 rustflags = [
     "-C", "link-arg=-Tsrc/arch/aarch64/linker.ld",
     "-C", "llvm-args=-align-loops=128",

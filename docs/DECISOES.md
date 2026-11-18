@@ -825,7 +825,10 @@ quem pede um processo dizendo o processo:
   `kernel/src/fios/mod.rs`, `COLETOR_CHAMADO`). O lote B2 acrescentou o
   caso que prova o cutucão no núcleo em que o coletor dorme, e o coletor
   passou a olhar a marca antes de dormir: o chamado que chega durante a
-  passada também não espera o tique. A pergunta da cota sem efeito,
+  passada também não espera o tique. O lote B3 pôs a pergunta dentro da
+  janela mascarada do sono (`fios::descansar_ate_a_interrupcao_se`): o
+  cutucão do chamado que chega entre a pergunta e o sono acorda o sono na
+  hora (o item 7 do adversário do lote B2). A pergunta da cota sem efeito,
   `ocupacao_na_cota`, ficou separada da do gate, que chama o coletor. Não
   ajuda com o coletor
   sem a vez, nem com o que esta decisão pergunta: a tabela cheia de vivos
@@ -1309,9 +1312,17 @@ B do #448.
   que o processo provoca no anel 3 e no EL0 o mata do mesmo jeito — a
   divisão por zero, o `ud2`, o passo do `TF`, o `brk` do ARM —, menos a
   verificação da máquina (`#MC`) e o SError do ARM, que são do hardware e
-  continuam parando a máquina. O adversário do lote B2 achou mais dois
-  caminhos até a máquina parada — o passo adiado por um `mov ss`, num
-  processador, e o LDT do reset —, que ficam para o lote B3.
+  continuam parando a máquina. O lote B3 acrescentou as mortes do que ele
+  prende: o ponto flutuante e o SIMD (o `#NM` no x86, a classe 0x07 no
+  ARM), o seletor do LDT (`#GP`), o `wfi` e o `wfe` do EL0 que iriam
+  dormir (a classe 0x01), o `msr daif` do EL0 (a classe 0x18) e o
+  `sysenter` (`#UD`; `#GP(0)` num Intel). E fechou os dois caminhos até a
+  máquina parada que o adversário do lote B2 achou: o passo adiado por um
+  `mov ss`, num processador — o `#DB` do anel 0 com o `BS` como única
+  causa volta sem o `TF`, e o processo morre do passo na volta da
+  chamada —, e o LDT do reset — o LDT nulo em todo núcleo faz do seletor
+  do LDT um `#GP` que mata o processo, e a falha de página também culpa o
+  processo pelo `CS` do quadro.
   O log diz qual e onde (`processo morto por ... em pc=...`), e a
   contabilidade das falhas a conta (`traps`), mas a auditoria não diz
   nada: a morte por uma falha não é uma decisão, e nunca teve registro —
@@ -1338,7 +1349,8 @@ B do #448.
 - **O impacto.** (b) e (c): `politica::auditoria` (o método), os
   tratadores das exceções nas duas arquiteturas e a fila até o coletor
   (`traps`, `fios`), o NSF (`seguranca`, o sinal), os casos `contador:` e
-  os das exceções do usuário (`excecoes:`), que o lote B2 acrescentou.
+  os das exceções do usuário (`excecoes:`), que os lotes B2 e B3
+  acrescentaram.
   (a): nada.
 - **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
   não muda nada; a (b) e a (c) acrescentam um registro, sem mudar os de
@@ -1353,8 +1365,10 @@ B do #448.
   nem #PF — o `int3` já era um #GP — parava a máquina, e no ARM o `brk` do
   EL0 com os imediatos do estouro de propósito também — e com ela o fim da
   auditoria que ainda não tinha ido ao journal —; o lote B2 as faz matar o
-  processo, como as outras, e é por ele que a morte por falha fica um evento comum, que esta decisão
-  pergunta se a auditoria grava.
+  processo, como as outras — e o lote B3, que prende o ponto flutuante e
+  o SIMD, faz morrer também o programa de fora que os use —, e é por eles
+  que a morte por falha fica um evento comum, que esta decisão pergunta se
+  a auditoria grava.
 - **Destrava.** Nada do roteiro; um sinal novo para o NSF.
 
 ### R13-CONSENT
@@ -1466,12 +1480,17 @@ alternativa (b).
 ([Roteiro](../README.md#roteiro), fase 12).
 
 - **O problema.** Os programas não usam SIMD nem AES-NI: o kernel não
-  salva os registradores de SIMD de um processo quando troca de processo,
-  e dois programas que os usassem corromperiam um o estado do outro, sem
-  erro nenhum. Os alvos (`x86_64-unknown-none`,
+  salva os registradores de SIMD de um processo quando troca de processo.
+  Até o lote B3 do #448, dois programas que os usassem passavam o estado
+  de um ao outro, sem erro — um canal entre titulares, por fora do gate,
+  que o adversário do lote B2 mostrou. Desde o lote B3, o kernel prende o
+  ponto flutuante e o SIMD no anel 3 e no EL0 — o `CR0.TS` no x86, o
+  `CPACR_EL1` em zero no ARM —, e o programa que os usa morre na primeira
+  instrução, com a falha contada. Os alvos (`x86_64-unknown-none`,
   `aarch64-unknown-none-softfloat`) e as opções dos pacotes de cifra
-  (`programas/.cargo/config.toml`) o garantem, e o `xtask` confere o kernel
-  (`conferir_sem_simd`). O custo: o ChaCha20-Poly1305 em software, 317
+  (`programas/.cargo/config.toml`) o garantem para os programas do
+  repositório, e o `xtask` confere o kernel e os programas do x86 da
+  imagem (`conferir_sem_simd`: o SIMD, o x87 e o MMX). O custo: o ChaCha20-Poly1305 em software, 317
   MiB/s no hospedeiro, contra 104 do AES-128-GCM — por isso ele vai
   primeiro ([O TLS de um programa](../README.md#o-tls-de-um-programa)) —, e
   o SHA-256 do BLS do IC, em software ([ICP](ICP.md#as-bibliotecas)).
@@ -1484,11 +1503,12 @@ alternativa (b).
   estado de um processo nunca fica no registrador enquanto outro roda: a
   troca preguiçosa é a do vazamento de estado de ponto flutuante entre
   processos conhecido desde 2018 (o LazyFP). (b) Salvar só para os
-  programas que o declaram no manifesto. (c) Como hoje.
+  programas que o declaram no manifesto. (c) Como hoje, desde o lote B3:
+  o ponto flutuante e o SIMD presos, e o programa que os usa morre.
 - **A recomendação provisória.** (a), medida — a memória por fio e o tempo
   da troca —, e só depois a mudança dos alvos dos programas, numa versão
-  da interface nativa: um programa compilado com SIMD num kernel que não o
-  salva corrompe sem erro.
+  da interface nativa: num kernel que não o salva, um programa compilado
+  com SIMD morre na primeira instrução.
 - **As fechadas.** O DS-2: a forma binária do programa — o ELF dos dois
   alvos — é contrato (SDK.md:69-72), e o que não é crescer é só numa
   versão maior, por decisão própria (SDK.md:84-86): mudar os alvos é uma

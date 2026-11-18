@@ -13827,6 +13827,14 @@ persistência do x86, de 50,9 a 33,1; a parte 1/3 da suíte do x86, de 26,3 a
 42,7. Com essa variação, o fim é o ritmo dos runners mais do que o tamanho
 dos pedaços, e dividir mais rende pouco.
 
+As CIs 512 a 514 (`d646516` e `b7b62cf`, só documentação e o lote B2;
+`d1be398`, a correção da 513) mediram 85,0, 79,2 e 75,7 minutos de ponta a
+ponta, com 1325, 1295 e 1323 de máquina. O maior job foi a persistência do
+x86 nas três: a parte 1/3 levou 67,3, 53,0 e 67,1 minutos, e a 2/3, 70,0,
+50,1 e 45,9 — de novo, a variação dos runners, com o mesmo trabalho. O fim
+veio dos fluxos entre dispositivos na 512 e na 514, e da parte 2/2 do
+iniciador do ARM na 513, que começou aos 33,0 e rodou 46,2.
+
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na
 508 e 58 na 509 —, e o que sobra até o piso é a ordem da fila, que não se

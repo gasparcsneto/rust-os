@@ -18,9 +18,9 @@ license = "MIT OR Apache-2.0"
 # inspeção do ICP-0) e não traz o `lazy_static`.
 ic-verify-bls-signature = { version = "0.6.0", default-features = false }
 # O sha2 0.10 que a verificação BLS traz para o hash-to-curve: em
-# software. O kernel não salva os registradores de SIMD de um processo
-# (ver `programas/.cargo/config.toml`), e o `cpufeatures` dele escolheria o
-# caminho com SHA-NI ou NEON sozinho.
+# software. O kernel não salva os registradores de SIMD de um processo, e
+# os prende (ver `programas/.cargo/config.toml`); o `cpufeatures` dele
+# escolheria o caminho com SHA-NI ou NEON sozinho.
 sha2-010 = { package = "sha2", version = "0.10.9", default-features = false, features = ["force-soft"] }
 # O resto, nas versões que o projeto já usa: o SHA-256 da árvore e do
 # hash independente de representação, o SHA-224 do Principal

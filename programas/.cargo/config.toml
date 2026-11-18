@@ -24,9 +24,11 @@ target = "x86_64-unknown-none"
 # config.toml`). O ChaCha20, o Poly1305, o AES, o GHASH, o SHA-2 e o
 # curve25519 do RustCrypto e do dalek perguntam ao processador, em tempo
 # de execução, se ele tem SIMD, e usam. Este kernel não salva os
-# registradores de SIMD de um processo quando troca de processo: dois
-# programas que os usassem corromperiam um o estado do outro, sem erro
-# nenhum. As opções são as que os pacotes oferecem para desligar o
+# registradores de SIMD de um processo quando troca de processo, e por isso
+# os prende no anel 3 e no EL0 (o lote B3 do #448): um programa que os
+# usasse morreria na primeira instrução — o `#NM` no x86, a classe 0x07 no
+# ARM —, em vez de corromper em silêncio o estado de outro. As opções são
+# as que os pacotes oferecem para desligar o
 # caminho; a do GHASH (`polyval_backend`) é só daqui — o kernel não usa
 # AES-GCM.
 [target.x86_64-unknown-none]

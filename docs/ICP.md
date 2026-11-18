@@ -156,7 +156,9 @@ observa o desfecho `unverified*` com a regra `declared-verification-failed`
 - **Reutilizadas direto**, `no_std` e conferidas nos dois alvos dos
   programas: `ic-verify-bls-signature` (e o `ic_bls12_381` que ela traz) —
   o emparelhamento BLS12-381 da DFINITY, sem reescrever. O SHA-256 dela,
-  em software: o kernel não salva os registradores de SIMD de um processo.
+  em software: o kernel não salva os registradores de SIMD de um processo,
+  e os prende — o processo que os usasse morreria na primeira instrução
+  (o lote B3 do #448).
 - **Oráculos**, só nos testes do hospedeiro: `ic-transport-types`,
   `ic-certification`, `ic-certificate-verification`, `ic_principal`,
   `candid` e `ic-ed25519` — cada peça do `web3` conferida contra a
