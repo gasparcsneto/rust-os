@@ -120,18 +120,27 @@ pub unsafe fn init() {
     // SAFETY: delegada ao chamador.
     unsafe { ligar_neste_nucleo() };
     crate::log_info!("usuario", "syscall/sysret habilitados");
+    crate::log_info!(
+        "usuario",
+        "o contador de ciclos fora do anel 3: CR4.TSD ligado, CR4.PCE desligado"
+    );
 }
 
-/// Liga o mecanismo de chamadas de sistema **neste** núcleo.
+/// Liga o mecanismo de chamadas de sistema **neste** núcleo, e tira dele o
+/// contador de ciclos do anel 3 (ver
+/// [`super::fechar_os_contadores_ao_usuario`]).
 ///
 /// Os registradores de modelo abaixo são do núcleo, não do sistema: cada
 /// núcleo que acorda precisa escrevê-los, ou o primeiro `syscall` que um
-/// processo fizer ali é `#UD`.
+/// processo fizer ali é `#UD`. O `CR4` também é do núcleo.
 ///
 /// # Safety
 ///
 /// Exige a GDT já carregada neste núcleo, com o TSS dele em `TR`.
 pub unsafe fn ligar_neste_nucleo() {
+    // Antes do primeiro processo que este núcleo rodar: o anel 3 nunca vê o
+    // contador.
+    super::fechar_os_contadores_ao_usuario();
     let sel = gdt::seletores();
     let por_nucleo = &POR_NUCLEO.0[gdt::nucleo_atual()] as *const PorNucleo as u64;
 

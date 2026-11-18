@@ -392,6 +392,53 @@ pub fn protecao_de_execucao() -> (bool, bool) {
     (tem, ligado)
 }
 
+/// Tira o contador de ciclos do anel 3, **neste** núcleo: o `CR4.TSD`
+/// ligado torna o `rdtsc` e o `rdtscp` privilegiados, e o `CR4.PCE`
+/// desligado — o valor de reset, escrito assim de propósito —, o `rdpmc`.
+/// Chamada por [`usuario::ligar_neste_nucleo`], no primeiro núcleo e em cada
+/// um que acorda: o `CR4` é do núcleo, e o dos outros copia o do primeiro
+/// (`smp::fotografar`), mas a escrita não depende da cópia.
+///
+/// # O relógio que não passava pelo gate
+///
+/// O relógio de um programa é o `system.uptime`: uma decisão do gate, com
+/// a taxa do papel, que anda de 10 em 10 ms. Com o `CR4` só com o SMEP, o
+/// `rdtsc` rodava no anel 3: o contador de ciclos, sem decisão nem
+/// registro, numa resolução que o programa calibra contra o
+/// `system.uptime` — a régua de um ataque de tempo, fora do modelo escrito
+/// (o #451). Nenhum dos programas o usava, e nenhuma conferência o
+/// proibia. Agora um processo que o lê morre pela falha de proteção (`#GP`),
+/// como um que executa uma instrução privilegiada, e o log diz qual.
+///
+/// O kernel continua lendo o contador no anel zero — a régua das medidas
+/// de custo ([`ciclos`]), o relógio da hora — e o bit não o alcança: ele só
+/// vale com CPL > 0. O `rdpid` não é um contador — lê o `IA32_TSC_AUX`, o
+/// número do núcleo —, e o bit não o toca.
+pub(super) fn fechar_os_contadores_ao_usuario() {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    // SAFETY: os dois bits existem em todo x86_64, e o kernel nunca executa
+    // `rdtsc`, `rdtscp` nem `rdpmc` fora do anel zero: ligar um e desligar o
+    // outro só tira do anel 3 o que ele não deve ter.
+    unsafe {
+        Cr4::update(|flags| {
+            flags.insert(Cr4Flags::TIMESTAMP_DISABLE);
+            flags.remove(Cr4Flags::PERFORMANCE_MONITOR_COUNTER);
+        })
+    };
+}
+
+/// Só para a suíte: o `CR4.TSD` e o `CR4.PCE` deste núcleo — ver
+/// [`fechar_os_contadores_ao_usuario`].
+#[cfg(feature = "modo-teste")]
+pub fn contadores_do_usuario() -> (bool, bool) {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    let cr4 = Cr4::read();
+    (
+        cr4.contains(Cr4Flags::TIMESTAMP_DISABLE),
+        cr4.contains(Cr4Flags::PERFORMANCE_MONITOR_COUNTER),
+    )
+}
+
 fn exigir_protecao_de_escrita() {
     use x86_64::registers::control::{Cr0, Cr0Flags};
 

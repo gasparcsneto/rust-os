@@ -109,15 +109,97 @@ pub fn atender_chamada(quadro: &mut Quadro) {
     quadro.x[0] = resultado as u64;
 }
 
-/// Nada a preparar: o mecanismo de chamada de sistema do ARM já está de pé
-/// assim que a tabela de vetores está.
+/// O mecanismo de chamada de sistema do ARM já está de pé assim que a
+/// tabela de vetores está; o que se prepara aqui é o que o EL0 **não**
+/// alcança: os contadores, neste núcleo — ver
+/// [`fechar_os_contadores_neste_nucleo`]. Os outros núcleos os fecham ao
+/// acordar (`smp::entrada_secundaria`).
 ///
 /// # Safety
 ///
 /// Existe por simetria com o x86, onde esta função escreve quatro
-/// registradores de modelo específico. Aqui não há estado a ligar.
+/// registradores de modelo específico. Aqui só escreve registradores de
+/// sistema do EL1, antes do primeiro processo.
 pub unsafe fn init() {
+    fechar_os_contadores_neste_nucleo();
     crate::log_info!("usuario", "svc de EL0 atendido pela tabela de vetores");
+    crate::log_info!(
+        "usuario",
+        "os contadores fora do EL0: CNTKCTL_EL1 em zero, PMUSERENR_EL0 em zero{}",
+        if pmu_v3() { "" } else { " (sem PMU)" }
+    );
+}
+
+/// Tira os contadores do EL0, **neste** núcleo — o #451, o par do `CR4.TSD`
+/// do x86:
+///
+/// - o `CNTKCTL_EL1` em zero: sem o `EL0PCTEN` e o `EL0VCTEN`, a leitura do
+///   `CNTPCT_EL0`, do `CNTVCT_EL0` e do `CNTFRQ_EL0` no EL0 vira uma exceção
+///   síncrona para o EL1; sem o `EL0VTEN` e o `EL0PTEN`, a dos registradores
+///   dos timers virtual e físico também. O resto do registrador é o fluxo
+///   de eventos do contador virtual, que o kernel não usa — os `wfe` dele
+///   são as paradas, que um evento a cada tanto só faria girar —, e sai
+///   desligado junto;
+/// - o `PMUSERENR_EL0` em zero, se o núcleo tem a PMU: o contador de ciclos
+///   e os de eventos dela também ficam fora do EL0. O valor de reset dele
+///   é desconhecido; sem a PMU (`ID_AA64DFR0_EL1.PMUVer`), o registrador
+///   não existe, e escrevê-lo seria uma instrução indefinida no boot.
+///
+/// # O relógio que não passava pelo gate
+///
+/// Nem o kernel nem o iniciador escreviam o `CNTKCTL_EL1`: a leitura do
+/// contador no EL0 dependia do firmware. O relógio de um programa é o
+/// `system.uptime`, decidido pelo gate; o contador no EL0 seria outro, sem
+/// decisão nem registro. Agora um processo que o lê morre pela exceção
+/// síncrona (`msr_mrs_trap`), como um que executa uma instrução
+/// privilegiada, e o log diz qual. O kernel continua lendo o contador no
+/// EL1 — a régua das medidas de custo (`ciclos`), o prazo da parada —, e
+/// o timer físico do EL1, que é o tique: nada disso passa pelo EL0.
+pub fn fechar_os_contadores_neste_nucleo() {
+    use aarch64_cpu::registers::CNTKCTL_EL1;
+    use tock_registers::interfaces::Writeable;
+    CNTKCTL_EL1.set(0);
+    if pmu_v3() {
+        // SAFETY: o núcleo declarou a PMUv3, e o registrador é de EL0, que
+        // o EL1 escreve; zero só tira o acesso do EL0.
+        unsafe {
+            asm!(
+                "msr pmuserenr_el0, xzr",
+                options(nomem, nostack, preserves_flags)
+            )
+        };
+    }
+    // SAFETY: barreira, sem efeito além da ordem: o EL0 que vier depois já
+    // vê os controles escritos.
+    unsafe { asm!("isb", options(nomem, nostack, preserves_flags)) };
+}
+
+/// O núcleo tem a PMU da arquitetura, a PMUv3: o `PMUVer` do
+/// `ID_AA64DFR0_EL1` entre 1 e 14 — 0 é sem PMU, e 15, uma de outro
+/// formato, que o kernel não conhece.
+fn pmu_v3() -> bool {
+    use aarch64_cpu::registers::ID_AA64DFR0_EL1;
+    use tock_registers::interfaces::Readable;
+    (1..=0xE).contains(&ID_AA64DFR0_EL1.read(ID_AA64DFR0_EL1::PMUVer))
+}
+
+/// Só para a suíte: o `CNTKCTL_EL1` e o `PMUSERENR_EL0` deste núcleo — este
+/// `None` sem a PMU —, como [`fechar_os_contadores_neste_nucleo`] os
+/// escreveu.
+#[cfg(feature = "modo-teste")]
+pub fn contadores_do_usuario() -> (u64, Option<u64>) {
+    use aarch64_cpu::registers::CNTKCTL_EL1;
+    use tock_registers::interfaces::Readable;
+    let pmuserenr = pmu_v3().then(|| {
+        let valor: u64;
+        // SAFETY: leitura de um registrador que o núcleo declarou, sem
+        // efeito.
+        unsafe {
+            asm!("mrs {}, pmuserenr_el0", out(reg) valor, options(nomem, nostack, preserves_flags))
+        };
+        valor
+    });
+    (CNTKCTL_EL1.get(), pmuserenr)
 }
 
 /// Informa a pilha de kernel do fio que vai rodar.

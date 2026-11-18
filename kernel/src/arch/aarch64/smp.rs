@@ -374,6 +374,9 @@ pub fn partir(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static st
 /// Chega aqui com a MMU ligada, os vetores instalados, `TPIDR_EL1` com o
 /// índice e a pilha do fio ocioso, IRQs mascaradas.
 extern "C" fn entrada_secundaria(indice: u64) -> ! {
+    // Os contadores fora do EL0 antes do primeiro processo deste núcleo: os
+    // registradores são do núcleo, e o firmware o acorda com os dele.
+    super::usuario::fechar_os_contadores_neste_nucleo();
     // SAFETY: estamos no núcleo que acabou de acordar, mascarado, com a
     // tabela de vetores instalada pelo bloco de partida.
     unsafe { super::gic::ligar_neste_nucleo() };

@@ -46,6 +46,11 @@
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const CODIGO_DO_INVASOR: i64 = 99;
 
+/// Código de saída que o contador usaria se o contador de ciclos lhe fosse
+/// legível no anel sem privilégio — ver [`bytes_do_contador`].
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_CONTADOR: i64 = 77;
+
 /// Código de saída que o programa de exemplo devolve quando tudo deu certo.
 ///
 /// Um valor arbitrário e improvável: se ele aparecer do outro lado, veio daqui
@@ -179,6 +184,10 @@ unsafe extern "C" {
     static ORFAO_INICIO: u8;
     #[link_name = "programa_orfao_fim"]
     static ORFAO_FIM: u8;
+    #[link_name = "programa_contador_inicio"]
+    static CONTADOR_INICIO: u8;
+    #[link_name = "programa_contador_fim"]
+    static CONTADOR_FIM: u8;
 }
 
 /// A imagem ELF do programa bem-comportado.
@@ -279,6 +288,22 @@ pub const CODIGO_DE_FALHA_DO_ORFAO: i64 = 10;
 pub fn bytes_do_orfao() -> &'static [u8] {
     // SAFETY: ver `entre`.
     unsafe { entre(&raw const ORFAO_INICIO, &raw const ORFAO_FIM) }
+}
+
+/// A imagem ELF do programa que lê o contador de ciclos — o `rdtsc` no x86,
+/// o `CNTVCT_EL0` no ARM — na primeira instrução, a da entrada.
+///
+/// Existe para provar que o contador não é um relógio do programa: o
+/// relógio dele é o `system.uptime`, decidido pelo gate. O kernel tira o
+/// contador do anel sem privilégio em todo núcleo — o `CR4.TSD` no x86, o
+/// `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM (o #451) —, e a leitura é uma
+/// falha de proteção, que mata o processo como uma instrução privilegiada.
+/// Se ele seguir em frente, sai com [`CODIGO_DO_CONTADOR`]: a leitura
+/// passou. Não está em `/bin`: só a suíte o roda.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub fn bytes_do_contador() -> &'static [u8] {
+    // SAFETY: ver `entre`.
+    unsafe { entre(&raw const CONTADOR_INICIO, &raw const CONTADOR_FIM) }
 }
 
 /// # Safety
@@ -782,6 +807,57 @@ programa_invasor_inicio:
 
 .global programa_invasor_fim
 programa_invasor_fim:
+
+// --- o contador: le o contador de ciclos no anel 3 --------------------------
+//
+// A primeira instrucao, na entrada, e o `rdtsc`. Com o `CR4.TSD` ligado, ela
+// e privilegiada: falha de protecao no anel 3, e o processo morre ali.
+.balign 8
+.global programa_contador_inicio
+programa_contador_inicio:
+
+.Lelf_cont:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0x3E                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO                // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_cont - .Lelf_cont // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_cont - .Lcodigo_cont  // p_filesz
+    .quad   .Lfim_codigo_cont - .Lcodigo_cont  // p_memsz
+    .quad   4096                                 // p_align
+
+.Lcodigo_cont:
+    rdtsc
+
+    // Inalcancavel: com o contador fora do anel 3, a leitura acima e uma
+    // falha de protecao. Se chegarmos aqui, ela passou.
+    mov     eax, 0
+    mov     edi, 77
+    syscall
+.Lprender_cont:
+    jmp     .Lprender_cont
+.Lfim_codigo_cont:
+
+.global programa_contador_fim
+programa_contador_fim:
 
 // --- o paciente: bifurca, espera o filho e sai com o codigo dele -----------
 //
@@ -1522,6 +1598,58 @@ programa_invasor_inicio:
 
 .global programa_invasor_fim
 programa_invasor_fim:
+
+// --- o contador: le o contador do timer generico no EL0 ---------------------
+//
+// A primeira instrucao, na entrada, le o `CNTVCT_EL0`. Com o `CNTKCTL_EL1`
+// sem o `EL0VCTEN`, a leitura no EL0 e uma excecao sincrona para o EL1, e o
+// processo morre ali.
+.balign 8
+.global programa_contador_inicio
+programa_contador_inicio:
+
+.Lelf_cont:
+    .byte   0x7F, 0x45, 0x4C, 0x46   // \x7fELF
+    .byte   2, 1, 1, 0               // 64 bits, little-endian, versao 1
+    .byte   0, 0, 0, 0, 0, 0, 0, 0   // resto do e_ident
+    .short  2                        // e_type: ET_EXEC
+    .short  0xB7                // e_machine
+    .long   1                        // e_version
+    .quad   VADDR_CODIGO                // e_entry
+    .quad   64                       // e_phoff: a tabela vem logo apos
+    .quad   0                        // e_shoff: sem secoes
+    .long   0                        // e_flags
+    .short  64                       // e_ehsize
+    .short  56                       // e_phentsize
+    .short  1                 // e_phnum
+    .short  0                        // e_shentsize
+    .short  0                        // e_shnum
+    .short  0                        // e_shstrndx
+
+    // segmento de codigo: leitura e execucao, nunca escrita
+    .long   1                                    // PT_LOAD
+    .long   5                                    // PF_R | PF_X
+    .quad   .Lcodigo_cont - .Lelf_cont // p_offset
+    .quad   VADDR_CODIGO                         // p_vaddr
+    .quad   VADDR_CODIGO                         // p_paddr
+    .quad   .Lfim_codigo_cont - .Lcodigo_cont  // p_filesz
+    .quad   .Lfim_codigo_cont - .Lcodigo_cont  // p_memsz
+    .quad   4096                                 // p_align
+
+.Lcodigo_cont:
+    mrs     x1, cntvct_el0
+
+    // Inalcancavel: com o contador fora do EL0, a leitura acima e uma
+    // excecao sincrona. Se chegarmos aqui, ela passou.
+    mov     x8, #0
+    mov     x0, #77
+    svc     #0
+.Lprender_cont:
+    b       .Lprender_cont
+.Lfim_codigo_cont:
+
+.global programa_contador_fim
+programa_contador_fim:
 
 // --- o paciente: bifurca, espera o filho e sai com o codigo dele -----------
 //

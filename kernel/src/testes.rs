@@ -31,6 +31,7 @@ use crate::rede::placa::PlacaDeRede;
 mod adocao;
 mod aviso;
 mod coleta;
+mod contador;
 mod enlace;
 mod fluxo;
 mod nascimento;
@@ -41852,6 +41853,14 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "zumbis: os nascimentos sem vaga de varios nucleos acordam o coletor, e todos nascem",
         f: zumbis::zumbis_os_nascimentos_sem_vaga_de_varios_nucleos_acordam_o_coletor,
+    },
+    Caso {
+        nome: "contador: o processo que le o contador de ciclos cai em cada nucleo, e o log diz o motivo",
+        f: contador::contador_o_processo_que_le_cai,
+    },
+    Caso {
+        nome: "contador: em cada nucleo, o acesso do usuario ao contador esta como o kernel o escreveu",
+        f: contador::contador_os_controles_em_cada_nucleo,
     },
 ];
 

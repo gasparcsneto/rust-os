@@ -413,6 +413,7 @@ kernel/src/
 │   ├── adocao.rs    os casos da reconstrução da auditoria no boot: a cadeia adotada igual, registro a registro, à da conta de antes — a do journal, refeita do disco, continuada com os eventos que a cadeia do boot tinha logo antes da adoção —, com o journal de poucos registros e o anel pela metade, o anel cheio, o boot de um registro e o boot cheio, depois da compactação, com uma lacuna e no boot seguinte, e o journal de antes no disco byte a byte; nada pedido nem devolvido ao alocador com a trava da auditoria na adoção, nem com a da cadeia refeita na reposição, com os controles das duas travas; o registro do boot que alguém segura, que não muda, com o da adotada copiado; a gravada que troca com a cadeia, que o `audit.head` e o `audit.tail` logo antes da adoção nunca mostram adiante da do boot, e logo depois mostram a da adotada, nunca a de antes; a adotada do journal vazio do primeiro boot, desde a gênese; e produtores em rajada na hora da adoção e um leitor noutros núcleos, sem perder, repetir nem desordenar nada no journal, e sem a cadeia nem a gravada pela metade
 │   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
+│   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
@@ -448,7 +449,7 @@ kernel/src/
 │   ├── programa.rs  mapeia o processo e desce de privilégio
 │   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
-│   └── exemplo.rs   seis programas mínimos, em assembly
+│   └── exemplo.rs   sete programas mínimos, em assembly — o sétimo, o `contador`, só para a suíte
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -5903,6 +5904,54 @@ em minutos, e o `system.info` diz `ticks`. A régua nunca devolve menos do
 que já devolveu, em núcleo nenhum. O relógio do kernel continua sendo a
 régua das durações; o serviço só mede a taxa dele contra o contador
 (`mono_ppm`), e não o corrige.
+
+**O contador fora do anel sem privilégio** (o #451, [B], no lote B do
+#448). A régua é do kernel: o relógio de um programa é o `system.uptime`,
+uma decisão do gate, com a taxa do papel. Mas o kernel x86 só ligava o
+SMEP no `CR4`, e o `rdtsc` rodava no anel 3 — o contador de ciclos, sem decisão
+nem registro, numa resolução que o programa calibra contra o
+`system.uptime`: a régua de um ataque de tempo, fora do modelo escrito —;
+e no ARM nem o kernel nem o iniciador escreviam o `CNTKCTL_EL1`, e a
+leitura do `CNTVCT_EL0` no EL0 dependia do firmware, com o
+`PMUSERENR_EL0` no valor de reset, desconhecido. Agora, em cada núcleo —
+o primeiro no boot, cada secundário ao acordar —, o x86 liga o `CR4.TSD`,
+que torna o `rdtsc` e o `rdtscp` privilegiados, e escreve desligado o
+`CR4.PCE`, o do `rdpmc` (`arch::x86_64::fechar_os_contadores_ao_usuario`,
+de `usuario::ligar_neste_nucleo`); e o ARM põe o `CNTKCTL_EL1` em zero —
+sem o `EL0PCTEN`, o `EL0VCTEN`, o `EL0VTEN` e o `EL0PTEN`, e sem o fluxo
+de eventos, que o kernel não usa — e, com a PMU, o `PMUSERENR_EL0` em zero
+(`arch::aarch64::usuario::fechar_os_contadores_neste_nucleo`). O processo
+que lê o contador morre pela falha de proteção — o `#GP` no x86, a exceção
+síncrona do `mrs` no ARM (`msr_mrs_trap`) —, como um que executa uma
+instrução privilegiada: a contabilidade das falhas (`traps.stats`) e o
+log (`processo morto por …`) dizem qual, e em que instrução. O kernel
+continua lendo o contador no anel zero e no EL1 — esta régua, a das
+medidas de custo, o prazo da parada dos núcleos — e o timer físico do EL1,
+e os controles não o alcançam. Nenhum dos 57 programas usa o contador, nas
+duas arquiteturas: conferido na desmontagem dos binários — sem `rdtsc`,
+`rdtscp`, `rdpmc` nem `rdpid`, nem `mrs` de `cntvct`, `cntpct`, `cntfrq` ou
+`pmccntr`. A suíte o confere com o `contador`, um programa mínimo montado
+à mão (`usuario/exemplo.rs`) cuja primeira instrução é a leitura:
+`contador: o processo que le o contador de ciclos cai em cada nucleo, e o
+log diz o motivo` e `contador: em cada nucleo, o acesso do usuario ao
+contador esta como o kernel o escreveu`. A morte dele não vai à auditoria
+— nenhuma morte por falha vai, nem a do `invasor`: não é uma decisão —;
+gravá-la seria um registro novo, que fica para uma decisão (ver [Decisões
+pendentes](#decisões-pendentes)).
+
+O QEMU, com o TCG, honra os dois controles, e é por ele que a suíte os
+confere: no x86, o `rdtsc` no anel 3 com o `TSD` ligado dá o `#GP(0)` na
+instrução da leitura, em cada um dos quatro núcleos; no ARM, o `mrs x1,
+cntvct_el0` no EL0 com o `CNTKCTL_EL1` em zero dá a exceção síncrona de
+classe 0x18 (o `ESR_EL1` 0x6234f821), também em cada núcleo. Quatro
+mutações, uma de cada vez, restauradas byte a byte, em debug, contra as
+partes da suíte com os dois casos (`DUKE_PARTE=k/1010` no x86, `k/1009`
+no ARM), reprovaram: o `CR4.TSD` desligado e o `CNTKCTL_EL1` com o
+`EL0VCTEN`, pelos dois casos — o processo lê o contador e sai com o código
+dele ("o processo leu o contador de ciclos e seguiu"), e os controles do
+núcleo 0 dão `0x0` e `0x2` —; o `CR4.PCE` ligado e o `PMUSERENR_EL0` com o
+`EN`, pelo caso dos controles (`0x3` e `0x100000000`) — o `contador` lê o
+contador de ciclos, e não o de desempenho.
 
 **O civil** (`hora::civil`). Uma instância só da disciplina do pacote,
 atrás de uma trava folha. Antes do primeiro acordo, é o RTC: lido no boot e
