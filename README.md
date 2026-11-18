@@ -2234,7 +2234,9 @@ imagem e sai com o código do `filho`, e nenhuma falha é contada. No ARM:
 o `brk` com 0xE5, com 0xE6 e com 0. Dois o QEMU 8.2 do TCG não reproduz
 como o processador, e o caso aceita as duas formas, ditas nele: o `int1`
 é um `#UD` no emulador (um `#DB` num processador), e o `push` não
-canônico, uma falha de página no endereço truncado (um `#SS`). As outras
+canônico, uma falha de página no endereço truncado (um `#SS`) — e, no
+QEMU da CI, que confere a forma canônica, um `#GP` com o código zero, que
+o caso também aceita (a CI 513 o mostrou). As outras
 exceções com código de erro — `#TS`, `#NP`, `#AC`, `#CP`, `#VC`, `#SX` —
 e o `#NM`, o `#OF`, o `#BR`, o `#VE` e o `#HV` não se alcançam do anel 3
 no emulador com o que o kernel liga; os tratadores delas usam a mesma

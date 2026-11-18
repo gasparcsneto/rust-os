@@ -58193,6 +58193,19 @@ fn botao_pedido(p: crate::botao::Passo) -> Result<(u64, u64, alloc::string::Stri
     }
 }
 
+/// O texto de um detalhe composto perdeu o fim no teto? Ver
+/// [`politica::auditoria::detalhe_composto`]: o texto vai entre quem pediu
+/// (`...): `) e a citação (`; decisao N`), e cortado termina na marca do
+/// corte — ou é só a marca, quando nem a primeira palavra coube.
+fn texto_cortado(detalhe: &str) -> bool {
+    use politica::auditoria::{MARCA_DO_CORTE, OMITIDO};
+    let antes = detalhe
+        .rsplit_once("; decisao ")
+        .map_or(detalhe, |(a, _)| a);
+    let texto = antes.rsplit_once("): ").map_or(antes, |(_, t)| t);
+    texto == OMITIDO || texto.ends_with(MARCA_DO_CORTE)
+}
+
 /// Os registros da auditoria depois de `depois` que `f` aceita, com o
 /// número.
 fn registros_depois(
@@ -76410,11 +76423,15 @@ fn malha_o_aplicativo_a_entrega_ao_b() -> Resultado {
                 crate::log_error!("teste", "{:?}", gravado);
                 return Err("um passo da entrega nao foi gravado com quem e o que");
             }
-            // Nenhum registro da malha chega ao teto do detalhe: um que
-            // chegasse teria sido cortado, e a cadeia perderia um elo.
+            // Nenhum registro da malha perde texto no teto do detalhe: o
+            // texto cortado diria menos do passo da entrega. A descrição do
+            // programa encolhe antes dele, sem perder quem pediu — o resumo
+            // fica (`(? <resumo>`, o A9-RESUMO) —, e um registro de
+            // exatamente `MAIOR_DETALHE` bytes coube inteiro: o caso o
+            // contava como cortado, e a CI 513 o achou com o fio de 4 dígitos
+            // e a decisão de 6.
             let cortados = registros_depois(antes, |e| {
-                e.metodo.starts_with("fabric.")
-                    && e.detalhe.len() >= politica::auditoria::MAIOR_DETALHE
+                e.metodo.starts_with("fabric.") && texto_cortado(&e.detalhe)
             });
             if !cortados.is_empty() {
                 crate::log_error!("teste", "{:?}", cortados[0].1.detalhe);

@@ -29,10 +29,11 @@
 //! o código do `filho`. No ARM: o `brk` com os dois imediatos do estouro de
 //! propósito e com outro qualquer.
 //!
-//! Dois desses o QEMU do TCG (8.2) não reproduz como o processador: o `int1`
-//! é um `#UD`, e o `push` não canônico, uma falha de página no endereço
-//! truncado. O caso aceita as duas formas, a do processador e a do emulador,
-//! e diz qual é qual; o `#DB` do anel 3 no emulador é o dos casos do passo.
+//! Dois desses o emulador não reproduz como o processador: o `int1` é um
+//! `#UD` no QEMU do TCG (8.2), e o `push` não canônico, uma falha de página
+//! no endereço truncado no 8.2 e um `#GP` com o código zero no QEMU da CI. O
+//! caso aceita as formas, a do processador e as dos emuladores, e diz qual é
+//! qual; o `#DB` do anel 3 no emulador é o dos casos do passo.
 //! As outras exceções com código de erro — `#TS`, `#NP`, `#AC`, `#CP`,
 //! `#VC`, `#SX` — e o `#NM`, o `#OF`, o `#BR`, o `#VE` e o `#HV` não se
 //! alcançam do anel 3 no emulador, com o que o kernel liga: os tratadores
@@ -382,7 +383,10 @@ pub(super) fn excecoes_o_int3_mata_o_processo() -> Resultado {
 /// `#NP` e ao `#DF`, fatal. O QEMU do TCG (8.2) não confere a forma
 /// canônica nesse acesso: a escrita vai ao endereço truncado, e é uma falha
 /// de página no zero, com o código de uma escrita do anel 3 numa página
-/// ausente — a rodada antes da correção o mostrou. As duas formas valem.
+/// ausente — a rodada antes da correção o mostrou. O QEMU da CI confere a
+/// forma canônica, mas dá `#GP` com o código zero, e não `#SS` — a CI 513 o
+/// mostrou. As três formas valem: todas matam o processo no `push`, pela
+/// mesma regra.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn excecoes_a_pilha_nao_canonica_mata_o_processo() -> Resultado {
     morre_pela_excecao(
@@ -399,6 +403,12 @@ pub(super) fn excecoes_a_pilha_nao_canonica_mata_o_processo() -> Resultado {
                 motivo: "falha de pagina",
                 deslocamento: exemplo::PUSH_DA_PILHA,
                 codigo: escrita_do_anel_3_sem_pagina,
+            },
+            Esperada {
+                nome: "general_protection_fault",
+                motivo: "falha de protecao",
+                deslocamento: exemplo::PUSH_DA_PILHA,
+                codigo: zero,
             },
         ],
     )
