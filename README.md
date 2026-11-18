@@ -9068,19 +9068,33 @@ não vai à auditoria, e o `ui.act` gravado só diz que o agente apertou, e
 quando.
 
 **Antes do login, nada além de entrar.** Um console sem ninguém aceita
-`login` e `ajuda` — a ajuda diz só como entrar. Todo o resto — um comando,
-conhecido ou não, uma tecla de função, um clique na barra — é
-`DENY_NOT_AUTHENTICATED`, gravado com o console: o comando que existe, com
-o nome; o que não é comando, com o marcador `(comando desconhecido)`; e
-nenhum dos dois com o resumo dos parâmetros — o registro leva o resumo do
-vazio. O que se digita num console sem ninguém pode ser uma senha no
-lugar errado — a linha inteira, ou o que vem depois do nome de um
-comando —, e o registro vai ao journal: nem a primeira palavra em claro,
-nem o resto num resumo sem chave, que se adivinha fora da máquina por
-dicionário (o N6, para a linha que não é comando; o I7, para o comando
-que existe). Antes do login, a decisão é a mesma qualquer que seja o
-parâmetro, e o registro também. A resposta é a mesma nos dois casos — quem
-digitou não fica sabendo se o comando existe. Não há login automático.
+`login` e `ajuda` — a ajuda lista só as palavras do console (`login`,
+`logout`, `senha`, `aceitar`, `parear`, `ajuda`), e não os comandos. Todo o resto — um comando,
+conhecido ou não, uma palavra do console (`senha`, `parear`, `aceitar`),
+uma tecla de função, um clique na barra — é `DENY_NOT_AUTHENTICATED`,
+gravado com o console: o comando que existe, com o nome; o que não é
+comando, com o marcador `(comando desconhecido)`; e nenhum dos dois com o
+resumo dos parâmetros — o registro leva o resumo do vazio. Menos o
+`logout`, que só diz que ninguém entrou, sem registro: não há sessão a
+encerrar, e nada do que veio junto é lido. O que se digita num console
+sem ninguém pode ser uma senha no lugar errado — a linha inteira, ou o que
+vem depois do nome de um comando —, e o registro vai ao journal: nem a
+primeira palavra em claro, nem o resto num resumo sem chave, que se
+adivinha fora da máquina por dicionário (o N6, para a linha que não é
+comando; o I7, para o comando que existe). Antes do login, a decisão e o
+registro não mudam com o parâmetro — nem com a presença dele. A troca da
+própria senha era a exceção: `senha` com algo na linha era recusada antes,
+no console, sem registro e com uma resposta própria, e `senha` sozinha
+gravava `credential.change_self` — o registro mudava com a presença do
+parâmetro, e não com o valor: não era um oráculo, mas contrariava a regra.
+Desde o lote B2 do #448 a pergunta de quem está entrado vem antes da
+conferência da linha (`interpretador::comecar_troca`), e as duas são a
+mesma recusa, com a mesma resposta (`consoles: sem ninguem, a senha com
+algo na linha e a mesma recusa da senha sozinha` confere o registro; a
+mutação que devolve a ordem de antes o reprova: "a troca da propria senha
+sem ninguem nao gravou um registro so"). A resposta é a mesma
+para o comando que existe e para o que não existe: quem digitou não fica
+sabendo se ele existe. Não há login automático.
 
 **Entrar.** `login` pede o nome e a senha (`login nome` pede só a senha).
 A senha não ecoa, não aparece na árvore semântica — o valor da linha

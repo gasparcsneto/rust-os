@@ -18859,6 +18859,87 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
     resultado
 }
 
+/// A troca da própria senha antes do login — o item 8 do adversário do
+/// lote B do #448: `senha <algo>` num console sem ninguém era recusado no
+/// console, antes da pergunta de quem está entrado, e não gravava nada,
+/// enquanto `senha` sozinha gravava a recusa; o registro mudava com a
+/// presença do parâmetro — não com o valor: não era um oráculo —, contra a
+/// regra escrita de antes do login. Agora as duas são a mesma recusa:
+/// `credential.change_self`, `DENY_NOT_AUTHENTICATED`, gravada com o
+/// console, sem o resumo do que veio junto, e o que veio junto não fica em
+/// lugar nenhum. Com alguém entrado, `senha <algo>` é recusado no console,
+/// sem decisão, sem registro e sem começar a troca, como antes.
+fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultado {
+    use crate::interpretador::Modo;
+    use crate::pessoas::Console;
+    use politica::Codigo;
+    use politica::auditoria::{Titular, resumo_dos_parametros};
+    /// O que se digita depois da palavra: uma senha no lugar errado.
+    const NA_LINHA: &str = "goiabada com queijo";
+    crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
+    crate::pessoas::registrar_de_teste("bia-do-b2", "operador", SENHA_DE_TESTE);
+    crate::interpretador::abrir_console(Console::Fisico);
+    let resultado = (|| -> Resultado {
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o console abriu com alguem entrado");
+        }
+        let vazio = resumo_dos_parametros(&[]);
+        let mut gravados = alloc::vec::Vec::new();
+        for linha in ["senha\n", "senha goiabada com queijo\n"] {
+            let antes = crate::autorizacao::ultimo_registro();
+            digitar_no_console(Console::Fisico, linha);
+            let registros = registros_depois(antes, |_| true);
+            let [(_, e)] = registros.as_slice() else {
+                for (seq, e) in &registros {
+                    crate::log_error!("teste", "registro {}: {:?}", seq, e);
+                }
+                return Err("a troca da propria senha sem ninguem nao gravou um registro so");
+            };
+            if e.metodo != crate::autorizacao::TROCA_DA_PROPRIA_SENHA
+                || e.titular != Titular::Anonimo
+                || e.codigo != Codigo::DenyNotAuthenticated
+                || e.recurso != Console::Fisico.texto()
+                || e.parametros != vazio
+            {
+                crate::log_error!("teste", "{:?}", e);
+                return Err(
+                    "a troca da propria senha sem ninguem nao foi a recusa de antes do login",
+                );
+            }
+            gravados.push((e.detalhe.clone(), e.agente.clone(), e.papel.clone()));
+            if crate::interpretador::modo() != Modo::Comando {
+                return Err("a troca da propria senha sem ninguem pediu alguma coisa");
+            }
+        }
+        if gravados[0] != gravados[1] {
+            return Err("a recusa mudou com a presenca do parametro");
+        }
+        nenhum_segredo_em_lugar_nenhum(&[NA_LINHA], &[])?;
+        // Com alguém entrado: recusado no console, sem decisão nem registro,
+        // e a troca não começa.
+        let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
+        entrar_no_console(Console::Fisico, "bia-do-b2", senha)?;
+        let antes = crate::autorizacao::ultimo_registro();
+        digitar_no_console(Console::Fisico, "senha goiabada com queijo\n");
+        let gravado = registros_depois(antes, |e| {
+            e.metodo == crate::autorizacao::TROCA_DA_PROPRIA_SENHA
+        });
+        if !gravado.is_empty() {
+            return Err("com alguem entrado, a senha com algo na linha foi gravada");
+        }
+        if crate::interpretador::modo() != Modo::Comando {
+            return Err("com alguem entrado, a senha com algo na linha comecou a troca");
+        }
+        nenhum_segredo_em_lugar_nenhum(&[NA_LINHA], &[])?;
+        digitar_no_console(Console::Fisico, "logout\n");
+        Ok(())
+    })();
+    crate::interpretador::desativar_para_teste();
+    crate::pessoas::esquecer_registradas();
+    resultado
+}
+
 /// O login de verdade: o nome, a senha sem eco — nem na tela, nem na árvore,
 /// nem no histórico do teclado —, a sessão aberta, os comandos com o papel
 /// da pessoa, e o `logout` voltando ao começo. Um agente não edita a linha
@@ -41931,6 +42012,10 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "contador: em cada nucleo, o kernel fecha o contador que outro deixou aberto",
         f: contador::contador_o_kernel_fecha_o_que_outro_abriu,
+    },
+    Caso {
+        nome: "consoles: sem ninguem, a senha com algo na linha e a mesma recusa da senha sozinha",
+        f: consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa,
     },
 ];
 

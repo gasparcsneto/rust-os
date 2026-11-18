@@ -36,14 +36,20 @@
 //! # Antes do login, nada além de entrar
 //!
 //! Um console sem ninguém entrado aceita `login` e `ajuda`. Todo o resto —
-//! um comando, uma tecla de função, um clique — é recusado com
+//! um comando, conhecido ou não, uma palavra do console (`senha`, `parear`,
+//! `aceitar`), uma tecla de função, um clique — é recusado com
 //! `DENY_NOT_AUTHENTICATED` e vai para a auditoria sem o resumo dos
 //! parâmetros: o comando com o nome, se ele existe; senão, com o marcador
-//! [`autorizacao::COMANDO_DESCONHECIDO`]. O que se digita ali pode ser uma
-//! senha no lugar errado — a linha inteira, ou o que vem depois do nome de
-//! um comando —, e não vai ao registro, nem em claro nem num resumo que se
-//! adivinha fora da máquina. A resposta é a mesma nos dois casos, e o
-//! registro não muda com o parâmetro. Depois do login, cada
+//! [`autorizacao::COMANDO_DESCONHECIDO`]. O `logout` é o único fora disso:
+//! só diz que ninguém entrou, sem registro — não há sessão a encerrar, e
+//! nada do que veio junto é lido. O que se digita ali pode ser uma senha no
+//! lugar errado — a linha inteira, ou o que vem depois do nome de um
+//! comando —, e não vai ao registro, nem em claro nem num resumo que se
+//! adivinha fora da máquina. A resposta é a mesma para o comando que existe
+//! e para o que não existe — quem digitou não fica sabendo se ele existe —,
+//! e o registro e a resposta não mudam com o parâmetro, nem com a presença
+//! dele: também a troca da própria senha, desde o lote B2 do #448 (ver
+//! [`comecar_troca`]). Depois do login, cada
 //! comando passa pela decisão com o papel que o registro dá à pessoa
 //! **agora**: uma revogação vale no comando seguinte, e o console volta a
 //! pedir o login.
@@ -2715,8 +2721,29 @@ fn sair(console: Console) {
 ///
 /// Nada se digita junto da palavra: uma senha na linha de comando já teria
 /// ecoado. `senha <algo>` é recusado, e o que veio junto não é usado.
+///
+/// # Ninguém entrado, primeiro
+///
+/// Sem ninguém entrado, a recusa é a de todo comando antes do login
+/// ([`autorizacao::recusar_sem_login`]): `DENY_NOT_AUTHENTICATED`, gravada
+/// como a troca da própria senha, sem o resumo do que veio junto, e a mesma
+/// resposta — com algo na linha ou sem nada. A conferência da linha vinha
+/// antes, e `senha <algo>` sem ninguém era recusado no console sem registro,
+/// com uma resposta própria, enquanto `senha` sozinho gravava: o registro e
+/// a resposta mudavam com a presença do parâmetro — não com o valor, e não
+/// era um oráculo —, contra a regra de antes do login (o item 8 do lote B2
+/// do #448). Com alguém entrado, a linha é conferida antes de qualquer
+/// decisão, como antes.
 fn comecar_troca(console: Console, params: &str) {
     let Some(i) = indice(console) else {
+        return;
+    };
+    let Some(sessao) = sessao_valida(console) else {
+        autorizacao::recusar_sem_login(console, autorizacao::TROCA_DA_PROPRIA_SENHA);
+        saidaln!(
+            console,
+            "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
+        );
         return;
     };
     if params != "{}" {
@@ -2726,14 +2753,6 @@ fn comecar_troca(console: Console, params: &str) {
         );
         return;
     }
-    let Some(sessao) = sessao_valida(console) else {
-        autorizacao::recusar_sem_login(console, autorizacao::TROCA_DA_PROPRIA_SENHA);
-        saidaln!(
-            console,
-            "negado: DENY_NOT_AUTHENTICATED; `login` para entrar"
-        );
-        return;
-    };
     if let Err((codigo, motivo)) = crate::pessoas::pode_trocar_a_propria_senha(console, sessao) {
         saidaln!(console, "negado: {}; {}", codigo.nome(), motivo);
         return;
@@ -3410,8 +3429,9 @@ fn despachar(
 ///
 /// Sai do mesmo registro que `agent.describe` publica. Uma lista escrita à
 /// mão aqui seria a segunda superfície que este módulo existe para não ter.
-/// Sem ninguém entrado, a ajuda diz só como entrar: ela não é privilegiada,
-/// e a lista do que o sistema faz é para quem entrou.
+/// Sem ninguém entrado, a ajuda lista só as palavras do console — `login`,
+/// `logout`, `senha`, `aceitar`, `parear` e `ajuda` —, e não os comandos: ela
+/// não é privilegiada, e a lista do que o sistema faz é para quem entrou.
 fn ajuda(console: Console, origem: Origem) {
     crate::log_info!(
         "console",

@@ -3893,8 +3893,10 @@ pub fn auditar_arrendamento(
 }
 
 /// Recusa um pedido feito num console sem ninguém entrado: só `login` e
-/// `ajuda` passam antes do login, e o resto — um comando, conhecido ou não —
-/// é `DENY_NOT_AUTHENTICATED`, gravado com o console.
+/// `ajuda` passam antes do login, e o resto — um comando, conhecido ou não,
+/// uma palavra do console, uma tecla de função — é `DENY_NOT_AUTHENTICATED`,
+/// gravado com o console; menos o `logout`, que só diz que ninguém entrou,
+/// sem registro.
 ///
 /// O `metodo` é o do pedido — o nome do comando que existe, o de uma
 /// palavra do console (a troca da própria senha, o pareamento), a tecla
@@ -3910,7 +3912,10 @@ pub fn auditar_arrendamento(
 /// grava o nome que não é de ninguém (ver [`crate::pessoas::autenticar`]),
 /// e a de que a senha não vai à auditoria: o N6 a aplicou à linha que não é
 /// comando, e o I7, ao comando que existe. Antes do login, a decisão é a
-/// mesma qualquer que seja o parâmetro, e o registro também.
+/// mesma qualquer que seja o parâmetro, e o registro também — e não mudam
+/// nem com a presença dele: a troca da própria senha com algo na linha,
+/// que o console recusava antes sem registro, chega aqui como a `senha`
+/// sozinha desde o lote B2 do #448 (`interpretador::comecar_troca`).
 pub fn recusar_sem_login(console: crate::pessoas::Console, metodo: &str) {
     auditar(
         &quem_sem_login(),
