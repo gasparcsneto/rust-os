@@ -84,7 +84,7 @@ fn codigo_da_leitura(codigo: u64) -> bool {
 ///
 /// A auditoria não diz nada: a morte de um processo por uma falha não é
 /// uma decisão, e não tem registro — nem a do `invasor`. Gravá-la seria um
-/// registro novo, uma decisão \[C\] (ver o relatório do #451).
+/// registro novo, uma decisão \[C\] (ver a AUD-FALHA, em `docs/DECISOES.md`).
 pub(super) fn contador_o_processo_que_le_cai() -> Resultado {
     let imagem = crate::usuario::exemplo::bytes_do_contador();
     let entrada = imagem
@@ -221,6 +221,124 @@ pub(super) fn contador_os_controles_em_cada_nucleo() -> Resultado {
         }
         if !como_o_kernel_escreveu(lido) {
             return Err("o acesso do usuario ao contador nao esta como o kernel o escreveu");
+        }
+    }
+    Ok(())
+}
+
+/// O que cada núcleo viu ao sujar e fechar os próprios controles: as vezes
+/// que fechou antes, mais um — zero é "ainda não viu" —, os controles sujos e
+/// os de depois, num número só como em [`controles`].
+static FECHOU_ANTES: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+static SUJOS: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+static DEPOIS: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Os controles sujos — os que o caso escreveu antes de o kernel fechar —,
+/// num número só: no x86, o `TSD` desligado e o `PCE` ligado; no ARM, o
+/// `EL0PCTEN` e o `EL0VCTEN` no `CNTKCTL_EL1` e o `EN` no `PMUSERENR_EL0`,
+/// com a PMU.
+#[cfg(target_arch = "x86_64")]
+fn sujar_e_fechar() -> (u64, u64) {
+    let (sujos, depois) = crate::arch::atual::sujar_e_fechar_os_contadores_de_teste();
+    let um = |(tsd, pce): (bool, bool)| u64::from(tsd) | (u64::from(pce) << 1);
+    (um(sujos), um(depois))
+}
+#[cfg(target_arch = "aarch64")]
+fn sujar_e_fechar() -> (u64, u64) {
+    let (sujos, depois) = crate::arch::atual::usuario::sujar_e_fechar_os_contadores_de_teste();
+    let um = |(cntkctl, pmuserenr): (u64, Option<u64>)| {
+        (cntkctl & 0xF_FFFF) | (pmuserenr.map_or(1 << 63, |p| (p & 0xFF) << 32))
+    };
+    (um(sujos), um(depois))
+}
+
+/// Os controles sujos são os que o caso escreveu — o caso de fato abriu o
+/// contador ao usuário antes de o kernel fechar.
+fn sujos_como_o_caso_escreveu(sujos: u64) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        sujos == 0b10
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        sujos & 0b11 == 0b11 && (sujos == 0b11 | (1 << 63) || (sujos >> 32) & 1 == 1)
+    }
+}
+
+/// Quantas vezes o núcleo `cpu` fechou os controles.
+fn fechamentos(cpu: usize) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::atual::fechamentos_dos_contadores_de_teste(cpu)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::atual::usuario::fechamentos_dos_contadores_de_teste(cpu)
+    }
+}
+
+/// Um fio preso a um núcleo suja os controles dele, e o kernel os fecha.
+extern "C" fn sujar_os_controles(cpu: u64) -> ! {
+    let i = cpu as usize;
+    ONDE[i].store(crate::arch::nucleo_atual() as u64, SeqCst);
+    FECHOU_ANTES[i].store(fechamentos(i) + 1, SeqCst);
+    let (sujos, depois) = sujar_e_fechar();
+    SUJOS[i].store(sujos, SeqCst);
+    DEPOIS[i].store(depois.wrapping_add(1), SeqCst);
+    crate::fios::terminar()
+}
+
+/// O kernel fecha o contador que outro deixou aberto, em cada núcleo — o
+/// item 6 do adversário do lote B do #448. O QEMU sai do reset com o
+/// `CNTKCTL_EL1` e o `PMUSERENR_EL0` em zero: no ARM, o caso que só lê os
+/// controles passaria sem as escritas do kernel, no boot cru; pela UEFI,
+/// dependeria do EDK2. Aqui, um fio preso a cada núcleo confere que o
+/// núcleo os fechou ao ligar — a conta de cada um, pelo menos uma vez —, e
+/// os abre como um firmware que os deixasse abertos — no ARM, o `EL0PCTEN`
+/// e o `EL0VCTEN`, e o `EN` da PMU; no x86, o `TSD` desligado e o `PCE`
+/// ligado —, chama a função que o boot chama, e confere o que ela escreveu.
+/// Sem as escritas, os controles ficam abertos, e o caso reprova nos dois
+/// boots do ARM; no x86 o caso dos controles já pegava, porque o `TSD` sai
+/// do reset desligado.
+pub(super) fn contador_o_kernel_fecha_o_que_outro_abriu() -> Resultado {
+    let nucleos = nucleos();
+    for &cpu in &nucleos {
+        ONDE[cpu].store(u64::MAX, SeqCst);
+        FECHOU_ANTES[cpu].store(0, SeqCst);
+        DEPOIS[cpu].store(0, SeqCst);
+        crate::fios::criar_no_nucleo("teste-contador-sujo", sujar_os_controles, cpu as u64, cpu)?;
+    }
+    esperar_ate(
+        || nucleos.iter().all(|&cpu| DEPOIS[cpu].load(SeqCst) != 0),
+        300,
+    )
+    .map_err(|_| "um nucleo nao sujou e fechou os controles do contador")?;
+    for &cpu in &nucleos {
+        let antes = FECHOU_ANTES[cpu].load(SeqCst).wrapping_sub(1);
+        let sujos = SUJOS[cpu].load(SeqCst);
+        let depois = DEPOIS[cpu].load(SeqCst).wrapping_sub(1);
+        crate::log_info!(
+            "teste",
+            "contador: o nucleo {} fechou {} vezes ao ligar; sujos {:#x}, depois {:#x}",
+            cpu,
+            antes,
+            sujos,
+            depois
+        );
+        if ONDE[cpu].load(SeqCst) != cpu as u64 {
+            return Err("os controles nao foram sujos no nucleo deles");
+        }
+        if antes == 0 {
+            return Err("um nucleo ligado nao fechou os contadores ao ligar");
+        }
+        if !sujos_como_o_caso_escreveu(sujos) {
+            return Err("o caso nao abriu os controles do contador");
+        }
+        if !como_o_kernel_escreveu(depois) {
+            return Err("o kernel nao fechou o contador que outro deixou aberto");
         }
     }
     Ok(())

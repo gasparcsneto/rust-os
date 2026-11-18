@@ -412,8 +412,8 @@ pub fn protecao_de_execucao() -> (bool, bool) {
 ///
 /// O kernel continua lendo o contador no anel zero — a régua das medidas
 /// de custo ([`ciclos`]), o relógio da hora — e o bit não o alcança: ele só
-/// vale com CPL > 0. O `rdpid` não é um contador — lê o `IA32_TSC_AUX`, o
-/// número do núcleo —, e o bit não o toca.
+/// vale com CPL > 0. O `rdpid` não é um contador — lê o `IA32_TSC_AUX`, que
+/// o kernel não escreve —, e o bit não o toca.
 pub(super) fn fechar_os_contadores_ao_usuario() {
     use x86_64::registers::control::{Cr4, Cr4Flags};
     // SAFETY: os dois bits existem em todo x86_64, e o kernel nunca executa
@@ -425,6 +425,48 @@ pub(super) fn fechar_os_contadores_ao_usuario() {
             flags.remove(Cr4Flags::PERFORMANCE_MONITOR_COUNTER);
         })
     };
+    #[cfg(feature = "modo-teste")]
+    FECHAMENTOS[gdt::nucleo_atual()].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Só para a suíte: quantas vezes cada núcleo tirou os contadores do anel 3
+/// ([`fechar_os_contadores_ao_usuario`]) — o primeiro no boot, cada
+/// secundário ao acordar.
+#[cfg(feature = "modo-teste")]
+static FECHAMENTOS: [core::sync::atomic::AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: quantas vezes o núcleo `cpu` tirou os contadores do
+/// anel 3.
+#[cfg(feature = "modo-teste")]
+pub fn fechamentos_dos_contadores_de_teste(cpu: usize) -> u64 {
+    FECHAMENTOS
+        .get(cpu)
+        .map_or(0, |f| f.load(core::sync::atomic::Ordering::SeqCst))
+}
+
+/// Só para a suíte: suja os controles deste núcleo como um firmware que os
+/// deixasse abertos — o `CR4.TSD` desligado e o `CR4.PCE` ligado —, e os
+/// fecha de novo por [`fechar_os_contadores_ao_usuario`]; devolve os dois
+/// bits sujos e os dois de depois. Tudo mascarado: nenhum processo roda
+/// neste núcleo no meio.
+#[cfg(feature = "modo-teste")]
+pub fn sujar_e_fechar_os_contadores_de_teste() -> ((bool, bool), (bool, bool)) {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    sem_interrupcoes(|| {
+        // SAFETY: os dois bits existem em todo x86_64; abertos só até a
+        // linha seguinte, com as interrupções mascaradas — nenhum processo
+        // roda aqui no meio.
+        unsafe {
+            Cr4::update(|flags| {
+                flags.remove(Cr4Flags::TIMESTAMP_DISABLE);
+                flags.insert(Cr4Flags::PERFORMANCE_MONITOR_COUNTER);
+            })
+        };
+        let sujos = contadores_do_usuario();
+        fechar_os_contadores_ao_usuario();
+        (sujos, contadores_do_usuario())
+    })
 }
 
 /// Só para a suíte: o `CR4.TSD` e o `CR4.PCE` deste núcleo — ver

@@ -41928,6 +41928,10 @@ static CASOS: &[Caso] = &[
         nome: "zumbis: o chamado que chega durante a passada do coletor nao espera o tique",
         f: zumbis::zumbis_o_chamado_durante_a_passada_nao_espera_o_tique,
     },
+    Caso {
+        nome: "contador: em cada nucleo, o kernel fecha o contador que outro deixou aberto",
+        f: contador::contador_o_kernel_fecha_o_que_outro_abriu,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

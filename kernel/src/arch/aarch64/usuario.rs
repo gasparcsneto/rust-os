@@ -125,8 +125,12 @@ pub unsafe fn init() {
     crate::log_info!("usuario", "svc de EL0 atendido pela tabela de vetores");
     crate::log_info!(
         "usuario",
-        "os contadores fora do EL0: CNTKCTL_EL1 em zero, PMUSERENR_EL0 em zero{}",
-        if pmu_v3() { "" } else { " (sem PMU)" }
+        "os contadores fora do EL0: CNTKCTL_EL1 em zero, PMUSERENR_EL0 {}",
+        if pmu_v3() {
+            "em zero"
+        } else {
+            "ausente (sem PMU)"
+        }
     );
 }
 
@@ -155,6 +159,29 @@ pub unsafe fn init() {
 /// privilegiada, e o log diz qual. O kernel continua lendo o contador no
 /// EL1 — a régua das medidas de custo (`ciclos`), o prazo da parada —, e
 /// o timer físico do EL1, que é o tique: nada disso passa pelo EL0.
+///
+/// # O que fica de fora: o AMU
+///
+/// Com a FEAT_AMUv1 — `ID_AA64PFR0_EL1.AMU` diferente de zero —, os
+/// contadores de atividade (`AMEVCNTR0<n>_EL0`, o de ciclos entre eles) são
+/// legíveis no EL0 com o `AMUSERENR_EL0.EN` ligado, e o valor de reset dele é
+/// desconhecido: um relógio fora do gate, como o do timer. O kernel **não**
+/// o escreve, e é uma escolha, não um esquecimento (o item 7 do lote B2 do
+/// #448):
+///
+/// - o QEMU do TCG não emula o AMU, e o núcleo da suíte (`cortex-a72`, um
+///   ARMv8.0) não o tem: o caminho que escrevesse o registro não roda em
+///   nenhuma rodada, nem em nenhuma bancada — código sem teste no caminho
+///   de boot de cada núcleo;
+/// - com um firmware que prende o acesso ao AMU no EL3 (`CPTR_EL3.TAM`), a
+///   própria escrita do EL1 cai no EL3, e o que o firmware faz dela — parar
+///   o núcleo, ou devolver uma instrução indefinida ao EL1 — pararia o boot
+///   no lugar de fechar um contador.
+///
+/// A lacuna vale só em hardware com o AMU e um firmware que deixe o
+/// `AMUSERENR_EL0` aberto. O fecho, quando entrar, entra com o teste que o
+/// exercite: o registro escrito só com o `AMU` declarado, e a armadilha do
+/// EL3 conferida antes.
 pub fn fechar_os_contadores_neste_nucleo() {
     use aarch64_cpu::registers::CNTKCTL_EL1;
     use tock_registers::interfaces::Writeable;
@@ -172,6 +199,56 @@ pub fn fechar_os_contadores_neste_nucleo() {
     // SAFETY: barreira, sem efeito além da ordem: o EL0 que vier depois já
     // vê os controles escritos.
     unsafe { asm!("isb", options(nomem, nostack, preserves_flags)) };
+    #[cfg(feature = "modo-teste")]
+    FECHAMENTOS[super::nucleo_atual()].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Só para a suíte: quantas vezes cada núcleo tirou os contadores do EL0
+/// ([`fechar_os_contadores_neste_nucleo`]) — o primeiro no boot, cada
+/// secundário ao acordar.
+#[cfg(feature = "modo-teste")]
+static FECHAMENTOS: [core::sync::atomic::AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: quantas vezes o núcleo `cpu` tirou os contadores do
+/// EL0.
+#[cfg(feature = "modo-teste")]
+pub fn fechamentos_dos_contadores_de_teste(cpu: usize) -> u64 {
+    FECHAMENTOS
+        .get(cpu)
+        .map_or(0, |f| f.load(core::sync::atomic::Ordering::SeqCst))
+}
+
+/// Só para a suíte: suja os controles deste núcleo como um firmware que os
+/// deixasse abertos — o `CNTKCTL_EL1` com o `EL0PCTEN` e o `EL0VCTEN`, e o
+/// `PMUSERENR_EL0` com o `EN`, se há a PMU —, e os fecha de novo por
+/// [`fechar_os_contadores_neste_nucleo`]; devolve os controles sujos e os
+/// de depois. O QEMU sai do reset com os dois em zero, e o caso que só lê
+/// os controles passaria sem as escritas do kernel: sujos aqui, só elas os
+/// zeram. Tudo mascarado: nenhum processo roda neste núcleo no meio.
+#[cfg(feature = "modo-teste")]
+pub fn sujar_e_fechar_os_contadores_de_teste() -> ((u64, Option<u64>), (u64, Option<u64>)) {
+    use aarch64_cpu::registers::CNTKCTL_EL1;
+    use tock_registers::interfaces::Writeable;
+    crate::arch::sem_interrupcoes(|| {
+        CNTKCTL_EL1.set(0b11);
+        if pmu_v3() {
+            // SAFETY: o núcleo declarou a PMUv3; o `EN` só até a linha
+            // seguinte, mascarado.
+            unsafe {
+                asm!(
+                    "msr pmuserenr_el0, {}",
+                    in(reg) 1u64,
+                    options(nomem, nostack, preserves_flags)
+                )
+            };
+        }
+        // SAFETY: barreira, sem efeito além da ordem.
+        unsafe { asm!("isb", options(nomem, nostack, preserves_flags)) };
+        let sujos = contadores_do_usuario();
+        fechar_os_contadores_neste_nucleo();
+        (sujos, contadores_do_usuario())
+    })
 }
 
 /// O núcleo tem a PMU da arquitetura, a PMUv3: o `PMUVer` do

@@ -413,7 +413,7 @@ kernel/src/
 │   ├── adocao.rs    os casos da reconstrução da auditoria no boot: a cadeia adotada igual, registro a registro, à da conta de antes — a do journal, refeita do disco, continuada com os eventos que a cadeia do boot tinha logo antes da adoção —, com o journal de poucos registros e o anel pela metade, o anel cheio, o boot de um registro e o boot cheio, depois da compactação, com uma lacuna e no boot seguinte, e o journal de antes no disco byte a byte; nada pedido nem devolvido ao alocador com a trava da auditoria na adoção, nem com a da cadeia refeita na reposição, com os controles das duas travas; o registro do boot que alguém segura, que não muda, com o da adotada copiado; a gravada que troca com a cadeia, que o `audit.head` e o `audit.tail` logo antes da adoção nunca mostram adiante da do boot, e logo depois mostram a da adotada, nunca a de antes; a adotada do journal vazio do primeiro boot, desde a gênese; e produtores em rajada na hora da adoção e um leitor noutros núcleos, sem perder, repetir nem desordenar nada no journal, e sem a cadeia nem a gravada pela metade
 │   ├── aviso.rs     os casos do aviso da malha: o programa `avisado` espera só no canal dele e diz cada aviso — o que o kernel publica, quando e quantas vezes, as recusas do `notify`, a revogação, o fim, a troca de imagem, a morte, o canal cheio, a recusa que consome e espaça o aviso, a vaga, a conta atrasada, o fim por fora na cadeia e a concorrência
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
-│   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu
+│   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu; e o kernel que os fecha em cada núcleo depois de um firmware que os deixasse abertos — os controles sujos e a função do boot chamada de novo (o lote B2 do #448)
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
@@ -6141,6 +6141,37 @@ dele ("o processo leu o contador de ciclos e seguiu"), e os controles do
 núcleo 0 dão `0x0` e `0x2` —; o `CR4.PCE` ligado e o `PMUSERENR_EL0` com o
 `EN`, pelo caso dos controles (`0x3` e `0x100000000`) — o `contador` lê o
 contador de ciclos, e não o de desempenho.
+
+No ARM, os dois casos passariam sem as escritas do kernel: o QEMU sai do
+reset com o `CNTKCTL_EL1` e o `PMUSERENR_EL0` em zero, e no boot cru é o
+que o kernel escreve; pela UEFI, dependeria do EDK2 (o item 6 do
+adversário do lote B). O lote B2 acrescentou `contador: em cada nucleo, o
+kernel fecha o contador que outro deixou aberto`: um fio preso a cada
+núcleo confere que ele fechou os controles ao ligar — a conta de cada
+núcleo, pelo menos uma vez (`fechamentos_dos_contadores_de_teste`) —,
+abre os controles como um firmware que os deixasse abertos — no ARM, o
+`EL0PCTEN` e o `EL0VCTEN` e, com a PMU, o `EN`; no x86, o `TSD` desligado
+e o `PCE` ligado —, com as interrupções mascaradas, chama a função que o
+boot chama e confere o que ela escreveu. A mutação que tira as duas escritas de
+`fechar_os_contadores_neste_nucleo`, rodada nos dois boots do ARM — o cru
+(`cargo xtask test`) e o da UEFI, pelo EDK2 (`cargo xtask iniciador`),
+`DUKE_PARTE=k/1016` —, **passa** pelos dois casos de antes nos dois — o
+QEMU e o EDK2 deixam os dois registros em zero: era o achado — e reprova
+o caso novo nos dois: "o kernel nao fechou o contador que outro deixou
+aberto".
+
+O AMU do ARM fica de fora, e é uma escolha, escrita junto do código
+(`arch::aarch64::usuario::fechar_os_contadores_neste_nucleo`, o item 7):
+com a FEAT_AMUv1 e o `AMUSERENR_EL0.EN` ligado, os `AMEVCNTR0<n>_EL0` —
+ciclos entre eles — são legíveis no EL0, um relógio fora do gate como o do
+timer. Escrever o `AMUSERENR_EL0` em zero só com o `ID_AA64PFR0_EL1.AMU`
+diferente de zero seria código sem teste no boot de cada núcleo: o QEMU do
+TCG não emula o AMU, e o núcleo da suíte (`cortex-a72`, um ARMv8.0) não o
+tem. E com um firmware que prende o AMU no EL3 (`CPTR_EL3.TAM`), a própria
+escrita do EL1 cai no EL3, e o que ele fizer dela — parar o núcleo,
+devolver uma instrução indefinida — pararia o boot no lugar de fechar um
+contador. A lacuna vale só em hardware com o AMU e um firmware que deixe
+o registro aberto; o fecho entra com o teste que o exercite.
 
 **O civil** (`hora::civil`). Uma instância só da disciplina do pacote,
 atrás de uma trava folha. Antes do primeiro acordo, é o RTC: lido no boot e
