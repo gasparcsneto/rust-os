@@ -823,7 +823,9 @@ quem pede um processo dizendo o processo:
   seguinte, sem esperar o tique, quando ganha a vez (*O chamado do
   coletor*, em [Coordenação](../README.md#coordenação);
   `kernel/src/fios/mod.rs`, `COLETOR_CHAMADO`). Não ajuda com o coletor
-  sem a vez, que é o que esta decisão pergunta.
+  sem a vez, nem com o que esta decisão pergunta: a tabela cheia de vivos
+  — de vários titulares, ou da mesma identidade em várias sessões — não
+  tem morto por recolher, e o chamado nem acontece.
 
 **As fechadas que ela toca.** A 14.1 (alternativa A, 7/11/2026) e a
 alternativa 1 do A1 (8/11/2026): a cota conta os zumbis e os mortos até o
@@ -1296,8 +1298,9 @@ antes** — o que a CI 509 mostrou, no pareamento.
 B do #448.
 
 - **O problema.** Um processo que lê o contador de ciclos — desde o #451,
-  privilegiado no anel 3 e no EL0 —, que executa uma instrução
-  privilegiada ou que lê a memória do kernel morre pela falha de proteção.
+  fora do anel 3 e do EL0 —, que executa uma instrução privilegiada ou
+  que lê a memória do kernel morre pela falha — a de proteção, ou a de
+  página, na leitura da memória do kernel.
   O log diz qual e onde (`processo morto por ... em pc=...`), e a
   contabilidade das falhas a conta (`traps`), mas a auditoria não diz
   nada: a morte por uma falha não é uma decisão, e nunca teve registro —
@@ -1325,6 +1328,9 @@ B do #448.
   tratadores das exceções nas duas arquiteturas e a fila até o coletor
   (`traps`, `fios`), o NSF (`seguranca`, o sinal), os casos `contador:` e
   os das exceções do usuário que o lote B2 acrescenta. (a): nada.
+- **As fechadas.** A 1.7 — a auditoria e a proveniência existentes: a (a)
+  não muda nada; a (b) e a (c) acrescentam um registro, sem mudar os de
+  antes, e o `audit.verify` e a adoção no boot têm de reconhecê-lo.
 - **O plano de validação.** (b) e (c): os casos `contador:` e os das
   exceções do usuário conferem o registro, com o processo e a falha; as
   mutações — o registro ausente, e o registro sem o processo —; a cadeia,
@@ -1859,8 +1865,8 @@ pendência #298: o resto do N6.
 - **O que se faz.** A (b) da pendência: o comando que existe, sem ninguém
   entrado, gravado sem o resumo, como a linha que não é comando — a regra
   de que a senha não vai à auditoria, que o N6 aplicou como [B]
-  (README.md:5115-5120). Antes do login, a decisão é a mesma qualquer que
-  seja o parâmetro.
+  (README.md:5115-5120). Antes do login, a decisão não muda com o valor
+  do parâmetro (a exceção da troca da própria senha está em *O estado*).
 - **O que não se propõe.** A (c), **(minha)**, um resumo com chave — um
   MAC com uma chave derivada da do Duke —: uma chave nova, e a custódia
   dela, seria [C].
