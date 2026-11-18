@@ -96,19 +96,42 @@ static POR_NUCLEO: TabelaPorNucleo = TabelaPorNucleo(
 
 /// Informa a pilha de kernel do fio que vai rodar.
 ///
-/// Chamado pela troca de contexto. Atualiza os dois caminhos de entrada no
+/// Chamado pela troca de contexto, e só por ela (`contexto::ceder_cpu`), com
+/// as interrupções mascaradas. Atualiza os dois caminhos de entrada no
 /// kernel a partir do usuário: o `RSP0` do TSS, que a *interrupção* usa, e a
-/// [`PorNucleo`] que a *chamada de sistema* usa — os dois **deste** núcleo.
+/// [`PorNucleo`] que a *chamada de sistema* usa — os dois **deste** núcleo,
+/// lido uma vez só.
+///
+/// # Por que só mascarado
+///
+/// Porque "deste núcleo" só vale enquanto o fio não pode sair dele. A
+/// entrada de um processo novo (`usuario::programa::entrar`) também a
+/// chamava, com as interrupções ligadas — o fio roda assim desde o `sti` do
+/// trampolim —: entre a leitura do núcleo e a escrita, o tique podia
+/// preemptar o fio e levá-lo a outro núcleo, e a escrita punha a pilha dele
+/// no `RSP0` e na [`PorNucleo`] do núcleo de antes. Até a troca seguinte
+/// ali, o fio que rodava naquele núcleo empilhava as interrupções do anel 3
+/// e entrava nas chamadas de sistema sobre a pilha deste, que rodava noutro
+/// (o item 4 do adversário do lote B2 do #448). A chamada era redundante —
+/// a troca que pôs o fio no núcleo já informou a pilha dele, e cada troca
+/// seguinte a informa de novo —, e saiu. O `debug_assert!` faz um chamador
+/// solto reprovar a suíte de depuração na primeira entrada.
 pub fn definir_pilha_de_kernel(topo: u64) {
+    debug_assert!(
+        !x86_64::instructions::interrupts::are_enabled(),
+        "a pilha de kernel informada com as interrupcoes ligadas"
+    );
     if topo == 0 {
         return;
     }
-    gdt::definir_pilha_de_kernel(topo);
+    let nucleo = gdt::nucleo_atual();
+    gdt::definir_pilha_de_kernel(nucleo, topo);
     // SAFETY: escrita de uma palavra alinhada na estrutura deste núcleo, com
-    // as interrupções mascaradas pelo chamador. Só o ponto de entrada de
-    // `syscall` **deste** núcleo a lê, e ele não pode estar executando agora
-    // — estamos em ring 0, no meio de uma troca de contexto.
-    unsafe { *POR_NUCLEO.0[gdt::nucleo_atual()].pilha_de_kernel.get() = topo };
+    // as interrupções mascaradas pelo chamador — o núcleo lido acima não
+    // muda até aqui. Só o ponto de entrada de `syscall` **deste** núcleo a
+    // lê, e ele não pode estar executando agora — estamos em ring 0, no meio
+    // de uma troca de contexto.
+    unsafe { *POR_NUCLEO.0[nucleo].pilha_de_kernel.get() = topo };
 }
 
 /// Liga o mecanismo de chamadas de sistema no primeiro núcleo.
@@ -124,10 +147,40 @@ pub unsafe fn init() {
         "usuario",
         "o contador de ciclos fora do anel 3: CR4.TSD ligado, CR4.PCE desligado"
     );
+    crate::log_info!(
+        "usuario",
+        "o ponto flutuante e o SIMD fora do anel 3: CR0.TS e CR0.MP ligados, e nunca desligados"
+    );
+    if let Some(r) = super::regime_do_firmware() {
+        crate::log_info!(
+            "usuario",
+            "o regime que o firmware deixou: CR0 {:#x}, CR4 {:#x}, DR7 {:#x}, SYSENTER_CS {:#x}, \
+             SYSENTER_ESP {:#x}, SYSENTER_EIP {:#x}",
+            r.cr0,
+            r.cr4,
+            r.dr7,
+            r.sysenter_cs,
+            r.sysenter_esp,
+            r.sysenter_eip
+        );
+    }
+    let r = super::ler_o_regime_deste_nucleo();
+    crate::log_info!(
+        "usuario",
+        "o regime do kernel: CR0 {:#x}, CR4 {:#x}, DR7 {:#x}, SYSENTER_CS {:#x}, SYSENTER_ESP \
+         {:#x}, SYSENTER_EIP {:#x}",
+        r.cr0,
+        r.cr4,
+        r.dr7,
+        r.sysenter_cs,
+        r.sysenter_esp,
+        r.sysenter_eip
+    );
 }
 
-/// Liga o mecanismo de chamadas de sistema **neste** núcleo, e tira dele o
-/// contador de ciclos do anel 3 (ver
+/// Liga o mecanismo de chamadas de sistema **neste** núcleo, escreve o
+/// regime dele (ver [`super::escrever_o_regime_deste_nucleo`]) e tira dele
+/// o contador de ciclos do anel 3 (ver
 /// [`super::fechar_os_contadores_ao_usuario`]).
 ///
 /// Os registradores de modelo abaixo são do núcleo, não do sistema: cada
@@ -138,8 +191,11 @@ pub unsafe fn init() {
 ///
 /// Exige a GDT já carregada neste núcleo, com o TSS dele em `TR`.
 pub unsafe fn ligar_neste_nucleo() {
-    // Antes do primeiro processo que este núcleo rodar: o anel 3 nunca vê o
-    // contador.
+    // Antes do primeiro processo que este núcleo rodar: o regime dele — o
+    // ponto flutuante preso, o `CR4` do kernel, nenhum ponto de parada, o
+    // `sysenter` sem entrada (ver `escrever_o_regime_deste_nucleo`) —, e o
+    // anel 3 nunca vê o contador.
+    super::escrever_o_regime_deste_nucleo();
     super::fechar_os_contadores_ao_usuario();
     let sel = gdt::seletores();
     let por_nucleo = &POR_NUCLEO.0[gdt::nucleo_atual()] as *const PorNucleo as u64;
@@ -518,10 +574,11 @@ fn janela_de_interrupcoes() {
 ///
 /// # Safety
 ///
-/// `entrada` e `pilha` precisam estar mapeados com permissão de usuário, e a
-/// pilha de kernel do fio atual precisa já ter sido informada por
-/// [`definir_pilha_de_kernel`] — sem isso, a primeira interrupção que chegar
-/// com o usuário rodando não terá para onde empilhar.
+/// `entrada` e `pilha` precisam estar mapeados com permissão de usuário, e o
+/// fio atual precisa ter pilha de kernel própria — a que a troca de
+/// contexto que o pôs neste núcleo informou por [`definir_pilha_de_kernel`]
+/// (o fio inicial, que veio do boot, não tem) —: sem ela, a primeira
+/// interrupção que chegar com o usuário rodando não terá para onde empilhar.
 pub unsafe fn entrar(entrada: u64, pilha: u64) -> ! {
     let sel = gdt::seletores();
 

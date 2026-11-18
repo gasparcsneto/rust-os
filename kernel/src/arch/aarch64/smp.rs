@@ -326,23 +326,27 @@ pub fn partir(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static st
     // firmware logo abaixo — os núcleos acordam um de cada vez.
     unsafe {
         let b = &mut *bloco;
-        let (mair, tcr, sctlr, vbar, cpacr): (u64, u64, u64, u64, u64);
+        let (mair, tcr, vbar): (u64, u64, u64);
         asm!("mrs {}, mair_el1", out(reg) mair, options(nomem, nostack));
         asm!("mrs {}, tcr_el1", out(reg) tcr, options(nomem, nostack));
-        asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
         asm!("mrs {}, vbar_el1", out(reg) vbar, options(nomem, nostack));
-        asm!("mrs {}, cpacr_el1", out(reg) cpacr, options(nomem, nostack));
         // A raiz do **kernel**, e não a ativa: quem está acordando outro
         // núcleo pode estar rodando num processo.
         b.ttbr0 = super::mmu::espaco_do_kernel();
         b.mair = mair;
         b.tcr = tcr;
-        b.sctlr = sctlr;
+        // O `SCTLR_EL1` e o `CPACR_EL1` do kernel, e não os do primeiro
+        // núcleo: o primeiro os tem do kernel também, mas a cópia
+        // dependeria da ordem do boot, e o firmware acorda cada núcleo com
+        // os seus. O `CPACR_EL1` em zero prende o FP/SIMD no EL0 e no EL1
+        // desde a primeira instrução do núcleo — ver
+        // `usuario::escrever_o_regime_deste_nucleo`.
+        b.sctlr = super::mmu::SCTLR_DO_KERNEL;
         b.vbar = vbar;
         b.indice = indice as u64;
         b.pilha_de_excecao = excecao.topo() & !0xF;
         b.pilha = topo & !0xF;
-        b.cpacr = cpacr;
+        b.cpacr = super::usuario::CPACR_DO_KERNEL;
         let entrada: extern "C" fn(u64) -> ! = entrada_secundaria;
         b.entrada = entrada as *const () as u64;
     }
@@ -374,8 +378,10 @@ pub fn partir(indice: usize, hardware: u64, topo: u64) -> Result<(), &'static st
 /// Chega aqui com a MMU ligada, os vetores instalados, `TPIDR_EL1` com o
 /// índice e a pilha do fio ocioso, IRQs mascaradas.
 extern "C" fn entrada_secundaria(indice: u64) -> ! {
-    // Os contadores fora do EL0 antes do primeiro processo deste núcleo: os
-    // registradores são do núcleo, e o firmware o acorda com os dele.
+    // O regime e os contadores fora do EL0 antes do primeiro processo deste
+    // núcleo: os registradores são do núcleo, e o firmware o acorda com os
+    // dele.
+    super::usuario::escrever_o_regime_deste_nucleo();
     super::usuario::fechar_os_contadores_neste_nucleo();
     // SAFETY: estamos no núcleo que acabou de acordar, mascarado, com a
     // tabela de vetores instalada pelo bloco de partida.

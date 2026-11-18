@@ -215,17 +215,16 @@ pub fn reservar_paginas_baixas(mut reservar: impl FnMut(u64, u64)) {
 }
 
 /// O que um núcleo novo copia do primeiro, porque não tem como descobrir
-/// sozinho.
+/// sozinho. O `CR4` não: o núcleo novo escreve o do kernel
+/// ([`super::cr4_do_kernel`]), e não o que o firmware deixou no primeiro.
 struct Molde {
     cr0: AtomicU64,
-    cr4: AtomicU64,
     pat: AtomicU64,
     xcr0: AtomicU64,
 }
 
 static MOLDE: Molde = Molde {
     cr0: AtomicU64::new(0),
-    cr4: AtomicU64::new(0),
     pat: AtomicU64::new(0),
     xcr0: AtomicU64::new(0),
 };
@@ -237,15 +236,17 @@ const CR4_OSXSAVE: u64 = 1 << 18;
 
 /// Fotografa os registradores de controle do primeiro núcleo.
 ///
-/// O `CR0` e o `CR4` dizem o regime em que o kernel roda: proteção de escrita
-/// no anel zero, SMEP, SSE habilitado. Um núcleo que acordasse com os valores
-/// de reset seria um núcleo com proteções a menos — e o primeiro processo
-/// que rodasse nele usaria SSE e morreria de `#UD`.
+/// O `CR0` diz o regime em que o kernel roda: a proteção de escrita no anel
+/// zero, e o ponto flutuante preso pelo `TS` (ver
+/// `escrever_o_regime_deste_nucleo`, que cada núcleo também roda ao
+/// acordar). Um núcleo que acordasse com os valores de reset seria um
+/// núcleo com proteções a menos. O `XCR0` é o que o firmware escolheu para o
+/// `xsave`, com o `OSXSAVE` do `CR4`. O `CR4` mesmo não se copia: o núcleo
+/// novo escreve o do kernel.
 fn fotografar() {
     use x86_64::registers::control::{Cr0, Cr4};
     let cr4 = Cr4::read_raw();
     MOLDE.cr0.store(Cr0::read_raw(), Ordering::Relaxed);
-    MOLDE.cr4.store(cr4, Ordering::Relaxed);
     // SAFETY: o PAT existe em todo x86_64.
     let pat = unsafe { x86_64::registers::model_specific::Msr::new(IA32_PAT).read() };
     MOLDE.pat.store(pat, Ordering::Relaxed);
@@ -378,23 +379,28 @@ extern "sysv64" fn entrada_secundaria(indice: u64) -> ! {
 
     // SAFETY: a raiz do kernel tem as mesmas entradas de topo da provisória
     // em toda a metade alta — onde estamos executando, com a pilha do ocioso
-    // —, então trocar não muda nenhuma tradução em uso. Os registradores de
-    // controle repetem os do primeiro núcleo, que é o regime em que todo o
+    // —, então trocar não muda nenhuma tradução em uso. O `CR4` é o do
+    // kernel, e o `CR0` repete o do primeiro núcleo: o regime em que todo o
     // kernel foi escrito para rodar.
     unsafe {
         paginacao::trocar_espaco(paginacao::espaco_do_kernel());
-        Cr4::write_raw(MOLDE.cr4.load(Ordering::Relaxed));
+        let cr4 = super::cr4_do_kernel();
+        Cr4::write_raw(cr4);
         let xcr0 = MOLDE.xcr0.load(Ordering::Relaxed);
-        if MOLDE.cr4.load(Ordering::Relaxed) & CR4_OSXSAVE != 0 && xcr0 != 0 {
+        if cr4 & CR4_OSXSAVE != 0 && xcr0 != 0 {
             core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") xcr0 as u32,
                 in("edx") (xcr0 >> 32) as u32, options(nomem, nostack, preserves_flags));
         }
+        // O x87 num estado conhecido — o INIT não o deixa em estado nenhum
+        // que se possa afirmar —, **antes** do `CR0` do primeiro núcleo: com
+        // o `TS` dele, o `fninit` seria `#NM` no anel 0, antes de haver IDT
+        // neste núcleo, e o núcleo daria falha tripla. É a última instrução
+        // de ponto flutuante que o kernel executa: depois do `TS`, nenhuma
+        // (`xtask::conferir_sem_simd` só a aceita aqui).
+        core::arch::asm!("fninit", options(nomem, nostack));
         Cr0::write_raw(MOLDE.cr0.load(Ordering::Relaxed));
         x86_64::registers::model_specific::Msr::new(IA32_PAT)
             .write(MOLDE.pat.load(Ordering::Relaxed));
-        // O x87 num estado conhecido. O INIT não o deixa em estado
-        // nenhum que se possa afirmar.
-        core::arch::asm!("fninit", options(nomem, nostack));
 
         gdt::init_secundario(indice);
     }

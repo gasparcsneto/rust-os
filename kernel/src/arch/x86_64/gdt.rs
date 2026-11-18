@@ -83,10 +83,21 @@ pub const IST_NMI: u16 = 1;
 /// continua na pilha de kernel do fio (ver `idt::depuracao`).
 pub const IST_DEPURACAO: u16 = 2;
 
+/// Índice, dentro da IST, da pilha reservada ao `#MC`.
+///
+/// # Por que o `#MC` não divide a do `#DF`
+///
+/// Os dois são sempre fatais e não voltam, e por isso dividiam a pilha. Mas
+/// um pode chegar no meio do post-mortem do outro: um `#MC` enquanto o
+/// relatório de um `#DF` corre — ou o contrário —, e a pilha da IST
+/// recomeça no topo, por cima do quadro e do relatório em curso, que
+/// sumiam (o item 6 do adversário do lote B2 do #448). Com uma pilha cada,
+/// o segundo relata por cima do primeiro, sem apagá-lo.
+pub const IST_VERIFICACAO_DA_MAQUINA: u16 = 3;
+
 /// 20 KiB. Não precisa ser grande: quem roda nela é um tratador curto — o
-/// que registra a falha e entra em post-mortem, o aviso da NMI, ou a
-/// anotação da morte de um processo pelo `#DB`, antes de passar à pilha do
-/// fio.
+/// que registra a falha e entra em post-mortem, o aviso da NMI, ou o passo
+/// do `#DB`, que volta ou passa à pilha do fio.
 const TAM_PILHA: usize = 4096 * 5;
 
 /// Uma pilha da IST.
@@ -114,6 +125,10 @@ static PILHAS_NMI: [PilhaEmergencia; MAX_NUCLEOS] =
 
 /// As pilhas do `#DB`, uma por núcleo.
 static PILHAS_DEPURACAO: [PilhaEmergencia; MAX_NUCLEOS] =
+    [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
+
+/// As pilhas do `#MC`, uma por núcleo.
+static PILHAS_VERIFICACAO_DA_MAQUINA: [PilhaEmergencia; MAX_NUCLEOS] =
     [const { PilhaEmergencia(UnsafeCell::new([0; TAM_PILHA])) }; MAX_NUCLEOS];
 
 /// Um TSS, num `UnsafeCell` porque `privilege_stack_table[0]` precisa mudar.
@@ -156,7 +171,41 @@ pub struct Seletores {
 
 /// Quantos descritores cabem: os seis segmentos, e dois por TSS — um
 /// descritor de sistema em 64 bits ocupa duas entradas.
+#[cfg(not(feature = "modo-teste"))]
 const ENTRADAS_DA_GDT: usize = 6 + 2 * MAX_NUCLEOS;
+
+/// Na suíte, mais duas: o descritor do LDT de teste — ver
+/// [`carregar_o_ldt_de_teste`]. Depois dos TSS, que não mudam de lugar.
+#[cfg(feature = "modo-teste")]
+const ENTRADAS_DA_GDT: usize = 6 + 2 * MAX_NUCLEOS + 2;
+
+/// Só para a suíte: a base do LDT de teste — um endereço canônico sem
+/// página em espaço nenhum, nem no do kernel, nem no de um processo (o
+/// usuário começa em 4 GiB). O descritor do seletor 0x0F estaria em
+/// `BASE_DO_LDT_DE_TESTE + 8`.
+#[cfg(feature = "modo-teste")]
+pub const BASE_DO_LDT_DE_TESTE: u64 = 0xDEAD_0000;
+
+/// Só para a suíte: o seletor do descritor do LDT de teste, ou zero antes de
+/// a GDT existir.
+#[cfg(feature = "modo-teste")]
+static SELETOR_DO_LDT_DE_TESTE: AtomicU16 = AtomicU16::new(0);
+
+/// O descritor de sistema de um LDT de `base` e `limite`, presente, de DPL
+/// 0, nas duas palavras que ele ocupa em 64 bits (SDM 3.5 e 7.2.3): na
+/// primeira, o limite, a base até o bit 31, o tipo 2 — o LDT — e o `P`; na
+/// segunda, a base de cima.
+#[cfg(feature = "modo-teste")]
+const fn descritor_de_ldt(base: u64, limite: u32) -> (u64, u64) {
+    let limite = limite as u64;
+    let baixo = (limite & 0xFFFF)
+        | ((base & 0xFF_FFFF) << 16)
+        | (0x2 << 40)
+        | (1 << 47)
+        | (((limite >> 16) & 0xF) << 48)
+        | (((base >> 24) & 0xFF) << 56);
+    (baixo, base >> 32)
+}
 
 static GDT: Once<(GlobalDescriptorTable<ENTRADAS_DA_GDT>, Seletores)> = Once::new();
 
@@ -256,9 +305,19 @@ pub fn init() {
                     topo(&PILHAS_DOUBLE_FAULT[i]);
                 tss.interrupt_stack_table[IST_NMI as usize] = topo(&PILHAS_NMI[i]);
                 tss.interrupt_stack_table[IST_DEPURACAO as usize] = topo(&PILHAS_DEPURACAO[i]);
+                tss.interrupt_stack_table[IST_VERIFICACAO_DA_MAQUINA as usize] =
+                    topo(&PILHAS_VERIFICACAO_DA_MAQUINA[i]);
                 &*TSSS[i].0.get()
             };
             *seletor = gdt.append(Descriptor::tss_segment(referencia));
+        }
+
+        // Na suíte, o descritor do LDT de teste, depois dos TSS.
+        #[cfg(feature = "modo-teste")]
+        {
+            let (baixo, alto) = descritor_de_ldt(BASE_DO_LDT_DE_TESTE, 0xFFFF);
+            let seletor = gdt.append(Descriptor::SystemSegment(baixo, alto));
+            SELETOR_DO_LDT_DE_TESTE.store(seletor.0, Ordering::Relaxed);
         }
 
         (
@@ -347,6 +406,21 @@ fn carregar(
 
         load_tss(*seletor_tss);
     }
+
+    // E o LDT nulo, em todo núcleo — o primeiro, por [`init`], e cada um que
+    // acorda, por [`init_secundario`]. O processador sai do reset — e cada
+    // secundário, do INIT da partida (`smp`) — com o `LDTR` **válido**, de
+    // base 0 e limite 0xFFFF (SDM, tabela 9-1), e nem o firmware, nem o
+    // iniciador, nem o trampolim carregam outro. Um seletor com o TI ligado
+    // vindo de um processo — o `mov ds` com 0x0F, e também o `mov ss`, o
+    // `lsl`, o `lar`, o `verr`, o `retf` — fazia o processador ler o
+    // descritor no endereço 0x8 **do processo**, num acesso de supervisor:
+    // ali não há página, e a falha de página sem o `U` era tomada por do
+    // kernel — `FALHA FATAL page_fault`, `endereco acusado: 0x8`, num `pc`
+    // do processo (o achado 1 do adversário do lote B2 do #448). Com o LDT
+    // nulo, o `mov` é `#GP` com o seletor no código, e o processo morre dele;
+    // o `lsl` só apaga o `ZF`.
+    carregar_o_ldt_nulo();
 }
 
 /// O `RSP0` do TSS deste núcleo: o topo da pilha de kernel do fio que ele
@@ -366,27 +440,136 @@ pub fn pilha_de_kernel_deste_nucleo() -> u64 {
     unsafe { (*TSSS[nucleo_atual()].0.get()).privilege_stack_table[0].as_u64() }
 }
 
-/// Aponta o `RSP0` do TSS para o topo da pilha de kernel do fio atual.
+/// Só para a suíte: o topo da pilha da IST de índice `indice` — contado de
+/// 0, como em [`IST_VERIFICACAO_DA_MAQUINA`] — no TSS do núcleo `nucleo`.
+#[cfg(feature = "modo-teste")]
+pub fn topo_da_ist_de_teste(nucleo: usize, indice: usize) -> u64 {
+    TSSS.get(nucleo).map_or(0, |tss| {
+        // SAFETY: cópia da tabela da IST do TSS, que só muda no `RSP0` — por
+        // valor: o TSS é empacotado, e uma referência ao campo não se alinha.
+        let tabela = unsafe { (*tss.0.get()).interrupt_stack_table };
+        tabela.get(indice).map_or(0, |t| t.as_u64())
+    })
+}
+
+/// Aponta o `RSP0` do TSS do núcleo `nucleo` — o deste, lido uma vez só
+/// por quem chama — para o topo da pilha de kernel do fio que ele vai rodar.
 ///
 /// É o endereço que o processador adota sozinho quando uma interrupção chega
 /// com o código do usuário rodando. Precisa acompanhar a troca de contexto:
 /// apontar para a pilha de outro fio faria dois fios empilharem quadros de
 /// exceção no mesmo lugar.
 ///
+/// Só com as interrupções mascaradas: entre a leitura do núcleo e a escrita,
+/// um fio solto pode ser preemptado e ir para outro núcleo, e a escrita
+/// poria a pilha dele no `RSP0` do núcleo de antes — o fio que roda lá
+/// empilharia as interrupções do anel 3 na pilha deste, que roda noutro (o
+/// item 4 do adversário do lote B2 do #448). O único chamador é a troca de
+/// contexto (`contexto::ceder_cpu`), mascarada; o `debug_assert!` faz
+/// qualquer outro reprovar a suíte de depuração.
+///
 /// Um valor zero é ignorado, e é o caso do fio inicial — a pilha dele veio do
 /// boot e ele não executa código de usuário.
-pub fn definir_pilha_de_kernel(topo: u64) {
+pub fn definir_pilha_de_kernel(nucleo: usize, topo: u64) {
+    debug_assert!(
+        !x86_64::instructions::interrupts::are_enabled(),
+        "o RSP0 escrito com as interrupcoes ligadas"
+    );
     if topo == 0 || GDT.get().is_none() {
         return;
     }
-    let tss = &TSSS[nucleo_atual()];
+    let tss = &TSSS[nucleo];
 
     // SAFETY: escrevemos um único campo do TSS **deste** núcleo, com as
-    // interrupções mascaradas pelo chamador (a troca de contexto). O
-    // processador só lê este campo ao entregar uma interrupção a este
-    // núcleo, o que não pode acontecer aqui dentro; e nenhum outro núcleo
-    // escreve no TSS de outro.
+    // interrupções mascaradas pelo chamador (a troca de contexto) — o
+    // núcleo lido não muda até a escrita. O processador só lê este campo ao
+    // entregar uma interrupção a este núcleo, o que não pode acontecer aqui
+    // dentro; e nenhum outro núcleo escreve no TSS de outro.
     unsafe {
         (*tss.0.get()).privilege_stack_table[0] = VirtAddr::new(topo);
+    }
+}
+
+/// Carrega o LDT nulo neste núcleo: o seletor zero no `LDTR`, que o marca
+/// inválido. Um seletor com o TI ligado passa a ser `#GP`, com o seletor no
+/// código.
+fn carregar_o_ldt_nulo() {
+    // SAFETY: estamos no anel 0; o seletor nulo não lê a GDT, e o `LDTR`
+    // inválido só torna o processador mais estrito — nada deste kernel usa
+    // um seletor do LDT.
+    unsafe {
+        core::arch::asm!(
+            "lldt {0:x}",
+            in(reg) 0u16,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
+
+/// Só para a suíte: carrega neste núcleo o LDT de teste — base em
+/// [`BASE_DO_LDT_DE_TESTE`], sem página, limite 0xFFFF —, como o `LDTR` que
+/// o processador traz do reset, de base 0, mas num endereço que nenhum
+/// espaço mapeia. O seletor 0x0F de um processo, no `mov ds`, faz o
+/// processador ler o descritor em `BASE_DO_LDT_DE_TESTE + 8`, num acesso de
+/// supervisor, e a falha de página vem sem o `U`: é a culpa pelo `CS` do
+/// quadro que mata o processo, e não o código de erro. O núcleo fica com o
+/// LDT de teste até [`largar_o_ldt_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn carregar_o_ldt_de_teste() {
+    let seletor = SELETOR_DO_LDT_DE_TESTE.load(Ordering::Relaxed);
+    if seletor == 0 {
+        return;
+    }
+    // SAFETY: estamos no anel 0, e o seletor é o de um descritor de LDT
+    // presente da GDT carregada — o processador o lê dela. Nenhum código do
+    // kernel usa um seletor do LDT.
+    unsafe {
+        core::arch::asm!(
+            "lldt {0:x}",
+            in(reg) seletor,
+            options(readonly, nostack, preserves_flags)
+        )
+    };
+}
+
+/// Só para a suíte: devolve este núcleo ao LDT nulo, depois de
+/// [`carregar_o_ldt_de_teste`].
+#[cfg(feature = "modo-teste")]
+pub fn largar_o_ldt_de_teste() {
+    carregar_o_ldt_nulo();
+}
+
+/// Só para a suíte: marca ausente (`P` desligado), ou presente de novo, o
+/// descritor da base do `sysret` — o da posição logo antes dos dados do
+/// usuário, que nada carrega: o `sysretq` de 64 bits parte dele e carrega os
+/// dois seguintes (ver [`init`]). É de dados do usuário, de DPL 3: o `mov
+/// ds` do seletor dele (0x1B) é `#NP`, e o `mov ss`, `#SS`, os dois com o
+/// seletor no código — o grupo com código de erro alcançado do anel 3, que
+/// o emulador não alcança de outro jeito. Devolve o descritor de antes.
+///
+/// A GDT é uma só, de todos os núcleos; o descritor só vale quando um
+/// seletor é carregado, e ninguém carrega este.
+#[cfg(feature = "modo-teste")]
+pub fn marcar_a_base_do_sysret_de_teste(ausente: bool) -> u64 {
+    const PRESENTE: u64 = 1 << 47;
+    let indice = seletores().dados_usuario.index() as u64 - 1;
+    let tabela = x86_64::instructions::tables::sgdt();
+    if indice * 8 + 7 > u64::from(tabela.limit) {
+        return 0;
+    }
+    let entrada = (tabela.base.as_u64() + indice * 8) as *mut u64;
+    // SAFETY: a entrada está dentro do limite da GDT carregada, que mora
+    // numa seção gravável (o `Once` tem mutabilidade interior); nenhum
+    // código Rust lê esta entrada, e o processador só a lê na carga do
+    // seletor dela, que nada faz.
+    unsafe {
+        let antes = core::ptr::read_volatile(entrada);
+        let depois = if ausente {
+            antes & !PRESENTE
+        } else {
+            antes | PRESENTE
+        };
+        core::ptr::write_volatile(entrada, depois);
+        antes
     }
 }

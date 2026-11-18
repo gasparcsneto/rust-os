@@ -42017,6 +42017,84 @@ static CASOS: &[Caso] = &[
         nome: "consoles: sem ninguem, a senha com algo na linha e a mesma recusa da senha sozinha",
         f: consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa,
     },
+    // O lote B3 do #448, no fim da tabela pelo mesmo motivo: o que o
+    // adversário do lote B2 achou — o LDT do reset, o FP/SIMD entre
+    // processos, o passo do `mov ss`, o segmento ausente, o estado que o
+    // kernel herda do firmware e o despertar do coletor.
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o seletor do LDT do anel 3 mata o processo pelo #GP, e a maquina segue",
+        f: excecoes::excecoes_o_seletor_do_ldt_mata_o_processo_pelo_gp,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o lsl de um seletor do LDT nao falha, e o processo sai",
+        f: excecoes::excecoes_o_lsl_de_um_seletor_do_ldt_nao_falha,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: a falha de pagina de um acesso do supervisor pedido pelo anel 3 mata o processo",
+        f: excecoes::excecoes_a_falha_de_pagina_do_supervisor_pelo_anel_3_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o SSE do anel 3 cai no #NM, e o xmm0 de um processo nao chega ao seguinte",
+        f: excecoes::excecoes_o_sse_do_anel_3_cai_no_nm_e_nao_passa_ao_seguinte,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o x87 do anel 3 cai no #NM",
+        f: excecoes::excecoes_o_x87_do_anel_3_cai_no_nm,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o passo no anel 0 volta sem o TF, e a conta anda",
+        f: excecoes::excecoes_o_passo_no_anel_0_volta_sem_o_tf,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o passo adiado pelo mov ss mata o processo, e a maquina segue",
+        f: excecoes::excecoes_o_passo_adiado_pelo_mov_ss_mata_o_processo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o segmento ausente do anel 3 mata o processo pelo #NP",
+        f: excecoes::excecoes_o_segmento_ausente_mata_o_processo_pelo_np,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: a pilha ausente do anel 3 mata o processo pelo #SS",
+        f: excecoes::excecoes_a_pilha_ausente_mata_o_processo_pelo_ss,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o sysenter do anel 3 mata o processo",
+        f: excecoes::excecoes_o_sysenter_do_anel_3_mata_o_processo,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o FP/SIMD do EL0 cai na classe 0x07, e o d0 de um processo nao chega ao seguinte",
+        f: excecoes::excecoes_o_fp_simd_do_el0_cai_na_classe_7_e_nao_passa_ao_seguinte,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o msr daif do EL0 mata o processo, e o nucleo nao fica mascarado",
+        f: excecoes::excecoes_o_msr_daif_do_el0_mata_o_processo,
+    },
+    Caso {
+        nome: "excecoes: em cada nucleo, o regime esta como o kernel o escreve, tambem depois de sujo",
+        f: excecoes::excecoes_o_regime_de_cada_nucleo,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Caso {
+        nome: "excecoes: o #MC tem pilha da IST propria em cada nucleo, separada da do #DF",
+        f: excecoes::excecoes_o_mc_tem_pilha_propria,
+    },
+    #[cfg(target_arch = "aarch64")]
+    Caso {
+        nome: "excecoes: o wfi do EL0 mata o processo",
+        f: excecoes::excecoes_o_wfi_do_el0_mata_o_processo,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

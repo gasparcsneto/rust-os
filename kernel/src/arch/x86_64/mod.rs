@@ -23,7 +23,7 @@ pub mod usuario;
 pub use contexto::{
     Contexto, ceder_cpu, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
 };
-pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as init_usuario};
+pub use usuario::{entrar as entrar_em_usuario, init as init_usuario};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -112,6 +112,10 @@ pub unsafe extern "sysv64" fn _start(entrega: *const protocolo::Entrega) -> ! {
     // partir daqui seria uma tela preta sem diagnóstico — e aqui isso é
     // literal: o iniciador acabou de se despedir pela mesma porta.
     let canal = crate::serial::init();
+
+    // O regime que o firmware deixou, antes de o kernel escrever um
+    // registrador de controle — só para o log do boot.
+    REGIME_DO_FIRMWARE.call_once(ler_o_regime_deste_nucleo);
 
     // SAFETY: o ponteiro é o que o iniciador entregou. A conferência abaixo é
     // o que separa "um ponteiro" de "a entrega": sem ela, um iniciador de
@@ -469,6 +473,38 @@ pub fn sujar_e_fechar_os_contadores_de_teste() -> ((bool, bool), (bool, bool)) {
     })
 }
 
+/// Só para a suíte: o próprio kernel liga o `TF` no anel 0, com as
+/// interrupções mascaradas — `pushfq`, o `TF` no topo, `popfq` —, e roda
+/// dois `nop`: o `#DB` do passo chega depois do primeiro, no anel 0, com o
+/// `BS` no `DR6`, como o do passo que o `mov ss` de um processo adia até
+/// depois da `syscall`. O tratador apaga o `TF` do quadro e volta — ver
+/// `idt::depuracao`. Devolve o `RFLAGS` lido depois do segundo `nop`: sem o
+/// `TF`, se o tratador o apagou. Sem o conserto, o `#DB` do anel 0 é fatal,
+/// e a suíte acaba aqui.
+#[cfg(feature = "modo-teste")]
+pub fn passo_no_anel_0_de_teste() -> u64 {
+    sem_interrupcoes(|| {
+        let flags: u64;
+        // SAFETY: só as flags mudam: o `TF` ligado pelo `popfq`, que o
+        // tratador do `#DB` apaga do quadro depois do primeiro `nop`, e o
+        // `RFLAGS` lido de volta. A pilha é a deste fio, e o que se empilha
+        // aqui se desempilha aqui; as interrupções seguem mascaradas.
+        unsafe {
+            core::arch::asm!(
+                "pushfq",
+                "or qword ptr [rsp], 0x100",
+                "popfq",
+                "nop",
+                "nop",
+                "pushfq",
+                "pop {flags}",
+                flags = out(reg) flags,
+            );
+        }
+        flags
+    })
+}
+
 /// Só para a suíte: o `CR4.TSD` e o `CR4.PCE` deste núcleo — ver
 /// [`fechar_os_contadores_ao_usuario`].
 #[cfg(feature = "modo-teste")]
@@ -479,6 +515,277 @@ pub fn contadores_do_usuario() -> (bool, bool) {
         cr4.contains(Cr4Flags::TIMESTAMP_DISABLE),
         cr4.contains(Cr4Flags::PERFORMANCE_MONITOR_COUNTER),
     )
+}
+
+// ---------------------------------------------------------------------------
+// O regime de cada núcleo: o que o firmware deixa, e o que o kernel escreve
+// ---------------------------------------------------------------------------
+
+/// O estado de controle de um núcleo que vale para todo processo que roda
+/// nele, e que o kernel escreve em vez de herdar — ver
+/// [`escrever_o_regime_deste_nucleo`]: o `CR0`, o `CR4`, o `DR7` e os três
+/// registradores do `sysenter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Regime {
+    pub cr0: u64,
+    pub cr4: u64,
+    pub dr7: u64,
+    pub sysenter_cs: u64,
+    pub sysenter_esp: u64,
+    pub sysenter_eip: u64,
+}
+
+/// Os registradores de modelo do `sysenter`: o seletor de código do anel 0
+/// por onde ele entra, a pilha e o endereço.
+const IA32_SYSENTER_CS: u32 = 0x174;
+const IA32_SYSENTER_ESP: u32 = 0x175;
+const IA32_SYSENTER_EIP: u32 = 0x176;
+
+/// O regime deste núcleo, como está agora.
+pub fn ler_o_regime_deste_nucleo() -> Regime {
+    use x86_64::registers::control::{Cr0, Cr4};
+    use x86_64::registers::model_specific::Msr;
+    let dr7: u64;
+    // SAFETY: estamos no anel 0; ler o `DR7` e os três registradores do
+    // `sysenter`, que existem em todo x86_64, não muda nada.
+    let (cs, esp, eip) = unsafe {
+        core::arch::asm!("mov {}, dr7", out(reg) dr7, options(nomem, nostack, preserves_flags));
+        (
+            Msr::new(IA32_SYSENTER_CS).read(),
+            Msr::new(IA32_SYSENTER_ESP).read(),
+            Msr::new(IA32_SYSENTER_EIP).read(),
+        )
+    };
+    Regime {
+        cr0: Cr0::read_raw(),
+        cr4: Cr4::read_raw(),
+        dr7,
+        sysenter_cs: cs,
+        sysenter_esp: esp,
+        sysenter_eip: eip,
+    }
+}
+
+/// O regime que o primeiro núcleo trouxe do firmware — e do iniciador, que
+/// não toca nele —, lido na primeira instrução Rust ([`_start`]), antes de o
+/// kernel escrever qualquer registrador de controle. Só para o log do boot
+/// ([`usuario::init`]): o que o OVMF deixa, numa máquina, é o que esta linha
+/// diz.
+static REGIME_DO_FIRMWARE: spin::Once<Regime> = spin::Once::new();
+
+/// O regime que o primeiro núcleo trouxe do firmware — ver
+/// [`REGIME_DO_FIRMWARE`].
+pub fn regime_do_firmware() -> Option<Regime> {
+    REGIME_DO_FIRMWARE.get().copied()
+}
+
+/// O `DR7` em repouso: nenhum ponto de parada armado, e o bit 10, reservado,
+/// ligado.
+const DR7_EM_REPOUSO: u64 = 0x400;
+
+/// O `DR6` em repouso — ver `idt::depuracao`.
+const DR6_EM_REPOUSO: u64 = 0xFFFF_0FF0;
+
+/// O `CR4` que o kernel quer, bit por bit, e não o que o firmware deixou: o
+/// primeiro núcleo o escreve inteiro ([`escrever_o_regime_deste_nucleo`]),
+/// e cada um que acorda também (`smp::entrada_secundaria`), em vez de
+/// copiar o do primeiro.
+///
+/// - **`PAE`**: o modo longo o exige.
+/// - **`LA57`**: o que já está — ele não muda no modo longo, e o iniciador
+///   monta tabelas de quatro níveis.
+/// - **`TSD`** ligado e **`PCE`** desligado: o contador de ciclos e os de
+///   desempenho fora do anel 3 (o #451; ver
+///   [`fechar_os_contadores_ao_usuario`]).
+/// - **`OSFXSR`**: para que o SSE de um processo seja o `#NM` do `CR0.TS`,
+///   como o x87 — sem ele, seria `#UD` antes —; o kernel é *soft-float* e
+///   não o usa. O **`OSXMMEXCPT`**, como o OVMF o deixa: ele só escolhe
+///   entre o `#XM` e o `#UD` de uma exceção de SIMD desmascarada,
+///   inalcançável com o `TS`. E o **`OSXSAVE`**, se o processador tem o
+///   `xsave`: o `XCR0` que o firmware escolheu, e que os secundários
+///   copiam, continua valendo para o `#NM` do AVX.
+/// - **`DE`**, se o processador o tem: o `DR4` e o `DR5` deixam de ser
+///   apelidos do `DR6` e do `DR7` — mais estrito, e o OVMF já o liga.
+/// - **`MCE`**, se o processador o tem: sem ele, uma verificação da máquina
+///   desliga o processador, em vez de chegar ao tratador do `#MC`.
+/// - **`SMEP`**, se o processador o tem: o anel 0 não executa página de
+///   usuário (ver [`exigir_que_o_kernel_nao_execute_pagina_de_usuario`]).
+///
+/// E nada mais, desligado de propósito. Entre os que um firmware poderia ter
+/// deixado: o **`FSGSBASE`**, que daria ao anel 3 o `wrfsbase` e o
+/// `wrgsbase` — a base do `FS` e do `GS`, que o kernel não guarda por
+/// processo, seria outro registrador passado de um processo ao seguinte no
+/// mesmo núcleo —, o **`PKE`**, pelo mesmo motivo com o `PKRU`, o **`SMAP`**
+/// e o **`CET`**, que o kernel não sabe atender, o **`PCIDE`**, o **`PGE`**
+/// — nenhuma página do kernel é global —, o **`UMIP`**, o **`VME`** e o
+/// **`PVI`**. O OVMF deixa `DE`, `PAE`, `MCE`, `OSFXSR` e `OSXMMEXCPT`
+/// (0x668, no log do boot).
+pub(super) fn cr4_do_kernel() -> u64 {
+    use x86_64::registers::control::{Cr4, Cr4Flags};
+    let um = core::arch::x86_64::__cpuid(1);
+    let sete = if core::arch::x86_64::__cpuid(0).eax >= 7 {
+        core::arch::x86_64::__cpuid_count(7, 0).ebx
+    } else {
+        0
+    };
+    let mut cr4 = Cr4Flags::PHYSICAL_ADDRESS_EXTENSION
+        | Cr4Flags::TIMESTAMP_DISABLE
+        | Cr4Flags::OSFXSR
+        | Cr4Flags::OSXMMEXCPT_ENABLE;
+    // O `LA57` não muda no modo longo: o que está.
+    cr4 |= Cr4::read() & Cr4Flags::L5_PAGING;
+    for (tem, bit) in [
+        (um.edx & (1 << 2) != 0, Cr4Flags::DEBUGGING_EXTENSIONS),
+        (um.edx & (1 << 7) != 0, Cr4Flags::MACHINE_CHECK_EXCEPTION),
+        (um.ecx & (1 << 26) != 0, Cr4Flags::OSXSAVE),
+        (
+            sete & (1 << 7) != 0,
+            Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION,
+        ),
+    ] {
+        if tem {
+            cr4 |= bit;
+        }
+    }
+    cr4.bits()
+}
+
+/// Escreve o regime deste núcleo: o que vale para todo processo que roda
+/// nele, e que o kernel não herda do firmware. Chamada por
+/// [`usuario::ligar_neste_nucleo`], no primeiro núcleo e em cada um que
+/// acorda, antes do primeiro processo dele. Devolve o regime escrito.
+///
+/// - **O `CR0.TS` e o `CR0.MP` ligados, e nunca desligados** — nenhum `clts`
+///   no kernel —, e o `CR0.EM` desligado: toda instrução de um processo que
+///   toca o estado do x87, do MMX, do SSE ou do AVX é `#NM` — o AVX sem o
+///   `OSXSAVE` é `#UD` antes —, e o processo morre dela
+///   (`idt::dispositivo_indisponivel`); o `MP` põe o `wait` junto. O kernel
+///   não salvava nem zerava o estado de ponto flutuante de um processo para
+///   o outro, e o `xmm0` que um deixava chegava ao seguinte no mesmo núcleo
+///   — um canal entre titulares, por fora do gate, da auditoria e do NSF (o
+///   achado 2 do adversário do lote B2 do #448). Os alvos dos programas e do
+///   kernel são *soft-float* (o DS-2), e nenhum programa do contrato usa
+///   ponto flutuante: o código de fora dele passa de uma corrupção calada a
+///   uma falha dita. Salvar e restaurar o estado, e liberá-lo aos programas,
+///   é a R12-SIMD (`docs/DECISOES.md`), que continua aberta.
+/// - **O `CR4`**: o de [`cr4_do_kernel`], inteiro.
+/// - **O `DR7` e o `DR6` em repouso** (0x400 e 0xFFFF_0FF0: nenhum ponto
+///   armado, nenhuma causa), e os quatro pontos zerados: um ponto de parada
+///   que o firmware deixasse armado daria um `#DB` no anel 0, que é fatal.
+/// - **Os três registradores do `sysenter` em zero**, se o processador tem
+///   o `sysenter`: num Intel, ele existe no modo de 64 bits, e entraria no
+///   anel 0 pelo `IA32_SYSENTER_CS` e pelo `IA32_SYSENTER_EIP` que o
+///   firmware deixasse; com o seletor zero, é `#GP(0)`, e o processo morre
+///   dele. Num AMD, ele é `#UD` no modo longo de qualquer jeito.
+pub(super) fn escrever_o_regime_deste_nucleo() -> Regime {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4};
+    use x86_64::registers::model_specific::Msr;
+    let tem_sysenter = core::arch::x86_64::__cpuid(1).edx & (1 << 11) != 0;
+    // SAFETY: estamos no anel 0, e cada escrita só torna o processador mais
+    // estrito para o anel 3 ou devolve a ele o estado de repouso: o kernel
+    // não executa instrução de ponto flutuante nem de SIMD (o alvo é
+    // *soft-float*, e `xtask::conferir_sem_simd` confere o binário — o
+    // `fninit` do núcleo que acorda vem antes daqui), os bits do `CR4` são
+    // os que o processador declara, os pontos de parada não são do kernel,
+    // e o `sysenter` não é a entrada de chamadas dele.
+    unsafe {
+        Cr0::update(|flags| {
+            flags.insert(Cr0Flags::TASK_SWITCHED | Cr0Flags::MONITOR_COPROCESSOR);
+            flags.remove(Cr0Flags::EMULATE_COPROCESSOR);
+        });
+        Cr4::write_raw(cr4_do_kernel());
+        core::arch::asm!(
+            "mov dr7, {repouso}",
+            "mov dr0, {zero}",
+            "mov dr1, {zero}",
+            "mov dr2, {zero}",
+            "mov dr3, {zero}",
+            "mov dr6, {dr6}",
+            repouso = in(reg) DR7_EM_REPOUSO,
+            zero = in(reg) 0u64,
+            dr6 = in(reg) DR6_EM_REPOUSO,
+            options(nomem, nostack, preserves_flags)
+        );
+        if tem_sysenter {
+            Msr::new(IA32_SYSENTER_CS).write(0);
+            Msr::new(IA32_SYSENTER_ESP).write(0);
+            Msr::new(IA32_SYSENTER_EIP).write(0);
+        }
+    }
+    #[cfg(feature = "modo-teste")]
+    REGIMES[gdt::nucleo_atual()].fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    ler_o_regime_deste_nucleo()
+}
+
+/// Só para a suíte: quantas vezes cada núcleo escreveu o regime
+/// ([`escrever_o_regime_deste_nucleo`]) — o primeiro no boot, cada
+/// secundário ao acordar.
+#[cfg(feature = "modo-teste")]
+static REGIMES: [core::sync::atomic::AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: quantas vezes o núcleo `cpu` escreveu o regime.
+#[cfg(feature = "modo-teste")]
+pub fn regimes_escritos_de_teste(cpu: usize) -> u64 {
+    REGIMES
+        .get(cpu)
+        .map_or(0, |r| r.load(core::sync::atomic::Ordering::SeqCst))
+}
+
+/// Só para a suíte: o regime que o kernel escreve, como o caso o confere —
+/// o `CR0` com o `TS` e o `MP` e sem o `EM`, o `CR4` de [`cr4_do_kernel`],
+/// nenhum ponto de parada armado no `DR7` e os três do `sysenter` em zero.
+#[cfg(feature = "modo-teste")]
+pub fn regime_como_o_kernel_escreve(r: &Regime) -> bool {
+    use x86_64::registers::control::Cr0Flags;
+    let cr0 = Cr0Flags::from_bits_truncate(r.cr0);
+    cr0.contains(Cr0Flags::TASK_SWITCHED | Cr0Flags::MONITOR_COPROCESSOR)
+        && !cr0.contains(Cr0Flags::EMULATE_COPROCESSOR)
+        && r.cr4 == cr4_do_kernel()
+        && r.dr7 & 0xFF == 0
+        && r.sysenter_cs == 0
+        && r.sysenter_esp == 0
+        && r.sysenter_eip == 0
+}
+
+/// Só para a suíte: suja o regime deste núcleo como um firmware que o
+/// deixasse aberto — o `CR0` sem o `TS` e o `MP`, o `CR4` com o `PGE`, que o
+/// kernel não liga, um ponto de parada armado no `DR7` num endereço sem
+/// página ([`ENDERECO_INVALIDO`], que nada toca no meio) e o `sysenter`
+/// apontado para o anel 0 —, e o escreve de novo por
+/// [`escrever_o_regime_deste_nucleo`]; devolve o regime sujo e o de
+/// depois. Tudo mascarado: nenhum processo roda neste núcleo no meio, e o
+/// kernel não executa ponto flutuante nem toca o endereço armado.
+#[cfg(feature = "modo-teste")]
+pub fn sujar_e_reescrever_o_regime_de_teste() -> (Regime, Regime) {
+    use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
+    use x86_64::registers::model_specific::Msr;
+    sem_interrupcoes(|| {
+        // SAFETY: tudo só até a linha seguinte, com as interrupções
+        // mascaradas — ver acima. O `PGE` existe em todo x86_64, e nenhuma
+        // entrada de página do kernel é global: ligá-lo não muda tradução
+        // nenhuma.
+        unsafe {
+            Cr0::update(|flags| {
+                flags.remove(Cr0Flags::TASK_SWITCHED | Cr0Flags::MONITOR_COPROCESSOR)
+            });
+            Cr4::update(|flags| flags.insert(Cr4Flags::PAGE_GLOBAL));
+            core::arch::asm!(
+                "mov dr0, {alvo}",
+                "mov dr7, {armado}",
+                alvo = in(reg) ENDERECO_INVALIDO,
+                // L0, leitura e escrita, oito bytes.
+                armado = in(reg) DR7_EM_REPOUSO | 1 | (0b11 << 16) | (0b11 << 18),
+                options(nomem, nostack, preserves_flags)
+            );
+            let sel = gdt::seletores();
+            Msr::new(IA32_SYSENTER_CS).write(u64::from(sel.codigo_kernel.0));
+            Msr::new(IA32_SYSENTER_ESP).write(ENDERECO_INVALIDO);
+            Msr::new(IA32_SYSENTER_EIP).write(ENDERECO_INVALIDO);
+        }
+        let sujo = ler_o_regime_deste_nucleo();
+        (sujo, escrever_o_regime_deste_nucleo())
+    })
 }
 
 fn exigir_protecao_de_escrita() {

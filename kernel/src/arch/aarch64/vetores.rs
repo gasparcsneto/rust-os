@@ -281,6 +281,14 @@ fn ler_far() -> u64 {
 const fn nome_da_classe(ec: u64) -> &'static str {
     match ec {
         0x00 => "unknown",
+        // O `wfi` e o `wfe` do EL0, presos pelo `SCTLR_EL1` do kernel — ver
+        // `mmu::SCTLR_DO_KERNEL`.
+        0x01 => "wfx_trap",
+        // O FP/SIMD preso pelo `CPACR_EL1.FPEN` em 00, que o kernel escreve
+        // em todo núcleo (`usuario::escrever_o_regime_deste_nucleo`): o
+        // processo que toca um registrador `v` morre daqui. Sem nome, era
+        // `sync_desconhecida`.
+        0x07 => "fp_simd_trap",
         0x0E => "illegal_execution_state",
         0x15 => "svc",
         0x18 => "msr_mrs_trap",

@@ -24,6 +24,7 @@
 //! resto.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::vetores::Quadro;
 
@@ -121,7 +122,27 @@ pub fn atender_chamada(quadro: &mut Quadro) {
 /// registradores de modelo específico. Aqui só escreve registradores de
 /// sistema do EL1, antes do primeiro processo.
 pub unsafe fn init() {
+    escrever_o_regime_deste_nucleo();
     fechar_os_contadores_neste_nucleo();
+    crate::log_info!(
+        "usuario",
+        "o FP/SIMD fora do EL0 e do EL1: CPACR_EL1 em zero, e nunca religado"
+    );
+    if let Some((sctlr, cpacr)) = regime_do_firmware() {
+        crate::log_info!(
+            "usuario",
+            "o regime que o firmware deixou: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}",
+            sctlr,
+            cpacr
+        );
+    }
+    let (sctlr, cpacr) = ler_o_regime_deste_nucleo();
+    crate::log_info!(
+        "usuario",
+        "o regime do kernel: SCTLR_EL1 {:#x}, CPACR_EL1 {:#x}",
+        sctlr,
+        cpacr
+    );
     crate::log_info!("usuario", "svc de EL0 atendido pela tabela de vetores");
     crate::log_info!(
         "usuario",
@@ -279,13 +300,143 @@ pub fn contadores_do_usuario() -> (u64, Option<u64>) {
     (CNTKCTL_EL1.get(), pmuserenr)
 }
 
-/// Informa a pilha de kernel do fio que vai rodar.
+/// O `CPACR_EL1` do kernel: zero. O `FPEN` em 00 prende o FP/SIMD no EL0 e
+/// no EL1 — ver [`escrever_o_regime_deste_nucleo`] —, e o `ZEN` do SVE e o
+/// `SMEN` do SME, também em 00, os prendem do mesmo jeito. O `TTA` em 0 não
+/// prende os registradores de rastro: no AArch64 eles já são indefinidos no
+/// EL0, o kernel não os usa no EL1, e o Duke não roda AArch32 no EL0; num
+/// núcleo sem a interface de sistema do rastro, o bit é RES0.
+pub const CPACR_DO_KERNEL: u64 = 0;
+
+/// Escreve o regime deste núcleo: o que vale para todo processo que roda
+/// nele, e que o kernel não herda do firmware. Chamada por [`init`], no
+/// primeiro núcleo, e por `smp::entrada_secundaria`, em cada um que acorda
+/// — que já entra com os dois valores pelo bloco de partida —, antes do
+/// primeiro processo.
 ///
-/// No ARM não há o que fazer: as exceções têm `SP_EL1` só delas, e o hardware
-/// a seleciona sozinho. A função existe para o contrato de [`crate::arch`] ser
-/// o mesmo nas duas arquiteturas — no x86 ela alimenta o `RSP0` do TSS e a
-/// global que o ponto de entrada de `syscall` consulta.
-pub fn definir_pilha_de_kernel(_topo: u64) {}
+/// - **O `CPACR_EL1` em zero** ([`CPACR_DO_KERNEL`]): o FP/SIMD preso no EL0
+///   e no EL1, e nunca religado. O processo que toca um registrador `v`
+///   morre da exceção da classe 0x07 (`fp_simd_trap`). Antes o kernel nunca
+///   o escrevia: no boot cru, ele sai do reset em zero; pela UEFI, o EDK2 o
+///   deixa com o `FPEN` em 11, e o `d0` que um processo deixava chegava ao
+///   seguinte no mesmo núcleo — um canal entre titulares, por fora do gate
+///   (o achado 2 do adversário do lote B2 do #448). O kernel é
+///   *soft-float*, e nenhum programa do contrato usa FP/SIMD (o DS-2).
+///   Salvar o estado e liberá-lo aos programas é a R12-SIMD
+///   (`docs/DECISOES.md`), que continua aberta.
+/// - **O `SCTLR_EL1` inteiro** ([`super::mmu::SCTLR_DO_KERNEL`]), o mesmo
+///   que o primeiro núcleo escreveu ao ligar a MMU: o `UMA`, o `UCI`, o
+///   `DZE` e o `UCT` desligados, entre outros — ver lá.
+pub fn escrever_o_regime_deste_nucleo() {
+    // SAFETY: os dois valores são os do kernel: o `SCTLR_EL1` mantém a
+    // tradução e os caches ligados, como já estão, e só fecha o que o EL0
+    // alcança; o `CPACR_EL1` em zero prende o FP/SIMD, que o kernel
+    // *soft-float* não usa. O `isb` faz a instrução seguinte já ver os dois.
+    unsafe {
+        asm!(
+            "msr cpacr_el1, {cpacr}",
+            "msr sctlr_el1, {sctlr}",
+            "isb",
+            cpacr = in(reg) CPACR_DO_KERNEL,
+            sctlr = in(reg) super::mmu::SCTLR_DO_KERNEL,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    #[cfg(feature = "modo-teste")]
+    REGIMES[super::nucleo_atual()].fetch_add(1, Ordering::SeqCst);
+}
+
+/// Só para a suíte: quantas vezes cada núcleo escreveu o regime
+/// ([`escrever_o_regime_deste_nucleo`]) — o primeiro no boot, cada
+/// secundário ao acordar.
+#[cfg(feature = "modo-teste")]
+static REGIMES: [AtomicU64; crate::nucleos::MAX_NUCLEOS] =
+    [const { AtomicU64::new(0) }; crate::nucleos::MAX_NUCLEOS];
+
+/// Só para a suíte: quantas vezes o núcleo `cpu` escreveu o regime.
+#[cfg(feature = "modo-teste")]
+pub fn regimes_escritos_de_teste(cpu: usize) -> u64 {
+    REGIMES.get(cpu).map_or(0, |r| r.load(Ordering::SeqCst))
+}
+
+/// Só para a suíte: o `SCTLR_EL1` e o `CPACR_EL1` são os do kernel? Do
+/// `SCTLR_EL1`, os bits que ele decide (`mmu::SCTLR_CONFERIDOS`); do
+/// `CPACR_EL1`, o `FPEN`, que prende o FP/SIMD.
+#[cfg(feature = "modo-teste")]
+pub fn regime_como_o_kernel_escreve((sctlr, cpacr): (u64, u64)) -> bool {
+    const FPEN: u64 = 0b11 << 20;
+    let conferidos = super::mmu::SCTLR_CONFERIDOS;
+    sctlr & conferidos == super::mmu::SCTLR_DO_KERNEL & conferidos
+        && cpacr & FPEN == CPACR_DO_KERNEL & FPEN
+}
+
+/// Só para a suíte: suja o regime deste núcleo como um firmware que o
+/// deixasse aberto — o `CPACR_EL1` com o `FPEN` em 11, como o EDK2 o deixa,
+/// e o `SCTLR_EL1` com o `UMA`, o `UCI`, o `DZE` e o `UCT` ligados —, e o
+/// escreve de novo por [`escrever_o_regime_deste_nucleo`]; devolve o regime
+/// sujo e o de depois. Tudo mascarado: nenhum processo roda neste núcleo no
+/// meio, e o kernel não usa o FP/SIMD nem os acessos do EL0.
+#[cfg(feature = "modo-teste")]
+pub fn sujar_e_reescrever_o_regime_de_teste() -> ((u64, u64), (u64, u64)) {
+    const ABERTOS: u64 = (1 << 9) | (1 << 14) | (1 << 15) | (1 << 26);
+    crate::arch::sem_interrupcoes(|| {
+        // SAFETY: só até a linha seguinte, mascarado — ver acima. O
+        // `SCTLR_EL1` sujo mantém a tradução e os caches como estão.
+        unsafe {
+            asm!(
+                "msr cpacr_el1, {cpacr}",
+                "msr sctlr_el1, {sctlr}",
+                "isb",
+                cpacr = in(reg) 0b11u64 << 20,
+                sctlr = in(reg) super::mmu::SCTLR_DO_KERNEL | ABERTOS,
+                options(nomem, nostack, preserves_flags)
+            )
+        };
+        let sujo = ler_o_regime_deste_nucleo();
+        escrever_o_regime_deste_nucleo();
+        (sujo, ler_o_regime_deste_nucleo())
+    })
+}
+
+/// O `SCTLR_EL1` e o `CPACR_EL1` deste núcleo, como estão agora.
+pub fn ler_o_regime_deste_nucleo() -> (u64, u64) {
+    let (sctlr, cpacr): (u64, u64);
+    // SAFETY: leituras de dois registradores do EL1, sem efeito.
+    unsafe {
+        asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack, preserves_flags));
+        asm!("mrs {}, cpacr_el1", out(reg) cpacr, options(nomem, nostack, preserves_flags));
+    }
+    (sctlr, cpacr)
+}
+
+/// O `SCTLR_EL1` e o `CPACR_EL1` que o primeiro núcleo trouxe do firmware,
+/// lidos na primeira função Rust (`inicio_aarch64`), antes de a MMU do
+/// kernel ligar. Só para o log do boot ([`init`]): no boot cru, é o reset do
+/// processador; pela UEFI, o que o EDK2 deixou, menos o `M` e o `C`, que o
+/// iniciador desliga antes do salto.
+static REGIME_DO_FIRMWARE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// [`REGIME_DO_FIRMWARE`] já foi guardado?
+static REGIME_GUARDADO: AtomicBool = AtomicBool::new(false);
+
+/// Guarda o regime que o firmware deixou neste núcleo — ver
+/// [`REGIME_DO_FIRMWARE`]. Chamada uma vez, no começo do boot.
+pub fn guardar_o_regime_do_firmware() {
+    let (sctlr, cpacr) = ler_o_regime_deste_nucleo();
+    REGIME_DO_FIRMWARE[0].store(sctlr, Ordering::Relaxed);
+    REGIME_DO_FIRMWARE[1].store(cpacr, Ordering::Relaxed);
+    REGIME_GUARDADO.store(true, Ordering::Release);
+}
+
+/// O regime que o firmware deixou — ver [`REGIME_DO_FIRMWARE`].
+fn regime_do_firmware() -> Option<(u64, u64)> {
+    REGIME_GUARDADO.load(Ordering::Acquire).then(|| {
+        (
+            REGIME_DO_FIRMWARE[0].load(Ordering::Relaxed),
+            REGIME_DO_FIRMWARE[1].load(Ordering::Relaxed),
+        )
+    })
+}
 
 /// Desce para EL0 e começa a executar em `entrada`. Nunca retorna.
 ///

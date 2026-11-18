@@ -49,7 +49,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::trava::Mutex;
 use aarch64_cpu::asm::barrier;
 use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, MAIR_EL1, SCTLR_EL1, TCR_EL1, TTBR0_EL1};
-use tock_registers::interfaces::{ReadWriteable, Readable, Writeable};
+use tock_registers::interfaces::{Readable, Writeable};
 
 use super::super::{Permissoes, TAMANHO_PAGINA, validar_alinhamento};
 
@@ -500,13 +500,112 @@ unsafe fn ligar(raiz: u64) {
     // O momento crítico. Entre esta escrita e o `isb` seguinte, a MMU passa a
     // valer: é o mapa de identidade que garante que a busca da próxima
     // instrução ainda encontre o mesmo código.
-    SCTLR_EL1.modify(
-        SCTLR_EL1::M::Enable      // liga a tradução
-            + SCTLR_EL1::C::Cacheable // cache de dados
-            + SCTLR_EL1::I::Cacheable, // cache de instruções
-    );
+    //
+    // O registrador inteiro, e não só o `M`, o `C` e o `I` sobre o que o
+    // firmware deixou — ver [`SCTLR_DO_KERNEL`].
+    SCTLR_EL1.set(SCTLR_DO_KERNEL);
     barrier::isb(barrier::SY);
 }
+
+/// O `SCTLR_EL1` do kernel, escrito inteiro — no primeiro núcleo ao ligar a
+/// MMU ([`ligar`]), em cada um que acorda pelo bloco de partida (`smp`), e de
+/// novo, com o `CPACR_EL1`, por `usuario::escrever_o_regime_deste_nucleo`.
+///
+/// Antes, o kernel só ligava o `M`, o `C` e o `I` sobre o que o firmware
+/// deixara (o item 10 do adversário do lote B2 do #448). O registrador
+/// governa também o que o EL0 alcança, e o resto ficava como o firmware
+/// quisesse: com o `UMA` ligado, o `msr daif` de um processo mascararia as
+/// IRQs do núcleo, e nenhum tique o tiraria dali. Bit por bit:
+///
+/// - **`M`, `C`, `I`** ligados: a tradução e os caches.
+/// - **`A`** desligado: o kernel e os programas fazem acessos desalinhados
+///   (o reset também o deixa assim).
+/// - **`SA`** e **`SA0`** ligados: a pilha desalinhada no EL1 e no EL0 é uma
+///   falha de alinhamento (`sp_alignment_fault`), como no reset.
+/// - **`UMA`** desligado: o EL0 não lê nem escreve o `DAIF` — o
+///   `msr daif` e o `msr daifset` de um processo são a exceção da classe
+///   0x18, e o processo morre dela.
+/// - **`UCI`** desligado: a manutenção de cache por endereço (`dc civac`,
+///   `dc cvau`, `ic ivau`...) no EL0 é a classe 0x18. É a ferramenta de um
+///   ataque de tempo pela cache entre processos (o *Flush+Reload* do ARM),
+///   com a régua que o #451 já tirou do EL0; nenhum programa do contrato a
+///   usa.
+/// - **`DZE`** e **`UCT`** desligados: o `dc zva` e a leitura do `CTR_EL0`
+///   no EL0 também são a classe 0x18 (o `DCZID_EL0` diz ao programa que o
+///   `dc zva` não existe). Nenhum programa do contrato os usa, e é o valor
+///   de reset, em que a suíte do boot cru sempre rodou.
+/// - **`nTWI`** e **`nTWE`** desligados: o `wfi` e o `wfe` do EL0 que iriam
+///   dormir são presos — a classe 0x01 (`wfx_trap`), e o processo morre
+///   dela, como o `hlt` do anel 3 no x86 é `#GP`. Eles não prenderiam o núcleo — no EL0
+///   as IRQs estão desmascaradas, e o tique o acorda —, mas o `sev` de um
+///   processo acorda o `wfe` de outro, noutro núcleo: contado contra o
+///   `system.uptime`, um sinal entre processos de titulares diferentes, por
+///   fora do gate, sem relógio nenhum. Nenhum programa do contrato espera
+///   assim — ele espera numa chamada de sistema —, e é o que o EDK2, a
+///   imagem de produção, já deixava; o reset do processador — o boot cru da
+///   suíte — os deixa ligados. O QEMU do TCG trata o `wfe` como um `yield`,
+///   e nunca o prende: o caso confere o `wfi`. O `wfe` com um evento
+///   pendente — do `eret` da volta, ou de um `sev` de outro núcleo, que o
+///   EL1 não prende — não dormiria, e passa: a arquitetura não o prende. O
+///   sinal fica caro, uma morte contada a cada zero, com ruído, mas não
+///   some.
+/// - **`E0E`** e **`EE`** desligados: o EL0 e o EL1 em *little-endian*.
+/// - **`WXN`** desligado: o mapa do kernel tem blocos que se escrevem e se
+///   executam.
+/// - **`SED`** ligado e **`ITD`** e **`CP15BEN`** desligados: o `SETEND`, o
+///   `IT` e as barreiras do CP15 são do AArch32 no EL0, que o kernel nunca
+///   entra — os valores do Linux.
+/// - Os bits que o ARMv8.0 reserva em 1 — o 11 (`EOS`), o 20 (`TSCXT`), o
+///   22 (`EIS`), o 23 (`SPAN`), o 28 (`nTLSMD`) e o 29 (`LSMAOE`) — ligados:
+///   nas extensões que os definem, cada um é o comportamento de antes delas
+///   (o `TSCXT` ligado prende o `SCXTNUM_EL0` do EL0, mais um registrador que
+///   passaria de um processo ao seguinte).
+/// - E nada mais: os bits das extensões — a autenticação de ponteiros, o
+///   MTE, o BTI, o `PAN` —, desligados.
+///
+/// O reset do processador — o boot cru da suíte — deixa 0x00C50838; o EDK2,
+/// pela UEFI, 0x30D01988 — sem o `M` e o `C`, que o iniciador desliga antes
+/// do salto. O log do boot diz os dois (`o regime que o firmware deixou`). Do
+/// EDK2 para o do kernel, ligam o `M`, o `C` e o `SA0` e desliga o `ITD`; do
+/// reset, ligam o `M`, o `C`, o `I`, o `SED`, o `TSCXT`, o `nTLSMD` e o
+/// `LSMAOE`, e desligam o `nTWI`, o `nTWE` e o `CP15BEN`.
+pub(super) const SCTLR_DO_KERNEL: u64 = (1 << 0) // M
+    | (1 << 2) // C
+    | (1 << 3) // SA
+    | (1 << 4) // SA0
+    | (1 << 8) // SED
+    | (1 << 11) // EOS, reservado em 1 no ARMv8.0
+    | (1 << 12) // I
+    | (1 << 20) // TSCXT, reservado em 1
+    | (1 << 22) // EIS, reservado em 1
+    | (1 << 23) // SPAN, reservado em 1
+    | (1 << 28) // nTLSMD, reservado em 1
+    | (1 << 29); // LSMAOE, reservado em 1
+
+// O valor, conferido na compilação: um bit trocado aqui não daria erro, e
+// sim um EL0 com o `DAIF` ou a cache nas mãos.
+const _: () = assert!(SCTLR_DO_KERNEL == 0x30D0_191D);
+
+/// Só para a suíte: os bits do `SCTLR_EL1` que o caso do regime confere —
+/// os que o kernel decide e que valem para o EL0 ou para a tradução: o `M`,
+/// o `A`, o `C`, o `SA`, o `SA0`, o `UMA`, o `I`, o `DZE`, o `UCT`, o
+/// `nTWI`, o `nTWE`, o `WXN`, o `E0E`, o `EE` e o `UCI`. Os reservados e os
+/// das extensões que o processador não tem podem se ler diferentes do que
+/// se escreveu, num processador de verdade.
+#[cfg(feature = "modo-teste")]
+pub const SCTLR_CONFERIDOS: u64 = 0b111
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 9)
+    | (1 << 12)
+    | (1 << 14)
+    | (1 << 15)
+    | (1 << 16)
+    | (1 << 18)
+    | (1 << 19)
+    | (1 << 24)
+    | (1 << 25)
+    | (1 << 26);
 
 /// Programa `TCR_EL1`, que descreve o formato das tabelas de tradução.
 ///

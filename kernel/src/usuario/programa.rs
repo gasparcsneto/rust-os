@@ -554,10 +554,16 @@ pub fn entrar(programa: Programa) -> Result<core::convert::Infallible, Falha> {
         pilha
     );
 
-    // SAFETY: código e pilha foram mapeados agora com permissão de usuário, e
-    // a pilha de kernel deste fio foi informada logo acima.
-    unsafe {
-        crate::arch::definir_pilha_de_kernel(pilha_de_kernel);
-        crate::arch::entrar_em_usuario(entrada, pilha)
-    }
+    // A pilha de kernel deste fio já é a do núcleo: a troca que o pôs aqui a
+    // informou (`arch::ceder_cpu`, no x86 o `RSP0` e a estrutura por núcleo
+    // da `syscall`), e cada troca seguinte a informa de novo — também a do
+    // fio que migra. Informá-la daqui, com as interrupções ligadas, escrevia
+    // a do núcleo de antes de uma migração: o núcleo lido num, a escrita
+    // feita noutro (o item 4 do adversário do lote B2 do #448). Ver
+    // `arch::x86_64::usuario::definir_pilha_de_kernel`.
+    //
+    // SAFETY: código e pilha foram mapeados agora com permissão de usuário,
+    // e a pilha de kernel deste fio, conferida logo acima, é a que a troca
+    // de contexto informou ao núcleo.
+    unsafe { crate::arch::entrar_em_usuario(entrada, pilha) }
 }

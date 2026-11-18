@@ -192,6 +192,29 @@ pub fn total() -> u64 {
     TOTAL.load(Ordering::Relaxed)
 }
 
+/// Quantos `#DB` do passo chegaram ao anel 0 e voltaram, com o `TF` apagado
+/// do quadro — o passo que um `mov ss` de um processo adia até depois da
+/// `syscall` (o cenário do CVE-2018-8897; ver `arch::x86_64::idt`, no
+/// tratador do `#DB`). Não é uma falha: o processo morre pelo caminho de
+/// sempre, na volta, e é aquela morte que se conta em [`registrar`].
+///
+/// Só um atômico: quem conta é o tratador do `#DB`, na pilha da IST, no
+/// meio de qualquer instrução do anel 0 — com uma trava qualquer na mão.
+/// Zero no ARM, que não tem esse caminho.
+static PASSOS_DO_ANEL_0: AtomicU64 = AtomicU64::new(0);
+
+/// Conta um passo do anel 0 que voltou — ver [`PASSOS_DO_ANEL_0`].
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn contar_passo_do_anel_0() {
+    PASSOS_DO_ANEL_0.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Quantos passos do anel 0 voltaram desde o boot — ver
+/// [`PASSOS_DO_ANEL_0`].
+pub fn passos_do_anel_0() -> u64 {
+    PASSOS_DO_ANEL_0.load(Ordering::Relaxed)
+}
+
 /// O kernel entrou em post-mortem: uma falha fatal aconteceu, e daqui em
 /// diante ele só responde.
 static EM_POST_MORTEM: AtomicBool = AtomicBool::new(false);

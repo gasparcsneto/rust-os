@@ -7438,6 +7438,11 @@ fn traps_stats(_params: Json, w: &mut JsonWriter) -> fmt::Result {
     // encheu. A trava foi obtida, a vaga e que faltou — causa diferente, efeito
     // igual para quem le, numero proprio.
     w.field_u64("types_lost", crate::traps::tipos_perdidos())?;
+    // Os `#DB` do passo que chegaram ao anel 0 e voltaram: o passo que o
+    // `mov ss` de um processo adia ate depois da `syscall` (o cenario do
+    // CVE-2018-8897). Nao e falha — o processo morre do passo na volta, e e
+    // essa morte que `by_type` conta —, e e zero no ARM.
+    w.field_u64("kernel_single_steps", crate::traps::passos_do_anel_0())?;
 
     w.key("by_type")?;
     w.begin_array()?;

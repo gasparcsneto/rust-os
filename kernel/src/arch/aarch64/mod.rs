@@ -31,7 +31,7 @@ pub mod vetores;
 pub use contexto::{
     Contexto, ceder_cpu, preparar_contexto, preparar_contexto_de_fork, redirecionar_para,
 };
-pub use usuario::{definir_pilha_de_kernel, entrar as entrar_em_usuario, init as init_usuario};
+pub use usuario::{entrar as entrar_em_usuario, init as init_usuario};
 
 pub use uart::Uart;
 
@@ -241,6 +241,10 @@ extern "C" fn inicio_aarch64(x0: u64) -> ! {
     // A serial vem antes de qualquer outra coisa. Sem ela, qualquer falha a
     // partir daqui seria silêncio absoluto — no ARM nem tela preta existe.
     let canal = crate::serial::init();
+
+    // O regime que o firmware deixou, antes de a MMU do kernel ligar — só
+    // para o log do boot.
+    usuario::guardar_o_regime_do_firmware();
 
     // SAFETY: `x0` veio do firmware ou do iniciador, e é o contrato dos dois
     // protocolos de boot. `entrega_em` só devolve um ponteiro depois de

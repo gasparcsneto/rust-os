@@ -1012,20 +1012,31 @@ pub(crate) fn para_a_esp(
     Ok((efi, kernel_para_a_esp(elf)?))
 }
 
-/// Confere que o kernel do x86 não usa registrador de SIMD nenhum.
+/// Confere que o kernel do x86 não usa registrador de SIMD nenhum, nem
+/// instrução de x87 ou de MMX.
 ///
 /// # Por que é preciso conferir
 ///
-/// Os registradores `xmm`, `ymm` e `zmm` são do processo que estava rodando:
-/// este kernel não os salva ao entrar, e uma instrução que os use dentro do
-/// kernel corrompe o estado de quem foi interrompido — sem erro, só números
-/// errados num programa que nem sabia que tinha sido interrompido.
+/// Os registradores `xmm`, `ymm` e `zmm` — e os do x87 e do MMX — são do
+/// processo que estava rodando: este kernel não os salva ao entrar, e uma
+/// instrução que os use dentro do kernel corrompe o estado de quem foi
+/// interrompido — sem erro, só números errados num programa que nem sabia
+/// que tinha sido interrompido.
 ///
-/// O alvo `x86_64-unknown-none` impede o compilador de gerar SIMD por conta
-/// própria. O que ele não impede é o código que **pede** SIMD, função a
-/// função, depois de perguntar ao processador — e as primitivas do canal
-/// seguro fazem isso. Três opções em `kernel/.cargo/config.toml` desligam
-/// esse caminho.
+/// E, desde o lote B3 do #448, o kernel liga o `CR0.TS` em todo núcleo e
+/// nunca o desliga (`arch::x86_64::escrever_o_regime_deste_nucleo`): toda
+/// instrução de x87, MMX, SSE ou AVX é `#NM`, e no anel 0 o `#NM` é fatal.
+/// Uma dessas no kernel não corromperia mais nada em silêncio — pararia a
+/// máquina na primeira vez que rodasse. Esta conferência a pega antes, no
+/// build. A única que o kernel executa é o `fninit` de um núcleo que acorda
+/// (`smp::entrada_secundaria`), **antes** de ligar o `TS` — a única aceita,
+/// e só ali ([`instrucao_de_ponto_flutuante`]).
+///
+/// O alvo `x86_64-unknown-none` impede o compilador de gerar SIMD e x87 por
+/// conta própria (é *soft-float*). O que ele não impede é o código que
+/// **pede** SIMD, função a função, depois de perguntar ao processador — e as
+/// primitivas do canal seguro fazem isso. Três opções em
+/// `kernel/.cargo/config.toml` desligam esse caminho.
 ///
 /// # O que foi medido, e o que não
 ///
@@ -1038,7 +1049,8 @@ pub(crate) fn para_a_esp(
 /// instrução no erro.
 ///
 /// Só o x86. No ARM o alvo `-softfloat` não deixa o NEON existir nem em
-/// código que o peça: a função não compila.
+/// código que o peça: a função não compila; e o `CPACR_EL1` em zero prende o
+/// FP/SIMD também no EL1.
 fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
     let objdump = ferramenta_llvm("llvm-objdump")?;
     let saida = Command::new(&objdump)
@@ -1061,7 +1073,7 @@ fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
             funcao = linha;
             continue;
         }
-        if ["%xmm", "%ymm", "%zmm"].iter().any(|r| linha.contains(r)) {
+        if instrucao_de_ponto_flutuante(funcao, linha) {
             total += 1;
             if achados.len() < 5 {
                 achados.push(format!("{funcao}\n      {}", linha.trim()));
@@ -1070,14 +1082,122 @@ fn conferir_sem_simd(elf: &Path) -> Result<(), String> {
     }
     if total > 0 {
         return Err(format!(
-            "usa registradores de SIMD em {total} instrução(ões) — os de um processo \
-             interrompido, que este kernel não salva. As primeiras:\n  {}\n\
+            "usa ponto flutuante ou SIMD em {total} instrução(ões) — os registradores de um \
+             processo interrompido, que este kernel não salva, e o `#NM` do `CR0.TS` no anel 0. \
+             As primeiras:\n  {}\n\
              Confira as opções de backend em `kernel/.cargo/config.toml` e em \
              `programas/.cargo/config.toml`.",
             achados.join("\n  ")
         ));
     }
     Ok(())
+}
+
+/// A linha `linha` da desmontagem do `llvm-objdump` — na sintaxe da AT&T,
+/// dentro da função cujo cabeçalho é `funcao` — é uma instrução de ponto
+/// flutuante ou de SIMD: um registrador `xmm`, `ymm`, `zmm`, `st` ou `mm`
+/// do MMX; um mnemônico do x87 — todos começam com `f`: `fld`, `fninit`,
+/// `fxsave`... —, o `wait`, o `emms`, o `ldmxcsr` e o `stmxcsr`; ou a
+/// família do `xsave` e do `xrstor`. O `xgetbv` e o `xsetbv` não: eles não
+/// tocam o estado de ponto flutuante, e o `CR0.TS` não os prende.
+///
+/// A exceção é uma só: o `fninit` do núcleo que acorda, em
+/// `smp::entrada_secundaria`, que roda antes de o `CR0.TS` ligar.
+fn instrucao_de_ponto_flutuante(funcao: &str, linha: &str) -> bool {
+    // `  d3cd9b:      \tfninit`: o endereço, os dois-pontos, e a instrução.
+    // Uma linha que não começa por um endereço não é instrução: o nome do
+    // arquivo e o formato, no começo, ou o título de uma seção.
+    let Some((endereco, instrucao)) = linha.split_once(':') else {
+        return false;
+    };
+    let endereco = endereco.trim();
+    if endereco.is_empty() || !endereco.chars().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let instrucao = instrucao.trim();
+    let mnemonico = instrucao.split_whitespace().next().unwrap_or("");
+    if mnemonico == "fninit" && funcao.contains("smp18entrada_secundaria") {
+        return false;
+    }
+    let registrador_mmx = instrucao
+        .match_indices("%mm")
+        .any(|(i, _)| instrucao[i + 3..].starts_with(|c: char| c.is_ascii_digit()));
+    ["%xmm", "%ymm", "%zmm", "%st"]
+        .iter()
+        .any(|r| instrucao.contains(r))
+        || registrador_mmx
+        || mnemonico.starts_with('f')
+        || ["wait", "emms", "ldmxcsr", "stmxcsr"].contains(&mnemonico)
+        || mnemonico.starts_with("xsave")
+        || mnemonico.starts_with("xrstor")
+}
+
+#[cfg(test)]
+mod testes_do_ponto_flutuante {
+    use super::instrucao_de_ponto_flutuante;
+
+    // Os cabeçalhos e as linhas como o `llvm-objdump -d --no-show-raw-insn`
+    // os escreve: o símbolo na mangla v0, e a instrução depois do endereço,
+    // de espaços e de uma tabulação.
+    const SMP: &str =
+        "0000000000d3cd00 <_RNvNtNtNtCsbv6XCleSqDx_4duke4arch6x86_643smp18entrada_secundaria>:";
+    const OUTRA: &str = "0000000000456700 <_RNvNtCsbv6XCleSqDx_4duke6chaves5gerar>:";
+
+    #[test]
+    fn o_simd_o_x87_e_o_mmx_sao_pegos() {
+        for linha in [
+            "  456710:      \tpxor\t%xmm0, %xmm0",
+            "  456710:      \tvmovdqa\t%ymm1, (%rax)",
+            "  456710:      \tvpaddq\t%zmm2, %zmm2, %zmm3",
+            "  456710:      \tfld1",
+            "  456710:      \tfstp\t%st(0)",
+            "  456710:      \tfninit",
+            "  456710:      \tfnstcw\t-0x2(%rsp)",
+            "  456710:      \tfxsave\t(%rdi)",
+            "  456710:      \tfxrstor64\t(%rdi)",
+            "  456710:      \twait",
+            "  456710:      \temms",
+            "  456710:      \tmovq\t%mm0, %rax",
+            "  456710:      \tldmxcsr\t(%rsp)",
+            "  456710:      \tstmxcsr\t(%rsp)",
+            "  456710:      \txsave\t(%rdi)",
+            "  456710:      \txsaveopt64\t(%rdi)",
+            "  456710:      \txrstor\t(%rdi)",
+        ] {
+            assert!(instrucao_de_ponto_flutuante(OUTRA, linha), "{linha}");
+        }
+    }
+
+    #[test]
+    fn o_resto_nao() {
+        for linha in [
+            "  456710:      \tmovq\t%rax, %rbx",
+            "  456710:      \tmovq\t%fs:0x28, %rax",
+            "  456710:      \txgetbv",
+            "  456710:      \txsetbv",
+            "  456710:      \tcallq\t0xbdd480 <_RNvNtCsbv6XCleSqDx_4duke2mm5frame>",
+            "  456710:      \tmovq\t0x10(%rsp), %rsi",
+            "0000000000456700 <_RNvNtCsbv6XCleSqDx_4duke6fninit>:",
+            "/home/user/rust-os/kernel/target/x86_64-unknown-none/debug/duke:\tfile format elf64-x86-64",
+            "Disassembly of section .text:",
+            "",
+        ] {
+            assert!(!instrucao_de_ponto_flutuante(OUTRA, linha), "{linha}");
+        }
+    }
+
+    #[test]
+    fn so_o_fninit_do_nucleo_que_acorda_passa() {
+        assert!(!instrucao_de_ponto_flutuante(
+            SMP,
+            "  d3cd9b:      \tfninit"
+        ));
+        assert!(instrucao_de_ponto_flutuante(SMP, "  d3cd9b:      \tfld1"));
+        assert!(instrucao_de_ponto_flutuante(
+            SMP,
+            "  d3cd9b:      \tpxor\t%xmm0, %xmm0"
+        ));
+    }
 }
 
 /// Encontra o `llvm-objcopy` que acompanha o toolchain Rust.

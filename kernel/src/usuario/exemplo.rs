@@ -83,6 +83,52 @@ pub const DEPOIS_DO_PASSO_NA_CHAMADA: u64 = 17;
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 pub const PUSH_DA_PILHA: u64 = 10;
 
+/// Onde fica a carga do seletor — o `mov ds` ou o `mov ss` — nos programas
+/// do LDT, do segmento ausente e da pilha ausente, a partir da entrada: a
+/// falha é do `mov`, e o `rip` é o da instrução. O montador confere o mesmo
+/// número nos programas.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CARGA_DO_SELETOR: u64 = 5;
+
+/// O código com que sai o programa do `lsl`: o `lsl` de um seletor do LDT
+/// não falha — com o LDT nulo, ele só apaga o `ZF` —, e o processo segue até
+/// a saída.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_LSL: i64 = 55;
+
+/// Onde fica a `syscall` do programa do `mov ss`, a partir da entrada: no
+/// QEMU do TCG, o `#DB` do passo chega no anel 3 logo depois do `mov ss`,
+/// com o `rip` nela.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const NA_SYSCALL_DO_MOV_SS: u64 = 20;
+
+/// Onde o `#DB` do programa do `mov ss` deixa o `rip` num processador, a
+/// partir da entrada: o `mov ss` adia o passo até depois da `syscall`, o
+/// `#DB` chega no anel 0 — e volta —, e o processo morre do passo no anel 3,
+/// na volta da chamada, depois dela.
+#[cfg(target_arch = "x86_64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const DEPOIS_DO_MOV_SS: u64 = 22;
+
+/// O código com que sai o programa do SIMD quando o registrador já tinha a
+/// marca que ele deixa: o que o processo anterior deixou no núcleo chegou a
+/// este — o canal entre processos. Sem ela, sai com zero.
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const CODIGO_DO_CANAL: i64 = 1;
+
+/// Onde fica o `msr daif` do programa do `DAIF`, a partir da entrada.
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const MSR_DO_DAIF: u64 = 4;
+
+/// Onde fica o `wfi` do programa do `wfi`, a partir da entrada.
+#[cfg(target_arch = "aarch64")]
+#[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
+pub const WFI_DO_PROGRAMA: u64 = 4;
+
 /// Código de saída que o programa de exemplo devolve quando tudo deu certo.
 ///
 /// Um valor arbitrário e improvável: se ele aparecer do outro lado, veio daqui
@@ -258,6 +304,38 @@ unsafe extern "C" {
     static PILHA_INICIO: u8;
     #[link_name = "programa_excecao_pilha_fim"]
     static PILHA_FIM: u8;
+    #[link_name = "programa_excecao_ldt_inicio"]
+    static LDT_INICIO: u8;
+    #[link_name = "programa_excecao_ldt_fim"]
+    static LDT_FIM: u8;
+    #[link_name = "programa_excecao_lsl_inicio"]
+    static LSL_INICIO: u8;
+    #[link_name = "programa_excecao_lsl_fim"]
+    static LSL_FIM: u8;
+    #[link_name = "programa_excecao_simd_inicio"]
+    static SIMD_INICIO: u8;
+    #[link_name = "programa_excecao_simd_fim"]
+    static SIMD_FIM: u8;
+    #[link_name = "programa_excecao_x87_inicio"]
+    static X87_INICIO: u8;
+    #[link_name = "programa_excecao_x87_fim"]
+    static X87_FIM: u8;
+    #[link_name = "programa_excecao_movss_inicio"]
+    static MOVSS_INICIO: u8;
+    #[link_name = "programa_excecao_movss_fim"]
+    static MOVSS_FIM: u8;
+    #[link_name = "programa_excecao_ausente_inicio"]
+    static AUSENTE_INICIO: u8;
+    #[link_name = "programa_excecao_ausente_fim"]
+    static AUSENTE_FIM: u8;
+    #[link_name = "programa_excecao_pilha_ausente_inicio"]
+    static PILHA_AUSENTE_INICIO: u8;
+    #[link_name = "programa_excecao_pilha_ausente_fim"]
+    static PILHA_AUSENTE_FIM: u8;
+    #[link_name = "programa_excecao_sysenter_inicio"]
+    static SYSENTER_INICIO: u8;
+    #[link_name = "programa_excecao_sysenter_fim"]
+    static SYSENTER_FIM: u8;
 }
 
 // Os programas das exceções do EL0 — ver [`bytes_da_excecao`].
@@ -275,13 +353,28 @@ unsafe extern "C" {
     static BRK_INICIO: u8;
     #[link_name = "programa_excecao_brk_fim"]
     static BRK_FIM: u8;
+    #[link_name = "programa_excecao_simd_inicio"]
+    static SIMD_INICIO: u8;
+    #[link_name = "programa_excecao_simd_fim"]
+    static SIMD_FIM: u8;
+    #[link_name = "programa_excecao_daif_inicio"]
+    static DAIF_INICIO: u8;
+    #[link_name = "programa_excecao_daif_fim"]
+    static DAIF_FIM: u8;
+    #[link_name = "programa_excecao_wfi_inicio"]
+    static WFI_INICIO: u8;
+    #[link_name = "programa_excecao_wfi_fim"]
+    static WFI_FIM: u8;
 }
 
-/// Os programas das exceções que um processo provoca — o lote B2 do #448.
-/// Cada um provoca a dele na entrada, ou depois do mínimo que ela pede, e
-/// tem de morrer dela: uma exceção vinda do anel sem privilégio é culpa do
-/// processo, e não do kernel. O do `NT` não provoca nenhuma: troca de imagem
-/// e sai pelo `filho`. Se seguir, sai com [`CODIGO_DA_EXCECAO`].
+/// Os programas das exceções que um processo provoca — os lotes B2 e B3 do
+/// #448. Cada um provoca a dele na entrada, ou depois do mínimo que ela
+/// pede, e tem de morrer dela: uma exceção vinda do anel sem privilégio é
+/// culpa do processo, e não do kernel. O do `NT` não provoca nenhuma: troca
+/// de imagem e sai pelo `filho`; o do `lsl`, só no x86, também não: sai
+/// com `CODIGO_DO_LSL`. Se seguir, sai com [`CODIGO_DA_EXCECAO`] — menos o do
+/// SIMD, que sai com zero, ou com [`CODIGO_DO_CANAL`] se o registrador já
+/// tinha a marca de quem rodou antes no núcleo.
 /// Não estão em `/bin`: só a suíte os roda.
 #[cfg_attr(not(feature = "modo-teste"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,6 +404,34 @@ pub enum Excecao {
     /// O `push` com o `rsp` não canônico: o `#SS`.
     #[cfg(target_arch = "x86_64")]
     Pilha,
+    /// O `mov ds` com o seletor 0x0F, do LDT: o `#GP` do LDT nulo.
+    #[cfg(target_arch = "x86_64")]
+    Ldt,
+    /// O `lsl` com o seletor 0x0F, do LDT: nenhuma falha, e a saída com
+    /// [`CODIGO_DO_LSL`].
+    #[cfg(target_arch = "x86_64")]
+    Lsl,
+    /// O `movq` do `xmm0`: o `#NM` do `CR0.TS` — e, sem ele, o canal.
+    #[cfg(target_arch = "x86_64")]
+    Simd,
+    /// O `fld1` do x87: o `#NM` do `CR0.TS`.
+    #[cfg(target_arch = "x86_64")]
+    X87,
+    /// O `TF` ligado, o `mov ss` e a `syscall`: o passo adiado do
+    /// CVE-2018-8897.
+    #[cfg(target_arch = "x86_64")]
+    MovSs,
+    /// O `mov ds` com o seletor 0x1B, cujo descritor o caso marca ausente:
+    /// o `#NP`.
+    #[cfg(target_arch = "x86_64")]
+    Ausente,
+    /// O `mov ss` com o mesmo seletor: o `#SS`.
+    #[cfg(target_arch = "x86_64")]
+    PilhaAusente,
+    /// `sysenter`: o `#GP` do `IA32_SYSENTER_CS` em zero, num Intel; o
+    /// `#UD`, num AMD — e no QEMU do TCG.
+    #[cfg(target_arch = "x86_64")]
+    Sysenter,
     /// `brk #0xe5`, o imediato do estouro de propósito.
     #[cfg(target_arch = "aarch64")]
     BrkDoEstouro,
@@ -320,6 +441,17 @@ pub enum Excecao {
     /// `brk #0`.
     #[cfg(target_arch = "aarch64")]
     Brk,
+    /// O `fmov` do `d0`: a classe 0x07 do `CPACR_EL1` em zero — e, sem
+    /// ele, o canal.
+    #[cfg(target_arch = "aarch64")]
+    Simd,
+    /// O `msr daif` que mascara as IRQs: a armadilha do `SCTLR_EL1.UMA`
+    /// desligado.
+    #[cfg(target_arch = "aarch64")]
+    Daif,
+    /// O `wfi`: a armadilha do `SCTLR_EL1.nTWI` desligado.
+    #[cfg(target_arch = "aarch64")]
+    Wfi,
 }
 
 /// A imagem ELF do programa da exceção `e` — ver [`Excecao`].
@@ -347,6 +479,25 @@ pub fn bytes_da_excecao(e: Excecao) -> &'static [u8] {
             Excecao::Int3 => entre(&raw const INT3_INICIO, &raw const INT3_FIM),
             #[cfg(target_arch = "x86_64")]
             Excecao::Pilha => entre(&raw const PILHA_INICIO, &raw const PILHA_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Ldt => entre(&raw const LDT_INICIO, &raw const LDT_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Lsl => entre(&raw const LSL_INICIO, &raw const LSL_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Simd => entre(&raw const SIMD_INICIO, &raw const SIMD_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::X87 => entre(&raw const X87_INICIO, &raw const X87_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::MovSs => entre(&raw const MOVSS_INICIO, &raw const MOVSS_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Ausente => entre(&raw const AUSENTE_INICIO, &raw const AUSENTE_FIM),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::PilhaAusente => entre(
+                &raw const PILHA_AUSENTE_INICIO,
+                &raw const PILHA_AUSENTE_FIM,
+            ),
+            #[cfg(target_arch = "x86_64")]
+            Excecao::Sysenter => entre(&raw const SYSENTER_INICIO, &raw const SYSENTER_FIM),
             #[cfg(target_arch = "aarch64")]
             Excecao::BrkDoEstouro => {
                 entre(&raw const BRK_ESTOURO_INICIO, &raw const BRK_ESTOURO_FIM)
@@ -355,6 +506,12 @@ pub fn bytes_da_excecao(e: Excecao) -> &'static [u8] {
             Excecao::BrkDaBorda => entre(&raw const BRK_BORDA_INICIO, &raw const BRK_BORDA_FIM),
             #[cfg(target_arch = "aarch64")]
             Excecao::Brk => entre(&raw const BRK_INICIO, &raw const BRK_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::Simd => entre(&raw const SIMD_INICIO, &raw const SIMD_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::Daif => entre(&raw const DAIF_INICIO, &raw const DAIF_FIM),
+            #[cfg(target_arch = "aarch64")]
+            Excecao::Wfi => entre(&raw const WFI_INICIO, &raw const WFI_FIM),
         }
     }
 }
@@ -1519,6 +1676,167 @@ programa_excecao_pilha_inicio:
 .endif
 .global programa_excecao_pilha_fim
 programa_excecao_pilha_fim:
+
+// --- o lote B3 do #448 ------------------------------------------------------
+
+// O seletor 0x0F: o indice 1 do LDT (o TI ligado), com o RPL 3. O processador
+// sai do reset -- e cada nucleo secundario, do INIT da partida -- com o LDTR
+// valido, de base 0 e limite 0xFFFF: sem o LDT nulo, o `mov ds` leria o
+// descritor no endereco 8 do processo, num acesso de supervisor, e a falha de
+// pagina viria sem o U. Com o LDT nulo, o seletor e #GP com o codigo 0x0C.
+.balign 8
+.global programa_excecao_ldt_inicio
+programa_excecao_ldt_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_ldt, .Lcodigo_ldt, .Lfim_codigo_ldt
+.Lcodigo_ldt:
+    mov     eax, 0x0F
+.Lcarga_ldt:
+    mov     ds, ax
+    SOBREVIVEU .Lprender_ldt
+.Lfim_codigo_ldt:
+.if .Lcarga_ldt - .Lcodigo_ldt - 5
+.error "a carga do seletor do LDT nao fica onde a suite confere"
+.endif
+.global programa_excecao_ldt_fim
+programa_excecao_ldt_fim:
+
+// A mesma leitura do descritor, sem carregar segmento nenhum: o `lsl`, que o
+// anel 3 executa. Com o LDT nulo, ele so apaga o ZF, e o processo sai com 55;
+// sem ele, a mesma falha de pagina do supervisor no endereco 8.
+.balign 8
+.global programa_excecao_lsl_inicio
+programa_excecao_lsl_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_lsl, .Lcodigo_lsl, .Lfim_codigo_lsl
+.Lcodigo_lsl:
+    mov     eax, 0x0F
+    lsl     ecx, eax
+    mov     eax, 0
+    mov     edi, 55
+    syscall
+.Lprender_lsl:
+    jmp     .Lprender_lsl
+.Lfim_codigo_lsl:
+.global programa_excecao_lsl_fim
+programa_excecao_lsl_fim:
+
+// O SIMD do anel 3, e o canal que ele seria: le o `xmm0` que o processo
+// anterior deixou neste nucleo, deixa nele uma marca, e sai com 1 se a marca
+// ja estava la -- com 0, se nao. Com o `CR0.TS` ligado, a primeira instrucao
+// e #NM, e o processo morre dela. Os bytes por extenso: o alvo soft-float nao
+// monta o `movq` dos registradores de SIMD.
+.balign 8
+.global programa_excecao_simd_inicio
+programa_excecao_simd_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_simd, .Lcodigo_simd, .Lfim_codigo_simd
+.Lcodigo_simd:
+    .byte   0x66, 0x48, 0x0F, 0x7E, 0xC0      // movq rax, xmm0
+    movabs  rcx, 0x5EC4E7D0D0E5A1A1
+    .byte   0x66, 0x48, 0x0F, 0x6E, 0xC1      // movq xmm0, rcx
+    xor     edi, edi
+    cmp     rax, rcx
+    sete    dil
+    mov     eax, 0
+    syscall
+.Lprender_simd:
+    jmp     .Lprender_simd
+.Lfim_codigo_simd:
+.global programa_excecao_simd_fim
+programa_excecao_simd_fim:
+
+// O x87 do anel 3: o `fld1`. Com o `CR0.TS` ligado, e #NM.
+.balign 8
+.global programa_excecao_x87_inicio
+programa_excecao_x87_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_x87, .Lcodigo_x87, .Lfim_codigo_x87
+.Lcodigo_x87:
+    .byte   0xD9, 0xE8                        // fld1
+    SOBREVIVEU .Lprender_x87
+.Lfim_codigo_x87:
+.global programa_excecao_x87_fim
+programa_excecao_x87_fim:
+
+// O passo adiado por um `mov ss` -- o cenario do CVE-2018-8897. O `TF` ligado,
+// e o `mov ss` adia o #DB do passo ate depois da instrucao seguinte, a
+// `syscall`: num processador, o #DB chega no anel 0, na primeira instrucao da
+// entrada, ja na pilha da IST; o kernel apaga o `TF` do quadro e volta, a
+// chamada `id` roda, e o processo morre do passo no anel 3, na volta, depois
+// da `syscall`. O QEMU do TCG nao adia o passo: o #DB sai no anel 3 logo
+// depois do `mov ss`, com o `rip` na `syscall`.
+.balign 8
+.global programa_excecao_movss_inicio
+programa_excecao_movss_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_movss, .Lcodigo_movss, .Lfim_codigo_movss
+.Lcodigo_movss:
+    mov     eax, 2
+    mov     dx, ss
+    pushfq
+    or      qword ptr [rsp], 0x100
+    popfq
+    mov     ss, dx
+.Lna_syscall_movss:
+    syscall
+.Ldepois_movss:
+    nop
+    SOBREVIVEU .Lprender_movss
+.Lfim_codigo_movss:
+.if .Lna_syscall_movss - .Lcodigo_movss - 20
+.error "a syscall do programa do mov ss nao fica onde a suite confere"
+.endif
+.if .Ldepois_movss - .Lcodigo_movss - 22
+.error "a volta da syscall do programa do mov ss nao fica onde a suite confere"
+.endif
+.global programa_excecao_movss_fim
+programa_excecao_movss_fim:
+
+// O seletor 0x1B: o descritor 3 da GDT, a base do `sysret`, que ninguem
+// carrega -- de dados do usuario, e nao de codigo. O caso o marca ausente:
+// o `mov ds` e #NP, com o seletor no codigo.
+.balign 8
+.global programa_excecao_ausente_inicio
+programa_excecao_ausente_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_aus, .Lcodigo_aus, .Lfim_codigo_aus
+.Lcodigo_aus:
+    mov     eax, 0x1B
+.Lcarga_aus:
+    mov     ds, ax
+    SOBREVIVEU .Lprender_aus
+.Lfim_codigo_aus:
+.if .Lcarga_aus - .Lcodigo_aus - 5
+.error "a carga do seletor ausente nao fica onde a suite confere"
+.endif
+.global programa_excecao_ausente_fim
+programa_excecao_ausente_fim:
+
+// O mesmo seletor no `SS`: #SS, com o seletor no codigo.
+.balign 8
+.global programa_excecao_pilha_ausente_inicio
+programa_excecao_pilha_ausente_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_paus, .Lcodigo_paus, .Lfim_codigo_paus
+.Lcodigo_paus:
+    mov     eax, 0x1B
+.Lcarga_paus:
+    mov     ss, ax
+    SOBREVIVEU .Lprender_paus
+.Lfim_codigo_paus:
+.if .Lcarga_paus - .Lcodigo_paus - 5
+.error "a carga do seletor da pilha ausente nao fica onde a suite confere"
+.endif
+.global programa_excecao_pilha_ausente_fim
+programa_excecao_pilha_ausente_fim:
+
+// `sysenter`: num Intel, ele existe no modo de 64 bits e entraria no anel 0
+// pelo `IA32_SYSENTER_CS`; com ele em zero, e #GP(0). Num AMD -- e no QEMU do
+// TCG, com o modelo `qemu64` --, e #UD no modo longo.
+.balign 8
+.global programa_excecao_sysenter_inicio
+programa_excecao_sysenter_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_sysenter, .Lcodigo_sysenter, .Lfim_codigo_sysenter
+.Lcodigo_sysenter:
+    .byte   0x0F, 0x34                        // sysenter
+    SOBREVIVEU .Lprender_sysenter
+.Lfim_codigo_sysenter:
+.global programa_excecao_sysenter_fim
+programa_excecao_sysenter_fim:
 "#
 );
 
@@ -2397,5 +2715,75 @@ programa_excecao_brk_inicio:
 .Lfim_codigo_brk0:
 .global programa_excecao_brk_fim
 programa_excecao_brk_fim:
+
+// --- o lote B3 do #448 ------------------------------------------------------
+
+// O FP/SIMD do EL0, e o canal que ele seria: le o `d0` que o processo
+// anterior deixou neste nucleo, deixa nele uma marca, e sai com 1 se a marca
+// ja estava la -- com 0, se nao. Com o `CPACR_EL1.FPEN` em 00, a primeira
+// instrucao e a excecao da classe 0x07, e o processo morre dela. `.inst`: o
+// alvo -softfloat nao monta o `fmov`.
+.balign 8
+.global programa_excecao_simd_inicio
+programa_excecao_simd_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_simd, .Lcodigo_simd, .Lfim_codigo_simd
+.Lcodigo_simd:
+    .inst   0x9E660000              // fmov x0, d0
+    movz    x1, #0xA1A1
+    movk    x1, #0xD0E5, lsl #16
+    movk    x1, #0xE7D0, lsl #32
+    movk    x1, #0x5EC4, lsl #48
+    .inst   0x9E670020              // fmov d0, x1
+    cmp     x0, x1
+    cset    x0, eq
+    mov     x8, #0
+    svc     #0
+.Lprender_simd:
+    b       .Lprender_simd
+.Lfim_codigo_simd:
+.global programa_excecao_simd_fim
+programa_excecao_simd_fim:
+
+// O `msr daif` do EL0, com o I ligado: com o `SCTLR_EL1.UMA` desligado, e a
+// excecao da classe 0x18, e o processo morre dela; ligado, o processo
+// mascararia as IRQs do nucleo, e nenhum tique o tiraria dali.
+.balign 8
+.global programa_excecao_daif_inicio
+programa_excecao_daif_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_daif, .Lcodigo_daif, .Lfim_codigo_daif
+.Lcodigo_daif:
+    mov     x0, #0x80
+.Lmsr_daif:
+    msr     daif, x0
+    SOBREVIVEU .Lprender_daif
+.Lfim_codigo_daif:
+.if .Lmsr_daif - .Lcodigo_daif - 4
+.error "o msr do daif nao fica onde a suite confere"
+.endif
+.global programa_excecao_daif_fim
+programa_excecao_daif_fim:
+
+// O `wfi` do EL0: com o `SCTLR_EL1.nTWI` desligado, e a excecao da classe
+// 0x01, e o processo morre dela. A arquitetura so prende o `wfi` que iria
+// dormir: com uma IRQ ja pendente, ele passa, a IRQ e atendida, e o laco o
+// repete -- quatro vezes, e o processo sai pelo SOBREVIVEU, se nenhum foi
+// preso.
+.balign 8
+.global programa_excecao_wfi_inicio
+programa_excecao_wfi_inicio:
+    ELF_DE_UM_SEGMENTO .Lelf_wfi, .Lcodigo_wfi, .Lfim_codigo_wfi
+.Lcodigo_wfi:
+    mov     x2, #4
+.Lwfi:
+    wfi
+    subs    x2, x2, #1
+    b.ne    .Lwfi
+    SOBREVIVEU .Lprender_wfi
+.Lfim_codigo_wfi:
+.if .Lwfi - .Lcodigo_wfi - 4
+.error "o wfi nao fica onde a suite confere"
+.endif
+.global programa_excecao_wfi_fim
+programa_excecao_wfi_fim:
 "#
 );

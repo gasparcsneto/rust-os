@@ -415,7 +415,7 @@ kernel/src/
 │   ├── coleta.rs    os casos da cópia da auditoria para o journal: com a trava da auditoria na mão, só a cópia dos ponteiros — nenhum pedido nem devolução ao alocador, pela conta do próprio alocador, e nenhuma entrada montada, com o controle positivo das contas —, e cada copiado montado; o auditado logo depois da cópia, que fica para a gravação seguinte; o anel que transborda no meio da coleta, com o copiado inteiro, devolvido depois por quem o segurava, e a lacuna do resto; um registro do journal cheio de registros mínimos — os cinco textos vazios —, o maior lote de ponteiros que a cópia pode copiar, no lugar reservado, sem nada pedido nem devolvido com a trava; a gravação que falha, sem andar a gravada; produtores em vários núcleos e três coletores ao mesmo tempo, sem perder, repetir nem desordenar, e o boot seguinte com a mesma cadeia; a compactação, que copia o anel do mesmo jeito, numa tomada só; o anel que perde registros antes da tomada dela, com a marca da base a partir do primeiro copiado e o boot seguinte que a adota; a compactação sem nenhum gravado no anel, só com a marca e o elo guardado; produtores sem folga, três coletores e compactações seguidas, com cada base inteira e o journal seguido; e o registro que chega ao teto da auditoria sem passar dele, a conta do que cabe com os dois bytes do tamanho de cada campo
 │   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu; e o kernel que os fecha em cada núcleo depois de um firmware que os deixasse abertos — os controles sujos e a função do boot chamada de novo (o lote B2 do #448)
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
-│   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer
+│   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer; e os do lote B3: no x86, o seletor do LDT (`mov ds` e `lsl`), a falha de página do supervisor pelo LDT de teste, o SSE e o x87 no `#NM` — o SSE duas vezes por núcleo, pelo canal —, o passo no anel 0 e o do `mov ss`, o `#NP` e o `#SS` do descritor ausente, o `sysenter` e a pilha da IST do `#MC`; no ARM, o FP/SIMD na classe 0x07, duas vezes por núcleo, o `msr daif` e o `wfi`; e, nas duas, o regime de cada núcleo — o `CR0`, o `CR4`, o `DR7` e o `sysenter`; o `SCTLR_EL1` e o `CPACR_EL1` — como o kernel o escreve, também depois de sujo
 │   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
@@ -450,7 +450,7 @@ kernel/src/
 │   ├── programa.rs  mapeia o processo e desce de privilégio
 │   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
-│   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: oito no x86, três no ARM), também só para a suíte
+│   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: dezesseis no x86, seis no ARM), também só para a suíte
 ├── tarefas/
 │   ├── mod.rs       tarefa, identidade e o `yield` explícito
 │   ├── executor.rs  escalonador cooperativo com suporte a wakers
@@ -1090,9 +1090,10 @@ ligado com a contagem que o primeiro mediu, e o escalonador.
 ```
 
 **O que é de cada núcleo.** O fio atual, o quantum e o ocioso, no
-escalonador; a pilha de interrupção e as pilhas de emergência (falha dupla e
-NMI), num TSS por núcleo no x86; a pilha de kernel da chamada de sistema,
-alcançada pelo `GS` só nas quatro instruções da entrada. No ARM toda exceção —
+escalonador; a pilha de interrupção e as pilhas de emergência da IST (a falha
+dupla, a NMI, o `#DB` e o `#MC`), num TSS por núcleo no x86; a pilha de
+kernel da chamada de sistema, alcançada pelo `GS` só nas quatro
+instruções da entrada. No ARM toda exceção —
 a interrupção, a falha e a chamada de sistema, com o comando inteiro que um
 processo pede — roda na pilha de exceção do núcleo (`SP_EL1`): 60 KiB da
 área de pilhas, com uma página de guarda embaixo, em todos os núcleos. O
@@ -2125,7 +2126,9 @@ resolve. O `#MC` e o SError são sempre fatais: é o hardware. Fora a
 cópia na escrita e o `svc` do EL1 — a cessão de um fio do kernel —, o
 `int3` do anel 0 e o `brk` do EL1 são os únicos que voltam — o
 `debug.trigger` —, e o estouro de propósito do `debug.trigger` com
-`stack_overflow` — e, no ARM, `stack_overflow_edge` — só vale deles.
+`stack_overflow` — e, no ARM, `stack_overflow_edge` — só vale deles; e,
+desde o lote B3, o `#DB` do passo que um `mov ss` do processo adia até o
+anel 0, que volta sem o `TF` (ver abaixo).
 
 Até o lote B2 do #448, no x86 só o `#GP` e a falha de página seguiam a
 regra: a IDT tinha o `#BP`, o `#UD` — fatal sem olhar o anel —, o `#GP`, a
@@ -2146,7 +2149,9 @@ Agora todas as exceções do crate `x86_64` — `#DE`, `#DB`, `#BP`, `#OF`,
 `#BR`, `#UD`, `#NM`, `#TS`, `#NP`, `#SS`, `#GP`, a falha de página, `#MF`,
 `#AC`, `#MC`, `#XM`, `#VE`, `#CP`, `#HV`, `#VC` e `#SX` — têm tratador — o
 `#DF` e a NMI já tinham —, pela mesma regra (`arch::x86_64::idt`), menos
-o `#MC`, sempre fatal, que roda na pilha do `#DF`.
+o `#MC`, sempre fatal, que roda numa pilha da IST só dele
+(`gdt::IST_VERIFICACAO_DA_MAQUINA`; até o lote B3, na do `#DF` — ver
+abaixo).
 No ARM (`arch::aarch64::vetores`), os dois imediatos só valem do EL1, e o
 `brk` do EL0 mata o processo como as outras falhas do EL0; nenhuma outra
 classe que o EL0 provoca é atendida, antes da pergunta, com efeito do
@@ -2176,36 +2181,209 @@ pilha de kernel do fio, a que o `#GP` usaria, vazia — o fio estava no
 anel 3 —, e a pilha da IST, sem guarda, não guarda o fio morto dormindo
 com as interrupções ligadas.
 
-**O que fica: o passo adiado por um `mov ss`, só no processador.** Com o
-`TF` ligado, o `mov ss` adia o `#DB` do passo dele até depois da
-instrução seguinte (o `pop ss` não existe em 64 bits); se ela leva ao
-anel 0 — a `syscall`, ou uma instrução que vira exceção —, o `#DB` chega
-no anel 0, na primeira instrução da entrada ou do tratador. A pilha da
-IST garante que o quadro não vai para a pilha do processo, e o tratador
-o tem por fatal, como todo `#DB` do anel 0: por esse caminho, num
-processador, um processo ainda para a máquina. O conserto conhecido — o
-do Linux (`exc_debug_kernel`), para o cenário do CVE-2018-8897 — trata o
-`#DB` do anel 0 com o `BS`
-no `DR6` como esse passo adiado, já que o kernel nunca anda em passos:
-apaga o `TF` do quadro e volta, e o processo morre pelo caminho de
-sempre — o `#DB` do anel 3 depois do `sysretq`, com o `TF` dele de
-volta, ou o tratador da exceção. Não entrou no lote B2: nenhum caso leva
-o passo adiado ao anel 0 — o QEMU 8.2 do TCG não adia o passo, e o `#DB`
-sai no anel 3, logo depois do `mov ss` (o adversário do lote B2 o
-conferiu nas fontes dele) —, e seria código sem teste num tratador de
-exceção. Fica para o lote B3, o seguinte, com um caso em que o próprio
-kernel liga o `TF` no anel 0.
+**O passo adiado por um `mov ss` volta (o lote B3 do #448).** Com o `TF`
+ligado, o `mov ss` adia o `#DB` do passo dele até depois da instrução
+seguinte (o `pop ss` não existe em 64 bits); se ela leva ao anel 0 — a
+`syscall`, ou uma instrução que vira exceção —, num processador o `#DB`
+chega no anel 0, na primeira instrução da entrada ou do tratador, com o
+`BS` no `DR6` (o cenário do CVE-2018-8897). A pilha da IST garante que o
+quadro não vai para a pilha do processo; mas o tratador tinha todo `#DB`
+do anel 0 por fatal, e por esse caminho um processo parava a máquina. O
+conserto segue o do Linux (`exc_debug_kernel`), mais estrito — só o
+passo, e sozinho —: o `#DB` do anel 0 com o `BS` como **única** causa no
+`DR6` apaga o `TF` do quadro, é contado — um
+atômico, sem trava nem log no tratador, porque o anel 0 interrompido pode
+ter uma trava na mão — e volta; a chamada roda, e o processo morre pelo
+caminho de sempre: o `#DB` do anel 3 depois do `sysretq`, que lhe devolve o
+`TF` dele, ou o tratador da exceção. As outras causas — os pontos B0 a B3,
+o `BD`, o `BT` — seguem fatais: o kernel não arma nenhuma. A conta vai ao
+`traps.stats` (`kernel_single_steps`). O QEMU 8.2 do TCG não adia o passo —
+o `#DB` sai no anel 3, logo depois do `mov ss` (o adversário do lote B2 o
+conferiu nas fontes dele) —, e a suíte leva o passo ao anel 0 de outro
+jeito: o próprio kernel liga o `TF` no anel 0, mascarado (`pushfq`, o `TF`
+no topo, `popfq`, dois `nop`), e o caso confere, em cada núcleo, que a conta
+andou um, que o `TF` saiu e que nenhuma falha foi contada (`excecoes: o
+passo no anel 0 volta sem o TF, e a conta anda`). Antes do conserto, a
+rodada dele parava em `FALHA FATAL #0: debug`, com o `DR6` 0xffff4ff0 — o
+`BS`. E o programa do adversário — o `TF`, o `mov ss` e a `syscall` do
+`id` — morre do passo nas duas formas: no TCG, no anel 3 com o `rip` na
+`syscall` (a entrada mais 20); num processador, na volta da chamada (a
+entrada mais 22) (`excecoes: o passo adiado pelo mov ss mata o processo, e a
+maquina segue`).
 
-**O que fica, também: o LDT do reset e o FP/SIMD.** O adversário do lote
-B2 achou outro caminho do anel 3 até a máquina parada. O processador sai
-do reset — e cada secundário, do INIT da partida — com o LDTR válido, de
-base 0, e o kernel não o carrega: um seletor com o TI ligado (`mov ds`,
-`lsl`…) faz o processador ler o descritor no endereço 0x8 do processo,
-num acesso de supervisor, e a falha de página sem o `U` é tomada por do
-kernel. E achou o estado de FP/SIMD, que o kernel não salva nem zera,
-passando de um processo ao seguinte no mesmo núcleo — um canal entre
-titulares por fora do gate. Os dois ficam para o lote B3, com o resto do
-que ele achou.
+**A morte pelo `#DB` anotada na pilha do fio.** O `#DB` do anel 3 anotava
+a morte — o log com formatação, o eco no console, a trava do escalonador,
+o cutucão — nos 20 KiB sem guarda da IST, antes do salto para a pilha de
+kernel do fio. Agora o tratador salta primeiro, e uma ponte `extern "C"`
+anota já na pilha do fio, com o `pc` e o `DR6` em dois registradores (o
+item 5 do adversário do lote B2). E o `#MC` tem uma pilha da IST só dele
+(`gdt::IST_VERIFICACAO_DA_MAQUINA`): ele dividia a do `#DF`, e um chegando
+no meio do post-mortem do outro recomeçava a pilha por cima do relatório em
+curso (o item 6; `excecoes: o #MC tem pilha da IST propria em cada nucleo,
+separada da do #DF`, que confere o portão do vetor 18 na IDT carregada e o
+topo dessa pilha no TSS de cada núcleo).
+
+**O LDT do reset (o lote B3).** O processador sai do reset — e cada
+secundário, do INIT da partida — com o `LDTR` válido, de base 0 e limite
+0xFFFF (SDM, tabela 9-1), e nem o firmware, nem o iniciador, nem o kernel o
+carregavam: um seletor com o TI ligado vindo de um processo (`mov ds` com
+0x0F; também `mov ss/fs/gs`, `lsl`, `lar`, `verr`, `verw`, um `retf` ou um
+`iretq`) fazia o processador ler o descritor no endereço 0x8 **do
+processo**, num acesso de supervisor (SDM 4.6). Ali não há página, e a
+falha de página sem o `U` era tomada por do kernel: a rodada do caso antes
+da correção parou em `FALHA FATAL #0: page_fault em pc=0x100000005
+codigo=0x0`, `endereco acusado: 0x8`, no primeiro núcleo: o OVMF deixa
+nele o `LDTR` de base 0. Agora `gdt::carregar` carrega o **LDT nulo** em todo
+núcleo, o primeiro e cada um que acorda: o `mov ds` é `#GP` com o seletor no
+código (0x0C), e o processo morre dele (`excecoes: o seletor do LDT do anel
+3 mata o processo pelo #GP, e a maquina segue`); o `lsl` do mesmo seletor
+só apaga o `ZF`, e o processo sai com 55 (`excecoes: o lsl de um seletor do
+LDT nao falha, e o processo sai`). E, em defesa, a falha de página culpa o
+processo também pelo `CS` do quadro (`do_anel_3`), como toda outra exceção
+e como o Linux ("User-mode registers count as a user access"): o `U` diz o
+privilégio do **acesso**, e o descritor que o processador lê para uma
+instrução do anel 3 é um acesso de supervisor. A cópia na escrita continua
+antes da pergunta e sem olhar o anel. Um caso a confere sozinha: com um LDT
+de teste carregado no núcleo — de base num endereço sem página em espaço
+nenhum, como o do reset —, o `mov ds` com 0x0F mata o processo pela falha
+de página no endereço da base mais 8, sem o `U` no código (`excecoes: a
+falha de pagina de um acesso do supervisor pedido pelo anel 3 mata o
+processo`); depois, o núcleo volta ao LDT nulo.
+
+**O FP/SIMD preso no anel 3 e no EL0 (o lote B3).** O kernel não salvava
+nem zerava o estado de ponto flutuante e de SIMD de um processo para o
+outro: no x86, `trocar_contexto` só guarda os registradores preservados, e
+o `CR4` do firmware, com o `OSFXSR`, deixava o SSE funcionar no anel 3; no
+ARM, o kernel nunca escrevia o `CPACR_EL1` — no boot cru ele sai do reset
+em zero, e o FP do EL0 já caía, mas pela UEFI o EDK2 o deixa com o `FPEN`
+em 11. Um processo deixava um valor no `xmm0` (ou no `d0`), e o seguinte, de
+outro titular, no mesmo núcleo, o lia: um canal entre titulares, por fora
+do gate, da auditoria e do NSF — e mais o estado de um código de fora que
+use SIMD, um `MXCSR` com exceções desmascaradas ou um arredondamento
+trocado passados ao seguinte. O programa da prova do adversário, rodado
+duas vezes no mesmo núcleo, mostrou o canal antes da correção: a primeira
+rodada saiu com 0 e a segunda com 1, nos quatro núcleos do x86, pela
+suíte (`cargo xtask test`, que sobe pelo OVMF e pelo iniciador); no ARM,
+pela UEFI (`cargo xtask iniciador`), o caso reprovou pelo canal — a
+segunda rodada leu o `d0` da primeira. A correção **prende** o FP/SIMD, pelo
+precedente do #451: os alvos dos programas e do kernel são *soft-float* (o
+DS-2), nenhum programa do contrato usa ponto flutuante, e o código de fora
+dele passa de uma corrupção calada a uma falha dita. No x86, o `CR0.TS` e o
+`CR0.MP` ligados em todo núcleo, e nunca desligados — nenhum `clts` —: toda
+instrução do anel 3 que toca o estado do x87, do MMX, do SSE ou do AVX é
+`#NM` — o AVX, num processador sem ele ou sem o `OSXSAVE`, é `#UD` antes —,
+e o processo morre dela
+(`excecoes: o SSE do anel 3 cai no #NM, e o xmm0 de um processo nao chega ao
+seguinte`, o programa da prova duas vezes em cada núcleo; `excecoes: o x87
+do anel 3 cai no #NM`, o `fld1`). O `fninit` do núcleo que acorda vai para
+antes do `CR0` do primeiro: com o `TS`, ele seria `#NM` no anel 0 antes da
+IDT. O `cargo xtask` confere, no build, que o kernel e os programas não têm
+instrução de x87, MMX, SSE nem AVX — os registradores `xmm`, `ymm`, `zmm`,
+`st` e `mm`, os mnemônicos do x87, o `wait`, o `emms`, o `ldmxcsr`, o
+`stmxcsr`, o `xsave` e o `xrstor` —, menos aquele `fninit`
+(`conferir_sem_simd`); e o kernel não chama os serviços de execução da
+UEFI, que usariam o SSE — a entrega do iniciador nem leva a tabela deles, e
+o reinício e o desligamento são pela ACPI. No ARM, o `CPACR_EL1` em zero
+em todo núcleo — o `FPEN` em 00, que prende o FP/SIMD no EL0 e no EL1 —,
+também no bloco de partida dos secundários, e a classe 0x07 ganhou o nome
+`fp_simd_trap`
+(`excecoes: o FP/SIMD do EL0 cai na classe 0x07, e o d0 de um processo nao
+chega ao seguinte`, o `fmov` duas vezes em cada núcleo). Isto **não**
+decide a R12-SIMD (`docs/DECISOES.md`), que pergunta se o kernel salva o
+estado e libera o SIMD aos programas: salvar e restaurar, ou zerar na
+troca, são o que ela decide.
+
+**O regime de cada núcleo (o lote B3).** O que vale para todo processo que
+roda num núcleo é escrito pelo kernel, e não herdado do firmware
+(`escrever_o_regime_deste_nucleo`, nas duas arquiteturas, em cada núcleo
+antes do primeiro processo). No x86: o `CR0.TS` e o `CR0.MP`; o `CR4`
+inteiro, com os bits que o kernel quer (`cr4_do_kernel`: o `PAE`, o `TSD`,
+o `OSFXSR` — sem ele, o SSE seria `#UD` antes do `#NM` —, o `OSXMMEXCPT`,
+como o OVMF o deixa — ele só escolhe entre o `#XM` e o `#UD` de uma
+exceção de SIMD desmascarada, inalcançável com o `TS` —, e, se o
+processador os tem, o `DE`, o `MCE`, o `OSXSAVE` e o `SMEP`; o `LA57` como
+está) — o `FSGSBASE` e o `PKE` de um firmware seriam outro registrador
+passado de um processo ao seguinte, e cada núcleo que acorda escreve o do
+kernel em vez de copiar o do primeiro; o `DR7` e o `DR6` em repouso (0x400 e
+0xFFFF0FF0: nenhum ponto armado, nenhuma causa) e os quatro pontos zerados
+— um ponto armado pelo firmware daria um `#DB` fatal no anel 0 —; e os três registradores do `sysenter` em zero — num Intel, ele existe
+em 64 bits e entraria no anel 0 pelo que o firmware deixasse; com o seletor
+zero é `#GP(0)`, num AMD e no QEMU do TCG (o modelo `qemu64`) é `#UD`
+(`excecoes: o sysenter do anel 3 mata o processo`, que aceita as duas). O
+OVMF deixa o `CR0` em 0x80010033, o `CR4` em 0x668 (`DE`, `PAE`, `MCE`,
+`OSFXSR` e `OSXMMEXCPT`), o `DR7` em 0x400 e o `sysenter` em zero; o kernel
+escreve o `CR4` 0x10066c (mais o `TSD` e o `SMEP`) e liga o `TS` — o log do
+boot diz os dois. No ARM, o `SCTLR_EL1` escrito inteiro, e não só o `M`, o
+`C` e o `I` (`mmu::SCTLR_DO_KERNEL`, 0x30D0191D, com o porquê de cada bit):
+o `UMA` desligado — ligado, o `msr daif` do EL0 mascararia as IRQs e
+prenderia o núcleo (`excecoes: o msr daif do EL0 mata o processo, e o
+nucleo nao fica mascarado`) —, o `UCI`, o `DZE` e o `UCT` desligados — a
+manutenção de cache por endereço é a ferramenta do *Flush+Reload* do ARM —,
+o `nTWI` e o `nTWE` desligados — o `wfi` e o `wfe` do EL0 que iriam
+dormir presos (`wfx_trap`): o `sev` de um processo acordaria o `wfe` de
+outro, noutro núcleo, um sinal entre titulares por fora do gate (`excecoes:
+o wfi do EL0 mata o processo`; o QEMU do TCG trata o `wfe` como um
+`yield`, e não o prende). O `wfe` sem evento pendente mata o processo; o
+que tem um — do `eret` da volta, ou de um `sev` de outro núcleo, que o
+EL1 não prende — passa, e a arquitetura não deixa prendê-lo: o sinal fica
+caro, uma morte contada a cada zero, com ruído, mas não some —, o `SA` e o `SA0` ligados, o `E0E` e o `EE` em *little-endian*, e
+os bits que o ARMv8.0 reserva em 1 ligados; e o `CPACR_EL1` em zero. O
+reset — o boot cru da suíte — deixa o `SCTLR_EL1` em 0x00C50838 e o
+`CPACR_EL1` em zero; o EDK2, o `SCTLR_EL1` em 0x30D01988 — sem o `M` e o
+`C`, que o iniciador desliga antes do salto: o `UMA`, o `UCI`, o `DZE`, o
+`UCT`, o `nTWI` e o `nTWE` já desligados, o `SA0` desligado — e o `FPEN` em
+11 (0x300000). Do EDK2 para o do kernel, ligam o `M`, o `C` e o `SA0`, e
+desliga o `ITD`, do AArch32; do reset, ligam o `M`, o `C`, o `I`, o `SED`,
+o `TSCXT`, o `nTLSMD` e o `LSMAOE`, e desligam o `nTWI`, o `nTWE` e o
+`CP15BEN`. O caso `excecoes: em cada nucleo, o
+regime esta como o kernel o escreve, tambem depois de sujo` confere, em
+cada núcleo, que ele o escreveu ao ligar, que o regime é o do kernel, e
+que, sujo como um firmware o deixaria aberto, a função do boot o escreve de
+novo.
+
+**O `RSP0` de um fio novo.** A entrada de um processo
+(`usuario::programa::entrar`) informava a pilha de kernel do fio ao núcleo
+com as interrupções ligadas: entre a leitura do núcleo e a escrita, o tique
+podia levar o fio a outro núcleo, e a escrita punha a pilha dele no `RSP0`
+e na estrutura da `syscall` do núcleo de antes — o fio que rodava lá
+empilhava as interrupções do anel 3 na pilha deste (o item 4 do adversário
+do lote B2). A chamada era redundante — a troca de contexto que põe o fio
+num núcleo já a informa, e cada troca a informa de novo, também a do fio
+que migra, a do filho do `fork` e a de quem troca de imagem — e saiu, e a
+pilha de kernel deixou de ser da interface `arch` (só o x86 a tem). O
+`RSP0` e a estrutura por núcleo são escritos com o núcleo lido uma vez só,
+e um `debug_assert!` de interrupções mascaradas faz qualquer chamador solto
+reprovar a suíte de depuração na primeira entrada de um processo. No ARM
+não há escrita assim: o `SP_EL1` de cada núcleo é escrito no boot,
+mascarado.
+
+**O que fica, depois do lote B3.** A R12-SIMD (`docs/DECISOES.md`), aberta:
+o FP/SIMD preso fecha o canal, e liberá-lo aos programas, salvando o estado
+de cada processo, é o que ela decide. O AMU do ARM, como o lote B2 o
+deixou. O caminho
+de verdade do passo adiado pelo `mov ss` só roda num processador — a suíte
+leva o passo ao anel 0 pelo `TF` do próprio kernel —, e o `#GP(0)` do
+`sysenter` só num Intel: no emulador, os dois casos aceitam as duas
+formas, e dizem qual viram. O `#MC` não se provoca na suíte: o caso confere
+a pilha dele, e o tratador é o mesmo de antes. A corrida do `RSP0` não tem
+caso direto: a escrita solta saiu, e o `debug_assert!` pega a que voltar,
+só na depuração.
+
+E o que o adversário do lote B3 achou, que vai para o lote B4: o
+`TPIDR_EL0` do ARM, que o kernel não guarda por fio — 64 bits de um
+processo ao seguinte no mesmo núcleo (alta) —; os seletores `DS`, `ES`,
+`FS` e `GS` do x86, pela mesma razão (alta, de banda menor: uns 15 bits por
+troca); o `nomem` das máscaras de interrupção do ARM, que deixa o
+compilador tirar uma leitura de dentro da janela do coletor; o `XCR0` que o
+firmware escolhe e o kernel copia — o AMX não confere o `TS` —; os
+registradores gerais na primeira entrada de um processo, que chegam com o
+que o kernel deixou; o `UMIP` do x86, desligado — com ele, o `sgdt`, o
+`sidt`, o `sldt`, o `smsw` e o `str` do anel 3 seriam `#GP`; o TCG do QEMU
+8.2 o tem (`+umip`), e o lote B4 o liga, com um caso —; o caso do regime
+do x86, que confere o `CR4` contra a mesma função que o escreve, e não
+olha os `DR0` a `DR3`; o `conferir_sem_simd`, que não conhece os `k0` a
+`k7`, o `vzeroupper`, o `vldmxcsr` nem o AMX; e o `MDSCR_EL1` e o
+`TPIDRRO_EL0` do ARM, que o regime não escreve.
 
 O `int3` do anel 3 não chega ao `#BP`: o portão tem DPL 0, e o `int3` de
 um anel acima dele é um `#GP` com o vetor no código de erro (0x1A) — o
@@ -2236,13 +2414,25 @@ como o processador, e o caso aceita as duas formas, ditas nele: o `int1`
 é um `#UD` no emulador (um `#DB` num processador), e o `push` não
 canônico, uma falha de página no endereço truncado (um `#SS`) — e, no
 QEMU da CI, que confere a forma canônica, um `#GP` com o código zero, que
-o caso também aceita (a CI 513 o mostrou). As outras
-exceções com código de erro — `#TS`, `#NP`, `#AC`, `#CP`, `#VC`, `#SX` —
-e o `#NM`, o `#OF`, o `#BR`, o `#VE` e o `#HV` não se alcançam do anel 3
-no emulador com o que o kernel liga; os tratadores delas usam a mesma
-regra. O `#MF` e o `#XM` podem se alcançar do anel 3 — o x87 ou o `MXCSR`
-desmascarados —, sem caso: usam o tratador do grupo sem código de erro,
-que o caso do `ud2` confere. Antes da correção, uma rodada por caso mostrou o achado: o `ud2` e
+o caso também aceita (a CI 513 o mostrou). O lote B3
+acrescentou, no x86: o `mov ds` com o seletor do LDT, o `lsl` dele e a
+falha de página do supervisor pelo LDT de teste (ver *O LDT do reset*); o
+SSE e o x87, no `#NM`; o passo no anel 0 e o do `mov ss`; o `sysenter`; e o
+grupo com código de erro, que nenhum programa alcançava no emulador — a
+mutação que o devolvia a fatal sobrevivia (ver *As mutações das exceções*) —: o caso marca
+ausente, só durante ele, o descritor da base do `sysret`, que nada carrega
+(o seletor 0x18, de dados do usuário, e não de código), e o `mov ds` com
+0x1B morre de `#NP(0x18)` e o `mov ss` de `#SS(0x18)` (`excecoes: o
+segmento ausente do anel 3 mata o processo pelo #NP` e `excecoes: a pilha
+ausente do anel 3 mata o processo pelo #SS`). No ARM: o `fmov`, o `msr
+daif` e o `wfi`. E, nas duas, o regime de cada núcleo; no x86, também a
+pilha da IST do `#MC`. Os casos do lote B3 conferem, além do nome, do `pc`
+e do código, o endereço da falha, quando ela tem um (`Esperada.endereco`). As outras exceções com
+código de erro — `#TS`, `#AC`, `#CP`, `#VC`, `#SX` — e o `#OF`, o `#BR`, o
+`#VE` e o `#HV` não se alcançam do anel 3 no emulador com o que o kernel
+liga; os tratadores delas usam a mesma regra, a do `#NP` e do `#SS`. O
+`#MF` e o `#XM` não se alcançam mais: o x87 e o SSE do anel 3 são `#NM`
+antes. Antes da correção, uma rodada por caso mostrou o achado: o `ud2` e
 o `int1` (`FALHA FATAL: invalid_opcode`, no `pc` da entrada), o `TF` e um
 `nop` (`double_fault`, o `#DB` ausente), o `NT` (`general_protection_fault`
 no `iretq` do fim do tratador do timer, o do companheiro, acordado pela
@@ -2274,8 +2464,37 @@ cauda).
 | o imediato do estouro (0xE5), no ARM, de volta antes de `veio_de_usuario` | reprovou — `excecoes: o brk do estouro de proposito no EL0 mata o processo, e a pilha nao afunda`: `FALHA FATAL: estouro_da_pilha_de_excecao` |
 | o da borda (0xE6), no ARM, de volta antes de `veio_de_usuario` | reprovou — `excecoes: o brk do estouro na borda no EL0 mata o processo, e a guarda nao e pisada`: `FALHA FATAL: estouro_da_pilha_de_excecao` aos 2,8 s, com a guarda pisada (rodada na integração do lote) |
 | o `brk` do EL0 de volta a registrar e seguir | reprovou — `excecoes: o brk do EL0 mata o processo, e nao registra e segue`: "o processo seguiu depois da excecao" |
-| o grupo com código de erro (`com_codigo!`: `#TS`, `#NP`, `#SS`, `#AC`…) de volta a fatal no anel 3 | **sobreviveu**, e não há caso no emulador que a mate: o `push` não canônico, no QEMU 8.2 do TCG, é uma falha de página, e nenhuma outra exceção do grupo se alcança do anel 3 com o que o kernel liga (sem `CR0.AM`, sem descritor ausente, sem CET). O `#GP`, que usa a mesma regra, é exercitado pelo `int3` e pelo `contador`; a falha de página, pelo `invasor` e, no emulador, pelo `push` não canônico |
+| o grupo com código de erro (`com_codigo!`: `#TS`, `#NP`, `#SS`, `#AC`…) de volta a fatal no anel 3 | **sobreviveu** no lote B2 — no lote B3, os casos do `#NP` e do `#SS` com o descritor ausente a matam, na tabela de baixo —, e não havia caso no emulador que a matasse: o `push` não canônico, no QEMU 8.2 do TCG, é uma falha de página, e nenhuma outra exceção do grupo se alcança do anel 3 com o que o kernel liga (sem `CR0.AM`, sem descritor ausente, sem CET). O `#GP`, que usa a mesma regra, é exercitado pelo `int3` e pelo `contador`; a falha de página, pelo `invasor` e, no emulador, pelo `push` não canônico |
 | o `#BP` do anel 3 de volta a registrar e seguir | **sobreviveu**, equivalente: o portão do `#BP` tem DPL 0, e o `int3` do anel 3 é um `#GP` (`excecoes: o int3 do anel 3 mata o processo, e nao registra e segue` confere o `#GP` com o código 0x1A); a regra no `#BP` vale no dia em que o portão mudar |
+
+E as do lote B3, do mesmo jeito, em debug, contra `DUKE_PARTE=k/1035` no
+x86 e `k/1020` no ARM — um caso por parte, e a cauda; a do `nTWI` e do
+`nTWE`, contra `1021/1021`, a parte do caso do `wfi`, o último —, e a do
+`CPACR_EL1` também pela UEFI (`cargo xtask iniciador`), onde o EDK2 deixa o
+`FPEN` em 11. As treze reprovaram na primeira rodada.
+
+| Mutação | Resultado |
+|---|---|
+| sem o LDT nulo (`gdt::carregar` sem o `lldt`) | reprovou — `excecoes: o seletor do LDT do anel 3 mata o processo pelo #GP, e a maquina segue`: "a falha contada nao foi a da excecao do programa, na instrucao dela" — o processo morreu, em cada núcleo, da falha de página no endereço 0x8, com o código 0, e não do `#GP(0x0C)` —; e `excecoes: o lsl de um seletor do LDT nao falha, e o processo sai`: "uma falha foi contada para um processo que nao devia falhar" (a mesma falha de página). A máquina seguiu: a culpa pelo `CS`, a correção em defesa, deu a falha ao processo |
+| a falha de página sem a culpa pelo `CS` (só o `U` do código) | reprovou — `excecoes: a falha de pagina de um acesso do supervisor pedido pelo anel 3 mata o processo`: `FALHA FATAL #0: page_fault em pc=0x100000005 codigo=0x0`, o `mov ds` com o seletor do LDT de teste |
+| sem o `CR0.TS` (o x86) | reprovou — `excecoes: o SSE do anel 3 cai no #NM, e o xmm0 de um processo nao chega ao seguinte`: "o canal: a segunda rodada no mesmo nucleo leu o registrador que a primeira deixou"; `excecoes: o x87 do anel 3 cai no #NM`: "o processo seguiu depois da excecao"; e `excecoes: em cada nucleo, o regime esta como o kernel o escreve, tambem depois de sujo`: "o regime do nucleo nao esta como o kernel o escreve" |
+| sem a escrita do `CPACR_EL1` (o ARM) | reprovou — no boot cru, `excecoes: em cada nucleo, o regime esta como o kernel o escreve, tambem depois de sujo`: "o kernel nao reescreveu o regime que outro deixou aberto" (o reset já deixa o `CPACR_EL1` em zero: só o regime sujo a mostra); e, pela UEFI, `excecoes: o FP/SIMD do EL0 cai na classe 0x07, e o d0 de um processo nao chega ao seguinte`: "o canal: a segunda rodada no mesmo nucleo leu o registrador que a primeira deixou" — no núcleo 0 a primeira rodada saiu com 0 e a segunda com 1; os secundários levam o zero do bloco de partida (`smp.rs`), e o FP seguiu preso neles |
+| o `BS` do anel 0 de volta a fatal | reprovou — `excecoes: o passo no anel 0 volta sem o TF, e a conta anda`: `FALHA FATAL #0: debug em pc=0xffff80000098e28f codigo=0xffff4ff0`, o `BS` no `DR6` |
+| a escrita do `RSP0` de volta ao `entrar`, com as interrupções ligadas | reprovou em debug — o primeiro processo da parte parou a suíte no `debug_assert!` de `usuario::definir_pilha_de_kernel` (`panicked at src/arch/x86_64/usuario.rs:120:5`: "a pilha de kernel informada com as interrupcoes ligadas"). Em release o `debug_assert!` não existe, e a corrida em si não tem caso: sem a escrita do `entrar` não há escrita solta onde um gancho de teste pare o fio entre a leitura do núcleo e a escrita — a que fica, a da troca de contexto, é mascarada |
+| o grupo com código de erro de volta a fatal no anel 3 (a que sobrevivia no lote B2) | reprovou — `excecoes: o segmento ausente do anel 3 mata o processo pelo #NP`: `FALHA FATAL #0: segment_not_present em pc=0x100000005 codigo=0x18`; e `excecoes: a pilha ausente do anel 3 mata o processo pelo #SS`: `FALHA FATAL #0: stack_segment_fault em pc=0x100000005 codigo=0x18` |
+| a pergunta do coletor fora da janela mascarada | reprovou nas duas — `zumbis: o chamado que chega na janela do sono do coletor acorda o sono, e nao espera o tique`: "o cutucao do chamado foi atendido dentro da janela, antes do sono: o coletor dormia ate o tique" (ver *As mutações do chamado do coletor*) |
+| o `#MC` de volta à pilha do `#DF` | reprovou — `excecoes: o #MC tem pilha da IST propria em cada nucleo, separada da do #DF`: "o #MC divide a pilha da IST com outro portao" |
+| o `sysenter` sem a escrita (o x86) | reprovou — `excecoes: em cada nucleo, o regime esta como o kernel o escreve, tambem depois de sujo`: "o kernel nao reescreveu o regime que outro deixou aberto" — o `SYSENTER_CS` sujo (8) ficou, em cada núcleo; o OVMF já o deixa em zero, e só o regime sujo a mostra. O caso do `sysenter` passa com ela: no `qemu64`, um AMD, a instrução é `#UD` em 64 bits, seja qual for o MSR |
+| o `SCTLR_EL1` com o `UMA` ligado (o ARM) | reprovou — `excecoes: o msr daif do EL0 mata o processo, e o nucleo nao fica mascarado`: "o processo seguiu depois da excecao" — o `msr daif` do EL0 passou —; e `excecoes: em cada nucleo, o regime esta como o kernel o escreve, tambem depois de sujo`: "o regime do nucleo nao esta como o kernel o escreve" |
+| o caso da senha na linha de volta ao atalho (`interpretador::tratar` direto, sem o teclado) | reprovou — `consoles: sem ninguem, a senha com algo na linha e a mesma recusa da senha sozinha`: "a linha de comando nao passou pelo historico do teclado duas vezes" — o histórico guardou a linha 0 vez: o caso sabe que passou pelo teclado |
+| o `SCTLR_EL1` com o `nTWI` e o `nTWE` ligados (o ARM) | reprovou — `excecoes: o wfi do EL0 mata o processo`: "o processo seguiu depois da excecao" — os quatro `wfi` passaram, e o processo chegou ao fim |
+
+A suíte inteira, com o lote B3, passou nas duas arquiteturas, em
+depuração, nas três partes da CI — no x86, 1042 casos, em 1521, 1347 e
+1229 segundos; no ARM, 1027, em 1248, 1039 e 1181 —, e pelo iniciador da
+UEFI: as duas partes do ARM (517 e 516 casos sobre o mapa da UEFI, em 1591
+e 1798 segundos) e a do x86 (110 segundos). Os casos novos passaram também
+em release, um por parte, nas duas.
 
 ### O `fork` não copia página nenhuma
 
@@ -3028,7 +3247,9 @@ usa, cada coisa pelo gate:
 
 As três suítes do TLS 1.3 vão na ordem de preferência do cliente, e o
 ChaCha20-Poly1305 primeiro: os programas não usam SIMD nem AES-NI — o
-kernel não salva esses registradores entre processos —, e em software ele
+kernel não salva esses registradores entre processos, e os prende: o
+processo que os toca morre (ver *A exceção do processo é do processo*) —,
+e em software ele
 cifrou 317 MiB/s no hospedeiro, contra 104 do AES-128-GCM e 80 do
 AES-256-GCM, em registros de 16 KiB. A ordem não muda a segurança, só o
 custo; um servidor sem ele escolhe o AES-128-GCM. O `icp-api.io` da rede
@@ -8629,7 +8850,8 @@ do `sigilo` conferem os vetores publicados do padrão — um deles gerado pela
 Cacophony, em Haskell — e conversam com o `snow`, outra implementação em
 Rust, nos dois papéis. As primitivas são do RustCrypto e do dalek, e no
 kernel vão sem SIMD: os registradores de SIMD são do processo interrompido,
-e este kernel não os salva.
+e este kernel não os salva — e os prende também no anel 0 e no EL1, onde
+uma instrução deles seria uma falha fatal.
 
 **Autenticado não é autorizado.** Uma chave que completa o aperto ainda
 precisa estar no registro, ou recebe uma recusa — com o motivo, em claro.
