@@ -17445,6 +17445,33 @@ fn nenhum_segredo_em_lugar_nenhum(
     senhas: &[&str],
     credenciais: &[sigilo::credencial::Credencial],
 ) -> Resultado {
+    nenhum_segredo_na_auditoria_nem_nos_relatorios(senhas, credenciais)?;
+    if leva_segredo(
+        &historico_do_teclado(),
+        &pedacos_secretos(senhas, credenciais),
+    ) {
+        return Err("um segredo, ou um pedaco dele, entrou no historico do teclado");
+    }
+    Ok(())
+}
+
+/// O que o histórico do teclado guardou e o leitor do sistema ainda não
+/// leu — e ele lê agora.
+fn historico_do_teclado() -> alloc::string::String {
+    let mut historico = alloc::string::String::new();
+    while let Some(c) = crate::teclado::observar() {
+        historico.push(c);
+        let _ = crate::teclado::ler();
+    }
+    historico
+}
+
+/// [`nenhum_segredo_em_lugar_nenhum`], sem o histórico do teclado: a
+/// auditoria, o log, o `system.info` e o registro de pessoas.
+fn nenhum_segredo_na_auditoria_nem_nos_relatorios(
+    senhas: &[&str],
+    credenciais: &[sigilo::credencial::Credencial],
+) -> Resultado {
     let pedacos = pedacos_secretos(senhas, credenciais);
     let leva = |t: &str| leva_segredo(t, &pedacos);
     let na_auditoria = crate::autorizacao::com_auditoria(|c| {
@@ -17475,13 +17502,16 @@ fn nenhum_segredo_em_lugar_nenhum(
             return Err("um segredo, ou um pedaco dele, saiu num relatorio");
         }
     }
-    let mut historico = alloc::string::String::new();
-    while let Some(c) = crate::teclado::observar() {
-        historico.push(c);
-        let _ = crate::teclado::ler();
-    }
-    if leva(&historico) {
-        return Err("um segredo, ou um pedaco dele, entrou no historico do teclado");
+    Ok(())
+}
+
+/// Nenhum registro do journal — a região atual inteira, decifrada, depois
+/// de a auditoria em memória ir para ele — leva um pedaço das `senhas`.
+fn nenhum_segredo_no_journal(senhas: &[&str]) -> Resultado {
+    crate::persistencia::gravar_auditoria()?;
+    let pedacos = pedacos_secretos(senhas, &[]);
+    if crate::persistencia::algum_registro_de_teste(|r| leva_pedaco(&r.conteudo, &pedacos))? {
+        return Err("um segredo, ou um pedaco dele, foi para o journal");
     }
     Ok(())
 }
@@ -18867,9 +18897,22 @@ fn consoles_sem_ninguem_o_comando_vai_sem_o_resumo() -> Resultado {
 /// presença do parâmetro — não com o valor: não era um oráculo —, contra a
 /// regra escrita de antes do login. Agora as duas são a mesma recusa:
 /// `credential.change_self`, `DENY_NOT_AUTHENTICATED`, gravada com o
-/// console, sem o resumo do que veio junto, e o que veio junto não fica em
-/// lugar nenhum. Com alguém entrado, `senha <algo>` é recusado no console,
-/// sem decisão, sem registro e sem começar a troca, como antes.
+/// console, sem o resumo do que veio junto. Com alguém entrado, `senha
+/// <algo>` é recusado no console, sem decisão, sem registro e sem começar a
+/// troca, como antes.
+///
+/// Tudo pelo caminho do teclado da máquina, o de produção (o item 8 do
+/// adversário do lote B2): cada tecla pelo código dela, como o tratador da
+/// interrupção a entrega, e a fila consumida pela tarefa do interpretador
+/// (`interpretador::tratar_tecla`), que a grava no histórico do teclado —
+/// o que o `keyboard.read` lê — antes de tratá-la. O caso afirma o que o
+/// desenho promete, e não "em lugar nenhum": o que veio na linha não vai à
+/// auditoria, nem ao journal, nem aos relatórios; a linha de comando
+/// digitada ecoa, e fica no histórico — é por isso que `senha <algo>` é
+/// recusado: "uma senha na linha de comando já teria ecoado"
+/// (`interpretador::comecar_troca`) —, e o caso confere que ela ficou,
+/// que é a prova de que as teclas passaram pelo teclado. A senha do login,
+/// digitada sem eco, não fica.
 fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultado {
     use crate::interpretador::Modo;
     use crate::pessoas::Console;
@@ -18877,19 +18920,22 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
     use politica::auditoria::{Titular, resumo_dos_parametros};
     /// O que se digita depois da palavra: uma senha no lugar errado.
     const NA_LINHA: &str = "goiabada com queijo";
+    /// A linha inteira, como o histórico a guarda.
+    const A_LINHA: &str = "senha goiabada com queijo\n";
     crate::pessoas::esquecer_registradas();
     crate::teclado::esvaziar();
     crate::pessoas::registrar_de_teste("bia-do-b2", "operador", SENHA_DE_TESTE);
     crate::interpretador::abrir_console(Console::Fisico);
+    let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
     let resultado = (|| -> Resultado {
         if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
             return Err("o console abriu com alguem entrado");
         }
         let vazio = resumo_dos_parametros(&[]);
         let mut gravados = alloc::vec::Vec::new();
-        for linha in ["senha\n", "senha goiabada com queijo\n"] {
+        for linha in ["senha\n", A_LINHA] {
             let antes = crate::autorizacao::ultimo_registro();
-            digitar_no_console(Console::Fisico, linha);
+            digitar_no_fisico_pelo_teclado(linha)?;
             let registros = registros_depois(antes, |_| true);
             let [(_, e)] = registros.as_slice() else {
                 for (seq, e) in &registros {
@@ -18916,13 +18962,20 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
         if gravados[0] != gravados[1] {
             return Err("a recusa mudou com a presenca do parametro");
         }
-        nenhum_segredo_em_lugar_nenhum(&[NA_LINHA], &[])?;
-        // Com alguém entrado: recusado no console, sem decisão nem registro,
-        // e a troca não começa.
-        let senha = core::str::from_utf8(SENHA_DE_TESTE).unwrap_or("");
-        entrar_no_console(Console::Fisico, "bia-do-b2", senha)?;
+        // Com alguém entrado — o login também pelo teclado, a senha sem eco
+        // —: recusado no console, sem decisão nem registro, e a troca não
+        // começa.
+        digitar_no_fisico_pelo_teclado("login\n")?;
+        digitar_no_fisico_pelo_teclado("bia-do-b2\n")?;
+        if crate::interpretador::modo() != Modo::Senha {
+            return Err("o login pelo teclado nao pediu a senha");
+        }
+        digitar_no_fisico_pelo_teclado(&alloc::format!("{senha}\n"))?;
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_none() {
+            return Err("o login pelo teclado nao abriu sessao no console");
+        }
         let antes = crate::autorizacao::ultimo_registro();
-        digitar_no_console(Console::Fisico, "senha goiabada com queijo\n");
+        digitar_no_fisico_pelo_teclado(A_LINHA)?;
         let gravado = registros_depois(antes, |e| {
             e.metodo == crate::autorizacao::TROCA_DA_PROPRIA_SENHA
         });
@@ -18932,13 +18985,53 @@ fn consoles_a_senha_com_algo_na_linha_sem_ninguem_e_a_mesma_recusa() -> Resultad
         if crate::interpretador::modo() != Modo::Comando {
             return Err("com alguem entrado, a senha com algo na linha comecou a troca");
         }
-        nenhum_segredo_em_lugar_nenhum(&[NA_LINHA], &[])?;
-        digitar_no_console(Console::Fisico, "logout\n");
+        // O que o desenho promete: nada do que veio na linha — nem a senha
+        // do login — na auditoria, nos relatórios e no journal.
+        nenhum_segredo_na_auditoria_nem_nos_relatorios(&[NA_LINHA, senha], &[])?;
+        nenhum_segredo_no_journal(&[NA_LINHA, senha])?;
+        // E no histórico, a linha de comando, duas vezes — a de antes do
+        // login e a de depois —, e a senha do login, digitada sem eco, não.
+        let historico = historico_do_teclado();
+        let linhas = historico.matches(A_LINHA).count();
+        crate::log_info!(
+            "teste",
+            "consoles: o historico do teclado guardou a linha de comando {} vez(es)",
+            linhas
+        );
+        if linhas != 2 {
+            return Err("a linha de comando nao passou pelo historico do teclado duas vezes");
+        }
+        if leva_segredo(&historico, &pedacos_secretos(&[senha], &[])) {
+            return Err("a senha do login, digitada sem eco, entrou no historico do teclado");
+        }
+        digitar_no_fisico_pelo_teclado("logout\n")?;
+        if crate::interpretador::sessao_do_console(Console::Fisico).is_some() {
+            return Err("o logout pelo teclado nao saiu da sessao");
+        }
         Ok(())
     })();
     crate::interpretador::desativar_para_teste();
     crate::pessoas::esquecer_registradas();
+    crate::teclado::esvaziar();
     resultado
+}
+
+/// Digita `texto` no console físico pelo caminho de produção: cada tecla
+/// pelo código dela, como o tratador da interrupção a entrega
+/// (`teclado::evento`), e a fila do console consumida como a tarefa do
+/// interpretador a consome (`interpretador::tratar_tecla`) — o histórico do
+/// teclado, e então o console. Sem a janela de ninguém com o foco: a tecla
+/// iria para ela, e não para a fila do console.
+fn digitar_no_fisico_pelo_teclado(texto: &str) -> Resultado {
+    for c in texto.chars() {
+        let codigo = (1..u8::MAX)
+            .find(|&k| crate::teclado::caractere(k) == Some(c))
+            .ok_or("um caractere que o teclado nao produz sem shift")?;
+        teclar(codigo);
+        let tecla = crate::teclado::ler().ok_or("a tecla nao chegou a fila do console fisico")?;
+        crate::interpretador::tratar_tecla(tecla);
+    }
+    Ok(())
 }
 
 /// O login de verdade: o nome, a senha sem eco — nem na tela, nem na árvore,

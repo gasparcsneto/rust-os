@@ -9317,7 +9317,18 @@ conferência da linha (`interpretador::comecar_troca`), e as duas são a
 mesma recusa, com a mesma resposta (`consoles: sem ninguem, a senha com
 algo na linha e a mesma recusa da senha sozinha` confere o registro; a
 mutação que devolve a ordem de antes o reprova: "a troca da propria senha
-sem ninguem nao gravou um registro so"). A resposta é a mesma
+sem ninguem nao gravou um registro so"). Desde o lote B3, o caso digita
+pelo caminho do teclado, o de produção — cada tecla pelo código dela, e a
+fila consumida como a tarefa do interpretador a consome
+(`interpretador::tratar_tecla`), que grava a tecla no histórico do
+teclado antes de tratá-la —, e não mais direto no console, por onde o
+histórico não a via (o item 8 do adversário do lote B2). E afirma o que o
+desenho promete, e não "em lugar nenhum": o que veio na linha não vai à
+auditoria, nem ao journal, nem aos relatórios; a linha de comando
+digitada ecoa, e fica no histórico — é por isso que `senha <algo>` é
+recusado: ela já teria ecoado —, e o caso confere que ela ficou, a prova
+de que as teclas passaram pelo teclado; a senha do login, digitada sem
+eco, não fica. A resposta é a mesma
 para o comando que existe e para o que não existe: quem digitou não fica
 sabendo se ele existe. Não há login automático.
 
