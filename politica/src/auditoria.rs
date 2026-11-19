@@ -3078,4 +3078,66 @@ mod testes {
             mesma(&oraculo, &nova, caso);
         }
     }
+
+    /// O desfecho do `user.run` numa recusa sobre quem pede (o #466, no
+    /// lote A4) repete o detalhe que o gate gravou, com a decisão citada no
+    /// fim — e, acima do teto, sai abreviado como todo detalhe que a
+    /// citação alonga: a descrição de quem pediu e depois o fim do texto,
+    /// que leva o editor pelo nome ou a contagem da cota. A recusa do gate,
+    /// sem a citação, tem mais lugar: aqui, fica com eles inteiros; com o
+    /// fio e o editor mais longos, também os perde. Era a demonstração do
+    /// I1 do adversário do lote A4, contra a documentação que prometia "o
+    /// mesmo detalhe — o editor pelo nome, a contagem da cota"; fica aqui
+    /// para a conta não mudar sem ninguém ver. Abaixo do teto, o mesmo
+    /// detalhe, com a citação.
+    #[test]
+    fn o_desfecho_acima_do_teto_abrevia_o_que_o_gate_gravou_inteiro() {
+        use crate::procedencia::nao_confiado;
+        let citacao = "; decisao 56789";
+        // O processo 1234, de um código de `loja-oficial`, pede o
+        // `user.run`, e o papel não confia mais no editor do código.
+        let pelo = "pelo processo 1234 (loja 0123456789abcdef de loja-oficial)";
+        let editor = nao_confiado("loja-oficial");
+        assert_eq!(
+            detalhe_composto(Some(pelo), &editor, ""),
+            "pelo processo 1234 (? 0123456789abcdef de ?): o papel nao confia no editor loja-oficial"
+        );
+        let desfecho = detalhe_composto(Some(pelo), &editor, citacao);
+        assert_eq!(
+            desfecho,
+            "pelo processo 1234 (? 0123456789abcdef de ?): o papel nao confia no editor ?; decisao 56789"
+        );
+        assert!(desfecho.len() <= MAIOR_DETALHE);
+        // A cota: o gate a guarda com a contagem inteira — cabe no teto com
+        // a descrição inteira —, e o desfecho perde o fim dela.
+        let cota = "cota de processos do papel: 12 de 12";
+        assert_eq!(
+            detalhe_composto(Some(pelo), cota, ""),
+            alloc::format!("{pelo}: {cota}")
+        );
+        assert_eq!(
+            detalhe_composto(Some(pelo), cota, citacao),
+            "pelo processo 1234 (? 0123456789abcdef de ?): cota de processos do papel: 12 de ?; decisao 56789"
+        );
+        // Com o fio de 20 dígitos e o editor de 32 bytes, o lugar a mais da
+        // recusa do gate não basta: ela também perde o editor.
+        let longo = "e".repeat(32);
+        let pelo_longo =
+            alloc::format!("pelo processo 12345678901234567890 (loja 0123456789abcdef de {longo})");
+        assert_eq!(
+            detalhe_composto(Some(&pelo_longo), &nao_confiado(&longo), ""),
+            "pelo processo 12345678901234567890 (? 0123456789abcdef de ?): o papel nao confia no editor ?"
+        );
+        // Abaixo do teto: o detalhe do gate, e a citação colada nele.
+        let curto = "pelo processo 12 (loja 0123456789abcdef)";
+        let do_gate = detalhe_composto(Some(curto), &editor, "");
+        assert_eq!(
+            do_gate,
+            "pelo processo 12 (loja 0123456789abcdef): o papel nao confia no editor loja-oficial"
+        );
+        assert_eq!(
+            detalhe_composto(Some(curto), &editor, "; decisao 7"),
+            alloc::format!("{do_gate}; decisao 7")
+        );
+    }
 }
