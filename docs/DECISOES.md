@@ -1957,9 +1957,11 @@ pendência #298.
     lançamento o nomeia;
   - as recusas das perguntas sobre quem pede continuam gravadas como o
     gate as grava, e, dentro de um comando, o `ALLOW` do `user.run`
-    ganha o desfecho delas, com o mesmo código e o mesmo detalhe, também
-    na cota contada de novo no nascimento; fora de um comando, só a do
-    gate. É a alternativa (a) do plano; a (b), um registro só que
+    ganha o desfecho delas, com o mesmo código e o detalhe que o gate
+    gravou — abreviado, como todo detalhe acima do teto, quando a citação
+    da decisão o alonga (o I1 do adversário do lote A4) —, também na cota
+    contada de novo no nascimento; fora de um comando, só a do gate. É a
+    alternativa (a) do plano; a (b), um registro só que
     citasse a decisão, mudaria o desenho da recusa do gate, e é [C], não
     tomada. A recusa conta uma vez no NSF — no risco, nos contadores e
     no perfil, que só contam decisões. O encerrado na última palavra já
@@ -1978,6 +1980,39 @@ pendência #298.
 
   Quatro casos novos, dois reforçados, quatro testes no hospedeiro e
   vinte e quatro mutações, todas reprovadas
+  ([README](../README.md#decisões-pendentes), "A soma das cotas de
+  processos e a cota por sessão").
+
+  O lote A5, [B], fez os achados do adversário do lote A4 — os quatro
+  baixos, dois informativos e dois dos três de antes do lote —, sem
+  autoridade, regra, registro ou semântica de auditoria novos:
+  - a conferência da imagem tem teto — a tabela de segmentos de até 64
+    entradas e as notas de até 4 KiB, somadas —: antes, uma imagem de
+    milhares de `PT_NOTE` custava, no fio de quem lança, o quadrado do
+    tamanho dela. Os tetos não são contrato: ficam muito acima dos
+    programas de verdade, de três ou quatro entradas e no máximo 1044
+    bytes de notas, e o `sdk-conferir` sem eles fica para um lote
+    seguinte;
+  - a `Carga`, o `hospedar` e o `carregar_a_carga` voltaram para dentro
+    de `lancar_por`, onde o compilador confere o alcance, e o `xtask`
+    confere que continuam lá;
+  - no NSF, a execução que cita uma decisão mais velha que o registro
+    que pôs o programa de agora não o troca, nem liga aresta: o desfecho
+    tardio de um `user.run` nativo voltava quem pediu ao programa de
+    antes. A alternativa de gravar o desfecho sem quem pediu mudaria o
+    registro, e é [C], não tomada;
+  - a guarda dos nomes protegidos acusa também o `type` que nomeia um
+    deles e o nome de função guardado como valor, nos donos inclusive;
+  - o desfecho das recusas sobre quem pede é o detalhe do gate,
+    abreviado acima do teto pela citação (o I1); e o
+    `DesfechoDoLancamento` só grava o que não acontece, conferido na
+    depuração (o I5);
+  - a página `[TETO, TETO + 4 KiB)` de um `PT_LOAD` vazio no teto não se
+    mapeia mais: toda faixa de página fica dentro de `[BASE, TETO)`;
+  - as regras `TetoExercido` e `AbusoDeCredencial` procuram a palavra no
+    texto do detalhe, sem o nome do programa de quem pediu.
+
+  Dois casos novos, seis testes no hospedeiro e vinte e sete mutações
   ([README](../README.md#decisões-pendentes), "A soma das cotas de
   processos e a cota por sessão").
 

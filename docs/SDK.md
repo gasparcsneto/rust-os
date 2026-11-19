@@ -69,10 +69,12 @@ pode usar sem que mude.
 A forma binária do programa — o ELF dos dois alvos, o `usuario.ld`, a
 entrada `principal` e a nota `Duke` com `duke-manifesto 1` — também é
 contrato, sem mudança de formato; ela é conferida na carga de cada
-programa. Os dois alvos são *soft-float*, e o kernel prende o ponto
-flutuante e o SIMD no anel 3 e no EL0 (o lote B3 do #448): o programa que
-executa uma instrução deles morre na primeira — o `#NM` no x86, a classe
-0x07 no ARM —, com a linha no log e a falha contada. A conferência do
+programa, com os tetos de trabalho de [As cotas](#as-cotas), que o
+`usuario.ld` não chega perto de usar. Os dois alvos são *soft-float*, e o
+kernel prende o ponto flutuante e o SIMD no anel 3 e no EL0 (o lote B3
+do #448): o programa que executa uma instrução deles morre na primeira —
+o `#NM` no x86, a classe 0x07 no ARM —, com a linha no log e a falha
+contada. A conferência do
 build (`conferir_sem_simd`) cobre só os programas do x86 da imagem; o
 `sdk-conferir` não a faz. Liberá-los é a
 [R12-SIMD](DECISOES.md#r12-simd).
@@ -507,6 +509,8 @@ continua sendo entrada não confiável.
 | o buffer de um sentido, a maior escrita e a maior leitura | 16 KiB |
 | o maior pedido e o maior anexo | 4096 bytes e 60 KiB |
 | o maior executável | 1 MiB |
+| as entradas da tabela de segmentos de um executável | 64, de todos os tipos; carregáveis, 8 |
+| as notas de um executável, somadas | 4 KiB (a do manifesto, até 1044 bytes) |
 
 Cada operação paga o orçamento dela: as de dados, o do plano de dados; as
 de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
@@ -526,7 +530,9 @@ de controle, a taxa do papel. O aviso não paga nada, porque não pede nada.
    divergiu.
 3. **Confira**: `cargo xtask sdk-conferir <elf>` diz o nome e as
    permissões do manifesto, o tamanho contra o teto de leitura do kernel,
-   o selo, se há, e o resumo BLAKE2s que a auditoria vai citar.
+   o selo, se há, e o resumo BLAKE2s que a auditoria vai citar. Os tetos
+   da tabela de segmentos e das notas ([As cotas](#as-cotas)) ele ainda
+   não confere: só a carga os recusa.
 4. **Sele**: `cargo xtask selar <privada do editor> <elf> [--saida
    <arquivo>]`. A ferramenta lê só a chave do editor que recebe — nenhuma
    de dispositivo, de Pessoa ou do Duke —, recusa o ELF sem manifesto

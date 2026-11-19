@@ -128,7 +128,10 @@ pontos onde acontece — não num canal paralelo:
   última palavra perguntou e esse desfecho, desde o lote A3 do #448; a
   imagem — o que não é um ELF64 deste processador, um segmento fora do
   lugar, o manifesto que não se lê —, conferida antes de o fio nascer,
-  desde o lote A4). A imagem que não se mapeia no fio novo, depois do
+  desde o lote A4, e com teto desde o lote A5: a tabela de segmentos de
+  até 64 entradas, as notas de até 4 KiB, somadas, e as páginas de todo
+  segmento dentro do espaço do usuário). A imagem que não se mapeia no
+  fio novo, depois do
   nascimento — a memória do espaço novo, dos segmentos, da pilha —,
   grava o mesmo desfecho depois do `processo N lancado`, em nome de quem
   o gate decidiu e citando a decisão, como o `exec` que falha depois do
@@ -139,15 +142,25 @@ pontos onde acontece — não num canal paralelo:
   nome de quem o gate já decidiu —, é o único caminho por que a execução
   de um comando se grava fora do fio dele — no fio novo, que não espera a
   resposta e em geral grava depois dela —, e só o lançamento o nomeia
-  (`NOMES_PROTEGIDOS`, no `xtask`). E as recusas das perguntas sobre quem
+  (`NOMES_PROTEGIDOS`, no `xtask`). Ele grava só o lançamento que não
+  acontece — a compilação de depuração confere que o código não permite:
+  um `ALLOW` dali, com um `processo N lancado`, seria um nascimento
+  forjado para o NSF —, e o fio novo que o leva — a `Carga`, o
+  `hospedar` e o `carregar_a_carga` — mora dentro de
+  `usuario::lancar_por`, em itens que nenhum outro item alcança (o lote
+  A5). E as recusas das perguntas sobre quem
   pede — o journal recusado, quem pede encerrado ou contido, o editor, o
   papel, a cota,
   também a contada de novo no nascimento — continuam gravadas como o
   gate as grava (`process.run`, com quem pede, sem citar a decisão);
   dentro de um comando, o `ALLOW` do `user.run` ganha o desfecho delas,
-  a execução da decisão com o mesmo código e o mesmo detalhe — o editor
-  pelo nome, a contagem da cota —; fora de um comando — o kernel, o
-  `fork` —, só a do gate (o lote A4). No NSF, a recusa conta uma vez —
+  a execução da decisão com o mesmo código e o detalhe que o gate gravou
+  — o editor pelo nome, a contagem da cota —, abreviado como todo
+  detalhe acima do teto quando a citação da decisão o alonga: a recusa
+  do gate, sem a citação, tem mais lugar, e, quando só um dos dois
+  registros os guarda inteiros, é ela (o I1 do adversário do lote A4);
+  fora de um comando — o kernel, o `fork` —, só a do gate (o lote A4).
+  No NSF, a recusa conta uma vez —
   no risco, nos contadores e no perfil, que só contam decisões: o
   desfecho é uma execução. O `process.fork` é um fato, não uma decisão:
   bifurcar não é
@@ -292,7 +305,14 @@ larguras diferentes do mesmo programa não são uma troca: o processo fica
 com a de 16, sem aresta (o lote B2). Um processo nasce uma vez só
 na época — um segundo nascimento do mesmo fio não muda o criador nem a
 autoridade —, e um `filho N` com N até o fio do pai não é nascimento: é o
-pedaço do número de outro processo, num registro cortado. Na
+pedaço do número de outro processo, num registro cortado. E a execução que
+cita uma decisão mais velha que o registro que pôs o programa de agora no
+processo não o troca, nem liga aresta
+(`seguranca::grafo::Grafo::executa_no_registro`, o lote A5): o desfecho
+tardio do `user.run` pedido pela interface nativa, gravado pelo fio novo
+depois de quem pediu trocar de imagem, diz o programa de quando o gate
+decidiu, e voltava o processo a ele na proveniência. O registro não muda;
+muda a leitura do grafo. Na
 proveniência, a regra do firewall de uma conexão casa pelo fio, e não
 pelo programa; cada fluxo barrado diz `firewall_blocked`, e o
 `firewall_rule` só quando algum registro do fluxo guardou o número — nulo
@@ -325,14 +345,14 @@ dispararam:
 |---|---|
 | `privilege-probing` | recusas por permissão — do papel — em métodos distintos, do mesmo ator, numa janela |
 | `outside-manifest` | um programa pediu o que o manifesto dele não declara: o papel de quem o lançou tem a permissão, e a atenuação recusou — um sinal do programa, médio, que não conta como sondagem de quem o lançou. Também o de nome longo: acima do teto do detalhe, a descrição do programa encolhe antes do motivo, e `o manifesto nao declara` chega inteiro — o corte do fim o levava, e as recusas viravam `privilege-probing`, alta |
-| `credential-abuse` | recusas de autenticação da mesma identidade: chave revogada, sessão que acabou, login recusado |
+| `credential-abuse` | recusas de autenticação da mesma identidade: chave revogada, sessão que acabou, login recusado — a revogação, pela palavra no texto do detalhe, sem o `pelo processo N (…)` de quem pediu: o nome do programa não a dispara (o lote A5) |
 | `out-of-scope` | recusas de recurso repetidas do mesmo ator |
 | `policy-change` | mudança de política ou de papel executada; recusas de mudança repetidas |
 | `anomalous-behavior` | o perfil do ator saiu da linha de base — para pessoas e agentes de IA, pela mesma conta |
 | `firewall-evasion` | pedidos recusados pelo firewall repetidos, ou insistência num destino bloqueado |
 | `dns-against-policy` | um nome resolvido para um endereço que o gate recusa a quem resolveu |
 | `process-chain` | processos lançados em profundidade ou em rajada a partir do mesmo ator |
-| `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador |
+| `ceiling-exercised` | tentativa de exercer o papel de teto de um administrador — pelo texto do detalhe, sem o `pelo`: o programa `arquiteto` não a dispara (o lote A5) |
 | `egress-after-probing` | quem tem um incidente alto aberto usa a rede |
 | `code-tampered` | o código de fora da imagem cujo selo não confere com ele — os bytes mudaram depois de selados, ou o selo é forjado: basta uma vez, mas quem pediu pode ser a vítima, e a confiança é média; o NSF não planeja contenção por ela — alerta, e a contenção fica com quem tem a autoridade. O código sem selo e o editor em quem o papel não confia são política, e não disparam nada. Reconhece o motivo também quando o detalhe passa do teto: a descrição do programa que pediu encolhe antes dele (`? <resumo> de ?`), e o motivo cortado — numa palavra inteira, com ` ?` no lugar do que saiu — ainda diz a falta enquanto guarda o começo essencial dela — um nome longo não apaga o alerta |
 | `clock-jump` | o relógio civil saltou dentro do envelope da incerteza, ou na primeira sincronização — a gravidade pelo tamanho, a confiança baixa: é o relógio sendo corrigido |
