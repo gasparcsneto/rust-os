@@ -42657,6 +42657,16 @@ static CASOS: &[Caso] = &[
         nome: "smp: o prazo do timer do ARM parte do contador, nunca chega antes, e pula os perdidos",
         f: smp_o_prazo_do_timer_do_arm,
     },
+    // O lote A5: os dois juntos, no fim — nenhum caso de antes muda de
+    // parte.
+    Caso {
+        nome: "contencao: a imagem de entradas ou de notas demais nao se carrega, e a do teto lanca",
+        f: nascimento::contencao_a_imagem_de_entradas_ou_notas_demais_nao_se_carrega,
+    },
+    Caso {
+        nome: "contencao: o segmento vazio no teto nao ganha a pagina de cima",
+        f: nascimento::contencao_o_segmento_vazio_no_teto_nao_ganha_a_pagina_de_cima,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

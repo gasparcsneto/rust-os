@@ -68,6 +68,14 @@
 //! mapeamento, pelo gancho do meio do nascimento — grava o desfecho depois
 //! do `processo N lancado`, em nome de quem o gate decidiu; nenhum desfecho
 //! guardado fica vivo depois (`autorizacao::desfechos_vivos_de_teste`).
+//!
+//! E os do lote A5 — achados do adversário do lote A4 —, no fim do arquivo:
+//! a conferência da imagem com teto, sem medir tempo — a tabela de
+//! segmentos de entradas demais e as notas acima do orçamento recusadas
+//! pelo motivo novo, a imagem de muitas notas do adversário também, e o
+//! `ola` no teto, que lança —; e o segmento vazio com o destino no teto do
+//! espaço do usuário, que ganhava a página de cima dele, recusado — e o
+//! mesmo segmento vazio dentro do espaço, que lança.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
@@ -3481,4 +3489,296 @@ pub(super) fn contencao_o_user_run_cuja_imagem_nao_se_mapeia_grava_o_desfecho() 
     desarmar();
     crate::pessoas::esquecer_registradas();
     resultado
+}
+
+// ---------------------------------------------------------------------------
+// O lote A5: o teto da tabela de segmentos e o orcamento das notas, e a
+// pagina de cima do segmento vazio no teto
+// ---------------------------------------------------------------------------
+
+/// Uma entrada da tabela de segmentos do ELF64: o tipo, as flags, onde o
+/// conteudo comeca no arquivo, o destino — o endereco virtual e o fisico —,
+/// quanto vem do arquivo e quanto ocupa na memoria; o alinhamento, uma
+/// pagina.
+fn entrada_de_segmento(
+    tipo: u32,
+    flags: u32,
+    deslocamento: u64,
+    destino: u64,
+    no_arquivo: u64,
+    na_memoria: u64,
+) -> [u8; 56] {
+    let mut e = [0u8; 56];
+    e[0..4].copy_from_slice(&tipo.to_le_bytes());
+    e[4..8].copy_from_slice(&flags.to_le_bytes());
+    e[8..16].copy_from_slice(&deslocamento.to_le_bytes());
+    e[16..24].copy_from_slice(&destino.to_le_bytes());
+    e[24..32].copy_from_slice(&destino.to_le_bytes());
+    e[32..40].copy_from_slice(&no_arquivo.to_le_bytes());
+    e[40..48].copy_from_slice(&na_memoria.to_le_bytes());
+    e[48..56].copy_from_slice(&4096u64.to_le_bytes());
+    e
+}
+
+/// As entradas da tabela de segmentos de `elf`, como estao no arquivo.
+fn entradas_de(elf: &[u8]) -> Result<alloc::vec::Vec<[u8; 56]>, &'static str> {
+    const CORTADO: &str = "o ELF do caso nao tem a tabela de segmentos inteira";
+    let pedaco = |de: usize, ate: usize| elf.get(de..ate).ok_or(CORTADO);
+    let mut tabela = [0u8; 8];
+    tabela.copy_from_slice(pedaco(32, 40)?);
+    let mut quantas = [0u8; 2];
+    quantas.copy_from_slice(pedaco(56, 58)?);
+    let tabela = u64::from_le_bytes(tabela) as usize;
+    (0..u16::from_le_bytes(quantas) as usize)
+        .map(|i| {
+            let de = tabela + 56 * i;
+            let mut entrada = [0u8; 56];
+            entrada.copy_from_slice(pedaco(de, de + 56)?);
+            Ok(entrada)
+        })
+        .collect()
+}
+
+/// Onde [`com_a_tabela`] poe a tabela de segmentos de `elf`: no fim dele,
+/// alinhada a 8.
+fn onde_vai_a_tabela(elf: &[u8]) -> usize {
+    elf.len().next_multiple_of(8)
+}
+
+/// `elf` com a tabela de segmentos trocada por `entradas`, posta no fim do
+/// arquivo ([`onde_vai_a_tabela`]) — o `e_phoff` e o `e_phnum` apontando
+/// para ela —, e `depois` logo em seguida. O resto nao muda: os segmentos
+/// das entradas copiadas apontam para os mesmos bytes.
+fn com_a_tabela(elf: &[u8], entradas: &[[u8; 56]], depois: &[u8]) -> alloc::vec::Vec<u8> {
+    let mut v = elf.to_vec();
+    v.resize(onde_vai_a_tabela(elf), 0);
+    let tabela = v.len() as u64;
+    v[32..40].copy_from_slice(&tabela.to_le_bytes());
+    v[56..58].copy_from_slice(&(entradas.len() as u16).to_le_bytes());
+    for e in entradas {
+        v.extend_from_slice(e);
+    }
+    v.extend_from_slice(depois);
+    v
+}
+
+/// Uma nota que nao e do Duke — o dono `GNU`, o tipo 3 — de `tamanho`
+/// bytes, multiplo de 4 e de pelo menos 16: o cabecalho, o dono e o
+/// conteudo zerado. O achador do manifesto a pula.
+fn nota_de_outro(tamanho: usize) -> alloc::vec::Vec<u8> {
+    let mut n = alloc::vec::Vec::with_capacity(tamanho);
+    n.extend_from_slice(&4u32.to_le_bytes());
+    n.extend_from_slice(&((tamanho - 16) as u32).to_le_bytes());
+    n.extend_from_slice(&3u32.to_le_bytes());
+    n.extend_from_slice(b"GNU\0");
+    n.resize(tamanho, 0);
+    n
+}
+
+/// O lote A5, no teto da tabela de segmentos e no orcamento das notas (o
+/// achado A1 do adversario do lote A4): a conferencia da imagem roda no fio
+/// de quem lanca, e o `elf::validar` percorria a tabela inteira — o
+/// `e_phnum` ate 65535 — e lia as notas de cada `PT_NOTE`, sem teto. Pela
+/// conta pura, sem medir tempo: a imagem do adversario — `PT_NOTE` que
+/// apontam todos para a propria tabela, cada entrada lida como uma nota de
+/// 56 bytes — com 4096 entradas, recusada pela tabela grande demais, e com
+/// o teto de entradas (`elf::MAX_ENTRADAS`), pelo orcamento das notas
+/// (`elf::ORCAMENTO_DAS_NOTAS`); o `ola` com a tabela no teto — as entradas
+/// a mais vazias — se confere, e com uma a mais, nao; com as notas no
+/// orcamento — um `PT_NOTE` a mais, com uma nota que nao e do Duke —, se
+/// confere, e com quatro bytes a mais, nao. E pelo `user.run`, com os
+/// editores do caso: o `ola` com a tabela no teto lanca e sai com o codigo
+/// dele; o de uma entrada a mais e o de quatro bytes de notas a mais nao
+/// lancam — `launched: false` com o motivo, o desfecho na auditoria, e
+/// nenhum nascimento. Antes do lote A5, a imagem de muitas notas so era
+/// recusada depois da conta inteira, e o `ola` de entradas demais lancava.
+pub(super) fn contencao_a_imagem_de_entradas_ou_notas_demais_nao_se_carrega() -> Resultado {
+    use crate::usuario::elf::{MAX_ENTRADAS, ORCAMENTO_DAS_NOTAS, validar};
+    const GRANDE_DEMAIS: &str = "tabela de segmentos grande demais";
+    const NOTAS_DEMAIS: &str = "segmentos de notas grandes demais";
+    const PT_NOTE: u32 = protocolo::usuario::manifesto::SEGMENTO_DE_NOTAS;
+    crate::pessoas::esquecer_registradas();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let ola = super::ola_da_imagem()?;
+    let originais = entradas_de(&ola)?;
+    // O `ola` com `n` entradas: as dele, e as vazias (`PT_NULL`) que faltam.
+    let com_entradas = |n: usize| {
+        let mut entradas = originais.clone();
+        entradas.resize(n, [0u8; 56]);
+        com_a_tabela(&ola, &entradas, &[])
+    };
+    // O `ola` com as notas dele e mais um `PT_NOTE` de `extra` bytes, logo
+    // depois da tabela.
+    let com_notas = |extra: usize| {
+        let mut entradas = originais.clone();
+        let onde = onde_vai_a_tabela(&ola) + 56 * (entradas.len() + 1);
+        entradas.push(entrada_de_segmento(
+            PT_NOTE,
+            4,
+            onde as u64,
+            0,
+            extra as u64,
+            extra as u64,
+        ));
+        com_a_tabela(&ola, &entradas, &nota_de_outro(extra))
+    };
+    // As notas do `ola`: o que os `PT_NOTE` dele leem.
+    let do_ola: usize = originais
+        .iter()
+        .filter(|e| e[0..4] == PT_NOTE.to_le_bytes())
+        .map(|e| {
+            let mut tamanho = [0u8; 8];
+            tamanho.copy_from_slice(&e[32..40]);
+            u64::from_le_bytes(tamanho) as usize
+        })
+        .sum();
+    // A imagem do adversario: o cabecalho do `ola` e `n` entradas `PT_NOTE`,
+    // cada uma com a tabela inteira como notas. Lida como nota, cada entrada
+    // tem o tamanho do dono no tipo (4) e o do conteudo nas flags (40): 56
+    // bytes, a entrada inteira. Nenhuma entrada carregavel.
+    let do_adversario = |n: usize| {
+        let mut v = ola[..64].to_vec();
+        v[32..40].copy_from_slice(&64u64.to_le_bytes());
+        v[56..58].copy_from_slice(&(n as u16).to_le_bytes());
+        for _ in 0..n {
+            v.extend_from_slice(&entrada_de_segmento(PT_NOTE, 40, 64, 0, 56 * n as u64, 0));
+        }
+        v
+    };
+
+    // A conta pura.
+    for (nome, bytes, esperado) in [
+        (
+            "o ola com a tabela no teto",
+            com_entradas(MAX_ENTRADAS),
+            None,
+        ),
+        (
+            "o ola com uma entrada a mais",
+            com_entradas(MAX_ENTRADAS + 1),
+            Some(GRANDE_DEMAIS),
+        ),
+        (
+            "o ola com as notas no orcamento",
+            com_notas(ORCAMENTO_DAS_NOTAS - do_ola),
+            None,
+        ),
+        (
+            "o ola com quatro bytes de notas a mais",
+            com_notas(ORCAMENTO_DAS_NOTAS - do_ola + 4),
+            Some(NOTAS_DEMAIS),
+        ),
+        (
+            "a imagem do adversario, de 4096 entradas",
+            do_adversario(4096),
+            Some(GRANDE_DEMAIS),
+        ),
+        (
+            "a imagem do adversario, no teto de entradas",
+            do_adversario(MAX_ENTRADAS),
+            Some(NOTAS_DEMAIS),
+        ),
+    ] {
+        let visto = validar(&bytes).err();
+        if visto != esperado {
+            crate::log_error!("teste", "{}: {:?}, e nao {:?}", nome, visto, esperado);
+            return Err("a conferencia do ELF nao tem o teto da tabela ou o orcamento das notas");
+        }
+    }
+
+    // Pelo `user.run`.
+    let resultado = super::com_editores_do_caso(|| {
+        let selado = |bytes: &[u8]| sigilo::codigo::selar(bytes, &super::EDITOR_DO_CASO.0);
+        let quem = operador_que_lanca(187, "a5-entradas-e-notas");
+        // O controle: o `ola` com a tabela no teto lanca e sai.
+        let no_teto = alloc::format!("{}/ola-com-a-tabela-no-teto", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&no_teto, &selado(&com_entradas(MAX_ENTRADAS)))?;
+        let desde = crate::log::total_emitidos();
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{no_teto}"}}"#),
+        );
+        if fs_numero(&r, "thread_id").is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o ola com a tabela no teto nao lancou");
+        }
+        super::saida_do_processo(desde, super::SAIDA_DO_OLA)?;
+        // Uma entrada a mais, e quatro bytes de notas a mais.
+        for (nome, bytes, motivo) in [
+            (
+                "ola-de-entradas-demais",
+                com_entradas(MAX_ENTRADAS + 1),
+                GRANDE_DEMAIS,
+            ),
+            (
+                "ola-de-notas-demais",
+                com_notas(ORCAMENTO_DAS_NOTAS - do_ola + 4),
+                NOTAS_DEMAIS,
+            ),
+        ] {
+            let caminho = alloc::format!("{}/{nome}", super::CODIGO_INSTALADO);
+            super::gravar_codigo(&caminho, &selado(&bytes))?;
+            nao_carrega(quem, &caminho, motivo)?;
+        }
+        Ok(())
+    });
+    let vagas = esperar_ate(|| crate::fios::vagas_livres_de_teste() >= livres, 600)
+        .map_err(|_| "as vagas do caso das entradas e das notas nao voltaram");
+    crate::pessoas::esquecer_registradas();
+    resultado.and(vagas)
+}
+
+/// O lote A5, na pagina de cima do teto (o pre-existente 1 do adversario do
+/// lote A4): um `PT_LOAD` vazio — nada do arquivo, nada na memoria — com o
+/// destino no `TETO` passava pelo `elf::validar`, porque a faixa vazia
+/// `[TETO, TETO)` cabe no espaco do usuario, e ganhava a pagina
+/// `[TETO, TETO + 4 KiB)`: uma pagina de usuario acima do teto declarado,
+/// ainda na entrada de topo do processo, que a morte dele devolve, mas que
+/// a copia na escrita e a conferencia das faixas das chamadas nao tomam por
+/// do usuario. O `ola` com esse segmento a mais nao lanca — `launched:
+/// false` com o motivo, o desfecho na auditoria, e nenhum nascimento. E o
+/// controle: o `ola` com o mesmo segmento vazio dentro do espaco do
+/// programa lanca e sai com o codigo dele — o que se recusa e a pagina
+/// fora, e nao o segmento vazio.
+pub(super) fn contencao_o_segmento_vazio_no_teto_nao_ganha_a_pagina_de_cima() -> Resultado {
+    const FORA: &str = "um segmento quer paginas fora do espaco do usuario";
+    crate::pessoas::esquecer_registradas();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let ola = super::ola_da_imagem()?;
+    let originais = entradas_de(&ola)?;
+    // O `ola` com um `PT_LOAD` vazio, so de leitura, em `destino`.
+    let com_o_vazio_em = |destino: u64| {
+        let mut entradas = originais.clone();
+        entradas.push(entrada_de_segmento(1, 4, 0, destino, 0, 0));
+        com_a_tabela(&ola, &entradas, &[])
+    };
+    let resultado = super::com_editores_do_caso(|| {
+        let selado = |bytes: &[u8]| sigilo::codigo::selar(bytes, &super::EDITOR_DO_CASO.0);
+        let quem = operador_que_lanca(188, "a5-vazio-no-teto");
+        // O controle: o vazio a 48 MiB do comeco, entre o programa e o que
+        // o `mapear` da.
+        let dentro = alloc::format!("{}/ola-com-o-vazio-dentro", super::CODIGO_INSTALADO);
+        let no_espaco = com_o_vazio_em(crate::usuario::BASE + 0x0300_0000);
+        super::gravar_codigo(&dentro, &selado(&no_espaco))?;
+        let desde = crate::log::total_emitidos();
+        let r = fs_pedir(
+            quem,
+            "user.run",
+            &alloc::format!(r#"{{"path":"{dentro}"}}"#),
+        );
+        if fs_numero(&r, "thread_id").is_none() {
+            crate::log_error!("teste", "{}", r);
+            return Err("o ola com o segmento vazio dentro do espaco nao lancou");
+        }
+        super::saida_do_processo(desde, super::SAIDA_DO_OLA)?;
+        // O vazio no `TETO`.
+        let no_teto = alloc::format!("{}/ola-com-o-vazio-no-teto", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&no_teto, &selado(&com_o_vazio_em(crate::usuario::TETO)))?;
+        nao_carrega(quem, &no_teto, FORA)
+    });
+    let vagas = esperar_ate(|| crate::fios::vagas_livres_de_teste() >= livres, 600)
+        .map_err(|_| "as vagas do caso do segmento vazio no teto nao voltaram");
+    crate::pessoas::esquecer_registradas();
+    resultado.and(vagas)
 }
