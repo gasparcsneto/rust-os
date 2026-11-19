@@ -110,9 +110,23 @@ pontos onde acontece — não num canal paralelo:
   dele, o fio do filho (`processo N lancado; decisao D`), e o `bifurcar`
   grava o filho (`process.fork`) em nome do pai — os dois **antes de o
   filho poder rodar**, para que o primeiro pedido dele nunca chegue antes
-  do registro que diz quem o criou. O `process.fork` é um fato, não uma
-  decisão: bifurcar não é permissão (o filho herda a autoridade do pai, e
-  conta na cota dela), e tudo o que o filho pedir passa pelo gate;
+  do registro que diz quem o criou. Só o lançamento do comando se grava
+  assim — com a autoridade dele e um dos caminhos que o gate decidiu —:
+  outro, de dentro do mesmo `user.run`, é recusado (`ERROR`, "fora de um
+  comando autorizado") — já no começo do lançamento, antes de o código ser
+  lido —, gravado como a execução da decisão, e não nasce, e
+  o NSF não atribui a quem pediu um processo de outra autoridade. A
+  amarração é pela autoridade e pelo caminho, e não pela contagem: dois
+  lançamentos assim, no mesmo `user.run`, nasceriam os dois, citando a
+  mesma decisão; o handler lança uma vez. No código de fora da imagem, o
+  nascimento diz também o resumo e o editor — pelo nome que a última
+  palavra perguntou, e não pelo da conferência. E o `user.run` permitido
+  que não lança — o arquivo que não se lê, o fio que não nasce — grava o
+  desfecho como execução da decisão, `ERROR` com o motivo, como o `exec`;
+  fora de um comando, em nome do kernel (os três, desde o lote A3 do
+  #448). O `process.fork` é um fato, não uma decisão: bifurcar não é
+  permissão (o filho herda a autoridade do pai, e conta na cota dela), e
+  tudo o que o filho pedir passa pelo gate;
 - a conexão derrubada por um bloqueio, como execução do `net.block`;
 - o pedido de rede recusado pelo firewall, como execução da decisão que o
   gate tinha permitido.
@@ -200,10 +214,18 @@ registro que o NSF não lê — um texto acima do teto, um titular ou um
 código que ele não conhece — não leva mais o lote junto
 (`seguranca::evento::lote`): os outros entram, o kernel diz no log qual
 não se leu e por quê, e o buraco é a lacuna de sempre (`audit-gap`), que
-o monitor de invariantes vê no registro seguinte que se lê. O ilegível
-que é o primeiro que o motor lê — no boot, o mais velho da janela que o
-journal repôs — não tem anterior, e não vira lacuna: dele fica só o aviso
-do log.
+o monitor de invariantes vê no registro seguinte que se lê. A leitura
+passa por eles pelo número (`seguranca::Motor::ler_lote`): um lote
+inteiro que não se lê — 64 seguidos — não para a volta, que segue até a
+cabeça ou o teto de leituras dela; até o lote A3 do #448, a volta parava
+ali, o `LIDO` não andava, e a seguinte pedia o mesmo lote até os
+registros saírem do anel. E o que não se lê e é o primeiro que o motor
+alcança, sem nenhum lido antes — no boot, o mais velho da janela que o
+journal repôs —, também vira a lacuna, pelo número
+(`seguranca::invariantes::Monitor::nao_lido`), vista no primeiro registro
+que se lê; antes, dele ficava só o aviso do log. Só um lote inteiro dos
+que não dizem o número ainda para a leitura ali, como antes; o kernel
+grava o número em todo registro.
 
 Acima do teto do detalhe (96 bytes), a auditoria abrevia a descrição do
 programa — `pelo processo N (? <resumo>)` no da imagem; no código de
@@ -884,7 +906,10 @@ contido pelo despertador.
   objetivo, a história que não pede, a ação sem plano, a adulteração e a
   lacuna, o desfecho do maior quórum — o identificador acima do teto de
   um campo —, o registro que não se lê, que vira a lacuna sem parar a
-  leitura, a proveniência, o DNS nas duas ordens, pessoa e agente pela
+  leitura — também um lote inteiro deles, por onde a leitura passa pelo
+  número; o primeiro que o motor alcança, que vira a lacuna pelo número,
+  no monitor e no motor; e o que não diz o número, que não anda a
+  leitura —, a proveniência, o DNS nas duas ordens, pessoa e agente pela
   mesma conta, e só o incidente alto levando à contenção; a descrição
   acima do teto do detalhe — o código adulterado, a recusa do manifesto, a
   bifurcação e o teto de nome longo, a decisão do `pelo` acima do teto, a
@@ -904,7 +929,9 @@ contido pelo despertador.
   revogada; o NSF num fio dele lendo junto com quatro fios que pedem — até
   ele dar três voltas com eles; a lacuna do anel; o desfecho do maior
   quórum, lido pelo gate com o que vem depois; o registro que não se
-  lê, que vira a lacuna e não para a leitura; o firewall só
+  lê, que vira a lacuna e não para a leitura, e mais de um lote deles —
+  sem nenhum lido antes —, que também não para a leitura, respeita o teto
+  da volta e vira uma lacuna só; o firewall só
   restringindo, depois do gate; os quadros sem fluxo, o ICMP e o aviso da
   conexão derrubada; o `resolvedor` contra a bancada; e a resposta que não
   dá acesso — religada, forjada, muda, malformada, de um servidor fora do

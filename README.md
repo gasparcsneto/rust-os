@@ -237,7 +237,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path`; padrão: o exemplo). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — o journal recusado, encerrado ou contido, o editor, o papel, a cota, também a contada de novo no nascimento — e em quem pediu encerrado na última palavra, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
+| `user.run` | Lança um programa no anel sem privilégio (`path` — o exemplo embutido é `/bin/exemplo`; sem o `path`, o gate recusa — `DENY_RESOURCE` a quem tem `process.run`: nenhum papel alcança o recurso vazio). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — o journal recusado, encerrado ou contido, o editor, o papel, a cota, também a contada de novo no nascimento — e em quem pediu encerrado na última palavra, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -422,7 +422,7 @@ kernel/src/
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -1436,8 +1436,8 @@ mudam isso no hardware — o processo executa num modo em que instruções
 privilegiadas não funcionam e só alcança as páginas marcadas como dele.
 
 ```
-$ cargo xtask agent user.run
-{"launched":true,"thread_id":7}
+$ cargo xtask agent user.run '{"path":"/bin/exemplo"}'
+{"program":"/bin/exemplo","launched":true,"thread_id":7}
 
 $ cargo xtask agent log.tail '{"count":3}'
 ... info  "usuario" "ola do anel 3"
@@ -2102,7 +2102,7 @@ processo pela que o nome indicar, e não retorna para quem chamou: retorna
 para o primeiro endereço do programa novo.
 
 ```
-$ cargo xtask agent user.run && cargo xtask agent user.stats
+$ cargo xtask agent user.run '{"path":"/bin/exemplo"}' && cargo xtask agent user.stats
 {"syscalls":7,"forks":1,"execs":1,"exits":2,...}
 
 $ cargo xtask agent log.tail '{"count":6}'
@@ -6445,10 +6445,13 @@ registro de cada uma no ponto em que nasceu.
   nativo sem o programa que o gate decidiu já não supõe "sem imagem", que
   passava pela confiança no editor sem pergunta — recusa como fora de um
   comando autorizado, `ERROR` —; e o nascimento do `user.run` fora de um
-  comando decidido recusa também, gravado em nome do kernel. As exceções
+  comando decidido recusa também, gravado em nome do kernel (desde o lote
+  A3, já no começo do lançamento: a (t) abaixo). As exceções
   se reconhecem pelo que são, e não por não terem decisão: o kernel que
   lança por conta própria, fora de um comando — o servidor de janelas e o
-  Terminal no boot, pelo `usuario::lancar`; a suíte, que lança direto
+  Terminal no boot, pelo `usuario::lancar` (desde o lote A3,
+  `usuario::lancar_como_sistema`, e só até o boot acabar de lançar, ver a
+  (m) abaixo); a suíte, que lança direto
   (`usuario::lancar_pelo_kernel`, `autorizacao::Lancador::Kernel`) —, e
   o handler do `user.run` que a suíte chama direto, cujo comando sem
   decisão só existe na compilação dela (`autorizacao::reconfirmar_o_lancamento`);
@@ -6546,8 +6549,10 @@ registro de cada uma no ponto em que nasceu.
   arquivo, que o `usuario::lancar_conferido` só aparece em
   `agent/commands.rs`, o arquivo do handler do `user.run` (e onde se
   define); o `usuario::lancar`, pelo texto com o caminho, em lugar nenhum
-  fora da suíte; o `lancar_como` e o `lancar_pelo_kernel`, pela palavra,
-  só em `usuario/mod.rs`;
+  fora da suíte — um texto que um `use` contornava; desde o lote A3, o
+  `usuario::lancar_como_sistema`, pela palavra, só em `usuario/mod.rs`, e
+  nenhum nome protegido com outro nome (a (m) abaixo) —; o `lancar_como` e
+  o `lancar_pelo_kernel`, pela palavra, só em `usuario/mod.rs`;
   o boot os pede só pelos dois lançamentos dele, o servidor de janelas e o
   Terminal, só no `main.rs`; e o `autorizacao::Lancador`, só em
   `autorizacao.rs` e `usuario/mod.rs` — pela palavra, também num `use` que
@@ -6580,6 +6585,264 @@ registro de cada uma no ponto em que nasceu.
   número da decisão levaram o detalhe a 97 bytes, um acima do teto, e a
   descrição do programa encolheu (`(pedinte abababab)` virou `(?
   abababab)`); nas partes, com menos dígitos, ele cabia. Só o teste mudou.
+  E o adversário da integração `f018bee..2c39e80` — o lote A2, o #454 e o
+  executor da suíte — não achou falha alta, e achou seis pontos, feitos no
+  lote A3, um incremento [B] de 18 de novembro de 2026 — as mesmas
+  perguntas do gate, amarradas onde ainda soltavam, e as guardas estáticas
+  do `xtask` que um `use` contornava; nenhuma regra nova, nenhuma
+  autoridade, nenhum tipo novo de detecção no NSF, e nada novo na auditoria
+  além do detalhe, do desfecho de decisões que já existiam e, fora de um
+  comando, de recusas do nascimento em nome do kernel, como as que já se
+  gravavam — nenhum registro de tipo novo:
+  (m) o lançamento do sistema — `Autoridade::Sistema`, e fora de um
+  comando sem decisão nenhuma — chamava-se `usuario::lancar`, e o `xtask`
+  o protegia pelo texto com o caminho, `usuario::lancar(`: um `use … as …`,
+  o `use crate::usuario as u`, o espaço ou a quebra de linha antes do
+  parêntese, um ponteiro de função, o `super::` e uma macro passavam, e
+  `lancar` não serve de palavra — colide com `executor.lancar(`. Agora tem
+  nome único, `usuario::lancar_como_sistema`, protegido pela palavra, só em
+  `usuario/mod.rs`. Nenhum nome protegido ganha outro nome: o `xtask`
+  recusa `<nome protegido> as`, com qualquer espaço, comentário ou quebra
+  de linha no meio, em todo arquivo fora da suíte, dono ou não — um `pub
+  use … as …` no dono deixava o apelido livre nos outros —; e lê cada
+  linha crua e a mesma linha só com o código, e uma linha que começa com
+  `//` dentro de um texto de várias linhas não esconde mais o código que
+  vem depois do texto. Os carregadores — `codigo::obter`,
+  `programa::carregar`, `programa::preparar`, `Preparada::trocar`,
+  `Trocada::mapear` e `programa::entrar`, que eram `pub`, quatro deles sem
+  regra nenhuma — são `pub(super)`: fora do módulo `usuario` a chamada não
+  compila, em forma nenhuma, e o `xtask` confere que a visibilidade não se
+  alarga (`conferir_os_carregadores`), e, dentro do módulo, que só o
+  `usuario/mod.rs` e o arquivo de cada um os nomeiam, e que ninguém lhes dá
+  outro nome (a (s) abaixo); o `programa::executar`, que entra
+  num programa sem a conferência do código, só existe na compilação da
+  suíte, e a suíte alcança o `carregar`, o `entrar` e o `obter` pelos
+  embrulhos dela (`carregar_de_teste`, `entrar_de_teste` e
+  `obter_de_teste`, nomes protegidos que nenhum arquivo de produção nomeia).
+  E o trinco do boot: o
+  `main.rs` fecha os lançamentos do kernel por conta própria depois do
+  servidor de janelas e do Terminal
+  (`autorizacao::fechar_os_lancamentos_do_kernel`), e daí em diante o
+  `Lancador::Kernel` fora de um comando é recusado como fora de um comando
+  autorizado, gravado em nome do kernel: a documentação e o `xtask` já
+  diziam "fora da suíte, só o boot", e o trinco o faz valer em tempo de
+  execução. Nenhum caminho de produção lança como o kernel depois do boot:
+  o Terminal que a barra abre de novo, o servidor de janelas o lança — um
+  processo, pelo `bifurcar` e pelo `executar`, cada chamada pelo gate em
+  nome dele —, e o NSF, a hora, a energia e o botão são fios do kernel, e
+  não processos. A suíte não o fecha no boot — só o caso do trinco, que o
+  reabre —, e lança direto; e o `xtask` confere que, fora de
+  `autorizacao.rs`, onde se define, só o `main.rs` o nomeia, e lá uma vez,
+  logo depois dos dois lançamentos, no mesmo bloco (`trinco_fora_de_ordem`;
+  a (z) abaixo);
+  (n) a última palavra do nascimento, num comando decidido, refazia a
+  decisão do comando e não olhava o lançamento: dentro do `user.run` de um
+  operador, um lançamento como o sistema, e um `lancar_conferido` com
+  outra autoridade ou com outro caminho, nasciam, gravados como a execução
+  da decisão do operador — o único chamador, o handler do `user.run`, passa
+  a autoridade de agora e o mesmo `path`, e a garantia era só essa linha.
+  Num comando decidido para `process.run`, qualquer que seja o lançador, a
+  autoridade do processo que nasce tem de ser a do comando
+  (`autorizacao::autoridade_atual`),
+  e o caminho, um dos recursos que o gate decidiu
+  (`autorizacao::alvo_decidido`), cru, como o handler o leu do pedido; o
+  exemplo embutido, sem caminho, é o recurso vazio, que o gate nunca
+  permite — o `user.run` sem `path` é `DENY_RESOURCE` para todo papel que
+  tem `process.run`, o sistema inclusive, e a descrição do comando, que
+  prometia o exemplo, diz
+  isso agora (o exemplo é `/bin/exemplo`). Recusado: `ERROR`, "fora de um
+  comando autorizado", gravado como a execução do comando — e, desde o
+  adversário do lote, já no começo do lançamento, antes da leitura do
+  código (a (t) abaixo). A amarração é
+  pela autoridade e pelo caminho, e não pela contagem: o único chamador
+  lança uma vez;
+  (o) o NSF parava num lote em que nenhum registro se lia: `novos == 0`
+  parava a volta, o `LIDO` não andava, e a volta seguinte pedia o mesmo
+  lote, até os registros saírem do anel. O motor passa pelos que não se
+  leem pelo número deles (`seguranca::Motor::ler_lote`), a volta segue até
+  a cabeça ou o teto de leituras dela, e o buraco é a lacuna de sempre,
+  vista no seguinte que se lê; e o primeiro que não se lê, sem nenhum
+  conferido antes — no boot, o mais velho da janela que o journal repôs —,
+  também vira a lacuna, pelo número
+  (`seguranca::invariantes::Monitor::nao_lido`), e não fica só no log. Um
+  lote inteiro dos que não dizem o número ainda para a leitura ali, como
+  antes: o kernel grava o número em todo registro;
+  (p) o registro do nascimento dizia o editor do código pelo nome da
+  conferência, e a última palavra, que pergunta a confiança de novo,
+  descartava o nome que a pergunta devolvia: a chave que sai do registro e
+  volta com outro nome no meio aparecia com o nome velho. O nascimento
+  grava o de agora, e o selo da conferência não guarda mais o nome
+  (`usuario::codigo::Selo`);
+  (q) um `user.run` permitido cujo arquivo não se lê, ou cujo fio não
+  nasce — a vaga, a pilha, o escalonamento congelado —, não gravava a
+  execução da decisão: a cadeia ficava com um `ALLOW` sem desfecho. Grava,
+  como o `exec` grava o mesmo caso: `ERROR`, com o motivo; fora de um
+  comando, em nome do kernel — num boot com tela e sem o disco dos
+  programas, os dois lançamentos do boot deixam cada um um `process.run`
+  `ERROR` em nome do kernel, com o motivo da leitura, onde antes só o log
+  dizia;
+  (r) o caso do executor da suíte soltava o coletor da auditoria por um
+  instante com o journal solto: uma gravação do coletor ali cairia num
+  caso seguinte. Ele segura o journal antes, em cada passo, e uma conta da
+  suíte (`persistencia::solturas_com_o_journal_solto_de_teste`) diz se o
+  coletor ficou solto com o journal solto em algum instante dele.
+  Os casos, no fim da tabela, depois dos do lote B4: `contencao: o
+  lancamento de dentro do user.run so nasce com a autoridade e o caminho
+  do comando` (pelo gancho de antes das perguntas do gate: o lançamento
+  como o sistema, outro caminho, outra autoridade e o exemplo embutido),
+  `codigo: o nascimento grava o nome do editor que a ultima palavra
+  perguntou` (pelo gancho do meio do nascimento, que troca o nome da chave
+  no registro), `contencao: o user.run de um caminho que nao existe grava
+  o desfecho`, `contencao: o user.run cujo fio nao nasce grava o desfecho`
+  (com a tabela de fios cheia, como o caso da energia, que passou a
+  dividir o enchimento com ele), `nsf: mais de um lote que nao se le nao
+  para a leitura, e vira uma lacuna` (os registros de uma volta inteira
+  mais um, sem nenhum lido antes) e `contencao: depois do boot o kernel
+  nao lanca por conta propria` (o trinco fechado, com um `user.run` que
+  ainda lança); e `suite: o executor ve e devolve o coletor solto e o
+  journal segurado`, reescrito. No `xtask`,
+  `as_formas_de_contornar_o_lancamento_do_sistema`,
+  `o_nome_protegido_nao_se_renomeia_nem_no_dono`,
+  `o_que_nao_e_o_nome_nao_se_acusa`, `os_carregadores_nao_se_alargam` e
+  `o_trinco_do_boot_depois_dos_dois_lancamentos`; no `seguranca`,
+  `o_lote_que_nao_se_le_nao_para_a_leitura`,
+  `o_primeiro_que_nao_se_le_vira_lacuna`,
+  `o_que_nao_diz_o_numero_nao_anda_a_leitura` e
+  `o_que_nao_se_le_antes_do_primeiro_e_lacuna`; e
+  `o_registro_que_nao_se_le_vira_lacuna`, que agora vê a leitura passar
+  pelo registro que não se lê (ver [As mutações do ponto sem volta e de
+  quem pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)).
+  E o adversário do lote A3, só de leitura, sobre o retrato do lote, não
+  achou falha alta nem média, e achou três baixas e seis informativas;
+  oito foram feitas no próprio lote — a mesma regra mais cedo, as guardas
+  do `xtask` mais fechadas, e a conta da suíte com o controle positivo —,
+  e a nona, de antes dele, fica à parte (abaixo). Nenhuma regra nova no
+  gate, nenhuma autoridade, e, na auditoria, só a recusa que a última
+  palavra já gravava, mais cedo, no lugar da leitura que falhava num
+  lançamento que não era o do comando:
+  (s) os carregadores alcançáveis pelos irmãos do módulo `usuario`: o
+  `pub(super)` de um filho vale para o módulo inteiro e os descendentes
+  dele, e um `use super::programa::{carregar as abrir, entrar as descer};`
+  em `usuario/elf.rs` — e um `pub fn` dele que os chamasse — passava pelo
+  compilador e pelo `xtask`: um segundo caminho de lançamento, sem a
+  conferência do código, o gate, a última palavra, o trinco e o registro
+  do nascimento. O `xtask` recusa, num arquivo do módulo `usuario`, ou de
+  um submódulo dele, que não seja o `usuario/mod.rs` nem o que define cada
+  um, os carregadores, o que só a suíte tem e os passos da carga
+  (`Preparada`, `Trocada`), como palavra, no código
+  (`carregadores_nos_irmaos`) — hoje, só os comentários os citam —; e, em
+  todo arquivo do módulo, o `usuario/mod.rs` inclusive, nenhum deles ganha
+  outro nome (`carregadores_renomeados`, o achado 2 do adversário do delta,
+  abaixo);
+  (t) a amarração do lançamento ao comando, e o trinco, só valiam no
+  nascimento: antes dele, as perguntas sobre quem pede e a leitura do
+  código corriam com a autoridade de quem chamava, e a leitura que falhava
+  ia à auditoria como a execução da decisão do operador — de um recurso
+  que ela não cobriu —, ou, com o trinco fechado, em nome do kernel, "nao
+  encontrado", sem o trinco chegar a recusar. A pergunta da última palavra
+  sobre o lançamento — quem lança, a autoridade, o caminho e o trinco, sem
+  decidir o comando de novo — vem também no começo do lançamento
+  (`autorizacao::conferir_o_lancamento`): recusado, `ERROR`, "fora de um
+  comando autorizado", gravado como a última palavra grava a recusa dela —
+  como a execução do comando, ou em nome do kernel —, e nada é lido. A
+  última palavra continua inteira no nascimento;
+  (u) o `include!` renomeado por um `use` — `use core::include as
+  trazer;` e `trazer!(…)` —, de antes do lote: a conferência procurava
+  `include` seguido de `!`. Recusa a palavra `include` no código do kernel
+  fora da suíte, em qualquer forma; o `include_str!` e o `include_bytes!`,
+  que trazem texto e bytes, são outras palavras;
+  (v) a regra do `as` caía por uma macro no dono: `macro_rules! apelido {
+  ($n:ident) => { pub use self::$n as abrir; }; }` e
+  `apelido!(lancar_como_sistema);`, em `usuario/mod.rs`, davam outro nome
+  a um nome protegido sem que o `as` viesse depois dele. O `xtask` recusa o
+  `use` com uma metavariável antes do `;` que o fecha — o `$` e um nome que
+  não é `crate`, ou uma repetição —, e o `use` nos argumentos de uma
+  invocação de macro (o achado 1 do adversário do delta, abaixo), em todo
+  arquivo do kernel fora da suíte (`onde_um_use_se_monta`); o kernel não
+  tem nenhum;
+  (w) o atributo da suíte era lido nas linhas cruas: um
+  `#[cfg(feature = "modo-teste")]` num comentário de bloco logo acima do
+  `fn` passava, e o `executar` ficaria na compilação de produção. É
+  conferido no código: um atributo de verdade, com só atributos e a
+  visibilidade até o `fn`, cujo texto, lido cru nas mesmas posições, é o
+  da suíte — a leitura das linhas cruas saiu, porque esta acha todo
+  atributo que ela achava —; e os dois arquivos dos carregadores não têm
+  macro nenhuma, que tiraria o atributo da compilação com ele no texto (o
+  achado 4 do adversário do delta, abaixo);
+  (x) a conta da suíte do caso do executor não tinha controle positivo:
+  tirar o incremento dela não reprovava nada — e, sem ele, a M6e, que só a
+  conta vê, sobreviveria. `auditoria: o que nao muda estado vai no
+  registro seguinte, ou no do coletor`, que solta o coletor com o journal
+  solto e o espera gravar, confere que ela andou. E as duas marcas — a pausa e o journal
+  segurado — moram num atômico só, só na suíte
+  (`persistencia::MARCAS_DA_AUDITORIA`), que o coletor lê de uma vez:
+  lidas uma depois da outra, a devolução do estado da suíte, que pausa e
+  depois solta, deixava o coletor que lesse a pausa antes dela, e o
+  journal depois da soltura, gravar sem instante nenhum com as duas
+  tiradas, e sem a conta ver;
+  (y) o caso da (n) não lançava com a mesma espécie de autoridade: os
+  lançamentos de dentro trocavam a pessoa pelo sistema, e a comparação só
+  da variante da `Autoridade` passaria. Ganhou um, com a autoridade de
+  outra pessoa operadora;
+  (z) o trinco conferido só pela ordem do texto: um `#[cfg(any())]` ou um
+  `if` na linha dele, um bloco à parte ou uma função que ninguém chama
+  passavam. O `xtask` exige as três chamadas seguidas — o servidor de
+  janelas, o Terminal e o trinco —, no mesmo bloco, só com espaços e
+  comentários entre elas, o trinco pelo caminho do pacote,
+  `crate::autorizacao::…`, e as três fora dos argumentos de uma macro (o
+  achado 3 do adversário do delta, abaixo). Um atributo, uma condição, um
+  bloco, uma função ou uma macro em volta tiram os dois lançamentos junto
+  com o trinco, e um boot sem eles não passa despercebido.
+  E o adversário do delta — as oito correções acima, pelo retrato novo —
+  achou que elas fecham os achados, e não sobra falha alta, média nem
+  baixa; e achou quatro formas informativas, todas num dono, que as
+  contornavam, feitas também no lote: (1) o `use` montado pela invocação
+  de uma macro do dono — `apelido!(pub use self::lancar_como_sistema);`,
+  com uma macro que só repassa os tokens, ou `apelido!(use
+  lancar_como_sistema);`, com uma que monta o `use` do token —: o `xtask`
+  recusa a palavra `use` nos argumentos de uma invocação de macro, em todo
+  arquivo do kernel fora da suíte, venha a macro de onde vier
+  (`invocacoes_de_macro`); (2) o apelido de um carregador feito no próprio
+  `usuario/mod.rs`, que os irmãos chamavam sem nomear o carregador: a
+  regra do `as` vale para os carregadores, o que só a suíte tem e os
+  passos da carga em todo arquivo do módulo `usuario`, o `mod.rs`
+  inclusive; (3) o trinco sombreado no `main.rs` por um `mod autorizacao`
+  com a mesma função, no mesmo bloco: o `main.rs` chama o trinco pelo
+  caminho do pacote, que não se sombreia, e o `xtask` exige essa forma; e
+  (4) uma macro no `programa.rs` em volta do `executar` que tirava o
+  atributo da suíte da compilação: nenhum `macro_rules!` nos arquivos dos
+  carregadores. Os outros donos de nomes protegidos não entraram na (4): o
+  `interpretador.rs` tem as duas macros dele.
+  O que fica, aceito como no plano do lote: o dono pode expor um nome
+  protegido por um embrulho, um `const` ou um `static` dele, ou por uma
+  macro dele que o chame — o apelido está fechado: pelo `as`, em todo
+  arquivo; pelo `use` montado numa macro, com a metavariável ou nos
+  argumentos dela; e, nos arquivos dos carregadores, por macro nenhuma —,
+  e o dono é revisado; um `#[macro_export]` com `crate::usuario::…`, ou um
+  `pub use core::include as …`, num pacote do repositório de que o kernel
+  dependa — a varredura é a de `kernel/src`, e hoje não há nenhum —; uma
+  referência pelo símbolo (`#[link_name = "_ZN…"]`); e as primitivas
+  abaixo dos carregadores, `fios::adotar_imagem` e
+  `arch::entrar_em_usuario`. E a nona, de antes do lote: a imagem que não
+  é ELF, gravada como "processo N lancado" antes de o fio novo a recusar,
+  fica para uma tarefa à parte; e as recusas sobre quem pede gravam
+  `process.run` sem citar a decisão do `user.run`, que é o desenho delas
+  (`usuario::NaoLancou::PorQuemPede`, a (j) acima). Os casos:
+  `contencao: o lancamento de dentro do user.run so nasce com a
+  autoridade e o caminho do comando`, com mais três lançamentos — o de
+  outra pessoa, e os dois de um caminho que não existe, pelo comando e
+  como o sistema —, `contencao: depois do boot o kernel nao lanca por
+  conta propria`, com o do caminho que não existe, e `auditoria: o que nao
+  muda estado vai no registro seguinte, ou no do coletor`, com a conta; no
+  `xtask`,
+  `o_irmao_do_usuario_nao_alcanca_os_carregadores`,
+  `o_include_renomeado`, `o_apelido_por_macro_no_dono`,
+  `o_atributo_da_suite_num_comentario` e
+  `o_trinco_logo_depois_dos_dois_lancamentos`; e, do delta,
+  `o_use_nos_argumentos_de_uma_macro`,
+  `o_carregador_nao_ganha_outro_nome_no_modulo_usuario` e
+  `nenhuma_macro_nos_arquivos_dos_carregadores`, com o trinco pelo caminho
+  do pacote nos dois do trinco.
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -8092,11 +8355,16 @@ falha fechado:
    o `user.run` responde `launched: false`, com o `code` e a explicação de
    razão `DENY_PROVENANCE`; o `executar` devolve `SEM_SELO` (−18),
    `SELO_NAO_CONFERE` (−19) ou `EDITOR_NAO_CONFIADO` (−20), e o processo
-   segue inteiro — nada foi trocado. No `executar`, o arquivo que o gate
-   deixou e não se lê também ganha a execução da decisão, `ERROR` com o
-   motivo da leitura, e o processo ouve `PROGRAMA_DESCONHECIDO` (−7) — ou
+   segue inteiro — nada foi trocado. O arquivo que o gate deixou e não se
+   lê também ganha a execução da decisão, `ERROR` com o motivo da leitura:
+   no `executar`, o processo ouve `PROGRAMA_DESCONHECIDO` (−7) — ou
    `SEM_MEMORIA` (−5), quando o que faltou foi um pedaço do heap do
-   tamanho do arquivo: ler de novo depois pode dar certo. Toda execução da
+   tamanho do arquivo: ler de novo depois pode dar certo —; no `user.run`,
+   desde o lote A3 do #448, quem pediu ouve `launched: false` com o
+   motivo, e o lançamento do kernel fora de um comando grava a recusa em
+   nome dele. E o `user.run` permitido cujo fio não nasce — a vaga, a
+   pilha, o escalonamento congelado — grava o mesmo desfecho, `ERROR` com
+   o motivo. Toda execução da
    decisão de uma chamada de sistema vai em nome de quem o gate decidiu —
    o titular, a sessão, o papel e o processo com o programa que pediu,
    guardados na decisão (`autorizacao::DecisaoDoProcesso`), como a de um
@@ -8130,13 +8398,21 @@ falha fechado:
    lançar o comando decidido para `process.run` — o `user.run` —: outro
    comando decidido seria decidido de novo pela permissão dele, e passaria
    (`ERROR`, "fora de um comando autorizado", diga quem lança o que
-   disser). Quem chama cada lançamento o `xtask` confere, arquivo por
-   arquivo: o do `user.run` (`usuario::lancar_conferido`) só em
-   `agent/commands.rs`, o arquivo do handler dele; o do kernel por conta
-   própria — o `lancar_como` e o `lancar_pelo_kernel`, pela palavra, só em
-   `usuario/mod.rs`, e o `usuario::lancar`, pelo texto com o caminho, em
-   lugar nenhum fora da suíte —, que o boot pede pelos dois lançamentos
-   dele, o servidor de janelas e o Terminal; e o lançador
+   disser) —, e só com a autoridade e um dos caminhos do comando: a
+   autoridade do processo que nasce é a do comando, e o caminho, um dos
+   recursos que o gate decidiu (o lote A3 do #448) — perguntado também no
+   começo do lançamento, antes de o código ser lido
+   (`autorizacao::conferir_o_lancamento`): o lançamento que não é o do
+   comando não lê nada nem pergunta nada sobre quem pede. Quem chama cada
+   lançamento o `xtask` confere, arquivo por arquivo: o do `user.run`
+   (`usuario::lancar_conferido`) só em `agent/commands.rs`, o arquivo do
+   handler dele; o do kernel por conta própria — o `lancar_como_sistema`,
+   o `lancar_como` e o `lancar_pelo_kernel`, pela palavra, só em
+   `usuario/mod.rs`, e nenhum deles com outro nome, em arquivo nenhum fora
+   da suíte —,
+   que o boot pede pelos dois lançamentos dele, o servidor de janelas e o
+   Terminal, e que depois dos dois ele fecha
+   (`autorizacao::fechar_os_lancamentos_do_kernel`); e o lançador
    (`autorizacao::Lancador`) só onde se define e onde se lança. Recusada
    no `executar`, nada se troca: a imagem
    preparada sai, o processo segue com a dele e ouve `NEGADO` (−16), o
@@ -8152,7 +8428,9 @@ falha fechado:
    cada pedido dela passa pelo gate;
 5. o processo nasce com o editor no programa do fio, e a auditoria diz de
    onde ele veio — o nascimento, `processo <fio> lancado: codigo <resumo>
-   de bancada`, e cada pedido dele, `(vindo <resumo> de bancada)`. Acima
+   de bancada` — o editor pelo nome que a última palavra do nascimento
+   perguntou (desde o lote A3 do #448; antes, o da conferência) —, e cada
+   pedido dele, `(vindo <resumo> de bancada)`. Acima
    do teto do detalhe, abreviados: o pedido sai `(? <resumo> de bancada)`
    ou `(? <resumo> de ?)`, e na descrição o resumo e o `de` ficam sempre.
    O nascimento, que é texto, perde as últimas palavras inteiras: primeiro
@@ -8308,7 +8586,20 @@ passa por ele.
 O `xtask invariantes` confere o desenho: só `usuario/mod.rs` chama
 `obter` e `programa::carregar`; nada mais em `usuario/` lê um executável
 do VFS; só o carregador monta o programa de um fio; e o kernel não sela
-nada — ele não tem chave de editor nenhuma.
+nada — ele não tem chave de editor nenhuma. Desde o lote A3 do #448, os
+carregadores — o `obter`, o `carregar`, o `preparar`, o `trocar`, o
+`mapear` e o `entrar` — são `pub(super)`: fora do módulo `usuario` a
+chamada não compila, em forma nenhuma, e o `xtask` confere que a
+visibilidade não se alarga, e que o `programa::executar`, que entra num
+programa sem a conferência, e os embrulhos com que a suíte alcança os
+carregadores só existem na suíte (`conferir_os_carregadores`) — com o
+atributo de verdade, no código, e não num comentário. Dentro do módulo,
+o `pub(super)` não separa os irmãos: o `xtask` confere que, fora do
+`usuario/mod.rs` e do arquivo de cada um, nenhum arquivo do módulo nomeia
+os carregadores, o que só a suíte tem e os passos da carga, em forma
+nenhuma (`carregadores_nos_irmaos`); que nenhum arquivo do módulo, nem o
+`usuario/mod.rs`, lhes dá outro nome (`carregadores_renomeados`); e que
+os dois arquivos dos carregadores não têm macro nenhuma.
 
 ### Da rede ao processo
 
@@ -9905,8 +10196,10 @@ suíte, que a conferência deixa de fora pelo caminho do arquivo —,
 conferido no arquivo inteiro, fora dos comentários e dos textos: o
 atributo com a palavra `path` em qualquer forma — `#[path = …]`, no
 `cfg_attr`, partido em linhas, `r#path` —, o atributo montado por uma
-macro (`#[$…]`) e o `include!` (o achado 6 do adversário do passo 1b e o
-achado 2 do passo 1c).
+macro (`#[$…]`) e o `include` — pela palavra, desde o lote A3 do #448:
+também o `use core::include as …` que o traz com outro nome — (o achado 6
+do adversário do passo 1b, o achado 2 do passo 1c e o achado 3 do
+adversário do lote A3).
 
 Em qualquer linha, o valor de um `set_value` pela árvore só leva o que uma
 pessoa digitaria — letras, números, sinais e o espaço —, e cabe na linha:
@@ -10775,10 +11068,169 @@ nao lanca`, a segunda nele e em `contencao: a chave revogada no meio do
 user.run nao lanca`, o caso da CI 509. E as regras
 novas do `xtask` sobre quem lança, cada uma com uma linha a mais num
 arquivo que não é dono — o `lancar_como` num `use` em `barra.rs`, o
-`usuario::lancar(` em `main.rs`, o `Lancador::Kernel` em
+`usuario::lancar(` em `main.rs` (a regra por texto que o lote A3 trocou
+pela palavra, com o nome único `lancar_como_sistema`), o `Lancador::Kernel` em
 `agent/commands.rs`, o `lancar_conferido` num `use` renomeado em
 `interpretador.rs`, o `lancar_o_terminal` em `agent/administracao.rs` —,
 foram acusadas pelo `cargo xtask invariantes`, que saiu com falha.
+
+#### As do lote A3
+
+Sessenta e quatro mutações contra o lote A3 — as (m) a (z) do item *A
+soma das cotas de processos e a cota por sessão*, em [Decisões
+pendentes](#decisões-pendentes), e as quatro do adversário do delta —,
+uma de cada vez, no repositório, e restauradas byte a byte, com a hora do
+arquivo renovada para o cargo recompilar; no fim, o diff da árvore era o
+de antes delas, pelo resumo. As da suíte rodaram no x86_64 em debug, cada
+uma contra a parte que tem o caso que a deve reprovar
+(`DUKE_PARTE=<i+1>/1048`: um caso por parte, e a cauda, de sete).
+
+O resultado que vale é o da última rodada de cada uma, e as rodadas foram
+sobre três versões do lote:
+
+- na árvore final, depois das correções do adversário do lote e das do
+  delta, cinquenta e três: as do `xtask` (X1 a X5 e X7 a X19), as da
+  árvore (F1 a F22 e T13 a T17), a L1 — na forma de hoje do braço,
+  `(None, Lancador::Kernel) => Ok(false)` —, a M2a, a M2b, que mutam a
+  pergunta que hoje vale também no começo do lançamento, e as cinco do
+  executor (M6a a M6e), com as duas marcas num atômico só;
+- depois das correções do adversário do lote, três: a M2c, a M2d e a M6f.
+  O delta não mudou o que elas mutam, só comentários;
+- antes das correções do adversário, sete, cujo código não mudou depois:
+  as do NSF (M3a a M3c: o `seguranca/src/motor.rs` só mudou nos
+  comentários, e o `kernel/src/seguranca.rs` é o mesmo), a M4 e as do
+  desfecho (M5a a M5c), sobre as mesmas linhas.
+
+E a X6, o atributo da suíte só nas linhas cruas, reprovou antes do
+adversário e saiu com a conferência que ela mutava (abaixo). Todas as
+outras reprovaram em cada rodada.
+
+| Mutação | Reprovada por |
+|---|---|
+| o trinco sem o guarda do braço `(None, Kernel)` (L1), no código de hoje `(None, Lancador::Kernel) => Ok(false)` | `contencao: depois do boot o kernel nao lanca por conta propria`: "depois do boot, o kernel lancou por conta propria" |
+| a última palavra sem a pergunta da autoridade (M2a) | `contencao: o lancamento de dentro do user.run so nasce com a autoridade e o caminho do comando`: "o lancamento como sistema de dentro do user.run nasceu" |
+| a última palavra sem a do caminho (M2b) | o mesmo caso: "o lancamento de outro caminho de dentro do user.run nasceu" |
+| o `LIDO` que não anda pelos que não se leem — `ler_lote` sem levar o `lido` ao maior (M3a) | `nsf: mais de um lote que nao se le nao para a leitura, e vira uma lacuna` ("o NSF parou num lote que nao se le"); no hospedeiro, `o_lote_que_nao_se_le_nao_para_a_leitura` e `o_registro_que_nao_se_le_vira_lacuna` |
+| a volta do `passo` que para por `novos == 0` (M3b) | o mesmo caso: "o NSF parou num lote que nao se le" |
+| `ler_lote` sem `Monitor::nao_lido` (M3c) | o mesmo caso: "os registros que nao se leem nao viraram uma lacuna so, vista no seguinte"; no hospedeiro, `o_primeiro_que_nao_se_le_vira_lacuna` |
+| o nome do editor da conferência de volta no nascimento — o `Selo` com o nome, de novo (M4) | `codigo: o nascimento grava o nome do editor que a ultima palavra perguntou`: "o registro do nascimento nao diz o nome do editor que a ultima palavra viu" |
+| a leitura que falha sem o desfecho (M5a) | `contencao: o user.run de um caminho que nao existe grava o desfecho`: "o user.run permitido de um caminho que nao existe ficou sem o desfecho" |
+| o fio que não nasce sem o desfecho (M5b) | `contencao: o user.run cujo fio nao nasce grava o desfecho`: "o user.run permitido cujo fio nao nasceu ficou sem o desfecho" |
+| o desfecho sem a gravação em nome do kernel, fora de um comando (M5c) | `contencao: o user.run de um caminho que nao existe grava o desfecho`: "a leitura recusada fora de um comando nao foi gravada em nome do kernel" |
+| a conferência do executor sem a recusa do coletor solto (M6a) | `suite: o executor ve e devolve o coletor solto e o journal segurado`: "o executor nao viu o coletor solto, ou nao o devolveu com o journal" |
+| sem a recusa do journal segurado (M6b) | o mesmo caso: "o executor nao viu, ou nao soltou, o journal segurado" |
+| sem pausar de novo (M6c) | o mesmo caso, pela conta da suíte: "o coletor ficou solto com o journal solto no caso do executor" — e a cauda inteira, pelo executor |
+| sem soltar (M6d) | o mesmo caso — e a cauda inteira, pelo executor |
+| o caso do executor com o coletor solto antes de segurar o journal (M6e) | o mesmo caso, pela conta da suíte: "o coletor ficou solto com o journal solto no caso do executor" |
+| o lançamento sem a pergunta do começo, só com a da última palavra (M2c, a (t)) | `contencao: o lancamento de dentro do user.run so nasce com a autoridade e o caminho do comando`: "um lancamento de dentro do user.run foi recusado por outro motivo" — o caminho que não existe ouviu a leitura —; e `contencao: depois do boot o kernel nao lanca por conta propria`: "depois do boot, o kernel leu o caminho que lancaria por conta propria" |
+| a autoridade comparada só pela variante (M2d, a (y)) | `contencao: o lancamento de dentro do user.run so nasce com a autoridade e o caminho do comando`: "o lancamento com a autoridade de outra pessoa de dentro do user.run nasceu" |
+| a conta da suíte sem o incremento (M6f, a (x)) | `auditoria: o que nao muda estado vai no registro seguinte, ou no do coletor`: "a conta da suite nao viu o coletor que gravou solto com o journal solto"; o caso do executor, sozinho, passou com ela — é o que o controle positivo fecha |
+
+As duas marcas num atômico só (a (x)) não têm mutação que um caso
+reprove: a janela era a de uma preempção do coletor entre as duas
+leituras, que a leitura única não tem, e nenhum caso a abre de propósito
+— a correção vale pela construção, e não por um caso.
+
+E as do `xtask`, nos testes do hospedeiro (`cargo test -p xtask
+testes_dos_nomes_protegidos`): o `lancar_como_sistema` fora de
+`NOMES_PROTEGIDOS` (X1: `o_lancamento_so_nos_donos`,
+`as_formas_de_contornar_o_lancamento_do_sistema` e
+`o_nome_protegido_nao_se_renomeia_nem_no_dono`); a conferência sem a regra
+do `as` (X2: `o_nome_protegido_nao_se_renomeia_nem_no_dono`) e o `as`
+que não atravessa a quebra de linha (X3: o mesmo, e
+`o_carregador_nao_ganha_outro_nome_no_modulo_usuario`); os nomes sem a
+linha só de código (X4: `as_formas_de_contornar_o_lancamento_do_sistema`,
+pela linha que começa com `//` dentro de um texto); os carregadores com o
+`pub` aceito (X5: `os_carregadores_nao_se_alargam`) e com a visibilidade
+lida só na linha do `fn` (X8: o mesmo, e
+`o_atributo_da_suite_num_comentario`); o trinco sem a ordem (X7:
+`o_trinco_do_boot_depois_dos_dois_lancamentos`); e o `as` sem a guarda da
+palavra que só começa com `as` (X9: `o_que_nao_e_o_nome_nao_se_acusa`). A
+X9 o revisor do lote achou viva: a entrada do teste punha um `(` depois
+do nome, e a pergunta do `as` nem chegava à guarda; a entrada passou a
+ser o nome, no dono, seguido de `assim` na linha seguinte, que só a
+guarda distingue de um `as`. A X7 o revisor do delta achou viva na
+árvore do adversário: sem a ordem, o trinco antes do Terminal cai nas
+três chamadas seguidas, que implicam a ordem e cuja mensagem também cita
+o Terminal, e o teste só pedia o nome dele (X7a, a mesma mutação com o
+teste de então: passou). O teste pede a mensagem da ordem, "o boot não o
+lançaria", e a X7 reprova. E a X6 — o atributo da suíte só nas linhas
+cruas — saiu com a conferência que ela mutava: a do código (a (w)) acha
+todo atributo que as linhas cruas achavam, e elas só acrescentavam a
+recusa do atributo na mesma linha do `fn`, que é Rust certo; a X13, que
+tira a do código, a que ficou, reprova. E as do adversário do lote: a
+regra dos irmãos do `usuario/mod.rs` desligada (X10:
+`o_irmao_do_usuario_nao_alcanca_os_carregadores`), o `include` de novo
+só seguido de `!` (X11: `o_include_renomeado`), a conferência sem a regra
+do `use` montado (X12: `o_apelido_por_macro_no_dono` e
+`o_use_nos_argumentos_de_uma_macro`), o atributo da suíte sem a
+conferência no código (X13: `os_carregadores_nao_se_alargam` e
+`o_atributo_da_suite_num_comentario`) e o trinco sem as três chamadas
+seguidas (X14: `o_trinco_logo_depois_dos_dois_lancamentos`). E as do
+delta: o `use` nos argumentos de uma invocação, sem a regra (X15:
+`o_use_nos_argumentos_de_uma_macro`); a regra do `as` dos carregadores
+desligada (X16: `o_carregador_nao_ganha_outro_nome_no_modulo_usuario`);
+o trinco pelo caminho relativo (X17: os dois testes do trinco); o trinco
+sem a conferência da macro em volta (X18:
+`o_trinco_logo_depois_dos_dois_lancamentos`); e os arquivos dos
+carregadores com macro aceita (X19:
+`nenhuma_macro_nos_arquivos_dos_carregadores`). E na
+árvore, uma linha de cada vez num arquivo que não é dono — ou, para o
+apelido, no dono —, o `cargo xtask invariantes` saiu com falha e a linha na
+lista, em todas: o `use … as …`, o `use crate::usuario as u`, o espaço e a
+quebra de linha antes do parêntese, o ponteiro de função, a macro e a
+linha que começa com `//` dentro de um texto, em `barra.rs`; o `super::`,
+em `usuario/codigo.rs`; o `pub use self::lancar_como_sistema as abrir` em
+`usuario/mod.rs` e o `pub use self::Lancador as L` em `autorizacao.rs`, os
+donos; os três embrulhos da suíte e o trinco, em `barra.rs`; o `pub fn
+carregar` em `programa.rs`; o trinco antes dos dois lançamentos, no
+`main.rs`; e o `executar` sem o atributo da suíte, que o clippy do kernel
+também recusa, sem uso. E as formas do adversário do lote, do mesmo
+jeito: o `use super::programa::{carregar as …, entrar as …}` em
+`usuario/elf.rs`, com o `carregar` e o `entrar` na lista; o `use
+core::include as trazer` em `barra.rs`; a macro do apelido no dono,
+`usuario/mod.rs`; o atributo da suíte do `executar` num comentário de
+bloco, em `programa.rs`; e o `#[cfg(any())]` na linha do trinco, no
+`main.rs`. E as do delta: a macro que repassa os tokens, com
+`apelido!(pub use self::lancar_como_sistema)`, no dono, `usuario/mod.rs`;
+o `use programa::{carregar as carga, entrar as descida}` no
+`usuario/mod.rs`, com o `carregar` e o `entrar` na lista; o trinco
+sombreado por um `mod autorizacao` no bloco do `main.rs`, chamado pelo
+caminho relativo — o do pacote não aparece mais —; os três do boot nos
+argumentos de uma macro, no `main.rs`; e a macro que tira o atributo da
+suíte, em `programa.rs`. O `programa::carregar`, o `preparar`, o `entrar` e
+o `codigo::obter`, chamados de `barra.rs`, não compilam (`E0603`). E a
+evidência de antes: o `xtask` do `ba3fa2c`, com as mesmas formas sobre o
+nome velho, `usuario::lancar`, e os apelidos nos donos, todas na árvore ao
+mesmo tempo, saiu com sucesso.
+
+A suíte inteira, com o lote A3, passou nas duas arquiteturas, em
+depuração, nas três partes da CI — no x86, 1055 casos, em 1761, 1506 e
+1497 segundos; no ARM, 1039, em 1431, 1251 e 1646 —, e pelo iniciador da
+UEFI: as duas partes do ARM (523 e 522 casos sobre o mapa da UEFI, em 1918
+e 2154 segundos) e a do x86 (115 segundos). Os seis casos novos, o do
+executor e o do controle positivo da conta passaram também em release, um
+por parte, nas duas; o `cargo xtask elf` passou nas duas, e o `cargo xtask
+compilador` não achou desvio: o `nightly-2026-11-15`, o `rustc
+1.102.0-nightly (5f4effd57 2026-11-13)`.
+
+As partes de depuração e o iniciador levaram de 1,20 a 1,42 vez o tempo
+das rodadas do B4, e não pelo lote: o contêiner de desenvolvimento
+reiniciou às 23:57 UTC, e as rodadas correram noutra máquina. Nela, os
+testes do hospedeiro dos pacotes que o A3 não toca — o mesmo código, o
+mesmo compilador e a máquina quieta nas duas medidas — levaram de 1,29 a
+1,58 vez o tempo de antes: o `web3`, de 37,7 a 49,4 segundos; o `http`, de
+22,9 a 36,2; o `diario`, de 3,4 a 4,3. Na suíte, caso a caso, a mediana
+ficou entre 1,19 e 1,36 vez, e quase todos os casos ficaram mais lentos —
+os que só calculam também: `mmu: a identidade do iniciador foi largada`,
+de 10,3 a 17,8 segundos na parte 3/3 do ARM. A razão não cresce ao longo
+de uma parte, como cresceria o que se acumulasse numa rodada: o primeiro
+décimo de cada parte, logo depois do boot, já vem mais lento, e no ARM
+mais a cada parte — 1,08, 1,22 e 1,31 vez —, com o relógio de parede. E o
+log do kernel tem o mesmo tamanho: 4235 e 4257 linhas na parte 1/3 do x86.
+O caso novo do NSF leva 72 segundos na parte 3/3 do x86 e 77 na do ARM:
+são os 513 avisos que ele escreve no log, 138 ms por linha no x86 e 149 no
+ARM, em depuração.
 
 ### As mutações do chamado do coletor
 
@@ -14152,12 +14604,29 @@ partes:
   devolve antes do seguinte. O caso `suite: o executor ve e devolve o
   coletor solto e o journal segurado`, que entrou no fim da tabela — para
   nenhum caso de antes mudar de parte —, confere a própria conferência: o
-  coletor solto, o journal segurado e os dois juntos reprovam, cada um com
-  o motivo dele, e voltam ao estado da suíte, e o estado da suíte passa.
+  coletor solto e o journal segurado reprovam, cada um com o motivo dele,
+  e voltam ao estado da suíte, e o estado da suíte passa. Desde o lote A3
+  do #448, ele só solta o coletor com o journal já segurado — o passo do
+  coletor solto é o dos dois juntos, e o executor diz primeiro o coletor;
+  antes, um passo soltava o coletor com o journal solto por um instante,
+  e uma gravação dele ali cairia num caso seguinte —, e uma conta da
+  suíte diz se isso aconteceu em algum instante do caso
+  (`persistencia::solturas_com_o_journal_solto_de_teste`), com o controle
+  positivo dela em `auditoria: o que nao muda estado vai no registro
+  seguinte, ou no do coletor`, que solta o coletor com o journal solto, o
+  espera gravar e vê a conta ter andado; e as
+  duas marcas, a pausa e o journal segurado, num atômico só, que o coletor
+  lê de uma vez — lidas separadas, a devolução que pausa e depois solta
+  deixava passar um coletor que lesse uma antes e a outra depois.
   As quatro mutações dela — sem a recusa do coletor solto, sem a do
-  journal segurado, sem pausar de novo, sem soltar — reprovam nele, e a
-  migração que solta o coletor de novo reprova pelo executor ("o caso
-  deixou o coletor da auditoria solto"). A documentação promete mais do
+  journal segurado, sem pausar de novo, sem soltar — reprovam nele, também
+  na rodada sobre o lote final, com as duas marcas num atômico só; e a
+  quinta, a do caso que solta o
+  coletor antes de segurar o journal, reprova pela conta (ver *As do lote
+  A3*, em [As mutações do ponto sem volta e de quem
+  pede](#as-mutações-do-ponto-sem-volta-e-de-quem-pede)). A migração que
+  solta o coletor de novo reprova pelo executor ("o caso deixou o coletor
+  da auditoria solto"). A documentação promete mais do
   que o código faz — a decisão no mesmo registro da mudança; o código
   garante junto ou antes, ou, se ela sai do anel no meio, a lacuna antes
   —, e o que se escreve e o que o kernel cumpre é uma decisão do dono
@@ -14257,6 +14726,17 @@ ponta a ponta, com 1345 de máquina. O maior job foi de novo a persistência
 do x86 — a parte 2/3 levou 72,0 minutos, e a 1/3, 61,8 —, e depois a
 atualização do ARM, 56,3. O fim veio dos fluxos entre o x86 e o ARM, que
 começaram aos 50,0 e rodaram 34,8.
+
+As CIs 516 (`6cfb81f`, o lote B4) e 517 (`ba3fa2c`, a hora no registro do
+proxy da bancada do IC) passaram verdes, 48 de 48 cada uma, mas correram
+juntas: a 517 subiu quatro minutos depois da 516, e as duas dividiram os
+runners. A 516 levou 112,8 minutos de ponta a ponta, e a 517, 150,3; as
+filas somaram 1409 e 2621 minutos de job, e o que mais esperou ficou 81,6
+minutos na fila. Os maiores, de novo, a persistência do x86 — a 1/3 da
+516, 68,6 minutos; a 2/3 da 517, 73,2 —, e a atualização do ARM, 59,0 na
+516. Cada job tem o seu runner, e nada muda dentro dele; mas a fila soma,
+e uma ponta nova não sobe com uma CI rodando quando a medida de relógio
+importa.
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

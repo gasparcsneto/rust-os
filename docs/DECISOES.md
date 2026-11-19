@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728` |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -1891,11 +1891,54 @@ pendência #298.
   acaba — a decisão de novo do `exec` pergunta a confiança no editor da
   imagem nova e se quem chama ainda pede, só no fio que o gate decidiu e
   sobre um `ALLOW`; a última palavra do nascimento pergunta a do código
-  que vai rodar, e só lança o comando decidido para `process.run`; o
-  encerrado ouve "processo encerrado"; e as recusas sobre quem pede no
-  `user.run` respondem sem a explicação do comando. Seis casos e as
-  mutações de cada pergunta, todas reprovadas ([README](../README.md#decisões-pendentes),
+  que vai rodar, e só lança o comando decidido para `process.run` — e,
+  desde o lote A3 do #448, só com a autoridade e um dos caminhos do
+  comando —; o encerrado ouve "processo encerrado"; e as recusas sobre
+  quem pede no `user.run` respondem sem a explicação do comando. Seis
+  casos e as mutações de cada pergunta, todas reprovadas ([README](../README.md#decisões-pendentes),
   "A soma das cotas de processos e a cota por sessão", (f) a (l)).
+
+  O adversário da integração `f018bee..2c39e80` — o lote A2, o #454 e o
+  executor da suíte — não achou falha alta. Os pontos dele foram o lote A3
+  do #448, [B]:
+  - a última palavra do nascimento lança só com a autoridade do comando e
+    um dos caminhos que o gate decidiu — e a mesma pergunta, sem decidir o
+    comando de novo, vem também no começo do lançamento, antes de o código
+    ser lido (`autorizacao::conferir_o_lancamento`);
+  - o lançamento do sistema com nome único
+    (`usuario::lancar_como_sistema`), protegido pela palavra; nenhum nome
+    protegido com outro nome; e os carregadores só de dentro do módulo
+    `usuario`;
+  - o trinco do boot (`autorizacao::fechar_os_lancamentos_do_kernel`): fora
+    da suíte, o kernel só lança por conta própria até lançar o servidor de
+    janelas e o Terminal;
+  - o NSF que passa pelos registros que não se leem;
+  - o nome do editor de agora no nascimento;
+  - o desfecho do `user.run` permitido que não lança.
+
+  E o adversário do próprio lote, só de leitura, achou três baixas e seis
+  informativas: oito feitas no lote — a mesma pergunta no começo do
+  lançamento; as guardas do `xtask` mais fechadas, nos irmãos do
+  `usuario/mod.rs`, no `include` pela palavra, no `use` montado numa
+  macro, no atributo da suíte no código e no trinco logo depois dos dois
+  lançamentos; a conta da suíte com o controle positivo e as duas marcas
+  num atômico só; e o caso da (n) com a autoridade de outra pessoa —, e a
+  nona, de antes dele, à parte. E o adversário do delta achou quatro
+  contornos informativos, todos num dono, feitos também: o `use` montado
+  pelos argumentos de uma macro, o apelido de um carregador no próprio
+  `usuario/mod.rs`, o trinco sombreado no `main.rs` — que agora se chama
+  pelo `crate::` — e a macro que tiraria o atributo da suíte do
+  `executar`.
+
+  A amarração é pela autoridade e pelo caminho, e não pela contagem: dois
+  lançamentos com a autoridade do comando e o caminho decidido, dentro do
+  mesmo `user.run`, passam os dois, cada um gravado como a execução da
+  mesma decisão; o único chamador lança uma vez; contar seria regra nova,
+  [C], não tomada. E a descrição do `user.run` diz o que o gate faz sem
+  `path` (o exemplo embutido é `/bin/exemplo`). Seis casos novos, três
+  reforçados, e sessenta e quatro mutações
+  ([README](../README.md#decisões-pendentes), "A soma das cotas de
+  processos e a cota por sessão", (m) a (z)).
 
 ### I7
 
