@@ -2625,11 +2625,14 @@ pub(super) fn fluxo_a_troca_grande_com_escritas_sem_parar() -> Resultado {
 }
 
 /// A troca de imagem de quem é ponta de fluxo que falha antes do ponto sem
-/// volta — a preparação da imagem nova falha, como falharia o ELF que o
-/// validador recusa ou o espaço novo sem memória — não encerra nada: o
-/// processo recebe o erro e segue o que era, ponta do fluxo, que continua
-/// passando bytes; nenhum fim é gravado. E a decisão do gate, já gravada,
-/// termina dita: a execução dela, `ERROR`, com o motivo e a citação.
+/// volta — a preparação da imagem nova falha depois da conferência dela,
+/// como falharia o espaço novo sem memória — não encerra nada: o processo
+/// recebe o erro, `SEM_MEMORIA`, e segue o que era, ponta do fluxo, que
+/// continua passando bytes; nenhum fim é gravado. E a decisão do gate, já
+/// gravada, termina dita: a execução dela, `ERROR`, com o motivo e a
+/// citação. A imagem que o validador recusa é recusada antes, na
+/// conferência, com `PROGRAMA_DESCONHECIDO` (o #471, no lote A4): ver
+/// [`fluxo_a_troca_para_a_imagem_que_nao_se_confere_ouve_programa_desconhecido`].
 pub(super) fn fluxo_a_troca_que_falha_antes_do_ponto_sem_volta() -> Resultado {
     use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
     troca_de_ponta_que_falha_intacta(
@@ -2674,13 +2677,91 @@ pub(super) fn fluxo_a_troca_cujo_arquivo_nao_cabe_no_heap() -> Resultado {
     )
 }
 
+/// O #471, no lote A4: a troca de imagem de quem é ponta de fluxo para uma
+/// imagem que não se confere — o que não é ELF, o `ola` com o manifesto
+/// que não se lê, os dois selados pelo editor do caso no armazém, onde o
+/// `fluxos` procura o código selado — é recusada antes do ponto sem volta,
+/// e o processo ouve `PROGRAMA_DESCONHECIDO`: a imagem não é um programa
+/// que este processador carregue, e tentar de novo não adianta. Antes, toda
+/// falha do primeiro passo da carga devolvia `SEM_MEMORIA`. O resto é o de
+/// sempre: o processo segue o que era, o fluxo continua, nenhum fim, e a
+/// decisão do gate termina dita — a execução dela, `ERROR`, com o motivo do
+/// carregador. E a memória que falta no espaço novo — a falha armada da
+/// preparação, depois da conferência — continua `SEM_MEMORIA`.
+///
+/// Cada troca com o seu registro de editores: o fim dos casos da malha lê a
+/// política do disco de novo, e a do caso sairia com ele.
+pub(super) fn fluxo_a_troca_para_a_imagem_que_nao_se_confere_ouve_programa_desconhecido()
+-> Resultado {
+    use crate::usuario::falha_da_troca_de_teste::{self as falha, Etapa};
+    use protocolo::usuario::erro;
+    let nao_elf = [b'x'; 80];
+    let manifesto_estragado = {
+        let ola = crate::testes::ola_da_imagem()?;
+        let inicio = {
+            let elf = crate::usuario::elf::validar(&ola)?;
+            let texto = elf.manifesto().ok_or("o ola nao tem manifesto")?;
+            texto.as_ptr() as usize - ola.as_ptr() as usize
+        };
+        let mut estragado = ola.clone();
+        estragado[inicio] ^= 0x20;
+        estragado
+    };
+    let imagens: [(&[u8], &str, u16); 2] = [
+        (&nao_elf, "nao e um ELF64 little-endian", 337),
+        (
+            &manifesto_estragado,
+            politica::manifesto::Erro::Cabecalho.motivo(),
+            345,
+        ),
+    ];
+    for (bytes, motivo, terminal) in imagens {
+        crate::testes::com_editores_do_caso(|| {
+            crate::testes::gravar_codigo(
+                troca::SELADO,
+                &sigilo::codigo::selar(bytes, &crate::testes::EDITOR_DO_CASO.0),
+            )?;
+            troca_de_ponta_que_falha_intacta_para(
+                terminal,
+                (troca::PARA_O_SELADO, troca::SELADO),
+                |_| {},
+                erro::PROGRAMA_DESCONHECIDO,
+                motivo,
+            )
+        })?;
+    }
+    // A memória que falta, depois da conferência: `SEM_MEMORIA`, como
+    // sempre.
+    troca_de_ponta_que_falha_intacta(
+        346,
+        |fio| falha::armar(fio, Etapa::Preparacao),
+        erro::SEM_MEMORIA,
+        falha::PREPARACAO,
+    )
+}
+
 /// A troca de imagem de quem é ponta de fluxo que falha onde `armar` a
 /// armou, sem chegar ao ponto sem volta: o processo recebe `devolvido` e
 /// segue o que era, ponta do fluxo, que continua passando bytes; nenhum fim
 /// é gravado; e a decisão do gate tem uma execução, `ERROR`, que a cita com
-/// `motivo`.
+/// `motivo`. Para o `ola` da imagem; para outra, ver
+/// [`troca_de_ponta_que_falha_intacta_para`].
 fn troca_de_ponta_que_falha_intacta(
     terminal: u16,
+    armar: impl Fn(u64),
+    devolvido: i64,
+    motivo: &str,
+) -> Resultado {
+    let ola = format!("{}/ola", crate::usuario::DIRETORIO_DOS_COMPILADOS);
+    troca_de_ponta_que_falha_intacta_para(terminal, (0, &ola), armar, devolvido, motivo)
+}
+
+/// [`troca_de_ponta_que_falha_intacta`] para outra imagem: o `b` do passo
+/// [`TROCAR`] que o `fluxos` troca por ela, e o caminho dela, como o gate o
+/// decide.
+fn troca_de_ponta_que_falha_intacta_para(
+    terminal: u16,
+    (passo, caminho): (i64, &str),
     armar: impl Fn(u64),
     devolvido: i64,
     motivo: &str,
@@ -2697,7 +2778,7 @@ fn troca_de_ponta_que_falha_intacta(
                 let trocas = trocas_feitas();
                 let desde_o_pedido = crate::autorizacao::ultimo_registro();
                 armar(c.fio());
-                let desde = c.ditar(TROCAR, 0)?;
+                let desde = c.ditar(TROCAR, passo)?;
                 let devolveu = dito_na_malha(desde, "fluxos: trocar devolveu ")?;
                 if devolveu != format!("{devolvido}") {
                     crate::log_error!("teste", "trocar devolveu {}", devolveu);
@@ -2718,7 +2799,7 @@ fn troca_de_ponta_que_falha_intacta(
                     return Err("a troca que falhou antes do ponto sem volta gravou um fim");
                 }
                 // A decisão, e a execução dela que a cita.
-                let (decisoes, execucoes) = registros_de_troca(desde_o_pedido);
+                let (decisoes, execucoes) = registros_de_troca_para(desde_o_pedido, caminho);
                 let dita = match (decisoes.as_slice(), execucoes.as_slice()) {
                     ([(decisao, d)], [execucao]) => {
                         d.codigo == Codigo::Allow

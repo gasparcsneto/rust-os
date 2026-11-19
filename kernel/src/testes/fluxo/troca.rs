@@ -60,10 +60,11 @@ const SEMENTE_DO_AGENTE: [u8; 32] = [0x6e; 32];
 const TENTATIVAS: usize = 4;
 
 /// O `b` do passo [`TROCAR`] para o código selado — o mesmo do `fluxos`.
-const PARA_O_SELADO: i64 = 2;
+/// Também o caso do #471, em `fluxo.rs`, troca para ele.
+pub(super) const PARA_O_SELADO: i64 = 2;
 
 /// Onde o `fluxos` procura o código selado — o mesmo caminho do programa.
-const SELADO: &str = "/armazem/compartilhado/codigo/ola-selado";
+pub(super) const SELADO: &str = "/armazem/compartilhado/codigo/ola-selado";
 
 /// A imagem nova da troca.
 #[derive(Clone, Copy)]

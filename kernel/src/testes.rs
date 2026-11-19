@@ -42325,6 +42325,10 @@ static CASOS: &[Caso] = &[
         nome: "contencao: o user.run cuja imagem nao se mapeia grava o desfecho depois do nascimento",
         f: nascimento::contencao_o_user_run_cuja_imagem_nao_se_mapeia_grava_o_desfecho,
     },
+    Caso {
+        nome: "fluxo: a troca para a imagem que nao se confere ouve PROGRAMA_DESCONHECIDO",
+        f: fluxo::fluxo_a_troca_para_a_imagem_que_nao_se_confere_ouve_programa_desconhecido,
+    },
 ];
 
 /// A cauda da suíte: os casos que rodam em **toda** parte, depois da fatia

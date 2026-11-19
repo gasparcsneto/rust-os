@@ -1369,7 +1369,11 @@ unsafe fn bifurcar(quadro: *mut core::ffi::c_void) -> i64 {
 ///
 /// - o arquivo que não se lê (`ERROR`, com o motivo da leitura);
 /// - o código que não confere (`DENY_POLICY`);
-/// - a imagem que falha antes do ponto sem volta (`ERROR`, com o motivo);
+/// - a imagem que falha antes do ponto sem volta (`ERROR`, com o motivo):
+///   a que não se confere — não é ELF, um segmento fora do lugar, o
+///   manifesto que não se lê —, que o processo ouve como
+///   `PROGRAMA_DESCONHECIDO`, ou o espaço novo sem memória, `SEM_MEMORIA`
+///   (desde o #471, no lote A4; antes, as duas eram `SEM_MEMORIA`);
 /// - a ordem que foi para outro fio **depois** de decidida (`CONFLICT`,
 ///   "adiada");
 /// - a decisão feita de novo no ponto sem volta, recusada (o código e o
@@ -1514,6 +1518,28 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
     let editor = codigo.selo.as_ref().map(|s| s.editor);
     let imagem = codigo.imagem;
 
+    // A imagem conferida antes do espaço novo — o ELF, os segmentos, o
+    // manifesto (`programa::conferir_a_imagem`), a conta pura do primeiro
+    // passo da carga —: a que não se confere não é um programa que este
+    // processador carregue, e o processo ouve `PROGRAMA_DESCONHECIDO`, o
+    // erro da leitura do que não é programa — tentar de novo não adianta.
+    // Antes, toda falha do primeiro passo devolvia `SEM_MEMORIA`, também a
+    // imagem que não é ELF e o manifesto que não se lê (o #471, no lote A4).
+    // O processo segue intacto, e a execução da decisão diz por quê, como
+    // sempre: `ERROR`, com o motivo, antes do ponto sem volta.
+    if let Err(motivo) = programa::conferir_a_imagem(&imagem) {
+        crate::autorizacao::auditar_execucao_do_processo(
+            &decisao,
+            "process.exec",
+            &caminho,
+            politica::Codigo::Error,
+            motivo,
+        );
+        crate::log_warn!("usuario", "executar recusado: {}", motivo);
+        RECUSADAS.fetch_add(1, Ordering::Relaxed);
+        return erro::PROGRAMA_DESCONHECIDO;
+    }
+
     let preparada = programa::preparar(&imagem, editor);
     #[cfg(feature = "modo-teste")]
     let preparada =
@@ -1535,6 +1561,10 @@ unsafe fn executar(quadro: *mut core::ffi::c_void, ponteiro: u64, tamanho: u64) 
         // uma falta momentânea de memória em `Espaco::novo`, as duas
         // recuperáveis, custavam o processo inteiro por uma premissa — "sem a
         // anterior" — que só vale do outro lado da troca.
+        //
+        // Com a imagem já conferida logo acima, o que falha aqui é a memória
+        // do espaço novo: `SEM_MEMORIA` — tentar de novo depois pode dar
+        // certo.
         //
         // A decisão do gate já foi gravada: a execução dela diz que a troca
         // falhou, e por quê — como a do código que não confere.
@@ -1786,8 +1816,10 @@ pub mod pausa_da_troca_de_teste {
 ///   dispositivo que recusa, ou, armada por `armar_leitura`, o da falta de
 ///   heap;
 /// - `Etapa::Preparacao`: o primeiro passo da carga, antes do ponto sem
-///   volta — como a imagem que o validador recusa, ou o espaço novo sem
-///   memória;
+///   volta e depois da conferência da imagem — como o espaço novo sem
+///   memória, que o processo ouve como `SEM_MEMORIA` (a imagem que o
+///   validador recusa é recusada antes, na conferência, com
+///   `PROGRAMA_DESCONHECIDO`: o #471, no lote A4);
 /// - `Etapa::Mapeamento`: o terceiro passo
 ///   ([`crate::usuario::programa::Trocada::mapear`]), **depois** do ponto
 ///   sem volta e de o que era da imagem anterior sair — como a falta de
