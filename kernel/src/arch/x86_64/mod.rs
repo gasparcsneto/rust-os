@@ -1432,13 +1432,16 @@ pub fn init_timer_definitivo() {
     };
 
     // Só agora o PIT pode ser desligado. Entre a programação do APIC e esta
-    // linha os dois disparam, e os dois chamam `tempo::tick` — o relógio anda
-    // rápido demais por alguns milissegundos, o que é infinitamente melhor
-    // que a alternativa: desligar o PIT primeiro e descobrir que o APIC não
-    // estava contando.
+    // linha os dois disparam, e só o PIT anda o relógio: o APIC conta os
+    // tiques dele, para a conferência, e assume o relógio logo abaixo, com o
+    // PIT já mascarado (`apic::assumir_o_relogio`). Até o #455-C os dois o
+    // andavam, ao dobro, duzentos milissegundos por tentativa da
+    // conferência. A ordem é a que não arrisca: desligar o PIT primeiro
+    // seria descobrir tarde que o APIC não estava contando.
     //
     // SAFETY: o timer do APIC já está entregando no lugar dele.
     unsafe { pic::mascarar(0) };
+    apic::assumir_o_relogio();
 
     crate::tempo::registrar_frequencia(efetiva);
     crate::irq::nomear(apic::VETOR_TIMER as usize, "timer-apic");

@@ -2251,8 +2251,10 @@ const MAX_TIMERS: usize = 4;
 ///
 /// No x86 o PIT sobe cedo e o APIC local o substitui assim que a paginação
 /// permite. Entre programar o APIC e mascarar o PIT existe uma janela em que
-/// **os dois** disparam, e os dois chamam `tempo::tick` — o relógio anda ao
-/// dobro da velocidade. Fora dessa janela, exatamente um deve estar contando.
+/// **os dois** disparam — e até o #455-C os dois chamavam `tempo::tick`, e o
+/// relógio andava ao dobro; desde então só o PIT o anda, até o APIC assumi-lo
+/// (`apic::assumir_o_relogio`). Fora dessa janela, exatamente um deve estar
+/// contando.
 ///
 /// Os dois erros possíveis são simétricos e este caso pega os dois:
 ///
@@ -28215,7 +28217,8 @@ fn smp_o_prazo_do_timer_do_arm() -> Resultado {
 /// - a conferência contra o PIT, no boot, recusa a tentativa com mais de
 ///   quatro por tique, e a que aprovou o APIC não os tinha — o veredito
 ///   conferido pelos números dela e por números fixos
-///   (`apic::julgar_a_conferencia`);
+///   (`apic::julgar_a_conferencia`) —; e nela só o PIT andou o relógio
+///   (`conferencia_do_boot_do_x86`);
 /// - um disparo antes do prazo não é tique. O caso o provoca no núcleo da
 ///   suíte, logo depois de um tique, com o prazo dele a quase um período: o
 ///   APIC dispara já (`apic::antecipar_de_teste`), e o handler só rearma —
@@ -28377,11 +28380,17 @@ fn smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc() -> Resultado {
 }
 
 /// A conferência do timer do x86 contra o PIT, no boot (o #455-C), pelo
-/// caso `smp: o tique do x86 vem pela grade comum do TSC...`: a última
-/// tentativa — a que aprovou o APIC, quando ele é o timer — passa no
-/// veredito pelos números dela, e o veredito, com números fixos, aprova na
-/// taxa e até quatro disparos antes do prazo por tique, e recusa acima
-/// deles, fora da tolerância da taxa, ou sem medida.
+/// caso `smp: o tique do x86 vem pela grade comum do TSC...`:
+///
+/// - nela, só o PIT andou o relógio: o APIC só o anda depois de assumi-lo
+///   (`apic::assumir_o_relogio`), e o relógio fica nos disparos do PIT — um
+///   a mais ou a menos pelas pontas da janela. Os dois juntos o andavam ao
+///   dobro, uns vinte a mais por tentativa;
+/// - a última tentativa — a que aprovou o APIC, quando ele é o timer — passa
+///   no veredito pelos números dela;
+/// - o veredito, com números fixos, aprova na taxa e até quatro disparos
+///   antes do prazo por tique, e recusa acima deles, fora da tolerância da
+///   taxa, ou sem medida.
 #[cfg(target_arch = "x86_64")]
 fn conferencia_do_boot_do_x86() -> Resultado {
     use crate::arch::atual::apic::{self, Conferencia, Recusa};
@@ -28389,11 +28398,17 @@ fn conferencia_do_boot_do_x86() -> Resultado {
     let conferencia = apic::conferencia_de_teste();
     crate::log_info!(
         "teste",
-        "x86: na conferencia contra o PIT do boot, {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT",
+        "x86: na conferencia contra o PIT do boot, {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT, e o relogio andou {}",
         conferencia.tiques,
         conferencia.antecipados,
-        conferencia.pit
+        conferencia.pit,
+        conferencia.relogio
     );
+    if conferencia.relogio > conferencia.pit + 2 {
+        return Err(
+            "na conferencia contra o PIT o relogio andou mais que o PIT: o APIC o andou antes de assumi-lo",
+        );
+    }
     if apic::pronto() && apic::julgar_a_conferencia(conferencia, hz, u64::from(hz)) != Ok(()) {
         return Err("o boot aceitou o APIC com a conferencia contra o PIT reprovada");
     }
@@ -28401,6 +28416,7 @@ fn conferencia_do_boot_do_x86() -> Resultado {
         pit,
         tiques,
         antecipados,
+        relogio: pit,
     };
     for (conferencia, esperado) in [
         (c(20, 20, 0), Ok(())),
@@ -31710,6 +31726,38 @@ fn pci_varredura_coerente() -> Resultado {
                 dispositivo
             );
             return Err("uma funcao alta apareceu sem a funcao zero do mesmo dispositivo");
+        }
+    }
+
+    // No x86 a linha que o firmware anotou vale de 1 a 15, menos a 2: a 0 é
+    // a do PIT, que desmascarada andaria o relógio ao lado do APIC, e a 2 a
+    // cascata do escravo (o #455-C). E nenhum dispositivo ficou com elas.
+    #[cfg(target_arch = "x86_64")]
+    {
+        for linha in (0..=16).chain([0xFF]) {
+            let esperada = (1..16).contains(&linha) && linha != 2;
+            if crate::arch::pci::linha_de_dispositivo(linha) != esperada {
+                crate::log_error!(
+                    "teste",
+                    "a linha {} do PIC: de dispositivo {}, e nao {}",
+                    linha,
+                    !esperada,
+                    esperada
+                );
+                return Err(
+                    "a PCI do x86 entrega uma linha do PIC que nao e de dispositivo, ou recusa uma que e",
+                );
+            }
+        }
+        let mut proibida = None;
+        crate::pci::com_dispositivos(|d| {
+            if matches!(d.interrupcao, Some(0 | 2)) {
+                proibida = d.interrupcao;
+            }
+        });
+        if let Some(linha) = proibida {
+            crate::log_error!("teste", "um dispositivo PCI ficou com a linha {}", linha);
+            return Err("um dispositivo PCI ficou com a linha do PIT ou a da cascata");
         }
     }
 

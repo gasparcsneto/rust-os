@@ -34,7 +34,7 @@
 //! O timer não é periódico: dispara uma vez, e o handler escreve a distância
 //! até o ponto seguinte de uma grade só, contada no TSC — ver [`PRAZO`].
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::nucleos::MAX_NUCLEOS;
 
@@ -449,14 +449,18 @@ fn calibrar(lapic: &Lapic) -> Option<(u32, u64)> {
 /// # Por que contar os disparos de cada um, e não tiques do relógio
 ///
 /// Porque quando esta função roda o timer do APIC **já está armado**, e os
-/// dois timers estão alimentando `tempo::ticks`. Medir um intervalo por ele
-/// daria metade do tempo real, e a primeira versão desta conferência fez
+/// dois timers alimentavam `tempo::ticks`. Medir um intervalo por ele dava
+/// metade do tempo real, e a primeira versão desta conferência fez
 /// exatamente isso: acusou 50% de desvio num timer que estava certo.
 ///
 /// Foi o mesmo erro que ela existe para pegar, cometido dentro dela. Do PIT
 /// conta a linha, que só ele alimenta; do APIC, os tiques dele ([`TIQUES`]),
 /// e não a linha: um disparo antes do prazo também é uma interrupção da
 /// linha, e não é tique.
+///
+/// Desde o #455-C o relógio, aqui, é só do PIT: o APIC só o anda depois de
+/// assumi-lo, com o PIT já mascarado ([`assumir_o_relogio`]). O que ele
+/// andou na janela vai junto nos números ([`Conferencia::relogio`]).
 ///
 /// # O que ela confere agora
 ///
@@ -493,6 +497,7 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
     let pit_antes = crate::irq::contagem_da_linha(linha_do_pit);
     let apic_antes = TIQUES.load(Ordering::Relaxed);
     let antecipados_antes = ANTECIPADOS.load(Ordering::Relaxed);
+    let relogio_antes = crate::tempo::ticks();
 
     let Some(pit) = esperar_disparos(linha_do_pit, pit_antes, DISPAROS_DO_PIT) else {
         return false;
@@ -501,12 +506,14 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
         pit,
         tiques: TIQUES.load(Ordering::Relaxed) - apic_antes,
         antecipados: ANTECIPADOS.load(Ordering::Relaxed) - antecipados_antes,
+        relogio: crate::tempo::ticks() - relogio_antes,
     };
     #[cfg(feature = "modo-teste")]
     for (lugar, valor) in CONFERENCIA_DE_TESTE.iter().zip([
         conferencia.pit,
         conferencia.tiques,
         conferencia.antecipados,
+        conferencia.relogio,
     ]) {
         lugar.store(valor, Ordering::SeqCst);
     }
@@ -515,10 +522,11 @@ fn conferir_contra_o_pit(hz_pedido: u32) -> bool {
         Ok(()) => {
             crate::log_info!(
                 "irq",
-                "conferencia contra o PIT: {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT",
+                "conferencia contra o PIT: {} tique(s) do APIC e {} disparo(s) antes do prazo em {} disparo(s) do PIT, e o relogio andou {}",
                 conferencia.tiques,
                 conferencia.antecipados,
-                conferencia.pit
+                conferencia.pit,
+                conferencia.relogio
             );
             true
         }
@@ -556,6 +564,11 @@ pub struct Conferencia {
     pub tiques: u64,
     /// Os disparos do APIC antes do prazo ([`ANTECIPADOS`]).
     pub antecipados: u64,
+    /// O que o relógio do kernel andou: só o PIT o anda na conferência
+    /// ([`assumir_o_relogio`]), e ele fica nos disparos do PIT, um a mais ou
+    /// a menos pelas pontas da janela. Fora do veredito: é o kernel, e não o
+    /// timer, que ele confere.
+    pub relogio: u64,
 }
 
 /// Por que uma conferência reprovou — ver [`julgar_a_conferencia`].
@@ -616,20 +629,50 @@ pub fn julgar_a_conferencia(c: Conferencia, hz_pedido: u32, hz_do_pit: u64) -> R
 /// campos de [`Conferencia`], na ordem —, escritos no primeiro núcleo, no
 /// boot, antes de os outros acordarem. Ver [`conferencia_de_teste`].
 #[cfg(feature = "modo-teste")]
-static CONFERENCIA_DE_TESTE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static CONFERENCIA_DE_TESTE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 /// Só para a suíte: os números da última conferência contra o PIT — a que
 /// aprovou o APIC, quando ele é o timer —, ou zeros se nenhuma chegou a
 /// contar.
 #[cfg(feature = "modo-teste")]
 pub fn conferencia_de_teste() -> Conferencia {
-    let [pit, tiques, antecipados] =
+    let [pit, tiques, antecipados, relogio] =
         core::array::from_fn(|i| CONFERENCIA_DE_TESTE[i].load(Ordering::SeqCst));
     Conferencia {
         pit,
         tiques,
         antecipados,
+        relogio,
     }
+}
+
+/// Se o timer do APIC anda o relógio do kernel — ver [`assumir_o_relogio`].
+static ANDA_O_RELOGIO: AtomicBool = AtomicBool::new(false);
+
+/// O timer do APIC passa a andar o relógio do kernel. Chamada uma vez, no
+/// boot, por `init_timer_definitivo`, depois de a conferência aprovar o APIC
+/// e de o PIT ser mascarado.
+///
+/// # Um timer de cada vez no relógio
+///
+/// Na conferência contra o PIT ([`conferir_contra_o_pit`]) os dois timers
+/// disparam no primeiro núcleo, e os dois chamavam `tempo::tick`: o tique de
+/// cada um achava o `VISTO` que o outro tinha gravado, e o relógio andava ao
+/// dobro — uns vinte tiques a mais em cada tentativa, fora da grade, contra
+/// o "nunca à frente" de `tempo::avancar` (o achado 4 do adversário do
+/// #455-B). Até aqui, só o PIT anda o relógio; o handler do APIC conta os
+/// tiques dele ([`TIQUES`]), que é o que a conferência compara, e o pulso do
+/// núcleo. Daqui em diante, só o APIC: o PIT já saiu. Entre o mascarar do
+/// PIT e esta chamada nenhum dos dois o anda — uns microssegundos, e no
+/// máximo um tique a menos.
+pub fn assumir_o_relogio() {
+    ANDA_O_RELOGIO.store(true, Ordering::Release);
+}
+
+/// O timer do APIC anda o relógio do kernel? Falso até
+/// [`assumir_o_relogio`].
+pub fn anda_o_relogio() -> bool {
+    ANDA_O_RELOGIO.load(Ordering::Acquire)
 }
 
 /// Liga o APIC local e programa o timer dele na frequência pedida.

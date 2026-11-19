@@ -45,8 +45,9 @@ pub const OFFSET_ESCRAVO: u8 = OFFSET_MESTRE + 8;
 /// Número da linha do PIT.
 ///
 /// Exposto porque a conferência do timer do APIC precisa contar os disparos
-/// **do PIT em si**, e não os tiques do relógio do kernel — que a essa altura
-/// já estão sendo alimentados pelos dois.
+/// **do PIT em si**, e não os tiques do relógio do kernel — que até o
+/// #455-C os dois alimentavam a essa altura —, e porque a PCI não entrega
+/// esta linha a dispositivo nenhum (`pci::linha_de_dispositivo`).
 pub const IRQ_TIMER: u8 = 0;
 
 /// Número da linha da COM2, onde vive o canal do agente.
@@ -59,8 +60,10 @@ pub const IRQ_SERIAL_AGENTE: u8 = 3;
 ///
 /// Uma interrupção do escravo chega ao processador **através** dela. Se ela
 /// ficar mascarada, nenhuma das oito linhas do escravo chega — e é para lá
-/// que o BIOS costuma rotear os dispositivos PCI.
-const IRQ_CASCATA: u8 = 2;
+/// que o BIOS costuma rotear os dispositivos PCI. Dela mesma não vem
+/// interrupção de dispositivo, e a PCI não a entrega a nenhum
+/// (`pci::linha_de_dispositivo`).
+pub const IRQ_CASCATA: u8 = 2;
 
 const CMD_MESTRE: u16 = 0x20;
 const DADOS_MESTRE: u16 = 0x21;

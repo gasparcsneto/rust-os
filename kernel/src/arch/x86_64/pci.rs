@@ -111,20 +111,42 @@ pub fn acesso() -> Option<Acesso> {
 /// dos BARs.
 ///
 /// `0xFF` é o valor que significa "não conectada", e `0` a `15` são as linhas
-/// do PIC. Qualquer outra coisa é um bilhete que não sabemos ler.
+/// do PIC — menos duas, que não são de dispositivo ([`linha_de_dispositivo`]).
+/// Qualquer outra coisa é um bilhete que não sabemos ler, e o dispositivo
+/// segue sem interrupção, por consulta, como o que não tem linha.
 pub fn linha_de_interrupcao(endereco: PciAddress, _pino: u8) -> Option<u32> {
     let ponta = EndpointHeader::from_header(PciHeader::new(endereco), Acesso)?;
     let (_, linha) = ponta.interrupt(Acesso);
-    (linha < 16).then_some(linha as u32)
+    let linha = u32::from(linha);
+    linha_de_dispositivo(linha).then_some(linha)
 }
 
-/// Libera a linha no controlador para que ela chegue ao processador.
+/// Se a linha `linha` do PIC pode ser de um dispositivo PCI: de 1 a 15, menos
+/// a 2.
+///
+/// A 0 é a do PIT ([`super::pic::IRQ_TIMER`]), mascarada quando o timer do
+/// APIC assume o relógio: desmascarada para um dispositivo, o PIT voltaria a
+/// andar o relógio no primeiro núcleo ao lado do APIC — uma segunda grade, e
+/// o mesmo período contado duas vezes (o achado 4 do adversário do #455-B).
+/// A 2 é a cascata do escravo ([`super::pic::IRQ_CASCATA`]): por ela passam
+/// as interrupções do escravo, e dela mesma não vem nenhuma de dispositivo.
+/// Só um firmware que escrevesse uma das duas no registrador de linha as
+/// daria; o SeaBIOS e o OVMF não escrevem.
+pub fn linha_de_dispositivo(linha: u32) -> bool {
+    linha < 16
+        && linha != u32::from(super::pic::IRQ_TIMER)
+        && linha != u32::from(super::pic::IRQ_CASCATA)
+}
+
+/// Libera a linha no controlador para que ela chegue ao processador. Só uma
+/// linha de dispositivo ([`linha_de_dispositivo`]): a do PIT e a da cascata
+/// ficam como estão.
 ///
 /// # Safety
 ///
 /// Só pode ser chamada quando já existe quem trate a linha.
 pub unsafe fn habilitar_interrupcao(linha: u32) {
-    if linha >= 16 {
+    if !linha_de_dispositivo(linha) {
         return;
     }
     // SAFETY: delegada ao chamador; a IDT já tem vetor para todas as

@@ -235,7 +235,9 @@ tratadores! {
 /// É a gêmea de `atender(0)`, e faz o mesmo trabalho: marcar o tempo e
 /// perguntar ao escalonador. O que muda é quem precisa ser avisado no fim —
 /// o APIC, não o PIC — e o rearme: o timer dispara uma vez por prazo, numa
-/// grade comum no TSC, e o seguinte é escrito aqui (ver `apic::PRAZO`).
+/// grade comum no TSC, e o seguinte é escrito aqui (ver `apic::PRAZO`). E o
+/// tempo só se marca depois de o APIC assumir o relógio: na conferência
+/// contra o PIT, no boot, quem o anda é o PIT (`apic::assumir_o_relogio`).
 extern "x86-interrupt" fn timer_do_apic(quadro: InterruptStackFrame) {
     // Um disparo antes do prazo não é tique: só rearma, para o mesmo prazo.
     // Os outros: cada núcleo tem o seu timer, e cada um conta o próprio pulso
@@ -244,7 +246,9 @@ extern "x86-interrupt" fn timer_do_apic(quadro: InterruptStackFrame) {
     let contou = super::apic::chegou_o_prazo();
     let preemptar = if contou {
         crate::nucleos::tique_local();
-        crate::tempo::tick();
+        if super::apic::anda_o_relogio() {
+            crate::tempo::tick();
+        }
         crate::fios::tique()
     } else {
         false
