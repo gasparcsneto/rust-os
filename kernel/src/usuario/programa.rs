@@ -30,7 +30,7 @@
 
 use crate::arch::{Permissoes, TAMANHO_PAGINA};
 
-use super::TETO;
+use super::{BASE, TETO};
 
 /// Onde a pilha do processo termina (o endereço mais alto, exclusivo).
 const TOPO_DA_PILHA: u64 = TETO;
@@ -255,9 +255,9 @@ struct Conferida<'a> {
 
 /// A conferência pura de uma imagem — só os bytes e as constantes do mapa
 /// do processo, sem espaço de endereços e sem memória de página: o ELF
-/// ([`super::elf::validar`]), as faixas de página de cada segmento, que não
-/// se dividem nem invadem a pilha, e o manifesto, que se lê ou recusa a
-/// imagem.
+/// ([`super::elf::validar`]), as faixas de página de cada segmento, que
+/// ficam no espaço do usuário, não se dividem nem invadem a pilha, e o
+/// manifesto, que se lê ou recusa a imagem.
 fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
     let elf = super::elf::validar(imagem)?;
 
@@ -267,7 +267,20 @@ fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
     let mut faixas = [(0u64, 0u64); super::elf::MAX_SEGMENTOS];
     let segmentos = elf.segmentos();
     for (i, segmento) in segmentos.iter().enumerate() {
-        faixas[i] = faixa_de_paginas(segmento.destino, segmento.bytes_na_memoria as u64)?;
+        let faixa = faixa_de_paginas(segmento.destino, segmento.bytes_na_memoria as u64)?;
+        // As páginas, e não só os bytes, no espaço do usuário. O segmento
+        // vazio com o destino no `TETO` — que o `elf::validar` aceita: a
+        // faixa vazia `[TETO, TETO)` cabe nele — ganhava a página
+        // `[TETO, TETO + 4 KiB)`, uma página de usuário acima do teto
+        // declarado, que a cópia na escrita e a conferência das faixas das
+        // chamadas não tomam por do usuário (o pré-existente 1 do
+        // adversário do lote A4). O começo vem sempre no espaço — o
+        // destino está nele, e o `BASE` é de página —, e fica conferido
+        // aqui para a regra estar inteira num lugar só.
+        if faixa.0 < BASE || faixa.1 > TETO {
+            return Err("um segmento quer paginas fora do espaco do usuario");
+        }
+        faixas[i] = faixa;
     }
     for i in 0..segmentos.len() {
         for j in (i + 1)..segmentos.len() {
@@ -560,6 +573,9 @@ pub mod carga_de_teste {
 /// Devolve `[primeira, fim_exclusivo)`, os dois alinhados a página. O
 /// arredondamento para cima usa `div_ceil` em vez de somar `TAMANHO_PAGINA - 1`
 /// porque os dois números vêm do arquivo, e a soma transbordaria em silêncio.
+///
+/// Uma faixa vazia ainda dá uma página, a de `inicio`: no fim do espaço do
+/// usuário, a de cima dele — quem chama confere a faixa (ver [`conferida`]).
 fn faixa_de_paginas(inicio: u64, tamanho: u64) -> Result<(u64, u64), &'static str> {
     let primeira = inicio & !(TAMANHO_PAGINA - 1);
     let fim = inicio

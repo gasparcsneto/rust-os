@@ -23,6 +23,13 @@
 //! saturante ou conferida, e todo campo é validado antes de virar decisão. Um
 //! ELF malformado devolve erro; nenhum deles pode causar pânico, e um pânico
 //! no kernel é terminal.
+//!
+//! E o trabalho também tem teto, porque o tamanho dele vem do arquivo: a
+//! tabela de segmentos tem no máximo [`MAX_ENTRADAS`] entradas, e as notas
+//! lidas, somadas, no máximo [`ORCAMENTO_DAS_NOTAS`] bytes. A conferência
+//! roda no fio de quem lança — o do comando, que em produção é o executor
+//! que atende os comandos de todos — e no do processo que troca de imagem:
+//! uma imagem não escolhe quanto tempo ela prende um deles.
 
 use super::{BASE, TETO};
 
@@ -57,12 +64,44 @@ const MAQUINA: u16 = 0xB7;
 const TAMANHO_DO_CABECALHO: usize = 64;
 const TAMANHO_DO_SEGMENTO: usize = 56;
 
-/// Quantos segmentos carregáveis aceitamos.
+/// Quantos segmentos carregáveis aceitamos: o tamanho do arranjo de uma
+/// [`Imagem`], que não pede memória.
+///
+/// Conta só os `PT_LOAD`. O teto da tabela inteira — de todos os tipos, que
+/// o laço percorre — é [`MAX_ENTRADAS`].
+pub const MAX_SEGMENTOS: usize = 8;
+
+/// Quantas entradas a tabela de segmentos pode ter, de todos os tipos.
 ///
 /// Um teto explícito existe porque `e_phnum` vem do arquivo: sem ele, um
-/// cabeçalho pedindo 65535 segmentos faria o kernel percorrer a tabela inteira
-/// dentro de uma única chamada.
-pub const MAX_SEGMENTOS: usize = 8;
+/// cabeçalho pedindo 65535 segmentos faria o kernel percorrer a tabela
+/// inteira dentro de uma única chamada — e ler as notas de cada `PT_NOTE`
+/// no caminho. A documentação do [`MAX_SEGMENTOS`] prometia esse teto, e
+/// ele só contava os carregáveis: uma imagem de milhares de `PT_NOTE`
+/// apontando todos para a própria tabela custava, no fio de quem lança, o
+/// número deles vezes as notas da tabela — o quadrado do tamanho dela —
+/// antes de ser recusada (o achado A1 do adversário do lote A4).
+///
+/// Os executáveis do Duke têm quatro entradas — os três `PT_LOAD` e o
+/// `PT_NOTE` do `usuario.ld` —, três quando um segmento sai vazio; os
+/// programas embutidos, até três; e um executável de outro ligador, uma
+/// dúzia. Sessenta e quatro é folga sobre todos eles, e o laço fica curto.
+pub const MAX_ENTRADAS: usize = 64;
+
+/// Quantos bytes de notas a conferência lê, somados os de todos os
+/// `PT_NOTE` da imagem.
+///
+/// As notas não se carregam: nelas só se procura o manifesto
+/// ([`protocolo::usuario::manifesto::achar`]), cuja nota tem no máximo
+/// 1044 bytes — o cabeçalho, o dono e o maior manifesto,
+/// [`protocolo::usuario::manifesto::MAIOR`]. Sem o orçamento, cada
+/// `PT_NOTE` se lia inteiro, por maior que fosse e quantas vezes a tabela o
+/// repetisse; com ele, o achador dá no máximo 341 voltas por imagem — a
+/// menor nota tem 12 bytes —, por mais entradas que ela tenha. Quatro KiB:
+/// a nota do Duke e as que um ligador põe ao lado dela, com folga. A imagem
+/// que passa do orçamento é recusada, e não lida pela metade: um manifesto
+/// depois do corte seria um manifesto ignorado.
+pub const ORCAMENTO_DAS_NOTAS: usize = 4096;
 
 /// Permissões que um segmento pede, como o ELF as codifica.
 const PF_EXECUTAVEL: u32 = 1;
@@ -186,6 +225,11 @@ pub fn validar(bytes: &[u8]) -> Result<Imagem<'_>, &'static str> {
     if tamanho_da_entrada != TAMANHO_DO_SEGMENTO {
         return Err("tabela de segmentos com entradas de tamanho inesperado");
     }
+    // O laço passa pela tabela inteira, e o número de entradas vem do
+    // arquivo: ver `MAX_ENTRADAS`.
+    if quantos > MAX_ENTRADAS {
+        return Err("tabela de segmentos grande demais");
+    }
 
     let mut segmentos = [Segmento {
         deslocamento: 0,
@@ -197,6 +241,8 @@ pub fn validar(bytes: &[u8]) -> Result<Imagem<'_>, &'static str> {
     }; MAX_SEGMENTOS];
     let mut total = 0;
     let mut manifesto = None;
+    // Os bytes de notas lidos até aqui, somados: ver `ORCAMENTO_DAS_NOTAS`.
+    let mut notas_lidas = 0usize;
 
     for i in 0..quantos {
         let base = tabela
@@ -215,6 +261,13 @@ pub fn validar(bytes: &[u8]) -> Result<Imagem<'_>, &'static str> {
                 .checked_add(no_arquivo)
                 .filter(|&fim| fim <= bytes.len() as u64)
                 .ok_or("segmento de notas fora da imagem")?;
+            // O orçamento, antes de ler: a soma das faixas dos `PT_NOTE`,
+            // também a mesma faixa repetida. A faixa cabe na imagem, então
+            // o tamanho dela cabe num `usize`.
+            notas_lidas = notas_lidas
+                .checked_add(no_arquivo as usize)
+                .filter(|&lidas| lidas <= ORCAMENTO_DAS_NOTAS)
+                .ok_or("segmentos de notas grandes demais")?;
             let notas = &bytes[deslocamento as usize..fim as usize];
             if let Some(achado) = protocolo::usuario::manifesto::achar(notas)? {
                 if manifesto.is_some() {
