@@ -551,7 +551,9 @@ impl Detector {
         // A credencial: uma chave revogada que continua pedindo é de
         // alertar — alguém revogou por um motivo —; falhas de
         // autenticação, de olhar, até serem muitas: quem erra a senha três
-        // vezes não é um ataque.
+        // vezes não é um ataque. A revogação, pelo texto do detalhe, e não
+        // pelo nome do programa de quem pediu (ver
+        // `Evento::texto_do_detalhe`).
         if e.codigo == Codigo::DenyNotAuthenticated {
             let vs = decisoes(Codigo::DenyNotAuthenticated);
             if vs.len() >= AUTENTICACAO[1]
@@ -569,7 +571,7 @@ impl Detector {
                         e.detalhe
                     ),
                 ));
-            } else if e.detalhe.contains("revogad")
+            } else if e.texto_do_detalhe().contains("revogad")
                 && self.pode(Regra::AbusoDeCredencial, &e.principal, 1, e.ts_ms)
             {
                 saida.push(det(
@@ -708,8 +710,10 @@ impl Detector {
             }
         }
 
+        // A palavra no texto do detalhe, e não no nome do programa de quem
+        // pediu (ver `Evento::texto_do_detalhe`).
         if e.codigo == Codigo::DenyRole
-            && e.detalhe.contains("teto")
+            && e.texto_do_detalhe().contains("teto")
             && self.pode(Regra::TetoExercido, &e.principal, 1, e.ts_ms)
         {
             saida.push(det(
@@ -1235,6 +1239,65 @@ pub(crate) mod testes {
                 Severidade::Media,
                 Confianca::Media
             )]
+        );
+    }
+
+    /// O nome do programa de quem pediu não dispara regra (o pré-existente
+    /// 2 do adversário do lote A4): o `arquiteto` — `teto` no nome — que
+    /// ouve a recusa do papel que não é a do teto, e o `irrevogado` —
+    /// `revogad` no nome — que ouve a sessão que acabou. As duas regras
+    /// procuram a palavra no texto do detalhe, sem o `pelo processo N (…)`;
+    /// no detalhe inteiro, o titular ganhava o "tentou exercer o teto de um
+    /// administrador", de severidade alta, e o "uso de credencial
+    /// revogada". E o controle: a recusa de verdade, com o mesmo `pelo`,
+    /// dispara as duas.
+    #[test]
+    fn o_nome_do_programa_nao_dispara_o_teto_nem_a_revogacao() {
+        let recusa = |seq: u64, codigo: Codigo, detalhe: String| {
+            let mut e = ev(seq, "agent:aa", Titular::Agente, "fs.read", codigo);
+            e.detalhe = detalhe;
+            e
+        };
+        let arquiteto = "pelo processo 9 (arquiteto 0a1b2c3d4e5f6071)";
+        let irrevogado = "pelo processo 10 (irrevogado 0a1b2c3d4e5f6071)";
+        let pelo_nome = [
+            recusa(
+                1,
+                Codigo::DenyRole,
+                alloc::format!("{arquiteto}: sem papel, ou papel que a politica nao tem"),
+            ),
+            recusa(
+                2,
+                Codigo::DenyNotAuthenticated,
+                alloc::format!("{irrevogado}: sessao de pessoa que acabou"),
+            ),
+        ];
+        let ds = rodar(&pelo_nome);
+        assert!(ds.is_empty(), "{ds:?}");
+        let de_verdade = [
+            recusa(
+                1,
+                Codigo::DenyRole,
+                alloc::format!(
+                    "{arquiteto}: o papel e o teto de um administrador: delega, nao se exerce"
+                ),
+            ),
+            recusa(
+                2,
+                Codigo::DenyNotAuthenticated,
+                alloc::format!("{irrevogado}: chave revogada"),
+            ),
+        ];
+        let r: Vec<_> = rodar(&de_verdade)
+            .iter()
+            .map(|d| (d.regra, d.severidade))
+            .collect();
+        assert_eq!(
+            r,
+            [
+                (Regra::TetoExercido, Severidade::Alta),
+                (Regra::AbusoDeCredencial, Severidade::Media)
+            ]
         );
     }
 

@@ -3093,3 +3093,96 @@ fn o_desfecho_depois_do_nascimento_nao_desfaz_a_proveniencia() {
     assert_eq!(m.ueba.perfil(&principal).map(|p| p.recusas), Some(0));
     assert_eq!((m.contadores.decisoes, m.contadores.recusas), (1, 0));
 }
+
+/// O desfecho tardio de um `user.run` pedido pela interface nativa (o achado
+/// A3 do adversário do lote A4): o processo 40, rodando X, pede o
+/// `user.run` de uma imagem que não se mapeia, ouve `launched: true` e troca
+/// de imagem para Y; o primeiro pedido de Y vem antes do desfecho, que o fio
+/// novo grava depois — `ERROR`, em nome de quem o gate decidiu, com X,
+/// citando a decisão de antes. O registro fica como o kernel o grava — uma
+/// execução da decisão 3, de quem pediu com X —, e o grafo fica com Y: a
+/// execução de uma decisão mais velha que o registro que pôs Y não troca o
+/// programa, nem liga aresta. Antes, o 40 voltava a X até o pedido seguinte,
+/// na proveniência dele e na do filho. E o pedido seguinte, de outro
+/// programa, troca como sempre.
+#[test]
+fn o_desfecho_tardio_nao_troca_o_programa_de_quem_pediu() {
+    let mut a = Auditoria::nova();
+    let x = "x 0a0b0c0d4e5f6071";
+    let y = "y 0102030405060708";
+    let pelo = |programa: &str| format!("pelo processo 40 ({programa})");
+    let caminho = "/armazem/compartilhado/codigo/grande";
+    a.gravar(do_agente(
+        "user.run",
+        "/programas/x86_64/x",
+        Codigo::Allow,
+        "",
+    ));
+    a.gravar(do_agente(
+        "user.run",
+        "/programas/x86_64/x",
+        Codigo::Allow,
+        "processo 40 lancado; decisao 1",
+    ));
+    // O 40, rodando X, pede o `user.run`: a decisão e o nascimento do 41.
+    let d = a.gravar(do_agente("user.run", caminho, Codigo::Allow, &pelo(x)));
+    a.gravar(do_agente(
+        "user.run",
+        caminho,
+        Codigo::Allow,
+        &format!("{}: processo 41 lancado; decisao {d}", pelo(x)),
+    ));
+    // Ouve `launched: true` e troca de imagem: a decisão do `exec`, que X
+    // pede, e o primeiro pedido de Y.
+    a.gravar(do_agente(
+        "process.exec",
+        "/programas/x86_64/y",
+        Codigo::Allow,
+        &pelo(x),
+    ));
+    let de_y = a.gravar(do_agente("fs.read", "/dados/a", Codigo::Allow, &pelo(y)));
+    // O desfecho tardio, do fio 41.
+    let tardio = a.gravar(do_agente(
+        "user.run",
+        caminho,
+        Codigo::Error,
+        &format!("{}: memoria fisica esgotada; decisao {d}", pelo(x)),
+    ));
+    let mut m = Motor::novo();
+    ler(&mut m, &a);
+
+    let ultimo = m.eventos().last().expect("o desfecho tardio");
+    assert_eq!(ultimo.seq, tardio);
+    assert_eq!(ultimo.tipo, Tipo::Execucao);
+    assert_eq!(ultimo.decisao, Some(d));
+    assert_eq!(ultimo.processo, Some((40, x.to_string())));
+    let p = m.grafo.processo(0, 40).expect("o processo 40");
+    assert_eq!(p.programa.as_deref(), Some(y));
+    assert_eq!(p.programa_desde, de_y);
+    let executa: Vec<No> = m
+        .grafo
+        .vizinhos(&No::Processo { epoca: 0, fio: 40 })
+        .into_iter()
+        .filter(|(aresta, _, sai)| *aresta == Aresta::Executa && *sai)
+        .map(|(_, no, _)| no)
+        .collect();
+    assert_eq!(
+        executa,
+        [No::Programa(x.to_string()), No::Programa(y.to_string())]
+    );
+    let prov = m.grafo.proveniencia(0, 41);
+    assert!(prov.completa());
+    let cadeia: Vec<(u64, Option<&str>)> = prov
+        .cadeia
+        .iter()
+        .map(|e| (e.fio, e.programa.as_deref()))
+        .collect();
+    assert_eq!(cadeia, [(41, None), (40, Some(y))]);
+
+    // E o pedido seguinte do 40, de outro programa: troca.
+    let z = "z 0f0e0d0c0b0a0908";
+    let de_z = a.gravar(do_agente("fs.read", "/dados/b", Codigo::Allow, &pelo(z)));
+    ler(&mut m, &a);
+    let p = m.grafo.processo(0, 40).expect("o processo 40");
+    assert_eq!((p.programa.as_deref(), p.programa_desde), (Some(z), de_z));
+}

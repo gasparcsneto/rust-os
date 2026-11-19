@@ -143,6 +143,11 @@ pub struct Processo {
     pub autoridade: String,
     /// O último programa que se viu executando nele.
     pub programa: Option<String>,
+    /// O registro que pôs o [`Self::programa`] de agora no processo — ver
+    /// [`Grafo::executa_no_registro`]: a execução de uma decisão mais velha
+    /// que ele não o troca. Zero, nenhum: o processo ainda sem programa, ou
+    /// com um que entrou sem o registro ([`Grafo::executa`]).
+    pub programa_desde: u64,
     /// O registro do nascimento.
     pub seq: u64,
     /// Nasceu de `user.run` (ou do kernel), ou de `bifurcar`.
@@ -238,8 +243,17 @@ impl Grafo {
         true
     }
 
-    /// Um processo apareceu executando `programa`: o primeiro pedido dele,
-    /// ou o primeiro depois de um `executar`.
+    /// [`Grafo::executa_no_registro`] sem o registro: a ordem não se
+    /// confere, e o programa que entra fica sem o registro que o pôs. É o de
+    /// quem não sabe de que registro veio o programa — os testes do grafo;
+    /// o motor passa sempre o registro.
+    pub fn executa(&mut self, epoca: u32, fio: u64, programa: &str) {
+        self.executa_no_registro(epoca, fio, programa, 0, None);
+    }
+
+    /// Um processo apareceu executando `programa` no registro `seq` — o
+    /// primeiro pedido dele, ou o primeiro depois de um `executar` —, que é a
+    /// execução da decisão `citada`, se é uma.
     ///
     /// # A descrição abreviada
     ///
@@ -271,7 +285,38 @@ impl Grafo {
     ///
     /// De um processo que o grafo não conhece, a abreviada não diz nada que
     /// se compare: não vira nó.
-    pub fn executa(&mut self, epoca: u32, fio: u64, programa: &str) {
+    ///
+    /// # A execução de uma decisão de antes
+    ///
+    /// Uma execução diz o programa de quem pediu **quando o gate decidiu**:
+    /// quem ela nomeia é o da decisão que ela cita. A que chega depois de o
+    /// processo trocar de imagem não é notícia do programa de agora: o
+    /// desfecho do lançamento, gravado pelo fio novo sem esperar a resposta
+    /// do comando — quem pediu pela interface nativa ouve `launched: true`,
+    /// troca de imagem, e só então o fio novo grava a imagem que não se
+    /// mapeou, com o programa de antes (o achado A3 do adversário do lote
+    /// A4). A execução que cita uma decisão mais velha que o registro que
+    /// pôs o programa de agora no processo ([`Processo::programa_desde`])
+    /// não o troca, nem liga aresta: a decisão que ela cita já passou pelo
+    /// motor — ele lê em ordem —, com a mesma descrição, e a aresta desse
+    /// programa entrou por ela; ligada de novo, uma aresta que o teto do
+    /// grafo já tirou voltaria como nova. Os registros não mudam: muda a
+    /// leitura do NSF.
+    ///
+    /// A que cita a decisão que pôs o programa de agora, ou uma depois dela,
+    /// troca como sempre: a falha do `exec` depois do ponto sem volta cita a
+    /// decisão do `exec`, que a imagem de antes pediu, e já diz a imagem
+    /// nova. E o mesmo programa, numa descrição que diz mais — a inteira
+    /// depois da abreviada, a de 16 dígitos depois da de 8 —, entra também
+    /// pela execução de antes: não é troca.
+    pub fn executa_no_registro(
+        &mut self,
+        epoca: u32,
+        fio: u64,
+        programa: &str,
+        seq: u64,
+        citada: Option<u64>,
+    ) {
         use politica::auditoria::descricao_abreviada;
         let abreviada = descricao_abreviada(programa);
         let Some(p) = self.processos.get_mut(&(epoca, fio)) else {
@@ -309,7 +354,13 @@ impl Grafo {
             }
             return;
         }
+        // A troca de verdade — salvo pela execução de uma decisão de antes
+        // do programa de agora (ver acima).
+        if citada.is_some_and(|d| d < p.programa_desde) {
+            return;
+        }
         p.programa = Some(programa.to_string());
+        p.programa_desde = seq;
         self.ligar(
             No::Processo { epoca, fio },
             Aresta::Executa,
@@ -458,8 +509,9 @@ pub fn o_mesmo_programa(a: &str, b: &str) -> bool {
 /// registro antigo tem — e só nesse par: dois de 16 se comparam inteiros.
 /// E o par de duas descrições **inteiras** do mesmo programa, uma de cada
 /// largura, também não vira troca: o processo fica com a de 16, sem aresta
-/// (ver [`Grafo::executa`]) — antes do lote B2 do #448, as duas inteiras
-/// davam o nó e a aresta a mais, que só as abreviadas evitavam.
+/// (ver [`Grafo::executa_no_registro`]) — antes do lote B2 do #448, as
+/// duas inteiras davam o nó e a aresta a mais, que só as abreviadas
+/// evitavam.
 ///
 /// Os dois resumos têm 8 ou 16 dígitos — é o que
 /// [`politica::auditoria::resumo_da_descricao`] devolve —, e a compilação de
@@ -485,6 +537,7 @@ mod testes {
             criador,
             autoridade: "agent:aa".to_string(),
             programa: None,
+            programa_desde: 0,
             seq,
             via,
         }
@@ -900,5 +953,58 @@ mod testes {
                 .iter()
                 .all(|(a, _, sai)| *a == Aresta::Sobre && !sai)
         );
+    }
+
+    /// A execução de uma decisão mais velha que o registro que pôs o
+    /// programa de agora não o troca, nem liga aresta (o achado A3 do
+    /// adversário do lote A4): o desfecho tardio do lançamento que o
+    /// processo pediu rodando X, gravado depois de ele trocar para Y. A que
+    /// cita o registro que pôs o programa de agora, ou um depois dele,
+    /// troca; o mesmo programa, numa descrição que diz mais, entra também
+    /// pela de antes; e o programa dado sem o registro fica sem ele.
+    #[test]
+    fn a_execucao_de_uma_decisao_de_antes_nao_troca_o_programa() {
+        let mut g = Grafo::novo();
+        for fio in [40, 41] {
+            g.nasceu(
+                0,
+                fio,
+                p(Criador::Principal("agent:aa".into()), Aresta::Lancou, 2),
+            );
+        }
+        // O programa de agora de um processo, e o registro que o pôs.
+        fn programa(g: &Grafo, fio: u64) -> Option<(&str, u64)> {
+            g.processo(0, fio)
+                .map(|p| (p.programa.as_deref().unwrap_or(""), p.programa_desde))
+        }
+        // X pelo registro 3, a decisão do lançamento que o 40 pede; Y pelo
+        // 6, o primeiro pedido dele depois da troca de imagem.
+        g.executa_no_registro(0, 40, "x 0a0b0c0d", 3, None);
+        g.executa_no_registro(0, 40, "y 01020304", 6, None);
+        let arestas = g.arestas();
+        assert_eq!(programa(&g, 40), Some(("y 01020304", 6)));
+        // O desfecho tardio: o registro 7, a execução da decisão 3, com X.
+        g.executa_no_registro(0, 40, "x 0a0b0c0d", 7, Some(3));
+        assert_eq!(programa(&g, 40), Some(("y 01020304", 6)));
+        assert_eq!(g.arestas(), arestas);
+        // A que cita o registro que pôs Y — a falha do `exec` que Y pediu,
+        // já com a imagem nova —: troca, com a aresta.
+        g.executa_no_registro(0, 40, "z 0f0f0f0f", 8, Some(6));
+        assert_eq!(programa(&g, 40), Some(("z 0f0f0f0f", 8)));
+        assert_eq!(g.arestas(), arestas + 1);
+        // A que cita uma decisão depois dele: troca.
+        g.executa_no_registro(0, 40, "w 0e0e0e0e", 10, Some(9));
+        assert_eq!(programa(&g, 40), Some(("w 0e0e0e0e", 10)));
+        // Sem o registro: o programa entra sem ele.
+        g.executa(0, 40, "v 0d0d0d0d");
+        assert_eq!(programa(&g, 40), Some(("v 0d0d0d0d", 0)));
+
+        // O mesmo programa, inteiro depois da abreviada: a execução de uma
+        // decisão de antes dá o nome, e não é troca — nem aresta.
+        g.executa_no_registro(0, 41, "? abcd1234 de ?", 6, None);
+        let arestas = g.arestas();
+        g.executa_no_registro(0, 41, "loja abcd1234 de duke", 7, Some(3));
+        assert_eq!(programa(&g, 41), Some(("loja abcd1234 de duke", 6)));
+        assert_eq!(g.arestas(), arestas);
     }
 }

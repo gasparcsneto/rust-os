@@ -566,11 +566,15 @@ impl Motor {
 
     fn processar(&mut self, mut e: Evento) {
         // O grafo: o processo que nasceu, o programa que roda, a decisão e
-        // o que ela nomeou.
+        // o que ela nomeou. O programa, pelo registro e pela decisão que ele
+        // cita: a execução de uma decisão de antes do programa de agora não
+        // o troca — o desfecho tardio de um lançamento, depois de quem o
+        // pediu trocar de imagem (ver `Grafo::executa_no_registro`).
         if let Tipo::Nascimento { filho } = e.tipo {
             let criador = match &e.processo {
                 Some((p, prog)) => {
-                    self.grafo.executa(e.epoca, *p, prog);
+                    self.grafo
+                        .executa_no_registro(e.epoca, *p, prog, e.seq, e.decisao);
                     Criador::Processo(*p)
                 }
                 None => Criador::Principal(e.principal.clone()),
@@ -587,12 +591,14 @@ impl Motor {
                     criador,
                     autoridade: e.principal.clone(),
                     programa: None,
+                    programa_desde: 0,
                     seq: e.seq,
                     via,
                 },
             );
         } else if let Some((p, prog)) = &e.processo {
-            self.grafo.executa(e.epoca, *p, prog);
+            self.grafo
+                .executa_no_registro(e.epoca, *p, prog, e.seq, e.decisao);
         }
         let quem = match &e.processo {
             Some((p, _)) => No::Processo {

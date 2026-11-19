@@ -515,6 +515,22 @@ impl Evento {
         !self.codigo.permite() && self.codigo != Codigo::Error
     }
 
+    /// O texto do detalhe, sem quem pediu e sem a decisão citada: o
+    /// [`Detalhe::resto`] de [`ler_detalhe`] — o que o kernel escreveu do
+    /// que aconteceu.
+    ///
+    /// É onde uma regra procura uma palavra do motivo, e não no detalhe
+    /// inteiro: o `pelo processo N (<nome> <resumo> de <editor>)` da frente
+    /// leva o nome do programa e o do editor, que quem os escreveu escolhe.
+    /// Procurada no detalhe inteiro, a palavra se achava no nome — o
+    /// `arquiteto`, que tem `teto`, ouvia "tentou exercer o teto de um
+    /// administrador", de severidade alta, a cada recusa do papel; o
+    /// `irrevogado`, "uso de credencial revogada", a cada sessão que acabou
+    /// (o pré-existente 2 do adversário do lote A4).
+    pub fn texto_do_detalhe(&self) -> String {
+        ler_detalhe(&self.detalhe).resto
+    }
+
     /// Uma recusa do manifesto do programa: o papel de quem o lançou tem a
     /// permissão, e o programa não a declarou — a atenuação funcionando.
     /// É um sinal do programa, e não alguém sondando o próprio papel.
