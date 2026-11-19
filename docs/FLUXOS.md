@@ -180,7 +180,11 @@ mudou. Quem não é ponta não toma a ordem. O `exec` cujo arquivo não se lê,
 ou que falha antes do ponto sem volta, não encerra fluxo nenhum: o
 processo ouve o erro e segue o que era — da leitura,
 `PROGRAMA_DESCONHECIDO`, ou `SEM_MEMORIA` quando faltou heap para ler o
-arquivo —, e a execução da decisão diz a falha (`ERROR`, com o motivo). O
+arquivo; da imagem que não se confere — não é ELF, um segmento fora do
+lugar, o manifesto que não se lê —, `PROGRAMA_DESCONHECIDO`; do espaço
+novo sem memória, `SEM_MEMORIA` (desde o lote A4; antes, as duas eram
+`SEM_MEMORIA`) —, e a execução da decisão diz a falha (`ERROR`, com o
+motivo). O
 que falha **depois** dele — a imagem nova que não se mapeia — não tem para
 onde voltar: os fluxos já acabaram na troca, com `o programa mudou`,
 gravado dentro da ordem como na troca que dá certo; a execução da decisão

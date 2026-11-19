@@ -121,10 +121,34 @@ pontos onde acontece — não num canal paralelo:
   mesma decisão; o handler lança uma vez. No código de fora da imagem, o
   nascimento diz também o resumo e o editor — pelo nome que a última
   palavra perguntou, e não pelo da conferência. E o `user.run` permitido
-  que não lança — o arquivo que não se lê, o fio que não nasce — grava o
-  desfecho como execução da decisão, `ERROR` com o motivo, como o `exec`;
-  fora de um comando, em nome do kernel (os três, desde o lote A3 do
-  #448). O `process.fork` é um fato, não uma decisão: bifurcar não é
+  que não lança — o arquivo que não se lê, a imagem que não se carrega,
+  o fio que não nasce — grava o desfecho como execução da decisão,
+  `ERROR` com o motivo, como o `exec`; fora de um comando, em nome do
+  kernel (a recusa no começo do lançamento, o editor pelo nome que a
+  última palavra perguntou e esse desfecho, desde o lote A3 do #448; a
+  imagem — o que não é um ELF64 deste processador, um segmento fora do
+  lugar, o manifesto que não se lê —, conferida antes de o fio nascer,
+  desde o lote A4). A imagem que não se mapeia no fio novo, depois do
+  nascimento — a memória do espaço novo, dos segmentos, da pilha —,
+  grava o mesmo desfecho depois do `processo N lancado`, em nome de quem
+  o gate decidiu e citando a decisão, como o `exec` que falha depois do
+  ponto sem volta (fora de um comando, em nome do kernel), e o processo
+  acaba sem rodar. Quem grava de lá é o
+  `autorizacao::DesfechoDoLancamento`, guardado no fio do comando no
+  começo do lançamento: não autoriza nada — grava, na mesma cadeia, em
+  nome de quem o gate já decidiu —, é a única execução gravada depois de
+  o comando responder, e só o lançamento o nomeia (`NOMES_PROTEGIDOS`,
+  no `xtask`). E as recusas das perguntas sobre quem pede — o journal
+  recusado, quem pede encerrado ou contido, o editor, o papel, a cota,
+  também a contada de novo no nascimento — continuam gravadas como o
+  gate as grava (`process.run`, com quem pede, sem citar a decisão);
+  dentro de um comando, o `ALLOW` do `user.run` ganha o desfecho delas,
+  a execução da decisão com o mesmo código e o mesmo detalhe — o editor
+  pelo nome, a contagem da cota —; fora de um comando — o kernel, o
+  `fork` —, só a do gate (o lote A4). No NSF, a recusa conta uma vez —
+  no risco, nos contadores e no perfil, que só contam decisões: o
+  desfecho é uma execução. O `process.fork` é um fato, não uma decisão:
+  bifurcar não é
   permissão (o filho herda a autoridade do pai, e conta na cota dela), e
   tudo o que o filho pedir passa pelo gate;
 - a conexão derrubada por um bloqueio, como execução do `net.block`;
@@ -212,9 +236,14 @@ já não se lia: o lote inteiro da cauda voltava com erro, e o NSF parava
 nele, cego para o que viesse depois até o registro sair do anel. Um
 registro que o NSF não lê — um texto acima do teto, um titular ou um
 código que ele não conhece — não leva mais o lote junto
-(`seguranca::evento::lote`): os outros entram, o kernel diz no log qual
-não se leu e por quê, e o buraco é a lacuna de sempre (`audit-gap`), que
-o monitor de invariantes vê no registro seguinte que se lê. A leitura
+(`seguranca::evento::lote`): os outros entram, o kernel diz no log, numa
+linha por lote — e não uma por registro —, quantos não se leram, entre
+que números, quantos sem o número e o motivo do primeiro (um só: o
+número e o motivo dele; `seguranca::evento::resumo_dos_ilegiveis`, desde
+o lote A4 — antes, uma janela de 512 registros que não se leem dava 512
+linhas por volta, mais do que o anel do log guarda, e o caso dela levava
+72 s no x86 em depuração), e o buraco é a lacuna de sempre (`audit-gap`),
+que o monitor de invariantes vê no registro seguinte que se lê. A leitura
 passa por eles pelo número (`seguranca::Motor::ler_lote`): um lote
 inteiro que não se lê — 64 seguidos — não para a volta, que segue até a
 cabeça ou o teto de leituras dela; até o lote A3 do #448, a volta parava

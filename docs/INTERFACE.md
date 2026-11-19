@@ -221,12 +221,16 @@ ligação a põe no segmento de notas. O envelope da nota está em
 `protocolo::usuario::manifesto` (o mesmo para quem monta e quem acha), e o
 texto em `politica::manifesto`, lido e testado no hospedeiro.
 
-- O kernel acha a nota em `elf::validar` e lê o manifesto em
-  `programa::carregar`, antes do ponto de não retorno: um manifesto que não
+- O kernel acha a nota em `elf::validar` e lê o manifesto na conferência
+  da imagem (`programa::conferir_a_imagem`, a mesma conta com que o
+  primeiro passo de `programa::carregar` começa), antes do ponto de não
+  retorno — e, no `user.run`, antes de o fio nascer: um manifesto que não
   se lê — cabeçalho de outra versão, permissão fora do vocabulário, dois
-  manifestos, nota que passa do fim — recusa a imagem, e o processo que
-  pediu o `executar` continua intacto. Um manifesto ilegível não é um
-  manifesto vazio.
+  manifestos, nota que passa do fim — recusa a imagem: o processo que
+  pediu o `executar` continua intacto e ouve `PROGRAMA_DESCONHECIDO`
+  (desde o lote A4; antes, `SEM_MEMORIA`), e o `user.run` responde
+  `launched: false`, com o desfecho na auditoria. Um manifesto ilegível
+  não é um manifesto vazio.
 - O processo guarda o programa (`autorizacao::Programa`): o manifesto e o
   resumo BLAKE2s da imagem. Ele troca junto com o espaço de endereços
   (`fios::adotar_imagem`), na mesma seção crítica: a imagem nova nunca roda

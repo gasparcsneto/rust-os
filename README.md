@@ -237,7 +237,7 @@ $ cargo xtask agent --canal 2 agent.session
 | `tasks.stats` | Escalonador cooperativo e fila de entrada do canal |
 | `threads.stats` | Escalonador preemptivo: trocas de contexto e quanta |
 | `threads.list` | Fios de execução do kernel, com estado e vezes escalonado |
-| `user.run` | Lança um programa no anel sem privilégio (`path` — o exemplo embutido é `/bin/exemplo`; sem o `path`, o gate recusa — `DENY_RESOURCE` a quem tem `process.run`: nenhum papel alcança o recurso vazio). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — o journal recusado, encerrado ou contido, o editor, o papel, a cota, também a contada de novo no nascimento — e em quem pediu encerrado na última palavra, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
+| `user.run` | Lança um programa no anel sem privilégio (`path` — o exemplo embutido é `/bin/exemplo`; sem o `path`, o gate recusa — `DENY_RESOURCE` a quem tem `process.run`: nenhum papel alcança o recurso vazio). O código de fora da imagem só roda com o selo de um editor em que o papel confia: senão, `CODE_UNSIGNED`, `CODE_TAMPERED` ou `CODE_UNTRUSTED`. A imagem que não se carrega — não é um ELF64 deste processador, um segmento fora do lugar, o manifesto que não se lê — é recusada antes de o fio nascer: `launched: false`, com o `error`. Recusado pelo gate depois de decidir o comando, `launched: false` com o `code` e o `error` da recusa: nas perguntas sobre quem pede — o journal recusado, encerrado ou contido, o editor, o papel, a cota, também a contada de novo no nascimento — e em quem pediu encerrado na última palavra, sem explicação, que é a do comando e não a delas; no comando decidido de novo no nascimento, ou na confiança no editor do código perguntada de novo ali, com a explicação |
 | `user.stats` | Chamadas atendidas e recusadas, arquivos abertos e lidos, último código de saída |
 | `tasks.list` | Tarefas lançadas, com id, nome e se estão vivas |
 | `irq.stats` | Contadores de interrupções de hardware por linha |
@@ -416,13 +416,13 @@ kernel/src/
 │   ├── contador.rs  os casos do contador de ciclos fora do anel sem privilégio (o #451): o processo que lê o contador — o `contador` de `usuario/exemplo.rs` — cai em cada núcleo, e a contabilidade das falhas e o log dizem qual falha e em que instrução; e os controles de cada núcleo — o `CR4.TSD` e o `CR4.PCE` no x86, o `CNTKCTL_EL1` e o `PMUSERENR_EL0` no ARM — como o kernel os escreveu; e o kernel que os fecha em cada núcleo depois de um firmware que os deixasse abertos — os controles sujos e a função do boot chamada de novo (o lote B2 do #448)
 │   ├── enlace.rs    os casos dos dispositivos relacionados e do enlace entre eles
 │   ├── excecoes.rs  os casos das exceções que um processo provoca (o lote B2 do #448): um programa mínimo por caso — os de `exemplo::Excecao`, em `usuario/exemplo.rs` —, em cada núcleo ligado, morre da exceção — o do `NT`, que não provoca nenhuma, troca de imagem e sai pelo `filho` —, com a falha contada, a linha no log, o processo fora da tabela e o núcleo seguindo; no x86, o `ud2`, a divisão por zero, o `int1`, o `TF` ligado com um `nop` e com a `syscall`, o `int3` e o `push` com o `rsp` não canônico, e o `NT` ligado nas chamadas e na troca de imagem, com um companheiro que só gira no mesmo núcleo; no ARM, o `brk` com os imediatos do estouro de propósito e com outro qualquer; e os do lote B3: no x86, o seletor do LDT (`mov ds` e `lsl`), a falha de página do supervisor pelo LDT de teste, o SSE e o x87 no `#NM` — o SSE duas vezes por núcleo, pelo canal —, o passo no anel 0 e o do `mov ss`, o `#NP` e o `#SS` do descritor ausente, o `sysenter` e a pilha da IST do `#MC`; no ARM, o FP/SIMD na classe 0x07, duas vezes por núcleo, o `msr daif` e o `wfi`; e, nas duas, o regime de cada núcleo — o `CR0`, o `CR4`, o `DR7` e o `sysenter`; o `SCTLR_EL1` e o `CPACR_EL1` — como o kernel o escreve, também depois de sujo; e os do lote B4: nas duas, o estado por fio — o canal, duas rodadas por núcleo, e o par, um receptor e um emissor presos ao mesmo núcleo, entrados juntos e cedendo um ao outro —, os registradores da primeira entrada, zerados, e o `fork`, que passa o do pai ao filho, e a troca de imagem, que o zera; no x86, o `str`, o `sldt`, o `smsw`, o `sgdt` e o `sidt` no `#GP` do UMIP e o `fwait` no `#NM`; no ARM, o canal do depurador; e o regime conferido bit a bit — no x86, contra o CPUID, com o `XCR0` e os `DR0` a `DR3`; no ARM, com o `MDSCR_EL1` e o `TPIDRRO_EL0`; e, dos achados do adversário do lote B4, a troca de imagem com as flags ligadas — o `filho` confere as de um processo novo —, o regime sujo conferido inteiro, com as bases do `FS` e do `GS`, e o par que confere a vez
-│   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos
+│   ├── fluxo.rs     os casos do fluxo da malha: dois programas `fluxos` com a autoridade de uma pessoa, a suíte ditando os passos — os bytes nos dois sentidos, o fim, as cotas, a contrapressão, as corridas e os ganchos; e a troca de imagem para a imagem que não se confere — o que não é ELF e o manifesto que não se lê —, que ouve `PROGRAMA_DESCONHECIDO`, e a memória que falta, `SEM_MEMORIA` (o #471, no lote A4)
 │   ├── fluxo/
 │   │   ├── par.rs   os casos do fluxo entre dois Dukes: o outro Duke é a suíte, com a chave de teste do dispositivo — abrindo pela vaga do enlace, ou aceitando do outro lado do fio do fluxo —, o gate daqui decidindo cada `abrir` e cada `dados`
 │   │   ├── par/
 │   │   │   └── aviso.rs os casos do aviso com o fluxo entre dois Dukes: a suspensão e o esquecimento do dispositivo avisam o fim, e o fluxo saindo e chegando avisa pelo crédito e pelos dados do par
 │   │   └── troca.rs os casos da decisão de novo no ponto sem volta do `exec` — o F4 e os achados do adversário do lote A do #448: a troca de imagem parada no meio pela pausa da suíte, decidida e com a imagem preparada, e a chave revogada, a política nova, o processo isolado ou a confiança no editor da imagem nova — o `ola` selado no armazém — tirada de fora, que a recusam — nada trocado, `NEGADO`, a execução da decisão na auditoria e a imagem de antes rodando —, e o fim pedido sem o isolamento, que a recusa e morre na volta, sem o fim dos fluxos pela troca; com quem é ponta de fluxo e com quem não é, e a rodada da ponta repetida quando a volta pausada é adiada, até passar pela decisão de novo; sem mudança no meio, a troca de sempre; e a decisão de novo presa ao fio e ao `ALLOW` da decisão
-│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado
+│   ├── nascimento.rs os casos do que muda no meio do nascimento de um processo, pelo gancho da suíte — o pai isolado, com a credencial suspensa, que sai, com o fim pedido sem o isolamento, com o journal recusado ou com a confiança no editor tirada no meio do `fork`, que não ganha filho; o processo isolado, encerrado — também sem o isolamento, o fim pedido com o teto cheio e o morto podado — no meio do `user.run` que ele pede pela interface nativa, e a pessoa que sai, a chave revogada e a política nova no meio do dela, que não lançam, e ouvem o código da recusa; e o processo encerrado enquanto nasce, que morre no primeiro ponto seguro, também quando a vaga volta sem ele nascer —; o `user.run` recusado nas perguntas do gate sobre quem pede, com o código e o motivo de cada recusa, sem a explicação do comando; o desconhecido — o pedido nativo sem o programa decidido, o lançamento fora de um comando — que recusa, e o kernel que lança por conta própria; a confiança no editor do código selado tirada no meio do nascimento — pelo `user.run` e pelo kernel fora de um comando —, que não lança; o lançamento dentro de um comando que não é o `user.run` — um `fs.verify`, pelo gancho da verificação —, recusado; e o `system.reboot` com a tabela de fios cheia, pelo fio `energia` do boot, e o despertar dele sem pedido, que não age; e os do lote A3 do #448: o lançamento de dentro do `user.run`, que só nasce com a autoridade e o caminho do comando — o do sistema, o de outro caminho, o de outra autoridade, o de outra pessoa e o exemplo embutido, pelo gancho de antes das perguntas do gate, e os dois de um caminho que não existe, recusados no começo do lançamento —, o nascimento que grava o editor pelo nome que a última palavra perguntou — pelo gancho do meio, que troca o nome da chave —, o `user.run` permitido que não lança e grava o desfecho — o caminho que não existe, e o fio que não nasce, com a tabela cheia —, e o kernel que não lança por conta própria depois do boot, com o trinco fechado; e os do lote A4: a recusa de quem pede com o desfecho do `user.run` — também a cota contada de novo no nascimento, pelo gancho de antes dele, e, fora de um comando, só a recusa do gate —, a imagem que não se carrega — o que não é ELF e o manifesto que não se lê —, que não lança e grava o desfecho, e a que não se mapeia, com o desfecho depois do `processo N lancado`, em nome de quem o gate decidiu, e nenhum desfecho guardado vivo depois
 │   ├── orcamento.rs os casos do orçamento da vez da tarefa `programas`: a fila em ordem, cada pedido uma vez através das vezes, o fio que morre com o pedido na fila entre duas, e os suspensos de dois processos vivos executados na vez com a fila cheia; o laço da tarefa num executor de teste, ao lado de uma vizinha — a fila sempre cheia, o pedido que chega logo depois da vez, o suspenso pronto, e a fila vazia, em que a tarefa estaciona —; o tempo da vez; e o `incansavel` de verdade — um titular no laço, dois ao mesmo tempo, a taxa apertada —, cada resposta conferida pelo `id` e a conta dos filhos contra a do kernel
 │   ├── pareamento.rs os casos da cerimônia de pareamento: o outro Duke é a suíte, com uma chave de teste — iniciando pela vaga do enlace, ou aceitando pela via do fio da cerimônia —, e a Pessoa digita no console
 │   ├── recolhimento.rs os casos da ordem do recolhimento — o achado A1-1: a busca do próximo morto começa no cursor e dá a volta pela tabela, e o laço de um titular que faz nascer e morrer processos sem parar não segura os mortos de outro —, com o coletor segurado: um recolhimento por vez — os mortos de outro titular acima do laço, a tabela cheia que dá a volta, o encerramento no meio do laço — e a passada de produção inteira, que recolhe a partir do cursor; e, tudo solto, dois coletores e o laço de um titular, com os processos de outro, que ocupam a cota dele, encerrados no meio
@@ -447,7 +447,7 @@ kernel/src/
 ├── usuario/
 │   ├── mod.rs       ABI das chamadas de sistema e validação de ponteiros
 │   ├── elf.rs       leitor de ELF64: o formato em que um programa chega
-│   ├── programa.rs  mapeia o processo e desce de privilégio
+│   ├── programa.rs  confere a imagem, mapeia o processo e desce de privilégio
 │   ├── codigo.rs    o código que vira processo, lido e conferido uma vez: o da imagem, ou o selado por um editor em que o papel confia
 │   ├── descritores.rs  a tabela de descritores de um processo
 │   └── exemplo.rs   os programas mínimos, em assembly: os sete das duas arquiteturas — o sétimo, o `contador`, só para a suíte — e os das exceções (`Excecao`: vinte e nove no x86, treze no ARM), também só para a suíte
@@ -6825,9 +6825,14 @@ registro de cada uma no ponto em que nasceu.
   abaixo dos carregadores, `fios::adotar_imagem` e
   `arch::entrar_em_usuario`. E a nona, de antes do lote: a imagem que não
   é ELF, gravada como "processo N lancado" antes de o fio novo a recusar,
-  fica para uma tarefa à parte; e as recusas sobre quem pede gravam
+  fica para uma tarefa à parte — feita no lote A4 (#467): a imagem se
+  confere antes de o fio nascer, e a que não se mapeia no fio novo grava o
+  desfecho depois do nascimento —; e as recusas sobre quem pede gravam
   `process.run` sem citar a decisão do `user.run`, que é o desenho delas
-  (`usuario::NaoLancou::PorQuemPede`, a (j) acima). Os casos:
+  (`usuario::NaoLancou::PorQuemPede`, a (j) acima) — e, desde o lote A4
+  (#466), o `ALLOW` do `user.run` ganha o desfecho delas, a execução da
+  decisão com o mesmo código e o mesmo detalhe, e a recusa do gate continua
+  como era. Os casos:
   `contencao: o lancamento de dentro do user.run so nasce com a
   autoridade e o caminho do comando`, com mais três lançamentos — o de
   outra pessoa, e os dois de um caminho que não existe, pelo comando e
@@ -6843,6 +6848,23 @@ registro de cada uma no ponto em que nasceu.
   `o_carregador_nao_ganha_outro_nome_no_modulo_usuario` e
   `nenhuma_macro_nos_arquivos_dos_carregadores`, com o trinco pelo caminho
   do pacote nos dois do trinco.
+  No lote A4, a recusa de quem pediu encerrado na última palavra não
+  mudou: ela já tinha o desfecho desde este lote — o `nasce` grava a
+  recusa como a execução da decisão —, e o que faltava era o das perguntas
+  do começo e o da cota. Os casos do lote A4: `contencao: a cota contada
+  de novo no nascimento do user.run grava o desfecho`, `contencao: o
+  user.run de uma imagem que nao se carrega grava o desfecho`, `contencao:
+  o user.run cuja imagem nao se mapeia grava o desfecho depois do
+  nascimento` e `fluxo: a troca para a imagem que nao se confere ouve
+  PROGRAMA_DESCONHECIDO`, novos; `contencao: a recusa do user.run no gate
+  diz o codigo` e `nsf: mais de um lote que nao se le nao para a leitura,
+  e vira uma lacuna`, reforçados; e, no hospedeiro,
+  `a_recusa_de_quem_pede_com_o_desfecho_conta_uma_vez` e
+  `o_desfecho_depois_do_nascimento_nao_desfaz_a_proveniencia` (o motor do
+  NSF: a recusa conta uma vez — no risco, nos contadores e no perfil, que
+  só contam decisões), `o_resumo_dos_ilegiveis_de_um_lote`
+  (`seguranca::evento`) e `o_desfecho_do_lancamento_so_nos_donos`
+  (`xtask`).
 - **A margem de memória da compressão concorrente** (de fora da 14.1 e da
   correção da vaga do morto; investigada em 8 de novembro de 2026, sem mudar
   o comportamento): no x86_64 em debug, o caso `compressao: varias ao mesmo
@@ -8364,7 +8386,16 @@ falha fechado:
    motivo, e o lançamento do kernel fora de um comando grava a recusa em
    nome dele. E o `user.run` permitido cujo fio não nasce — a vaga, a
    pilha, o escalonamento congelado — grava o mesmo desfecho, `ERROR` com
-   o motivo. Toda execução da
+   o motivo. A imagem que se lê e não se carrega — não é um ELF64 deste
+   processador, um segmento fora do lugar, o manifesto que não se lê —
+   também, antes de o fio nascer: `ERROR`, com o motivo, e `launched:
+   false` (o lote A4, #467); e a que não se mapeia depois do nascimento — a
+   memória do espaço novo, dos segmentos, da pilha —, depois do `processo
+   N lancado`, em nome de quem o gate decidiu, citando a decisão: o
+   processo acaba sem rodar. No `executar`, a imagem que não se confere
+   devolve `PROGRAMA_DESCONHECIDO` (−7), e só a memória que falta no
+   espaço novo, `SEM_MEMORIA` (−5) — antes, as duas eram `SEM_MEMORIA` (o
+   #471, no lote A4). Toda execução da
    decisão de uma chamada de sistema vai em nome de quem o gate decidiu —
    o titular, a sessão, o papel e o processo com o programa que pediu,
    guardados na decisão (`autorizacao::DecisaoDoProcesso`), como a de um
@@ -8692,7 +8723,8 @@ suíte confere que o `user.run` do `ola` da imagem não passa por ela.
   nasceu, sem resposta a quem pediu e com o arquivo lido depois da
   decisão. Agora `user.run` lê e confere antes de o fio nascer, responde a
   recusa a quem pediu, e entrega ao fio os bytes conferidos — e o caminho
-  que não existe deixou de ser "lançado".
+  que não existe deixou de ser "lançado"; e, desde o lote A4, a imagem que
+  não se carrega também.
 - **Lançar passou a esperar a leitura.** Com a leitura antes de o fio
   nascer, quem lança espera o arquivo ser lido e conferido, e um laço de
   lançamentos ficou em fila. Dois casos da suíte dependiam do lançamento
@@ -14737,6 +14769,21 @@ minutos na fila. Os maiores, de novo, a persistência do x86 — a 1/3 da
 516. Cada job tem o seu runner, e nada muda dentro dele; mas a fila soma,
 e uma ponta nova não sobe com uma CI rodando quando a medida de relógio
 importa.
+
+A CI 518 (`cd9b370`, o lote A3) passou verde, 48 de 48, em 88,6 minutos de
+ponta a ponta, com 1338 de máquina. O maior job foi de novo a persistência
+do x86 — a parte 2/3 levou 73,3 minutos, e a 1/3, 57,4 —, e depois a
+atualização do ARM, 57,5. O fim veio dos fluxos entre dispositivos da
+mesma arquitetura, que começaram aos 54,7 e rodaram 33,9. As partes da
+suíte de depuração levaram, contra as CIs 516 e 517, de 0,70 a 1,65 vez —
+contra a 516, as do ARM de 0,70 a 0,96 e as do x86 de 1,11 a 1,26; contra
+a 517, de 0,74 a 1,65, para os dois lados —: a variação dos runners, sem
+direção; o lote não deixou a suíte mais lenta, e a lentidão das rodadas
+finais dele foi da máquina de desenvolvimento. Caso a caso, na parte 3/3
+do x86, a mediana subiu 1,24 vez contra a CI 516, espalhada por quase
+todos os casos, como num runner mais lento; e o caso novo do NSF levou ali
+142,5 segundos, pelos 513 avisos no log — um por registro que não se lê —,
+que o lote A4 trocou por um por lote (#469).
 
 Os runners variam — o mesmo trabalho levou de 0,6 a 1,6 vez entre as CI
 505 e 506, e a mesma parte 2/3 da persistência do x86 levou 44 minutos na

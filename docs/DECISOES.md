@@ -1813,7 +1813,7 @@ como [C].
 | Id | O que se faz | O estado |
 |---|---|---|
 | [A1-4](#a1-4) | a recusa da cota diz quantos dos contados são mortos que esperam o coletor | feito, no `ee4ea45` |
-| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448 |
+| [F4](#f4) | o `exec` decide de novo no ponto sem volta | feito, no `869dc08`, e o resto que o adversário do lote achou, no `97ea728`; o que o adversário da integração achou, no lote A3 do #448; o desfecho da imagem que não se carrega e o das recusas sobre quem pede, e o erro do `exec` da imagem que não se confere, no lote A4 |
 | [I7](#i7) | o comando que existe, num console sem ninguém, gravado sem o resumo dos parâmetros | feito, no lote B do #448; a troca da própria senha com algo na linha, no lote B2 |
 | [A9-RESUMO](#a9-resumo) | o resumo de 16 dígitos na descrição de um programa | feito, no lote B do #448; o que o adversário do lote achou — o número da regra do firewall que se perde no corte, e o par misturado de duas descrições inteiras — no lote B2 |
 | [DN-4](#dn-4) | o handoff como o próximo marco da fase 15 | decidido pelo roteiro |
@@ -1939,6 +1939,46 @@ pendência #298.
   reforçados, e sessenta e quatro mutações
   ([README](../README.md#decisões-pendentes), "A soma das cotas de
   processos e a cota por sessão", (m) a (z)).
+
+  O lote A4 (#467, #466, #469 e #471), [B], fez a nona — de antes do
+  adversário do lote A3 — e três pontos ao lado dela:
+  - a imagem que se lê e não se carrega é conferida antes de o fio
+    nascer (`usuario::programa::conferir_a_imagem`, a conta pura do
+    primeiro passo da carga, sobre os mesmos bytes que o fio carrega),
+    também a do exemplo embutido: recusada, o desfecho `ERROR` com o
+    motivo e `launched: false`. Antes, o fio nascia, o nascimento ia à
+    auditoria como `processo N lancado`, quem pediu ouvia
+    `launched: true`, e o erro ficava só no log;
+  - a que não se mapeia no fio novo grava o desfecho depois do
+    nascimento, em nome de quem o gate decidiu e citando a decisão, pelo
+    `autorizacao::DesfechoDoLancamento`, guardado no fio do comando e
+    entregue ao fio novo na carga, que o larga antes de entrar no
+    programa e antes de terminar. Ele não autoriza nada, e só o
+    lançamento o nomeia;
+  - as recusas das perguntas sobre quem pede continuam gravadas como o
+    gate as grava, e, dentro de um comando, o `ALLOW` do `user.run`
+    ganha o desfecho delas, com o mesmo código e o mesmo detalhe, também
+    na cota contada de novo no nascimento; fora de um comando, só a do
+    gate. É a alternativa (a) do plano; a (b), um registro só que
+    citasse a decisão, mudaria o desenho da recusa do gate, e é [C], não
+    tomada. A recusa conta uma vez no NSF — no risco, nos contadores e
+    no perfil, que só contam decisões. O encerrado na última palavra já
+    tinha o desfecho desde o lote A3 (o `nasce` grava a recusa como a
+    execução da decisão): o que faltava era o das perguntas do começo e
+    o da cota;
+  - os registros que o NSF não lê vão ao log numa linha por lote: a
+    janela de 512 dava 512 linhas por volta, e o caso dela levava 72 s no
+    x86 e 77 s no ARM em depuração, 138 e 149 ms por linha; agora são 8
+    linhas e uns poucos segundos;
+  - o `exec` da imagem que não se confere devolve
+    `PROGRAMA_DESCONHECIDO` (−7), e só a memória que falta,
+    `SEM_MEMORIA` (−5); antes, as duas eram −5. Nenhum documento nem
+    programa dependia do −5, e a auditoria do `exec` não mudou.
+
+  Quatro casos novos, dois reforçados, quatro testes no hospedeiro e
+  vinte e quatro mutações, todas reprovadas
+  ([README](../README.md#decisões-pendentes), "A soma das cotas de
+  processos e a cota por sessão").
 
 ### I7
 
