@@ -40,6 +40,24 @@ const BASE_DA_PILHA: u64 = TETO - protocolo::usuario::PAGINAS_DA_PILHA * TAMANHO
 /// A página não mapeada logo abaixo da pilha.
 const GUARD_DA_PILHA: u64 = BASE_DA_PILHA - TAMANHO_PAGINA;
 
+/// Quantas páginas os segmentos de uma imagem pedem, no máximo, somadas: o
+/// espaço que o mapa do usuário dá ao programa — de [`crate::usuario::BASE`]
+/// ao começo do que `mapear` dá ([`protocolo::usuario::MAPEAVEL`]), 64 MiB.
+///
+/// # Por quê
+///
+/// A conferência tem teto, e a carga não tinha: o terceiro passo
+/// ([`Trocada::mapear`]) zera e mapeia cada página que os segmentos pedem
+/// — no `exec`, dentro da chamada, com as interrupções mascaradas —, e um
+/// `.bss` de 255 MiB num arquivo de uma página passava, quase todo o espaço
+/// do usuário (o achado B4 do adversário do lote A5). Com o teto, o pior
+/// caso fica em 64 MiB, um quarto disso; tirar a carga do `exec` de dentro
+/// da chamada, como o `user.run` já faz no fio novo, é outra mudança, que
+/// fica para depois. O teto é o do mapa que o `protocolo` já documenta — o
+/// código e os dados do programa até 64 MiB —, e não o de um programa de
+/// verdade: os do Duke pedem umas poucas páginas.
+pub const MAX_PAGINAS_DA_IMAGEM: u64 = (protocolo::usuario::MAPEAVEL.0 - BASE) / TAMANHO_PAGINA;
+
 /// Qual entrada da tabela de topo pertence ao processo.
 ///
 /// Todo o espaço do usuário cabe nesta única entrada, e é ela que fica vazia
@@ -256,8 +274,9 @@ struct Conferida<'a> {
 /// A conferência pura de uma imagem — só os bytes e as constantes do mapa
 /// do processo, sem espaço de endereços e sem memória de página: o ELF
 /// ([`super::elf::validar`]), as faixas de página de cada segmento, que
-/// ficam no espaço do usuário, não se dividem nem invadem a pilha, e o
-/// manifesto, que se lê ou recusa a imagem.
+/// ficam no espaço do usuário, não se dividem nem invadem a pilha e, somadas,
+/// cabem no espaço do programa ([`MAX_PAGINAS_DA_IMAGEM`]), e o manifesto,
+/// que se lê ou recusa a imagem.
 fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
     let elf = super::elf::validar(imagem)?;
 
@@ -293,6 +312,18 @@ fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
             return Err("um segmento invade a pilha do processo");
         }
     }
+    // As páginas da imagem, somadas — o que a carga vai zerar e mapear: as
+    // faixas já não se dividem —, até o espaço do programa
+    // ([`MAX_PAGINAS_DA_IMAGEM`]). Somadas, e não por segmento: com o teto
+    // de cada um, quatro segmentos de 60 MiB passariam, e pediriam quase
+    // todo o espaço do usuário.
+    let paginas: u64 = faixas[..segmentos.len()]
+        .iter()
+        .map(|&(inicio, fim)| (fim - inicio) / TAMANHO_PAGINA)
+        .sum();
+    if paginas > MAX_PAGINAS_DA_IMAGEM {
+        return Err("os segmentos pedem paginas demais");
+    }
 
     // O manifesto que a imagem declara — lido aqui, onde recusar ainda
     // deixa o processo intacto. Um manifesto que não se lê recusa a imagem:
@@ -318,8 +349,9 @@ fn conferida(imagem: &[u8]) -> Result<Conferida<'_>, &'static str> {
 ///
 /// As duas portas a fazem antes do que pede memória. O lançamento
 /// (`usuario::lancar_por`), antes de o fio nascer: a imagem que não é um
-/// ELF deste processador, com entradas ou notas demais, com um segmento
-/// fora do lugar ou com o manifesto que não se lê é recusada a quem pediu, com o desfecho na auditoria, em
+/// ELF deste processador, com entradas, notas ou páginas demais, com um
+/// segmento fora do lugar ou com o manifesto que não se lê é recusada a
+/// quem pediu, com o desfecho na auditoria, em
 /// vez de nascer e morrer no fio novo com o erro só no log (o #467). E o
 /// `executar` (`usuario::executar`), antes do espaço novo: a imagem que não
 /// se confere ouve `PROGRAMA_DESCONHECIDO`, e só a memória que falta,

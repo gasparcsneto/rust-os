@@ -29,7 +29,10 @@
 //! lidas, somadas, no máximo [`ORCAMENTO_DAS_NOTAS`] bytes. A conferência
 //! roda no fio de quem lança — o do comando, que em produção é o executor
 //! que atende os comandos de todos — e no do processo que troca de imagem:
-//! uma imagem não escolhe quanto tempo ela prende um deles.
+//! uma imagem não escolhe quanto tempo a conferência prende um deles. A
+//! carga, que vem depois — no `exec`, dentro da chamada —, zera e mapeia o
+//! que os segmentos pedem, e isso a imagem escolhe, até o teto das páginas
+//! dela ([`super::programa::MAX_PAGINAS_DA_IMAGEM`], 64 MiB).
 
 use super::{BASE, TETO};
 

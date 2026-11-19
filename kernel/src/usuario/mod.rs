@@ -2004,8 +2004,8 @@ pub enum NaoLancou {
     /// motivo da leitura, `DENY_POLICY` com o da procedência.
     Codigo(codigo::Recusa),
     /// A imagem se leu e não se carrega: não é um ELF64 deste processador,
-    /// tem entradas ou notas demais, um segmento fora do lugar ou que
-    /// invade a pilha, o manifesto que não se lê
+    /// tem entradas, notas ou páginas demais, um segmento fora do lugar ou
+    /// que invade a pilha, o manifesto que não se lê
     /// ([`programa::conferir_a_imagem`]). Conferida antes de o fio
     /// nascer — antes, o fio nascia, o nascimento ia à auditoria como
     /// "processo N lancado", e o fio novo morria com o erro só no log (a
@@ -2346,7 +2346,8 @@ fn lancar_por(
     // A imagem, conferida antes de o fio nascer: o ELF — o cabeçalho, a
     // máquina, a tabela de segmentos e as notas, com teto, os segmentos,
     // `W^X` —, as páginas dos segmentos, que ficam no espaço do usuário,
-    // não se dividem nem invadem a pilha, e o manifesto. É a conta pura do
+    // não se dividem nem invadem a pilha e, somadas, cabem no espaço do
+    // programa, e o manifesto. É a conta pura do
     // primeiro passo da carga (`programa::conferir_a_imagem`), sobre os
     // mesmos bytes que o fio vai carregar: ninguém relê o arquivo. Antes, só
     // o fio novo a fazia, depois do nascimento — e a imagem que não é ELF,

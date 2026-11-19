@@ -1366,6 +1366,11 @@ pub const PAGINA: u64 = 4096;
 /// Os limites são largos dos dois lados de propósito: uma faixa que
 /// encostasse no programa ou na pilha faria um `mapear` legítimo depender
 /// do tamanho de um executável, ou de quanto a pilha cresceu.
+///
+/// Os 64 MiB do programa são um teto, e não só o mapa: o kernel recusa a
+/// imagem cujos segmentos carregáveis pedem, somados, mais páginas que eles
+/// (`MAX_PAGINAS_DA_IMAGEM`, no `usuario::programa` do kernel, desde o lote
+/// A6) — a carga zera e mapeia cada página que os segmentos pedem.
 pub const MAPEAVEL: (u64, u64) = (BASE + 0x0400_0000, TETO - 0x0100_0000);
 
 // O mapa acima só vale se as fatias não se sobrepõem, e é o compilador quem
