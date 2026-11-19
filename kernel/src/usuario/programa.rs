@@ -662,6 +662,16 @@ pub fn entrar_de_teste(programa: Programa) -> Result<core::convert::Infallible, 
     entrar(programa)
 }
 
+/// Só para a suíte: [`conferir_a_imagem`], que fora dela só o módulo
+/// `usuario` alcança — a conta pura, sem espaço de endereços e sem memória
+/// de página. O caso do teto das páginas da imagem confere por ela a imagem
+/// no teto, que pede 64 MiB — metade da máquina da bancada —, sem carregá-la.
+/// Não é um carregador, e não está nas guardas deles no `xtask`.
+#[cfg(feature = "modo-teste")]
+pub fn conferir_a_imagem_de_teste(imagem: &[u8]) -> Result<(), &'static str> {
+    conferir_a_imagem(imagem)
+}
+
 /// Desce para o anel sem privilégio num programa já carregado. Nunca
 /// retorna.
 ///

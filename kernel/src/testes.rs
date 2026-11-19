@@ -31228,15 +31228,26 @@ fn elf_aceita_a_imagem_de_exemplo() -> Resultado {
     Ok(())
 }
 
-/// Um ELF malformado vira erro, nunca pânico.
+/// Um ELF malformado vira erro, nunca pânico — e o erro diz o campo.
 ///
 /// # Por que a lista é longa
 ///
 /// Cada caso corresponde a um campo que o arquivo controla e que o kernel usa
-/// para decidir onde escrever ou quanto copiar. Um `e_phnum` grande demais faz
-/// o kernel percorrer uma tabela que não existe; um `p_vaddr` fora da faixa
-/// faz ele escrever onde não deve; uma soma que transborda transforma um
-/// segmento enorme num que *parece* pequeno.
+/// para decidir onde ler, onde escrever ou quanto copiar. Um `e_phoff` fora
+/// da imagem faz o kernel ler uma tabela que não existe; um `e_phnum` grande
+/// demais, percorrer uma tabela comprida — que o teto da tabela recusa antes
+/// do laço desde o lote A5 (`elf::MAX_ENTRADAS`) —; um `p_vaddr` fora da
+/// faixa faz ele escrever onde não deve; uma soma que transborda transforma
+/// um segmento enorme num que *parece* pequeno.
+///
+/// # O motivo, e não só a recusa
+///
+/// Cada avaria confere o motivo com que o leitor a recusa. Só a recusa não
+/// basta: a de `e_phnum` 4096, que chegava à tabela fora da imagem, passou a
+/// cair no teto da tabela no lote A5, e nada notou — nenhuma outra chegava
+/// mais a "tabela de segmentos fora da imagem" (a observação do revisor do
+/// lote A5). A tabela fora da imagem tem agora a avaria dela: o `e_phoff`
+/// no fim do arquivo, com as três entradas do exemplo.
 ///
 /// Hoje a imagem vem de dentro do próprio kernel e nenhum desses casos
 /// aconteceria por acaso. Mas o ponto de um carregador é aceitar programas de
@@ -31249,60 +31260,110 @@ fn elf_recusa_imagens_invalidas() -> Resultado {
         return Err("a imagem de exemplo deveria ser valida");
     }
 
-    /// Uma avaria a aplicar sobre uma cópia da imagem válida, e o motivo pelo
-    /// qual o leitor precisa recusá-la.
-    type Avaria<'a> = (&'a dyn Fn(&mut Vec<u8>), &'a str);
+    /// Uma avaria a aplicar sobre uma cópia da imagem válida, o que ela
+    /// estraga, e o motivo com que o leitor precisa recusá-la.
+    type Avaria<'a> = (&'a dyn Fn(&mut Vec<u8>), &'a str, &'a str);
 
     let casos: &[Avaria] = &[
-        (&|v: &mut Vec<u8>| v.truncate(8), "cabecalho truncado"),
-        (&|v: &mut Vec<u8>| v[1] = b'X', "assinatura errada"),
-        (&|v: &mut Vec<u8>| v[4] = 1, "classe 32 bits"),
-        (&|v: &mut Vec<u8>| v[16] = 3, "ET_DYN em vez de ET_EXEC"),
-        (&|v: &mut Vec<u8>| v[18] ^= 0xFF, "outra arquitetura"),
+        (
+            &|v: &mut Vec<u8>| v.truncate(8),
+            "cabecalho truncado",
+            "imagem menor que um cabecalho ELF",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[1] = b'X',
+            "assinatura errada",
+            "nao e um ELF64 little-endian",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[4] = 1,
+            "classe 32 bits",
+            "nao e um ELF64 little-endian",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[16] = 3,
+            "ET_DYN em vez de ET_EXEC",
+            "o ELF nao e um executavel de endereco fixo",
+        ),
+        (
+            &|v: &mut Vec<u8>| v[18] ^= 0xFF,
+            "outra arquitetura",
+            "o ELF e de outra arquitetura",
+        ),
         (
             &|v: &mut Vec<u8>| v[24..32].copy_from_slice(&0u64.to_le_bytes()),
             "entrada fora do espaco do usuario",
+            "o ponto de entrada esta fora do espaco do usuario",
         ),
         (
             &|v: &mut Vec<u8>| v[54..56].copy_from_slice(&32u16.to_le_bytes()),
             "p_entsize inesperado",
+            "tabela de segmentos com entradas de tamanho inesperado",
         ),
         (
             &|v: &mut Vec<u8>| v[56..58].copy_from_slice(&4096u16.to_le_bytes()),
-            "e_phnum maior que a imagem",
+            "e_phnum acima do teto da tabela",
+            "tabela de segmentos grande demais",
+        ),
+        (
+            &|v: &mut Vec<u8>| {
+                let fim = v.len() as u64;
+                v[32..40].copy_from_slice(&fim.to_le_bytes());
+            },
+            "e_phoff no fim da imagem",
+            "tabela de segmentos fora da imagem",
         ),
         (
             &|v: &mut Vec<u8>| v[56..58].copy_from_slice(&0u16.to_le_bytes()),
             "nenhum segmento carregavel",
+            "o ELF nao tem nenhum segmento carregavel",
         ),
         (
             &|v: &mut Vec<u8>| v[68..72].copy_from_slice(&7u32.to_le_bytes()),
             "segmento pedindo escrita e execucao",
+            "segmento pede escrita e execucao ao mesmo tempo",
         ),
         (
             &|v: &mut Vec<u8>| v[80..88].copy_from_slice(&0u64.to_le_bytes()),
             "p_vaddr fora do espaco do usuario",
+            "segmento quer morar fora do espaco do usuario",
         ),
         (
             &|v: &mut Vec<u8>| v[96..104].copy_from_slice(&u64::MAX.to_le_bytes()),
             "p_filesz que transborda",
+            "segmento com deslocamento que transborda",
         ),
         (
             &|v: &mut Vec<u8>| v[104..112].copy_from_slice(&0u64.to_le_bytes()),
             "p_memsz menor que p_filesz",
+            "segmento ocupa menos memoria do que traz do arquivo",
         ),
         (
             &|v: &mut Vec<u8>| v[72..80].copy_from_slice(&(1u64 << 40).to_le_bytes()),
             "p_offset alem do fim da imagem",
+            "segmento aponta para fora da imagem",
         ),
     ];
 
-    for (estragar, motivo) in casos {
+    for (estragar, avaria, motivo) in casos {
         let mut copia: Vec<u8> = valida.to_vec();
         estragar(&mut copia);
-        if crate::usuario::elf::validar(&copia).is_ok() {
-            crate::log_error!("teste", "aceitou um ELF com {}", motivo);
-            return Err("o leitor de ELF aceitou uma imagem invalida");
+        match crate::usuario::elf::validar(&copia) {
+            Ok(_) => {
+                crate::log_error!("teste", "aceitou um ELF com {}", avaria);
+                return Err("o leitor de ELF aceitou uma imagem invalida");
+            }
+            Err(visto) if visto != *motivo => {
+                crate::log_error!(
+                    "teste",
+                    "{}: recusou com `{}`, e nao com `{}`",
+                    avaria,
+                    visto,
+                    motivo
+                );
+                return Err("o leitor de ELF recusou uma imagem invalida pelo motivo errado");
+            }
+            Err(_) => {}
         }
     }
     Ok(())
@@ -43039,6 +43100,16 @@ static CASOS: &[Caso] = &[
     Caso {
         nome: "smp: o tique do x86 vem pela grade comum do TSC, e o disparo antes do prazo nao conta",
         f: smp_o_tique_do_x86_vem_pela_grade_comum_do_tsc,
+    },
+    // O lote A6: os dois juntos, no fim — nenhum caso de antes muda de
+    // parte.
+    Caso {
+        nome: "contencao: o orcamento das notas vem antes de le-las, e o teto invade a pilha",
+        f: nascimento::contencao_o_orcamento_vem_antes_e_o_teto_invade_a_pilha,
+    },
+    Caso {
+        nome: "contencao: a imagem de paginas demais nao se confere, e a do teto se confere",
+        f: nascimento::contencao_a_imagem_de_paginas_demais_nao_se_confere,
     },
 ];
 

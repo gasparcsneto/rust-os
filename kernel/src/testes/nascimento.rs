@@ -77,6 +77,14 @@
 //! `ola` no teto, que lança —; e o segmento vazio com o destino no teto do
 //! espaço do usuário, que ganhava a página de cima dele, recusado — e o
 //! mesmo segmento vazio dentro do espaço, que lança.
+//!
+//! E os do lote A6 — achados do adversário e do revisor do lote A5 —, no
+//! fim do arquivo: o motivo de duas recusas que os do lote A5 não fixavam —
+//! as notas acima do orçamento, recusadas antes de o achador ler o
+//! segmento, e o segmento que acaba no teto, que invade a pilha —; e a
+//! imagem cujos segmentos pedem, somados, mais páginas que o espaço do
+//! programa, recusada pela conta pura, sem carregar — e a do teto, que se
+//! confere.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
@@ -3784,4 +3792,178 @@ pub(super) fn contencao_o_segmento_vazio_no_teto_nao_ganha_a_pagina_de_cima() ->
         .map_err(|_| "as vagas do caso do segmento vazio no teto nao voltaram");
     crate::pessoas::esquecer_registradas();
     resultado.and(vagas)
+}
+
+// ---------------------------------------------------------------------------
+// O lote A6: o motivo de duas recusas da conferencia da imagem que os casos
+// do lote A5 nao fixavam, e o teto das paginas da imagem
+// ---------------------------------------------------------------------------
+
+/// O lote A6, nos motivos que os casos do lote A5 nao fixavam (o I2 do
+/// adversario do lote A5, e a observacao do revisor dele sobre a mutacao
+/// PG3), a partir do caso que o adversario propos:
+///
+/// - o orcamento das notas vem antes de ler cada `PT_NOTE`: o `ola` com um
+///   `PT_NOTE` a mais, quatro bytes acima do orcamento, cuja nota diz ter o
+///   dobro do segmento de conteudo, ouve "segmentos de notas grandes
+///   demais", e nao o erro do achador, "nota passa do fim do segmento", que
+///   so sairia se o segmento fosse lido antes. Com o orcamento depois da
+///   leitura (a mutacao EL6), um `PT_NOTE` de um MiB de notas de 12 bytes
+///   custava 87 382 voltas do achador antes da recusa, contra no maximo
+///   341, e o caso do lote A5 passava igual;
+/// - o segmento que acaba no `TETO` invade a pilha: o `ola` com um
+///   `PT_LOAD` em `[TETO - 4 KiB, TETO)`, pelo `user.run`, nao lanca e
+///   ouve "um segmento invade a pilha do processo" — na resposta e no
+///   desfecho na auditoria, sem nascimento (`nao_carrega`). Com o limite de
+///   cima da faixa com `>=` (a PG3), o motivo vira "um segmento quer
+///   paginas fora do espaco do usuario", e o caso do lote A5 passava igual.
+pub(super) fn contencao_o_orcamento_vem_antes_e_o_teto_invade_a_pilha() -> Resultado {
+    use crate::usuario::elf::{ORCAMENTO_DAS_NOTAS, validar};
+    const NOTAS_DEMAIS: &str = "segmentos de notas grandes demais";
+    const PILHA: &str = "um segmento invade a pilha do processo";
+    const PT_NOTE: u32 = protocolo::usuario::manifesto::SEGMENTO_DE_NOTAS;
+    crate::pessoas::esquecer_registradas();
+    let livres = crate::fios::vagas_livres_de_teste();
+    let ola = super::ola_da_imagem()?;
+    let originais = entradas_de(&ola)?;
+    // As notas do `ola`: o que os `PT_NOTE` dele leem.
+    let do_ola: usize = originais
+        .iter()
+        .filter(|e| e[0..4] == PT_NOTE.to_le_bytes())
+        .map(|e| {
+            let mut tamanho = [0u8; 8];
+            tamanho.copy_from_slice(&e[32..40]);
+            u64::from_le_bytes(tamanho) as usize
+        })
+        .sum();
+    // Um `PT_NOTE` a mais, quatro bytes acima do orcamento, logo depois da
+    // tabela, cuja nota diz ter o dobro do segmento de conteudo: o achador a
+    // recusaria com "nota passa do fim do segmento".
+    let extra = ORCAMENTO_DAS_NOTAS - do_ola + 4;
+    let mut nota = alloc::vec::Vec::with_capacity(extra);
+    nota.extend_from_slice(&4u32.to_le_bytes());
+    nota.extend_from_slice(&((2 * extra) as u32).to_le_bytes());
+    nota.extend_from_slice(&3u32.to_le_bytes());
+    nota.extend_from_slice(b"GNU\0");
+    nota.resize(extra, 0);
+    let mut com_a_nota = originais.clone();
+    let onde = onde_vai_a_tabela(&ola) + 56 * (com_a_nota.len() + 1);
+    com_a_nota.push(entrada_de_segmento(
+        PT_NOTE,
+        4,
+        onde as u64,
+        0,
+        extra as u64,
+        extra as u64,
+    ));
+    let visto = validar(&com_a_tabela(&ola, &com_a_nota, &nota)).err();
+    if visto != Some(NOTAS_DEMAIS) {
+        crate::log_error!("teste", "a nota acima do orcamento: {:?}", visto);
+        return Err("o orcamento das notas nao vem antes de ler o segmento");
+    }
+
+    // O segmento que acaba no `TETO`, pelo `user.run`.
+    let resultado = super::com_editores_do_caso(|| {
+        let selado = |bytes: &[u8]| sigilo::codigo::selar(bytes, &super::EDITOR_DO_CASO.0);
+        let quem = operador_que_lanca(189, "a6-pilha-no-teto");
+        let mut no_fim = originais.clone();
+        no_fim.push(entrada_de_segmento(
+            1,
+            4,
+            0,
+            crate::usuario::TETO - 4096,
+            0,
+            4096,
+        ));
+        let caminho = alloc::format!("{}/ola-que-acaba-no-teto", super::CODIGO_INSTALADO);
+        super::gravar_codigo(&caminho, &selado(&com_a_tabela(&ola, &no_fim, &[])))?;
+        nao_carrega(quem, &caminho, PILHA)
+    });
+    let vagas = esperar_ate(|| crate::fios::vagas_livres_de_teste() >= livres, 600)
+        .map_err(|_| "as vagas do caso do orcamento e da pilha nao voltaram");
+    crate::pessoas::esquecer_registradas();
+    resultado.and(vagas)
+}
+
+/// O lote A6, no teto das paginas da imagem (o achado B4 do adversario do
+/// lote A5): a conferencia tinha teto, e a carga nao — o terceiro passo
+/// zera e mapeia o que os segmentos pedem, no `exec` dentro da chamada, com
+/// as interrupcoes mascaradas, e um `.bss` de quase todo o espaco do
+/// usuario, num arquivo de uma pagina, passava. A soma das paginas dos
+/// segmentos fica no espaco que o mapa do usuario da ao programa
+/// (`programa::MAX_PAGINAS_DA_IMAGEM`, 64 MiB). Pela conta pura
+/// (`programa::conferir_a_imagem_de_teste`), sem carregar nada — a imagem
+/// no teto pede metade da maquina da bancada: o `ola` com um `PT_LOAD`
+/// vazio a mais, que leva a soma ao teto, se confere; com uma pagina a
+/// mais, nao; dois segmentos que cabem, cada um, e passam juntos, nao — o
+/// teto e da soma —; e o `.bss` ate a guarda da pilha, nao. Antes do lote
+/// A6, as tres passavam.
+pub(super) fn contencao_a_imagem_de_paginas_demais_nao_se_confere() -> Resultado {
+    use crate::usuario::programa::{MAX_PAGINAS_DA_IMAGEM, conferir_a_imagem_de_teste};
+    const DEMAIS: &str = "os segmentos pedem paginas demais";
+    const PAGINA: u64 = 4096;
+    let ola = super::ola_da_imagem()?;
+    let originais = entradas_de(&ola)?;
+    // As paginas dos segmentos carregaveis do `ola`, como a conferencia as
+    // conta — da pagina do destino a que cobre o fim, pelo menos uma —, e
+    // onde elas acabam.
+    let campo = |e: &[u8; 56], de: usize| {
+        let mut v = [0u8; 8];
+        v.copy_from_slice(&e[de..de + 8]);
+        u64::from_le_bytes(v)
+    };
+    let mut do_ola = 0u64;
+    let mut fim_do_ola = 0u64;
+    for e in originais.iter().filter(|e| e[0..4] == 1u32.to_le_bytes()) {
+        let (destino, na_memoria) = (campo(e, 16), campo(e, 40));
+        let primeira = destino & !(PAGINA - 1);
+        let ultima = (destino + na_memoria).div_ceil(PAGINA) * PAGINA;
+        do_ola += (ultima.max(primeira + PAGINA) - primeira) / PAGINA;
+        fim_do_ola = fim_do_ola.max(ultima);
+    }
+    // Os segmentos a mais, so de leitura e vazios no arquivo, um depois do
+    // outro, a partir de 16 MiB do comeco: longe do `ola`.
+    let longe = crate::usuario::BASE + 0x0100_0000;
+    if fim_do_ola > longe {
+        return Err("o ola do caso passa de 16 MiB do comeco do espaco do usuario");
+    }
+    let com = |segmentos: &[u64]| {
+        let mut entradas = originais.clone();
+        let mut destino = longe;
+        for &paginas in segmentos {
+            entradas.push(entrada_de_segmento(1, 4, 0, destino, 0, paginas * PAGINA));
+            destino += paginas * PAGINA;
+        }
+        com_a_tabela(&ola, &entradas, &[])
+    };
+    let falta = MAX_PAGINAS_DA_IMAGEM - do_ola;
+    let metade = MAX_PAGINAS_DA_IMAGEM / 2 + 1;
+    let ate_a_guarda =
+        (crate::usuario::TETO - (protocolo::usuario::PAGINAS_DA_PILHA + 1) * PAGINA - longe)
+            / PAGINA;
+    for (nome, bytes, esperado) in [
+        ("o ola no teto das paginas", com(&[falta]), None),
+        (
+            "o ola com uma pagina a mais",
+            com(&[falta + 1]),
+            Some(DEMAIS),
+        ),
+        (
+            "dois segmentos que passam juntos",
+            com(&[metade, metade]),
+            Some(DEMAIS),
+        ),
+        (
+            "o .bss ate a guarda da pilha",
+            com(&[ate_a_guarda]),
+            Some(DEMAIS),
+        ),
+    ] {
+        let visto = conferir_a_imagem_de_teste(&bytes).err();
+        if visto != esperado {
+            crate::log_error!("teste", "{}: {:?}, e nao {:?}", nome, visto, esperado);
+            return Err("a conferencia da imagem nao tem o teto das paginas");
+        }
+    }
+    Ok(())
 }
