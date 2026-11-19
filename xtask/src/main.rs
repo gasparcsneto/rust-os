@@ -6580,6 +6580,130 @@ fn conferir_os_carregadores(raiz: &Path) -> Result<Vec<String>, String> {
     Ok(fora)
 }
 
+/// O arquivo do lançamento: onde o fio novo de um lançamento mora — ver
+/// [`ITENS_DO_FIO_NOVO`].
+const ARQUIVO_DO_LANCAMENTO: &str = "kernel/src/usuario/mod.rs";
+
+/// O fio novo de um lançamento — a carga que ele recebe, a entrada dele e
+/// a carga desfeita —, pela palavra que o declara e o nome: itens de dentro
+/// de `lancar_por`, no [`ARQUIVO_DO_LANCAMENTO`], e não do módulo.
+///
+/// # Por quê
+///
+/// Do módulo, os três ficavam ao alcance de todo filho do `usuario` —
+/// `super::hospedar`, de `elf.rs` ou de um submódulo novo —, e nenhum é
+/// palavra de carregador ([`carregadores_nos_irmaos`]): um irmão com uma
+/// `Carga` dele entraria num programa sem o gate, sem a conferência do
+/// código, sem a última palavra, sem o trinco e sem o nascimento na
+/// auditoria. O lote A4 os tinha tirado de dentro, e nada notou (o achado
+/// A2 do adversário dele). Dentro, quem confere o alcance é o compilador;
+/// aqui, que eles continuam lá ([`fio_novo_fora_do_lancamento`]).
+const ITENS_DO_FIO_NOVO: &[(&str, &str)] = &[
+    ("struct", "Carga"),
+    ("fn", "hospedar"),
+    ("fn", "carregar_a_carga"),
+];
+
+/// O que `fonte` — o [`ARQUIVO_DO_LANCAMENTO`] — tem do fio novo fora de
+/// `lancar_por` ([`ITENS_DO_FIO_NOVO`]), no código ([`so_o_codigo`]): o item
+/// declarado fora do corpo dele, na linha da declaração; e o item — ou o
+/// `fn lancar_por` — declarado mais de uma vez, ou nenhuma: a conferência
+/// cega.
+fn fio_novo_fora_do_lancamento(fonte: &str) -> Vec<String> {
+    let c = so_o_codigo(fonte);
+    let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+    let corpo = match onde_se_declara(&c, "fn", "lancar_por")[..] {
+        [i] => corpo_do_item(&c, i),
+        ref outras => {
+            return vec![format!(
+                "{ARQUIVO_DO_LANCAMENTO}: `fn lancar_por` declarado {} vezes, e não uma: a \
+                 conferência do fio novo está cega",
+                outras.len()
+            )];
+        }
+    };
+    let mut fora = Vec::new();
+    for (palavra, nome) in ITENS_DO_FIO_NOVO {
+        match onde_se_declara(&c, palavra, nome)[..] {
+            [i] if corpo.contains(&i) => {}
+            [i] => fora.push(format!(
+                "{ARQUIVO_DO_LANCAMENTO}:{}: `{palavra} {nome}` fora de `lancar_por`: o fio novo \
+                 de um lançamento só se alcança de dentro dele",
+                linha_de(i)
+            )),
+            ref outras => fora.push(format!(
+                "{ARQUIVO_DO_LANCAMENTO}: `{palavra} {nome}` declarado {} vezes, e não uma: a \
+                 conferência do fio novo está cega",
+                outras.len()
+            )),
+        }
+    }
+    fora
+}
+
+/// Onde `palavra nome` se declara em `c` — uma fonte só com o código
+/// ([`so_o_codigo`]) —: a palavra (`fn`, `struct`), inteira, os espaços e o
+/// nome, inteiro, também cru (`r#`). A posição da palavra.
+fn onde_se_declara(c: &[char], palavra: &str, nome: &str) -> Vec<usize> {
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let p: Vec<char> = palavra.chars().collect();
+    let n: Vec<char> = nome.chars().collect();
+    let mut achadas = Vec::new();
+    for i in 0..c.len() {
+        let e_a_palavra = c[i..].starts_with(&p[..])
+            && (i == 0 || !de_nome(c[i - 1]))
+            && !c.get(i + p.len()).is_some_and(|&x| de_nome(x));
+        if !e_a_palavra {
+            continue;
+        }
+        let mut k = i + p.len();
+        while c.get(k).is_some_and(|x| x.is_whitespace()) {
+            k += 1;
+        }
+        if c[k.min(c.len())..].starts_with(&['r', '#']) {
+            k += 2;
+        }
+        if c.get(k..k + n.len()) == Some(&n[..]) && !c.get(k + n.len()).is_some_and(|&x| de_nome(x))
+        {
+            achadas.push(i);
+        }
+    }
+    achadas
+}
+
+/// O corpo do item que começa em `i`, em `c` — uma fonte só com o código
+/// ([`so_o_codigo`]) —: da primeira chave depois de `i` à que a fecha, as
+/// duas inclusive. Sem chave, vazio no fim da fonte; sem a que fecha, até o
+/// fim.
+fn corpo_do_item(c: &[char], i: usize) -> std::ops::Range<usize> {
+    let Some(abre) = (i..c.len()).find(|&k| c[k] == '{') else {
+        return c.len()..c.len();
+    };
+    let mut nivel = 0usize;
+    for (j, &x) in c.iter().enumerate().skip(abre) {
+        match x {
+            '{' => nivel += 1,
+            '}' => {
+                nivel -= 1;
+                if nivel == 0 {
+                    return abre..j + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    abre..c.len()
+}
+
+/// [`fio_novo_fora_do_lancamento`] no [`ARQUIVO_DO_LANCAMENTO`], lido pelo
+/// caminho: o arquivo que suma reprova, em vez de deixar a conferência
+/// cega.
+fn conferir_o_fio_novo_do_lancamento(raiz: &Path) -> Result<Vec<String>, String> {
+    let texto = std::fs::read_to_string(raiz.join(ARQUIVO_DO_LANCAMENTO))
+        .map_err(|e| format!("não foi possível ler {ARQUIVO_DO_LANCAMENTO}: {e}"))?;
+    Ok(fio_novo_fora_do_lancamento(&texto))
+}
+
 /// A abertura da persistência antes de quem atende, e o trinco do boot, uma
 /// vez, depois dos dois lançamentos ([`trinco_fora_de_ordem`]): devolve o
 /// que estiver fora de ordem no `kernel/src/main.rs`.
@@ -6731,9 +6855,23 @@ fn trinco_fora_de_ordem(texto: &str) -> Vec<String> {
 /// [`CHAMADAS_PROTEGIDAS`] procura a chamada com o caminho, e por texto
 /// aquilo se contorna (o achado 8 do adversário do passo 1); aqui, o nome
 /// em qualquer forma. Só nomes que não se repetem noutro módulo: o dono
-/// inclui o que os define. Nenhum deles ganha outro nome, nem no dono
-/// ([`onde_um_nome_protegido_se_renomeia`]), e cada linha conta crua e só
-/// com o código ([`nomes_protegidos_fora`]).
+/// inclui o que os define. Nenhum deles ganha outro nome, nem no dono —
+/// pelo `as` ([`onde_um_nome_protegido_se_renomeia`]), por um `type` que o
+/// nomeie, ou, sendo de função, pelo nome guardado como valor, sem a
+/// chamada ([`onde_um_nome_protegido_se_esconde`], desde o lote A5) —, e
+/// cada linha conta crua e só com o código ([`nomes_protegidos_fora`]). Os
+/// nomes de função começam com minúscula, e os de tipo, com maiúscula.
+///
+/// # O que a palavra não vê
+///
+/// O embrulho: um item do dono que não é protegido e leva o protegido — um
+/// tipo com ele num campo, um `const` ou um `static` com um valor dele, uma
+/// função que o devolve ou o chama, um fecho, uma macro. Fora do dono, quem
+/// usa o embrulho não nomeia nada protegido, e nenhuma regra por texto o
+/// acusaria sem acusar também o uso legítimo do dono. Quem o fecha é o
+/// próprio dono — revisado — e, onde dá, o compilador: a `Carga` do
+/// lançamento, que leva o desfecho, é um item de dentro de `lancar_por`
+/// ([`ITENS_DO_FIO_NOVO`]).
 const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
     // Quem atende a fila dos pedidos dos processos: só a tarefa `programas`,
     // no executor, pelo `nativo::servir()` — o laço de `servir_com` com o
@@ -7121,6 +7259,12 @@ fn nomes_protegidos_fora(relativo: &str, texto: &str) -> (Vec<String>, Vec<usize
             "{relativo}:{linha}: `{nome} as`: um nome protegido não ganha outro nome, nem no dono"
         ));
     }
+    for (linha, nome, forma) in onde_um_nome_protegido_se_esconde(texto) {
+        fora.push(format!(
+            "{relativo}:{linha}: `{nome}` {forma}: um nome protegido não ganha outro nome sem o \
+             `as`, nem no dono"
+        ));
+    }
     for linha in onde_um_use_se_monta(texto) {
         fora.push(format!(
             "{relativo}:{linha}: um `use` montado por uma macro: o nome que vem de uma \
@@ -7148,6 +7292,99 @@ fn nomes_protegidos_fora(relativo: &str, texto: &str) -> (Vec<String>, Vec<usize
 /// #448).
 fn onde_um_nome_protegido_se_renomeia(fonte: &str) -> Vec<(usize, &'static str)> {
     onde_se_renomeia(fonte, NOMES_PROTEGIDOS.iter().map(|(nome, _)| *nome))
+}
+
+/// Onde um nome de [`NOMES_PROTEGIDOS`] ganha outro nome sem o `as`, em
+/// `fonte` — no código ([`so_o_codigo`]) —, de um de dois jeitos. A linha do
+/// nome, contada do 1, o nome e a forma.
+///
+/// - **Num `type`**: o nome, como palavra inteira, em qualquer lugar de um
+///   `type … ;` — o apelido de tipo, também o associado de um `impl`.
+/// - **A função como valor**: um nome de função — os que começam com
+///   minúscula; os de maiúscula são de tipo — sem a chamada: sem o `(` logo
+///   depois dele, com só espaços no meio. Num `const`, num `static`, num
+///   argumento, numa atribuição, no fim de um bloco. Não contam a
+///   declaração — o `fn` logo antes do nome —, nem a importação: um `use`
+///   só de caminho até o `;` que o fecha — nomes, `::`, chaves, vírgulas e
+///   o `*` —, que traz o nome sem dar outro (o `as` tem a regra dele). O
+///   turbofish, `nome::<T>(…)`, que nenhum deles usa, também se acusa: o
+///   lado seguro.
+///
+/// # Por quê, em qualquer arquivo
+///
+/// Fora do dono, o nome já se acusa pela palavra
+/// ([`nomes_protegidos_fora`]). No dono a palavra é livre, e o `as` não era
+/// o único jeito de dar outro nome: `pub type Desfecho =
+/// crate::autorizacao::DesfechoDoLancamento;` e `pub const NOVO: fn(&str)
+/// -> Desfecho = crate::autorizacao::desfecho_do_lancamento;`, no
+/// `usuario/mod.rs`, deixavam o tipo e a função livres nos outros arquivos,
+/// alcançados pelo apelido sem nenhuma palavra protegida (o achado A4 do
+/// adversário do lote A4). Nenhum dono faz isso: cada nome de função
+/// protegido aparece no código só declarado ou chamado, e nenhum `type`
+/// nomeia um nome protegido.
+fn onde_um_nome_protegido_se_esconde(fonte: &str) -> Vec<(usize, &'static str, &'static str)> {
+    let c = so_o_codigo(fonte);
+    let de_nome = |x: char| x.is_alphanumeric() || x == '_';
+    let palavra = |i: usize, p: &[char]| {
+        c.get(i..i + p.len()) == Some(p)
+            && (i == 0 || !de_nome(c[i - 1]))
+            && !c.get(i + p.len()).is_some_and(|&x| de_nome(x))
+    };
+    let linha_de = |i: usize| 1 + c[..i].iter().filter(|&&x| x == '\n').count();
+    // Os `type … ;`, e os `use … ;` só de caminho.
+    let mut apelidos = Vec::new();
+    let mut importacoes = Vec::new();
+    for i in 0..c.len() {
+        let e_type = palavra(i, &['t', 'y', 'p', 'e']);
+        if !e_type && !palavra(i, &['u', 's', 'e']) {
+            continue;
+        }
+        let fim = (i..c.len()).find(|&k| c[k] == ';').unwrap_or(c.len());
+        if e_type {
+            apelidos.push(i..fim);
+        } else if c[i + 3..fim]
+            .iter()
+            .all(|&x| de_nome(x) || x.is_whitespace() || matches!(x, ':' | '{' | '}' | ',' | '*'))
+        {
+            importacoes.push(i..fim);
+        }
+    }
+    let mut achados = Vec::new();
+    for (nome, _) in NOMES_PROTEGIDOS {
+        let n: Vec<char> = nome.chars().collect();
+        let de_funcao = nome.starts_with(char::is_lowercase);
+        for i in 0..c.len() {
+            if !palavra(i, &n[..]) {
+                continue;
+            }
+            if apelidos.iter().any(|a| a.contains(&i)) {
+                achados.push((linha_de(i), *nome, "num `type`"));
+                continue;
+            }
+            if !de_funcao || importacoes.iter().any(|u| u.contains(&i)) {
+                continue;
+            }
+            let mut depois = i + n.len();
+            while c.get(depois).is_some_and(|x| x.is_whitespace()) {
+                depois += 1;
+            }
+            // A declaração: o `fn` antes do nome — também do cru, `r#`.
+            let mut antes = i;
+            if antes >= 2 && c[antes - 2..antes] == ['r', '#'] {
+                antes -= 2;
+            }
+            while antes > 0 && c[antes - 1].is_whitespace() {
+                antes -= 1;
+            }
+            let declarado = antes >= 2 && palavra(antes - 2, &['f', 'n']);
+            if c.get(depois) != Some(&'(') && !declarado {
+                achados.push((linha_de(i), *nome, "sem a chamada, como valor"));
+            }
+        }
+    }
+    achados.sort_unstable();
+    achados.dedup();
+    achados
 }
 
 /// Onde um dos `nomes` ganha outro nome em `fonte` — a regra de
@@ -7606,6 +7843,179 @@ mod testes_dos_nomes_protegidos {
         );
     }
 
+    /// Nenhum nome protegido ganha outro nome sem o `as`, nem no dono (o
+    /// achado A4 do adversário do lote A4): o `type` que o nomeia — também
+    /// partido em linhas, e o associado de um `impl` — e o nome de função
+    /// guardado como valor, sem a chamada — num `const`, num `static`
+    /// partido em linhas, num argumento, numa atribuição, no fim de um
+    /// bloco, com `self::`, no turbofish, e depois do `use<…>` de uma
+    /// captura precisa, que não é importação —, cada um na linha do nome. O
+    /// que passa: a chamada — também com o parêntese na linha seguinte, e
+    /// a do identificador cru —, a declaração — também a genérica —, o
+    /// método, o `use` só de caminho, o tipo fora de um `type` e o `type`
+    /// sem nome protegido. E o outro arquivo, que alcança o apelido do dono
+    /// sem nenhuma palavra, não se acusa: quem o fecha é o dono.
+    #[test]
+    fn o_nome_protegido_nao_ganha_outro_nome_sem_as() {
+        let usuario = "kernel/src/usuario/mod.rs";
+        let autorizacao = "kernel/src/autorizacao.rs";
+        // A prova do adversário, no dono.
+        let prova = "pub type Desfecho = crate::autorizacao::DesfechoDoLancamento;\n\
+                     pub const NOVO: fn(&str) -> Desfecho = crate::autorizacao::desfecho_do_lancamento;\n";
+        assert_eq!(acusadas(usuario, prova), [1, 2]);
+        assert_eq!(
+            super::onde_um_nome_protegido_se_esconde(prova),
+            [
+                (1, "DesfechoDoLancamento", "num `type`"),
+                (2, "desfecho_do_lancamento", "sem a chamada, como valor"),
+            ]
+        );
+        let casos: &[(&str, &str, &[usize])] = &[
+            (
+                usuario,
+                "static S: fn(Option<&str>) -> R =\n    lancar_como_sistema;\n",
+                &[2],
+            ),
+            (
+                usuario,
+                "fn f() {\n    let _ = crate::fios::criar(\"x\", lancar_pelo_kernel, 0);\n}\n",
+                &[2],
+            ),
+            (
+                usuario,
+                "fn f() -> u8 {\n    let g = lancar_como;\n    let h = { lancar_conferido };\n    0\n}\n",
+                &[2, 3],
+            ),
+            (
+                autorizacao,
+                "const T: (fn(), u8) = (self::fechar_os_lancamentos_do_kernel, 1);\n",
+                &[1],
+            ),
+            (usuario, "fn f() {\n    lancar_como::<u8>(None);\n}\n", &[2]),
+            (usuario, "let _ = lancar_como_sistema\n    assim;\n", &[1]),
+            // O `use<…>` da captura precisa não é uma importação: o nome
+            // depois dele, no corpo, é um valor.
+            (
+                usuario,
+                "fn f() -> impl Fn() + use<> {\n    lancar_como_sistema\n}\n",
+                &[2],
+            ),
+            (autorizacao, "pub type\n    L =\n    Lancador;\n", &[3]),
+            (
+                autorizacao,
+                "impl X for Y {\n    type Saida = DesfechoDoLancamento;\n}\n",
+                &[2],
+            ),
+        ];
+        for (arquivo, fonte, esperadas) in casos {
+            assert_eq!(
+                &acusadas(arquivo, fonte)[..],
+                *esperadas,
+                "{arquivo}:\n{fonte}"
+            );
+        }
+        for (arquivo, fonte) in [
+            (usuario, "pub fn lancar_como_sistema(c: Option<&str>) {}\n"),
+            (usuario, "fn lancar_como<T>(c: T) {}\n"),
+            (usuario, "let _ = lancar_como_sistema\n    (None);\n"),
+            (usuario, "let _ = r#lancar_como_sistema(None);\n"),
+            (
+                usuario,
+                "use crate::autorizacao::{desfecho_do_lancamento, Lancador};\n",
+            ),
+            (usuario, "pub use self::lancar_pelo_kernel;\n"),
+            (usuario, "fn f(d: &DesfechoDoLancamento, l: Lancador) {}\n"),
+            (usuario, "type Recusa = (Codigo, String);\n"),
+            ("kernel/src/interpretador.rs", "x.seguida_de(y);\n"),
+        ] {
+            assert_eq!(
+                acusadas(arquivo, fonte),
+                Vec::<usize>::new(),
+                "{arquivo}:\n{fonte}"
+            );
+        }
+        // O outro arquivo, pelo apelido do dono: nenhuma palavra protegida.
+        assert!(
+            acusadas(
+                "kernel/src/agent/commands.rs",
+                "let d = crate::usuario::NOVO(\"/x\");\nd.gravar(c, \"x\");\n"
+            )
+            .is_empty()
+        );
+        // Os nomes de tipo são os que começam com maiúscula: os outros são
+        // de função, e a regra do valor vale para eles.
+        let tipos: Vec<&str> = NOMES_PROTEGIDOS
+            .iter()
+            .map(|(nome, _)| *nome)
+            .filter(|nome| nome.starts_with(char::is_uppercase))
+            .collect();
+        assert_eq!(tipos, ["Lancador", "DesfechoDoLancamento"]);
+    }
+
+    /// O fio novo de um lançamento — a `Carga`, o `hospedar` e o
+    /// `carregar_a_carga` — mora dentro de `lancar_por` (o achado A2 do
+    /// adversário do lote A4): fora dele, cada um reprova na linha da
+    /// declaração; declarado duas vezes, ou o `lancar_por` sumido, a
+    /// conferência cega reprova; num comentário ou num texto, não conta. E o
+    /// `usuario/mod.rs` de verdade passa.
+    #[test]
+    fn o_fio_novo_do_lancamento_mora_dentro_dele() {
+        let carga = "struct Carga {\n    x: u64,\n}\n";
+        let hospedar = "extern \"C\" fn hospedar(p: u64) -> ! {\n    loop {}\n}\n";
+        let carregar = "fn carregar_a_carga(p: u64) -> u64 {\n    p\n}\n";
+        let dentro = |itens: &[&str]| -> String {
+            let corpo: String = itens
+                .iter()
+                .flat_map(|item| item.lines())
+                .map(|linha| format!("    {linha}\n"))
+                .collect();
+            format!("fn lancar_por(a: u64) -> Result<u64, X> {{\n{corpo}    Ok(a)\n}}\n")
+        };
+        let bom = format!("fn antes() {{}}\n{}", dentro(&[carga, hospedar, carregar]));
+        assert_eq!(
+            super::fio_novo_fora_do_lancamento(&bom),
+            Vec::<String>::new()
+        );
+        for (fora_dele, resto, declaracao) in [
+            (carga, [hospedar, carregar], "struct Carga"),
+            (hospedar, [carga, carregar], "fn hospedar"),
+            (carregar, [carga, hospedar], "fn carregar_a_carga"),
+        ] {
+            let fonte = format!("{fora_dele}{}", dentro(&resto));
+            let achados = super::fio_novo_fora_do_lancamento(&fonte);
+            assert!(
+                achados.len() == 1
+                    && achados[0].starts_with("kernel/src/usuario/mod.rs:1:")
+                    && achados[0].contains(&format!("`{declaracao}` fora de `lancar_por`")),
+                "{fonte}: {achados:?}"
+            );
+        }
+        let duas = format!("{carregar}{bom}");
+        let achados = super::fio_novo_fora_do_lancamento(&duas);
+        assert!(
+            achados.len() == 1 && achados[0].contains("`fn carregar_a_carga` declarado 2 vezes"),
+            "{achados:?}"
+        );
+        let sem = bom.replace("fn lancar_por(", "fn lancar(");
+        let achados = super::fio_novo_fora_do_lancamento(&sem);
+        assert!(
+            achados.len() == 1 && achados[0].contains("`fn lancar_por` declarado 0 vezes"),
+            "{achados:?}"
+        );
+        let citado = format!("// fn hospedar\nconst S: &str = \"struct Carga\";\n{bom}");
+        assert_eq!(
+            super::fio_novo_fora_do_lancamento(&citado),
+            Vec::<String>::new()
+        );
+        let real =
+            std::fs::read_to_string(super::raiz_do_projeto().join(super::ARQUIVO_DO_LANCAMENTO))
+                .unwrap();
+        assert_eq!(
+            super::fio_novo_fora_do_lancamento(&real),
+            Vec::<String>::new()
+        );
+    }
+
     /// As formas que a conferência por texto da chamada com o caminho não
     /// via (o achado 8 do adversário do passo 1), e as que não são o nome.
     #[test]
@@ -7761,7 +8171,10 @@ mod testes_dos_nomes_protegidos {
     /// O que não é o nome, ou não é renomeá-lo, não se acusa: o dono que
     /// chama, a documentação, outro nome que começa igual, o `as` de um
     /// molde com o nome num comentário, o nome com `as` num texto do dono, e
-    /// o nome seguido de outra palavra que começa com `as`.
+    /// o nome seguido de outra palavra que começa com `as` — o de um tipo; o
+    /// de uma função, sem a chamada, se acusa desde o lote A5, mas como
+    /// valor, e não pelo `as` (ver
+    /// `o_nome_protegido_nao_ganha_outro_nome_sem_as`).
     #[test]
     fn o_que_nao_e_o_nome_nao_se_acusa() {
         let usuario = "kernel/src/usuario/mod.rs";
@@ -7781,7 +8194,7 @@ mod testes_dos_nomes_protegidos {
                 "let x = y as u64; // lancar_como_sistema as abrir\n",
             ),
             (usuario, "let s = \"lancar_como_sistema as abrir\";\n"),
-            (usuario, "let _ = lancar_como_sistema\n    assim;\n"),
+            (usuario, "let _: Lancador\n    assim;\n"),
             (usuario, "let _ = lancar_como_sistema\n    (None); // as\n"),
         ] {
             assert_eq!(
@@ -7790,6 +8203,10 @@ mod testes_dos_nomes_protegidos {
                 "{arquivo}:\n{fonte}"
             );
         }
+        assert!(
+            onde_um_nome_protegido_se_renomeia("let _ = lancar_como_sistema\n    assim;\n")
+                .is_empty()
+        );
     }
 
     /// Os carregadores não se alargam: `pub`, `pub(crate)` e
@@ -8133,13 +8550,15 @@ mod testes_dos_nomes_protegidos {
     /// aceita em arquivo nenhum, dono ou não: o nome que vem dela não
     /// aparece no `use`, e o `as` não vem logo depois dele (o achado 4 do
     /// adversário do lote A3 do #448). Partido em linhas e com a repetição
-    /// também; o `$crate`, a macro sem `use` e o `$` num comentário, não.
+    /// também; o `$crate`, a macro sem `use` e o `$` num comentário, não. E,
+    /// desde o lote A5, também a invocação, que passa o nome de função sem
+    /// chamá-lo (`onde_um_nome_protegido_se_esconde`).
     #[test]
     fn o_apelido_por_macro_no_dono() {
         let usuario = "kernel/src/usuario/mod.rs";
         let barra = "kernel/src/barra.rs";
         let prova = "macro_rules! apelido {\n    ($n:ident) => {\n        pub use self::$n as abrir;\n    };\n}\napelido!(lancar_como_sistema);\n";
-        assert_eq!(acusadas(usuario, prova), [3]);
+        assert_eq!(acusadas(usuario, prova), [3, 6]);
         assert_eq!(
             acusadas(
                 barra,
@@ -8358,8 +8777,10 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
     // o kernel não sela nada.
     fora.extend(conferir_codigo_conferido(&raiz)?);
     // E os carregadores só se alcançam de dentro do módulo `usuario`; o que
-    // entra num programa sem a conferência, só na suíte.
+    // entra num programa sem a conferência, só na suíte; e o fio novo de um
+    // lançamento, só de dentro dele.
     fora.extend(conferir_os_carregadores(&raiz)?);
+    fora.extend(conferir_o_fio_novo_do_lancamento(&raiz)?);
     // O servidor de Roughtime de teste é só da suíte; e nenhuma decisão lê
     // o relógio civil nem o lógico.
     fora.extend(conferir_servidor_de_hora_so_na_suite(&raiz)?);
@@ -8394,8 +8815,9 @@ fn conferir_ponto_unico_de_decisao() -> Result<ExitCode, String> {
              sai da taxa, e só espera pela auditoria, pelo gate; o \
              código só vira processo pela conferência única, que o kernel faz e não sela, e \
              pelos carregadores, que só o módulo `usuario` alcança, e nele só o \
-             `usuario/mod.rs` e o arquivo de cada um, sem outro nome; nenhum nome protegido \
-             ganha outro nome, nem por uma macro; e \
+             `usuario/mod.rs` e o arquivo de cada um, sem outro nome, com o fio novo de um \
+             lançamento só de dentro dele; nenhum nome protegido ganha outro nome, nem por \
+             uma macro, nem por um `type`, nem como valor; e \
              a hora só anda pelos tratadores de time.sync e time.confirm, depois do gate, com \
              o servidor de teste só na suíte e o da bancada de tempo escrito à parte; e as \
              chaves de assinatura só mudam pelos handlers delas, pela prova e pela revogação \
@@ -8916,9 +9338,15 @@ fn bloco_unsafe(linha: &str) -> bool {
 
 /// O bloco da linha `i` está dentro de uma `unsafe fn` com `# Safety`?
 fn dentro_de_unsafe_fn_documentada(linhas: &[&str], i: usize) -> bool {
-    // Sobe até a primeira assinatura de função. É uma heurística de coluna,
-    // e basta: este projeto não aninha funções dentro de funções fora de
-    // blocos de teste, e lá o `unsafe` vem com `SAFETY` próprio.
+    // Sobe até a primeira assinatura de função de recuo até quatro: a de
+    // uma função do módulo, a de um método ou a de uma função aninhada numa
+    // do módulo — o projeto aninha funções também fora da suíte: o fio novo
+    // de `usuario::lancar_por`, o `texto` do `audit_declare`. A de recuo
+    // maior, aninhada num método, fica de fora, e o bloco dela conta como do
+    // método. É uma heurística de coluna, e basta: todo bloco que ela dá
+    // por coberto sem `SAFETY` está, hoje, dentro da `unsafe fn` que ela
+    // acha. Uma `unsafe fn` aninhada, com `# Safety`, cobriria também um
+    // bloco da função de fora escrito depois dela.
     for j in (0..=i).rev() {
         let l = linhas[j];
         let recuo = l.len() - l.trim_start().len();
