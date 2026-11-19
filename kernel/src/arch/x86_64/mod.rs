@@ -1423,6 +1423,13 @@ pub fn init_timer_definitivo() {
     /// resolução, é ter um timer por núcleo.
     const HZ: u32 = 100;
 
+    if !tsc_invariante() {
+        crate::log_warn!(
+            "irq",
+            "o CPUID nao anuncia o TSC invariante (0x80000007, EDX bit 8): a grade dos tiques e a regua do civil supoem o TSC numa taxa so, e igual em todos os nucleos"
+        );
+    }
+
     // SAFETY: a paginação está no ar, o PIT está rodando desde
     // `init_interrupcoes` e as interrupções estão habilitadas — as três
     // pré-condições da calibração.
@@ -1959,6 +1966,48 @@ pub fn ciclos() -> u64 {
     // existe em todo x86_64, e no anel 0 nada o impede — o `CR4.TSD` só
     // vale para o anel 3.
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// O TSC lido em ordem: o `lfence` antes do `rdtsc` faz a leitura esperar
+/// tudo o que veio antes dela terminar, as leituras da memória incluídas.
+/// Sem ele o processador pode executar o `rdtsc` adiantado, antes de uma
+/// leitura que o programa faz primeiro.
+///
+/// É a leitura da grade dos tiques (`apic::PRAZO`): o rearme lê o TSC depois
+/// de ver, no relógio, o avanço de outro núcleo (`tempo::avancar`), e o pulo
+/// dos perdidos supõe essa ordem — o achado 3 do adversário do #455-B. No
+/// emulador sem aceleração as instruções correm em ordem, e a barreira não
+/// muda nada que se veja; no hardware, a janela é de nanossegundos.
+/// [`ciclos`] fica sem ela: as medidas de custo, a régua do civil e as
+/// esperas não dependem dessa ordem, e ela custaria em cada uma.
+fn ciclos_em_ordem() -> u64 {
+    let (baixo, alto): (u32, u32);
+    // SAFETY: `lfence` só ordena, e `rdtsc` só lê o contador do processador;
+    // os dois existem em todo x86_64, e no anel 0 nada os impede. Sem
+    // `nomem`: o compilador também não passa por ela um acesso à memória.
+    unsafe {
+        core::arch::asm!(
+            "lfence",
+            "rdtsc",
+            out("eax") baixo,
+            out("edx") alto,
+            options(nostack, preserves_flags),
+        );
+    }
+    (u64::from(alto) << 32) | u64::from(baixo)
+}
+
+/// O processador anuncia o TSC invariante — o bit 8 do EDX da folha
+/// `0x8000_0007` do `CPUID`: o TSC numa taxa só, em todo estado de energia e
+/// de frequência. A grade dos tiques (`apic::PRAZO`) e a régua do civil
+/// supõem isso, e a grade supõe ainda o TSC igual em todos os núcleos, que
+/// o kernel não confere. Sem o bit, o boot só avisa: o emulador sem
+/// aceleração não o anuncia, e o TSC dele é um só, para todos.
+fn tsc_invariante() -> bool {
+    // A folha existe se o maior número das estendidas chega a ela; nenhuma
+    // das duas leituras tem efeito colateral.
+    core::arch::x86_64::__cpuid(0x8000_0000).eax >= 0x8000_0007
+        && core::arch::x86_64::__cpuid(0x8000_0007).edx & (1 << 8) != 0
 }
 
 /// A frequência de [`ciclos`] e o erro máximo dela, em ppm: o x86 não a

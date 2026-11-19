@@ -179,8 +179,12 @@ static CONTAGEM: AtomicU32 = AtomicU32::new(0);
 /// núcleo era seguido do próximo da grade dele a menos de um período, antes
 /// do próximo do outro, e ninguém tinha andado no meio. Agora o APIC dispara
 /// uma vez, e o handler escreve a distância até o ponto seguinte de uma
-/// grade só, contada no TSC — o contador que todos os núcleos leem igual (no
-/// emulador, o mesmo para todos). É o que o ARM faz com o `CNTP_CVAL_EL0`.
+/// grade só, contada no TSC — que a grade supõe igual em todos os núcleos:
+/// no emulador ele é um só, e no hardware é o TSC invariante e
+/// sincronizado. O boot avisa quando o `CPUID` não anuncia o invariante, e
+/// a sincronia não se confere. É o que o ARM faz com o `CNTP_CVAL_EL0`. O
+/// TSC é lido sempre em ordem (`ciclos_em_ordem`): o rearme o lê depois de
+/// ver, no relógio, o avanço de outro núcleo.
 /// O modo do x86 que compara direto com o TSC (o TSC-deadline) não existe no
 /// emulador sem aceleração: o `qemu64` não o anuncia, e o QEMU o tira dos
 /// recursos do TCG. A CI não o exercitaria.
@@ -390,7 +394,7 @@ fn calibrar(lapic: &Lapic) -> Option<(u32, u64)> {
 
     let comeco = crate::irq::contagem_da_linha(linha);
     lapic.contagem_inicial.set(u32::MAX);
-    let tsc_no_comeco = super::ciclos();
+    let tsc_no_comeco = super::ciclos_em_ordem();
 
     let Some(tiques) = esperar_disparos(linha, comeco, TIQUES_DO_PIT) else {
         // Desarma o contador antes de desistir. Ele foi carregado logo acima e
@@ -401,7 +405,7 @@ fn calibrar(lapic: &Lapic) -> Option<(u32, u64)> {
     };
 
     let restante = lapic.contagem_atual.get();
-    let tsc_no_fim = super::ciclos();
+    let tsc_no_fim = super::ciclos_em_ordem();
     lapic.contagem_inicial.set(0);
 
     let andou = u32::MAX.checked_sub(restante)? as u64;
@@ -736,7 +740,7 @@ pub unsafe fn init(hz: u32) -> Option<u32> {
             return None;
         }
         INTERVALO.store(intervalo, Ordering::Relaxed);
-        ORIGEM.store(super::ciclos(), Ordering::Relaxed);
+        ORIGEM.store(super::ciclos_em_ordem(), Ordering::Relaxed);
         lapic.divisor.set(DIVISOR_CODIFICADO);
         lapic.lvt_timer.set(LVT_DO_TIMER);
         armar_o_primeiro();
@@ -942,7 +946,7 @@ pub unsafe fn ligar_neste_nucleo() -> Result<(), &'static str> {
 /// [`PRAZO`].
 fn armar_o_primeiro() {
     let n = super::gdt::nucleo_atual();
-    let agora = super::ciclos();
+    let agora = super::ciclos_em_ordem();
     let prazo = crate::tempo::proximo_prazo(
         ORIGEM.load(Ordering::Relaxed),
         agora,
@@ -987,7 +991,7 @@ fn armar_para(prazo: u64, agora: u64) {
 pub fn chegou_o_prazo() -> bool {
     let n = super::gdt::nucleo_atual();
     let prazo = PRAZO[n].load(Ordering::Relaxed);
-    let chegou = (super::ciclos().wrapping_sub(prazo) as i64) >= 0;
+    let chegou = (super::ciclos_em_ordem().wrapping_sub(prazo) as i64) >= 0;
     if chegou {
         TIQUES.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -1006,7 +1010,7 @@ pub fn chegou_o_prazo() -> bool {
 pub fn rearmar(contou: bool) {
     let n = super::gdt::nucleo_atual();
     let vencido = PRAZO[n].load(Ordering::Relaxed);
-    let agora = super::ciclos();
+    let agora = super::ciclos_em_ordem();
     let proximo = if contou {
         crate::tempo::proximo_prazo(vencido, agora, INTERVALO.load(Ordering::Relaxed))
     } else {
