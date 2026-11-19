@@ -6832,6 +6832,22 @@ const NOMES_PROTEGIDOS: &[(&str, &[&str])] = &[
         "Lancador",
         &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
     ),
+    // O desfecho de um lançamento, guardado no fio do comando para valer no
+    // fio novo — a imagem que não se mapeia depois do nascimento (o #467,
+    // no lote A4; ver `autorizacao::DesfechoDoLancamento`): é a única
+    // execução gravada depois de o comando responder, e só o lançamento a
+    // guarda. Fora de `autorizacao.rs`, onde se define, só o
+    // `usuario/mod.rs`, que lança, o nomeia — nenhum outro handler grava em
+    // nome de uma decisão depois de responder. A conta da suíte dos vivos é
+    // outra palavra (`desfechos_vivos_de_teste`).
+    (
+        "desfecho_do_lancamento",
+        &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
+    ),
+    (
+        "DesfechoDoLancamento",
+        &["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"],
+    ),
     // Os carregadores, para a suíte: a carga sem entrar no programa, a
     // entrada num programa já carregado e a leitura conferida do código,
     // que fora da suíte só o módulo `usuario` alcança — `pub(super)`, ver
@@ -7509,6 +7525,85 @@ mod testes_dos_nomes_protegidos {
             "fn lancar_como_de_teste() {}",
             "lancar_como"
         ));
+    }
+
+    /// O desfecho de um lançamento, guardado para valer no fio novo (o
+    /// #467, no lote A4): só onde se define e onde se lança — nenhum outro
+    /// handler grava em nome de uma decisão depois de responder. Pela
+    /// palavra, em qualquer forma, como os outros nomes protegidos; e a
+    /// conta da suíte dos vivos, que é outra palavra, não se acusa.
+    #[test]
+    fn o_desfecho_do_lancamento_so_nos_donos() {
+        let donos = |nome: &str| {
+            NOMES_PROTEGIDOS
+                .iter()
+                .find(|(n, _)| *n == nome)
+                .map(|(_, d)| d.to_vec())
+        };
+        let esperados = Some(vec![
+            "kernel/src/autorizacao.rs",
+            "kernel/src/usuario/mod.rs",
+        ]);
+        assert_eq!(donos("desfecho_do_lancamento"), esperados);
+        assert_eq!(donos("DesfechoDoLancamento"), esperados);
+        // Fora dos donos, em qualquer forma, acusado: a chamada, o `use`
+        // renomeado, o tipo num campo, a chamada partida em duas linhas.
+        for (arquivo, texto) in [
+            (
+                "kernel/src/agent/commands.rs",
+                "let d = crate::autorizacao::desfecho_do_lancamento(caminho);\n",
+            ),
+            (
+                "kernel/src/nativo.rs",
+                "use crate::autorizacao::DesfechoDoLancamento as D;\n",
+            ),
+            (
+                "kernel/src/usuario/programa.rs",
+                "struct X {\n    d: crate::autorizacao::DesfechoDoLancamento,\n}\n",
+            ),
+            (
+                "kernel/src/interpretador.rs",
+                "let d = crate::autorizacao::\n    desfecho_do_lancamento(\"x\");\n",
+            ),
+        ] {
+            let (fora, _) = nomes_protegidos_fora(arquivo, texto);
+            assert!(!fora.is_empty(), "{arquivo}: {texto}");
+        }
+        // Nos donos, não; e o nome aparece como do dono — a conta que diz
+        // se a conferência está cega.
+        for dono in ["kernel/src/autorizacao.rs", "kernel/src/usuario/mod.rs"] {
+            let (fora, nos_donos) = nomes_protegidos_fora(
+                dono,
+                "let d = desfecho_do_lancamento(r);\nfn f(d: &DesfechoDoLancamento) {}\n",
+            );
+            assert!(fora.is_empty(), "{dono}: {fora:?}");
+            assert_eq!(nos_donos.len(), 2, "{dono}");
+        }
+        // Nenhum dos dois ganha outro nome, nem no dono.
+        assert!(
+            !acusadas(
+                "kernel/src/usuario/mod.rs",
+                "use crate::autorizacao::DesfechoDoLancamento as Desfecho;\n"
+            )
+            .is_empty()
+        );
+        // E o que não é o nome não se acusa: a conta da suíte dos vivos, e
+        // a menção num comentário.
+        assert!(!tem_a_palavra(
+            "crate::autorizacao::desfechos_vivos_de_teste()",
+            "desfecho_do_lancamento"
+        ));
+        assert!(!tem_a_palavra(
+            "fn desfecho_do_lancamento_de_teste() {}",
+            "desfecho_do_lancamento"
+        ));
+        assert!(
+            acusadas(
+                "kernel/src/agent/commands.rs",
+                "// o `autorizacao::DesfechoDoLancamento` grava depois\n"
+            )
+            .is_empty()
+        );
     }
 
     /// As formas que a conferência por texto da chamada com o caminho não
