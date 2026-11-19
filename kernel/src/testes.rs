@@ -74746,6 +74746,18 @@ fn civil_agora() -> Result<hora::disciplina::Leitura, &'static str> {
     crate::hora::civil::ler().ok_or("sem relogio civil")
 }
 
+/// O civil cercado pela régua: `(antes, civil, depois)`, a régua lida antes
+/// e depois do civil, que a lê no meio (`hora::civil::ler`). A régua nunca
+/// volta (`contador::agora_ms`), e o instante do civil fica entre as duas
+/// leituras: a régua entre dois civis cercados vai da mais curta — o
+/// `antes` do segundo menos o `depois` do primeiro — à mais larga. Uma
+/// parada entre as leituras só alarga a faixa.
+fn civil_cercado() -> Result<(u64, u64, u64), &'static str> {
+    let antes = crate::hora::contador::agora_ms();
+    let civil = civil_agora()?.meio_ms;
+    Ok((antes, civil, crate::hora::contador::agora_ms()))
+}
+
 /// O registro do desfecho da rodada mais nova — o recurso começa por
 /// `civil ` —, com o número.
 fn ultimo_desfecho() -> Option<(u64, politica::auditoria::Evento)> {
@@ -75679,6 +75691,14 @@ fn hora_fontes_divergentes() -> Resultado {
 /// monotônico não muda; para trás, fora do envelope, também pendente, e
 /// confirmado o civil volta enquanto o lógico fica no piso, adiantado, até
 /// o civil passar.
+///
+/// O gradual se confere contra a régua cercada ([`civil_cercado`]): o teto
+/// dos 5% com a régua mais larga entre os dois civis, e o piso com a mais
+/// curta. Com o civil e a régua lidos um depois do outro, uma parada de uns
+/// 5 ms entre os dois da primeira ponta — uma interrupção longa, outro fio
+/// no quantum — punha o civil acima do teto sem defeito: com o gradual a
+/// 5%, a folga dos 5,5% é de cinco milésimos da janela de um segundo (o
+/// mesmo molde do achado 1 do adversário do #455-B, no relógio do kernel).
 fn hora_a_disciplina_no_civil() -> Resultado {
     use crate::rede::bancada_hora as bancada;
     use hora::disciplina::Estado;
@@ -75706,11 +75726,16 @@ fn hora_a_disciplina_no_civil() -> Resultado {
         // depressa, até 5%, e nunca para trás — nem de uma vez: ao longo da
         // própria rodada, ele não andou mais que a régua e os 5%.
         todas(4);
-        let (ca, ra) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
+        let (ra, ca, _) = civil_cercado()?;
         fechou_com(&rodada_do_servico(), &["gradual"], "sincronizado")?;
-        let (c0, r0) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
-        if (c0 - ca) * 1000 > (r0 - ra) * 1055 + 50_000 {
-            crate::log_error!("teste", "civil {} ms em {} ms de regua", c0 - ca, r0 - ra);
+        let (r0, c0, r0_depois) = civil_cercado()?;
+        if (c0 - ca) * 1000 > (r0_depois - ra) * 1055 + 50_000 {
+            crate::log_error!(
+                "teste",
+                "civil {} ms em ate {} ms de regua",
+                c0 - ca,
+                r0_depois - ra
+            );
             return Err("o ajuste gradual aplicou o desvio de uma vez");
         }
         let mut antes = c0;
@@ -75723,10 +75748,17 @@ fn hora_a_disciplina_no_civil() -> Resultado {
             antes = c;
             crate::fios::ceder();
         }
-        let (c1, r1) = (civil_agora()?.meio_ms, crate::hora::contador::agora_ms());
-        let (dc, dr) = (c1 - c0, r1 - r0);
-        if dc < dr || dc * 1000 > dr * 1055 {
-            crate::log_error!("teste", "civil {} ms em {} ms de regua", dc, dr);
+        let (r1, c1, r1_depois) = civil_cercado()?;
+        let dc = c1 - c0;
+        let (curta, larga) = (r1.saturating_sub(r0_depois), r1_depois - r0);
+        if dc < curta || dc * 1000 > larga * 1055 {
+            crate::log_error!(
+                "teste",
+                "civil {} ms em {} a {} ms de regua",
+                dc,
+                curta,
+                larga
+            );
             return Err("o ajuste gradual passou de 5%, ou nao adiantou o civil");
         }
 
