@@ -2068,7 +2068,19 @@ pub fn desfecho_do_lancamento(recurso: &str) -> DesfechoDoLancamento {
 impl DesfechoDoLancamento {
     /// Grava o desfecho: a execução da decisão do comando, ou, fora de um,
     /// em nome do kernel. Devolve o número do registro.
+    ///
+    /// Só o lançamento que **não** acontece tem desfecho: o `codigo` é o de
+    /// uma recusa ou `ERROR`, nunca um que permite — a compilação de
+    /// depuração o confere. Um `ALLOW` gravado daqui com um `processo N
+    /// lancado` no detalhe seria lido pelo NSF como um nascimento em nome de
+    /// quem o gate decidiu: uma proveniência forjada, gravada fora do fio do
+    /// comando (o I5 do adversário do lote A4). O nascimento é do `nasce`,
+    /// pela última palavra.
     pub fn gravar(&self, codigo: Codigo, detalhe: &str) -> u64 {
+        debug_assert!(
+            !codigo.permite(),
+            "o desfecho de um lancamento grava so o que nao acontece"
+        );
         match &self.execucao {
             Some(e) => e.clone().gravar(&self.recurso, codigo, detalhe),
             None => auditar_do_kernel("process.run", &self.recurso, codigo, detalhe),
@@ -2080,8 +2092,13 @@ impl DesfechoDoLancamento {
     /// (ver [`permitir_processo_com_o_detalhe`]): a recusa delas já está na
     /// auditoria, como o gate a grava, e não há `ALLOW` a fechar; um registro
     /// em nome do kernel diria duas vezes a mesma recusa. Devolve o número
-    /// do registro, ou zero.
+    /// do registro, ou zero. O `codigo` nunca permite, como em
+    /// [`DesfechoDoLancamento::gravar`].
     pub fn gravar_no_comando(&self, codigo: Codigo, detalhe: &str) -> u64 {
+        debug_assert!(
+            !codigo.permite(),
+            "o desfecho de um lancamento grava so o que nao acontece"
+        );
         self.execucao
             .as_ref()
             .map_or(0, |e| e.clone().gravar(&self.recurso, codigo, detalhe))
@@ -4401,7 +4418,9 @@ pub type RecusaDeQuemPede = (Codigo, &'static str, Cow<'static, str>);
 /// decisão do gate sobre quem pede, e continua sem citar a decisão do
 /// comando que lança. O desfecho do `user.run` é outro registro, que quem
 /// lança grava: a execução da decisão do comando, com o mesmo código e o
-/// mesmo detalhe, em nome de quem o gate decidiu (o lote A4, #466).
+/// mesmo detalhe, em nome de quem o gate decidiu (o lote A4, #466) — acima
+/// do teto, abreviado pela citação, como toda execução (`citando`); a
+/// recusa daqui, sem a citação, tem mais lugar.
 pub fn permitir_processo_com_o_detalhe(
     autoridade: Autoridade,
     metodo: &str,

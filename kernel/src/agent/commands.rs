@@ -7178,10 +7178,12 @@ fn user_run(params: Json, w: &mut JsonWriter) -> fmt::Result {
         // o papel não confia, o papel que falta, a cota esgotada, também a
         // contada de novo ao nascer —: o código e o motivo de verdade, já
         // gravados — a recusa do gate, e o desfecho deste comando, a execução
-        // da decisão dele com o mesmo código e o mesmo detalhe; na última
-        // palavra, só o desfecho —, e nenhuma explicação. A explicação lê a
-        // decisão do comando — o papel e a permissão com que o gate o
-        // decidiu —, e estas recusas não são ela: a cota sairia "o seu
+        // da decisão dele com o mesmo código e o detalhe que o gate gravou,
+        // abreviado como todo detalhe acima do teto quando a citação da
+        // decisão o alonga; na última palavra, só o desfecho —, e nenhuma
+        // explicação. A explicação lê a decisão do comando — o papel e a
+        // permissão com que o gate o decidiu —, e estas recusas não são
+        // ela: a cota sairia "o seu
         // papel não permite process.run", a sessão que acabou com o papel
         // de antes, o encerrado com "um administrador pode liberá-la". Ver
         // `usuario::NaoLancou::PorQuemPede`.
