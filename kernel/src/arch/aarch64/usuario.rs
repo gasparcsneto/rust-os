@@ -187,8 +187,9 @@ pub unsafe fn init() {
 /// decisão nem registro. Agora um processo que o lê morre pela exceção
 /// síncrona (`msr_mrs_trap`), como um que executa uma instrução
 /// privilegiada, e o log diz qual. O kernel continua lendo o contador no
-/// EL1 — a régua das medidas de custo (`ciclos`), o prazo da parada —, e
-/// o timer físico do EL1, que é o tique: nada disso passa pelo EL0.
+/// EL1 — a régua das medidas de custo (`ciclos`), o prazo da parada e o do
+/// tique (`gic::PRAZO`) —, e o timer físico do EL1, que é o tique: nada
+/// disso passa pelo EL0.
 ///
 /// # O que fica de fora: o AMU
 ///
